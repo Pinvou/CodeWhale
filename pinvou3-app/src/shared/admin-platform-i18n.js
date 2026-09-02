@@ -2045,12 +2045,15 @@ Object.assign(adminPlatformCopy.ja.billing, {
 
 Object.assign(adminPlatformCopy.zh.billing, {
   walletID: '钱包 ID', pageSize: '每页条数', currentPageRange: (count, limit) => `本页 ${count} 条 · 服务端单次最多返回 ${limit} 条，不代表全部记录`,
+  walletSearch: '搜索钱包 ID、所有者名称或稳定标识', allOwnerTypes: '全部所有者类型', sourceType: '来源类型', requestedBy: '申请人 ID', modelID: '模型 ID', channel: '支付渠道', refundSearch: '搜索退款、订单或交易标识', caseSearch: '搜索案件、订单或交易标识', allEntryTypes: '全部账本类型', businessReference: '业务引用', allCaseTypes: '全部差异类型', createdFrom: '创建时间起', createdTo: '创建时间止', businessDateFrom: '业务日期起', businessDateTo: '业务日期止', previousPage: '上一页', nextPage: '下一页', snapshotAsOf: '列表快照时间', legacyPagination: '当前服务未返回稳定分页游标；仅展示本次响应，不把本页数量视为总数。', snapshotExpired: '列表快照已过期。请从第一页重新查询；系统不会自动跳页或复用旧游标。', restartPagination: '从第一页重新查询',
 });
 Object.assign(adminPlatformCopy.en.billing, {
   walletID: 'Wallet ID', pageSize: 'Page size', currentPageRange: (count, limit) => `${count} on this page · The server returns at most ${limit} per request; this is not a total`,
+  walletSearch: 'Search wallet ID, owner name, or stable identifier', allOwnerTypes: 'All owner types', sourceType: 'Source type', requestedBy: 'Requester ID', modelID: 'Model ID', channel: 'Payment channel', refundSearch: 'Search refund, order, or transaction identifier', caseSearch: 'Search case, order, or transaction identifier', allEntryTypes: 'All ledger types', businessReference: 'Business reference', allCaseTypes: 'All case types', createdFrom: 'Created from', createdTo: 'Created to', businessDateFrom: 'Business date from', businessDateTo: 'Business date to', previousPage: 'Previous page', nextPage: 'Next page', snapshotAsOf: 'List snapshot', legacyPagination: 'This service did not return a stable cursor. Only this response is shown, and the page count is not treated as a total.', snapshotExpired: 'The list snapshot has expired. Start again from the first page; the console will not jump pages or reuse the old cursor automatically.', restartPagination: 'Start from first page',
 });
 Object.assign(adminPlatformCopy.ja.billing, {
   walletID: 'ウォレット ID', pageSize: 'ページ件数', currentPageRange: (count, limit) => `このページ ${count} 件 · 1 回の取得上限は ${limit} 件で、総件数ではありません`,
+  walletSearch: 'ウォレット ID、所有者名、または安定 ID を検索', allOwnerTypes: 'すべての所有者種別', sourceType: '発生元種別', requestedBy: '申請者 ID', modelID: 'モデル ID', channel: '決済チャネル', refundSearch: '返金、注文、取引 ID を検索', caseSearch: '案件、注文、取引 ID を検索', allEntryTypes: 'すべての台帳種別', businessReference: '業務参照', allCaseTypes: 'すべての差異種別', createdFrom: '作成日時（開始）', createdTo: '作成日時（終了）', businessDateFrom: '業務日（開始）', businessDateTo: '業務日（終了）', previousPage: '前のページ', nextPage: '次のページ', snapshotAsOf: '一覧スナップショット', legacyPagination: 'サービスから安定カーソルが返されていません。この応答だけを表示し、件数を総数として扱いません。', snapshotExpired: '一覧スナップショットの有効期限が切れました。先頭ページから再検索してください。自動遷移や古いカーソルの再利用は行いません。', restartPagination: '先頭ページから再検索',
 });
 
 Object.assign(adminPlatformCopy.zh.billing, {

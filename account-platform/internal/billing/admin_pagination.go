@@ -431,12 +431,14 @@ func (r *PostgresRepository) createAdminPaginationPageOnce(ctx context.Context, 
 	if err = cleanupAdminPaginationTx(ctx, tx, now); err != nil {
 		return AdminPaginationPage{}, paginationStorageError(err)
 	}
-	_, err = tx.Exec(ctx, `DELETE FROM admin_pagination_snapshots WHERE subject_id=$1 AND resource_type=$2`, request.SubjectID, request.Resource)
-	if err != nil {
-		return AdminPaginationPage{}, paginationStorageError(err)
-	}
-	var activeSnapshots, activeMembers int64
-	if err = tx.QueryRow(ctx, `SELECT count(*),COALESCE(sum(member_count),0) FROM admin_pagination_snapshots WHERE expires_at>$1`, now).Scan(&activeSnapshots, &activeMembers); err != nil {
+	var replacedID uuid.UUID
+	var replacedSecret []byte
+	err = tx.QueryRow(ctx, `SELECT id,cursor_secret FROM admin_pagination_snapshots WHERE subject_id=$1 AND resource_type=$2`, request.SubjectID, request.Resource).Scan(&replacedID, &replacedSecret)
+	if err == nil {
+		if err = expireAdminPaginationSnapshot(ctx, tx, replacedID, replacedSecret, now); err != nil {
+			return AdminPaginationPage{}, paginationStorageError(err)
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return AdminPaginationPage{}, paginationStorageError(err)
 	}
 	var subjectSnapshots int64
@@ -444,7 +446,19 @@ func (r *PostgresRepository) createAdminPaginationPageOnce(ctx context.Context, 
 		return AdminPaginationPage{}, paginationStorageError(err)
 	}
 	if subjectSnapshots >= 2 {
-		return AdminPaginationPage{}, ErrPaginationSnapshotLimited
+		var oldestID uuid.UUID
+		var oldestSecret []byte
+		err = tx.QueryRow(ctx, `SELECT id,cursor_secret FROM admin_pagination_snapshots WHERE subject_id=$1 AND expires_at>$2 ORDER BY created_at,id LIMIT 1`, request.SubjectID, now).Scan(&oldestID, &oldestSecret)
+		if err != nil {
+			return AdminPaginationPage{}, paginationStorageError(err)
+		}
+		if err = expireAdminPaginationSnapshot(ctx, tx, oldestID, oldestSecret, now); err != nil {
+			return AdminPaginationPage{}, paginationStorageError(err)
+		}
+	}
+	var activeSnapshots, activeMembers int64
+	if err = tx.QueryRow(ctx, `SELECT count(*),COALESCE(sum(member_count),0) FROM admin_pagination_snapshots WHERE expires_at>$1`, now).Scan(&activeSnapshots, &activeMembers); err != nil {
+		return AdminPaginationPage{}, paginationStorageError(err)
 	}
 	if activeSnapshots >= adminSnapshotMaxGlobal {
 		return AdminPaginationPage{}, ErrPaginationSnapshotLimited
@@ -501,6 +515,15 @@ func (r *PostgresRepository) createAdminPaginationPageOnce(ctx context.Context, 
 		return AdminPaginationPage{}, paginationStorageError(err)
 	}
 	return page, nil
+}
+
+func expireAdminPaginationSnapshot(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, cursorSecret []byte, now time.Time) error {
+	if _, err := tx.Exec(ctx, `INSERT INTO admin_pagination_snapshot_tombstones(snapshot_id,cursor_secret,purge_after) VALUES($1,$2,$3)
+		ON CONFLICT(snapshot_id) DO UPDATE SET cursor_secret=EXCLUDED.cursor_secret,purge_after=EXCLUDED.purge_after`, snapshotID, cursorSecret, now.Add(24*time.Hour)); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `DELETE FROM admin_pagination_snapshots WHERE id=$1`, snapshotID)
+	return err
 }
 
 func (r *PostgresRepository) adminPaginationMaxStorageBytes() int64 {

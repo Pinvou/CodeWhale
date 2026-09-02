@@ -3,7 +3,8 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminFinanceQueryUpdates, adminNavigationGroups, clearAdminFinanceQueryUpdates, normalizeAdminFinanceQuery, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
+import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGroups, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
+import { createFinanceDetailRecovery, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from './admin-finance-pagination.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 import { createFinanceIdempotencyKey, executeStructuredFinanceAction, financeActionRequiresRefresh, isUnknownMutationOutcome, paymentAnomalyResolutionOptions } from './finance-actions.js';
@@ -259,7 +260,7 @@ function StructuredActionPanel({ operation, copy, busy, onChange, onClose, onRef
           <div className="adm-row-actions">
             <button type="button" disabled={busy || refreshRequired} onClick={onClose}>{labels.cancel}</button>
             {refreshRequired ? (
-              <button type="button" disabled={busy} onClick={onRefresh}>{busy ? labels.refreshing : labels.refreshStatus}</button>
+              <button type="button" disabled={busy} onClick={onRefresh}>{busy ? labels.refreshing : operation.restartPagination ? copy.billing.restartPagination : labels.refreshStatus}</button>
             ) : (
               <button className={operation.danger ? 'danger' : ''} disabled={busy}>{busy ? labels.submitting : labels.confirm}</button>
             )}
@@ -292,6 +293,30 @@ function FinanceLimitSelect({ copy, value, onChange }) {
         {[25, 50, 100, 200].map((limit) => <option key={limit} value={String(limit)}>{limit}</option>)}
       </select>
     </label>
+  );
+}
+
+function FinanceDateTimeRange({ copy, value, onChange }) {
+  return (
+    <>
+      <label>{copy.billing.createdFrom}<input type="datetime-local" value={value.created_from || ''} onChange={(event) => onChange('created_from', event.target.value)} /></label>
+      <label>{copy.billing.createdTo}<input type="datetime-local" value={value.created_to || ''} onChange={(event) => onChange('created_to', event.target.value)} /></label>
+    </>
+  );
+}
+
+function FinancePagination({ copy, count, limit, page, canPrevious, loading, onPrevious, onNext }) {
+  if (!page) return null;
+  if (page.legacy) return <div className="adm-inline-message info">{copy.billing.legacyPagination}</div>;
+  return (
+    <div className="adm-pagination adm-finance-pagination">
+      <span>{copy.billing.currentPageRange(count, limit)}</span>
+      {page.snapshotAsOf && <small>{copy.billing.snapshotAsOf}: {formatDate(page.snapshotAsOf)}</small>}
+      <div className="adm-row-actions">
+        <button type="button" disabled={loading || page.expired || !canPrevious} onClick={onPrevious}>{copy.billing.previousPage}</button>
+        <button type="button" disabled={loading || page.expired || !page.nextCursor} onClick={onNext}>{copy.billing.nextPage}</button>
+      </div>
+    </div>
   );
 }
 
@@ -609,6 +634,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       organization_tab: null,
       finance_tab: null,
       ...clearAdminFinanceQueryUpdates(),
+      ...clearAdminFinanceDetailUpdates(),
       product_cursor: null,
       product_limit: null,
       product_lifecycle_status: null,
@@ -642,12 +668,17 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const organizationDirectory = section === 'organizations' ? readAdminOrganizationDirectory() : { q: '', status: '', cursor: '' };
   const financeTab = ['billing', 'payments', 'products'].includes(section) ? readAdminFinanceTab(section) : '';
   const financeQuery = ['billing', 'payments'].includes(section) ? readAdminFinanceQuery(section, financeTab) : {};
+  const financeDetail = ['billing', 'payments'].includes(section) ? readAdminFinanceDetail(section, financeTab) : { type: '', id: '', query: {} };
   const changeFinanceTab = (nextTab, mode = 'push') => {
-    writeAdminSection(section, mode, undefined, undefined, { finance_tab: nextTab });
+    writeAdminSection(section, mode, undefined, undefined, { finance_tab: nextTab, ...clearAdminFinanceDetailUpdates() });
     setRouteVersion((value) => value + 1);
   };
   const changeFinanceQuery = (nextTab, nextQuery, mode = 'push') => {
     writeAdminSection(section, mode, undefined, undefined, { finance_tab: nextTab, ...adminFinanceQueryUpdates(nextTab, nextQuery) });
+    setRouteVersion((value) => value + 1);
+  };
+  const changeFinanceDetail = (type, id, query = {}, mode = 'push') => {
+    writeAdminSection(section, mode, undefined, undefined, adminFinanceDetailUpdates(type, id, query));
     setRouteVersion((value) => value + 1);
   };
   const currentPageTitle = copy.nav[section];
@@ -735,8 +766,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
-          {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
+          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
+          {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'system' && (
@@ -2390,7 +2421,7 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
   );
 }
 
-function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', routeQuery = {}, routeVersion = 0, onRouteTabChange, onRouteQueryChange, onNavigate, embedded = false, requestTracker }) {
+function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', routeQuery = {}, routeDetail = { type: '', id: '', query: {} }, routeVersion = 0, onRouteTabChange, onRouteQueryChange, onRouteDetailChange, onNavigate, embedded = false, requestTracker }) {
   const defaultTab = surface === 'payments' ? 'orders' : surface === 'products' ? 'prices' : 'wallets';
   const initialFilter = (targetTab, fallback) => routeTab === targetTab
     ? normalizeAdminFinanceQuery(targetTab, routeQuery)
@@ -2409,14 +2440,21 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const [anomalyDetail, setAnomalyDetail] = useState(null);
   const [actionPanel, setActionPanel] = useState(null);
   const ownerSearchSequence = useRef(0);
+  const financeCursorBackRef = useRef(new Map());
+  const financeDetailCursorBackRef = useRef(new Map());
+  const routeDetailRef = useRef(routeDetail);
   const [reconciliation, setReconciliation] = useState({
     channel: 'ALIPAY',
     businessDate: new Date().toISOString().slice(0, 10),
   });
   const [adjustment, setAdjustment] = useState({ walletID: '', amount: '', reason: '' });
   const [adjustmentRequestKey, setAdjustmentRequestKey] = useState(() => crypto.randomUUID());
-  const [receivableFilter, setReceivableFilter] = useState(() => initialFilter('receivables', { wallet_id: '', status: '', limit: '100' }));
-  const [orderFilter, setOrderFilter] = useState(() => initialFilter('orders', { q: '', status: '', limit: '100' }));
+  const [walletFilter, setWalletFilter] = useState(() => initialFilter('wallets', {}));
+  const [receivableFilter, setReceivableFilter] = useState(() => initialFilter('receivables', {}));
+  const [adjustmentFilter, setAdjustmentFilter] = useState(() => initialFilter('adjustments', {}));
+  const [holdFilter, setHoldFilter] = useState(() => initialFilter('holds', {}));
+  const [orderFilter, setOrderFilter] = useState(() => initialFilter('orders', {}));
+  const [refundFilter, setRefundFilter] = useState(() => initialFilter('refunds', {}));
   const [lateFilter, setLateFilter] = useState(() => initialFilter('lateReviews', {
     status: '',
     provider_id: '',
@@ -2425,17 +2463,21 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     entered_to: '',
     next_review_before: '',
     overdue: false,
-    limit: '100',
+    limit: '50',
   }));
   const [anomalyFilter, setAnomalyFilter] = useState(() => initialFilter('anomalies', {
     anomaly_type: '',
     status: 'OPEN',
     severity: '',
     owner_id: '',
-    limit: '100',
+    limit: '50',
   }));
+  const [reconciliationFilter, setReconciliationFilter] = useState(() => initialFilter('reconciliations', {}));
+  const [ledgerFilter, setLedgerFilter] = useState(() => normalizeAdminFinanceDetailQuery('ledger', routeDetail.type === 'ledger' ? routeDetail.query : {}));
+  const [caseFilter, setCaseFilter] = useState(() => normalizeAdminFinanceDetailQuery('reconciliationCases', routeDetail.type === 'reconciliationCases' ? routeDetail.query : {}));
   const permissionSet = new Set(permissions || []);
   const canReadWallets = permissionSet.has('platform.billing.wallets.read');
+  const canReadLedger = permissionSet.has('platform.billing.ledger.read');
   const canReadPricing = permissionSet.has('platform.pricing.read');
   const canReadUsage = permissionSet.has('platform.usage.read');
   const canRequestAdjustment = permissionSet.has('platform.billing.repairs.request');
@@ -2447,6 +2489,13 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const canReleaseHold = permissionSet.has('platform.billing.holds.release');
   const canReadUserDirectory = permissionSet.has('platform.users.read');
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
+  routeDetailRef.current = routeDetail;
+  const canReadUsageRef = useRef(canReadUsage);
+  const canReadUserDirectoryRef = useRef(canReadUserDirectory);
+  const canReconcileRef = useRef(canReconcile);
+  canReadUsageRef.current = canReadUsage;
+  canReadUserDirectoryRef.current = canReadUserDirectory;
+  canReconcileRef.current = canReconcile;
   const visibleTabs =
     surface === 'payments'
       ? [...(canReadWallets ? ['orders', 'refunds', 'lateReviews', 'anomalies'] : []), ...(canReadUsage ? ['reconciliations'] : []), ...(canReadWallets ? ['controls'] : [])]
@@ -2477,7 +2526,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const loadTab = useCallback(async (targetTab, options = {}) => {
     const requestKey = `${surface}:${targetTab}`;
     const generation = requestTracker.begin(requestKey);
-    const routeAware = ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(targetTab);
+    const routeAware = isAdminFinancePaginatedTab(targetTab);
     const querySnapshot = routeAware ? normalizeAdminFinanceQuery(targetTab, options.query || routeQuery) : null;
     setData((current) => updateFinanceTabState(current, surface, targetTab, {
       loading: true,
@@ -2487,38 +2536,47 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     }));
     try {
       let next = {};
+      let page = null;
       if (targetTab === 'wallets' && canReadWallets) {
-        const result = await client.wallets();
-        next.wallets = result.items || [];
+        const collection = normalizeFinanceCollection(await client.wallets(querySnapshot), querySnapshot);
+        next.wallets = collection.items;
+        page = collection.page;
       } else if (targetTab === 'receivables' && canReadWallets) {
-        const result = await client.receivables(querySnapshot);
-        next.receivables = result.items || [];
+        const collection = normalizeFinanceCollection(await client.receivables(querySnapshot), querySnapshot);
+        next.receivables = collection.items;
+        page = collection.page;
       } else if (targetTab === 'adjustments' && canReadWallets) {
-        const [adjustments, wallets, approvals] = await Promise.all([
-          client.adjustments(),
-          canRequestAdjustment ? client.wallets() : Promise.resolve({ items: [] }),
+        const [adjustments, approvals] = await Promise.all([
+          client.adjustments(querySnapshot),
           canRequestAdjustment || canApproveAdjustment ? client.approvalRequests({ command_type: 'WALLET_ADJUSTMENT' }) : Promise.resolve({ items: [] }),
         ]);
-        next = { adjustments: adjustments.items || [], adjustmentApprovals: approvals.items || [] };
-        if (canRequestAdjustment) next.adjustmentWallets = wallets.items || [];
+        const collection = normalizeFinanceCollection(adjustments, querySnapshot);
+        next = { adjustments: collection.items, adjustmentApprovals: approvals.items || [] };
+        page = collection.page;
       } else if (targetTab === 'holds' && canReadUsage) {
-        const result = await client.holds();
-        next.holds = result.items || [];
+        const collection = normalizeFinanceCollection(await client.holds(querySnapshot), querySnapshot);
+        next.holds = collection.items;
+        page = collection.page;
       } else if (targetTab === 'orders' && canReadWallets) {
-        const result = await client.paymentOrders(querySnapshot);
-        next.orders = result.items || [];
+        const collection = normalizeFinanceCollection(await client.paymentOrders(querySnapshot), querySnapshot);
+        next.orders = collection.items;
+        page = collection.page;
       } else if (targetTab === 'refunds' && canReadWallets) {
-        const result = await client.refunds();
-        next.refunds = result.items || [];
+        const collection = normalizeFinanceCollection(await client.refunds(querySnapshot), querySnapshot);
+        next.refunds = collection.items;
+        page = collection.page;
       } else if (targetTab === 'lateReviews' && canReadWallets) {
-        const result = await client.latePaymentReviews(querySnapshot);
-        next.lateReviews = result.items || [];
+        const collection = normalizeFinanceCollection(await client.latePaymentReviews(querySnapshot), querySnapshot);
+        next.lateReviews = collection.items;
+        page = collection.page;
       } else if (targetTab === 'anomalies' && canReadWallets) {
-        const result = await client.paymentAnomalies(querySnapshot);
-        next.anomalies = result.items || [];
+        const collection = normalizeFinanceCollection(await client.paymentAnomalies(querySnapshot), querySnapshot);
+        next.anomalies = collection.items;
+        page = collection.page;
       } else if (targetTab === 'reconciliations' && canReadUsage) {
-        const result = await client.reconciliationRuns();
-        next.reconciliations = result.items || [];
+        const collection = normalizeFinanceCollection(await client.reconciliationRuns(querySnapshot), querySnapshot);
+        next.reconciliations = collection.items;
+        page = collection.page;
       } else if (targetTab === 'controls' && canReadWallets) {
         const canReadControlApprovals = canRequestControlResume || canApproveControlResume;
         const [paymentControls, providerApprovals, productApprovals] = await Promise.all([
@@ -2540,7 +2598,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         loaded: true,
         error: '',
         updatedAt: Date.now(),
-        ...(querySnapshot ? { query: querySnapshot, page: { cursor: null } } : {}),
+        ...(querySnapshot ? { query: querySnapshot, page } : {}),
       }));
       return next;
     } catch (reason) {
@@ -2549,7 +2607,12 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         setData((current) => updateFinanceTabState(current, surface, targetTab, { loading: false }));
         return null;
       }
-      setData((current) => updateFinanceTabState(current, surface, targetTab, { loading: false, attempted: true, error: copy.failed }));
+      setData((current) => updateFinanceTabState(current, surface, targetTab, {
+        loading: false,
+        attempted: true,
+        error: isFinanceSnapshotExpired(reason) ? copy.billing.snapshotExpired : copy.failed,
+        ...(isFinanceSnapshotExpired(reason) ? { page: { ...(current?.financeTabStates?.[surface]?.[targetTab]?.page || {}), expired: true } } : {}),
+      }));
       return null;
     }
   }, [canApproveAdjustment, canApproveControlResume, canReadPricing, canReadUsage, canReadWallets, canRequestAdjustment, canRequestControlResume, client, copy.failed, requestTracker, routeQuery, setData, surface]);
@@ -2575,14 +2638,19 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   }, [canReadWallets, client, copy.failed, requestTracker, setData, surface]);
   const routeQueryKey = JSON.stringify(routeQuery);
   useEffect(() => {
-    if (tab === 'receivables') setReceivableFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    if (tab === 'wallets') setWalletFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'receivables') setReceivableFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'adjustments') setAdjustmentFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'holds') setHoldFilter(normalizeAdminFinanceQuery(tab, routeQuery));
     else if (tab === 'orders') setOrderFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'refunds') setRefundFilter(normalizeAdminFinanceQuery(tab, routeQuery));
     else if (tab === 'lateReviews') setLateFilter(normalizeAdminFinanceQuery(tab, routeQuery));
     else if (tab === 'anomalies') setAnomalyFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'reconciliations') setReconciliationFilter(normalizeAdminFinanceQuery(tab, routeQuery));
   }, [routeQueryKey, routeVersion, tab]);
   useEffect(() => {
     if (!tab) return;
-    const routeAware = ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(tab);
+    const routeAware = isAdminFinancePaginatedTab(tab);
     const desiredQuery = routeAware ? normalizeAdminFinanceQuery(tab, routeQuery) : null;
     if (financeTabShouldLoad(activeTabState, desiredQuery)) {
       void loadTab(tab, desiredQuery ? { query: desiredQuery } : undefined);
@@ -2596,7 +2664,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     setData((current) => resetFinanceSurfaceLoading(current, surface));
   }, [requestTracker, setData, surface]);
   const reload = async () => {
-    const routeAware = ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(tab);
+    const routeAware = isAdminFinancePaginatedTab(tab);
     const [result] = await Promise.all([
       loadTab(tab, routeAware ? { query: normalizeAdminFinanceQuery(tab, routeQuery) } : undefined),
       surface === 'payments' && canReadWallets ? loadPaymentCapabilities() : Promise.resolve(null),
@@ -2611,7 +2679,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       await action();
       await reload();
       setNotice(copy.billing.completed);
-    } catch {
+    } catch (cause) {
       setError(copy.billing.actionFailed);
     } finally {
       setBusy(false);
@@ -2642,7 +2710,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setNotice(copy.billing.actionPanel.statusRefreshed);
     } catch (cause) {
       const requestID = cause?.requestID ? copy.billing.actionPanel.requestID(cause.requestID) : '';
-      setActionPanel((current) => ({ ...current, error: `${copy.billing.actionPanel.refreshFailed}${requestID}` }));
+      setActionPanel((current) => ({ ...current, restartPagination: isFinanceSnapshotExpired(cause), error: `${copy.billing.actionPanel.refreshFailed}${requestID}` }));
     } finally {
       setBusy(false);
     }
@@ -2681,7 +2749,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       if (outcome.refreshed) setActionPanel(null);
       else {
         const requestID = outcome.refreshError?.requestID ? copy.billing.actionPanel.requestID(outcome.refreshError.requestID) : '';
-        setActionPanel((current) => ({ ...current, writeSucceeded: true, error: `${copy.billing.actionPanel.refreshFailed}${requestID}` }));
+        setActionPanel((current) => ({ ...current, writeSucceeded: true, restartPagination: isFinanceSnapshotExpired(outcome.refreshError), error: `${copy.billing.actionPanel.refreshFailed}${requestID}` }));
       }
     } catch (cause) {
       const unknown = !actionPanel.idempotencyKey && isUnknownMutationOutcome(cause);
@@ -2693,17 +2761,53 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setBusy(false);
     }
   };
-  const showLedger = async (wallet) => {
-    setBusy(true);
-    setError('');
+  const loadLedgerPage = useCallback(async (wallet, rawQuery = {}) => {
+    const query = normalizeAdminFinanceDetailQuery('ledger', rawQuery);
+    const requestKey = `${surface}:ledger-detail`;
+    const generation = requestTracker.begin(requestKey);
+    setLedger((current) => ({
+      wallet,
+      query,
+      items: current?.wallet?.wallet_id === wallet.wallet_id ? current.items || [] : [],
+      page: current?.wallet?.wallet_id === wallet.wallet_id ? current.page || null : null,
+      loading: true,
+      error: '',
+    }));
     try {
-      const result = await client.walletLedger(wallet.wallet_id);
-      setLedger({ wallet, items: result.items || [] });
-    } catch {
-      setError(copy.billing.actionFailed);
-    } finally {
-      setBusy(false);
+      const collection = normalizeFinanceCollection(await client.walletLedger(wallet.wallet_id, query), query);
+      if (!requestTracker.isCurrent(requestKey, generation)) return;
+      setLedger({ wallet, query, ...collection, loading: false, error: '' });
+    } catch (cause) {
+      if (!requestTracker.isCurrent(requestKey, generation)) return;
+      setLedger((current) => current ? {
+        ...current,
+        loading: false,
+        error: isFinanceSnapshotExpired(cause) ? copy.billing.snapshotExpired : copy.billing.actionFailed,
+        ...(isFinanceSnapshotExpired(cause) ? { page: { ...current.page, expired: true } } : {}),
+      } : current);
     }
+  }, [client, copy.billing.actionFailed, copy.billing.snapshotExpired, requestTracker, surface]);
+  const showLedger = (wallet) => {
+    if (!canReadLedger) return;
+    onRouteDetailChange?.('ledger', wallet.wallet_id, normalizeAdminFinanceDetailQuery('ledger', {}));
+  };
+  const changeLedgerPage = (direction) => {
+    if (!ledger || ledger.loading || ledger.page?.legacy || ledger.page?.expired) return;
+    let cursor = '';
+    if (direction === 'next') {
+      cursor = ledger.page?.nextCursor || '';
+      if (!cursor) return;
+      rememberFinanceCursor(financeDetailCursorBackRef.current, 'ledger', ledger.query, cursor, ledger.wallet.wallet_id);
+    } else {
+      cursor = previousFinanceCursor(financeDetailCursorBackRef.current, 'ledger', ledger.query, ledger.wallet.wallet_id);
+      if (cursor == null) return;
+    }
+    onRouteDetailChange?.('ledger', ledger.wallet.wallet_id, { ...ledger.query, cursor });
+  };
+  const searchLedger = (event) => {
+    event.preventDefault();
+    if (!ledger) return;
+    onRouteDetailChange?.('ledger', ledger.wallet.wallet_id, normalizeAdminFinanceDetailQuery('ledger', { ...ledgerFilter, cursor: '' }));
   };
   const showReceivable = async (receivable) => {
     setBusy(true);
@@ -2815,19 +2919,34 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       execute: ({ reason }) => client.repairPaymentOrder(item.order_id, reason),
     });
   };
-  const searchOrders = async (event) => {
+  const searchFinanceCollection = async (event, targetTab, filter, setFilter) => {
     event.preventDefault();
-    const query = normalizeAdminFinanceQuery('orders', orderFilter);
-    setOrderFilter(query);
-    onRouteQueryChange?.('orders', query);
-    await loadTab('orders', { query });
+    const query = normalizeAdminFinanceQuery(targetTab, { ...filter, cursor: '' });
+    setFilter(query);
+    onRouteQueryChange?.(targetTab, query);
+    await loadTab(targetTab, { query });
   };
-  const searchReceivables = async (event) => {
-    event.preventDefault();
-    const query = normalizeAdminFinanceQuery('receivables', receivableFilter);
-    setReceivableFilter(query);
-    onRouteQueryChange?.('receivables', query);
-    await loadTab('receivables', { query });
+  const changeFinancePage = async (direction) => {
+    if (!isAdminFinancePaginatedTab(tab) || activeTabState.loading || activeTabState.page?.legacy || activeTabState.page?.expired) return;
+    const query = normalizeAdminFinanceQuery(tab, activeTabState.query || routeQuery);
+    const scope = surface;
+    let cursor = '';
+    if (direction === 'next') {
+      cursor = activeTabState.page?.nextCursor || '';
+      if (!cursor) return;
+      rememberFinanceCursor(financeCursorBackRef.current, tab, query, cursor, scope);
+    } else {
+      cursor = previousFinanceCursor(financeCursorBackRef.current, tab, query, scope);
+      if (cursor == null) return;
+    }
+    const nextQuery = { ...query, cursor };
+    onRouteQueryChange?.(tab, nextQuery);
+    await loadTab(tab, { query: nextQuery });
+  };
+  const restartExpiredFinancePage = () => {
+    const query = resetExpiredFinanceQuery(activeTabState.query || routeQuery);
+    onRouteQueryChange?.(tab, query, 'replace');
+    void loadTab(tab, { query });
   };
   const release = (item) => {
     openActionPanel({
@@ -2843,30 +2962,122 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       execute: ({ reason }, { idempotencyKey }) => client.releaseHold(item.hold_id, reason, idempotencyKey),
     });
   };
-  const showCases = async (run) => {
-    setBusy(true);
-    setError('');
-    try {
-      const result = await client.reconciliationCases(run.reconciliation_run_id);
-      setCases({ run, items: result.items || [] });
-    } catch {
-      setError(copy.billing.actionFailed);
-    } finally {
-      setBusy(false);
+  const isCurrentReconciliationCaseRoute = useCallback((runID, query) => {
+    return financeDetailRouteIsCurrent({
+      canRead: canReadUsageRef.current,
+      current: routeDetailRef.current,
+      type: 'reconciliationCases',
+      id: runID,
+      query,
+      normalizeQuery: (value) => normalizeAdminFinanceDetailQuery('reconciliationCases', value),
+    });
+  }, []);
+  const loadReconciliationCasePage = useCallback(async (run, rawQuery = {}, options = {}) => {
+    const query = normalizeAdminFinanceDetailQuery('reconciliationCases', rawQuery);
+    const requestKey = `${surface}:reconciliation-cases-detail`;
+    const routeMatches = () => isCurrentReconciliationCaseRoute(run.reconciliation_run_id, query);
+    if (!routeMatches()) return null;
+    setCases((current) => ({
+      run,
+      query,
+      items: current?.run?.reconciliation_run_id === run.reconciliation_run_id ? current.items || [] : [],
+      page: current?.run?.reconciliation_run_id === run.reconciliation_run_id ? current.page || null : null,
+      loading: true,
+      error: '',
+    }));
+    const result = await runFinanceDetailRequest({
+      requestTracker,
+      requestKey,
+      load: () => client.reconciliationCases(run.reconciliation_run_id, query),
+      isRouteCurrent: routeMatches,
+    });
+    if (result.status === 'stale') return null;
+    if (result.status === 'ok') {
+      const collection = normalizeFinanceCollection(result.value, query);
+      setCases({ run, query, ...collection, loading: false, error: '' });
+      return collection;
     }
+    setCases((current) => current ? {
+      ...current,
+      loading: false,
+      error: result.status === 'expired' ? copy.billing.snapshotExpired : copy.billing.actionFailed,
+      ...(result.status === 'expired' ? { page: { ...current.page, expired: true } } : {}),
+    } : current);
+    if (options.throwOnError) throw result.error;
+    return null;
+  }, [client, copy.billing.actionFailed, copy.billing.snapshotExpired, isCurrentReconciliationCaseRoute, requestTracker, surface]);
+  const showCases = (run) => onRouteDetailChange?.('reconciliationCases', run.reconciliation_run_id, normalizeAdminFinanceDetailQuery('reconciliationCases', {}));
+  const changeReconciliationCasePage = (direction) => {
+    if (!cases || cases.loading || cases.page?.legacy || cases.page?.expired) return;
+    let cursor = '';
+    if (direction === 'next') {
+      cursor = cases.page?.nextCursor || '';
+      if (!cursor) return;
+      rememberFinanceCursor(financeDetailCursorBackRef.current, 'reconciliationCases', cases.query, cursor, cases.run.reconciliation_run_id);
+    } else {
+      cursor = previousFinanceCursor(financeDetailCursorBackRef.current, 'reconciliationCases', cases.query, cases.run.reconciliation_run_id);
+      if (cursor == null) return;
+    }
+    onRouteDetailChange?.('reconciliationCases', cases.run.reconciliation_run_id, { ...cases.query, cursor });
   };
+  const searchReconciliationCases = (event) => {
+    event.preventDefault();
+    if (!cases) return;
+    onRouteDetailChange?.('reconciliationCases', cases.run.reconciliation_run_id, normalizeAdminFinanceDetailQuery('reconciliationCases', { ...caseFilter, cursor: '' }));
+  };
+  const routeDetailKey = JSON.stringify(routeDetail);
+  useEffect(() => {
+    if (routeDetail.type === 'ledger' && canReadLedger) {
+      const query = normalizeAdminFinanceDetailQuery('ledger', routeDetail.query);
+      setLedgerFilter(query);
+      const wallet = (data.wallets || []).find((item) => item.wallet_id === routeDetail.id) || { wallet_id: routeDetail.id };
+      if (!ledger || ledger.wallet?.wallet_id !== routeDetail.id || JSON.stringify(ledger.query) !== JSON.stringify(query)) void loadLedgerPage(wallet, query);
+    } else {
+      requestTracker.invalidate(`${surface}:ledger-detail`);
+      setLedger(null);
+    }
+    if (routeDetail.type === 'reconciliationCases' && canReadUsage) {
+      const query = normalizeAdminFinanceDetailQuery('reconciliationCases', routeDetail.query);
+      setCaseFilter(query);
+      const run = (data.reconciliations || []).find((item) => item.reconciliation_run_id === routeDetail.id) || { reconciliation_run_id: routeDetail.id };
+      if (!cases || cases.run?.reconciliation_run_id !== routeDetail.id || JSON.stringify(cases.query) !== JSON.stringify(query)) void loadReconciliationCasePage(run, query);
+    } else {
+      requestTracker.invalidate(`${surface}:reconciliation-cases-detail`);
+      setCases(null);
+    }
+  }, [canReadLedger, canReadUsage, loadLedgerPage, loadReconciliationCasePage, routeDetailKey, routeVersion]);
   const updateReconciliationCase = async (item, action) => {
+    if (!canReconcileRef.current || !cases || cases.loading || cases.page?.expired) return;
+    if (action === 'ASSIGN' && !canReadUserDirectoryRef.current) return;
+    const run = cases.run;
+    const query = { ...cases.query };
+    const runID = run.reconciliation_run_id;
+    const refreshCurrentCases = createFinanceDetailRecovery({
+      query,
+      load: (refreshQuery) => loadReconciliationCasePage(run, refreshQuery, { requireCurrentRoute: true, throwOnError: true }),
+      onRestart: (refreshQuery) => {
+        routeDetailRef.current = { type: 'reconciliationCases', id: runID, query: refreshQuery };
+        onRouteDetailChange?.('reconciliationCases', runID, refreshQuery, 'replace');
+      },
+    });
     if (action === 'CLAIM') {
-      void perform(async () => {
+      setBusy(true);
+      setNotice('');
+      setCases((current) => current ? { ...current, error: '' } : current);
+      try {
         await client.updateReconciliationCase(item.case_id, { action, reason: copy.billing.actionPanel.claimReason });
-        const result = await client.reconciliationCases(cases.run.reconciliation_run_id);
-        setCases((current) => ({ ...current, items: result.items || [] }));
-      });
+        await loadReconciliationCasePage(run, query, { requireCurrentRoute: true });
+        if (isCurrentReconciliationCaseRoute(runID, query)) setNotice(copy.billing.completed);
+      } catch {
+        if (isCurrentReconciliationCaseRoute(runID, query)) setCases((current) => current ? { ...current, loading: false, error: copy.billing.actionFailed } : current);
+      } finally {
+        setBusy(false);
+      }
       return;
     }
     const fields = [];
     if (action === 'ASSIGN') {
-      if (!canReadUserDirectory) return;
+      if (!canReadUserDirectoryRef.current) return;
       const searchOwners = async (query) => {
         const sequence = ++ownerSearchSequence.current;
         setActionPanel((current) => current ? {
@@ -2914,12 +3125,15 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       ],
       fields,
       confirmation: copy.billing.actionPanel.caseConfirmations[action],
-      execute: (values, { idempotencyKey }) => client.updateReconciliationCase(item.case_id, { action, ...values }, idempotencyKey),
-      after: async () => {
-        await reload();
-        const result = await client.reconciliationCases(cases.run.reconciliation_run_id);
-        setCases((current) => ({ ...current, items: result.items || [] }));
+      execute: (values, { idempotencyKey }) => {
+        if (!canReconcileRef.current || (action === 'ASSIGN' && !canReadUserDirectoryRef.current)) {
+          const permissionError = new Error('PERMISSION_DENIED');
+          permissionError.status = 403;
+          throw permissionError;
+        }
+        return client.updateReconciliationCase(item.case_id, { action, ...values }, idempotencyKey);
       },
+      after: refreshCurrentCases,
     });
   };
   const showOrder = async (order) => {
@@ -2933,13 +3147,6 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setBusy(false);
     }
   };
-  const searchLateReviews = async (event) => {
-    event.preventDefault();
-    const query = normalizeAdminFinanceQuery('lateReviews', lateFilter);
-    setLateFilter(query);
-    onRouteQueryChange?.('lateReviews', query);
-    await loadTab('lateReviews', { query });
-  };
   const showLateReview = async (item) => {
     setBusy(true);
     setError('');
@@ -2950,13 +3157,6 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     } finally {
       setBusy(false);
     }
-  };
-  const searchAnomalies = async (event) => {
-    event.preventDefault();
-    const query = normalizeAdminFinanceQuery('anomalies', anomalyFilter);
-    setAnomalyFilter(query);
-    onRouteQueryChange?.('anomalies', query);
-    await loadTab('anomalies', { query });
   };
   const showAnomaly = async (item) => {
     setBusy(true);
@@ -3089,11 +3289,11 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           label: copy.billing.receivable,
           render: (item) => formatPoints(item.receivable_microcredits, language),
         },
-        {
+        ...(canReadLedger ? [{
           key: 'actions',
           label: copy.accounts.actions,
           render: (item) => <button onClick={() => showLedger(item)}>{copy.billing.viewLedger}</button>,
-        },
+        }] : []),
       ],
       receivables: [
         {
@@ -3487,7 +3687,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         },
       ],
     }),
-    [busy, canApproveAdjustment, canRequestAdjustment, client, copy, data.adjustmentApprovals, language, normalRefundCreationEnabled, repairSupported],
+    [busy, canApproveAdjustment, canReadLedger, canRequestAdjustment, client, copy, data.adjustmentApprovals, language, normalRefundCreationEnabled, repairSupported],
   );
   const renderWithActionPanel = (content) => (
     <>
@@ -3509,6 +3709,18 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         copy={copy}
         title={`${copy.billing.ledger} · ${shortID(ledger.wallet.wallet_id)}`}
         items={ledger.items}
+        filters={(
+          <form className="adm-ops-form" onSubmit={searchLedger}>
+            <select value={ledgerFilter.entry_type} onChange={(event) => setLedgerFilter((current) => ({ ...current, entry_type: event.target.value }))}>
+              <option value="">{copy.billing.allEntryTypes}</option>
+              {['RECHARGE', 'USAGE', 'REFUND', 'REVERSAL', 'ADJUSTMENT', 'EXPIRY', 'RECEIVABLE', 'CHARGEBACK'].map((value) => <option key={value}>{value}</option>)}
+            </select>
+            <input value={ledgerFilter.business_reference} onChange={(event) => setLedgerFilter((current) => ({ ...current, business_reference: event.target.value }))} placeholder={copy.billing.businessReference} />
+            <FinanceDateTimeRange copy={copy} value={ledgerFilter} onChange={(key, value) => setLedgerFilter((current) => ({ ...current, [key]: value }))} />
+            <FinanceLimitSelect copy={copy} value={ledgerFilter.limit} onChange={(event) => setLedgerFilter((current) => ({ ...current, limit: event.target.value }))} />
+            <button disabled={ledger.loading}>{copy.searchAction}</button>
+          </form>
+        )}
         columns={[
           { key: 'entry_type', label: copy.billing.type },
           {
@@ -3544,7 +3756,15 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             render: (item) => formatDate(item.created_at),
           },
         ]}
-        onBack={() => setLedger(null)}
+        page={ledger.page}
+        limit={ledger.query?.limit || '50'}
+        busy={ledger.loading}
+        canPrevious={previousFinanceCursor(financeDetailCursorBackRef.current, 'ledger', ledger.query, ledger.wallet.wallet_id) !== null}
+        onPrevious={() => changeLedgerPage('previous')}
+        onNext={() => changeLedgerPage('next')}
+        error={ledger.error}
+        onRestart={() => ledger.page?.expired ? onRouteDetailChange?.('ledger', ledger.wallet.wallet_id, resetExpiredFinanceQuery(ledger.query), 'replace') : loadLedgerPage(ledger.wallet, ledger.query)}
+        onBack={() => onRouteDetailChange?.('', '', {})}
       />
     );
   if (receivableDetail)
@@ -3682,8 +3902,28 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     return renderWithActionPanel(
       <BillingDetail
         copy={copy}
-        title={`${copy.billing.cases} · ${cases.run.business_date}`}
+        title={`${copy.billing.cases} · ${cases.run.business_date || shortID(cases.run.reconciliation_run_id)}`}
         items={cases.items}
+        filters={(
+          <form className="adm-ops-form" onSubmit={searchReconciliationCases}>
+            <select value={caseFilter.status} onChange={(event) => setCaseFilter((current) => ({ ...current, status: event.target.value }))}>
+              <option value="">{copy.billing.allStatuses}</option>
+              {['OPEN', 'IN_REVIEW', 'RESOLVED', 'IGNORED'].map((value) => <option key={value}>{value}</option>)}
+            </select>
+            <select value={caseFilter.severity} onChange={(event) => setCaseFilter((current) => ({ ...current, severity: event.target.value }))}>
+              <option value="">{copy.billing.allSeverities}</option>
+              {['P0', 'P1', 'P2'].map((value) => <option key={value}>{value}</option>)}
+            </select>
+            <input value={caseFilter.owner_id} onChange={(event) => setCaseFilter((current) => ({ ...current, owner_id: event.target.value }))} placeholder={copy.billing.ownerID} />
+            <select value={caseFilter.case_type} onChange={(event) => setCaseFilter((current) => ({ ...current, case_type: event.target.value }))}>
+              <option value="">{copy.billing.allCaseTypes}</option>
+              {['PROVIDER_PAID_INTERNAL_MISSING', 'INTERNAL_PAID_PROVIDER_MISSING', 'AMOUNT_MISMATCH', 'DUPLICATE_TRANSACTION', 'PROVIDER_REFUND_INTERNAL_MISSING', 'INTERNAL_REFUND_PROVIDER_MISSING', 'REFUND_AMOUNT_MISMATCH', 'PROVIDER_CHARGEBACK_INTERNAL_MISSING', 'INTERNAL_CHARGEBACK_PROVIDER_MISSING', 'PAYMENT_LEDGER_MISSING', 'REFUND_LEDGER_MISSING', 'CHARGEBACK_LEDGER_MISSING', 'UNSUPPORTED_PROVIDER_ENTRY'].map((value) => <option key={value}>{value}</option>)}
+            </select>
+            <FinanceDateTimeRange copy={copy} value={caseFilter} onChange={(key, value) => setCaseFilter((current) => ({ ...current, [key]: value }))} />
+            <FinanceLimitSelect copy={copy} value={caseFilter.limit} onChange={(event) => setCaseFilter((current) => ({ ...current, limit: event.target.value }))} />
+            <button disabled={cases.loading}>{copy.searchAction}</button>
+          </form>
+        )}
         columns={[
           { key: 'merchant_order_no', label: copy.billing.order },
           { key: 'case_type', label: copy.billing.caseType },
@@ -3720,35 +3960,43 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           },
           { key: 'repair_action', label: copy.billing.repairAction },
           { key: 'review_result', label: copy.billing.reviewResult },
-          {
+          ...(canReconcile ? [{
             key: 'actions',
             label: copy.accounts.actions,
             render: (item) => (
               <div className="adm-row-actions">
-                {!item.owner_id && (
-                  <button disabled={busy} onClick={() => updateReconciliationCase(item, 'CLAIM')}>
+                {!item.owner_id && ['OPEN', 'IN_REVIEW'].includes(item.status) && (
+                  <button disabled={busy || cases.loading || cases.page?.expired} onClick={() => updateReconciliationCase(item, 'CLAIM')}>
                     {copy.billing.claimReview}
                   </button>
                 )}
                 {canReadUserDirectory && (
-                  <button disabled={busy || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'ASSIGN')}>
+                  <button disabled={busy || cases.loading || cases.page?.expired || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'ASSIGN')}>
                     {copy.billing.assignOwner}
                   </button>
                 )}
-                <button disabled={busy || !item.owner_id || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'SET_REPAIR_ACTION')}>
+                <button disabled={busy || cases.loading || cases.page?.expired || !item.owner_id || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'SET_REPAIR_ACTION')}>
                   {copy.billing.setRepairAction}
                 </button>
-                <button disabled={busy || !item.owner_id || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'RESOLVE')}>
+                <button disabled={busy || cases.loading || cases.page?.expired || !item.owner_id || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'RESOLVE')}>
                   {copy.billing.resolveCase}
                 </button>
-                <button disabled={busy || !item.owner_id || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'IGNORE')}>
+                <button disabled={busy || cases.loading || cases.page?.expired || !item.owner_id || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'IGNORE')}>
                   {copy.billing.ignoreCase}
                 </button>
               </div>
             ),
-          },
+          }] : []),
         ]}
-        onBack={() => setCases(null)}
+        page={cases.page}
+        limit={cases.query?.limit || '50'}
+        busy={cases.loading}
+        canPrevious={previousFinanceCursor(financeDetailCursorBackRef.current, 'reconciliationCases', cases.query, cases.run.reconciliation_run_id) !== null}
+        onPrevious={() => changeReconciliationCasePage('previous')}
+        onNext={() => changeReconciliationCasePage('next')}
+        error={cases.error}
+        onRestart={() => cases.page?.expired ? onRouteDetailChange?.('reconciliationCases', cases.run.reconciliation_run_id, resetExpiredFinanceQuery(cases.query), 'replace') : loadReconciliationCasePage(cases.run, cases.query)}
+        onBack={() => onRouteDetailChange?.('', '', {})}
       />
     );
   if (anomalyDetail) {
@@ -4104,11 +4352,23 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       )}
       {surface === 'payments' && data.paymentCapabilityState?.error && <div className="adm-inline-message error">{copy.billing.capabilitiesUnavailable}</div>}
       {!embedded && <Tabs active={tab} onChange={changeTab} items={visibleTabs.map((key) => ({ key, label: copy.billing[key] }))} />}
-      {activeTabState.loaded && ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(tab) && (
-        <div className="adm-inline-message">{copy.billing.currentPageRange(items.length, activeTabState.query?.limit || 100)}</div>
+      {tab === 'wallets' && (
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'wallets', walletFilter, setWalletFilter)}>
+          <input value={walletFilter.q} onChange={(event) => setWalletFilter((current) => ({ ...current, q: event.target.value }))} placeholder={copy.billing.walletSearch} />
+          <select value={walletFilter.owner_type} onChange={(event) => setWalletFilter((current) => ({ ...current, owner_type: event.target.value }))}>
+            <option value="">{copy.billing.allOwnerTypes}</option>
+            {['PERSONAL', 'ORGANIZATION', 'ORG_UNIT'].map((value) => <option key={value}>{value}</option>)}
+          </select>
+          <select value={walletFilter.status} onChange={(event) => setWalletFilter((current) => ({ ...current, status: event.target.value }))}>
+            <option value="">{copy.billing.allStatuses}</option>
+            {['ACTIVE', 'FROZEN', 'CLOSED'].map((value) => <option key={value}>{value}</option>)}
+          </select>
+          <FinanceLimitSelect copy={copy} value={walletFilter.limit} onChange={(event) => setWalletFilter((current) => ({ ...current, limit: event.target.value }))} />
+          <button disabled={busy}>{copy.searchAction}</button>
+        </form>
       )}
       {tab === 'receivables' && (
-        <form className="adm-ops-form" onSubmit={searchReceivables}>
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'receivables', receivableFilter, setReceivableFilter)}>
           <input
             value={receivableFilter.wallet_id}
             onChange={(event) => setReceivableFilter((current) => ({ ...current, wallet_id: event.target.value }))}
@@ -4118,7 +4378,22 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             <option value="">{copy.billing.allStatuses}</option>
             {['OPEN', 'PARTIALLY_SETTLED', 'SETTLED', 'WRITTEN_OFF'].map((status) => <option key={status}>{status}</option>)}
           </select>
+          <input value={receivableFilter.source_type} onChange={(event) => setReceivableFilter((current) => ({ ...current, source_type: event.target.value }))} placeholder={copy.billing.sourceType} />
+          <FinanceDateTimeRange copy={copy} value={receivableFilter} onChange={(key, value) => setReceivableFilter((current) => ({ ...current, [key]: value }))} />
           <FinanceLimitSelect copy={copy} value={receivableFilter.limit} onChange={(event) => setReceivableFilter((current) => ({ ...current, limit: event.target.value }))} />
+          <button disabled={busy}>{copy.searchAction}</button>
+        </form>
+      )}
+      {tab === 'adjustments' && (
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'adjustments', adjustmentFilter, setAdjustmentFilter)}>
+          <input value={adjustmentFilter.wallet_id} onChange={(event) => setAdjustmentFilter((current) => ({ ...current, wallet_id: event.target.value }))} placeholder={copy.billing.walletID} />
+          <select value={adjustmentFilter.status} onChange={(event) => setAdjustmentFilter((current) => ({ ...current, status: event.target.value }))}>
+            <option value="">{copy.billing.allStatuses}</option>
+            {['PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'POSTED'].map((value) => <option key={value}>{value}</option>)}
+          </select>
+          <input value={adjustmentFilter.requested_by} onChange={(event) => setAdjustmentFilter((current) => ({ ...current, requested_by: event.target.value }))} placeholder={copy.billing.requestedBy} />
+          <FinanceDateTimeRange copy={copy} value={adjustmentFilter} onChange={(key, value) => setAdjustmentFilter((current) => ({ ...current, [key]: value }))} />
+          <FinanceLimitSelect copy={copy} value={adjustmentFilter.limit} onChange={(event) => setAdjustmentFilter((current) => ({ ...current, limit: event.target.value }))} />
           <button disabled={busy}>{copy.searchAction}</button>
         </form>
       )}
@@ -4126,12 +4401,12 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         <form className="adm-ops-form" onSubmit={submitAdjustment}>
           <label>
             {copy.billing.adjustmentWallet}
-            <select value={adjustment.walletID} onChange={(event) => setAdjustment((current) => ({ ...current, walletID: event.target.value }))} required>
-              <option value="">{copy.billing.selectWallet}</option>
-              {(data.adjustmentWallets || []).map((wallet) => (
-                <option key={wallet.wallet_id} value={wallet.wallet_id}>{wallet.owner_type} · {shortID(wallet.owner_id)} · {shortID(wallet.wallet_id)}</option>
+            <input list="adjustment-wallet-options" value={adjustment.walletID} onChange={(event) => setAdjustment((current) => ({ ...current, walletID: event.target.value }))} placeholder={copy.billing.selectWallet} required />
+            <datalist id="adjustment-wallet-options">
+              {(data.wallets || []).map((wallet) => (
+                <option key={wallet.wallet_id} value={wallet.wallet_id}>{wallet.owner_type} · {shortID(wallet.owner_id)}</option>
               ))}
-            </select>
+            </datalist>
           </label>
           <label>
             {copy.billing.adjustmentAmount}
@@ -4149,8 +4424,21 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           <small>{copy.billing.adjustmentApprovalBoundary}</small>
         </form>
       )}
+      {tab === 'holds' && (
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'holds', holdFilter, setHoldFilter)}>
+          <input value={holdFilter.wallet_id} onChange={(event) => setHoldFilter((current) => ({ ...current, wallet_id: event.target.value }))} placeholder={copy.billing.walletID} />
+          <select value={holdFilter.status} onChange={(event) => setHoldFilter((current) => ({ ...current, status: event.target.value }))}>
+            <option value="">{copy.billing.allStatuses}</option>
+            {['ACTIVE', 'COMMITTED', 'RELEASED', 'EXPIRED', 'REVIEW'].map((value) => <option key={value}>{value}</option>)}
+          </select>
+          <input value={holdFilter.model_id} onChange={(event) => setHoldFilter((current) => ({ ...current, model_id: event.target.value }))} placeholder={copy.billing.modelID} />
+          <FinanceDateTimeRange copy={copy} value={holdFilter} onChange={(key, value) => setHoldFilter((current) => ({ ...current, [key]: value }))} />
+          <FinanceLimitSelect copy={copy} value={holdFilter.limit} onChange={(event) => setHoldFilter((current) => ({ ...current, limit: event.target.value }))} />
+          <button disabled={busy}>{copy.searchAction}</button>
+        </form>
+      )}
       {tab === 'orders' && (
-        <form className="adm-ops-form" onSubmit={searchOrders}>
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'orders', orderFilter, setOrderFilter)}>
           <input
             value={orderFilter.q}
             onChange={(event) =>
@@ -4176,12 +4464,29 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
               <option key={status}>{status}</option>
             ))}
           </select>
+          <input value={orderFilter.provider_id} onChange={(event) => setOrderFilter((current) => ({ ...current, provider_id: event.target.value }))} placeholder={copy.billing.provider} />
+          <input value={orderFilter.channel} onChange={(event) => setOrderFilter((current) => ({ ...current, channel: event.target.value }))} placeholder={copy.billing.channel} />
+          <FinanceDateTimeRange copy={copy} value={orderFilter} onChange={(key, value) => setOrderFilter((current) => ({ ...current, [key]: value }))} />
           <FinanceLimitSelect copy={copy} value={orderFilter.limit} onChange={(event) => setOrderFilter((current) => ({ ...current, limit: event.target.value }))} />
           <button disabled={busy}>{copy.searchAction}</button>
         </form>
       )}
+      {tab === 'refunds' && (
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'refunds', refundFilter, setRefundFilter)}>
+          <input value={refundFilter.q} onChange={(event) => setRefundFilter((current) => ({ ...current, q: event.target.value }))} placeholder={copy.billing.refundSearch} />
+          <select value={refundFilter.status} onChange={(event) => setRefundFilter((current) => ({ ...current, status: event.target.value }))}>
+            <option value="">{copy.billing.allStatuses}</option>
+            {['REQUESTED', 'SUCCEEDED', 'FAILED', 'MANUAL_REVIEW', 'REVIEW_REQUIRED', 'RESOLVED'].map((value) => <option key={value}>{value}</option>)}
+          </select>
+          <input value={refundFilter.provider_id} onChange={(event) => setRefundFilter((current) => ({ ...current, provider_id: event.target.value }))} placeholder={copy.billing.provider} />
+          <FinanceDateTimeRange copy={copy} value={refundFilter} onChange={(key, value) => setRefundFilter((current) => ({ ...current, [key]: value }))} />
+          <FinanceLimitSelect copy={copy} value={refundFilter.limit} onChange={(event) => setRefundFilter((current) => ({ ...current, limit: event.target.value }))} />
+          <button disabled={busy}>{copy.searchAction}</button>
+        </form>
+      )}
       {tab === 'lateReviews' && (
-        <form className="adm-ops-form" onSubmit={searchLateReviews}>
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'lateReviews', lateFilter, setLateFilter)}>
+          <input value={lateFilter.q} onChange={(event) => setLateFilter((current) => ({ ...current, q: event.target.value }))} placeholder={copy.billing.caseSearch} />
           <select
             value={lateFilter.status}
             onChange={(event) =>
@@ -4196,6 +4501,10 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
               <option key={status}>{status}</option>
             ))}
           </select>
+          <select value={lateFilter.severity} onChange={(event) => setLateFilter((current) => ({ ...current, severity: event.target.value }))}>
+            <option value="">{copy.billing.allSeverities}</option>
+            {['P0', 'P1', 'P2'].map((value) => <option key={value}>{value}</option>)}
+          </select>
           <input
             value={lateFilter.provider_id}
             onChange={(event) =>
@@ -4206,6 +4515,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             }
             placeholder={copy.billing.provider}
           />
+          <FinanceDateTimeRange copy={copy} value={lateFilter} onChange={(key, value) => setLateFilter((current) => ({ ...current, [key]: value }))} />
           <input
             value={lateFilter.owner_id}
             onChange={(event) =>
@@ -4273,7 +4583,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         </form>
       )}
       {tab === 'anomalies' && (
-        <form className="adm-ops-form" onSubmit={searchAnomalies}>
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'anomalies', anomalyFilter, setAnomalyFilter)}>
+          <input value={anomalyFilter.q} onChange={(event) => setAnomalyFilter((current) => ({ ...current, q: event.target.value }))} placeholder={copy.billing.caseSearch} />
           <select
             value={anomalyFilter.anomaly_type}
             onChange={(event) =>
@@ -4320,6 +4631,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             onChange={(event) => setAnomalyFilter((current) => ({ ...current, owner_id: event.target.value }))}
             placeholder={copy.billing.ownerID}
           />
+          <input value={anomalyFilter.provider_id} onChange={(event) => setAnomalyFilter((current) => ({ ...current, provider_id: event.target.value }))} placeholder={copy.billing.provider} />
+          <FinanceDateTimeRange copy={copy} value={anomalyFilter} onChange={(key, value) => setAnomalyFilter((current) => ({ ...current, [key]: value }))} />
           <FinanceLimitSelect copy={copy} value={anomalyFilter.limit} onChange={(event) => setAnomalyFilter((current) => ({ ...current, limit: event.target.value }))} />
           <button disabled={busy}>{copy.searchAction}</button>
         </form>
@@ -4329,6 +4642,20 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           <strong>{copy.billing.pricingReadOnlyTitle}</strong>
           <span>{copy.billing.pricingReadOnlyDescription}</span>
         </div>
+      )}
+      {tab === 'reconciliations' && canReadUsage && (
+        <form className="adm-ops-form" onSubmit={(event) => searchFinanceCollection(event, 'reconciliations', reconciliationFilter, setReconciliationFilter)}>
+          <input value={reconciliationFilter.provider_id} onChange={(event) => setReconciliationFilter((current) => ({ ...current, provider_id: event.target.value }))} placeholder={copy.billing.provider} />
+          <input value={reconciliationFilter.channel} onChange={(event) => setReconciliationFilter((current) => ({ ...current, channel: event.target.value }))} placeholder={copy.billing.channel} />
+          <select value={reconciliationFilter.status} onChange={(event) => setReconciliationFilter((current) => ({ ...current, status: event.target.value }))}>
+            <option value="">{copy.billing.allStatuses}</option>
+            {['RUNNING', 'COMPLETED', 'FAILED'].map((value) => <option key={value}>{value}</option>)}
+          </select>
+          <label>{copy.billing.businessDateFrom}<input type="date" value={reconciliationFilter.business_date_from} onChange={(event) => setReconciliationFilter((current) => ({ ...current, business_date_from: event.target.value }))} /></label>
+          <label>{copy.billing.businessDateTo}<input type="date" value={reconciliationFilter.business_date_to} onChange={(event) => setReconciliationFilter((current) => ({ ...current, business_date_to: event.target.value }))} /></label>
+          <FinanceLimitSelect copy={copy} value={reconciliationFilter.limit} onChange={(event) => setReconciliationFilter((current) => ({ ...current, limit: event.target.value }))} />
+          <button disabled={busy}>{copy.searchAction}</button>
+        </form>
       )}
       {tab === 'reconciliations' && canReconcile && (
         <form
@@ -4373,22 +4700,38 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       )}
       {notice && <div className="adm-inline-message ok">{notice}</div>}
       {error && <div className="adm-inline-message error">{error}</div>}
-      {activeTabState.error && <div className="adm-inline-message error" role="alert">{activeTabState.error} <button type="button" disabled={activeTabState.loading} onClick={() => void reload()}>{copy.retry}</button></div>}
+      {activeTabState.error && <div className="adm-inline-message error" role="alert">{activeTabState.error} <button type="button" disabled={activeTabState.loading} onClick={activeTabState.page?.expired ? restartExpiredFinancePage : () => void reload()}>{activeTabState.page?.expired ? copy.billing.restartPagination : copy.retry}</button></div>}
       {activeTabState.loading && !activeTabState.loaded && <div className="adm-empty" role="status">{copy.loading}</div>}
       {activeTabState.loaded && (tab === 'controls' ? <PaymentControlsPanel copy={copy} data={data} client={client} permissions={permissions} onNavigate={onNavigate} onReload={() => loadTab('controls', { force: true })} /> : <Table columns={columns[tab]} items={items} copy={copy} />)}
+      {activeTabState.loaded && isAdminFinancePaginatedTab(tab) && (
+        <FinancePagination
+          copy={copy}
+          count={items.length}
+          limit={activeTabState.query?.limit || '50'}
+          page={activeTabState.page}
+          canPrevious={previousFinanceCursor(financeCursorBackRef.current, tab, activeTabState.query || routeQuery, surface) !== null}
+          loading={activeTabState.loading}
+          onPrevious={() => void changeFinancePage('previous')}
+          onNext={() => void changeFinancePage('next')}
+        />
+      )}
     </section>
   );
 }
 
-function BillingDetail({ copy, title, items, columns, onBack }) {
+function BillingDetail({ copy, title, items, columns, filters = null, page = null, limit = '50', busy = false, canPrevious = false, onPrevious, onNext, error = '', onRestart, onBack }) {
   return (
     <DetailDrawer label={title} onClose={onBack}>
     <section className="adm-panel">
       <button className="adm-back" onClick={onBack}>
         ← {copy.billing.back}
       </button>
-      <SectionHeader title={title} count={items.length} copy={copy} />
-      <Table columns={columns} items={items} copy={copy} />
+      <SectionHeader title={title} count={page ? undefined : items.length} copy={copy} />
+      {filters}
+      {error && <div className="adm-inline-message error" role="alert">{error} <button type="button" disabled={busy} onClick={onRestart}>{page?.expired ? copy.billing.restartPagination : copy.retry}</button></div>}
+      {busy && items.length === 0 && <div className="adm-empty" role="status">{copy.loading}</div>}
+      {(!busy || items.length > 0) && <Table columns={columns} items={items} copy={copy} />}
+      {page && <FinancePagination copy={copy} count={items.length} limit={limit} page={page} canPrevious={canPrevious} loading={busy} onPrevious={onPrevious} onNext={onNext} />}
     </section>
     </DetailDrawer>
   );

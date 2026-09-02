@@ -28,7 +28,8 @@ test('finance child tabs load, cache, fail, and refresh independently', async ()
   assert.match(view, /activeTabState\.loaded &&/);
   assert.match(view, /financeRequestTrackerRef/);
   assert.match(view, /requestTracker\.invalidatePrefix/);
-  assert.match(view, /next\.adjustmentWallets = wallets\.items/);
+  assert.doesNotMatch(view, /client\.wallets\(\{ limit: '200' \}\)/);
+  assert.match(view, /data\.wallets \|\| \[\]/);
   assert.doesNotMatch(view, /next\.wallets = wallets\.items/);
   assert.match(view, /requestKey = 'payments:capabilities'/);
   assert.match(view, /paymentCapabilityState\?\.loaded === true/);
@@ -41,7 +42,7 @@ test('finance child tabs load, cache, fail, and refresh independently', async ()
   assert.match(finance, /updateFinanceTabState/);
   assert.match(finance, /readFinanceTabQuery/);
   assert.match(view, /const querySnapshot =/);
-  assert.match(view, /query: querySnapshot, page: \{ cursor: null \}/);
+  assert.match(view, /query: querySnapshot, page/);
   assert.match(finance, /createFinanceTabRequestTracker/);
   assert.match(finance, /resetFinanceSurfaceLoading/);
   assert.match(finance, /updatePaymentCapabilityState/);

@@ -167,8 +167,23 @@ func TestAdminPaginationPostgresIntegration(t *testing.T) {
 			t.Fatalf("create subject-capacity prerequisite: %v", err)
 		}
 	}
-	if _, err := repository.AdminPaginationPage(ctx, AdminPaginationRequest{SubjectID: capacitySubject, Resource: adminPageRefunds, Filters: map[string]string{}, Limit: 1}); !errors.Is(err, ErrPaginationSnapshotLimited) {
-		t.Fatalf("third active subject snapshot returned %v", err)
+	var oldestSnapshotID uuid.UUID
+	var oldestSnapshotSecret []byte
+	if err := repository.pool.QueryRow(ctx, `SELECT id,cursor_secret FROM admin_pagination_snapshots WHERE subject_id=$1 ORDER BY created_at,id LIMIT 1`, capacitySubject).Scan(&oldestSnapshotID, &oldestSnapshotSecret); err != nil {
+		t.Fatalf("read oldest subject snapshot: %v", err)
+	}
+	oldestCursor, err := signedAdminCursor(oldestSnapshotID, 0, oldestSnapshotSecret)
+	if err != nil {
+		t.Fatalf("sign oldest subject cursor: %v", err)
+	}
+	if _, err := repository.AdminPaginationPage(ctx, AdminPaginationRequest{SubjectID: capacitySubject, Resource: adminPageRefunds, Filters: map[string]string{}, Limit: 1}); err != nil {
+		t.Fatalf("third resource should recycle the oldest subject snapshot: %v", err)
+	}
+	if _, err := repository.AdminPaginationPage(ctx, AdminPaginationRequest{SubjectID: capacitySubject, Resource: adminPageReceivables, Filters: map[string]string{}, Cursor: oldestCursor, Limit: 1}); !errors.Is(err, ErrPaginationCursorExpired) {
+		t.Fatalf("recycled subject snapshot cursor returned %v", err)
+	}
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM admin_pagination_snapshots WHERE subject_id=$1 AND expires_at>$2`, capacitySubject, now).Scan(&active); err != nil || active != 2 {
+		t.Fatalf("subject snapshot recycling left %d active snapshots: %v", active, err)
 	}
 	rateSubject := uuid.New()
 	for attempt := 0; attempt < adminSnapshotSubjectPerMin; attempt++ {

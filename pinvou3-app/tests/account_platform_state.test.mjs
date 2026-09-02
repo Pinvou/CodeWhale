@@ -11,7 +11,8 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from '../src/features/account-platform/admin-finance.js';
-import { adminFinanceQueryUpdates, adminNavigationGroups, adminSectionURL, clearAdminFinanceQueryUpdates, normalizeAdminFinanceQuery, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGroups, adminSectionURL, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { createFinanceDetailRecovery, financeCursorContext, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from '../src/features/account-platform/admin-finance-pagination.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
@@ -32,12 +33,28 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   assert.equal(readAdminFinanceTab('products', { search: '?finance_tab=prices' }), 'prices');
   assert.equal(readAdminFinanceTab('billing', { search: '?finance_tab=prices' }), 'wallets');
   assert.equal(readAdminFinanceTab('payments', { search: '' }), 'orders');
-  assert.deepEqual(readAdminFinanceQuery('payments', 'orders', { search: '?payment_q=order%2F42&payment_status=PAID&payment_limit=25' }), { q: 'order/42', status: 'PAID', limit: '25' });
-  assert.deepEqual(readAdminFinanceQuery('billing', 'receivables', { search: '?receivable_wallet_id=wallet-1&receivable_status=OPEN&receivable_limit=999' }), { wallet_id: 'wallet-1', status: 'OPEN', limit: '100' });
-  assert.deepEqual(readAdminFinanceQuery('payments', 'lateReviews', { search: '?late_provider_id=h3c&late_overdue=true&late_limit=200' }), { status: '', provider_id: 'h3c', owner_id: '', entered_from: '', entered_to: '', next_review_before: '', overdue: true, limit: '200' });
-  assert.deepEqual(normalizeAdminFinanceQuery('anomalies', { status: '', owner_id: ' actor ', limit: '50' }), { anomaly_type: '', status: '', severity: '', owner_id: 'actor', limit: '50' });
-  assert.deepEqual(adminFinanceQueryUpdates('orders', { q: ' order ', status: '', limit: '50' }), { payment_q: 'order', payment_status: null, payment_limit: '50' });
+  assert.deepEqual(readAdminFinanceQuery('payments', 'orders', { search: '?payment_q=order%2F42&payment_status=PAID&payment_limit=25&payment_cursor=next%2F1' }), { q: 'order/42', status: 'PAID', provider_id: '', channel: '', created_from: '', created_to: '', limit: '25', cursor: 'next/1' });
+  assert.deepEqual(readAdminFinanceQuery('billing', 'receivables', { search: '?receivable_wallet_id=wallet-1&receivable_status=OPEN&receivable_limit=999' }), { wallet_id: 'wallet-1', status: 'OPEN', source_type: '', created_from: '', created_to: '', limit: '50', cursor: '' });
+  assert.deepEqual(readAdminFinanceQuery('payments', 'lateReviews', { search: '?late_provider_id=h3c&late_overdue=true&late_limit=200' }), { q: '', status: '', severity: '', provider_id: 'h3c', owner_id: '', created_from: '', created_to: '', entered_from: '', entered_to: '', next_review_before: '', overdue: true, limit: '200', cursor: '' });
+  assert.deepEqual(normalizeAdminFinanceQuery('anomalies', { status: '', owner_id: ' actor ', limit: '50' }), { q: '', anomaly_type: '', status: '', severity: '', owner_id: 'actor', provider_id: '', created_from: '', created_to: '', limit: '50', cursor: '' });
+  const orderUpdates = adminFinanceQueryUpdates('orders', { q: ' order ', status: '', limit: '50' });
+  assert.equal(orderUpdates.payment_q, 'order');
+  assert.equal(orderUpdates.payment_status, null);
+  assert.equal(orderUpdates.payment_limit, '50');
+  assert.equal(orderUpdates.payment_cursor, null);
+  assert.equal(isAdminFinancePaginatedTab('reconciliations'), true);
+  assert.equal(isAdminFinancePaginatedTab('controls'), false);
   assert.equal(clearAdminFinanceQueryUpdates().late_owner_id, null);
+  assert.deepEqual(readAdminFinanceDetail('billing', 'wallets', { search: '?finance_detail=ledger&finance_detail_id=wallet-1&ledger_entry_type=USAGE&ledger_cursor=ledger-next' }), {
+    type: 'ledger', id: 'wallet-1', query: { entry_type: 'USAGE', business_reference: '', created_from: '', created_to: '', limit: '50', cursor: 'ledger-next' },
+  });
+  assert.deepEqual(readAdminFinanceDetail('payments', 'reconciliations', { search: '?finance_detail=reconciliationCases&finance_detail_id=run-1&case_status=OPEN&case_type=PAYMENT_LEDGER_MISSING&case_limit=25' }), {
+    type: 'reconciliationCases', id: 'run-1', query: { status: 'OPEN', severity: '', owner_id: '', case_type: 'PAYMENT_LEDGER_MISSING', created_from: '', created_to: '', limit: '25', cursor: '' },
+  });
+  assert.deepEqual(readAdminFinanceDetail('payments', 'orders', { search: '?finance_detail=reconciliationCases&finance_detail_id=run-1' }), { type: '', id: '', query: {} });
+  assert.equal(adminFinanceDetailUpdates('ledger', 'wallet-1', { entry_type: 'USAGE' }).ledger_entry_type, 'USAGE');
+  assert.equal(clearAdminFinanceDetailUpdates().case_cursor, null);
+  assert.equal(normalizeAdminFinanceDetailQuery('ledger', { entry_type: 'DEBIT' }).entry_type, '');
   assert.deepEqual(resolveAdminFinanceTab('holds', 'wallets', ['wallets', 'receivables']), { tab: 'wallets', replace: true });
   assert.deepEqual(resolveAdminFinanceTab('receivables', 'wallets', ['wallets', 'receivables']), { tab: 'receivables', replace: false });
   assert.deepEqual(resolveAdminFinanceTab('prices', 'catalog', ['catalog']), { tab: 'catalog', replace: true });
@@ -63,6 +80,87 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   ]);
 });
 
+test('admin finance stable cursor state is context-bound and safely degrades', () => {
+  const page = normalizeFinanceCollection({ items: [{ id: 1 }], next_cursor: 'next', snapshot_as_of: '2026-09-02T08:00:00Z' }, { status: 'OPEN', cursor: '' });
+  assert.deepEqual(page, { items: [{ id: 1 }], page: { cursor: '', nextCursor: 'next', snapshotAsOf: '2026-09-02T08:00:00Z', legacy: false, expired: false } });
+  assert.equal(normalizeFinanceCollection({ items: [] }, {}).page.legacy, true);
+  const cursors = new Map();
+  rememberFinanceCursor(cursors, 'orders', { status: 'PAID', limit: '50', cursor: '' }, 'opaque-next', 'payments');
+  assert.equal(previousFinanceCursor(cursors, 'orders', { status: 'PAID', limit: '50', cursor: 'opaque-next' }, 'payments'), '');
+  assert.equal(previousFinanceCursor(cursors, 'orders', { status: 'FAILED', limit: '50', cursor: 'opaque-next' }, 'payments'), null);
+  assert.notEqual(financeCursorContext('orders', { status: 'PAID' }, 'payments'), financeCursorContext('orders', { status: 'PAID' }, 'billing'));
+  assert.equal(isFinanceSnapshotExpired({ status: 410 }), true);
+  assert.equal(isFinanceSnapshotExpired({ code: 'PAGINATION_CURSOR_EXPIRED' }), true);
+  assert.deepEqual(resetExpiredFinanceQuery({ status: 'OPEN', cursor: 'old' }), { status: 'OPEN', cursor: '' });
+  const detailRequests = createFinanceTabRequestTracker();
+  const oldLedgerRequest = detailRequests.begin('billing:ledger-detail');
+  const currentLedgerRequest = detailRequests.begin('billing:ledger-detail');
+  assert.equal(detailRequests.isCurrent('billing:ledger-detail', oldLedgerRequest), false);
+  assert.equal(detailRequests.isCurrent('billing:ledger-detail', currentLedgerRequest), true);
+});
+
+test('admin finance detail requests reject stale routes, reversed responses, and expired post-write snapshots', async () => {
+  const backTracker = createFinanceTabRequestTracker();
+  let routeCurrent = true;
+  let finishBackRequest;
+  const backRequest = runFinanceDetailRequest({
+    requestTracker: backTracker,
+    requestKey: 'payments:reconciliation-cases-detail',
+    load: () => new Promise((resolve) => { finishBackRequest = resolve; }),
+    isRouteCurrent: () => routeCurrent,
+  });
+  routeCurrent = false;
+  finishBackRequest({ items: [{ case_id: 'stale-after-back' }] });
+  assert.deepEqual(await backRequest, { status: 'stale' });
+
+  const switchTracker = createFinanceTabRequestTracker();
+  let finishRunA;
+  let finishRunB;
+  const runA = runFinanceDetailRequest({
+    requestTracker: switchTracker,
+    requestKey: 'payments:reconciliation-cases-detail',
+    load: () => new Promise((resolve) => { finishRunA = resolve; }),
+  });
+  const runB = runFinanceDetailRequest({
+    requestTracker: switchTracker,
+    requestKey: 'payments:reconciliation-cases-detail',
+    load: () => new Promise((resolve) => { finishRunB = resolve; }),
+  });
+  finishRunB({ items: [{ case_id: 'run-b' }] });
+  assert.deepEqual(await runB, { status: 'ok', value: { items: [{ case_id: 'run-b' }] } });
+  finishRunA({ items: [{ case_id: 'run-a' }] });
+  assert.deepEqual(await runA, { status: 'stale' });
+
+  const expired = await runFinanceDetailRequest({
+    requestTracker: createFinanceTabRequestTracker(),
+    requestKey: 'payments:reconciliation-cases-detail',
+    load: async () => { throw Object.assign(new Error('expired'), { status: 410 }); },
+  });
+  assert.equal(expired.status, 'expired');
+  assert.equal(expired.error.status, 410);
+
+  const attempts = [];
+  const restarted = [];
+  const recover = createFinanceDetailRecovery({
+    query: { status: 'OPEN', cursor: 'expired-cursor' },
+    load: async (query) => {
+      attempts.push(query);
+      if (query.cursor) throw Object.assign(new Error('expired'), { status: 410 });
+      return { items: [{ case_id: 'authoritative-first-page' }] };
+    },
+    onRestart: (query) => restarted.push(query),
+  });
+  await assert.rejects(recover(), error => error.status === 410);
+  assert.deepEqual(await recover(), { items: [{ case_id: 'authoritative-first-page' }] });
+  assert.deepEqual(attempts.map(item => item.cursor), ['expired-cursor', '']);
+  assert.deepEqual(restarted, [{ status: 'OPEN', cursor: '' }]);
+
+  const route = { type: 'reconciliationCases', id: 'run-1', query: { status: 'OPEN', cursor: '' } };
+  const matches = (canRead) => financeDetailRouteIsCurrent({ canRead, current: route, type: 'reconciliationCases', id: 'run-1', query: route.query });
+  assert.equal(matches(true), true);
+  assert.equal(matches(false), false, 'revoking read permission must invalidate the current detail before another GET or state write');
+});
+
 test('admin billing client forwards only existing normalized finance filters', async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;
@@ -72,15 +170,32 @@ test('admin billing client forwards only existing normalized finance filters', a
   };
   try {
     const client = new AdminPlatformClient('/portal');
+    await client.wallets({ owner_type: 'ORGANIZATION', status: 'ACTIVE', q: 'owner', limit: '50', cursor: 'wallet-next' });
+    await client.walletLedger('wallet/id', { entry_type: 'USAGE', business_reference: 'order-1', limit: '25', cursor: 'ledger-next' });
     await client.receivables({ wallet_id: 'wallet-id', status: 'OPEN', limit: '25' });
     await client.paymentOrders({ q: 'order 42', status: 'PAID', limit: '50' });
+    await client.refunds({ q: 'refund-1', status: 'FAILED', provider_id: 'h3c', limit: '50', cursor: 'refund-next' });
+    await client.adjustments({ wallet_id: 'wallet-id', status: 'POSTED', requested_by: 'operator', limit: '100', cursor: 'adjustment-next' });
+    await client.holds({ wallet_id: 'wallet-id', status: 'REVIEW', model_id: 'model-1', limit: '200', cursor: 'hold-next' });
     await client.latePaymentReviews({ status: 'PROVIDER_BLIND', provider_id: 'h3c', owner_id: 'owner-id', entered_from: '2026-09-01T08:00', entered_to: '2026-09-02T08:00', next_review_before: '2026-09-03T08:00', overdue: true, limit: '200' });
     await client.paymentAnomalies({ anomaly_type: 'CHARGEBACK', status: 'OPEN', severity: 'P0', owner_id: 'owner-id', limit: '25' });
+    await client.reconciliationRuns({ provider_id: 'h3c', channel: 'ALIPAY', status: 'FAILED', business_date_from: '2026-09-01', business_date_to: '2026-09-02', limit: '50', cursor: 'run-next' });
+    await client.reconciliationCases('run/id', { status: 'OPEN', severity: 'P1', owner_id: 'owner-id', case_type: 'INTERNAL_PAID_PROVIDER_MISSING', limit: '25', cursor: 'case-next' });
+    const enteredFrom = encodeURIComponent(new Date('2026-09-01T08:00').toISOString());
+    const enteredTo = encodeURIComponent(new Date('2026-09-02T08:00').toISOString());
+    const nextReviewBefore = encodeURIComponent(new Date('2026-09-03T08:00').toISOString());
     assert.deepEqual(calls, [
+      '/portal/api/admin/billing/admin/v1/wallets?limit=50&cursor=wallet-next&owner_type=ORGANIZATION&status=ACTIVE&q=owner',
+      '/portal/api/admin/billing/admin/v1/wallets/wallet%2Fid/ledger?limit=25&cursor=ledger-next&entry_type=USAGE&business_reference=order-1',
       '/portal/api/admin/billing/admin/v1/receivables?limit=25&wallet_id=wallet-id&status=OPEN',
       '/portal/api/admin/billing/admin/v1/payment-orders?limit=50&q=order+42&status=PAID',
-      '/portal/api/admin/billing/admin/v1/late-payment-reviews?limit=200&status=PROVIDER_BLIND&provider_id=h3c&owner_id=owner-id&entered_from=2026-09-01T00%3A00%3A00.000Z&entered_to=2026-09-02T00%3A00%3A00.000Z&next_review_before=2026-09-03T00%3A00%3A00.000Z&overdue=true',
+      '/portal/api/admin/billing/admin/v1/refunds?limit=50&cursor=refund-next&q=refund-1&status=FAILED&provider_id=h3c',
+      '/portal/api/admin/billing/admin/v1/adjustments?limit=100&cursor=adjustment-next&wallet_id=wallet-id&status=POSTED&requested_by=operator',
+      '/portal/api/admin/billing/admin/v1/usage-holds?limit=200&cursor=hold-next&wallet_id=wallet-id&status=REVIEW&model_id=model-1',
+      `/portal/api/admin/billing/admin/v1/late-payment-reviews?limit=200&status=PROVIDER_BLIND&provider_id=h3c&owner_id=owner-id&entered_from=${enteredFrom}&entered_to=${enteredTo}&next_review_before=${nextReviewBefore}&overdue=true`,
       '/portal/api/admin/billing/admin/v1/payment-anomalies?limit=25&anomaly_type=CHARGEBACK&status=OPEN&severity=P0&owner_id=owner-id',
+      '/portal/api/admin/billing/admin/v1/reconciliation-runs?limit=50&cursor=run-next&provider_id=h3c&channel=ALIPAY&status=FAILED&business_date_from=2026-09-01&business_date_to=2026-09-02',
+      '/portal/api/admin/billing/admin/v1/reconciliation-runs/run%2Fid/cases?limit=25&cursor=case-next&status=OPEN&severity=P1&owner_id=owner-id&case_type=INTERNAL_PAID_PROVIDER_MISSING',
     ]);
   } finally {
     globalThis.fetch = originalFetch;

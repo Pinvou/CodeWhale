@@ -24,16 +24,13 @@ test('portal consumes only existing Billing filters and recharge product stable 
   ]) assert.match(navigation, new RegExp(parameter));
   assert.match(navigation, /readAdminFinanceQuery/);
   assert.match(navigation, /adminFinanceQueryUpdates/);
-  assert.match(view, /onRouteQueryChange\?\.\('receivables', query\)/);
-  assert.match(view, /onRouteQueryChange\?\.\('orders', query\)/);
-  assert.match(view, /onRouteQueryChange\?\.\('lateReviews', query\)/);
-  assert.match(view, /onRouteQueryChange\?\.\('anomalies', query\)/);
+  assert.match(view, /onRouteQueryChange\?\.\(targetTab, query\)/);
   assert.match(view, /client\.receivables\(querySnapshot\)/);
   assert.match(view, /requestedQuery: querySnapshot/);
   assert.match(view, /const querySnapshot = routeAware \? normalizeAdminFinanceQuery\(targetTab, options\.query \|\| routeQuery\) : null/);
   assert.doesNotMatch(view, /options\.query \|\| (receivableFilter|orderFilter|lateFilter|anomalyFilter)/);
   assert.match(view, /loadTab\(tab, routeAware \? \{ query: normalizeAdminFinanceQuery\(tab, routeQuery\) \} : undefined\)/);
-  assert.match(view, /currentPageRange\(items\.length/);
+  assert.match(view, /currentPageRange\(count, limit\)/);
   assert.doesNotMatch(view, /<SectionHeader title=\{surface === 'payments'[\s\S]*?count=\{activeTabState\.loaded \? items\.length/);
   assert.doesNotMatch(view, /total_count/);
   assert.match(client, /receivables\(filters = \{\}, signal\)/);

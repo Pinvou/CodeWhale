@@ -1,5 +1,17 @@
 import { mergeObservedVersions } from './authorization-ui.js';
 
+const ADMIN_BILLING_LIMITS = new Set(['25', '50', '100', '200']);
+
+function billingCollectionQuery(filters = {}, { keys = [], dateTimeKeys = [], dateKeys = [] } = {}) {
+  const query = new URLSearchParams({ limit: ADMIN_BILLING_LIMITS.has(String(filters.limit)) ? String(filters.limit) : '50' });
+  if (filters.cursor) query.set('cursor', filters.cursor);
+  for (const key of keys) if (filters[key]) query.set(key, filters[key]);
+  for (const key of dateTimeKeys) if (filters[key]) query.set(key, new Date(filters[key]).toISOString());
+  for (const key of dateKeys) if (filters[key]) query.set(key, filters[key]);
+  if (filters.overdue) query.set('overdue', 'true');
+  return query;
+}
+
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
@@ -259,16 +271,16 @@ export class AdminPlatformClient {
   billingOverview(signal) {
     return this.request('billing', '/admin/v1/overview', signal);
   }
-  wallets(signal) {
-    return this.request('billing', '/admin/v1/wallets?limit=100', signal);
+  wallets(filters = {}, signal) {
+    const query = billingCollectionQuery(filters, { keys: ['owner_type', 'status', 'q'] });
+    return this.request('billing', `/admin/v1/wallets?${query}`, signal);
   }
-  walletLedger(walletID, signal) {
-    return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal);
+  walletLedger(walletID, filters = {}, signal) {
+    const query = billingCollectionQuery(filters, { keys: ['entry_type', 'business_reference'], dateTimeKeys: ['created_from', 'created_to'] });
+    return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?${query}`, signal);
   }
   receivables(filters = {}, signal) {
-    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
-    if (filters.wallet_id) query.set('wallet_id', filters.wallet_id);
-    if (filters.status) query.set('status', filters.status);
+    const query = billingCollectionQuery(filters, { keys: ['wallet_id', 'status', 'source_type'], dateTimeKeys: ['created_from', 'created_to'] });
     return this.request('billing', `/admin/v1/receivables?${query}`, signal);
   }
   receivableAllocations(receivableID, signal) {
@@ -322,9 +334,7 @@ export class AdminPlatformClient {
     return this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/transition`, 'POST', input, idempotencyKey);
   }
   paymentOrders(filters = {}, signal) {
-    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
-    if (filters.q) query.set('q', filters.q);
-    if (filters.status) query.set('status', filters.status);
+    const query = billingCollectionQuery(filters, { keys: ['q', 'status', 'provider_id', 'channel'], dateTimeKeys: ['created_from', 'created_to'] });
     return this.request('billing', `/admin/v1/payment-orders?${query}`, signal);
   }
   paymentOrder(orderID, signal) {
@@ -333,8 +343,9 @@ export class AdminPlatformClient {
   paymentProviderControls(signal) {
     return this.request('billing', '/admin/v1/payment-provider-controls', signal);
   }
-  refunds(signal) {
-    return this.request('billing', '/admin/v1/refunds?limit=100', signal);
+  refunds(filters = {}, signal) {
+    const query = billingCollectionQuery(filters, { keys: ['q', 'status', 'provider_id'], dateTimeKeys: ['created_from', 'created_to'] });
+    return this.request('billing', `/admin/v1/refunds?${query}`, signal);
   }
   syncPaymentOrder(orderID) {
     return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {});
@@ -355,8 +366,9 @@ export class AdminPlatformClient {
       idempotencyKey,
     );
   }
-  adjustments(signal) {
-    return this.request('billing', '/admin/v1/adjustments?limit=100', signal);
+  adjustments(filters = {}, signal) {
+    const query = billingCollectionQuery(filters, { keys: ['wallet_id', 'status', 'requested_by'], dateTimeKeys: ['created_from', 'created_to'] });
+    return this.request('billing', `/admin/v1/adjustments?${query}`, signal);
   }
   createAdjustment(input) {
     return this.mutate('billing', '/admin/v1/adjustments', 'POST', input);
@@ -375,8 +387,9 @@ export class AdminPlatformClient {
   submitApprovalRequest(requestID, expectedVersion) {
     return this.mutate('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}/actions/submit`, 'POST', { expected_version: expectedVersion });
   }
-  holds(signal) {
-    return this.request('billing', '/admin/v1/usage-holds?limit=100', signal);
+  holds(filters = {}, signal) {
+    const query = billingCollectionQuery(filters, { keys: ['wallet_id', 'status', 'model_id'], dateTimeKeys: ['created_from', 'created_to'] });
+    return this.request('billing', `/admin/v1/usage-holds?${query}`, signal);
   }
   hold(holdID, signal) {
     return this.request('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}`, signal);
@@ -384,8 +397,9 @@ export class AdminPlatformClient {
   releaseHold(holdID, reason, idempotencyKey) {
     return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }, idempotencyKey);
   }
-  reconciliationRuns(signal) {
-    return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal);
+  reconciliationRuns(filters = {}, signal) {
+    const query = billingCollectionQuery(filters, { keys: ['provider_id', 'channel', 'status'], dateKeys: ['business_date_from', 'business_date_to'] });
+    return this.request('billing', `/admin/v1/reconciliation-runs?${query}`, signal);
   }
   runReconciliation(channel, businessDate) {
     return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', {
@@ -400,17 +414,18 @@ export class AdminPlatformClient {
       items,
     });
   }
-  reconciliationCases(runID, signal) {
-    return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal);
+  reconciliationCases(runID, filters = {}, signal) {
+    const query = billingCollectionQuery(filters, { keys: ['status', 'severity', 'owner_id', 'case_type'], dateTimeKeys: ['created_from', 'created_to'] });
+    return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?${query}`, signal);
   }
   updateReconciliationCase(caseID, command, idempotencyKey = `reconciliation-case-${crypto.randomUUID()}`) {
     return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, idempotencyKey);
   }
   latePaymentReviews(filters = {}, signal) {
-    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
-    for (const key of ['status', 'provider_id', 'owner_id']) if (filters[key]) query.set(key, filters[key]);
-    for (const key of ['entered_from', 'entered_to', 'next_review_before']) if (filters[key]) query.set(key, new Date(filters[key]).toISOString());
-    if (filters.overdue) query.set('overdue', 'true');
+    const query = billingCollectionQuery(filters, {
+      keys: ['q', 'status', 'severity', 'provider_id', 'owner_id'],
+      dateTimeKeys: ['created_from', 'created_to', 'entered_from', 'entered_to', 'next_review_before'],
+    });
     return this.request('billing', `/admin/v1/late-payment-reviews?${query}`, signal);
   }
   latePaymentReview(caseID, signal) {
@@ -432,8 +447,7 @@ export class AdminPlatformClient {
     return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason });
   }
   paymentAnomalies(filters = {}, signal) {
-    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
-    for (const key of ['anomaly_type', 'status', 'severity', 'owner_id']) if (filters[key]) query.set(key, filters[key]);
+    const query = billingCollectionQuery(filters, { keys: ['q', 'anomaly_type', 'status', 'severity', 'owner_id', 'provider_id'], dateTimeKeys: ['created_from', 'created_to'] });
     return this.request('billing', `/admin/v1/payment-anomalies?${query}`, signal);
   }
   paymentAnomaly(caseID, signal) {
