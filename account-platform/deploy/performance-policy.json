@@ -6,5 +6,6 @@
   "stream": { "dispatch_p95_ms": 500, "dispatch_p99_ms": 1500, "content_p95_ms": 5000, "content_p99_ms": 15000, "concurrent": 200, "unexpected_error_percent": 0.5 },
   "holds": { "active": 100000, "steady_tps": 200, "burst_tps": 500, "burst_seconds": 60, "lock_wait_p99_ms": 500 },
   "payments": { "orders": 1000000, "transactions": 3000000, "order_create_tps": 50, "evidence_merge_tps": 200 },
+  "admin_pagination": { "payment_orders": 1000000, "minimum_pages": 5000, "members_seen": 1000000, "concurrent_creates": 1, "concurrent_updates": 1, "first_snapshot_p99_ms": 10000, "duplicate_members": 0, "omitted_members": 0 },
   "events": { "retained_unacked_per_stream": 1000000, "backlog": 100000, "drain_seconds": 900, "realtime_peak_percent": 50, "alert_backlog": 50000, "stop_high_risk_backlog": 500000 }
 }

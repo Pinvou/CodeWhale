@@ -137,6 +137,7 @@ func main() {
 	go observability.RunBackground(workerContext, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(workerContext, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, testAdmissionEvidenceTTL).Run)
 	go observability.RunBackground(workerContext, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCallSchedule).Run)
+	go observability.RunBackground(workerContext, "admin-pagination-cleanup", billing.NewAdminPaginationCleanupWorker(repository, time.Minute).Run)
 	if payments.Capabilities().BillSupported {
 		go observability.RunBackground(workerContext, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
 	}
@@ -146,7 +147,7 @@ func main() {
 	}
 	handler := service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify)
 	handler = compatibility.WrapExcept(handler, "/api/v1/payment-callback/token", "/api/v1/payment-callbacks")
-	if err := httpserver.RunWithApplication("billing-service", handler, repository.Ping); err != nil {
+	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, repository.Ping, repository.AdminPaginationCollectors()...); err != nil {
 		log.Fatal(err)
 	}
 }

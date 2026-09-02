@@ -315,8 +315,12 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminWallets(w http.ResponseWriter, r *http.Request) {
-	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
-		return repository.AdminWallets(r.Context(), limit)
+	s.writeAdminSnapshotCollection(w, r, adminPageWallets, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
+		if err != nil {
+			return nil, err
+		}
+		return repository.AdminWalletsByIDs(r.Context(), ids)
 	})
 }
 
@@ -326,31 +330,13 @@ type adminReceivableRepository interface {
 }
 
 func (s *Service) adminReceivables(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.repository.(adminReceivableRepository)
-	if !ok {
-		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "receivable administration is unavailable", httpserver.RequestID(r.Context()))
-		return
-	}
-	var walletID *uuid.UUID
-	if value := strings.TrimSpace(r.URL.Query().Get("wallet_id")); value != "" {
-		parsed, err := uuid.Parse(value)
+	s.writeAdminSnapshotCollection(w, r, adminPageReceivables, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
 		if err != nil {
-			api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "receivable wallet filter is invalid", httpserver.RequestID(r.Context()))
-			return
+			return nil, err
 		}
-		walletID = &parsed
-	}
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	if status != "" && status != "OPEN" && status != "PARTIALLY_SETTLED" && status != "SETTLED" && status != "WRITTEN_OFF" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "receivable status filter is invalid", httpserver.RequestID(r.Context()))
-		return
-	}
-	items, err := repository.ListReceivables(r.Context(), walletID, status, billingAdminLimit(r))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+		return repository.AdminReceivablesByIDs(r.Context(), ids)
+	})
 }
 
 func (s *Service) adminReceivableAllocations(w http.ResponseWriter, r *http.Request) {
@@ -369,26 +355,18 @@ func (s *Service) adminReceivableAllocations(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Service) adminPaymentOrders(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
-	if !ok {
-		return
-	}
-	filter := AdminPaymentOrderFilter{Query: strings.TrimSpace(r.URL.Query().Get("q")), Status: strings.TrimSpace(r.URL.Query().Get("status"))}
-	if len(filter.Query) > 160 || (filter.Status != "" && !validAdminPaymentStatus(filter.Status)) {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "payment order filter is invalid", httpserver.RequestID(r.Context()))
-		return
-	}
-	items, err := repository.AdminPaymentOrders(r.Context(), filter, billingAdminLimit(r))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	s.writeAdminSnapshotCollection(w, r, adminPagePaymentOrders, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
+		if err != nil {
+			return nil, err
+		}
+		return repository.AdminPaymentOrdersByIDs(r.Context(), ids)
+	})
 }
 
 func (s *Service) adminRefunds(w http.ResponseWriter, r *http.Request) {
-	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
-		return repository.AdminRefunds(r.Context(), limit)
+	s.writeAdminSnapshotCollection(w, r, adminPageRefunds, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		return repository.AdminRefundsByIDs(r.Context(), rawIDs)
 	})
 }
 
@@ -420,8 +398,12 @@ func validAdminPaymentStatus(status string) bool {
 }
 
 func (s *Service) adminAdjustments(w http.ResponseWriter, r *http.Request) {
-	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
-		return repository.AdminAdjustments(r.Context(), limit)
+	s.writeAdminSnapshotCollection(w, r, adminPageAdjustments, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
+		if err != nil {
+			return nil, err
+		}
+		return repository.AdminAdjustmentsByIDs(r.Context(), ids)
 	})
 }
 
@@ -459,8 +441,12 @@ func (s *Service) adminRequestAdjustment(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Service) adminUsageHolds(w http.ResponseWriter, r *http.Request) {
-	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
-		return repository.AdminUsageHolds(r.Context(), limit)
+	s.writeAdminSnapshotCollection(w, r, adminPageUsageHolds, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
+		if err != nil {
+			return nil, err
+		}
+		return repository.AdminUsageHoldsByIDs(r.Context(), ids)
 	})
 }
 
@@ -501,21 +487,28 @@ func (s *Service) adminPriceVersions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminWalletLedger(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
-	if !ok {
-		return
-	}
 	walletID, err := uuid.Parse(r.PathValue("wallet_id"))
 	if err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid wallet", httpserver.RequestID(r.Context()))
 		return
 	}
-	items, err := repository.AdminWalletLedger(r.Context(), walletID, billingAdminLimit(r))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
+	if strings.TrimSpace(r.URL.Query().Get("cursor")) == "" {
+		repository, ok := s.requireAdminRepository(w, r)
+		if !ok {
+			return
+		}
+		if _, err = repository.AdminWalletLedger(r.Context(), walletID, 1); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	s.writeAdminSnapshotCollection(w, r, adminPageWalletLedger, walletID.String(), func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
+		if err != nil {
+			return nil, err
+		}
+		return repository.AdminWalletLedgerByIDs(r.Context(), walletID, ids)
+	})
 }
 
 func (s *Service) adminRejectAdjustment(w http.ResponseWriter, r *http.Request) {
@@ -613,42 +606,13 @@ func (s *Service) adminRefundPaymentOrder(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Service) adminLatePaymentReviews(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
-	if !ok {
-		return
-	}
-	filter := LatePaymentReviewFilter{Status: strings.TrimSpace(r.URL.Query().Get("status")), ProviderID: strings.TrimSpace(r.URL.Query().Get("provider_id")), Overdue: strings.EqualFold(r.URL.Query().Get("overdue"), "true")}
-	if raw := strings.TrimSpace(r.URL.Query().Get("owner_id")); raw != "" {
-		ownerID, err := uuid.Parse(raw)
+	s.writeAdminSnapshotCollection(w, r, adminPageLatePaymentReviews, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
 		if err != nil {
-			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid review owner", httpserver.RequestID(r.Context()))
-			return
+			return nil, err
 		}
-		filter.OwnerID = &ownerID
-	}
-	for raw, target := range map[string]**time.Time{
-		"entered_from":       &filter.EnteredFrom,
-		"entered_to":         &filter.EnteredTo,
-		"next_review_before": &filter.NextReviewBefore,
-	} {
-		value := strings.TrimSpace(r.URL.Query().Get(raw))
-		if value == "" {
-			continue
-		}
-		parsed, err := time.Parse(time.RFC3339, value)
-		if err != nil {
-			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", raw+" must use RFC3339", httpserver.RequestID(r.Context()))
-			return
-		}
-		parsed = parsed.UTC()
-		*target = &parsed
-	}
-	items, err := repository.AdminLatePaymentReviews(r.Context(), filter, billingAdminLimit(r))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+		return repository.AdminLatePaymentReviewsByIDs(r.Context(), ids)
+	})
 }
 
 func (s *Service) adminLatePaymentReviewDetail(w http.ResponseWriter, r *http.Request) {
@@ -816,8 +780,12 @@ func (s *Service) adminReleaseUsageHold(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) adminReconciliationRuns(w http.ResponseWriter, r *http.Request) {
-	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
-		return repository.AdminReconciliationRuns(r.Context(), limit)
+	s.writeAdminSnapshotCollection(w, r, adminPageReconciliationRuns, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
+		if err != nil {
+			return nil, err
+		}
+		return repository.AdminReconciliationRunsByIDs(r.Context(), ids)
 	})
 }
 
@@ -843,21 +811,25 @@ func (s *Service) adminRunReconciliation(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Service) adminReconciliationCases(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
-	if !ok {
-		return
+	runID := strings.TrimSpace(r.PathValue("run_id"))
+	if runID == "" {
+		runID = strings.TrimSpace(r.URL.Query().Get("run_id"))
 	}
-	runID, err := uuid.Parse(r.PathValue("run_id"))
-	if err != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid reconciliation run", httpserver.RequestID(r.Context()))
-		return
+	if runID != "" {
+		parsed, err := uuid.Parse(runID)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid reconciliation run", httpserver.RequestID(r.Context()))
+			return
+		}
+		runID = parsed.String()
 	}
-	items, err := repository.AdminReconciliationCases(r.Context(), runID, billingAdminLimit(r))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	s.writeAdminSnapshotCollection(w, r, adminPageReconciliationCases, runID, func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
+		if err != nil {
+			return nil, err
+		}
+		return repository.AdminReconciliationCasesByIDs(r.Context(), ids)
+	})
 }
 
 func (s *Service) adminUpdateReconciliationCase(w http.ResponseWriter, r *http.Request) {
@@ -884,25 +856,13 @@ func (s *Service) adminUpdateReconciliationCase(w http.ResponseWriter, r *http.R
 }
 
 func (s *Service) adminPaymentAnomalies(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
-	if !ok {
-		return
-	}
-	filter := PaymentAnomalyFilter{AnomalyType: r.URL.Query().Get("anomaly_type"), Status: r.URL.Query().Get("status"), Severity: r.URL.Query().Get("severity")}
-	if raw := strings.TrimSpace(r.URL.Query().Get("owner_id")); raw != "" {
-		owner, err := uuid.Parse(raw)
+	s.writeAdminSnapshotCollection(w, r, adminPagePaymentAnomalies, "", func(repository adminPaginationItemsRepository, rawIDs []string) (any, error) {
+		ids, err := adminUUIDs(rawIDs)
 		if err != nil {
-			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid owner_id", httpserver.RequestID(r.Context()))
-			return
+			return nil, err
 		}
-		filter.OwnerID = &owner
-	}
-	items, err := repository.AdminPaymentAnomalies(r.Context(), filter, billingAdminLimit(r))
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+		return repository.AdminPaymentAnomaliesByIDs(r.Context(), ids)
+	})
 }
 
 func (s *Service) adminPaymentAnomalyDetail(w http.ResponseWriter, r *http.Request) {
@@ -1156,11 +1116,11 @@ FROM usage_holds hold LEFT JOIN (
 	return items, rows.Err()
 }
 
-type adminHoldScanner interface {
+type billingRowScanner interface {
 	Scan(...any) error
 }
 
-func scanAdminHold(row adminHoldScanner, item *AdminHold) error {
+func scanAdminHold(row billingRowScanner, item *AdminHold) error {
 	return row.Scan(&item.ID, &item.UsageRequestID, &item.WalletID, &item.PriceVersionID, &item.Status, &item.AnomalyState, &item.MaxMicrocredits, &item.ActualMicrocredits, &item.ExpiresAt, &item.TerminalAt, &item.ModelID, &item.ProtocolCode, &item.FormulaVersionID, &item.PricingSnapshot, &item.RequestSnapshot, &item.UsageSnapshot, &item.OrganizationID, &item.MemberUserID, &item.MembershipVersion, &item.CreatedAt, &item.UpdatedAt)
 }
 
@@ -1537,7 +1497,7 @@ func (r *PostgresRepository) AdminReconciliationCases(ctx context.Context, runID
 
 const reconciliationCaseSelect = `SELECT id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,severity,owner_id,repair_action,review_result,provider_snapshot,internal_snapshot,refund_snapshot,ledger_snapshot,resolution,created_at,resolved_at,updated_at,version FROM reconciliation_cases`
 
-func scanReconciliationCase(row pgx.Row, item *AdminReconciliationCase) error {
+func scanReconciliationCase(row billingRowScanner, item *AdminReconciliationCase) error {
 	return row.Scan(&item.ID, &item.RunID, &item.PaymentOrderID, &item.MerchantOrderNo, &item.CaseType, &item.Status, &item.Severity, &item.OwnerID, &item.RepairAction, &item.ReviewResult, &item.ProviderSnapshot, &item.InternalSnapshot, &item.RefundSnapshot, &item.LedgerSnapshot, &item.Resolution, &item.CreatedAt, &item.ResolvedAt, &item.UpdatedAt, &item.Version)
 }
 

@@ -168,7 +168,7 @@ func getLatePaymentReviewCaseByOrder(ctx context.Context, tx pgx.Tx, orderID uui
 
 const latePaymentReviewSelect = `SELECT late.id,late.payment_order_id,late.review_status,manual.severity,manual.owner_id,late.provider_id,late.provider_version,late.merchant_order_no,late.provider_capability_snapshot,late.policy_snapshot,late.evidence_summary,manual.claimed_at,manual.first_response_at,manual.claim_due_at,manual.first_response_due_at,manual.mitigation_due_at,manual.resolution_due_at,manual.escalation_level,manual.last_escalated_at,late.last_query_at,late.last_query_result,late.next_review_at,late.blind_reason,late.created_at,late.updated_at,late.resolved_at FROM late_payment_review_cases late JOIN manual_review_cases manual ON manual.id=late.id`
 
-func scanLatePaymentReviewCase(row pgx.Row) (LatePaymentReviewCase, bool, error) {
+func scanLatePaymentReviewCase(row billingRowScanner) (LatePaymentReviewCase, bool, error) {
 	var item LatePaymentReviewCase
 	err := row.Scan(&item.ID, &item.PaymentOrderID, &item.ReviewStatus, &item.Severity, &item.OwnerID, &item.ProviderID, &item.ProviderVersion, &item.MerchantOrderNo, &item.ProviderCapabilitySnapshot, &item.PolicySnapshot, &item.EvidenceSummary, &item.ClaimedAt, &item.FirstResponseAt, &item.ClaimDueAt, &item.FirstResponseDueAt, &item.MitigationDueAt, &item.ResolutionDueAt, &item.EscalationLevel, &item.LastEscalatedAt, &item.LastQueryAt, &item.LastQueryResult, &item.NextReviewAt, &item.BlindReason, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

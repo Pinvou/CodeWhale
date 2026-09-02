@@ -111,7 +111,7 @@ func createPaymentAnomalyWithinTransaction(ctx context.Context, tx pgx.Tx, anoma
 
 const paymentAnomalySelect = `SELECT anomaly.id,anomaly.anomaly_type,manual.severity,anomaly.status,manual.owner_id,anomaly.payment_order_id,anomaly.payment_transaction_id,anomaly.payment_evidence_id,anomaly.refund_id,anomaly.forced_refund_case_id,anomaly.chargeback_case_id,anomaly.resolution_code,anomaly.resolution_reason,anomaly.financial_action_status,anomaly.resource_snapshot,manual.claimed_at,manual.claim_due_at,manual.first_response_due_at,manual.mitigation_due_at,manual.resolution_due_at,anomaly.version,anomaly.created_at,anomaly.updated_at,anomaly.resolved_at FROM payment_anomaly_cases anomaly JOIN manual_review_cases manual ON manual.id=anomaly.id`
 
-func scanPaymentAnomaly(row pgx.Row) (PaymentAnomalyCase, bool, error) {
+func scanPaymentAnomaly(row billingRowScanner) (PaymentAnomalyCase, bool, error) {
 	var item PaymentAnomalyCase
 	err := row.Scan(&item.ID, &item.AnomalyType, &item.Severity, &item.Status, &item.OwnerID, &item.PaymentOrderID, &item.PaymentTransactionID, &item.PaymentEvidenceID, &item.RefundID, &item.ForcedRefundCaseID, &item.ChargebackCaseID, &item.ResolutionCode, &item.ResolutionReason, &item.FinancialActionStatus, &item.ResourceSnapshot, &item.ClaimedAt, &item.ClaimDueAt, &item.FirstResponseDueAt, &item.MitigationDueAt, &item.ResolutionDueAt, &item.Version, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

@@ -613,28 +613,54 @@ paths:
   /billing/admin/v1/wallets:
     get:
       operationId: listAdminWallets
-      summary: List recently updated wallets
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      summary: List wallets through a subject-bound stable snapshot
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: owner_type, in: query, schema: { type: string, enum: [PERSONAL, ORGANIZATION, ORG_UNIT] } }
+        - { name: status, in: query, schema: { type: string, enum: [ACTIVE, FROZEN, CLOSED] } }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/wallets/{wallet_id}/ledger:
     get:
       operationId: listAdminWalletLedger
       summary: List immutable wallet ledger entries
-      parameters: [{ $ref: "#/components/parameters/WalletID" }, { $ref: "#/components/parameters/Limit" }]
+      parameters:
+        - { $ref: "#/components/parameters/WalletID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: entry_type, in: query, schema: { type: string, enum: [RECHARGE, USAGE, REFUND, REVERSAL, ADJUSTMENT, EXPIRY, RECEIVABLE, CHARGEBACK] } }
+        - { name: business_reference, in: query, schema: { type: string, maxLength: 160 } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/receivables:
     get:
       operationId: listAdminReceivables
       summary: Query wallet receivables and their settlement state
       parameters:
         - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
         - { name: wallet_id, in: query, schema: { type: string, format: uuid } }
         - { name: status, in: query, schema: { type: string, enum: [OPEN, PARTIALLY_SETTLED, SETTLED, WRITTEN_OFF] } }
+        - { name: source_type, in: query, schema: { type: string, enum: [USAGE_OVERAGE, CHARGEBACK] } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
         "200":
           description: Receivable collection
@@ -643,11 +669,17 @@ paths:
               schema:
                 type: object
                 additionalProperties: false
-                required: [items]
+                required: [items, next_cursor, snapshot_as_of]
                 properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/Receivable" } }
+                  items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/Receivable" } }
+                  next_cursor: { type: string }
+                  snapshot_as_of: { type: string, format: date-time }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/receivables/{receivable_id}/allocations:
     get:
       operationId: listAdminReceivableAllocations
@@ -895,6 +927,7 @@ paths:
       summary: Search recently updated payment orders
       parameters:
         - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
         - name: q
           in: query
           description: Mobile, Pinvou order ID, Mall order ID, payment transaction ID, or SKU
@@ -902,10 +935,18 @@ paths:
         - name: status
           in: query
           schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, EXPIRED, MANUAL_REVIEW] }
+        - { name: provider_id, in: query, schema: { type: string, maxLength: 120 } }
+        - { name: channel, in: query, schema: { type: string, pattern: '^[A-Z0-9_]{1,32}$' } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/payment-orders/{order_id}/sync:
     post:
       operationId: syncAdminPaymentOrder
@@ -963,18 +1004,42 @@ paths:
     get:
       operationId: listAdminRefundOperations
       summary: List targeted ordinary refund requests and isolated forced-refund review cases
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: status, in: query, schema: { type: string, enum: [REQUESTED, SUCCEEDED, FAILED, MANUAL_REVIEW, REVIEW_REQUIRED, RESOLVED] } }
+        - { name: provider_id, in: query, schema: { type: string, maxLength: 120 } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/adjustments:
     get:
       operationId: listAdminAdjustments
       summary: List recent manual billing adjustments
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: wallet_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [PENDING_APPROVAL, APPROVED, REJECTED, POSTED] } }
+        - { name: requested_by, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
     post:
       operationId: createAdminAdjustmentRequest
       summary: Create an idempotent pending adjustment before submitting its immutable approval command
@@ -1014,10 +1079,22 @@ paths:
     get:
       operationId: listAdminUsageHolds
       summary: List recent usage reservations
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: wallet_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [ACTIVE, COMMITTED, RELEASED, EXPIRED, REVIEW] } }
+        - { name: model_id, in: query, schema: { type: string, maxLength: 160 } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/usage-holds/{hold_id}:
     get:
       operationId: getAdminUsageHold
@@ -1050,17 +1127,26 @@ paths:
       summary: Filter late-payment and provider-blind review cases without changing payment facts
       parameters:
         - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
         - { name: status, in: query, schema: { type: string, enum: [REVIEW_REQUIRED_LATE_PAYMENT, PROVIDER_BLIND, ARCHIVED_CONFIRMED_UNPAID, RESOLVED_PAID] } }
+        - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
         - { name: provider_id, in: query, schema: { type: string } }
         - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
         - { name: entered_from, in: query, schema: { type: string, format: date-time } }
         - { name: entered_to, in: query, schema: { type: string, format: date-time } }
         - { name: next_review_before, in: query, schema: { type: string, format: date-time } }
         - { name: overdue, in: query, schema: { type: boolean, default: false } }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/late-payment-reviews/{case_id}:
     get:
       operationId: getAdminLatePaymentReview
@@ -1125,14 +1211,24 @@ paths:
       summary: List unified chargeback, forced-refund, duplicate-payment, late-conflict, refund-failure, and invalid-transition cases
       description: Each case preserves immutable evidence, owner, review conclusion, and financial-action status while the source domain state remains independent.
       parameters:
-        - { name: anomaly_type, in: query, schema: { type: string } }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: anomaly_type, in: query, schema: { type: string, enum: [CHARGEBACK, FORCED_REFUND, DUPLICATE_PAYMENT, LATE_PAYMENT_CONFLICT, REFUND_FAILURE, PAYMENT_FACT_CONFLICT, ILLEGAL_TRANSITION] } }
         - { name: status, in: query, schema: { type: string, enum: [OPEN, RESOLVED] } }
         - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
         - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { name: provider_id, in: query, schema: { type: string, maxLength: 120 } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
         - { $ref: "#/components/parameters/Limit" }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/payment-anomalies/{case_id}:
     get:
       operationId: getAdminPaymentAnomaly
@@ -1167,9 +1263,22 @@ paths:
     get:
       operationId: listAdminReconciliationRuns
       summary: List recent payment reconciliation runs
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: provider_id, in: query, schema: { type: string, maxLength: 120 } }
+        - { name: channel, in: query, schema: { type: string, pattern: '^[A-Z0-9_]{1,32}$' } }
+        - { name: status, in: query, schema: { type: string, enum: [RUNNING, COMPLETED, FAILED] } }
+        - { name: business_date_from, in: query, schema: { type: string, format: date } }
+        - { name: business_date_to, in: query, schema: { type: string, format: date } }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
     post:
       operationId: runAdminReconciliation
       summary: Reconcile one payment channel and business date
@@ -1199,11 +1308,47 @@ paths:
     get:
       operationId: listAdminReconciliationCases
       summary: List differences found by a reconciliation run
-      parameters: [{ $ref: "#/components/parameters/RunID" }, { $ref: "#/components/parameters/Limit" }]
+      parameters:
+        - { $ref: "#/components/parameters/RunID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED] } }
+        - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/ReconciliationCaseType" }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+  /billing/admin/v1/reconciliation-cases:
+    get:
+      operationId: listAllAdminReconciliationCases
+      summary: List reconciliation cases with an optional run scope
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: run_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED] } }
+        - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/ReconciliationCaseType" }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
+      responses:
+        "200": { $ref: "#/components/responses/SnapshotCollection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/PaginationSnapshotLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
   /billing/admin/v1/reconciliation-cases/{case_id}/commands:
     post:
       operationId: updateAdminReconciliationCase
@@ -1657,6 +1802,35 @@ components:
       name: cursor
       in: query
       schema: { type: string, minLength: 1, maxLength: 512 }
+    CreatedFrom:
+      name: created_from
+      in: query
+      description: Inclusive RFC3339 UTC lower bound. When paired with created_to the interval must not exceed 366 days.
+      schema: { type: string, format: date-time }
+    CreatedTo:
+      name: created_to
+      in: query
+      description: Exclusive RFC3339 UTC upper bound.
+      schema: { type: string, format: date-time }
+    ReconciliationCaseType:
+      name: case_type
+      in: query
+      schema:
+        type: string
+        enum:
+          - PROVIDER_PAID_INTERNAL_MISSING
+          - INTERNAL_PAID_PROVIDER_MISSING
+          - AMOUNT_MISMATCH
+          - DUPLICATE_TRANSACTION
+          - PROVIDER_REFUND_INTERNAL_MISSING
+          - INTERNAL_REFUND_PROVIDER_MISSING
+          - REFUND_AMOUNT_MISMATCH
+          - PROVIDER_CHARGEBACK_INTERNAL_MISSING
+          - INTERNAL_CHARGEBACK_PROVIDER_MISSING
+          - PAYMENT_LEDGER_MISSING
+          - REFUND_LEDGER_MISSING
+          - CHARGEBACK_LEDGER_MISSING
+          - UNSUPPORTED_PROVIDER_ENTRY
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -2936,6 +3110,55 @@ components:
                 items:
                   type: object
                   additionalProperties: true
+    SnapshotCollection:
+      description: A subject-, resource-, scope-, and filter-bound stable snapshot page. Resource state is read live while membership and order remain frozen for 15 minutes.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items, next_cursor, snapshot_as_of]
+            properties:
+              items:
+                type: array
+                maxItems: 200
+                items:
+                  type: object
+                  additionalProperties: true
+              next_cursor: { type: string }
+              snapshot_as_of: { type: string, format: date-time }
+    PaginationSnapshotLimited:
+      description: Snapshot creation is rate- or capacity-limited. Retry after the declared number of seconds.
+      headers:
+        Retry-After:
+          required: true
+          description: Minimum number of seconds before creating another snapshot.
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, message]
+            properties:
+              code: { type: string, enum: [PAGINATION_SNAPSHOT_LIMITED] }
+              message: { type: string }
+              request_id: { type: string }
+    PaginationSnapshotUnavailable:
+      description: Snapshot storage or its bounded query is temporarily unavailable. Retry after the declared number of seconds.
+      headers:
+        Retry-After:
+          required: true
+          description: Minimum number of seconds before retrying the snapshot request.
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, message]
+            properties:
+              code: { type: string, enum: [PAGINATION_SNAPSHOT_UNAVAILABLE] }
+              message: { type: string }
+              request_id: { type: string }
     Error:
       description: JSON API error
       content:

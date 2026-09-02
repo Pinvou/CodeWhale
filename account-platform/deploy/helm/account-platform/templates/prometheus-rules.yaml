@@ -35,4 +35,31 @@ spec:
           for: 1m
           labels: { severity: p1 }
           annotations: { summary: "Account Platform has dead-lettered domain events" }
+    - name: account-platform.admin-pagination
+      rules:
+        - alert: PinvouAdminPaginationMemberWatermarkWarning
+          expr: sum(max by (resource) (pinvou_admin_pagination_snapshot_members)) >= 14000000
+          for: 5m
+          labels: { severity: p2 }
+          annotations: { summary: "Billing admin pagination members reached 70% capacity" }
+        - alert: PinvouAdminPaginationMemberWatermarkCritical
+          expr: sum(max by (resource) (pinvou_admin_pagination_snapshot_members)) >= 17000000
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Billing admin pagination members reached 85% capacity" }
+        - alert: PinvouAdminPaginationStorageWatermarkWarning
+          expr: max(pinvou_admin_pagination_storage_bytes) >= 6012954214
+          for: 5m
+          labels: { severity: p2 }
+          annotations: { summary: "Billing admin pagination storage reached 70% capacity" }
+        - alert: PinvouAdminPaginationStorageWatermarkCritical
+          expr: max(pinvou_admin_pagination_storage_bytes) >= 7301444403
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Billing admin pagination storage reached 85% capacity" }
+        - alert: PinvouAdminPaginationCleanupBacklog
+          expr: max(pinvou_admin_pagination_cleanup_oldest_age_seconds) > 300
+          for: 2m
+          labels: { severity: p1 }
+          annotations: { summary: "Billing admin pagination cleanup is more than five minutes behind" }
 {{- end }}

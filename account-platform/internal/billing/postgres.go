@@ -22,8 +22,10 @@ var (
 )
 
 type PostgresRepository struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool                      *pgxpool.Pool
+	now                       func() time.Time
+	paginationMetrics         *AdminPaginationMetrics
+	paginationMaxStorageBytes int64
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -37,7 +39,7 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 	if err != nil {
 		return nil, fmt.Errorf("open billing database: %w", err)
 	}
-	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }, paginationMetrics: newAdminPaginationMetrics(), paginationMaxStorageBytes: adminSnapshotMaxStorageBytes}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, err

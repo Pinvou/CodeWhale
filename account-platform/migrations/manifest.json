@@ -894,6 +894,16 @@
         "file": "000049_local_payment_expiry.up.sql",
         "version": 49,
         "sha256": "13c2cfd865feb46bca7f4811b2b4ca6be96c9906195f45bfc7aa839da78a5866"
+      },
+      {
+        "file": "000050_admin_pagination_snapshots.down.sql",
+        "version": 50,
+        "sha256": "ad1bacbb1a4e180787e10e7906f511a05f3d1ea2b123ca03624f8668d4333fae"
+      },
+      {
+        "file": "000050_admin_pagination_snapshots.up.sql",
+        "version": 50,
+        "sha256": "e17ae14422cd1a8e44dc7be9217e07ec6152250f8f17fa624515e2369b132777"
       }
     ],
     "payment-simulator": [

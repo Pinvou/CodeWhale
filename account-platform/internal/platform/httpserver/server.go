@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/trustedclock"
+	"github.com/prometheus/client_golang/prometheus"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -63,9 +64,9 @@ func HandlerWithApplication(cfg config.Config, application http.Handler, ready f
 	return handler
 }
 
-func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(context.Context) error) (http.Handler, *httpMetrics) {
+func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(context.Context) error, collectors ...prometheus.Collector) (http.Handler, *httpMetrics) {
 	health := NewRouter()
-	metrics := newHTTPMetrics(cfg.ServiceName)
+	metrics := newHTTPMetrics(cfg.ServiceName, collectors...)
 	var clock *trustedclock.Monitor
 	if strings.HasPrefix(strings.ToLower(cfg.Environment), "production") {
 		clock, _ = trustedclock.New(cfg.TrustedTimeSources)
@@ -176,6 +177,10 @@ func ConfigureProcessLogging(serviceName string) error {
 }
 
 func RunWithApplication(serviceName string, application http.Handler, ready func(context.Context) error) error {
+	return RunWithApplicationAndCollectors(serviceName, application, ready)
+}
+
+func RunWithApplicationAndCollectors(serviceName string, application http.Handler, ready func(context.Context) error, collectors ...prometheus.Collector) error {
 	cfg, err := config.Load(serviceName)
 	if err != nil {
 		return err
@@ -204,7 +209,7 @@ func RunWithApplication(serviceName string, application http.Handler, ready func
 	}()
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
-	applicationHandler, metrics := handlerWithMetrics(cfg, application, ready)
+	applicationHandler, metrics := handlerWithMetrics(cfg, application, ready, collectors...)
 	server := &http.Server{
 		Addr:              cfg.Address,
 		Handler:           applicationHandler,

@@ -31,7 +31,7 @@
 
 `production-new` 还会强制开启跨可用区/节点拓扑约束、PDB 与零不可用滚动策略，并禁止 Chart 内单副本 Redis/NATS，改用 `rediss://`、`tls://`/HTTPS 管理监控端点的外部高可用依赖。按 `deploy/runbooks/high-availability-failover.md` 完成 Pod、节点、区域、滚动升级和依赖主节点丢失场景后，运行 `npm --prefix account-platform run check:production-ha -- <evidence.json>`；没有同一候选版本的实际证据时仍标记 `NOT_DEPLOYED`。
 
-性能发布按 `deploy/runbooks/performance-capacity.md` 冻结发布、数据集、资源和负载档位，并运行 `npm --prefix account-platform run check:production-performance -- <evidence.json>`。测试报告必须保留全部慢请求/错误样本并分离平台、Provider、排队和客户端网络，不能用模板值或开发机冒烟替代生产等价容量结论。
+性能发布按 `deploy/runbooks/performance-capacity.md` 冻结发布、数据集、资源和负载档位，并运行 `npm --prefix account-platform run check:production-performance -- <evidence.json> --expected-release-sha256=<候选镜像或制品 SHA-256> --page-trace=<逐页轨迹> --mutation-trace=<并发变更轨迹>`。发布流水线传入的可信候选摘要必须与证据中的 `release_sha256` 完全一致，命令会读取两份轨迹制品并重算摘要。测试报告必须保留全部慢请求/错误样本并分离平台、Provider、排队和客户端网络，不能用模板值或开发机冒烟替代生产等价容量结论。
 
 人工案件 worker 由 `MANUAL_REVIEW_ON_CALL_USER_IDS` 接收按升级顺序排列的稳定用户 UUID。Compose 示例值只用于开发；正式 Helm 发布前必须把 `global.manualReviewOnCallUserIds` 替换为真实值班负责人链。`production`/`production-new` 缺失该配置时 Account、Billing、Token 均拒绝启动，避免 SLA 超时退化成只有通知而无人接手。更换值班人只影响后续升级，不重算已创建案件的认领、首次响应、止损或解决截止时间。
 

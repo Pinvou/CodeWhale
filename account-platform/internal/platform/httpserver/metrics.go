@@ -22,7 +22,7 @@ type httpMetrics struct {
 	registry  *prometheus.Registry
 }
 
-func newHTTPMetrics(service string) *httpMetrics {
+func newHTTPMetrics(service string, collectors ...prometheus.Collector) *httpMetrics {
 	labels := prometheus.Labels{"service": service}
 	metrics := &httpMetrics{
 		requests:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_requests_total", Help: "Completed account platform HTTP requests.", ConstLabels: labels}, []string{"method", "route", "status"}),
@@ -32,6 +32,9 @@ func newHTTPMetrics(service string) *httpMetrics {
 		registry:  prometheus.NewRegistry(),
 	}
 	metrics.registry.MustRegister(metrics.requests, metrics.duration, metrics.inFlight, metrics.readiness)
+	if len(collectors) > 0 {
+		metrics.registry.MustRegister(collectors...)
+	}
 	return metrics
 }
 
