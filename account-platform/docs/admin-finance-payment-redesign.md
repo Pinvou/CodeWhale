@@ -206,7 +206,7 @@ APT-116 不复用当前外层固定要求 `platform.billing.wallets.read` 的 `/
 | `GET /billing/admin/v1/finance-overviews/pricing` | `platform.pricing.read` | 点时 | `price_draft_count` / `price_future_count` / `price_active_count` / `price_ended_or_cancelled_count` | `COUNT`；按价格派生状态互斥统计；不使用 Token 模型目录作分母 |
 | 同上 | 同上 | 点时 | `metering_active_count` / `metering_inactive_count` | `COUNT`；按计量单位版本当前 active 事实统计 |
 | `GET /billing/admin/v1/finance-overviews/products` | `platform.products.read` | 点时 | `product_draft_count` / `product_on_sale_count` / `product_off_sale_count` | `COUNT`；默认不计墓碑，`DELETED` 仅单独返回 `product_deleted_count` |
-| 同上 | 同上 | 点时 | `admission_pending_count` / `admission_blocked_count` | `COUNT`；pending 为最新验证 `PENDING`；blocked 为非墓碑商品无验证、最新验证 `FAILED`、当前绑定证据 `expires_at <= as_of` 或证据存在 revocation；两者互斥，当前有效且未撤销的 `VERIFIED` 不计入 |
+| 同上 | 同上 | 点时 | `admission_pending_count` / `admission_blocked_count` | `COUNT`；pending 为最新验证 `PENDING`；blocked 为非墓碑商品无验证、最新验证 `FAILED`、当前绑定证据 `expires_at <= as_of` 或证据存在 revocation，以及 `ON_SALE` 但无活动绑定；两者互斥，最新验证 `PENDING` 优先于 blocked，当前验证和活动绑定均有效且未撤销的 `VERIFIED` 不计入 |
 
 统一 200 响应为 `{ "as_of": RFC3339, "window": null|{"from","to","timezone":"UTC"}, "metrics": [{"key","value","unit","included_statuses"}] }`。点时指标的 `window=null`；计数没有分母，当前阶段不返回比例。未知时间窗返回 400；无权返回 403；任一查询失败使该端点返回 503 和稳定错误码，不返回部分指标或伪 0，但不阻断页面对另外三个端点的调用。OpenAPI 固定 metric key、unit 和状态集合，合同测试覆盖边界时间、重复交易、墓碑、准入缺失、权限隔离和局部失败。
 

@@ -505,6 +505,12 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	if !billingAdminPathAllowed(http.MethodGet, "/admin/v1/recharge-products") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/publish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/unpublish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/delete") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/recharge-products/"+userID+"/admission-verifications") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/admission-verifications/"+memberID+"/retry") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/admission-verifications/"+memberID+"/revoke") {
 		t.Fatal("admin portal must expose only the recharge product catalog lifecycle")
 	}
+	for _, resource := range []string{"accounts", "payments", "pricing", "products"} {
+		path := "/admin/v1/finance-overviews/" + resource
+		if !billingAdminPathAllowed(http.MethodGet, path) || billingAdminPathAllowed(http.MethodPost, path) {
+			t.Fatalf("admin portal must expose %s as read-only", path)
+		}
+	}
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-policies") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/approval-requests/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests/"+userID+"/actions/decide") {
 		t.Fatal("approval workflow paths must be allowlisted")
 	}

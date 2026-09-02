@@ -21,14 +21,14 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 411 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 377`、`部分实现 29`、`未实现 3`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `411` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-115 已完成，其余任务按序实施。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 378`、`部分实现 29`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `411` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-116 已完成，其余任务按序实施。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
 | `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；连续实施起点 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`，并包含本文件所在提交 | 通过代码审阅；不等同生产部署 |
 | `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 411/411 个唯一目标编号均有结论 |
 | `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 411 个唯一编号一一覆盖，无缺失、无额外编号 |
-| `ADMIN-FINANCE-PAYMENT-REDESIGN` | 财务支付三分区、现有能力闭环、定价生命周期、Billing 分页和分区运营概览设计 | 产品已批准 `UI-37`～`UI-46`、`ADM-54`、`BILL-47`、`NFR-55`；第三轮独立文档复审已通过，代码任务 APT-105～APT-115 已完成并逐项通过独立代码复审 |
+| `ADMIN-FINANCE-PAYMENT-REDESIGN` | 财务支付三分区、现有能力闭环、定价生命周期、Billing 分页和分区运营概览设计 | 产品已批准 `UI-37`～`UI-46`、`ADM-54`、`BILL-47`、`NFR-55`；第三轮独立文档复审已通过，代码任务 APT-105～APT-116 已完成并逐项通过独立代码复审 |
 | `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现按 APT-069–APT-082 分任务进行 |
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `ORGANIZATION-OBJECT-AUTHORIZATION` | 显式目标组织、节点子树列表、源/目标节点双向移动门禁及成员全部实际节点归属校验 | Account Go 测试、OpenAPI lint、对象作用域合同和全量静态验证通过；数据库多节点绑定与并发移动待部署验证 |
@@ -43,10 +43,11 @@
 | `ROLE-AUTHORIZATION-UX-UAT-20260901` | 角色目录唯一入口、权限清单、引导式授权、授权记录与独立审计深链的 Portal 部署验证 | 2026-09-01 从不可变目录 `/opt/pinvou-account-platform-13e22858-20260901T122502Z` 单服务滚动替换 Portal，迁移差异为空；Portal Readiness 返回 `0.8.0@13e22858`，公网 `admin.html` 返回 200，`admin.js` SHA-256 为 `2c94f783…`、`admin.css` 为 `f2686d03…`，与 Git 归档和容器制品一致；角色目录操作列保持单行，目录按个人/平台/组织三类归属展示且节点管理员仍以真实 `UNIT` 作用域授权；部署后 Portal panic/fatal 与 Nginx 5xx 计数均为 0，Account、Billing、Token、Identity 及全部基础容器保持健康，回滚目标为 `ea76c318` |
 | `ADMIN-PORTAL-PROTOTYPE-CONFORMANCE` | 以 `admin-portal-ui-prototype.html` 为第一视觉和信息架构基准，核验五组导航及精确页面命名、浅色蓝白壳层、页头、指标卡、业务卡片、工具栏、数据表、右侧详情抽屉和旧扩展页融合；禁止旧六组分类及旧深色/青绿色设计回退 | 2026-08-28 源码/制品五组合同、前端 lint、Portal 构建、215 项合同、Go 单测、任务覆盖和架构守卫通过；`CLOUD_UAT 0.8.0@e8c3c929` Portal healthy，公网 `admin.html`/`admin.js` 返回 200，CSS `d43a713e…`、JS `21bc2d85…` 与服务器发布目录一致 |
 | `ADMIN-IDENTITY-UX` | 用户、组织、角色绑定、注册修复与注销修复在统一身份页面内按精确权限展示 | 身份扩展挂载测试、37 个权限/角色/基础合同测试、前端 lint 和 Portal 构建通过；未改变现有 Account API 或管理动作 |
-| `AUTHORIZATION-COVERAGE-GATE` | 自动发现生产 Go 源码中的 HTTP 路由、后台任务、事件 Consumer/Relay 及全部 CLI，并要求稳定个人/平台/组织权限、精确 `internal.*` 权限或专用公开协议策略逐项分类 | 当前 260 个 HTTP 路由、21 个任务、3 个事件入口和 13 个 CLI 全部登记；删除登记、未知权限、作用域错配、陈旧项和新增未分类入口的负向合同通过，统一 verify 与正式客户端发布门禁均执行该检查 |
+| `AUTHORIZATION-COVERAGE-GATE` | 自动发现生产 Go 源码中的 HTTP 路由、后台任务、事件 Consumer/Relay 及全部 CLI，并要求稳定个人/平台/组织权限、精确 `internal.*` 权限或专用公开协议策略逐项分类 | 当前 278 个 HTTP 路由、24 个任务、3 个事件入口和 13 个 CLI 全部登记；删除登记、未知权限、作用域错配、陈旧项和新增未分类入口的负向合同通过，统一 verify 与正式客户端发布门禁均执行该检查 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
+| `GO-POSTGRES` | Billing PostgreSQL 聚合集成验证 | `TestFinanceOverviewsPostgresIntegration` 已在 PostgreSQL 17 的最小隔离镜像表上执行通过，覆盖概览查询所读取的生产列与关键边界；该证据不替代完整迁移链测试 |
 | `CONTRACT-36` | 本轮 RBAC 前基线合同集 | OpenAPI lint 与原 36 个合同测试通过 |
 | `RBAC-AUTH` | Account RBAC 迁移、默认拒绝、旧 Realm Role 不可绕过、跨服务原子权限和版本响应定向测试 | Go 单元测试与新增合同测试通过；合同总数增至 37 |
 | `USER-CODE` | UUIDv7 永久守卫、百万编码生成/校验、永久登记、本人/运营展示、精确查询防枚举与 OpenAPI 合同 | Go 单元测试、38 个合同测试及桌面三语 40 项定向测试通过；数据库运行级迁移验证待部署 |
@@ -248,7 +249,7 @@
 | BILL-44 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 支持 DRAFT/PUBLISHED/ACTIVE/ENDED/CANCELLED、生效前取消及 ACTIVE 阻断/全局继承/替代三种结束模式 |
 | BILL-45 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | Hold 冻结逐单位价格、来源、分母和舍入；撤销、结束或替代后续租、追加及结算不重算 |
 | BILL-46 | 已实现 | DOC_CURRENT | GO-UNIT; BILLING-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 个人余额、权益和订单严格要求个人原子权限且不能在组织上下文借用；组织购买、余额、权益和授予使用 URL 显式目标组织实时鉴权，无需切换活动上下文。 |
-| BILL-47 | 未实现 | DOC_CURRENT | ADMIN-FINANCE-PAYMENT-REDESIGN | NOT_DEPLOYED | 三分区权限裁剪概览 API、单位/时间窗口径和局部失败合同待 APT-116。 |
+| BILL-47 | 已实现 | DOC_CURRENT | GO-UNIT; GO-POSTGRES; OPENAPI; ADMIN-FINANCE-PAYMENT-REDESIGN | NOT_DEPLOYED | 四个精确权限端点为三个分区返回固定 key/unit/status 的点时或 UTC 半开窗口指标；查询失败整端点 503，不返回部分指标或伪 0。 |
 | PAY-11 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 订单允许多笔 Provider 流水；支付来源权益包唯一绑定一笔成功流水，不同成功流水分别独立履约或进入复核 |
 | PAY-12 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; PAYMENT-CONVERGENCE | NOT_DEPLOYED | 回调、主动查询、Provider 账单和人工修复均先保存 Provider/版本/流水/金额/时间/载荷摘要；成功账单行复用统一归并器并按流水防止重复入账，未匹配或冲突账单仍留证并进入对账复核 |
 | PAY-13 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | 支付流水 `PAID/LATE_PAID` 不被退款、拒付或关单覆盖；退款、拒付、关单分别推进独立状态机，订单支付/退款/拒付/关注摘要由底层事实含应收优先级完整重建 |
@@ -840,7 +841,7 @@
 | BILL-44 | 定价版本生命周期与撤销 | 已实现 | 已形成 DRAFT/PUBLISHED/ACTIVE/ENDED/CANCELLED，并支持生效前取消及 ACTIVE 阻断、全局接续和替代接续。 |
 | BILL-45 | 已创建 Hold 价格不可变 | 已实现 | Hold 完整冻结逐单位最终价格、继承来源、分母和舍入，续租、追加预占及核对均复用原快照。 |
 | BILL-46 | Billing 个人与组织原子授权 | 已实现 | 个人充值/余额/订单按 `personal.billing.read`、`personal.recharge.create/manage` 失败关闭；组织购买、钱包与授予按显式目标组织校验 `org.entitlements.purchase`、`org.wallet.read`、`org.quota.*` 和 `org.grants.reclaim_closed`。 |
-| BILL-47 | 财务支付分区运营概览口径 | 未实现 | 三个分区的权限裁剪概览、单位/时间窗口径和局部失败合同尚未编码。 |
+| BILL-47 | 财务支付分区运营概览口径 | 已实现 | accounts/payments/pricing/products 四端点按精确权限独立返回；支付默认 24 小时、最大 31 天 UTC 半开窗口，单位和状态集合固定，失败原子 503；测试覆盖重复支付证据、价格互斥、墓碑、准入与活动绑定缺失。 |
 
 ### 3.5 充值、支付 Provider 与新华三商城
 

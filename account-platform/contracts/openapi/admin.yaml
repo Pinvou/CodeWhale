@@ -610,6 +610,55 @@ paths:
         "200": { $ref: "#/components/responses/BillingOverview" }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/finance-overviews/accounts:
+    get:
+      operationId: getAdminFinanceAccountsOverview
+      summary: Get point-in-time wallet, receivable, adjustment, and hold metrics
+      description: Requires platform.billing.wallets.read. The response is atomic; any metric query failure returns FINANCE_OVERVIEW_UNAVAILABLE without partial metrics.
+      responses:
+        "200": { $ref: "#/components/responses/FinanceAccountsOverview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/FinanceOverviewUnavailable" }
+  /billing/admin/v1/finance-overviews/payments:
+    get:
+      operationId: getAdminFinancePaymentsOverview
+      summary: Get windowed payment facts and point-in-time exception metrics
+      description: Requires platform.billing.wallets.read. Defaults to the UTC half-open interval [now-24h,now); explicit from/to must both be UTC RFC3339 values and span at most 31 days. Each PAID or LATE_PAID payment transaction contributes once using provider_paid_at, falling back to verified_at. The response is atomic.
+      parameters:
+        - name: from
+          in: query
+          description: Inclusive UTC RFC3339 lower bound; must be supplied with to.
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          description: Exclusive UTC RFC3339 upper bound; must be supplied with from and be no more than 31 days later.
+          schema: { type: string, format: date-time }
+      responses:
+        "200": { $ref: "#/components/responses/FinancePaymentsOverview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/FinanceOverviewUnavailable" }
+  /billing/admin/v1/finance-overviews/pricing:
+    get:
+      operationId: getAdminFinancePricingOverview
+      summary: Get point-in-time derived price and metering-unit metrics
+      description: Requires platform.pricing.read and never depends on wallet permission or the Token model catalog. Price states are mutually exclusive. The response is atomic.
+      responses:
+        "200": { $ref: "#/components/responses/FinancePricingOverview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/FinanceOverviewUnavailable" }
+  /billing/admin/v1/finance-overviews/products:
+    get:
+      operationId: getAdminFinanceProductsOverview
+      summary: Get point-in-time recharge-product lifecycle and admission metrics
+      description: Requires platform.products.read and never depends on wallet permission. Deleted tombstones are excluded from active lifecycle and admission metrics and reported separately. Latest PENDING admission and blocked admission are mutually exclusive. The response is atomic.
+      responses:
+        "200": { $ref: "#/components/responses/FinanceProductsOverview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/FinanceOverviewUnavailable" }
   /billing/admin/v1/wallets:
     get:
       operationId: listAdminWallets
@@ -2672,6 +2721,98 @@ components:
       required: [reason]
       properties:
         reason: { type: string, minLength: 1, maxLength: 500 }
+    FinanceOverviewWindow:
+      type: object
+      additionalProperties: false
+      required: [from, to, timezone]
+      properties:
+        from: { type: string, format: date-time, description: Inclusive UTC boundary }
+        to: { type: string, format: date-time, description: Exclusive UTC boundary }
+        timezone: { type: string, const: UTC }
+    FinanceOverviewMetric:
+      type: object
+      additionalProperties: false
+      required: [key, value, unit, included_statuses]
+      properties:
+        key: { type: string }
+        value: { type: integer, format: int64 }
+        unit: { type: string, enum: [COUNT, MICROCREDITS, CNY_FEN] }
+        included_statuses: { type: array, items: { type: string } }
+    FinanceAccountsMetric:
+      allOf:
+        - { $ref: "#/components/schemas/FinanceOverviewMetric" }
+        - oneOf:
+            - properties: { key: { const: wallet_count }, unit: { const: COUNT }, included_statuses: { const: [ACTIVE, FROZEN, CLOSED] } }
+            - properties: { key: { const: posted_microcredits }, unit: { const: MICROCREDITS }, included_statuses: { const: [ACTIVE, FROZEN, CLOSED] } }
+            - properties: { key: { const: reserved_microcredits }, unit: { const: MICROCREDITS }, included_statuses: { const: [ACTIVE, FROZEN, CLOSED] } }
+            - properties: { key: { const: available_microcredits }, unit: { const: MICROCREDITS }, included_statuses: { const: [ACTIVE, FROZEN, CLOSED] } }
+            - properties: { key: { const: receivable_microcredits }, unit: { const: MICROCREDITS }, included_statuses: { const: [ACTIVE, FROZEN, CLOSED] } }
+            - properties: { key: { const: pending_adjustment_count }, unit: { const: COUNT }, included_statuses: { const: [PENDING_APPROVAL] } }
+            - properties: { key: { const: at_risk_hold_count }, unit: { const: COUNT }, included_statuses: { const: [ACTIVE, REVIEW] } }
+    FinancePaymentsMetric:
+      allOf:
+        - { $ref: "#/components/schemas/FinanceOverviewMetric" }
+        - oneOf:
+            - properties: { key: { const: orders_created_count }, unit: { const: COUNT }, included_statuses: { const: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, EXPIRED, MANUAL_REVIEW] } }
+            - properties: { key: { const: payments_received_fen }, unit: { const: CNY_FEN }, included_statuses: { const: [PAID, LATE_PAID] } }
+            - properties: { key: { const: late_review_open_count }, unit: { const: COUNT }, included_statuses: { const: [REVIEW_REQUIRED_LATE_PAYMENT, PROVIDER_BLIND] } }
+            - properties: { key: { const: payment_anomaly_open_count }, unit: { const: COUNT }, included_statuses: { const: [OPEN] } }
+            - properties: { key: { const: reconciliation_open_count }, unit: { const: COUNT }, included_statuses: { const: [OPEN, IN_REVIEW] } }
+            - properties: { key: { const: refund_attention_count }, unit: { const: COUNT }, included_statuses: { const: [FAILED, MANUAL_REVIEW] } }
+            - properties: { key: { const: provider_controlled_count }, unit: { const: COUNT }, included_statuses: { const: [NEW_ORDERS_DISABLED] } }
+            - properties: { key: { const: product_controlled_count }, unit: { const: COUNT }, included_statuses: { const: [NEW_ORDERS_DISABLED] } }
+    FinancePricingMetric:
+      allOf:
+        - { $ref: "#/components/schemas/FinanceOverviewMetric" }
+        - oneOf:
+            - properties: { key: { const: price_draft_count }, unit: { const: COUNT }, included_statuses: { const: [DRAFT] } }
+            - properties: { key: { const: price_future_count }, unit: { const: COUNT }, included_statuses: { const: [PUBLISHED] } }
+            - properties: { key: { const: price_active_count }, unit: { const: COUNT }, included_statuses: { const: [ACTIVE] } }
+            - properties: { key: { const: price_ended_or_cancelled_count }, unit: { const: COUNT }, included_statuses: { const: [ENDED, CANCELLED] } }
+            - properties: { key: { const: metering_active_count }, unit: { const: COUNT }, included_statuses: { const: [ACTIVE] } }
+            - properties: { key: { const: metering_inactive_count }, unit: { const: COUNT }, included_statuses: { const: [INACTIVE] } }
+    FinanceProductsMetric:
+      allOf:
+        - { $ref: "#/components/schemas/FinanceOverviewMetric" }
+        - oneOf:
+            - properties: { key: { const: product_draft_count }, unit: { const: COUNT }, included_statuses: { const: [DRAFT] } }
+            - properties: { key: { const: product_on_sale_count }, unit: { const: COUNT }, included_statuses: { const: [ON_SALE] } }
+            - properties: { key: { const: product_off_sale_count }, unit: { const: COUNT }, included_statuses: { const: [OFF_SALE] } }
+            - properties: { key: { const: product_deleted_count }, unit: { const: COUNT }, included_statuses: { const: [DELETED] } }
+            - properties: { key: { const: admission_pending_count }, unit: { const: COUNT }, included_statuses: { const: [PENDING] } }
+            - properties: { key: { const: admission_blocked_count }, unit: { const: COUNT }, included_statuses: { const: [MISSING, FAILED, EXPIRED, REVOKED] } }
+    FinanceAccountsOverview:
+      type: object
+      additionalProperties: false
+      required: [as_of, window, metrics]
+      properties:
+        as_of: { type: string, format: date-time }
+        window: { type: "null" }
+        metrics: { type: array, minItems: 7, maxItems: 7, items: { $ref: "#/components/schemas/FinanceAccountsMetric" } }
+    FinancePaymentsOverview:
+      type: object
+      additionalProperties: false
+      required: [as_of, window, metrics]
+      properties:
+        as_of: { type: string, format: date-time }
+        window: { $ref: "#/components/schemas/FinanceOverviewWindow" }
+        metrics: { type: array, minItems: 8, maxItems: 8, items: { $ref: "#/components/schemas/FinancePaymentsMetric" } }
+    FinancePricingOverview:
+      type: object
+      additionalProperties: false
+      required: [as_of, window, metrics]
+      properties:
+        as_of: { type: string, format: date-time }
+        window: { type: "null" }
+        metrics: { type: array, minItems: 6, maxItems: 6, items: { $ref: "#/components/schemas/FinancePricingMetric" } }
+    FinanceProductsOverview:
+      type: object
+      additionalProperties: false
+      required: [as_of, window, metrics]
+      properties:
+        as_of: { type: string, format: date-time }
+        window: { type: "null" }
+        metrics: { type: array, minItems: 6, maxItems: 6, items: { $ref: "#/components/schemas/FinanceProductsMetric" } }
     MeteringUnitCreate:
       type: object
       additionalProperties: false
@@ -3071,6 +3212,38 @@ components:
               pending_adjustments: { type: integer, format: int64, minimum: 0 }
               active_or_review_usage_holds: { type: integer, format: int64, minimum: 0 }
               payment_capabilities: { type: object, additionalProperties: true }
+    FinanceAccountsOverview:
+      description: Atomic account-finance overview with fixed metrics and no time window
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/FinanceAccountsOverview" }
+    FinancePaymentsOverview:
+      description: Atomic payment overview with a bounded UTC half-open window
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/FinancePaymentsOverview" }
+    FinancePricingOverview:
+      description: Atomic point-in-time pricing and metering overview
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/FinancePricingOverview" }
+    FinanceProductsOverview:
+      description: Atomic point-in-time product lifecycle and admission overview
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/FinanceProductsOverview" }
+    FinanceOverviewUnavailable:
+      description: The complete overview query failed; no partial metric set is returned
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [code, message]
+            properties:
+              code: { type: string, const: FINANCE_OVERVIEW_UNAVAILABLE }
+              message: { type: string }
+              request_id: { type: string }
     TokenOverview:
       description: Permission-filtered Token route and usage counters
       content:

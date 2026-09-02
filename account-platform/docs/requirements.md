@@ -343,7 +343,7 @@ REPAIR_REQUIRED --受审计修复命令--> 原失败阶段
 
 `[BILL-46]` 个人余额、权益包和订单读取分别要求 `personal.billing.read`，个人下单要求 `personal.recharge.create`，关闭待支付订单和提交晚到支付声明要求 `personal.recharge.manage`；组织购买、组织钱包/授予读取、分配、撤回和注销授予回收只接受对应 `org.*` 权限与显式目标组织，不用个人权限或活动上下文代替管理授权。
 
-`[BILL-47]` Billing 通过 accounts、payments、pricing、products 四个独立端点为三个财务分区提供概览，分别要求现有 `platform.billing.wallets.read`、`platform.billing.wallets.read`、`platform.pricing.read`、`platform.products.read`，不复用钱包权限包住定价/商品，也不读取 Token 模型目录。响应固定 `as_of/window/metrics(key,value,unit,included_statuses)`；点时指标无分母，支付窗口默认 24 小时、最大 31 天并使用 UTC 半开区间。无权返回 403，查询失败整端点返回 503，不返回部分指标或伪 0，Portal 对四端点独立加载。
+`[BILL-47]` Billing 通过 accounts、payments、pricing、products 四个独立端点为三个财务分区提供概览，分别要求现有 `platform.billing.wallets.read`、`platform.billing.wallets.read`、`platform.pricing.read`、`platform.products.read`，不复用钱包权限包住定价/商品，也不读取 Token 模型目录。响应固定 `as_of/window/metrics(key,value,unit,included_statuses)`；点时指标无分母，支付窗口默认 24 小时、最大 31 天并使用 UTC 半开区间；商品准入阻断包含 `ON_SALE` 但无活动绑定，最新验证 `PENDING` 与 blocked 互斥。无权返回 403，查询失败整端点返回 503，不返回部分指标或伪 0，Portal 对四端点独立加载。
 
 `[TOK-49]` 个人上下文模型目录/协议读取、模型调用、用量读取和取消分别要求 `personal.models.read`、`personal.model.invoke`、`personal.usage.read`、`personal.usage.cancel`；组织上下文调用要求规范 `org.model.invoke` 及组织模型/额度资格。权限通过后仍必须满足目录、路由、余额、Hold、限流和状态机。
 
