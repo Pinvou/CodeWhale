@@ -14,6 +14,7 @@ const packageJson = JSON.parse(
 );
 
 const helperFiles = new Set([
+  "behavior_telemetry_source.mjs",
   "bridge_domain_contract.mjs",
   "ui_test_server.js",
 ]);

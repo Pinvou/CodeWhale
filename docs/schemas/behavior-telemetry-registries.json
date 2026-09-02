@@ -1,0 +1,18 @@
+{
+  "providers": [
+    "openai", "anthropic", "deepseek", "gemini", "qwen", "kimi", "minimax", "glm",
+    "mimo", "doubao", "xai", "local", "custom", "unknown"
+  ],
+  "models": [
+    "claude_opus", "claude_sonnet", "claude_haiku", "deepseek_chat", "deepseek_reasoner",
+    "deepseek", "gpt_5", "gpt_4", "o3", "gemini", "qwen", "kimi", "minimax", "glm",
+    "mimo", "doubao", "grok", "llama", "mistral", "custom", "unknown"
+  ],
+  "tools": [
+    "shell", "read_file", "edit_file", "search_files", "search", "web_search",
+    "view_image", "image_generation", "load_skill", "tool_search", "request_user_input",
+    "update_plan", "feishu", "wecom", "dingtalk", "tmeet", "weather", "iwencai",
+    "ima", "tencent_docs", "wecom_bot", "eip", "zhidao", "qcc", "patsnap_search",
+    "canva", "obsidian", "yuandian", "gongwen", "pptx", "mcp_custom", "custom", "unknown"
+  ]
+}

@@ -775,7 +775,23 @@ impl EventBridge {
             "turn_started",
             json!({ "status": "running" }),
         );
+        crate::features::behavior_telemetry::admit_task(
+            &self.app,
+            &self.pinvou_session_id,
+            &turn_id,
+        );
         turn_id
+    }
+
+    pub fn track_model_used(&self, turn_id: &str, provider: &str, model: &str) {
+        crate::features::behavior_telemetry::track_model_used_keys(
+            &self.app,
+            &self.pinvou_session_id,
+            turn_id,
+            provider,
+            model,
+            "session_default",
+        );
     }
 
     pub fn finish_turn(&self, turn_id: &str, status: &str, error: Option<&str>) {
@@ -783,6 +799,19 @@ impl EventBridge {
             Some(turn_id.to_string()),
             "turn_completed",
             json!({ "status": status, "error": error }),
+        );
+        let telemetry_status = match status {
+            "Completed" => "success",
+            "Interrupted" => "interrupted",
+            _ => "failed",
+        };
+        crate::features::behavior_telemetry::finish_task(
+            &self.app,
+            &self.pinvou_session_id,
+            turn_id,
+            telemetry_status,
+            (telemetry_status != "success")
+                .then(|| crate::features::behavior_telemetry::error_category(error)),
         );
         let mut current = self.current_turn.write();
         if current.as_deref() == Some(turn_id) {
@@ -831,6 +860,13 @@ impl EventBridge {
                 self.emit_protocol("user_message_chunk", chunk, meta)
             }
             SessionUpdate::AgentMessageChunk(chunk) => {
+                if let Some(turn_id) = self.current_turn.read().as_deref() {
+                    crate::features::behavior_telemetry::task_first_output(
+                        &self.app,
+                        &self.pinvou_session_id,
+                        turn_id,
+                    );
+                }
                 self.emit_protocol("agent_message_chunk", chunk, meta)
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
@@ -872,6 +908,15 @@ impl EventBridge {
             &call.title,
             &input,
         );
+        if let Some(turn_id) = self.current_turn.read().as_deref() {
+            crate::features::behavior_telemetry::track_tool_call_started(
+                &self.app,
+                &self.pinvou_session_id,
+                turn_id,
+                &id,
+                &call.title,
+            );
+        }
         let terminal = is_terminal(call.status);
         self.tools.lock().insert(id.clone(), call.clone());
         self.emit_protocol("tool_call", call.clone(), notification_meta);
@@ -901,6 +946,15 @@ impl EventBridge {
                     &call.title,
                     &call.raw_input.clone().unwrap_or_else(|| json!({})),
                 );
+                if let Some(turn_id) = self.current_turn.read().as_deref() {
+                    crate::features::behavior_telemetry::track_tool_call_started(
+                        &self.app,
+                        &self.pinvou_session_id,
+                        turn_id,
+                        &id,
+                        &call.title,
+                    );
+                }
                 if is_terminal(call.status) {
                     completed = Some(call.clone());
                 }
@@ -921,6 +975,17 @@ impl EventBridge {
             &call.raw_input.clone().unwrap_or_else(|| json!({})),
             matches!(call.status, ToolCallStatus::Completed),
         );
+        if let Some(turn_id) = self.current_turn.read().as_deref() {
+            crate::features::behavior_telemetry::track_tool_call_completed(
+                &self.app,
+                &self.pinvou_session_id,
+                turn_id,
+                &call.tool_call_id.to_string(),
+                &call.title,
+                matches!(call.status, ToolCallStatus::Completed),
+                Some("tool_error"),
+            );
+        }
     }
 
     pub fn emit(&self, event_type: &str, data: Value) -> AcpEventEnvelope {

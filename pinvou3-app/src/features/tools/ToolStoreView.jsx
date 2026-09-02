@@ -6,7 +6,7 @@ import { notifyComposerToolsChanged } from './tool-events.js';
 import { localizeTool, mergeConfigFields, TsActionBtn, tsCategories, tsSkillIconByName, tsSkillsData, tsToolsData, tsToolWelcomeData, TOOL_TYPE_GROUPS, getToolTypeGroup, TOOL_BUSINESS_GROUPS, getToolBusinessGroup } from './tool-common.jsx';
 import { MAX_SKILL_ZIP_BYTES, pickSkillDrop, fileToBase64 } from './skill-import-logic.js';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
-import { can } from '../../shared/platform.js';
+import { can, isWeb } from '../../shared/platform.js';
 import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert } from './connector-ui-state.js';
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
@@ -14,6 +14,33 @@ import { isImeComposing } from '../../shared/ime-guard.mjs';
 const OAUTH_UI_TIMEOUT_MS = 90_000;
 
 const canStartExternalAuth = () => can('oauth') && can('externalAuth');
+
+const behaviorTelemetryCommand = () => (
+  isWeb
+    ? 'web_access_track_behavior_event'
+    : 'track_behavior_event'
+);
+
+const createBehaviorToken = (prefix) => {
+  const bytes = new Uint8Array(12);
+  window.crypto.getRandomValues(bytes);
+  const suffix = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${prefix}-${suffix}`;
+};
+
+const toolBehaviorType = (tool) => {
+  if (tool?.feishuCli || tool?.wecomCli || tool?.dingtalkCli || tool?.eipCli || tool?.zhidaoCli || tool?.tmeetCli) return 'cli';
+  if (tool?.oauthMcp || /mcp/i.test(tool?.type || '')) return 'mcp';
+  if (/skill/i.test(tool?.type || '') || tool?.userUploaded) return 'skill';
+  if (tool?.builtin) return 'builtin';
+  return 'custom';
+};
+
+const toolPositionBucket = (index) => {
+  if (index < 3) return '1_3';
+  if (index < 10) return '4_10';
+  return '11_plus';
+};
 
 const reportConnectorFailure = (connector, value, phase) => {
   const failure = connectorFailure(value, phase);
@@ -838,6 +865,64 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const [alert, setAlert] = useState({ visible: false, loading: false, title: '', subtitle: '', isInstall: false, isError: false });
       const oauthRequestRef = useRef({});
       const [configDialog, setConfigDialog] = useState(null); // { backendId, name, fields }
+      const storeRootRef = useRef(null);
+      const behaviorViewIdRef = useRef(createBehaviorToken('tool-view'));
+      const behaviorImpressionsRef = useRef(new Set());
+      const configurationAttemptsRef = useRef(new Map());
+      const configurationAttemptCountsRef = useRef(new Map());
+      const trackToolBehavior = (eventName, tool, fields = {}) => {
+        if (!tool?.backendId) return;
+        invokeTauri(behaviorTelemetryCommand(), {
+          request: {
+            eventName,
+            toolKey: tool.backendId,
+            toolType: toolBehaviorType(tool),
+            ...fields,
+          },
+        }).catch(() => {});
+      };
+      const beginToolConfiguration = (tool, entryPoint = 'marketplace') => {
+        if (!tool?.backendId) return null;
+        const existing = configurationAttemptsRef.current.get(tool.backendId);
+        if (existing) return existing;
+        const attemptIndex = (configurationAttemptCountsRef.current.get(tool.backendId) || 0) + 1;
+        configurationAttemptCountsRef.current.set(tool.backendId, attemptIndex);
+        const attempt = {
+          tool,
+          operationId: createBehaviorToken('tool-config'),
+          attemptIndex,
+          startedAt: Date.now(),
+        };
+        configurationAttemptsRef.current.set(tool.backendId, attempt);
+        trackToolBehavior('tool_configuration_started', tool, {
+          operationId: attempt.operationId,
+          attemptIndex,
+          entryPoint,
+        });
+        return attempt;
+      };
+      const finishToolConfiguration = (backendId, success) => {
+        const attempt = configurationAttemptsRef.current.get(backendId);
+        if (!attempt) return;
+        configurationAttemptsRef.current.delete(backendId);
+        trackToolBehavior('tool_configuration_finished', attempt.tool, {
+          operationId: attempt.operationId,
+          attemptIndex: attempt.attemptIndex,
+          success,
+          durationMs: Math.max(0, Date.now() - attempt.startedAt),
+        });
+      };
+      const openToolDetail = (tool) => {
+        trackToolBehavior('tool_detail_opened', tool, {
+          viewId: behaviorViewIdRef.current,
+          entryPoint: 'marketplace',
+        });
+        setSelectedTool(tool);
+      };
+      useEffect(() => () => {
+        Array.from(configurationAttemptsRef.current.keys())
+          .forEach(backendId => finishToolConfiguration(backendId, false));
+      }, []);
       const [obsidianGuide, setObsidianGuide] = useState(null); // {backendId,name,state,vault_path} 未安装/没库引导
       const [groupBy, setGroupBy] = useState('type'); // 列表视图主维度:'type'(按类型) | 'business'(按业务)
       const [installedOnly, setInstalledOnly] = useState(false); // 头像入口:只看已安装
@@ -1024,11 +1109,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           const ph = flow && flow.phase;
           if (ph !== prevPhase) {
             if (ph === 'done') {
+              finishToolConfiguration('feishu', true);
               setBusyId(null);
               loadBackendState();
               setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.feishu), subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'feishu' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
+              finishToolConfiguration('feishu', false);
               setBusyId(null);
             }
             prevPhase = ph;
@@ -1048,11 +1135,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           const ph = flow && flow.phase;
           if (ph !== prevPhase) {
             if (ph === 'done') {
+              finishToolConfiguration('wecom', true);
               setBusyId(null);
               loadBackendState();
               setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.wecom), subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'wecom' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
+              finishToolConfiguration('wecom', false);
               setBusyId(null);
             }
             prevPhase = ph;
@@ -1072,11 +1161,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           const ph = flow && flow.phase;
           if (ph !== prevPhase) {
             if (ph === 'done') {
+              finishToolConfiguration('dingtalk', true);
               setBusyId(null);
               loadBackendState();
               setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.dingtalk), subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'dingtalk' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
+              finishToolConfiguration('dingtalk', false);
               setBusyId(null);
             }
             prevPhase = ph;
@@ -1115,11 +1206,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           const ph = flow && flow.phase;
           if (ph !== prevPhase) {
             if (ph === 'done') {
+              finishToolConfiguration('tmeet', true);
               setBusyId(null);
               loadBackendState();
               setAlert({ visible: true, loading: false, title: detailCopy.actions.connectedTmeet, subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'tmeet' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
+              finishToolConfiguration('tmeet', false);
               setBusyId(null);
             }
             prevPhase = ph;
@@ -1141,6 +1234,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setWecomQr({ qr: p.qr_data_url, url: p.url, phase: p.phase });
         }).then(u => unlisten.push(u));
         ev.listen('wecom:connected', () => {
+          finishToolConfiguration('wecom', true);
           setWecomQr(null); setBusyId(null);
           // 连上 → 按规则写技能(默认启用),企微技能即刻对模型可见;连接态经 readiness 重取。
           invokeTauri('wecom_apply_skills').catch(() => {});
@@ -1149,6 +1243,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           notifyComposerToolsChanged();
         }).then(u => unlisten.push(u));
         ev.listen('wecom:error', (e) => {
+          finishToolConfiguration('wecom', false);
           const p = e.payload || {};
           setWecomQr(null); setBusyId(null);
           const failure = reportConnectorFailure('wecom', p, p.phase || 'authorize');
@@ -1159,11 +1254,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setEipSso({ url: p.url, qr: p.qr_data_url });
         }).then(u => unlisten.push(u));
         ev.listen('eip:connected', () => {
+          finishToolConfiguration('eip', true);
           setEipSso(null); setEipConnected(true); setBusyId(null);
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         }).then(u => unlisten.push(u));
         ev.listen('eip:error', (e) => {
+          finishToolConfiguration('eip', false);
           const p = e.payload || {};
           setEipSso(null); setBusyId(null);
           const failure = reportConnectorFailure('eip', p, 'connect');
@@ -1174,11 +1271,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setZhidaoSso({ url: p.url, qr: p.qr_data_url });
         }).then(u => unlisten.push(u));
         ev.listen('zhidao:connected', () => {
+          finishToolConfiguration('zhidao', true);
           setZhidaoSso(null); setZhidaoConnected(true); setBusyId(null);
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         }).then(u => unlisten.push(u));
         ev.listen('zhidao:error', (e) => {
+          finishToolConfiguration('zhidao', false);
           const p = e.payload || {};
           setZhidaoSso(null); setBusyId(null);
           const failure = reportConnectorFailure('zhidao', p, 'connect');
@@ -1394,6 +1493,41 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         if (!a.installed && b.installed) return 1;
         return 0;
       });
+      const behaviorPositionByKey = new Map(
+        filteredTools
+          .filter(tool => tool.backendId)
+          .map((tool, index) => [tool.backendId, toolPositionBucket(index)]),
+      );
+      useEffect(() => {
+        const root = storeRootRef.current;
+        if (!root) return undefined;
+        const recordImpression = (element) => {
+          const backendId = element.dataset.toolAnalyticsKey;
+          if (!backendId || behaviorImpressionsRef.current.has(backendId)) return;
+          const tool = filteredTools.find(item => item.backendId === backendId);
+          if (!tool) return;
+          behaviorImpressionsRef.current.add(backendId);
+          trackToolBehavior('tool_impression', tool, {
+            viewId: behaviorViewIdRef.current,
+            entryPoint: 'marketplace',
+            positionBucket: element.dataset.toolAnalyticsPosition,
+          });
+        };
+        const elements = Array.from(root.querySelectorAll('[data-tool-analytics-key]'));
+        if (!window.IntersectionObserver) {
+          elements.forEach(recordImpression);
+          return undefined;
+        }
+        const observer = new window.IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting || entry.intersectionRatio < 0.25) return;
+            recordImpression(entry.target);
+            observer.unobserve(entry.target);
+          });
+        }, { threshold: 0.25 });
+        elements.forEach(element => observer.observe(element));
+        return () => observer.disconnect();
+      }, [searchQuery, activeCategory, groupBy, installedOnly, toolBackend, skillBackend]);
       // 分区:非搜索即分区(仅显示已安装仍保持原分区视图,只是过滤到已装条目)。组内沿用 filteredTools 排序。
       const sectioned = !searching;
       // 即将上线占位卡(无 backendId)单拎到独立栏，不参与类型/业务分组。
@@ -1461,6 +1595,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         const backendId = activeAlert?.toolId;
         const requestId = activeAlert?.requestId;
         if (!backendId || !isCurrentOAuthRequest(backendId, requestId)) return;
+        finishToolConfiguration(backendId, false);
         setAlert(prev => ({
           ...prev,
           cancelable: false,
@@ -1519,6 +1654,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           setAlert({ visible: true, loading: false, title: storeCopy.oauthConfigError, subtitle: storeCopy.oauthNoServerName(name), isInstall: false, isError: true });
           return;
         }
+        const tracksConfiguration = hasConfig || Boolean(t?.oauthMcp);
+        if (tracksConfiguration) beginToolConfiguration(t, 'marketplace');
+        let configurationSucceeded = false;
         const oauthRequestId = t?.oauthMcp ? beginOAuthRequest(backendId) : null;
         setBusyId(backendId);
         if (t?.oauthMcp) {
@@ -1600,6 +1738,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
               setSelectedTool(prev => ({ ...prev, ...outcome.selectedToolPatch }));
             }
             notifyComposerToolsChanged();
+            configurationSucceeded = true;
             return;
           }
           await loadBackendState();
@@ -1615,11 +1754,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             setSelectedTool(prev => ({ ...prev, installed: true }));
           }
           notifyComposerToolsChanged();
+          configurationSucceeded = true;
         } catch (e) {
           if (t?.oauthMcp && !isCurrentOAuthRequest(backendId, oauthRequestId)) return;
           console.error('install failed:', e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, subtitle: String(e && e.message ? e.message : e).slice(0, 240), isInstall: false, isError: true });
         } finally {
+          if (tracksConfiguration) finishToolConfiguration(backendId, configurationSucceeded);
           if (t?.oauthMcp) {
             if (isCurrentOAuthRequest(backendId, oauthRequestId)) {
               clearOAuthRequest(backendId, oauthRequestId);
@@ -1805,6 +1946,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         const apiKey = (values.IMA_API_KEY || '').trim();
         setBusyId('ima');
         setAlert({ loading: true, visible: false, title: detailCopy.actions.connectingIma, subtitle: detailCopy.actions.validatingIma, isInstall: true, isError: false });
+        const tool = findLocalizedTool('ima');
+        beginToolConfiguration(tool, 'marketplace');
+        let succeeded = false;
         try {
           await invokeTauri('ima_connect', { clientId, apiKey });
           await loadBackendState();
@@ -1813,10 +1957,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             setSelectedTool(prev => ({ ...prev, installed: true }));
           }
           notifyComposerToolsChanged();
+          succeeded = true;
         } catch (e) {
           reportConnectorFailure('ima', e, 'connect');
           setAlert({ visible: true, loading: false, title: detailCopy.actions.imaFailed, subtitle: detailCopy.actions.operationFailed, isInstall: false, isError: true });
         } finally {
+          finishToolConfiguration('ima', succeeded);
           setBusyId(null);
         }
       };
@@ -1844,6 +1990,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // 进度走后端事件 feishu:qr / feishu:phase / feishu:connected / feishu:error
       //(监听见下方 useEffect);这里只 ensure cli + 触发 begin。busyId 在事件里清。
       const connectFeishu = async () => {
+        beginToolConfiguration(findLocalizedTool('feishu'), 'marketplace');
         setBusyId('feishu');
         ensureFeishuListeners();
         // 开流程卡（无阻塞弹窗）：先起“准备运行时”步。写进跨视图 store，切走不丢。
@@ -1860,6 +2007,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           stage = 'register';
           await invokeTauri('feishu_connect_begin');
         } catch (e) {
+          finishToolConfiguration('feishu', false);
           reportConnectorFailure('feishu', e, stage);
           feishuConn.stopTick();
           setBusyId(null);
@@ -1868,6 +2016,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       };
       // 取消/关闭流程卡：置取消 + kill 子进程 + 清状态。
       const feishuResetFlow = () => {
+        finishToolConfiguration('feishu', false);
         feishuConn.stopTick();
         invokeTauri('feishu_cancel').catch(() => {});
         feishuConn.setFlow(null); setBusyId(null);
@@ -1893,6 +2042,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接企业微信(单段扫码):流程卡驱动(镜像飞书),进度走 wecom:* 事件。
       const connectWecom = async () => {
+        beginToolConfiguration(findLocalizedTool('wecom'), 'marketplace');
         setBusyId('wecom');
         ensureWecomListeners();
         // 开流程卡(无阻塞弹窗):先起"准备运行时"步,写进跨视图 store,切走不丢。
@@ -1908,6 +2058,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           stage = 'authorize';
           await invokeTauri('wecom_connect_begin');
         } catch (e) {
+          finishToolConfiguration('wecom', false);
           reportConnectorFailure('wecom', e, stage);
           wecomConn.stopTick();
           setBusyId(null);
@@ -1915,6 +2066,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
       };
       const wecomResetFlow = () => {
+        finishToolConfiguration('wecom', false);
         wecomConn.stopTick();
         invokeTauri('wecom_cancel').catch(() => {});
         wecomConn.setFlow(null); setBusyId(null);
@@ -1939,6 +2091,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接钉钉(单段扫码):流程卡驱动(镜像企微),进度走 dingtalk:* 事件。
       const connectDingtalk = async () => {
+        beginToolConfiguration(findLocalizedTool('dingtalk'), 'marketplace');
         setBusyId('dingtalk');
         ensureDingtalkListeners();
         dingtalkConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
@@ -1951,6 +2104,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           stage = 'authorize';
           await invokeTauri('dingtalk_connect_begin');
         } catch (e) {
+          finishToolConfiguration('dingtalk', false);
           reportConnectorFailure('dingtalk', e, stage);
           dingtalkConn.stopTick();
           setBusyId(null);
@@ -1958,6 +2112,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
       };
       const dingtalkResetFlow = () => {
+        finishToolConfiguration('dingtalk', false);
         dingtalkConn.stopTick();
         invokeTauri('dingtalk_cancel').catch(() => {});
         dingtalkConn.setFlow(null); setBusyId(null);
@@ -1981,11 +2136,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接 EIP(SSO 轮询自动收):事件驱动。二进制内置,无需 ensure_cli/扫码。
       const connectEip = async () => {
+        beginToolConfiguration(findLocalizedTool('eip'), 'marketplace');
         setBusyId('eip');
         try {
           await invokeTauri('eip_connect_begin');
           // 后续:eip:sso 出登录地址 → 用户浏览器 SSO 登录 → eip:connected 收尾。
         } catch (e) {
+          finishToolConfiguration('eip', false);
           setEipSso(null); setBusyId(null);
           const failure = reportConnectorFailure('eip', e, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
@@ -2008,10 +2165,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接知道知识库(SSO 轮询自动收):事件驱动。二进制内置,无需手工粘贴 token。
       const connectZhidao = async () => {
+        beginToolConfiguration(findLocalizedTool('zhidao'), 'marketplace');
         setBusyId('zhidao');
         try {
           await invokeTauri('zhidao_connect_begin');
         } catch (e) {
+          finishToolConfiguration('zhidao', false);
           setZhidaoSso(null); setBusyId(null);
           const failure = reportConnectorFailure('zhidao', e, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'zhidao' });
@@ -2034,6 +2193,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接腾讯会议(单段 OAuth 授权):流程卡驱动(镜像钉钉),进度走 tmeet:* 事件。
       const connectTmeet = async () => {
+        beginToolConfiguration(findLocalizedTool('tmeet'), 'marketplace');
         setBusyId('tmeet');
         ensureTmeetListeners();
         tmeetConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
@@ -2046,6 +2206,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           stage = 'authorize';
           await invokeTauri('tmeet_connect_begin');
         } catch (e) {
+          finishToolConfiguration('tmeet', false);
           reportConnectorFailure('tmeet', e, stage);
           tmeetConn.stopTick();
           setBusyId(null);
@@ -2053,6 +2214,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }
       };
       const tmeetResetFlow = () => {
+        finishToolConfiguration('tmeet', false);
         tmeetConn.stopTick();
         invokeTauri('tmeet_cancel').catch(() => {});
         tmeetConn.setFlow(null); setBusyId(null);
@@ -2139,6 +2301,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (isInstalled) return disconnectIma();
           const it = tools.find(x => x.backendId === 'ima') || localizeTool(tsToolsData.find(x => x.backendId === 'ima'), t);
           if (!it) return;
+          beginToolConfiguration(it, 'marketplace');
           setConfigDialog({
             backendId,
             name: it.title,
@@ -2164,6 +2327,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             return doInstall(backendId, {});
           }
           if (tool?.configFields && tool.configFields.length > 0) {
+            beginToolConfiguration(tool, 'marketplace');
             setConfigDialog({
               backendId,
               name,
@@ -2216,7 +2380,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       }, [selectedTool]);
 
       return (
-        <div className="flex-1 flex flex-col w-full h-full relative z-10 overflow-hidden antialiased selection:bg-blue-200 dark:selection:bg-blue-900">
+        <div ref={storeRootRef} className="flex-1 flex flex-col w-full h-full relative z-10 overflow-hidden antialiased selection:bg-blue-200 dark:selection:bg-blue-900">
           {createPortal(<TsAlert alert={localizeConnectorAlert(alert, storeCopy, detailCopy)} theme={theme} copy={storeCopy} onDismiss={() => setAlert(a => ({ ...a, visible: false }))} onCancelLoading={cancelOAuthLoading} onNewChat={() => { const tid = alert.toolId; setAlert(a => ({ ...a, visible: false })); if (onNewChat) onNewChat(tid); }} />, document.body)}
           {/* 拖放技能包 overlay:可接受拖放期间全屏提示(pointer-events-none 不挡点击) */}
           {dropActive && canMutateToolStore && (
@@ -2234,7 +2398,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             config={externalAuthAvailable ? configDialog : null}
             theme={theme}
             copy={storeCopy}
-            onCancel={() => setConfigDialog(null)}
+            onCancel={() => { if (configDialog?.backendId) finishToolConfiguration(configDialog.backendId, false); setConfigDialog(null); }}
             onConfirm={(values) => { const bid = configDialog.backendId; setConfigDialog(null); if (bid === 'ima') connectIma(values); else doInstall(bid, values); }}
           />, document.body)}
           {createPortal(<TsObsidianGuide
@@ -2284,7 +2448,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           />, document.body)}
           {/* 飞书扫码二维码已内联进 FeishuFlowCard（详情弹窗内），不再单独浮层 */}
           {wecomQr && (() => {
-            const cancel = () => { invokeTauri('wecom_cancel').catch(() => {}); setWecomQr(null); setBusyId(null); };
+            const cancel = () => { finishToolConfiguration('wecom', false); invokeTauri('wecom_cancel').catch(() => {}); setWecomQr(null); setBusyId(null); };
             return createPortal((
             <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', WebkitBackdropFilter: 'blur(8px)', backdropFilter: 'blur(8px)' }} onClick={cancel}>
               <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl p-7 w-full max-w-[440px] flex flex-col items-center text-center shadow-2xl" onClick={e => e.stopPropagation()}>
@@ -2305,10 +2469,10 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           })()}
           <ConnectorSsoDialog state={eipSso} name={storeCopy.toolNames.eip} copy={storeCopy}
             onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }); }}
-            onCancel={() => { invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(null); }} />
+            onCancel={() => { finishToolConfiguration('eip', false); invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(null); }} />
           <ConnectorSsoDialog state={zhidaoSso} name={storeCopy.toolNames.zhidao} copy={storeCopy}
             onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
-            onCancel={() => { invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(null); }} />
+            onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(null); }} />
           <div className="flex-1 flex flex-col bg-white dark:bg-[#131314] text-slate-900 dark:text-white transition-colors duration-300 font-sans overflow-y-auto custom-scrollbar p-4 sm:p-6 lg:p-10">
 
             {/* Header */}
@@ -2448,7 +2612,9 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                             {section.items.map((tool) => (
                               <div
                                 key={`list-${tool.id}`}
-                                onClick={() => setSelectedTool(tool)}
+                                data-tool-analytics-key={tool.backendId || undefined}
+                                data-tool-analytics-position={tool.backendId ? behaviorPositionByKey.get(tool.backendId) : undefined}
+                                onClick={() => openToolDetail(tool)}
                                 className="group flex items-center gap-4 py-3 cursor-pointer px-3 border-b border-slate-100 dark:border-white/5 last:border-0"
                               >
                                 <TsToolIcon tool={tool} className="h-16 w-16 flex-shrink-0 rounded-[16px] border border-black/5 shadow-sm transition-shadow group-hover:shadow dark:border-white/5" imageClassName="h-11 w-11" fallbackSize={30} />
@@ -2470,7 +2636,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                                   {(() => {
                                     const cf = tool.feishuCli ? feishuFlow : tool.wecomCli ? wecomFlow : tool.dingtalkCli ? dingtalkFlow : tool.tmeetCli ? tmeetFlow : null;
                                     if (externalAuthAvailable && cf && (cf.phase === 'running' || cf.phase === 'qr')) {
-                                      return <FeishuMini flow={cf} onClick={() => setSelectedTool(tool)} copy={storeCopy.mini} />;
+                                      return <FeishuMini flow={cf} onClick={() => openToolDetail(tool)} copy={storeCopy.mini} />;
                                     }
                                     // 管理可见性编辑态：卡片出现每个模式的勾选框，勾选 = 可见。
                                     if (managingVisibility) {

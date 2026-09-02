@@ -242,6 +242,7 @@
       browserCdp: false,
     },
     settings: null,
+    behaviorTelemetry: null,
     selectedPet: "lingling",
     memory: {
       loading: false,
@@ -1387,7 +1388,7 @@
     knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
-    settings: ["settings", "selectedPet"],
+    settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
     llmapi: ["llmApiModels", "llmApiStatus"],
     vllm: ["vllmBootstrapDone", "vllmBootstrapError", "vllmBootstrapping", "vllmSetup", "vllmSetupAttempt", "vllmSetupDismissed", "vllmSetupPhase"],
@@ -2136,6 +2137,8 @@
   invokeErrorObserver = settingsFeature.observeInvokeError;
   modelAvailabilityError = settingsFeature.modelAvailabilityError;
   var loadSettings = settingsFeature.loadSettings;
+  var loadBehaviorTelemetryStatus = settingsFeature.loadBehaviorTelemetryStatus;
+  var setBehaviorTelemetryEnabled = settingsFeature.setBehaviorTelemetryEnabled;
   var loadSelectedPet = settingsFeature.loadSelectedPet;
   var setSelectedPet = settingsFeature.setSelectedPet;
   var loadEffectiveModelConfig = settingsFeature.loadEffectiveModelConfig;
@@ -2319,6 +2322,7 @@
   var closeVoiceAsrSetup = voiceFeature.closeVoiceAsrSetup;
   var cancelVoiceInput = voiceFeature.cancelVoiceInput;
   var clearVoiceInput = voiceFeature.clearVoiceInput;
+  var abandonVoiceResult = voiceFeature.abandonVoiceResult;
   var appendVoiceText = voiceFeature.appendVoiceText;
   var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
@@ -2423,6 +2427,7 @@
     var parallelLoads = [
       startupAwait("bridge:load_platform_capabilities", loadPlatformCapabilities),
       startupAwait("bridge:load_settings", loadSettings),
+      startupAwait("bridge:load_behavior_telemetry", loadBehaviorTelemetryStatus),
       startupAwait("bridge:load_selected_pet", loadSelectedPet),
       startupAwait("bridge:load_effective_model", loadEffectiveModelConfig),
       startupAwait("bridge:load_app_version", loadAppVersion),
@@ -2503,6 +2508,7 @@
       closeVoiceAsrSetup: closeVoiceAsrSetup,
       cancelVoiceInput: cancelVoiceInput,
       clearVoiceInput: clearVoiceInput,
+      abandonVoiceResult: abandonVoiceResult,
       appendVoiceText: appendVoiceText,
       runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     },
@@ -2565,6 +2571,8 @@
       saveSearchSettings: saveSearchSettings,
       saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
       testSearchProvider: testSearchProvider,
+      loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
+      setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
     },
     feedback: { submitFeedback: submitFeedback },
     llmapi: {

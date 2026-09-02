@@ -18,6 +18,64 @@
     var sessionStates = context.sessionStates;
     var discardManagedAttachment = context.discardManagedAttachment || function () { return Promise.resolve(); };
     var attachIdSeq = 0;
+    function telemetryToken(prefix) {
+      if (root.crypto && typeof root.crypto.randomUUID === "function") {
+        return prefix + root.crypto.randomUUID().replace(/-/g, ""); // safari14-ok: guarded above
+      }
+      if (root.crypto && typeof root.crypto.getRandomValues === "function") {
+        var bytes = new Uint8Array(12);
+        root.crypto.getRandomValues(bytes);
+        return prefix + Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
+      }
+      return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    }
+    function fileTypeBucket(name) {
+      var ext = (String(name || "").split(".").pop() || "").toLowerCase();
+      if (["doc", "docx", "md", "txt", "rtf"].indexOf(ext) >= 0) return "document";
+      if (["xls", "xlsx", "csv", "tsv"].indexOf(ext) >= 0) return "spreadsheet";
+      if (["ppt", "pptx", "odp"].indexOf(ext) >= 0) return "presentation";
+      if (ext === "pdf") return "pdf";
+      if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "heic"].indexOf(ext) >= 0) return "image";
+      if (["zip", "7z", "rar", "tar", "gz"].indexOf(ext) >= 0) return "archive";
+      if (["js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "cpp", "h", "html", "css", "json", "yaml", "yml"].indexOf(ext) >= 0) return "code";
+      return "other";
+    }
+    function sizeBucket(size) {
+      var bytes = Number(size) || 0;
+      if (bytes <= 1024 * 1024) return "0_1mib";
+      if (bytes <= 10 * 1024 * 1024) return "1_10mib";
+      if (bytes <= 100 * 1024 * 1024) return "10_100mib";
+      return "100mib_plus";
+    }
+    function beginAttachmentTelemetry(att, name, size, entryPoint) {
+      var attempt = {
+        attachmentId: telemetryToken("attachment_"),
+        operationId: telemetryToken("attachment_op_"),
+        fileTypeBucket: fileTypeBucket(name),
+        startedAt: Date.now(),
+        finished: false,
+      };
+      att.telemetryAttempt = attempt;
+      invoke("track_behavior_event", { request: {
+        eventName: "attachment_added", attachmentId: attempt.attachmentId,
+        operationId: attempt.operationId, attemptIndex: 1,
+        fileTypeBucket: attempt.fileTypeBucket, sizeBucket: sizeBucket(size),
+        entryPoint: entryPoint,
+      } }).catch(function () {});
+      return attempt;
+    }
+    function finishAttachmentTelemetry(att, success, errorCategory) {
+      var attempt = att && att.telemetryAttempt;
+      if (!attempt || attempt.finished) return;
+      attempt.finished = true;
+      invoke("track_behavior_event", { request: {
+        eventName: "attachment_processing_completed", attachmentId: attempt.attachmentId,
+        operationId: attempt.operationId, attemptIndex: 1,
+        fileTypeBucket: attempt.fileTypeBucket, success: !!success,
+        durationMs: Math.max(0, Date.now() - attempt.startedAt),
+        errorCategory: success ? undefined : (errorCategory || "validation_failed"),
+      } }).catch(function () {});
+    }
   // ── 产物面板 ─────────────────────────────────────────────────────
   function artifactInfo(path) { return invoke("artifact_info", { path: path }); }
   function readArtifactText(path) { return invoke("read_artifact_text", { path: path }); }
@@ -103,19 +161,44 @@
     var cmd = (ext === "html" || ext === "htm") ? "open_artifact_window" : "open_in_system";
     return invoke(cmd, { path: path, sessionId: sessionId || null }).catch(function (e) { addSystemItem(bt("openFailed") + e); });
   }
+  function artifactExportFormat(path) {
+    var ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (["docx", "xlsx", "pptx", "pdf", "png", "html"].indexOf(ext) >= 0) return ext;
+    if (ext === "htm") return "html";
+    if (ext === "md") return "markdown";
+    return "other";
+  }
+  function trackArtifactExport(path) {
+    var bn = basename(path);
+    var artifact = state.artifacts.find(function (item) { return basename(item.path) === bn; });
+    if (!artifact || !artifact.telemetryId) return;
+    invoke("track_behavior_event", { request: {
+      eventName: "artifact_exported", artifactId: artifact.telemetryId,
+      exportFormat: artifactExportFormat(path),
+    } }).catch(function () {});
+  }
   function downloadArtifact(path, sessionId) {
-    return openArtifactExternal(path, sessionId);
+    var ext = (String(path).split(".").pop() || "").toLowerCase();
+    var cmd = (ext === "html" || ext === "htm") ? "open_artifact_window" : "open_in_system";
+    return invoke(cmd, { path: path, sessionId: sessionId || null }).then(function (result) {
+      trackArtifactExport(path);
+      return result;
+    }).catch(function (e) { addSystemItem(bt("openFailed") + e); return false; });
   }
 
   // ── 附件 ────────────────────────────────────────────────────────
   async function addAttachmentByPath(path) {
     var id = ++attachIdSeq;
-    var att = { id: id, basename: basename(path), status: "parsing", result: null, error: null };
+    var att = { id: id, basename: basename(path), status: "parsing", result: null, error: null, cancelled: false };
     state.attachments.push(att); notify();
     try {
+      var info = await artifactInfo(path).catch(function () { return null; });
+      beginAttachmentTelemetry(att, att.basename, info && info.size, "composer");
       var result = await invoke("ingest_file", { path: path });
+      if (att.cancelled) { finishAttachmentTelemetry(att, false, "user_cancelled"); return; }
       att.status = "ready"; att.result = result;
-    } catch (e) { att.status = "error"; att.error = String(e); }
+      finishAttachmentTelemetry(att, true);
+    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
     notify();
   }
   async function addDroppedFileAttachment(file) {
@@ -123,6 +206,7 @@
     var id = ++attachIdSeq;
     var att = { id: id, basename: file.name || "attachment", status: "parsing", result: null, error: null, cancelled: false, uploadId: null };
     state.attachments.push(att);
+    beginAttachmentTelemetry(att, att.basename, file.size, "composer");
     notify();
     try {
       var uploader = root.PinvouChunkedFileUpload;
@@ -164,6 +248,7 @@
       att.basename = result.basename || att.basename;
       att.status = "ready";
       att.result = result;
+      finishAttachmentTelemetry(att, true);
     } catch (e) {
       att.status = "error";
       att.error = e && e.code === "device_upload_empty"
@@ -175,6 +260,7 @@
             : e && e.code === "device_upload_invalid_result"
               ? bt("attachInvalidResult")
               : String(e);
+      finishAttachmentTelemetry(att, false, e && e.code === "device_upload_cancelled" ? "user_cancelled" : "validation_failed");
     }
     notify();
   }
@@ -211,6 +297,7 @@
     var removed = state.attachments.find(function (a) { return a.id === id; });
     if (removed) {
       removed.cancelled = true;
+      finishAttachmentTelemetry(removed, false, "user_cancelled");
       if (removed.status === "ready" && removed.result) {
         discardManagedAttachment(removed.result);
       }
@@ -221,6 +308,7 @@
   function clearAttachments() {
     state.attachments.forEach(function (attachment) {
       attachment.cancelled = true;
+      finishAttachmentTelemetry(attachment, false, "user_cancelled");
       if (attachment.status === "ready" && attachment.result) {
         discardManagedAttachment(attachment.result);
       }

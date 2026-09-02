@@ -74,6 +74,35 @@
     var ext = (String(path || "").split(".").pop() || "").toLowerCase();
     return DELIVERABLE_EXTS.indexOf(ext) >= 0;
   }
+  function artifactType(path) {
+    var ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (["doc", "docx", "md", "rtf"].indexOf(ext) >= 0) return "document";
+    if (["xls", "xlsx", "csv"].indexOf(ext) >= 0) return "spreadsheet";
+    if (["ppt", "pptx", "odp"].indexOf(ext) >= 0) return "slides";
+    if (ext === "pdf") return "pdf";
+    if (["png", "jpg", "jpeg", "gif", "webp", "svg"].indexOf(ext) >= 0) return "image";
+    if (["html", "htm"].indexOf(ext) >= 0) return "html";
+    if (["js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "cpp", "h", "css"].indexOf(ext) >= 0) return "code";
+    return "other";
+  }
+  function artifactTelemetryId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return "artifact_" + window.crypto.randomUUID().replace(/-/g, ""); // safari14-ok: guarded above
+    }
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return "artifact_" + Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
+    }
+    return "artifact_" + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
+  function recordArtifactCreated(artifact, sid) {
+    if (!artifact || !sid) return;
+    invoke("track_behavior_event", { request: {
+      eventName: "artifact_created", artifactId: artifact.telemetryId,
+      artifactType: artifact.telemetryType, sessionId: sid,
+    } }).catch(function () {});
+  }
   function trackArtifact(path) {
     if (!path) return;
     var bn = basename(path);
@@ -82,13 +111,15 @@
         // 已有同名:write_file 跟踪的是相对路径、disk watcher 推的是绝对路径——同一文件
         // 两种 path 会重复。新 path 绝对而旧的相对则用绝对替换(open 可靠),否则忽略重复。
         if (isAbsPath(path) && !isAbsPath(state.artifacts[i].path)) {
-          state.artifacts[i] = { path: path, basename: bn };
+          state.artifacts[i] = Object.assign({}, state.artifacts[i], { path: path, basename: bn });
           notify();
         }
         return;
       }
     }
-    state.artifacts.push({ path: path, basename: bn });
+    var artifact = { path: path, basename: bn, telemetryId: artifactTelemetryId(), telemetryType: artifactType(path) };
+    state.artifacts.push(artifact);
+    recordArtifactCreated(artifact, state.activeSessionId);
     notify();
   }
   function markTurnDirtyArtifact(path) {

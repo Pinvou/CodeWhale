@@ -374,6 +374,33 @@
   var scheduledRunEventRefreshTimer = null;
   var scheduledTaskPendingLoads = Object.create(null);
   var scheduledTaskAutoCreateInFlight = Object.create(null);
+  var scheduledTelemetryFinishedRuns = Object.create(null);
+  var scheduledTelemetryStartedAt = Date.now();
+  function scheduledRunDuration(run) {
+    var started = Date.parse(run && (run.startedAt || run.createdAt) || "");
+    var ended = Date.parse(run && run.endedAt || "");
+    if (!Number.isFinite(started) || !Number.isFinite(ended)) return 0;
+    return Math.max(0, Math.min(86400000, ended - started));
+  }
+  function trackScheduledRunFinished(run) {
+    if (!run || !run.id) return;
+    var automationId = run.automationId || run.automation_id;
+    var status = String(run.status || "").toLowerCase();
+    if (!automationId || ["completed", "failed", "canceled", "cancelled", "interrupted"].indexOf(status) < 0) return;
+    var endedAt = Date.parse(run.endedAt || "");
+    if (!Number.isFinite(endedAt) || endedAt < scheduledTelemetryStartedAt - 5000) return;
+    var key = automationId + ":" + run.id;
+    if (scheduledTelemetryFinishedRuns[key]) return;
+    scheduledTelemetryFinishedRuns[key] = true;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "scheduled_task_run_finished",
+      scheduledTaskSourceId: automationId,
+      scheduledRunSourceId: run.id,
+      status: status,
+      durationMs: scheduledRunDuration(run),
+      errorCategory: status === "failed" ? "internal_error" : (status === "completed" ? undefined : "user_cancelled"),
+    } }).catch(function () {});
+  }
   var sessionSwitchRequestToken = 0;
   var pendingCapabilitySessionSwitch = null;
   // 能力快照迟到时的切换宽限：等待期间不向用户报错，快照到达即自动重试；
@@ -2494,6 +2521,7 @@
     var rows = (state.scheduledTaskRecentRuns || []).slice();
     (Array.isArray(runs) ? runs : []).forEach(function (run) {
       if (!run) return;
+      trackScheduledRunFinished(run);
       rememberScheduledRunOwner(run);
       var merged = Object.assign({}, run, {
         automationId: run.automationId || task.id,
@@ -2559,6 +2587,7 @@
       });
       var rows = (Array.isArray(runs) ? runs : []).map(function (run) {
         if (!run) return null;
+        trackScheduledRunFinished(run);
         rememberScheduledRunOwner(run);
         var automationId = run.automationId || run.automation_id;
         var task = tasksById[automationId] || null;
@@ -2691,6 +2720,7 @@
 
   function upsertScheduledTaskRun(run) {
     if (!run || !run.id) return;
+    trackScheduledRunFinished(run);
     rememberScheduledRunOwner(run);
     if (state.selectedScheduledTaskId && run.automationId && state.selectedScheduledTaskId !== run.automationId) return;
     var found = false;
@@ -2746,6 +2776,12 @@
       }
       if (templateId) rememberScheduledTaskTemplateSource(created.id, templateId);
       attachScheduledTaskTemplateSource(created);
+      invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+        eventName: "scheduled_task_created",
+        scheduledTaskSourceId: created.id,
+        scheduleRule: created.rrule || backendInput.rrule || "",
+        taskType: templateId || "custom",
+      } }).catch(function () {});
       // 立即重拉任务列表:新 stamp 会使创建前仍在途的 list_scheduled_tasks 响应失效,
       // 防止旧结果落地时把刚创建的任务从列表里覆盖掉。
       await loadScheduledTasks();
@@ -4544,6 +4580,28 @@
     var ext = (String(path || "").split(".").pop() || "").toLowerCase();
     return DELIVERABLE_EXTS.indexOf(ext) >= 0;
   }
+  function artifactBehaviorType(path) {
+    var ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (["doc", "docx", "md", "rtf"].indexOf(ext) >= 0) return "document";
+    if (["xls", "xlsx", "csv"].indexOf(ext) >= 0) return "spreadsheet";
+    if (["ppt", "pptx", "odp"].indexOf(ext) >= 0) return "slides";
+    if (ext === "pdf") return "pdf";
+    if (["png", "jpg", "jpeg", "gif", "webp", "svg"].indexOf(ext) >= 0) return "image";
+    if (["html", "htm"].indexOf(ext) >= 0) return "html";
+    if (["js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "cpp", "h", "css"].indexOf(ext) >= 0) return "code";
+    return "other";
+  }
+  function artifactBehaviorId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return "artifact_" + window.crypto.randomUUID().replace(/-/g, ""); // safari14-ok: guarded above
+    }
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return "artifact_" + Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
+    }
+    return "artifact_" + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
   function trackArtifact(path) {
     if (!path) return;
     if (state.activeSessionId && !artifactBelongsToSession(path, state.activeSessionId)) return;
@@ -4553,13 +4611,18 @@
         // 已有同名:write_file 跟踪的是相对路径、disk watcher 推的是绝对路径——同一文件
         // 两种 path 会重复。新 path 绝对而旧的相对则用绝对替换(open 可靠),否则忽略重复。
         if (isAbsPath(path) && !isAbsPath(state.artifacts[i].path)) {
-          state.artifacts[i] = { path: path, basename: bn };
+          state.artifacts[i] = Object.assign({}, state.artifacts[i], { path: path, basename: bn });
           notify();
         }
         return;
       }
     }
-    state.artifacts.push({ path: path, basename: bn });
+    var artifact = { path: path, basename: bn, telemetryId: artifactBehaviorId(), telemetryType: artifactBehaviorType(path) };
+    state.artifacts.push(artifact);
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "artifact_created", artifactId: artifact.telemetryId,
+      artifactType: artifact.telemetryType, sessionId: state.activeSessionId,
+    } }).catch(function () {});
     notify();
   }
   function markTurnDirtyArtifact(path) {
@@ -4751,6 +4814,20 @@
     return text;
   }
 
+  function trackSceneSubmitted(sid, scene) {
+    var raw = String(scene || "");
+    if (!sid || !raw) return;
+    var parts = raw.split(":");
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", {
+      request: {
+        eventName: "scene_submitted",
+        sessionId: sid,
+        sceneL1: parts[0] || "unknown",
+        sceneL2: parts.slice(1).join(":") || parts[0] || "unknown",
+      },
+    }).catch(function () {});
+  }
+
   // 真正发送:在 sid 的工作集上加 user 气泡 + 流式占位 + busy,然后 invoke chat。
   // active/后台通用(后台走 runSyncOnSession 临时切工作集)。
   function doSendFor(sid, text, displayText, attachmentsPayload, meta, restrictTools, surfaceFailure) {
@@ -4824,6 +4901,24 @@
           runSyncOnSession(sid, function () {
             recordPinvouSceneForMessage(sid, submittedMessagePos, meta.pinvouScene);
           });
+          trackSceneSubmitted(sid, meta.pinvouScene);
+        }
+        if (meta && meta.voiceOperationId) {
+          invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", {
+            request: {
+              eventName: "voice_message_submitted",
+              operationId: meta.voiceOperationId,
+              sessionId: sid,
+            },
+          }).catch(function () {});
+          if (state.voiceInput && state.voiceInput.operationId === meta.voiceOperationId) {
+            state.voiceInput = Object.assign({}, state.voiceInput, {
+              status: "idle",
+              operationId: null,
+              telemetryTerminal: true,
+            });
+            notify();
+          }
         }
         return true;
       })
@@ -5115,6 +5210,25 @@
       );
       // 首轮提交成功 = 新一轮已受理：未提交的「打开」转正锁死（同 doSendFor）。
       try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
+      if (submission.voiceOperationId && metadata && metadata.id) {
+        invoke("web_access_track_behavior_event", {
+          request: {
+            eventName: "voice_message_submitted",
+            operationId: submission.voiceOperationId,
+            sessionId: metadata.id,
+          },
+        }).catch(function () {});
+        if (state.voiceInput && state.voiceInput.operationId === submission.voiceOperationId) {
+          state.voiceInput = Object.assign({}, state.voiceInput, {
+            status: "idle",
+            operationId: null,
+            telemetryTerminal: true,
+          });
+        }
+      }
+      if (submission.pinvouScene && metadata && metadata.id) {
+        trackSceneSubmitted(metadata.id, submission.pinvouScene);
+      }
       acceptFirstTurnSubmission(submission, metadata);
     } catch (error) {
       submission.inFlight = false;
@@ -5157,6 +5271,7 @@
       time: time,
       displayText: displayText,
       pinvouScene: meta && meta.pinvouScene,
+      voiceOperationId: meta && meta.voiceOperationId,
       readyAttachments: readyAttachments.slice(),
       uiSnapshot: prepared.snapshot,
       args: {
@@ -5200,6 +5315,9 @@
 
     var displayText = formatAttachmentDisplayText(text, readyAttachments);
     var attachmentsPayload = readyAttachments.map(function (a) { return a.result; });
+    if (state.voiceInput && state.voiceInput.status === "completed" && state.voiceInput.operationId) {
+      meta = Object.assign({}, meta || {}, { voiceOperationId: state.voiceInput.operationId });
+    }
 
     if (!state.activeSessionId && IS_WEB && canInvoke("web_access_create_session_and_chat")) {
       var existingFirstTurn = state.chatItems.some(function (item) {
@@ -5224,6 +5342,9 @@
       }
     }
     var sid = state.activeSessionId;
+    if (state.voiceInput && state.voiceInput.status === "completed" && state.voiceInput.operationId) {
+      meta = Object.assign({}, meta || {}, { voiceOperationId: state.voiceInput.operationId });
+    }
     var activeTurnBuffer = getBuffer(sid);
     function consumeUiTurnState() {
       var consumed = {
@@ -6726,6 +6847,25 @@
   async function setSelectedPet(id) {
     return await invoke("set_selected_pet", { id: id });
   }
+  async function loadBehaviorTelemetryStatus() {
+    state.behaviorTelemetry = {
+      configured: false,
+      enabled: false,
+      user_enabled: null,
+      collection_period_id: null,
+      withdrawal_pending: false,
+      deletion_pending: false,
+      last_deletion_request_id: null,
+      retention_days: 35,
+      pending_event_count: 0,
+      dropped_event_count: 0,
+    };
+    notify();
+    return state.behaviorTelemetry;
+  }
+  async function setBehaviorTelemetryEnabled() {
+    throw new Error("behavior telemetry is unsupported by the Web host");
+  }
   async function loadEffectiveModelConfig(sessionId) {
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     try {
@@ -7740,7 +7880,7 @@
   }
 
   // ── 编辑上一轮 / 手动压缩 ─────────────────────────────────────────
-  async function editLastTurn(newText) {
+  async function editLastTurn(newText, options) {
     if (state.busy || !state.activeSessionId) return;
     newText = (newText || "").trim();
     if (!newText) return;
@@ -7797,7 +7937,11 @@
     turnUsageDirty[sid] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护
     emitPetEvent("pet:turn_start", sid);
     try {
-      await invoke("edit_last_turn", { newMessage: newText, sessionId: sid });
+      await invoke("edit_last_turn", {
+        newMessage: newText,
+        sessionId: sid,
+        retryReason: options && options.retryReason || "input_changed",
+      });
       // 编辑重跑 = 后端受理新一轮：未提交的「打开」转正锁死（同 doSendFor）。
       try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
       if (editBuffer) editBuffer.deferredRemoteUserEvent = null;
@@ -7975,6 +8119,22 @@
       : "";
     return new Error(bt("downloadLimitError")(suffix));
   }
+  function artifactExportFormat(path) {
+    var ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (["docx", "xlsx", "pptx", "pdf", "png", "html"].indexOf(ext) >= 0) return ext;
+    if (ext === "htm") return "html";
+    if (ext === "md") return "markdown";
+    return "other";
+  }
+  function trackArtifactExported(path) {
+    var bn = basename(path);
+    var artifact = state.artifacts.find(function (item) { return basename(item.path) === bn; });
+    if (!artifact || !artifact.telemetryId) return;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "artifact_exported", artifactId: artifact.telemetryId,
+      exportFormat: artifactExportFormat(path),
+    } }).catch(function () {});
+  }
 
   async function downloadArtifact(path, sessionId) {
     if (IS_WEB && !hasCapability("artifactDownload")) {
@@ -7982,7 +8142,9 @@
       return false;
     }
     try {
-      return await downloadArtifactRaw(path, sessionId);
+      var downloaded = await downloadArtifactRaw(path, sessionId);
+      if (downloaded) trackArtifactExported(path);
+      return downloaded;
     } catch (e) {
       addSystemItem(bt("downloadFailed") + String((e && e.message) || e));
       return false;
@@ -8155,14 +8317,65 @@
     }
   }
 
+  function attachmentTelemetryToken(prefix) {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return prefix + window.crypto.randomUUID().replace(/-/g, ""); // safari14-ok: guarded above
+    }
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return prefix + Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
+    }
+    return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
+  function attachmentFileType(name) {
+    var ext = (String(name || "").split(".").pop() || "").toLowerCase();
+    if (["doc", "docx", "md", "txt", "rtf"].indexOf(ext) >= 0) return "document";
+    if (["xls", "xlsx", "csv", "tsv"].indexOf(ext) >= 0) return "spreadsheet";
+    if (["ppt", "pptx", "odp"].indexOf(ext) >= 0) return "presentation";
+    if (ext === "pdf") return "pdf";
+    if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "heic"].indexOf(ext) >= 0) return "image";
+    if (["zip", "7z", "rar", "tar", "gz"].indexOf(ext) >= 0) return "archive";
+    if (["js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "cpp", "h", "html", "css", "json", "yaml", "yml"].indexOf(ext) >= 0) return "code";
+    return "other";
+  }
+  function attachmentSizeBucket(size) {
+    var bytes = Number(size) || 0;
+    if (bytes <= 1024 * 1024) return "0_1mib";
+    if (bytes <= 10 * 1024 * 1024) return "1_10mib";
+    if (bytes <= 100 * 1024 * 1024) return "10_100mib";
+    return "100mib_plus";
+  }
+  function beginAttachmentTelemetry(att, size, entryPoint) {
+    var attempt = { attachmentId: attachmentTelemetryToken("attachment_"), operationId: attachmentTelemetryToken("attachment_op_"), fileTypeBucket: attachmentFileType(att.basename), startedAt: Date.now(), finished: false };
+    att.telemetryAttempt = attempt;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "attachment_added", attachmentId: attempt.attachmentId, operationId: attempt.operationId,
+      attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket, sizeBucket: attachmentSizeBucket(size), entryPoint: entryPoint,
+    } }).catch(function () {});
+  }
+  function finishAttachmentTelemetry(att, success, errorCategory) {
+    var attempt = att && att.telemetryAttempt;
+    if (!attempt || attempt.finished) return;
+    attempt.finished = true;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "attachment_processing_completed", attachmentId: attempt.attachmentId,
+      operationId: attempt.operationId, attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket,
+      success: !!success, durationMs: Math.max(0, Date.now() - attempt.startedAt),
+      errorCategory: success ? undefined : (errorCategory || "validation_failed"),
+    } }).catch(function () {});
+  }
+
   async function addAttachmentByPath(path) {
     var id = ++attachIdSeq;
     var att = { id: id, basename: basename(path), status: "parsing", result: null, error: null };
     state.attachments.push(att); notify();
+    beginAttachmentTelemetry(att, 0, "composer");
     try {
       var result = await invoke(IS_WEB ? "web_access_ingest_file" : "ingest_file", { path: path });
       att.status = "ready"; att.result = result;
-    } catch (e) { att.status = "error"; att.error = String(e); }
+      finishAttachmentTelemetry(att, true);
+    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
     notify();
   }
   async function addPasteImage(filename, bytes) {
@@ -8186,6 +8399,7 @@
   }
   function removeAttachment(id) {
     var removed = state.attachments.find(function (attachment) { return attachment.id === id; });
+    finishAttachmentTelemetry(removed, false, "user_cancelled");
     state.attachments = state.attachments.filter(function (a) { return a.id !== id; });
     releaseAttachmentOnDesktop(removed);
     notify();
@@ -8193,6 +8407,7 @@
   function clearAttachments() {
     var removed = state.attachments.slice();
     state.attachments = [];
+    removed.forEach(function (attachment) { finishAttachmentTelemetry(attachment, false, "user_cancelled"); });
     removed.forEach(releaseAttachmentOnDesktop);
   }
   // 打开系统文件选择器并摄入为附件
@@ -8220,6 +8435,7 @@
       status: "uploading", progress: 0, result: null, error: null,
     };
     state.attachments.push(att); notify();
+    beginAttachmentTelemetry(att, file.size, "composer");
     try {
       if (!uploader || typeof uploader.uploadFile !== "function") {
         throw new Error("chunked attachment uploader is unavailable");
@@ -8251,6 +8467,7 @@
       var summary = completed.result;
       att.status = "ready"; att.progress = 100; att.result = summary;
       att.basename = summary.basename || att.basename;
+      finishAttachmentTelemetry(att, true);
     } catch (e) {
       if (!e || e.code !== "device_upload_cancelled") {
         att.status = "error";
@@ -8270,6 +8487,7 @@
                 : rawUploadError;
         addSystemItem(bt("deviceUploadFailed") + att.error);
       }
+      finishAttachmentTelemetry(att, false, e && e.code === "device_upload_cancelled" ? "user_cancelled" : "validation_failed");
     }
     notify();
   }
@@ -8761,6 +8979,50 @@
   // ── 语音输入（WebView one-shot 录音 → 本地 SenseVoice/FunASR ASR；Linux webview 录音授权见 lib.rs setup）──────────────
   var activeVoiceInput = null;
 
+  function voiceToken(prefix) {
+    return prefix + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 14);
+  }
+
+  function trackVoiceEvent(eventName, session, fields) {
+    if (!session || !session.operationId) return;
+    var request = Object.assign({ eventName: eventName, operationId: session.operationId }, fields || {});
+    if (session.telemetrySessionId && request.sessionId == null) request.sessionId = session.telemetrySessionId;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: request }).catch(function () {});
+  }
+
+  function voiceDurationMs(session) {
+    return Math.max(0, Math.min(86400000, Date.now() - Number(session && session.startedAt || Date.now())));
+  }
+
+  function voiceTelemetryErrorCategory(category) {
+    if (category === "permission_denied") return "permission_denied";
+    if (category === "timeout") return "timeout";
+    if (category === "device_unavailable" || category === "constraint_unsupported" || category === "dependency_unavailable") return "unsupported";
+    if (category === "context_mismatch") return "validation_failed";
+    if (category === "cancelled") return "user_cancelled";
+    if (category === "recognition_failed" || category === "empty_result" || category === "recording_failed") return "tool_error";
+    return "internal_error";
+  }
+
+  function trackVoiceTerminal(eventName, session, fields) {
+    if (!session || session.telemetryTerminal) return;
+    session.telemetryTerminal = true;
+    trackVoiceEvent(eventName, session, fields);
+  }
+
+  function abandonCompletedVoiceResult(stage) {
+    var current = state.voiceInput || {};
+    if (current.status !== "completed" || !current.operationId || current.telemetryTerminal) return;
+    trackVoiceEvent("voice_cancelled", {
+      operationId: current.operationId,
+      telemetrySessionId: current.telemetrySessionId,
+    }, {
+      stage: stage || "recognition",
+      durationMs: Math.max(0, Date.now() - Number(current.startedAt || Date.now())),
+    });
+    state.voiceInput = Object.assign({}, current, { telemetryTerminal: true, operationId: null });
+  }
+
   function setVoiceInputStatus(status, patch) {
     var next = Object.assign({}, state.voiceInput, patch || {});
     next.status = status;
@@ -8913,6 +9175,10 @@
     var session = activeVoiceInput;
     if (!session) return;
     if (cancelled) {
+      trackVoiceTerminal("voice_cancelled", session, {
+        stage: state.voiceInput && state.voiceInput.stage === "permission" ? "permission" : "recording",
+        durationMs: voiceDurationMs(session),
+      });
       cleanupVoiceInputSession(session);
       activeVoiceInput = null;
       setVoiceInputStatus("cancelled", { message: bt("voiceCancelled"), completedAt: Date.now() });
@@ -8955,10 +9221,25 @@
       if (typeof session.writeback === "function") {
         session.writeback(text, session.draftBeforeStart);
       }
-      setVoiceInputStatus("completed", { message: bt("voiceWritten"), completedAt: Date.now() });
+      trackVoiceEvent("voice_recognition_completed", session, {
+        durationMs: Math.max(0, Date.now() - Number(session.recognitionStartedAt || session.startedAt)),
+        recognizerType: "local",
+      });
+      setVoiceInputStatus("completed", {
+        message: bt("voiceWritten"),
+        completedAt: Date.now(),
+        operationId: session.operationId,
+        telemetrySessionId: session.telemetrySessionId,
+        telemetryTerminal: false,
+        startedAt: session.startedAt,
+      });
       emitVoiceDiagnostic("writeback", "info", "voice text written back", "语音已写入输入框", "");
     } catch (err) {
       var normalized = normalizeVoiceError(err, "transcribing");
+      trackVoiceTerminal("voice_recognition_failed", session, {
+        durationMs: Math.max(0, Date.now() - Number(session.recognitionStartedAt || session.startedAt)),
+        errorCategory: voiceTelemetryErrorCategory(normalized.category),
+      });
       setVoiceInputStatus("failed", {
         message: normalized.message,
         error: normalized.message,
@@ -9040,6 +9321,29 @@
       return;
     }
 
+    abandonCompletedVoiceResult("recognition");
+    var pendingVoiceSession = {
+      id: voiceToken("voice_"),
+      operationId: voiceToken("voiceop_"),
+      sessionId: state.activeSessionId || null,
+      telemetrySessionId: state.activeSessionId || voiceToken("draftsession_"),
+      draftBeforeStart: String(draftText || ""),
+      writeback: writeback,
+      chunks: [],
+      sampleRate: 16000,
+      startedAt: Date.now(),
+      telemetryTerminal: false,
+      permissionRecorded: false,
+    };
+    trackVoiceEvent("voice_entry_clicked", pendingVoiceSession, { entryPoint: "composer" });
+    activeVoiceInput = pendingVoiceSession;
+    setVoiceInputStatus("requesting_permission", {
+      message: bt("voiceRequestingPermission"),
+      sessionId: pendingVoiceSession.sessionId,
+      startedAt: pendingVoiceSession.startedAt,
+      stage: "dependency",
+    });
+
     // iOS/WebKit 只允许在用户点击的同步调用栈里启动 AudioContext。Web 端先在任何
     // await 之前创建并 resume，后续依赖检测和麦克风授权完成后复用这个 context。
     var AudioCtor = window.AudioContext || window.webkitAudioContext; // eslint-disable-line compat/compat -- Safari 14.0 ships webkitAudioContext; the || fallback above selects it
@@ -9060,11 +9364,17 @@
     // 首次/缺组件：先检测本地语音识别依赖，缺则弹安装框、不进录音。
     try {
       var asrStatus = await invoke("voice_asr_status");
+      if (activeVoiceInput !== pendingVoiceSession) return;
       // VoiceAsrStatus 只有 engine/ffmpeg/model/ready/missing,无 installable 字段。
       // 未装好即弹安装引导;平台 gating 若要做,需先给后端补 installable(当前无此需求)。
       if (asrStatus && !asrStatus.ready) {
+        trackVoiceTerminal("voice_recognition_failed", pendingVoiceSession, {
+          durationMs: voiceDurationMs(pendingVoiceSession),
+          errorCategory: "configuration_missing",
+        });
         if (IS_WEB) {
           if (primedAudioContext) primedAudioContext.close().catch(function () {});
+          activeVoiceInput = null;
           setVoiceInputStatus("failed", {
             message: bt("voiceNeedDesktopAsr"),
             error: "voice_asr_not_ready",
@@ -9074,25 +9384,17 @@
           });
           return;
         }
+        activeVoiceInput = null;
         state.voiceAsrSetup = { open: true, status: asrStatus, installing: false, progress: null, error: null };
         notify();
         return;
       }
     } catch (e) {
+      if (activeVoiceInput !== pendingVoiceSession) return;
       // 检测失败（如 mock 环境/旧后端）不阻塞，继续走原录音路径（环境变量/兜底引擎）
     }
 
-    var session = {
-      id: Date.now().toString(36),
-      sessionId: state.activeSessionId || null,
-      draftBeforeStart: String(draftText || ""),
-      writeback: writeback,
-      chunks: [],
-      sampleRate: 16000,
-      startedAt: Date.now(),
-      audioContext: primedAudioContext,
-    };
-    activeVoiceInput = session;
+    var session = Object.assign(pendingVoiceSession, { audioContext: primedAudioContext });
     setVoiceInputStatus("requesting_permission", {
       message: bt("voiceRequestingPermission"),
       sessionId: session.sessionId,
@@ -9120,6 +9422,8 @@
         cleanupVoiceInputSession(session);
         return;
       }
+      session.permissionRecorded = true;
+      trackVoiceEvent("voice_permission_result", session, { voicePermissionStatus: "granted" });
       session.audioContext = session.audioContext || new AudioCtor();
       if (primedAudioResume) await primedAudioResume;
       if (session.audioContext.state === "suspended") await session.audioContext.resume();
@@ -9140,12 +9444,31 @@
       session.processor.connect(session.zeroGain);
       session.zeroGain.connect(session.audioContext.destination);
       session.timeoutId = setTimeout(function () { finishVoiceInput(false, true); }, 10000);
+      session.recognitionStartedAt = Date.now();
       setVoiceInputStatus("recording", { message: bt("voiceRecording"), stage: "recording" });
+      trackVoiceEvent("voice_started", session);
       emitVoiceDiagnostic("recording", "info", "recording started", "", "");
     } catch (err) {
       cleanupVoiceInputSession(session);
       if (activeVoiceInput === session) activeVoiceInput = null;
       var normalized = normalizeVoiceError(err, "recording");
+      if (!session.permissionRecorded && normalized.category !== "cancelled") {
+        session.permissionRecorded = true;
+        trackVoiceTerminal("voice_permission_result", session, {
+          voicePermissionStatus: normalized.category === "permission_denied" ? "denied" : "error",
+          errorCategory: voiceTelemetryErrorCategory(normalized.category),
+        });
+      } else if (normalized.category === "cancelled") {
+        trackVoiceTerminal("voice_cancelled", session, {
+          stage: normalized.stage || "permission",
+          durationMs: voiceDurationMs(session),
+        });
+      } else {
+        trackVoiceTerminal("voice_recognition_failed", session, {
+          durationMs: voiceDurationMs(session),
+          errorCategory: voiceTelemetryErrorCategory(normalized.category),
+        });
+      }
       setVoiceInputStatus("failed", {
         message: normalized.message,
         error: normalized.message,
@@ -9166,6 +9489,7 @@
       finishVoiceInput(true, false);
       return;
     }
+    abandonCompletedVoiceResult("recognition");
     setVoiceInputStatus("idle", {
       message: "",
       error: null,
@@ -9173,6 +9497,10 @@
       stage: null,
       sessionId: null,
     });
+  }
+
+  function abandonVoiceResult() {
+    abandonCompletedVoiceResult("recognition");
   }
 
   function appendVoiceText(base, text) {
@@ -9338,6 +9666,7 @@
     cancelKbModel: cancelKbModel,
     cancelVoiceInput: cancelVoiceInput,
     clearVoiceInput: clearVoiceInput,
+    abandonVoiceResult: abandonVoiceResult,
     appendVoiceText: appendVoiceText,
     runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     loadScheduledTasks: loadScheduledTasks,
@@ -9375,6 +9704,8 @@
     stopMonitorPolling: stopMonitorPolling,
     clearMonitorStats: clearMonitorStats,
     setSelectedPet: setSelectedPet,
+    loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
+    setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
     saveSettings: saveSettings,
     saveSettingsAndRestart: saveSettingsAndRestart,
     saveSearchSettings: saveSearchSettings,

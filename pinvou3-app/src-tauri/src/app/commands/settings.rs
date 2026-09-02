@@ -335,16 +335,25 @@ pub async fn delete_model(id: String) -> Result<(), String> {
 /// 设全局默认模型(新建会话继承它)。不打断已在用的会话——它们各自保持 spawn
 /// 时的模型,想换在该会话的 chip 里切。
 #[tauri::command]
-pub async fn set_active_model(id: String) -> Result<(), String> {
+pub async fn set_active_model(id: String, app: AppHandle) -> Result<(), String> {
     UserPrefs::update_transaction(|prefs| {
         if prefs.model_by_id(&id).is_none() {
             return Err(format!("model not found: {id}"));
         }
-        prefs.advanced.active_model_id = Some(id);
+        prefs.advanced.active_model_id = Some(id.clone());
         Ok(())
     })
-    .map(|_| ())
-    .map_err(|e| sanitize_command_error("set_active_model", e))
+    .map_err(|e| sanitize_command_error("set_active_model", e))?;
+    if let Some(model) = UserPrefs::load().model_by_id(&id) {
+        crate::features::behavior_telemetry::track_model_selected(
+            &app,
+            model.preset.as_str(),
+            &model.model,
+            "app_default",
+            "settings",
+        );
+    }
+    Ok(())
 }
 
 /// 切某会话当前模型(聊天 chip 热切):写 per-session 绑定 + evict 该会话 engine,
@@ -357,15 +366,30 @@ pub async fn set_session_model(
     app: AppHandle,
     pool: State<'_, EnginePool>,
 ) -> Result<(), String> {
+    let prefs = UserPrefs::load();
     if let Some(mid) = &model_id {
-        if UserPrefs::load().model_by_id(mid).is_none() {
+        if prefs.model_by_id(mid).is_none() {
             return Err(format!("model not found: {mid}"));
         }
     }
+    let selected_model = model_id
+        .as_deref()
+        .and_then(|id| prefs.model_by_id(id))
+        .or_else(|| prefs.active_model())
+        .cloned();
     pool.switch_session_model(&session_id, model_id)
         .await
         .map_err(|error| format!("set_session_model({session_id}): {error:#}"))?;
     super::sessions::emit_session_event(&app, "session:model_changed", &session_id, "model");
+    if let Some(model) = selected_model {
+        crate::features::behavior_telemetry::track_model_selected(
+            &app,
+            model.preset.as_str(),
+            &model.model,
+            "session",
+            "composer",
+        );
+    }
     Ok(())
 }
 

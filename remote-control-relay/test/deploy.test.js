@@ -13,6 +13,11 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   const source = await readFile(deployScript, "utf8");
   assert.match(source, /PINVOU_REMOTE_PUBLIC_BASE_PATH="\$BASE_PATH" npm run build:web/);
   assert.match(source, /tar -czf - -C "\$RELAY_DIR\/web\/dist" \./);
+  assert.match(source, /behavior-telemetry-schema\.js/);
+  assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
+  assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
+  assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
+  assert.match(source, /cp -a "\$remote_dir\/docs\/schemas" "\$backup\/telemetry-schemas"/);
   assert.match(source, /deploy_output=.*<<'REMOTE'\r?\nset -Eeuo pipefail/);
   assert.match(source, /tar --no-same-owner --no-same-permissions -xzf "\$web_tmp" -C "\$web_stage"/);
   assert.match(source, /chown -R root:root "\$web_stage"/);
@@ -23,6 +28,32 @@ test("production deploy builds and replaces the complete shared WebUI dist", asy
   assert.match(source, /PINVOU_CONFIRM_PRODUCTION_DEPLOY/);
   assert.doesNotMatch(source, /PINVOU_ALLOW_LEGACY_REMOTE_DEPLOY/);
   assert.doesNotMatch(source, /nginx -t|systemctl reload nginx/);
+});
+
+test("production relay code artifact supports a cold ESM load", async (t) => {
+  const relayDir = join(repoRoot, "remote-control-relay");
+  const root = await mkdtemp(join(relayDir, ".deploy-cold-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const archive = join(root, "relay-code.tar.gz");
+  const stage = join(root, "stage");
+  await mkdir(stage);
+  const packed = spawnSync("tar", [
+    "-czf", archive,
+    "-C", relayDir,
+    "server.js", "telemetry-service.js", "behavior-telemetry-schema.js",
+    "-C", repoRoot,
+    "docs/schemas/behavior-telemetry-v1.schema.json",
+    "docs/schemas/behavior-telemetry-registries.json",
+  ], { encoding: "utf8" });
+  assert.equal(packed.status, 0, packed.stderr);
+  const extracted = spawnSync("tar", ["-xzf", archive, "-C", stage], { encoding: "utf8" });
+  assert.equal(extracted.status, 0, extracted.stderr);
+  const loaded = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    "await import('./telemetry-service.js')",
+  ], { cwd: stage, encoding: "utf8" });
+  assert.equal(loaded.status, 0, loaded.stderr);
 });
 
 async function executable(path, content) {
@@ -86,8 +117,10 @@ test("deploy script rolls back when post-deploy public verification fails", {
   await executable(join(bin, "scp"), `#!/usr/bin/env bash\necho scp >> "${log}"\n`);
   await executable(join(bin, "ssh"), `#!/usr/bin/env bash
 cat >/dev/null
-if [[ "$*" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
-  echo upload >> "${log}"
+if [[ "$*" == *"cat > '/tmp/pinvou-remote-code-"* ]]; then
+  echo upload_code >> "${log}"
+elif [[ "$*" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
+  echo upload_web >> "${log}"
 elif (( $# >= 10 )); then
   echo deploy >> "${log}"
   echo 'backup=/opt/pinvou-remote-relay/backups/fake'
@@ -139,7 +172,7 @@ esac
   assert.match(calls, /deploy/);
   assert.match(calls, /rollback/);
   assert.deepEqual(
-    calls.split(/\r?\n/).filter((entry) => ["upload", "deploy", "rollback"].includes(entry)),
-    ["upload", "deploy", "rollback"],
+    calls.split(/\r?\n/).filter((entry) => ["upload_code", "upload_web", "deploy", "rollback"].includes(entry)),
+    ["upload_code", "upload_web", "deploy", "rollback"],
   );
 });

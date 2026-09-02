@@ -77,7 +77,11 @@ command_protocol!(
 command_protocol!(
     behavior_telemetry_protocol,
     "behavior_telemetry.rs",
-    ["track_behavior_event"]
+    [
+        "get_behavior_telemetry_status",
+        "set_behavior_telemetry_enabled",
+        "track_behavior_event",
+    ]
 );
 command_protocol!(chat_protocol, "chat.rs", ["chat"]);
 command_protocol!(
@@ -420,6 +424,7 @@ command_protocol!(
         "web_access_get_acp_agent_status",
         "web_access_save_session_messages_chunk",
         "web_access_transcribe_voice_audio",
+        "web_access_track_behavior_event",
         "web_access_read_artifact_chunk",
         "web_access_update_settings",
         "web_access_artifact_info",

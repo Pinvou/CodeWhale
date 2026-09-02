@@ -11,7 +11,34 @@
   var invoke = context.invoke;
   var listen = context.listen;
   var authoritativeAccountRevision = 0;
+  var behaviorTelemetryStatusPollTimer = null;
 
+  function behaviorTelemetryControlPending(status) {
+    return !!(status && (status.withdrawal_pending || status.deletion_pending));
+  }
+
+  function behaviorTelemetryStatusNeedsPoll(status) {
+    return !!(status && (
+      status.enabled
+      || behaviorTelemetryControlPending(status)
+      || (status.configured && status.user_enabled !== false)
+    ));
+  }
+
+  function scheduleBehaviorTelemetryStatusPoll() {
+    if (behaviorTelemetryStatusPollTimer || !behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) return;
+    var delay = behaviorTelemetryControlPending(state.behaviorTelemetry) ? 1000 : 5000;
+    behaviorTelemetryStatusPollTimer = setTimeout(async function pollBehaviorTelemetryStatus() {
+      behaviorTelemetryStatusPollTimer = null;
+      try {
+        state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
+        notify();
+      } catch (_) {}
+      if (behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) {
+        scheduleBehaviorTelemetryStatusPoll();
+      }
+    }, delay);
+  }
   function isBuiltinLlmApiModelId(modelId) {
     if (modelId === "builtin_llmapi") return true;
     return (state.savedModels || []).some(function (model) {
@@ -113,6 +140,33 @@
       state.settings = { theme: "genesis", language: "zh-Hans" };
     }
     notify();
+  }
+  async function loadBehaviorTelemetryStatus() {
+    try {
+      state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
+    } catch (_) {
+      state.behaviorTelemetry = {
+        configured: false,
+        enabled: false,
+        user_enabled: null,
+        collection_period_id: null,
+        withdrawal_pending: false,
+        deletion_pending: false,
+        last_deletion_request_id: null,
+        retention_days: 35,
+        pending_event_count: 0,
+        dropped_event_count: 0,
+      };
+    }
+    notify();
+    scheduleBehaviorTelemetryStatusPoll();
+    return state.behaviorTelemetry;
+  }
+  async function setBehaviorTelemetryEnabled(enabled) {
+    state.behaviorTelemetry = await invoke("set_behavior_telemetry_enabled", { enabled: !!enabled });
+    notify();
+    scheduleBehaviorTelemetryStatusPoll();
+    return state.behaviorTelemetry;
   }
   async function loadSelectedPet() {
     try {
@@ -526,11 +580,67 @@
   }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
+ function analyticsOperationId(prefix) {
+   var cryptoApi = globalThis.crypto;
+   if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+     var bytes = new Uint8Array(12);
+     cryptoApi.getRandomValues(bytes);
+     return `${prefix}_${Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('')}`;
+   }
+   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+ }
+ function analyticsProviderKey(model) {
+   const raw = String(model.vendor || model.preset || 'unknown').toLowerCase();
+   const normalized = raw.replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z0-9]+/, '').slice(0, 64);
+   return normalized || 'unknown';
+ }
+ function hasConfiguredUserModel() {
+   return (state.savedModels || []).some(item => {
+     if (item && item.kind === 'builtin_llmapi') return false;
+     const credential = item.credential_state || (item.has_secret ? 'configured' : 'missing');
+     return credential === 'configured' || credential === 'env_override';
+   });
+ }
+ async function trackProviderSetup(request) {
+   try { await invoke("track_behavior_event", { request }); } catch (_) { /* analytics is best effort */ }
+ }
  async function saveModel(model) {
-   await invoke("save_model", { model: model });
-   await loadModels();
-   await loadSettings();
-   await loadEffectiveModelConfig();
+   const operationId = analyticsOperationId('provider');
+   const providerKey = analyticsProviderKey(model);
+   const startedAt = Date.now();
+   const initialSetup = !hasConfiguredUserModel();
+   if (initialSetup) {
+     await trackProviderSetup({ eventName: 'onboarding_started', entryPoint: 'settings' });
+   }
+   await trackProviderSetup({
+     eventName: 'provider_setup_started', providerKey, entryPoint: 'settings',
+     operationId, attemptIndex: 1,
+   });
+   try {
+     await invoke("save_model", { model: model });
+     const durationMs = Math.max(0, Date.now() - startedAt);
+     await trackProviderSetup({
+       eventName: 'provider_setup_completed', providerKey, operationId,
+       attemptIndex: 1, durationMs,
+     });
+     if (initialSetup) {
+       await trackProviderSetup({
+         eventName: 'onboarding_completed', durationMs, providerConfigured: true,
+       });
+       await trackProviderSetup({
+         eventName: 'task_environment_ready', readinessSource: 'provider_setup', providerKey,
+       });
+     }
+     await loadModels();
+     await loadSettings();
+     await loadEffectiveModelConfig();
+   } catch (error) {
+     await trackProviderSetup({
+       eventName: 'provider_setup_failed', providerKey, operationId,
+       attemptIndex: 1, errorCategory: 'validation_failed',
+     });
+     throw error;
+   }
  }
  async function revealModelApiKey(id) {
    return await invoke("reveal_model_api_key", { id: id });
@@ -586,6 +696,8 @@
 
     return {
       loadSettings: loadSettings,
+      loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
+      setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
       loadSelectedPet: loadSelectedPet,
       setSelectedPet: setSelectedPet,
       loadEffectiveModelConfig: loadEffectiveModelConfig,

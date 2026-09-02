@@ -136,6 +136,7 @@ try {
   assert.equal(projected.turns[1].operationCount, 2);
   assert.equal(projected.turns[1].failedOperationCount, 1);
   assert.equal(projected.turns[1].status, 'Completed');
+  assert.equal(projected.turns[1].id, 'turn-old', 'completed UI turns must expose the authoritative turn id');
   assert.equal(projected.turns[1].completedAt, 4000);
   assert.deepEqual(projected.turns[1].usage, {
     inputTokens: 120,
@@ -148,6 +149,7 @@ try {
   assert.equal(projected.turns[1].items[2].legacyItem, chatItems[4], 'tool cards must retain the original item for provider rendering');
   assert.equal(projected.turns[1].items[3].tool.name, 'read_file', 'shared presentation must retain the provider tool name');
   assert.equal(projected.turns[2].status, 'running');
+  assert.equal(projected.turns[2].id, 'turn-live', 'active UI turns must expose the authoritative turn id');
   assert.equal(projected.turns[2].startedAt, 123456);
   assert.equal(projected.turns[2].waitingPermission, false);
   assert.equal(projected.turns[2].waitingInput, true);

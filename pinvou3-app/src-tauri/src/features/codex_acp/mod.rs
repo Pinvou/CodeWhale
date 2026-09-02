@@ -646,6 +646,7 @@ struct AcpSession {
     connection: ConnectionTo<Agent>,
     acp_session_id: String,
     bridge: EventBridge,
+    backend: AgentBackend,
     busy: AtomicBool,
     configuring: AtomicBool,
     models: Vec<CodexAcpModel>,
@@ -693,6 +694,12 @@ impl AcpSession {
         attachments: Vec<CodexDisplayAttachment>,
     ) -> bool {
         let turn_id = self.bridge.begin_turn(&content, &attachments);
+        let model = self.current_model.read().clone().unwrap_or_default();
+        self.bridge.track_model_used(
+            &turn_id,
+            self.backend.agent_id().unwrap_or("unknown"),
+            &model,
+        );
         let kimi_diagnostic_cursor = match self.kimi_session_id.as_deref() {
             Some(session_id) => Some(kimi_diagnostic_cursor(session_id).await),
             None => None,
@@ -3918,6 +3925,7 @@ impl AcpPool {
             kimi_session_id: (backend == AgentBackend::KimiAcp).then(|| acp_session_id.clone()),
             acp_session_id,
             bridge: event_bridge,
+            backend,
             busy: AtomicBool::new(false),
             configuring: AtomicBool::new(false),
             models,

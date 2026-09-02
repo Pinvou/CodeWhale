@@ -12,14 +12,16 @@ edition = "2024"
 # rust-toolchain.toml (reproducible). The two are complementary.
 # 1.89 > the 1.85 floor of edition 2024 — kept unchanged.
 rust-version = "1.89"
-# cargo-shear (unused-dependency / unlinked-file check) exemption:
-# rustc-stack-wrapper.rs is not a compilation target of this crate; it is
-# source code that scripts/rustc-stack-wrapper-select.sh compiles on demand
-# into rustc-stack-wrapper.exe on Windows (direct CreateProcess launch to
-# bypass the cmd 8191-char limit) — see the RUSTC_WRAPPER notes in
-# .cargo/config.toml. Do NOT delete it per shear's advice.
+# cargo-shear (unused-dependency / unlinked-file check) exemptions:
+# - rustc-stack-wrapper.rs is compiled on demand by
+#   scripts/rustc-stack-wrapper-select.sh rather than by Cargo.
+# - behavior_telemetry_tests.rs is include!d by the explicitly declared
+#   standalone test target; cargo-shear does not follow concat!(env!(...)).
 [package.metadata.cargo-shear]
-ignored-paths = ["scripts/rustc-stack-wrapper.rs"]
+ignored-paths = [
+    "scripts/rustc-stack-wrapper.rs",
+    "src/features/behavior_telemetry_tests.rs",
+]
 # The main binary is the Tauri app (src/main.rs); src/bin/dump_system_prompt.rs
 # is a dev tool. This key makes `cargo run` (without --bin) default to the
 # main app instead of erroring out due to multiple bins.
@@ -39,11 +41,20 @@ required-features = ["dev-tools"]
 name = "pinvou3_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[test]]
+name = "behavior_telemetry"
+path = "tests/behavior_telemetry.rs"
+required-features = ["behavior-telemetry-test"]
+
 [features]
 default = ["local-embed"]
 local-embed = ["pinvou-knowledge/local-embed"]
 dev-tools = []
 benchmark-hooks = ["dep:agent-backend-api", "deepseek-tui/benchmark-observability", "deepseek-tui/benchmark-eval-controls"]
+# Non-default adapters used only by the standalone behavior-telemetry test
+# target. Keeping those tests out of the monolithic lib-test harness bounds
+# rustc/ThinLTO memory without exposing the adapters in release builds.
+behavior-telemetry-test = []
 # Isolated macOS BrowserCore build for physical-device acceptance. Production release is
 # controlled only by `platform::capabilities::MACOS_BROWSER_RELEASED`; this feature is never
 # included in the default feature set.

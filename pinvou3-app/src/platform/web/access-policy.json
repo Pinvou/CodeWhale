@@ -158,6 +158,7 @@
     "web_access_set_codex_acp_model",
     "web_access_search_codex_workspace",
     "web_access_transcribe_voice_audio",
+    "web_access_track_behavior_event",
     "web_access_update_settings",
     "web_access_upload_attachment_chunk",
     "web_access_write_artifact_text",

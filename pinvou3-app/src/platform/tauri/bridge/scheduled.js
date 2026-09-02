@@ -24,6 +24,34 @@
     var scheduledRunEventRefreshTimer = null;
     var scheduledTaskPendingLoads = Object.create(null);
     var scheduledTaskAutoCreateInFlight = Object.create(null);
+    var scheduledTelemetryFinishedRuns = Object.create(null);
+    var scheduledTelemetryStartedAt = Date.now();
+  function scheduledRunDuration(run) {
+    var started = Date.parse(run && (run.startedAt || run.createdAt) || "");
+    var ended = Date.parse(run && run.endedAt || "");
+    if (!Number.isFinite(started) || !Number.isFinite(ended)) return 0;
+    return Math.max(0, Math.min(86400000, ended - started));
+  }
+
+  function trackScheduledRunFinished(run) {
+    if (!run || !run.id) return;
+    var automationId = run.automationId || run.automation_id;
+    var status = String(run.status || "").toLowerCase();
+    if (!automationId || ["completed", "failed", "canceled", "cancelled", "interrupted"].indexOf(status) < 0) return;
+    var endedAt = Date.parse(run.endedAt || "");
+    if (!Number.isFinite(endedAt) || endedAt < scheduledTelemetryStartedAt - 5000) return;
+    var key = automationId + ":" + run.id;
+    if (scheduledTelemetryFinishedRuns[key]) return;
+    scheduledTelemetryFinishedRuns[key] = true;
+    invoke("track_behavior_event", { request: {
+      eventName: "scheduled_task_run_finished",
+      scheduledTaskSourceId: automationId,
+      scheduledRunSourceId: run.id,
+      status: status,
+      durationMs: scheduledRunDuration(run),
+      errorCategory: status === "failed" ? "internal_error" : (status === "completed" ? undefined : "user_cancelled"),
+    } }).catch(function () {});
+  }
   function loadScheduledTaskTemplateSources() {
     try {
       var parsed = JSON.parse(window.localStorage.getItem(SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY) || "{}");
@@ -463,6 +491,7 @@
     var rows = (state.scheduledTaskRecentRuns || []).slice();
     (Array.isArray(runs) ? runs : []).forEach(function (run) {
       if (!run) return;
+      trackScheduledRunFinished(run);
       rememberScheduledRunOwner(run);
       var merged = Object.assign({}, run, {
         automationId: run.automationId || task.id,
@@ -528,6 +557,7 @@
       });
       var rows = (Array.isArray(runs) ? runs : []).map(function (run) {
         if (!run) return null;
+        trackScheduledRunFinished(run);
         rememberScheduledRunOwner(run);
         var automationId = run.automationId || run.automation_id;
         var task = tasksById[automationId] || null;
@@ -660,6 +690,7 @@
 
   function upsertScheduledTaskRun(run) {
     if (!run || !run.id) return;
+    trackScheduledRunFinished(run);
     rememberScheduledRunOwner(run);
     if (state.selectedScheduledTaskId && run.automationId && state.selectedScheduledTaskId !== run.automationId) return;
     var found = false;
@@ -715,6 +746,12 @@
       }
       if (templateId) rememberScheduledTaskTemplateSource(created.id, templateId);
       attachScheduledTaskTemplateSource(created);
+      invoke("track_behavior_event", { request: {
+        eventName: "scheduled_task_created",
+        scheduledTaskSourceId: created.id,
+        scheduleRule: created.rrule || backendInput.rrule || "",
+        taskType: templateId || "custom",
+      } }).catch(function () {});
       // 立即重拉任务列表:新 stamp 会使创建前仍在途的 list_scheduled_tasks 响应失效,
       // 防止旧结果落地时把刚创建的任务从列表里覆盖掉。
       await loadScheduledTasks();

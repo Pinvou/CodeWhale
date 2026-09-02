@@ -736,6 +736,8 @@ function DefaultItem({
 
 export function ConversationTurn({
   turn,
+  sessionId,
+  onRetry,
   now,
   pendingByTool = {},
   onRespond = () => {},
@@ -834,7 +836,13 @@ export function ConversationTurn({
           })}
           {!running && (assistantAvailable || turn.lifecycleKnown || turn.completedAt || turn.error) && <AssistantMessageFooter>
             {assistantAvailable && (
-              <AssistantMessageActions resolveText={() => assistantResponseText(turn)} copy={c} />
+              <AssistantMessageActions
+                resolveText={() => assistantResponseText(turn)}
+                copy={c}
+                sessionId={sessionId}
+                turnId={turn.lifecycleKnown ? turn.id : null}
+                onRetry={onRetry ? () => onRetry(turn) : undefined}
+              />
             )}
             {(turn.lifecycleKnown || turn.completedAt || turn.error) && <>
               <ConversationStatusBadge status={turn.status} copy={c} />
@@ -857,7 +865,14 @@ export function ConversationTurn({
 export function ConversationTimeline({ turns = [], ...props }) {
   return (
     <>
-      {turns.map(turn => <ConversationTurn key={turn.id} turn={turn} {...props} />)}
+      {turns.map((turn, index) => (
+        <ConversationTurn
+          key={turn.id}
+          turn={turn}
+          {...props}
+          onRetry={index === turns.length - 1 ? props.onRetry : undefined}
+        />
+      ))}
     </>
   );
 }

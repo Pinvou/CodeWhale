@@ -9,6 +9,8 @@ import { PinvouLogo } from '../../components/PinvouLogo.jsx';
 import { MaterialInspector } from './MaterialInspector.jsx';
 import { RelayAvatar } from './RelayAvatar.jsx';
 import { TeamBoard } from './TeamBoard.jsx';
+import { invokeTauri } from '../../platform/tauri/client.js';
+import { isWeb } from '../../shared/platform.js';
 import {
   TEAM_RELAY_SOURCE_FILTERS, TEAM_RELAY_VIEWS, canUpdateRelayProgress, matchesRelayView,
   matchesSourceFilter, projectSnapshot, projectTeamBoard, relayViewCounts,
@@ -16,6 +18,22 @@ import {
 import './team-relay.css';
 
 const DEFAULT_TEAM_RELAY_SERVICE_URL = 'https://pinvou.com/pinvou3/team-relay';
+
+function teamTelemetryToken(prefix) {
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(12);
+    window.crypto.getRandomValues(bytes);
+    return `${prefix}-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
+function memberCountBucket(count) {
+  if (count <= 1) return '1';
+  if (count <= 3) return '2_3';
+  if (count <= 8) return '4_8';
+  return '9_plus';
+}
 
 function displayTime(value) {
   const date = new Date(value);
@@ -650,6 +668,11 @@ function WorkThread({ copy, task, meId, confirmedTransfers, busy, taskWorkspace,
 }
 
 export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeAgents }) {
+  const teamTelemetryViewIdRef = useRef(null);
+  const teamTelemetrySessionIdRef = useRef(null);
+  const teamTelemetryReportedRef = useRef(false);
+  if (!teamTelemetryViewIdRef.current) teamTelemetryViewIdRef.current = teamTelemetryToken('team-view');
+  if (!teamTelemetrySessionIdRef.current) teamTelemetrySessionIdRef.current = teamTelemetryToken('team-session');
   const copy = t.uiTeamRelay;
   const bridge = window.TauriBridge;
   const loadAvatarSource = bridge?.teamRelay?.avatarSource;
@@ -684,7 +707,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const joinCodeFetchedAtRef = useRef(0);
 
   const relay = viewState.teamRelay || {};
-  const webHost = window.PinvouPlatform?.kind === 'web' || window.PinvouPlatform?.isWeb === true;
+  const webHost = isWeb;
   const capabilitiesLoaded = viewState.platformCapabilities?.loaded || webHost;
   const supported = !webHost && viewState.platformCapabilities?.teamRelaySupported === true;
   useEffect(() => bridge?.state?.subscribeMany ? bridge.state.subscribeMany(['platform', 'teamRelay'], setViewState) : undefined, [bridge]);
@@ -696,6 +719,19 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const teams = snapshot?.teams?.length ? snapshot.teams : snapshot?.bootstrap?.team ? [{ ...snapshot.bootstrap.team, open_work_count: 0 }] : [];
   const activeTeamId = selectedTeamId || snapshot?.bootstrap?.team?.id;
   const activeBootstrap = (snapshot?.team_bootstraps || []).find(item => item.team.id === activeTeamId) || snapshot?.bootstrap;
+  useEffect(() => {
+    if (teamTelemetryReportedRef.current || !supported || !activeBootstrap?.team?.id) return;
+    teamTelemetryReportedRef.current = true;
+    invokeTauri('track_behavior_event', {
+      request: {
+        eventName: 'team_mode_opened',
+        viewId: teamTelemetryViewIdRef.current,
+        sessionId: teamTelemetrySessionIdRef.current,
+        memberCountBucket: memberCountBucket(activeBootstrap?.members?.length || 1),
+        entryPoint: 'sidebar',
+      },
+    }).catch(() => {});
+  }, [activeBootstrap?.members?.length, activeBootstrap?.team?.id, bridge, supported]);
   const activeMembershipSignature = useMemo(() => {
     const membersSignature = (activeBootstrap?.members || [])
       .map(member => `${member.id}:${member.role || ''}`)

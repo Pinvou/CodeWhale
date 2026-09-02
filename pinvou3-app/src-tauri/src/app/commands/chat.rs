@@ -88,6 +88,25 @@ pub(crate) async fn chat_with_reservation(
     if message.trim().is_empty() && attachments.as_ref().map_or(true, |a| a.is_empty()) {
         return Err("empty message".to_string());
     }
+    let is_scheduled = store.scheduled_profile(&sid).is_some();
+    let mode_state = store.mode_state(&sid);
+    let has_attachment = attachments.as_ref().is_some_and(|items| !items.is_empty());
+    let input_type = match (!message.trim().is_empty(), has_attachment) {
+        (true, true) => "mixed",
+        (false, true) => "attachment",
+        _ => "text",
+    };
+    let team_initiated = crate::features::behavior_telemetry::is_team_session(app, &sid);
+    let mut telemetry_submission = (!is_scheduled).then(|| {
+        crate::features::behavior_telemetry::begin_task_submission(
+            app,
+            &sid,
+            if team_initiated { "team" } else { "assistant" },
+            "user",
+            input_type,
+            has_attachment,
+        )
+    });
     // 默认标题会话用首条消息自动命名（原生代码会话与 ACP 同一语义）。
     // 命名失败不阻断发送——标题是展示层信息，正文投递才是关键路径。
     let title_source = if message.trim().is_empty() {
@@ -125,7 +144,6 @@ pub(crate) async fn chat_with_reservation(
                 .map(|session| session.messages.len())
                 .map_err(|error| format!("load Session {sid} for attachment references: {error:#}"))
         })?;
-    let is_scheduled = store.scheduled_profile(&sid).is_some();
     if is_scheduled {
         for attachment in attachments.as_deref().unwrap_or_default() {
             validate_staged_attachment_basename(&attachment.basename).map_err(|error| {
@@ -279,7 +297,6 @@ pub(crate) async fn chat_with_reservation(
         }
     }
     // 取该 session 的 mode 状态（mode + 多智能体开关）。
-    let mode_state = store.mode_state(&sid);
     // 多智能体模式（ADR-0006）：所有产生模型 turn 的入口共用提醒组装；每轮
     // 重申而非首轮一次性教学，关掉开关即保持原消息不变。
     let prepared_delegation = super::multiagent::prepare_delegation_turn(
@@ -312,6 +329,9 @@ pub(crate) async fn chat_with_reservation(
         .await
     {
         Ok(()) => {
+            if let Some(submission) = telemetry_submission.take() {
+                submission.sent();
+            }
             pending_injections.commit();
             if let Some((message_index, attachment_references)) = attachment_record {
                 if let Err(error) =

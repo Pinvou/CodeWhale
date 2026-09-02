@@ -988,8 +988,9 @@ pub async fn web_access_get_codex_workspace_diff(
 pub async fn web_access_cancel_codex_acp(
     session_id: String,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<(), String> {
-    let result = super::codex::cancel_codex_acp(session_id, acp_pool).await;
+    let result = super::codex::cancel_codex_acp(session_id, acp_pool, app).await;
     web_acp_result(WebAcpOperation::Cancel, result)
 }
 
@@ -1006,6 +1007,7 @@ pub async fn web_access_codex_acp_prompt(
     manager: State<'_, RemoteControlManager>,
     store: State<'_, SessionStore>,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<(), String> {
     let outcome = async {
         crate::features::sessions::validate_session_id(&session_id)
@@ -1046,6 +1048,7 @@ pub async fn web_access_codex_acp_prompt(
             workspace_references.unwrap_or_default(),
             &store,
             &acp_pool,
+            &app,
         )
         .await;
         if result.is_err() {
@@ -1167,11 +1170,19 @@ pub async fn web_access_set_codex_acp_model(
     session_id: String,
     model_id: String,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<Value, String> {
-    let outcome = acp_pool
-        .set_model(&session_id, &model_id)
-        .await
-        .and_then(project_acp_session_info_for_web);
+    let provider = acp_pool
+        .backend(&session_id)
+        .agent_id()
+        .unwrap_or("unknown");
+    let outcome = acp_pool.set_model(&session_id, &model_id).await;
+    if outcome.is_ok() {
+        crate::features::behavior_telemetry::track_model_selected(
+            &app, provider, &model_id, "session", "composer",
+        );
+    }
+    let outcome = outcome.and_then(project_acp_session_info_for_web);
     web_acp_result(WebAcpOperation::SetModel, outcome)
 }
 
@@ -1512,23 +1523,25 @@ pub async fn web_access_save_session_messages_chunk(
 #[tauri::command]
 pub async fn web_access_transcribe_voice_audio(
     audio_base64: String,
-    session_id: String,
+    session_id: Option<String>,
     store: State<'_, SessionStore>,
 ) -> Result<super::voice::VoiceTranscriptionResponse, super::voice::VoiceCommandError> {
-    crate::features::sessions::validate_session_id(&session_id).map_err(|error| {
-        super::voice::VoiceCommandError::new(
-            "context_mismatch",
-            "transcribing",
-            format!("invalid Session id: {error:#}"),
-        )
-    })?;
-    store.load(&session_id).map_err(|error| {
-        super::voice::VoiceCommandError::new(
-            "context_mismatch",
-            "transcribing",
-            format!("load Session {session_id}: {error:#}"),
-        )
-    })?;
+    if let Some(session_id) = session_id.as_deref() {
+        crate::features::sessions::validate_session_id(session_id).map_err(|error| {
+            super::voice::VoiceCommandError::new(
+                "context_mismatch",
+                "transcribing",
+                format!("invalid Session id: {error:#}"),
+            )
+        })?;
+        store.load(session_id).map_err(|error| {
+            super::voice::VoiceCommandError::new(
+                "context_mismatch",
+                "transcribing",
+                format!("load Session {session_id}: {error:#}"),
+            )
+        })?;
+    }
     let audio_bytes = base64::engine::general_purpose::STANDARD
         .decode(audio_base64)
         .map_err(|error| {
@@ -1547,6 +1560,16 @@ pub async fn web_access_transcribe_voice_audio(
     }
     super::voice::transcribe_voice_audio(super::voice::VoiceTranscriptionRequest { audio_bytes })
         .await
+}
+
+/// Web-safe telemetry projection. The underlying command accepts only the
+/// versioned event whitelist and schema-controlled scalar fields.
+#[tauri::command]
+pub fn web_access_track_behavior_event(
+    request: super::behavior_telemetry::TrackBehaviorEventRequest,
+    app: AppHandle,
+) -> Result<(), String> {
+    super::behavior_telemetry::track_behavior_event(request, app)
 }
 
 /// Read a bounded chunk from a Session-owned artifact. The resolver rejects

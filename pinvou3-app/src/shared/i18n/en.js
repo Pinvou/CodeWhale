@@ -615,6 +615,9 @@ dictEn.uiKnowledge = {
 };
 
 Object.assign(dictEn.uiConversation, {
+  feedbackPositive: 'Helpful',
+  feedbackNegative: 'Not helpful',
+  retryReply: 'Regenerate',
   callingTool: name => `Calling ${name}`,
   inputPlaceholder: 'Enter a value',
   otherAnswer: 'Other',
@@ -1832,3 +1835,14 @@ dictEn["uiTeamRelayAccess"] = {
   "disabling": "Disabling…",
   "disableUnavailable": "Team Relay could not be disabled. Try again."
 };
+dictEn["uiSettingsDetail"]["behaviorAnalyticsTitle"] = "Privacy and usage analytics";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsLabel"] = "Help improve PINVOU";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDesc"] = "Enabled by default during preview. Only controlled feature outcomes, timing, and error categories are collected; conversations, file contents, paths, and credentials are never collected. Your on/off choice is retained.";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsNotConfigured"] = "Usage analytics is not configured in this build and remains off.";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsRetention"] = days => `Linkable data is retained for at most ${days} days. You can turn analytics off or back on at any time.`;
+dictEn["uiSettingsDetail"]["behaviorAnalyticsEnableConfirm"] = "PINVOU will collect controlled feature usage and quality data to improve the product. Conversation text, file contents, paths, tool arguments, and credentials are never collected. Enable analytics?";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDisableConfirm"] = "Collection stops immediately and pending events are cleared. An offline withdrawal will retry when connectivity returns. Turn analytics off?";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "On";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "Off";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "Remote withdrawal pending";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "The operation failed. Try again later.";

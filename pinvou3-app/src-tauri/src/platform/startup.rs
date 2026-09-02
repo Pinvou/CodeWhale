@@ -28,6 +28,10 @@ fn elapsed() -> Duration {
     STARTED_AT.get_or_init(Instant::now).elapsed()
 }
 
+pub fn elapsed_ms() -> u64 {
+    elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 fn clean_field(value: &str) -> String {
     crate::platform::credential_store::redact_secret(value)
         .chars()

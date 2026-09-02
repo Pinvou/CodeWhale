@@ -4,6 +4,17 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, X } from '../../components/icons.jsx';
 import { invokeTauri } from '../../platform/tauri/client.js';
+import { isWeb } from '../../shared/platform.js';
+
+function providerTelemetryToken(prefix) {
+  const cryptoApi = globalThis.crypto;
+  if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+    const bytes = new Uint8Array(12);
+    cryptoApi.getRandomValues(bytes);
+    return `${prefix}_${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
 import {
   ACP_MODEL_1M_VARIANTS, ACP_MODEL_PRESETS, ACP_PROVIDER_PRESETS, CLAUDE_MODEL_SLOT_IDS,
 } from './acp-provider-catalog.js';
@@ -298,7 +309,15 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
   const doSave = async (apiKeyAction, trimmedKey) => {
     setSaving(true);
     setError('');
+    const operationId = providerTelemetryToken('provider');
+    const providerKey = String(agent || 'unknown').toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z0-9]+/, '').slice(0, 64) || 'unknown';
+    const startedAt = Date.now();
+    const trackSetup = request => invokeTauri(
+      isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event',
+      { request },
+    ).catch(() => {});
     try {
+      await trackSetup({ eventName: 'provider_setup_started', providerKey, entryPoint: 'settings', operationId, attemptIndex: 1 });
       const { slotPayload, contextWindowPayload } = payloadRef.current;
       const saved = await invokeTauri('save_acp_provider', {
         agent,
@@ -312,9 +331,17 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
         apiKey: trimmedKey || null,
         apiKeyAction,
       });
+      await trackSetup({
+        eventName: 'provider_setup_completed', providerKey, operationId, attemptIndex: 1,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
       onSaved(saved);
       onClose();
     } catch (e) {
+      await trackSetup({
+        eventName: 'provider_setup_failed', providerKey, operationId, attemptIndex: 1,
+        errorCategory: 'validation_failed',
+      });
       setError(String(e));
       setSaving(false);
     }

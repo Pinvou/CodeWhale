@@ -12,9 +12,28 @@ import { can, isWeb } from '../../shared/platform.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 
 let kbCache = { scan: null, stats: null, types: [], loaded: false, colls: [], allDocs: [], embedInfo: null, model: null, outputs: [], outputsLoaded: false };
+let knowledgeImportTelemetryAttempt = null;
+let knowledgeImportAttemptIndex = 0;
 
 const MODEL_PROGRESS_RADIUS = 31;
 const MODEL_PROGRESS_CIRCUMFERENCE = 2 * Math.PI * MODEL_PROGRESS_RADIUS;
+
+function behaviorToken(prefix) {
+  if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
+    return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+  }
+  const bytes = new Uint8Array(12);
+  window.crypto.getRandomValues(bytes);
+  return `${prefix}${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function countBucket(count) {
+  if (count <= 0) return '0';
+  if (count === 1) return '1';
+  if (count <= 10) return '2_10';
+  if (count <= 100) return '11_100';
+  return '100_plus';
+}
 
 function ModelProgressIndicator({ downloading, percent, label }) {
   if (!downloading) {
@@ -667,10 +686,56 @@ function ModelProgressIndicator({ downloading, percent, label }) {
       const [docs, setDocs] = useState([]);
       const [allDocs, setAllDocs] = useState(kbCache.allDocs);
       const [idx, setIdx] = useState(null);
+      const addToKbSourceRef = useRef('file');
+      const finishKnowledgeImport = useCallback((success, errorCategory) => {
+        const attempt = knowledgeImportTelemetryAttempt;
+        if (!attempt || attempt.finished) return;
+        attempt.finished = true;
+        knowledgeImportTelemetryAttempt = null;
+        inv(isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event', {
+          request: {
+            eventName: 'knowledge_import_completed',
+            operationId: attempt.operationId,
+            attemptIndex: attempt.attemptIndex,
+            success,
+            durationMs: Math.max(0, Date.now() - attempt.startedAt),
+            errorCategory: success ? undefined : (errorCategory || 'internal_error'),
+          },
+        }).catch(() => {});
+      }, []);
+      const startKnowledgeImport = useCallback(async (collectionId, paths, sourceType) => {
+        const list = Array.isArray(paths) ? paths : [paths];
+        const attempt = {
+          operationId: behaviorToken('knowledge_import_'),
+          attemptIndex: ++knowledgeImportAttemptIndex,
+          startedAt: Date.now(),
+          finished: false,
+        };
+        knowledgeImportTelemetryAttempt = attempt;
+        inv(isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event', {
+          request: {
+            eventName: 'knowledge_import_started',
+            operationId: attempt.operationId,
+            attemptIndex: attempt.attemptIndex,
+            sourceType,
+            itemCountBucket: countBucket(list.length),
+          },
+        }).catch(() => {});
+        try {
+          return await inv('kb_collection_add_sources', { collectionId, paths: list });
+        } catch (error) {
+          finishKnowledgeImport(false, 'validation_failed');
+          throw error;
+        }
+      }, [finishKnowledgeImport]);
       const [importError, setImportError] = useState('');
       const [failedFilesLoading, setFailedFilesLoading] = useState(false);
       const failedPaginationRef = useRef({ jobId: null, generation: 0, initialized: false, nextOffset: 0 });
       const replaceIndexState = useCallback((next) => {
+        if (knowledgeImportTelemetryAttempt && next && !next.running && ['done', 'done_with_errors', 'cancelled', 'interrupted'].includes(next.phase)) {
+          const success = next.phase === 'done' && Number(next.failed || 0) === 0;
+          finishKnowledgeImport(success, next.phase === 'cancelled' ? 'user_cancelled' : (success ? undefined : 'internal_error'));
+        }
         const generation = failedPaginationRef.current.generation + 1;
         failedPaginationRef.current = {
           jobId: next && next.jobId ? next.jobId : null,
@@ -680,7 +745,7 @@ function ModelProgressIndicator({ downloading, percent, label }) {
         };
         setFailedFilesLoading(false);
         setIdx(next);
-      }, []);
+      }, [finishKnowledgeImport]);
       const invalidateFailedPagination = useCallback(() => {
         const current = failedPaginationRef.current;
         failedPaginationRef.current = {
@@ -910,7 +975,7 @@ function ModelProgressIndicator({ downloading, percent, label }) {
         let paths = [];
         try { paths = await picker(); } catch (e) { paths = []; }
         if (!paths || !paths.length) return;
-        try { replaceIndexState(await inv('kb_collection_add_sources', { collectionId: cid, paths })); } catch (e) {}
+        try { replaceIndexState(await startKnowledgeImport(cid, paths, kind === 'folders' ? 'folder' : 'file')); } catch (e) {}
       };
       // 知识库页底部入口：选文件/文件夹 → 单知识集直接加；多个/无则走「加入知识库」浮层选择。
       const dzPick = async (kind) => {
@@ -920,8 +985,8 @@ function ModelProgressIndicator({ downloading, percent, label }) {
         let paths = [];
         try { paths = await picker(); } catch (e) { paths = []; }
         if (!paths || !paths.length) return;
-        if (colls.length === 1) { try { replaceIndexState(await inv('kb_collection_add_sources', { collectionId: colls[0].id, paths })); } catch (e) {} }
-        else { setAddToKb(paths); }
+        if (colls.length === 1) { try { replaceIndexState(await startKnowledgeImport(colls[0].id, paths, kind === 'folders' ? 'folder' : 'file')); } catch (e) {} }
+        else { addToKbSourceRef.current = kind === 'folders' ? 'folder' : 'file'; setAddToKb(paths); }
       };
       // 「+ 添加 ▾」下拉菜单：文件 / 文件夹。portal 到 body 以免被 overflow-y-auto 裁剪。
       const [addMenu, setAddMenu] = useState(null); // null | {left,top,width,src}
@@ -1681,7 +1746,7 @@ function ModelProgressIndicator({ downloading, percent, label }) {
                 ) : (
                   <div className="flex flex-col gap-1 mb-4 max-h-[240px] overflow-y-auto">
                     {colls.map((c) => (
-                      <button key={c.id} onClick={async () => { try { replaceIndexState(await inv('kb_collection_add_sources', { collectionId: c.id, paths: Array.isArray(addToKb) ? addToKb : [addToKb] })); } catch (e) {} setAddToKb(null); if (!outputsOnly) setSub('kb'); }}
+                      <button key={c.id} onClick={async () => { try { replaceIndexState(await startKnowledgeImport(c.id, Array.isArray(addToKb) ? addToKb : [addToKb], addToKbSourceRef.current)); } catch (e) {} setAddToKb(null); if (!outputsOnly) setSub('kb'); }}
                         className={`text-left px-4 py-2.5 rounded-xl text-[14px] ${card} ${iconHover} ${ink}`}>{c.name}</button>
                     ))}
                   </div>

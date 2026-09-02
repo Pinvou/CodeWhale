@@ -19,8 +19,7 @@ PUBLIC_URL="${PINVOU_REMOTE_PUBLIC_URL:-https://pinvou.com/pinvou3/remote}"
 DIRECT_URL="${PINVOU_REMOTE_DIRECT_URL:-http://47.120.8.237:8787/pinvou3/remote}"
 BASE_PATH="${PINVOU_REMOTE_PUBLIC_BASE_PATH:-/pinvou3/remote}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
-REMOTE_SERVER_TMP="/tmp/pinvou-remote-server-$STAMP.js"
-REMOTE_TELEMETRY_TMP="/tmp/pinvou-telemetry-service-$STAMP.js"
+REMOTE_CODE_TMP="/tmp/pinvou-remote-code-$STAMP.tar.gz"
 REMOTE_WEB_TMP="/tmp/pinvou-remote-web-$STAMP.tar.gz"
 REMOTE_STATS_TMP="/tmp/pinvou-stats-$STAMP.html"
 REMOTE_HARDENING_TMP="/tmp/pinvou-remote-hardening-$STAMP.conf"
@@ -99,6 +98,7 @@ fi
 
 node --check "$RELAY_DIR/server.js"
 node --check "$RELAY_DIR/telemetry-service.js"
+node --check "$RELAY_DIR/behavior-telemetry-schema.js"
 if [[ "${SKIP_WEB_BUILD:-0}" != "1" ]]; then
   echo "构建生产 base path 的共享 WebUI"
   (cd "$ROOT/pinvou3-app" && PINVOU_REMOTE_PUBLIC_BASE_PATH="$BASE_PATH" npm run build:web)
@@ -115,8 +115,12 @@ fi
 ensure_cached_db "$IPV4_DB_CACHE" "$IPV4_DB_URL" "$IPV4_DB_SHA256"
 ensure_cached_db "$IPV6_DB_CACHE" "$IPV6_DB_URL" "$IPV6_DB_SHA256"
 
-scp "$RELAY_DIR/server.js" "$SERVER:$REMOTE_SERVER_TMP"
-scp "$RELAY_DIR/telemetry-service.js" "$SERVER:$REMOTE_TELEMETRY_TMP"
+tar -czf - -C "$RELAY_DIR" \
+  server.js telemetry-service.js behavior-telemetry-schema.js \
+  -C "$ROOT" \
+  docs/schemas/behavior-telemetry-v1.schema.json \
+  docs/schemas/behavior-telemetry-registries.json \
+  | ssh "$SERVER" "cat > '$REMOTE_CODE_TMP'"
 # dist 内包含带哈希的 JS/CSS、桥接脚本和本地 vendor，必须作为一个版本整体上传。
 tar -czf - -C "$RELAY_DIR/web/dist" . | ssh "$SERVER" "cat > '$REMOTE_WEB_TMP'"
 scp "$RELAY_DIR/web/stats.html" "$SERVER:$REMOTE_STATS_TMP"
@@ -126,21 +130,21 @@ scp "$RELAY_DIR/package-lock.json" "$SERVER:$REMOTE_LOCK_TMP"
 scp "$IPV4_DB_CACHE" "$SERVER:$REMOTE_IPV4_DB_TMP"
 scp "$IPV6_DB_CACHE" "$SERVER:$REMOTE_IPV6_DB_TMP"
 
-deploy_output="$(ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_SERVER_TMP" "$REMOTE_TELEMETRY_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
+deploy_output="$(ssh "$SERVER" bash -s -- "$REMOTE_DIR" "$SERVICE" "$STAMP" "$REMOTE_CODE_TMP" "$REMOTE_WEB_TMP" "$REMOTE_STATS_TMP" "$REMOTE_HARDENING_TMP" "$REMOTE_PACKAGE_TMP" "$REMOTE_LOCK_TMP" "$REMOTE_IPV4_DB_TMP" "$REMOTE_IPV6_DB_TMP" <<'REMOTE'
 set -Eeuo pipefail
 remote_dir="$1"
 service="$2"
 stamp="$3"
-server_tmp="$4"
-telemetry_tmp="$5"
-web_tmp="$6"
-stats_tmp="$7"
-hardening_tmp="$8"
-package_tmp="$9"
-lock_tmp="${10}"
-ipv4_tmp="${11}"
-ipv6_tmp="${12}"
+code_tmp="$4"
+web_tmp="$5"
+stats_tmp="$6"
+hardening_tmp="$7"
+package_tmp="$8"
+lock_tmp="$9"
+ipv4_tmp="${10}"
+ipv6_tmp="${11}"
 backup="$remote_dir/backups/$stamp"
+code_stage="$remote_dir/code.next-$stamp"
 web_stage="$remote_dir/web/dist.next-$stamp"
 dropin_dir="/etc/systemd/system/${service}.d"
 dropin="$dropin_dir/10-hardening.conf"
@@ -150,8 +154,15 @@ ipv6_db="$telemetry_data_dir/ip2region_v6.xdb"
 ipv4_sha256="6307a9696f5711f84bcb8b25f07894de68a64a0ed4a1cc7e990562dd3084f210"
 ipv6_sha256="5b93da35ac28bc316dccc54a758381f7a874ae0461dd51ff5df5e34815586f11"
 
-node --check "$server_tmp"
-node --check "$telemetry_tmp"
+rm -rf "$code_stage"
+mkdir -p "$code_stage"
+tar --no-same-owner --no-same-permissions -xzf "$code_tmp" -C "$code_stage"
+rm -f "$code_tmp"
+node --check "$code_stage/server.js"
+node --check "$code_stage/telemetry-service.js"
+node --check "$code_stage/behavior-telemetry-schema.js"
+test -f "$code_stage/docs/schemas/behavior-telemetry-v1.schema.json"
+test -f "$code_stage/docs/schemas/behavior-telemetry-registries.json"
 mkdir -p "$remote_dir/web"
 rm -rf "$web_stage"
 mkdir -p "$web_stage"
@@ -174,6 +185,16 @@ if [[ -f "$remote_dir/telemetry-service.js" ]]; then
 else
   touch "$backup/no-telemetry-service"
 fi
+if [[ -f "$remote_dir/behavior-telemetry-schema.js" ]]; then
+  cp -a "$remote_dir/behavior-telemetry-schema.js" "$backup/behavior-telemetry-schema.js"
+else
+  touch "$backup/no-behavior-telemetry-schema"
+fi
+if [[ -d "$remote_dir/docs/schemas" ]]; then
+  cp -a "$remote_dir/docs/schemas" "$backup/telemetry-schemas"
+else
+  touch "$backup/no-telemetry-schemas"
+fi
 if [[ -f "$remote_dir/web/stats.html" ]]; then
   cp -a "$remote_dir/web/stats.html" "$backup/stats.html"
 else
@@ -194,6 +215,9 @@ rollback() {
   if [[ -f "$backup/no-package-lock" ]]; then rm -f "$remote_dir/package-lock.json"; else cp -a "$backup/package-lock.json" "$remote_dir/package-lock.json"; fi
   if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
   if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
+  if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
+  rm -rf "$remote_dir/docs/schemas"
+  if [[ ! -f "$backup/no-telemetry-schemas" ]]; then mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
   if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
   if [[ -f "$backup/no-hardening-dropin" ]]; then
     rm -f "$dropin"
@@ -235,13 +259,22 @@ chmod 700 "$telemetry_data_dir"
 install_db "$ipv4_db" "$ipv4_tmp" "$ipv4_sha256"
 install_db "$ipv6_db" "$ipv6_tmp" "$ipv6_sha256"
 
-chown root:root "$server_tmp" "$telemetry_tmp" "$stats_tmp" "$hardening_tmp" "$package_tmp" "$lock_tmp"
-chmod 644 "$server_tmp" "$telemetry_tmp" "$stats_tmp" "$hardening_tmp" "$package_tmp" "$lock_tmp"
+chown -R root:root "$code_stage"
+find "$code_stage" -type d -exec chmod 755 {} +
+find "$code_stage" -type f -exec chmod 644 {} +
+chown root:root "$stats_tmp" "$hardening_tmp" "$package_tmp" "$lock_tmp"
+chmod 644 "$stats_tmp" "$hardening_tmp" "$package_tmp" "$lock_tmp"
 mv "$package_tmp" "$remote_dir/package.json"
 mv "$lock_tmp" "$remote_dir/package-lock.json"
 (cd "$remote_dir" && npm ci --omit=dev)
-mv "$server_tmp" "$remote_dir/server.js"
-mv "$telemetry_tmp" "$remote_dir/telemetry-service.js"
+mv "$code_stage/server.js" "$remote_dir/server.js"
+mv "$code_stage/telemetry-service.js" "$remote_dir/telemetry-service.js"
+mv "$code_stage/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"
+mkdir -p "$remote_dir/docs"
+rm -rf "$remote_dir/docs/schemas"
+mv "$code_stage/docs/schemas" "$remote_dir/docs/schemas"
+rm -rf "$code_stage"
+(cd "$remote_dir" && node --input-type=module -e "await import('./telemetry-service.js')")
 rm -rf "$remote_dir/web/dist"
 mv "$web_stage" "$remote_dir/web/dist"
 mv "$stats_tmp" "$remote_dir/web/stats.html"
@@ -290,6 +323,9 @@ if [[ -f "$backup/no-package" ]]; then rm -f "$remote_dir/package.json"; else te
 if [[ -f "$backup/no-package-lock" ]]; then rm -f "$remote_dir/package-lock.json"; else test -f "$backup/package-lock.json"; cp -a "$backup/package-lock.json" "$remote_dir/package-lock.json"; fi
 if [[ -f "$remote_dir/package.json" ]]; then (cd "$remote_dir" && npm ci --omit=dev); fi
 if [[ -f "$backup/no-telemetry-service" ]]; then rm -f "$remote_dir/telemetry-service.js"; else cp -a "$backup/telemetry-service.js" "$remote_dir/telemetry-service.js"; fi
+if [[ -f "$backup/no-behavior-telemetry-schema" ]]; then rm -f "$remote_dir/behavior-telemetry-schema.js"; else test -f "$backup/behavior-telemetry-schema.js"; cp -a "$backup/behavior-telemetry-schema.js" "$remote_dir/behavior-telemetry-schema.js"; fi
+rm -rf "$remote_dir/docs/schemas"
+if [[ ! -f "$backup/no-telemetry-schemas" ]]; then test -d "$backup/telemetry-schemas"; mkdir -p "$remote_dir/docs"; cp -a "$backup/telemetry-schemas" "$remote_dir/docs/schemas"; fi
 if [[ -f "$backup/no-stats-html" ]]; then rm -f "$remote_dir/web/stats.html"; else cp -a "$backup/stats.html" "$remote_dir/web/stats.html"; fi
 if [[ -f "$backup/no-hardening-dropin" ]]; then
   rm -f "/etc/systemd/system/${service}.d/10-hardening.conf"

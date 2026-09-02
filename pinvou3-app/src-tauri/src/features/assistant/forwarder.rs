@@ -110,18 +110,21 @@ pub(crate) fn spawn_event_forwarder(
                     active_operation_rejected = false;
                     chat_persistence_error = None;
                     current_turn_id = Some(turn_id.clone());
-                    crate::features::behavior_telemetry::track(
-                        &app,
-                        crate::features::behavior_telemetry::BehaviorEvent::new("task_started")
-                            .session(&session_id)
-                            .turn(&turn_id),
-                    );
-                    crate::features::behavior_telemetry::track_model_used(
-                        &app,
-                        &session_id,
-                        &turn_id,
-                        &bridge,
-                    );
+                    crate::features::behavior_telemetry::admit_task(&app, &session_id, &turn_id);
+                    if let Some(model) = bridge.effective_model_owned() {
+                        crate::features::behavior_telemetry::track_model_used_keys(
+                            &app,
+                            &session_id,
+                            &turn_id,
+                            model.preset.as_str(),
+                            &model.model,
+                            if bridge.session_model.is_some() {
+                                "session_default"
+                            } else {
+                                "app_default"
+                            },
+                        );
+                    }
                     if let Err(error) = turn_shell_tasks.bind_or_prepare_turn(&turn_id).await {
                         log::error!(
                             "[pinvou3][chat] failed to bind shell task scope sid={} turn={}: {error:#}",
@@ -140,6 +143,15 @@ pub(crate) fn spawn_event_forwarder(
                     }
                 }
                 Event::MessageDelta { content, .. } => {
+                    if !content.is_empty() {
+                        if let Some(turn_id) = current_turn_id.as_deref() {
+                            crate::features::behavior_telemetry::task_first_output(
+                                &app,
+                                &session_id,
+                                turn_id,
+                            );
+                        }
+                    }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
                         crate::features::assistant::timing::record_first_message_delta(&session_id);
@@ -191,6 +203,15 @@ pub(crate) fn spawn_event_forwarder(
                     );
                 }
                 Event::ToolCallStarted { id, name, input } => {
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::track_tool_call_started(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            &id,
+                            &name,
+                        );
+                    }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
                         benchmark_tool_started_at.insert(id.clone(), std::time::Instant::now());
@@ -234,6 +255,19 @@ pub(crate) fn spawn_event_forwarder(
                     }
                     // 携带 metadata 让前端识别 careful hook 拦截 (safety_level=="dangerous")
                     let (output, success, metadata) = tool_call_result_parts(result);
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::track_tool_call_completed(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            &id,
+                            &name,
+                            success,
+                            (!success).then(|| {
+                                crate::features::behavior_telemetry::error_category(Some(&output))
+                            }),
+                        );
+                    }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
                         crate::features::assistant::timing::record_tool_completed(
@@ -1014,17 +1048,18 @@ pub(crate) fn spawn_event_forwarder(
                         }
                     }
                     if let Some(turn_id) = current_turn_id.as_deref() {
-                        crate::features::behavior_telemetry::track(
+                        let status =
+                            behavior_task_status(terminal_status, terminal_error.as_deref());
+                        crate::features::behavior_telemetry::finish_task(
                             &app,
-                            crate::features::behavior_telemetry::BehaviorEvent::new(
-                                "task_finished",
-                            )
-                            .session(&session_id)
-                            .turn(turn_id)
-                            .status(behavior_task_status(
-                                terminal_status,
-                                terminal_error.as_deref(),
-                            )),
+                            &session_id,
+                            turn_id,
+                            status,
+                            (status != "success").then(|| {
+                                crate::features::behavior_telemetry::error_category(
+                                    terminal_error.as_deref(),
+                                )
+                            }),
                         );
                     }
                     maybe_notify_task_completed(
@@ -1203,12 +1238,12 @@ pub(crate) fn spawn_event_forwarder(
             Some(EmittedTerminal {
                 turn_id: Some(turn_id),
             }) => {
-                crate::features::behavior_telemetry::track(
+                crate::features::behavior_telemetry::finish_task(
                     &app,
-                    crate::features::behavior_telemetry::BehaviorEvent::new("task_finished")
-                        .session(&session_id)
-                        .turn(&turn_id)
-                        .status("failed"),
+                    &session_id,
+                    &turn_id,
+                    "failed",
+                    Some("internal_error"),
                 );
                 let _ = turn_events.send(EngineTurnSignal::Terminal {
                     turn_id,
