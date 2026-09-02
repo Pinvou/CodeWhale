@@ -13,7 +13,16 @@ const source = 393;
 const pullNumber = 923;
 const issueNumber = 915;
 const head = "9".repeat(40);
+const advancedHead = "2".repeat(40);
 const merge = "a".repeat(40);
+
+function clone(value) {
+  return structuredClone(value);
+}
+
+function httpError(status) {
+  return new Error(`GitHub API 失败：HTTP ${status}`);
+}
 
 function fixture({ release = false, merged = false } = {}) {
   const provenance = createProvenance({
@@ -45,7 +54,8 @@ function fixture({ release = false, merged = false } = {}) {
     body: `<!-- community-backflow:Pinvou/pinvou-agent#${source} -->\n` +
       `<!-- community-backflow-plan:{"schema":1,"source":${source},"depends_on":[],"release":${release}} -->`,
   };
-  return { pull, issue };
+  const filePages = [[{ filename: release ? "VERSION" : "src/example.rs" }]];
+  return { pull, issue, filePages };
 }
 
 function workflowEvent() {
@@ -68,20 +78,40 @@ function mergedEvent() {
   };
 }
 
-function fakeApi(data) {
+function fakeApi(data, options = {}) {
   const calls = [];
   let postedComment = "";
+  let branchSha = options.branchSha === undefined ? head : options.branchSha;
+  const currentIssue = clone(data.issue);
+  let pullReads = 0;
+  let issueReads = 0;
+  let refReads = 0;
   const request = async (_token, method, path, payload) => {
     calls.push({ method, path, payload });
-    if (method === "GET" && path === `/repos/${repo}/pulls/${pullNumber}`) return data.pull;
+    if (method === "GET" && path === `/repos/${repo}/pulls/${pullNumber}`) {
+      pullReads += 1;
+      const value = options.pullAtRead?.(pullReads, clone(data.pull)) || data.pull;
+      return clone(value);
+    }
     if (method === "GET" && path === `/repos/Pinvou/pinvou-agent/pulls/${source}`) {
-      return data.communityPull || { merged: true, merged_at: "2026-09-01T08:00:00Z" };
+      return clone(data.communityPull || { merged: true, merged_at: "2026-09-01T08:00:00Z" });
+    }
+    const filesMatch = path.match(/\/pulls\/393\/files\?per_page=100&page=(\d+)$/u);
+    if (method === "GET" && filesMatch) {
+      const page = Number(filesMatch[1]);
+      const value = data.filePages?.[page - 1];
+      return value === undefined ? [] : clone(value);
     }
     if (method === "GET" && path.includes(`/repos/${repo}/issues?`)) {
-      return path.includes("backflow%3Asynced") ? [] : [data.issue];
+      return path.includes("backflow%3Asynced") ? [] : [clone(currentIssue)];
+    }
+    if (method === "GET" && path === `/repos/${repo}/issues/${issueNumber}`) {
+      issueReads += 1;
+      const value = options.issueAtRead?.(issueReads, clone(currentIssue)) || currentIssue;
+      return clone(value);
     }
     if (method === "GET" && path === `/repos/${repo}/commits/${head}/check-runs?per_page=100&page=1`) {
-      return data.checks || {
+      return clone(data.checks || {
         check_runs: [{
           name: "required-gate",
           head_sha: head,
@@ -89,166 +119,284 @@ function fakeApi(data) {
           conclusion: "success",
           html_url: "https://github.com/checks/required-gate",
         }],
-      };
+      });
     }
-    if (method === "DELETE" && path.includes("/git/refs/heads/backflow/community-393")) return null;
+    if (method === "GET" && path.includes("/git/ref/heads/backflow/community-393")) {
+      refReads += 1;
+      if (options.refAtRead) branchSha = options.refAtRead(refReads, branchSha);
+      if (branchSha === null) throw httpError(404);
+      return { object: { sha: branchSha } };
+    }
+    if (method === "DELETE" && path.includes("/git/refs/heads/backflow/community-393")) {
+      if (options.deleteStatus) throw httpError(options.deleteStatus);
+      branchSha = options.afterDeleteSha === undefined ? null : options.afterDeleteSha;
+      return null;
+    }
     if (method === "GET" && path.includes(`/issues/${issueNumber}/comments?per_page=100&page=`)) return [];
     if (method === "POST" && path.endsWith(`/issues/${issueNumber}/comments`)) {
       postedComment = payload.body;
       return { id: 42 };
     }
     if (method === "GET" && path.endsWith("/issues/comments/42")) return { body: postedComment };
-    if (method === "PATCH" && path.endsWith(`/issues/${issueNumber}`)) return { ok: true };
+    if (method === "DELETE" && path.includes(`/issues/${issueNumber}/labels/`)) {
+      const encoded = path.slice(path.lastIndexOf("/") + 1);
+      const deleted = decodeURIComponent(encoded);
+      currentIssue.labels = currentIssue.labels.filter((label) => label.name !== deleted);
+      return null;
+    }
+    if (method === "POST" && path.endsWith(`/issues/${issueNumber}/labels`)) {
+      for (const label of payload.labels) {
+        if (!currentIssue.labels.some((current) => current.name === label)) {
+          currentIssue.labels.push({ name: label });
+        }
+      }
+      return { ok: true };
+    }
+    if (method === "PATCH" && path.endsWith(`/issues/${issueNumber}`)) {
+      if (payload.state) currentIssue.state = payload.state;
+      return { ok: true };
+    }
     throw new Error(`unexpected request: ${method} ${path}`);
   };
-  return { request, calls, postedComment: () => postedComment };
+  return { request, calls, postedComment: () => postedComment, branchSha: () => branchSha };
+}
+
+function fakeGraphql({ mergeMethod = "SQUASH", existing = false, mutate } = {}) {
+  const calls = [];
+  const graphql = async (_token, query, variables) => {
+    calls.push({ query, variables });
+    if (query.includes("query BackflowMergeQueuePolicy")) {
+      return { repository: { mergeQueue: { configuration: { mergeMethod } } } };
+    }
+    if (query.includes("query BackflowPullState")) {
+      return { node: { mergeQueueEntry: existing ? { id: "existing" } : null, autoMergeRequest: null } };
+    }
+    if (query.includes("mutation EnqueueBackflowPull")) {
+      if (mutate) return mutate({ query, variables });
+      return { enqueuePullRequest: { mergeQueueEntry: { id: "MQ_entry" } } };
+    }
+    throw new Error("unexpected GraphQL operation");
+  };
+  return { graphql, calls };
 }
 
 test("事件解析只接受成功 PR Check 与已合并 pull_request_target", () => {
-  assert.deepEqual(parseAutomationEvent(workflowEvent()), {
-    action: "advance",
-    pullNumber,
-    expectedHead: head,
-  });
-  assert.equal(parseAutomationEvent({
-    action: "completed",
-    workflow_run: { name: "PR Check", event: "pull_request", conclusion: "failure", pull_requests: [] },
-  }).action, "skip");
-  assert.equal(parseAutomationEvent({
-    action: "completed",
-    workflow_run: {
-      name: "PR Check", event: "push", conclusion: "success", pull_requests: [{ number: pullNumber }],
-    },
-  }).action, "skip");
-  assert.equal(parseAutomationEvent({
-    action: "closed",
-    pull_request: { number: pullNumber, merged: false },
-  }).action, "skip");
+  assert.deepEqual(parseAutomationEvent(workflowEvent()), { action: "advance", pullNumber, expectedHead: head });
+  assert.equal(parseAutomationEvent({ action: "completed", workflow_run: { name: "PR Check", event: "pull_request", conclusion: "failure", pull_requests: [] } }).action, "skip");
+  assert.equal(parseAutomationEvent({ action: "completed", workflow_run: { name: "PR Check", event: "push", conclusion: "success", pull_requests: [{ number: pullNumber }] } }).action, "skip");
+  assert.equal(parseAutomationEvent({ action: "closed", pull_request: { number: pullNumber, merged: false } }).action, "skip");
   assert.equal(parseAutomationEvent(mergedEvent()).action, "finalize");
 });
 
 test("未显式启用时安全跳过且不读取 GitHub", async () => {
   let touched = false;
-  const result = await runAutomation({
-    event: workflowEvent(),
-    repo,
-    token: null,
-    enabled: undefined,
-    request: async () => { touched = true; },
-  });
+  const result = await runAutomation({ event: workflowEvent(), repo, token: null, enabled: undefined, request: async () => { touched = true; } });
   assert.deepEqual(result, { status: "skipped", reason: "automation-disabled" });
   assert.equal(touched, false);
 });
 
-test("成功 required-gate 对应当前 head 时进入 Merge Queue", async () => {
-  const data = fixture();
-  const api = fakeApi(data);
-  const graphqlCalls = [];
-  const graphql = async (_token, query, variables) => {
-    graphqlCalls.push({ query, variables });
-    if (query.includes("query BackflowPullState")) {
-      return { node: { mergeQueueEntry: null, autoMergeRequest: null } };
-    }
-    return { enqueuePullRequest: { mergeQueueEntry: { id: "MQ_entry" } } };
-  };
-  const result = await runAutomation({
-    event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql,
-  });
+test("验证 Queue 为 SQUASH 后以 expectedHeadOid 加入 Merge Queue", async () => {
+  const api = fakeApi(fixture());
+  const graph = fakeGraphql();
+  const result = await runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql });
   assert.equal(result.status, "enqueued");
-  assert.equal(graphqlCalls.length, 2);
-  assert.match(graphqlCalls[1].query, /enqueuePullRequest/);
-  assert.deepEqual(graphqlCalls[1].variables, { id: "PR_node" });
+  assert.equal(graph.calls.length, 3);
+  assert.deepEqual(graph.calls[0].variables, { owner: "Pinvou", name: "pinvou3", branch: "main" });
+  assert.match(graph.calls[2].query, /expectedHeadOid: \$head/u);
+  assert.deepEqual(graph.calls[2].variables, { id: "PR_node", head });
 });
 
-test("dry-run 完成全部校验但不入队", async () => {
-  const data = fixture();
-  const api = fakeApi(data);
-  let mutation = false;
-  const result = await runAutomation({
-    event: workflowEvent(),
-    repo,
-    token: "token",
-    enabled: "true",
-    dryRun: true,
-    request: api.request,
-    graphql: async (_token, query) => {
-      if (query.includes("mutation")) mutation = true;
-      return { node: { mergeQueueEntry: null, autoMergeRequest: null } };
-    },
-  });
+test("校验 H 后分支推进到 H2 时 expectedHeadOid 令入队原子失败", async () => {
+  const api = fakeApi(fixture());
+  const graph = fakeGraphql({ mutate: ({ variables }) => {
+    assert.equal(variables.head, head);
+    throw new Error(`expectedHeadOid ${head} does not match ${advancedHead}`);
+  } });
+  await assert.rejects(runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql }), /expectedHeadOid/u);
+  assert.equal(graph.calls.filter((call) => call.query.includes("mutation EnqueueBackflowPull")).length, 1);
+});
+
+test("Merge Queue 合并方法不是 SQUASH 时拒绝入队且不修改远端规则", async () => {
+  const api = fakeApi(fixture());
+  const graph = fakeGraphql({ mergeMethod: "MERGE" });
+  await assert.rejects(runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql }), /mergeMethod=MERGE.*配置为 SQUASH.*不会修改规则或绕过 Queue/u);
+  assert.equal(graph.calls.length, 1);
+  assert.equal(graph.calls.some((call) => call.query.includes("mutation")), false);
+});
+
+test("dry-run 完成包括 Queue 策略在内的校验但不入队", async () => {
+  const api = fakeApi(fixture());
+  const graph = fakeGraphql();
+  const result = await runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", dryRun: true, request: api.request, graphql: graph.graphql });
   assert.equal(result.status, "dry-run");
   assert.equal(result.action, "enqueue");
-  assert.equal(mutation, false);
+  assert.equal(graph.calls.some((call) => call.query.includes("mutation")), false);
 });
 
 test("workflow_run head 必须等于 PR 当前 head", async () => {
-  const data = fixture();
-  const api = fakeApi(data);
+  const api = fakeApi(fixture());
   const event = workflowEvent();
   event.workflow_run.head_sha = "7".repeat(40);
-  await assert.rejects(runAutomation({
-    event,
-    repo,
-    token: "token",
-    enabled: "true",
-    request: api.request,
-    graphql: async () => ({ node: {} }),
-  }), /事件 head .* 与 PR .* 当前 head .* 不一致/);
+  await assert.rejects(runAutomation({ event, repo, token: "token", enabled: "true", request: api.request, graphql: fakeGraphql().graphql }), /事件 head .* 与 PR .* 当前 head .* 不一致/u);
 });
 
-test("已入队或已启用 auto-merge 时幂等跳过", async () => {
-  const data = fixture();
-  const api = fakeApi(data);
-  const result = await runAutomation({
-    event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request,
-    graphql: async () => ({ node: { mergeQueueEntry: { id: "existing" }, autoMergeRequest: null } }),
-  });
+test("已入队时仍先核验 SQUASH 策略后幂等跳过", async () => {
+  const api = fakeApi(fixture());
+  const graph = fakeGraphql({ existing: true });
+  const result = await runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql });
   assert.equal(result.status, "already-enabled");
+  assert.equal(graph.calls.length, 2);
+});
+
+test("分页读取来源 files，并以根目录 VERSION 与 Issue Release 计划交叉验证", async () => {
+  const data = fixture({ release: true, merged: true });
+  data.filePages = [Array.from({ length: 100 }, (_, index) => ({ filename: `src/file-${index}.rs` })), [{ filename: "VERSION" }]];
+  const api = fakeApi(data);
+  const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
+  assert.equal(result.status, "deferred-release");
+  assert.equal(api.calls.some((call) => call.path.endsWith("files?per_page=100&page=2")), true);
+  assert.equal(api.calls.some((call) => ["PATCH", "DELETE"].includes(call.method)), false);
+});
+
+test("来源 VERSION 与 Issue Release 计划不一致或 files 未知时 fail closed", async (t) => {
+  const cases = [
+    ["漏标 Release", () => fixture(), (data) => { data.filePages = [[{ filename: "VERSION" }]]; }, /Release 计划为 false.*判定为 true/u],
+    ["误标 Release", () => fixture({ release: true }), (data) => { data.filePages = [[{ filename: "src/example.rs" }]]; }, /Release 计划为 true.*判定为 false/u],
+    ["files 响应未知", () => fixture(), (data) => { data.filePages = [{ unknown: true }]; }, /files 响应未知/u],
+    ["changed file 未知", () => fixture(), (data) => { data.filePages = [[{}]]; }, /无法识别的 changed file/u],
+    ["Release plan 类型未知", () => fixture(), (data) => { data.issue.body = data.issue.body.replace('"release":false', '"release":"false"'); }, /plan marker 无效/u],
+  ];
+  for (const [name, create, mutate, pattern] of cases) {
+    await t.test(name, async () => {
+      const data = create();
+      mutate(data);
+      const api = fakeApi(data);
+      await assert.rejects(runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: fakeGraphql().graphql }), pattern);
+    });
+  }
 });
 
 test("拒绝外部 head、错误 base、过期 gate、blocked Issue 与未合并来源", async (t) => {
   const cases = [
-    ["外部 head", (data) => { data.pull.head.repo.full_name = "fork/pinvou3"; }, /不是 Official 同仓 PR/],
-    ["错误 base", (data) => { data.pull.base.ref = "feature"; }, /base 不是 main/],
-    ["过期 gate", (data) => { data.checks = { check_runs: [{ name: "required-gate", head_sha: "old", status: "completed", conclusion: "success" }] }; }, /没有成功的 required-gate/],
-    ["Issue 来源 marker 不一致", (data) => { data.issue.body = data.issue.body.replace("#393", "#392"); }, /必须关联唯一 Official Issue/],
-    ["blocked Issue", (data) => { data.issue.labels.push({ name: "backflow:blocked" }); }, /backflow:blocked/],
-    ["未合并来源", (data) => { data.communityPull = { merged: false, merged_at: null }; }, /不是 merged 状态/],
+    ["外部 head", (data) => { data.pull.head.repo.full_name = "fork/pinvou3"; }, /不是 Official 同仓 PR/u],
+    ["错误 base", (data) => { data.pull.base.ref = "feature"; }, /base 不是 main/u],
+    ["过期 gate", (data) => { data.checks = { check_runs: [{ name: "required-gate", head_sha: "old", status: "completed", conclusion: "success" }] }; }, /没有成功的 required-gate/u],
+    ["Issue 来源 marker 不一致", (data) => { data.issue.body = data.issue.body.replace("#393", "#392"); }, /必须关联唯一 Official Issue/u],
+    ["blocked Issue", (data) => { data.issue.labels.push({ name: "backflow:blocked" }); }, /backflow:blocked/u],
+    ["未合并来源", (data) => { data.communityPull = { merged: false, merged_at: null }; }, /不是 merged 状态/u],
   ];
   for (const [name, mutate, pattern] of cases) {
     await t.test(name, async () => {
       const data = fixture();
       mutate(data);
       const api = fakeApi(data);
-      await assert.rejects(runAutomation({
-        event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request,
-        graphql: async () => ({ node: {} }),
-      }), pattern);
+      await assert.rejects(runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: fakeGraphql().graphql }), pattern);
     });
   }
 });
 
-test("普通回流合并后删除分支、写 UTF-8 评论并关闭为 synced", async () => {
-  const data = fixture({ merged: true });
-  const api = fakeApi(data);
-  const result = await runAutomation({
-    event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request,
-  });
+test("普通回流合并后回读 ref、删除分支、重读状态并关闭为 synced", async () => {
+  const api = fakeApi(fixture({ merged: true }));
+  const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
   assert.equal(result.status, "finalized");
+  assert.equal(api.calls.filter((call) => call.method === "GET" && call.path.includes("/git/ref/")).length, 2);
   assert.equal(api.calls.some((call) => call.method === "DELETE"), true);
-  assert.match(api.postedComment(), /回流 PR 已合并并自动收尾/);
-  const patch = api.calls.find((call) => call.method === "PATCH");
-  assert.deepEqual(patch.payload.labels.sort(), ["backflow:synced", "产品"].sort());
-  assert.equal(patch.payload.state, "closed");
+  assert.equal(api.branchSha(), null);
+  assert.match(api.postedComment(), /回流 PR 已合并并自动收尾/u);
+  const issuePatch = api.calls.find((call) => call.method === "PATCH");
+  assert.equal("labels" in issuePatch.payload, false);
+  assert.equal(issuePatch.payload.state, "closed");
+  assert.equal(api.calls.filter((call) => call.method === "DELETE" && call.path.includes("/labels/")).length, 2);
+  const addLabels = api.calls.find((call) => call.method === "POST" && call.path.endsWith(`/issues/${issueNumber}/labels`));
+  assert.deepEqual(addLabels.payload, { labels: ["backflow:synced"] });
+});
+
+test("远端分支 ref 已不存在时仅将 GET 404 视为幂等并继续安全收尾", async () => {
+  const api = fakeApi(fixture({ merged: true }), { branchSha: null });
+  const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
+  assert.equal(result.status, "finalized");
+  assert.equal(api.calls.some((call) => call.method === "DELETE" && call.path.includes("/git/refs/")), false);
+  assert.equal(api.calls.some((call) => call.method === "PATCH"), true);
+});
+
+test("删除分支仅将 404 视为幂等，422 必须阻止关闭 Issue", async () => {
+  const api = fakeApi(fixture({ merged: true }), { deleteStatus: 422 });
+  await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /HTTP 422/u);
+  assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
+});
+
+test("分支 ref 已推进或删除后仍存在时绝不关闭 Issue", async (t) => {
+  await t.test("删除前已推进到 H2", async () => {
+    const api = fakeApi(fixture({ merged: true }), { branchSha: advancedHead });
+    await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /已推进到 .*不删除/u);
+    assert.equal(api.calls.some((call) => call.method === "DELETE"), false);
+    assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
+  });
+  await t.test("删除后 ref 回读仍存在", async () => {
+    const api = fakeApi(fixture({ merged: true }), { afterDeleteSha: advancedHead });
+    await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /删除后仍指向/u);
+    assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
+  });
+});
+
+test("收尾前 PR head 变化立即停止且不删除分支", async () => {
+  const api = fakeApi(fixture({ merged: true }), { pullAtRead: (read, pull) => {
+    if (read === 2) pull.head.sha = advancedHead;
+    return pull;
+  } });
+  await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /merged\/head\/branch\/merge commit 已变化/u);
+  assert.equal(api.calls.some((call) => call.method === "DELETE"), false);
+});
+
+test("收尾前 PR 或 Issue 状态变化以及新增 blocker 都立即停止", async (t) => {
+  const cases = [
+    ["PR 不再 merged", {
+      pullAtRead: (read, pull) => {
+        if (read === 2) pull.merged = false;
+        return pull;
+      },
+    }, /merged\/head\/branch\/merge commit 已变化/u],
+    ["Issue 被并发关闭", {
+      issueAtRead: (read, issue) => {
+        if (read === 1) issue.state = "closed";
+        return issue;
+      },
+    }, /不再是开放的 processing 状态/u],
+    ["Issue 新增 blocker", {
+      issueAtRead: (read, issue) => {
+        if (read === 1) issue.labels.push({ name: "backflow:blocked" });
+        return issue;
+      },
+    }, /新增 blocker\/dependency-wait/u],
+  ];
+  for (const [name, options, pattern] of cases) {
+    await t.test(name, async () => {
+      const api = fakeApi(fixture({ merged: true }), options);
+      await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), pattern);
+      assert.equal(api.calls.some((call) => call.method === "DELETE"), false);
+      assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
+    });
+  }
+});
+
+test("删除前、更新标签前或最终关闭前 Issue 标签变化立即停止，绝不用旧标签覆盖", async (t) => {
+  for (const [name, changedRead] of [["删除前", 1], ["更新标签前", 2], ["最终关闭前", 3]]) {
+    await t.test(name, async () => {
+      const api = fakeApi(fixture({ merged: true }), { issueAtRead: (read, issue) => {
+        if (read === changedRead) issue.labels.push({ name: "并发审查" });
+        return issue;
+      } });
+      await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /标签已变化/u);
+      assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
+      if (changedRead === 1) assert.equal(api.calls.some((call) => call.method === "DELETE"), false);
+    });
+  }
 });
 
 test("Release 回流提示后续固件构建，不删除分支或错误关闭 Issue", async () => {
-  const data = fixture({ release: true, merged: true });
-  const api = fakeApi(data);
-  const result = await runAutomation({
-    event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request,
-  });
+  const api = fakeApi(fixture({ release: true, merged: true }));
+  const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
   assert.equal(result.status, "deferred-release");
-  assert.match(api.postedComment(), /不会跳过固件构建契约/);
+  assert.match(api.postedComment(), /不会跳过固件构建契约/u);
   assert.equal(api.calls.some((call) => ["PATCH", "DELETE"].includes(call.method)), false);
 });

@@ -34,6 +34,15 @@ class CommunityBackflowSkillTests(unittest.TestCase):
         self.assertIn("deferred-release", self.skill)
         self.assertIn("不删除分支、不修改标签、不关闭", self.skill)
 
+    def test_event_automation_documents_concurrency_guards(self):
+        self.assertIn("expectedHeadOid", self.skill)
+        self.assertIn("mergeQueue.configuration.mergeMethod", self.skill)
+        self.assertIn("`MERGE`", self.skill)
+        self.assertIn("`REBASE`", self.skill)
+        self.assertIn("`VERSION`", self.skill)
+        self.assertIn("ref", self.skill)
+        self.assertIn("backflow:synced", self.skill)
+
     def test_cross_platform_fast_path_and_dependency_waves_are_required(self):
         self.assertIn("node scripts/community-backflow.mjs plan", self.skill)
         self.assertIn("node scripts/community-backflow.mjs queue", self.skill)

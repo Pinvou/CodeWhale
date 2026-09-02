@@ -85,8 +85,10 @@ PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI
 
 每次推进都从 GitHub 回读并同时验证：Official 同仓、base=`main`、固定
 `backflow/community-<source>` 分支、来源 marker/provenance/current head 一致、来源 Community
-PR 仍 merged、唯一关联 Official Issue、不带 blocked/dependency-wait，以及该 head 的
-`required-gate` 已 completed/success。任何一项不成立都停止，不根据事件载荷猜测状态。
+PR 仍 merged、分页读取的真实 changed files、唯一关联 Official Issue、不带
+blocked/dependency-wait，以及该 head 的 `required-gate` 已 completed/success。只有来源根目录
+`VERSION` 发生变更（含重命名前路径）才判定为 Release，并与 Issue plan 交叉验证；响应未知或
+两者不一致时 fail closed。任何一项不成立都停止，不根据事件载荷猜测状态。
 
 ```shell
 # 本地或 Actions 事件载荷的完整只读演练；仍需显式启用变量才会进入验证路径
@@ -97,15 +99,20 @@ node scripts/community-backflow.mjs automation \
   --dry-run
 ```
 
-入队和收尾均可安全重放：已经在 Merge Queue/已启用 auto-merge 的 PR 不重复入队；普通
-Issue 评论含稳定 marker，自动器保留非 `backflow:*` 标签，删除远端固定分支后再标记
-`backflow:synced` 并关闭。Release 回流第一阶段用幂等评论明确返回 `deferred-release`，不删除
-分支、不改标签、不关闭 Issue；其 `release-packages.yml` 去重触发与构建链接回读仍按后文
+入队和收尾均可安全重放：`enqueuePullRequest.expectedHeadOid` 绑定已通过门禁的 head，校验后
+分支推进会由 GitHub 原子拒绝；已经在 Merge Queue/已启用 auto-merge 的 PR 不重复入队。普通
+Issue 评论含稳定 marker；删除前重新回读 PR、Issue 和远端 ref，ref 必须仍等于已验证 head，
+删除后还需回读确认 404。关闭前再次检查标签，并只定向移除回流标签、添加
+`backflow:synced`，不使用旧标签数组覆盖并发更新。Release 回流第一阶段用幂等评论明确返回
+`deferred-release`，不删除分支、不改标签、不关闭 Issue；其 `release-packages.yml` 去重触发与
+构建链接回读仍按后文
 人工契约完成，避免缺失固件构建证据时错误收尾。
 
-Official `main` 的 Merge Queue 继续以仓库规则配置的 squash 策略合并；GitHub 的
-`enqueuePullRequest` 接口本身不接受逐 PR merge method。远端回流分支在收到 merged 事件并
-完成上述复核后由收尾器删除，因此不会把分支删除提前到组合门禁之前。
+GitHub 的 `enqueuePullRequest` 接口本身不接受逐 PR merge method，不能据此声称 squash。
+自动器在每次推进前通过 GraphQL 回读 Official `main` 的
+`mergeQueue.configuration.mergeMethod`，只接受 `SQUASH`；缺失、未知或实际为 `MERGE`/`REBASE`
+时给出管理员可操作的配置提示并拒绝入队，绝不修改远端规则或绕过 Queue。远端回流分支仅在
+收到 merged 事件并完成上述复核后删除，不会把分支删除提前到组合门禁之前。
 
 ## 依赖调度
 
