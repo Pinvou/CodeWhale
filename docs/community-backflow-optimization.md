@@ -105,6 +105,9 @@ node scripts/community-backflow.mjs automation \
 Issue 评论含稳定 marker；收尾各阶段重新回读 PR、Issue、head 和标签。先添加并回读确认
 `backflow:synced`，确认前始终保留 `backflow:processing`，随后才定向移除旧回流标签并关闭；
 `open+synced` 是可恢复中间态，重放会全面复核后继续关闭，不使用旧标签数组覆盖并发更新。
+GitHub API 只对 `GET/HEAD` 做透明重试；评论、标签、关闭、建 PR 与 GraphQL mutation 等写请求
+若在服务端可能已提交后丢失响应，会立即失败且不盲目重试。下一次事件重放通过 stable marker
+和远端状态回读收敛，因此响应丢失不会在同一次调用内写出重复评论。
 Release 回流第一阶段用幂等评论明确返回
 `deferred-release`，不删除分支、不改标签、不关闭 Issue；其 `release-packages.yml` 去重触发与
 构建链接回读仍按后文

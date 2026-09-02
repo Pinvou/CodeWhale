@@ -364,10 +364,15 @@ function sleep(milliseconds) {
 }
 
 export async function githubRequest(token, method, path, payload) {
+  const normalizedMethod = String(method).toUpperCase();
+  // 只有不产生远端写入的请求允许透明重试。POST/PATCH/DELETE 在连接中断时
+  // 无法判断服务端是否已经提交；盲重试可能重复评论、创建 PR，或让状态机
+  // 越过一次应由回读确认的 mutation。写请求由上层稳定 marker/状态重放收敛。
+  const retrySafe = normalizedMethod === "GET" || normalizedMethod === "HEAD";
   const body = payload == null ? undefined : Buffer.from(JSON.stringify(payload), "utf8");
   const timeout = Number(process.env.COMMUNITY_BACKFLOW_GITHUB_TIMEOUT_MS || 15_000);
   const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 15_000;
-  const maxAttempts = 3;
+  const maxAttempts = retrySafe ? 3 : 1;
   let lastError;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -377,7 +382,7 @@ export async function githubRequest(token, method, path, payload) {
     let text;
     try {
       response = await fetch(`${process.env.GITHUB_API_URL || "https://api.github.com"}${path}`, {
-        method,
+        method: normalizedMethod,
         headers: {
           Accept: "application/vnd.github+json",
           Authorization: `Bearer ${token}`,
@@ -392,7 +397,10 @@ export async function githubRequest(token, method, path, payload) {
     } catch (error) {
       lastError = error;
       if (attempt === maxAttempts) {
-        fail(`GitHub API ${method} ${path} 连续 ${maxAttempts} 次网络请求失败：${error.message || error}`);
+        if (!retrySafe) {
+          fail(`GitHub API ${normalizedMethod} ${path} 网络结果不明确；为避免重复写入不会自动重试：${error.message || error}`);
+        }
+        fail(`GitHub API ${normalizedMethod} ${path} 连续 ${maxAttempts} 次网络请求失败：${error.message || error}`);
       }
       await sleep(retryDelayMs(null, attempt));
       continue;
@@ -402,13 +410,13 @@ export async function githubRequest(token, method, path, payload) {
 
     if (response.ok) return text ? JSON.parse(text) : null;
     const rateLimited = response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0";
-    if ((RETRYABLE_GITHUB_STATUS.has(response.status) || rateLimited) && attempt < maxAttempts) {
+    if (retrySafe && (RETRYABLE_GITHUB_STATUS.has(response.status) || rateLimited) && attempt < maxAttempts) {
       await sleep(retryDelayMs(response, attempt));
       continue;
     }
-    fail(`GitHub API ${method} ${path} 失败：HTTP ${response.status} ${text}`);
+    fail(`GitHub API ${normalizedMethod} ${path} 失败：HTTP ${response.status} ${text}`);
   }
-  fail(`GitHub API ${method} ${path} 失败：${lastError || "未知错误"}`);
+  fail(`GitHub API ${normalizedMethod} ${path} 失败：${lastError || "未知错误"}`);
 }
 
 export async function githubGraphqlRequest(token, query, variables = {}) {

@@ -153,6 +153,9 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 - workflow 不 checkout PR head，也不执行 PR 提供的脚本。未配置仓库变量时安全跳过；排障可用
   `node scripts/community-backflow.mjs automation --repo OWNER/REPO --event-file EVENT.json --dry-run`
   完整只读校验。
+- GitHub API 仅对 `GET/HEAD` 透明重试。评论、标签、关闭、建 PR 和 GraphQL mutation 等写请求
+  若在服务端可能已提交后丢失响应，立即停止而不盲目重试；后续事件通过 stable marker 和远端
+  状态回读幂等收敛，避免同一次调用产生重复评论或重复写入。
 - Release 回流在第一阶段以幂等评论返回 `deferred-release`，不删除分支、不修改标签、不关闭
   Issue，继续按下方固件构建契约人工完成。自动器不会把缺失固件构建证据的 Release Issue
   标记 synced。

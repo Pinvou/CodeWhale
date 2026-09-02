@@ -80,7 +80,9 @@ function mergedEvent() {
 
 function fakeApi(data, options = {}) {
   const calls = [];
-  let postedComment = "";
+  const postedComments = [];
+  let nextCommentId = 42;
+  let remainingCommentResponseLosses = Number(options.commentResponseLosses || 0);
   let branchSha = options.branchSha === undefined ? head : options.branchSha;
   const currentIssue = clone(data.issue);
   const remainingFailures = { ...(options.mutationFailures || {}) };
@@ -135,13 +137,24 @@ function fakeApi(data, options = {}) {
       });
     }
     if (method === "GET" && path.includes(`/issues/${issueNumber}/comments?per_page=100&page=`)) {
-      return postedComment ? [{ id: 42, body: postedComment }] : [];
+      return clone(postedComments);
     }
     if (method === "POST" && path.endsWith(`/issues/${issueNumber}/comments`)) {
-      postedComment = payload.body;
-      return { id: 42 };
+      const comment = { id: nextCommentId, body: payload.body };
+      nextCommentId += 1;
+      postedComments.push(comment);
+      if (remainingCommentResponseLosses > 0) {
+        remainingCommentResponseLosses -= 1;
+        throw new TypeError("socket closed after server committed comment");
+      }
+      return { id: comment.id };
     }
-    if (method === "GET" && path.endsWith("/issues/comments/42")) return { body: postedComment };
+    const commentMatch = path.match(/\/issues\/comments\/(\d+)$/u);
+    if (method === "GET" && commentMatch) {
+      const comment = postedComments.find((current) => current.id === Number(commentMatch[1]));
+      if (!comment) throw httpError(404);
+      return clone(comment);
+    }
     if (method === "DELETE" && path.includes(`/issues/${issueNumber}/labels/`)) {
       const encoded = path.slice(path.lastIndexOf("/") + 1);
       const deleted = decodeURIComponent(encoded);
@@ -171,7 +184,8 @@ function fakeApi(data, options = {}) {
   return {
     request,
     calls,
-    postedComment: () => postedComment,
+    postedComment: () => postedComments.at(-1)?.body || "",
+    postedComments: () => clone(postedComments),
     branchSha: () => branchSha,
     issue: () => clone(currentIssue),
   };
@@ -377,6 +391,24 @@ test("普通回流先确认 synced、最后移除 processing 并关闭，且不�
   assert.deepEqual(api.issue().labels.map((label) => label.name).sort(), ["backflow:synced", "产品"].sort());
 });
 
+test("普通收尾评论已落库但响应丢失时重放只保留一条 stable marker 评论", async () => {
+  const api = fakeApi(fixture({ merged: true }), { commentResponseLosses: 1 });
+  await assert.rejects(
+    runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }),
+    /socket closed after server committed comment/u,
+  );
+  assert.equal(api.postedComments().length, 1);
+  assert.equal(api.issue().state, "open");
+
+  const result = await runAutomation({
+    event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request,
+  });
+  assert.equal(result.status, "finalized");
+  assert.equal(api.postedComments().length, 1);
+  assert.equal(api.calls.filter((call) =>
+    call.method === "POST" && call.path.endsWith(`/issues/${issueNumber}/comments`)).length, 1);
+});
+
 test("校验 H 后远端分支正好推进到 H2 时收尾不触发无 CAS 的 ref DELETE", async () => {
   const api = fakeApi(fixture({ merged: true }), { advanceBranchAtIssueRead: 2 });
   const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
@@ -482,5 +514,24 @@ test("Release 回流提示后续固件构建，不删除分支或错误关闭 Is
   const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
   assert.equal(result.status, "deferred-release");
   assert.match(api.postedComment(), /不会跳过固件构建契约/u);
+  assert.equal(api.calls.some((call) => ["PATCH", "DELETE"].includes(call.method)), false);
+});
+
+test("Release 延后评论已落库但响应丢失时重放仍幂等且不收尾", async () => {
+  const api = fakeApi(fixture({ release: true, merged: true }), { commentResponseLosses: 1 });
+  await assert.rejects(
+    runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }),
+    /socket closed after server committed comment/u,
+  );
+  assert.equal(api.postedComments().length, 1);
+
+  for (let replay = 0; replay < 2; replay += 1) {
+    const result = await runAutomation({
+      event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request,
+    });
+    assert.equal(result.status, "deferred-release");
+  }
+  assert.equal(api.postedComments().length, 1);
+  assert.equal(api.issue().state, "open");
   assert.equal(api.calls.some((call) => ["PATCH", "DELETE"].includes(call.method)), false);
 });
