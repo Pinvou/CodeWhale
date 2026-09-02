@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoping, and native web search. Existing unknown model IDs continue to pass
   through unchanged.
 
+### Fixed
+
+- API-backed `[search]` providers visibly degrade to the keyless Bing tail
+  instead of DuckDuckGo when unavailable: DuckDuckGo is unreachable from
+  mainland-China networks (DNS poisoning plus SNI reset), while Bing serves
+  its global and China endpoints without a key. The all-backends-down error
+  now suggests every selectable API-backed provider, including SearXNG and
+  Sofya, and the `web_search` tool description no longer claims a
+  DuckDuckGo hop for configured API backends.
+
 ## [0.9.5] - 2026-08-08
 
 Codewhale v0.9.5 consolidates the terminal application into one compiled
