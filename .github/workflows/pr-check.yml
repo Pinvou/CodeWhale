@@ -21,8 +21,8 @@ name: PR Check
 #   与 rust-test 并行,各自独立 cache。clippy 规则见 Cargo.toml [lints] 表:
 #   只启用实测零欠账的 lint(deny),有欠账的 lint/group 显式 allow,
 #   欠账由清理 PR(#35 及后续)消化后逐个升 deny。
-# - windows-rust-test:Windows 专属原语在原生 runner 执行；Ready 高风险 PR 或
-#   ci:full-rust 标签触发一次，Merge Queue 不重复；main 保留累计 Windows 原生验证。
+# - windows-rust-test:Windows 全目标 check 与六组原生回归使用同一路由并行执行；
+#   Ready 高风险 PR 或 ci:full-rust 标签触发一次，Merge Queue 不重复；main 保留累计验证。
 # - windows-rustup-repair-test:相关 PR 在隔离目录破坏工具链并验证下载源回退与重装。
 # - windows-codex-runtime-test:相关 PR 在 Windows 原生验证 browser-wrapper 生命周期、
 #   准备 Node + ACP Bridge，并核对安装包资源。
@@ -1130,10 +1130,10 @@ jobs:
           exit "$status"
 
   windows-rust-test:
-    name: windows-rust-test
+    name: windows-rust-test (${{ matrix.phase }})
     needs: changes
     # Native Windows coverage runs once on ready high-risk/explicit PRs and on main.
-    # Merge Queue does not repeat this 20+ minute leg; Linux validates the combined tree.
+    # Merge Queue does not repeat this native leg; Linux validates the combined tree.
     if: >-
       ${{
         !cancelled() &&
@@ -1152,14 +1152,24 @@ jobs:
           )
         )
       }}
+    # `cargo check --all-targets --features dev-tools` produces a metadata-only graph,
+    # while `cargo test --lib --no-run` must codegen/link the default-feature test
+    # harness. Running them sequentially made both compile graphs part of the 47-78 minute
+    # critical path. Keep both required under this aggregate matrix job, but run them
+    # independently so wall time is the slower leg rather than their sum.
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        phase: [all-targets-check, regression]
     runs-on: windows-latest
     # 状态机回归使用 Bash 循环；job 级固定 shell 也覆盖 merge ref 从 base
     # 带入该步骤的场景。本 job 其余 run 命令均兼容 Bash。
     defaults:
       run:
         shell: bash
-    # 全量 cargo check --all-targets + lib 链接检查,无暖 cache,挂死会长时间烧 runner 分钟。
-    # 90min:aws-lc-sys(NASM 预生成对象)冷编译比纯 Rust 图更久,留足余量。
+    # Each independent leg can still compile aws-lc-sys on a cache miss; retain the existing
+    # safety ceiling while phase metrics establish a new evidence-based limit.
     timeout-minutes: 90
     env:
       # reqwest 0.13 → aws-lc-sys(非 FIPS)。Windows x86_64 需 NASM 汇编;runner 默认无 NASM,
@@ -1179,7 +1189,10 @@ jobs:
           submodules: false
 
       - name: 初始化公共底座 submodule
-        run: git submodule update --init --recursive -- CodeWhale
+        run: |
+          started=$SECONDS
+          git submodule update --init --recursive -- CodeWhale
+          echo "WINDOWS_RUST_TIMING phase=${{ matrix.phase }} step=codewhale-init elapsed_seconds=$((SECONDS-started))"
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -1197,35 +1210,53 @@ jobs:
         shell: bash
         run: rustc -O pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs -o pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
 
-      - name: Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: pinvou3-app/package-lock.json
-
-      - name: 安装前端构建依赖
-        run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
-
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
+          # Both legs restore the established namespace on their isolated runners.
+          # Only regression/main may save, so parallelization adds neither a new
+          # cache namespace nor a second writer racing the existing 10GB cache.
           shared-key: windows-rust-test
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ matrix.phase == 'regression' && github.ref == 'refs/heads/main' }}
+
+      - name: Windows Rust 缓存基线诊断
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:GITHUB_WORKSPACE "pinvou3-app/src-tauri/target"
+          $fingerprints = Join-Path $target "debug/.fingerprint"
+          $deps = Join-Path $target "debug/deps"
+          $fingerprintCount = if (Test-Path -LiteralPath $fingerprints) {
+            @(Get-ChildItem -LiteralPath $fingerprints -Directory -ErrorAction SilentlyContinue).Count
+          } else { 0 }
+          $depFileCount = if (Test-Path -LiteralPath $deps) {
+            @(Get-ChildItem -LiteralPath $deps -File -ErrorAction SilentlyContinue).Count
+          } else { 0 }
+          Write-Host "WINDOWS_RUST_CACHE phase=${{ matrix.phase }} target_exists=$(Test-Path -LiteralPath $target) fingerprint_crates=$fingerprintCount dep_files=$depFileCount"
 
       - name: Windows Rust 全目标检查
-        run: >-
-          cargo check --manifest-path pinvou3-app/src-tauri/Cargo.toml
-          --all-targets --features dev-tools
+        if: ${{ matrix.phase == 'all-targets-check' }}
+        run: |
+          started=$SECONDS
+          set +e
+          cargo check --manifest-path pinvou3-app/src-tauri/Cargo.toml \
+            --all-targets --features dev-tools
+          status=$?
+          set -e
+          echo "WINDOWS_RUST_TIMING phase=all-targets-check step=cargo-check elapsed_seconds=$((SECONDS-started)) status=$status"
+          exit "$status"
 
       - name: Windows Rust 单元测试链接检查
+        if: ${{ matrix.phase == 'regression' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $timer = [System.Diagnostics.Stopwatch]::StartNew()
           $records = @(& cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml `
             --lib --no-run --message-format=json)
           $cargoExit = $LASTEXITCODE
+          $timer.Stop()
+          Write-Host "WINDOWS_RUST_TIMING phase=regression step=cargo-test-link elapsed_seconds=$([math]::Round($timer.Elapsed.TotalSeconds)) status=$cargoExit"
           $records | ForEach-Object { Write-Host $_ }
           if ($cargoExit -ne 0) {
             throw "FAIL: Windows Rust 单元测试链接检查失败(exit=$cargoExit)"
@@ -1257,6 +1288,7 @@ jobs:
       # link.exe 已给测试 exe 嵌入默认清单,Windows 会优先使用内嵌资源而忽略同目录
       # <exe>.manifest；因此必须用 runner 自带的 Windows SDK mt.exe 更新 resource #1。
       - name: Windows 测试 exe 嵌入 Common-Controls v6 清单
+        if: ${{ matrix.phase == 'regression' }}
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -1299,14 +1331,17 @@ jobs:
       # SxS 程序集 DLL(如 comctl32)的缺符号假阳性,嵌入前读到的是无 v6 声明的默认清单;
       # 直接传 $PINVOU3_TEST_EXE 保证诊断对象就是刚嵌入清单、回归将运行的那个 exe。
       - name: Windows 测试二进制导入诊断
+        if: ${{ matrix.phase == 'regression' }}
         continue-on-error: true
         shell: pwsh
         run: python scripts/ci-windows-imports-diagnose.py "$env:PINVOU3_TEST_EXE"
 
       - name: Windows 原子替换状态机回归
+        if: ${{ matrix.phase == 'regression' }}
         shell: bash
         run: |
           set -euo pipefail
+          total_started=$SECONDS
           # 直接运行已经由 mt.exe 修补的链接产物。这里不能再次调用 cargo test，
           # 否则 Cargo 可能重链并覆盖 exe，导致 Common-Controls v6 清单丢失。
           test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"
@@ -1317,6 +1352,7 @@ jobs:
           cd pinvou3-app/src-tauri
           # 逐过滤器断言至少命中 1 个测试,避免测试改名后过滤器 0 匹配却 exit 0
           # 导致的静默空跑。
+          index=0
           for filter in \
             'platform::filesystem::tests::windows_' \
             'platform::paths::tests::managed_python_' \
@@ -1324,12 +1360,16 @@ jobs:
             'artifact_writes_never_expose_partial_utf8_to_concurrent_readers' \
             'artifact_public_read_' \
             'features::memory::tests::topic_migration_'; do
+            index=$((index+1))
+            started=$SECONDS
             "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
             grep -qE 'running [1-9][0-9]* tests?' /tmp/windows_regression.log || {
               echo "FAIL: 回归过滤器 '$filter' 匹配 0 个测试(疑似测试改名导致静默空跑)" >&2
               exit 1
             }
+            echo "WINDOWS_RUST_TIMING phase=regression step=test-filter-$index elapsed_seconds=$((SECONDS-started)) status=0"
           done
+          echo "WINDOWS_RUST_TIMING phase=regression step=six-filter-suite elapsed_seconds=$((SECONDS-total_started)) status=0"
 
   windows-rustup-repair-test:
     name: windows-rustup-repair-test
