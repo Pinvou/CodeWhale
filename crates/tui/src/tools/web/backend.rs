@@ -261,7 +261,8 @@ async fn run_backend_chain(
         .join(", ");
     Err(ToolError::not_available(format!(
         "web search backends unavailable: {backend_ids}; \
-         configure an API-backed [search] provider (tavily, bocha, metaso, baidu, volcengine) for dependable results"
+         configure an API-backed [search] provider (tavily, bocha, metaso, searxng, baidu, \
+         volcengine, sofya) for dependable results"
     )))
 }
 

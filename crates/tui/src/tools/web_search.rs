@@ -1,7 +1,9 @@
 //! Web search tool backed by a bounded backend chain: the active route's
-//! documented provider-native search, configured API search, then DuckDuckGo
-//! HTML scrape with a one-way Bing fallback. Explicit Bing and private
-//! DuckDuckGo-compatible routes remain single-provider. API adapters
+//! documented provider-native search, configured API search, then a keyless
+//! Bing tail chosen by reachability; API outages never route through
+//! DuckDuckGo. The configured DuckDuckGo route keeps its own one-way Bing
+//! scrape fallback. Explicit Bing and private DuckDuckGo-compatible routes
+//! remain single-provider. API adapters
 //! include Tavily, Bocha (博查),
 //! Metaso API (<https://metaso.cn>), SearXNG JSON API, Baidu AI Search,
 //! Volcengine Ark, and Sofya (<https://sofya.co>).
@@ -103,7 +105,7 @@ impl ToolSpec for WebSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search the web and return ranked results with URLs, snippets, session-scoped ref_ids, and an execution receipt. Open a result ref_id with `web.run` when the short summary is not enough; fetch only the few sources needed. When the exact active route reports a documented first-party server-side search tool, it is tried first; otherwise the default backend is DuckDuckGo with Bing fallback. Configured API backends visibly degrade through DuckDuckGo then Bing when unavailable, and every hop is recorded. Configuration and network-policy errors fail closed. Explicit Bing and private DuckDuckGo-compatible routes do not cross providers. Set `[search] provider = \"bing\" | \"tavily\" | \"bocha\" | \"metaso\" | \"searxng\" | \"baidu\" | \"volcengine\" | \"sofya\"` in config.toml, or `[search] base_url` for a private DuckDuckGo-compatible endpoint or trusted SearXNG instance. For a known canonical URL, prefer `fetch_url` directly."
+        "Search the web and return ranked results with URLs, snippets, session-scoped ref_ids, and an execution receipt. Open a result ref_id with `web.run` when the short summary is not enough; fetch only the few sources needed. When the exact active route reports a documented first-party server-side search tool, it is tried first; otherwise the default backend is DuckDuckGo with Bing fallback. Configured API backends visibly degrade through the keyless Bing tail when unavailable, and every hop is recorded. Configuration and network-policy errors fail closed. Explicit Bing and private DuckDuckGo-compatible routes do not cross providers. Set `[search] provider = \"bing\" | \"tavily\" | \"bocha\" | \"metaso\" | \"searxng\" | \"baidu\" | \"volcengine\" | \"sofya\"` in config.toml, or `[search] base_url` for a private DuckDuckGo-compatible endpoint or trusted SearXNG instance. For a known canonical URL, prefer `fetch_url` directly."
     }
 
     fn input_schema(&self) -> Value {
