@@ -270,6 +270,34 @@ test("workflow_run head 必须等于 PR 当前 head", async () => {
   await assert.rejects(runAutomation({ event, repo, token: "token", enabled: "true", request: api.request, graphql: fakeGraphql().graphql }), /事件 head .* 与 PR .* 当前 head .* 不一致/u);
 });
 
+test("事件缺少 head 时拒绝处理以保持 head 绑定完整", async () => {
+  const api = fakeApi(fixture());
+  const event = workflowEvent();
+  delete event.workflow_run.head_sha;
+  await assert.rejects(runAutomation({ event, repo, token: "token", enabled: "true", request: api.request, graphql: fakeGraphql().graphql }), /事件 head missing/u);
+  assert.equal(api.calls.some((call) => call.method !== "GET"), false);
+});
+
+test("非回流 PR 的 advance 与 finalize 事件安全跳过且零写入", async () => {
+  const advanceData = fixture();
+  advanceData.pull.head.ref = "feature/normal";
+  const advanceApi = fakeApi(advanceData);
+  assert.deepEqual(
+    await runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: advanceApi.request, graphql: fakeGraphql().graphql }),
+    { status: "skipped", reason: "not-a-backflow-pull-request" },
+  );
+  assert.equal(advanceApi.calls.some((call) => call.method !== "GET"), false);
+
+  const finalizeData = fixture({ merged: true });
+  finalizeData.pull.head.ref = "feature/normal";
+  const finalizeApi = fakeApi(finalizeData);
+  assert.deepEqual(
+    await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: finalizeApi.request }),
+    { status: "skipped", reason: "not-a-backflow-pull-request" },
+  );
+  assert.equal(finalizeApi.calls.some((call) => call.method !== "GET"), false);
+});
+
 test("已入队时仍先核验 SQUASH 策略后幂等跳过", async () => {
   const api = fakeApi(fixture());
   const graph = fakeGraphql({ existing: true });

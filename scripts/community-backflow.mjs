@@ -551,7 +551,7 @@ function isReleaseSource(files) {
 async function readAutomationContext({ request, token, repo, pullNumber, expectedHead }) {
   const pull = await request(token, "GET", `/repos/${repo}/pulls/${pullNumber}`);
   const source = parseSourceFromBranch(String(pull?.head?.ref || ""));
-  if (!source) fail(`PR #${pullNumber} 不是 backflow/community-<source> 分支`);
+  if (!source) return null; // 非回流 PR 与自动器无关，安全跳过而不是制造失败任务
   if (String(pull?.base?.ref || "") !== "main") fail(`PR #${pullNumber} 的 base 不是 main`);
   const targetRepo = String(repo).toLocaleLowerCase("en-US");
   if (
@@ -561,7 +561,7 @@ async function readAutomationContext({ request, token, repo, pullNumber, expecte
     fail(`PR #${pullNumber} 不是 Official 同仓 PR`);
   }
   const head = String(pull?.head?.sha || "");
-  if (!head || (expectedHead && head !== expectedHead)) {
+  if (!head || !expectedHead || head !== expectedHead) {
     fail(`事件 head ${expectedHead || "missing"} 与 PR #${pullNumber} 当前 head ${head || "missing"} 不一致`);
   }
   if (pull.draft) fail(`PR #${pullNumber} 仍是 Draft`);
@@ -937,6 +937,7 @@ export async function runAutomation({
     pullNumber: parsed.pullNumber,
     expectedHead: parsed.expectedHead,
   });
+  if (!context) return { status: "skipped", reason: "not-a-backflow-pull-request" };
   if (parsed.action === "advance") return enqueueBackflow({ graphql, token, repo, context, dryRun });
   return finalizeBackflow({ request, token, repo, context, dryRun });
 }
