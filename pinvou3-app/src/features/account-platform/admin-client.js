@@ -286,6 +286,9 @@ export class AdminPlatformClient {
   paymentOrder(orderID, signal) {
     return this.request('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}`, signal);
   }
+  paymentProviderControls(signal) {
+    return this.request('billing', '/admin/v1/payment-provider-controls', signal);
+  }
   refunds(signal) {
     return this.request('billing', '/admin/v1/refunds?limit=100', signal);
   }
@@ -318,6 +321,9 @@ export class AdminPlatformClient {
     const query = new URLSearchParams({ limit: '200' });
     for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
     return this.request('account', `/admin/v1/approval-requests?${query}`, signal);
+  }
+  approvalRequest(requestID, signal) {
+    return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal);
   }
   createApprovalDraft(input) {
     return this.mutate('account', '/admin/v1/approval-requests', 'POST', input);

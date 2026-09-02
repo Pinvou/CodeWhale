@@ -14,7 +14,7 @@ export function readAdminSection(locationLike = globalThis.location) {
 const organizationTabs = new Set(['overview', 'members', 'units', 'lifecycle']);
 const financeTabs = Object.freeze({
   billing: new Set(['wallets', 'receivables', 'adjustments', 'holds']),
-  payments: new Set(['orders', 'refunds', 'lateReviews', 'anomalies', 'reconciliations']),
+  payments: new Set(['orders', 'refunds', 'lateReviews', 'anomalies', 'reconciliations', 'controls']),
   products: new Set(['catalog', 'prices']),
 });
 const financeDefaultTabs = Object.freeze({ billing: 'wallets', payments: 'orders', products: 'catalog' });

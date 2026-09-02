@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { adjustmentApprovalAction } from './admin-finance.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, paymentControlApprovalAction, submitPaymentControlApproval } from './admin-finance.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminNavigationGroups, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
@@ -360,7 +360,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             adjustmentApprovals: adjustmentApprovals.items || [],
           };
         } else if (target === 'payments') {
-          const [overview, orders, refunds, lateReviews, anomalies, reconciliations] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.paymentOrders({}, signal)), read('platform.billing.wallets.read', () => client.refunds(signal)), read('platform.billing.wallets.read', () => client.latePaymentReviews({}, signal)), read('platform.billing.wallets.read', () => client.paymentAnomalies({}, signal)), read('platform.usage.read', () => client.reconciliationRuns(signal))]);
+          const controlPermissions = ['platform.billing.payment-controls.resume.request', 'platform.billing.payment-controls.resume.approve'];
+          const [overview, orders, refunds, lateReviews, anomalies, reconciliations, paymentControls, providerApprovals, productApprovals] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.paymentOrders({}, signal)), read('platform.billing.wallets.read', () => client.refunds(signal)), read('platform.billing.wallets.read', () => client.latePaymentReviews({}, signal)), read('platform.billing.wallets.read', () => client.paymentAnomalies({}, signal)), read('platform.usage.read', () => client.reconciliationRuns(signal)), read('platform.billing.wallets.read', () => client.paymentProviderControls(signal), null), readAny(controlPermissions, () => client.approvalRequests({ command_type: 'PAYMENT_PROVIDER_RESUME' }, signal)), readAny(controlPermissions, () => client.approvalRequests({ command_type: 'PAYMENT_PRODUCT_RESUME' }, signal))]);
           next = {
             billingOverview: overview,
             orders: orders.items || [],
@@ -368,6 +369,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             lateReviews: lateReviews.items || [],
             anomalies: anomalies.items || [],
             reconciliations: reconciliations.items || [],
+            paymentControls,
+            paymentControlApprovals: [...(providerApprovals.items || []), ...(productApprovals.items || [])],
           };
         } else if (target === 'products') {
           const prices = await read('platform.pricing.read', () => client.priceVersions(signal));
@@ -660,7 +663,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'system' && (
@@ -2192,6 +2195,134 @@ function ProductsWorkspace({ copy, language, data, client, setData, permissions,
   );
 }
 
+function PaymentControlsPanel({ copy, data, client, setData, permissions, onNavigate }) {
+  const control = data.paymentControls;
+  const permissionSet = new Set(permissions || []);
+  const canRequest = permissionSet.has('platform.billing.payment-controls.resume.request');
+  const canApprove = permissionSet.has('platform.billing.payment-controls.resume.approve');
+  const [reasons, setReasons] = useState({});
+  const [busyTarget, setBusyTarget] = useState('');
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const requestKeysRef = useRef(new Map());
+  const approvals = data.paymentControlApprovals || [];
+  const activeApprovalStatuses = new Set(['DRAFT', 'SUBMITTED', 'APPROVED', 'EXECUTING']);
+  const approvalFor = (commandType, targetID) => {
+    const matching = approvals.filter((item) => item.command_type === commandType && item.target_resource_id === targetID);
+    return matching.find((item) => item.status === 'DRAFT' && (item.allowed_actions || []).includes('SUBMIT'))
+      || matching.find((item) => activeApprovalStatuses.has(item.status))
+      || matching[0];
+  };
+  const reload = async () => {
+    const canReadApprovals = canRequest || canApprove;
+    const [paymentControls, providerApprovals, productApprovals] = await Promise.all([
+      client.paymentProviderControls(),
+      canReadApprovals ? client.approvalRequests({ command_type: 'PAYMENT_PROVIDER_RESUME' }) : Promise.resolve({ items: [] }),
+      canReadApprovals ? client.approvalRequests({ command_type: 'PAYMENT_PRODUCT_RESUME' }) : Promise.resolve({ items: [] }),
+    ]);
+    const paymentControlApprovals = [...(providerApprovals.items || []), ...(productApprovals.items || [])];
+    setData((current) => ({ ...current, paymentControls, paymentControlApprovals }));
+    return paymentControlApprovals;
+  };
+  const requestResume = async (product = null, existingApproval = null) => {
+    const targetKey = product?.product_id || 'provider';
+    const reason = String(reasons[targetKey] || '').trim();
+    let approvalInput = null;
+    if (!existingApproval) {
+      if (!requestKeysRef.current.has(targetKey)) requestKeysRef.current.set(targetKey, `payment-control-resume-${crypto.randomUUID()}`);
+      approvalInput = buildPaymentControlApprovalDraft(control, product, reason, requestKeysRef.current.get(targetKey));
+    }
+    if (!canRequest || (!approvalInput && !existingApproval)) return;
+    setBusyTarget(targetKey);
+    setNotice('');
+    setError('');
+    try {
+      await submitPaymentControlApproval(client, approvalInput, existingApproval);
+      setReasons((current) => ({ ...current, [targetKey]: '' }));
+      requestKeysRef.current.delete(targetKey);
+      await reload();
+      setNotice(copy.billing.controlResumeSubmitted);
+    } catch {
+      try {
+        await reload();
+      } catch {
+        // Preserve the original failure and idempotency key when convergence cannot be checked.
+      }
+      setError(copy.billing.controlResumeFailed);
+    } finally {
+      setBusyTarget('');
+    }
+  };
+  const openApproval = (commandType, targetID) => onNavigate?.('approvals', { approval_command_type: commandType, approval_target: targetID });
+  if (!control) return <div className="adm-inline-message error">{copy.billing.controlsUnavailable}</div>;
+  const providerApproval = approvalFor('PAYMENT_PROVIDER_RESUME', control.provider_id);
+  const providerAction = paymentControlApprovalAction(providerApproval, { canRequest });
+  const evidence = control.stop_loss_evidence || {};
+  return (
+    <section className="adm-finance-subpanel">
+      <SectionHeader title={copy.billing.controls} copy={copy} />
+      {notice && <div className="adm-inline-message ok">{notice}</div>}
+      {error && <div className="adm-inline-message error">{error}</div>}
+      <div className="adm-detail-grid">
+        <div><small>{copy.billing.provider}</small><strong>{control.provider_id} · {control.provider_version}</strong></div>
+        <div><small>{copy.billing.newOrders}</small><Status value={control.new_orders_enabled ? 'ENABLED' : 'PAUSED'} /></div>
+        <div><small>{copy.billing.controlVersion}</small><strong>v{control.provider_control_version}</strong></div>
+        <div><small>{copy.billing.controlReason}</small><strong>{control.reason_code || '—'} · {control.reason || '—'}</strong></div>
+        <div><small>{copy.billing.observationGaps}</small><strong>{evidence.observation_gap_count ?? 0}</strong></div>
+        <div><small>{copy.billing.updated}</small><strong>{formatDate(control.updated_at)}</strong></div>
+      </div>
+      {!control.new_orders_enabled && (
+        <div className="adm-ops-form">
+          {providerAction === 'create' && <label>{copy.billing.resumeReason}<input minLength="10" maxLength="2000" value={reasons.provider || ''} onChange={(event) => setReasons((current) => ({ ...current, provider: event.target.value }))} /></label>}
+          {providerAction === 'create' && <button type="button" disabled={!control.resume_draft || busyTarget === 'provider' || String(reasons.provider || '').trim().length < 10} title={!control.resume_draft ? copy.billing.resumeDraftUnavailable : undefined} onClick={() => requestResume()}>{copy.billing.requestProviderResume}</button>}
+          {providerAction === 'submit' && <button type="button" disabled={busyTarget === 'provider'} onClick={() => requestResume(null, providerApproval)}>{copy.billing.continueControlResume}</button>}
+          {providerAction === 'create' && !control.resume_draft && <small>{copy.billing.resumeDraftUnavailable}</small>}
+          {providerApproval && (canRequest || canApprove) && <button type="button" onClick={() => openApproval('PAYMENT_PROVIDER_RESUME', control.provider_id)}>{copy.billing.viewApproval} · {providerApproval.status}</button>}
+        </div>
+      )}
+      <h3>{copy.billing.productControls}</h3>
+      <div className="adm-table-wrap" tabIndex="0">
+        <table className="adm-table"><thead><tr><th>{copy.billing.product}</th><th>{copy.billing.newOrders}</th><th>{copy.billing.controlVersion}</th><th>{copy.billing.controlReason}</th><th>{copy.accounts.actions}</th></tr></thead>
+          <tbody>{(control.products || []).map((product) => {
+            const approval = approvalFor('PAYMENT_PRODUCT_RESUME', product.product_id);
+            const action = paymentControlApprovalAction(approval, { canRequest });
+            return (
+              <tr key={product.product_id}>
+                <td><code>{product.product_id}</code></td>
+                <td><Status value={product.new_orders_enabled ? 'ENABLED' : 'PAUSED'} /></td>
+                <td>v{product.version}</td>
+                <td>{product.reason_code || '—'} · {product.reason || '—'}</td>
+                <td>{!product.new_orders_enabled ? (
+                  <div className="adm-row-actions">
+                    {action === 'create' && <input aria-label={`${copy.billing.resumeReason} · ${product.product_id}`} minLength="10" maxLength="2000" value={reasons[product.product_id] || ''} onChange={(event) => setReasons((current) => ({ ...current, [product.product_id]: event.target.value }))} />}
+                    {action === 'create' && <button disabled={!product.resume_draft || busyTarget === product.product_id || String(reasons[product.product_id] || '').trim().length < 10} title={!product.resume_draft ? copy.billing.resumeDraftUnavailable : undefined} onClick={() => requestResume(product)}>{copy.billing.requestProductResume}</button>}
+                    {action === 'submit' && <button disabled={busyTarget === product.product_id} onClick={() => requestResume(product, approval)}>{copy.billing.continueControlResume}</button>}
+                    {action === 'create' && !product.resume_draft && <small>{copy.billing.resumeDraftUnavailable}</small>}
+                    {approval && (canRequest || canApprove) && <button onClick={() => openApproval('PAYMENT_PRODUCT_RESUME', product.product_id)}>{copy.billing.viewApproval} · {approval.status}</button>}
+                  </div>
+                ) : '—'}</td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </div>
+      <h3>{copy.billing.stopLossEvidence}</h3>
+      <Table copy={copy} items={evidence.evaluations || []} columns={[
+        { key: 'scope_type', label: copy.billing.scope },
+        { key: 'product_id', label: copy.billing.product },
+        { key: 'trigger_type', label: copy.billing.trigger },
+        { key: 'source_case_id', label: copy.billing.sourceCase, render: (item) => item.source_case_id ? <code>{item.source_case_id}</code> : '—' },
+        { key: 'severity', label: copy.billing.severity },
+        { key: 'action_applied', label: copy.billing.actionApplied, render: (item) => item.action_applied === true ? copy.billing.applied : item.action_applied === false ? copy.billing.notApplied : '—' },
+        { key: 'policy_version', label: copy.billing.policyVersion },
+        { key: 'metrics', label: copy.billing.metrics, render: (item) => <code>{formatSummary(item.metrics)}</code> },
+        { key: 'evidence_details', label: copy.billing.evidenceDetails, render: (item) => <details><summary>{copy.billing.viewDetails}</summary><small>{copy.billing.window}: {formatDate(item.window_start)} — {formatDate(item.window_end)}<br />{copy.billing.highWatermark}: <code>{item.observation_high_watermark || '—'}</code></small></details> },
+        { key: 'evaluated_at', label: copy.billing.updated, render: (item) => formatDate(item.evaluated_at) },
+      ]} />
+    </section>
+  );
+}
+
 function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', onRouteTabChange, onNavigate, embedded = false }) {
   const defaultTab = surface === 'payments' ? 'orders' : surface === 'products' ? 'prices' : 'wallets';
   const [tab, setTab] = useState(routeTab || defaultTab);
@@ -2240,13 +2371,15 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const canRequestAdjustment = permissionSet.has('platform.billing.repairs.request');
   const canSyncOrders = permissionSet.has('platform.billing.orders.sync');
   const canRequestRepair = permissionSet.has('platform.billing.repairs.request');
+  const canRequestControlResume = permissionSet.has('platform.billing.payment-controls.resume.request');
+  const canApproveControlResume = permissionSet.has('platform.billing.payment-controls.resume.approve');
   const canApproveAdjustment = permissionSet.has('platform.billing.repairs.approve');
   const canReleaseHold = permissionSet.has('platform.billing.holds.release');
   const canManagePricing = permissionSet.has('platform.pricing.manage');
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
   const visibleTabs =
     surface === 'payments'
-      ? [...(canReadWallets ? ['orders', 'refunds', 'lateReviews', 'anomalies'] : []), ...(canReadUsage ? ['reconciliations'] : [])]
+      ? [...(canReadWallets ? ['orders', 'refunds', 'lateReviews', 'anomalies'] : []), ...(canReadUsage ? ['reconciliations'] : []), ...(canReadWallets ? ['controls'] : [])]
       : surface === 'products'
         ? canReadPricing
           ? ['prices']
@@ -2271,8 +2404,9 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const hasLimitedPaymentCapabilities = paymentCapabilities.provider_id && (!paymentCapabilities.refund_supported || !paymentCapabilities.close_supported || !paymentCapabilities.notification_supported || paymentCapabilities.reconciliation_mode !== 'API');
   const reload = async () => {
     if (surface === 'payments') {
-      const [orders, refunds, lateReviews, anomalies, reconciliations] = await Promise.all([canReadWallets ? client.paymentOrders(orderFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.refunds() : Promise.resolve({ items: [] }), canReadWallets ? client.latePaymentReviews(lateFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.paymentAnomalies(anomalyFilter) : Promise.resolve({ items: [] }), canReadUsage ? client.reconciliationRuns() : Promise.resolve({ items: [] })]);
-      setData((current) => ({ ...current, orders: orders.items || [], refunds: refunds.items || [], lateReviews: lateReviews.items || [], anomalies: anomalies.items || [], reconciliations: reconciliations.items || [] }));
+      const canReadControlApprovals = canRequestControlResume || canApproveControlResume;
+      const [orders, refunds, lateReviews, anomalies, reconciliations, paymentControls, providerApprovals, productApprovals] = await Promise.all([canReadWallets ? client.paymentOrders(orderFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.refunds() : Promise.resolve({ items: [] }), canReadWallets ? client.latePaymentReviews(lateFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.paymentAnomalies(anomalyFilter) : Promise.resolve({ items: [] }), canReadUsage ? client.reconciliationRuns() : Promise.resolve({ items: [] }), canReadWallets ? client.paymentProviderControls() : Promise.resolve(null), canReadControlApprovals ? client.approvalRequests({ command_type: 'PAYMENT_PROVIDER_RESUME' }) : Promise.resolve({ items: [] }), canReadControlApprovals ? client.approvalRequests({ command_type: 'PAYMENT_PRODUCT_RESUME' }) : Promise.resolve({ items: [] })]);
+      setData((current) => ({ ...current, orders: orders.items || [], refunds: refunds.items || [], lateReviews: lateReviews.items || [], anomalies: anomalies.items || [], reconciliations: reconciliations.items || [], paymentControls, paymentControlApprovals: [...(providerApprovals.items || []), ...(productApprovals.items || [])] }));
       return;
     }
     if (surface === 'products') {
@@ -3846,7 +3980,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       )}
       {notice && <div className="adm-inline-message ok">{notice}</div>}
       {error && <div className="adm-inline-message error">{error}</div>}
-      <Table columns={columns[tab]} items={items} copy={copy} />
+      {tab === 'controls' ? <PaymentControlsPanel copy={copy} data={data} client={client} setData={setData} permissions={permissions} onNavigate={onNavigate} /> : <Table columns={columns[tab]} items={items} copy={copy} />}
     </section>
   );
 }

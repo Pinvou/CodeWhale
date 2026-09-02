@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('payment provider and product recovery are version-frozen and independently approved', async () => {
-  const [policy, accountMigration, productPolicyMigration, billingMigration, productBillingMigration, recovery, health, consumer, service, admin, approvalUI] = await Promise.all([
+  const [policy, accountMigration, productPolicyMigration, billingMigration, productBillingMigration, recovery, health, consumer, service, admin, approvalUI, adminView, adminClient, adminFinance] = await Promise.all([
     read('internal/platform/approvalpolicy/registry.go'),
     read('migrations/account/000033_payment_provider_resume_policy.up.sql'),
     read('migrations/account/000038_payment_product_resume_policy.up.sql'),
@@ -19,6 +19,9 @@ test('payment provider and product recovery are version-frozen and independently
     read('internal/billing/service.go'),
     read('contracts/openapi/admin.yaml'),
     read('internal/portal/static/assets/approval-requests.js'),
+    read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
+    read('../pinvou3-app/src/features/account-platform/admin-client.js'),
+    read('../pinvou3-app/src/features/account-platform/admin-finance.js'),
   ]);
 
   assert.match(policy, /PAYMENT_PROVIDER_RESUME/);
@@ -56,8 +59,18 @@ test('payment provider and product recovery are version-frozen and independently
   assert.match(consumer, /executeApprovedProductResumeCommand/);
   assert.match(service, /payment-provider-controls/);
   assert.match(admin, /getPaymentProviderControls/);
-  assert.match(approvalUI, /createControlResume/);
-  assert.match(approvalUI, /resume_draft/);
-  assert.match(approvalUI, /productResumeForms/);
-  assert.match(approvalUI, /draftInput/);
+  assert.doesNotMatch(approvalUI, /createControlResume|resume_draft|productResumeForms/);
+  assert.match(adminClient, /paymentProviderControls/);
+  assert.match(adminView, /function PaymentControlsPanel/);
+  assert.match(adminFinance, /product \? product\.resume_draft : control\?\.resume_draft/);
+  assert.match(adminFinance, /allowed_actions \|\| \[\]\)\.includes\('SUBMIT'\)/);
+  assert.match(adminFinance, /client\.approvalRequest\(approval\.approval_request_id\)/);
+  assert.match(adminClient, /approvalRequest\(requestID, signal\)/);
+  assert.match(adminView, /PAYMENT_PROVIDER_RESUME/);
+  assert.match(adminView, /PAYMENT_PRODUCT_RESUME/);
+  assert.match(adminView, /source_case_id/);
+  assert.match(adminView, /action_applied/);
+  assert.match(adminView, /observation_high_watermark/);
+  assert.match(adminView, /continueControlResume/);
+  assert.match(adminView, /approval_command_type: commandType, approval_target: targetID/);
 });

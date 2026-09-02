@@ -56,7 +56,7 @@ test('source and built admin portal preserve the HTML prototype five-group navig
   assert.match(navigation, /historyLike\.replaceState/);
   assert.match(navigation, /finance_tab/);
   assert.match(navigation, /billing: new Set\(\['wallets', 'receivables', 'adjustments', 'holds'\]\)/);
-  assert.match(navigation, /payments: new Set\(\['orders', 'refunds', 'lateReviews', 'anomalies', 'reconciliations'\]\)/);
+  assert.match(navigation, /payments: new Set\(\['orders', 'refunds', 'lateReviews', 'anomalies', 'reconciliations', 'controls'\]\)/);
   assert.match(navigation, /products: new Set\(\['catalog', 'prices'\]\)/);
   assert.match(authorization, /platform\.tokens\.read/);
   assert.match(authorization, /products: \['platform\.products\.read', 'platform\.pricing\.read'\]/);

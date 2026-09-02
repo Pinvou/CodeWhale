@@ -130,7 +130,7 @@
 | APT-104 | 平台组织节点移动管理合同及结构树交互 | ACC-68 | APT-010, APT-075, APT-103 | CODE | DONE |
 | APT-105 | 财务支付三分区改名、子页迁移与稳定深链 | UI-37 | APT-094, APT-096 | CODE | DONE |
 | APT-106 | 手工调账申请、审批恢复与审批中心深链 | UI-38 | APT-008, APT-105 | CODE | DONE |
-| APT-107 | 支付 Provider/商品控制展示与恢复申请深链 | UI-39 | APT-093, APT-105 | CODE | PENDING |
+| APT-107 | 支付 Provider/商品控制展示与恢复申请深链 | UI-39 | APT-093, APT-105 | CODE | DONE |
 | APT-108 | 财务支付子页独立加载、局部失败与独立刷新 | UI-40 | APT-105 | CODE | PENDING |
 | APT-109 | Billing 既有筛选与充值商品稳定 cursor 适配 | UI-41 | APT-084, APT-108 | CODE | PENDING |
 | APT-110 | 财务支付商品结构化操作面板并移除浏览器 prompt | UI-42 | APT-106–APT-108 | CODE | PENDING |
