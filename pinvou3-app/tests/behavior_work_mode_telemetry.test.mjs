@@ -2,15 +2,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
 const codeView = readFileSync(new URL('../src/features/codex/CodexAcpView.jsx', import.meta.url), 'utf8');
 const teamView = readFileSync(new URL('../src/features/team-relay/TeamRelayView.jsx', import.meta.url), 'utf8');
 const scheduledDesktop = readFileSync(new URL('../src/platform/tauri/bridge/scheduled.js', import.meta.url), 'utf8');
 const scheduledWeb = readFileSync(new URL('../src/platform/web/bridge.js', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
-const telemetry = [
-  '../src-tauri/src/features/behavior_telemetry.rs',
-  '../src-tauri/src/features/behavior_telemetry_tests.rs',
-].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
+const telemetry = behaviorTelemetryRust;
 
 test('code workspace reports one visible page instance with a controlled provider', () => {
   assert.match(codeView, /codeTelemetryReportedRef/);

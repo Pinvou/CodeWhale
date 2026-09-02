@@ -2,12 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
 const view = readFileSync(new URL('../src/features/tools/ToolStoreView.jsx', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
-const telemetry = [
-  '../src-tauri/src/features/behavior_telemetry.rs',
-  '../src-tauri/src/features/behavior_telemetry_tests.rs',
-].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
+const telemetry = behaviorTelemetryRust;
 
 test('tool cards emit deduplicated visibility impressions and explicit detail opens', () => {
   assert.match(view, /import \{ can, isWeb \} from '..\/..\/shared\/platform\.js'/);

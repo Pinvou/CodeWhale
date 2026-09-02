@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const rust = [
-  '../src-tauri/src/features/behavior_telemetry.rs',
-  '../src-tauri/src/features/behavior_telemetry_tests.rs',
-].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
+const rust = behaviorTelemetryRust;
 const usageRust = readFileSync(new URL('../src-tauri/src/platform/telemetry.rs', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');

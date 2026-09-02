@@ -2,15 +2,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
 const desktopAttachments = readFileSync(new URL('../src/platform/tauri/bridge/artifacts.js', import.meta.url), 'utf8');
 const desktopArtifacts = readFileSync(new URL('../src/platform/tauri/bridge/artifact-tracker.js', import.meta.url), 'utf8');
 const web = readFileSync(new URL('../src/platform/web/bridge.js', import.meta.url), 'utf8');
 const knowledge = readFileSync(new URL('../src/features/knowledge/KnowledgeView.jsx', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
-const telemetry = [
-  '../src-tauri/src/features/behavior_telemetry.rs',
-  '../src-tauri/src/features/behavior_telemetry_tests.rs',
-].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
+const telemetry = behaviorTelemetryRust;
 
 test('desktop and web attachments emit a correlated, idempotent processing terminal', () => {
   for (const source of [desktopAttachments, web]) {

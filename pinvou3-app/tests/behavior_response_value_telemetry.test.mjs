@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
 const source = relative => readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8');
 const actions = source('src/features/conversation/AssistantMessageActions.jsx');
 const timeline = source('src/features/conversation/ConversationTimeline.jsx');
@@ -10,10 +12,7 @@ const desktopBridge = source('src/platform/tauri/bridge/interaction.js');
 const webBridge = source('src/platform/web/bridge.js');
 const command = source('src-tauri/src/app/commands/behavior_telemetry.rs');
 const retryCommand = source('src-tauri/src/app/commands/memory.rs');
-const telemetry = [
-  'src-tauri/src/features/behavior_telemetry.rs',
-  'src-tauri/src/features/behavior_telemetry_tests.rs',
-].map(source).join('\n');
+const telemetry = behaviorTelemetryRust;
 
 test('feedback and copy only send controlled response metadata', () => {
   assert.match(actions, /feedbackAction: clearing \? 'clear' : 'set'/);

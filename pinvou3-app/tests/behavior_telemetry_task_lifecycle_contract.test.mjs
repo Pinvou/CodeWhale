@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const telemetry = [
-  '../src-tauri/src/features/behavior_telemetry.rs',
-  '../src-tauri/src/features/behavior_telemetry_tests.rs',
-].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
+const telemetry = behaviorTelemetryRust;
 const chat = readFileSync(new URL('../src-tauri/src/app/commands/chat.rs', import.meta.url), 'utf8');
 const forwarder = readFileSync(new URL('../src-tauri/src/features/assistant/forwarder.rs', import.meta.url), 'utf8');
 const runtime = readFileSync(new URL('../src-tauri/src/app/commands/runtime.rs', import.meta.url), 'utf8');

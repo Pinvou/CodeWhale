@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const telemetry = [
-  '../src-tauri/src/features/behavior_telemetry.rs',
-  '../src-tauri/src/features/behavior_telemetry_tests.rs',
-].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
+const telemetry = behaviorTelemetryRust;
 const forwarder = readFileSync(new URL('../src-tauri/src/features/assistant/forwarder.rs', import.meta.url), 'utf8');
 const acp = readFileSync(new URL('../src-tauri/src/features/codex_acp/mod.rs', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('../src-tauri/src/app/commands/settings.rs', import.meta.url), 'utf8');
@@ -20,7 +19,8 @@ const schema = JSON.parse(readFileSync(new URL('../../docs/schemas/behavior-tele
 test('model use is correlated to the admitted attempt in assistant and ACP modes', () => {
   assert(telemetry.includes('.string("attempt_id", attempt.attempt_id)'));
   assert(telemetry.includes('.string("selection_source", selection_source)'));
-  assert(forwarder.includes('track_model_used('));
+  assert(forwarder.includes('track_model_used_keys('));
+  assert.equal(telemetry.includes('crate::features::assistant'), false);
   assert(acp.includes('self.bridge.track_model_used('));
 });
 
