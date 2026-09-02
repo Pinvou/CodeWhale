@@ -18,6 +18,8 @@ import {
 import './team-relay.css';
 
 const DEFAULT_TEAM_RELAY_SERVICE_URL = 'https://pinvou.com/pinvou3/team-relay';
+const EMPTY_RELAY_OPTIONS = [];
+const EMPTY_RELAY_GROUPS = [];
 
 function teamTelemetryToken(prefix) {
   if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
@@ -162,7 +164,7 @@ function MaterialChips({ copy, materials, onRemove }) {
   return <div className="team-relay-draft-materials">{materials.map(material => <span key={material.id}><FileText size={14} /><span>{material.name}</span><button type="button" onClick={() => onRemove(material.id)} aria-label={copy.removeMaterial(material.name)}><X size={12} /></button></span>)}</div>;
 }
 
-function RelaySelect({ value, onChange, options = [], groups = [], disabled = false, ariaLabel }) {
+function RelaySelect({ value, onChange, options = EMPTY_RELAY_OPTIONS, groups = EMPTY_RELAY_GROUPS, disabled = false, ariaLabel }) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef(null);

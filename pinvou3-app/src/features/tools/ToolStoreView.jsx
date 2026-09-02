@@ -163,7 +163,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         <div className={`h-full rounded-full transition-all ${creep ? 'bg-blue-500' : 'bg-emerald-500'}`} style={{ width: (pct || 0) + '%' }} />
       </div>
     );
-    const FeishuFlowCard = ({ flow, onRetry, onCancel, name = '', twoStep = true, browserAuth = false, steps = [], copy = {}, errors = {} }) => {
+    // Stable empty array/object defaults: inline [] and {} are new references on every render, which makes memoized children re-render repeatedly.
+    const EMPTY_STEPS = [];
+    const EMPTY_COPY = {};
+    const EMPTY_ERRORS = {};
+    const FeishuFlowCard = ({ flow, onRetry, onCancel, name = '', twoStep = true, browserAuth = false, steps = EMPTY_STEPS, copy = EMPTY_COPY, errors = EMPTY_ERRORS }) => {
       if (!flow) return null;
       const isErr = flow.phase === 'error';
       return (

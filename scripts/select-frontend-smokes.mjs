@@ -56,7 +56,7 @@ const FULL_PREFIXES = [
   "pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/",
   "pinvou3-app/src-tauri/tauri.conf.json",
   "pinvou3-app/tests/",
-  "pinvou3-app/vite.config.js",
+  "pinvou3-app/vite.config.mjs",
   "scripts/mcp-server-contract-smoke.py",
   "scripts/run-frontend-smokes.mjs",
   "scripts/run-user-journey-tests.sh",
@@ -76,7 +76,7 @@ function isFrontendRelevant(path) {
     path.startsWith("remote-control-relay/") ||
     path === "pinvou3-app/package.json" ||
     path === "pinvou3-app/package-lock.json" ||
-    path === "pinvou3-app/vite.config.js" ||
+    path === "pinvou3-app/vite.config.mjs" ||
     path === "pinvou3-app/eslint.config.mjs" ||
     path === "pinvou3-app/src-tauri/tauri.conf.json" ||
     path === "scripts/run-user-journey-tests.sh" ||

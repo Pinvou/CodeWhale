@@ -24,6 +24,7 @@ on:
       - 'pinvou3-app/src-tauri/**'
       - 'pinvou3-app/package.json'
       - 'pinvou3-app/package-lock.json'
+      - 'pinvou3-app/vite.config.mjs'
       - 'CodeWhale'
       - '.github/workflows/mac-build.yml'
       - 'scripts/run-mac-verify.sh'
