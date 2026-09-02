@@ -481,13 +481,17 @@ func loadManagedPriceForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Ma
 }
 
 func derivePriceStatus(item ManagedPriceVersion, now time.Time) string {
-	if item.LifecycleStatus == "CANCELLED" || item.LifecycleStatus == "ENDED" || item.LifecycleStatus == "DRAFT" {
-		return item.LifecycleStatus
+	return derivePriceLifecycleStatus(item.LifecycleStatus, item.EffectiveFrom, item.EffectiveTo, now)
+}
+
+func derivePriceLifecycleStatus(lifecycleStatus string, effectiveFrom time.Time, effectiveTo *time.Time, now time.Time) string {
+	if lifecycleStatus == "CANCELLED" || lifecycleStatus == "ENDED" || lifecycleStatus == "DRAFT" {
+		return lifecycleStatus
 	}
-	if now.Before(item.EffectiveFrom) {
+	if now.Before(effectiveFrom) {
 		return "PUBLISHED"
 	}
-	if item.EffectiveTo != nil && !now.Before(*item.EffectiveTo) {
+	if effectiveTo != nil && !now.Before(*effectiveTo) {
 		return "ENDED"
 	}
 	return "ACTIVE"

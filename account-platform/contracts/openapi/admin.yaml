@@ -673,19 +673,6 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
-    post:
-      operationId: createAdminPricingVersion
-      summary: Activate a new model price while retaining price history
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/PricingVersionCreate" }
-      responses:
-        "201": { description: Pricing version activated }
-        "400": { $ref: "#/components/responses/Error" }
-        "403": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/metering-units:
     get:
       operationId: listAdminMeteringUnitVersions
@@ -2504,15 +2491,6 @@ components:
       required: [reason]
       properties:
         reason: { type: string, minLength: 1, maxLength: 500 }
-    PricingVersionCreate:
-      type: object
-      additionalProperties: false
-      required: [model, input_per_million, output_per_million, cached_input_per_million]
-      properties:
-        model: { type: string, minLength: 1, maxLength: 160 }
-        input_per_million: { type: integer, format: int64, minimum: 0 }
-        output_per_million: { type: integer, format: int64, minimum: 0 }
-        cached_input_per_million: { type: integer, format: int64, minimum: 0 }
     MeteringUnitCreate:
       type: object
       additionalProperties: false

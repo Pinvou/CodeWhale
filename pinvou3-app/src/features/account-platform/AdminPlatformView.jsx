@@ -2409,12 +2409,6 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const [anomalyDetail, setAnomalyDetail] = useState(null);
   const [actionPanel, setActionPanel] = useState(null);
   const ownerSearchSequence = useRef(0);
-  const [price, setPrice] = useState({
-    model: '',
-    input: '',
-    output: '',
-    cached: '',
-  });
   const [reconciliation, setReconciliation] = useState({
     channel: 'ALIPAY',
     businessDate: new Date().toISOString().slice(0, 10),
@@ -2452,7 +2446,6 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const canApproveAdjustment = permissionSet.has('platform.billing.repairs.approve');
   const canReleaseHold = permissionSet.has('platform.billing.holds.release');
   const canReadUserDirectory = permissionSet.has('platform.users.read');
-  const canManagePricing = permissionSet.has('platform.pricing.manage');
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
   const visibleTabs =
     surface === 'payments'
@@ -2699,26 +2692,6 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     } finally {
       setBusy(false);
     }
-  };
-  const createPrice = (event) => {
-    event.preventDefault();
-    const input = {
-      model: price.model.trim(),
-      input_per_million: Math.round(Number(price.input) * MICROCREDITS_PER_POINT),
-      output_per_million: Math.round(Number(price.output) * MICROCREDITS_PER_POINT),
-      cached_input_per_million: Math.round(Number(price.cached) * MICROCREDITS_PER_POINT),
-    };
-    if (
-      !input.model ||
-      Object.values(input)
-        .slice(1)
-        .some((value) => !Number.isFinite(value) || value < 0)
-    )
-      return;
-    void perform(async () => {
-      await client.createPriceVersion(input);
-      setPrice({ model: '', input: '', output: '', cached: '' });
-    });
   };
   const showLedger = async (wallet) => {
     setBusy(true);
@@ -3177,6 +3150,11 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           render: (item) => formatPoints(item.cached_input_per_million, language),
         },
         {
+          key: 'status',
+          label: copy.accounts.status,
+          render: (item) => <Status value={item.status} />,
+        },
+        {
           key: 'effective_from',
           label: copy.billing.effectiveFrom,
           render: (item) => formatDate(item.effective_from),
@@ -3184,7 +3162,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         {
           key: 'effective_to',
           label: copy.billing.effectiveTo,
-          render: (item) => (item.effective_to ? formatDate(item.effective_to) : <Status value="ACTIVE" />),
+          render: (item) => (item.effective_to ? formatDate(item.effective_to) : '—'),
         },
       ],
       orders: [
@@ -4346,38 +4324,11 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           <button disabled={busy}>{copy.searchAction}</button>
         </form>
       )}
-      {tab === 'prices' && canManagePricing && (
-        <form className="adm-ops-form" onSubmit={createPrice}>
-          <input placeholder={copy.tokens.model} value={price.model} onChange={(event) => setPrice((current) => ({ ...current, model: event.target.value }))} />
-          <input type="number" min="0" step="0.0001" placeholder={copy.billing.inputPrice} value={price.input} onChange={(event) => setPrice((current) => ({ ...current, input: event.target.value }))} />
-          <input
-            type="number"
-            min="0"
-            step="0.0001"
-            placeholder={copy.billing.outputPrice}
-            value={price.output}
-            onChange={(event) =>
-              setPrice((current) => ({
-                ...current,
-                output: event.target.value,
-              }))
-            }
-          />
-          <input
-            type="number"
-            min="0"
-            step="0.0001"
-            placeholder={copy.billing.cachedPrice}
-            value={price.cached}
-            onChange={(event) =>
-              setPrice((current) => ({
-                ...current,
-                cached: event.target.value,
-              }))
-            }
-          />
-          <button disabled={busy}>{copy.billing.activatePrice}</button>
-        </form>
+      {tab === 'prices' && (
+        <div className="adm-inline-message info adm-pricing-read-only" role="status">
+          <strong>{copy.billing.pricingReadOnlyTitle}</strong>
+          <span>{copy.billing.pricingReadOnlyDescription}</span>
+        </div>
       )}
       {tab === 'reconciliations' && canReconcile && (
         <form

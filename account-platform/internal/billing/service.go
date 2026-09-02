@@ -139,7 +139,6 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/receivables", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminReceivables))
 		admin.GET("/receivables/:receivable_id/allocations", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminReceivableAllocations))
 		admin.GET("/pricing-versions", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPriceVersions))
-		admin.POST("/pricing-versions", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_VERSION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceVersion))
 		admin.POST("/pricing/drafts", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceDraftV2))
 		admin.GET("/pricing", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminManagedPrices))
 		admin.PUT("/pricing/:price_version_id/draft", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdatePriceDraft))

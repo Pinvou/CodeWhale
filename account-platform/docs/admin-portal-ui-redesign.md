@@ -201,7 +201,7 @@
 | `/billing/products/:id` | 删除 | `platform.products.delete` | PLATFORM | AUDIT_ONLY；仅 DRAFT/OFF_SALE |
 | `/billing/products/:id` | 申请/批准商品恢复 | `platform.billing.payment-controls.resume.request` / `.approve` | PLATFORM | APPROVAL_REQUIRED；Provider ACTIVE 后另起新申请 |
 | `/pricing` | 定价/计量读取 | `platform.pricing.read` | PLATFORM | READ_ONLY |
-| `/pricing-versions` | 旧版价格版本创建 | `platform.pricing.manage` | PLATFORM | `BILLING_PRICE_VERSION_CREATE` 已注册且固定 AUDIT_ONLY |
+| `/pricing-versions` | 旧版价格版本历史读取 | `platform.pricing.read` | PLATFORM | READ_ONLY；旧版 `POST`、运行时命令策略与 Portal 代理入口均已移除，历史迁移记录仅作为不可变审计事实保留 |
 | `/pricing/drafts`、`/pricing/:id/draft`、`/pricing/:id/publish`、`/pricing/:id/transition`、`/metering-units*` | 新版定价/计量写入 | `platform.pricing.manage` | PLATFORM | **NOT_AVAILABLE**：路由分别声明的六个 Billing 命令当前尚未注册，实际失败关闭为 `COMMAND_POLICY_UNAVAILABLE`；已批准 `ADM-54 / APT-112` 负责精确注册，`UI-44 / APT-113` 完成后才显示入口 |
 | `/models` | 读取 | `platform.models.read` | PLATFORM | READ_ONLY |
 | `/models:sync` | 同步 | `platform.models.sync` | PLATFORM | `TOKEN_MODEL_CATALOG_SYNC` 固定 AUDIT_ONLY |

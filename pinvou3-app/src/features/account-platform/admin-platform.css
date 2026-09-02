@@ -108,6 +108,7 @@
 .adm-empty{padding:64px 24px;color:var(--adm-muted);text-align:center}
 .adm-alert,.adm-inline-message{margin-bottom:16px;padding:13px 15px;border:1px solid #f0c8cc;border-radius:11px;color:var(--adm-danger);background:var(--adm-danger-soft)}
 .adm-inline-message:not(.ok):not(.error){color:var(--adm-info);border-color:#cce2ef;background:var(--adm-info-soft)}.adm-inline-message.ok{color:var(--adm-success);border-color:#c4e8d6;background:var(--adm-success-soft)}
+.adm-pricing-read-only{display:grid;gap:5px}.adm-pricing-read-only span{color:var(--adm-muted);line-height:1.55}
 
 /* Details, organizations and access management. */
 .adm-technical-id{display:inline-flex;max-width:100%;align-items:center;gap:6px}.adm-technical-id code{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

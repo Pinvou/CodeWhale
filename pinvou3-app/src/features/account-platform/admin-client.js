@@ -277,9 +277,6 @@ export class AdminPlatformClient {
   priceVersions(signal) {
     return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal);
   }
-  createPriceVersion(input) {
-    return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input);
-  }
   paymentOrders(filters = {}, signal) {
     const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
     if (filters.q) query.set('q', filters.q);

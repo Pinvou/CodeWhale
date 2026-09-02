@@ -446,7 +446,7 @@ test('operations API is role protected and limits mutations to documented manage
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/ownership']), ['post']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/status']), ['patch']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}']), ['patch', 'delete']);
-  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/pricing-versions']), ['get', 'post']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/pricing-versions']), ['get']);
   assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/payment-orders/{order_id}/refunds']), ['post']);
   assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/usage-holds/{hold_id}/release']), ['post']);
   assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/reconciliation-runs']), ['get', 'post']);

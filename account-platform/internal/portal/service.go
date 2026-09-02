@@ -678,7 +678,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies") {
 		return true
 	}
-	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/reconciliation-imports" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
+	if (resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/reconciliation-imports" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
 		return true
 	}
 	if (resource == "/admin/v1/pricing" || resource == "/admin/v1/metering-units") && method == http.MethodGet || (resource == "/admin/v1/pricing/drafts" || resource == "/admin/v1/metering-units") && method == http.MethodPost {

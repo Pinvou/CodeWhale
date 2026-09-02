@@ -173,8 +173,11 @@ type AdminPriceVersion struct {
 	InputPerMillion       int64      `json:"input_per_million"`
 	OutputPerMillion      int64      `json:"output_per_million"`
 	CachedInputPerMillion int64      `json:"cached_input_per_million"`
+	LifecycleStatus       string     `json:"lifecycle_status"`
+	Status                string     `json:"status"`
 	EffectiveFrom         time.Time  `json:"effective_from"`
 	EffectiveTo           *time.Time `json:"effective_to,omitempty"`
+	PublishedAt           *time.Time `json:"-"`
 	CreatedAt             time.Time  `json:"created_at"`
 }
 
@@ -237,7 +240,6 @@ type adminRepository interface {
 	AdminUsageHolds(context.Context, int) ([]AdminHold, error)
 	AdminUsageHold(context.Context, uuid.UUID) (AdminHoldDetail, error)
 	AdminPriceVersions(context.Context, int) ([]AdminPriceVersion, error)
-	AdminCreatePriceVersion(context.Context, string, int64, int64, int64) (AdminPriceVersion, error)
 	AdminWalletLedger(context.Context, uuid.UUID, int) ([]AdminLedgerEntry, error)
 	AdminPaymentOrder(context.Context, uuid.UUID) (AdminPaymentOrder, error)
 	AdminReleaseUsageHold(context.Context, uuid.UUID, string, string, string) (AdminHold, error)
@@ -496,28 +498,6 @@ func (s *Service) adminPriceVersions(w http.ResponseWriter, r *http.Request) {
 	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
 		return repository.AdminPriceVersions(r.Context(), limit)
 	})
-}
-
-func (s *Service) adminCreatePriceVersion(w http.ResponseWriter, r *http.Request) {
-	repository, ok := s.requireAdminRepository(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		Model                 string `json:"model"`
-		InputPerMillion       int64  `json:"input_per_million"`
-		OutputPerMillion      int64  `json:"output_per_million"`
-		CachedInputPerMillion int64  `json:"cached_input_per_million"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		return
-	}
-	price, err := repository.AdminCreatePriceVersion(r.Context(), body.Model, body.InputPerMillion, body.OutputPerMillion, body.CachedInputPerMillion)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusCreated, price)
 }
 
 func (s *Service) adminWalletLedger(w http.ResponseWriter, r *http.Request) {
@@ -1283,62 +1263,35 @@ FROM usage_holds hold LEFT JOIN (
 }
 
 func (r *PostgresRepository) AdminPriceVersions(ctx context.Context, limit int) ([]AdminPriceVersion, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,effective_to,created_at FROM pricing_versions ORDER BY effective_from DESC,id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id,model,input_per_million,output_per_million,cached_input_per_million,lifecycle_status,effective_from,effective_to,published_at,created_at FROM pricing_versions WHERE published_at IS NOT NULL ORDER BY effective_from DESC,id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]AdminPriceVersion, 0)
+	items := make([]AdminPriceVersion, 0, limit)
 	for rows.Next() {
 		var item AdminPriceVersion
-		if err := rows.Scan(&item.ID, &item.Model, &item.InputPerMillion, &item.OutputPerMillion, &item.CachedInputPerMillion, &item.EffectiveFrom, &item.EffectiveTo, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Model, &item.InputPerMillion, &item.OutputPerMillion, &item.CachedInputPerMillion, &item.LifecycleStatus, &item.EffectiveFrom, &item.EffectiveTo, &item.PublishedAt, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return projectPublishedAdminPrices(items, r.now()), nil
 }
 
-func (r *PostgresRepository) AdminCreatePriceVersion(ctx context.Context, model string, input, output, cached int64) (AdminPriceVersion, error) {
-	model = strings.TrimSpace(model)
-	if model == "" || len(model) > 160 || input < 0 || output < 0 || cached < 0 {
-		return AdminPriceVersion{}, ErrConflict
-	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return AdminPriceVersion{}, err
-	}
-	defer tx.Rollback(ctx)
-	now := r.now()
-	var currentFrom time.Time
-	err = tx.QueryRow(ctx, `SELECT effective_from FROM pricing_versions WHERE model=$1 AND effective_to IS NULL FOR UPDATE`, model).Scan(&currentFrom)
-	if err == nil {
-		if !now.After(currentFrom) {
-			now = currentFrom.Add(time.Microsecond)
+func projectPublishedAdminPrices(items []AdminPriceVersion, now time.Time) []AdminPriceVersion {
+	result := make([]AdminPriceVersion, 0, len(items))
+	for _, item := range items {
+		if item.PublishedAt == nil || item.LifecycleStatus == "DRAFT" {
+			continue
 		}
-		if _, err := tx.Exec(ctx, `UPDATE pricing_versions SET effective_to=$2 WHERE model=$1 AND effective_to IS NULL`, model, now); err != nil {
-			return AdminPriceVersion{}, err
-		}
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return AdminPriceVersion{}, err
+		item.Status = derivePriceLifecycleStatus(item.LifecycleStatus, item.EffectiveFrom, item.EffectiveTo, now)
+		result = append(result, item)
 	}
-	item := AdminPriceVersion{ID: uuid.Must(uuid.NewV7()), Model: model, InputPerMillion: input, OutputPerMillion: output, CachedInputPerMillion: cached, EffectiveFrom: now, CreatedAt: now}
-	if _, err := tx.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at,scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status) VALUES($1,$2,$3,$4,$5,$6,$6,'MODEL',$2,'CHAT',$7,'MICROCREDIT','DRAFT')`, item.ID, model, input, output, cached, now, chatFormulaVersionID); err != nil {
-		return AdminPriceVersion{}, err
-	}
-	for unitID, rate := range map[uuid.UUID]int64{
-		uuid.MustParse("00000000-0000-7000-8100-000000000001"): input,
-		uuid.MustParse("00000000-0000-7000-8100-000000000002"): cached,
-		uuid.MustParse("00000000-0000-7000-8100-000000000003"): output,
-	} {
-		if _, err := tx.Exec(ctx, `INSERT INTO pricing_version_unit_configs(price_version_id,unit_definition_id,config_type,fixed_price_per_denominator,created_at) VALUES($1,$2,'FIXED_PRICE',$3,$4)`, item.ID, unitID, rate, now); err != nil {
-			return AdminPriceVersion{}, err
-		}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE pricing_versions SET lifecycle_status='PUBLISHED',published_at=$2 WHERE id=$1`, item.ID, now); err != nil {
-		return AdminPriceVersion{}, err
-	}
-	return item, tx.Commit(ctx)
+	return result
 }
 
 func (r *PostgresRepository) AdminWalletLedger(ctx context.Context, walletID uuid.UUID, limit int) ([]AdminLedgerEntry, error) {
