@@ -10,8 +10,8 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
-import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from '../src/features/account-platform/admin-finance.js';
-import { adminNavigationGroups, adminSectionURL, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from '../src/features/account-platform/admin-finance.js';
+import { adminFinanceQueryUpdates, adminNavigationGroups, adminSectionURL, clearAdminFinanceQueryUpdates, normalizeAdminFinanceQuery, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
@@ -32,6 +32,12 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   assert.equal(readAdminFinanceTab('products', { search: '?finance_tab=prices' }), 'prices');
   assert.equal(readAdminFinanceTab('billing', { search: '?finance_tab=prices' }), 'wallets');
   assert.equal(readAdminFinanceTab('payments', { search: '' }), 'orders');
+  assert.deepEqual(readAdminFinanceQuery('payments', 'orders', { search: '?payment_q=order%2F42&payment_status=PAID&payment_limit=25' }), { q: 'order/42', status: 'PAID', limit: '25' });
+  assert.deepEqual(readAdminFinanceQuery('billing', 'receivables', { search: '?receivable_wallet_id=wallet-1&receivable_status=OPEN&receivable_limit=999' }), { wallet_id: 'wallet-1', status: 'OPEN', limit: '100' });
+  assert.deepEqual(readAdminFinanceQuery('payments', 'lateReviews', { search: '?late_provider_id=h3c&late_overdue=true&late_limit=200' }), { status: '', provider_id: 'h3c', owner_id: '', entered_from: '', entered_to: '', next_review_before: '', overdue: true, limit: '200' });
+  assert.deepEqual(normalizeAdminFinanceQuery('anomalies', { status: '', owner_id: ' actor ', limit: '50' }), { anomaly_type: '', status: '', severity: '', owner_id: 'actor', limit: '50' });
+  assert.deepEqual(adminFinanceQueryUpdates('orders', { q: ' order ', status: '', limit: '50' }), { payment_q: 'order', payment_status: null, payment_limit: '50' });
+  assert.equal(clearAdminFinanceQueryUpdates().late_owner_id, null);
   assert.deepEqual(resolveAdminFinanceTab('holds', 'wallets', ['wallets', 'receivables']), { tab: 'wallets', replace: true });
   assert.deepEqual(resolveAdminFinanceTab('receivables', 'wallets', ['wallets', 'receivables']), { tab: 'receivables', replace: false });
   assert.deepEqual(resolveAdminFinanceTab('prices', 'catalog', ['catalog']), { tab: 'catalog', replace: true });
@@ -55,6 +61,30 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
     ['push', { section: 'tokens' }, '', '/admin.html?trace=kept&section=tokens#focus'],
     ['replace', { section: 'audit' }, '', '/admin.html?trace=kept&section=audit#focus'],
   ]);
+});
+
+test('admin billing client forwards only existing normalized finance filters', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    return new Response(JSON.stringify({ items: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const client = new AdminPlatformClient('/portal');
+    await client.receivables({ wallet_id: 'wallet-id', status: 'OPEN', limit: '25' });
+    await client.paymentOrders({ q: 'order 42', status: 'PAID', limit: '50' });
+    await client.latePaymentReviews({ status: 'PROVIDER_BLIND', provider_id: 'h3c', owner_id: 'owner-id', entered_from: '2026-09-01T08:00', entered_to: '2026-09-02T08:00', next_review_before: '2026-09-03T08:00', overdue: true, limit: '200' });
+    await client.paymentAnomalies({ anomaly_type: 'CHARGEBACK', status: 'OPEN', severity: 'P0', owner_id: 'owner-id', limit: '25' });
+    assert.deepEqual(calls, [
+      '/portal/api/admin/billing/admin/v1/receivables?limit=25&wallet_id=wallet-id&status=OPEN',
+      '/portal/api/admin/billing/admin/v1/payment-orders?limit=50&q=order+42&status=PAID',
+      '/portal/api/admin/billing/admin/v1/late-payment-reviews?limit=200&status=PROVIDER_BLIND&provider_id=h3c&owner_id=owner-id&entered_from=2026-09-01T00%3A00%3A00.000Z&entered_to=2026-09-02T00%3A00%3A00.000Z&next_review_before=2026-09-03T00%3A00%3A00.000Z&overdue=true',
+      '/portal/api/admin/billing/admin/v1/payment-anomalies?limit=25&anomaly_type=CHARGEBACK&status=OPEN&severity=P0&owner_id=owner-id',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('Keycloak security access and user operations have independent permission boundaries', () => {
@@ -284,6 +314,13 @@ test('finance tab state isolates cached data, errors, and stale requests', () =>
   const restoredOrderQuery = readFinanceTabQuery(filteredOrders, 'payments', 'orders');
   restoredOrderQuery.q = 'local-edit';
   assert.equal(filteredOrders.financeTabStates.payments.orders.query.q, 'merchant-42');
+  const executedQuery = { q: '', status: 'PAID', limit: '100' };
+  const unsubmittedDraft = { q: '', status: 'FAILED', limit: '100' };
+  assert.equal(financeTabShouldLoad({ attempted: true, loading: false, query: executedQuery }, executedQuery), false);
+  assert.equal(financeTabShouldLoad({ attempted: true, loading: false, query: executedQuery, requestedQuery: executedQuery, error: 'failed' }, executedQuery), false);
+  assert.equal(financeTabShouldLoad({ attempted: true, loading: false, query: executedQuery, requestedQuery: unsubmittedDraft, error: 'failed' }, executedQuery), true);
+  assert.equal(financeTabShouldLoad({ attempted: false, loading: false }, executedQuery), true);
+  assert.equal(financeTabShouldLoad({ attempted: false, loading: true }, executedQuery), false);
 
   const tracker = createFinanceTabRequestTracker();
   const firstOrders = tracker.begin('payments:orders');

@@ -2006,3 +2006,13 @@ Object.assign(adminPlatformCopy.en.billing, {
 Object.assign(adminPlatformCopy.ja.billing, {
   controls: '決済チャネル制御', provider: 'Provider', product: '商品', newOrders: '新規注文', controlVersion: '制御バージョン', controlReason: '制御理由', observationGaps: '観測ギャップ', productControls: '商品別制御', resumeReason: '復旧理由（10 文字以上）', requestProviderResume: 'Provider 復旧を申請', requestProductResume: '商品復旧を申請', continueControlResume: '復旧申請の送信を続行', resumeDraftUnavailable: '現在のサーバースナップショットは復旧条件を満たしていません。', controlResumeSubmitted: '復旧申請を承認センターに送信しました。', controlResumeFailed: '復旧申請に失敗しました。一覧に下書きが残っている場合は送信を続行できます。', controlsUnavailable: '決済チャネル制御を一時的に取得できません。', capabilitiesUnavailable: '決済機能スナップショットを一時的に取得できません。一覧は表示し、関連操作は安全のため無効化しています。', stopLossEvidence: '損失制御の証拠', scope: '範囲', trigger: 'トリガー', sourceCase: '起点案件', severity: '重大度', actionApplied: '適用結果', applied: '適用済み', notApplied: '未適用', policyVersion: 'ポリシーバージョン', metrics: '指標スナップショット', evidenceDetails: '追加証拠', viewDetails: '詳細を見る', window: '評価期間', highWatermark: '観測ハイウォーターマーク',
 });
+
+Object.assign(adminPlatformCopy.zh.billing, {
+  walletID: '钱包 ID', pageSize: '每页条数', currentPageRange: (count, limit) => `本页 ${count} 条 · 服务端单次最多返回 ${limit} 条，不代表全部记录`,
+});
+Object.assign(adminPlatformCopy.en.billing, {
+  walletID: 'Wallet ID', pageSize: 'Page size', currentPageRange: (count, limit) => `${count} on this page · The server returns at most ${limit} per request; this is not a total`,
+});
+Object.assign(adminPlatformCopy.ja.billing, {
+  walletID: 'ウォレット ID', pageSize: 'ページ件数', currentPageRange: (count, limit) => `このページ ${count} 件 · 1 回の取得上限は ${limit} 件で、総件数ではありません`,
+});

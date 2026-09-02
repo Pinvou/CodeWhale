@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminNavigationGroups, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
+import { adminFinanceQueryUpdates, adminNavigationGroups, clearAdminFinanceQueryUpdates, normalizeAdminFinanceQuery, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
@@ -210,6 +210,17 @@ function Tabs({ items, active, onChange }) {
         </button>
       ))}
     </div>
+  );
+}
+
+function FinanceLimitSelect({ copy, value, onChange }) {
+  return (
+    <label>
+      {copy.billing.pageSize}
+      <select value={value} onChange={onChange}>
+        {[25, 50, 100, 200].map((limit) => <option key={limit} value={String(limit)}>{limit}</option>)}
+      </select>
+    </label>
   );
 }
 
@@ -527,6 +538,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       organization_id: null,
       organization_tab: null,
       finance_tab: null,
+      ...clearAdminFinanceQueryUpdates(),
+      product_cursor: null,
+      product_limit: null,
+      product_lifecycle_status: null,
+      product_include_deleted: null,
       approval_command_type: null,
       approval_target: null,
       ...query,
@@ -555,8 +571,13 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const organizationRoute = section === 'organizations' ? readAdminOrganizationRoute() : { organizationID: '', tab: 'overview' };
   const organizationDirectory = section === 'organizations' ? readAdminOrganizationDirectory() : { q: '', status: '', cursor: '' };
   const financeTab = ['billing', 'payments', 'products'].includes(section) ? readAdminFinanceTab(section) : '';
+  const financeQuery = ['billing', 'payments'].includes(section) ? readAdminFinanceQuery(section, financeTab) : {};
   const changeFinanceTab = (nextTab, mode = 'push') => {
     writeAdminSection(section, mode, undefined, undefined, { finance_tab: nextTab });
+    setRouteVersion((value) => value + 1);
+  };
+  const changeFinanceQuery = (nextTab, nextQuery, mode = 'push') => {
+    writeAdminSection(section, mode, undefined, undefined, { finance_tab: nextTab, ...adminFinanceQueryUpdates(nextTab, nextQuery) });
     setRouteVersion((value) => value + 1);
   };
   const currentPageTitle = copy.nav[section];
@@ -644,8 +665,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
-          {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
+          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
+          {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'system' && (
@@ -2299,8 +2320,11 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
   );
 }
 
-function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', onRouteTabChange, onNavigate, embedded = false, requestTracker }) {
+function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', routeQuery = {}, routeVersion = 0, onRouteTabChange, onRouteQueryChange, onNavigate, embedded = false, requestTracker }) {
   const defaultTab = surface === 'payments' ? 'orders' : surface === 'products' ? 'prices' : 'wallets';
+  const initialFilter = (targetTab, fallback) => routeTab === targetTab
+    ? normalizeAdminFinanceQuery(targetTab, routeQuery)
+    : readFinanceTabQuery(data, surface, targetTab, fallback);
   const [tab, setTab] = useState(routeTab || defaultTab);
   const items = data[tab] || [];
   const [busy, setBusy] = useState(false);
@@ -2325,8 +2349,9 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   });
   const [adjustment, setAdjustment] = useState({ walletID: '', amount: '', reason: '' });
   const [adjustmentRequestKey, setAdjustmentRequestKey] = useState(() => crypto.randomUUID());
-  const [orderFilter, setOrderFilter] = useState(() => readFinanceTabQuery(data, surface, 'orders', { q: '', status: '' }));
-  const [lateFilter, setLateFilter] = useState(() => readFinanceTabQuery(data, surface, 'lateReviews', {
+  const [receivableFilter, setReceivableFilter] = useState(() => initialFilter('receivables', { wallet_id: '', status: '', limit: '100' }));
+  const [orderFilter, setOrderFilter] = useState(() => initialFilter('orders', { q: '', status: '', limit: '100' }));
+  const [lateFilter, setLateFilter] = useState(() => initialFilter('lateReviews', {
     status: '',
     provider_id: '',
     owner_id: '',
@@ -2334,11 +2359,14 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     entered_to: '',
     next_review_before: '',
     overdue: false,
+    limit: '100',
   }));
-  const [anomalyFilter, setAnomalyFilter] = useState(() => readFinanceTabQuery(data, surface, 'anomalies', {
+  const [anomalyFilter, setAnomalyFilter] = useState(() => initialFilter('anomalies', {
     anomaly_type: '',
     status: 'OPEN',
     severity: '',
+    owner_id: '',
+    limit: '100',
   }));
   const permissionSet = new Set(permissions || []);
   const canReadWallets = permissionSet.has('platform.billing.wallets.read');
@@ -2380,25 +2408,24 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const reconciliationImportSupported = paymentCapabilities.bill_file_import_supported === true;
   const repairSupported = paymentCapabilities.manual_repair_supported === true;
   const hasLimitedPaymentCapabilities = paymentCapabilities.provider_id && (!paymentCapabilities.refund_supported || !paymentCapabilities.close_supported || !paymentCapabilities.notification_supported || paymentCapabilities.reconciliation_mode !== 'API');
-  const loadTab = useCallback(async (targetTab) => {
+  const loadTab = useCallback(async (targetTab, options = {}) => {
     const requestKey = `${surface}:${targetTab}`;
     const generation = requestTracker.begin(requestKey);
-    const querySnapshot =
-      targetTab === 'orders'
-        ? { ...orderFilter }
-        : targetTab === 'lateReviews'
-          ? { ...lateFilter }
-          : targetTab === 'anomalies'
-            ? { ...anomalyFilter }
-            : null;
-    setData((current) => updateFinanceTabState(current, surface, targetTab, { loading: true, attempted: true, error: '' }));
+    const routeAware = ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(targetTab);
+    const querySnapshot = routeAware ? normalizeAdminFinanceQuery(targetTab, options.query || routeQuery) : null;
+    setData((current) => updateFinanceTabState(current, surface, targetTab, {
+      loading: true,
+      attempted: true,
+      error: '',
+      ...(querySnapshot ? { requestedQuery: querySnapshot } : {}),
+    }));
     try {
       let next = {};
       if (targetTab === 'wallets' && canReadWallets) {
         const result = await client.wallets();
         next.wallets = result.items || [];
       } else if (targetTab === 'receivables' && canReadWallets) {
-        const result = await client.receivables();
+        const result = await client.receivables(querySnapshot);
         next.receivables = result.items || [];
       } else if (targetTab === 'adjustments' && canReadWallets) {
         const [adjustments, wallets, approvals] = await Promise.all([
@@ -2459,7 +2486,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setData((current) => updateFinanceTabState(current, surface, targetTab, { loading: false, attempted: true, error: copy.failed }));
       return null;
     }
-  }, [anomalyFilter, canApproveAdjustment, canApproveControlResume, canReadPricing, canReadUsage, canReadWallets, canRequestAdjustment, canRequestControlResume, client, copy.failed, lateFilter, orderFilter, requestTracker, setData, surface]);
+  }, [canApproveAdjustment, canApproveControlResume, canReadPricing, canReadUsage, canReadWallets, canRequestAdjustment, canRequestControlResume, client, copy.failed, requestTracker, routeQuery, setData, surface]);
   const loadPaymentCapabilities = useCallback(async () => {
     if (surface !== 'payments' || !canReadWallets) return null;
     const requestKey = 'payments:capabilities';
@@ -2480,9 +2507,21 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       return null;
     }
   }, [canReadWallets, client, copy.failed, requestTracker, setData, surface]);
+  const routeQueryKey = JSON.stringify(routeQuery);
   useEffect(() => {
-    if (tab && !activeTabState.attempted && !activeTabState.loading) void loadTab(tab);
-  }, [activeTabState.attempted, activeTabState.loading, loadTab, tab]);
+    if (tab === 'receivables') setReceivableFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'orders') setOrderFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'lateReviews') setLateFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+    else if (tab === 'anomalies') setAnomalyFilter(normalizeAdminFinanceQuery(tab, routeQuery));
+  }, [routeQueryKey, routeVersion, tab]);
+  useEffect(() => {
+    if (!tab) return;
+    const routeAware = ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(tab);
+    const desiredQuery = routeAware ? normalizeAdminFinanceQuery(tab, routeQuery) : null;
+    if (financeTabShouldLoad(activeTabState, desiredQuery)) {
+      void loadTab(tab, desiredQuery ? { query: desiredQuery } : undefined);
+    }
+  }, [activeTabState.attempted, activeTabState.loading, activeTabState.query, activeTabState.requestedQuery, loadTab, routeQueryKey, routeVersion, tab]);
   useEffect(() => {
     if (surface === 'payments' && canReadWallets && !data.paymentCapabilityState?.attempted && !data.paymentCapabilityState?.loading) void loadPaymentCapabilities();
   }, [canReadWallets, data.paymentCapabilityState?.attempted, data.paymentCapabilityState?.loading, loadPaymentCapabilities, surface]);
@@ -2491,8 +2530,9 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     setData((current) => resetFinanceSurfaceLoading(current, surface));
   }, [requestTracker, setData, surface]);
   const reload = async () => {
+    const routeAware = ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(tab);
     const [result] = await Promise.all([
-      loadTab(tab, { force: true }),
+      loadTab(tab, routeAware ? { query: normalizeAdminFinanceQuery(tab, routeQuery) } : undefined),
       surface === 'payments' && canReadWallets ? loadPaymentCapabilities() : Promise.resolve(null),
     ]);
     return result;
@@ -2639,7 +2679,17 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   };
   const searchOrders = async (event) => {
     event.preventDefault();
-    await loadTab('orders', { force: true });
+    const query = normalizeAdminFinanceQuery('orders', orderFilter);
+    setOrderFilter(query);
+    onRouteQueryChange?.('orders', query);
+    await loadTab('orders', { query });
+  };
+  const searchReceivables = async (event) => {
+    event.preventDefault();
+    const query = normalizeAdminFinanceQuery('receivables', receivableFilter);
+    setReceivableFilter(query);
+    onRouteQueryChange?.('receivables', query);
+    await loadTab('receivables', { query });
   };
   const release = (item) => {
     const reason = promptReason(copy.billing.releaseReason);
@@ -2683,7 +2733,10 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   };
   const searchLateReviews = async (event) => {
     event.preventDefault();
-    await loadTab('lateReviews', { force: true });
+    const query = normalizeAdminFinanceQuery('lateReviews', lateFilter);
+    setLateFilter(query);
+    onRouteQueryChange?.('lateReviews', query);
+    await loadTab('lateReviews', { query });
   };
   const showLateReview = async (item) => {
     setBusy(true);
@@ -2698,7 +2751,10 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   };
   const searchAnomalies = async (event) => {
     event.preventDefault();
-    await loadTab('anomalies', { force: true });
+    const query = normalizeAdminFinanceQuery('anomalies', anomalyFilter);
+    setAnomalyFilter(query);
+    onRouteQueryChange?.('anomalies', query);
+    await loadTab('anomalies', { query });
   };
   const showAnomaly = async (item) => {
     setBusy(true);
@@ -3760,7 +3816,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     );
   return (
     <section className={embedded ? 'adm-finance-subpanel' : 'adm-panel'}>
-      {!embedded && <SectionHeader title={surface === 'payments' ? copy.billing.paymentsTitle : surface === 'products' ? copy.nav.products : copy.billing.title} count={activeTabState.loaded ? items.length : undefined} copy={copy}>
+      {!embedded && <SectionHeader title={surface === 'payments' ? copy.billing.paymentsTitle : surface === 'products' ? copy.nav.products : copy.billing.title} copy={copy}>
         <div className="adm-row-actions">
           {activeTabState.updatedAt && <small>{copy.updated} {new Date(activeTabState.updatedAt).toLocaleTimeString()}</small>}
           <button type="button" disabled={activeTabState.loading || busy} onClick={() => void reload()}>{copy.refresh}</button>
@@ -3774,6 +3830,24 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       )}
       {surface === 'payments' && data.paymentCapabilityState?.error && <div className="adm-inline-message error">{copy.billing.capabilitiesUnavailable}</div>}
       {!embedded && <Tabs active={tab} onChange={changeTab} items={visibleTabs.map((key) => ({ key, label: copy.billing[key] }))} />}
+      {activeTabState.loaded && ['receivables', 'orders', 'lateReviews', 'anomalies'].includes(tab) && (
+        <div className="adm-inline-message">{copy.billing.currentPageRange(items.length, activeTabState.query?.limit || 100)}</div>
+      )}
+      {tab === 'receivables' && (
+        <form className="adm-ops-form" onSubmit={searchReceivables}>
+          <input
+            value={receivableFilter.wallet_id}
+            onChange={(event) => setReceivableFilter((current) => ({ ...current, wallet_id: event.target.value }))}
+            placeholder={copy.billing.walletID}
+          />
+          <select value={receivableFilter.status} onChange={(event) => setReceivableFilter((current) => ({ ...current, status: event.target.value }))}>
+            <option value="">{copy.billing.allStatuses}</option>
+            {['OPEN', 'PARTIALLY_SETTLED', 'SETTLED', 'WRITTEN_OFF'].map((status) => <option key={status}>{status}</option>)}
+          </select>
+          <FinanceLimitSelect copy={copy} value={receivableFilter.limit} onChange={(event) => setReceivableFilter((current) => ({ ...current, limit: event.target.value }))} />
+          <button disabled={busy}>{copy.searchAction}</button>
+        </form>
+      )}
       {tab === 'adjustments' && canRequestAdjustment && (
         <form className="adm-ops-form" onSubmit={submitAdjustment}>
           <label>
@@ -3824,6 +3898,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
               <option key={status}>{status}</option>
             ))}
           </select>
+          <FinanceLimitSelect copy={copy} value={orderFilter.limit} onChange={(event) => setOrderFilter((current) => ({ ...current, limit: event.target.value }))} />
           <button disabled={busy}>{copy.searchAction}</button>
         </form>
       )}
@@ -3915,6 +3990,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             />
             {copy.billing.overdueOnly}
           </label>
+          <FinanceLimitSelect copy={copy} value={lateFilter.limit} onChange={(event) => setLateFilter((current) => ({ ...current, limit: event.target.value }))} />
           <button disabled={busy}>{copy.searchAction}</button>
         </form>
       )}
@@ -3961,6 +4037,12 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             <option>P1</option>
             <option>P2</option>
           </select>
+          <input
+            value={anomalyFilter.owner_id}
+            onChange={(event) => setAnomalyFilter((current) => ({ ...current, owner_id: event.target.value }))}
+            placeholder={copy.billing.ownerID}
+          />
+          <FinanceLimitSelect copy={copy} value={anomalyFilter.limit} onChange={(event) => setAnomalyFilter((current) => ({ ...current, limit: event.target.value }))} />
           <button disabled={busy}>{copy.searchAction}</button>
         </form>
       )}

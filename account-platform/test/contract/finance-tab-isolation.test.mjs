@@ -20,8 +20,9 @@ test('finance child tabs load, cache, fail, and refresh independently', async ()
     assert.match(view, new RegExp(`targetTab === '${tab}'`));
   }
   assert.match(view, /financeTabStates\?\.\[surface\]\?\.\[tab\]/);
-  assert.match(view, /!activeTabState\.attempted && !activeTabState\.loading/);
-  assert.match(view, /loadTab\(tab, \{ force: true \}\)/);
+  assert.match(view, /financeTabShouldLoad\(activeTabState, desiredQuery\)/);
+  assert.match(view, /requestedQuery: querySnapshot/);
+  assert.match(view, /loadTab\(tab, routeAware \? \{ query: normalizeAdminFinanceQuery\(tab, routeQuery\) \} : undefined\)/);
   assert.match(view, /activeTabState\.error/);
   assert.match(view, /activeTabState\.loading && !activeTabState\.loaded/);
   assert.match(view, /activeTabState\.loaded &&/);
@@ -54,7 +55,7 @@ test('finance child tabs load, cache, fail, and refresh independently', async ()
   assert.match(products, /generation!==loadGeneration/);
   assert.match(products, /catch\(error\)\{if\(generation!==loadGeneration\)return false;loadMessage/);
   assert.match(products, /id="product-load-message"/);
-  assert.match(products, /loaded=true;loadMessage\(""\);return true/);
+  assert.match(products, /loaded=true;loadMessage\(""\);syncQueryUI\(\);return true/);
   assert.match(products, /version!==activeAuthorizationVersion/);
   assert.match(products, /globalThis\.location\.reload\(\)/);
   assert.doesNotMatch(products, /\(async\(\)=>\{try\{const session=/);

@@ -83,6 +83,14 @@ export function readFinanceTabQuery(current, surface, tab, fallback = {}) {
   return { ...(cached || fallback) };
 }
 
+export function financeTabShouldLoad(state = {}, desiredQuery = null) {
+  if (state.loading) return false;
+  if (!state.attempted) return true;
+  if (!desiredQuery) return false;
+  const requestedQuery = state.requestedQuery || state.query || null;
+  return JSON.stringify(requestedQuery) !== JSON.stringify(desiredQuery);
+}
+
 export function resetFinanceSurfaceLoading(current, surface) {
   const surfaceStates = current?.financeTabStates?.[surface] || {};
   const nextSurfaceStates = Object.fromEntries(Object.entries(surfaceStates).map(([tab, state]) => [

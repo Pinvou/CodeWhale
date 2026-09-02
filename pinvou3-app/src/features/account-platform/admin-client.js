@@ -265,8 +265,11 @@ export class AdminPlatformClient {
   walletLedger(walletID, signal) {
     return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal);
   }
-  receivables(signal) {
-    return this.request('billing', '/admin/v1/receivables?limit=100', signal);
+  receivables(filters = {}, signal) {
+    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
+    if (filters.wallet_id) query.set('wallet_id', filters.wallet_id);
+    if (filters.status) query.set('status', filters.status);
+    return this.request('billing', `/admin/v1/receivables?${query}`, signal);
   }
   receivableAllocations(receivableID, signal) {
     return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(receivableID)}/allocations`, signal);
@@ -278,7 +281,7 @@ export class AdminPlatformClient {
     return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input);
   }
   paymentOrders(filters = {}, signal) {
-    const query = new URLSearchParams({ limit: '100' });
+    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
     if (filters.q) query.set('q', filters.q);
     if (filters.status) query.set('status', filters.status);
     return this.request('billing', `/admin/v1/payment-orders?${query}`, signal);
@@ -363,7 +366,7 @@ export class AdminPlatformClient {
     return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, `reconciliation-case-${crypto.randomUUID()}`);
   }
   latePaymentReviews(filters = {}, signal) {
-    const query = new URLSearchParams({ limit: '100' });
+    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
     for (const key of ['status', 'provider_id', 'owner_id']) if (filters[key]) query.set(key, filters[key]);
     for (const key of ['entered_from', 'entered_to', 'next_review_before']) if (filters[key]) query.set(key, new Date(filters[key]).toISOString());
     if (filters.overdue) query.set('overdue', 'true');
@@ -388,7 +391,7 @@ export class AdminPlatformClient {
     return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason });
   }
   paymentAnomalies(filters = {}, signal) {
-    const query = new URLSearchParams({ limit: '100' });
+    const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
     for (const key of ['anomaly_type', 'status', 'severity', 'owner_id']) if (filters[key]) query.set(key, filters[key]);
     return this.request('billing', `/admin/v1/payment-anomalies?${query}`, signal);
   }
