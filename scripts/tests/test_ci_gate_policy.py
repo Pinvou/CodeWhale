@@ -54,6 +54,39 @@ def _matches_paths_filter(path, patterns):
     return included and not excluded
 
 
+def _evaluate_github_condition(
+    expression,
+    *,
+    event_name,
+    draft,
+    mode,
+    rust_full=False,
+    rust_code=False,
+    full_label=False,
+):
+    """Replay the checked-in GitHub expression for a deterministic truth table."""
+
+    replacements = {
+        "!cancelled()": "True",
+        "github.event_name": repr(event_name),
+        "github.event.pull_request.draft": repr(draft),
+        "needs.changes.outputs.backflow_mode": repr(mode),
+        "needs.changes.outputs.rust_full": repr(str(rust_full).lower()),
+        "needs.changes.outputs.rust_code": repr(str(rust_code).lower()),
+        "contains(github.event.pull_request.labels.*.name, 'ci:full-rust')": repr(
+            full_label
+        ),
+    }
+    evaluated = expression
+    for source, value in replacements.items():
+        evaluated = evaluated.replace(source, value)
+    evaluated = evaluated.replace("&&", " and ").replace("||", " or ")
+    evaluated = re.sub(r"\btrue\b", "True", evaluated, flags=re.IGNORECASE)
+    evaluated = re.sub(r"\bfalse\b", "False", evaluated, flags=re.IGNORECASE)
+    evaluated = " ".join(evaluated.split())
+    return bool(eval(evaluated, {"__builtins__": {}}, {}))
+
+
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -165,6 +198,12 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"{output}: ${{{{ steps.filter.outputs.{output} }}}}",
                 changes,
             )
+        for output, fallback in (
+            ("backflow_mode", "full"),
+            ("pure_release_backflow", "false"),
+        ):
+            self.assertIn(f"{output}:", changes)
+            self.assertIn(f"|| '{fallback}'", changes)
 
         required_gate = self.workflow.split("\n  required-gate:", maxsplit=1)[1]
         self.assertIn("Merge Queue 基础检查失败", required_gate)
@@ -443,7 +482,19 @@ class CiGatePolicyTests(unittest.TestCase):
             "needs.changes.outputs.rust_full == 'true'",
             windows_rust_test,
         )
-        self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
+        self.assertIn(
+            "needs.changes.outputs.backflow_mode == 'windows_full'",
+            windows_rust_test,
+        )
+        self.assertIn(
+            "needs.changes.outputs.backflow_mode == 'ordinary'",
+            windows_rust_test,
+        )
+        self.assertRegex(
+            windows_rust_test,
+            r"github\.event_name == 'merge_group'\s*&&\s*"
+            r"needs\.changes\.outputs\.backflow_mode == 'full'",
+        )
         self.assertIn(
             "contains(github.event.pull_request.labels.*.name, 'ci:full-rust')",
             windows_rust_test,
@@ -451,7 +502,6 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn(
             "github.event.pull_request.draft == false", windows_rust_test
         )
-        self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
         self.assertIn("name: windows-rust-test (${{ matrix.phase }})", windows_rust_test)
         self.assertIn("fail-fast: false", windows_rust_test)
         self.assertIn("max-parallel: 2", windows_rust_test)
@@ -542,6 +592,105 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("--all-targets --features dev-tools", windows_rust_test)
         self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
         self.assertNotIn("--lib --no-run --features dev-tools", windows_rust_test)
+
+    def test_windows_policy_condition_truth_table_and_required_result(self):
+        windows_job = self.pr_workflow.split(
+            "\n  windows-rust-test:", maxsplit=1
+        )[1].split("\n  windows-rustup-repair-test:", maxsplit=1)[0]
+        job_expression = re.search(
+            r"\n    if: >-\n      \$\{\{(.*?)\n      \}\}",
+            windows_job,
+            flags=re.DOTALL,
+        ).group(1)
+
+        required_gate = self.pr_workflow.split("\n  required-gate:", maxsplit=1)[1]
+        required_expression = re.search(
+            r"WINDOWS_RUST_REQUIRED_BY_POLICY: \$\{\{ (.*?) \}\}",
+            required_gate,
+        ).group(1)
+
+        cases = (
+            # policy/API/diff failure is full even for a paths-filter-low-risk diff
+            ("policy failure ready", "pull_request", False, "full", False, True, False, True, True),
+            ("policy failure draft", "pull_request", True, "full", False, True, False, False, False),
+            ("incomplete queue entry policy failure", "merge_group", False, "full", False, False, False, True, True),
+            ("truncated queue labels policy failure", "merge_group", False, "full", True, True, False, True, True),
+            # A provable mixed/non-trusted group keeps ordinary MQ behavior; each PR
+            # already took its own ready-stage Windows route.
+            ("mixed cumulative group", "merge_group", False, "ordinary", True, True, False, False, False),
+            ("non-main low-risk PR", "pull_request", False, "ordinary", False, True, False, False, False),
+            ("ordinary high-risk PR", "pull_request", False, "ordinary", True, True, False, True, False),
+            ("ci full label", "pull_request", False, "ordinary", False, True, True, True, False),
+            ("Windows-native non-Rust", "pull_request", False, "windows_full", False, False, False, True, True),
+            ("portable Rust ready", "pull_request", False, "portable_rust", True, True, False, False, False),
+            ("pure release ready", "pull_request", False, "release", True, True, False, False, False),
+            ("main cumulative", "push", False, "full", False, False, False, True, False),
+        )
+        for (
+            name,
+            event_name,
+            draft,
+            mode,
+            rust_full,
+            rust_code,
+            full_label,
+            expected_job,
+            expected_policy_required,
+        ) in cases:
+            with self.subTest(name=name):
+                values = dict(
+                    event_name=event_name,
+                    draft=draft,
+                    mode=mode,
+                    rust_full=rust_full,
+                    rust_code=rust_code,
+                    full_label=full_label,
+                )
+                self.assertEqual(
+                    _evaluate_github_condition(job_expression, **values),
+                    expected_job,
+                )
+                policy_required = _evaluate_github_condition(
+                    required_expression, **values
+                )
+                self.assertEqual(policy_required, expected_policy_required)
+                # Replay the required-gate shell contract: policy-required Windows
+                # accepts only success; skipped is valid only when policy did not
+                # require this job.
+                self.assertEqual(
+                    not policy_required or "success" == "success",
+                    True,
+                )
+                self.assertEqual(
+                    not policy_required or "skipped" == "success",
+                    not policy_required,
+                )
+
+    def test_pure_release_backflow_runs_contract_only_and_skipped_jobs_are_accepted(self):
+        for start, end in (
+            ("frontend-test", "relay-test"),
+            ("knowledge-rust", "rust-lint"),
+            ("rust-lint", "rust-test"),
+            ("windows-rustup-repair-test", "windows-codex-runtime-test"),
+            ("windows-codex-runtime-test", "windows-runtime-test"),
+            ("windows-runtime-test", "macos-codex-runtime-test"),
+            ("macos-codex-runtime-test", "required-gate"),
+        ):
+            job = self.pr_workflow.split(f"\n  {start}:", maxsplit=1)[1].split(
+                f"\n  {end}:", maxsplit=1
+            )[0]
+            self.assertIn("needs.changes.outputs.pure_release_backflow != 'true'", job)
+
+        release_contract = self.pr_workflow.split(
+            "\n  release-contract-test:", maxsplit=1
+        )[1].split("\n  knowledge-rust:", maxsplit=1)[0]
+        self.assertNotIn("pure_release_backflow", release_contract)
+
+        required_gate = self.pr_workflow.split("\n  required-gate:", maxsplit=1)[1]
+        self.assertIn("success|skipped", required_gate)
+        self.assertIn("WINDOWS_RUST_REQUIRED_BY_POLICY", required_gate)
+        self.assertIn('"$WINDOWS_RUST_RESULT" != success', required_gate)
+        self.assertIn("回流策略 $BACKFLOW_MODE 要求完整 Windows Rust", required_gate)
 
     def test_windows_browser_wrapper_lifecycle_runs_in_required_native_job(self):
         changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(

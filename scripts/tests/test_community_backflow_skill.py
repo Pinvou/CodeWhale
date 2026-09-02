@@ -55,12 +55,16 @@ class CommunityBackflowSkillTests(unittest.TestCase):
         self.assertIn("run ID/URL", self.skill)
         self.assertIn("不发布 OTA", self.skill)
 
-    def test_backflow_pr_defers_full_rust_test_to_latest_main(self):
+    def test_backflow_rust_policy_is_semantic_and_fail_closed(self):
         self.assertIn(
-            "Official 同仓 `backflow/community-*` PR 不重复运行完整 `rust-test`",
+            "普通跨平台 Rust 可信回流不重复运行完整 `rust-test` 或完整 Windows Rust",
             self.skill,
         )
-        self.assertIn("外部 fork 的同名分支不适用此例外", self.skill)
+        self.assertIn("base→head 实际 diff", self.skill)
+        self.assertIn("派生版本字段机械一致变化", self.skill)
+        self.assertIn("API/diff 失败或 Merge Group", self.skill)
+        self.assertIn("required-gate` 不得接受 skipped", self.skill)
+        self.assertIn("外部 fork 的同名分支", self.skill)
         self.assertIn("只保留最新 main 的累计状态验证", self.skill)
         self.assertIn("不等待合入后的 main Rust 测试完成", self.skill)
 

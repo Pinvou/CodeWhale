@@ -92,6 +92,15 @@ Session、远控及其他高爆炸半径路径会在入队前自动追加完整 
 其他 Ready Rust PR 可用 `ci:full-rust` 强制追加同款全量回归；Draft 不响应该
 标签。目前轻量 Rust 边界仅限 `feedback`、`personas`、`pet` 模块内部改动；它们的
 注册、应用命令、共享平台接口、Cargo 元数据或任何未分类 Rust 路径仍进入完整回归。
+Official 同仓 `backflow/community-*` 可信回流会继续读取实际 base→head 差异并做内容
+语义分类。只有 `VERSION` 与 `scripts/sync-version.mjs` 管理的全部派生字段机械同步为
+同一个 SemVer 时，才按纯 Release 只运行发布契约；普通跨平台 Rust 回流保留 lint、
+三平台 portability、影响范围内的定向测试和 `main` 累计验证。Windows/平台/路径/
+进程/安装/权限/原生语义、Cargo 依赖或 feature、`build.rs`、工具链与 CodeWhale
+gitlink 变化仍运行完整 Windows 门禁。来源 marker、head/base 仓库或非 `main` base
+不可信时保持普通 PR 的既有路由；Merge Group 成员链无法完整证明、API/diff 失败、
+版本内容异常或 Release 混合改动时 fail closed 强制完整 Windows，`required-gate`
+不接受此状态下的 skipped。`ci:full-rust` 仍可强制使用普通完整路由。
 发布链路改动只跑轻量契约测试；完整
 deb、dmg、nsis 安装包仅在 `VERSION` 改动进入 `main` 后，或人工明确触发
 `workflow_dispatch` 时构建。

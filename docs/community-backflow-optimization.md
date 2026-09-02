@@ -98,11 +98,33 @@ PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI
 现有前端、Rust、Windows runtime 和 macOS runtime 任务继续按路径路由。三平台轻门禁与这些
 任务并行，并由 `required-gate` 汇总，因此不会把三个操作系统串成三倍墙钟时间。
 
+`scripts/ci-rust-policy.py` 在信任校验之后继续读取事件中的 base/head SHA 和 Git 实际
+diff，输出以下保守路由：
+
+- `release`：只允许 `VERSION` 与 `sync-version.mjs` 管理的全部派生字段机械同步；
+  运行 `release-contract-test`，跳过由 Cargo/package 版本字段误触发的产品编译。
+- `portable_rust`：不含 Windows/平台/路径/进程/安装/权限/原生依赖、Cargo、`build.rs`、
+  toolchain 或 CodeWhale gitlink 风险的普通跨平台 Rust；保留 lint、portability、定向
+  测试和最新 `main` 的累计 Windows 验证。
+- `windows_full`：上述 Windows 高风险或 Release 内容异常、混合改动；Ready PR 继续运行
+  完整 `windows-rust-test`。
+- `non_rust`：继续使用既有受影响产品门禁。
+- `ordinary`：来源 marker、head/base 仓库或 base=`main` 不满足可信合同，严格保持普通
+  PR 的既有路径路由。
+- `full`：API、Git、diff 或 Merge Group 成员链无法完整解析；即使 paths-filter 本来会
+  跳过，也强制完整 Windows，并由 `required-gate` 拒绝 skipped。
+
+Merge Group 通过队列快照中每项 `baseCommit→headCommit` 链从事件 `head_sha` 反向走到
+`base_sha`，并逐一校验链上所有 PR；不能只用累计 head 匹配最后一个 PR。外部 fork、
+伪造/重复 marker 和 `ci:full-rust` 回到普通 PR 路由；无法读取 base/head、API/diff 或
+成员链时走 `full`。`required-gate` 只把 release/portable/non-rust 策略导致的 skipped
+视为预期结果，不接受要求完整 Windows 时的 skipped、失败、取消或未完成状态。
+
 ## Rust 与缓存
 
 - 本地只运行受影响 package 的快速检查，不对同一 head 重复全仓冷构建。
-- 完整 Rust 测试交给有缓存的 CI；可信回流仍按既有策略在 PR 阶段跳过完整 `rust-test`，
-  由最新 `main` 做累计验证。
+- 完整 Rust 测试交给有缓存的 CI；可信回流仍在 PR 阶段跳过完整 Linux `rust-test`；
+  Windows 高风险回流在 Ready PR 保留完整 Windows 回归，其余由最新 `main` 做累计验证。
 - npm/Cargo 缓存必须包含 OS、架构、工具链和 lockfile；不得跨平台复用编译产物。
 - 同一 PR 的旧 SHA 由 `concurrency.cancel-in-progress` 取消。
 

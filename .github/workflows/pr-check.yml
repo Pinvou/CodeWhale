@@ -22,7 +22,9 @@ name: PR Check
 #   只启用实测零欠账的 lint(deny),有欠账的 lint/group 显式 allow,
 #   欠账由清理 PR(#35 及后续)消化后逐个升 deny。
 # - windows-rust-test:Windows 全目标 check 与六组原生回归使用同一路由并行执行；
-#   Ready 高风险 PR 或 ci:full-rust 标签触发一次，Merge Queue 不重复；main 保留累计验证。
+#   Ready 高风险 PR 或 ci:full-rust 标签触发一次。可信回流按 base→head 内容语义
+#   区分纯版本、普通跨平台 Rust 和 Windows 高风险；Merge Queue 不重复，main 保留
+#   累计原生验证。
 # - windows-rustup-repair-test:相关 PR 在隔离目录破坏工具链并验证下载源回退与重装。
 # - windows-codex-runtime-test:相关 PR 在 Windows 原生验证 browser-wrapper 生命周期、
 #   准备 Node + ACP Bridge，并核对安装包资源。
@@ -148,6 +150,8 @@ jobs:
       windows_rustup_repair: ${{ steps.filter.outputs.windows_rustup_repair }}
       backflow_infra: ${{ steps.filter.outputs.backflow_infra }}
       trusted_backflow: ${{ steps.pr-rust-policy.outputs.trusted_backflow || steps.queue-rust-policy.outputs.trusted_backflow || 'false' }}
+      backflow_mode: ${{ steps.pr-rust-policy.outputs.backflow_mode || steps.queue-rust-policy.outputs.backflow_mode || 'full' }}
+      pure_release_backflow: ${{ steps.pr-rust-policy.outputs.pure_release_backflow || steps.queue-rust-policy.outputs.pure_release_backflow || 'false' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -487,7 +491,7 @@ jobs:
     # Draft runs lint/build/logic tests. Ready PRs and merge groups select browser
     # smokes from their actual base/head diff. Shared, unknown, test-infrastructure,
     # and empty diffs fail closed to the complete smoke set.
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
+    if: ${{ !cancelled() && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -686,7 +690,7 @@ jobs:
   knowledge-rust:
     name: knowledge-rust
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && (needs.changes.outputs.knowledge_rust == 'true' || needs.changes.outputs.knowledge_dependencies == 'true') }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.knowledge_rust == 'true' || needs.changes.outputs.knowledge_dependencies == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -742,7 +746,7 @@ jobs:
     # 纳入 rust_dependencies:只改 deny.toml 时 rust_code=false 但 rust_dependencies=true,
     # cargo-deny 子步骤(已按 rust_dependencies 门控)需本 job 启动才能运行;
     # 否则 deny.toml 策略改动会静默漏检 cargo-deny。
-    if: ${{ !cancelled() && github.event.action != 'closed' && (needs.changes.outputs.rust_code == 'true' || needs.changes.outputs.rust_dependencies == 'true') }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.rust_code == 'true' || needs.changes.outputs.rust_dependencies == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1092,7 +1096,13 @@ jobs:
     name: windows-rust-test (${{ matrix.phase }})
     needs: changes
     # Native Windows coverage runs once on ready high-risk/explicit PRs and on main.
+    # Native Windows coverage runs once on ready high-risk/explicit PRs and on main.
+    # Trusted backflows are classified from the actual base/head diff: malformed or
+    # mixed release changes fail closed; Windows/Cargo/native semantics stay full;
+    # mechanical releases and portable Rust defer cumulative Windows coverage to main.
     # Merge Queue does not repeat this native leg; Linux validates the combined tree.
+    # It only runs on the queue when policy/API/diff resolution fails and mode=full,
+    # so skipped cannot mask uncertainty.
     if: >-
       ${{
         !cancelled() &&
@@ -1102,12 +1112,23 @@ jobs:
             github.event_name == 'pull_request' &&
             github.event.pull_request.draft == false &&
             (
-              needs.changes.outputs.rust_full == 'true' ||
+              needs.changes.outputs.backflow_mode == 'full' ||
+              needs.changes.outputs.backflow_mode == 'windows_full' ||
               (
-                needs.changes.outputs.rust_code == 'true' &&
-                contains(github.event.pull_request.labels.*.name, 'ci:full-rust')
+                needs.changes.outputs.backflow_mode == 'ordinary' &&
+                (
+                  needs.changes.outputs.rust_full == 'true' ||
+                  (
+                    needs.changes.outputs.rust_code == 'true' &&
+                    contains(github.event.pull_request.labels.*.name, 'ci:full-rust')
+                  )
+                )
               )
             )
+          ) ||
+          (
+            github.event_name == 'merge_group' &&
+            needs.changes.outputs.backflow_mode == 'full'
           )
         )
       }}
@@ -1333,7 +1354,7 @@ jobs:
   windows-rustup-repair-test:
     name: windows-rustup-repair-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_rustup_repair == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -1362,7 +1383,7 @@ jobs:
   windows-codex-runtime-test:
     name: windows-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.windows_codex == 'true' || needs.changes.outputs.acp_runtime == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -1397,7 +1418,7 @@ jobs:
   windows-runtime-test:
     name: windows-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.windows_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
@@ -1410,7 +1431,7 @@ jobs:
   macos-codex-runtime-test:
     name: macos-codex-runtime-test
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && needs.changes.outputs.acp_runtime == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: macos-15
     timeout-minutes: 20
     steps:
@@ -1471,6 +1492,8 @@ jobs:
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
           WINDOWS_RUSTUP_REPAIR_RESULT: ${{ needs.windows-rustup-repair-test.result }}
+          BACKFLOW_MODE: ${{ needs.changes.outputs.backflow_mode }}
+          WINDOWS_RUST_REQUIRED_BY_POLICY: ${{ (github.event_name == 'merge_group' && needs.changes.outputs.backflow_mode == 'full') || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (needs.changes.outputs.backflow_mode == 'full' || needs.changes.outputs.backflow_mode == 'windows_full')) }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             # 队列提交由 GitHub 生成，不重复校验人工 commit message；
@@ -1481,6 +1504,11 @@ jobs:
             fi
           elif [[ "$COMMIT_MESSAGE_RESULT" != success || "$VERSION_CONSISTENCY_RESULT" != success || "$CHANGES_RESULT" != success || "$FAST_GATE_RESULT" != success ]]; then
             echo "基础检查失败: commit-message=$COMMIT_MESSAGE_RESULT version-consistency=$VERSION_CONSISTENCY_RESULT changes=$CHANGES_RESULT fast-gate=$FAST_GATE_RESULT" >&2
+            exit 1
+          fi
+
+          if [[ "$WINDOWS_RUST_REQUIRED_BY_POLICY" == "true" && "$WINDOWS_RUST_RESULT" != success ]]; then
+            echo "回流策略 $BACKFLOW_MODE 要求完整 Windows Rust，但结果为 $WINDOWS_RUST_RESULT" >&2
             exit 1
           fi
 
