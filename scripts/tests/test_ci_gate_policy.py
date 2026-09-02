@@ -416,7 +416,13 @@ class CiGatePolicyTests(unittest.TestCase):
             "        if: ${{ github.event_name != 'push' }}",
             rust_test,
         )
-        self.assertEqual(rust_test.count("bash scripts/ci-memguard.sh &"), 3)
+        self.assertIn(
+            "cargo test --test behavior_telemetry (standalone memory-bounded harness)",
+            rust_test,
+        )
+        self.assertIn("--test behavior_telemetry", rust_test)
+        self.assertIn("--features behavior-telemetry-test", rust_test)
+        self.assertEqual(rust_test.count("bash scripts/ci-memguard.sh &"), 4)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', rust_test)
         self.assertIn("timeout-minutes: 120", rust_test)
         self.assertIn(
