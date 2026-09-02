@@ -1031,12 +1031,13 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # 标准 ubuntu-latest 只有约 7GB RAM；大型 ThinLTO 测试 harness 在最后链接
-      # 阶段会短时超过物理内存。2GiB 本地 swap 只为吸收该峰值，不改变测试范围、
+      # 阶段会短时超过物理内存。3GiB 本地 swap 只为吸收主库和独立遥测 target
+      # 的链接峰值，不改变测试范围、
       # 失败判定或产品构建参数；相较直接降低 memguard 阈值，它仍让看门狗按
       # MemAvailable + SwapFree 的真实剩余容量提前保住 runner 和诊断日志。
       - name: 为 Rust 测试链接峰值配置受限 swap
         run: |
-          sudo fallocate -l 2G /mnt/pinvou-rust-test.swap
+          sudo fallocate -l 3G /mnt/pinvou-rust-test.swap
           sudo chmod 600 /mnt/pinvou-rust-test.swap
           sudo mkswap /mnt/pinvou-rust-test.swap
           sudo swapon /mnt/pinvou-rust-test.swap

@@ -442,7 +442,7 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertEqual(rust_test.count("bash scripts/ci-memguard.sh &"), 4)
         self.assertIn('CARGO_PROFILE_DEV_CODEGEN_UNITS: "16"', rust_test)
-        self.assertIn("sudo fallocate -l 2G /mnt/pinvou-rust-test.swap", rust_test)
+        self.assertIn("sudo fallocate -l 3G /mnt/pinvou-rust-test.swap", rust_test)
         self.assertIn("sudo mkswap /mnt/pinvou-rust-test.swap", rust_test)
         self.assertIn("sudo swapon /mnt/pinvou-rust-test.swap", rust_test)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', rust_test)
