@@ -21,14 +21,14 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 411 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 373`、`部分实现 29`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `411` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-111 已完成，其余任务按序实施。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 374`、`部分实现 29`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `411` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-112 已完成，其余任务按序实施。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
 | `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；连续实施起点 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`，并包含本文件所在提交 | 通过代码审阅；不等同生产部署 |
 | `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 411/411 个唯一目标编号均有结论 |
 | `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 411 个唯一编号一一覆盖，无缺失、无额外编号 |
-| `ADMIN-FINANCE-PAYMENT-REDESIGN` | 财务支付三分区、现有能力闭环、定价生命周期、Billing 分页和分区运营概览设计 | 产品已批准 `UI-37`～`UI-46`、`ADM-54`、`BILL-47`、`NFR-55`；第三轮独立文档复审已通过，代码任务 APT-105～APT-111 已完成并逐项通过独立代码复审 |
+| `ADMIN-FINANCE-PAYMENT-REDESIGN` | 财务支付三分区、现有能力闭环、定价生命周期、Billing 分页和分区运营概览设计 | 产品已批准 `UI-37`～`UI-46`、`ADM-54`、`BILL-47`、`NFR-55`；第三轮独立文档复审已通过，代码任务 APT-105～APT-112 已完成并逐项通过独立代码复审 |
 | `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现按 APT-069–APT-082 分任务进行 |
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `ORGANIZATION-OBJECT-AUTHORIZATION` | 显式目标组织、节点子树列表、源/目标节点双向移动门禁及成员全部实际节点归属校验 | Account Go 测试、OpenAPI lint、对象作用域合同和全量静态验证通过；数据库多节点绑定与并发移动待部署验证 |
@@ -333,7 +333,7 @@
 | ADM-51 | 已实现 | AUDIT_HEAD | COMMAND-POLICY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 添加、验证/撤销、上架、下架和删除均登记 AUDIT_ONLY 策略，命令记录绑定操作者、原因、幂等指纹和前后版本。 |
 | ADM-52 | 已实现 | AUDIT_HEAD | OPENAPI-LINT; PORTAL-PROXY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Billing 提供列表、添加、验证/重试/撤销、上架、下架和删除接口；OpenAPI 与 Portal 只开放精确方法和 UUID 路径。 |
 | ADM-53 | 已实现 | DOC_CURRENT | PAYMENT-TIERED-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 后台控制接口返回 Provider/商品层级、策略与评估窗口指标、观察缺口和控制版本，并只在当前层满足条件时分别生成 Provider 或单商品恢复草稿。 |
-| ADM-54 | 未实现 | DOC_CURRENT | ADMIN-FINANCE-PAYMENT-REDESIGN | NOT_DEPLOYED | 六个现有定价与计量管理命令尚未在审批策略注册表中按路由精确注册，待 APT-112。 |
+| ADM-54 | 已实现 | AUDIT_HEAD | ADMIN-FINANCE-PAYMENT-REDESIGN; APPROVAL-COMMANDS | NOT_DEPLOYED | 六个现有定价与计量管理命令已按路由精确注册为 `AUDIT_ONLY`，统一要求 `platform.pricing.manage`；Account 000041 以追加迁移持久化相同策略，保留旧命令历史事实且未知命令继续失败关闭。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
@@ -987,7 +987,7 @@
 | ADM-48 | Break-glass 可信操作者 | 已实现 | CLI 只从受控描述符读取签名运维凭据，服务端校验受众、主体、目标、时效和唯一凭据 ID；自报身份参数已删除。 |
 | ADM-49 | 短期人类委托 | 已实现 | Account 签发受众/权限/目标/时效/请求指纹及授权版本绑定的 Ed25519 委托；Billing 验签消费并以服务主体、委托人、委托 ID 和授权版本记录不可变额度审计。 |
 | ADM-53 | 支付分级止损后台治理 | 部分实现 | 后台已有控制读取与 Provider 恢复草稿，待展示分层评估/gap 并拆分商品和 Provider 恢复。 |
-| ADM-54 | 定价与计量管理命令策略注册 | 未实现 | 六个现有管理命令尚未按路由精确注册。 |
+| ADM-54 | 定价与计量管理命令策略注册 | 已实现 | 六个现有 Billing 管理命令已按路由一一注册为 `AUDIT_ONLY`，请求权限固定为 `platform.pricing.manage`，并由追加迁移持久化相同不可变策略。 |
 
 ## 4. 非功能需求
 

@@ -202,7 +202,7 @@
 | `/billing/products/:id` | 申请/批准商品恢复 | `platform.billing.payment-controls.resume.request` / `.approve` | PLATFORM | APPROVAL_REQUIRED；Provider ACTIVE 后另起新申请 |
 | `/pricing` | 定价/计量读取 | `platform.pricing.read` | PLATFORM | READ_ONLY |
 | `/pricing-versions` | 旧版价格版本历史读取 | `platform.pricing.read` | PLATFORM | READ_ONLY；旧版 `POST`、运行时命令策略与 Portal 代理入口均已移除，历史迁移记录仅作为不可变审计事实保留 |
-| `/pricing/drafts`、`/pricing/:id/draft`、`/pricing/:id/publish`、`/pricing/:id/transition`、`/metering-units*` | 新版定价/计量写入 | `platform.pricing.manage` | PLATFORM | **NOT_AVAILABLE**：路由分别声明的六个 Billing 命令当前尚未注册，实际失败关闭为 `COMMAND_POLICY_UNAVAILABLE`；已批准 `ADM-54 / APT-112` 负责精确注册，`UI-44 / APT-113` 完成后才显示入口 |
+| `/pricing/drafts`、`/pricing/:id/draft`、`/pricing/:id/publish`、`/pricing/:id/transition`、`/metering-units*` | 新版定价/计量写入 | `platform.pricing.manage` | PLATFORM | 六个 Billing 命令已由 `ADM-54 / APT-112` 按 `AUDIT_ONLY` 精确注册，具备该权限的调用方可使用 API；管理界面入口仍保持隐藏，待 `UI-44 / APT-113` 完成后开放 |
 | `/models` | 读取 | `platform.models.read` | PLATFORM | READ_ONLY |
 | `/models:sync` | 同步 | `platform.models.sync` | PLATFORM | `TOKEN_MODEL_CATALOG_SYNC` 固定 AUDIT_ONLY |
 | `/models` | 草稿、发布、生命周期、前向回滚 | `platform.models.manage` | PLATFORM | `TOKEN_MODEL_DRAFT_SAVE`、`TOKEN_MODEL_PUBLISH`、`TOKEN_MODEL_LIFECYCLE_CHANGE`、`TOKEN_MODEL_CATALOG_ROLLBACK` 均固定 AUDIT_ONLY |
@@ -370,9 +370,9 @@
 | 顶层组织所有权转移 | `platform.organizations.owner.transfer`，`ACCOUNT_OWNERSHIP_TRANSFER` 固定 AUDIT_ONLY | Header 或 body fallback 幂等键 | 无 reason/expected_version/recent-auth；强化见 `UIA-003` |
 | `POST /account/admin/v1/audit-exports` | `platform.audit.export`，AUDIT_ONLY | body 必填 filter/reason/include_pii/idempotency_key；服务端校验 15 分钟内认证 | 当前具备；含 PII 另需临时 `platform.audit.pii.export` |
 | 审计 download-ticket | `platform.audit.export`，AUDIT_ONLY | 再次校验 15 分钟内认证；票据 15 分钟、一次成功 | 当前具备；解密密钥缺口另见第 10 节与 `UIA-006` |
-| 定价 draft create/update | `platform.pricing.manage`；当前 `COMMAND_POLICY_UNAVAILABLE` | OpenAPI 定义 `PriceDraft.expected_etag`，PUT 定义 412；但 `BILLING_PRICE_DRAFT_CREATE`、`BILLING_PRICE_DRAFT_UPDATE` 尚未注册 | `APT-112` 注册、`APT-113` 接入；只按 draft 的 ETag 合同，不提前宣称可用 |
-| 定价 publish | `platform.pricing.manage`；当前 `COMMAND_POLICY_UNAVAILABLE` | OpenAPI 定义 Header `Idempotency-Key` + body `expected_etag`；但 `BILLING_PRICE_PUBLISH` 尚未注册 | `APT-112` 注册、`APT-113` 接入；发布无 reason/recent-auth，按真实合同接入 |
-| 定价 transition、计量单位 create/deactivate | `platform.pricing.manage`；当前 `COMMAND_POLICY_UNAVAILABLE` | OpenAPI 已定义各自请求；`BILLING_PRICE_TRANSITION`、`BILLING_METERING_UNIT_CREATE`、`BILLING_METERING_UNIT_DEACTIVATE` 尚未注册 | `APT-112` 注册、`APT-113` 接入；transition 只有幂等键，metering 两动作当前均无幂等键/ETag，不能声称 CAS |
+| 定价 draft create/update | `platform.pricing.manage`；`BILLING_PRICE_DRAFT_CREATE`、`BILLING_PRICE_DRAFT_UPDATE` 固定 AUDIT_ONLY | OpenAPI 定义 `PriceDraft.expected_etag`，PUT 定义 412 | 策略已由 `APT-112` 注册，UI 由 `APT-113` 接入；只按 draft 的 ETag 合同，不扩展并发保证 |
+| 定价 publish | `platform.pricing.manage`；`BILLING_PRICE_PUBLISH` 固定 AUDIT_ONLY | OpenAPI 定义 Header `Idempotency-Key` + body `expected_etag` | 策略已由 `APT-112` 注册，UI 由 `APT-113` 接入；发布无 reason/recent-auth，按真实合同接入 |
+| 定价 transition、计量单位 create/deactivate | `platform.pricing.manage`；`BILLING_PRICE_TRANSITION`、`BILLING_METERING_UNIT_CREATE`、`BILLING_METERING_UNIT_DEACTIVATE` 固定 AUDIT_ONLY | OpenAPI 已定义各自请求；transition 只有幂等键，metering 两动作当前均无幂等键/ETag | 策略已由 `APT-112` 注册，UI 由 `APT-113` 接入；不能声称不存在的 CAS 或幂等保证 |
 | 协议/公式 draft/publish | `platform.pricing.manage`；当前 `COMMAND_POLICY_UNAVAILABLE` | OpenAPI 已定义各自请求；`TOKEN_PROTOCOL_DRAFT_CREATE`、`TOKEN_PROTOCOL_PUBLISH`、`TOKEN_FORMULA_DRAFT_CREATE`、`TOKEN_FORMULA_PUBLISH` 尚未注册 | `UIA-020` 前按钮不存在；注册后按 Token 领域真实冲突码处理 |
 | 商品草稿创建 | `platform.products.create`，`BILLING_RECHARGE_PRODUCT_CREATE` 固定 AUDIT_ONLY | Header 必填 16～128 字符 `Idempotency-Key`；body 必填完整商品事实、`expected_version: 0` 与非空 `reason`；15 分钟内近期认证 | 当前合同完整，不列 API_GAP；缺字段为请求错误，非零版本为 `BILLING_CONFLICT`，同键异正文为 `IDEMPOTENCY_CONFLICT` |
 | 商品发布、准入验证/重试/撤销 | `platform.products.publish`；`BILLING_RECHARGE_PRODUCT_PUBLISH`、`BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY`、`BILLING_RECHARGE_PRODUCT_ADMISSION_REVOKE` 均固定 AUDIT_ONLY | Header `Idempotency-Key` + body `expected_version/reason`，发布可带 `evidence_id`；15 分钟内近期认证 | 只处理该端点实际返回的 401/409 code，不抽象为全局错误码 |

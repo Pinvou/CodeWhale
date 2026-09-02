@@ -92,3 +92,23 @@ func TestAdminOrganizationUnitMoveUsesInitialAtomicPolicy(t *testing.T) {
 		t.Fatalf("unexpected organization unit move policy: %#v %v", policy, err)
 	}
 }
+
+func TestPricingAndMeteringCommandsAreAuditOnlyWithExactPermission(t *testing.T) {
+	commands := []string{
+		"BILLING_PRICE_DRAFT_CREATE",
+		"BILLING_PRICE_DRAFT_UPDATE",
+		"BILLING_PRICE_PUBLISH",
+		"BILLING_PRICE_TRANSITION",
+		"BILLING_METERING_UNIT_CREATE",
+		"BILLING_METERING_UNIT_DEACTIVATE",
+	}
+	for _, commandType := range commands {
+		policy, err := Lookup(commandType)
+		if err != nil {
+			t.Fatalf("pricing policy %s is unavailable: %v", commandType, err)
+		}
+		if policy.Mode != AuditOnly || policy.RequesterPermission != "platform.pricing.manage" || policy.ApprovalCount != 0 || policy.SelfApprovalForbidden || policy.ExecutorIdentity != "requesting-domain-service" {
+			t.Fatalf("unexpected pricing policy for %s: %#v", commandType, policy)
+		}
+	}
+}
