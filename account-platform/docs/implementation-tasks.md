@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 104 个任务中，94 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，3 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 117 个任务中，94 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，16 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -128,6 +128,19 @@
 | APT-102 | 组织成员服务端分页、搜索筛选与按需权限编辑 | ACC-66, UI-35 | APT-011, APT-046, APT-095 | CODE | DONE |
 | APT-103 | 平台组织资料、状态、成员和结构权限拆分与兼容迁移 | ACC-67 | APT-006, APT-069, APT-075 | CODE | DONE |
 | APT-104 | 平台组织节点移动管理合同及结构树交互 | ACC-68 | APT-010, APT-075, APT-103 | CODE | DONE |
+| APT-105 | 财务支付三分区改名、子页迁移与稳定深链 | UI-37 | APT-094, APT-096 | CODE | PENDING |
+| APT-106 | 手工调账申请、审批恢复与审批中心深链 | UI-38 | APT-008, APT-105 | CODE | PENDING |
+| APT-107 | 支付 Provider/商品控制展示与恢复申请深链 | UI-39 | APT-093, APT-105 | CODE | PENDING |
+| APT-108 | 财务支付子页独立加载、局部失败与独立刷新 | UI-40 | APT-105 | CODE | PENDING |
+| APT-109 | Billing 既有筛选与充值商品稳定 cursor 适配 | UI-41 | APT-084, APT-108 | CODE | PENDING |
+| APT-110 | 财务支付商品结构化操作面板并移除浏览器 prompt | UI-42 | APT-106–APT-108 | CODE | PENDING |
+| APT-111 | 移除旧模型价格写入口并提供新版生命周期只读展示 | UI-43 | APT-105 | CODE | PENDING |
+| APT-112 | 注册六个 Billing 定价与计量管理命令策略 | ADM-54 | APT-008, APT-018 | CODE | PENDING |
+| APT-113 | 计量单位和模型定价完整生命周期管理界面 | UI-44 | APT-111, APT-112 | CODE | PENDING |
+| APT-114 | Billing 高数据量列表 cursor、筛选与稳定排序合同 | NFR-55 | APT-018–APT-025 | CODE | PENDING |
+| APT-115 | Portal 消费 Billing 全量分页和 URL 状态合同 | UI-45 | APT-109, APT-114 | CODE | PENDING |
+| APT-116 | 财务支付三个分区运营概览 API 与权限裁剪 | BILL-47 | APT-018–APT-025, APT-083, APT-093 | CODE | PENDING |
+| APT-117 | 财务支付三个分区运营概览、下穿与局部失败界面 | UI-46 | APT-105, APT-113, APT-115, APT-116 | CODE | PENDING |
 
 ## 3. 独立提交验收模板
 
