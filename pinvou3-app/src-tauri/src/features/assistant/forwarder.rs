@@ -111,12 +111,20 @@ pub(crate) fn spawn_event_forwarder(
                     chat_persistence_error = None;
                     current_turn_id = Some(turn_id.clone());
                     crate::features::behavior_telemetry::admit_task(&app, &session_id, &turn_id);
-                    crate::features::behavior_telemetry::track_model_used(
-                        &app,
-                        &session_id,
-                        &turn_id,
-                        &bridge,
-                    );
+                    if let Some(model) = bridge.effective_model_owned() {
+                        crate::features::behavior_telemetry::track_model_used_keys(
+                            &app,
+                            &session_id,
+                            &turn_id,
+                            model.preset.as_str(),
+                            &model.model,
+                            if bridge.session_model.is_some() {
+                                "session_default"
+                            } else {
+                                "app_default"
+                            },
+                        );
+                    }
                     if let Err(error) = turn_shell_tasks.bind_or_prepare_turn(&turn_id).await {
                         log::error!(
                             "[pinvou3][chat] failed to bind shell task scope sid={} turn={}: {error:#}",

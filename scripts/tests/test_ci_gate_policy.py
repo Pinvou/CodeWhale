@@ -9,6 +9,7 @@ PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
 MAC_BUILD_WORKFLOW = ROOT / ".github/workflows/mac-build.yml"
 PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
+CI_MEMGUARD = ROOT / "scripts/ci-memguard.sh"
 
 
 def _extract_quoted_paths(block):
@@ -71,6 +72,16 @@ class CiGatePolicyTests(unittest.TestCase):
                 self.release_workflow,
                 f"发布流程仍引用已退役网页模板: {retired_reference}",
             )
+
+    def test_rust_memguard_explains_policy_termination_in_ci_log(self):
+        memguard = CI_MEMGUARD.read_text(encoding="utf-8")
+        self.assertIn("内存占用过高", memguard)
+        self.assertIn("MemAvailable+SwapFree", memguard)
+        self.assertIn("CI 资源保护策略将终止", memguard)
+        self.assertIn(
+            "::error title=Rust CI 因内存占用过高被策略终止::",
+            memguard,
+        )
 
     def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
         verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
@@ -392,7 +403,7 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
         self.assertIn(
-            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-threads=1",
+            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --no-default-features --lib -- --test-threads=1",
             rust_test,
         )
         # push(main) 只编译暖 cache,不执行测试:MQ 已对同一组合树跑过全量测试;
@@ -422,7 +433,16 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn("--test behavior_telemetry", rust_test)
         self.assertIn("--features behavior-telemetry-test", rust_test)
+        self.assertEqual(rust_test.count("--no-default-features"), 4)
+        self.assertNotIn(
+            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib",
+            rust_test,
+        )
         self.assertEqual(rust_test.count("bash scripts/ci-memguard.sh &"), 4)
+        self.assertIn('CARGO_PROFILE_DEV_CODEGEN_UNITS: "16"', rust_test)
+        self.assertIn("sudo fallocate -l 2G /mnt/pinvou-rust-test.swap", rust_test)
+        self.assertIn("sudo mkswap /mnt/pinvou-rust-test.swap", rust_test)
+        self.assertIn("sudo swapon /mnt/pinvou-rust-test.swap", rust_test)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', rust_test)
         self.assertIn("timeout-minutes: 120", rust_test)
         self.assertIn(

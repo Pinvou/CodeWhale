@@ -70,17 +70,5 @@ mod features {
     }
 }
 
-mod behavior_telemetry {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/features/behavior_telemetry.rs"
-    ));
-
-    #[cfg(test)]
-    mod tests {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/features/behavior_telemetry_tests.rs"
-        ));
-    }
-}
+#[path = "../src/features/behavior_telemetry.rs"]
+mod behavior_telemetry;
