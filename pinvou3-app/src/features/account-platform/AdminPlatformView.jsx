@@ -5,6 +5,7 @@ import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInp
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminFinanceQueryUpdates, adminNavigationGroups, clearAdminFinanceQueryUpdates, normalizeAdminFinanceQuery, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
+import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 import { createFinanceIdempotencyKey, executeStructuredFinanceAction, financeActionRequiresRefresh, isUnknownMutationOutcome, paymentAnomalyResolutionOptions } from './finance-actions.js';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
@@ -301,7 +302,6 @@ function AdminExtensionSlot({ section, financeTab, authorization }) {
   const visible = {
     'approval-requests-root': section === 'approvals',
     'product-admin-root': section === 'products' && financeTab === 'catalog' && platformPermissions.has('platform.products.read'),
-    'pricing-admin-root': false,
   };
 
   useEffect(() => {
@@ -2252,7 +2252,7 @@ function UnitBranch({ unit, copy, disabled, addDisabled, allUnits, onAddChild, o
   );
 }
 
-function ProductsWorkspace({ copy, language, data, client, setData, permissions, routeTab, onRouteTabChange, requestTracker }) {
+function ProductsWorkspace({ copy, client, permissions, routeTab, onRouteTabChange }) {
   const permissionSet = new Set(permissions || []);
   const visibleTabs = [...(permissionSet.has('platform.products.read') ? ['catalog'] : []), ...(permissionSet.has('platform.pricing.read') ? ['prices'] : [])];
   const activeTab = visibleTabs.includes(routeTab) ? routeTab : visibleTabs[0] || '';
@@ -2263,7 +2263,7 @@ function ProductsWorkspace({ copy, language, data, client, setData, permissions,
     <section className="adm-panel">
       <SectionHeader title={copy.nav.products} copy={copy} />
       <Tabs active={activeTab} onChange={onRouteTabChange} items={visibleTabs.map((key) => ({ key, label: key === 'catalog' ? copy.billing.productCatalog : copy.billing.prices }))} />
-      {activeTab === 'prices' && <Billing surface="products" embedded routeTab="prices" copy={copy} language={language} data={data} client={client} setData={setData} permissions={permissions} requestTracker={requestTracker} />}
+      {permissionSet.has('platform.pricing.read') && <div hidden={activeTab !== 'prices'}><PricingLifecycleWorkspace copy={copy} client={client} permissions={permissions} /></div>}
     </section>
   );
 }

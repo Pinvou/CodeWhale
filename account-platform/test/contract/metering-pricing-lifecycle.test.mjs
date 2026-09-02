@@ -46,11 +46,12 @@ test('gateway renews and extends the original hold before further delivery', asy
   assert.match(reconciliation, /PromptTokens - cached/);
 });
 
-test('admin contract exposes units, price lifecycle, protocols, and formulas', async () => {
-  const [source, page, script] = await Promise.all([
+test('admin contract and React workspace expose units, price lifecycle, protocols, and formulas', async () => {
+  const [source, page, workspace, copy] = await Promise.all([
     read('contracts/openapi/admin.yaml'),
     read('internal/portal/static/admin.html'),
-    read('internal/portal/static/assets/pricing-admin.js'),
+    read('../pinvou3-app/src/features/account-platform/PricingLifecycleWorkspace.jsx'),
+    read('../pinvou3-app/src/shared/admin-platform-i18n.js'),
   ]);
   const contract = YAML.parse(source);
 
@@ -64,6 +65,8 @@ test('admin contract exposes units, price lifecycle, protocols, and formulas', a
     '/token/admin/v1/formulas/{formula_version_id}/preview',
   ]) assert.ok(contract.paths[route], `missing admin route ${route}`);
 
-  assert.match(page, /pricing-admin\.js/);
-  for (const copy of ['计量、协议与价格生命周期', 'Metering, protocols, and pricing lifecycle', '計量・プロトコル・価格ライフサイクル']) assert.match(script, new RegExp(copy));
+  assert.doesNotMatch(page, /pricing-admin\.js|pricing-admin-root/);
+  assert.match(workspace, /createPriceDraft/);
+  assert.match(workspace, /createMeteringUnit/);
+  assert.equal((copy.match(/pricingLifecycle:/g) || []).length, 3);
 });

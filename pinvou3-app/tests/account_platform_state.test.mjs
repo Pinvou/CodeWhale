@@ -138,7 +138,7 @@ test('admin finance capabilities use independent permission-gated routes without
   assert.match(view, /section === 'billing'.*surface="billing"/s);
   assert.match(view, /section === 'payments'.*surface="payments"/s);
   assert.match(view, /section === 'settings'.*SettingsWorkspace/s);
-  assert.match(view, /'pricing-admin-root': false/);
+  assert.match(view, /<PricingLifecycleWorkspace/);
   assert.match(authorization, /billing: \['platform\.billing\.wallets\.read', 'platform\.usage\.read'\]/);
   assert.match(authorization, /payments: \['platform\.billing\.wallets\.read', 'platform\.usage\.read'\]/);
   assert.match(authorization, /products: \['platform\.products\.read', 'platform\.pricing\.read'\]/);

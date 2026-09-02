@@ -277,6 +277,50 @@ export class AdminPlatformClient {
   priceVersions(signal) {
     return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal);
   }
+  managedPrices(signal) {
+    return this.request('billing', '/admin/v1/pricing?limit=100', signal);
+  }
+  managedPrice(priceVersionID, signal) {
+    return this.request('billing', `/admin/v1/pricing?price_version_id=${encodeURIComponent(priceVersionID)}`, signal);
+  }
+  managedPriceSpace(input, signal) {
+    const query = new URLSearchParams({
+      limit: '200',
+      scope_type: input.scope_type,
+      protocol_code: input.protocol_code,
+      formula_version_id: input.formula_version_id,
+      credit_unit: input.credit_unit || 'MICROCREDIT',
+    });
+    if (input.scope_type === 'MODEL') query.set('scope_id', input.scope_id);
+    return this.request('billing', `/admin/v1/pricing?${query}`, signal);
+  }
+  meteringUnits(signal) {
+    return this.request('billing', '/admin/v1/metering-units', signal);
+  }
+  pricingProtocols(signal) {
+    return this.request('token', '/admin/v1/protocols', signal);
+  }
+  createMeteringUnit(input) {
+    return this.mutate('billing', '/admin/v1/metering-units', 'POST', input);
+  }
+  deactivateMeteringUnit(unitDefinitionID) {
+    return this.mutate('billing', `/admin/v1/metering-units/${encodeURIComponent(unitDefinitionID)}/deactivate`, 'POST', {});
+  }
+  createPriceDraft(input) {
+    return this.mutate('billing', '/admin/v1/pricing/drafts', 'POST', input);
+  }
+  updatePriceDraft(priceVersionID, input) {
+    return this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/draft`, 'PUT', input);
+  }
+  previewPrice(priceVersionID, signal) {
+    return this.request('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/preview`, signal);
+  }
+  publishPrice(priceVersionID, expectedETag, idempotencyKey) {
+    return this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/publish`, 'POST', { expected_etag: expectedETag }, idempotencyKey);
+  }
+  transitionPrice(priceVersionID, input, idempotencyKey) {
+    return this.mutate('billing', `/admin/v1/pricing/${encodeURIComponent(priceVersionID)}/transition`, 'POST', input, idempotencyKey);
+  }
   paymentOrders(filters = {}, signal) {
     const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
     if (filters.q) query.set('q', filters.q);

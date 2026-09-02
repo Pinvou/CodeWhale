@@ -58,11 +58,20 @@ type ManagedPriceVersion struct {
 	DerivedStatus           string                   `json:"derived_status"`
 	Version                 int64                    `json:"version"`
 	SpaceETag               int64                    `json:"space_etag"`
+	CurrentSpaceETag        int64                    `json:"current_space_etag"`
 	EffectiveFrom           time.Time                `json:"effective_from"`
 	EffectiveTo             *time.Time               `json:"effective_to,omitempty"`
 	PublishedAt             *time.Time               `json:"published_at,omitempty"`
 	Units                   []PriceUnitConfiguration `json:"units"`
 	SuccessorPriceVersionID *uuid.UUID               `json:"successor_price_version_id,omitempty"`
+}
+
+type ManagedPriceSpaceQuery struct {
+	ScopeType        string
+	ScopeID          *string
+	ProtocolCode     string
+	FormulaVersionID uuid.UUID
+	CreditUnit       string
 }
 
 var shanghaiLocation = func() *time.Location {
@@ -199,7 +208,7 @@ func (r *PostgresRepository) CreatePriceDraft(ctx context.Context, command Price
 			return ManagedPriceVersion{}, err
 		}
 	}
-	item := ManagedPriceVersion{PriceVersionID: id, ScopeType: command.ScopeType, ScopeID: command.ScopeID, ProtocolCode: command.ProtocolCode, FormulaVersionID: command.FormulaVersionID, CreditUnit: command.CreditUnit, LifecycleStatus: "DRAFT", DerivedStatus: "DRAFT", Version: version, SpaceETag: etag, EffectiveFrom: command.EffectiveFrom, EffectiveTo: command.EffectiveTo, Units: command.Units}
+	item := ManagedPriceVersion{PriceVersionID: id, ScopeType: command.ScopeType, ScopeID: command.ScopeID, ProtocolCode: command.ProtocolCode, FormulaVersionID: command.FormulaVersionID, CreditUnit: command.CreditUnit, LifecycleStatus: "DRAFT", DerivedStatus: "DRAFT", Version: version, SpaceETag: etag, CurrentSpaceETag: etag, EffectiveFrom: command.EffectiveFrom, EffectiveTo: command.EffectiveTo, Units: command.Units}
 	if err := appendPricingAudit(ctx, tx, id, "DRAFT_CREATED", actor, "", nil, item, now); err != nil {
 		return ManagedPriceVersion{}, err
 	}
@@ -231,8 +240,11 @@ func (r *PostgresRepository) ListManagedPrices(ctx context.Context, limit int) (
 	rows.Close()
 	items := make([]ManagedPriceVersion, 0, len(ids))
 	for _, id := range ids {
-		item, _, err := loadManagedPriceForUpdate(ctx, tx, id)
+		item, scopeKey, err := loadManagedPriceForUpdate(ctx, tx, id)
 		if err != nil {
+			return nil, err
+		}
+		if err := tx.QueryRow(ctx, `SELECT etag FROM pricing_space_versions WHERE scope_type=$1 AND scope_key=$2 AND protocol_code=$3 AND formula_version_id=$4 AND credit_unit=$5`, item.ScopeType, scopeKey, item.ProtocolCode, item.FormulaVersionID, item.CreditUnit).Scan(&item.CurrentSpaceETag); err != nil {
 			return nil, err
 		}
 		item.DerivedStatus = derivePriceStatus(item, r.now())
@@ -242,6 +254,101 @@ func (r *PostgresRepository) ListManagedPrices(ctx context.Context, limit int) (
 		return nil, err
 	}
 	return items, nil
+}
+
+func normalizeManagedPriceSpaceQuery(query ManagedPriceSpaceQuery) (ManagedPriceSpaceQuery, string, error) {
+	query.ScopeType = strings.ToUpper(strings.TrimSpace(query.ScopeType))
+	query.ProtocolCode = strings.ToUpper(strings.TrimSpace(query.ProtocolCode))
+	query.CreditUnit = strings.ToUpper(strings.TrimSpace(query.CreditUnit))
+	if query.ScopeID != nil {
+		value := strings.TrimSpace(*query.ScopeID)
+		query.ScopeID = &value
+	}
+	if query.ScopeType == "GLOBAL" {
+		if query.ScopeID != nil && *query.ScopeID != "" {
+			return query, "", ErrConflict
+		}
+		query.ScopeID = nil
+	} else if query.ScopeType != "MODEL" || query.ScopeID == nil || *query.ScopeID == "" || len(*query.ScopeID) > 160 {
+		return query, "", ErrConflict
+	}
+	if query.ProtocolCode == "" || query.FormulaVersionID == uuid.Nil || query.CreditUnit == "" {
+		return query, "", ErrConflict
+	}
+	scopeKey := "*"
+	if query.ScopeID != nil {
+		scopeKey = *query.ScopeID
+	}
+	return query, scopeKey, nil
+}
+
+func (r *PostgresRepository) ReadManagedPrice(ctx context.Context, id uuid.UUID) (ManagedPriceVersion, error) {
+	if id == uuid.Nil {
+		return ManagedPriceVersion{}, ErrConflict
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return ManagedPriceVersion{}, err
+	}
+	defer tx.Rollback(ctx)
+	item, scopeKey, err := loadManagedPriceForUpdate(ctx, tx, id)
+	if err != nil {
+		return ManagedPriceVersion{}, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT etag FROM pricing_space_versions WHERE scope_type=$1 AND scope_key=$2 AND protocol_code=$3 AND formula_version_id=$4 AND credit_unit=$5`, item.ScopeType, scopeKey, item.ProtocolCode, item.FormulaVersionID, item.CreditUnit).Scan(&item.CurrentSpaceETag); err != nil {
+		return ManagedPriceVersion{}, err
+	}
+	item.DerivedStatus = derivePriceStatus(item, r.now())
+	return item, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) ReadManagedPriceSpace(ctx context.Context, raw ManagedPriceSpaceQuery, limit int) (int64, []ManagedPriceVersion, bool, error) {
+	query, scopeKey, err := normalizeManagedPriceSpaceQuery(raw)
+	if err != nil || limit < 1 || limit > 200 {
+		return 0, nil, false, ErrConflict
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		return 0, nil, false, err
+	}
+	defer tx.Rollback(ctx)
+	var etag int64
+	err = tx.QueryRow(ctx, `SELECT etag FROM pricing_space_versions WHERE scope_type=$1 AND scope_key=$2 AND protocol_code=$3 AND formula_version_id=$4 AND credit_unit=$5`, query.ScopeType, scopeKey, query.ProtocolCode, query.FormulaVersionID, query.CreditUnit).Scan(&etag)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 1, []ManagedPriceVersion{}, false, tx.Commit(ctx)
+	}
+	if err != nil {
+		return 0, nil, false, err
+	}
+	rows, err := tx.Query(ctx, `SELECT id FROM pricing_versions WHERE scope_type=$1 AND COALESCE(scope_id,'')=$2 AND protocol_code=$3 AND formula_version_id=$4 AND credit_unit=$5 ORDER BY created_at DESC,id DESC LIMIT $6`, query.ScopeType, nullableScopeKey(query.ScopeType, scopeKey), query.ProtocolCode, query.FormulaVersionID, query.CreditUnit, limit+1)
+	if err != nil {
+		return 0, nil, false, err
+	}
+	ids := make([]uuid.UUID, 0, limit+1)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, nil, false, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	hasMore := len(ids) > limit
+	if hasMore {
+		ids = ids[:limit]
+	}
+	items := make([]ManagedPriceVersion, 0, len(ids))
+	for _, id := range ids {
+		item, _, err := loadManagedPriceForUpdate(ctx, tx, id)
+		if err != nil {
+			return 0, nil, false, err
+		}
+		item.CurrentSpaceETag = etag
+		item.DerivedStatus = derivePriceStatus(item, r.now())
+		items = append(items, item)
+	}
+	return etag, items, hasMore, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) UpdatePriceDraft(ctx context.Context, id, actor uuid.UUID, command PriceDraftCommand) (ManagedPriceVersion, error) {
@@ -669,6 +776,50 @@ func (s *Service) adminMeteringUnits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminManagedPrices(w http.ResponseWriter, r *http.Request) {
+	if rawID := strings.TrimSpace(r.URL.Query().Get("price_version_id")); rawID != "" {
+		repository, ok := s.repository.(interface {
+			ReadManagedPrice(context.Context, uuid.UUID) (ManagedPriceVersion, error)
+		})
+		if !ok {
+			return
+		}
+		id, err := uuid.Parse(rawID)
+		if err != nil {
+			s.writeError(w, r, ErrConflict)
+			return
+		}
+		item, err := repository.ReadManagedPrice(r.Context(), id)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		api.WriteJSON(w, http.StatusOK, map[string]any{"item": item})
+		return
+	}
+	if rawScope := strings.TrimSpace(r.URL.Query().Get("scope_type")); rawScope != "" {
+		repository, ok := s.repository.(interface {
+			ReadManagedPriceSpace(context.Context, ManagedPriceSpaceQuery, int) (int64, []ManagedPriceVersion, bool, error)
+		})
+		if !ok {
+			return
+		}
+		var scopeID *string
+		if raw := r.URL.Query().Get("scope_id"); raw != "" {
+			scopeID = &raw
+		}
+		formulaID, err := uuid.Parse(r.URL.Query().Get("formula_version_id"))
+		if err != nil {
+			s.writeError(w, r, ErrConflict)
+			return
+		}
+		etag, items, hasMore, err := repository.ReadManagedPriceSpace(r.Context(), ManagedPriceSpaceQuery{ScopeType: rawScope, ScopeID: scopeID, ProtocolCode: r.URL.Query().Get("protocol_code"), FormulaVersionID: formulaID, CreditUnit: r.URL.Query().Get("credit_unit")}, billingAdminLimit(r))
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		api.WriteJSON(w, http.StatusOK, map[string]any{"current_space_etag": etag, "items": items, "has_more": hasMore})
+		return
+	}
 	repository, ok := s.repository.(interface {
 		ListManagedPrices(context.Context, int) ([]ManagedPriceVersion, error)
 	})

@@ -702,8 +702,15 @@ paths:
   /billing/admin/v1/pricing:
     get:
       operationId: listAdminManagedPrices
-      summary: List price drafts and published lifecycle versions with derived status
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      summary: List price lifecycle versions, read one exact version, or project one exact pricing space and its current ETag
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: price_version_id, in: query, schema: { type: string, format: uuid } }
+        - { name: scope_type, in: query, schema: { type: string, enum: [GLOBAL, MODEL] } }
+        - { name: scope_id, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: protocol_code, in: query, schema: { type: string } }
+        - { name: formula_version_id, in: query, schema: { type: string, format: uuid } }
+        - { name: credit_unit, in: query, schema: { type: string, default: MICROCREDIT } }
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }

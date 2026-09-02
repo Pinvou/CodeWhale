@@ -202,7 +202,7 @@
 | `/billing/products/:id` | 申请/批准商品恢复 | `platform.billing.payment-controls.resume.request` / `.approve` | PLATFORM | APPROVAL_REQUIRED；Provider ACTIVE 后另起新申请 |
 | `/pricing` | 定价/计量读取 | `platform.pricing.read` | PLATFORM | READ_ONLY |
 | `/pricing-versions` | 旧版价格版本历史读取 | `platform.pricing.read` | PLATFORM | READ_ONLY；旧版 `POST`、运行时命令策略与 Portal 代理入口均已移除，历史迁移记录仅作为不可变审计事实保留 |
-| `/pricing/drafts`、`/pricing/:id/draft`、`/pricing/:id/publish`、`/pricing/:id/transition`、`/metering-units*` | 新版定价/计量写入 | `platform.pricing.manage` | PLATFORM | 六个 Billing 命令已由 `ADM-54 / APT-112` 按 `AUDIT_ONLY` 精确注册，具备该权限的调用方可使用 API；管理界面入口仍保持隐藏，待 `UI-44 / APT-113` 完成后开放 |
+| `/pricing/drafts`、`/pricing/:id/draft`、`/pricing/:id/publish`、`/pricing/:id/transition`、`/metering-units*` | 新版定价/计量写入 | `platform.pricing.manage` | PLATFORM | 六个 Billing 命令已由 `ADM-54 / APT-112` 按 `AUDIT_ONLY` 精确注册；`UI-44 / APT-113` 已开放权限裁剪后的 React 生命周期工作区。新建价格草稿和计量单位分别在写前重取精确价格空间与完整单位基线；模型、协议公式使用各自独立加载的当前状态，并在提交前复核权限、目录存在性和协议兼容性 |
 | `/models` | 读取 | `platform.models.read` | PLATFORM | READ_ONLY |
 | `/models:sync` | 同步 | `platform.models.sync` | PLATFORM | `TOKEN_MODEL_CATALOG_SYNC` 固定 AUDIT_ONLY |
 | `/models` | 草稿、发布、生命周期、前向回滚 | `platform.models.manage` | PLATFORM | `TOKEN_MODEL_DRAFT_SAVE`、`TOKEN_MODEL_PUBLISH`、`TOKEN_MODEL_LIFECYCLE_CHANGE`、`TOKEN_MODEL_CATALOG_ROLLBACK` 均固定 AUDIT_ONLY |
@@ -536,7 +536,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 - **订单与支付案件**：成功/失败/未知清晰分层；同步、认领、异常解决使用精确权限和单案件操作。
 - **退款记录**：不显示“新建退款”；仅查询既有退款及处理失败/未知/强制异常案件。
 - **调账/Hold/修复**：申请和审批视图分离；任何需要审批的动作只创建 approval request。
-- **定价**：已发布版本只读；结束或取消按状态矩阵操作，不在原版本直接编辑。新版 draft/publish/transition 与计量单位写入在 `APT-112` 注册命令且 `APT-113` 完成 UI 前隐藏，旧版 `POST /pricing-versions` 不得冒充新版生命周期入口。
+- **定价**：已发布版本只读；结束或取消按状态矩阵操作，不在原版本直接编辑。新版 draft/publish/transition 与计量单位写入已由 `APT-112` 注册命令并由 `APT-113` 接入 React 工作区；旧版 `POST /pricing-versions` 写入口已移除，不得冒充新版生命周期入口。无幂等合同的单位创建与停用在请求结果未知时持久锁定本次操作，必须通过权威刷新确认结果后才能继续。
 - **充值商品**：草稿、准入验证、发布、下架、删除、Provider/商品恢复分别显示。ON_SALE 删除按钮始终不存在；商品恢复不与 Provider 恢复合并。
 
 ### 12.3 模型、Token 与用量
@@ -621,7 +621,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | 服务身份 | 审批执行只读 | 无人类执行权限 | 审批执行内部合同 | APT-047 | 只能最小服务身份执行；环境凭据门禁通过 |
 | 支付恢复 | Provider/商品控制 | payment-controls resume request/approve | payment-provider-controls GET + approval APIs；现场探测端点缺失 | APT-065、APT-067、APT-093；缺口 UIA-005 | 两类独立审批；Provider 不自动开商品；无探测证据不提交 |
 | 充值商品 | `/billing/products` | `platform.products.read/create/publish/unpublish/delete` | recharge-products、publish/unpublish/delete、admission-verifications | APT-083、APT-084、APT-085、APT-093 | ON_SALE 不可删除；证据失效关闭；恢复另审批 |
-| 定价/应收/钱包/订单 | 财务各页 | `platform.pricing.read/manage`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request/approve` | Billing admin APIs | APT-018、APT-019、APT-020、APT-023、APT-024、APT-025；Billing 命令注册 APT-112 | 单位准确；审批动作不走直接接口；新版定价写在 APT-112、APT-113 完成前隐藏 |
+| 定价/应收/钱包/订单 | 财务各页 | `platform.pricing.read/manage`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request/approve` | Billing admin APIs | APT-018、APT-019、APT-020、APT-023、APT-024、APT-025；Billing 命令注册 APT-112；生命周期 UI APT-113 | 单位准确；审批动作不走直接接口；新版定价写入按权限、精确空间 ETag、真实幂等合同和未知结果恢复规则开放 |
 | 退款关闭 | `/billing/refunds` 只读及异常案件 | 对应财务读/修复权 | existing refund/admin repair APIs | APT-056 | 无退款发起入口或 API 调用 |
 | Token 隔离 | `/token/*` | `platform.tokens.*` | token admin overview/accounts/routes/validate/provisionings | APT-028、APT-031、APT-073 | 无权限页面/字段/卡片均不可见；密钥不回显 |
 | 用量对账 | `/usage/*` | `platform.usage.*` | usage requests/reconciliation APIs | APT-030 | 结果未知先查/对账，不盲重试 |
@@ -659,7 +659,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | S12 | 路由管理 | 使用 tokens.read/manage 分权；技术字段截断/复制/Tooltip；现有路由写没有近期认证、原因、幂等/CAS，强化等待 `UIA-004` |
 | S13 | 系统状态 | 仅使用 `GET /system/status`；卡片独立失败。事件能力未获产品批准时永久隐藏；获批后须由 Account/Billing/Token 各自端点（候选 UIA-008、UIA-021、UIA-022）及 Portal 适配（候选 UIA-023）共同交付，Portal 不跨库重放 |
 | S14 | 我的组织 | 增加组织/节点选择器；已有卡片独立鉴权；UNIT 只覆盖目标子树；组织审计 API 等待 `UIA-009`；资料写/注销由 Account API `UIA-019` + Portal `UIA-012` 闭环；全员用量由 Token API `UIA-016` + Portal `UIA-024` 闭环。两条链互不依赖，任一未批准时只永久隐藏本链入口 |
-| S15 | 定价与商品 | ON_SALE 删除按钮移除；显示准入证据、发布事实不可变、Provider/商品独立恢复；新版定价与计量写在 APT-112、APT-113 完成前隐藏 |
+| S15 | 定价与商品 | ON_SALE 删除按钮移除；显示准入证据、发布事实不可变、Provider/商品独立恢复；新版定价与计量工作区已按 APT-112、APT-113 开放，并保持各资源独立加载、局部失败与刷新恢复 |
 | S16 | 审计 | 导出额度为“每人每日 10 个”；异步导出、默认脱敏、临时 PII 权限、一次下载/过期/水印/加密签名；密钥一次性面板与 replay 修复依赖 `UIA-006` |
 | S17 | 应收 | 当前仅 wallet_id/status/limit；时间/cursor 由 APT-114、APT-115 交付；allocations 详情只读，写销/修复进入精确审批策略 |
 | S18 | 手工调账 | 创建记录使用 reason/idempotency_key；资金执行只走审批；`expected_version` 只用于后续审批请求而非调账创建端点 |

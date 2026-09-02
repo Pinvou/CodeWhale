@@ -66,15 +66,12 @@ function preserveAccountPortalExtensions() {
     'admin.html': {
       head: [
         '<script type="module" crossorigin src="/assets/approval-requests.js"></script>',
-        '<script type="module" crossorigin src="/assets/pricing-admin.js"></script>',
         '<script type="module" crossorigin src="/assets/product-admin.js"></script>',
         '<link rel="stylesheet" crossorigin href="/assets/approval-requests.css">',
-        '<link rel="stylesheet" crossorigin href="/assets/pricing-admin.css">',
         '<link rel="stylesheet" crossorigin href="/assets/product-admin.css">',
       ],
       body: [
         '<div id="approval-requests-root"></div>',
-        '<div id="pricing-admin-root"></div>',
         '<div id="product-admin-root"></div>',
       ],
     },

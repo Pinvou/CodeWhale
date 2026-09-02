@@ -61,20 +61,22 @@ test('source and built admin portal preserve the HTML prototype five-group navig
   assert.match(authorization, /platform\.tokens\.read/);
   assert.match(authorization, /products: \['platform\.products\.read', 'platform\.pricing\.read'\]/);
   assert.doesNotMatch(authorization, /billing: \[[^\]]*platform\.pricing\.read/);
-  assert.match(view, /'pricing-admin-root': false/);
+  assert.match(view, /<PricingLifecycleWorkspace/);
   assert.match(view, /'approval-requests-root': section === 'approvals'/);
   assert.match(view, /'product-admin-root': section === 'products' && financeTab === 'catalog'/);
   assert.match(view, /readAdminFinanceTab/);
   assert.match(view, /surface="payments"/);
-  assert.match(view, /surface="products"/);
+  assert.match(view, /function ProductsWorkspace/);
   assert.match(view, /function SettingsWorkspace/);
   assert.match(view, /copy\.runbooks\.noExecution/);
   assert.doesNotMatch(view, /createUser\(|createRole\(|eventReplay\(/);
-  for (const root of ['approval-requests-root', 'pricing-admin-root', 'product-admin-root']) {
+  for (const root of ['approval-requests-root', 'product-admin-root']) {
     assert.ok(builtHTML.includes(`id="${root}"`), `${root} is retained for permission-gated mounting`);
     assert.match(sourceCSS, new RegExp(`\\.admin-portal-body\\s*>\\s*#${root}`));
     assert.ok(builtCSS.includes(`#${root}`));
   }
+  assert.ok(!builtHTML.includes('pricing-admin-root'), 'pricing lifecycle is owned by the React pricing workspace');
+  assert.ok(!builtHTML.includes('pricing-admin.js'), 'the retired pricing extension is not loaded in the background');
   assert.ok(!builtHTML.includes('role-bindings-root'), 'role binding management is owned by the React role workspace');
   assert.match(view, /<AdminRolesWorkspace/);
   assert.ok(!builtHTML.includes('registration-repair-root'), 'registration repair is owned by the React user workspace');
