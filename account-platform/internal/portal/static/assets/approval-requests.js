@@ -11,8 +11,15 @@ Object.assign(copy.zh,{providerRecovery:'Provider 恢复',productRecovery:'商�
 Object.assign(copy.en,{providerRecovery:'Provider recovery',productRecovery:'Product recovery',productResumeCreated:'Product recovery submitted',productResumeUnavailable:'The Provider must be available and the product must pass admission, observation-gap, and live-probe checks'});
 Object.assign(copy.ja,{providerRecovery:'Provider 復旧',productRecovery:'商品の復旧',productResumeCreated:'商品の復旧申請を送信しました',productResumeUnavailable:'Provider の復旧後、商品が審査、観測ギャップ、現地プローブの条件を満たす必要があります'});
 let items = [], providerControl = null, csrf = '';
-let adjustmentRequestKey = crypto.randomUUID();
+let loadGeneration = 0;
 const filters = {command_type:'',status:'',risk_class:'',requester_user_id:'',target:'',submitted_from:'',submitted_to:'',expires_from:'',expires_to:''};
+function syncRouteFilters(){
+  const query=new URLSearchParams(location.search);
+  for(const name of Object.keys(filters)) filters[name]='';
+  filters.command_type=query.get('approval_command_type')||'';
+  filters.target=query.get('approval_target')||'';
+}
+syncRouteFilters();
 const language = () => { const value=localStorage.getItem('pinvou.admin.language')||'zh'; return copy[value]?value:'zh'; };
 const t = () => copy[language()];
 const esc = value => String(value??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -23,12 +30,16 @@ async function requestService(service,path, options={}) { const response=await f
 const request=(path,options={})=>requestService('account',path,options);
 
 async function load(){
+  const generation=++loadGeneration;
+  const filterSnapshot={...filters};
   try {
     if(!csrf) await session();
     const params=new URLSearchParams();
-    for(const name of Object.keys(filters)){if(filters[name]) params.set(name,name.includes('_from')||name.includes('_to')?new Date(filters[name]).toISOString():filters[name]);}
-    const [body,control]=await Promise.all([request(`/admin/v1/approval-requests?${params}`),requestService('billing','/admin/v1/payment-provider-controls')]); items=body.items||[]; providerControl=control; render();
-  } catch(error){ root.innerHTML=`<section class="approval-panel"><p class="approval-error">${esc(t().failed)}: ${esc(error.message)}</p></section>`; }
+    for(const name of Object.keys(filterSnapshot)){if(filterSnapshot[name]) params.set(name,name.includes('_from')||name.includes('_to')?new Date(filterSnapshot[name]).toISOString():filterSnapshot[name]);}
+    const [body,control]=await Promise.all([request(`/admin/v1/approval-requests?${params}`),requestService('billing','/admin/v1/payment-provider-controls').catch(()=>null)]);
+    if(generation!==loadGeneration) return;
+    items=body.items||[]; providerControl=control; render();
+  } catch(error){ if(generation===loadGeneration) root.innerHTML=`<section class="approval-panel"><p class="approval-error">${esc(t().failed)}: ${esc(error.message)}</p></section>`; }
 }
 
 async function action(item, decision){
@@ -38,17 +49,6 @@ async function action(item, decision){
 }
 
 async function withdraw(item){ await request(`/admin/v1/approval-requests/${encodeURIComponent(item.approval_request_id)}/actions/withdraw`,{method:'POST',body:JSON.stringify({expected_version:item.version})}); await load(); }
-
-async function createAdjustment(event){
-  event.preventDefault(); const c=t(); const form=event.currentTarget; const button=form.querySelector('button'); const wallet=form.wallet_id.value.trim(); const amount=Number(form.amount_microcredits.value); const reason=form.reason.value.trim();
-  if(!wallet||!Number.isSafeInteger(amount)||amount===0||reason.length<10) return;
-  button.disabled=true; button.textContent=c.creating;
-  try {
-    const adjustment=await requestService('billing','/admin/v1/adjustments',{method:'POST',body:JSON.stringify({wallet_id:wallet,amount_microcredits:amount,reason,idempotency_key:adjustmentRequestKey})});
-    const draft=await request('/admin/v1/approval-requests',{method:'POST',body:JSON.stringify({command_type:'WALLET_ADJUSTMENT',idempotency_key:`approval:${adjustmentRequestKey}`,normalized_command:{adjustment_id:adjustment.adjustment_id,wallet_id:adjustment.wallet_id,amount_microcredits:adjustment.amount_microcredits,requested_by:adjustment.requested_by},target_resource_type:'MANUAL_ADJUSTMENT',target_resource_id:adjustment.adjustment_id,reason,redacted_evidence:[],expected_impact:{wallet_id:adjustment.wallet_id,delta_microcredits:adjustment.amount_microcredits},critical_resource_versions:{adjustment_version:adjustment.version},financial_snapshot:{wallet_id:adjustment.wallet_id,delta_microcredits:adjustment.amount_microcredits}})});
-    if(draft.status==='DRAFT') await request(`/admin/v1/approval-requests/${encodeURIComponent(draft.approval_request_id)}/actions/submit`,{method:'POST',body:JSON.stringify({expected_version:draft.version})}); else if(draft.status!=='SUBMITTED') throw new Error(`APPROVAL_${draft.status}`); adjustmentRequestKey=crypto.randomUUID(); form.reset(); await load(); alert(c.created);
-  } catch(error){alert(`${c.failed}: ${error.message}`);} finally {button.disabled=false;button.textContent=c.create;}
-}
 
 async function createControlResume(event){
   event.preventDefault(); const c=t(); const form=event.currentTarget; const reason=form.resume_reason.value.trim(); const productID=form.dataset.productId||''; const product=productID?(providerControl?.products||[]).find(item=>item.product_id===productID):null; const draftInput=product?product.resume_draft:providerControl?.resume_draft;
@@ -63,17 +63,19 @@ async function createControlResume(event){
 }
 
 function render(){
-  const c=t(); const types=[...new Set(items.map(x=>x.command_type))].sort(); const statuses=['DRAFT','SUBMITTED','APPROVED','EXECUTING','EXECUTED','EXECUTION_FAILED','REJECTED','WITHDRAWN','EXPIRED','INVALIDATED'];
+  const c=t(); const types=[...new Set([filters.command_type,...items.map(x=>x.command_type)].filter(Boolean))].sort(); const statuses=['DRAFT','SUBMITTED','APPROVED','EXECUTING','EXECUTED','EXECUTION_FAILED','REJECTED','WITHDRAWN','EXPIRED','INVALIDATED'];
   const rows=items.map(item=>{const actions=item.allowed_actions||[];return `<tr><td><strong>${esc(item.command_type)}</strong><small>${esc(c.policy)} v${esc(item.policy_version)} · ${esc(item.risk_class)} · ${esc(c.one)}</small></td><td><span>${esc(item.status)}</span><small>v${esc(item.version)}</small></td><td><code>${esc(item.requester_user_id)}</code></td><td>${esc(item.target_resource_type)}<small>${esc(item.target_resource_id)}</small></td><td>${esc(date(item.submitted_at||item.created_at))}<small>${esc(date(item.expires_at))}</small></td><td><details><summary>${esc(c.impact)}</summary><pre>${esc(JSON.stringify(item.expected_impact||{},null,2))}</pre></details><details><summary>${esc(c.command)}</summary><pre>${esc(JSON.stringify(item.normalized_command||{},null,2))}</pre></details><details><summary>${esc(c.versions)}</summary><pre>${esc(JSON.stringify(item.critical_resource_versions||{},null,2))}</pre></details><details><summary>${esc(c.evidence)}</summary><pre>${esc(JSON.stringify(item.redacted_evidence||[],null,2))}</pre></details></td><td class="approval-actions">${actions.includes('APPROVE')?`<button data-id="${item.approval_request_id}" data-decision="APPROVED">${esc(c.approve)}</button>`:''}${actions.includes('REJECT')?`<button data-id="${item.approval_request_id}" data-decision="REJECTED">${esc(c.reject)}</button>`:''}${actions.includes('WITHDRAW')?`<button data-id="${item.approval_request_id}" data-withdraw>${esc(c.withdraw)}</button>`:''}</td></tr>`}).join('');
   const select=(name,label,values)=>`<label>${esc(label)}<select name="${name}"><option value="">${esc(c.all)}</option>${values.map(value=>`<option value="${esc(value)}"${filters[name]===value?' selected':''}>${esc(value)}</option>`).join('')}</select></label>`;
   const input=(name,label,type='text')=>`<label>${esc(label)}<input name="${name}" type="${type}" value="${esc(filters[name])}"></label>`;
   const productResumeForms=(providerControl?.products||[]).filter(product=>!product.new_orders_enabled).map(product=>`<form class="approval-control-resume" data-product-id="${esc(product.product_id)}"><strong>${esc(c.productRecovery)} · ${esc(product.product_id)}</strong><label>${esc(c.resumeReason)}<input name="resume_reason" minlength="10" maxlength="2000" required></label><button${product.resume_draft?'':' disabled'}>${esc(c.productRecovery)}</button></form>`).join('');
-  root.innerHTML=`<section class="approval-panel"><header><div><h2>${esc(c.title)}</h2><p>${esc(c.lead)}</p></div><button data-refresh>${esc(c.refresh)}</button></header><details class="approval-control-snapshot"><summary>${esc(c.paymentControls)}</summary><pre>${esc(JSON.stringify(providerControl||{},null,2))}</pre></details><form class="approval-control-resume"><strong>${esc(c.providerRecovery)}</strong><label>${esc(c.resumeReason)}<input name="resume_reason" minlength="10" maxlength="2000" required></label><button${providerControl?.resume_draft?'':' disabled'}>${esc(c.requestResume)}</button></form>${productResumeForms}<form class="approval-create"><label>${esc(c.wallet)}<input name="wallet_id" required></label><label>${esc(c.amount)}<input name="amount_microcredits" type="number" step="1" required></label><label>${esc(c.requestReason)}<input name="reason" minlength="10" maxlength="2000" required></label><button>${esc(c.create)}</button></form><div class="approval-filters">${select('command_type',c.type,types)}${select('status',c.status,statuses)}${select('risk_class',c.risk,['FINANCIAL_FACT_CHANGE'])}${input('requester_user_id',c.requester)}${input('target',c.target)}${input('submitted_from',c.submittedFrom,'datetime-local')}${input('submitted_to',c.submittedTo,'datetime-local')}${input('expires_from',c.expiresFrom,'datetime-local')}${input('expires_to',c.expiresTo,'datetime-local')}</div>${rows?`<div class="approval-table"><table><thead><tr>${[c.type,c.status,c.requester,c.target,c.submitted,c.impact,c.actions].map(x=>`<th>${esc(x)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`:`<p>${esc(c.empty)}</p>`}</section>`;
+  root.innerHTML=`<section class="approval-panel"><header><div><h2>${esc(c.title)}</h2><p>${esc(c.lead)}</p></div><button data-refresh>${esc(c.refresh)}</button></header><details class="approval-control-snapshot"><summary>${esc(c.paymentControls)}</summary><pre>${esc(JSON.stringify(providerControl||{},null,2))}</pre></details><form class="approval-control-resume"><strong>${esc(c.providerRecovery)}</strong><label>${esc(c.resumeReason)}<input name="resume_reason" minlength="10" maxlength="2000" required></label><button${providerControl?.resume_draft?'':' disabled'}>${esc(c.requestResume)}</button></form>${productResumeForms}<div class="approval-filters">${select('command_type',c.type,types)}${select('status',c.status,statuses)}${select('risk_class',c.risk,['FINANCIAL_FACT_CHANGE'])}${input('requester_user_id',c.requester)}${input('target',c.target)}${input('submitted_from',c.submittedFrom,'datetime-local')}${input('submitted_to',c.submittedTo,'datetime-local')}${input('expires_from',c.expiresFrom,'datetime-local')}${input('expires_to',c.expiresTo,'datetime-local')}</div>${rows?`<div class="approval-table"><table><thead><tr>${[c.type,c.status,c.requester,c.target,c.submitted,c.impact,c.actions].map(x=>`<th>${esc(x)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`:`<p>${esc(c.empty)}</p>`}</section>`;
   root.querySelector('[data-refresh]').onclick=load; root.querySelectorAll('.approval-filters input,.approval-filters select').forEach(node=>node.onchange=()=>{filters[node.name]=node.value;load();});
   root.querySelectorAll('[data-decision]').forEach(button=>button.onclick=()=>action(items.find(x=>x.approval_request_id===button.dataset.id),button.dataset.decision));
   root.querySelectorAll('[data-withdraw]').forEach(button=>button.onclick=()=>withdraw(items.find(x=>x.approval_request_id===button.dataset.id)));
-  root.querySelector('.approval-create').onsubmit=createAdjustment;
   root.querySelectorAll('.approval-control-resume').forEach(form=>form.onsubmit=createControlResume);
 }
 
-if(root){render();load();window.addEventListener('pinvou-admin-language-change',render);}
+if(root){
+  const routeChanged=()=>{if(new URLSearchParams(location.search).get('section')==='approvals'){syncRouteFilters();load();}};
+  render();load();window.addEventListener('pinvou-admin-language-change',render);window.addEventListener('pinvou-admin-route-change',routeChanged);window.addEventListener('popstate',routeChanged);
+}

@@ -1953,3 +1953,46 @@ Object.assign(adminPlatformCopy.ja.roles, {
   joinedAt: '参加日時',
   memberPageSummary: (page, count) => `${page} ページ · このページ ${count} 件`,
 });
+
+Object.assign(adminPlatformCopy.zh.billing, {
+  adjustmentWallet: '目标钱包 ID',
+  selectWallet: '选择钱包',
+  adjustmentAmount: '调整积分（非零，可为负数）',
+  adjustmentReason: '申请原因（至少 10 个字符）',
+  submitAdjustment: '创建并提交审批',
+  adjustmentApprovalBoundary: '资金变更由独立审批人在审批中心决定；申请人不能自审。',
+  adjustmentSubmitted: '调账申请已提交至审批中心。',
+  adjustmentApprovalPending: '调账记录已创建，但审批提交未完成。请在列表中恢复审批，不要重复创建。',
+  executionStatus: '执行状态',
+  approvalStatus: '审批状态 / 申请 ID',
+  viewApproval: '查看审批',
+  resumeApproval: '恢复审批提交',
+});
+Object.assign(adminPlatformCopy.en.billing, {
+  adjustmentWallet: 'Target wallet ID',
+  selectWallet: 'Select a wallet',
+  adjustmentAmount: 'Point adjustment (non-zero; negatives allowed)',
+  adjustmentReason: 'Request reason (at least 10 characters)',
+  submitAdjustment: 'Create and submit for approval',
+  adjustmentApprovalBoundary: 'An independent approver decides the financial change in Approvals; requesters cannot approve their own requests.',
+  adjustmentSubmitted: 'The adjustment request was submitted to Approvals.',
+  adjustmentApprovalPending: 'The adjustment record was created, but approval submission did not finish. Resume it from the list instead of creating another record.',
+  executionStatus: 'Execution status',
+  approvalStatus: 'Approval status / request ID',
+  viewApproval: 'View approval',
+  resumeApproval: 'Resume approval submission',
+});
+Object.assign(adminPlatformCopy.ja.billing, {
+  adjustmentWallet: '対象ウォレット ID',
+  selectWallet: 'ウォレットを選択',
+  adjustmentAmount: '調整ポイント（0 以外、負数可）',
+  adjustmentReason: '申請理由（10 文字以上）',
+  submitAdjustment: '作成して承認申請',
+  adjustmentApprovalBoundary: '資金変更は承認センターで独立した承認者が判断し、申請者自身は承認できません。',
+  adjustmentSubmitted: '調整申請を承認センターに送信しました。',
+  adjustmentApprovalPending: '調整レコードは作成されましたが、承認申請は未完了です。重複作成せず、一覧から申請を再開してください。',
+  executionStatus: '実行状態',
+  approvalStatus: '承認状態 / 申請 ID',
+  viewApproval: '承認を表示',
+  resumeApproval: '承認申請を再開',
+});

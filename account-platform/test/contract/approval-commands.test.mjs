@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('every management write is classified and financial facts use the independent approval executor', async () => {
-  const [policy, accountService, billingService, tokenService, accountMigration, billingMigration, approvals, execution, billingExecution, billingConsumer, billingMain, adminOpenAPI, eventSchema, portal] = await Promise.all([
+  const [policy, accountService, billingService, tokenService, accountMigration, billingMigration, approvals, execution, billingExecution, billingConsumer, billingMain, adminOpenAPI, eventSchema, portal, adminView] = await Promise.all([
     read('internal/platform/approvalpolicy/registry.go'),
     read('internal/account/service.go'),
     read('internal/billing/service.go'),
@@ -21,7 +21,8 @@ test('every management write is classified and financial facts use the independe
     read('cmd/billing-service/main.go'),
     read('contracts/openapi/admin.yaml'),
     read('contracts/events/account.approval-command.authorized.v1.schema.json'),
-    read('internal/portal/static/assets/approval-requests.js')
+    read('internal/portal/static/assets/approval-requests.js'),
+    read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx')
   ]);
 
   const financialCommands = [
@@ -80,5 +81,7 @@ test('every management write is classified and financial facts use the independe
   for (const language of ['zh', 'en', 'ja']) assert.match(portal, new RegExp(`${language}: \\{`));
   for (const filter of ['risk_class', 'requester_user_id', 'target', 'submitted_from', 'submitted_to', 'expires_from', 'expires_to']) assert.match(portal, new RegExp(filter));
   for (const frozenView of ['normalized_command', 'critical_resource_versions', 'redacted_evidence']) assert.match(portal, new RegExp(frozenView));
-  assert.match(portal, /createAdjustment/);
+  assert.doesNotMatch(portal, /createAdjustment/);
+  assert.match(adminView, /await client\.createAdjustment[\s\S]*?await ensureAdjustmentApproval/);
+  assert.doesNotMatch(adminView, /client\.decideAdjustment/);
 });

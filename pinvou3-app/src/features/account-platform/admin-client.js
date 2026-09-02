@@ -311,8 +311,19 @@ export class AdminPlatformClient {
   adjustments(signal) {
     return this.request('billing', '/admin/v1/adjustments?limit=100', signal);
   }
-  decideAdjustment(adjustmentID, decision, reason) {
-    return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason });
+  createAdjustment(input) {
+    return this.mutate('billing', '/admin/v1/adjustments', 'POST', input);
+  }
+  approvalRequests(filters = {}, signal) {
+    const query = new URLSearchParams({ limit: '200' });
+    for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
+    return this.request('account', `/admin/v1/approval-requests?${query}`, signal);
+  }
+  createApprovalDraft(input) {
+    return this.mutate('account', '/admin/v1/approval-requests', 'POST', input);
+  }
+  submitApprovalRequest(requestID, expectedVersion) {
+    return this.mutate('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}/actions/submit`, 'POST', { expected_version: expectedVersion });
   }
   holds(signal) {
     return this.request('billing', '/admin/v1/usage-holds?limit=100', signal);

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
-import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
+import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints, parsePointsInputToMicrocredits } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
@@ -10,6 +10,7 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
+import { adjustmentApprovalAction } from '../src/features/account-platform/admin-finance.js';
 import { adminNavigationGroups, adminSectionURL, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
@@ -110,13 +111,45 @@ test('admin finance capabilities use independent permission-gated routes without
   assert.match(authorization, /billing: \['platform\.billing\.wallets\.read', 'platform\.usage\.read'\]/);
   assert.match(authorization, /payments: \['platform\.billing\.wallets\.read', 'platform\.usage\.read'\]/);
   assert.match(authorization, /products: \['platform\.products\.read', 'platform\.pricing\.read'\]/);
-  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read'\]/);
+  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read', 'platform\.billing\.repairs\.request', 'platform\.billing\.repairs\.approve'\]/);
   assert.match(styles, /\.admin-portal-body > #approval-requests-root[\s\S]*display:none/);
   assert.match(styles, /\.approval-control-snapshot/);
   assert.match(main, /pinvou-admin-language-change/);
   assert.match(approvals, /<details class="approval-control-snapshot">/);
   assert.match(approvals, /pinvou-admin-language-change/);
   assert.match(products, /pinvou-admin-language-change/);
+});
+
+test('manual adjustments create and recover approval requests only from accounts and billing', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');
+  const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
+  const approvals = await readFile(new URL('../../account-platform/internal/portal/static/assets/approval-requests.js', import.meta.url), 'utf8');
+
+  assert.match(client, /createAdjustment\(input\)[\s\S]*?\/admin\/v1\/adjustments/);
+  assert.match(client, /createApprovalDraft\(input\)[\s\S]*?\/admin\/v1\/approval-requests/);
+  assert.match(client, /submitApprovalRequest\(requestID, expectedVersion\)/);
+  assert.doesNotMatch(client, /decideAdjustment\(/);
+  assert.match(view, /await client\.createAdjustment[\s\S]*?await ensureAdjustmentApproval/);
+  assert.match(view, /command_type: 'WALLET_ADJUSTMENT'/);
+  assert.match(view, /idempotency_key: `approval:\$\{requestKey\}`/);
+  assert.match(view, /created \? copy\.billing\.adjustmentApprovalPending/);
+  assert.match(view, /recoverAdjustmentApproval/);
+  assert.match(view, /approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item\.adjustment_id/);
+  assert.doesNotMatch(view, /client\.decideAdjustment/);
+  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read', 'platform\.billing\.repairs\.request', 'platform\.billing\.repairs\.approve'\]/);
+  const pending = { status: 'PENDING_APPROVAL', request_idempotency_key: 'adjustment-key' };
+  assert.equal(adjustmentApprovalAction(pending, { status: 'DRAFT' }, { canRequest: true }), 'resume');
+  assert.equal(adjustmentApprovalAction(pending, { status: 'SUBMITTED' }, { canRequest: true }), 'view');
+  assert.equal(adjustmentApprovalAction(pending, null, { canRequest: true }), 'resume');
+  assert.equal(adjustmentApprovalAction(pending, { status: 'DRAFT' }, { canApprove: true }), 'view');
+  assert.equal(adjustmentApprovalAction(pending, { status: 'DRAFT' }, {}), 'none');
+  assert.match(view, /pinvou-admin-route-change/);
+  assert.match(approvals, /syncRouteFilters/);
+  assert.match(approvals, /addEventListener\('pinvou-admin-route-change',routeChanged\)/);
+  assert.match(approvals, /addEventListener\('popstate',routeChanged\)/);
+  assert.doesNotMatch(approvals, /class="approval-create"/);
+  assert.doesNotMatch(approvals, /function createAdjustment/);
 });
 
 test('admin model, system, audit, and runbook surfaces keep technical identifiers usable and secrets out of the DOM', async () => {
@@ -155,6 +188,16 @@ async function sourceFiles(root) {
 
 test('account balances convert internal microcredits to display points', () => {
   assert.equal(MICROCREDITS_PER_POINT, 10_000);
+  assert.equal(parsePointsInputToMicrocredits('1.2345'), 12_345);
+  assert.equal(parsePointsInputToMicrocredits('-1.2345'), -12_345);
+  assert.equal(parsePointsInputToMicrocredits('0.0001'), 1);
+  assert.equal(parsePointsInputToMicrocredits('0'), 0);
+  assert.equal(parsePointsInputToMicrocredits('1.23456'), null);
+  assert.equal(parsePointsInputToMicrocredits('1e2'), null);
+  assert.equal(parsePointsInputToMicrocredits('900719925474.0991'), Number.MAX_SAFE_INTEGER);
+  assert.equal(parsePointsInputToMicrocredits('900719925474.0992'), null);
+  assert.equal(parsePointsInputToMicrocredits('-900719925474.0991'), Number.MIN_SAFE_INTEGER);
+  assert.equal(parsePointsInputToMicrocredits('-900719925474.0992'), null);
   assert.equal(microcreditsToPoints(1_000_000), 100);
   assert.equal(formatPoints(1_000_000, 'en'), '100');
   assert.equal(formatPoints(7_969_994, 'en'), '796.9994');

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 411 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 367`、`部分实现 29`、`未实现 13`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `411` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105 已完成，其余任务按序实施。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 368`、`部分实现 29`、`未实现 12`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `411` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-106 已完成，其余任务按序实施。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -387,7 +387,7 @@
 | UI-35 | 已实现 | DOC_CURRENT | ACCOUNT-PLATFORM-STATE; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | 成员区改为紧凑分页表格、远程用户候选与按需权限抽屉；列表不再预渲染全部角色/节点控件，也不展示或搜索邮箱。 |
 | UI-36 | 已实现 | DOC_CURRENT | CONTRACT; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | ACTIVE 组织不再显示删除；DISABLED 组织通过删除检查界面展示跨域阻断，区分 409/503 与 request_id，并要求精确名称和审计理由后才可提交。 |
 | UI-37 | 已实现 | AUDIT_HEAD | ADMIN-FINANCE-PAYMENT-REDESIGN; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE | NOT_DEPLOYED | 已改为“账户与计费 / 支付与对账 / 定价与商品”，模型定价与支付对账归位，并以 `finance_tab` 保持子页刷新、前进后退和权限降级后的稳定深链。 |
-| UI-38 | 未实现 | DOC_CURRENT | ADMIN-FINANCE-PAYMENT-REDESIGN | NOT_DEPLOYED | 手工调账申请、未完成申请恢复和审批中心下穿待 APT-106。 |
+| UI-38 | 已实现 | AUDIT_HEAD | ADMIN-FINANCE-PAYMENT-REDESIGN; APPROVAL-COMMANDS | NOT_DEPLOYED | 账户与计费已提供钱包选择、积分调账申请、Billing 记录与审批申请串联；审批提交失败可按原幂等键恢复，列表展示审批/执行状态并深链审批中心，财务页不再直接批准或拒绝。 |
 | UI-39 | 未实现 | DOC_CURRENT | ADMIN-FINANCE-PAYMENT-REDESIGN | NOT_DEPLOYED | Provider/商品分层控制证据及独立恢复申请入口待 APT-107。 |
 | UI-40 | 未实现 | DOC_CURRENT | ADMIN-FINANCE-PAYMENT-REDESIGN | NOT_DEPLOYED | 财务支付各子页独立加载、刷新、局部失败和权限裁剪待 APT-108。 |
 | UI-41 | 未实现 | DOC_CURRENT | ADMIN-FINANCE-PAYMENT-REDESIGN | NOT_DEPLOYED | 既有规范化筛选和充值商品稳定 cursor 的 Portal 接入待 APT-109。 |
@@ -928,7 +928,7 @@
 | UI-35 | 紧凑成员权限工作区 | 已实现 | 成员以紧凑表格分页展示；添加成员使用远程用户搜索，角色与节点范围仅在选中单个成员后打开编辑抽屉。 |
 | UI-36 | 组织删除交互闭环 | 已实现 | ACTIVE 不出现删除入口；DISABLED 的删除面板展示就绪度与结构化阻断，要求名称和原因双确认，并保留可重试错误与 request_id。 |
 | UI-37 | 财务支付三分区信息架构 | 已实现 | 三分区名称、子页归属、权限边界和 `finance_tab` 稳定深链已在源码、三语目录、原型及内置 Portal 制品中一致实现。 |
-| UI-38 | 手工调账申请与审批下穿 | 未实现 | 申请、恢复和审批中心深链尚未编码。 |
+| UI-38 | 手工调账申请与审批下穿 | 已实现 | 调账创建、审批提交、部分失败恢复、审批状态/申请 ID 展示和目标过滤深链已闭环；批准、拒绝、撤回及执行仍由审批中心和服务身份负责。 |
 | UI-39 | 支付渠道控制与恢复申请 | 未实现 | Provider/商品分层控制和独立恢复申请尚未编码。 |
 | UI-40 | 财务支付子页独立状态 | 未实现 | 子页独立加载、刷新、失败和权限裁剪尚未编码。 |
 | UI-41 | 既有筛选与充值商品稳定分页 | 未实现 | 既有筛选和商品 cursor 尚未接入 Portal URL 状态。 |

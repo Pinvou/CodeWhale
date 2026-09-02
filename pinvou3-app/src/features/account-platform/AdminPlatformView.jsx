@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
+import { adjustmentApprovalAction } from './admin-finance.js';
+import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminNavigationGroups, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
@@ -349,13 +350,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             roleOrganizations: organizations.items || [],
           };
         } else if (target === 'billing') {
-          const [overview, wallets, receivables, adjustments, holds] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.wallets(signal)), read('platform.billing.wallets.read', () => client.receivables(signal)), read('platform.billing.wallets.read', () => client.adjustments(signal)), read('platform.usage.read', () => client.holds(signal))]);
+          const [overview, wallets, receivables, adjustments, holds, adjustmentApprovals] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.wallets(signal)), read('platform.billing.wallets.read', () => client.receivables(signal)), read('platform.billing.wallets.read', () => client.adjustments(signal)), read('platform.usage.read', () => client.holds(signal)), readAny(['platform.billing.repairs.request', 'platform.billing.repairs.approve'], () => client.approvalRequests({ command_type: 'WALLET_ADJUSTMENT' }, signal))]);
           next = {
             billingOverview: overview,
             wallets: wallets.items || [],
             receivables: receivables.items || [],
             adjustments: adjustments.items || [],
             holds: holds.items || [],
+            adjustmentApprovals: adjustmentApprovals.items || [],
           };
         } else if (target === 'payments') {
           const [overview, orders, refunds, lateReviews, anomalies, reconciliations] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.paymentOrders({}, signal)), read('platform.billing.wallets.read', () => client.refunds(signal)), read('platform.billing.wallets.read', () => client.latePaymentReviews({}, signal)), read('platform.billing.wallets.read', () => client.paymentAnomalies({}, signal)), read('platform.usage.read', () => client.reconciliationRuns(signal))]);
@@ -540,8 +542,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       organization_id: null,
       organization_tab: null,
       finance_tab: null,
+      approval_command_type: null,
+      approval_target: null,
       ...query,
     });
+    globalThis.dispatchEvent?.(new CustomEvent('pinvou-admin-route-change'));
     setRouteVersion((value) => value + 1);
     if (!sectionHasData(key, data)) load(key, undefined, authorization);
   };
@@ -654,7 +659,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
@@ -2187,7 +2192,7 @@ function ProductsWorkspace({ copy, language, data, client, setData, permissions,
   );
 }
 
-function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', onRouteTabChange, embedded = false }) {
+function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', onRouteTabChange, onNavigate, embedded = false }) {
   const defaultTab = surface === 'payments' ? 'orders' : surface === 'products' ? 'prices' : 'wallets';
   const [tab, setTab] = useState(routeTab || defaultTab);
   const items = data[tab] || [];
@@ -2211,6 +2216,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     channel: 'ALIPAY',
     businessDate: new Date().toISOString().slice(0, 10),
   });
+  const [adjustment, setAdjustment] = useState({ walletID: '', amount: '', reason: '' });
+  const [adjustmentRequestKey, setAdjustmentRequestKey] = useState(() => crypto.randomUUID());
   const [orderFilter, setOrderFilter] = useState({ q: '', status: '' });
   const [lateFilter, setLateFilter] = useState({
     status: '',
@@ -2230,9 +2237,10 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const canReadWallets = permissionSet.has('platform.billing.wallets.read');
   const canReadPricing = permissionSet.has('platform.pricing.read');
   const canReadUsage = permissionSet.has('platform.usage.read');
+  const canRequestAdjustment = permissionSet.has('platform.billing.repairs.request');
   const canSyncOrders = permissionSet.has('platform.billing.orders.sync');
   const canRequestRepair = permissionSet.has('platform.billing.repairs.request');
-  const canApproveAdjustment = permissionSet.has('platform.billing.adjustments.approve');
+  const canApproveAdjustment = permissionSet.has('platform.billing.repairs.approve');
   const canReleaseHold = permissionSet.has('platform.billing.holds.release');
   const canManagePricing = permissionSet.has('platform.pricing.manage');
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
@@ -2272,8 +2280,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setData((current) => ({ ...current, prices: prices.items || [] }));
       return;
     }
-    const [wallets, receivables, adjustments, holds] = await Promise.all([canReadWallets ? client.wallets() : Promise.resolve({ items: [] }), canReadWallets ? client.receivables() : Promise.resolve({ items: [] }), canReadWallets ? client.adjustments() : Promise.resolve({ items: [] }), canReadUsage ? client.holds() : Promise.resolve({ items: [] })]);
-    setData((current) => ({ ...current, wallets: wallets.items || [], receivables: receivables.items || [], adjustments: adjustments.items || [], holds: holds.items || [] }));
+    const [wallets, receivables, adjustments, holds, adjustmentApprovals] = await Promise.all([canReadWallets ? client.wallets() : Promise.resolve({ items: [] }), canReadWallets ? client.receivables() : Promise.resolve({ items: [] }), canReadWallets ? client.adjustments() : Promise.resolve({ items: [] }), canReadUsage ? client.holds() : Promise.resolve({ items: [] }), canRequestAdjustment || canApproveAdjustment ? client.approvalRequests({ command_type: 'WALLET_ADJUSTMENT' }) : Promise.resolve({ items: [] })]);
+    setData((current) => ({ ...current, wallets: wallets.items || [], receivables: receivables.items || [], adjustments: adjustments.items || [], holds: holds.items || [], adjustmentApprovals: adjustmentApprovals.items || [] }));
   };
   const perform = async (action) => {
     setBusy(true);
@@ -2345,9 +2353,63 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setBusy(false);
     }
   };
-  const decide = (item, decision) => {
-    const reason = promptReason(copy.billing.decisionReason);
-    if (reason) void perform(() => client.decideAdjustment(item.adjustment_id, decision, reason));
+  const ensureAdjustmentApproval = async (item, reason, requestKey) => {
+    const draft = await client.createApprovalDraft({
+      command_type: 'WALLET_ADJUSTMENT',
+      idempotency_key: `approval:${requestKey}`,
+      normalized_command: {
+        adjustment_id: item.adjustment_id,
+        wallet_id: item.wallet_id,
+        amount_microcredits: item.amount_microcredits,
+        requested_by: item.requested_by,
+      },
+      target_resource_type: 'MANUAL_ADJUSTMENT',
+      target_resource_id: item.adjustment_id,
+      reason,
+      redacted_evidence: [],
+      expected_impact: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
+      critical_resource_versions: { adjustment_version: item.version },
+      financial_snapshot: { wallet_id: item.wallet_id, delta_microcredits: item.amount_microcredits },
+    });
+    if (draft.status === 'DRAFT') return client.submitApprovalRequest(draft.approval_request_id, draft.version);
+    if (['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'].includes(draft.status)) return draft;
+    throw new Error(`APPROVAL_${draft.status || 'UNKNOWN'}`);
+  };
+  const submitAdjustment = async (event) => {
+    event.preventDefault();
+    const amountMicrocredits = parsePointsInputToMicrocredits(adjustment.amount);
+    const walletID = adjustment.walletID.trim();
+    const reason = adjustment.reason.trim();
+    if (!walletID || amountMicrocredits == null || amountMicrocredits === 0 || reason.length < 10) return;
+    setBusy(true);
+    setNotice('');
+    setError('');
+    let created = null;
+    try {
+      created = await client.createAdjustment({ wallet_id: walletID, amount_microcredits: amountMicrocredits, reason, idempotency_key: adjustmentRequestKey });
+      await ensureAdjustmentApproval(created, reason, adjustmentRequestKey);
+      await reload();
+      setAdjustment({ walletID: '', amount: '', reason: '' });
+      setAdjustmentRequestKey(crypto.randomUUID());
+      setNotice(copy.billing.adjustmentSubmitted);
+    } catch {
+      try {
+        if (created) await reload();
+      } catch {
+        // Keep the original submission failure as the actionable result.
+      }
+      setError(created ? copy.billing.adjustmentApprovalPending : copy.billing.actionFailed);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const recoverAdjustmentApproval = (item) => {
+    const requestKey = item.request_idempotency_key;
+    if (!requestKey) return;
+    void perform(() => ensureAdjustmentApproval(item, item.reason, requestKey));
+  };
+  const openAdjustmentApproval = (item) => {
+    onNavigate?.('approvals', { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item.adjustment_id });
   };
   const refund = (item) => {
     const reason = promptReason(copy.billing.refundReason);
@@ -2498,6 +2560,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       await client.importProviderBill(reconciliation.channel, reconciliation.businessDate, rows);
     });
   };
+  const adjustmentApprovalByTarget = new Map((data.adjustmentApprovals || []).map((item) => [item.target_resource_id, item]));
   const columns = useMemo(
     () => ({
       wallets: [
@@ -2740,25 +2803,41 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         },
         {
           key: 'status',
-          label: copy.accounts.status,
+          label: copy.billing.executionStatus,
           render: (item) => <Status value={item.status} />,
+        },
+        {
+          key: 'approval_request_id',
+          label: copy.billing.approvalStatus,
+          render: (item) => {
+            const approval = adjustmentApprovalByTarget.get(item.adjustment_id);
+            const requestID = approval?.approval_request_id || item.approval_request_id;
+            return requestID ? (
+              <span>
+                <Status value={approval?.status || '—'} />
+                <br />
+                <code title={requestID}>{shortID(requestID)}</code>
+              </span>
+            ) : (
+              <Status value="NOT_SUBMITTED" />
+            );
+          },
+        },
+        {
+          key: 'updated_at',
+          label: copy.billing.updated,
+          render: (item) => formatDate(adjustmentApprovalByTarget.get(item.adjustment_id)?.updated_at || item.updated_at),
         },
         {
           key: 'actions',
           label: copy.accounts.actions,
-          render: (item) =>
-            canApproveAdjustment && item.status === 'PENDING_APPROVAL' ? (
-              <div className="adm-row-actions">
-                <button disabled={busy} onClick={() => decide(item, 'approve')}>
-                  {copy.billing.approve}
-                </button>
-                <button className="danger" disabled={busy} onClick={() => decide(item, 'reject')}>
-                  {copy.billing.reject}
-                </button>
-              </div>
-            ) : (
-              '—'
-            ),
+          render: (item) => {
+            const approval = adjustmentApprovalByTarget.get(item.adjustment_id);
+            const action = adjustmentApprovalAction(item, approval, { canRequest: canRequestAdjustment, canApprove: canApproveAdjustment });
+            if (action === 'resume') return <button disabled={busy} onClick={() => recoverAdjustmentApproval(item)}>{copy.billing.resumeApproval}</button>;
+            if (action === 'view') return <button onClick={() => openAdjustmentApproval(item)}>{copy.billing.viewApproval}</button>;
+            return '—';
+          },
         },
       ],
       holds: [
@@ -2916,7 +2995,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         },
       ],
     }),
-    [busy, client, copy, language, normalRefundCreationEnabled, repairSupported],
+    [busy, canApproveAdjustment, canRequestAdjustment, client, copy, data.adjustmentApprovals, language, normalRefundCreationEnabled, repairSupported],
   );
   if (ledger)
     return (
@@ -3501,6 +3580,29 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
         </div>
       )}
       {!embedded && <Tabs active={tab} onChange={changeTab} items={visibleTabs.map((key) => ({ key, label: copy.billing[key] }))} />}
+      {tab === 'adjustments' && canRequestAdjustment && (
+        <form className="adm-ops-form" onSubmit={submitAdjustment}>
+          <label>
+            {copy.billing.adjustmentWallet}
+            <select value={adjustment.walletID} onChange={(event) => setAdjustment((current) => ({ ...current, walletID: event.target.value }))} required>
+              <option value="">{copy.billing.selectWallet}</option>
+              {(data.wallets || []).map((wallet) => (
+                <option key={wallet.wallet_id} value={wallet.wallet_id}>{wallet.owner_type} · {shortID(wallet.owner_id)} · {shortID(wallet.wallet_id)}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            {copy.billing.adjustmentAmount}
+            <input type="number" step="0.0001" value={adjustment.amount} onChange={(event) => setAdjustment((current) => ({ ...current, amount: event.target.value }))} required />
+          </label>
+          <label>
+            {copy.billing.adjustmentReason}
+            <input minLength="10" maxLength="2000" value={adjustment.reason} onChange={(event) => setAdjustment((current) => ({ ...current, reason: event.target.value }))} required />
+          </label>
+          <button disabled={busy}>{copy.billing.submitAdjustment}</button>
+          <small>{copy.billing.adjustmentApprovalBoundary}</small>
+        </form>
+      )}
       {tab === 'orders' && (
         <form className="adm-ops-form" onSubmit={searchOrders}>
           <input
