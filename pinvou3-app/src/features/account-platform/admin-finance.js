@@ -61,3 +61,78 @@ export async function submitPaymentControlApproval(client, draftInput, existingA
   error.code = 'APPROVAL_NOT_ACTIVE';
   throw error;
 }
+
+export function updateFinanceTabState(current, surface, tab, patch) {
+  return {
+    ...(current || {}),
+    financeTabStates: {
+      ...(current?.financeTabStates || {}),
+      [surface]: {
+        ...(current?.financeTabStates?.[surface] || {}),
+        [tab]: {
+          ...(current?.financeTabStates?.[surface]?.[tab] || {}),
+          ...patch,
+        },
+      },
+    },
+  };
+}
+
+export function readFinanceTabQuery(current, surface, tab, fallback = {}) {
+  const cached = current?.financeTabStates?.[surface]?.[tab]?.query;
+  return { ...(cached || fallback) };
+}
+
+export function resetFinanceSurfaceLoading(current, surface) {
+  const surfaceStates = current?.financeTabStates?.[surface] || {};
+  const nextSurfaceStates = Object.fromEntries(Object.entries(surfaceStates).map(([tab, state]) => [
+    tab,
+    state.loading ? { ...state, loading: false, attempted: Boolean(state.loaded) } : state,
+  ]));
+  const next = {
+    ...(current || {}),
+    financeTabStates: {
+      ...(current?.financeTabStates || {}),
+      [surface]: nextSurfaceStates,
+    },
+  };
+  if (surface === 'payments' && next.paymentCapabilityState?.loading) {
+    next.paymentCapabilityState = { ...next.paymentCapabilityState, loading: false, attempted: false, loaded: false };
+    next.paymentCapabilities = null;
+  }
+  return next;
+}
+
+export function updatePaymentCapabilityState(current, statePatch, capabilities = current?.paymentCapabilities ?? null) {
+  return {
+    ...(current || {}),
+    paymentCapabilities: capabilities,
+    paymentCapabilityState: {
+      ...(current?.paymentCapabilityState || {}),
+      ...statePatch,
+    },
+  };
+}
+
+export function createFinanceTabRequestTracker() {
+  const generations = new Map();
+  return {
+    begin(key) {
+      const generation = (generations.get(key) || 0) + 1;
+      generations.set(key, generation);
+      return generation;
+    },
+    isCurrent(key, generation) {
+      return generations.get(key) === generation;
+    },
+    invalidate(key) {
+      generations.set(key, (generations.get(key) || 0) + 1);
+    },
+    invalidatePrefix(prefix) {
+      for (const key of generations.keys()) if (key.startsWith(prefix)) this.invalidate(key);
+    },
+    invalidateAll() {
+      for (const key of generations.keys()) this.invalidate(key);
+    },
+  };
+}

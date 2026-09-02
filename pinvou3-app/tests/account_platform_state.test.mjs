@@ -10,7 +10,7 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
-import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, paymentControlApprovalAction, submitPaymentControlApproval } from '../src/features/account-platform/admin-finance.js';
+import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from '../src/features/account-platform/admin-finance.js';
 import { adminNavigationGroups, adminSectionURL, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
@@ -255,6 +255,80 @@ test('payment controls preserve server recovery drafts and keep provider and pro
     approvalRequest: async () => ({ approval_request_id: 'approval-product', status: 'DRAFT', version: 1, allowed_actions: [] }),
     submitApprovalRequest: async () => { throw new Error('must not submit without allowed action'); },
   }, productDraft), /APPROVAL_SUBMIT_NOT_ALLOWED/);
+});
+
+test('finance tab state isolates cached data, errors, and stale requests', () => {
+  const current = {
+    wallets: [{ wallet_id: 'wallet-a' }],
+    orders: [{ order_id: 'order-a' }],
+    financeTabStates: {
+      billing: { wallets: { loaded: true, error: '' } },
+      payments: { orders: { loaded: true, error: '' } },
+    },
+  };
+  const failedHolds = updateFinanceTabState(current, 'billing', 'holds', { attempted: true, loading: false, error: 'failed' });
+  assert.deepEqual(failedHolds.wallets, current.wallets);
+  assert.deepEqual(failedHolds.orders, current.orders);
+  assert.deepEqual(failedHolds.financeTabStates.billing.wallets, { loaded: true, error: '' });
+  assert.deepEqual(failedHolds.financeTabStates.payments.orders, { loaded: true, error: '' });
+  assert.deepEqual(failedHolds.financeTabStates.billing.holds, { attempted: true, loading: false, error: 'failed' });
+  assert.equal(current.financeTabStates.billing.holds, undefined);
+
+  const filteredOrders = updateFinanceTabState(failedHolds, 'payments', 'orders', {
+    loaded: true,
+    query: { q: 'merchant-42', status: 'PAID' },
+    page: { cursor: null },
+  });
+  assert.deepEqual(readFinanceTabQuery(filteredOrders, 'payments', 'orders', { q: '', status: '' }), { q: 'merchant-42', status: 'PAID' });
+  assert.deepEqual(readFinanceTabQuery(filteredOrders, 'payments', 'anomalies', { anomaly_type: '', status: 'OPEN', severity: '' }), { anomaly_type: '', status: 'OPEN', severity: '' });
+  const restoredOrderQuery = readFinanceTabQuery(filteredOrders, 'payments', 'orders');
+  restoredOrderQuery.q = 'local-edit';
+  assert.equal(filteredOrders.financeTabStates.payments.orders.query.q, 'merchant-42');
+
+  const tracker = createFinanceTabRequestTracker();
+  const firstOrders = tracker.begin('payments:orders');
+  const holds = tracker.begin('billing:holds');
+  const secondOrders = tracker.begin('payments:orders');
+  assert.equal(tracker.isCurrent('payments:orders', firstOrders), false);
+  assert.equal(tracker.isCurrent('payments:orders', secondOrders), true);
+  assert.equal(tracker.isCurrent('billing:holds', holds), true);
+  tracker.invalidatePrefix('payments:');
+  assert.equal(tracker.isCurrent('payments:orders', secondOrders), false);
+  assert.equal(tracker.isCurrent('billing:holds', holds), true);
+  tracker.invalidateAll();
+  assert.equal(tracker.isCurrent('billing:holds', holds), false);
+
+  const interrupted = resetFinanceSurfaceLoading({
+    financeTabStates: { payments: { orders: { attempted: true, loading: true, loaded: false }, refunds: { attempted: true, loading: true, loaded: true } } },
+    paymentCapabilityState: { attempted: true, loading: true, loaded: false },
+  }, 'payments');
+  assert.deepEqual(interrupted.financeTabStates.payments.orders, { attempted: false, loading: false, loaded: false });
+  assert.deepEqual(interrupted.financeTabStates.payments.refunds, { attempted: true, loading: false, loaded: true });
+  assert.deepEqual(interrupted.paymentCapabilityState, { attempted: false, loading: false, loaded: false });
+  assert.equal(interrupted.paymentCapabilities, null);
+
+  const afterWalletRefresh = { ...failedHolds, wallets: [{ wallet_id: 'wallet-new' }] };
+  const afterOlderAdjustmentResponse = { ...afterWalletRefresh, adjustmentWallets: [{ wallet_id: 'wallet-old' }] };
+  assert.deepEqual(afterOlderAdjustmentResponse.wallets, [{ wallet_id: 'wallet-new' }]);
+  assert.deepEqual(afterOlderAdjustmentResponse.adjustmentWallets, [{ wallet_id: 'wallet-old' }]);
+  const firstCapabilities = tracker.begin('payments:capabilities');
+  const secondCapabilities = tracker.begin('payments:capabilities');
+  assert.equal(tracker.isCurrent('payments:capabilities', firstCapabilities), false);
+  assert.equal(tracker.isCurrent('payments:capabilities', secondCapabilities), true);
+
+  const overview = { total_wallets: 9, payment_capabilities: { refund_supported: true } };
+  const overviewState = { billingOverview: overview, overviewAvailability: { finance: 'ready' } };
+  const capabilityLoading = updatePaymentCapabilityState(overviewState, { attempted: true, loading: true, loaded: false, error: '' });
+  assert.strictEqual(capabilityLoading.billingOverview, overview);
+  assert.deepEqual(capabilityLoading.overviewAvailability, { finance: 'ready' });
+  assert.equal(capabilityLoading.paymentCapabilities, null);
+  const capabilityFailed = updatePaymentCapabilityState(capabilityLoading, { attempted: true, loading: false, loaded: false, error: 'failed' }, null);
+  assert.strictEqual(capabilityFailed.billingOverview, overview);
+  assert.deepEqual(capabilityFailed.overviewAvailability, { finance: 'ready' });
+  assert.equal(capabilityFailed.paymentCapabilities, null);
+  const capabilityReady = updatePaymentCapabilityState(capabilityFailed, { attempted: true, loading: false, loaded: true, error: '' }, { refund_supported: false });
+  assert.strictEqual(capabilityReady.billingOverview, overview);
+  assert.deepEqual(capabilityReady.paymentCapabilities, { refund_supported: false });
 });
 
 test('admin model, system, audit, and runbook surfaces keep technical identifiers usable and secrets out of the DOM', async () => {
