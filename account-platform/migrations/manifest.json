@@ -904,6 +904,16 @@
         "file": "000050_admin_pagination_snapshots.up.sql",
         "version": 50,
         "sha256": "e17ae14422cd1a8e44dc7be9217e07ec6152250f8f17fa624515e2369b132777"
+      },
+      {
+        "file": "000051_pricing_space_versions_repair.down.sql",
+        "version": 51,
+        "sha256": "4d224343dd9c63633b7c0d3905580143da1d59197c0f148b557f0727840de05c"
+      },
+      {
+        "file": "000051_pricing_space_versions_repair.up.sql",
+        "version": 51,
+        "sha256": "c3eaeb8ad3b982486115d2e8cbe9c41b950c2a8231b9198fd098393dc2317ca8"
       }
     ],
     "payment-simulator": [
