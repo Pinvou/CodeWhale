@@ -12,6 +12,23 @@ export function readAdminSection(locationLike = globalThis.location) {
 }
 
 const organizationTabs = new Set(['overview', 'members', 'units', 'lifecycle']);
+const financeTabs = Object.freeze({
+  billing: new Set(['wallets', 'receivables', 'adjustments', 'holds']),
+  payments: new Set(['orders', 'refunds', 'lateReviews', 'anomalies', 'reconciliations']),
+  products: new Set(['catalog', 'prices']),
+});
+const financeDefaultTabs = Object.freeze({ billing: 'wallets', payments: 'orders', products: 'catalog' });
+
+export function readAdminFinanceTab(section, locationLike = globalThis.location) {
+  const requestedTab = new URLSearchParams(String(locationLike?.search || '')).get('finance_tab') || '';
+  return financeTabs[section]?.has(requestedTab) ? requestedTab : financeDefaultTabs[section] || '';
+}
+
+export function resolveAdminFinanceTab(requestedTab, currentTab, visibleTabs = []) {
+  if (visibleTabs.includes(requestedTab)) return { tab: requestedTab, replace: false };
+  const fallback = visibleTabs.includes(currentTab) ? currentTab : visibleTabs[0] || '';
+  return { tab: fallback, replace: Boolean(fallback && fallback !== requestedTab) };
+}
 
 export function readAdminOrganizationRoute(locationLike = globalThis.location) {
   const search = new URLSearchParams(String(locationLike?.search || ''));

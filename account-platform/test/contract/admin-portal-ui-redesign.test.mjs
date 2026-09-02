@@ -46,7 +46,7 @@ test('source and built admin portal preserve the HTML prototype five-group navig
   assert.doesNotMatch(navigation, /key: 'operations'/);
   const exactSections = ['overview', 'users', 'roles', 'organizations', 'myorg', 'billing', 'payments', 'products', 'tokens', 'approvals', 'audit', 'system', 'settings'];
   for (const section of exactSections) assert.ok(navigation.includes(`'${section}'`), `${section} is part of the canonical information architecture`);
-  for (const label of ['工作台', '平台总览', '身份与组织', '用户管理', '角色与权限', '组织管理', '我的组织', '财务与支付', '计费运营', '支付与资金', '定价与商品', '模型与 Token', 'Token Gateway', '治理与安全', '审批中心', '审计与导出', '系统与安全', '偏好设置']) {
+  for (const label of ['工作台', '平台总览', '身份与组织', '用户管理', '角色与权限', '组织管理', '我的组织', '财务与支付', '账户与计费', '支付与对账', '定价与商品', '模型与 Token', 'Token Gateway', '治理与安全', '审批中心', '审计与导出', '系统与安全', '偏好设置']) {
     assert.ok(prototype.includes(label), `${label} is defined by the HTML prototype`);
     assert.ok(i18n.includes(label), `${label} is preserved by source translations`);
     assert.ok(builtJS.includes(label), `${label} is preserved by the built portal`);
@@ -54,11 +54,19 @@ test('source and built admin portal preserve the HTML prototype five-group navig
   assert.match(navigation, /URLSearchParams/);
   assert.match(navigation, /historyLike\.pushState/);
   assert.match(navigation, /historyLike\.replaceState/);
+  assert.match(navigation, /finance_tab/);
+  assert.match(navigation, /billing: new Set\(\['wallets', 'receivables', 'adjustments', 'holds'\]\)/);
+  assert.match(navigation, /payments: new Set\(\['orders', 'refunds', 'lateReviews', 'anomalies', 'reconciliations'\]\)/);
+  assert.match(navigation, /products: new Set\(\['catalog', 'prices'\]\)/);
   assert.match(authorization, /platform\.tokens\.read/);
+  assert.match(authorization, /products: \['platform\.products\.read', 'platform\.pricing\.read'\]/);
+  assert.doesNotMatch(authorization, /billing: \[[^\]]*platform\.pricing\.read/);
   assert.match(view, /'pricing-admin-root': false/);
   assert.match(view, /'approval-requests-root': section === 'approvals'/);
-  assert.match(view, /'product-admin-root': section === 'products'/);
+  assert.match(view, /'product-admin-root': section === 'products' && financeTab === 'catalog'/);
+  assert.match(view, /readAdminFinanceTab/);
   assert.match(view, /surface="payments"/);
+  assert.match(view, /surface="products"/);
   assert.match(view, /function SettingsWorkspace/);
   assert.match(view, /copy\.runbooks\.noExecution/);
   assert.doesNotMatch(view, /createUser\(|createRole\(|eventReplay\(/);

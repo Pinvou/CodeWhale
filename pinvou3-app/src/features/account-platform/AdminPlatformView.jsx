@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminNavigationGroups, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, writeAdminSection } from './admin-navigation.js';
+import { adminNavigationGroups, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
@@ -212,12 +212,12 @@ function Tabs({ items, active, onChange }) {
   );
 }
 
-function AdminExtensionSlot({ section, authorization }) {
+function AdminExtensionSlot({ section, financeTab, authorization }) {
   const hostRef = useRef(null);
   const platformPermissions = new Set(authorization?.platform_permissions || []);
   const visible = {
     'approval-requests-root': section === 'approvals',
-    'product-admin-root': section === 'products' && platformPermissions.has('platform.products.read'),
+    'product-admin-root': section === 'products' && financeTab === 'catalog' && platformPermissions.has('platform.products.read'),
     'pricing-admin-root': false,
   };
 
@@ -236,7 +236,7 @@ function AdminExtensionSlot({ section, authorization }) {
       const node = document.getElementById(id);
       if (node) node.hidden = !isVisible;
     }
-  }, [section, authorization]);
+  }, [section, financeTab, authorization]);
 
   return <div ref={hostRef} className="adm-extension-stack" />;
 }
@@ -349,26 +349,28 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             roleOrganizations: organizations.items || [],
           };
         } else if (target === 'billing') {
-          const [overview, wallets, receivables, prices, adjustments, holds, reconciliations] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.wallets(signal)), read('platform.billing.wallets.read', () => client.receivables(signal)), read('platform.pricing.read', () => client.priceVersions(signal)), read('platform.billing.wallets.read', () => client.adjustments(signal)), read('platform.usage.read', () => client.holds(signal)), read('platform.usage.read', () => client.reconciliationRuns(signal))]);
+          const [overview, wallets, receivables, adjustments, holds] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.wallets(signal)), read('platform.billing.wallets.read', () => client.receivables(signal)), read('platform.billing.wallets.read', () => client.adjustments(signal)), read('platform.usage.read', () => client.holds(signal))]);
           next = {
             billingOverview: overview,
             wallets: wallets.items || [],
             receivables: receivables.items || [],
-            prices: prices.items || [],
             adjustments: adjustments.items || [],
             holds: holds.items || [],
-            reconciliations: reconciliations.items || [],
           };
         } else if (target === 'payments') {
-          const [overview, orders, refunds, lateReviews, anomalies] = await Promise.all([client.billingOverview(signal), client.paymentOrders({}, signal), client.refunds(signal), client.latePaymentReviews({}, signal), client.paymentAnomalies({}, signal)]);
+          const [overview, orders, refunds, lateReviews, anomalies, reconciliations] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.paymentOrders({}, signal)), read('platform.billing.wallets.read', () => client.refunds(signal)), read('platform.billing.wallets.read', () => client.latePaymentReviews({}, signal)), read('platform.billing.wallets.read', () => client.paymentAnomalies({}, signal)), read('platform.usage.read', () => client.reconciliationRuns(signal))]);
           next = {
             billingOverview: overview,
             orders: orders.items || [],
             refunds: refunds.items || [],
             lateReviews: lateReviews.items || [],
             anomalies: anomalies.items || [],
+            reconciliations: reconciliations.items || [],
           };
-        } else if (target === 'products' || target === 'approvals' || target === 'settings') {
+        } else if (target === 'products') {
+          const prices = await read('platform.pricing.read', () => client.priceVersions(signal));
+          next = { prices: prices.items || [] };
+        } else if (target === 'approvals' || target === 'settings') {
           next = {};
         } else if (target === 'tokens') {
           const [accounts, usage, models, provisionings] = await Promise.all([read('platform.tokens.read', () => client.tokenAccounts(signal)), read('platform.usage.read', () => client.usageRequests(signal)), read('platform.models.read', () => client.catalogModels(signal)), read('platform.tokens.read', () => client.provisionings(signal))]);
@@ -537,6 +539,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       audit_resource: null,
       organization_id: null,
       organization_tab: null,
+      finance_tab: null,
       ...query,
     });
     setRouteVersion((value) => value + 1);
@@ -561,6 +564,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
   const organizationRoute = section === 'organizations' ? readAdminOrganizationRoute() : { organizationID: '', tab: 'overview' };
   const organizationDirectory = section === 'organizations' ? readAdminOrganizationDirectory() : { q: '', status: '', cursor: '' };
+  const financeTab = ['billing', 'payments', 'products'].includes(section) ? readAdminFinanceTab(section) : '';
+  const changeFinanceTab = (nextTab, mode = 'push') => {
+    writeAdminSection(section, mode, undefined, undefined, { finance_tab: nextTab });
+    setRouteVersion((value) => value + 1);
+  };
   const currentPageTitle = copy.nav[section];
   const currentPageLead = section === 'overview' ? copy.overview.lead : copy.pageLeads?.[section] || copy.subtitle;
 
@@ -646,8 +654,9 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'billing' && <Billing key="billing" surface="billing" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {section === 'payments' && <Billing key="payments" surface="payments" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'system' && (
             <>
@@ -657,7 +666,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           )}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} />}
-          <AdminExtensionSlot section={section} authorization={authorization} />
+          <AdminExtensionSlot section={section} financeTab={financeTab} authorization={authorization} />
         </div>
       </main>
     </div>
@@ -2162,8 +2171,25 @@ function UnitBranch({ unit, copy, disabled, addDisabled, allUnits, onAddChild, o
   );
 }
 
-function Billing({ copy, language, data, client, setData, permissions, surface = 'billing' }) {
-  const [tab, setTab] = useState(surface === 'payments' ? 'orders' : 'wallets');
+function ProductsWorkspace({ copy, language, data, client, setData, permissions, routeTab, onRouteTabChange }) {
+  const permissionSet = new Set(permissions || []);
+  const visibleTabs = [...(permissionSet.has('platform.products.read') ? ['catalog'] : []), ...(permissionSet.has('platform.pricing.read') ? ['prices'] : [])];
+  const activeTab = visibleTabs.includes(routeTab) ? routeTab : visibleTabs[0] || '';
+  useEffect(() => {
+    if (activeTab && activeTab !== routeTab) onRouteTabChange(activeTab, 'replace');
+  }, [activeTab, onRouteTabChange, routeTab]);
+  return (
+    <section className="adm-panel">
+      <SectionHeader title={copy.nav.products} copy={copy} />
+      <Tabs active={activeTab} onChange={onRouteTabChange} items={visibleTabs.map((key) => ({ key, label: key === 'catalog' ? copy.billing.productCatalog : copy.billing.prices }))} />
+      {activeTab === 'prices' && <Billing surface="products" embedded routeTab="prices" copy={copy} language={language} data={data} client={client} setData={setData} permissions={permissions} />}
+    </section>
+  );
+}
+
+function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', onRouteTabChange, embedded = false }) {
+  const defaultTab = surface === 'payments' ? 'orders' : surface === 'products' ? 'prices' : 'wallets';
+  const [tab, setTab] = useState(routeTab || defaultTab);
   const items = data[tab] || [];
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -2212,13 +2238,21 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
   const visibleTabs =
     surface === 'payments'
-      ? canReadWallets
-        ? ['orders', 'refunds', 'lateReviews', 'anomalies']
-        : []
-      : [...(canReadWallets ? ['wallets', 'receivables', 'adjustments'] : []), ...(canReadPricing ? ['prices'] : []), ...(canReadUsage ? ['holds', 'reconciliations'] : [])];
+      ? [...(canReadWallets ? ['orders', 'refunds', 'lateReviews', 'anomalies'] : []), ...(canReadUsage ? ['reconciliations'] : [])]
+      : surface === 'products'
+        ? canReadPricing
+          ? ['prices']
+          : []
+        : [...(canReadWallets ? ['wallets', 'receivables', 'adjustments'] : []), ...(canReadUsage ? ['holds'] : [])];
   useEffect(() => {
-    if (!visibleTabs.includes(tab)) setTab(visibleTabs[0] || (surface === 'payments' ? 'orders' : 'wallets'));
-  }, [tab, visibleTabs.join('|')]);
+    const resolved = resolveAdminFinanceTab(routeTab, tab, visibleTabs);
+    if (resolved.tab !== tab) setTab(resolved.tab);
+    if (resolved.replace) onRouteTabChange?.(resolved.tab, 'replace');
+  }, [onRouteTabChange, routeTab, tab, visibleTabs.join('|')]);
+  const changeTab = (nextTab) => {
+    setTab(nextTab);
+    onRouteTabChange?.(nextTab);
+  };
   const paymentCapabilities = data.billingOverview?.payment_capabilities || {};
   const normalRefundCreationEnabled =
     paymentCapabilities.normal_refund_creation_enabled === true &&
@@ -2229,12 +2263,17 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const hasLimitedPaymentCapabilities = paymentCapabilities.provider_id && (!paymentCapabilities.refund_supported || !paymentCapabilities.close_supported || !paymentCapabilities.notification_supported || paymentCapabilities.reconciliation_mode !== 'API');
   const reload = async () => {
     if (surface === 'payments') {
-      const [orders, refunds, lateReviews, anomalies] = await Promise.all([canReadWallets ? client.paymentOrders(orderFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.refunds() : Promise.resolve({ items: [] }), canReadWallets ? client.latePaymentReviews(lateFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.paymentAnomalies(anomalyFilter) : Promise.resolve({ items: [] })]);
-      setData((current) => ({ ...current, orders: orders.items || [], refunds: refunds.items || [], lateReviews: lateReviews.items || [], anomalies: anomalies.items || [] }));
+      const [orders, refunds, lateReviews, anomalies, reconciliations] = await Promise.all([canReadWallets ? client.paymentOrders(orderFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.refunds() : Promise.resolve({ items: [] }), canReadWallets ? client.latePaymentReviews(lateFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.paymentAnomalies(anomalyFilter) : Promise.resolve({ items: [] }), canReadUsage ? client.reconciliationRuns() : Promise.resolve({ items: [] })]);
+      setData((current) => ({ ...current, orders: orders.items || [], refunds: refunds.items || [], lateReviews: lateReviews.items || [], anomalies: anomalies.items || [], reconciliations: reconciliations.items || [] }));
       return;
     }
-    const [wallets, receivables, prices, adjustments, holds, reconciliations] = await Promise.all([canReadWallets ? client.wallets() : Promise.resolve({ items: [] }), canReadWallets ? client.receivables() : Promise.resolve({ items: [] }), canReadPricing ? client.priceVersions() : Promise.resolve({ items: [] }), canReadWallets ? client.adjustments() : Promise.resolve({ items: [] }), canReadUsage ? client.holds() : Promise.resolve({ items: [] }), canReadUsage ? client.reconciliationRuns() : Promise.resolve({ items: [] })]);
-    setData((current) => ({ ...current, wallets: wallets.items || [], receivables: receivables.items || [], prices: prices.items || [], adjustments: adjustments.items || [], holds: holds.items || [], reconciliations: reconciliations.items || [] }));
+    if (surface === 'products') {
+      const prices = await (canReadPricing ? client.priceVersions() : Promise.resolve({ items: [] }));
+      setData((current) => ({ ...current, prices: prices.items || [] }));
+      return;
+    }
+    const [wallets, receivables, adjustments, holds] = await Promise.all([canReadWallets ? client.wallets() : Promise.resolve({ items: [] }), canReadWallets ? client.receivables() : Promise.resolve({ items: [] }), canReadWallets ? client.adjustments() : Promise.resolve({ items: [] }), canReadUsage ? client.holds() : Promise.resolve({ items: [] })]);
+    setData((current) => ({ ...current, wallets: wallets.items || [], receivables: receivables.items || [], adjustments: adjustments.items || [], holds: holds.items || [] }));
   };
   const perform = async (action) => {
     setBusy(true);
@@ -3454,14 +3493,14 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       </DetailDrawer>
     );
   return (
-    <section className="adm-panel">
-      <SectionHeader title={surface === 'payments' ? copy.billing.paymentsTitle : copy.billing.title} count={items.length} copy={copy} />
+    <section className={embedded ? 'adm-finance-subpanel' : 'adm-panel'}>
+      {!embedded && <SectionHeader title={surface === 'payments' ? copy.billing.paymentsTitle : surface === 'products' ? copy.nav.products : copy.billing.title} count={items.length} copy={copy} />}
       {surface === 'payments' && hasLimitedPaymentCapabilities && (
         <div className="adm-inline-message">
           {copy.billing.capabilityLimitations} {copy.billing.reconciliationMode}: <strong>{paymentCapabilities.reconciliation_mode || '—'}</strong>
         </div>
       )}
-      <Tabs active={tab} onChange={setTab} items={visibleTabs.map((key) => ({ key, label: copy.billing[key] }))} />
+      {!embedded && <Tabs active={tab} onChange={changeTab} items={visibleTabs.map((key) => ({ key, label: copy.billing[key] }))} />}
       {tab === 'orders' && (
         <form className="adm-ops-form" onSubmit={searchOrders}>
           <input

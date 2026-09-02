@@ -128,7 +128,7 @@
 | APT-102 | 组织成员服务端分页、搜索筛选与按需权限编辑 | ACC-66, UI-35 | APT-011, APT-046, APT-095 | CODE | DONE |
 | APT-103 | 平台组织资料、状态、成员和结构权限拆分与兼容迁移 | ACC-67 | APT-006, APT-069, APT-075 | CODE | DONE |
 | APT-104 | 平台组织节点移动管理合同及结构树交互 | ACC-68 | APT-010, APT-075, APT-103 | CODE | DONE |
-| APT-105 | 财务支付三分区改名、子页迁移与稳定深链 | UI-37 | APT-094, APT-096 | CODE | PENDING |
+| APT-105 | 财务支付三分区改名、子页迁移与稳定深链 | UI-37 | APT-094, APT-096 | CODE | DONE |
 | APT-106 | 手工调账申请、审批恢复与审批中心深链 | UI-38 | APT-008, APT-105 | CODE | PENDING |
 | APT-107 | 支付 Provider/商品控制展示与恢复申请深链 | UI-39 | APT-093, APT-105 | CODE | PENDING |
 | APT-108 | 财务支付子页独立加载、局部失败与独立刷新 | UI-40 | APT-105 | CODE | PENDING |
