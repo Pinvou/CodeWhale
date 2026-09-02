@@ -42,6 +42,9 @@ class CommunityBackflowSkillTests(unittest.TestCase):
         self.assertIn("`VERSION`", self.skill)
         self.assertIn("ref", self.skill)
         self.assertIn("backflow:synced", self.skill)
+        self.assertIn("open+synced", self.skill)
+        self.assertIn("GET→DELETE", self.skill)
+        self.assertIn("不得删除远端分支", self.skill)
 
     def test_cross_platform_fast_path_and_dependency_waves_are_required(self):
         self.assertIn("node scripts/community-backflow.mjs plan", self.skill)

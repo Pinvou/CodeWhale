@@ -91,6 +91,13 @@ function normalizePath(value) {
   return String(value).replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
+function uniqueMarkerMatch(body, pattern, label) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matches = [...String(body || "").matchAll(new RegExp(pattern.source, flags))];
+  if (matches.length > 1) fail(`${label} 必须恰好出现一次，实际 ${matches.length} 次`);
+  return matches[0] || null;
+}
+
 export function validateChangedPaths(paths) {
   const errors = [];
   const folded = new Map();
@@ -202,7 +209,11 @@ export function parseQueueIssues(issues) {
   if (!Array.isArray(issues)) fail("Issue 队列必须是数组");
   const items = issues.map((issue) => {
     const issueNumber = Number(issue?.number);
-    const match = PLAN_MARKER_RE.exec(String(issue?.body || ""));
+    const match = uniqueMarkerMatch(
+      issue?.body,
+      PLAN_MARKER_RE,
+      `Issue #${issueNumber || "unknown"} 的 community-backflow-plan marker`,
+    );
     if (!match) fail(`Issue #${issueNumber || "unknown"} 缺少 community-backflow-plan marker`);
     let marker;
     try {
@@ -233,7 +244,7 @@ export function encodeProvenanceMarker(provenance) {
 }
 
 export function parseProvenanceMarker(body) {
-  const match = PROVENANCE_MARKER_RE.exec(String(body || ""));
+  const match = uniqueMarkerMatch(body, PROVENANCE_MARKER_RE, "PR provenance marker");
   if (!match) return null;
   try {
     return JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
@@ -296,7 +307,7 @@ function preflight(options = {}) {
 }
 
 export function verifyPullBody({ body, expectedHead, expectedSource }) {
-  const sourceMatch = BACKFLOW_MARKER_RE.exec(String(body || ""));
+  const sourceMatch = uniqueMarkerMatch(body, BACKFLOW_MARKER_RE, "PR 来源 marker");
   if (!sourceMatch) fail("PR 正文缺少 Community 回流来源 marker");
   const provenance = parseProvenanceMarker(body);
   if (!provenance) fail("PR 正文缺少实际处理平台的 provenance marker");
@@ -414,7 +425,11 @@ function labelNames(issue) {
 }
 
 export function parseIssuePlan(issue) {
-  const match = PLAN_MARKER_RE.exec(String(issue?.body || ""));
+  const match = uniqueMarkerMatch(
+    issue?.body,
+    PLAN_MARKER_RE,
+    `Issue #${issue?.number || "unknown"} 的 community-backflow-plan marker`,
+  );
   if (!match) return null;
   let marker;
   try {
@@ -435,6 +450,15 @@ export function parseIssuePlan(issue) {
     release: Boolean(marker.release),
     depends_on: Array.isArray(marker.depends_on) ? marker.depends_on.map(Number) : [],
   };
+}
+
+function parseIssueSourceMarker(issue) {
+  const match = uniqueMarkerMatch(
+    issue?.body,
+    BACKFLOW_MARKER_RE,
+    `Issue #${issue?.number || "unknown"} 的来源 marker`,
+  );
+  return match ? Number(match[1]) : null;
 }
 
 export function parseAutomationEvent(event) {
@@ -551,8 +575,8 @@ async function readAutomationContext({ request, token, repo, pullNumber, expecte
   const issues = await collectAutomationIssues(request, token, repo);
   const matches = issues.filter((issue) => {
     const plan = parseIssuePlan(issue);
-    const issueSource = BACKFLOW_MARKER_RE.exec(String(issue?.body || ""));
-    return plan?.source === source && Number(issueSource?.[1]) === source;
+    const issueSource = parseIssueSourceMarker(issue);
+    return plan?.source === source && issueSource === source;
   });
   if (matches.length !== 1) {
     fail(`来源 Community PR #${source} 必须关联唯一 Official Issue，实际 ${matches.length} 个`);
@@ -663,36 +687,6 @@ function releaseDeferredMarker(context) {
   return `<!-- ${AUTO_RELEASE_DEFERRED_MARKER_PREFIX}:${SOURCE_REPO}#${context.source}:${context.pull.merge_commit_sha} -->`;
 }
 
-async function readBackflowBranchRef(request, token, repo, branch) {
-  const ref = branch.split("/").map(encodeURIComponent).join("/");
-  try {
-    const current = await request(token, "GET", `/repos/${repo}/git/ref/heads/${ref}`);
-    const sha = String(current?.object?.sha || "");
-    if (!sha) fail(`远端分支 ${branch} 的 ref 响应缺少 object.sha`);
-    return sha;
-  } catch (error) {
-    if (/HTTP 404\b/u.test(String(error?.message || error))) return null;
-    throw error;
-  }
-}
-
-async function deleteBackflowBranch(request, token, repo, branch, expectedHead) {
-  const ref = branch.split("/").map(encodeURIComponent).join("/");
-  const before = await readBackflowBranchRef(request, token, repo, branch);
-  if (before === null) return false;
-  if (before !== expectedHead) {
-    fail(`远端分支 ${branch} 已推进到 ${before}，不删除已验证 head ${expectedHead} 之外的 ref`);
-  }
-  try {
-    await request(token, "DELETE", `/repos/${repo}/git/refs/heads/${ref}`);
-  } catch (error) {
-    if (!/HTTP 404\b/u.test(String(error?.message || error))) throw error;
-  }
-  const after = await readBackflowBranchRef(request, token, repo, branch);
-  if (after !== null) fail(`远端分支 ${branch} 删除后仍指向 ${after}，停止关闭 Issue`);
-  return true;
-}
-
 function sameLabels(left, right) {
   return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
 }
@@ -703,7 +697,6 @@ async function revalidateFinalizeState({
   repo,
   context,
   expectedLabels,
-  requiredLabel = "backflow:processing",
 }) {
   const pull = await request(token, "GET", `/repos/${repo}/pulls/${context.pull.number}`);
   const source = parseSourceFromBranch(String(pull?.head?.ref || ""));
@@ -734,10 +727,10 @@ async function revalidateFinalizeState({
     fail(`Official Issue #${issue.number} 的标签已变化，停止自动收尾以避免覆盖并发更新`);
   }
   const plan = parseIssuePlan(issue);
-  const issueSource = BACKFLOW_MARKER_RE.exec(String(issue?.body || ""));
+  const issueSource = parseIssueSourceMarker(issue);
   if (
     plan?.source !== context.source ||
-    Number(issueSource?.[1]) !== context.source ||
+    issueSource !== context.source ||
     plan.release !== context.release
   ) {
     fail(`Official Issue #${issue.number} 的来源或 Release 计划已变化，停止自动收尾`);
@@ -745,8 +738,11 @@ async function revalidateFinalizeState({
   if (issue.state === "closed" && labels.includes("backflow:synced")) {
     return { pull, issue, labels, alreadyFinalized: true };
   }
-  if (issue.state !== "open" || !labels.includes(requiredLabel)) {
-    fail(`Official Issue #${issue.number} 不再是开放的 ${requiredLabel.replace("backflow:", "")} 状态`);
+  if (
+    issue.state !== "open" ||
+    (!labels.includes("backflow:processing") && !labels.includes("backflow:synced"))
+  ) {
+    fail(`Official Issue #${issue.number} 不在可恢复的 open processing/synced 状态`);
   }
   return { pull, issue, labels, alreadyFinalized: false };
 }
@@ -810,7 +806,8 @@ async function finalizeBackflow({ request, token, repo, context, dryRun }) {
     `- 来源：${SOURCE_REPO}#${context.source}\n` +
     `- PR head：\`${context.head}\`\n` +
     `- merge commit：\`${context.pull.merge_commit_sha}\`\n` +
-    `- required-gate：${context.requiredGate.html_url || "success"}`;
+    `- required-gate：${context.requiredGate.html_url || "success"}\n` +
+    `- 分支清理：自动器不执行无 SHA 原子绑定的 ref 删除，请使用人工流程或安全 reaper`;
   if (dryRun) {
     const nextLabels = [
       ...context.labels.filter((label) => !label.startsWith("backflow:")),
@@ -835,7 +832,6 @@ async function finalizeBackflow({ request, token, repo, context, dryRun }) {
   if (refreshed.alreadyFinalized) {
     return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
   }
-  await deleteBackflowBranch(request, token, repo, context.pull.head.ref, context.head);
   const comments = await collectIssueComments(request, token, repo, context.issue.number);
   if (!comments.some((comment) => String(comment.body || "").includes(marker))) {
     const comment = await request(
@@ -857,8 +853,30 @@ async function finalizeBackflow({ request, token, repo, context, dryRun }) {
   if (beforeClose.alreadyFinalized) {
     return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
   }
-  for (const label of beforeClose.labels.filter((name) =>
-    name.startsWith("backflow:") && name !== "backflow:synced")) {
+  let syncedState = beforeClose;
+  if (!beforeClose.labels.includes("backflow:synced")) {
+    await request(token, "POST", `/repos/${repo}/issues/${context.issue.number}/labels`, {
+      labels: ["backflow:synced"],
+    });
+    syncedState = await revalidateFinalizeState({
+      request,
+      token,
+      repo,
+      context,
+      expectedLabels: [...beforeClose.labels, "backflow:synced"],
+    });
+    if (syncedState.alreadyFinalized) {
+      return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
+    }
+  }
+  const obsoleteLabels = syncedState.labels.filter((name) =>
+    name.startsWith("backflow:") &&
+    name !== "backflow:synced" &&
+    name !== "backflow:processing");
+  if (syncedState.labels.includes("backflow:processing")) {
+    obsoleteLabels.push("backflow:processing");
+  }
+  for (const label of obsoleteLabels) {
     try {
       await request(
         token,
@@ -869,13 +887,8 @@ async function finalizeBackflow({ request, token, repo, context, dryRun }) {
       if (!/HTTP 404\b/u.test(String(error?.message || error))) throw error;
     }
   }
-  if (!beforeClose.labels.includes("backflow:synced")) {
-    await request(token, "POST", `/repos/${repo}/issues/${context.issue.number}/labels`, {
-      labels: ["backflow:synced"],
-    });
-  }
   const expectedSyncedLabels = [
-    ...beforeClose.labels.filter((label) => !label.startsWith("backflow:")),
+    ...syncedState.labels.filter((label) => !label.startsWith("backflow:")),
     "backflow:synced",
   ];
   const readyToClose = await revalidateFinalizeState({
@@ -884,7 +897,6 @@ async function finalizeBackflow({ request, token, repo, context, dryRun }) {
     repo,
     context,
     expectedLabels: expectedSyncedLabels,
-    requiredLabel: "backflow:synced",
   });
   if (readyToClose.alreadyFinalized) {
     return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };

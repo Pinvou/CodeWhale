@@ -10,9 +10,8 @@ on:
     types: [closed]
 
 permissions:
-  actions: read
   checks: read
-  contents: write
+  contents: read
   issues: write
   pull-requests: write
 

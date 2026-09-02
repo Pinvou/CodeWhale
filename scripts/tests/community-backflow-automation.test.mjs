@@ -83,9 +83,20 @@ function fakeApi(data, options = {}) {
   let postedComment = "";
   let branchSha = options.branchSha === undefined ? head : options.branchSha;
   const currentIssue = clone(data.issue);
+  const remainingFailures = { ...(options.mutationFailures || {}) };
+  const remainingAfterFailures = { ...(options.mutationFailuresAfter || {}) };
   let pullReads = 0;
   let issueReads = 0;
-  let refReads = 0;
+  const failMutation = (name) => {
+    if ((remainingFailures[name] || 0) <= 0) return;
+    remainingFailures[name] -= 1;
+    throw httpError(503);
+  };
+  const failMutationAfter = (name) => {
+    if ((remainingAfterFailures[name] || 0) <= 0) return;
+    remainingAfterFailures[name] -= 1;
+    throw httpError(503);
+  };
   const request = async (_token, method, path, payload) => {
     calls.push({ method, path, payload });
     if (method === "GET" && path === `/repos/${repo}/pulls/${pullNumber}`) {
@@ -103,10 +114,12 @@ function fakeApi(data, options = {}) {
       return value === undefined ? [] : clone(value);
     }
     if (method === "GET" && path.includes(`/repos/${repo}/issues?`)) {
-      return path.includes("backflow%3Asynced") ? [] : [clone(currentIssue)];
+      const label = decodeURIComponent(new URL(`https://example.invalid${path}`).searchParams.get("labels") || "");
+      return currentIssue.labels.some((current) => current.name === label) ? [clone(currentIssue)] : [];
     }
     if (method === "GET" && path === `/repos/${repo}/issues/${issueNumber}`) {
       issueReads += 1;
+      if (options.advanceBranchAtIssueRead === issueReads) branchSha = advancedHead;
       const value = options.issueAtRead?.(issueReads, clone(currentIssue)) || currentIssue;
       return clone(value);
     }
@@ -121,18 +134,9 @@ function fakeApi(data, options = {}) {
         }],
       });
     }
-    if (method === "GET" && path.includes("/git/ref/heads/backflow/community-393")) {
-      refReads += 1;
-      if (options.refAtRead) branchSha = options.refAtRead(refReads, branchSha);
-      if (branchSha === null) throw httpError(404);
-      return { object: { sha: branchSha } };
+    if (method === "GET" && path.includes(`/issues/${issueNumber}/comments?per_page=100&page=`)) {
+      return postedComment ? [{ id: 42, body: postedComment }] : [];
     }
-    if (method === "DELETE" && path.includes("/git/refs/heads/backflow/community-393")) {
-      if (options.deleteStatus) throw httpError(options.deleteStatus);
-      branchSha = options.afterDeleteSha === undefined ? null : options.afterDeleteSha;
-      return null;
-    }
-    if (method === "GET" && path.includes(`/issues/${issueNumber}/comments?per_page=100&page=`)) return [];
     if (method === "POST" && path.endsWith(`/issues/${issueNumber}/comments`)) {
       postedComment = payload.body;
       return { id: 42 };
@@ -141,24 +145,36 @@ function fakeApi(data, options = {}) {
     if (method === "DELETE" && path.includes(`/issues/${issueNumber}/labels/`)) {
       const encoded = path.slice(path.lastIndexOf("/") + 1);
       const deleted = decodeURIComponent(encoded);
+      failMutation(`delete-${deleted}`);
       currentIssue.labels = currentIssue.labels.filter((label) => label.name !== deleted);
+      failMutationAfter(`delete-${deleted}`);
       return null;
     }
     if (method === "POST" && path.endsWith(`/issues/${issueNumber}/labels`)) {
+      failMutation("add-synced");
       for (const label of payload.labels) {
         if (!currentIssue.labels.some((current) => current.name === label)) {
           currentIssue.labels.push({ name: label });
         }
       }
+      failMutationAfter("add-synced");
       return { ok: true };
     }
     if (method === "PATCH" && path.endsWith(`/issues/${issueNumber}`)) {
+      failMutation("close");
       if (payload.state) currentIssue.state = payload.state;
+      failMutationAfter("close");
       return { ok: true };
     }
     throw new Error(`unexpected request: ${method} ${path}`);
   };
-  return { request, calls, postedComment: () => postedComment, branchSha: () => branchSha };
+  return {
+    request,
+    calls,
+    postedComment: () => postedComment,
+    branchSha: () => branchSha,
+    issue: () => clone(currentIssue),
+  };
 }
 
 function fakeGraphql({ mergeMethod = "SQUASH", existing = false, mutate } = {}) {
@@ -295,51 +311,114 @@ test("拒绝外部 head、错误 base、过期 gate、blocked Issue 与未合并
   }
 });
 
-test("普通回流合并后回读 ref、删除分支、重读状态并关闭为 synced", async () => {
+test("PR 与 Issue 的来源、provenance、plan marker 必须各恰好一个且互相一致", async (t) => {
+  const provenanceMarker = /<!-- community-backflow-provenance:[A-Za-z0-9_-]+ -->/u;
+  const cases = [
+    ["重复 PR 来源 marker", (data) => {
+      data.pull.body += `\n<!-- community-backflow:Pinvou/pinvou-agent#${source} -->`;
+    }, /PR 来源 marker.*实际 2 次/u],
+    ["重复 PR provenance marker", (data) => {
+      data.pull.body += `\n${data.pull.body.match(provenanceMarker)[0]}`;
+    }, /PR provenance marker.*实际 2 次/u],
+    ["重复 Issue 来源 marker", (data) => {
+      data.issue.body += `\n<!-- community-backflow:Pinvou/pinvou-agent#${source} -->`;
+    }, /Issue #915 的来源 marker.*实际 2 次/u],
+    ["重复 Issue plan marker", (data) => {
+      const plan = data.issue.body.match(/<!-- community-backflow-plan:[^\r\n]+ -->/u)[0];
+      data.issue.body += `\n${plan}`;
+    }, /Issue #915 的 community-backflow-plan marker.*实际 2 次/u],
+    ["PR 来源与分支冲突", (data) => {
+      data.pull.body = data.pull.body.replace(
+        `community-backflow:Pinvou/pinvou-agent#${source}`,
+        "community-backflow:Pinvou/pinvou-agent#392",
+      );
+    }, /provenance 来源 PR 与来源 marker 不一致/u],
+    ["PR provenance 与来源冲突", (data) => {
+      const conflicting = createProvenance({
+        base: "8".repeat(40), head, source: 392, paths: ["文档/说明.md"], platform: "win32",
+      });
+      data.pull.body = data.pull.body.replace(provenanceMarker, encodeProvenanceMarker(conflicting));
+    }, /provenance 来源 PR 与来源 marker 不一致/u],
+    ["Issue plan 与来源冲突", (data) => {
+      data.issue.body = data.issue.body.replace(`"source":${source}`, '"source":392');
+    }, /必须关联唯一 Official Issue/u],
+  ];
+  for (const [name, mutate, pattern] of cases) {
+    await t.test(name, async () => {
+      const data = fixture();
+      mutate(data);
+      const api = fakeApi(data);
+      await assert.rejects(runAutomation({
+        event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request,
+        graphql: fakeGraphql().graphql,
+      }), pattern);
+    });
+  }
+});
+
+test("普通回流先确认 synced、最后移除 processing 并关闭，且不自动删除分支", async () => {
   const api = fakeApi(fixture({ merged: true }));
   const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
   assert.equal(result.status, "finalized");
-  assert.equal(api.calls.filter((call) => call.method === "GET" && call.path.includes("/git/ref/")).length, 2);
-  assert.equal(api.calls.some((call) => call.method === "DELETE"), true);
-  assert.equal(api.branchSha(), null);
+  assert.equal(api.calls.some((call) => call.path.includes("/git/ref")), false);
+  assert.equal(api.branchSha(), head);
   assert.match(api.postedComment(), /回流 PR 已合并并自动收尾/u);
+  assert.match(api.postedComment(), /不执行无 SHA 原子绑定的 ref 删除/u);
   const issuePatch = api.calls.find((call) => call.method === "PATCH");
   assert.equal("labels" in issuePatch.payload, false);
   assert.equal(issuePatch.payload.state, "closed");
   assert.equal(api.calls.filter((call) => call.method === "DELETE" && call.path.includes("/labels/")).length, 2);
   const addLabels = api.calls.find((call) => call.method === "POST" && call.path.endsWith(`/issues/${issueNumber}/labels`));
   assert.deepEqual(addLabels.payload, { labels: ["backflow:synced"] });
+  const addIndex = api.calls.indexOf(addLabels);
+  const removeProcessingIndex = api.calls.findIndex((call) =>
+    call.method === "DELETE" && call.path.endsWith("backflow%3Aprocessing"));
+  assert.ok(addIndex >= 0 && removeProcessingIndex > addIndex);
+  assert.deepEqual(api.issue().labels.map((label) => label.name).sort(), ["backflow:synced", "产品"].sort());
 });
 
-test("远端分支 ref 已不存在时仅将 GET 404 视为幂等并继续安全收尾", async () => {
-  const api = fakeApi(fixture({ merged: true }), { branchSha: null });
+test("校验 H 后远端分支正好推进到 H2 时收尾不触发无 CAS 的 ref DELETE", async () => {
+  const api = fakeApi(fixture({ merged: true }), { advanceBranchAtIssueRead: 2 });
   const result = await runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request });
   assert.equal(result.status, "finalized");
-  assert.equal(api.calls.some((call) => call.method === "DELETE" && call.path.includes("/git/refs/")), false);
-  assert.equal(api.calls.some((call) => call.method === "PATCH"), true);
+  assert.equal(api.branchSha(), advancedHead);
+  assert.equal(api.calls.some((call) => call.path.includes("/git/ref")), false);
 });
 
-test("删除分支仅将 404 视为幂等，422 必须阻止关闭 Issue", async () => {
-  const api = fakeApi(fixture({ merged: true }), { deleteStatus: 422 });
-  await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /HTTP 422/u);
-  assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
+test("每个标签或关闭 mutation 失败后重跑都从可恢复状态收敛", async (t) => {
+  const cases = [
+    ["添加 synced 前失败", "mutationFailures", "add-synced", "open", ["backflow:pending", "backflow:processing", "产品"]],
+    ["添加 synced 后响应失败", "mutationFailuresAfter", "add-synced", "open", ["backflow:pending", "backflow:processing", "backflow:synced", "产品"]],
+    ["移除 pending 前失败", "mutationFailures", "delete-backflow:pending", "open", ["backflow:pending", "backflow:processing", "backflow:synced", "产品"]],
+    ["移除 pending 后响应失败", "mutationFailuresAfter", "delete-backflow:pending", "open", ["backflow:processing", "backflow:synced", "产品"]],
+    ["移除 processing 前失败", "mutationFailures", "delete-backflow:processing", "open", ["backflow:processing", "backflow:synced", "产品"]],
+    ["移除 processing 后响应失败", "mutationFailuresAfter", "delete-backflow:processing", "open", ["backflow:synced", "产品"]],
+    ["关闭 Issue 前失败", "mutationFailures", "close", "open", ["backflow:synced", "产品"]],
+    ["关闭 Issue 后响应失败", "mutationFailuresAfter", "close", "closed", ["backflow:synced", "产品"]],
+  ];
+  for (const [name, failureOption, mutation, expectedState, expectedAfterFailure] of cases) {
+    await t.test(name, async () => {
+      const api = fakeApi(fixture({ merged: true }), { [failureOption]: { [mutation]: 1 } });
+      await assert.rejects(runAutomation({
+        event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request,
+      }), /HTTP 503/u);
+      assert.equal(api.issue().state, expectedState);
+      assert.deepEqual(
+        api.issue().labels.map((label) => label.name).sort(),
+        [...expectedAfterFailure].sort(),
+      );
+
+      const result = await runAutomation({
+        event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request,
+      });
+      assert.ok(["finalized", "already-finalized"].includes(result.status));
+      assert.equal(api.issue().state, "closed");
+      assert.deepEqual(api.issue().labels.map((label) => label.name).sort(), ["backflow:synced", "产品"].sort());
+    });
+  }
 });
 
-test("分支 ref 已推进或删除后仍存在时绝不关闭 Issue", async (t) => {
-  await t.test("删除前已推进到 H2", async () => {
-    const api = fakeApi(fixture({ merged: true }), { branchSha: advancedHead });
-    await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /已推进到 .*不删除/u);
-    assert.equal(api.calls.some((call) => call.method === "DELETE"), false);
-    assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
-  });
-  await t.test("删除后 ref 回读仍存在", async () => {
-    const api = fakeApi(fixture({ merged: true }), { afterDeleteSha: advancedHead });
-    await assert.rejects(runAutomation({ event: mergedEvent(), repo, token: "token", enabled: "true", request: api.request }), /删除后仍指向/u);
-    assert.equal(api.calls.some((call) => call.method === "PATCH"), false);
-  });
-});
-
-test("收尾前 PR head 变化立即停止且不删除分支", async () => {
+test("收尾前 PR head 变化立即停止且不执行写 mutation", async () => {
   const api = fakeApi(fixture({ merged: true }), { pullAtRead: (read, pull) => {
     if (read === 2) pull.head.sha = advancedHead;
     return pull;
@@ -361,7 +440,7 @@ test("收尾前 PR 或 Issue 状态变化以及新增 blocker 都立即停止", 
         if (read === 1) issue.state = "closed";
         return issue;
       },
-    }, /不再是开放的 processing 状态/u],
+    }, /不在可恢复的 open processing\/synced 状态/u],
     ["Issue 新增 blocker", {
       issueAtRead: (read, issue) => {
         if (read === 1) issue.labels.push({ name: "backflow:blocked" });
@@ -379,8 +458,13 @@ test("收尾前 PR 或 Issue 状态变化以及新增 blocker 都立即停止", 
   }
 });
 
-test("删除前、更新标签前或最终关闭前 Issue 标签变化立即停止，绝不用旧标签覆盖", async (t) => {
-  for (const [name, changedRead] of [["删除前", 1], ["更新标签前", 2], ["最终关闭前", 3]]) {
+test("各收尾阶段 Issue 标签变化立即停止，绝不用旧标签覆盖", async (t) => {
+  for (const [name, changedRead] of [
+    ["首次复核", 1],
+    ["标签更新前", 2],
+    ["synced 确认", 3],
+    ["最终关闭前", 4],
+  ]) {
     await t.test(name, async () => {
       const api = fakeApi(fixture({ merged: true }), { issueAtRead: (read, issue) => {
         if (read === changedRead) issue.labels.push({ name: "并发审查" });

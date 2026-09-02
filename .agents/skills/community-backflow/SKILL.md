@@ -137,15 +137,19 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 - `PR Check` 的 `workflow_run` 成功后，使用默认分支受信代码重新回读 PR、来源 Community
   PR 及分页 changed files、关联 Official Issue 和当前 head 的 `required-gate`，校验通过才加入
   Merge Queue。根目录 `VERSION` 的真实变更必须与 Issue Release plan 一致，否则失败关闭。
-- `pull_request_target.closed` 确认 PR 实际 merged 后，再读 PR/Issue/head/ref；ref 仍指向已验证
-  head 才删除，删除后回读确认不存在。关闭前再次读取状态和标签，以幂等 marker 评论 Issue，
-  只定向更新回流标签为 `backflow:synced`，不覆盖非回流标签或并发标签更新。
+- `pull_request_target.closed` 确认 PR 实际 merged 后，在各收尾阶段重读 PR/Issue/head/标签。
+  先添加并回读确认 `backflow:synced`，确认前保留 `backflow:processing`；失败重放可从
+  `open+processing+synced` 或 `open+synced` 继续，且不覆盖非回流标签或并发更新。
+- GitHub REST ref DELETE 没有服务端 SHA compare-and-delete，事件自动器不得删除远端分支；
+  分支清理由人工流程或具备原子绑定能力的安全 reaper 完成，不能使用有 H→H2 窗口的
+  GET→DELETE 模式。
 - 入队 mutation 用 `expectedHeadOid` 绑定已通过门禁的 head，并先通过受信 GraphQL API 审计
   Official `main` 的 `mergeQueue.configuration.mergeMethod`。只有实际为 `SQUASH` 才入队；
   `MERGE`、`REBASE` 或未知配置都拒绝，自动器不得修改远端规则或绕过组合门禁。
 - 自动器只接受 Official 同仓、base 为 `main`、分支严格匹配
   `backflow/community-<source-number>` 的 PR；来源 marker、provenance、Issue plan marker 和
-  当前 head 任一不一致都会失败关闭，不猜测或修正远端状态。
+  Issue 来源 marker 都必须各恰好出现一次，重复、冲突或与当前 head 不一致都会失败关闭，
+  不猜测或修正远端状态。
 - workflow 不 checkout PR head，也不执行 PR 提供的脚本。未配置仓库变量时安全跳过；排障可用
   `node scripts/community-backflow.mjs automation --repo OWNER/REPO --event-file EVENT.json --dry-run`
   完整只读校验。

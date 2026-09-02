@@ -24,13 +24,14 @@ class CommunityBackflowAutomationWorkflowTests(unittest.TestCase):
 
     def test_permissions_and_explicit_opt_in_are_declared(self):
         for permission in (
-            "actions: read",
             "checks: read",
-            "contents: write",
+            "contents: read",
             "issues: write",
             "pull-requests: write",
         ):
             self.assertIn(permission, self.workflow)
+        self.assertNotIn("actions: read", self.workflow)
+        self.assertNotIn("contents: write", self.workflow)
         self.assertIn(
             "COMMUNITY_BACKFLOW_AUTOMATION_ENABLED: "
             "${{ vars.COMMUNITY_BACKFLOW_AUTOMATION_ENABLED }}",
