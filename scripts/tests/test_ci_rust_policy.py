@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -351,6 +352,114 @@ class CiRustPolicyTests(unittest.TestCase):
         self.assertEqual(decision[:2], (False, "full"))
         self.assertIn("ci:full-rust", decision.reason)
 
+    def test_pagination_loops_fail_closed_to_full_mode(self):
+        event = {
+            "merge_group": {
+                "head_sha": "queue-head",
+                "base_sha": "base-main",
+                "base_ref": "refs/heads/main",
+            }
+        }
+        entry = {
+            "baseCommit": {"oid": "base-main"},
+            "headCommit": {"oid": "queue-head"},
+            "pullRequest": pull_request(),
+        }
+
+        def page_with(has_next_page, end_cursor):
+            return {
+                "data": {
+                    "repository": {
+                        "mergeQueue": {
+                            "entries": {
+                                "nodes": [entry],
+                                "pageInfo": {
+                                    "hasNextPage": has_next_page,
+                                    "endCursor": end_cursor,
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+
+        repeated = page_with(True, "same-cursor")
+        repeated_pages = {None: repeated, "same-cursor": repeated}
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):
+            decision = POLICY.resolve_routing_event(
+                event,
+                "Pinvou/pinvou3",
+                "token",
+                fetch_page=lambda cursor=None, **_: repeated_pages[cursor],
+                inspect_diff=lambda *_: self.fail(
+                    "cyclic pagination used trusted diff routing"
+                ),
+            )
+        self.assertEqual(decision[:2], (False, "full"))
+        self.assertIn("cursor repeated", decision.reason)
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):
+            decision = POLICY.resolve_routing_event(
+                event,
+                "Pinvou/pinvou3",
+                "token",
+                fetch_page=lambda **_: page_with(True, None),
+                inspect_diff=lambda *_: self.fail(
+                    "missing pagination cursor used trusted diff routing"
+                ),
+            )
+        self.assertEqual(decision[:2], (False, "full"))
+        self.assertIn("cursor is missing", decision.reason)
+
+    def test_untraceable_merge_group_chains_fail_closed_to_full_mode(self):
+        event = {
+            "merge_group": {
+                "head_sha": "queue-head",
+                "base_sha": "base-main",
+                "base_ref": "refs/heads/main",
+            }
+        }
+
+        def entry(base, head, number=186):
+            return {
+                "baseCommit": {"oid": base},
+                "headCommit": {"oid": head},
+                "pullRequest": pull_request(number=number),
+            }
+
+        responses = (
+            ("broken chain", queue_page(entry("orphan-base", "queue-head"))),
+            (
+                "duplicate head commit",
+                queue_page(
+                    entry("base-main", "queue-head", 186),
+                    entry("base-main", "queue-head", 187),
+                ),
+            ),
+            (
+                "entry chain cycle",
+                queue_page(
+                    entry("second-head", "queue-head", 186),
+                    entry("queue-head", "second-head", 187),
+                ),
+            ),
+        )
+        for name, response in responses:
+            with self.subTest(name=name), patch.dict(
+                os.environ, {"GITHUB_EVENT_NAME": "merge_group"}
+            ):
+                decision = POLICY.resolve_routing_event(
+                    event,
+                    "Pinvou/pinvou3",
+                    "token",
+                    fetch_page=lambda response=response, **_: response,
+                    inspect_diff=lambda *_: self.fail(
+                        "untraceable chain used trusted diff routing"
+                    ),
+                )
+            self.assertEqual(decision[:2], (False, "full"))
+            self.assertIn("failed closed", decision.reason)
+
     def test_malformed_queue_graphql_structure_fails_closed_without_attribute_error(self):
         event = {
             "merge_group": {
@@ -511,11 +620,38 @@ class CiRustPolicyTests(unittest.TestCase):
         ]
         self.assertEqual(POLICY.classify_trusted_diff(mixed)[0], "windows_full")
 
+    def test_version_file_anomalies_reject_the_release_route(self):
+        for name, before, after in (
+            ("invalid semver", "0.9.0\n", "not-a-version\n"),
+            ("leading blank line", "0.9.0\n", "\n0.9.1\n"),
+            ("trailing note", "0.9.0\n", "0.9.1\n# release notes\n"),
+        ):
+            with self.subTest(name=name):
+                anomalous = release_changes()
+                anomalous[0] = change("VERSION", before, after)
+                pure, _ = POLICY.pure_release_change(anomalous)
+                self.assertFalse(pure)
+
+    def test_release_version_targets_match_sync_version_targets(self):
+        source = (ROOT / "scripts" / "sync-version.mjs").read_text(encoding="utf-8")
+        managed = set(re.findall(r"name:\s*'([^']+)'", source))
+        managed.add("VERSION")
+        self.assertEqual(managed, set(POLICY.RELEASE_VERSION_TARGETS))
+
     def test_windows_high_risk_paths_and_changed_semantics_stay_full(self):
         cases = (
             [change("CodeWhale")],
             [change("pinvou3-app/src-tauri/src/platform/paths.rs")],
             [change("pinvou3-app/scripts/tauri/windows-installer.js")],
+            [change(".github/workflows/pr-check.yml")],
+            [change("scripts/ci-rust-policy.py")],
+            [
+                change(
+                    "pinvou3-app/src-tauri/tauri.conf.json",
+                    '{"version":"0.9.0"}\n',
+                    '{"version":"0.9.0","bundle":{"active":true}}\n',
+                )
+            ],
             [
                 change(
                     "pinvou3-app/src-tauri/src/features/chat/mod.rs",
@@ -559,6 +695,40 @@ class CiRustPolicyTests(unittest.TestCase):
             )
         ]
         self.assertEqual(POLICY.classify_trusted_diff(changes)[0], "portable_rust")
+
+    def test_non_rust_backflow_routes_without_the_windows_leg(self):
+        changes = [change("docs/community-backflow.md", "# title\n", "# changed\n")]
+        mode, reason = POLICY.classify_trusted_diff(changes)
+        self.assertEqual(mode, "non_rust")
+        self.assertIn("non-Rust", reason)
+
+    def test_empty_trusted_diff_fails_closed_to_full_mode(self):
+        pull_event = {
+            "pull_request": {
+                **pull_request(),
+                "base": {"sha": "a" * 40},
+                "head": {"sha": "b" * 40},
+            }
+        }
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "pull_request"}):
+            decision = POLICY.resolve_routing_event(
+                pull_event,
+                "Pinvou/pinvou3",
+                inspect_diff=lambda *_: [],
+            )
+        self.assertEqual(decision[:2], (False, "full"))
+        self.assertIn("diff routing failed closed", decision.reason)
+
+    def test_emit_fails_closed_on_unknown_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            with patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}):
+                POLICY._emit(POLICY.RoutingDecision(True, "stealth", "unexpected"))
+            values = output.read_text(encoding="utf-8")
+        self.assertIn("trusted_backflow=false", values)
+        self.assertIn("backflow_mode=full", values)
+        self.assertIn("pure_release_backflow=false", values)
+        self.assertIn("unknown mode", values)
 
     def test_routing_uses_event_base_head_and_emits_fail_closed_outputs(self):
         base_sha = "a" * 40

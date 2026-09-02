@@ -104,8 +104,9 @@ diff，输出以下保守路由：
 - `release`：只允许 `VERSION` 与 `sync-version.mjs` 管理的全部派生字段机械同步；
   运行 `release-contract-test`，跳过由 Cargo/package 版本字段误触发的产品编译。
 - `portable_rust`：不含 Windows/平台/路径/进程/安装/权限/原生依赖、Cargo、`build.rs`、
-  toolchain 或 CodeWhale gitlink 风险的普通跨平台 Rust；保留 lint、portability、定向
-  测试和最新 `main` 的累计 Windows 验证。
+  toolchain、CodeWhale gitlink、`tauri.conf.json` 非版本字段或门禁自身（工作流、本
+  策略）风险的普通跨平台 Rust；保留 lint、portability、定向测试和最新 `main` 的
+  累计 Windows 验证。
 - `windows_full`：上述 Windows 高风险或 Release 内容异常、混合改动；Ready PR 继续运行
   完整 `windows-rust-test`。
 - `non_rust`：继续使用既有受影响产品门禁。

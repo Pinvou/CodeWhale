@@ -65,6 +65,11 @@ WINDOWS_HIGH_RISK_PATHS = (
     "pinvou3-app/src-tauri/packaging/windows/**",
     "pinvou3-app/scripts/tauri/**windows**",
     "private-runtimes/windows",
+    # A backflow must never be able to lighten its own gate: edits to the CI
+    # workflow, to this policy, or to non-version bundle config stay full.
+    "**/tauri.conf.json",
+    ".github/workflows/**",
+    "scripts/ci-rust-policy.py",
 )
 WINDOWS_HIGH_RISK_PATH_PART = re.compile(
     r"(?:^|[/_.-])(?:windows|win32|filesystem|paths?|process|installer?|"

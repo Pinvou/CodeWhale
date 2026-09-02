@@ -100,17 +100,19 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 - Official 同仓 `backflow/community-*` PR 以 current head 的 base→head 实际 diff
   做 CI 语义分类，不得用标题、标签或 Issue 文案替代。只有 `VERSION` 和
   `scripts/sync-version.mjs` 管理的全部派生版本字段机械一致变化时，才作为纯 Release
-  仅运行版本与发布契约；混合代码、依赖、feature 或格式外改动必须 fail closed。
+  豁免产品编译类 job（fast-gate、版本一致性、发布契约与三平台 `backflow-portability`
+  仍正常运行）；混合代码、依赖、feature 或格式外改动必须 fail closed。
 - 普通跨平台 Rust 可信回流不重复运行完整 `rust-test` 或完整 Windows Rust，但仍运行
   `rust-lint`、三平台 `backflow-portability`、快速门禁、实际影响范围内的定向测试，
   并由合入后的最新 `main` 承担累计 Windows 验证。
 - Windows 专属平台、路径、进程、安装、权限或原生依赖语义，Cargo 依赖/feature、
-  `build.rs`、Rust 工具链、CodeWhale gitlink 等变化仍必须在 Ready PR 运行完整
-  `windows-rust-test`。来源仓库、固定分支、唯一 marker、base/head diff 或内容解析
-  必须完整校验，base 必须是 Official `main`。不可信 PR 保持普通 PR 的既有策略；
-  API/diff 失败或 Merge Group 无法通过 baseCommit→headCommit 链完整证明全部成员时，
-  必须 fail closed 运行完整 Windows，`required-gate` 不得接受 skipped；`ci:full-rust`
-  继续强制完整策略。
+  `build.rs`、Rust 工具链、CodeWhale gitlink、`tauri.conf.json` 非版本字段以及门禁
+  自身（`.github/workflows/**`、`scripts/ci-rust-policy.py`）等变化仍必须在 Ready PR
+  运行完整 `windows-rust-test`。来源仓库、固定分支、唯一 marker、base/head diff 或
+  内容解析必须完整校验，base 必须是 Official `main`。不可信 PR 保持普通 PR 的既有
+  策略；API/diff 失败或 Merge Group 无法通过 baseCommit→headCommit 链完整证明全部
+  成员时，必须 fail closed 运行完整 Windows，`required-gate` 不得接受 skipped；
+  `ci:full-rust` 继续强制完整策略。
 - 当前 head 的 required checks 成功且 `rust-test` 为 skipped 是预期状态，不构成
   blocker；按上述策略 skipped 的 `windows-rust-test` 同理。外部 fork 的同名分支
   不适用任何可信回流例外。

@@ -99,8 +99,10 @@ decision over the actual base-to-head diff. A pure release is accepted only when
 to one consistent SemVer; it runs the release contract without product compilation.
 Other cross-platform Rust backflows keep lint, portability, affected tests, and
 cumulative `main` coverage, while Windows/platform/path/process/install/permission/
-native changes, Cargo dependency or feature changes, `build.rs`, the toolchain, and
-the CodeWhale gitlink retain the complete Windows job. A mismatched source marker,
+native changes, Cargo dependency or feature changes, `build.rs`, the toolchain, the
+CodeWhale gitlink, non-version `tauri.conf.json` fields, and edits to the gate
+itself (`pr-check.yml`, `ci-rust-policy.py`) retain the complete Windows job. A
+mismatched source marker,
 fork, base repository, or non-`main` base uses the unchanged ordinary PR routing.
 An incomplete Merge Group member chain, API/diff failure, malformed version field,
 mixed release change, or unknown policy state fails closed to the complete Windows

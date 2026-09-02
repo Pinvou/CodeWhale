@@ -654,16 +654,18 @@ class CiGatePolicyTests(unittest.TestCase):
                     required_expression, **values
                 )
                 self.assertEqual(policy_required, expected_policy_required)
-                # Replay the required-gate shell contract: policy-required Windows
-                # accepts only success; skipped is valid only when policy did not
-                # require this job.
+                # Replay the required-gate shell contract: a policy-required
+                # Windows leg accepts only success; without the requirement the
+                # per-item loop accepts success|skipped and rejects the rest.
+                accepted = [
+                    result
+                    for result in ("success", "skipped", "failure", "cancelled")
+                    if result == "success"
+                    or (result == "skipped" and not policy_required)
+                ]
                 self.assertEqual(
-                    not policy_required or "success" == "success",
-                    True,
-                )
-                self.assertEqual(
-                    not policy_required or "skipped" == "success",
-                    not policy_required,
+                    accepted,
+                    ["success"] if policy_required else ["success", "skipped"],
                 )
 
     def test_pure_release_backflow_runs_contract_only_and_skipped_jobs_are_accepted(self):
