@@ -36,9 +36,11 @@ class MergeQueuePolicyTests(unittest.TestCase):
         self.assertIn("github.event.merge_group.base_sha", portability)
         self.assertIn("github.event.merge_group.head_sha", portability)
 
-    def test_trusted_backflow_skips_only_full_rust_test(self):
+    def test_trusted_backflow_uses_diff_aware_rust_policy(self):
         changes = self._job("changes", "fast-gate")
         self.assertIn("trusted_backflow:", changes)
+        self.assertIn("backflow_mode:", changes)
+        self.assertIn("pure_release_backflow:", changes)
         self.assertIn("python3 scripts/ci-rust-policy.py", changes)
         self.assertIn("GITHUB_TOKEN: ${{ github.token }}", changes)
 
@@ -53,7 +55,13 @@ class MergeQueuePolicyTests(unittest.TestCase):
         )
 
         rust_lint = self._job("rust-lint", "rust-test")
-        self.assertNotIn("trusted_backflow", rust_lint)
+        self.assertIn("pure_release_backflow != 'true'", rust_lint)
+
+        windows_rust_test = self._job("windows-rust-test", "windows-rustup-repair-test")
+        self.assertIn("needs.changes.outputs.backflow_mode == 'windows_full'", windows_rust_test)
+        self.assertIn("needs.changes.outputs.backflow_mode == 'full'", windows_rust_test)
+        self.assertIn("needs.changes.outputs.backflow_mode == 'ordinary'", windows_rust_test)
+        self.assertIn("needs.changes.outputs.rust_full == 'true'", windows_rust_test)
 
     def test_running_main_cache_warmer_and_cumulative_checks_are_preserved(self):
         concurrency = self.workflow.split("\nconcurrency:", maxsplit=1)[1].split(
@@ -77,7 +85,8 @@ class MergeQueuePolicyTests(unittest.TestCase):
         self.assertIn("github.event.pull_request.draft == false", windows_rust_test)
         self.assertIn("needs.changes.outputs.rust_full == 'true'", windows_rust_test)
         self.assertIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
-        self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
+        self.assertIn("github.event_name == 'merge_group'", windows_rust_test)
+        self.assertIn("needs.changes.outputs.backflow_mode == 'full'", windows_rust_test)
 
 
 if __name__ == "__main__":

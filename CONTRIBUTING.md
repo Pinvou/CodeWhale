@@ -93,6 +93,21 @@ for another ready Rust pull request; the label has no effect on a draft.
 The current lightweight Rust boundaries are internal-only changes under `feedback`,
 `personas`, and `pet`. Changing their registration, app commands, shared platform
 surface, Cargo metadata, or any unclassified Rust path still runs full regression.
+Trusted same-repository `backflow/community-*` pull requests add a content-aware
+decision over the actual base-to-head diff. A pure release is accepted only when
+`VERSION` and every field managed by `scripts/sync-version.mjs` change mechanically
+to one consistent SemVer; it runs the release contract without product compilation.
+Other cross-platform Rust backflows keep lint, portability, affected tests, and
+cumulative `main` coverage, while Windows/platform/path/process/install/permission/
+native changes, Cargo dependency or feature changes, `build.rs`, the toolchain, the
+CodeWhale gitlink, non-version `tauri.conf.json` fields, and edits to the gate
+itself (`pr-check.yml`, `ci-rust-policy.py`) retain the complete Windows job. A
+mismatched source marker,
+fork, base repository, or non-`main` base uses the unchanged ordinary PR routing.
+An incomplete Merge Group member chain, API/diff failure, malformed version field,
+mixed release change, or unknown policy state fails closed to the complete Windows
+job; `required-gate` does not accept a skipped Windows result in that state.
+`ci:full-rust` continues to force the ordinary full route.
 Release-chain changes run lightweight contract tests only; full deb, dmg, and nsis
 packages are built only after a
 `VERSION` change reaches `main`, or through an explicit `workflow_dispatch`.
