@@ -83,9 +83,22 @@ const protocolSources = {
 
 const expectedProtocolHashes = {
   multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
-  orchestration: 'c0c6a17672d1b8e6a99d69dd354589d765fe2d62a23dd6401c3c58122c7e3ddf',
+  orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
   artifacts: 'e188b39659ef1f17996807f0effa49fdd6fb6d0b8f7d233121ad529f6579633a',
-  chat: '808e7f8f921211b4c7be45832665e93175c6fa2350ef8d0e3bd868849c3e8db6',
+  // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
+  // entry + comment translations touching `invoke(` mentions (the extractor
+  // scans raw source, so comment wording is part of the digest). Recomputed
+  // again for the eighth-review fixes: zap resend gating on the in-flight
+  // steer settlement, the per-sid zap entry guard, and the accompanying
+  // comment wording. And again for the streaming-freeze follow-ups: the
+  // settlement side table (a Promise on the queued chip poisoned the
+  // subscription snapshot), steeredMidTurn bubble markers, and the hydration
+  // envelope strip. And again for the r13 follow-ups: the transcript
+  // fallback's legacy-chip pre-check (chat-events.js) and the zap
+  // skip-resend settlement helper (chat.js). And again for the steer
+  // persistence alignment: the steered-messages sidecar save/get invokes
+  // (bridge.js) and the position-capture load_session (chat.js).
+  chat: '895ba00983a80bc6fbf0ce3ffc162a0c0a77ffcd6bb730d8c93c7d5d61157e5b',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',

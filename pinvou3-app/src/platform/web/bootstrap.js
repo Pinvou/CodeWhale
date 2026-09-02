@@ -11,6 +11,8 @@
     sessionModelSwitch: true,
     modelManagement: false,
     toolStoreMutations: false,
+    // Zap-send needs the desktop EnginePool command channel; hide the button on web.
+    interruptSend: false,
     deviceFileUpload: true,
     acpCodeMode: true,
   };
