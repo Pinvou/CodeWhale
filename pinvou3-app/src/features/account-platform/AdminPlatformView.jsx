@@ -5,6 +5,7 @@ import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInp
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminFinanceQueryUpdates, adminNavigationGroups, clearAdminFinanceQueryUpdates, normalizeAdminFinanceQuery, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
+import { createFinanceIdempotencyKey, executeStructuredFinanceAction, financeActionRequiresRefresh, isUnknownMutationOutcome, paymentAnomalyResolutionOptions } from './finance-actions.js';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './admin-platform.css';
@@ -196,6 +197,75 @@ function DetailDrawer({ label, onClose, children }) {
         {children}
       </aside>
     </div>
+  );
+}
+
+function StructuredActionPanel({ operation, copy, busy, onChange, onClose, onRefresh, onSubmit }) {
+  if (!operation) return null;
+  const labels = copy.billing.actionPanel;
+  const refreshRequired = financeActionRequiresRefresh(operation);
+  return (
+    <DetailDrawer label={operation.title} onClose={busy || refreshRequired ? () => {} : onClose}>
+      <section className="adm-panel adm-action-panel">
+        <SectionHeader title={operation.title} copy={copy}>
+          <button type="button" disabled={busy || refreshRequired} onClick={onClose}>{labels.cancel}</button>
+        </SectionHeader>
+        <p className="adm-help">{operation.help || labels.help}</p>
+        <dl className="adm-detail-list adm-action-summary">
+          {(operation.summary || []).map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value || '—'}</dd></div>)}
+          {operation.idempotencyKey && <div><dt>{labels.idempotencyKey}</dt><dd><code>{operation.idempotencyKey}</code></dd></div>}
+        </dl>
+        <form className="adm-action-form" onSubmit={onSubmit}>
+          {(operation.fields || []).map((field) => {
+            const fieldID = `finance-action-${field.name}`;
+            const helpID = `${fieldID}-help`;
+            const errorID = `${fieldID}-error`;
+            const describedBy = [field.help ? helpID : '', operation.fieldErrors?.[field.name] ? errorID : ''].filter(Boolean).join(' ') || undefined;
+            return (
+            <label key={field.name} htmlFor={fieldID}>
+              <span>{field.label}</span>
+              {field.type === 'directory-search' ? (
+                <div className="adm-action-search">
+                  <input id={fieldID} value={operation.values[field.name] || ''} onChange={(event) => onChange(field.name, event.target.value)} placeholder={field.placeholder} aria-describedby={describedBy} aria-invalid={Boolean(operation.fieldErrors?.[field.name])} />
+                  <button type="button" disabled={busy || operation.lookupBusy} onClick={() => field.onSearch(operation.values[field.name] || '')}>
+                    {operation.lookupBusy ? labels.searching : labels.searchUsers}
+                  </button>
+                </div>
+              ) : field.type === 'select' ? (
+                <select id={fieldID} value={operation.values[field.name] || ''} onChange={(event) => onChange(field.name, event.target.value)} required={field.required} aria-describedby={describedBy} aria-invalid={Boolean(operation.fieldErrors?.[field.name])}>
+                  <option value="">{labels.choose}</option>
+                  {(field.options || []).map((option) => {
+                    const value = typeof option === 'string' ? option : option.value;
+                    const label = typeof option === 'string' ? option : option.label;
+                    return <option key={value} value={value}>{label}</option>;
+                  })}
+                </select>
+              ) : field.type === 'textarea' ? (
+                <textarea id={fieldID} rows={field.rows || 4} value={operation.values[field.name] || ''} onChange={(event) => onChange(field.name, event.target.value)} minLength={field.minLength} maxLength={field.maxLength} required={field.required} aria-describedby={describedBy} aria-invalid={Boolean(operation.fieldErrors?.[field.name])} />
+              ) : (
+                <input id={fieldID} type={field.type || 'text'} value={operation.values[field.name] || ''} onChange={(event) => onChange(field.name, event.target.value)} minLength={field.minLength} maxLength={field.maxLength} required={field.required} aria-describedby={describedBy} aria-invalid={Boolean(operation.fieldErrors?.[field.name])} />
+              )}
+              {field.help && <small id={helpID}>{field.help}</small>}
+              {operation.fieldErrors?.[field.name] && <small id={errorID} className="adm-field-error">{operation.fieldErrors[field.name]}</small>}
+            </label>
+            );
+          })}
+          {operation.error && <div className="adm-inline-message error" role="alert" aria-live="assertive">{operation.error}</div>}
+          <div className="adm-action-confirmation">
+            <strong>{labels.confirmation}</strong>
+            <span>{operation.confirmation}</span>
+          </div>
+          <div className="adm-row-actions">
+            <button type="button" disabled={busy || refreshRequired} onClick={onClose}>{labels.cancel}</button>
+            {refreshRequired ? (
+              <button type="button" disabled={busy} onClick={onRefresh}>{busy ? labels.refreshing : labels.refreshStatus}</button>
+            ) : (
+              <button className={operation.danger ? 'danger' : ''} disabled={busy}>{busy ? labels.submitting : labels.confirm}</button>
+            )}
+          </div>
+        </form>
+      </section>
+    </DetailDrawer>
   );
 }
 
@@ -2337,6 +2407,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const [holdDetail, setHoldDetail] = useState(null);
   const [lateReviewDetail, setLateReviewDetail] = useState(null);
   const [anomalyDetail, setAnomalyDetail] = useState(null);
+  const [actionPanel, setActionPanel] = useState(null);
+  const ownerSearchSequence = useRef(0);
   const [price, setPrice] = useState({
     model: '',
     input: '',
@@ -2379,6 +2451,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const canApproveControlResume = permissionSet.has('platform.billing.payment-controls.resume.approve');
   const canApproveAdjustment = permissionSet.has('platform.billing.repairs.approve');
   const canReleaseHold = permissionSet.has('platform.billing.holds.release');
+  const canReadUserDirectory = permissionSet.has('platform.users.read');
   const canManagePricing = permissionSet.has('platform.pricing.manage');
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
   const visibleTabs =
@@ -2551,7 +2624,82 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setBusy(false);
     }
   };
-  const promptReason = (label) => String(window.prompt(label) || '').trim();
+  const openActionPanel = (configuration) => {
+    ownerSearchSequence.current += 1;
+    const values = Object.fromEntries((configuration.fields || []).map((field) => [field.name, field.value || '']));
+    const idempotencyKey = configuration.idempotencyPrefix ? createFinanceIdempotencyKey(configuration.idempotencyPrefix) : '';
+    setActionPanel({ ...configuration, values, fieldErrors: {}, error: '', idempotencyKey, attempted: false, writeSucceeded: false, outcomeUnknown: false });
+  };
+  const changeActionField = (name, value) => setActionPanel((current) => ({
+    ...current,
+    values: { ...current.values, [name]: value },
+    fieldErrors: { ...current.fieldErrors, [name]: '' },
+    error: '',
+    idempotencyKey: current.attempted && current.idempotencyPrefix ? createFinanceIdempotencyKey(current.idempotencyPrefix) : current.idempotencyKey,
+    attempted: current.attempted && current.idempotencyPrefix ? false : current.attempted,
+  }));
+  const refreshActionPanel = async () => {
+    if (!actionPanel || busy) return;
+    setBusy(true);
+    setActionPanel((current) => ({ ...current, error: '' }));
+    try {
+      const result = actionPanel.after ? await actionPanel.after() : await reload();
+      if (!actionPanel.after && result === null) throw new Error('REFRESH_FAILED');
+      setActionPanel(null);
+      setNotice(copy.billing.actionPanel.statusRefreshed);
+    } catch (cause) {
+      const requestID = cause?.requestID ? copy.billing.actionPanel.requestID(cause.requestID) : '';
+      setActionPanel((current) => ({ ...current, error: `${copy.billing.actionPanel.refreshFailed}${requestID}` }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const submitActionPanel = async (event) => {
+    event.preventDefault();
+    if (!actionPanel || busy) return;
+    const labels = copy.billing.actionPanel;
+    const values = {};
+    const fieldErrors = {};
+    for (const field of actionPanel.fields || []) {
+      if (field.submit === false) continue;
+      const value = String(actionPanel.values[field.name] || '').trim();
+      values[field.name] = value;
+      if (field.required && !value) fieldErrors[field.name] = labels.required;
+      else if (field.minLength && [...value].length < field.minLength) fieldErrors[field.name] = labels.minimumLength(field.minLength);
+      else if (field.future && (!Number.isFinite(new Date(value).getTime()) || new Date(value).getTime() <= Date.now())) fieldErrors[field.name] = labels.futureTime;
+    }
+    if (Object.keys(fieldErrors).length) {
+      setActionPanel((current) => ({ ...current, values: { ...current.values, ...values }, fieldErrors }));
+      return;
+    }
+    setBusy(true);
+    setNotice('');
+    setError('');
+    setActionPanel((current) => ({ ...current, values: { ...current.values, ...values }, fieldErrors: {}, error: '', attempted: true }));
+    try {
+      const outcome = await executeStructuredFinanceAction({
+        execute: () => actionPanel.execute(values, { idempotencyKey: actionPanel.idempotencyKey }),
+        refresh: async () => {
+          const result = actionPanel.after ? await actionPanel.after() : await reload();
+          if (!actionPanel.after && result === null) throw new Error('REFRESH_FAILED');
+        },
+      });
+      setNotice(copy.billing.completed);
+      if (outcome.refreshed) setActionPanel(null);
+      else {
+        const requestID = outcome.refreshError?.requestID ? copy.billing.actionPanel.requestID(outcome.refreshError.requestID) : '';
+        setActionPanel((current) => ({ ...current, writeSucceeded: true, error: `${copy.billing.actionPanel.refreshFailed}${requestID}` }));
+      }
+    } catch (cause) {
+      const unknown = !actionPanel.idempotencyKey && isUnknownMutationOutcome(cause);
+      const mapped = labels.errors?.[cause?.code]
+        || (cause?.status === 401 ? labels.authenticationRequired : cause?.status === 403 ? copy.permissionDenied : cause?.status >= 500 ? labels.serviceUnavailable : copy.billing.actionFailed);
+      const requestID = cause?.requestID ? labels.requestID(cause.requestID) : '';
+      setActionPanel((current) => ({ ...current, outcomeUnknown: unknown, error: `${unknown ? labels.resultUnknown : mapped}${requestID}` }));
+    } finally {
+      setBusy(false);
+    }
+  };
   const createPrice = (event) => {
     event.preventDefault();
     const input = {
@@ -2666,16 +2814,33 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     onNavigate?.('approvals', { approval_command_type: 'WALLET_ADJUSTMENT', approval_target: item.adjustment_id });
   };
   const refund = (item) => {
-    const reason = promptReason(copy.billing.refundReason);
-    if (reason && orderDetail)
-      void perform(async () => {
-        await client.refundPaymentOrder(orderDetail.order_id, item.source_payment_transaction_id, item.package_id, reason);
-        setOrderDetail(await client.paymentOrder(orderDetail.order_id));
-      });
+    if (!orderDetail) return;
+    const orderID = orderDetail.order_id;
+    openActionPanel({
+      title: copy.billing.actionPanel.refundTitle,
+      danger: true,
+      idempotencyPrefix: 'target-refund',
+      summary: [
+        { label: copy.billing.order, value: orderDetail.merchant_order_no || orderID },
+        { label: copy.billing.packageID, value: item.package_id },
+      ],
+      fields: [{ name: 'reason', label: copy.billing.actionPanel.reason, type: 'textarea', required: true, minLength: 10, maxLength: 2000 }],
+      confirmation: copy.billing.actionPanel.refundConfirmation,
+      execute: ({ reason }, { idempotencyKey }) => client.refundPaymentOrder(orderID, item.source_payment_transaction_id, item.package_id, reason, idempotencyKey),
+      after: async () => {
+        await reload();
+        setOrderDetail(await client.paymentOrder(orderID));
+      },
+    });
   };
   const repair = (item) => {
-    const reason = promptReason(copy.billing.repairReason);
-    if (reason) void perform(() => client.repairPaymentOrder(item.order_id, reason));
+    openActionPanel({
+      title: copy.billing.actionPanel.repairTitle,
+      summary: [{ label: copy.billing.order, value: item.merchant_order_no || item.order_id }],
+      fields: [{ name: 'reason', label: copy.billing.actionPanel.reason, type: 'textarea', required: true, minLength: 10, maxLength: 2000 }],
+      confirmation: copy.billing.actionPanel.repairConfirmation,
+      execute: ({ reason }) => client.repairPaymentOrder(item.order_id, reason),
+    });
   };
   const searchOrders = async (event) => {
     event.preventDefault();
@@ -2692,8 +2857,18 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     await loadTab('receivables', { query });
   };
   const release = (item) => {
-    const reason = promptReason(copy.billing.releaseReason);
-    if (reason && window.confirm(copy.billing.confirmRelease)) void perform(() => client.releaseHold(item.hold_id, reason));
+    openActionPanel({
+      title: copy.billing.actionPanel.releaseTitle,
+      danger: true,
+      idempotencyPrefix: 'hold-release',
+      summary: [
+        { label: copy.billing.holdID, value: item.hold_id },
+        { label: copy.billing.maximum, value: formatUsagePoints(item.max_microcredits, language) },
+      ],
+      fields: [{ name: 'reason', label: copy.billing.actionPanel.reason, type: 'textarea', required: true, minLength: 10, maxLength: 2000 }],
+      confirmation: copy.billing.actionPanel.releaseConfirmation,
+      execute: ({ reason }, { idempotencyKey }) => client.releaseHold(item.hold_id, reason, idempotencyKey),
+    });
   };
   const showCases = async (run) => {
     setBusy(true);
@@ -2707,17 +2882,71 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       setBusy(false);
     }
   };
-  const updateReconciliationCase = (item, action) => {
-    const command = { action };
-    if (action === 'ASSIGN') command.owner_id = String(window.prompt(copy.billing.ownerPrompt, item.owner_id || '') || '').trim();
-    if (action === 'SET_REPAIR_ACTION') command.repair_action = promptReason(copy.billing.repairActionPrompt);
-    if (action === 'RESOLVE' || action === 'IGNORE') command.review_result = promptReason(copy.billing.reviewResultPrompt);
-    command.reason = promptReason(copy.billing.caseCommandReason);
-    if ([...command.reason].length < 10 || (action === 'ASSIGN' && !command.owner_id) || (action === 'SET_REPAIR_ACTION' && !command.repair_action) || ((action === 'RESOLVE' || action === 'IGNORE') && !command.review_result)) return;
-    void perform(async () => {
-      await client.updateReconciliationCase(item.case_id, command);
-      const result = await client.reconciliationCases(cases.run.reconciliation_run_id);
-      setCases((current) => ({ ...current, items: result.items || [] }));
+  const updateReconciliationCase = async (item, action) => {
+    if (action === 'CLAIM') {
+      void perform(async () => {
+        await client.updateReconciliationCase(item.case_id, { action, reason: copy.billing.actionPanel.claimReason });
+        const result = await client.reconciliationCases(cases.run.reconciliation_run_id);
+        setCases((current) => ({ ...current, items: result.items || [] }));
+      });
+      return;
+    }
+    const fields = [];
+    if (action === 'ASSIGN') {
+      if (!canReadUserDirectory) return;
+      const searchOwners = async (query) => {
+        const sequence = ++ownerSearchSequence.current;
+        setActionPanel((current) => current ? {
+          ...current,
+          lookupBusy: true,
+          error: '',
+          values: { ...current.values, owner_id: '' },
+          fieldErrors: { ...current.fieldErrors, owner_id: '' },
+        } : current);
+        try {
+          const result = await client.users(String(query || '').trim());
+          if (sequence !== ownerSearchSequence.current) return;
+          const options = (result.items || []).filter((user) => user.status === 'ACTIVE').map((user) => ({
+            value: user.user_id,
+            label: `${user.display_name || user.username || user.user_code} · ${user.user_code || shortID(user.user_id)}`,
+          }));
+          setActionPanel((current) => current ? {
+            ...current,
+            lookupBusy: false,
+            fields: current.fields.map((field) => field.name === 'owner_id' ? { ...field, options } : field),
+            fieldErrors: { ...current.fieldErrors, owner_id: options.length ? '' : copy.billing.actionPanel.noUsers },
+          } : current);
+        } catch {
+          if (sequence !== ownerSearchSequence.current) return;
+          setActionPanel((current) => current ? { ...current, lookupBusy: false, error: copy.billing.actionPanel.userDirectoryFailed } : current);
+        }
+      };
+      fields.push({
+        name: 'owner_query', label: copy.billing.actionPanel.userQuery, type: 'directory-search', submit: false,
+        placeholder: copy.billing.actionPanel.userQueryPlaceholder, help: copy.billing.actionPanel.userQueryHelp, onSearch: searchOwners,
+      });
+      fields.push({ name: 'owner_id', label: copy.billing.actionPanel.owner, type: 'select', required: true, value: item.owner_id || '', options: [] });
+    }
+    if (action === 'SET_REPAIR_ACTION') fields.push({ name: 'repair_action', label: copy.billing.actionPanel.repairAction, type: 'textarea', required: true, maxLength: 500, value: item.repair_action || '' });
+    if (action === 'RESOLVE' || action === 'IGNORE') fields.push({ name: 'review_result', label: copy.billing.actionPanel.reviewResult, type: 'textarea', required: true, maxLength: 2000, value: item.review_result || '' });
+    fields.push({ name: 'reason', label: copy.billing.actionPanel.reason, type: 'textarea', required: true, minLength: 10, maxLength: 2000 });
+    openActionPanel({
+      title: copy.billing.actionPanel.caseTitles[action],
+      danger: action === 'IGNORE',
+      idempotencyPrefix: 'reconciliation-case',
+      summary: [
+        { label: copy.billing.caseID, value: item.case_id },
+        { label: copy.billing.caseType, value: item.case_type },
+        { label: copy.billing.status, value: item.status },
+      ],
+      fields,
+      confirmation: copy.billing.actionPanel.caseConfirmations[action],
+      execute: (values, { idempotencyKey }) => client.updateReconciliationCase(item.case_id, { action, ...values }, idempotencyKey),
+      after: async () => {
+        await reload();
+        const result = await client.reconciliationCases(cases.run.reconciliation_run_id);
+        setCases((current) => ({ ...current, items: result.items || [] }));
+      },
     });
   };
   const showOrder = async (order) => {
@@ -2773,11 +3002,26 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       if (anomalyDetail) setAnomalyDetail(await client.paymentAnomaly(anomalyDetail.case.case_id));
     });
   const resolveAnomaly = (item) => {
-    const resolution = String(window.prompt(copy.billing.anomalyResolutionPrompt, 'ESCALATE_FINANCIAL_REPAIR') || '')
-      .trim()
-      .toUpperCase();
-    const reason = promptReason(copy.billing.anomalyResolutionReason);
-    if (resolution && [...reason].length >= 10) void performAnomaly(() => client.resolvePaymentAnomaly(item.case_id, resolution, reason));
+    const resolutionOptions = paymentAnomalyResolutionOptions(item);
+    if (!resolutionOptions.length) return;
+    openActionPanel({
+      title: copy.billing.actionPanel.anomalyTitle,
+      idempotencyPrefix: 'payment-anomaly-resolve',
+      summary: [
+        { label: copy.billing.caseID, value: item.case_id },
+        { label: copy.billing.anomalyType, value: item.anomaly_type },
+      ],
+      fields: [
+        { name: 'resolution', label: copy.billing.actionPanel.resolution, type: 'select', required: true, value: resolutionOptions[0], options: resolutionOptions },
+        { name: 'reason', label: copy.billing.actionPanel.reason, type: 'textarea', required: true, minLength: 10, maxLength: 2000 },
+      ],
+      confirmation: copy.billing.actionPanel.anomalyConfirmation,
+      execute: ({ resolution, reason }, { idempotencyKey }) => client.resolvePaymentAnomaly(item.case_id, resolution, reason, idempotencyKey),
+      after: async () => {
+        await reload();
+        setAnomalyDetail(await client.paymentAnomaly(item.case_id));
+      },
+    });
   };
   const performLate = (action) =>
     perform(async () => {
@@ -2785,13 +3029,40 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       if (lateReviewDetail) setLateReviewDetail(await client.latePaymentReview(lateReviewDetail.case.case_id));
     });
   const scheduleLate = (item) => {
-    const next = window.prompt(copy.billing.nextReviewPrompt, new Date(Date.now() + 86400000).toISOString().slice(0, 16));
-    const reason = promptReason(copy.billing.reviewReason);
-    if (next && reason) void performLate(() => client.scheduleLatePaymentReview(item.case_id, next, reason));
+    openActionPanel({
+      title: copy.billing.actionPanel.scheduleTitle,
+      summary: [
+        { label: copy.billing.caseID, value: item.case_id },
+        { label: copy.billing.order, value: item.merchant_order_no },
+      ],
+      fields: [
+        { name: 'next_review_at', label: copy.billing.nextReview, type: 'datetime-local', required: true, future: true, value: new Date(Date.now() + 86400000).toISOString().slice(0, 16) },
+        { name: 'reason', label: copy.billing.actionPanel.reason, type: 'textarea', required: true, minLength: 10, maxLength: 500 },
+      ],
+      confirmation: copy.billing.actionPanel.scheduleConfirmation,
+      execute: ({ next_review_at, reason }) => client.scheduleLatePaymentReview(item.case_id, next_review_at, reason),
+      after: async () => {
+        await reload();
+        setLateReviewDetail(await client.latePaymentReview(item.case_id));
+      },
+    });
   };
   const markProviderBlind = (item) => {
-    const reason = promptReason(copy.billing.providerBlindReason);
-    if (reason) void performLate(() => client.escalateProviderBlind(item.case_id, reason));
+    openActionPanel({
+      title: copy.billing.actionPanel.providerBlindTitle,
+      danger: true,
+      summary: [
+        { label: copy.billing.caseID, value: item.case_id },
+        { label: copy.billing.provider, value: item.provider_id },
+      ],
+      fields: [{ name: 'reason', label: copy.billing.actionPanel.reason, type: 'textarea', required: true, minLength: 10, maxLength: 500 }],
+      confirmation: copy.billing.actionPanel.providerBlindConfirmation,
+      execute: ({ reason }) => client.escalateProviderBlind(item.case_id, reason),
+      after: async () => {
+        await reload();
+        setLateReviewDetail(await client.latePaymentReview(item.case_id));
+      },
+    });
   };
   const importBill = (event) => {
     const file = event.target.files?.[0];
@@ -3240,8 +3511,22 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     }),
     [busy, canApproveAdjustment, canRequestAdjustment, client, copy, data.adjustmentApprovals, language, normalRefundCreationEnabled, repairSupported],
   );
+  const renderWithActionPanel = (content) => (
+    <>
+      {content}
+      <StructuredActionPanel
+        operation={actionPanel}
+        copy={copy}
+        busy={busy}
+        onChange={changeActionField}
+        onClose={() => setActionPanel(null)}
+        onRefresh={refreshActionPanel}
+        onSubmit={submitActionPanel}
+      />
+    </>
+  );
   if (ledger)
-    return (
+    return renderWithActionPanel(
       <BillingDetail
         copy={copy}
         title={`${copy.billing.ledger} · ${shortID(ledger.wallet.wallet_id)}`}
@@ -3285,7 +3570,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       />
     );
   if (receivableDetail)
-    return (
+    return renderWithActionPanel(
       <BillingDetail
         copy={copy}
         title={`${copy.billing.allocations} · ${shortID(receivableDetail.receivable.receivable_id)}`}
@@ -3317,7 +3602,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       />
     );
   if (holdDetail)
-    return (
+    return renderWithActionPanel(
       <DetailDrawer label={`${copy.billing.holdEvidence} · ${shortID(holdDetail.hold.hold_id)}`} onClose={() => setHoldDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setHoldDetail(null)}>
@@ -3416,7 +3701,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       </DetailDrawer>
     );
   if (cases)
-    return (
+    return renderWithActionPanel(
       <BillingDetail
         copy={copy}
         title={`${copy.billing.cases} · ${cases.run.business_date}`}
@@ -3467,9 +3752,11 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
                     {copy.billing.claimReview}
                   </button>
                 )}
-                <button disabled={busy || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'ASSIGN')}>
-                  {copy.billing.assignOwner}
-                </button>
+                {canReadUserDirectory && (
+                  <button disabled={busy || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'ASSIGN')}>
+                    {copy.billing.assignOwner}
+                  </button>
+                )}
                 <button disabled={busy || !item.owner_id || !['OPEN', 'IN_REVIEW'].includes(item.status)} onClick={() => updateReconciliationCase(item, 'SET_REPAIR_ACTION')}>
                   {copy.billing.setRepairAction}
                 </button>
@@ -3488,7 +3775,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     );
   if (anomalyDetail) {
     const item = anomalyDetail.case;
-    return (
+    return renderWithActionPanel(
       <DetailDrawer label={`${copy.billing.anomalyDetail} · ${item.anomaly_type}`} onClose={() => setAnomalyDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setAnomalyDetail(null)}>
@@ -3501,7 +3788,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
                 {copy.billing.claimReview}
               </button>
             )}
-            <button disabled={busy || !canRequestRepair || item.status !== 'OPEN' || !item.owner_id} title={!canRequestRepair ? copy.permissionDenied : undefined} onClick={() => resolveAnomaly(item)}>
+            <button disabled={busy || !canRequestRepair || item.status !== 'OPEN' || !item.owner_id || !paymentAnomalyResolutionOptions(item).length} title={!canRequestRepair ? copy.permissionDenied : undefined} onClick={() => resolveAnomaly(item)}>
               {copy.billing.resolveCase}
             </button>
           </div>
@@ -3568,7 +3855,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   if (lateReviewDetail) {
     const item = lateReviewDetail.case;
     const active = ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND'].includes(item.review_status);
-    return (
+    return renderWithActionPanel(
       <DetailDrawer label={`${copy.billing.reviewDetail} · ${item.merchant_order_no}`} onClose={() => setLateReviewDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setLateReviewDetail(null)}>
@@ -3678,7 +3965,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     );
   }
   if (orderDetail)
-    return (
+    return renderWithActionPanel(
       <DetailDrawer label={`${copy.billing.orderDetail} · ${orderDetail.merchant_order_no}`} onClose={() => setOrderDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setOrderDetail(null)}>
@@ -3816,6 +4103,15 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     );
   return (
     <section className={embedded ? 'adm-finance-subpanel' : 'adm-panel'}>
+      <StructuredActionPanel
+        operation={actionPanel}
+        copy={copy}
+        busy={busy}
+        onChange={changeActionField}
+        onClose={() => setActionPanel(null)}
+        onRefresh={refreshActionPanel}
+        onSubmit={submitActionPanel}
+      />
       {!embedded && <SectionHeader title={surface === 'payments' ? copy.billing.paymentsTitle : surface === 'products' ? copy.nav.products : copy.billing.title} copy={copy}>
         <div className="adm-row-actions">
           {activeTabState.updatedAt && <small>{copy.updated} {new Date(activeTabState.updatedAt).toLocaleTimeString()}</small>}
@@ -3867,6 +4163,10 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             {copy.billing.adjustmentReason}
             <input minLength="10" maxLength="2000" value={adjustment.reason} onChange={(event) => setAdjustment((current) => ({ ...current, reason: event.target.value }))} required />
           </label>
+          <div className="adm-action-confirmation">
+            <strong>{copy.billing.actionPanel.confirmation}</strong>
+            <span>{copy.billing.actionPanel.adjustmentConfirmation(adjustment.walletID ? shortID(adjustment.walletID) : '—', adjustment.amount || '—')}</span>
+          </div>
           <button disabled={busy}>{copy.billing.submitAdjustment}</button>
           <small>{copy.billing.adjustmentApprovalBoundary}</small>
         </form>

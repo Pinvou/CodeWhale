@@ -56,6 +56,8 @@ test('admin contract and portal expose evidence without a balance mutation route
   assert.ok(contract.paths['/billing/admin/v1/usage-holds/{hold_id}/release'].post.parameters.some(parameter => parameter.$ref?.endsWith('/IdempotencyKey')));
   assert.ok(contract.components.schemas.UsageHoldDetail.properties.component_allocations);
   assert.match(client, /hold\(holdID, signal\)/);
-  assert.match(client, /hold-release-\$\{crypto\.randomUUID\(\)\}/);
+  assert.match(client, /releaseHold\(holdID, reason, idempotencyKey\)/);
+  assert.match(client, /\{ reason \}, idempotencyKey/);
+  assert.match(view, /idempotencyPrefix: 'hold-release'/);
   assert.match(view, /holdDetail\.lease_events/);
 });

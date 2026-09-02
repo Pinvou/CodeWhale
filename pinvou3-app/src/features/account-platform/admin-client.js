@@ -301,7 +301,7 @@ export class AdminPlatformClient {
   repairPaymentOrder(orderID, reason) {
     return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason });
   }
-  refundPaymentOrder(orderID, transactionID, packageID, reason) {
+  refundPaymentOrder(orderID, transactionID, packageID, reason, idempotencyKey) {
     return this.mutate(
       'billing',
       `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`,
@@ -311,7 +311,7 @@ export class AdminPlatformClient {
         entitlement_package_id: packageID,
         reason,
       },
-      `target-refund-${crypto.randomUUID()}`,
+      idempotencyKey,
     );
   }
   adjustments(signal) {
@@ -340,8 +340,8 @@ export class AdminPlatformClient {
   hold(holdID, signal) {
     return this.request('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}`, signal);
   }
-  releaseHold(holdID, reason) {
-    return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }, `hold-release-${crypto.randomUUID()}`);
+  releaseHold(holdID, reason, idempotencyKey) {
+    return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }, idempotencyKey);
   }
   reconciliationRuns(signal) {
     return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal);
@@ -362,8 +362,8 @@ export class AdminPlatformClient {
   reconciliationCases(runID, signal) {
     return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal);
   }
-  updateReconciliationCase(caseID, command) {
-    return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, `reconciliation-case-${crypto.randomUUID()}`);
+  updateReconciliationCase(caseID, command, idempotencyKey = `reconciliation-case-${crypto.randomUUID()}`) {
+    return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, idempotencyKey);
   }
   latePaymentReviews(filters = {}, signal) {
     const query = new URLSearchParams({ limit: ['25', '50', '100', '200'].includes(String(filters.limit)) ? String(filters.limit) : '100' });
@@ -401,8 +401,8 @@ export class AdminPlatformClient {
   claimPaymentAnomaly(caseID) {
     return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/claim`, 'POST', {}, `payment-anomaly-claim-${crypto.randomUUID()}`);
   }
-  resolvePaymentAnomaly(caseID, resolution, reason) {
-    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, `payment-anomaly-resolve-${crypto.randomUUID()}`);
+  resolvePaymentAnomaly(caseID, resolution, reason, idempotencyKey) {
+    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, idempotencyKey);
   }
   tokenOverview(signal) {
     return this.request('token', '/admin/v1/overview', signal);
