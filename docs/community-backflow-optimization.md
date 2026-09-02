@@ -65,7 +65,8 @@ node scripts/community-backflow.mjs submit \
 
 `queue` 和 `submit` 优先使用 `GITHUB_TOKEN` 或 `GH_TOKEN`；使用 Git Credential Manager
 时由操作者显式传入 `--credential <github-username>`，工具不内置个人账号。GitHub API 请求
-使用 15 秒超时，并对网络错误、限流和临时 5xx 最多重试 3 次。请求正文始终以 UTF-8 字节发送，创建或更新后逐字回读
+使用 15 秒超时；只读请求（GET/HEAD）对网络错误、限流和临时 5xx 最多重试 3 次，写请求不自动
+重试（fail-closed 契约见下文“事件驱动自动推进”）。请求正文始终以 UTF-8 字节发送，创建或更新后逐字回读
 标题和正文。Token 不写入输出、文件或 PR。
 
 PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI 版本、base/head SHA
@@ -112,6 +113,12 @@ Release 回流第一阶段用幂等评论明确返回
 `deferred-release`，不删除分支、不改标签、不关闭 Issue；其 `release-packages.yml` 去重触发与
 构建链接回读仍按后文
 人工契约完成，避免缺失固件构建证据时错误收尾。
+
+事件消费与恢复边界：非 `backflow/community-<n>` 分支的 PR Check 成功事件或普通已合并 PR
+会被安全跳过（`not-a-backflow-pull-request`），不产生失败任务。收尾路径的写步骤没有天然的
+“下一次事件”：某一步失败后需人工重跑失败的 workflow run（重放按上文契约幂等收敛），或转
+人工按 Skill 收尾；自动器不主动通知。入队后被合并队列踢出时，若 head checks 重新成功，自动器
+会按同一契约再次入队，该重入队路径没有退避上限；持续组合失败应人工介入并改走人工收尾流程。
 
 GitHub 的 `enqueuePullRequest` 接口本身不接受逐 PR merge method，不能据此声称 squash。
 自动器在每次推进前通过 GraphQL 回读 Official `main` 的
