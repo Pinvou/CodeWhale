@@ -6929,6 +6929,113 @@ fn engine_handle_cancel_tracks_latest_turn_token() {
 }
 
 #[test]
+fn engine_handle_cancel_turn_only_fires_the_named_turns_token() {
+    let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
+    // No turn installed yet: the slot carries no identity, so every
+    // turn-bound cancel must skip instead of firing the anonymous token.
+    assert!(!handle.cancel_turn("turn-1", CancelReason::User, CancelMode::StopDropInbox));
+    assert!(!handle.is_cancelled());
+
+    engine.install_turn_cancel_token("turn-1");
+    assert!(handle.cancel_turn("turn-1", CancelReason::User, CancelMode::StopDropInbox));
+    assert!(engine.cancel_token.is_cancelled());
+
+    // A follow-up turn swaps the slot — exactly what a runtime self-started
+    // continuation (idle sub-agent completion, background shell wake, goal
+    // continuation) does before the host observes its `TurnStarted`.
+    engine.install_turn_cancel_token("turn-2");
+    let followup_token = engine.cancel_token.clone();
+    // A stale cancel still targeting turn-1 must skip: it may not fire the
+    // follow-up's token, and it must not latch a steer disposition for it.
+    assert!(!handle.cancel_turn("turn-1", CancelReason::User, CancelMode::StopDropInbox));
+    assert!(
+        !followup_token.is_cancelled(),
+        "stale turn-bound cancel must not fire the follow-up turn's token"
+    );
+    // The follow-up's own cancel still lands on its token.
+    assert!(handle.cancel_turn("turn-2", CancelReason::User, CancelMode::InterruptKeepInbox));
+    assert!(followup_token.is_cancelled());
+}
+
+#[tokio::test]
+async fn forkguard_cancel_turn_binding_spares_unnamed_turns_and_hits_the_observed_turn() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let request_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(BlockingModelClient {
+            entered: std::sync::Arc::clone(&entered),
+            request_dropped: std::sync::Arc::clone(&request_dropped),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Cancel must bind to the observed turn id.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+    let turn_id = {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for TurnStarted")
+                .expect("engine event");
+            if let Event::TurnStarted { turn_id, .. } = event {
+                break turn_id;
+            }
+        }
+    };
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("model request was never entered");
+
+    // A host cancel bound to a turn identity the engine never installed
+    // (stale target, or a follow-up turn the host has not observed yet —
+    // pinvou-agent#254) must not fire the running turn's token and must not
+    // disturb the in-flight provider request.
+    assert!(!handle.cancel_turn(
+        "turn-that-never-ran",
+        CancelReason::User,
+        CancelMode::StopDropInbox,
+    ));
+    assert!(
+        !handle.is_cancelled(),
+        "turn-bound cancel with a foreign turn id fired the live token"
+    );
+    assert!(!request_dropped.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Cancelling the turn id observed from `TurnStarted` lands on exactly
+    // that turn: same interrupted terminal, same dropped provider future as
+    // the mode-less cancel path.
+    assert!(handle.cancel_turn(&turn_id, CancelReason::User, CancelMode::StopDropInbox,));
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for cancellation")
+    {
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+    assert!(
+        request_dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "turn-bound cancellation must drop the active provider future"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[test]
 fn engine_initial_prompt_includes_configured_goal() {
     let config = EngineConfig {
         goal_objective: Some("Fix goal handoff".to_string()),
@@ -17148,7 +17255,10 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     let handle = EngineHandle {
         tx_op,
         rx_event: Arc::new(RwLock::new(mpsc::channel::<Event>(1).1)),
-        cancel_token: Arc::new(StdMutex::new(cancel_token)),
+        cancel_token: Arc::new(StdMutex::new(super::TurnCancelSlot {
+            turn_id: None,
+            token: cancel_token,
+        })),
         cancel_reason: Arc::new(StdMutex::new(None)),
         tx_approval: mpsc::channel(1).0,
         tx_user_input: mpsc::channel(1).0,

@@ -579,6 +579,32 @@ pub enum CancelMode {
     StopDropInbox,
 }
 
+/// Turn-scoped cancellation slot shared between the engine and its hosts.
+///
+/// The engine installs a fresh token under the starting turn's identity at
+/// every turn start, atomically replacing the previous entry under one lock.
+/// Hosts that cancel through [`EngineHandle::cancel_turn`] resolve the token
+/// under that same lock only while the slot still names the target turn, so
+/// a host whose turn view is stale — the engine swapped tokens for a
+/// self-started follow-up turn (idle sub-agent completion, background shell
+/// wake, goal continuation) before the host observed it — can never fire the
+/// newer turn's token.
+#[derive(Clone, Debug)]
+pub struct TurnCancelSlot {
+    /// Identity of the turn owning [`Self::token`] — the engine-minted
+    /// `TurnContext::id`, the same value carried by `Event::TurnStarted`.
+    /// `None` before the first turn and after an engine-side reset that is
+    /// not bound to a turn (`Op::CancelRequest`): nothing cancellable is
+    /// bound to a named turn, so every turn-bound cancel must skip.
+    pub turn_id: Option<String>,
+    pub token: CancellationToken,
+}
+
+/// Lock-protected slot held jointly by the engine and every
+/// [`EngineHandle`] clone. The engine swaps the whole entry at turn start;
+/// hosts read-verify-clone under the same lock to cancel one exact turn.
+pub type SharedCancelToken = Arc<StdMutex<TurnCancelSlot>>;
+
 /// Outcome of withdrawing a queued steer by id. Hosts that re-send the same
 /// input through another path (e.g. interrupt-and-send) need to know whether
 /// the engine copy can still be committed, otherwise the same message may be
@@ -814,8 +840,11 @@ pub struct EngineHandle {
     pub tx_op: mpsc::Sender<Op>,
     /// Receive events from the engine
     pub rx_event: Arc<RwLock<mpsc::Receiver<Event>>>,
-    /// Shared pointer to the cancellation token for the current request.
-    cancel_token: Arc<StdMutex<CancellationToken>>,
+    /// Shared pointer to the cancellation slot for the current request. The
+    /// engine swaps the whole slot (identity + token) at every turn start;
+    /// `cancel_with_mode` cancels whatever token currently occupies it,
+    /// `cancel_turn` cancels only the named turn's token.
+    cancel_token: SharedCancelToken,
     /// Latched reason for the most recent cancellation. Read by the
     /// approval / user-input handlers to enrich their error strings.
     /// Cleared by the engine when a fresh turn starts.
@@ -934,7 +963,7 @@ pub struct Engine {
     /// delivery.
     delivered_subagent_completion_ids: HashSet<String>,
     cancel_token: CancellationToken,
-    shared_cancel_token: Arc<StdMutex<CancellationToken>>,
+    shared_cancel_token: SharedCancelToken,
     /// Latched reason for the current cancellation, mirrored to
     /// `EngineHandle::cancel_reason`. Read by `approval.rs` when
     /// surfacing the "Request cancelled while awaiting …" error so the
@@ -1280,15 +1309,37 @@ impl Engine {
             .await;
     }
 
+    /// Install a fresh cancellation token with no turn identity: used by the
+    /// engine-side `Op::CancelRequest` reset, where the cancelled turn is over
+    /// and the follow-up token belongs to no named turn yet. Turn starts must
+    /// use [`Self::install_turn_cancel_token`] so hosts can bind their cancels.
     fn reset_cancel_token(&mut self) {
+        self.install_cancel_slot(None);
+    }
+
+    /// Install this turn's cancellation token bound to `turn_id` as one
+    /// atomic slot swap. Hosts cancel through the turn-bound slot, so the
+    /// token swap and the identity swap must be a single step: a cancel that
+    /// resolves the token under the slot lock either sees the previous turn's
+    /// identity and token (cancels them — correct) or this turn's (skips —
+    /// the newer turn is not the cancel's target).
+    fn install_turn_cancel_token(&mut self, turn_id: &str) {
+        self.install_cancel_slot(Some(turn_id.to_string()));
+    }
+
+    fn install_cancel_slot(&mut self, turn_id: Option<String>) {
         let token = CancellationToken::new();
         self.cancel_token = token.clone();
+        let slot = TurnCancelSlot {
+            turn_id,
+            token: token.clone(),
+        };
         match self.shared_cancel_token.lock() {
             Ok(mut shared) => {
-                *shared = token;
+                *shared = slot;
             }
             Err(poisoned) => {
-                *poisoned.into_inner() = token;
+                *poisoned.into_inner() = slot;
             }
         }
         // Fresh turn → clear any latched cancellation reason from the
@@ -1457,7 +1508,10 @@ impl Engine {
         let (tx_steer, rx_steer) = mpsc::channel(64);
         let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
-        let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
+        let shared_cancel_token: SharedCancelToken = Arc::new(StdMutex::new(TurnCancelSlot {
+            turn_id: None,
+            token: cancel_token.clone(),
+        }));
         let steer_control = Arc::new(StdMutex::new(SteerControlState::default()));
         let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
         let shared_paused = Arc::new(StdMutex::new(false));
@@ -1713,7 +1767,6 @@ impl Engine {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
     ) {
-        self.reset_cancel_token();
         self.turn_counter = self.turn_counter.saturating_add(1);
 
         let turn_id = format!(
@@ -1721,6 +1774,10 @@ impl Engine {
             USER_SHELL_TOOL_ID_PREFIX,
             seq = self.turn_counter
         );
+        // Bind the fresh cancellation token to this turn's identity before
+        // anything else observes the turn (same turn-bound slot contract as
+        // `handle_send_message`).
+        self.install_turn_cancel_token(&turn_id);
         let tool_id = turn_id.clone();
         let tool_name = "Bash".to_string();
         let tool_input = json!({ "action": "run", "command": command, "source": "user" });
@@ -4573,8 +4630,18 @@ impl Engine {
         if let Some(status) = input_policy.status() {
             let _ = self.tx_event.send(Event::status(status)).await;
         }
-        // Reset cancel token for fresh turn (in case previous was cancelled)
-        self.reset_cancel_token();
+        // Create turn context first so the fresh cancellation token can be
+        // installed under this turn's identity and the start event includes a
+        // stable turn id. The token swap and the identity swap are one atomic
+        // slot step: hosts cancel through the turn-bound slot, so a cancel
+        // racing this install either hits the previous turn's token (its
+        // target) or skips this turn entirely — it can never fire this new
+        // token while believing it targets the previous turn (Pinvou
+        // pinvou-agent#254: runtime self-started turns swapped the shared
+        // token before the host observed `TurnStarted`, so a stale
+        // generation-matched cancel killed the follow-up turn).
+        let mut turn = TurnContext::new(self.config.max_steps);
+        self.install_turn_cancel_token(&turn.id);
 
         // Track the complete effective mode policy so mid-turn metadata, `/edit`,
         // idle worker resumptions, and approval gates cannot read a stale policy
@@ -4590,8 +4657,6 @@ impl Engine {
         // turns". Steers collected into `pending_steers` by an interrupted
         // turn were already parked back by the turn loop.
 
-        // Create turn context first so start event includes a stable turn id.
-        let mut turn = TurnContext::new(self.config.max_steps);
         // Publish the active steer destination before `TurnStarted`. Hosts
         // may steer or cancel as soon as they observe that event, and both
         // operations must resolve against this exact generation.
@@ -6522,7 +6587,10 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     let (tx_user_input, rx_user_input) = mpsc::channel(32);
     let (tx_steer, rx_steer) = mpsc::channel(64);
     let cancel_token = CancellationToken::new();
-    let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
+    let shared_cancel_token: SharedCancelToken = Arc::new(StdMutex::new(TurnCancelSlot {
+        turn_id: None,
+        token: cancel_token.clone(),
+    }));
     let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
     let shared_paused = Arc::new(StdMutex::new(false));
     let live_runtime_authority = Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
