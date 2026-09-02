@@ -1,4 +1,5 @@
 import re
+import tomllib
 import unittest
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -9,6 +10,7 @@ PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
 MAC_BUILD_WORKFLOW = ROOT / ".github/workflows/mac-build.yml"
 PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
+TAURI_MANIFEST = ROOT / "pinvou3-app/src-tauri/Cargo.toml"
 
 
 def _extract_quoted_paths(block):
@@ -426,8 +428,9 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
 
-    def test_windows_rust_test_cumulative_main_push_is_path_independent(self):
-        # Main's Windows regression must remain independent of adjacent diff paths.
+    def test_windows_rust_test_parallel_phases_preserve_routing_and_coverage(self):
+        # Both matrix legs retain the exact cumulative/high-risk route; splitting
+        # compile graphs must not turn either leg into an optional check.
         windows_rust_test = _without_yaml_comments(
             self.pr_workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
                 "\n  windows-rustup-repair-test:", maxsplit=1
@@ -449,6 +452,46 @@ class CiGatePolicyTests(unittest.TestCase):
             "github.event.pull_request.draft == false", windows_rust_test
         )
         self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
+        self.assertIn("name: windows-rust-test (${{ matrix.phase }})", windows_rust_test)
+        self.assertIn("fail-fast: false", windows_rust_test)
+        self.assertIn("max-parallel: 2", windows_rust_test)
+        self.assertIn("phase: [all-targets-check, regression]", windows_rust_test)
+
+        self.assertIn(
+            "- name: Windows Rust 全目标检查\n"
+            "        if: ${{ matrix.phase == 'all-targets-check' }}",
+            windows_rust_test,
+        )
+        self.assertIn("--all-targets --features dev-tools", windows_rust_test)
+        self.assertIn(
+            "- name: Windows Rust 单元测试链接检查\n"
+            "        if: ${{ matrix.phase == 'regression' }}",
+            windows_rust_test,
+        )
+        self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
+
+        # Both isolated legs restore one established namespace, but only the
+        # regression/main leg may save. This avoids a second cache writer/key.
+        self.assertIn("- name: Cargo cache", windows_rust_test)
+        self.assertIn("shared-key: windows-rust-test", windows_rust_test)
+        self.assertIn(
+            "save-if: ${{ matrix.phase == 'regression' && "
+            "github.ref == 'refs/heads/main' }}",
+            windows_rust_test,
+        )
+        self.assertEqual(windows_rust_test.count("shared-key:"), 1)
+        self.assertNotIn(
+            "if: ${{ matrix.phase == 'regression' }}\n"
+            "        uses: Swatinem/rust-cache",
+            windows_rust_test,
+        )
+        self.assertIn("WINDOWS_RUST_CACHE", windows_rust_test)
+        self.assertIn("WINDOWS_RUST_TIMING", windows_rust_test)
+
+        # Node/npm were inherited from a retired JS-contract step. The remaining
+        # Rust build scripts and six filtered regressions do not consume node_modules.
+        self.assertNotIn("actions/setup-node", windows_rust_test)
+        self.assertNotIn("npm --prefix pinvou3-app ci", windows_rust_test)
 
         self.assertIn(
             "defaults:\n      run:\n        shell: bash",
@@ -463,6 +506,16 @@ class CiGatePolicyTests(unittest.TestCase):
         )[1]
         self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
         self.assertNotIn("cargo test", regression)
+        for filter_name in (
+            "platform::filesystem::tests::windows_",
+            "platform::paths::tests::managed_python_",
+            "artifact_read_recovers_an_occupied_1177_layout_after_release",
+            "artifact_writes_never_expose_partial_utf8_to_concurrent_readers",
+            "artifact_public_read_",
+            "features::memory::tests::topic_migration_",
+        ):
+            self.assertEqual(regression.count(filter_name), 1)
+        self.assertIn("running [1-9][0-9]* tests?", regression)
 
         required_gate = self.pr_workflow.split(
             "\n  required-gate:", maxsplit=1
@@ -470,6 +523,25 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("- windows-rust-test", required_gate)
         self.assertIn("WINDOWS_RUST_RESULT", required_gate)
         self.assertIn('"windows-rust-test:$WINDOWS_RUST_RESULT"', required_gate)
+
+    def test_windows_rust_split_matches_the_declared_feature_graph(self):
+        with TAURI_MANIFEST.open("rb") as manifest_file:
+            manifest = tomllib.load(manifest_file)
+        features = manifest["features"]
+        self.assertEqual(features["default"], ["local-embed"])
+        self.assertEqual(features["dev-tools"], [])
+        dump_prompt = next(
+            binary for binary in manifest["bin"]
+            if binary["name"] == "dump_system_prompt"
+        )
+        self.assertEqual(dump_prompt["required-features"], ["dev-tools"])
+
+        windows_rust_test = self.pr_workflow.split(
+            "\n  windows-rust-test:", maxsplit=1
+        )[1].split("\n  windows-rustup-repair-test:", maxsplit=1)[0]
+        self.assertIn("--all-targets --features dev-tools", windows_rust_test)
+        self.assertIn("--lib --no-run --message-format=json", windows_rust_test)
+        self.assertNotIn("--lib --no-run --features dev-tools", windows_rust_test)
 
     def test_windows_browser_wrapper_lifecycle_runs_in_required_native_job(self):
         changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(

@@ -181,6 +181,14 @@ class WorkflowStepOrderContractTests(unittest.TestCase):
         self.assertIn("ci-windows-imports-diagnose.py", block)
         self.assertIn("PINVOU3_TEST_EXE", block)
 
+    def test_manifest_and_diagnose_stay_on_the_regression_leg(self):
+        for step_name in (
+            "Windows 测试 exe 嵌入 Common-Controls v6 清单",
+            "Windows 测试二进制导入诊断",
+        ):
+            _, block = self._step_block(step_name)
+            self.assertIn("if: ${{ matrix.phase == 'regression' }}", block)
+
 
 if __name__ == "__main__":
     unittest.main()
