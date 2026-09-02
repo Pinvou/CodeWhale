@@ -271,6 +271,22 @@ export class AdminPlatformClient {
   billingOverview(signal) {
     return this.request('billing', '/admin/v1/overview', signal);
   }
+  financeAccountsOverview(signal) {
+    return this.request('billing', '/admin/v1/finance-overviews/accounts', signal);
+  }
+  financePaymentsOverview(window = {}, signal) {
+    const query = new URLSearchParams();
+    if (window.from) query.set('from', window.from);
+    if (window.to) query.set('to', window.to);
+    const suffix = query.size ? `?${query}` : '';
+    return this.request('billing', `/admin/v1/finance-overviews/payments${suffix}`, signal);
+  }
+  financePricingOverview(signal) {
+    return this.request('billing', '/admin/v1/finance-overviews/pricing', signal);
+  }
+  financeProductsOverview(signal) {
+    return this.request('billing', '/admin/v1/finance-overviews/products', signal);
+  }
   wallets(filters = {}, signal) {
     const query = billingCollectionQuery(filters, { keys: ['owner_type', 'status', 'q'] });
     return this.request('billing', `/admin/v1/wallets?${query}`, signal);

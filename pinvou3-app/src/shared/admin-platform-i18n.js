@@ -279,6 +279,25 @@ export const adminPlatformCopy = {
       effectiveTo: '失效时间',
       pricingReadOnlyTitle: '模型价格暂为只读',
       pricingReadOnlyDescription: '当前仅展示已生效和历史价格。旧版直接激活入口已停用；草稿、预览、发布和转换将在新版生命周期管理启用后提供。',
+      overview: {
+        eyebrow: '运营概览', unavailable: '该概览暂时不可用，其他财务功能不受影响。', statuses: '统计状态', notApplicable: '不适用', updated: '数据时点', noDenominator: '数量为完整统计，不代表当前列表页条数，也不使用比例分母', viewFiltered: '查看已筛选明细 →', viewUnfiltered: '查看相关明细（口径不可完全复现）→', defaultDescription: '按服务端固定口径统计。',
+        pointInTime: (asOf) => `点时统计 · ${asOf}`,
+        window: (from, to, timezone) => `统计窗口 · ${from} 至 ${to}（${timezone}，左闭右开）`,
+        titles: { accounts: '账户与资金概览', payments: '支付与风险概览', pricing: '定价与计量概览', products: '充值商品概览' },
+        units: { COUNT: '项', MICROCREDITS: '积分', CNY_FEN: '人民币' },
+        metrics: {
+          wallet_count: '钱包总数', posted_microcredits: '账面积分', reserved_microcredits: '预占积分', available_microcredits: '可用积分', receivable_microcredits: '应收积分', pending_adjustment_count: '待审批调整', at_risk_hold_count: '风险预占',
+          orders_created_count: '新建支付订单', payments_received_fen: '实收金额', late_review_open_count: '待处理晚到支付', payment_anomaly_open_count: '未结支付异常', reconciliation_open_count: '未结对账差异', refund_attention_count: '需关注退款', provider_controlled_count: '受控支付渠道', product_controlled_count: '受控支付商品',
+          price_draft_count: '价格草稿', price_future_count: '未来生效价格', price_active_count: '当前生效价格', price_ended_or_cancelled_count: '已结束或取消价格', metering_active_count: '有效计量单位', metering_inactive_count: '停用计量单位',
+          product_draft_count: '商品草稿', product_on_sale_count: '在售商品', product_off_sale_count: '下架商品', product_deleted_count: '已删除商品', admission_pending_count: '准入验证中', admission_blocked_count: '准入受阻',
+        },
+        descriptions: {
+          wallet_count: '统计所有未物理删除的钱包。', posted_microcredits: '汇总全部钱包当前账面投影。', reserved_microcredits: '汇总全部钱包当前预占投影。', available_microcredits: '账面减去预占和应收后的当前可用投影。', receivable_microcredits: '汇总全部钱包当前应收投影。', pending_adjustment_count: '仅统计 PENDING_APPROVAL 调整，可精确筛选。', at_risk_hold_count: '统计 REVIEW，或已到期但仍为 ACTIVE 的 Hold。',
+          orders_created_count: '统计创建时间落入所示左闭右开窗口的订单。', payments_received_fen: '统计窗口内 PAID/LATE_PAID 交易；优先使用 Provider 支付时间，否则使用核验时间，同一交易只计一次。', late_review_open_count: '统计晚到支付复核的非终态集合。', payment_anomaly_open_count: '仅统计 OPEN 支付异常，可精确筛选。', reconciliation_open_count: '统计 OPEN 或 IN_REVIEW 对账差异，不等同于对账运行状态。', refund_attention_count: '统计 FAILED 或 MANUAL_REVIEW 退款。', provider_controlled_count: '统计当前仍阻断新单的 Provider 级控制。', product_controlled_count: '统计当前仍阻断新单的商品级控制，与 Provider 控制分别计算。',
+          price_draft_count: '按互斥派生状态统计 DRAFT 价格。', price_future_count: '按互斥派生状态统计未来生效的 PUBLISHED 价格。', price_active_count: '按互斥派生状态统计当前 ACTIVE 价格。', price_ended_or_cancelled_count: '合计 ENDED 与 CANCELLED 价格。', metering_active_count: '统计当前有效的计量单位版本。', metering_inactive_count: '统计当前停用的计量单位版本。',
+          product_draft_count: '统计非墓碑 DRAFT 商品。', product_on_sale_count: '统计非墓碑 ON_SALE 商品。', product_off_sale_count: '统计非墓碑 OFF_SALE 商品。', product_deleted_count: '仅统计 DELETED 墓碑商品。', admission_pending_count: '最新准入验证为 PENDING；该状态优先于受阻判定。', admission_blocked_count: '统计非墓碑商品中缺少验证、最新验证失败、绑定证据过期或撤销，以及在售却无活动绑定的商品；不含 PENDING。',
+        },
+      },
       pricingLifecycle: {
         lifecycleBoundary: '已发布价格和计量事实不可原地修改；生效日按 Asia/Shanghai 自然日边界计算。', createDraft: '新建价格草稿', editDraft: '编辑价格草稿', draftContract: '草稿保存使用服务端价格空间 ETag；发布和生命周期转换使用稳定幂等键。',
         scope: '定价范围', model: '模型标识', modelScope: '模型', modelDirectoryRequired: '创建模型价格需要模型目录读取权限；不能手填内部模型标识。', formula: '协议公式版本', chooseFormula: '选择已发布公式', effectiveFrom: '生效日', effectiveTo: '结束日（可选）', etag: '价格空间 ETag', serverDerived: '提交前从服务端读取',
@@ -729,6 +748,25 @@ export const adminPlatformCopy = {
       effectiveTo: 'Effective to',
       pricingReadOnlyTitle: 'Model pricing is temporarily read-only',
       pricingReadOnlyDescription: 'Current and historical prices remain visible. Direct activation through the legacy flow is disabled; draft, preview, publish, and transition actions will be available through the new lifecycle management flow.',
+      overview: {
+        eyebrow: 'Operations overview', unavailable: 'This overview is temporarily unavailable. Other finance functions remain available.', statuses: 'Included statuses', notApplicable: 'Not applicable', updated: 'As of', noDenominator: 'Counts are complete aggregates, not current-page totals or ratios', viewFiltered: 'View filtered details →', viewUnfiltered: 'View related details (scope cannot be reproduced exactly) →', defaultDescription: 'Calculated by the fixed server-side definition.',
+        pointInTime: (asOf) => `Point-in-time snapshot · ${asOf}`,
+        window: (from, to, timezone) => `Window · ${from} to ${to} (${timezone}, start inclusive and end exclusive)`,
+        titles: { accounts: 'Accounts and funds overview', payments: 'Payments and risk overview', pricing: 'Pricing and metering overview', products: 'Recharge products overview' },
+        units: { COUNT: 'items', MICROCREDITS: 'points', CNY_FEN: 'CNY' },
+        metrics: {
+          wallet_count: 'Wallets', posted_microcredits: 'Posted points', reserved_microcredits: 'Reserved points', available_microcredits: 'Available points', receivable_microcredits: 'Receivable points', pending_adjustment_count: 'Adjustments awaiting approval', at_risk_hold_count: 'At-risk holds',
+          orders_created_count: 'Payment orders created', payments_received_fen: 'Payments received', late_review_open_count: 'Open late-payment reviews', payment_anomaly_open_count: 'Open payment anomalies', reconciliation_open_count: 'Open reconciliation cases', refund_attention_count: 'Refunds needing attention', provider_controlled_count: 'Controlled providers', product_controlled_count: 'Controlled payment products',
+          price_draft_count: 'Draft prices', price_future_count: 'Future prices', price_active_count: 'Active prices', price_ended_or_cancelled_count: 'Ended or cancelled prices', metering_active_count: 'Active metering units', metering_inactive_count: 'Inactive metering units',
+          product_draft_count: 'Draft products', product_on_sale_count: 'Products on sale', product_off_sale_count: 'Off-sale products', product_deleted_count: 'Deleted products', admission_pending_count: 'Admission pending', admission_blocked_count: 'Admission blocked',
+        },
+        descriptions: {
+          wallet_count: 'All wallets that have not been physically deleted.', posted_microcredits: 'Current posted projection across all wallets.', reserved_microcredits: 'Current reserved projection across all wallets.', available_microcredits: 'Current posted amount minus reserved and receivable projections.', receivable_microcredits: 'Current receivable projection across all wallets.', pending_adjustment_count: 'PENDING_APPROVAL adjustments only; the detail filter is exact.', at_risk_hold_count: 'Holds in REVIEW, or ACTIVE holds whose expiry is at or before the snapshot.',
+          orders_created_count: 'Orders created inside the shown start-inclusive, end-exclusive window.', payments_received_fen: 'PAID/LATE_PAID transactions in the window, using provider payment time or verified time as fallback, with each transaction counted once.', late_review_open_count: 'The non-terminal late-payment review set.', payment_anomaly_open_count: 'OPEN payment anomalies only; the detail filter is exact.', reconciliation_open_count: 'OPEN or IN_REVIEW reconciliation cases, not reconciliation runs.', refund_attention_count: 'Refunds in FAILED or MANUAL_REVIEW.', provider_controlled_count: 'Provider-level controls currently blocking new orders.', product_controlled_count: 'Product-level controls currently blocking new orders, counted independently from provider controls.',
+          price_draft_count: 'DRAFT prices in the mutually exclusive derived lifecycle.', price_future_count: 'Future-effective PUBLISHED prices in the mutually exclusive derived lifecycle.', price_active_count: 'Current ACTIVE prices in the mutually exclusive derived lifecycle.', price_ended_or_cancelled_count: 'ENDED and CANCELLED prices combined.', metering_active_count: 'Currently active metering-unit versions.', metering_inactive_count: 'Currently inactive metering-unit versions.',
+          product_draft_count: 'Non-tombstone DRAFT products.', product_on_sale_count: 'Non-tombstone ON_SALE products.', product_off_sale_count: 'Non-tombstone OFF_SALE products.', product_deleted_count: 'DELETED product tombstones only.', admission_pending_count: 'The latest admission verification is PENDING; pending takes precedence over blocked.', admission_blocked_count: 'Non-tombstone products with missing or failed verification, expired or revoked binding evidence, or ON_SALE without an active binding; PENDING is excluded.',
+        },
+      },
       pricingLifecycle: {
         lifecycleBoundary: 'Published pricing and metering facts are immutable. Effective dates use Asia/Shanghai day boundaries.', createDraft: 'Create price draft', editDraft: 'Edit price draft', draftContract: 'Draft saves use the server pricing-space ETag; publish and lifecycle transitions use stable idempotency keys.',
         scope: 'Pricing scope', model: 'Model identifier', modelScope: 'Model', modelDirectoryRequired: 'Creating a model price requires model-directory read access; internal model identifiers cannot be typed manually.', formula: 'Protocol formula version', chooseFormula: 'Choose a published formula', effectiveFrom: 'Effective date', effectiveTo: 'End date (optional)', etag: 'Pricing-space ETag', serverDerived: 'Read from the server before submit',
@@ -1175,6 +1213,25 @@ export const adminPlatformCopy = {
       effectiveTo: '終了日時',
       pricingReadOnlyTitle: 'モデル価格は一時的に読み取り専用です',
       pricingReadOnlyDescription: '現在および過去の価格のみ表示します。旧方式の直接有効化は停止済みです。下書き、プレビュー、公開、切り替えは新しいライフサイクル管理で提供します。',
+      overview: {
+        eyebrow: '運用概要', unavailable: 'この概要は一時的に利用できません。他の財務機能は引き続き利用できます。', statuses: '集計対象状態', notApplicable: '該当なし', updated: 'データ時点', noDenominator: '件数は全体集計であり、現在ページの件数や比率の分母ではありません', viewFiltered: '絞り込み済み詳細を表示 →', viewUnfiltered: '関連詳細を表示（集計条件は完全再現不可）→', defaultDescription: 'サーバー側の固定定義で集計します。',
+        pointInTime: (asOf) => `時点集計 · ${asOf}`,
+        window: (from, to, timezone) => `集計期間 · ${from} ～ ${to}（${timezone}、開始を含み終了を含まない）`,
+        titles: { accounts: 'アカウント・資金概要', payments: '決済・リスク概要', pricing: '価格・計量概要', products: 'チャージ商品概要' },
+        units: { COUNT: '件', MICROCREDITS: 'ポイント', CNY_FEN: '人民元' },
+        metrics: {
+          wallet_count: 'ウォレット総数', posted_microcredits: '記帳済みポイント', reserved_microcredits: '予約ポイント', available_microcredits: '利用可能ポイント', receivable_microcredits: '未収ポイント', pending_adjustment_count: '承認待ち調整', at_risk_hold_count: '要注意予約',
+          orders_created_count: '新規決済注文', payments_received_fen: '受領金額', late_review_open_count: '未処理の遅延決済', payment_anomaly_open_count: '未解決の決済異常', reconciliation_open_count: '未解決の照合差異', refund_attention_count: '要対応の返金', provider_controlled_count: '制御中の決済事業者', product_controlled_count: '制御中の決済商品',
+          price_draft_count: '価格ドラフト', price_future_count: '将来適用価格', price_active_count: '適用中価格', price_ended_or_cancelled_count: '終了・取消価格', metering_active_count: '有効な計量単位', metering_inactive_count: '無効な計量単位',
+          product_draft_count: '商品ドラフト', product_on_sale_count: '販売中商品', product_off_sale_count: '販売停止商品', product_deleted_count: '削除済み商品', admission_pending_count: '承認確認中', admission_blocked_count: '承認停止中',
+        },
+        descriptions: {
+          wallet_count: '物理削除されていない全ウォレットを集計します。', posted_microcredits: '全ウォレットの現在の記帳投影を合計します。', reserved_microcredits: '全ウォレットの現在の予約投影を合計します。', available_microcredits: '記帳額から予約額と未収額を差し引いた現在投影です。', receivable_microcredits: '全ウォレットの現在の未収投影を合計します。', pending_adjustment_count: 'PENDING_APPROVAL の調整のみ。詳細フィルターは完全一致します。', at_risk_hold_count: 'REVIEW、またはスナップショット時点で期限切れの ACTIVE Hold を集計します。',
+          orders_created_count: '表示された開始を含み終了を含まない期間内に作成された注文です。', payments_received_fen: '期間内の PAID/LATE_PAID 取引。Provider 支払時刻を優先し、なければ検証時刻を使用して取引ごとに一度だけ集計します。', late_review_open_count: '遅延決済レビューの非終端状態を集計します。', payment_anomaly_open_count: 'OPEN の決済異常のみ。詳細フィルターは完全一致します。', reconciliation_open_count: 'OPEN または IN_REVIEW の照合差異であり、照合実行ではありません。', refund_attention_count: 'FAILED または MANUAL_REVIEW の返金です。', provider_controlled_count: '新規注文を現在も停止する Provider 単位の制御です。', product_controlled_count: '新規注文を現在も停止する商品単位の制御で、Provider 制御とは別に集計します。',
+          price_draft_count: '相互排他的な派生状態の DRAFT 価格です。', price_future_count: '将来有効になる PUBLISHED 価格です。', price_active_count: '現在 ACTIVE の価格です。', price_ended_or_cancelled_count: 'ENDED と CANCELLED の価格合計です。', metering_active_count: '現在有効な計量単位バージョンです。', metering_inactive_count: '現在無効な計量単位バージョンです。',
+          product_draft_count: '墓石を除く DRAFT 商品です。', product_on_sale_count: '墓石を除く ON_SALE 商品です。', product_off_sale_count: '墓石を除く OFF_SALE 商品です。', product_deleted_count: 'DELETED の商品墓石のみです。', admission_pending_count: '最新の承認検証が PENDING。pending は blocked より優先されます。', admission_blocked_count: '検証なし、最新検証失敗、証拠バインドの期限切れ・取消、または販売中なのに有効バインドがない非墓石商品です。PENDING は除外します。',
+        },
+      },
       pricingLifecycle: {
         lifecycleBoundary: '公開済みの価格・計量事実は変更できません。適用日は Asia/Shanghai の日境界を使用します。', createDraft: '価格ドラフトを作成', editDraft: '価格ドラフトを編集', draftContract: 'ドラフト保存は価格空間 ETag、公開とライフサイクル変更は安定した冪等キーを使用します。',
         scope: '価格範囲', model: 'モデル識別子', modelScope: 'モデル', modelDirectoryRequired: 'モデル価格の作成にはモデルディレクトリの読み取り権限が必要です。内部モデル ID は手入力できません。', formula: 'プロトコル式バージョン', chooseFormula: '公開済み式を選択', effectiveFrom: '適用日', effectiveTo: '終了日（任意）', etag: '価格空間 ETag', serverDerived: '送信前にサーバーから取得',

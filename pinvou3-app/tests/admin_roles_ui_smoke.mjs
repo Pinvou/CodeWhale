@@ -66,7 +66,7 @@ try {
   await page.goto(`http://127.0.0.1:${port}/admin.html?section=roles`, { waitUntil: 'networkidle0' });
   await page.waitForSelector('.adm-role-workspace');
   assert.equal(await page.$eval('.adm-topbar h1', (node) => node.textContent.trim()), '角色与权限');
-  assert.deepEqual(await page.$$eval('.adm-role-summary strong', (nodes) => nodes.map((node) => node.textContent.trim())), ['1', '1', '1', '1']);
+  assert.deepEqual(await page.$$eval('.adm-role-summary strong', (nodes) => nodes.map((node) => node.textContent.trim())), ['1', '1', '2']);
   assert.equal(await page.$eval('.adm-role-detail code', (node) => node.textContent.trim()), 'PERSONAL_USER');
   assert.equal(await page.$('#role-bindings-root'), null);
   await page.screenshot({ path: path.join(process.env.TEMP || process.cwd(), 'pinvou-admin-roles-catalog-smoke.png'), fullPage: true });

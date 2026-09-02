@@ -8,6 +8,7 @@ import { createFinanceDetailRecovery, financeDetailRouteIsCurrent, isFinanceSnap
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 import { createFinanceIdempotencyKey, executeStructuredFinanceAction, financeActionRequiresRefresh, isUnknownMutationOutcome, paymentAnomalyResolutionOptions } from './finance-actions.js';
+import { financeOverviewDrilldown, financeOverviewMetricTimeScope, formatFinanceOverviewValue } from './admin-finance-overview.js';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './admin-platform.css';
@@ -37,6 +38,9 @@ function formatMoney(value) {
 }
 function formatDate(value) {
   return value ? new Date(value).toLocaleString() : '—';
+}
+function formatUTCDate(value) {
+  return value ? new Date(value).toLocaleString(undefined, { timeZone: 'UTC' }) : '—';
 }
 function shortID(value) {
   const text = String(value || '');
@@ -768,7 +772,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'billing' && <Billing key="billing" surface="billing" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
-          {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
+          {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'system' && (
             <>
@@ -2283,19 +2287,106 @@ function UnitBranch({ unit, copy, disabled, addDisabled, allUnits, onAddChild, o
   );
 }
 
-function ProductsWorkspace({ copy, client, permissions, routeTab, onRouteTabChange }) {
+function FinanceOverviewBlock({ copy, language, surface, load, onDrilldown, canDrilldown = () => true }) {
+  const [state, setState] = useState({ loading: true, data: null, error: null, forbidden: false });
+  const generationRef = useRef(0);
+  const controllerRef = useRef(null);
+  const reload = useCallback(async () => {
+    const generation = ++generationRef.current;
+    controllerRef.current?.abort();
+    const controller = new globalThis.AbortController();
+    controllerRef.current = controller;
+    setState((current) => ({ ...current, loading: true, error: null, forbidden: false }));
+    try {
+      const result = await load(controller.signal);
+      if (generation === generationRef.current) setState({ loading: false, data: result, error: null, forbidden: false });
+    } catch (error) {
+      if (generation !== generationRef.current || error?.name === 'AbortError') return;
+      setState({ loading: false, data: null, error: { code: error?.code || '', requestID: error?.requestID || '' }, forbidden: error?.status === 403 });
+    }
+  }, [load]);
+  useEffect(() => {
+    void reload();
+    return () => {
+      generationRef.current += 1;
+      controllerRef.current?.abort();
+    };
+  }, [reload]);
+  if (state.forbidden) return null;
+  const labels = copy.billing.overview;
+  const overview = state.data;
+  return (
+    <section className="adm-finance-overview" aria-labelledby={`finance-overview-${surface}`}>
+      <header>
+        <div>
+          <span className="adm-eyebrow">{labels.eyebrow}</span>
+          <h2 id={`finance-overview-${surface}`}>{labels.titles[surface]}</h2>
+        </div>
+        <button type="button" aria-busy={state.loading} onClick={() => void reload()}>{copy.refresh}</button>
+      </header>
+      {state.loading && !overview && <div className="adm-finance-overview-state" role="status">{copy.loading}</div>}
+      {state.error && <div className="adm-finance-overview-state error" role="alert"><span>{labels.unavailable}{state.error.code ? ` · ${state.error.code}` : ''}{state.error.requestID ? ` · request_id=${state.error.requestID}` : ''}</span><button type="button" onClick={() => void reload()}>{copy.retry}</button></div>}
+      {overview && !state.error && (
+        <div className="adm-finance-overview-grid">
+          {(overview.metrics || []).map((metric) => {
+            const candidate = financeOverviewDrilldown(surface, metric.key, overview.window);
+            const target = candidate && canDrilldown(candidate) ? candidate : null;
+            const usesWindow = financeOverviewMetricTimeScope(surface, metric.key) === 'window' && overview.window;
+            const content = (
+              <>
+                <span>{labels.metrics[metric.key] || metric.key}</span>
+                <strong>{formatFinanceOverviewValue(metric, {
+                  formatCount: formatNumber,
+                  formatPoints: (value) => formatPoints(value, language),
+                  formatMoney,
+                })}</strong>
+                <small>{usesWindow
+                  ? labels.window(formatUTCDate(overview.window.from), formatUTCDate(overview.window.to), overview.window.timezone)
+                  : labels.pointInTime(formatDate(overview.as_of))}</small>
+                <small>{labels.units[metric.unit] || metric.unit} · {labels.statuses}: {(metric.included_statuses || []).join(', ') || labels.notApplicable}</small>
+                <small>{labels.descriptions[metric.key] || labels.defaultDescription}</small>
+                {target && <em>{target.exact ? labels.viewFiltered : labels.viewUnfiltered}</em>}
+              </>
+            );
+            return target
+              ? <button type="button" className="adm-finance-overview-card" key={metric.key} onClick={() => onDrilldown(target)}>{content}</button>
+              : <article className="adm-finance-overview-card" key={metric.key}>{content}</article>;
+          })}
+        </div>
+      )}
+      {overview && !state.error && <footer>{labels.noDenominator} · {labels.updated}: {formatDate(overview.as_of)}</footer>}
+    </section>
+  );
+}
+
+function ProductsWorkspace({ copy, language, client, permissions, routeTab, onRouteTabChange, onNavigate }) {
   const permissionSet = new Set(permissions || []);
   const visibleTabs = [...(permissionSet.has('platform.products.read') ? ['catalog'] : []), ...(permissionSet.has('platform.pricing.read') ? ['prices'] : [])];
   const activeTab = visibleTabs.includes(routeTab) ? routeTab : visibleTabs[0] || '';
   useEffect(() => {
     if (activeTab && activeTab !== routeTab) onRouteTabChange(activeTab, 'replace');
   }, [activeTab, onRouteTabChange, routeTab]);
+  const pricingLoad = useCallback((signal) => client.financePricingOverview(signal), [client]);
+  const productsLoad = useCallback((signal) => client.financeProductsOverview(signal), [client]);
+  const drilldown = (target) => {
+    if (target.tab === 'catalog') {
+      onNavigate?.('products', { finance_tab: 'catalog', product_cursor: null, ...target.query });
+      return;
+    }
+    onRouteTabChange?.(target.tab);
+  };
   return (
-    <section className="adm-panel">
-      <SectionHeader title={copy.nav.products} copy={copy} />
-      <Tabs active={activeTab} onChange={onRouteTabChange} items={visibleTabs.map((key) => ({ key, label: key === 'catalog' ? copy.billing.productCatalog : copy.billing.prices }))} />
-      {permissionSet.has('platform.pricing.read') && <div hidden={activeTab !== 'prices'}><PricingLifecycleWorkspace copy={copy} client={client} permissions={permissions} /></div>}
-    </section>
+    <>
+      <div className="adm-finance-overviews">
+        {permissionSet.has('platform.pricing.read') && <FinanceOverviewBlock copy={copy} language={language} surface="pricing" load={pricingLoad} onDrilldown={drilldown} canDrilldown={(target) => visibleTabs.includes(target.tab)} />}
+        {permissionSet.has('platform.products.read') && <FinanceOverviewBlock copy={copy} language={language} surface="products" load={productsLoad} onDrilldown={drilldown} canDrilldown={(target) => visibleTabs.includes(target.tab)} />}
+      </div>
+      <section className="adm-panel">
+        <SectionHeader title={copy.nav.products} copy={copy} />
+        <Tabs active={activeTab} onChange={onRouteTabChange} items={visibleTabs.map((key) => ({ key, label: key === 'catalog' ? copy.billing.productCatalog : copy.billing.prices }))} />
+        {permissionSet.has('platform.pricing.read') && <div hidden={activeTab !== 'prices'}><PricingLifecycleWorkspace copy={copy} client={client} permissions={permissions} /></div>}
+      </section>
+    </>
   );
 }
 
@@ -2489,6 +2580,10 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const canReleaseHold = permissionSet.has('platform.billing.holds.release');
   const canReadUserDirectory = permissionSet.has('platform.users.read');
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
+  const overviewSurface = surface === 'payments' ? 'payments' : 'accounts';
+  const overviewLoad = useCallback((signal) => surface === 'payments'
+    ? client.financePaymentsOverview({}, signal)
+    : client.financeAccountsOverview(signal), [client, surface]);
   routeDetailRef.current = routeDetail;
   const canReadUsageRef = useRef(canReadUsage);
   const canReadUserDirectoryRef = useRef(canReadUserDirectory);
@@ -2512,6 +2607,11 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
   const changeTab = (nextTab) => {
     setTab(nextTab);
     onRouteTabChange?.(nextTab);
+  };
+  const drilldownOverview = (target) => {
+    setTab(target.tab);
+    if (isAdminFinancePaginatedTab(target.tab)) onRouteQueryChange?.(target.tab, target.query || {});
+    else onRouteTabChange?.(target.tab);
   };
   const activeTabState = data.financeTabStates?.[surface]?.[tab] || {};
   const paymentCapabilityReady = data.paymentCapabilityState?.loaded === true && !data.paymentCapabilityState?.loading && !data.paymentCapabilityState?.error;
@@ -4328,7 +4428,9 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       </DetailDrawer>
     );
   return (
-    <section className={embedded ? 'adm-finance-subpanel' : 'adm-panel'}>
+    <>
+      {!embedded && canReadWallets && <div className="adm-finance-overviews"><FinanceOverviewBlock copy={copy} language={language} surface={overviewSurface} load={overviewLoad} onDrilldown={drilldownOverview} canDrilldown={(target) => visibleTabs.includes(target.tab)} /></div>}
+      <section className={embedded ? 'adm-finance-subpanel' : 'adm-panel'}>
       <StructuredActionPanel
         operation={actionPanel}
         copy={copy}
@@ -4715,7 +4817,8 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
           onNext={() => void changeFinancePage('next')}
         />
       )}
-    </section>
+      </section>
+    </>
   );
 }
 

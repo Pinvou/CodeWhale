@@ -54,6 +54,21 @@ test("feature-local changes select core and feature smokes", () => {
   );
 });
 
+test("account platform changes select the finance overview browser smoke", () => {
+  assert.deepEqual(
+    labels(
+      selectFrontendSmokes([
+        "pinvou3-app/src/features/account-platform/AdminPlatformView.jsx",
+      ]),
+    ),
+    [
+      "npm:test:ui-smoke",
+      "node:tests/admin_roles_ui_smoke.mjs",
+      "npm:test:admin-finance-overview-ui",
+    ],
+  );
+});
+
 test("relay changes select the web UI smoke", () => {
   assert.deepEqual(
     labels(selectFrontendSmokes(["remote-control-relay/server.js"])),
