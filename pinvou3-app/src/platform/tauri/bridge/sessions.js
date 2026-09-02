@@ -1045,7 +1045,7 @@
       automationId: automationId,
       runId: runId,
       taskName: (task && task.name) || (run && (run.taskName || run.name)) || "",
-      model: (task && task.model) || null,
+      model: (task && task.model) || (run && run.taskModel) || null,
       mode: "yolo",
     };
     // 先发布完整会话视图；只有已完成的运行才持久化为已查看。
