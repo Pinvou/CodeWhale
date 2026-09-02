@@ -129,7 +129,7 @@ flowchart LR
 
 | 角色代码 | 中文名称 | 主要职责 |
 |---|---|---|
-| `PLATFORM_SUPER_ADMIN` | 平台超级管理员 | 平台角色分配、安全配置和紧急处置；保留最后一个超级管理员保护 |
+| `PLATFORM_SUPER_ADMIN` | 平台超级管理员 | 默认具备全部常驻平台管理能力；高风险操作继续受审批、审计、脱敏和不可回显约束，并保留最后一个超级管理员保护 |
 | `PLATFORM_IDENTITY_ADMIN` | 账号管理员 | 用户查询、启停、资料修复、手机号/用户名异常和密码恢复运营 |
 | `PLATFORM_ORGANIZATION_ADMIN` | 组织管理员 | 顶层组织创建、资料、状态、成员、结构、逻辑删除和所有者应急转让 |
 | `PLATFORM_BILLING_OPERATOR` | 计费运营员 | 钱包、账本、订单同步、Hold、人工调整申请和人工财务修复申请 |
@@ -158,12 +158,12 @@ flowchart LR
 | 充值商品目录读取 | ✓ | — | — | 只读 | — | ✓ | — | — | 只读 |
 | 充值商品添加/上架/下架/删除 | ✓ | — | — | — | — | ✓ | — | — | — |
 | 模型网关目录同步 | ✓ | — | — | — | — | — | ✓ | — | — |
-| Token Account/路由/凭据检查 | — | — | — | — | — | — | ✓ | — | — |
+| Token Account/路由/凭据检查 | ✓ | — | — | — | — | — | ✓ | — | — |
 | 用量核对人工重试 | ✓ | — | — | 只读 | — | — | ✓ | ✓ | 只读 |
 | 服务状态、Relay 和死信 | ✓ | — | — | — | — | — | — | ✓ | 只读 |
 | 全平台审计查询与脱敏导出 | ✓ | — | — | — | — | — | — | — | ✓ |
 
-超级管理员拥有平台治理和紧急授权权限，但不因该角色自动获得真实 Token Account、路由和凭据管理权；需要执行模型运营时必须另行获得 `PLATFORM_MODEL_ADMIN`，紧急场景也通过有时限且受审计的角色授予完成。超级管理员仍不能审批自己创建的资金申请，不能绕过不可变账本，也不能查看真实供应商密钥。同一用户可以兼任计费运营和审批角色，允许不同用户互相审批各自申请；所有强制审批命令无论金额大小都只需一名独立审批人。普通退款领域命令保留 `AUDIT_ONLY` 分类，但当前没有用户或运营新建入口；该分类不构成开放授权。
+超级管理员默认具备全部常驻平台管理权限，包括真实 Token Account、路由、Provisioning 和凭据现场校验；权限扩大不改变资源接口的最小返回原则。超级管理员仍不能审批自己创建的资金申请，不能绕过不可变账本，不能查看真实供应商密钥、密文、Key ID、Provider 地址或原始错误。未脱敏 PII 导出仍要求独立、可到期的 `PLATFORM_AUDIT_PII_EXPORT`，不属于常驻平台管理权限。同一用户可以兼任计费运营和审批角色，允许不同用户互相审批各自申请；所有强制审批命令无论金额大小都只需一名独立审批人。普通退款领域命令保留 `AUDIT_ONLY` 分类，但当前没有用户或运营新建入口；该分类不构成开放授权。
 
 业务管理员可以在其已有资源读取权限下查看该资源返回的脱敏操作时间线，但不能据此搜索全平台审计库。全平台审计查询和导出只授予 `PLATFORM_AUDITOR` 与 `PLATFORM_SUPER_ADMIN`；PII 导出仍只允许独立临时授权。
 
@@ -173,7 +173,7 @@ flowchart LR
 
 | 角色 | 精确权限码 |
 |---|---|
-| `PLATFORM_SUPER_ADMIN` | `platform.roles.read`、`platform.roles.assign`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.profile.manage`、`platform.organizations.status.manage`、`platform.organizations.members.manage`、`platform.organizations.units.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.repairs.approve`、`platform.billing.adjustments.request`、`platform.billing.adjustments.approve`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.billing.payment-controls.resume.approve`、`platform.pricing.read`、`platform.pricing.manage`、`platform.products.read`、`platform.products.create`、`platform.products.publish`、`platform.products.unpublish`、`platform.products.delete`、`platform.models.read`、`platform.models.sync`、`platform.models.manage`、`platform.usage.read`、`platform.usage.reconcile.retry`、`platform.system.status.read`、`platform.events.retry`、`platform.audit.read`、`platform.audit.export` |
+| `PLATFORM_SUPER_ADMIN` | `platform.roles.read`、`platform.roles.assign`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.profile.manage`、`platform.organizations.status.manage`、`platform.organizations.members.manage`、`platform.organizations.units.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.repairs.approve`、`platform.billing.adjustments.request`、`platform.billing.adjustments.approve`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.billing.payment-controls.resume.approve`、`platform.pricing.read`、`platform.pricing.manage`、`platform.products.read`、`platform.products.create`、`platform.products.publish`、`platform.products.unpublish`、`platform.products.delete`、`platform.models.read`、`platform.models.sync`、`platform.models.manage`、`platform.tokens.read`、`platform.tokens.manage`、`platform.tokens.credentials.validate`、`platform.usage.read`、`platform.usage.reconcile.retry`、`platform.system.status.read`、`platform.events.retry`、`platform.audit.read`、`platform.audit.export` |
 | `PLATFORM_IDENTITY_ADMIN` | `platform.roles.read`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair` |
 | `PLATFORM_ORGANIZATION_ADMIN` | `platform.roles.read`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.profile.manage`、`platform.organizations.status.manage`、`platform.organizations.members.manage`、`platform.organizations.units.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer` |
 | `PLATFORM_BILLING_OPERATOR` | `platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.adjustments.request`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.products.read`、`platform.usage.read` |
@@ -357,7 +357,7 @@ platform.audit.pii.export
 
 系统权限按职责分为账号安全、组织治理、计费/财务、定价、模型与凭据、用量核对、系统运维和审计八组。读取与写入、申请与审批、正常状态机与异常修复必须使用不同权限；不得用 `platform.system.status.read`、`platform.billing.wallets.read` 或某个宽泛 `manage` 权限代替无关敏感操作。新增后台端点必须先选择已有原子权限，确实没有等价语义时才新增权限码及角色矩阵。
 
-`platform.tokens.read`、`platform.tokens.manage` 和 `platform.tokens.credentials.validate` 只授予 `PLATFORM_MODEL_ADMIN`；其他平台角色包括 `PLATFORM_SUPER_ADMIN` 不隐式继承，确有需要时通过独立、可到期的角色绑定获得。审计员通过审计事件查看操作事实，不通过 Token Gateway 资源接口读取真实 Token Account、路由或凭据元数据。
+`platform.tokens.read`、`platform.tokens.manage` 和 `platform.tokens.credentials.validate` 同时授予 `PLATFORM_SUPER_ADMIN` 与 `PLATFORM_MODEL_ADMIN`；其他平台角色不隐式继承。两类角色都只能读取脱敏凭据元数据和稳定校验结论，不能取得真实供应商密钥、密文、Key ID、Provider 地址或原始错误。审计员通过审计事件查看操作事实，不通过 Token Gateway 资源接口读取真实 Token Account、路由或凭据元数据。
 
 `platform.audit.export` 只允许导出默认脱敏内容；未脱敏个人字段另需 `platform.audit.pii.export`，该权限不内置授予任何常驻角色，只能通过有到期时间、原因和审计的独立授权获得。密码、验证码、Token、Cookie、供应商/支付密钥和模型正文不属于可授权导出字段。
 
@@ -390,7 +390,7 @@ org.grants.reclaim_closed
 org.model.invoke
 ```
 
-`org.models.read` 只读取组织模型允许策略、目录范围和面向组织的生效结果；`org.models.manage` 只修改这些业务策略。历史设计中的 `org.tokens.read`、`org.tokens.manage` 永久退休，不授予任何组织角色，也不得复用为其他含义；真实 Token Account、路由、凭据和 Provisioning API 只接受 `platform.tokens.*` 对应的平台模型运营权限。
+`org.models.read` 只读取组织模型允许策略、目录范围和面向组织的生效结果；`org.models.manage` 只修改这些业务策略。历史设计中的 `org.tokens.read`、`org.tokens.manage` 永久退休，不授予任何组织角色，也不得复用为其他含义；真实 Token Account、路由、凭据和 Provisioning API 只接受 `platform.tokens.*` 对应的平台权限，该权限默认授予平台超级管理员和平台模型运营员。
 
 写接口应只接受需要的最小权限。例如成员列表只要求 `org.members.read`，购买组织权益只要求 `org.entitlements.purchase`，分配额度只要求 `org.quota.allocate`，组织模型策略只要求 `org.models.manage`，不能统一要求 `ORG_ADMIN`。任何组织权限都不能满足平台 Token 运营接口。
 
@@ -867,7 +867,7 @@ Billing 和 Token Gateway 通过 Account 内部授权解析接口获取短期、
 6. 显式映射现有平台管理员并至少保留一个有效超级管理员；Keycloak `platform-admin` Claim 继续不参与业务授权。
 7. 校验每个有效组织恰好一个 `OWNER`；新增 `ORG_MODEL_ADMIN` 不自动提升历史成员，由管理员按需授予。
 8. 当前迁移已把按 Session 保存的活动上下文收敛为每用户一条全局记录；后续迁移继续保留其确定规则及单调版本通知。
-9. 移除或永久拒绝普通端点对真实 Token Account/路由/凭据的管理，将真实资源管理权限只映射给 `PLATFORM_MODEL_ADMIN`；扫描历史普通用户/组织创建的远端凭据并进入受控隔离，不得自动提升其创建者为系统角色。
+9. 移除或永久拒绝普通端点对真实 Token Account/路由/凭据的管理，将真实资源管理权限映射给 `PLATFORM_SUPER_ADMIN` 与 `PLATFORM_MODEL_ADMIN`；扫描历史普通用户/组织创建的远端凭据并进入受控隔离，不得自动提升其创建者为系统角色。
 10. 对权限集合变化影响的个人、系统和每个组织作用域递增授权版本并发布失效事件；迁移前后生成机器可读差异，未声明扩权/收权阻断发布。
 11. 内部服务逐接口接入精确工作负载权限和签名委托，移除请求体自报人类 actor；Break-glass 操作者改为可信执行环境派生。
 12. 契约与回归门禁证明所有 HTTP、任务、事件、回调和 CLI 入口都声明个人/系统/组织权限或明确的工作负载/公开协议策略；未分类入口发布失败。

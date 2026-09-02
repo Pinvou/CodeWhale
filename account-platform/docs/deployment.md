@@ -461,7 +461,7 @@ Token `000015_usage_cancellation_convergence` 增加执行/取消/交付/结算�
 
 Token `000019_usage_convergence_evidence` 增加模型外部事实的只追加收敛时间线，并为完整重放结果保存明文载荷的 SHA-256（正文仍只加密存储）。先迁移 Token 数据库再滚动 Gateway；发布后注入派发后连接中断、相同结果重放、冲突完整结果、Provider 查询暂无结论/明确拒绝/返回用量及 Billing 提交不确定，核验每次外部观察与复核、结算或客户 Hold 释放均有对应脱敏证据，冲突结果不能覆盖首个完整结果，非幂等模型请求不会自动二次派发。监控 `UNCERTAINTY/REVIEW` 和 `RECONCILIATION_STOPPED` 证据增长及无终态案件；禁止通过删除证据、覆盖结果密文或直接改状态结束复核。
 
-Account `000026_token_account_operations` 注册平台 Token Account 创建为只审计管理命令。先执行 Account 迁移，再滚动 Token Gateway 与 Portal；否则新版创建路由会因未知命令策略失败关闭。发布后分别使用平台模型运营员、超级管理员、组织所有者和组织模型管理员验证：只有前者可列出、创建、启停和检查 PLATFORM 账号；其余身份统一返回 403 且相同的不存在/存在资源响应不泄露元数据。抽样确认后台永远不列出 `management_mode=USER` 账号，凭据检查响应和审计仅含统一状态、稳定错误码、指纹等元数据，不含 Secret、密文、Key ID、Provider 地址或上游错误原文。
+Account `000026_token_account_operations` 注册平台 Token Account 创建为只审计管理命令，`000042_super_admin_platform_permissions` 将全部常驻平台管理权限补齐到超级管理员。先执行 Account 迁移，再滚动 Token Gateway 与 Portal；否则新版创建路由会因未知命令策略失败关闭。发布后分别使用平台模型运营员、超级管理员、组织所有者和组织模型管理员验证：前两者可按原子权限列出、创建、启停和检查 PLATFORM 账号；组织身份统一返回 403 且相同的不存在/存在资源响应不泄露元数据。抽样确认后台永远不列出 `management_mode=USER` 账号，凭据检查响应和审计仅含统一状态、稳定错误码、指纹等元数据，不含 Secret、密文、Key ID、Provider 地址或上游错误原文。
 
 不要默认执行 down migration。涉及破坏性 Schema 的发布必须先提供前向兼容阶段和单独数据迁移方案。
 

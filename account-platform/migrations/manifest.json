@@ -412,6 +412,16 @@
         "file": "000041_pricing_metering_command_policies.up.sql",
         "version": 41,
         "sha256": "e1dd382f59deb54d63b7378a279cc7a161758fdcdd5ca931ef629e78defacffa"
+      },
+      {
+        "file": "000042_super_admin_platform_permissions.down.sql",
+        "version": 42,
+        "sha256": "4188a580e70aaa076283563becbffb10b3cb812ad7fab6a59afec3a1986e805d"
+      },
+      {
+        "file": "000042_super_admin_platform_permissions.up.sql",
+        "version": 42,
+        "sha256": "38f5463c220cfc86e22cc3ecb61a1ffee709111a125dcffdd358b19ae25fa9cc"
       }
     ],
     "billing": [

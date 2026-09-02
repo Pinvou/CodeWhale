@@ -433,7 +433,7 @@
     const toastRegion = document.getElementById('toastRegion');
     const state = { role: 'super', page: 'overview', theme: localStorage.getItem('pinvou-admin-theme') || 'light' };
     const roles = {
-      super: { label: '平台超级管理员', actor: 'admin', avatar: 'A', pages: ['overview','users','roles','organizations','billing','payments','products','approvals','audit','system','settings'] },
+      super: { label: '平台超级管理员', actor: 'admin', avatar: 'A', pages: ['overview','users','roles','organizations','billing','payments','products','tokens','approvals','audit','system','settings'] },
       billing: { label: '计费运营员', actor: 'billing.ops', avatar: 'B', pages: ['overview','billing','payments','approvals','audit','settings'] },
       pricing: { label: '定价与商品管理员', actor: 'pricing.ops', avatar: 'P', pages: ['overview','products','audit','settings'] },
       model: { label: '平台模型运营', actor: 'model.ops', avatar: 'M', pages: ['overview','tokens','audit','settings'] },
@@ -486,7 +486,7 @@
       while (cards.length < 4) cards.push(['系统可用性','99.98%','最近 30 天','activity']);
       const quick = navGroups.flatMap(g=>g.items).filter(i=>role.pages.includes(i.id) && i.id!=='overview').slice(0,6);
       return `${pageHead('Account OS','平台总览','权限上下文决定你能看到的数据、快捷入口和待办；无权资源不会发起请求。',`<button class="btn" data-action="refresh">${icon('activity')}刷新状态</button>`)}
-        <div class="banner info">${icon('shield')}<div><strong>当前视图：${role.label}</strong><p>${state.role==='super'?'超级管理员不隐式拥有 Token 权限，因此 Token 运营入口已隐藏。':'所有卡片均按原子权限独立裁剪，直接访问无权路由也会被服务端拒绝。'}</p></div></div>
+        <div class="banner info">${icon('shield')}<div><strong>当前视图：${role.label}</strong><p>${state.role==='super'?'超级管理员默认具备全部常驻平台管理权限；高风险操作仍受审批、审计、脱敏和不可回显约束。':'所有卡片均按原子权限独立裁剪，直接访问无权路由也会被服务端拒绝。'}</p></div></div>
         <div class="grid kpi">${cards.slice(0,4).map((c,i)=>`<article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">${c[0]}</span><span class="kpi-icon">${icon(c[3])}</span></div><div class="kpi-value">${c[1]}</div><div class="kpi-foot"><span class="${i===2?'trend-warn':'trend-up'}">${i===2?'需要关注':'运行正常'}</span> · ${c[2]}</div></article>`).join('')}</div>
         <section class="card section"><div class="section-head"><div><h2>快捷工作区</h2><p>仅展示当前权限可访问的业务域。</p></div></div><div class="quick-grid">${quick.map(q=>`<button class="quick" data-page="${q.id}">${icon(q.icon)}<strong>${q.label}</strong><small>${quickDesc(q.id)}</small></button>`).join('')}</div></section>
         <div class="grid two section"><section class="card card-pad"><h2>待办节奏</h2><p class="subtitle">按风险、SLA 与到期时间排序。</p><ul class="timeline"><li><strong>支付渠道恢复申请等待审批</strong>控制版本 v14 · 还剩 38 分钟<time>今天 15:42</time></li><li><strong>注册修复案件接近 SLA</strong>Identity 查询已完成，等待 Account 提交<time>今天 14:18</time></li><li><strong>审计导出将在 12 分钟后过期</strong>一次性下载票据尚未使用<time>今天 13:56</time></li></ul></section><section class="card card-pad"><h2>服务健康</h2><p class="subtitle">聚合卡片局部失败，不影响其他已加载事实。</p><div class="provider-meta"><div><span>Account</span><strong>${badge('正常','success')}</strong></div><div><span>Billing</span><strong>${badge('正常','success')}</strong></div><div><span>Token</span><strong>${badge(state.role==='model'?'正常':'无权','info')}</strong></div></div><div class="banner warning" style="margin:18px 0 0">${icon('alert')}<div><strong>Event Relay 有 2 个死信</strong><p>当前仅展示摘要；重放能力在对应领域 API 正式获批前保持隐藏。</p></div></div></section></div>`;
@@ -506,7 +506,7 @@
     }
 
     function rolesPage() {
-      const roleCards=[['PLATFORM_SUPER_ADMIN','平台治理与身份组织等矩阵能力','不隐式包含 platform.tokens.*'],['PLATFORM_IDENTITY_ADMIN','用户状态、修复及角色绑定只读','无 platform.roles.assign'],['PLATFORM_BILLING_OPERATOR','财务读、修复与恢复申请','禁止自审、无 Token 权限'],['PLATFORM_MODEL_ADMIN','Token、路由、凭据验证与用量','无财务审批权限']];
+      const roleCards=[['PLATFORM_SUPER_ADMIN','全部常驻平台管理能力','秘密不可回显，临时 PII 导出需独立授权'],['PLATFORM_IDENTITY_ADMIN','用户状态、修复及角色绑定只读','无 platform.roles.assign'],['PLATFORM_BILLING_OPERATOR','财务读、修复与恢复申请','禁止自审、无 Token 权限'],['PLATFORM_MODEL_ADMIN','Token、路由、凭据验证与用量','无财务审批权限']];
       return `${pageHead('Authorization','角色与权限','统一查看角色包含的权限，并按精确权限管理不同作用域下的授权。',state.role==='super'?`<button class="btn primary" data-action="grant-role">${icon('shield')}新增授权</button>`:'')}
         <div class="banner warning">${icon('alert')}<div><strong>角色名称不是授权依据</strong><p>导航、字段和动作均由原子权限集合决定。账号管理员只能查看角色绑定，不能授予或撤销。</p></div></div>
         <div class="grid two">${roleCards.map(r=>`<article class="card card-pad"><div class="approval-line"><h2 style="margin:0">${r[0]}</h2>${badge('内置角色','info')}</div><p class="subtitle" style="margin-top:10px">${r[1]}</p><div class="banner ${r[0].includes('SUPER')?'warning':'info'}" style="margin:16px 0 0"><div><strong>边界</strong><p>${r[2]}</p></div></div></article>`).join('')}</div>

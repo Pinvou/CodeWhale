@@ -34,7 +34,7 @@
 - 不提供 KYC、邮箱恢复或无需求支撑的 2FA 设置。
 - 不开放退款发起入口；只展示既有退款记录并处理失败、不确定或强制异常案件。
 - 不在公网 Portal 执行或代理 bootstrap、break-glass、IdP 管理、密钥轮换 CLI 或任意 shell。
-- 不允许超级管理员因角色名称而隐式获得 Token 权限。
+- 超级管理员默认具备全部常驻平台管理权限；Token 高风险操作仍逐接口校验原子权限并保留审批、审计、脱敏和不可回显约束。
 - 不在客户端推断权限、审批策略或状态迁移；服务端始终是授权与状态事实源。
 
 ### 1.3 本轮已批准的 UI/UX 需求边界
@@ -46,7 +46,7 @@
 | `UI-28` | 统一后台壳层与共享基础组件 | 拥有后台应用壳层、分组导航、路由/URL、当前项、页头、语言、退出登录，以及可复用的加载/空/无权/错误/部分失败容器、状态标签、表格/详情框架、对话框、Toast、焦点与状态播报基础组件；在本项提交内完成这些壳层/组件自身的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式和组件状态测试；只显示具有精确读权限的入口 | 不负责各领域页面的数据接线或页面级验收；不新增导航对应的服务端资源；不因视觉分组合并权限 |
 | `UI-29` | 身份、用户、角色与组织界面改版 | **依赖 UI-28**；在本项单独提交内完成用户、角色绑定、组织、节点及现有修复页面的真实数据接线，并完成全部受影响页的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式，以及加载、空、无权、错误、部分失败、冲突、离线/超时、结果不确定状态 | 不新增用户或角色；不改变用户、角色、组织生命周期及管理动作；质量与状态不得推迟到 UI-32 补做 |
 | `UI-30` | 财务、支付、审批、定价与充值商品界面改版 | **依赖 UI-28**；在本项单独提交内完成现有额度/账本、订单、案件、调账、Hold、审批、定价和商品页面，并完成全部受影响页的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式，以及加载、空、无权、错误、部分失败、冲突、离线/超时、结果不确定状态；资金与 CNY 明确区分 | 不开放退款入口；不新增探测、恢复、定价或商品命令；不可用能力继续隐藏；质量与状态不得推迟到 UI-32 补做 |
-| `UI-31` | 模型、Token、系统与审计界面改版 | **依赖 UI-28**；在本项单独提交内完成现有模型、Token Account、路由、凭据元数据、Provisioning、用量、系统状态、审计与只读运行手册页面，并完成全部受影响页的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式，以及加载、空、无权、错误、部分失败、冲突、离线/超时、结果不确定状态；秘密不回显 | 不赋予超级管理员隐式 Token 权限；不增加公网 bootstrap、break-glass、IdP 或事件重放执行入口；质量与状态不得推迟到 UI-32 补做 |
+| `UI-31` | 模型、Token、系统与审计界面改版 | **依赖 UI-28**；在本项单独提交内完成现有模型、Token Account、路由、凭据元数据、Provisioning、用量、系统状态、审计与只读运行手册页面，并完成全部受影响页的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式，以及加载、空、无权、错误、部分失败、冲突、离线/超时、结果不确定状态；秘密不回显 | 超级管理员默认获得常驻 Token 管理权限，但不能查看秘密或临时敏感数据；不增加公网 bootstrap、break-glass、IdP 或事件重放执行入口；质量与状态不得推迟到 UI-32 补做 |
 | `UI-32` | 无产品代码的跨页面集成与发布验收 | **依赖 UI-28、UI-29、UI-30、UI-31 全部完成**；仅新增或调整集成/E2E/视觉/无障碍验收与发布证据，不修改产品代码；按第 9、11、13～15 节验证异步恢复、真实错误、加载、冲突、离线/超时、结果不确定、三语、AA、响应式、字段展示和危险操作，并验证构建制品与源码一致 | 不承担 UI-28～UI-31 漏做的产品实现；不用前端假数据补齐服务端缺口；不把测试通过解释为新增功能已上线 |
 | `UI-37` | 财务支付三分区信息架构 | 保留 `billing/payments/products` 稳定 section，将用户可见页面调整为“账户与计费、支付与对账、定价与商品”；模型定价迁入定价与商品，支付四方对账迁入支付与对账；子页 URL、权限和前进后退独立 | 不把分组变更解释为权限合并；不改变账本、支付或定价事实 |
 | `UI-38` | 手工调账申请与审批下穿 | 从账户与计费创建或恢复 `WALLET_ADJUSTMENT` 申请，并下穿审批中心查看状态 | 申请、审批、服务身份执行分离；申请人不得自审 |
@@ -138,7 +138,7 @@
 
 | 角色 | 主要能力 | 明确不包含 |
 |---|---|---|
-| `PLATFORM_SUPER_ADMIN` | 平台身份、组织、财务、商品、模型、系统状态、审计等现有矩阵能力 | **不隐式包含任何 `platform.tokens.*`**；不包含临时 PII 导出权限；不能绕过审批或最后超级管理员保护 |
+| `PLATFORM_SUPER_ADMIN` | 全部常驻平台管理能力，包括模型、Token Account、路由、Provisioning 与凭据现场校验 | 不包含临时 PII 导出权限；不能查看秘密、绕过审批或绕过最后超级管理员保护 |
 | `PLATFORM_IDENTITY_ADMIN` | 用户查询/状态、注册/资料/注销修复、角色定义与既有绑定只读 | **不含 `platform.roles.assign`，不能 POST/DELETE 角色绑定**；不含财务、Token、审计导出、角色定义创建 |
 | `PLATFORM_ORGANIZATION_ADMIN` | 组织查询、创建、状态、删除、所有权及组织结构管理 | 财务审批、Token、角色定义创建 |
 | `PLATFORM_BILLING_OPERATOR` | 财务读、同步、修复/调账申请、Hold 释放、支付恢复申请、商品只读、用量只读 | 自己审批、支付恢复批准、Token |
@@ -160,7 +160,7 @@
 |---|---|---|---|---|
 | `/overview` | 用户/组织统计卡 | `platform.users.read` / `platform.organizations.read` | PLATFORM | READ_ONLY，卡片独立裁剪 |
 | `/overview` | 财务卡 | `platform.billing.wallets.read` | PLATFORM | READ_ONLY，金额脱敏策略适用 |
-| `/overview` | Token/用量卡 | `platform.tokens.read` / `platform.usage.read` | PLATFORM | READ_ONLY；超级管理员无 Token 权限时不显示 |
+| `/overview` | Token/用量卡 | `platform.tokens.read` / `platform.usage.read` | PLATFORM | READ_ONLY；超级管理员默认显示，其他角色仍按原子权限裁剪 |
 | `/users` | 列表、状态、`user_code` | `platform.users.read` | PLATFORM | READ_ONLY；手机号脱敏 |
 | `/users/:id` | 启用/停用 | `platform.users.status.manage` | PLATFORM | AUDIT_ONLY |
 | `/users/:id` | 新建/删除用户 | 无 | 无 | **禁用，不渲染、不提供接口** |
@@ -260,7 +260,7 @@
 - 只有明确拥有 `platform.tokens.read` 的主体才能进入 Token 页面或看到 Token 聚合数据。
 - 创建/修改 Token Account、路由、Provisioning 或凭据元数据要求 `platform.tokens.manage`。
 - 现场凭据验证必须额外要求 `platform.tokens.credentials.validate`。
-- `PLATFORM_SUPER_ADMIN` 未在角色矩阵列出上述权限，因此 Portal 必须显示“无 Token 权限”，不能以“超级管理员”名称兜底。
+- `PLATFORM_SUPER_ADMIN` 在角色矩阵中显式包含上述常驻 Token 权限；Portal 仍只消费服务端返回的原子权限，不能在客户端按角色名称绕过授权。
 - Token 密钥、Authorization Header、完整凭据和可复用验证材料永不显示、导出或写入审计详情。
 
 ---
@@ -614,7 +614,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 |---|---|---|---|---|---|
 | ADM-01 Bootstrap | `/runbooks/bootstrap` 只读 | `platform.system.status.read` | 系统状态/审计读接口；无公网执行 API | APT-007 | BOOTSTRAP_PENDING 无登录会话；Portal 无执行按钮 |
 | ADM-02/ADM-08 运维边界 | `/runbooks/break-glass`、`/runbooks/idp` 只读 | 系统/审计读权 | 无公网 break-glass/IdP 管理 API | APT-007、APT-077 | 只能按受控终端/受限网络运行手册执行 |
-| 角色绑定 | `/role-bindings` 授予/撤销 | `platform.roles.assign` | `GET/POST /account/admin/v1/role-bindings`；`DELETE .../{binding_id}` | APT-006、APT-046、APT-069 | 不存在角色创建；超级管理员无 Token 隐式权限 |
+| 角色绑定 | `/role-bindings` 授予/撤销 | `platform.roles.assign` | `GET/POST /account/admin/v1/role-bindings`；`DELETE .../{binding_id}` | APT-006、APT-046、APT-069 | 不存在角色创建；超级管理员的完整常驻权限来自服务端角色真值表 |
 | 用户状态/修复 | `/users`、修复队列 | `platform.users.read`、`platform.users.status.manage`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read/repair` | users/status、registration/profile/closure repair APIs | 注册 APT-003；资料 APT-004；注销 APT-014 | 无后台新建/删除；仅按各端点真实重试合同恢复 |
 | 组织生命周期 | `/organizations` | `platform.organizations.*` | `/account/admin/v1/organizations` 及 status/delete/ownership | 顶层组织 APT-009；节点 APT-010 | DELETED 不可恢复；删除先停用和跨域预检 |
 | 审批框架 | `/approvals/*` | 冻结 policy 精确权限 | approval-policies/approval-requests/actions | APT-008、APT-074、APT-082 | 禁自审、冻结快照、CAS/幂等、服务身份执行 |
@@ -648,7 +648,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | S1 | 信息架构 | 导航改为权限驱动；新增明确的“我的申请/待我审批”分离；运行手册只读分组；无权组完全隐藏 |
 | S2 | 平台总览 | 三张领域摘要卡 + 独立系统健康条；删除 KYC 和只读告警；统计卡片独立鉴权及局部失败；无权/失败不显示 0；可用积分扣除应收占用；路由健康分母为全部路由；累计值显式标注；非零待办可进入有权队列；Token 卡不因超级管理员身份出现 |
 | S3 | 用户管理 | 删除“新建用户”；将 `q` 搜索与 `user_code` 完整精确查询分开；手机号脱敏；状态筛选在 `UIA-007/UIA-015` 前不显示 |
-| S4 | 角色管理 | 删除“新建角色”和虚构权限；改为内置角色只读 + 绑定授予/撤销；明确超级管理员不含 Token 权限 |
+| S4 | 角色管理 | 删除“新建角色”和虚构权限；改为内置角色只读 + 绑定授予/撤销；明确超级管理员具备全部常驻平台管理权限，临时 PII 导出继续独立授权 |
 | S5 | Token Account | 页面整体要求 `platform.tokens.read`；写动作要求 manage，凭据验证另鉴权；密钥永不回显 |
 | S6 | 组织列表 | 删除“DELETED 可恢复”；补 ACTIVE/DISABLED/DELETED 状态动作矩阵和删除预检；顶层写入 CAS 等待 `UIA-003` |
 | S7 | 账务总览 | 积分/CNY 分栏；卡片字段独立权限；补空/错/无权/部分失败状态 |
@@ -690,7 +690,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 
 | 编号 | 验收场景 | 预期结果 |
 |---|---|---|
-| AC-01 | 仅 `PLATFORM_SUPER_ADMIN` 登录并访问 Token 路由/卡片 | 导航与卡片不显示；直达返回无权；无 Token 数据泄露 |
+| AC-01 | 仅 `PLATFORM_SUPER_ADMIN` 登录并访问 Token 路由/卡片 | 导航、Token Account、路由和 Provisioning 正常显示并可按原子权限管理；凭据仅返回脱敏元数据，秘密和原始错误不回显 |
 | AC-02 | 用户/角色页检查创建能力 | 无“新建用户/角色”控件，OpenAPI 无对应调用 |
 | AC-03 | 申请人尝试审批自己提交的财务修复 | 服务端返回 `APPROVAL_SELF_DECISION_FORBIDDEN`；审批记录无变化 |
 | AC-04 | 审批提交后资源版本改变 | 执行前 CAS 失败，申请 INVALIDATED；不产生副作用 |

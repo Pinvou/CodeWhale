@@ -141,6 +141,7 @@
 | APT-115 | Portal 消费 Billing 全量分页和 URL 状态合同 | UI-45 | APT-109, APT-114 | CODE | DONE |
 | APT-116 | 财务支付三个分区运营概览 API 与权限裁剪 | BILL-47 | APT-018–APT-025, APT-083, APT-093 | CODE | DONE |
 | APT-117 | 财务支付三个分区运营概览、下穿与局部失败界面 | UI-46 | APT-105, APT-113, APT-115, APT-116 | CODE | DONE |
+| APT-118 | 超级管理员完整常驻平台权限迁移、缓存失效与安全边界回归 | ADM-55 | APT-069, APT-073, APT-097 | CODE | DONE |
 
 ## 3. 独立提交验收模板
 

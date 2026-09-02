@@ -7,6 +7,7 @@ const read = path => readFileSync(new URL(path, root), 'utf8');
 
 test('platform Token operations are role isolated and resource scoped', () => {
   const rbac = read('migrations/account/000010_authorization_rbac.up.sql');
+  const superAdminExpansion = read('migrations/account/000042_super_admin_platform_permissions.up.sql');
   const command = read('migrations/account/000026_token_account_operations.up.sql');
   const service = read('internal/token/service.go');
   const admin = read('internal/token/admin.go');
@@ -22,7 +23,12 @@ test('platform Token operations are role isolated and resource scoped', () => {
   for (const permission of ['platform.tokens.read', 'platform.tokens.manage', 'platform.tokens.credentials.validate']) {
     assert.match(rbac, new RegExp(`'PLATFORM_MODEL_ADMIN'.*${permission.replaceAll('.', '\\.')}`));
   }
+  // Keep the original migration immutable and prove the later forward
+  // migration intentionally changes the effective super-admin boundary.
   assert.match(rbac, /PLATFORM_SUPER_ADMIN[\s\S]*NOT IN \('platform\.tokens\.read', 'platform\.tokens\.manage', 'platform\.tokens\.credentials\.validate'\)/);
+  assert.match(superAdminExpansion, /INSERT INTO role_permissions\(role_code,permission_code\)[\s\S]*'PLATFORM_SUPER_ADMIN',code[\s\S]*scope='PLATFORM'/);
+  assert.match(superAdminExpansion, /code<>'platform\.audit\.pii\.export'/);
+  assert.match(superAdminExpansion, /bump_role_assignment_scope_version[\s\S]*role_code='PLATFORM_SUPER_ADMIN'/);
   assert.doesNotMatch(rbac.match(/UNION ALL SELECT 'OWNER'[\s\S]*?UNION ALL SELECT 'AUDITOR'/)?.[0] || '', /platform\.tokens/);
 
   assert.match(service, /POST\("\/token-accounts"[\s\S]*platform\.tokens\.manage[\s\S]*TOKEN_ACCOUNT_CREATE/);

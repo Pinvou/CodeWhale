@@ -5,6 +5,7 @@ import test from 'node:test';
 const migration = await readFile(new URL('../../migrations/account/000034_three_scope_authorization.up.sql', import.meta.url), 'utf8');
 const productPermissionMigration = await readFile(new URL('../../migrations/account/000037_recharge_product_permissions.up.sql', import.meta.url), 'utf8');
 const organizationGovernanceMigration = await readFile(new URL('../../migrations/account/000039_organization_governance_permissions.up.sql', import.meta.url), 'utf8');
+const superAdminPermissionMigration = await readFile(new URL('../../migrations/account/000042_super_admin_platform_permissions.up.sql', import.meta.url), 'utf8');
 const recoveryMigration = await readFile(new URL('../../migrations/account/000033_payment_provider_resume_policy.up.sql', import.meta.url), 'utf8');
 const authorization = await readFile(new URL('../../internal/account/authorization.go', import.meta.url), 'utf8');
 const postgres = await readFile(new URL('../../internal/account/postgres.go', import.meta.url), 'utf8');
@@ -37,6 +38,13 @@ function organizationGovernanceRolePermissions(basePermissions) {
   ];
 }
 
+function superAdminExpandedPermissions(role) {
+  if (role !== 'PLATFORM_SUPER_ADMIN') return [];
+  assert.match(superAdminPermissionMigration, /WHERE scope='PLATFORM'/);
+  assert.match(superAdminPermissionMigration, /code<>'platform\.audit\.pii\.export'/);
+  return ['platform.tokens.read', 'platform.tokens.manage', 'platform.tokens.credentials.validate'];
+}
+
 test('authorization migration creates PERSONAL independently and backfills the lifecycle-owned role', () => {
   assert.match(migration, /scope IN \('PERSONAL','PLATFORM','ORGANIZATION','UNIT'\)/);
   assert.match(migration, /'PERSONAL_USER','PERSONAL',FALSE,TRUE/);
@@ -55,11 +63,16 @@ test('authorization migration creates PERSONAL independently and backfills the l
   assert.match(migration, /scope='UNIT'/);
 });
 
-test('built-in role truth tables replace instead of append and preserve separation of duties', () => {
+test('built-in role truth tables preserve specialist duties while super admin receives all persistent platform management permissions', () => {
   assert.match(migration, /DELETE FROM role_permissions WHERE role_code IN/);
   const superAdmin = desiredRoleSegment('PLATFORM_SUPER_ADMIN', 'PLATFORM_IDENTITY_ADMIN');
+  // The historical truth-table migration remains immutable; migration 42
+  // expands the effective role without rewriting already-applied history.
   assert.doesNotMatch(superAdmin, /platform\.tokens\.(read|manage|credentials\.validate)/);
   assert.doesNotMatch(superAdmin, /platform\.audit\.pii\.export/);
+  assert.match(superAdminPermissionMigration, /SELECT 'PLATFORM_SUPER_ADMIN',code/);
+  assert.match(superAdminPermissionMigration, /WHERE scope='PLATFORM'/);
+  assert.match(superAdminPermissionMigration, /code<>'platform\.audit\.pii\.export'/);
 
   const modelAdmin = desiredRoleSegment('PLATFORM_MODEL_ADMIN', 'PLATFORM_OPERATIONS_ADMIN');
   assert.match(modelAdmin, /platform\.tokens\.read/);
@@ -95,6 +108,7 @@ test('every built-in human role exactly matches the reviewed design truth table'
     ];
     const actual = [...new Set([
       ...basePermissions,
+      ...superAdminExpandedPermissions(role),
       ...organizationGovernanceRolePermissions(basePermissions),
     ])].sort();
     assert.deepEqual(actual, expected, `${role} migration permissions diverge from the reviewed design`);
