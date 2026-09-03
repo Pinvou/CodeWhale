@@ -1875,3 +1875,8 @@ dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "有効";
 dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "無効";
 dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "リモート撤回の処理待ち";
 dictJa["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "操作に失敗しました。しばらくしてから再試行してください。";
+// features/chat バックグラウンドタスク表示の辞書項目（uiChat は既存のためマージ）
+Object.assign(dictJa.uiChat, {
+  bgTasks: 'バックグラウンドタスク',
+  bgTasksRunning: n => `${n} 件のバックグラウンドタスク実行中`,
+});

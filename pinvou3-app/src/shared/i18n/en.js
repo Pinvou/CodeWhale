@@ -1874,3 +1874,8 @@ dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "On";
 dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "Off";
 dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "Remote withdrawal pending";
 dictEn["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "The operation failed. Try again later.";
+// features/chat background task indicator entries (uiChat exists, merge instead of overwrite)
+Object.assign(dictEn.uiChat, {
+  bgTasks: 'Background Tasks',
+  bgTasksRunning: n => `${n} background task${n === 1 ? '' : 's'} running`,
+});

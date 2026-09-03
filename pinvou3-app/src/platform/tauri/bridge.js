@@ -2129,6 +2129,7 @@
   var terminalFeature = installBridgeFeature("terminal", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addChatItem: addChatItem });
   var updateToolItem = terminalFeature.updateToolItem;
   var isShellExecutionTool = terminalFeature.isShellExecutionTool;
+  var mentionsShellTool = terminalFeature.mentionsShellTool;
   var utf8Length = terminalFeature.utf8Length;
   var normalizeTerminalTail = terminalFeature.normalizeTerminalTail;
   var formatShellSnapshot = terminalFeature.formatShellSnapshot;
@@ -2235,6 +2236,7 @@
     composePlanMarkdown: composePlanMarkdown,
     refreshHistoryList: refreshHistoryList,
     isShellExecutionTool: isShellExecutionTool,
+    mentionsShellTool: mentionsShellTool,
     scheduleShellPoll: scheduleShellPoll,
     appendToolItemOutput: appendToolItemOutput,
     scheduleShellNotify: scheduleShellNotify,

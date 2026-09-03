@@ -97,8 +97,11 @@ const expectedProtocolHashes = {
   // fallback's legacy-chip pre-check (chat-events.js) and the zap
   // skip-resend settlement helper (chat.js). And again for the steer
   // persistence alignment: the steered-messages sidecar save/get invokes
-  // (bridge.js) and the position-capture load_session (chat.js).
-  chat: '895ba00983a80bc6fbf0ce3ffc162a0c0a77ffcd6bb730d8c93c7d5d61157e5b',
+  // (bridge.js) and the position-capture load_session (chat.js). Recomputed
+  // again for the background-task indicator: the multiagent:agent_progress
+  // listener schedules shell snapshot polling for sub-agent spawned tasks
+  // (chat-events.js).
+  chat: 'b9e14e9b20bc3e8ac97dd5e6e69bbd7cb92a801a941152aae8020fedbcd4d55c',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
