@@ -116,6 +116,7 @@
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "secret-rotation", "permission": "internal.job.secret-rotation" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "model-catalog-sync", "permission": "internal.job.model-catalog-sync" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "default-route-provisioning", "permission": "internal.job.default-route-provisioning" },
+    { "source": "account-platform/cmd/token-gateway/main.go", "name": "admin-pagination-cleanup", "permission": "internal.job.admin-pagination-cleanup" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "model-emergency-cancellation", "permission": "internal.job.model-emergency-cancellation" }
   ],
   "events": [
