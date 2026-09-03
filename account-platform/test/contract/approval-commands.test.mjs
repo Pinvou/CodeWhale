@@ -48,7 +48,11 @@ test('every management write is classified and financial facts use the independe
     const managementWrites = source.split(/\r?\n/).filter(line => /admin\.(POST|PUT|PATCH|DELETE)\(/.test(line));
     assert.ok(managementWrites.length > 0);
     for (const line of managementWrites) {
-      assert.match(line, /approvalpolicy\.Require\(/, `unclassified management write: ${line.trim()}`);
+      if (/admin\.POST\("\/commands"/.test(line)) {
+        assert.match(line, /requireNewTokenCommandGovernanceActive\(\).*adminCreateTokenCommand/, `unguarded dynamic management write: ${line.trim()}`);
+        continue;
+      }
+      assert.match(line, /approvalpolicy\.(?:Require|RequireLegacyTokenDirect)\(/, `unclassified management write: ${line.trim()}`);
     }
   }
 

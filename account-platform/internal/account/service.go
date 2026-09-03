@@ -657,6 +657,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusGone, "APPROVAL_REQUEST_EXPIRED", "the approval request has expired"
 	case errors.Is(err, ErrApprovalInvalidated):
 		status, code, message = http.StatusConflict, "APPROVAL_REQUEST_INVALIDATED", "the approval request no longer matches current policy, authorization, or resource facts"
+	case errors.Is(err, ErrTokenGovernanceInactive):
+		status, code, message = http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "Token command governance is not active"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

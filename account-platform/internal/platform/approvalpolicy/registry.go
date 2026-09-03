@@ -39,7 +39,10 @@ type Policy struct {
 var ErrPolicyNotRegistered = errors.New("management command policy is not registered")
 
 var policies = buildPolicies()
-var executableApprovalCommands = map[string]struct{}{"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}, "PAYMENT_PRODUCT_RESUME": {}}
+var executableApprovalCommands = map[string]struct{}{
+	"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}, "PAYMENT_PRODUCT_RESUME": {},
+	"TOKEN_MODEL_LIFECYCLE_CHANGE": {}, "TOKEN_MODEL_CATALOG_ROLLBACK": {}, "TOKEN_CREDENTIAL_REVOKE": {},
+}
 
 func buildPolicies() map[string]Policy {
 	result := map[string]Policy{}
@@ -160,7 +163,61 @@ func buildPolicies() map[string]Policy {
 			ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service",
 		}
 	}
+	addTokenGovernancePolicies(result)
 	return result
+}
+
+func addTokenGovernancePolicies(result map[string]Policy) {
+	audit := func(commandType string, version int64, permission string, snapshotVersion int, fields ...string) {
+		result[commandType] = Policy{
+			CommandType: commandType, PolicyVersion: version, Mode: AuditOnly,
+			RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
+			ApprovalCount: 0, SelfApprovalForbidden: false, SnapshotSchemaVersion: snapshotVersion,
+			CriticalResourceFields: fields, ExpiresAfter: 24 * time.Hour,
+			ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service",
+		}
+	}
+	// APT-122 owns these four v1 policies. They are repeated here only as the
+	// complete nineteen-command code registry; the values remain byte-for-byte
+	// compatible with account migration 000044.
+	audit("TOKEN_PROTOCOL_DRAFT_CREATE", 1, "platform.pricing.manage", 1, "protocol_code", "expected_protocol_head_version", "request_fingerprint")
+	audit("TOKEN_PROTOCOL_PUBLISH", 1, "platform.pricing.manage", 1, "protocol_definition_id", "expected_protocol_version", "draft_etag", "request_fingerprint")
+	audit("TOKEN_FORMULA_DRAFT_CREATE", 1, "platform.pricing.manage", 1, "protocol_definition_id", "expected_protocol_version", "expected_formula_head_version", "request_fingerprint")
+	audit("TOKEN_FORMULA_PUBLISH", 1, "platform.pricing.manage", 1, "formula_version_id", "expected_formula_version", "draft_etag", "request_fingerprint")
+
+	audit("TOKEN_MODEL_DRAFT_SAVE", 2, "platform.models.manage", 2, "model_id", "expected_catalog_version", "expected_draft_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_MODEL_PUBLISH", 2, "platform.models.manage", 2, "model_id", "expected_catalog_version", "expected_draft_version", "precheck_fingerprint", "request_fingerprint")
+	result["TOKEN_MODEL_LIFECYCLE_CHANGE"] = Policy{
+		CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.models.lifecycle.request", ApproverPermission: "platform.models.lifecycle.approve",
+		RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{"model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+	}
+	audit("TOKEN_MODEL_CATALOG_SYNC", 2, "platform.models.sync", 2, "expected_catalog_version", "adapter_observed_version", "catalog_diff_fingerprint", "request_fingerprint")
+	result["TOKEN_MODEL_CATALOG_ROLLBACK"] = Policy{
+		CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, Mode: ApprovalRequired,
+		RequesterPermission: "platform.models.catalog.rollback.request", ApproverPermission: "platform.models.catalog.rollback.approve",
+		RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{"current_catalog_version", "source_catalog_version", "catalog_diff_fingerprint", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+	}
+	audit("TOKEN_ACCOUNT_CREATE", 2, "platform.tokens.manage", 2, "owner_type", "owner_id", "owner_authorization_version", "creation_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ACCOUNT_STATUS_CHANGE", 2, "platform.tokens.manage", 2, "token_account_id", "expected_account_version", "target_status", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ROUTE_UPSERT", 2, "platform.tokens.manage", 2, "token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_code", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ROUTE_DELETE", 2, "platform.tokens.manage", 2, "token_account_id", "route_id", "expected_account_version", "expected_route_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_CREDENTIAL_ENROLL", 1, "platform.tokens.manage", 1, "token_account_id", "expected_account_version", "credential_slot_version", "launch_fingerprint")
+	audit("TOKEN_CREDENTIAL_ROTATE", 1, "platform.tokens.manage", 1, "token_account_id", "expected_account_version", "active_credential_version", "launch_fingerprint")
+	result["TOKEN_CREDENTIAL_REVOKE"] = Policy{
+		CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, Mode: ApprovalRequired,
+		RequesterPermission: "platform.tokens.credentials.revoke.request", ApproverPermission: "platform.tokens.credentials.revoke.approve",
+		RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"token_account_id", "token_account_version", "credential_id", "credential_version", "credential_status", "credential_fingerprint", "active_route_set_fingerprint", "provisioning_lease_set_fingerprint", "inflight_request_set_fingerprint", "replacement_credential_version", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+	}
+	audit("TOKEN_CREDENTIAL_VALIDATE", 2, "platform.tokens.credentials.validate", 2, "token_account_id", "expected_account_version", "credential_id", "credential_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ROUTE_PROVISIONING_REPAIR", 2, "platform.tokens.manage", 2, "provisioning_id", "expected_provisioning_version", "target_generation", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_USAGE_RECONCILIATION_RETRY", 2, "platform.usage.reconcile.retry", 2, "usage_request_id", "expected_usage_version", "evidence_high_watermark", "precheck_fingerprint", "request_fingerprint")
 }
 
 func ValidateAll(commands map[string]Mode) error {
@@ -194,6 +251,18 @@ func Executable(commandType string) bool {
 	return ok
 }
 
+// TokenExecutableApproval reports only the three Token commands introduced by
+// ADM-64. Account uses this narrow predicate to keep their approval entrypoint
+// closed until APT-138 performs the single persistent activation switch.
+func TokenExecutableApproval(commandType string) bool {
+	switch strings.ToUpper(strings.TrimSpace(commandType)) {
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+		return true
+	default:
+		return false
+	}
+}
+
 // Require annotates every management write route with its stable policy and
 // fails closed on unknown or conflicting classifications. Approval-required
 // commands cannot be invoked through their legacy direct-mutation route.
@@ -212,6 +281,23 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 		}
 		ctx.Header("X-Command-Type", policy.CommandType)
 		ctx.Header("X-Command-Policy-Version", fmt.Sprint(policy.PolicyVersion))
+		ctx.Next()
+	}
+}
+
+// RequireLegacyTokenDirect preserves the two immutable v1 direct paths while
+// the APT-138 activation record is absent. APT-138 replaces this branch and
+// the approval branch atomically; callers cannot select a version themselves.
+func RequireLegacyTokenDirect(commandType string) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		commandType = strings.ToUpper(strings.TrimSpace(commandType))
+		if commandType != "TOKEN_MODEL_LIFECYCLE_CHANGE" && commandType != "TOKEN_MODEL_CATALOG_ROLLBACK" {
+			api.WriteError(ctx.Writer, http.StatusServiceUnavailable, "COMMAND_POLICY_UNAVAILABLE", "management command policy is unavailable", httpserver.RequestID(ctx.Request.Context()))
+			ctx.Abort()
+			return
+		}
+		ctx.Header("X-Command-Type", commandType)
+		ctx.Header("X-Command-Policy-Version", "1")
 		ctx.Next()
 	}
 }

@@ -126,6 +126,9 @@ func (r *PostgresRepository) CompleteApprovalExecution(ctx context.Context, requ
 	if result != "EXECUTED" && result != "FAILED" {
 		return ErrConflict
 	}
+	if (result == "EXECUTED" && errorClass != "") || (result == "FAILED" && !validStableExecutionErrorCode(errorClass)) {
+		return ErrConflict
+	}
 	if _, err := canonicalSafeJSONObject(jsonOrDefault(domainResult, `{}`)); err != nil {
 		return err
 	}
@@ -172,6 +175,23 @@ func (r *PostgresRepository) CompleteApprovalExecution(ctx context.Context, requ
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func validStableExecutionErrorCode(code string) bool {
+	if len(code) < 1 || len(code) > 120 || code != strings.TrimSpace(code) || code[0] < 'A' || code[0] > 'Z' {
+		return false
+	}
+	for index := 1; index < len(code); index++ {
+		if current := code[index]; (current < 'A' || current > 'Z') && (current < '0' || current > '9') && current != '_' {
+			return false
+		}
+	}
+	for _, sensitive := range []string{"TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL"} {
+		if strings.Contains(code, sensitive) {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalSafeJSONObject(raw json.RawMessage) ([]byte, error) {

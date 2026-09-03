@@ -78,6 +78,11 @@ func TestTokenProtocolFormulaPoliciesPostgresIntegration(t *testing.T) {
 	if _, err := connection.Exec(ctx, `UPDATE approval_command_policies SET risk_class='CHANGED' WHERE command_type='TOKEN_PROTOCOL_PUBLISH' AND policy_version=1`); err == nil {
 		t.Fatal("installed policy versions must be immutable")
 	}
+	// APT-123 is now the latest Account migration and deliberately preserves
+	// policy history. Roll it back first, then exercise APT-122's own down.
+	if err := migrations.DownOne(ctx, connection, loaded); err != nil {
+		t.Fatal(err)
+	}
 	if err := migrations.DownOne(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +93,144 @@ func TestTokenProtocolFormulaPoliciesPostgresIntegration(t *testing.T) {
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestTokenCommandGovernancePoliciesPostgresIntegration proves that the real
+// 000045 migration matches the nineteen-command registry and invalidates one
+// platform authorization snapshot once even when both allowed roles are held.
+func TestTokenCommandGovernancePoliciesPostgresIntegration(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("PINVOU_TEST_ACCOUNT_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("PINVOU_TEST_ACCOUNT_DATABASE_URL is not configured")
+	}
+	if testing.Short() && os.Getenv("PINVOU_TEST_ACCOUNT_POLICY_GATE") != "1" {
+		t.Skip("Account command-policy PostgreSQL gate is run explicitly before the short race suite")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
+	connection, err := pgx.Connect(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close(context.Background()) })
+	schema := "token_governance_policy_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	identifier := pgx.Identifier{schema}.Sanitize()
+	if _, err := connection.Exec(ctx, `CREATE SCHEMA `+identifier); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = connection.Exec(context.Background(), `DROP SCHEMA `+identifier+` CASCADE`) })
+	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil || len(loaded) == 0 || loaded[len(loaded)-1].Version != 45 {
+		t.Fatalf("expected Account migration 45 last: %v", err)
+	}
+	if err := migrations.Up(ctx, connection, loaded[:len(loaded)-1]); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, connection)
+	actor := uuid.New()
+	requesterBinding := uuid.New()
+	now := time.Now().UTC()
+	if _, err := connection.Exec(ctx, `INSERT INTO users(id,status,display_name,created_at,updated_at) VALUES($1,'ACTIVE','governance actor',$2,$2)`, actor, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `INSERT INTO role_assignments(id,user_id,role_code,source,grant_source,starts_at,created_at) VALUES($1,$3,'PLATFORM_SUPER_ADMIN','INTEGRATION_TEST','INTEGRATION_TEST',$4,$4),($2,$3,'PLATFORM_MODEL_ADMIN','INTEGRATION_TEST','INTEGRATION_TEST',$4,$4)`, requesterBinding, uuid.New(), actor, now); err != nil {
+		t.Fatal(err)
+	}
+	var before int64
+	if err := connection.QueryRow(ctx, `SELECT version FROM authorization_versions WHERE user_id=$1 AND scope='PLATFORM'`, actor).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrations.Up(ctx, connection, loaded); err != nil {
+		t.Fatal(err)
+	}
+	migrations.Unlock(ctx, connection)
+	var after int64
+	if err := connection.QueryRow(ctx, `SELECT version FROM authorization_versions WHERE user_id=$1 AND scope='PLATFORM'`, actor).Scan(&after); err != nil || after != before+1 {
+		t.Fatalf("authorization version=%d want=%d err=%v", after, before+1, err)
+	}
+	approvalRequest := uuid.New()
+	if _, err := connection.Exec(ctx, `INSERT INTO approval_requests(
+		id,command_type,policy_version,requester_user_id,requester_binding_id,requester_authorization_version,
+		idempotency_key,normalized_command,command_fingerprint,target_resource_type,target_resource_id,reason,
+		redacted_evidence,expected_impact,status,expires_at,execution_deadline,submitted_at,decided_at,created_at,updated_at
+	) VALUES($1,'TOKEN_MODEL_LIFECYCLE_CHANGE',2,$2,$3,$4,'migration-check-request','{}',decode(repeat('00',32),'hex'),
+		'MODEL','model-for-error-class-check','migration constraint check','{}','{}','APPROVED',$5 + INTERVAL '1 hour',
+		$5 + INTERVAL '5 minutes',$5,$5,$5,$5)`, approvalRequest, actor, requesterBinding, after, now); err != nil {
+		t.Fatal(err)
+	}
+	invalidExecutions := []struct {
+		name       string
+		status     string
+		errorClass any
+	}{
+		{name: "executing with error class", status: "EXECUTING", errorClass: "DOMAIN_REJECTED"},
+		{name: "executed with error class", status: "EXECUTED", errorClass: "DOMAIN_REJECTED"},
+		{name: "failed without error class", status: "FAILED", errorClass: nil},
+	}
+	for _, testCase := range invalidExecutions {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := connection.Exec(ctx, `INSERT INTO approval_executions(
+				id,approval_request_id,command_type,command_fingerprint,execution_idempotency_key,executor_identity,
+				job_run_id,status,authorization_snapshot,error_class,started_at
+			) VALUES($1,$2,'TOKEN_MODEL_LIFECYCLE_CHANGE',decode(repeat('00',32),'hex'),$3,'token-command-executor',
+				'migration-check-job',$4,'{}',$5,$6)`, uuid.New(), approvalRequest, "migration-check-"+strings.ReplaceAll(testCase.name, " ", "-"), testCase.status, testCase.errorClass, now)
+			if err == nil || !strings.Contains(err.Error(), "approval_executions_stable_error_class") {
+				t.Fatalf("expected stable error class constraint rejection, got %v", err)
+			}
+		})
+	}
+	if err := migrations.Up(ctx, connection, loaded); err != nil {
+		t.Fatal(err)
+	}
+	var repeated int64
+	if err := connection.QueryRow(ctx, `SELECT version FROM authorization_versions WHERE user_id=$1 AND scope='PLATFORM'`, actor).Scan(&repeated); err != nil || repeated != after {
+		t.Fatalf("idempotent up changed authorization version=%d want=%d err=%v", repeated, after, err)
+	}
+
+	for commandType := range tokenGovernancePolicyTypes() {
+		expected, err := Lookup(commandType)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var actual Policy
+		var mode string
+		var critical []byte
+		var expiresSeconds, executionSeconds int64
+		err = connection.QueryRow(ctx, `SELECT command_type,policy_version,approval_mode,requester_permission,COALESCE(approver_permission,''),risk_class,approval_count,self_approval_forbidden,snapshot_schema_version,critical_resource_fields,EXTRACT(EPOCH FROM expires_after)::bigint,EXTRACT(EPOCH FROM execution_window)::bigint,executor_identity FROM approval_command_policies WHERE command_type=$1 AND policy_version=$2`, commandType, expected.PolicyVersion).Scan(&actual.CommandType, &actual.PolicyVersion, &mode, &actual.RequesterPermission, &actual.ApproverPermission, &actual.RiskClass, &actual.ApprovalCount, &actual.SelfApprovalForbidden, &actual.SnapshotSchemaVersion, &critical, &expiresSeconds, &executionSeconds, &actual.ExecutorIdentity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		actual.Mode = Mode(mode)
+		actual.ExpiresAfter = time.Duration(expiresSeconds) * time.Second
+		actual.ExecutionWindow = time.Duration(executionSeconds) * time.Second
+		if err := json.Unmarshal(critical, &actual.CriticalResourceFields); err != nil || !policiesEqual(expected, actual) {
+			t.Fatalf("database and registry policy differ for %s: expected=%#v actual=%#v err=%v", commandType, expected, actual, err)
+		}
+	}
+	var exactEdges, unexpectedEdges int
+	if err := connection.QueryRow(ctx, `SELECT count(*) FROM role_permissions WHERE permission_code IN ('platform.models.lifecycle.request','platform.models.lifecycle.approve','platform.models.catalog.rollback.request','platform.models.catalog.rollback.approve','platform.tokens.credentials.revoke.request','platform.tokens.credentials.revoke.approve') AND role_code IN ('PLATFORM_SUPER_ADMIN','PLATFORM_MODEL_ADMIN')`).Scan(&exactEdges); err != nil || exactEdges != 12 {
+		t.Fatalf("allowed role edges=%d want=12 err=%v", exactEdges, err)
+	}
+	if err := connection.QueryRow(ctx, `SELECT count(*) FROM role_permissions WHERE permission_code IN ('platform.models.lifecycle.request','platform.models.lifecycle.approve','platform.models.catalog.rollback.request','platform.models.catalog.rollback.approve','platform.tokens.credentials.revoke.request','platform.tokens.credentials.revoke.approve') AND role_code NOT IN ('PLATFORM_SUPER_ADMIN','PLATFORM_MODEL_ADMIN')`).Scan(&unexpectedEdges); err != nil || unexpectedEdges != 0 {
+		t.Fatalf("unexpected role edges=%d err=%v", unexpectedEdges, err)
+	}
+}
+
+func tokenGovernancePolicyTypes() map[string]struct{} {
+	result := make(map[string]struct{}, 19)
+	for _, commandType := range []string{
+		"TOKEN_PROTOCOL_DRAFT_CREATE", "TOKEN_PROTOCOL_PUBLISH", "TOKEN_FORMULA_DRAFT_CREATE", "TOKEN_FORMULA_PUBLISH",
+		"TOKEN_MODEL_DRAFT_SAVE", "TOKEN_MODEL_PUBLISH", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_SYNC", "TOKEN_MODEL_CATALOG_ROLLBACK",
+		"TOKEN_ACCOUNT_CREATE", "TOKEN_ACCOUNT_STATUS_CHANGE", "TOKEN_ROUTE_UPSERT", "TOKEN_ROUTE_DELETE",
+		"TOKEN_CREDENTIAL_ENROLL", "TOKEN_CREDENTIAL_ROTATE", "TOKEN_CREDENTIAL_REVOKE", "TOKEN_CREDENTIAL_VALIDATE",
+		"TOKEN_ROUTE_PROVISIONING_REPAIR", "TOKEN_USAGE_RECONCILIATION_RETRY",
+	} {
+		result[commandType] = struct{}{}
+	}
+	return result
 }
 
 func policiesEqual(left, right Policy) bool {

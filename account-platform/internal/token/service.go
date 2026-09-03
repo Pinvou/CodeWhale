@@ -63,6 +63,7 @@ type Service struct {
 	impactPrechecksEnabled      bool
 	impactPrechecks             ImpactPrecheckRepository
 	impactPricing               ImpactPriceCoverageClient
+	approvedCommandExecutor     ApprovedTokenCommandExecutor
 	adminProxyHMACKey           []byte
 	breaker                     *resilience.Breaker
 	activeUpstreamCancels       sync.Map
@@ -115,6 +116,11 @@ func (s *Service) WithAdminProxyHMACKey(key []byte) *Service {
 	return s
 }
 
+func (s *Service) WithApprovedTokenCommandExecutor(executor ApprovedTokenCommandExecutor) *Service {
+	s.approvedCommandExecutor = executor
+	return s
+}
+
 func NewService(repository Repository, contexts ContextResolver, wallets WalletResolver, validator CredentialValidator, providerURLs ProviderURLPolicy, billing BillingClient, upstream UpstreamClient, maximumInputTokens int64) *Service {
 	if maximumInputTokens <= 0 {
 		maximumInputTokens = 128_000
@@ -136,6 +142,9 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal.GET("/users/:user_id/account-closure-assessment", serviceauth.Require("internal.token.account-closure-assessment.read"), httpserver.AdaptFunc(s.accountClosureAssessment))
 	internal.GET("/client-readiness", serviceauth.Require("internal.token.client-readiness.read"), httpserver.AdaptFunc(s.clientReadinessStatus))
 	internal.POST("/client-readiness/attestations", serviceauth.Require("internal.token.client-readiness.attest"), httpserver.AdaptFunc(s.issueClientReadinessAttestation))
+	internal.POST("/commands/model-lifecycle/execute", serviceauth.Require("internal.token.model-lifecycle.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.executeApprovedModelLifecycle))
+	internal.POST("/commands/catalog-rollback/execute", serviceauth.Require("internal.token.catalog-rollback.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.executeApprovedCatalogRollback))
+	internal.POST("/commands/credential-revoke/execute", serviceauth.Require("internal.token.credential-revoke.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.executeApprovedCredentialRevoke))
 	router.GET("/v1/client-compatibility", httpserver.AdaptFunc(s.clientCompatibility))
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
@@ -191,15 +200,17 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/models", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogModels))
 		admin.PUT("/models/:model_id/draft", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_DRAFT_SAVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSaveCatalogDraft))
 		admin.POST("/models/:model_id/publish", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishCatalogDraft))
-		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_LIFECYCLE_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
+		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_LIFECYCLE_CHANGE"), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
 		admin.POST("/models:sync", s.authorizer.Require("platform.models.sync"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncCatalog))
-		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_ROLLBACK", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRollbackCatalog))
+		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_CATALOG_ROLLBACK"), httpserver.AdaptFunc(s.adminRollbackCatalog))
 		admin.GET("/models/:model_id/impact/lifecycle", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminModelLifecycleImpact))
 		admin.GET("/model-catalog/impact/rollback", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogRollbackImpact))
 		admin.GET("/provisionings", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisionings))
 		admin.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioning))
 		admin.GET("/owner-candidates", s.authorizer.Require("platform.tokens.owner-candidates.read"), httpserver.AdaptFunc(s.adminOwnerCandidates))
 		admin.GET("/resource-audit", s.authorizer.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), httpserver.AdaptFunc(s.adminResourceAudit))
+		admin.POST("/commands", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateTokenCommand))
+		admin.GET("/commands/:command_reference", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandResult))
 		admin.GET("/token-accounts/:token_account_id/impact/status", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccountStatusImpact))
 		admin.GET("/token-accounts/:token_account_id/impact/route", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenRouteImpact))
 		admin.GET("/token-accounts/:token_account_id/impact/credential", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenCredentialImpact))

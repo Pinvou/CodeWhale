@@ -2,8 +2,11 @@ package approvalpolicy
 
 import (
 	"errors"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestFinancialRepairsRequireOneIndependentApproval(t *testing.T) {
@@ -133,4 +136,72 @@ func TestTokenProtocolFormulaCommandsAreAuditOnlyWithFrozenFields(t *testing.T) 
 			t.Fatalf("AUDIT_ONLY command %s must not enter the approval executor allowlist", commandType)
 		}
 	}
+}
+
+func TestNineteenTokenGovernanceCommandsAreRegistered(t *testing.T) {
+	commands := []string{
+		"TOKEN_PROTOCOL_DRAFT_CREATE", "TOKEN_PROTOCOL_PUBLISH", "TOKEN_FORMULA_DRAFT_CREATE", "TOKEN_FORMULA_PUBLISH",
+		"TOKEN_MODEL_DRAFT_SAVE", "TOKEN_MODEL_PUBLISH", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_SYNC", "TOKEN_MODEL_CATALOG_ROLLBACK",
+		"TOKEN_ACCOUNT_CREATE", "TOKEN_ACCOUNT_STATUS_CHANGE", "TOKEN_ROUTE_UPSERT", "TOKEN_ROUTE_DELETE",
+		"TOKEN_CREDENTIAL_ENROLL", "TOKEN_CREDENTIAL_ROTATE", "TOKEN_CREDENTIAL_REVOKE", "TOKEN_CREDENTIAL_VALIDATE",
+		"TOKEN_ROUTE_PROVISIONING_REPAIR", "TOKEN_USAGE_RECONCILIATION_RETRY",
+	}
+	for _, commandType := range commands {
+		if _, err := Lookup(commandType); err != nil {
+			t.Fatalf("Token governance command %s is not registered: %v", commandType, err)
+		}
+	}
+}
+
+func TestTokenApprovalPoliciesAndExecutableAllowlistAreFrozen(t *testing.T) {
+	expected := map[string]Policy{
+		"TOKEN_MODEL_LIFECYCLE_CHANGE": {
+			CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, Mode: ApprovalRequired,
+			RequesterPermission: "platform.models.lifecycle.request", ApproverPermission: "platform.models.lifecycle.approve",
+			RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true, SnapshotSchemaVersion: 2,
+			CriticalResourceFields: []string{"model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+			ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+		},
+		"TOKEN_MODEL_CATALOG_ROLLBACK": {
+			CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, Mode: ApprovalRequired,
+			RequesterPermission: "platform.models.catalog.rollback.request", ApproverPermission: "platform.models.catalog.rollback.approve",
+			RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true, SnapshotSchemaVersion: 2,
+			CriticalResourceFields: []string{"current_catalog_version", "source_catalog_version", "catalog_diff_fingerprint", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
+			ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+		},
+		"TOKEN_CREDENTIAL_REVOKE": {
+			CommandType: "TOKEN_CREDENTIAL_REVOKE", PolicyVersion: 1, Mode: ApprovalRequired,
+			RequesterPermission: "platform.tokens.credentials.revoke.request", ApproverPermission: "platform.tokens.credentials.revoke.approve",
+			RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE", ApprovalCount: 1, SelfApprovalForbidden: true, SnapshotSchemaVersion: 1,
+			CriticalResourceFields: []string{"token_account_id", "token_account_version", "credential_id", "credential_version", "credential_status", "credential_fingerprint", "active_route_set_fingerprint", "provisioning_lease_set_fingerprint", "inflight_request_set_fingerprint", "replacement_credential_version", "policy_version"},
+			ExpiresAfter:           24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
+		},
+	}
+	for commandType, want := range expected {
+		got, err := Lookup(commandType)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("Token approval policy mismatch for %s:\n got %#v\nwant %#v\nerr %v", commandType, got, want, err)
+		}
+	}
+	for _, existing := range []string{"WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME"} {
+		if !Executable(existing) {
+			t.Fatalf("existing executable command %s was removed", existing)
+		}
+	}
+	for commandType := range tokenCommandSpecsForTest() {
+		_, shouldExecute := expected[commandType]
+		if Executable(commandType) != shouldExecute {
+			t.Fatalf("unexpected Token executable allowlist state for %s", commandType)
+		}
+	}
+}
+
+func tokenCommandSpecsForTest() map[string]struct{} {
+	result := map[string]struct{}{}
+	for _, policy := range All() {
+		if strings.HasPrefix(policy.CommandType, "TOKEN_") && policy.CommandType != "TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE" && !strings.HasSuffix(policy.CommandType, "_LIFECYCLE_APPLY") && policy.CommandType != "TOKEN_USAGE_RECONCILE" {
+			result[policy.CommandType] = struct{}{}
+		}
+	}
+	return result
 }

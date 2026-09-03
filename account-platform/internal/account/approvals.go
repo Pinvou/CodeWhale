@@ -11,8 +11,10 @@ import (
 	"io"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -21,9 +23,10 @@ import (
 )
 
 var (
-	ErrApprovalSelfDecision = errors.New("approval requester cannot decide their own request")
-	ErrApprovalInvalidated  = errors.New("approval request is invalidated")
-	ErrApprovalExpired      = errors.New("approval request is expired")
+	ErrApprovalSelfDecision    = errors.New("approval requester cannot decide their own request")
+	ErrApprovalInvalidated     = errors.New("approval request is invalidated")
+	ErrApprovalExpired         = errors.New("approval request is expired")
+	ErrTokenGovernanceInactive = errors.New("token command governance is not active")
 )
 
 type ApprovalRequest struct {
@@ -114,6 +117,13 @@ func (r *PostgresRepository) ApprovalPolicies(context.Context) []approvalpolicy.
 func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal identity.Principal, draft ApprovalDraft) (ApprovalRequest, error) {
 	if !humanApprovalPrincipal(principal) {
 		return ApprovalRequest{}, ErrForbidden
+	}
+	// No activation record exists before APT-138. Keeping this check ahead of
+	// policy lookup, authorization and the transaction guarantees that merely
+	// installing APT-123 cannot create an approval, snapshot, audit event or
+	// authorized outbox event for a Token command.
+	if approvalpolicy.TokenExecutableApproval(draft.CommandType) {
+		return ApprovalRequest{}, ErrTokenGovernanceInactive
 	}
 	policy, normalized, fingerprint, err := normalizeApprovalDraft(draft)
 	if err != nil || policy.Mode != approvalpolicy.ApprovalRequired {
@@ -546,7 +556,7 @@ func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte,
 	if err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
 	}
-	criticalVersions, err := canonicalSafeJSONObject(jsonOrDefault(draft.CriticalResourceVersions, `{}`))
+	criticalVersions, err := canonicalApprovalCriticalVersions(policy, jsonOrDefault(draft.CriticalResourceVersions, `{}`))
 	if err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
 	}
@@ -562,6 +572,169 @@ func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte,
 	}
 	fingerprint := sha256.Sum256(bytes.Join([][]byte{[]byte(policy.CommandType), []byte(fmt.Sprint(policy.PolicyVersion)), normalized, []byte(strings.TrimSpace(draft.TargetResourceType)), []byte(strings.TrimSpace(draft.TargetResourceID)), criticalVersions, financialSnapshot}, []byte{0}))
 	return policy, normalized, fingerprint, nil
+}
+
+func canonicalApprovalCriticalVersions(policy approvalpolicy.Policy, raw json.RawMessage) ([]byte, error) {
+	if !approvalpolicy.TokenExecutableApproval(policy.CommandType) {
+		return canonicalSafeJSONObject(raw)
+	}
+	if len(raw) == 0 || len(raw) > 256<<10 {
+		return nil, ErrConflict
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var fields map[string]any
+	if decoder.Decode(&fields) != nil || fields == nil {
+		return nil, ErrConflict
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, ErrConflict
+	}
+	if len(fields) != len(policy.CriticalResourceFields) {
+		return nil, ErrConflict
+	}
+	for _, name := range policy.CriticalResourceFields {
+		value, ok := fields[name]
+		if !ok || !validTokenApprovalCriticalValue(policy, name, value) {
+			return nil, ErrConflict
+		}
+	}
+	if containsSecretFieldExceptCredentialMetadata(fields) {
+		return nil, ErrConflict
+	}
+	return json.Marshal(fields)
+}
+
+func validTokenApprovalCriticalValue(policy approvalpolicy.Policy, name string, value any) bool {
+	if value == nil {
+		switch name {
+		case "existing_session_cutoff_at", "replacement_model_id", "replacement_credential_version":
+			return true
+		default:
+			return false
+		}
+	}
+	if strings.HasSuffix(name, "_version") || name == "catalog_version" || name == "source_catalog_version" || name == "current_catalog_version" {
+		number, ok := value.(json.Number)
+		if !ok {
+			return false
+		}
+		parsed, err := strconv.ParseInt(number.String(), 10, 64)
+		if err != nil || parsed < 0 {
+			return false
+		}
+		return name != "policy_version" || parsed == policy.PolicyVersion
+	}
+	text, ok := value.(string)
+	if !ok || strings.TrimSpace(text) == "" || len(text) > 512 {
+		return false
+	}
+	if strings.HasSuffix(name, "_fingerprint") {
+		decoded, err := hex.DecodeString(strings.TrimSpace(text))
+		return err == nil && len(decoded) == sha256.Size
+	}
+	if strings.HasSuffix(name, "_at") {
+		_, err := time.Parse(time.RFC3339Nano, text)
+		return err == nil
+	}
+	if strings.HasSuffix(name, "_id") {
+		_, err := uuid.Parse(text)
+		return err == nil
+	}
+	if name == "credential_status" {
+		return slices.Contains([]string{"PENDING", "ACTIVE", "RETIRED", "REVOKED"}, strings.ToUpper(text))
+	}
+	if name == "current_lifecycle" || name == "target_lifecycle" {
+		return slices.Contains([]string{"PUBLISHED", "DEPRECATED", "REMOVED"}, strings.ToUpper(text))
+	}
+	return true
+}
+
+func containsSecretFieldExceptCredentialMetadata(value any) bool {
+	safeCredentialMetadata := map[string]struct{}{
+		"token_account_id": {}, "token_account_version": {}, "credential_id": {}, "credential_version": {},
+		"credential_status": {}, "credential_fingerprint": {}, "replacement_credential_version": {},
+	}
+	var walk func(any) bool
+	walk = func(current any) bool {
+		switch typed := current.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				normalized := normalizeSensitiveFieldName(key)
+				if _, safe := safeCredentialMetadata[normalized]; safe {
+					if !validCredentialMetadataValue(normalized, child) {
+						return true
+					}
+					continue
+				} else if sensitiveGovernanceFieldName(normalized) {
+					return true
+				}
+				if walk(child) {
+					return true
+				}
+			}
+		case []any:
+			for _, child := range typed {
+				if walk(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(value)
+}
+
+func normalizeSensitiveFieldName(key string) string {
+	var normalized strings.Builder
+	var previous rune
+	for index, current := range []rune(strings.TrimSpace(key)) {
+		if current == '-' || current == '.' || unicode.IsSpace(current) {
+			current = '_'
+		} else if unicode.IsUpper(current) && index > 0 && (unicode.IsLower(previous) || unicode.IsDigit(previous)) {
+			normalized.WriteRune('_')
+		}
+		normalized.WriteRune(unicode.ToLower(current))
+		previous = current
+	}
+	return normalized.String()
+}
+
+func validCredentialMetadataValue(name string, value any) bool {
+	switch name {
+	case "token_account_id", "credential_id":
+		text, ok := value.(string)
+		_, err := uuid.Parse(text)
+		return ok && err == nil
+	case "token_account_version", "credential_version", "replacement_credential_version", "active_credential_version", "credential_slot_version":
+		if value == nil && name == "replacement_credential_version" {
+			return true
+		}
+		switch number := value.(type) {
+		case json.Number:
+			parsed, err := strconv.ParseInt(number.String(), 10, 64)
+			return err == nil && parsed >= 0
+		case float64:
+			return number >= 0 && number == float64(int64(number))
+		default:
+			return false
+		}
+	case "credential_status":
+		text, ok := value.(string)
+		return ok && slices.Contains([]string{"PENDING", "ACTIVE", "RETIRED", "REVOKED"}, strings.ToUpper(strings.TrimSpace(text)))
+	case "credential_fingerprint":
+		text, ok := value.(string)
+		decoded, err := hex.DecodeString(strings.TrimSpace(text))
+		return ok && err == nil && len(decoded) == sha256.Size
+	default:
+		return false
+	}
+}
+
+func sensitiveGovernanceFieldName(normalized string) bool {
+	compact := strings.ReplaceAll(normalized, "_", "")
+	return strings.Contains(compact, "password") || strings.Contains(compact, "secret") || strings.Contains(compact, "cipher") || strings.Contains(compact, "privatekey") || strings.Contains(compact, "credential") || strings.Contains(compact, "endpoint") || strings.Contains(compact, "provideraddress") || strings.Contains(compact, "providerurl") || strings.Contains(compact, "baseurl") || compact == "authorization" || compact == "apikey" || compact == "keyid" || compact == "cookie" || compact == "token" || strings.HasSuffix(compact, "token")
 }
 
 func canonicalSafeJSON(raw json.RawMessage) ([]byte, error) {
@@ -586,7 +759,7 @@ func canonicalSafeJSONValue(raw json.RawMessage, allowedTypes ...string) ([]byte
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, ErrConflict
 	}
-	if containsSecretField(value) {
+	if containsSecretFieldExceptCredentialMetadata(value) {
 		return nil, ErrConflict
 	}
 	valueType := ""
@@ -606,8 +779,8 @@ func containsSecretField(value any) bool {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
-			normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
-			if strings.Contains(normalized, "password") || strings.Contains(normalized, "secret") || strings.Contains(normalized, "credential") || strings.Contains(normalized, "cookie") || normalized == "authorization" || normalized == "api_key" || strings.HasSuffix(normalized, "_token") || normalized == "token" {
+			normalized := normalizeSensitiveFieldName(key)
+			if sensitiveGovernanceFieldName(normalized) {
 				return true
 			}
 			if containsSecretField(child) {

@@ -10,6 +10,49 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/commands/model-lifecycle/execute:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: executeApprovedModelLifecycleInternal
+      summary: Execute one Account-authorized lifecycle command as token-command-executor
+      description: The route is installed but returns TOKEN_COMMAND_GOVERNANCE_INACTIVE until APT-138 activation; it is never exposed through Portal or ingress.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedTokenCommandExecution" } } } }
+      responses:
+        "200": { description: Existing or completed redacted result, content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } } }
+        "202": { description: Outcome unknown; query the same command reference, content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/catalog-rollback/execute:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: executeApprovedCatalogRollbackInternal
+      summary: Execute one Account-authorized catalog rollback as token-command-executor
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedTokenCommandExecution" } } } }
+      responses:
+        "200": { description: Existing or completed redacted result, content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } } }
+        "202": { description: Outcome unknown, content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/credential-revoke/execute:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: executeApprovedCredentialRevokeInternal
+      summary: Execute one Account-authorized credential revoke as token-command-executor
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovedTokenCommandExecution" } } } }
+      responses:
+        "200": { description: Existing or completed redacted result, content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } } }
+        "202": { description: Outcome unknown, content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /client-compatibility:
     get:
       security: []
@@ -680,6 +723,10 @@ components:
     oidc:
       type: openIdConnect
       openIdConnectUrl: https://identity.example.invalid/realms/pinvou/.well-known/openid-configuration
+    serviceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: workload identity JWT
   responses:
     Error:
       description: Stable error response
@@ -708,6 +755,51 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    GovernedTokenCommandEnvelope:
+      type: object
+      additionalProperties: false
+      required: [command_type, reason, target_resource_type, target_resource_id, expected_versions, precheck_fingerprint, command]
+      properties:
+        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+        target_resource_type: { type: string, minLength: 1, maxLength: 80 }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        expected_versions: { type: object, additionalProperties: true }
+        precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        command: { type: object, additionalProperties: true, description: Account-frozen normalized command without secrets or provider internals. }
+    ApprovedTokenCommandExecution:
+      type: object
+      additionalProperties: false
+      description: Executor identity is taken only from the authenticated workload context; it is never accepted in this body. Account issues the stable execution key and retries must reuse it unchanged.
+      required: [approval_request_id, requester_user_id, authorization_version, command_fingerprint, execution_idempotency_key, command]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        requester_user_id: { type: string, format: uuid }
+        authorization_version: { type: integer, format: int64, minimum: 1 }
+        command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        execution_idempotency_key: { type: string, minLength: 16, maxLength: 512, description: Account-issued stable execution key; every domain adapter must persist and replay this exact key. }
+        command: { $ref: "#/components/schemas/GovernedTokenCommandEnvelope" }
+    GovernedTokenCommandResult:
+      type: object
+      additionalProperties: false
+      required: [command_reference, command_type, policy_version, actor_user_id, actor_permission, authorization_version, idempotency_fingerprint, target_resource_type, target_resource_id, status, approval_request_id, audit_request_id, created_at]
+      properties:
+        command_reference: { type: string, format: uuid }
+        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        actor_user_id: { type: string, format: uuid }
+        actor_permission: { type: string }
+        authorization_version: { type: integer, format: int64, minimum: 1 }
+        idempotency_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        target_resource_type: { type: string }
+        target_resource_id: { type: string }
+        status: { type: string, enum: [PENDING, SUCCEEDED, REJECTED, FAILED, UNKNOWN] }
+        redacted_result: { type: object, additionalProperties: true }
+        stable_error_code: { type: string, minLength: 1, maxLength: 120, pattern: '^[A-Z][A-Z0-9_]*$', description: "Stable classification only; raw errors and Token, Key, Secret, Password, or Credential text are forbidden." }
+        approval_request_id: { type: string, format: uuid }
+        audit_request_id: { type: string }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
     AdminPaginationEnvelope:
       type: object
       description: Shared NFR-56 envelope. APT-121 resource operations specialize the items schema without changing these fields.

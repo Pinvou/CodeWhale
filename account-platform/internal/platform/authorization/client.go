@@ -149,6 +149,24 @@ func (c *Client) AuthorizedUserID(ctx context.Context, principal identity.Princi
 	return result.UserID, nil
 }
 
+// AuthorizedUserIDAll evaluates all permissions in one Account authorization
+// snapshot. The returned version must be persisted with governed commands so a
+// later authorization change cannot be merged with an earlier decision.
+func (c *Client) AuthorizedUserIDAll(ctx context.Context, principal identity.Principal, permissions ...string) (uuid.UUID, int64, error) {
+	result, headers, err := c.allowedComposite(ctx, principal, nil, permissions)
+	if err != nil {
+		return uuid.Nil, 0, err
+	}
+	version, valid := positiveAuthorizationVersion(headers)
+	if !valid {
+		return uuid.Nil, 0, errors.New("authorization version is unavailable")
+	}
+	if !result.Allowed || result.UserID == uuid.Nil {
+		return uuid.Nil, 0, ErrPermissionDenied
+	}
+	return result.UserID, version, nil
+}
+
 func (c *Client) AuthorizedOrganizationUserID(ctx context.Context, principal identity.Principal, permission string, organizationID uuid.UUID) (uuid.UUID, int64, error) {
 	result, headers, err := c.decision(ctx, principal, permission, &organizationID)
 	if err != nil {

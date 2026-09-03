@@ -442,6 +442,16 @@
         "file": "000044_token_protocol_formula_command_policies.up.sql",
         "version": 44,
         "sha256": "23f971c67d5a034d69271e520423582ba5ba99fc36eefe518a2105a4154fb3ef"
+      },
+      {
+        "file": "000045_token_command_governance.down.sql",
+        "version": 45,
+        "sha256": "6fa62f27bc86738d1d9c0382686e3f7912e1104044790a966a7cd6ecc9663804"
+      },
+      {
+        "file": "000045_token_command_governance.up.sql",
+        "version": 45,
+        "sha256": "17c1dd0aa675b4d84fd558618c59e668220815930f489b03b092772adb01258c"
       }
     ],
     "billing": [
@@ -1218,6 +1228,16 @@
         "file": "000023_admin_pagination_snapshots.up.sql",
         "version": 23,
         "sha256": "3b7e7ba7e95372e419948ba16824c09813a88da7122874f910ca79ab266155e9"
+      },
+      {
+        "file": "000024_token_command_results.down.sql",
+        "version": 24,
+        "sha256": "c864e89957ec450f31548143ff418c8dfeeda1e47affca5699e34bf308ec2f9a"
+      },
+      {
+        "file": "000024_token_command_results.up.sql",
+        "version": 24,
+        "sha256": "f79a7a12f69beb6ca360e09ebbec01f028266d7c610ff63b07f0e33f193c263b"
       }
     ]
   }

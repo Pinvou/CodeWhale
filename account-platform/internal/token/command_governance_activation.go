@@ -46,3 +46,32 @@ func writeTokenCommandGovernanceInactive(ctx *gin.Context) {
 	api.WriteError(ctx.Writer, http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "Token command governance is not active", httpserver.RequestID(ctx.Request.Context()))
 	ctx.Abort()
 }
+
+// selectLegacyTokenDirect keeps the immutable v1 path selected while no
+// activation reader is installed. Once APT-138 installs the persistent reader,
+// ACTIVE rejects human direct mutation and any unreadable state fails closed.
+func (s *Service) selectLegacyTokenDirect() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if s.commandGovernanceActivation == nil {
+			ctx.Next()
+			return
+		}
+		activation, err := s.commandGovernanceActivation.CurrentTokenCommandGovernanceActivation(ctx.Request.Context())
+		if err != nil {
+			writeTokenCommandGovernanceInactive(ctx)
+			return
+		}
+		if activation.State == "ACTIVE" && activation.Epoch > 0 {
+			api.WriteError(ctx.Writer, http.StatusForbidden, "DIRECT_APPROVAL_COMMAND_FORBIDDEN", "submit this command through the approval workflow", httpserver.RequestID(ctx.Request.Context()))
+			ctx.Abort()
+			return
+		}
+		if activation.State == "PRE_ACTIVATION" && activation.Epoch == 0 {
+			ctx.Next()
+			return
+		}
+		// SAFE_ROLLBACK and malformed/mixed-version states stop all new writes;
+		// they must never revive the historical direct branch.
+		writeTokenCommandGovernanceInactive(ctx)
+	}
+}

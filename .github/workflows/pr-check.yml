@@ -638,6 +638,14 @@ jobs:
           printf '%s\n' "$token_command_output"
           grep -F -- '--- PASS: TestTokenAdminProtocolFormulaCommandsPostgresIntegration' <<< "$token_command_output"
           ! grep -F -- '--- SKIP: TestTokenAdminProtocolFormulaCommandsPostgresIntegration' <<< "$token_command_output"
+          token_governance_policy_output="$(PINVOU_TEST_ACCOUNT_POLICY_GATE=1 go test -run '^TestTokenCommandGovernancePoliciesPostgresIntegration$' -count=1 -v ./internal/platform/approvalpolicy)"
+          printf '%s\n' "$token_governance_policy_output"
+          grep -F -- '--- PASS: TestTokenCommandGovernancePoliciesPostgresIntegration' <<< "$token_governance_policy_output"
+          ! grep -F -- '--- SKIP: TestTokenCommandGovernancePoliciesPostgresIntegration' <<< "$token_governance_policy_output"
+          token_governance_result_output="$(PINVOU_TEST_TOKEN_COMMAND_GATE=1 go test -run '^TestTokenCommandGovernancePostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$token_governance_result_output"
+          grep -F -- '--- PASS: TestTokenCommandGovernancePostgresIntegration' <<< "$token_governance_result_output"
+          ! grep -F -- '--- SKIP: TestTokenCommandGovernancePostgresIntegration' <<< "$token_governance_result_output"
           go test -short -race ./...
           go vet ./...
 

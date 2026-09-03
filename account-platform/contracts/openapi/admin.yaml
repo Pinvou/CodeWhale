@@ -2116,6 +2116,40 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands:
+    post:
+      operationId: createGovernedTokenCommand
+      summary: Create or recover one governed Token command result
+      description: Installed in APT-123 but returns TOKEN_COMMAND_GOVERNANCE_INACTIVE until the single APT-138 activation transition. Approval-required commands are never accepted here.
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandEnvelope" } } }
+      responses:
+        "200": { description: Existing result for the same idempotency key and fingerprint, content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandResult" } } } }
+        "202": { description: Command accepted or its outcome remains unknown, content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands/{command_reference}:
+    get:
+      operationId: getGovernedTokenCommandResult
+      summary: Recover the current redacted result owned by the authenticated actor
+      description: Installed in APT-123 but returns TOKEN_COMMAND_GOVERNANCE_INACTIVE before APT-138 activation; a different actor receives the same not-found response as an unknown reference.
+      parameters:
+        - name: command_reference
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Current immutable command result, content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     oidc:
@@ -2295,6 +2329,41 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    TokenCommandEnvelope:
+      type: object
+      additionalProperties: false
+      required: [command_type, reason, target_resource_type, target_resource_id, expected_versions, precheck_fingerprint, command]
+      properties:
+        command_type:
+          type: string
+          enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_DRAFT_SAVE, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_SYNC, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_ACCOUNT_CREATE, TOKEN_ACCOUNT_STATUS_CHANGE, TOKEN_ROUTE_UPSERT, TOKEN_ROUTE_DELETE, TOKEN_CREDENTIAL_ENROLL, TOKEN_CREDENTIAL_ROTATE, TOKEN_CREDENTIAL_REVOKE, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY]
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+        target_resource_type: { type: string, minLength: 1, maxLength: 80, pattern: '^[A-Z][A-Z0-9_]*$' }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        expected_versions: { type: object, additionalProperties: true }
+        precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        command: { type: object, additionalProperties: true, description: "Command-specific normalized input. Secret, ciphertext, key identifiers, provider URLs, force, and ignore_blocker fields are forbidden." }
+    TokenCommandResult:
+      type: object
+      additionalProperties: false
+      required: [command_reference, command_type, policy_version, actor_user_id, actor_permission, authorization_version, idempotency_fingerprint, target_resource_type, target_resource_id, status, audit_request_id, created_at]
+      properties:
+        command_reference: { type: string, format: uuid }
+        command_type: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        actor_user_id: { type: string, format: uuid }
+        actor_permission: { type: string }
+        authorization_version: { type: integer, format: int64, minimum: 1 }
+        idempotency_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        target_resource_type: { type: string }
+        target_resource_id: { type: string }
+        status: { type: string, enum: [PENDING, SUCCEEDED, REJECTED, FAILED, UNKNOWN] }
+        redacted_result: { type: object, additionalProperties: true }
+        stable_error_code: { type: string, minLength: 1, maxLength: 120, pattern: '^[A-Z][A-Z0-9_]*$', description: "Stable classification only; raw errors and Token, Key, Secret, Password, or Credential text are forbidden." }
+        approval_request_id: { type: string, format: uuid }
+        audit_request_id: { type: string }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
     TokenImpactPrecheck:
       type: object
       additionalProperties: false

@@ -71,7 +71,7 @@ func NewHTTPApprovalExecutionGate(rawURL, serviceToken string) (*HTTPApprovalExe
 }
 
 func (gate *HTTPApprovalExecutionGate) Begin(ctx context.Context, requestID uuid.UUID, jobRunID string, observedVersions json.RawMessage) (ApprovedCommand, error) {
-	payload := map[string]any{"executor_identity": billingApprovalExecutorIdentity, "job_run_id": jobRunID, "observed_versions": json.RawMessage(observedVersions)}
+	payload := map[string]any{"job_run_id": jobRunID, "observed_versions": json.RawMessage(observedVersions)}
 	var command ApprovedCommand
 	if err := gate.request(ctx, http.MethodPost, fmt.Sprintf("/internal/v1/approval-requests/%s/executions", requestID), payload, &command); err != nil {
 		return ApprovedCommand{}, err
@@ -80,7 +80,7 @@ func (gate *HTTPApprovalExecutionGate) Begin(ctx context.Context, requestID uuid
 }
 
 func (gate *HTTPApprovalExecutionGate) Complete(ctx context.Context, requestID uuid.UUID, jobRunID, result string, domainResult, ledgerReferences json.RawMessage, errorClass string) error {
-	payload := map[string]any{"executor_identity": billingApprovalExecutorIdentity, "job_run_id": jobRunID, "result": result, "domain_result": json.RawMessage(domainResult), "ledger_references": json.RawMessage(ledgerReferences), "error_class": errorClass}
+	payload := map[string]any{"job_run_id": jobRunID, "result": result, "domain_result": json.RawMessage(domainResult), "ledger_references": json.RawMessage(ledgerReferences), "error_class": errorClass}
 	return gate.request(ctx, http.MethodPost, fmt.Sprintf("/internal/v1/approval-requests/%s/executions/complete", requestID), payload, nil)
 }
 

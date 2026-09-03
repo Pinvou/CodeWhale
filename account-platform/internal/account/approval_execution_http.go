@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -32,15 +34,19 @@ func (s *Service) beginApprovalExecution(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	executorIdentity, ok := approvalExecutorFromContext(w, r)
+	if !ok {
+		return
+	}
 	var body struct {
-		ExecutorIdentity string          `json:"executor_identity"`
 		JobRunID         string          `json:"job_run_id"`
 		ObservedVersions json.RawMessage `json:"observed_versions"`
 	}
 	if api.DecodeJSON(w, r, &body) != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_EXECUTION", "invalid approval execution request", httpserver.RequestID(r.Context()))
 		return
 	}
-	execution, err := repository.BeginApprovalExecution(r.Context(), requestID, body.ExecutorIdentity, body.JobRunID, body.ObservedVersions)
+	execution, err := repository.BeginApprovalExecution(r.Context(), requestID, executorIdentity, body.JobRunID, body.ObservedVersions)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -58,8 +64,11 @@ func (s *Service) completeApprovalExecution(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	executorIdentity, ok := approvalExecutorFromContext(w, r)
+	if !ok {
+		return
+	}
 	var body struct {
-		ExecutorIdentity string          `json:"executor_identity"`
 		JobRunID         string          `json:"job_run_id"`
 		Result           string          `json:"result"`
 		DomainResult     json.RawMessage `json:"domain_result"`
@@ -67,11 +76,21 @@ func (s *Service) completeApprovalExecution(w http.ResponseWriter, r *http.Reque
 		ErrorClass       string          `json:"error_class"`
 	}
 	if api.DecodeJSON(w, r, &body) != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_EXECUTION", "invalid approval execution completion", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := repository.CompleteApprovalExecution(r.Context(), requestID, body.ExecutorIdentity, body.JobRunID, body.Result, body.DomainResult, body.LedgerReferences, body.ErrorClass); err != nil {
+	if err := repository.CompleteApprovalExecution(r.Context(), requestID, executorIdentity, body.JobRunID, body.Result, body.DomainResult, body.LedgerReferences, body.ErrorClass); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func approvalExecutorFromContext(w http.ResponseWriter, r *http.Request) (string, bool) {
+	workload, ok := serviceauth.FromContext(r.Context())
+	if !ok || workload.ActorType != "SERVICE" || strings.TrimSpace(workload.Service) == "" || strings.TrimSpace(workload.Subject) == "" {
+		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "trusted executor identity is required", httpserver.RequestID(r.Context()))
+		return "", false
+	}
+	return strings.TrimSpace(workload.Service), true
 }

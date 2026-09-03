@@ -146,7 +146,7 @@
 | APT-120 | Token 高数量分页快照、预算、cursor、入口超时与容量基座 | NFR-56 | APT-036, APT-045 | CODE | DONE |
 | APT-121 | 九类 Token 查询合同与模型/Token 资源审计投影 | ADM-56, ADM-63 | APT-119, APT-120 | CODE | DONE |
 | APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | DONE |
-| APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | PENDING |
+| APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | DONE |
 | APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | DONE |
 | APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | PENDING |
 | APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | PENDING |
@@ -230,7 +230,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-123 十九项 Token 命令治理与三项强制审批
 
-- **目标/范围**：主目标 `ADM-65`，仅交付 `ADM-64` 的预激活基础且不得关闭 ADM-64。修改 `migrations/account/000045_*`、`migrations/token/000024_*`、`internal/platform/approvalpolicy/{registry.go,registry_test.go}`、`internal/account/{approvals.go,approval_execution.go,approval_worker.go}`、`internal/token` 十九项命令适配器/结果查询/审计 outbox/内部执行路由、`cmd/{account-service,token-gateway}` 及对应 OpenAPI、事件和工作负载权限配置。本任务唯一拥有其余十五项策略注册、三项审批权限/策略以及十九项通用命令结果、幂等指纹和恢复索引 schema；APT-122 已拥有四项协议/公式策略版本且本任务不得重写。本任务不创建 activation record、epoch、状态列或状态机；这些对象唯一归 APT-138/`000028_*`。
+- **实现状态**：`DONE`；已通过身份 B 第五轮独立代码审核。Account `000045`、Token `000024`、十九项策略注册与通用持久结果、三项审批精确权限/策略、actor 绑定结果查询、最小 executor 内部路由与 workload allowlist、中间提交 PRE_ACTIVATION 门禁已实现。十九项领域 adapter 的最终接入与验收仍由下表对应后续任务负责；activation record/epoch/state machine 及审批事件 consumer 仍唯一归 APT-138，均未在本任务提前实现。尚未推送或部署；本地未配置 Account/Token PostgreSQL URL，真实迁移链命名用例未执行，CI 已强制逐项 PASS 且拒绝 SKIP。
+- **目标/范围**：主目标 `ADM-65`，仅交付 `ADM-64` 的预激活基础且不得关闭 ADM-64。修改 `migrations/account/000045_*`、`migrations/token/000024_*`、`internal/platform/approvalpolicy/{registry.go,registry_test.go}`、`internal/account/{approvals.go,approval_execution.go,approval_worker.go}`、`internal/token` 十九项命令治理中间件/结果查询/审计 outbox/内部执行路由、`cmd/{account-service,token-gateway}` 及对应 OpenAPI、事件和工作负载权限配置。本任务唯一拥有其余十五项策略注册、三项审批权限/策略以及十九项通用命令结果、幂等指纹和恢复索引 schema；APT-122 已拥有四项协议/公式策略版本且本任务不得重写。十九项领域 adapter 不在本任务接入；本任务也不创建 activation record、epoch、状态列、状态机或审批事件 consumer，这些激活对象与 consumer 唯一归 APT-138/`000028_*`。
 - **十九项共同合同**：逐项执行下表所有者映射；所有管理命令创建 API 接受必填 reason、专项 7.2 指定 CAS/版本和 16～128 字符 `Idempotency-Key`（APT-133 隔离 origin 的 `/launch` 不是命令创建 API，固定只接收 `launch_id`），持久化 command type、actor/permission、请求摘要、幂等指纹、预检/关键版本、前后状态、审计 request_id 与脱敏结果。提交前重验权限/CAS/预检；唯一键冲突返回同一结果或 `IDEMPOTENCY_KEY_REUSED`；超时只通过结果查询恢复，禁止盲重试、`force`、`ignore_blocker`。`TOKEN_CREDENTIAL_ENROLL`、`TOKEN_CREDENTIAL_ROTATE` 也必须注册为 `AUDIT_ONLY`，结果只保存不透明引用和脱敏元数据。
 - **审批/权限/执行**：严格写入专项 7.3 三组 13 字段及 exact ordered key array；lifecycle/rollback 保留 v1 并追加 v2，revoke 新增 v1；六权限仅原子授予超级/模型管理员并递增 authorization version。`executableApprovalCommands` 保留全部既有合法项，新增 Token 子集恰为三项；`token-command-executor` 仅持有 approval begin/complete 和三个 `internal.token.*.execute`。人类 direct 固定 403 是已安装但只有 APT-138 `ACTIVE` 才会被路由选择的新分支，不得在预激活阶段提前覆盖旧 v1 direct。
 - **状态/兼容/回滚**：APT-138 的 activation record 不存在即被所有 N/N-1 组件解释为预激活关闭态：旧 v1 direct 保持原行为，新审批入口、executor 消费、新治理 envelope 和新增协议/公式写路径全部关闭；本任务严禁自行持久化 `PRE_ACTIVATION`、epoch 或写 `ACTIVE`。故障回滚只关闭基础 gate，并保留结果、审计及已引用策略；activation 记录缺失语义、最终状态机和原子激活唯一归 APT-138。
