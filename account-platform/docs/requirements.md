@@ -1038,10 +1038,10 @@ RECEIVABLE_OPEN -> RESOLVED
 | UI-25 | 普通个人中心角色信息收敛 | 普通个人中心不展示“我的角色授权”或原始角色码、作用域、授予来源和有效期，也不为该区块请求本人角色绑定接口；权限驱动界面和平台/组织后台的角色管理能力保持不变。 |
 | UI-26 | 权益包渐进式展示 | “我的权益包”默认仅展示最临近到期的最多 5 个有效包及使用进度、状态和到期时间，并汇总有效包数与剩余积分；主页面参考订单记录采用扁平分区和单层列表边界，不再在列表外重复嵌套资料卡；完整组成、来源和退款关联等现有信息进入可访问的全量列表与详情弹窗。 |
 | UI-27 | 全状态订单摘要与详情 | “订单与发票”以简洁摘要表格展示全部充值订单的描述、类型、金额、日期、状态、订单号、时长和数量；复杂支付与履约字段进入可访问详情弹窗。桌面、中等宽度和移动端分别采用完整表格、精简表格和卡片布局。 |
-| UI-28 | 统一管理后台壳层与共享基础组件 | 基于现有权限和 API 重构管理后台壳层、分组导航、路由、页头及共享状态、表格、详情、对话框、通知和无障碍组件；导航必须完全采用 HTML 原型定义的五组与页面名称：工作台（平台总览）、身份与组织（用户管理、角色与权限、组织管理、我的组织）、财务与支付（计费运营、支付与资金、定价与商品）、模型与 Token（Token Gateway）、治理与安全（审批中心、审计与导出、系统与安全、偏好设置）。页面按精确读权限和真实接口独立显示，无接口或无权限页面隐藏，不使用假数据。平台总览采用身份与组织、资金与计费、模型与 Token 三张领域摘要卡及独立系统健康条；每个数据源独立请求和局部失败，禁止以 0 代替无权或加载失败；可用积分统一为已入账减使用中再减应收占用，路由健康率统一为健康路由数除以全部路由数；累计值必须明确标注，待办仅显示当前权限内非零事项并可进入对应工作队列，总览本身不显示“只读权限”告警。并完成组件自身的简中、英文、日文、WCAG 2.1 AA、响应式及真实状态验收。只改变展示与交互，不新增业务能力、权限、治理模式或状态迁移；既有总览接口可补充口径字段并按既有原子权限裁剪响应。 |
+| UI-28 | 统一管理后台壳层与共享基础组件 | 基于现有权限和 API 重构管理后台壳层、分组导航、路由、页头及共享状态、表格、详情、对话框、通知和无障碍组件；导航的历史基线采用 HTML 原型定义的五组。其中“模型与 Token”的历史 Token Gateway 只在 UI-47 feature gate 关闭时作为 canonical；门禁开启后由 UI-47 的“模型管理、Token 资源、运行与用量”取代，本项不与 UI-47 构成冲突。其他分组和页面保持原基线。页面按精确读权限和真实接口独立显示，无接口或无权限页面隐藏，不使用假数据。平台总览采用身份与组织、资金与计费、模型与 Token 三张领域摘要卡及独立系统健康条；每个数据源独立请求和局部失败，禁止以 0 代替无权或加载失败；可用积分统一为已入账减使用中再减应收占用，路由健康率统一为健康路由数除以全部路由数；累计值必须明确标注，待办仅显示当前权限内非零事项并可进入对应工作队列，总览本身不显示“只读权限”告警。并完成组件自身的简中、英文、日文、WCAG 2.1 AA、响应式及真实状态验收。只改变展示与交互，不新增业务能力、权限、治理模式或状态迁移；既有总览接口可补充口径字段并按既有原子权限裁剪响应。 |
 | UI-29 | 身份、用户、角色与组织后台界面改版 | 依赖 UI-28，完成用户管理、角色与权限、组织管理及现有身份修复能力的展示与交互改版；用户目录使用稳定游标分页，用户名/展示名/精确 UUID 搜索与完整用户编码查询分开，停用前明确会话失效影响并禁止当前管理员自停用；用户详情展示现有核心字段。当前账号生命周期不采集或维护邮箱，因此用户目录、详情和搜索不得展示或使用邮箱，底层可选邮箱字段仅作兼容保留。注册、资料和注销修复按独立权限归入同一紧凑异常工作台。角色成为独立 URL 页面，角色定义及权限清单只在角色目录集中展示，用户详情和组织详情仅展示当前对象的有效访问摘要并可深链到目录；Keycloak 平台级受控管理入口不得与用户目录或注销修复混合，“我的组织”仅在存在真实接口与适用权限时显示。并在本项内完成受影响页面的三语、WCAG 2.1 AA、响应式和全部真实状态验收；不新增用户、角色、资源端点、管理动作、权限或状态迁移，仅允许为既有用户列表补充向后兼容的 cursor。 |
 | UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 依赖 UI-28，基于现有接口把计费运营、支付与资金、定价与商品、审批中心拆为独立 URL 页面，继续复用现有额度、账本、订单、案件、调账、Hold、审批、定价和充值商品接口；各页及动作分别按精确权限显示，不保留财务聚合 Tab。并在本项内完成受影响页面的三语、WCAG 2.1 AA、响应式和全部真实状态验收；不开放退款入口，不新增或改变业务能力、API、权限、治理模式或状态迁移。 |
-| UI-31 | 模型、Token、系统与审计后台界面改版 | 依赖 UI-28，基于现有接口完成 Token Gateway、审计与导出、系统与安全页面中模型、Token Account、路由、凭据元数据、Provisioning、用量、系统状态、审计及只读运行手册的展示与交互改版；Keycloak 受控管理入口及隧道说明归入“系统与安全”，仅按既有 `platform.users.identity.repair` 权限显示，系统状态仍独立按 `platform.system.status.read` 显示，任一权限不得隐式替代另一权限；只读运行手册不形成独立导航组。并在本项内完成受影响页面的三语、WCAG 2.1 AA、响应式和全部真实状态验收；不扩大 Token 或系统权限，不新增或改变业务能力、API、权限、治理模式或状态迁移。 |
+| UI-31 | 模型、Token、系统与审计后台界面改版 | 依赖 UI-28，基于现有接口完成历史 Token Gateway、审计与导出、系统与安全页面改版。UI-47 feature gate 启用后，Token Gateway 不再是 canonical 入口，其模型/Token/运行内容由 UI-47 三页取代；本项仍作为 gate 关闭时的历史基线，而审计与系统内容不受取代。Keycloak 受控入口及隧道说明归入“系统与安全”，仅按 `platform.users.identity.repair` 显示，系统状态仍按 `platform.system.status.read` 独立显示；只读运行手册不形成独立导航组。并在本项内完成受影响页面的三语、WCAG 2.1 AA、响应式和真实状态验收；不扩大 Token 或系统权限。 |
 | UI-32 | 管理后台跨页面集成与发布验收 | 依赖 UI-28～UI-31 全部完成，仅新增或调整集成、E2E、视觉、无障碍验收与发布证据，不修改产品代码；覆盖异步恢复、真实错误、加载、冲突、离线或超时、结果不确定、三语、WCAG 2.1 AA、响应式、字段展示和危险操作，不承担前序需求漏做的实现，也不新增或改变业务能力、API、权限或状态迁移。 |
 | UI-33 | 组织目录可扩展交互 | 组织目录消费 ACC-16 的状态筛选和稳定游标，显示本页数量而不把当前页误称为总数；组织 ID 可复制，状态使用三语业务文案。创建组织由明确主按钮打开表单，初始所有者和新增成员使用服务端用户搜索，不受用户目录首屏 25 条限制；危险操作收入口径一致的“更多操作”，不提供批量删除。 |
 | UI-34 | 独立组织详情深链 | 组织详情使用带 `organization_id` 的独立 URL 工作区而非模态抽屉；刷新、前进、后退和分享链接保持目标组织，返回目录恢复搜索、状态和页码。详情按概览、成员与权限、组织结构、生命周期与风险分区，角色定义只在角色目录展示，组织详情仅显示当前有效访问摘要和目录深链。 |
@@ -1057,6 +1057,18 @@ RECEIVABLE_OPEN -> RESOLVED
 | UI-44 | 管理端计量单位与模型定价生命周期 | 定价与商品页面按精确权限管理版本化计量单位和全局/模型价格，支持草稿、逐单位固定或显式继承、解析预览、发布、未来生效、取消和结束；已发布版本只读，各动作逐端点遵循现有真实合同：draft 使用 `expected_etag`，publish 使用幂等键与 `expected_etag`，transition 仅使用幂等键，metering create/deactivate 当前没有 ETag 或幂等键；前端不得模拟缺失的并发保证。 |
 | UI-45 | Billing 全量分页 Portal 适配 | Portal 消费 Billing 钱包/账本、应收、订单、退款、调账、Hold、晚到支付、支付异常和支付对账的稳定 cursor、确定排序和规范化筛选；分页状态写入 URL，返回详情后恢复目录状态。 |
 | UI-46 | 财务支付分区运营概览界面 | 账户与计费、支付与对账、定价与商品分别展示服务端权限裁剪的概览；每个指标明确单位、时间窗、分母和不可用语义，积分与 CNY 分开，无权或失败不伪装为 0，并可下穿对应子页和筛选。 |
+| UI-47 | 模型与 Token 三页面信息架构 | “模型与 Token”一级分区固定拆为“模型管理、Token 资源、运行与用量”三个二级页面，分别围绕 Model、Token Account、Request/Provisioning 形成业务闭环；页面内按原子权限独立裁剪区块，至少验证 model-only、token-only、usage-only、pricing-only。该 feature gate 开启时三页 supersede UI-28/UI-31 的 Token Gateway canonical 导航与路由；gate 关闭时保持历史入口。旧 `section=tokens` 按固定页面顺序规范化到首个可访问页面，三个页面均无权时进入统一无泄露 403，不退回其他页面。后续实施任务必须更新现有管理后台合同测试，分别断言 gate on/off 的 canonical 结果；本需求变更不直接修改实现测试。 |
+| UI-48 | 模型与 Token URL 与独立状态 | 页面、子视图、服务端筛选、cursor 历史和详情均写入 URL 并支持刷新、分享及前进后退恢复；九类数据源不得共享 filter/cursor：模型、协议、公式、Token Account、Provisioning、用量、核对异常、owner 候选分别使用 `model_cursor/protocol_cursor/formula_cursor/token_cursor/provisioning_cursor/usage_cursor/reconciliation_cursor/owner_candidate_cursor` 及同名前缀筛选；资源审计在模型/Token 详情分别使用 `model_audit_cursor/token_audit_cursor`。模型与 Token 详情嵌套 Provisioning 另用 `model_provisioning_cursor/token_provisioning_cursor`，不能复用运行页 cursor。URL→API 参数、固定服务端排序及高级筛选的唯一映射以 `admin-model-token-redesign.md` 第 4.1 节为准；客户端不提供 sort。切换 section 先清除其他两区全部状态，详情返回只恢复本区上下文。旧 `section=tokens` 先删除旧 tab/filter/detail/cursor 和三个新区状态，再一次性规范化到首个有权 section。无权深链先按请求 `section` 删除全部模型与 Token 详情/页签/筛选/cursor 参数，再以一次 `replaceState` 进入 403；合法 UUID 无权、非法 UUID、互斥详情和无权页签均不得发起详情请求，目标 ID 不得进入 DOM、日志或遥测。一期 Provisioning/Usage 详情是运行页主内容子视图，二期 Model/Token Account 是独立资产详情主内容页，均不得以临时抽屉替代。每个数据源独立加载、失败、刷新和保留成功结果，单个接口失败不得清空或阻断其他区块。 |
+| UI-49 | 协议与安全公式管理界面 | 模型管理按 `platform.pricing.*` 精确权限接入 Token 已有协议、公式、确定性预览、发布及 Billing 同步状态；草稿与不可变发布版本明确区分，失败状态可局部恢复，不在前端执行任意公式代码。 |
+| UI-50 | Token 资源目录选择与健康管理 | Token Account 所有者通过 Account/Organization 权威目录和权限交集选择，路由只提交稳定 `model_id` 与已发布协议版本并由服务端解析 upstream；管理员及客户端不能提交健康值。健康由有 TTL、证据和失败关闭语义的服务端探测状态机产生，Token Account、路由和凭据动作展示影响与恢复路径。 |
+| UI-51 | Provisioning 与用量核对闭环 | 运行与用量接入 Provisioning 详情/尝试历史和基于用量请求事实的核对异常队列；异常请求可查看冻结配置、Hold、Adapter 关联和脱敏证据，并只重试证据核对、读取最终结算状态和审计引用，绝不重新发送模型请求。 |
+| UI-52 | 模型与 Token 结构化高风险交互 | 模型同步/发布/生命周期/回滚、Token Account 状态、路由、凭据、Provisioning 修复和用量核对重试全部使用可访问结构化对话框或工作面板，包含权威版本、影响预检、原因、适用的生效时间/截止时间、幂等及结果不确定核验；确认面板不等于审批，治理模式只按服务端命令策略执行。本分区不得使用浏览器 `prompt/confirm`。 |
+| UI-53 | 独立模型详情 | 模型名称下穿稳定 `model_id` 详情页，唯一页签结构固定为“概览 / 能力、协议与公式 / 路由与运行 / 价格与计量 / 生命周期与依赖 / 审计”；历史版本与当前版本分离，刷新/返回保留目录筛选和分页，页面不展示 Provider 私有配置。价格页签要求定价读取权限，审计页签要求审计读取权限，无权页签不请求、不渲染。 |
+| UI-54 | 独立 Token Account 详情与凭据生命周期 | 二期 Token Account 下穿概览、凭据、路由、Provisioning、审计独立主内容页。仅会接触 Secret 的凭据新增/轮换通过 Token 服务独立 origin 的一次性隔离写入页完成，不保留外部交接备选。现场验证使用 `platform.tokens.credentials.validate` 直接调用 Token 脱敏命令，不进入隔离页、不接收 Secret，仅返回稳定结论和证据摘要。撤销由 Portal 向 Account 创建 `TOKEN_CREDENTIAL_REVOKE` 审批申请，不启动隔离页，人类直接 Token revoke API 关闭。Portal 仅为新增/轮换向部署白名单中的固定 credential origin 执行 `target=_blank`、`noopener noreferrer` 的顶层 POST；CSP `form-action` 精确允许该 origin。弹窗受阻必须撤销 launch 并安全失败，不得降级为 query、fragment、同页或 iframe。任何 Portal 响应、DOM、存储、日志、遥测和审计均不出现秘密、密文、Provider Key ID、Provider 私有地址或原始错误。 |
+| UI-55 | 模型生命周期依赖分析与计划生效 | 模型发布、弃用、下架和目录回滚先展示价格覆盖、路由、Provisioning、进行中请求、会话截止与替代模型影响；允许按既有状态机配置未来生效及新会话/存量会话截止，提交时重新校验版本和依赖，阻断项不能由 Portal 忽略。 |
+| UI-56 | 模型上下文价格与计量入口 | 模型详情展示 Billing 返回的当前/未来价格、适用计量单位、公式、继承来源和覆盖状态；有 `platform.pricing.manage` 时复用财务定价的共享编辑组件，所有读写仍直达 Billing 合同，“定价与商品”继续作为跨模型统一治理入口，不生成第二份价格定义。Billing 价格不可用、无权或结果不确定时，不得显示伪价格，依赖有效价格的发布/上架动作失败关闭。 |
+| UI-57 | 模型与运行运营概览 | 模型管理和运行与用量展示服务端权限裁剪的目录差异、路由/Provisioning 健康及核对异常趋势；指标明确时间窗、时区、分母与不可用语义，逐服务独立失败，不扫描分页列表、不以无权或失败伪装为 0。 |
+| UI-58 | 模型与 Token 灰度迁移和回滚 | 三页面及二期能力必须由独立 feature gate 分级放量，服务与 Portal 支持 N/N-1；旧 `section=tokens` 自 GA 起兼容至少 90 天或两个生产版本取较长者。数据库采用前向兼容迁移；回滚先停新写和隔离凭据会话，再回滚 Portal/服务，失效 cursor 返回 410，未消费安全会话立即失效，每阶段保留权限、分页、安全、审计和可观测证据。 |
 | ADM-01 | 首个超级管理员安全初始化 | 幂等创建 admin，并通过交互式直接设密或不少于128 bit熵的一次性引导凭据完成激活；未激活前无管理权限。 |
 | ADM-02 | Break-glass 恢复 | 只通过受控离线命令恢复，操作者从 OS/受控终端、mTLS 证书或签名运维凭据派生，命令行不得自报工作负载身份；立即告警并写不可删除审计。 |
 | ADM-03 | 服务身份最小权限 | 服务账号、任务和 Relay 使用独立短期凭据，不继承人类角色。 |
@@ -1094,7 +1106,7 @@ RECEIVABLE_OPEN -> RESOLVED
 | ADM-35 | 注册 Saga 修复 | 授权运营人员可重试 Identity 查询、Account 提交及满足证明门禁的补偿，不得直接删身份或释放预约。 |
 | ADM-36 | 管理命令审批分类注册 | 每个后台写命令必须按版本化策略显式登记为 `APPROVAL_REQUIRED` 或 `AUDIT_ONLY`；未登记命令默认拒绝执行。 |
 | ADM-37 | 强制审批命令清单 | 绕过正常业务状态机并直接改变资金、权益、账本、应收或已确认计费事实的人工命令必须申请与审批分离。 |
-| ADM-38 | 仅审计命令清单 | 正常状态机、确定性自动任务及明确列出的治理命令只执行权限、幂等、重新认证和审计，不进入财务审批流。 |
+| ADM-38 | 仅审计命令清单 | 正常状态机、确定性自动任务及明确列出的治理命令只执行权限、幂等、重新认证和审计，不进入审批流；但模型计划弃用/下架等生命周期变更、模型目录前向回滚、Token 凭据撤销是经 ADM-64 明确列出的高风险治理例外，固定为 `APPROVAL_REQUIRED`。分类以不可变的版本化策略为准，既有策略不得原地修改。 |
 | ADM-39 | 审批请求生命周期 | 审批请求具有不可逆状态机、有效期、撤回和重新提交规则；重新提交必须创建新申请并关联旧申请。 |
 | ADM-40 | 审批快照与资源变更失效 | 申请保存不可变命令、关键资源版本和策略快照；影响执行语义或资格的资源变化使原审批失效。 |
 | ADM-41 | 执行前权限重新校验 | 执行开始前重新校验申请人和审批人的当前有效权限；授权失效或无法确认时审批失效并禁止执行。 |
@@ -1112,6 +1124,18 @@ RECEIVABLE_OPEN -> RESOLVED
 | ADM-53 | 支付分级止损后台治理 | 后台展示订单、商品、分区与 Provider 控制及完整评估证据；商品和 Provider 恢复入口严格分离，止损策略任意语义变更均须原子权限、近期认证、CAS、幂等、双人审批和审计。 |
 | ADM-54 | 定价与计量管理命令策略注册 | 价格草稿创建/更新、价格发布/转换、计量单位创建/停用六个现有管理命令分别按路由精确权限注册为 `AUDIT_ONLY`；未知命令仍失败关闭，不改变领域请求、权限或状态迁移。 |
 | ADM-55 | 超级管理员完整平台管理权限 | `PLATFORM_SUPER_ADMIN` 默认具备除临时未脱敏 PII 导出外的全部常驻 `platform.*` 管理权限；既有超级管理员在迁移后立即失效旧授权缓存。高风险命令继续逐接口执行审批、自审禁止、不可变审计和幂等约束；Token 凭据接口只返回脱敏元数据和稳定结论，任何角色均不能取得密钥明文、密文、Key ID、Provider 地址或原始错误。 |
+| ADM-56 | Token 管理高数据量查询合同 | 模型、协议、公式、Token Account、Provisioning、用量、核对异常、资源审计和所有者候选列表提供 NFR-56 的统一 envelope、逐资源筛选/全序和稳定 cursor；cursor 绑定主体、授权版本、资源、筛选、limit 与快照，过期、错配和容量超限按稳定错误码失败关闭，服务端未返回 total 时 Portal 不得推算。 |
+| ADM-57 | 模型与 Token 影响预检合同 | Token 提供模型生命周期/目录回滚及 Token Account 状态、路由和凭据动作的只读影响预检，返回当前资源版本、关联路由/Provisioning/进行中请求、阻断和脱敏摘要；正式写命令在提交时重新核验，预检成功不是执行授权。 |
+| ADM-58 | Provider 凭据隔离写入合同 | Token 使用独立 origin 隔离写入页作为唯一会接触 Secret 的凭据新增/轮换通道；脱敏现场验证由 Token 域直接命令执行，审批撤销由 Portal→Account 执行，两者均不进入隔离页。Production 固定 `https://credentials.account.pinvou.com`，Cloud UAT 固定 `https://credentials-uat.account.pinvou.com`；Portal CSP `form-action` 只追加当前环境精确 origin，禁止通配、动态 origin 和开放 `https:`。launch ID 仅以 `application/x-www-form-urlencoded` POST body 传输且不是 bearer；用户手势触发 `target=_blank` 与 `noopener noreferrer` 顶层表单，`/launch` 消费后以 303 跳转固定 `/session` 并返回 no-store/no-referrer。地址栏、Referer、历史、代理日志均不得出现 ID，刷新不得重放 POST；10 秒无隔离页 heartbeat 即撤销 launch 并返回 `CREDENTIAL_WINDOW_BLOCKED`，不得降级 query/fragment/同页/iframe。隔离页自行执行专用 audience 的 OIDC Authorization Code+PKCE 与 `prompt=login/max_age=900`，强校验 state/nonce/PKCE/auth_time/subject/origin/CSRF 并绑定环境、账户、动作、槽位、版本、浏览器及幂等摘要。会话 TTL 5 分钟、单次成功、最多 3 次尝试，禁止 iframe/opener/第三方代码。秘密仅由 Token 同源端点消费，Portal 只得到不透明引用；轮换执行 CANDIDATE→ACTIVE、旧版本 RETIRING→REVOKED，窃取/换浏览器/换主体/回放均失败，未知结果只能按同一幂等引用查询。 |
+| ADM-59 | 模型运营聚合与跨域价格投影 | Token 的模型/运行概览只聚合本域目录、路由、Provisioning 和用量事实；Billing 按 `model_id` 独立提供价格投影。Portal 可并列呈现但不得由任一服务代写另一领域、扫描列表计算指标或宣称跨域原子性。 |
+| ADM-60 | 协议与公式管理命令策略注册 | Token 协议草稿/发布和公式草稿/发布四个现有命令分别按路由精确权限注册为 `AUDIT_ONLY`；未知命令继续失败关闭，不改变协议/公式请求、权限、不可变发布或 Billing 同步语义。 |
+| ADM-61 | Token Account 所有者候选合同 | 用户候选由 Account、组织/节点候选由 Organization 权威提供，统一要求专用窄权限 `platform.tokens.owner-candidates.read`，不扩展通用用户/组织目录读取；只返回稳定 ID、类型、显示标签和状态，采用 NFR-56 分页及更严格输入/限流。该权限必须以 Account 追加迁移幂等创建，并在同一事务原子授予且仅授予 `PLATFORM_SUPER_ADMIN` 与 `PLATFORM_MODEL_ADMIN`，随后对两角色全部有效绑定递增 authorization version，使旧授权缓存和 cursor 立即失效；down 迁移先撤销两个角色授予，再按角色绑定本身递增版本（不得依赖已删除的 role-permission 连接），最后删除权限定义。超级管理员/模型管理员允许，其他平台/组织/个人角色拒绝；manage-only 必须显示创建死路且不得退化为 UUID 输入，owner-candidates-only 可读候选但不能创建。缺权限返回无泄露 403；已授权但不存在、不可见或越出作用域返回空候选页。Token 不复制目录，提交时重新解析对象状态与权限。 |
+| ADM-62 | 路由解析与健康探测合同 | 路由命令只接受稳定 `model_id`、已发布 `protocol_version_id` 和策略/版本/幂等字段，由 Token 服务解析受保护 upstream；请求含 health 字段必须拒绝。健康仅由 `UNKNOWN/PROBING/HEALTHY/DEGRADED/UNHEALTHY/STALE` 服务端探测状态机产生，HEALTHY TTL 5 分钟，过期或证据不可用按不可路由失败关闭。 |
+| ADM-63 | 模型与 Token 资源审计投影 | Token 从本域已有不可变审计事实提供模型/Token Account 详情审计投影，Portal 只复用审计展示组件，不拼接 Account 全局审计列表；读取要求目标资源权限与 `platform.audit.read` 的交集，服务端固定单资源等值过滤，只返回脱敏最小字段并按 NFR-56 分页，不存在、无权和越界统一无泄露。资源页签不授予导出，审计导出继续要求独立权限。 |
+| ADM-64 | 模型与 Token 逐动作治理合同 | 协议/公式、模型、目录、Token Account、路由、凭据、Provisioning 和用量写动作必须逐稳定 command type 固定 `AUDIT_ONLY` 或 `APPROVAL_REQUIRED`，并逐项定义权限、近期认证、reason、CAS、幂等、影响预检、审计和未知结果恢复；完整矩阵以 `admin-model-token-redesign.md` 第 7.2 节为准。`TOKEN_MODEL_LIFECYCLE_CHANGE`、`TOKEN_MODEL_CATALOG_ROLLBACK`、`TOKEN_CREDENTIAL_REVOKE` 是 ADM-38 的明确高风险例外；新增权限固定为 `platform.models.lifecycle.request`、`platform.models.lifecycle.approve`、`platform.models.catalog.rollback.request`、`platform.models.catalog.rollback.approve`、`platform.tokens.credentials.revoke.request`、`platform.tokens.credentials.revoke.approve`。三项均要求一名非申请人的审批、申请与决定 15 分钟近期认证、24 小时申请有效期、5 分钟执行窗口，并由 `token-command-executor` 最小服务身份消费 Account 授权事件执行。现有模型命令策略 v1 保持不可变，生命周期和目录回滚新增 v2；凭据撤销新增 v1。人类可达的 direct Token 写 API 必须关闭，只能创建审批申请；六个新权限、角色授予、授权版本递增、策略版本和最小执行身份必须由前向追加迁移交付；同时必须更新 `internal/platform/approvalpolicy` 注册表为 lifecycle v2/rollback v2/revoke v1，并将三项加入 `executableApprovalCommands` allowlist。发布门禁必须在真实迁移后数据库与代码注册表间逐字段比对 command type/version/mode/申请权限/审批权限/risk/人数/禁止自审/快照 schema 与关键字段/有效期/执行窗口/执行身份，并验证 allowlist，任一不一致失败关闭。结构化确认不等于审批，普通核对不得升级或冒充 `USAGE_SETTLEMENT_REPAIR`，未注册或试图 `force/ignore_blocker` 的命令失败关闭。 |
+| ADM-65 | 模型与 Token 命令治理预激活基础 | 在 ADM-64 最终激活前，允许独立交付十九项策略注册、通用持久命令结果、幂等与未知恢复基础，但不得创建 activation record/epoch/state machine；记录不存在必须解释为预激活关闭态，保持旧 v1 direct 原行为，并关闭新审批、executor 消费、新治理 envelope 和新增协议/公式写路径。该基础只能由 ADM-64 的持久 `ACTIVE` 原子切换启用，任何中间提交不得提前开放或双写。 |
+
+`[ADM-64][策略值冻结]` 三项策略可直接写入 DB/registry 的完整 13 字段目标值（包括 `risk_class`、`snapshot_schema_version` 和 exact ordered `critical_resource_fields` JSON key 数组）以 `admin-model-token-redesign.md` 第 7.3 节为唯一真相源。`executableApprovalCommands` 不得被重置为仅三项：必须保留 `WALLET_ADJUSTMENT`、`PAYMENT_PROVIDER_RESUME`、`PAYMENT_PRODUCT_RESUME` 及其他既有合法项，同时断言新增的 `TOKEN_*` 可执行子集恰为上述三项，其他 Token 治理命令不得意外放行。
 
 ### 8.1 个人中心
 
@@ -1221,10 +1245,10 @@ executor_identity
 4. 自动对账、自动核对、自动重试、Provider 状态同步、案件认领/分派、证据查询和不改变财务事实的重新查询；根据差异改账必须改用 `RECONCILIATION_FINANCIAL_REPAIR`。
 5. 有权威现金证据且不减免本金的正常应收清偿分配；人工核销或减免必须改用 `RECEIVABLE_WRITE_OFF`。
 6. 组织额度分配、普通撤回及 BILL-40 的注销授予合规回收；这些命令仍须满足组成守恒、锁、权限和幂等规则。
-7. 用户/组织启停、组织创建和逻辑删除、所有权转让、成员/角色管理、模型目录、价格、策略、Token Account、路由、凭据元数据及 Provisioning 生命周期操作。
+7. 用户/组织启停、组织创建和逻辑删除、所有权转让、成员/角色管理、模型草稿/发布、价格、组织模型策略、Token Account、路由、非撤销凭据元数据及 Provisioning 生命周期操作。模型计划弃用/下架等生命周期变更、模型目录前向回滚和 Token 凭据撤销不属于本项，固定执行 ADM-64 审批。
 8. 平台角色授予/撤销、临时/紧急授权和受限 Break-glass。高风险角色操作必须重新认证、即时告警并完整审计；Break-glass 不依赖普通审批系统，避免全部审批人失效时形成恢复死锁。
 
-组织删除、正常退款和其他本清单命令不要求申请与审批分离；“只审计”不表示可以绕过领域前置条件、Provider 能力或最小权限。任何同名操作一旦选择“强制”“忽略阻断”“直接改账”等异常路径，必须使用 ADM-37 中对应的独立命令，不能复用 `AUDIT_ONLY` API 参数切换行为。
+组织删除、正常退款和其他本清单命令不要求申请与审批分离；ADM-64 三项高风险治理例外按各自非财务审批策略执行。“只审计”不表示可以绕过领域前置条件、Provider 能力或最小权限。任何同名操作一旦选择“强制”“忽略阻断”“直接改账”等异常路径，必须使用 ADM-37 中对应的独立命令，不能复用 `AUDIT_ONLY` API 参数切换行为。
 
 #### 8.2.2 审批生命周期、失效与执行
 
@@ -1353,6 +1377,9 @@ EXECUTION_FAILED -> EXECUTING | INVALIDATED
 | NFR-53 | 运行时商品配置治理：日常 SKU/BOM、金额、权益与上/下架变化只通过受权限控制的后台数据命令完成；不得要求修改或发布代码、迁移、需求、架构、任务及状态文档，发布门禁自动阻止基线文档重新固化当前商品清单。 |
 | NFR-54 | 支付健康评估可靠性：健康观察、窗口成员和控制动作持久化、可去重、可重放并使用可信时间；并发评估只产生一次阈值穿越，观察缺口失败关闭对应分区且不能证明恢复。 |
 | NFR-55 | Billing 高数据量稳定分页：钱包/账本、应收、订单、退款、调账、Hold、晚到支付、支付异常和支付对账列表使用 15 分钟服务端资源 ID 快照及绑定主体、资源、父作用域、筛选摘要和位置的 opaque cursor；默认确定排序、`limit` 默认 50/最大 200，并返回 `items/next_cursor/snapshot_as_of`。单快照最多 100 万成员，单主体最多 2 个活动快照且同资源最多 1 个；同资源新快照替换旧快照，第三种资源事务回收主体最旧快照并为旧 cursor 保留 410 墓碑；全局最多 64 个/2000 万成员，创建速率主体每分钟 6 次、全局 60 次。过宽返回 `PAGINATION_FILTER_REQUIRED`，全局容量或速率配额返回带 Retry-After 的 `PAGINATION_SNAPSHOT_LIMITED`，超时/存储失败返回 `PAGINATION_SNAPSHOT_UNAVAILABLE`；不得截断、静默首页或伪造总数，并监控水位与清理积压。 |
+| NFR-56 | Token 管理高数据量稳定分页：所有列表响应固定 `{items,next_cursor,has_more,limit,as_of,snapshot_expires_at,request_id}`，模型、协议、公式、Token Account、Provisioning、用量、核对异常和资源审计默认 50/最大 200，所有者候选默认 20/最大 50；超范围 limit 返回 400 `INVALID_LIMIT`。九类资源的 URL 参数、API 参数、独立 cursor、固定服务端排序及 schema 来源以 `admin-model-token-redesign.md` 第 4.1 节为规范；API 不接受客户端 sort，排序最后含稳定 ID。cursor 签名绑定主体、授权版本、资源、规范化筛选、排序、limit 和快照高水位，TTL 15 分钟；错配/篡改返回 400 `INVALID_CURSOR`，过期或被事务替换/回收返回 410 `CURSOR_EXPIRED`，墓碑至少保留 20 分钟。单快照最多 1,000,000 成员，超出返回 422 `PAGINATION_FILTER_REQUIRED`；单主体最多 2 个活动快照、同主体同资源最多 1 个，同资源新快照事务替换旧快照，第三资源事务回收最旧快照；全局硬上限为 64 个活动快照、20,000,000 个成员和 8 GiB 成员存储。创建速率为单主体 6 次/分钟、全局 60 次/分钟；容量/创建速率耗尽返回 429 `PAGINATION_SNAPSHOT_LIMITED` 与 1～60 秒 `Retry-After`。三类请求使用互斥且不可累加/重置的唯一墙钟预算：首屏快照构建 10 秒（从入口接收至首次成员查询和完整事务写入，超时为 503 `PAGINATION_SNAPSHOT_UNAVAILABLE`、`Retry-After: 5`，数据库使用同一剩余 deadline）；已有快照读取 3 秒且禁止重建（504 `QUERY_TIMEOUT`）；跨域影响预检 5 秒且所有下游共享同一绝对 deadline（504 `PRECHECK_TIMEOUT`，写动作失败关闭）。入口代理 upstream timeout 分别为 12/5/7 秒，必须大于业务预算以保留稳定领域错误。快照头、成员、高水位和墓碑同事务提交，不留半快照。清理每分钟幂等运行；快照数、成员数或字节任一达 70% 告警、达 85% critical 并拒绝新的非替换快照，最旧清理积压超过 5 分钟告警。常规请求按主体/资源 60 次/分钟、来源 IP 120 次/分钟，所有者候选 30/60 次/分钟；常规限流返回 429 `RATE_LIMITED`，非快照查询容量返回 503 `QUERY_CAPACITY_EXCEEDED`。必须自动验证各硬边界、70%/85% 水位、第三资源回收、三类预算与代理超时、清理/事务故障、进程中断无半快照及并发变更下全量翻页无重复漏项；不得返回不完整 200、前端过滤、静默截断或伪造总数。 |
+
+`[NFR-56][用量证据投影]` `/usage-requests/{id}/evidence` 的跨表唯一键固定为 `(source_kind,source_id)`：`CANCELLATION` 将 `usage_cancellation_evidence.occurred_at` 投影为 `observed_at`、`source_id=id`，`CONVERGENCE` 将 `usage_convergence_evidence.observed_at` 原样投影、`source_id=id`。服务端固定按 `observed_at ASC,source_kind ASC,source_id ASC` 排序，cursor 必须冻结这三个位置字段；不接受客户端 sort，不以单表 `id` 冒充跨表 tie-breaker。
 
 ### 11.1 性能与容量验收
 
@@ -1640,7 +1667,8 @@ EXECUTION_FAILED -> EXECUTING | INVALIDATED
 - `[ADM-33]` 晚到支付审核页的认领、重新查询、安排复核、归档和事实盲区升级均写操作者与证据审计；任何请求都不能直接提交支付成功状态或绕过 PAY-12 证据归并器入账。
 - `[ADM-36]` 枚举全部后台写 API 和任务入口，未注册、未知版本或分类冲突的命令均被服务端拒绝；同一命令从不同页面/API 调用得到相同审批分类。
 - `[ADM-37]` 逐一验证钱包/权益调整、账本/应收修复及支付、退款、拒付、对账、用量结算财务修复只有独立审批后才能执行；大额调整仍是一名独立审批人且不能自审。
-- `[ADM-38]` 逐一验证普通退款、组织删除、角色/价格/模型配置及确定性自动处理只写审计但仍执行领域前置条件；给任一 `AUDIT_ONLY` 命令注入强制改账/忽略阻断参数均被拒绝。
+- `[ADM-38]` 逐一验证普通退款、组织删除、角色/价格、模型草稿/发布及确定性自动处理只写审计但仍执行领域前置条件；模型生命周期、目录回滚和凭据撤销必须命中 ADM-64 `APPROVAL_REQUIRED` 例外。给任一 `AUDIT_ONLY` 命令注入强制改账/忽略阻断参数均被拒绝。
+- `[ADM-64]` 验证六个新权限的追加迁移、两角色原子授予与 authorization version 递增；确认生命周期/回滚 v1 行保持逐字不可变且新增 v2，凭据撤销新增 v1。三个人类 direct Token API 均返回 `DIRECT_APPROVAL_COMMAND_FORBIDDEN`，一名非申请审批人通过后只有 `token-command-executor` 能消费授权事件；申请人自审、过期、执行窗口超时、关键快照变化、旧策略版本或普通 Token 服务身份执行全部失败关闭。
 - `[ADM-39]` 对批准、拒绝、撤回、过期和执行注入并发竞争，最多一个转换成功；终态申请不能重开，重新提交产生新 ID、全新快照并正确关联旧申请。
 - `[ADM-40]` 申请后分别改变支付、权益、Hold、策略及关键版本会使审批结构化失效；无关元数据和符合约束的增量钱包正常变化按声明规则处理，系统不存在绝对余额设置命令。
 - `[ADM-41]` 在提交后撤销/到期申请人或审批人授权，以及模拟授权事实源超时，执行均失败关闭并记录明确原因；已原子进入执行的命令可幂等完成且审计保留执行开始快照。

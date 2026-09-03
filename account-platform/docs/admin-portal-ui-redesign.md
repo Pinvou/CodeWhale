@@ -17,7 +17,7 @@
 5. `account-platform/contracts/openapi/admin.yaml` 及各服务 OpenAPI：已定义的管理接口。
 6. 当前路由注册、审批策略注册表和真实代码：已实现行为的核验依据。
 
-除第 1.3 节已经产品批准的 `UI-28`～`UI-32`、`UI-37`～`UI-46`、`ADM-54`、`BILL-47`、`NFR-55` 界面与交互专项需求外，本文不得创造新的业务需求、权限或接口。财务支付重构的领域边界、两期范围和任务顺序以 `admin-finance-payment-redesign.md` 为准。原稿中的“新建用户”“新建角色”、KYC、邮箱恢复、Portal 内 2FA、Portal 代理 bootstrap、break-glass 或 IdP 管理等能力全部删除或明确禁用。
+除第 1.3 节已经产品批准的 `UI-28`～`UI-32`、`UI-37`～`UI-58`、`ADM-54`～`ADM-64`、`BILL-47`、`NFR-55`～`NFR-56` 界面与交互专项需求外，本文不得创造新的业务需求、权限或接口。财务支付重构的领域边界、两期范围和任务顺序以 `admin-finance-payment-redesign.md` 为准；模型与 Token 重构的三页面信息架构、领域边界、两期范围和验收以 `admin-model-token-redesign.md` 为准。原稿中的“新建用户”“新建角色”、KYC、邮箱恢复、Portal 内 2FA、Portal 代理 bootstrap、break-glass 或 IdP 管理等能力全部删除或明确禁用。
 
 ---
 
@@ -46,7 +46,7 @@
 | `UI-28` | 统一后台壳层与共享基础组件 | 拥有后台应用壳层、分组导航、路由/URL、当前项、页头、语言、退出登录，以及可复用的加载/空/无权/错误/部分失败容器、状态标签、表格/详情框架、对话框、Toast、焦点与状态播报基础组件；在本项提交内完成这些壳层/组件自身的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式和组件状态测试；只显示具有精确读权限的入口 | 不负责各领域页面的数据接线或页面级验收；不新增导航对应的服务端资源；不因视觉分组合并权限 |
 | `UI-29` | 身份、用户、角色与组织界面改版 | **依赖 UI-28**；在本项单独提交内完成用户、角色绑定、组织、节点及现有修复页面的真实数据接线，并完成全部受影响页的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式，以及加载、空、无权、错误、部分失败、冲突、离线/超时、结果不确定状态 | 不新增用户或角色；不改变用户、角色、组织生命周期及管理动作；质量与状态不得推迟到 UI-32 补做 |
 | `UI-30` | 财务、支付、审批、定价与充值商品界面改版 | **依赖 UI-28**；在本项单独提交内完成现有额度/账本、订单、案件、调账、Hold、审批、定价和商品页面，并完成全部受影响页的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式，以及加载、空、无权、错误、部分失败、冲突、离线/超时、结果不确定状态；资金与 CNY 明确区分 | 不开放退款入口；不新增探测、恢复、定价或商品命令；不可用能力继续隐藏；质量与状态不得推迟到 UI-32 补做 |
-| `UI-31` | 模型、Token、系统与审计界面改版 | **依赖 UI-28**；在本项单独提交内完成现有模型、Token Account、路由、凭据元数据、Provisioning、用量、系统状态、审计与只读运行手册页面，并完成全部受影响页的简中/英文/日文、WCAG 2.1 AA、320px/768px/1440px/200% 响应式，以及加载、空、无权、错误、部分失败、冲突、离线/超时、结果不确定状态；秘密不回显 | 超级管理员默认获得常驻 Token 管理权限，但不能查看秘密或临时敏感数据；不增加公网 bootstrap、break-glass、IdP 或事件重放执行入口；质量与状态不得推迟到 UI-32 补做 |
+| `UI-31` | 模型、Token、系统与审计界面改版 | **依赖 UI-28**；保留现有 Token Gateway 与系统/审计页面的已实现历史基线。UI-47 feature gate 启用后，Token Gateway canonical 导航/路由被“模型管理、Token 资源、运行与用量”取代；关闭时仍使用历史入口。系统与审计内容不被 supersede，原三语、WCAG 2.1 AA、响应式与真实状态约束继续有效 | 超级管理员默认获得常驻 Token 管理权限，但不能查看秘密或临时敏感数据；不增加公网 bootstrap、break-glass、IdP 或事件重放执行入口 |
 | `UI-32` | 无产品代码的跨页面集成与发布验收 | **依赖 UI-28、UI-29、UI-30、UI-31 全部完成**；仅新增或调整集成/E2E/视觉/无障碍验收与发布证据，不修改产品代码；按第 9、11、13～15 节验证异步恢复、真实错误、加载、冲突、离线/超时、结果不确定、三语、AA、响应式、字段展示和危险操作，并验证构建制品与源码一致 | 不承担 UI-28～UI-31 漏做的产品实现；不用前端假数据补齐服务端缺口；不把测试通过解释为新增功能已上线 |
 | `UI-37` | 财务支付三分区信息架构 | 保留 `billing/payments/products` 稳定 section，将用户可见页面调整为“账户与计费、支付与对账、定价与商品”；模型定价迁入定价与商品，支付四方对账迁入支付与对账；子页 URL、权限和前进后退独立 | 不把分组变更解释为权限合并；不改变账本、支付或定价事实 |
 | `UI-38` | 手工调账申请与审批下穿 | 从账户与计费创建或恢复 `WALLET_ADJUSTMENT` 申请，并下穿审批中心查看状态 | 申请、审批、服务身份执行分离；申请人不得自审 |
@@ -56,6 +56,8 @@
 | `UI-42` | 财务支付结构化操作 | 用结构化表单、字段校验、确认摘要和错误映射替代浏览器 prompt | 不开放普通退款；危险操作不丢失原因、幂等或版本事实 |
 | `UI-43` | 旧价格写入口收敛 | 移除旧 `pricing-versions` 写入口，新生命周期未交付时只读展示 | 不用旧接口假扮草稿、预览、发布或转换 |
 | `ADM-54` | 定价与计量命令策略 | 精确注册六个现有管理命令为 `AUDIT_ONLY` | 不扩权、不改变领域状态机，未知命令继续失败关闭 |
+| `UI-47`～`UI-52`、`ADM-56`～`ADM-57`、`ADM-60`～`ADM-62`、`ADM-64`、`NFR-56` | 模型与 Token 一期 | 拆分三个页面，完成原子权限/URL/独立状态、机器可验收分页、协议公式、权威 owner 选择、稳定模型/协议路由、服务端健康、Provisioning/Usage 主内容详情、核对闭环、逐动作治理与最小预检 | 不用前端过滤冒充分页，不接收客户端健康，不重发模型请求，价格不可用失败关闭 |
+| `UI-53`～`UI-58`、`ADM-58`～`ADM-59`、`ADM-63` | 模型与 Token 二期及灰度 | 完成 Model/Token Account 独立主内容详情、隔离凭据生命周期、完整依赖计划、Billing 价格入口、资源审计、差异/趋势及 N/N-1 灰度回滚 | Billing 仍是价格事实源；秘密不进 Portal；资源审计不扩权；兼容期与会话失效可验证 |
 | `UI-44` | 计量单位与模型定价生命周期 | 接入计量单位、草稿、预览、发布、未来生效和转换 UI | 不原地编辑已发布事实；逐端点遵循真实 ETag/幂等合同，不模拟缺失的 CAS |
 | `NFR-55` | Billing 稳定分页合同 | 高数据量列表补齐稳定 cursor、确定排序和规范化筛选 | 不使用无界 limit 或当前页前端切片冒充分页 |
 | `UI-45` | Billing 全量分页 Portal 适配 | Portal 消费 Billing cursor，并以 URL 恢复目录上下文 | 不把当前页条数显示为全量总数 |
@@ -79,7 +81,7 @@
 - 原候选 `UIA-001` 已获批准，并拆分为 `UI-28`～`UI-31` 四个可独立提交的界面需求。
 - 原候选 `UIA-018` 仅批准“基于现有 API 的基础改版总验收”，转换为 `UI-32`；其验收范围不自动包含任何未批准候选 API。
 - 财务支付重构 `UI-37`～`UI-46`、`ADM-54`、`BILL-47`、`NFR-55` 已由产品明确批准，按 `admin-finance-payment-redesign.md` 的一期、二期及 APT-105～APT-117 顺序交付；其批准不自动扩展到发票、税务、银行结算、提现或定金领域。
-- 原 `UIA-013` 已全量转换为 `NFR-55 / APT-114`；原 `UIA-015` 的 Billing Portal 适配已转换为 `UI-45 / APT-115`，仅 Account/Token 其余列表仍保留候选；原 `UIA-020` 的六个 Billing 命令已转换为 `ADM-54 / APT-112`，仅四个 Token 协议/公式命令仍保留候选。其余未获批准候选继续执行 `NOT_AVAILABLE` 或永久隐藏，不创建服务端任务，也不作为本轮任务依赖。
+- 原 `UIA-013` 已全量转换为 `NFR-55 / APT-114`；原 `UIA-014` 已转换为 `ADM-56/NFR-56`，原 `UIA-015` 的 Token Portal 子集已转换为 `UI-48`，原 `UIA-020` 的 Token 四个协议/公式命令已转换为 `ADM-60`。Account 其余列表仍保留候选；其余未获批准候选继续执行 `NOT_AVAILABLE` 或永久隐藏，不创建服务端任务，也不作为本轮任务依赖。
 - PDF 与 HTML 原型继续只提供信息层级、布局和组件风格参考；原型中的示例数据、演示身份切换器和没有真实接口的按钮不得进入生产后台。
 
 ---
@@ -108,10 +110,10 @@
 | 工作台 | 平台总览 | 至少具有一个平台页面的精确读权限；卡片仍按各自读权限独立请求和展示 |
 | 身份与组织 | 用户管理、角色与权限、组织管理、我的组织 | 子页分别要求现有 `platform.users.*` 修复/读取权限、`platform.roles.read`、`platform.organizations.read` 或现有组织作用域读权限；没有可用接口的“我的组织”隐藏 |
 | 财务与支付 | 账户与计费、支付与对账、定价与商品 | `billing/payments/products` section 保持稳定；账户页按钱包/账本/应收/Hold 权限，支付页按订单/案件/对账/控制权限，定价商品页按 `platform.pricing.*` 与 `platform.products.*` 分区块独立显示；一个子页的权限不解锁相邻子页 |
-| 模型与 Token | Token Gateway | 至少具有 `platform.models.read`、`platform.tokens.read` 或 `platform.usage.read` 中该页真实数据所需权限；写权限不替代读权限 |
+| 模型与 Token | 模型管理、Token 资源、运行与用量 | 模型管理至少具有 `platform.models.read` 或 `platform.pricing.read`；Token 资源要求 `platform.tokens.read`；运行与用量至少具有 `platform.tokens.read` 或 `platform.usage.read`；页面内继续逐区块鉴权，写权限不替代读权限 |
 | 治理与安全 | 审批中心、审计与导出、系统与安全、偏好设置 | 审批读取沿用 `platform.billing.wallets.read` 且动作继续精确鉴权；审计和系统分别要求 `platform.audit.read`、`platform.system.status.read`；偏好设置只在已有管理页面可访问且存在真实本地偏好时显示 |
 
-以上五组及页面名称以 `admin-portal-ui-prototype.html` 的 `navGroups` 为视觉信息架构，财务三个 section 的领域归属以 `admin-finance-payment-redesign.md` 为业务真相源，不再保留“总览/治理/运行手册/系统运行”六组旧分类。角色、支付、商品、审批、偏好均为独立 URL `section`，不能作为用户或财务页内的二级聚合 Tab。只读运行手册作为“系统与安全”或“审计与导出”的内容区存在，不形成第六导航组；面向具体用户的注册、资料与注销修复归入“用户管理”，Keycloak 平台级受控入口及隧道说明归入“系统与安全”，两者使用各自既有精确权限独立显示。
+以上五组及页面名称以 `admin-portal-ui-prototype.html` 的 `navGroups` 为视觉信息架构，财务三个 section 的领域归属以 `admin-finance-payment-redesign.md` 为业务真相源，模型与 Token 三个 section 的归属以 `admin-model-token-redesign.md` 为业务真相源，不再保留“总览/治理/运行手册/系统运行”六组旧分类。角色、支付、商品、模型管理、Token 资源、运行与用量、审批、偏好均为独立 URL `section`，不能重新塞回用户、财务或单一 Token 聚合页。只读运行手册作为“系统与安全”或“审计与导出”的内容区存在，不形成第六导航组；面向具体用户的注册、资料与注销修复归入“用户管理”，Keycloak 平台级受控入口及隧道说明归入“系统与安全”，两者使用各自既有精确权限独立显示。
 
 ### 3.2 导航与组件鉴权
 
@@ -120,6 +122,7 @@
 - 页面标题、统计卡片、表格列、详情字段、导出按钮和行内动作分别声明所需权限。
 - 对无权字段不请求或由服务端裁剪；不得请求后仅用 CSS 隐藏。
 - 无页面读权限时不显示导航；直接访问路由返回统一“无权访问”，不泄露资源是否存在。
+- 九类数据源分别使用 `model/protocol/formula/token/provisioning/usage/reconciliation/owner_candidate` 前缀 filter/cursor；资源审计在两个资产详情中分别使用 `model_audit/token_audit`，嵌套 Provisioning 分别使用 `model_provisioning/token_provisioning`，不得共享 `operations_cursor` 或客户端 sort。URL→API→权威排序映射以专项设计第 4.1 节为准。跨 section 先删除另外两区全部页签、筛选、详情和 cursor。旧 `section=tokens` 先清理旧 `tab/token_tab/tokens_tab/q/status/.../cursor` 和三个新区状态，再一次 `replaceState` 到首个有权 section。无权深链先按请求 `section` 清理三个分区全部状态，再进入 403；合法 UUID 无权、非法 UUID、Provisioning/Usage 互斥详情和无权页签均不得发起详情请求，目标 ID 不进入 DOM、日志或遥测。
 - 一个聚合接口返回多领域数据时，每个数据块携带 `visibility` 或按权限裁剪；前端不得以“能看总览”为由显示财务、Token 或 PII。
 
 ### 3.3 组织选择器与节点范围
@@ -205,9 +208,9 @@
 | `/pricing/drafts`、`/pricing/:id/draft`、`/pricing/:id/publish`、`/pricing/:id/transition`、`/metering-units*` | 新版定价/计量写入 | `platform.pricing.manage` | PLATFORM | 六个 Billing 命令已由 `ADM-54 / APT-112` 按 `AUDIT_ONLY` 精确注册；`UI-44 / APT-113` 已开放权限裁剪后的 React 生命周期工作区。新建价格草稿和计量单位分别在写前重取精确价格空间与完整单位基线；模型、协议公式使用各自独立加载的当前状态，并在提交前复核权限、目录存在性和协议兼容性 |
 | `/models` | 读取 | `platform.models.read` | PLATFORM | READ_ONLY |
 | `/models:sync` | 同步 | `platform.models.sync` | PLATFORM | `TOKEN_MODEL_CATALOG_SYNC` 固定 AUDIT_ONLY |
-| `/models` | 草稿、发布、生命周期、前向回滚 | `platform.models.manage` | PLATFORM | `TOKEN_MODEL_DRAFT_SAVE`、`TOKEN_MODEL_PUBLISH`、`TOKEN_MODEL_LIFECYCLE_CHANGE`、`TOKEN_MODEL_CATALOG_ROLLBACK` 均固定 AUDIT_ONLY |
+| `/models` | 草稿、发布、生命周期、前向回滚 | 草稿/发布 `platform.models.manage`；生命周期 `platform.models.lifecycle.request`；回滚 `platform.models.catalog.rollback.request` | PLATFORM | 草稿/发布固定 AUDIT_ONLY；生命周期与回滚是 ADM-38 例外并固定 APPROVAL_REQUIRED，只创建 Account 申请，审批权限分别为 `.lifecycle.approve` / `.catalog.rollback.approve`，人类 direct Token API 关闭 |
 | `/token/protocols`、`/token/formulas/:id/preview` | 协议/公式读取与预览 | `platform.pricing.read` | PLATFORM | READ_ONLY |
-| `/token/protocols`、`/token/formulas` | 草稿/发布 | `platform.pricing.manage` | PLATFORM | **NOT_AVAILABLE**：路由分别声明 `TOKEN_PROTOCOL_DRAFT_CREATE`、`TOKEN_PROTOCOL_PUBLISH`、`TOKEN_FORMULA_DRAFT_CREATE`、`TOKEN_FORMULA_PUBLISH`，但当前 `approvalpolicy` 注册表缺少这些命令，实际失败关闭为 `COMMAND_POLICY_UNAVAILABLE`；见 `UIA-020` |
+| `/token/protocols`、`/token/formulas` | 草稿/发布 | `platform.pricing.manage` | PLATFORM | 当前命令策略缺口必须在一期先注册为逐路由 `AUDIT_ONLY` 后才显示写按钮；未知命令继续失败关闭，不得由 Portal 绕过 |
 | `/token/accounts`、`/token/routes`、`/token/provisionings` | 读取 | `platform.tokens.read` | PLATFORM | READ_ONLY |
 | 同上 | 创建、路由、轮换、修复 | `platform.tokens.manage` | PLATFORM | AUDIT_ONLY；密钥值不回显 |
 | `/token/credentials/validate` | 现场凭据验证 | `platform.tokens.credentials.validate` | PLATFORM | AUDIT_ONLY；只返回结论和证据摘要 |
@@ -257,11 +260,21 @@
 
 ### 4.3 Token 权限隔离硬规则
 
-- 只有明确拥有 `platform.tokens.read` 的主体才能进入 Token 页面或看到 Token 聚合数据。
+- 模型管理、Token 资源、运行与用量是三个独立页面；导航与数据区分别按 `platform.models.read`、`platform.pricing.read`、`platform.tokens.read`、`platform.usage.read` 的真实交集出现，必须覆盖 model-only、pricing-only、token-only、usage-only，任一权限不得解锁相邻领域。旧 `section=tokens` 选择首个可访问页，三页均无权时统一拒绝。
+- 只有明确拥有 `platform.tokens.read` 的主体才能进入 Token 资源页面或看到 Token Account、路由、凭据元数据和 Provisioning 数据；运行与用量页面中的 Provisioning 区块遵守同一规则。
 - 创建/修改 Token Account、路由、Provisioning 或凭据元数据要求 `platform.tokens.manage`。
 - 现场凭据验证必须额外要求 `platform.tokens.credentials.validate`。
 - `PLATFORM_SUPER_ADMIN` 在角色矩阵中显式包含上述常驻 Token 权限；Portal 仍只消费服务端返回的原子权限，不能在客户端按角色名称绕过授权。
-- Token 密钥、Authorization Header、完整凭据和可复用验证材料永不显示、导出或写入审计详情。
+- 所有者选择器对用户使用 Account 目录、对组织/节点使用 Organization 目录，统一要求专用窄权限 `platform.tokens.owner-candidates.read`；该权限必须通过 Account 追加迁移创建、原子授予超级管理员与模型管理员，并对两个角色全部有效绑定递增 authorization version 使缓存和旧 cursor 失效，不能只改文档角色表。它不扩展通用目录读取。缺权限为无泄露 403，已授权但不可见/不存在为空候选；只返回最小字段并严格限流防枚举。创建入口必须同时有 `platform.tokens.manage` 与候选权限；manage-only 明确显示权限死路并禁用创建，禁止退化为 UUID 文本框；owner-candidates-only 可读候选但不能创建。
+- 路由只提交稳定 `model_id` 与已发布 `protocol_version_id`，upstream 由 Token 服务解析；健康只来自 5 分钟 TTL 的服务端探测状态机，客户端提交 health 必须被拒绝。
+- Token 密钥、Authorization Header、完整凭据和可复用验证材料永不显示、导出或写入审计详情。二期仅凭据新增/轮换的秘密进入独立 Token origin 的 5 分钟一次性隔离写入页；Production 固定 `https://credentials.account.pinvou.com`、Cloud UAT 固定 `https://credentials-uat.account.pinvou.com`，Portal CSP `form-action` 只允许当前环境精确 origin。launch ID 非 bearer 且仅通过 `target=_blank`、`noopener noreferrer` 的顶层表单 POST body 传输；固定 `/launch` 消费后 303 到无 ID 的固定 `/session`，URL、Referer、历史和代理日志均无 ID。10 秒无隔离页 heartbeat 必须撤销 launch、显示 `CREDENTIAL_WINDOW_BLOCKED`，不得降级 query/fragment/同页/iframe。现场验证是 Token 域直接脱敏命令；撤销是 Portal→Account 审批申请，两者均不打开隔离页。完整合同见专项设计第 6～7 节。
+- Model/Token Account 资源审计由 Token 从本域既有不可变事实提供投影，Portal 只复用审计展示组件；读取要求资源读权与 `platform.audit.read` 的交集，并由服务端固定资源等值过滤，页签不隐式授予导出。
+- 模型价格区块同时要求模型读和定价读权限；读写直接消费 Billing 事实与合同，不得复制到 Token 数据库或由 Token API 代理写入。
+- 模型生命周期、目录前向回滚和凭据撤销是治理命令中的三项 `APPROVAL_REQUIRED` 例外。Portal 只创建 Account 审批申请；生命周期/回滚分别追加不可变 policy v2，撤销新增 v1，六个申请/审批权限通过迁移授予超级管理员和模型管理员。同一稳定用户禁止自审，批准后仅由 `token-command-executor` 消费授权事件执行；旧 direct Token 管理 API 不再接受人类调用。
+
+### 4.4 Token 查询预算与入口代理
+
+Token 管理查询只有三类互斥的墙钟预算，从入口代理收到请求起计时，不能在重试、数据库或下游调用处重置：首屏快照构建 10 秒，超时返回 503 `PAGINATION_SNAPSHOT_UNAVAILABLE` 与 `Retry-After: 5`；已有快照读取 3 秒且禁止重建，超时返回 504 `QUERY_TIMEOUT`；跨域影响预检 5 秒且所有下游共享同一绝对 deadline，超时返回 504 `PRECHECK_TIMEOUT` 并阻断写动作。入口代理 upstream timeout 分别配置为 12、5、7 秒，必须大于业务预算，让领域服务先返回稳定错误。容量、限流和超时错误不得互相替代；具体容量及事务规则见 `NFR-56` 与专项设计第 4 节。
 
 ---
 
@@ -373,7 +386,7 @@
 | 定价 draft create/update | `platform.pricing.manage`；`BILLING_PRICE_DRAFT_CREATE`、`BILLING_PRICE_DRAFT_UPDATE` 固定 AUDIT_ONLY | OpenAPI 定义 `PriceDraft.expected_etag`，PUT 定义 412 | 策略已由 `APT-112` 注册，UI 由 `APT-113` 接入；只按 draft 的 ETag 合同，不扩展并发保证 |
 | 定价 publish | `platform.pricing.manage`；`BILLING_PRICE_PUBLISH` 固定 AUDIT_ONLY | OpenAPI 定义 Header `Idempotency-Key` + body `expected_etag` | 策略已由 `APT-112` 注册，UI 由 `APT-113` 接入；发布无 reason/recent-auth，按真实合同接入 |
 | 定价 transition、计量单位 create/deactivate | `platform.pricing.manage`；`BILLING_PRICE_TRANSITION`、`BILLING_METERING_UNIT_CREATE`、`BILLING_METERING_UNIT_DEACTIVATE` 固定 AUDIT_ONLY | OpenAPI 已定义各自请求；transition 只有幂等键，metering 两动作当前均无幂等键/ETag | 策略已由 `APT-112` 注册，UI 由 `APT-113` 接入；不能声称不存在的 CAS 或幂等保证 |
-| 协议/公式 draft/publish | `platform.pricing.manage`；当前 `COMMAND_POLICY_UNAVAILABLE` | OpenAPI 已定义各自请求；`TOKEN_PROTOCOL_DRAFT_CREATE`、`TOKEN_PROTOCOL_PUBLISH`、`TOKEN_FORMULA_DRAFT_CREATE`、`TOKEN_FORMULA_PUBLISH` 尚未注册 | `UIA-020` 前按钮不存在；注册后按 Token 领域真实冲突码处理 |
+| 协议/公式 draft/publish | `platform.pricing.manage`；当前 `COMMAND_POLICY_UNAVAILABLE` | OpenAPI 已定义各自请求；`TOKEN_PROTOCOL_DRAFT_CREATE`、`TOKEN_PROTOCOL_PUBLISH`、`TOKEN_FORMULA_DRAFT_CREATE`、`TOKEN_FORMULA_PUBLISH` 尚未注册 | `ADM-60` 完成前按钮不存在；注册后按 Token 领域真实冲突码处理 |
 | 商品草稿创建 | `platform.products.create`，`BILLING_RECHARGE_PRODUCT_CREATE` 固定 AUDIT_ONLY | Header 必填 16～128 字符 `Idempotency-Key`；body 必填完整商品事实、`expected_version: 0` 与非空 `reason`；15 分钟内近期认证 | 当前合同完整，不列 API_GAP；缺字段为请求错误，非零版本为 `BILLING_CONFLICT`，同键异正文为 `IDEMPOTENCY_CONFLICT` |
 | 商品发布、准入验证/重试/撤销 | `platform.products.publish`；`BILLING_RECHARGE_PRODUCT_PUBLISH`、`BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY`、`BILLING_RECHARGE_PRODUCT_ADMISSION_REVOKE` 均固定 AUDIT_ONLY | Header `Idempotency-Key` + body `expected_version/reason`，发布可带 `evidence_id`；15 分钟内近期认证 | 只处理该端点实际返回的 401/409 code，不抽象为全局错误码 |
 | 商品下架 | `platform.products.unpublish`，`BILLING_RECHARGE_PRODUCT_UNPUBLISH` 固定 AUDIT_ONLY | Header `Idempotency-Key` + body `expected_version/reason`；15 分钟内近期认证 | 当前合同完整 |
@@ -388,7 +401,9 @@
 | Token 凭据验证 | `platform.tokens.credentials.validate`，AUDIT_ONLY | 无 body，只返回统一脱敏结论 | 无“本次验证”幂等/原因；不得展示原始错误或秘密 |
 | 用量对账重试 | `platform.usage.reconcile.retry`，AUDIT_ONLY | Header `Idempotency-Key` + reason | 当前具备；不会重新发送模型请求 |
 | 模型 draft 保存 | `platform.models.manage`，AUDIT_ONLY | `expected_catalog_version/expected_draft_version` | 无幂等/reason/recent-auth；只把 catalog/draft 409 当该领域版本冲突 |
-| 模型发布/生命周期/前向回滚 | `platform.models.manage`，AUDIT_ONLY | body 含领域 expected version、idempotency_key、reason | 当前具备；错误码使用模型领域错误 |
+| 模型发布 | `platform.models.manage`，AUDIT_ONLY | body 含领域 expected version、idempotency_key、reason | 当前具备；错误码使用模型领域错误 |
+| 模型生命周期/前向回滚 | 独立 `*.request/*.approve`，APPROVAL_REQUIRED | 申请/决定 15m、一名独立审批人、24h/5m、关键版本快照、`token-command-executor` | 现有 v1 AUDIT_ONLY 仅作不可变历史；新增 v2，关闭人类 direct API |
+| 凭据撤销 | `platform.tokens.credentials.revoke.request/.approve`，APPROVAL_REQUIRED | Portal 申请与 Account 决定均 15m、活动引用预检、秘密不可回显、24h/5m；不启动隔离页 | 新增 v1；一名独立审批人，`token-command-executor` 执行 |
 | 审批 draft/更新/submit/withdraw/decide | 冻结策略的 requester/approver 权限，APPROVAL_REQUIRED | draft 有 idempotency/reason/critical versions；更新、迁移、决定有 `expected_version`，决定另有 reason/observed_versions | 只有 draft 具备显式幂等键；submit/withdraw/decide 无幂等字段，强化见 `UIA-011`；只能依赖审批领域 CAS |
 
 ### 7.1 支付 Provider 与商品双人恢复
@@ -425,15 +440,15 @@
 | late-payment reviews | `limit`, `status`, `provider_id`, `owner_id`, `entered_from/to`, `next_review_before`, `overdue` | 无 cursor/sort | 单案件详情/认领/查询/排期/归档 |
 | payment anomalies | `anomaly_type`, `status`, `severity`, `owner_id`, `limit` | 无 cursor/sort | 单案件详情/认领/解决 |
 | reconciliation runs/cases | runs 无参数；cases 为 path `run_id` + `limit` | 无 cursor/sort | case command 单条；未知结果不批量重放 |
-| Token accounts / admin usage requests | 各自仅 `limit` | 无 cursor/sort | Token 有单条详情；用量有单条详情；秘密永不返回 |
-| protocols/formulas/models | 无列表参数 | 无 cursor/sort | 当前返回版本集合/目录；不虚构筛选 |
-| provisionings | `limit`, `status` | 无 cursor/sort | 单条详情含 attempt history；修复逐条 |
+| Token accounts / admin usage requests | 当前各自仅 `limit`；目标按 ADM-56/NFR-56 增加规范化筛选 | 当前无 cursor/sort；一期改为稳定快照 cursor | Token 有单条详情；用量有单条详情；秘密永不返回 |
+| protocols/formulas/models | 当前无列表参数；目标按 ADM-56/NFR-56 增加规范化筛选 | 当前无 cursor/sort；一期改为稳定快照 cursor | 当前返回版本集合/目录；二期按 UI-53 增加模型详情与版本差异 |
+| provisionings | 当前为 `limit`, `status`；目标增加模型、Token Account、作用域和时间筛选 | 当前无 cursor/sort；一期改为稳定快照 cursor | 已有单条详情含 attempt history；修复逐条，Portal 一期正式接入 |
 | approval requests | `limit`, `command_type`, `status`, `risk_class`, `requester_user_id`, `target`, `submitted_from/to`, `expires_from/to` | 无 cursor/sort | 服务端返回 `allowed_actions`；禁止批量审批；cursor 为 `UIA-007` |
 | `/me/organizations`、`/me/role-bindings`、`/me/invitations` | 无参数 | 无分页/排序 | 仅当前主体；不得用于全平台枚举 |
 | 组织 units/members/role-bindings | units 可传 `root_unit_id`；members 可传 `unit_id`；role-bindings 无筛选 | 无 cursor/sort | UNIT 必须显式子树；跨节点结果由服务端排除；组织审计列表不存在 |
 | 组织额度/权益列表 | 依 token-gateway 现有 organization balance/packages/quota-grants 合同 | 仅端点已定义的分页字段 | 支持的 batch 仅限合同已有 quota allocate/reclaim；不能推广到其他资源 |
 
-所有真实筛选和 cursor 状态写入 URL。无 cursor 的接口刷新时重新执行相同查询并明确“数据可能已变化”，不能生成或复用虚构 cursor。用户目录已完成向后兼容的 Account cursor 与 Portal 翻页适配；Billing 由 `NFR-55 / APT-114` 与 `UI-45 / APT-115` 交付；其余 Account、Token 服务缺口仍分别由 `UIA-007/UIA-014` 承担，Portal 对这两域的其余适配仍由缩减后的候选 `UIA-015` 承担。对应任务完成前只能使用现有上限和服务端返回顺序。
+所有真实筛选和 cursor 状态写入 URL。无 cursor 的接口刷新时重新执行相同查询并明确“数据可能已变化”，不能生成或复用虚构 cursor。用户目录与 Billing 已完成对应稳定分页；Token 管理列表现状仍为有界 limit，其目标合同已正式转换为 `ADM-56/NFR-56`，Portal 适配纳入 `UI-48`。对应任务完成前只能使用现有上限和服务端返回顺序，不得提前用前端过滤冒充服务端分页。
 
 详情、脱敏与批量的统一落地边界：
 
@@ -541,10 +556,11 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 
 ### 12.3 模型、Token 与用量
 
-- **模型**：模型读、同步、管理三个动作独立鉴权。
-- **Token Account/路由/Provisioning**：无 `platform.tokens.read` 时整组隐藏；密钥不可回显；变更动作要求 manage；凭据验证另需 credentials.validate。
-- **协议/公式**：只展示已定义的计量事实和版本，不提供任意表达式在线执行；草稿/发布写动作在 `UIA-020` 前隐藏。
-- **用量请求/对账**：不显示模型内容；结果未知必须查询/对账；重试使用新 attempt。
+- **模型管理**：模型读、同步、管理三个动作独立鉴权；协议/公式继续使用定价读写权限；一期完成目录与协议公式子视图。二期 Model 详情必须占据主内容区并使用稳定 URL，唯一页签固定为“概览 / 能力、协议与公式 / 路由与运行 / 价格与计量 / 生命周期与依赖 / 审计”，不得在其他文档或实现中拆出同义重复页签。价格不可用时不显示伪值且阻断依赖价格的写动作。
+- **Token 资源**：无 `platform.tokens.read` 时 Token Account 区块隐藏；变更动作要求 manage，凭据验证另需 credentials.validate。所有者由 Account/Organization 权威目录和专用 owner-candidates 权限选择；创建必须同时具备 manage 与候选权限，原型和产品都必须演示 manage-only 死路且不提供 UUID 盲填。路由只提交稳定模型/协议版本；健康由服务端探测产生。二期 Token Account 详情占据主内容区；只有凭据新增/轮换经固定白名单 Token origin 的顶层 POST，验证直接调用 Token 脱敏命令，撤销创建 Account 审批，后两者不进入隔离页。
+- **运行与用量**：Provisioning 与用量区块分别鉴权、独立失败；一期详情是同页主内容稳定 URL 子视图，不是二期资产详情；不显示模型正文；结果未知必须查询/核对；核对重试不创建新的模型执行。
+- **协议/公式**：只展示已定义的计量事实和版本，不提供任意表达式在线执行；四个 Token 管理命令的策略注册是一期写按钮出现的前置任务。
+- **跨域定价与审计**：模型详情只按模型上下文读取/编辑 Billing 唯一价格事实；财务侧全平台定价治理入口保持不变。模型/Token 详情读取 Token 本域审计投影并复用展示组件，不拼接 Account 全局审计、不复制可写事实或扩展导出权限。
 
 ### 12.4 治理、运行手册与我的组织
 
@@ -649,14 +665,14 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | S2 | 平台总览 | 三张领域摘要卡 + 独立系统健康条；删除 KYC 和只读告警；统计卡片独立鉴权及局部失败；无权/失败不显示 0；可用积分扣除应收占用；路由健康分母为全部路由；累计值显式标注；非零待办可进入有权队列；Token 卡不因超级管理员身份出现 |
 | S3 | 用户管理 | 删除“新建用户”；将 `q` 搜索与 `user_code` 完整精确查询分开；手机号脱敏；状态筛选在 `UIA-007/UIA-015` 前不显示 |
 | S4 | 角色管理 | 删除“新建角色”和虚构权限；改为内置角色只读 + 绑定授予/撤销；明确超级管理员具备全部常驻平台管理权限，临时 PII 导出继续独立授权 |
-| S5 | Token Account | 页面整体要求 `platform.tokens.read`；写动作要求 manage，凭据验证另鉴权；密钥永不回显 |
+| S5 | Token Account | 区块要求 `platform.tokens.read`；owner 选择使用目录权限交集与反枚举；写动作要求 manage，凭据验证另鉴权；二期独立主内容详情与隔离凭据写入，秘密永不进入 Portal |
 | S6 | 组织列表 | 删除“DELETED 可恢复”；补 ACTIVE/DISABLED/DELETED 状态动作矩阵和删除预检；顶层写入 CAS 等待 `UIA-003` |
 | S7 | 账务总览 | 积分/CNY 分栏；卡片字段独立权限；补空/错/无权/部分失败状态 |
 | S8 | 支付复核 | 明确案件只读、认领、解决、Provider/商品恢复的不同权限和治理模式；结果未知不重复写 |
 | S9 | 待审批 | 只显示拥有冻结 `approver_permission` 的申请；显示禁自审、到期、快照、版本和作用域 |
 | S10 | 注册修复 | 只用现有 status/stage/responsibility/older_than/sla/limit；展示响应已有 operation 字段；禁止虚构 attempt、cursor 或批量重试 |
 | S11 | 平台设置 | 删除 2FA、邮箱恢复等无任务能力；语言必须含简中/英文/日文；仅保留有 API/任务的设置 |
-| S12 | 路由管理 | 使用 tokens.read/manage 分权；技术字段截断/复制/Tooltip；现有路由写没有近期认证、原因、幂等/CAS，强化等待 `UIA-004` |
+| S12 | 路由管理 | 使用 tokens.read/manage 分权；只提交稳定模型/协议版本，服务端解析 upstream 并产生带 TTL 的探测健康；客户端 health 字段被拒绝；原因、幂等/CAS 按逐动作治理矩阵补齐 |
 | S13 | 系统状态 | 仅使用 `GET /system/status`；卡片独立失败。事件能力未获产品批准时永久隐藏；获批后须由 Account/Billing/Token 各自端点（候选 UIA-008、UIA-021、UIA-022）及 Portal 适配（候选 UIA-023）共同交付，Portal 不跨库重放 |
 | S14 | 我的组织 | 增加组织/节点选择器；已有卡片独立鉴权；UNIT 只覆盖目标子树；组织审计 API 等待 `UIA-009`；资料写/注销由 Account API `UIA-019` + Portal `UIA-012` 闭环；全员用量由 Token API `UIA-016` + Portal `UIA-024` 闭环。两条链互不依赖，任一未批准时只永久隐藏本链入口 |
 | S15 | 定价与商品 | ON_SALE 删除按钮移除；显示准入证据、发布事实不可变、Provider/商品独立恢复；新版定价与计量工作区已按 APT-112、APT-113 开放，并保持各资源独立加载、局部失败与刷新恢复 |
@@ -668,12 +684,12 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | S21 | 退款 | 删除“发起退款”；保留既有记录与失败/不确定/强制异常案件处理入口 |
 | S22 | 对账 | 当前 reconciliation run 返回同步 200，不显示异步任务状态；按 run/case 真实资源展示，不自动重放外部副作用 |
 | S23 | 账务修复 | 所有财务修复只创建审批申请；使用 requester/approver 精确权限 |
-| S24 | 协议 | 已发布协议/版本只读；无 Token 权限不显示关联敏感字段；不提供任意编辑执行；草稿/发布在 `UIA-020` 前隐藏 |
-| S25 | 公式 | 展示不可变版本和单位；不在 Portal 执行任意表达式；积分/CNY 类型明确；草稿/发布在 `UIA-020` 前隐藏 |
+| S24 | 协议 | 已发布协议/版本只读；pricing-only 可见本区但不可见模型目录；不提供任意编辑执行；草稿/发布只在一期命令策略注册完成后显示 |
+| S25 | 公式 | 展示不可变版本和单位；不在 Portal 执行任意表达式；积分/CNY 类型明确；草稿/预览/发布独立状态与恢复 |
 | S26 | 凭据元数据 | 只显示不可复用元数据；验证需 credentials.validate；禁止复制密钥/Token |
-| S27 | Provisioning | 按 PENDING/READY/FAILED/REPAIR_REQUIRED 状态矩阵；修复创建新 PENDING attempt |
-| S28 | 用量请求 | 不显示模型正文；当前列表仅 limit，模型/状态/时间筛选等待 `UIA-014/UIA-015`；详情按 usage_request_id 脱敏 |
-| S29 | 用量对账 | 重试需 usage.reconcile.retry、Idempotency-Key 和 reason；返回更新后的 usage request，不虚构新 attempt ID；不确定时查询/对账 |
+| S27 | Provisioning | 按 PENDING/READY/FAILED/REPAIR_REQUIRED 状态矩阵；一期以稳定 URL 主内容子视图接入详情与 attempt history，修复只创建新 PENDING 轮次 |
+| S28 | 用量请求 | 不显示模型正文；列表按 NFR-56 明确 envelope/筛选/排序；一期详情按 usage_request_id 在主内容区脱敏呈现，返回恢复列表上下文 |
+| S29 | 用量对账 | 建立基于用量请求事实的异常队列；重试需 usage.reconcile.retry、Idempotency-Key 和 reason；返回更新后的 usage request，不虚构新 attempt ID、不重发模型请求；不确定时查询/核对 |
 | S30 | 注销修复 | 区分自助注销终态和修复 attempt；后台不恢复已匿名化身份；补幂等/审计 |
 | S31 | 审批策略注册表 | 只读展示命令、版本、申请/审批权限、执行身份、时限；Portal 不编辑策略 |
 | S32 | 审批执行/失败 | 显示服务身份、CAS、幂等、执行窗口和失败可重试性；人类不得直接执行 |
@@ -718,6 +734,18 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | AC-41 | 用户数超过 25 后创建组织或添加成员 | 可通过服务端用户搜索选择后续用户，不依赖用户目录首屏数据 |
 | AC-42 | 组织成员和节点数量同时增长 | 成员列表服务端分页；每行不预渲染全部角色和全部节点复选框，编辑面板按需加载 |
 | AC-43 | 仅持有组织状态管理权限 | 只能启停组织，不能改名、增删成员、改角色或修改节点结构；服务端直接调用同样拒绝 |
+| AC-44 | 模型与 Token 合法 UUID 无权深链 | 先清理全部详情/页签/cursor 参数再进入 403；详情请求数为 0，目标 ID 不进入 DOM、日志或遥测 |
+| AC-45 | 模型与 Token 非法 UUID 或 Provisioning/Usage 互斥详情 | 删除全部冲突详情状态并回到有权列表，显示稳定提示；不任择目标、不发送详情请求 |
+| AC-46 | 只有 `platform.tokens.manage` 打开 Token Account 创建 | 显示缺少 owner-candidates 的失败关闭死路并禁用创建，不出现 UUID 文本框；只有候选权限时可读最小候选但不能创建 |
+| AC-47 | credential launch 正常完成 | CSP 只允许固定环境 origin；launch ID 仅在顶层 POST body，303 后 URL/Referer/历史/代理日志无 ID，`window.opener` 为空且刷新不重放 POST |
+| AC-48 | 浏览器阻止 credential 新窗口 | 10 秒无 heartbeat 后撤销 launch 并显示 `CREDENTIAL_WINDOW_BLOCKED`；网络中无 query、fragment、同页或 iframe 降级 |
+| AC-49 | Token 首屏、已有快照和跨域预检超时 | 分别使用唯一 10/3/5 秒预算并返回 `PAGINATION_SNAPSHOT_UNAVAILABLE`/`QUERY_TIMEOUT`/`PRECHECK_TIMEOUT`；入口代理 12/5/7 秒不抢先改写错误 |
+| AC-50 | 三个模型与 Token section 交叉切换 | 新历史项只包含目标 section 的具名筛选/cursor/详情；其他两区状态被删除，后退/前进恢复各自 URL 且不发生跨区详情请求或 cursor 错配 |
+| AC-51 | 带旧 tab/filter/detail/cursor 的 `section=tokens` | 一次 `replaceState` 清理全部旧/新区状态并进入首个有权新 section；刷新不二次迁移，三页均无权时清理后 403 |
+| AC-52 | 九类数据源及详情嵌套列表交错筛选、翻页和局部失败 | 每个请求只携带专项设计 4.1 的本资源 API filter/cursor 且无 sort；协议/公式、Provisioning/Usage/核对、owner、资源审计和嵌套列表的 cursor 不互相覆盖，单源失败/重试不清除其他成功结果，刷新及前进后退恢复相同 URL 状态 |
+| AC-53 | 凭据新增/轮换、验证和撤销交错执行 | 只有新增/轮换产生隔离 origin POST；验证只调用 Token 脱敏命令；撤销只创建 Account 审批，后两者无 launch/隔离页请求，人类 direct revoke 失败关闭 |
+| AC-54 | 三个 Token 强制审批策略发布门禁 | 迁移后 DB 与 `internal/platform/approvalpolicy` 对 lifecycle v2/rollback v2/revoke v1 的专项 7.3 全部 13 字段（含 exact ordered 关键字段数组）相等；`executableApprovalCommands` 保留钱包调整、Provider/商品恢复等既有合法项，新增 `TOKEN_*` 子集恰为三项且无其他 Token 命令；任一偏差阻断发布 |
+| AC-55 | UI-47 feature gate 切换 canonical 入口 | 后续实施任务更新现有管理后台合同测试；gate on 断言三页导航/路由，gate off 断言历史 Token Gateway，本轮只改文档与原型而不改实现测试 |
 | AC-44 | 平台结构管理员移动节点 | 使用真实 expected_structure_version；跨组织、自身、后代、停用父节点和旧版本全部失败关闭 |
 | AC-21 | user_code、积分、CNY、技术 ID 展示 | 编码不可变且可复制；积分无 ¥；金额带 CNY；技术 ID 可访问 Tooltip/复制 |
 | AC-22 | 退款页 | 无退款发起入口；既有记录和允许的异常案件仍可查询/处理 |
@@ -733,7 +761,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | AC-34 | 仅批准组织资料更新/注销 | 只创建 UIA-019、UIA-012 对应的正式任务；资料更新/注销闭环可用，全员用量入口永久隐藏；任务图不引用 UIA-016/UIA-024 对应任务且无缺失依赖 |
 | AC-35 | 仅批准组织全员用量 | 只创建 UIA-016、UIA-024 对应的正式任务；全员/节点子树用量闭环可用，资料更新/注销入口永久隐藏；任务图不引用 UIA-019/UIA-012 对应任务且无缺失依赖 |
 | AC-29 | 创建充值商品草稿的字段、版本与幂等检查 | 缺任一必填商品字段或 reason 返回请求错误；`expected_version != 0` 返回 `BILLING_CONFLICT`；相同 Header 幂等键同正文重放原结果、异正文返回 `IDEMPOTENCY_CONFLICT` |
-| AC-30 | 调用新版定价、计量单位、协议或公式写端点 | Billing 六命令在 APT-112 前、Token 四命令在候选 UIA-020 获批并完成前，真实响应均为 `COMMAND_POLICY_UNAVAILABLE` 且 Portal 无按钮；完成后每个命令从注册表解析为精确权限和 AUDIT_ONLY，并通过路由合同测试 |
+| AC-30 | 调用新版定价、计量单位、协议或公式写端点 | Billing 六命令已经由 APT-112 注册；Token 四命令在 ADM-60 对应任务完成前真实响应仍为 `COMMAND_POLICY_UNAVAILABLE` 且 Portal 无按钮；完成后每个命令从注册表解析为精确权限和 AUDIT_ONLY，并通过路由合同测试 |
 
 ---
 
@@ -746,12 +774,14 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | `UIA-001` | `UI-28`、`UI-29`、`UI-30`、`UI-31` | 仅基于现有 API 的后台壳层、共享组件和三组领域页面改版；正式编号与目标以 `requirements.md` 为准，第 1.3 节定义详细验收 | 独立复审通过后先同步需求状态矩阵；随后先创建 UI-28 正式任务，再创建分别依赖 UI-28 的 UI-29/30/31 正式任务 |
 | `UIA-018` | `UI-32` | 仅批准 UI-28～31 的无产品代码集成与发布验收，不自动包含任何候选 API 或未批准能力 | 仅当状态矩阵已同步、且 UI-28～31 对应正式任务均已存在时才能建任务；正式依赖仅为 UI-28～31，交付不得修改产品代码 |
 | `UIA-013` | `NFR-55 / APT-114` | Billing 高数据量列表合同已全量批准并转换；15 分钟有界服务端 ID 快照、筛选、排序、容量和滥用门禁以财务重构设计为准 | 已进入正式任务；原 UIA-013 不再出现在候选表或候选依赖中 |
-| `UIA-015` Billing 子集 | `UI-45 / APT-115` | 仅 Billing 列表的 Portal cursor、URL 和返回恢复已批准；Account/Token 子集仍未批准 | APT-115 只依赖正式 Billing 合同；缩减后的 UIA-015 不得再次包含 Billing |
-| `UIA-020` Billing 六命令 | `ADM-54 / APT-112` | 仅六个 Billing 定价/计量命令策略注册已批准；四个 Token 协议/公式命令仍未批准 | APT-112 只注册 Billing 六命令；缩减后的 UIA-020 不得再次包含 Billing |
+| `UIA-015` Billing 子集 | `UI-45 / APT-115` | Billing 列表的 Portal cursor、URL 和返回恢复已批准并完成；Token 子集在本轮另行转换，当前仅 Account 子集仍未批准 | APT-115 只依赖正式 Billing 合同；UIA-015 不得再次包含 Billing 或 Token |
+| `UIA-020` Billing 六命令 | `ADM-54 / APT-112` | 六个 Billing 定价/计量命令策略已批准并完成；Token 四命令在本轮另行转换 | APT-112 只注册 Billing 六命令；Token 四命令由 ADM-60 后续任务独立交付 |
+| `UIA-014`、`UIA-015` Token 子集、`UIA-020` Token 四命令 | `ADM-56/NFR-56`、`UI-48`、`ADM-60` | Token 稳定分页、Portal URL 适配和协议/公式命令策略已由本轮产品决策正式批准 | 独立文档审核通过后再拆正式任务；不得继续作为候选或提前实现 |
+| `UIA-004` | `ADM-64` | Token Account/状态/路由及新增凭据生命周期的 reason、近期认证、CAS、幂等、审计和未知结果恢复已按逐动作矩阵正式批准 | 独立文档审核通过后再拆任务；确认框不替代命令策略，禁止 force/ignore_blocker |
 
 ### 18.2 未批准候选总则
 
-以下总则和候选表只适用于 `UIA-002`～`UIA-012`、`UIA-014`、缩减为 Account/Token 子集的 `UIA-015`、`UIA-016`～`UIA-017`、`UIA-019`、缩减为 Token 四命令的 `UIA-020` 以及 `UIA-021`～`UIA-024`。`UIA-001`、`UIA-013`、`UIA-018` 已全量转换，`UIA-015/UIA-020` 的 Billing 子集已转换，只存在于上方追踪表，不再属于候选项。候选编号不是正式任务 ID，因而没有任务状态，也不构成 `implementation-tasks.md` 中的依赖边。产品决策必须先发生：
+以下总则和候选表只适用于除 `UIA-004` 外的 `UIA-002`～`UIA-012`、缩减为 Account 子集的 `UIA-015`、`UIA-016`～`UIA-017`、`UIA-019` 以及 `UIA-021`～`UIA-024`。`UIA-001`、`UIA-004`、`UIA-013`、`UIA-014`、`UIA-018` 已全量转换，`UIA-015` 的 Billing/Token 子集和 `UIA-020` 全部子集已转换，只存在于上方追踪表，不再属于候选项。候选编号不是正式任务 ID，因而没有任务状态，也不构成 `implementation-tasks.md` 中的依赖边。产品决策必须先发生：
 
 1. 产品批准某一建议项后，先在唯一需求源 `requirements.md` 中形成正式编号和目标；本 UI/UX 专项或独立需求变更文档只补充详细交互与验收。随后必须通过独立文档步骤同步 `implementation-status.md` 的需求状态矩阵，矩阵完成前不得在 `implementation-tasks.md` 建任务；建成的新任务初始状态只能是 `PENDING`，随后只使用 `PENDING / IN_PROGRESS / DONE / BLOCKED_EXTERNAL` 四种正式状态。
 2. 正式任务只引用届时真实存在的正式任务 ID；本表的 UIA 引用仅表示**候选纳入条件**，转换时必须解析为已创建的正式任务，不得把 UIA 编号直接写入正式依赖。
@@ -762,7 +792,6 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 |---|---|---|---|---|
 | `UIA-002` | `UIR-002` 角色绑定写合同强化 | APT-006、APT-046、APT-069 | **Account 单提交**：OpenAPI、服务、迁移（如需）、合同/权限测试 | reason/recent-auth/幂等/CAS 取舍固化；Identity Admin 对 binding POST/DELETE 均 403；不改 Portal |
 | `UIA-003` | `UIR-003` 用户状态与组织/成员/节点写合同强化 | APT-006、APT-009、APT-010、APT-011、APT-046、APT-069、APT-075 | **Account 单提交**：相关 OpenAPI、服务和并发/审计测试 | 每个端点分别定义 reason/幂等/CAS；旧客户端兼容；无跨节点越权；不改 Portal |
-| `UIA-004` | `UIR-004` Token Account/状态/路由写合同强化 | APT-006、APT-028、APT-031、APT-069、APT-073、APT-075 | **Token 单提交**：OpenAPI、服务和秘密/并发测试 | 幂等、reason、版本与必要 step-up 有明确合同；秘密不回显；不改 Portal |
 | `UIA-005` | `UIR-005` 支付恢复只读现场探测 API | APT-008、APT-067、APT-092、APT-093 | **Billing 单提交**：OpenAPI、探测服务、证据存储和无收费副作用测试 | 失败/过期/未知证据不能生成可提交草稿；Provider/商品证据隔离；不改 Portal |
 | `UIA-006` | `UIR-006` 审计导出一次性密钥与配额可观察合同 | APT-006、APT-008、APT-055 | **Account 单提交**：OpenAPI、导出服务和安全测试 | create 首次响应后 replay/GET 不返密钥；丢失需新建；配额字段若不提供则合同明确；不改 Portal |
 | `UIA-007` | `UIR-007` Account 其余高数据量列表合同 | APT-003、APT-004、APT-009、APT-011、APT-014、APT-046、APT-055、APT-074、APT-075 | **Account 单提交**：仅尚未覆盖的 Account 列表 OpenAPI、查询实现和分页测试 | users 的 q 与 user_code 已分离且用户目录 cursor 已实现；继续补齐角色绑定及修复队列等剩余 Account cursor/筛选/稳定排序，不改 Billing、Token、Portal |
@@ -771,12 +800,10 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | `UIA-010` | `UIR-010` 现有异步领域的 Portal 刷新恢复 | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；APT-003、APT-004、APT-014、APT-028、APT-055、APT-074、APT-083、APT-084 | **Portal 单提交**：仅逐领域状态组件、URL 恢复和前端测试 | 只恢复审计导出/准入/Provisioning/审批等已有 GET；无统一任务服务、心跳或取消 |
 | `UIA-011` | `UIR-011` 审批 submit/withdraw/decide 显式幂等 | APT-008、APT-074、APT-082 | **Account 单提交**：Approval OpenAPI、服务和重放/并发测试 | 同键同参返回原决定，同键异参冲突；保留 expected_version；不改 Portal |
 | `UIA-012` | `UIR-012` 我的组织资料更新/注销 Portal 闭环 | 产品单独批准资料/注销；APT-009、APT-014、APT-069、APT-075；唯一候选任务依赖：UIA-019 | **Portal 单提交**：只接入已完成的 Account 组织资料更新/注销合同 | `org.profile.update` 与 `org.delete.request` 独立鉴权；注销阻断完整；不读取全员用量、不依赖 UIA-016/UIA-024、不改 Account API |
-| `UIA-014` | `UIR-014` Token 高数据量列表合同 | APT-028、APT-030、APT-031、APT-081 | **Token 单提交**：仅 Token 列表 OpenAPI、查询实现和分页测试 | Token Account/用量/Provisioning 的 cursor、筛选、排序稳定；不改 Account、Billing、Portal |
-| `UIA-015` | `UIR-015` Account/Token 其余列表 Portal 适配 | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；候选条件仅 UIA-007、UIA-014 | **Portal 单提交**：用户目录之外的 Account/Token 列表 URL、cursor、筛选、排序和前端合同测试 | Billing 部分已转换为 UI-45/APT-115；继续保证 Account/Token 参数不串用，旧无 cursor 响应安全降级；不改服务 |
+| `UIA-015` | `UIR-015` Account 其余列表 Portal 适配 | 正式 UI 需求/任务 UI-28、UI-29；候选条件仅 UIA-007 | **Portal 单提交**：用户目录之外的 Account 列表 URL、cursor、筛选、排序和前端合同测试 | Billing 部分已转换为 UI-45/APT-115，Token 部分已转换为 UI-48；继续保证 Account 参数不串用，旧无 cursor 响应安全降级；不改服务 |
 | `UIA-016` | `UIR-016` 组织全员/节点子树用量聚合 API | 产品批准；APT-030、APT-069、APT-075、APT-081 | **Token 单提交**：组织用量 OpenAPI、查询、UNIT scope 与脱敏测试 | `org.usage.read.all` 才可读；UNIT 仅目标子树；不返回模型正文；不改 Account/Portal |
-| `UIA-017` | `UIR-017` 已批准 API gap 的 Portal 适配（不含列表、我的组织和事件专项） | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；以及 UIA-002、UIA-003、UIA-004、UIA-005、UIA-006、UIA-009、UIA-011、UIA-020 中产品已批准且正式任务已创建的子集 | **Portal 单提交**：只适配正式任务已完成的角色/写合同、探测、审计、审批及命令注册修复 | 未批准能力永久隐藏，已批准但对应正式任务未完成的能力继续隐藏；列表由 UIA-015、资料/注销由 UIA-012、全员用量由 UIA-024、事件由 UIA-023 负责；不改服务/API |
+| `UIA-017` | `UIR-017` 已批准 API gap 的 Portal 适配（不含列表、我的组织和事件专项） | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；以及 UIA-002、UIA-003、UIA-004、UIA-005、UIA-006、UIA-009、UIA-011 中产品已批准且正式任务已创建的子集 | **Portal 单提交**：只适配正式任务已完成的角色/写合同、探测、审计及审批修复 | 未批准能力永久隐藏，已批准但对应正式任务未完成的能力继续隐藏；Account 列表由 UIA-015、Token 列表由 UI-48、资料/注销由 UIA-012、全员用量由 UIA-024、事件由 UIA-023 负责；不改服务/API |
 | `UIA-019` | `UIR-019` 组织资料更新与组织注销申请 API | 产品批准；APT-009、APT-014、APT-069、APT-075 | **Account 单提交**：资料/注销 OpenAPI、服务、阻断和 scope 测试 | 无权/UNIT 写入拒绝；注销不绕过跨域阻断；不改 Token/Portal |
-| `UIA-020` | `UIR-020` Token 缺失管理命令策略注册 | APT-008、APT-026、APT-045、APT-069 | **共享 approvalpolicy 单提交**：只补 4 个 Token 协议/公式命令的注册与合同测试 | Billing 六命令已转换为 ADM-54/APT-112；此候选仅使四个 Token 命令解析为路由现有精确权限和 AUDIT_ONLY，未知命令仍失败关闭；不改 OpenAPI、领域服务或 Portal |
 | `UIA-021` | `UIR-021` Billing Outbox 查询/重放 API | 产品批准；APT-006、APT-045、APT-069、APT-076 | **Billing 单提交**：仅 Billing OpenAPI、Billing 自有 Outbox/`event_replay_requests`、授权委托与测试 | 完整实现 §4.2.1：GET 返回不可变包络 `event_digest`；POST 强制 `expected_digest`、16～128 字符幂等键、至少 20 字符 reason；仅未发布死信在 Serializable 事务中追加请求并重排队；人类授权与 `EVENT_REPLAY` 身份分别审计；摘要变化、非死信、已发布、跨域 ID、同键异请求均失败关闭 |
 | `UIA-022` | `UIR-022` Token Outbox 查询/重放 API | 产品批准；APT-006、APT-045、APT-069、APT-076 | **Token 单提交**：仅 Token OpenAPI、Token 自有 Outbox/`event_replay_requests`、授权委托与测试 | 完整实现 §4.2.1：GET 返回不可变包络 `event_digest`；POST 强制 `expected_digest`、16～128 字符幂等键、至少 20 字符 reason；仅未发布死信在 Serializable 事务中追加请求并重排队；人类授权与 `EVENT_REPLAY` 身份分别审计；摘要变化、非死信、已发布、跨域 ID、同键异请求均失败关闭 |
 | `UIA-023` | `UIR-023` 三领域事件 Portal 只读聚合与路由适配 | 产品批准；APT-076；正式 UI 需求/任务 UI-28、UI-31；候选条件 UIA-008、UIA-021、UIA-022 中产品批准并已创建正式任务的领域子集；若产品目标定义为“全平台事件”，三项领域候选必须全部批准 | **Portal 单提交**：只读聚合脱敏摘要，并把重放动作路由到事件所属服务；不持有 Outbox 写能力 | 三域卡片独立授权/失败；请求不跨域；某领域未批准时永久隐藏，对应正式任务未完成时暂时隐藏；部分获批时页面不得宣称“全平台覆盖”；不改服务/API |
@@ -784,7 +811,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 
 当前实现门禁：
 
-1. `UIA-001`、`UIA-013`、`UIA-018` 以及 `UIA-015/UIA-020` 的 Billing 子集已按 §1.4 和 §18.1 转换为正式需求/任务，不再受候选总则约束；只有 §18.2 明确列出的剩余候选及缩减子集仍无正式状态，涉及其新 API 的画板能力必须隐藏，不能以前端模拟。
+1. `UIA-001`、`UIA-013`、`UIA-014`、`UIA-018`、`UIA-015` 的 Billing/Token 子集以及 `UIA-020` 已按 §1.4 和 §18.1 转换为正式需求，不再受候选总则约束；只有 §18.2 明确列出的剩余候选及缩减子集仍无正式状态，涉及其新 API 的画板能力必须隐藏，不能以前端模拟。
 2. APT-007 的 bootstrap/break-glass 受控环境验证和 APT-047 的最小服务身份环境验证仍是上线门禁。门禁未通过不授权在 Portal 加临时执行入口。
 3. Account/Billing/Token 事件能力须分别做产品决策，并记录目标是三域全平台覆盖还是明确的领域子集；组织审计、组织资料写/注销和全员用量同样先决策。未决或未纳入期间采用 NOT_AVAILABLE，并以永久隐藏验收事实收敛，不创建占位任务。
 4. `UI-28` 拥有壳层和共享基础组件；`UI-29`、`UI-30`、`UI-31` 各自依赖 UI-28，并在本任务内完成受影响页的三语、AA、响应式和全部真实状态。`UI-32` 只在 UI-28～31 全部完成后执行第 9、11、13～15 节的无产品代码集成验收。资料/注销链为 Account API `UIA-019` + Portal `UIA-012`；全员用量链为 Token API `UIA-016` + Portal `UIA-024`。两条候选链仍未批准，不形成正式任务或缺失依赖。

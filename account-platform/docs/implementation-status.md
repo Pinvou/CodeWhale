@@ -4,13 +4,13 @@
 >
 > 校准日期：2026-08-26
 >
-> 状态定义：`已实现`、`部分实现`、`降级实现`、`未实现`、`移除`、`非当前范围`。本轮 411 个目标编号均已有明确实现结论，不再保留无结论占位。
+> 状态定义：`已实现`、`部分实现`、`降级实现`、`未实现`、`移除`、`非当前范围`。本轮 435 个目标编号均已有明确实现结论，不再保留无结论占位。
 
 > 对应目标需求：`requirements.md`
 
 ## 0. 状态证据规则
 
-本文保留目标重构前的实现判断和差距，供迁移规划使用。本轮已逐项核验 411 个目标编号；代码存在性、静态配置和现有自动化测试只能证明仓库实现状态，不能替代环境部署与生产验收：
+本文保留目标重构前的实现判断和差距，供迁移规划使用。本轮已逐项核验 435 个目标编号；代码存在性、静态配置和现有自动化测试只能证明仓库实现状态，不能替代环境部署与生产验收：
 
 | 字段 | 要求 |
 |---|---|
@@ -19,19 +19,22 @@
 | `deployment_version` | 已验证的部署版本、环境和验证时间；未部署写 `NOT_DEPLOYED` |
 | `known_gaps` | 与目标需求的剩余差异、Provider 降级和未验证风险 |
 
-当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 412 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
+当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 435 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
 全量核验汇总：`已实现 380`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `412` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-117 已全部完成并逐项通过独立代码复审。超级管理员完整平台权限新增 ADM-55 并由 APT-118 实现。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致。超级管理员权限与价格空间修复版本 `0.8.0@4ccf7404` 已于 2026-09-03 部署至 `CLOUD_UAT`：Account 000042、Billing 000051 迁移通过，Account/Billing/Portal 与公网 readiness 均证明目标 Commit，超级管理员常驻平台权限为 46/46、未脱敏 PII 导出授权为 0，价格空间缺口为 0；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+
+本轮模型与 Token 需求变更新增 23 个正式目标，当前汇总以 `已实现 380`、`部分实现 29`、`未实现 24`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `435` 项为准；上段的 412 项汇总是变更前已完成基线。新增 `UI-47`～`UI-58`、`ADM-56`～`ADM-65`、`NFR-56` 的需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 的任务拆分已通过身份 B 第五轮独立审核；下一步从 APT-119 开始逐任务实施和独立复审，当前尚未实现、推送或部署。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
 | `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；连续实施起点 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`，并包含本文件所在提交 | 通过代码审阅；不等同生产部署 |
-| `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 411/411 个唯一目标编号均有结论 |
-| `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 411 个唯一编号一一覆盖，无缺失、无额外编号 |
+| `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 435/435 个目标编号均有结论；新增模型与 Token 需求按现状记为未实现 |
+| `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 435 个目标编号一一覆盖，无缺失、无额外编号 |
 | `ADMIN-FINANCE-PAYMENT-REDESIGN` | 财务支付三分区、现有能力闭环、定价生命周期、Billing 分页和分区运营概览设计 | 产品已批准 `UI-37`～`UI-46`、`ADM-54`、`BILL-47`、`NFR-55`；第三轮独立文档复审已通过，代码任务 APT-105～APT-117 已完成并逐项通过独立代码复审 |
 | `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现按 APT-069–APT-082 分任务进行 |
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `SUPER-ADMIN-PLATFORM-PERMISSIONS` | 超级管理员完整常驻平台权限、Token 管理可见性、授权缓存失效及临时 PII 权限隔离 | Account 000042 前向/回滚迁移、角色真值表合同、Token 隔离合同、Portal 三语制品和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
+| `ADMIN-MODEL-TOKEN-REDESIGN` | 三页面原子权限、机器可验收分页、权威 owner/路由健康、一期运行详情、二期资产详情、凭据三路径、资源审计、逐动作治理、Billing 价格边界及 N/N-1 灰度回滚 | 需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 任务拆分已通过身份 B 第五轮独立审核；下一步实施 APT-119，当前尚未实现、推送或部署 |
 | `ORGANIZATION-OBJECT-AUTHORIZATION` | 显式目标组织、节点子树列表、源/目标节点双向移动门禁及成员全部实际节点归属校验 | Account Go 测试、OpenAPI lint、对象作用域合同和全量静态验证通过；数据库多节点绑定与并发移动待部署验证 |
 | `LOGIN-PERMISSION-GATE` | Keycloak 浏览器密码/短信/注册完成路径与 Direct Grant 密码/短信路径在成功前强一致检查 `personal.session.login`，并校验精确 issuer 与最小工作负载路由 | Identity 静态合同、Compose/Helm 配置、Account 生命周期授权测试及全量合同通过；自定义 Keycloak 镜像构建和真实登录待部署验证 |
 | `PASSWORD-SECURITY-AUTHORIZATION` | 已登录改密的近期认证与个人权限门禁、匿名恢复的防枚举权限/生命周期校验、密码隔离和会话撤销 | Account Go 单元测试、OpenAPI lint、密码安全合同及全量静态验证通过；真实短信、Keycloak 改密和数据库串行化待部署验证 |
@@ -341,6 +344,16 @@
 | ADM-53 | 已实现 | DOC_CURRENT | PAYMENT-TIERED-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 后台控制接口返回 Provider/商品层级、策略与评估窗口指标、观察缺口和控制版本，并只在当前层满足条件时分别生成 Provider 或单商品恢复草稿。 |
 | ADM-54 | 已实现 | AUDIT_HEAD | ADMIN-FINANCE-PAYMENT-REDESIGN; APPROVAL-COMMANDS; FINANCE-PAYMENT-UAT-20260902 | 0.8.0@b56b71ae (CLOUD_UAT, 2026-09-02) | 六个现有定价与计量管理命令已按路由精确注册为 `AUDIT_ONLY`，统一要求 `platform.pricing.manage`；Account 000041 以追加迁移持久化相同策略，保留旧命令历史事实且未知命令继续失败关闭。 |
 | ADM-55 | 已实现 | DOC_CURRENT | SUPER-ADMIN-PLATFORM-PERMISSIONS; THREE-SCOPE-AUTHORIZATION; TOKEN-OPERATIONS-ISOLATION; SUPER-ADMIN-PRICING-UAT-20260903 | 0.8.0@4ccf7404 (CLOUD_UAT, 2026-09-03) | Account 000042 为超级管理员补齐除临时未脱敏 PII 导出外的全部现有常驻平台权限并递增有效绑定的授权版本；Token 高风险命令继续执行既有审批、审计、脱敏和秘密不可回显边界。 |
+| ADM-56 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 管理列表当前仅支持无 cursor 的有限参数；稳定快照、完整筛选和确定排序待实现。 |
+| ADM-57 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前模型与 Token 高风险动作缺少统一服务端影响预检合同。 |
+| ADM-58 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有面向 Portal 的一次性凭据接入、轮换和撤销合同；秘密不可回显边界已存在。 |
+| ADM-59 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有模型/运行目标聚合和 Billing 按模型上下文价格投影的完整合同。 |
+| ADM-60 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 四个协议/公式写命令路由已存在，但审批策略注册缺失，当前按 COMMAND_POLICY_UNAVAILABLE 失败关闭。 |
+| ADM-61 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有供 Token Account owner 选择使用的权限交集、最小字段、反枚举目录候选合同。 |
+| ADM-62 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前路由仍接收自由文本 model/protocol/health，尚未实现稳定目录引用、服务端 upstream 解析及带 TTL 的健康探测状态机。 |
+| ADM-63 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 内部存在分散审计事实，但模型/Token Account 详情没有复用 Audit 服务的权限交集、固定资源过滤和脱敏分页投影。 |
+| ADM-64 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 现有部分命令已有策略/幂等字段，但逐动作近期认证、reason、CAS、未知恢复不完整；确认 UI 不能弥补服务端合同。 |
+| ADM-65 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 十九项治理策略、通用命令结果与预激活失败关闭基础尚未实现；APT-123 交付基础但不激活，最终由 APT-138 收口 ADM-64。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
@@ -369,6 +382,7 @@
 | NFR-45 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; ACCOUNT-CLOSURE-SAGA; LATE-PAYMENT-REVIEW; PAYMENT-ANOMALY-RECONCILIATION; ROUTE-PROVISIONING-ELIGIBILITY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Account、Billing、Token 使用统一冻结时钟和不可变案件/转派/止损证据；注册、资料、注销、支付/退款/拒付、对账、路由 Provisioning、用量及高风险命令修复均接入 P0/P1/P2，生产缺值班链即拒绝启动；任一截止逾期实际转派 owner，P0/P1 止损逾期会停用关联 Provider/商品/路由或暂停高风险命令，而非只通知 |
 | NFR-54 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-HEALTH | NOT_DEPLOYED | 持久观察按 Billing 接收时间与稳定尝试去重，业务拒绝排除，评估冻结成员/高水位并以策略、控制前版本和成员摘要唯一化。 |
 | NFR-55 | 已实现 | AUDIT_HEAD | GO-UNIT; ADMIN-FINANCE-PAYMENT-REDESIGN; FINANCE-PAYMENT-UAT-20260902 | 0.8.0@b56b71ae (CLOUD_UAT, 2026-09-02) | 11 类 Billing 管理资源已使用 15 分钟资源 ID 快照、确定性 HMAC cursor、规范化筛选和有界 limit；PR 门禁强制运行专用 PostgreSQL 集成测试并拒绝跳过，生产百万级翻页和并发变更证据仍由候选制品绑定的发布门禁验收，未在本地冒充执行。 |
+| NFR-56 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 管理列表尚无稳定快照 cursor；目标已冻结单快照 100 万成员、单主体 2 个/同资源 1 个、全局 64 个/2000 万成员/8 GiB、70%/85% 水位、事务回收、20 分钟墓碑、清理失败错误和自动边界验收，当前只能按有界 limit 读取。 |
 | NFR-46 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT宿主机Chrony已同步并可见9源，当前样本偏差约-2.3ms至+2.9ms；应用仍为development Compose，缺三源中位配置、100ms连续证明、250ms/1s注入、readiness/写拒绝与告警投递验收 |
 | NFR-47 | 已实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | 四服务共用版本清单与响应头，三版合同矩阵、90天支持、60天通知、受审批安全例外及稳定426已闭环；每次正式发布必须更新真实发布日期与淘汰时间 |
 | NFR-48 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION | NOT_DEPLOYED | 服务端任务要求 `platform.audit.export`、15分钟近期认证、明确范围和原因；默认不可逆主体标识及字段脱敏，未脱敏字段另需最长24小时临时 `platform.audit.pii.export`；执行31天/10万行/500MB、每用户2并发/10每日配额，加密签名水印文件只允许15分钟内单次成功下载；缺生产密钥托管、大规模及真实并发验收 |
@@ -403,6 +417,18 @@
 | UI-44 | 已实现 | AUDIT_HEAD | ADMIN-FINANCE-PAYMENT-REDESIGN; METERING-PRICING-LIFECYCLE; PRICING-LIFECYCLE-UI; UI-LINT; UI-BUILD; FINANCE-PAYMENT-UAT-20260902 | 0.8.0@b56b71ae (CLOUD_UAT, 2026-09-02) | React 管理界面已闭环计量单位、定价草稿、预览、发布、未来生效和转换；按精确价格空间与 `current_space_etag` 读取权威基线，以模型目录选择器、实时权限复核、不可变发布事实和非幂等未知结果恢复锁失败关闭。 |
 | UI-45 | 已实现 | AUDIT_HEAD | ADMIN-FINANCE-PAYMENT-REDESIGN; ACCOUNT-PLATFORM-STATE; FINANCE-FULL-PAGINATION; UI-LINT; UI-BUILD; FINANCE-PAYMENT-UAT-20260902 | 0.8.0@b56b71ae (CLOUD_UAT, 2026-09-02) | Portal 已消费钱包/账本、应收、订单、退款、调账、Hold、晚到支付、支付异常和支付对账的稳定 cursor 与规范筛选；列表和详情状态写入 URL 并支持返回恢复、显式 410 首屏重启和旧接口降级，不伪造总数。 |
 | UI-46 | 已实现 | AUDIT_HEAD | ADMIN-FINANCE-PAYMENT-REDESIGN; FINANCE-OVERVIEW-UI; UI-LINT; UI-BUILD; FINANCE-PAYMENT-UAT-20260902 | 0.8.0@b56b71ae (CLOUD_UAT, 2026-09-02) | 三个财务分区分别消费服务端聚合；定价与商品的两个区块独立加载。指标逐项展示单位、服务端状态口径与点时/UTC 窗口，无等价筛选时明确进入未过滤子页；403 隐藏，失败仅影响本区块且不伪装为 0。请求代次和 AbortController 防止刷新竞态及离页回写，桌面/移动端真实浏览器 smoke 已纳入自动前端门禁。 |
+| UI-47 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前实现仍为 UI-28/UI-31 的单一 Token Gateway 历史页面，而已批准原型已改为模型管理、Token 资源、运行与用量三个 canonical section；现有 `admin-portal-ui-redesign.test.mjs` 因仍断言原型包含 Token Gateway 而失败，属于 APT-127/137 待更新的已知实现合同差距，不表示文档或原型语法失败。 |
+| UI-48 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前 Token 子页签、筛选、分页与详情未完整进入 URL，且共用页面错误状态；目标为逐数据源独立状态和稳定恢复。 |
+| UI-49 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 已有协议、公式及预览 API，但 Portal 没有正式管理界面。 |
+| UI-50 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前 Token Account 所有者及路由模型仍允许输入内部标识，健康字段缺少只读证据化交互。 |
+| UI-51 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Provisioning 详情 API 已存在但未接入；用量列表/详情和核对重试存在，独立异常队列及状态筛选尚缺。 |
+| UI-52 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前模型、路由、Provisioning 和核对操作仍存在浏览器 prompt/confirm，缺少一致的结构化影响确认。 |
+| UI-53 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前无独立模型详情 GET 与页面深链。 |
+| UI-54 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token Account 已有详情但仍在聚合页内；目标仅对接触 Secret 的新增/轮换使用隔离 origin，现场验证由 Token 直接脱敏命令执行，撤销仅走 Portal→Account 审批且不打开隔离页。 |
+| UI-55 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 领域状态机已有截止字段，但 Portal 缺少依赖预检、计划生效、替代模型和阻断展示。 |
+| UI-56 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Billing 已拥有模型价格生命周期，模型详情尚未复用该事实和编辑组件。 |
+| UI-57 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前缺少目录差异、路由/Provisioning 健康和异常趋势的服务端聚合界面。 |
+| UI-58 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有三页面 N/N-1、独立 feature gate、旧 URL 期限、前向数据库及凭据会话失效的完整灰度/回滚交付链。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -944,6 +970,8 @@
 | UI-44 | 管理端计量单位与模型定价生命周期 | 已实现 | React 管理界面已接入完整生命周期；精确价格空间投影、模型目录选择、权限复核、不可变发布事实及非幂等未知结果恢复均有合同覆盖。 |
 | UI-45 | Billing 全量分页 Portal 适配 | 已实现 | 钱包/账本、应收、订单、退款、调账、Hold、晚到支付、支付异常和支付对账已接入稳定 cursor、完整筛选和 URL 恢复；详情返回保留目录上下文，410 需显式从首屏重新核验，旧服务响应安全降级且不显示伪造总数。 |
 | UI-46 | 财务支付分区运营概览界面 | 已实现 | 三个分区分别消费服务端聚合，定价与商品区块独立加载；指标展示单位、状态口径与点时/UTC 时间窗，只在筛选等价时精确下穿。403 隐藏、局部失败不伪装为 0，请求竞态、离页取消、三语、键盘及响应式交互均有自动化回归。 |
+| UI-47～UI-52 | 模型与 Token 一期重构 | 未实现 | 需求、设计及 APT-119～APT-138 中对应一期任务拆分均已通过独立审核；下一步实施 APT-119，尚未实现、推送或部署。 |
+| UI-53～UI-58 | 模型与 Token 二期运营治理与灰度 | 未实现 | 需求、设计及模型/Token Account 详情、隔离凭据、依赖计划、Billing 价格入口、趋势概览、N/N-1 对应任务拆分均已通过独立审核，尚未实现、推送或部署。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |
@@ -996,6 +1024,7 @@
 | ADM-53 | 支付分级止损后台治理 | 部分实现 | 后台已有控制读取与 Provider 恢复草稿，待展示分层评估/gap 并拆分商品和 Provider 恢复。 |
 | ADM-54 | 定价与计量管理命令策略注册 | 已实现 | 六个现有 Billing 管理命令已按路由一一注册为 `AUDIT_ONLY`，请求权限固定为 `platform.pricing.manage`，并由追加迁移持久化相同不可变策略。 |
 | ADM-55 | 超级管理员完整平台管理权限 | 已实现 | 超级管理员默认具备全部常驻平台管理权限；未脱敏 PII 导出继续使用独立临时角色，高风险操作不绕过审批、审计、脱敏与不可回显约束。 |
+| ADM-56～ADM-65 | 模型与 Token 管理合同增量 | 未实现 | 稳定查询、影响预检、固定 origin 隔离凭据、跨域价格、协议公式策略、owner 权限、路由健康、资源审计、治理预激活基础和逐动作治理的需求、设计与 APT-119～APT-138 任务拆分均已通过独立审核；下一步实施 APT-119，尚未实现、推送或部署，APT-138 仍是 ADM-64 的唯一最终收口任务。 |
 
 ## 4. 非功能需求
 
@@ -1050,6 +1079,7 @@
 | NFR-45 | 人工队列 SLA | 已实现：三领域统一从源案件创建时间冻结 P0/P1 7×24 与 P2 上海工作时 SLA，转派不重置；注册/资料/注销、支付/退款/拒付/对账、路由 Provisioning、用量和高风险命令队列均保存责任人及不可变时间线，逐截止自动升级至配置的下一值班负责人，P0/P1 止损逾期执行 Provider、支付商品、路由或高风险命令暂停评估。 |
 | NFR-54 | 支付健康评估可靠性 | 已实现：观察、窗口成员、策略和评估不可变；稳定尝试、控制版本和成员摘要使并发阈值穿越幂等。 |
 | NFR-55 | Billing 高数据量稳定分页 | 已实现：11 类资源使用 15 分钟资源 ID 快照、确定性 HMAC cursor、确定排序、规范化筛选和默认 50/最大 200 的有界 limit；主体/全局速率、快照/成员/8GiB 容量、10 秒超时、过期墓碑、清理指标与 70%/85% 告警均失败关闭。PR 门禁使用专用 PostgreSQL 强制执行事务、并发、全局边界、11 类 SQL、过期及超时回滚测试并拒绝 skip；百万订单完整翻页、并发变更轨迹和候选制品摘要绑定仍作为生产发布证据强制校验，不冒充本地已执行。 |
+| NFR-56 | Token 管理高数据量稳定分页 | 未实现：目标已逐资源定义 envelope、筛选、全序、默认/最大 limit、15 分钟快照、20 分钟墓碑、100 万单快照成员、单主体 2 个/同资源 1 个、全局 64 个/2000 万成员/8 GiB、70%/85% 水位和事务回收；首屏构建/已有快照读取/跨域预检使用不可累加的 10/3/5 秒唯一预算及 12/5/7 秒入口代理超时，分别返回稳定错误；当前仅有部分 limit/status 参数。 |
 | NFR-46 | 统一可信时钟 | 云端 UAT 宿主机 Chrony 已同步9源且当前偏差为毫秒级；生产三源中位配置、100ms连续证明、250ms/1s注入和告警/readiness/写拒绝证据仍缺失。 |
 | NFR-47 | 桌面 API 兼容与淘汰 | 已实现：N/N-1/N-2共用合同矩阵；清单启动校验90天支持和60天通知，四服务返回契约/最小版本/Sunset头，桌面直连与平台模型请求携带精确版本，过期远程写操作稳定返回426及HTTPS升级入口，不影响本地模型和本地读取。 |
 | NFR-48 | 审计导出保护 | 已实现：服务端任务要求专用权限、15分钟近期认证、明确范围和原因，执行默认脱敏/临时PII授权、加密签名水印、31天/10万行/500MB、2并发/10每日及15分钟一次性下载。 |
