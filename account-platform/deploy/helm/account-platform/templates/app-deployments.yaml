@@ -89,6 +89,9 @@ spec:
             - name: WORKLOAD_IDENTITY_RULES_JSON
               value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.billing.wallet.ensure" "internal.billing.account-closure-assessment.read" "internal.billing.account-closure-grants.isolate" "internal.billing.organization.lifecycle" "internal.billing.organization-unit.lifecycle" "internal.billing.organization-member.lifecycle")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.billing.wallet.read" "internal.billing.entitlement.read" "internal.billing.hold.reserve" "internal.billing.hold.extend" "internal.billing.hold.commit" "internal.billing.hold.release" "internal.billing.account-closed-grant.reclaim" "internal.billing.pricing.read" "internal.billing.pricing.bind" "internal.billing.quota.read" "internal.billing.quota.allocate" "internal.billing.quota.revoke" "internal.billing.product.read" "internal.billing.payment-capability.read" "internal.billing.recharge-order.create" "internal.billing.recharge-order.read" "internal.billing.recharge-order.close" "internal.billing.payment-claim.create"))) | quote }}
             {{- else if eq $app.name "token-gateway" }}
+            - { name: TOKEN_ADMIN_PAGINATION_ENABLED, value: {{ $root.Values.tokenGateway.adminPaginationEnabled | quote }} }
+            - name: TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-admin-pagination-cursor-hmac-key-base64, optional: true } }
             - name: WORKLOAD_IDENTITY_RULES_JSON
               value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.token.organization.lifecycle" "internal.token.organization-unit.lifecycle" "internal.token.replay.delete" "internal.token.account-closure-assessment.read"))) | quote }}
             {{- end }}
@@ -215,6 +218,7 @@ spec:
             - name: CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: client-readiness-attestation-private-key-base64 } }
             {{- else if eq $app.name "token-portal" }}
+            - { name: TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS, value: {{ $root.Values.ingress.tokenAdminMaxTimeoutSeconds | quote }} }
             - { name: REDIS_URL, value: {{ include "pinvou.redisUrl" $root | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
             - { name: PORTAL_OIDC_AUTHORIZATION_URL, value: {{ printf "%s/realms/pinvou/protocol/openid-connect/auth" $root.Values.keycloak.hostname | quote }} }

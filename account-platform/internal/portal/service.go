@@ -21,6 +21,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/requestdeadline"
 	"github.com/google/uuid"
 )
 
@@ -41,10 +42,11 @@ type Config struct {
 const defaultSessionMaxAge = 30 * 24 * time.Hour
 
 type Service struct {
-	config Config
-	store  Store
-	client *http.Client
-	now    func() time.Time
+	config      Config
+	store       Store
+	client      *http.Client
+	now         func() time.Time
+	deadlineNow func() time.Time
 }
 
 func NewService(config Config, store Store) (*Service, error) {
@@ -57,7 +59,7 @@ func NewService(config Config, store Store) (*Service, error) {
 	if config.SessionMaxAge <= 0 {
 		config.SessionMaxAge = defaultSessionMaxAge
 	}
-	return &Service{config: config, store: store, client: observability.NewHTTPClient(15 * time.Second), now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{config: config, store: store, client: observability.NewHTTPClient(15 * time.Second), now: func() time.Time { return time.Now().UTC() }, deadlineNow: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (s *Service) Handler(static http.Handler) http.Handler {
@@ -72,7 +74,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
 	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
 	router.GET("/api/admin/system/status", httpserver.AdaptFunc(s.adminSystemStatus))
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	application := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -118,6 +120,35 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 			}
 		}
 		static.ServeHTTP(w, r)
+	})
+	return s.tokenAdminIngressDeadline(application)
+}
+
+func (s *Service) tokenAdminIngressDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The Portal is the first trusted application ingress. Discard both
+		// client-controlled transport headers before deriving one absolute chain.
+		r.Header.Del(requestdeadline.AbsoluteDeadlineHeader)
+		r.Header.Del(requestdeadline.DeadlineClassHeader)
+		const prefix = "/api/admin/token"
+		if !strings.HasPrefix(r.URL.Path, prefix+"/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		resource := strings.TrimPrefix(r.URL.Path, prefix)
+		class, ok := requestdeadline.Classify(r.Method, resource, r.URL.Query().Get("cursor"))
+		if !ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		contract, err := requestdeadline.Start(s.deadlineNow().UTC(), class)
+		if err != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "PAGINATION_SNAPSHOT_UNAVAILABLE", "the Token management query could not be scheduled", httpserver.RequestID(r.Context()))
+			return
+		}
+		ctx, cancel := requestdeadline.WithContract(r.Context(), contract)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -275,7 +306,13 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	target := *upstream
 	target.Path = strings.TrimRight(target.Path, "/") + resource
 	target.RawQuery = r.URL.RawQuery
-	request, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), io.LimitReader(r.Body, 4<<20))
+	requestContext := r.Context()
+	var cancel context.CancelFunc
+	if contract, ok := requestdeadline.FromContext(r.Context()); ok {
+		requestContext, cancel = context.WithDeadline(requestContext, contract.BFFDeadline)
+		defer cancel()
+	}
+	request, err := http.NewRequestWithContext(requestContext, r.Method, target.String(), io.LimitReader(r.Body, 4<<20))
 	if err != nil {
 		api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -292,8 +329,15 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	if token := r.Header.Get("X-Pinvou-Download-Token"); token != "" {
 		request.Header.Set("X-Pinvou-Download-Token", token)
 	}
+	if contract, ok := requestdeadline.FromContext(r.Context()); ok {
+		requestdeadline.ApplyToUpstream(request, contract)
+	}
 	response, err := s.client.Do(request)
 	if err != nil {
+		if contract, ok := requestdeadline.FromContext(r.Context()); ok && (errors.Is(err, context.DeadlineExceeded) || errors.Is(requestContext.Err(), context.DeadlineExceeded)) {
+			writeTokenAdminDeadlineError(w, r, contract.Class)
+			return
+		}
 		api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -302,6 +346,9 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	w.Header().Set("Cache-Control", "no-store")
 	if disposition := response.Header.Get("Content-Disposition"); disposition != "" {
 		w.Header().Set("Content-Disposition", disposition)
+	}
+	if retryAfter := response.Header.Get("Retry-After"); retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
 	}
 	if contextVersion := response.Header.Get("X-Context-Version"); contextVersion != "" {
 		w.Header().Set("X-Context-Version", contextVersion)
@@ -320,6 +367,18 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+}
+
+func writeTokenAdminDeadlineError(w http.ResponseWriter, r *http.Request, class requestdeadline.Class) {
+	switch class {
+	case requestdeadline.SnapshotBuild:
+		w.Header().Set("Retry-After", "5")
+		api.WriteError(w, http.StatusServiceUnavailable, "PAGINATION_SNAPSHOT_UNAVAILABLE", "the pagination snapshot could not be built in time", httpserver.RequestID(r.Context()))
+	case requestdeadline.Precheck:
+		api.WriteError(w, http.StatusGatewayTimeout, "PRECHECK_TIMEOUT", "the impact precheck timed out", httpserver.RequestID(r.Context()))
+	default:
+		api.WriteError(w, http.StatusGatewayTimeout, "QUERY_TIMEOUT", "the pagination query timed out", httpserver.RequestID(r.Context()))
+	}
 }
 
 func (s *Service) applyClientCompatibilityHeaders(request *http.Request, source string) {

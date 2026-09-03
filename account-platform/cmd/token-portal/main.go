@@ -31,6 +31,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if configured := strings.TrimSpace(os.Getenv("TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS")); configured != "" && configured != "14" {
+		log.Fatal("TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS must be 14 to preserve the frozen Token admin deadline chains")
+	}
 	service, err := portal.NewService(portal.Config{
 		PublicURL:        publicURL,
 		AuthorizationURL: mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),

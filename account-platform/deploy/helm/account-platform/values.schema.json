@@ -204,8 +204,9 @@
     },
     "tokenGateway": {
       "type": "object",
-      "required": ["gatewayAdapter", "secretProvider", "secretKeyId", "secretRotationIntervalSeconds", "secretRotationBatchSize", "providerAllowedHosts", "maxInputTokens", "modelCatalogDefaultContextTokens", "modelCatalogDefaultMaxOutputTokens", "modelCatalogSyncMinutes", "clientContractVersion", "minimumClientVersion", "maximumClientVersion", "readinessAttestationKeyId", "readinessAttestationTtlSeconds"],
+	  "required": ["adminPaginationEnabled", "gatewayAdapter", "secretProvider", "secretKeyId", "secretRotationIntervalSeconds", "secretRotationBatchSize", "providerAllowedHosts", "maxInputTokens", "modelCatalogDefaultContextTokens", "modelCatalogDefaultMaxOutputTokens", "modelCatalogSyncMinutes", "clientContractVersion", "minimumClientVersion", "maximumClientVersion", "readinessAttestationKeyId", "readinessAttestationTtlSeconds"],
       "properties": {
+		"adminPaginationEnabled": { "type": "boolean" },
         "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
         "secretProvider": { "enum": ["local", "remote"] },
         "secretKeyId": { "type": "string" },
@@ -235,7 +236,7 @@
         "timeSourceCidrs": { "$ref": "#/definitions/cidrs" }
       }
     },
-    "ingress": { "type": "object", "required": ["enabled", "portalHost", "keycloakHost", "identityHost", "tlsSecretName"], "properties": { "enabled": { "type": "boolean" }, "portalHost": { "type": "string", "minLength": 1 }, "keycloakHost": { "type": "string", "minLength": 1 }, "identityHost": { "type": "string", "minLength": 1 }, "tlsSecretName": { "type": "string" } } },
+	"ingress": { "type": "object", "required": ["enabled", "portalHost", "keycloakHost", "identityHost", "tlsSecretName", "tokenAdminMaxTimeoutSeconds", "tokenAdminPath"], "properties": { "enabled": { "type": "boolean" }, "portalHost": { "type": "string", "minLength": 1 }, "keycloakHost": { "type": "string", "minLength": 1 }, "identityHost": { "type": "string", "minLength": 1 }, "tlsSecretName": { "type": "string" }, "tokenAdminMaxTimeoutSeconds": { "type": "integer", "const": 14 }, "tokenAdminPath": { "type": "string", "const": "/api/admin/token" } } },
     "keycloak": {
       "type": "object",
       "required": ["hostname", "adminHostname"],

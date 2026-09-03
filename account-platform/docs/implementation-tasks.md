@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，108 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，23 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，110 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，21 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -143,7 +143,7 @@
 | APT-117 | 财务支付三个分区运营概览、下穿与局部失败界面 | UI-46 | APT-105, APT-113, APT-115, APT-116 | CODE | DONE |
 | APT-118 | 超级管理员完整常驻平台权限迁移、缓存失效与安全边界回归 | ADM-55 | APT-069, APT-073, APT-097 | CODE | DONE |
 | APT-119 | owner 候选专用权限、权威目录与授权版本迁移 | ADM-61 | APT-006, APT-069, APT-118 | CODE | DONE |
-| APT-120 | Token 高数量分页快照、预算、cursor、入口超时与容量基座 | NFR-56 | APT-036, APT-045 | CODE | PENDING |
+| APT-120 | Token 高数量分页快照、预算、cursor、入口超时与容量基座 | NFR-56 | APT-036, APT-045 | CODE | DONE |
 | APT-121 | 九类 Token 查询合同与模型/Token 资源审计投影 | ADM-56, ADM-63 | APT-119, APT-120 | CODE | PENDING |
 | APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | PENDING |
 | APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | PENDING |
@@ -202,6 +202,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **不包含**：不改 Token Account 创建表单、不提供 UUID 盲填、不实现 Token 分页快照或路由模型选择器。
 
 ### APT-120 Token 分页快照、入口预算与容量基座
+
+> 实施状态（2026-09-03）：`DONE`；共享 schema、签名 cursor、容量/清理/授权失效、稳定错误和三类绝对 deadline 链已实现，并通过身份 B 第三轮独立代码审核。当前尚未推送、未部署。本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL`，真实 PostgreSQL 重型用例未执行；PR 门禁创建独立数据库、显式运行三项命名用例并逐项要求 PASS、拒绝任何 SKIP，该门禁仍须在候选提交上实际通过。
 
 - **目标/范围**：主目标 `NFR-56`。修改 `migrations/token/000023_*`，新增 `internal/token/admin_pagination*.go`，同步 Token OpenAPI 通用 envelope/error schema、`internal/portal/{static.go,service.go}` 的 BFF 超时、Portal HTTP server 配置以及 `deploy/{compose,helm}` 的 ingress/upstream timeout 模板和合同测试。本任务拥有快照头、成员、墓碑、清理和容量索引 schema，后续任务不重复改该 schema。
 - **预算/兼容/回滚**：三类完整链唯一冻结为：首屏快照构建 `Token 10s → BFF 12s → ingress 14s`，已有快照读取 `Token 3s → BFF 5s → ingress 7s`，跨域预检 `Token 5s → BFF 7s → ingress 9s`。入口生成并透传同一个绝对 deadline，BFF/ingress 只能保留传输余量、不得逐层重新计时或放大业务预算；服务端按请求类型只消费一种业务预算。cursor 签名绑定主体/授权/资源/筛选/排序/limit/高水位，实现 400/410/422/429/503/504 稳定错误。feature gate 关闭时不产生新快照；down 前停新建、让活动 cursor 返回 410 后再移除快照表。

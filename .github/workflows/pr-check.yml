@@ -574,6 +574,7 @@ jobs:
           --health-retries 10
     env:
       PINVOU_TEST_BILLING_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
+      PINVOU_TEST_TOKEN_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_token_pagination_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
 
@@ -595,6 +596,11 @@ jobs:
       - name: 安装契约测试依赖
         run: npm --prefix account-platform ci --prefer-offline --no-audit
 
+      - name: 创建 Token 分页隔离数据库
+        env:
+          PGPASSWORD: account_platform_test
+        run: createdb --host 127.0.0.1 --username account_platform_test account_platform_token_pagination_test
+
       - name: Go 格式、测试与静态检查
         working-directory: account-platform
         run: |
@@ -603,7 +609,17 @@ jobs:
           printf '%s\n' "$pagination_output"
           grep -F -- '--- PASS: TestAdminPaginationPostgresIntegration' <<< "$pagination_output"
           ! grep -F -- '--- SKIP: TestAdminPaginationPostgresIntegration' <<< "$pagination_output"
-          go test -race ./...
+          token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^TestTokenAdminPagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$token_pagination_output"
+          for test_name in \
+            TestTokenAdminPaginationPostgresIntegration \
+            TestTokenAdminPaginationPostgresMillionMemberBoundary \
+            TestTokenAdminPaginationMigrationFailsClosedAndIsIdempotent; do
+            grep -F -- "--- PASS: $test_name" <<< "$token_pagination_output"
+            ! grep -F -- "--- SKIP: $test_name" <<< "$token_pagination_output"
+          done
+          ! grep -F -- '--- SKIP:' <<< "$token_pagination_output"
+          go test -short -race ./...
           go vet ./...
 
       - name: OpenAPI、事件与迁移契约

@@ -708,6 +708,29 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    AdminPaginationEnvelope:
+      type: object
+      description: Shared NFR-56 envelope. APT-121 resource operations specialize the items schema without changing these fields.
+      additionalProperties: false
+      required: [items, next_cursor, has_more, limit, as_of, snapshot_expires_at, request_id]
+      properties:
+        items:
+          type: array
+          items: { type: object }
+        next_cursor: { type: [string, "null"], description: Signed opaque cursor; null exactly when has_more is false. }
+        has_more: { type: boolean }
+        limit: { type: integer, minimum: 1, maximum: 200 }
+        as_of: { type: string, format: date-time, description: Database-authoritative snapshot high-water mark. }
+        snapshot_expires_at: { type: string, format: date-time }
+        request_id: { type: string, minLength: 1 }
+    AdminPaginationErrorCode:
+      type: string
+      enum: [INVALID_LIMIT, INVALID_CURSOR, CURSOR_EXPIRED, PAGINATION_FILTER_REQUIRED, PAGINATION_SNAPSHOT_LIMITED, RATE_LIMITED, PAGINATION_SNAPSHOT_UNAVAILABLE, QUERY_TIMEOUT, PRECHECK_TIMEOUT, QUERY_CAPACITY_EXCEEDED]
+    AdminPaginationCursor:
+      type: string
+      minLength: 32
+      maxLength: 4096
+      description: Signed opaque envelope bound to subject, authorization version, resource, normalized scope/filter, fixed sort, limit, database high-water mark and expiry.
     ClientCompatibility:
       type: object
       additionalProperties: false

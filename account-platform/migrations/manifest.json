@@ -1198,6 +1198,16 @@
         "file": "000022_legacy_token_account_quarantine.up.sql",
         "version": 22,
         "sha256": "aef0feb65341158062e86c85af27afde85aadc3d614f1e99a2b7862e57c894ef"
+      },
+      {
+        "file": "000023_admin_pagination_snapshots.down.sql",
+        "version": 23,
+        "sha256": "c8a237b133a4b19b02491169e7210847622907e32f05bc68f53ee115d68c3f7e"
+      },
+      {
+        "file": "000023_admin_pagination_snapshots.up.sql",
+        "version": 23,
+        "sha256": "3b7e7ba7e95372e419948ba16824c09813a88da7122874f910ca79ab266155e9"
       }
     ]
   }

@@ -19,6 +19,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/requestdeadline"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
 )
@@ -59,6 +60,23 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
+	paginationEnabled, err := strconv.ParseBool(valueOrDefault("TOKEN_ADMIN_PAGINATION_ENABLED", "false"))
+	if err != nil {
+		log.Fatal("TOKEN_ADMIN_PAGINATION_ENABLED must be true or false")
+	}
+	paginationKey := []byte(nil)
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64")); raw != "" {
+		paginationKey, err = base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			log.Fatal("TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64 must be valid base64")
+		}
+	}
+	if err := repository.ConfigureAdminPagination(token.AdminPaginationConfig{Enabled: paginationEnabled, CursorHMACKey: paginationKey}); err != nil {
+		log.Fatal("Token admin pagination is not configured: ", err)
+	}
+	if err := repository.SetAdminPaginationGate(ctx, paginationEnabled); err != nil {
+		log.Fatal("Token admin pagination rollout gate could not be persisted: ", err)
+	}
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
@@ -204,6 +222,7 @@ func main() {
 	go observability.RunBackground(workerContext, "usage-reconciliation", token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run)
 	go observability.RunBackground(workerContext, "manual-review-sla", token.NewManualReviewSLAWorker(repository, onCallSchedule, time.Minute).Run)
 	go observability.RunBackground(workerContext, "replay-retention", token.NewReplayRetentionWorker(repository, 15*time.Second).Run)
+	go observability.RunBackground(workerContext, "admin-pagination-cleanup", token.NewAdminPaginationCleanupWorker(repository, time.Minute).Run)
 	secretRotationInterval := 5 * time.Minute
 	if raw := strings.TrimSpace(os.Getenv("TOKEN_SECRET_ROTATION_INTERVAL_SECONDS")); raw != "" {
 		seconds, parseErr := strconv.Atoi(raw)
@@ -250,7 +269,9 @@ func main() {
 			return nil
 		}
 	}
-	if err := httpserver.RunWithApplication("token-gateway", compatibility.Wrap(service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify)), ready); err != nil {
+	handler := compatibility.Wrap(service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify))
+	handler = requestdeadline.TokenAdminMiddleware(handler, time.Now)
+	if err := httpserver.RunWithApplicationAndCollectors("token-gateway", handler, ready, repository.AdminPaginationCollectors()...); err != nil {
 		log.Fatal(err)
 	}
 }

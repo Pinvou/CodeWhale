@@ -42,4 +42,31 @@ spec:
           - path: /v1/registration/password-prechecks
             pathType: Exact
             backend: { service: { name: {{ include "pinvou.fullname" . }}-identity-service, port: { number: 8080 } } }
+---
+# Token administration has a dedicated ingress so its bounded pagination
+# transport ceiling cannot alter payment callbacks, Keycloak, Identity, or the
+# rest of Portal. Portal applies the exact 14/7/9-second per-request deadline.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "pinvou.fullname" . }}-token-admin
+  labels: {{ include "pinvou.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "2"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: {{ .Values.ingress.tokenAdminMaxTimeoutSeconds | quote }}
+    nginx.ingress.kubernetes.io/proxy-send-timeout: {{ .Values.ingress.tokenAdminMaxTimeoutSeconds | quote }}
+spec:
+  {{- with .Values.ingress.className }}ingressClassName: {{ . }}{{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - secretName: {{ . }}
+      hosts: [{{ $.Values.ingress.portalHost | quote }}]
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.portalHost | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.tokenAdminPath }}
+            pathType: Prefix
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-token-portal, port: { number: 8080 } } }
 {{- end }}

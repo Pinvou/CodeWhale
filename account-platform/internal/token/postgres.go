@@ -68,9 +68,11 @@ type CreateAccountRequest struct {
 }
 
 type PostgresRepository struct {
-	pool    *pgxpool.Pool
-	secrets SecretProvider
-	now     func() time.Time
+	pool                   *pgxpool.Pool
+	secrets                SecretProvider
+	now                    func() time.Time
+	adminPagination        adminPaginationRuntime
+	adminPaginationMetrics *AdminPaginationMetrics
 }
 
 type Repository interface {
@@ -459,7 +461,7 @@ func NewPostgresRepository(ctx context.Context, databaseURL string, secrets Secr
 	if err != nil {
 		return nil, fmt.Errorf("open token database: %w", err)
 	}
-	repository := &PostgresRepository{pool: pool, secrets: secrets, now: func() time.Time { return time.Now().UTC() }}
+	repository := &PostgresRepository{pool: pool, secrets: secrets, now: func() time.Time { return time.Now().UTC() }, adminPaginationMetrics: newAdminPaginationMetrics()}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, err

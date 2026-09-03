@@ -94,7 +94,9 @@ class CiGatePolicyTests(unittest.TestCase):
         )[1].split("\n  release-contract-test:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.account_platform == 'true'", account_job)
         self.assertIn("postgres:17-alpine", account_job)
-        self.assertIn("go test -race ./...", account_job)
+        self.assertIn("go test -short -race ./...", account_job)
+        self.assertIn("PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test", account_job)
+        self.assertIn("PINVOU_TEST_TOKEN_DATABASE_URL", account_job)
         self.assertIn("buf lint account-platform/contracts/proto", account_job)
         self.assertIn("account_platform_test_${domain//-/_}", account_job)
         self.assertIn("token-portal", account_job)

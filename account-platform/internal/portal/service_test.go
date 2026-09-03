@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/requestdeadline"
 	"github.com/google/uuid"
 )
 
@@ -281,6 +282,123 @@ func TestMutationRequiresExactOriginAndCSRF(t *testing.T) {
 	request.Header.Set("Origin", "https://evil.example")
 	if service.validMutation(request, session) {
 		t.Fatal("cross-origin request must be rejected")
+	}
+}
+
+func TestTokenAdminIngressDiscardsForgedDeadlineAndClassifiesCursor(t *testing.T) {
+	service := testService(t, newMemoryStore())
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/token/admin/v1/models?cursor=signed", nil)
+	request.Header.Set(requestdeadline.AbsoluteDeadlineHeader, time.Now().Add(time.Hour).Format(time.RFC3339Nano))
+	request.Header.Set(requestdeadline.DeadlineClassHeader, string(requestdeadline.SnapshotBuild))
+	response := httptest.NewRecorder()
+	called := false
+	service.tokenAdminIngressDeadline(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		called = true
+		contract, ok := requestdeadline.FromContext(r.Context())
+		if !ok || contract.Class != requestdeadline.SnapshotRead {
+			t.Fatalf("trusted ingress contract = %+v, %v", contract, ok)
+		}
+		if remaining := time.Until(contract.IngressDeadline); remaining <= 6*time.Second || remaining > 7*time.Second {
+			t.Fatalf("read ingress budget was reset or enlarged: %s", remaining)
+		}
+		if r.Header.Get(requestdeadline.AbsoluteDeadlineHeader) != "" || r.Header.Get(requestdeadline.DeadlineClassHeader) != "" {
+			t.Fatal("client-controlled deadline headers reached the application")
+		}
+	})).ServeHTTP(response, request)
+	if !called {
+		t.Fatal("deadline middleware did not call the application")
+	}
+}
+
+func TestTokenAdminProxyForwardsOneAbsoluteBusinessDeadline(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(requestdeadline.DeadlineClassHeader) != string(requestdeadline.SnapshotBuild) {
+			t.Fatalf("deadline class = %q", r.Header.Get(requestdeadline.DeadlineClassHeader))
+		}
+		deadline, err := time.Parse(time.RFC3339Nano, r.Header.Get(requestdeadline.AbsoluteDeadlineHeader))
+		if err != nil {
+			t.Fatalf("absolute deadline: %v", err)
+		}
+		if remaining := time.Until(deadline); remaining <= 9*time.Second || remaining > 10*time.Second {
+			t.Fatalf("business budget was reset or enlarged: %s", remaining)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"items":[]}`)
+	}))
+	defer upstream.Close()
+	parsed, _ := url.Parse(upstream.URL)
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.TokenGatewayURL = parsed
+	session := Session{ID: "deadline-session", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("d", 32)}
+	_ = store.SaveSession(context.Background(), session)
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/token/admin/v1/models", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("proxy status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestTokenAdminProxyPreservesStableErrorsBeforeOuterDeadline(t *testing.T) {
+	for _, item := range []struct {
+		name, path, resource, code string
+		class                      requestdeadline.Class
+		status                     int
+	}{{"build", "/api/admin/token/admin/v1/models", "/admin/v1/models", "PAGINATION_SNAPSHOT_UNAVAILABLE", requestdeadline.SnapshotBuild, 503}, {"read", "/api/admin/token/admin/v1/models?cursor=signed", "/admin/v1/models", "QUERY_TIMEOUT", requestdeadline.SnapshotRead, 504}, {"precheck", "/api/admin/token/admin/v1/models/impact", "/admin/v1/models/impact", "PRECHECK_TIMEOUT", requestdeadline.Precheck, 504}} {
+		t.Run(item.name, func(t *testing.T) {
+			observedDeadline := make(chan time.Time, 1)
+			tokenHandler := requestdeadline.TokenAdminMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				deadline, ok := r.Context().Deadline()
+				if !ok {
+					t.Error("Token handler did not receive a business deadline")
+					return
+				}
+				observedDeadline <- deadline
+				<-r.Context().Done()
+				if !errors.Is(r.Context().Err(), context.DeadlineExceeded) || !requestdeadline.WriteContextDeadlineError(w, r) {
+					t.Errorf("Token handler did not classify its consumed deadline: %v", r.Context().Err())
+				}
+			}), time.Now)
+			upstream := httptest.NewServer(tokenHandler)
+			defer upstream.Close()
+			parsed, _ := url.Parse(upstream.URL)
+			store := newMemoryStore()
+			service := testService(t, store)
+			service.config.TokenGatewayURL = parsed
+			budget, _ := requestdeadline.BudgetFor(item.class)
+			portalStartedAt := time.Now().UTC().Add(-budget.Business + 250*time.Millisecond)
+			businessDeadline := portalStartedAt.Add(budget.Business)
+			service.deadlineNow = func() time.Time { return portalStartedAt }
+			session := Session{ID: "deadline-" + item.name, AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("e", 32)}
+			_ = store.SaveSession(context.Background(), session)
+			request := httptest.NewRequest(http.MethodGet, item.path, nil)
+			request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+			request.Header.Set(requestdeadline.AbsoluteDeadlineHeader, time.Now().Add(time.Hour).Format(time.RFC3339Nano))
+			request.Header.Set(requestdeadline.DeadlineClassHeader, string(requestdeadline.SnapshotBuild))
+			response := httptest.NewRecorder()
+			started := time.Now()
+			application := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				service.proxy(w, r, service.config.TokenGatewayURL, item.resource, func(string, string) bool { return true })
+			})
+			service.tokenAdminIngressDeadline(application).ServeHTTP(response, request)
+			var deadline time.Time
+			select {
+			case deadline = <-observedDeadline:
+			case <-time.After(time.Second):
+				t.Fatal("Portal proxy did not reach the cancellable Token handler")
+			}
+			if !deadline.Equal(businessDeadline) {
+				t.Fatalf("Portal/Token reset the absolute deadline: got=%s want=%s", deadline, businessDeadline)
+			}
+			if response.Code != item.status || !strings.Contains(response.Body.String(), item.code) {
+				t.Fatalf("stable error was lost: status=%d body=%s", response.Code, response.Body.String())
+			}
+			if elapsed := time.Since(started); elapsed < 100*time.Millisecond || elapsed >= 2*time.Second {
+				t.Fatalf("Token deadline was not consumed before the outer BFF/Portal deadline: %s", elapsed)
+			}
+		})
 	}
 }
 

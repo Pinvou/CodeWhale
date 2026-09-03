@@ -110,6 +110,7 @@ billing:
   paymentCallbackTokenTtlSeconds: 300
 
 tokenGateway:
+  adminPaginationEnabled: false
   gatewayAdapter: NEW_API
   secretProvider: remote
   secretKeyId: ""
@@ -147,6 +148,10 @@ ingress:
   keycloakHost: accounts.example.invalid
   identityHost: identity.example.invalid
   tlsSecretName: ""
+  # External ingress is a 14s transport ceiling. Portal applies the exact
+  # class-specific 14/7/9s absolute deadline without resetting it.
+  tokenAdminMaxTimeoutSeconds: 14
+  tokenAdminPath: /api/admin/token
 
 keycloak:
   enabled: true
