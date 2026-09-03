@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，113 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，18 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，119 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，12 个任务为 `PENDING`，0 个任务为 `IN_REVIEW`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -152,7 +152,7 @@
 | APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | DONE |
 | APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | DONE |
 | APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | DONE |
-| APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | PENDING |
+| APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | DONE |
 | APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | PENDING |
 | APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | PENDING |
 | APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | PENDING |
@@ -291,7 +291,11 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-129 Token 所有者与路由模型选择器
 
-- **目标/范围**：主目标 `UI-50`。仅修改 Portal Token Account 创建/编辑表单、共享搜索选择器、BFF 参数映射、i18n/CSS 和选择器合同测试；消费 APT-119 owner candidates 与 APT-125 稳定模型/协议、健康投影。
+> 实现状态（2026-09-04）：`DONE`，已通过身份 B 第四轮独立代码审核，尚未推送或部署。Token 资源页已按 `platform.tokens.manage + platform.tokens.owner-candidates.read` 双权限和默认关闭的 `admin_token_resource_forms` 子 gate 裁剪创建入口；用户、组织、组织节点候选均消费 APT-119 权威服务端搜索与 cursor，manage-only 不请求候选且不提供手填 ID 回退。路由表单只从已发布目录级联选择稳定 `model_id/protocol_version_id`，写入仅走 APT-125 v2 合同；APT-138 未激活时失败关闭，绝不回退 v1。健康仅展示服务端探测状态、数据库权威 `as_of`、观测时间、TTL 与诊断代码，无可信时间或证据异常时按 UNKNOWN/STALE 不可路由。实现修改 Portal 精确 v2 PUT 白名单、默认关闭配置、客户端/导航、三语、响应式样式和合同测试；未实现 APT-131 通用高风险框架、APT-133 凭据或任何新领域事实。
+
+> 代码审核记录（2026-09-04）：身份 B 第四轮结论为 `PASS`。此前首轮六项、第二轮两项及第三轮两项问题均已修复：权限或子 gate 撤销会在候选/模型请求及渲染前清理 owner URL 组并卸载路由表单，既有候选/模型请求随组件清理中止；授权刷新同步重建 URL 派生状态，避免恢复权限后复活已清理弹窗。路由提交以完整规范化 payload 固定幂等键并用同步 inflight guard 阻止双发，仅精确可证明零写的 HTTP status/code 组合允许同 payload 原键重试或变更 payload 后换键，网络丢失、504、错配组合及非白名单 5xx 锁定原键；浏览器门禁实际覆盖 `409 + INTERNAL_ERROR`，证明改 payload 后仍不再发请求且保留原键。健康投影只使用 Token 详情的数据库权威 `as_of`，不使用浏览器时钟或自设容差；详情由同一只读 Repeatable Read 事务读取 `as_of`、账户、凭据及路由，列表查询不携带额外投影列。证据缺少权威时间、时间非法/倒置、TTL 超过五分钟或观测晚于 `as_of` 均降为 UNKNOWN，按 `as_of` 已过期则降为 STALE，均不可路由。真实 PostgreSQL 门禁覆盖列表列匹配、详情仓储及 HTTP JSON 同快照投影；本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL` 时显式 SKIP，CI 强制不得 SKIP。真实 Portal Chromium smoke 已穿过 `AdminPlatformView → AdminModelTokenWorkspace → AdminTokenResourcesWorkspace → AdminPlatformClient`，记录并断言单次 `replaceState`、候选/模型请求与 `AbortSignal`、DOM 卸载、双击单写和幂等键冻结/换键；定向 Node、Go、OpenAPI、ESLint、Portal 构建、i18n、架构、任务覆盖与 diff 门禁均通过。Portal 只开放本任务实际使用的 v2 PUT，冻结 admin v2 合同按路径精确允许。
+
+- **目标/范围**：主目标 `UI-50`。修改 `pinvou3-app/src/features/account-platform/{AdminTokenResourcesWorkspace.jsx,admin-token-resource-state.js,AdminModelTokenWorkspace.jsx,AdminPlatformView.jsx,admin-client.js,admin-navigation.js,admin-platform.css}`、`pinvou3-app/src/shared/admin-platform-i18n.js`、`pinvou3-app/tests/admin_token_resources_ui_smoke.mjs`、前端 smoke 选择器、Token Account 详情 `as_of` 投影及 OpenAPI、Portal gate/BFF 白名单与生成制品、部署默认值、选择器及 Portal 合同测试；消费 APT-119 owner candidates 与 APT-125 稳定模型/协议、健康投影。
 - **权限/兼容/回滚**：创建入口必须同时具备 `platform.tokens.manage` 与 `platform.tokens.owner-candidates.read`；仅 manage 时展示可解释的权限死路但不发候选请求，仅 owner-candidates 时不展示创建入口。写入只提交稳定 ID，拒绝手输 UUID、显示名、health 或 upstream；无数据库变更，关闭表单子 gate 回退旧页面只读能力。
 - **验收**：用户/组织/节点候选搜索、空结果、续页、撤权 cursor 失效、模型/协议级联、HEALTHY TTL/STALE 展示、无权/不存在不可区分及键盘交互通过；覆盖 manage-only、candidate-only 和双权限矩阵。
 - **不包含**：不改 owner 权限迁移、路由健康状态机、凭据、Provisioning 或模型目录事实。

@@ -15,6 +15,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:markdown-artifact-ui"),
   command("node", "tests/admin_roles_ui_smoke.mjs"),
   command("npm", "test:admin-finance-overview-ui"),
+  command("npm", "test:admin-token-resources-ui"),
   command("node", "tests/detached_boot_smoke.js"),
   command("node", "tests/drag_gesture_smoke.js"),
   command("node", "tests/update_notice_ui_smoke.js"),
@@ -30,6 +31,7 @@ const FEATURE_COMMANDS = new Map([
   ["account-platform", [
     command("node", "tests/admin_roles_ui_smoke.mjs"),
     command("npm", "test:admin-finance-overview-ui"),
+    command("npm", "test:admin-token-resources-ui"),
   ]],
   ["knowledge", [command("npm", "test:kb-smoke")]],
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],

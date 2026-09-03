@@ -39,6 +39,37 @@ func TestTokenAdminQueryProjectionAllowlistIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestTokenAdminStableRouteAllowlistIsExact(t *testing.T) {
+	accountID := uuid.NewString()
+	for _, item := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPut, "/admin/v2/token-accounts/" + accountID + "/routes"},
+	} {
+		if !tokenAdminPathAllowed(item.method, item.path) {
+			t.Fatalf("stable route path not allowed: %s %s", item.method, item.path)
+		}
+	}
+	for _, item := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodDelete, "/admin/v2/token-accounts/" + accountID + "/routes"},
+		{http.MethodPost, "/admin/v2/token-accounts/" + accountID + "/routes"},
+		{http.MethodGet, "/admin/v2/token-accounts/" + accountID + "/routes"},
+		{http.MethodPut, "/admin/v2/token-accounts/not-a-uuid/routes"},
+		{http.MethodPut, "/admin/v2/token-accounts/" + accountID + "/routes/extra"},
+		{http.MethodPost, "/admin/v2/token-accounts/" + accountID + "/impact/route"},
+		{http.MethodGet, "/admin/v2/token-accounts/" + accountID + "/impact/route"},
+		{http.MethodGet, "/admin/v2/token-accounts/" + accountID + "/impact/credential"},
+	} {
+		if tokenAdminPathAllowed(item.method, item.path) {
+			t.Fatalf("unexpected stable route path allowed: %s %s", item.method, item.path)
+		}
+	}
+}
+
 func TestPortalClientSourceRejectsForgedPublicForwardingHeaders(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://portal.example/api/admin/token/admin/v1/models", nil)
 	request.RemoteAddr = "203.0.113.19:443"

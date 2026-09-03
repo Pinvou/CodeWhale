@@ -46,13 +46,14 @@ test('stable route write and account detail schemas validate actual JSON project
   const detail = {
     token_account_id: id('2'), owner_type: 'USER', owner_id: id('6'), wallet_id: id('7'), name: 'Platform account',
     status: 'ACTIVE', share_scope: 'OWNER_UNIT_ONLY', management_mode: 'PLATFORM', active_credential_count: 1,
-    route_count: 1, account_version: 2, updated_at: updatedAt,
+    route_count: 1, account_version: 2, updated_at: updatedAt, as_of: updatedAt,
     credentials: [{ credential_id: id('8'), provider: 'PROVIDER', fingerprint: 'redacted-fingerprint', version: 1,
       status: 'ACTIVE', validation_status: 'VALID', allowed_models: ['stable-model'], validated_at: updatedAt, updated_at: updatedAt }],
     routes: [stableRead, legacyRead],
   };
   const validateDetail = responseValidator(contract, 'AdminTokenAccountDetail');
   assert.equal(validateDetail(detail), true, JSON.stringify(validateDetail.errors));
+  assert.equal(validateDetail({ ...detail, as_of: undefined }), false, 'health projection requires the database-authoritative as_of');
   assert.equal(validateDetail({ ...detail, credentials: [{ ...detail.credentials[0], base_url: 'https://must-not-leak.invalid' }] }), false);
 });
 

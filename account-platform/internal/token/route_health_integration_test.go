@@ -2,7 +2,10 @@ package token
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,6 +100,22 @@ VALUES($12,$8,'route-health-model','CHAT',100,'NONE','UNKNOWN',$4,$3,1,$1,$6,'RE
 	}
 	if status != "HEALTHY" || diagnostic != "PROBE_SUCCEEDED" || !expiresAt.After(observedAt) || expiresAt.Sub(observedAt) != routeHealthyTTL {
 		t.Fatalf("unexpected healthy evidence: status=%s diagnostic=%s observed=%s expires=%s", status, diagnostic, observedAt, expiresAt)
+	}
+	accounts, err := repository.AdminTokenAccounts(ctx, 10)
+	if err != nil || len(accounts) != 1 || accounts[0].ID != accountID {
+		t.Fatalf("admin account list projection=%#v err=%v", accounts, err)
+	}
+	detail, err := repository.AdminTokenAccount(ctx, accountID)
+	if err != nil || detail.AsOf.IsZero() || len(detail.Routes) != 1 || detail.Routes[0].HealthObservedAt == nil || detail.Routes[0].HealthObservedAt.After(detail.AsOf) {
+		t.Fatalf("repeatable-read account detail=%#v err=%v", detail, err)
+	}
+	var authorizationVersion atomic.Int64
+	authorizationVersion.Store(1)
+	handler := newAdminQueryIntegrationHandler(t, repository, actorID, &authorizationVersion, map[string]bool{"platform.tokens.read": true})
+	response := performAdminQueryRequest(handler, "/admin/v1/token-accounts/"+accountID.String())
+	var projected AdminTokenAccountDetail
+	if err := json.Unmarshal(response.Body.Bytes(), &projected); response.Code != http.StatusOK || err != nil || projected.AsOf.IsZero() || len(projected.Routes) != 1 || projected.Routes[0].ID != routeID {
+		t.Fatalf("admin detail handler status=%d body=%s projection=%#v err=%v", response.Code, response.Body.String(), projected, err)
 	}
 	if _, err := repository.pool.Exec(ctx, `UPDATE routing_policies SET next_probe_at=transaction_timestamp(),probe_lease_owner=NULL,probe_lease_until=NULL WHERE id=$1`, routeID); err != nil {
 		t.Fatal(err)

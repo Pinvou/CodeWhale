@@ -60,7 +60,7 @@ const adminModelTokenSectionParameters = Object.freeze({
   modelOperations: Object.freeze(['operations_tab', 'provisioning_id', 'usage_request_id', ...['provisionings', 'usage', 'reconciliation', 'provisioningAttempts', 'usageEvidence'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
 });
 const legacyTokenParameters = Object.freeze(['tab', 'token_tab', 'tokens_tab', 'q', 'status', 'protocol', 'source', 'owner_type', 'health', 'model_id_filter', 'owner_id_filter', 'from', 'to', 'cursor']);
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function clearParameters(parameters, updates) {
   for (const parameter of parameters) updates[parameter] = null;
@@ -72,6 +72,10 @@ function hasAnyModelTokenState(search) {
 
 export function adminModelTokenIAGateEnabled(session = {}) {
   return session?.feature_flags?.admin_model_token_ia === true;
+}
+
+export function adminTokenResourceFormsGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_token_resource_forms === true;
 }
 
 export function readAdminModelTokenQuery(source, locationLike = globalThis.location) {
@@ -136,7 +140,7 @@ export function readAdminModelTokenModelTab(permissions = [], locationLike = glo
   return { tab: visible.includes(requested) ? requested : visible[0] || '', replace: Boolean(visible.length && !visible.includes(requested)), visible };
 }
 
-export function normalizeAdminModelTokenEntry(requestedSection, visibleSections, modelTokenIAEnabled, locationLike = globalThis.location, permissions = null) {
+export function normalizeAdminModelTokenEntry(requestedSection, visibleSections, modelTokenIAEnabled, locationLike = globalThis.location, permissions = null, options = {}) {
   const visible = new Set(visibleSections);
   const requested = String(requestedSection || '');
   const search = new URLSearchParams(String(locationLike?.search || ''));
@@ -161,6 +165,15 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
   for (const [section, parameters] of Object.entries(adminModelTokenSectionParameters)) {
     if (section === requested) continue;
     for (const parameter of parameters) if (search.has(parameter)) updates[parameter] = null;
+  }
+  if (permissions !== null && requested === 'tokenResources') {
+    const granted = new Set(permissions);
+    const ownerSelectionAllowed = options.tokenResourceFormsEnabled === true
+      && granted.has('platform.tokens.manage')
+      && granted.has('platform.tokens.owner-candidates.read');
+    if (!ownerSelectionAllowed) {
+      for (const parameter of Object.values(adminModelTokenQueryParameters.ownerCandidates)) if (search.has(parameter)) updates[parameter] = null;
+    }
   }
   const clearOrphanOrInvalidDetail = (idKey, parameters) => {
     const id = search.get(idKey) || '';
@@ -226,10 +239,10 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
   return { section: requested, replace: Object.keys(updates).length > 0, updates, notice };
 }
 
-export function normalizeAdminModelTokenNavigation(requestedSection, visibleSections, modelTokenIAEnabled, permissions, queryUpdates = {}, locationLike = globalThis.location) {
+export function normalizeAdminModelTokenNavigation(requestedSection, visibleSections, modelTokenIAEnabled, permissions, queryUpdates = {}, locationLike = globalThis.location, options = {}) {
   const candidateURL = new URL(adminSectionURL(requestedSection, locationLike, queryUpdates), 'https://admin.invalid');
   const candidateLocation = { pathname: candidateURL.pathname, search: candidateURL.search, hash: candidateURL.hash };
-  const normalized = normalizeAdminModelTokenEntry(requestedSection, visibleSections, modelTokenIAEnabled, candidateLocation, permissions);
+  const normalized = normalizeAdminModelTokenEntry(requestedSection, visibleSections, modelTokenIAEnabled, candidateLocation, permissions, options);
   return {
     ...normalized,
     updates: { ...queryUpdates, ...normalized.updates },

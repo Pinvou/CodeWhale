@@ -54,7 +54,7 @@ test("feature-local changes select core and feature smokes", () => {
   );
 });
 
-test("account platform changes select the finance overview browser smoke", () => {
+test("account platform changes select its production browser smokes", () => {
   assert.deepEqual(
     labels(
       selectFrontendSmokes([
@@ -65,6 +65,7 @@ test("account platform changes select the finance overview browser smoke", () =>
       "npm:test:ui-smoke",
       "node:tests/admin_roles_ui_smoke.mjs",
       "npm:test:admin-finance-overview-ui",
+      "npm:test:admin-token-resources-ui",
     ],
   );
 });

@@ -28,19 +28,20 @@ import (
 )
 
 type Config struct {
-	PublicURL                *url.URL
-	AuthorizationURL         *url.URL
-	TokenURL                 *url.URL
-	ClientID                 string
-	AccountURL               *url.URL
-	BillingURL               *url.URL
-	TokenGatewayURL          *url.URL
-	ClientVersion            string
-	TokenAdminProxyHMACKey   []byte
-	AdminModelTokenIAEnabled bool
-	SystemProbes             []SystemProbe
-	SecureCookies            bool
-	SessionMaxAge            time.Duration
+	PublicURL                      *url.URL
+	AuthorizationURL               *url.URL
+	TokenURL                       *url.URL
+	ClientID                       string
+	AccountURL                     *url.URL
+	BillingURL                     *url.URL
+	TokenGatewayURL                *url.URL
+	ClientVersion                  string
+	TokenAdminProxyHMACKey         []byte
+	AdminModelTokenIAEnabled       bool
+	AdminTokenResourceFormsEnabled bool
+	SystemProbes                   []SystemProbe
+	SecureCookies                  bool
+	SessionMaxAge                  time.Duration
 }
 
 const defaultSessionMaxAge = 30 * 24 * time.Hour
@@ -263,7 +264,10 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
 		"csrf_token":    session.CSRFToken,
-		"feature_flags": map[string]bool{"admin_model_token_ia": s.config.AdminModelTokenIAEnabled},
+		"feature_flags": map[string]bool{
+			"admin_model_token_ia":       s.config.AdminModelTokenIAEnabled,
+			"admin_token_resource_forms": s.config.AdminTokenResourceFormsEnabled,
+		},
 	})
 }
 
@@ -843,13 +847,23 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if strings.Contains(resource, "..") {
 		return false
 	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) >= 5 && parts[0] == "admin" && parts[1] == "v2" && parts[2] == "token-accounts" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		if len(parts) == 5 && parts[4] == "routes" {
+			return method == http.MethodPut
+		}
+		return false
+	}
 	if resource == "/admin/v1/protocols" {
 		return method == http.MethodGet || method == http.MethodPost
 	}
 	if resource == "/admin/v1/models:sync" || resource == "/admin/v1/model-catalog:rollback" {
 		return method == http.MethodPost
 	}
-	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	parts = strings.Split(strings.Trim(resource, "/"), "/")
 	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" {
 		return false
 	}

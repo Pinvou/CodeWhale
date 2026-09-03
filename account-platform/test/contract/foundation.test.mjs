@@ -428,7 +428,7 @@ test('operations API is role protected and limits mutations to documented manage
   const admin = await readYaml('contracts/openapi/admin.yaml');
   assert.deepEqual(admin.security, [{ oidc: [] }]);
   for (const [pathName, pathItem] of Object.entries(admin.paths)) {
-    assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/)/);
+    assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/|\/token\/admin\/v2\/token-accounts\/\{token_account_id\}\/(?:routes|impact\/route)$)/);
     for (const operation of Object.values(pathItem)) {
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
     }

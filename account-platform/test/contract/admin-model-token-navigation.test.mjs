@@ -262,8 +262,8 @@ test('new page source keeps independent loading, error, refresh and last-updated
   const initialNormalize = view.indexOf('const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled');
   const initialDenied = view.indexOf('if (visible.length === 0)', initialNormalize);
   assert.ok(initialNormalize >= 0 && initialNormalize < initialDenied, 'initial authorization normalizes before rendering zero-permission denial');
-  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, modelTokenIAEnabled, undefined, next\.platform_permissions \|\| \[\]\)/);
-  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates\)/);
+  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, modelTokenIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled \}\)/);
+  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled \}\)/);
   assert.match(source, /provisioningRequest &&/);
   assert.match(source, /usageRequest &&/);
 });

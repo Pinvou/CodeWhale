@@ -3516,7 +3516,7 @@ components:
     AdminTokenAccountDetail:
       type: object
       additionalProperties: false
-      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, management_mode, active_credential_count, route_count, account_version, updated_at, credentials, routes]
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, management_mode, active_credential_count, route_count, account_version, updated_at, as_of, credentials, routes]
       properties:
         token_account_id: { type: string, format: uuid }
         owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
@@ -3532,6 +3532,7 @@ components:
         route_count: { type: integer, format: int64, minimum: 0 }
         account_version: { type: integer, format: int64, minimum: 1 }
         updated_at: { type: string, format: date-time }
+        as_of: { type: string, format: date-time, description: Database-authoritative observation boundary for route health projection. }
         credentials: { type: array, items: { $ref: "#/components/schemas/AdminCredentialMetadata" } }
         routes:
           type: array

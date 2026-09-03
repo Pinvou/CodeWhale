@@ -522,6 +522,9 @@ export class AdminPlatformClient {
   upsertTokenRoute(tokenAccountID, route) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route);
   }
+  upsertStableTokenRoute(tokenAccountID, route, idempotencyKey) {
+    return this.mutate('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route, idempotencyKey);
+  }
   deleteTokenRoute(tokenAccountID, model) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'DELETE', { model });
   }

@@ -9,7 +9,7 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const docsRoot = path.join(repositoryRoot, 'account-platform', 'docs');
 const targetPattern = /^(CORE|SCOPE|ID|ACC|TOK|BILL|PAY|UI|ADM|NFR)-(\d+)$/;
 const incompleteStatuses = new Set(['部分实现', '未实现', '降级实现']);
-const taskStatuses = new Set(['PENDING', 'IN_PROGRESS', 'DONE', 'BLOCKED_EXTERNAL']);
+const taskStatuses = new Set(['PENDING', 'IN_PROGRESS', 'IN_REVIEW', 'DONE', 'BLOCKED_EXTERNAL']);
 
 function expandTargets(field) {
   const targets = [];

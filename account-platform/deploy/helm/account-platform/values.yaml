@@ -36,6 +36,7 @@ images:
 
 portal:
   adminModelTokenIAEnabled: false
+  adminTokenResourceFormsEnabled: false
 
 replicas:
   accountService: 2

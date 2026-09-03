@@ -45,7 +45,7 @@
 
 Token Account 详情在二期成为独立主内容页，页签为“概览 / 凭据 / 路由 / Provisioning / 审计”。凭据只显示类型、状态、指纹、更新时间和稳定结论，不显示 Secret、密文、Provider Key ID、Provider 私有地址或原始错误。
 
-路由表单只接受目录选择器产生的稳定模型、协议版本及路由策略；调用方不得提交健康状态。服务端探测状态固定为 `UNKNOWN/PROBING/HEALTHY/DEGRADED/UNHEALTHY/STALE`，HEALTHY 证据 TTL 为 5 分钟，过期或不可用时按不可路由失败关闭。
+路由表单只接受目录选择器产生的稳定模型、协议版本及路由策略；调用方不得提交健康状态。服务端探测状态固定为 `UNKNOWN/PROBING/HEALTHY/DEGRADED/UNHEALTHY/STALE`，HEALTHY 证据 TTL 为 5 分钟。Token Account 详情必须返回与健康证据同源的数据库权威 `as_of`；Portal 只能以该值判断证据是否来自未来或已过期，不得使用浏览器时钟或自设容差。`as_of` 缺失/非法、观测时间晚于 `as_of`、TTL 非法或证据过期时均按不可路由失败关闭。
 
 ### 2.3 运行与用量
 

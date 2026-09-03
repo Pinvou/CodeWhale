@@ -62,6 +62,7 @@ type AdminCredentialMetadata struct {
 
 type AdminTokenAccountDetail struct {
 	AdminTokenAccount
+	AsOf        time.Time                 `json:"as_of"`
 	Credentials []AdminCredentialMetadata `json:"credentials"`
 	Routes      []RoutingPolicy           `json:"routes"`
 }
@@ -585,7 +586,15 @@ GROUP BY a.id,s.scope ORDER BY a.updated_at DESC,a.id LIMIT $1`, limit)
 
 func (r *PostgresRepository) AdminTokenAccount(ctx context.Context, accountID uuid.UUID) (AdminTokenAccountDetail, error) {
 	var result AdminTokenAccountDetail
-	err := r.pool.QueryRow(ctx, `
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return AdminTokenAccountDetail{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&result.AsOf); err != nil {
+		return AdminTokenAccountDetail{}, err
+	}
+	err = tx.QueryRow(ctx, `
 SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,
        COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,
        count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.management_version,a.updated_at
@@ -603,39 +612,49 @@ WHERE a.id=$1 AND a.management_mode='PLATFORM' GROUP BY a.id,s.scope`, accountID
 	if err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
-	credentialRows, err := r.pool.Query(ctx, `
+	credentialRows, err := tx.Query(ctx, `
 SELECT id,provider,fingerprint,version,status,validation_status,allowed_models,validated_at,
        COALESCE(revoked_at,retired_at,activated_at,validated_at,created_at)
 FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, accountID)
 	if err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
-	defer credentialRows.Close()
 	result.Credentials = make([]AdminCredentialMetadata, 0)
 	for credentialRows.Next() {
 		var item AdminCredentialMetadata
 		if err := credentialRows.Scan(&item.ID, &item.Provider, &item.Fingerprint, &item.Version, &item.Status, &item.ValidationStatus, &item.AllowedModels, &item.ValidatedAt, &item.UpdatedAt); err != nil {
+			credentialRows.Close()
 			return AdminTokenAccountDetail{}, err
 		}
 		result.Credentials = append(result.Credentials, item)
 	}
 	if err := credentialRows.Err(); err != nil {
+		credentialRows.Close()
 		return AdminTokenAccountDetail{}, err
 	}
-	routeRows, err := r.pool.Query(ctx, routingPolicyProjection+` WHERE token_account_id=$1 AND reference_status<>'DELETED' ORDER BY priority DESC,model_id,id`, accountID)
+	credentialRows.Close()
+	routeRows, err := tx.Query(ctx, routingPolicyProjection+` WHERE token_account_id=$1 AND reference_status<>'DELETED' ORDER BY priority DESC,model_id,id`, accountID)
 	if err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
-	defer routeRows.Close()
 	result.Routes = make([]RoutingPolicy, 0)
 	for routeRows.Next() {
 		var item RoutingPolicy
 		if err := routeRows.Scan(&item.ID, &item.TokenAccountID, &item.Model, &item.ModelID, &item.ProtocolVersionID, &item.ProtocolCode, &item.Priority, &item.DefaultScope, &item.ReferenceStatus, &item.HealthStatus, &item.HealthDiagnostic, &item.HealthObservedAt, &item.HealthExpiresAt, &item.RouteVersion, &item.RouteGeneration, &item.UpdatedAt); err != nil {
+			routeRows.Close()
 			return AdminTokenAccountDetail{}, err
 		}
 		result.Routes = append(result.Routes, item)
 	}
-	return result, routeRows.Err()
+	if err := routeRows.Err(); err != nil {
+		routeRows.Close()
+		return AdminTokenAccountDetail{}, err
+	}
+	routeRows.Close()
+	if err := tx.Commit(ctx); err != nil {
+		return AdminTokenAccountDetail{}, err
+	}
+	return result, nil
 }
 
 func (r *PostgresRepository) AdminDeleteRoute(ctx context.Context, accountID uuid.UUID, model string, actorID uuid.UUID) error {

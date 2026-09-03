@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, previousAdminModelTokenCursor, readAdminModelTokenModelTab, readAdminModelTokenOperationsTab, readAdminModelTokenQuery, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, planAdminModelTokenOperationRequests, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
 import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.jsx';
+import { AdminTokenResourcesWorkspace } from './AdminTokenResourcesWorkspace.jsx';
 
 function useAdminSource({ enabled, load, query, refreshVersion }) {
   const [state, setState] = useState(initialAdminSourceState);
@@ -147,35 +148,6 @@ function ModelDirectory({ client, copy, routeVersion, onQueryChange, cursorHisto
   );
 }
 
-function TokenAccounts({ client, copy, routeVersion, onQueryChange, cursorHistory }) {
-  const query = useMemo(() => readAdminModelTokenQuery('tokenAccounts'), [routeVersion]);
-  const [refreshVersion, setRefreshVersion] = useState(0);
-  const load = useMemo(() => (filters, signal) => client.tokenAccounts(filters, signal), [client]);
-  const state = useAdminSource({ enabled: true, load, query, refreshVersion });
-  const retry = () => {
-    if (state.error?.status === 410) {
-      delete cursorHistory.current.tokenAccounts;
-      onQueryChange('tokenAccounts', { ...query, cursor: '' }, 'replace');
-    } else setRefreshVersion((value) => value + 1);
-  };
-  return (
-    <section className="adm-card adm-source-card" aria-labelledby="token-accounts-title">
-      <SourceHeader title={copy.tokenAccounts} titleID="token-accounts-title" state={state} copy={copy} onRetry={retry} />
-      <FilterForm source="tokenAccounts" query={query} copy={copy} onQueryChange={onQueryChange} fields={[
-        { key: 'q', label: copy.tokenSearch, placeholder: copy.tokenSearchPlaceholder },
-        { key: 'owner_type', label: copy.ownerType, options: ['USER', 'ORG', 'ORG_UNIT'] },
-        { key: 'status', label: copy.status, options: ['ACTIVE', 'DISABLED', 'FROZEN'] },
-        { key: 'health_status', label: copy.health, options: ['UNKNOWN', 'PROBING', 'HEALTHY', 'DEGRADED', 'UNHEALTHY', 'STALE'] },
-      ]} />
-      <SourceFeedback state={state} copy={copy} onRetry={retry} />
-      {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.tokenAccount}</th><th>{copy.owner}</th><th>{copy.status}</th><th>{copy.credentials}</th><th>{copy.routes}</th><th>{copy.updatedAt}</th></tr></thead><tbody>
-        {state.items.map((item) => <tr key={item.token_account_id}><td data-label={copy.tokenAccount}><strong>{item.name}</strong><small className="adm-secondary-id">{item.token_account_id}</small></td><td data-label={copy.owner}>{copy.enumLabels?.[item.owner_type] || item.owner_type}<small className="adm-secondary-id">{item.owner_id}</small></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.credentials}>{Number(item.active_credential_count || 0).toLocaleString()}</td><td data-label={copy.routes}>{Number(item.route_count || 0).toLocaleString()}</td><td data-label={copy.updatedAt}>{new Date(item.updated_at).toLocaleString()}</td></tr>)}
-      </tbody></table></div>}
-      <Pagination source="tokenAccounts" query={query} state={state} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} />
-    </section>
-  );
-}
-
 function Provisionings({ load, copy, routeVersion, onQueryChange, cursorHistory }) {
   const query = useMemo(() => readAdminModelTokenQuery('provisionings'), [routeVersion]);
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -222,7 +194,7 @@ function UsageRequests({ load, copy, routeVersion, onQueryChange, cursorHistory 
   </section>;
 }
 
-export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, routeNotice }) {
+export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, routeNotice, tokenResourceFormsEnabled = false }) {
   const modelTokenCopy = copy.modelToken;
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
@@ -252,7 +224,7 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
       {modelTabs.tab === 'directory' && granted.has('platform.models.read') && <div role="tabpanel" id="model-panel-directory" aria-labelledby="model-tab-directory"><ModelDirectory client={client} copy={modelTokenCopy} routeVersion={routeVersion} onQueryChange={onQueryChange} cursorHistory={cursorHistory} /></div>}
       {modelTabs.tab === 'protocols' && granted.has('platform.pricing.read') && <div role="tabpanel" id="model-panel-protocols" aria-labelledby="model-tab-protocols"><AdminProtocolFormulaWorkspace client={client} copy={modelTokenCopy} canManage={granted.has('platform.pricing.manage')} routeVersion={routeVersion} onRouteChange={onRouteChange} cursorHistory={cursorHistory} /></div>}
     </>}
-    {section === 'tokenResources' && <TokenAccounts client={client} copy={modelTokenCopy} routeVersion={routeVersion} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
+    {section === 'tokenResources' && <AdminTokenResourcesWorkspace client={client} copy={modelTokenCopy} permissions={permissions} formsEnabled={tokenResourceFormsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onRouteChange={onRouteChange} histories={cursorHistory} />}
     {section === 'modelOperations' && <>
       <div className="adm-tabs" role="tablist" aria-label={modelTokenCopy.operationsViews} onKeyDown={moveOperationsTab}>
         {operations.visible.map((tab) => <button type="button" role="tab" id={`model-operations-tab-${tab}`} aria-controls={`model-operations-panel-${tab}`} aria-selected={operations.tab === tab} tabIndex={operations.tab === tab ? 0 : -1} className={operations.tab === tab ? 'active' : ''} key={tab} onClick={() => onRouteChange({ operations_tab: tab }, 'push')}>{tab === 'provisionings' ? modelTokenCopy.provisionings : modelTokenCopy.usageRequests}</button>)}
