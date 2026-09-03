@@ -5580,7 +5580,7 @@ mod tests {
         assert!(
             !prompt.contains(session_id),
             "workspace 路径(含 session_id)必须移出静态 system → turn_meta, 实际仍含: {}",
-            &prompt.chars().take(200).collect::<String>()
+            prompt.chars().take(200).collect::<String>()
         );
     }
 

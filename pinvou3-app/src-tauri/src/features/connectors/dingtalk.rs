@@ -82,7 +82,7 @@ fn extract_user_code(line: &str) -> Option<String> {
                 && s.chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-')
         })
-        .last()
+        .next_back()
         .map(|s| s.to_string())
 }
 
