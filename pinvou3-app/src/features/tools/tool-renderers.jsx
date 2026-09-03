@@ -12,6 +12,7 @@ import {
 } from '../multiagent/subagent-conversation.mjs';
 import { AppIcon } from '../personas/persona-shared.jsx';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
+import { useShellTaskCancel } from '../chat/shell-task-cancel.js';
 import { AcShieldCheck, AcSparkles, ArtifactCard, DiffView, GrepView, ListDirView, OutputError, OutputPre, ReceiptBlock, ShellTextView, ShellView, StockQuoteCard, TODO_TOOLS, TodoView, WeatherCard, isQuietTool, isReceipt, isStockQuoteTool, isWeatherTool, looksDiff, outBox, parseReceipt, toolBasename, toolSummary, tryParseJson, tryTailJson } from './tool-common.jsx';
 
 const isShellExecutionTool = name => [
@@ -547,8 +548,8 @@ const ToolOutput = ({ item, t }) => {
     const StandardToolCard = ({ item, t, variant = 'legacy' }) => {
       const isTimeline = variant === 'timeline';
       const isRunning = item.state === 'running';
-      const [cancelling, setCancelling] = useState(false);
-      const [shellCancelError, setShellCancelError] = useState('');
+      // eslint-disable-next-line react-hooks/rules-of-hooks -- the early-return branch is constant for an instance's lifetime (see the comment above); the per-instance Hook count is stable
+      const { cancelling, cancelError: shellCancelError, cancel: cancelShellTask } = useShellTaskCancel(t);
       // 有可视化卡片的工具(天气/股票)完成后直接展开,不折叠
       const hasCard = (isWeatherTool(item.name) || isStockQuoteTool(item.name)) && item.state === 'done';
       const hasLiveShellOutput = isShellExecutionTool(item.name)
@@ -583,19 +584,9 @@ const ToolOutput = ({ item, t }) => {
             ? t.uiToolRender.done
             : t.uiToolRender.failed;
       const mutedColor = 'text-[#757575] dark:text-[#8E8E8E]';
-      const cancelBackground = async (event) => {
+      const cancelBackground = (event) => {
         event.stopPropagation();
-        if (!item.taskId || cancelling) return;
-        setCancelling(true);
-        setShellCancelError('');
-        try {
-          await bridge.chat.cancelShellTask(item.sessionId, item.taskId);
-        } catch (error) {
-          console.warn('cancel shell task failed', error);
-          setShellCancelError(`${t.shellCancelFailed || t.toolFailed}: ${String(error)}`);
-        } finally {
-          setCancelling(false);
-        }
+        cancelShellTask(item.sessionId, item.taskId);
       };
       const cancelButton = item.taskId && isRunning ? (
         <button

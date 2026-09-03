@@ -1860,3 +1860,8 @@ dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "已启用";
 dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "已关闭";
 dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "远端撤回待处理";
 dictZh["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "操作失败，请稍后重试。";
+// features/chat 后台任务指示器词条（uiChat 已存在，合并而非覆盖）
+Object.assign(dictZh.uiChat, {
+  bgTasks: '后台任务',
+  bgTasksRunning: n => `${n} 个后台任务运行中`,
+});
