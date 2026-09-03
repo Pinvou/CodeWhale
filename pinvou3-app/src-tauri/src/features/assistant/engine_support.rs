@@ -263,8 +263,8 @@ pub(super) fn apply_scheduled_turn_policy(
     };
 
     *mode = profile.execution_mode().to_app_mode();
-    *route = Box::new(resolved_route);
-    *compaction = Box::new(compaction_config);
+    **route = resolved_route;
+    **compaction = compaction_config;
     *auto_model = false;
     *allow_shell = profile.allow_shell;
     *trust_mode = profile.trust_mode;

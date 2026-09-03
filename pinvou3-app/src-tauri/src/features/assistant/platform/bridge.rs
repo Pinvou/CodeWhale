@@ -2996,7 +2996,8 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // edition 2024: env writes are unsafe — same pattern as lib.rs tests.
+        // SAFETY: holding ENV_LOCK via locked_env() (first statement of this
+        // test); env writes in the test process are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
 
         let mut bridge = fixture_bridge();
@@ -5579,7 +5580,7 @@ mod tests {
         assert!(
             !prompt.contains(session_id),
             "workspace 路径(含 session_id)必须移出静态 system → turn_meta, 实际仍含: {}",
-            &prompt.chars().take(200).collect::<String>()
+            prompt.chars().take(200).collect::<String>()
         );
     }
 
