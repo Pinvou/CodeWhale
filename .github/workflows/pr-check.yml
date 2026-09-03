@@ -1102,6 +1102,20 @@ jobs:
       # harness. Linking their 2,300+ source lines into the already-large lib
       # harness pushed one rustc/ThinLTO process past the hosted-runner budget;
       # a source-file-only split does not change that compilation boundary.
+      # The preceding lib harness is no longer needed after it has executed. Remove
+      # only its large root-crate artifacts before compiling this feature-distinct
+      # harness, while retaining all third-party dependency outputs. This prevents
+      # a cold Merge Queue run from exhausting the hosted runner disk without
+      # reducing either test scope.
+      - name: 回收已完成的主测试产物
+        if: ${{ github.event_name != 'push' }}
+        run: |
+          target="pinvou3-app/src-tauri/target/debug/deps"
+          find "$target" -maxdepth 1 -type f \
+            \( -name 'pinvou3_lib-*' -o -name 'libpinvou3_lib-*' \) \
+            -print -delete
+          df -h "$GITHUB_WORKSPACE"
+
       - name: cargo test --test behavior_telemetry (standalone memory-bounded harness)
         if: ${{ github.event_name != 'push' }}
         run: |

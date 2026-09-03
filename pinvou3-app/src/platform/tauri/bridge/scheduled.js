@@ -11,7 +11,6 @@
     var addSystemItem = context.addSystemItem;
     var rememberScheduledRunOwner = context.rememberScheduledRunOwner;
     var isScheduledRunTerminal = context.isScheduledRunTerminal;
-    var purgeSessionBuffer = context.purgeSessionBuffer;
     var createNewSession = context.createNewSession;
     var prefillComposer = context.prefillComposer;
     var sessionStates = context.sessionStates;
@@ -563,8 +562,8 @@
         var task = tasksById[automationId] || null;
         return Object.assign({}, run, {
           automationId: automationId,
-          taskName: task && task.name || bt("scheduledTaskFallbackName"),
-          taskModel: task && task.model || null,
+          taskName: task && task.name || run.taskName || bt("scheduledTaskFallbackName"),
+          taskModel: task && task.model || run.taskModel || null,
         });
       }).filter(function (run) {
         return run && run.sessionId && !run.archived;
@@ -812,22 +811,8 @@
       // 3 秒轮询的旧 list 响应落地时会把刚删的任务复活回侧边栏（含本 feature
       // run-now 轮询依赖的 taskStillListed 判断，幽灵窗口会击穿 R1 守卫）。
       invalidateScheduledTaskReads(id);
-      var deletedSessionIds = deleted && Array.isArray(deleted.deletedSessionIds)
-        ? deleted.deletedSessionIds
-        : [];
-      var deletedSessionSet = Object.create(null);
-      deletedSessionIds.forEach(function (sessionId) {
-        deletedSessionSet[sessionId] = true;
-        purgeSessionBuffer(sessionId);
-      });
       forgetScheduledTaskTemplateSource(id);
       state.scheduledTasks = (state.scheduledTasks || []).filter(function (task) { return task.id !== id; });
-      state.scheduledTaskRecentRuns = (state.scheduledTaskRecentRuns || []).filter(function (run) {
-        return run && run.automationId !== id && !deletedSessionSet[run.sessionId];
-      });
-      state.scheduledTaskRuns = (state.scheduledTaskRuns || []).filter(function (run) {
-        return run && run.automationId !== id && !deletedSessionSet[run.sessionId];
-      });
       if (state.selectedScheduledTaskId === id) selectScheduledTask(null);
       notify();
       return deleted;
