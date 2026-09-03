@@ -43,8 +43,5 @@
     "^/features/team-relay/TeamRelayView.jsx$",
     "^/shared/i18n.js$"
   ],
-  "ignoreExportsUsedInFile": true,
-  "rules": {
-    "exports": "warn"
-  }
+  "ignoreExportsUsedInFile": true
 }

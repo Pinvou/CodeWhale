@@ -398,7 +398,7 @@ fn topic_migration_staging_failure_preserves_old_authority() {
         &new,
         std::slice::from_ref(&old_path),
         |_| true,
-        |_, _| Err(io::Error::new(io::ErrorKind::Other, "staging failpoint")),
+        |_, _| Err(io::Error::other("staging failpoint")),
         |path| fs::remove_file(path),
     )
     .unwrap_err();
@@ -433,7 +433,7 @@ fn topic_migration_cleanup_failure_returns_warning_and_retries() {
         &new,
         std::slice::from_ref(&old_path),
         |value| value.id == "new",
-        |path, value| write_json_atomic_unlocked(path, value),
+        write_json_atomic_unlocked,
         |_| Err(io::Error::new(io::ErrorKind::PermissionDenied, "occupied")),
     )
     .unwrap();

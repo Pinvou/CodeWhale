@@ -634,7 +634,10 @@ class CiRustPolicyTests(unittest.TestCase):
 
     def test_release_version_targets_match_sync_version_targets(self):
         source = (ROOT / "scripts" / "sync-version.mjs").read_text(encoding="utf-8")
-        managed = set(re.findall(r"name:\s*'([^']+)'", source))
+        managed = {
+            re.sub(r"\([^)]*\)$", "", target)
+            for target in re.findall(r"name:\s*'([^']+)'", source)
+        }
         managed.add("VERSION")
         self.assertEqual(managed, set(POLICY.RELEASE_VERSION_TARGETS))
 

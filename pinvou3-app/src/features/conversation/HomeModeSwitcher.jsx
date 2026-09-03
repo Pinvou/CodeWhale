@@ -31,6 +31,9 @@ function normalizeCodeAgents(codeAgents, selectedAgentId) {
   return normalized;
 }
 
+// Stable empty-object default: an inline {} is a new reference on every render, which makes memoized children re-render repeatedly.
+const EMPTY_COPY = {};
+
 export function HomeModeSwitcher({
   mode,
   onChange,
@@ -41,7 +44,7 @@ export function HomeModeSwitcher({
   onCodeAgentChange,
   onManageProviders,
   isDark = false,
-  copy = {},
+  copy = EMPTY_COPY,
 }) {
   const visibleModes = HOME_MODE_OPTIONS
     .filter(option => option.enabled !== false && (option.key !== 'code' || codeSupported))
