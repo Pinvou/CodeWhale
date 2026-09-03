@@ -126,6 +126,16 @@ export function readAdminModelTokenOperationsTab(permissions = [], locationLike 
   return { tab: visible.includes(requested) ? requested : visible[0] || '', replace: Boolean(visible.length && !visible.includes(requested)), visible };
 }
 
+export function readAdminModelTokenModelTab(permissions = [], locationLike = globalThis.location) {
+  const granted = new Set(permissions);
+  const visible = [
+    granted.has('platform.models.read') ? 'directory' : '',
+    granted.has('platform.pricing.read') ? 'protocols' : '',
+  ].filter(Boolean);
+  const requested = new URLSearchParams(String(locationLike?.search || '')).get('model_tab') || '';
+  return { tab: visible.includes(requested) ? requested : visible[0] || '', replace: Boolean(visible.length && !visible.includes(requested)), visible };
+}
+
 export function normalizeAdminModelTokenEntry(requestedSection, visibleSections, modelTokenIAEnabled, locationLike = globalThis.location, permissions = null) {
   const visible = new Set(visibleSections);
   const requested = String(requestedSection || '');
@@ -180,6 +190,19 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
     }
     if (operations.tab !== 'provisionings' && search.get('provisioning_id')) clearParameters(adminModelTokenDetailParameters.provisioning, updates);
     if (operations.tab !== 'usage' && search.get('usage_request_id')) clearParameters(adminModelTokenDetailParameters.usage, updates);
+  }
+  if (permissions !== null && requested === 'models') {
+    const modelTabs = readAdminModelTokenModelTab(permissions, locationLike);
+    if (modelTabs.replace) updates.model_tab = modelTabs.tab || null;
+    if (!modelTabs.visible.includes('directory')) {
+      clearParameters(Object.values(adminModelTokenQueryParameters.models), updates);
+      clearParameters(adminModelTokenDetailParameters.model, updates);
+    }
+    if (!modelTabs.visible.includes('protocols')) {
+      clearParameters(Object.values(adminModelTokenQueryParameters.protocols), updates);
+      clearParameters(Object.values(adminModelTokenQueryParameters.formulas), updates);
+    }
+    if (modelTabs.tab !== 'directory') clearParameters(adminModelTokenDetailParameters.model, updates);
   }
   if (permissions !== null && requested === 'models' && search.get('model_id') && updates.model_id !== null) {
     const detailTab = search.get('model_detail_tab') || 'overview';

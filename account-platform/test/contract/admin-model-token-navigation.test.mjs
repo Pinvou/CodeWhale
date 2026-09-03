@@ -233,13 +233,15 @@ test('history replacement, popstate normalization, and cross-section restoration
 
   const modelHistoryURL = '?section=models&model_q=flash&model_cursor=page-two';
   const popModel = normalizeAdminModelTokenEntry('models', ['models', 'tokenResources'], true, locationLike(modelHistoryURL), ['platform.models.read', 'platform.tokens.read']);
-  assert.equal(popModel.replace, false);
+  assert.equal(popModel.replace, true);
+  assert.equal(popModel.updates.model_tab, 'directory');
   assert.deepEqual(readAdminModelTokenQuery('models', locationLike(modelHistoryURL)), { q: 'flash', lifecycle_status: '', protocol_code: '', source_adapter: '', source_missing: '', cursor: 'page-two' });
   const crossSection = normalizeAdminModelTokenNavigation('tokenResources', ['models', 'tokenResources'], true, ['platform.models.read', 'platform.tokens.read'], {}, locationLike(modelHistoryURL));
   const tokenURL = adminSectionURL(crossSection.section, locationLike(modelHistoryURL), crossSection.updates);
   assert.equal(tokenURL, '/admin.html?section=tokenResources');
   const restoredByPopState = normalizeAdminModelTokenEntry('models', ['models', 'tokenResources'], true, locationLike(modelHistoryURL), ['platform.models.read', 'platform.tokens.read']);
-  assert.equal(restoredByPopState.replace, false);
+  assert.equal(restoredByPopState.replace, true);
+  assert.equal(restoredByPopState.updates.model_tab, 'directory');
   assert.equal(readAdminModelTokenQuery('models', locationLike(modelHistoryURL)).cursor, 'page-two');
 });
 

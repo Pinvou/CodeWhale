@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，112 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，19 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，113 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，18 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -18,7 +18,7 @@
 6. 每个提交至少运行 `node scripts/account-platform.mjs verify`；涉及桌面、Web、部署、安全、恢复或性能时增加相应定向测试和制品/环境验收。
 7. 任务完成仅表示其映射目标全部达到验收标准；部分完成时保持 `IN_PROGRESS`，不得提前关闭或拆成多个混合提交。
 
-状态值：`PENDING`、`IN_PROGRESS`、`DONE`、`BLOCKED_EXTERNAL`。
+状态值：`PENDING`、`IN_PROGRESS`、`IN_REVIEW`、`DONE`、`BLOCKED_EXTERNAL`。
 
 ## 2. 任务队列
 
@@ -151,7 +151,7 @@
 | APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | DONE |
 | APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | DONE |
 | APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | DONE |
-| APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | PENDING |
+| APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | DONE |
 | APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | PENDING |
 | APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | PENDING |
 | APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | PENDING |
@@ -272,7 +272,19 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-128 协议与安全计量公式工作台
 
-- **目标/范围**：主目标 `UI-49`。仅修改 `internal/portal/static/{admin.html,assets/admin.js,assets/admin.css,assets/account-platform-i18n.js}`、`internal/portal/{static.go,service.go}`、Portal BFF 白名单及协议/公式 UI 合同测试；接入 APT-122 的真实草稿、预览、发布和 Billing 同步命令。
+> 实施状态（2026-09-04）：`DONE`；身份 B 第五轮独立代码审核通过。已按 UI-49、APT-122/123 合同和 APT-127 信息架构完成协议/公式独立分页筛选、草稿/安全预览/发布、Billing 权威单位校验与同步回执、结构化命令交互、三语和响应式实现。写入携带服务端头版本或不可变草稿 ETag、固定幂等键及原因；成功响应逐动作校验完整资源与不可变快照，未知结果锁定同一对话框，页面不执行或回显任意公式表达式。APT-123 `PRE_ACTIVATION` 关闭态继续由 Token 服务端 503 失败关闭，APT-138 未激活；APT-131 通用高风险恢复、APT-132 模型详情与 APT-135 价格编辑均未提前实现。Node 定向行为测试、Portal/Token Go、OpenAPI、ESLint、Portal build、i18n、architecture guard 和 diff 门禁通过；当前尚未推送或部署。
+
+> 代码审核记录（2026-09-04）：身份 B 首轮 `NEEDS_CHANGES` 的四项已修复，等待复审。四类写命令现在逐动作验证 64 位十六进制引用、稳定命令类型、`EXECUTED`、目标对象/版本/状态及安全 precheck；公式发布还验证 `SYNCHRONIZED` 与 Billing 登记摘要，任何畸形 2xx 均按未知结果锁定且不刷新。写请求发出后的原始 504、非标准响应、网络拒绝和无法证明零写的代理错误统一保持原幂等上下文进入未知锁定；公式草稿只读取真实 `precheck.metering_unit_version_count` 并投影数量，不读取或回显单位 ID 集合。来源标题关联 ID，预览失败对话框已补齐可访问名称、初始焦点、焦点圈闭、Escape 和关闭后焦点恢复。定向 Node 已增至 25 项通过。
+
+> 代码审核记录（2026-09-04）：身份 B 第二轮 `NEEDS_CHANGES` 的两项已修复，等待复审。客户端现在按每类动作完整验证 OpenAPI 命令信封及协议/公式资源的必填字段、精确类型、RFC 3339 时间和不可变内容：草稿逐字段匹配本次请求，发布逐字段匹配提交前列表快照，协议 schema 及公式 expression、evaluator、Billing 权威单位映射任一缺失或变化均进入未知结果锁定。可证明零写只接受 Token/Portal 实际产出的精确 HTTP 状态与稳定错误码组合；504 无条件未知，网络错误、非标准响应、错配组合和无法证明零写的 5xx 同样未知。定向行为测试已覆盖缺字段、错类型、快照漂移、四类真实命令/单位校验错误以及状态码错配。
+
+> 代码审核记录（2026-09-04）：身份 B 第三轮 `NEEDS_CHANGES` 的两项已修复，等待复审。四类动作的 precheck 和公式发布 Billing 回执均改为精确键集合，拒绝任意额外或安全敏感字段；公式草稿逐项验证 Billing 返回的 `unit_code/unit_definition_id/version/status`，要求 ACTIVE、精确类型、唯一且与请求映射一一对应。新建协议/公式及发布目标严格要求非空 RFC UUIDv7 和正确 variant，关联计量单位至少要求非空 RFC UUID；合法 UUIDv7、合法关联 UUID、nil、错 version/variant、嵌套额外字段及映射漂移均已加入负向行为测试。
+
+> 代码审核记录（2026-09-04）：身份 B 第四轮 `NEEDS_CHANGES` 的唯一项已修复，等待复审。公式请求、公式资源和 Billing 单位校验结果三层均按规范化 `unit_definition_id` 强制唯一，大小写不同但语义相同的 UUID 视为重复；单位代码只接受无前后空白的大写规范形式。不同单位代码复用同一 UUID、大小写变体重复、非规范代码均在写入前或成功响应确认前失败，合法多单位即使 Billing 返回顺序不同仍可通过精确映射校验。
+
+> 代码审核记录（2026-09-04）：身份 B 第五轮 `PASS`。确认四类命令的响应、precheck、Billing 回执、UUID 与单位映射均按冻结合同失败关闭；精确错误对、未知结果锁定、权限裁剪、局部错误、键盘焦点、三语及响应式边界通过复审。APT-123 仍为 `PRE_ACTIVATION`，本任务未创建 activation record，且未越界实现 APT-131、APT-132 或 APT-135。
+
+- **目标/范围**：主目标 `UI-49`。修改 `pinvou3-app/src/features/account-platform/{AdminModelTokenWorkspace.jsx,AdminProtocolFormulaWorkspace.jsx,admin-client.js,admin-navigation.js,admin-model-token-state.js,admin-protocol-formula-state.js,admin-platform.css}`、`pinvou3-app/src/shared/admin-platform-i18n.js`、Portal 生成制品、既有精确 BFF 白名单验证及协议/公式 UI 合同测试；接入 APT-122 的真实草稿、预览、发布和 Billing 同步命令。OpenAPI 写入/预览合同仍以 APT-122 已冻结的 `contracts/openapi/admin.yaml` 为单一真相源，本任务只补客户端精确映射，不修改服务端领域合同。
 - **权限/状态/回滚**：读取、编辑、预览、发布分别按 `platform.pricing.*` 精确裁剪；协议和公式各自维护 filter/cursor/loading/error/refresh，单源失败不清空另一源。受 APT-127 一期 gate 约束，关闭 gate 即恢复旧入口；无数据库变更。
 - **验收**：四类命令、公式确定性预览、版本不可变、Billing 不可用/超时、无权无泄漏、三语、键盘与 320px/200% 均有合同或 E2E 证据；页面不得执行任意表达式或展示未脱敏 Provider 数据。
 - **不包含**：不改命令策略 registry、协议/公式服务端写模型、模型详情、价格编辑或高风险操作通用面板。

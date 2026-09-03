@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { adminModelTokenQueryUpdates, previousAdminModelTokenCursor, readAdminModelTokenOperationsTab, readAdminModelTokenQuery, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
+import { adminModelTokenQueryUpdates, previousAdminModelTokenCursor, readAdminModelTokenModelTab, readAdminModelTokenOperationsTab, readAdminModelTokenQuery, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, planAdminModelTokenOperationRequests, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
+import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.jsx';
 
 function useAdminSource({ enabled, load, query, refreshVersion }) {
   const [state, setState] = useState(initialAdminSourceState);
@@ -226,6 +227,7 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
   const operations = useMemo(() => readAdminModelTokenOperationsTab(permissions), [permissions, routeVersion]);
+  const modelTabs = useMemo(() => readAdminModelTokenModelTab(permissions), [permissions, routeVersion]);
   const operationRequests = useMemo(() => planAdminModelTokenOperationRequests(permissions, client), [permissions, client]);
   const provisioningRequest = operationRequests.find((request) => request.source === 'provisionings');
   const usageRequest = operationRequests.find((request) => request.source === 'usage');
@@ -243,9 +245,13 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   };
   return <>
     {notice && <div className="adm-inline-message info" role="status">{notice}</div>}
-    {section === 'models' && (granted.has('platform.models.read')
-      ? <ModelDirectory client={client} copy={modelTokenCopy} routeVersion={routeVersion} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />
-      : <section className="adm-card adm-source-card"><div className="adm-source-state">{modelTokenCopy.pricingOnly}</div></section>)}
+    {section === 'models' && <>
+      <div className="adm-tabs adm-model-tabs" role="tablist" aria-label={modelTokenCopy.modelViews} onKeyDown={moveOperationsTab}>
+        {modelTabs.visible.map((tab) => <button type="button" role="tab" id={`model-tab-${tab}`} aria-controls={`model-panel-${tab}`} aria-selected={modelTabs.tab === tab} tabIndex={modelTabs.tab === tab ? 0 : -1} className={modelTabs.tab === tab ? 'active' : ''} key={tab} onClick={() => onRouteChange({ model_tab: tab }, 'push')}>{tab === 'directory' ? modelTokenCopy.modelDirectory : modelTokenCopy.protocolFormulaView}</button>)}
+      </div>
+      {modelTabs.tab === 'directory' && granted.has('platform.models.read') && <div role="tabpanel" id="model-panel-directory" aria-labelledby="model-tab-directory"><ModelDirectory client={client} copy={modelTokenCopy} routeVersion={routeVersion} onQueryChange={onQueryChange} cursorHistory={cursorHistory} /></div>}
+      {modelTabs.tab === 'protocols' && granted.has('platform.pricing.read') && <div role="tabpanel" id="model-panel-protocols" aria-labelledby="model-tab-protocols"><AdminProtocolFormulaWorkspace client={client} copy={modelTokenCopy} canManage={granted.has('platform.pricing.manage')} routeVersion={routeVersion} onRouteChange={onRouteChange} cursorHistory={cursorHistory} /></div>}
+    </>}
     {section === 'tokenResources' && <TokenAccounts client={client} copy={modelTokenCopy} routeVersion={routeVersion} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
     {section === 'modelOperations' && <>
       <div className="adm-tabs" role="tablist" aria-label={modelTokenCopy.operationsViews} onKeyDown={moveOperationsTab}>

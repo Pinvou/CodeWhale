@@ -556,6 +556,21 @@ export class AdminPlatformClient {
   formulas(filters = {}, signal) {
     return this.request('token', `/admin/v1/formulas?${tokenAdminCollectionQuery('formulas', filters)}`, signal);
   }
+  createProtocolDraft(input, idempotencyKey) {
+    return this.mutate('token', '/admin/v1/protocols', 'POST', input, idempotencyKey);
+  }
+  publishProtocol(protocolDefinitionID, input, idempotencyKey) {
+    return this.mutate('token', `/admin/v1/protocols/${encodeURIComponent(protocolDefinitionID)}/publish`, 'POST', input, idempotencyKey);
+  }
+  createFormulaDraft(protocolDefinitionID, input, idempotencyKey) {
+    return this.mutate('token', `/admin/v1/protocols/${encodeURIComponent(protocolDefinitionID)}/formulas`, 'POST', input, idempotencyKey);
+  }
+  previewFormula(formulaVersionID, signal) {
+    return this.request('token', `/admin/v1/formulas/${encodeURIComponent(formulaVersionID)}/preview`, signal);
+  }
+  publishFormula(formulaVersionID, input, idempotencyKey) {
+    return this.mutate('token', `/admin/v1/formulas/${encodeURIComponent(formulaVersionID)}/publish`, 'POST', input, idempotencyKey);
+  }
   tokenReconciliationCases(filters = {}, signal) {
     return this.request('token', `/admin/v1/reconciliation-cases?${tokenAdminCollectionQuery('reconciliation', filters)}`, signal);
   }
