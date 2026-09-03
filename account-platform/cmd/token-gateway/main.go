@@ -128,12 +128,21 @@ func main() {
 		defaultPriority = parsed
 	}
 	defaultProvider := strings.ToUpper(strings.TrimSpace(os.Getenv("TOKEN_DEFAULT_PROVIDER")))
+	adapterName := strings.ToUpper(strings.TrimSpace(os.Getenv("TOKEN_GATEWAY_ADAPTER")))
+	if adapterName == "" {
+		adapterName = "NEW_API"
+	}
+	configuredAdapterVersion := map[string]string{"NEW_API": "new-api-v1", "OPENAI_COMPATIBLE": "openai-compatible-v1"}[adapterName]
+	if configuredAdapterVersion == "" {
+		log.Fatal("TOKEN_GATEWAY_ADAPTER must be NEW_API or OPENAI_COMPATIBLE")
+	}
 	defaultRoutes, err := token.NewDefaultRouteProvisioner(repository, providerURLPolicy, token.DefaultRouteConfig{
-		Provider: defaultProvider,
-		BaseURL:  os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL"),
-		Secret:   []byte(os.Getenv("TOKEN_DEFAULT_PROVIDER_API_KEY")),
-		Models:   strings.Split(os.Getenv("TOKEN_DEFAULT_PROVIDER_MODELS"), ","),
-		Priority: defaultPriority,
+		Provider:       defaultProvider,
+		AdapterVersion: configuredAdapterVersion,
+		BaseURL:        os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL"),
+		Secret:         []byte(os.Getenv("TOKEN_DEFAULT_PROVIDER_API_KEY")),
+		Models:         strings.Split(os.Getenv("TOKEN_DEFAULT_PROVIDER_MODELS"), ","),
+		Priority:       defaultPriority,
 	})
 	if err != nil {
 		log.Fatal("default Token Account provisioning is not configured: ", err)
@@ -162,10 +171,6 @@ func main() {
 	}, repository, defaultRoutes, billingClient, repository)
 	if err != nil {
 		log.Fatal("client readiness is not configured: ", err)
-	}
-	adapterName := strings.ToUpper(strings.TrimSpace(os.Getenv("TOKEN_GATEWAY_ADAPTER")))
-	if adapterName == "" {
-		adapterName = "NEW_API"
 	}
 	var gatewayAdapter token.UpstreamClient
 	var evidenceClient token.UsageEvidenceProvider
@@ -225,6 +230,14 @@ func main() {
 	if err != nil {
 		log.Fatal("model catalog synchronization is not configured: ", err)
 	}
+	probeAdapter, ok := gatewayAdapter.(token.RouteHealthProbeAdapter)
+	if !ok {
+		log.Fatal("model gateway adapter does not support server-side route health probes")
+	}
+	routeHealth, err := token.NewRouteHealthWorker(repository, probeAdapter, providerURLPolicy, time.Second)
+	if err != nil {
+		log.Fatal("route health worker is not configured: ", err)
+	}
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go observability.RunBackground(workerContext, "usage-reconciliation", token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run)
@@ -259,6 +272,7 @@ func main() {
 	cancelInitialSync()
 	go observability.RunBackground(workerContext, "model-catalog-sync", catalogSync.Run)
 	go observability.RunBackground(workerContext, "default-route-provisioning", defaultRoutes.Run)
+	go observability.RunBackground(workerContext, "route-health-probe", routeHealth.Run)
 	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient)
 	go observability.RunBackground(workerContext, "model-emergency-cancellation", token.NewEmergencyModelCancellationWorker(repository, service, 5*time.Second).Run)
 	ready := repository.Ping

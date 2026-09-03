@@ -148,7 +148,7 @@
 | APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | DONE |
 | APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | DONE |
 | APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | DONE |
-| APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | PENDING |
+| APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | DONE |
 | APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | PENDING |
 | APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | PENDING |
 | APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | PENDING |
@@ -248,6 +248,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-125 路由解析与健康状态机
 
+- **实现状态**：`DONE`；稳定模型/协议路由、版本化 v2 管理合同、服务端健康探测与 TTL、精确 Provisioning 引用、影响证据、迁移兼容及 CI PostgreSQL 门禁已实现，并通过身份 B 第四轮独立代码审核。APT-138 尚未创建或激活持久 activation record：`PRE_ACTIVATION` 继续保留旧 v1 direct Portal 合同，`ACTIVE` 才选择 v2 稳定写合同；两条领域事务均预留 activation lock/epoch 的事务内起始及提交前重检边界，当前生产仍保持预激活状态。当前尚未推送或部署；本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL`，真实 PostgreSQL 用例显式 SKIP，CI 隔离库必须逐项 PASS 且拒绝 SKIP。
 - **目标/范围**：主目标 `ADM-62`。修改 `migrations/token/000025_*`、`internal/token/{routing.go,management.go,provisioning.go,gateway_adapter.go}`、`cmd/token-gateway`、Token OpenAPI 和健康 worker/指标测试。本任务唯一拥有 route-health schema。
 - **合同/回滚**：路由写入只接收稳定 `model_id`、已发布 `protocol_version_id`、策略/版本/幂等字段，含 health/upstream 写入值即拒绝；服务端生成 `UNKNOWN/PROBING/HEALTHY/DEGRADED/UNHEALTHY/STALE`，HEALTHY TTL 5m。回滚先停探测 worker，保留最后证据为 STALE，再回滚读投影。
 - **验收**：非发布模型/协议、客户端 health/upstream、过期/缺证健康全部失败关闭；并发探测、TTL、单调状态迁移、失败恢复和指标可观测均通过。

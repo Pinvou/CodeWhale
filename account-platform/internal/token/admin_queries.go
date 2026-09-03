@@ -432,7 +432,7 @@ func tokenAccountSnapshotSource(filter adminQueryFilter) (AdminSnapshotMemberSou
 	if err != nil {
 		return nil, err
 	}
-	health, err := filter.enum("health_status", "HEALTHY", "DEGRADED", "UNHEALTHY", "UNKNOWN")
+	health, err := filter.enum("health_status", "HEALTHY", "DEGRADED", "UNHEALTHY", "UNKNOWN", "PROBING", "STALE")
 	if err != nil {
 		return nil, err
 	}
@@ -445,7 +445,7 @@ func tokenAccountSnapshotSource(filter adminQueryFilter) (AdminSnapshotMemberSou
 WHERE account.management_mode='PLATFORM' AND account.updated_at<=$3
 AND ($4='' OR account.name ILIKE '%'||$4||'%' OR account.id::text=$4)
 AND ($5='' OR account.owner_type=$5) AND ($6::uuid IS NULL OR account.owner_id=$6) AND ($7='' OR account.status=$7)
-AND ($8='' OR ($8='UNKNOWN' AND NOT EXISTS(SELECT 1 FROM routing_policies route WHERE route.token_account_id=account.id)) OR EXISTS(SELECT 1 FROM routing_policies route WHERE route.token_account_id=account.id AND route.health_status=$8))
+AND ($8='' OR ($8='UNKNOWN' AND NOT EXISTS(SELECT 1 FROM routing_policies route WHERE route.token_account_id=account.id)) OR EXISTS(SELECT 1 FROM routing_policies route WHERE route.token_account_id=account.id AND route.health_status=$8 AND ($8<>'HEALTHY' OR route.health_expires_at>transaction_timestamp())))
 AND ($9='' OR ($9='NONE' AND NOT EXISTS(SELECT 1 FROM provider_credentials credential WHERE credential.token_account_id=account.id)) OR EXISTS(SELECT 1 FROM provider_credentials credential WHERE credential.token_account_id=account.id AND (($9 IN ('VALID','INVALID') AND credential.validation_status=$9) OR ($9 NOT IN ('VALID','INVALID','NONE') AND credential.status=$9))))
 `, highWater, q, ownerType, ownerID, status, health, credential)
 	}, nil
@@ -755,7 +755,7 @@ func (r *PostgresRepository) adminTokenAccountsByIDs(ctx context.Context, resour
 	if err != nil || len(ids) == 0 {
 		return []AdminTokenAccount{}, err
 	}
-	rows, err := r.pool.Query(ctx, `SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.updated_at FROM token_accounts a LEFT JOIN token_share_policies s ON s.token_account_id=a.id LEFT JOIN provider_credentials c ON c.token_account_id=a.id LEFT JOIN routing_policies p ON p.token_account_id=a.id WHERE a.management_mode='PLATFORM' AND a.id=ANY($1::uuid[]) GROUP BY a.id,s.scope`, ids)
+	rows, err := r.pool.Query(ctx, `SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.management_version,a.updated_at FROM token_accounts a LEFT JOIN token_share_policies s ON s.token_account_id=a.id LEFT JOIN provider_credentials c ON c.token_account_id=a.id LEFT JOIN routing_policies p ON p.token_account_id=a.id AND p.reference_status='RESOLVED' WHERE a.management_mode='PLATFORM' AND a.id=ANY($1::uuid[]) GROUP BY a.id,s.scope`, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -763,7 +763,7 @@ func (r *PostgresRepository) adminTokenAccountsByIDs(ctx context.Context, resour
 	values := map[string]AdminTokenAccount{}
 	for rows.Next() {
 		var item AdminTokenAccount
-		if err = rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.ManagementMode, &item.ActiveCredentialCount, &item.RouteCount, &item.UpdatedAt); err != nil {
+		if err = rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.ManagementMode, &item.ActiveCredentialCount, &item.RouteCount, &item.AccountVersion, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		values[item.ID.String()] = item

@@ -217,7 +217,8 @@ test('platform overview uses permission-scoped sources, correct business metrics
   assert.match(accountAdmin, /GrantedPermission\(r\.Context\(\), PermissionPlatformUsersRead\)/);
   assert.match(accountAdmin, /GrantedPermission\(r\.Context\(\), PermissionPlatformOrganizationsRead\)/);
   assert.match(billingAdmin, /receivable_microcredits/);
-  assert.match(tokenAdmin, /SELECT count\(\*\) FROM routing_policies\)/);
+  assert.match(tokenAdmin, /SELECT count\(\*\) FROM routing_policies WHERE reference_status='RESOLVED'/);
+  assert.match(tokenAdmin, /health_status='HEALTHY' AND health_expires_at>transaction_timestamp\(\)/);
   assert.match(tokenAdmin, /response\["routes"\] = result\.Routes/);
   assert.match(systemStatus, /\/v1\/account\/bootstrap/);
   assert.match(systemStatus, /permission == "platform\.system\.status\.read"/);

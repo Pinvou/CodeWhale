@@ -78,7 +78,7 @@ var tokenCommandSpecs = map[string]tokenCommandSpec{
 	"TOKEN_MODEL_CATALOG_ROLLBACK":     {[]string{"platform.models.catalog.rollback.request"}, true, true, nil},
 	"TOKEN_ACCOUNT_CREATE":             {[]string{"platform.tokens.manage", "platform.tokens.owner-candidates.read"}, true, false, []string{"owner_type", "owner_id", "owner_authorization_version", "creation_version", "precheck_fingerprint", "request_fingerprint"}},
 	"TOKEN_ACCOUNT_STATUS_CHANGE":      {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "expected_account_version", "target_status", "precheck_fingerprint", "request_fingerprint"}},
-	"TOKEN_ROUTE_UPSERT":               {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_code", "precheck_fingerprint", "request_fingerprint"}},
+	"TOKEN_ROUTE_UPSERT":               {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_version_id", "precheck_fingerprint", "request_fingerprint"}},
 	"TOKEN_ROUTE_DELETE":               {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "route_id", "expected_account_version", "expected_route_version", "precheck_fingerprint", "request_fingerprint"}},
 	"TOKEN_CREDENTIAL_ENROLL":          {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "expected_account_version", "credential_slot_version", "launch_fingerprint"}},
 	"TOKEN_CREDENTIAL_ROTATE":          {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "expected_account_version", "active_credential_version", "launch_fingerprint"}},

@@ -1431,7 +1431,7 @@ paths:
         - { name: owner_type, in: query, schema: { type: string, enum: [USER, ORG, ORG_UNIT] } }
         - { name: owner_id, in: query, schema: { type: string, format: uuid } }
         - { name: status, in: query, schema: { type: string, enum: [ACTIVE, DISABLED, FROZEN] } }
-        - { name: health_status, in: query, schema: { type: string, enum: [HEALTHY, DEGRADED, UNHEALTHY, UNKNOWN] } }
+        - { name: health_status, in: query, schema: { type: string, enum: [UNKNOWN, PROBING, HEALTHY, DEGRADED, UNHEALTHY, STALE] } }
         - { name: credential_status, in: query, schema: { type: string, enum: [NONE, PENDING, VALID, INVALID, REVOKED] } }
       responses:
         "200": { $ref: "#/components/responses/TokenAdminAccountCollection" }
@@ -1461,7 +1461,7 @@ paths:
       summary: Get a Token account with routes and credential metadata only
       parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
       responses:
-        "200": { $ref: "#/components/responses/Overview" }
+        "200": { description: Account detail with stable and quarantined legacy routes represented separately, content: { application/json: { schema: { $ref: "#/components/schemas/AdminTokenAccountDetail" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}/status:
@@ -1482,21 +1482,23 @@ paths:
   /token/admin/v1/token-accounts/{token_account_id}/routes:
     put:
       operationId: upsertAdminTokenRoute
-      summary: Create or replace a model routing policy
+      summary: Legacy pre-activation text route mutation
+      description: Preserved only while Token command governance is PRE_ACTIVATION; ACTIVE retires this contract with 410.
       parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/TokenRouteChange" }
+            schema: { $ref: "#/components/schemas/LegacyTokenRouteChange" }
       responses:
         "200": { $ref: "#/components/responses/Overview" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
     delete:
       operationId: deleteAdminTokenRoute
-      summary: Delete a model routing policy
+      summary: Legacy pre-activation text route deletion
       parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
       requestBody:
         required: true
@@ -1504,13 +1506,51 @@ paths:
           application/json:
             schema:
               type: object
+              additionalProperties: false
               required: [model]
-              properties: { model: { type: string } }
+              properties: { model: { type: string, minLength: 1, maxLength: 160 } }
       responses:
         "204": { description: Route deleted }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+  /token/admin/v2/token-accounts/{token_account_id}/routes:
+    put:
+      operationId: upsertStableAdminTokenRoute
+      summary: Create or replace a stable model routing policy
+      description: Available only after the atomic APT-138 activation. Health and upstream fields are server-owned and rejected.
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRouteChange" }
+      responses:
+        "200": { description: Frozen stable route command result, content: { application/json: { schema: { $ref: "#/components/schemas/TokenRoute" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteStableAdminTokenRoute
+      summary: Tombstone a stable model routing policy
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StableTokenRouteDelete" }
+      responses:
+        "204": { description: Route deleted or frozen idempotent result replayed }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate:
     post:
       operationId: validateAdminProviderCredential
@@ -1853,6 +1893,24 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/PrecheckTimeout" }
+  /token/admin/v2/token-accounts/{token_account_id}/impact/route:
+    get:
+      operationId: precheckStableAdminTokenRouteImpact
+      summary: Resolve the same stable route keys used by the v2 write and return versioned impact evidence
+      parameters:
+        - { name: token_account_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: action, in: query, required: true, schema: { type: string, enum: [UPSERT, DELETE] } }
+        - { name: route_id, in: query, description: Required only for DELETE, schema: { type: string, format: uuid } }
+        - { name: model_id, in: query, description: Required only for UPSERT, schema: { type: string, format: uuid } }
+        - { name: protocol_version_id, in: query, description: Required only for UPSERT, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "Read-only stable-key evidence; the later command repeats reference, CAS and dependency validation", content: { application/json: { schema: { $ref: "#/components/schemas/TokenImpactPrecheck" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
         "504": { $ref: "#/components/responses/PrecheckTimeout" }
   /token/admin/v1/token-accounts/{token_account_id}/impact/credential:
@@ -2388,7 +2446,9 @@ components:
                 model_capability_version_id: { type: string, format: uuid }
                 protocol_definition_id: { type: string, format: uuid }
                 account_updated_at: { type: string, format: date-time }
+                account_version: { type: integer, format: int64, minimum: 1 }
                 route_generation: { type: integer, format: int64, minimum: 0 }
+                route_version: { type: integer, format: int64, minimum: 0 }
                 credential_version: { type: integer, minimum: 1 }
                 evidence_etag: { type: string, pattern: '^"impact-[0-9a-f]{64}"$' }
                 evidence_set_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
@@ -2934,6 +2994,7 @@ components:
         scope_id: { type: string, format: uuid }
         model_id: { type: string, format: uuid }
         protocol_code: { type: string }
+        protocol_version_id: { type: string, format: uuid, description: Stable protocol binding; absent only on quarantined legacy provisioning rows. }
         desired_generation: { type: integer, format: int64, minimum: 1 }
         actual_generation: { type: integer, format: int64, minimum: 1 }
         status: { type: string, enum: [PENDING, READY, FAILED, REPAIR_REQUIRED] }
@@ -3391,7 +3452,7 @@ components:
     AdminTokenAccount:
       type: object
       additionalProperties: false
-      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, default_priority]
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, management_mode, active_credential_count, route_count, account_version, updated_at]
       properties:
         token_account_id: { type: string, format: uuid }
         owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
@@ -3402,7 +3463,37 @@ components:
         name: { type: string }
         status: { type: string, enum: [ACTIVE, DISABLED, FROZEN] }
         share_scope: { type: string, enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS] }
-        default_priority: { type: integer, minimum: 0, maximum: 10000 }
+        management_mode: { type: string, enum: [PLATFORM] }
+        active_credential_count: { type: integer, format: int64, minimum: 0 }
+        route_count: { type: integer, format: int64, minimum: 0 }
+        account_version: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
+    AdminTokenAccountDetail:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, management_mode, active_credential_count, route_count, account_version, updated_at, credentials, routes]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        owner_organization_id: { type: string, format: uuid }
+        owner_unit_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, FROZEN] }
+        share_scope: { type: string, enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS] }
+        management_mode: { type: string, enum: [PLATFORM] }
+        active_credential_count: { type: integer, format: int64, minimum: 0 }
+        route_count: { type: integer, format: int64, minimum: 0 }
+        account_version: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
+        credentials: { type: array, items: { $ref: "#/components/schemas/AdminCredentialMetadata" } }
+        routes:
+          type: array
+          items:
+            oneOf:
+              - { $ref: "#/components/schemas/StableTokenRouteRead" }
+              - { $ref: "#/components/schemas/LegacyTokenRouteRead" }
     CredentialValidationResult:
       type: object
       additionalProperties: false
@@ -3411,10 +3502,46 @@ components:
         validation_status: { type: string, enum: [VALID, INVALID] }
         error_code: { type: string, enum: [CREDENTIAL_CHECK_FAILED] }
         credential:
-          type: object
+          allOf:
+            - { $ref: "#/components/schemas/AdminCredentialMetadata" }
           description: Metadata only; secret, ciphertext, and provider endpoint are never returned.
-          additionalProperties: true
+    AdminCredentialMetadata:
+      type: object
+      additionalProperties: false
+      required: [credential_id, provider, fingerprint, version, status, validation_status, allowed_models, updated_at]
+      properties:
+        credential_id: { type: string, format: uuid }
+        provider: { type: string, minLength: 1, maxLength: 120 }
+        fingerprint: { type: string, minLength: 1, maxLength: 256 }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [PENDING, ACTIVE, RETIRED, REVOKED] }
+        validation_status: { type: string, enum: [UNKNOWN, VALID, INVALID] }
+        allowed_models: { type: array, items: { type: string, minLength: 1 }, uniqueItems: true }
+        validated_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     TokenRouteChange:
+      type: object
+      additionalProperties: false
+      description: The client supplies immutable catalog references and policy only. health_status and any upstream/provider value are rejected.
+      required: [model_id, protocol_version_id, priority, default_scope, expected_account_version, expected_route_version, reason]
+      properties:
+        model_id: { type: string, format: uuid }
+        protocol_version_id: { type: string, format: uuid }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        default_scope: { type: string, enum: [NONE, UNIT, ORG] }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        expected_route_version: { type: integer, format: int64, minimum: 0, description: Use 0 only when creating a new route. }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    StableTokenRouteDelete:
+      type: object
+      additionalProperties: false
+      required: [route_id, expected_account_version, expected_route_version, reason]
+      properties:
+        route_id: { type: string, format: uuid }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        expected_route_version: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    LegacyTokenRouteChange:
       type: object
       additionalProperties: false
       required: [model, protocol_code, priority, default_scope, health_status]
@@ -3424,6 +3551,68 @@ components:
         priority: { type: integer, minimum: 0, maximum: 10000 }
         default_scope: { type: string, enum: [NONE, UNIT, ORG] }
         health_status: { type: string, enum: [HEALTHY, DEGRADED, UNHEALTHY] }
+    TokenRoute:
+      type: object
+      additionalProperties: false
+      required: [route_id, token_account_id, model_id, protocol_version_id, protocol_code, priority, default_scope, health_status, health_diagnostic_code, health_observed_at, health_expires_at, route_version, route_generation, account_version, updated_at]
+      properties:
+        route_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        protocol_version_id: { type: string, format: uuid }
+        protocol_code: { type: string }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        default_scope: { type: string, enum: [NONE, UNIT, ORG] }
+        health_status: { type: string, enum: [UNKNOWN, PROBING, HEALTHY, DEGRADED, UNHEALTHY, STALE], description: Server-derived only. }
+        health_diagnostic_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,63}$' }
+        health_observed_at: { type: [string, "null"], format: date-time }
+        health_expires_at: { type: [string, "null"], format: date-time, description: HEALTHY is routable only before this DB-authoritative instant; maximum TTL is five minutes. }
+        route_version: { type: integer, format: int64, minimum: 1 }
+        route_generation: { type: integer, format: int64, minimum: 1 }
+        account_version: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
+    StableTokenRouteRead:
+      type: object
+      additionalProperties: false
+      required: [route_id, token_account_id, model, model_id, protocol_version_id, protocol_code, priority, default_scope, reference_status, health_status, route_version, route_generation, updated_at]
+      properties:
+        route_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        model: { type: string, description: Server-resolved upstream reference; never accepted by the stable write API. }
+        model_id: { type: string, format: uuid }
+        protocol_version_id: { type: string, format: uuid }
+        protocol_code: { type: string }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        default_scope: { type: string, enum: [NONE, UNIT, ORG] }
+        reference_status: { type: string, enum: [RESOLVED] }
+        health_status: { type: string, enum: [UNKNOWN, PROBING, HEALTHY, DEGRADED, UNHEALTHY, STALE] }
+        health_diagnostic_code: { type: string }
+        health_observed_at: { type: [string, "null"], format: date-time }
+        health_expires_at: { type: [string, "null"], format: date-time }
+        route_version: { type: integer, format: int64, minimum: 1 }
+        route_generation: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
+    LegacyTokenRouteRead:
+      type: object
+      additionalProperties: false
+      required: [route_id, token_account_id, model, model_id, protocol_version_id, protocol_code, priority, default_scope, reference_status, health_status, route_version, route_generation, updated_at]
+      properties:
+        route_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        model: { type: string }
+        model_id: { type: "null" }
+        protocol_version_id: { type: "null" }
+        protocol_code: { type: string }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        default_scope: { type: string, enum: [NONE, UNIT, ORG] }
+        reference_status: { type: string, enum: [LEGACY_UNRESOLVED] }
+        health_status: { type: string, enum: [HEALTHY, DEGRADED, UNHEALTHY, STALE] }
+        health_diagnostic_code: { type: string }
+        health_observed_at: { type: [string, "null"], format: date-time }
+        health_expires_at: { type: [string, "null"], format: date-time }
+        route_version: { type: integer, format: int64, minimum: 1 }
+        route_generation: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
     Reason:
       type: object
       additionalProperties: false

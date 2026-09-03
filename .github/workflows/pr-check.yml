@@ -646,6 +646,14 @@ jobs:
           printf '%s\n' "$token_governance_result_output"
           grep -F -- '--- PASS: TestTokenCommandGovernancePostgresIntegration' <<< "$token_governance_result_output"
           ! grep -F -- '--- SKIP: TestTokenCommandGovernancePostgresIntegration' <<< "$token_governance_result_output"
+          route_health_output="$(go test -run '^TestRouteHealthPostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$route_health_output"
+          grep -F -- '--- PASS: TestRouteHealthPostgresIntegration' <<< "$route_health_output"
+          ! grep -F -- '--- SKIP: TestRouteHealthPostgresIntegration' <<< "$route_health_output"
+          stable_routes_output="$(go test -run '^TestStableRoutesPostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$stable_routes_output"
+          grep -F -- '--- PASS: TestStableRoutesPostgresIntegration' <<< "$stable_routes_output"
+          ! grep -F -- '--- SKIP: TestStableRoutesPostgresIntegration' <<< "$stable_routes_output"
           go test -short -race ./...
           go vet ./...
 

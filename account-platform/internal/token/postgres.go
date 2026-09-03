@@ -44,14 +44,42 @@ type Credential struct {
 }
 
 type RoutingPolicy struct {
-	TokenAccountID  uuid.UUID `json:"token_account_id"`
-	Model           string    `json:"model"`
-	ProtocolCode    string    `json:"protocol_code"`
-	Priority        int       `json:"priority"`
-	DefaultScope    string    `json:"default_scope"`
-	HealthStatus    string    `json:"health_status"`
-	RouteGeneration int64     `json:"route_generation"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                uuid.UUID  `json:"route_id"`
+	TokenAccountID    uuid.UUID  `json:"token_account_id"`
+	Model             string     `json:"model"`
+	ModelID           *uuid.UUID `json:"model_id"`
+	ProtocolVersionID *uuid.UUID `json:"protocol_version_id"`
+	ProtocolCode      string     `json:"protocol_code"`
+	Priority          int        `json:"priority"`
+	DefaultScope      string     `json:"default_scope"`
+	ReferenceStatus   string     `json:"reference_status"`
+	HealthStatus      string     `json:"health_status"`
+	HealthDiagnostic  string     `json:"health_diagnostic_code,omitempty"`
+	HealthObservedAt  *time.Time `json:"health_observed_at,omitempty"`
+	HealthExpiresAt   *time.Time `json:"health_expires_at,omitempty"`
+	RouteVersion      int64      `json:"route_version"`
+	RouteGeneration   int64      `json:"route_generation"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+// StableRouteResult is the versioned write projection. It excludes the legacy
+// text model reference so v2 clients can only consume immutable catalog keys.
+type StableRouteResult struct {
+	ID                uuid.UUID  `json:"route_id"`
+	TokenAccountID    uuid.UUID  `json:"token_account_id"`
+	ModelID           uuid.UUID  `json:"model_id"`
+	ProtocolVersionID uuid.UUID  `json:"protocol_version_id"`
+	ProtocolCode      string     `json:"protocol_code"`
+	Priority          int        `json:"priority"`
+	DefaultScope      string     `json:"default_scope"`
+	HealthStatus      string     `json:"health_status"`
+	HealthDiagnostic  string     `json:"health_diagnostic_code"`
+	HealthObservedAt  *time.Time `json:"health_observed_at"`
+	HealthExpiresAt   *time.Time `json:"health_expires_at"`
+	RouteVersion      int64      `json:"route_version"`
+	RouteGeneration   int64      `json:"route_generation"`
+	AccountVersion    int64      `json:"account_version"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type CreateAccountRequest struct {
@@ -73,6 +101,8 @@ type PostgresRepository struct {
 	now                    func() time.Time
 	adminPagination        adminPaginationRuntime
 	adminPaginationMetrics *AdminPaginationMetrics
+	routeHealthMetrics     *RouteHealthMetrics
+	routeActivationGuard   TokenRouteActivationTransactionGuard
 }
 
 type Repository interface {
@@ -461,7 +491,7 @@ func NewPostgresRepository(ctx context.Context, databaseURL string, secrets Secr
 	if err != nil {
 		return nil, fmt.Errorf("open token database: %w", err)
 	}
-	repository := &PostgresRepository{pool: pool, secrets: secrets, now: func() time.Time { return time.Now().UTC() }, adminPaginationMetrics: newAdminPaginationMetrics()}
+	repository := &PostgresRepository{pool: pool, secrets: secrets, now: func() time.Time { return time.Now().UTC() }, adminPaginationMetrics: newAdminPaginationMetrics(), routeHealthMetrics: newRouteHealthMetrics()}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -600,11 +630,8 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE provider_credentials SET status='ACTIVE',activated_at=$2 WHERE id=$1`, credential.ID, now)
 	}
-	for _, model := range models {
-		if err != nil {
-			break
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,route_generation) SELECT $1,id,$2,'CHAT',default_priority,'NONE','HEALTHY',$3,1 FROM token_accounts WHERE id=$4 ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code='CHAT',health_status='HEALTHY',updated_at=EXCLUDED.updated_at,route_generation=routing_policies.route_generation+1`, uuid.Must(uuid.NewV7()), model, now, accountID)
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE routing_policies SET health_status='UNKNOWN',health_diagnostic_code='CREDENTIAL_CHANGED',health_observed_at=NULL,health_expires_at=NULL,next_probe_at=$2,health_version=health_version+1,updated_at=$2 WHERE token_account_id=$1 AND reference_status='RESOLVED'`, accountID, now)
 	}
 	if err != nil {
 		return Credential{}, err
@@ -613,19 +640,25 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 }
 
 func (r *PostgresRepository) ListCandidates(ctx context.Context, model, protocolCode string) ([]Candidate, error) {
-	protocolCode = strings.ToUpper(strings.TrimSpace(protocolCode))
+	modelID, modelErr := uuid.Parse(strings.TrimSpace(model))
+	protocolVersionID, protocolErr := uuid.Parse(strings.TrimSpace(protocolCode))
+	if modelErr != nil || protocolErr != nil {
+		return []Candidate{}, ErrRouteReferenceInvalid
+	}
 	rows, err := r.pool.Query(ctx, `
 SELECT ta.id,ta.name,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.status,
        sp.scope,pc.allowed_models,
        ARRAY(SELECT em.user_id FROM token_explicit_members em WHERE em.token_account_id=ta.id ORDER BY em.user_id),
-	       rp.default_scope,rp.priority,rp.health_status,pc.id,rp.protocol_code,rp.route_generation
+	       rp.default_scope,rp.priority,rp.health_status,rp.health_expires_at,transaction_timestamp(),pc.id,rp.protocol_code,rp.model_id,rp.protocol_version_id,rp.route_generation
 FROM token_accounts ta
 JOIN token_share_policies sp ON sp.token_account_id=ta.id
 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
-JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=$1 AND rp.protocol_code=$2
-LEFT JOIN route_provisionings provision ON provision.active_token_account_id=ta.id AND provision.active_credential_id=pc.id AND provision.upstream_model_ref=rp.model AND provision.protocol_code=rp.protocol_code AND provision.status='READY' AND provision.actual_generation=rp.route_generation
+JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model_id=$1 AND rp.protocol_version_id=$2 AND rp.reference_status='RESOLVED'
+JOIN model_identities identity ON identity.id=rp.model_id AND pc.provider=identity.provider_id AND identity.upstream_model_ref=ANY(pc.allowed_models)
+LEFT JOIN route_provisionings provision ON provision.active_token_account_id=ta.id AND provision.active_credential_id=pc.id AND provision.model_id=rp.model_id AND provision.protocol_version_id=rp.protocol_version_id AND provision.status='READY' AND provision.actual_generation=rp.route_generation
 WHERE ta.status='ACTIVE' AND ta.management_mode='PLATFORM' AND provision.id IS NOT NULL
-ORDER BY rp.priority DESC,ta.id`, model, protocolCode)
+  AND rp.health_status='HEALTHY' AND rp.health_expires_at>transaction_timestamp()
+ORDER BY rp.priority DESC,ta.id`, modelID, protocolVersionID)
 	if err != nil {
 		return nil, err
 	}
@@ -633,7 +666,7 @@ ORDER BY rp.priority DESC,ta.id`, model, protocolCode)
 	items := make([]Candidate, 0)
 	for rows.Next() {
 		var item Candidate
-		if err := rows.Scan(&item.TokenAccountID, &item.Name, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Status, &item.ShareScope, &item.AllowedModels, &item.ExplicitMembers, &item.DefaultScope, &item.Priority, &item.HealthStatus, &item.CredentialID, &item.ProtocolCode, &item.RouteGeneration); err != nil {
+		if err := rows.Scan(&item.TokenAccountID, &item.Name, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Status, &item.ShareScope, &item.AllowedModels, &item.ExplicitMembers, &item.DefaultScope, &item.Priority, &item.HealthStatus, &item.HealthExpiresAt, &item.DatabaseNow, &item.CredentialID, &item.ProtocolCode, &item.ModelID, &item.ProtocolVersionID, &item.RouteGeneration); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

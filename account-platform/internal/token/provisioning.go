@@ -27,6 +27,7 @@ type RouteProvisioning struct {
 	ScopeID              uuid.UUID  `json:"scope_id"`
 	ModelID              uuid.UUID  `json:"model_id"`
 	ProtocolCode         string     `json:"protocol_code"`
+	ProtocolVersionID    *uuid.UUID `json:"protocol_version_id,omitempty"`
 	DesiredGeneration    int64      `json:"desired_generation"`
 	ActualGeneration     *int64     `json:"actual_generation,omitempty"`
 	Status               string     `json:"status"`
@@ -63,11 +64,11 @@ type ProvisioningDetail struct {
 	Attempts []ProvisioningAttempt `json:"attempts"`
 }
 
-const provisioningSelect = `SELECT id,scope_type,scope_id,model_id,protocol_code,desired_generation,actual_generation,status,stage,policy_version,attempt_count,repair_round,max_attempts,sla_deadline_at,lease_until,next_retry_at,last_error_code,last_error_detail,active_token_account_id,active_credential_id,updated_at FROM route_provisionings`
+const provisioningSelect = `SELECT id,scope_type,scope_id,model_id,protocol_code,protocol_version_id,desired_generation,actual_generation,status,stage,policy_version,attempt_count,repair_round,max_attempts,sla_deadline_at,lease_until,next_retry_at,last_error_code,last_error_detail,active_token_account_id,active_credential_id,updated_at FROM route_provisionings`
 
 func scanProvisioning(row interface{ Scan(...any) error }) (RouteProvisioning, error) {
 	var item RouteProvisioning
-	err := row.Scan(&item.ID, &item.ScopeType, &item.ScopeID, &item.ModelID, &item.ProtocolCode, &item.DesiredGeneration, &item.ActualGeneration, &item.Status, &item.Stage, &item.PolicyVersion, &item.AttemptCount, &item.RepairRound, &item.MaxAttempts, &item.SLADeadlineAt, &item.LeaseUntil, &item.NextRetryAt, &item.LastErrorCode, &item.LastErrorDetail, &item.ActiveTokenAccountID, &item.ActiveCredentialID, &item.UpdatedAt)
+	err := row.Scan(&item.ID, &item.ScopeType, &item.ScopeID, &item.ModelID, &item.ProtocolCode, &item.ProtocolVersionID, &item.DesiredGeneration, &item.ActualGeneration, &item.Status, &item.Stage, &item.PolicyVersion, &item.AttemptCount, &item.RepairRound, &item.MaxAttempts, &item.SLADeadlineAt, &item.LeaseUntil, &item.NextRetryAt, &item.LastErrorCode, &item.LastErrorDetail, &item.ActiveTokenAccountID, &item.ActiveCredentialID, &item.UpdatedAt)
 	return item, err
 }
 
@@ -82,14 +83,14 @@ func provisioningScope(resolved AuthorizationContext) (string, uuid.UUID, error)
 }
 
 func (p *PostgresDefaultRouteProvisioner) desiredSignature(scopeType string, scopeID, walletID uuid.UUID, model CatalogModel) string {
-	payload, _ := json.Marshal(map[string]any{"scope_type": scopeType, "scope_id": scopeID, "wallet_id": walletID, "model_id": model.ModelID, "upstream_model_ref": model.UpstreamModelRef, "protocol_code": model.ProtocolCode, "provider": p.config.Provider, "base_url": p.config.BaseURL, "credential_fingerprint": Fingerprint(p.config.Secret), "priority": p.config.Priority})
+	payload, _ := json.Marshal(map[string]any{"scope_type": scopeType, "scope_id": scopeID, "wallet_id": walletID, "model_id": model.ModelID, "upstream_model_ref": model.UpstreamModelRef, "protocol_code": model.ProtocolCode, "protocol_version_id": model.ProtocolDefinitionID, "provider": p.config.Provider, "adapter_version": p.config.AdapterVersion, "base_url": p.config.BaseURL, "credential_fingerprint": Fingerprint(p.config.Secret), "priority": p.config.Priority})
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
 }
 
 func (p *PostgresDefaultRouteProvisioner) Ensure(ctx context.Context, resolved AuthorizationContext, walletID uuid.UUID, model CatalogModel) (RouteProvisioning, error) {
 	scopeType, scopeID, err := provisioningScope(resolved)
-	if err != nil || walletID == uuid.Nil || model.ModelID == uuid.Nil || model.ProtocolCode == "" || strings.TrimSpace(model.UpstreamModelRef) == "" {
+	if err != nil || walletID == uuid.Nil || model.ModelID == uuid.Nil || model.ProtocolDefinitionID == uuid.Nil || model.ProtocolCode == "" || strings.TrimSpace(model.UpstreamModelRef) == "" {
 		return RouteProvisioning{}, ErrNoEligibleRoute
 	}
 	if err := p.ValidateContextModelPolicy(ctx, resolved, model.ModelID); err != nil {
@@ -106,30 +107,33 @@ func (p *PostgresDefaultRouteProvisioner) Ensure(ctx context.Context, resolved A
 	}
 	item, err := scanProvisioning(tx.QueryRow(ctx, provisioningSelect+` WHERE scope_type=$1 AND scope_id=$2 AND model_id=$3 AND protocol_code=$4 AND desired_signature=$5 ORDER BY desired_generation DESC LIMIT 1`, scopeType, scopeID, model.ModelID, model.ProtocolCode, signature))
 	if err == nil {
-		valid := item.Status != "READY"
-		if item.Status == "READY" && item.ActiveTokenAccountID != nil && item.ActiveCredentialID != nil && item.ActualGeneration != nil {
-			if checkErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM token_accounts ta JOIN provider_credentials pc ON pc.token_account_id=ta.id JOIN routing_policies rp ON rp.token_account_id=ta.id WHERE ta.id=$1 AND ta.status='ACTIVE' AND ta.management_mode='PLATFORM' AND pc.id=$2 AND pc.status='ACTIVE' AND pc.validation_status='VALID' AND rp.model=$3 AND rp.protocol_code=$4 AND rp.health_status<>'UNHEALTHY' AND rp.route_generation=$5)`, *item.ActiveTokenAccountID, *item.ActiveCredentialID, model.UpstreamModelRef, model.ProtocolCode, *item.ActualGeneration).Scan(&valid); checkErr != nil {
-				return RouteProvisioning{}, checkErr
+		valid := item.ProtocolVersionID != nil && *item.ProtocolVersionID == model.ProtocolDefinitionID
+		if valid && item.Status == "READY" {
+			valid = item.ActiveTokenAccountID != nil && item.ActiveCredentialID != nil && item.ActualGeneration != nil
+			if valid {
+				if checkErr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM token_accounts ta JOIN provider_credentials pc ON pc.token_account_id=ta.id JOIN routing_policies rp ON rp.token_account_id=ta.id JOIN model_identities identity ON identity.id=rp.model_id WHERE ta.id=$1 AND ta.status='ACTIVE' AND ta.management_mode='PLATFORM' AND pc.id=$2 AND pc.status='ACTIVE' AND pc.validation_status='VALID' AND pc.provider=identity.provider_id AND identity.adapter_version=$6 AND identity.upstream_model_ref=ANY(pc.allowed_models) AND rp.model_id=$3 AND rp.protocol_version_id=$4 AND rp.reference_status='RESOLVED' AND rp.route_generation=$5)`, *item.ActiveTokenAccountID, *item.ActiveCredentialID, model.ModelID, model.ProtocolDefinitionID, *item.ActualGeneration, model.AdapterVersion).Scan(&valid); checkErr != nil {
+					return RouteProvisioning{}, checkErr
+				}
 			}
 		}
-		if item.Status != "READY" || valid {
+		if valid {
 			return item, tx.Commit(ctx)
 		}
-		err = pgx.ErrNoRows // create a new desired generation for drifted READY resources
+		err = pgx.ErrNoRows // create a new desired generation for version drift or drifted READY resources
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return RouteProvisioning{}, err
 	}
 	var generation int64
 	ownerType := map[string]string{"PERSONAL": "USER", "ORGANIZATION": "ORG"}[scopeType]
-	if err := tx.QueryRow(ctx, `SELECT GREATEST(COALESCE((SELECT max(desired_generation) FROM route_provisionings WHERE scope_type=$1 AND scope_id=$2 AND model_id=$3 AND protocol_code=$4),0),COALESCE((SELECT max(rp.route_generation) FROM token_accounts ta JOIN routing_policies rp ON rp.token_account_id=ta.id WHERE ta.owner_type=$5 AND ta.owner_id=$2 AND ta.management_mode='PLATFORM' AND rp.model=$6 AND rp.protocol_code=$4),0))+1`, scopeType, scopeID, model.ModelID, model.ProtocolCode, ownerType, model.UpstreamModelRef).Scan(&generation); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT GREATEST(COALESCE((SELECT max(desired_generation) FROM route_provisionings WHERE scope_type=$1 AND scope_id=$2 AND model_id=$3 AND protocol_code=$4),0),COALESCE((SELECT max(rp.route_generation) FROM token_accounts ta JOIN routing_policies rp ON rp.token_account_id=ta.id WHERE ta.owner_type=$5 AND ta.owner_id=$2 AND ta.management_mode='PLATFORM' AND rp.model_id=$3 AND rp.protocol_version_id=$6),0))+1`, scopeType, scopeID, model.ModelID, model.ProtocolCode, ownerType, model.ProtocolDefinitionID).Scan(&generation); err != nil {
 		return RouteProvisioning{}, err
 	}
 	now := p.repository.now()
 	policy := map[string]any{"version": 1, "lease_seconds": 120, "initial_backoff_seconds": 5, "multiplier": 2, "maximum_backoff_seconds": 300, "jitter_percent": 20, "max_attempts": 8, "sla_seconds": 1800}
 	policyJSON, _ := json.Marshal(policy)
 	id := uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,desired_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,next_retry_at,requested_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'PENDING','QUEUED',1,$10,8,$11,$12,$13,$12,$12)`, id, scopeType, scopeID, walletID, model.ModelID, model.UpstreamModelRef, model.ProtocolCode, generation, signature, policyJSON, now.Add(30*time.Minute), now, resolved.UserID)
+	_, err = tx.Exec(ctx, `INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id,desired_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,next_retry_at,requested_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PENDING','QUEUED',1,$11,8,$12,$13,$14,$13,$13)`, id, scopeType, scopeID, walletID, model.ModelID, model.UpstreamModelRef, model.ProtocolCode, model.ProtocolDefinitionID, generation, signature, policyJSON, now.Add(30*time.Minute), now, resolved.UserID)
 	if err != nil {
 		return RouteProvisioning{}, err
 	}
@@ -218,7 +222,12 @@ func (p *PostgresDefaultRouteProvisioner) execute(ctx context.Context, item Rout
 	if item.ScopeType == "ORGANIZATION" {
 		resolved = AuthorizationContext{UserID: p.requestedBy(ctx, item.ID), ContextType: "ORGANIZATION", OrganizationID: &item.ScopeID}
 	}
-	err := p.provisionResources(ctx, resolved, p.walletID(ctx, item.ID), p.upstreamModel(ctx, item.ID))
+	model, modelErr := p.provisioningModel(ctx, item.ID)
+	if modelErr != nil {
+		p.failAttempt(ctx, item, attemptID, modelErr, p.repository.now())
+		return
+	}
+	err := p.provisionResources(ctx, resolved, p.walletID(ctx, item.ID), model)
 	now := p.repository.now()
 	if err != nil {
 		p.failAttempt(ctx, item, attemptID, err, now)
@@ -226,7 +235,7 @@ func (p *PostgresDefaultRouteProvisioner) execute(ctx context.Context, item Rout
 	}
 	var accountID, credentialID uuid.UUID
 	var generation int64
-	err = p.repository.pool.QueryRow(ctx, `SELECT ta.id,pc.id,rp.route_generation FROM route_provisionings p JOIN token_accounts ta ON ta.owner_type=CASE p.scope_type WHEN 'PERSONAL' THEN 'USER' ELSE 'ORG' END AND ta.owner_id=p.scope_id AND ta.management_mode='PLATFORM' JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID' JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=p.upstream_model_ref AND rp.protocol_code=p.protocol_code WHERE p.id=$1`, item.ID).Scan(&accountID, &credentialID, &generation)
+	err = p.repository.pool.QueryRow(ctx, `SELECT ta.id,pc.id,rp.route_generation FROM route_provisionings p JOIN token_accounts ta ON ta.owner_type=CASE p.scope_type WHEN 'PERSONAL' THEN 'USER' ELSE 'ORG' END AND ta.owner_id=p.scope_id AND ta.management_mode='PLATFORM' JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model_id=p.model_id AND rp.protocol_version_id=$2 AND rp.reference_status='RESOLVED' JOIN model_identities identity ON identity.id=rp.model_id AND identity.adapter_version=$3 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.provider=identity.provider_id AND identity.upstream_model_ref=ANY(pc.allowed_models) AND pc.status='ACTIVE' AND pc.validation_status='VALID' WHERE p.id=$1`, item.ID, model.ProtocolDefinitionID, model.AdapterVersion).Scan(&accountID, &credentialID, &generation)
 	if err != nil || generation != item.DesiredGeneration {
 		p.failAttempt(ctx, item, attemptID, errors.New("resource verification failed"), now)
 		return
@@ -239,7 +248,7 @@ func (p *PostgresDefaultRouteProvisioner) execute(ctx context.Context, item Rout
 	if _, err = tx.Exec(ctx, `UPDATE route_provisioning_attempts SET status='SUCCEEDED',stage='VERIFIED',ended_at=$2 WHERE id=$1 AND status='RUNNING'`, attemptID, now); err != nil {
 		return
 	}
-	if _, err = tx.Exec(ctx, `UPDATE route_provisionings SET status='READY',stage='VERIFIED',actual_generation=$2,active_token_account_id=$3,active_credential_id=$4,lease_owner=NULL,lease_until=NULL,next_retry_at=NULL,last_error_code=NULL,last_error_detail=NULL,updated_at=$5 WHERE id=$1 AND lease_owner=$6`, item.ID, generation, accountID, credentialID, now, p.workerID); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE route_provisionings SET status='READY',stage='VERIFIED',protocol_version_id=$2,actual_generation=$3,active_token_account_id=$4,active_credential_id=$5,lease_owner=NULL,lease_until=NULL,next_retry_at=NULL,last_error_code=NULL,last_error_detail=NULL,updated_at=$6 WHERE id=$1 AND lease_owner=$7`, item.ID, model.ProtocolDefinitionID, generation, accountID, credentialID, now, p.workerID); err != nil {
 		return
 	}
 	evidence, _ := json.Marshal(map[string]any{"attempt_id": attemptID, "actual_generation": generation, "token_account_id": accountID, "credential_id": credentialID})
@@ -306,10 +315,8 @@ func (p *PostgresDefaultRouteProvisioner) walletID(ctx context.Context, id uuid.
 	_ = p.repository.pool.QueryRow(ctx, `SELECT wallet_id FROM route_provisionings WHERE id=$1`, id).Scan(&value)
 	return value
 }
-func (p *PostgresDefaultRouteProvisioner) upstreamModel(ctx context.Context, id uuid.UUID) string {
-	var value string
-	_ = p.repository.pool.QueryRow(ctx, `SELECT upstream_model_ref FROM route_provisionings WHERE id=$1`, id).Scan(&value)
-	return value
+func (p *PostgresDefaultRouteProvisioner) provisioningModel(ctx context.Context, id uuid.UUID) (CatalogModel, error) {
+	return scanCatalogModel(p.repository.pool.QueryRow(ctx, catalogSelect+` JOIN route_provisionings provisioning ON provisioning.model_id=e.model_id AND provisioning.protocol_version_id=e.protocol_definition_id WHERE provisioning.id=$1 AND provisioning.protocol_version_id IS NOT NULL AND e.catalog_version=(SELECT max(exact.catalog_version) FROM model_catalog_entries exact WHERE exact.model_id=provisioning.model_id AND exact.protocol_definition_id=provisioning.protocol_version_id) AND e.lifecycle_status='PUBLISHED' AND e.source_available=true AND p.id=provisioning.protocol_version_id`, id))
 }
 
 func provisioningError(item RouteProvisioning) error {
@@ -440,7 +447,7 @@ func (p *PostgresDefaultRouteProvisioner) Repair(ctx context.Context, id, actor 
 
 func (p *PostgresDefaultRouteProvisioner) ValidateModelReady(ctx context.Context, modelID uuid.UUID, protocol string) error {
 	var ready bool
-	err := p.repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM route_provisionings p JOIN token_accounts ta ON ta.id=p.active_token_account_id AND ta.status='ACTIVE' JOIN provider_credentials pc ON pc.id=p.active_credential_id AND pc.status='ACTIVE' AND pc.validation_status='VALID' JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=p.upstream_model_ref AND rp.protocol_code=p.protocol_code AND rp.route_generation=p.actual_generation WHERE p.model_id=$1 AND p.protocol_code=$2 AND p.status='READY')`, modelID, protocol).Scan(&ready)
+	err := p.repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM route_provisionings p JOIN token_accounts ta ON ta.id=p.active_token_account_id AND ta.status='ACTIVE' JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model_id=p.model_id AND rp.protocol_version_id=p.protocol_version_id AND rp.reference_status='RESOLVED' AND rp.route_generation=p.actual_generation JOIN model_identities identity ON identity.id=rp.model_id AND identity.provider_id=$3 AND identity.adapter_version=$4 JOIN provider_credentials pc ON pc.id=p.active_credential_id AND pc.token_account_id=ta.id AND pc.provider=identity.provider_id AND identity.upstream_model_ref=ANY(pc.allowed_models) AND pc.status='ACTIVE' AND pc.validation_status='VALID' WHERE p.model_id=$1 AND p.protocol_code=$2 AND p.protocol_version_id IS NOT NULL AND p.status='READY')`, modelID, protocol, p.config.Provider, p.config.AdapterVersion).Scan(&ready)
 	if err != nil {
 		return err
 	}
@@ -473,6 +480,14 @@ func (p *PostgresDefaultRouteProvisioner) ContextEligible(ctx context.Context, r
 	}
 	if status != "READY" {
 		return false, "ROUTE_PROVISIONING_" + status, nil
+	}
+	var ready bool
+	err = p.repository.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM route_provisionings p JOIN token_accounts ta ON ta.id=p.active_token_account_id AND ta.status='ACTIVE' JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model_id=p.model_id AND rp.protocol_version_id=p.protocol_version_id AND rp.reference_status='RESOLVED' AND rp.route_generation=p.actual_generation JOIN model_identities identity ON identity.id=rp.model_id AND identity.provider_id=$5 AND identity.adapter_version=$6 JOIN provider_credentials pc ON pc.id=p.active_credential_id AND pc.token_account_id=ta.id AND pc.provider=identity.provider_id AND identity.upstream_model_ref=ANY(pc.allowed_models) AND pc.status='ACTIVE' AND pc.validation_status='VALID' WHERE p.scope_type=$1 AND p.scope_id=$2 AND p.model_id=$3 AND p.protocol_code=$4 AND p.protocol_version_id IS NOT NULL AND p.status='READY')`, scopeType, scopeID, modelID, protocol, p.config.Provider, p.config.AdapterVersion).Scan(&ready)
+	if err != nil {
+		return false, "ROUTE_PROVISIONING_UNAVAILABLE", err
+	}
+	if !ready {
+		return false, "ROUTE_PROVISIONING_DRIFTED", nil
 	}
 	return true, "READY", nil
 }

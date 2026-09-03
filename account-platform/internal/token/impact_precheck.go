@@ -44,6 +44,8 @@ type ImpactResourceVersion struct {
 	ProtocolDefinitionID *uuid.UUID `json:"protocol_definition_id,omitempty"`
 	AccountUpdatedAt     *time.Time `json:"account_updated_at,omitempty"`
 	RouteGeneration      *int64     `json:"route_generation,omitempty"`
+	RouteVersion         *int64     `json:"route_version,omitempty"`
+	AccountVersion       *int64     `json:"account_version,omitempty"`
 	CredentialVersion    *int       `json:"credential_version,omitempty"`
 	EvidenceETag         string     `json:"evidence_etag"`
 	EvidenceSetSHA256    string     `json:"evidence_set_sha256"`
@@ -99,6 +101,13 @@ type ImpactPrecheckRepository interface {
 	TokenAccountImpact(context.Context, uuid.UUID) (ImpactLocalEvidence, error)
 	TokenRouteImpact(context.Context, uuid.UUID, string, string, string) (ImpactLocalEvidence, error)
 	TokenCredentialImpact(context.Context, uuid.UUID, *uuid.UUID) (ImpactLocalEvidence, error)
+}
+
+type StableRouteImpactInput struct {
+	Action            string
+	RouteID           uuid.UUID
+	ModelID           uuid.UUID
+	ProtocolVersionID uuid.UUID
 }
 
 func (s *Service) WithImpactPrechecks(enabled bool, repository ImpactPrecheckRepository, billing ImpactPriceCoverageClient) *Service {
@@ -222,6 +231,36 @@ func (s *Service) adminTokenRouteImpact(w http.ResponseWriter, r *http.Request) 
 	}
 	s.adminTokenLocalImpact(w, r, "TOKEN_ROUTE_"+action, []string{"model=" + model, "protocol_code=" + protocol}, func(repository ImpactPrecheckRepository, accountID uuid.UUID) (ImpactLocalEvidence, error) {
 		return repository.TokenRouteImpact(r.Context(), accountID, model, protocol, action)
+	})
+}
+
+func (s *Service) adminStableTokenRouteImpact(w http.ResponseWriter, r *http.Request) {
+	action := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
+	input := StableRouteImpactInput{Action: action}
+	var err error
+	if action == "UPSERT" {
+		input.ModelID, err = uuid.Parse(strings.TrimSpace(r.URL.Query().Get("model_id")))
+		if err == nil {
+			input.ProtocolVersionID, err = uuid.Parse(strings.TrimSpace(r.URL.Query().Get("protocol_version_id")))
+		}
+	} else if action == "DELETE" {
+		input.RouteID, err = uuid.Parse(strings.TrimSpace(r.URL.Query().Get("route_id")))
+	} else {
+		err = ErrForbidden
+	}
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "stable route identifiers are invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	parameters := []string{"route_id=" + input.RouteID.String(), "model_id=" + input.ModelID.String(), "protocol_version_id=" + input.ProtocolVersionID.String()}
+	s.adminTokenLocalImpact(w, r, "TOKEN_ROUTE_"+action, parameters, func(repository ImpactPrecheckRepository, accountID uuid.UUID) (ImpactLocalEvidence, error) {
+		stable, ok := repository.(interface {
+			StableTokenRouteImpact(context.Context, uuid.UUID, StableRouteImpactInput) (ImpactLocalEvidence, error)
+		})
+		if !ok {
+			return ImpactLocalEvidence{}, ErrRouteReferenceInvalid
+		}
+		return stable.StableTokenRouteImpact(r.Context(), accountID, input)
 	})
 }
 
@@ -401,17 +440,17 @@ func impactETag(values ...string) string {
 	return `"impact-` + hex.EncodeToString(digest[:]) + `"`
 }
 
-const canServeCoverageRelation = `(SELECT provision.id provisioning_id,provision.status provisioning_status,provision.scope_type,provision.scope_id,provision.wallet_id,provision.model_id,provision.upstream_model_ref,provision.protocol_code,provision.actual_generation,account.id account_id,account.owner_type,account.owner_id,account.owner_organization_id,account.owner_unit_id,account.status account_status,identity.provider_id required_provider,credential.id credential_id,credential.version credential_version,credential.status credential_status,credential.validation_status,credential.provider credential_provider,credential.allowed_models,route.id route_id,route.health_status route_health_status,route.route_generation
+const canServeCoverageRelation = `(SELECT provision.id provisioning_id,provision.status provisioning_status,provision.scope_type,provision.scope_id,provision.wallet_id,provision.model_id,provision.upstream_model_ref,provision.protocol_code,provision.protocol_version_id,provision.actual_generation,account.id account_id,account.owner_type,account.owner_id,account.owner_organization_id,account.owner_unit_id,account.status account_status,identity.provider_id required_provider,credential.id credential_id,credential.version credential_version,credential.status credential_status,credential.validation_status,credential.provider credential_provider,credential.allowed_models,route.id route_id,route.health_status route_health_status,route.route_generation
 FROM route_provisionings provision
 JOIN model_identities identity ON identity.id=provision.model_id
 JOIN token_accounts account ON account.id=provision.active_token_account_id AND account.management_mode='PLATFORM' AND account.status='ACTIVE' AND account.wallet_id=provision.wallet_id
  AND ((provision.scope_type='PERSONAL' AND account.owner_type='USER' AND account.owner_id=provision.scope_id) OR (provision.scope_type='ORGANIZATION' AND ((account.owner_type='ORG' AND account.owner_id=provision.scope_id) OR (account.owner_type='ORG_UNIT' AND account.owner_organization_id=provision.scope_id))))
 JOIN provider_credentials credential ON credential.id=provision.active_credential_id AND credential.token_account_id=account.id AND credential.status='ACTIVE' AND credential.validation_status='VALID' AND credential.provider=identity.provider_id AND provision.upstream_model_ref=ANY(credential.allowed_models)
-JOIN routing_policies route ON route.token_account_id=account.id AND route.model=provision.upstream_model_ref AND route.protocol_code=provision.protocol_code AND route.route_generation=provision.actual_generation AND route.health_status<>'UNHEALTHY'
+JOIN routing_policies route ON route.token_account_id=account.id AND route.model_id=provision.model_id AND route.protocol_version_id=provision.protocol_version_id AND route.route_generation=provision.actual_generation AND route.reference_status='RESOLVED' AND route.health_status='HEALTHY' AND route.health_expires_at>transaction_timestamp()
 WHERE provision.status='READY')`
 
 const impactAffectedCoverageCTE = `affected AS (
-	SELECT DISTINCT scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,required_provider
+	SELECT DISTINCT scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id,required_provider
 	FROM serving WHERE account_id=$1 AND ($2='' OR upstream_model_ref=$2) AND ($3::uuid IS NULL OR credential_id=$3)
 )`
 
@@ -427,7 +466,7 @@ const alternativeAccountCandidatesCTE = `alternative_accounts AS (
 	SELECT DISTINCT candidate.account_id
 	FROM serving candidate
 	WHERE candidate.account_id<>$1 AND EXISTS(SELECT 1 FROM affected)
-	 AND NOT EXISTS(SELECT 1 FROM affected WHERE NOT EXISTS(SELECT 1 FROM serving exact_candidate WHERE exact_candidate.account_id=candidate.account_id AND exact_candidate.scope_type=affected.scope_type AND exact_candidate.scope_id=affected.scope_id AND exact_candidate.wallet_id=affected.wallet_id AND exact_candidate.model_id=affected.model_id AND exact_candidate.upstream_model_ref=affected.upstream_model_ref AND exact_candidate.protocol_code=affected.protocol_code))
+	 AND NOT EXISTS(SELECT 1 FROM affected WHERE NOT EXISTS(SELECT 1 FROM serving exact_candidate WHERE exact_candidate.account_id=candidate.account_id AND exact_candidate.scope_type=affected.scope_type AND exact_candidate.scope_id=affected.scope_id AND exact_candidate.wallet_id=affected.wallet_id AND exact_candidate.model_id=affected.model_id AND exact_candidate.upstream_model_ref=affected.upstream_model_ref AND exact_candidate.protocol_code=affected.protocol_code AND exact_candidate.protocol_version_id=affected.protocol_version_id))
 )`
 
 func canServeCoverageCount(ctx context.Context, tx pgx.Tx, modelIDs []uuid.UUID, accountID *uuid.UUID, model string, credentialID, excludeAccountID *uuid.UUID) (int64, error) {
@@ -443,13 +482,26 @@ func alternativeCoverageCounts(ctx context.Context, tx pgx.Tx, accountID uuid.UU
 	return credentials, accounts, err
 }
 
+func stableRouteDeleteCoverage(ctx context.Context, tx pgx.Tx, accountID, routeID, protocolVersionID uuid.UUID) (int64, int64, int64, error) {
+	var affected, covered, gaps int64
+	err := tx.QueryRow(ctx, `WITH serving AS `+canServeCoverageRelation+`, affected AS (
+		SELECT DISTINCT scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id
+		FROM serving WHERE account_id=$1 AND route_id=$2 AND protocol_version_id=$3
+	), coverage AS (
+		SELECT affected.*,EXISTS(SELECT 1 FROM serving candidate WHERE candidate.account_id<>$1 AND candidate.scope_type=affected.scope_type AND candidate.scope_id=affected.scope_id AND candidate.wallet_id=affected.wallet_id AND candidate.model_id=affected.model_id AND candidate.upstream_model_ref=affected.upstream_model_ref AND candidate.protocol_code=affected.protocol_code AND candidate.protocol_version_id=$3) covered
+		FROM affected
+	)
+	SELECT count(*),count(*) FILTER (WHERE covered),count(*) FILTER (WHERE NOT covered) FROM coverage`, accountID, routeID, protocolVersionID).Scan(&affected, &covered, &gaps)
+	return affected, covered, gaps, err
+}
+
 func routeDeleteCoverage(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, model, protocol string) (int64, int64, int64, error) {
 	var affected, covered, gaps int64
 	err := tx.QueryRow(ctx, `WITH serving AS `+canServeCoverageRelation+`, affected AS (
-		SELECT DISTINCT scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code
-		FROM serving WHERE account_id=$1 AND upstream_model_ref=$2 AND protocol_code=$3
+		SELECT DISTINCT scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id
+		FROM serving WHERE account_id=$1 AND upstream_model_ref=$2 AND ($3='' OR protocol_code=$3)
 	), coverage AS (
-		SELECT affected.*,EXISTS(SELECT 1 FROM serving candidate WHERE candidate.account_id<>$1 AND candidate.scope_type=affected.scope_type AND candidate.scope_id=affected.scope_id AND candidate.wallet_id=affected.wallet_id AND candidate.model_id=affected.model_id AND candidate.upstream_model_ref=affected.upstream_model_ref AND candidate.protocol_code=affected.protocol_code) covered
+		SELECT affected.*,EXISTS(SELECT 1 FROM serving candidate WHERE candidate.account_id<>$1 AND candidate.scope_type=affected.scope_type AND candidate.scope_id=affected.scope_id AND candidate.wallet_id=affected.wallet_id AND candidate.model_id=affected.model_id AND candidate.upstream_model_ref=affected.upstream_model_ref AND candidate.protocol_code=affected.protocol_code AND candidate.protocol_version_id=affected.protocol_version_id) covered
 		FROM affected
 	)
 	SELECT count(*),count(*) FILTER (WHERE covered),count(*) FILTER (WHERE NOT covered) FROM coverage`, accountID, model, protocol).Scan(&affected, &covered, &gaps)
@@ -527,7 +579,7 @@ func (r *PostgresRepository) CatalogRollbackImpact(ctx context.Context, sourceVe
 	}
 	var dependencies ImpactDependencySummary
 	if err := tx.QueryRow(ctx, `SELECT
-		count(DISTINCT route.id),count(DISTINCT route.id) FILTER (WHERE route.health_status='HEALTHY'),
+		count(DISTINCT route.id),count(DISTINCT route.id) FILTER (WHERE route.reference_status='RESOLVED' AND route.health_status='HEALTHY' AND route.health_expires_at>transaction_timestamp()),
 		count(DISTINCT provision.id),0,
 		count(DISTINCT provision.id) FILTER (WHERE provision.lease_until>transaction_timestamp()),
 		count(DISTINCT request.id) FILTER (WHERE request.execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING')),
@@ -577,7 +629,7 @@ func modelImpactInTx(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replacem
 	evidence.PriceDimensions = []ImpactPriceQuery{{ModelID: modelID, ProtocolCode: protocol, CreditUnit: "MICROCREDIT"}}
 	err = tx.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM routing_policies WHERE model IN ($1,$2)),
-		(SELECT count(*) FROM routing_policies WHERE model IN ($1,$2) AND health_status='HEALTHY'),
+		(SELECT count(*) FROM routing_policies WHERE (model_id::text=$1 OR model=$2) AND reference_status='RESOLVED' AND health_status='HEALTHY' AND health_expires_at>transaction_timestamp()),
 		(SELECT count(*) FROM route_provisionings WHERE model_id=$3),
 		0,
 		(SELECT count(*) FROM route_provisionings WHERE model_id=$3 AND lease_until>transaction_timestamp()),
@@ -603,6 +655,101 @@ func (r *PostgresRepository) TokenAccountImpact(ctx context.Context, accountID u
 
 func (r *PostgresRepository) TokenRouteImpact(ctx context.Context, accountID uuid.UUID, model, protocol, action string) (ImpactLocalEvidence, error) {
 	return r.tokenAccountScopedImpact(ctx, accountID, strings.TrimSpace(model), strings.ToUpper(strings.TrimSpace(protocol)), strings.ToUpper(strings.TrimSpace(action)), nil)
+}
+
+func (r *PostgresRepository) StableTokenRouteImpact(ctx context.Context, accountID uuid.UUID, input StableRouteImpactInput) (ImpactLocalEvidence, error) {
+	input.Action = strings.ToUpper(strings.TrimSpace(input.Action))
+	if accountID == uuid.Nil || input.Action != "UPSERT" && input.Action != "DELETE" || input.Action == "UPSERT" && (input.ModelID == uuid.Nil || input.ProtocolVersionID == uuid.Nil) || input.Action == "DELETE" && input.RouteID == uuid.Nil {
+		return ImpactLocalEvidence{}, ErrForbidden
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	defer tx.Rollback(ctx)
+	var evidence ImpactLocalEvidence
+	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&evidence.ObservedAt); err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	var accountUpdated time.Time
+	var accountVersion int64
+	if err = tx.QueryRow(ctx, `SELECT updated_at,management_version FROM token_accounts WHERE id=$1 AND management_mode='PLATFORM'`, accountID).Scan(&accountUpdated, &accountVersion); errors.Is(err, pgx.ErrNoRows) {
+		return ImpactLocalEvidence{}, ErrNotFound
+	} else if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.CurrentVersion.AccountUpdatedAt, evidence.CurrentVersion.AccountVersion = &accountUpdated, &accountVersion
+	var reference stableRouteReference
+	var routeID uuid.UUID
+	var routeGeneration, routeVersion *int64
+	if input.Action == "UPSERT" {
+		reference, err = resolveStableRouteReference(ctx, tx, input.ModelID, input.ProtocolVersionID)
+		if err != nil {
+			return ImpactLocalEvidence{}, err
+		}
+		evidence.CurrentVersion.CatalogVersion = &reference.CatalogVersion
+		evidence.CurrentVersion.CapabilityVersionID = &reference.CapabilityVersionID
+		evidence.CurrentVersion.ProtocolDefinitionID = &reference.ProtocolVersionID
+		var generation, version int64
+		err = tx.QueryRow(ctx, `SELECT id,route_generation,route_version FROM routing_policies WHERE token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND reference_status='RESOLVED'`, accountID, input.ModelID, input.ProtocolVersionID).Scan(&routeID, &generation, &version)
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = nil
+			evidence.CurrentStatus = "CREATE"
+			zero := int64(0)
+			routeGeneration, routeVersion = &zero, &zero
+		} else if err == nil {
+			evidence.CurrentStatus = "PRESENT"
+			routeGeneration, routeVersion = &generation, &version
+		}
+	} else {
+		var generation, version int64
+		err = tx.QueryRow(ctx, `SELECT route.model_id,route.protocol_version_id,route.route_generation,route.route_version,identity.upstream_model_ref,protocol.protocol_code,identity.provider_id,identity.adapter_version FROM routing_policies route JOIN model_identities identity ON identity.id=route.model_id JOIN protocol_definitions protocol ON protocol.id=route.protocol_version_id WHERE route.id=$1 AND route.token_account_id=$2 AND route.reference_status='RESOLVED'`, input.RouteID, accountID).Scan(&reference.ModelID, &reference.ProtocolVersionID, &generation, &version, &reference.UpstreamModel, &reference.ProtocolCode, &reference.Provider, &reference.AdapterVersion)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ImpactLocalEvidence{}, ErrNotFound
+		}
+		if err == nil {
+			routeID, routeGeneration, routeVersion, evidence.CurrentStatus = input.RouteID, &generation, &version, "PRESENT"
+			evidence.CurrentVersion.ProtocolDefinitionID = &reference.ProtocolVersionID
+			if err = tx.QueryRow(ctx, `SELECT catalog_version,model_capability_version_id FROM model_catalog_entries WHERE model_id=$1 AND protocol_definition_id=$2 ORDER BY catalog_version DESC LIMIT 1`, reference.ModelID, reference.ProtocolVersionID).Scan(&reference.CatalogVersion, &reference.CapabilityVersionID); err != nil {
+				return ImpactLocalEvidence{}, err
+			}
+			evidence.CurrentVersion.CatalogVersion = &reference.CatalogVersion
+			evidence.CurrentVersion.CapabilityVersionID = &reference.CapabilityVersionID
+		}
+	}
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.ResourceType = "TOKEN_ROUTE"
+	if routeID != uuid.Nil {
+		evidence.ResourceID = routeID.String()
+	} else {
+		evidence.ResourceID = accountID.String() + ":" + reference.ModelID.String() + ":" + reference.ProtocolVersionID.String()
+	}
+	evidence.CurrentVersion.RouteGeneration, evidence.CurrentVersion.RouteVersion = routeGeneration, routeVersion
+	err = tx.QueryRow(ctx, `SELECT
+ (SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND reference_status='RESOLVED'),
+ (SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND reference_status='RESOLVED' AND health_status='HEALTHY' AND health_expires_at>transaction_timestamp()),
+ (SELECT count(*) FROM route_provisionings WHERE active_token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3),
+ (SELECT count(*) FROM route_provisionings WHERE active_token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND status='READY'),
+ (SELECT count(*) FROM route_provisionings WHERE active_token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND lease_until>transaction_timestamp()),
+ (SELECT count(*) FROM usage_requests WHERE token_account_id=$1 AND model_id=$2 AND protocol_definition_id=$3 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING')),
+ (SELECT count(DISTINCT session_id) FROM usage_requests WHERE token_account_id=$1 AND model_id=$2 AND protocol_definition_id=$3 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING'))`, accountID, reference.ModelID, reference.ProtocolVersionID).Scan(&evidence.Dependencies.Routes, &evidence.Dependencies.HealthyRoutes, &evidence.Dependencies.Provisionings, &evidence.Dependencies.ReadyProvisionings, &evidence.Dependencies.ActiveLeases, &evidence.Dependencies.InflightRequests, &evidence.Dependencies.ActiveSessions)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	if input.Action == "DELETE" {
+		evidence.Dependencies.AffectedCoverageTuples, evidence.Dependencies.RemainingReadyCoverage, evidence.Dependencies.CoverageGaps, err = stableRouteDeleteCoverage(ctx, tx, accountID, routeID, reference.ProtocolVersionID)
+		if err != nil {
+			return ImpactLocalEvidence{}, err
+		}
+	}
+	evidence.CurrentVersion.EvidenceSetSHA256, err = stableRouteImpactKeySet(ctx, tx, accountID, routeID, reference)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.CurrentVersion.EvidenceETag = localImpactETag(evidence)
+	return evidence, commitReadOnly(ctx, tx)
 }
 
 func (r *PostgresRepository) TokenCredentialImpact(ctx context.Context, accountID uuid.UUID, credentialID *uuid.UUID) (ImpactLocalEvidence, error) {
@@ -692,7 +839,7 @@ func (r *PostgresRepository) tokenAccountScopedImpact(ctx context.Context, accou
 	}
 	err = tx.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND ($2 OR model=$3)),
-		(SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND ($2 OR model=$3) AND health_status='HEALTHY'),
+		(SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND ($2 OR model_id::text=$3 OR model=$3) AND reference_status='RESOLVED' AND health_status='HEALTHY' AND health_expires_at>transaction_timestamp()),
 		(SELECT count(*) FROM route_provisionings WHERE active_token_account_id=$1 AND ($2 OR upstream_model_ref=$3) AND ($4 OR active_credential_id=$5)),
 		0,
 		(SELECT count(*) FROM route_provisionings WHERE active_token_account_id=$1 AND ($2 OR upstream_model_ref=$3) AND ($4 OR active_credential_id=$5) AND lease_until>transaction_timestamp()),
@@ -726,7 +873,7 @@ func (r *PostgresRepository) tokenAccountScopedImpact(ctx context.Context, accou
 
 func localImpactETag(evidence ImpactLocalEvidence) string {
 	version := evidence.CurrentVersion
-	return impactETag(evidence.ResourceType, evidence.ResourceID, evidence.CurrentStatus, valueInt64(version.CatalogVersion), valueUUID(version.CapabilityVersionID), valueUUID(version.ProtocolDefinitionID), valueTime(version.AccountUpdatedAt), valueInt64(version.RouteGeneration), valueInt(version.CredentialVersion), version.EvidenceSetSHA256, strconv.FormatInt(evidence.Dependencies.Routes, 10), strconv.FormatInt(evidence.Dependencies.HealthyRoutes, 10), strconv.FormatInt(evidence.Dependencies.Provisionings, 10), strconv.FormatInt(evidence.Dependencies.ReadyProvisionings, 10), strconv.FormatInt(evidence.Dependencies.InflightRequests, 10), strconv.FormatInt(evidence.Dependencies.ActiveSessions, 10), strconv.FormatInt(evidence.Dependencies.ActiveLeases, 10), strconv.FormatInt(evidence.Dependencies.AlternativeCredentials, 10), strconv.FormatInt(evidence.Dependencies.AlternativeAccounts, 10), strconv.FormatInt(evidence.Dependencies.AffectedCoverageTuples, 10), strconv.FormatInt(evidence.Dependencies.RemainingReadyCoverage, 10), strconv.FormatInt(evidence.Dependencies.CoverageGaps, 10))
+	return impactETag(evidence.ResourceType, evidence.ResourceID, evidence.CurrentStatus, valueInt64(version.CatalogVersion), valueUUID(version.CapabilityVersionID), valueUUID(version.ProtocolDefinitionID), valueTime(version.AccountUpdatedAt), valueInt64(version.AccountVersion), valueInt64(version.RouteGeneration), valueInt64(version.RouteVersion), valueInt(version.CredentialVersion), version.EvidenceSetSHA256, strconv.FormatInt(evidence.Dependencies.Routes, 10), strconv.FormatInt(evidence.Dependencies.HealthyRoutes, 10), strconv.FormatInt(evidence.Dependencies.Provisionings, 10), strconv.FormatInt(evidence.Dependencies.ReadyProvisionings, 10), strconv.FormatInt(evidence.Dependencies.InflightRequests, 10), strconv.FormatInt(evidence.Dependencies.ActiveSessions, 10), strconv.FormatInt(evidence.Dependencies.ActiveLeases, 10), strconv.FormatInt(evidence.Dependencies.AlternativeCredentials, 10), strconv.FormatInt(evidence.Dependencies.AlternativeAccounts, 10), strconv.FormatInt(evidence.Dependencies.AffectedCoverageTuples, 10), strconv.FormatInt(evidence.Dependencies.RemainingReadyCoverage, 10), strconv.FormatInt(evidence.Dependencies.CoverageGaps, 10))
 }
 
 func appendImpactKeyRows(ctx context.Context, tx pgx.Tx, digest hash.Hash, query string, args ...any) error {
@@ -776,10 +923,32 @@ func modelImpactKeySet(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, upstre
 	}{
 		{`SELECT 'catalog|'||jsonb_build_array(entry.catalog_version,entry.model_id,entry.lifecycle_status,entry.model_capability_version_id,entry.protocol_definition_id,entry.source_available,entry.replacement_model_id,entry.new_session_cutoff_at,entry.continuation_cutoff_at,entry.force_cancel_inflight)::text FROM model_catalog_entries entry WHERE entry.catalog_version=(SELECT max(version) FROM model_catalog_versions) AND entry.model_id=$1`, []any{modelID}},
 		{`SELECT 'route|'||jsonb_build_array(id,model,protocol_code,route_generation,'PRESENT',health_status)::text FROM routing_policies WHERE model IN ($1,$2) ORDER BY id`, []any{modelID.String(), upstream}},
-		{`SELECT 'provisioning|'||jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code)::text FROM route_provisionings WHERE model_id=$1 ORDER BY id`, []any{modelID}},
+		{`SELECT 'provisioning|'||jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code,protocol_version_id)::text FROM route_provisionings WHERE model_id=$1 ORDER BY id`, []any{modelID}},
 		{`SELECT 'request|'||jsonb_build_array(id,session_id,status,execution_status)::text FROM usage_requests WHERE model_id=$1 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, []any{modelID}},
 		{`SELECT DISTINCT 'credential|'||jsonb_build_array(credential.id,credential.version,credential.status,credential.validation_status,credential.provider,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(credential.allowed_models) value),route.model,route.protocol_code)::text FROM routing_policies route JOIN provider_credentials credential ON credential.token_account_id=route.token_account_id WHERE route.model IN ($1,$2) ORDER BY 1`, []any{modelID.String(), upstream}},
 		{`SELECT 'replacement|'||jsonb_build_array(entry.model_id,entry.lifecycle_status,entry.model_capability_version_id,entry.protocol_definition_id,entry.source_available)::text FROM model_catalog_entries entry WHERE $1<>$2 AND entry.catalog_version=(SELECT max(version) FROM model_catalog_versions) AND entry.model_id=$1`, []any{replacement, uuid.Nil}},
+	}
+	for _, item := range queries {
+		if err := appendImpactKeyRows(ctx, tx, digest, item.sql, item.args...); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+func stableRouteImpactKeySet(ctx context.Context, tx pgx.Tx, accountID, routeID uuid.UUID, reference stableRouteReference) (string, error) {
+	digest := sha256.New()
+	queries := []struct {
+		sql  string
+		args []any
+	}{
+		{`SELECT 'account|'||jsonb_build_array(id,status,management_version,updated_at)::text FROM token_accounts WHERE id=$1`, []any{accountID}},
+		{`SELECT 'target-route|'||jsonb_build_array(id,token_account_id,model_id,protocol_version_id,priority,default_scope,reference_status,route_version,route_generation,health_version,health_status,health_diagnostic_code,health_observed_at,health_expires_at,updated_at)::text FROM routing_policies WHERE token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND ($4::uuid='00000000-0000-0000-0000-000000000000' OR id=$4) ORDER BY id`, []any{accountID, reference.ModelID, reference.ProtocolVersionID, routeID}},
+		{`SELECT 'candidate-route|'||jsonb_build_array(id,token_account_id,model_id,protocol_version_id,priority,default_scope,reference_status,route_version,route_generation,health_version,health_status,health_diagnostic_code,health_observed_at,health_expires_at,updated_at)::text FROM routing_policies WHERE model_id=$1 AND protocol_version_id=$2 AND reference_status='RESOLVED' ORDER BY token_account_id,id`, []any{reference.ModelID, reference.ProtocolVersionID}},
+		{`SELECT 'provisioning|'||jsonb_build_array(id,scope_type,scope_id,wallet_id,model_id,protocol_version_id,status,stage,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,updated_at)::text FROM route_provisionings WHERE model_id=$1 AND protocol_version_id=$2 ORDER BY id`, []any{reference.ModelID, reference.ProtocolVersionID}},
+		{`SELECT 'request|'||jsonb_build_array(id,token_account_id,credential_id,session_id,protocol_definition_id,route_generation,status,execution_status,execution_version,updated_at)::text FROM usage_requests WHERE model_id=$1 AND protocol_definition_id=$2 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, []any{reference.ModelID, reference.ProtocolVersionID}},
+		{`SELECT 'credential|'||jsonb_build_array(id,token_account_id,provider,version,status,validation_status,fingerprint,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(allowed_models) value),validated_at)::text FROM provider_credentials WHERE provider=$1 AND $2=ANY(allowed_models) ORDER BY token_account_id,id`, []any{reference.Provider, reference.UpstreamModel}},
+		{`SELECT 'coverage|'||jsonb_build_array(provisioning_id,provisioning_status,scope_type,scope_id,wallet_id,model_id,protocol_version_id,actual_generation,account_id,account_status,required_provider,credential_id,credential_version,route_id,route_health_status,route_generation)::text FROM ` + canServeCoverageRelation + ` serving WHERE model_id=$1 AND protocol_version_id=$2 ORDER BY scope_type,scope_id,wallet_id,account_id,credential_id,route_id,provisioning_id`, []any{reference.ModelID, reference.ProtocolVersionID}},
 	}
 	for _, item := range queries {
 		if err := appendImpactKeyRows(ctx, tx, digest, item.sql, item.args...); err != nil {
@@ -797,7 +966,7 @@ func catalogImpactKeySet(ctx context.Context, tx pgx.Tx, sourceVersion, currentV
 	}{
 		{`SELECT 'catalog-diff|'||jsonb_build_array(catalog_version,model_id,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available,replacement_model_id,new_session_cutoff_at,continuation_cutoff_at,force_cancel_inflight)::text FROM model_catalog_entries WHERE catalog_version=ANY($1::bigint[]) ORDER BY catalog_version,model_id`, []any{[]int64{sourceVersion, currentVersion}}},
 		{`SELECT 'route|'||jsonb_build_array(route.id,route.model,route.protocol_code,route.route_generation,'PRESENT',route.health_status)::text FROM routing_policies route JOIN model_identities identity ON route.model IN (identity.id::text,identity.upstream_model_ref) WHERE identity.id=ANY($1::uuid[]) ORDER BY route.id`, []any{modelIDs}},
-		{`SELECT 'provisioning|'||jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code)::text FROM route_provisionings WHERE model_id=ANY($1::uuid[]) ORDER BY id`, []any{modelIDs}},
+		{`SELECT 'provisioning|'||jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code,protocol_version_id)::text FROM route_provisionings WHERE model_id=ANY($1::uuid[]) ORDER BY id`, []any{modelIDs}},
 		{`SELECT 'request|'||jsonb_build_array(id,session_id,status,execution_status)::text FROM usage_requests WHERE model_id=ANY($1::uuid[]) AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, []any{modelIDs}},
 		{`SELECT DISTINCT 'credential|'||jsonb_build_array(credential.id,credential.version,credential.status,credential.validation_status,credential.provider,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(credential.allowed_models) value),route.model,route.protocol_code)::text FROM routing_policies route JOIN model_identities identity ON route.model IN (identity.id::text,identity.upstream_model_ref) JOIN provider_credentials credential ON credential.token_account_id=route.token_account_id WHERE identity.id=ANY($1::uuid[]) ORDER BY 1`, []any{modelIDs}},
 	}
@@ -823,13 +992,13 @@ func tokenAccountImpactKeySet(ctx context.Context, tx pgx.Tx, accountID uuid.UUI
 	}{
 		{`SELECT 'account|'||jsonb_build_array(id,status,updated_at,owner_type,owner_id)::text FROM token_accounts WHERE id=$1`, []any{accountID}},
 		{`SELECT 'route|'||jsonb_build_array(id,model,protocol_code,route_generation,'PRESENT',health_status)::text FROM routing_policies WHERE token_account_id=$1 AND ($2 OR model=$3) ORDER BY id`, []any{accountID, modelAll, model}},
-		{`SELECT 'provisioning|'||jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code)::text FROM route_provisionings WHERE active_token_account_id=$1 AND ($2 OR upstream_model_ref=$3) AND ($4 OR active_credential_id=$5) ORDER BY id`, []any{accountID, modelAll, model, credentialAll, credential}},
+		{`SELECT 'provisioning|'||jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code,protocol_version_id)::text FROM route_provisionings WHERE active_token_account_id=$1 AND ($2 OR upstream_model_ref=$3) AND ($4 OR active_credential_id=$5) ORDER BY id`, []any{accountID, modelAll, model, credentialAll, credential}},
 		{`SELECT 'request|'||jsonb_build_array(id,session_id,status,execution_status)::text FROM usage_requests WHERE token_account_id=$1 AND ($2 OR model=$3) AND ($4 OR credential_id=$5) AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, []any{accountID, modelAll, model, credentialAll, credential}},
 		{`SELECT 'credential|'||jsonb_build_array(id,version,status,validation_status,provider,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(allowed_models) value))::text FROM provider_credentials WHERE token_account_id=$1 ORDER BY id`, []any{accountID}},
 		{`WITH serving AS ` + canServeCoverageRelation + `,` + impactAffectedCoverageCTE + `,` + alternativeAccountCandidatesCTE + `
-		 SELECT 'qualifying-coverage|'||jsonb_build_array(serving.provisioning_id,serving.provisioning_status,serving.scope_type,serving.scope_id,serving.wallet_id,serving.model_id,serving.upstream_model_ref,serving.protocol_code,serving.actual_generation,serving.account_id,serving.owner_type,serving.owner_id,serving.owner_organization_id,serving.owner_unit_id,serving.account_status,serving.required_provider,serving.credential_id,serving.credential_version,serving.credential_status,serving.validation_status,serving.credential_provider,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(serving.allowed_models) value),serving.route_id,serving.route_health_status,serving.route_generation)::text
-		 FROM serving WHERE (serving.account_id=$1 OR serving.account_id IN (SELECT account_id FROM alternative_accounts)) AND EXISTS(SELECT 1 FROM affected WHERE serving.scope_type=affected.scope_type AND serving.scope_id=affected.scope_id AND serving.wallet_id=affected.wallet_id AND serving.model_id=affected.model_id AND serving.upstream_model_ref=affected.upstream_model_ref AND serving.protocol_code=affected.protocol_code)
-		 ORDER BY serving.scope_type,serving.scope_id,serving.wallet_id,serving.model_id,serving.protocol_code,serving.account_id,serving.credential_id,serving.route_id,serving.provisioning_id`, []any{accountID, model, credentialID}},
+		 SELECT 'qualifying-coverage|'||jsonb_build_array(serving.provisioning_id,serving.provisioning_status,serving.scope_type,serving.scope_id,serving.wallet_id,serving.model_id,serving.upstream_model_ref,serving.protocol_code,serving.protocol_version_id,serving.actual_generation,serving.account_id,serving.owner_type,serving.owner_id,serving.owner_organization_id,serving.owner_unit_id,serving.account_status,serving.required_provider,serving.credential_id,serving.credential_version,serving.credential_status,serving.validation_status,serving.credential_provider,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(serving.allowed_models) value),serving.route_id,serving.route_health_status,serving.route_generation)::text
+		 FROM serving WHERE (serving.account_id=$1 OR serving.account_id IN (SELECT account_id FROM alternative_accounts)) AND EXISTS(SELECT 1 FROM affected WHERE serving.scope_type=affected.scope_type AND serving.scope_id=affected.scope_id AND serving.wallet_id=affected.wallet_id AND serving.model_id=affected.model_id AND serving.upstream_model_ref=affected.upstream_model_ref AND serving.protocol_code=affected.protocol_code AND serving.protocol_version_id=affected.protocol_version_id)
+		 ORDER BY serving.scope_type,serving.scope_id,serving.wallet_id,serving.model_id,serving.protocol_version_id,serving.account_id,serving.credential_id,serving.route_id,serving.provisioning_id`, []any{accountID, model, credentialID}},
 	}
 	for _, item := range queries {
 		if err := appendImpactKeyRows(ctx, tx, digest, item.sql, item.args...); err != nil {

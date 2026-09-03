@@ -3,12 +3,13 @@ package token
 import (
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
 
-func Eligible(context AuthorizationContext, candidate Candidate, model string) bool {
-	if candidate.Status != "ACTIVE" || candidate.HealthStatus == "UNHEALTHY" || candidate.CredentialID == uuid.Nil || candidate.WalletID == uuid.Nil || !slices.Contains(candidate.AllowedModels, model) {
+func eligibleAt(context AuthorizationContext, candidate Candidate, model string, now time.Time) bool {
+	if candidate.Status != "ACTIVE" || candidate.HealthStatus != "HEALTHY" || candidate.HealthExpiresAt == nil || !now.Before(candidate.HealthExpiresAt.UTC()) || candidate.CredentialID == uuid.Nil || candidate.WalletID == uuid.Nil || !slices.Contains(candidate.AllowedModels, model) {
 		return false
 	}
 	if context.ContextType == "PERSONAL" {
@@ -30,6 +31,10 @@ func Eligible(context AuthorizationContext, candidate Candidate, model string) b
 	return false
 }
 
+func Eligible(context AuthorizationContext, candidate Candidate, model string) bool {
+	return eligibleAt(context, candidate, model, time.Now().UTC())
+}
+
 func SelectRoute(context AuthorizationContext, request RouteRequest, candidates []Candidate) (Candidate, error) {
 	model := strings.TrimSpace(request.Model)
 	protocolCode := strings.ToUpper(strings.TrimSpace(request.ProtocolCode))
@@ -41,7 +46,10 @@ func SelectRoute(context AuthorizationContext, request RouteRequest, candidates 
 	}
 	eligible := make([]Candidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		if Eligible(context, candidate, model) && (candidate.ProtocolCode == "" || candidate.ProtocolCode == protocolCode) {
+		// Production candidates carry transaction_timestamp() from the same
+		// database statement that proves the health TTL. A zero value is not a
+		// client-overridable clock fallback and therefore fails closed here.
+		if !candidate.DatabaseNow.IsZero() && eligibleAt(context, candidate, model, candidate.DatabaseNow.UTC()) && (candidate.ProtocolCode == "" || candidate.ProtocolCode == protocolCode) {
 			eligible = append(eligible, candidate)
 		}
 	}

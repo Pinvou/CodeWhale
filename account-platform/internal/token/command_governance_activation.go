@@ -2,12 +2,16 @@ package token
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 )
+
+var ErrTokenRouteActivationChanged = errors.New("token route governance activation changed during mutation")
 
 // TokenCommandGovernanceActivation is the narrow read model that APT-138
 // will back with its single persistent activation record. Until then no
@@ -20,6 +24,41 @@ type TokenCommandGovernanceActivation struct {
 
 type TokenCommandGovernanceActivationReader interface {
 	CurrentTokenCommandGovernanceActivation(context.Context) (TokenCommandGovernanceActivation, error)
+}
+
+// TokenRouteActivationTransactionGuard is the transaction seam APT-138 will
+// implement with its persistent activation row. It must lock and compare the
+// selected state and epoch inside the route mutation transaction.
+type TokenRouteActivationTransactionGuard interface {
+	LockAndCheckTokenRouteActivation(context.Context, pgx.Tx, TokenCommandGovernanceActivation) error
+}
+
+type tokenRouteActivationContextKey struct{}
+
+type tokenRouteActivationSelection struct {
+	TokenCommandGovernanceActivation
+	transactional bool
+}
+
+func selectTokenRouteActivation(ctx *gin.Context, activation TokenCommandGovernanceActivation, transactional bool) {
+	selection := tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: transactional}
+	ctx.Request = ctx.Request.WithContext(context.WithValue(ctx.Request.Context(), tokenRouteActivationContextKey{}, selection))
+}
+
+func (r *PostgresRepository) WithTokenRouteActivationTransactionGuard(guard TokenRouteActivationTransactionGuard) *PostgresRepository {
+	r.routeActivationGuard = guard
+	return r
+}
+
+func (r *PostgresRepository) recheckTokenRouteActivation(ctx context.Context, tx pgx.Tx) error {
+	selection, ok := ctx.Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
+	if !ok || !selection.transactional {
+		return nil
+	}
+	if r.routeActivationGuard == nil {
+		return ErrTokenRouteActivationChanged
+	}
+	return r.routeActivationGuard.LockAndCheckTokenRouteActivation(ctx, tx, selection.TokenCommandGovernanceActivation)
 }
 
 func (s *Service) WithTokenCommandGovernanceActivation(reader TokenCommandGovernanceActivationReader) *Service {
@@ -38,6 +77,7 @@ func (s *Service) requireNewTokenCommandGovernanceActive() gin.HandlerFunc {
 			writeTokenCommandGovernanceInactive(ctx)
 			return
 		}
+		selectTokenRouteActivation(ctx, activation, true)
 		ctx.Next()
 	}
 }
@@ -72,6 +112,35 @@ func (s *Service) selectLegacyTokenDirect() gin.HandlerFunc {
 		}
 		// SAFE_ROLLBACK and malformed/mixed-version states stop all new writes;
 		// they must never revive the historical direct branch.
+		writeTokenCommandGovernanceInactive(ctx)
+	}
+}
+
+// selectLegacyTokenRouteDirect keeps the v1 text/health contract available
+// during PRE_ACTIVATION. The atomic APT-138 transition retires it before v2
+// stable writes can be selected, so no mixed write contract is reachable.
+func (s *Service) selectLegacyTokenRouteDirect() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if s.commandGovernanceActivation == nil {
+			selectTokenRouteActivation(ctx, TokenCommandGovernanceActivation{State: "PRE_ACTIVATION", Epoch: 0}, false)
+			ctx.Next()
+			return
+		}
+		activation, err := s.commandGovernanceActivation.CurrentTokenCommandGovernanceActivation(ctx.Request.Context())
+		if err != nil {
+			writeTokenCommandGovernanceInactive(ctx)
+			return
+		}
+		if activation.State == "PRE_ACTIVATION" && activation.Epoch == 0 {
+			selectTokenRouteActivation(ctx, activation, true)
+			ctx.Next()
+			return
+		}
+		if activation.State == "ACTIVE" && activation.Epoch > 0 {
+			api.WriteError(ctx.Writer, http.StatusGone, "LEGACY_TOKEN_ROUTE_CONTRACT_RETIRED", "use the stable route API", httpserver.RequestID(ctx.Request.Context()))
+			ctx.Abort()
+			return
+		}
 		writeTokenCommandGovernanceInactive(ctx)
 	}
 }

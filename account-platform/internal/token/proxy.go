@@ -136,12 +136,12 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, provisioningErr)
 		return
 	}
-	candidates, err := s.repository.ListCandidates(r.Context(), catalogModel.UpstreamModelRef, "CHAT")
+	candidates, err := s.repository.ListCandidates(r.Context(), catalogModel.ModelID.String(), catalogModel.ProtocolDefinitionID.String())
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	route, err := SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT"}, candidates)
+	route, err := SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: catalogModel.ProtocolCode}, candidates)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

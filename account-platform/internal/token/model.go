@@ -22,6 +22,8 @@ var (
 	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle conflicts with current state")
 	ErrCancellationRequested         = errors.New("usage cancellation was requested before dispatch")
 	ErrRateLimited                   = errors.New("model request rate or concurrency limit reached")
+	ErrRouteVersionConflict          = errors.New("token route version conflict")
+	ErrRouteReferenceInvalid         = errors.New("token route model or protocol reference is invalid")
 )
 
 type RateLimitError struct{ RetryAfter time.Duration }
@@ -68,8 +70,12 @@ type Candidate struct {
 	DefaultScope      string
 	Priority          int
 	HealthStatus      string
+	HealthExpiresAt   *time.Time
+	DatabaseNow       time.Time
 	CredentialID      uuid.UUID
 	ProtocolCode      string
+	ModelID           uuid.UUID
+	ProtocolVersionID uuid.UUID
 	RouteGeneration   int64
 }
 

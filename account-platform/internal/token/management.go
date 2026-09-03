@@ -2,13 +2,18 @@ package token
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func (r *PostgresRepository) SetAccountStatus(ctx context.Context, accountID uuid.UUID, status string, actorID uuid.UUID, reason string) (TokenAccount, error) {
@@ -130,9 +135,22 @@ func (r *PostgresRepository) UpdateSharePolicy(ctx context.Context, accountID uu
 	return account, tx.Commit(ctx)
 }
 
+type StableRouteInput struct {
+	ModelID                uuid.UUID
+	ProtocolVersionID      uuid.UUID
+	Priority               int
+	DefaultScope           string
+	ExpectedAccountVersion int64
+	ExpectedRouteVersion   int64
+	IdempotencyKey         string
+	Reason                 string
+}
+
+// UpsertRoute is the frozen v1 direct contract. APT-138 switches callers to
+// the v2 governed route. Until then this path remains available and never
+// creates a stable reference from untrusted text.
 func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUID, model, protocolCode string, priority int, defaultScope, healthStatus string, actorID uuid.UUID) (RoutingPolicy, error) {
-	model = strings.TrimSpace(model)
-	protocolCode = strings.ToUpper(strings.TrimSpace(protocolCode))
+	model, protocolCode = strings.TrimSpace(model), strings.ToUpper(strings.TrimSpace(protocolCode))
 	defaultScope, healthStatus = strings.ToUpper(strings.TrimSpace(defaultScope)), strings.ToUpper(strings.TrimSpace(healthStatus))
 	if accountID == uuid.Nil || actorID == uuid.Nil || model == "" || protocolCode != "CHAT" || priority < 0 || priority > 10000 || !slices.Contains([]string{"NONE", "UNIT", "ORG"}, defaultScope) || !slices.Contains([]string{"HEALTHY", "DEGRADED", "UNHEALTHY"}, healthStatus) {
 		return RoutingPolicy{}, ErrForbidden
@@ -142,36 +160,323 @@ func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUI
 		return RoutingPolicy{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return RoutingPolicy{}, err
+	}
 	account, err := getTokenAccount(ctx, tx, accountID, true)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || account.ManagementMode != "PLATFORM" {
 		return RoutingPolicy{}, ErrNotFound
 	}
 	if err != nil {
 		return RoutingPolicy{}, err
-	}
-	if account.ManagementMode != "PLATFORM" {
-		return RoutingPolicy{}, ErrNotFound
 	}
 	if !defaultScopeAllowed(account.OwnerType, defaultScope) {
 		return RoutingPolicy{}, ErrForbidden
 	}
 	var allowed bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM provider_credentials WHERE token_account_id=$1 AND status='ACTIVE' AND validation_status='VALID' AND $2=ANY(allowed_models))`, accountID, model).Scan(&allowed); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM provider_credentials WHERE token_account_id=$1 AND status='ACTIVE' AND validation_status='VALID' AND $2=ANY(allowed_models))`, accountID, model).Scan(&allowed); err != nil {
 		return RoutingPolicy{}, err
 	}
 	if !allowed {
 		return RoutingPolicy{}, ErrNotFound
 	}
-	now := r.now()
-	policy := RoutingPolicy{TokenAccountID: accountID, Model: model, ProtocolCode: protocolCode, Priority: priority, DefaultScope: defaultScope, HealthStatus: healthStatus, UpdatedAt: now}
-	err = tx.QueryRow(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by,route_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1) ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code=EXCLUDED.protocol_code,priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status=EXCLUDED.health_status,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,route_generation=routing_policies.route_generation+1 RETURNING route_generation`, uuid.Must(uuid.NewV7()), accountID, model, protocolCode, priority, defaultScope, healthStatus, now, actorID).Scan(&policy.RouteGeneration)
+	now := r.now().UTC()
+	var routeID uuid.UUID
+	var referenceStatus string
+	var routeCount int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND model=$2 AND reference_status<>'DELETED'`, accountID, model).Scan(&routeCount); err != nil {
+		return RoutingPolicy{}, err
+	}
+	if routeCount == 0 {
+		routeID = uuid.Must(uuid.NewV7())
+		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by,route_generation,reference_status,route_version,health_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1,'LEGACY_UNRESOLVED',1,1)`, routeID, accountID, model, protocolCode, priority, defaultScope, healthStatus, now, actorID)
+	} else if routeCount > 1 {
+		// Multiple protocol-versioned routes deliberately make the text-only v1
+		// mutation ambiguous; callers must wait for the v2 activation.
+		return RoutingPolicy{}, ErrAmbiguousRoute
+	} else if err = tx.QueryRow(ctx, `SELECT id,reference_status FROM routing_policies WHERE token_account_id=$1 AND model=$2 AND reference_status<>'DELETED' FOR UPDATE`, accountID, model).Scan(&routeID, &referenceStatus); err != nil {
+		return RoutingPolicy{}, err
+	} else if referenceStatus == "LEGACY_UNRESOLVED" {
+		_, err = tx.Exec(ctx, `UPDATE routing_policies SET protocol_code=$2,priority=$3,default_scope=$4,health_status=$5,updated_at=$6,updated_by=$7,route_generation=route_generation+1,route_version=route_version+1 WHERE id=$1`, routeID, protocolCode, priority, defaultScope, healthStatus, now, actorID)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE routing_policies SET priority=$2,default_scope=$3,health_status='UNKNOWN',health_diagnostic_code='LEGACY_CONFIGURATION_CHANGED',health_observed_at=NULL,health_expires_at=NULL,next_probe_at=$4,updated_at=$4,updated_by=$5,route_generation=route_generation+1,route_version=route_version+1,health_version=health_version+1 WHERE id=$1`, routeID, priority, defaultScope, now, actorID)
+	}
 	if err != nil {
 		return RoutingPolicy{}, err
 	}
-	if err := recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('model',$6,'protocol_code',$7,'priority',$8,'default_scope',$9,'health_status',$10)`, model, protocolCode, priority, defaultScope, healthStatus); err != nil {
+	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('model',$6,'protocol_code',$7,'priority',$8,'default_scope',$9,'health_status',$10)`, model, protocolCode, priority, defaultScope, healthStatus); err != nil {
 		return RoutingPolicy{}, err
 	}
-	return policy, tx.Commit(ctx)
+	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` WHERE id=$1`, routeID))
+	if err != nil {
+		return RoutingPolicy{}, err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return RoutingPolicy{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+func stableRouteDigest(command string, accountID uuid.UUID, input StableRouteInput) string {
+	payload, _ := json.Marshal(map[string]any{"command_type": command, "token_account_id": accountID, "model_id": input.ModelID, "protocol_version_id": input.ProtocolVersionID, "priority": input.Priority, "default_scope": input.DefaultScope, "expected_account_version": input.ExpectedAccountVersion, "expected_route_version": input.ExpectedRouteVersion, "reason": input.Reason})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
+}
+
+func validStableRouteInput(accountID, actorID uuid.UUID, input StableRouteInput) bool {
+	input.DefaultScope = strings.ToUpper(strings.TrimSpace(input.DefaultScope))
+	input.Reason = strings.TrimSpace(input.Reason)
+	return accountID != uuid.Nil && actorID != uuid.Nil && input.ModelID != uuid.Nil && input.ProtocolVersionID != uuid.Nil && input.Priority >= 0 && input.Priority <= 10000 && slices.Contains([]string{"NONE", "UNIT", "ORG"}, input.DefaultScope) && input.ExpectedAccountVersion > 0 && input.ExpectedRouteVersion >= 0 && len(input.IdempotencyKey) >= 16 && len(input.IdempotencyKey) <= 128 && utf8.RuneCountInString(input.Reason) >= 10 && utf8.RuneCountInString(input.Reason) <= 2000
+}
+
+func scanRoutingPolicy(row interface{ Scan(...any) error }) (RoutingPolicy, error) {
+	var item RoutingPolicy
+	err := row.Scan(&item.ID, &item.TokenAccountID, &item.Model, &item.ModelID, &item.ProtocolVersionID, &item.ProtocolCode, &item.Priority, &item.DefaultScope, &item.ReferenceStatus, &item.HealthStatus, &item.HealthDiagnostic, &item.HealthObservedAt, &item.HealthExpiresAt, &item.RouteVersion, &item.RouteGeneration, &item.UpdatedAt)
+	return item, err
+}
+
+const routingPolicyProjection = `SELECT id,token_account_id,model,model_id,protocol_version_id,protocol_code,priority,default_scope,reference_status,health_status,COALESCE(health_diagnostic_code,''),health_observed_at,health_expires_at,route_version,route_generation,updated_at FROM routing_policies`
+
+func stableRouteResult(item RoutingPolicy, accountVersion int64) (StableRouteResult, error) {
+	if item.ReferenceStatus != "RESOLVED" || item.ModelID == nil || item.ProtocolVersionID == nil || accountVersion < 1 {
+		return StableRouteResult{}, ErrRouteReferenceInvalid
+	}
+	return StableRouteResult{ID: item.ID, TokenAccountID: item.TokenAccountID, ModelID: *item.ModelID, ProtocolVersionID: *item.ProtocolVersionID, ProtocolCode: item.ProtocolCode, Priority: item.Priority, DefaultScope: item.DefaultScope, HealthStatus: item.HealthStatus, HealthDiagnostic: item.HealthDiagnostic, HealthObservedAt: item.HealthObservedAt, HealthExpiresAt: item.HealthExpiresAt, RouteVersion: item.RouteVersion, RouteGeneration: item.RouteGeneration, AccountVersion: accountVersion, UpdatedAt: item.UpdatedAt}, nil
+}
+
+type stableRouteReference struct {
+	ModelID             uuid.UUID
+	ProtocolVersionID   uuid.UUID
+	CatalogVersion      int64
+	CapabilityVersionID uuid.UUID
+	UpstreamModel       string
+	ProtocolCode        string
+	Provider            string
+	AdapterVersion      string
+}
+
+func resolveStableRouteReference(ctx context.Context, database interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, modelID, protocolVersionID uuid.UUID) (stableRouteReference, error) {
+	var result stableRouteReference
+	result.ModelID, result.ProtocolVersionID = modelID, protocolVersionID
+	err := database.QueryRow(ctx, `SELECT current.version,entry.model_capability_version_id,identity.upstream_model_ref,protocol.protocol_code,identity.provider_id,identity.adapter_version
+FROM model_catalog_versions current
+JOIN model_catalog_entries entry ON entry.catalog_version=current.version AND entry.model_id=$1 AND entry.lifecycle_status='PUBLISHED' AND entry.source_available=true
+JOIN model_identities identity ON identity.id=entry.model_id
+JOIN model_capability_versions capability ON capability.id=entry.model_capability_version_id AND capability.model_id=entry.model_id AND capability.protocol_definition_id=$2
+JOIN protocol_definitions protocol ON protocol.id=$2 AND protocol.id=entry.protocol_definition_id AND protocol.status='PUBLISHED'
+WHERE current.version=(SELECT max(version) FROM model_catalog_versions)`, modelID, protocolVersionID).Scan(&result.CatalogVersion, &result.CapabilityVersionID, &result.UpstreamModel, &result.ProtocolCode, &result.Provider, &result.AdapterVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return stableRouteReference{}, ErrRouteReferenceInvalid
+	}
+	return result, err
+}
+
+func (r *PostgresRepository) UpsertStableRoute(ctx context.Context, accountID uuid.UUID, input StableRouteInput, actorID uuid.UUID) (StableRouteResult, error) {
+	input.DefaultScope, input.IdempotencyKey, input.Reason = strings.ToUpper(strings.TrimSpace(input.DefaultScope)), strings.TrimSpace(input.IdempotencyKey), strings.TrimSpace(input.Reason)
+	if !validStableRouteInput(accountID, actorID, input) {
+		return StableRouteResult{}, ErrForbidden
+	}
+	digest := stableRouteDigest("TOKEN_ROUTE_UPSERT", accountID, input)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return StableRouteResult{}, err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "TOKEN_ROUTE:"+input.IdempotencyKey); err != nil {
+		return StableRouteResult{}, err
+	}
+	var storedActor uuid.UUID
+	var storedDigest string
+	var snapshot []byte
+	if err = tx.QueryRow(ctx, `SELECT actor_id,request_digest,result_snapshot FROM routing_policy_mutations WHERE idempotency_key=$1`, input.IdempotencyKey).Scan(&storedActor, &storedDigest, &snapshot); err == nil {
+		if storedActor != actorID || storedDigest != digest {
+			return StableRouteResult{}, ErrIdempotencyConflict
+		}
+		var replay StableRouteResult
+		if json.Unmarshal(snapshot, &replay) != nil || replay.ID == uuid.Nil || replay.ModelID == uuid.Nil || replay.ProtocolVersionID == uuid.Nil {
+			return StableRouteResult{}, ErrRouteVersionConflict
+		}
+		if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+			return StableRouteResult{}, err
+		}
+		return replay, tx.Commit(ctx)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return StableRouteResult{}, err
+	}
+	account, err := getTokenAccount(ctx, tx, accountID, true)
+	if errors.Is(err, pgx.ErrNoRows) || account.ManagementMode != "PLATFORM" {
+		return StableRouteResult{}, ErrNotFound
+	}
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	var accountVersion int64
+	if err = tx.QueryRow(ctx, `SELECT management_version FROM token_accounts WHERE id=$1`, accountID).Scan(&accountVersion); err != nil {
+		return StableRouteResult{}, err
+	}
+	if accountVersion != input.ExpectedAccountVersion {
+		return StableRouteResult{}, ErrRouteVersionConflict
+	}
+	if !defaultScopeAllowed(account.OwnerType, input.DefaultScope) {
+		return StableRouteResult{}, ErrForbidden
+	}
+	reference, err := resolveStableRouteReference(ctx, tx, input.ModelID, input.ProtocolVersionID)
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	var allowed bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM provider_credentials WHERE token_account_id=$1 AND provider=$2 AND status='ACTIVE' AND validation_status='VALID' AND $3=ANY(allowed_models))`, accountID, reference.Provider, reference.UpstreamModel).Scan(&allowed); err != nil {
+		return StableRouteResult{}, err
+	}
+	if !allowed {
+		return StableRouteResult{}, ErrRouteReferenceInvalid
+	}
+	now := r.now().UTC()
+	existing, loadErr := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` WHERE token_account_id=$1 AND ((reference_status='RESOLVED' AND model_id=$2 AND protocol_version_id=$3) OR (reference_status='LEGACY_UNRESOLVED' AND model=$4)) ORDER BY CASE reference_status WHEN 'RESOLVED' THEN 0 ELSE 1 END,id LIMIT 1 FOR UPDATE`, accountID, input.ModelID, input.ProtocolVersionID, reference.UpstreamModel))
+	var routeID uuid.UUID
+	if errors.Is(loadErr, pgx.ErrNoRows) {
+		if input.ExpectedRouteVersion != 0 {
+			return StableRouteResult{}, ErrRouteVersionConflict
+		}
+		routeID = uuid.Must(uuid.NewV7())
+		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by,route_generation,model_id,protocol_version_id,reference_status,route_version,health_version,health_diagnostic_code,next_probe_at)
+VALUES($1,$2,$3,$4,$5,$6,'UNKNOWN',$7,$8,1,$9,$10,'RESOLVED',1,1,'AWAITING_INITIAL_PROBE',$7)`, routeID, accountID, reference.UpstreamModel, reference.ProtocolCode, input.Priority, input.DefaultScope, now, actorID, input.ModelID, input.ProtocolVersionID)
+	} else if loadErr != nil {
+		return StableRouteResult{}, loadErr
+	} else {
+		if existing.RouteVersion != input.ExpectedRouteVersion {
+			return StableRouteResult{}, ErrRouteVersionConflict
+		}
+		routeID = existing.ID
+		var command pgconn.CommandTag
+		command, err = tx.Exec(ctx, `UPDATE routing_policies SET model=$2,protocol_code=$3,model_id=$9,protocol_version_id=$10,reference_status='RESOLVED',priority=$4,default_scope=$5,health_status='UNKNOWN',health_diagnostic_code='ROUTE_CONFIGURATION_CHANGED',health_observed_at=NULL,health_expires_at=NULL,next_probe_at=$6,probe_lease_owner=NULL,probe_lease_until=NULL,route_version=route_version+1,route_generation=route_generation+1,health_version=health_version+1,updated_at=$6,updated_by=$7 WHERE id=$1 AND route_version=$8`, routeID, reference.UpstreamModel, reference.ProtocolCode, input.Priority, input.DefaultScope, now, actorID, input.ExpectedRouteVersion, input.ModelID, input.ProtocolVersionID)
+		if err == nil && command.RowsAffected() != 1 {
+			return StableRouteResult{}, ErrRouteVersionConflict
+		}
+	}
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	accountCommand, err := tx.Exec(ctx, `UPDATE token_accounts SET management_version=management_version+1,updated_at=$2 WHERE id=$1 AND management_version=$3`, accountID, now, input.ExpectedAccountVersion)
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	if accountCommand.RowsAffected() != 1 {
+		return StableRouteResult{}, ErrRouteVersionConflict
+	}
+	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('route_id',$6,'model_id',$7,'protocol_version_id',$8,'priority',$9,'default_scope',$10,'route_version',$11,'reason',$12)`, routeID, input.ModelID, input.ProtocolVersionID, input.Priority, input.DefaultScope, input.ExpectedRouteVersion+1, input.Reason); err != nil {
+		return StableRouteResult{}, err
+	}
+	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` WHERE id=$1`, routeID))
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	result, err := stableRouteResult(item, input.ExpectedAccountVersion+1)
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	snapshot, _ = json.Marshal(result)
+	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_UPSERT',$3,$4,$5,$6,$6+interval '7 days')`, input.IdempotencyKey, actorID, digest, routeID, snapshot, now); err != nil {
+		return StableRouteResult{}, err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return StableRouteResult{}, err
+	}
+	return result, tx.Commit(ctx)
+}
+
+type StableRouteDeleteInput struct {
+	RouteID                uuid.UUID
+	ExpectedAccountVersion int64
+	ExpectedRouteVersion   int64
+	IdempotencyKey         string
+	Reason                 string
+}
+
+func (r *PostgresRepository) DeleteStableRoute(ctx context.Context, accountID uuid.UUID, input StableRouteDeleteInput, actorID uuid.UUID) error {
+	input.IdempotencyKey, input.Reason = strings.TrimSpace(input.IdempotencyKey), strings.TrimSpace(input.Reason)
+	if accountID == uuid.Nil || input.RouteID == uuid.Nil || actorID == uuid.Nil || input.ExpectedAccountVersion <= 0 || input.ExpectedRouteVersion <= 0 || len(input.IdempotencyKey) < 16 || len(input.IdempotencyKey) > 128 || utf8.RuneCountInString(input.Reason) < 10 || utf8.RuneCountInString(input.Reason) > 2000 {
+		return ErrForbidden
+	}
+	digestInput := StableRouteInput{ExpectedAccountVersion: input.ExpectedAccountVersion, ExpectedRouteVersion: input.ExpectedRouteVersion, IdempotencyKey: input.IdempotencyKey, Reason: input.Reason}
+	digest := stableRouteDigest("TOKEN_ROUTE_DELETE:"+input.RouteID.String(), accountID, digestInput)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "TOKEN_ROUTE:"+input.IdempotencyKey); err != nil {
+		return err
+	}
+	var storedActor uuid.UUID
+	var storedDigest string
+	if err = tx.QueryRow(ctx, `SELECT actor_id,request_digest FROM routing_policy_mutations WHERE idempotency_key=$1`, input.IdempotencyKey).Scan(&storedActor, &storedDigest); err == nil {
+		if storedActor != actorID || storedDigest != digest {
+			return ErrIdempotencyConflict
+		}
+		if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	var accountVersion int64
+	if err = tx.QueryRow(ctx, `SELECT management_version FROM token_accounts WHERE id=$1 AND management_mode='PLATFORM' FOR UPDATE`, accountID).Scan(&accountVersion); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if accountVersion != input.ExpectedAccountVersion {
+		return ErrRouteVersionConflict
+	}
+	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` WHERE id=$1 AND token_account_id=$2 FOR UPDATE`, input.RouteID, accountID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if item.ModelID == nil || item.ProtocolVersionID == nil || item.RouteVersion != input.ExpectedRouteVersion {
+		return ErrRouteVersionConflict
+	}
+	now := r.now().UTC()
+	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_tombstones(route_id,token_account_id,model_id,protocol_version_id,route_version,route_generation,deleted_by,reason,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, item.ID, accountID, *item.ModelID, *item.ProtocolVersionID, item.RouteVersion, item.RouteGeneration, actorID, input.Reason, now); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `UPDATE routing_policies SET reference_status='DELETED',health_status='STALE',health_diagnostic_code='ROUTE_DELETED',health_observed_at=$3,health_expires_at=NULL,next_probe_at=NULL,probe_lease_owner=NULL,probe_lease_until=NULL,route_version=route_version+1,health_version=health_version+1,updated_at=$3,updated_by=$4 WHERE id=$1 AND route_version=$2`, item.ID, input.ExpectedRouteVersion, now, actorID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrRouteVersionConflict
+	}
+	accountCommand, err := tx.Exec(ctx, `UPDATE token_accounts SET management_version=management_version+1,updated_at=$2 WHERE id=$1 AND management_version=$3`, accountID, now, input.ExpectedAccountVersion)
+	if err != nil {
+		return err
+	}
+	if accountCommand.RowsAffected() != 1 {
+		return ErrRouteVersionConflict
+	}
+	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_DELETED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('route_id',$6,'model_id',$7,'protocol_version_id',$8,'route_version',$9,'reason',$10)`, item.ID, *item.ModelID, *item.ProtocolVersionID, item.RouteVersion, input.Reason); err != nil {
+		return err
+	}
+	snapshot, _ := json.Marshal(map[string]any{"route_id": item.ID, "deleted": true})
+	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_DELETE',$3,$4,$5,$6,$6+interval '7 days')`, input.IdempotencyKey, actorID, digest, item.ID, snapshot, now); err != nil {
+		return err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func getTokenAccount(ctx context.Context, database interface {

@@ -282,3 +282,36 @@ func TestLegacyDirectSelectionPreservesPreActivationAndFailsClosedAtActive(t *te
 		})
 	}
 }
+
+func TestStableRouteVersionSelectionIsAtomicWithLegacyRetirement(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, scenario := range []struct {
+		name         string
+		reader       TokenCommandGovernanceActivationReader
+		legacyStatus int
+		legacyNext   bool
+		stableStatus int
+		stableNext   bool
+	}{
+		{name: "record absent", legacyStatus: http.StatusNoContent, legacyNext: true, stableStatus: http.StatusServiceUnavailable},
+		{name: "pre activation", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "PRE_ACTIVATION"}}, legacyStatus: http.StatusNoContent, legacyNext: true, stableStatus: http.StatusServiceUnavailable},
+		{name: "active", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}}, legacyStatus: http.StatusGone, stableStatus: http.StatusNoContent, stableNext: true},
+		{name: "safe rollback", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "SAFE_ROLLBACK", Epoch: 2}}, legacyStatus: http.StatusServiceUnavailable, stableStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			service := &Service{commandGovernanceActivation: scenario.reader}
+			legacyNext, stableNext := false, false
+			legacy := gin.New()
+			legacy.PUT("/legacy", service.selectLegacyTokenRouteDirect(), func(c *gin.Context) { legacyNext = true; c.Status(http.StatusNoContent) })
+			legacyResponse := httptest.NewRecorder()
+			legacy.ServeHTTP(legacyResponse, httptest.NewRequest(http.MethodPut, "/legacy", nil))
+			stable := gin.New()
+			stable.PUT("/stable", service.requireNewTokenCommandGovernanceActive(), func(c *gin.Context) { stableNext = true; c.Status(http.StatusNoContent) })
+			stableResponse := httptest.NewRecorder()
+			stable.ServeHTTP(stableResponse, httptest.NewRequest(http.MethodPut, "/stable", nil))
+			if legacyResponse.Code != scenario.legacyStatus || legacyNext != scenario.legacyNext || stableResponse.Code != scenario.stableStatus || stableNext != scenario.stableNext {
+				t.Fatalf("legacy=%d/%v stable=%d/%v", legacyResponse.Code, legacyNext, stableResponse.Code, stableNext)
+			}
+		})
+	}
+}

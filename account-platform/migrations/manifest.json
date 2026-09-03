@@ -1238,6 +1238,16 @@
         "file": "000024_token_command_results.up.sql",
         "version": 24,
         "sha256": "f79a7a12f69beb6ca360e09ebbec01f028266d7c610ff63b07f0e33f193c263b"
+      },
+      {
+        "file": "000025_stable_routes_health.down.sql",
+        "version": 25,
+        "sha256": "b4dc924c138719812d02ed699daeda78e3ec2ad0d75f57515c6cf2abbf3d762e"
+      },
+      {
+        "file": "000025_stable_routes_health.up.sql",
+        "version": 25,
+        "sha256": "f79cb0529e8bbd11aad1fb8b68b2c2b8eab6e047dd5e12b13d932a422276b75f"
       }
     ]
   }

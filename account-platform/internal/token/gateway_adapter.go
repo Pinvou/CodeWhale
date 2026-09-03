@@ -66,7 +66,7 @@ func newHTTPUpstreamClient(adapterVersion string, referenceHeaders []string) *HT
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	return &HTTPUpstreamClient{client: &http.Client{Transport: observability.NewHTTPTransport(transport)}, adapterVersion: adapterVersion, requestPath: "/v1/chat/completions", referenceHeaders: referenceHeaders}
+	return &HTTPUpstreamClient{client: &http.Client{Transport: observability.NewHTTPTransport(transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, adapterVersion: adapterVersion, requestPath: "/v1/chat/completions", referenceHeaders: referenceHeaders}
 }
 
 func (c *HTTPUpstreamClient) AdapterVersion() string { return c.adapterVersion }

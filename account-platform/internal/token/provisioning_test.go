@@ -39,3 +39,14 @@ func TestProvisioningStatusUsesStableAdmissionErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestProvisioningDesiredSignatureFreezesProtocolVersion(t *testing.T) {
+	provisioner := &PostgresDefaultRouteProvisioner{config: DefaultRouteConfig{Provider: "PROVIDER", AdapterVersion: "adapter-v1", BaseURL: "https://provider.invalid", Secret: []byte("test-secret"), Priority: 100}}
+	scopeID, walletID, modelID := uuid.New(), uuid.New(), uuid.New()
+	v1 := CatalogModel{ModelID: modelID, ProtocolCode: "CHAT", ProtocolDefinitionID: uuid.New(), UpstreamModelRef: "stable-model"}
+	v2 := v1
+	v2.ProtocolDefinitionID = uuid.New()
+	if first, second := provisioner.desiredSignature("PERSONAL", scopeID, walletID, v1), provisioner.desiredSignature("PERSONAL", scopeID, walletID, v2); first == second {
+		t.Fatalf("protocol version did not change desired signature: %s", first)
+	}
+}

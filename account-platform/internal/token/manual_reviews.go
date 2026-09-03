@@ -159,7 +159,7 @@ func (r *PostgresRepository) evaluateTokenStopLoss(ctx context.Context, tx pgx.T
 	if err := tx.QueryRow(ctx, `SELECT token_account_id,model FROM usage_requests WHERE id=$1`, item.resourceID).Scan(&tokenAccountID, &model); err != nil {
 		return err
 	}
-	command, err := tx.Exec(ctx, `UPDATE routing_policies SET health_status='UNHEALTHY',updated_at=$3 WHERE token_account_id=$1 AND model=$2 AND health_status<>'UNHEALTHY'`, tokenAccountID, model, now)
+	command, err := tx.Exec(ctx, `UPDATE routing_policies SET health_status='UNHEALTHY',health_diagnostic_code='MANUAL_REVIEW_REQUIRED',health_observed_at=$3,health_expires_at=NULL,next_probe_at=$3,health_version=health_version+1,updated_at=$3 WHERE token_account_id=$1 AND (model=$2 OR model_id::text=$2) AND health_status<>'UNHEALTHY'`, tokenAccountID, model, now)
 	if err != nil {
 		return err
 	}

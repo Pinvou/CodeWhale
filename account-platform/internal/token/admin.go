@@ -44,6 +44,7 @@ type AdminTokenAccount struct {
 	ManagementMode        string     `json:"management_mode"`
 	ActiveCredentialCount int64      `json:"active_credential_count"`
 	RouteCount            int64      `json:"route_count"`
+	AccountVersion        int64      `json:"account_version"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
 
@@ -333,6 +334,52 @@ func (s *Service) adminUpsertTokenRoute(w http.ResponseWriter, r *http.Request) 
 	api.WriteJSON(w, http.StatusOK, result)
 }
 
+func (s *Service) adminUpsertStableTokenRoute(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := adminUUID(w, r, "token_account_id")
+	if !ok {
+		return
+	}
+	var body struct {
+		ModelID                uuid.UUID `json:"model_id"`
+		ProtocolVersionID      uuid.UUID `json:"protocol_version_id"`
+		Priority               int       `json:"priority"`
+		DefaultScope           string    `json:"default_scope"`
+		ExpectedAccountVersion int64     `json:"expected_account_version"`
+		ExpectedRouteVersion   int64     `json:"expected_route_version"`
+		Reason                 string    `json:"reason"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_ROUTE_COMMAND", "the route command is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(key) < 16 || len(key) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	repository, repositoryOK := s.requireAdminRepository(w, r)
+	if !repositoryOK {
+		return
+	}
+	if _, err := repository.AdminTokenAccount(r.Context(), accountID); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	repositoryWithRoutes, ok := s.repository.(interface {
+		UpsertStableRoute(context.Context, uuid.UUID, StableRouteInput, uuid.UUID) (StableRouteResult, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "token route administration is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := repositoryWithRoutes.UpsertStableRoute(r.Context(), accountID, StableRouteInput{ModelID: body.ModelID, ProtocolVersionID: body.ProtocolVersionID, Priority: body.Priority, DefaultScope: body.DefaultScope, ExpectedAccountVersion: body.ExpectedAccountVersion, ExpectedRouteVersion: body.ExpectedRouteVersion, IdempotencyKey: key, Reason: body.Reason}, tokenAdminActor(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
 func (s *Service) adminDeleteTokenRoute(w http.ResponseWriter, r *http.Request) {
 	repository, ok := s.requireAdminRepository(w, r)
 	if !ok {
@@ -349,6 +396,44 @@ func (s *Service) adminDeleteTokenRoute(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := repository.AdminDeleteRoute(r.Context(), accountID, body.Model, tokenAdminActor(r)); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) adminDeleteStableTokenRoute(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	accountID, ok := adminUUID(w, r, "token_account_id")
+	if !ok {
+		return
+	}
+	var body struct {
+		RouteID                uuid.UUID `json:"route_id"`
+		ExpectedAccountVersion int64     `json:"expected_account_version"`
+		ExpectedRouteVersion   int64     `json:"expected_route_version"`
+		Reason                 string    `json:"reason"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_ROUTE_COMMAND", "the route command is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(key) < 16 || len(key) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	repository, ok := s.repository.(interface {
+		DeleteStableRoute(context.Context, uuid.UUID, StableRouteDeleteInput, uuid.UUID) error
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "stable token route administration is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err := repository.DeleteStableRoute(r.Context(), accountID, StableRouteDeleteInput{RouteID: body.RouteID, ExpectedAccountVersion: body.ExpectedAccountVersion, ExpectedRouteVersion: body.ExpectedRouteVersion, IdempotencyKey: key, Reason: body.Reason}, tokenAdminActor(r)); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -459,8 +544,8 @@ SELECT
   (SELECT count(*) FROM token_accounts),
   (SELECT count(*) FROM token_accounts WHERE status='ACTIVE'),
   (SELECT count(*) FROM provider_credentials WHERE status='ACTIVE' AND validation_status='VALID'),
-  (SELECT count(*) FROM routing_policies),
-  (SELECT count(*) FROM routing_policies WHERE health_status='HEALTHY'),
+  (SELECT count(*) FROM routing_policies WHERE reference_status='RESOLVED'),
+  (SELECT count(*) FROM routing_policies WHERE reference_status='RESOLVED' AND health_status='HEALTHY' AND health_expires_at>transaction_timestamp()),
   (SELECT count(*) FROM usage_requests),
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW')),
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL),
@@ -476,11 +561,11 @@ func (r *PostgresRepository) AdminTokenAccounts(ctx context.Context, limit int) 
 	rows, err := r.pool.Query(ctx, `
 SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,
        COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,
-       count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.updated_at
+       count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.management_version,a.updated_at
 FROM token_accounts a
 LEFT JOIN token_share_policies s ON s.token_account_id=a.id
 LEFT JOIN provider_credentials c ON c.token_account_id=a.id
-LEFT JOIN routing_policies p ON p.token_account_id=a.id
+LEFT JOIN routing_policies p ON p.token_account_id=a.id AND p.reference_status='RESOLVED'
 WHERE a.management_mode='PLATFORM'
 GROUP BY a.id,s.scope ORDER BY a.updated_at DESC,a.id LIMIT $1`, limit)
 	if err != nil {
@@ -490,7 +575,7 @@ GROUP BY a.id,s.scope ORDER BY a.updated_at DESC,a.id LIMIT $1`, limit)
 	items := make([]AdminTokenAccount, 0)
 	for rows.Next() {
 		var item AdminTokenAccount
-		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.ManagementMode, &item.ActiveCredentialCount, &item.RouteCount, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.ManagementMode, &item.ActiveCredentialCount, &item.RouteCount, &item.AccountVersion, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -503,14 +588,14 @@ func (r *PostgresRepository) AdminTokenAccount(ctx context.Context, accountID uu
 	err := r.pool.QueryRow(ctx, `
 SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,
        COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,
-       count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.updated_at
+       count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.management_version,a.updated_at
 FROM token_accounts a
 LEFT JOIN token_share_policies s ON s.token_account_id=a.id
 LEFT JOIN provider_credentials c ON c.token_account_id=a.id
-LEFT JOIN routing_policies p ON p.token_account_id=a.id
+LEFT JOIN routing_policies p ON p.token_account_id=a.id AND p.reference_status='RESOLVED'
 WHERE a.id=$1 AND a.management_mode='PLATFORM' GROUP BY a.id,s.scope`, accountID).Scan(
 		&result.ID, &result.OwnerType, &result.OwnerID, &result.OwnerOrganization, &result.OwnerUnit, &result.WalletID,
-		&result.Name, &result.Status, &result.ShareScope, &result.ManagementMode, &result.ActiveCredentialCount, &result.RouteCount, &result.UpdatedAt,
+		&result.Name, &result.Status, &result.ShareScope, &result.ManagementMode, &result.ActiveCredentialCount, &result.RouteCount, &result.AccountVersion, &result.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AdminTokenAccountDetail{}, ErrNotFound
@@ -537,7 +622,7 @@ FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, acco
 	if err := credentialRows.Err(); err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
-	routeRows, err := r.pool.Query(ctx, `SELECT token_account_id,model,protocol_code,priority,default_scope,health_status,route_generation,updated_at FROM routing_policies WHERE token_account_id=$1 ORDER BY priority DESC,model`, accountID)
+	routeRows, err := r.pool.Query(ctx, routingPolicyProjection+` WHERE token_account_id=$1 AND reference_status<>'DELETED' ORDER BY priority DESC,model_id,id`, accountID)
 	if err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
@@ -545,7 +630,7 @@ FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, acco
 	result.Routes = make([]RoutingPolicy, 0)
 	for routeRows.Next() {
 		var item RoutingPolicy
-		if err := routeRows.Scan(&item.TokenAccountID, &item.Model, &item.ProtocolCode, &item.Priority, &item.DefaultScope, &item.HealthStatus, &item.RouteGeneration, &item.UpdatedAt); err != nil {
+		if err := routeRows.Scan(&item.ID, &item.TokenAccountID, &item.Model, &item.ModelID, &item.ProtocolVersionID, &item.ProtocolCode, &item.Priority, &item.DefaultScope, &item.ReferenceStatus, &item.HealthStatus, &item.HealthDiagnostic, &item.HealthObservedAt, &item.HealthExpiresAt, &item.RouteVersion, &item.RouteGeneration, &item.UpdatedAt); err != nil {
 			return AdminTokenAccountDetail{}, err
 		}
 		result.Routes = append(result.Routes, item)
@@ -563,14 +648,41 @@ func (r *PostgresRepository) AdminDeleteRoute(ctx context.Context, accountID uui
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `DELETE FROM routing_policies route USING token_accounts account WHERE route.token_account_id=$1 AND route.model=$2 AND account.id=route.token_account_id AND account.management_mode='PLATFORM'`, accountID, model)
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
+	var routeCount int
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM routing_policies route JOIN token_accounts account ON account.id=route.token_account_id WHERE route.token_account_id=$1 AND route.model=$2 AND route.reference_status<>'DELETED' AND account.management_mode='PLATFORM'`, accountID, model).Scan(&routeCount); err != nil {
+		return err
+	}
+	if routeCount > 1 {
+		return ErrAmbiguousRoute
+	}
+	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` route JOIN token_accounts account ON account.id=route.token_account_id WHERE route.token_account_id=$1 AND route.model=$2 AND route.reference_status<>'DELETED' AND account.management_mode='PLATFORM' FOR UPDATE OF route`, accountID, model))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
-	if command.RowsAffected() == 0 {
-		return ErrNotFound
+	now := r.now().UTC()
+	if item.ReferenceStatus == "RESOLVED" && item.ModelID != nil && item.ProtocolVersionID != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_tombstones(route_id,token_account_id,model_id,protocol_version_id,route_version,route_generation,deleted_by,reason,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,'legacy v1 compatibility deletion',$8) ON CONFLICT(route_id) DO NOTHING`, item.ID, accountID, *item.ModelID, *item.ProtocolVersionID, item.RouteVersion, item.RouteGeneration, actorID, now); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE routing_policies SET reference_status='DELETED',health_status='STALE',health_diagnostic_code='ROUTE_DELETED',health_observed_at=$2,health_expires_at=NULL,next_probe_at=NULL,probe_lease_owner=NULL,probe_lease_until=NULL,route_version=route_version+1,health_version=health_version+1,updated_at=$2,updated_by=$3 WHERE id=$1`, item.ID, now, actorID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(ctx, `UPDATE token_accounts SET management_version=management_version+1,updated_at=$2 WHERE id=$1`, accountID, now); err != nil {
+			return err
+		}
+	} else if _, err = tx.Exec(ctx, `DELETE FROM routing_policies WHERE id=$1 AND reference_status='LEGACY_UNRESOLVED'`, item.ID); err != nil {
+		return err
 	}
-	if err := recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_DELETED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('model',$6)`, model); err != nil {
+	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_DELETED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('model',$6)`, model); err != nil {
+		return err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

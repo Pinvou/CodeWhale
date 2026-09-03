@@ -32,7 +32,11 @@ func (r *PostgresRepository) AdminPaginationCollectors() []prometheus.Collector 
 		return nil
 	}
 	m := r.adminPaginationMetrics
-	return []prometheus.Collector{m.activeSnapshots, m.activeMembers, m.storageBytes, m.cleanupLag, m.capacityLevel, m.creations}
+	collectors := []prometheus.Collector{m.activeSnapshots, m.activeMembers, m.storageBytes, m.cleanupLag, m.capacityLevel, m.creations}
+	if r.routeHealthMetrics != nil {
+		collectors = append(collectors, r.routeHealthMetrics.probes, r.routeHealthMetrics.state, r.routeHealthMetrics.backlog, r.routeHealthMetrics.lag, r.routeHealthMetrics.inflight)
+	}
+	return collectors
 }
 
 func (r *PostgresRepository) recordAdminPaginationCreation(resource string, err error) {
