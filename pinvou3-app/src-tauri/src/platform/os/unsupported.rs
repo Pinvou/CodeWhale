@@ -209,6 +209,11 @@ pub fn python_command() -> String {
     "python3".to_string()
 }
 
+/// 空设备路径桩（未知平台按 POSIX 约定）。
+pub fn null_device() -> &'static str {
+    "/dev/null"
+}
+
 pub fn connector_cli_command(_cli_bin: &str, program: &str) -> Command {
     Command::new(program)
 }
