@@ -35,6 +35,7 @@ type Service struct {
 	now                         func() time.Time
 	auditExports                *AuditExportService
 	humanDelegations            *humandelegation.Signer
+	ownerCandidateCursorKey     []byte
 }
 
 func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
@@ -81,6 +82,11 @@ func (s *Service) WithServiceToken(serviceToken string) *Service {
 	return s
 }
 
+func (s *Service) WithTokenOwnerCandidateCursorKey(key []byte) *Service {
+	s.ownerCandidateCursorKey = append([]byte(nil), key...)
+	return s
+}
+
 func (s *Service) WithClientCompatibility(serviceVersion, contractVersion string) *Service {
 	s.serviceVersion = strings.TrimSpace(serviceVersion)
 	s.clientContractVersion = strings.TrimSpace(contractVersion)
@@ -98,6 +104,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/authorization/check", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.checkPermission))
 	internal.POST("/authorization/human-delegations", serviceauth.Require("internal.authorization.delegate"), httpserver.AdaptFunc(s.createHumanDelegation))
+	internal.GET("/token-owner-candidates", serviceauth.Require("internal.token-owner-candidates.read"), httpserver.AdaptFunc(s.internalTokenOwnerCandidates))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/approval-requests/:approval_request_id/executions", serviceauth.Require("internal.approval-execution.begin"), approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))

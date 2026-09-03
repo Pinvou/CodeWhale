@@ -10,6 +10,47 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/token-owner-candidates:
+    get:
+      servers:
+        - url: /
+      security:
+        - serviceToken: []
+      operationId: listInternalTokenOwnerCandidates
+      summary: Return the minimal authoritative owner projection to the trusted Token service
+      description: Requires the exact internal.token-owner-candidates.read workload permission and the human actor issuer/subject. This is a high-throughput internal scan API, not a Portal/public admin page. One logical scan consumes anti-enumeration quota only on its first request; signed continuations inherit scan_id and quota, while invalid cursors count as new failed scans. At most 3 scans per actor and 10 per calling service remain active for the 15-minute TTL. Each scan request has a 10-second server budget. The opaque cursor binds the workload, actor, authorization version, resource, filter, database transaction-time high-water, and immutable owner type plus stable ID. The APT-121 facade independently builds and pages the normalized-label UI snapshot.
+      parameters:
+        - name: actor_issuer
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 512 }
+        - name: actor_subject
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 255 }
+        - name: owner_type
+          in: query
+          schema: { type: string, enum: [USER, ORGANIZATION, UNIT] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50000, default: 20000 }
+        - name: cursor
+          in: query
+          description: Opaque server-signed continuation token; clients must not inspect or modify it.
+          schema: { type: string, minLength: 80, maxLength: 4096 }
+      responses:
+        "200":
+          description: Minimal candidates in immutable owner_type, id order.
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenOwnerCandidatePage" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /auth/registration/precheck:
     post:
       security: []
@@ -965,6 +1006,10 @@ components:
     oidc:
       type: openIdConnect
       openIdConnectUrl: https://identity.example.invalid/realms/pinvou/.well-known/openid-configuration
+    serviceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: workload identity JWT
   responses:
     Error:
       description: Stable error response
@@ -1000,6 +1045,28 @@ components:
         maxLength: 120
       description: Stable operation key; body fallback is accepted for constrained clients.
   schemas:
+    TokenOwnerCandidate:
+      type: object
+      additionalProperties: false
+      required: [id, type, display_label, status]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [USER, ORGANIZATION, UNIT] }
+        display_label: { type: string, minLength: 1 }
+        status: { type: string }
+    TokenOwnerCandidatePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor, has_more, limit, authorization_version]
+      properties:
+        items:
+          type: array
+          maxItems: 50000
+          items: { $ref: "#/components/schemas/TokenOwnerCandidate" }
+        next_cursor: { type: [string, "null"] }
+        has_more: { type: boolean }
+        limit: { type: integer, minimum: 1, maximum: 50000 }
+        authorization_version: { type: integer, format: int64, minimum: 1 }
     AccountClosureBlocker:
       type: object
       additionalProperties: false

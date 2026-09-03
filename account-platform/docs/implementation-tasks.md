@@ -142,7 +142,7 @@
 | APT-116 | 财务支付三个分区运营概览 API 与权限裁剪 | BILL-47 | APT-018–APT-025, APT-083, APT-093 | CODE | DONE |
 | APT-117 | 财务支付三个分区运营概览、下穿与局部失败界面 | UI-46 | APT-105, APT-113, APT-115, APT-116 | CODE | DONE |
 | APT-118 | 超级管理员完整常驻平台权限迁移、缓存失效与安全边界回归 | ADM-55 | APT-069, APT-073, APT-097 | CODE | DONE |
-| APT-119 | owner 候选专用权限、权威目录与授权版本迁移 | ADM-61 | APT-006, APT-069, APT-118 | CODE | PENDING |
+| APT-119 | owner 候选专用权限、权威目录与授权版本迁移 | ADM-61 | APT-006, APT-069, APT-118 | CODE | DONE |
 | APT-120 | Token 高数量分页快照、预算、cursor、入口超时与容量基座 | NFR-56 | APT-036, APT-045 | CODE | PENDING |
 | APT-121 | 九类 Token 查询合同与模型/Token 资源审计投影 | ADM-56, ADM-63 | APT-119, APT-120 | CODE | PENDING |
 | APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | PENDING |
@@ -195,9 +195,10 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-119 owner 候选权限与权威目录
 
-- **目标/范围**：主目标 `ADM-61`。仅修改 `migrations/account/000043_*`、`internal/account/{authorization.go,directory.go,admin.go,service.go}`、Account OpenAPI/权限合同与定向测试；提供用户、组织、节点最小候选投影，Token 只消费稳定 ID、类型、标签和状态。
-- **数据/权限/回滚**：同一 Account 迁移幂等创建 `platform.tokens.owner-candidates.read`，仅原子授予 `PLATFORM_SUPER_ADMIN`/`PLATFORM_MODEL_ADMIN`，递增两角色全部有效绑定 authorization version 并使缓存/cursor 失效；down 按“撤授→递增绑定版本→删权限”顺序。不新增 feature gate。
-- **验收**：精确两角色允许、其他平台/组织/个人角色无泄露拒绝；反枚举限流、空候选、迁移幂等、down 顺序、授权版本和旧 cursor 失效自动测试通过。
+- **实现状态**：`DONE`；身份 B 第五轮独立代码审核通过。仓库实现尚未推送、未部署；本地未配置 `ACCOUNT_DATABASE_URL`，真实 PostgreSQL 集成用例未执行并保留为发布前隔离库门禁。
+- **目标/范围**：主目标 `ADM-61`。仅修改 `migrations/account/000043_*`、`internal/account/{authorization.go,directory.go,admin.go,service.go}`、Account 内部 OpenAPI/工作负载策略、可信公网代理头合同与定向测试；提供仅经 `internal.token-owner-candidates.read` service-auth 调用的用户、组织、节点最小权威投影，Token 只消费稳定 ID、类型、标签和状态。APT-119 不提供 Portal/BFF 或公网 admin 候选路由；公开快照分页门面及搜索筛选归 APT-120/121。
+- **数据/权限/回滚**：同一 Account 迁移幂等创建 `platform.tokens.owner-candidates.read`，仅原子授予 `PLATFORM_SUPER_ADMIN`/`PLATFORM_MODEL_ADMIN`；权限 scope 修复、正确边新增、错误边撤销先合并角色集合，再按用户与作用域去重，使每个有效授权版本恰递增一次。内部扫描默认 20,000、最大 50,000，与未来公开 UI 的 20/50 完全分离；cursor 使用独立 HMAC 密钥、15 分钟 TTL，绑定 `scan_id`、调用 service/workload subject、人类 issuer/subject、authorization version、resource、filter 与同事务数据库时间高水位，按不可变 `(owner_type,id)` 采集。仅首请求或非法 cursor 消耗 actor 30/min、caller service 60/min 配额，合法续页继承逻辑扫描；每 actor/service 同时最多 3/10 个活跃扫描。down 按实际边变化去重失效。不新增 feature gate。
+- **验收**：精确两角色允许、其他平台/组织/个人角色无泄露拒绝；Portal/公网路径不存在；伪造来源头和直连不可获得工作负载身份；逻辑扫描配额、活跃扫描上限跨副本精确；空候选、错误 scope 且两个正确边均预存、错误角色边、重复 up/down、授权变更、cursor 篡改/跨主体/过期均自动测试。PostgreSQL 集成还必须在 10 秒预算内完整遍历 1,500 条以上数据、证明续页仅计一次并证明首屏后按 DB 时间插入不进入同一扫描；以隔离库 `ACCOUNT_DATABASE_URL=... go test ./internal/account -run TestTokenOwnerCandidatesPostgresIntegration -count=1` 执行，本地未配置时明确记录未运行。
 - **不包含**：不改 Token Account 创建表单、不提供 UUID 盲填、不实现 Token 分页快照或路由模型选择器。
 
 ### APT-120 Token 分页快照、入口预算与容量基座

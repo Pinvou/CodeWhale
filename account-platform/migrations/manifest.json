@@ -422,6 +422,16 @@
         "file": "000042_super_admin_platform_permissions.up.sql",
         "version": 42,
         "sha256": "38f5463c220cfc86e22cc3ecb61a1ffee709111a125dcffdd358b19ae25fa9cc"
+      },
+      {
+        "file": "000043_token_owner_candidates.down.sql",
+        "version": 43,
+        "sha256": "efaecd4dcdf40595fb38f570d9fbbc9419865bb0d132248c3e21547f1fa15422"
+      },
+      {
+        "file": "000043_token_owner_candidates.up.sql",
+        "version": 43,
+        "sha256": "35316888b6353d2eb30c398033218f242e48da32b45e74495acf60e523f9cad9"
       }
     ],
     "billing": [

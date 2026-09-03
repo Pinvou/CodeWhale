@@ -24,7 +24,10 @@ delegations additionally require `human-delegation-signing-key-id` and an isolat
 Ed25519 seed/private key in unpadded Base64URL as
 `human-delegation-signing-key-base64url`; publish only the derived public key to
 authorized consumers as `human-delegation-verification-keys-json` and overlap key IDs
-during rotation. The exact public OIDC token
+during rotation. The Account-internal owner directory additionally requires an
+independent 32-byte standard-Base64 `owner-candidate-cursor-hmac-key-base64`;
+rotate it only after the 15-minute cursor TTL has drained, because old cursors
+fail closed. The exact public OIDC token
 path is routed through Identity Adapter and fails closed when its external Redis
 or Keycloak dependency is unavailable. Never place those values in a
 values file or rendered manifest.

@@ -37,6 +37,7 @@ const (
 	PermissionPlatformSystemStatusRead           = "platform.system.status.read"
 	PermissionPlatformRegistrationsRepair        = "platform.registrations.repair"
 	PermissionPlatformProfileChangesRepair       = "platform.profile-changes.repair"
+	PermissionPlatformTokenOwnerCandidatesRead   = "platform.tokens.owner-candidates.read"
 	PermissionPersonalSessionLogin               = "personal.session.login"
 	PermissionPersonalProfileRead                = "personal.profile.read"
 	PermissionPersonalProfileUpdate              = "personal.profile.update"

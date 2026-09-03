@@ -81,7 +81,7 @@ spec:
             - { name: WORKLOAD_IDENTITY_AUDIENCE, value: {{ $root.Values.workloadIdentity.audience | quote }} }
             {{- if eq $app.name "account-service" }}
             - name: WORKLOAD_IDENTITY_RULES_JSON
-              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-billing-service" $root.Release.Namespace $fullname) "service" "billing-service" "permissions" (list "internal.authorization.check" "internal.approval-execution.begin" "internal.approval-execution.complete" "internal.account-closure-state.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.authorization.check" "internal.authorization.delegate" "internal.client-compatibility.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-keycloak" $root.Release.Namespace $fullname) "service" "keycloak-mobile-authenticator" "permissions" (list "internal.auth.sms.verify" "internal.authorization.check"))) | quote }}
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-billing-service" $root.Release.Namespace $fullname) "service" "billing-service" "permissions" (list "internal.authorization.check" "internal.approval-execution.begin" "internal.approval-execution.complete" "internal.account-closure-state.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.authorization.check" "internal.authorization.delegate" "internal.client-compatibility.read" "internal.token-owner-candidates.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-keycloak" $root.Release.Namespace $fullname) "service" "keycloak-mobile-authenticator" "permissions" (list "internal.auth.sms.verify" "internal.authorization.check"))) | quote }}
             {{- else if eq $app.name "identity-service" }}
             - name: WORKLOAD_IDENTITY_RULES_JSON
               value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.identity.password-reference.validate" "internal.identity.user.create" "internal.identity.registration.read" "internal.identity.user.disable" "internal.identity.username.update" "internal.identity.mobile.update" "internal.identity.password.reset" "internal.identity.sessions.revoke" "internal.identity.user.delete"))) | quote }}
@@ -130,6 +130,8 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-signing-key-id } }
             - name: HUMAN_DELEGATION_SIGNING_KEY_BASE64URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-signing-key-base64url } }
+            - name: OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: owner-candidate-cursor-hmac-key-base64 } }
             {{- else if eq $app.name "identity-service" }}
             - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
             - { name: KEYCLOAK_ADMIN_API_URL, value: {{ printf "http://%s-keycloak:8080" $fullname | quote }} }

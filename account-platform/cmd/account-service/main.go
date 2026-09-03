@@ -101,6 +101,12 @@ func main() {
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationMemberLifecycle(billingOrganizationLifecycle)
+	ownerCandidateCursorKey, decodeErr := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(os.Getenv("OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64")))
+	if decodeErr != nil || len(ownerCandidateCursorKey) != 32 {
+		log.Fatal("OWNER_CANDIDATE_CURSOR_HMAC_KEY_BASE64 must be standard Base64 encoding exactly 32 random bytes")
+	}
+	service.WithTokenOwnerCandidateCursorKey(ownerCandidateCursorKey)
+	clear(ownerCandidateCursorKey)
 	humanDelegationKey, err := humandelegation.DecodeSigningKey(os.Getenv("HUMAN_DELEGATION_SIGNING_KEY_BASE64URL"))
 	if err != nil {
 		log.Fatal(err)

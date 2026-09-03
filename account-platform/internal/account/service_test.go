@@ -21,6 +21,10 @@ type fakeRepository struct {
 	deny                 bool
 	lookupResult         AdminUser
 	lookupErr            error
+	ownerCandidatePage   TokenOwnerCandidatePage
+	ownerCandidateErr    error
+	ownerCandidateFilter TokenOwnerCandidateFilter
+	ownerCandidateActor  TokenOwnerCandidateActor
 	setExpected          int64
 	setContext           Context
 	organizationState    *AdminOrganizationState
@@ -57,6 +61,11 @@ func (*fakeRepository) RoleDefinitions(context.Context) ([]AdminRoleDefinition, 
 func (f *fakeRepository) LookupUserByCode(_ context.Context, _ identity.Principal, code, source, device string) (AdminUser, error) {
 	f.adminCalls = append(f.adminCalls, "user-code:"+code+":"+source+":"+device)
 	return f.lookupResult, f.lookupErr
+}
+func (f *fakeRepository) TokenOwnerCandidates(_ context.Context, actor TokenOwnerCandidateActor, filter TokenOwnerCandidateFilter) (TokenOwnerCandidatePage, error) {
+	f.ownerCandidateFilter = filter
+	f.ownerCandidateActor = actor
+	return f.ownerCandidatePage, f.ownerCandidateErr
 }
 func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	panic("not used")
@@ -326,6 +335,95 @@ func TestLegacyRealmRoleCannotBypassAccountPermissionDenial(t *testing.T) {
 	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "PERMISSION_DENIED") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestTokenOwnerCandidateRouteUsesDedicatedPermissionAndMinimalProjection(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	repository := &fakeRepository{ownerCandidatePage: TokenOwnerCandidatePage{
+		Items:                []TokenOwnerCandidate{{ID: id, Type: "USER", DisplayLabel: "test user", Status: "ACTIVE"}},
+		HasMore:              false,
+		Limit:                20,
+		AuthorizationVersion: 7,
+	}}
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/token-owner-candidates?actor_issuer=https%3A%2F%2Fissuer.example&actor_subject=model-admin&owner_type=user&limit=20", nil)
+	request.Header.Set("Authorization", "Bearer service-secret")
+	request.Header.Set("X-Pinvou-Client-Source", "198.51.100.7")
+	request.Header.Set("X-Real-IP", "198.51.100.8")
+	request.Header.Set("X-Forwarded-For", "198.51.100.9")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).WithServiceToken("service-secret").WithTokenOwnerCandidateCursorKey([]byte("0123456789abcdef0123456789abcdef")).Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"display_label":"test user"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(strings.ToLower(response.Body.String()), "email") || strings.Contains(strings.ToLower(response.Body.String()), "mobile") {
+		t.Fatalf("owner candidate leaked profile fields: %s", response.Body.String())
+	}
+	if repository.ownerCandidateFilter.OwnerType != "USER" || repository.ownerCandidateActor.Issuer != "https://issuer.example" || repository.ownerCandidateActor.Subject != "model-admin" || repository.ownerCandidateActor.CallerService != "development-static-token" || repository.ownerCandidateActor.CallerSubject != "development-static-token" {
+		t.Fatalf("filter=%+v actor=%+v", repository.ownerCandidateFilter, repository.ownerCandidateActor)
+	}
+	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("cache-control=%q", got)
+	}
+
+	repository.ownerCandidateActor = TokenOwnerCandidateActor{}
+	response = httptest.NewRecorder()
+	publicRequest := httptest.NewRequest(http.MethodGet, "/admin/v1/token-owner-candidates?actor_issuer=x&actor_subject=y", nil)
+	NewService(repository, &fakeWalletProvisioner{}).WithServiceToken("service-secret").Handler(nil).ServeHTTP(response, publicRequest)
+	if response.Code != http.StatusNotFound || repository.ownerCandidateActor.Subject != "" {
+		t.Fatalf("public route status=%d body=%s repository_called=%+v", response.Code, response.Body.String(), repository.ownerCandidateActor)
+	}
+	response = httptest.NewRecorder()
+	directRequest := httptest.NewRequest(http.MethodGet, "/internal/v1/token-owner-candidates?actor_issuer=x&actor_subject=y", nil)
+	NewService(repository, &fakeWalletProvisioner{}).WithServiceToken("service-secret").WithTokenOwnerCandidateCursorKey([]byte("0123456789abcdef0123456789abcdef")).Handler(nil).ServeHTTP(response, directRequest)
+	if response.Code != http.StatusUnauthorized || repository.ownerCandidateActor.Subject != "" {
+		t.Fatalf("direct request status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestTokenOwnerCandidateFilterRejectsUnsupportedInput(t *testing.T) {
+	for _, target := range []string{
+		"/internal/v1/token-owner-candidates?actor_issuer=i&actor_subject=s&limit=50001",
+		"/internal/v1/token-owner-candidates?actor_issuer=i&actor_subject=s&owner_type=PERSONAL",
+		"/internal/v1/token-owner-candidates?actor_issuer=i&actor_subject=s&status=ACTIVE",
+		"/internal/v1/token-owner-candidates?actor_issuer=i",
+	} {
+		if _, err := parseTokenOwnerCandidateFilter(httptest.NewRequest(http.MethodGet, target, nil)); err == nil {
+			t.Fatalf("expected invalid filter for %s", target)
+		}
+	}
+}
+
+func TestTokenOwnerCandidateCursorBindsFilterAndAuthorizationVersion(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	key := []byte("0123456789abcdef0123456789abcdef")
+	now := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	actor := TokenOwnerCandidateActor{Issuer: "https://issuer.example", Subject: "model-admin", CallerService: "token-gateway", CallerSubject: "token-workload"}
+	filter := TokenOwnerCandidateFilter{OwnerType: "USER", Limit: 20}
+	cursor, err := encodeTokenOwnerCandidateCursor(tokenOwnerCandidateCursor{Version: 1, Resource: tokenOwnerCandidateCursorResource, CallerService: actor.CallerService, CallerSubject: actor.CallerSubject, ActorIssuer: actor.Issuer, ActorSubject: actor.Subject, AuthorizationVersion: 7, FilterFingerprint: tokenOwnerCandidateFilterFingerprint(filter), ScanID: uuid.New(), HighWater: now, OwnerType: "USER", OwnerID: id, IssuedAt: now, ExpiresAt: now.Add(tokenOwnerCandidateCursorTTL)}, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := decodeTokenOwnerCandidateCursor(cursor, key, actor, filter, now.Add(time.Minute))
+	if err != nil || parsed == nil {
+		t.Fatalf("decode cursor: cursor=%+v err=%v", parsed, err)
+	}
+	filter.Cursor = parsed
+	if err := validateTokenOwnerCandidateCursorAuthorization(filter, 7); err != nil {
+		t.Fatalf("current cursor rejected: %v", err)
+	}
+	if err := validateTokenOwnerCandidateCursorAuthorization(filter, 8); !errors.Is(err, ErrTokenOwnerCandidateCursorExpired) {
+		t.Fatalf("stale cursor error=%v", err)
+	}
+	if _, err := decodeTokenOwnerCandidateCursor(cursor, key, TokenOwnerCandidateActor{Issuer: actor.Issuer, Subject: "other", CallerService: actor.CallerService, CallerSubject: actor.CallerSubject}, TokenOwnerCandidateFilter{OwnerType: "USER", Limit: 20}, now); !errors.Is(err, ErrInvalidTokenOwnerCandidateCursor) {
+		t.Fatalf("cross-subject cursor error=%v", err)
+	}
+	forged := cursor[:len(cursor)-1] + "A"
+	if _, err := decodeTokenOwnerCandidateCursor(forged, key, actor, TokenOwnerCandidateFilter{OwnerType: "USER", Limit: 20}, now); !errors.Is(err, ErrInvalidTokenOwnerCandidateCursor) {
+		t.Fatalf("tampered cursor error=%v", err)
+	}
+	if _, err := decodeTokenOwnerCandidateCursor(cursor, key, actor, TokenOwnerCandidateFilter{OwnerType: "USER", Limit: 20}, now.Add(tokenOwnerCandidateCursorTTL)); !errors.Is(err, ErrTokenOwnerCandidateCursorExpired) {
+		t.Fatalf("expired cursor error=%v", err)
 	}
 }
 

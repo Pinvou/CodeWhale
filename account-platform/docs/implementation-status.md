@@ -23,7 +23,7 @@
 
 全量核验汇总：`已实现 380`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `412` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-117 已全部完成并逐项通过独立代码复审。超级管理员完整平台权限新增 ADM-55 并由 APT-118 实现。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致。超级管理员权限与价格空间修复版本 `0.8.0@4ccf7404` 已于 2026-09-03 部署至 `CLOUD_UAT`：Account 000042、Billing 000051 迁移通过，Account/Billing/Portal 与公网 readiness 均证明目标 Commit，超级管理员常驻平台权限为 46/46、未脱敏 PII 导出授权为 0，价格空间缺口为 0；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
-本轮模型与 Token 需求变更新增 23 个正式目标，当前汇总以 `已实现 380`、`部分实现 29`、`未实现 24`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `435` 项为准；上段的 412 项汇总是变更前已完成基线。新增 `UI-47`～`UI-58`、`ADM-56`～`ADM-65`、`NFR-56` 的需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 的任务拆分已通过身份 B 第五轮独立审核；下一步从 APT-119 开始逐任务实施和独立复审，当前尚未实现、推送或部署。
+本轮模型与 Token 需求变更新增 23 个正式目标，当前汇总以 `已实现 381`、`部分实现 29`、`未实现 23`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `435` 项为准；上段的 412 项汇总是变更前已完成基线。新增 `UI-47`～`UI-58`、`ADM-56`～`ADM-65`、`NFR-56` 的需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 的任务拆分已通过身份 B 第五轮独立审核；APT-119 已完成并通过身份 B 第五轮独立代码审核，尚未推送、未部署，APT-120 及后续任务尚未开始。真实 PostgreSQL 集成用例因本地未配置 `ACCOUNT_DATABASE_URL` 尚未执行，保留为发布前隔离库门禁。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -34,7 +34,8 @@
 | `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现按 APT-069–APT-082 分任务进行 |
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `SUPER-ADMIN-PLATFORM-PERMISSIONS` | 超级管理员完整常驻平台权限、Token 管理可见性、授权缓存失效及临时 PII 权限隔离 | Account 000042 前向/回滚迁移、角色真值表合同、Token 隔离合同、Portal 三语制品和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
-| `ADMIN-MODEL-TOKEN-REDESIGN` | 三页面原子权限、机器可验收分页、权威 owner/路由健康、一期运行详情、二期资产详情、凭据三路径、资源审计、逐动作治理、Billing 价格边界及 N/N-1 灰度回滚 | 需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 任务拆分已通过身份 B 第五轮独立审核；下一步实施 APT-119，当前尚未实现、推送或部署 |
+| `ADMIN-MODEL-TOKEN-REDESIGN` | 三页面原子权限、机器可验收分页、权威 owner/路由健康、一期运行详情、二期资产详情、凭据三路径、资源审计、逐动作治理、Billing 价格边界及 N/N-1 灰度回滚 | 需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 任务拆分已通过身份 B 第五轮独立审核；APT-119 已完成并通过身份 B 第五轮独立代码审核且未推送/部署，APT-120 及后续尚未开始 |
+| `TOKEN-OWNER-CANDIDATES` | ADM-61 专用权限、Account 最小权威投影、service-auth、签名扫描 cursor、授权版本失效、限流与公网隔离 | 身份 B 第五轮独立代码审核通过；Account/Portal Go 范围测试、20 项定向合同、OpenAPI、迁移清单、架构及 diff 门禁通过。真实 PostgreSQL 集成用例本地未执行，发布前必须在隔离库运行 |
 | `ORGANIZATION-OBJECT-AUTHORIZATION` | 显式目标组织、节点子树列表、源/目标节点双向移动门禁及成员全部实际节点归属校验 | Account Go 测试、OpenAPI lint、对象作用域合同和全量静态验证通过；数据库多节点绑定与并发移动待部署验证 |
 | `LOGIN-PERMISSION-GATE` | Keycloak 浏览器密码/短信/注册完成路径与 Direct Grant 密码/短信路径在成功前强一致检查 `personal.session.login`，并校验精确 issuer 与最小工作负载路由 | Identity 静态合同、Compose/Helm 配置、Account 生命周期授权测试及全量合同通过；自定义 Keycloak 镜像构建和真实登录待部署验证 |
 | `PASSWORD-SECURITY-AUTHORIZATION` | 已登录改密的近期认证与个人权限门禁、匿名恢复的防枚举权限/生命周期校验、密码隔离和会话撤销 | Account Go 单元测试、OpenAPI lint、密码安全合同及全量静态验证通过；真实短信、Keycloak 改密和数据库串行化待部署验证 |
@@ -349,7 +350,7 @@
 | ADM-58 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有面向 Portal 的一次性凭据接入、轮换和撤销合同；秘密不可回显边界已存在。 |
 | ADM-59 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有模型/运行目标聚合和 Billing 按模型上下文价格投影的完整合同。 |
 | ADM-60 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 四个协议/公式写命令路由已存在，但审批策略注册缺失，当前按 COMMAND_POLICY_UNAVAILABLE 失败关闭。 |
-| ADM-61 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有供 Token Account owner 选择使用的权限交集、最小字段、反枚举目录候选合同。 |
+| ADM-61 | 已实现 | AUDIT_HEAD, TOKEN-OWNER-CANDIDATES | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | APT-119 已实现专用人类权限、仅 service-auth 可达的最小权威投影、按真实作用域去重的授权版本失效，以及默认 20,000/最大 50,000 的内部逻辑扫描；HMAC cursor 绑定 scan/主体/授权版本/DB 时间高水位，合法续页不重复计额并限制 3/10 个活跃扫描。Portal/BFF 与公网 admin 暴露已排除，公开 20/50 快照门面留待 APT-120/121。身份 B 第五轮独立代码审核通过，当前未推送、未部署；本地未配置 `ACCOUNT_DATABASE_URL`，真实 PostgreSQL 集成用例尚未执行，发布前必须在隔离库通过。 |
 | ADM-62 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前路由仍接收自由文本 model/protocol/health，尚未实现稳定目录引用、服务端 upstream 解析及带 TTL 的健康探测状态机。 |
 | ADM-63 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 内部存在分散审计事实，但模型/Token Account 详情没有复用 Audit 服务的权限交集、固定资源过滤和脱敏分页投影。 |
 | ADM-64 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 现有部分命令已有策略/幂等字段，但逐动作近期认证、reason、CAS、未知恢复不完整；确认 UI 不能弥补服务端合同。 |
@@ -970,7 +971,7 @@
 | UI-44 | 管理端计量单位与模型定价生命周期 | 已实现 | React 管理界面已接入完整生命周期；精确价格空间投影、模型目录选择、权限复核、不可变发布事实及非幂等未知结果恢复均有合同覆盖。 |
 | UI-45 | Billing 全量分页 Portal 适配 | 已实现 | 钱包/账本、应收、订单、退款、调账、Hold、晚到支付、支付异常和支付对账已接入稳定 cursor、完整筛选和 URL 恢复；详情返回保留目录上下文，410 需显式从首屏重新核验，旧服务响应安全降级且不显示伪造总数。 |
 | UI-46 | 财务支付分区运营概览界面 | 已实现 | 三个分区分别消费服务端聚合，定价与商品区块独立加载；指标展示单位、状态口径与点时/UTC 时间窗，只在筛选等价时精确下穿。403 隐藏、局部失败不伪装为 0，请求竞态、离页取消、三语、键盘及响应式交互均有自动化回归。 |
-| UI-47～UI-52 | 模型与 Token 一期重构 | 未实现 | 需求、设计及 APT-119～APT-138 中对应一期任务拆分均已通过独立审核；下一步实施 APT-119，尚未实现、推送或部署。 |
+| UI-47～UI-52 | 模型与 Token 一期重构 | 未实现 | 需求、设计及 APT-119～APT-138 中对应一期任务拆分均已通过独立审核；APT-119 后端基础已完成并通过身份 B 第五轮代码审核，页面任务尚未开始，全部变更均未推送、未部署。 |
 | UI-53～UI-58 | 模型与 Token 二期运营治理与灰度 | 未实现 | 需求、设计及模型/Token Account 详情、隔离凭据、依赖计划、Billing 价格入口、趋势概览、N/N-1 对应任务拆分均已通过独立审核，尚未实现、推送或部署。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
@@ -1024,7 +1025,7 @@
 | ADM-53 | 支付分级止损后台治理 | 部分实现 | 后台已有控制读取与 Provider 恢复草稿，待展示分层评估/gap 并拆分商品和 Provider 恢复。 |
 | ADM-54 | 定价与计量管理命令策略注册 | 已实现 | 六个现有 Billing 管理命令已按路由一一注册为 `AUDIT_ONLY`，请求权限固定为 `platform.pricing.manage`，并由追加迁移持久化相同不可变策略。 |
 | ADM-55 | 超级管理员完整平台管理权限 | 已实现 | 超级管理员默认具备全部常驻平台管理权限；未脱敏 PII 导出继续使用独立临时角色，高风险操作不绕过审批、审计、脱敏与不可回显约束。 |
-| ADM-56～ADM-65 | 模型与 Token 管理合同增量 | 未实现 | 稳定查询、影响预检、固定 origin 隔离凭据、跨域价格、协议公式策略、owner 权限、路由健康、资源审计、治理预激活基础和逐动作治理的需求、设计与 APT-119～APT-138 任务拆分均已通过独立审核；下一步实施 APT-119，尚未实现、推送或部署，APT-138 仍是 ADM-64 的唯一最终收口任务。 |
+| ADM-56～ADM-65 | 模型与 Token 管理合同增量 | 部分实现 | 稳定查询、影响预检、固定 origin 隔离凭据、跨域价格、协议公式策略、owner 权限、路由健康、资源审计、治理预激活基础和逐动作治理的需求、设计与 APT-119～APT-138 任务拆分均已通过独立审核；ADM-61/APT-119 已实现并通过身份 B 第五轮代码审核且未推送/部署，APT-120 及后续尚未开始，APT-138 仍是 ADM-64 的唯一最终收口任务。 |
 
 ## 4. 非功能需求
 
