@@ -32,7 +32,7 @@ if command -v cmake >/dev/null; then
 else
   echo "    cmake 缺失，下载预编译(免 root)…"
   curl -fsSL -o "$WORK/cmake.tgz" \
-    "https://github.com/Kitware/CMake/releases/download/v3.30.5/cmake-3.30.5-linux-$(uname -m).tar.gz"
+    "https://github.com/Kitware/CMake/releases/download/v4.4.2/cmake-4.4.2-linux-$(uname -m).tar.gz"
   tar xzf "$WORK/cmake.tgz" -C "$WORK"
   CMAKE="$WORK/$(ls "$WORK" | grep '^cmake-')/bin/cmake"
 fi

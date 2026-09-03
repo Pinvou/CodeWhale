@@ -109,7 +109,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: 版本与 CI 路由脚本测试
         run: >-
@@ -408,7 +408,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: 回流调度与跨平台契约测试
         run: >-
@@ -509,7 +509,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: |
             pinvou3-app/package-lock.json
@@ -607,7 +607,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: remote-control-relay/package-lock.json
 
@@ -646,7 +646,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: team-relay-hub/package-lock.json
 
@@ -672,7 +672,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: pinvou3-app/package-lock.json
 
@@ -705,7 +705,7 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.97.1
+          toolchain: 1.98.0
           components: clippy, rustfmt
 
       - name: Cargo cache
@@ -996,7 +996,7 @@ jobs:
         if: ${{ github.event_name != 'push' }}
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: remote-control-relay/package-lock.json
 
@@ -1209,9 +1209,12 @@ jobs:
     defaults:
       run:
         shell: bash
-    # Each independent leg can still compile aws-lc-sys on a cache miss; retain the existing
-    # safety ceiling while phase metrics establish a new evidence-based limit.
-    timeout-minutes: 90
+    # Each independent leg can still compile aws-lc-sys on a cache miss. A Rust toolchain
+    # upgrade invalidates the main-scoped target cache; the 1.98.0 cold regression build
+    # completed compilation plus all native checks in about 90 minutes, but GitHub cancelled
+    # the otherwise-successful job at the former 90-minute ceiling. Keep the test scope intact
+    # and align this cold-build safety margin with the Linux heavy Rust gate.
+    timeout-minutes: 120
     env:
       # reqwest 0.13 → aws-lc-sys(非 FIPS)。Windows x86_64 需 NASM 汇编;runner 默认无 NASM,
       # 用预生成 NASM 对象规避(aws-lc-rs 官方支持,无需额外装 NASM)。
@@ -1425,7 +1428,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: 安装锁定的 Rust 工具链
         shell: pwsh
@@ -1454,7 +1457,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
           cache-dependency-path: pinvou3-app/package-lock.json
 
@@ -1502,7 +1505,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: 准备 macOS universal ACP Bridge
         run: ./pinvou3-app/scripts/prepare-codex-bridge-runtime.sh
