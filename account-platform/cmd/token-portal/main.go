@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
@@ -42,18 +43,26 @@ func main() {
 	if configured := strings.TrimSpace(os.Getenv("TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS")); configured != "" && configured != "14" {
 		log.Fatal("TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS must be 14 to preserve the frozen Token admin deadline chains")
 	}
+	adminModelTokenIAEnabled := false
+	if raw := strings.TrimSpace(os.Getenv("PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED")); raw != "" {
+		adminModelTokenIAEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatal("PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED must be a boolean")
+		}
+	}
 	service, err := portal.NewService(portal.Config{
-		PublicURL:              publicURL,
-		AuthorizationURL:       mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
-		TokenURL:               mustURL("PORTAL_OIDC_TOKEN_URL"),
-		ClientID:               os.Getenv("PORTAL_OIDC_CLIENT_ID"),
-		AccountURL:             mustURL("ACCOUNT_HTTP_URL"),
-		BillingURL:             mustURL("BILLING_HTTP_URL"),
-		TokenGatewayURL:        mustURL("TOKEN_GATEWAY_HTTP_URL"),
-		ClientVersion:          compatibility.Manifest().CurrentClientVersion,
-		TokenAdminProxyHMACKey: proxyHMACKey,
-		SystemProbes:           systemProbes(),
-		SecureCookies:          publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
+		PublicURL:                publicURL,
+		AuthorizationURL:         mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
+		TokenURL:                 mustURL("PORTAL_OIDC_TOKEN_URL"),
+		ClientID:                 os.Getenv("PORTAL_OIDC_CLIENT_ID"),
+		AccountURL:               mustURL("ACCOUNT_HTTP_URL"),
+		BillingURL:               mustURL("BILLING_HTTP_URL"),
+		TokenGatewayURL:          mustURL("TOKEN_GATEWAY_HTTP_URL"),
+		ClientVersion:            compatibility.Manifest().CurrentClientVersion,
+		TokenAdminProxyHMACKey:   proxyHMACKey,
+		AdminModelTokenIAEnabled: adminModelTokenIAEnabled,
+		SystemProbes:             systemProbes(),
+		SecureCookies:            publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
 	}, store)
 	if err != nil {
 		log.Fatal(err)

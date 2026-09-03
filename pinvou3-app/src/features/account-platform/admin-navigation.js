@@ -1,10 +1,225 @@
-export const adminNavigationGroups = Object.freeze([
+import { adminModelTokenOperationSources } from './admin-model-token-state.js';
+
+export const legacyAdminNavigationGroups = Object.freeze([
   { key: 'workbench', sections: ['overview'] },
   { key: 'identity', sections: ['users', 'roles', 'organizations', 'myorg'] },
   { key: 'finance', sections: ['billing', 'payments', 'products'] },
   { key: 'models', sections: ['tokens'] },
   { key: 'governance', sections: ['approvals', 'audit', 'system', 'settings'] },
 ]);
+
+export const adminModelTokenSections = Object.freeze(['models', 'tokenResources', 'modelOperations']);
+
+export function adminNavigationGroupsForGate(modelTokenIAEnabled) {
+  return legacyAdminNavigationGroups.map((group) => (
+    group.key === 'models'
+      ? { ...group, sections: modelTokenIAEnabled ? [...adminModelTokenSections] : ['tokens'] }
+      : { ...group, sections: [...group.sections] }
+  ));
+}
+
+// Legacy export remains stable for gate-off consumers and extensions.
+export const adminNavigationGroups = legacyAdminNavigationGroups;
+
+const adminModelTokenQueryParameters = Object.freeze({
+  models: Object.freeze({ q: 'model_q', lifecycle_status: 'model_lifecycle_status', protocol_code: 'model_protocol_code', source_adapter: 'model_source_adapter', source_missing: 'model_source_missing', cursor: 'model_cursor' }),
+  protocols: Object.freeze({ q: 'protocol_q', status: 'protocol_status', protocol_code: 'protocol_code', published: 'protocol_published', created_from: 'protocol_created_from', created_to: 'protocol_created_to', cursor: 'protocol_cursor' }),
+  formulas: Object.freeze({ q: 'formula_q', status: 'formula_status', protocol_definition_id: 'formula_protocol_id', metering_unit_code: 'formula_metering_unit_code', published: 'formula_published', created_from: 'formula_created_from', created_to: 'formula_created_to', cursor: 'formula_cursor' }),
+  tokenAccounts: Object.freeze({ q: 'token_q', owner_type: 'token_owner_type', owner_id: 'token_owner_id', status: 'token_status', health_status: 'token_health_status', credential_status: 'token_credential_status', cursor: 'token_cursor' }),
+  provisionings: Object.freeze({ q: 'provisioning_q', status: 'provisioning_status', model_id: 'provisioning_model_id', token_account_id: 'provisioning_token_account_id', scope_type: 'provisioning_scope_type', scope_id: 'provisioning_scope_id', sla_overdue: 'provisioning_sla_overdue', cursor: 'provisioning_cursor' }),
+  usage: Object.freeze({ q: 'usage_q', execution_status: 'usage_execution_status', settlement_status: 'usage_settlement_status', model: 'usage_model', token_account_id: 'usage_token_account_id', organization_id: 'usage_organization_id', started_from: 'usage_started_from', started_to: 'usage_started_to', cursor: 'usage_cursor' }),
+  reconciliation: Object.freeze({ q: 'reconciliation_q', status: 'reconciliation_status', severity: 'reconciliation_severity', case_type: 'reconciliation_case_type', owner_id: 'reconciliation_owner_id', sla_overdue: 'reconciliation_sla_overdue', cursor: 'reconciliation_cursor' }),
+  ownerCandidates: Object.freeze({ q: 'owner_candidate_q', owner_type: 'owner_candidate_type', status: 'owner_candidate_status', organization_id: 'owner_candidate_organization_id', cursor: 'owner_candidate_cursor' }),
+  modelAudit: Object.freeze({ action: 'model_audit_action', actor_id: 'model_audit_actor_id', occurred_from: 'model_audit_occurred_from', occurred_to: 'model_audit_occurred_to', cursor: 'model_audit_cursor' }),
+  tokenAudit: Object.freeze({ action: 'token_audit_action', actor_id: 'token_audit_actor_id', occurred_from: 'token_audit_occurred_from', occurred_to: 'token_audit_occurred_to', cursor: 'token_audit_cursor' }),
+  modelProvisionings: Object.freeze({ q: 'model_provisioning_q', status: 'model_provisioning_status', cursor: 'model_provisioning_cursor' }),
+  tokenProvisionings: Object.freeze({ q: 'token_provisioning_q', status: 'token_provisioning_status', cursor: 'token_provisioning_cursor' }),
+  tokenCredentials: Object.freeze({ status: 'token_credential_metadata_status', cursor: 'token_credential_cursor' }),
+  tokenRoutes: Object.freeze({ health_status: 'token_route_health_status', cursor: 'token_route_cursor' }),
+  provisioningAttempts: Object.freeze({ status: 'provisioning_attempt_status', cursor: 'provisioning_attempt_cursor' }),
+  usageEvidence: Object.freeze({ evidence_type: 'usage_evidence_type', cursor: 'usage_evidence_cursor' }),
+});
+
+const adminModelTokenPageParameters = Object.freeze([
+  'model_tab', 'model_id', 'model_detail_tab', 'token_account_id', 'token_detail_tab',
+  'operations_tab', 'provisioning_id', 'usage_request_id',
+]);
+const adminModelTokenDetailParameters = Object.freeze({
+  model: Object.freeze(['model_id', 'model_detail_tab', ...Object.values(adminModelTokenQueryParameters.modelAudit), ...Object.values(adminModelTokenQueryParameters.modelProvisionings)]),
+  token: Object.freeze(['token_account_id', 'token_detail_tab', ...Object.values(adminModelTokenQueryParameters.tokenAudit), ...Object.values(adminModelTokenQueryParameters.tokenProvisionings), ...Object.values(adminModelTokenQueryParameters.tokenCredentials), ...Object.values(adminModelTokenQueryParameters.tokenRoutes)]),
+  provisioning: Object.freeze(['provisioning_id', ...Object.values(adminModelTokenQueryParameters.provisioningAttempts)]),
+  usage: Object.freeze(['usage_request_id', ...Object.values(adminModelTokenQueryParameters.usageEvidence)]),
+});
+const adminModelTokenTabParameters = Object.freeze({
+  provisionings: Object.freeze([...Object.values(adminModelTokenQueryParameters.provisionings), ...adminModelTokenDetailParameters.provisioning]),
+  usage: Object.freeze([...Object.values(adminModelTokenQueryParameters.usage), ...adminModelTokenDetailParameters.usage]),
+});
+const adminModelTokenSectionParameters = Object.freeze({
+  models: Object.freeze(['model_tab', 'model_id', 'model_detail_tab', ...['models', 'protocols', 'formulas', 'modelAudit', 'modelProvisionings'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+  tokenResources: Object.freeze(['token_account_id', 'token_detail_tab', ...['tokenAccounts', 'ownerCandidates', 'tokenAudit', 'tokenProvisionings', 'tokenCredentials', 'tokenRoutes'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+  modelOperations: Object.freeze(['operations_tab', 'provisioning_id', 'usage_request_id', ...['provisionings', 'usage', 'reconciliation', 'provisioningAttempts', 'usageEvidence'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+});
+const legacyTokenParameters = Object.freeze(['tab', 'token_tab', 'tokens_tab', 'q', 'status', 'protocol', 'source', 'owner_type', 'health', 'model_id_filter', 'owner_id_filter', 'from', 'to', 'cursor']);
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function clearParameters(parameters, updates) {
+  for (const parameter of parameters) updates[parameter] = null;
+}
+
+function hasAnyModelTokenState(search) {
+  return [...adminModelTokenPageParameters, ...Object.values(adminModelTokenQueryParameters).flatMap((parameters) => Object.values(parameters))].some((parameter) => search.has(parameter));
+}
+
+export function adminModelTokenIAGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_model_token_ia === true;
+}
+
+export function readAdminModelTokenQuery(source, locationLike = globalThis.location) {
+  const parameters = adminModelTokenQueryParameters[source];
+  if (!parameters) return {};
+  const search = new URLSearchParams(String(locationLike?.search || ''));
+  const result = {};
+  for (const [key, parameter] of Object.entries(parameters)) result[key] = String(search.get(parameter) || '').trim();
+  for (const key of ['source_missing', 'published', 'sla_overdue']) {
+    if (Object.hasOwn(result, key) && result[key] !== 'true' && result[key] !== 'false') result[key] = '';
+  }
+  return result;
+}
+
+export function adminModelTokenQueryUpdates(source, input = {}) {
+  const parameters = adminModelTokenQueryParameters[source];
+  if (!parameters) return {};
+  return Object.fromEntries(Object.entries(parameters).map(([key, parameter]) => [parameter, String(input[key] || '').trim() || null]));
+}
+
+export function synchronizeAdminModelTokenCursorHistory(previous = {}, query = {}) {
+  const signature = JSON.stringify(Object.entries(query).filter(([key]) => key !== 'cursor').sort(([left], [right]) => left.localeCompare(right)));
+  const currentCursor = String(query.cursor || '');
+  if (previous.signature !== signature) return { signature, currentCursor, previousByCursor: {} };
+  return { ...previous, currentCursor, previousByCursor: { ...(previous.previousByCursor || {}) } };
+}
+
+export function rememberAdminModelTokenNextCursor(history, nextCursor) {
+  const cursor = String(nextCursor || '');
+  if (!cursor) return history;
+  return { ...history, currentCursor: cursor, previousByCursor: { ...history.previousByCursor, [cursor]: history.currentCursor || '' } };
+}
+
+export function previousAdminModelTokenCursor(history) {
+  const current = String(history?.currentCursor || '');
+  if (!current || !Object.hasOwn(history?.previousByCursor || {}, current)) return { available: false, cursor: '' };
+  return { available: true, cursor: history.previousByCursor[current] || '' };
+}
+
+export function clearAdminModelTokenUpdates({ includeLegacy = false } = {}) {
+  const keys = [
+    ...adminModelTokenPageParameters,
+    ...Object.values(adminModelTokenQueryParameters).flatMap((parameters) => Object.values(parameters)),
+    ...(includeLegacy ? legacyTokenParameters : []),
+  ];
+  return Object.fromEntries([...new Set(keys)].map((key) => [key, null]));
+}
+
+export function readAdminModelTokenOperationsTab(permissions = [], locationLike = globalThis.location) {
+  const visible = adminModelTokenOperationSources(permissions);
+  const requested = new URLSearchParams(String(locationLike?.search || '')).get('operations_tab') || '';
+  return { tab: visible.includes(requested) ? requested : visible[0] || '', replace: Boolean(visible.length && !visible.includes(requested)), visible };
+}
+
+export function normalizeAdminModelTokenEntry(requestedSection, visibleSections, modelTokenIAEnabled, locationLike = globalThis.location, permissions = null) {
+  const visible = new Set(visibleSections);
+  const requested = String(requestedSection || '');
+  const search = new URLSearchParams(String(locationLike?.search || ''));
+  if (visible.size === 0 && (requested === 'tokens' || adminModelTokenSections.includes(requested) || hasAnyModelTokenState(search))) {
+    return { section: 'forbidden', replace: true, updates: clearAdminModelTokenUpdates({ includeLegacy: true }) };
+  }
+  if (!modelTokenIAEnabled) {
+    if (adminModelTokenSections.includes(requested)) {
+      return { section: visible.has('tokens') ? 'tokens' : [...visible][0] || 'forbidden', replace: true, updates: clearAdminModelTokenUpdates() };
+    }
+    return { section: visible.has(requested) ? requested : '', replace: false, updates: {} };
+  }
+  if (requested === 'tokens') {
+    return { section: adminModelTokenSections.find((item) => visible.has(item)) || 'forbidden', replace: true, updates: clearAdminModelTokenUpdates({ includeLegacy: true }) };
+  }
+  if (adminModelTokenSections.includes(requested) && !visible.has(requested)) {
+    return { section: 'forbidden', replace: true, updates: clearAdminModelTokenUpdates({ includeLegacy: true }) };
+  }
+  if (!adminModelTokenSections.includes(requested)) return { section: visible.has(requested) ? requested : '', replace: false, updates: {} };
+  const updates = {};
+  let notice = '';
+  for (const [section, parameters] of Object.entries(adminModelTokenSectionParameters)) {
+    if (section === requested) continue;
+    for (const parameter of parameters) if (search.has(parameter)) updates[parameter] = null;
+  }
+  const clearOrphanOrInvalidDetail = (idKey, parameters) => {
+    const id = search.get(idKey) || '';
+    const hasNested = parameters.some((parameter) => parameter !== idKey && search.has(parameter));
+    if ((id && !uuidPattern.test(id)) || (!id && hasNested)) {
+      clearParameters(parameters, updates);
+      if (id) notice = 'invalid';
+    }
+  };
+  if (requested === 'modelOperations' && search.get('provisioning_id') && search.get('usage_request_id')) {
+    clearParameters(adminModelTokenDetailParameters.provisioning, updates);
+    clearParameters(adminModelTokenDetailParameters.usage, updates);
+    notice = 'conflict';
+  } else {
+    if (requested === 'models') clearOrphanOrInvalidDetail('model_id', adminModelTokenDetailParameters.model);
+    if (requested === 'tokenResources') clearOrphanOrInvalidDetail('token_account_id', adminModelTokenDetailParameters.token);
+    if (requested === 'modelOperations') {
+      clearOrphanOrInvalidDetail('provisioning_id', adminModelTokenDetailParameters.provisioning);
+      clearOrphanOrInvalidDetail('usage_request_id', adminModelTokenDetailParameters.usage);
+    }
+  }
+  if (permissions !== null && requested === 'modelOperations') {
+    const operations = readAdminModelTokenOperationsTab(permissions, locationLike);
+    if (operations.replace) updates.operations_tab = operations.tab || null;
+    for (const tab of ['provisionings', 'usage']) {
+      if (!operations.visible.includes(tab)) clearParameters(adminModelTokenTabParameters[tab], updates);
+    }
+    if (operations.tab !== 'provisionings' && search.get('provisioning_id')) clearParameters(adminModelTokenDetailParameters.provisioning, updates);
+    if (operations.tab !== 'usage' && search.get('usage_request_id')) clearParameters(adminModelTokenDetailParameters.usage, updates);
+  }
+  if (permissions !== null && requested === 'models' && search.get('model_id') && updates.model_id !== null) {
+    const detailTab = search.get('model_detail_tab') || 'overview';
+    const allowedTabs = new Set(['overview', 'capabilities', 'operations', 'lifecycle']);
+    if (permissions.includes('platform.pricing.read')) allowedTabs.add('pricing');
+    if (permissions.includes('platform.audit.read')) allowedTabs.add('audit');
+    if (!allowedTabs.has(detailTab)) {
+      updates.model_detail_tab = 'overview';
+      clearParameters(Object.values(adminModelTokenQueryParameters.modelAudit), updates);
+    }
+  }
+  if (permissions !== null && requested === 'tokenResources' && search.get('token_account_id') && updates.token_account_id !== null) {
+    const detailTab = search.get('token_detail_tab') || 'overview';
+    const allowedTabs = new Set(['overview', 'credentials', 'routes', 'provisionings']);
+    if (permissions.includes('platform.audit.read')) allowedTabs.add('audit');
+    if (!allowedTabs.has(detailTab)) {
+      updates.token_detail_tab = 'overview';
+      clearParameters(Object.values(adminModelTokenQueryParameters.tokenAudit), updates);
+    }
+  }
+  return { section: requested, replace: Object.keys(updates).length > 0, updates, notice };
+}
+
+export function normalizeAdminModelTokenNavigation(requestedSection, visibleSections, modelTokenIAEnabled, permissions, queryUpdates = {}, locationLike = globalThis.location) {
+  const candidateURL = new URL(adminSectionURL(requestedSection, locationLike, queryUpdates), 'https://admin.invalid');
+  const candidateLocation = { pathname: candidateURL.pathname, search: candidateURL.search, hash: candidateURL.hash };
+  const normalized = normalizeAdminModelTokenEntry(requestedSection, visibleSections, modelTokenIAEnabled, candidateLocation, permissions);
+  return {
+    ...normalized,
+    updates: { ...queryUpdates, ...normalized.updates },
+  };
+}
+
+export function adminModelTokenOverviewRoute(permissions = [], modelTokenIAEnabled = false) {
+  const granted = new Set(permissions);
+  if (!modelTokenIAEnabled) return granted.has('platform.tokens.read') || granted.has('platform.usage.read') ? { section: 'tokens', query: {} } : null;
+  if (granted.has('platform.tokens.read')) return { section: 'tokenResources', query: {} };
+  if (granted.has('platform.usage.read')) return { section: 'modelOperations', query: { operations_tab: 'usage' } };
+  return null;
+}
 
 export function readAdminSection(locationLike = globalThis.location) {
   if (!locationLike) return '';

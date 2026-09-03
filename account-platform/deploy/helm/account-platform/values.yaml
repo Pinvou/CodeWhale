@@ -34,6 +34,9 @@ images:
   redis: { repository: redis, tag: "8.2-alpine", pullPolicy: IfNotPresent }
   nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
 
+portal:
+  adminModelTokenIAEnabled: false
+
 replicas:
   accountService: 2
   identityService: 1

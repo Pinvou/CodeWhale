@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，111 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，20 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，112 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，19 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -150,7 +150,7 @@
 | APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | DONE |
 | APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | DONE |
 | APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | DONE |
-| APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | PENDING |
+| APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | DONE |
 | APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | PENDING |
 | APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | PENDING |
 | APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | PENDING |
@@ -264,10 +264,11 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-127 三页架构、URL 与错误隔离
 
-- **目标/范围**：主目标 `UI-47`、`UI-48`。仅修改 `internal/portal/static/{admin.html,assets/admin.js,assets/admin.css,assets/account-platform-i18n.js}`、`internal/portal/{static.go,service.go}` 及现有 `test/contract/admin-portal-ui-redesign.test.mjs`/新导航合同测试。
+- **目标/范围**：主目标 `UI-47`、`UI-48`。修改 `pinvou3-app/src/features/account-platform/{AdminPlatformView.jsx,AdminModelTokenWorkspace.jsx,admin-client.js,admin-model-token-state.js,admin-navigation.js,admin-platform.css,authorization-ui.js}` 与 `pinvou3-app/src/shared/admin-platform-i18n.js`，由构建同步 `internal/portal/static/assets/{admin.js,admin.css,account-platform-i18n.js}`；Portal session gate 使用 `cmd/token-portal/main.go`、`internal/portal/{service.go,service_test.go}`，默认关闭值同步 `deploy/compose`、`deploy/helm`。合同验证使用现有 `test/contract/admin-portal-ui-redesign.test.mjs` 和新增导航/状态测试。不改业务 schema 或领域写合同。
 - **交付/兼容**：新增“模型管理/Token 资源/运行与用量”三 section，九数源和详情嵌套数据分别管理 URL filter/cursor/error/loading/refresh；跨 section、legacy `section=tokens`、popstate、非法/无权/互斥详情按已批清理顺序处理，零详情请求/零 DOM/日志泄露。
-- **feature gate/回滚/验收**：独立一期 IA gate；on 时 supersede UI-28/UI-31 Token Gateway canonical，off 时历史入口不变。先关 gate 即可 UI 回滚。验证 model/token/usage/pricing-only、无权 403、刷新/分享/前进后退、单源错误/重试不清其他数据、三语、AA、320px/200%。
+- **feature gate/回滚/验收**：APT-127 交付独立、默认关闭的一期 IA 功能开关及本地/环境装配；on 时 supersede UI-28/UI-31 Token Gateway canonical，off 时历史入口与调用 URL 不变，先关 gate 即可 UI 回滚。APT-137 只负责跨版本分级发布、生产激活/回滚编排和生产等价门禁，不重复实现本期开关或页面。验证 model/token/usage/pricing-only、无权 403、刷新/分享/前进后退、单源错误/重试不清其他数据、三语、AA、320px/200%。
 - **不包含**：只接入 APT-121 真实读 API 与空/错态；不做协议公式写入、选择器、运行详情、高风险动作或二期资产详情。
+> 代码审核记录（2026-09-04）：身份 B 第三轮 `PASS`。已完成默认关闭的一期 IA gate、三 section 与九类具名 URL/API 映射；当前仅渲染模型、Token Account、Provisioning、用量四类 APT-121 既有列表，逐源维护加载、错误、重试、数据时间、筛选和 cursor，并在 410 时只重建目标数据源首屏。legacy/gate-off 保持旧 `Token Gateway` 与旧调用 URL；无权、非法、跨 section 和互斥详情会在请求前同步归一并清理，operations 页签切换对候选 URL 使用同一归一逻辑且只写一次 history。生产请求规划和逐源状态转换由可测试模块复用，覆盖 usage-only 零 Provisioning 请求、查询首帧无旧行、迟到响应隔离与单源失败。三语、键盘页签、可见焦点、320px/200% 响应式、Portal session gate、Compose/Helm 默认值、BFF allowlist 和生成制品已同步。APT-128 及后续协议/公式操作、选择器、详情和高风险写入仍不在本任务内；尚未推送或部署。
 
 ### APT-128 协议与安全计量公式工作台
 
@@ -343,7 +344,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-137 分级发布、兼容与总回滚门禁
 
-- **目标/范围**：主目标 `UI-58`。仅修改 Account/Token/Portal 配置说明与 feature-gate 装配、`deploy/compose`、`deploy/helm`、OpenAPI/Portal 契约门禁、运维 runbook 和发布验证脚本；汇总 APT-127～APT-136，并唯一负责 credential origin 的 DNS/TLS、Portal/credential CSP、固定环境白名单、反向代理/WAF 日志抑制和生产等价健康探针证据，但不夹带功能修复。
+- **目标/范围**：主目标 `UI-58`。仅修改 Account/Token/Portal 分级发布配置、`deploy/compose`、`deploy/helm`、OpenAPI/Portal 契约门禁、运维 runbook 和发布验证脚本；复用 APT-127 已交付的一期 IA 基础开关，汇总 APT-127～APT-136，并唯一负责跨版本分级发布与生产激活/回滚编排，以及 credential origin 的 DNS/TLS、Portal/credential CSP、固定环境白名单、反向代理/WAF 日志抑制和生产等价健康探针证据，但不夹带功能修复。
 - **发布/兼容/回滚**：冻结一期 IA/列表/协议公式/选择器/运行闭环/结构化操作与二期详情/凭据/生命周期/价格/概览的独立 gate 和依赖顺序；服务端、Portal、cursor envelope、审批事件和隔离凭据入口支持 N/N-1。`section=tokens` 至少保留 90 天且跨两个稳定版本规范化；UI-47 开启后 supersede UI-28/UI-31 canonical。回滚顺序为先停写/worker/launch，再关二期、一期和代理路由；活动 cursor 返回 410，进行中审批/计划/session 按各任务合同收敛。
 - **验收**：逐 gate on/off、混合 N/N-1、滚动升级/回滚、旧链接/书签/popstate、九源 cursor 独立、CSP/origin、DNS/TLS/代理/WAF、10s heartbeat 探针、DB↔registry 逐字段一致、`executableApprovalCommands` 保留既有项且 Token 增量恰三项、容量及 `10→12→14`/`3→5→7`/`5→7→9` 绝对 deadline 链/告警、三语与安全扫描全部成为发布门禁，并记录生产等价环境证据。
 - **不包含**：不新增业务 API/schema/权限/页面，不改审批分类或数据事实；任何验收失败回到其唯一所属 APT 修复后重新审核。

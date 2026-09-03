@@ -28,18 +28,19 @@ import (
 )
 
 type Config struct {
-	PublicURL              *url.URL
-	AuthorizationURL       *url.URL
-	TokenURL               *url.URL
-	ClientID               string
-	AccountURL             *url.URL
-	BillingURL             *url.URL
-	TokenGatewayURL        *url.URL
-	ClientVersion          string
-	TokenAdminProxyHMACKey []byte
-	SystemProbes           []SystemProbe
-	SecureCookies          bool
-	SessionMaxAge          time.Duration
+	PublicURL                *url.URL
+	AuthorizationURL         *url.URL
+	TokenURL                 *url.URL
+	ClientID                 string
+	AccountURL               *url.URL
+	BillingURL               *url.URL
+	TokenGatewayURL          *url.URL
+	ClientVersion            string
+	TokenAdminProxyHMACKey   []byte
+	AdminModelTokenIAEnabled bool
+	SystemProbes             []SystemProbe
+	SecureCookies            bool
+	SessionMaxAge            time.Duration
 }
 
 const defaultSessionMaxAge = 30 * 24 * time.Hour
@@ -259,7 +260,11 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusOK, map[string]any{"authenticated": true, "csrf_token": session.CSRFToken})
+	api.WriteJSON(w, http.StatusOK, map[string]any{
+		"authenticated": true,
+		"csrf_token":    session.CSRFToken,
+		"feature_flags": map[string]bool{"admin_model_token_ia": s.config.AdminModelTokenIAEnabled},
+	})
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request) {

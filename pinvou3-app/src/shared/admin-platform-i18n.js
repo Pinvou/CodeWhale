@@ -1456,6 +1456,51 @@ Object.assign(adminPlatformCopy.ja.billing, {
   capabilityLimitations: '現在の決済プロバイダーには機能制限があります。未対応の返金、能動的なクローズ、通知、日次照合操作は無効です。',
 });
 
+Object.assign(adminPlatformCopy.zh.nav, { models: '模型管理', tokenResources: 'Token 资源', modelOperations: '运行与用量', forbidden: '无权访问' });
+Object.assign(adminPlatformCopy.zh.pageLeads, {
+  models: '管理模型目录；协议、公式与价格能力按原子权限独立开放。',
+  tokenResources: '管理平台 Token Account 资源，并查看凭据与路由的安全摘要。',
+  modelOperations: '分别查看 Provisioning 与用量请求，单个数据源失败不影响其他视图。',
+  forbidden: '当前账号没有访问此模型与 Token 页面所需的读取权限。',
+});
+adminPlatformCopy.zh.modelToken = {
+  modelDirectory: '模型目录', tokenAccounts: 'Token Account', provisionings: 'Provisioning', usageRequests: '用量请求',
+  modelSearch: '模型搜索', modelSearchPlaceholder: '名称或稳定模型 ID', tokenSearch: '账户搜索', tokenSearchPlaceholder: '名称或 Token Account ID', provisioningSearch: '任务搜索', usageSearch: '请求搜索', identifierPlaceholder: '输入完整 ID',
+  model: '模型', modelID: '稳定模型 ID', tokenAccount: 'Token Account', tokenAccountID: 'Token Account ID', provisioning: '任务 ID', request: '请求 ID', owner: '所有者', ownerType: '所有者类型', status: '状态', lifecycle: '生命周期', protocol: '协议', sourceAdapter: '来源 Adapter', source: '目录来源', health: '服务端健康', credentials: '有效凭据', routes: '路由', contextLength: '上下文长度', executionStatus: '执行状态', settlementStatus: '结算状态', stage: '阶段', generation: '实际 / 目标代次', startedAt: '开始时间', updatedAt: '更新时间',
+  all: '全部', search: '查询', clear: '清除', retry: '重试', refreshSource: '刷新此数据源', loading: '正在加载…', lastUpdated: '更新于', notUpdated: '尚未更新', noResults: '当前筛选下暂无数据。', sourceUnavailable: '此数据源暂时不可用', cursorExpired: '分页快照已过期', retryHelp: '可单独重试；已成功加载的其他数据不会被清空。', requestID: '请求 ID', previous: '上一页', next: '下一页', snapshotAt: '快照截至', pageCount: (count, more) => `本页 ${count} 项${more ? ' · 还有下一页' : ''}`, operationsViews: '运行与用量视图', pricingOnly: '当前仅有定价读取权限，因此不会请求模型目录。请从“定价与商品”查看模型价格；模型页内价格入口将在后续阶段按独立权限开放。', invalidLink: '链接中的详情标识无效，已安全返回列表。', conflictingDetail: '链接包含互斥的详情目标，已安全返回列表。', forbiddenTitle: '无法访问此分区', forbiddenBody: '当前账号没有任何对应页面读取权限；系统未请求或展示隐藏资源。',
+  enumLabels: { ACTIVE: '可用', DISABLED: '已停用', FROZEN: '已冻结', USER: '个人用户', ORG: '组织', ORG_UNIT: '组织节点', PUBLISHED: '已发布', DEPRECATED: '已弃用', REMOVED: '已下架', READY: '就绪', PENDING: '待处理', FAILED: '失败', REPAIR_REQUIRED: '需要修复', HEALTHY: '健康', DEGRADED: '降级', UNHEALTHY: '不健康', STALE: '已过期', UNKNOWN: '未知', PROBING: '探测中', RECEIVED: '已接收', HOLD_RESERVING: '额度预占中', HOLD_RESERVED: '额度已预占', DISPATCH_INTENT_PERSISTED: '投递意图已保存', UPSTREAM_DISPATCHING: '正在投递上游', STREAMING: '流式响应中', SUCCEEDED: '已成功', CANCELLED_BEFORE_DISPATCH: '投递前已取消', REVIEW: '待人工核对', HOLD_PENDING: '额度预占待确认', HOLD_ACTIVE: '额度已锁定', USAGE_PENDING: '用量待结算', SETTLED: '已结算', RELEASED: '已释放', SETTLEMENT_PENDING: '待结算', QUEUED: '已排队', PROVISIONING: '配置中', VERIFIED: '已验证', LEASE_EXPIRED: '租约已过期', SLA_EXCEEDED: '已超过时限', MANUAL_REPAIR: '人工修复', UNAVAILABLE: '不可用' },
+};
+
+Object.assign(adminPlatformCopy.en.nav, { models: 'Models', tokenResources: 'Token resources', modelOperations: 'Operations & usage', forbidden: 'Access denied' });
+Object.assign(adminPlatformCopy.en.pageLeads, {
+  models: 'Manage the model catalog. Protocol, formula, and pricing capabilities are permission-scoped.',
+  tokenResources: 'Manage platform Token Accounts and review safe credential and route summaries.',
+  modelOperations: 'Review Provisioning and usage independently so one source cannot block another.',
+  forbidden: 'This account lacks the read permission required for this model and Token page.',
+});
+adminPlatformCopy.en.modelToken = {
+  modelDirectory: 'Model catalog', tokenAccounts: 'Token Accounts', provisionings: 'Provisioning', usageRequests: 'Usage requests',
+  modelSearch: 'Find models', modelSearchPlaceholder: 'Name or stable model ID', tokenSearch: 'Find accounts', tokenSearchPlaceholder: 'Name or Token Account ID', provisioningSearch: 'Find tasks', usageSearch: 'Find requests', identifierPlaceholder: 'Enter a complete ID',
+  model: 'Model', modelID: 'Stable model ID', tokenAccount: 'Token Account', tokenAccountID: 'Token Account ID', provisioning: 'Task ID', request: 'Request ID', owner: 'Owner', ownerType: 'Owner type', status: 'Status', lifecycle: 'Lifecycle', protocol: 'Protocol', sourceAdapter: 'Source adapter', source: 'Catalog source', health: 'Server health', credentials: 'Active credentials', routes: 'Routes', contextLength: 'Context length', executionStatus: 'Execution', settlementStatus: 'Settlement', stage: 'Stage', generation: 'Actual / desired generation', startedAt: 'Started', updatedAt: 'Updated',
+  all: 'All', search: 'Search', clear: 'Clear', retry: 'Retry', refreshSource: 'Refresh this source', loading: 'Loading…', lastUpdated: 'Updated', notUpdated: 'Not updated yet', noResults: 'No data matches the current filters.', sourceUnavailable: 'This data source is temporarily unavailable', cursorExpired: 'The pagination snapshot expired', retryHelp: 'Retry this source only; other successful data remains available.', requestID: 'Request ID', previous: 'Previous', next: 'Next', snapshotAt: 'Snapshot at', pageCount: (count, more) => `${count} on this page${more ? ' · more available' : ''}`, operationsViews: 'Operations and usage views', pricingOnly: 'Only pricing read access is available, so the model catalog is not requested. View model prices under Pricing & products; the model-page price entry will be permission-gated in a later phase.', invalidLink: 'The detail identifier was invalid, so the list was restored safely.', conflictingDetail: 'The link contained conflicting detail targets, so the list was restored safely.', forbiddenTitle: 'This area is unavailable', forbiddenBody: 'This account lacks all applicable page permissions. Hidden resources were not requested or rendered.',
+  enumLabels: { ACTIVE: 'Available', DISABLED: 'Disabled', FROZEN: 'Frozen', USER: 'User', ORG: 'Organization', ORG_UNIT: 'Organization unit', PUBLISHED: 'Published', DEPRECATED: 'Deprecated', REMOVED: 'Removed', READY: 'Ready', PENDING: 'Pending', FAILED: 'Failed', REPAIR_REQUIRED: 'Repair required', HEALTHY: 'Healthy', DEGRADED: 'Degraded', UNHEALTHY: 'Unhealthy', STALE: 'Stale', UNKNOWN: 'Unknown', PROBING: 'Probing', RECEIVED: 'Received', HOLD_RESERVING: 'Reserving hold', HOLD_RESERVED: 'Hold reserved', DISPATCH_INTENT_PERSISTED: 'Dispatch intent saved', UPSTREAM_DISPATCHING: 'Dispatching upstream', STREAMING: 'Streaming', SUCCEEDED: 'Succeeded', CANCELLED_BEFORE_DISPATCH: 'Cancelled before dispatch', REVIEW: 'Manual review', HOLD_PENDING: 'Hold pending', HOLD_ACTIVE: 'Hold active', USAGE_PENDING: 'Usage settlement pending', SETTLED: 'Settled', RELEASED: 'Released', SETTLEMENT_PENDING: 'Settlement pending', QUEUED: 'Queued', PROVISIONING: 'Provisioning', VERIFIED: 'Verified', LEASE_EXPIRED: 'Lease expired', SLA_EXCEEDED: 'SLA exceeded', MANUAL_REPAIR: 'Manual repair', UNAVAILABLE: 'Unavailable' },
+};
+
+Object.assign(adminPlatformCopy.ja.nav, { models: 'モデル管理', tokenResources: 'Token リソース', modelOperations: '運用と使用量', forbidden: 'アクセス不可' });
+Object.assign(adminPlatformCopy.ja.pageLeads, {
+  models: 'モデルカタログを管理します。プロトコル、式、価格は個別の権限で表示されます。',
+  tokenResources: 'プラットフォーム Token Account と、安全な資格情報・ルート概要を管理します。',
+  modelOperations: 'Provisioning と使用量を独立して表示し、一つの障害が他を妨げないようにします。',
+  forbidden: 'このモデルと Token ページに必要な閲覧権限がありません。',
+});
+adminPlatformCopy.ja.modelToken = {
+  modelDirectory: 'モデルカタログ', tokenAccounts: 'Token Account', provisionings: 'Provisioning', usageRequests: '使用量リクエスト',
+  modelSearch: 'モデル検索', modelSearchPlaceholder: '名前または安定モデル ID', tokenSearch: 'アカウント検索', tokenSearchPlaceholder: '名前または Token Account ID', provisioningSearch: 'タスク検索', usageSearch: 'リクエスト検索', identifierPlaceholder: '完全な ID を入力',
+  model: 'モデル', modelID: '安定モデル ID', tokenAccount: 'Token Account', tokenAccountID: 'Token Account ID', provisioning: 'タスク ID', request: 'リクエスト ID', owner: '所有者', ownerType: '所有者種別', status: '状態', lifecycle: 'ライフサイクル', protocol: 'プロトコル', sourceAdapter: 'ソース Adapter', source: 'カタログソース', health: 'サーバー状態', credentials: '有効な資格情報', routes: 'ルート', contextLength: 'コンテキスト長', executionStatus: '実行状態', settlementStatus: '決済状態', stage: '段階', generation: '実際 / 目標世代', startedAt: '開始時刻', updatedAt: '更新時刻',
+  all: 'すべて', search: '検索', clear: 'クリア', retry: '再試行', refreshSource: 'このデータを更新', loading: '読み込み中…', lastUpdated: '更新', notUpdated: '未更新', noResults: '現在の条件に一致するデータはありません。', sourceUnavailable: 'このデータソースは一時的に利用できません', cursorExpired: 'ページングスナップショットの期限が切れました', retryHelp: 'このデータのみ再試行します。他の取得済みデータは保持されます。', requestID: 'リクエスト ID', previous: '前へ', next: '次へ', snapshotAt: 'スナップショット', pageCount: (count, more) => `このページ ${count} 件${more ? '・次のページあり' : ''}`, operationsViews: '運用と使用量の表示', pricingOnly: '価格閲覧権限のみのため、モデルカタログは要求しません。モデル価格は「価格と商品」で確認してください。モデルページ内の価格導線は後続フェーズで権限別に提供します。', invalidLink: '詳細 ID が無効なため、安全に一覧へ戻りました。', conflictingDetail: '競合する詳細対象が含まれていたため、安全に一覧へ戻りました。', forbiddenTitle: 'この領域にはアクセスできません', forbiddenBody: '該当ページの閲覧権限がありません。非表示リソースは要求も表示もしていません。',
+  enumLabels: { ACTIVE: '利用可能', DISABLED: '無効', FROZEN: '凍結', USER: '個人ユーザー', ORG: '組織', ORG_UNIT: '組織ノード', PUBLISHED: '公開済み', DEPRECATED: '非推奨', REMOVED: '提供終了', READY: '準備完了', PENDING: '保留中', FAILED: '失敗', REPAIR_REQUIRED: '修復が必要', HEALTHY: '正常', DEGRADED: '低下', UNHEALTHY: '異常', STALE: '期限切れ', UNKNOWN: '不明', PROBING: '確認中', RECEIVED: '受信済み', HOLD_RESERVING: '枠を確保中', HOLD_RESERVED: '枠を確保済み', DISPATCH_INTENT_PERSISTED: '送信予定を保存済み', UPSTREAM_DISPATCHING: '上流へ送信中', STREAMING: 'ストリーミング中', SUCCEEDED: '成功', CANCELLED_BEFORE_DISPATCH: '送信前にキャンセル', REVIEW: '要確認', HOLD_PENDING: '枠の確保待ち', HOLD_ACTIVE: '枠を確保済み', USAGE_PENDING: '使用量の決済待ち', SETTLED: '決済済み', RELEASED: '解放済み', SETTLEMENT_PENDING: '決済待ち', QUEUED: '待機中', PROVISIONING: '構成中', VERIFIED: '検証済み', LEASE_EXPIRED: 'リース期限切れ', SLA_EXCEEDED: '期限超過', MANUAL_REPAIR: '手動修復', UNAVAILABLE: '利用不可' },
+};
+
 Object.assign(adminPlatformCopy.zh.accounts, {
   userCode: '用户编码',
   exactCodeHint: '输入完整用户编码进行精确查询',

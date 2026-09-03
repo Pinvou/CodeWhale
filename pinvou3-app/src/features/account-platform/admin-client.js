@@ -1,6 +1,30 @@
 import { mergeObservedVersions } from './authorization-ui.js';
 
 const ADMIN_BILLING_LIMITS = new Set(['25', '50', '100', '200']);
+const TOKEN_ADMIN_FILTERS = Object.freeze({
+  models: ['q', 'lifecycle_status', 'protocol_code', 'source_adapter', 'source_missing'],
+  protocols: ['q', 'status', 'protocol_code', 'published', 'created_from', 'created_to'],
+  formulas: ['q', 'status', 'protocol_definition_id', 'metering_unit_code', 'published', 'created_from', 'created_to'],
+  tokenAccounts: ['q', 'owner_type', 'owner_id', 'status', 'health_status', 'credential_status'],
+  provisionings: ['q', 'status', 'model_id', 'token_account_id', 'scope_type', 'scope_id', 'sla_overdue'],
+  usage: ['q', 'execution_status', 'settlement_status', 'model', 'token_account_id', 'organization_id', 'started_from', 'started_to'],
+  reconciliation: ['q', 'status', 'severity', 'case_type', 'owner_id', 'sla_overdue'],
+  ownerCandidates: ['q', 'owner_type', 'status', 'organization_id'],
+  resourceAudit: ['resource_type', 'resource_id', 'action', 'actor_id', 'occurred_from', 'occurred_to'],
+});
+
+function tokenAdminCollectionQuery(source, filters = {}) {
+  const query = new URLSearchParams({ limit: '50' });
+  for (const key of [...(TOKEN_ADMIN_FILTERS[source] || []), 'cursor']) {
+    const value = String(filters[key] || '').trim();
+    if (value) query.set(key, value);
+  }
+  return query;
+}
+
+function isAbortSignal(value) {
+  return typeof globalThis.AbortSignal !== 'undefined' && value instanceof globalThis.AbortSignal;
+}
 
 function billingCollectionQuery(filters = {}, { keys = [], dateTimeKeys = [], dateKeys = [] } = {}) {
   const query = new URLSearchParams({ limit: ADMIN_BILLING_LIMITS.has(String(filters.limit)) ? String(filters.limit) : '50' });
@@ -478,8 +502,13 @@ export class AdminPlatformClient {
   tokenOverview(signal) {
     return this.request('token', '/admin/v1/overview', signal);
   }
-  tokenAccounts(signal) {
-    return this.request('token', '/admin/v1/token-accounts?limit=100', signal);
+  tokenAccounts(filtersOrSignal = {}, signal) {
+    if (isAbortSignal(filtersOrSignal)) {
+      return this.request('token', '/admin/v1/token-accounts?limit=100', filtersOrSignal);
+    }
+    const filters = filtersOrSignal;
+    const requestSignal = signal;
+    return this.request('token', `/admin/v1/token-accounts?${tokenAdminCollectionQuery('tokenAccounts', filters)}`, requestSignal);
   }
   createTokenAccount(input) {
     return this.mutate('token', '/admin/v1/token-accounts', 'POST', input);
@@ -499,8 +528,13 @@ export class AdminPlatformClient {
   validateTokenCredential(tokenAccountID, credentialID) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credentials/${encodeURIComponent(credentialID)}/validate`, 'POST', {});
   }
-  usageRequests(signal) {
-    return this.request('token', '/admin/v1/usage-requests?limit=100', signal);
+  usageRequests(filtersOrSignal = {}, signal) {
+    if (isAbortSignal(filtersOrSignal)) {
+      return this.request('token', '/admin/v1/usage-requests?limit=100', filtersOrSignal);
+    }
+    const filters = filtersOrSignal;
+    const requestSignal = signal;
+    return this.request('token', `/admin/v1/usage-requests?${tokenAdminCollectionQuery('usage', filters)}`, requestSignal);
   }
   usageRequest(usageRequestID, signal) {
     return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal);
@@ -508,8 +542,28 @@ export class AdminPlatformClient {
   retryUsageReconciliation(usageRequestID, reason) {
     return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, `usage-reconcile-${crypto.randomUUID()}`);
   }
-  catalogModels(signal) {
-    return this.request('token', '/admin/v1/models', signal);
+  catalogModels(filtersOrSignal = {}, signal) {
+    if (isAbortSignal(filtersOrSignal)) {
+      return this.request('token', '/admin/v1/models', filtersOrSignal);
+    }
+    const filters = filtersOrSignal;
+    const requestSignal = signal;
+    return this.request('token', `/admin/v1/models?${tokenAdminCollectionQuery('models', filters)}`, requestSignal);
+  }
+  protocols(filters = {}, signal) {
+    return this.request('token', `/admin/v1/protocols?${tokenAdminCollectionQuery('protocols', filters)}`, signal);
+  }
+  formulas(filters = {}, signal) {
+    return this.request('token', `/admin/v1/formulas?${tokenAdminCollectionQuery('formulas', filters)}`, signal);
+  }
+  tokenReconciliationCases(filters = {}, signal) {
+    return this.request('token', `/admin/v1/reconciliation-cases?${tokenAdminCollectionQuery('reconciliation', filters)}`, signal);
+  }
+  tokenOwnerCandidates(filters = {}, signal) {
+    return this.request('token', `/admin/v1/owner-candidates?${tokenAdminCollectionQuery('ownerCandidates', filters)}`, signal);
+  }
+  tokenResourceAudit(filters = {}, signal) {
+    return this.request('token', `/admin/v1/resource-audit?${tokenAdminCollectionQuery('resourceAudit', filters)}`, signal);
   }
   saveModelDraft(modelID, input) {
     return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/draft`, 'PUT', input);
@@ -526,8 +580,13 @@ export class AdminPlatformClient {
   rollbackModelCatalog(input) {
     return this.mutate('token', '/admin/v1/model-catalog:rollback', 'POST', input);
   }
-  provisionings(signal) {
-    return this.request('token', '/admin/v1/provisionings?limit=100', signal);
+  provisionings(filtersOrSignal = {}, signal) {
+    if (isAbortSignal(filtersOrSignal)) {
+      return this.request('token', '/admin/v1/provisionings?limit=100', filtersOrSignal);
+    }
+    const filters = filtersOrSignal;
+    const requestSignal = signal;
+    return this.request('token', `/admin/v1/provisionings?${tokenAdminCollectionQuery('provisionings', filters)}`, requestSignal);
   }
   provisioning(provisioningID, signal) {
     return this.request('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}`, signal);

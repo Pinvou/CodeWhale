@@ -19,6 +19,9 @@ export const adminSectionPermissions = Object.freeze({
   payments: ['platform.billing.wallets.read', 'platform.usage.read'],
   products: ['platform.products.read', 'platform.pricing.read'],
   tokens: ['platform.tokens.read', 'platform.models.read', 'platform.usage.read'],
+  models: ['platform.models.read', 'platform.pricing.read'],
+  tokenResources: ['platform.tokens.read'],
+  modelOperations: ['platform.tokens.read', 'platform.usage.read'],
   approvals: ['platform.billing.wallets.read', 'platform.billing.repairs.request', 'platform.billing.repairs.approve', 'platform.billing.payment-controls.resume.request', 'platform.billing.payment-controls.resume.approve'],
   system: ['platform.system.status.read', 'platform.users.identity.repair'],
   audit: ['platform.audit.read'],
@@ -33,6 +36,9 @@ export const adminSectionMutationPermissions = Object.freeze({
   payments: ['platform.billing.orders.sync', 'platform.billing.repairs.request', 'platform.billing.payment-controls.resume.request', 'platform.usage.reconcile.retry'],
   products: ['platform.products.create', 'platform.products.publish', 'platform.products.unpublish', 'platform.products.delete', 'platform.pricing.manage'],
   tokens: ['platform.tokens.manage', 'platform.tokens.credentials.validate', 'platform.models.sync', 'platform.models.manage', 'platform.usage.reconcile.retry'],
+  models: ['platform.models.sync', 'platform.models.manage', 'platform.pricing.manage'],
+  tokenResources: ['platform.tokens.manage', 'platform.tokens.credentials.validate'],
+  modelOperations: ['platform.usage.reconcile.retry'],
   approvals: ['platform.billing.repairs.request', 'platform.billing.repairs.approve', 'platform.billing.payment-controls.resume.request', 'platform.billing.payment-controls.resume.approve'],
   system: ['platform.users.identity.repair'],
   audit: ['platform.audit.export'],
@@ -89,10 +95,12 @@ export function mergeObservedVersions(current = {}, observed = {}) {
   return next;
 }
 
-export function adminVisibleSections(snapshot) {
+export function adminVisibleSections(snapshot, { modelTokenIAEnabled = false } = {}) {
   const visible = Object.keys(adminSectionPermissions).filter((section) => hasAnyPermission(snapshot, adminSectionPermissions[section]));
-  if (visible.length > 0) visible.push('settings');
-  return visible;
+  const hidden = modelTokenIAEnabled ? new Set(['tokens']) : new Set(['models', 'tokenResources', 'modelOperations']);
+  const filtered = visible.filter((section) => !hidden.has(section));
+  if (filtered.length > 0) filtered.push('settings');
+  return filtered;
 }
 
 export function adminSectionReadOnly(snapshot, section) {

@@ -3,9 +3,10 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminNavigationGroups, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
+import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminNavigationGroupsForGate, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { createFinanceDetailRecovery, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from './admin-finance-pagination.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
+import { AdminModelTokenWorkspace } from './AdminModelTokenWorkspace.jsx';
 import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 import { createFinanceIdempotencyKey, executeStructuredFinanceAction, financeActionRequiresRefresh, isUnknownMutationOutcome, paymentAnomalyResolutionOptions } from './finance-actions.js';
 import { financeOverviewDrilldown, financeOverviewMetricTimeScope, formatFinanceOverviewValue } from './admin-finance-overview.js';
@@ -22,6 +23,9 @@ const NAV_ICONS = {
   payments: '¤',
   products: '□',
   tokens: '↗',
+  models: '□',
+  tokenResources: '◇',
+  modelOperations: '↗',
   approvals: '✓',
   system: '◉',
   audit: '≡',
@@ -365,6 +369,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [busy, setBusy] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
   const [routeVersion, setRouteVersion] = useState(0);
+  const [modelTokenIAEnabled, setModelTokenIAEnabled] = useState(false);
+  const [modelTokenRouteNotice, setModelTokenRouteNotice] = useState('');
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
   const financeRequestTrackerRef = useRef(null);
@@ -464,7 +470,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             roleUsers: users.items || [],
             roleOrganizations: organizations.items || [],
           };
-        } else if (target === 'billing' || target === 'payments' || target === 'products') {
+        } else if (target === 'billing' || target === 'payments' || target === 'products' || target === 'models' || target === 'tokenResources' || target === 'modelOperations' || target === 'forbidden') {
           next = {};
         } else if (target === 'approvals' || target === 'settings') {
           next = {};
@@ -513,17 +519,22 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           return;
         }
         const granted = await client.authorization(controller.signal);
-        const visible = adminVisibleSections(granted);
+        const iaEnabled = adminModelTokenIAGateEnabled(session);
+        setModelTokenIAEnabled(iaEnabled);
+        const visible = adminVisibleSections(granted, { modelTokenIAEnabled: iaEnabled });
+        const requested = readAdminSection();
+        const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled, undefined, granted.platform_permissions || []);
         if (visible.length === 0) {
+          if (normalized.replace) writeAdminSection(normalized.section, 'replace', undefined, undefined, normalized.updates);
           setAuth('denied');
           return;
         }
         authorizationRef.current = granted;
         setAuthorization(granted);
-        const requested = readAdminSection();
-        const target = visible.includes(requested) ? requested : visible[0];
+        const target = normalized.section || visible[0];
         setSection(target);
-        writeAdminSection(target, 'replace');
+        setModelTokenRouteNotice(normalized.notice || '');
+        writeAdminSection(target, 'replace', undefined, undefined, normalized.updates);
         await load(target, controller.signal, granted);
       } catch (reason) {
         if (reason?.name !== 'AbortError') {
@@ -556,18 +567,21 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         const current = authorizationRef.current;
         const permissionsChanged = JSON.stringify(current?.platform_permissions || []) !== JSON.stringify(next?.platform_permissions || []);
         if (permissionsChanged || authorizationVersionChanged(authorizationVersions(current), authorizationVersions(next))) {
-          const visible = adminVisibleSections(next);
+          const visible = adminVisibleSections(next, { modelTokenIAEnabled });
           authorizationRef.current = next;
           setAuthorization(next);
           financeRequestTrackerRef.current.invalidateAll();
           setData({});
+          const normalized = normalizeAdminModelTokenEntry(section, visible, modelTokenIAEnabled, undefined, next.platform_permissions || []);
           if (visible.length === 0) {
+            if (normalized.replace) writeAdminSection(normalized.section, 'replace', undefined, undefined, normalized.updates);
             setAuth('denied');
             return;
           }
-          const target = visible.includes(section) ? section : visible[0];
+          const target = normalized.section || visible[0];
           setSection(target);
-          writeAdminSection(target, 'replace');
+          setModelTokenRouteNotice(normalized.notice || '');
+          writeAdminSection(target, 'replace', undefined, undefined, normalized.updates);
           await load(target, undefined, next);
         }
       } catch (reason) {
@@ -602,31 +616,37 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       unsubscribe?.();
       globalThis.removeEventListener?.('focus', onFocus);
     };
-  }, [auth, client, load, section]);
+  }, [auth, client, load, modelTokenIAEnabled, section]);
 
   useEffect(() => {
     if (auth !== 'ready' || !authorization) return undefined;
     const onPopState = () => {
       const requested = readAdminSection();
-      const visible = adminVisibleSections(authorization);
-      if (!visible.includes(requested)) {
+      const visible = adminVisibleSections(authorization, { modelTokenIAEnabled });
+      const normalized = normalizeAdminModelTokenEntry(requested, visible, modelTokenIAEnabled, undefined, authorization.platform_permissions || []);
+      if (!normalized.section) {
         writeAdminSection(section, 'replace');
         return;
       }
-      if (requested === section) {
+      if (normalized.replace) writeAdminSection(normalized.section, 'replace', undefined, undefined, normalized.updates);
+      setModelTokenRouteNotice(normalized.notice || '');
+      if (normalized.section === section) {
         setRouteVersion((value) => value + 1);
         return;
       }
-      setSection(requested);
+      setSection(normalized.section);
       setRouteVersion((value) => value + 1);
-      if (!sectionHasData(requested, data)) void load(requested, undefined, authorization);
+      if (!sectionHasData(normalized.section, data)) void load(normalized.section, undefined, authorization);
     };
     globalThis.addEventListener?.('popstate', onPopState);
     return () => globalThis.removeEventListener?.('popstate', onPopState);
-  }, [auth, authorization, data, load, section]);
+  }, [auth, authorization, data, load, modelTokenIAEnabled, section]);
 
   const navigate = (key, query = {}) => {
-    if (!adminVisibleSections(authorization).includes(key)) return;
+    if (!adminVisibleSections(authorization, { modelTokenIAEnabled }).includes(key)) return;
+    const modelTokenQuery = key === 'modelOperations' && !query.operations_tab
+      ? { operations_tab: platformPermissions.includes('platform.tokens.read') ? 'provisionings' : 'usage', ...query }
+      : query;
     setSection(key);
     writeAdminSection(key, 'push', undefined, undefined, {
       role: null,
@@ -645,7 +665,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       product_include_deleted: null,
       approval_command_type: null,
       approval_target: null,
-      ...query,
+      ...clearAdminModelTokenUpdates({ includeLegacy: key !== 'tokens' }),
+      ...modelTokenQuery,
     });
     globalThis.dispatchEvent?.(new CustomEvent('pinvou-admin-route-change'));
     setRouteVersion((value) => value + 1);
@@ -661,12 +682,12 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   if (auth === 'denied') return <StatePage copy={copy} kind="denied" />;
   if (auth === 'error') return <StatePage copy={copy} kind="error" onRetry={() => window.location.reload()} />;
 
-  const visibleSections = adminVisibleSections(authorization);
-  const visibleGroups = adminNavigationGroups
+  const visibleSections = adminVisibleSections(authorization, { modelTokenIAEnabled });
+  const visibleGroups = adminNavigationGroupsForGate(modelTokenIAEnabled)
     .map((group) => ({ ...group, sections: group.sections.filter((key) => visibleSections.includes(key)) }))
     .filter((group) => group.sections.length > 0);
   const platformPermissions = authorization?.platform_permissions || [];
-  const sectionIsReadOnly = section === 'settings' || section === 'overview' ? false : adminSectionReadOnly(authorization, section);
+  const sectionIsReadOnly = section === 'settings' || section === 'overview' || section === 'forbidden' ? false : adminSectionReadOnly(authorization, section);
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
   const organizationRoute = section === 'organizations' ? readAdminOrganizationRoute() : { organizationID: '', tab: 'overview' };
   const organizationDirectory = section === 'organizations' ? readAdminOrganizationDirectory() : { q: '', status: '', cursor: '' };
@@ -683,6 +704,12 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   };
   const changeFinanceDetail = (type, id, query = {}, mode = 'push') => {
     writeAdminSection(section, mode, undefined, undefined, adminFinanceDetailUpdates(type, id, query));
+    setRouteVersion((value) => value + 1);
+  };
+  const changeModelTokenRoute = (updates, mode = 'push') => {
+    const normalized = normalizeAdminModelTokenNavigation(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates);
+    writeAdminSection(normalized.section, mode, undefined, undefined, normalized.updates);
+    setModelTokenRouteNotice('');
     setRouteVersion((value) => value + 1);
   };
   const currentPageTitle = copy.nav[section];
@@ -742,11 +769,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         {busy && <div className="adm-progress" role="progressbar" aria-label={copy.loading} />}
         <div className="adm-page">
           {!organizationRoute.organizationID && <PageHeader
-            eyebrow={copy.navGroups[currentGroup?.key] || copy.product}
+            eyebrow={copy.navGroups[currentGroup?.key || (section === 'forbidden' ? 'models' : '')] || copy.product}
             title={currentPageTitle}
             subtitle={currentPageLead}
-            updatedAt={['billing', 'payments', 'products', 'approvals', 'settings'].includes(section) ? null : updatedAt}
-            canRefresh={!['billing', 'payments', 'products', 'approvals', 'settings'].includes(section)}
+            updatedAt={['billing', 'payments', 'products', 'approvals', 'settings', 'models', 'tokenResources', 'modelOperations', 'forbidden'].includes(section) ? null : updatedAt}
+            canRefresh={!['billing', 'payments', 'products', 'approvals', 'settings', 'models', 'tokenResources', 'modelOperations', 'forbidden'].includes(section)}
             busy={busy}
             copy={copy}
             onRefresh={() => {
@@ -764,7 +791,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
               {copy.permissionReadOnlyReason}
             </div>
           )}
-          {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} onNavigate={navigate} />}
+          {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} modelTokenIAEnabled={modelTokenIAEnabled} onNavigate={navigate} />}
           {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} organizationRoute={organizationRoute} organizationDirectory={organizationDirectory} routeVersion={routeVersion} />}
           {section === 'users' && (
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
@@ -774,6 +801,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {['models', 'tokenResources', 'modelOperations'].includes(section) && <AdminModelTokenWorkspace section={section} copy={copy} client={client} permissions={platformPermissions} routeVersion={routeVersion} onRouteChange={changeModelTokenRoute} routeNotice={modelTokenRouteNotice} />}
+          {section === 'forbidden' && <section className="adm-card adm-source-card"><div className="adm-source-state"><strong>{copy.modelToken.forbiddenTitle}</strong><span>{copy.modelToken.forbiddenBody}</span></div></section>}
           {section === 'system' && (
             <>
               {hasPermission(authorization, 'platform.system.status.read') && <SystemStatus copy={copy} data={data} permissions={platformPermissions} />}
@@ -810,7 +839,7 @@ function StatePage({ copy, kind, onRetry }) {
   );
 }
 
-function Overview({ copy, language, data, permissions, onNavigate }) {
+function Overview({ copy, language, data, permissions, modelTokenIAEnabled, onNavigate }) {
   const a = data.accountOverview || {},
     b = data.billingOverview || {},
     t = data.tokenOverview || {};
@@ -821,6 +850,7 @@ function Overview({ copy, language, data, permissions, onNavigate }) {
   const canBilling = permissionSet.has('platform.billing.wallets.read');
   const canTokens = permissionSet.has('platform.tokens.read');
   const canUsage = permissionSet.has('platform.usage.read');
+  const modelTokenRoute = adminModelTokenOverviewRoute(permissions, modelTokenIAEnabled);
   const available = Number(b.posted_microcredits || 0) - Number(b.reserved_microcredits || 0) - Number(b.receivable_microcredits || 0);
   const routeTotal = Number(t.routes || 0);
   const healthyRoutes = Number(t.healthy_routes || 0);
@@ -833,8 +863,8 @@ function Overview({ copy, language, data, permissions, onNavigate }) {
     canOrganizations && { label: copy.overview.invitations, value: a.pending_invitations, section: 'organizations', tone: 'warning' },
     canBilling && { label: copy.overview.paymentReview, value: b.review_payment_orders, section: 'payments', tone: 'danger' },
     canBilling && { label: copy.overview.pendingAdjustments, value: b.pending_adjustments, section: 'approvals', tone: 'warning' },
-    canUsage && { label: copy.overview.usageReview, value: t.review_usage_requests, section: 'tokens', tone: 'warning' },
-    canUsage && { label: copy.overview.reconciliationStopped, value: t.reconciliation_stopped, section: 'tokens', tone: 'danger' },
+    canUsage && modelTokenRoute && { label: copy.overview.usageReview, value: t.review_usage_requests, section: modelTokenIAEnabled ? 'modelOperations' : modelTokenRoute.section, query: modelTokenIAEnabled ? { operations_tab: 'usage' } : {}, tone: 'warning' },
+    canUsage && modelTokenRoute && { label: copy.overview.reconciliationStopped, value: t.reconciliation_stopped, section: modelTokenIAEnabled ? 'modelOperations' : modelTokenRoute.section, query: modelTokenIAEnabled ? { operations_tab: 'usage' } : {}, tone: 'danger' },
   ].filter((item) => item && Number(item.value) > 0);
   const sourceError = (source) => availability[source] === 'error';
   return (
@@ -880,7 +910,7 @@ function Overview({ copy, language, data, permissions, onNavigate }) {
           </OverviewDomain>
         )}
         {(canTokens || canUsage) && (
-          <OverviewDomain title={copy.overview.modelToken} action={copy.overview.viewDetails} onAction={() => onNavigate('tokens')} error={sourceError('modelToken')} copy={copy}>
+          <OverviewDomain title={copy.overview.modelToken} action={copy.overview.viewDetails} onAction={() => onNavigate(modelTokenRoute.section, modelTokenRoute.query)} error={sourceError('modelToken')} copy={copy}>
             {canTokens ? (
               <OverviewPrimary label={copy.overview.routesHealthy} value={routeTotal ? `${formatNumber(healthyRoutes)} / ${formatNumber(routeTotal)}` : copy.overview.noRoutes} />
             ) : (
@@ -902,7 +932,7 @@ function Overview({ copy, language, data, permissions, onNavigate }) {
         {alerts.length ? (
           <div className="adm-attention-list">
             {alerts.map((item) => (
-              <button type="button" key={`${item.section}-${item.label}`} onClick={() => onNavigate(item.section)}>
+              <button type="button" key={`${item.section}-${item.label}`} onClick={() => onNavigate(item.section, item.query || {})}>
                 <span className={`adm-attention-dot ${item.tone}`} aria-hidden="true" />
                 <span>{item.label}</span>
                 <strong>{formatNumber(item.value)}</strong>

@@ -44,13 +44,16 @@ test('source and built admin portal preserve the HTML prototype five-group navig
     assert.ok(builtJS.includes(group));
   }
   assert.doesNotMatch(navigation, /key: 'operations'/);
-  const exactSections = ['overview', 'users', 'roles', 'organizations', 'myorg', 'billing', 'payments', 'products', 'tokens', 'approvals', 'audit', 'system', 'settings'];
+  const exactSections = ['overview', 'users', 'roles', 'organizations', 'myorg', 'billing', 'payments', 'products', 'tokens', 'models', 'tokenResources', 'modelOperations', 'approvals', 'audit', 'system', 'settings'];
   for (const section of exactSections) assert.ok(navigation.includes(`'${section}'`), `${section} is part of the canonical information architecture`);
-  for (const label of ['工作台', '平台总览', '身份与组织', '用户管理', '角色与权限', '组织管理', '我的组织', '财务与支付', '账户与计费', '支付与对账', '定价与商品', '模型与 Token', 'Token Gateway', '治理与安全', '审批中心', '审计与导出', '系统与安全', '偏好设置']) {
+  for (const label of ['工作台', '平台总览', '身份与组织', '用户管理', '角色与权限', '组织管理', '我的组织', '财务与支付', '账户与计费', '支付与对账', '定价与商品', '模型与 Token', '模型管理', 'Token 资源', '运行与用量', '治理与安全', '审批中心', '审计与导出', '系统与安全', '偏好设置']) {
     assert.ok(prototype.includes(label), `${label} is defined by the HTML prototype`);
     assert.ok(i18n.includes(label), `${label} is preserved by source translations`);
     assert.ok(builtJS.includes(label), `${label} is preserved by the built portal`);
   }
+  assert.ok(i18n.includes('Token Gateway'), 'gate-off translation keeps the historical entry');
+  assert.ok(builtJS.includes('Token Gateway'), 'gate-off build keeps the historical entry');
+  assert.match(navigation, /modelTokenIAEnabled \? \[\.\.\.adminModelTokenSections\] : \['tokens'\]/);
   assert.match(navigation, /URLSearchParams/);
   assert.match(navigation, /historyLike\.pushState/);
   assert.match(navigation, /historyLike\.replaceState/);
@@ -206,7 +209,7 @@ test('platform overview uses permission-scoped sources, correct business metrics
   assert.match(view, /posted_microcredits \|\| 0\) - Number\(b\.reserved_microcredits \|\| 0\) - Number\(b\.receivable_microcredits \|\| 0\)/);
   assert.match(view, /healthyRoutes \/ routeTotal/);
   assert.match(view, /className="adm-overview-domains"/);
-  assert.match(view, /onNavigate\(item\.section\)/);
+  assert.match(view, /onNavigate\(item\.section, item\.query \|\| \{\}\)/);
   assert.match(view, /section === 'settings' \|\| section === 'overview'/);
   assert.match(css, /\.adm-overview-domains\{[^}]*repeat\(3/);
   assert.doesNotMatch(css, /\.adm-overview-domain\.accent\{[^}]*gradient/);
