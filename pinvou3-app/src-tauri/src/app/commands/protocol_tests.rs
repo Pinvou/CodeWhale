@@ -83,7 +83,11 @@ command_protocol!(
         "track_behavior_event",
     ]
 );
-command_protocol!(chat_protocol, "chat.rs", ["chat"]);
+command_protocol!(
+    chat_protocol,
+    "chat.rs",
+    ["chat", "steer_chat", "withdraw_steer"]
+);
 command_protocol!(
     connectors_protocol,
     "connectors.rs",
@@ -472,6 +476,8 @@ command_protocol!(
         "save_session_artifacts",
         "save_session_pinvou_scene_events",
         "get_session_pinvou_scene_events",
+        "save_session_steered_messages",
+        "get_session_steered_messages",
         "list_workspace_files"
     ]
 );
