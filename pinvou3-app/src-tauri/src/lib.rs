@@ -1609,6 +1609,11 @@ pub fn run() {
             commands::marketplace::bundle_readiness,
             commands::marketplace::export_plugin_spec,
             commands::files::verify_upload,
+            commands::marketplace::list_recycled_plugins,
+            commands::marketplace::restore_recycled_plugin,
+            commands::marketplace::purge_recycled_plugin,
+            commands::marketplace::export_recycled_plugin,
+            commands::marketplace::export_installed_plugin,
         ]);
 
     startup::mark("tauri:builder_configured");
