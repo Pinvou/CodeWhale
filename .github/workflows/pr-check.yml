@@ -1195,9 +1195,12 @@ jobs:
     defaults:
       run:
         shell: bash
-    # Each independent leg can still compile aws-lc-sys on a cache miss; retain the existing
-    # safety ceiling while phase metrics establish a new evidence-based limit.
-    timeout-minutes: 90
+    # Each independent leg can still compile aws-lc-sys on a cache miss. A Rust toolchain
+    # upgrade invalidates the main-scoped target cache; the 1.98.0 cold regression build
+    # completed compilation plus all native checks in about 90 minutes, but GitHub cancelled
+    # the otherwise-successful job at the former 90-minute ceiling. Keep the test scope intact
+    # and align this cold-build safety margin with the Linux heavy Rust gate.
+    timeout-minutes: 120
     env:
       # reqwest 0.13 → aws-lc-sys(非 FIPS)。Windows x86_64 需 NASM 汇编;runner 默认无 NASM,
       # 用预生成 NASM 对象规避(aws-lc-rs 官方支持,无需额外装 NASM)。
