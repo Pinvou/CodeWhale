@@ -48,6 +48,7 @@
 
     { "source": "account-platform/internal/token/service.go", "receiver": "router", "method": "GET", "path": "/v1/client-compatibility", "scope": "public", "strategy": "protocol.client-compatibility.read-only" },
     { "source": "account-platform/internal/token/service.go", "receiver": "admin", "method": "GET", "path": "/resource-audit", "scope": "platform", "permissions": ["platform.models.read", "platform.tokens.read", "platform.audit.read"], "strategy": "domain.platform-composite-any-read-and-audit" },
+    { "source": "account-platform/internal/token/service.go", "receiver": "admin", "method": "GET", "path": "/operations-overview", "scope": "platform", "permissions": ["platform.models.read", "platform.tokens.read", "platform.usage.read"], "strategy": "domain.platform-token-operations-overview-all-read" },
     { "source": "account-platform/internal/token/service.go", "receiver": "admin", "method": "POST", "path": "/commands", "scope": "platform", "strategy": "domain.approval-policy.dynamic-command-permission-preactivation" },
     { "source": "account-platform/internal/token/service.go", "receiver": "admin", "method": "GET", "path": "/commands/:command_reference", "scope": "platform", "strategy": "domain.approval-policy.actor-bound-result-preactivation" },
     { "source": "account-platform/internal/token/service.go", "receiver": "protected", "method": "GET", "path": "/v1/usage-requests/:usage_request_id", "scope": "active", "permissions": ["personal.usage.read", "org.usage.read.self"], "strategy": "domain.active-context" },

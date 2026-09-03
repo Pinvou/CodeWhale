@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，110 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，21 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，111 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，20 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -149,7 +149,7 @@
 | APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | DONE |
 | APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | DONE |
 | APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | DONE |
-| APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | PENDING |
+| APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | DONE |
 | APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | PENDING |
 | APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | PENDING |
 | APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | PENDING |
@@ -260,6 +260,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **边界/回滚**：Token 只聚合目录/路由/Provisioning/用量，Billing 仍是当前/未来价格、计量单位、继承和覆盖事实源；不跨库原子、不复制价格、不扫描分页列表算指标。无新 schema，两个读 gate 可分别关闭。
 - **验收**：指标明确时间窗/时区/分母，403 隐藏、失败不伪装 0；Billing 无权/不可用/结果不确定都不返伪价格；并列请求局部失败可恢复。
 - **不包含**：不做概览/详情 UI、不改定价写合同或生命周期。
+- **实现状态（2026-09-04）**：`DONE`；身份 B 首轮独立代码审核通过。Token 端已实现 DB 权威时间的单语句原子聚合、默认 24 小时/最大 31 天 UTC 半开窗、稳定路由健康分母和 3 秒失败关闭；Billing 端已实现稳定 `model_id` 加精确协议/公式/积分单位的 repeatable-read 当前与下一实际变化投影，显式区分 `AVAILABLE/MISSING/BLOCKED`，并返回逐单位继承来源与价格空间 ETag。两个入口由 `TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED`、`BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED` 独立控制且默认关闭；Portal 仅独立透传，不组合快照或宣称跨域原子。OpenAPI、Ajv 实际响应、授权清单、指标和真实 PostgreSQL CI 禁止 SKIP 门禁已补齐；本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL`、`PINVOU_TEST_BILLING_DATABASE_URL`，两个命名集成用例明确 SKIP，CI 隔离库必须逐项 PASS 且拒绝 SKIP。当前未推送、未部署。
 
 ### APT-127 三页架构、URL 与错误隔离
 

@@ -71,7 +71,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates)
+	modelPriceProjectionEnabled, err := optionalBooleanEnvironment("BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED", false)
+	if err != nil {
+		log.Fatal(err)
+	}
+	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates).WithAdminModelPriceProjection(modelPriceProjectionEnabled)
 	humanDelegationKeys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal(err)
@@ -147,7 +151,8 @@ func main() {
 	}
 	handler := service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify)
 	handler = compatibility.WrapExcept(handler, "/api/v1/payment-callback/token", "/api/v1/payment-callbacks")
-	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, repository.Ping, repository.AdminPaginationCollectors()...); err != nil {
+	collectors := append(repository.AdminPaginationCollectors(), service.AdminModelPriceProjectionCollectors()...)
+	if err := httpserver.RunWithApplicationAndCollectors("billing-service", handler, repository.Ping, collectors...); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -618,6 +618,10 @@ jobs:
           printf '%s\n' "$impact_pricing_output"
           grep -F -- '--- PASS: TestBillingImpactPriceCoveragePostgresIntegration' <<< "$impact_pricing_output"
           ! grep -F -- '--- SKIP: TestBillingImpactPriceCoveragePostgresIntegration' <<< "$impact_pricing_output"
+          model_price_projection_output="$(go test -run '^TestModelPriceProjectionPostgresIntegration$' -count=1 -v ./internal/billing)"
+          printf '%s\n' "$model_price_projection_output"
+          grep -F -- '--- PASS: TestModelPriceProjectionPostgresIntegration' <<< "$model_price_projection_output"
+          ! grep -F -- '--- SKIP: TestModelPriceProjectionPostgresIntegration' <<< "$model_price_projection_output"
           token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^(TestTokenAdmin(Pagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)|QueryAdaptersPostgresIntegration)|TestTokenImpactPrecheckPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_pagination_output"
           for test_name in \
@@ -630,6 +634,10 @@ jobs:
             ! grep -F -- "--- SKIP: $test_name" <<< "$token_pagination_output"
           done
           ! grep -F -- '--- SKIP:' <<< "$token_pagination_output"
+          token_operations_overview_output="$(go test -run '^TestTokenOperationsOverviewPostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$token_operations_overview_output"
+          grep -F -- '--- PASS: TestTokenOperationsOverviewPostgresIntegration' <<< "$token_operations_overview_output"
+          ! grep -F -- '--- SKIP: TestTokenOperationsOverviewPostgresIntegration' <<< "$token_operations_overview_output"
           token_policy_output="$(PINVOU_TEST_ACCOUNT_POLICY_GATE=1 go test -run '^TestTokenProtocolFormulaPoliciesPostgresIntegration$' -count=1 -v ./internal/platform/approvalpolicy)"
           printf '%s\n' "$token_policy_output"
           grep -F -- '--- PASS: TestTokenProtocolFormulaPoliciesPostgresIntegration' <<< "$token_policy_output"

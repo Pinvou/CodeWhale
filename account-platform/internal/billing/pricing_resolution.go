@@ -42,6 +42,14 @@ func (r *PostgresRepository) ResolveCurrentPrice(ctx context.Context, model, pro
 		return PriceVersion{}, err
 	}
 	defer tx.Rollback(ctx)
+	price, err := resolveCurrentPriceTx(ctx, tx, model, protocol, formulaVersionID, creditUnit, at)
+	if err != nil {
+		return PriceVersion{}, err
+	}
+	return price, tx.Commit(ctx)
+}
+
+func resolveCurrentPriceTx(ctx context.Context, tx pgx.Tx, model, protocol string, formulaVersionID uuid.UUID, creditUnit string, at time.Time) (PriceVersion, error) {
 	var blocked bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pricing_blocks WHERE model_id=$1 AND protocol_code=$2 AND formula_version_id=$3 AND credit_unit=$4 AND effective_from<=$5 AND (effective_to IS NULL OR effective_to>$5))`, model, protocol, formulaVersionID, creditUnit, at).Scan(&blocked); err != nil {
 		return PriceVersion{}, err
@@ -62,11 +70,7 @@ func (r *PostgresRepository) ResolveCurrentPrice(ctx context.Context, model, pro
 	if !found {
 		return PriceVersion{}, ErrPriceMissing
 	}
-	price, err := resolvePriceCandidate(ctx, tx, selected, model, at)
-	if err != nil {
-		return PriceVersion{}, err
-	}
-	return price, tx.Commit(ctx)
+	return resolvePriceCandidate(ctx, tx, selected, model, at)
 }
 
 func selectUniquePriceCandidate(ctx context.Context, tx pgx.Tx, scopeType, scopeID, protocol string, formulaVersionID uuid.UUID, creditUnit string, at time.Time) (priceCandidate, bool, error) {

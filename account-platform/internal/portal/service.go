@@ -768,6 +768,10 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) == 5 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "models" && parts[4] == "price-projection" && method == http.MethodGet {
+		_, err := uuid.Parse(parts[3])
+		return err == nil
+	}
 	if len(parts) >= 5 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "recharge-products" {
 		if _, err := uuid.Parse(parts[3]); err != nil {
 			return false
@@ -825,7 +829,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/operations-overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit") {
 		return true
 	}
 	if resource == "/admin/v1/token-accounts" && method == http.MethodPost {

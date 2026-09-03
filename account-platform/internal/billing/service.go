@@ -25,17 +25,19 @@ import (
 )
 
 type Service struct {
-	repository       Repository
-	payments         *PaymentCoordinator
-	authorizer       *authorization.Client
-	approvalGate     ApprovalExecutionGate
-	closureStates    AccountClosureStateVerifier
-	callbackAuth     *paymentcallback.Authenticator
-	callbackProfiles *paymentcallback.Profiles
-	humanDelegations *humandelegation.Verifier
-	catalog          RechargeProductCatalogRepository
-	impactPricing    impactPriceRepository
-	now              func() time.Time
+	repository                  Repository
+	payments                    *PaymentCoordinator
+	authorizer                  *authorization.Client
+	approvalGate                ApprovalExecutionGate
+	closureStates               AccountClosureStateVerifier
+	callbackAuth                *paymentcallback.Authenticator
+	callbackProfiles            *paymentcallback.Profiles
+	humanDelegations            *humandelegation.Verifier
+	catalog                     RechargeProductCatalogRepository
+	impactPricing               impactPriceRepository
+	modelPriceProjectionEnabled bool
+	modelPriceProjectionMetrics *modelPriceProjectionMetrics
+	now                         func() time.Time
 }
 
 func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepository) *Service {
@@ -44,7 +46,7 @@ func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepos
 }
 
 func NewService(repository Repository) *Service {
-	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }}
+	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }, modelPriceProjectionMetrics: newModelPriceProjectionMetrics()}
 	service.impactPricing, _ = repository.(impactPriceRepository)
 	return service
 }
@@ -148,6 +150,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/finance-overviews/payments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminFinancePaymentsOverview))
 		admin.GET("/finance-overviews/pricing", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminFinancePricingOverview))
 		admin.GET("/finance-overviews/products", s.authorizer.Require("platform.products.read"), httpserver.AdaptFunc(s.adminFinanceProductsOverview))
+		admin.GET("/models/:model_id/price-projection", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminModelPriceProjection))
 		admin.GET("/wallets", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminWallets))
 		admin.GET("/wallets/:wallet_id/ledger", s.authorizer.Require("platform.billing.ledger.read"), httpserver.AdaptFunc(s.adminWalletLedger))
 		admin.GET("/receivables", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminReceivables))

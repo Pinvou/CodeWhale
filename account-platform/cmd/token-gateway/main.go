@@ -81,6 +81,10 @@ func main() {
 	if err != nil {
 		log.Fatal("TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED must be true or false")
 	}
+	operationsOverviewEnabled, err := strconv.ParseBool(valueOrDefault("TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED", "false"))
+	if err != nil {
+		log.Fatal("TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED must be true or false")
+	}
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
@@ -273,7 +277,7 @@ func main() {
 	go observability.RunBackground(workerContext, "model-catalog-sync", catalogSync.Run)
 	go observability.RunBackground(workerContext, "default-route-provisioning", defaultRoutes.Run)
 	go observability.RunBackground(workerContext, "route-health-probe", routeHealth.Run)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient)
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient).WithAdminOperationsOverview(operationsOverviewEnabled)
 	go observability.RunBackground(workerContext, "model-emergency-cancellation", token.NewEmergencyModelCancellationWorker(repository, service, 5*time.Second).Run)
 	ready := repository.Ping
 	if strings.EqualFold(cfg.Environment, "production") || strings.EqualFold(cfg.Environment, "production-new") {
@@ -293,7 +297,8 @@ func main() {
 	}
 	handler := compatibility.Wrap(service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify))
 	handler = requestdeadline.TokenAdminMiddleware(handler, time.Now)
-	if err := httpserver.RunWithApplicationAndCollectors("token-gateway", handler, ready, repository.AdminPaginationCollectors()...); err != nil {
+	collectors := append(repository.AdminPaginationCollectors(), service.AdminOperationsOverviewCollectors()...)
+	if err := httpserver.RunWithApplicationAndCollectors("token-gateway", handler, ready, collectors...); err != nil {
 		log.Fatal(err)
 	}
 }

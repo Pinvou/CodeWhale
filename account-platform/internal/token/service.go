@@ -64,6 +64,8 @@ type Service struct {
 	impactPrechecks             ImpactPrecheckRepository
 	impactPricing               ImpactPriceCoverageClient
 	approvedCommandExecutor     ApprovedTokenCommandExecutor
+	operationsOverviewEnabled   bool
+	operationsOverviewMetrics   *tokenOperationsOverviewMetrics
 	adminProxyHMACKey           []byte
 	breaker                     *resilience.Breaker
 	activeUpstreamCancels       sync.Map
@@ -121,11 +123,16 @@ func (s *Service) WithApprovedTokenCommandExecutor(executor ApprovedTokenCommand
 	return s
 }
 
+func (s *Service) WithAdminOperationsOverview(enabled bool) *Service {
+	s.operationsOverviewEnabled = enabled
+	return s
+}
+
 func NewService(repository Repository, contexts ContextResolver, wallets WalletResolver, validator CredentialValidator, providerURLs ProviderURLPolicy, billing BillingClient, upstream UpstreamClient, maximumInputTokens int64) *Service {
 	if maximumInputTokens <= 0 {
 		maximumInputTokens = 128_000
 	}
-	service := &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000, breaker: resilience.NewBreaker()}
+	service := &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000, breaker: resilience.NewBreaker(), operationsOverviewMetrics: newTokenOperationsOverviewMetrics()}
 	if resolver, ok := contexts.(CommerceCustomerResolver); ok {
 		service.commerceCustomers = resolver
 	}
@@ -178,6 +185,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	admin := protected.Group("/admin/v1")
 	if s.authorizer != nil {
 		admin.GET("/overview", s.authorizer.RequireAny("platform.tokens.read", "platform.usage.read", "platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/operations-overview", s.authorizer.RequireAnyAnd([]string{"platform.models.read"}, []string{"platform.tokens.read", "platform.usage.read"}), httpserver.AdaptFunc(s.adminTokenOperationsOverview))
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
 		admin.POST("/token-accounts", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateTokenAccount))
 		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))
