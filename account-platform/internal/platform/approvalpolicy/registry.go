@@ -71,6 +71,20 @@ func buildPolicies() map[string]Policy {
 		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "product_id", "provider_control_version", "product_control_version", "catalog_item_id", "catalog_version", "admission_version", "mapping_id", "mapping_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
+	for commandType, criticalFields := range map[string][]string{
+		"TOKEN_PROTOCOL_DRAFT_CREATE": {"protocol_code", "expected_protocol_head_version", "request_fingerprint"},
+		"TOKEN_PROTOCOL_PUBLISH":      {"protocol_definition_id", "expected_protocol_version", "draft_etag", "request_fingerprint"},
+		"TOKEN_FORMULA_DRAFT_CREATE":  {"protocol_definition_id", "expected_protocol_version", "expected_formula_head_version", "request_fingerprint"},
+		"TOKEN_FORMULA_PUBLISH":       {"formula_version_id", "expected_formula_version", "draft_etag", "request_fingerprint"},
+	} {
+		result[commandType] = Policy{
+			CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly,
+			RequesterPermission: "platform.pricing.manage", RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
+			ApprovalCount: 0, SelfApprovalForbidden: false, SnapshotSchemaVersion: 1,
+			CriticalResourceFields: criticalFields, ExpiresAfter: 24 * time.Hour,
+			ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service",
+		}
+	}
 	auditCommands := map[string]string{
 		"ACCOUNT_ROLE_BINDING_GRANT": "platform.roles.assign", "ACCOUNT_ROLE_BINDING_REVOKE": "platform.roles.assign",
 		"ACCOUNT_USER_STATUS_CHANGE": "platform.users.status.manage", "ACCOUNT_USER_DELETE": "platform.users.status.manage",

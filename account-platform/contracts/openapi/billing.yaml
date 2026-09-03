@@ -10,6 +10,84 @@ servers:
 security:
   - serviceToken: []
 paths:
+  /internal/v1/pricing/formula-bindings/validate:
+    post:
+      operationId: validateFormulaDraftMeteringUnitVersions
+      summary: Validate exact active metering unit versions without writing Billing facts
+      description: Service-authenticated read-only validation used before Token persists a formula draft. verified_count is computed by Billing and never accepted from the caller.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [required_unit_versions]
+              properties:
+                required_unit_versions:
+                  type: object
+                  minProperties: 1
+                  maxProperties: 32
+                  additionalProperties: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Every exact unit ID exists, matches its unit code, and is currently referenceable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FormulaDraftUnitValidation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/pricing/formula-bindings/{formula_version_id}:
+    put:
+      operationId: registerImmutableProtocolFormulaBinding
+      summary: Idempotently register an immutable Token formula snapshot after validation
+      parameters:
+        - name: formula_version_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [protocol_code, required_unit_definition_ids, formula_snapshot]
+              properties:
+                protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+                required_unit_definition_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 32
+                  uniqueItems: true
+                  items: { type: string, format: uuid }
+                formula_snapshot:
+                  type: object
+                  additionalProperties: false
+                  required: [evaluator_version, expression]
+                  properties:
+                    evaluator_version: { type: string, const: SAFE_PARAMETER_MAP_V1 }
+                    expression:
+                      type: object
+                      minProperties: 1
+                      maxProperties: 32
+                      additionalProperties: { type: string, enum: [estimated_input_tokens, cached_input_tokens, max_output_tokens, image_count, request_count, document_count] }
+      responses:
+        "200":
+          description: Billing durably accepted the exact immutable binding
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FormulaBindingReceipt" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /payment-capabilities:
     get:
       operationId: getPaymentCapabilities
@@ -386,6 +464,42 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    FormulaBindingReceipt:
+      type: object
+      additionalProperties: false
+      description: Database-derived immutable receipt. Identical retries return the original published_at even if a referenced unit is later inactive.
+      required: [formula_version_id, status, protocol_code, required_metering_unit_definition_ids, formula_snapshot_sha256, published_at]
+      properties:
+        formula_version_id: { type: string, format: uuid }
+        status: { type: string, const: REGISTERED }
+        protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+        required_metering_unit_definition_ids:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        formula_snapshot_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        published_at: { type: string, format: date-time }
+    FormulaDraftUnitValidation:
+      type: object
+      additionalProperties: false
+      required: [verified_count, unit_versions]
+      properties:
+        verified_count: { type: integer, minimum: 1, maximum: 32 }
+        unit_versions:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required: [unit_code, unit_definition_id, version, status]
+            properties:
+              unit_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+              unit_definition_id: { type: string, format: uuid }
+              version: { type: integer, format: int64, minimum: 1 }
+              status: { type: string, const: ACTIVE }
     PaymentCallbackToken:
       type: object
       additionalProperties: false

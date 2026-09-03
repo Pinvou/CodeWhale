@@ -23,7 +23,7 @@
 
 全量核验汇总：`已实现 380`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `412` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-104 已完成。财务支付重构新增 UI-37～UI-46、ADM-54、BILL-47、NFR-55，已拆分为 APT-105～APT-117；独立文档复审已通过，APT-105～APT-117 已全部完成并逐项通过独立代码复审。超级管理员完整平台权限新增 ADM-55 并由 APT-118 实现。其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html`/`admin.js` 返回 200，CSS/JS 哈希与仓库制品一致。超级管理员权限与价格空间修复版本 `0.8.0@4ccf7404` 已于 2026-09-03 部署至 `CLOUD_UAT`：Account 000042、Billing 000051 迁移通过，Account/Billing/Portal 与公网 readiness 均证明目标 Commit，超级管理员常驻平台权限为 46/46、未脱敏 PII 导出授权为 0，价格空间缺口为 0；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
-本轮模型与 Token 需求变更新增 23 个正式目标，当前汇总以 `已实现 384`、`部分实现 29`、`未实现 20`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `435` 项为准；上段的 412 项汇总是变更前已完成基线。新增 `UI-47`～`UI-58`、`ADM-56`～`ADM-65`、`NFR-56` 的需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 的任务拆分已通过身份 B 第五轮独立审核；APT-119、APT-120、APT-121 已分别通过身份 B 第五轮、第三轮、第四轮独立代码审核，三者均尚未推送、未部署，APT-122 及后续尚未开始。APT-119 真实 PostgreSQL 集成用例因本地未配置 `ACCOUNT_DATABASE_URL` 尚未执行；APT-120 重型用例与 APT-121 九类适配集成用例因本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL` 尚未执行，但 PR 门禁已创建隔离数据库并强制相关命名用例逐项 PASS、拒绝 SKIP，仍须由候选提交取得实际 CI 证据。
+本轮模型与 Token 需求变更新增 23 个正式目标，当前汇总以 `已实现 385`、`部分实现 29`、`未实现 19`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `435` 项为准；上段的 412 项汇总是变更前已完成基线。新增 `UI-47`～`UI-58`、`ADM-56`～`ADM-65`、`NFR-56` 的需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 的任务拆分已通过身份 B 第五轮独立审核；APT-119、APT-120、APT-121、APT-122 已分别通过身份 B 第五轮、第三轮、第四轮、第三轮独立代码审核，四者均尚未推送、未部署；APT-123 及后续尚未开始。APT-119 真实 PostgreSQL 集成用例因本地未配置 `ACCOUNT_DATABASE_URL` 尚未执行；APT-120 重型用例、APT-121 九类适配集成用例及 APT-122 Account/Billing/Token 真实迁移链用例因本地未配置相应 PostgreSQL URL 尚未执行，但 PR 门禁已创建隔离数据库并强制相关命名用例逐项 PASS、拒绝 SKIP，仍须由候选提交取得实际 CI 证据。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -34,10 +34,11 @@
 | `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现按 APT-069–APT-082 分任务进行 |
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `SUPER-ADMIN-PLATFORM-PERMISSIONS` | 超级管理员完整常驻平台权限、Token 管理可见性、授权缓存失效及临时 PII 权限隔离 | Account 000042 前向/回滚迁移、角色真值表合同、Token 隔离合同、Portal 三语制品和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
-| `ADMIN-MODEL-TOKEN-REDESIGN` | 三页面原子权限、机器可验收分页、权威 owner/路由健康、一期运行详情、二期资产详情、凭据三路径、资源审计、逐动作治理、Billing 价格边界及 N/N-1 灰度回滚 | 需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 任务拆分已通过身份 B 第五轮独立审核；APT-119、APT-120、APT-121 已分别通过身份 B 第五轮、第三轮、第四轮独立代码审核，均未推送/部署；APT-122 及后续尚未开始 |
+| `ADMIN-MODEL-TOKEN-REDESIGN` | 三页面原子权限、机器可验收分页、权威 owner/路由健康、一期运行详情、二期资产详情、凭据三路径、资源审计、逐动作治理、Billing 价格边界及 N/N-1 灰度回滚 | 需求与设计已通过身份 B 第八轮独立审核，APT-119～APT-138 任务拆分已通过身份 B 第五轮独立审核；APT-119、APT-120、APT-121、APT-122 已分别通过身份 B 第五轮、第三轮、第四轮、第三轮独立代码审核，均未推送/部署；APT-123 及后续尚未开始 |
 | `TOKEN-OWNER-CANDIDATES` | ADM-61 专用权限、Account 最小权威投影、service-auth、签名扫描 cursor、授权版本失效、限流与公网隔离 | 身份 B 第五轮独立代码审核通过；Account/Portal Go 范围测试、20 项定向合同、OpenAPI、迁移清单、架构及 diff 门禁通过。真实 PostgreSQL 集成用例本地未执行，发布前必须在隔离库运行 |
 | `TOKEN-ADMIN-PAGINATION-BASE` | NFR-56 Token 快照 schema、签名 cursor、容量与清理、稳定错误、绝对 deadline 链及专用入口 | 身份 B 第三轮独立代码审核通过；Go 全量短测试、Go vet、10 项 Token/Helm 合同、CI 策略、OpenAPI/Helm/workflow 解析、迁移清单、架构及 diff 门禁通过。三个 PostgreSQL 重型用例本地未执行；PR 门禁使用独立数据库逐项要求 PASS 并拒绝 SKIP；当前未部署。 |
 | `TOKEN-ADMIN-QUERY-ADAPTERS` | ADM-56、ADM-63 与 NFR-56 九类逐资源查询、owner 权威投影、资源审计权限交集及用量 evidence 三元 cursor | 身份 B 第四轮独立代码审核通过；相关 Go 测试/vet、17 项合同、OpenAPI、授权覆盖、架构、gofmt 及 diff 门禁通过。本地未配置 PostgreSQL URL，真实迁移/高量集成未执行；PR 隔离库门禁强制 PASS、拒绝 SKIP；当前未部署。 |
+| `TOKEN-PROTOCOL-FORMULA-GOVERNANCE` | ADM-60 四个稳定协议/公式命令的精确 AUDIT_ONLY 策略、CAS/ETag、审计 Outbox、Billing 同步、近期认证与预激活失败关闭 | APT-122 已通过身份 B 第三轮独立代码审核；Billing 权威单位只读校验、数据库实际不可变绑定回执/同一 T1 重放与协议发布引用快照复验已完成。Go 定向测试、四项合同测试、OpenAPI lint 与迁移清单通过。本地未配置 PostgreSQL URL，Account/Billing/Token 真实迁移链用例未执行；PR 隔离库门禁强制 PASS、拒绝 SKIP；当前未部署。 |
 | `ORGANIZATION-OBJECT-AUTHORIZATION` | 显式目标组织、节点子树列表、源/目标节点双向移动门禁及成员全部实际节点归属校验 | Account Go 测试、OpenAPI lint、对象作用域合同和全量静态验证通过；数据库多节点绑定与并发移动待部署验证 |
 | `LOGIN-PERMISSION-GATE` | Keycloak 浏览器密码/短信/注册完成路径与 Direct Grant 密码/短信路径在成功前强一致检查 `personal.session.login`，并校验精确 issuer 与最小工作负载路由 | Identity 静态合同、Compose/Helm 配置、Account 生命周期授权测试及全量合同通过；自定义 Keycloak 镜像构建和真实登录待部署验证 |
 | `PASSWORD-SECURITY-AUTHORIZATION` | 已登录改密的近期认证与个人权限门禁、匿名恢复的防枚举权限/生命周期校验、密码隔离和会话撤销 | Account Go 单元测试、OpenAPI lint、密码安全合同及全量静态验证通过；真实短信、Keycloak 改密和数据库串行化待部署验证 |
@@ -50,7 +51,7 @@
 | `ROLE-AUTHORIZATION-UX-UAT-20260901` | 角色目录唯一入口、权限清单、引导式授权、授权记录与独立审计深链的 Portal 部署验证 | 2026-09-01 从不可变目录 `/opt/pinvou-account-platform-13e22858-20260901T122502Z` 单服务滚动替换 Portal，迁移差异为空；Portal Readiness 返回 `0.8.0@13e22858`，公网 `admin.html` 返回 200，`admin.js` SHA-256 为 `2c94f783…`、`admin.css` 为 `f2686d03…`，与 Git 归档和容器制品一致；角色目录操作列保持单行，目录按个人/平台/组织三类归属展示且节点管理员仍以真实 `UNIT` 作用域授权；部署后 Portal panic/fatal 与 Nginx 5xx 计数均为 0，Account、Billing、Token、Identity 及全部基础容器保持健康，回滚目标为 `ea76c318` |
 | `ADMIN-PORTAL-PROTOTYPE-CONFORMANCE` | 以 `admin-portal-ui-prototype.html` 为第一视觉和信息架构基准，核验五组导航及精确页面命名、浅色蓝白壳层、页头、指标卡、业务卡片、工具栏、数据表、右侧详情抽屉和旧扩展页融合；禁止旧六组分类及旧深色/青绿色设计回退 | 2026-08-28 源码/制品五组合同、前端 lint、Portal 构建、215 项合同、Go 单测、任务覆盖和架构守卫通过；`CLOUD_UAT 0.8.0@e8c3c929` Portal healthy，公网 `admin.html`/`admin.js` 返回 200，CSS `d43a713e…`、JS `21bc2d85…` 与服务器发布目录一致 |
 | `ADMIN-IDENTITY-UX` | 用户、组织、角色绑定、注册修复与注销修复在统一身份页面内按精确权限展示 | 身份扩展挂载测试、37 个权限/角色/基础合同测试、前端 lint 和 Portal 构建通过；未改变现有 Account API 或管理动作 |
-| `AUTHORIZATION-COVERAGE-GATE` | 自动发现生产 Go 源码中的 HTTP 路由、后台任务、事件 Consumer/Relay 及全部 CLI，并要求稳定个人/平台/组织权限、精确 `internal.*` 权限或专用公开协议策略逐项分类 | 当前 278 个 HTTP 路由、24 个任务、3 个事件入口和 13 个 CLI 全部登记；删除登记、未知权限、作用域错配、陈旧项和新增未分类入口的负向合同通过，统一 verify 与正式客户端发布门禁均执行该检查 |
+| `AUTHORIZATION-COVERAGE-GATE` | 自动发现生产 Go 源码中的 HTTP 路由、后台任务、事件 Consumer/Relay 及全部 CLI，并要求稳定个人/平台/组织权限、精确 `internal.*` 权限或专用公开协议策略逐项分类 | 当前 285 个 HTTP 路由、25 个任务、3 个事件入口和 13 个 CLI 全部登记；APT-122 Billing 单位验证入口固定为 `internal.billing.pricing.read` 且 Token 工作负载已有最小授权。删除登记、未知权限、作用域错配、陈旧项和新增未分类入口的负向合同通过，统一 verify 与正式客户端发布门禁均执行该检查 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
@@ -351,7 +352,7 @@
 | ADM-57 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前模型与 Token 高风险动作缺少统一服务端影响预检合同。 |
 | ADM-58 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有面向 Portal 的一次性凭据接入、轮换和撤销合同；秘密不可回显边界已存在。 |
 | ADM-59 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前没有模型/运行目标聚合和 Billing 按模型上下文价格投影的完整合同。 |
-| ADM-60 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | Token 四个协议/公式写命令路由已存在，但审批策略注册缺失，当前按 COMMAND_POLICY_UNAVAILABLE 失败关闭。 |
+| ADM-60 | 已实现 | DOC_CURRENT | TOKEN-PROTOCOL-FORMULA-GOVERNANCE | NOT_DEPLOYED | APT-122 已实现四个精确 `AUDIT_ONLY` 策略、CAS/ETag、审计 Outbox、Billing 权威同步与 activation 默认失败关闭，并通过身份 B 第三轮独立代码审核；持久命令结果查询由 APT-123、原子激活由 APT-138 交付。 |
 | ADM-61 | 已实现 | AUDIT_HEAD, TOKEN-OWNER-CANDIDATES | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | APT-119 已实现专用人类权限、仅 service-auth 可达的最小权威投影、按真实作用域去重的授权版本失效，以及默认 20,000/最大 50,000 的内部逻辑扫描；HMAC cursor 绑定 scan/主体/授权版本/DB 时间高水位，合法续页不重复计额并限制 3/10 个活跃扫描。Portal/BFF 与公网 admin 暴露已排除，公开 20/50 快照门面留待 APT-120/121。身份 B 第五轮独立代码审核通过，当前未推送、未部署；本地未配置 `ACCOUNT_DATABASE_URL`，真实 PostgreSQL 集成用例尚未执行，发布前必须在隔离库通过。 |
 | ADM-62 | 未实现 | DOC_CURRENT | ADMIN-MODEL-TOKEN-REDESIGN | NOT_DEPLOYED | 当前路由仍接收自由文本 model/protocol/health，尚未实现稳定目录引用、服务端 upstream 解析及带 TTL 的健康探测状态机。 |
 | ADM-63 | 已实现 | APT-121-DONE | ADMIN-MODEL-TOKEN-REDESIGN; TOKEN-ADMIN-QUERY-ADAPTERS | NOT_DEPLOYED | 模型与 Token Account 已从本域不可变事实提供固定单资源、脱敏分页审计投影，读取采用资源读权与 `platform.audit.read` 的同一授权版本原子交集；身份 B 第四轮独立代码审核通过。 |
@@ -1027,7 +1028,7 @@
 | ADM-53 | 支付分级止损后台治理 | 部分实现 | 后台已有控制读取与 Provider 恢复草稿，待展示分层评估/gap 并拆分商品和 Provider 恢复。 |
 | ADM-54 | 定价与计量管理命令策略注册 | 已实现 | 六个现有 Billing 管理命令已按路由一一注册为 `AUDIT_ONLY`，请求权限固定为 `platform.pricing.manage`，并由追加迁移持久化相同不可变策略。 |
 | ADM-55 | 超级管理员完整平台管理权限 | 已实现 | 超级管理员默认具备全部常驻平台管理权限；未脱敏 PII 导出继续使用独立临时角色，高风险操作不绕过审批、审计、脱敏与不可回显约束。 |
-| ADM-56～ADM-65 | 模型与 Token 管理合同增量 | 部分实现 | 稳定查询、影响预检、固定 origin 隔离凭据、跨域价格、协议公式策略、owner 权限、路由健康、资源审计、治理预激活基础和逐动作治理的需求、设计与 APT-119～APT-138 任务拆分均已通过独立审核；APT-119、APT-120、APT-121 已分别通过身份 B 第五轮、第三轮、第四轮代码审核，均未推送/部署；其中 ADM-56、ADM-61、ADM-63 已实现，APT-122 及后续尚未开始，APT-138 仍是 ADM-64 的唯一最终收口任务。 |
+| ADM-56～ADM-65 | 模型与 Token 管理合同增量 | 部分实现 | 稳定查询、影响预检、固定 origin 隔离凭据、跨域价格、协议公式策略、owner 权限、路由健康、资源审计、治理预激活基础和逐动作治理的需求、设计与 APT-119～APT-138 任务拆分均已通过独立审核；APT-119、APT-120、APT-121、APT-122 已分别通过身份 B 第五轮、第三轮、第四轮、第三轮代码审核，均未推送/部署；其中 ADM-56、ADM-60、ADM-61、ADM-63 已实现，APT-123 及后续尚未开始，APT-138 仍是 ADM-64 的唯一最终收口任务。 |
 
 ## 4. 非功能需求
 

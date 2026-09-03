@@ -574,6 +574,7 @@ jobs:
           --health-retries 10
     env:
       PINVOU_TEST_BILLING_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
+      PINVOU_TEST_ACCOUNT_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
       PINVOU_TEST_TOKEN_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_token_pagination_test?sslmode=disable
     steps:
       - uses: actions/checkout@v7
@@ -609,6 +610,10 @@ jobs:
           printf '%s\n' "$pagination_output"
           grep -F -- '--- PASS: TestAdminPaginationPostgresIntegration' <<< "$pagination_output"
           ! grep -F -- '--- SKIP: TestAdminPaginationPostgresIntegration' <<< "$pagination_output"
+          formula_validation_output="$(PINVOU_TEST_FORMULA_VALIDATION_GATE=1 go test -run '^TestFormulaDraftUnitValidationPostgresIntegration$' -count=1 -v ./internal/billing)"
+          printf '%s\n' "$formula_validation_output"
+          grep -F -- '--- PASS: TestFormulaDraftUnitValidationPostgresIntegration' <<< "$formula_validation_output"
+          ! grep -F -- '--- SKIP: TestFormulaDraftUnitValidationPostgresIntegration' <<< "$formula_validation_output"
           token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^TestTokenAdmin(Pagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)|QueryAdaptersPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_pagination_output"
           for test_name in \
@@ -620,6 +625,14 @@ jobs:
             ! grep -F -- "--- SKIP: $test_name" <<< "$token_pagination_output"
           done
           ! grep -F -- '--- SKIP:' <<< "$token_pagination_output"
+          token_policy_output="$(PINVOU_TEST_ACCOUNT_POLICY_GATE=1 go test -run '^TestTokenProtocolFormulaPoliciesPostgresIntegration$' -count=1 -v ./internal/platform/approvalpolicy)"
+          printf '%s\n' "$token_policy_output"
+          grep -F -- '--- PASS: TestTokenProtocolFormulaPoliciesPostgresIntegration' <<< "$token_policy_output"
+          ! grep -F -- '--- SKIP: TestTokenProtocolFormulaPoliciesPostgresIntegration' <<< "$token_policy_output"
+          token_command_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^TestTokenAdminProtocolFormulaCommandsPostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$token_command_output"
+          grep -F -- '--- PASS: TestTokenAdminProtocolFormulaCommandsPostgresIntegration' <<< "$token_command_output"
+          ! grep -F -- '--- SKIP: TestTokenAdminProtocolFormulaCommandsPostgresIntegration' <<< "$token_command_output"
           go test -short -race ./...
           go vet ./...
 

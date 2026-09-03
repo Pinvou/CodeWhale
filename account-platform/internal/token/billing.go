@@ -109,7 +109,32 @@ type SnapshotBillingClient interface {
 }
 
 type FormulaBindingClient interface {
-	RegisterFormulaBinding(context.Context, uuid.UUID, string, []uuid.UUID, json.RawMessage, time.Time) error
+	RegisterFormulaBinding(context.Context, uuid.UUID, string, []uuid.UUID, json.RawMessage) (FormulaBindingReceipt, error)
+}
+
+type FormulaBindingReceipt struct {
+	FormulaVersionID                  uuid.UUID   `json:"formula_version_id"`
+	Status                            string      `json:"status"`
+	ProtocolCode                      string      `json:"protocol_code"`
+	RequiredMeteringUnitDefinitionIDs []uuid.UUID `json:"required_metering_unit_definition_ids"`
+	FormulaSnapshotSHA256             string      `json:"formula_snapshot_sha256"`
+	PublishedAt                       time.Time   `json:"published_at"`
+}
+
+type MeteringUnitVersionReference struct {
+	UnitCode         string    `json:"unit_code"`
+	UnitDefinitionID uuid.UUID `json:"unit_definition_id"`
+	Version          int64     `json:"version"`
+	Status           string    `json:"status"`
+}
+
+type FormulaDraftValidation struct {
+	VerifiedCount int                            `json:"verified_count"`
+	UnitVersions  []MeteringUnitVersionReference `json:"unit_versions"`
+}
+
+type FormulaDraftValidationClient interface {
+	ValidateFormulaDraftUnits(context.Context, map[string]uuid.UUID) (FormulaDraftValidation, error)
 }
 
 type SnapshotOrganizationBillingClient interface {
@@ -435,8 +460,16 @@ func (c *HTTPBillingClient) Extend(ctx context.Context, usageID, holdID uuid.UUI
 	return c.call(ctx, http.MethodPost, "/internal/v1/holds/extend", map[string]any{"usage_request_id": usageID, "hold_id": holdID, "lease_seconds": 900, "additional_microcredits": additional}, nil)
 }
 
-func (c *HTTPBillingClient) RegisterFormulaBinding(ctx context.Context, formulaID uuid.UUID, protocol string, required []uuid.UUID, snapshot json.RawMessage, publishedAt time.Time) error {
-	return c.call(ctx, http.MethodPut, "/internal/v1/pricing/formula-bindings/"+formulaID.String(), map[string]any{"protocol_code": protocol, "required_unit_definition_ids": required, "formula_snapshot": snapshot, "published_at": publishedAt}, nil)
+func (c *HTTPBillingClient) RegisterFormulaBinding(ctx context.Context, formulaID uuid.UUID, protocol string, required []uuid.UUID, snapshot json.RawMessage) (FormulaBindingReceipt, error) {
+	var receipt FormulaBindingReceipt
+	err := c.call(ctx, http.MethodPut, "/internal/v1/pricing/formula-bindings/"+formulaID.String(), map[string]any{"protocol_code": protocol, "required_unit_definition_ids": required, "formula_snapshot": snapshot}, &receipt)
+	return receipt, err
+}
+
+func (c *HTTPBillingClient) ValidateFormulaDraftUnits(ctx context.Context, required map[string]uuid.UUID) (FormulaDraftValidation, error) {
+	var result FormulaDraftValidation
+	err := c.call(ctx, http.MethodPost, "/internal/v1/pricing/formula-bindings/validate", map[string]any{"required_unit_versions": required}, &result)
+	return result, err
 }
 
 func (c *HTTPBillingClient) Commit(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage) error {

@@ -713,6 +713,7 @@ func (r *PostgresRepository) adminProtocolsByIDs(ctx context.Context, resourceID
 		if err = rows.Scan(&item.ID, &item.ProtocolCode, &item.Version, &item.Status, &item.RequestSchema, &item.CreatedAt, &item.PublishedAt); err != nil {
 			return nil, err
 		}
+		item.ETag = protocolDefinitionETag(item)
 		values[item.ID.String()] = item
 	}
 	if err = rows.Err(); err != nil {
@@ -740,6 +741,7 @@ func (r *PostgresRepository) adminFormulasByIDs(ctx context.Context, resourceIDs
 		}
 		_ = json.Unmarshal(required, &item.RequiredUnitVersions)
 		_ = json.Unmarshal(expression, &item.Expression)
+		item.ETag = protocolFormulaETag(item)
 		values[item.ID.String()] = item
 	}
 	if err = rows.Err(); err != nil {

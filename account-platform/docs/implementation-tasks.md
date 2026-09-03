@@ -145,7 +145,7 @@
 | APT-119 | owner 候选专用权限、权威目录与授权版本迁移 | ADM-61 | APT-006, APT-069, APT-118 | CODE | DONE |
 | APT-120 | Token 高数量分页快照、预算、cursor、入口超时与容量基座 | NFR-56 | APT-036, APT-045 | CODE | DONE |
 | APT-121 | 九类 Token 查询合同与模型/Token 资源审计投影 | ADM-56, ADM-63 | APT-119, APT-120 | CODE | DONE |
-| APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | PENDING |
+| APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | DONE |
 | APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | PENDING |
 | APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | PENDING |
 | APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | PENDING |
@@ -220,6 +220,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **不包含**：不改快照 schema、不实现 Portal 列表/详情、不增加审计导出或新可写事实。
 
 ### APT-122 协议/公式命令与策略注册
+
+> 实施状态（2026-09-03）：DONE，已通过身份 B 第三轮独立代码审核，尚未推送或部署。四个稳定命令、Account 000044 追加策略、CAS/ETag、结构化审计与事务 Outbox、Billing 权威计量单位只读校验与数据库实际不可变公式绑定回执/同一 T1 重放、协议发布引用快照复验、15 分钟近期认证及默认关闭 activation gate 已完成；本地未配置 PostgreSQL 集成环境，三个真实迁移链命名用例未执行，由 PR 隔离库门禁强制 PASS 且拒绝 SKIP。
 
 - **目标/范围**：主目标 `ADM-60`。修改 `migrations/account/000044_*`、`internal/platform/approvalpolicy/{registry.go,registry_test.go}`、`internal/token/{protocol_admin.go,protocol_admin_http.go}`（按仓库实际路由文件名落位）、Token OpenAPI及协议/公式持久化合同测试；本任务拥有四个协议/公式 public API 与既有 draft/head/immutable version/outbox 写入适配。
 - **数据/回滚**：前向追加注册四个稳定 command type 为精确权限的 `AUDIT_ONLY`，交付策略、handler 和自动化测试，API 冻结专项 7.2 的 reason、CAS、幂等、预检、审计与结果查询输入输出；不改变既有领域表语义和发布版本不可变性。APT-138 activation record 不存在时，公开新增协议/公式写路径必须保持失败关闭且不可达，只有 APT-138 持久状态为 `ACTIVE` 才能选择这些 handler。down 只删本迁移策略版本，被审计引用时失败关闭；通用持久命令结果由后续 APT-123 唯一建表。

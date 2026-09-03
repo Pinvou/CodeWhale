@@ -2,6 +2,7 @@ package approvalpolicy
 
 import (
 	"errors"
+	"slices"
 	"testing"
 )
 
@@ -109,6 +110,27 @@ func TestPricingAndMeteringCommandsAreAuditOnlyWithExactPermission(t *testing.T)
 		}
 		if policy.Mode != AuditOnly || policy.RequesterPermission != "platform.pricing.manage" || policy.ApprovalCount != 0 || policy.SelfApprovalForbidden || policy.ExecutorIdentity != "requesting-domain-service" {
 			t.Fatalf("unexpected pricing policy for %s: %#v", commandType, policy)
+		}
+	}
+}
+
+func TestTokenProtocolFormulaCommandsAreAuditOnlyWithFrozenFields(t *testing.T) {
+	expected := map[string][]string{
+		"TOKEN_PROTOCOL_DRAFT_CREATE": {"protocol_code", "expected_protocol_head_version", "request_fingerprint"},
+		"TOKEN_PROTOCOL_PUBLISH":      {"protocol_definition_id", "expected_protocol_version", "draft_etag", "request_fingerprint"},
+		"TOKEN_FORMULA_DRAFT_CREATE":  {"protocol_definition_id", "expected_protocol_version", "expected_formula_head_version", "request_fingerprint"},
+		"TOKEN_FORMULA_PUBLISH":       {"formula_version_id", "expected_formula_version", "draft_etag", "request_fingerprint"},
+	}
+	for commandType, criticalFields := range expected {
+		policy, err := Lookup(commandType)
+		if err != nil {
+			t.Fatalf("Token protocol/formula policy %s is unavailable: %v", commandType, err)
+		}
+		if policy.PolicyVersion != 1 || policy.Mode != AuditOnly || policy.RequesterPermission != "platform.pricing.manage" || policy.ApproverPermission != "" || policy.ApprovalCount != 0 || policy.SelfApprovalForbidden || policy.RiskClass != "GOVERNANCE_OR_NORMAL_STATE_MACHINE" || policy.SnapshotSchemaVersion != 1 || !slices.Equal(policy.CriticalResourceFields, criticalFields) || policy.ExecutorIdentity != "requesting-domain-service" {
+			t.Fatalf("unexpected Token protocol/formula policy for %s: %#v", commandType, policy)
+		}
+		if Executable(commandType) {
+			t.Fatalf("AUDIT_ONLY command %s must not enter the approval executor allowlist", commandType)
 		}
 	}
 }

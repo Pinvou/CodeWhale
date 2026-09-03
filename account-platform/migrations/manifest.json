@@ -432,6 +432,16 @@
         "file": "000043_token_owner_candidates.up.sql",
         "version": 43,
         "sha256": "35316888b6353d2eb30c398033218f242e48da32b45e74495acf60e523f9cad9"
+      },
+      {
+        "file": "000044_token_protocol_formula_command_policies.down.sql",
+        "version": 44,
+        "sha256": "91c424739acb485dd9755c5aa525f07886085e27060723bc2720daa5a68d2465"
+      },
+      {
+        "file": "000044_token_protocol_formula_command_policies.up.sql",
+        "version": 44,
+        "sha256": "23f971c67d5a034d69271e520423582ba5ba99fc36eefe518a2105a4154fb3ef"
       }
     ],
     "billing": [

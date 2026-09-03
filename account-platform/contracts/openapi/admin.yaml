@@ -1616,33 +1616,61 @@ paths:
     post:
       operationId: createAdminProtocolDraft
       summary: Create a new protocol definition draft version
+      description: APT-122 installs this command fail-closed. It remains unavailable until the single APT-138 activation record is ACTIVE.
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolDraft" } } }
       responses:
-        "201": { description: Protocol draft created }
+        "201": { description: Protocol draft created, content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolFormulaCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/CommandResultUnknown" }
   /token/admin/v1/protocols/{protocol_definition_id}/publish:
     post:
       operationId: publishAdminProtocol
       summary: Publish an immutable protocol definition version
-      parameters: [{ name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      description: Requires OIDC auth_time within 15 minutes and remains fail-closed until APT-138 ACTIVE.
+      parameters:
+        - { name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolPublishCommand" } } }
       responses:
-        "200": { description: Protocol version published }
+        "200": { description: Protocol version published, content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolFormulaCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/CommandResultUnknown" }
   /token/admin/v1/protocols/{protocol_definition_id}/formulas:
     post:
       operationId: createAdminFormulaDraft
       summary: Create a safe parameter-map formula draft bound to exact unit versions
-      parameters: [{ name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      description: APT-122 installs this command fail-closed. It remains unavailable until APT-138 ACTIVE.
+      parameters:
+        - { name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/FormulaDraft" } } }
       responses:
-        "201": { description: Formula draft created }
+        "201": { description: Formula draft created, content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolFormulaCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/CommandResultUnknown" }
   /token/admin/v1/formulas:
     get:
       operationId: listAdminFormulaVersions
@@ -1671,19 +1699,31 @@ paths:
     post:
       operationId: publishAdminFormula
       summary: Publish an immutable formula and synchronize its snapshot to Billing
-      parameters: [{ name: formula_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      description: Requires OIDC auth_time within 15 minutes. Billing uncertainty returns a stable command reference and must not be blindly retried.
+      parameters:
+        - { name: formula_version_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/FormulaPublishCommand" } } }
       responses:
-        "200": { description: Formula published and synchronized }
+        "200": { description: Formula published and synchronized, content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolFormulaCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/CommandResultUnknown" }
   /token/admin/v1/formulas/{formula_version_id}/preview:
     get:
       operationId: previewAdminFormula
       summary: Validate and preview deterministic zero-default evaluation without executing arbitrary code
       parameters: [{ name: formula_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
       responses:
-        "200": { description: Safe formula preview }
+        "200": { description: Safe formula preview, content: { application/json: { schema: { $ref: "#/components/schemas/FormulaPreview" } } } }
         "403": { $ref: "#/components/responses/Error" }
   /token/admin/v1/models:
     get:
@@ -2325,19 +2365,20 @@ components:
     TokenAdminProtocol:
       type: object
       additionalProperties: false
-      required: [protocol_definition_id, protocol_code, version, status, request_schema, created_at]
+      required: [protocol_definition_id, protocol_code, version, status, request_schema, etag, created_at]
       properties:
         protocol_definition_id: { type: string, format: uuid }
         protocol_code: { type: string }
         version: { type: integer, format: int64 }
         status: { type: string, enum: [DRAFT, PUBLISHED, DEPRECATED] }
         request_schema: { type: object, additionalProperties: true }
+        etag: { type: string, pattern: '^[0-9a-f]{64}$' }
         created_at: { type: string, format: date-time }
         published_at: { type: string, format: date-time }
     TokenAdminFormula:
       type: object
       additionalProperties: false
-      required: [formula_version_id, protocol_definition_id, protocol_code, version, status, required_unit_versions, expression, evaluator_version, created_at]
+      required: [formula_version_id, protocol_definition_id, protocol_code, version, status, required_unit_versions, expression, evaluator_version, etag, created_at]
       properties:
         formula_version_id: { type: string, format: uuid }
         protocol_definition_id: { type: string, format: uuid }
@@ -2347,6 +2388,7 @@ components:
         required_unit_versions: { type: object, additionalProperties: { type: string, format: uuid } }
         expression: { type: object, additionalProperties: { type: string } }
         evaluator_version: { type: string }
+        etag: { type: string, pattern: '^[0-9a-f]{64}$' }
         created_at: { type: string, format: date-time }
         published_at: { type: string, format: date-time }
     TokenAdminAccountSummary:
@@ -3271,21 +3313,71 @@ components:
     ProtocolDraft:
       type: object
       additionalProperties: false
-      required: [protocol_code, request_schema]
+      required: [protocol_code, request_schema, expected_protocol_head_version, reason]
       properties:
         protocol_code: { type: string, minLength: 1, maxLength: 80 }
         request_schema: { type: object, additionalProperties: true }
+        expected_protocol_head_version: { type: integer, format: int64, minimum: 0 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
     FormulaDraft:
       type: object
       additionalProperties: false
-      required: [required_unit_versions, expression]
+      required: [required_unit_versions, expression, expected_protocol_version, expected_formula_head_version, reason]
       properties:
         required_unit_versions:
           type: object
+          minProperties: 1
+          maxProperties: 32
+          propertyNames: { pattern: '^[A-Za-z][A-Za-z0-9_]{0,79}$' }
+          description: Exact immutable metering-unit definition IDs; Billing computes and returns the verified count from its authoritative catalog before Token writes the draft.
           additionalProperties: { type: string, format: uuid }
         expression:
           type: object
+          minProperties: 1
+          maxProperties: 32
+          propertyNames: { pattern: '^[A-Za-z][A-Za-z0-9_]{0,79}$' }
           additionalProperties: { type: string, enum: [estimated_input_tokens, cached_input_tokens, max_output_tokens, image_count, request_count, document_count] }
+        expected_protocol_version: { type: integer, format: int64, minimum: 1 }
+        expected_formula_head_version: { type: integer, format: int64, minimum: 0 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    ProtocolPublishCommand:
+      type: object
+      additionalProperties: false
+      required: [expected_protocol_version, draft_etag, reason]
+      properties:
+        expected_protocol_version: { type: integer, format: int64, minimum: 1 }
+        draft_etag: { type: string, pattern: '^[0-9a-f]{64}$' }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    FormulaPublishCommand:
+      type: object
+      additionalProperties: false
+      required: [expected_formula_version, draft_etag, reason]
+      properties:
+        expected_formula_version: { type: integer, format: int64, minimum: 1 }
+        draft_etag: { type: string, pattern: '^[0-9a-f]{64}$' }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    ProtocolFormulaCommandResult:
+      type: object
+      additionalProperties: false
+      required: [command_reference, command_type, policy_version, status, precheck]
+      properties:
+        command_reference: { type: string, pattern: '^[0-9a-f]{64}$' }
+        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH] }
+        policy_version: { type: integer, format: int64, const: 1 }
+        status: { type: string, const: EXECUTED }
+        protocol: { $ref: "#/components/schemas/TokenAdminProtocol" }
+        formula: { $ref: "#/components/schemas/TokenAdminFormula" }
+        precheck: { type: object, additionalProperties: true }
+        billing_sync: { type: string, enum: [SYNCHRONIZED] }
+    FormulaPreview:
+      type: object
+      additionalProperties: false
+      required: [formula, sample_missing_optional_parameters, deterministic, external_access]
+      properties:
+        formula: { $ref: "#/components/schemas/TokenAdminFormula" }
+        sample_missing_optional_parameters: { type: object, additionalProperties: { type: integer, format: int64 } }
+        deterministic: { type: boolean, const: true }
+        external_access: { type: boolean, const: false }
     RefundCreate:
       type: object
       additionalProperties: false
@@ -3819,6 +3911,25 @@ components:
               code: { type: string, enum: [PAGINATION_SNAPSHOT_UNAVAILABLE] }
               message: { type: string }
               request_id: { type: string }
+    CommandResultUnknown:
+      description: The command deadline expired after execution may have started. Clients must query the stable command reference and must not retry blindly.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [code, message, request_id, details]
+            properties:
+              code: { type: string, const: COMMAND_RESULT_UNKNOWN }
+              message: { type: string }
+              request_id: { type: string }
+              details:
+                type: object
+                additionalProperties: false
+                required: [command_reference, result_query]
+                properties:
+                  command_reference: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  result_query: { type: string, pattern: '^/token/admin/v1/commands/[0-9a-f]{64}$' }
     Error:
       description: JSON API error
       content:

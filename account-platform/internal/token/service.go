@@ -43,25 +43,26 @@ type CredentialValidator interface {
 }
 
 type Service struct {
-	repository             Repository
-	contexts               ContextResolver
-	commerceCustomers      CommerceCustomerResolver
-	wallets                WalletResolver
-	validator              CredentialValidator
-	providerURLs           ProviderURLPolicy
-	billing                BillingClient
-	upstream               UpstreamClient
-	maximumInputTokens     int64
-	defaultMaxOutputTokens int64
-	maximumOutputTokens    int64
-	defaultRoutes          DefaultRouteProvisioner
-	catalogSync            *CatalogSynchronizer
-	authorizer             *authorization.Client
-	clientReadiness        *ClientReadinessService
-	ownerCandidates        OwnerCandidateDirectory
-	adminProxyHMACKey      []byte
-	breaker                *resilience.Breaker
-	activeUpstreamCancels  sync.Map
+	repository                  Repository
+	contexts                    ContextResolver
+	commerceCustomers           CommerceCustomerResolver
+	wallets                     WalletResolver
+	validator                   CredentialValidator
+	providerURLs                ProviderURLPolicy
+	billing                     BillingClient
+	upstream                    UpstreamClient
+	maximumInputTokens          int64
+	defaultMaxOutputTokens      int64
+	maximumOutputTokens         int64
+	defaultRoutes               DefaultRouteProvisioner
+	catalogSync                 *CatalogSynchronizer
+	authorizer                  *authorization.Client
+	clientReadiness             *ClientReadinessService
+	ownerCandidates             OwnerCandidateDirectory
+	commandGovernanceActivation TokenCommandGovernanceActivationReader
+	adminProxyHMACKey           []byte
+	breaker                     *resilience.Breaker
+	activeUpstreamCancels       sync.Map
 }
 
 func (s *Service) registerActiveUpstream(usageID uuid.UUID, cancel context.CancelFunc) func() {
@@ -179,10 +180,10 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("TOKEN_USAGE_RECONCILIATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryReconciliation))
 		admin.GET("/protocols", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminProtocols))
 		admin.GET("/formulas", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminFormulas))
-		admin.POST("/protocols", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateProtocol))
-		admin.POST("/protocols/:protocol_definition_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishProtocol))
-		admin.POST("/protocols/:protocol_definition_id/formulas", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateFormula))
-		admin.POST("/formulas/:formula_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishFormula))
+		admin.POST("/protocols", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_DRAFT_CREATE", approvalpolicy.AuditOnly), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateProtocol))
+		admin.POST("/protocols/:protocol_definition_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_PUBLISH", approvalpolicy.AuditOnly), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminPublishProtocol))
+		admin.POST("/protocols/:protocol_definition_id/formulas", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_DRAFT_CREATE", approvalpolicy.AuditOnly), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateFormula))
+		admin.POST("/formulas/:formula_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_PUBLISH", approvalpolicy.AuditOnly), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminPublishFormula))
 		admin.GET("/formulas/:formula_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewFormula))
 		admin.GET("/models", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogModels))
 		admin.PUT("/models/:model_id/draft", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_DRAFT_SAVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSaveCatalogDraft))
