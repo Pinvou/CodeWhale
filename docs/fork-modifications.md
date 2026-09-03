@@ -196,6 +196,13 @@
 - Community 回流扫描、依赖调度、跨平台 preflight、PR provenance、Merge Queue 策略及其
   三平台 CI 门禁。这些属于父仓治理基础设施，不修改 CodeWhale gitlink 或 fork 行为；由
   `community-backflow`、CI 策略测试和 `fork-guard.sh --fast` 的父仓联动检查守护。
+- `features/assistant/product_runtime/agentic_task.rs` (PR #398): headless
+  single-task agentic entry for external harnesses (Terminal-Bench/Harbor),
+  benchmark-hooks gated. It drives a product-equivalent turn through the GUI
+  send path (`eval_tool_policy = None`) without touching eval tool policies,
+  and shares the windowless host bootstrap with the eval backend. Covered by
+  the fork-guard layer-3 `agentic_task::tests` and the
+  `engine_config_tool_call_cap_respects_env_override` regression.
 
 CodeWhale fork 只提供这些产品能力不可缺少的底座生命周期入口和原子不变量。
 
