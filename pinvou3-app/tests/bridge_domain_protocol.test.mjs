@@ -95,7 +95,7 @@ const expectedProtocolHashes = {
   remoteControl: 'b48906332b45fecfb5a9b222264edb694ff39a47c6ae2105f8d1c32a47653830',
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
   sessions: '43be5b929743f00818492d51d7a725860c71b9a52e7fdcbe72606426472409c0',
-  settings: '77772691e72e7db3715d3c705089e603697750f2e2ce82739403e5ca7468e574',
+  settings: 'afff0d5112a7f7fb983fac9d3564c2f65f33865e3794749e208801c30bd722cc',
   updater: '7b1eea2076e6257bc799349099795d42fd71b1db6d6c0655da0fe512918e8ed0',
   voice: 'b26fd3ae1fa7d11f3457f757dae29bc518c4c9467ac138ef0b95a3cd118301b2',
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
@@ -220,7 +220,6 @@ try {
   if (previousTauri === undefined) delete globalThis.__TAURI__;
   else globalThis.__TAURI__ = previousTauri;
 }
-
 assert.doesNotMatch(
   read('bridge.js'),
   /repairPythonDependenciesAfterFirstFrame|repair_python_dependencies_after_first_frame/u,
