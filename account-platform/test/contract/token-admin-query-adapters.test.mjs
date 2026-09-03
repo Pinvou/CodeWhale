@@ -104,6 +104,44 @@ test('closed model and legacy usage schemas validate production JSON shapes', as
   assert.equal(legacyItem, '#/components/schemas/AdminUsageRequest');
 });
 
+test('impact precheck covered and uncovered price evidence validate as closed alternatives', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  const validate = ajv.compile(contract.components.schemas.TokenImpactPrecheck);
+  const base = {
+    action: 'MODEL_LIFECYCLE_DEPRECATED',
+    evidence: {
+      resource_type: 'MODEL', resource_id: '11111111-1111-4111-8111-111111111111', current_status: 'PUBLISHED',
+      current_version: { evidence_etag: `"impact-${'a'.repeat(64)}"`, evidence_set_sha256: 'b'.repeat(64) },
+      dependencies: { routes: 0, healthy_routes: 0, provisionings: 0, ready_provisionings: 0, active_leases: 0, inflight_requests: 0, active_sessions: 0, alternative_credentials: 0, alternative_accounts: 0, affected_coverage_tuples: 0, remaining_ready_coverage: 0, coverage_gaps: 0 },
+    },
+    blockers: [], token_observed_at: '2026-09-03T00:00:00Z', billing_observed_at: '2026-09-03T00:00:01Z',
+    snapshot_semantics: 'INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS', precheck_fingerprint: 'c'.repeat(64), requires_cas_revalidation: true,
+  };
+  const common = { model_id: '11111111-1111-4111-8111-111111111111', protocol_code: 'CHAT', credit_unit: 'MICROCREDIT' };
+  const covered = { ...base, price_coverage: { models_checked: 1, models_covered: 1, fully_covered: true, billing_observed_at: base.billing_observed_at, versions: [{ ...common, covered: true, formula_version_id: '22222222-2222-4222-8222-222222222222', price_version_id: '33333333-3333-4333-8333-333333333333', effective_from: '2026-09-01T00:00:00Z' }] } };
+  const uncovered = { ...base, price_coverage: { models_checked: 1, models_covered: 0, fully_covered: false, billing_observed_at: base.billing_observed_at, versions: [{ ...common, covered: false }] } };
+  assert.equal(validate(covered), true, JSON.stringify(validate.errors));
+  assert.equal(validate(uncovered), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...uncovered, price_coverage: { ...uncovered.price_coverage, versions: [{ ...common, covered: false, price_version_id: '33333333-3333-4333-8333-333333333333' }] } }), false);
+  assert.equal(validate({ ...covered, price_coverage: { ...covered.price_coverage, versions: [{ ...covered.price_coverage.versions[0], provider: 'must-not-leak' }] } }), false);
+  const dependencies = contract.components.schemas.TokenImpactPrecheck.properties.evidence.properties.dependencies.properties;
+  assert.match(dependencies.affected_coverage_tuples.description, /scope_type, scope_id, wallet_id, model_id, upstream_model_ref, protocol_code/);
+  assert.match(dependencies.remaining_ready_coverage.description, /exact currently serviceable match/);
+  assert.match(dependencies.coverage_gaps.description, /coverage_gaps = affected_coverage_tuples - remaining_ready_coverage/);
+});
+
+test('impact precheck freezes exact coverage tuples and separate credential candidates', async () => {
+  const source = await read('internal/token/impact_precheck.go');
+  assert.match(source, /candidate\.status IN \('PENDING','RETIRED'\) AND candidate\.validation_status='VALID'/);
+  assert.match(source, /candidate\.token_account_id=\$1 AND candidate\.id<>\$3/);
+  assert.match(source, /candidate\.provider<>affected\.required_provider OR NOT affected\.upstream_model_ref=ANY\(candidate\.allowed_models\)/);
+  assert.match(source, /candidate\.scope_type=affected\.scope_type AND candidate\.scope_id=affected\.scope_id AND candidate\.wallet_id=affected\.wallet_id AND candidate\.model_id=affected\.model_id AND candidate\.upstream_model_ref=affected\.upstream_model_ref AND candidate\.protocol_code=affected\.protocol_code/);
+  assert.match(source, /AffectedCoverageTuples.*RemainingReadyCoverage.*CoverageGaps/s);
+  assert.match(source, /appendImpactKeyRowsIterator\(ctx, digest, rows\)/);
+});
+
 test('query adapters freeze authoritative total orders and isolated resource names', async () => {
   const [queries, handlers, service] = await Promise.all([read('internal/token/admin_queries.go'), read('internal/token/admin_queries_http.go'), read('internal/token/service.go')]);
   for (const order of [

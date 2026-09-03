@@ -60,6 +60,9 @@ type Service struct {
 	clientReadiness             *ClientReadinessService
 	ownerCandidates             OwnerCandidateDirectory
 	commandGovernanceActivation TokenCommandGovernanceActivationReader
+	impactPrechecksEnabled      bool
+	impactPrechecks             ImpactPrecheckRepository
+	impactPricing               ImpactPriceCoverageClient
 	adminProxyHMACKey           []byte
 	breaker                     *resilience.Breaker
 	activeUpstreamCancels       sync.Map
@@ -191,10 +194,15 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_LIFECYCLE_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
 		admin.POST("/models:sync", s.authorizer.Require("platform.models.sync"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncCatalog))
 		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_ROLLBACK", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRollbackCatalog))
+		admin.GET("/models/:model_id/impact/lifecycle", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminModelLifecycleImpact))
+		admin.GET("/model-catalog/impact/rollback", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogRollbackImpact))
 		admin.GET("/provisionings", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisionings))
 		admin.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioning))
 		admin.GET("/owner-candidates", s.authorizer.Require("platform.tokens.owner-candidates.read"), httpserver.AdaptFunc(s.adminOwnerCandidates))
 		admin.GET("/resource-audit", s.authorizer.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), httpserver.AdaptFunc(s.adminResourceAudit))
+		admin.GET("/token-accounts/:token_account_id/impact/status", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccountStatusImpact))
+		admin.GET("/token-accounts/:token_account_id/impact/route", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenRouteImpact))
+		admin.GET("/token-accounts/:token_account_id/impact/credential", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenCredentialImpact))
 		admin.POST("/provisionings/:provisioning_id/repair", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_PROVISIONING_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairProvisioning))
 	}
 	return router

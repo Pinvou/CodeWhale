@@ -1795,6 +1795,81 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models/{model_id}/impact/lifecycle:
+    get:
+      operationId: precheckAdminModelLifecycleImpact
+      summary: Read a redacted model lifecycle dependency and pricing impact snapshot
+      parameters:
+        - { name: model_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: target_status, in: query, required: true, schema: { type: string, enum: [PUBLISHED, DEPRECATED, REMOVED] } }
+        - { name: replacement_model_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Read-only evidence; a later command must repeat CAS and dependency validation, content: { application/json: { schema: { $ref: "#/components/schemas/TokenImpactPrecheck" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/PrecheckTimeout" }
+  /token/admin/v1/model-catalog/impact/rollback:
+    get:
+      operationId: precheckAdminModelCatalogRollbackImpact
+      summary: Read complete price and runtime impact before a forward catalog rollback
+      parameters:
+        - { name: source_catalog_version, in: query, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        "200": { description: Read-only evidence; a later command must repeat CAS and dependency validation, content: { application/json: { schema: { $ref: "#/components/schemas/TokenImpactPrecheck" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/PrecheckTimeout" }
+  /token/admin/v1/token-accounts/{token_account_id}/impact/status:
+    get:
+      operationId: precheckAdminTokenAccountStatusImpact
+      summary: Read redacted route, provisioning, request and session impact before an account status change
+      parameters:
+        - { name: token_account_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: target_status, in: query, required: true, schema: { type: string, enum: [ACTIVE, DISABLED] } }
+      responses:
+        "200": { description: Read-only evidence; a later command must repeat CAS and dependency validation, content: { application/json: { schema: { $ref: "#/components/schemas/TokenImpactPrecheck" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/PrecheckTimeout" }
+  /token/admin/v1/token-accounts/{token_account_id}/impact/route:
+    get:
+      operationId: precheckAdminTokenRouteImpact
+      summary: Read redacted runtime dependencies before a route upsert or delete
+      parameters:
+        - { name: token_account_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: action, in: query, required: true, schema: { type: string, enum: [UPSERT, DELETE] } }
+        - { name: model, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 200 } }
+        - { name: protocol_code, in: query, description: Required for UPSERT and validated against the current published model catalog, schema: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' } }
+      responses:
+        "200": { description: Read-only evidence; a later command must repeat CAS and dependency validation, content: { application/json: { schema: { $ref: "#/components/schemas/TokenImpactPrecheck" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/PrecheckTimeout" }
+  /token/admin/v1/token-accounts/{token_account_id}/impact/credential:
+    get:
+      operationId: precheckAdminTokenCredentialImpact
+      summary: Read redacted route, lease, request and alternative-credential impact
+      parameters:
+        - { name: token_account_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: action, in: query, required: true, schema: { type: string, enum: [ENROLL, ROTATE, REVOKE, VALIDATE] } }
+        - { name: credential_id, in: query, description: Required except for ENROLL, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Read-only evidence; a later command must repeat CAS and dependency validation, content: { application/json: { schema: { $ref: "#/components/schemas/TokenImpactPrecheck" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/PrecheckTimeout" }
   /token/admin/v1/reconciliation-cases:
     get:
       operationId: listAdminTokenReconciliationCases
@@ -2220,6 +2295,114 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    TokenImpactPrecheck:
+      type: object
+      additionalProperties: false
+      description: Token and Billing evidence are independently observed domain snapshots; this response never claims one distributed transaction or cross-domain as-of time.
+      required: [action, evidence, blockers, token_observed_at, snapshot_semantics, precheck_fingerprint, requires_cas_revalidation]
+      properties:
+        action: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,119}$' }
+        evidence:
+          type: object
+          additionalProperties: false
+          required: [resource_type, resource_id, current_status, current_version, dependencies]
+          properties:
+            resource_type: { type: string, enum: [MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, TOKEN_ROUTE, PROVIDER_CREDENTIAL] }
+            resource_id: { type: string, minLength: 1, maxLength: 400 }
+            current_status: { type: string, minLength: 1, maxLength: 80 }
+            current_version:
+              type: object
+              additionalProperties: false
+              required: [evidence_etag, evidence_set_sha256]
+              properties:
+                catalog_version: { type: integer, format: int64, minimum: 1 }
+                model_capability_version_id: { type: string, format: uuid }
+                protocol_definition_id: { type: string, format: uuid }
+                account_updated_at: { type: string, format: date-time }
+                route_generation: { type: integer, format: int64, minimum: 0 }
+                credential_version: { type: integer, minimum: 1 }
+                evidence_etag: { type: string, pattern: '^"impact-[0-9a-f]{64}"$' }
+                evidence_set_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+            dependencies:
+              type: object
+              additionalProperties: false
+              required: [routes, healthy_routes, provisionings, ready_provisionings, active_leases, inflight_requests, active_sessions, alternative_credentials, alternative_accounts, affected_coverage_tuples, remaining_ready_coverage, coverage_gaps]
+              properties:
+                routes: { type: integer, format: int64, minimum: 0 }
+                healthy_routes: { type: integer, format: int64, minimum: 0 }
+                provisionings: { type: integer, format: int64, minimum: 0 }
+                ready_provisionings: { type: integer, format: int64, minimum: 0 }
+                active_leases: { type: integer, format: int64, minimum: 0 }
+                inflight_requests: { type: integer, format: int64, minimum: 0 }
+                active_sessions: { type: integer, format: int64, minimum: 0 }
+                alternative_credentials: { type: integer, format: int64, minimum: 0 }
+                alternative_accounts: { type: integer, format: int64, minimum: 0 }
+                affected_coverage_tuples:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Count of distinct currently serviceable target route/account tuples `(scope_type, scope_id, wallet_id, model_id, upstream_model_ref, protocol_code)` frozen from the Token snapshot.
+                remaining_ready_coverage:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Count of affected tuples for which at least one candidate Token Account other than the target account provides an exact currently serviceable match on all six tuple fields.
+                coverage_gaps:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Exact invariant `coverage_gaps = affected_coverage_tuples - remaining_ready_coverage`; every gap is an affected tuple with no exact candidate after excluding the target account.
+            replacement_model_id: { type: string, format: uuid }
+            replacement_model_ready: { type: boolean }
+        price_coverage:
+          type: object
+          additionalProperties: false
+          required: [models_checked, models_covered, fully_covered, versions, billing_observed_at]
+          properties:
+            models_checked: { type: integer, minimum: 1, maximum: 5000 }
+            models_covered: { type: integer, minimum: 0, maximum: 5000 }
+            fully_covered: { type: boolean }
+            versions:
+              type: array
+              maxItems: 5000
+              items:
+                type: object
+                additionalProperties: false
+                required: [model_id, protocol_code, credit_unit, covered]
+                properties:
+                  model_id: { type: string, format: uuid }
+                  protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+                  formula_version_id: { type: string, format: uuid }
+                  credit_unit: { type: string, const: MICROCREDIT }
+                  covered: { type: boolean }
+                  price_version_id: { type: string, format: uuid }
+                  effective_from: { type: string, format: date-time }
+                  effective_to: { type: string, format: date-time }
+                oneOf:
+                  - type: object
+                    required: [formula_version_id, price_version_id, effective_from]
+                    properties:
+                      covered: { type: boolean, const: true }
+                  - type: object
+                    properties:
+                      covered: { type: boolean, const: false }
+                    not:
+                      anyOf:
+                        - required: [formula_version_id]
+                          properties: { formula_version_id: {} }
+                        - required: [price_version_id]
+                          properties: { price_version_id: {} }
+                        - required: [effective_from]
+                          properties: { effective_from: {} }
+                        - required: [effective_to]
+                          properties: { effective_to: {} }
+            billing_observed_at: { type: string, format: date-time }
+        blockers: { type: array, uniqueItems: true, items: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,119}$' } }
+        token_observed_at: { type: string, format: date-time }
+        billing_observed_at: { type: string, format: date-time }
+        snapshot_semantics: { type: string, const: INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS }
+        precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        requires_cas_revalidation: { type: boolean, const: true }
     RechargeProductMapping:
       type: object
       required: [draft_version, provider_id, provider_version, sku_bom, amount_fen, currency, channels, admission_class]
@@ -3909,6 +4092,18 @@ components:
             required: [code, message]
             properties:
               code: { type: string, enum: [PAGINATION_SNAPSHOT_UNAVAILABLE] }
+              message: { type: string }
+              request_id: { type: string }
+    PrecheckTimeout:
+      description: The single five-second cross-domain precheck deadline expired or complete downstream evidence could not be established. No write is authorized.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [code, message, request_id]
+            properties:
+              code: { type: string, const: PRECHECK_TIMEOUT }
               message: { type: string }
               request_id: { type: string }
     CommandResultUnknown:

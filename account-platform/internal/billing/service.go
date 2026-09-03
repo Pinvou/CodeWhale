@@ -34,6 +34,7 @@ type Service struct {
 	callbackProfiles *paymentcallback.Profiles
 	humanDelegations *humandelegation.Verifier
 	catalog          RechargeProductCatalogRepository
+	impactPricing    impactPriceRepository
 	now              func() time.Time
 }
 
@@ -43,7 +44,14 @@ func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepos
 }
 
 func NewService(repository Repository) *Service {
-	return &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }}
+	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }}
+	service.impactPricing, _ = repository.(impactPriceRepository)
+	return service
+}
+
+func (s *Service) WithImpactPriceRepository(repository impactPriceRepository) *Service {
+	s.impactPricing = repository
+	return s
 }
 
 func (s *Service) WithPayments(payments *PaymentCoordinator) *Service {
@@ -93,6 +101,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", serviceauth.Require("internal.billing.account-closed-grant.reclaim"), s.requireHumanDelegation("org.grants.reclaim_closed", "member-quota-grant", "grant_id"), httpserver.AdaptFunc(s.reclaimAccountClosedGrantInternal))
 	protected.GET("/internal/v1/pricing/current", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.currentPrice))
 	protected.GET("/internal/v1/pricing/:price_version_id", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.priceByID))
+	protected.POST("/internal/v1/pricing/impact-coverage", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.impactPriceCoverage))
 	protected.POST("/internal/v1/pricing/formula-bindings/validate", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.validateFormulaDraftUnits))
 	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", serviceauth.Require("internal.billing.pricing.bind"), httpserver.AdaptFunc(s.putFormulaBinding))
 	if s.catalog != nil {

@@ -77,6 +77,10 @@ func main() {
 	if err := repository.SetAdminPaginationGate(ctx, paginationEnabled); err != nil {
 		log.Fatal("Token admin pagination rollout gate could not be persisted: ", err)
 	}
+	impactPrechecksEnabled, err := strconv.ParseBool(valueOrDefault("TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED", "false"))
+	if err != nil {
+		log.Fatal("TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED must be true or false")
+	}
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
@@ -255,7 +259,7 @@ func main() {
 	cancelInitialSync()
 	go observability.RunBackground(workerContext, "model-catalog-sync", catalogSync.Run)
 	go observability.RunBackground(workerContext, "default-route-provisioning", defaultRoutes.Run)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey)
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient)
 	go observability.RunBackground(workerContext, "model-emergency-cancellation", token.NewEmergencyModelCancellationWorker(repository, service, 5*time.Second).Run)
 	ready := repository.Ping
 	if strings.EqualFold(cfg.Environment, "production") || strings.EqualFold(cfg.Environment, "production-new") {

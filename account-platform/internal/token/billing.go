@@ -137,6 +137,33 @@ type FormulaDraftValidationClient interface {
 	ValidateFormulaDraftUnits(context.Context, map[string]uuid.UUID) (FormulaDraftValidation, error)
 }
 
+type ImpactPriceCoverage struct {
+	ModelID          uuid.UUID  `json:"model_id"`
+	ProtocolCode     string     `json:"protocol_code"`
+	FormulaVersionID *uuid.UUID `json:"formula_version_id,omitempty"`
+	CreditUnit       string     `json:"credit_unit"`
+	Covered          bool       `json:"covered"`
+	PriceVersionID   *uuid.UUID `json:"price_version_id,omitempty"`
+	EffectiveFrom    *time.Time `json:"effective_from,omitempty"`
+	EffectiveTo      *time.Time `json:"effective_to,omitempty"`
+}
+
+type ImpactPriceQuery struct {
+	ModelID      uuid.UUID `json:"model_id"`
+	ProtocolCode string    `json:"protocol_code"`
+	CreditUnit   string    `json:"credit_unit"`
+}
+
+type ImpactPriceCoverageResult struct {
+	Items  []ImpactPriceCoverage `json:"items"`
+	AsOf   time.Time             `json:"as_of"`
+	Source string                `json:"source"`
+}
+
+type ImpactPriceCoverageClient interface {
+	ImpactPriceCoverage(context.Context, []ImpactPriceQuery) (ImpactPriceCoverageResult, error)
+}
+
 type SnapshotOrganizationBillingClient interface {
 	ReserveMemberQuotaPriced(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, uuid.UUID, HoldPricingContext) (BillingHold, error)
 }
@@ -424,6 +451,53 @@ func (c *HTTPBillingClient) PriceByID(ctx context.Context, priceID uuid.UUID) (P
 	var price PriceVersion
 	err := c.call(ctx, http.MethodGet, "/internal/v1/pricing/"+priceID.String(), nil, &price)
 	return price, err
+}
+
+func (c *HTTPBillingClient) ImpactPriceCoverage(ctx context.Context, items []ImpactPriceQuery) (ImpactPriceCoverageResult, error) {
+	var result ImpactPriceCoverageResult
+	err := c.callStrict(ctx, http.MethodPost, "/internal/v1/pricing/impact-coverage", map[string]any{"items": items}, &result)
+	return result, err
+}
+
+func (c *HTTPBillingClient) callStrict(ctx context.Context, method, path string, input, output any) error {
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, method, c.baseURL.String()+path, bytes.NewReader(encoded))
+	if err != nil {
+		return err
+	}
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		var problem struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(data, &problem)
+		return &BillingHTTPError{Status: response.StatusCode, Code: problem.Code}
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 2<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(output); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("unexpected trailing billing response")
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *HTTPBillingClient) Reserve(ctx context.Context, usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID) (BillingHold, error) {

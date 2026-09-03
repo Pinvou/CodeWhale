@@ -147,7 +147,7 @@
 | APT-121 | 九类 Token 查询合同与模型/Token 资源审计投影 | ADM-56, ADM-63 | APT-119, APT-120 | CODE | DONE |
 | APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | DONE |
 | APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | PENDING |
-| APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | PENDING |
+| APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | DONE |
 | APT-125 | 路由稳定模型/协议解析与服务端健康探测状态机 | ADM-62 | APT-027, APT-028, APT-121, APT-122, APT-123 | CODE | PENDING |
 | APT-126 | 模型/运行概览与 Billing 模型价格跨域只读投影 | ADM-59 | APT-113, APT-121, APT-125 | CODE | PENDING |
 | APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | PENDING |
@@ -239,6 +239,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-124 跨域影响预检
 
+- **实现状态**：`DONE`；五类只读预检、同一 Token 快照的固定全序流式关键集合 SHA/组合 ETag、规范化双域预检指纹、Billing 单事务批量价格覆盖、逐 tuple READY/替代资源事实、默认关闭 gate、5 秒绝对 deadline、脱敏错误和真实迁移链集成门禁已实现，并通过身份 B 第五轮独立代码审核。随本任务创建独立提交，尚未推送或部署；本地未配置 Token/Billing PostgreSQL URL，真实 PostgreSQL 用例未执行，CI 隔离库命名门禁必须 PASS 且拒绝 SKIP。
 - **目标/范围**：主目标 `ADM-57`。修改 `internal/token/{catalog.go,catalog_http.go,management.go,provisioning.go,reconciliation.go,billing.go}` 及 Token/Billing 内部客户端和 OpenAPI，只增加模型生命周期/目录回滚、Token Account 状态、路由、凭据动作的只读预检。
 - **合同/回滚**：返回当前版本、价格覆盖、路由/Provisioning/在途请求、会话/替代模型、租约和替代凭据的脱敏摘要；共享 APT-120 唯一 5s deadline，失败关闭。无 schema 所有权，以 feature gate 关闭新 GET 即可回滚。
 - **验收**：任一下游超时统一 `PRECHECK_TIMEOUT`；预检后并发变更使正式命令 409/失效；无权/不存在无泄露；不返回 Provider 地址、Secret 或原始错误。

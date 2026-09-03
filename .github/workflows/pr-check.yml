@@ -614,13 +614,18 @@ jobs:
           printf '%s\n' "$formula_validation_output"
           grep -F -- '--- PASS: TestFormulaDraftUnitValidationPostgresIntegration' <<< "$formula_validation_output"
           ! grep -F -- '--- SKIP: TestFormulaDraftUnitValidationPostgresIntegration' <<< "$formula_validation_output"
-          token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^TestTokenAdmin(Pagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)|QueryAdaptersPostgresIntegration)$' -count=1 -v ./internal/token)"
+          impact_pricing_output="$(go test -run '^TestBillingImpactPriceCoveragePostgresIntegration$' -count=1 -v ./internal/billing)"
+          printf '%s\n' "$impact_pricing_output"
+          grep -F -- '--- PASS: TestBillingImpactPriceCoveragePostgresIntegration' <<< "$impact_pricing_output"
+          ! grep -F -- '--- SKIP: TestBillingImpactPriceCoveragePostgresIntegration' <<< "$impact_pricing_output"
+          token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^(TestTokenAdmin(Pagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)|QueryAdaptersPostgresIntegration)|TestTokenImpactPrecheckPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_pagination_output"
           for test_name in \
             TestTokenAdminPaginationPostgresIntegration \
             TestTokenAdminPaginationPostgresMillionMemberBoundary \
             TestTokenAdminPaginationMigrationFailsClosedAndIsIdempotent \
-            TestTokenAdminQueryAdaptersPostgresIntegration; do
+            TestTokenAdminQueryAdaptersPostgresIntegration \
+            TestTokenImpactPrecheckPostgresIntegration; do
             grep -F -- "--- PASS: $test_name" <<< "$token_pagination_output"
             ! grep -F -- "--- SKIP: $test_name" <<< "$token_pagination_output"
           done

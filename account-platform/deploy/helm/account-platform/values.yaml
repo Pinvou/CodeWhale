@@ -111,6 +111,7 @@ billing:
 
 tokenGateway:
   adminPaginationEnabled: false
+  impactPrechecksEnabled: false
   gatewayAdapter: NEW_API
   secretProvider: remote
   secretKeyId: ""
