@@ -101,6 +101,7 @@ import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
 import { PlanLayer, ToolCard, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
 import { notifyChatRoundCommitted } from '../tools/tool-events.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
+import { formatAttachmentLimitError } from '../attachments/attachment-limit-errors.js';
 import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
 import { bridge } from '../../hooks/useBridge.js';
@@ -2214,9 +2215,8 @@ export function CodexAcpView({
           // message (transfer.rs); map to the current-language copy instead
           // of passing the raw error through.
           const uploadErrorText = String(err?.message || '');
-          const displayError = err?.code === 'device_upload_too_large'
-            ? t.uiAttachments.deviceUploadTooLarge(file.name)
-            : err?.code === 'device_upload_empty'
+          const attachmentLimitError = formatAttachmentLimitError(err, t.uiAttachments);
+          const displayError = attachmentLimitError || (err?.code === 'device_upload_empty'
               ? t.uiAttachments.deviceUploadEmpty(file.name)
               : err?.code === 'device_upload_unavailable'
                 ? t.uiAttachments.deviceUploadUnavailable
@@ -2226,7 +2226,7 @@ export function CodexAcpView({
                     ? t.uiAttachments.deviceUploadDigestInvalid
                     : uploadErrorText === 'web_attachment_integrity_mismatch'
                       ? t.uiAttachments.deviceUploadIntegrityMismatch
-                      : t.uiAttachments.deviceUploadFailed(file.name);
+                      : t.uiAttachments.deviceUploadFailed(file.name));
           setAttachmentDrafts(current => updateAcpAttachmentDraft(current, id, attachment => ({
             ...attachment, status: 'error', error: displayError,
           })));
@@ -2339,7 +2339,13 @@ export function CodexAcpView({
           });
           await addAttachmentByPath(path, attachmentKey);
         } catch (err) {
-          showError(err);
+          const limitError = formatAttachmentLimitError(err, t.uiAttachments);
+          if (limitError) {
+            console.error('Codex paste attachment failed:', err);
+            setError(limitError);
+          } else {
+            showError(err);
+          }
         }
       };
       reader.readAsArrayBuffer(file);
@@ -3536,7 +3542,9 @@ export function CodexAcpView({
                 failedLabel={t.uiAttachments.failed}
                 removeLabel={t.uiAttachments.remove}
                 className="mb-2"
-                formatError={value => String(value || '')}
+                formatError={value => (
+                  formatAttachmentLimitError(value, t.uiAttachments) || String(value || '')
+                )}
               />
               {nativeVoiceInput.status !== 'idle' && nativeVoiceInput.message && (
                 <div className={`flex items-center justify-between gap-2 mb-2 px-3 py-2 rounded-2xl text-[12px] ${

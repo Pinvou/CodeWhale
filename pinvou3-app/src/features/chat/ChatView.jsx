@@ -41,6 +41,7 @@ import {
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
+import { formatAttachmentLimitError } from '../attachments/attachment-limit-errors.js';
 import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { ConversationAttachmentBubble } from '../attachments/ConversationAttachmentBubble.jsx';
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
@@ -804,6 +805,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const hasMessages = chatItems.length > 0;
       const attachments = (bs && bs.attachments) || [];
       const formatAttachmentError = (error) => {
+        const limitError = formatAttachmentLimitError(error, t.uiAttachments);
+        if (limitError) return limitError;
         const raw = String(error || '');
         if (/under sensitive system dir|crosses sensitive (dir|component)/i.test(raw)) {
           return t.attachProtectedLocation;
@@ -2041,7 +2044,13 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             reader.onload = () => {
               const bytes = Array.from(new Uint8Array(reader.result));
               const ext = (file.type.split('/')[1] || 'png');
-              if (bridge.available) bridge.attachments.addPasteImage(`paste-${Date.now()}.${ext}`, bytes);
+            if (bridge.available) {
+              bridge.attachments.addPasteImage(
+                `paste-${Date.now()}.${ext}`,
+                bytes,
+                formatAttachmentError,
+              );
+            }
             };
             reader.readAsArrayBuffer(file);
           }
