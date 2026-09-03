@@ -144,7 +144,7 @@
 | APT-118 | 超级管理员完整常驻平台权限迁移、缓存失效与安全边界回归 | ADM-55 | APT-069, APT-073, APT-097 | CODE | DONE |
 | APT-119 | owner 候选专用权限、权威目录与授权版本迁移 | ADM-61 | APT-006, APT-069, APT-118 | CODE | DONE |
 | APT-120 | Token 高数量分页快照、预算、cursor、入口超时与容量基座 | NFR-56 | APT-036, APT-045 | CODE | DONE |
-| APT-121 | 九类 Token 查询合同与模型/Token 资源审计投影 | ADM-56, ADM-63 | APT-119, APT-120 | CODE | PENDING |
+| APT-121 | 九类 Token 查询合同与模型/Token 资源审计投影 | ADM-56, ADM-63 | APT-119, APT-120 | CODE | DONE |
 | APT-122 | Token 协议/公式四命令策略注册与不可变版本门禁 | ADM-60 | APT-008, APT-018 | CODE | PENDING |
 | APT-123 | 十九项 Token 命令治理基础、策略注册与持久结果恢复 | ADM-65 | APT-008, APT-074, APT-076, APT-118, APT-120, APT-122, APT-124 | CODE | PENDING |
 | APT-124 | 模型生命周期、目录回滚及 Token 变更的影响预检 | ADM-57 | APT-028, APT-030, APT-120 | CODE | PENDING |
@@ -211,6 +211,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **不包含**：不改九类业务查询、Portal URL、owner Account schema 或任何写命令。
 
 ### APT-121 九类查询与资源审计投影
+
+> 实施状态（2026-09-03）：已完成并通过身份 B 第四轮独立代码审核（DONE），尚未提交、推送或部署。已完成九类查询、资源审计和 evidence 投影，并对 APT-119 Account 内部 owner 权威源做了仅增加可选 `organization_id` 过滤的向后兼容集成修正；本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL`，真实 PostgreSQL 集成用例未执行，PR 隔离库门禁必须逐项 PASS 且拒绝 SKIP。
 
 - **目标/范围**：主目标 `ADM-56`、`ADM-63`。修改 `internal/token/{admin.go,catalog.go,catalog_http.go,protocol_admin.go,management.go,provisioning.go,provisioning_http.go,reconciliation.go,postgres.go}`，新增资源审计/用量 evidence 只读投影文件，同步 Token/Portal BFF OpenAPI 与合同测试。
 - **查询合同**：严格按专项设计 4.1 为模型、协议、公式、Token Account、Provisioning、用量、核对异常、资源审计及 APT-119 owner 候选分别适配独立 filter/cursor 和确定全序，拒绝客户端 sort。evidence 投影唯一键 `(source_kind,source_id)`，时间映射和三元 cursor 不得变体。资源审计要求资源读权与 `platform.audit.read` 交集。

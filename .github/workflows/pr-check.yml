@@ -609,12 +609,13 @@ jobs:
           printf '%s\n' "$pagination_output"
           grep -F -- '--- PASS: TestAdminPaginationPostgresIntegration' <<< "$pagination_output"
           ! grep -F -- '--- SKIP: TestAdminPaginationPostgresIntegration' <<< "$pagination_output"
-          token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^TestTokenAdminPagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)$' -count=1 -v ./internal/token)"
+          token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^TestTokenAdmin(Pagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)|QueryAdaptersPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_pagination_output"
           for test_name in \
             TestTokenAdminPaginationPostgresIntegration \
             TestTokenAdminPaginationPostgresMillionMemberBoundary \
-            TestTokenAdminPaginationMigrationFailsClosedAndIsIdempotent; do
+            TestTokenAdminPaginationMigrationFailsClosedAndIsIdempotent \
+            TestTokenAdminQueryAdaptersPostgresIntegration; do
             grep -F -- "--- PASS: $test_name" <<< "$token_pagination_output"
             ! grep -F -- "--- SKIP: $test_name" <<< "$token_pagination_output"
           done

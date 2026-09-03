@@ -121,6 +121,7 @@ func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 	if err != nil || len(empty.Items) != 0 {
 		t.Fatalf("authorized empty page=%+v err=%v", empty, err)
 	}
+	assertTokenOwnerCandidateLifecycleWhitelist(t, ctx, repository, serviceActor, superActor.ID)
 	if _, err := repository.pool.Exec(ctx, `DELETE FROM token_owner_candidate_query_attempts`); err != nil {
 		t.Fatal(err)
 	}
@@ -249,6 +250,68 @@ func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSharedServiceLimit(t, ctx, repository, actors)
+}
+
+func assertTokenOwnerCandidateLifecycleWhitelist(t *testing.T, ctx context.Context, repository *PostgresRepository, actor TokenOwnerCandidateActor, creator uuid.UUID) {
+	t.Helper()
+	createdAt := time.Now().UTC().Add(-time.Hour)
+	userStatuses := []string{"PROVISIONING", "ACTIVE", "DISABLED", "BOOTSTRAP_PENDING", "REPAIR_REQUIRED", "CLOSING", "DELETED"}
+	expectedUsers := map[uuid.UUID]string{}
+	for _, status := range userStatuses {
+		id := uuid.New()
+		if _, err := repository.pool.Exec(ctx, `INSERT INTO users(id,status,display_name,user_code,created_at,updated_at) VALUES($1,$2,$3,generate_unique_user_code(),$4,$4)`, id, status, "candidate-"+strings.ToLower(status), createdAt); err != nil {
+			t.Fatal(err)
+		}
+		if status == "PROVISIONING" || status == "ACTIVE" || status == "DISABLED" {
+			expectedUsers[id] = status
+		}
+	}
+	activeOrganization, disabledOrganization, deletedOrganization := uuid.New(), uuid.New(), uuid.New()
+	for _, organization := range []struct {
+		id     uuid.UUID
+		status string
+	}{{activeOrganization, "ACTIVE"}, {disabledOrganization, "DISABLED"}, {deletedOrganization, "DELETED"}} {
+		if _, err := repository.pool.Exec(ctx, `INSERT INTO organizations(id,name,status,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$5)`, organization.id, "candidate-"+strings.ToLower(organization.status), organization.status, creator, createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	activeUnit, disabledUnit, deletedUnit := uuid.New(), uuid.New(), uuid.New()
+	for _, unit := range []struct {
+		id     uuid.UUID
+		status string
+	}{{activeUnit, "ACTIVE"}, {disabledUnit, "DISABLED"}, {deletedUnit, "DELETED"}} {
+		if _, err := repository.pool.Exec(ctx, `INSERT INTO organization_units(id,organization_id,parent_unit_id,name,status,created_at,updated_at) VALUES($1,$2,NULL,$3,$4,$5,$5)`, unit.id, activeOrganization, "candidate-"+strings.ToLower(unit.status), unit.status, createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	assertPage := func(ownerType string, expected map[uuid.UUID]string, excluded ...uuid.UUID) {
+		t.Helper()
+		page, err := repository.TokenOwnerCandidates(ctx, actor, TokenOwnerCandidateFilter{OwnerType: ownerType, Limit: 50000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[uuid.UUID]string{}
+		for _, item := range page.Items {
+			if item.Status != "ACTIVE" && item.Status != "DISABLED" && item.Status != "PROVISIONING" {
+				t.Fatalf("%s emitted non-selectable lifecycle %q", ownerType, item.Status)
+			}
+			seen[item.ID] = item.Status
+		}
+		for id, status := range expected {
+			if seen[id] != status {
+				t.Fatalf("%s candidate %s status=%q want=%q", ownerType, id, seen[id], status)
+			}
+		}
+		for _, id := range excluded {
+			if _, ok := seen[id]; ok {
+				t.Fatalf("%s emitted excluded lifecycle candidate %s", ownerType, id)
+			}
+		}
+	}
+	assertPage("USER", expectedUsers)
+	assertPage("ORGANIZATION", map[uuid.UUID]string{activeOrganization: "ACTIVE", disabledOrganization: "DISABLED"}, deletedOrganization)
+	assertPage("UNIT", map[uuid.UUID]string{activeUnit: "ACTIVE", disabledUnit: "DISABLED"}, deletedUnit)
 }
 
 type integrationActor struct {

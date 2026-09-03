@@ -134,22 +134,23 @@ FROM (
          COALESCE(NULLIF(btrim(account_user.display_name),''),NULLIF(btrim(account_user.username),''),account_user.user_code) AS display_label,
          account_user.status,account_user.created_at
   FROM users account_user
-  WHERE account_user.status<>'DELETED'
+  WHERE account_user.status IN ('ACTIVE','DISABLED','PROVISIONING')
+    AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM memberships membership WHERE membership.user_id=account_user.id AND membership.organization_id=$6 AND membership.status='ACTIVE'))
   UNION ALL
   SELECT organization.id,'ORGANIZATION',organization.name,organization.status,organization.created_at
   FROM organizations organization
-  WHERE organization.status<>'DELETED'
+  WHERE organization.status IN ('ACTIVE','DISABLED') AND ($6::uuid IS NULL OR organization.id=$6)
   UNION ALL
   SELECT unit.id,'UNIT',unit.name,unit.status,unit.created_at
   FROM organization_units unit
-  JOIN organizations organization ON organization.id=unit.organization_id AND organization.status<>'DELETED'
-  WHERE unit.status<>'DELETED'
+  JOIN organizations organization ON organization.id=unit.organization_id AND organization.status IN ('ACTIVE','DISABLED')
+  WHERE unit.status IN ('ACTIVE','DISABLED') AND ($6::uuid IS NULL OR unit.organization_id=$6)
 ) candidate
 WHERE ($1='' OR candidate.owner_type=$1)
   AND candidate.created_at<=$2
   AND ($3='' OR (candidate.owner_type,candidate.owner_id)>($3,$4))
 ORDER BY candidate.owner_type,candidate.owner_id
-LIMIT $5`, filter.OwnerType, highWater, cursorType, cursorID, filter.Limit+1)
+LIMIT $5`, filter.OwnerType, highWater, cursorType, cursorID, filter.Limit+1, filter.OrganizationID)
 	if err != nil {
 		return TokenOwnerCandidatePage{}, err
 	}

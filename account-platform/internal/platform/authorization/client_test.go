@@ -72,14 +72,14 @@ func TestRequireAnyRecordsOnlyVerifiedPermissions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		checks++
 		var body struct {
-			Permission string `json:"permission"`
+			AnyPermissions []string `json:"any_permissions"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
 		w.Header().Set("X-Context-Version", "3")
 		w.Header().Set("X-Authorization-Version", "5")
-		_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": body.Permission == "platform.users.read"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": true, "granted_permissions": []string{"platform.users.read"}})
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL, "service-secret")
@@ -101,7 +101,65 @@ func TestRequireAnyRecordsOnlyVerifiedPermissions(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer user-token")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	if response.Code != http.StatusNoContent || checks != 2 || response.Header().Get("X-Authorization-Version") != "5" {
+	if response.Code != http.StatusNoContent || checks != 1 || response.Header().Get("X-Authorization-Version") != "5" {
 		t.Fatalf("status=%d checks=%d headers=%v", response.Code, checks, response.Header())
+	}
+}
+
+func TestRequireAnyAndUsesOneAtomicVersionAndFailsClosedWithoutVersion(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		version    string
+		wantStatus int
+	}{
+		{name: "one atomic decision", version: "9", wantStatus: http.StatusNoContent},
+		{name: "missing version", wantStatus: http.StatusServiceUnavailable},
+		{name: "invalid version", version: "not-a-version", wantStatus: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checks := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				checks++
+				var body struct {
+					Any []string `json:"any_permissions"`
+					All []string `json:"all_permissions"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				if len(body.Any) != 2 || len(body.All) != 1 || body.All[0] != "platform.audit.read" {
+					t.Fatalf("unexpected composite expression: %#v", body)
+				}
+				if test.version != "" {
+					w.Header().Set("X-Authorization-Version", test.version)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"allowed": true, "granted_permissions": []string{"platform.models.read", "platform.audit.read"}})
+			}))
+			defer server.Close()
+			client, err := NewClient(server.URL, "service-secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gin.SetMode(gin.TestMode)
+			router := gin.New()
+			router.Use(identity.GinMiddleware(func(context.Context, string) (identity.Principal, error) {
+				return identity.Principal{Issuer: "issuer", Subject: "subject"}, nil
+			}))
+			called := false
+			router.GET("/audit", client.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), func(c *gin.Context) {
+				called = true
+				if !GrantedPermission(c.Request.Context(), "platform.models.read") || !GrantedPermission(c.Request.Context(), "platform.audit.read") {
+					t.Fatal("atomic grant set was not propagated")
+				}
+				c.Status(http.StatusNoContent)
+			})
+			request := httptest.NewRequest(http.MethodGet, "/audit", nil)
+			request.Header.Set("Authorization", "Bearer user-token")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus || checks != 1 || called != (test.wantStatus == http.StatusNoContent) {
+				t.Fatalf("status=%d checks=%d called=%v", response.Code, checks, called)
+			}
+		})
 	}
 }

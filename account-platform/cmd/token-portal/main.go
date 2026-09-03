@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/url"
@@ -31,20 +32,28 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	proxyHMACKey := []byte(nil)
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64")); raw != "" {
+		proxyHMACKey, err = base64.StdEncoding.DecodeString(raw)
+		if err != nil || len(proxyHMACKey) < 32 {
+			log.Fatal("TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64 must contain at least 32 base64-decoded bytes")
+		}
+	}
 	if configured := strings.TrimSpace(os.Getenv("TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS")); configured != "" && configured != "14" {
 		log.Fatal("TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS must be 14 to preserve the frozen Token admin deadline chains")
 	}
 	service, err := portal.NewService(portal.Config{
-		PublicURL:        publicURL,
-		AuthorizationURL: mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
-		TokenURL:         mustURL("PORTAL_OIDC_TOKEN_URL"),
-		ClientID:         os.Getenv("PORTAL_OIDC_CLIENT_ID"),
-		AccountURL:       mustURL("ACCOUNT_HTTP_URL"),
-		BillingURL:       mustURL("BILLING_HTTP_URL"),
-		TokenGatewayURL:  mustURL("TOKEN_GATEWAY_HTTP_URL"),
-		ClientVersion:    compatibility.Manifest().CurrentClientVersion,
-		SystemProbes:     systemProbes(),
-		SecureCookies:    publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
+		PublicURL:              publicURL,
+		AuthorizationURL:       mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
+		TokenURL:               mustURL("PORTAL_OIDC_TOKEN_URL"),
+		ClientID:               os.Getenv("PORTAL_OIDC_CLIENT_ID"),
+		AccountURL:             mustURL("ACCOUNT_HTTP_URL"),
+		BillingURL:             mustURL("BILLING_HTTP_URL"),
+		TokenGatewayURL:        mustURL("TOKEN_GATEWAY_HTTP_URL"),
+		ClientVersion:          compatibility.Manifest().CurrentClientVersion,
+		TokenAdminProxyHMACKey: proxyHMACKey,
+		SystemProbes:           systemProbes(),
+		SecureCookies:          publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
 	}, store)
 	if err != nil {
 		log.Fatal(err)

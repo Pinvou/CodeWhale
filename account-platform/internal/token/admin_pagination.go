@@ -129,9 +129,13 @@ type AdminPaginationPage struct {
 type AdminSnapshotMemberSource func(context.Context, pgx.Tx, uuid.UUID, time.Time, int) error
 
 type adminCursorEnvelope struct {
-	Version              int       `json:"v"`
-	SnapshotID           uuid.UUID `json:"sid"`
-	Position             int       `json:"pos"`
+	Version    int       `json:"v"`
+	SnapshotID uuid.UUID `json:"sid"`
+	Position   int       `json:"pos"`
+	// PositionKey binds the signed cursor to the exact last member tuple of
+	// the preceding page. It is optional only for cursors issued before this
+	// backward-compatible envelope extension.
+	PositionKey          string    `json:"position_key,omitempty"`
 	SubjectID            uuid.UUID `json:"sub"`
 	AuthorizationVersion int64     `json:"av"`
 	Resource             string    `json:"res"`
@@ -463,6 +467,17 @@ func (r *PostgresRepository) readAdminPaginationPage(ctx context.Context, reques
 	if cursor.ExpiresUnixNano <= now.UnixNano() || !expiresAt.After(now) {
 		return AdminPaginationPage{}, ErrAdminPaginationCursorExpired
 	}
+	if cursor.PositionKey != "" && cursor.Position > 0 {
+		var storedPositionKey string
+		if err = tx.QueryRow(deadlineCtx, `SELECT resource_id FROM token_admin_pagination_snapshot_members WHERE snapshot_id=$1 AND position=$2`, cursor.SnapshotID, cursor.Position-1).Scan(&storedPositionKey); errors.Is(err, pgx.ErrNoRows) {
+			return AdminPaginationPage{}, ErrAdminPaginationCursorExpired
+		} else if err != nil {
+			return AdminPaginationPage{}, adminPaginationReadError(err)
+		}
+		if storedPositionKey != cursor.PositionKey {
+			return AdminPaginationPage{}, ErrAdminPaginationCursorInvalid
+		}
+	}
 	page, err := r.readAdminSnapshotMembers(deadlineCtx, tx, request, cursor.SnapshotID, scopeDigest, filterDigest, cursor.Position, highWater, expiresAt)
 	if err != nil {
 		return AdminPaginationPage{}, adminPaginationReadError(err)
@@ -500,6 +515,7 @@ func (r *PostgresRepository) readAdminSnapshotMembers(ctx context.Context, query
 		page.HasMore = true
 		nextCursor, cursorErr := signedAdminPaginationCursor(adminCursorEnvelope{
 			Version: 1, SnapshotID: snapshotID, Position: position + request.Limit, SubjectID: request.SubjectID,
+			PositionKey:          page.ResourceIDs[len(page.ResourceIDs)-1],
 			AuthorizationVersion: request.AuthorizationVersion, Resource: request.Resource, ScopeDigest: scopeDigest,
 			FilterDigest: filterDigest, Sort: request.Sort, Limit: request.Limit,
 			HighWaterUnixNano: highWater.UnixNano(), ExpiresUnixNano: expiresAt.UnixNano(),

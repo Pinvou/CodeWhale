@@ -31,8 +31,9 @@ type Client struct {
 var ErrPermissionDenied = errors.New("permission is not granted")
 
 type decision struct {
-	Allowed bool      `json:"allowed"`
-	UserID  uuid.UUID `json:"user_id"`
+	Allowed            bool      `json:"allowed"`
+	UserID             uuid.UUID `json:"user_id"`
+	GrantedPermissions []string  `json:"granted_permissions,omitempty"`
 }
 
 func NewClient(rawURL, serviceToken string) (*Client, error) {
@@ -104,6 +105,37 @@ func RequestSHA256(body []byte) string { return humandelegation.RequestDigest(bo
 func (c *Client) Allowed(ctx context.Context, principal identity.Principal, permission string) (bool, http.Header, error) {
 	result, headers, err := c.decision(ctx, principal, permission, nil)
 	return result.Allowed, headers, err
+}
+
+func (c *Client) allowedComposite(ctx context.Context, principal identity.Principal, anyPermissions, allPermissions []string) (decision, http.Header, error) {
+	payload, err := json.Marshal(map[string]any{
+		"issuer": principal.Issuer, "subject": principal.Subject,
+		"any_permissions": anyPermissions, "all_permissions": allPermissions,
+	})
+	if err != nil {
+		return decision{}, nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint.String(), bytes.NewReader(payload))
+	if err != nil {
+		return decision{}, nil, err
+	}
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return decision{}, nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return decision{}, nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return decision{}, response.Header, errors.New("account composite authorization check failed")
+	}
+	var result decision
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		return decision{}, response.Header, err
+	}
+	return result, response.Header, nil
 }
 
 func (c *Client) AuthorizedUserID(ctx context.Context, principal identity.Principal, permission string) (uuid.UUID, error) {
@@ -211,9 +243,51 @@ func GrantedPermission(ctx context.Context, permission string) bool {
 	return ok
 }
 
-// RequireAny authorizes every requested permission independently, permits the
-// request when at least one is granted, and records only verified grants for
-// field-level response filtering.
+func positiveAuthorizationVersion(headers http.Header) (int64, bool) {
+	value := strings.TrimSpace(headers.Get("X-Authorization-Version"))
+	version, err := strconv.ParseInt(value, 10, 64)
+	return version, err == nil && version > 0
+}
+
+// RequireAnyAnd atomically evaluates (ANY(anyPermissions) AND ALL(allPermissions))
+// in one Account request and records exactly the permissions granted by that
+// response. No version from another authorization request can be merged.
+func (c *Client) RequireAnyAnd(anyPermissions []string, allPermissions []string) gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		principal, ok := identity.FromContext(ginContext.Request.Context())
+		if !ok {
+			api.WriteError(ginContext.Writer, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(ginContext.Request.Context()))
+			ginContext.Abort()
+			return
+		}
+		result, headers, err := c.allowedComposite(ginContext.Request.Context(), principal, anyPermissions, allPermissions)
+		if err != nil {
+			api.WriteError(ginContext.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(ginContext.Request.Context()))
+			ginContext.Abort()
+			return
+		}
+		if _, valid := positiveAuthorizationVersion(headers); !valid {
+			api.WriteError(ginContext.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_VERSION_INVALID", "authorization version is unavailable", httpserver.RequestID(ginContext.Request.Context()))
+			ginContext.Abort()
+			return
+		}
+		if !result.Allowed {
+			api.WriteError(ginContext.Writer, http.StatusForbidden, "PERMISSION_DENIED", "the requested permission expression is not granted", httpserver.RequestID(ginContext.Request.Context()))
+			ginContext.Abort()
+			return
+		}
+		for _, name := range []string{"X-Context-Version", "X-Authorization-Version"} {
+			if value := headers.Get(name); value != "" {
+				ginContext.Header(name, value)
+			}
+		}
+		ginContext.Request = ginContext.Request.WithContext(WithGrantedPermissions(ginContext.Request.Context(), result.GrantedPermissions...))
+		ginContext.Next()
+	}
+}
+
+// RequireAny evaluates all alternatives in one Account authorization snapshot,
+// permits the request when at least one is granted, and records verified grants.
 func (c *Client) RequireAny(permissions ...string) gin.HandlerFunc {
 	return func(ginContext *gin.Context) {
 		principal, ok := identity.FromContext(ginContext.Request.Context())
@@ -222,30 +296,19 @@ func (c *Client) RequireAny(permissions ...string) gin.HandlerFunc {
 			ginContext.Abort()
 			return
 		}
-		granted := make([]string, 0, len(permissions))
-		var versionHeaders http.Header
-		authorizationUnavailable := false
-		for _, permission := range permissions {
-			permission = strings.TrimSpace(permission)
-			if permission == "" {
-				continue
-			}
-			allowed, headers, err := c.Allowed(ginContext.Request.Context(), principal, permission)
-			if err != nil {
-				authorizationUnavailable = true
-				continue
-			}
-			versionHeaders = headers
-			if allowed {
-				granted = append(granted, permission)
-			}
+		result, versionHeaders, err := c.allowedComposite(ginContext.Request.Context(), principal, permissions, nil)
+		if err != nil {
+			api.WriteError(ginContext.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(ginContext.Request.Context()))
+			ginContext.Abort()
+			return
 		}
-		if len(granted) == 0 {
-			if authorizationUnavailable {
-				api.WriteError(ginContext.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(ginContext.Request.Context()))
-			} else {
-				api.WriteError(ginContext.Writer, http.StatusForbidden, "PERMISSION_DENIED", "none of the requested permissions is granted", httpserver.RequestID(ginContext.Request.Context()))
-			}
+		if _, valid := positiveAuthorizationVersion(versionHeaders); !valid {
+			api.WriteError(ginContext.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_VERSION_INVALID", "authorization version is unavailable", httpserver.RequestID(ginContext.Request.Context()))
+			ginContext.Abort()
+			return
+		}
+		if !result.Allowed || len(result.GrantedPermissions) == 0 {
+			api.WriteError(ginContext.Writer, http.StatusForbidden, "PERMISSION_DENIED", "none of the requested permissions is granted", httpserver.RequestID(ginContext.Request.Context()))
 			ginContext.Abort()
 			return
 		}
@@ -254,7 +317,7 @@ func (c *Client) RequireAny(permissions ...string) gin.HandlerFunc {
 				ginContext.Header(name, value)
 			}
 		}
-		ginContext.Request = ginContext.Request.WithContext(WithGrantedPermissions(ginContext.Request.Context(), granted...))
+		ginContext.Request = ginContext.Request.WithContext(WithGrantedPermissions(ginContext.Request.Context(), result.GrantedPermissions...))
 		ginContext.Next()
 	}
 }

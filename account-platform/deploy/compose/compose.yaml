@@ -385,6 +385,7 @@ services:
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
       # Portal enforces per-class absolute chains: 10/12/14, 3/5/7, 5/7/9.
       TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS: "14"
+      TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64: ${TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64:-}
       SYSTEM_PROBES_JSON: '[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://mock-newapi:8080/health/ready"},{"key":"event-bus","kind":"http","url":"http://nats:8222/healthz"},{"key":"account-event-relay","kind":"relay","url":"http://account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://token-event-relay:9090"}]'
     depends_on:
       redis:

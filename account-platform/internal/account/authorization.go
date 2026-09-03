@@ -70,12 +70,15 @@ type AuthorizationDecision struct {
 	PersonalAuthorizationVersion     int64      `json:"personal_authorization_version"`
 	PlatformAuthorizationVersion     int64      `json:"platform_authorization_version"`
 	OrganizationAuthorizationVersion int64      `json:"organization_authorization_version"`
+	GrantedPermissions               []string   `json:"granted_permissions,omitempty"`
 }
 
 type PermissionCheck struct {
 	Issuer         string     `json:"issuer"`
 	Subject        string     `json:"subject"`
 	Permission     string     `json:"permission"`
+	AnyPermissions []string   `json:"any_permissions,omitempty"`
+	AllPermissions []string   `json:"all_permissions,omitempty"`
 	OrganizationID *uuid.UUID `json:"target_organization_id,omitempty"`
 	UnitID         *uuid.UUID `json:"target_unit_id,omitempty"`
 }
@@ -83,6 +86,10 @@ type PermissionCheck struct {
 type authorizationRepository interface {
 	Authorize(context.Context, identity.Principal, string, *uuid.UUID, *uuid.UUID) (AuthorizationDecision, error)
 	RoleDefinitions(context.Context) ([]AdminRoleDefinition, error)
+}
+
+type compositeAuthorizationRepository interface {
+	AuthorizeComposite(context.Context, identity.Principal, []string, []string) (AuthorizationDecision, error)
 }
 
 func (r *PostgresRepository) Authorize(ctx context.Context, principal identity.Principal, permission string, organizationID, unitID *uuid.UUID) (AuthorizationDecision, error) {
@@ -149,6 +156,103 @@ WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, permis
 	default:
 		decision.AuthorizationVersion = 1
 	}
+	return decision, nil
+}
+
+func canonicalPermissionSet(values []string) ([]string, error) {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = canonicalPermissionCode(value)
+		if value == "" {
+			return nil, ErrForbidden
+		}
+		if _, exists := seen[value]; !exists {
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	if len(result) > 16 {
+		return nil, ErrForbidden
+	}
+	return result, nil
+}
+
+// AuthorizeComposite evaluates a platform permission expression from one
+// PostgreSQL statement, so grants and the authorization version are one
+// indivisible snapshot. It intentionally supports only platform permissions.
+func (r *PostgresRepository) AuthorizeComposite(ctx context.Context, principal identity.Principal, anyPermissions, allPermissions []string) (AuthorizationDecision, error) {
+	anyPermissions, err := canonicalPermissionSet(anyPermissions)
+	if err != nil || len(anyPermissions) == 0 {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	allPermissions, err = canonicalPermissionSet(allPermissions)
+	if err != nil {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	requested, err := canonicalPermissionSet(append(append([]string{}, anyPermissions...), allPermissions...))
+	if err != nil {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	var decision AuthorizationDecision
+	var allPlatform bool
+	err = r.pool.QueryRow(ctx, `
+WITH requested(permission) AS (SELECT DISTINCT unnest($3::text[])),
+principal AS (
+  SELECT account_user.id,account_user.status,COALESCE(active.context_version,1) context_version,
+         COALESCE((SELECT version FROM authorization_versions WHERE user_id=account_user.id AND scope='PERSONAL' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1) personal_version,
+         COALESCE((SELECT version FROM authorization_versions WHERE user_id=account_user.id AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1) platform_version
+  FROM identities identity_record
+  JOIN users account_user ON account_user.id=identity_record.user_id
+  LEFT JOIN user_active_contexts active ON active.user_id=account_user.id
+  WHERE identity_record.issuer=$1 AND identity_record.subject=$2
+), evaluated AS (
+  SELECT requested.permission,permission.scope,
+         EXISTS(
+           SELECT 1 FROM role_assignments assignment
+           JOIN roles role ON role.code=assignment.role_code AND role.scope='PLATFORM'
+           JOIN role_permissions edge ON edge.role_code=assignment.role_code AND edge.permission_code=requested.permission
+           WHERE assignment.user_id=principal.id AND assignment.organization_id IS NULL AND assignment.unit_id IS NULL
+             AND assignment.revoked_at IS NULL AND assignment.starts_at<=transaction_timestamp()
+             AND (assignment.expires_at IS NULL OR assignment.expires_at>transaction_timestamp())
+         ) granted
+  FROM principal CROSS JOIN requested LEFT JOIN permissions permission ON permission.code=requested.permission
+)
+SELECT principal.id,principal.status,principal.context_version,principal.personal_version,principal.platform_version,
+       COALESCE(array_agg(evaluated.permission ORDER BY evaluated.permission) FILTER (WHERE evaluated.granted),'{}'::text[]),
+       COALESCE(bool_and(evaluated.scope='PLATFORM'),false)
+FROM principal CROSS JOIN evaluated
+GROUP BY principal.id,principal.status,principal.context_version,principal.personal_version,principal.platform_version`, principal.Issuer, principal.Subject, requested).Scan(
+		&decision.UserID, &decision.UserStatus, &decision.ContextVersion, &decision.PersonalAuthorizationVersion,
+		&decision.PlatformAuthorizationVersion, &decision.GrantedPermissions, &allPlatform,
+	)
+	if errors.Is(err, pgx.ErrNoRows) || !allPlatform {
+		return AuthorizationDecision{}, ErrForbidden
+	}
+	if err != nil {
+		return AuthorizationDecision{}, err
+	}
+	decision.PermissionScope = "PLATFORM"
+	decision.AuthorizationVersion = decision.PlatformAuthorizationVersion
+	granted := make(map[string]struct{}, len(decision.GrantedPermissions))
+	for _, permission := range decision.GrantedPermissions {
+		granted[permission] = struct{}{}
+	}
+	allGranted := true
+	for _, permission := range allPermissions {
+		_, ok := granted[permission]
+		allGranted = allGranted && ok
+	}
+	anyGranted := false
+	for _, permission := range anyPermissions {
+		_, ok := granted[permission]
+		anyGranted = anyGranted || ok
+	}
+	statusPermission := anyPermissions[0]
+	if len(allPermissions) > 0 {
+		statusPermission = allPermissions[0]
+	}
+	decision.Allowed = permissionAllowedForUserStatus(decision.UserStatus, statusPermission) && allGranted && anyGranted
 	return decision, nil
 }
 
@@ -327,7 +431,8 @@ func (s *Service) checkPermission(w http.ResponseWriter, r *http.Request) {
 	request.Issuer = strings.TrimSpace(request.Issuer)
 	request.Subject = strings.TrimSpace(request.Subject)
 	request.Permission = strings.TrimSpace(request.Permission)
-	if request.Issuer == "" || request.Subject == "" || request.Permission == "" || (request.UnitID != nil && request.OrganizationID == nil) {
+	composite := len(request.AnyPermissions) > 0 || len(request.AllPermissions) > 0
+	if request.Issuer == "" || request.Subject == "" || (request.Permission == "") == !composite || (request.UnitID != nil && request.OrganizationID == nil) || (composite && (request.OrganizationID != nil || request.UnitID != nil)) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid permission check", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -336,13 +441,24 @@ func (s *Service) checkPermission(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	decision, err := repository.Authorize(r.Context(), identity.Principal{Issuer: request.Issuer, Subject: request.Subject}, request.Permission, request.OrganizationID, request.UnitID)
+	var decision AuthorizationDecision
+	var err error
+	if composite {
+		compositeRepository, available := s.repository.(compositeAuthorizationRepository)
+		if !available {
+			api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		decision, err = compositeRepository.AuthorizeComposite(r.Context(), identity.Principal{Issuer: request.Issuer, Subject: request.Subject}, request.AnyPermissions, request.AllPermissions)
+	} else {
+		decision, err = repository.Authorize(r.Context(), identity.Principal{Issuer: request.Issuer, Subject: request.Subject}, request.Permission, request.OrganizationID, request.UnitID)
+	}
 	if err != nil && !errors.Is(err, ErrForbidden) {
 		s.writeError(w, r, err)
 		return
 	}
 	if errors.Is(err, ErrForbidden) {
-		decision = AuthorizationDecision{Allowed: false, Permission: request.Permission, OrganizationID: request.OrganizationID, ContextVersion: 1, AuthorizationVersion: 1}
+		decision = AuthorizationDecision{Allowed: false, Permission: request.Permission, OrganizationID: request.OrganizationID}
 	}
 	writeAuthorizationVersions(w.Header(), decision)
 	w.Header().Set("Cache-Control", "no-store")

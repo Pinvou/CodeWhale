@@ -193,6 +193,9 @@ func lockTokenKey(ctx context.Context, tx pgx.Tx, namespace, key string) error {
 }
 
 func (s *Service) adminProtocols(w http.ResponseWriter, r *http.Request) {
+	if s.paginatedProtocols(w, r) {
+		return
+	}
 	repo, ok := s.repository.(interface {
 		ListProtocolsAndFormulas(context.Context) ([]ProtocolDefinition, []ProtocolFormulaVersion, error)
 	})

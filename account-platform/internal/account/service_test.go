@@ -55,6 +55,10 @@ func (*fakeRepository) GetCommerceCustomerMapping(context.Context, identity.Prin
 func (f *fakeRepository) Authorize(_ context.Context, _ identity.Principal, permission string, organizationID, _ *uuid.UUID) (AuthorizationDecision, error) {
 	return AuthorizationDecision{Allowed: !f.deny, Permission: permission, OrganizationID: organizationID, ContextVersion: 1, AuthorizationVersion: 1}, nil
 }
+func (f *fakeRepository) AuthorizeComposite(_ context.Context, _ identity.Principal, anyPermissions, allPermissions []string) (AuthorizationDecision, error) {
+	granted := append(append([]string{}, anyPermissions...), allPermissions...)
+	return AuthorizationDecision{Allowed: !f.deny, GrantedPermissions: granted, ContextVersion: 1, AuthorizationVersion: 1, PlatformAuthorizationVersion: 1}, nil
+}
 func (*fakeRepository) RoleDefinitions(context.Context) ([]AdminRoleDefinition, error) {
 	return []AdminRoleDefinition{{Code: "PLATFORM_SUPER_ADMIN", Scope: "PLATFORM", Permissions: []string{PermissionPlatformRolesRead}}}, nil
 }
@@ -391,6 +395,20 @@ func TestTokenOwnerCandidateFilterRejectsUnsupportedInput(t *testing.T) {
 		if _, err := parseTokenOwnerCandidateFilter(httptest.NewRequest(http.MethodGet, target, nil)); err == nil {
 			t.Fatalf("expected invalid filter for %s", target)
 		}
+	}
+}
+
+func TestTokenOwnerCandidateFilterAcceptsAndBindsOrganizationScope(t *testing.T) {
+	organizationID := uuid.New()
+	request := httptest.NewRequest(http.MethodGet, "/internal/v1/token-owner-candidates?actor_issuer=i&actor_subject=s&owner_type=UNIT&organization_id="+organizationID.String()+"&limit=20000", nil)
+	filter, err := parseTokenOwnerCandidateFilter(request)
+	if err != nil || filter.OrganizationID == nil || *filter.OrganizationID != organizationID {
+		t.Fatalf("filter=%+v err=%v", filter, err)
+	}
+	other := filter
+	other.OrganizationID = nil
+	if tokenOwnerCandidateFilterFingerprint(filter) == tokenOwnerCandidateFilterFingerprint(other) {
+		t.Fatal("organization scope must be bound into the signed scan cursor")
 	}
 }
 

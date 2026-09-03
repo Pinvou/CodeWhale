@@ -81,6 +81,7 @@ test('internal OpenAPI freezes a four-field no-email projection and stable error
   assert.deepEqual(operation.security, [{ serviceToken: [] }]);
   assert.deepEqual(Object.keys(openapi.components.schemas.TokenOwnerCandidate.properties).sort(), ['display_label', 'id', 'status', 'type']);
   assert.equal(openapi.components.schemas.TokenOwnerCandidate.additionalProperties, false);
+  assert.deepEqual(openapi.components.schemas.TokenOwnerCandidate.properties.status.enum, ['ACTIVE', 'DISABLED', 'PROVISIONING']);
   assert.doesNotMatch(JSON.stringify(openapi.components.schemas.TokenOwnerCandidate), /email|mobile|subject/i);
   for (const status of ['200', '400', '403', '410', '429']) assert.ok(operation.responses[status], status);
   const limit = operation.parameters.find((parameter) => parameter.name === 'limit');
@@ -113,6 +114,7 @@ test('real PostgreSQL gate covers migration idempotence, authorization, cursors,
   assert.match(integration, /seedTokenOwnerCandidateOrganizations\([\s\S]*1601/);
   assert.match(integration, /10\*time\.Second[\s\S]*logical scan attempts/);
   assert.match(integration, /fourth concurrent scan error/);
+  assert.match(integration, /assertTokenOwnerCandidateLifecycleWhitelist/);
   assert.match(integration, /activeServiceActors := make\(\[\]TokenOwnerCandidateActor, 0, 11\)[\s\S]*index < 10[\s\S]*eleventh service active scan error/);
   assert.match(integration, /ffffffff-ffff-ffff-ffff-ffffffffffff[\s\S]*clock_timestamp\(\)/);
 });

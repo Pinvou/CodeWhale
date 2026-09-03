@@ -2,10 +2,12 @@ package portal
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,17 +28,18 @@ import (
 )
 
 type Config struct {
-	PublicURL        *url.URL
-	AuthorizationURL *url.URL
-	TokenURL         *url.URL
-	ClientID         string
-	AccountURL       *url.URL
-	BillingURL       *url.URL
-	TokenGatewayURL  *url.URL
-	ClientVersion    string
-	SystemProbes     []SystemProbe
-	SecureCookies    bool
-	SessionMaxAge    time.Duration
+	PublicURL              *url.URL
+	AuthorizationURL       *url.URL
+	TokenURL               *url.URL
+	ClientID               string
+	AccountURL             *url.URL
+	BillingURL             *url.URL
+	TokenGatewayURL        *url.URL
+	ClientVersion          string
+	TokenAdminProxyHMACKey []byte
+	SystemProbes           []SystemProbe
+	SecureCookies          bool
+	SessionMaxAge          time.Duration
 }
 
 const defaultSessionMaxAge = 30 * 24 * time.Hour
@@ -128,6 +131,9 @@ func (s *Service) tokenAdminIngressDeadline(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The Portal is the first trusted application ingress. Discard both
 		// client-controlled transport headers before deriving one absolute chain.
+		// X-Pinvou-Client-Source is always Portal-owned; public clients can never
+		// supply the source identity used by Token's persistent rate limiter.
+		r.Header.Del("X-Pinvou-Client-Source")
 		r.Header.Del(requestdeadline.AbsoluteDeadlineHeader)
 		r.Header.Del(requestdeadline.DeadlineClassHeader)
 		const prefix = "/api/admin/token"
@@ -384,6 +390,11 @@ func writeTokenAdminDeadlineError(w http.ResponseWriter, r *http.Request, class 
 func (s *Service) applyClientCompatibilityHeaders(request *http.Request, source string) {
 	if source = strings.TrimSpace(source); source != "" {
 		request.Header.Set("X-Pinvou-Client-Source", source)
+		if len(s.config.TokenAdminProxyHMACKey) >= 32 {
+			mac := hmac.New(sha256.New, s.config.TokenAdminProxyHMACKey)
+			_, _ = mac.Write([]byte(request.Method + "\n" + request.URL.RequestURI() + "\n" + source))
+			request.Header.Set("X-Pinvou-Client-Source-Signature", hex.EncodeToString(mac.Sum(nil)))
+		}
 	}
 	if version := strings.TrimSpace(s.config.ClientVersion); version != "" {
 		request.Header.Set(clientcompat.ClientVersionHeader, version)
@@ -598,18 +609,28 @@ func safeProxyPathID(value string) bool {
 }
 
 func portalClientSource(r *http.Request) string {
-	if source := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(source) != nil {
-		return source
+	peerText := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(peerText); err == nil {
+		peerText = host
 	}
-	if forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ","); len(forwarded) > 0 {
-		if source := strings.TrimSpace(forwarded[0]); net.ParseIP(source) != nil {
-			return source
+	peer := net.ParseIP(peerText)
+	// Forwarding headers are transport assertions made by the configured
+	// private ingress, never by an Internet peer. This keeps forged public
+	// X-Real-IP/X-Forwarded-For values out of the rate-limit identity.
+	if peer != nil && (peer.IsLoopback() || peer.IsPrivate()) {
+		if source := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); source != nil {
+			return source.String()
+		}
+		if forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ","); len(forwarded) > 0 {
+			if source := net.ParseIP(strings.TrimSpace(forwarded[0])); source != nil {
+				return source.String()
+			}
 		}
 	}
-	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
-		return host
+	if peer != nil {
+		return peer.String()
 	}
-	return strings.TrimSpace(r.RemoteAddr)
+	return "untrusted"
 }
 
 func accountAdminPathAllowed(method, resource string) bool {
@@ -804,7 +825,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit") {
 		return true
 	}
 	if resource == "/admin/v1/token-accounts" && method == http.MethodPost {
@@ -828,6 +849,7 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	}
 	if parts[2] == "usage-requests" {
 		return (len(parts) == 4 && method == http.MethodGet) ||
+			(len(parts) == 5 && parts[4] == "evidence" && method == http.MethodGet) ||
 			(len(parts) == 5 && parts[4] == "retry-reconciliation" && method == http.MethodPost)
 	}
 	if parts[2] == "protocols" {

@@ -1423,10 +1423,25 @@ paths:
     get:
       operationId: listAdminTokenAccounts
       summary: List recently updated Token accounts without credential secrets
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      description: Stable PLATFORM-managed snapshot ordered by updated_at DESC, id ASC. Client sort parameters are rejected.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: owner_type, in: query, schema: { type: string, enum: [USER, ORG, ORG_UNIT] } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [ACTIVE, DISABLED, FROZEN] } }
+        - { name: health_status, in: query, schema: { type: string, enum: [HEALTHY, DEGRADED, UNHEALTHY, UNKNOWN] } }
+        - { name: credential_status, in: query, schema: { type: string, enum: [NONE, PENDING, VALID, INVALID, REVOKED] } }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/TokenAdminAccountCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
     post:
       operationId: createAdminTokenAccount
       summary: Create a PLATFORM-managed Token account for a personal, organization, or organization-unit scope
@@ -1509,10 +1524,27 @@ paths:
     get:
       operationId: listAdminUsageRequests
       summary: List recent model usage and settlement requests
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      description: Stable snapshot ordered by updated_at DESC, id ASC. q accepts only an exact request id or idempotency digest.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 255 } }
+        - { name: execution_status, in: query, schema: { type: string } }
+        - { name: settlement_status, in: query, schema: { type: string } }
+        - { name: model, in: query, schema: { type: string, maxLength: 255 } }
+        - { name: token_account_id, in: query, schema: { type: string, format: uuid } }
+        - { name: organization_id, in: query, schema: { type: string, format: uuid } }
+        - { name: started_from, in: query, schema: { type: string, format: date-time } }
+        - { name: started_to, in: query, schema: { type: string, format: date-time } }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/TokenAdminUsageCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests/{usage_request_id}:
     get:
       operationId: getAdminUsageRequest
@@ -1522,6 +1554,25 @@ paths:
         "200": { $ref: "#/components/responses/Overview" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/usage-requests/{usage_request_id}/evidence:
+    get:
+      operationId: listAdminUsageEvidence
+      summary: Page cancellation and convergence evidence without request content
+      description: Fixed order observed_at ASC, source_kind ASC, source_id ASC; source_kind plus source_id is the cross-table unique key.
+      parameters:
+        - { $ref: "#/components/parameters/UsageRequestID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: evidence_type, in: query, schema: { type: string, maxLength: 120 } }
+      responses:
+        "200": { $ref: "#/components/responses/TokenAdminUsageEvidenceCollection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation:
     post:
       operationId: retryAdminUsageReconciliation
@@ -1543,9 +1594,25 @@ paths:
     get:
       operationId: listAdminProtocolsAndFormulas
       summary: List versioned protocol definitions and safe formula versions
+      description: Stable protocol snapshot ordered by protocol_code ASC, version DESC, id ASC. The legacy aggregate remains while the pagination gate is disabled.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: status, in: query, schema: { type: string, enum: [DRAFT, PUBLISHED, DEPRECATED] } }
+        - { name: protocol_code, in: query, schema: { type: string, maxLength: 80 } }
+        - { name: published, in: query, schema: { type: boolean } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
       responses:
-        "200": { description: Protocol and formula versions }
+        "200": { $ref: "#/components/responses/TokenAdminProtocolCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
     post:
       operationId: createAdminProtocolDraft
       summary: Create a new protocol definition draft version
@@ -1576,6 +1643,30 @@ paths:
         "201": { description: Formula draft created }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/formulas:
+    get:
+      operationId: listAdminFormulaVersions
+      summary: Page formula versions independently of protocol rows
+      description: Fixed order protocol_code ASC, version DESC, id ASC; client sort parameters are rejected.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: status, in: query, schema: { type: string, enum: [DRAFT, PUBLISHED, DEPRECATED] } }
+        - { name: protocol_definition_id, in: query, schema: { type: string, format: uuid } }
+        - { name: metering_unit_code, in: query, schema: { type: string, maxLength: 80 } }
+        - { name: published, in: query, schema: { type: boolean } }
+        - { $ref: "#/components/parameters/CreatedFrom" }
+        - { $ref: "#/components/parameters/CreatedTo" }
+      responses:
+        "200": { $ref: "#/components/responses/TokenAdminFormulaCollection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/formulas/{formula_version_id}/publish:
     post:
       operationId: publishAdminFormula
@@ -1598,9 +1689,24 @@ paths:
     get:
       operationId: listAdminCatalogModels
       summary: List current catalog models, immutable tombstones, and editable drafts
+      description: Stable current-catalog snapshot ordered by normalized_name ASC, model_id ASC; client sort parameters are rejected.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: lifecycle_status, in: query, schema: { type: string, enum: [PUBLISHED, DEPRECATED, REMOVED] } }
+        - { name: protocol_code, in: query, schema: { type: string, maxLength: 80 } }
+        - { name: source_adapter, in: query, schema: { type: string, maxLength: 120 } }
+        - { name: source_missing, in: query, schema: { type: boolean } }
       responses:
-        "200": { description: Current model catalog and drafts, content: { application/json: { schema: { $ref: "#/components/schemas/AdminModelCatalog" } } } }
+        "200": { $ref: "#/components/responses/TokenAdminModelCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/models/{model_id}/draft:
     put:
       operationId: saveAdminModelDraft
@@ -1649,25 +1755,98 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/reconciliation-cases:
+    get:
+      operationId: listAdminTokenReconciliationCases
+      summary: Page Token usage and reconciliation manual-review cases
+      description: domain is fixed to TOKEN and ordering is updated_at DESC, id DESC.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: status, in: query, schema: { type: string, enum: [OPEN, RESOLVED, LONG_TERM_PLAN] } }
+        - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
+        - { name: case_type, in: query, schema: { type: string, maxLength: 120 } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { name: sla_overdue, in: query, schema: { type: boolean } }
+      responses:
+        "200": { $ref: "#/components/responses/TokenAdminReconciliationCollection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/owner-candidates:
+    get:
+      operationId: listAdminTokenOwnerCandidates
+      summary: Page the minimal authoritative owner projection for Token Account creation
+      description: Account is scanned by immutable type/id; the Token snapshot is ordered by NFKC and Unicode case-fold label, owner type, owner id.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: owner_type, in: query, schema: { type: string, enum: [USER, ORGANIZATION, UNIT] } }
+        - { name: status, in: query, schema: { type: string, enum: [ACTIVE, DISABLED, PROVISIONING] } }
+        - { name: organization_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/TokenAdminOwnerCandidateCollection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/resource-audit:
+    get:
+      operationId: listAdminTokenResourceAudit
+      summary: Page a single model or Token Account audit history
+      description: Requires platform.audit.read and the matching model or Token resource read permission. It is not an export endpoint.
+      parameters:
+        - { name: resource_type, in: query, required: true, schema: { type: string, enum: [MODEL, TOKEN_ACCOUNT] } }
+        - { name: resource_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: action, in: query, schema: { type: string, maxLength: 120 } }
+        - { name: actor_id, in: query, schema: { type: string, format: uuid } }
+        - { name: occurred_from, in: query, schema: { type: string, format: date-time } }
+        - { name: occurred_to, in: query, schema: { type: string, format: date-time } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200": { $ref: "#/components/responses/TokenAdminResourceAuditCollection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/provisionings:
     get:
       operationId: listAdminRouteProvisionings
       summary: List managed route provisioning state without credential secrets
       parameters:
         - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, schema: { type: string, maxLength: 160 } }
         - { name: status, in: query, schema: { type: string, enum: [PENDING, READY, FAILED, REPAIR_REQUIRED] } }
+        - { name: model_id, in: query, schema: { type: string, format: uuid } }
+        - { name: token_account_id, in: query, schema: { type: string, format: uuid } }
+        - { name: scope_type, in: query, schema: { type: string, enum: [PERSONAL, ORGANIZATION] } }
+        - { name: scope_id, in: query, schema: { type: string, format: uuid } }
+        - { name: sla_overdue, in: query, schema: { type: boolean } }
       responses:
-        "200":
-          description: Managed route provisioning state
-          content:
-            application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [items]
-                properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/RouteProvisioning" } }
+        "200": { $ref: "#/components/responses/TokenAdminProvisioningCollection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/provisionings/{provisioning_id}:
     get:
       operationId: getAdminRouteProvisioning
@@ -1850,7 +2029,7 @@ components:
     Cursor:
       name: cursor
       in: query
-      schema: { type: string, minLength: 1, maxLength: 512 }
+      schema: { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationCursor" }
     CreatedFrom:
       name: created_from
       in: query
@@ -2143,12 +2322,247 @@ components:
       properties:
         catalog_version: { type: integer, format: int64, minimum: 0 }
         items: { type: array, items: { $ref: "#/components/schemas/AdminCatalogModel" } }
-    AdminCatalogModel:
+    TokenAdminProtocol:
+      type: object
+      additionalProperties: false
+      required: [protocol_definition_id, protocol_code, version, status, request_schema, created_at]
+      properties:
+        protocol_definition_id: { type: string, format: uuid }
+        protocol_code: { type: string }
+        version: { type: integer, format: int64 }
+        status: { type: string, enum: [DRAFT, PUBLISHED, DEPRECATED] }
+        request_schema: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+    TokenAdminFormula:
+      type: object
+      additionalProperties: false
+      required: [formula_version_id, protocol_definition_id, protocol_code, version, status, required_unit_versions, expression, evaluator_version, created_at]
+      properties:
+        formula_version_id: { type: string, format: uuid }
+        protocol_definition_id: { type: string, format: uuid }
+        protocol_code: { type: string }
+        version: { type: integer, format: int64 }
+        status: { type: string, enum: [DRAFT, PUBLISHED, DEPRECATED] }
+        required_unit_versions: { type: object, additionalProperties: { type: string, format: uuid } }
+        expression: { type: object, additionalProperties: { type: string } }
+        evaluator_version: { type: string }
+        created_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+    TokenAdminAccountSummary:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, management_mode, active_credential_count, route_count, updated_at]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        owner_organization_id: { type: string, format: uuid }
+        owner_unit_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, FROZEN] }
+        share_scope: { type: string }
+        management_mode: { type: string, const: PLATFORM }
+        active_credential_count: { type: integer, format: int64, minimum: 0 }
+        route_count: { type: integer, format: int64, minimum: 0 }
+        updated_at: { type: string, format: date-time }
+    TokenAdminUsageSummary:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, token_account_id, model, execution_status, delivery_status, cancel_status, settlement_status, maximum_microcredits, reconciliation_attempts, started_at, updated_at]
+      properties:
+        usage_request_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        model: { type: string }
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64 }
+        execution_status: { type: string }
+        delivery_status: { type: string }
+        cancel_status: { type: string }
+        settlement_status: { type: string }
+        maximum_microcredits: { type: integer, format: int64 }
+        actual_microcredits: { type: integer, format: int64 }
+        error_class: { type: string }
+        reconciliation_attempts: { type: integer, minimum: 0 }
+        reconciliation_stopped_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    AdminUsageRequest:
+      description: Legacy gate-off usage-list projection. The paginated gate-on list deliberately uses TokenAdminUsageSummary instead.
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, user_id, session_id, token_account_id, credential_id, wallet_id, model, status, request_fingerprint, execution_status, delivery_status, cancel_status, settlement_status, maximum_microcredits, reconciliation_attempts, last_persisted_sequence, last_client_confirmed_sequence, cancellation_evidence, convergence_evidence, started_at, updated_at]
+      properties:
+        usage_request_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        session_id: { type: string }
+        organization_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        credential_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        price_version_id: { type: string, format: uuid }
+        hold_id: { type: string, format: uuid }
+        model: { type: string }
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64 }
+        model_capability_version_id: { type: string, format: uuid }
+        protocol_definition_id: { type: string, format: uuid }
+        route_generation: { type: integer, format: int64 }
+        status: { type: string }
+        request_fingerprint: { type: string }
+        execution_status: { type: string }
+        delivery_status: { type: string }
+        cancel_status: { type: string }
+        settlement_status: { type: string }
+        maximum_microcredits: { type: integer, format: int64 }
+        actual_microcredits: { type: integer, format: int64 }
+        error_class: { type: string }
+        provider_id: { type: string }
+        adapter_version: { type: string }
+        upstream_request_id: { type: string }
+        attempt_status: { type: string }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        cached_input_tokens: { type: integer, format: int64 }
+        reconciliation_attempts: { type: integer, minimum: 0 }
+        reconciliation_last_error: { type: string }
+        reconciliation_stopped_at: { type: string, format: date-time }
+        cancel_requested_at: { type: string, format: date-time }
+        provider_terminal_at: { type: string, format: date-time }
+        final_usage_observed_at: { type: string, format: date-time }
+        last_persisted_sequence: { type: integer, format: int64 }
+        last_client_confirmed_sequence: { type: integer, format: int64 }
+        cancellation_evidence: {}
+        convergence_evidence: {}
+        started_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TokenAdminReconciliationCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, case_type, resource_type, resource_id, severity, status, claim_due_at, first_response_due_at, mitigation_due_at, resolution_due_at, escalation_level, updated_at]
+      properties:
+        case_id: { type: string, format: uuid }
+        case_type: { type: string }
+        resource_type: { type: string }
+        resource_id: { type: string, format: uuid }
+        severity: { type: string }
+        status: { type: string }
+        owner_id: { type: string, format: uuid }
+        claim_due_at: { type: string, format: date-time }
+        first_response_due_at: { type: string, format: date-time }
+        mitigation_due_at: { type: string, format: date-time }
+        resolution_due_at: { type: string, format: date-time }
+        escalation_level: { type: integer, minimum: 0 }
+        updated_at: { type: string, format: date-time }
+    TokenAdminOwnerCandidate:
+      type: object
+      additionalProperties: false
+      required: [id, type, display_label, status]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [USER, ORGANIZATION, UNIT] }
+        display_label: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, PROVISIONING] }
+    TokenAdminResourceAudit:
+      type: object
+      additionalProperties: false
+      required: [audit_id, action, resource_type, resource_id, actor_id, summary, occurred_at]
+      properties:
+        audit_id: { type: string, format: uuid }
+        action: { type: string }
+        resource_type: { type: string, enum: [MODEL, TOKEN_ACCOUNT] }
+        resource_id: { type: string, format: uuid }
+        actor_id: { type: string, format: uuid }
+        summary: { type: object, description: Redacted audit summary without secrets or request payloads, additionalProperties: true }
+        occurred_at: { type: string, format: date-time }
+    TokenAdminUsageEvidence:
+      type: object
+      additionalProperties: false
+      required: [source_kind, source_id, evidence_type, evidence, observed_at]
+      properties:
+        source_kind: { type: string, enum: [CANCELLATION, CONVERGENCE] }
+        source_id: { type: string, format: uuid }
+        evidence_type: { type: string }
+        evidence: { type: object, description: "Sanitized evidence only; no credential, provider token, request content, or upstream secret", additionalProperties: true }
+        observed_at: { type: string, format: date-time }
+    TokenAdminModelPage:
       allOf:
-        - { $ref: "token-gateway.yaml#/components/schemas/CatalogModel" }
-        - type: object
-          properties:
-            draft: { $ref: "#/components/schemas/ModelDraft" }
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/AdminCatalogModel" } } } }
+    TokenAdminProtocolPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminProtocol" } } } }
+    TokenAdminFormulaPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminFormula" } } } }
+    TokenAdminAccountPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminAccountSummary" } } } }
+    TokenAdminProvisioningPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/RouteProvisioning" } } } }
+    TokenAdminUsagePage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminUsageSummary" } } } }
+    TokenAdminReconciliationPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminReconciliationCase" } } } }
+    TokenAdminOwnerCandidatePage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/TokenAdminOwnerCandidate" } }, limit: { type: integer, minimum: 1, maximum: 50 } } }
+    TokenAdminResourceAuditPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminResourceAudit" } } } }
+    TokenAdminUsageEvidencePage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminUsageEvidence" } } } }
+    TokenAdminProtocolAggregate:
+      type: object
+      additionalProperties: false
+      required: [protocols, formulas]
+      properties:
+        protocols: { type: array, items: { $ref: "#/components/schemas/TokenAdminProtocol" } }
+        formulas: { type: array, items: { $ref: "#/components/schemas/TokenAdminFormula" } }
+    AdminCatalogModel:
+      type: object
+      additionalProperties: false
+      required: [model_id, catalog_version, display_name, description, aliases, lifecycle_status, protocol_code, protocol_version, protocol_definition_id, model_capability_version_id, capability_version, context_length, maximum_output_tokens, supported_modalities, tokenizer_version, source_available, source_missing_confirmations, force_cancel_inflight]
+      properties:
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        display_name: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string }
+        aliases: { type: array, uniqueItems: true, items: { type: string } }
+        lifecycle_status: { type: string, enum: [PUBLISHED, DEPRECATED, REMOVED] }
+        protocol_code: { type: string }
+        protocol_version: { type: integer, format: int64, minimum: 1 }
+        protocol_definition_id: { type: string, format: uuid }
+        model_capability_version_id: { type: string, format: uuid }
+        capability_version: { type: integer, format: int64, minimum: 1 }
+        context_length: { type: integer, format: int64, minimum: 1 }
+        maximum_output_tokens: { type: integer, format: int64, minimum: 0 }
+        supported_modalities: { type: array, uniqueItems: true, items: { type: string } }
+        tokenizer_version: { type: string }
+        source_available: { type: boolean }
+        source_missing_since: { type: string, format: date-time }
+        source_missing_confirmations: { type: integer, minimum: 0 }
+        deprecation_effective_at: { type: string, format: date-time }
+        replacement_model_id: { type: string, format: uuid }
+        new_session_cutoff_at: { type: string, format: date-time }
+        continuation_cutoff_at: { type: string, format: date-time }
+        force_cancel_inflight: { type: boolean }
+        draft: { $ref: "#/components/schemas/ModelDraft" }
     ModelDraft:
       type: object
       additionalProperties: false
@@ -2218,6 +2632,7 @@ components:
         reason: { type: string, minLength: 1, maxLength: 500 }
     RouteProvisioning:
       type: object
+      additionalProperties: false
       required: [provisioning_id, scope_type, scope_id, model_id, protocol_code, desired_generation, status, stage, policy_version, attempt_count, repair_round, max_attempts, sla_deadline_at, updated_at]
       properties:
         provisioning_id: { type: string, format: uuid }
@@ -3283,6 +3698,78 @@ components:
                 items:
                   type: object
                   additionalProperties: true
+    TokenAdminFormulaCollection:
+      description: Stable formula snapshot page with a closed projection.
+      content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminFormulaPage" } } }
+    TokenAdminReconciliationCollection:
+      description: Stable reconciliation snapshot page with a closed projection.
+      content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminReconciliationPage" } } }
+    TokenAdminOwnerCandidateCollection:
+      description: Stable owner-candidate snapshot page; limit and items are capped at 50 and each item has exactly four fields.
+      content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminOwnerCandidatePage" } } }
+    TokenAdminResourceAuditCollection:
+      description: Stable redacted resource-audit snapshot page.
+      content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminResourceAuditPage" } } }
+    TokenAdminUsageEvidenceCollection:
+      description: Stable sanitized evidence snapshot page.
+      content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminUsageEvidencePage" } } }
+    TokenAdminAccountCollection:
+      description: Gate-compatible Token Account collection; both legacy and snapshot items use the same closed projection.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { type: object, additionalProperties: false, required: [items], properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminAccountSummary" } } } }
+              - { $ref: "#/components/schemas/TokenAdminAccountPage" }
+    TokenAdminProvisioningCollection:
+      description: Gate-compatible provisioning collection with closed items.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { type: object, additionalProperties: false, required: [items], properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/RouteProvisioning" } } } }
+              - { $ref: "#/components/schemas/TokenAdminProvisioningPage" }
+    TokenAdminUsageCollection:
+      description: Gate-compatible usage collection; gate-off preserves the historical full AdminUsageRequest while gate-on returns the minimal redacted list DTO.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { type: object, additionalProperties: false, required: [items], properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/AdminUsageRequest" } } } }
+              - { $ref: "#/components/schemas/TokenAdminUsagePage" }
+    TokenAdminProtocolCollection:
+      description: Gate-compatible protocol response with the existing aggregate while disabled and a stable protocol snapshot page while enabled.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { $ref: "#/components/schemas/TokenAdminProtocolAggregate" }
+              - { $ref: "#/components/schemas/TokenAdminProtocolPage" }
+    TokenAdminModelCollection:
+      description: "Gate-compatible model response: legacy catalog while disabled, stable snapshot page while enabled."
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - { $ref: "#/components/schemas/AdminModelCatalog" }
+              - { $ref: "#/components/schemas/TokenAdminModelPage" }
+    TokenAdminQueryLimited:
+      description: The query or snapshot-creation budget was exhausted.
+      headers:
+        Retry-After: { required: true, schema: { type: integer, minimum: 1, maximum: 60 } }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [code, message, request_id]
+            properties:
+              code:
+                allOf:
+                  - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationErrorCode" }
+                  - { type: string, enum: [RATE_LIMITED, PAGINATION_SNAPSHOT_LIMITED] }
+              message: { type: string }
+              request_id: { type: string }
     SnapshotCollection:
       description: A subject-, resource-, scope-, and filter-bound stable snapshot page. Resource state is read live while membership and order remain frozen for 15 minutes.
       content:

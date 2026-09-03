@@ -31,6 +31,10 @@ paths:
         - name: owner_type
           in: query
           schema: { type: string, enum: [USER, ORGANIZATION, UNIT] }
+        - name: organization_id
+          in: query
+          description: Optional authoritative organization scope; response remains the same four-field minimal projection.
+          schema: { type: string, format: uuid }
         - name: limit
           in: query
           schema: { type: integer, minimum: 1, maximum: 50000, default: 20000 }
@@ -1053,7 +1057,7 @@ components:
         id: { type: string, format: uuid }
         type: { type: string, enum: [USER, ORGANIZATION, UNIT] }
         display_label: { type: string, minLength: 1 }
-        status: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, PROVISIONING], description: "Only selectable lifecycle states are emitted; repair, closing, anonymization/deletion-pending and unknown states are excluded." }
     TokenOwnerCandidatePage:
       type: object
       additionalProperties: false

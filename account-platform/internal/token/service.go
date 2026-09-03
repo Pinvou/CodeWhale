@@ -58,6 +58,8 @@ type Service struct {
 	catalogSync            *CatalogSynchronizer
 	authorizer             *authorization.Client
 	clientReadiness        *ClientReadinessService
+	ownerCandidates        OwnerCandidateDirectory
+	adminProxyHMACKey      []byte
 	breaker                *resilience.Breaker
 	activeUpstreamCancels  sync.Map
 }
@@ -96,6 +98,16 @@ func (s *Service) WithCatalogSynchronizer(synchronizer *CatalogSynchronizer) *Se
 
 func (s *Service) WithClientReadiness(readiness *ClientReadinessService) *Service {
 	s.clientReadiness = readiness
+	return s
+}
+
+func (s *Service) WithOwnerCandidateDirectory(directory OwnerCandidateDirectory) *Service {
+	s.ownerCandidates = directory
+	return s
+}
+
+func (s *Service) WithAdminProxyHMACKey(key []byte) *Service {
+	s.adminProxyHMACKey = append([]byte(nil), key...)
 	return s
 }
 
@@ -162,8 +174,11 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", s.authorizer.Require("platform.tokens.credentials.validate"), approvalpolicy.Require("TOKEN_CREDENTIAL_VALIDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminValidateCredential))
 		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
 		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
+		admin.GET("/usage-requests/:usage_request_id/evidence", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageEvidence))
+		admin.GET("/reconciliation-cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("TOKEN_USAGE_RECONCILIATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryReconciliation))
 		admin.GET("/protocols", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminProtocols))
+		admin.GET("/formulas", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminFormulas))
 		admin.POST("/protocols", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateProtocol))
 		admin.POST("/protocols/:protocol_definition_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishProtocol))
 		admin.POST("/protocols/:protocol_definition_id/formulas", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateFormula))
@@ -177,6 +192,8 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_ROLLBACK", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRollbackCatalog))
 		admin.GET("/provisionings", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisionings))
 		admin.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioning))
+		admin.GET("/owner-candidates", s.authorizer.Require("platform.tokens.owner-candidates.read"), httpserver.AdaptFunc(s.adminOwnerCandidates))
+		admin.GET("/resource-audit", s.authorizer.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), httpserver.AdaptFunc(s.adminResourceAudit))
 		admin.POST("/provisionings/:provisioning_id/repair", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_PROVISIONING_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairProvisioning))
 	}
 	return router

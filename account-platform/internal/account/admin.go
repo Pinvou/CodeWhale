@@ -91,10 +91,11 @@ type tokenOwnerCandidateCursor struct {
 }
 
 type TokenOwnerCandidateFilter struct {
-	OwnerType string
-	Limit     int
-	Cursor    *tokenOwnerCandidateCursor
-	CursorErr error
+	OwnerType      string
+	OrganizationID *uuid.UUID
+	Limit          int
+	Cursor         *tokenOwnerCandidateCursor
+	CursorErr      error
 }
 
 type TokenOwnerCandidateActor struct {
@@ -254,7 +255,7 @@ func adminLimit(r *http.Request) int {
 func parseTokenOwnerCandidateFilter(r *http.Request) (TokenOwnerCandidateFilter, error) {
 	query := r.URL.Query()
 	for key := range query {
-		if !slices.Contains([]string{"actor_issuer", "actor_subject", "owner_type", "limit", "cursor"}, key) {
+		if !slices.Contains([]string{"actor_issuer", "actor_subject", "owner_type", "organization_id", "limit", "cursor"}, key) {
 			return TokenOwnerCandidateFilter{}, ErrInvalidTokenOwnerCandidateFilter
 		}
 	}
@@ -269,6 +270,13 @@ func parseTokenOwnerCandidateFilter(r *http.Request) (TokenOwnerCandidateFilter,
 	if filter.OwnerType != "" && filter.OwnerType != "USER" && filter.OwnerType != "ORGANIZATION" && filter.OwnerType != "UNIT" {
 		return TokenOwnerCandidateFilter{}, ErrInvalidTokenOwnerCandidateFilter
 	}
+	if raw := strings.TrimSpace(query.Get("organization_id")); raw != "" {
+		organizationID, err := uuid.Parse(raw)
+		if err != nil {
+			return TokenOwnerCandidateFilter{}, ErrInvalidTokenOwnerCandidateFilter
+		}
+		filter.OrganizationID = &organizationID
+	}
 	if rawLimit := strings.TrimSpace(query.Get("limit")); rawLimit != "" {
 		limit, err := strconv.Atoi(rawLimit)
 		if err != nil || limit < 1 || limit > 50000 {
@@ -280,7 +288,11 @@ func parseTokenOwnerCandidateFilter(r *http.Request) (TokenOwnerCandidateFilter,
 }
 
 func tokenOwnerCandidateFilterFingerprint(filter TokenOwnerCandidateFilter) string {
-	body := strings.Join([]string{filter.OwnerType, strconv.Itoa(filter.Limit)}, "\x00")
+	organizationID := ""
+	if filter.OrganizationID != nil {
+		organizationID = filter.OrganizationID.String()
+	}
+	body := strings.Join([]string{filter.OwnerType, organizationID, strconv.Itoa(filter.Limit)}, "\x00")
 	digest := sha256.Sum256([]byte(body))
 	return fmt.Sprintf("%x", digest[:])
 }

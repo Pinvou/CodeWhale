@@ -179,6 +179,9 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminTokenAccounts(w http.ResponseWriter, r *http.Request) {
+	if s.paginatedTokenAccounts(w, r) {
+		return
+	}
 	repository, ok := s.requireAdminRepository(w, r)
 	if !ok {
 		return
@@ -389,6 +392,9 @@ func (s *Service) adminValidateCredential(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Service) adminUsageRequests(w http.ResponseWriter, r *http.Request) {
+	if s.paginatedUsage(w, r) {
+		return
+	}
 	repository, ok := s.requireAdminRepository(w, r)
 	if !ok {
 		return

@@ -725,12 +725,12 @@ components:
         request_id: { type: string, minLength: 1 }
     AdminPaginationErrorCode:
       type: string
-      enum: [INVALID_LIMIT, INVALID_CURSOR, CURSOR_EXPIRED, PAGINATION_FILTER_REQUIRED, PAGINATION_SNAPSHOT_LIMITED, RATE_LIMITED, PAGINATION_SNAPSHOT_UNAVAILABLE, QUERY_TIMEOUT, PRECHECK_TIMEOUT, QUERY_CAPACITY_EXCEEDED]
+      enum: [INVALID_FILTER, INVALID_LIMIT, INVALID_CURSOR, CURSOR_EXPIRED, SNAPSHOT_RESOURCE_CHANGED, AUTHORIZATION_VERSION_INVALID, PAGINATION_FILTER_REQUIRED, PAGINATION_SNAPSHOT_LIMITED, RATE_LIMITED, PAGINATION_SNAPSHOT_UNAVAILABLE, QUERY_TIMEOUT, PRECHECK_TIMEOUT, QUERY_CAPACITY_EXCEEDED]
     AdminPaginationCursor:
       type: string
       minLength: 32
       maxLength: 4096
-      description: Signed opaque envelope bound to subject, authorization version, resource, normalized scope/filter, fixed sort, limit, database high-water mark and expiry.
+      description: Signed opaque envelope bound to subject, authorization version, resource, normalized scope/filter, fixed sort, limit, database high-water mark, expiry, and the preceding page's exact terminal member tuple.
     ClientCompatibility:
       type: object
       additionalProperties: false

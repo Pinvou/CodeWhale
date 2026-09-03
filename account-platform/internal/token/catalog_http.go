@@ -133,6 +133,9 @@ func waitForCatalogRoutes(ctx context.Context, operations provisioningOperations
 }
 
 func (s *Service) adminCatalogModels(w http.ResponseWriter, r *http.Request) {
+	if s.paginatedModels(w, r) {
+		return
+	}
 	repository, ok := s.catalogRepository(w, r)
 	if !ok {
 		return

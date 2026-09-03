@@ -28,6 +28,9 @@ func (s *Service) provisioningOperations(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Service) adminProvisionings(w http.ResponseWriter, r *http.Request) {
+	if s.paginatedProvisionings(w, r) {
+		return
+	}
 	operations, ok := s.provisioningOperations(w, r)
 	if !ok {
 		return
