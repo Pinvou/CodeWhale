@@ -2279,7 +2279,7 @@ paths:
     post:
       operationId: createGovernedTokenCommand
       summary: Create or recover one governed Token command result
-      description: Installed in APT-123 but returns TOKEN_COMMAND_GOVERNANCE_INACTIVE until the single APT-138 activation transition. Approval-required commands are never accepted here.
+      description: Installed in APT-123 but returns TOKEN_COMMAND_GOVERNANCE_INACTIVE until the single APT-138 activation transition. Approval-required commands are never accepted here. Provisioning repair and usage reconciliation commands synchronously enqueue only their bounded domain recovery work, persist a redacted terminal result, and never replay a model request.
       parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -2493,8 +2493,8 @@ components:
       additionalProperties: false
       required: [command_type, target_resource_type, target_resource_id, command]
       properties:
-        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC] }
-        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG] }
+        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG, PROVISIONING, USAGE_REQUEST] }
         target_resource_id: { type: string, minLength: 1, maxLength: 160 }
         command: { type: object, additionalProperties: true }
       allOf:
@@ -2562,13 +2562,31 @@ components:
               target_resource_type: { const: MODEL_CATALOG }
               target_resource_id: { const: CURRENT }
               command: { type: object, maxProperties: 0 }
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_PROVISIONING_REPAIR } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROVISIONING }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                allOf:
+                  - { $ref: "#/components/schemas/TokenRuntimeGovernedCommand" }
+                  - { $ref: "#/components/schemas/TokenProvisioningRepairCommand" }
+        - if: { properties: { command_type: { const: TOKEN_USAGE_RECONCILIATION_RETRY } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: USAGE_REQUEST }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                allOf:
+                  - { $ref: "#/components/schemas/TokenRuntimeGovernedCommand" }
+                  - { $ref: "#/components/schemas/TokenUsageReconciliationRetryCommand" }
     TokenCommandPrecheck:
       allOf:
         - { $ref: "#/components/schemas/TokenImpactPrecheck" }
         - type: object
           required: [expected_versions]
           properties:
-            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC] }
+            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
             expected_versions: { type: object }
         - if: { properties: { action: { const: TOKEN_PROTOCOL_DRAFT_CREATE } }, required: [action] }
           then:
@@ -2651,6 +2669,81 @@ components:
                   expected_catalog_version: { type: integer, format: int64, minimum: 0 }
                   adapter_observed_version: { type: string, minLength: 1, maxLength: 160 }
                   catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { action: { const: TOKEN_ROUTE_PROVISIONING_REPAIR } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: PROVISIONING }
+              expected_versions: { $ref: "#/components/schemas/TokenProvisioningRepairExpectedVersions" }
+        - if: { properties: { action: { const: TOKEN_USAGE_RECONCILIATION_RETRY } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: USAGE_REQUEST }
+              expected_versions: { $ref: "#/components/schemas/TokenUsageReconciliationExpectedVersions" }
+    TokenProvisioningRepairCommand:
+      type: object
+      additionalProperties: false
+      required: [provisioning_id, expected_provisioning_version, target_generation, replay_model_request]
+      properties:
+        provisioning_id: { type: string, format: uuid }
+        expected_provisioning_version: { type: string, format: date-time }
+        target_generation: { type: integer, format: int64, minimum: 1 }
+        replay_model_request: { type: boolean, const: false }
+    TokenUsageReconciliationRetryCommand:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, expected_usage_version, evidence_high_watermark, replay_model_request]
+      properties:
+        usage_request_id: { type: string, format: uuid }
+        expected_usage_version: { type: string, format: date-time }
+        evidence_high_watermark: { type: integer, format: int64, minimum: 0 }
+        replay_model_request: { type: boolean, const: false }
+    TokenRuntimeGovernedCommand:
+      oneOf:
+        - { $ref: "#/components/schemas/TokenProvisioningRepairCommand" }
+        - { $ref: "#/components/schemas/TokenUsageReconciliationRetryCommand" }
+    TokenProvisioningRepairExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [provisioning_id, expected_provisioning_version, target_generation]
+      properties:
+        provisioning_id: { type: string, format: uuid }
+        expected_provisioning_version: { type: string, format: date-time }
+        target_generation: { type: integer, format: int64, minimum: 1 }
+    TokenUsageReconciliationExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, expected_usage_version, evidence_high_watermark]
+      properties:
+        usage_request_id: { type: string, format: uuid }
+        expected_usage_version: { type: string, format: date-time }
+        evidence_high_watermark: { type: integer, format: int64, minimum: 0 }
+    TokenProvisioningRepairGovernedResult:
+      type: object
+      additionalProperties: false
+      required: [provisioning_id, status, repair_round, target_generation, replay_model_request]
+      properties:
+        provisioning_id: { type: string, format: uuid }
+        status: { type: string, enum: [FAILED, REPAIR_REQUIRED, PENDING] }
+        repair_round: { type: integer, minimum: 0 }
+        target_generation: { type: integer, format: int64, minimum: 1 }
+        replay_model_request: { type: boolean, const: false }
+    TokenUsageReconciliationGovernedResult:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, status, evidence_high_watermark, replay_model_request]
+      properties:
+        usage_request_id: { type: string, format: uuid }
+        status: { type: string, enum: [SETTLEMENT_PENDING, REVIEW, QUEUED] }
+        evidence_high_watermark: { type: integer, format: int64, minimum: 0 }
+        replay_model_request: { type: boolean, const: false }
+    TokenRuntimeGovernedResult:
+      oneOf:
+        - { $ref: "#/components/schemas/TokenProvisioningRepairGovernedResult" }
+        - { $ref: "#/components/schemas/TokenUsageReconciliationGovernedResult" }
     TokenCommandEnvelope:
       type: object
       additionalProperties: false
@@ -2665,6 +2758,45 @@ components:
         expected_versions: { type: object, additionalProperties: true }
         precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         command: { type: object, additionalProperties: true, description: "Command-specific normalized input. Secret, ciphertext, key identifiers, provider URLs, force, and ignore_blocker fields are forbidden." }
+      allOf:
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_PROVISIONING_REPAIR } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROVISIONING }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                allOf:
+                  - { $ref: "#/components/schemas/TokenRuntimeGovernedCommand" }
+                  - { $ref: "#/components/schemas/TokenProvisioningRepairCommand" }
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [provisioning_id, expected_provisioning_version, target_generation, precheck_fingerprint, request_fingerprint]
+                properties:
+                  provisioning_id: { type: string, format: uuid }
+                  expected_provisioning_version: { type: string, format: date-time }
+                  target_generation: { type: integer, format: int64, minimum: 1 }
+                  precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { command_type: { const: TOKEN_USAGE_RECONCILIATION_RETRY } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: USAGE_REQUEST }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                allOf:
+                  - { $ref: "#/components/schemas/TokenRuntimeGovernedCommand" }
+                  - { $ref: "#/components/schemas/TokenUsageReconciliationRetryCommand" }
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [usage_request_id, expected_usage_version, evidence_high_watermark, precheck_fingerprint, request_fingerprint]
+                properties:
+                  usage_request_id: { type: string, format: uuid }
+                  expected_usage_version: { type: string, format: date-time }
+                  evidence_high_watermark: { type: integer, format: int64, minimum: 0 }
+                  precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
     TokenCommandResult:
       type: object
       additionalProperties: false
@@ -2686,6 +2818,28 @@ components:
         audit_request_id: { type: string }
         created_at: { type: string, format: date-time }
         completed_at: { type: string, format: date-time }
+      allOf:
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_PROVISIONING_REPAIR } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROVISIONING }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenProvisioningRepairGovernedResult" }
+        - if: { properties: { command_type: { const: TOKEN_USAGE_RECONCILIATION_RETRY } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: USAGE_REQUEST }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenUsageReconciliationGovernedResult" }
+        - if:
+            properties:
+              command_type: { enum: [TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+              status: { const: SUCCEEDED }
+            required: [command_type, status]
+          then:
+            required: [redacted_result]
+            properties:
+              redacted_result: { $ref: "#/components/schemas/TokenRuntimeGovernedResult" }
     TokenImpactPrecheck:
       type: object
       additionalProperties: false
@@ -2698,7 +2852,7 @@ components:
           additionalProperties: false
           required: [resource_type, resource_id, current_status, current_version, dependencies]
           properties:
-            resource_type: { type: string, enum: [MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, TOKEN_ROUTE, PROVIDER_CREDENTIAL, PROTOCOL, FORMULA] }
+            resource_type: { type: string, enum: [MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, TOKEN_ROUTE, PROVIDER_CREDENTIAL, PROTOCOL, FORMULA, PROVISIONING, USAGE_REQUEST] }
             resource_id: { type: string, minLength: 1, maxLength: 400 }
             current_status: { type: string, minLength: 1, maxLength: 80 }
             current_version:

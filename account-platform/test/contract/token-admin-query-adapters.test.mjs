@@ -249,6 +249,80 @@ test('impact precheck freezes exact coverage tuples and separate credential cand
   assert.match(source, /appendImpactKeyRowsIterator\(ctx, digest, rows\)/);
 });
 
+test('governed command precheck actual projections validate and reject extra fields', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const validate = schemaValidator(contract, 'TokenCommandPrecheck');
+  const actual = {
+    action: 'TOKEN_ROUTE_PROVISIONING_REPAIR',
+    evidence: {
+      resource_type: 'PROVISIONING', resource_id: '11111111-1111-4111-8111-111111111111', current_status: 'FAILED',
+      current_version: { evidence_etag: `"impact-${'a'.repeat(64)}"`, evidence_set_sha256: 'b'.repeat(64) },
+      dependencies: { routes: 0, healthy_routes: 0, provisionings: 0, ready_provisionings: 0, active_leases: 0, inflight_requests: 0, active_sessions: 0, alternative_credentials: 0, alternative_accounts: 0, affected_coverage_tuples: 0, remaining_ready_coverage: 0, coverage_gaps: 0 },
+    },
+    blockers: [], token_observed_at: '2026-09-04T12:00:00Z', snapshot_semantics: 'INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS',
+    precheck_fingerprint: 'c'.repeat(64), requires_cas_revalidation: true,
+    expected_versions: { provisioning_id: '11111111-1111-4111-8111-111111111111', expected_provisioning_version: '2026-09-04T12:00:00Z', target_generation: 2 },
+  };
+  assert.equal(validate(actual), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...actual, worker_id: 'must-not-pass' }), false);
+  assert.equal(validate({ ...actual, evidence: { ...actual.evidence, error_detail: 'must-not-pass' } }), false);
+  const usage = {
+    ...actual,
+    action: 'TOKEN_USAGE_RECONCILIATION_RETRY',
+    evidence: { ...actual.evidence, resource_type: 'USAGE_REQUEST', current_status: 'REVIEW' },
+    expected_versions: { usage_request_id: actual.evidence.resource_id, expected_usage_version: '2026-09-04T12:00:00Z', evidence_high_watermark: 9 },
+  };
+  assert.equal(validate(usage), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...usage, expected_versions: { ...usage.expected_versions, replay_model_request: false } }), false);
+});
+
+test('runtime governed command targets and results are closed and forbid model replay', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const validatePrecheck = schemaValidator(contract, 'TokenCommandPrecheckRequest');
+  const validateEnvelope = schemaValidator(contract, 'TokenCommandEnvelope');
+  const validateResult = schemaValidator(contract, 'TokenRuntimeGovernedResult');
+  const validateCommandResult = schemaValidator(contract, 'TokenCommandResult');
+  const id = '11111111-1111-4111-8111-111111111111';
+  const version = '2026-09-04T12:00:00Z';
+  const provisioningCommand = { provisioning_id: id, expected_provisioning_version: version, target_generation: 3, replay_model_request: false };
+  const usageCommand = { usage_request_id: id, expected_usage_version: version, evidence_high_watermark: 9, replay_model_request: false };
+  const provisioningPrecheck = { command_type: 'TOKEN_ROUTE_PROVISIONING_REPAIR', target_resource_type: 'PROVISIONING', target_resource_id: id, command: provisioningCommand };
+  const usagePrecheck = { command_type: 'TOKEN_USAGE_RECONCILIATION_RETRY', target_resource_type: 'USAGE_REQUEST', target_resource_id: id, command: usageCommand };
+  assert.equal(validatePrecheck(provisioningPrecheck), true, JSON.stringify(validatePrecheck.errors));
+  assert.equal(validatePrecheck(usagePrecheck), true, JSON.stringify(validatePrecheck.errors));
+  for (const invalid of [
+    { ...provisioningPrecheck, command: { ...provisioningCommand, replay_model_request: true } },
+    { ...provisioningPrecheck, command: { ...provisioningCommand, replay_model_request: undefined } },
+    { ...provisioningPrecheck, command: { ...provisioningCommand, worker_id: 'must-not-pass' } },
+    { ...provisioningPrecheck, command: usageCommand },
+    { ...usagePrecheck, command: { ...usageCommand, replay_model_request: 'false' } },
+  ]) assert.equal(validatePrecheck(invalid), false, JSON.stringify(invalid));
+  const envelope = {
+    ...provisioningPrecheck,
+    reason: 'repair only the frozen provisioning generation',
+    expected_versions: { provisioning_id: id, expected_provisioning_version: version, target_generation: 3, precheck_fingerprint: 'a'.repeat(64), request_fingerprint: 'b'.repeat(64) },
+    precheck_fingerprint: 'a'.repeat(64),
+  };
+  assert.equal(validateEnvelope(envelope), true, JSON.stringify(validateEnvelope.errors));
+  assert.equal(validateEnvelope({ ...envelope, expected_versions: { ...envelope.expected_versions, worker_id: 'must-not-pass' } }), false);
+  assert.equal(validateResult({ provisioning_id: id, status: 'PENDING', repair_round: 2, target_generation: 3, replay_model_request: false }), true, JSON.stringify(validateResult.errors));
+  assert.equal(validateResult({ usage_request_id: id, status: 'QUEUED', evidence_high_watermark: 9, replay_model_request: false }), true, JSON.stringify(validateResult.errors));
+  assert.equal(validateResult({ usage_request_id: id, status: 'QUEUED', evidence_high_watermark: 9, replay_model_request: false, raw_error: 'must-not-pass' }), false);
+  const commandResult = {
+    command_reference: '22222222-2222-4222-8222-222222222222', command_type: 'TOKEN_ROUTE_PROVISIONING_REPAIR', policy_version: 2,
+    actor_user_id: '33333333-3333-4333-8333-333333333333', actor_permission: 'platform.tokens.manage', authorization_version: 9,
+    idempotency_fingerprint: 'd'.repeat(64), target_resource_type: 'PROVISIONING', target_resource_id: id, status: 'SUCCEEDED',
+    redacted_result: { provisioning_id: id, status: 'PENDING', repair_round: 2, target_generation: 3, replay_model_request: false },
+    audit_request_id: 'request-runtime-1', created_at: version, completed_at: version,
+  };
+  assert.equal(validateCommandResult(commandResult), true, JSON.stringify(validateCommandResult.errors));
+  assert.equal(validateCommandResult({ ...commandResult, redacted_result: { ...commandResult.redacted_result, error_detail: 'must-not-pass' } }), false);
+  assert.equal(validateCommandResult({ ...commandResult, redacted_result: { usage_request_id: id, status: 'QUEUED', evidence_high_watermark: 9, replay_model_request: false } }), false);
+  const { redacted_result: _missingResult, ...missingResult } = commandResult;
+  assert.equal(validateCommandResult(missingResult), false);
+  assert.equal(validateCommandResult({ ...commandResult, target_resource_type: 'USAGE_REQUEST' }), false);
+});
+
 test('query adapters freeze authoritative total orders and isolated resource names', async () => {
   const [queries, handlers, service] = await Promise.all([read('internal/token/admin_queries.go'), read('internal/token/admin_queries_http.go'), read('internal/token/service.go')]);
   for (const order of [

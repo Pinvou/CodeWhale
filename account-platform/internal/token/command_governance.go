@@ -269,6 +269,9 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 	if !ok || policyErr != nil || policy.Mode == approvalpolicy.ApprovalRequired != spec.Approval || utf8.RuneCountInString(envelope.Reason) < 10 || utf8.RuneCountInString(envelope.Reason) > 2000 || len(key) < 16 || len(key) > maximumKeyLength || envelope.TargetResourceType == "" || envelope.TargetResourceID == "" || strings.Contains(strings.ToLower(string(envelope.Command)), "ignore_blocker") || strings.Contains(strings.ToLower(string(envelope.Command)), `"force"`) {
 		return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 	}
+	if expectedType, governed := directCommandPrecheckTypes[envelope.CommandType]; governed && (envelope.TargetResourceType != expectedType || validateOwnedCommandPrecheckTarget(envelope.CommandType, envelope.TargetResourceID, envelope.Command) != nil) {
+		return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+	}
 	var facts map[string]any
 	if json.Unmarshal(envelope.ExpectedVersions, &facts) != nil || containsSensitiveCommandField(envelope.ExpectedVersions) || containsSensitiveCommandField(envelope.Command) {
 		return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
@@ -433,6 +436,41 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
+	canonicalEnvelope, requestDigest, keyDigest, idempotencyFingerprint, canonicalErr := normalizeTokenCommand(envelope, r.Header.Get("Idempotency-Key"), "")
+	if canonicalErr != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	envelope = canonicalEnvelope
+	repository, repositoryOK := s.repository.(*PostgresRepository)
+	if !repositoryOK {
+		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	begin := tokenCommandBegin{Envelope: envelope, ActorUserID: actor, ActorPermission: strings.Join(spec.Permissions, "+"), AuthorizationVersion: authorizationVersion, IdempotencyKey: r.Header.Get("Idempotency-Key"), AuditRequestID: httpserver.RequestID(r.Context())}
+	if isRuntimeGovernedCommand(envelope.CommandType) {
+		item, _, runtimeErr := repository.ExecuteRuntimeTokenCommand(r.Context(), runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
+		if errors.Is(runtimeErr, ErrTokenCommandResultMismatch) {
+			api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(runtimeErr, ErrTokenCommandInvalid) {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(runtimeErr, ErrCatalogVersionConflict) || errors.Is(runtimeErr, ErrProtocolFormulaPrecheck) || errors.Is(runtimeErr, ErrNotFound) || errors.Is(runtimeErr, ErrForbidden) {
+			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
+			return
+		}
+		if runtimeErr != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "query the same command reference before retrying", httpserver.RequestID(r.Context()))
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusOK, item)
+		return
+	}
+	var authoritativeBefore json.RawMessage
 	if _, requiresAuthoritativePrecheck := directCommandPrecheckTypes[strings.ToUpper(strings.TrimSpace(envelope.CommandType))]; requiresAuthoritativePrecheck {
 		precheck, precheckErr := s.buildTokenCommandPrecheck(r.Context(), TokenCommandPrecheckRequest{
 			CommandType: envelope.CommandType, TargetResourceType: envelope.TargetResourceType,
@@ -443,6 +481,10 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 				api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
 				return
 			}
+			if errors.Is(precheckErr, ErrCatalogVersionConflict) || errors.Is(precheckErr, ErrProtocolFormulaPrecheck) || errors.Is(precheckErr, ErrNotFound) {
+				api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
+				return
+			}
 			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_PRECHECK_UNAVAILABLE", "the governed command precheck could not be revalidated", httpserver.RequestID(r.Context()))
 			return
 		}
@@ -450,13 +492,10 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
 			return
 		}
+		authoritativeBefore = precheck.ExpectedVersions
 	}
-	repository, ok := s.repository.(*PostgresRepository)
-	if !ok {
-		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
-		return
-	}
-	item, created, err := repository.BeginTokenCommand(r.Context(), tokenCommandBegin{Envelope: envelope, ActorUserID: actor, ActorPermission: strings.Join(spec.Permissions, "+"), AuthorizationVersion: authorizationVersion, IdempotencyKey: r.Header.Get("Idempotency-Key"), AuditRequestID: httpserver.RequestID(r.Context())})
+	begin.BeforeState = authoritativeBefore
+	item, created, err := repository.BeginTokenCommand(r.Context(), begin)
 	if errors.Is(err, ErrTokenCommandResultMismatch) {
 		api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
 		return
@@ -475,6 +514,10 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Retry-After", "2")
 	api.WriteJSON(w, status, item)
+}
+
+func isRuntimeGovernedCommand(commandType string) bool {
+	return commandType == "TOKEN_ROUTE_PROVISIONING_REPAIR" || commandType == "TOKEN_USAGE_RECONCILIATION_RETRY"
 }
 
 func (s *Service) adminTokenCommandResult(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -43,6 +44,13 @@ type commandPrecheckSnapshot struct {
 	Blockers         []string
 }
 
+type runtimeGovernedCommand struct {
+	ResourceID            uuid.UUID
+	ExpectedVersion       time.Time
+	TargetGeneration      int64
+	EvidenceHighWatermark int64
+}
+
 var directCommandPrecheckTypes = map[string]string{
 	"TOKEN_PROTOCOL_DRAFT_CREATE":      "PROTOCOL",
 	"TOKEN_PROTOCOL_PUBLISH":           "PROTOCOL",
@@ -50,6 +58,8 @@ var directCommandPrecheckTypes = map[string]string{
 	"TOKEN_FORMULA_PUBLISH":            "FORMULA",
 	"TOKEN_MODEL_PUBLISH":              "MODEL",
 	"TOKEN_MODEL_CATALOG_SYNC":         "MODEL_CATALOG",
+	"TOKEN_ROUTE_PROVISIONING_REPAIR":  "PROVISIONING",
+	"TOKEN_USAGE_RECONCILIATION_RETRY": "USAGE_REQUEST",
 }
 
 func (s *Service) adminTokenCommandPrecheck(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +251,9 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 		if decodeCommand(raw, &command) != nil {
 			return ErrTokenCommandInvalid
 		}
+	case "TOKEN_ROUTE_PROVISIONING_REPAIR", "TOKEN_USAGE_RECONCILIATION_RETRY":
+		_, err := parseRuntimeGovernedCommand(commandType, "", raw)
+		return err
 	default:
 		return ErrTokenCommandInvalid
 	}
@@ -251,7 +264,12 @@ func validateOwnedCommandPrecheckTarget(commandType, targetID string, raw json.R
 	if err := validateOwnedCommandPrecheck(commandType, raw); err != nil {
 		return err
 	}
-	if strings.ToUpper(strings.TrimSpace(commandType)) != "TOKEN_MODEL_PUBLISH" {
+	commandType = strings.ToUpper(strings.TrimSpace(commandType))
+	if commandType == "TOKEN_ROUTE_PROVISIONING_REPAIR" || commandType == "TOKEN_USAGE_RECONCILIATION_RETRY" {
+		_, err := parseRuntimeGovernedCommand(commandType, targetID, raw)
+		return err
+	}
+	if commandType != "TOKEN_MODEL_PUBLISH" {
 		return nil
 	}
 	var command struct {
@@ -262,6 +280,52 @@ func validateOwnedCommandPrecheckTarget(commandType, targetID string, raw json.R
 		return ErrTokenCommandInvalid
 	}
 	return nil
+}
+
+// parseRuntimeGovernedCommand is the only parser used by runtime precheck,
+// command persistence and the domain mutation adapter. In particular the
+// boolean is a pointer so an omitted replay_model_request cannot be confused
+// with the only permitted value, false.
+func parseRuntimeGovernedCommand(commandType, targetID string, raw json.RawMessage) (runtimeGovernedCommand, error) {
+	var result runtimeGovernedCommand
+	canonicalTarget := strings.TrimSpace(targetID)
+	switch strings.ToUpper(strings.TrimSpace(commandType)) {
+	case "TOKEN_ROUTE_PROVISIONING_REPAIR":
+		var command struct {
+			ProvisioningID              string `json:"provisioning_id"`
+			ExpectedProvisioningVersion string `json:"expected_provisioning_version"`
+			TargetGeneration            int64  `json:"target_generation"`
+			ReplayModelRequest          *bool  `json:"replay_model_request"`
+		}
+		if decodeCommand(raw, &command) != nil || command.ReplayModelRequest == nil || *command.ReplayModelRequest || command.TargetGeneration < 1 {
+			return runtimeGovernedCommand{}, ErrTokenCommandInvalid
+		}
+		id, err := uuid.Parse(command.ProvisioningID)
+		version, versionErr := time.Parse(time.RFC3339Nano, command.ExpectedProvisioningVersion)
+		if err != nil || id == uuid.Nil || command.ProvisioningID != id.String() || versionErr != nil || command.ExpectedProvisioningVersion != version.UTC().Format(time.RFC3339Nano) || canonicalTarget != "" && canonicalTarget != id.String() {
+			return runtimeGovernedCommand{}, ErrTokenCommandInvalid
+		}
+		result = runtimeGovernedCommand{ResourceID: id, ExpectedVersion: version.UTC(), TargetGeneration: command.TargetGeneration}
+	case "TOKEN_USAGE_RECONCILIATION_RETRY":
+		var command struct {
+			UsageRequestID        string `json:"usage_request_id"`
+			ExpectedUsageVersion  string `json:"expected_usage_version"`
+			EvidenceHighWatermark int64  `json:"evidence_high_watermark"`
+			ReplayModelRequest    *bool  `json:"replay_model_request"`
+		}
+		if decodeCommand(raw, &command) != nil || command.ReplayModelRequest == nil || *command.ReplayModelRequest || command.EvidenceHighWatermark < 0 {
+			return runtimeGovernedCommand{}, ErrTokenCommandInvalid
+		}
+		id, err := uuid.Parse(command.UsageRequestID)
+		version, versionErr := time.Parse(time.RFC3339Nano, command.ExpectedUsageVersion)
+		if err != nil || id == uuid.Nil || command.UsageRequestID != id.String() || versionErr != nil || command.ExpectedUsageVersion != version.UTC().Format(time.RFC3339Nano) || canonicalTarget != "" && canonicalTarget != id.String() {
+			return runtimeGovernedCommand{}, ErrTokenCommandInvalid
+		}
+		result = runtimeGovernedCommand{ResourceID: id, ExpectedVersion: version.UTC(), EvidenceHighWatermark: command.EvidenceHighWatermark}
+	default:
+		return runtimeGovernedCommand{}, ErrTokenCommandInvalid
+	}
+	return result, nil
 }
 
 func validImpactETag(value string) bool {
@@ -389,7 +453,17 @@ func catalogDraftFingerprint(draft CatalogDraft) string {
 func decodeCommand(raw json.RawMessage, target any) error {
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return ErrTokenCommandInvalid
+		}
+		return err
+	}
+	return nil
 }
 
 func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, targetID string, raw json.RawMessage) (commandPrecheckSnapshot, error) {
@@ -619,6 +693,59 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 			"provisioning_set_fingerprint=" + provisioningSetFingerprint,
 		}, unitCodes...)
 		return commandPrecheckSnapshot{Status: "DRAFT", ExpectedVersions: expectedVersions, EvidenceValues: evidenceValues, PriceDimensions: dimensions, Blockers: blockers}, nil
+	case "TOKEN_ROUTE_PROVISIONING_REPAIR":
+		command, err := parseRuntimeGovernedCommand(commandType, targetID, raw)
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		var status string
+		var desiredGeneration int64
+		var repairRound int
+		var updatedAt time.Time
+		err = tx.QueryRow(ctx, `SELECT status,desired_generation,repair_round,updated_at FROM route_provisionings WHERE id=$1`, command.ResourceID).Scan(&status, &desiredGeneration, &repairRound, &updatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		}
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		if !updatedAt.Equal(command.ExpectedVersion) || desiredGeneration != command.TargetGeneration {
+			return commandPrecheckSnapshot{}, ErrCatalogVersionConflict
+		}
+		blockers := []string{}
+		if status != "FAILED" && status != "REPAIR_REQUIRED" {
+			blockers = append(blockers, "PROVISIONING_NOT_REPAIRABLE")
+		}
+		version := updatedAt.UTC().Format(time.RFC3339Nano)
+		return commandPrecheckSnapshot{Status: status, ExpectedVersions: map[string]any{"provisioning_id": command.ResourceID, "expected_provisioning_version": version, "target_generation": desiredGeneration}, EvidenceValues: []string{status, version, strconv.FormatInt(desiredGeneration, 10), strconv.Itoa(repairRound)}, Blockers: blockers}, nil
+	case "TOKEN_USAGE_RECONCILIATION_RETRY":
+		command, err := parseRuntimeGovernedCommand(commandType, targetID, raw)
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		var status string
+		var highWater int64
+		var updatedAt time.Time
+		var debitProhibited bool
+		err = tx.QueryRow(ctx, `SELECT u.status,u.last_persisted_sequence,u.updated_at,EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=u.id AND loss.customer_debit_prohibited) FROM usage_requests u WHERE u.id=$1`, command.ResourceID).Scan(&status, &highWater, &updatedAt, &debitProhibited)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		}
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		if !updatedAt.Equal(command.ExpectedVersion) || highWater != command.EvidenceHighWatermark {
+			return commandPrecheckSnapshot{}, ErrCatalogVersionConflict
+		}
+		blockers := []string{}
+		if status != "SETTLEMENT_PENDING" && status != "REVIEW" {
+			blockers = append(blockers, "USAGE_NOT_RECONCILABLE")
+		}
+		if debitProhibited {
+			blockers = append(blockers, "CUSTOMER_DEBIT_PROHIBITED")
+		}
+		version := updatedAt.UTC().Format(time.RFC3339Nano)
+		return commandPrecheckSnapshot{Status: status, ExpectedVersions: map[string]any{"usage_request_id": command.ResourceID, "expected_usage_version": version, "evidence_high_watermark": highWater}, EvidenceValues: []string{status, version, strconv.FormatInt(highWater, 10), strconv.FormatBool(debitProhibited)}, Blockers: blockers}, nil
 	default:
 		return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
 	}
