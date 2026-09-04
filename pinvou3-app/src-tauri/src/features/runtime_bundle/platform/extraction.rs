@@ -169,6 +169,12 @@ impl Pinvou3Bundle {
         crate::platform::startup::mark("bundle_extract:write_builtin_skills:start");
         self.write_builtin_skills()?;
         crate::platform::startup::mark("bundle_extract:write_builtin_skills:done");
+        // IT 内部 CLI 连接器(eip/zhidao)的包装脚本 + 平台二进制,连接与模型
+        // shell 都按旧契约读 bundle/skills/{eip,zhidao}/bin(见 lib.rs PATH 前插、
+        // connectors/platform/linux.rs bin_path),每启动防御性重写。
+        crate::platform::startup::mark("bundle_extract:write_connector_cli_bins:start");
+        self.write_connector_cli_bins()?;
+        crate::platform::startup::mark("bundle_extract:write_connector_cli_bins:done");
         // 首启一次性导入旧布局安装态到 BundleStore（marketplace-unification §9）。
         // 位置：cleanups 之后（退役目录不导入）、技能迁移与 gates 之前（迁移按 import
         // 的登记反推归属；gates 会把 CLI companion 技能解包到新布局，见下）；manifest
@@ -214,8 +220,10 @@ impl Pinvou3Bundle {
         // 自愈对账：认领错位归位/去重、孤儿副本、瘫记录、内置释放目录残旧收敛。
         // 名称无关（按归属证明判定，各发行版构建自动适配），排在布局迁移之后
         // （旧扁平目录已搬完）、gates 之前（CLI 静态所有目录不受影响）。
+        // 豁免集必须含 write_connector_cli_bins 的 eip/zhidao——本函数上方刚写出
+        // 的 bin 目录若不在集内,会被这里的收敛步骤当残旧目录删掉（回归过一次）。
         let heal = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
-            .self_heal_skills(Self::BUILTIN_RELEASED_SKILL_DIRS);
+            .self_heal_skills(Self::SELF_HEAL_PROTECTED_DIRS);
         crate::platform::startup::mark_with_detail(
             "rust",
             "bundle_extract:skills_self_heal:done",
@@ -506,6 +514,13 @@ impl Pinvou3Bundle {
     /// would be written and self-heal-deleted in the same run.
     pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] = &["visual-design"];
 
+    /// 自愈对账（`self_heal_skills` 第 4 步「内置释放目录收敛」）的完整豁免集
+    /// = 内置释放技能（[`Self::BUILTIN_RELEASED_SKILL_DIRS`]）+ IT 内部 CLI
+    /// 连接器的运行时 bin 目录（`eip`/`zhidao`，[`Self::write_connector_cli_bins`]
+    /// 每启动重写，无 SKILL.md、无归属记录，缺豁免会被对账当残旧收敛掉）。
+    /// 传给 self_heal_skills 的是本常量，不要直接传 BUILTIN_RELEASED_SKILL_DIRS。
+    pub(crate) const SELF_HEAL_PROTECTED_DIRS: &[&str] = &["visual-design", "eip", "zhidao"];
+
     /// 解包内嵌的内置 skills 到 pinvou3 单一来源 `bundle/skills`。v0.9 clean re-fork
     /// 后 catalogue 与 `load_skill` 都只扫描此目录，不再写 `~/.agents/skills`。
     /// 每次启动防御性写出(immutable 内置资源);内容一致则跳过写——这些资源不进
@@ -514,6 +529,54 @@ impl Pinvou3Bundle {
     pub(super) fn write_builtin_skills(&self) -> std::io::Result<()> {
         let dir = self.skills_dir.join("visual-design");
         self.write_if_changed(&dir.join("SKILL.md"), VISUAL_DESIGN_SKILL_MD)?;
+        Ok(())
+    }
+
+    /// 解包 IT 内部 CLI 连接器(eip / zhidao)的运行时资产到 `bundle/skills/{eip,zhidao}/bin`:
+    /// 公共包装脚本(`EIP_SKILL_DIR`/`ZHIDAO_SKILL_DIR` 的 `bin/` 子树,内部注入
+    /// AGENT_* 后 exec 真二进制)+ 平台原生 CLI(`EIP/ZHIDAO_PLATFORM_BIN_DIR`)。
+    /// 消费方:连接流程的 `eip_bin_path()`/`zhidao_bin_path()` 与 lib.rs 的 PATH 前插
+    /// (模型 shell 直接跑 `eip <子命令>`)。每启动防御性重写(immutable 内嵌资源),
+    /// 升级换二进制时靠覆盖兜住。**不落 SKILL.md**——技能可见性由
+    /// `apply_eip/zhidao_skill_visibility` 按连接态在新 `bundles/` 布局门控;
+    /// 本目录无 SKILL.md 不会被注册表扫成常驻技能。
+    pub(super) fn write_connector_cli_bins(&self) -> std::io::Result<()> {
+        let eip = self.skills_dir.join("eip");
+        Self::extract_embedded_cli_bin(&EIP_SKILL_DIR, &eip)?;
+        #[cfg(any(windows, target_os = "linux"))]
+        Self::extract_dir(&EIP_PLATFORM_BIN_DIR, &eip.join("bin"))?;
+
+        let zhidao = self.skills_dir.join("zhidao");
+        Self::extract_embedded_cli_bin(&ZHIDAO_SKILL_DIR, &zhidao)?;
+        #[cfg(any(windows, target_os = "linux"))]
+        Self::extract_dir(&ZHIDAO_PLATFORM_BIN_DIR, &zhidao.join("bin"))?;
+        Ok(())
+    }
+
+    /// 解包公共技能目录的 `bin/` 子树到目标 `bin/`,并给 CLI 可执行位(unix)。
+    /// 包装脚本与平台二进制同目录(包装脚本按自身路径找真二进制)。
+    /// 注意 include_dir 的子 Dir 内文件路径仍相对内嵌根(如 `bin/eip`),
+    /// 故 extract_dir 的目标是技能根目录,由相对路径自然铺出 `bin/` 层。
+    fn extract_embedded_cli_bin(embedded: &Dir<'_>, dest: &std::path::Path) -> std::io::Result<()> {
+        let bin_dest = dest.join("bin");
+        if let Some(bin) = embedded.get_dir("bin") {
+            Self::extract_dir(bin, dest)?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(entries) = std::fs::read_dir(&bin_dest) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() {
+                        let _ =
+                            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
+                    }
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = bin_dest;
         Ok(())
     }
 
@@ -1268,6 +1331,68 @@ fn should_ensure_embedded_release(
 
 #[cfg(test)]
 mod tests {
+    /// 回归:IT 内部 CLI 连接器(eip/zhidao)的包装脚本 + 平台二进制必须随启动
+    /// 解包到 bundle/skills/{eip,zhidao}/bin,且不得落 SKILL.md(可见性归
+    /// apply_*_skill_visibility 的连接态门控)。e02f86b6 重构曾误删解包调用,
+    /// 全新装机上连接 EIP/知道直接 sso_start_failed(文案误导用户查内网)。
+    #[test]
+    fn write_connector_cli_bins_releases_wrapper_and_platform_binaries() {
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-connector-cli-bins-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let bundle = super::Pinvou3Bundle::paths();
+
+        bundle.write_connector_cli_bins().unwrap();
+
+        for (skill, wrapper, cli_prefix) in [
+            ("eip", "eip", "eip-cli"),
+            ("zhidao", "zhidao", "zhidao-cli"),
+        ] {
+            let bin = bundle.skills_dir.join(skill).join("bin");
+            assert!(
+                bin.join(wrapper).is_file(),
+                "{skill} 包装脚本未解包: {}",
+                bin.join(wrapper).display()
+            );
+            // 平台原生 CLI 仅 windows/linux 内嵌(macOS 无此二进制)。
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                let has_cli = std::fs::read_dir(&bin).unwrap().flatten().any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|f| f.starts_with(cli_prefix))
+                });
+                assert!(has_cli, "{skill} 平台二进制未解包: {}", bin.display());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(bin.join(wrapper))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_ne!(mode & 0o111, 0, "{skill} 包装脚本缺可执行位");
+            }
+            assert!(
+                !bundle.skills_dir.join(skill).join("SKILL.md").exists(),
+                "{skill} SKILL.md 不得随二进制解包(连接态门控会失效)"
+            );
+        }
+
+        // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
+        unsafe { std::env::remove_var("PINVOU3_HOME") };
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// G1 回归：上传来源记录不得进入内嵌重释放（防用户内容被嵌入资源覆盖）。
     #[test]
     fn embedded_release_skips_non_preset_sources() {
