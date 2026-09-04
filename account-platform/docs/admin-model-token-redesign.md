@@ -204,24 +204,23 @@ Portal 的 CSP 必须由部署环境选择精确值，例如生产：
 Content-Security-Policy: default-src 'self'; form-action 'self' https://credentials.account.pinvou.com; frame-ancestors 'none'; base-uri 'none'
 ```
 
-不得使用 `https:`、通配子域、调用方传入 origin 或动态重定向。credential origin 自身使用 `default-src 'self'; connect-src 'self' <exact-oidc-origin>; form-action 'self' <exact-oidc-origin>; frame-ancestors 'none'; base-uri 'none'`，且不加载第三方脚本、像素或字体。
+不得使用 `https:`、通配子域、调用方传入 origin 或动态重定向。Portal 另提供固定同源 `GET /credential-handoff`；URL 不接受 query、fragment、path 参数或任何 launch/result 引用。它只返回最小静态 HTML 与由专用构建步骤生成、字节冻结的内联 handoff 脚本，不加载 Portal App、第三方代码、字体、像素、遥测或 Service Worker。构建同时生成该脚本的 SHA-256 base64 摘要；CSP 仅允许以精确 `script-src 'sha256-<build-pinned-digest>'` 授权的该内联脚本，并禁止 `script-src 'self'`、`'unsafe-inline'`、`'unsafe-eval'`、动态 nonce 和运行时拼接脚本。响应不读写业务会话、不设置 Cookie，并固定返回 `Cache-Control: no-store`、`Referrer-Policy: origin` 与 `Content-Security-Policy: default-src 'none'; script-src 'sha256-<build-pinned-digest>'; form-action https://credentials.account.pinvou.com; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'`。handoff 在发送 READY 前及接收 BIND 后均必须验证 `navigator.serviceWorker.controller === null`；其注册 scope 不得覆盖 `/credential-handoff`。构建/部署门禁扫描 Service Worker 注册与 scope，Production/UAT 生产等价探针再从浏览器验证；若既有 root scope 会覆盖 handoff，必须先收窄/迁移 scope，否则发布失败关闭。credential origin 自身使用 `default-src 'self'; connect-src 'self' <exact-oidc-origin>; form-action 'self' <exact-oidc-origin>; frame-ancestors 'none'; base-uri 'none'`，且不加载第三方脚本、像素或字体。
 
-### 6.2 顶层 POST launch
+### 6.2 Portal 同源 handoff 与顶层 POST launch
 
-Portal 先从 Token 创建 5 分钟、单次消费、最多 3 次尝试的 launch 记录和不透明 `result_ref`。用户点击后，以 HTML form 的顶层跨 origin POST 打开新浏览上下文：
+Chromium 对直接 `target=_blank` 的跨 origin 表单 POST 会发送不透明 `Origin:null`，因此该路径正式废止；Portal 不得直接向 credential origin 打开、fetch 或提交 launch。唯一允许的浏览器协议如下，版本冻结为 `credential-handoff/v1`：
 
-```html
-<form method="post"
-      action="https://credentials.account.pinvou.com/launch"
-      target="_blank"
-      rel="noopener">
-  <input type="hidden" name="launch_id" value="...">
-</form>
-```
-
-Production/UAT 的 action 必须来自编译/部署白名单，不接受 API 返回任意 URL。表单只传 `launch_id`，不传账户、owner、Secret 或 Provider 信息；`launch_id` 只存在 POST body，禁止 query、fragment、path、cookie、local/session storage、window.name、Referer、遥测和日志。导航前阶段由承载表单的 Portal HTTP 响应设置 `Referrer-Policy: origin`，使 Chromium 发出的 Referer 至多为不带 path、query、fragment 的 Portal origin；该策略只约束 Referer，既不生成也不认证 `Origin`。表单必须由真实用户手势直接提交，并固定使用 `target=_blank` + `rel="noopener"`；必须移除 `noreferrer`，以免 Chromium 将跨 origin 顶层 POST 的正常 `Origin` 降为 `null`。credential origin 仍必须独立、精确验证浏览器发送的 `Origin`，不能把 Referer 当作授权证据。导航后阶段从 credential origin 的首个 303 开始启用 `COOP: same-origin`、`Referrer-Policy: no-referrer` 与 `Cache-Control: no-store`；最终 opener 隔离由 `rel=noopener` 与 COOP 双重保证。
-
-credential origin 的 `/launch` 只接受 `application/x-www-form-urlencoded` POST，并要求 `Origin` 与当前环境唯一 Portal origin 精确相等；缺失、`null`、伪造、跨环境或带异常端口的 Origin 一律拒绝且不得消费 launch。验证并原子消费 launch 后返回：
+1. 用户点击后，Portal 必须在同一可信用户手势栈中先以 `_blank` 打开固定同源 `/credential-handoff`。弹窗返回 `null`、未在 3 秒内进入 READY、任一阶段 `navigator.serviceWorker.controller !== null` 或部署检查发现注册 scope 覆盖 handoff 时关闭窗口并失败，且此时不得创建 launch；若 launch 已因并发响应创建，则必须立即按同一 `result_ref` 撤销。
+2. handoff 仅运行 6.1 的最小静态文档。Portal 使用 CSPRNG 生成至少 256 bit handoff nonce 并创建 `MessageChannel`；不得使用 launch/result ID 充当 nonce。
+3. handoff 先通过 `window.opener.postMessage` 发送闭合 `{version:1,type:"HANDOFF_READY"}`。Portal 只接受 `event.origin` 精确等于自身 origin 且 `event.source === popup` 的消息，随后以精确 Portal origin 为 `targetOrigin` 发送闭合 `{version:1,type:"HANDOFF_BIND",nonce}` 并只转移一个 MessagePort。
+4. handoff 同样校验 `event.origin`、`event.source === window.opener`、nonce 格式和闭合 v1 schema，通过所收端口回复 `{version:1,type:"HANDOFF_BOUND",nonce}`。Portal 仅在 3 秒内收到 nonce 匹配的 ACK 后创建 5 分钟、单次消费、最多 3 次尝试的 launch 与不透明 `result_ref`。
+5. Portal 只经绑定端口发送一次闭合 `{version:1,type:"HANDOFF_SUBMIT",nonce,launch_id}`；handoff 只接受 READY→BOUND→SUBMITTED 顺序、同一 nonce 和规范 UUID，并在 3 秒内回复一次 `{version:1,type:"HANDOFF_ACCEPTED",nonce}`。重复、乱序、额外字段、第二端口、来源漂移或超时均关闭端口/窗口；已经创建 launch 时原子撤销并进入稳定失败。
+6. launch ID 仅可短暂存在于 Portal 运行内存、MessagePort 消息和 handoff 为提交即时创建的 DOM API 表单值中；不得进入可见 DOM 文本、URL/query/fragment/path、Cookie、local/session storage、IndexedDB、Cache API、window.name、剪贴板、Referer、Performance、遥测、控制台、访问日志或崩溃报告。handoff 不读取 `document.cookie`，不设置 Cookie，提交后不保留节点。
+7. handoff 收到 SUBMIT 后先在内存中创建尚未挂载的临时 form 并写入唯一 `launch_id`，再发出 ACCEPTED；随后立即关闭 MessagePort、移除监听、清空 nonce/launch JavaScript 变量并执行 `window.opener = null`，最后才挂载该 form、以 `_self` 向部署白名单中的固定 `https://credentials.account.pinvou.com/launch` 提交并移除节点。body 只能是单一 `launch_id`。不得退化为直接 `_blank` 跨 origin POST、fetch、GET、query/fragment、iframe、同页 Portal 导航或复制链接。
+8. credential origin 的 `/launch` 只接受 `application/x-www-form-urlencoded` POST，并要求浏览器 `Origin` 与当前环境唯一 Portal origin 精确相等；缺失、`null`、伪造、跨环境或带异常端口的 Origin 一律拒绝且不得消费 launch，Referer 永不作为授权证据。
+9. Portal 在 READY/BIND 阶段保留 opener 仅用于精确 source/origin 握手；handoff ACCEPTED 后主动置空，credential origin 的首个 303 再以 COOP 强制隔离。除上述闭合握手外，双方不得读取或调用对方 DOM。
+10. Portal 只把同一 `result_ref` 作为权威恢复引用。SUBMIT/303/响应丢失或结果未知时只轮询该引用，绝不重新 POST launch、生成新 handoff nonce 或换幂等键盲试；用户取消、权限撤销、gate 关闭、窗口提前关闭、任一阶段 3 秒超时或 10 秒内无首 heartbeat，均以适用稳定原因原子撤销已创建且未终态的 launch。
+11. launch 被验证并原子消费后必须返回：
 
 ```http
 HTTP/1.1 303 See Other
@@ -233,9 +232,9 @@ Cache-Control: no-store
 
 `/session` 是固定地址，不携带任何 ID。首次 303 和后续所有 credential origin 响应都保持 `COOP: same-origin`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。因为 POST URL 本身也固定为 `/launch`，重定向后的地址、Referer 和浏览器历史均不含 launch ID；反向代理、WAF、应用访问日志和崩溃报告禁止记录请求 body。浏览器刷新 `/session` 不得重放 POST。
 
-弹窗或新页被阻止时必须安全失败：Portal 在 10 秒内未观察到 Token 保存的隔离页一次性 heartbeat，就原子撤销 launch，显示稳定错误 `CREDENTIAL_WINDOW_BLOCKED` 和“允许本站打开新窗口后重试”；不得改为 GET、query/fragment、同页降级、iframe、复制链接或把 Secret 收回 Portal。窗口已打开但认证失败时同样只经 `result_ref` 轮询稳定状态。
+弹窗或新页在 launch 创建前被阻止时必须安全失败且零 launch；创建后任一握手/窗口/heartbeat 阶段失败时原子撤销，显示对应稳定错误（无首 heartbeat 为 `CREDENTIAL_WINDOW_BLOCKED`）和“允许本站打开新窗口后重试”。不得改为 GET、query/fragment、同页降级、iframe、复制链接或把 Secret 收回 Portal。窗口已打开但认证失败时同样只经 `result_ref` 轮询稳定状态。
 
-强制双 origin 浏览器验收逐项覆盖：① Portal 初始 HTTP 响应为 `Referrer-Policy: origin`，实际导航 Referer 至多为 Portal origin 且无 path/query/fragment，精确 Portal `Origin` 的顶层 POST 可成功；②缺失、`null`、伪造、跨环境 Origin 均拒绝且 launch 零消费；③ launch ID 仅出现于 POST body；④首次响应为 303 且 `Location` 精确等于 `/session`；⑤ 303 落地后 `window.opener === null`；⑥刷新不重发 POST；⑦地址栏、`document.referrer`、Performance/Navigation、浏览器历史和代理访问日志均无 launch/result ID；⑧弹窗阻止时 launch 被撤销且网络中没有 query、fragment、同页或 iframe 降级；⑨换浏览器、换主体及重放均失败关闭。
+强制真实 Chromium 验收覆盖上述 11 点，并至少包含：直接 `_blank` 跨 origin POST 被测试明确禁用；弹窗阻止/READY 前失败零 launch；CSP 仅允许精确 SHA-256 hash 授权的内联脚本并禁止 `script-src 'self'`、`'unsafe-inline'`、`'unsafe-eval'`；`navigator.serviceWorker.controller === null` 且所有注册 scope 不覆盖 handoff，root scope 覆盖时门禁失败；双向 origin+source、CSPRNG nonce、闭合 v1 schema 与 MessageChannel ACK；重复/乱序/第二端口/超时在有 launch 时只撤销一次；handoff 无 App/第三方/遥测/Service Worker 且 launch 仅在内存、端口和瞬时表单；HANDOFF_ACCEPTED 后 opener 为空；credential `/launch` 收到精确 Portal Origin，缺失/`null`/伪造/跨环境均零消费；首次 303 `Location: /session` 且从该响应起 COOP/no-referrer/no-store；刷新及未知结果不重发 POST；URL、Referer、History、Performance、Cookie/storage/window.name/代理和应用日志均无 launch/result ID；弹窗阻断、取消、撤权、关 gate 有界撤销且无降级；换浏览器、换主体和重放失败关闭。
 
 ### 6.3 隔离会话
 
@@ -408,7 +407,7 @@ Portal 对三个动作只向 Account `POST /account/admin/v1/approval-requests` 
 2. owner 权限追加迁移的创建、精确角色授予、授权版本递增、缓存/cursor 失效和 down 回滚测试。
 3. 合法 UUID 无权、非法 UUID、互斥详情、无权页签的零详情请求、零 DOM/日志泄漏测试。
 4. 三类唯一预算、入口代理超时顺序、快照事务中断无半结果、容量边界、70%/85% 水位、第三资源回收和并发翻页无重复漏项测试。
-5. 固定 credential origin/CSP 的两阶段真实浏览器测试：导航前 Portal HTTP 响应使用 `Referrer-Policy: origin`，表单 `target=_blank + rel=noopener` 且无 `noreferrer`；导航后从首个 303 起使用 COOP same-origin/no-referrer/no-store，并覆盖无 ID、弹窗阻止撤销且无 query 降级。
+5. 固定 Portal `/credential-handoff` 与 credential origin 的真实浏览器测试：完整覆盖 6.2 的 11 点握手、构建期固定脚本 SHA-256 CSP、`navigator.serviceWorker.controller === null` 与注册 scope 不覆盖、一次性 `_self` POST、精确 Origin、opener 生命周期、首个 303 后 COOP/no-referrer/no-store、无引用泄漏及失败有界撤销；root scope 覆盖和直接 `_blank` 跨 origin POST 均必须阻断发布。
 6. 逐区块失败隔离、URL 前进后退、旧 `section=tokens` 兼容、移动端与键盘可访问性测试。
 7. 从真实迁移后数据库对三个强制审批策略与 `internal/platform/approvalpolicy` 逐字段（包括有序 `critical_resource_fields`）比对；`executableApprovalCommands` 保留所有既有合法项，且新增 `TOKEN_*` 子集恰为 lifecycle v2、rollback v2、revoke v1 三项，无其他 Token 命令被放行；任一偏差阻断发布。
 8. 现有管理后台合同测试在后续实施任务中更新：feature gate 开启时断言三页为 canonical，关闭时仍断言历史 Token Gateway；本轮不修改实现测试。
