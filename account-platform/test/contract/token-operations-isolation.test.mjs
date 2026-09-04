@@ -19,6 +19,7 @@ test('platform Token operations are role isolated and resource scoped', () => {
   const portal = read('internal/portal/service.go');
   const client = read('../pinvou3-app/src/features/account-platform/admin-client.js');
   const ui = read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx');
+  const tokenResourcesUI = read('../pinvou3-app/src/features/account-platform/AdminTokenResourcesWorkspace.jsx');
 
   for (const permission of ['platform.tokens.read', 'platform.tokens.manage', 'platform.tokens.credentials.validate']) {
     assert.match(rbac, new RegExp(`'PLATFORM_MODEL_ADMIN'.*${permission.replaceAll('.', '\\.')}`));
@@ -53,7 +54,9 @@ test('platform Token operations are role isolated and resource scoped', () => {
   assert.match(portal, /resource == "\/admin\/v1\/token-accounts" && method == http\.MethodPost/);
   assert.match(client, /createTokenAccount/);
   assert.match(ui, /createTokenAccount/);
-  assert.match(ui, /validation_status === 'VALID'/);
+  assert.match(ui, /const canValidateCredentials = false/);
+  assert.doesNotMatch(ui, /validation_status === 'VALID'/);
+  assert.doesNotMatch(tokenResourcesUI, /validateTokenCredential|validation_status/);
 
   assert.doesNotMatch(organizationAPI, /^  \/token-accounts(?::|\/)/m);
   assert.doesNotMatch(service, /protected\.(?:GET|POST|PUT|PATCH|DELETE)\("\/v1\/token-accounts/);

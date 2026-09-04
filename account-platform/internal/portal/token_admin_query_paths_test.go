@@ -51,6 +51,14 @@ func TestTokenAdminStableRouteAllowlistIsExact(t *testing.T) {
 		path   string
 	}{
 		{http.MethodPut, "/admin/v2/token-accounts/" + accountID + "/routes"},
+		{http.MethodDelete, "/admin/v2/token-accounts/" + accountID + "/routes"},
+		{http.MethodGet, "/admin/v2/token-accounts/" + accountID + "/impact/route"},
+		{http.MethodGet, "/admin/v1/token-accounts/" + accountID + "/impact/status"},
+		{http.MethodGet, "/admin/v1/token-accounts/" + accountID + "/impact/credential"},
+		{http.MethodPost, "/admin/v1/commands"},
+		{http.MethodGet, "/admin/v1/commands/" + uuid.NewString()},
+		{http.MethodGet, "/admin/v1/models/" + accountID + "/impact/lifecycle"},
+		{http.MethodGet, "/admin/v1/model-catalog/impact/rollback"},
 	} {
 		if !tokenAdminPathAllowed(item.method, item.path) {
 			t.Fatalf("stable route path not allowed: %s %s", item.method, item.path)
@@ -60,14 +68,15 @@ func TestTokenAdminStableRouteAllowlistIsExact(t *testing.T) {
 		method string
 		path   string
 	}{
-		{http.MethodDelete, "/admin/v2/token-accounts/" + accountID + "/routes"},
 		{http.MethodPost, "/admin/v2/token-accounts/" + accountID + "/routes"},
 		{http.MethodGet, "/admin/v2/token-accounts/" + accountID + "/routes"},
 		{http.MethodPut, "/admin/v2/token-accounts/not-a-uuid/routes"},
 		{http.MethodPut, "/admin/v2/token-accounts/" + accountID + "/routes/extra"},
 		{http.MethodPost, "/admin/v2/token-accounts/" + accountID + "/impact/route"},
-		{http.MethodGet, "/admin/v2/token-accounts/" + accountID + "/impact/route"},
 		{http.MethodGet, "/admin/v2/token-accounts/" + accountID + "/impact/credential"},
+		{http.MethodGet, "/admin/v1/commands/not-a-uuid"},
+		{http.MethodDelete, "/admin/v1/commands/" + uuid.NewString()},
+		{http.MethodGet, "/admin/v1/token-accounts/" + accountID + "/impact/status/extra"},
 	} {
 		if tokenAdminPathAllowed(item.method, item.path) {
 			t.Fatalf("unexpected stable route path allowed: %s %s", item.method, item.path)

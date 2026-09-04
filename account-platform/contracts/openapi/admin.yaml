@@ -3267,7 +3267,7 @@ components:
       description: Redacted Portal detail for frozen configuration and evidence reconciliation; user/session, credential, request fingerprint, Provider identity, upstream request, and inline evidence are excluded.
       type: object
       additionalProperties: false
-      required: [usage_request_id, token_account_id, model, status, execution_status, delivery_status, cancel_status, settlement_status, maximum_microcredits, reconciliation_attempts, started_at, updated_at]
+      required: [usage_request_id, token_account_id, model, status, execution_status, delivery_status, cancel_status, settlement_status, maximum_microcredits, reconciliation_attempts, last_persisted_sequence, started_at, updated_at]
       properties:
         usage_request_id: { type: string, format: uuid }
         organization_id: { type: string, format: uuid }
@@ -3299,6 +3299,7 @@ components:
           enum: [MANUAL_RECONCILIATION_REQUESTED, MANUAL_RECONCILIATION_REQUIRED, USAGE_EVIDENCE_TIMEOUT, USAGE_EVIDENCE_UNAVAILABLE, HOLD_RELEASE_UNAVAILABLE, TRUSTED_USAGE_DEADLINE_EXCEEDED, RECONCILIATION_DIAGNOSTIC_REDACTED]
           description: Controlled redacted diagnostic code; never a free-form reason, secret-shaped label, or provider error.
         reconciliation_stopped_at: { type: string, format: date-time }
+        last_persisted_sequence: { type: integer, format: int64, minimum: 0 }
         started_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     TokenAdminReconciliationCase:

@@ -3,7 +3,7 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelOperationsDetailsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminNavigationGroupsForGate, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
+import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelOperationsDetailsGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminNavigationGroupsForGate, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { createFinanceDetailRecovery, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from './admin-finance-pagination.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { AdminModelTokenWorkspace } from './AdminModelTokenWorkspace.jsx';
@@ -372,6 +372,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [modelTokenIAEnabled, setModelTokenIAEnabled] = useState(false);
   const [tokenResourceFormsEnabled, setTokenResourceFormsEnabled] = useState(false);
   const [modelOperationsDetailsEnabled, setModelOperationsDetailsEnabled] = useState(false);
+  const [modelTokenActionsEnabled, setModelTokenActionsEnabled] = useState(false);
   const [modelTokenRouteNotice, setModelTokenRouteNotice] = useState('');
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
@@ -527,9 +528,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         setTokenResourceFormsEnabled(resourceFormsEnabled);
         const operationsDetailsEnabled = adminModelOperationsDetailsGateEnabled(session);
         setModelOperationsDetailsEnabled(operationsDetailsEnabled);
+        const actionsEnabled = adminModelTokenActionsGateEnabled(session);
+        setModelTokenActionsEnabled(actionsEnabled);
         const visible = adminVisibleSections(granted, { modelTokenIAEnabled: iaEnabled });
         const requested = readAdminSection();
-        const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled, undefined, granted.platform_permissions || [], { tokenResourceFormsEnabled: resourceFormsEnabled, modelOperationsDetailsEnabled: operationsDetailsEnabled });
+        const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled, undefined, granted.platform_permissions || [], { tokenResourceFormsEnabled: resourceFormsEnabled, modelOperationsDetailsEnabled: operationsDetailsEnabled, modelTokenActionsEnabled: actionsEnabled });
         if (visible.length === 0) {
           if (normalized.replace) writeAdminSection(normalized.section, 'replace', undefined, undefined, normalized.updates);
           setAuth('denied');
@@ -564,21 +567,31 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       if (authorizationRefreshRef.current) return;
       authorizationRefreshRef.current = true;
       try {
-        const next = await client.authorization();
+        const [next, nextSession] = await Promise.all([client.authorization(), client.session()]);
         if (disposed) return;
+        if (!nextSession.authenticated) { setAuth('guest'); return; }
         if (retryTimer !== null) {
           globalThis.clearTimeout?.(retryTimer);
           retryTimer = null;
         }
         const current = authorizationRef.current;
         const permissionsChanged = JSON.stringify(current?.platform_permissions || []) !== JSON.stringify(next?.platform_permissions || []);
-        if (permissionsChanged || authorizationVersionChanged(authorizationVersions(current), authorizationVersions(next))) {
-          const visible = adminVisibleSections(next, { modelTokenIAEnabled });
+        const nextIAEnabled = adminModelTokenIAGateEnabled(nextSession);
+        const nextResourceFormsEnabled = adminTokenResourceFormsGateEnabled(nextSession);
+        const nextOperationsDetailsEnabled = adminModelOperationsDetailsGateEnabled(nextSession);
+        const nextActionsEnabled = adminModelTokenActionsGateEnabled(nextSession);
+        const gatesChanged = nextIAEnabled !== modelTokenIAEnabled || nextResourceFormsEnabled !== tokenResourceFormsEnabled || nextOperationsDetailsEnabled !== modelOperationsDetailsEnabled || nextActionsEnabled !== modelTokenActionsEnabled;
+        if (permissionsChanged || authorizationVersionChanged(authorizationVersions(current), authorizationVersions(next)) || gatesChanged) {
+          const visible = adminVisibleSections(next, { modelTokenIAEnabled: nextIAEnabled });
           authorizationRef.current = next;
           setAuthorization(next);
+          setModelTokenIAEnabled(nextIAEnabled);
+          setTokenResourceFormsEnabled(nextResourceFormsEnabled);
+          setModelOperationsDetailsEnabled(nextOperationsDetailsEnabled);
+          setModelTokenActionsEnabled(nextActionsEnabled);
           financeRequestTrackerRef.current.invalidateAll();
           setData({});
-          const normalized = normalizeAdminModelTokenEntry(section, visible, modelTokenIAEnabled, undefined, next.platform_permissions || [], { tokenResourceFormsEnabled, modelOperationsDetailsEnabled });
+          const normalized = normalizeAdminModelTokenEntry(section, visible, nextIAEnabled, undefined, next.platform_permissions || [], { tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled });
           if (visible.length === 0) {
             if (normalized.replace) writeAdminSection(normalized.section, 'replace', undefined, undefined, normalized.updates);
             setAuth('denied');
@@ -623,14 +636,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       unsubscribe?.();
       globalThis.removeEventListener?.('focus', onFocus);
     };
-  }, [auth, client, load, modelOperationsDetailsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
+  }, [auth, client, load, modelOperationsDetailsEnabled, modelTokenActionsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
 
   useEffect(() => {
     if (auth !== 'ready' || !authorization) return undefined;
     const onPopState = () => {
       const requested = readAdminSection();
       const visible = adminVisibleSections(authorization, { modelTokenIAEnabled });
-      const normalized = normalizeAdminModelTokenEntry(requested, visible, modelTokenIAEnabled, undefined, authorization.platform_permissions || [], { tokenResourceFormsEnabled, modelOperationsDetailsEnabled });
+      const normalized = normalizeAdminModelTokenEntry(requested, visible, modelTokenIAEnabled, undefined, authorization.platform_permissions || [], { tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelTokenActionsEnabled });
       if (!normalized.section) {
         writeAdminSection(section, 'replace');
         return;
@@ -647,7 +660,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     };
     globalThis.addEventListener?.('popstate', onPopState);
     return () => globalThis.removeEventListener?.('popstate', onPopState);
-  }, [auth, authorization, data, load, modelOperationsDetailsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
+  }, [auth, authorization, data, load, modelOperationsDetailsEnabled, modelTokenActionsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
 
   const navigate = (key, query = {}) => {
     if (!adminVisibleSections(authorization, { modelTokenIAEnabled }).includes(key)) return;
@@ -714,7 +727,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     setRouteVersion((value) => value + 1);
   };
   const changeModelTokenRoute = (updates, mode = 'push') => {
-    const normalized = normalizeAdminModelTokenNavigation(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, { tokenResourceFormsEnabled, modelOperationsDetailsEnabled });
+    const normalized = normalizeAdminModelTokenNavigation(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, { tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelTokenActionsEnabled });
     writeAdminSection(normalized.section, mode, undefined, undefined, normalized.updates);
     setModelTokenRouteNotice('');
     setRouteVersion((value) => value + 1);
@@ -808,7 +821,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {['models', 'tokenResources', 'modelOperations'].includes(section) && <AdminModelTokenWorkspace section={section} copy={copy} client={client} permissions={platformPermissions} routeVersion={routeVersion} onRouteChange={changeModelTokenRoute} onNavigate={navigate} routeNotice={modelTokenRouteNotice} tokenResourceFormsEnabled={tokenResourceFormsEnabled} modelOperationsDetailsEnabled={modelOperationsDetailsEnabled} />}
+          {['models', 'tokenResources', 'modelOperations'].includes(section) && <AdminModelTokenWorkspace section={section} copy={copy} client={client} permissions={platformPermissions} routeVersion={routeVersion} onRouteChange={changeModelTokenRoute} onNavigate={navigate} routeNotice={modelTokenRouteNotice} tokenResourceFormsEnabled={tokenResourceFormsEnabled} modelOperationsDetailsEnabled={modelOperationsDetailsEnabled} modelTokenActionsEnabled={modelTokenActionsEnabled} />}
           {section === 'forbidden' && <section className="adm-card adm-source-card"><div className="adm-source-state"><strong>{copy.modelToken.forbiddenTitle}</strong><span>{copy.modelToken.forbiddenBody}</span></div></section>}
           {section === 'system' && (
             <>
@@ -4899,13 +4912,15 @@ function Tokens({ copy, language, data, client, setData, permissions }) {
   });
   const permissionSet = new Set(permissions || []);
   const canReadTokens = permissionSet.has('platform.tokens.read');
-  const canManageTokens = permissionSet.has('platform.tokens.manage');
-  const canValidateCredentials = permissionSet.has('platform.tokens.credentials.validate');
+  // The legacy Token Gateway remains read-only. Structured writes live only in
+  // the gated model/Token workspaces, so the old page can never bypass impact review.
+  const canManageTokens = false;
+  const canValidateCredentials = false;
   const canReadModels = permissionSet.has('platform.models.read');
-  const canManageModels = permissionSet.has('platform.models.manage');
-  const canSyncModels = permissionSet.has('platform.models.sync');
+  const canManageModels = false;
+  const canSyncModels = false;
   const canReadUsage = permissionSet.has('platform.usage.read');
-  const canRetryUsage = permissionSet.has('platform.usage.reconcile.retry');
+  const canRetryUsage = false;
   const visibleTabs = [...(canReadTokens ? ['tokenAccounts', 'provisionings'] : []), ...(canReadModels ? ['models'] : []), ...(canReadUsage ? ['usage'] : [])];
   useEffect(() => {
     if (!visibleTabs.includes(tab)) setTab(visibleTabs[0] || 'tokenAccounts');
@@ -4934,173 +4949,24 @@ function Tokens({ copy, language, data, client, setData, permissions }) {
       setUsageDetail(await client.usageRequest(item.usage_request_id));
       setAccount(null);
     });
-  const refreshAccount = async () => setAccount(await client.tokenAccount(account.token_account_id));
-  const updateStatus = () => {
-    const status = account.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE';
-    const reason = window.prompt(copy.tokens.statusReason);
-    if (!reason?.trim()) return;
-    void perform(async () => {
-      await client.setTokenAccountStatus(account.token_account_id, status, reason.trim());
-      await refreshAccount();
-      setData((current) => ({
-        ...current,
-        tokenAccounts: (current.tokenAccounts || []).map((item) => (item.token_account_id === account.token_account_id ? { ...item, status } : item)),
-      }));
-    });
-  };
-  const saveRoute = (event) => {
-    event.preventDefault();
-    if (!route.model.trim()) return;
-    void perform(async () => {
-      await client.upsertTokenRoute(account.token_account_id, {
-        ...route,
-        model: route.model.trim(),
-        priority: Number(route.priority),
-      });
-      await refreshAccount();
-      setRoute((current) => ({ ...current, model: '' }));
-    });
-  };
-  const deleteRoute = (model) => {
-    if (!window.confirm(copy.tokens.confirmDeleteRoute(model))) return;
-    void perform(async () => {
-      await client.deleteTokenRoute(account.token_account_id, model);
-      await refreshAccount();
-    });
-  };
-  const validateCredential = (credentialID) =>
-    perform(async () => {
-      const result = await client.validateTokenCredential(account.token_account_id, credentialID);
-      await refreshAccount();
-      return result.validation_status === 'VALID' ? copy.tokens.credentialValid : copy.tokens.credentialInvalid;
-    });
-  const createTokenAccount = (event) => {
-    event.preventDefault();
-    const ownerID = newAccount.owner_id.trim();
-    if (!ownerID || !newAccount.name.trim()) return;
-    const isOrganization = newAccount.owner_type === 'ORG';
-    void perform(async () => {
-      await client.createTokenAccount({
-        owner_type: newAccount.owner_type,
-        owner_id: ownerID,
-        owner_organization_id: isOrganization ? ownerID : null,
-        owner_unit_id: null,
-        name: newAccount.name.trim(),
-        share_scope: isOrganization ? 'ORG_ALL' : 'OWNER_UNIT_ONLY',
-        default_priority: Number(newAccount.default_priority),
-      });
-      const result = await client.tokenAccounts();
-      setData((current) => ({ ...current, tokenAccounts: result.items || [] }));
-      setNewAccount((current) => ({ ...current, owner_id: '', name: '' }));
-      return copy.tokens.accountCreated;
-    });
-  };
-  const retryReconciliation = () => {
-    const reason = window.prompt(copy.tokens.retryReason);
-    if (!reason?.trim()) return;
-    void perform(async () => {
-      setUsageDetail(await client.retryUsageReconciliation(usageDetail.usage_request_id, reason.trim()));
-    });
-  };
-  const refreshModels = async () => {
-    const result = await client.catalogModels();
-    setData((current) => ({
-      ...current,
-      models: result.items || [],
-      catalogVersion: result.catalog_version || 0,
-    }));
-  };
-  const syncModels = () =>
-    perform(async () => {
-      await client.syncModelCatalog();
-      await refreshModels();
-      return copy.tokens.catalogSynced;
-    });
-  const editModel = (item) => {
-    const displayName = window.prompt(copy.tokens.displayName, item.draft?.display_name || item.display_name);
-    if (!displayName?.trim()) return;
-    const aliases = window.prompt(copy.tokens.aliases, (item.draft?.aliases || item.aliases || []).join(', '));
-    void perform(async () => {
-      await client.saveModelDraft(item.model_id, {
-        expected_catalog_version: data.catalogVersion,
-        expected_draft_version: item.draft?.draft_version || 0,
-        display_name: displayName.trim(),
-        description: item.draft?.description ?? item.description ?? '',
-        aliases: String(aliases || '')
-          .split(',')
-          .map((value) => value.trim())
-          .filter(Boolean),
-        protocol_code: item.protocol_code,
-        protocol_version: item.protocol_version,
-        context_length: item.draft?.context_length || item.context_length,
-        maximum_output_tokens: item.draft?.maximum_output_tokens ?? item.maximum_output_tokens,
-        supported_modalities: item.draft?.supported_modalities || item.supported_modalities,
-        tokenizer_version: item.draft?.tokenizer_version || item.tokenizer_version,
-      });
-      await refreshModels();
-      return copy.tokens.draftSaved;
-    });
-  };
-  const publishModel = (item) => {
-    const reason = window.prompt(copy.tokens.changeReason);
-    if (!reason?.trim() || !item.draft) return;
-    void perform(async () => {
-      await client.publishModelDraft(item.model_id, {
-        expected_catalog_version: data.catalogVersion,
-        expected_draft_version: item.draft.draft_version,
-        idempotency_key: `model-publish-${crypto.randomUUID()}`,
-        reason: reason.trim(),
-      });
-      await refreshModels();
-      return copy.tokens.modelPublished;
-    });
-  };
-  const transitionModel = (item, target_status) => {
-    const reason = window.prompt(copy.tokens.changeReason);
-    if (!reason?.trim()) return;
-    void perform(async () => {
-      await client.transitionModel(item.model_id, {
-        expected_catalog_version: data.catalogVersion,
-        target_status,
-        effective_at: new Date().toISOString(),
-        new_session_cutoff_at: new Date().toISOString(),
-        continuation_cutoff_at: new Date().toISOString(),
-        force_cancel_inflight: false,
-        idempotency_key: `model-lifecycle-${crypto.randomUUID()}`,
-        reason: reason.trim(),
-      });
-      await refreshModels();
-      return copy.tokens.lifecycleChanged;
-    });
-  };
-  const rollbackCatalog = () => {
-    const source = Number(window.prompt(copy.tokens.rollbackVersion));
-    const reason = window.prompt(copy.tokens.changeReason);
-    if (!Number.isInteger(source) || source < 1 || !reason?.trim()) return;
-    void perform(async () => {
-      await client.rollbackModelCatalog({
-        source_catalog_version: source,
-        expected_catalog_version: data.catalogVersion,
-        idempotency_key: `model-rollback-${crypto.randomUUID()}`,
-        reason: reason.trim(),
-      });
-      await refreshModels();
-      return copy.tokens.catalogRolledBack;
-    });
-  };
   const refreshProvisionings = async () => {
-    const result = await client.provisionings();
-    setData((current) => ({ ...current, provisionings: result.items || [] }));
+    const latest = await client.provisionings();
+    setData((current) => ({ ...current, provisionings: latest.items || [] }));
   };
-  const repairProvisioning = (item) => {
-    const reason = window.prompt(copy.tokens.repairReason);
-    if (!reason?.trim()) return;
-    void perform(async () => {
-      await client.repairProvisioning(item.provisioning_id, reason.trim());
-      await refreshProvisionings();
-      return copy.tokens.repairStarted;
-    });
-  };
+  const unavailableWrite = () => {};
+  const preventUnavailableWrite = (event) => event.preventDefault();
+  const updateStatus = unavailableWrite;
+  const saveRoute = preventUnavailableWrite;
+  const deleteRoute = unavailableWrite;
+  const validateCredential = unavailableWrite;
+  const createTokenAccount = preventUnavailableWrite;
+  const retryReconciliation = unavailableWrite;
+  const syncModels = unavailableWrite;
+  const editModel = unavailableWrite;
+  const publishModel = unavailableWrite;
+  const transitionModel = unavailableWrite;
+  const rollbackCatalog = unavailableWrite;
+  const repairProvisioning = unavailableWrite;
   if (account) return <TokenAccountDetail copy={copy} account={account} route={route} setRoute={setRoute} busy={busy} notice={notice} error={error} onBack={() => setAccount(null)} onStatus={updateStatus} onSaveRoute={saveRoute} onDeleteRoute={deleteRoute} onValidate={validateCredential} canManage={canManageTokens} canValidate={canValidateCredentials} />;
   if (usageDetail) return <UsageRequestDetail copy={copy} language={language} item={usageDetail} busy={busy} notice={notice} error={error} onBack={() => setUsageDetail(null)} onRetry={retryReconciliation} canRetry={canRetryUsage} />;
   const columns =

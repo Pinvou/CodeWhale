@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -17,9 +18,10 @@ import (
 )
 
 type memoryStore struct {
-	mu       sync.Mutex
-	flows    map[string]LoginFlow
-	sessions map[string]Session
+	mu                      sync.Mutex
+	flows                   map[string]LoginFlow
+	sessions                map[string]Session
+	approvalClassifications map[string]ApprovalClassification
 }
 
 type unavailableSessionStore struct{ *memoryStore }
@@ -29,7 +31,7 @@ func (s *unavailableSessionStore) GetSession(context.Context, string) (Session, 
 }
 
 func newMemoryStore() *memoryStore {
-	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}}
+	return &memoryStore{flows: map[string]LoginFlow{}, sessions: map[string]Session{}, approvalClassifications: map[string]ApprovalClassification{}}
 }
 func (s *memoryStore) SaveFlow(_ context.Context, key string, value LoginFlow) error {
 	s.mu.Lock()
@@ -63,8 +65,25 @@ func (s *memoryStore) GetSession(_ context.Context, key string) (Session, error)
 	return value, nil
 }
 func (s *memoryStore) DeleteSession(_ context.Context, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.sessions, key)
 	return nil
+}
+func (s *memoryStore) SaveApprovalClassification(_ context.Context, proof ApprovalClassification) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.approvalClassifications[approvalClassificationKey(proof.SessionID, proof.ApprovalRequestID)] = proof
+	return nil
+}
+func (s *memoryStore) GetApprovalClassification(_ context.Context, sessionID, approvalRequestID string) (ApprovalClassification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	proof, ok := s.approvalClassifications[approvalClassificationKey(sessionID, approvalRequestID)]
+	if !ok {
+		return ApprovalClassification{}, ErrSessionNotFound
+	}
+	return proof, nil
 }
 func (*memoryStore) TryRefreshLock(context.Context, string) (bool, error) { return true, nil }
 func (*memoryStore) ReleaseRefreshLock(context.Context, string) error     { return nil }
@@ -462,6 +481,21 @@ func TestSessionEndpointExposesOnlyNonSensitiveModelOperationsDetailsGate(t *tes
 	}
 }
 
+func TestSessionEndpointExposesOnlyNonSensitiveModelTokenActionsGate(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AdminModelTokenActionsEnabled = true
+	session := Session{ID: "model-token-actions-session", AccessToken: "access-secret", RefreshToken: "refresh-secret", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("a", 32)}
+	_ = store.SaveSession(context.Background(), session)
+	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if body := response.Body.String(); response.Code != http.StatusOK || !strings.Contains(body, `"admin_model_token_actions":true`) || strings.Contains(body, "access-secret") || strings.Contains(body, "refresh-secret") {
+		t.Fatalf("unexpected model Token actions feature session response: %d %s", response.Code, body)
+	}
+}
+
 func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -677,14 +711,261 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-policies") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/approval-requests/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests/"+userID+"/actions/decide") {
 		t.Fatal("approval workflow paths must be allowlisted")
 	}
-	if !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts/"+userID) || !tokenAdminPathAllowed(http.MethodPatch, "/admin/v1/token-accounts/"+userID+"/status") || !tokenAdminPathAllowed(http.MethodPut, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodDelete, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts/"+userID+"/credentials/"+memberID+"/validate") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/usage-requests/"+userID) || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/usage-requests/"+userID+"/retry-reconciliation") {
-		t.Fatal("admin portal must expose documented Token Gateway operations")
+	if !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts/"+userID) || !tokenAdminPathAllowed(http.MethodPut, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodDelete, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/usage-requests/"+userID) {
+		t.Fatal("admin portal must expose documented Token reads, creation, and the APT-125 v1 route compatibility contract")
 	}
-	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/protocols") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/publish") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/formulas") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/formulas/"+userID+"/publish") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/formulas/"+userID+"/preview") {
-		t.Fatal("admin portal must expose protocol and formula lifecycle operations")
+	for _, blocked := range []struct{ method, resource string }{
+		{http.MethodPatch, "/admin/v1/token-accounts/" + userID + "/status"},
+		{http.MethodPost, "/admin/v1/token-accounts/" + userID + "/credentials/" + memberID + "/validate"},
+		{http.MethodPost, "/admin/v1/usage-requests/" + userID + "/retry-reconciliation"},
+		{http.MethodPost, "/admin/v1/provisionings/" + userID + "/repair"},
+		{http.MethodPost, "/admin/v1/models:sync"},
+		{http.MethodPost, "/admin/v1/model-catalog:rollback"},
+		{http.MethodPost, "/admin/v1/models/" + userID + "/publish"},
+		{http.MethodPost, "/admin/v1/models/" + userID + "/lifecycle"},
+	} {
+		if tokenAdminPathAllowed(blocked.method, blocked.resource) {
+			t.Fatalf("ungoverned model/Token mutation remained exposed: %s %s", blocked.method, blocked.resource)
+		}
+	}
+	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/protocols") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/formulas/"+userID+"/preview") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/commands:precheck") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/commands") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/commands/"+userID) {
+		t.Fatal("admin portal must expose governed protocol/formula reads, prechecks, commands, and recovery")
+	}
+	if tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols") || tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/publish") || tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/formulas") || tokenAdminPathAllowed(http.MethodPost, "/admin/v1/formulas/"+userID+"/publish") {
+		t.Fatal("legacy direct protocol/formula writes must not remain exposed")
 	}
 	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/"+userID) || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/force-complete") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
 		t.Fatal("admin portal must not expose undocumented mutations, internal APIs, or the model data plane")
+	}
+}
+
+func TestModelTokenActionGateRejectsLegacyV2AndAccountApprovalWritesBeforeProxy(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AdminModelTokenActionsEnabled = false
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.config.TokenGatewayURL = upstreamURL
+	service.config.AccountURL = upstreamURL
+	csrf := strings.Repeat("c", 32)
+	session := Session{ID: "model-token-gate", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: csrf}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	authorize := func(request *http.Request) {
+		request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+		request.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: csrf})
+		request.Header.Set("Origin", "https://portal.example")
+		request.Header.Set("X-CSRF-Token", csrf)
+	}
+	for _, item := range []struct {
+		name     string
+		method   string
+		resource string
+		body     string
+		account  bool
+		status   int
+	}{
+		{name: "legacy token write", method: http.MethodPost, resource: "admin/v1/models:sync", status: http.StatusNotFound},
+		{name: "v2 token write", method: http.MethodPut, resource: "admin/v2/token-accounts/0198fbf7-c3ba-7bc4-8849-c157740963de/routes", status: http.StatusNotFound},
+		{name: "token approval draft", method: http.MethodPost, resource: "admin/v1/approval-requests", body: `{"command_type":"TOKEN_MODEL_LIFECYCLE_CHANGE"}`, account: true, status: http.StatusNotFound},
+		{name: "unclassified approval draft", method: http.MethodPost, resource: "admin/v1/approval-requests", body: `{"reason":"missing command classification"}`, account: true, status: http.StatusServiceUnavailable},
+		{name: "malformed approval draft", method: http.MethodPost, resource: "admin/v1/approval-requests", body: `{"command_type":`, account: true, status: http.StatusServiceUnavailable},
+		{name: "unclassified approval update", method: http.MethodPut, resource: "admin/v1/approval-requests/0198fbf7-c3ba-7bc4-8849-c157740963de", body: `{"expected_version":1}`, account: true, status: http.StatusServiceUnavailable},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			request := httptest.NewRequest(item.method, "/", strings.NewReader(item.body))
+			request.SetPathValue("resource", item.resource)
+			authorize(request)
+			response := httptest.NewRecorder()
+			if item.account {
+				service.proxyAdminAccount(response, request)
+			} else {
+				service.proxyAdminToken(response, request)
+			}
+			if response.Code != item.status {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("disabled model/Token actions reached upstream %d times", upstreamHits)
+	}
+
+	for _, item := range []struct {
+		name     string
+		method   string
+		resource string
+		body     string
+		account  bool
+	}{
+		{name: "token read remains routed", method: http.MethodGet, resource: "admin/v1/models"},
+		{name: "non-token approval remains routed", method: http.MethodPost, resource: "admin/v1/approval-requests", body: `{"command_type":"WALLET_ADJUSTMENT"}`, account: true},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			request := httptest.NewRequest(item.method, "/", strings.NewReader(item.body))
+			request.SetPathValue("resource", item.resource)
+			authorize(request)
+			response := httptest.NewRecorder()
+			if item.account {
+				service.proxyAdminAccount(response, request)
+			} else {
+				service.proxyAdminToken(response, request)
+			}
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("request was unexpectedly intercepted: status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("allowed reads and non-Token approvals reached upstream %d times, want 2", upstreamHits)
+	}
+}
+
+func TestDisabledModelTokenApprovalActionsUseSessionBoundLocalClassification(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AdminModelTokenActionsEnabled = true
+	now := time.Now().UTC()
+	service.now = func() time.Time { return now }
+	tokenID := uuid.MustParse("0198fbf7-c3ba-7bc4-8849-c157740963de")
+	financeID := uuid.MustParse("0198fbf7-c3ba-7bc4-8849-c157740963df")
+	updatedFinanceID := uuid.MustParse("0198fbf7-c3ba-7bc4-8849-c157740963e1")
+	accountCalls := 0
+	actionWrites := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accountCalls++
+		if strings.Contains(r.URL.Path, "/actions/") {
+			actionWrites++
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if r.Method == http.MethodGet || r.Method == http.MethodPut || r.Method == http.MethodPost {
+			id := path.Base(r.URL.Path)
+			if r.Method == http.MethodPost {
+				id = financeID.String()
+				w.WriteHeader(http.StatusCreated)
+			}
+			commandType := "TOKEN_MODEL_LIFECYCLE_CHANGE"
+			if id == financeID.String() || id == updatedFinanceID.String() {
+				commandType = "WALLET_ADJUSTMENT"
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"approval_request_id":"`+id+`","command_type":"`+commandType+`"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	service.config.AccountURL, _ = url.Parse(upstream.URL)
+	csrf := strings.Repeat("z", 32)
+	session := Session{ID: "actor-a", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: csrf}
+	_ = store.SaveSession(context.Background(), session)
+	authorize := func(request *http.Request, value Session) {
+		request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: value.ID})
+		request.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: value.CSRFToken})
+		request.Header.Set("Origin", "https://portal.example")
+		request.Header.Set("X-CSRF-Token", value.CSRFToken)
+	}
+	read := func(id uuid.UUID) {
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.SetPathValue("resource", "admin/v1/approval-requests/"+id.String())
+		authorize(request, session)
+		response := httptest.NewRecorder()
+		service.proxyAdminAccount(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("classification read status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	writeDraft := func(method string, id *uuid.UUID) *httptest.ResponseRecorder {
+		resource := "admin/v1/approval-requests"
+		if id != nil {
+			resource += "/" + id.String()
+		}
+		request := httptest.NewRequest(method, "/", strings.NewReader(`{"command_type":"WALLET_ADJUSTMENT","expected_version":1}`))
+		request.SetPathValue("resource", resource)
+		authorize(request, session)
+		response := httptest.NewRecorder()
+		service.proxyAdminAccount(response, request)
+		return response
+	}
+	action := func(id uuid.UUID, value Session, action string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"expected_version":1}`))
+		request.SetPathValue("resource", "admin/v1/approval-requests/"+id.String()+"/actions/"+action)
+		authorize(request, value)
+		response := httptest.NewRecorder()
+		service.proxyAdminAccount(response, request)
+		return response
+	}
+
+	read(tokenID)
+	if response := writeDraft(http.MethodPost, nil); response.Code != http.StatusCreated {
+		t.Fatalf("classification create status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := writeDraft(http.MethodPut, &updatedFinanceID); response.Code != http.StatusOK {
+		t.Fatalf("classification update status=%d body=%s", response.Code, response.Body.String())
+	}
+	service.config.AdminModelTokenActionsEnabled = false
+	if response := writeDraft(http.MethodPut, &financeID); response.Code != http.StatusOK {
+		t.Fatalf("non-Token update after create status=%d body=%s", response.Code, response.Body.String())
+	}
+	before := accountCalls
+	if response := action(tokenID, session, "submit"); response.Code != http.StatusNotFound {
+		t.Fatalf("Token action status=%d body=%s", response.Code, response.Body.String())
+	}
+	if accountCalls != before || actionWrites != 0 {
+		t.Fatalf("Token action contacted Account: calls=%d->%d writes=%d", before, accountCalls, actionWrites)
+	}
+	if response := action(financeID, session, "submit"); response.Code != http.StatusNoContent || actionWrites != 1 {
+		t.Fatalf("non-Token action status=%d writes=%d body=%s", response.Code, actionWrites, response.Body.String())
+	}
+	if response := action(financeID, session, "withdraw"); response.Code != http.StatusNoContent || actionWrites != 2 {
+		t.Fatalf("non-Token withdraw status=%d writes=%d body=%s", response.Code, actionWrites, response.Body.String())
+	}
+	if response := action(financeID, session, "decide"); response.Code != http.StatusNoContent || actionWrites != 3 {
+		t.Fatalf("non-Token decide status=%d writes=%d body=%s", response.Code, actionWrites, response.Body.String())
+	}
+	if response := action(updatedFinanceID, session, "submit"); response.Code != http.StatusNoContent || actionWrites != 4 {
+		t.Fatalf("updated non-Token action status=%d writes=%d body=%s", response.Code, actionWrites, response.Body.String())
+	}
+	rotated := session
+	rotated.AccessToken = "different-actor-token"
+	_ = store.SaveSession(context.Background(), rotated)
+	before = accountCalls
+	if response := action(financeID, rotated, "submit"); response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "APPROVAL_CLASSIFICATION_UNAVAILABLE") {
+		t.Fatalf("cross-actor token proof status=%d body=%s", response.Code, response.Body.String())
+	}
+	if accountCalls != before || actionWrites != 4 {
+		t.Fatal("cross-actor token proof must fail before Account")
+	}
+	_ = store.SaveSession(context.Background(), session)
+
+	other := Session{ID: "actor-b", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: strings.Repeat("y", 32)}
+	_ = store.SaveSession(context.Background(), other)
+	before = accountCalls
+	if response := action(financeID, other, "submit"); response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "APPROVAL_CLASSIFICATION_UNAVAILABLE") {
+		t.Fatalf("cross-actor proof status=%d body=%s", response.Code, response.Body.String())
+	}
+	if accountCalls != before || actionWrites != 4 {
+		t.Fatal("cross-actor proof must fail before Account")
+	}
+	proof, _ := store.GetApprovalClassification(context.Background(), session.ID, financeID.String())
+	proof.ExpiresAt = now.Add(-time.Second)
+	_ = store.SaveApprovalClassification(context.Background(), proof)
+	if response := action(financeID, session, "submit"); response.Code != http.StatusServiceUnavailable || actionWrites != 4 {
+		t.Fatalf("expired proof status=%d writes=%d", response.Code, actionWrites)
+	}
+	forgedID := uuid.MustParse("0198fbf7-c3ba-7bc4-8849-c157740963e0")
+	if response := action(forgedID, session, "submit"); response.Code != http.StatusServiceUnavailable || actionWrites != 4 {
+		t.Fatalf("missing/forged proof status=%d writes=%d", response.Code, actionWrites)
 	}
 }
 

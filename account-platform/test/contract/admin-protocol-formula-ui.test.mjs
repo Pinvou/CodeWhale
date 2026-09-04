@@ -293,10 +293,11 @@ test('APT-128 UI is localized, structured, responsive, and keeps APT-123 activat
     for (const key of ['protocolFormulaView', 'protocolDefinitions', 'safeFormulas', 'createProtocolDraft', 'createFormulaDraft', 'previewSafety', 'billingAuthority']) assert.ok(copy[key], `${language}.${key}`);
     assert.ok(copy.commandErrors.TOKEN_COMMAND_GOVERNANCE_INACTIVE);
   }
-  const [workspace, css, tokenService] = await Promise.all([
+  const [workspace, css, tokenService, portalService] = await Promise.all([
     readFile(new URL('../../../pinvou3-app/src/features/account-platform/AdminProtocolFormulaWorkspace.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../../../pinvou3-app/src/features/account-platform/admin-platform.css', import.meta.url), 'utf8'),
     readFile(new URL('../../internal/token/service.go', import.meta.url), 'utf8'),
+    readFile(new URL('../../internal/portal/service.go', import.meta.url), 'utf8'),
   ]);
   assert.doesNotMatch(workspace, /window\.(prompt|confirm)|eval\(|dangerouslySetInnerHTML/);
   assert.match(workspace, /role="dialog" aria-modal="true"/);
@@ -309,6 +310,12 @@ test('APT-128 UI is localized, structured, responsive, and keeps APT-123 activat
   assert.match(workspace, /previousFocus\.current\?\.focus\?\.\(\)/);
   assert.match(workspace, /minLength="10"/);
   assert.match(workspace, /action\.failure\?\.unknown/);
+  assert.match(workspace, /governedTokenCommandPrecheck/);
+  assert.match(workspace, /createGovernedTokenCommand/);
+  assert.match(workspace, /governedTokenCommandResult/);
+  assert.doesNotMatch(workspace, /client\.(createProtocolDraft|publishProtocol|createFormulaDraft|publishFormula)\(/);
+  assert.match(portalService, /if parts\[2\] == "protocols" \{\s*return false\s*\}/);
+  assert.match(portalService, /if parts\[2\] == "formulas" \{\s*return len\(parts\) == 5 && parts\[4\] == "preview" && method == http\.MethodGet\s*\}/);
   assert.match(css, /@media\(max-width:760px\)[\s\S]*\.adm-protocol-dialog\{width:100%;height:100%/);
   assert.match(css, /@media\(pointer:coarse\)/);
   for (const command of ['TOKEN_PROTOCOL_DRAFT_CREATE', 'TOKEN_PROTOCOL_PUBLISH', 'TOKEN_FORMULA_DRAFT_CREATE', 'TOKEN_FORMULA_PUBLISH']) {

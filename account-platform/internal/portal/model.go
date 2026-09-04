@@ -20,6 +20,17 @@ type Session struct {
 	CreatedAt        time.Time `json:"created_at"`
 }
 
+// ApprovalClassification is a short-lived, server-authenticated proof used by
+// the Portal to classify an approval action without trusting browser input or
+// contacting Account after the model/Token action gate has been disabled.
+type ApprovalClassification struct {
+	SessionID             string    `json:"session_id"`
+	ActorTokenFingerprint string    `json:"actor_token_fingerprint"`
+	ApprovalRequestID     string    `json:"approval_request_id"`
+	CommandType           string    `json:"command_type"`
+	ExpiresAt             time.Time `json:"expires_at"`
+}
+
 type TokenResponse struct {
 	AccessToken      string `json:"access_token"`
 	RefreshToken     string `json:"refresh_token"`

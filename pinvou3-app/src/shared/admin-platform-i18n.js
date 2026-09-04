@@ -1456,6 +1456,40 @@ Object.assign(adminPlatformCopy.ja.billing, {
   capabilityLimitations: '現在の決済プロバイダーには機能制限があります。未対応の返金、能動的なクローズ、通知、日次照合操作は無効です。',
 });
 
+const adminModelTokenActionCopyZh = {
+  actionsReadOnly: '高风险操作入口尚未启用；当前区域保持只读。',
+  actionLead: '核对服务端影响证据并填写原因后提交。提交会固定幂等键，冲突不会覆盖新事实。',
+  actionResourceVersion: '权威版本', approvalRequired: '需独立审批', actionEffectiveAt: '生效时间', actionImmediate: '立即生效',
+  actionLoadingImpact: '正在加载服务端影响预检…', actionUnknown: '结果暂时无法确认。只能使用原幂等键恢复查询或重试，不能创建新操作。', actionPrecheckFailed: '影响预检失败，当前不能提交。', actionSubmitFailed: '操作未受理；请重新加载权威影响后再确认。',
+  actionRoutes: '关联路由', actionProvisionings: 'Provisioning', actionInflight: '进行中请求', actionSessions: '活跃会话', actionCoverageGaps: '覆盖缺口', actionAlternatives: '可用替代项', actionBlocked: '服务端阻止本次操作',
+  impactBlockers: { PRICE_COVERAGE_MISSING: '缺少有效价格覆盖。', REPLACEMENT_MODEL_UNAVAILABLE: '替代模型不可用。', INFLIGHT_REQUESTS_PRESENT: '仍有进行中的请求。', READY_PROVISIONING_DEPENDS_ON_ROUTE: '已有就绪 Provisioning 依赖该路由。', READY_COVERAGE_WOULD_BE_LOST: '操作会丢失就绪覆盖。', ALTERNATIVE_CREDENTIAL_MISSING: '没有可用的替代凭据。', ACTIVE_LEASES_PRESENT: '仍有活跃租约。' },
+  actionDangerConfirm: '我已核对目标、影响与不可逆后果，并确认继续。', actionAuditNotice: '确认不等于审批。服务端仍会校验权限、近期认证、版本、审批策略并写入审计。', actionReload: '重新加载影响', actionRecoverSameKey: '查询原命令结果', actionRecoveryUnavailable: '等待人工核查', actionRequestApproval: '提交审批', actionAccepted: '操作已受理', actionApprovalReference: '审批单', actionAuditReference: '审计引用', actionAccountVersion: '账户版本', actionRouteVersion: '路由版本',
+  routeConfiguration: '路由配置', enableTokenAccount: '重新启用 Token Account', disableTokenAccount: '停用 Token Account', disableTokenAccountLead: '状态变更前必须检查路由、凭据、运行任务和进行中请求；最终状态由服务端命令决定。', deleteRoute: '删除路由', deleteRouteLead: '删除前必须验证替代覆盖、运行任务和进行中请求。',
+  publishModel: '发布模型草稿', deprecateModel: '弃用模型', removeModel: '下架模型', syncCatalog: '同步模型目录', modelActionLead: '生命周期操作会使用目录版本和实时依赖证据进行并发复核。', catalogVersion: '目录版本', rollbackCatalog: '回滚模型目录', rollbackCatalogLead: '从历史版本创建新的前向目录版本；不会改写历史。', rollbackSource: '回滚来源', rollbackVersion: '历史目录版本',
+};
+const adminModelTokenActionCopyEn = {
+  actionsReadOnly: 'High-risk actions are not enabled yet; this area remains read-only.',
+  actionLead: 'Review server impact evidence and enter a reason. Submission fixes an idempotency key and never overwrites newer facts.',
+  actionResourceVersion: 'Authoritative version', approvalRequired: 'Independent approval required', actionEffectiveAt: 'Effective time', actionImmediate: 'Immediately',
+  actionLoadingImpact: 'Loading the server impact precheck…', actionUnknown: 'The result is unknown. Only recovery with the original idempotency key is allowed; a new operation cannot be created.', actionPrecheckFailed: 'Impact precheck failed. Submission is unavailable.', actionSubmitFailed: 'The operation was not accepted. Reload authoritative impact before confirming again.',
+  actionRoutes: 'Related routes', actionProvisionings: 'Provisioning', actionInflight: 'In-flight requests', actionSessions: 'Active sessions', actionCoverageGaps: 'Coverage gaps', actionAlternatives: 'Available alternatives', actionBlocked: 'The server blocks this operation',
+  impactBlockers: { PRICE_COVERAGE_MISSING: 'Valid price coverage is missing.', REPLACEMENT_MODEL_UNAVAILABLE: 'The replacement model is unavailable.', INFLIGHT_REQUESTS_PRESENT: 'Requests are still in flight.', READY_PROVISIONING_DEPENDS_ON_ROUTE: 'Ready Provisioning depends on this route.', READY_COVERAGE_WOULD_BE_LOST: 'Ready coverage would be lost.', ALTERNATIVE_CREDENTIAL_MISSING: 'No alternative credential is available.', ACTIVE_LEASES_PRESENT: 'Active leases remain.' },
+  actionDangerConfirm: 'I reviewed the target, impact, and irreversible consequences and want to continue.', actionAuditNotice: 'Confirmation is not approval. The server still checks permission, recent authentication, versions, approval policy, and writes audit evidence.', actionReload: 'Reload impact', actionRecoverSameKey: 'Query original command', actionRecoveryUnavailable: 'Await manual review', actionRequestApproval: 'Request approval', actionAccepted: 'Operation accepted', actionApprovalReference: 'Approval request', actionAuditReference: 'Audit reference', actionAccountVersion: 'Account version', actionRouteVersion: 'Route version',
+  routeConfiguration: 'Route configuration', enableTokenAccount: 'Re-enable Token Account', disableTokenAccount: 'Disable Token Account', disableTokenAccountLead: 'Routes, credentials, running work, and in-flight requests must be checked before a status change; the server command decides the final state.', deleteRoute: 'Delete route', deleteRouteLead: 'Alternative coverage, running work, and in-flight requests must be checked first.',
+  publishModel: 'Publish model draft', deprecateModel: 'Deprecate model', removeModel: 'Remove model', syncCatalog: 'Sync model catalog', modelActionLead: 'Lifecycle actions revalidate catalog versions and live dependencies before commit.', catalogVersion: 'Catalog version', rollbackCatalog: 'Rollback model catalog', rollbackCatalogLead: 'Create a new forward catalog version from history without rewriting history.', rollbackSource: 'Rollback source', rollbackVersion: 'Historical catalog version',
+};
+const adminModelTokenActionCopyJa = {
+  actionsReadOnly: '高リスク操作はまだ有効ではないため、この領域は読み取り専用です。',
+  actionLead: 'サーバーの影響証拠を確認して理由を入力します。送信時に冪等キーを固定し、新しい事実を上書きしません。',
+  actionResourceVersion: '権威バージョン', approvalRequired: '独立承認が必要', actionEffectiveAt: '反映時刻', actionImmediate: '即時',
+  actionLoadingImpact: 'サーバーの影響事前確認を読み込み中…', actionUnknown: '結果を確認できません。元の冪等キーによる復旧のみ可能で、新しい操作は作成できません。', actionPrecheckFailed: '影響事前確認に失敗したため送信できません。', actionSubmitFailed: '操作は受理されませんでした。権威影響を再読込してから確認してください。',
+  actionRoutes: '関連ルート', actionProvisionings: 'Provisioning', actionInflight: '実行中リクエスト', actionSessions: '有効セッション', actionCoverageGaps: 'カバレッジ不足', actionAlternatives: '利用可能な代替', actionBlocked: 'サーバーがこの操作を禁止しています',
+  impactBlockers: { PRICE_COVERAGE_MISSING: '有効な価格カバレッジがありません。', REPLACEMENT_MODEL_UNAVAILABLE: '代替モデルを利用できません。', INFLIGHT_REQUESTS_PRESENT: '実行中のリクエストがあります。', READY_PROVISIONING_DEPENDS_ON_ROUTE: '準備済み Provisioning がこのルートに依存しています。', READY_COVERAGE_WOULD_BE_LOST: '準備済みカバレッジが失われます。', ALTERNATIVE_CREDENTIAL_MISSING: '代替資格情報がありません。', ACTIVE_LEASES_PRESENT: '有効なリースが残っています。' },
+  actionDangerConfirm: '対象、影響、取り消せない結果を確認し、続行します。', actionAuditNotice: '確認は承認ではありません。サーバーは権限、直近認証、バージョン、承認方針を再確認し、監査証拠を記録します。', actionReload: '影響を再読込', actionRecoverSameKey: '元のコマンド結果を照会', actionRecoveryUnavailable: '手動確認待ち', actionRequestApproval: '承認を申請', actionAccepted: '操作を受け付けました', actionApprovalReference: '承認申請', actionAuditReference: '監査参照', actionAccountVersion: 'アカウント版', actionRouteVersion: 'ルート版',
+  routeConfiguration: 'ルート設定', enableTokenAccount: 'Token Account を再有効化', disableTokenAccount: 'Token Account を無効化', disableTokenAccountLead: '状態変更前にルート、認証情報、実行中タスク、処理中リクエストを確認し、最終状態はサーバーコマンドで決定します。', deleteRoute: 'ルートを削除', deleteRouteLead: '代替カバレッジ、実行中タスク、処理中リクエストを先に検証します。',
+  publishModel: 'モデル草稿を公開', deprecateModel: 'モデルを非推奨化', removeModel: 'モデルを削除', syncCatalog: 'モデルカタログを同期', modelActionLead: 'ライフサイクル操作はコミット前にカタログ版と依存関係を再検証します。', catalogVersion: 'カタログ版', rollbackCatalog: 'モデルカタログを復元', rollbackCatalogLead: '履歴を書き換えず、過去版から新しい前進版を作成します。', rollbackSource: '復元元', rollbackVersion: '履歴カタログ版',
+};
+
 const adminTokenResourceCopyZh = {
   createTokenAccount: '创建 Token Account', ownerSelectionLead: '从权威目录搜索并选择所有者；不接受手填内部 ID。', candidateStatus: '候选状态', organizationContext: '所属组织', changeOrganization: '更换组织', findOrganization: '搜索组织', findOwner: '搜索所有者', ownerSearchPlaceholder: '输入名称或完整稳定 ID', accountName: '账户名称', selectedOwner: '已选所有者', notSelected: '尚未选择', confirmCreate: '确认创建', ownerCreateFailed: 'Token Account 创建失败，请按最新状态重试。', ownerCandidatePermissionRequired: '当前仅有 Token 管理权限，但缺少所有者候选读取权限。创建入口已安全关闭，且不会请求候选目录或退化为手填 ID。', configureStableRoute: '配置稳定路由', stableRouteLead: '先选择已发布模型，再确认其精确协议版本；只提交稳定引用与路由策略。', findModel: '搜索已发布模型', chooseModel: '选择模型', chooseProtocol: '选择协议版本', defaultScope: '默认范围', routeServerOwned: 'Provider、upstream 与健康状态均由服务端解析和探测，本页面不能提交或覆盖这些字段。', confirmRoute: '确认保存路由', stableRouteNotActive: '稳定路由写入尚未激活。旧版 v1 兼容接口不会被新界面调用，请等待 APT-138 激活后再试。', routeSaveFailed: '稳定路由未保存，请刷新账户状态后重试。', modelPermissionRequired: '缺少模型目录读取权限，无法安全选择稳定模型和协议版本；路由写入入口已关闭。', backToAccounts: '返回 Token Account', routeHealth: '路由与健康', refreshHealth: '刷新健康证据', healthUnavailable: '路由健康证据暂时不可用', noRoutes: '当前账户尚无路由。', healthEvidence: '探测证据时间', routable: '当前可选路', stableModel: '稳定模型', legacyUnresolved: '旧路由（待迁移）', notObserved: '尚未探测', expiresAt: '有效至', noExpiry: '无有效 TTL', viewRouteHealth: '查看路由与健康', actions: '操作', priority: '优先级', close: '关闭', cancel: '取消', submitting: '提交中…', reason: '操作原因（至少 10 个字符）', yes: '是', no: '否',
 };
@@ -1514,6 +1548,9 @@ adminPlatformCopy.ja.modelToken = {
 Object.assign(adminPlatformCopy.zh.modelToken, adminTokenResourceCopyZh);
 Object.assign(adminPlatformCopy.en.modelToken, adminTokenResourceCopyEn);
 Object.assign(adminPlatformCopy.ja.modelToken, adminTokenResourceCopyJa);
+Object.assign(adminPlatformCopy.zh.modelToken, adminModelTokenActionCopyZh);
+Object.assign(adminPlatformCopy.en.modelToken, adminModelTokenActionCopyEn);
+Object.assign(adminPlatformCopy.ja.modelToken, adminModelTokenActionCopyJa);
 Object.assign(adminPlatformCopy.zh.modelToken, { routeOutcomeUnknown: '路由写入结果暂时未知。已保留原幂等键并锁定新提交，请先刷新权威账户状态。' });
 Object.assign(adminPlatformCopy.en.modelToken, { routeOutcomeUnknown: 'The route outcome is unknown. The original idempotency key is retained and new submission is locked until authoritative account state is refreshed.' });
 Object.assign(adminPlatformCopy.ja.modelToken, { routeOutcomeUnknown: 'ルート更新結果は不明です。元の冪等キーを保持して再送信をロックしました。先に権威アカウント状態を更新してください。' });

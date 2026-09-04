@@ -38,6 +38,7 @@ portal:
   adminModelTokenIAEnabled: false
   adminTokenResourceFormsEnabled: false
   adminModelOperationsDetailsEnabled: false
+  adminModelTokenActionsEnabled: false
 
 replicas:
   accountService: 2

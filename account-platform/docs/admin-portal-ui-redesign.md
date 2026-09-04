@@ -561,7 +561,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 - **运行与用量**：Provisioning 与用量区块分别鉴权、独立失败；一期详情是同页主内容稳定 URL 子视图，不是二期资产详情；不显示模型正文；结果未知必须查询/核对；核对重试不创建新的模型执行。
 - **协议/公式**：只展示已定义的计量事实和版本，不提供任意表达式在线执行；四个 Token 管理命令的策略注册是一期写按钮出现的前置任务。
 - **跨域定价与审计**：模型详情只按模型上下文读取/编辑 Billing 唯一价格事实；财务侧全平台定价治理入口保持不变。模型/Token 详情读取 Token 本域审计投影并复用展示组件，不拼接 Account 全局审计、不复制可写事实或扩展导出权限。
-- **高风险交互整改所有权**：APT-131 第三轮整改拆为 `APT-124-R1 → APT-130-R1 → APT-131-R1`。前两批分别由 Token/Billing 和运行领域交付权威预检、完整财务快照、闭合 repair/reconcile target、CAS 与 governed result；Portal 批次只负责 Account 权威 create/GET 产生的审批分类证明、统一对话框、终态/未知恢复、撤权中止和真实浏览器 smoke。Portal 不计算 precheck 或领域版本。三批逐批独立审核、独立提交，前置合同未通过时对应按钮失败关闭。
+- **高风险交互整改所有权**：APT-131 第三轮整改拆为 `APT-124-R1 → APT-130-R1 → APT-131-R1`。前两批分别由 Token/Billing 和运行领域交付权威预检、完整财务快照、闭合 repair/reconcile target、CAS 与 governed result；Portal 批次只负责 Account 权威 create/update/detail 产生的审批分类证明、统一对话框、终态/未知恢复、撤权中止和真实浏览器 smoke。Portal 不计算 precheck 或领域版本。三批逐批独立审核、独立提交，前置合同未通过时对应按钮失败关闭。
 
 ### 12.4 治理、运行手册与我的组织
 

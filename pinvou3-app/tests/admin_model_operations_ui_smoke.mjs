@@ -18,6 +18,7 @@ const caseID = '0199a300-0001-7000-8000-000000000006';
 const attemptID = '0199a300-0001-7000-8000-000000000007';
 const evidenceID = '0199a300-0001-7000-8000-000000000008';
 const actorID = '0199a300-0001-7000-8000-000000000009';
+const commandID = '0199a300-0001-7000-8000-000000000013';
 
 const allPermissions = ['platform.tokens.read', 'platform.tokens.manage', 'platform.usage.read', 'platform.usage.reconcile.retry', 'platform.audit.read'];
 let permissions = [...allPermissions];
@@ -26,7 +27,7 @@ let attemptMode = 'success';
 let evidenceMode = 'success';
 let usageDelay = false;
 let retryMode = 'success';
-const observations = { provisioningDetail: 0, attempts: 0, usageDetail: 0, usageAborted: 0, evidence: 0, retryCalls: [], repairCalls: [], modelRequests: 0 };
+const observations = { provisioningDetail: 0, attempts: 0, usageDetail: 0, usageAborted: 0, evidence: 0, retryCalls: [], repairCalls: [], precheckCalls: [], commandCalls: [], resultCalls: 0, modelRequests: 0 };
 
 const now = '2026-09-04T12:00:00Z';
 function envelope(items, more = false) {
@@ -56,8 +57,32 @@ const usage = {
   status: 'REVIEW', execution_status: 'SUCCEEDED', delivery_status: 'COMPLETED', cancel_status: 'NOT_REQUESTED', settlement_status: 'REVIEW',
   maximum_microcredits: 100, actual_microcredits: 90, adapter_version: 'adapter-v3', attempt_status: 'SUCCEEDED',
   input_tokens: 5, cached_input_tokens: 2, output_tokens: 3, reconciliation_attempts: 2,
-  reconciliation_last_error: 'RECONCILIATION_DIAGNOSTIC_REDACTED', started_at: '2026-09-04T11:58:00Z', updated_at: now,
+  reconciliation_last_error: 'RECONCILIATION_DIAGNOSTIC_REDACTED', last_persisted_sequence: 2,
+  started_at: '2026-09-04T11:58:00Z', updated_at: now,
 };
+
+const dependencies = Object.fromEntries(['routes', 'healthy_routes', 'provisionings', 'ready_provisionings', 'active_leases', 'inflight_requests', 'active_sessions', 'alternative_credentials', 'alternative_accounts', 'affected_coverage_tuples', 'remaining_ready_coverage', 'coverage_gaps'].map((key) => [key, 0]));
+function governedPrecheck(input) {
+  const repair = input.command_type === 'TOKEN_ROUTE_PROVISIONING_REPAIR';
+  return {
+    action: input.command_type, precheck_fingerprint: 'a'.repeat(64), requires_cas_revalidation: true,
+    snapshot_semantics: 'INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS', token_observed_at: now, blockers: [],
+    evidence: { resource_type: input.target_resource_type, resource_id: input.target_resource_id, current_status: repair ? 'FAILED' : 'REVIEW', current_version: { evidence_etag: `"impact-${'b'.repeat(64)}"`, evidence_set_sha256: 'c'.repeat(64) }, dependencies },
+    expected_versions: repair
+      ? { provisioning_id: provisioningID, expected_provisioning_version: now, target_generation: 2 }
+      : { usage_request_id: usageID, expected_usage_version: now, evidence_high_watermark: 2 },
+  };
+}
+function commandResult(input, status) {
+  return {
+    command_reference: commandID, command_type: input.command_type, policy_version: 2, actor_user_id: actorID,
+    actor_permission: input.command_type === 'TOKEN_ROUTE_PROVISIONING_REPAIR' ? 'platform.tokens.manage' : 'platform.usage.reconcile.retry',
+    authorization_version: 1, idempotency_fingerprint: 'd'.repeat(64), target_resource_type: input.target_resource_type,
+    target_resource_id: input.target_resource_id, status, redacted_result: {}, stable_error_code: null,
+    approval_request_id: null, audit_request_id: 'operation-action-audit', created_at: now,
+    completed_at: status === 'SUCCEEDED' ? '2026-09-04T12:00:01Z' : null,
+  };
+}
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
@@ -72,7 +97,7 @@ const server = createServer(async (request, response) => {
     return json(response, { permissions, detailsEnabled, attemptMode, evidenceMode, usageDelay, retryMode });
   }
   if (url.pathname === '/__test__/state') return json(response, observations);
-  if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-smoke', feature_flags: { admin_model_token_ia: true, admin_model_operations_details: detailsEnabled } });
+  if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-smoke', feature_flags: { admin_model_token_ia: true, admin_model_operations_details: detailsEnabled, admin_model_token_actions: true } });
   if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: actorID, platform_permissions: permissions });
   if (url.pathname === '/api/admin/token/admin/v1/provisionings' && request.method === 'GET') return json(response, envelope([provisioning]));
   if (url.pathname === '/api/admin/token/admin/v1/usage-requests' && request.method === 'GET') return json(response, envelope([usage]));
@@ -108,6 +133,20 @@ const server = createServer(async (request, response) => {
   if (url.pathname === `/api/admin/token/admin/v1/provisionings/${provisioningID}/repair` && request.method === 'POST') {
     observations.repairCalls.push({ key: request.headers['idempotency-key'], body: await body(request) });
     return json(response, { ...provisioning, status: 'PENDING', repair_round: 1, stage: 'MANUAL_REPAIR' }, 202);
+  }
+  if (url.pathname === '/api/admin/token/admin/v1/commands:precheck' && request.method === 'POST') {
+    const input = await body(request);
+    observations.precheckCalls.push(input);
+    return json(response, governedPrecheck(input));
+  }
+  if (url.pathname === '/api/admin/token/admin/v1/commands' && request.method === 'POST') {
+    const input = await body(request);
+    observations.commandCalls.push({ key: request.headers['idempotency-key'], body: input });
+    return json(response, commandResult(input, 'PENDING'), 202);
+  }
+  if (url.pathname === `/api/admin/token/admin/v1/commands/${commandID}` && request.method === 'GET') {
+    observations.resultCalls += 1;
+    return json(response, commandResult(observations.commandCalls.at(-1).body, 'SUCCEEDED'));
   }
   if (/model|inference|chat|completion/u.test(url.pathname) && url.pathname.startsWith('/api/')) observations.modelRequests += 1;
   if (url.pathname.startsWith('/api/admin/')) return json(response, { items: [] });
@@ -171,6 +210,27 @@ try {
   for (const hidden of ['worker_id', 'error_detail']) assert.doesNotMatch(JSON.stringify(safeAttemptsPayload), new RegExp(`"${hidden}"`, 'u'), `attempt network payload excludes ${hidden}`);
   assert.match(page.url(), /provisioning_q=failed/u, 'detail preserves its source-list query');
 
+  const detailButtons = await page.$$eval('.adm-operation-detail header button', (nodes) => nodes.map((node) => node.textContent.trim()));
+  assert.equal(detailButtons.some((label) => /repair/iu.test(label)), true, `governed repair button is visible: ${JSON.stringify(detailButtons)}`);
+  await page.evaluate(() => [...document.querySelectorAll('.adm-operation-detail header button')].find((button) => /repair/iu.test(button.textContent)).click());
+  await page.waitForSelector('.adm-high-risk-dialog textarea');
+  await page.type('.adm-high-risk-dialog textarea', 'retry the bounded provisioning checks');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
+  const repairBefore = (await state(page)).commandCalls.length;
+  await page.click('.adm-high-risk-dialog button[type="submit"]');
+  await page.waitForFunction((count) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.commandCalls.length === count + 1), {}, repairBefore);
+  await page.waitForSelector('.adm-high-risk-dialog [role="alert"]');
+  await page.click('.adm-high-risk-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-high-risk-dialog .adm-inline-message.success'));
+  const afterRepair = await state(page);
+  assert.equal(afterRepair.precheckCalls.at(-1).command_type, 'TOKEN_ROUTE_PROVISIONING_REPAIR');
+  assert.deepEqual(afterRepair.precheckCalls.at(-1).command, { provisioning_id: provisioningID, expected_provisioning_version: now, target_generation: 2, replay_model_request: false });
+  assert.equal(afterRepair.commandCalls.at(-1).body.command_type, 'TOKEN_ROUTE_PROVISIONING_REPAIR');
+  assert.deepEqual(afterRepair.commandCalls.at(-1).body.command, { provisioning_id: provisioningID, expected_provisioning_version: now, target_generation: 2, replay_model_request: false });
+  assert.equal(afterRepair.repairCalls.length, 0, 'governed repair never falls back to the legacy repair POST');
+  await page.click('.adm-high-risk-dialog footer button:first-child');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
+
   await configure(page, 'evidence=fail&retry=success');
   await page.goto(`${origin}/admin.html?section=modelOperations&operations_tab=reconciliation&reconciliation_status=OPEN`, { waitUntil: 'networkidle0' });
   await page.click('#model-operations-panel-reconciliation tbody button');
@@ -188,33 +248,27 @@ try {
   assert.equal(reflow.fits, true, `operation detail reflows without page-level horizontal scrolling at 320px: ${JSON.stringify(reflow)}`);
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
 
-  const reason = '客户 13800138000 要求仅重新核对 existing-secret-token';
-  await page.type('.adm-operation-command textarea', reason);
-  const beforeRetry = (await state(page)).retryCalls.length;
-  await page.evaluate(() => { const button = document.querySelector('.adm-operation-command button[type="submit"]'); button.click(); button.click(); });
-  await page.waitForFunction((count) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.retryCalls.length === count + 1), {}, beforeRetry);
-  const afterRetry = await state(page);
-  assert.equal(afterRetry.modelRequests, 0, 'reconciliation never calls a model or inference endpoint');
-  assert.deepEqual(afterRetry.retryCalls.at(-1).body, { reason });
-  await page.waitForFunction(() => [...document.querySelectorAll('.adm-operation-detail textarea')].every((node) => !node.value.includes('13800138000')));
-  assert.doesNotMatch(await page.$eval('.adm-operation-detail', (node) => node.textContent), /13800138000|existing-secret-token/u, 'operator reason and PII stay out of the operational DOM');
-
-  await configure(page, 'retry=unknown');
-  await page.reload({ waitUntil: 'networkidle0' });
-  await page.type('.adm-operation-command textarea', 'recover uncertain reconciliation result');
-  const beforeUnknown = (await state(page)).retryCalls.length;
-  await page.click('.adm-operation-command button[type="submit"]');
-  await page.waitForSelector('.adm-command-unknown');
-  const unknownState = await state(page);
-  assert.equal(unknownState.retryCalls.length, beforeUnknown + 1);
-  const frozenKey = unknownState.retryCalls.at(-1).key;
-  assert.match(await page.$eval('.adm-operation-command button[type="submit"]', (node) => node.textContent), /original key/u);
-  await configure(page, 'retry=success');
-  await page.click('.adm-operation-command button[type="submit"]');
-  await page.waitForFunction((count) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.retryCalls.length === count + 1), {}, beforeUnknown + 1);
-  assert.equal((await state(page)).retryCalls.at(-1).key, frozenKey, 'unknown recovery reuses the exact idempotency key');
-  await page.waitForSelector('.adm-operation-audit button');
-  await page.click('.adm-operation-audit button');
+  await page.evaluate(() => [...document.querySelectorAll('.adm-operation-detail header button')].find((button) => button.textContent.trim() === 'Reconcile existing evidence again').click());
+  await page.waitForSelector('.adm-high-risk-dialog textarea');
+  await page.type('.adm-high-risk-dialog textarea', 'reconcile only the existing usage and settlement evidence');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
+  const reconcileBefore = (await state(page)).commandCalls.length;
+  await page.click('.adm-high-risk-dialog button[type="submit"]');
+  await page.waitForFunction((count) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.commandCalls.length === count + 1), {}, reconcileBefore);
+  await page.waitForSelector('.adm-high-risk-dialog [role="alert"]');
+  await page.click('.adm-high-risk-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-high-risk-dialog .adm-inline-message.success'));
+  const governedState = await state(page);
+  assert.equal(governedState.precheckCalls.at(-1).command_type, 'TOKEN_USAGE_RECONCILIATION_RETRY');
+  assert.deepEqual(governedState.precheckCalls.at(-1).command, { usage_request_id: usageID, expected_usage_version: now, evidence_high_watermark: 2, replay_model_request: false });
+  assert.equal(governedState.commandCalls.at(-1).body.command_type, 'TOKEN_USAGE_RECONCILIATION_RETRY');
+  assert.deepEqual(governedState.commandCalls.at(-1).body.command, { usage_request_id: usageID, expected_usage_version: now, evidence_high_watermark: 2, replay_model_request: false });
+  assert.equal(governedState.retryCalls.length, 0, 'governed reconciliation never falls back to the legacy retry POST');
+  assert.equal(governedState.modelRequests, 0, 'reconciliation does not call a model or inference endpoint');
+  await page.click('.adm-high-risk-dialog footer button:first-child');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
+  await page.waitForFunction(() => document.querySelector('.adm-operation-audit button')?.getClientRects().length > 0);
+  await page.evaluate(() => document.querySelector('.adm-operation-audit button').click());
   await page.waitForFunction((id) => new URLSearchParams(location.search).get('section') === 'audit' && new URLSearchParams(location.search).get('audit_resource') === id, {}, usageID);
 
   await configure(page, 'permissions=all&usage-delay=1');

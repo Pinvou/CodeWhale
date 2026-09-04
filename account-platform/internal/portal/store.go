@@ -2,6 +2,8 @@ package portal
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -17,6 +19,8 @@ type Store interface {
 	SaveSession(context.Context, Session) error
 	GetSession(context.Context, string) (Session, error)
 	DeleteSession(context.Context, string) error
+	SaveApprovalClassification(context.Context, ApprovalClassification) error
+	GetApprovalClassification(context.Context, string, string) (ApprovalClassification, error)
 	TryRefreshLock(context.Context, string) (bool, error)
 	ReleaseRefreshLock(context.Context, string) error
 	Ping(context.Context) error
@@ -79,6 +83,35 @@ func (s *RedisStore) GetSession(ctx context.Context, id string) (Session, error)
 
 func (s *RedisStore) DeleteSession(ctx context.Context, id string) error {
 	return s.client.Del(ctx, "portal:session:"+id).Err()
+}
+
+func (s *RedisStore) SaveApprovalClassification(ctx context.Context, proof ApprovalClassification) error {
+	body, err := json.Marshal(proof)
+	if err != nil {
+		return err
+	}
+	ttl := time.Until(proof.ExpiresAt)
+	if ttl <= 0 {
+		return ErrSessionNotFound
+	}
+	return s.client.Set(ctx, approvalClassificationKey(proof.SessionID, proof.ApprovalRequestID), body, ttl).Err()
+}
+
+func (s *RedisStore) GetApprovalClassification(ctx context.Context, sessionID, approvalRequestID string) (ApprovalClassification, error) {
+	value, err := s.client.Get(ctx, approvalClassificationKey(sessionID, approvalRequestID)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return ApprovalClassification{}, ErrSessionNotFound
+	}
+	var proof ApprovalClassification
+	if err == nil {
+		err = json.Unmarshal(value, &proof)
+	}
+	return proof, err
+}
+
+func approvalClassificationKey(sessionID, approvalRequestID string) string {
+	digest := sha256.Sum256([]byte(sessionID + "\x00" + approvalRequestID))
+	return "portal:approval-classification:" + hex.EncodeToString(digest[:])
 }
 
 func (s *RedisStore) TryRefreshLock(ctx context.Context, id string) (bool, error) {

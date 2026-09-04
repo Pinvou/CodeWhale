@@ -1,6 +1,7 @@
 package portal
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -40,6 +41,7 @@ type Config struct {
 	AdminModelTokenIAEnabled           bool
 	AdminTokenResourceFormsEnabled     bool
 	AdminModelOperationsDetailsEnabled bool
+	AdminModelTokenActionsEnabled      bool
 	SystemProbes                       []SystemProbe
 	SecureCookies                      bool
 	SessionMaxAge                      time.Duration
@@ -269,6 +271,7 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 			"admin_model_token_ia":           s.config.AdminModelTokenIAEnabled,
 			"admin_token_resource_forms":     s.config.AdminTokenResourceFormsEnabled,
 			"admin_model_operations_details": s.config.AdminModelOperationsDetailsEnabled,
+			"admin_model_token_actions":      s.config.AdminModelTokenActionsEnabled,
 		},
 	})
 }
@@ -294,6 +297,9 @@ func (s *Service) proxyToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) proxyAdminAccount(w http.ResponseWriter, r *http.Request) {
+	if s.rejectDisabledModelTokenApproval(w, r) {
+		return
+	}
 	s.proxy(w, r, s.config.AccountURL, "/"+r.PathValue("resource"), accountAdminPathAllowed)
 }
 
@@ -302,7 +308,83 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.config.AdminModelTokenActionsEnabled {
+		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return
+	}
 	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenAdminPathAllowed)
+}
+
+func (s *Service) rejectDisabledModelTokenApproval(w http.ResponseWriter, r *http.Request) bool {
+	if s.config.AdminModelTokenActionsEnabled || r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return false
+	}
+	resource := path.Clean("/" + r.PathValue("resource"))
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	isDraftWrite := resource == "/admin/v1/approval-requests" && r.Method == http.MethodPost
+	isDraftUpdate := len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "approval-requests" && r.Method == http.MethodPut
+	isExistingAction := len(parts) == 6 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "approval-requests" && parts[4] == "actions" && (parts[5] == "submit" || parts[5] == "withdraw" || parts[5] == "decide") && r.Method == http.MethodPost
+	if isDraftUpdate || isExistingAction {
+		requestID, err := uuid.Parse(parts[3])
+		if err != nil {
+			api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+			return true
+		}
+		return s.rejectDisabledExistingTokenApprovalAction(w, r, requestID)
+	}
+	if !isDraftWrite {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, (4<<20)+1))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "the approval request could not be read", httpserver.RequestID(r.Context()))
+		return true
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if len(body) > 4<<20 {
+		api.WriteError(w, http.StatusRequestEntityTooLarge, "INVALID_REQUEST", "the approval request is too large", httpserver.RequestID(r.Context()))
+		return true
+	}
+	var input struct {
+		CommandType string `json:"command_type"`
+	}
+	if json.Unmarshal(body, &input) != nil || strings.TrimSpace(input.CommandType) == "" {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_CLASSIFICATION_UNAVAILABLE", "the approval request could not be classified", httpserver.RequestID(r.Context()))
+		return true
+	}
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(input.CommandType)), "TOKEN_") {
+		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return true
+	}
+	return false
+}
+
+// rejectDisabledExistingTokenApprovalAction uses the short-lived classification
+// proof captured when this same Portal session read the authoritative Account
+// approval projection. The action request never calls Account merely to decide
+// whether it may call Account: missing, expired, cross-session, or malformed
+// proof fails closed and therefore cannot be used to bypass the feature gate.
+func (s *Service) rejectDisabledExistingTokenApprovalAction(w http.ResponseWriter, r *http.Request, approvalRequestID uuid.UUID) bool {
+	session, err := s.authenticatedSession(r.Context(), r)
+	if err != nil {
+		api.WriteError(w, http.StatusUnauthorized, "LOGIN_REQUIRED", "login is required", httpserver.RequestID(r.Context()))
+		return true
+	}
+	if !s.validMutation(r, session) {
+		api.WriteError(w, http.StatusForbidden, "CSRF_REJECTED", "the request origin or CSRF token is invalid", httpserver.RequestID(r.Context()))
+		return true
+	}
+	proof, err := s.store.GetApprovalClassification(r.Context(), session.ID, approvalRequestID.String())
+	actorFingerprint := approvalActorTokenFingerprint(session.AccessToken)
+	if err != nil || proof.SessionID != session.ID || proof.ActorTokenFingerprint == "" || subtle.ConstantTimeCompare([]byte(proof.ActorTokenFingerprint), []byte(actorFingerprint)) != 1 || proof.ApprovalRequestID != approvalRequestID.String() || !proof.ExpiresAt.After(s.now()) || strings.TrimSpace(proof.CommandType) == "" {
+		api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_CLASSIFICATION_UNAVAILABLE", "the approval request could not be classified", httpserver.RequestID(r.Context()))
+		return true
+	}
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(proof.CommandType)), "TOKEN_") {
+		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return true
+	}
+	return false
 }
 
 func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.URL, resource string, allowed func(string, string) bool) {
@@ -359,6 +441,9 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 		return
 	}
 	defer response.Body.Close()
+	if upstream == s.config.AccountURL && response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices {
+		s.captureApprovalClassification(r.Context(), session, r.Method, resource, response)
+	}
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "no-store")
 	if disposition := response.Header.Get("Content-Disposition"); disposition != "" {
@@ -384,6 +469,76 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+}
+
+func (s *Service) captureApprovalClassification(ctx context.Context, session Session, method, resource string, response *http.Response) {
+	parts := strings.Split(strings.Trim(path.Clean(resource), "/"), "/")
+	if len(parts) < 3 || parts[0] != "admin" || parts[1] != "v1" || parts[2] != "approval-requests" {
+		return
+	}
+	isCreate := method == http.MethodPost && len(parts) == 3
+	isDetail := method == http.MethodGet && len(parts) == 4
+	isUpdate := method == http.MethodPut && len(parts) == 4
+	if !isCreate && !isDetail && !isUpdate {
+		return
+	}
+	var expectedID uuid.UUID
+	if !isCreate {
+		var err error
+		expectedID, err = uuid.Parse(parts[3])
+		if err != nil {
+			return
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, (32<<20)+1))
+	if err != nil {
+		return
+	}
+	response.Body = io.NopCloser(bytes.NewReader(body))
+	if len(body) > 32<<20 {
+		return
+	}
+	var projection struct {
+		ID          string `json:"approval_request_id"`
+		CommandType string `json:"command_type"`
+	}
+	if json.Unmarshal(body, &projection) != nil {
+		return
+	}
+	requestID, err := uuid.Parse(projection.ID)
+	commandType := strings.TrimSpace(projection.CommandType)
+	if err != nil || requestID == uuid.Nil || (!isCreate && requestID != expectedID) || !canonicalApprovalCommandType(commandType) {
+		return
+	}
+	expiresAt := s.now().Add(2 * time.Minute)
+	if session.RefreshExpiresAt.Before(expiresAt) {
+		expiresAt = session.RefreshExpiresAt
+	}
+	_ = s.store.SaveApprovalClassification(ctx, ApprovalClassification{
+		SessionID:             session.ID,
+		ActorTokenFingerprint: approvalActorTokenFingerprint(session.AccessToken),
+		ApprovalRequestID:     requestID.String(),
+		CommandType:           commandType,
+		ExpiresAt:             expiresAt,
+	})
+}
+
+func canonicalApprovalCommandType(value string) bool {
+	if value == "" || len(value) > 80 || value != strings.ToUpper(value) {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'A' && character <= 'Z' || index > 0 && character >= '0' && character <= '9' || index > 0 && character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func approvalActorTokenFingerprint(accessToken string) string {
+	digest := sha256.Sum256([]byte("portal-approval-actor-v1\x00" + accessToken))
+	return hex.EncodeToString(digest[:])
 }
 
 func writeTokenAdminDeadlineError(w http.ResponseWriter, r *http.Request, class requestdeadline.Class) {
@@ -855,7 +1010,10 @@ func tokenAdminPathAllowed(method, resource string) bool {
 			return false
 		}
 		if len(parts) == 5 && parts[4] == "routes" {
-			return method == http.MethodPut
+			return method == http.MethodPut || method == http.MethodDelete
+		}
+		if len(parts) == 6 && parts[4] == "impact" && parts[5] == "route" {
+			return method == http.MethodGet
 		}
 		return false
 	}
@@ -866,36 +1024,47 @@ func tokenAdminPathAllowed(method, resource string) bool {
 		return method == http.MethodGet
 	}
 	if resource == "/admin/v1/protocols" {
-		return method == http.MethodGet || method == http.MethodPost
+		return method == http.MethodGet
 	}
-	if resource == "/admin/v1/models:sync" || resource == "/admin/v1/model-catalog:rollback" {
+	if resource == "/admin/v1/commands" {
 		return method == http.MethodPost
+	}
+	if resource == "/admin/v1/commands:precheck" {
+		return method == http.MethodPost
+	}
+	if resource == "/admin/v1/model-catalog/impact/rollback" {
+		return method == http.MethodGet
 	}
 	parts = strings.Split(strings.Trim(resource, "/"), "/")
 	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" {
 		return false
+	}
+	if parts[2] == "commands" {
+		if len(parts) != 4 || method != http.MethodGet {
+			return false
+		}
+		_, err := uuid.Parse(parts[3])
+		return err == nil
 	}
 	if _, err := uuid.Parse(parts[3]); err != nil {
 		return false
 	}
 	if parts[2] == "usage-requests" {
 		return (len(parts) == 4 && method == http.MethodGet) ||
-			(len(parts) == 5 && parts[4] == "evidence" && method == http.MethodGet) ||
-			(len(parts) == 5 && parts[4] == "retry-reconciliation" && method == http.MethodPost)
+			(len(parts) == 5 && parts[4] == "evidence" && method == http.MethodGet)
 	}
 	if parts[2] == "protocols" {
-		return len(parts) == 5 && ((parts[4] == "publish" || parts[4] == "formulas") && method == http.MethodPost)
+		return false
 	}
 	if parts[2] == "formulas" {
-		return len(parts) == 5 && (parts[4] == "publish" && method == http.MethodPost || parts[4] == "preview" && method == http.MethodGet)
+		return len(parts) == 5 && parts[4] == "preview" && method == http.MethodGet
 	}
 	if parts[2] == "models" {
-		return len(parts) == 5 && ((parts[4] == "draft" && method == http.MethodPut) || ((parts[4] == "publish" || parts[4] == "lifecycle") && method == http.MethodPost))
+		return len(parts) == 6 && parts[4] == "impact" && parts[5] == "lifecycle" && method == http.MethodGet
 	}
 	if parts[2] == "provisionings" {
 		return len(parts) == 4 && method == http.MethodGet ||
-			len(parts) == 5 && parts[4] == "attempts" && method == http.MethodGet ||
-			len(parts) == 5 && parts[4] == "repair" && method == http.MethodPost
+			len(parts) == 5 && parts[4] == "attempts" && method == http.MethodGet
 	}
 	if parts[2] != "token-accounts" {
 		return false
@@ -905,15 +1074,12 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	}
 	if len(parts) == 5 {
 		switch parts[4] {
-		case "status":
-			return method == http.MethodPatch
 		case "routes":
 			return method == http.MethodPut || method == http.MethodDelete
 		}
 	}
-	if len(parts) == 7 && parts[4] == "credentials" && parts[6] == "validate" && method == http.MethodPost {
-		_, err := uuid.Parse(parts[5])
-		return err == nil
+	if len(parts) == 6 && parts[4] == "impact" && (parts[5] == "status" || parts[5] == "route" || parts[5] == "credential") {
+		return method == http.MethodGet
 	}
 	return false
 }

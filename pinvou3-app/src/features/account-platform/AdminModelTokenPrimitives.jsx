@@ -38,14 +38,14 @@ export function Status({ value, copy }) {
   return <span className={`adm-status ${tone}`}>{label}</span>;
 }
 
-export function SourceHeader({ title, titleID, state, copy, onRetry }) {
+export function SourceHeader({ title, titleID, state, copy, onRetry, actions = null }) {
   return (
     <div className="adm-source-head">
       <div>
         <h2 id={titleID}>{title}</h2>
         <p>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</p>
       </div>
-      <button type="button" disabled={state.loading} onClick={onRetry}>{state.loading ? copy.loading : copy.refreshSource}</button>
+      <div className="adm-row-actions">{actions}<button type="button" disabled={state.loading} onClick={onRetry}>{state.loading ? copy.loading : copy.refreshSource}</button></div>
     </div>
   );
 }

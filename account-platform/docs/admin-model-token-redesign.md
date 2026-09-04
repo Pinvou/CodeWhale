@@ -376,7 +376,7 @@ Portal 对三个动作只向 Account `POST /account/admin/v1/approval-requests` 
 
 **APT-131-R1（Portal/UI 所有权）**：
 
-- Portal 在 Account 的权威 approval create 或详情 GET 响应通过校验后，将 `session + actor access-token fingerprint + approval_request_id + command_type + short TTL` 写入服务端分类证明；证明不得由客户端提交的明文 `command_type` 推导。直接绕过、伪造、过期、跨 session/actor 或未知分类均失败关闭。
+- Portal 在 Account 的权威 approval create、update 或详情 GET 响应通过校验后，将 `session + actor access-token fingerprint + approval_request_id + command_type + short TTL` 写入服务端分类证明；证明不得由客户端提交的明文 `command_type` 推导。直接绕过、伪造、过期、跨 session/actor 或未知分类均失败关闭。
 - 总 gate 关闭后，approval submit/withdraw/decide 在动作代理前只查本地证明：`TOKEN_*` 为零次 Account 调用并拒绝；可信非 Token 证明继续代理。非 Token 的正常 create→submit 链必须由 create 响应立即生成证明，不能要求用户先额外 GET 详情；历史未分类申请只能在 gate 开启时通过权威 GET 建立证明。
 - UI 只消费前两批的权威 precheck/command/result。可信 GET 返回 `SUCCEEDED`、`REJECTED`、`FAILED` 时分别收敛为成功或稳定终态；只有 `PENDING`、`UNKNOWN`、403/404 或网络失败保持未知。未知状态冻结原始引用、输入和幂等键，禁止无引用重写或换键盲试。
 - 权限或 gate 撤销同步卸载对话框并 abort 在途 precheck/command/recovery；权限恢复不能复活旧输入。浏览器 smoke 必须由生产组件和客户端链路执行，绑定端口时显式排除 Chromium unsafe ports（含 3659），并连续运行至少 5 次证明稳定。

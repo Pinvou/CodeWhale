@@ -157,6 +157,7 @@ type AdminUsageDetail struct {
 	ReconciliationAttempts  int        `json:"reconciliation_attempts"`
 	ReconciliationLastError *string    `json:"reconciliation_last_error,omitempty"`
 	ReconciliationStoppedAt *time.Time `json:"reconciliation_stopped_at,omitempty"`
+	LastPersistedSequence   int64      `json:"last_persisted_sequence"`
 	StartedAt               time.Time  `json:"started_at"`
 	UpdatedAt               time.Time  `json:"updated_at"`
 }
@@ -174,7 +175,8 @@ func redactAdminUsageDetail(item AdminUsageRequest) AdminUsageDetail {
 		ErrorClass: item.ErrorClass, AdapterVersion: item.AdapterVersion, AttemptStatus: item.AttemptStatus,
 		InputTokens: item.InputTokens, OutputTokens: item.OutputTokens, CachedInputTokens: item.CachedInputTokens,
 		ReconciliationAttempts: item.ReconciliationAttempts, ReconciliationLastError: diagnostic,
-		ReconciliationStoppedAt: item.ReconciliationStoppedAt, StartedAt: item.StartedAt, UpdatedAt: item.UpdatedAt,
+		ReconciliationStoppedAt: item.ReconciliationStoppedAt, LastPersistedSequence: item.LastPersistedSequence,
+		StartedAt: item.StartedAt, UpdatedAt: item.UpdatedAt,
 	}
 }
 

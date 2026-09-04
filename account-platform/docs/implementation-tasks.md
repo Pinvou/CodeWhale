@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，120 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，10 个任务为 `PENDING`，1 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，121 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，10 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -154,7 +154,7 @@
 | APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | DONE |
 | APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | DONE |
 | APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | DONE |
-| APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | IN_PROGRESS |
+| APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | DONE |
 | APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | PENDING |
 | APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | PENDING |
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | PENDING |
@@ -315,7 +315,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-131 结构化高风险操作交互
 
-> 实现状态（2026-09-04）：`IN_PROGRESS / REOPENED_REMEDIATION`。身份 B 第三轮结论为 `NEEDS_CHANGES`：第二轮实现把 Token/Billing 权威预检计算与运行领域治理适配混入了 Portal/UI 任务，非 Token 审批创建后直接提交缺少本地可信分类证明，生命周期/回滚财务快照不能以多维价格的最大局部版本充当完整变化证据，通用 repair/reconcile target 未闭合，浏览器 smoke 还可能随机绑定 Chromium 不安全端口。现有代码改动不得据此宣告完成、提交或推送；先按下表完成文档审核，再依次整改、独立复审和独立提交。
+> 实现状态（2026-09-04）：`DONE / REMEDIATION_REVIEW_PASS`。APT-124-R1、APT-130-R1 已分别通过身份 B 第三轮、第二轮审核并独立提交；APT-131-R1 已按 Portal/UI 所有权完成统一结构化对话框、权威命令/审批接线、可信审批分类证明、终态/未知恢复、撤权/关 gate 中止和安全端口浏览器 smoke，并通过身份 B 第二轮独立复审。三批整改全部闭环，仍未推送或部署。
 
 - **目标/范围**：主目标 `UI-52`。APT-131 仅拥有 Portal 通用命令对话框/影响面板/命令客户端、BFF 精确代理、审批分类证明、终态/未知状态机、i18n/CSS 和真实浏览器 smoke；消费 APT-124-R1、APT-130-R1 的权威合同，但不在 Portal 计算预检、财务指纹、领域版本或治理结果。
 - **治理/兼容/回滚**：统一采集 reason、近期认证、CAS/version、idempotency key 和适用生效信息；依据服务端策略显示 `AUDIT_ONLY` 或 `APPROVAL_REQUIRED`。关闭动作 gate 时，Token 审批 submit/withdraw/decide 必须在代理前凭本地可信分类证明零 Account 调用失败关闭；非 Token 审批由 Account 创建或详情响应生成的同类证明继续正常代理。未知结果仅按冻结 `command_reference` GET；关闭 gate 或撤权会卸载 UI 并中止在途请求。
@@ -328,7 +328,13 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 |---|---|---|---|---|---|
 | `APT-124-R1` | `DONE / REMEDIATION_REVIEW_PASS` | APT-122、APT-123、APT-124 原已审核交付 | `internal/token` 与 `internal/billing` 的权威 precheck/financial projection；Account 拥有 approval snapshot 持久化/响应、submit 前重验、授权事件 payload 和 begin-execution lease 冻结投影。同步 Token/Billing/Account OpenAPI 与事件合同。拥有 13/8 完整 financial 变化证据、提交前 CAS 重验，以及协议/公式、目录同步和模型命令所需跨域预检 | 完整定价集合任一维度等量替换也改变指纹；不得使用 `max(price.version)`；`critical_resource_versions + financial_snapshot` 从 approval create 持久化与响应，经 submit 前重验、授权事件，逐字段原样进入 begin-execution lease，执行领取前的快照变化使申请失效；闭合 OpenAPI、真实 PostgreSQL、Account 持久化/HTTP、授权事件和 lease 合同全部通过。本批只交付快照贯穿与重验，不启动 APT-138 consumer 或领域执行 | 1；身份 B 第三轮审核 `PASS`，本批独立提交 |
 | `APT-130-R1` | `DONE / REMEDIATION_REVIEW_PASS` | APT-123、APT-130、APT-124-R1 | 仅 `internal/token` 的 Provisioning repair / usage reconciliation target 解析、领域版本/CAS、precheck 与 governed result adapter；同步 Token OpenAPI/合同，不改 Portal/UI | 两个 command type 使用不同闭合 schema；额外字段、错 target/type/version、`replay_model_request` 缺失或非 `false` 均在持久化前拒绝；precheck 与 command 共用解析器；结果只按 actor/command/digest/reference 恢复，核对绝不重发模型请求 | 2；身份 B 第二轮审核 `PASS`，本批独立提交 |
-| `APT-131-R1` | `REOPENED_REMEDIATION / DOC_REVIEW` | APT-124-R1、APT-130-R1 | 仅 `internal/portal`、Portal BFF/OpenAPI 代理、`pinvou3-app` 的通用对话框/命令客户端、三语/CSS 与 smoke；拥有审批分类证明、可信终态/未知恢复和 gate/撤权 abort，不改 Token/Billing 领域计算 | Account 权威 create/GET 响应均可生成 session/actor/approval/type/TTL 绑定证明；gate off 动作请求对 Token 为零 Account 调用、可信非 Token 可代理、缺失/伪造/过期/跨主体失败关闭；终态矩阵、零盲写、协议/公式既有 UI 不回退；smoke 端口显式排除 Chromium unsafe ports 并连续 5 次稳定 | 3；前两批已提交且身份 B 审核 `PASS` 后完成 APT-131 独立提交 |
+| `APT-131-R1` | `DONE / REMEDIATION_REVIEW_PASS` | APT-124-R1、APT-130-R1 | 仅 `internal/portal`、Portal BFF/OpenAPI 代理、`pinvou3-app` 的通用对话框/命令客户端、三语/CSS 与 smoke；拥有审批分类证明、可信终态/未知恢复和 gate/撤权 abort，不改 Token/Billing 领域计算 | Account 权威 create/update/detail 响应均可生成 session/actor/approval/type/TTL 绑定证明；gate off 动作请求对 Token 为零 Account 调用、可信非 Token 可代理、缺失/伪造/过期/跨主体失败关闭；终态矩阵、零盲写、协议/公式既有 UI 不回退；smoke 端口由 OS 安全分配并连续 5 次稳定 | 3；身份 B 第二轮审核 `PASS`，本批独立提交 |
+
+> APT-131-R1 待审记录（2026-09-04）：Portal 总动作 gate 在源码、Compose 与 Helm 中均默认关闭；Account 权威 create/update/detail 的闭合 2xx 投影在服务端生成短期分类证明，Token 后续动作在 gate off 时零 Account 调用失败关闭，非 Token 的 create→update/submit/withdraw/decide 保持可用。同步、发布、生命周期、回滚、协议/公式、Token 状态/路由、Provisioning repair 与 usage reconcile 均使用结构化交互并消费 APT-124-R1/APT-130-R1 权威 precheck、版本/CAS、命令或审批结果；repair/reconcile 命令携带精确版本/generation/high-watermark 且显式禁止模型重放。`SUCCEEDED/REJECTED/FAILED` 保留可信终态，只有 `PENDING/UNKNOWN` 或冻结引用 GET 失败保持未知并禁止盲写；关 gate 或撤权卸载对话框并中止在途请求。Portal/Token Go、Node 合同、OpenAPI、ESLint、Portal build、i18n、architecture/task/authorization/diff 门禁及真实 Chromium smoke 已执行；模型动作与 Token 资源 smoke 均以 OS 分配安全端口连续五次通过。全量合同仍只有 browser-login、H3C provider 和 foundation v2 allowlist 三项既有基线失败，与本批 diff 无关。APT-134 排程与 APT-138 执行/激活未启动。
+
+> APT-131-R1 首轮整改记录（2026-09-04）：生命周期与目录回滚 UI 只接受 APT-124-R1 的闭合 13/8 字段 `critical_resource_versions` 和闭合 6 字段 `financial_snapshot`，审批创建、提交响应及冻结引用恢复均逐字段原样核验，旧 `approval_snapshot` / `price_coverage` 形状失败关闭。同步、发布、生命周期、回滚四类在途动作按 `action.type` 与各自原子权限绑定；单项撤权立即卸载对话框并中止预检，权限恢复不会复活动作或产生延迟写。模型动作与 Token 资源 smoke 共用 Chromium 完整 unsafe-port 集合的安全端口绑定器，OS 分配命中 3659 等受限端口时先关闭再重试；两套真实 smoke 均须连续五次通过。该轮提交身份 B 复审后由下述第二轮记录收口。
+
+> APT-131-R1 代码审核记录（2026-09-04）：身份 B 第二轮 `PASS`。确认生命周期/回滚严格消费并原样冻结 APT-124-R1 的 13/8 字段关键版本与 6 字段财务快照，审批创建、提交响应和冻结引用恢复不接受旧形状或漂移；发布、同步、生命周期、回滚按动作类型精确撤权并中止，恢复权限不复活、不产生延迟写；共用 Chromium 安全端口绑定器覆盖完整 unsafe 集合和 3659 重试。定向 Node 47/47、Portal/Token Go、OpenAPI、ESLint、Portal build、三语、架构、任务、授权与 diff 门禁通过，模型动作及 Token 资源真实 smoke 各连续 5/5 通过，运行 smoke 通过。全量合同 333/336，三项 browser-login、H3C provider、foundation v2 allowlist 为既有基线失败且与本批 diff 无关。APT-132+、APT-134 排程和 APT-138 激活/执行未实现。
 
 三批必须逐批执行“身份 A 实现 → 身份 B 独立审核 → A 修复 → B 复审直至 `PASS` → 独立提交”。文档审核未通过前不得继续代码整改；任一前置批次未通过时，后续批次保持失败关闭且不得用 Portal 假数据、旧 direct POST 或宽松 OpenAPI 维持按钮可用。APT-124 与 APT-130 原 `DONE` 提交和审核记录保留，整改提交只追加所有权明确的增量。
 

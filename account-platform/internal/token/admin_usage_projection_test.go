@@ -19,7 +19,8 @@ func TestAdminUsageDetailRedactsInternalCorrelation(t *testing.T) {
 		ExecutionStatus: "REVIEW", DeliveryStatus: "COMPLETED", CancelStatus: "NOT_REQUESTED", SettlementStatus: "REVIEW",
 		MaximumMicrocredits: 100, ReconciliationAttempts: 2, ProviderID: pointer("private-provider"),
 		UpstreamRequestID: pointer("private-upstream-request"), CancellationEvidence: json.RawMessage(`{"secret":"not-inline"}`),
-		ConvergenceEvidence: json.RawMessage(`{"secret":"not-inline"}`), ReconciliationLastError: pointer("private customer reason"), StartedAt: now, UpdatedAt: now,
+		ConvergenceEvidence: json.RawMessage(`{"secret":"not-inline"}`), ReconciliationLastError: pointer("private customer reason"),
+		LastPersistedSequence: 17, StartedAt: now, UpdatedAt: now,
 	}
 	payload, err := json.Marshal(redactAdminUsageDetail(item))
 	if err != nil {
@@ -31,7 +32,7 @@ func TestAdminUsageDetailRedactsInternalCorrelation(t *testing.T) {
 			t.Fatalf("redacted detail leaked %q: %s", hidden, text)
 		}
 	}
-	for _, required := range []string{"usage_request_id", "token_account_id", "model", "execution_status", "settlement_status", "maximum_microcredits"} {
+	for _, required := range []string{"usage_request_id", "token_account_id", "model", "execution_status", "settlement_status", "maximum_microcredits", "last_persisted_sequence"} {
 		if !strings.Contains(text, `"`+required+`"`) {
 			t.Fatalf("redacted detail omitted %q: %s", required, text)
 		}

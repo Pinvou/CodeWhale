@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
+import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
+import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck } from './admin-high-risk-action-state.js';
 
 function readDetailID(key) {
   return String(new URLSearchParams(globalThis.location?.search || '').get(key) || '').trim();
@@ -47,51 +49,6 @@ function DateValue({ value }) {
 
 function DetailFacts({ facts }) {
   return <dl className="adm-operation-facts">{facts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>;
-}
-
-function commandKey(prefix) {
-  return `${prefix}-${globalThis.crypto.randomUUID()}`;
-}
-
-function CommandPanel({ id, title, help, reasonLabel, submitLabel, successLabel, recoveryLabel, unavailableLabel, enabled, onSubmit }) {
-  const [reason, setReason] = useState('');
-  const [state, setState] = useState({ busy: false, unknown: false, message: '' });
-  const keyRef = useRef('');
-  const payloadRef = useRef('');
-  const inflight = useRef(false);
-  const submit = async (event) => {
-    event.preventDefault();
-    const normalized = reason.trim();
-    if (!enabled || normalized.length < 1 || [...normalized].length > 500 || inflight.current) return;
-    const payload = JSON.stringify({ reason: normalized });
-    if (!keyRef.current || payloadRef.current !== payload) {
-      keyRef.current = commandKey('admin-operation');
-      payloadRef.current = payload;
-    }
-    inflight.current = true;
-    setState({ busy: true, unknown: false, message: '' });
-    try {
-      await onSubmit(normalized, keyRef.current);
-      keyRef.current = '';
-      payloadRef.current = '';
-      setReason('');
-      setState({ busy: false, unknown: false, message: successLabel });
-    } catch (error) {
-      setState({ busy: false, unknown: true, message: error?.requestID ? `${unavailableLabel} · ${error.requestID}` : unavailableLabel });
-    } finally {
-      inflight.current = false;
-    }
-  };
-  if (!enabled) return null;
-  return <form className="adm-operation-command" onSubmit={submit} aria-labelledby={`${id}-title`}>
-    <div><h3 id={`${id}-title`}>{title}</h3><p>{help}</p></div>
-    <label><span>{reasonLabel}</span><textarea value={reason} minLength={1} required disabled={state.busy || state.unknown} onChange={(event) => {
-      setReason(event.target.value);
-      if (!state.unknown && payloadRef.current !== JSON.stringify({ reason: event.target.value.trim() })) keyRef.current = '';
-    }} /></label>
-    <button type="submit" disabled={state.busy || reason.trim().length < 1 || [...reason.trim()].length > 500}>{state.busy ? unavailableLabel : state.unknown ? recoveryLabel : submitLabel}</button>
-    {state.message && <p role={state.unknown ? 'alert' : 'status'} className={state.unknown ? 'adm-command-unknown' : 'adm-command-ok'}>{state.message}</p>}
-  </form>;
 }
 
 function sourceRetry({ state, source, query, histories, onQueryChange, setRefreshVersion }) {
@@ -198,13 +155,18 @@ function Evidence({ client, usageID, copy, routeVersion, onQueryChange, historie
   </section>;
 }
 
-function ProvisioningDetail({ id, client, copy, permissions, routeVersion, onBack, onQueryChange, histories }) {
+function ProvisioningDetail({ id, client, copy, routeVersion, onBack, onQueryChange, histories, canRepair }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [repairOpen, setRepairOpen] = useState(false);
   const load = useMemo(() => (signal) => client.provisioning(id, signal), [client, id]);
   const state = useDetailSource({ enabled: Boolean(id), load, refreshVersion });
   const item = state.item;
+	const repairCommand = item ? { provisioning_id: id, expected_provisioning_version: item.updated_at, target_generation: item.desired_generation, replay_model_request: false } : null;
+	useEffect(() => {
+		if (!canRepair) setRepairOpen(false);
+	}, [canRepair]);
   return <section className="adm-card adm-operation-detail" aria-labelledby="provisioning-detail-title">
-    <header><button type="button" className="secondary" onClick={onBack}>← {copy.backToList}</button><div><h2 id="provisioning-detail-title">{copy.provisioningDetail}</h2><p>{copy.provisioningDetailLead}</p></div><button type="button" onClick={() => setRefreshVersion((value) => value + 1)}>{copy.refreshSource}</button></header>
+    <header><button type="button" className="secondary" onClick={onBack}>← {copy.backToList}</button><div><h2 id="provisioning-detail-title">{copy.provisioningDetail}</h2><p>{copy.provisioningDetailLead}</p></div><div className="adm-row-actions">{canRepair && ['FAILED', 'REPAIR_REQUIRED'].includes(item?.status) && <button type="button" onClick={() => setRepairOpen(true)}>{copy.repairProvisioning}</button>}<button type="button" onClick={() => setRefreshVersion((value) => value + 1)}>{copy.refreshSource}</button></div></header>
     {detailFeedback(state, copy, () => setRefreshVersion((value) => value + 1))}
     {item && <>
       <DetailFacts facts={[
@@ -220,22 +182,23 @@ function ProvisioningDetail({ id, client, copy, permissions, routeVersion, onBac
         [copy.updatedAt, <DateValue value={item.updated_at} />],
       ]} />
       <Attempts client={client} provisioningID={id} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} />
-      <CommandPanel id="provisioning-repair" title={copy.repairProvisioning} help={copy.repairProvisioningHelp} reasonLabel={copy.operationReason} submitLabel={copy.submitRepair} successLabel={copy.repairAccepted} recoveryLabel={copy.recoverUnknown} unavailableLabel={copy.commandResultUnknown} enabled={permissions.includes('platform.tokens.manage') && ['FAILED', 'REPAIR_REQUIRED'].includes(item.status)} onSubmit={async (reason, key) => {
-        const result = await client.repairProvisioning(id, reason, key);
-        if (result?.provisioning_id !== id || result?.status !== 'PENDING' || !Number.isInteger(result?.repair_round) || result.repair_round <= Number(item.repair_round || 0)) throw new Error('unverified repair response');
-        setRefreshVersion((value) => value + 1);
-      }} />
     </>}
+		{repairOpen && item && repairCommand && canRepair && <AdminHighRiskActionDialog action={{ key: `provisioning-repair-${id}`, impactAction: 'TOKEN_ROUTE_PROVISIONING_REPAIR', title: copy.repairProvisioning, lead: copy.repairProvisioningHelp }} copy={copy} target={{ label: id, version: `${copy.generation}: ${item.desired_generation}` }} policy="AUDIT_ONLY" recentAuth reasonMin={1} reasonMax={500} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_ROUTE_PROVISIONING_REPAIR', target_resource_type: 'PROVISIONING', target_resource_id: id, command: repairCommand }, signal), { commandType: 'TOKEN_ROUTE_PROVISIONING_REPAIR', targetResourceType: 'PROVISIONING', targetResourceID: id })} onClose={() => setRepairOpen(false)} execute={async (payload, key, signal) => requireGovernedTokenCommandResult(await client.createGovernedTokenCommand(await governedTokenEnvelope({ commandType: 'TOKEN_ROUTE_PROVISIONING_REPAIR', targetResourceType: 'PROVISIONING', targetResourceID: id, reason: payload.reason, impact: payload.precheck, command: repairCommand }), key, signal), { commandType: 'TOKEN_ROUTE_PROVISIONING_REPAIR', targetResourceType: 'PROVISIONING', targetResourceID: id })} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_ROUTE_PROVISIONING_REPAIR', targetResourceType: 'PROVISIONING', targetResourceID: id })} onCompleted={() => setRefreshVersion((value) => value + 1)} />}
   </section>;
 }
 
-function UsageDetail({ id, client, copy, permissions, routeVersion, onBack, onQueryChange, histories, onNavigate }) {
+function UsageDetail({ id, client, copy, permissions, routeVersion, onBack, onQueryChange, histories, onNavigate, canReconcile }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [reconcileOpen, setReconcileOpen] = useState(false);
   const load = useMemo(() => (signal) => client.usageRequest(id, signal), [client, id]);
   const state = useDetailSource({ enabled: Boolean(id), load, refreshVersion });
   const item = state.item;
+	const reconcileCommand = item ? { usage_request_id: id, expected_usage_version: item.updated_at, evidence_high_watermark: item.last_persisted_sequence, replay_model_request: false } : null;
+	useEffect(() => {
+		if (!canReconcile) setReconcileOpen(false);
+	}, [canReconcile]);
   return <section className="adm-card adm-operation-detail" aria-labelledby="usage-detail-title">
-    <header><button type="button" className="secondary" onClick={onBack}>← {copy.backToList}</button><div><h2 id="usage-detail-title">{copy.usageDetail}</h2><p>{copy.usageDetailLead}</p></div><button type="button" onClick={() => setRefreshVersion((value) => value + 1)}>{copy.refreshSource}</button></header>
+    <header><button type="button" className="secondary" onClick={onBack}>← {copy.backToList}</button><div><h2 id="usage-detail-title">{copy.usageDetail}</h2><p>{copy.usageDetailLead}</p></div><div className="adm-row-actions">{canReconcile && ['SETTLEMENT_PENDING', 'REVIEW'].includes(item?.status) && <button type="button" onClick={() => setReconcileOpen(true)}>{copy.retryReconciliation}</button>}<button type="button" onClick={() => setRefreshVersion((value) => value + 1)}>{copy.refreshSource}</button></div></header>
     {detailFeedback(state, copy, () => setRefreshVersion((value) => value + 1))}
     {item && <>
       <DetailFacts facts={[
@@ -262,16 +225,12 @@ function UsageDetail({ id, client, copy, permissions, routeVersion, onBack, onQu
       ]} />
       {permissions.includes('platform.audit.read') && <div className="adm-row-actions adm-operation-audit"><button type="button" onClick={() => onNavigate?.('audit', { audit_resource: id })}>{copy.viewAudit}</button></div>}
       <Evidence client={client} usageID={id} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} />
-      <CommandPanel id="usage-reconciliation" title={copy.retryReconciliation} help={copy.retryReconciliationHelp} reasonLabel={copy.operationReason} submitLabel={copy.submitReconciliation} successLabel={copy.reconciliationAccepted} recoveryLabel={copy.recoverUnknown} unavailableLabel={copy.commandResultUnknown} enabled={permissions.includes('platform.usage.reconcile.retry') && item.settlement_status !== 'SETTLED'} onSubmit={async (reason, key) => {
-        const result = await client.retryUsageReconciliation(id, reason, key);
-        if (result?.usage_request_id !== id || typeof result?.status !== 'string' || typeof result?.settlement_status !== 'string' || !Number.isInteger(result?.reconciliation_attempts)) throw new Error('unverified reconciliation response');
-        setRefreshVersion((value) => value + 1);
-      }} />
     </>}
+		{reconcileOpen && item && reconcileCommand && canReconcile && <AdminHighRiskActionDialog action={{ key: `usage-reconcile-${id}`, impactAction: 'TOKEN_USAGE_RECONCILIATION_RETRY', title: copy.retryReconciliation, lead: copy.retryReconciliationHelp }} copy={copy} target={{ label: id, version: `${copy.updatedAt}: ${new Date(item.updated_at).toLocaleString()}` }} policy="AUDIT_ONLY" reasonMin={1} reasonMax={500} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_USAGE_RECONCILIATION_RETRY', target_resource_type: 'USAGE_REQUEST', target_resource_id: id, command: reconcileCommand }, signal), { commandType: 'TOKEN_USAGE_RECONCILIATION_RETRY', targetResourceType: 'USAGE_REQUEST', targetResourceID: id })} onClose={() => setReconcileOpen(false)} execute={async (payload, key, signal) => requireGovernedTokenCommandResult(await client.createGovernedTokenCommand(await governedTokenEnvelope({ commandType: 'TOKEN_USAGE_RECONCILIATION_RETRY', targetResourceType: 'USAGE_REQUEST', targetResourceID: id, reason: payload.reason, impact: payload.precheck, command: reconcileCommand }), key, signal), { commandType: 'TOKEN_USAGE_RECONCILIATION_RETRY', targetResourceType: 'USAGE_REQUEST', targetResourceID: id })} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_USAGE_RECONCILIATION_RETRY', targetResourceType: 'USAGE_REQUEST', targetResourceID: id })} onCompleted={() => setRefreshVersion((value) => value + 1)} />}
   </section>;
 }
 
-export function AdminModelOperationsWorkspace({ client, copy, permissions, detailsEnabled, routeVersion, operations, requests, onRouteChange, onQueryChange, onNavigate, histories }) {
+export function AdminModelOperationsWorkspace({ client, copy, permissions, detailsEnabled, actionsEnabled, routeVersion, operations, requests, onRouteChange, onQueryChange, onNavigate, histories }) {
   const provisioningID = detailsEnabled && operations.tab === 'provisionings' ? readDetailID('provisioning_id') : '';
   const usageID = detailsEnabled && ['usage', 'reconciliation'].includes(operations.tab) ? readDetailID('usage_request_id') : '';
   const provisioningRequest = requests.find((request) => request.source === 'provisionings');
@@ -279,8 +238,8 @@ export function AdminModelOperationsWorkspace({ client, copy, permissions, detai
   const reconciliationRequest = requests.find((request) => request.source === 'reconciliation');
   const clearProvisioning = () => onRouteChange({ provisioning_id: null, ...adminModelTokenQueryUpdates('provisioningAttempts', {}) }, 'push');
   const clearUsage = () => onRouteChange({ usage_request_id: null, ...adminModelTokenQueryUpdates('usageEvidence', {}) }, 'push');
-  if (provisioningID) return <ProvisioningDetail id={provisioningID} client={client} copy={copy} permissions={permissions} routeVersion={routeVersion} onBack={clearProvisioning} onQueryChange={onQueryChange} histories={histories} />;
-  if (usageID) return <UsageDetail id={usageID} client={client} copy={copy} permissions={permissions} routeVersion={routeVersion} onBack={clearUsage} onQueryChange={onQueryChange} onNavigate={onNavigate} histories={histories} />;
+  if (provisioningID) return <ProvisioningDetail id={provisioningID} client={client} copy={copy} routeVersion={routeVersion} onBack={clearProvisioning} onQueryChange={onQueryChange} histories={histories} canRepair={actionsEnabled && permissions.includes('platform.tokens.manage')} />;
+  if (usageID) return <UsageDetail id={usageID} client={client} copy={copy} permissions={permissions} routeVersion={routeVersion} onBack={clearUsage} onQueryChange={onQueryChange} onNavigate={onNavigate} histories={histories} canReconcile={actionsEnabled && permissions.includes('platform.usage.reconcile.retry')} />;
   return <>
     {provisioningRequest && <div role="tabpanel" hidden={operations.tab !== 'provisionings'} id="model-operations-panel-provisionings" aria-labelledby="model-operations-tab-provisionings"><ProvisioningList load={provisioningRequest.load} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} canOpen={detailsEnabled} onOpen={(id) => onRouteChange({ provisioning_id: id }, 'push')} /></div>}
     {usageRequest && <div role="tabpanel" hidden={operations.tab !== 'usage'} id="model-operations-panel-usage" aria-labelledby="model-operations-tab-usage"><UsageList load={usageRequest.load} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} canOpen={detailsEnabled} onOpen={(id) => onRouteChange({ usage_request_id: id }, 'push')} /></div>}

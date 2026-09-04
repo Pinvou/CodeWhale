@@ -179,6 +179,7 @@ test('closed model and legacy usage schemas validate production JSON shapes', as
     settlement_status: usage.settlement_status,
     maximum_microcredits: usage.maximum_microcredits,
     reconciliation_attempts: usage.reconciliation_attempts,
+    last_persisted_sequence: usage.last_persisted_sequence,
     started_at: usage.started_at,
     updated_at: usage.updated_at,
   };

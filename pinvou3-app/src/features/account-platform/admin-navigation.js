@@ -83,6 +83,10 @@ export function adminModelOperationsDetailsGateEnabled(session = {}) {
   return session?.feature_flags?.admin_model_operations_details === true;
 }
 
+export function adminModelTokenActionsGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_model_token_actions === true;
+}
+
 export function readAdminModelTokenQuery(source, locationLike = globalThis.location) {
   const parameters = adminModelTokenQueryParameters[source];
   if (!parameters) return {};

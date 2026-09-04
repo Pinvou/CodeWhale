@@ -64,6 +64,13 @@ func main() {
 			log.Fatal("PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED must be a boolean")
 		}
 	}
+	adminModelTokenActionsEnabled := false
+	if raw := strings.TrimSpace(os.Getenv("PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED")); raw != "" {
+		adminModelTokenActionsEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatal("PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED must be a boolean")
+		}
+	}
 	service, err := portal.NewService(portal.Config{
 		PublicURL:                          publicURL,
 		AuthorizationURL:                   mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
@@ -77,6 +84,7 @@ func main() {
 		AdminModelTokenIAEnabled:           adminModelTokenIAEnabled,
 		AdminTokenResourceFormsEnabled:     adminTokenResourceFormsEnabled,
 		AdminModelOperationsDetailsEnabled: adminModelOperationsDetailsEnabled,
+		AdminModelTokenActionsEnabled:      adminModelTokenActionsEnabled,
 		SystemProbes:                       systemProbes(),
 		SecureCookies:                      publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
 	}, store)

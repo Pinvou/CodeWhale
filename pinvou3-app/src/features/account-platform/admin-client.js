@@ -97,7 +97,7 @@ export class AdminPlatformClient {
     return payload;
   }
 
-  async mutate(area, resource, method, body, idempotencyKey = '') {
+  async mutate(area, resource, method, body, idempotencyKey = '', signal) {
     const headers = {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -110,6 +110,7 @@ export class AdminPlatformClient {
       credentials: 'same-origin',
       cache: 'no-store',
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
     this.observeAuthorizationVersions(response.headers);
     const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
@@ -423,11 +424,11 @@ export class AdminPlatformClient {
   approvalRequest(requestID, signal) {
     return this.request('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}`, signal);
   }
-  createApprovalDraft(input) {
-    return this.mutate('account', '/admin/v1/approval-requests', 'POST', input);
+  createApprovalDraft(input, signal) {
+    return this.mutate('account', '/admin/v1/approval-requests', 'POST', input, '', signal);
   }
-  submitApprovalRequest(requestID, expectedVersion) {
-    return this.mutate('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}/actions/submit`, 'POST', { expected_version: expectedVersion });
+  submitApprovalRequest(requestID, expectedVersion, signal) {
+    return this.mutate('account', `/admin/v1/approval-requests/${encodeURIComponent(requestID)}/actions/submit`, 'POST', { expected_version: expectedVersion }, '', signal);
   }
   holds(filters = {}, signal) {
     const query = billingCollectionQuery(filters, { keys: ['wallet_id', 'status', 'model_id'], dateTimeKeys: ['created_from', 'created_to'] });
@@ -524,8 +525,27 @@ export class AdminPlatformClient {
   upsertTokenRoute(tokenAccountID, route) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route);
   }
-  upsertStableTokenRoute(tokenAccountID, route, idempotencyKey) {
-    return this.mutate('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route, idempotencyKey);
+  upsertStableTokenRoute(tokenAccountID, route, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route, idempotencyKey, signal);
+  }
+  deleteStableTokenRoute(tokenAccountID, route, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'DELETE', route, idempotencyKey, signal);
+  }
+  tokenAccountStatusImpact(tokenAccountID, targetStatus, signal) {
+    const query = new URLSearchParams({ target_status: targetStatus });
+    return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/impact/status?${query}`, signal);
+  }
+  stableTokenRouteImpact(tokenAccountID, input, signal) {
+    const query = new URLSearchParams({ action: input.action });
+    if (input.route_id) query.set('route_id', input.route_id);
+    if (input.model_id) query.set('model_id', input.model_id);
+    if (input.protocol_version_id) query.set('protocol_version_id', input.protocol_version_id);
+    return this.request('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}/impact/route?${query}`, signal);
+  }
+  tokenCredentialImpact(tokenAccountID, action, credentialID, signal) {
+    const query = new URLSearchParams({ action });
+    if (credentialID) query.set('credential_id', credentialID);
+    return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/impact/credential?${query}`, signal);
   }
   deleteTokenRoute(tokenAccountID, model) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'DELETE', { model });
@@ -547,8 +567,8 @@ export class AdminPlatformClient {
   usageEvidence(usageRequestID, filters = {}, signal) {
     return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/evidence?${tokenAdminCollectionQuery('usageEvidence', filters)}`, signal);
   }
-  retryUsageReconciliation(usageRequestID, reason, idempotencyKey) {
-    return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, idempotencyKey);
+  retryUsageReconciliation(usageRequestID, reason, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, idempotencyKey, signal);
   }
   catalogModels(filtersOrSignal = {}, signal) {
     if (isAbortSignal(filtersOrSignal)) {
@@ -564,20 +584,20 @@ export class AdminPlatformClient {
   formulas(filters = {}, signal) {
     return this.request('token', `/admin/v1/formulas?${tokenAdminCollectionQuery('formulas', filters)}`, signal);
   }
-  createProtocolDraft(input, idempotencyKey) {
-    return this.mutate('token', '/admin/v1/protocols', 'POST', input, idempotencyKey);
+  createProtocolDraft(input, idempotencyKey, signal) {
+    return this.mutate('token', '/admin/v1/protocols', 'POST', input, idempotencyKey, signal);
   }
-  publishProtocol(protocolDefinitionID, input, idempotencyKey) {
-    return this.mutate('token', `/admin/v1/protocols/${encodeURIComponent(protocolDefinitionID)}/publish`, 'POST', input, idempotencyKey);
+  publishProtocol(protocolDefinitionID, input, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/protocols/${encodeURIComponent(protocolDefinitionID)}/publish`, 'POST', input, idempotencyKey, signal);
   }
-  createFormulaDraft(protocolDefinitionID, input, idempotencyKey) {
-    return this.mutate('token', `/admin/v1/protocols/${encodeURIComponent(protocolDefinitionID)}/formulas`, 'POST', input, idempotencyKey);
+  createFormulaDraft(protocolDefinitionID, input, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/protocols/${encodeURIComponent(protocolDefinitionID)}/formulas`, 'POST', input, idempotencyKey, signal);
   }
   previewFormula(formulaVersionID, signal) {
     return this.request('token', `/admin/v1/formulas/${encodeURIComponent(formulaVersionID)}/preview`, signal);
   }
-  publishFormula(formulaVersionID, input, idempotencyKey) {
-    return this.mutate('token', `/admin/v1/formulas/${encodeURIComponent(formulaVersionID)}/publish`, 'POST', input, idempotencyKey);
+  publishFormula(formulaVersionID, input, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/formulas/${encodeURIComponent(formulaVersionID)}/publish`, 'POST', input, idempotencyKey, signal);
   }
   tokenReconciliationCases(filters = {}, signal) {
     return this.request('token', `/admin/v1/reconciliation-cases?${tokenAdminCollectionQuery('reconciliation', filters)}`, signal);
@@ -593,6 +613,24 @@ export class AdminPlatformClient {
   }
   publishModelDraft(modelID, input) {
     return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/publish`, 'POST', input);
+  }
+  modelLifecycleImpact(modelID, targetStatus, replacementModelID = '', signal) {
+    const query = new URLSearchParams({ target_status: targetStatus });
+    if (replacementModelID) query.set('replacement_model_id', replacementModelID);
+    return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/impact/lifecycle?${query}`, signal);
+  }
+  catalogRollbackImpact(sourceCatalogVersion, signal) {
+    const query = new URLSearchParams({ source_catalog_version: String(sourceCatalogVersion) });
+    return this.request('token', `/admin/v1/model-catalog/impact/rollback?${query}`, signal);
+  }
+  governedTokenCommandPrecheck(input, signal) {
+    return this.mutate('token', '/admin/v1/commands:precheck', 'POST', input, '', signal);
+  }
+  createGovernedTokenCommand(input, idempotencyKey, signal) {
+    return this.mutate('token', '/admin/v1/commands', 'POST', input, idempotencyKey, signal);
+  }
+  governedTokenCommandResult(commandReference, signal) {
+    return this.request('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}`, signal);
   }
   transitionModel(modelID, input) {
     return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle`, 'POST', input);
@@ -617,8 +655,8 @@ export class AdminPlatformClient {
   provisioningAttempts(provisioningID, filters = {}, signal) {
     return this.request('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/attempts?${tokenAdminCollectionQuery('provisioningAttempts', filters)}`, signal);
   }
-  repairProvisioning(provisioningID, reason, idempotencyKey) {
-    return this.mutate('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/repair`, 'POST', { reason }, idempotencyKey);
+  repairProvisioning(provisioningID, reason, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/repair`, 'POST', { reason }, idempotencyKey, signal);
   }
   systemStatus(signal) {
     return this.request('system', '/status', signal);

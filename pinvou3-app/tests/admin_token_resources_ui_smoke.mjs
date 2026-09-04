@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import puppeteer from 'puppeteer-core';
+import { listenOnChromiumSafePort } from './chromium-safe-port.mjs';
 
 const browserPath = [
   process.env.CHROME,
@@ -22,10 +23,13 @@ const allPermissions = ['platform.tokens.read', 'platform.tokens.manage', 'platf
 
 let permissions = [...allPermissions];
 let formsEnabled = true;
+let actionsEnabled = true;
 let candidateDelay = false;
 let modelDelay = false;
 let routeMode = 'success';
-const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, routeCalls: [] };
+let accountStatus = 'ACTIVE';
+const statusCommandID = '0199a100-0001-7000-8000-000000000108';
+const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, impactCalls: 0, routeCalls: [], commandCalls: [] };
 
 function envelope(items) {
   return { items, next_cursor: '', has_more: false, limit: 50, as_of: '2026-09-04T12:00:00Z', snapshot_expires_at: '2026-09-04T12:15:00Z', request_id: 'request-test' };
@@ -104,6 +108,18 @@ const model = {
   source_missing_confirmations: 0,
   force_cancel_inflight: false,
 };
+const impactDependencies = Object.fromEntries(['routes', 'healthy_routes', 'provisionings', 'ready_provisionings', 'active_leases', 'inflight_requests', 'active_sessions', 'alternative_credentials', 'alternative_accounts', 'affected_coverage_tuples', 'remaining_ready_coverage', 'coverage_gaps'].map((key) => [key, 0]));
+function routeImpact(action) {
+  return {
+    action: `TOKEN_ROUTE_${action}`,
+    precheck_fingerprint: 'a'.repeat(64),
+    requires_cas_revalidation: true,
+    snapshot_semantics: 'INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS',
+    token_observed_at: '2026-09-04T12:00:00Z',
+    blockers: [],
+    evidence: { resource_type: 'TOKEN_ROUTE', resource_id: accountID, current_status: 'ACTIVE', current_version: { evidence_etag: `"impact-${'b'.repeat(64)}"`, evidence_set_sha256: 'c'.repeat(64) }, dependencies: impactDependencies },
+  };
+}
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
@@ -113,16 +129,18 @@ const server = createServer(async (request, response) => {
     if (nextPermissions === 'no-owner') permissions = allPermissions.filter((value) => value !== 'platform.tokens.owner-candidates.read');
     if (nextPermissions === 'no-model') permissions = allPermissions.filter((value) => value !== 'platform.models.read');
     if (url.searchParams.has('gate')) formsEnabled = url.searchParams.get('gate') === '1';
+    if (url.searchParams.has('action-gate')) actionsEnabled = url.searchParams.get('action-gate') === '1';
     if (url.searchParams.has('candidate-delay')) candidateDelay = url.searchParams.get('candidate-delay') === '1';
     if (url.searchParams.has('model-delay')) modelDelay = url.searchParams.get('model-delay') === '1';
     if (url.searchParams.has('route-mode')) routeMode = url.searchParams.get('route-mode');
-    return json(response, { permissions, formsEnabled, routeMode });
+    if (url.searchParams.has('account-status')) accountStatus = url.searchParams.get('account-status');
+    return json(response, { permissions, formsEnabled, actionsEnabled, routeMode, accountStatus });
   }
   if (url.pathname === '/__test__/state') return json(response, observations);
-  if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test', feature_flags: { admin_model_token_ia: true, admin_token_resource_forms: formsEnabled } });
+  if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test', feature_flags: { admin_model_token_ia: true, admin_token_resource_forms: formsEnabled, admin_model_token_actions: actionsEnabled } });
   if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: ownerID, platform_permissions: permissions });
-  if (url.pathname === '/api/admin/token/admin/v1/token-accounts') return json(response, envelope([account]));
-  if (url.pathname === `/api/admin/token/admin/v1/token-accounts/${accountID}`) return json(response, accountDetail);
+  if (url.pathname === '/api/admin/token/admin/v1/token-accounts') return json(response, envelope([{ ...account, status: accountStatus }]));
+  if (url.pathname === `/api/admin/token/admin/v1/token-accounts/${accountID}`) return json(response, { ...accountDetail, status: accountStatus });
   if (url.pathname === '/api/admin/token/admin/v1/owner-candidates') {
     observations.candidateCalls += 1;
     const payload = envelope([{ id: ownerID, type: 'USER', display_label: 'Alice', status: 'ACTIVE' }]);
@@ -135,15 +153,53 @@ const server = createServer(async (request, response) => {
     if (modelDelay) return delayed(request, response, payload, () => { observations.modelAborted += 1; });
     return json(response, payload);
   }
+  if (url.pathname === `/api/admin/token/admin/v2/token-accounts/${accountID}/impact/route`) {
+    observations.impactCalls += 1;
+    return json(response, routeImpact(url.searchParams.get('action')));
+  }
+  if (url.pathname === `/api/admin/token/admin/v1/token-accounts/${accountID}/impact/status`) {
+    return json(response, { ...routeImpact('UPSERT'), action: `TOKEN_ACCOUNT_STATUS_${url.searchParams.get('target_status')}`, evidence: { ...routeImpact('UPSERT').evidence, resource_type: 'TOKEN_ACCOUNT', resource_id: accountID } });
+  }
+  if (url.pathname === '/api/admin/token/admin/v1/commands' && request.method === 'POST') {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    observations.commandCalls.push({ key: request.headers['idempotency-key'], body: input });
+    return json(response, {
+      command_reference: statusCommandID, command_type: input.command_type, policy_version: 2,
+      actor_user_id: ownerID, actor_permission: 'platform.tokens.manage', authorization_version: 3,
+      idempotency_fingerprint: 'd'.repeat(64), target_resource_type: input.target_resource_type, target_resource_id: input.target_resource_id,
+      status: 'SUCCEEDED', redacted_result: {}, stable_error_code: null, approval_request_id: null,
+      audit_request_id: 'token-status-audit', created_at: '2026-09-04T12:00:00Z', completed_at: '2026-09-04T12:00:01Z',
+    });
+  }
   if (url.pathname === `/api/admin/token/admin/v2/token-accounts/${accountID}/routes` && request.method === 'PUT') {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    observations.routeCalls.push({ key: request.headers['idempotency-key'], body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    observations.routeCalls.push({ key: request.headers['idempotency-key'], body });
+    const stableRoute = {
+      route_id: routeID,
+      token_account_id: accountID,
+      model_id: body.model_id,
+      protocol_version_id: body.protocol_version_id,
+      protocol_code: 'CHAT',
+      priority: body.priority,
+      default_scope: body.default_scope,
+      health_status: 'UNKNOWN',
+      health_diagnostic_code: 'ROUTE_CONFIGURATION_CHANGED',
+      health_observed_at: null,
+      health_expires_at: null,
+      route_version: body.expected_route_version + 1,
+      route_generation: 2,
+      account_version: body.expected_account_version + 1,
+      updated_at: '2026-09-04T12:00:01Z',
+    };
     if (routeMode === 'unknown') return json(response, { code: 'INTERNAL_ERROR', request_id: 'unknown-request' }, 500);
     if (routeMode === 'mismatch') return json(response, { code: 'INTERNAL_ERROR', request_id: 'mismatch-request' }, 409);
     if (routeMode === 'safe') return json(response, { code: 'TOKEN_ROUTE_VERSION_CONFLICT', request_id: 'safe-request' }, 409);
-    if (routeMode === 'delay-success') return setTimeout(() => json(response, { route_id: routeID }), 250);
-    return json(response, { route_id: routeID });
+    if (routeMode === 'delay-success') return setTimeout(() => json(response, stableRoute), 250);
+    return json(response, stableRoute);
   }
   const relative = url.pathname === '/admin.html' ? 'admin.html' : url.pathname.replace(/^\//, '');
   const target = path.resolve(staticRoot, relative);
@@ -154,9 +210,7 @@ const server = createServer(async (request, response) => {
   response.end(await readFile(target));
 });
 
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-const { port } = server.address();
-const origin = `http://127.0.0.1:${port}`;
+const { origin } = await listenOnChromiumSafePort(server);
 const browser = await puppeteer.launch({ executablePath: browserPath, headless: 'new', args: ['--no-sandbox', '--disable-gpu', '--no-first-run'] });
 
 async function configure(page, query) {
@@ -171,27 +225,28 @@ async function openRouteDialog(page) {
   if (!await page.$('.adm-token-health')) {
     await page.goto(`${origin}/admin.html?section=tokenResources&token_account_id=${accountID}&token_detail_tab=routes`, { waitUntil: 'networkidle0' });
   }
-  await page.waitForSelector('.adm-token-health .adm-row-actions button:first-child');
-  await page.click('.adm-token-health .adm-row-actions button:first-child');
-  await page.waitForSelector('[aria-labelledby="token-route-dialog-title"] select');
-  await page.waitForFunction((value) => [...document.querySelectorAll('[aria-labelledby="token-route-dialog-title"] option')].some((option) => option.value === value), {}, modelID);
+  await page.waitForFunction(() => [...document.querySelectorAll('.adm-token-health .adm-row-actions button')].some((button) => button.textContent.includes('Configure stable route')));
+  await page.evaluate(() => [...document.querySelectorAll('.adm-token-health .adm-row-actions button')].find((button) => button.textContent.includes('Configure stable route')).click());
+  await page.waitForSelector('.adm-high-risk-dialog select');
+  await page.waitForFunction((value) => [...document.querySelectorAll('.adm-high-risk-dialog option')].some((option) => option.value === value), {}, modelID);
   await page.evaluate((value) => {
-    const select = [...document.querySelectorAll('[aria-labelledby="token-route-dialog-title"] select')].find((item) => [...item.options].some((option) => option.value === value));
+    const select = [...document.querySelectorAll('.adm-high-risk-dialog select')].find((item) => [...item.options].some((option) => option.value === value));
     select.value = value;
     select.dispatchEvent(new Event('change', { bubbles: true }));
   }, modelID);
-  await page.waitForFunction((value) => [...document.querySelectorAll('[aria-labelledby="token-route-dialog-title"] select')].some((item) => [...item.options].some((option) => option.value === value)), {}, protocolID);
+  await page.waitForFunction((value) => [...document.querySelectorAll('.adm-high-risk-dialog select')].some((item) => [...item.options].some((option) => option.value === value)), {}, protocolID);
   await page.evaluate((value) => {
-    const select = [...document.querySelectorAll('[aria-labelledby="token-route-dialog-title"] select')].find((item) => [...item.options].some((option) => option.value === value));
+    const select = [...document.querySelectorAll('.adm-high-risk-dialog select')].find((item) => [...item.options].some((option) => option.value === value));
     select.value = value;
     select.dispatchEvent(new Event('change', { bubbles: true }));
   }, protocolID);
-  await page.type('[aria-labelledby="token-route-dialog-title"] textarea', 'configure stable route safely');
+  await page.type('.adm-high-risk-dialog textarea', 'configure stable route safely');
+  await page.waitForFunction(() => document.querySelector('.adm-high-risk-dialog button[type="submit"]') && !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
 }
 
 async function submitRoute(page, twice = false) {
   await page.evaluate((double) => {
-    const button = document.querySelector('[aria-labelledby="token-route-dialog-title"] footer button:last-child');
+    const button = document.querySelector('.adm-high-risk-dialog footer button:last-child');
     button.click();
     if (double) button.click();
   }, twice);
@@ -212,7 +267,7 @@ try {
   });
 
   await page.goto(`${origin}/admin.html?section=tokenResources`, { waitUntil: 'networkidle0' });
-  await configure(page, 'permissions=all&gate=1&candidate-delay=1');
+  await configure(page, 'permissions=all&gate=1&action-gate=1&candidate-delay=1');
   await page.evaluate(() => { globalThis.__tokenResourceTest.replaceCount = 0; });
   await page.click('.adm-source-head .adm-row-actions button:first-child');
   await page.waitForFunction(() => fetch('/__test__/state').then((response) => response.json()).then((value) => value.candidateCalls >= 1));
@@ -233,8 +288,8 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.match(page.url(), /token_account_id=/, `route action did not update URL: ${await page.$eval('main', (node) => node.textContent)}`);
   await page.waitForSelector('.adm-token-health');
-  assert.equal(await page.$eval('.adm-token-health tbody tr td:last-child', (node) => node.textContent.trim()), 'Yes', 'route health uses the response as_of boundary');
-  await page.click('.adm-token-health .adm-row-actions button:first-child');
+  assert.equal(await page.$eval('.adm-token-health tbody tr td[data-label="Routable now"]', (node) => node.textContent.trim()), 'Yes', 'route health uses the response as_of boundary');
+  await page.evaluate(() => [...document.querySelectorAll('.adm-token-health .adm-row-actions button')].find((button) => button.textContent.includes('Configure stable route')).click());
   await page.waitForFunction(() => fetch('/__test__/state').then((response) => response.json()).then((value) => value.modelCalls >= 1));
   await configure(page, 'permissions=no-model');
   await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
@@ -252,34 +307,75 @@ try {
   assert.equal(await page.$$eval('[aria-labelledby="token-owner-dialog-title"]', (nodes) => nodes.length), 0);
   assert.equal((await state(page)).candidateCalls, gateCandidateCalls, 'gate-off deep link performs no candidate request');
 
-  await configure(page, 'permissions=all&gate=1&route-mode=delay-success');
+  await configure(page, 'permissions=all&gate=1&action-gate=0');
+  await page.goto(`${origin}/admin.html?section=tokenResources&token_account_id=${accountID}&token_detail_tab=routes`, { waitUntil: 'networkidle0' });
+  assert.equal(await page.$$eval('.adm-token-health button.danger,.adm-token-health .adm-row-actions button:not(:last-child)', (nodes) => nodes.length), 0, 'action gate off leaves Token resources read-only');
+  assert.equal(await page.$$eval('.adm-high-risk-dialog', (nodes) => nodes.length), 0, 'action gate off renders no command dialog');
+
+  await configure(page, 'permissions=all&gate=1&action-gate=1&account-status=DISABLED');
+  await page.reload({ waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => [...document.querySelectorAll('.adm-token-health .adm-row-actions button')].some((button) => button.textContent.includes('Re-enable Token Account')));
+  await page.evaluate(() => [...document.querySelectorAll('.adm-token-health .adm-row-actions button')].find((button) => button.textContent.includes('Re-enable Token Account')).click());
+  await page.waitForSelector('.adm-high-risk-dialog textarea');
+  await page.type('.adm-high-risk-dialog textarea', 're-enable after reviewing authoritative health evidence');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
+  const beforeEnable = (await state(page)).commandCalls.length;
+  await page.click('.adm-high-risk-dialog button[type="submit"]');
+  await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  const enabledCommand = (await state(page)).commandCalls.at(-1);
+  assert.equal((await state(page)).commandCalls.length, beforeEnable + 1, 're-enable dispatches one governed command');
+  assert.equal(enabledCommand.body.command_type, 'TOKEN_ACCOUNT_STATUS_CHANGE');
+  assert.equal(enabledCommand.body.command.target_status, 'ACTIVE');
+  assert.equal(enabledCommand.body.expected_versions.target_status, 'ACTIVE');
+  await configure(page, 'account-status=ACTIVE');
+  await page.click('.adm-high-risk-dialog footer button:first-child');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
+
+  await openRouteDialog(page);
+  const beforeGateRevocation = (await state(page)).routeCalls.length;
+  await configure(page, 'action-gate=0');
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
+  assert.equal((await state(page)).routeCalls.length, beforeGateRevocation, 'gate revocation unloads the open route command before any write');
+  await configure(page, 'action-gate=1');
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(await page.$$eval('.adm-high-risk-dialog', (nodes) => nodes.length), 0, 'permission restoration never revives a cleared command dialog');
+  assert.equal((await state(page)).routeCalls.length, beforeGateRevocation, 'permission restoration performs no deferred write');
+
+  await configure(page, 'permissions=all&gate=1&action-gate=1&route-mode=delay-success');
+  await page.reload({ waitUntil: 'networkidle0' });
   await openRouteDialog(page);
   const beforeDouble = (await state(page)).routeCalls.length;
   await submitRoute(page, true);
   await page.waitForFunction((before) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.routeCalls.length === before + 1), {}, beforeDouble);
-  await page.waitForFunction(() => !document.querySelector('[aria-labelledby="token-route-dialog-title"]'));
+  await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  await page.click('.adm-high-risk-dialog footer button:first-child');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
   assert.equal((await state(page)).routeCalls.length, beforeDouble + 1, 'same-tick double click dispatches one stable route write');
 
   await configure(page, 'route-mode=unknown');
   await openRouteDialog(page);
   const beforeUnknown = (await state(page)).routeCalls.length;
   await submitRoute(page);
-  await page.waitForSelector('[aria-labelledby="token-route-dialog-title"] [role="alert"]');
+  await page.waitForSelector('.adm-high-risk-dialog [role="alert"]');
   const unknownCall = (await state(page)).routeCalls.at(-1);
+  await configure(page, 'route-mode=success');
   await submitRoute(page);
   await new Promise((resolve) => setTimeout(resolve, 80));
   const afterUnknown = await state(page);
-  assert.equal(afterUnknown.routeCalls.length, beforeUnknown + 1, 'unknown outcome remains locked and cannot blind-retry');
-  assert.equal(afterUnknown.routeCalls.at(-1).key, unknownCall.key, 'unknown outcome retains the frozen command key');
-  await page.click('[aria-labelledby="token-route-dialog-title"] header button');
+  assert.equal(afterUnknown.routeCalls.length, beforeUnknown + 1, 'unknown direct write is never repeated without a result-query reference');
+  assert.equal(afterUnknown.routeCalls.at(-1).key, unknownCall.key, 'unknown outcome retains the frozen command key for manual correlation');
+  assert.equal(await page.$eval('.adm-high-risk-dialog button[type="submit"]', (button) => button.disabled), true, 'unknown direct write fails closed when recovery has no trusted reference');
+  await page.reload({ waitUntil: 'networkidle0' });
 
   await configure(page, 'route-mode=mismatch');
   await openRouteDialog(page);
   const beforeMismatch = (await state(page)).routeCalls.length;
   await submitRoute(page);
-  await page.waitForSelector('[aria-labelledby="token-route-dialog-title"] [role="alert"]');
+  await page.waitForSelector('.adm-high-risk-dialog [role="alert"]');
   const mismatchCall = (await state(page)).routeCalls.at(-1);
-  await page.$eval('[aria-labelledby="token-route-dialog-title"] input[type="number"]', (input) => {
+  await page.$eval('.adm-high-risk-dialog input[type="number"]', (input) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '101');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
@@ -288,16 +384,17 @@ try {
   const afterMismatch = await state(page);
   assert.equal(afterMismatch.routeCalls.length, beforeMismatch + 1, 'mismatched 409 status/code locks even a changed payload');
   assert.equal(afterMismatch.routeCalls.at(-1).key, mismatchCall.key, 'mismatched response retains the original key');
-  await page.click('[aria-labelledby="token-route-dialog-title"] header button');
+  assert.equal(await page.$eval('.adm-high-risk-dialog header button', (button) => button.disabled), true, 'unknown result cannot be dismissed into a fresh command');
+  await page.reload({ waitUntil: 'networkidle0' });
 
   await configure(page, 'route-mode=safe');
   await openRouteDialog(page);
   const beforeSafe = (await state(page)).routeCalls.length;
   await submitRoute(page);
-  await page.waitForSelector('[aria-labelledby="token-route-dialog-title"] [role="alert"]');
+  await page.waitForSelector('.adm-high-risk-dialog [role="alert"]');
   await submitRoute(page);
   await page.waitForFunction((before) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.routeCalls.length === before + 2), {}, beforeSafe);
-  await page.$eval('[aria-labelledby="token-route-dialog-title"] input[type="number"]', (input) => {
+  await page.$eval('.adm-high-risk-dialog input[type="number"]', (input) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '101');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
