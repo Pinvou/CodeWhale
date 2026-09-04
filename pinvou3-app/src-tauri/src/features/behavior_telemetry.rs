@@ -13,9 +13,11 @@ use sha2::{Digest, Sha256};
 use tauri::Manager;
 use tokio::sync::{Mutex, mpsc};
 
+use crate::platform::telemetry::{TELEMETRY_DEFAULT_BASE_URL, TELEMETRY_ENROLLMENT_TOKEN};
 use crate::platform::{filesystem, paths};
 
 const STATE_VERSION: u8 = 6;
+const DEFAULT_BEHAVIOR_EVENTS_URL: &str = "https://pinvou.com/pinvou3/stats/api/behavior/events";
 const CONTROLLED_PROVIDER_KEYS: &[&str] = &[
     "openai",
     "anthropic",
@@ -1393,15 +1395,21 @@ impl RuntimeConfig {
                 .as_deref(),
         );
         let telemetry_base_url = std::env::var("PINVOU_TELEMETRY_BASE_URL")
-            .unwrap_or_default()
+            .unwrap_or_else(|_| TELEMETRY_DEFAULT_BASE_URL.to_string())
             .trim_end_matches('/')
             .to_string();
-        let behavior_events_url = std::env::var("PINVOU_BEHAVIOR_EVENTS_URL").unwrap_or_default();
-        let enrollment_token = std::env::var("PINVOU_TELEMETRY_ENROLLMENT_TOKEN")
-            .ok()
-            .filter(|value| value.len() >= 24);
-        let enabled =
-            requested_enabled && !telemetry_base_url.is_empty() && !behavior_events_url.is_empty();
+        let behavior_events_url = std::env::var("PINVOU_BEHAVIOR_EVENTS_URL")
+            .unwrap_or_else(|_| DEFAULT_BEHAVIOR_EVENTS_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
+        let enrollment_token = match std::env::var("PINVOU_TELEMETRY_ENROLLMENT_TOKEN") {
+            Ok(value) => (value.len() >= 24).then_some(value),
+            Err(_) => Some(TELEMETRY_ENROLLMENT_TOKEN.to_string()),
+        };
+        let enabled = requested_enabled
+            && !telemetry_base_url.is_empty()
+            && !behavior_events_url.is_empty()
+            && enrollment_token.is_some();
         Self {
             enabled,
             telemetry_base_url,

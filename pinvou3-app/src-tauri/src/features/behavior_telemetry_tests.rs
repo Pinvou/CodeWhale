@@ -59,6 +59,22 @@ impl<'a> EnvRestore<'a> {
             values: previous,
         }
     }
+
+    fn unset(home: &'a TestHome, keys: &[&'static str]) -> Self {
+        let previous = keys
+            .iter()
+            .map(|key| {
+                let old = std::env::var_os(key);
+                // SAFETY: `home` proves this test owns ENV_LOCK for the restore lifetime.
+                unsafe { std::env::remove_var(key) };
+                (*key, old)
+            })
+            .collect();
+        Self {
+            _home: home,
+            values: previous,
+        }
+    }
 }
 
 impl Drop for EnvRestore<'_> {
@@ -385,6 +401,88 @@ fn internal_collection_is_enabled_by_default_with_an_operational_kill_switch() {
     assert!(behavior_telemetry_enabled_by_config(Some("1")));
     assert!(!behavior_telemetry_enabled_by_config(Some("false")));
     assert!(!behavior_telemetry_enabled_by_config(Some("off")));
+}
+
+#[test]
+fn packaged_runtime_uses_the_deployed_telemetry_service_without_launcher_environment() {
+    let home = TestHome::new();
+    let _env = EnvRestore::unset(
+        &home,
+        &[
+            "PINVOU_BEHAVIOR_TELEMETRY_ENABLED",
+            "PINVOU_TELEMETRY_BASE_URL",
+            "PINVOU_BEHAVIOR_EVENTS_URL",
+            "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+        ],
+    );
+
+    let runtime = RuntimeConfig::from_env();
+
+    assert!(runtime.enabled);
+    // 控制面 URL 由事件地址 strip_suffix("/events") 推导，默认值必须保持该后缀。
+    assert!(DEFAULT_BEHAVIOR_EVENTS_URL.ends_with("/events"));
+    assert!(TELEMETRY_ENROLLMENT_TOKEN.len() >= 24);
+    assert_eq!(runtime.telemetry_base_url, TELEMETRY_DEFAULT_BASE_URL);
+    assert_eq!(runtime.behavior_events_url, DEFAULT_BEHAVIOR_EVENTS_URL);
+    assert_eq!(
+        runtime.enrollment_token.as_deref(),
+        Some(TELEMETRY_ENROLLMENT_TOKEN)
+    );
+}
+
+#[test]
+fn explicit_complete_runtime_override_is_honored_and_normalized() {
+    let home = TestHome::new();
+    let _env = EnvRestore::set(
+        &home,
+        &[
+            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
+            (
+                "PINVOU_TELEMETRY_BASE_URL",
+                "https://telemetry.example.internal/pinvou3/telemetry/",
+            ),
+            (
+                "PINVOU_BEHAVIOR_EVENTS_URL",
+                "https://telemetry.example.internal/pinvou3/stats/api/behavior/events/",
+            ),
+            (
+                "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                "pinvou_tel_enroll_v1_override_token_ok24",
+            ),
+        ],
+    );
+
+    let runtime = RuntimeConfig::from_env();
+
+    assert!(runtime.enabled);
+    assert_eq!(
+        runtime.telemetry_base_url,
+        "https://telemetry.example.internal/pinvou3/telemetry"
+    );
+    assert_eq!(
+        runtime.behavior_events_url,
+        "https://telemetry.example.internal/pinvou3/stats/api/behavior/events"
+    );
+    assert_eq!(
+        runtime.enrollment_token.as_deref(),
+        Some("pinvou_tel_enroll_v1_override_token_ok24")
+    );
+}
+
+#[test]
+fn explicit_incomplete_runtime_override_fails_closed() {
+    let home = TestHome::new();
+    let _env = EnvRestore::set(
+        &home,
+        &[
+            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
+            ("PINVOU_TELEMETRY_BASE_URL", ""),
+            ("PINVOU_BEHAVIOR_EVENTS_URL", ""),
+            ("PINVOU_TELEMETRY_ENROLLMENT_TOKEN", "short"),
+        ],
+    );
+
+    assert!(!RuntimeConfig::from_env().enabled);
 }
 
 #[test]

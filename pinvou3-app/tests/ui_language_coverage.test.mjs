@@ -246,7 +246,7 @@ assert.match(teamRelayAccess, /copy\.disable/);
 assert.doesNotMatch(teamRelayAccess, /当前功能内测中/);
 const settings = source('features/settings/SettingsView.jsx');
 assert.match(settings, /t\.uiSettings/);
-assert.match(settings, /const settingsCopy = t\.uiSettingsDetail/);
+assert.match(settings, /const settingsCopy = (?:\/\*\* @type \{typeof )?t\.uiSettingsDetail/);
 assert.match(settings, /settingsCopy\.addSearch/);
 assert.match(settings, /settingsCopy\.deleteModelTitle/);
 assert.match(settings, /item\.title \|\| presetProviderLabel\(p, t\)/);

@@ -1872,17 +1872,21 @@ dictJa["uiTeamRelayAccess"] = {
   "disabling": "無効化中…",
   "disableUnavailable": "チームリレーを無効にできませんでした。もう一度お試しください。"
 };
-dictJa["uiSettingsDetail"]["behaviorAnalyticsTitle"] = "プライバシーと利用状況分析";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsLabel"] = "PINVOU の改善に協力する";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsDesc"] = "プレビュー期間中は既定で有効です。管理された機能の結果、所要時間、エラー分類のみを収集し、会話、ファイル内容、パス、認証情報は収集しません。オン／オフの選択は保持されます。";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsNotConfigured"] = "このビルドでは利用状況分析サービスが設定されていないため、収集は無効です。";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsRetention"] = days => `関連付け可能なデータの保持期間は最大 ${days} 日です。いつでも無効化または再有効化できます。`;
-dictJa["uiSettingsDetail"]["behaviorAnalyticsEnableConfirm"] = "製品改善のため、管理された機能利用と品質データを収集します。会話本文、ファイル内容、パス、ツール引数、認証情報は収集しません。有効にしますか？";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsDisableConfirm"] = "収集を直ちに停止し、未送信イベントを削除します。オフライン時の撤回は接続復旧後に再試行されます。無効にしますか？";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "有効";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "無効";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "リモート撤回の処理待ち";
-dictJa["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "操作に失敗しました。しばらくしてから再試行してください。";
+const behaviorSettingsJa = /** @type {Record<string, string | ((days: number) => string)>} */ (dictJa.uiSettingsDetail);
+behaviorSettingsJa.behaviorAnalyticsTitle = "プライバシーと利用状況分析";
+behaviorSettingsJa.behaviorAnalyticsEntryTitle = "データ管理";
+behaviorSettingsJa.behaviorAnalyticsEntryDesc = "製品改善とデータ利用の設定を管理します";
+behaviorSettingsJa.behaviorAnalyticsBack = "ヘルプとフィードバックに戻る";
+behaviorSettingsJa.behaviorAnalyticsLabel = "PINVOU の改善に協力する";
+behaviorSettingsJa.behaviorAnalyticsDesc = "プレビュー期間中は既定で有効です。管理された機能の結果、所要時間、エラー分類のみを収集し、会話、ファイル内容、パス、認証情報は収集しません。オン／オフの選択は保持されます。";
+behaviorSettingsJa.behaviorAnalyticsNotConfigured = "このビルドでは利用状況分析サービスが設定されていないため、収集は無効です。";
+behaviorSettingsJa.behaviorAnalyticsRetention = (/** @type {number} */ days) => `関連付け可能なデータの保持期間は最大 ${days} 日です。いつでも無効化または再有効化できます。`;
+behaviorSettingsJa.behaviorAnalyticsEnableConfirm = "製品改善のため、管理された機能利用と品質データを収集します。会話本文、ファイル内容、パス、ツール引数、認証情報は収集しません。有効にしますか？";
+behaviorSettingsJa.behaviorAnalyticsDisableConfirm = "収集を直ちに停止し、未送信イベントを削除します。オフライン時の撤回は接続復旧後に再試行されます。無効にしますか？";
+behaviorSettingsJa.behaviorAnalyticsStatusEnabled = "有効";
+behaviorSettingsJa.behaviorAnalyticsStatusDisabled = "無効";
+behaviorSettingsJa.behaviorAnalyticsStatusWithdrawalPending = "リモート撤回の処理待ち";
+behaviorSettingsJa.behaviorAnalyticsActionFailed = "操作に失敗しました。しばらくしてから再試行してください。";
 // features/chat バックグラウンドタスク表示の辞書項目（uiChat は既存のためマージ）
 Object.assign(dictJa.uiChat, {
   bgTasks: 'バックグラウンドタスク',

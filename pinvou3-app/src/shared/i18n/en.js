@@ -1871,17 +1871,21 @@ dictEn["uiTeamRelayAccess"] = {
   "disabling": "Disabling…",
   "disableUnavailable": "Team Relay could not be disabled. Try again."
 };
-dictEn["uiSettingsDetail"]["behaviorAnalyticsTitle"] = "Privacy and usage analytics";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsLabel"] = "Help improve PINVOU";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsDesc"] = "Enabled by default during preview. Only controlled feature outcomes, timing, and error categories are collected; conversations, file contents, paths, and credentials are never collected. Your on/off choice is retained.";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsNotConfigured"] = "Usage analytics is not configured in this build and remains off.";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsRetention"] = days => `Linkable data is retained for at most ${days} days. You can turn analytics off or back on at any time.`;
-dictEn["uiSettingsDetail"]["behaviorAnalyticsEnableConfirm"] = "PINVOU will collect controlled feature usage and quality data to improve the product. Conversation text, file contents, paths, tool arguments, and credentials are never collected. Enable analytics?";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsDisableConfirm"] = "Collection stops immediately and pending events are cleared. An offline withdrawal will retry when connectivity returns. Turn analytics off?";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "On";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "Off";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "Remote withdrawal pending";
-dictEn["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "The operation failed. Try again later.";
+const behaviorSettingsEn = /** @type {Record<string, string | ((days: number) => string)>} */ (dictEn.uiSettingsDetail);
+behaviorSettingsEn.behaviorAnalyticsTitle = "Privacy and usage analytics";
+behaviorSettingsEn.behaviorAnalyticsEntryTitle = "Data Management";
+behaviorSettingsEn.behaviorAnalyticsEntryDesc = "Manage product improvement and data usage settings";
+behaviorSettingsEn.behaviorAnalyticsBack = "Back to Help & Feedback";
+behaviorSettingsEn.behaviorAnalyticsLabel = "Help improve PINVOU";
+behaviorSettingsEn.behaviorAnalyticsDesc = "Enabled by default during preview. Only controlled feature outcomes, timing, and error categories are collected; conversations, file contents, paths, and credentials are never collected. Your on/off choice is retained.";
+behaviorSettingsEn.behaviorAnalyticsNotConfigured = "Usage analytics is not configured in this build and remains off.";
+behaviorSettingsEn.behaviorAnalyticsRetention = (/** @type {number} */ days) => `Linkable data is retained for at most ${days} days. You can turn analytics off or back on at any time.`;
+behaviorSettingsEn.behaviorAnalyticsEnableConfirm = "PINVOU will collect controlled feature usage and quality data to improve the product. Conversation text, file contents, paths, tool arguments, and credentials are never collected. Enable analytics?";
+behaviorSettingsEn.behaviorAnalyticsDisableConfirm = "Collection stops immediately and pending events are cleared. An offline withdrawal will retry when connectivity returns. Turn analytics off?";
+behaviorSettingsEn.behaviorAnalyticsStatusEnabled = "On";
+behaviorSettingsEn.behaviorAnalyticsStatusDisabled = "Off";
+behaviorSettingsEn.behaviorAnalyticsStatusWithdrawalPending = "Remote withdrawal pending";
+behaviorSettingsEn.behaviorAnalyticsActionFailed = "The operation failed. Try again later.";
 // features/chat background task indicator entries (uiChat exists, merge instead of overwrite)
 Object.assign(dictEn.uiChat, {
   bgTasks: 'Background Tasks',

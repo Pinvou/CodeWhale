@@ -27,6 +27,9 @@ pub mod behavior_telemetry_test_support {
     use std::io;
     use std::path::Path;
 
+    pub const TELEMETRY_DEFAULT_BASE_URL: &str = super::telemetry::TELEMETRY_DEFAULT_BASE_URL;
+    pub const TELEMETRY_ENROLLMENT_TOKEN: &str = super::telemetry::TELEMETRY_ENROLLMENT_TOKEN;
+
     pub fn atomic_write_private(path: &Path, content: &[u8]) -> io::Result<()> {
         super::filesystem::atomic_write_private(path, content)
     }

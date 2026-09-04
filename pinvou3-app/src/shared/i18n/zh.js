@@ -1857,17 +1857,21 @@ dictZh["uiTeamRelayAccess"] = {
   "disabling": "关闭中…",
   "disableUnavailable": "暂时无法关闭接力，请重试。"
 };
-dictZh["uiSettingsDetail"]["behaviorAnalyticsTitle"] = "隐私与行为统计";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsLabel"] = "帮助改进 PINVOU";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsDesc"] = "内测期间默认开启，仅收集受控的功能使用结果、耗时和错误分类，不收集对话、文件内容、路径或凭据；你的开启或关闭选择会保留。";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsNotConfigured"] = "此版本未配置行为统计服务，采集保持关闭。";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsRetention"] = days => `可关联数据最多保留 ${days} 天；可随时关闭，也可重新开启。`;
-dictZh["uiSettingsDetail"]["behaviorAnalyticsEnableConfirm"] = "启用后，PINVOU 将收集受控的功能使用与质量数据，用于改进产品。不会收集对话正文、文件内容、路径、工具参数或凭据。是否启用？";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsDisableConfirm"] = "关闭后将立即停止采集并清空待上传事件；离线时撤回请求会在联网后重试。是否关闭？";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "已启用";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "已关闭";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "远端撤回待处理";
-dictZh["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "操作失败，请稍后重试。";
+const behaviorSettingsZh = /** @type {Record<string, string | ((days: number) => string)>} */ (dictZh.uiSettingsDetail);
+behaviorSettingsZh.behaviorAnalyticsTitle = "隐私与行为统计";
+behaviorSettingsZh.behaviorAnalyticsEntryTitle = "数据管理";
+behaviorSettingsZh.behaviorAnalyticsEntryDesc = "管理产品改进计划与数据使用设置";
+behaviorSettingsZh.behaviorAnalyticsBack = "返回帮助反馈";
+behaviorSettingsZh.behaviorAnalyticsLabel = "帮助改进 PINVOU";
+behaviorSettingsZh.behaviorAnalyticsDesc = "内测期间默认开启，仅收集受控的功能使用结果、耗时和错误分类，不收集对话、文件内容、路径或凭据；你的开启或关闭选择会保留。";
+behaviorSettingsZh.behaviorAnalyticsNotConfigured = "此版本未配置行为统计服务，采集保持关闭。";
+behaviorSettingsZh.behaviorAnalyticsRetention = (/** @type {number} */ days) => `可关联数据最多保留 ${days} 天；可随时关闭，也可重新开启。`;
+behaviorSettingsZh.behaviorAnalyticsEnableConfirm = "启用后，PINVOU 将收集受控的功能使用与质量数据，用于改进产品。不会收集对话正文、文件内容、路径、工具参数或凭据。是否启用？";
+behaviorSettingsZh.behaviorAnalyticsDisableConfirm = "关闭后将立即停止采集并清空待上传事件；离线时撤回请求会在联网后重试。是否关闭？";
+behaviorSettingsZh.behaviorAnalyticsStatusEnabled = "已启用";
+behaviorSettingsZh.behaviorAnalyticsStatusDisabled = "已关闭";
+behaviorSettingsZh.behaviorAnalyticsStatusWithdrawalPending = "远端撤回待处理";
+behaviorSettingsZh.behaviorAnalyticsActionFailed = "操作失败，请稍后重试。";
 // features/chat 后台任务指示器词条（uiChat 已存在，合并而非覆盖）
 Object.assign(dictZh.uiChat, {
   bgTasks: '后台任务',

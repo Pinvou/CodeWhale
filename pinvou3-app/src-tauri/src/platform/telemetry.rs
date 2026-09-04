@@ -19,9 +19,9 @@ use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const DEFAULT_BASE_URL: &str = "https://pinvou.com/pinvou3/telemetry";
+pub(crate) const TELEMETRY_DEFAULT_BASE_URL: &str = "https://pinvou.com/pinvou3/telemetry";
 // 协议版本门槛，不是客户端身份凭证；真实性和资源边界由服务端另行保护。
-const ENROLLMENT_TOKEN: &str = "pinvou_tel_enroll_v1_7Jk9pQ3mZ8xW2sN6cR4tY5uH";
+pub(crate) const TELEMETRY_ENROLLMENT_TOKEN: &str = "pinvou_tel_enroll_v1_7Jk9pQ3mZ8xW2sN6cR4tY5uH";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2 * 60);
 const OUTBOX_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const OUTBOX_MAX_EVENTS: usize = 5_000;
@@ -154,7 +154,7 @@ impl TelemetryState {
             .user_agent(format!("pinvou3/{app_version}"))
             .build()?;
         let base_url = std::env::var("PINVOU_TELEMETRY_BASE_URL")
-            .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+            .unwrap_or_else(|_| TELEMETRY_DEFAULT_BASE_URL.to_string())
             .trim_end_matches('/')
             .to_string();
         Ok(Some(Self {
@@ -294,7 +294,7 @@ impl TelemetryState {
             .client
             .post(format!("{}/v1/register", self.inner.base_url))
             .json(&RegisterRequest {
-                enrollment_token: ENROLLMENT_TOKEN,
+                enrollment_token: TELEMETRY_ENROLLMENT_TOKEN,
                 registration_secret: &registration_secret,
                 hardware_claim: &self.inner.hardware.claim,
                 hardware_source: &self.inner.hardware.source,

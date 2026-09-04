@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Archive, Briefcase, Check, ChevronDown, Code, Cpu, Database, Edit2, FileText, Globe, Lightbulb, MessageSquare, MoreHorizontal, Paperclip, Plus, RefreshCw, Search, Sparkles, Store, Trash2, User, Users, Video, Wrench, X, Zap } from '../../components/icons.jsx';
+import { Archive, Briefcase, Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Edit2, FileText, Globe, Lightbulb, MessageSquare, MoreHorizontal, Paperclip, Plus, RefreshCw, Search, Sparkles, Store, Trash2, User, Users, Video, Wrench, X, Zap } from '../../components/icons.jsx';
 import { ArchivedDeleteConfirmDialog } from '../../components/layout/NavigationComponents.jsx';
 import { ComposerPopover } from '../../components/ComposerPopover.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
@@ -1871,13 +1871,14 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
         {footer && <div className={`px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]`}>{footer}</div>}
       </section>
     );
-    /** @param {{ label: string, desc?: string, value?: string, children?: import('react').ReactNode, onClick?: () => void, danger?: boolean }} props - Row content and optional click behavior. */
-    const IOSRow = ({ label, desc, value, children, onClick, danger }) => {
+    /** @param {{ label: string, desc?: string, value?: string, children?: import('react').ReactNode, onClick?: () => void, danger?: boolean, testId?: string }} props - Row content and optional click behavior. */
+    const IOSRow = ({ label, desc, value, children, onClick, danger, testId }) => {
       const RowTag = onClick ? 'button' : 'div';
       return (
       <RowTag
         type={onClick ? 'button' : undefined}
         onClick={onClick}
+        data-testid={testId}
         className={`w-full min-h-[58px] flex flex-wrap items-center gap-3 px-4 py-2.5 text-left border-b last:border-b-0 max-sm:flex-col max-sm:items-stretch ${
           'border-black/[0.12] text-[#1C1C1E] dark:border-white/[0.10] dark:text-[#F2F2F7]'
         } ${onClick ? ('hover:bg-black/[0.035] dark:hover:bg-white/[0.05]') : ''}`}
@@ -1891,8 +1892,8 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       </RowTag>
       );
     };
-    /** @param {{ checked: boolean, onChange: (checked: boolean) => void }} props - Switch state. */
-    const IOSSwitch = ({ checked, onChange }) => <Toggle checked={checked} onChange={onChange} size="md" />;
+    /** @param {{ checked: boolean, onChange: (checked: boolean) => void, disabled?: boolean, ariaLabel?: string }} props - Switch state. */
+    const IOSSwitch = ({ checked, onChange, disabled, ariaLabel }) => <Toggle checked={checked} onChange={onChange} disabled={disabled} aria-label={ariaLabel} size="md" />;
     /** @param {{ id: string, icon: import('react').ReactNode, label: string, dot?: boolean, active: boolean, onSelect: (id: string) => void }} props - Sidebar section entry. */
     const SectionButton = ({ id, icon, label, dot, active, onSelect }) => (
       <button
@@ -2050,9 +2051,10 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       </div>
     );
 
+    /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsRetention: (days: number) => string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
     const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
-      const settingsCopy = t.uiSettingsDetail;
+      const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
       const usesBundledDependencyInstaller = !!platformCapabilities.usesBundledDependencyInstaller;
@@ -2645,6 +2647,15 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               : settingsCopy.behaviorAnalyticsStatusDisabled;
         return (
           <>
+            <button
+              type="button"
+              data-testid="behavior-analytics-back"
+              onClick={() => setActiveSection('help')}
+              className="mb-4 inline-flex items-center gap-1 text-[13px] text-[#6E6E73] hover:text-[#1C1C1E] dark:text-[#98989D] dark:hover:text-[#F2F2F7]"
+            >
+              <ChevronLeft size={15} />
+              {settingsCopy.behaviorAnalyticsBack}
+            </button>
             <IOSSection
               title={settingsCopy.behaviorAnalyticsTitle}
               footer={settingsCopy.behaviorAnalyticsRetention(behaviorTelemetry.retention_days || 35)}
@@ -2658,6 +2669,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                   checked={!!behaviorTelemetry.enabled}
                   onChange={toggleBehaviorTelemetry}
                   disabled={!behaviorTelemetry.configured || behaviorTelemetryBusy}
+                  ariaLabel={settingsCopy.behaviorAnalyticsLabel}
                 />
               </IOSRow>
             </IOSSection>
@@ -2787,11 +2799,23 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
         );
       };
       const renderHelp = () => (
-        <IOSSection>
-          <IOSRow label={settingsCopy.feedbackTitle} desc={settingsCopy.feedbackDesc}>
-            <button onClick={() => setFeedbackOpen(true)} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.submitFeedback}</button>
-          </IOSRow>
-        </IOSSection>
+        <>
+          <IOSSection>
+            <IOSRow label={settingsCopy.feedbackTitle} desc={settingsCopy.feedbackDesc}>
+              <button onClick={() => setFeedbackOpen(true)} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.submitFeedback}</button>
+            </IOSRow>
+          </IOSSection>
+          <IOSSection>
+            <IOSRow
+              label={settingsCopy.behaviorAnalyticsEntryTitle}
+              desc={settingsCopy.behaviorAnalyticsEntryDesc}
+              onClick={() => setActiveSection('data')}
+              testId="behavior-analytics-entry"
+            >
+              <ChevronRight size={17} className="shrink-0 text-[#C7C7CC] dark:text-[#636366]" />
+            </IOSRow>
+          </IOSSection>
+        </>
       );
       const renderCommunity = () => (
         <CommunityPanel
