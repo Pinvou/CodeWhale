@@ -6,6 +6,7 @@ import {
   encodeProvenanceMarker,
   parseAutomationEvent,
   runAutomation,
+  runManualEnqueue,
 } from "../community-backflow.mjs";
 
 const repo = "Pinvou/pinvou3";
@@ -191,7 +192,7 @@ function fakeApi(data, options = {}) {
   };
 }
 
-function fakeGraphql({ mergeMethod = "SQUASH", existing = false, mutate } = {}) {
+function fakeGraphql({ mergeMethod = "MERGE", existing = false, mutate } = {}) {
   const calls = [];
   const graphql = async (_token, query, variables) => {
     calls.push({ query, variables });
@@ -225,15 +226,20 @@ test("未显式启用时安全跳过且不读取 GitHub", async () => {
   assert.equal(touched, false);
 });
 
-test("验证 Queue 为 SQUASH 后以 expectedHeadOid 加入 Merge Queue", async () => {
-  const api = fakeApi(fixture());
-  const graph = fakeGraphql();
-  const result = await runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql });
-  assert.equal(result.status, "enqueued");
-  assert.equal(graph.calls.length, 3);
-  assert.deepEqual(graph.calls[0].variables, { owner: "Pinvou", name: "pinvou3", branch: "main" });
-  assert.match(graph.calls[2].query, /expectedHeadOid: \$head/u);
-  assert.deepEqual(graph.calls[2].variables, { id: "PR_node", head });
+test("遵循 Queue 当前支持的合并方法并以 expectedHeadOid 入队", async (t) => {
+  for (const mergeMethod of ["MERGE", "SQUASH", "REBASE"]) {
+    await t.test(mergeMethod, async () => {
+      const api = fakeApi(fixture());
+      const graph = fakeGraphql({ mergeMethod });
+      const result = await runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql });
+      assert.equal(result.status, "enqueued");
+      assert.equal(result.mergeMethod, mergeMethod);
+      assert.equal(graph.calls.length, 3);
+      assert.deepEqual(graph.calls[0].variables, { owner: "Pinvou", name: "pinvou3", branch: "main" });
+      assert.match(graph.calls[2].query, /expectedHeadOid: \$head/u);
+      assert.deepEqual(graph.calls[2].variables, { id: "PR_node", head });
+    });
+  }
 });
 
 test("校验 H 后分支推进到 H2 时 expectedHeadOid 令入队原子失败", async () => {
@@ -246,12 +252,36 @@ test("校验 H 后分支推进到 H2 时 expectedHeadOid 令入队原子失败",
   assert.equal(graph.calls.filter((call) => call.query.includes("mutation EnqueueBackflowPull")).length, 1);
 });
 
-test("Merge Queue 合并方法不是 SQUASH 时拒绝入队且不修改远端规则", async () => {
+test("Merge Queue 合并方法未知时拒绝入队且不修改远端规则", async () => {
   const api = fakeApi(fixture());
-  const graph = fakeGraphql({ mergeMethod: "MERGE" });
-  await assert.rejects(runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql }), /mergeMethod=MERGE.*配置为 SQUASH.*不会修改规则或绕过 Queue/u);
+  const graph = fakeGraphql({ mergeMethod: "UNKNOWN" });
+  await assert.rejects(runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql }), /mergeMethod=UNKNOWN.*不受回流契约支持.*不会修改规则或绕过 Queue/u);
   assert.equal(graph.calls.length, 1);
   assert.equal(graph.calls.some((call) => call.query.includes("mutation")), false);
+});
+
+test("人工 enqueue 命令复用完整回流校验并绑定当前 head", async () => {
+  const api = fakeApi(fixture());
+  const graph = fakeGraphql({ mergeMethod: "MERGE" });
+  const result = await runManualEnqueue({
+    repo,
+    pullNumber,
+    expectedHead: head,
+    token: "token",
+    request: api.request,
+    graphql: graph.graphql,
+  });
+  assert.deepEqual(result, { status: "enqueued", pull: pullNumber, head, mergeMethod: "MERGE" });
+  assert.deepEqual(graph.calls.at(-1).variables, { id: "PR_node", head });
+});
+
+test("人工 enqueue 命令拒绝无效或过期 head", async () => {
+  await assert.rejects(runManualEnqueue({ repo, pullNumber, expectedHead: "short", token: "token" }), /有效 --head/u);
+  const api = fakeApi(fixture());
+  await assert.rejects(
+    runManualEnqueue({ repo, pullNumber, expectedHead: advancedHead, token: "token", request: api.request }),
+    /与 PR .* 当前 head .* 不一致/u,
+  );
 });
 
 test("dry-run 完成包括 Queue 策略在内的校验但不入队", async () => {
@@ -298,7 +328,7 @@ test("非回流 PR 的 advance 与 finalize 事件安全跳过且零写入", asy
   assert.equal(finalizeApi.calls.some((call) => call.method !== "GET"), false);
 });
 
-test("已入队时仍先核验 SQUASH 策略后幂等跳过", async () => {
+test("已入队时仍先核验当前 Queue 策略后幂等跳过", async () => {
   const api = fakeApi(fixture());
   const graph = fakeGraphql({ existing: true });
   const result = await runAutomation({ event: workflowEvent(), repo, token: "token", enabled: "true", request: api.request, graphql: graph.graphql });
