@@ -227,31 +227,98 @@ function statsDayLabel(day) {
   return new Date(day * DAY_MS).toISOString().slice(0, 10);
 }
 
-export function buildStatsOverview(devices, events, now = Date.now()) {
+function isBehaviorInstallationDevice(device) {
+  return device?.hardware_source === "installation_id";
+}
+
+function compatibleUsageByDay(devices, usageEvents, behaviorEvents, startDay, endDay) {
+  const deviceById = new Map(devices.map((device) => [device.device_id, device]));
+  const rows = new Map();
+  for (let day = startDay; day <= endDay; day += 1) {
+    rows.set(day, { legacy: new Map(), behavior: new Map() });
+  }
+
+  for (const event of usageEvents) {
+    if (!deviceById.has(event.device_id)) continue;
+    const row = rows.get(statsDay(event.occurred_at));
+    if (!row) continue;
+    row.legacy.set(event.device_id, (row.legacy.get(event.device_id) || 0) + 1);
+  }
+
+  const seenAttempts = new Set();
+  for (const event of behaviorEvents) {
+    if (event.event_name !== "task_finished") continue;
+    const row = rows.get(statsDay(event.occurred_at));
+    if (!row) continue;
+    const deviceId = boundedText(event.device_id || eventIdentity(event), 128);
+    const attemptId = boundedText(event.attempt_id || event.turn_id || event.event_id, 128);
+    if (!deviceId || !attemptId) continue;
+    const attemptKey = `${deviceId}\u001f${attemptId}`;
+    if (seenAttempts.has(attemptKey)) continue;
+    seenAttempts.add(attemptKey);
+    row.behavior.set(deviceId, (row.behavior.get(deviceId) || 0) + 1);
+  }
+
+  return new Map([...rows].map(([day, row]) => {
+    const counts = new Map(row.legacy);
+    // 新旧客户端可能在迁移期同时发送两类事件。同一设备同一天一旦存在
+    // task_finished，就以新埋点为准，避免旧 usage event 再次累计。
+    for (const [deviceId, turns] of row.behavior) counts.set(deviceId, turns);
+    return [day, counts];
+  }));
+}
+
+function statsArguments(behaviorEventsOrNow, fallbackNow) {
+  if (Array.isArray(behaviorEventsOrNow)) {
+    return { behaviorEvents: behaviorEventsOrNow, now: fallbackNow };
+  }
+  return { behaviorEvents: [], now: behaviorEventsOrNow ?? fallbackNow };
+}
+
+export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fallbackNow = Date.now()) {
+  const { behaviorEvents, now } = statsArguments(behaviorEventsOrNow, fallbackNow);
   const today = statsDay(now);
   const trendStart = today - 29;
   const activeWeekStart = today - 6;
+  const operationalDevices = devices.filter((device) => !isBehaviorInstallationDevice(device));
   const deviceById = new Map(devices.map((device) => [device.device_id, device]));
 
-  const online = devices.filter((device) => now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS);
-  const activeToday = devices.filter((device) => statsDay(device.last_active_at || 0) === today);
-  const activeWeek = devices.filter((device) => statsDay(device.last_active_at || 0) >= activeWeekStart);
+  const online = operationalDevices.filter(
+    (device) => now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS,
+  );
+  const compatibleUsage = compatibleUsageByDay(
+    devices,
+    events,
+    behaviorEvents,
+    trendStart,
+    today,
+  );
   const trend = new Map();
   for (let day = trendStart; day <= today; day += 1) {
-    trend.set(day, { day: statsDayLabel(day), turns: 0, device_ids: new Set() });
+    const usage = compatibleUsage.get(day) || new Map();
+    trend.set(day, {
+      day: statsDayLabel(day),
+      turns: [...usage.values()].reduce((sum, turns) => sum + turns, 0),
+      device_ids: new Set(usage.keys()),
+    });
   }
 
-  for (const event of events) {
-    if (!deviceById.has(event.device_id)) continue;
-    const row = trend.get(statsDay(event.occurred_at));
-    if (!row) continue;
-    row.turns += 1;
-    row.device_ids.add(event.device_id);
+  const activeToday = trend.get(today)?.device_ids || new Set();
+  const activeWeek = new Set();
+  for (let day = activeWeekStart; day <= today; day += 1) {
+    for (const deviceId of trend.get(day)?.device_ids || []) activeWeek.add(deviceId);
   }
-
+  const behaviorVersionByDevice = new Map();
+  for (const event of behaviorEvents) {
+    const deviceId = boundedText(event.device_id || eventIdentity(event), 128);
+    const version = boundedText(event.app_version, 32);
+    if (deviceId && version) behaviorVersionByDevice.set(deviceId, version);
+  }
   const versionMap = new Map();
-  for (const device of activeWeek) {
-    const version = device.app_version || "未知";
+  for (const deviceId of activeWeek) {
+    const version = behaviorVersionByDevice.get(deviceId)
+      || deviceById.get(deviceId)?.app_version
+      || "未知";
     versionMap.set(version, (versionMap.get(version) || 0) + 1);
   }
 
@@ -260,8 +327,8 @@ export function buildStatsOverview(devices, events, now = Date.now()) {
     online_window_seconds: ONLINE_WINDOW_MS / 1000,
     counts: {
       online: online.length,
-      active_today: activeToday.length,
-      active_7d: activeWeek.length,
+      active_today: activeToday.size,
+      active_7d: activeWeek.size,
     },
     usage_trend: [...trend.values()].map((row) => ({
       day: row.day,
@@ -274,19 +341,21 @@ export function buildStatsOverview(devices, events, now = Date.now()) {
   };
 }
 
-export function buildDeviceList(devices, events, now = Date.now()) {
+export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallbackNow = Date.now()) {
+  const { behaviorEvents, now } = statsArguments(behaviorEventsOrNow, fallbackNow);
   const weekStart = statsDay(now) - 6;
+  const today = statsDay(now);
+  const usage = compatibleUsageByDay(devices, events, behaviorEvents, weekStart, today);
   const activity = new Map();
-  for (const event of events) {
-    if (statsDay(event.occurred_at) < weekStart) continue;
-    const row = activity.get(event.device_id) || { turns: 0 };
-    row.turns += 1;
-    activity.set(event.device_id, row);
+  for (const counts of usage.values()) {
+    for (const [deviceId, turns] of counts) {
+      activity.set(deviceId, (activity.get(deviceId) || 0) + turns);
+    }
   }
 
   return devices
+    .filter((device) => !isBehaviorInstallationDevice(device))
     .map((device) => {
-      const recent = activity.get(device.device_id) || { turns: 0 };
       const online = now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS;
       return {
         device_id: device.device_id,
@@ -297,7 +366,7 @@ export function buildDeviceList(devices, events, now = Date.now()) {
         region: formatDeviceRegion(device.region),
         first_seen_at: device.first_seen_at,
         last_active_at: device.last_active_at,
-        turns_7d: recent.turns,
+        turns_7d: activity.get(device.device_id) || 0,
       };
     })
     .sort((a, b) => Number(b.online) - Number(a.online)
@@ -2310,12 +2379,12 @@ export class TelemetryStore {
 
   overview() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildStatsOverview([...this.devices.values()], this.events);
+    return buildStatsOverview([...this.devices.values()], this.events, this.behaviorEvents);
   }
 
   deviceList() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildDeviceList([...this.devices.values()], this.events);
+    return buildDeviceList([...this.devices.values()], this.events, this.behaviorEvents);
   }
 
   behaviorOverview(range) {
