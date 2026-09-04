@@ -1874,7 +1874,7 @@ dictJa["uiTeamRelayAccess"] = {
 };
 const behaviorSettingsJa = /** @type {Record<string, string | ((days: number) => string)>} */ (dictJa.uiSettingsDetail);
 behaviorSettingsJa.behaviorAnalyticsTitle = "プライバシーと利用状況分析";
-behaviorSettingsJa.behaviorAnalyticsEntryTitle = "プライバシー設定";
+behaviorSettingsJa.behaviorAnalyticsEntryTitle = "データ管理";
 behaviorSettingsJa.behaviorAnalyticsEntryDesc = "製品改善とデータ利用の設定を管理します";
 behaviorSettingsJa.behaviorAnalyticsBack = "ヘルプとフィードバックに戻る";
 behaviorSettingsJa.behaviorAnalyticsLabel = "PINVOU の改善に協力する";

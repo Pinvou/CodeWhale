@@ -1873,7 +1873,7 @@ dictEn["uiTeamRelayAccess"] = {
 };
 const behaviorSettingsEn = /** @type {Record<string, string | ((days: number) => string)>} */ (dictEn.uiSettingsDetail);
 behaviorSettingsEn.behaviorAnalyticsTitle = "Privacy and usage analytics";
-behaviorSettingsEn.behaviorAnalyticsEntryTitle = "Privacy settings";
+behaviorSettingsEn.behaviorAnalyticsEntryTitle = "Data Management";
 behaviorSettingsEn.behaviorAnalyticsEntryDesc = "Manage product improvement and data usage settings";
 behaviorSettingsEn.behaviorAnalyticsBack = "Back to Help & Feedback";
 behaviorSettingsEn.behaviorAnalyticsLabel = "Help improve PINVOU";

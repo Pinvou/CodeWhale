@@ -1859,7 +1859,7 @@ dictZh["uiTeamRelayAccess"] = {
 };
 const behaviorSettingsZh = /** @type {Record<string, string | ((days: number) => string)>} */ (dictZh.uiSettingsDetail);
 behaviorSettingsZh.behaviorAnalyticsTitle = "隐私与行为统计";
-behaviorSettingsZh.behaviorAnalyticsEntryTitle = "隐私设置";
+behaviorSettingsZh.behaviorAnalyticsEntryTitle = "数据管理";
 behaviorSettingsZh.behaviorAnalyticsEntryDesc = "管理产品改进计划与数据使用设置";
 behaviorSettingsZh.behaviorAnalyticsBack = "返回帮助反馈";
 behaviorSettingsZh.behaviorAnalyticsLabel = "帮助改进 PINVOU";

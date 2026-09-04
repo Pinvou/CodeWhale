@@ -1772,6 +1772,7 @@ async function modalWidth(page, headingText) {
   const behaviorEntry = await page.evaluate(() => ({
     topLevel: !!document.querySelector('[data-testid="settings-section-data"]'),
     secondLevel: !!document.querySelector('[data-testid="behavior-analytics-entry"]'),
+    entryTitle: (document.querySelector('[data-testid="behavior-analytics-entry"] > div > div')?.textContent || '').trim(),
   }));
   await page.click('[data-testid="behavior-analytics-entry"]');
   await page.waitForFunction(() =>
@@ -1787,7 +1788,7 @@ async function modalWidth(page, headingText) {
     disabled: document.querySelector('[role="switch"]')?.getAttribute('aria-checked') === 'false',
     invoked: window.__SETTINGS_TEST__.calls.some(call => call.cmd === 'set_behavior_telemetry_enabled' && call.args.enabled === false),
   }));
-  rec('⑮a 行为统计开关位于帮助反馈二级页且可持久关闭', !behaviorEntry.topLevel && behaviorEntry.secondLevel && behaviorPanel.hasBack && behaviorPanel.enabled && behaviorPanel.label === '帮助改进 PINVOU' && behaviorDisabled.disabled && behaviorDisabled.invoked, JSON.stringify({ behaviorEntry, behaviorPanel, behaviorDisabled }));
+  rec('⑮a 行为统计开关位于帮助反馈二级页且可持久关闭', !behaviorEntry.topLevel && behaviorEntry.secondLevel && behaviorEntry.entryTitle === '数据管理' && behaviorPanel.hasBack && behaviorPanel.enabled && behaviorPanel.label === '帮助改进 PINVOU' && behaviorDisabled.disabled && behaviorDisabled.invoked, JSON.stringify({ behaviorEntry, behaviorPanel, behaviorDisabled }));
   await page.click('[data-testid="behavior-analytics-back"]');
   await clickExact(page, '提交反馈');
   await sleep(250);
