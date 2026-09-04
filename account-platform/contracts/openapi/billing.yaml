@@ -505,7 +505,7 @@ components:
     ImpactPriceCoverageResult:
       type: object
       additionalProperties: false
-      required: [items, as_of, source]
+      required: [items, as_of, source, financial_fact_revision, price_set_fingerprint]
       properties:
         items:
           type: array
@@ -516,10 +516,12 @@ components:
               - $ref: "#/components/schemas/UncoveredImpactPrice"
         as_of: { type: string, format: date-time }
         source: { type: string, const: BILLING }
+        financial_fact_revision: { type: integer, format: int64, minimum: 1 }
+        price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
     CoveredImpactPrice:
       type: object
       additionalProperties: false
-      required: [model_id, protocol_code, formula_version_id, credit_unit, covered, price_version_id, effective_from]
+      required: [model_id, protocol_code, formula_version_id, credit_unit, covered, price_version_id, price_version, effective_from]
       properties:
         model_id: { type: string, format: uuid }
         protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
@@ -527,6 +529,7 @@ components:
         credit_unit: { type: string, const: MICROCREDIT }
         covered: { type: boolean, const: true }
         price_version_id: { type: string, format: uuid }
+        price_version: { type: integer, format: int64, minimum: 1 }
         effective_from: { type: string, format: date-time }
         effective_to: { type: string, format: date-time }
     UncoveredImpactPrice:
@@ -558,9 +561,11 @@ components:
     FormulaDraftUnitValidation:
       type: object
       additionalProperties: false
-      required: [verified_count, unit_versions]
+      required: [verified_count, unit_versions, observed_at, unit_set_fingerprint]
       properties:
         verified_count: { type: integer, minimum: 1, maximum: 32 }
+        observed_at: { type: string, format: date-time }
+        unit_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         unit_versions:
           type: array
           minItems: 1

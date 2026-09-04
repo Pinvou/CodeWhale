@@ -80,7 +80,7 @@ test('APT-122 OpenAPI freezes CAS, reason, idempotency and unknown-result envelo
   const validation = billingDocument.paths['/internal/v1/pricing/formula-bindings/validate'].post;
   assert.equal(validation.responses['200'].content['application/json'].schema.$ref, '#/components/schemas/FormulaDraftUnitValidation');
   assert.equal(billingDocument.components.schemas.FormulaDraftUnitValidation.additionalProperties, false);
-  assert.deepEqual(billingDocument.components.schemas.FormulaDraftUnitValidation.required, ['verified_count', 'unit_versions']);
+  assert.deepEqual(billingDocument.components.schemas.FormulaDraftUnitValidation.required, ['verified_count', 'unit_versions', 'observed_at', 'unit_set_fingerprint']);
   const binding = billingDocument.paths['/internal/v1/pricing/formula-bindings/{formula_version_id}'].put;
   assert.equal(binding.responses['200'].content['application/json'].schema.$ref, '#/components/schemas/FormulaBindingReceipt');
   assert.equal(billingDocument.components.schemas.FormulaBindingReceipt.properties.status.const, 'REGISTERED');

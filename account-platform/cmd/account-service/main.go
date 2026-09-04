@@ -71,6 +71,11 @@ func main() {
 		log.Fatal(err)
 	}
 	serviceCredential := serviceauth.CredentialFromEnvironment()
+	approvalSnapshots, err := account.NewHTTPApprovalSnapshotSource(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal(err)
+	}
+	repository.WithApprovalSnapshotSource(approvalSnapshots)
 	wallets, err := account.NewHTTPWalletProvisioner(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)

@@ -7,6 +7,17 @@ import YAML from 'yaml';
 
 const read = path => readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
 
+function schemaValidator(contract, schemaName) {
+  const document = JSON.parse(JSON.stringify({
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    $ref: `#/$defs/${schemaName}`,
+    $defs: contract.components.schemas,
+  }).replaceAll('#/components/schemas/', '#/$defs/'));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  return ajv.compile(document);
+}
+
 test('nine Token admin resources publish independent cursor and exact filters', async () => {
   const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
   const resources = new Map([
@@ -185,9 +196,7 @@ test('closed model and legacy usage schemas validate production JSON shapes', as
 
 test('impact precheck covered and uncovered price evidence validate as closed alternatives', async () => {
   const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  addFormats(ajv);
-  const validate = ajv.compile(contract.components.schemas.TokenImpactPrecheck);
+  const validate = schemaValidator(contract, 'TokenImpactPrecheck');
   const base = {
     action: 'MODEL_LIFECYCLE_DEPRECATED',
     evidence: {
@@ -199,12 +208,31 @@ test('impact precheck covered and uncovered price evidence validate as closed al
     snapshot_semantics: 'INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS', precheck_fingerprint: 'c'.repeat(64), requires_cas_revalidation: true,
   };
   const common = { model_id: '11111111-1111-4111-8111-111111111111', protocol_code: 'CHAT', credit_unit: 'MICROCREDIT' };
-  const covered = { ...base, price_coverage: { models_checked: 1, models_covered: 1, fully_covered: true, billing_observed_at: base.billing_observed_at, versions: [{ ...common, covered: true, formula_version_id: '22222222-2222-4222-8222-222222222222', price_version_id: '33333333-3333-4333-8333-333333333333', effective_from: '2026-09-01T00:00:00Z' }] } };
-  const uncovered = { ...base, price_coverage: { models_checked: 1, models_covered: 0, fully_covered: false, billing_observed_at: base.billing_observed_at, versions: [{ ...common, covered: false }] } };
+  const covered = { ...base, price_coverage: { models_checked: 1, models_covered: 1, fully_covered: true, billing_observed_at: base.billing_observed_at, financial_fact_revision: 4, price_set_fingerprint: '9'.repeat(64), versions: [{ ...common, covered: true, formula_version_id: '22222222-2222-4222-8222-222222222222', price_version_id: '33333333-3333-4333-8333-333333333333', price_version: 4, effective_from: '2026-09-01T00:00:00Z' }] } };
+  const uncovered = { ...base, price_coverage: { models_checked: 1, models_covered: 0, fully_covered: false, billing_observed_at: base.billing_observed_at, financial_fact_revision: 4, price_set_fingerprint: '8'.repeat(64), versions: [{ ...common, covered: false }] } };
   assert.equal(validate(covered), true, JSON.stringify(validate.errors));
   assert.equal(validate(uncovered), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...uncovered, price_coverage: { ...uncovered.price_coverage, versions: [{ ...common, covered: false, price_version_id: '33333333-3333-4333-8333-333333333333' }] } }), false);
   assert.equal(validate({ ...covered, price_coverage: { ...covered.price_coverage, versions: [{ ...covered.price_coverage.versions[0], provider: 'must-not-leak' }] } }), false);
+
+  const lifecycleSnapshot = {
+    model_id: common.model_id, catalog_version: 7, current_lifecycle: 'PUBLISHED', target_lifecycle: 'DEPRECATED', lifecycle_plan_version: 0,
+    effective_at: '2026-09-03T00:05:00Z', existing_session_cutoff_at: null, replacement_model_id: null, billing_price_version: 4,
+    route_set_fingerprint: 'd'.repeat(64), provisioning_set_fingerprint: 'e'.repeat(64), inflight_request_set_fingerprint: 'f'.repeat(64), policy_version: 2,
+  };
+  const financialSnapshot = {
+    billing_price_revision: 4, price_set_fingerprint: '9'.repeat(64), models_checked: 1, models_covered: 1,
+    fully_covered: true, billing_as_of: base.billing_observed_at,
+  };
+  assert.equal(validate({ ...covered, action: 'MODEL_LIFECYCLE_DEPRECATED', critical_resource_versions: lifecycleSnapshot, financial_snapshot: financialSnapshot }), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...covered, action: 'MODEL_LIFECYCLE_DEPRECATED', critical_resource_versions: { ...lifecycleSnapshot, secret: 'must-not-pass' }, financial_snapshot: financialSnapshot }), false);
+  assert.equal(validate({ ...covered, action: 'MODEL_LIFECYCLE_DEPRECATED', critical_resource_versions: { ...lifecycleSnapshot, lifecycle_plan_version: -1 }, financial_snapshot: financialSnapshot }), false);
+  const rollbackSnapshot = {
+    current_catalog_version: 7, source_catalog_version: 3, catalog_diff_fingerprint: '1'.repeat(64), billing_price_version: 4,
+    route_set_fingerprint: 'd'.repeat(64), provisioning_set_fingerprint: 'e'.repeat(64), inflight_request_set_fingerprint: 'f'.repeat(64), policy_version: 2,
+  };
+  assert.equal(validate({ ...covered, action: 'MODEL_CATALOG_ROLLBACK', evidence: { ...covered.evidence, resource_type: 'MODEL_CATALOG', resource_id: '3' }, critical_resource_versions: rollbackSnapshot, financial_snapshot: financialSnapshot }), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...covered, action: 'MODEL_CATALOG_ROLLBACK', evidence: { ...covered.evidence, resource_type: 'MODEL_CATALOG', resource_id: '3' }, critical_resource_versions: { ...rollbackSnapshot, policy_version: 3 }, financial_snapshot: financialSnapshot }), false);
   const dependencies = contract.components.schemas.TokenImpactPrecheck.properties.evidence.properties.dependencies.properties;
   assert.match(dependencies.affected_coverage_tuples.description, /scope_type, scope_id, wallet_id, model_id, upstream_model_ref, protocol_code/);
   assert.match(dependencies.remaining_ready_coverage.description, /exact currently serviceable match/);

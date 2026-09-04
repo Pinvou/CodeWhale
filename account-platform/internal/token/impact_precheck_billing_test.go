@@ -14,6 +14,7 @@ import (
 
 func TestHTTPBillingImpactCoverageUsesServiceAuthAndClosedContract(t *testing.T) {
 	modelID, priceID := uuid.New(), uuid.New()
+	priceVersion := int64(1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/internal/v1/pricing/impact-coverage" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -28,7 +29,7 @@ func TestHTTPBillingImpactCoverageUsesServiceAuthAndClosedContract(t *testing.T)
 			t.Fatalf("body=%v err=%v", body, err)
 		}
 		formulaID, effectiveFrom := uuid.New(), time.Now().UTC().Add(-time.Hour)
-		_ = json.NewEncoder(w).Encode(ImpactPriceCoverageResult{Source: "BILLING", AsOf: time.Now().UTC(), Items: []ImpactPriceCoverage{{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, EffectiveFrom: &effectiveFrom}}})
+		_ = json.NewEncoder(w).Encode(ImpactPriceCoverageResult{Source: "BILLING", AsOf: time.Now().UTC(), FinancialFactRevision: 7, PriceSetFingerprint: strings.Repeat("a", 64), Items: []ImpactPriceCoverage{{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, PriceVersion: &priceVersion, EffectiveFrom: &effectiveFrom}}})
 	}))
 	defer server.Close()
 	client, err := NewHTTPBillingClient(server.URL, "test-service-token")

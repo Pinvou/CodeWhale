@@ -26,7 +26,80 @@
         "normalized_command": { "type": "object", "additionalProperties": true },
         "target_resource_type": { "type": "string", "minLength": 1, "maxLength": 80 },
         "target_resource_id": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "critical_resource_versions": { "type": "object", "additionalProperties": true }
+        "critical_resource_versions": { "type": "object", "additionalProperties": true },
+        "financial_snapshot": { "type": "object", "additionalProperties": true }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "command_type": { "const": "TOKEN_MODEL_LIFECYCLE_CHANGE" } }, "required": ["command_type"] },
+          "then": {
+            "required": ["financial_snapshot"],
+            "properties": {
+              "critical_resource_versions": { "$ref": "#/$defs/tokenModelLifecycleSnapshot" },
+              "financial_snapshot": { "$ref": "#/$defs/tokenFinancialSnapshot" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "command_type": { "const": "TOKEN_MODEL_CATALOG_ROLLBACK" } }, "required": ["command_type"] },
+          "then": {
+            "required": ["financial_snapshot"],
+            "properties": {
+              "critical_resource_versions": { "$ref": "#/$defs/tokenCatalogRollbackSnapshot" },
+              "financial_snapshot": { "$ref": "#/$defs/tokenFinancialSnapshot" }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "tokenModelLifecycleSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"],
+      "properties": {
+        "model_id": { "type": "string", "format": "uuid" },
+        "catalog_version": { "type": "integer", "minimum": 1 },
+        "current_lifecycle": { "enum": ["PUBLISHED", "DEPRECATED"] },
+        "target_lifecycle": { "enum": ["DEPRECATED", "REMOVED"] },
+        "lifecycle_plan_version": { "const": 0 },
+        "effective_at": { "type": "string", "format": "date-time" },
+        "existing_session_cutoff_at": { "type": ["string", "null"], "format": "date-time" },
+        "replacement_model_id": { "type": ["string", "null"], "format": "uuid" },
+        "billing_price_version": { "type": "integer", "minimum": 1 },
+        "route_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "provisioning_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "inflight_request_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "policy_version": { "const": 2 }
+      }
+    },
+    "tokenCatalogRollbackSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_catalog_version", "source_catalog_version", "catalog_diff_fingerprint", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"],
+      "properties": {
+        "current_catalog_version": { "type": "integer", "minimum": 1 },
+        "source_catalog_version": { "type": "integer", "minimum": 1 },
+        "catalog_diff_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "billing_price_version": { "type": "integer", "minimum": 1 },
+        "route_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "provisioning_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "inflight_request_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "policy_version": { "const": 2 }
+      }
+    },
+    "tokenFinancialSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["billing_price_revision", "price_set_fingerprint", "models_checked", "models_covered", "fully_covered", "billing_as_of"],
+      "properties": {
+        "billing_price_revision": { "type": "integer", "minimum": 1 },
+        "price_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "models_checked": { "type": "integer", "minimum": 1 },
+        "models_covered": { "type": "integer", "minimum": 0 },
+        "fully_covered": { "const": true },
+        "billing_as_of": { "type": "string", "format": "date-time" }
       }
     }
   }

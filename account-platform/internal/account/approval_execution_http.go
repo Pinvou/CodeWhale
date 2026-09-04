@@ -13,7 +13,7 @@ import (
 )
 
 type approvalExecutionRepository interface {
-	BeginApprovalExecution(context.Context, uuid.UUID, string, string, json.RawMessage) (ApprovalExecution, error)
+	BeginApprovalExecution(context.Context, uuid.UUID, string, string, json.RawMessage, json.RawMessage) (ApprovalExecution, error)
 	CompleteApprovalExecution(context.Context, uuid.UUID, string, string, string, json.RawMessage, json.RawMessage, string) error
 }
 
@@ -39,14 +39,15 @@ func (s *Service) beginApprovalExecution(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
-		JobRunID         string          `json:"job_run_id"`
-		ObservedVersions json.RawMessage `json:"observed_versions"`
+		JobRunID                  string          `json:"job_run_id"`
+		ObservedVersions          json.RawMessage `json:"observed_versions"`
+		ObservedFinancialSnapshot json.RawMessage `json:"observed_financial_snapshot"`
 	}
 	if api.DecodeJSON(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_EXECUTION", "invalid approval execution request", httpserver.RequestID(r.Context()))
 		return
 	}
-	execution, err := repository.BeginApprovalExecution(r.Context(), requestID, executorIdentity, body.JobRunID, body.ObservedVersions)
+	execution, err := repository.BeginApprovalExecution(r.Context(), requestID, executorIdentity, body.JobRunID, body.ObservedVersions, body.ObservedFinancialSnapshot)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

@@ -3,6 +3,7 @@ package approvalpolicy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // TestTokenProtocolFormulaPoliciesPostgresIntegration compares the executable
@@ -123,8 +125,8 @@ func TestTokenCommandGovernancePoliciesPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := migrations.Load("../../migrations/account")
-	if err != nil || len(loaded) == 0 || loaded[len(loaded)-1].Version != 45 {
-		t.Fatalf("expected Account migration 45 last: %v", err)
+	if err != nil || len(loaded) == 0 || loaded[len(loaded)-1].Version != 46 {
+		t.Fatalf("expected Account migration 46 last: %v", err)
 	}
 	if err := migrations.Up(ctx, connection, loaded[:len(loaded)-1]); err != nil {
 		t.Fatal(err)
@@ -181,6 +183,27 @@ func TestTokenCommandGovernancePoliciesPostgresIntegration(t *testing.T) {
 				t.Fatalf("expected stable error class constraint rejection, got %v", err)
 			}
 		})
+	}
+	critical := `{"catalog_version":7}`
+	financial := `{"billing_price_revision":11,"price_set_fingerprint":"` + strings.Repeat("a", 64) + `"}`
+	validExecution := uuid.New()
+	if _, err := connection.Exec(ctx, `INSERT INTO approval_executions(id,approval_request_id,command_type,command_fingerprint,execution_idempotency_key,executor_identity,job_run_id,status,authorization_snapshot,critical_resource_versions,financial_snapshot,started_at) VALUES($1,$2,'TOKEN_MODEL_LIFECYCLE_CHANGE',decode(repeat('00',32),'hex'),$3,'token-command-executor','migration-valid-job','EXECUTING','{}',$4,$5,$6)`, validExecution, approvalRequest, "migration-valid-snapshot", critical, financial, now); err != nil {
+		t.Fatal(err)
+	}
+	var frozenCritical, frozenFinancial []byte
+	if err := connection.QueryRow(ctx, `SELECT critical_resource_versions,financial_snapshot FROM approval_executions WHERE id=$1`, validExecution).Scan(&frozenCritical, &frozenFinancial); err != nil || !strings.Contains(string(frozenCritical), `"catalog_version": 7`) || !strings.Contains(string(frozenFinancial), `"billing_price_revision": 11`) {
+		t.Fatalf("frozen snapshots critical=%s financial=%s err=%v", frozenCritical, frozenFinancial, err)
+	}
+	if _, err := connection.Exec(ctx, `UPDATE approval_executions SET financial_snapshot='{}' WHERE id=$1`, validExecution); err == nil {
+		t.Fatal("execution lease financial snapshot must be immutable")
+	}
+	rollbackErr := migrations.DownOne(ctx, connection, loaded)
+	var postgresErr *pgconn.PgError
+	if !errors.As(rollbackErr, &postgresErr) || postgresErr.Code != "55000" {
+		t.Fatalf("rollback with execution history must fail closed: %v", rollbackErr)
+	}
+	if err := connection.QueryRow(ctx, `SELECT critical_resource_versions,financial_snapshot FROM approval_executions WHERE id=$1`, validExecution).Scan(&frozenCritical, &frozenFinancial); err != nil || len(frozenCritical) == 0 || len(frozenFinancial) == 0 {
+		t.Fatalf("failed rollback removed frozen execution history: critical=%s financial=%s err=%v", frozenCritical, frozenFinancial, err)
 	}
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)

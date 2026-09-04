@@ -23,10 +23,13 @@ import (
 )
 
 var (
-	ErrApprovalSelfDecision    = errors.New("approval requester cannot decide their own request")
-	ErrApprovalInvalidated     = errors.New("approval request is invalidated")
-	ErrApprovalExpired         = errors.New("approval request is expired")
-	ErrTokenGovernanceInactive = errors.New("token command governance is not active")
+	ErrApprovalSelfDecision        = errors.New("approval requester cannot decide their own request")
+	ErrApprovalInvalidated         = errors.New("approval request is invalidated")
+	ErrApprovalExpired             = errors.New("approval request is expired")
+	ErrTokenGovernanceInactive     = errors.New("token command governance is not active")
+	ErrApprovalSnapshotUnavailable = errors.New("approval snapshot is unavailable")
+	ErrApprovalSnapshotTimeout     = errors.New("approval snapshot timed out")
+	ErrApprovalSnapshotRejected    = errors.New("approval snapshot request was rejected")
 )
 
 type ApprovalRequest struct {
@@ -100,6 +103,7 @@ type ApprovalExecution struct {
 	TargetResourceType       string          `json:"target_resource_type"`
 	TargetResourceID         string          `json:"target_resource_id"`
 	CriticalResourceVersions json.RawMessage `json:"critical_resource_versions"`
+	FinancialSnapshot        json.RawMessage `json:"financial_snapshot"`
 	RequesterUserID          uuid.UUID       `json:"requester_user_id"`
 	ApproverUserID           uuid.UUID       `json:"approver_user_id"`
 	DecisionReason           string          `json:"decision_reason"`
@@ -118,21 +122,15 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	if !humanApprovalPrincipal(principal) {
 		return ApprovalRequest{}, ErrForbidden
 	}
-	// No activation record exists before APT-138. Keeping this check ahead of
-	// policy lookup, authorization and the transaction guarantees that merely
-	// installing APT-123 cannot create an approval, snapshot, audit event or
-	// authorized outbox event for a Token command.
-	if approvalpolicy.TokenExecutableApproval(draft.CommandType) {
-		return ApprovalRequest{}, ErrTokenGovernanceInactive
-	}
-	policy, normalized, fingerprint, err := normalizeApprovalDraft(draft)
+	policy, originalFingerprint, err := validateApprovalDraftRequest(draft)
 	if err != nil || policy.Mode != approvalpolicy.ApprovalRequired {
-		if err == nil {
-			err = ErrConflict
-		}
-		return ApprovalRequest{}, err
+		return ApprovalRequest{}, ErrConflict
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// The actor-scoped advisory lock below serializes an idempotency key. READ
+	// COMMITTED is intentional: a waiter must observe the winner's committed
+	// row after acquiring the lock. Authorization rows are held with SHARE
+	// locks by strongPlatformAuthorization until this transaction commits.
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
@@ -148,6 +146,32 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
+	lockScope := actorID.String() + "\x00" + policy.CommandType + "\x00" + strings.TrimSpace(draft.IdempotencyKey)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockScope); err != nil {
+		return ApprovalRequest{}, err
+	}
+	var existingID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT id FROM approval_requests WHERE requester_user_id=$1 AND command_type=$2 AND idempotency_key=$3`, *actorID, policy.CommandType, strings.TrimSpace(draft.IdempotencyKey)).Scan(&existingID)
+	if err == nil {
+		existing, loadErr := approvalRequestByID(ctx, tx, existingID)
+		if loadErr != nil {
+			return ApprovalRequest{}, loadErr
+		}
+		existingFingerprint, fingerprintErr := approvalRequestOriginalFingerprint(existing)
+		if fingerprintErr != nil || existingFingerprint != originalFingerprint {
+			return ApprovalRequest{}, ErrConflict
+		}
+		return existing, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return ApprovalRequest{}, err
+	}
+	// APT-138 owns activation. Existing same-request replays above remain
+	// readable, while a new executable Token approval fails closed only after
+	// policy, actor and strong authorization have been established.
+	if approvalpolicy.TokenExecutableApproval(policy.CommandType) && !r.tokenApprovalCreateEnabledForTest(policy.CommandType) {
+		return ApprovalRequest{}, ErrTokenGovernanceInactive
+	}
 	if draft.SupersedesRequestID != nil {
 		var previousRequester uuid.UUID
 		var previousStatus string
@@ -160,20 +184,13 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 			return ApprovalRequest{}, ErrConflict
 		}
 	}
-	var existingID uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT id FROM approval_requests WHERE requester_user_id=$1 AND command_type=$2 AND idempotency_key=$3`, *actorID, policy.CommandType, strings.TrimSpace(draft.IdempotencyKey)).Scan(&existingID)
-	if err == nil {
-		existing, loadErr := approvalRequestByID(ctx, tx, existingID)
-		if loadErr != nil {
-			return ApprovalRequest{}, loadErr
-		}
-		if existing.CommandFingerprint != hex.EncodeToString(fingerprint[:]) {
-			return ApprovalRequest{}, ErrConflict
-		}
-		return existing, tx.Commit(ctx)
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	draft, err = r.authoritativeApprovalDraft(ctx, draft)
+	if err != nil {
 		return ApprovalRequest{}, err
+	}
+	resolvedPolicy, normalized, fingerprint, err := normalizeApprovalDraft(draft)
+	if err != nil || resolvedPolicy.CommandType != policy.CommandType || resolvedPolicy.PolicyVersion != policy.PolicyVersion {
+		return ApprovalRequest{}, ErrConflict
 	}
 	now := r.now()
 	id := uuid.Must(uuid.NewV7())
@@ -200,7 +217,7 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	if !humanApprovalPrincipal(principal) {
 		return ApprovalRequest{}, ErrForbidden
 	}
-	policy, normalized, fingerprint, err := normalizeApprovalDraft(draft)
+	policy, _, err := validateApprovalDraftRequest(draft)
 	if err != nil || policy.Mode != approvalpolicy.ApprovalRequired {
 		return ApprovalRequest{}, ErrConflict
 	}
@@ -225,6 +242,17 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	}
 	if _, _, _, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission); err != nil {
 		return ApprovalRequest{}, err
+	}
+	if approvalpolicy.TokenExecutableApproval(policy.CommandType) {
+		return ApprovalRequest{}, ErrTokenGovernanceInactive
+	}
+	draft, err = r.authoritativeApprovalDraft(ctx, draft)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	resolvedPolicy, normalized, fingerprint, err := normalizeApprovalDraft(draft)
+	if err != nil || resolvedPolicy.CommandType != policy.CommandType || resolvedPolicy.PolicyVersion != policy.PolicyVersion {
+		return ApprovalRequest{}, ErrConflict
 	}
 	now := r.now()
 	command, err := tx.Exec(ctx, `UPDATE approval_requests SET normalized_command=$2,command_fingerprint=$3,target_resource_type=$4,target_resource_id=$5,reason=$6,redacted_evidence=$7,expected_impact=$8,version=version+1,updated_at=$9 WHERE id=$1 AND status='DRAFT' AND version=$10`, requestID, normalized, fingerprint[:], strings.TrimSpace(draft.TargetResourceType), strings.TrimSpace(draft.TargetResourceID), strings.TrimSpace(draft.Reason), jsonOrDefault(draft.RedactedEvidence, `[]`), jsonOrDefault(draft.ExpectedImpact, `{}`), now, expectedVersion)
@@ -295,6 +323,18 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 		bindingID, authVersion, _, authErr := strongPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission)
 		if authErr != nil || bindingID != item.RequesterBindingID || authVersion != item.RequesterAuthorizationVersion {
 			return ApprovalRequest{}, ErrApprovalInvalidated
+		}
+		if approvalSnapshotCommand(item.CommandType) {
+			if r.approvalSnapshots == nil {
+				return ApprovalRequest{}, ErrApprovalInvalidated
+			}
+			projection, precheckErr := r.precheckApprovalSnapshot(ctx, ApprovalSnapshotRequest{CommandType: item.CommandType, TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID, NormalizedCommand: item.NormalizedCommand})
+			if precheckErr != nil {
+				return ApprovalRequest{}, precheckErr
+			}
+			if !sameJSONObject(projection.CriticalResourceVersions, item.CriticalResourceVersions) || !sameJSONObject(projection.FinancialSnapshot, item.FinancialSnapshot) {
+				return r.invalidateApproval(ctx, tx, item, *actorID, "INVALIDATED", "AUTHORITATIVE_SNAPSHOT_CHANGED", map[string]any{}, now, ErrApprovalInvalidated)
+			}
 		}
 		submittedExpiresAt = now.Add(policy.ExpiresAfter)
 	}
@@ -397,7 +437,7 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 		return ApprovalRequest{}, err
 	}
 	if decision == "APPROVED" {
-		payload := map[string]any{"approval_request_id": requestID, "command_type": item.CommandType, "command_fingerprint": item.CommandFingerprint, "policy_version": item.PolicyVersion, "executor_identity": policy.ExecutorIdentity, "execution_deadline": executionDeadline, "normalized_command": item.NormalizedCommand, "target_resource_type": item.TargetResourceType, "target_resource_id": item.TargetResourceID, "critical_resource_versions": item.CriticalResourceVersions}
+		payload := map[string]any{"approval_request_id": requestID, "command_type": item.CommandType, "command_fingerprint": item.CommandFingerprint, "policy_version": item.PolicyVersion, "executor_identity": policy.ExecutorIdentity, "execution_deadline": executionDeadline, "normalized_command": item.NormalizedCommand, "target_resource_type": item.TargetResourceType, "target_resource_id": item.TargetResourceID, "critical_resource_versions": item.CriticalResourceVersions, "financial_snapshot": item.FinancialSnapshot}
 		if err := appendOutbox(ctx, tx, "account.approval-command.authorized.v1", requestID, item.Version+1, payload); err != nil {
 			return ApprovalRequest{}, err
 		}
@@ -533,6 +573,10 @@ func humanApprovalPrincipal(principal identity.Principal) bool {
 	return strings.TrimSpace(principal.Issuer) != "" && strings.TrimSpace(principal.Subject) != "" && strings.TrimSpace(principal.SessionID) != "" && !principal.AuthenticatedAt.IsZero()
 }
 
+func (r *PostgresRepository) tokenApprovalCreateEnabledForTest(commandType string) bool {
+	return r.tokenApprovalCreateGate != nil && r.tokenApprovalCreateGate(strings.ToUpper(strings.TrimSpace(commandType)))
+}
+
 func approvalPolicyForItem(item ApprovalRequest) (approvalpolicy.Policy, error) {
 	policy, err := approvalpolicy.Lookup(item.CommandType)
 	if err != nil || item.PolicyVersion != policy.PolicyVersion || policy.Mode != approvalpolicy.ApprovalRequired || item.RequesterPermission != policy.RequesterPermission || item.ApproverPermission != policy.ApproverPermission {
@@ -560,9 +604,12 @@ func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte,
 	if err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
 	}
-	financialSnapshot, err := canonicalSafeJSONObject(jsonOrDefault(draft.FinancialSnapshot, `{}`))
+	financialSnapshot, err := canonicalApprovalFinancialSnapshot(policy, jsonOrDefault(draft.FinancialSnapshot, `{}`))
 	if err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
+	}
+	if approvalSnapshotCommand(policy.CommandType) && !tokenApprovalSnapshotsAligned(criticalVersions, financialSnapshot) {
+		return approvalpolicy.Policy{}, nil, [32]byte{}, ErrConflict
 	}
 	if _, err := canonicalSafeJSONObject(jsonOrDefault(draft.ExpectedImpact, `{}`)); err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
@@ -572,6 +619,140 @@ func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte,
 	}
 	fingerprint := sha256.Sum256(bytes.Join([][]byte{[]byte(policy.CommandType), []byte(fmt.Sprint(policy.PolicyVersion)), normalized, []byte(strings.TrimSpace(draft.TargetResourceType)), []byte(strings.TrimSpace(draft.TargetResourceID)), criticalVersions, financialSnapshot}, []byte{0}))
 	return policy, normalized, fingerprint, nil
+}
+
+// validateApprovalDraftRequest validates only caller-owned fields. Authoritative
+// resource snapshots are deliberately excluded so an idempotent replay can be
+// proven from the original request without another downstream read.
+func validateApprovalDraftRequest(draft ApprovalDraft) (approvalpolicy.Policy, [32]byte, error) {
+	policy, err := approvalpolicy.Lookup(strings.ToUpper(strings.TrimSpace(draft.CommandType)))
+	if err != nil || policy.Mode != approvalpolicy.ApprovalRequired || !approvalpolicy.Executable(policy.CommandType) {
+		return approvalpolicy.Policy{}, [32]byte{}, ErrConflict
+	}
+	if len(strings.TrimSpace(draft.IdempotencyKey)) < 8 || len(draft.IdempotencyKey) > 120 || len(strings.TrimSpace(draft.TargetResourceType)) < 1 || len(strings.TrimSpace(draft.TargetResourceType)) > 80 || len(strings.TrimSpace(draft.TargetResourceID)) < 1 || len(strings.TrimSpace(draft.TargetResourceID)) > 160 || len(strings.TrimSpace(draft.Reason)) < 10 || len(strings.TrimSpace(draft.Reason)) > 2000 {
+		return approvalpolicy.Policy{}, [32]byte{}, ErrConflict
+	}
+	fingerprint, err := approvalDraftOriginalFingerprint(policy.CommandType, draft)
+	if err != nil {
+		return approvalpolicy.Policy{}, [32]byte{}, err
+	}
+	return policy, fingerprint, nil
+}
+
+func approvalRequestOriginalFingerprint(item ApprovalRequest) ([32]byte, error) {
+	return approvalDraftOriginalFingerprint(item.CommandType, ApprovalDraft{
+		NormalizedCommand: item.NormalizedCommand, TargetResourceType: item.TargetResourceType,
+		TargetResourceID: item.TargetResourceID, Reason: item.Reason, RedactedEvidence: item.RedactedEvidence,
+		ExpectedImpact: item.ExpectedImpact, CriticalResourceVersions: item.CriticalResourceVersions,
+		FinancialSnapshot: item.FinancialSnapshot, SupersedesRequestID: item.SupersedesRequestID,
+	})
+}
+
+func approvalDraftOriginalFingerprint(commandType string, draft ApprovalDraft) ([32]byte, error) {
+	normalized, err := canonicalSafeJSON(draft.NormalizedCommand)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	evidence, err := canonicalSafeJSONValue(jsonOrDefault(draft.RedactedEvidence, `[]`), "object", "array")
+	if err != nil {
+		return [32]byte{}, err
+	}
+	impact, err := canonicalSafeJSONObject(jsonOrDefault(draft.ExpectedImpact, `{}`))
+	if err != nil {
+		return [32]byte{}, err
+	}
+	parts := [][]byte{[]byte(strings.ToUpper(strings.TrimSpace(commandType))), normalized, []byte(strings.ToUpper(strings.TrimSpace(draft.TargetResourceType))), []byte(strings.TrimSpace(draft.TargetResourceID)), []byte(strings.TrimSpace(draft.Reason)), evidence, impact}
+	if draft.SupersedesRequestID != nil {
+		parts = append(parts, []byte(draft.SupersedesRequestID.String()))
+	} else {
+		parts = append(parts, nil)
+	}
+	if !approvalSnapshotCommand(commandType) {
+		critical, criticalErr := canonicalSafeJSONObject(jsonOrDefault(draft.CriticalResourceVersions, `{}`))
+		financial, financialErr := canonicalSafeJSONObject(jsonOrDefault(draft.FinancialSnapshot, `{}`))
+		if criticalErr != nil || financialErr != nil {
+			return [32]byte{}, ErrConflict
+		}
+		parts = append(parts, critical, financial)
+	}
+	return sha256.Sum256(bytes.Join(parts, []byte{0})), nil
+}
+
+func tokenApprovalSnapshotsAligned(critical, financial []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(critical))
+	decoder.UseNumber()
+	var criticalFields map[string]any
+	if decoder.Decode(&criticalFields) != nil {
+		return false
+	}
+	decoder = json.NewDecoder(bytes.NewReader(financial))
+	decoder.UseNumber()
+	var financialFields map[string]any
+	if decoder.Decode(&financialFields) != nil {
+		return false
+	}
+	return fmt.Sprint(criticalFields["billing_price_version"]) == fmt.Sprint(financialFields["billing_price_revision"])
+}
+
+func canonicalApprovalFinancialSnapshot(policy approvalpolicy.Policy, raw json.RawMessage) ([]byte, error) {
+	if !approvalSnapshotCommand(policy.CommandType) {
+		return canonicalSafeJSONObject(raw)
+	}
+	if len(raw) == 0 || len(raw) > 64<<10 {
+		return nil, ErrConflict
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var fields map[string]any
+	if decoder.Decode(&fields) != nil || fields == nil || len(fields) != 6 {
+		return nil, ErrConflict
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, ErrConflict
+	}
+	revision, ok := fields["billing_price_revision"].(json.Number)
+	if !ok {
+		return nil, ErrConflict
+	}
+	parsedRevision, err := strconv.ParseInt(revision.String(), 10, 64)
+	if err != nil || parsedRevision < 1 {
+		return nil, ErrConflict
+	}
+	for _, name := range []string{"models_checked", "models_covered"} {
+		number, ok := fields[name].(json.Number)
+		if !ok {
+			return nil, ErrConflict
+		}
+		value, err := strconv.ParseInt(number.String(), 10, 64)
+		if err != nil || value < 0 || name == "models_checked" && value < 1 {
+			return nil, ErrConflict
+		}
+	}
+	checked, _ := strconv.ParseInt(fields["models_checked"].(json.Number).String(), 10, 64)
+	covered, _ := strconv.ParseInt(fields["models_covered"].(json.Number).String(), 10, 64)
+	fullyCovered, ok := fields["fully_covered"].(bool)
+	if !ok || !fullyCovered || covered != checked {
+		return nil, ErrConflict
+	}
+	fingerprint, ok := fields["price_set_fingerprint"].(string)
+	if !ok || len(fingerprint) != 64 {
+		return nil, ErrConflict
+	}
+	if decoded, err := hex.DecodeString(fingerprint); err != nil || len(decoded) != sha256.Size {
+		return nil, ErrConflict
+	}
+	asOf, ok := fields["billing_as_of"].(string)
+	if !ok {
+		return nil, ErrConflict
+	}
+	if _, err := time.Parse(time.RFC3339Nano, asOf); err != nil {
+		return nil, ErrConflict
+	}
+	if containsSecretFieldExceptCredentialMetadata(fields) {
+		return nil, ErrConflict
+	}
+	return json.Marshal(fields)
 }
 
 func canonicalApprovalCriticalVersions(policy approvalpolicy.Policy, raw json.RawMessage) ([]byte, error) {
@@ -621,10 +802,16 @@ func validTokenApprovalCriticalValue(policy approvalpolicy.Policy, name string, 
 			return false
 		}
 		parsed, err := strconv.ParseInt(number.String(), 10, 64)
-		if err != nil || parsed < 0 {
+		if err != nil {
 			return false
 		}
-		return name != "policy_version" || parsed == policy.PolicyVersion
+		if name == "policy_version" {
+			return parsed == policy.PolicyVersion
+		}
+		if name == "lifecycle_plan_version" {
+			return parsed == 0
+		}
+		return parsed >= 1
 	}
 	text, ok := value.(string)
 	if !ok || strings.TrimSpace(text) == "" || len(text) > 512 {
@@ -639,8 +826,8 @@ func validTokenApprovalCriticalValue(policy approvalpolicy.Policy, name string, 
 		return err == nil
 	}
 	if strings.HasSuffix(name, "_id") {
-		_, err := uuid.Parse(text)
-		return err == nil
+		parsed, err := uuid.Parse(text)
+		return err == nil && parsed != uuid.Nil
 	}
 	if name == "credential_status" {
 		return slices.Contains([]string{"PENDING", "ACTIVE", "RETIRED", "REVOKED"}, strings.ToUpper(text))
@@ -800,7 +987,7 @@ func containsSecretField(value any) bool {
 func strongPlatformAuthorization(ctx context.Context, database queryable, userID uuid.UUID, permission string) (uuid.UUID, int64, *time.Time, error) {
 	var bindingID uuid.UUID
 	var validUntil *time.Time
-	err := database.QueryRow(ctx, `SELECT ra.id,ra.expires_at FROM users u JOIN role_assignments ra ON ra.user_id=u.id AND ra.organization_id IS NULL JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$2 WHERE u.id=$1 AND u.status='ACTIVE' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now()) ORDER BY ra.expires_at NULLS LAST,ra.id LIMIT 1`, userID, permission).Scan(&bindingID, &validUntil)
+	err := database.QueryRow(ctx, `SELECT ra.id,ra.expires_at FROM users u JOIN role_assignments ra ON ra.user_id=u.id AND ra.organization_id IS NULL JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$2 WHERE u.id=$1 AND u.status='ACTIVE' AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now()) ORDER BY ra.expires_at NULLS LAST,ra.id LIMIT 1 FOR SHARE OF u,ra`, userID, permission).Scan(&bindingID, &validUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, 0, nil, ErrForbidden
 	}
@@ -808,7 +995,9 @@ func strongPlatformAuthorization(ctx context.Context, database queryable, userID
 		return uuid.Nil, 0, nil, err
 	}
 	var version int64
-	if err := database.QueryRow(ctx, `SELECT COALESCE((SELECT version FROM authorization_versions WHERE user_id=$1 AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1)`, userID).Scan(&version); err != nil {
+	if err := database.QueryRow(ctx, `SELECT version FROM authorization_versions WHERE user_id=$1 AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid FOR SHARE`, userID).Scan(&version); errors.Is(err, pgx.ErrNoRows) {
+		version = 1
+	} else if err != nil {
 		return uuid.Nil, 0, nil, err
 	}
 	return bindingID, version, validUntil, nil

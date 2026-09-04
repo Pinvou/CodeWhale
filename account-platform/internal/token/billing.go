@@ -129,8 +129,10 @@ type MeteringUnitVersionReference struct {
 }
 
 type FormulaDraftValidation struct {
-	VerifiedCount int                            `json:"verified_count"`
-	UnitVersions  []MeteringUnitVersionReference `json:"unit_versions"`
+	VerifiedCount      int                            `json:"verified_count"`
+	UnitVersions       []MeteringUnitVersionReference `json:"unit_versions"`
+	ObservedAt         time.Time                      `json:"observed_at"`
+	UnitSetFingerprint string                         `json:"unit_set_fingerprint"`
 }
 
 type FormulaDraftValidationClient interface {
@@ -144,6 +146,7 @@ type ImpactPriceCoverage struct {
 	CreditUnit       string     `json:"credit_unit"`
 	Covered          bool       `json:"covered"`
 	PriceVersionID   *uuid.UUID `json:"price_version_id,omitempty"`
+	PriceVersion     *int64     `json:"price_version,omitempty"`
 	EffectiveFrom    *time.Time `json:"effective_from,omitempty"`
 	EffectiveTo      *time.Time `json:"effective_to,omitempty"`
 }
@@ -155,9 +158,11 @@ type ImpactPriceQuery struct {
 }
 
 type ImpactPriceCoverageResult struct {
-	Items  []ImpactPriceCoverage `json:"items"`
-	AsOf   time.Time             `json:"as_of"`
-	Source string                `json:"source"`
+	Items                 []ImpactPriceCoverage `json:"items"`
+	AsOf                  time.Time             `json:"as_of"`
+	Source                string                `json:"source"`
+	FinancialFactRevision int64                 `json:"financial_fact_revision"`
+	PriceSetFingerprint   string                `json:"price_set_fingerprint"`
 }
 
 type ImpactPriceCoverageClient interface {

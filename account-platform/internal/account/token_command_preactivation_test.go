@@ -16,13 +16,13 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestTokenApprovalCreationFailsBeforeAnyDatabaseWriteInPreActivation(t *testing.T) {
+func TestTokenApprovalCreationValidatesCallerInputBeforePreActivationGate(t *testing.T) {
 	repository := &PostgresRepository{}
 	principal := identity.Principal{Issuer: "https://issuer.example", Subject: "operator", SessionID: "session", AuthenticatedAt: time.Now()}
 	for _, commandType := range []string{"TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE"} {
 		_, err := repository.CreateApprovalDraft(context.Background(), principal, ApprovalDraft{CommandType: commandType})
-		if !errors.Is(err, ErrTokenGovernanceInactive) {
-			t.Fatalf("%s reached policy/authorization/database processing in pre-activation: %v", commandType, err)
+		if !errors.Is(err, ErrConflict) {
+			t.Fatalf("%s incomplete request was not rejected before storage: %v", commandType, err)
 		}
 	}
 }
@@ -31,7 +31,7 @@ func TestTokenApprovalCriticalResourceVersionsAreExactTypedAndSecretSafe(t *test
 	fingerprint := strings.Repeat("a", 64)
 	valid := map[string]map[string]any{
 		"TOKEN_MODEL_LIFECYCLE_CHANGE": {
-			"model_id": uuid.NewString(), "catalog_version": 7, "current_lifecycle": "PUBLISHED", "target_lifecycle": "DEPRECATED", "lifecycle_plan_version": 2,
+			"model_id": uuid.NewString(), "catalog_version": 7, "current_lifecycle": "PUBLISHED", "target_lifecycle": "DEPRECATED", "lifecycle_plan_version": 0,
 			"effective_at": time.Now().UTC().Format(time.RFC3339Nano), "existing_session_cutoff_at": nil, "replacement_model_id": nil, "billing_price_version": 4,
 			"route_set_fingerprint": fingerprint, "provisioning_set_fingerprint": fingerprint, "inflight_request_set_fingerprint": fingerprint, "policy_version": 2,
 		},
@@ -95,6 +95,42 @@ func TestTokenApprovalCriticalResourceVersionsAreExactTypedAndSecretSafe(t *test
 	}
 }
 
+func TestTokenApprovalFinancialSnapshotIsClosedAlignedAndSecretSafe(t *testing.T) {
+	policy, err := approvalpolicy.Lookup("TOKEN_MODEL_LIFECYCLE_CHANGE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priceFingerprint := strings.Repeat("a", 64)
+	financial := json.RawMessage(`{"billing_price_revision":7,"price_set_fingerprint":"` + priceFingerprint + `","models_checked":2,"models_covered":2,"fully_covered":true,"billing_as_of":"2026-09-04T00:00:00Z"}`)
+	canonicalFinancial, err := canonicalApprovalFinancialSnapshot(policy, financial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	critical := json.RawMessage(`{"model_id":"` + uuid.NewString() + `","catalog_version":7,"current_lifecycle":"PUBLISHED","target_lifecycle":"DEPRECATED","lifecycle_plan_version":0,"effective_at":"2026-09-04T00:00:00Z","existing_session_cutoff_at":null,"replacement_model_id":null,"billing_price_version":7,"route_set_fingerprint":"` + priceFingerprint + `","provisioning_set_fingerprint":"` + priceFingerprint + `","inflight_request_set_fingerprint":"` + priceFingerprint + `","policy_version":2}`)
+	canonicalCritical, err := canonicalApprovalCriticalVersions(policy, critical)
+	if err != nil || !tokenApprovalSnapshotsAligned(canonicalCritical, canonicalFinancial) {
+		t.Fatalf("aligned snapshots rejected: %v", err)
+	}
+	for name, raw := range map[string]json.RawMessage{
+		"extra":            json.RawMessage(`{"billing_price_revision":7,"price_set_fingerprint":"` + priceFingerprint + `","models_checked":2,"models_covered":2,"fully_covered":true,"billing_as_of":"2026-09-04T00:00:00Z","extra":1}`),
+		"partial":          json.RawMessage(`{"billing_price_revision":7}`),
+		"uncovered":        json.RawMessage(`{"billing_price_revision":7,"price_set_fingerprint":"` + priceFingerprint + `","models_checked":2,"models_covered":1,"fully_covered":true,"billing_as_of":"2026-09-04T00:00:00Z"}`),
+		"secret":           json.RawMessage(`{"billing_price_revision":7,"price_set_fingerprint":"` + priceFingerprint + `","models_checked":2,"models_covered":2,"fully_covered":true,"billing_as_of":"2026-09-04T00:00:00Z","api_key":"forbidden"}`),
+		"invalid revision": json.RawMessage(`{"billing_price_revision":0,"price_set_fingerprint":"` + priceFingerprint + `","models_checked":2,"models_covered":2,"fully_covered":true,"billing_as_of":"2026-09-04T00:00:00Z"}`),
+		"empty coverage":   json.RawMessage(`{"billing_price_revision":7,"price_set_fingerprint":"` + priceFingerprint + `","models_checked":0,"models_covered":0,"fully_covered":false,"billing_as_of":"2026-09-04T00:00:00Z"}`),
+	} {
+		if _, err := canonicalApprovalFinancialSnapshot(policy, raw); err == nil {
+			t.Fatalf("accepted %s financial snapshot", name)
+		}
+	}
+	drifted := append(json.RawMessage(nil), critical...)
+	drifted = json.RawMessage(strings.Replace(string(drifted), `"billing_price_version":7`, `"billing_price_version":8`, 1))
+	driftedCanonical, err := canonicalApprovalCriticalVersions(policy, drifted)
+	if err != nil || tokenApprovalSnapshotsAligned(driftedCanonical, canonicalFinancial) {
+		t.Fatalf("revision drift alignment err=%v", err)
+	}
+}
+
 func TestApprovalExecutorIdentityComesOnlyFromTrustedServiceContext(t *testing.T) {
 	for _, service := range []string{"billing-command-executor", "token-command-executor"} {
 		ctx, err := serviceauth.ContextForJob(context.Background(), service, "APPROVAL_EXECUTION", uuid.NewString())
@@ -151,7 +187,7 @@ func TestApprovalExecutionErrorClassIsStableAndSecretFree(t *testing.T) {
 	}
 }
 
-func TestTokenApprovalProductionRouteFailsBeforeRepositoryWritesInPreActivation(t *testing.T) {
+func TestTokenApprovalProductionRouteValidatesRequestBeforePreActivationGate(t *testing.T) {
 	service := NewService(&PostgresRepository{}, nil)
 	handler := identity.Middleware(func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.example", Subject: "operator", SessionID: "session", AuthenticatedAt: time.Now()}, nil
@@ -161,7 +197,7 @@ func TestTokenApprovalProductionRouteFailsBeforeRepositoryWritesInPreActivation(
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "TOKEN_COMMAND_GOVERNANCE_INACTIVE") {
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "CONFLICT") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

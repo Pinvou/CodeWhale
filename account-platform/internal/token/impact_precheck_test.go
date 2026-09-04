@@ -126,7 +126,8 @@ func TestImpactPrechecksArePermissionedFeatureGatedAndRedacted(t *testing.T) {
 		PriceDimensions: []ImpactPriceQuery{{ModelID: modelID, ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT"}},
 	}
 	formulaID, priceID, effectiveFrom := uuid.New(), uuid.New(), time.Now().UTC().Add(-time.Hour)
-	pricing := stubImpactPricing{result: ImpactPriceCoverageResult{Source: "BILLING", AsOf: time.Now().UTC(), Items: []ImpactPriceCoverage{{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, EffectiveFrom: &effectiveFrom}}}}
+	priceVersion := int64(1)
+	pricing := stubImpactPricing{result: ImpactPriceCoverageResult{Source: "BILLING", AsOf: time.Now().UTC(), FinancialFactRevision: 7, PriceSetFingerprint: strings.Repeat("a", 64), Items: []ImpactPriceCoverage{{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, PriceVersion: &priceVersion, EffectiveFrom: &effectiveFrom}}}}
 	tests := []struct {
 		path   string
 		action string
@@ -259,7 +260,8 @@ func TestImpactPriceCoverageRejectsMalformedBillingEvidence(t *testing.T) {
 	modelID, otherID, formulaID, priceID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	effectiveFrom := time.Now().UTC().Add(-time.Hour)
 	evidence := ImpactLocalEvidence{ResourceType: "MODEL", ResourceID: modelID.String(), CurrentStatus: "PUBLISHED", PriceDimensions: []ImpactPriceQuery{{ModelID: modelID, ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT"}}, CurrentVersion: ImpactResourceVersion{EvidenceETag: `"impact"`}}
-	validItem := ImpactPriceCoverage{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, EffectiveFrom: &effectiveFrom}
+	priceVersion := int64(1)
+	validItem := ImpactPriceCoverage{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, PriceVersion: &priceVersion, EffectiveFrom: &effectiveFrom}
 	cases := map[string]ImpactPriceCoverageResult{
 		"wrong source":          {Source: "TOKEN", AsOf: time.Now().UTC(), Items: []ImpactPriceCoverage{validItem}},
 		"zero observed time":    {Source: "BILLING", Items: []ImpactPriceCoverage{validItem}},
@@ -288,7 +290,8 @@ func TestPrecheckFingerprintBindsActionReplacementAndPriceVersion(t *testing.T) 
 	evidence := ImpactLocalEvidence{ResourceType: "MODEL", ResourceID: modelID.String(), CurrentStatus: "PUBLISHED", ObservedAt: observedAt, PriceDimensions: []ImpactPriceQuery{{ModelID: modelID, ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT"}}, CurrentVersion: ImpactResourceVersion{EvidenceETag: `"impact-local"`, EvidenceSetSHA256: strings.Repeat("a", 64)}}
 	read := func(target string, replacement uuid.UUID, priceID uuid.UUID) ImpactPrecheckResult {
 		t.Helper()
-		pricing := stubImpactPricing{result: ImpactPriceCoverageResult{Source: "BILLING", AsOf: observedAt.Add(time.Second), Items: []ImpactPriceCoverage{{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, EffectiveFrom: &effectiveFrom}}}}
+		priceVersion := int64(1)
+		pricing := stubImpactPricing{result: ImpactPriceCoverageResult{Source: "BILLING", AsOf: observedAt.Add(time.Second), FinancialFactRevision: priceVersion, PriceSetFingerprint: strings.Repeat(string(rune('a'+priceVersion-1)), 64), Items: []ImpactPriceCoverage{{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, PriceVersion: &priceVersion, EffectiveFrom: &effectiveFrom}}}}
 		handler := impactTestHandler(t, true, stubImpactRepository{evidence: evidence}, pricing, true)
 		request := httptest.NewRequest(http.MethodGet, "/admin/v1/models/"+modelID.String()+"/impact/lifecycle?target_status="+target+"&replacement_model_id="+replacement.String(), nil)
 		request.Header.Set("Authorization", "Bearer impact-test")

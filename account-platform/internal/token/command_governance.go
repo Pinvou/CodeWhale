@@ -433,6 +433,24 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
+	if _, requiresAuthoritativePrecheck := directCommandPrecheckTypes[strings.ToUpper(strings.TrimSpace(envelope.CommandType))]; requiresAuthoritativePrecheck {
+		precheck, precheckErr := s.buildTokenCommandPrecheck(r.Context(), TokenCommandPrecheckRequest{
+			CommandType: envelope.CommandType, TargetResourceType: envelope.TargetResourceType,
+			TargetResourceID: envelope.TargetResourceID, Command: envelope.Command,
+		})
+		if precheckErr != nil {
+			if errors.Is(precheckErr, ErrTokenCommandInvalid) {
+				api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+				return
+			}
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_PRECHECK_UNAVAILABLE", "the governed command precheck could not be revalidated", httpserver.RequestID(r.Context()))
+			return
+		}
+		if envelope.PrecheckFingerprint != precheck.PrecheckFingerprint || !tokenCommandExpectedVersionsMatch(envelope.ExpectedVersions, precheck.ExpectedVersions) || len(precheck.Blockers) > 0 {
+			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
 	repository, ok := s.repository.(*PostgresRepository)
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))

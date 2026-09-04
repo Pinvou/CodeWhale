@@ -362,6 +362,7 @@ Portal 对三个动作只向 Account `POST /account/admin/v1/approval-requests` 
 
 - Token 拥有命令目标解析、Token 本域依赖快照和组合 precheck；Billing 只拥有价格、公式、单位与覆盖事实的只读投影；Account 拥有 approval create 时的 snapshot 持久化与响应、submit 前重验、授权事件 payload 及 begin-execution lease 冻结投影。Portal 只能透传和展示，不得计算数量、版本、阻断、指纹或伪造成功。
 - 协议草稿/发布、公式草稿/发布、目录同步、模型发布、模型生命周期和目录回滚所需的跨域预检，必须逐 `command_type` 使用闭合请求/响应 schema、同一个绝对 deadline、规范化输入和稳定失败码。请求或任一嵌套对象出现额外字段、错类型、未知 target 或不匹配资源时，在创建命令/审批前拒绝。
+- 模型发布必须在同一个 Token Repeatable Read 快照内按草稿锁定的精确 `protocol_version_id` 读取 resolved 路由和 Provisioning；闭合 `expected_versions` 同时冻结 route/Provisioning/READY 覆盖计数与固定全序全量行指纹。没有稳定路由、没有对应 Provisioning、READY 覆盖不足，或提交前发生即使计数不变的路由/Provisioning 事实变化，均在 command 持久化前失败关闭。
 - `billing_price_version` 是 Billing 在同一事务中返回的权威**完整价格事实修订号**：请求涉及的任一 pricing space、formula binding、unit config、block、生命周期或有效期事实发生变化时必须改变；禁止使用各 pricing space 独立递增版本的 `MAX(price.version)` 代替。Billing 同时对全部相关行按固定全序输出流式 SHA-256，覆盖稳定 ID、作用域、模型、协议、公式、单位、价格版本、配置类型/值、生命周期和有效区间；新增、删除、等量替换、非最大维度变化均必须改变 `financial_snapshot.price_set_fingerprint`。
 - 生命周期 13 字段和回滚 8 字段的 `critical_resource_versions` 保持第 7.3 节 exact ordered key array，不以计数或当前页摘要代替。`financial_snapshot` 另行使用闭合 schema，至少冻结 Billing 修订号、价格集合指纹、覆盖结论和 Billing `as_of`；Account 在 approval create 时原子持久化并原样响应同一规范化 `critical_resource_versions + financial_snapshot`，submit 前重新读取权威源逐字段重验，通过后原样写入授权事件，并在 begin-execution 时原样冻结到 lease。执行领取前重新计算的任一变化使申请失效，不能只比较 13/8 字段中的局部最大版本。
 - APT-124-R1 只交付权威预检、CAS/指纹、Account snapshot 持久/响应/重验及事件/lease 贯穿，不创建 APT-134 的生命周期计划，不启动 APT-138 的 consumer 或任何领域执行。

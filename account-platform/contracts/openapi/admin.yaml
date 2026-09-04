@@ -2190,6 +2190,7 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-requests/{approval_request_id}:
     get:
       operationId: getAdminApprovalRequest
@@ -2219,6 +2220,8 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-requests/{approval_request_id}/actions/submit:
     post:
       operationId: submitAdminApprovalRequest
@@ -2229,6 +2232,8 @@ paths:
         "200": { description: Submitted approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-requests/{approval_request_id}/actions/withdraw:
     post:
       operationId: withdrawAdminApprovalRequest
@@ -2254,6 +2259,22 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands:precheck:
+    post:
+      operationId: precheckGovernedTokenCommand
+      summary: Freeze authoritative redacted Token command evidence before dispatch
+      description: Returns a command-specific Token snapshot and, where required, an independently observed Billing projection. The later command repeats the same CAS and fingerprint validation.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandPrecheckRequest" } } }
+      responses:
+        "200": { description: Frozen redacted precheck, content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandPrecheck" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/commands:
     post:
       operationId: createGovernedTokenCommand
@@ -2467,6 +2488,169 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    TokenCommandPrecheckRequest:
+      type: object
+      additionalProperties: false
+      required: [command_type, target_resource_type, target_resource_id, command]
+      properties:
+        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC] }
+        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG] }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        command: { type: object, additionalProperties: true }
+      allOf:
+        - if: { properties: { command_type: { const: TOKEN_PROTOCOL_DRAFT_CREATE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROTOCOL }
+              command:
+                type: object
+                additionalProperties: false
+                required: [protocol_code, request_schema]
+                properties:
+                  protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+                  request_schema: { type: object }
+        - if: { properties: { command_type: { const: TOKEN_PROTOCOL_PUBLISH } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROTOCOL }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                type: object
+                additionalProperties: false
+                required: [expected_protocol_version, draft_etag]
+                properties:
+                  expected_protocol_version: { type: integer, format: int64, minimum: 1 }
+                  draft_etag: { type: string, minLength: 10, maxLength: 160 }
+        - if: { properties: { command_type: { const: TOKEN_FORMULA_DRAFT_CREATE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: FORMULA }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                type: object
+                additionalProperties: false
+                required: [required_unit_versions, expression]
+                properties:
+                  required_unit_versions: { type: object, minProperties: 1, additionalProperties: { type: string, format: uuid } }
+                  expression: { type: object, minProperties: 1, additionalProperties: { type: string, minLength: 1, maxLength: 120 } }
+        - if: { properties: { command_type: { const: TOKEN_FORMULA_PUBLISH } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: FORMULA }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                type: object
+                additionalProperties: false
+                required: [expected_formula_version, draft_etag]
+                properties:
+                  expected_formula_version: { type: integer, format: int64, minimum: 1 }
+                  draft_etag: { type: string, minLength: 10, maxLength: 160 }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_PUBLISH } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: MODEL }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                type: object
+                additionalProperties: false
+                required: [model_id]
+                properties:
+                  model_id: { type: string, format: uuid }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_SYNC } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: MODEL_CATALOG }
+              target_resource_id: { const: CURRENT }
+              command: { type: object, maxProperties: 0 }
+    TokenCommandPrecheck:
+      allOf:
+        - { $ref: "#/components/schemas/TokenImpactPrecheck" }
+        - type: object
+          required: [expected_versions]
+          properties:
+            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC] }
+            expected_versions: { type: object }
+        - if: { properties: { action: { const: TOKEN_PROTOCOL_DRAFT_CREATE } }, required: [action] }
+          then:
+            properties:
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [protocol_code, expected_protocol_head_version]
+                properties:
+                  protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+                  expected_protocol_head_version: { type: integer, format: int64, minimum: 0 }
+        - if: { properties: { action: { const: TOKEN_PROTOCOL_PUBLISH } }, required: [action] }
+          then:
+            properties:
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [protocol_definition_id, expected_protocol_version, draft_etag]
+                properties:
+                  protocol_definition_id: { type: string, format: uuid }
+                  expected_protocol_version: { type: integer, format: int64, minimum: 1 }
+                  draft_etag: { type: string, minLength: 10, maxLength: 160 }
+        - if: { properties: { action: { const: TOKEN_FORMULA_DRAFT_CREATE } }, required: [action] }
+          then:
+            properties:
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [protocol_definition_id, expected_protocol_version, expected_formula_head_version]
+                properties:
+                  protocol_definition_id: { type: string, format: uuid }
+                  expected_protocol_version: { type: integer, format: int64, minimum: 1 }
+                  expected_formula_head_version: { type: integer, format: int64, minimum: 0 }
+        - if: { properties: { action: { const: TOKEN_FORMULA_PUBLISH } }, required: [action] }
+          then:
+            properties:
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [formula_version_id, expected_formula_version, draft_etag]
+                properties:
+                  formula_version_id: { type: string, format: uuid }
+                  expected_formula_version: { type: integer, format: int64, minimum: 1 }
+                  draft_etag: { type: string, minLength: 10, maxLength: 160 }
+        - if: { properties: { action: { const: TOKEN_MODEL_PUBLISH } }, required: [action] }
+          then:
+            required: [price_coverage, billing_observed_at]
+            properties:
+              price_coverage: { type: object }
+              billing_observed_at: { type: string, format: date-time }
+              evidence:
+                properties:
+                  resource_type: { const: MODEL }
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [model_id, expected_catalog_version, expected_draft_version, draft_fingerprint, protocol_definition_id, protocol_version, stable_route_count, stable_route_set_fingerprint, provisioning_count, ready_route_count, provisioning_set_fingerprint, financial_fact_revision, price_set_fingerprint]
+                properties:
+                  model_id: { type: string, format: uuid }
+                  expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+                  expected_draft_version: { type: integer, format: int64, minimum: 1 }
+                  draft_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  protocol_definition_id: { type: string, format: uuid }
+                  protocol_version: { type: integer, format: int64, minimum: 1 }
+                  stable_route_count: { type: integer, format: int64, minimum: 0 }
+                  stable_route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  provisioning_count: { type: integer, format: int64, minimum: 0 }
+                  ready_route_count: { type: integer, format: int64, minimum: 0 }
+                  provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  financial_fact_revision: { type: integer, format: int64, minimum: 1 }
+                  price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { action: { const: TOKEN_MODEL_CATALOG_SYNC } }, required: [action] }
+          then:
+            properties:
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [expected_catalog_version, adapter_observed_version, catalog_diff_fingerprint]
+                properties:
+                  expected_catalog_version: { type: integer, format: int64, minimum: 0 }
+                  adapter_observed_version: { type: string, minLength: 1, maxLength: 160 }
+                  catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
     TokenCommandEnvelope:
       type: object
       additionalProperties: false
@@ -2514,7 +2698,7 @@ components:
           additionalProperties: false
           required: [resource_type, resource_id, current_status, current_version, dependencies]
           properties:
-            resource_type: { type: string, enum: [MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, TOKEN_ROUTE, PROVIDER_CREDENTIAL] }
+            resource_type: { type: string, enum: [MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, TOKEN_ROUTE, PROVIDER_CREDENTIAL, PROTOCOL, FORMULA] }
             resource_id: { type: string, minLength: 1, maxLength: 400 }
             current_status: { type: string, minLength: 1, maxLength: 80 }
             current_version:
@@ -2566,7 +2750,7 @@ components:
         price_coverage:
           type: object
           additionalProperties: false
-          required: [models_checked, models_covered, fully_covered, versions, billing_observed_at]
+          required: [models_checked, models_covered, fully_covered, versions, billing_observed_at, financial_fact_revision, price_set_fingerprint]
           properties:
             models_checked: { type: integer, minimum: 1, maximum: 5000 }
             models_covered: { type: integer, minimum: 0, maximum: 5000 }
@@ -2585,11 +2769,12 @@ components:
                   credit_unit: { type: string, const: MICROCREDIT }
                   covered: { type: boolean }
                   price_version_id: { type: string, format: uuid }
+                  price_version: { type: integer, format: int64, minimum: 1 }
                   effective_from: { type: string, format: date-time }
                   effective_to: { type: string, format: date-time }
                 oneOf:
                   - type: object
-                    required: [formula_version_id, price_version_id, effective_from]
+                    required: [formula_version_id, price_version_id, price_version, effective_from]
                     properties:
                       covered: { type: boolean, const: true }
                   - type: object
@@ -2601,17 +2786,69 @@ components:
                           properties: { formula_version_id: {} }
                         - required: [price_version_id]
                           properties: { price_version_id: {} }
+                        - required: [price_version]
+                          properties: { price_version: {} }
                         - required: [effective_from]
                           properties: { effective_from: {} }
                         - required: [effective_to]
                           properties: { effective_to: {} }
             billing_observed_at: { type: string, format: date-time }
+            financial_fact_revision: { type: integer, format: int64, minimum: 1 }
+            price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         blockers: { type: array, uniqueItems: true, items: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,119}$' } }
         token_observed_at: { type: string, format: date-time }
         billing_observed_at: { type: string, format: date-time }
         snapshot_semantics: { type: string, const: INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS }
         precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         requires_cas_revalidation: { type: boolean, const: true }
+        expected_versions: { type: object, additionalProperties: true }
+        critical_resource_versions:
+          oneOf:
+            - { $ref: "#/components/schemas/TokenModelLifecycleApprovalSnapshot" }
+            - { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
+        financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+    TokenModelLifecycleApprovalSnapshot:
+      type: object
+      additionalProperties: false
+      required: [model_id, catalog_version, current_lifecycle, target_lifecycle, lifecycle_plan_version, effective_at, existing_session_cutoff_at, replacement_model_id, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+      properties:
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        current_lifecycle: { type: string, enum: [DRAFT, PUBLISHED, DEPRECATED, REMOVED] }
+        target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
+        lifecycle_plan_version: { type: integer, format: int64, minimum: 0, description: "Zero is the pre-APT-134 creation sentinel; no schedule is activated by this contract." }
+        effective_at: { type: string, format: date-time }
+        existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+        replacement_model_id: { type: [string, "null"], format: uuid }
+        billing_price_version: { type: integer, format: int64, minimum: 1 }
+        route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, const: 2 }
+    TokenCatalogRollbackApprovalSnapshot:
+      type: object
+      additionalProperties: false
+      required: [current_catalog_version, source_catalog_version, catalog_diff_fingerprint, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+      properties:
+        current_catalog_version: { type: integer, format: int64, minimum: 1 }
+        source_catalog_version: { type: integer, format: int64, minimum: 1 }
+        catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        billing_price_version: { type: integer, format: int64, minimum: 1 }
+        route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, const: 2 }
+    TokenFinancialSnapshot:
+      type: object
+      additionalProperties: false
+      required: [billing_price_revision, price_set_fingerprint, models_checked, models_covered, fully_covered, billing_as_of]
+      properties:
+        billing_price_revision: { type: integer, format: int64, minimum: 1 }
+        price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        models_checked: { type: integer, minimum: 1 }
+        models_covered: { type: integer, minimum: 0 }
+        fully_covered: { type: boolean, const: true }
+        billing_as_of: { type: string, format: date-time }
     RechargeProductMapping:
       type: object
       required: [draft_version, provider_id, provider_version, sku_bom, amount_fen, currency, channels, admission_class]
@@ -3327,6 +3564,21 @@ components:
         critical_resource_versions: { type: object, additionalProperties: true }
         financial_snapshot: { type: object, additionalProperties: true }
         supersedes_request_id: { type: string, format: uuid }
+      allOf:
+        - if:
+            properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE } }
+            required: [command_type]
+          then:
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/TokenModelLifecycleApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        - if:
+            properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }
+            required: [command_type]
+          then:
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
     ApprovalDecision:
       type: object
       additionalProperties: false
@@ -3371,6 +3623,21 @@ components:
         financial_snapshot: { type: object, additionalProperties: true }
         policy_snapshot: { type: object, additionalProperties: true }
         allowed_actions: { type: array, uniqueItems: true, items: { type: string, enum: [EDIT, SUBMIT, WITHDRAW, APPROVE, REJECT] } }
+      allOf:
+        - if:
+            properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE } }
+            required: [command_type]
+          then:
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/TokenModelLifecycleApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        - if:
+            properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }
+            required: [command_type]
+          then:
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
     RoleBindingGrant:
       type: object
       additionalProperties: false

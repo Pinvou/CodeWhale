@@ -52,6 +52,10 @@ test('every management write is classified and financial facts use the independe
         assert.match(line, /requireNewTokenCommandGovernanceActive\(\).*adminCreateTokenCommand/, `unguarded dynamic management write: ${line.trim()}`);
         continue;
       }
+      if (/admin\.POST\("\/commands:precheck"/.test(line)) {
+        assert.match(line, /requireNewTokenCommandGovernanceActive\(\).*adminTokenCommandPrecheck/, `unguarded dynamic precheck: ${line.trim()}`);
+        continue;
+      }
       assert.match(line, /approvalpolicy\.(?:Require|RequireLegacyTokenDirect)\(/, `unclassified management write: ${line.trim()}`);
     }
   }

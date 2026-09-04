@@ -67,7 +67,7 @@ func TestFormulaDraftUnitValidationPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := repository.ValidateFormulaDraftUnits(ctx, map[string]uuid.UUID{"INPUT_TOKEN": activeID})
-	if err != nil || result.VerifiedCount != 1 || len(result.UnitVersions) != 1 || result.UnitVersions[0].UnitDefinitionID != activeID || result.UnitVersions[0].Version != 7 || result.UnitVersions[0].Status != "ACTIVE" {
+	if err != nil || result.VerifiedCount != 1 || len(result.UnitVersions) != 1 || result.UnitVersions[0].UnitDefinitionID != activeID || result.UnitVersions[0].Version != 7 || result.UnitVersions[0].Status != "ACTIVE" || result.ObservedAt.IsZero() || len(result.UnitSetFingerprint) != 64 {
 		t.Fatalf("unexpected authoritative validation: %#v err=%v", result, err)
 	}
 	handler := NewService(repository).Handler("billing-formula-validation-test-token")
@@ -84,7 +84,8 @@ func TestFormulaDraftUnitValidationPostgresIntegration(t *testing.T) {
 	authorized.Header.Set("Content-Type", "application/json")
 	authorizedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(authorizedResponse, authorized)
-	if authorizedResponse.Code != http.StatusOK || !strings.Contains(authorizedResponse.Body.String(), `"verified_count":1`) {
+	var authorizedProjection FormulaDraftValidation
+	if authorizedResponse.Code != http.StatusOK || json.Unmarshal(authorizedResponse.Body.Bytes(), &authorizedProjection) != nil || authorizedProjection.ObservedAt.IsZero() || len(authorizedProjection.UnitSetFingerprint) != 64 {
 		t.Fatalf("service-authenticated validation failed: %d %s", authorizedResponse.Code, authorizedResponse.Body.String())
 	}
 	var bindingFacts int

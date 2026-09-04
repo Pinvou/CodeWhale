@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -889,6 +890,15 @@ type CatalogSynchronizer struct {
 	actor          uuid.UUID
 }
 
+type CatalogSyncPreview struct {
+	CatalogVersion         int64
+	AdapterObservedVersion string
+	DiffFingerprint        string
+	Added                  int
+	Missing                int
+	ObservedAt             time.Time
+}
+
 func NewCatalogSynchronizer(repository CatalogRepository, adapter UpstreamClient, providerID, baseURL string, secret []byte, contextLength, maximumOutput int64, interval time.Duration) (*CatalogSynchronizer, error) {
 	catalogAdapter, ok := adapter.(ModelCatalogAdapter)
 	providerID = strings.ToUpper(strings.TrimSpace(providerID))
@@ -908,6 +918,47 @@ func (s *CatalogSynchronizer) Sync(ctx context.Context) (int64, bool, error) {
 		return 0, false, err
 	}
 	return s.repository.SyncCatalog(ctx, s.providerID, s.adapterVersion, models, s.contextLength, s.maximumOutput, s.actor)
+}
+
+func (s *CatalogSynchronizer) Preview(ctx context.Context) (CatalogSyncPreview, error) {
+	discovered, err := s.adapter.DiscoverModels(ctx, s.baseURL, s.secret)
+	if err != nil {
+		return CatalogSyncPreview{}, err
+	}
+	version, current, err := s.repository.ListCatalog(ctx)
+	if err != nil {
+		return CatalogSyncPreview{}, err
+	}
+	currentRefs := make([]string, 0, len(current))
+	currentSet := make(map[string]struct{}, len(current))
+	for _, item := range current {
+		key := strings.TrimSpace(item.UpstreamModelRef)
+		currentRefs = append(currentRefs, key)
+		currentSet[key] = struct{}{}
+	}
+	discoveredRefs := make([]string, 0, len(discovered))
+	discoveredSet := make(map[string]struct{}, len(discovered))
+	added := 0
+	for _, item := range discovered {
+		key := strings.TrimSpace(item.UpstreamModelRef)
+		discoveredRefs = append(discoveredRefs, key)
+		discoveredSet[key] = struct{}{}
+		if _, exists := currentSet[key]; !exists {
+			added++
+		}
+	}
+	missing := 0
+	for key := range currentSet {
+		if _, exists := discoveredSet[key]; !exists {
+			missing++
+		}
+	}
+	sort.Strings(currentRefs)
+	sort.Strings(discoveredRefs)
+	observedDigest := sha256.Sum256([]byte(strings.Join(append([]string{s.providerID, s.adapterVersion}, discoveredRefs...), "\x00")))
+	observedVersion := hex.EncodeToString(observedDigest[:])
+	diffDigest := sha256.Sum256([]byte(strings.Join(append(append([]string{strconv.FormatInt(version, 10), observedVersion}, currentRefs...), discoveredRefs...), "\x00")))
+	return CatalogSyncPreview{CatalogVersion: version, AdapterObservedVersion: observedVersion, DiffFingerprint: hex.EncodeToString(diffDigest[:]), Added: added, Missing: missing, ObservedAt: time.Now().UTC()}, nil
 }
 
 func (s *CatalogSynchronizer) Run(ctx context.Context) {

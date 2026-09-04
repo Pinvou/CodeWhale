@@ -10,6 +10,36 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/approval-requests/{approval_request_id}/executions:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: beginApprovalExecution
+      summary: Atomically acquire an approved command execution lease with both frozen snapshots
+      parameters:
+        - name: approval_request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: observed_financial_snapshot is required by the service for Token lifecycle and catalog rollback approvals; legacy non-Token commands remain compatible without it.
+              required: [job_run_id, observed_versions]
+              properties:
+                job_run_id: { type: string, minLength: 1, maxLength: 160 }
+                observed_versions: { type: object, additionalProperties: true }
+                observed_financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshotOrGeneric" }
+      responses:
+        "200": { description: Immutable execution lease, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalExecutionLease" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/token-owner-candidates:
     get:
       servers:
@@ -1049,6 +1079,83 @@ components:
         maxLength: 120
       description: Stable operation key; body fallback is accepted for constrained clients.
   schemas:
+    TokenFinancialSnapshot:
+      type: object
+      additionalProperties: false
+      required: [billing_price_revision, price_set_fingerprint, models_checked, models_covered, fully_covered, billing_as_of]
+      properties:
+        billing_price_revision: { type: integer, format: int64, minimum: 1 }
+        price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        models_checked: { type: integer, minimum: 1 }
+        models_covered: { type: integer, minimum: 0 }
+        fully_covered: { type: boolean, const: true }
+        billing_as_of: { type: string, format: date-time }
+    TokenFinancialSnapshotOrGeneric:
+      anyOf:
+        - { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        - { type: object, additionalProperties: true }
+    ApprovalExecutionLease:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, command_type, policy_version, command_fingerprint, normalized_command, target_resource_type, target_resource_id, critical_resource_versions, financial_snapshot, requester_user_id, approver_user_id, decision_reason, execution_idempotency_key, executor_identity, status]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string, minLength: 1, maxLength: 80 }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        normalized_command: { type: object, additionalProperties: true }
+        target_resource_type: { type: string, minLength: 1, maxLength: 80 }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        critical_resource_versions: { type: object, additionalProperties: true }
+        financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshotOrGeneric" }
+        requester_user_id: { type: string, format: uuid }
+        approver_user_id: { type: string, format: uuid }
+        decision_reason: { type: string }
+        execution_idempotency_key: { type: string, minLength: 1, maxLength: 512 }
+        executor_identity: { type: string, minLength: 1, maxLength: 120 }
+        status: { type: string, enum: [EXECUTING, EXECUTED, FAILED] }
+      allOf:
+        - if: { properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE } }, required: [command_type] }
+          then:
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/TokenModelLifecycleApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }, required: [command_type] }
+          then:
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+    TokenModelLifecycleApprovalSnapshot:
+      type: object
+      additionalProperties: false
+      required: [model_id, catalog_version, current_lifecycle, target_lifecycle, lifecycle_plan_version, effective_at, existing_session_cutoff_at, replacement_model_id, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+      properties:
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        current_lifecycle: { type: string, enum: [PUBLISHED, DEPRECATED, REMOVED] }
+        target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
+        lifecycle_plan_version: { type: integer, format: int64, const: 0 }
+        effective_at: { type: string, format: date-time }
+        existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+        replacement_model_id: { type: [string, "null"], format: uuid }
+        billing_price_version: { type: integer, format: int64, minimum: 1 }
+        route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, const: 2 }
+    TokenCatalogRollbackApprovalSnapshot:
+      type: object
+      additionalProperties: false
+      required: [current_catalog_version, source_catalog_version, catalog_diff_fingerprint, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+      properties:
+        current_catalog_version: { type: integer, format: int64, minimum: 1 }
+        source_catalog_version: { type: integer, format: int64, minimum: 1 }
+        catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        billing_price_version: { type: integer, format: int64, minimum: 1 }
+        route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, const: 2 }
     TokenOwnerCandidate:
       type: object
       additionalProperties: false

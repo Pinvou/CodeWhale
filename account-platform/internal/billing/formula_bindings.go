@@ -25,8 +25,10 @@ type MeteringUnitVersionReference struct {
 }
 
 type FormulaDraftValidation struct {
-	VerifiedCount int                            `json:"verified_count"`
-	UnitVersions  []MeteringUnitVersionReference `json:"unit_versions"`
+	VerifiedCount      int                            `json:"verified_count"`
+	UnitVersions       []MeteringUnitVersionReference `json:"unit_versions"`
+	ObservedAt         time.Time                      `json:"observed_at"`
+	UnitSetFingerprint string                         `json:"unit_set_fingerprint"`
 }
 
 type FormulaBindingReceipt struct {
@@ -36,6 +38,14 @@ type FormulaBindingReceipt struct {
 	RequiredMeteringUnitDefinitionIDs []uuid.UUID `json:"required_metering_unit_definition_ids"`
 	FormulaSnapshotSHA256             string      `json:"formula_snapshot_sha256"`
 	PublishedAt                       time.Time   `json:"published_at"`
+}
+
+type formulaDraftUnitFact struct {
+	MeteringUnitVersionReference
+	MinimumPrecision int64      `json:"minimum_precision"`
+	PriceDenominator int64      `json:"price_denominator"`
+	RoundingRule     string     `json:"rounding_rule"`
+	DeactivatedAt    *time.Time `json:"deactivated_at"`
 }
 
 func (r *PostgresRepository) ValidateFormulaDraftUnits(ctx context.Context, required map[string]uuid.UUID) (FormulaDraftValidation, error) {
@@ -52,22 +62,32 @@ func (r *PostgresRepository) ValidateFormulaDraftUnits(ctx context.Context, requ
 		expected[id] = code
 		ids = append(ids, id)
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,unit_code,version,status FROM metering_unit_definitions WHERE id=ANY($1) AND status='ACTIVE'`, ids)
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return FormulaDraftValidation{}, err
+	}
+	defer tx.Rollback(ctx)
+	result := FormulaDraftValidation{UnitVersions: make([]MeteringUnitVersionReference, 0, len(required))}
+	facts := make([]formulaDraftUnitFact, 0, len(required))
+	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&result.ObservedAt); err != nil {
+		return FormulaDraftValidation{}, err
+	}
+	rows, err := tx.Query(ctx, `SELECT id,unit_code,version,status,minimum_precision,price_denominator,rounding_rule,deactivated_at FROM metering_unit_definitions WHERE id=ANY($1) AND status='ACTIVE'`, ids)
 	if err != nil {
 		return FormulaDraftValidation{}, err
 	}
 	defer rows.Close()
-	result := FormulaDraftValidation{UnitVersions: make([]MeteringUnitVersionReference, 0, len(required))}
 	for rows.Next() {
-		var item MeteringUnitVersionReference
-		if err := rows.Scan(&item.UnitDefinitionID, &item.UnitCode, &item.Version, &item.Status); err != nil {
+		var fact formulaDraftUnitFact
+		if err := rows.Scan(&fact.UnitDefinitionID, &fact.UnitCode, &fact.Version, &fact.Status, &fact.MinimumPrecision, &fact.PriceDenominator, &fact.RoundingRule, &fact.DeactivatedAt); err != nil {
 			return FormulaDraftValidation{}, err
 		}
-		item.UnitCode = strings.ToUpper(strings.TrimSpace(item.UnitCode))
-		if expected[item.UnitDefinitionID] != item.UnitCode {
+		fact.UnitCode = strings.ToUpper(strings.TrimSpace(fact.UnitCode))
+		if expected[fact.UnitDefinitionID] != fact.UnitCode {
 			return FormulaDraftValidation{}, ErrPriceMissing
 		}
-		result.UnitVersions = append(result.UnitVersions, item)
+		result.UnitVersions = append(result.UnitVersions, fact.MeteringUnitVersionReference)
+		facts = append(facts, fact)
 	}
 	if err := rows.Err(); err != nil {
 		return FormulaDraftValidation{}, err
@@ -76,7 +96,22 @@ func (r *PostgresRepository) ValidateFormulaDraftUnits(ctx context.Context, requ
 		return FormulaDraftValidation{}, ErrPriceMissing
 	}
 	sort.Slice(result.UnitVersions, func(i, j int) bool { return result.UnitVersions[i].UnitCode < result.UnitVersions[j].UnitCode })
+	sort.Slice(facts, func(i, j int) bool {
+		if facts[i].UnitCode != facts[j].UnitCode {
+			return facts[i].UnitCode < facts[j].UnitCode
+		}
+		return facts[i].UnitDefinitionID.String() < facts[j].UnitDefinitionID.String()
+	})
 	result.VerifiedCount = len(result.UnitVersions)
+	factJSON, err := json.Marshal(facts)
+	if err != nil {
+		return FormulaDraftValidation{}, err
+	}
+	digest := sha256.Sum256(factJSON)
+	result.UnitSetFingerprint = hex.EncodeToString(digest[:])
+	if err := tx.Commit(ctx); err != nil {
+		return FormulaDraftValidation{}, err
+	}
 	return result, nil
 }
 

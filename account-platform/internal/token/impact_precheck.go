@@ -19,7 +19,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var ErrImpactScopeTooLarge = errors.New("impact precheck scope is too large")
+var (
+	ErrImpactScopeTooLarge      = errors.New("impact precheck scope is too large")
+	ErrImpactPricingUnavailable = errors.New("impact pricing snapshot is unavailable")
+)
 
 const maximumImpactModels = 5000
 
@@ -52,24 +55,30 @@ type ImpactResourceVersion struct {
 }
 
 type ImpactLocalEvidence struct {
-	ResourceType       string                  `json:"resource_type"`
-	ResourceID         string                  `json:"resource_id"`
-	CurrentStatus      string                  `json:"current_status"`
-	CurrentVersion     ImpactResourceVersion   `json:"current_version"`
-	Dependencies       ImpactDependencySummary `json:"dependencies"`
-	ModelIDs           []uuid.UUID             `json:"-"`
-	PriceDimensions    []ImpactPriceQuery      `json:"-"`
-	ReplacementModelID *uuid.UUID              `json:"replacement_model_id,omitempty"`
-	ReplacementReady   *bool                   `json:"replacement_model_ready,omitempty"`
-	ObservedAt         time.Time               `json:"-"`
+	ResourceType               string                  `json:"resource_type"`
+	ResourceID                 string                  `json:"resource_id"`
+	CurrentStatus              string                  `json:"current_status"`
+	CurrentVersion             ImpactResourceVersion   `json:"current_version"`
+	Dependencies               ImpactDependencySummary `json:"dependencies"`
+	ModelIDs                   []uuid.UUID             `json:"-"`
+	PriceDimensions            []ImpactPriceQuery      `json:"-"`
+	ReplacementModelID         *uuid.UUID              `json:"replacement_model_id,omitempty"`
+	ReplacementReady           *bool                   `json:"replacement_model_ready,omitempty"`
+	ObservedAt                 time.Time               `json:"-"`
+	RouteSetFingerprint        string                  `json:"-"`
+	ProvisioningSetFingerprint string                  `json:"-"`
+	InflightSetFingerprint     string                  `json:"-"`
+	CatalogDiffFingerprint     string                  `json:"-"`
 }
 
 type ImpactPriceSummary struct {
-	ModelsChecked     int                   `json:"models_checked"`
-	ModelsCovered     int                   `json:"models_covered"`
-	FullyCovered      bool                  `json:"fully_covered"`
-	Versions          []ImpactPriceEvidence `json:"versions"`
-	BillingObservedAt time.Time             `json:"billing_observed_at"`
+	ModelsChecked         int                   `json:"models_checked"`
+	ModelsCovered         int                   `json:"models_covered"`
+	FullyCovered          bool                  `json:"fully_covered"`
+	Versions              []ImpactPriceEvidence `json:"versions"`
+	BillingObservedAt     time.Time             `json:"billing_observed_at"`
+	FinancialFactRevision int64                 `json:"financial_fact_revision"`
+	PriceSetFingerprint   string                `json:"price_set_fingerprint"`
 }
 
 type ImpactPriceEvidence struct {
@@ -79,20 +88,23 @@ type ImpactPriceEvidence struct {
 	CreditUnit       string     `json:"credit_unit"`
 	Covered          bool       `json:"covered"`
 	PriceVersionID   *uuid.UUID `json:"price_version_id,omitempty"`
+	PriceVersion     *int64     `json:"price_version,omitempty"`
 	EffectiveFrom    *time.Time `json:"effective_from,omitempty"`
 	EffectiveTo      *time.Time `json:"effective_to,omitempty"`
 }
 
 type ImpactPrecheckResult struct {
-	Action                  string              `json:"action"`
-	Evidence                ImpactLocalEvidence `json:"evidence"`
-	PriceCoverage           *ImpactPriceSummary `json:"price_coverage,omitempty"`
-	Blockers                []string            `json:"blockers"`
-	TokenObservedAt         time.Time           `json:"token_observed_at"`
-	BillingObservedAt       *time.Time          `json:"billing_observed_at,omitempty"`
-	SnapshotSemantics       string              `json:"snapshot_semantics"`
-	PrecheckFingerprint     string              `json:"precheck_fingerprint"`
-	RequiresCASRevalidation bool                `json:"requires_cas_revalidation"`
+	Action                   string              `json:"action"`
+	Evidence                 ImpactLocalEvidence `json:"evidence"`
+	PriceCoverage            *ImpactPriceSummary `json:"price_coverage,omitempty"`
+	Blockers                 []string            `json:"blockers"`
+	TokenObservedAt          time.Time           `json:"token_observed_at"`
+	BillingObservedAt        *time.Time          `json:"billing_observed_at,omitempty"`
+	SnapshotSemantics        string              `json:"snapshot_semantics"`
+	PrecheckFingerprint      string              `json:"precheck_fingerprint"`
+	RequiresCASRevalidation  bool                `json:"requires_cas_revalidation"`
+	CriticalResourceVersions map[string]any      `json:"critical_resource_versions,omitempty"`
+	FinancialSnapshot        map[string]any      `json:"financial_snapshot,omitempty"`
 }
 
 type ImpactPrecheckRepository interface {
@@ -176,6 +188,26 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 	if target == "REMOVED" && evidence.Dependencies.InflightRequests > 0 {
 		result.Blockers = append(result.Blockers, "INFLIGHT_REQUESTS_PRESENT")
 	}
+	replacementValue := any(nil)
+	if replacement != nil {
+		replacementValue = replacement.String()
+	}
+	catalogVersion := int64(0)
+	if evidence.CurrentVersion.CatalogVersion != nil {
+		catalogVersion = *evidence.CurrentVersion.CatalogVersion
+	}
+	if catalogVersion < 1 || price.FinancialFactRevision < 1 || !validImpactFingerprint(price.PriceSetFingerprint) || !validImpactFingerprint(evidence.RouteSetFingerprint) || !validImpactFingerprint(evidence.ProvisioningSetFingerprint) || !validImpactFingerprint(evidence.InflightSetFingerprint) {
+		result.Blockers = append(result.Blockers, "APPROVAL_SNAPSHOT_UNAVAILABLE")
+	}
+	result.CriticalResourceVersions = map[string]any{
+		"model_id": modelID.String(), "catalog_version": catalogVersion,
+		"current_lifecycle": evidence.CurrentStatus, "target_lifecycle": target, "lifecycle_plan_version": int64(0),
+		"effective_at": evidence.ObservedAt.UTC(), "existing_session_cutoff_at": nil, "replacement_model_id": replacementValue,
+		"billing_price_version": price.FinancialFactRevision, "route_set_fingerprint": evidence.RouteSetFingerprint,
+		"provisioning_set_fingerprint": evidence.ProvisioningSetFingerprint, "inflight_request_set_fingerprint": evidence.InflightSetFingerprint,
+		"policy_version": int64(2),
+	}
+	result.FinancialSnapshot = financialImpactSnapshot(price)
 	finalizeImpactResult(&result, "target_status="+target, "replacement_model_id="+valueUUID(replacement))
 	api.WriteJSON(w, http.StatusOK, result)
 }
@@ -207,6 +239,20 @@ func (s *Service) adminCatalogRollbackImpact(w http.ResponseWriter, r *http.Requ
 		blockers = append(blockers, "INFLIGHT_REQUESTS_PRESENT")
 	}
 	result := ImpactPrecheckResult{Action: "MODEL_CATALOG_ROLLBACK", Evidence: evidence, PriceCoverage: &price, Blockers: blockers}
+	catalogVersion := int64(0)
+	if evidence.CurrentVersion.CatalogVersion != nil {
+		catalogVersion = *evidence.CurrentVersion.CatalogVersion
+	}
+	if catalogVersion < 1 || price.FinancialFactRevision < 1 || !validImpactFingerprint(price.PriceSetFingerprint) || !validImpactFingerprint(evidence.CatalogDiffFingerprint) || !validImpactFingerprint(evidence.RouteSetFingerprint) || !validImpactFingerprint(evidence.ProvisioningSetFingerprint) || !validImpactFingerprint(evidence.InflightSetFingerprint) {
+		result.Blockers = append(result.Blockers, "APPROVAL_SNAPSHOT_UNAVAILABLE")
+	}
+	result.CriticalResourceVersions = map[string]any{
+		"current_catalog_version": catalogVersion, "source_catalog_version": version,
+		"catalog_diff_fingerprint": evidence.CatalogDiffFingerprint, "billing_price_version": price.FinancialFactRevision,
+		"route_set_fingerprint": evidence.RouteSetFingerprint, "provisioning_set_fingerprint": evidence.ProvisioningSetFingerprint,
+		"inflight_request_set_fingerprint": evidence.InflightSetFingerprint, "policy_version": int64(2),
+	}
+	result.FinancialSnapshot = financialImpactSnapshot(price)
 	finalizeImpactResult(&result, "source_catalog_version="+strconv.FormatInt(version, 10))
 	api.WriteJSON(w, http.StatusOK, result)
 }
@@ -341,12 +387,13 @@ func finalizeImpactResult(result *ImpactPrecheckResult, actionParameters ...stri
 		billingObservedAt := result.PriceCoverage.BillingObservedAt.UTC()
 		result.BillingObservedAt = &billingObservedAt
 		values = append(values, "billing_as_of="+billingObservedAt.Format(time.RFC3339Nano))
+		values = append(values, "billing_revision="+strconv.FormatInt(result.PriceCoverage.FinancialFactRevision, 10), "price_set_fingerprint="+result.PriceCoverage.PriceSetFingerprint)
 		versions := append([]ImpactPriceEvidence(nil), result.PriceCoverage.Versions...)
 		sort.Slice(versions, func(i, j int) bool {
 			return impactPriceDimensionKey(ImpactPriceQuery{ModelID: versions[i].ModelID, ProtocolCode: versions[i].ProtocolCode, CreditUnit: versions[i].CreditUnit}) < impactPriceDimensionKey(ImpactPriceQuery{ModelID: versions[j].ModelID, ProtocolCode: versions[j].ProtocolCode, CreditUnit: versions[j].CreditUnit})
 		})
 		for _, version := range versions {
-			values = append(values, impactPriceDimensionKey(ImpactPriceQuery{ModelID: version.ModelID, ProtocolCode: version.ProtocolCode, CreditUnit: version.CreditUnit}), strconv.FormatBool(version.Covered), valueUUID(version.FormulaVersionID), valueUUID(version.PriceVersionID))
+			values = append(values, impactPriceDimensionKey(ImpactPriceQuery{ModelID: version.ModelID, ProtocolCode: version.ProtocolCode, CreditUnit: version.CreditUnit}), strconv.FormatBool(version.Covered), valueUUID(version.FormulaVersionID), valueUUID(version.PriceVersionID), valueInt64(version.PriceVersion))
 		}
 	}
 	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
@@ -354,33 +401,37 @@ func finalizeImpactResult(result *ImpactPrecheckResult, actionParameters ...stri
 }
 
 func (s *Service) impactPriceCoverage(w http.ResponseWriter, r *http.Request, dimensions []ImpactPriceQuery) (ImpactPriceSummary, bool) {
+	result, err := s.loadImpactPriceCoverage(r.Context(), dimensions)
+	if err != nil {
+		writeImpactDownstreamFailure(w, r)
+		return ImpactPriceSummary{}, false
+	}
+	return result, true
+}
+
+func (s *Service) loadImpactPriceCoverage(ctx context.Context, dimensions []ImpactPriceQuery) (ImpactPriceSummary, error) {
 	client := s.impactPricing
 	if client == nil {
 		client, _ = s.billing.(ImpactPriceCoverageClient)
 	}
 	if client == nil || len(dimensions) == 0 {
-		writeImpactDownstreamFailure(w, r)
-		return ImpactPriceSummary{}, false
+		return ImpactPriceSummary{}, ErrImpactPricingUnavailable
 	}
-	coverage, err := client.ImpactPriceCoverage(r.Context(), dimensions)
+	coverage, err := client.ImpactPriceCoverage(ctx, dimensions)
 	if err != nil {
-		writeImpactDownstreamFailure(w, r)
-		return ImpactPriceSummary{}, false
+		return ImpactPriceSummary{}, err
 	}
-	if coverage.Source != "BILLING" || coverage.AsOf.IsZero() || len(coverage.Items) != len(dimensions) {
-		writeImpactDownstreamFailure(w, r)
-		return ImpactPriceSummary{}, false
+	if coverage.Source != "BILLING" || coverage.AsOf.IsZero() || coverage.FinancialFactRevision < 1 || !validImpactFingerprint(coverage.PriceSetFingerprint) || len(coverage.Items) != len(dimensions) {
+		return ImpactPriceSummary{}, ErrImpactPricingUnavailable
 	}
 	byKey := make(map[string]ImpactPriceCoverage, len(coverage.Items))
 	for _, item := range coverage.Items {
 		key := impactPriceDimensionKey(ImpactPriceQuery{ModelID: item.ModelID, ProtocolCode: item.ProtocolCode, CreditUnit: item.CreditUnit})
 		if item.ModelID == uuid.Nil || item.ProtocolCode == "" || item.ProtocolCode != strings.ToUpper(strings.TrimSpace(item.ProtocolCode)) || item.CreditUnit == "" || item.CreditUnit != strings.ToUpper(strings.TrimSpace(item.CreditUnit)) {
-			writeImpactDownstreamFailure(w, r)
-			return ImpactPriceSummary{}, false
+			return ImpactPriceSummary{}, ErrImpactPricingUnavailable
 		}
-		if _, duplicate := byKey[key]; duplicate || item.Covered != (item.PriceVersionID != nil && item.FormulaVersionID != nil && item.EffectiveFrom != nil && !item.EffectiveFrom.IsZero()) || (!item.Covered && (item.PriceVersionID != nil || item.FormulaVersionID != nil || item.EffectiveFrom != nil || item.EffectiveTo != nil)) {
-			writeImpactDownstreamFailure(w, r)
-			return ImpactPriceSummary{}, false
+		if _, duplicate := byKey[key]; duplicate || item.Covered != (item.PriceVersionID != nil && item.PriceVersion != nil && *item.PriceVersion > 0 && item.FormulaVersionID != nil && item.EffectiveFrom != nil && !item.EffectiveFrom.IsZero()) || (!item.Covered && (item.PriceVersionID != nil || item.PriceVersion != nil || item.FormulaVersionID != nil || item.EffectiveFrom != nil || item.EffectiveTo != nil)) {
+			return ImpactPriceSummary{}, ErrImpactPricingUnavailable
 		}
 		byKey[key] = item
 	}
@@ -390,26 +441,43 @@ func (s *Service) impactPriceCoverage(w http.ResponseWriter, r *http.Request, di
 	for _, dimension := range dimensions {
 		key := impactPriceDimensionKey(dimension)
 		if _, duplicate := seen[key]; duplicate {
-			writeImpactDownstreamFailure(w, r)
-			return ImpactPriceSummary{}, false
+			return ImpactPriceSummary{}, ErrImpactPricingUnavailable
 		}
 		seen[key] = struct{}{}
 		item, exists := byKey[key]
 		if !exists {
-			writeImpactDownstreamFailure(w, r)
-			return ImpactPriceSummary{}, false
+			return ImpactPriceSummary{}, ErrImpactPricingUnavailable
 		}
 		if item.Covered {
 			covered++
 		}
-		versions = append(versions, ImpactPriceEvidence{ModelID: dimension.ModelID, ProtocolCode: item.ProtocolCode, FormulaVersionID: item.FormulaVersionID, CreditUnit: item.CreditUnit, Covered: item.Covered, PriceVersionID: item.PriceVersionID, EffectiveFrom: item.EffectiveFrom, EffectiveTo: item.EffectiveTo})
+		versions = append(versions, ImpactPriceEvidence{ModelID: dimension.ModelID, ProtocolCode: item.ProtocolCode, FormulaVersionID: item.FormulaVersionID, CreditUnit: item.CreditUnit, Covered: item.Covered, PriceVersionID: item.PriceVersionID, PriceVersion: item.PriceVersion, EffectiveFrom: item.EffectiveFrom, EffectiveTo: item.EffectiveTo})
 	}
 	sort.Slice(versions, func(i, j int) bool { return versions[i].ModelID.String() < versions[j].ModelID.String() })
-	return ImpactPriceSummary{ModelsChecked: len(dimensions), ModelsCovered: covered, FullyCovered: covered == len(dimensions), Versions: versions, BillingObservedAt: coverage.AsOf.UTC()}, true
+	return ImpactPriceSummary{ModelsChecked: len(dimensions), ModelsCovered: covered, FullyCovered: covered == len(dimensions), Versions: versions, BillingObservedAt: coverage.AsOf.UTC(), FinancialFactRevision: coverage.FinancialFactRevision, PriceSetFingerprint: coverage.PriceSetFingerprint}, nil
+}
+
+func financialImpactSnapshot(price ImpactPriceSummary) map[string]any {
+	return map[string]any{
+		"billing_price_revision": price.FinancialFactRevision,
+		"price_set_fingerprint":  price.PriceSetFingerprint,
+		"models_checked":         price.ModelsChecked,
+		"models_covered":         price.ModelsCovered,
+		"fully_covered":          price.FullyCovered,
+		"billing_as_of":          price.BillingObservedAt.UTC(),
+	}
 }
 
 func impactPriceDimensionKey(item ImpactPriceQuery) string {
 	return item.ModelID.String() + "\x00" + strings.ToUpper(strings.TrimSpace(item.ProtocolCode)) + "\x00" + strings.ToUpper(strings.TrimSpace(item.CreditUnit))
+}
+
+func validImpactFingerprint(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func writeImpactDownstreamFailure(w http.ResponseWriter, r *http.Request) {
@@ -602,6 +670,22 @@ func (r *PostgresRepository) CatalogRollbackImpact(ctx context.Context, sourceVe
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
+	evidence.CatalogDiffFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(catalog_version,model_id,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available,replacement_model_id,new_session_cutoff_at,continuation_cutoff_at,force_cancel_inflight)::text FROM model_catalog_entries WHERE catalog_version=ANY($1::bigint[]) ORDER BY catalog_version,model_id`, []int64{sourceVersion, current})
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.RouteSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(route.id,route.model_id,route.protocol_version_id,route.route_version,route.route_generation,route.reference_status,route.health_status)::text FROM routing_policies route WHERE route.model_id=ANY($1::uuid[]) ORDER BY route.id`, ids)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.ProvisioningSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,protocol_version_id)::text FROM route_provisionings WHERE model_id=ANY($1::uuid[]) ORDER BY id`, ids)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.InflightSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,session_id,status,execution_status,execution_version)::text FROM usage_requests WHERE model_id=ANY($1::uuid[]) AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, ids)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
 	evidence.CurrentVersion.EvidenceETag = localImpactETag(evidence)
 	return evidence, commitReadOnly(ctx, tx)
 }
@@ -643,6 +727,18 @@ func modelImpactInTx(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replacem
 		return ImpactLocalEvidence{}, err
 	}
 	evidence.CurrentVersion.EvidenceSetSHA256, err = modelImpactKeySet(ctx, tx, modelID, upstream, replacementID)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.RouteSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,model_id,protocol_version_id,route_version,route_generation,reference_status,health_status)::text FROM routing_policies WHERE model_id=$1 OR model IN ($1::text,$2) ORDER BY id`, modelID, upstream)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.ProvisioningSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,protocol_version_id)::text FROM route_provisionings WHERE model_id=$1 ORDER BY id`, modelID)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	evidence.InflightSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,session_id,status,execution_status,execution_version)::text FROM usage_requests WHERE model_id=$1 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, modelID)
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
@@ -909,6 +1005,14 @@ func appendImpactKeyRowsIterator(ctx context.Context, digest hash.Hash, rows imp
 func writeImpactKey(digest hash.Hash, value string) {
 	_, _ = digest.Write([]byte(value))
 	_, _ = digest.Write([]byte{0})
+}
+
+func impactRowsFingerprint(ctx context.Context, tx pgx.Tx, query string, args ...any) (string, error) {
+	digest := sha256.New()
+	if err := appendImpactKeyRows(ctx, tx, digest, query, args...); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func modelImpactKeySet(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, upstream string, replacementID *uuid.UUID) (string, error) {

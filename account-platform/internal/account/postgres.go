@@ -23,6 +23,12 @@ type PostgresRepository struct {
 	walletProvisioningSLA  time.Duration
 	commerceProviderID     string
 	commerceAdapterVersion string
+	approvalSnapshots      ApprovalSnapshotSource
+	// tokenApprovalCreateGate is nil in every production constructor. APT-138
+	// owns the eventual activation source; the package integration gate injects
+	// an in-memory decision only to exercise the otherwise dormant transaction
+	// chain without changing PRE_ACTIVATION behavior.
+	tokenApprovalCreateGate func(string) bool
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {

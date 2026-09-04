@@ -46,8 +46,8 @@ func TestBillingImpactPriceCoveragePostgresIntegration(t *testing.T) {
 		models[index] = ImpactPriceQuery{ModelID: uuid.New(), ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT"}
 	}
 	started := time.Now()
-	coverage, asOf, err := repository.BatchCurrentPriceCoverage(ctx, models)
-	if err != nil || len(coverage) != 5000 || asOf.IsZero() || time.Since(started) > 5*time.Second {
+	coverage, asOf, revision, fingerprint, err := repository.BatchCurrentPriceCoverage(ctx, models)
+	if err != nil || len(coverage) != 5000 || asOf.IsZero() || revision < 1 || len(fingerprint) != 64 || time.Since(started) > 5*time.Second {
 		t.Fatalf("5000 batch count=%d as_of=%s duration=%s err=%v", len(coverage), asOf, time.Since(started), err)
 	}
 	for _, item := range coverage {
@@ -56,7 +56,7 @@ func TestBillingImpactPriceCoveragePostgresIntegration(t *testing.T) {
 		}
 	}
 	tooLarge := append(models, ImpactPriceQuery{ModelID: uuid.New(), ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT"})
-	if _, _, err := repository.BatchCurrentPriceCoverage(ctx, tooLarge); !errors.Is(err, ErrConflict) {
+	if _, _, _, _, err := repository.BatchCurrentPriceCoverage(ctx, tooLarge); !errors.Is(err, ErrConflict) {
 		t.Fatalf("5001 err=%v", err)
 	}
 
@@ -77,10 +77,78 @@ func TestBillingImpactPriceCoveragePostgresIntegration(t *testing.T) {
 	}
 	insertModelPrice(firstID)
 	query := []ImpactPriceQuery{{ModelID: modelID, ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT"}}
-	modelCoverage, _, err := repository.BatchCurrentPriceCoverage(ctx, query)
+	modelCoverage, _, beforeRevision, beforeFingerprint, err := repository.BatchCurrentPriceCoverage(ctx, query)
 	if err != nil || len(modelCoverage) != 1 || !modelCoverage[0].Covered || modelCoverage[0].PriceVersionID == nil || *modelCoverage[0].PriceVersionID != firstID {
 		t.Fatalf("model inheritance=%+v err=%v", modelCoverage, err)
 	}
+	// A non-selected, non-maximum pricing-space fact still belongs to the
+	// authoritative related fact set and must invalidate a frozen snapshot.
+	nonMaximumID := uuid.New()
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at,scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status,version,space_etag) VALUES($1,$2,3,3,3,transaction_timestamp()+interval '1 day',transaction_timestamp(),'MODEL',$2,'CHAT',$3,'MICROCREDIT','DRAFT',1,1)`, nonMaximumID, modelID.String(), formulaID); err != nil {
+		t.Fatal(err)
+	}
+	_, _, afterRevision, afterFingerprint, err := repository.BatchCurrentPriceCoverage(ctx, query)
+	if err != nil || afterRevision <= beforeRevision || afterFingerprint == beforeFingerprint {
+		t.Fatalf("non-maximum drift revision=%d->%d fingerprint=%s->%s err=%v", beforeRevision, afterRevision, beforeFingerprint, afterFingerprint, err)
+	}
+	assertRelevantDrift := func(name string, previousRevision int64, previousFingerprint string) (int64, string) {
+		t.Helper()
+		_, _, revision, fingerprint, err := repository.BatchCurrentPriceCoverage(ctx, query)
+		if err != nil || revision <= previousRevision || fingerprint == previousFingerprint {
+			t.Fatalf("%s drift revision=%d->%d fingerprint=%s->%s err=%v", name, previousRevision, revision, previousFingerprint, fingerprint, err)
+		}
+		return revision, fingerprint
+	}
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO pricing_version_unit_configs(price_version_id,unit_definition_id,config_type,created_at) VALUES($1,$2,'INHERIT_GLOBAL',transaction_timestamp())`, nonMaximumID, unitIDs[0]); err != nil {
+		t.Fatal(err)
+	}
+	afterRevision, afterFingerprint = assertRelevantDrift("unit config", afterRevision, afterFingerprint)
+	extraUnitID, extraFormulaID := uuid.New(), uuid.New()
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO metering_unit_definitions(id,unit_code,version,minimum_precision,price_denominator,rounding_rule,status,created_at) VALUES($1,'REQUEST',91,1,1,'CEILING','ACTIVE',transaction_timestamp())`, extraUnitID); err != nil {
+		t.Fatal(err)
+	}
+	_, _, unrelatedRevision, unrelatedFingerprint, err := repository.BatchCurrentPriceCoverage(ctx, query)
+	if err != nil || unrelatedRevision <= afterRevision || unrelatedFingerprint != afterFingerprint {
+		t.Fatalf("unbound unit must advance global revision without entering related fingerprint: revision=%d->%d fingerprint=%s->%s err=%v", afterRevision, unrelatedRevision, afterFingerprint, unrelatedFingerprint, err)
+	}
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO billing_protocol_formula_bindings(formula_version_id,protocol_code,required_unit_definition_ids,formula_snapshot,published_at) VALUES($1,'CHAT',$2,'{"evaluator_version":"SAFE_PARAMETER_MAP_V1","expression":{"REQUEST":"request_count"}}',transaction_timestamp())`, extraFormulaID, []uuid.UUID{extraUnitID}); err != nil {
+		t.Fatal(err)
+	}
+	afterRevision, afterFingerprint = assertRelevantDrift("formula binding", unrelatedRevision, unrelatedFingerprint)
+	if _, err := repository.pool.Exec(ctx, `UPDATE metering_unit_definitions SET status='INACTIVE',deactivated_at=transaction_timestamp() WHERE id=$1`, extraUnitID); err != nil {
+		t.Fatal(err)
+	}
+	afterRevision, afterFingerprint = assertRelevantDrift("bound unit status", afterRevision, afterFingerprint)
+	var relevantPriceCount int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM pricing_versions WHERE protocol_code='CHAT' AND credit_unit='MICROCREDIT' AND (scope_type='GLOBAL' OR scope_type='MODEL' AND scope_id=$1)`, modelID.String()).Scan(&relevantPriceCount); err != nil {
+		t.Fatal(err)
+	}
+	replacementID := uuid.New()
+	replacementTx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = replacementTx.Exec(ctx, `DELETE FROM pricing_version_unit_configs WHERE price_version_id=$1`, nonMaximumID); err == nil {
+		_, err = replacementTx.Exec(ctx, `DELETE FROM pricing_versions WHERE id=$1`, nonMaximumID)
+	}
+	if err == nil {
+		_, err = replacementTx.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,effective_to,created_at,scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status,version,space_etag) VALUES($1,$2,9,9,9,transaction_timestamp()+interval '2 days',transaction_timestamp()+interval '3 days',transaction_timestamp(),'MODEL',$2,'CHAT',$3,'MICROCREDIT','DRAFT',1,1)`, replacementID, modelID.String(), formulaID)
+	}
+	if err == nil {
+		_, err = replacementTx.Exec(ctx, `INSERT INTO pricing_version_unit_configs(price_version_id,unit_definition_id,config_type,created_at) VALUES($1,$2,'INHERIT_GLOBAL',transaction_timestamp())`, replacementID, unitIDs[0])
+	}
+	if err != nil {
+		_ = replacementTx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := replacementTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var replacementCount int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM pricing_versions WHERE protocol_code='CHAT' AND credit_unit='MICROCREDIT' AND (scope_type='GLOBAL' OR scope_type='MODEL' AND scope_id=$1)`, modelID.String()).Scan(&replacementCount); err != nil || replacementCount != relevantPriceCount {
+		t.Fatalf("equal-count replacement changed price count=%d want=%d err=%v", replacementCount, relevantPriceCount, err)
+	}
+	afterRevision, afterFingerprint = assertRelevantDrift("equal-count effective-window replacement", afterRevision, afterFingerprint)
 	secondGlobalID := uuid.New()
 	if _, err := repository.pool.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at,scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status,version,space_etag) VALUES($1,'*',1,1,1,transaction_timestamp()-interval '30 minutes',transaction_timestamp()-interval '30 minutes','GLOBAL',NULL,'CHAT',$2,'MICROCREDIT','DRAFT',2,2)`, secondGlobalID, formulaID); err != nil {
 		t.Fatal(err)
@@ -93,14 +161,14 @@ func TestBillingImpactPriceCoveragePostgresIntegration(t *testing.T) {
 	if _, err := repository.pool.Exec(ctx, `UPDATE pricing_versions SET lifecycle_status='PUBLISHED',published_at=transaction_timestamp() WHERE id=$1`, secondGlobalID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := repository.BatchCurrentPriceCoverage(ctx, query); !errors.Is(err, ErrPriceAmbiguous) {
+	if _, _, _, _, err := repository.BatchCurrentPriceCoverage(ctx, query); !errors.Is(err, ErrPriceAmbiguous) {
 		t.Fatalf("multiple inherited GLOBAL prices err=%v", err)
 	}
 	if _, err := repository.pool.Exec(ctx, `UPDATE pricing_versions SET lifecycle_status='ENDED',ended_at=transaction_timestamp() WHERE id=$1`, secondGlobalID); err != nil {
 		t.Fatal(err)
 	}
 	insertModelPrice(secondID)
-	if _, _, err := repository.BatchCurrentPriceCoverage(ctx, query); !errors.Is(err, ErrPriceAmbiguous) {
+	if _, _, _, _, err := repository.BatchCurrentPriceCoverage(ctx, query); !errors.Is(err, ErrPriceAmbiguous) {
 		t.Fatalf("ambiguous err=%v", err)
 	}
 
@@ -113,7 +181,7 @@ func TestBillingImpactPriceCoveragePostgresIntegration(t *testing.T) {
 	}
 	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer timeoutCancel()
-	_, _, timeoutErr := repository.BatchCurrentPriceCoverage(timeoutCtx, query)
+	_, _, _, _, timeoutErr := repository.BatchCurrentPriceCoverage(timeoutCtx, query)
 	_ = lockTx.Rollback(ctx)
 	if !errors.Is(timeoutErr, context.DeadlineExceeded) {
 		t.Fatalf("deadline err=%v", timeoutErr)

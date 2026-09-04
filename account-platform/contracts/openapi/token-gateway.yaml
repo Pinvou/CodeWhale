@@ -10,6 +10,24 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/approval-command-prechecks:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: precheckTokenApprovalCommandInternal
+      summary: Recompute the authoritative Token and Billing snapshots for Account approval CAS
+      description: Read-only and fail-closed. This contract does not activate or execute Token governance commands.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalSnapshotRequest" }
+      responses:
+        "200": { description: Authoritative frozen snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalSnapshotProjection" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/commands/model-lifecycle/execute:
     post:
       servers: [{ url: / }]
@@ -755,6 +773,109 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    ApprovalSnapshotRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [command_type, target_resource_type, target_resource_id, normalized_command]
+          properties:
+            command_type: { type: string, const: TOKEN_MODEL_LIFECYCLE_CHANGE }
+            target_resource_type: { type: string, const: MODEL }
+            target_resource_id: { type: string, format: uuid }
+            normalized_command:
+              type: object
+              additionalProperties: false
+              required: [model_id, target_lifecycle, effective_at, existing_session_cutoff_at, replacement_model_id]
+              properties:
+                model_id: { type: string, format: uuid }
+                target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
+                effective_at: { type: string, format: date-time }
+                existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+                replacement_model_id: { type: [string, "null"], format: uuid }
+        - type: object
+          additionalProperties: false
+          required: [command_type, target_resource_type, target_resource_id, normalized_command]
+          properties:
+            command_type: { type: string, const: TOKEN_MODEL_CATALOG_ROLLBACK }
+            target_resource_type: { type: string, const: MODEL_CATALOG }
+            target_resource_id: { type: string, pattern: '^[1-9][0-9]{0,18}$' }
+            normalized_command:
+              type: object
+              additionalProperties: false
+              required: [source_catalog_version]
+              properties:
+                source_catalog_version: { type: integer, format: int64, minimum: 1 }
+    TokenFinancialSnapshot:
+      type: object
+      additionalProperties: false
+      required: [billing_price_revision, price_set_fingerprint, models_checked, models_covered, fully_covered, billing_as_of]
+      properties:
+        billing_price_revision: { type: integer, format: int64, minimum: 1 }
+        price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        models_checked: { type: integer, minimum: 1 }
+        models_covered: { type: integer, minimum: 0 }
+        fully_covered: { type: boolean, const: true }
+        billing_as_of: { type: string, format: date-time }
+    ModelLifecycleCriticalResourceVersions:
+      type: object
+      additionalProperties: false
+      required: [model_id, catalog_version, current_lifecycle, target_lifecycle, lifecycle_plan_version, effective_at, existing_session_cutoff_at, replacement_model_id, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+      properties:
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        current_lifecycle: { type: string, enum: [PUBLISHED, DEPRECATED] }
+        target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
+        lifecycle_plan_version: { type: integer, const: 0 }
+        effective_at: { type: string, format: date-time }
+        existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+        replacement_model_id: { type: [string, "null"], format: uuid }
+        billing_price_version: { type: integer, format: int64, minimum: 1 }
+        route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, const: 2 }
+    CatalogRollbackCriticalResourceVersions:
+      type: object
+      additionalProperties: false
+      required: [current_catalog_version, source_catalog_version, catalog_diff_fingerprint, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+      properties:
+        current_catalog_version: { type: integer, format: int64, minimum: 1 }
+        source_catalog_version: { type: integer, format: int64, minimum: 1 }
+        catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        billing_price_version: { type: integer, format: int64, minimum: 1 }
+        route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, const: 2 }
+    ApprovalSnapshotProjection:
+      type: object
+      additionalProperties: false
+      required: [command_type, target_resource_type, target_resource_id, critical_resource_versions, financial_snapshot, precheck_fingerprint, token_observed_at, billing_observed_at]
+      properties:
+        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK] }
+        target_resource_type: { type: string, enum: [MODEL, MODEL_CATALOG] }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        critical_resource_versions:
+          oneOf:
+            - { $ref: "#/components/schemas/ModelLifecycleCriticalResourceVersions" }
+            - { $ref: "#/components/schemas/CatalogRollbackCriticalResourceVersions" }
+        financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        token_observed_at: { type: string, format: date-time }
+        billing_observed_at: { type: string, format: date-time }
+      allOf:
+        - if: { properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: MODEL }
+              target_resource_id: { type: string, format: uuid }
+              critical_resource_versions: { $ref: "#/components/schemas/ModelLifecycleCriticalResourceVersions" }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: MODEL_CATALOG }
+              target_resource_id: { type: string, pattern: '^[1-9][0-9]{0,18}$' }
+              critical_resource_versions: { $ref: "#/components/schemas/CatalogRollbackCriticalResourceVersions" }
     GovernedTokenCommandEnvelope:
       type: object
       additionalProperties: false
