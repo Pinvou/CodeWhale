@@ -3762,7 +3762,8 @@ impl Engine {
                         let started_at = Instant::now();
                         let shell_permits = shell_permits.clone();
                         let workspace = self.session.workspace.clone();
-                        let context_override = batch_tool_context.clone();
+                        let context_override =
+                            tool_context_for_call(batch_tool_context.clone(), &plan.id);
                         let cancel_token = self.cancel_token.clone();
                         let turn_tool_security = self.active_turn_tool_security.clone();
                         let restricted_audit = turn_tool_security.is_some();
@@ -3954,7 +3955,7 @@ impl Engine {
                                     tool_input.clone(),
                                     tool_registry,
                                     tool_exec_lock.clone(),
-                                    batch_tool_context.clone(),
+                                    tool_context_for_call(batch_tool_context.clone(), &tool_id),
                                 ) => ToolExecutionOutcome::from_legacy(result),
                             };
                             let result = terminal.legacy_result();
@@ -4252,7 +4253,10 @@ impl Engine {
                                     self.session.workspace.clone(),
                                     tool_registry,
                                     mcp_pool.clone(),
-                                    context_override.or_else(|| batch_tool_context.clone()),
+                                    tool_context_for_call(
+                                        context_override.or_else(|| batch_tool_context.clone()),
+                                        &tool_id,
+                                    ),
                                     self.active_turn_tool_security.clone(),
                                 ) => (result, false),
                             }
@@ -4982,6 +4986,13 @@ pub(super) fn production_input_estimate_with_work_tail(
         std::slice::from_ref(tail),
         None,
     ))
+}
+
+fn tool_context_for_call(
+    context: Option<crate::tools::ToolContext>,
+    tool_call_id: &str,
+) -> Option<crate::tools::ToolContext> {
+    context.map(|context| context.with_origin_tool_call_id(tool_call_id))
 }
 
 pub(super) fn shell_completion_status_text(
@@ -5811,6 +5822,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn forkguard_tool_context_for_call_preserves_turn_and_sets_call_origin() {
+        let context = crate::tools::ToolContext::new(".").with_foreground_turn_id("turn-origin");
+
+        let context = tool_context_for_call(Some(context), "tool-origin")
+            .expect("tool context remains available");
+
+        assert_eq!(context.origin_turn_id.as_deref(), Some("turn-origin"));
+        assert_eq!(context.origin_tool_call_id.as_deref(), Some("tool-origin"));
+        assert!(tool_context_for_call(None, "tool-origin").is_none());
+    }
+
+    #[test]
     fn subagent_completion_handoff_is_internal_user_message() {
         let message = subagent_completion_runtime_message(
             "Build passed\n<codewhale:subagent.done>{\"agent_id\":\"agent_a\"}</codewhale:subagent.done>",
@@ -5848,6 +5871,8 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                origin_tool_call_id: Some("tool_abc".to_string()),
+                origin_turn_id: Some("turn_abc".to_string()),
             }],
             "",
         )
@@ -5871,6 +5896,8 @@ mod tests {
                 linked_task_id: Some("task_1".to_string()),
                 owner_agent_id: Some("agent_verifier".to_string()),
                 owner_agent_name: Some("verifier".to_string()),
+                origin_tool_call_id: Some("tool_abc".to_string()),
+                origin_turn_id: Some("turn_abc".to_string()),
             },
         ]);
         let text = match &message.content[0] {
@@ -5887,6 +5914,8 @@ mod tests {
         assert!(text.contains("art_shell_abc"));
         assert!(text.contains("cargo test -p codewhale-tui"));
         assert!(text.contains("test failed"));
+        assert!(text.contains(r#""origin_tool_call_id":"tool_abc""#));
+        assert!(text.contains(r#""origin_turn_id":"turn_abc""#));
     }
 
     #[test]

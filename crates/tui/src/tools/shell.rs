@@ -166,6 +166,10 @@ pub struct ShellJobSnapshot {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_turn_id: Option<String>,
 }
 
 /// Once-only completion event for a tracked background shell job.
@@ -189,6 +193,10 @@ pub struct ShellCompletionEvent {
     pub owner_agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_turn_id: Option<String>,
 }
 
 /// Exact byte evidence captured alongside a bounded completion event.
@@ -225,6 +233,8 @@ impl ShellCompletionEvidence {
             "status": format!("{:?}", self.event.status),
             "exit_code": self.event.exit_code,
             "duration_ms": self.event.duration_ms,
+            "origin_tool_call_id": self.event.origin_tool_call_id,
+            "origin_turn_id": self.event.origin_turn_id,
             "stdout": stream(&self.stdout),
             "stderr": stream(&self.stderr),
         })
@@ -748,6 +758,8 @@ pub struct BackgroundShell {
     pub sandbox_type: SandboxType,
     pub linked_task_id: Option<String>,
     pub owner_agent: Option<ShellJobOwner>,
+    origin_tool_call_id: Option<String>,
+    origin_turn_id: Option<String>,
     stdout_buffer: Arc<Mutex<Vec<u8>>>,
     stderr_buffer: Option<Arc<Mutex<Vec<u8>>>>,
     heavy_permit: Option<HeavyCommandPermit>,
@@ -839,6 +851,8 @@ struct ShellSpawnIntentGuard {
 struct ShellSpawnContext {
     owner_agent: Option<ShellJobOwner>,
     work_lifecycle: Option<ShellWorkLifecycle>,
+    origin_tool_call_id: Option<String>,
+    origin_turn_id: Option<String>,
 }
 
 impl ShellSpawnIntentGuard {
@@ -1194,6 +1208,8 @@ impl BackgroundShell {
                 .owner_agent
                 .as_ref()
                 .map(|owner| owner.agent_name.clone()),
+            origin_tool_call_id: self.origin_tool_call_id.clone(),
+            origin_turn_id: self.origin_turn_id.clone(),
         }
     }
 
@@ -1224,6 +1240,8 @@ impl BackgroundShell {
                 .owner_agent
                 .as_ref()
                 .map(|owner| owner.agent_name.clone()),
+            origin_tool_call_id: self.origin_tool_call_id.clone(),
+            origin_turn_id: self.origin_turn_id.clone(),
         }
     }
 
@@ -1551,6 +1569,8 @@ impl ShellManager {
             owner_agent,
             None,
             None,
+            None,
+            None,
         )
     }
 
@@ -1569,6 +1589,8 @@ impl ShellManager {
         owner_agent: Option<ShellJobOwner>,
         work_lifecycle: Option<ShellWorkLifecycle>,
         readonly_workspace: Option<&std::path::Path>,
+        origin_tool_call_id: Option<String>,
+        origin_turn_id: Option<String>,
     ) -> Result<ShellResult> {
         // Log execution via ShellDispatcher when SHELL_DISPATCHER_LOG is set.
         crate::shell_dispatcher::ShellDispatcher::log_exec(command);
@@ -1611,6 +1633,8 @@ impl ShellManager {
                 ShellSpawnContext {
                     owner_agent,
                     work_lifecycle,
+                    origin_tool_call_id,
+                    origin_turn_id,
                 },
             )
         } else {
@@ -1979,6 +2003,8 @@ impl ShellManager {
         let ShellSpawnContext {
             owner_agent,
             work_lifecycle,
+            origin_tool_call_id,
+            origin_turn_id,
         } = spawn_context;
         let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
         let mut spawn_guard =
@@ -2147,6 +2173,8 @@ impl ShellManager {
             sandbox_type,
             linked_task_id: None,
             owner_agent,
+            origin_tool_call_id,
+            origin_turn_id,
             stdout_buffer,
             stderr_buffer,
             heavy_permit,
@@ -2561,6 +2589,8 @@ impl ShellManager {
                 linked_task_id,
                 owner_agent_id: None,
                 owner_agent_name: None,
+                origin_tool_call_id: None,
+                origin_turn_id: None,
             },
         );
     }
@@ -3247,6 +3277,8 @@ async fn execute_foreground_via_background(
             owner,
             lifecycle,
             direct_argv.then_some(context.workspace.as_path()),
+            context.origin_tool_call_id.clone(),
+            context.origin_turn_id.clone(),
         )?
     };
     let task_id = spawned
@@ -3956,6 +3988,8 @@ impl ToolSpec for BashTool {
                 shell_job_owner_from_context(context),
                 shell_work_lifecycle_from_context(context),
                 None,
+                context.origin_tool_call_id.clone(),
+                context.origin_turn_id.clone(),
             );
             if let (Ok(result), Some(permit)) = (&result, heavy_permit)
                 && let Some(task_id) = result.task_id.as_deref()

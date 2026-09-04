@@ -540,6 +540,11 @@ pub struct ToolExecutionState {
     /// jobs can be attributed in UI surfaces.
     pub owner_agent_id: Option<String>,
     pub owner_agent_name: Option<String>,
+    /// Tool call and engine turn that created work through this context.
+    /// Long-running tools preserve these stable identities so hosts can
+    /// reconcile later snapshots with the originating transcript position.
+    pub(crate) origin_tool_call_id: Option<String>,
+    pub(crate) origin_turn_id: Option<String>,
     /// Engine turn that owns foreground shell waits created from this
     /// context. Detached/background work clears this identity and survives
     /// turn cancellation.
@@ -703,6 +708,8 @@ impl ToolContext {
                 file_read_tracker: new_shared_file_read_tracker(),
                 owner_agent_id: None,
                 owner_agent_name: None,
+                origin_tool_call_id: None,
+                origin_turn_id: None,
                 foreground_turn_id: None,
                 tool_authority,
                 trust_mode,
@@ -769,7 +776,16 @@ impl ToolContext {
     /// Bind foreground shell waits to the engine turn that created them.
     #[must_use]
     pub(crate) fn with_foreground_turn_id(mut self, turn_id: impl Into<String>) -> Self {
-        self.foreground_turn_id = Some(turn_id.into());
+        let turn_id = turn_id.into();
+        self.foreground_turn_id = Some(turn_id.clone());
+        self.origin_turn_id = Some(turn_id);
+        self
+    }
+
+    /// Bind long-running work to the tool call that created it.
+    #[must_use]
+    pub(crate) fn with_origin_tool_call_id(mut self, tool_call_id: impl Into<String>) -> Self {
+        self.origin_tool_call_id = Some(tool_call_id.into());
         self
     }
 

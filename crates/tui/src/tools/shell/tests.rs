@@ -907,9 +907,12 @@ async fn background_start_advertises_task_status_completion() {
 }
 
 #[tokio::test]
-async fn background_shell_job_carries_subagent_owner() {
+async fn forkguard_background_shell_job_preserves_origin_identity() {
     let tmp = tempdir().expect("tempdir");
-    let ctx = ToolContext::new(tmp.path()).with_owner_agent("agent_owner", "verifier");
+    let ctx = ToolContext::new(tmp.path())
+        .with_foreground_turn_id("turn-origin")
+        .with_origin_tool_call_id("tool-origin")
+        .with_owner_agent("agent_owner", "verifier");
     let result = BashTool::new("Bash")
         .execute(
             json!({"command": sleep_command(2), "background": true}),
@@ -942,6 +945,16 @@ async fn background_shell_job_carries_subagent_owner() {
             .expect("owned shell job snapshot");
         assert_eq!(snapshot.owner_agent_id.as_deref(), Some("agent_owner"));
         assert_eq!(snapshot.owner_agent_name.as_deref(), Some("verifier"));
+        assert_eq!(snapshot.origin_tool_call_id.as_deref(), Some("tool-origin"));
+        assert_eq!(snapshot.origin_turn_id.as_deref(), Some("turn-origin"));
+        let mut legacy_json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let legacy_object = legacy_json.as_object_mut().expect("snapshot object");
+        legacy_object.remove("origin_tool_call_id");
+        legacy_object.remove("origin_turn_id");
+        let legacy_snapshot: ShellJobSnapshot =
+            serde_json::from_value(legacy_json).expect("deserialize legacy snapshot");
+        assert_eq!(legacy_snapshot.origin_tool_call_id, None);
+        assert_eq!(legacy_snapshot.origin_turn_id, None);
         let owners = manager.running_owner_agent_ids();
         assert_eq!(owners, vec!["agent_owner".to_string()]);
     }
@@ -955,7 +968,9 @@ async fn background_shell_job_carries_subagent_owner() {
 #[tokio::test]
 async fn drain_finished_jobs_reports_once() {
     let tmp = tempdir().expect("tempdir");
-    let ctx = ToolContext::new(tmp.path());
+    let ctx = ToolContext::new(tmp.path())
+        .with_foreground_turn_id("turn-origin")
+        .with_origin_tool_call_id("tool-origin");
     let result = BashTool::new("Bash")
         .execute(
             json!({"command": echo_command("drain-finished-once"), "background": true}),
@@ -990,6 +1005,16 @@ async fn drain_finished_jobs_reports_once() {
     assert_eq!(first[0].task_id, task_id);
     assert_eq!(first[0].status, ShellStatus::Completed);
     assert!(first[0].stdout_tail.contains("drain-finished-once"));
+    assert_eq!(first[0].origin_tool_call_id.as_deref(), Some("tool-origin"));
+    assert_eq!(first[0].origin_turn_id.as_deref(), Some("turn-origin"));
+    let mut legacy_json = serde_json::to_value(&first[0]).expect("serialize completion");
+    let legacy_object = legacy_json.as_object_mut().expect("completion object");
+    legacy_object.remove("origin_tool_call_id");
+    legacy_object.remove("origin_turn_id");
+    let legacy_completion: ShellCompletionEvent =
+        serde_json::from_value(legacy_json).expect("deserialize legacy completion");
+    assert_eq!(legacy_completion.origin_tool_call_id, None);
+    assert_eq!(legacy_completion.origin_turn_id, None);
 
     let second = manager.drain_finished_jobs_with_evidence();
     assert!(second.is_empty(), "completion should be reported only once");
@@ -1017,6 +1042,8 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: Some("tool-origin".to_string()),
+            origin_turn_id: Some("turn-origin".to_string()),
         },
         stdout: stdout.clone(),
         stderr: stderr.clone(),
@@ -1026,6 +1053,8 @@ fn completion_evidence_preserves_arbitrary_stream_bytes() {
         serde_json::from_slice(&evidence.artifact_bytes()).expect("evidence JSON");
     assert_eq!(payload["stdout"]["encoding"], "base64");
     assert_eq!(payload["stderr"]["encoding"], "base64");
+    assert_eq!(payload["origin_tool_call_id"], "tool-origin");
+    assert_eq!(payload["origin_turn_id"], "turn-origin");
     let decoded_stdout = base64::engine::general_purpose::STANDARD
         .decode(payload["stdout"]["content"].as_str().expect("stdout data"))
         .expect("decode stdout");
@@ -1254,6 +1283,8 @@ fn completed_shell_with_reader(
         sandbox_type: SandboxType::None,
         linked_task_id: None,
         owner_agent: None,
+        origin_tool_call_id: None,
+        origin_turn_id: None,
         stdout_buffer: std::sync::Arc::clone(&stdout_buffer),
         stderr_buffer: None,
         heavy_permit: None,
@@ -2703,6 +2734,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         sandbox_type: SandboxType::None,
         linked_task_id: None,
         owner_agent: None,
+        origin_tool_call_id: None,
+        origin_turn_id: None,
         stdout_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         stderr_buffer: None,
         heavy_permit: None,
