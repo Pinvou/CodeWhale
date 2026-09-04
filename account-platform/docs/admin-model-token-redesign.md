@@ -28,7 +28,7 @@
 
 “模型目录”负责同步目录、差异预览、草稿编辑、发布、计划弃用、下架和回滚；“协议与公式”补齐现有后台接口对应的界面；模型详情在二期成为独立主内容页。
 
-标准闭环为：同步目录 → 查看新增/变化/缺失差异 → 编辑草稿 → 校验协议、公式、有效价格及 READY 路由 → 发布 → 监控 → 计划弃用 → 下架或前向回滚。发布、弃用、下架和回滚都先展示价格、路由、Provisioning、进行中请求、新会话/存量会话截止及替代模型影响，提交时重新预检。
+标准闭环为：同步目录 → 查看新增/变化/缺失差异 → 编辑草稿 → 校验协议、公式、有效价格及 READY 路由 → 发布 → 监控 → 计划弃用 → 下架或前向回滚。发布、弃用、下架和回滚都先展示价格、路由、Provisioning、进行中请求、新会话/存量会话截止及替代模型影响，提交时重新预检。未来发布仍属于既有 `TOKEN_MODEL_PUBLISH / AUDIT_ONLY`：计划必须冻结与即时发布相同的草稿版本、草稿内容、基础目录、协议、能力、别名、价格与路由证据，通过受治理命令后才进入 `SCHEDULED`，到期 worker 复用即时发布的单一领域效果；只有弃用和下架使用 `TOKEN_MODEL_LIFECYCLE_CHANGE / APPROVAL_REQUIRED`，进入 Account 申请、独立审批、授权事件与执行租约链。
 
 模型详情唯一页签结构为“概览 / 能力、协议与公式 / 路由与运行 / 价格与计量 / 生命周期与依赖 / 审计”。“能力、协议与公式”同时呈现当前不可变能力版本、协议版本及安全计量公式，不另设重复协议页签；“生命周期与依赖”统一承载目录版本差异、价格/路由/Provisioning/进行中请求依赖和计划生效，不把同一依赖拆到概览。价格页签消费 Billing 权威投影；没有 `platform.pricing.read` 时不请求、不渲染，编辑入口还要求 `platform.pricing.manage`，并复用财务定价组件和 Billing 命令合同。审计页签额外要求 `platform.audit.read`。
 
@@ -263,7 +263,7 @@ Cache-Control: no-store
 | `TOKEN_FORMULA_DRAFT_CREATE` | `platform.pricing.manage` | `AUDIT_ONLY` | 否 | 必填 | `expected_protocol_version` + `expected_formula_head_version`（首次 0） | 必填 | 计量单位版本、协议参数映射 | 通用审计 + 草稿版本 | 命令结果查询；不得重复创建 |
 | `TOKEN_FORMULA_PUBLISH` | `platform.pricing.manage` | `AUDIT_ONLY` | 15m | 必填 | `expected_formula_version` + 草稿 ETag | 必填 | 确定性预览、单位版本、Billing 同步可用性 | 通用审计 + Token/Billing 同步摘要 | 命令结果查询；同步不确定时按同一命令收敛 |
 | `TOKEN_MODEL_DRAFT_SAVE` | `platform.models.manage` | `AUDIT_ONLY` | 否 | 必填 | `expected_catalog_version` + `expected_draft_version` | 必填 | 协议/公式存在及字段有效性 | 通用审计 + 草稿差异 | 命令结果查询或刷新草稿；冲突不自动覆盖 |
-| `TOKEN_MODEL_PUBLISH` | `platform.models.manage` | `AUDIT_ONLY` | 15m | 必填 | `expected_catalog_version` + `expected_draft_version` | 必填 | 协议/公式、有效价格、READY 路由覆盖 | 通用审计 + 新目录版本 | 命令结果查询并读取目标目录版本 |
+| `TOKEN_MODEL_PUBLISH` | `platform.models.manage` | `AUDIT_ONLY` | 15m | 必填 | `expected_catalog_version` + `expected_draft_version` | 必填 | 协议/公式、有效价格、READY 路由覆盖 | 通用审计；即时模式产生新目录版本，计划模式原子产生 `SCHEDULED` 计划 | 命令结果查询；即时模式读取目标目录版本，计划模式读取计划且到期前不得宣称目录版本 |
 | `TOKEN_MODEL_LIFECYCLE_CHANGE` | `platform.models.lifecycle.request` | `APPROVAL_REQUIRED` | 15m | 必填 | `expected_catalog_version` + 生命周期计划版本 | 必填 | 价格、路由、Provisioning、在途请求、会话截止、替代模型 | 申请、批准、执行及生命周期审计 | 查询审批/执行和新目录版本；不得重提或 force |
 | `TOKEN_MODEL_CATALOG_SYNC` | `platform.models.sync` | `AUDIT_ONLY` | 否 | 必填 | `expected_catalog_version` + Adapter 观察版本 | 必填 | 只读差异预览及连续缺失证据 | 通用审计 + 同步差异摘要 | 命令结果查询；未知时不得启动第二次同步 |
 | `TOKEN_MODEL_CATALOG_ROLLBACK` | `platform.models.catalog.rollback.request` | `APPROVAL_REQUIRED` | 15m | 必填 | `source_catalog_version` + `expected_catalog_version` | 必填 | 全量目录差异、价格、路由、Provisioning、在途请求 | 申请、批准、执行及新目录版本审计 | 查询审批/执行和前向回滚版本；不执行破坏性回退 |
@@ -279,6 +279,12 @@ Cache-Control: no-store
 | `TOKEN_USAGE_RECONCILIATION_RETRY` | `platform.usage.reconcile.retry` | `AUDIT_ONLY` | 否 | 必填 | `expected_usage_version` + 证据高水位 | 必填 | 仅待结算/复核状态、客户扣款禁止及当前证据 | 通用审计 + 证据高水位 | 按同一幂等键查询；只核对既有证据，绝不重发模型请求 |
 
 `TOKEN_MODEL_LIFECYCLE_CHANGE`、`TOKEN_MODEL_CATALOG_ROLLBACK` 和 `TOKEN_CREDENTIAL_REVOKE` 是 ADM-38“治理命令通常只审计”的明确高风险例外。普通发布、创建、修复和核对为 `AUDIT_ONLY` 不表示低风险或可跳过预检。组织业务模型策略的 `TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE` 属于组织权限域，不进入本平台真实 Token 资源矩阵。
+
+`TOKEN_MODEL_PUBLISH` 的受治理 canonical command 使用闭合 `publish_mode` discriminator，且不因模式改变治理分类：
+
+- `IMMEDIATE`：`{model_id, publish_mode:"IMMEDIATE"}`；既有公开即时发布请求由 Token 边界规范化成该形式。成功结果只在同一事务完成真实草稿发布后返回新 `catalog_version`。
+- `SCHEDULED`：`{model_id, publish_mode:"SCHEDULED", lifecycle_plan_id, lifecycle_plan_version, effective_at}`；`effective_at` 是数据库权威绝对时间且满足最小窗口。`expected_versions` 必须原样冻结 APT-124 发布预检的 `model_id`、`expected_catalog_version`、`expected_draft_version`、`draft_fingerprint`、`protocol_definition_id`、`protocol_version`、稳定路由数量/固定全序指纹、Provisioning 数量/READY 数量/固定全序指纹、`financial_fact_revision` 与 `price_set_fingerprint`；`draft_fingerprint` 覆盖基础目录版本、完整草稿内容、能力与别名，不能只冻结计数。命令持久化、通用结果与 `SCHEDULED` 计划行必须位于同一 Token 事务，成功投影闭合返回 `command_reference`、`command_type`、`lifecycle_plan_id`、`lifecycle_plan_version`、`status:SCHEDULED`、`effective_at`，此时不得返回或暗示新目录版本。
+- 计划结果不确定时只能按同一 actor、command type、幂等摘要和 `command_reference` GET 恢复；无引用、404、无权、超时或网络失败均保持 `UNKNOWN` 且禁止用新键重建。明确零写错误才允许按原键恢复或按修改后的 payload 使用新键。取消使用独立幂等/CAS 将尚未执行计划置为 `CANCELLED`；到期 worker 重新逐字段校验冻结草稿与依赖，复用即时发布的目录锁、基础目录/协议/能力/别名校验、前向目录复制、草稿删除、审计/outbox 单一领域效果，成功后才产生并返回 `result_catalog_version`。草稿或依赖漂移置为 `INVALIDATED` 并保持目录零写；worker 租约过期可接管但不能重复发布。
 
 ### 7.3 三个强制审批命令的正式策略
 
