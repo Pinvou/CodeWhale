@@ -149,13 +149,14 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
   assert.equal("failure_rate_7d" in list[0], false);
 });
 
-test("device dashboard selects release generations for unrelated legacy and behavior identities", () => {
+test("device dashboard conservatively merges usage and core behavior without replacing hardware inventory", () => {
   const now = at("2026-09-04T12:00:00");
   const devices = [
     {
       device_id: "dev_legacy",
       first_seen_at: at("2026-09-01T08:00:00"),
-      last_seen_at: now - 30_000,
+      last_seen_at: now - 360_000,
+      last_active_at: at("2026-09-03T09:00:00"),
       app_version: "0.8.3",
       hardware_source: "windows_cim_uuid",
     },
@@ -163,6 +164,7 @@ test("device dashboard selects release generations for unrelated legacy and beha
       device_id: "dev_hw",
       first_seen_at: at("2026-09-02T08:00:00"),
       last_seen_at: now - 20_000,
+      last_active_at: at("2026-09-04T10:05:00"),
       app_version: "0.9.1",
       hardware_source: "windows_cim_uuid",
     },
@@ -176,7 +178,6 @@ test("device dashboard selects release generations for unrelated legacy and beha
   ];
   const usageEvents = [
     { event_id: "usage_legacy_previous", device_id: "dev_legacy", occurred_at: at("2026-09-03T09:00:00") },
-    { event_id: "usage_legacy_today", device_id: "dev_legacy", occurred_at: at("2026-09-04T09:00:00") },
     { event_id: "usage_hw_1", device_id: "dev_hw", occurred_at: at("2026-09-04T10:00:00") },
     { event_id: "usage_hw_2", device_id: "dev_hw", occurred_at: at("2026-09-04T10:05:00") },
   ];
@@ -228,7 +229,7 @@ test("device dashboard selects release generations for unrelated legacy and beha
   ];
 
   const overview = buildStatsOverview(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(overview.counts, { online: 2, active_today: 2, active_7d: 2 });
+  assert.deepEqual(overview.counts, { online: 1, active_today: 2, active_7d: 3 });
   assert.deepEqual(overview.usage_trend.at(-2), {
     day: "2026-09-03",
     active_devices: 1,
@@ -237,19 +238,71 @@ test("device dashboard selects release generations for unrelated legacy and beha
   assert.deepEqual(overview.usage_trend.at(-1), {
     day: "2026-09-04",
     active_devices: 2,
-    turns: 3,
+    turns: 4,
   });
   assert.deepEqual(overview.active_versions, [
+    { version: "0.9.1", count: 2 },
     { version: "0.8.3", count: 1 },
-    { version: "0.9.1", count: 1 },
   ]);
 
   const list = buildDeviceList(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(list.map((device) => device.device_id), ["dev_install", "dev_legacy"]);
-  assert.equal(list.find((device) => device.device_id === "dev_install").turns_7d, 2);
-  assert.equal(list.find((device) => device.device_id === "dev_install").last_active_at, at("2026-09-04T11:05:00"));
-  assert.equal(list.find((device) => device.device_id === "dev_legacy").turns_7d, 2);
-  assert.equal(list.some((device) => device.device_id === "dev_hw"), false);
+  assert.deepEqual(list.map((device) => device.device_id), ["dev_hw", "dev_legacy"]);
+  assert.equal(list.find((device) => device.device_id === "dev_hw").turns_7d, 2);
+  assert.equal(list.find((device) => device.device_id === "dev_hw").last_active_at, at("2026-09-04T10:05:00"));
+  assert.equal(list.find((device) => device.device_id === "dev_legacy").turns_7d, 1);
+  assert.equal(list.some((device) => device.device_id === "dev_install"), false);
+});
+
+test("current hardware inventory survives disabled idle and unexpected behavior registrations", () => {
+  const now = at("2026-09-04T12:00:00");
+  const hardware = {
+    device_id: "dev_hw_current",
+    first_seen_at: at("2026-09-04T08:00:00"),
+    last_seen_at: now - 10_000,
+    app_version: "0.9.1",
+    hardware_source: "windows_cim_uuid",
+  };
+  const idleBehavior = {
+    device_id: "dev_install_idle",
+    first_seen_at: at("2026-09-04T08:01:00"),
+    last_seen_at: now - 5_000,
+    app_version: "0.9.1",
+    hardware_source: "installation_id",
+  };
+  const unexpectedBehavior = {
+    ...idleBehavior,
+    device_id: "dev_install_unexpected",
+  };
+
+  for (const devices of [[hardware], [hardware, idleBehavior, unexpectedBehavior]]) {
+    const overview = buildStatsOverview(devices, [], [], now);
+    assert.deepEqual(overview.counts, { online: 1, active_today: 0, active_7d: 0 });
+    const list = buildDeviceList(devices, [], [], now);
+    assert.deepEqual(list.map((device) => device.device_id), ["dev_hw_current"]);
+    assert.equal(list[0].first_seen_at, at("2026-09-04T08:00:00"));
+  }
+});
+
+test("versionless legacy usage survives a hardware device upgrade", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [{
+    device_id: "dev_hw_upgraded",
+    first_seen_at: at("2026-08-01T08:00:00"),
+    last_seen_at: now - 10_000,
+    last_active_at: at("2026-09-04T10:00:00"),
+    app_version: "0.9.1",
+    hardware_source: "windows_cim_uuid",
+  }];
+  const usageEvents = [{
+    event_id: "usage_before_upgrade_without_version",
+    device_id: "dev_hw_upgraded",
+    occurred_at: at("2026-09-04T10:00:00"),
+  }];
+
+  const overview = buildStatsOverview(devices, usageEvents, [], now);
+  assert.deepEqual(overview.counts, { online: 1, active_today: 1, active_7d: 1 });
+  assert.equal(overview.usage_trend.at(-1).turns, 1);
+  assert.equal(buildDeviceList(devices, usageEvents, [], now)[0].turns_7d, 1);
 });
 
 test("scheduled and system behavior tasks never enter homepage metrics", () => {
@@ -288,14 +341,14 @@ test("scheduled and system behavior tasks never enter homepage metrics", () => {
   ];
 
   const overview = buildStatsOverview(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(overview.counts, { online: 2, active_today: 1, active_7d: 1 });
+  assert.deepEqual(overview.counts, { online: 1, active_today: 1, active_7d: 1 });
   assert.deepEqual(overview.usage_trend.at(-1), {
     day: "2026-09-04",
     active_devices: 1,
     turns: 1,
   });
   assert.deepEqual(buildDeviceList(devices, usageEvents, behaviorEvents, now)
-    .map((device) => device.device_id).sort(), ["dev_hw", "dev_install"]);
+    .map((device) => device.device_id), ["dev_hw"]);
 });
 
 test("behavior analytics aggregates tasks voice tools installs scenes and models", () => {
@@ -1219,7 +1272,6 @@ test("retention compaction removes expired identity mappings and facts without r
     }]);
     assert.equal(store.devices.size, 1);
     assert.equal(store.events.length, 1);
-    assert.equal(store.events[0].app_version, "0.8.7");
 
     assert.equal(store.compactExpiredData(now), true);
     assert.equal(store.devices.size, 0);
