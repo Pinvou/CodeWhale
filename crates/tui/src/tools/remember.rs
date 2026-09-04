@@ -72,7 +72,7 @@ impl ToolSpec for RememberTool {
                 "scope": {
                     "type": "string",
                     "enum": ["global", "workspace"],
-                    "description": "Native backend scope; defaults to global."
+                    "description": "Native backend scope; defaults to global. workspace requires a git repository with an origin."
                 }
             },
             "required": []

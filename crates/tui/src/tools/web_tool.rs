@@ -71,7 +71,7 @@ impl ToolSpec for WebTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search the web, fetch a known URL, or wait for a local dev server. Prefer fetch for a canonical URL and search when the source is unknown. Web actions are read-only and network-policy aware."
+        "Search the web, fetch a known URL, or wait for a local dev server. Prefer fetch for a canonical URL and search when the source is unknown. search/fetch are network-policy aware; wait only reaches loopback and does not evaluate network policy."
     }
 
     fn input_schema(&self) -> Value {
@@ -159,7 +159,7 @@ impl ToolSpec for WebTool {
                 },
                 "port": {
                     "type": "integer",
-                    "description": "TCP port to wait for (action=wait)"
+                    "description": "TCP port to wait for (action=wait). action=wait requires `port`; the `url` port must match and the host must be loopback."
                 },
                 "poll_interval_ms": {
                     "type": "integer",

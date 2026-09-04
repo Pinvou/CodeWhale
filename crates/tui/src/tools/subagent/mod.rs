@@ -8365,6 +8365,16 @@ impl ToolSpec for AgentTool {
                     "enum": FLEET_ROLE_SCHEMA_VALUES,
                     "description": SUBAGENT_TYPE_DESCRIPTION
                 },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "For type=custom: exact tool names this child may call — the child gets exactly the tools listed (advanced)."
+                },
+                "disallowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Tool names removed from this child's toolset (deny list) (advanced)."
+                },
                 "profile": {
                     "type": "string",
                     "description": "Optional Fleet selector. Use a role from action=roster or an exact prompt-only profile id explicitly presented by the embedding host; unknown and ambient saved-profile values are refused. The resolved role supplies the child's posture. There is no per-call model override on this surface."
@@ -15744,8 +15754,7 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
     "Use `read` for bounded file reads and `bash` only for the allowed read-only inspection subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, and shell control actions are unavailable.\n",
     "Use your private `todo_write` list as editable working notes when useful; it is agent-owned state, not permission to write project files. Those tool calls remain in the complete transcript artifact returned to the parent.\n",
     "Honor QUESTION, SCOPE, ALREADY_KNOWN, and STOP_CONDITION. Do not repeat ALREADY_KNOWN work unless evidence contradicts it; do not broaden once QUESTION is answered.\n",
-    "Your value is compressed evidence: cite `path:line-range` for each finding and stop once evidence is sufficient. Return partial findings if the next step would be speculative or duplicative.\n",
-    "CHANGES will almost always be \"None.\" for a scout.\n\n"
+    "Your value is compressed reconnaissance: cite `path:line-range` for each finding and stop once evidence is sufficient. Return partial findings if the next step would be speculative or duplicative.\n\n"
 );
 
 const PLAN_AGENT_INTRO: &str = concat!(

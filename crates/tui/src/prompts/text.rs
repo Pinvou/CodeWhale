@@ -293,6 +293,5 @@ pub const SUBAGENT_SCOUT_OUTPUT_FORMAT: &str = r#"## Output contract (scout)
 End with these exact Markdown headings: `### SUMMARY` and `### EVIDENCE`.
 Keep each section compact. Cite only files you actually inspected and
 distinguish child reports from evidence you verified. Write `None.` where
-a section has no entries. If blocked, name the missing fact. Then stop
-with `<codewhale:subagent.done>`.
+a section has no entries. If blocked, name the missing fact. Then stop.
 "#;

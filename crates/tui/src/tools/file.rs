@@ -1985,7 +1985,7 @@ impl ToolSpec for EditFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. Returns a compact unified diff, not the full file. Pass `expected_hash` (the `content_hash` from that `read`) to have the edit refused, with the file untouched, if it changed in between. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
+        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching plus punctuation/line-ending normalization fallbacks automatically. Returns a compact unified diff, not the full file. Pass `expected_hash` (the `content_hash` from that `read`) to have the edit refused, with the file untouched, if it changed in between. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
     }
 
     fn input_schema(&self) -> Value {

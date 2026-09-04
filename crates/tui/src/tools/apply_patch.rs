@@ -319,7 +319,7 @@ impl ToolSpec for ApplyPatchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Apply a transactional unified-diff patch across one or more files, with fuzzy context matching and a rendered diff."
+        "Apply a unified-diff patch (multi-hunk, multi-file) or full-file replacements via `replace`. Use this instead of `git apply` or `patch` in `Bash`, or repeated File `edit` calls — single transactional change with fuzzy matching and a rendered diff."
     }
 
     fn input_schema(&self) -> Value {
