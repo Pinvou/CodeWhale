@@ -561,6 +561,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 - **运行与用量**：Provisioning 与用量区块分别鉴权、独立失败；一期详情是同页主内容稳定 URL 子视图，不是二期资产详情；不显示模型正文；结果未知必须查询/核对；核对重试不创建新的模型执行。
 - **协议/公式**：只展示已定义的计量事实和版本，不提供任意表达式在线执行；四个 Token 管理命令的策略注册是一期写按钮出现的前置任务。
 - **跨域定价与审计**：模型详情只按模型上下文读取/编辑 Billing 唯一价格事实；财务侧全平台定价治理入口保持不变。模型/Token 详情读取 Token 本域审计投影并复用展示组件，不拼接 Account 全局审计、不复制可写事实或扩展导出权限。
+- **高风险交互整改所有权**：APT-131 第三轮整改拆为 `APT-124-R1 → APT-130-R1 → APT-131-R1`。前两批分别由 Token/Billing 和运行领域交付权威预检、完整财务快照、闭合 repair/reconcile target、CAS 与 governed result；Portal 批次只负责 Account 权威 create/GET 产生的审批分类证明、统一对话框、终态/未知恢复、撤权中止和真实浏览器 smoke。Portal 不计算 precheck 或领域版本。三批逐批独立审核、独立提交，前置合同未通过时对应按钮失败关闭。
 
 ### 12.4 治理、运行手册与我的组织
 
@@ -641,6 +642,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | 退款关闭 | `/billing/refunds` 只读及异常案件 | 对应财务读/修复权 | existing refund/admin repair APIs | APT-056 | 无退款发起入口或 API 调用 |
 | Token 隔离 | `/token/*` | `platform.tokens.*` | token admin overview/accounts/routes/validate/provisionings | APT-028、APT-031、APT-073 | 无权限页面/字段/卡片均不可见；密钥不回显 |
 | 用量对账 | `/usage/*` | `platform.usage.*` | usage requests/reconciliation APIs | APT-030 | 结果未知先查/对账，不盲重试 |
+| UI-52 模型与 Token 高风险交互整改 | 模型/协议/公式/Token/运行动作结构化面板 | 各 command type 的精确原子权限 | Token/Billing 权威 precheck 与 closed command/result；Account approval create/detail/action；Portal 精确代理 | APT-124-R1 → APT-130-R1 → APT-131-R1 | 完整财务变化证据与执行事件、repair/reconcile 禁模型重放、gate off Token 审批零上游、非 Token create→submit 不受影响、终态/未知矩阵和安全端口 smoke；三批分别经身份 B 审核后提交 |
 | 系统状态 | `/system/status` | `platform.system.status.read` | `GET /system/status` | APT-033 | 只读探针；APT-033 不承担事件重试 |
 | Account 事件查询/重放（预留） | 不显示 | `platform.events.retry` | 当前无 Account OpenAPI | 候选 UIA-008；无正式任务状态 | 产品批准并完成 Account 自有端点前无入口，禁止查询/写入其他服务库 |
 | Billing 事件查询/重放（预留） | 不显示 | `platform.events.retry` | 当前无 Billing OpenAPI | 候选 UIA-021；无正式任务状态 | 产品批准并完成 Billing 自有端点前无入口，禁止查询/写入其他服务库 |

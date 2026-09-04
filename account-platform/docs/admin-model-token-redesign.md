@@ -354,6 +354,33 @@ Portal 对三个动作只向 Account `POST /account/admin/v1/approval-requests` 
 
 交付时不能只插入数据库策略：必须同步更新 `internal/platform/approvalpolicy` 代码注册表，将 `TOKEN_MODEL_LIFECYCLE_CHANGE` 指向 v2、`TOKEN_MODEL_CATALOG_ROLLBACK` 指向 v2、`TOKEN_CREDENTIAL_REVOKE` 指向 v1，并将三个 command type 加入 `executableApprovalCommands` allowlist。数据库和代码必须逐字段相等：`command_type`、`policy_version`、`approval_mode`、`requester_permission`、`approver_permission`、`risk_class`、`approval_count`、`self_approval_forbidden`、`snapshot_schema_version`、`critical_resource_fields`、`expires_after`、`execution_window`、`executor_identity`。新增自动门禁要从真实迁移后数据库读取三个版本逐字段与注册表比较。allowlist 门禁必须保留现有 `WALLET_ADJUSTMENT`、`PAYMENT_PROVIDER_RESUME`、`PAYMENT_PRODUCT_RESUME` 及其他既有合法项；仅断言新增的 `TOKEN_*` 可执行集合恰为上述三项，不允许其他 Token 治理命令被意外放行。任一字段、有序数组、版本或 allowlist 差异都阻断发布。
 
+### 7.4 APT-131 第三轮整改的服务所有权与冻结合同
+
+身份 B 第三轮审核确认：结构化交互不能把缺失的 Token/Billing 权威合同实现塞进 Portal。原 APT-124、APT-130 的已审核交付保持 `DONE`，新增缺口按 `APT-124-R1 → APT-130-R1 → APT-131-R1` 三个具名整改批次顺序独立审核、独立提交；在前置批次通过前，相应 Portal 动作保持失败关闭。
+
+**APT-124-R1（Token/Billing 预检所有权）**：
+
+- Token 拥有命令目标解析、Token 本域依赖快照和组合 precheck；Billing 只拥有价格、公式、单位与覆盖事实的只读投影；Account 拥有 approval create 时的 snapshot 持久化与响应、submit 前重验、授权事件 payload 及 begin-execution lease 冻结投影。Portal 只能透传和展示，不得计算数量、版本、阻断、指纹或伪造成功。
+- 协议草稿/发布、公式草稿/发布、目录同步、模型发布、模型生命周期和目录回滚所需的跨域预检，必须逐 `command_type` 使用闭合请求/响应 schema、同一个绝对 deadline、规范化输入和稳定失败码。请求或任一嵌套对象出现额外字段、错类型、未知 target 或不匹配资源时，在创建命令/审批前拒绝。
+- `billing_price_version` 是 Billing 在同一事务中返回的权威**完整价格事实修订号**：请求涉及的任一 pricing space、formula binding、unit config、block、生命周期或有效期事实发生变化时必须改变；禁止使用各 pricing space 独立递增版本的 `MAX(price.version)` 代替。Billing 同时对全部相关行按固定全序输出流式 SHA-256，覆盖稳定 ID、作用域、模型、协议、公式、单位、价格版本、配置类型/值、生命周期和有效区间；新增、删除、等量替换、非最大维度变化均必须改变 `financial_snapshot.price_set_fingerprint`。
+- 生命周期 13 字段和回滚 8 字段的 `critical_resource_versions` 保持第 7.3 节 exact ordered key array，不以计数或当前页摘要代替。`financial_snapshot` 另行使用闭合 schema，至少冻结 Billing 修订号、价格集合指纹、覆盖结论和 Billing `as_of`；Account 在 approval create 时原子持久化并原样响应同一规范化 `critical_resource_versions + financial_snapshot`，submit 前重新读取权威源逐字段重验，通过后原样写入授权事件，并在 begin-execution 时原样冻结到 lease。执行领取前重新计算的任一变化使申请失效，不能只比较 13/8 字段中的局部最大版本。
+- APT-124-R1 只交付权威预检、CAS/指纹、Account snapshot 持久/响应/重验及事件/lease 贯穿，不创建 APT-134 的生命周期计划，不启动 APT-138 的 consumer 或任何领域执行。
+
+**APT-130-R1（运行领域命令适配所有权）**：
+
+- `TOKEN_ROUTE_PROVISIONING_REPAIR` 的 target 只接受闭合字段 `provisioning_id`、`expected_provisioning_version`、`target_generation`、`replay_model_request:false`；`TOKEN_USAGE_RECONCILIATION_RETRY` 只接受闭合字段 `usage_request_id`、`expected_usage_version`、`evidence_high_watermark`、`replay_model_request:false`。布尔值必须显式为 `false`，不得省略、置真、字符串化或藏入额外字段。
+- precheck、命令创建和执行前重验复用同一个逐命令解析器；必须验证稳定 UUID、目标资源类型、领域状态、版本/CAS、当前代次或证据高水位、actor/权限和请求摘要。错 command/target 组合、额外字段或试图重放模型请求在写 `PENDING` 命令前拒绝。
+- governed result 只按冻结的 actor、command type、digest、idempotency key 和 `command_reference` 恢复。成功只代表创建了合规 repair/reconciliation 轮次或核对结果，绝不代表重新发起模型请求；reason 仅进入审计，响应继续使用 APT-130 的脱敏投影。
+- APT-130-R1 不改 APT-130 已完成的分页、安全详情和异常队列，也不激活 APT-138。
+
+**APT-131-R1（Portal/UI 所有权）**：
+
+- Portal 在 Account 的权威 approval create 或详情 GET 响应通过校验后，将 `session + actor access-token fingerprint + approval_request_id + command_type + short TTL` 写入服务端分类证明；证明不得由客户端提交的明文 `command_type` 推导。直接绕过、伪造、过期、跨 session/actor 或未知分类均失败关闭。
+- 总 gate 关闭后，approval submit/withdraw/decide 在动作代理前只查本地证明：`TOKEN_*` 为零次 Account 调用并拒绝；可信非 Token 证明继续代理。非 Token 的正常 create→submit 链必须由 create 响应立即生成证明，不能要求用户先额外 GET 详情；历史未分类申请只能在 gate 开启时通过权威 GET 建立证明。
+- UI 只消费前两批的权威 precheck/command/result。可信 GET 返回 `SUCCEEDED`、`REJECTED`、`FAILED` 时分别收敛为成功或稳定终态；只有 `PENDING`、`UNKNOWN`、403/404 或网络失败保持未知。未知状态冻结原始引用、输入和幂等键，禁止无引用重写或换键盲试。
+- 权限或 gate 撤销同步卸载对话框并 abort 在途 precheck/command/recovery；权限恢复不能复活旧输入。浏览器 smoke 必须由生产组件和客户端链路执行，绑定端口时显式排除 Chromium unsafe ports（含 3659），并连续运行至少 5 次证明稳定。
+- APT-131-R1 不新增 Token/Billing 预检计算、领域 parser/CAS、执行事件或数据库事实；不提前实现 APT-133 Secret、APT-134 排程或 APT-138 激活。
+
 ## 8. UI、可访问性与错误语义
 
 - 英文枚举在中文界面转换为“已发布、已弃用、可用、对话”等标签，原枚举可置于 Tooltip。
