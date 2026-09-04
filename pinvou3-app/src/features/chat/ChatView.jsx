@@ -1552,9 +1552,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         setActiveArtifactPath(artifact && artifact.path ? artifact.path : null);
         setArtifactDockActivation((value) => value + 1);
       }, []);
-      const openArtifactsPreview = useCallback(() => {
+      const showArtifactsPreview = useCallback((path) => {
         prefetchChatPanel('artifacts');
-        if (latestArtifact && latestArtifact.path) setActiveArtifactPath(latestArtifact.path);
+        if (path) setActiveArtifactPath(path);
         setArtifactsOpen(true);
         setArtifactDockActivation((value) => value + 1);
         void invokeObservedPanelSelection(
@@ -1562,7 +1562,20 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           ['artifact-preview', activeSessionId],
           reportRightDockSelectionFailure,
         );
-      }, [activeSessionId, latestArtifact, onRightDockPanelSelectionChange]);
+      }, [activeSessionId, onRightDockPanelSelectionChange]);
+      const openArtifactsPreview = useCallback(() => {
+        showArtifactsPreview(latestArtifact && latestArtifact.path);
+      }, [latestArtifact, showArtifactsPreview]);
+      useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        const onPresentArtifact = (event) => {
+          const detail = event && event.detail;
+          if (!detail || detail.sessionId !== activeSessionId || !detail.path) return;
+          showArtifactsPreview(detail.path);
+        };
+        window.addEventListener('pinvou:present-artifact', onPresentArtifact);
+        return () => window.removeEventListener('pinvou:present-artifact', onPresentArtifact);
+      }, [activeSessionId, showArtifactsPreview]);
       useEffect(() => {
         const previousCount = previousArtifactCountRef.current;
         previousArtifactCountRef.current = artifactCount;
