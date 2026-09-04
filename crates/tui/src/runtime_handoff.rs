@@ -140,6 +140,8 @@ pub(crate) fn shell_completion_runtime_message(
                 "linked_task_id": event.linked_task_id,
                 "owner_agent_id": event.owner_agent_id,
                 "owner_agent_name": event.owner_agent_name,
+                "origin_tool_call_id": event.origin_tool_call_id,
+                "origin_turn_id": event.origin_turn_id,
             })
             .to_string()
         })
