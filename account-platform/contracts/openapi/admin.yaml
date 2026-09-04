@@ -1833,6 +1833,39 @@ paths:
         "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
         "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
         "504": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models/{model_id}:
+    get:
+      operationId: getAdminModelDetail
+      summary: Read one stable model with its current safe protocol and formula binding
+      description: Requires platform.models.read. The repeatable-read Token projection excludes Provider configuration, upstream references, raw request schemas, and formula expressions.
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      responses:
+        "200": { description: Stable model detail, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminModelDetail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models/{model_id}/versions:
+    get:
+      operationId: listAdminModelVersions
+      summary: List immutable redacted historical catalog versions for one stable model
+      parameters:
+        - { name: model_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+      responses:
+        "200":
+          description: Stable redacted model-version snapshot page excluding the current catalog version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenAdminModelVersionPage" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/models/{model_id}/draft:
     put:
       operationId: saveAdminModelDraft
@@ -3355,6 +3388,10 @@ components:
       allOf:
         - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
         - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/AdminCatalogModel" } } } }
+    TokenAdminModelVersionPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/TokenAdminModelVersion" } } } }
     TokenAdminProtocolPage:
       allOf:
         - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
@@ -3431,6 +3468,66 @@ components:
         continuation_cutoff_at: { type: string, format: date-time }
         force_cancel_inflight: { type: boolean }
         draft: { $ref: "#/components/schemas/ModelDraft" }
+    TokenAdminModelProtocolSummary:
+      type: object
+      additionalProperties: false
+      required: [protocol_definition_id, protocol_code, version, status, schema_field_count, etag, created_at]
+      properties:
+        protocol_definition_id: { type: string, format: uuid }
+        protocol_code: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }
+        status: { type: string, enum: [DRAFT, PUBLISHED, DEPRECATED] }
+        schema_field_count: { type: integer, minimum: 0 }
+        etag: { type: string, pattern: '^[0-9a-f]{64}$' }
+        created_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+    TokenAdminModelFormulaSummary:
+      type: object
+      additionalProperties: false
+      required: [formula_version_id, protocol_definition_id, protocol_code, version, status, required_unit_versions, evaluator_version, etag, created_at]
+      properties:
+        formula_version_id: { type: string, format: uuid }
+        protocol_definition_id: { type: string, format: uuid }
+        protocol_code: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }
+        status: { type: string, enum: [PUBLISHED] }
+        required_unit_versions: { type: object, minProperties: 1, additionalProperties: { type: string, format: uuid } }
+        evaluator_version: { type: string }
+        etag: { type: string, pattern: '^[0-9a-f]{64}$' }
+        created_at: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+    TokenAdminModelDetail:
+      type: object
+      additionalProperties: false
+      required: [as_of, model, protocol, formula]
+      properties:
+        as_of: { type: string, format: date-time }
+        model: { $ref: "#/components/schemas/AdminCatalogModel" }
+        protocol: { $ref: "#/components/schemas/TokenAdminModelProtocolSummary" }
+        formula:
+          oneOf:
+            - { $ref: "#/components/schemas/TokenAdminModelFormulaSummary" }
+            - { type: "null" }
+    TokenAdminModelVersion:
+      type: object
+      additionalProperties: false
+      required: [catalog_version, display_name, lifecycle_status, model_capability_version_id, capability_version, protocol_definition_id, protocol_code, protocol_version, schema_field_count, context_length, maximum_output_tokens, supported_modalities, tokenizer_version, source_available, published_at]
+      properties:
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        display_name: { type: string, minLength: 1, maxLength: 160 }
+        lifecycle_status: { type: string, enum: [PUBLISHED, DEPRECATED, REMOVED] }
+        model_capability_version_id: { type: string, format: uuid }
+        capability_version: { type: integer, format: int64, minimum: 1 }
+        protocol_definition_id: { type: string, format: uuid }
+        protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+        protocol_version: { type: integer, format: int64, minimum: 1 }
+        schema_field_count: { type: integer, minimum: 0 }
+        context_length: { type: integer, format: int64, minimum: 1 }
+        maximum_output_tokens: { type: integer, format: int64, minimum: 0 }
+        supported_modalities: { type: array, uniqueItems: true, items: { type: string } }
+        tokenizer_version: { type: string }
+        source_available: { type: boolean }
+        published_at: { type: string, format: date-time }
     ModelDraft:
       type: object
       additionalProperties: false

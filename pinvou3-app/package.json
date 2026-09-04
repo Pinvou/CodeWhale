@@ -121,6 +121,7 @@
     "test:admin-token-resources-ui": "node tests/admin_token_resources_ui_smoke.mjs",
     "test:admin-model-actions-ui": "node tests/admin_model_actions_ui_smoke.mjs",
     "test:admin-model-operations-ui": "node tests/admin_model_operations_ui_smoke.mjs",
+    "test:admin-model-detail-ui": "node tests/admin_model_detail_ui_smoke.mjs",
     "test:browser-smoke": "node ../scripts/run-frontend-smokes.mjs --full",
     "test:webui": "npm run build:web && node ../remote-control-relay/test/web-ui.smoke.cjs",
     "test:markdown": "node tests/render_markdown.test.js && node tests/markdown_syntax_highlight.test.mjs",

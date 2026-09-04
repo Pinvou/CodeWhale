@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，121 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，10 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，122 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，9 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -155,7 +155,7 @@
 | APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | DONE |
 | APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | DONE |
 | APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | DONE |
-| APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | PENDING |
+| APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | DONE |
 | APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | PENDING |
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | PENDING |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | PENDING |
@@ -344,7 +344,15 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-132 模型独立详情页
 
-- **目标/范围**：主目标 `UI-53`。仅修改 Portal 模型详情路由、`admin.html`/JS/CSS/i18n、BFF 投影与详情合同测试；唯一 IA 冻结为“概览 / 能力、协议与公式 / 路由与运行 / 价格与计量 / 生命周期与依赖 / 审计”六页签，其他文档、原型和实现不得再拆分、合并或改名。
+> 实现状态（2026-09-04）：`DONE`；身份 B 第三轮独立代码审核 `PASS`。已按唯一六页签结构实现稳定 `model_id` 独立主内容页；默认关闭的详情 gate、非法/无权/无 gate URL 归一、目录状态保留返回、刷新/分享/浏览器历史、逐原子权限页签裁剪和撤权请求中止已接入生产路由。Token 新增同一只读 Repeatable Read 快照的当前目录、不可变能力/协议及安全公式详情投影，不返回 Provider/Adapter/upstream、原始协议 schema 或公式 expression；另新增只返回旧目录/能力安全摘要的不可变历史版本快照分页，当前、草稿与历史明确分离。CHAT `parameters` 数组和受支持的 JSON Schema `properties` 均按真实字段数统计，畸形或歧义 schema 失败关闭。Provisioning 和资源审计复用既有服务端分页，Billing 价格页直读 APT-126 权威投影并明确两域非原子；生命周期页固定展示 12 项三语依赖、完整价格覆盖及 Token/Billing 独立权威观测时间。详情不提供任何写动作。定向 Ajv/导航 19 项、Token/Portal Go、OpenAPI、授权、i18n、ESLint、Portal build、architecture、task 与 Chromium 生产制品 smoke 已通过；smoke 覆盖 320px/200%、六页签、历史 cursor 深链/刷新、完整依赖与价格覆盖、局部审计失败/重试、价格/运行按需请求、权限撤销中止、无权与 gate-off 零详情请求和 ID 零 DOM。本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL`，命名 PostgreSQL 用例按约定 `SKIP`，PR 隔离库已登记 no-SKIP 门禁。APT-134 排程、APT-135 价格编辑、APT-136 趋势、APT-138 激活及 Token Account 详情均未实现。
+
+> 代码审核整改记录（2026-09-04）：身份 B 首轮 `NEEDS_CHANGES` 指出资源审计不能替代版本历史、CHAT 基线 `request_schema.parameters` 被错误按 `properties` 计数，以及生命周期依赖未完整展示价格覆盖/双域观测时间且部分内部键直接进入界面。身份 A 已逐项整改：历史版本改为模型绑定的签名快照 cursor 分页和闭合脱敏 schema；schema 摘要支持两种明确形状且畸形失败关闭，真实 PostgreSQL 用例断言 CHAT 为 4；生命周期按固定键序和三语标签展示 12 项依赖、价格覆盖版本及双域 `observed_at`，生产 Chromium 断言内部 snake_case 键不进入 DOM。当前重新提交身份 B 复审，审核通过前不标 `DONE`。
+
+> 第二轮整改记录（2026-09-04）：身份 B 确认首轮三项整改通过，仅退回历史分页 OpenAPI 错误矩阵。身份 A 已按共享分页 Handler 的真实结果补齐 422 `PAGINATION_FILTER_REQUIRED` 与 504 `QUERY_TIMEOUT`，并把 429 收紧为同时覆盖 `RATE_LIMITED` 和 `PAGINATION_SNAPSHOT_LIMITED` 的闭合 `TokenAdminQueryLimited`；合同测试逐项断言 200/400/403/410/422/429/503/504 和两种 429 稳定码，当前再次提交身份 B 复审。
+
+> 代码审核记录（2026-09-04）：身份 B 第三轮 `PASS`。确认首轮历史版本、安全 schema 摘要和生命周期完整投影三项整改均闭合；第二轮历史分页响应矩阵与真实共享 Handler 一致，429 闭合覆盖速率限制和快照容量两种稳定码，未知码及额外字段负例通过。APT-132 未越界实现 APT-133 Token Account 详情、APT-134 生命周期计划、APT-135 价格编辑、APT-136 趋势或 APT-138 激活/执行。
+
+- **目标/范围**：主目标 `UI-53`。修改 Token 现有目录事实的安全只读详情投影、Admin OpenAPI、Portal 模型详情路由、`admin.html`/JS/CSS/i18n、BFF 精确代理、生产浏览器 smoke 注册与详情合同测试；不新增迁移、领域事实或写合同。唯一 IA 冻结为“概览 / 能力、协议与公式 / 路由与运行 / 价格与计量 / 生命周期与依赖 / 审计”六页签，其他文档、原型和实现不得再拆分、合并或改名。
 - **URL/权限/回滚**：稳定 `model_id` 深链，每个嵌套数据源使用独立 filter/cursor/error；价格页签要求 Billing 读权，审计页签要求资源读权与 `platform.audit.read` 交集，无权页签不请求、不进 DOM/日志。二期详情 gate 可独立关闭并回到 APT-127 列表，返回时保留列表 URL；无数据库变更。
 - **验收**：合法 UUID 无权、非法 UUID、互斥详情、无权页签、刷新/分享/popstate、各嵌套源局部失败、三语和可访问性通过；稳定 ID 可复制，敏感值不可回显。
 - **不包含**：只交付六页签 IA、路由、读取投影和受控空态；不实现“生命周期与依赖”中的计划写能力（APT-134）、“价格与计量”写组件（APT-135）、凭据或 Token 详情。

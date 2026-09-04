@@ -93,10 +93,23 @@ export function Pagination({ source, query, state, copy, cursorHistory, onQueryC
 export function FilterForm({ source, query, fields, copy, onQueryChange }) {
   const [draft, setDraft] = useState(query);
   useEffect(() => setDraft(query), [JSON.stringify(query)]);
+  const fieldValue = (field) => {
+    const value = draft[field.key] || '';
+    if (!value || field.type !== 'datetime-local') return value;
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return '';
+    return new Date(parsed.getTime() - parsed.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+  };
+  const submitted = () => Object.fromEntries(Object.entries(draft).map(([key, value]) => {
+    const field = fields.find((candidate) => candidate.key === key);
+    if (!value || field?.type !== 'datetime-local') return [key, value];
+    const parsed = new Date(value);
+    return [key, Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()];
+  }));
   return (
     <form className="adm-model-token-filters" onSubmit={(event) => {
       event.preventDefault();
-      onQueryChange(source, { ...draft, cursor: '' });
+      onQueryChange(source, { ...submitted(), cursor: '' });
     }}>
       {fields.map((field) => (
         <label key={field.key}>
@@ -107,7 +120,7 @@ export function FilterForm({ source, query, fields, copy, onQueryChange }) {
               {field.options.map((option) => <option key={option} value={option}>{copy.enumLabels?.[option] || option}</option>)}
             </select>
           ) : (
-            <input type={field.type || 'search'} value={draft[field.key] || ''} placeholder={field.placeholder || ''} onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.value }))} />
+            <input type={field.type || 'search'} value={fieldValue(field)} placeholder={field.placeholder || ''} onChange={(event) => setDraft((current) => ({ ...current, [field.key]: event.target.value }))} />
           )}
         </label>
       ))}

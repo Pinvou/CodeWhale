@@ -41,6 +41,7 @@ type Config struct {
 	AdminModelTokenIAEnabled           bool
 	AdminTokenResourceFormsEnabled     bool
 	AdminModelOperationsDetailsEnabled bool
+	AdminModelDetailsEnabled           bool
 	AdminModelTokenActionsEnabled      bool
 	SystemProbes                       []SystemProbe
 	SecureCookies                      bool
@@ -271,6 +272,7 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 			"admin_model_token_ia":           s.config.AdminModelTokenIAEnabled,
 			"admin_token_resource_forms":     s.config.AdminTokenResourceFormsEnabled,
 			"admin_model_operations_details": s.config.AdminModelOperationsDetailsEnabled,
+			"admin_model_details":            s.config.AdminModelDetailsEnabled,
 			"admin_model_token_actions":      s.config.AdminModelTokenActionsEnabled,
 		},
 	})
@@ -1060,7 +1062,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 		return len(parts) == 5 && parts[4] == "preview" && method == http.MethodGet
 	}
 	if parts[2] == "models" {
-		return len(parts) == 6 && parts[4] == "impact" && parts[5] == "lifecycle" && method == http.MethodGet
+		return (len(parts) == 4 && method == http.MethodGet) ||
+			(len(parts) == 5 && parts[4] == "versions" && method == http.MethodGet) ||
+			(len(parts) == 6 && parts[4] == "impact" && parts[5] == "lifecycle" && method == http.MethodGet)
 	}
 	if parts[2] == "provisionings" {
 		return len(parts) == 4 && method == http.MethodGet ||

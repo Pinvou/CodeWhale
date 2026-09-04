@@ -4,6 +4,7 @@ import { planAdminModelTokenOperationRequests } from './admin-model-token-state.
 import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.jsx';
 import { AdminTokenResourcesWorkspace } from './AdminTokenResourcesWorkspace.jsx';
 import { AdminModelOperationsWorkspace } from './AdminModelOperationsWorkspace.jsx';
+import { AdminModelDetailWorkspace } from './AdminModelDetailWorkspace.jsx';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
 import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact, validApprovalRequest } from './admin-high-risk-action-state.js';
@@ -40,7 +41,7 @@ async function recoverTokenApproval(client, reference, draft, signal) {
   throw Object.assign(new Error('approval reached a terminal non-success state'), { code: `APPROVAL_${value.status}`, commandReference: reference, finalResult: true });
 }
 
-function ModelDirectory({ client, copy, permissions, actionsEnabled, routeVersion, onQueryChange, cursorHistory }) {
+function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnabled, routeVersion, onQueryChange, onOpenDetail, cursorHistory }) {
   const query = useMemo(() => readAdminModelTokenQuery('models'), [routeVersion]);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [action, setAction] = useState(null);
@@ -71,8 +72,8 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, routeVersio
         { key: 'source_adapter', label: copy.sourceAdapter },
       ]} />
       <SourceFeedback state={state} copy={copy} onRetry={retry} />
-      {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.model}</th><th>{copy.lifecycle}</th><th>{copy.protocol}</th><th>{copy.contextLength}</th><th>{copy.source}</th>{actionsEnabled && <th>{copy.actions}</th>}</tr></thead><tbody>
-				{state.items.map((item) => <tr key={item.model_id}><td data-label={copy.model}><strong>{item.display_name}</strong><small className="adm-secondary-id">{item.model_id}</small></td><td data-label={copy.lifecycle}><Status value={item.lifecycle_status} copy={copy} /></td><td data-label={copy.protocol}>{item.protocol_code} · v{item.protocol_version}</td><td data-label={copy.contextLength}>{Number(item.context_length || 0).toLocaleString()}</td><td data-label={copy.source}><Status value={item.source_available ? 'ACTIVE' : 'UNAVAILABLE'} copy={copy} /></td>{actionsEnabled && <td data-label={copy.actions}><div className="adm-row-actions">{canPublish && item.draft && <button type="button" onClick={() => setAction({ type: 'PUBLISH', item })}>{copy.publish}</button>}{canLifecycle && item.lifecycle_status === 'PUBLISHED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'DEPRECATED', item })}>{copy.deprecateModel}</button>}{canLifecycle && item.lifecycle_status !== 'REMOVED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'REMOVED', item })}>{copy.removeModel}</button>}</div></td>}</tr>)}
+      {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.model}</th><th>{copy.lifecycle}</th><th>{copy.protocol}</th><th>{copy.contextLength}</th><th>{copy.source}</th>{(actionsEnabled || detailsEnabled) && <th>{copy.actions}</th>}</tr></thead><tbody>
+				{state.items.map((item) => <tr key={item.model_id}><td data-label={copy.model}>{detailsEnabled ? <button type="button" className="adm-name-link" onClick={() => onOpenDetail(item.model_id)}><strong>{item.display_name}</strong></button> : <strong>{item.display_name}</strong>}<small className="adm-secondary-id">{item.model_id}</small></td><td data-label={copy.lifecycle}><Status value={item.lifecycle_status} copy={copy} /></td><td data-label={copy.protocol}>{item.protocol_code} · v{item.protocol_version}</td><td data-label={copy.contextLength}>{Number(item.context_length || 0).toLocaleString()}</td><td data-label={copy.source}><Status value={item.source_available ? 'ACTIVE' : 'UNAVAILABLE'} copy={copy} /></td>{(actionsEnabled || detailsEnabled) && <td data-label={copy.actions}><div className="adm-row-actions">{detailsEnabled && <button type="button" onClick={() => onOpenDetail(item.model_id)}>{copy.viewDetail}</button>}{canPublish && item.draft && <button type="button" onClick={() => setAction({ type: 'PUBLISH', item })}>{copy.publish}</button>}{canLifecycle && item.lifecycle_status === 'PUBLISHED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'DEPRECATED', item })}>{copy.deprecateModel}</button>}{canLifecycle && item.lifecycle_status !== 'REMOVED' && <button type="button" onClick={() => setAction({ type: 'LIFECYCLE', targetStatus: 'REMOVED', item })}>{copy.removeModel}</button>}</div></td>}</tr>)}
       </tbody></table></div>}
       <Pagination source="models" query={query} state={state} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} />
 			{action?.type === 'PUBLISH' && action.item && canPublish && <AdminHighRiskActionDialog action={{ key: `model-publish-${action.item.model_id}`, impactAction: 'TOKEN_MODEL_PUBLISH', title: copy.publishModel, lead: copy.modelActionLead }} copy={copy} target={{ label: action.item.display_name, version: `${copy.catalogVersion}: ${action.item.catalog_version}`, effectiveAt: copy.actionImmediate }} policy="AUDIT_ONLY" recentAuth payloadDetails={{ model_id: action.item.model_id, expected_catalog_version: action.item.catalog_version, expected_draft_version: action.item.draft?.draft_version || 0 }} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_MODEL_PUBLISH', target_resource_type: 'MODEL', target_resource_id: action.item.model_id, command: { model_id: action.item.model_id } }, signal), { commandType: 'TOKEN_MODEL_PUBLISH', targetResourceType: 'MODEL', targetResourceID: action.item.model_id })} onClose={() => setAction(null)} execute={async (payload, key, signal) => {
@@ -99,13 +100,14 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, routeVersio
   );
 }
 
-export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelTokenActionsEnabled = false }) {
+export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelDetailsEnabled = false, modelTokenActionsEnabled = false }) {
   const modelTokenCopy = copy.modelToken;
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
   const operations = useMemo(() => readAdminModelTokenOperationsTab(permissions), [permissions, routeVersion]);
   const modelTabs = useMemo(() => readAdminModelTokenModelTab(permissions), [permissions, routeVersion]);
   const operationRequests = useMemo(() => planAdminModelTokenOperationRequests(permissions, client), [permissions, client]);
+  const modelID = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_id') || '', [routeVersion]);
   const onQueryChange = (source, query, mode = 'push') => onRouteChange(adminModelTokenQueryUpdates(source, query), mode);
   const notice = routeNotice === 'invalid' ? modelTokenCopy.invalidLink : routeNotice === 'conflict' ? modelTokenCopy.conflictingDetail : '';
   const moveOperationsTab = (event) => {
@@ -121,11 +123,12 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   return <>
     {notice && <div className="adm-inline-message info" role="status">{notice}</div>}
     {!modelTokenActionsEnabled && <div className="adm-inline-message info" role="status">{modelTokenCopy.actionsReadOnly}</div>}
-    {section === 'models' && <>
+    {section === 'models' && modelDetailsEnabled && modelID && granted.has('platform.models.read') && <AdminModelDetailWorkspace modelID={modelID} client={client} copy={modelTokenCopy} permissions={permissions} routeVersion={routeVersion} onRouteChange={onRouteChange} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} />}
+    {section === 'models' && (!modelDetailsEnabled || !modelID) && <>
       <div className="adm-tabs adm-model-tabs" role="tablist" aria-label={modelTokenCopy.modelViews} onKeyDown={moveOperationsTab}>
         {modelTabs.visible.map((tab) => <button type="button" role="tab" id={`model-tab-${tab}`} aria-controls={`model-panel-${tab}`} aria-selected={modelTabs.tab === tab} tabIndex={modelTabs.tab === tab ? 0 : -1} className={modelTabs.tab === tab ? 'active' : ''} key={tab} onClick={() => onRouteChange({ model_tab: tab }, 'push')}>{tab === 'directory' ? modelTokenCopy.modelDirectory : modelTokenCopy.protocolFormulaView}</button>)}
       </div>
-      {modelTabs.tab === 'directory' && granted.has('platform.models.read') && <div role="tabpanel" id="model-panel-directory" aria-labelledby="model-tab-directory"><ModelDirectory client={client} copy={modelTokenCopy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} cursorHistory={cursorHistory} /></div>}
+      {modelTabs.tab === 'directory' && granted.has('platform.models.read') && <div role="tabpanel" id="model-panel-directory" aria-labelledby="model-tab-directory"><ModelDirectory client={client} copy={modelTokenCopy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} detailsEnabled={modelDetailsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onOpenDetail={(id) => onRouteChange({ model_id: id, model_detail_tab: 'overview' }, 'push')} cursorHistory={cursorHistory} /></div>}
 			{modelTabs.tab === 'protocols' && granted.has('platform.pricing.read') && <div role="tabpanel" id="model-panel-protocols" aria-labelledby="model-tab-protocols"><AdminProtocolFormulaWorkspace client={client} copy={modelTokenCopy} canManage={modelTokenActionsEnabled && granted.has('platform.pricing.manage')} routeVersion={routeVersion} onRouteChange={onRouteChange} cursorHistory={cursorHistory} /></div>}
     </>}
     {section === 'tokenResources' && <AdminTokenResourcesWorkspace client={client} copy={modelTokenCopy} permissions={permissions} formsEnabled={tokenResourceFormsEnabled} actionsEnabled={modelTokenActionsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onRouteChange={onRouteChange} histories={cursorHistory} />}

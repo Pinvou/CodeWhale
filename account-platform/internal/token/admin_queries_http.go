@@ -23,6 +23,7 @@ type adminPaginationRepository interface {
 	AdminPaginationPage(context.Context, AdminPaginationRequest, AdminSnapshotMemberSource) (AdminPaginationPage, error)
 	reserveAdminQueryRate(context.Context, uuid.UUID, string, string, bool) error
 	adminModelsByIDs(context.Context, []string) ([]AdminCatalogModel, error)
+	adminModelVersionsByIDs(context.Context, uuid.UUID, []string) ([]AdminModelVersion, error)
 	adminProtocolsByIDs(context.Context, []string) ([]ProtocolDefinition, error)
 	adminFormulasByIDs(context.Context, []string) ([]ProtocolFormulaVersion, error)
 	adminTokenAccountsByIDs(context.Context, []string) ([]AdminTokenAccount, error)
@@ -34,6 +35,10 @@ type adminPaginationRepository interface {
 	adminReconciliationByIDs(context.Context, []string) ([]AdminReconciliationCase, error)
 	adminAuditByIDs(context.Context, string, []string) ([]AdminResourceAudit, error)
 	adminEvidenceByIDs(context.Context, []string) ([]AdminUsageEvidence, error)
+}
+
+type adminModelDetailRepository interface {
+	adminModelDetail(context.Context, uuid.UUID) (AdminModelDetail, error)
 }
 
 type adminPaginationPageRepository interface {
@@ -191,6 +196,46 @@ func (s *Service) paginatedModels(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return s.adminQueryPage(w, r, filter, "models", "platform", adminModelsSort, 50, 200, source, func(ctx context.Context, ids []string) (any, error) { return repo.adminModelsByIDs(ctx, ids) })
+}
+
+func (s *Service) adminModelDetail(w http.ResponseWriter, r *http.Request) {
+	modelID, ok := adminUUID(w, r, "model_id")
+	if !ok {
+		return
+	}
+	repository, ok := s.repository.(adminModelDetailRepository)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "model detail is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := repository.adminModelDetail(r.Context(), modelID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
+func (s *Service) adminModelVersions(w http.ResponseWriter, r *http.Request) {
+	modelID, ok := adminUUID(w, r, "model_id")
+	if !ok {
+		return
+	}
+	filter, err := parseAdminQuery(r.URL.Query(), nil)
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	repository, ok := s.paginationRepository()
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "model version history is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if !s.adminQueryPage(w, r, filter, "model-versions", "model:"+modelID.String(), adminModelVersionsSort, 25, 100, modelVersionSnapshotSource(modelID), func(ctx context.Context, ids []string) (any, error) {
+		return repository.adminModelVersionsByIDs(ctx, modelID, ids)
+	}) {
+		writeAdminQueryError(w, r, ErrAdminPaginationDisabled)
+	}
 }
 
 func (s *Service) paginatedProtocols(w http.ResponseWriter, r *http.Request) bool {

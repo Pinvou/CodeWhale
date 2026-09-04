@@ -38,6 +38,7 @@ const (
 	adminUsageSort                        = "updated_at DESC,id ASC"
 	adminReconciliationSort               = "updated_at DESC,id DESC"
 	adminResourceAuditSort                = "occurred_at DESC,id DESC"
+	adminModelVersionsSort                = "catalog_version DESC"
 	adminOwnerCandidatesSort              = "normalized_display_label ASC,owner_type ASC,owner_id ASC"
 	adminUsageEvidenceSort                = "observed_at ASC,source_kind ASC,source_id ASC"
 	adminUsageReconciliationCasePredicate = "review.domain='TOKEN' AND review.case_type IN ('USAGE_RECONCILIATION_REVIEW') AND review.resource_type='USAGE_REQUEST' AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=review.resource_id)"
@@ -77,6 +78,62 @@ type AdminResourceAudit struct {
 	ActorID      uuid.UUID       `json:"actor_id"`
 	Summary      json.RawMessage `json:"summary"`
 	OccurredAt   time.Time       `json:"occurred_at"`
+}
+
+// AdminModelProtocolSummary and AdminModelFormulaSummary are deliberately
+// narrow detail projections. Raw request schemas and formula expressions are
+// not needed by the read-only asset page and therefore never cross the Portal
+// boundary.
+type AdminModelProtocolSummary struct {
+	ID               uuid.UUID  `json:"protocol_definition_id"`
+	ProtocolCode     string     `json:"protocol_code"`
+	Version          int64      `json:"version"`
+	Status           string     `json:"status"`
+	SchemaFieldCount int        `json:"schema_field_count"`
+	ETag             string     `json:"etag"`
+	CreatedAt        time.Time  `json:"created_at"`
+	PublishedAt      *time.Time `json:"published_at,omitempty"`
+}
+
+type AdminModelFormulaSummary struct {
+	ID                   uuid.UUID            `json:"formula_version_id"`
+	ProtocolDefinitionID uuid.UUID            `json:"protocol_definition_id"`
+	ProtocolCode         string               `json:"protocol_code"`
+	Version              int64                `json:"version"`
+	Status               string               `json:"status"`
+	RequiredUnitVersions map[string]uuid.UUID `json:"required_unit_versions"`
+	EvaluatorVersion     string               `json:"evaluator_version"`
+	ETag                 string               `json:"etag"`
+	CreatedAt            time.Time            `json:"created_at"`
+	PublishedAt          *time.Time           `json:"published_at,omitempty"`
+}
+
+type AdminModelDetail struct {
+	AsOf     time.Time                 `json:"as_of"`
+	Model    AdminCatalogModel         `json:"model"`
+	Protocol AdminModelProtocolSummary `json:"protocol"`
+	Formula  *AdminModelFormulaSummary `json:"formula"`
+}
+
+// AdminModelVersion is an immutable, redacted catalog-history projection.
+// Provider identity, adapter configuration, upstream references, raw protocol
+// schemas and formula expressions are deliberately excluded.
+type AdminModelVersion struct {
+	CatalogVersion           int64     `json:"catalog_version"`
+	DisplayName              string    `json:"display_name"`
+	LifecycleStatus          string    `json:"lifecycle_status"`
+	ModelCapabilityVersionID uuid.UUID `json:"model_capability_version_id"`
+	CapabilityVersion        int64     `json:"capability_version"`
+	ProtocolDefinitionID     uuid.UUID `json:"protocol_definition_id"`
+	ProtocolCode             string    `json:"protocol_code"`
+	ProtocolVersion          int64     `json:"protocol_version"`
+	SchemaFieldCount         int       `json:"schema_field_count"`
+	ContextLength            int64     `json:"context_length"`
+	MaximumOutputTokens      int64     `json:"maximum_output_tokens"`
+	SupportedModalities      []string  `json:"supported_modalities"`
+	TokenizerVersion         string    `json:"tokenizer_version"`
+	SourceAvailable          bool      `json:"source_available"`
+	PublishedAt              time.Time `json:"published_at"`
 }
 
 type AdminUsageEvidence struct {
@@ -385,6 +442,18 @@ WHERE entry.catalog_version=(SELECT COALESCE(max(version),0) FROM model_catalog_
   AND (NOT $7 OR entry.source_available<>$8)
 `, q, lifecycle, protocol, adapter, hasMissing, missingValue)
 	}, nil
+}
+
+func modelVersionSnapshotSource(modelID uuid.UUID) AdminSnapshotMemberSource {
+	return func(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, _ time.Time, maximum int) error {
+		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `
+SELECT entry.catalog_version::text AS resource_id,
+       row_number() OVER (ORDER BY entry.catalog_version DESC)-1 AS position
+FROM model_catalog_entries entry
+WHERE entry.model_id=$3
+  AND entry.catalog_version < (SELECT COALESCE(max(version),0) FROM model_catalog_versions)
+`, modelID)
+	}
 }
 
 func protocolSnapshotSource(filter adminQueryFilter) (AdminSnapshotMemberSource, error) {
@@ -757,6 +826,152 @@ func (r *PostgresRepository) adminModelsByIDs(ctx context.Context, resourceIDs [
 		}
 	}
 	if err = draftRows.Err(); err != nil {
+		return nil, err
+	}
+	return orderedValues(resourceIDs, values)
+}
+
+func (r *PostgresRepository) adminModelDetail(ctx context.Context, modelID uuid.UUID) (AdminModelDetail, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return AdminModelDetail{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var asOf time.Time
+	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&asOf); err != nil {
+		return AdminModelDetail{}, err
+	}
+	model, err := scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=(SELECT COALESCE(max(version),0) FROM model_catalog_versions) AND e.model_id=$1`, modelID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminModelDetail{}, ErrNotFound
+	}
+	if err != nil {
+		return AdminModelDetail{}, err
+	}
+	adminModel := AdminCatalogModel{CatalogModel: model}
+	var draft CatalogDraft
+	var draftModalities []byte
+	err = tx.QueryRow(ctx, `SELECT model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at FROM model_catalog_drafts WHERE model_id=$1`, modelID).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &draftModalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt)
+	if err == nil {
+		_ = json.Unmarshal(draftModalities, &draft.SupportedModalities)
+		adminModel.Draft = &draft
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return AdminModelDetail{}, err
+	}
+	var protocol ProtocolDefinition
+	err = tx.QueryRow(ctx, `SELECT id,protocol_code,version,status,request_schema,created_at,published_at FROM protocol_definitions WHERE id=$1`, model.ProtocolDefinitionID).Scan(&protocol.ID, &protocol.ProtocolCode, &protocol.Version, &protocol.Status, &protocol.RequestSchema, &protocol.CreatedAt, &protocol.PublishedAt)
+	if err != nil {
+		return AdminModelDetail{}, err
+	}
+	protocol.ETag = protocolDefinitionETag(protocol)
+	schemaFieldCount, err := adminProtocolSchemaFieldCount(protocol.RequestSchema)
+	if err != nil {
+		return AdminModelDetail{}, err
+	}
+	protocolSummary := AdminModelProtocolSummary{ID: protocol.ID, ProtocolCode: protocol.ProtocolCode, Version: protocol.Version, Status: protocol.Status, SchemaFieldCount: schemaFieldCount, ETag: protocol.ETag, CreatedAt: protocol.CreatedAt, PublishedAt: protocol.PublishedAt}
+	var formula ProtocolFormulaVersion
+	var requiredUnits, expression []byte
+	err = tx.QueryRow(ctx, `SELECT formula.id,formula.protocol_definition_id,protocol.protocol_code,formula.version,formula.status,formula.required_unit_versions,formula.expression,formula.evaluator_version,formula.created_at,formula.published_at FROM protocol_formula_versions formula JOIN protocol_definitions protocol ON protocol.id=formula.protocol_definition_id WHERE formula.protocol_definition_id=$1 AND formula.status='PUBLISHED' ORDER BY formula.version DESC,formula.id DESC LIMIT 1`, model.ProtocolDefinitionID).Scan(&formula.ID, &formula.ProtocolDefinitionID, &formula.ProtocolCode, &formula.Version, &formula.Status, &requiredUnits, &expression, &formula.EvaluatorVersion, &formula.CreatedAt, &formula.PublishedAt)
+	var formulaSummary *AdminModelFormulaSummary
+	if err == nil {
+		_ = json.Unmarshal(requiredUnits, &formula.RequiredUnitVersions)
+		_ = json.Unmarshal(expression, &formula.Expression)
+		formula.ETag = protocolFormulaETag(formula)
+		formulaSummary = &AdminModelFormulaSummary{ID: formula.ID, ProtocolDefinitionID: formula.ProtocolDefinitionID, ProtocolCode: formula.ProtocolCode, Version: formula.Version, Status: formula.Status, RequiredUnitVersions: formula.RequiredUnitVersions, EvaluatorVersion: formula.EvaluatorVersion, ETag: formula.ETag, CreatedAt: formula.CreatedAt, PublishedAt: formula.PublishedAt}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return AdminModelDetail{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return AdminModelDetail{}, err
+	}
+	return AdminModelDetail{AsOf: asOf.UTC(), Model: adminModel, Protocol: protocolSummary, Formula: formulaSummary}, nil
+}
+
+func adminProtocolSchemaFieldCount(raw json.RawMessage) (int, error) {
+	var shape map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &shape) != nil || shape == nil {
+		return 0, errors.New("protocol request schema is invalid")
+	}
+	parametersRaw, hasParameters := shape["parameters"]
+	propertiesRaw, hasProperties := shape["properties"]
+	if hasParameters == hasProperties {
+		return 0, errors.New("protocol request schema has no unambiguous supported field collection")
+	}
+	if hasParameters {
+		var parameters []string
+		if json.Unmarshal(parametersRaw, &parameters) != nil || parameters == nil {
+			return 0, errors.New("protocol request schema parameters are invalid")
+		}
+		seen := make(map[string]struct{}, len(parameters))
+		for _, parameter := range parameters {
+			if parameter == "" || strings.TrimSpace(parameter) != parameter {
+				return 0, errors.New("protocol request schema parameter is invalid")
+			}
+			if _, exists := seen[parameter]; exists {
+				return 0, errors.New("protocol request schema parameter is duplicated")
+			}
+			seen[parameter] = struct{}{}
+		}
+		return len(parameters), nil
+	}
+	var properties map[string]json.RawMessage
+	if json.Unmarshal(propertiesRaw, &properties) != nil || properties == nil {
+		return 0, errors.New("protocol request schema properties are invalid")
+	}
+	for key, value := range properties {
+		if key == "" || strings.TrimSpace(key) != key || len(value) == 0 || !json.Valid(value) {
+			return 0, errors.New("protocol request schema property is invalid")
+		}
+	}
+	return len(properties), nil
+}
+
+func (r *PostgresRepository) adminModelVersionsByIDs(ctx context.Context, modelID uuid.UUID, resourceIDs []string) ([]AdminModelVersion, error) {
+	if len(resourceIDs) == 0 {
+		return []AdminModelVersion{}, nil
+	}
+	versions := make([]int64, 0, len(resourceIDs))
+	for _, raw := range resourceIDs {
+		version, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || version < 1 {
+			return nil, ErrAdminSnapshotResourceChanged
+		}
+		versions = append(versions, version)
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT entry.catalog_version,entry.display_name,entry.lifecycle_status,
+       capability.id,capability.version,protocol.id,protocol.protocol_code,protocol.version,protocol.request_schema,
+       capability.context_length,capability.maximum_output_tokens,capability.supported_modalities,capability.tokenizer_version,
+       entry.source_available,catalog.published_at
+FROM model_catalog_entries entry
+JOIN model_catalog_versions catalog ON catalog.version=entry.catalog_version
+JOIN model_capability_versions capability ON capability.id=entry.model_capability_version_id
+JOIN protocol_definitions protocol ON protocol.id=entry.protocol_definition_id
+WHERE entry.model_id=$1 AND entry.catalog_version=ANY($2::bigint[])
+`, modelID, versions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make(map[string]AdminModelVersion, len(resourceIDs))
+	for rows.Next() {
+		var item AdminModelVersion
+		var requestSchema, modalities []byte
+		if err = rows.Scan(&item.CatalogVersion, &item.DisplayName, &item.LifecycleStatus,
+			&item.ModelCapabilityVersionID, &item.CapabilityVersion, &item.ProtocolDefinitionID, &item.ProtocolCode, &item.ProtocolVersion, &requestSchema,
+			&item.ContextLength, &item.MaximumOutputTokens, &modalities, &item.TokenizerVersion,
+			&item.SourceAvailable, &item.PublishedAt); err != nil {
+			return nil, err
+		}
+		if item.SchemaFieldCount, err = adminProtocolSchemaFieldCount(requestSchema); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal(modalities, &item.SupportedModalities); err != nil || item.SupportedModalities == nil {
+			return nil, errors.New("model capability modalities are invalid")
+		}
+		values[strconv.FormatInt(item.CatalogVersion, 10)] = item
+	}
+	if err = rows.Err(); err != nil {
 		return nil, err
 	}
 	return orderedValues(resourceIDs, values)

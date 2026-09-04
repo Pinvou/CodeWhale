@@ -84,8 +84,8 @@ test('invalid and mutually exclusive detail targets are removed without selectin
   assert.equal(crossSection.updates.token_cursor, null);
   assert.equal(crossSection.updates.usage_request_id, null);
 
-  const nestedInvalid = normalizeAdminModelTokenEntry('models', visible, true, locationLike('?section=models&model_id=bad&model_detail_tab=audit&model_audit_action=PUBLISH&model_audit_cursor=a&model_provisioning_status=FAILED&model_provisioning_cursor=p'), ['platform.models.read']);
-  for (const key of ['model_id', 'model_detail_tab', 'model_audit_action', 'model_audit_cursor', 'model_provisioning_status', 'model_provisioning_cursor']) assert.equal(nestedInvalid.updates[key], null);
+  const nestedInvalid = normalizeAdminModelTokenEntry('models', visible, true, locationLike('?section=models&model_id=bad&model_detail_tab=audit&model_audit_action=PUBLISH&model_audit_cursor=a&model_history_cursor=h&model_provisioning_status=FAILED&model_provisioning_cursor=p'), ['platform.models.read']);
+  for (const key of ['model_id', 'model_detail_tab', 'model_audit_action', 'model_audit_cursor', 'model_history_cursor', 'model_provisioning_status', 'model_provisioning_cursor']) assert.equal(nestedInvalid.updates[key], null);
 
   const nestedConflict = normalizeAdminModelTokenEntry('modelOperations', visible, true, locationLike('?section=modelOperations&operations_tab=usage&provisioning_id=00000000-0000-4000-8000-000000000301&provisioning_attempt_status=FAILED&provisioning_attempt_cursor=p&usage_request_id=00000000-0000-4000-8000-000000000401&usage_evidence_type=CANCELLATION&usage_evidence_cursor=u'), ['platform.tokens.read', 'platform.usage.read']);
   for (const key of ['provisioning_id', 'provisioning_attempt_status', 'provisioning_attempt_cursor', 'usage_request_id', 'usage_evidence_type', 'usage_evidence_cursor']) assert.equal(nestedConflict.updates[key], null);
@@ -97,6 +97,37 @@ test('invalid and mutually exclusive detail targets are removed without selectin
 
   const invalidToken = normalizeAdminModelTokenEntry('tokenResources', visible, true, locationLike('?section=tokenResources&token_account_id=bad&token_detail_tab=routes&token_credential_metadata_status=ACTIVE&token_credential_cursor=c&token_route_health_status=HEALTHY&token_route_cursor=r&token_provisioning_status=READY&token_provisioning_cursor=p&token_audit_action=READ&token_audit_cursor=a'), ['platform.tokens.read', 'platform.audit.read']);
   for (const key of ['token_account_id', 'token_detail_tab', 'token_credential_metadata_status', 'token_credential_cursor', 'token_route_health_status', 'token_route_cursor', 'token_provisioning_status', 'token_provisioning_cursor', 'token_audit_action', 'token_audit_cursor']) assert.equal(invalidToken.updates[key], null);
+});
+
+test('model detail gate and tab permissions clear hidden state before any detail request', () => {
+  const model = '00000000-0000-4000-8000-000000000101';
+  const base = ['models', 'tokenResources'];
+  const disabled = normalizeAdminModelTokenEntry('models', base, true, locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=audit&model_audit_cursor=secret&model_history_cursor=history`), ['platform.models.read', 'platform.audit.read'], { modelDetailsEnabled: false });
+  assert.equal(disabled.updates.model_id, null);
+  assert.equal(disabled.updates.model_detail_tab, null);
+  assert.equal(disabled.updates.model_audit_cursor, null);
+  assert.equal(disabled.updates.model_history_cursor, null);
+
+  const noPricing = normalizeAdminModelTokenEntry('models', base, true, locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=pricing`), ['platform.models.read'], { modelDetailsEnabled: true });
+  assert.equal(noPricing.updates.model_detail_tab, 'overview');
+  const noAudit = normalizeAdminModelTokenEntry('models', base, true, locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=audit&model_audit_action=SECRET`), ['platform.models.read'], { modelDetailsEnabled: true });
+  assert.equal(noAudit.updates.model_detail_tab, 'overview');
+  assert.equal(noAudit.updates.model_audit_action, null);
+  const noRuntime = normalizeAdminModelTokenEntry('models', base, true, locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=operations&model_provisioning_status=READY&model_provisioning_cursor=secret`), ['platform.models.read'], { modelDetailsEnabled: true });
+  assert.equal(noRuntime.updates.model_detail_tab, 'overview');
+  assert.equal(noRuntime.updates.model_provisioning_status, null);
+  assert.equal(noRuntime.updates.model_provisioning_cursor, null);
+
+  const operations = normalizeAdminModelTokenEntry('models', base, true, locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=operations&model_q=flash&model_cursor=list-page&model_provisioning_cursor=runtime-page`), ['platform.models.read', 'platform.tokens.read'], { modelDetailsEnabled: true });
+  assert.equal(operations.updates.model_id, undefined);
+  assert.equal(operations.updates.model_cursor, undefined);
+  const backURL = adminSectionURL('models', locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=operations&model_q=flash&model_cursor=list-page&model_provisioning_cursor=runtime-page`), { model_id: null, model_detail_tab: null, model_provisioning_cursor: null });
+  assert.equal(backURL, '/admin.html?section=models&model_tab=directory&model_q=flash&model_cursor=list-page');
+
+  const capabilities = normalizeAdminModelTokenEntry('models', base, true, locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=capabilities&model_history_cursor=history-page`), ['platform.models.read'], { modelDetailsEnabled: true });
+  assert.notEqual(capabilities.updates.model_history_cursor, null);
+  const lifecycle = normalizeAdminModelTokenEntry('models', base, true, locationLike(`?section=models&model_tab=directory&model_id=${model}&model_detail_tab=lifecycle&model_history_cursor=history-page`), ['platform.models.read'], { modelDetailsEnabled: true });
+  assert.equal(lifecycle.updates.model_history_cursor, null);
 });
 
 test('operation detail child gate preserves list state and canonical deep links only when authorized', () => {
@@ -191,7 +222,7 @@ test('every resource owns distinct URL filters and operation tabs follow atomic 
     usage_token_account_id: null, usage_organization_id: null, usage_started_from: null, usage_started_to: null, usage_cursor: 'next',
   });
   const clear = clearAdminModelTokenUpdates({ includeLegacy: true });
-  for (const key of ['model_cursor', 'protocol_cursor', 'formula_cursor', 'token_cursor', 'provisioning_cursor', 'usage_cursor', 'reconciliation_cursor', 'owner_candidate_cursor', 'model_audit_cursor', 'token_audit_cursor']) assert.equal(clear[key], null);
+  for (const key of ['model_cursor', 'protocol_cursor', 'formula_cursor', 'token_cursor', 'provisioning_cursor', 'usage_cursor', 'reconciliation_cursor', 'owner_candidate_cursor', 'model_audit_cursor', 'model_history_cursor', 'token_audit_cursor']) assert.equal(clear[key], null);
   assert.deepEqual(readAdminModelTokenOperationsTab(['platform.usage.read'], locationLike('?operations_tab=provisionings')), { tab: 'usage', replace: true, visible: ['usage', 'reconciliation'] });
 });
 
@@ -288,8 +319,8 @@ test('new page source keeps independent loading, error, refresh and last-updated
   const initialNormalize = view.indexOf('const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled');
   const initialDenied = view.indexOf('if (visible.length === 0)', initialNormalize);
   assert.ok(initialNormalize >= 0 && initialNormalize < initialDenied, 'initial authorization normalizes before rendering zero-permission denial');
-  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
-  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelTokenActionsEnabled \}\)/);
+  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelDetailsEnabled: nextDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
+  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, modelTokenActionsEnabled \}\)/);
   assert.match(operationsSource, /provisioningRequest &&/);
   assert.match(operationsSource, /usageRequest &&/);
   assert.match(operationsSource, /reconciliationRequest &&/);

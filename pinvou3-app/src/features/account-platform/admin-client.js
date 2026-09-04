@@ -11,6 +11,7 @@ const TOKEN_ADMIN_FILTERS = Object.freeze({
   reconciliation: ['q', 'status', 'severity', 'case_type', 'owner_id', 'sla_overdue'],
   ownerCandidates: ['q', 'owner_type', 'status', 'organization_id'],
   resourceAudit: ['resource_type', 'resource_id', 'action', 'actor_id', 'occurred_from', 'occurred_to'],
+  modelVersions: [],
   provisioningAttempts: ['status'],
   usageEvidence: ['evidence_type'],
 });
@@ -578,6 +579,12 @@ export class AdminPlatformClient {
     const requestSignal = signal;
     return this.request('token', `/admin/v1/models?${tokenAdminCollectionQuery('models', filters)}`, requestSignal);
   }
+  catalogModel(modelID, signal) {
+    return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}`, signal);
+  }
+  modelVersions(modelID, filters = {}, signal) {
+    return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/versions?${tokenAdminCollectionQuery('modelVersions', filters)}`, signal);
+  }
   protocols(filters = {}, signal) {
     return this.request('token', `/admin/v1/protocols?${tokenAdminCollectionQuery('protocols', filters)}`, signal);
   }
@@ -607,6 +614,14 @@ export class AdminPlatformClient {
   }
   tokenResourceAudit(filters = {}, signal) {
     return this.request('token', `/admin/v1/resource-audit?${tokenAdminCollectionQuery('resourceAudit', filters)}`, signal);
+  }
+  modelPriceProjection(modelID, protocolCode, formulaVersionID, creditUnit = 'MICROCREDIT', signal) {
+    const query = new URLSearchParams({
+      protocol_code: String(protocolCode || ''),
+      formula_version_id: String(formulaVersionID || ''),
+      credit_unit: String(creditUnit || ''),
+    });
+    return this.request('billing', `/admin/v1/models/${encodeURIComponent(modelID)}/price-projection?${query}`, signal);
   }
   saveModelDraft(modelID, input) {
     return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/draft`, 'PUT', input);

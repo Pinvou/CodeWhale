@@ -64,6 +64,13 @@ func main() {
 			log.Fatal("PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED must be a boolean")
 		}
 	}
+	adminModelDetailsEnabled := false
+	if raw := strings.TrimSpace(os.Getenv("PORTAL_ADMIN_MODEL_DETAILS_ENABLED")); raw != "" {
+		adminModelDetailsEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatal("PORTAL_ADMIN_MODEL_DETAILS_ENABLED must be a boolean")
+		}
+	}
 	adminModelTokenActionsEnabled := false
 	if raw := strings.TrimSpace(os.Getenv("PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED")); raw != "" {
 		adminModelTokenActionsEnabled, err = strconv.ParseBool(raw)
@@ -84,6 +91,7 @@ func main() {
 		AdminModelTokenIAEnabled:           adminModelTokenIAEnabled,
 		AdminTokenResourceFormsEnabled:     adminTokenResourceFormsEnabled,
 		AdminModelOperationsDetailsEnabled: adminModelOperationsDetailsEnabled,
+		AdminModelDetailsEnabled:           adminModelDetailsEnabled,
 		AdminModelTokenActionsEnabled:      adminModelTokenActionsEnabled,
 		SystemProbes:                       systemProbes(),
 		SecureCookies:                      publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",

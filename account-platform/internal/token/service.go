@@ -207,6 +207,8 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/formulas/:formula_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_PUBLISH", approvalpolicy.AuditOnly), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminPublishFormula))
 		admin.GET("/formulas/:formula_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewFormula))
 		admin.GET("/models", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogModels))
+		admin.GET("/models/:model_id", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminModelDetail))
+		admin.GET("/models/:model_id/versions", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminModelVersions))
 		admin.PUT("/models/:model_id/draft", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_DRAFT_SAVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSaveCatalogDraft))
 		admin.POST("/models/:model_id/publish", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishCatalogDraft))
 		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_LIFECYCLE_CHANGE"), httpserver.AdaptFunc(s.adminTransitionCatalogModel))

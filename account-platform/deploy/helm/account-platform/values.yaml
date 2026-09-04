@@ -38,6 +38,7 @@ portal:
   adminModelTokenIAEnabled: false
   adminTokenResourceFormsEnabled: false
   adminModelOperationsDetailsEnabled: false
+  adminModelDetailsEnabled: false
   adminModelTokenActionsEnabled: false
 
 replicas:
