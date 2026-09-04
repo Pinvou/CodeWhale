@@ -792,19 +792,19 @@ impl ToolSpec for WorkflowTool {
                 },
                 "script": {
                     "type": "string",
-                    "description": "Workflow JS source. The runtime provides args, task(...), parallel(thunks), pipeline(thunks), log(...), phase(...), and budget. Fan-out syntax: await parallel([() => task({...}), () => task({...})]). parallel() requires one array of zero-argument thunks, not variadic task promises."
+                    "description": "Workflow JS source. The runtime provides args, task(...), parallel(thunks), pipeline(items, ...stages), log(...), phase(...), and budget. Fan-out syntax: await parallel([() => task({...}), () => task({...})]). parallel() requires one array of zero-argument thunks, not variadic task promises. Date and Math.random are unavailable (deterministic replay)."
                 },
                 "source_path": {
                     "type": "string",
-                    "description": "Path to a .workflow.js script inside the workspace. Use instead of script for checked-in workflows."
+                    "description": "Path to a workflow script (.workflow.js/.ts) inside the workspace or ~/.codewhale/workflows. Use instead of script for checked-in workflows."
                 },
                 "fleet": {
                     "type": "string",
-                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") is frozen at start: each member's provider, model, reasoning, and permission ceiling are fixed, and per-task model/thinking overrides are rejected."
+                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") is frozen at start: each member's provider, model, reasoning, and permission ceiling are fixed, and any per-task routing/stance override (model, strength, thinking, type, allowed_tools, write_authority) is rejected; write-role members must declare write scope."
                 },
                 "plan": {
                     "type": "object",
-                    "description": "Structured planner plan JSON (#4124). Alternative to script/source_path. Accepts goal, risk, max_children, token_budget, phases[], and/or children[] (or IR nodes). risk must be exactly read_only, writes, or elevated. For a child, prefer role/profile without an explicit type; do not combine a role/profile with a conflicting type. Lowered to Workflow JS with parallel() partial-success semantics."
+                    "description": "Structured planner plan JSON (#4124). Alternative to script/source_path. Accepts goal, risk, max_children, token_budget, phases[], children[], gates[] (or IR nodes). gates[] are Workflow-owned lane gates that can pause roles pending APPROVE/PASS verdicts. risk: read_only | writes | elevated (common aliases accepted). For a child, prefer role/profile without an explicit type; do not combine a role/profile with a conflicting type. Lowered to Workflow JS with parallel() partial-success semantics."
                 },
                 "args": {
                     "anyOf": [
@@ -833,7 +833,7 @@ impl ToolSpec for WorkflowTool {
                 "verify": {
                     "type": "boolean",
                     "default": false,
-                    "description": "After a successful workflow completion, run quick workspace verifier gates (auto/quick profile)."
+                    "description": "After a successful workflow completion, run quick workspace verifier gates (auto/quick profile); any failed or skipped gate flips the run's final status to Failed."
                 }
             },
             "required": [],

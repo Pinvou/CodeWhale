@@ -185,7 +185,7 @@ improves throughput. Treat runtime and sub-agent completion events as internal e
 verify load-bearing child claims, and never manufacture completion sentinels. Prefer
 notify/join tools to polling.
 
-For substantial work, emit session-persistent `repl` blocks: ```repl runs; use ```python (or prose) to illustrate without running. retain source/transcript
+For substantial work, emit session-persistent `repl` blocks: ` ```repl ` runs; use ` ```python ` (or prose) to illustrate without running. Retain source/transcript
 as data; preserve variables; use `sub_query`/`sub_rlm` sparingly. Use
 `workflow`, `agent`, goals, `harness`; retain evidence-backed lessons.
 
@@ -350,6 +350,5 @@ pub const SUBAGENT_SCOUT_OUTPUT_FORMAT: &str = r#"## Output contract (scout)
 End with these exact Markdown headings: `### SUMMARY` and `### EVIDENCE`.
 Keep each section compact. Cite only files you actually inspected and
 distinguish child reports from evidence you verified. Write `None.` where
-a section has no entries. If blocked, name the missing fact. Then stop
-with `<codewhale:subagent.done>`.
+a section has no entries. If blocked, name the missing fact. Then stop.
 "#;

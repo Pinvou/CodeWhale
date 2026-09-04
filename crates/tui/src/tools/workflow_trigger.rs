@@ -4,11 +4,12 @@
 //! saying the word "workflow". Policy here answers "should we orchestrate?" —
 //! the parent prompt still **tells the operator** the intended shape and may
 //! ask setup questions via `request_user_input` (TUI modal) before calling
-//! `workflow` / `plan`.
+//! `workflow` / emitting a Plan-mode response.
 //!
-//! This remains Act/Agent guidance rather than a prose classifier at the host
-//! boundary. Operate sends ordinary work to direct background workers and
-//! reaches for Workflow only when its stronger orchestration properties help.
+//! This is an offline policy probe / reserved classifier; the Act prompt layer
+//! intentionally does not mention Workflow. Operate sends ordinary work to
+//! direct background workers and reaches for Workflow only when its stronger
+//! orchestration properties help.
 
 /// Signals the parent can supply without full conversation replay.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

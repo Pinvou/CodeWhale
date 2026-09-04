@@ -827,7 +827,7 @@ impl ToolSpec for McpSyncRegistry {
          plausibly covers the task's core specialized capability, call \
          start_registry_mcp_server with its exact name and inspect its tools \
          before choosing a local alternative; do not run its package command \
-         through exec_shell."
+         through Bash."
     }
 
     fn input_schema(&self) -> Value {

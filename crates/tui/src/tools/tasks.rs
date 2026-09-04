@@ -174,7 +174,7 @@ impl ToolSpec for TasksTool {
                 "Cancel a queued or running durable task through TaskManager. Requires approval because it changes work state."
             }
             Some("gate_run") => {
-                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task."
+                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task. Dangerous commands are BLOCKED; default timeout 120s."
             }
             Some("pr_attempt_record") => {
                 "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes."
@@ -190,7 +190,7 @@ impl ToolSpec for TasksTool {
                 "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
             }
             _ => {
-                "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\", \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\". Use task_shell_start for long-running shell work."
+                "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). Use task_shell_start for long-running shell work."
             }
         }
     }
@@ -861,7 +861,7 @@ impl ToolSpec for TaskShellStartTool {
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 },
+                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Applies to the foreground wait; the background task itself is not bounded by it — stop it with action=cancel." },
                 "stdin": { "type": "string" },
                 "tty": { "type": "boolean" }
             },

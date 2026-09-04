@@ -70,7 +70,9 @@ impl ToolSpec for FimEditTool {
          prefix_anchor (text that appears before the section to replace), and \
          suffix_anchor (text that appears after the section to replace). The tool \
          calls the active route's fill-in-the-middle completion endpoint to \
-         generate replacement content."
+         generate replacement content; this requires the active provider to \
+         expose a fill-in-the-middle completions endpoint, and the call fails \
+         otherwise."
     }
 
     fn input_schema(&self) -> Value {
