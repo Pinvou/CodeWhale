@@ -62,7 +62,7 @@ test('packaged clients reuse the deployed telemetry bootstrap defaults', () => {
   assert.match(usageRust, /pub\(crate\) const TELEMETRY_DEFAULT_BASE_URL/);
   assert.match(usageRust, /pub\(crate\) const TELEMETRY_ENROLLMENT_TOKEN/);
   assert.match(rust, /unwrap_or_else\(\|_\| TELEMETRY_DEFAULT_BASE_URL\.to_string\(\)\)/);
-  assert.match(rust, /DEFAULT_BEHAVIOR_EVENTS_URL/);
+  assert.match(rust, /unwrap_or_else\(\|_\| DEFAULT_BEHAVIOR_EVENTS_URL\.to_string\(\)\)/);
   assert.match(rust, /Err\(_\) => Some\(TELEMETRY_ENROLLMENT_TOKEN\.to_string\(\)\)/);
 });
 

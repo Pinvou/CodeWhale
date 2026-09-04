@@ -1399,7 +1399,9 @@ impl RuntimeConfig {
             .trim_end_matches('/')
             .to_string();
         let behavior_events_url = std::env::var("PINVOU_BEHAVIOR_EVENTS_URL")
-            .unwrap_or_else(|_| DEFAULT_BEHAVIOR_EVENTS_URL.to_string());
+            .unwrap_or_else(|_| DEFAULT_BEHAVIOR_EVENTS_URL.to_string())
+            .trim_end_matches('/')
+            .to_string();
         let enrollment_token = match std::env::var("PINVOU_TELEMETRY_ENROLLMENT_TOKEN") {
             Ok(value) => (value.len() >= 24).then_some(value),
             Err(_) => Some(TELEMETRY_ENROLLMENT_TOKEN.to_string()),
