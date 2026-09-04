@@ -131,6 +131,17 @@ function injectSource() {
     // save_model 失败注入:非 null 时 reject 该错误,模拟连接/写盘失败。
     var saveModelError = null;
     var dependencyCheckResponse = [];
+    var behaviorTelemetry = {
+      configured: true,
+      enabled: true,
+      user_enabled: null,
+      collection_period_id: 'period_test',
+      withdrawal_pending: false,
+      deletion_pending: false,
+      retention_days: 35,
+      pending_event_count: 0,
+      dropped_event_count: 0,
+    };
     var memoryOverview = {
       profile: { version: 1, revision: 3, identity: { call_name: '升级前称呼', assistant_alias: 'PINVOU' }, conventions: {} },
       preferences: [], work_context: [], current_focus: [], recent_activity: [], recent_work: [], pending: [], never: [],
@@ -218,6 +229,14 @@ function injectSource() {
         ] });
         case 'detect_local_vllm_setup': return Promise.resolve({ eligible: false, has_packages: false, vllm_online: false });
         case 'get_selected_pet': return Promise.resolve('lingling');
+        case 'get_behavior_telemetry_status': return Promise.resolve(Object.assign({}, behaviorTelemetry));
+        case 'set_behavior_telemetry_enabled':
+          behaviorTelemetry = Object.assign({}, behaviorTelemetry, {
+            enabled: !!args.enabled,
+            user_enabled: !!args.enabled,
+            collection_period_id: args.enabled ? 'period_test' : null,
+          });
+          return Promise.resolve(Object.assign({}, behaviorTelemetry));
         case 'list_sessions': return Promise.resolve([]);
         case 'get_super_permission_status': return Promise.resolve(superPerm);
         case 'set_super_permission': return Promise.reject(new Error('pkexec unavailable'));
@@ -1750,6 +1769,26 @@ async function modalWidth(page, headingText) {
   });
   rec('⑮ Community follows Help & Feedback and directly exposes the official group', communityPanel.exists && communityPanel.separateTab && communityPanel.immediatelyAfterHelp && communityPanel.directTopLevel && communityPanel.width >= 500 && communityPanel.width <= 700 && communityPanel.insideViewport && communityPanel.hasQrImage && communityPanel.correctGroupName && communityPanel.correctGroupNumber && communityPanel.copyEnabled && communityPanel.copyWorks && communityPanel.hasDiscussionsFallback && communityPanel.hasSupportBoundary && communityPanel.noHorizontalOverflow, JSON.stringify(communityPanel));
   await clickSettingsSection(page, '帮助反馈');
+  const behaviorEntry = await page.evaluate(() => ({
+    topLevel: !!document.querySelector('[data-testid="settings-section-data"]'),
+    secondLevel: !!document.querySelector('[data-testid="behavior-analytics-entry"]'),
+  }));
+  await page.click('[data-testid="behavior-analytics-entry"]');
+  await page.waitForFunction(() =>
+    (document.querySelector('[data-testid="settings-content"] h1')?.textContent || '').trim() === '数据管理');
+  const behaviorPanel = await page.evaluate(() => ({
+    hasBack: !!document.querySelector('[data-testid="behavior-analytics-back"]'),
+    enabled: document.querySelector('[role="switch"]')?.getAttribute('aria-checked') === 'true',
+    label: document.querySelector('[role="switch"]')?.getAttribute('aria-label') || '',
+  }));
+  await page.click('[role="switch"]');
+  await sleep(100);
+  const behaviorDisabled = await page.evaluate(() => ({
+    disabled: document.querySelector('[role="switch"]')?.getAttribute('aria-checked') === 'false',
+    invoked: window.__SETTINGS_TEST__.calls.some(call => call.cmd === 'set_behavior_telemetry_enabled' && call.args.enabled === false),
+  }));
+  rec('⑮a 行为统计开关位于帮助反馈二级页且可持久关闭', !behaviorEntry.topLevel && behaviorEntry.secondLevel && behaviorPanel.hasBack && behaviorPanel.enabled && behaviorPanel.label === '帮助改进 PINVOU' && behaviorDisabled.disabled && behaviorDisabled.invoked, JSON.stringify({ behaviorEntry, behaviorPanel, behaviorDisabled }));
+  await page.click('[data-testid="behavior-analytics-back"]');
   await clickExact(page, '提交反馈');
   await sleep(250);
   const feedbackModal = await page.evaluate(() => {

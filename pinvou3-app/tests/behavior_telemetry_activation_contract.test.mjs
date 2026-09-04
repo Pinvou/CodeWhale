@@ -52,7 +52,18 @@ test('internal preview defaults on while persisting an explicit user on/off choi
   assert.match(settingsView, /behaviorTelemetry/);
   assert.match(settingsView, /behaviorAnalyticsEnableConfirm/);
   assert.match(settingsView, /behaviorAnalyticsDisableConfirm/);
+  assert.match(settingsView, /testId="behavior-analytics-entry"/);
+  assert.match(settingsView, /behaviorAnalyticsEntryTitle[\s\S]*setActiveSection\('data'\)/);
+  assert.doesNotMatch(settingsView, /<SectionButton id="data"/);
   assert.doesNotMatch(settingsView, /deleteBehaviorTelemetry|deleteRemoteBehaviorTelemetryData/);
+});
+
+test('packaged clients reuse the deployed telemetry bootstrap defaults', () => {
+  assert.match(usageRust, /pub\(crate\) const TELEMETRY_DEFAULT_BASE_URL/);
+  assert.match(usageRust, /pub\(crate\) const TELEMETRY_ENROLLMENT_TOKEN/);
+  assert.match(rust, /unwrap_or_else\(\|_\| TELEMETRY_DEFAULT_BASE_URL\.to_string\(\)\)/);
+  assert.match(rust, /DEFAULT_BEHAVIOR_EVENTS_URL/);
+  assert.match(rust, /Err\(_\) => Some\(TELEMETRY_ENROLLMENT_TOKEN\.to_string\(\)\)/);
 });
 
 test('provider setup and first task environment use the v1 lifecycle events', () => {
