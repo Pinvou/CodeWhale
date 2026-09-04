@@ -689,6 +689,7 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
   var bridgeKind = runtimeOptions.bridgeKind === "web" ? "web" : "tauri";
   var listeners = Object.create(null);
   var windowListeners = Object.create(null);
+  var dispatchedWindowEvents = [];
   var handlers = Object.create(null);
   var calls = [];
   var dialogCalls = [];
@@ -814,6 +815,7 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
       });
     },
     dispatchEvent: function (event) {
+      dispatchedWindowEvents.push(event);
       (windowListeners[event.type] || []).slice().forEach(function (listener) { listener(event); });
       return true;
     },
@@ -838,11 +840,17 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
   }
   window.window = window;
   window.document = document;
+  function CustomEvent(type, init) {
+    this.type = type;
+    this.detail = init && init.detail;
+  }
+  window.CustomEvent = CustomEvent;
   var context = {
     window: window,
     document: document,
     localStorage: storage,
     sessionStorage: storage,
+    CustomEvent: CustomEvent,
     console: { log: function () {}, warn: function () {}, error: function () {} },
     setTimeout: runtimeOptions.setTimeout || setTimeout,
     clearTimeout: runtimeOptions.clearTimeout || clearTimeout,
@@ -890,6 +898,9 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
     storageData: storageData,
     dialogCalls: dialogCalls,
     getStructuredCloneCalls: function () { return structuredCloneCalls; },
+    getWindowEvents: function (type) {
+      return dispatchedWindowEvents.filter(function (event) { return !type || event.type === type; });
+    },
     setDialogResult: function (value) { dialogResult = value; },
     emit: function (name, payload) {
       assert.ok(listeners[name] && listeners[name].length, "expected listener " + name);
@@ -7790,6 +7801,7 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
     success: true,
     output: "Updated snake-game.html",
   });
+  var presentationEventsBeforeUpdate = harness.getWindowEvents("pinvou:present-artifact").length;
   presentArtifact("tool-present-snake-update", "snake-game.html", "Snake game v2", null);
 
   var updatedCardState = bridge.state.get("chat");
@@ -7812,6 +7824,18 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
     "the existing card must receive the latest presentation metadata");
   assert.strictEqual(updatedSnakeCards[0].path, absoluteArtifactPath,
     "a relative presentation update must preserve the existing absolute openable path");
+  var presentationEventsAfterUpdate = harness.getWindowEvents("pinvou:present-artifact");
+  assert.strictEqual(presentationEventsAfterUpdate.length, presentationEventsBeforeUpdate + 1,
+    bridgeKind + " must emit a presentation request even when artifact count stays unchanged");
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(presentationEventsAfterUpdate[presentationEventsAfterUpdate.length - 1].detail)),
+    {
+      sessionId: sessionId,
+      path: absoluteArtifactPath,
+      toolCallId: "tool-present-snake-update",
+    },
+    bridgeKind + " must present the reconciled absolute card path",
+  );
 
   // A same-named artifact from another absolute directory gets its own card.
   var exportSummaryPath = "C:\\Users\\tester\\exports\\summary.pptx";
