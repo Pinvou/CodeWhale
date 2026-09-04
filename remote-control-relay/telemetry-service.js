@@ -55,6 +55,7 @@ const ADMIN_SESSION_MS = 12 * 60 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
 const REGION_REFRESH_MS = DAY_MS;
 const STATS_TIMEZONE_OFFSET_MS = 8 * 60 * 60_000;
+const LEGACY_USAGE_LAST_RELEASE = Object.freeze([0, 8, 3]);
 const DEFAULT_EVENT_RETENTION_MS = 35 * DAY_MS;
 const DEFAULT_MAX_EVENTS = 100_000;
 const DEFAULT_MAX_DEVICES = 10_000;
@@ -231,26 +232,78 @@ function isBehaviorInstallationDevice(device) {
   return device?.hardware_source === "installation_id";
 }
 
+function isCoreUserTask(event, eventName) {
+  return event?.event_name === eventName
+    && event.initiator_type === "user"
+    && ["assistant", "code", "team"].includes(event.mode);
+}
+
+function parseReleaseVersion(value) {
+  const matched = /^v?(\d+)\.(\d+)\.(\d+)(?:\D|$)/.exec(String(value || "").trim());
+  return matched ? matched.slice(1).map(Number) : null;
+}
+
+function isLegacyUsageVersion(value) {
+  const version = parseReleaseVersion(value);
+  if (!version) return null;
+  for (let index = 0; index < LEGACY_USAGE_LAST_RELEASE.length; index += 1) {
+    if (version[index] === LEGACY_USAGE_LAST_RELEASE[index]) continue;
+    return version[index] < LEGACY_USAGE_LAST_RELEASE[index];
+  }
+  return true;
+}
+
+function behaviorGenerationVersions(devices) {
+  const versions = new Set();
+  for (const device of devices) {
+    if (!isBehaviorInstallationDevice(device)) continue;
+    const version = boundedText(device.app_version, 32);
+    if (version) versions.add(version);
+  }
+  return versions;
+}
+
+function usesLegacyStatsSource(device, behaviorVersions, eventVersion = null) {
+  if (!device || isBehaviorInstallationDevice(device)) return false;
+  const version = boundedText(eventVersion || device.app_version, 32);
+  if (version && behaviorVersions.has(version)) return false;
+  return isLegacyUsageVersion(version) !== false;
+}
+
+function statsDevicesForGeneration(devices) {
+  const behaviorVersions = behaviorGenerationVersions(devices);
+  return devices.filter((device) => {
+    if (isBehaviorInstallationDevice(device)) return true;
+    return usesLegacyStatsSource(device, behaviorVersions);
+  });
+}
+
 function compatibleUsageByDay(devices, usageEvents, behaviorEvents, startDay, endDay) {
   const deviceById = new Map(devices.map((device) => [device.device_id, device]));
+  const behaviorVersions = behaviorGenerationVersions(devices);
   const rows = new Map();
   for (let day = startDay; day <= endDay; day += 1) {
     rows.set(day, { legacy: new Map(), behavior: new Map() });
   }
 
   for (const event of usageEvents) {
-    if (!deviceById.has(event.device_id)) continue;
-    const row = rows.get(statsDay(event.occurred_at));
+    const device = deviceById.get(event.device_id);
+    if (!usesLegacyStatsSource(device, behaviorVersions, event.app_version)) continue;
+    const day = statsDay(event.occurred_at);
+    const row = rows.get(day);
     if (!row) continue;
     row.legacy.set(event.device_id, (row.legacy.get(event.device_id) || 0) + 1);
   }
 
   const seenAttempts = new Set();
   for (const event of behaviorEvents) {
-    if (event.event_name !== "task_finished") continue;
-    const row = rows.get(statsDay(event.occurred_at));
+    if (!isCoreUserTask(event, "task_finished")) continue;
+    const device = deviceById.get(event.device_id);
+    if (!isBehaviorInstallationDevice(device)) continue;
+    const day = statsDay(event.occurred_at);
+    const row = rows.get(day);
     if (!row) continue;
-    const deviceId = boundedText(event.device_id || eventIdentity(event), 128);
+    const deviceId = boundedText(event.device_id, 128);
     const attemptId = boundedText(event.attempt_id || event.turn_id || event.event_id, 128);
     if (!deviceId || !attemptId) continue;
     const attemptKey = `${deviceId}\u001f${attemptId}`;
@@ -260,10 +313,9 @@ function compatibleUsageByDay(devices, usageEvents, behaviorEvents, startDay, en
   }
 
   return new Map([...rows].map(([day, row]) => {
-    const counts = new Map(row.legacy);
-    // 新旧客户端可能在迁移期同时发送两类事件。同一设备同一天一旦存在
-    // task_finished，就以新埋点为准，避免旧 usage event 再次累计。
-    for (const [deviceId, turns] of row.behavior) counts.set(deviceId, turns);
+    // 旧设备与新安装身份没有可靠关联键，因此按发布代际选择数据源，
+    // 而不尝试猜测两个 device_id 的对应关系。
+    const counts = new Map([...row.legacy, ...row.behavior]);
     return [day, counts];
   }));
 }
@@ -280,7 +332,7 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   const today = statsDay(now);
   const trendStart = today - 29;
   const activeWeekStart = today - 6;
-  const operationalDevices = devices.filter((device) => !isBehaviorInstallationDevice(device));
+  const operationalDevices = statsDevicesForGeneration(devices);
   const deviceById = new Map(devices.map((device) => [device.device_id, device]));
 
   const online = operationalDevices.filter(
@@ -343,18 +395,29 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
 
 export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallbackNow = Date.now()) {
   const { behaviorEvents, now } = statsArguments(behaviorEventsOrNow, fallbackNow);
+  const deviceById = new Map(devices.map((device) => [device.device_id, device]));
   const weekStart = statsDay(now) - 6;
   const today = statsDay(now);
   const usage = compatibleUsageByDay(devices, events, behaviorEvents, weekStart, today);
   const activity = new Map();
+  const lastBehaviorActivity = new Map();
   for (const counts of usage.values()) {
     for (const [deviceId, turns] of counts) {
       activity.set(deviceId, (activity.get(deviceId) || 0) + turns);
     }
   }
+  for (const event of behaviorEvents) {
+    if (!isCoreUserTask(event, "task_finished")) continue;
+    if (!isBehaviorInstallationDevice(deviceById.get(event.device_id))) continue;
+    const occurredAt = Number(event.occurred_at || 0);
+    if (!Number.isFinite(occurredAt)) continue;
+    lastBehaviorActivity.set(
+      event.device_id,
+      Math.max(lastBehaviorActivity.get(event.device_id) || 0, occurredAt),
+    );
+  }
 
-  return devices
-    .filter((device) => !isBehaviorInstallationDevice(device))
+  return statsDevicesForGeneration(devices)
     .map((device) => {
       const online = now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS;
       return {
@@ -365,7 +428,7 @@ export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallb
         online,
         region: formatDeviceRegion(device.region),
         first_seen_at: device.first_seen_at,
-        last_active_at: device.last_active_at,
+        last_active_at: lastBehaviorActivity.get(device.device_id) || device.last_active_at,
         turns_7d: activity.get(device.device_id) || 0,
       };
     })
@@ -391,12 +454,6 @@ function dayRows(window) {
 
 function eventIdentity(event) {
   return boundedText(event.identity_id || event.device_id, 128);
-}
-
-function isCoreUserTask(event, eventName) {
-  return event?.event_name === eventName
-    && event.initiator_type === "user"
-    && ["assistant", "code", "team"].includes(event.mode);
 }
 
 function activeIdentityByDay(_devices, _usageEvents, behaviorEvents, window) {
@@ -2067,6 +2124,7 @@ export class TelemetryStore {
         device_id: device.device_id,
         occurred_at: occurredAt,
         received_at: now,
+        app_version: boundedText(device.app_version, 32),
         input_tokens: boundedCount(raw.input_tokens),
         output_tokens: boundedCount(raw.output_tokens),
         success: raw.success !== false,

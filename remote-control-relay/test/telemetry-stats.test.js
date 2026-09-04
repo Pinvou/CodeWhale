@@ -83,7 +83,7 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
       first_seen_at: at("2026-07-06T10:00:00"),
       last_seen_at: now - 10_000,
       last_active_at: at("2026-07-14T11:00:00"),
-      app_version: "1.0.0",
+      app_version: "0.8.3",
       platform: "linux",
       state: "online",
       region: {
@@ -98,7 +98,7 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
       first_seen_at: at("2026-07-13T09:00:00"),
       last_seen_at: now - 360_000,
       last_active_at: at("2026-07-14T10:00:00"),
-      app_version: "2.0.0",
+      app_version: "0.8.2",
       platform: "windows",
       state: "online",
     },
@@ -107,7 +107,7 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
       first_seen_at: at("2026-07-14T08:00:00"),
       last_seen_at: now - 360_000,
       last_active_at: at("2026-07-14T09:00:00"),
-      app_version: "1.0.0",
+      app_version: "0.8.3",
       platform: "linux",
       state: "online",
     },
@@ -124,8 +124,8 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
   assert.equal(overview.online_window_seconds, 300);
   assert.deepEqual(overview.counts, { online: 1, active_today: 3, active_7d: 3 });
   assert.deepEqual(overview.active_versions, [
-    { version: "1.0.0", count: 2 },
-    { version: "2.0.0", count: 1 },
+    { version: "0.8.3", count: 2 },
+    { version: "0.8.2", count: 1 },
   ]);
   assert.equal(overview.usage_trend.length, 30);
   assert.deepEqual(overview.usage_trend.at(-2), {
@@ -149,53 +149,46 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
   assert.equal("failure_rate_7d" in list[0], false);
 });
 
-test("device dashboard combines legacy usage and behavior task finishes without double counting", () => {
+test("device dashboard selects release generations for unrelated legacy and behavior identities", () => {
   const now = at("2026-09-04T12:00:00");
   const devices = [
     {
       device_id: "dev_legacy",
       first_seen_at: at("2026-09-01T08:00:00"),
-      last_seen_at: now - 10_000,
+      last_seen_at: now - 30_000,
       app_version: "0.8.3",
       hardware_source: "windows_cim_uuid",
     },
     {
-      device_id: "dev_shared",
+      device_id: "dev_hw",
       first_seen_at: at("2026-09-02T08:00:00"),
       last_seen_at: now - 20_000,
       app_version: "0.9.1",
       hardware_source: "windows_cim_uuid",
     },
     {
-      device_id: "dev_behavior_installation",
-      first_seen_at: at("2026-09-04T08:00:00"),
-      last_seen_at: now - 30_000,
+      device_id: "dev_install",
+      first_seen_at: at("2026-09-02T08:00:00"),
+      last_seen_at: now - 10_000,
       app_version: "0.9.1",
       hardware_source: "installation_id",
     },
   ];
   const usageEvents = [
-    { event_id: "usage_legacy_1", device_id: "dev_legacy", occurred_at: at("2026-09-04T09:00:00") },
-    { event_id: "usage_legacy_2", device_id: "dev_legacy", occurred_at: at("2026-09-04T09:05:00") },
-    { event_id: "usage_shared_1", device_id: "dev_shared", occurred_at: at("2026-09-04T10:00:00") },
-    { event_id: "usage_shared_2", device_id: "dev_shared", occurred_at: at("2026-09-04T10:05:00") },
+    { event_id: "usage_legacy_previous", device_id: "dev_legacy", occurred_at: at("2026-09-03T09:00:00") },
+    { event_id: "usage_legacy_today", device_id: "dev_legacy", occurred_at: at("2026-09-04T09:00:00") },
+    { event_id: "usage_hw_1", device_id: "dev_hw", occurred_at: at("2026-09-04T10:00:00") },
+    { event_id: "usage_hw_2", device_id: "dev_hw", occurred_at: at("2026-09-04T10:05:00") },
   ];
   const behaviorEvents = [
-    {
-      event_id: "behavior_shared",
-      event_name: "task_finished",
-      attempt_id: "attempt_shared",
-      device_id: "dev_shared",
-      app_version: "0.9.1",
-      status: "success",
-      occurred_at: at("2026-09-04T10:10:00"),
-    },
     {
       event_id: "behavior_installation_1",
       event_name: "task_finished",
       attempt_id: "attempt_installation_1",
-      device_id: "dev_behavior_installation",
+      device_id: "dev_install",
       app_version: "0.9.1",
+      mode: "assistant",
+      initiator_type: "user",
       status: "success",
       occurred_at: at("2026-09-04T11:00:00"),
     },
@@ -203,38 +196,106 @@ test("device dashboard combines legacy usage and behavior task finishes without 
       event_id: "behavior_installation_duplicate",
       event_name: "task_finished",
       attempt_id: "attempt_installation_1",
-      device_id: "dev_behavior_installation",
+      device_id: "dev_install",
       app_version: "0.9.1",
+      mode: "assistant",
+      initiator_type: "user",
       status: "success",
       occurred_at: at("2026-09-04T11:01:00"),
+    },
+    {
+      event_id: "behavior_scheduled",
+      event_name: "task_finished",
+      attempt_id: "attempt_scheduled",
+      device_id: "dev_install",
+      app_version: "0.9.1",
+      mode: "scheduled",
+      initiator_type: "system",
+      status: "success",
+      occurred_at: at("2026-09-04T11:02:00"),
     },
     {
       event_id: "behavior_installation_2",
       event_name: "task_finished",
       attempt_id: "attempt_installation_2",
-      device_id: "dev_behavior_installation",
+      device_id: "dev_install",
       app_version: "0.9.1",
+      mode: "team",
+      initiator_type: "user",
       status: "failed",
       occurred_at: at("2026-09-04T11:05:00"),
     },
   ];
 
   const overview = buildStatsOverview(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(overview.counts, { online: 2, active_today: 3, active_7d: 3 });
+  assert.deepEqual(overview.counts, { online: 2, active_today: 2, active_7d: 2 });
+  assert.deepEqual(overview.usage_trend.at(-2), {
+    day: "2026-09-03",
+    active_devices: 1,
+    turns: 1,
+  });
   assert.deepEqual(overview.usage_trend.at(-1), {
     day: "2026-09-04",
-    active_devices: 3,
-    turns: 5,
+    active_devices: 2,
+    turns: 3,
   });
   assert.deepEqual(overview.active_versions, [
-    { version: "0.9.1", count: 2 },
     { version: "0.8.3", count: 1 },
+    { version: "0.9.1", count: 1 },
   ]);
 
   const list = buildDeviceList(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(list.map((device) => device.device_id), ["dev_legacy", "dev_shared"]);
+  assert.deepEqual(list.map((device) => device.device_id), ["dev_install", "dev_legacy"]);
+  assert.equal(list.find((device) => device.device_id === "dev_install").turns_7d, 2);
+  assert.equal(list.find((device) => device.device_id === "dev_install").last_active_at, at("2026-09-04T11:05:00"));
   assert.equal(list.find((device) => device.device_id === "dev_legacy").turns_7d, 2);
-  assert.equal(list.find((device) => device.device_id === "dev_shared").turns_7d, 1);
+  assert.equal(list.some((device) => device.device_id === "dev_hw"), false);
+});
+
+test("scheduled and system behavior tasks never enter homepage metrics", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [
+    {
+      device_id: "dev_hw",
+      first_seen_at: at("2026-09-04T08:00:00"),
+      last_seen_at: now - 10_000,
+      app_version: "0.8.3",
+      hardware_source: "windows_cim_uuid",
+    },
+    {
+      device_id: "dev_install",
+      first_seen_at: at("2026-09-04T08:00:00"),
+      last_seen_at: now - 5_000,
+      app_version: "0.9.1",
+      hardware_source: "installation_id",
+    },
+  ];
+  const usageEvents = [
+    { event_id: "usage_hw", device_id: "dev_hw", occurred_at: at("2026-09-04T10:00:00") },
+  ];
+  const behaviorEvents = [
+    {
+      event_id: "behavior_system",
+      event_name: "task_finished",
+      attempt_id: "attempt_system",
+      device_id: "dev_install",
+      app_version: "0.9.1",
+      mode: "scheduled",
+      initiator_type: "system",
+      status: "success",
+      occurred_at: at("2026-09-04T11:00:00"),
+    },
+  ];
+
+  const overview = buildStatsOverview(devices, usageEvents, behaviorEvents, now);
+  assert.deepEqual(overview.counts, { online: 2, active_today: 1, active_7d: 1 });
+  assert.deepEqual(overview.usage_trend.at(-1), {
+    day: "2026-09-04",
+    active_devices: 1,
+    turns: 1,
+  });
+  assert.deepEqual(buildDeviceList(devices, usageEvents, behaviorEvents, now)
+    .map((device) => device.device_id).sort(), ["dev_hw", "dev_install"]);
 });
 
 test("behavior analytics aggregates tasks voice tools installs scenes and models", () => {
@@ -1158,6 +1219,7 @@ test("retention compaction removes expired identity mappings and facts without r
     }]);
     assert.equal(store.devices.size, 1);
     assert.equal(store.events.length, 1);
+    assert.equal(store.events[0].app_version, "0.8.7");
 
     assert.equal(store.compactExpiredData(now), true);
     assert.equal(store.devices.size, 0);
