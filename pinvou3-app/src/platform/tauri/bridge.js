@@ -998,6 +998,8 @@
   var retryFirstTurn = chatFeature.retryFirstTurn;
   var prefillComposer = chatFeature.prefillComposer;
   var removeQueued = chatFeature.removeQueued;
+  var prioritizeQueued = chatFeature.prioritizeQueued;
+  var editQueued = chatFeature.editQueued;
   var steer = chatFeature.steer;
   var interruptAndSend = chatFeature.interruptAndSend;
   var interruptAndSendQueued = chatFeature.interruptAndSendQueued;
@@ -2638,6 +2640,8 @@
       retryFirstTurn: retryFirstTurn,
       prefillComposer: prefillComposer,
       removeQueued: removeQueued,
+      prioritizeQueued: prioritizeQueued,
+      editQueued: editQueued,
       steer: steer,
       interruptAndSend: interruptAndSend,
       interruptAndSendQueued: interruptAndSendQueued,
