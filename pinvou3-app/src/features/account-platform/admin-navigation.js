@@ -53,6 +53,7 @@ const adminModelTokenDetailParameters = Object.freeze({
 const adminModelTokenTabParameters = Object.freeze({
   provisionings: Object.freeze([...Object.values(adminModelTokenQueryParameters.provisionings), ...adminModelTokenDetailParameters.provisioning]),
   usage: Object.freeze([...Object.values(adminModelTokenQueryParameters.usage), ...adminModelTokenDetailParameters.usage]),
+  reconciliation: Object.freeze([...Object.values(adminModelTokenQueryParameters.reconciliation), ...adminModelTokenDetailParameters.usage]),
 });
 const adminModelTokenSectionParameters = Object.freeze({
   models: Object.freeze(['model_tab', 'model_id', 'model_detail_tab', ...['models', 'protocols', 'formulas', 'modelAudit', 'modelProvisionings'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
@@ -76,6 +77,10 @@ export function adminModelTokenIAGateEnabled(session = {}) {
 
 export function adminTokenResourceFormsGateEnabled(session = {}) {
   return session?.feature_flags?.admin_token_resource_forms === true;
+}
+
+export function adminModelOperationsDetailsGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_model_operations_details === true;
 }
 
 export function readAdminModelTokenQuery(source, locationLike = globalThis.location) {
@@ -198,11 +203,16 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
   if (permissions !== null && requested === 'modelOperations') {
     const operations = readAdminModelTokenOperationsTab(permissions, locationLike);
     if (operations.replace) updates.operations_tab = operations.tab || null;
-    for (const tab of ['provisionings', 'usage']) {
+    for (const tab of ['provisionings', 'usage', 'reconciliation']) {
       if (!operations.visible.includes(tab)) clearParameters(adminModelTokenTabParameters[tab], updates);
     }
-    if (operations.tab !== 'provisionings' && search.get('provisioning_id')) clearParameters(adminModelTokenDetailParameters.provisioning, updates);
-    if (operations.tab !== 'usage' && search.get('usage_request_id')) clearParameters(adminModelTokenDetailParameters.usage, updates);
+    if (options.modelOperationsDetailsEnabled !== true) {
+      clearParameters(adminModelTokenDetailParameters.provisioning, updates);
+      clearParameters(adminModelTokenDetailParameters.usage, updates);
+    } else {
+      if (operations.tab !== 'provisionings' && search.get('provisioning_id')) clearParameters(adminModelTokenDetailParameters.provisioning, updates);
+      if (!['usage', 'reconciliation'].includes(operations.tab) && search.get('usage_request_id')) clearParameters(adminModelTokenDetailParameters.usage, updates);
+    }
   }
   if (permissions !== null && requested === 'models') {
     const modelTabs = readAdminModelTokenModelTab(permissions, locationLike);

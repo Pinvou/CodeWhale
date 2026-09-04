@@ -66,6 +66,7 @@ test("account platform changes select its production browser smokes", () => {
       "node:tests/admin_roles_ui_smoke.mjs",
       "npm:test:admin-finance-overview-ui",
       "npm:test:admin-token-resources-ui",
+      "npm:test:admin-model-operations-ui",
     ],
   );
 });

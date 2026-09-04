@@ -11,6 +11,8 @@ const TOKEN_ADMIN_FILTERS = Object.freeze({
   reconciliation: ['q', 'status', 'severity', 'case_type', 'owner_id', 'sla_overdue'],
   ownerCandidates: ['q', 'owner_type', 'status', 'organization_id'],
   resourceAudit: ['resource_type', 'resource_id', 'action', 'actor_id', 'occurred_from', 'occurred_to'],
+  provisioningAttempts: ['status'],
+  usageEvidence: ['evidence_type'],
 });
 
 function tokenAdminCollectionQuery(source, filters = {}) {
@@ -542,8 +544,11 @@ export class AdminPlatformClient {
   usageRequest(usageRequestID, signal) {
     return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal);
   }
-  retryUsageReconciliation(usageRequestID, reason) {
-    return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, `usage-reconcile-${crypto.randomUUID()}`);
+  usageEvidence(usageRequestID, filters = {}, signal) {
+    return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/evidence?${tokenAdminCollectionQuery('usageEvidence', filters)}`, signal);
+  }
+  retryUsageReconciliation(usageRequestID, reason, idempotencyKey) {
+    return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, idempotencyKey);
   }
   catalogModels(filtersOrSignal = {}, signal) {
     if (isAbortSignal(filtersOrSignal)) {
@@ -607,10 +612,13 @@ export class AdminPlatformClient {
     return this.request('token', `/admin/v1/provisionings?${tokenAdminCollectionQuery('provisionings', filters)}`, requestSignal);
   }
   provisioning(provisioningID, signal) {
-    return this.request('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}`, signal);
+    return this.request('token', `/admin/v2/provisionings/${encodeURIComponent(provisioningID)}`, signal);
   }
-  repairProvisioning(provisioningID, reason) {
-    return this.mutate('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/repair`, 'POST', { reason }, `provisioning-repair-${crypto.randomUUID()}`);
+  provisioningAttempts(provisioningID, filters = {}, signal) {
+    return this.request('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/attempts?${tokenAdminCollectionQuery('provisioningAttempts', filters)}`, signal);
+  }
+  repairProvisioning(provisioningID, reason, idempotencyKey) {
+    return this.mutate('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/repair`, 'POST', { reason }, idempotencyKey);
   }
   systemStatus(signal) {
     return this.request('system', '/status', signal);

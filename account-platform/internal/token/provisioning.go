@@ -333,9 +333,9 @@ func provisioningError(item RouteProvisioning) error {
 }
 
 func sanitizeProvisioningReason(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 500 {
-		value = value[:500]
+	value, valid := normalizeAdminOperationReason(value)
+	if !valid {
+		return ""
 	}
 	return value
 }
@@ -344,6 +344,10 @@ func provisioningDigest(value any) string {
 	payload, _ := json.Marshal(value)
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
+}
+
+func provisioningCommandStorageKey(actor uuid.UUID, key string) string {
+	return "v2:" + provisioningDigest(map[string]any{"actor_id": actor, "idempotency_key": key})
 }
 
 func (p *PostgresDefaultRouteProvisioner) List(ctx context.Context, status string, limit int) ([]RouteProvisioning, error) {
@@ -393,7 +397,8 @@ func (p *PostgresDefaultRouteProvisioner) Detail(ctx context.Context, id uuid.UU
 
 func (p *PostgresDefaultRouteProvisioner) Repair(ctx context.Context, id, actor uuid.UUID, key, reason string) (RouteProvisioning, error) {
 	reason = sanitizeProvisioningReason(reason)
-	if id == uuid.Nil || actor == uuid.Nil || reason == "" || len(strings.TrimSpace(key)) < 16 {
+	key = strings.TrimSpace(key)
+	if id == uuid.Nil || actor == uuid.Nil || reason == "" || len(key) < 16 || len(key) > 128 {
 		return RouteProvisioning{}, ErrForbidden
 	}
 	tx, err := p.repository.pool.Begin(ctx)
@@ -405,13 +410,27 @@ func (p *PostgresDefaultRouteProvisioner) Repair(ctx context.Context, id, actor 
 	if err != nil {
 		return RouteProvisioning{}, ErrNotFound
 	}
-	digest := provisioningDigest(map[string]any{"provisioning_id": id, "reason": reason})
+	const commandType = "PROVISIONING_REPAIR"
+	digest := provisioningDigest(map[string]any{"actor_id": actor, "command_type": commandType, "provisioning_id": id, "reason": reason})
+	storageKey := provisioningCommandStorageKey(actor, key)
 	var storedDigest string
 	var resultSnapshot []byte
-	var resultRound int
-	err = tx.QueryRow(ctx, `SELECT request_digest,repair_round,result_snapshot FROM route_provisioning_commands WHERE idempotency_key=$1`, key).Scan(&storedDigest, &resultRound, &resultSnapshot)
+	var storedProvisioningID uuid.UUID
+	legacyCommand := false
+	err = tx.QueryRow(ctx, `SELECT provisioning_id,request_digest,result_snapshot FROM route_provisioning_commands WHERE idempotency_key=$1 AND actor_id=$2 AND command_type=$3`, storageKey, actor, commandType).Scan(&storedProvisioningID, &storedDigest, &resultSnapshot)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Read pre-v2 rows only for the same actor and command. New writes always
+		// use the scoped digest so another actor's identical raw key cannot
+		// collide with or replay this command.
+		err = tx.QueryRow(ctx, `SELECT provisioning_id,request_digest,result_snapshot FROM route_provisioning_commands WHERE idempotency_key=$1 AND actor_id=$2 AND command_type=$3`, key, actor, commandType).Scan(&storedProvisioningID, &storedDigest, &resultSnapshot)
+		legacyCommand = err == nil
+	}
 	if err == nil {
-		if storedDigest != digest {
+		expectedDigest := digest
+		if legacyCommand {
+			expectedDigest = provisioningDigest(map[string]any{"provisioning_id": id, "reason": reason})
+		}
+		if storedProvisioningID != id || storedDigest != expectedDigest {
 			return RouteProvisioning{}, ErrIdempotencyConflict
 		}
 		var replay RouteProvisioning
@@ -434,7 +453,7 @@ func (p *PostgresDefaultRouteProvisioner) Repair(ctx context.Context, id, actor 
 		return RouteProvisioning{}, err
 	}
 	resultSnapshot, _ = json.Marshal(result)
-	_, err = tx.Exec(ctx, `INSERT INTO route_provisioning_commands(idempotency_key,command_type,request_digest,provisioning_id,repair_round,actor_id,reason,result_snapshot,created_at) VALUES($1,'PROVISIONING_REPAIR',$2,$3,$4,$5,$6,$7,$8)`, key, digest, id, item.RepairRound, actor, reason, resultSnapshot, now)
+	_, err = tx.Exec(ctx, `INSERT INTO route_provisioning_commands(idempotency_key,command_type,request_digest,provisioning_id,repair_round,actor_id,reason,result_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, storageKey, commandType, digest, id, item.RepairRound, actor, reason, resultSnapshot, now)
 	if err == nil {
 		evidence, _ := json.Marshal(map[string]any{"repair_round": item.RepairRound})
 		_, err = tx.Exec(ctx, `INSERT INTO route_provisioning_audit(id,provisioning_id,action,before_status,after_status,desired_generation,actor_id,reason,evidence,created_at) VALUES($1,$2,'REPAIR_REQUESTED',$3,'PENDING',$4,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), id, item.Status, item.DesiredGeneration, actor, reason, evidence, now)

@@ -29,16 +29,18 @@ func (e adminQueryRateLimitError) Error() string { return ErrAdminQueryRateLimit
 func (e adminQueryRateLimitError) Unwrap() error { return ErrAdminQueryRateLimited }
 
 const (
-	adminModelsSort          = "normalized_name ASC,model_id ASC"
-	adminProtocolsSort       = "protocol_code ASC,version DESC,id ASC"
-	adminFormulasSort        = "protocol_code ASC,version DESC,id ASC"
-	adminTokenAccountsSort   = "updated_at DESC,id ASC"
-	adminProvisioningsSort   = "updated_at DESC,id DESC"
-	adminUsageSort           = "updated_at DESC,id ASC"
-	adminReconciliationSort  = "updated_at DESC,id DESC"
-	adminResourceAuditSort   = "occurred_at DESC,id DESC"
-	adminOwnerCandidatesSort = "normalized_display_label ASC,owner_type ASC,owner_id ASC"
-	adminUsageEvidenceSort   = "observed_at ASC,source_kind ASC,source_id ASC"
+	adminModelsSort                       = "normalized_name ASC,model_id ASC"
+	adminProtocolsSort                    = "protocol_code ASC,version DESC,id ASC"
+	adminFormulasSort                     = "protocol_code ASC,version DESC,id ASC"
+	adminTokenAccountsSort                = "updated_at DESC,id ASC"
+	adminProvisioningsSort                = "updated_at DESC,id DESC"
+	adminProvisioningAttemptsSort         = "repair_round ASC,attempt_number ASC,id ASC"
+	adminUsageSort                        = "updated_at DESC,id ASC"
+	adminReconciliationSort               = "updated_at DESC,id DESC"
+	adminResourceAuditSort                = "occurred_at DESC,id DESC"
+	adminOwnerCandidatesSort              = "normalized_display_label ASC,owner_type ASC,owner_id ASC"
+	adminUsageEvidenceSort                = "observed_at ASC,source_kind ASC,source_id ASC"
+	adminUsageReconciliationCasePredicate = "review.domain='TOKEN' AND review.case_type IN ('USAGE_RECONCILIATION_REVIEW') AND review.resource_type='USAGE_REQUEST' AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=review.resource_id)"
 )
 
 type AdminQueryEnvelope struct {
@@ -83,6 +85,57 @@ type AdminUsageEvidence struct {
 	Type       string          `json:"evidence_type"`
 	Payload    json.RawMessage `json:"evidence"`
 	ObservedAt time.Time       `json:"observed_at"`
+}
+
+// AdminProvisioningAttempt is the Portal-safe attempt projection. Worker
+// identities and free-form error details stay behind the service boundary;
+// operators only need stable diagnostics to decide whether to repair.
+type AdminProvisioningAttempt struct {
+	ID            uuid.UUID  `json:"attempt_id"`
+	RepairRound   int        `json:"repair_round"`
+	AttemptNumber int        `json:"attempt_number"`
+	Status        string     `json:"status"`
+	Stage         string     `json:"stage"`
+	ErrorCode     *string    `json:"error_code,omitempty"`
+	StartedAt     time.Time  `json:"started_at"`
+	EndedAt       *time.Time `json:"ended_at,omitempty"`
+}
+
+// AdminProvisioningDetail is the versioned Portal-safe projection. Attempt
+// history is deliberately excluded and is available only through its bounded,
+// redacted pagination endpoint. Lease owners, credential IDs and free-form
+// diagnostic text never cross this boundary.
+type AdminProvisioningDetail struct {
+	ID                uuid.UUID  `json:"provisioning_id"`
+	ScopeType         string     `json:"scope_type"`
+	ScopeID           uuid.UUID  `json:"scope_id"`
+	ModelID           uuid.UUID  `json:"model_id"`
+	ProtocolCode      string     `json:"protocol_code"`
+	ProtocolVersionID *uuid.UUID `json:"protocol_version_id,omitempty"`
+	DesiredGeneration int64      `json:"desired_generation"`
+	ActualGeneration  *int64     `json:"actual_generation,omitempty"`
+	Status            string     `json:"status"`
+	Stage             string     `json:"stage"`
+	PolicyVersion     int64      `json:"policy_version"`
+	AttemptCount      int        `json:"attempt_count"`
+	RepairRound       int        `json:"repair_round"`
+	MaxAttempts       int        `json:"max_attempts"`
+	SLADeadlineAt     time.Time  `json:"sla_deadline_at"`
+	NextRetryAt       *time.Time `json:"next_retry_at,omitempty"`
+	LastErrorCode     *string    `json:"last_error_code,omitempty"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+}
+
+func redactAdminProvisioningDetail(item RouteProvisioning) AdminProvisioningDetail {
+	return AdminProvisioningDetail{
+		ID: item.ID, ScopeType: item.ScopeType, ScopeID: item.ScopeID, ModelID: item.ModelID,
+		ProtocolCode: item.ProtocolCode, ProtocolVersionID: item.ProtocolVersionID,
+		DesiredGeneration: item.DesiredGeneration, ActualGeneration: item.ActualGeneration,
+		Status: item.Status, Stage: item.Stage, PolicyVersion: item.PolicyVersion,
+		AttemptCount: item.AttemptCount, RepairRound: item.RepairRound, MaxAttempts: item.MaxAttempts,
+		SLADeadlineAt: item.SLADeadlineAt, NextRetryAt: item.NextRetryAt,
+		LastErrorCode: item.LastErrorCode, UpdatedAt: item.UpdatedAt,
+	}
 }
 
 type AdminUsageSummary struct {
@@ -557,7 +610,7 @@ func reconciliationSnapshotSource(filter adminQueryFilter) (AdminSnapshotMemberS
 	if err != nil {
 		return nil, err
 	}
-	caseType, err := filter.upperString("case_type", 120)
+	caseType, err := filter.enum("case_type", "USAGE_RECONCILIATION_REVIEW")
 	if err != nil {
 		return nil, err
 	}
@@ -571,7 +624,7 @@ func reconciliationSnapshotSource(filter adminQueryFilter) (AdminSnapshotMemberS
 	}
 	return func(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, highWater time.Time, maximum int) error {
 		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `SELECT review.id::text AS resource_id,row_number() OVER (ORDER BY review.updated_at DESC,review.id DESC)-1 AS position FROM manual_review_cases review
-WHERE review.domain='TOKEN' AND (review.case_type ILIKE '%USAGE%' OR review.case_type ILIKE '%RECONCIL%') AND review.updated_at<=$3
+WHERE `+adminUsageReconciliationCasePredicate+` AND review.updated_at<=$3
 AND ($4='' OR review.id::text=$4 OR review.resource_id::text=$4) AND ($5='' OR review.status=$5)
 AND ($6='' OR review.severity=$6) AND ($7='' OR review.case_type=$7) AND ($8::uuid IS NULL OR review.owner_id=$8)
 AND ($9::boolean IS NULL OR (LEAST(review.claim_due_at,review.first_response_due_at,review.mitigation_due_at,review.resolution_due_at)<$3 AND review.status='OPEN')=$9)
@@ -625,6 +678,18 @@ SELECT 'CANCELLATION'::text source_kind,id source_id,evidence_type,occurred_at o
 UNION ALL SELECT 'CONVERGENCE',id,evidence_type,observed_at FROM usage_convergence_evidence WHERE usage_request_id=$3
 ) evidence WHERE evidence.observed_at<=$4 AND ($5='' OR evidence.evidence_type=$5)
 `, usageID, highWater, evidenceType)
+	}, nil
+}
+
+func provisioningAttemptSnapshotSource(filter adminQueryFilter, provisioningID uuid.UUID) (AdminSnapshotMemberSource, error) {
+	status, err := filter.enum("status", "RUNNING", "SUCCEEDED", "FAILED", "TIMED_OUT")
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, highWater time.Time, maximum int) error {
+		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `SELECT attempt.id::text AS resource_id,row_number() OVER (ORDER BY attempt.repair_round ASC,attempt.attempt_number ASC,attempt.id ASC)-1 AS position FROM route_provisioning_attempts attempt
+WHERE attempt.provisioning_id=$3 AND attempt.started_at<=$4 AND ($5='' OR attempt.status=$5)
+`, provisioningID, highWater, status)
 	}, nil
 }
 
@@ -798,6 +863,47 @@ func (r *PostgresRepository) adminProvisioningsByIDs(ctx context.Context, resour
 	return orderedValues(resourceIDs, values)
 }
 
+func (r *PostgresRepository) adminProvisioningAttemptsByIDs(ctx context.Context, provisioningID uuid.UUID, resourceIDs []string) ([]AdminProvisioningAttempt, error) {
+	ids, err := parseResourceIDs(resourceIDs)
+	if err != nil || len(ids) == 0 {
+		return []AdminProvisioningAttempt{}, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id,repair_round,attempt_number,status,stage,error_code,started_at,ended_at FROM route_provisioning_attempts WHERE provisioning_id=$1 AND id=ANY($2::uuid[])`, provisioningID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := map[string]AdminProvisioningAttempt{}
+	for rows.Next() {
+		var item AdminProvisioningAttempt
+		if err = rows.Scan(&item.ID, &item.RepairRound, &item.AttemptNumber, &item.Status, &item.Stage, &item.ErrorCode, &item.StartedAt, &item.EndedAt); err != nil {
+			return nil, err
+		}
+		values[item.ID.String()] = item
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return orderedValues(resourceIDs, values)
+}
+
+func (r *PostgresRepository) adminProvisioningDetail(ctx context.Context, provisioningID uuid.UUID) (AdminProvisioningDetail, error) {
+	item, err := scanProvisioning(r.pool.QueryRow(ctx, provisioningSelect+` WHERE id=$1`, provisioningID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminProvisioningDetail{}, ErrNotFound
+	}
+	if err != nil {
+		return AdminProvisioningDetail{}, err
+	}
+	return redactAdminProvisioningDetail(item), nil
+}
+
+func (r *PostgresRepository) adminProvisioningExists(ctx context.Context, provisioningID uuid.UUID) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM route_provisionings WHERE id=$1)`, provisioningID).Scan(&exists)
+	return exists, err
+}
+
 func (r *PostgresRepository) adminUsageByIDs(ctx context.Context, resourceIDs []string) ([]AdminUsageSummary, error) {
 	ids, err := parseResourceIDs(resourceIDs)
 	if err != nil || len(ids) == 0 {
@@ -839,7 +945,7 @@ func (r *PostgresRepository) adminReconciliationByIDs(ctx context.Context, resou
 	if err != nil || len(ids) == 0 {
 		return []AdminReconciliationCase{}, err
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,case_type,resource_type,resource_id,severity,status,owner_id,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,escalation_level,updated_at FROM manual_review_cases WHERE domain='TOKEN' AND id=ANY($1::uuid[])`, ids)
+	rows, err := r.pool.Query(ctx, `SELECT review.id,review.case_type,review.resource_type,review.resource_id,review.severity,review.status,review.owner_id,review.claim_due_at,review.first_response_due_at,review.mitigation_due_at,review.resolution_due_at,review.escalation_level,review.updated_at FROM manual_review_cases review WHERE `+adminUsageReconciliationCasePredicate+` AND review.id=ANY($1::uuid[])`, ids)
 	if err != nil {
 		return nil, err
 	}

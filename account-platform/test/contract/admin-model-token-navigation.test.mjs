@@ -99,6 +99,28 @@ test('invalid and mutually exclusive detail targets are removed without selectin
   for (const key of ['token_account_id', 'token_detail_tab', 'token_credential_metadata_status', 'token_credential_cursor', 'token_route_health_status', 'token_route_cursor', 'token_provisioning_status', 'token_provisioning_cursor', 'token_audit_action', 'token_audit_cursor']) assert.equal(invalidToken.updates[key], null);
 });
 
+test('operation detail child gate preserves list state and canonical deep links only when authorized', () => {
+  const visible = ['modelOperations'];
+  const permissions = ['platform.tokens.read', 'platform.usage.read'];
+  const gatedURL = locationLike('?section=modelOperations&operations_tab=provisionings&provisioning_q=failed&provisioning_cursor=list-page&provisioning_id=00000000-0000-4000-8000-000000000301&provisioning_attempt_status=FAILED&provisioning_attempt_cursor=attempt-page');
+  const gated = normalizeAdminModelTokenEntry('modelOperations', visible, true, gatedURL, permissions, { modelOperationsDetailsEnabled: false });
+  for (const key of ['provisioning_id', 'provisioning_attempt_status', 'provisioning_attempt_cursor']) assert.equal(gated.updates[key], null);
+  assert.equal(gated.updates.provisioning_q, undefined);
+  assert.equal(gated.updates.provisioning_cursor, undefined);
+  assert.equal(adminSectionURL(gated.section, gatedURL, gated.updates), '/admin.html?section=modelOperations&operations_tab=provisionings&provisioning_q=failed&provisioning_cursor=list-page');
+
+  const active = normalizeAdminModelTokenEntry('modelOperations', visible, true, gatedURL, permissions, { modelOperationsDetailsEnabled: true });
+  assert.equal(active.replace, false);
+
+  const reconciliationURL = locationLike('?section=modelOperations&operations_tab=reconciliation&reconciliation_status=OPEN&reconciliation_cursor=case-page&usage_request_id=00000000-0000-4000-8000-000000000401&usage_evidence_type=SETTLEMENT&usage_evidence_cursor=evidence-page');
+  const reconciliation = normalizeAdminModelTokenEntry('modelOperations', visible, true, reconciliationURL, permissions, { modelOperationsDetailsEnabled: true });
+  assert.equal(reconciliation.replace, false);
+
+  const revoked = normalizeAdminModelTokenEntry('modelOperations', visible, true, reconciliationURL, ['platform.tokens.read'], { modelOperationsDetailsEnabled: true });
+  assert.equal(revoked.updates.operations_tab, 'provisionings');
+  for (const key of ['reconciliation_status', 'reconciliation_cursor', 'usage_request_id', 'usage_evidence_type', 'usage_evidence_cursor']) assert.equal(revoked.updates[key], null);
+});
+
 test('usage-only operation links normalize before render and never plan a Provisioning request', async () => {
   const route = locationLike('?section=modelOperations&operations_tab=provisionings&provisioning_q=private&provisioning_cursor=p&provisioning_id=00000000-0000-4000-8000-000000000301&provisioning_attempt_cursor=a&usage_q=review&usage_cursor=u');
   const normalized = normalizeAdminModelTokenEntry('modelOperations', ['modelOperations', 'settings'], true, route, ['platform.usage.read']);
@@ -108,15 +130,16 @@ test('usage-only operation links normalize before render and never plan a Provis
   assert.equal(normalized.updates.usage_cursor, undefined);
   const finalURL = adminSectionURL(normalized.section, route, normalized.updates);
   assert.equal(finalURL, '/admin.html?section=modelOperations&operations_tab=usage&usage_q=review&usage_cursor=u');
-  const calls = { provisionings: 0, usage: 0 };
+  const calls = { provisionings: 0, usage: 0, reconciliation: 0 };
   const operations = readAdminModelTokenOperationsTab(['platform.usage.read'], locationLike(finalURL.slice(finalURL.indexOf('?'))));
   const client = {
     provisionings: async () => { calls.provisionings += 1; return { items: [] }; },
     usageRequests: async () => { calls.usage += 1; return { items: [] }; },
+    tokenReconciliationCases: async () => { calls.reconciliation += 1; return { items: [] }; },
   };
   await Promise.all(planAdminModelTokenOperationRequests(['platform.usage.read'], client).map((request) => request.load({}, new AbortController().signal)));
-  assert.deepEqual(calls, { provisionings: 0, usage: 1 });
-  assert.deepEqual(operations.visible, ['usage']);
+  assert.deepEqual(calls, { provisionings: 0, usage: 1, reconciliation: 1 });
+  assert.deepEqual(operations.visible, ['usage', 'reconciliation']);
 
   const tokenOnly = normalizeAdminModelTokenEntry('modelOperations', ['modelOperations', 'settings'], true, locationLike('?section=modelOperations&operations_tab=usage&usage_q=review&usage_cursor=u&usage_request_id=00000000-0000-4000-8000-000000000401&usage_evidence_cursor=e'), ['platform.tokens.read']);
   assert.equal(tokenOnly.updates.operations_tab, 'provisionings');
@@ -137,19 +160,19 @@ test('operation tab changes normalize the candidate URL and clear the inactive d
     },
     replaceState(_state, _unused, url) { historyCalls.push({ mode: 'replace', url }); },
   };
-  const toUsage = normalizeAdminModelTokenNavigation('modelOperations', visible, true, permissions, { operations_tab: 'usage' }, mutableLocation);
+  const toUsage = normalizeAdminModelTokenNavigation('modelOperations', visible, true, permissions, { operations_tab: 'usage' }, mutableLocation, { modelOperationsDetailsEnabled: true });
   writeAdminSection(toUsage.section, 'push', history, mutableLocation, toUsage.updates);
   assert.equal(historyCalls.length, 1);
   assert.equal(historyCalls[0].url, '/admin.html?section=modelOperations&operations_tab=usage&provisioning_q=failed&usage_q=review');
-  const refreshedUsage = normalizeAdminModelTokenEntry('modelOperations', visible, true, mutableLocation, permissions);
+  const refreshedUsage = normalizeAdminModelTokenEntry('modelOperations', visible, true, mutableLocation, permissions, { modelOperationsDetailsEnabled: true });
   assert.equal(refreshedUsage.replace, false);
 
   mutableLocation.search += '&usage_request_id=00000000-0000-4000-8000-000000000401&usage_evidence_cursor=evidence';
-  const toProvisionings = normalizeAdminModelTokenNavigation('modelOperations', visible, true, permissions, { operations_tab: 'provisionings' }, mutableLocation);
+  const toProvisionings = normalizeAdminModelTokenNavigation('modelOperations', visible, true, permissions, { operations_tab: 'provisionings' }, mutableLocation, { modelOperationsDetailsEnabled: true });
   writeAdminSection(toProvisionings.section, 'push', history, mutableLocation, toProvisionings.updates);
   assert.equal(historyCalls.length, 2);
   assert.equal(historyCalls[1].url, '/admin.html?section=modelOperations&operations_tab=provisionings&provisioning_q=failed&usage_q=review');
-  const refreshedProvisionings = normalizeAdminModelTokenEntry('modelOperations', visible, true, mutableLocation, permissions);
+  const refreshedProvisionings = normalizeAdminModelTokenEntry('modelOperations', visible, true, mutableLocation, permissions, { modelOperationsDetailsEnabled: true });
   assert.equal(refreshedProvisionings.replace, false);
 });
 
@@ -169,7 +192,7 @@ test('every resource owns distinct URL filters and operation tabs follow atomic 
   });
   const clear = clearAdminModelTokenUpdates({ includeLegacy: true });
   for (const key of ['model_cursor', 'protocol_cursor', 'formula_cursor', 'token_cursor', 'provisioning_cursor', 'usage_cursor', 'reconciliation_cursor', 'owner_candidate_cursor', 'model_audit_cursor', 'token_audit_cursor']) assert.equal(clear[key], null);
-  assert.deepEqual(readAdminModelTokenOperationsTab(['platform.usage.read'], locationLike('?operations_tab=provisionings')), { tab: 'usage', replace: true, visible: ['usage'] });
+  assert.deepEqual(readAdminModelTokenOperationsTab(['platform.usage.read'], locationLike('?operations_tab=provisionings')), { tab: 'usage', replace: true, visible: ['usage', 'reconciliation'] });
 });
 
 test('cursor history is filter-bound and browser history cannot reuse a cursor under another query', () => {
@@ -247,25 +270,29 @@ test('history replacement, popstate normalization, and cross-section restoration
 
 test('new page source keeps independent loading, error, refresh and last-updated state contracts', async () => {
   const source = await (await import('node:fs/promises')).readFile(new URL('../../../pinvou3-app/src/features/account-platform/AdminModelTokenWorkspace.jsx', import.meta.url), 'utf8');
-  assert.match(source, /function useAdminSource/);
-  assert.match(source, /executeAdminSourceRequest/);
-  assert.match(source, /visibleAdminSourceState/);
+  const primitivesSource = await (await import('node:fs/promises')).readFile(new URL('../../../pinvou3-app/src/features/account-platform/AdminModelTokenPrimitives.jsx', import.meta.url), 'utf8');
+  assert.match(primitivesSource, /function useAdminSource/);
+  assert.match(primitivesSource, /executeAdminSourceRequest/);
+  assert.match(primitivesSource, /visibleAdminSourceState/);
   assert.match(source, /planAdminModelTokenOperationRequests/);
-  assert.match(source, /return \(\) => controller\.abort\(\)/);
-  assert.match(source, /state\.error\?\.status === 410/);
-  assert.match(source, /onQueryChange\('usage', \{ \.\.\.query, cursor: '' \}, 'replace'\)/);
+  assert.match(primitivesSource, /return \(\) => controller\.abort\(\)/);
+  assert.match(primitivesSource, /state\.error\?\.status === 410/);
   assert.match(source, /ArrowLeft.*ArrowRight.*Home.*End/);
   assert.match(source, /role="tabpanel"/);
   assert.doesNotMatch(source, /usageRequest\(|provisioning\(|tokenAccount\(/);
   assert.doesNotMatch(source, /window\.prompt|window\.confirm/);
+  const operationsSource = await (await import('node:fs/promises')).readFile(new URL('../../../pinvou3-app/src/features/account-platform/AdminModelOperationsWorkspace.jsx', import.meta.url), 'utf8');
+  assert.match(operationsSource, /state\.error\?\.status === 410/);
+  assert.match(operationsSource, /source: 'usage'/);
   const view = await (await import('node:fs/promises')).readFile(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const initialNormalize = view.indexOf('const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled');
   const initialDenied = view.indexOf('if (visible.length === 0)', initialNormalize);
   assert.ok(initialNormalize >= 0 && initialNormalize < initialDenied, 'initial authorization normalizes before rendering zero-permission denial');
-  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, modelTokenIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled \}\)/);
-  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled \}\)/);
-  assert.match(source, /provisioningRequest &&/);
-  assert.match(source, /usageRequest &&/);
+  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, modelTokenIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled \}\)/);
+  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled \}\)/);
+  assert.match(operationsSource, /provisioningRequest &&/);
+  assert.match(operationsSource, /usageRequest &&/);
+  assert.match(operationsSource, /reconciliationRequest &&/);
 });
 
 test('APT-127 presentation keeps three-language labels, visible focus, and a 320px layout boundary', async () => {
@@ -300,6 +327,9 @@ test('new collection calls use the paginated BFF contract while gate-off calls k
     await client.tokenReconciliationCases({ status: 'OPEN', severity: 'P1' });
     await client.tokenOwnerCandidates({ q: 'team', owner_type: 'ORG' });
     await client.tokenResourceAudit({ resource_type: 'MODEL', resource_id: '00000000-0000-4000-8000-000000000101', action: 'PUBLISHED' });
+    await client.provisioningAttempts('00000000-0000-4000-8000-000000000301', { status: 'FAILED', cursor: 'attempt-page' });
+    await client.usageEvidence('00000000-0000-4000-8000-000000000401', { evidence_type: 'SETTLEMENT', cursor: 'evidence-page' });
+    await client.provisioning('00000000-0000-4000-8000-000000000301');
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -316,6 +346,9 @@ test('new collection calls use the paginated BFF contract while gate-off calls k
   assert.equal(requested[8], 'https://portal.example/api/admin/token/admin/v1/reconciliation-cases?limit=50&status=OPEN&severity=P1');
   assert.equal(requested[9], 'https://portal.example/api/admin/token/admin/v1/owner-candidates?limit=50&q=team&owner_type=ORG');
   assert.equal(requested[10], 'https://portal.example/api/admin/token/admin/v1/resource-audit?limit=50&resource_type=MODEL&resource_id=00000000-0000-4000-8000-000000000101&action=PUBLISHED');
+  assert.equal(requested[11], 'https://portal.example/api/admin/token/admin/v1/provisionings/00000000-0000-4000-8000-000000000301/attempts?limit=50&status=FAILED&cursor=attempt-page');
+  assert.equal(requested[12], 'https://portal.example/api/admin/token/admin/v1/usage-requests/00000000-0000-4000-8000-000000000401/evidence?limit=50&evidence_type=SETTLEMENT&cursor=evidence-page');
+  assert.equal(requested[13], 'https://portal.example/api/admin/token/admin/v2/provisionings/00000000-0000-4000-8000-000000000301');
 });
 
 test('Portal BFF explicitly allowlists every APT-127 list source and exposes the gate through session only', async () => {

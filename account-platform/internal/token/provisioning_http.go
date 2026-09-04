@@ -61,6 +61,24 @@ func (s *Service) adminProvisioning(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, item)
 }
 
+func (s *Service) adminProvisioningV2(w http.ResponseWriter, r *http.Request) {
+	id, ok := adminUUID(w, r, "provisioning_id")
+	if !ok {
+		return
+	}
+	repository, ok := s.paginationRepository()
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "token administration is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.adminProvisioningDetail(r.Context(), id)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
 func (s *Service) adminRepairProvisioning(w http.ResponseWriter, r *http.Request) {
 	operations, ok := s.provisioningOperations(w, r)
 	if !ok {
@@ -73,10 +91,20 @@ func (s *Service) adminRepairProvisioning(w http.ResponseWriter, r *http.Request
 	var body struct {
 		Reason string `json:"reason"`
 	}
-	if api.DecodeJSON(w, r, &body) != nil || strings.TrimSpace(body.Reason) == "" {
+	if api.DecodeJSON(w, r, &body) != nil {
 		return
 	}
-	item, err := operations.Repair(r.Context(), id, tokenAdminActor(r), r.Header.Get("Idempotency-Key"), body.Reason)
+	reason, validReason := normalizeAdminOperationReason(body.Reason)
+	if !validReason {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REASON", "reason must contain 1 to 500 Unicode characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(key) < 16 || len(key) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := operations.Repair(r.Context(), id, tokenAdminActor(r), key, reason)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

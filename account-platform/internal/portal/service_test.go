@@ -447,6 +447,21 @@ func TestSessionEndpointExposesOnlyNonSensitiveTokenResourceFormsGate(t *testing
 	}
 }
 
+func TestSessionEndpointExposesOnlyNonSensitiveModelOperationsDetailsGate(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AdminModelOperationsDetailsEnabled = true
+	session := Session{ID: "model-operations-feature-session", AccessToken: "access-secret", RefreshToken: "refresh-secret", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("o", 32)}
+	_ = store.SaveSession(context.Background(), session)
+	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if body := response.Body.String(); response.Code != http.StatusOK || !strings.Contains(body, `"admin_model_operations_details":true`) || strings.Contains(body, "access-secret") || strings.Contains(body, "refresh-secret") {
+		t.Fatalf("unexpected model operations feature session response: %d %s", response.Code, body)
+	}
+}
+
 func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

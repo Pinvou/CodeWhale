@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
@@ -29,6 +30,12 @@ type AdminOverview struct {
 	ReviewUsageRequests   int64 `json:"review_usage_requests"`
 	ReconciliationPending int64 `json:"reconciliation_pending"`
 	ReconciliationStopped int64 `json:"reconciliation_stopped"`
+}
+
+func normalizeAdminOperationReason(value string) (string, bool) {
+	reason := strings.TrimSpace(value)
+	count := utf8.RuneCountInString(reason)
+	return reason, count >= 1 && count <= 500
 }
 
 type AdminTokenAccount struct {
@@ -117,6 +124,86 @@ type AdminUsageRequest struct {
 	ConvergenceEvidence         json.RawMessage `json:"convergence_evidence"`
 	StartedAt                   time.Time       `json:"started_at"`
 	UpdatedAt                   time.Time       `json:"updated_at"`
+}
+
+// AdminUsageDetail is the Portal-safe detail projection. The full internal
+// record contains user/session, credential, provider request, and request
+// fingerprint fields that are not needed for evidence reconciliation.
+type AdminUsageDetail struct {
+	ID                      uuid.UUID  `json:"usage_request_id"`
+	OrganizationID          *uuid.UUID `json:"organization_id,omitempty"`
+	TokenAccountID          uuid.UUID  `json:"token_account_id"`
+	PriceVersionID          *uuid.UUID `json:"price_version_id,omitempty"`
+	HoldID                  *uuid.UUID `json:"hold_id,omitempty"`
+	Model                   string     `json:"model"`
+	ModelID                 *uuid.UUID `json:"model_id,omitempty"`
+	CatalogVersion          *int64     `json:"catalog_version,omitempty"`
+	CapabilityVersionID     *uuid.UUID `json:"model_capability_version_id,omitempty"`
+	ProtocolDefinitionID    *uuid.UUID `json:"protocol_definition_id,omitempty"`
+	RouteGeneration         *int64     `json:"route_generation,omitempty"`
+	Status                  string     `json:"status"`
+	ExecutionStatus         string     `json:"execution_status"`
+	DeliveryStatus          string     `json:"delivery_status"`
+	CancelStatus            string     `json:"cancel_status"`
+	SettlementStatus        string     `json:"settlement_status"`
+	MaximumMicrocredits     int64      `json:"maximum_microcredits"`
+	ActualMicrocredits      *int64     `json:"actual_microcredits,omitempty"`
+	ErrorClass              *string    `json:"error_class,omitempty"`
+	AdapterVersion          *string    `json:"adapter_version,omitempty"`
+	AttemptStatus           *string    `json:"attempt_status,omitempty"`
+	InputTokens             *int64     `json:"input_tokens,omitempty"`
+	OutputTokens            *int64     `json:"output_tokens,omitempty"`
+	CachedInputTokens       *int64     `json:"cached_input_tokens,omitempty"`
+	ReconciliationAttempts  int        `json:"reconciliation_attempts"`
+	ReconciliationLastError *string    `json:"reconciliation_last_error,omitempty"`
+	ReconciliationStoppedAt *time.Time `json:"reconciliation_stopped_at,omitempty"`
+	StartedAt               time.Time  `json:"started_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+}
+
+func redactAdminUsageDetail(item AdminUsageRequest) AdminUsageDetail {
+	diagnostic := stableReconciliationDiagnostic(item.ReconciliationLastError)
+	return AdminUsageDetail{
+		ID: item.ID, OrganizationID: item.OrganizationID, TokenAccountID: item.TokenAccountID,
+		PriceVersionID: item.PriceVersionID, HoldID: item.HoldID, Model: item.Model, ModelID: item.ModelID,
+		CatalogVersion: item.CatalogVersion, CapabilityVersionID: item.CapabilityVersionID,
+		ProtocolDefinitionID: item.ProtocolDefinitionID, RouteGeneration: item.RouteGeneration,
+		Status: item.Status, ExecutionStatus: item.ExecutionStatus, DeliveryStatus: item.DeliveryStatus,
+		CancelStatus: item.CancelStatus, SettlementStatus: item.SettlementStatus,
+		MaximumMicrocredits: item.MaximumMicrocredits, ActualMicrocredits: item.ActualMicrocredits,
+		ErrorClass: item.ErrorClass, AdapterVersion: item.AdapterVersion, AttemptStatus: item.AttemptStatus,
+		InputTokens: item.InputTokens, OutputTokens: item.OutputTokens, CachedInputTokens: item.CachedInputTokens,
+		ReconciliationAttempts: item.ReconciliationAttempts, ReconciliationLastError: diagnostic,
+		ReconciliationStoppedAt: item.ReconciliationStoppedAt, StartedAt: item.StartedAt, UpdatedAt: item.UpdatedAt,
+	}
+}
+
+func stableReconciliationDiagnostic(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	code := strings.TrimSpace(*value)
+	if code == "" {
+		return nil
+	}
+	switch code {
+	case "MANUAL_RECONCILIATION_REQUESTED",
+		"MANUAL_RECONCILIATION_REQUIRED",
+		"USAGE_EVIDENCE_TIMEOUT",
+		"USAGE_EVIDENCE_UNAVAILABLE",
+		"HOLD_RELEASE_UNAVAILABLE",
+		"RECONCILIATION_DIAGNOSTIC_REDACTED":
+		// These are the only operational codes safe for the Portal projection.
+	case "TRUSTED_USAGE_DEADLINE_EXCEEDED:MANUAL_RECONCILIATION_REQUIRED",
+		"TRUSTED_USAGE_DEADLINE_EXCEEDED:USAGE_EVIDENCE_TIMEOUT",
+		"TRUSTED_USAGE_DEADLINE_EXCEEDED:USAGE_EVIDENCE_UNAVAILABLE":
+		// Collapse the historical compound value so internal retry detail does
+		// not become part of the public diagnostic vocabulary.
+		code = "TRUSTED_USAGE_DEADLINE_EXCEEDED"
+	default:
+		code = "RECONCILIATION_DIAGNOSTIC_REDACTED"
+	}
+	return &code
 }
 
 type adminRepository interface {
@@ -507,7 +594,7 @@ func (s *Service) adminUsageRequest(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, result)
+	api.WriteJSON(w, http.StatusOK, redactAdminUsageDetail(result))
 }
 
 func (s *Service) adminRetryReconciliation(w http.ResponseWriter, r *http.Request) {
@@ -525,17 +612,22 @@ func (s *Service) adminRetryReconciliation(w http.ResponseWriter, r *http.Reques
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
+	reason, validReason := normalizeAdminOperationReason(body.Reason)
+	if !validReason {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REASON", "reason must contain 1 to 500 Unicode characters", httpserver.RequestID(r.Context()))
+		return
+	}
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if len(key) < 16 || len(key) > 128 {
 		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
 		return
 	}
-	result, err := repository.AdminRetryReconciliation(r.Context(), usageID, body.Reason, tokenAdminActor(r), replayDigest([]byte(key)))
+	result, err := repository.AdminRetryReconciliation(r.Context(), usageID, reason, tokenAdminActor(r), replayDigest([]byte(key)))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, result)
+	api.WriteJSON(w, http.StatusOK, redactAdminUsageDetail(result))
 }
 
 func (r *PostgresRepository) AdminOverview(ctx context.Context) (AdminOverview, error) {
@@ -809,8 +901,8 @@ func (r *PostgresRepository) AdminUsageRequest(ctx context.Context, usageID uuid
 }
 
 func (r *PostgresRepository) AdminRetryReconciliation(ctx context.Context, usageID uuid.UUID, reason string, actorID uuid.UUID, keyDigest string) (AdminUsageRequest, error) {
-	reason = strings.TrimSpace(reason)
-	if usageID == uuid.Nil || actorID == uuid.Nil || reason == "" || len(keyDigest) != 64 {
+	reason, validReason := normalizeAdminOperationReason(reason)
+	if usageID == uuid.Nil || actorID == uuid.Nil || !validReason || len(keyDigest) != 64 {
 		return AdminUsageRequest{}, ErrForbidden
 	}
 	now := r.now()
@@ -822,7 +914,7 @@ func (r *PostgresRepository) AdminRetryReconciliation(ctx context.Context, usage
 	fingerprintBytes := sha256.Sum256([]byte("pinvou-usage-reconcile-v1\x00" + usageID.String() + "\x00" + reason))
 	fingerprint := hex.EncodeToString(fingerprintBytes[:])
 	commandID := uuid.Must(uuid.NewV7())
-	insert, err := tx.Exec(ctx, `INSERT INTO usage_reconciliation_commands(id,usage_request_id,actor_user_id,idempotency_key_digest,request_fingerprint,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(actor_user_id,idempotency_key_digest) DO NOTHING`, commandID, usageID, actorID, keyDigest, fingerprint, reason, now)
+	insert, err := tx.Exec(ctx, `INSERT INTO usage_reconciliation_commands(id,usage_request_id,actor_user_id,idempotency_key_digest,request_fingerprint,reason,created_at) VALUES($1,$2,$3,$4,$5,'AUDIT_ONLY',$6) ON CONFLICT(actor_user_id,idempotency_key_digest) DO NOTHING`, commandID, usageID, actorID, keyDigest, fingerprint, now)
 	if err != nil {
 		return AdminUsageRequest{}, err
 	}
@@ -840,7 +932,7 @@ func (r *PostgresRepository) AdminRetryReconciliation(ctx context.Context, usage
 		}
 		return r.AdminUsageRequest(ctx, usageID)
 	}
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,reconciliation_stopped_at=NULL,updated_at=$2 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND NOT EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=usage_requests.id AND loss.customer_debit_prohibited)`, usageID, now, truncateReconciliationError("manual retry requested: "+reason))
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error='MANUAL_RECONCILIATION_REQUESTED',reconciliation_stopped_at=NULL,updated_at=$2 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND NOT EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=usage_requests.id AND loss.customer_debit_prohibited)`, usageID, now)
 	if err != nil {
 		return AdminUsageRequest{}, err
 	}

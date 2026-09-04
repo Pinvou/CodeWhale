@@ -1636,7 +1636,7 @@ paths:
       summary: Get settlement and provider-neutral Adapter correlation metadata without conversation content
       parameters: [{ $ref: "#/components/parameters/UsageRequestID" }]
       responses:
-        "200": { $ref: "#/components/responses/Overview" }
+        "200": { description: Redacted usage request detail, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminUsageDetail" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests/{usage_request_id}/evidence:
@@ -1671,10 +1671,11 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/Reason" }
       responses:
-        "200": { $ref: "#/components/responses/Overview" }
+        "200": { description: Reconciliation retry result for the existing usage request, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminUsageDetail" } } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /token/admin/v1/protocols:
     get:
       operationId: listAdminProtocolsAndFormulas
@@ -1977,14 +1978,14 @@ paths:
     get:
       operationId: listAdminTokenReconciliationCases
       summary: Page Token usage and reconciliation manual-review cases
-      description: domain is fixed to TOKEN and ordering is updated_at DESC, id DESC.
+      description: domain is fixed to TOKEN; only the explicit USAGE_RECONCILIATION_REVIEW allowlist with resource_type USAGE_REQUEST and an existing usage request is returned. Ordering is updated_at DESC, id DESC.
       parameters:
         - { $ref: "#/components/parameters/Limit" }
         - { $ref: "#/components/parameters/Cursor" }
         - { name: q, in: query, schema: { type: string, maxLength: 160 } }
         - { name: status, in: query, schema: { type: string, enum: [OPEN, RESOLVED, LONG_TERM_PLAN] } }
         - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
-        - { name: case_type, in: query, schema: { type: string, maxLength: 120 } }
+        - { name: case_type, in: query, schema: { type: string, enum: [USAGE_RECONCILIATION_REVIEW] } }
         - { name: owner_id, in: query, schema: { type: string, format: uuid } }
         - { name: sla_overdue, in: query, schema: { type: boolean } }
       responses:
@@ -2074,11 +2075,44 @@ paths:
         "200": { description: Provisioning detail, content: { application/json: { schema: { $ref: "#/components/schemas/ProvisioningDetail" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v2/provisionings/{provisioning_id}:
+    get:
+      operationId: getAdminRouteProvisioningV2
+      summary: Get one Portal-safe provisioning generation without inline attempt history
+      description: Versioned projection excludes attempts, worker identity, credential identity, lease owner and free-form error detail. Attempt history is read only through its separately paginated redacted endpoint.
+      parameters: [{ $ref: "#/components/parameters/ProvisioningID" }]
+      responses:
+        "200": { description: Redacted provisioning detail, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminProvisioningDetail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/provisionings/{provisioning_id}/attempts:
+    get:
+      operationId: listAdminRouteProvisioningAttempts
+      summary: Page the bounded attempt history for one provisioning generation
+      description: Fixed order repair_round ASC, attempt_number ASC, id ASC. The projection never returns credential secrets or provider endpoints.
+      parameters:
+        - { $ref: "#/components/parameters/ProvisioningID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { type: string, enum: [RUNNING, SUCCEEDED, FAILED, TIMED_OUT] } }
+      responses:
+        "200": { $ref: "#/components/responses/TokenAdminProvisioningAttemptCollection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/provisionings/{provisioning_id}/repair:
     post:
       operationId: repairAdminRouteProvisioning
       summary: Start a new bounded repair round for a terminal failed provisioning
-      parameters: [{ $ref: "#/components/parameters/ProvisioningID" }]
+      parameters:
+        - { $ref: "#/components/parameters/ProvisioningID" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
       requestBody:
         required: true
         content:
@@ -2091,6 +2125,7 @@ paths:
                 reason: { type: string, minLength: 1, maxLength: 500 }
       responses:
         "202": { description: Repair round accepted, content: { application/json: { schema: { $ref: "#/components/schemas/RouteProvisioning" } } } }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -2837,6 +2872,44 @@ components:
         convergence_evidence: {}
         started_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    TokenAdminUsageDetail:
+      description: Redacted Portal detail for frozen configuration and evidence reconciliation; user/session, credential, request fingerprint, Provider identity, upstream request, and inline evidence are excluded.
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, token_account_id, model, status, execution_status, delivery_status, cancel_status, settlement_status, maximum_microcredits, reconciliation_attempts, started_at, updated_at]
+      properties:
+        usage_request_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        price_version_id: { type: string, format: uuid }
+        hold_id: { type: string, format: uuid }
+        model: { type: string }
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64 }
+        model_capability_version_id: { type: string, format: uuid }
+        protocol_definition_id: { type: string, format: uuid }
+        route_generation: { type: integer, format: int64 }
+        status: { type: string }
+        execution_status: { type: string }
+        delivery_status: { type: string }
+        cancel_status: { type: string }
+        settlement_status: { type: string }
+        maximum_microcredits: { type: integer, format: int64 }
+        actual_microcredits: { type: integer, format: int64 }
+        error_class: { type: string }
+        adapter_version: { type: string }
+        attempt_status: { type: string }
+        input_tokens: { type: integer, format: int64 }
+        output_tokens: { type: integer, format: int64 }
+        cached_input_tokens: { type: integer, format: int64 }
+        reconciliation_attempts: { type: integer, minimum: 0 }
+        reconciliation_last_error:
+          type: string
+          enum: [MANUAL_RECONCILIATION_REQUESTED, MANUAL_RECONCILIATION_REQUIRED, USAGE_EVIDENCE_TIMEOUT, USAGE_EVIDENCE_UNAVAILABLE, HOLD_RELEASE_UNAVAILABLE, TRUSTED_USAGE_DEADLINE_EXCEEDED, RECONCILIATION_DIAGNOSTIC_REDACTED]
+          description: Controlled redacted diagnostic code; never a free-form reason, secret-shaped label, or provider error.
+        reconciliation_stopped_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     TokenAdminReconciliationCase:
       type: object
       additionalProperties: false
@@ -2906,6 +2979,10 @@ components:
       allOf:
         - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
         - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/RouteProvisioning" } } } }
+    TokenAdminProvisioningAttemptPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAdminProvisioningAttempt" } } } }
     TokenAdminUsagePage:
       allOf:
         - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
@@ -3071,6 +3148,44 @@ components:
         error_detail: { type: string }
         started_at: { type: string, format: date-time }
         ended_at: { type: string, format: date-time }
+    TokenAdminProvisioningAttempt:
+      description: Redacted Portal projection without worker identity or free-form error detail.
+      type: object
+      additionalProperties: false
+      required: [attempt_id, repair_round, attempt_number, status, stage, started_at]
+      properties:
+        attempt_id: { type: string, format: uuid }
+        repair_round: { type: integer, minimum: 0 }
+        attempt_number: { type: integer, minimum: 1 }
+        status: { type: string, enum: [RUNNING, SUCCEEDED, FAILED, TIMED_OUT] }
+        stage: { type: string }
+        error_code: { type: string }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+    TokenAdminProvisioningDetail:
+      description: Portal-safe provisioning detail. Attempt history and sensitive operational fields are intentionally absent.
+      type: object
+      additionalProperties: false
+      required: [provisioning_id, scope_type, scope_id, model_id, protocol_code, desired_generation, status, stage, policy_version, attempt_count, repair_round, max_attempts, sla_deadline_at, updated_at]
+      properties:
+        provisioning_id: { type: string, format: uuid }
+        scope_type: { type: string, enum: [PERSONAL, ORGANIZATION] }
+        scope_id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        protocol_code: { type: string, minLength: 1 }
+        protocol_version_id: { type: string, format: uuid }
+        desired_generation: { type: integer, format: int64, minimum: 1 }
+        actual_generation: { type: integer, format: int64, minimum: 1 }
+        status: { type: string }
+        stage: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        attempt_count: { type: integer, minimum: 0 }
+        repair_round: { type: integer, minimum: 0 }
+        max_attempts: { type: integer, minimum: 1 }
+        sla_deadline_at: { type: string, format: date-time }
+        next_retry_at: { type: string, format: date-time }
+        last_error_code: { type: string }
+        updated_at: { type: string, format: date-time }
     ProvisioningDetail:
       unevaluatedProperties: false
       allOf:
@@ -4395,6 +4510,9 @@ components:
     TokenAdminUsageEvidenceCollection:
       description: Stable sanitized evidence snapshot page.
       content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminUsageEvidencePage" } } }
+    TokenAdminProvisioningAttemptCollection:
+      description: Stable redacted provisioning-attempt snapshot page.
+      content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminProvisioningAttemptPage" } } }
     TokenAdminAccountCollection:
       description: Gate-compatible Token Account collection; both legacy and snapshot items use the same closed projection.
       content:

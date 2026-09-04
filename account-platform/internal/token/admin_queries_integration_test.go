@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,6 +60,8 @@ INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,he
 VALUES(gen_random_uuid(),$3,'model-one',100,'NONE','HEALTHY',$10,1,'CHAT');
 INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,desired_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,active_token_account_id,active_credential_id,requested_by,created_at,updated_at)
 VALUES($5,'PERSONAL',$7,$6,$1,'model-one','CHAT',1,$12,'PENDING','REQUESTED',1,'{}',3,$10+interval '1 hour',$3,$4,$8,$10,$10);
+INSERT INTO route_provisioning_attempts(id,provisioning_id,repair_round,attempt_number,worker_id,status,stage,started_at,ended_at)
+VALUES(gen_random_uuid(),$5,0,1,'integration-worker','FAILED','PROVISIONING',$10,$10+interval '1 second');
 INSERT INTO usage_requests(id,user_id,session_id,token_account_id,credential_id,wallet_id,model,status,maximum_microcredits,request_snapshot,started_at,updated_at,idempotency_key_digest,request_fingerprint)
 VALUES($13,$7,'session',$3,$4,$6,'model-one','CREATED',100,'{}',$10,$10,$12,$12);
 INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at)
@@ -74,6 +77,13 @@ VALUES($18,$13,'SETTLEMENT','BILLING','COMMIT','integration',$12,'{}',$10);`
 	auditID, tokenAuditID, cancellationID, convergenceID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	digest := strings.Repeat("0", 64)
 	if _, err := repository.pool.Exec(ctx, seed, modelID, protocolID, accountID, credentialID, provisioningID, walletID, ownerID, actorID, capabilityID, now, catalogVersion, digest, usageID, reviewID, auditID, tokenAuditID, cancellationID, convergenceID); err != nil {
+		t.Fatal(err)
+	}
+	shadowReviewID, badTypeReviewID, missingUsageReviewID := uuid.New(), uuid.New(), uuid.New()
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO manual_review_cases(id,domain,case_type,resource_type,resource_id,severity,status,created_at,claim_due_at,first_response_due_at,mitigation_due_at,resolution_due_at,updated_at) VALUES
+($1,'TOKEN','USAGE_RECONCILIATION_SHADOW','USAGE_REQUEST',$4,'P1','OPEN',$5,$5,$5,$5,$5,$5),
+($2,'TOKEN','USAGE_RECONCILIATION_REVIEW','TOKEN_ACCOUNT',$4,'P1','OPEN',$5,$5,$5,$5,$5,$5),
+($3,'TOKEN','USAGE_RECONCILIATION_REVIEW','USAGE_REQUEST',$6,'P1','OPEN',$5,$5,$5,$5,$5,$5)`, shadowReviewID, badTypeReviewID, missingUsageReviewID, usageID, now, uuid.New()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -117,6 +127,11 @@ VALUES($18,$13,'SETTLEMENT','BILLING','COMMIT','integration',$12,'{}',$10);`
 		items, err := repository.adminProvisioningsByIDs(ctx, ids)
 		return len(items), err
 	})
+	attemptSource, _ := provisioningAttemptSnapshotSource(empty, provisioningID)
+	assertPage("provisioning-attempts", adminProvisioningAttemptsSort, attemptSource, func(ctx context.Context, ids []string) (int, error) {
+		items, err := repository.adminProvisioningAttemptsByIDs(ctx, provisioningID, ids)
+		return len(items), err
+	})
 	usageSource, _ := usageSnapshotSource(empty)
 	assertPage("usage-requests", adminUsageSort, usageSource, func(ctx context.Context, ids []string) (int, error) {
 		items, err := repository.adminUsageByIDs(ctx, ids)
@@ -127,6 +142,9 @@ VALUES($18,$13,'SETTLEMENT','BILLING','COMMIT','integration',$12,'{}',$10);`
 		items, err := repository.adminReconciliationByIDs(ctx, ids)
 		return len(items), err
 	})
+	if items, err := repository.adminReconciliationByIDs(ctx, []string{shadowReviewID.String(), badTypeReviewID.String(), missingUsageReviewID.String()}); err != nil || len(items) != 0 {
+		t.Fatalf("reconciliation loader admitted non-authoritative cases: count=%d err=%v", len(items), err)
+	}
 	auditSource, _ := auditSnapshotSource(empty, "MODEL", modelID)
 	assertPage("resource-audit:model", adminResourceAuditSort, auditSource, func(ctx context.Context, ids []string) (int, error) {
 		items, err := repository.adminAuditByIDs(ctx, "MODEL", ids)
@@ -192,6 +210,7 @@ VALUES($18,$13,'SETTLEMENT','BILLING','COMMIT','integration',$12,'{}',$10);`
 		"/admin/v1/formulas?q=chat&status=published&protocol_definition_id=" + protocolID.String() + "&metering_unit_code=INPUT_TOKEN&published=true&created_from=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339)) + "&created_to=" + url.QueryEscape(now.Add(time.Hour).Format(time.RFC3339)) + "&limit=1",
 		"/admin/v1/token-accounts?q=account&owner_type=user&owner_id=" + ownerID.String() + "&status=active&health_status=healthy&credential_status=valid&limit=1",
 		"/admin/v1/provisionings?q=" + provisioningID.String() + "&status=pending&model_id=" + modelID.String() + "&token_account_id=" + accountID.String() + "&scope_type=personal&scope_id=" + ownerID.String() + "&sla_overdue=false&limit=1",
+		"/admin/v1/provisionings/" + provisioningID.String() + "/attempts?status=failed&limit=1",
 		"/admin/v1/usage-requests?q=" + usageID.String() + "&execution_status=received&settlement_status=hold_pending&model=model-one&token_account_id=" + accountID.String() + "&started_from=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339)) + "&started_to=" + url.QueryEscape(now.Add(time.Hour).Format(time.RFC3339)) + "&limit=1",
 		"/admin/v1/reconciliation-cases?q=" + reviewID.String() + "&status=open&severity=p1&case_type=usage_reconciliation_review&sla_overdue=false&limit=1",
 		"/admin/v1/resource-audit?resource_type=MODEL&resource_id=" + modelID.String() + "&action=model_published&actor_id=" + actorID.String() + "&occurred_from=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339)) + "&occurred_to=" + url.QueryEscape(now.Add(time.Hour).Format(time.RFC3339)) + "&limit=1",
@@ -203,6 +222,105 @@ VALUES($18,$13,'SETTLEMENT','BILLING','COMMIT','integration',$12,'{}',$10);`
 		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"items"`) {
 			t.Fatalf("production handler %s status=%d body=%s", path, response.Code, response.Body.String())
 		}
+	}
+	safeProvisioning := performAdminQueryRequest(handler, "/admin/v2/provisionings/"+provisioningID.String())
+	if body := safeProvisioning.Body.String(); safeProvisioning.Code != http.StatusOK || strings.Contains(body, "attempts") || strings.Contains(body, "worker_id") || strings.Contains(body, "error_detail") || strings.Contains(body, "active_credential_id") {
+		t.Fatalf("versioned provisioning detail status=%d body=%s", safeProvisioning.Code, body)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE usage_requests SET status='REVIEW',settlement_status='REVIEW',reconciliation_last_error='SECRET' WHERE id=$1`, usageID); err != nil {
+		t.Fatal(err)
+	}
+	safeUsage := performAdminQueryRequest(handler, "/admin/v1/usage-requests/"+usageID.String())
+	if body := safeUsage.Body.String(); safeUsage.Code != http.StatusOK || !strings.Contains(body, "RECONCILIATION_DIAGNOSTIC_REDACTED") || strings.Contains(body, `"SECRET"`) {
+		t.Fatalf("usage handler did not redact an unsafe historical diagnostic status=%d body=%s", safeUsage.Code, body)
+	}
+	privateReason := "客户 13800138000 要求重新核对"
+	if _, err := repository.AdminRetryReconciliation(ctx, usageID, privateReason, actorID, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	var diagnosticCode, commandReason, auditSummary string
+	if err := repository.pool.QueryRow(ctx, `SELECT request.reconciliation_last_error,command.reason,audit.summary::text FROM usage_requests request JOIN usage_reconciliation_commands command ON command.usage_request_id=request.id JOIN token_audit_logs audit ON audit.resource_type='USAGE_REQUEST' AND audit.resource_id=request.id AND audit.action='USAGE_RECONCILIATION_RETRIED' WHERE request.id=$1 ORDER BY audit.occurred_at DESC LIMIT 1`, usageID).Scan(&diagnosticCode, &commandReason, &auditSummary); err != nil {
+		t.Fatal(err)
+	}
+	if diagnosticCode != "MANUAL_RECONCILIATION_REQUESTED" || commandReason != "AUDIT_ONLY" || strings.Contains(diagnosticCode, privateReason) || strings.Contains(commandReason, privateReason) || !strings.Contains(auditSummary, privateReason) {
+		t.Fatalf("reason storage diagnostic=%q command=%q audit=%q", diagnosticCode, commandReason, auditSummary)
+	}
+	provisioner := &PostgresDefaultRouteProvisioner{repository: repository}
+	legacyKey := "legacy-raw-key-0000001"
+	legacyReason := "legacy operator repair"
+	if _, err := repository.pool.Exec(ctx, `UPDATE route_provisionings SET status='PENDING',stage='MANUAL_REPAIR',repair_round=1,attempt_count=0 WHERE id=$1`, provisioningID); err != nil {
+		t.Fatal(err)
+	}
+	legacyResult, err := scanProvisioning(repository.pool.QueryRow(ctx, provisioningSelect+` WHERE id=$1`, provisioningID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySnapshot, err := json.Marshal(legacyResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDigest := provisioningDigest(map[string]any{"provisioning_id": provisioningID, "reason": legacyReason})
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO route_provisioning_commands(idempotency_key,command_type,request_digest,provisioning_id,repair_round,actor_id,reason,result_snapshot,created_at) VALUES($1,'PROVISIONING_REPAIR',$2,$3,1,$4,$5,$6,$7)`, legacyKey, legacyDigest, provisioningID, actorID, legacyReason, legacySnapshot, now); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := provisioner.Repair(ctx, provisioningID, actorID, legacyKey, legacyReason)
+	if err != nil || replayed.RepairRound != 1 || replayed.Status != legacyResult.Status {
+		t.Fatalf("pre-v2 same-actor replay round=%d status=%s err=%v", replayed.RepairRound, replayed.Status, err)
+	}
+	secondActor := uuid.New()
+	if _, err := repository.pool.Exec(ctx, `UPDATE route_provisionings SET status='FAILED' WHERE id=$1`, provisioningID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := provisioner.Repair(ctx, provisioningID, secondActor, legacyKey, "second operator repair")
+	if err != nil || second.RepairRound != 2 {
+		t.Fatalf("pre-v2 raw key leaked across actors round=%d err=%v", second.RepairRound, err)
+	}
+	var legacyCommandCount, legacyRawKeyCount int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE idempotency_key=$1) FROM route_provisioning_commands WHERE provisioning_id=$2 AND command_type='PROVISIONING_REPAIR'`, legacyKey, provisioningID).Scan(&legacyCommandCount, &legacyRawKeyCount); err != nil || legacyCommandCount != 2 || legacyRawKeyCount != 1 {
+		t.Fatalf("legacy actor isolation commands=%d raw=%d err=%v", legacyCommandCount, legacyRawKeyCount, err)
+	}
+
+	concurrentProvisioningID := uuid.New()
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,desired_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,active_token_account_id,active_credential_id,requested_by,created_at,updated_at) VALUES($1,'PERSONAL',$2,$3,$4,'model-one','CHAT',2,$5,'FAILED','VERIFY',1,'{}',3,$6+interval '1 hour',$7,$8,$9,$6,$6)`, concurrentProvisioningID, ownerID, walletID, modelID, strings.Repeat("1", 64), now, accountID, credentialID, actorID); err != nil {
+		t.Fatal(err)
+	}
+	concurrentKey := "same-actor-concurrent-key-0001"
+	concurrentReason := "concurrent operator repair"
+	type repairResult struct {
+		item RouteProvisioning
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan repairResult, 2)
+	var workers sync.WaitGroup
+	for index := 0; index < 2; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			item, repairErr := provisioner.Repair(ctx, concurrentProvisioningID, actorID, concurrentKey, concurrentReason)
+			results <- repairResult{item: item, err: repairErr}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	var concurrentResponses []RouteProvisioning
+	for result := range results {
+		if result.err != nil || result.item.RepairRound != 1 || result.item.Status != "PENDING" {
+			t.Fatalf("concurrent same-actor replay round=%d status=%s err=%v", result.item.RepairRound, result.item.Status, result.err)
+		}
+		concurrentResponses = append(concurrentResponses, result.item)
+	}
+	if len(concurrentResponses) != 2 || concurrentResponses[0].ID != concurrentResponses[1].ID || !concurrentResponses[0].UpdatedAt.Equal(concurrentResponses[1].UpdatedAt) {
+		t.Fatalf("concurrent responses differ: %+v", concurrentResponses)
+	}
+	if _, err := provisioner.Repair(ctx, concurrentProvisioningID, actorID, concurrentKey, "changed repair payload"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("same actor changed payload=%v", err)
+	}
+	var commandCount, auditCount, repairRound int
+	if err := repository.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM route_provisioning_commands WHERE provisioning_id=$1 AND command_type='PROVISIONING_REPAIR'),(SELECT count(*) FROM route_provisioning_audit WHERE provisioning_id=$1 AND action='REPAIR_REQUESTED'),(SELECT repair_round FROM route_provisionings WHERE id=$1)`, concurrentProvisioningID).Scan(&commandCount, &auditCount, &repairRound); err != nil || commandCount != 1 || auditCount != 1 || repairRound != 1 {
+		t.Fatalf("concurrent same-actor command=%d audit=%d round=%d err=%v", commandCount, auditCount, repairRound, err)
 	}
 
 	for _, matrix := range []struct {
@@ -371,5 +489,5 @@ func newTokenQueryIntegrationRepository(t *testing.T, ctx context.Context, datab
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	return &PostgresRepository{pool: pool}
+	return &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }, adminPaginationMetrics: newAdminPaginationMetrics()}
 }

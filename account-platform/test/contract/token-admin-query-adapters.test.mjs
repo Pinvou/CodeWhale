@@ -51,14 +51,67 @@ test('usage evidence publishes its independent cursor and stable error surface',
   assert.deepEqual(Object.keys(operation.responses).sort(), ['200', '400', '403', '410', '422', '429', '503', '504']);
 });
 
+test('provisioning attempts publish an independent bounded cursor and closed projection', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const operation = contract.paths['/token/admin/v1/provisionings/{provisioning_id}/attempts'].get;
+  const parameters = operation.parameters.map(parameter => parameter.name ?? contract.components.parameters[parameter.$ref.split('/').at(-1)].name);
+  assert.deepEqual(parameters, ['provisioning_id', 'limit', 'cursor', 'status']);
+  assert.ok(operation.responses['200'].$ref.endsWith('/TokenAdminProvisioningAttemptCollection'));
+  assert.deepEqual(Object.keys(operation.responses).sort(), ['200', '400', '403', '404', '410', '422', '429', '503', '504']);
+  assert.equal(contract.components.schemas.TokenAdminProvisioningAttempt.additionalProperties, false);
+  assert.ok(contract.components.schemas.TokenAdminProvisioningAttemptPage.allOf[1].properties.items.items.$ref.endsWith('/TokenAdminProvisioningAttempt'));
+  for (const hidden of ['worker_id', 'error_detail']) assert.ok(!Object.hasOwn(contract.components.schemas.TokenAdminProvisioningAttempt.properties, hidden));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  const validate = ajv.compile(contract.components.schemas.TokenAdminProvisioningAttempt);
+  const attempt = { attempt_id: '00000000-0000-4000-8000-000000000201', repair_round: 0, attempt_number: 1, status: 'FAILED', stage: 'VERIFY', error_code: 'ROUTE_UNAVAILABLE', started_at: '2026-09-04T12:00:00Z' };
+  assert.equal(validate(attempt), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...attempt, worker_id: 'private-worker' }), false);
+  assert.equal(validate({ ...attempt, error_detail: 'provider secret' }), false);
+});
+
+test('versioned provisioning detail is a closed redacted projection without inline attempts', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const operation = contract.paths['/token/admin/v2/provisionings/{provisioning_id}'].get;
+  assert.equal(operation.responses['200'].content['application/json'].schema.$ref, '#/components/schemas/TokenAdminProvisioningDetail');
+  const schema = contract.components.schemas.TokenAdminProvisioningDetail;
+  assert.equal(schema.additionalProperties, false);
+  for (const hidden of ['attempts', 'worker_id', 'error_detail', 'last_error_detail', 'lease_owner', 'lease_until', 'active_credential_id']) assert.ok(!Object.hasOwn(schema.properties, hidden));
+  const ajv = new Ajv2020({ allErrors: true, strict: false });
+  addFormats(ajv);
+  const validate = ajv.compile(schema);
+  const detail = {
+    provisioning_id: '00000000-0000-4000-8000-000000000301', scope_type: 'PERSONAL', scope_id: '00000000-0000-4000-8000-000000000302',
+    model_id: '00000000-0000-4000-8000-000000000303', protocol_code: 'CHAT', desired_generation: 2,
+    status: 'FAILED', stage: 'VERIFY', policy_version: 1, attempt_count: 1, repair_round: 0, max_attempts: 3,
+    sla_deadline_at: '2026-09-04T13:00:00Z', updated_at: '2026-09-04T12:00:00Z',
+  };
+  assert.equal(validate(detail), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...detail, attempts: [] }), false);
+});
+
+test('repair and reconciliation mutations publish bounded idempotency and conflict contracts', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const repair = contract.paths['/token/admin/v1/provisionings/{provisioning_id}/repair'].post;
+  const retry = contract.paths['/token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation'].post;
+  const names = repair.parameters.map(parameter => parameter.name ?? contract.components.parameters[parameter.$ref.split('/').at(-1)].name);
+  assert.deepEqual(names, ['provisioning_id', 'Idempotency-Key']);
+  assert.deepEqual(Object.keys(repair.responses).sort(), ['202', '400', '403', '404', '409']);
+  assert.deepEqual(Object.keys(retry.responses).sort(), ['200', '400', '403', '404', '409']);
+  const key = contract.components.parameters.IdempotencyKey.schema;
+  assert.deepEqual({ minLength: key.minLength, maxLength: key.maxLength }, { minLength: 16, maxLength: 128 });
+  const reason = contract.components.schemas.Reason.properties.reason;
+  assert.deepEqual({ minLength: reason.minLength, maxLength: reason.maxLength }, { minLength: 1, maxLength: 500 });
+});
+
 test('all paginated Token projections and pages are closed schemas', async () => {
   const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
-  for (const item of ['TokenAdminProtocol', 'TokenAdminFormula', 'TokenAdminAccountSummary', 'TokenAdminUsageSummary', 'TokenAdminReconciliationCase', 'TokenAdminOwnerCandidate', 'TokenAdminResourceAudit', 'TokenAdminUsageEvidence']) {
+  for (const item of ['TokenAdminProtocol', 'TokenAdminFormula', 'TokenAdminAccountSummary', 'TokenAdminUsageSummary', 'TokenAdminUsageDetail', 'TokenAdminReconciliationCase', 'TokenAdminOwnerCandidate', 'TokenAdminResourceAudit', 'TokenAdminUsageEvidence', 'TokenAdminProvisioningAttempt']) {
     assert.equal(contract.components.schemas[item].additionalProperties, false, item);
   }
   assert.equal(contract.components.schemas.RouteProvisioning.additionalProperties, false);
   assert.equal(contract.components.schemas.TokenAdminOwnerCandidate.properties.status.enum.includes('FROZEN'), false);
-  for (const page of ['TokenAdminModelPage', 'TokenAdminProtocolPage', 'TokenAdminFormulaPage', 'TokenAdminAccountPage', 'TokenAdminProvisioningPage', 'TokenAdminUsagePage', 'TokenAdminReconciliationPage', 'TokenAdminOwnerCandidatePage', 'TokenAdminResourceAuditPage', 'TokenAdminUsageEvidencePage']) {
+  for (const page of ['TokenAdminModelPage', 'TokenAdminProtocolPage', 'TokenAdminFormulaPage', 'TokenAdminAccountPage', 'TokenAdminProvisioningPage', 'TokenAdminProvisioningAttemptPage', 'TokenAdminUsagePage', 'TokenAdminReconciliationPage', 'TokenAdminOwnerCandidatePage', 'TokenAdminResourceAuditPage', 'TokenAdminUsageEvidencePage']) {
     assert.ok(contract.components.schemas[page].allOf[0].$ref.endsWith('/AdminPaginationEnvelope'), page);
     assert.ok(contract.components.schemas[page].allOf[1].properties.items.items.$ref, `${page} item`);
   }
@@ -102,6 +155,32 @@ test('closed model and legacy usage schemas validate production JSON shapes', as
   assert.equal(validateUsage(usage), true, JSON.stringify(validateUsage.errors));
   const legacyItem = contract.components.responses.TokenAdminUsageCollection.content['application/json'].schema.oneOf[0].properties.items.items.$ref;
   assert.equal(legacyItem, '#/components/schemas/AdminUsageRequest');
+
+  const validateUsageDetail = ajv.compile(contract.components.schemas.TokenAdminUsageDetail);
+  const detail = {
+    usage_request_id: usage.usage_request_id,
+    token_account_id: usage.token_account_id,
+    model: usage.model,
+    status: usage.status,
+    execution_status: usage.execution_status,
+    delivery_status: usage.delivery_status,
+    cancel_status: usage.cancel_status,
+    settlement_status: usage.settlement_status,
+    maximum_microcredits: usage.maximum_microcredits,
+    reconciliation_attempts: usage.reconciliation_attempts,
+    started_at: usage.started_at,
+    updated_at: usage.updated_at,
+  };
+  assert.equal(validateUsageDetail(detail), true, JSON.stringify(validateUsageDetail.errors));
+  assert.equal(validateUsageDetail({ ...detail, reconciliation_last_error: 'MANUAL_RECONCILIATION_REQUESTED' }), true, JSON.stringify(validateUsageDetail.errors));
+  for (const unsafe of ['SECRET', 'API_KEY', 'PASSWORD', 'CUSTOMER_PHONE_13800138000', '_CODE', '1CODE', 'customer phone 13800138000']) {
+    assert.equal(validateUsageDetail({ ...detail, reconciliation_last_error: unsafe }), false, `${unsafe} is not in the controlled diagnostic vocabulary`);
+  }
+  for (const [field, value] of [['user_id', usage.user_id], ['session_id', usage.session_id], ['credential_id', usage.credential_id], ['request_fingerprint', usage.request_fingerprint], ['provider_id', 'secret-provider'], ['upstream_request_id', 'upstream-secret'], ['convergence_evidence', {}]]) {
+    assert.equal(validateUsageDetail({ ...detail, [field]: value }), false, `${field} must not enter the Portal detail`);
+  }
+  assert.equal(contract.paths['/token/admin/v1/usage-requests/{usage_request_id}'].get.responses['200'].content['application/json'].schema.$ref, '#/components/schemas/TokenAdminUsageDetail');
+  assert.equal(contract.paths['/token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation'].post.responses['200'].content['application/json'].schema.$ref, '#/components/schemas/TokenAdminUsageDetail');
 });
 
 test('impact precheck covered and uncovered price evidence validate as closed alternatives', async () => {
@@ -147,7 +226,7 @@ test('query adapters freeze authoritative total orders and isolated resource nam
   for (const order of [
     'normalized_name ASC,model_id ASC', 'protocol_code ASC,version DESC,id ASC',
     'updated_at DESC,id ASC', 'updated_at DESC,id DESC', 'occurred_at DESC,id DESC',
-    'normalized_display_label ASC,owner_type ASC,owner_id ASC',
+    'normalized_display_label ASC,owner_type ASC,owner_id ASC', 'repair_round ASC,attempt_number ASC,id ASC',
     'observed_at ASC,source_kind ASC,source_id ASC',
   ]) assert.ok(queries.includes(order), order);
   for (const resource of ['models', 'protocols', 'formulas', 'token-accounts', 'provisionings', 'usage-requests', 'reconciliation-cases', 'owner-candidates']) {
@@ -156,6 +235,9 @@ test('query adapters freeze authoritative total orders and isolated resource nam
   assert.match(handlers, /resource-audit:"\+strings\.ToLower\(resourceType\)/);
   assert.match(handlers, /authorization\.GrantedPermission\(r\.Context\(\), requiredRead\)/);
   assert.match(service, /RequireAnyAnd\(\[\]string\{"platform\.models\.read", "platform\.tokens\.read"\}, \[\]string\{"platform\.audit\.read"\}\)/u);
+  assert.match(queries, /review\.domain='TOKEN' AND review\.case_type IN \('USAGE_RECONCILIATION_REVIEW'\) AND review\.resource_type='USAGE_REQUEST' AND EXISTS\(SELECT 1 FROM usage_requests request WHERE request\.id=review\.resource_id\)/u);
+  assert.doesNotMatch(queries, /review\.case_type ILIKE|review\.resource_type ILIKE/u);
+  assert.ok((queries.match(/adminUsageReconciliationCasePredicate/g) ?? []).length >= 3, 'snapshot and loader share the authoritative reconciliation predicate');
 });
 
 test('owner projection stays service-auth only and evidence has a cross-table identity', async () => {
@@ -193,7 +275,7 @@ test('PostgreSQL gate applies the production Token migration chain and productio
   assert.match(integration, /migrations\.Load\("\.\.\/\.\.\/migrations\/token"\)/);
   assert.match(integration, /migrations\.Up\(ctx, connection, loaded\)/);
   assert.doesNotMatch(integration, /CREATE TABLE model_catalog_versions|CREATE TABLE token_accounts/);
-  for (const loader of ['adminModelsByIDs', 'adminProtocolsByIDs', 'adminFormulasByIDs', 'adminTokenAccountsByIDs', 'adminProvisioningsByIDs', 'adminUsageByIDs', 'adminReconciliationByIDs', 'adminAuditByIDs', 'adminEvidenceByIDs']) {
+  for (const loader of ['adminModelsByIDs', 'adminProtocolsByIDs', 'adminFormulasByIDs', 'adminTokenAccountsByIDs', 'adminProvisioningsByIDs', 'adminProvisioningAttemptsByIDs', 'adminUsageByIDs', 'adminReconciliationByIDs', 'adminAuditByIDs', 'adminEvidenceByIDs']) {
     assert.match(integration, new RegExp(`repository\\.${loader}`), loader);
   }
   assert.match(integration, /service\.Handler\("", verify\)/);

@@ -16,23 +16,28 @@ func TestTokenAdminQueryProjectionAllowlistIsReadOnly(t *testing.T) {
 		"/admin/v1/token-accounts", "/admin/v1/provisionings", "/admin/v1/usage-requests",
 		"/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit",
 		"/admin/v1/usage-requests/" + usageID + "/evidence",
+		"/admin/v1/provisionings/" + usageID + "/attempts",
 	}
 	for _, path := range listPaths {
 		if !tokenAdminPathAllowed(http.MethodGet, path) {
 			t.Fatalf("read path not allowed: %s", path)
 		}
 	}
+	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v2/provisionings/"+usageID) {
+		t.Fatal("versioned redacted provisioning detail must be allowlisted")
+	}
 	// Existing aggregate roots retain their previously approved write methods while
 	// projection-only routes introduced by APT-121 cannot be used to mutate data.
 	for _, path := range []string{
 		"/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates",
 		"/admin/v1/resource-audit", "/admin/v1/usage-requests/" + usageID + "/evidence",
+		"/admin/v1/provisionings/" + usageID + "/attempts",
 	} {
 		if tokenAdminPathAllowed(http.MethodPost, path) || tokenAdminPathAllowed(http.MethodDelete, path) {
 			t.Fatalf("query projection must remain read-only: %s", path)
 		}
 	}
-	for _, path := range []string{"/admin/v1/owner-candidates/" + uuid.NewString(), "/admin/v1/resource-audit/export", "/admin/v1/usage-requests/not-a-uuid/evidence"} {
+	for _, path := range []string{"/admin/v1/owner-candidates/" + uuid.NewString(), "/admin/v1/resource-audit/export", "/admin/v1/usage-requests/not-a-uuid/evidence", "/admin/v1/provisionings/not-a-uuid/attempts", "/admin/v1/provisionings/" + usageID + "/attempts/extra", "/admin/v2/provisionings/not-a-uuid", "/admin/v2/provisionings/" + usageID + "/attempts"} {
 		if tokenAdminPathAllowed(http.MethodGet, path) {
 			t.Fatalf("unexpected Token admin path allowed: %s", path)
 		}

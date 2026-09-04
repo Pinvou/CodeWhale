@@ -215,6 +215,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/model-catalog/impact/rollback", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogRollbackImpact))
 		admin.GET("/provisionings", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisionings))
 		admin.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioning))
+		admin.GET("/provisionings/:provisioning_id/attempts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioningAttempts))
 		admin.GET("/owner-candidates", s.authorizer.Require("platform.tokens.owner-candidates.read"), httpserver.AdaptFunc(s.adminOwnerCandidates))
 		admin.GET("/resource-audit", s.authorizer.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), httpserver.AdaptFunc(s.adminResourceAudit))
 		admin.POST("/commands", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateTokenCommand))
@@ -226,6 +227,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	}
 	adminV2 := protected.Group("/admin/v2")
 	if s.authorizer != nil {
+		adminV2.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioningV2))
 		adminV2.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertStableTokenRoute))
 		adminV2.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteStableTokenRoute))
 		adminV2.GET("/token-accounts/:token_account_id/impact/route", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminStableTokenRouteImpact))

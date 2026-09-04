@@ -27,6 +27,9 @@ type adminPaginationRepository interface {
 	adminFormulasByIDs(context.Context, []string) ([]ProtocolFormulaVersion, error)
 	adminTokenAccountsByIDs(context.Context, []string) ([]AdminTokenAccount, error)
 	adminProvisioningsByIDs(context.Context, []string) ([]RouteProvisioning, error)
+	adminProvisioningDetail(context.Context, uuid.UUID) (AdminProvisioningDetail, error)
+	adminProvisioningAttemptsByIDs(context.Context, uuid.UUID, []string) ([]AdminProvisioningAttempt, error)
+	adminProvisioningExists(context.Context, uuid.UUID) (bool, error)
 	adminUsageByIDs(context.Context, []string) ([]AdminUsageSummary, error)
 	adminReconciliationByIDs(context.Context, []string) ([]AdminReconciliationCase, error)
 	adminAuditByIDs(context.Context, string, []string) ([]AdminResourceAudit, error)
@@ -383,6 +386,42 @@ func (s *Service) adminUsageEvidence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.adminQueryPage(w, r, filter, "usage-evidence", usageID.String(), adminUsageEvidenceSort, 50, 200, source, func(ctx context.Context, ids []string) (any, error) { return repo.adminEvidenceByIDs(ctx, ids) }) {
+		writeAdminQueryError(w, r, ErrAdminPaginationDisabled)
+	}
+}
+
+func (s *Service) adminProvisioningAttempts(w http.ResponseWriter, r *http.Request) {
+	provisioningID, ok := adminUUID(w, r, "provisioning_id")
+	if !ok {
+		return
+	}
+	filter, err := parseAdminQuery(r.URL.Query(), []string{"status"})
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	source, err := provisioningAttemptSnapshotSource(filter, provisioningID)
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	repo, ok := s.paginationRepository()
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "token administration is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	exists, err := repo.adminProvisioningExists(r.Context(), provisioningID)
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	if !exists {
+		s.writeError(w, r, ErrNotFound)
+		return
+	}
+	if !s.adminQueryPage(w, r, filter, "provisioning-attempts", provisioningID.String(), adminProvisioningAttemptsSort, 50, 200, source, func(ctx context.Context, ids []string) (any, error) {
+		return repo.adminProvisioningAttemptsByIDs(ctx, provisioningID, ids)
+	}) {
 		writeAdminQueryError(w, r, ErrAdminPaginationDisabled)
 	}
 }

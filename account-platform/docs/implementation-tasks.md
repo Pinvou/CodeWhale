@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，119 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，12 个任务为 `PENDING`，0 个任务为 `IN_REVIEW`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个任务中，120 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，11 个任务为 `PENDING`，0 个任务为 `IN_REVIEW`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -153,7 +153,7 @@
 | APT-127 | 模型与 Token 三 section、独立 URL 状态与逐源错误隔离 | UI-47, UI-48 | APT-094, APT-097, APT-121 | CODE | DONE |
 | APT-128 | 协议、安全公式、预览、发布及 Billing 同步界面 | UI-49 | APT-122, APT-123, APT-127 | CODE | DONE |
 | APT-129 | Token owner/路由模型选择器与健康管理界面 | UI-50 | APT-119, APT-123, APT-125, APT-127 | CODE | DONE |
-| APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | PENDING |
+| APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | DONE |
 | APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | PENDING |
 | APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | PENDING |
 | APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | PENDING |
@@ -302,7 +302,9 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-130 Provisioning、用量与核对异常闭环
 
-- **目标/范围**：主目标 `UI-51`。修改 `internal/token/{provisioning.go,provisioning_http.go,reconciliation.go}` 的 repair/retry API 适配与既有 generation/attempt/outbox 写入、Portal“运行与用量”页、稳定 URL 的主内容详情子视图、BFF 白名单/i18n/CSS及合同测试；接入 Provisioning 详情与 attempt history、用量详情/evidence、核对异常队列和“仅重新核对”命令。禁止使用抽屉、覆盖弹层或把详情挤入列表同一布局。
+> 实现状态（2026-09-04）：`DONE`；身份 B 第三轮独立代码审核 `PASS`。Provisioning 新增版本化安全详情投影且不内联 attempt、worker 或自由文本，旧 v1 合同保持兼容；核对异常快照与 loader 共用 `TOKEN + USAGE_RECONCILIATION_REVIEW + USAGE_REQUEST + usage_requests EXISTS` 权威约束；repair 幂等按 actor/command/digest 隔离并校验 16–128 字符 key；核对原因仅进入审计，运行投影仅允许受控诊断码白名单，其余历史值统一脱敏，reason 按 Unicode 1–500 字符校验。实现严格复用 APT-121、APT-123 与 APT-127，子 gate 默认关闭，不新增数据库事实，也未提前实现 APT-131、APT-132+ 或 APT-138。Portal 真实 smoke 已覆盖正式异常类型、详情与 attempt 网络闭合投影、从不请求 v1 内联详情、attempt/evidence 局部失败与重试、异常下穿、窄屏回流、双击单写、未知结果同键恢复、撤权中止、审计跳转及 Secret/PII 不进入运行 DOM；Go、OpenAPI、Portal/BFF、前端合同、i18n、构建与架构门禁通过。真实 PostgreSQL 门禁覆盖权威异常筛选、pre-v2 明文 key 同 actor 恢复/跨 actor 隔离、同 actor 并发仅一次 repair/command/audit 与审计专用 reason，在本地无测试数据库时按约定 `SKIP`，CI 保持 no-SKIP。当前未推送、未部署。
+
+- **目标/范围**：主目标 `UI-51`。修改 `internal/token/{admin.go,admin_queries.go,admin_queries_http.go,service.go}` 的脱敏详情/attempt 分页查询与 repair/retry API 适配，复用既有 generation/attempt/outbox 写入；修改 Portal“运行与用量”页、稳定 URL 的主内容详情子视图、BFF 白名单/i18n/CSS及合同测试；接入 Provisioning 详情与 attempt history、用量详情/evidence、核对异常队列和“仅重新核对”命令。禁止使用抽屉、覆盖弹层或把详情挤入列表同一布局。
 - **URL/状态/回滚**：Provisioning、用量、异常队列及用量 evidence 分别持有独立 filter/cursor/loading/error/refresh；仅 `provisioning_id` 与 `usage_request_id` 是详情深链参数且互斥进入全宽主内容子视图。核对异常不设独立详情参数，从异常队列选择记录后沿用其权威 `usage_request_id` 进入同一用量详情，并在该详情内显示核对证据/操作；面包屑和返回保留来源队列及各自主列表状态。受一期 gate 约束且无数据库变更，关闭子 gate 隐藏详情/处置入口但保留只读列表。
 - **验收**：九类查询合同中的三类页面翻页、并发局部失败、重试、空态、403/404 无泄漏、evidence 三元 cursor、未知结果恢复和审计跳转通过；文案明确“重新核对”绝不重新请求模型。
 - **不包含**：不改 Provisioning/用量事实、分页快照 schema、模型请求重放机制、趋势聚合或 Token 详情。

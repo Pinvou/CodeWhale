@@ -3,6 +3,7 @@ export function adminModelTokenOperationSources(permissions = []) {
   return [
     granted.has('platform.tokens.read') ? 'provisionings' : '',
     granted.has('platform.usage.read') ? 'usage' : '',
+    granted.has('platform.usage.read') ? 'reconciliation' : '',
   ].filter(Boolean);
 }
 
@@ -11,7 +12,9 @@ export function planAdminModelTokenOperationRequests(permissions = [], client) {
     source,
     load: source === 'provisionings'
       ? (query, signal) => client.provisionings(query, signal)
-      : (query, signal) => client.usageRequests(query, signal),
+      : source === 'usage'
+        ? (query, signal) => client.usageRequests(query, signal)
+        : (query, signal) => client.tokenReconciliationCases(query, signal),
   }));
 }
 

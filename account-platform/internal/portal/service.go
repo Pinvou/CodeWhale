@@ -28,20 +28,21 @@ import (
 )
 
 type Config struct {
-	PublicURL                      *url.URL
-	AuthorizationURL               *url.URL
-	TokenURL                       *url.URL
-	ClientID                       string
-	AccountURL                     *url.URL
-	BillingURL                     *url.URL
-	TokenGatewayURL                *url.URL
-	ClientVersion                  string
-	TokenAdminProxyHMACKey         []byte
-	AdminModelTokenIAEnabled       bool
-	AdminTokenResourceFormsEnabled bool
-	SystemProbes                   []SystemProbe
-	SecureCookies                  bool
-	SessionMaxAge                  time.Duration
+	PublicURL                          *url.URL
+	AuthorizationURL                   *url.URL
+	TokenURL                           *url.URL
+	ClientID                           string
+	AccountURL                         *url.URL
+	BillingURL                         *url.URL
+	TokenGatewayURL                    *url.URL
+	ClientVersion                      string
+	TokenAdminProxyHMACKey             []byte
+	AdminModelTokenIAEnabled           bool
+	AdminTokenResourceFormsEnabled     bool
+	AdminModelOperationsDetailsEnabled bool
+	SystemProbes                       []SystemProbe
+	SecureCookies                      bool
+	SessionMaxAge                      time.Duration
 }
 
 const defaultSessionMaxAge = 30 * 24 * time.Hour
@@ -265,8 +266,9 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		"authenticated": true,
 		"csrf_token":    session.CSRFToken,
 		"feature_flags": map[string]bool{
-			"admin_model_token_ia":       s.config.AdminModelTokenIAEnabled,
-			"admin_token_resource_forms": s.config.AdminTokenResourceFormsEnabled,
+			"admin_model_token_ia":           s.config.AdminModelTokenIAEnabled,
+			"admin_token_resource_forms":     s.config.AdminTokenResourceFormsEnabled,
+			"admin_model_operations_details": s.config.AdminModelOperationsDetailsEnabled,
 		},
 	})
 }
@@ -857,6 +859,12 @@ func tokenAdminPathAllowed(method, resource string) bool {
 		}
 		return false
 	}
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v2" && parts[2] == "provisionings" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		return method == http.MethodGet
+	}
 	if resource == "/admin/v1/protocols" {
 		return method == http.MethodGet || method == http.MethodPost
 	}
@@ -885,7 +893,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 		return len(parts) == 5 && ((parts[4] == "draft" && method == http.MethodPut) || ((parts[4] == "publish" || parts[4] == "lifecycle") && method == http.MethodPost))
 	}
 	if parts[2] == "provisionings" {
-		return len(parts) == 4 && method == http.MethodGet || len(parts) == 5 && parts[4] == "repair" && method == http.MethodPost
+		return len(parts) == 4 && method == http.MethodGet ||
+			len(parts) == 5 && parts[4] == "attempts" && method == http.MethodGet ||
+			len(parts) == 5 && parts[4] == "repair" && method == http.MethodPost
 	}
 	if parts[2] != "token-accounts" {
 		return false
