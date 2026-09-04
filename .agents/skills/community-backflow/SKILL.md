@@ -1,6 +1,6 @@
 ---
 name: community-backflow
-description: 处理 Pinvou Community 已合并 PR 到 Official 的完整回流队列。用于处理全部 backflow:pending Issue、做轻量语义移植、创建并跟进回流 PR，以及在当前 head required checks 通过且没有实际 blocker 时执行管理员 squash merge 和 Issue 收尾。
+description: 处理 Pinvou Community 已合并 PR 到 Official 的完整回流队列。用于处理全部 backflow:pending Issue、做轻量语义移植、创建并跟进回流 PR，以及在当前 head required checks 通过且没有实际 blocker 时加入 Merge Queue 并完成 Issue 收尾。
 ---
 
 # 开源回流处理
@@ -123,7 +123,9 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 
 ## 入队与自动合并
 
-满足以下条件就执行 `gh pr merge --auto --squash --delete-branch`，由 Merge Queue 在最新
+满足以下条件就执行
+`node scripts/community-backflow.mjs enqueue --repo Pinvou/pinvou3 --pull <official-pr-number> --head <current-head-sha> --credential <github-username>`，
+由命令重新完成完整回流校验，并由 Merge Queue 在最新
 `main` 组合提交上完成 required checks 后合并：
 
 - 定时任务已明确授权自动加入 Merge Queue。
@@ -159,8 +161,8 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
   分支清理由人工流程或具备原子绑定能力的安全 reaper 完成，不能使用有 H→H2 窗口的
   GET→DELETE 模式。
 - 入队 mutation 用 `expectedHeadOid` 绑定已通过门禁的 head，并先通过受信 GraphQL API 审计
-  Official `main` 的 `mergeQueue.configuration.mergeMethod`。只有实际为 `SQUASH` 才入队；
-  `MERGE`、`REBASE` 或未知配置都拒绝，自动器不得修改远端规则或绕过组合门禁。
+  Official `main` 的 `mergeQueue.configuration.mergeMethod`。对 GitHub 明确定义的 `MERGE`、`SQUASH`、`REBASE`
+  遵循仓库当前配置入队；缺失或未知配置都拒绝，自动器不得修改远端规则或绕过组合门禁。
 - 自动器只接受 Official 同仓、base 为 `main`、分支严格匹配
   `backflow/community-<source-number>` 的 PR；来源 marker、provenance、Issue plan marker 和
   Issue 来源 marker 都必须各恰好出现一次，重复、冲突或与当前 head 不一致都会失败关闭，
@@ -175,8 +177,9 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
   Issue，继续按下方固件构建契约人工完成。自动器不会把缺失固件构建证据的 Release Issue
   标记 synced。
 
-如果仓库未启用自动器，或自动器因真实 blocker 停止，继续使用上方
-`gh pr merge --auto --squash --delete-branch` 和人工收尾流程。
+如果仓库未启用自动器，或自动器未接管当前事件，继续使用上方带明确 PR 与当前 head 的
+`community-backflow.mjs enqueue` 命令和人工收尾流程。该命令不会自动删除远端分支；必须在确认 PR 已合并且
+远端 head 仍等于已验证 SHA 后，按“收尾”要求安全清理。
 
 ## Release 固件构建
 

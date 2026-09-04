@@ -24,6 +24,7 @@ export const AUTO_FINALIZED_MARKER_PREFIX = "community-backflow-auto-finalized";
 export const AUTO_RELEASE_DEFERRED_MARKER_PREFIX = "community-backflow-auto-release-deferred";
 export const AUTOMATION_ENV = "COMMUNITY_BACKFLOW_AUTOMATION_ENABLED";
 export const SOURCE_REPO = "Pinvou/pinvou-agent";
+export const SUPPORTED_MERGE_QUEUE_METHODS = new Set(["MERGE", "SQUASH", "REBASE"]);
 
 const RETRYABLE_GITHUB_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
@@ -655,10 +656,10 @@ async function enqueueBackflow({ graphql, token, repo, context, dryRun }) {
     }
   `, { owner, name, branch: "main" });
   const mergeMethod = policy?.repository?.mergeQueue?.configuration?.mergeMethod;
-  if (mergeMethod !== "SQUASH") {
+  if (!SUPPORTED_MERGE_QUEUE_METHODS.has(mergeMethod)) {
     fail(
       `Official main Merge Queue mergeMethod=${mergeMethod || "unknown"}；` +
-      "请仓库管理员将 Queue 合并方法配置为 SQUASH 后重试，自动器不会修改规则或绕过 Queue",
+      "该配置不受回流契约支持，自动器不会修改规则或绕过 Queue",
     );
   }
   const state = await graphql(token, `
@@ -672,10 +673,16 @@ async function enqueueBackflow({ graphql, token, repo, context, dryRun }) {
     }
   `, { id: context.pull.node_id });
   if (state?.node?.mergeQueueEntry || state?.node?.autoMergeRequest) {
-    return { status: "already-enabled", pull: context.pull.number, head: context.head };
+    return { status: "already-enabled", pull: context.pull.number, head: context.head, mergeMethod };
   }
   if (dryRun) {
-    return { status: "dry-run", action: "enqueue", pull: context.pull.number, head: context.head };
+    return {
+      status: "dry-run",
+      action: "enqueue",
+      pull: context.pull.number,
+      head: context.head,
+      mergeMethod,
+    };
   }
   await graphql(token, `
     mutation EnqueueBackflowPull($id: ID!, $head: GitObjectID!) {
@@ -684,7 +691,7 @@ async function enqueueBackflow({ graphql, token, repo, context, dryRun }) {
       }
     }
   `, { id: context.pull.node_id, head: context.head });
-  return { status: "enqueued", pull: context.pull.number, head: context.head };
+  return { status: "enqueued", pull: context.pull.number, head: context.head, mergeMethod };
 }
 
 function finalizedMarker(context) {
@@ -942,6 +949,46 @@ export async function runAutomation({
   return finalizeBackflow({ request, token, repo, context, dryRun });
 }
 
+export async function runManualEnqueue({
+  repo,
+  pullNumber,
+  expectedHead,
+  token,
+  dryRun = false,
+  request = githubRequest,
+  graphql = githubGraphqlRequest,
+}) {
+  if (!repo || !/^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/u.test(repo)) {
+    fail("enqueue 缺少有效 --repo");
+  }
+  if (!Number.isInteger(Number(pullNumber)) || Number(pullNumber) <= 0) {
+    fail("enqueue 缺少有效 --pull");
+  }
+  if (!/^[0-9a-f]{40}$/iu.test(String(expectedHead || ""))) {
+    fail("enqueue 缺少有效 --head");
+  }
+  if (!token) fail("enqueue 缺少 GitHub 凭证");
+  const context = await readAutomationContext({
+    request,
+    token,
+    repo,
+    pullNumber: Number(pullNumber),
+    expectedHead: String(expectedHead),
+  });
+  if (!context) fail(`PR #${pullNumber} 不是受支持的回流 PR`);
+  return enqueueBackflow({ graphql, token, repo, context, dryRun });
+}
+
+async function enqueue(options) {
+  return runManualEnqueue({
+    repo: String(options.repo || ""),
+    pullNumber: Number(options.pull),
+    expectedHead: String(options.head || ""),
+    token: githubToken(options),
+    dryRun: Boolean(options["dry-run"]),
+  });
+}
+
 async function automation(options) {
   if (!options["event-file"]) fail("automation 缺少 --event-file");
   const event = JSON.parse(readFileSync(resolve(String(options["event-file"])), "utf8"));
@@ -1061,6 +1108,7 @@ function help() {
   node scripts/community-backflow.mjs preflight [--base origin/main] [--head HEAD] [--source N]
   node scripts/community-backflow.mjs verify --body-file pr-body.txt --head SHA [--source N]
   node scripts/community-backflow.mjs submit --repo OWNER/REPO --issue N --source N --title TITLE --body-file FILE [--credential USERNAME] [--no-push]
+  node scripts/community-backflow.mjs enqueue --repo OWNER/REPO --pull N --head SHA [--credential USERNAME] [--dry-run]
   node scripts/community-backflow.mjs automation --repo OWNER/REPO --event-file EVENT.json [--dry-run]
 `;
 }
@@ -1102,6 +1150,10 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (command === "submit") {
     process.stdout.write(`${JSON.stringify(await submit(options), null, 2)}\n`);
+    return;
+  }
+  if (command === "enqueue") {
+    process.stdout.write(`${JSON.stringify(await enqueue(options), null, 2)}\n`);
     return;
   }
   if (command === "automation") {

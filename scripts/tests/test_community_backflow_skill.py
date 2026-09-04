@@ -20,7 +20,7 @@ class CommunityBackflowSkillTests(unittest.TestCase):
 
     def test_merge_queue_requires_current_head_gates(self):
         self.assertIn(
-            "gh pr merge --auto --squash --delete-branch",
+            "node scripts/community-backflow.mjs enqueue --repo Pinvou/pinvou3 --pull <official-pr-number> --head <current-head-sha>",
             self.skill,
         )
         self.assertIn("当前 head SHA", self.skill)
