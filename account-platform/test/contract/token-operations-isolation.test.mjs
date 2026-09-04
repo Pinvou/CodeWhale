@@ -33,7 +33,8 @@ test('platform Token operations are role isolated and resource scoped', () => {
   assert.doesNotMatch(rbac.match(/UNION ALL SELECT 'OWNER'[\s\S]*?UNION ALL SELECT 'AUDITOR'/)?.[0] || '', /platform\.tokens/);
 
   assert.match(service, /POST\("\/token-accounts"[\s\S]*platform\.tokens\.manage[\s\S]*TOKEN_ACCOUNT_CREATE/);
-  assert.match(service, /credentials\/:credential_id\/validate"[\s\S]*platform\.tokens\.credentials\.validate/);
+  assert.doesNotMatch(service, /credentials\/:credential_id\/validate"/, 'legacy direct credential validation must stay removed');
+  assert.match(read('internal/token/command_governance.go'), /TOKEN_CREDENTIAL_VALIDATE[\s\S]*platform\.tokens\.credentials\.validate/);
   assert.match(command, /TOKEN_ACCOUNT_CREATE[\s\S]*AUDIT_ONLY[\s\S]*platform\.tokens\.manage/);
   assert.match(policy, /TOKEN_ACCOUNT_CREATE.*platform\.tokens\.manage/);
 
@@ -48,7 +49,7 @@ test('platform Token operations are role isolated and resource scoped', () => {
   assert.doesNotMatch(admin.match(/type AdminCredentialMetadata struct \{([\s\S]*?)\n\}/)?.[1] || '', /BaseURL|Secret|Ciphertext|KeyID/);
 
   assert.match(adminAPI, /createAdminTokenAccount/);
-  assert.match(adminAPI, /CredentialValidationResult/);
+  assert.match(adminAPI, /TokenCredentialValidationGovernedResult/);
   const policySchema = organizationAPI.match(/OrganizationModelPolicy:[\s\S]*?(?=\n    [A-Z][A-Za-z]+:)/)?.[0] || '';
   assert.doesNotMatch(policySchema, /token_account_id|credential_id|route_id|provisioning_id/);
   assert.match(portal, /resource == "\/admin\/v1\/token-accounts" && method == http\.MethodPost/);

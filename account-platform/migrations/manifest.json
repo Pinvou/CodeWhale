@@ -1268,6 +1268,16 @@
         "file": "000025_stable_routes_health.up.sql",
         "version": 25,
         "sha256": "f79cb0529e8bbd11aad1fb8b68b2c2b8eab6e047dd5e12b13d932a422276b75f"
+      },
+      {
+        "file": "000026_credential_isolation.down.sql",
+        "version": 26,
+        "sha256": "3f5666a049de107580fd596bf58432a0cc0fa0b114359b46e336960f247a71d1"
+      },
+      {
+        "file": "000026_credential_isolation.up.sql",
+        "version": 26,
+        "sha256": "a0024f770eae00b2e4a6c20636289d3a3e3a66edf3ddf9fd3c4e213082e6b0cd"
       }
     ]
   }

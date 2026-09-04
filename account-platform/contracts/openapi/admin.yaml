@@ -1509,6 +1509,18 @@ paths:
         "200": { description: Account detail with stable and quarantined legacy routes represented separately, content: { application/json: { schema: { $ref: "#/components/schemas/AdminTokenAccountDetail" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v2/token-accounts/{token_account_id}:
+    get:
+      operationId: getAdminTokenAccountSafeDetail
+      summary: Get a safe Token account summary without inline credential or route resources
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      responses:
+        "200": { description: Safe account summary observed in one database snapshot, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminAccountSafeDetail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}/status:
     patch:
       operationId: setAdminTokenAccountStatus
@@ -1525,6 +1537,23 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}/routes:
+    get:
+      operationId: listAdminTokenAccountRoutes
+      summary: List stable route and server-derived health metadata for one Token Account
+      parameters:
+        - { $ref: "#/components/parameters/TokenAccountID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: health_status, in: query, schema: { type: string, enum: [UNKNOWN, PROBING, HEALTHY, DEGRADED, UNHEALTHY, STALE] } }
+      responses:
+        "200": { description: Stable route snapshot page, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminRoutePage" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
     put:
       operationId: upsertAdminTokenRoute
       summary: Legacy pre-activation text route mutation
@@ -1596,15 +1625,86 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
-  /token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate:
-    post:
-      operationId: validateAdminProviderCredential
-      summary: Validate a provider credential without returning its secret, ciphertext, or endpoint
-      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/CredentialID" }]
+  /token/admin/v1/token-accounts/{token_account_id}/credentials:
+    get:
+      operationId: listAdminTokenAccountCredentials
+      summary: List redacted credential metadata for one Token Account
+      description: Never returns secret, ciphertext, provider key identifier, provider endpoint, or raw validation error.
+      parameters:
+        - { $ref: "#/components/parameters/TokenAccountID" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: status, in: query, schema: { type: string, enum: [PENDING, CANDIDATE, ACTIVE, RETIRING, RETIRED, REVOKED] } }
       responses:
-        "200": { description: Uniform redacted credential validation result, content: { application/json: { schema: { $ref: "#/components/schemas/CredentialValidationResult" } } } }
+        "200": { description: Stable redacted credential snapshot page, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminCredentialPage" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/TokenAdminQueryLimited" }
+        "503": { $ref: "#/components/responses/PaginationSnapshotUnavailable" }
+        "504": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/credential-launches/enroll:
+    post:
+      operationId: createAdminCredentialEnrollLaunch
+      summary: Create a one-time credential enrollment launch
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CredentialLaunchRequest" } } } }
+      responses:
+        "201": { description: Opaque one-time launch, content: { application/json: { schema: { $ref: "#/components/schemas/CredentialLaunch" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/credential-launches/rotate:
+    post:
+      operationId: createAdminCredentialRotateLaunch
+      summary: Create a one-time credential rotation launch
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/CredentialLaunchRequest" } } } }
+      responses:
+        "201": { description: Opaque one-time launch, content: { application/json: { schema: { $ref: "#/components/schemas/CredentialLaunch" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/credential-results/{result_ref}:
+    get:
+      operationId: getAdminCredentialIsolationResult
+      summary: Query one actor-bound redacted credential isolation result
+      parameters: [{ name: result_ref, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Redacted result only, content: { application/json: { schema: { $ref: "#/components/schemas/CredentialIsolationResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/credential-results/{result_ref}/revoke-window:
+    post:
+      operationId: revokeBlockedAdminCredentialWindow
+      summary: Revoke a launch when the isolated top-level window did not confirm within ten seconds
+      parameters: [{ name: result_ref, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason_code]
+              properties:
+                reason_code: { type: string, enum: [CREDENTIAL_WINDOW_BLOCKED, CREDENTIAL_LAUNCH_CANCELLED, CREDENTIAL_PERMISSION_REVOKED, CREDENTIAL_FEATURE_DISABLED] }
+      responses:
+        "204": { description: Launch revoked }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests:
     get:
       operationId: listAdminUsageRequests
@@ -2469,11 +2569,6 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
-    CredentialID:
-      name: credential_id
-      in: path
-      required: true
-      schema: { type: string, format: uuid }
     UsageRequestID:
       name: usage_request_id
       in: path
@@ -2526,8 +2621,8 @@ components:
       additionalProperties: false
       required: [command_type, target_resource_type, target_resource_id, command]
       properties:
-        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
-        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG, PROVISIONING, USAGE_REQUEST] }
+        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG, PROVIDER_CREDENTIAL, PROVISIONING, USAGE_REQUEST] }
         target_resource_id: { type: string, minLength: 1, maxLength: 160 }
         command: { type: object, additionalProperties: true }
       allOf:
@@ -2595,6 +2690,18 @@ components:
               target_resource_type: { const: MODEL_CATALOG }
               target_resource_id: { const: CURRENT }
               command: { type: object, maxProperties: 0 }
+        - if: { properties: { command_type: { const: TOKEN_CREDENTIAL_VALIDATE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROVIDER_CREDENTIAL }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                type: object
+                additionalProperties: false
+                required: [token_account_id, credential_id]
+                properties:
+                  token_account_id: { type: string, format: uuid }
+                  credential_id: { type: string, format: uuid }
         - if: { properties: { command_type: { const: TOKEN_ROUTE_PROVISIONING_REPAIR } }, required: [command_type] }
           then:
             properties:
@@ -2619,7 +2726,7 @@ components:
         - type: object
           required: [expected_versions]
           properties:
-            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
             expected_versions: { type: object }
         - if: { properties: { action: { const: TOKEN_PROTOCOL_DRAFT_CREATE } }, required: [action] }
           then:
@@ -2702,6 +2809,13 @@ components:
                   expected_catalog_version: { type: integer, format: int64, minimum: 0 }
                   adapter_observed_version: { type: string, minLength: 1, maxLength: 160 }
                   catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { action: { const: TOKEN_CREDENTIAL_VALIDATE } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: PROVIDER_CREDENTIAL }
+              expected_versions: { $ref: "#/components/schemas/TokenCredentialValidateExpectedVersions" }
         - if: { properties: { action: { const: TOKEN_ROUTE_PROVISIONING_REPAIR } }, required: [action] }
           then:
             properties:
@@ -2754,6 +2868,17 @@ components:
         usage_request_id: { type: string, format: uuid }
         expected_usage_version: { type: string, format: date-time }
         evidence_high_watermark: { type: integer, format: int64, minimum: 0 }
+    TokenCredentialValidateExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, expected_account_version, credential_id, credential_version, precheck_fingerprint, request_fingerprint]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        credential_id: { type: string, format: uuid }
+        credential_version: { type: integer, minimum: 1 }
+        precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
     TokenProvisioningRepairGovernedResult:
       type: object
       additionalProperties: false
@@ -2777,6 +2902,14 @@ components:
       oneOf:
         - { $ref: "#/components/schemas/TokenProvisioningRepairGovernedResult" }
         - { $ref: "#/components/schemas/TokenUsageReconciliationGovernedResult" }
+    TokenCredentialValidationGovernedResult:
+      type: object
+      additionalProperties: false
+      required: [validation_status, credential]
+      properties:
+        validation_status: { type: string, enum: [VALID, INVALID] }
+        error_code: { type: string, enum: [CREDENTIAL_CHECK_FAILED] }
+        credential: { $ref: "#/components/schemas/TokenAdminCredentialMetadata" }
     TokenCommandEnvelope:
       type: object
       additionalProperties: false
@@ -2830,6 +2963,19 @@ components:
                   evidence_high_watermark: { type: integer, format: int64, minimum: 0 }
                   precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
                   request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { command_type: { const: TOKEN_CREDENTIAL_VALIDATE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROVIDER_CREDENTIAL }
+              target_resource_id: { type: string, format: uuid }
+              command:
+                type: object
+                additionalProperties: false
+                required: [token_account_id, credential_id]
+                properties:
+                  token_account_id: { type: string, format: uuid }
+                  credential_id: { type: string, format: uuid }
+              expected_versions: { $ref: "#/components/schemas/TokenCredentialValidateExpectedVersions" }
     TokenCommandResult:
       type: object
       additionalProperties: false
@@ -2864,6 +3010,17 @@ components:
               target_resource_type: { const: USAGE_REQUEST }
               target_resource_id: { type: string, format: uuid }
               redacted_result: { $ref: "#/components/schemas/TokenUsageReconciliationGovernedResult" }
+        - if:
+            properties:
+              command_type: { const: TOKEN_CREDENTIAL_VALIDATE }
+              status: { const: SUCCEEDED }
+            required: [command_type, status]
+          then:
+            required: [redacted_result]
+            properties:
+              target_resource_type: { const: PROVIDER_CREDENTIAL }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenCredentialValidationGovernedResult" }
         - if:
             properties:
               command_type: { enum: [TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
@@ -2993,7 +3150,11 @@ components:
           oneOf:
             - { $ref: "#/components/schemas/TokenModelLifecycleApprovalSnapshot" }
             - { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
-        financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+            - { $ref: "#/components/schemas/TokenCredentialRevokeApprovalSnapshot" }
+        financial_snapshot:
+          oneOf:
+            - { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+            - { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
     TokenModelLifecycleApprovalSnapshot:
       type: object
       additionalProperties: false
@@ -3025,6 +3186,26 @@ components:
         provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         policy_version: { type: integer, const: 2 }
+    TokenCredentialRevokeApprovalSnapshot:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, token_account_version, credential_id, credential_version, credential_status, credential_fingerprint, active_route_set_fingerprint, provisioning_lease_set_fingerprint, inflight_request_set_fingerprint, replacement_credential_version, policy_version]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        token_account_version: { type: integer, format: int64, minimum: 1 }
+        credential_id: { type: string, format: uuid }
+        credential_version: { type: integer, minimum: 1 }
+        credential_status: { type: string, enum: [PENDING, CANDIDATE, ACTIVE, RETIRING, RETIRED, REVOKED] }
+        credential_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        active_route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_lease_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        replacement_credential_version: { type: [integer, "null"], minimum: 1 }
+        policy_version: { type: integer, const: 1 }
+    EmptyFinancialSnapshot:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
     TokenFinancialSnapshot:
       type: object
       additionalProperties: false
@@ -3831,6 +4012,24 @@ components:
             properties:
               critical_resource_versions: { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
               financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        - if:
+            properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE } }
+            required: [command_type]
+          then:
+            properties:
+              normalized_command:
+                type: object
+                additionalProperties: false
+                required: [token_account_id, expected_account_version, credential_id, credential_version]
+                properties:
+                  token_account_id: { type: string, format: uuid }
+                  expected_account_version: { type: integer, format: int64, minimum: 1 }
+                  credential_id: { type: string, format: uuid }
+                  credential_version: { type: integer, minimum: 1 }
+              target_resource_type: { const: PROVIDER_CREDENTIAL }
+              target_resource_id: { type: string, format: uuid }
+              critical_resource_versions: { $ref: "#/components/schemas/TokenCredentialRevokeApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
     ApprovalDecision:
       type: object
       additionalProperties: false
@@ -3890,6 +4089,24 @@ components:
             properties:
               critical_resource_versions: { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
               financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        - if:
+            properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE } }
+            required: [command_type]
+          then:
+            properties:
+              normalized_command:
+                type: object
+                additionalProperties: false
+                required: [token_account_id, expected_account_version, credential_id, credential_version]
+                properties:
+                  token_account_id: { type: string, format: uuid }
+                  expected_account_version: { type: integer, format: int64, minimum: 1 }
+                  credential_id: { type: string, format: uuid }
+                  credential_version: { type: integer, minimum: 1 }
+              target_resource_type: { const: PROVIDER_CREDENTIAL }
+              target_resource_id: { type: string, format: uuid }
+              critical_resource_versions: { $ref: "#/components/schemas/TokenCredentialRevokeApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
     RoleBindingGrant:
       type: object
       additionalProperties: false
@@ -4174,17 +4391,26 @@ components:
             oneOf:
               - { $ref: "#/components/schemas/StableTokenRouteRead" }
               - { $ref: "#/components/schemas/LegacyTokenRouteRead" }
-    CredentialValidationResult:
+    TokenAdminAccountSafeDetail:
       type: object
       additionalProperties: false
-      required: [validation_status, credential]
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, management_mode, active_credential_count, route_count, account_version, updated_at, as_of]
       properties:
-        validation_status: { type: string, enum: [VALID, INVALID] }
-        error_code: { type: string, enum: [CREDENTIAL_CHECK_FAILED] }
-        credential:
-          allOf:
-            - { $ref: "#/components/schemas/AdminCredentialMetadata" }
-          description: Metadata only; secret, ciphertext, and provider endpoint are never returned.
+        token_account_id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        owner_organization_id: { type: [string, "null"], format: uuid }
+        owner_unit_id: { type: [string, "null"], format: uuid }
+        wallet_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, FROZEN] }
+        share_scope: { type: string, enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS] }
+        management_mode: { type: string, const: PLATFORM }
+        active_credential_count: { type: integer, format: int64, minimum: 0 }
+        route_count: { type: integer, format: int64, minimum: 0 }
+        account_version: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
+        as_of: { type: string, format: date-time, description: Database-authoritative observation boundary for the account summary. }
     AdminCredentialMetadata:
       type: object
       additionalProperties: false
@@ -4199,6 +4425,97 @@ components:
         allowed_models: { type: array, items: { type: string, minLength: 1 }, uniqueItems: true }
         validated_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    TokenAdminCredentialMetadata:
+      type: object
+      additionalProperties: false
+      required: [credential_id, credential_type, fingerprint, version, status, validation_status, allowed_models, responsible_actor_id, created_at, updated_at]
+      properties:
+        credential_id: { type: string, format: uuid }
+        credential_type: { type: string, minLength: 1, maxLength: 120, description: Provider adapter type only; never a provider key identifier. }
+        fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [PENDING, CANDIDATE, ACTIVE, RETIRING, RETIRED, REVOKED] }
+        validation_status: { type: string, enum: [UNKNOWN, VALID, INVALID] }
+        allowed_models: { type: array, items: { type: string, minLength: 1 }, uniqueItems: true }
+        validated_at: { type: string, format: date-time }
+        responsible_actor_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TokenAdminCredentialPage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/TokenAdminCredentialMetadata" } }, limit: { type: integer, minimum: 1, maximum: 100 } } }
+    TokenAdminRoutePage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 100, items: { $ref: "#/components/schemas/StableTokenRouteRead" } }, limit: { type: integer, minimum: 1, maximum: 100 } } }
+    CredentialLaunchRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_account_version, expected_credential_version, slot, reason]
+      properties:
+        action: { type: string, enum: [ENROLL, ROTATE] }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        expected_credential_version: { type: integer, minimum: 0 }
+        slot: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,63}$' }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    CredentialLaunch:
+      type: object
+      additionalProperties: false
+      required: [launch_id, result_ref, token_account_id, action, status, expires_at, audit_request_id]
+      properties:
+        launch_id: { type: string, format: uuid, description: Opaque one-time POST-body value; never place it in a URL. }
+        result_ref: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        action: { type: string, enum: [ENROLL, ROTATE] }
+        status: { type: string, const: CREATED }
+        expires_at: { type: string, format: date-time }
+        audit_request_id: { type: string, minLength: 1 }
+    CredentialIsolationResult:
+      type: object
+      additionalProperties: false
+      required: [result_ref, token_account_id, action, status, audit_request_id, window_confirmed, updated_at]
+      properties:
+        result_ref: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        action: { type: string, enum: [ENROLL, ROTATE] }
+        status: { type: string, enum: [PENDING, SUCCEEDED, FAILED, REVOKED, EXPIRED] }
+        credential_id: { type: string, format: uuid }
+        credential_version: { type: integer, minimum: 1 }
+        credential_status: { type: string, enum: [ACTIVE] }
+        validation_status: { type: string, enum: [VALID] }
+        fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        error_code: { type: string, enum: [CREDENTIAL_WINDOW_BLOCKED, CREDENTIAL_LAUNCH_CANCELLED, CREDENTIAL_PERMISSION_REVOKED, CREDENTIAL_FEATURE_DISABLED, CREDENTIAL_LAUNCH_EXPIRED, CREDENTIAL_VALIDATION_FAILED] }
+        audit_request_id: { type: string, minLength: 1 }
+        window_confirmed: { type: boolean }
+        updated_at: { type: string, format: date-time }
+      allOf:
+        - if: { properties: { status: { const: SUCCEEDED } }, required: [status] }
+          then:
+            properties: { credential_id: {}, credential_version: {}, credential_status: {}, validation_status: {}, fingerprint: {}, error_code: {} }
+            required: [credential_id, credential_version, credential_status, validation_status, fingerprint]
+            not: { properties: { error_code: {} }, required: [error_code] }
+        - if: { properties: { status: { const: PENDING } }, required: [status] }
+          then:
+            not:
+              anyOf:
+                - { properties: { credential_id: {} }, required: [credential_id] }
+                - { properties: { credential_version: {} }, required: [credential_version] }
+                - { properties: { credential_status: {} }, required: [credential_status] }
+                - { properties: { validation_status: {} }, required: [validation_status] }
+                - { properties: { fingerprint: {} }, required: [fingerprint] }
+                - { properties: { error_code: {} }, required: [error_code] }
+        - if: { properties: { status: { enum: [FAILED, REVOKED, EXPIRED] } }, required: [status] }
+          then:
+            properties: { error_code: {}, credential_id: {}, credential_version: {}, credential_status: {}, validation_status: {}, fingerprint: {} }
+            required: [error_code]
+            not:
+              anyOf:
+                - { properties: { credential_id: {} }, required: [credential_id] }
+                - { properties: { credential_version: {} }, required: [credential_version] }
+                - { properties: { credential_status: {} }, required: [credential_status] }
+                - { properties: { validation_status: {} }, required: [validation_status] }
+                - { properties: { fingerprint: {} }, required: [fingerprint] }
     TokenRouteChange:
       type: object
       additionalProperties: false

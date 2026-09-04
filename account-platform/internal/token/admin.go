@@ -67,6 +67,20 @@ type AdminCredentialMetadata struct {
 	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
+type AdminCredentialSafeMetadata struct {
+	ID               uuid.UUID  `json:"credential_id"`
+	CredentialType   string     `json:"credential_type"`
+	Fingerprint      string     `json:"fingerprint"`
+	Version          int        `json:"version"`
+	Status           string     `json:"status"`
+	ValidationStatus string     `json:"validation_status"`
+	AllowedModels    []string   `json:"allowed_models"`
+	ValidatedAt      *time.Time `json:"validated_at,omitempty"`
+	ResponsibleBy    uuid.UUID  `json:"responsible_actor_id"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+}
+
 type AdminTokenAccountDetail struct {
 	AdminTokenAccount
 	AsOf        time.Time                 `json:"as_of"`
@@ -74,10 +88,27 @@ type AdminTokenAccountDetail struct {
 	Routes      []RoutingPolicy           `json:"routes"`
 }
 
+// AdminTokenAccountSafeDetail is the versioned Portal projection used by the
+// account detail workspace. Credential and route rows are deliberately absent:
+// those resources are exposed only through their independently paginated,
+// redacted projections.
+type AdminTokenAccountSafeDetail struct {
+	AdminTokenAccount
+	AsOf time.Time `json:"as_of"`
+}
+
 type AdminCredentialValidationResult struct {
 	ValidationStatus string                  `json:"validation_status"`
 	ErrorCode        string                  `json:"error_code,omitempty"`
 	Credential       AdminCredentialMetadata `json:"credential"`
+}
+
+// AdminCredentialSafeValidationResult is the governed Portal projection. It
+// intentionally excludes provider endpoint, key identifiers and ciphertext.
+type AdminCredentialSafeValidationResult struct {
+	ValidationStatus string                      `json:"validation_status"`
+	ErrorCode        string                      `json:"error_code,omitempty"`
+	Credential       AdminCredentialSafeMetadata `json:"credential"`
 }
 
 type AdminUsageRequest struct {
@@ -355,6 +386,26 @@ func (s *Service) adminTokenAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := repository.AdminTokenAccount(r.Context(), accountID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
+func (s *Service) adminTokenAccountV2(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.repository.(interface {
+		AdminTokenAccountSafeDetail(context.Context, uuid.UUID) (AdminTokenAccountSafeDetail, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ADMIN_QUERY_UNAVAILABLE", "token account detail projection is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	accountID, ok := adminUUID(w, r, "token_account_id")
+	if !ok {
+		return
+	}
+	result, err := repository.AdminTokenAccountSafeDetail(r.Context(), accountID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

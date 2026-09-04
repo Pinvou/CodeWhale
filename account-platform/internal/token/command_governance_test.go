@@ -24,6 +24,17 @@ type testTokenGovernanceActivationReader struct {
 
 type testApprovedTokenExecutor struct{}
 
+type countingApprovedTokenExecutor struct{ prechecks int }
+
+func (executor *countingApprovedTokenExecutor) PrecheckApprovedTokenCommand(context.Context, string, TokenCommandEnvelope) (json.RawMessage, error) {
+	executor.prechecks++
+	return json.RawMessage(`{}`), nil
+}
+
+func (*countingApprovedTokenExecutor) ExecuteApprovedTokenCommand(context.Context, string, string, TokenCommandEnvelope) (json.RawMessage, json.RawMessage, string, error) {
+	return nil, nil, "", errors.New("must not execute")
+}
+
 func (testApprovedTokenExecutor) PrecheckApprovedTokenCommand(context.Context, string, TokenCommandEnvelope) (json.RawMessage, error) {
 	return json.RawMessage(`{"version":1}`), nil
 }
@@ -82,6 +93,7 @@ func TestTokenCommandSensitiveScanIsRecursiveWithCredentialMetadataWhitelist(t *
 	for _, safe := range []json.RawMessage{
 		json.RawMessage(`{"credential_id":"` + uuid.NewString() + `","credential_version":2,"credential_status":"ACTIVE","credential_fingerprint":"` + strings.Repeat("a", 64) + `"}`),
 		json.RawMessage(`{"nested":[{"token_account_id":"` + uuid.NewString() + `"}]}`),
+		json.RawMessage(`{"validation_status":"VALID","credential":{"credential_id":"` + uuid.NewString() + `","credential_type":"NEW_API","fingerprint":"` + strings.Repeat("b", 64) + `","version":2,"status":"ACTIVE","validation_status":"VALID","allowed_models":["flash"],"validated_at":"2026-09-04T12:00:00Z","responsible_actor_id":"` + uuid.NewString() + `","created_at":"2026-09-01T00:00:00Z","updated_at":"2026-09-04T12:00:00Z"}}`),
 	} {
 		if containsSensitiveCommandField(safe) {
 			t.Fatalf("safe credential metadata was rejected: %s", safe)
@@ -99,6 +111,7 @@ func TestTokenCommandSensitiveScanIsRecursiveWithCredentialMetadataWhitelist(t *
 		json.RawMessage(`{"credential_id":{"secret":"masquerade"}}`),
 		json.RawMessage(`{"credential_version":"2"}`),
 		json.RawMessage(`{"nested":[[{"credential_status":"SECRET"}]]}`),
+		json.RawMessage(`{"credential":{"credential_id":"` + uuid.NewString() + `","credential_type":"NEW_API","fingerprint":"` + strings.Repeat("b", 64) + `","version":2,"status":"ACTIVE","validation_status":"VALID","allowed_models":["flash"],"responsible_actor_id":"` + uuid.NewString() + `","created_at":"2026-09-01T00:00:00Z","updated_at":"2026-09-04T12:00:00Z","provider_url":"https://private.invalid"}}`),
 	} {
 		if !containsSensitiveCommandField(unsafe) {
 			t.Fatalf("sensitive field was accepted: %s", unsafe)
@@ -133,6 +146,42 @@ func TestTokenCommandDecodeFailuresReturnStableBadRequest(t *testing.T) {
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "INVALID_APPROVED_COMMAND") {
 			t.Fatalf("approved command decode status=%d body=%s", response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestApprovedCredentialRevokeRejectsNonEmptyFinancialSnapshotBeforePersistence(t *testing.T) {
+	accountID, credentialID, approvalID, actorID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	fingerprint := strings.Repeat("a", 64)
+	expected := json.RawMessage(`{"token_account_id":"` + accountID.String() + `","token_account_version":2,"credential_id":"` + credentialID.String() + `","credential_version":1,"credential_status":"ACTIVE","credential_fingerprint":"` + strings.Repeat("b", 64) + `","active_route_set_fingerprint":"` + strings.Repeat("c", 64) + `","provisioning_lease_set_fingerprint":"` + strings.Repeat("d", 64) + `","inflight_request_set_fingerprint":"` + strings.Repeat("e", 64) + `","replacement_credential_version":2,"policy_version":1}`)
+	envelope := TokenCommandEnvelope{
+		CommandType: "TOKEN_CREDENTIAL_REVOKE", Reason: "revoke the approved credential after impact review", TargetResourceType: "PROVIDER_CREDENTIAL", TargetResourceID: credentialID.String(),
+		ExpectedVersions: expected, PrecheckFingerprint: fingerprint,
+		Command: json.RawMessage(`{"token_account_id":"` + accountID.String() + `","expected_account_version":2,"credential_id":"` + credentialID.String() + `","credential_version":1}`),
+	}
+	for name, financial := range map[string]json.RawMessage{
+		"missing": nil,
+		"null":    json.RawMessage(`null`),
+		"array":   json.RawMessage(`[]`),
+		"extra":   json.RawMessage(`{"billing_price_revision":1}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			executor := &countingApprovedTokenExecutor{}
+			body := approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 3, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_CREDENTIAL_REVOKE:" + fingerprint, CriticalResourceVersions: expected, FinancialSnapshot: financial, Envelope: envelope}
+			raw, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, err := serviceauth.ContextForJob(context.Background(), "token-command-executor", "APPROVAL_EXECUTION", uuid.NewString())
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/internal/v1/commands/credential-revoke/execute", strings.NewReader(string(raw))).WithContext(ctx)
+			response := httptest.NewRecorder()
+			(&Service{approvedCommandExecutor: executor}).executeApprovedCredentialRevoke(response, request)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "INVALID_APPROVED_COMMAND") || executor.prechecks != 0 {
+				t.Fatalf("status=%d prechecks=%d body=%s", response.Code, executor.prechecks, response.Body.String())
+			}
+		})
 	}
 }
 

@@ -30,6 +30,7 @@ var (
 	ErrApprovalSnapshotUnavailable = errors.New("approval snapshot is unavailable")
 	ErrApprovalSnapshotTimeout     = errors.New("approval snapshot timed out")
 	ErrApprovalSnapshotRejected    = errors.New("approval snapshot request was rejected")
+	ErrInvalidApprovalInput        = errors.New("approval request input is invalid")
 )
 
 type ApprovalRequest struct {
@@ -123,7 +124,10 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 		return ApprovalRequest{}, ErrForbidden
 	}
 	policy, originalFingerprint, err := validateApprovalDraftRequest(draft)
-	if err != nil || policy.Mode != approvalpolicy.ApprovalRequired {
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if policy.Mode != approvalpolicy.ApprovalRequired {
 		return ApprovalRequest{}, ErrConflict
 	}
 	// The actor-scoped advisory lock below serializes an idempotency key. READ
@@ -218,7 +222,10 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 		return ApprovalRequest{}, ErrForbidden
 	}
 	policy, _, err := validateApprovalDraftRequest(draft)
-	if err != nil || policy.Mode != approvalpolicy.ApprovalRequired {
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if policy.Mode != approvalpolicy.ApprovalRequired {
 		return ApprovalRequest{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -632,6 +639,16 @@ func validateApprovalDraftRequest(draft ApprovalDraft) (approvalpolicy.Policy, [
 	if len(strings.TrimSpace(draft.IdempotencyKey)) < 8 || len(draft.IdempotencyKey) > 120 || len(strings.TrimSpace(draft.TargetResourceType)) < 1 || len(strings.TrimSpace(draft.TargetResourceType)) > 80 || len(strings.TrimSpace(draft.TargetResourceID)) < 1 || len(strings.TrimSpace(draft.TargetResourceID)) > 160 || len(strings.TrimSpace(draft.Reason)) < 10 || len(strings.TrimSpace(draft.Reason)) > 2000 {
 		return approvalpolicy.Policy{}, [32]byte{}, ErrConflict
 	}
+	// Credential revocation never has a Billing snapshot. Requiring the
+	// caller to send the exact empty object keeps null/default coercion from
+	// weakening the closed approval contract before any downstream read or
+	// persistence is attempted.
+	if policy.CommandType == "TOKEN_CREDENTIAL_REVOKE" {
+		financial, financialErr := canonicalSafeJSONObject(draft.FinancialSnapshot)
+		if financialErr != nil || string(financial) != "{}" {
+			return approvalpolicy.Policy{}, [32]byte{}, ErrInvalidApprovalInput
+		}
+	}
 	fingerprint, err := approvalDraftOriginalFingerprint(policy.CommandType, draft)
 	if err != nil {
 		return approvalpolicy.Policy{}, [32]byte{}, err
@@ -691,12 +708,22 @@ func tokenApprovalSnapshotsAligned(critical, financial []byte) bool {
 	if decoder.Decode(&financialFields) != nil {
 		return false
 	}
+	if _, credentialSnapshot := criticalFields["credential_id"]; credentialSnapshot {
+		return len(financialFields) == 0
+	}
 	return fmt.Sprint(criticalFields["billing_price_version"]) == fmt.Sprint(financialFields["billing_price_revision"])
 }
 
 func canonicalApprovalFinancialSnapshot(policy approvalpolicy.Policy, raw json.RawMessage) ([]byte, error) {
 	if !approvalSnapshotCommand(policy.CommandType) {
 		return canonicalSafeJSONObject(raw)
+	}
+	if policy.CommandType == "TOKEN_CREDENTIAL_REVOKE" {
+		canonical, err := canonicalSafeJSONObject(raw)
+		if err != nil || string(canonical) != "{}" {
+			return nil, ErrConflict
+		}
+		return canonical, nil
 	}
 	if len(raw) == 0 || len(raw) > 64<<10 {
 		return nil, ErrConflict

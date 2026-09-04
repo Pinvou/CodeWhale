@@ -106,12 +106,22 @@ type ApprovedTokenCommandExecutor interface {
 }
 
 type approvedTokenCommandBody struct {
-	ApprovalRequestID       uuid.UUID            `json:"approval_request_id"`
-	RequesterUserID         uuid.UUID            `json:"requester_user_id"`
-	AuthorizationVersion    int64                `json:"authorization_version"`
-	CommandFingerprint      string               `json:"command_fingerprint"`
-	ExecutionIdempotencyKey string               `json:"execution_idempotency_key"`
-	Envelope                TokenCommandEnvelope `json:"command"`
+	ApprovalRequestID        uuid.UUID            `json:"approval_request_id"`
+	RequesterUserID          uuid.UUID            `json:"requester_user_id"`
+	AuthorizationVersion     int64                `json:"authorization_version"`
+	CommandFingerprint       string               `json:"command_fingerprint"`
+	ExecutionIdempotencyKey  string               `json:"execution_idempotency_key"`
+	CriticalResourceVersions json.RawMessage      `json:"critical_resource_versions,omitempty"`
+	FinancialSnapshot        json.RawMessage      `json:"financial_snapshot,omitempty"`
+	Envelope                 TokenCommandEnvelope `json:"command"`
+}
+
+func exactEmptyFinancialSnapshot(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	return json.Unmarshal(raw, &fields) == nil && fields != nil && len(fields) == 0
 }
 
 func (r *PostgresRepository) BeginTokenCommand(ctx context.Context, input tokenCommandBegin) (TokenCommandResult, bool, error) {
@@ -155,6 +165,19 @@ func (r *PostgresRepository) CompleteTokenCommand(ctx context.Context, reference
 		return TokenCommandResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	item, err := completeTokenCommandTx(ctx, tx, reference, status, afterState, redactedResult, stableErrorCode)
+	if err != nil {
+		return TokenCommandResult{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+func completeTokenCommandTx(ctx context.Context, tx pgx.Tx, reference uuid.UUID, status string, afterState, redactedResult json.RawMessage, stableErrorCode string) (TokenCommandResult, error) {
+	status = strings.ToUpper(strings.TrimSpace(status))
+	stableCodeRequired := containsString([]string{"REJECTED", "FAILED", "UNKNOWN"}, status)
+	if reference == uuid.Nil || !containsString([]string{"SUCCEEDED", "REJECTED", "FAILED", "UNKNOWN"}, status) || (status == "SUCCEEDED" && stableErrorCode != "") || (stableCodeRequired && !validStableTokenErrorCode(stableErrorCode)) || containsSensitiveCommandField(afterState) || containsSensitiveCommandField(redactedResult) {
+		return TokenCommandResult{}, ErrTokenCommandInvalid
+	}
 	var commandType, permission, targetType, targetID, reason, keyFingerprint, precheckFingerprint, auditRequestID string
 	var policyVersion int64
 	var approvalRequestID *uuid.UUID
@@ -177,7 +200,7 @@ func (r *PostgresRepository) CompleteTokenCommand(ctx context.Context, reference
 			return TokenCommandResult{}, loadErr
 		}
 		if item.Status == status {
-			return item, tx.Commit(ctx)
+			return item, nil
 		}
 		return TokenCommandResult{}, ErrTokenCommandResultFinal
 	}
@@ -203,7 +226,7 @@ func (r *PostgresRepository) CompleteTokenCommand(ctx context.Context, reference
 	if err != nil {
 		return TokenCommandResult{}, err
 	}
-	return item, tx.Commit(ctx)
+	return item, nil
 }
 
 func validStableTokenErrorCode(code string) bool {
@@ -320,6 +343,12 @@ func containsSensitiveCommandField(raw json.RawMessage) bool {
 		case map[string]any:
 			for key, child := range typed {
 				normalized := normalizeTokenSensitiveFieldName(key)
+				if normalized == "credential" {
+					if !validSafeCredentialProjection(child) {
+						return true
+					}
+					continue
+				}
 				_, safeCredentialField := safeCredentialMetadata[normalized]
 				if safeCredentialField && !validTokenCredentialMetadataValue(normalized, child) {
 					return true
@@ -341,6 +370,80 @@ func containsSensitiveCommandField(raw json.RawMessage) bool {
 		return false
 	}
 	return walk(value)
+}
+
+func validSafeCredentialProjection(value any) bool {
+	item, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	required := map[string]bool{
+		"credential_id": true, "credential_type": true, "fingerprint": true, "version": true,
+		"status": true, "validation_status": true, "allowed_models": true,
+		"responsible_actor_id": true, "created_at": true, "updated_at": true,
+	}
+	for key := range item {
+		if !required[key] && key != "validated_at" {
+			return false
+		}
+	}
+	for key := range required {
+		if _, found := item[key]; !found {
+			return false
+		}
+	}
+	credentialID, credentialIDOK := item["credential_id"].(string)
+	responsibleID, responsibleIDOK := item["responsible_actor_id"].(string)
+	credentialType, typeOK := item["credential_type"].(string)
+	fingerprint, fingerprintOK := item["fingerprint"].(string)
+	version, versionOK := item["version"].(float64)
+	status, statusOK := item["status"].(string)
+	validation, validationOK := item["validation_status"].(string)
+	models, modelsOK := item["allowed_models"].([]any)
+	createdAt, createdOK := item["created_at"].(string)
+	updatedAt, updatedOK := item["updated_at"].(string)
+	if _, err := uuid.Parse(credentialID); !credentialIDOK || err != nil {
+		return false
+	}
+	if _, err := uuid.Parse(responsibleID); !responsibleIDOK || err != nil {
+		return false
+	}
+	if !typeOK || len(credentialType) < 1 || len(credentialType) > 120 || credentialType != strings.TrimSpace(credentialType) || !fingerprintOK || len(fingerprint) != 64 {
+		return false
+	}
+	if _, err := hex.DecodeString(fingerprint); err != nil {
+		return false
+	}
+	if !versionOK || version < 1 || version != float64(int64(version)) || !statusOK || !containsString([]string{"PENDING", "CANDIDATE", "ACTIVE", "RETIRING", "RETIRED", "REVOKED"}, status) || !validationOK || !containsString([]string{"UNKNOWN", "VALID", "INVALID"}, validation) || !modelsOK {
+		return false
+	}
+	seenModels := map[string]bool{}
+	for _, raw := range models {
+		model, modelOK := raw.(string)
+		if !modelOK || len(model) < 1 || len(model) > 160 || model != strings.TrimSpace(model) || seenModels[model] {
+			return false
+		}
+		seenModels[model] = true
+	}
+	if !createdOK || !updatedOK {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, createdAt); err != nil {
+		return false
+	}
+	if _, err := time.Parse(time.RFC3339Nano, updatedAt); err != nil {
+		return false
+	}
+	if validated, found := item["validated_at"]; found {
+		value, valueOK := validated.(string)
+		if !valueOK {
+			return false
+		}
+		if _, err := time.Parse(time.RFC3339Nano, value); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeTokenSensitiveFieldName(key string) string {
@@ -508,6 +611,22 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
+	if envelope.CommandType == "TOKEN_CREDENTIAL_VALIDATE" && item.Status == "PENDING" {
+		completed, executeErr := s.executeGovernedCredentialValidation(r.Context(), repository, item.CommandReference, actor, envelope)
+		if errors.Is(executeErr, ErrCredentialProbeClaimed) {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Retry-After", "2")
+			api.WriteJSON(w, http.StatusAccepted, completed)
+			return
+		}
+		if executeErr != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "query the same command reference before retrying", httpserver.RequestID(r.Context()))
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusOK, completed)
+		return
+	}
 	status := http.StatusOK
 	if created {
 		status = http.StatusAccepted
@@ -610,6 +729,12 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 	body.Envelope = canonicalEnvelope
+	if commandType == "TOKEN_CREDENTIAL_REVOKE" {
+		if !tokenCommandExpectedVersionsMatch(body.CriticalResourceVersions, body.Envelope.ExpectedVersions) || !exactEmptyFinancialSnapshot(body.FinancialSnapshot) {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command snapshot is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
 	repository, ok := s.repository.(*PostgresRepository)
 	if !ok {
 		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
@@ -640,6 +765,26 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 	}
 	if item.Status != "PENDING" {
 		api.WriteJSON(w, http.StatusOK, item)
+		return
+	}
+	if commandType == "TOKEN_CREDENTIAL_REVOKE" {
+		executor, supported := s.approvedCommandExecutor.(interface {
+			ExecuteApprovedCredentialRevoke(context.Context, uuid.UUID, uuid.UUID, TokenCommandEnvelope) (TokenCommandResult, error)
+		})
+		if !supported {
+			api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_EXECUTOR_UNAVAILABLE", "the approved credential revoke adapter is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		completed, executeErr := executor.ExecuteApprovedCredentialRevoke(r.Context(), item.CommandReference, body.RequesterUserID, body.Envelope)
+		if errors.Is(executeErr, ErrCatalogVersionConflict) || errors.Is(executeErr, ErrNotFound) || errors.Is(executeErr, ErrForbidden) || errors.Is(executeErr, ErrTokenCommandInvalid) {
+			api.WriteError(w, http.StatusConflict, "PRECHECK_CHANGED", "the approved command no longer matches current resource facts", httpserver.RequestID(r.Context()))
+			return
+		}
+		if executeErr != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "query the same command reference before retrying", httpserver.RequestID(r.Context()))
+			return
+		}
+		api.WriteJSON(w, http.StatusOK, completed)
 		return
 	}
 	after, result, stableCode, executionErr := s.approvedCommandExecutor.ExecuteApprovedTokenCommand(r.Context(), commandType, body.ExecutionIdempotencyKey, body.Envelope)

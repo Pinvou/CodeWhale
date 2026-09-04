@@ -62,6 +62,7 @@ export function validImpactPrecheck(value, expectedAction = '') {
 				: expectedAction === 'MODEL_CATALOG_ROLLBACK' || expectedAction === 'TOKEN_MODEL_CATALOG_ROLLBACK' || expectedAction === 'TOKEN_MODEL_CATALOG_SYNC' ? 'MODEL_CATALOG'
         : expectedAction.startsWith('TOKEN_PROTOCOL_') ? 'PROTOCOL'
           : expectedAction.startsWith('TOKEN_FORMULA_') ? 'FORMULA'
+            : expectedAction.startsWith('TOKEN_CREDENTIAL_') ? 'PROVIDER_CREDENTIAL'
             : expectedAction === 'TOKEN_ROUTE_PROVISIONING_REPAIR' ? 'PROVISIONING'
               : expectedAction === 'TOKEN_USAGE_RECONCILIATION_RETRY' ? 'USAGE_REQUEST'
                 : expectedAction.startsWith('TOKEN_ROUTE_') ? 'TOKEN_ROUTE' : '';
@@ -85,6 +86,7 @@ export function requireGovernedTokenPrecheck(value, expected) {
 const approvalSnapshotFields = Object.freeze({
 	TOKEN_MODEL_LIFECYCLE_CHANGE: ['model_id', 'catalog_version', 'current_lifecycle', 'target_lifecycle', 'lifecycle_plan_version', 'effective_at', 'existing_session_cutoff_at', 'replacement_model_id', 'billing_price_version', 'route_set_fingerprint', 'provisioning_set_fingerprint', 'inflight_request_set_fingerprint', 'policy_version'],
 	TOKEN_MODEL_CATALOG_ROLLBACK: ['current_catalog_version', 'source_catalog_version', 'catalog_diff_fingerprint', 'billing_price_version', 'route_set_fingerprint', 'provisioning_set_fingerprint', 'inflight_request_set_fingerprint', 'policy_version'],
+	TOKEN_CREDENTIAL_REVOKE: ['token_account_id', 'token_account_version', 'credential_id', 'credential_version', 'credential_status', 'credential_fingerprint', 'active_route_set_fingerprint', 'provisioning_lease_set_fingerprint', 'inflight_request_set_fingerprint', 'replacement_credential_version', 'policy_version'],
 });
 const financialSnapshotFields = Object.freeze(['billing_price_revision', 'price_set_fingerprint', 'models_checked', 'models_covered', 'fully_covered', 'billing_as_of']);
 
@@ -98,17 +100,24 @@ export function requireTokenApprovalImpact(value, expected) {
 	const snapshot = value.critical_resource_versions;
 	const financial = value.financial_snapshot;
 	const fields = approvalSnapshotFields[expected.commandType] || [];
-	if (!hasExactFields(snapshot, fields) || !hasExactFields(financial, financialSnapshotFields)) throw Object.assign(new Error('incomplete approval snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
+	const credentialRevoke = expected.commandType === 'TOKEN_CREDENTIAL_REVOKE';
+	if (!hasExactFields(snapshot, fields) || (credentialRevoke ? !hasExactFields(financial, []) : !hasExactFields(financial, financialSnapshotFields))) throw Object.assign(new Error('incomplete approval snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
 	const hashes = fields.filter((field) => field.endsWith('_fingerprint'));
 	if (hashes.some((field) => !fingerprintPattern.test(String(snapshot[field] || '')))
-		|| !Number.isInteger(snapshot.policy_version) || snapshot.policy_version !== 2
-		|| !Number.isInteger(snapshot.billing_price_version) || snapshot.billing_price_version < 1
+		|| !Number.isInteger(snapshot.policy_version) || snapshot.policy_version !== (credentialRevoke ? 1 : 2)
+		|| credentialRevoke && (!uuidPattern.test(String(snapshot.token_account_id || '').toLowerCase())
+			|| !uuidPattern.test(String(snapshot.credential_id || '').toLowerCase()) || snapshot.credential_id !== expected.targetResourceID
+			|| !Number.isInteger(snapshot.token_account_version) || snapshot.token_account_version < 1
+			|| !Number.isInteger(snapshot.credential_version) || snapshot.credential_version < 1
+			|| !['PENDING', 'CANDIDATE', 'ACTIVE', 'RETIRING', 'RETIRED', 'REVOKED'].includes(snapshot.credential_status)
+			|| snapshot.replacement_credential_version != null && (!Number.isInteger(snapshot.replacement_credential_version) || snapshot.replacement_credential_version < 1))
+		|| !credentialRevoke && (!Number.isInteger(snapshot.billing_price_version) || snapshot.billing_price_version < 1
 		|| !Number.isInteger(financial.billing_price_revision) || financial.billing_price_revision !== snapshot.billing_price_version
 		|| !fingerprintPattern.test(String(financial.price_set_fingerprint || ''))
 		|| !Number.isInteger(financial.models_checked) || financial.models_checked < 1
 		|| !Number.isInteger(financial.models_covered) || financial.models_covered < 0 || financial.models_covered > financial.models_checked
 		|| financial.fully_covered !== true || financial.models_covered !== financial.models_checked
-		|| Number.isNaN(Date.parse(String(financial.billing_as_of || '')))) throw Object.assign(new Error('invalid approval snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
+		|| Number.isNaN(Date.parse(String(financial.billing_as_of || ''))))) throw Object.assign(new Error('invalid approval snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
 	if (expected.commandType === 'TOKEN_MODEL_LIFECYCLE_CHANGE') {
 		if (!uuidPattern.test(String(snapshot.model_id || '').toLowerCase()) || snapshot.model_id !== expected.targetResourceID || snapshot.target_lifecycle !== expected.targetStatus
 			|| !['DRAFT', 'PUBLISHED', 'DEPRECATED', 'REMOVED'].includes(snapshot.current_lifecycle)
@@ -117,9 +126,9 @@ export function requireTokenApprovalImpact(value, expected) {
 			|| Number.isNaN(Date.parse(String(snapshot.effective_at || '')))
 			|| snapshot.existing_session_cutoff_at != null && Number.isNaN(Date.parse(String(snapshot.existing_session_cutoff_at)))
 			|| snapshot.replacement_model_id != null && !uuidPattern.test(String(snapshot.replacement_model_id).toLowerCase())) throw Object.assign(new Error('mismatched lifecycle snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
-	} else if (!Number.isInteger(snapshot.current_catalog_version) || snapshot.current_catalog_version < 1
+	} else if (expected.commandType === 'TOKEN_MODEL_CATALOG_ROLLBACK' && (!Number.isInteger(snapshot.current_catalog_version) || snapshot.current_catalog_version < 1
 		|| !Number.isInteger(snapshot.source_catalog_version) || snapshot.source_catalog_version !== expected.sourceCatalogVersion
-		|| !fingerprintPattern.test(String(snapshot.catalog_diff_fingerprint || ''))) {
+		|| !fingerprintPattern.test(String(snapshot.catalog_diff_fingerprint || '')))) {
 		throw Object.assign(new Error('mismatched rollback snapshot'), { code: 'INVALID_IMPACT_RESPONSE' });
 	}
 	return value;
@@ -162,7 +171,8 @@ export function validApprovalRequest(value, expected, statuses) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   if (!uuidPattern.test(String(value.approval_request_id || '').toLowerCase()) || !uuidPattern.test(String(value.requester_user_id || '').toLowerCase())) return false;
   if (value.command_type !== expected.command_type || value.target_resource_type !== expected.target_resource_type || value.target_resource_id !== expected.target_resource_id || value.reason !== expected.reason) return false;
-  if (value.policy_version !== 2 || value.approval_mode !== 'APPROVAL_REQUIRED' || !statuses.includes(value.status) || !Number.isInteger(value.version) || value.version < 1) return false;
+	const expectedPolicyVersion = expected.command_type === 'TOKEN_CREDENTIAL_REVOKE' ? 1 : 2;
+	if (value.policy_version !== expectedPolicyVersion || value.approval_mode !== 'APPROVAL_REQUIRED' || !statuses.includes(value.status) || !Number.isInteger(value.version) || value.version < 1) return false;
   if (!fingerprintPattern.test(String(value.command_fingerprint || '')) || Number.isNaN(Date.parse(String(value.expires_at || ''))) || Number.isNaN(Date.parse(String(value.created_at || ''))) || Number.isNaN(Date.parse(String(value.updated_at || '')))) return false;
   if (!Array.isArray(value.allowed_actions) || value.allowed_actions.some((item) => !['EDIT', 'SUBMIT', 'WITHDRAW', 'APPROVE', 'REJECT'].includes(item))) return false;
   return highRiskPayloadKey(value.normalized_command) === highRiskPayloadKey(expected.normalized_command)

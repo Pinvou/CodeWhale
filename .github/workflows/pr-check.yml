@@ -458,6 +458,11 @@ jobs:
       - name: Vite build
         run: npm run build:ui
 
+      - name: Credential handoff hash and Service Worker scope gate
+        run: |
+          node ../scripts/build-credential-handoff.mjs --check
+          node ../scripts/build-credential-handoff.mjs --check-deployment
+
       - name: 前端逻辑测试 (pet 全套 + diff parser + markdown)
         run: npm test
 
@@ -602,6 +607,13 @@ jobs:
           PGPASSWORD: account_platform_test
         run: createdb --host 127.0.0.1 --username account_platform_test account_platform_token_pagination_test
 
+      - name: Prepare real credential-origin browser gate
+        run: |
+          npm --prefix pinvou3-app ci --prefer-offline --no-audit
+          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          test -n "$chrome"
+          echo "CHROME=$chrome" >> "$GITHUB_ENV"
+
       - name: Go 格式、测试与静态检查
         working-directory: account-platform
         run: |
@@ -675,6 +687,14 @@ jobs:
           printf '%s\n' "$stable_routes_output"
           grep -F -- '--- PASS: TestStableRoutesPostgresIntegration' <<< "$stable_routes_output"
           ! grep -F -- '--- SKIP: TestStableRoutesPostgresIntegration' <<< "$stable_routes_output"
+          credential_isolation_output="$(go test -run '^TestCredentialIsolationPostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$credential_isolation_output"
+          grep -F -- '--- PASS: TestCredentialIsolationPostgresIntegration' <<< "$credential_isolation_output"
+          ! grep -F -- '--- SKIP: TestCredentialIsolationPostgresIntegration' <<< "$credential_isolation_output"
+          credential_origin_output="$(PINVOU_REQUIRE_CREDENTIAL_BROWSER=1 go test -run '^TestCredentialOriginServicePostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$credential_origin_output"
+          grep -F -- '--- PASS: TestCredentialOriginServicePostgresIntegration' <<< "$credential_origin_output"
+          ! grep -F -- '--- SKIP: TestCredentialOriginServicePostgresIntegration' <<< "$credential_origin_output"
           go test -short -race ./...
           go vet ./...
 

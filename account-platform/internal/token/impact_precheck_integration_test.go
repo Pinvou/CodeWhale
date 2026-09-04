@@ -2,7 +2,9 @@ package token
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,16 +39,16 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES
 ($4,'USER',$5,$6,'Impact Account','ACTIVE',$8,$10,$10,'PLATFORM');
 INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES
-($7,$4,'provider','https://redacted.invalid','x'::bytea,'key','fingerprint-a',1,'ACTIVE',ARRAY['model-one'],$10,$8,$10,'VALID'),
-($15,$4,'provider','https://redacted.invalid','y'::bytea,'key','fingerprint-b',2,'RETIRED',ARRAY['model-one'],$10,$8,$10,'VALID'),
-($16,$4,'other-provider','https://redacted.invalid','z'::bytea,'key','fingerprint-c',3,'PENDING',ARRAY['model-one'],$10,$8,$10,'VALID');
+($7,$4,'provider','https://redacted.invalid','x'::bytea,'key',$12,1,'ACTIVE',ARRAY['model-one'],$10,$8,$10,'VALID'),
+($15,$4,'provider','https://redacted.invalid','y'::bytea,'key',$13,2,'RETIRED',ARRAY['model-one'],$10,$8,$10,'VALID'),
+($16,$4,'other-provider','https://redacted.invalid','z'::bytea,'key',$17,3,'PENDING',ARRAY['model-one'],$10,$8,$10,'VALID');
 INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,route_generation,protocol_code,model_id,protocol_version_id,reference_status,route_version,health_version,health_diagnostic_code,health_observed_at,health_expires_at,next_probe_at) VALUES
 (gen_random_uuid(),$4,'model-one',100,'NONE','HEALTHY',$10,3,'CHAT',$1,$3,'RESOLVED',1,1,'PROBE_SUCCEEDED',$10,$10+interval '4 minutes',$10+interval '3 minutes');
 INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id,desired_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,lease_owner,lease_until,active_token_account_id,active_credential_id,requested_by,created_at,updated_at) VALUES
 (gen_random_uuid(),'PERSONAL',$5,$6,$1,'model-one','CHAT',$3,3,$12,'READY','READY',1,'{}',3,$10+interval '1 hour','worker',$10+interval '1 minute',$4,$7,$8,$10,$10);
 INSERT INTO usage_requests(id,user_id,session_id,token_account_id,credential_id,wallet_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,status,execution_status,execution_version,delivery_status,maximum_microcredits,request_snapshot,started_at,updated_at,idempotency_key_digest,request_fingerprint) VALUES
 (gen_random_uuid(),$5,'session-one',$4,$7,$6,'model-one',$1,$14,$9,$3,3,'{}','UPSTREAM_ACTIVE','STREAMING',1,'STARTED',100,'{}',$10,$10,$12,$12);`
-	if _, err := repository.pool.Exec(ctx, seed, modelID, replacementID, protocolID, accountID, ownerID, walletID, credentialID, actorID, capabilityID, now, replacementCapabilityID, digest, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", catalogVersion, alternativeCredentialID, irrelevantCredentialID); err != nil {
+	if _, err := repository.pool.Exec(ctx, seed, modelID, replacementID, protocolID, accountID, ownerID, walletID, credentialID, actorID, capabilityID, now, replacementCapabilityID, digest, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", catalogVersion, alternativeCredentialID, irrelevantCredentialID, strings.Repeat("c", 64)); err != nil {
 		t.Fatal(err)
 	}
 	model, err := repository.ModelLifecycleImpact(ctx, modelID, &replacementID)
@@ -66,8 +68,20 @@ INSERT INTO usage_requests(id,user_id,session_id,token_account_id,credential_id,
 		t.Fatalf("route=%+v err=%v", route, err)
 	}
 	credential, err := repository.TokenCredentialImpact(ctx, accountID, &credentialID)
-	if err != nil || credential.CurrentVersion.CredentialVersion == nil || *credential.CurrentVersion.CredentialVersion != 1 || credential.Dependencies.ActiveLeases != 1 || credential.Dependencies.AlternativeCredentials != 1 {
+	if err != nil || credential.CurrentVersion.CredentialVersion == nil || *credential.CurrentVersion.CredentialVersion != 1 || credential.CurrentVersion.AccountVersion == nil || *credential.CurrentVersion.AccountVersion != 1 || credential.CredentialFingerprint != digest || credential.Dependencies.ActiveLeases != 1 || credential.Dependencies.AlternativeCredentials != 1 || !validImpactFingerprint(credential.RouteSetFingerprint) || !validImpactFingerprint(credential.ProvisioningSetFingerprint) || !validImpactFingerprint(credential.InflightSetFingerprint) || credential.ReplacementCredentialVersion == nil || *credential.ReplacementCredentialVersion != 2 {
 		t.Fatalf("credential=%+v err=%v", credential, err)
+	}
+	if _, err := repository.pool.Exec(ctx, `UPDATE route_provisionings SET lease_until=$1 WHERE active_credential_id=$2; UPDATE usage_requests SET execution_status='SUCCEEDED' WHERE credential_id=$2`, now.Add(-time.Minute), credentialID); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(repository, nil, nil, nil, ProviderURLPolicy{}, nil, nil, 0).WithImpactPrechecks(true, repository, nil)
+	projection, err := service.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{CommandType: "TOKEN_CREDENTIAL_REVOKE", TargetResourceType: "PROVIDER_CREDENTIAL", TargetResourceID: credentialID.String(), NormalizedCommand: json.RawMessage(`{"token_account_id":"` + accountID.String() + `","expected_account_version":1,"credential_id":"` + credentialID.String() + `","credential_version":1}`)})
+	if err != nil || projection.BillingObservedAt != nil {
+		t.Fatalf("credential approval projection=%+v err=%v", projection, err)
+	}
+	var frozen map[string]any
+	if json.Unmarshal(projection.CriticalResourceVersions, &frozen) != nil || len(frozen) != 11 || string(projection.FinancialSnapshot) != "{}" {
+		t.Fatalf("credential frozen snapshot=%s financial=%s", projection.CriticalResourceVersions, projection.FinancialSnapshot)
 	}
 	if _, err := repository.pool.Exec(ctx, `UPDATE provider_credentials SET provider='other-provider' WHERE id=$1`, alternativeCredentialID); err != nil {
 		t.Fatal(err)

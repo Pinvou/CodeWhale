@@ -5,6 +5,7 @@ import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.j
 import { AdminTokenResourcesWorkspace } from './AdminTokenResourcesWorkspace.jsx';
 import { AdminModelOperationsWorkspace } from './AdminModelOperationsWorkspace.jsx';
 import { AdminModelDetailWorkspace } from './AdminModelDetailWorkspace.jsx';
+import { AdminTokenAccountDetailWorkspace } from './AdminTokenAccountDetailWorkspace.jsx';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
 import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact, validApprovalRequest } from './admin-high-risk-action-state.js';
@@ -100,7 +101,7 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
   );
 }
 
-export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelDetailsEnabled = false, modelTokenActionsEnabled = false }) {
+export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelDetailsEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
   const modelTokenCopy = copy.modelToken;
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
@@ -108,6 +109,7 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   const modelTabs = useMemo(() => readAdminModelTokenModelTab(permissions), [permissions, routeVersion]);
   const operationRequests = useMemo(() => planAdminModelTokenOperationRequests(permissions, client), [permissions, client]);
   const modelID = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_id') || '', [routeVersion]);
+	const tokenAccountID = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('token_account_id') || '', [routeVersion]);
   const onQueryChange = (source, query, mode = 'push') => onRouteChange(adminModelTokenQueryUpdates(source, query), mode);
   const notice = routeNotice === 'invalid' ? modelTokenCopy.invalidLink : routeNotice === 'conflict' ? modelTokenCopy.conflictingDetail : '';
   const moveOperationsTab = (event) => {
@@ -131,7 +133,8 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
       {modelTabs.tab === 'directory' && granted.has('platform.models.read') && <div role="tabpanel" id="model-panel-directory" aria-labelledby="model-tab-directory"><ModelDirectory client={client} copy={modelTokenCopy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} detailsEnabled={modelDetailsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onOpenDetail={(id) => onRouteChange({ model_id: id, model_detail_tab: 'overview' }, 'push')} cursorHistory={cursorHistory} /></div>}
 			{modelTabs.tab === 'protocols' && granted.has('platform.pricing.read') && <div role="tabpanel" id="model-panel-protocols" aria-labelledby="model-tab-protocols"><AdminProtocolFormulaWorkspace client={client} copy={modelTokenCopy} canManage={modelTokenActionsEnabled && granted.has('platform.pricing.manage')} routeVersion={routeVersion} onRouteChange={onRouteChange} cursorHistory={cursorHistory} /></div>}
     </>}
-    {section === 'tokenResources' && <AdminTokenResourcesWorkspace client={client} copy={modelTokenCopy} permissions={permissions} formsEnabled={tokenResourceFormsEnabled} actionsEnabled={modelTokenActionsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onRouteChange={onRouteChange} histories={cursorHistory} />}
+		{section === 'tokenResources' && tokenDetailsEnabled && tokenAccountID && granted.has('platform.tokens.read') && <AdminTokenAccountDetailWorkspace accountID={tokenAccountID} client={client} copy={modelTokenCopy} permissions={permissions} routeVersion={routeVersion} onRouteChange={onRouteChange} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} actionsEnabled={modelTokenActionsEnabled} credentialOrigin={credentialOrigin} />}
+		{section === 'tokenResources' && (!tokenDetailsEnabled || !tokenAccountID) && <AdminTokenResourcesWorkspace client={client} copy={modelTokenCopy} permissions={permissions} formsEnabled={tokenResourceFormsEnabled} actionsEnabled={modelTokenActionsEnabled} detailsEnabled={tokenDetailsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onRouteChange={onRouteChange} histories={cursorHistory} />}
     {section === 'modelOperations' && <>
       <div className="adm-tabs" role="tablist" aria-label={modelTokenCopy.operationsViews} onKeyDown={moveOperationsTab}>
         {operations.visible.map((tab) => <button type="button" role="tab" id={`model-operations-tab-${tab}`} aria-controls={`model-operations-panel-${tab}`} aria-selected={operations.tab === tab} tabIndex={operations.tab === tab ? 0 : -1} className={operations.tab === tab ? 'active' : ''} key={tab} onClick={() => onRouteChange({ operations_tab: tab }, 'push')}>{tab === 'provisionings' ? modelTokenCopy.provisionings : tab === 'usage' ? modelTokenCopy.usageRequests : modelTokenCopy.reconciliationQueue}</button>)}

@@ -1125,6 +1125,11 @@ components:
             properties:
               critical_resource_versions: { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
               financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+        - if: { properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE } }, required: [command_type] }
+          then:
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/TokenCredentialRevokeApprovalSnapshot" }
+              financial_snapshot: { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
     TokenModelLifecycleApprovalSnapshot:
       type: object
       additionalProperties: false
@@ -1156,6 +1161,26 @@ components:
         provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         policy_version: { type: integer, const: 2 }
+    TokenCredentialRevokeApprovalSnapshot:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, token_account_version, credential_id, credential_version, credential_status, credential_fingerprint, active_route_set_fingerprint, provisioning_lease_set_fingerprint, inflight_request_set_fingerprint, replacement_credential_version, policy_version]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        token_account_version: { type: integer, format: int64, minimum: 1 }
+        credential_id: { type: string, format: uuid }
+        credential_version: { type: integer, minimum: 1 }
+        credential_status: { type: string, enum: [PENDING, CANDIDATE, ACTIVE, RETIRING, RETIRED, REVOKED] }
+        credential_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        active_route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_lease_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        replacement_credential_version: { type: [integer, "null"], minimum: 1 }
+        policy_version: { type: integer, const: 1 }
+    EmptyFinancialSnapshot:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
     TokenOwnerCandidate:
       type: object
       additionalProperties: false

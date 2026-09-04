@@ -84,17 +84,17 @@ test('health projection expires HEALTHY evidence locally and never invents routa
 test('owner and route deep links remain stable while revoked detail state is normalized away', () => {
   const location = { pathname: '/admin.html', search: `?section=tokenResources&owner_candidate_type=UNIT&owner_candidate_organization_id=${organizationID}&owner_candidate_q=研发&owner_candidate_cursor=signed&token_account_id=${modelID}&token_detail_tab=routes`, hash: '' };
   assert.deepEqual(readAdminModelTokenQuery('ownerCandidates', location), { q: '研发', owner_type: 'UNIT', status: '', organization_id: organizationID, cursor: 'signed' });
-  const allowed = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, location, ['platform.tokens.read', 'platform.tokens.manage', 'platform.tokens.owner-candidates.read'], { tokenResourceFormsEnabled: true });
+  const allowed = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, location, ['platform.tokens.read', 'platform.tokens.manage', 'platform.tokens.owner-candidates.read'], { tokenResourceFormsEnabled: true, tokenDetailsEnabled: true });
   assert.equal(allowed.updates.token_account_id, undefined);
   assert.equal(allowed.updates.owner_candidate_q, undefined);
-  const fineGrainedRevoked = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, location, ['platform.tokens.read', 'platform.tokens.manage'], { tokenResourceFormsEnabled: true });
+  const fineGrainedRevoked = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, location, ['platform.tokens.read', 'platform.tokens.manage'], { tokenResourceFormsEnabled: true, tokenDetailsEnabled: true });
   assert.equal(fineGrainedRevoked.section, 'tokenResources');
   assert.equal(fineGrainedRevoked.updates.owner_candidate_q, null);
   assert.equal(fineGrainedRevoked.updates.owner_candidate_cursor, null);
   assert.equal(fineGrainedRevoked.updates.token_account_id, undefined);
-  const gateOff = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, location, ['platform.tokens.read', 'platform.tokens.manage', 'platform.tokens.owner-candidates.read'], { tokenResourceFormsEnabled: false });
+  const gateOff = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, location, ['platform.tokens.read', 'platform.tokens.manage', 'platform.tokens.owner-candidates.read'], { tokenResourceFormsEnabled: false, tokenDetailsEnabled: true });
   assert.equal(gateOff.updates.owner_candidate_type, null);
-  const clean = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, { pathname: '/admin.html', search: '?section=tokenResources', hash: '' }, ['platform.tokens.read', 'platform.tokens.manage'], { tokenResourceFormsEnabled: true });
+  const clean = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, { pathname: '/admin.html', search: '?section=tokenResources', hash: '' }, ['platform.tokens.read', 'platform.tokens.manage'], { tokenResourceFormsEnabled: true, tokenDetailsEnabled: true });
   assert.equal(clean.replace, false);
   assert.deepEqual(clean.updates, {});
   const revoked = normalizeAdminModelTokenEntry('tokenResources', ['models'], true, location, ['platform.models.read']);

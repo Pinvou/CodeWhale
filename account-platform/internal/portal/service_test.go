@@ -845,6 +845,62 @@ func TestModelTokenActionGateRejectsLegacyV2AndAccountApprovalWritesBeforeProxy(
 	}
 }
 
+func TestTokenCredentialDetailGateRejectsNewIsolationWorkButPreservesLaunchCleanup(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AdminTokenDetailsEnabled = false
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.config.TokenGatewayURL = upstreamURL
+	accountID := "0198fbf7-c3ba-7bc4-8849-c157740963de"
+	resultRef := "0198fbf7-c3ba-7bc4-8849-c157740963df"
+	for _, item := range []struct{ method, resource string }{
+		{http.MethodGet, "admin/v1/token-accounts/" + accountID + "/credentials"},
+		{http.MethodPost, "admin/v1/token-accounts/" + accountID + "/credential-launches/enroll"},
+		{http.MethodPost, "admin/v1/token-accounts/" + accountID + "/credential-launches/rotate"},
+		{http.MethodGet, "admin/v1/credential-results/" + resultRef},
+	} {
+		request := httptest.NewRequest(item.method, "/", nil)
+		request.SetPathValue("resource", item.resource)
+		response := httptest.NewRecorder()
+		service.proxyAdminToken(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s %s status=%d body=%s", item.method, item.resource, response.Code, response.Body.String())
+		}
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("disabled Token credential detail reached upstream %d times", upstreamHits)
+	}
+	csrf := strings.Repeat("c", 32)
+	session := Session{ID: "credential-cleanup", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: csrf}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	cleanup := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"reason_code":"CREDENTIAL_FEATURE_DISABLED"}`))
+	cleanup.Header.Set("Content-Type", "application/json")
+	cleanup.Header.Set("Origin", "https://portal.example")
+	cleanup.Header.Set("X-CSRF-Token", csrf)
+	cleanup.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	cleanup.AddCookie(&http.Cookie{Name: service.csrfCookieName(), Value: csrf})
+	cleanup.SetPathValue("resource", "admin/v1/credential-results/"+resultRef+"/revoke-window")
+	cleanupResponse := httptest.NewRecorder()
+	service.proxyAdminToken(cleanupResponse, cleanup)
+	if cleanupResponse.Code != http.StatusNoContent || upstreamHits != 1 {
+		t.Fatalf("disabled detail gate blocked launch cleanup: status=%d hits=%d body=%s", cleanupResponse.Code, upstreamHits, cleanupResponse.Body.String())
+	}
+	if tokenCredentialIsolationPath(http.MethodGet, "/admin/v1/token-accounts/not-a-uuid/credentials") || tokenCredentialIsolationPath(http.MethodPost, "/admin/v1/token-accounts/"+accountID+"/routes") {
+		t.Fatal("credential detail gate classified an invalid or unrelated path")
+	}
+}
+
 func TestDisabledModelTokenApprovalActionsUseSessionBoundLocalClassification(t *testing.T) {
 	store := newMemoryStore()
 	service := testService(t, store)

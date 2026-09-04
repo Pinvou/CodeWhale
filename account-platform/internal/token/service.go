@@ -23,6 +23,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -66,6 +67,7 @@ type Service struct {
 	approvedCommandExecutor     ApprovedTokenCommandExecutor
 	operationsOverviewEnabled   bool
 	operationsOverviewMetrics   *tokenOperationsOverviewMetrics
+	credentialIsolationEnabled  bool
 	adminProxyHMACKey           []byte
 	breaker                     *resilience.Breaker
 	activeUpstreamCancels       sync.Map
@@ -128,6 +130,22 @@ func (s *Service) WithAdminOperationsOverview(enabled bool) *Service {
 	return s
 }
 
+func (s *Service) WithCredentialIsolation(enabled bool) *Service {
+	s.credentialIsolationEnabled = enabled
+	return s
+}
+
+func (s *Service) requireCredentialIsolationEnabled() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if !s.credentialIsolationEnabled {
+			api.WriteError(ctx.Writer, http.StatusServiceUnavailable, "CREDENTIAL_ISOLATION_UNAVAILABLE", "credential isolation is not enabled", httpserver.RequestID(ctx.Request.Context()))
+			ctx.Abort()
+			return
+		}
+		ctx.Next()
+	}
+}
+
 func NewService(repository Repository, contexts ContextResolver, wallets WalletResolver, validator CredentialValidator, providerURLs ProviderURLPolicy, billing BillingClient, upstream UpstreamClient, maximumInputTokens int64) *Service {
 	if maximumInputTokens <= 0 {
 		maximumInputTokens = 128_000
@@ -160,6 +178,10 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.POST("/v1/usage-requests/:usage_request_id/cancel", httpserver.AdaptFunc(s.cancelUsageRequest))
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	protected.GET("/v1/model-protocols", httpserver.AdaptFunc(s.modelProtocols))
+	// Cancellation is actor-bound in the repository and deliberately remains
+	// reachable after a management permission or feature-gate revocation so an
+	// already issued one-time launch can always be terminalized.
+	protected.POST("/admin/v1/credential-results/:result_ref/revoke-window", httpserver.AdaptFunc(s.adminRevokeCredentialLaunch))
 	protected.GET("/v1/models", httpserver.AdaptFunc(s.listCatalogModels))
 	protected.GET("/v1/organizations/:organization_id/model-policy", httpserver.AdaptFunc(s.organizationModelPolicy))
 	protected.PUT("/v1/organizations/:organization_id/model-policy", approvalpolicy.Require("TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationModelPolicy))
@@ -190,10 +212,14 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
 		admin.POST("/token-accounts", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateTokenAccount))
 		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))
+		admin.GET("/token-accounts/:token_account_id/credentials", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenCredentials))
+		admin.GET("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenRoutes))
 		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
 		admin.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenRouteDirect(), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertTokenRoute))
 		admin.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenRouteDirect(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteTokenRoute))
-		admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", s.authorizer.Require("platform.tokens.credentials.validate"), approvalpolicy.Require("TOKEN_CREDENTIAL_VALIDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminValidateCredential))
+		admin.POST("/token-accounts/:token_account_id/credential-launches/enroll", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ENROLL", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateCredentialLaunchFor("ENROLL")))
+		admin.POST("/token-accounts/:token_account_id/credential-launches/rotate", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ROTATE", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateCredentialLaunchFor("ROTATE")))
+		admin.GET("/credential-results/:result_ref", s.authorizer.Require("platform.tokens.read"), s.requireCredentialIsolationEnabled(), httpserver.AdaptFunc(s.adminCredentialIsolationResult))
 		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
 		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
 		admin.GET("/usage-requests/:usage_request_id/evidence", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageEvidence))
@@ -231,6 +257,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	}
 	adminV2 := protected.Group("/admin/v2")
 	if s.authorizer != nil {
+		adminV2.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccountV2))
 		adminV2.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioningV2))
 		adminV2.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertStableTokenRoute))
 		adminV2.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteStableTokenRoute))

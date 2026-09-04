@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -41,7 +42,9 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	repository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL)
-	repository.tokenApprovalCreateGate = func(commandType string) bool { return commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" }
+	repository.tokenApprovalCreateGate = func(commandType string) bool {
+		return commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || commandType == "TOKEN_CREDENTIAL_REVOKE"
+	}
 	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_MODEL_ADMIN", "snapshot-requester")
 	secondRequester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_MODEL_ADMIN", "snapshot-requester-two")
 	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "snapshot-approver")
@@ -82,6 +85,33 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	}
 	repository.WithApprovalSnapshotSource(source)
 	service := NewService(repository, nil)
+
+	// Credential revocation has an exact 11+0 contract. null, arrays, missing
+	// values and non-empty objects are rejected before an authoritative read or
+	// any approval row is written.
+	for index, financial := range []any{nil, []any{}, map[string]any{"extra": true}} {
+		idempotencyKey := fmt.Sprintf("credential-financial-invalid-%02d", index)
+		invalid := map[string]any{
+			"command_type": "TOKEN_CREDENTIAL_REVOKE", "idempotency_key": idempotencyKey,
+			"normalized_command": map[string]any{}, "target_resource_type": "PROVIDER_CREDENTIAL", "target_resource_id": uuid.NewString(),
+			"reason": "reject invalid credential financial snapshot", "redacted_evidence": []any{}, "expected_impact": map[string]any{}, "critical_resource_versions": map[string]any{}, "financial_snapshot": financial,
+		}
+		response := performApprovalIntegrationRequest(t, service.adminCreateApprovalDraft, requesterPrincipal, http.MethodPost, "/admin/v1/approval-requests", "", invalid)
+		var count int
+		if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM approval_requests WHERE idempotency_key=$1`, idempotencyKey).Scan(&count); err != nil || response.Code != http.StatusBadRequest || count != 0 || sourceCalls.Load() != 0 {
+			t.Fatalf("invalid credential financial[%d] status=%d rows=%d downstream=%d err=%v body=%s", index, response.Code, count, sourceCalls.Load(), err, response.Body.String())
+		}
+	}
+	missing := map[string]any{
+		"command_type": "TOKEN_CREDENTIAL_REVOKE", "idempotency_key": "credential-financial-invalid-missing",
+		"normalized_command": map[string]any{}, "target_resource_type": "PROVIDER_CREDENTIAL", "target_resource_id": uuid.NewString(), "reason": "reject missing credential financial snapshot",
+		"redacted_evidence": []any{}, "expected_impact": map[string]any{}, "critical_resource_versions": map[string]any{},
+	}
+	missingResponse := performApprovalIntegrationRequest(t, service.adminCreateApprovalDraft, requesterPrincipal, http.MethodPost, "/admin/v1/approval-requests", "", missing)
+	var missingRows int
+	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM approval_requests WHERE idempotency_key='credential-financial-invalid-missing'`).Scan(&missingRows); err != nil || missingResponse.Code != http.StatusBadRequest || missingRows != 0 || sourceCalls.Load() != 0 {
+		t.Fatalf("missing credential financial status=%d rows=%d downstream=%d err=%v body=%s", missingResponse.Code, missingRows, sourceCalls.Load(), err, missingResponse.Body.String())
+	}
 
 	// The test-only gate opens only the otherwise dormant create branch. Two
 	// concurrent HTTP requests traverse strong authorization, the actor-scoped
@@ -251,6 +281,36 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	var lease ApprovalExecution
 	if executionResponse.Code != http.StatusOK || json.Unmarshal(executionResponse.Body.Bytes(), &lease) != nil || lease.Status != "EXECUTING" || !sameJSONObject(lease.CriticalResourceVersions, critical) || !sameJSONObject(lease.FinancialSnapshot, financial) {
 		t.Fatalf("execution lease status=%d body=%s", executionResponse.Code, executionResponse.Body.String())
+	}
+
+	// Credential revocation uses the same Account HTTP/create/submit chain but
+	// freezes only Token-owned facts: exactly 11 critical fields and an empty
+	// financial snapshot. No Billing observation is invented for this command.
+	credentialAccountID, credentialID := uuid.New(), uuid.New()
+	if _, err := tokenConnection.Exec(ctx, `
+INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Credential approval snapshot','ACTIVE',$4,$5,$5,'PLATFORM');
+INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,created_by,created_at,validation_status) VALUES($6,$1,'provider','https://private.invalid','secret'::bytea,'private-key',$7,1,'RETIRED',ARRAY['model-one'],$4,$5,'VALID')`, credentialAccountID, uuid.New(), uuid.New(), approver.ID, time.Now().UTC(), credentialID, strings.Repeat("d", 64)); err != nil {
+		t.Fatal(err)
+	}
+	credentialDraft := map[string]any{
+		"command_type": "TOKEN_CREDENTIAL_REVOKE", "idempotency_key": "snapshot-credential-revoke-0001",
+		"normalized_command":   map[string]any{"token_account_id": credentialAccountID, "expected_account_version": 1, "credential_id": credentialID, "credential_version": 1},
+		"target_resource_type": "PROVIDER_CREDENTIAL", "target_resource_id": credentialID, "reason": "revoke after independent credential impact review",
+		"redacted_evidence": map[string]any{}, "expected_impact": map[string]any{}, "critical_resource_versions": map[string]any{}, "financial_snapshot": map[string]any{},
+	}
+	credentialCreate := performApprovalIntegrationRequest(t, service.adminCreateApprovalDraft, approverPrincipal, http.MethodPost, "/admin/v1/approval-requests", "", credentialDraft)
+	var credentialApproval ApprovalRequest
+	if credentialCreate.Code != http.StatusCreated || json.Unmarshal(credentialCreate.Body.Bytes(), &credentialApproval) != nil || credentialApproval.Status != "DRAFT" {
+		t.Fatalf("credential approval create status=%d body=%s", credentialCreate.Code, credentialCreate.Body.String())
+	}
+	assertApprovalSnapshotKeys(t, credentialApproval.CriticalResourceVersions, []string{"token_account_id", "token_account_version", "credential_id", "credential_version", "credential_status", "credential_fingerprint", "active_route_set_fingerprint", "provisioning_lease_set_fingerprint", "inflight_request_set_fingerprint", "replacement_credential_version", "policy_version"})
+	if string(credentialApproval.FinancialSnapshot) != "{}" || strings.Contains(credentialCreate.Body.String(), "private.invalid") || strings.Contains(credentialCreate.Body.String(), "private-key") || strings.Contains(credentialCreate.Body.String(), "secret") {
+		t.Fatalf("credential approval response is not isolated: %s", credentialCreate.Body.String())
+	}
+	credentialSubmit := performApprovalIntegrationRequest(t, service.adminSubmitApprovalRequest, approverPrincipal, http.MethodPost, "/admin/v1/approval-requests/"+credentialApproval.ID.String()+"/actions/submit", credentialApproval.ID.String(), map[string]any{"expected_version": 1})
+	var credentialSubmitted ApprovalRequest
+	if credentialSubmit.Code != http.StatusOK || json.Unmarshal(credentialSubmit.Body.Bytes(), &credentialSubmitted) != nil || credentialSubmitted.Status != "SUBMITTED" || !sameJSONObject(credentialSubmitted.CriticalResourceVersions, credentialApproval.CriticalResourceVersions) || string(credentialSubmitted.FinancialSnapshot) != "{}" {
+		t.Fatalf("credential approval submit status=%d body=%s", credentialSubmit.Code, credentialSubmit.Body.String())
 	}
 }
 

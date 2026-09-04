@@ -42,7 +42,9 @@ type Config struct {
 	AdminTokenResourceFormsEnabled     bool
 	AdminModelOperationsDetailsEnabled bool
 	AdminModelDetailsEnabled           bool
+	AdminTokenDetailsEnabled           bool
 	AdminModelTokenActionsEnabled      bool
+	CredentialOrigin                   *url.URL
 	SystemProbes                       []SystemProbe
 	SecureCookies                      bool
 	SessionMaxAge                      time.Duration
@@ -65,6 +67,11 @@ func NewService(config Config, store Store) (*Service, error) {
 	if config.PublicURL.Scheme != "https" && config.SecureCookies {
 		return nil, errors.New("secure portal cookies require an HTTPS public URL")
 	}
+	if config.AdminTokenDetailsEnabled {
+		if err := validateCredentialOrigin(config.CredentialOrigin, config.SecureCookies); err != nil {
+			return nil, err
+		}
+	}
 	if config.SessionMaxAge <= 0 {
 		config.SessionMaxAge = defaultSessionMaxAge
 	}
@@ -84,7 +91,14 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
 	router.GET("/api/admin/system/status", httpserver.AdaptFunc(s.adminSystemStatus))
 	application := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Referrer-Policy", "no-referrer")
+		if r.URL.Path == "/credential-handoff" {
+			s.credentialHandoff(w, r)
+			return
+		}
+		// Credential launch documents need a non-null browser Origin while the
+		// Referer remains origin-only. The credential service still validates the
+		// Origin independently; this response policy is not an authorization check.
+		w.Header().Set("Referrer-Policy", "origin")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
@@ -273,9 +287,35 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 			"admin_token_resource_forms":     s.config.AdminTokenResourceFormsEnabled,
 			"admin_model_operations_details": s.config.AdminModelOperationsDetailsEnabled,
 			"admin_model_details":            s.config.AdminModelDetailsEnabled,
+			"admin_token_details":            s.config.AdminTokenDetailsEnabled,
 			"admin_model_token_actions":      s.config.AdminModelTokenActionsEnabled,
 		},
+		"credential_origin": credentialOriginProjection(s.config),
 	})
+}
+
+func validateCredentialOrigin(origin *url.URL, secure bool) error {
+	if origin == nil || origin.User != nil || origin.RawQuery != "" || origin.Fragment != "" || (origin.Path != "" && origin.Path != "/") {
+		return errors.New("credential origin must be an absolute origin without path, query, fragment, or credentials")
+	}
+	host := strings.ToLower(origin.Hostname())
+	if secure {
+		if origin.Scheme != "https" || (host != "credentials.account.pinvou.com" && host != "credentials-uat.account.pinvou.com") || origin.Port() != "" {
+			return errors.New("credential origin is not in the fixed production or UAT allowlist")
+		}
+		return nil
+	}
+	if origin.Scheme != "http" || host != "127.0.0.1" && host != "localhost" {
+		return errors.New("development credential origin must use loopback HTTP")
+	}
+	return nil
+}
+
+func credentialOriginProjection(config Config) string {
+	if !config.AdminTokenDetailsEnabled || config.CredentialOrigin == nil {
+		return ""
+	}
+	return config.CredentialOrigin.Scheme + "://" + config.CredentialOrigin.Host
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
@@ -310,11 +350,48 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.config.AdminModelTokenActionsEnabled {
+	resource := path.Clean("/" + r.PathValue("resource"))
+	credentialCleanup := tokenCredentialRevokeWindowPath(r.Method, resource)
+	if tokenCredentialIsolationPath(r.Method, resource) && !credentialCleanup && (!s.config.AdminTokenDetailsEnabled || s.config.CredentialOrigin == nil) {
+		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !credentialCleanup && !s.config.AdminModelTokenActionsEnabled {
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
 		return
 	}
 	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenAdminPathAllowed)
+}
+
+func tokenCredentialRevokeWindowPath(method, resource string) bool {
+	parts := strings.Split(strings.Trim(path.Clean(resource), "/"), "/")
+	if len(parts) != 5 || parts[0] != "admin" || parts[1] != "v1" || parts[2] != "credential-results" || parts[4] != "revoke-window" || method != http.MethodPost {
+		return false
+	}
+	_, err := uuid.Parse(parts[3])
+	return err == nil
+}
+
+func tokenCredentialIsolationPath(method, resource string) bool {
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(path.Clean(resource), "/"), "/")
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v2" && parts[2] == "token-accounts" && method == http.MethodGet {
+		_, err := uuid.Parse(parts[3])
+		return err == nil
+	}
+	if len(parts) >= 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "credential-results" {
+		return len(parts) == 4 && method == http.MethodGet || len(parts) == 5 && parts[4] == "revoke-window" && method == http.MethodPost
+	}
+	if len(parts) < 5 || parts[0] != "admin" || parts[1] != "v1" || parts[2] != "token-accounts" {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	return len(parts) == 5 && parts[4] == "credentials" && method == http.MethodGet ||
+		len(parts) == 6 && parts[4] == "credential-launches" && (parts[5] == "enroll" || parts[5] == "rotate") && method == http.MethodPost
 }
 
 func (s *Service) rejectDisabledModelTokenApproval(w http.ResponseWriter, r *http.Request) bool {
@@ -1019,11 +1096,23 @@ func tokenAdminPathAllowed(method, resource string) bool {
 		}
 		return false
 	}
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v2" && parts[2] == "token-accounts" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		return method == http.MethodGet
+	}
 	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v2" && parts[2] == "provisionings" {
 		if _, err := uuid.Parse(parts[3]); err != nil {
 			return false
 		}
 		return method == http.MethodGet
+	}
+	if len(parts) >= 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "credential-results" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		return len(parts) == 4 && method == http.MethodGet || len(parts) == 5 && parts[4] == "revoke-window" && method == http.MethodPost
 	}
 	if resource == "/admin/v1/protocols" {
 		return method == http.MethodGet
@@ -1079,8 +1168,13 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if len(parts) == 5 {
 		switch parts[4] {
 		case "routes":
-			return method == http.MethodPut || method == http.MethodDelete
+			return method == http.MethodGet || method == http.MethodPut || method == http.MethodDelete
+		case "credentials":
+			return method == http.MethodGet
 		}
+	}
+	if len(parts) == 6 && parts[4] == "credential-launches" && (parts[5] == "enroll" || parts[5] == "rotate") {
+		return method == http.MethodPost
 	}
 	if len(parts) == 6 && parts[4] == "impact" && (parts[5] == "status" || parts[5] == "route" || parts[5] == "credential") {
 		return method == http.MethodGet

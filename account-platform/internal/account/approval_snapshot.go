@@ -32,7 +32,7 @@ type ApprovalSnapshotProjection struct {
 	FinancialSnapshot        json.RawMessage `json:"financial_snapshot"`
 	PrecheckFingerprint      string          `json:"precheck_fingerprint"`
 	tokenObservedAt          time.Time
-	billingObservedAt        time.Time
+	billingObservedAt        *time.Time
 }
 
 type ApprovalSnapshotSource interface {
@@ -92,11 +92,11 @@ func (c *HTTPApprovalSnapshotSource) PrecheckApprovalSnapshot(ctx context.Contex
 		FinancialSnapshot        json.RawMessage `json:"financial_snapshot"`
 		PrecheckFingerprint      string          `json:"precheck_fingerprint"`
 		TokenObservedAt          time.Time       `json:"token_observed_at"`
-		BillingObservedAt        time.Time       `json:"billing_observed_at"`
+		BillingObservedAt        *time.Time      `json:"billing_observed_at"`
 	}
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 512<<10))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&wire) != nil || wire.CommandType != input.CommandType || wire.TargetResourceType != input.TargetResourceType || wire.TargetResourceID != input.TargetResourceID || wire.TokenObservedAt.IsZero() || wire.BillingObservedAt.IsZero() || len(wire.PrecheckFingerprint) != 64 {
+	if decoder.Decode(&wire) != nil || wire.CommandType != input.CommandType || wire.TargetResourceType != input.TargetResourceType || wire.TargetResourceID != input.TargetResourceID || wire.TokenObservedAt.IsZero() || input.CommandType == "TOKEN_CREDENTIAL_REVOKE" && wire.BillingObservedAt != nil || input.CommandType != "TOKEN_CREDENTIAL_REVOKE" && (wire.BillingObservedAt == nil || wire.BillingObservedAt.IsZero()) || len(wire.PrecheckFingerprint) != 64 {
 		return ApprovalSnapshotProjection{}, ErrApprovalSnapshotUnavailable
 	}
 	if decoded, err := hex.DecodeString(wire.PrecheckFingerprint); err != nil || len(decoded) != 32 {
@@ -159,7 +159,7 @@ func (r *PostgresRepository) precheckApprovalSnapshot(ctx context.Context, input
 
 func approvalSnapshotCommand(commandType string) bool {
 	switch strings.ToUpper(strings.TrimSpace(commandType)) {
-	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
 		return true
 	default:
 		return false

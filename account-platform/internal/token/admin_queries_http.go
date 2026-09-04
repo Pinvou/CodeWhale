@@ -27,6 +27,8 @@ type adminPaginationRepository interface {
 	adminProtocolsByIDs(context.Context, []string) ([]ProtocolDefinition, error)
 	adminFormulasByIDs(context.Context, []string) ([]ProtocolFormulaVersion, error)
 	adminTokenAccountsByIDs(context.Context, []string) ([]AdminTokenAccount, error)
+	adminTokenCredentialsByIDs(context.Context, uuid.UUID, []string) ([]AdminCredentialSafeMetadata, error)
+	adminTokenRoutesByIDs(context.Context, uuid.UUID, []string) ([]RoutingPolicy, error)
 	adminProvisioningsByIDs(context.Context, []string) ([]RouteProvisioning, error)
 	adminProvisioningDetail(context.Context, uuid.UUID) (AdminProvisioningDetail, error)
 	adminProvisioningAttemptsByIDs(context.Context, uuid.UUID, []string) ([]AdminProvisioningAttempt, error)
@@ -293,6 +295,60 @@ func (s *Service) paginatedTokenAccounts(w http.ResponseWriter, r *http.Request)
 		return false
 	}
 	return s.adminQueryPage(w, r, filter, "token-accounts", "platform", adminTokenAccountsSort, 50, 200, source, func(ctx context.Context, ids []string) (any, error) { return repo.adminTokenAccountsByIDs(ctx, ids) })
+}
+
+func (s *Service) adminTokenCredentials(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := adminUUID(w, r, "token_account_id")
+	if !ok {
+		return
+	}
+	filter, err := parseAdminQuery(r.URL.Query(), []string{"status"})
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	source, err := tokenCredentialSnapshotSource(filter, accountID)
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	repo, ok := s.paginationRepository()
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "credential metadata is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if !s.adminQueryPage(w, r, filter, "token-credentials", "token-account:"+accountID.String(), adminTokenCredentialsSort, 25, 100, source, func(ctx context.Context, ids []string) (any, error) {
+		return repo.adminTokenCredentialsByIDs(ctx, accountID, ids)
+	}) {
+		writeAdminQueryError(w, r, ErrAdminPaginationDisabled)
+	}
+}
+
+func (s *Service) adminTokenRoutes(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := adminUUID(w, r, "token_account_id")
+	if !ok {
+		return
+	}
+	filter, err := parseAdminQuery(r.URL.Query(), []string{"health_status"})
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	source, err := tokenRouteSnapshotSource(filter, accountID)
+	if err != nil {
+		writeAdminQueryError(w, r, err)
+		return
+	}
+	repo, ok := s.paginationRepository()
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "token routes are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if !s.adminQueryPage(w, r, filter, "token-routes", "token-account:"+accountID.String(), adminTokenRoutesSort, 25, 100, source, func(ctx context.Context, ids []string) (any, error) {
+		return repo.adminTokenRoutesByIDs(ctx, accountID, ids)
+	}) {
+		writeAdminQueryError(w, r, ErrAdminPaginationDisabled)
+	}
 }
 
 func (s *Service) paginatedProvisionings(w http.ResponseWriter, r *http.Request) bool {

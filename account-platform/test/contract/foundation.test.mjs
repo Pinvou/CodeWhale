@@ -254,7 +254,7 @@ test('event schemas compile as JSON Schema 2020-12 and reject secrets', async ()
   for (const file of files) {
     const raw = await readFile(path.join(directory, file), 'utf8');
     const schema = JSON.parse(raw);
-    assert.doesNotMatch(raw, /token_credential|access_token|client_secret|api_key/i, file);
+		assert.doesNotMatch(raw, /access_token|client_secret|api_key|credential_secret|ciphertext|private_key|provider_url|base_url|key_id/i, file);
     assert.doesNotThrow(() => ajv.compile(schema), file);
   }
 });
@@ -428,7 +428,7 @@ test('operations API is role protected and limits mutations to documented manage
   const admin = await readYaml('contracts/openapi/admin.yaml');
   assert.deepEqual(admin.security, [{ oidc: [] }]);
   for (const [pathName, pathItem] of Object.entries(admin.paths)) {
-    assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/|\/token\/admin\/v2\/token-accounts\/\{token_account_id\}\/(?:routes|impact\/route)$)/);
+    assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/|\/token\/admin\/v2\/(?:provisionings\/\{provisioning_id\}|token-accounts\/\{token_account_id\}(?:\/(?:routes|impact\/route))?)$)/);
     for (const operation of Object.values(pathItem)) {
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
     }
@@ -452,8 +452,10 @@ test('operations API is role protected and limits mutations to documented manage
   assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/reconciliation-runs']), ['get', 'post']);
   assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}']), ['get']);
   assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/status']), ['patch']);
-  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/routes']), ['put', 'delete']);
-  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate']), ['post']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/routes']), ['get', 'put', 'delete']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/credentials']), ['get']);
+  assert.equal(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate'], undefined);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v2/token-accounts/{token_account_id}']), ['get']);
   assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/usage-requests/{usage_request_id}']), ['get']);
   assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation']), ['post']);
 });

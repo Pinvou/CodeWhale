@@ -129,6 +129,30 @@ func TestTokenApprovalFinancialSnapshotIsClosedAlignedAndSecretSafe(t *testing.T
 	if err != nil || tokenApprovalSnapshotsAligned(driftedCanonical, canonicalFinancial) {
 		t.Fatalf("revision drift alignment err=%v", err)
 	}
+	credentialPolicy, err := approvalpolicy.Lookup("TOKEN_CREDENTIAL_REVOKE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialFinancial, err := canonicalApprovalFinancialSnapshot(credentialPolicy, json.RawMessage(`{}`))
+	credentialCritical := json.RawMessage(`{"token_account_id":"` + uuid.NewString() + `","token_account_version":8,"credential_id":"` + uuid.NewString() + `","credential_version":3,"credential_status":"ACTIVE","credential_fingerprint":"` + priceFingerprint + `","active_route_set_fingerprint":"` + priceFingerprint + `","provisioning_lease_set_fingerprint":"` + priceFingerprint + `","inflight_request_set_fingerprint":"` + priceFingerprint + `","replacement_credential_version":null,"policy_version":1}`)
+	canonicalCredential, criticalErr := canonicalApprovalCriticalVersions(credentialPolicy, credentialCritical)
+	if err != nil || criticalErr != nil || !tokenApprovalSnapshotsAligned(canonicalCredential, credentialFinancial) {
+		t.Fatalf("credential 11+0 snapshot rejected: financial=%v critical=%v", err, criticalErr)
+	}
+	if _, err := canonicalApprovalFinancialSnapshot(credentialPolicy, json.RawMessage(`{"billing_price_revision":7}`)); err == nil {
+		t.Fatal("credential revoke accepted a Billing snapshot")
+	}
+	for name, raw := range map[string]json.RawMessage{
+		"missing": nil,
+		"null":    json.RawMessage(`null`),
+		"array":   json.RawMessage(`[]`),
+		"extra":   json.RawMessage(`{"extra":true}`),
+	} {
+		draft := ApprovalDraft{CommandType: "TOKEN_CREDENTIAL_REVOKE", IdempotencyKey: "credential-revoke-strict", NormalizedCommand: json.RawMessage(`{}`), TargetResourceType: "PROVIDER_CREDENTIAL", TargetResourceID: uuid.NewString(), Reason: "revoke after complete impact review", FinancialSnapshot: raw}
+		if _, _, err := validateApprovalDraftRequest(draft); err == nil {
+			t.Fatalf("credential revoke accepted %s financial snapshot", name)
+		}
+	}
 }
 
 func TestApprovalExecutorIdentityComesOnlyFromTrustedServiceContext(t *testing.T) {

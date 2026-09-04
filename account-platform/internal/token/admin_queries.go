@@ -39,6 +39,8 @@ const (
 	adminReconciliationSort               = "updated_at DESC,id DESC"
 	adminResourceAuditSort                = "occurred_at DESC,id DESC"
 	adminModelVersionsSort                = "catalog_version DESC"
+	adminTokenCredentialsSort             = "version DESC,id DESC"
+	adminTokenRoutesSort                  = "priority DESC,id DESC"
 	adminOwnerCandidatesSort              = "normalized_display_label ASC,owner_type ASC,owner_id ASC"
 	adminUsageEvidenceSort                = "observed_at ASC,source_kind ASC,source_id ASC"
 	adminUsageReconciliationCasePredicate = "review.domain='TOKEN' AND review.case_type IN ('USAGE_RECONCILIATION_REVIEW') AND review.resource_type='USAGE_REQUEST' AND EXISTS(SELECT 1 FROM usage_requests request WHERE request.id=review.resource_id)"
@@ -573,6 +575,32 @@ AND ($9='' OR ($9='NONE' AND NOT EXISTS(SELECT 1 FROM provider_credentials crede
 	}, nil
 }
 
+func tokenCredentialSnapshotSource(filter adminQueryFilter, accountID uuid.UUID) (AdminSnapshotMemberSource, error) {
+	status, err := filter.enum("status", "PENDING", "CANDIDATE", "ACTIVE", "RETIRING", "RETIRED", "REVOKED", "VALID", "INVALID", "UNKNOWN")
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, highWater time.Time, maximum int) error {
+		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `SELECT credential.id::text AS resource_id,row_number() OVER (ORDER BY credential.version DESC,credential.id DESC)-1 AS position FROM provider_credentials credential
+JOIN token_accounts account ON account.id=credential.token_account_id AND account.management_mode='PLATFORM'
+WHERE credential.token_account_id=$3 AND credential.created_at<=$4
+AND ($5='' OR credential.status=$5 OR credential.validation_status=$5)`, accountID, highWater, status)
+	}, nil
+}
+
+func tokenRouteSnapshotSource(filter adminQueryFilter, accountID uuid.UUID) (AdminSnapshotMemberSource, error) {
+	health, err := filter.enum("health_status", "HEALTHY", "DEGRADED", "UNHEALTHY", "UNKNOWN", "PROBING", "STALE")
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, highWater time.Time, maximum int) error {
+		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `SELECT route.id::text AS resource_id,row_number() OVER (ORDER BY route.priority DESC,route.id DESC)-1 AS position FROM routing_policies route
+JOIN token_accounts account ON account.id=route.token_account_id AND account.management_mode='PLATFORM'
+WHERE route.token_account_id=$3 AND route.reference_status='RESOLVED' AND route.updated_at<=$4
+AND ($5='' OR CASE WHEN route.health_status='HEALTHY' AND (route.health_observed_at IS NULL OR route.health_expires_at IS NULL OR route.health_expires_at<=transaction_timestamp()) THEN 'STALE' ELSE route.health_status END=$5)`, accountID, highWater, health)
+	}, nil
+}
+
 func provisioningSnapshotSource(filter adminQueryFilter) (AdminSnapshotMemberSource, error) {
 	q, err := filter.search("q", 160)
 	if err != nil {
@@ -1045,6 +1073,93 @@ func (r *PostgresRepository) adminTokenAccountsByIDs(ctx context.Context, resour
 		var item AdminTokenAccount
 		if err = rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.ManagementMode, &item.ActiveCredentialCount, &item.RouteCount, &item.AccountVersion, &item.UpdatedAt); err != nil {
 			return nil, err
+		}
+		values[item.ID.String()] = item
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return orderedValues(resourceIDs, values)
+}
+
+func (r *PostgresRepository) AdminTokenAccountSafeDetail(ctx context.Context, accountID uuid.UUID) (AdminTokenAccountSafeDetail, error) {
+	result := AdminTokenAccountSafeDetail{}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback(ctx)
+	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&result.AsOf); err != nil {
+		return AdminTokenAccountSafeDetail{}, err
+	}
+	err = tx.QueryRow(ctx, `
+SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,
+       COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,
+       count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),
+       count(DISTINCT p.id),a.management_version,a.updated_at
+FROM token_accounts a
+LEFT JOIN token_share_policies s ON s.token_account_id=a.id
+LEFT JOIN provider_credentials c ON c.token_account_id=a.id
+LEFT JOIN routing_policies p ON p.token_account_id=a.id AND p.reference_status='RESOLVED'
+WHERE a.id=$1 AND a.management_mode='PLATFORM'
+GROUP BY a.id,s.scope`, accountID).Scan(
+		&result.ID, &result.OwnerType, &result.OwnerID, &result.OwnerOrganization, &result.OwnerUnit, &result.WalletID,
+		&result.Name, &result.Status, &result.ShareScope, &result.ManagementMode, &result.ActiveCredentialCount, &result.RouteCount,
+		&result.AccountVersion, &result.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminTokenAccountSafeDetail{}, ErrNotFound
+	}
+	if err != nil {
+		return AdminTokenAccountSafeDetail{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return AdminTokenAccountSafeDetail{}, err
+	}
+	return result, nil
+}
+
+func (r *PostgresRepository) adminTokenCredentialsByIDs(ctx context.Context, accountID uuid.UUID, resourceIDs []string) ([]AdminCredentialSafeMetadata, error) {
+	ids, err := parseResourceIDs(resourceIDs)
+	if err != nil || len(ids) == 0 {
+		return []AdminCredentialSafeMetadata{}, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT credential.id,credential.provider,credential.fingerprint,credential.version,credential.status,credential.validation_status,credential.allowed_models,credential.validated_at,credential.created_by,credential.created_at,COALESCE(credential.revoked_at,credential.retired_at,credential.activated_at,credential.validated_at,credential.created_at)
+FROM provider_credentials credential JOIN token_accounts account ON account.id=credential.token_account_id AND account.management_mode='PLATFORM'
+WHERE credential.token_account_id=$1 AND credential.id=ANY($2::uuid[])`, accountID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := map[string]AdminCredentialSafeMetadata{}
+	for rows.Next() {
+		var item AdminCredentialSafeMetadata
+		if err = rows.Scan(&item.ID, &item.CredentialType, &item.Fingerprint, &item.Version, &item.Status, &item.ValidationStatus, &item.AllowedModels, &item.ValidatedAt, &item.ResponsibleBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		values[item.ID.String()] = item
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return orderedValues(resourceIDs, values)
+}
+
+func (r *PostgresRepository) adminTokenRoutesByIDs(ctx context.Context, accountID uuid.UUID, resourceIDs []string) ([]RoutingPolicy, error) {
+	ids, err := parseResourceIDs(resourceIDs)
+	if err != nil || len(ids) == 0 {
+		return []RoutingPolicy{}, err
+	}
+	rows, err := r.pool.Query(ctx, routingPolicyProjection+` WHERE token_account_id=$1 AND id=ANY($2::uuid[]) AND reference_status='RESOLVED'`, accountID, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := map[string]RoutingPolicy{}
+	for rows.Next() {
+		item, scanErr := scanRoutingPolicy(rows)
+		if scanErr != nil {
+			return nil, scanErr
 		}
 		values[item.ID.String()] = item
 	}

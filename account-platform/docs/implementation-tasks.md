@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，122 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，8 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，1 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，123 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，8 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -156,7 +156,7 @@
 | APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | DONE |
 | APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | DONE |
 | APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | DONE |
-| APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | IN_REVIEW |
+| APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | DONE |
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | PENDING |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | PENDING |
 | APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | PENDING |
@@ -359,7 +359,13 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-133 Token Account 详情与隔离凭据生命周期
 
-> 实现状态（2026-09-05）：`IN_REVIEW`。已完成五页签独立详情、安全分页投影、隔离 credential origin、一次性新增/轮换、受治理现场验证与撤销审批接线；撤销申请消费 Token 权威 11 字段关键资源快照与空 financial snapshot，Account 在创建、提交重验、授权事件及执行租约中保持同一冻结证据，Portal 与浏览器均不接触凭据秘密。旧 v1 内联详情继续仅作兼容，新页面只消费 v2 安全摘要及独立分页资源。PRE_ACTIVATION 未切换，APT-134+ 与 APT-138 不在本任务激活。身份 B 首轮代码复审提出七项整改；真实 Chromium 进一步证明直接 `target=_blank` 跨 origin 表单 POST 即使移除 `noreferrer` 仍发送 `Origin:null`，因此该路径已废止。本轮按 B 裁决冻结 Portal 同源 `/credential-handoff` 协议，代码继续暂停，待本次文档复审通过后再按新合同整改；复审通过前不提交代码、不推送、不部署。
+> 实现状态（2026-09-05）：`DONE`。已完成五页签独立详情、安全分页投影、一次性新增/轮换、受治理现场验证、撤销审批与生产 revoke adapter；撤销执行前逐字段重验 Token 权威 11 字段快照与空 financial snapshot，Account 在创建、提交重验、授权事件及执行租约中保持同一冻结证据。旧 v1 内联详情继续仅作兼容，新页面只消费 v2 安全摘要及独立分页资源。身份 B 首轮提出的 OIDC 同源信任、10 秒 heartbeat 竞态、验证租约恢复、历史最大版本递增、三阶段轮换脱敏审计和有界撤销均已整改。经两轮身份 B 文档审核冻结并通过 Portal 同源固定 `/credential-handoff`：构建期固定 SHA-256 CSP、运行期 controller/scope 双检查、闭合 v1 MessageChannel、严格非 null Portal Origin、固定 303 `/session` 及 credential origin 同源秘密提交均已落地；Portal、URL、DOM、storage、日志与审计不接触 Secret。生产接线 Chromium 已连续 5 次通过完整 handoff 流程及弹窗受阻、乱序、超时、撤权、关 gate、跨浏览器和刷新不重放负例；另有具名真实 PostgreSQL 集成门禁穿过 Credential Origin HTTP handler、持久仓库、PKCE、签名 JWT/JWKS 与受控 IdP，并在 CI 中接真实 Chromium 连续执行 5 个账户。本地未配置 PostgreSQL 时两项具名用例明确 `SKIP`，CI 强制 no-SKIP。身份 B 第四轮独立代码审核已通过；PRE_ACTIVATION 未切换，APT-134+、APT-137 生产等价 TLS/代理探针及 APT-138 激活不在本任务范围，尚未推送或部署。
+
+> 第二轮整改记录（2026-09-05）：launch 与 session 已持久化 actor issuer/subject、Account authorization version 和治理 gate epoch；创建、消费、首 heartbeat、OIDC 回调前后及最终 credential 事务均经同一事务型 authority guard 重验，验证期间漂移会在最终提交前失败关闭且不产生 credential。10 秒仅约束首 heartbeat，完成首 heartbeat 后 OIDC 可在 5 分钟 session TTL 内继续。handoff 在 MessagePort 同步拒绝时认定“确定未提交”，一旦发送 SUBMIT 后丢 ACK/网络结果则进入 UNKNOWN，只轮询既有 result reference；撤销响应不确定也先撤销一次后查询同一结果，绝不重建或重 POST。`TOKEN_CREDENTIAL_REVOKE` 的 `financial_snapshot` 只接受精确非 null 空对象 `{}`，缺失、null、数组或额外字段均在任何权威读取和持久化前返回稳定 400。生产继续保持 PRE_ACTIVATION；本任务只提供 APT-138 可注入的事务 authority guard 接缝，不在本批启动 gate consumer 或十九项执行。
+
+> 第三轮整改记录（2026-09-05）：Token 内部 credential revoke executor 的原始 HTTP JSON 边界已独立执行 `financial_snapshot` 存在、非 null、object 且零字段检查，四类非法输入在 repository/precheck 前稳定 400；真实 PostgreSQL 用例同时断言 command、audit、outbox 总量不变。接力窗口在 ACK 丢失后自动固定一次 `CREDENTIAL_LAUNCH_CANCELLED` 撤销，撤销响应丢失仍查询同一 result reference；同步未提交与立即取消使用后端当前状态合法的稳定原因，失败 Promise 会释放但既有 revoke attempt 永不重复，后续只 GET 并最终收敛。真实 Chromium CI 已废止跨 origin 直提交流程，改由生产 Portal `GET /credential-handoff` 构建产物与 MessageChannel 在内存传递 launch ID，浏览器 URL/DOM/Performance 均无该 ID，再穿过真实 Credential Origin、PostgreSQL、签名 JWT/JWKS 与受控 IdP，连续 5 个独立账户验收。
+
+> 代码审核记录（2026-09-05）：身份 B 第四轮 `PASS`。确认 Token executor 在 repository/precheck 前严格拒绝缺失、null、数组或非空 `financial_snapshot` 且零 command/audit/outbox 写入；ACK/撤销响应丢失固定只撤销一次并仅查询原 `result_ref`，不重建或重 POST；生产 Portal `/credential-handoff`、冻结脚本、MessageChannel、真实 Credential Origin/PostgreSQL/PKCE/JWT/JWKS/受控 IdP 与连续五账户 Chromium 路径均闭合，launch ID 和 Secret 未进入 URL、DOM、Performance、日志或审计。APT-138 未来注入权威 guard 时必须以严格绝对超时约束外部 Account 查询，避免长期占用 Token 行锁；本任务不激活 consumer、十九项命令或生产 gate。
 
 - **目标/范围**：主目标 `UI-54`、`ADM-58`。修改 `migrations/token/000026_*`、`internal/token` 的 credential launch/session/result 与脱敏验证/撤销适配、独立 `cmd/token-credential-portal`（及其最小服务包）、Portal 同源固定 `/credential-handoff` 最小静态路由、专用脚本构建与 SHA-256 CSP 生成/校验、Portal Token 详情五页签“概览、凭据、路由、Provisioning、审计”和安全自动化；本任务唯一拥有 handoff v1 消息 schema、凭据 launch/session schema、运行时 SW controller 检查与代码级失败撤销。TLS、DNS、反向代理、环境白名单、Service Worker 注册 scope 的生产等价复核与生产探针证据统一归 APT-137，本任务为 `CODE`。
 - **安全合同**：完整实现专项设计 6.1～6.3 的 11 点合同，不接受直接跨 origin POST 等缩减替代。① Portal 同源 `GET /credential-handoff` 固定无 ID/query/fragment，响应不建 session/Cookie，使用 no-store、Referrer-Policy origin 与最小 CSP；专用构建冻结内联脚本字节并生成固定 SHA-256，CSP 只允许以该精确 hash 授权的内联脚本，并禁止 `script-src 'self'`、`'unsafe-inline'`、`'unsafe-eval'`。handoff 在 READY 前与 BIND 后均要求 `navigator.serviceWorker.controller===null`，代码/部署保证注册 scope 不覆盖。② 用户手势先开 handoff；弹窗、READY/BIND 失败不创建 launch，BOUND 后才创建，之后失败撤销同一 `result_ref`。③ 双向精确 origin+`event.source`、至少 256-bit CSPRNG nonce、闭合 v1 schema、专属 `MessageChannel`。④ READY→BOUND→SUBMIT→ACCEPTED 单次有序 ACK，重复/乱序/跨窗口/3 秒阶段超时失败关闭。⑤ launch ID 仅存在运行时内存、MessagePort 与瞬时不可见 DOM form，不进可见 DOM、URL、Cookie、storage/IndexedDB/Cache、window.name、Clipboard、Referer/History/Performance、遥测或日志。⑥ handoff 先建立未挂载的瞬时 form，再发 ACCEPTED；随后关闭 port、清监听和 JavaScript 变量、置 `opener=null`，最后才挂载 form 并以 `_self` POST 单个 `launch_id` 到固定 credential `/launch`；禁止直接 `_blank` 跨 origin POST、fetch/XHR、GET/query/fragment/path、iframe/同页降级。⑦ `/launch` 精确要求当前 Portal 的非 null Origin，拒绝零消费。⑧ 首个 303 固定 `/session` 且从该响应起 COOP same-origin/no-referrer/no-store。⑨ 未知只查询同一 `result_ref`，不得新 nonce/key 或重 POST。⑩ 关窗/取消/撤权/关 gate/10 秒 heartbeat 超时分阶段有界撤销。⑪ 现场验证为 Portal→Token direct 脱敏命令，撤销为 Portal→Account 的 APT-123 审批命令且均不进入隔离页。
@@ -393,7 +399,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **目标/范围**：主目标 `ADM-64`。在 APT-122～APT-136 的领域/API 接入全部通过独立审核后，修改 `migrations/token/000028_*`、`internal/token` 治理激活仓储/路由门禁、Account 审批入口激活校验、`internal/platform/approvalpolicy` 总合同测试及发布前集成测试。本任务唯一拥有持久治理激活记录（状态、epoch、策略集合摘要、十九项处理器摘要、操作者、CAS、时间与审计 request_id），不改任何领域事实 schema。
 - **状态机/原子边界**：初始只能是 `PRE_ACTIVATION`：旧 v1 direct 保持当前兼容行为，新治理/新审批写入口关闭；全部一致性门禁成功后，只允许一次单事务 CAS 将 activation record 从 `PRE_ACTIVATION → ACTIVE`，同一持久 epoch 的同一次原子路由切换关闭三项旧 direct、接受新审批执行并开放其余十六项新治理 envelope，不允许逐命令、逐实例或重复激活，不存在双写窗口。`ACTIVE → SAFE_ROLLBACK` 只停止十九项新写、审批领取和执行消费，绝不重开旧 direct；修复并重跑全部门禁后只允许 `SAFE_ROLLBACK → ACTIVE`。禁止回到 `PRE_ACTIVATION`、跳过状态、客户端指定状态或仅切一项命令。
 - **N/N-1/故障恢复**：Account 创建审批前强一致校验 Token activation epoch；Token 处理 direct/执行/结果查询时校验同一持久 epoch。N-1 不认识 `ACTIVE/SAFE_ROLLBACK` 或策略集合摘要时失败关闭，新旧实例混跑不得自行降级 direct。切换进程崩溃、数据库提交不确定、事件重复/乱序、Account/Token 网络分区只按 activation CAS 与 command result 查询恢复，不重放写命令。
-- **总验收**：十九项逐一核对策略/权限/近期认证/reason/CAS/持久幂等/影响预检/审计/未知恢复、API handler 和领域存储所有者；三项审批逐字段比对 DB↔registry、allowlist、最小执行身份和 direct 403，十六项 `AUDIT_ONLY` 验证不可绕过中间件。故障注入覆盖切换前、CAS 提交中、提交后响应丢失、混合 N/N-1、重复事件、进入/退出 `SAFE_ROLLBACK`，证明状态迁移合法、零双写、零 direct 复活和审计连续。
+- **总验收**：十九项逐一核对策略/权限/近期认证/reason/CAS/持久幂等/影响预检/审计/未知恢复、API handler 和领域存储所有者；三项审批逐字段比对 DB↔registry、allowlist、最小执行身份和 direct 403，十六项 `AUDIT_ONLY` 验证不可绕过中间件。故障注入覆盖切换前、CAS 提交中、提交后响应丢失、混合 N/N-1、重复事件、进入/退出 `SAFE_ROLLBACK`，证明状态迁移合法、零双写、零 direct 复活和审计连续。APT-133 提供的 credential authority guard 接缝在本任务接入真实 Account 权威源时必须使用贯穿事务的严格绝对 deadline；超时或不可确认时失败关闭并释放 Token 行锁，不允许外部查询无限延长持锁时间。
 - **回滚/不包含**：应用回滚只能 CAS 进入 `SAFE_ROLLBACK` 并保留 activation/command/audit 历史；`000028` down 在任何非 `PRE_ACTIVATION` 或有引用时失败关闭。不实现页面、领域命令、预检计算、凭据隔离、TLS/代理或生产部署；发现差异必须退回唯一所属 APT 修复，不能在本任务夹带修补。
 
 ### APT-137 分级发布、兼容与总回滚门禁

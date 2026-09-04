@@ -103,6 +103,7 @@ type PostgresRepository struct {
 	adminPaginationMetrics *AdminPaginationMetrics
 	routeHealthMetrics     *RouteHealthMetrics
 	routeActivationGuard   TokenRouteActivationTransactionGuard
+	credentialAuthGuard    CredentialIsolationAuthorityGuard
 }
 
 type Repository interface {

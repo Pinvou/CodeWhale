@@ -14,6 +14,8 @@ const TOKEN_ADMIN_FILTERS = Object.freeze({
   modelVersions: [],
   provisioningAttempts: ['status'],
   usageEvidence: ['evidence_type'],
+	tokenCredentials: ['status'],
+	tokenRoutes: ['health_status'],
 });
 
 function tokenAdminCollectionQuery(source, filters = {}) {
@@ -520,6 +522,24 @@ export class AdminPlatformClient {
   tokenAccount(tokenAccountID, signal) {
     return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal);
   }
+	tokenAccountSafeDetail(tokenAccountID, signal) {
+		return this.request('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal);
+	}
+	tokenAccountCredentials(tokenAccountID, filters = {}, signal) {
+		return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credentials?${tokenAdminCollectionQuery('tokenCredentials', filters)}`, signal);
+	}
+	tokenAccountRoutes(tokenAccountID, filters = {}, signal) {
+		return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes?${tokenAdminCollectionQuery('tokenRoutes', filters)}`, signal);
+	}
+	createCredentialLaunch(tokenAccountID, action, input, idempotencyKey, signal) {
+		return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credential-launches/${String(action).toLowerCase()}`, 'POST', input, idempotencyKey, signal);
+	}
+	credentialIsolationResult(resultRef, signal) {
+		return this.request('token', `/admin/v1/credential-results/${encodeURIComponent(resultRef)}`, signal);
+	}
+	revokeCredentialWindow(resultRef, reasonCode, signal) {
+		return this.mutate('token', `/admin/v1/credential-results/${encodeURIComponent(resultRef)}/revoke-window`, 'POST', { reason_code: reasonCode }, '', signal);
+	}
   setTokenAccountStatus(tokenAccountID, status, reason) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/status`, 'PATCH', { status, reason });
   }

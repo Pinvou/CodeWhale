@@ -214,6 +214,37 @@ test('approval impact consumes only the authoritative 13/8 critical snapshot and
   assert.throws(() => requireTokenApprovalImpact({ ...rollback, critical_resource_versions: { ...rollback.critical_resource_versions, source_catalog_version: 4 } }, { action: rollback.action, commandType: 'TOKEN_MODEL_CATALOG_ROLLBACK', sourceCatalogVersion: 3 }), /rollback snapshot/u);
 });
 
+test('credential revoke consumes the authoritative 11-field Token snapshot and no Billing facts', () => {
+  const credentialID = '0199a300-0001-7000-8000-000000000031';
+  const accountID = '0199a300-0001-7000-8000-000000000032';
+  const revoke = {
+    ...impact, action: 'TOKEN_CREDENTIAL_REVOKE', billing_observed_at: undefined,
+    evidence: { ...impact.evidence, resource_type: 'PROVIDER_CREDENTIAL', resource_id: credentialID, current_status: 'ACTIVE' },
+    critical_resource_versions: {
+      token_account_id: accountID, token_account_version: 7, credential_id: credentialID, credential_version: 3,
+      credential_status: 'ACTIVE', credential_fingerprint: '1'.repeat(64), active_route_set_fingerprint: '2'.repeat(64),
+      provisioning_lease_set_fingerprint: '3'.repeat(64), inflight_request_set_fingerprint: '4'.repeat(64),
+      replacement_credential_version: null, policy_version: 1,
+    },
+    financial_snapshot: {},
+  };
+  assert.equal(requireTokenApprovalImpact(revoke, { action: revoke.action, commandType: 'TOKEN_CREDENTIAL_REVOKE', targetResourceID: credentialID }), revoke);
+  for (const invalid of [
+    { ...revoke, financial_snapshot: null },
+    { ...revoke, financial_snapshot: [] },
+    { ...revoke, financial_snapshot: { extra: true } },
+    { ...revoke, financial_snapshot: { billing_price_revision: 1 } },
+    { ...revoke, critical_resource_versions: { ...revoke.critical_resource_versions, credential_id: accountID } },
+    { ...revoke, critical_resource_versions: { ...revoke.critical_resource_versions, credential_fingerprint: 'unsafe' } },
+    { ...revoke, critical_resource_versions: { ...revoke.critical_resource_versions, extra: true } },
+  ]) assert.throws(() => requireTokenApprovalImpact(invalid, { action: revoke.action, commandType: 'TOKEN_CREDENTIAL_REVOKE', targetResourceID: credentialID }), /approval snapshot/u);
+
+  const input = { command_type: 'TOKEN_CREDENTIAL_REVOKE', target_resource_type: 'PROVIDER_CREDENTIAL', target_resource_id: credentialID, reason: 'revoke after complete impact review', normalized_command: { token_account_id: accountID, expected_account_version: 7, credential_id: credentialID, credential_version: 3 }, critical_resource_versions: revoke.critical_resource_versions, financial_snapshot: {} };
+  const approval = { ...input, approval_request_id: '0199a300-0001-7000-8000-000000000033', requester_user_id: '0199a300-0001-7000-8000-000000000034', policy_version: 1, approval_mode: 'APPROVAL_REQUIRED', command_fingerprint: 'e'.repeat(64), status: 'DRAFT', version: 1, expires_at: '2026-09-06T12:00:00Z', created_at: '2026-09-05T12:00:00Z', updated_at: '2026-09-05T12:00:00Z', allowed_actions: ['EDIT', 'SUBMIT'] };
+  assert.equal(validApprovalRequest(approval, input, ['DRAFT']), true);
+  assert.equal(validApprovalRequest({ ...approval, policy_version: 2 }, input, ['DRAFT']), false);
+});
+
 test('Chromium smoke server binding rejects the complete unsafe-port set and retries port 3659', async () => {
   const expectedUnsafe = [
     1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95,

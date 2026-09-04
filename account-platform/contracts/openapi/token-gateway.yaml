@@ -805,6 +805,22 @@ components:
               required: [source_catalog_version]
               properties:
                 source_catalog_version: { type: integer, format: int64, minimum: 1 }
+        - type: object
+          additionalProperties: false
+          required: [command_type, target_resource_type, target_resource_id, normalized_command]
+          properties:
+            command_type: { type: string, const: TOKEN_CREDENTIAL_REVOKE }
+            target_resource_type: { type: string, const: PROVIDER_CREDENTIAL }
+            target_resource_id: { type: string, format: uuid }
+            normalized_command:
+              type: object
+              additionalProperties: false
+              required: [token_account_id, expected_account_version, credential_id, credential_version]
+              properties:
+                token_account_id: { type: string, format: uuid }
+                expected_account_version: { type: integer, format: int64, minimum: 1 }
+                credential_id: { type: string, format: uuid }
+                credential_version: { type: integer, minimum: 1 }
     TokenFinancialSnapshot:
       type: object
       additionalProperties: false
@@ -847,19 +863,43 @@ components:
         provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         policy_version: { type: integer, const: 2 }
+    CredentialRevokeCriticalResourceVersions:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, token_account_version, credential_id, credential_version, credential_status, credential_fingerprint, active_route_set_fingerprint, provisioning_lease_set_fingerprint, inflight_request_set_fingerprint, replacement_credential_version, policy_version]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        token_account_version: { type: integer, format: int64, minimum: 1 }
+        credential_id: { type: string, format: uuid }
+        credential_version: { type: integer, minimum: 1 }
+        credential_status: { type: string, enum: [PENDING, CANDIDATE, ACTIVE, RETIRING, RETIRED, REVOKED] }
+        credential_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        active_route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        provisioning_lease_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        replacement_credential_version: { type: [integer, "null"], minimum: 1 }
+        policy_version: { type: integer, const: 1 }
+    EmptyFinancialSnapshot:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
     ApprovalSnapshotProjection:
       type: object
       additionalProperties: false
-      required: [command_type, target_resource_type, target_resource_id, critical_resource_versions, financial_snapshot, precheck_fingerprint, token_observed_at, billing_observed_at]
+      required: [command_type, target_resource_type, target_resource_id, critical_resource_versions, financial_snapshot, precheck_fingerprint, token_observed_at]
       properties:
-        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK] }
-        target_resource_type: { type: string, enum: [MODEL, MODEL_CATALOG] }
+        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] }
+        target_resource_type: { type: string, enum: [MODEL, MODEL_CATALOG, PROVIDER_CREDENTIAL] }
         target_resource_id: { type: string, minLength: 1, maxLength: 160 }
         critical_resource_versions:
           oneOf:
             - { $ref: "#/components/schemas/ModelLifecycleCriticalResourceVersions" }
             - { $ref: "#/components/schemas/CatalogRollbackCriticalResourceVersions" }
-        financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+            - { $ref: "#/components/schemas/CredentialRevokeCriticalResourceVersions" }
+        financial_snapshot:
+          oneOf:
+            - { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+            - { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
         precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         token_observed_at: { type: string, format: date-time }
         billing_observed_at: { type: string, format: date-time }
@@ -870,12 +910,26 @@ components:
               target_resource_type: { const: MODEL }
               target_resource_id: { type: string, format: uuid }
               critical_resource_versions: { $ref: "#/components/schemas/ModelLifecycleCriticalResourceVersions" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+              billing_observed_at: { type: string, format: date-time }
+            required: [billing_observed_at]
         - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }, required: [command_type] }
           then:
             properties:
               target_resource_type: { const: MODEL_CATALOG }
               target_resource_id: { type: string, pattern: '^[1-9][0-9]{0,18}$' }
               critical_resource_versions: { $ref: "#/components/schemas/CatalogRollbackCriticalResourceVersions" }
+              financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
+              billing_observed_at: { type: string, format: date-time }
+            required: [billing_observed_at]
+        - if: { properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROVIDER_CREDENTIAL }
+              target_resource_id: { type: string, format: uuid }
+              critical_resource_versions: { $ref: "#/components/schemas/CredentialRevokeCriticalResourceVersions" }
+              financial_snapshot: { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
+              billing_observed_at: false
     GovernedTokenCommandEnvelope:
       type: object
       additionalProperties: false
@@ -888,6 +942,22 @@ components:
         expected_versions: { type: object, additionalProperties: true }
         precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         command: { type: object, additionalProperties: true, description: Account-frozen normalized command without secrets or provider internals. }
+      allOf:
+        - if: { properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: PROVIDER_CREDENTIAL }
+              target_resource_id: { type: string, format: uuid }
+              expected_versions: { $ref: "#/components/schemas/CredentialRevokeCriticalResourceVersions" }
+              command:
+                type: object
+                additionalProperties: false
+                required: [token_account_id, expected_account_version, credential_id, credential_version]
+                properties:
+                  token_account_id: { type: string, format: uuid }
+                  expected_account_version: { type: integer, format: int64, minimum: 1 }
+                  credential_id: { type: string, format: uuid }
+                  credential_version: { type: integer, minimum: 1 }
     ApprovedTokenCommandExecution:
       type: object
       additionalProperties: false
@@ -899,7 +969,21 @@ components:
         authorization_version: { type: integer, format: int64, minimum: 1 }
         command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         execution_idempotency_key: { type: string, minLength: 16, maxLength: 512, description: Account-issued stable execution key; every domain adapter must persist and replay this exact key. }
+        critical_resource_versions: { type: object }
+        financial_snapshot: { type: object }
         command: { $ref: "#/components/schemas/GovernedTokenCommandEnvelope" }
+      allOf:
+        - if:
+            properties:
+              command:
+                properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE } }
+                required: [command_type]
+            required: [command]
+          then:
+            required: [critical_resource_versions, financial_snapshot]
+            properties:
+              critical_resource_versions: { $ref: "#/components/schemas/CredentialRevokeCriticalResourceVersions" }
+              financial_snapshot: { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
     GovernedTokenCommandResult:
       type: object
       additionalProperties: false

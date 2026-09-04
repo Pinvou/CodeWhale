@@ -3,7 +3,7 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminNavigationGroupsForGate, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
+import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { createFinanceDetailRecovery, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from './admin-finance-pagination.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { AdminModelTokenWorkspace } from './AdminModelTokenWorkspace.jsx';
@@ -373,6 +373,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [tokenResourceFormsEnabled, setTokenResourceFormsEnabled] = useState(false);
   const [modelOperationsDetailsEnabled, setModelOperationsDetailsEnabled] = useState(false);
   const [modelDetailsEnabled, setModelDetailsEnabled] = useState(false);
+	const [tokenDetailsEnabled, setTokenDetailsEnabled] = useState(false);
+	const [credentialOrigin, setCredentialOrigin] = useState('');
   const [modelTokenActionsEnabled, setModelTokenActionsEnabled] = useState(false);
   const [modelTokenRouteNotice, setModelTokenRouteNotice] = useState('');
   const authorizationRef = useRef(null);
@@ -531,11 +533,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         setModelOperationsDetailsEnabled(operationsDetailsEnabled);
         const detailsEnabled = adminModelDetailsGateEnabled(session);
         setModelDetailsEnabled(detailsEnabled);
+				const tokenDetailGate = adminTokenDetailsGateEnabled(session);
+				setTokenDetailsEnabled(tokenDetailGate);
+				setCredentialOrigin(tokenDetailGate ? session.credential_origin : '');
         const actionsEnabled = adminModelTokenActionsGateEnabled(session);
         setModelTokenActionsEnabled(actionsEnabled);
         const visible = adminVisibleSections(granted, { modelTokenIAEnabled: iaEnabled });
         const requested = readAdminSection();
-        const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled, undefined, granted.platform_permissions || [], { tokenResourceFormsEnabled: resourceFormsEnabled, modelOperationsDetailsEnabled: operationsDetailsEnabled, modelDetailsEnabled: detailsEnabled, modelTokenActionsEnabled: actionsEnabled });
+				const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled, undefined, granted.platform_permissions || [], { tokenResourceFormsEnabled: resourceFormsEnabled, modelOperationsDetailsEnabled: operationsDetailsEnabled, modelDetailsEnabled: detailsEnabled, tokenDetailsEnabled: tokenDetailGate, modelTokenActionsEnabled: actionsEnabled });
         if (visible.length === 0) {
           if (normalized.replace) writeAdminSection(normalized.section, 'replace', undefined, undefined, normalized.updates);
           setAuth('denied');
@@ -583,8 +588,9 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         const nextResourceFormsEnabled = adminTokenResourceFormsGateEnabled(nextSession);
         const nextOperationsDetailsEnabled = adminModelOperationsDetailsGateEnabled(nextSession);
         const nextDetailsEnabled = adminModelDetailsGateEnabled(nextSession);
+				const nextTokenDetailsEnabled = adminTokenDetailsGateEnabled(nextSession);
         const nextActionsEnabled = adminModelTokenActionsGateEnabled(nextSession);
-        const gatesChanged = nextIAEnabled !== modelTokenIAEnabled || nextResourceFormsEnabled !== tokenResourceFormsEnabled || nextOperationsDetailsEnabled !== modelOperationsDetailsEnabled || nextDetailsEnabled !== modelDetailsEnabled || nextActionsEnabled !== modelTokenActionsEnabled;
+				const gatesChanged = nextIAEnabled !== modelTokenIAEnabled || nextResourceFormsEnabled !== tokenResourceFormsEnabled || nextOperationsDetailsEnabled !== modelOperationsDetailsEnabled || nextDetailsEnabled !== modelDetailsEnabled || nextTokenDetailsEnabled !== tokenDetailsEnabled || nextActionsEnabled !== modelTokenActionsEnabled;
         if (permissionsChanged || authorizationVersionChanged(authorizationVersions(current), authorizationVersions(next)) || gatesChanged) {
           const visible = adminVisibleSections(next, { modelTokenIAEnabled: nextIAEnabled });
           authorizationRef.current = next;
@@ -593,10 +599,12 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           setTokenResourceFormsEnabled(nextResourceFormsEnabled);
           setModelOperationsDetailsEnabled(nextOperationsDetailsEnabled);
           setModelDetailsEnabled(nextDetailsEnabled);
+					setTokenDetailsEnabled(nextTokenDetailsEnabled);
+					setCredentialOrigin(nextTokenDetailsEnabled ? nextSession.credential_origin : '');
           setModelTokenActionsEnabled(nextActionsEnabled);
           financeRequestTrackerRef.current.invalidateAll();
           setData({});
-          const normalized = normalizeAdminModelTokenEntry(section, visible, nextIAEnabled, undefined, next.platform_permissions || [], { tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelDetailsEnabled: nextDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled });
+					const normalized = normalizeAdminModelTokenEntry(section, visible, nextIAEnabled, undefined, next.platform_permissions || [], { tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelDetailsEnabled: nextDetailsEnabled, tokenDetailsEnabled: nextTokenDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled });
           if (visible.length === 0) {
             if (normalized.replace) writeAdminSection(normalized.section, 'replace', undefined, undefined, normalized.updates);
             setAuth('denied');
@@ -641,14 +649,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       unsubscribe?.();
       globalThis.removeEventListener?.('focus', onFocus);
     };
-  }, [auth, client, load, modelDetailsEnabled, modelOperationsDetailsEnabled, modelTokenActionsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
+	}, [auth, client, load, modelDetailsEnabled, tokenDetailsEnabled, modelOperationsDetailsEnabled, modelTokenActionsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
 
   useEffect(() => {
     if (auth !== 'ready' || !authorization) return undefined;
     const onPopState = () => {
       const requested = readAdminSection();
       const visible = adminVisibleSections(authorization, { modelTokenIAEnabled });
-      const normalized = normalizeAdminModelTokenEntry(requested, visible, modelTokenIAEnabled, undefined, authorization.platform_permissions || [], { tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, modelTokenActionsEnabled });
+			const normalized = normalizeAdminModelTokenEntry(requested, visible, modelTokenIAEnabled, undefined, authorization.platform_permissions || [], { tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, tokenDetailsEnabled, modelTokenActionsEnabled });
       if (!normalized.section) {
         writeAdminSection(section, 'replace');
         return;
@@ -665,7 +673,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     };
     globalThis.addEventListener?.('popstate', onPopState);
     return () => globalThis.removeEventListener?.('popstate', onPopState);
-  }, [auth, authorization, data, load, modelDetailsEnabled, modelOperationsDetailsEnabled, modelTokenActionsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
+	}, [auth, authorization, data, load, modelDetailsEnabled, tokenDetailsEnabled, modelOperationsDetailsEnabled, modelTokenActionsEnabled, modelTokenIAEnabled, section, tokenResourceFormsEnabled]);
 
   const navigate = (key, query = {}) => {
     if (!adminVisibleSections(authorization, { modelTokenIAEnabled }).includes(key)) return;
@@ -732,7 +740,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     setRouteVersion((value) => value + 1);
   };
   const changeModelTokenRoute = (updates, mode = 'push') => {
-    const normalized = normalizeAdminModelTokenNavigation(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, { tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, modelTokenActionsEnabled });
+		const normalized = normalizeAdminModelTokenNavigation(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, { tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, tokenDetailsEnabled, modelTokenActionsEnabled });
     writeAdminSection(normalized.section, mode, undefined, undefined, normalized.updates);
     setModelTokenRouteNotice('');
     setRouteVersion((value) => value + 1);
@@ -826,7 +834,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           {section === 'payments' && <Billing key="payments" surface="payments" routeTab={financeTab} routeQuery={financeQuery} routeDetail={financeDetail} routeVersion={routeVersion} onRouteTabChange={changeFinanceTab} onRouteQueryChange={changeFinanceQuery} onRouteDetailChange={changeFinanceDetail} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'products' && <ProductsWorkspace routeTab={financeTab} onRouteTabChange={changeFinanceTab} onNavigate={navigate} copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} requestTracker={financeRequestTrackerRef.current} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {['models', 'tokenResources', 'modelOperations'].includes(section) && <AdminModelTokenWorkspace section={section} copy={copy} client={client} permissions={platformPermissions} routeVersion={routeVersion} onRouteChange={changeModelTokenRoute} onNavigate={navigate} routeNotice={modelTokenRouteNotice} tokenResourceFormsEnabled={tokenResourceFormsEnabled} modelOperationsDetailsEnabled={modelOperationsDetailsEnabled} modelDetailsEnabled={modelDetailsEnabled} modelTokenActionsEnabled={modelTokenActionsEnabled} />}
+					{['models', 'tokenResources', 'modelOperations'].includes(section) && <AdminModelTokenWorkspace section={section} copy={copy} client={client} permissions={platformPermissions} routeVersion={routeVersion} onRouteChange={changeModelTokenRoute} onNavigate={navigate} routeNotice={modelTokenRouteNotice} tokenResourceFormsEnabled={tokenResourceFormsEnabled} modelOperationsDetailsEnabled={modelOperationsDetailsEnabled} modelDetailsEnabled={modelDetailsEnabled} tokenDetailsEnabled={tokenDetailsEnabled} credentialOrigin={credentialOrigin} modelTokenActionsEnabled={modelTokenActionsEnabled} />}
           {section === 'forbidden' && <section className="adm-card adm-source-card"><div className="adm-source-state"><strong>{copy.modelToken.forbiddenTitle}</strong><span>{copy.modelToken.forbiddenBody}</span></div></section>}
           {section === 'system' && (
             <>

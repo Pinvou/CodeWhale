@@ -63,6 +63,34 @@ func TestHTTPApprovalSnapshotSourceRequiresClosedMatchingProjection(t *testing.T
 	}
 }
 
+func TestHTTPApprovalSnapshotSourceAcceptsCredentialRevokeWithoutBillingFacts(t *testing.T) {
+	accountID, credentialID := uuid.New(), uuid.New()
+	fingerprint := strings.Repeat("a", 64)
+	critical := map[string]any{
+		"token_account_id": accountID, "token_account_version": 7, "credential_id": credentialID, "credential_version": 3,
+		"credential_status": "ACTIVE", "credential_fingerprint": fingerprint, "active_route_set_fingerprint": fingerprint,
+		"provisioning_lease_set_fingerprint": fingerprint, "inflight_request_set_fingerprint": fingerprint,
+		"replacement_credential_version": nil, "policy_version": 1,
+	}
+	input := ApprovalSnapshotRequest{CommandType: "TOKEN_CREDENTIAL_REVOKE", TargetResourceType: "PROVIDER_CREDENTIAL", TargetResourceID: credentialID.String(), NormalizedCommand: json.RawMessage(`{"token_account_id":"` + accountID.String() + `","expected_account_version":7,"credential_id":"` + credentialID.String() + `","credential_version":3}`)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"command_type": input.CommandType, "target_resource_type": input.TargetResourceType, "target_resource_id": input.TargetResourceID,
+			"critical_resource_versions": critical, "financial_snapshot": map[string]any{}, "precheck_fingerprint": fingerprint,
+			"token_observed_at": "2026-09-05T00:00:00Z",
+		})
+	}))
+	defer server.Close()
+	client, err := NewHTTPApprovalSnapshotSource(server.URL, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := client.PrecheckApprovalSnapshot(context.Background(), input)
+	if err != nil || projection.billingObservedAt != nil || !sameJSONObject(projection.FinancialSnapshot, json.RawMessage(`{}`)) {
+		t.Fatalf("credential projection=%+v err=%v", projection, err)
+	}
+}
+
 func TestHTTPApprovalSnapshotSourceClassifiesTransientAndRejectedFailures(t *testing.T) {
 	modelID := uuid.New()
 	input := ApprovalSnapshotRequest{

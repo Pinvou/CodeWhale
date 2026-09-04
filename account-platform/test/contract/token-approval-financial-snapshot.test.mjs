@@ -41,6 +41,21 @@ test('Token approval projection binds command type to the exact 13-field and fin
   assert.equal(validate(value), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...value, critical_resource_versions: { ...critical, extra: 1 } }), false);
   assert.equal(validate({ ...value, critical_resource_versions: { current_catalog_version: 8, source_catalog_version: 7, catalog_diff_fingerprint: digest('1'), billing_price_version: 11, route_set_fingerprint: digest('a'), provisioning_set_fingerprint: digest('b'), inflight_request_set_fingerprint: digest('c'), policy_version: 2 } }), false);
+
+  const credentialID = id('2');
+  const credential = {
+    command_type: 'TOKEN_CREDENTIAL_REVOKE', target_resource_type: 'PROVIDER_CREDENTIAL', target_resource_id: credentialID,
+    critical_resource_versions: {
+      token_account_id: id('3'), token_account_version: 7, credential_id: credentialID, credential_version: 3,
+      credential_status: 'ACTIVE', credential_fingerprint: digest('1'), active_route_set_fingerprint: digest('2'),
+      provisioning_lease_set_fingerprint: digest('3'), inflight_request_set_fingerprint: digest('4'),
+      replacement_credential_version: null, policy_version: 1,
+    }, financial_snapshot: {}, precheck_fingerprint: digest('5'), token_observed_at: '2026-09-05T08:00:00Z',
+  };
+  assert.equal(validate(credential), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...credential, billing_observed_at: '2026-09-05T08:00:00Z' }), false);
+  for (const invalidFinancial of [null, [], { extra: true }, financial]) assert.equal(validate({ ...credential, financial_snapshot: invalidFinancial }), false);
+  assert.equal(validate({ ...credential, critical_resource_versions: { ...credential.critical_resource_versions, credential_secret: 'forbidden' } }), false);
 });
 
 test('model publish precheck is a closed stable-target and full price-evidence contract', async () => {
@@ -91,6 +106,10 @@ test('Account execution lease retains the exact snapshots for Token commands and
   assert.equal(validate(value), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...value, financial_snapshot: { ...financial, extra: 1 } }), false);
   assert.equal(validate({ ...value, command_type: 'WALLET_ADJUSTMENT', critical_resource_versions: {}, financial_snapshot: {} }), true, JSON.stringify(validate.errors));
+  const credentialID = id('8');
+  const credentialCritical = { token_account_id: id('9'), token_account_version: 2, credential_id: credentialID, credential_version: 1, credential_status: 'RETIRED', credential_fingerprint: digest('1'), active_route_set_fingerprint: digest('2'), provisioning_lease_set_fingerprint: digest('3'), inflight_request_set_fingerprint: digest('4'), replacement_credential_version: null, policy_version: 1 };
+  assert.equal(validate({ ...value, command_type: 'TOKEN_CREDENTIAL_REVOKE', policy_version: 1, target_resource_type: 'PROVIDER_CREDENTIAL', target_resource_id: credentialID, critical_resource_versions: credentialCritical, financial_snapshot: {} }), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...value, command_type: 'TOKEN_CREDENTIAL_REVOKE', policy_version: 1, target_resource_type: 'PROVIDER_CREDENTIAL', target_resource_id: credentialID, critical_resource_versions: credentialCritical, financial_snapshot: financial }), false);
 });
 
 test('authorized event carries the same closed snapshots without secret fields', async () => {
@@ -101,4 +120,9 @@ test('authorized event carries the same closed snapshots without secret fields',
   const event = { event_id: id('6'), event_type: 'account.approval-command.authorized.v1', aggregate_id: id('7'), aggregate_version: 2, occurred_at: '2026-09-04T08:00:02Z', trace_id: 'trace', payload: { approval_request_id: id('7'), command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', command_fingerprint: digest('a'), policy_version: 2, executor_identity: 'token-command-executor', execution_deadline: '2026-09-04T08:05:00Z', normalized_command: {}, target_resource_type: 'MODEL', target_resource_id: critical.model_id, critical_resource_versions: critical, financial_snapshot: financial } };
   assert.equal(validate(event), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...event, payload: { ...event.payload, financial_snapshot: { ...financial, api_key: 'forbidden' } } }), false);
+  const credentialID = id('8');
+  const credentialCritical = { token_account_id: id('9'), token_account_version: 2, credential_id: credentialID, credential_version: 1, credential_status: 'RETIRED', credential_fingerprint: digest('1'), active_route_set_fingerprint: digest('2'), provisioning_lease_set_fingerprint: digest('3'), inflight_request_set_fingerprint: digest('4'), replacement_credential_version: null, policy_version: 1 };
+  const credentialEvent = { ...event, payload: { ...event.payload, command_type: 'TOKEN_CREDENTIAL_REVOKE', policy_version: 1, target_resource_type: 'PROVIDER_CREDENTIAL', target_resource_id: credentialID, critical_resource_versions: credentialCritical, financial_snapshot: {} } };
+  assert.equal(validate(credentialEvent), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...credentialEvent, payload: { ...credentialEvent.payload, financial_snapshot: financial } }), false);
 });

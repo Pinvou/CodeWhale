@@ -88,6 +88,10 @@ export function adminModelDetailsGateEnabled(session = {}) {
   return session?.feature_flags?.admin_model_details === true;
 }
 
+export function adminTokenDetailsGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_token_details === true && typeof session?.credential_origin === 'string' && session.credential_origin.length > 0;
+}
+
 export function adminModelTokenActionsGateEnabled(session = {}) {
   return session?.feature_flags?.admin_model_token_actions === true;
 }
@@ -188,6 +192,9 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
     if (!ownerSelectionAllowed) {
       for (const parameter of Object.values(adminModelTokenQueryParameters.ownerCandidates)) if (search.has(parameter)) updates[parameter] = null;
     }
+		if (options.tokenDetailsEnabled !== true || !granted.has('platform.tokens.read')) {
+			clearParameters(adminModelTokenDetailParameters.token, updates);
+		}
   }
   const clearOrphanOrInvalidDetail = (idKey, parameters) => {
     const id = search.get(idKey) || '';
@@ -261,6 +268,10 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
       updates.token_detail_tab = 'overview';
       clearParameters(Object.values(adminModelTokenQueryParameters.tokenAudit), updates);
     }
+		if (detailTab !== 'credentials') clearParameters(Object.values(adminModelTokenQueryParameters.tokenCredentials), updates);
+		if (detailTab !== 'routes') clearParameters(Object.values(adminModelTokenQueryParameters.tokenRoutes), updates);
+		if (detailTab !== 'provisionings') clearParameters(Object.values(adminModelTokenQueryParameters.tokenProvisionings), updates);
+		if (detailTab !== 'audit') clearParameters(Object.values(adminModelTokenQueryParameters.tokenAudit), updates);
   }
   return { section: requested, replace: Object.keys(updates).length > 0, updates, notice };
 }

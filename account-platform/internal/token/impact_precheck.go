@@ -55,20 +55,22 @@ type ImpactResourceVersion struct {
 }
 
 type ImpactLocalEvidence struct {
-	ResourceType               string                  `json:"resource_type"`
-	ResourceID                 string                  `json:"resource_id"`
-	CurrentStatus              string                  `json:"current_status"`
-	CurrentVersion             ImpactResourceVersion   `json:"current_version"`
-	Dependencies               ImpactDependencySummary `json:"dependencies"`
-	ModelIDs                   []uuid.UUID             `json:"-"`
-	PriceDimensions            []ImpactPriceQuery      `json:"-"`
-	ReplacementModelID         *uuid.UUID              `json:"replacement_model_id,omitempty"`
-	ReplacementReady           *bool                   `json:"replacement_model_ready,omitempty"`
-	ObservedAt                 time.Time               `json:"-"`
-	RouteSetFingerprint        string                  `json:"-"`
-	ProvisioningSetFingerprint string                  `json:"-"`
-	InflightSetFingerprint     string                  `json:"-"`
-	CatalogDiffFingerprint     string                  `json:"-"`
+	ResourceType                 string                  `json:"resource_type"`
+	ResourceID                   string                  `json:"resource_id"`
+	CurrentStatus                string                  `json:"current_status"`
+	CurrentVersion               ImpactResourceVersion   `json:"current_version"`
+	Dependencies                 ImpactDependencySummary `json:"dependencies"`
+	ModelIDs                     []uuid.UUID             `json:"-"`
+	PriceDimensions              []ImpactPriceQuery      `json:"-"`
+	ReplacementModelID           *uuid.UUID              `json:"replacement_model_id,omitempty"`
+	ReplacementReady             *bool                   `json:"replacement_model_ready,omitempty"`
+	ObservedAt                   time.Time               `json:"-"`
+	RouteSetFingerprint          string                  `json:"-"`
+	ProvisioningSetFingerprint   string                  `json:"-"`
+	InflightSetFingerprint       string                  `json:"-"`
+	CatalogDiffFingerprint       string                  `json:"-"`
+	CredentialFingerprint        string                  `json:"-"`
+	ReplacementCredentialVersion *int                    `json:"-"`
 }
 
 type ImpactPriceSummary struct {
@@ -333,9 +335,59 @@ func (s *Service) adminTokenCredentialImpact(w http.ResponseWriter, r *http.Requ
 	if credentialID != nil {
 		credentialParameter = credentialID.String()
 	}
-	s.adminTokenLocalImpact(w, r, "TOKEN_CREDENTIAL_"+action, []string{"credential_id=" + credentialParameter}, func(repository ImpactPrecheckRepository, accountID uuid.UUID) (ImpactLocalEvidence, error) {
-		return repository.TokenCredentialImpact(r.Context(), accountID, credentialID)
-	})
+	if action != "REVOKE" {
+		s.adminTokenLocalImpact(w, r, "TOKEN_CREDENTIAL_"+action, []string{"credential_id=" + credentialParameter}, func(repository ImpactPrecheckRepository, accountID uuid.UUID) (ImpactLocalEvidence, error) {
+			return repository.TokenCredentialImpact(r.Context(), accountID, credentialID)
+		})
+		return
+	}
+	repository, ok := s.impactPrecheckRepository(w, r)
+	if !ok {
+		return
+	}
+	accountID, ok := adminUUID(w, r, "token_account_id")
+	if !ok {
+		return
+	}
+	evidence, err := repository.TokenCredentialImpact(r.Context(), accountID, credentialID)
+	if err != nil {
+		s.writeImpactError(w, r, err)
+		return
+	}
+	result := credentialRevokeImpactResult(accountID, *credentialID, evidence)
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
+func credentialRevokeImpactResult(accountID, credentialID uuid.UUID, evidence ImpactLocalEvidence) ImpactPrecheckResult {
+	blockers := []string{}
+	if evidence.Dependencies.ReadyProvisionings > 0 && evidence.Dependencies.AlternativeCredentials == 0 {
+		blockers = append(blockers, "ALTERNATIVE_CREDENTIAL_MISSING")
+	}
+	if evidence.Dependencies.ActiveLeases > 0 {
+		blockers = append(blockers, "ACTIVE_LEASES_PRESENT")
+	}
+	accountVersion, credentialVersion := int64(0), 0
+	if evidence.CurrentVersion.AccountVersion != nil {
+		accountVersion = *evidence.CurrentVersion.AccountVersion
+	}
+	if evidence.CurrentVersion.CredentialVersion != nil {
+		credentialVersion = *evidence.CurrentVersion.CredentialVersion
+	}
+	result := ImpactPrecheckResult{Action: "TOKEN_CREDENTIAL_REVOKE", Evidence: evidence, Blockers: blockers,
+		CriticalResourceVersions: map[string]any{
+			"token_account_id": accountID.String(), "token_account_version": accountVersion,
+			"credential_id": credentialID.String(), "credential_version": credentialVersion,
+			"credential_status": evidence.CurrentStatus, "credential_fingerprint": evidence.CredentialFingerprint,
+			"active_route_set_fingerprint":       evidence.RouteSetFingerprint,
+			"provisioning_lease_set_fingerprint": evidence.ProvisioningSetFingerprint,
+			"inflight_request_set_fingerprint":   evidence.InflightSetFingerprint,
+			"replacement_credential_version":     evidence.ReplacementCredentialVersion, "policy_version": int64(1),
+		}, FinancialSnapshot: map[string]any{}}
+	if accountVersion < 1 || credentialVersion < 1 || !validImpactFingerprint(evidence.CredentialFingerprint) || !validImpactFingerprint(evidence.RouteSetFingerprint) || !validImpactFingerprint(evidence.ProvisioningSetFingerprint) || !validImpactFingerprint(evidence.InflightSetFingerprint) {
+		result.Blockers = append(result.Blockers, "APPROVAL_SNAPSHOT_UNAVAILABLE")
+	}
+	finalizeImpactResult(&result, "token_account_id="+accountID.String(), "credential_id="+credentialID.String(), "credential_version="+strconv.Itoa(credentialVersion))
+	return result
 }
 
 func (s *Service) adminTokenLocalImpact(w http.ResponseWriter, r *http.Request, action string, actionParameters []string, load func(ImpactPrecheckRepository, uuid.UUID) (ImpactLocalEvidence, error)) {
@@ -864,7 +916,8 @@ func (r *PostgresRepository) tokenAccountScopedImpact(ctx context.Context, accou
 	}
 	evidence.ObservedAt = evidence.ObservedAt.UTC()
 	var updated time.Time
-	err = tx.QueryRow(ctx, `SELECT status,updated_at FROM token_accounts WHERE id=$1 AND management_mode='PLATFORM'`, accountID).Scan(&evidence.CurrentStatus, &updated)
+	var accountVersion int64
+	err = tx.QueryRow(ctx, `SELECT status,updated_at,management_version FROM token_accounts WHERE id=$1 AND management_mode='PLATFORM'`, accountID).Scan(&evidence.CurrentStatus, &updated, &accountVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ImpactLocalEvidence{}, ErrNotFound
 	}
@@ -874,6 +927,7 @@ func (r *PostgresRepository) tokenAccountScopedImpact(ctx context.Context, accou
 	evidence.ResourceType, evidence.ResourceID = "TOKEN_ACCOUNT", accountID.String()
 	updated = updated.UTC()
 	evidence.CurrentVersion.AccountUpdatedAt = &updated
+	evidence.CurrentVersion.AccountVersion = &accountVersion
 	if model != "" && routeAction == "UPSERT" {
 		var published bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_catalog_entries entry JOIN model_identities identity ON identity.id=entry.model_id JOIN protocol_definitions protocol ON protocol.id=entry.protocol_definition_id WHERE entry.catalog_version=(SELECT max(version) FROM model_catalog_versions) AND entry.lifecycle_status='PUBLISHED' AND entry.source_available AND (entry.model_id::text=$1 OR identity.upstream_model_ref=$1) AND protocol.protocol_code=$2 AND protocol.status='PUBLISHED')`, model, routeProtocol).Scan(&published); err != nil {
@@ -919,7 +973,7 @@ func (r *PostgresRepository) tokenAccountScopedImpact(ctx context.Context, accou
 	}
 	if credentialID != nil {
 		var version int
-		err = tx.QueryRow(ctx, `SELECT version,status FROM provider_credentials WHERE token_account_id=$1 AND id=$2`, accountID, *credentialID).Scan(&version, &evidence.CurrentStatus)
+		err = tx.QueryRow(ctx, `SELECT version,status,fingerprint FROM provider_credentials WHERE token_account_id=$1 AND id=$2`, accountID, *credentialID).Scan(&version, &evidence.CurrentStatus, &evidence.CredentialFingerprint)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ImpactLocalEvidence{}, ErrNotFound
 		}
@@ -952,6 +1006,27 @@ func (r *PostgresRepository) tokenAccountScopedImpact(ctx context.Context, accou
 	evidence.Dependencies.AlternativeCredentials, evidence.Dependencies.AlternativeAccounts, err = alternativeCoverageCounts(ctx, tx, accountID, model, credentialID)
 	if err != nil {
 		return ImpactLocalEvidence{}, err
+	}
+	if credentialID != nil {
+		var replacementVersion *int
+		err = tx.QueryRow(ctx, `WITH serving AS `+canServeCoverageRelation+`,`+impactAffectedCoverageCTE+`,`+alternativeCredentialCandidatesCTE+`
+			SELECT max(credential_version) FROM alternative_credentials`, accountID, model, credentialID).Scan(&replacementVersion)
+		if err != nil {
+			return ImpactLocalEvidence{}, err
+		}
+		evidence.ReplacementCredentialVersion = replacementVersion
+		evidence.RouteSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,model_id,protocol_version_id,route_version,route_generation,reference_status,health_status)::text FROM routing_policies WHERE token_account_id=$1 ORDER BY id`, accountID)
+		if err != nil {
+			return ImpactLocalEvidence{}, err
+		}
+		evidence.ProvisioningSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,protocol_version_id)::text FROM route_provisionings WHERE active_token_account_id=$1 AND active_credential_id=$2 AND lease_until>transaction_timestamp() ORDER BY id`, accountID, *credentialID)
+		if err != nil {
+			return ImpactLocalEvidence{}, err
+		}
+		evidence.InflightSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,session_id,status,execution_status,execution_version)::text FROM usage_requests WHERE token_account_id=$1 AND credential_id=$2 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, accountID, *credentialID)
+		if err != nil {
+			return ImpactLocalEvidence{}, err
+		}
 	}
 	if model != "" && routeAction == "DELETE" {
 		evidence.Dependencies.AffectedCoverageTuples, evidence.Dependencies.RemainingReadyCoverage, evidence.Dependencies.CoverageGaps, err = routeDeleteCoverage(ctx, tx, accountID, model, routeProtocol)

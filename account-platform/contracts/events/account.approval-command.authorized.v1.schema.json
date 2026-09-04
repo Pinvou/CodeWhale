@@ -49,6 +49,16 @@
               "financial_snapshot": { "$ref": "#/$defs/tokenFinancialSnapshot" }
             }
           }
+        },
+        {
+          "if": { "properties": { "command_type": { "const": "TOKEN_CREDENTIAL_REVOKE" } }, "required": ["command_type"] },
+          "then": {
+            "required": ["financial_snapshot"],
+            "properties": {
+              "critical_resource_versions": { "$ref": "#/$defs/tokenCredentialRevokeSnapshot" },
+              "financial_snapshot": { "$ref": "#/$defs/emptyFinancialSnapshot" }
+            }
+          }
         }
       ]
     }
@@ -89,6 +99,25 @@
         "policy_version": { "const": 2 }
       }
     },
+    "tokenCredentialRevokeSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_account_id", "token_account_version", "credential_id", "credential_version", "credential_status", "credential_fingerprint", "active_route_set_fingerprint", "provisioning_lease_set_fingerprint", "inflight_request_set_fingerprint", "replacement_credential_version", "policy_version"],
+      "properties": {
+        "token_account_id": { "type": "string", "format": "uuid" },
+        "token_account_version": { "type": "integer", "minimum": 1 },
+        "credential_id": { "type": "string", "format": "uuid" },
+        "credential_version": { "type": "integer", "minimum": 1 },
+        "credential_status": { "enum": ["PENDING", "CANDIDATE", "ACTIVE", "RETIRING", "RETIRED", "REVOKED"] },
+        "credential_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "active_route_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "provisioning_lease_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "inflight_request_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "replacement_credential_version": { "type": ["integer", "null"], "minimum": 1 },
+        "policy_version": { "const": 1 }
+      }
+    },
+    "emptyFinancialSnapshot": { "type": "object", "additionalProperties": false, "maxProperties": 0 },
     "tokenFinancialSnapshot": {
       "type": "object",
       "additionalProperties": false,

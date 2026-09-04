@@ -29,7 +29,7 @@ type ApprovalSnapshotProjection struct {
 	FinancialSnapshot        json.RawMessage `json:"financial_snapshot"`
 	PrecheckFingerprint      string          `json:"precheck_fingerprint"`
 	TokenObservedAt          time.Time       `json:"token_observed_at"`
-	BillingObservedAt        time.Time       `json:"billing_observed_at"`
+	BillingObservedAt        *time.Time      `json:"billing_observed_at,omitempty"`
 }
 
 func (s *Service) internalApprovalCommandPrecheck(w http.ResponseWriter, r *http.Request) {
@@ -150,10 +150,35 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 			result.Blockers = append(result.Blockers, "INFLIGHT_REQUESTS_PRESENT")
 		}
 		finalizeImpactResult(&result, "source_catalog_version="+strings.TrimSpace(request.TargetResourceID))
+	case "TOKEN_CREDENTIAL_REVOKE":
+		if request.TargetResourceType != "PROVIDER_CREDENTIAL" {
+			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
+		}
+		credentialID, err := uuid.Parse(request.TargetResourceID)
+		if err != nil || credentialID == uuid.Nil {
+			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
+		}
+		var command struct {
+			TokenAccountID         uuid.UUID `json:"token_account_id"`
+			ExpectedAccountVersion int64     `json:"expected_account_version"`
+			CredentialID           uuid.UUID `json:"credential_id"`
+			CredentialVersion      int       `json:"credential_version"`
+		}
+		if decodeCommand(request.NormalizedCommand, &command) != nil || command.TokenAccountID == uuid.Nil || command.ExpectedAccountVersion < 1 || command.CredentialID != credentialID || command.CredentialVersion < 1 {
+			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
+		}
+		evidence, err := repository.TokenCredentialImpact(ctx, command.TokenAccountID, &credentialID)
+		if err != nil {
+			return ApprovalSnapshotProjection{}, err
+		}
+		result = credentialRevokeImpactResult(command.TokenAccountID, credentialID, evidence)
+		if evidence.CurrentVersion.AccountVersion == nil || *evidence.CurrentVersion.AccountVersion != command.ExpectedAccountVersion || evidence.CurrentVersion.CredentialVersion == nil || *evidence.CurrentVersion.CredentialVersion != command.CredentialVersion {
+			result.Blockers = append(result.Blockers, "RESOURCE_VERSION_CHANGED")
+		}
 	default:
 		return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
 	}
-	if len(result.Blockers) > 0 || result.BillingObservedAt == nil || !validImpactFingerprint(result.PrecheckFingerprint) {
+	if len(result.Blockers) > 0 || request.CommandType != "TOKEN_CREDENTIAL_REVOKE" && result.BillingObservedAt == nil || !validImpactFingerprint(result.PrecheckFingerprint) {
 		return ApprovalSnapshotProjection{}, ErrCatalogVersionConflict
 	}
 	critical, err := json.Marshal(result.CriticalResourceVersions)
@@ -164,5 +189,5 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 	if err != nil {
 		return ApprovalSnapshotProjection{}, err
 	}
-	return ApprovalSnapshotProjection{CommandType: request.CommandType, TargetResourceType: request.TargetResourceType, TargetResourceID: request.TargetResourceID, CriticalResourceVersions: critical, FinancialSnapshot: financial, PrecheckFingerprint: result.PrecheckFingerprint, TokenObservedAt: result.TokenObservedAt, BillingObservedAt: result.BillingObservedAt.UTC()}, nil
+	return ApprovalSnapshotProjection{CommandType: request.CommandType, TargetResourceType: request.TargetResourceType, TargetResourceID: request.TargetResourceID, CriticalResourceVersions: critical, FinancialSnapshot: financial, PrecheckFingerprint: result.PrecheckFingerprint, TokenObservedAt: result.TokenObservedAt, BillingObservedAt: result.BillingObservedAt}, nil
 }

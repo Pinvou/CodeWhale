@@ -60,6 +60,7 @@ var directCommandPrecheckTypes = map[string]string{
 	"TOKEN_MODEL_CATALOG_SYNC":         "MODEL_CATALOG",
 	"TOKEN_ROUTE_PROVISIONING_REPAIR":  "PROVISIONING",
 	"TOKEN_USAGE_RECONCILIATION_RETRY": "USAGE_REQUEST",
+	"TOKEN_CREDENTIAL_VALIDATE":        "PROVIDER_CREDENTIAL",
 }
 
 func (s *Service) adminTokenCommandPrecheck(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +255,14 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 	case "TOKEN_ROUTE_PROVISIONING_REPAIR", "TOKEN_USAGE_RECONCILIATION_RETRY":
 		_, err := parseRuntimeGovernedCommand(commandType, "", raw)
 		return err
+	case "TOKEN_CREDENTIAL_VALIDATE":
+		var command struct {
+			TokenAccountID uuid.UUID `json:"token_account_id"`
+			CredentialID   uuid.UUID `json:"credential_id"`
+		}
+		if decodeCommand(raw, &command) != nil || command.TokenAccountID == uuid.Nil || command.CredentialID == uuid.Nil {
+			return ErrTokenCommandInvalid
+		}
 	default:
 		return ErrTokenCommandInvalid
 	}
@@ -268,6 +277,16 @@ func validateOwnedCommandPrecheckTarget(commandType, targetID string, raw json.R
 	if commandType == "TOKEN_ROUTE_PROVISIONING_REPAIR" || commandType == "TOKEN_USAGE_RECONCILIATION_RETRY" {
 		_, err := parseRuntimeGovernedCommand(commandType, targetID, raw)
 		return err
+	}
+	if commandType == "TOKEN_CREDENTIAL_VALIDATE" {
+		var command struct {
+			TokenAccountID uuid.UUID `json:"token_account_id"`
+			CredentialID   uuid.UUID `json:"credential_id"`
+		}
+		id, err := uuid.Parse(strings.TrimSpace(targetID))
+		if err != nil || decodeCommand(raw, &command) != nil || command.CredentialID != id {
+			return ErrTokenCommandInvalid
+		}
 	}
 	if commandType != "TOKEN_MODEL_PUBLISH" {
 		return nil
@@ -693,6 +712,39 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 			"provisioning_set_fingerprint=" + provisioningSetFingerprint,
 		}, unitCodes...)
 		return commandPrecheckSnapshot{Status: "DRAFT", ExpectedVersions: expectedVersions, EvidenceValues: evidenceValues, PriceDimensions: dimensions, Blockers: blockers}, nil
+	case "TOKEN_CREDENTIAL_VALIDATE":
+		credentialID, err := uuid.Parse(targetID)
+		if err != nil || credentialID == uuid.Nil {
+			return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
+		}
+		var command struct {
+			TokenAccountID uuid.UUID `json:"token_account_id"`
+			CredentialID   uuid.UUID `json:"credential_id"`
+		}
+		if decodeCommand(raw, &command) != nil || command.CredentialID != credentialID || command.TokenAccountID == uuid.Nil {
+			return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
+		}
+		var accountVersion int64
+		var version int
+		var status, validationStatus, fingerprint string
+		err = tx.QueryRow(ctx, `SELECT account.management_version,credential.version,credential.status,credential.validation_status,credential.fingerprint FROM token_accounts account JOIN provider_credentials credential ON credential.token_account_id=account.id WHERE account.id=$1 AND account.management_mode='PLATFORM' AND credential.id=$2`, command.TokenAccountID, credentialID).Scan(&accountVersion, &version, &status, &validationStatus, &fingerprint)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		}
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		requestHash := sha256.Sum256([]byte(command.TokenAccountID.String() + "\x00" + credentialID.String() + "\x00" + strconv.Itoa(version)))
+		evidenceHash := sha256.Sum256([]byte(strconv.FormatInt(accountVersion, 10) + "\x00" + strconv.Itoa(version) + "\x00" + status + "\x00" + validationStatus + "\x00" + fingerprint))
+		blockers := []string{}
+		if status != "ACTIVE" {
+			blockers = append(blockers, "CREDENTIAL_NOT_ACTIVE")
+		}
+		return commandPrecheckSnapshot{Status: status, ExpectedVersions: map[string]any{
+			"token_account_id": command.TokenAccountID, "expected_account_version": accountVersion,
+			"credential_id": credentialID, "credential_version": version,
+			"precheck_fingerprint": hex.EncodeToString(evidenceHash[:]), "request_fingerprint": hex.EncodeToString(requestHash[:]),
+		}, EvidenceValues: []string{command.TokenAccountID.String(), credentialID.String(), strconv.FormatInt(accountVersion, 10), strconv.Itoa(version), status, validationStatus, fingerprint}, Blockers: blockers}, nil
 	case "TOKEN_ROUTE_PROVISIONING_REPAIR":
 		command, err := parseRuntimeGovernedCommand(commandType, targetID, raw)
 		if err != nil {

@@ -631,6 +631,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusForbidden, "ACCOUNT_FORBIDDEN", "the account action is not permitted"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
+	case errors.Is(err, ErrInvalidApprovalInput):
+		status, code, message = http.StatusBadRequest, "INVALID_APPROVAL_REQUEST", "the approval request is invalid"
 	case errors.Is(err, ErrRecentAuthenticationRequired):
 		status, code, message = http.StatusUnauthorized, "RECENT_AUTHENTICATION_REQUIRED", "authentication within the last 15 minutes is required"
 	case errors.Is(err, ErrAuditExportQuota):

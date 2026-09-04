@@ -56,6 +56,10 @@ test('every management write is classified and financial facts use the independe
         assert.match(line, /requireNewTokenCommandGovernanceActive\(\).*adminTokenCommandPrecheck/, `unguarded dynamic precheck: ${line.trim()}`);
         continue;
       }
+      if (/admin\.POST\("\/credential-results\/:result_ref\/revoke-window"/.test(line)) {
+        assert.match(line, /requireCredentialIsolationEnabled\(\).*adminRevokeCredentialLaunch/, `unguarded one-time credential window abort: ${line.trim()}`);
+        continue;
+      }
       assert.match(line, /approvalpolicy\.(?:Require|RequireLegacyTokenDirect)\(/, `unclassified management write: ${line.trim()}`);
     }
   }
