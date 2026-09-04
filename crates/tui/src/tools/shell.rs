@@ -3405,7 +3405,7 @@ impl ToolSpec for BashTool {
         if self.read_only {
             "Inspect the workspace with the bounded read-only command subset. Commands run directly as argv, never through a shell; only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
-            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" polls a background task; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
+            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" polls a background task; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Output is truncated per stream (~30KB: head/tail kept, middle summarized; see metadata flags). Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
         }
     }
 
@@ -3427,7 +3427,7 @@ impl ToolSpec for BashTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (capped at 600000), action=wait 30000, action=interact 1000. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases."
+                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (capped at 600000), action=wait 30000, action=interact 1000. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases. Applies to the foreground wait; background=true tasks are not bounded by it — stop them with action=cancel."
                 },
                 "background": {
                     "type": "boolean",

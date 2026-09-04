@@ -218,7 +218,7 @@ impl GoalState {
     ) -> Result<(), &'static str> {
         if self.objective.is_some() && self.status != Some(GoalStatus::Complete) {
             return Err(
-                "An unfinished goal already exists. Complete or clear it before creating another.",
+                "An unfinished goal already exists. Complete it before creating another (blocked/paused goals are cleared by the user/host).",
             );
         }
         self.objective = Some(objective);
@@ -657,7 +657,7 @@ impl ToolSpec for CreateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create the current runtime goal. Use this only when the user explicitly asks to pursue a persistent objective and no unfinished goal exists; complete or clear an unfinished goal before creating another."
+        "Create the current runtime goal. Use this only when the user explicitly asks to pursue a persistent objective and no unfinished goal exists; complete it before creating another (blocked/paused goals are cleared by the user/host). Root agent only; sub-agents inspect with get_goal."
     }
 
     fn input_schema(&self) -> Value {
@@ -777,7 +777,7 @@ impl ToolSpec for UpdateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input."
+        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input. Root agent only; sub-agents inspect with get_goal."
     }
 
     fn input_schema(&self) -> Value {
@@ -818,7 +818,7 @@ impl ToolSpec for UpdateGoalTool {
                         "gaps": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Concrete remaining gaps. Required for critical not_achieved reviews; order and duplicate wording do not affect the stall fingerprint."
+                            "description": "Concrete remaining gaps. Required for critical not_achieved reviews; order and duplicate wording do not affect the stall fingerprint. Three identical critical gap sets auto-pause the goal (no_progress)."
                         }
                     },
                     "required": ["status", "check", "summary"],

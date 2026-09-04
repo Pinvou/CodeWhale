@@ -7132,7 +7132,7 @@ impl ToolSpec for AgentTool {
             "For parallel write work use worktree=true so children do not collide in the parent checkout. ",
             "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait blocks without changing child state, and until=\"all\" joins a whole fan-out in one call. ",
-            "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",
+            "The narrow agents/list, agents/message, agents/followup, agents/interrupt, agents/coordinate, and agents/wait tools expose the same semantics directly; there is no second transport. ",
             "In Operate, background workers are the default for independent or long work; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
             "Legacy action=status|peek|cancel remain for compatibility."
         )
@@ -7158,7 +7158,7 @@ impl ToolSpec for AgentTool {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "minimum": 5,
+                    "minimum": 1,
                     "maximum": 120,
                     "description": "For action=wait: maximum seconds to block (default 30). Prefer ending the turn and staying reachable — results arrive automatically as <codewhale:subagent.done> sentinels — only wait when you must join before continuing."
                 },
@@ -7196,6 +7196,16 @@ impl ToolSpec for AgentTool {
                     "type": "string",
                     "enum": FLEET_ROLE_SCHEMA_VALUES,
                     "description": SUBAGENT_TYPE_DESCRIPTION
+                },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "For type=custom: exact tool names this child may call — the child gets exactly the tools listed (advanced)."
+                },
+                "disallowed_tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Tool names removed from this child's toolset (deny list) (advanced)."
                 },
                 "profile": {
                     "type": "string",
@@ -13901,8 +13911,7 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
     "Use `File` for bounded reads and `Bash` action `run` for the advertised direct-argv evidence subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, unknown flags, and shell control actions are unavailable.\n",
     "Use your private `todo_write` list as editable working notes when useful; it is agent-owned state, not permission to write project files. Those tool calls remain in the complete transcript artifact returned to the parent.\n",
     "Honor QUESTION, SCOPE, ALREADY_KNOWN, and STOP_CONDITION. Do not repeat ALREADY_KNOWN work unless evidence contradicts it; do not broaden once QUESTION is answered.\n",
-    "Your value is compressed reconnaissance: cite `path:line-range` for each finding and stop once evidence is sufficient. Return partial findings if the next step would be speculative or duplicative.\n",
-    "CHANGES will almost always be \"None.\" for a scout.\n\n"
+    "Your value is compressed reconnaissance: cite `path:line-range` for each finding and stop once evidence is sufficient. Return partial findings if the next step would be speculative or duplicative.\n\n"
 );
 
 const PLAN_AGENT_INTRO: &str = concat!(

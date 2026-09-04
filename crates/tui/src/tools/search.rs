@@ -56,7 +56,7 @@ impl ToolSpec for GrepFilesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `exec_shell` — pure-Rust, faster, and skips common non-code directories (node_modules, .git, target, ...) by default. Returns matching lines with context (default: 2 lines before/after each match)."
+        "Search for a regex pattern in workspace files. Use this instead of `grep -r`, `rg`, or `find ... -exec grep` in `Bash` — pure-Rust, faster, and skips common non-code directories (node_modules, .git, target, ...) by default; it does not apply .gitignore (built-in default exclusions only). Returns matching lines with context (default: 2 lines before/after each match)."
     }
 
     fn input_schema(&self) -> Value {
@@ -83,7 +83,7 @@ impl ToolSpec for GrepFilesTool {
                 },
                 "context_lines": {
                     "type": "integer",
-                    "description": "Number of context lines before and after each match (default: 2)"
+                    "description": "Number of context lines before and after each match (default: 2). context_lines=1 returns single strings instead of arrays."
                 },
                 "case_insensitive": {
                     "type": "boolean",

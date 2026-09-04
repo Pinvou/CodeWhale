@@ -112,7 +112,8 @@ Only output English for:\n\
 - Technical terms that lack a standard translation in {target_language}\n\
 - Code blocks the user explicitly requests in English\n\n\
 This is a hard display requirement: the user does not read English, \
-so any English prose in your response will block their decision-making."
+so any English prose in your response will block their decision-making. \
+This overrides the ## Language mirroring rule for this session."
     )
 }
 
@@ -455,6 +456,54 @@ pub fn set_base_prompt_override(s: String) -> Result<(), String> {
     set_prompt_override(&BASE_PROMPT_OVERRIDE, s)
 }
 
+/// Replace the Simplified Chinese locale preamble. First call wins; later
+/// calls return the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_zh_hans_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_ZH_HANS_OVERRIDE, s)
+}
+
+/// Replace the Japanese locale preamble. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_ja_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_JA_OVERRIDE, s)
+}
+
+/// Replace the Brazilian Portuguese locale preamble. First call wins; later
+/// calls return the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_pt_br_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_PT_BR_OVERRIDE, s)
+}
+
+/// Replace the Vietnamese locale preamble. First call wins; later calls
+/// return the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_vi_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_VI_OVERRIDE, s)
+}
+
+/// Replace the Simplified Chinese locale closer. First call wins; later calls
+/// return the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_zh_hans_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_ZH_HANS_OVERRIDE, s)
+}
+
+/// Replace the Japanese locale closer. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_ja_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_JA_OVERRIDE, s)
+}
+
+/// Replace the Brazilian Portuguese locale closer. First call wins; later
+/// calls return the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_pt_br_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_PT_BR_OVERRIDE, s)
+}
+
+/// Replace the Vietnamese locale closer. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_vi_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, s)
+}
+
 // ── Config-directory prompt overrides (issue #3638) ──
 // Bridge the embedder override hooks above to a user-facing source: an
 // optional file in the Codewhale config directory. This lets users repurpose
@@ -703,6 +752,14 @@ fn effective_locale_closer_vi() -> &'static str {
 
 pub(crate) fn effective_authority_recap() -> &'static str {
     effective_prompt_override(&AUTHORITY_RECAP_OVERRIDE, AUTHORITY_RECAP)
+}
+
+/// Whether the authority-recap trailer is appended after WorldState. When an
+/// embedder composer owns the static prompt prefix, the bundled
+/// `### Whose word wins` section the recap points at no longer exists, so
+/// appending the recap would leave a dangling cross-reference.
+fn authority_recap_trailer_appended(composer_installed: bool) -> bool {
+    !composer_installed
 }
 
 /// Optional locale-native reinforcement preamble prepended to the system
@@ -1265,11 +1322,16 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     .to_system_blocks();
 
     // Trailers keep recency bias after WorldState: authority, then locale.
-    blocks.push(SystemBlock {
-        block_type: "text".to_string(),
-        text: effective_authority_recap().trim().to_string(),
-        cache_control: None,
-    });
+    // When an embedder composer owns the static prefix, the bundled
+    // `### Whose word wins` section the recap points at no longer exists,
+    // so appending the recap would leave a dangling cross-reference.
+    if authority_recap_trailer_appended(static_prompt_composer_installed()) {
+        blocks.push(SystemBlock {
+            block_type: "text".to_string(),
+            text: effective_authority_recap().trim().to_string(),
+            cache_control: None,
+        });
+    }
     if let Some(closer) = locale_reinforcement_closer(session_context.locale_tag) {
         blocks.push(SystemBlock {
             block_type: "text".to_string(),
@@ -1364,6 +1426,15 @@ mod tests {
     /// Discriminator unique to the injected relay block (not present in the
     /// agent prompt's own discussion of the convention).
     const HANDOFF_BLOCK_MARKER: &str = "left a relay artifact at `.codewhale/handoff.md`";
+
+    /// The recap points at the bundled `### Whose word wins` section; an
+    /// embedder composer that owns the static prefix retires that section,
+    /// so the trailer must be skipped instead of dangling in the blocks.
+    #[test]
+    fn authority_recap_trailer_skipped_when_static_composer_owns_prefix() {
+        assert!(authority_recap_trailer_appended(false));
+        assert!(!authority_recap_trailer_appended(true));
+    }
 
     // Config-directory prompt override resolution (#3638). These exercise the
     // pure file resolver only; the global install path is intentionally not

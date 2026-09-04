@@ -138,10 +138,10 @@ impl ToolSpec for GithubTool {
                 "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
             }
             Some("close_issue") => {
-                "Close a GitHub issue only when structured acceptance evidence is present and approved. For pull requests use github_close_pr; do not call PRs issues in user-facing output. Never close merely because the agent is stopping."
+                "Close a GitHub issue only when structured acceptance evidence is present and approved. Rejected when the worktree is dirty unless allow_dirty=true. For pull requests use github_close_pr; do not call PRs issues in user-facing output. Never close merely because the agent is stopping."
             }
             Some("close_pr") => {
-                "Close a GitHub pull request only when structured acceptance evidence is present and approved. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
+                "Close a GitHub pull request only when structured acceptance evidence is present and approved. Rejected when the worktree is dirty unless allow_dirty=true. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
             }
             _ if self.read_only => {
                 "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\"; bodies/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
