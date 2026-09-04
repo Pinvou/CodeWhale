@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，122 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，9 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，122 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，8 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，1 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -156,7 +156,7 @@
 | APT-130 | Provisioning 详情、尝试历史与用量核对异常闭环 | UI-51 | APT-121, APT-123, APT-127 | CODE | DONE |
 | APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | DONE |
 | APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | DONE |
-| APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | PENDING |
+| APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | IN_REVIEW |
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | PENDING |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | PENDING |
 | APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | PENDING |
@@ -359,10 +359,12 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-133 Token Account 详情与隔离凭据生命周期
 
+> 实现状态（2026-09-05）：`IN_REVIEW`。已完成五页签独立详情、安全分页投影、隔离 credential origin、一次性新增/轮换、受治理现场验证与撤销审批接线；撤销申请消费 Token 权威 11 字段关键资源快照与空 financial snapshot，Account 在创建、提交重验、授权事件及执行租约中保持同一冻结证据，Portal 与浏览器均不接触凭据秘密。旧 v1 内联详情继续仅作兼容，新页面只消费 v2 安全摘要及独立分页资源。PRE_ACTIVATION 未切换，APT-134+ 与 APT-138 不在本任务激活。身份 B 首轮代码复审提出七项整改；其中浏览器实测确认 `noreferrer` 会令跨 origin 顶层 POST 的 `Origin` 退化为 `null`，本轮先按 B 裁决统一为导航前 Portal HTTP 响应头 `Referrer-Policy: origin`、`target=_blank + rel=noopener` 且无 `noreferrer`，以及 `/launch` 精确 Origin 门禁和导航后首个 303 起 COOP/no-referrer/no-store；Referrer Policy 仅限制 Referer，不生成或认证 Origin。文档复审通过后再继续代码收口。复审通过前不提交、推送或部署。
+
 - **目标/范围**：主目标 `UI-54`、`ADM-58`。修改 `migrations/token/000026_*`、`internal/token` 的 credential launch/session/result 与脱敏验证/撤销适配、独立 `cmd/token-credential-portal`（及其最小服务包）、Portal Token 详情五页签“概览、凭据、路由、Provisioning、审计”和安全自动化；本任务唯一拥有凭据 launch/session schema。TLS、DNS、反向代理、环境白名单与生产等价探针证据统一归 APT-137，本任务为 `CODE`。
-- **安全合同**：完整实现专项设计 6.1～6.3，不接受缩减替代：每环境唯一固定 credential origin；Portal CSP `form-action` 精确放行；仅新增/轮换使用真实用户手势触发的 `target=_blank` + `rel="noopener noreferrer"` 顶层 POST。launch 仅在 POST body，原子消费后 303 到固定 `/session`，URL、Referer、历史、存储、window.name、遥测和日志均无 ID/Secret；10s 内无一次性 heartbeat 时原子撤销并返回 `CREDENTIAL_WINDOW_BLOCKED`，绝不降级 query/fragment/path/GET/同页/iframe。现场验证为 Portal→Token direct 脱敏命令；撤销为 Portal→Account 的 APT-123 审批命令且不进入隔离页。
+- **安全合同**：完整实现专项设计 6.1～6.3，不接受缩减替代：每环境唯一固定 credential origin；Portal CSP `form-action` 精确放行。导航前由承载表单的 Portal HTTP 响应设置 `Referrer-Policy: origin`，将实际 Referer 限制为无 path/query/fragment 的 Portal origin；该响应头仅约束 Referer，不生成或认证 `Origin`。仅新增/轮换使用真实用户手势触发的 `target=_blank` + `rel=noopener` 顶层 POST，并移除会使 Chromium 导航 POST 产生 `Origin:null` 的 `noreferrer`。`/launch` 独立精确校验浏览器发送的 Origin，仅在其匹配当前 Portal 时消费，缺失/null/伪造/跨环境请求零消费；launch 仅在 POST body。导航后原子消费的首个响应为 303 `Location: /session`，从该响应起固定 COOP same-origin/no-referrer/no-store，最终 opener 为空。URL、Referer、History、Performance、存储、window.name、遥测和日志均无 launch/result ID 或 Secret；10s 内无一次性 heartbeat 时原子撤销并返回 `CREDENTIAL_WINDOW_BLOCKED`，绝不降级 query/fragment/path/GET/同页/iframe。现场验证为 Portal→Token direct 脱敏命令；撤销为 Portal→Account 的 APT-123 审批命令且不进入隔离页。
 - **隔离会话/回滚**：专用 OIDC audience、Authorization Code+PKCE、`prompt=login&max_age=900`，强校验 state、nonce、PKCE、auth_time、subject、CSRF Origin，并绑定环境、账户、动作、槽位、版本、浏览器和幂等摘要；launch 5 分钟有效、单次消费、最多三次尝试。独立 credential gate 或固定 origin 配置缺失时失败关闭；回滚先停新 launch、原子撤销全部未完成 session，再关闭隔离服务；down 仅在无活动/审计引用后删除本迁移对象。
-- **验收**：本任务独立完成 `TOKEN_CREDENTIAL_ENROLL`、`TOKEN_CREDENTIAL_ROTATE`、`TOKEN_CREDENTIAL_VALIDATE`、`TOKEN_CREDENTIAL_REVOKE` 四项领域命令验收；覆盖五页签独立 URL/cursor、专用 audience、prompt/max_age、state/nonce/auth_time/subject、PKCE、CSRF Origin、浏览器绑定、5min/三次、原子消费/撤销、10s heartbeat、稳定错误、303 零泄漏、`window.opener === null`、刷新不重放、Referer/历史/Performance/代理及应用日志扫描、弹窗阻断无 query 降级、换浏览器/换主体/重放/超时失败关闭、验证脱敏、轮换状态机与撤销审批。十九项总一致性留给 APT-138；N/N-1 和环境探针由 APT-137 验收。
+- **验收**：本任务独立完成 `TOKEN_CREDENTIAL_ENROLL`、`TOKEN_CREDENTIAL_ROTATE`、`TOKEN_CREDENTIAL_VALIDATE`、`TOKEN_CREDENTIAL_REVOKE` 四项领域命令验收；覆盖五页签独立 URL/cursor、专用 audience、prompt/max_age、state/nonce/auth_time/subject、PKCE、CSRF Origin、浏览器绑定、5min/三次、原子消费/撤销、10s heartbeat、稳定错误、验证脱敏、轮换状态机与撤销审批。双 origin Chromium 必须逐项证明：Portal 初始 HTTP 响应为 `Referrer-Policy: origin` 且实际 Referer 至多为无 path/query/fragment 的 Portal origin，精确 Origin 成功；缺失/null/伪造/跨环境 Origin 零消费；body-only launch；303 `Location: /session`；落地后 opener 为空；刷新不重放；Referer/History/Performance/代理和应用日志无引用；弹窗阻断撤销且无降级；换浏览器/主体/重放失败关闭。十九项总一致性留给 APT-138；N/N-1、TLS/代理及生产等价 origin/heartbeat 探针由 APT-137 验收。
 - **不包含**：不重建 KMS/Secret 底座、不允许 Portal 接触 Secret、不改三项审批策略值、不实现模型详情或生命周期。
 
 ### APT-134 模型生命周期计划与依赖分析
@@ -398,7 +400,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 - **目标/范围**：主目标 `UI-58`。仅修改 Account/Token/Portal 分级发布配置、`deploy/compose`、`deploy/helm`、OpenAPI/Portal 契约门禁、运维 runbook 和发布验证脚本；复用 APT-127 已交付的一期 IA 基础开关，汇总 APT-127～APT-136，并唯一负责跨版本分级发布与生产激活/回滚编排，以及 credential origin 的 DNS/TLS、Portal/credential CSP、固定环境白名单、反向代理/WAF 日志抑制和生产等价健康探针证据，但不夹带功能修复。
 - **发布/兼容/回滚**：冻结一期 IA/列表/协议公式/选择器/运行闭环/结构化操作与二期详情/凭据/生命周期/价格/概览的独立 gate 和依赖顺序；服务端、Portal、cursor envelope、审批事件和隔离凭据入口支持 N/N-1。`section=tokens` 至少保留 90 天且跨两个稳定版本规范化；UI-47 开启后 supersede UI-28/UI-31 canonical。回滚顺序为先停写/worker/launch，再关二期、一期和代理路由；活动 cursor 返回 410，进行中审批/计划/session 按各任务合同收敛。
-- **验收**：逐 gate on/off、混合 N/N-1、滚动升级/回滚、旧链接/书签/popstate、九源 cursor 独立、CSP/origin、DNS/TLS/代理/WAF、10s heartbeat 探针、DB↔registry 逐字段一致、`executableApprovalCommands` 保留既有项且 Token 增量恰三项、容量及 `10→12→14`/`3→5→7`/`5→7→9` 绝对 deadline 链/告警、三语与安全扫描全部成为发布门禁，并记录生产等价环境证据。
+- **验收**：逐 gate on/off、混合 N/N-1、滚动升级/回滚、旧链接/书签/popstate、九源 cursor 独立、CSP/origin、DNS/TLS/代理/WAF、10s heartbeat 探针、DB↔registry 逐字段一致、`executableApprovalCommands` 保留既有项且 Token 增量恰三项、容量及 `10→12→14`/`3→5→7`/`5→7→9` 绝对 deadline 链/告警、三语与安全扫描全部成为发布门禁，并记录生产等价环境证据。credential 生产探针必须以真实双 origin 浏览器覆盖 APT-133 的九项合同，特别验证导航前 Portal HTTP 响应头 `Referrer-Policy: origin`、实际 Referer 至多为无 path/query/fragment 的 Portal origin、移除 `noreferrer` 后浏览器发送精确 Portal Origin、null/缺失/伪造零消费，以及导航后首个 303 起 COOP same-origin/no-referrer/no-store 与最终 opener 隔离；不得用单 origin mock 代替。
 - **不包含**：不新增业务 API/schema/权限/页面，不改审批分类或数据事实；任何验收失败回到其唯一所属 APT 修复后重新审核。
 
 ## 4. 独立提交验收模板

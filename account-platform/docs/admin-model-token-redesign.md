@@ -214,27 +214,28 @@ Portal 先从 Token 创建 5 分钟、单次消费、最多 3 次尝试的 launc
 <form method="post"
       action="https://credentials.account.pinvou.com/launch"
       target="_blank"
-      rel="noopener noreferrer">
+      rel="noopener">
   <input type="hidden" name="launch_id" value="...">
 </form>
 ```
 
-Production/UAT 的 action 必须来自编译/部署白名单，不接受 API 返回任意 URL。表单只传 `launch_id`，不传账户、owner、Secret 或 Provider 信息；`launch_id` 只存在 POST body，禁止 query、fragment、path、cookie、local/session storage、window.name、Referer、遥测和日志。表单必须由真实用户手势直接提交，并以 `target=_blank` + `rel="noopener noreferrer"`（或经安全测试证明等价的 opener 隔离机制）保证隔离页没有 opener。
+Production/UAT 的 action 必须来自编译/部署白名单，不接受 API 返回任意 URL。表单只传 `launch_id`，不传账户、owner、Secret 或 Provider 信息；`launch_id` 只存在 POST body，禁止 query、fragment、path、cookie、local/session storage、window.name、Referer、遥测和日志。导航前阶段由承载表单的 Portal HTTP 响应设置 `Referrer-Policy: origin`，使 Chromium 发出的 Referer 至多为不带 path、query、fragment 的 Portal origin；该策略只约束 Referer，既不生成也不认证 `Origin`。表单必须由真实用户手势直接提交，并固定使用 `target=_blank` + `rel="noopener"`；必须移除 `noreferrer`，以免 Chromium 将跨 origin 顶层 POST 的正常 `Origin` 降为 `null`。credential origin 仍必须独立、精确验证浏览器发送的 `Origin`，不能把 Referer 当作授权证据。导航后阶段从 credential origin 的首个 303 开始启用 `COOP: same-origin`、`Referrer-Policy: no-referrer` 与 `Cache-Control: no-store`；最终 opener 隔离由 `rel=noopener` 与 COOP 双重保证。
 
-credential origin 的 `/launch` 只接受 `application/x-www-form-urlencoded` POST，验证并原子消费 launch 后返回：
+credential origin 的 `/launch` 只接受 `application/x-www-form-urlencoded` POST，并要求 `Origin` 与当前环境唯一 Portal origin 精确相等；缺失、`null`、伪造、跨环境或带异常端口的 Origin 一律拒绝且不得消费 launch。验证并原子消费 launch 后返回：
 
 ```http
 HTTP/1.1 303 See Other
 Location: /session
+Cross-Origin-Opener-Policy: same-origin
 Referrer-Policy: no-referrer
 Cache-Control: no-store
 ```
 
-`/session` 是固定地址，不携带任何 ID。因为 POST URL 本身也固定为 `/launch`，重定向后的地址、Referer 和浏览器历史均不含 launch ID；反向代理、WAF、应用访问日志和崩溃报告禁止记录请求 body。浏览器刷新 `/session` 不得重放 POST。
+`/session` 是固定地址，不携带任何 ID。首次 303 和后续所有 credential origin 响应都保持 `COOP: same-origin`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。因为 POST URL 本身也固定为 `/launch`，重定向后的地址、Referer 和浏览器历史均不含 launch ID；反向代理、WAF、应用访问日志和崩溃报告禁止记录请求 body。浏览器刷新 `/session` 不得重放 POST。
 
 弹窗或新页被阻止时必须安全失败：Portal 在 10 秒内未观察到 Token 保存的隔离页一次性 heartbeat，就原子撤销 launch，显示稳定错误 `CREDENTIAL_WINDOW_BLOCKED` 和“允许本站打开新窗口后重试”；不得改为 GET、query/fragment、同页降级、iframe、复制链接或把 Secret 收回 Portal。窗口已打开但认证失败时同样只经 `result_ref` 轮询稳定状态。
 
-强制浏览器验收：launch ID 仅出现于 POST body；303 后地址栏、`document.referrer`、Performance/Navigation、浏览器历史和代理访问日志均无 ID；`window.opener === null`；刷新不重发 POST；弹窗阻止时 launch 被撤销且网络中没有任何 query 降级。
+强制双 origin 浏览器验收逐项覆盖：① Portal 初始 HTTP 响应为 `Referrer-Policy: origin`，实际导航 Referer 至多为 Portal origin 且无 path/query/fragment，精确 Portal `Origin` 的顶层 POST 可成功；②缺失、`null`、伪造、跨环境 Origin 均拒绝且 launch 零消费；③ launch ID 仅出现于 POST body；④首次响应为 303 且 `Location` 精确等于 `/session`；⑤ 303 落地后 `window.opener === null`；⑥刷新不重发 POST；⑦地址栏、`document.referrer`、Performance/Navigation、浏览器历史和代理访问日志均无 launch/result ID；⑧弹窗阻止时 launch 被撤销且网络中没有 query、fragment、同页或 iframe 降级；⑨换浏览器、换主体及重放均失败关闭。
 
 ### 6.3 隔离会话
 
@@ -407,7 +408,7 @@ Portal 对三个动作只向 Account `POST /account/admin/v1/approval-requests` 
 2. owner 权限追加迁移的创建、精确角色授予、授权版本递增、缓存/cursor 失效和 down 回滚测试。
 3. 合法 UUID 无权、非法 UUID、互斥详情、无权页签的零详情请求、零 DOM/日志泄漏测试。
 4. 三类唯一预算、入口代理超时顺序、快照事务中断无半结果、容量边界、70%/85% 水位、第三资源回收和并发翻页无重复漏项测试。
-5. 固定 credential origin/CSP、顶层 POST、303 无 ID、no-opener/no-referrer、弹窗阻止撤销且无 query 降级的真实浏览器测试。
+5. 固定 credential origin/CSP 的两阶段真实浏览器测试：导航前 Portal HTTP 响应使用 `Referrer-Policy: origin`，表单 `target=_blank + rel=noopener` 且无 `noreferrer`；导航后从首个 303 起使用 COOP same-origin/no-referrer/no-store，并覆盖无 ID、弹窗阻止撤销且无 query 降级。
 6. 逐区块失败隔离、URL 前进后退、旧 `section=tokens` 兼容、移动端与键盘可访问性测试。
 7. 从真实迁移后数据库对三个强制审批策略与 `internal/platform/approvalpolicy` 逐字段（包括有序 `critical_resource_fields`）比对；`executableApprovalCommands` 保留所有既有合法项，且新增 `TOKEN_*` 子集恰为 lifecycle v2、rollback v2、revoke v1 三项，无其他 Token 命令被放行；任一偏差阻断发布。
 8. 现有管理后台合同测试在后续实施任务中更新：feature gate 开启时断言三页为 canonical，关闭时仍断言历史 Token Gateway；本轮不修改实现测试。
