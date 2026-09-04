@@ -5,6 +5,12 @@
 //! while the small platform surface delegates to the real library adapters.
 
 mod platform {
+    pub mod telemetry {
+        pub use pinvou3_lib::platform::behavior_telemetry_test_support::{
+            TELEMETRY_DEFAULT_BASE_URL, TELEMETRY_ENROLLMENT_TOKEN,
+        };
+    }
+
     pub mod filesystem {
         use std::io;
         use std::path::Path;
