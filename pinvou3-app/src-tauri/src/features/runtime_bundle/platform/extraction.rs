@@ -171,9 +171,13 @@ impl Pinvou3Bundle {
         crate::platform::startup::mark("bundle_extract:write_builtin_skills:done");
         // IT 内部 CLI 连接器(eip/zhidao)的包装脚本 + 平台二进制,连接与模型
         // shell 都按旧契约读 bundle/skills/{eip,zhidao}/bin(见 lib.rs PATH 前插、
-        // connectors/platform/linux.rs bin_path),每启动防御性重写。
+        // connectors/platform/linux.rs bin_path)。内容未变化则整文件跳过;失败
+        // 只告警不阻塞启动(杀软扫描/只读盘等瞬时占用不应拖垮 Bridge),连接
+        // EIP/知道时 eip_bin_path 侧仍有兜底。
         crate::platform::startup::mark("bundle_extract:write_connector_cli_bins:start");
-        self.write_connector_cli_bins()?;
+        if let Err(e) = self.write_connector_cli_bins() {
+            log::warn!("[runtime-bundle] 连接器 CLI 资产解包失败(不阻塞启动): {e}");
+        }
         crate::platform::startup::mark("bundle_extract:write_connector_cli_bins:done");
         // 首启一次性导入旧布局安装态到 BundleStore（marketplace-unification §9）。
         // 位置：cleanups 之后（退役目录不导入）、技能迁移与 gates 之前（迁移按 import
@@ -223,7 +227,7 @@ impl Pinvou3Bundle {
         // 豁免集必须含 write_connector_cli_bins 的 eip/zhidao——本函数上方刚写出
         // 的 bin 目录若不在集内,会被这里的收敛步骤当残旧目录删掉（回归过一次）。
         let heal = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
-            .self_heal_skills(Self::SELF_HEAL_PROTECTED_DIRS);
+            .self_heal_skills(&Self::self_heal_protected_dirs());
         crate::platform::startup::mark_with_detail(
             "rust",
             "bundle_extract:skills_self_heal:done",
@@ -514,12 +518,22 @@ impl Pinvou3Bundle {
     /// would be written and self-heal-deleted in the same run.
     pub(crate) const BUILTIN_RELEASED_SKILL_DIRS: &[&str] = &["visual-design"];
 
-    /// 自愈对账（`self_heal_skills` 第 4 步「内置释放目录收敛」）的完整豁免集
-    /// = 内置释放技能（[`Self::BUILTIN_RELEASED_SKILL_DIRS`]）+ IT 内部 CLI
-    /// 连接器的运行时 bin 目录（`eip`/`zhidao`，[`Self::write_connector_cli_bins`]
-    /// 每启动重写，无 SKILL.md、无归属记录，缺豁免会被对账当残旧收敛掉）。
-    /// 传给 self_heal_skills 的是本常量，不要直接传 BUILTIN_RELEASED_SKILL_DIRS。
-    pub(crate) const SELF_HEAL_PROTECTED_DIRS: &[&str] = &["visual-design", "eip", "zhidao"];
+    /// IT 内部 CLI 连接器的运行时目录名（[`Self::write_connector_cli_bins`] 的
+    /// 释放面）。无 SKILL.md、无归属记录，自愈对账（`self_heal_skills` 第 4 步
+    /// 「内置释放目录收敛」）会当残旧收敛掉，故必须并入自愈豁免集。
+    pub(crate) const CONNECTOR_CLI_BIN_DIRS: &[&str] = &["eip", "zhidao"];
+
+    /// 自愈对账的豁免集 = 内置释放技能（[`Self::BUILTIN_RELEASED_SKILL_DIRS`]）
+    /// ∪ IT 内部 CLI 连接器目录（[`Self::CONNECTOR_CLI_BIN_DIRS`]）。由两处
+    /// 真相源动态组合成单一豁免清单，扩充任一侧无须记得改这里（评审 P3：
+    /// 避免第二份硬编码清单漂移导致新增内置技能被自愈误删）。
+    pub(crate) fn self_heal_protected_dirs() -> Vec<&'static str> {
+        Self::BUILTIN_RELEASED_SKILL_DIRS
+            .iter()
+            .chain(Self::CONNECTOR_CLI_BIN_DIRS.iter())
+            .copied()
+            .collect()
+    }
 
     /// 解包内嵌的内置 skills 到 pinvou3 单一来源 `bundle/skills`。v0.9 clean re-fork
     /// 后 catalogue 与 `load_skill` 都只扫描此目录，不再写 `~/.agents/skills`。
@@ -533,45 +547,85 @@ impl Pinvou3Bundle {
     }
 
     /// 解包 IT 内部 CLI 连接器(eip / zhidao)的运行时资产到 `bundle/skills/{eip,zhidao}/bin`:
-    /// 公共包装脚本(`EIP_SKILL_DIR`/`ZHIDAO_SKILL_DIR` 的 `bin/` 子树,内部注入
-    /// AGENT_* 后 exec 真二进制)+ 平台原生 CLI(`EIP/ZHIDAO_PLATFORM_BIN_DIR`)。
-    /// 消费方:连接流程的 `eip_bin_path()`/`zhidao_bin_path()` 与 lib.rs 的 PATH 前插
-    /// (模型 shell 直接跑 `eip <子命令>`)。每启动防御性重写(immutable 内嵌资源),
-    /// 升级换二进制时靠覆盖兜住。**不落 SKILL.md**——技能可见性由
+    /// 平台原生 CLI(`EIP/ZHIDAO_PLATFORM_BIN_DIR`)+ 公共包装脚本(公共技能
+    /// `bin/` 子树,内部注入 AGENT_* 后 exec 真二进制)。消费方:连接流程的
+    /// `eip_bin_path()`/`zhidao_bin_path()` 与 lib.rs 的 PATH 前插(模型 shell
+    /// 直接跑 `eip <子命令>`)。逐文件内容比对,未变化即跳过——不再每次启动
+    /// 无条件重写约 20MB 二进制;变化时先写同目录临时文件再原子替换,不留半截
+    /// 副本(评审 P2)。最后统一对整个 bin 目录补 0o755,刚写入/此前缺执行位的
+    /// 平台二进制一并兜住(评审 P1)。**不落 SKILL.md**——技能可见性由
     /// `apply_eip/zhidao_skill_visibility` 按连接态在新 `bundles/` 布局门控;
     /// 本目录无 SKILL.md 不会被注册表扫成常驻技能。
     pub(super) fn write_connector_cli_bins(&self) -> std::io::Result<()> {
         let eip = self.skills_dir.join("eip");
-        Self::extract_embedded_cli_bin(&EIP_SKILL_DIR, &eip)?;
         #[cfg(any(windows, target_os = "linux"))]
-        Self::extract_dir(&EIP_PLATFORM_BIN_DIR, &eip.join("bin"))?;
+        Self::extract_dir_if_changed(&EIP_PLATFORM_BIN_DIR, &eip.join("bin"))?;
+        if let Some(bin) = EIP_SKILL_DIR.get_dir("bin") {
+            Self::extract_dir_if_changed(bin, &eip)?;
+        }
+        Self::chmod_cli_bins(&eip.join("bin"))?;
 
         let zhidao = self.skills_dir.join("zhidao");
-        Self::extract_embedded_cli_bin(&ZHIDAO_SKILL_DIR, &zhidao)?;
         #[cfg(any(windows, target_os = "linux"))]
-        Self::extract_dir(&ZHIDAO_PLATFORM_BIN_DIR, &zhidao.join("bin"))?;
+        Self::extract_dir_if_changed(&ZHIDAO_PLATFORM_BIN_DIR, &zhidao.join("bin"))?;
+        if let Some(bin) = ZHIDAO_SKILL_DIR.get_dir("bin") {
+            Self::extract_dir_if_changed(bin, &zhidao)?;
+        }
+        Self::chmod_cli_bins(&zhidao.join("bin"))?;
         Ok(())
     }
 
-    /// 解包公共技能目录的 `bin/` 子树到目标 `bin/`,并给 CLI 可执行位(unix)。
-    /// 包装脚本与平台二进制同目录(包装脚本按自身路径找真二进制)。
-    /// 注意 include_dir 的子 Dir 内文件路径仍相对内嵌根(如 `bin/eip`),
-    /// 故 extract_dir 的目标是技能根目录,由相对路径自然铺出 `bin/` 层。
-    fn extract_embedded_cli_bin(embedded: &Dir<'_>, dest: &std::path::Path) -> std::io::Result<()> {
-        let bin_dest = dest.join("bin");
-        if let Some(bin) = embedded.get_dir("bin") {
-            Self::extract_dir(bin, dest)?;
+    /// 逐文件解包内嵌目录(路径相对内嵌根铺开,如 `bin/eip` → `<root>/bin/eip`),
+    /// 内容未变化则跳过写入。返回实际重写的文件数。
+    fn extract_dir_if_changed(dir: &Dir<'_>, root: &std::path::Path) -> std::io::Result<usize> {
+        let mut rewritten = 0;
+        for file in dir.files() {
+            let rel = file.path();
+            if rel.components().any(|c| c.as_os_str() == "__pycache__")
+                || rel
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pyc"))
+            {
+                continue;
+            }
+            if Self::write_file_if_changed(&root.join(rel), file.contents())? {
+                rewritten += 1;
+            }
         }
+        Ok(rewritten)
+    }
+
+    /// 字节安全版「变了才写」:内容一致跳过;变化时先写同目录 `.pinvou3-tmp`
+    /// 临时文件再原子替换,避免中断/占用留下半截二进制。
+    fn write_file_if_changed(path: &std::path::Path, contents: &[u8]) -> std::io::Result<bool> {
+        if std::fs::read(path).is_ok_and(|existing| existing == contents) {
+            return Ok(false);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_file_name(format!(
+            "{}.pinvou3-tmp",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("pinvou3-file")
+        ));
+        std::fs::write(&tmp, contents)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(true)
+    }
+
+    /// bin 目录内所有文件统一补 0o755(unix)。在平台二进制与包装脚本全部
+    /// 落盘之后执行,执行位不依赖写入顺序;幂等,对未变化跳写的文件同样兜底
+    /// (升级自旧版本时遗留的 0o644 二进制由此修复)。
+    fn chmod_cli_bins(bin_dest: &std::path::Path) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(entries) = std::fs::read_dir(&bin_dest) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_file() {
-                        let _ =
-                            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755));
-                    }
+            for entry in std::fs::read_dir(bin_dest)?.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))?;
                 }
             }
         }
@@ -1366,12 +1420,28 @@ mod tests {
             // 平台原生 CLI 仅 windows/linux 内嵌(macOS 无此二进制)。
             #[cfg(any(windows, target_os = "linux"))]
             {
-                let has_cli = std::fs::read_dir(&bin).unwrap().flatten().any(|e| {
-                    e.file_name()
-                        .to_str()
-                        .is_some_and(|f| f.starts_with(cli_prefix))
-                });
-                assert!(has_cli, "{skill} 平台二进制未解包: {}", bin.display());
+                let cli = std::fs::read_dir(&bin)
+                    .unwrap()
+                    .flatten()
+                    .find(|e| {
+                        e.file_name()
+                            .to_str()
+                            .is_some_and(|f| f.starts_with(cli_prefix))
+                    })
+                    .unwrap_or_else(|| panic!("{skill} 平台二进制未解包: {}", bin.display()));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = std::fs::metadata(cli.path()).unwrap().permissions().mode();
+                    assert_ne!(
+                        mode & 0o111,
+                        0,
+                        "{skill} 平台二进制缺可执行位: {}",
+                        cli.path().display()
+                    );
+                }
+                #[cfg(not(unix))]
+                let _ = cli;
             }
             #[cfg(unix)]
             {
@@ -1388,9 +1458,69 @@ mod tests {
             );
         }
 
+        // 评审 P2:内容未变化时重复调用不得重写(逐文件 mtime 逐位不变)。
+        let mtimes_before: Vec<(std::path::PathBuf, std::time::SystemTime)> =
+            std::fs::read_dir(bundle.skills_dir.join("eip").join("bin"))
+                .unwrap()
+                .flatten()
+                .map(|e| {
+                    let p = e.path();
+                    let mtime = p.metadata().unwrap().modified().unwrap();
+                    (p, mtime)
+                })
+                .collect();
+        assert!(!mtimes_before.is_empty());
+        bundle.write_connector_cli_bins().unwrap();
+        for (path, mtime) in &mtimes_before {
+            assert_eq!(
+                path.metadata().unwrap().modified().unwrap(),
+                *mtime,
+                "内容未变化仍被重写: {}",
+                path.display()
+            );
+        }
+
+        // 内容漂移自愈:人为改坏包装脚本后重调,内容应被内嵌副本修复。
+        let wrapper = bundle.skills_dir.join("eip").join("bin").join("eip");
+        std::fs::write(&wrapper, b"corrupted").unwrap();
+        bundle.write_connector_cli_bins().unwrap();
+        assert_ne!(
+            std::fs::read(&wrapper).unwrap(),
+            b"corrupted",
+            "包装脚本漂移未被内嵌副本修复"
+        );
+
         // SAFETY: the caller's test holds platform::paths::tests::ENV_LOCK throughout; env writes are serialized in-process.
         unsafe { std::env::remove_var("PINVOU3_HOME") };
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// 评审 P3:自愈豁免集必须由 BUILTIN_RELEASED_SKILL_DIRS 与
+    /// CONNECTOR_CLI_BIN_DIRS 动态组合——扩充任一侧无须改第三份清单;
+    /// 同时守护组合结果无重复、且覆盖两侧全部条目。
+    #[test]
+    fn self_heal_protected_dirs_compose_builtin_and_connector_bins() {
+        let protected = super::Pinvou3Bundle::self_heal_protected_dirs();
+        for dir in super::Pinvou3Bundle::BUILTIN_RELEASED_SKILL_DIRS {
+            assert!(
+                protected.contains(dir),
+                "内置释放技能 {dir} 不在自愈豁免集内,会被收敛删除"
+            );
+        }
+        for dir in super::Pinvou3Bundle::CONNECTOR_CLI_BIN_DIRS {
+            assert!(
+                protected.contains(dir),
+                "连接器 bin 目录 {dir} 不在自愈豁免集内,会被收敛删除"
+            );
+        }
+        let mut sorted = protected.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            protected.len(),
+            "自愈豁免集存在重复条目: {protected:?}"
+        );
     }
 
     /// G1 回归：上传来源记录不得进入内嵌重释放（防用户内容被嵌入资源覆盖）。
