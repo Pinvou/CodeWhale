@@ -402,6 +402,20 @@ Portal 对三个动作只向 Account `POST /account/admin/v1/approval-requests` 
 - 权限或 gate 撤销同步卸载对话框并 abort 在途 precheck/command/recovery；权限恢复不能复活旧输入。浏览器 smoke 必须由生产组件和客户端链路执行，绑定端口时显式排除 Chromium unsafe ports（含 3659），并连续运行至少 5 次证明稳定。
 - APT-131-R1 不新增 Token/Billing 预检计算、领域 parser/CAS、执行事件或数据库事实；不提前实现 APT-133 Secret、APT-134 排程或 APT-138 激活。
 
+### 7.5 APT-138 激活前的领域适配整改边界
+
+2026-09-05 激活前只读审计确认，十九项策略注册、既有领域 handler 与 PRE 失败关闭并不等于十九项均已闭合接入通用命令事务。原 APT-122、APT-123、APT-125 的 `DONE` 与身份 B 审核历史保持不可变；当前缺口使用 `REOPENED_REMEDIATION` 具名批次修复，不把 adapter 缺口转嫁给 APT-138，也不以一次大提交抹平所有权。
+
+| 批次 | 精确命令 | 冻结事务与恢复合同 | 旧入口合同 |
+|---|---|---|---|
+| `APT-122-R2` | `TOKEN_PROTOCOL_DRAFT_CREATE`、`TOKEN_PROTOCOL_PUBLISH`、`TOKEN_FORMULA_DRAFT_CREATE`、`TOKEN_FORMULA_PUBLISH` | 复用已审核 protocol/formula 领域方法与 Billing 单位校验；canonical envelope、权威 precheck、领域草稿/不可变版本、`token_command_results`、脱敏审计和 Outbox 必须同一 Token 事务提交。actor/command/key/digest 相同只重放首次安全结果，异请求冲突；网络不确定只按原 reference GET，禁止盲重发。公式发布继承同一 canonical command/T1 的 Billing binding receipt existing-first：Billing 成功而 Token 回滚/超时/丢响应时只以原 key/reference 收敛，异内容返回 409；Token 仅在完整 receipt 逐字段复核后同事务写不可变公式版本、结果、审计和 Outbox。 | 无 activation record 的 PRE 继续按已冻结兼容边界失败关闭；持久 reader 安装后，专用写入口必须与通用命令读取同一 state/epoch，`ACTIVE` 只允许通用治理路径，`SAFE_ROLLBACK` 与 epoch 漂移零写。 |
+| `APT-123-R2` | `TOKEN_MODEL_DRAFT_SAVE`、`TOKEN_MODEL_PUBLISH` 的 `IMMEDIATE`、`TOKEN_ACCOUNT_CREATE`、`TOKEN_ACCOUNT_STATUS_CHANGE`、`TOKEN_MODEL_CATALOG_ROLLBACK` | 即时模型、账户、回滚各自复用既有权威 precheck/CAS，在同一领域事务提交事实、通用结果、脱敏审计和 Outbox；`SCHEDULED` publish 仍归 APT-134。目录回滚 adapter 只准备未来批准执行的单一领域调用和可查询结果，本批不得消费事件。并发重放隔离 actor，冻结首次结果，404/超时不得推断零写。 | 旧 draft/publish/account/status/rollback 写入口只允许保留明确的 PRE 兼容；reader 安装后统一选择，`ACTIVE` 不旁路、`SAFE_ROLLBACK` 不恢复 direct。 |
+| `APT-125-R1` | `TOKEN_ROUTE_UPSERT`、`TOKEN_ROUTE_DELETE` | 复用稳定 `model_id/protocol_version_id`、路由版本、墓碑及精确影响证据；路由事实、通用结果、脱敏审计与 Outbox 同一 Token 事务提交，写前使用同一 activation transaction guard。等量依赖替换、epoch 漂移和 CAS 变化均零写；同键重放原 route/tombstone 结果。 | Portal 不再直写 v2 专用入口；PRE 的 v1 兼容边界不变，`ACTIVE` 只走通用 `/commands`，v2 专用写不形成第二条人类路径，`SAFE_ROLLBACK` 不复活 v1/v2 direct。 |
+
+三批固定按 `APT-122-R2 → APT-123-R2 → APT-125-R1` 独立实现、身份 B 审核与提交；真实 PostgreSQL、HTTP 和 Portal 回归必须逐命令覆盖成功、权限/CAS/版本漂移、并发幂等、响应丢失、旧入口 PRE/ACTIVE/SAFE 选择及审计/Outbox/结果恰一次；公式发布还必须覆盖 Billing 成功→Token 失败/回滚、同键完整回执恢复、异内容 409 及 Token 响应丢失只 GET。三批只补领域 adapter 和旁路关闭，不创建或安装 activation record/reader/transaction guard/credential authority guard，不向 Account 注入 activation 校验，也不注册审批 consumer、NATS subscription 或生命周期 worker。
+
+APT-138 因此保持 `PENDING / BLOCKED_BY_REMEDIATION`。三个整改批次全部经身份 B `PASS` 后，APT-138 才唯一负责 `000029` 激活状态机、生产 reader/guard、Account activation 校验、三项审批 consumer、生产 NATS 注册和 APT-134 lifecycle worker 的生产 main 总装，并在同一候选提交上完成十九项总验收；不存在由整改批次提前切换一部分命令的中间状态。worker 在 PRE 不启动，ACTIVE 才注册/领取带 epoch 的租约，SAFE_ROLLBACK 停止领取新租约且在手租约提交前重验失败关闭；重复实例只允许一个租约持有者，恢复 ACTIVE 不得重复领域效果。APT-137 只验收灰度、N/N-1 与部署等价证据，不承接该功能接线。
+
 ## 8. UI、可访问性与错误语义
 
 - 英文枚举在中文界面转换为“已发布、已弃用、可用、对话”等标签，原枚举可置于 Tooltip。

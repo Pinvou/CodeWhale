@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，126 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，5 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，126 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，5 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 及 APT-122-R2、APT-123-R2、APT-125-R1 是保留原已审核交付历史、同时修复具名缺口的整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -221,6 +221,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-122 协议/公式命令与策略注册
 
+> 当前状态补充（2026-09-05）：原 APT-122 交付与身份 B 第三轮 `PASS` 历史保持 `DONE`；APT-138 激活前审计发现四个已审核领域 handler 尚未接入通用 `/commands` 结果事务，故以 `APT-122-R2 / REOPENED_REMEDIATION` 单独修复，不回写或否定原策略、不可变版本与 Billing 校验结论。
+
 > 实施状态（2026-09-03）：DONE，已通过身份 B 第三轮独立代码审核，尚未推送或部署。四个稳定命令、Account 000044 追加策略、CAS/ETag、结构化审计与事务 Outbox、Billing 权威计量单位只读校验与数据库实际不可变公式绑定回执/同一 T1 重放、协议发布引用快照复验、15 分钟近期认证及默认关闭 activation gate 已完成；本地未配置 PostgreSQL 集成环境，三个真实迁移链命名用例未执行，由 PR 隔离库门禁强制 PASS 且拒绝 SKIP。
 
 - **目标/范围**：主目标 `ADM-60`。修改 `migrations/account/000044_*`、`internal/platform/approvalpolicy/{registry.go,registry_test.go}`、`internal/token/{protocol_admin.go,protocol_admin_http.go}`（按仓库实际路由文件名落位）、Token OpenAPI及协议/公式持久化合同测试；本任务拥有四个协议/公式 public API 与既有 draft/head/immutable version/outbox 写入适配。
@@ -229,6 +231,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **不包含**：不改协议/公式 UI、不将命令改为强制审批、不修改三项 Token 高风险策略。
 
 ### APT-123 十九项 Token 命令治理与三项强制审批
+
+> 当前状态补充（2026-09-05）：原 APT-123 预激活基础与身份 B 第五轮 `PASS` 历史保持 `DONE`；即时模型、账户及目录回滚的通用 adapter/旧入口选择缺口由 `APT-123-R2 / REOPENED_REMEDIATION` 修复。APT-123-R2 不拥有 activation、consumer 或生命周期/凭据领域实现。
 
 - **实现状态**：`DONE`；已通过身份 B 第五轮独立代码审核。Account `000045`、Token `000024`、十九项策略注册与通用持久结果、三项审批精确权限/策略、actor 绑定结果查询、最小 executor 内部路由与 workload allowlist、中间提交 PRE_ACTIVATION 门禁已实现。十九项领域 adapter 的最终接入与验收仍由下表对应后续任务负责；activation record/epoch/state machine 及审批事件 consumer 仍唯一归 APT-138，均未在本任务提前实现。尚未推送或部署；本地未配置 Account/Token PostgreSQL URL，真实迁移链命名用例未执行，CI 已强制逐项 PASS 且拒绝 SKIP。
 - **目标/范围**：主目标 `ADM-65`，仅交付 `ADM-64` 的预激活基础且不得关闭 ADM-64。修改 `migrations/account/000045_*`、`migrations/token/000024_*`、`internal/platform/approvalpolicy/{registry.go,registry_test.go}`、`internal/account/{approvals.go,approval_execution.go,approval_worker.go}`、`internal/token` 十九项命令治理中间件/结果查询/审计 outbox/内部执行路由、`cmd/{account-service,token-gateway}` 及对应 OpenAPI、事件和工作负载权限配置。本任务唯一拥有其余十五项策略注册、三项审批权限/策略以及十九项通用命令结果、幂等指纹和恢复索引 schema；APT-122 已拥有四项协议/公式策略版本且本任务不得重写。十九项领域 adapter 不在本任务接入；本任务也不创建 activation record、epoch、状态列、状态机或审批事件 consumer，这些激活对象与 consumer 唯一归 APT-138/`000029_*`；`000028` 后续由 APT-136 用于运行概览索引。
@@ -249,6 +253,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **不包含**：不改实际命令状态机、不创建审批、不做 UI 影响面板。
 
 ### APT-125 路由解析与健康状态机
+
+> 当前状态补充（2026-09-05）：原 APT-125 稳定引用、健康状态机及身份 B 第四轮 `PASS` 历史保持 `DONE`；route upsert/delete 尚未统一到通用结果事务且 Portal 仍存在 v2 专用直写，故以 `APT-125-R1 / REOPENED_REMEDIATION` 单独收口，不改变既有路由 schema、探测算法或 Provisioning 语义。
 
 - **实现状态**：`DONE`；稳定模型/协议路由、版本化 v2 管理合同、服务端健康探测与 TTL、精确 Provisioning 引用、影响证据、迁移兼容及 CI PostgreSQL 门禁已实现，并通过身份 B 第四轮独立代码审核。APT-138 尚未创建或激活持久 activation record：`PRE_ACTIVATION` 继续保留旧 v1 direct Portal 合同，`ACTIVE` 才选择 v2 稳定写合同；两条领域事务均预留 activation lock/epoch 的事务内起始及提交前重检边界，当前生产仍保持预激活状态。当前尚未推送或部署；本地未配置 `PINVOU_TEST_TOKEN_DATABASE_URL`，真实 PostgreSQL 用例显式 SKIP，CI 隔离库必须逐项 PASS 且拒绝 SKIP。
 - **目标/范围**：主目标 `ADM-62`。修改 `migrations/token/000025_*`、`internal/token/{routing.go,management.go,provisioning.go,gateway_adapter.go}`、`cmd/token-gateway`、Token OpenAPI 和健康 worker/指标测试。本任务唯一拥有 route-health schema。
@@ -408,12 +414,25 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 > 实现与代码审核记录（2026-09-05）：`DONE`；身份 B 第三轮独立代码审核 `PASS`。同步命令以唯一 Provider 重观测、publication lock 下的目录基线/差异重算及事务 activation state/epoch guard 绑定同一 checked slice，任何 observation、目录或激活 epoch 漂移均在目录、命令、审计、outbox/result 写入前失败关闭；旧同步直写入口保持关闭，生产未注入 APT-138 reader/guard/consumer。运行概览仅接受 `24h/7d/30d`，以数据库权威时间生成闭合趋势桶；具名 `000028` 索引、生产 schema 的 1,000,000/100,000 冷一暖三性能门禁、目录差异、局部状态、URL 下穿、三语、320px/200% 与两套生产 Chromium smoke 已闭合。Go 全量、定向 Node、OpenAPI、迁移清单、任务/i18n/架构、ESLint、Portal build 和两套 smoke 连续五次均通过；本地未配置 Token/性能 PostgreSQL URL，具名用例明确 `SKIP`，PR 工作流逐项拒绝 SKIP。APT-137 灰度和 APT-138 activation/consumer 未提前实现。
 
+### APT-138 前置领域适配整改批次
+
+2026-09-05 APT-138 激活前只读审计确认：既有任务的策略、领域 API 与预激活保护历史仍保持 `DONE`，但部分 Portal 已切换到通用 `/admin/v1/commands`，对应领域 adapter 尚未接入，另有专用写入口在未来 `ACTIVE` 下可能旁路通用结果。下列批次状态均为 `PENDING / REOPENED_REMEDIATION`，必须按顺序经身份 B 独立审核并独立提交；在三批全部 `PASS` 前，APT-138 固定为 `PENDING / BLOCKED_BY_REMEDIATION`，不得创建 activation record、启动 consumer 或注册 worker。
+
+| 整改批次 | 目标映射 | 状态 | 依赖 | 冻结命令 | 唯一代码所有权 | 原子性与兼容验收 | 独立验证 |
+|---|---|---|---|---|---|---|---|
+| `APT-122-R2` | `ADM-60, UI-49` | `PENDING` | `APT-122, APT-123, APT-128` | `TOKEN_PROTOCOL_DRAFT_CREATE`、`TOKEN_PROTOCOL_PUBLISH`、`TOKEN_FORMULA_DRAFT_CREATE`、`TOKEN_FORMULA_PUBLISH` | 复用 APT-122 已审核的 protocol/formula 仓储与 Billing 校验，只增加通用 `/commands` 到四个领域 adapter 的接线和结果投影；不得改公式执行、单位所有权或策略分类 | canonical envelope、权威 precheck、领域 draft/version、通用 `token_command_results`、脱敏审计和 Outbox 在同一 Token 事务提交；同 actor/command/key 重放原结果，错 payload 冲突，响应丢失只 GET。`TOKEN_FORMULA_PUBLISH` 必须继承既有跨 Billing T1：同一 canonical command/key/reference 先 existing-first 读取绑定回执，Billing 成功后 Token 回滚、超时或响应丢失不得生成新 key；仅在完整且逐字段匹配的 receipt 复核后，Token 才在同一事务写 formula version/result/audit/outbox，异内容固定 409。旧四个专用 POST 在无 activation record 时保持失败关闭；安装 reader 后仅 `ACTIVE` 可由统一治理路径写入，`SAFE_ROLLBACK` 与 epoch 漂移零写，专用入口不得形成第二条可达人类写路径 | 真实 PostgreSQL 和 HTTP 逐命令覆盖成功、CAS/ETag 漂移、并发幂等、提交响应丢失、额外字段、Billing 瞬时失败、审计/Outbox/通用结果恰一次及 Secret/表达式安全扫描；公式发布另覆盖 Billing 成功→Token 失败/回滚、完整回执同键恢复、异内容 409、Token 响应丢失只 GET；Portal 四动作回归；身份 B `PASS` 后独立提交 |
+| `APT-123-R2` | `无（ADM-64 前置，不主拥有规范目标）` | `PENDING` | `APT-122-R2, APT-123, APT-124, APT-131, APT-134` | `TOKEN_MODEL_DRAFT_SAVE`、`TOKEN_MODEL_PUBLISH` 的 `IMMEDIATE`、`TOKEN_ACCOUNT_CREATE`、`TOKEN_ACCOUNT_STATUS_CHANGE`、`TOKEN_MODEL_CATALOG_ROLLBACK` | APT-123 保持策略/通用结果及即时模型、账户、回滚领域事实的唯一所有者；只补五项通用 adapter、结果与旧入口选择。`SCHEDULED` publish 继续归 APT-134，生命周期与凭据撤销领域执行不在本批 | 五项均在领域 CAS 成功的同一 Token 事务内完成通用结果、领域事实、脱敏审计和 Outbox；rollback adapter 只供未来 APT-138 consumer 的内部批准执行调用，继续使用前向目录版本。旧 draft/publish/account/status/rollback 专用写在 `PRE_ACTIVATION` 保持历史兼容或既有失败关闭，在持久 reader 存在后由同一 state/epoch 选择，`ACTIVE` 不旁路、`SAFE_ROLLBACK` 不复活 direct。重放冻结首次脱敏结果，UNKNOWN 只 GET | 真实 PostgreSQL/HTTP/Portal 覆盖五项成功、权限/近期认证、owner 双权限、创建哨兵、CAS/预检漂移、并发同键/跨 actor、提交不确定和旧入口 PRE/ACTIVE/SAFE 矩阵；rollback 覆盖授权 envelope 到领域 adapter 的结果原子性但不得启动 consumer；身份 B `PASS` 后独立提交 |
+| `APT-125-R1` | `ADM-62, UI-50` | `PENDING` | `APT-123-R2, APT-125, APT-129` | `TOKEN_ROUTE_UPSERT`、`TOKEN_ROUTE_DELETE` | 复用 APT-125 稳定 `model_id/protocol_version_id`、健康与 tombstone 领域事务；只补两项通用 adapter/结果，并将 Portal 从 v2 专用直写改为统一 `/commands` | 写前复用 APT-125 精确影响证据和 activation transaction guard；路由事实、account/route version、墓碑、通用结果、脱敏审计和 Outbox 同事务。旧 v1 在 PRE 保持兼容，v2 专用写在 ACTIVE 不得作为人类旁路，SAFE/epoch 漂移零写；同键重放原 route/tombstone 结果，404 不推断未执行 | 真实 PostgreSQL/HTTP/Portal 覆盖稳定 ID、协议多版本、健康/凭据/READY 依赖、等量证据替换、upsert/delete 并发与响应丢失、PRE/ACTIVE/SAFE/epoch 竞态、Portal 零 v2 直写；身份 B `PASS` 后独立提交 |
+
+三批完成顺序固定为 `APT-122-R2 → APT-123-R2 → APT-125-R1 → APT-138`。具名整改批次不占正式 APT 编号，故主任务表的依赖列仍只列 APT-122～APT-136；本段是 APT-138 的强制附加先决条件，三批任一未 `PASS` 即不得开工 APT-138。它们不得新增 activation schema、生产 reader/transaction guard/credential authority guard、Account activation 校验、审批事件 consumer 或 NATS 注册；这些对象仍唯一归 APT-138。三批也不得将任何命令改为另一治理模式，或提前注册 APT-134 lifecycle worker；该 worker 的生产 main 注册与 activation 联动由 APT-138 总装。
+
 ### APT-138 十九项命令一致性总验收与原子激活
 
-- **目标/范围**：主目标 `ADM-64`。在 APT-122～APT-136 的领域/API 接入全部通过独立审核后，修改 `migrations/token/000029_*`、`internal/token` 治理激活仓储/路由门禁、Account 审批入口激活校验、`internal/platform/approvalpolicy` 总合同测试及发布前集成测试。本任务唯一拥有持久治理激活记录（状态、epoch、策略集合摘要、十九项处理器摘要、操作者、CAS、时间与审计 request_id），不改任何领域事实 schema；`000028` 已由 APT-136 唯一用于运行概览索引。
-- **状态机/原子边界**：初始只能是 `PRE_ACTIVATION`：旧 v1 direct 保持当前兼容行为，新治理/新审批写入口关闭；全部一致性门禁成功后，只允许一次单事务 CAS 将 activation record 从 `PRE_ACTIVATION → ACTIVE`，同一持久 epoch 的同一次原子路由切换关闭三项旧 direct、接受新审批执行并开放其余十六项新治理 envelope，不允许逐命令、逐实例或重复激活，不存在双写窗口。`ACTIVE → SAFE_ROLLBACK` 只停止十九项新写、审批领取和执行消费，绝不重开旧 direct；修复并重跑全部门禁后只允许 `SAFE_ROLLBACK → ACTIVE`。禁止回到 `PRE_ACTIVATION`、跳过状态、客户端指定状态或仅切一项命令。
+- **当前状态**：`PENDING / BLOCKED_BY_REMEDIATION`。只读审计已确认 APT-122-R2、APT-123-R2、APT-125-R1 三批缺口；三批未全部经身份 B `PASS` 并独立提交前，不得开始 activation migration 或生产接线。
+- **目标/范围**：主目标 `ADM-64`。在 APT-122～APT-136 及三个前置整改批次的领域/API 接入全部通过独立审核后，修改 `migrations/token/000029_*`、`internal/token` 治理激活仓储/路由门禁、Account 审批入口激活校验、`internal/platform/approvalpolicy` 总合同测试及发布前集成测试。本任务唯一拥有持久治理激活记录（状态、epoch、策略集合摘要、十九项处理器摘要、操作者、CAS、时间与审计 request_id），以及三项审批授权事件 consumer、生产 NATS 注册、真实 activation reader/事务 guard/credential authority guard和 APT-134 lifecycle worker 的生产 main 注册/启停总装；不改任何领域事实 schema；`000028` 已由 APT-136 唯一用于运行概览索引。
+- **状态机/原子边界**：初始只能是 `PRE_ACTIVATION`：旧 v1 direct 保持当前兼容行为，新治理/新审批写入口关闭，APT-134 lifecycle worker 不注册或不启动；全部一致性门禁成功后，只允许一次单事务 CAS 将 activation record 从 `PRE_ACTIVATION → ACTIVE`，同一持久 epoch 的同一次原子路由切换关闭三项旧 direct、接受新审批执行并开放其余十六项新治理 envelope，同时启动具备同 epoch transaction guard 的 lifecycle worker，不允许逐命令、逐实例或重复激活，不存在双写窗口。`ACTIVE → SAFE_ROLLBACK` 只停止十九项新写、审批领取、执行消费和 worker 新租约领取，已领取租约在提交前重验 epoch 并失败关闭；绝不重开旧 direct。修复并重跑全部门禁后只允许 `SAFE_ROLLBACK → ACTIVE`。禁止回到 `PRE_ACTIVATION`、跳过状态、客户端指定状态或仅切一项命令。
 - **N/N-1/故障恢复**：Account 创建审批前强一致校验 Token activation epoch；Token 处理 direct/执行/结果查询时校验同一持久 epoch。N-1 不认识 `ACTIVE/SAFE_ROLLBACK` 或策略集合摘要时失败关闭，新旧实例混跑不得自行降级 direct。切换进程崩溃、数据库提交不确定、事件重复/乱序、Account/Token 网络分区只按 activation CAS 与 command result 查询恢复，不重放写命令。
-- **总验收**：十九项逐一核对策略/权限/近期认证/reason/CAS/持久幂等/影响预检/审计/未知恢复、API handler 和领域存储所有者；三项审批逐字段比对 DB↔registry、allowlist、最小执行身份和 direct 403，十六项 `AUDIT_ONLY` 验证不可绕过中间件。故障注入覆盖切换前、CAS 提交中、提交后响应丢失、混合 N/N-1、重复事件、进入/退出 `SAFE_ROLLBACK`，证明状态迁移合法、零双写、零 direct 复活和审计连续。APT-133 提供的 credential authority guard 接缝在本任务接入真实 Account 权威源时必须使用贯穿事务的严格绝对 deadline；超时或不可确认时失败关闭并释放 Token 行锁，不允许外部查询无限延长持锁时间。
+- **总验收**：十九项逐一核对策略/权限/近期认证/reason/CAS/持久幂等/影响预检/审计/未知恢复、API handler 和领域存储所有者；三项审批逐字段比对 DB↔registry、allowlist、最小执行身份和 direct 403，十六项 `AUDIT_ONLY` 验证不可绕过中间件。故障注入覆盖切换前、CAS 提交中、提交后响应丢失、混合 N/N-1、重复事件、进入/退出 `SAFE_ROLLBACK`，证明状态迁移合法、零双写、零 direct 复活和审计连续。APT-134 worker 另以 PRE 零启动、ACTIVE 唯一注册、重复实例租约互斥、epoch 切换和 SAFE 停止新租约/在手租约提交失败关闭验收，恢复 ACTIVE 后只处理合法未终态计划且不重复领域效果。APT-133 提供的 credential authority guard 接缝在本任务接入真实 Account 权威源时必须使用贯穿事务的严格绝对 deadline；超时或不可确认时失败关闭并释放 Token 行锁，不允许外部查询无限延长持锁时间。
 - **回滚/不包含**：应用回滚只能 CAS 进入 `SAFE_ROLLBACK` 并保留 activation/command/audit 历史；`000029` down 在任何非 `PRE_ACTIVATION` 或有引用时失败关闭。不实现页面、领域命令、预检计算、凭据隔离、TLS/代理或生产部署；发现差异必须退回唯一所属 APT 修复，不能在本任务夹带修补。
 
 ### APT-137 分级发布、兼容与总回滚门禁
