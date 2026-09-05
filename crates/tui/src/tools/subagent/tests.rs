@@ -10761,6 +10761,9 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         tool_timeout: DEFAULT_TOOL_TIMEOUT,
         speech_output_dir: None,
         todos: crate::tools::todo::new_shared_todo_list(),
+        // Test stubs run without a manager-stamped governor; the LLM call
+        // path treats `None` as "report nothing".
+        governor: None,
     }
 }
 
@@ -13007,7 +13010,6 @@ fn launch_gate_defaults_to_launch_concurrency_capped_by_max_agents() {
 
 #[tokio::test]
 async fn launch_gate_queues_extra_direct_children() {
-    use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
 
     let tmp = tempdir().expect("tempdir");
@@ -13024,12 +13026,11 @@ async fn launch_gate_queues_extra_direct_children() {
     runtime.context = ToolContext::new(tmp.path());
     runtime.mailbox = Some(mailbox);
 
-    let gate = Arc::new(Semaphore::new(1));
+    let gate = Arc::new(governor::DynamicGate::new(1));
     let held_launch_permit = Arc::clone(&gate)
-        .acquire_owned()
-        .await
+        .try_acquire()
         .expect("test holds the single launch permit");
-    let spawn = |agent_id: &str, gate: Option<Arc<Semaphore>>| {
+    let spawn = |agent_id: &str, gate: Option<Arc<governor::DynamicGate>>| {
         let (input_tx, input_rx) = mpsc::unbounded_channel();
         let agent = SubAgent::new(
             agent_id.to_string(),
@@ -13156,7 +13157,6 @@ async fn launch_gate_queues_extra_direct_children() {
 
 #[tokio::test]
 async fn launch_gate_wait_counts_against_child_wall_timeout() {
-    use tokio::sync::Semaphore;
     use tokio_util::sync::CancellationToken;
 
     const WALL_TIME: Duration = Duration::from_millis(150);
@@ -13188,10 +13188,9 @@ async fn launch_gate_wait_counts_against_child_wall_timeout() {
     runtime.context = ToolContext::new(tmp.path());
     runtime.mailbox = Some(mailbox);
 
-    let gate = Arc::new(Semaphore::new(1));
+    let gate = Arc::new(governor::DynamicGate::new(1));
     let held_launch_permit = Arc::clone(&gate)
-        .acquire_owned()
-        .await
+        .try_acquire()
         .expect("test holds the single launch permit past the wall timeout");
     let task = SubAgentTask {
         manager_handle: Arc::clone(&manager),
