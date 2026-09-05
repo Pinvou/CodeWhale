@@ -281,6 +281,20 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 	envelope.TargetResourceType = strings.ToUpper(strings.TrimSpace(envelope.TargetResourceType))
 	envelope.TargetResourceID = strings.TrimSpace(envelope.TargetResourceID)
 	envelope.PrecheckFingerprint = strings.ToLower(strings.TrimSpace(envelope.PrecheckFingerprint))
+	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
+		command, err := parseModelPublishCommand(envelope.Command)
+		if err != nil {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+		envelope.Command, err = json.Marshal(command)
+		if err != nil {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+		envelope.Command, err = canonicalJSON(envelope.Command)
+		if err != nil {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+	}
 	key = strings.TrimSpace(key)
 	approvalFingerprint = strings.ToLower(strings.TrimSpace(approvalFingerprint))
 	spec, ok := tokenCommandSpecs[envelope.CommandType]
@@ -304,6 +318,13 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 		}
 	}
+	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
+		modelID, parseErr := uuid.Parse(envelope.TargetResourceID)
+		expected, expectedErr := parseModelPublishExpected(envelope.ExpectedVersions, modelID)
+		if parseErr != nil || expectedErr != nil || expected.PrecheckFingerprint != envelope.PrecheckFingerprint || expected.RequestFingerprint != modelPublishRequestFingerprint(envelope, facts) {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+	}
 	if _, err := hex.DecodeString(envelope.PrecheckFingerprint); err != nil || len(envelope.PrecheckFingerprint) != 64 {
 		return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 	}
@@ -322,6 +343,33 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 	fingerprintInput = append(fingerprintInput, []byte(approvalFingerprint)...)
 	fingerprintHash := sha256.Sum256(fingerprintInput)
 	return envelope, hex.EncodeToString(requestHash[:]), hex.EncodeToString(keyHash[:]), hex.EncodeToString(fingerprintHash[:]), nil
+}
+
+// modelPublishRequestFingerprint mirrors highRiskPayloadKey in the Portal:
+// every object key is ordered before JSON encoding and the two transport-only
+// proofs are excluded from the frozen authoritative facts.
+func modelPublishRequestFingerprint(envelope TokenCommandEnvelope, facts map[string]any) string {
+	domainFacts := make(map[string]any, len(facts))
+	for key, value := range facts {
+		if key != "request_fingerprint" && key != "precheck_fingerprint" {
+			domainFacts[key] = value
+		}
+	}
+	expected, expectedErr := json.Marshal(domainFacts)
+	command, commandErr := canonicalJSON(envelope.Command)
+	if expectedErr != nil || commandErr != nil {
+		return ""
+	}
+	payload, err := json.Marshal(map[string]any{
+		"command": command, "commandType": envelope.CommandType,
+		"expectedVersions": json.RawMessage(expected), "targetResourceID": envelope.TargetResourceID,
+		"targetResourceType": envelope.TargetResourceType,
+	})
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
 }
 
 func containsSensitiveCommandField(raw json.RawMessage) bool {
@@ -551,6 +599,34 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		return
 	}
 	begin := tokenCommandBegin{Envelope: envelope, ActorUserID: actor, ActorPermission: strings.Join(spec.Permissions, "+"), AuthorizationVersion: authorizationVersion, IdempotencyKey: r.Header.Get("Idempotency-Key"), AuditRequestID: httpserver.RequestID(r.Context())}
+	scheduledModelPublish := false
+	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
+		publishCommand, parseErr := parseModelPublishCommand(envelope.Command)
+		if parseErr != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		scheduledModelPublish = publishCommand.PublishMode == "SCHEDULED"
+		if scheduledModelPublish {
+			// A completed scheduled publication is immutable. Recover it before
+			// touching Token or Billing precheck sources so later draft drift does
+			// not turn an exact idempotent replay into a different outcome.
+			existing, existingErr := scanTokenCommandResult(repository.pool.QueryRow(r.Context(), tokenCommandResultSelect+` WHERE actor_user_id=$1 AND command_type='TOKEN_MODEL_PUBLISH' AND idempotency_key_digest=$2`, actor, keyDigest))
+			if existingErr == nil {
+				if existing.IdempotencyFingerprint != idempotencyFingerprint {
+					api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
+					return
+				}
+				w.Header().Set("Cache-Control", "no-store")
+				api.WriteJSON(w, http.StatusOK, existing)
+				return
+			}
+			if !errors.Is(existingErr, pgx.ErrNoRows) {
+				api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
+				return
+			}
+		}
+	}
 	if isRuntimeGovernedCommand(envelope.CommandType) {
 		item, _, runtimeErr := repository.ExecuteRuntimeTokenCommand(r.Context(), runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
 		if errors.Is(runtimeErr, ErrTokenCommandResultMismatch) {
@@ -598,6 +674,33 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		authoritativeBefore = precheck.ExpectedVersions
 	}
 	begin.BeforeState = authoritativeBefore
+	if scheduledModelPublish {
+		item, created, scheduleErr := repository.ScheduleModelPublish(r.Context(), begin)
+		switch {
+		case errors.Is(scheduleErr, ErrTokenCommandResultMismatch):
+			api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
+			return
+		case errors.Is(scheduleErr, ErrTokenCommandInvalid):
+			api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+			return
+		case errors.Is(scheduleErr, ErrCatalogVersionConflict), errors.Is(scheduleErr, ErrNotFound), errors.Is(scheduleErr, ErrProtocolFormulaPrecheck):
+			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
+			return
+		case errors.Is(scheduleErr, errLifecyclePlanWindowInvalid):
+			api.WriteError(w, http.StatusUnprocessableEntity, "LIFECYCLE_PLAN_WINDOW_INVALID", "the lifecycle plan effective time is outside the allowed window", httpserver.RequestID(r.Context()))
+			return
+		case scheduleErr != nil:
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "query the same command reference before retrying", httpserver.RequestID(r.Context()))
+			return
+		}
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, status, item)
+		return
+	}
 	item, created, err := repository.BeginTokenCommand(r.Context(), begin)
 	if errors.Is(err, ErrTokenCommandResultMismatch) {
 		api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
@@ -729,6 +832,10 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 	body.Envelope = canonicalEnvelope
+	if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && (!jsonSemanticEqual(body.CriticalResourceVersions, body.Envelope.ExpectedVersions) || len(body.FinancialSnapshot) == 0) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command snapshot is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
 	if commandType == "TOKEN_CREDENTIAL_REVOKE" {
 		if !tokenCommandExpectedVersionsMatch(body.CriticalResourceVersions, body.Envelope.ExpectedVersions) || !exactEmptyFinancialSnapshot(body.FinancialSnapshot) {
 			api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command snapshot is invalid", httpserver.RequestID(r.Context()))
@@ -746,6 +853,17 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if errors.Is(loadErr, ErrNotFound) {
+		// Authoritative lifecycle evidence is intentionally recomputed only for
+		// the first execution claim. A repeated Account event must replay the
+		// frozen result even when dependencies changed after the plan was
+		// scheduled; otherwise event delivery would cease to be idempotent.
+		if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+			projection, projectionErr := s.approvalCommandPrecheck(r.Context(), ApprovalSnapshotRequest{CommandType: commandType, TargetResourceType: body.Envelope.TargetResourceType, TargetResourceID: body.Envelope.TargetResourceID, NormalizedCommand: body.Envelope.Command})
+			if projectionErr != nil || projection.PrecheckFingerprint != body.Envelope.PrecheckFingerprint || !jsonSemanticEqual(projection.CriticalResourceVersions, body.CriticalResourceVersions) || !jsonSemanticEqual(projection.FinancialSnapshot, body.FinancialSnapshot) {
+				api.WriteError(w, http.StatusConflict, "PRECHECK_CHANGED", "the approved command no longer matches current resource facts", httpserver.RequestID(r.Context()))
+				return
+			}
+		}
 		before, precheckErr := s.approvedCommandExecutor.PrecheckApprovedTokenCommand(r.Context(), commandType, body.Envelope)
 		if precheckErr != nil {
 			api.WriteError(w, http.StatusConflict, "PRECHECK_CHANGED", "the approved command no longer matches current resource facts", httpserver.RequestID(r.Context()))
@@ -765,6 +883,26 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 	}
 	if item.Status != "PENDING" {
 		api.WriteJSON(w, http.StatusOK, item)
+		return
+	}
+	if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+		executor, supported := s.approvedCommandExecutor.(interface {
+			ExecuteApprovedModelLifecycle(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, json.RawMessage, json.RawMessage, TokenCommandEnvelope) (TokenCommandResult, error)
+		})
+		if !supported {
+			api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_EXECUTOR_UNAVAILABLE", "the approved lifecycle adapter is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+		completed, executeErr := executor.ExecuteApprovedModelLifecycle(r.Context(), item.CommandReference, body.RequesterUserID, body.ApprovalRequestID, body.CommandFingerprint, body.CriticalResourceVersions, body.FinancialSnapshot, body.Envelope)
+		if errors.Is(executeErr, ErrCatalogVersionConflict) || errors.Is(executeErr, ErrNotFound) || errors.Is(executeErr, ErrForbidden) || errors.Is(executeErr, ErrTokenCommandInvalid) {
+			api.WriteError(w, http.StatusConflict, "PRECHECK_CHANGED", "the approved command no longer matches current resource facts", httpserver.RequestID(r.Context()))
+			return
+		}
+		if executeErr != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "query the same command reference before retrying", httpserver.RequestID(r.Context()))
+			return
+		}
+		api.WriteJSON(w, http.StatusOK, completed)
 		return
 	}
 	if commandType == "TOKEN_CREDENTIAL_REVOKE" {

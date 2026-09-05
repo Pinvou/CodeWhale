@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
+import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
+import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact, validApprovalRequest } from './admin-high-risk-action-state.js';
 
 const MODEL_DETAIL_TABS = Object.freeze(['overview', 'capabilities', 'operations', 'pricing', 'lifecycle', 'audit']);
 
@@ -151,14 +153,105 @@ function PricingTab({ detail, client, copy }) {
   </DetailSource>;
 }
 
-function LifecycleTab({ detail, client, copy }) {
+function lifecycleApprovalDraft(plan, reason, impact, idempotencyKey) {
+  return {
+    command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', idempotency_key: idempotencyKey,
+    normalized_command: { model_id: plan.model_id, lifecycle_plan_id: plan.lifecycle_plan_id, lifecycle_plan_version: plan.lifecycle_plan_version, target_lifecycle: plan.target_lifecycle, effective_at: plan.effective_at, existing_session_cutoff_at: plan.existing_session_cutoff_at, replacement_model_id: plan.replacement_model_id },
+    target_resource_type: 'MODEL', target_resource_id: plan.model_id, reason,
+    redacted_evidence: { precheck_fingerprint: impact.precheck_fingerprint, token_observed_at: impact.token_observed_at, billing_observed_at: impact.billing_observed_at || null },
+    expected_impact: { blockers: impact.blockers, dependencies: impact.evidence.dependencies },
+    critical_resource_versions: impact.critical_resource_versions, financial_snapshot: impact.financial_snapshot,
+  };
+}
+
+async function submitLifecycleApproval(client, draft, signal) {
+  const created = await client.createApprovalDraft(draft, signal);
+  if (!validApprovalRequest(created, draft, ['DRAFT'])) throw Object.assign(new Error('invalid lifecycle approval draft'), { code: 'INVALID_APPROVAL_RESPONSE' });
+  try {
+    const submitted = await client.submitApprovalRequest(created.approval_request_id, created.version, signal);
+    if (!validApprovalRequest(submitted, draft, ['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'])) throw Object.assign(new Error('invalid lifecycle approval submit'), { code: 'INVALID_APPROVAL_RESPONSE' });
+    return submitted;
+  } catch (error) {
+    throw Object.assign(error instanceof Error ? error : new Error('lifecycle approval submit failed'), { commandReference: created.approval_request_id });
+  }
+}
+
+async function recoverLifecycleApproval(client, reference, draft, signal) {
+  const value = await client.approvalRequest(reference, signal);
+  const statuses = ['DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTING', 'EXECUTED', 'EXECUTION_FAILED'];
+  if (!validApprovalRequest(value, draft, statuses)) throw Object.assign(new Error('invalid lifecycle approval recovery'), { code: 'INVALID_APPROVAL_RESPONSE', commandReference: reference });
+  if (['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'].includes(value.status)) return value;
+  if (value.status === 'DRAFT') throw Object.assign(new Error('approval submission outcome remains unknown'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', commandReference: reference });
+  throw Object.assign(new Error('approval reached terminal state'), { code: `APPROVAL_${value.status}`, commandReference: reference, finalResult: true });
+}
+
+function localDateTime(instant) {
+  const value = new Date(instant);
+  value.setMinutes(value.getMinutes() - value.getTimezoneOffset());
+  return value.toISOString().slice(0, 16);
+}
+
+function LifecycleTab({ detail, client, copy, permissions, actionsEnabled, query, candidateQuery, onQueryChange, cursorHistory }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [planRefreshVersion, setPlanRefreshVersion] = useState(0);
+  const [planAction, setPlanAction] = useState(null);
+  const initialTarget = detail.model.lifecycle_status === 'DRAFT' ? 'PUBLISHED' : detail.model.lifecycle_status === 'PUBLISHED' ? 'DEPRECATED' : 'REMOVED';
+  const [form, setForm] = useState(() => ({ target_lifecycle: initialTarget, effective_at: localDateTime(Date.now() + 10 * 60 * 1000), existing_session_cutoff_at: '', replacement_model_id: '', reason: '' }));
+	const [candidateDraft, setCandidateDraft] = useState(candidateQuery.q || '');
+	const [selectedCandidate, setSelectedCandidate] = useState(null);
+  const [formState, setFormState] = useState({ busy: false, error: null });
+  const createKey = React.useRef({ signature: '', key: '' });
+	const createInflight = React.useRef(false);
   const model = detail.model;
-  const target = model.lifecycle_status === 'PUBLISHED' ? 'DEPRECATED' : model.lifecycle_status === 'DEPRECATED' ? 'REMOVED' : '';
-  const query = useMemo(() => ({ model_id: model.model_id, target }), [model.model_id, target]);
+	const canApprovalPlan = actionsEnabled && permissions.includes('platform.models.lifecycle.request') && (model.lifecycle_status === 'PUBLISHED' || model.lifecycle_status === 'DEPRECATED');
+	const canPublishPlan = actionsEnabled && permissions.includes('platform.models.manage') && model.lifecycle_status === 'DRAFT';
+	const canPlan = canApprovalPlan || canPublishPlan;
+  const target = model.lifecycle_status === 'DRAFT' ? 'PUBLISHED' : model.lifecycle_status === 'PUBLISHED' ? 'DEPRECATED' : model.lifecycle_status === 'DEPRECATED' ? 'REMOVED' : '';
+  const impactQuery = useMemo(() => ({ model_id: model.model_id, target }), [model.model_id, target]);
   const load = useMemo(() => async (filters, signal) => asCollection(await client.modelLifecycleImpact(filters.model_id, filters.target, '', signal)), [client]);
-  const state = useAdminSource({ enabled: Boolean(target), load, query, refreshVersion });
+  const state = useAdminSource({ enabled: Boolean(target) && target !== 'PUBLISHED', load, query: impactQuery, refreshVersion });
+  const planLoad = useMemo(() => (filters, signal) => client.modelLifecyclePlans(model.model_id, filters, signal), [client, model.model_id]);
+  const plans = useAdminSource({ enabled: true, load: planLoad, query, refreshVersion: planRefreshVersion });
+  // The write CAS must not depend on the operator's visible list filters.
+  // The newest plan is authoritative because rescheduling always freezes the
+  // previous active version before inserting the next monotonically versioned row.
+  const activePlans = useAdminSource({ enabled: canPlan, load: planLoad, query: { limit: 1 }, refreshVersion: planRefreshVersion });
+  const candidateLoad = useMemo(() => (filters, signal) => client.catalogModels({ ...filters, lifecycle_status: 'PUBLISHED' }, signal), [client]);
+  const [candidateRefreshVersion, setCandidateRefreshVersion] = useState(0);
+  const candidates = useAdminSource({ enabled: canPlan && form.target_lifecycle === 'REMOVED', load: candidateLoad, query: candidateQuery, refreshVersion: candidateRefreshVersion });
+  useEffect(() => { if (!canPlan) { setPlanAction(null); setFormState({ busy: false, error: null }); } }, [canPlan]);
+	useEffect(() => setCandidateDraft(candidateQuery.q || ''), [candidateQuery.q]);
   const impact = state.items[0];
+	const retryPlans = () => {
+		if (plans.error?.status === 410) { delete cursorHistory.current.modelLifecyclePlans; onQueryChange('modelLifecyclePlans', { ...query, cursor: '' }, 'replace'); }
+		else setPlanRefreshVersion((value) => value + 1);
+	};
+	const retryCandidates = () => {
+		if (candidates.error?.status === 410) { delete cursorHistory.current.modelLifecycleCandidates; onQueryChange('modelLifecycleCandidates', { ...candidateQuery, cursor: '' }, 'replace'); }
+		else setCandidateRefreshVersion((value) => value + 1);
+	};
+	const createPlan = async (event) => {
+		event.preventDefault();
+		if (!canPlan || formState.busy || createInflight.current) return;
+		const latestPlan = activePlans.items[0];
+		const activePlan = activePlans.items.find((item) => ['PENDING_APPROVAL', 'SCHEDULED'].includes(item.status));
+		const effectiveAt = new Date(form.effective_at).toISOString();
+		if (form.target_lifecycle === 'PUBLISHED') {
+			setPlanAction({ type: 'SCHEDULE_PUBLISH', command: { model_id: model.model_id, publish_mode: 'SCHEDULED', lifecycle_plan_id: globalThis.crypto.randomUUID(), lifecycle_plan_version: Number(latestPlan?.lifecycle_plan_version || 0) + 1, effective_at: effectiveAt }, reason: form.reason.trim() });
+			return;
+		}
+		const input = { expected_catalog_version: model.catalog_version, expected_plan_version: Number(activePlan?.lifecycle_plan_version || 0), target_lifecycle: form.target_lifecycle, effective_at: effectiveAt, existing_session_cutoff_at: form.target_lifecycle === 'REMOVED' ? effectiveAt : form.target_lifecycle === 'DEPRECATED' && form.existing_session_cutoff_at ? new Date(form.existing_session_cutoff_at).toISOString() : null, replacement_model_id: form.target_lifecycle === 'REMOVED' ? form.replacement_model_id || null : null, force_cancel_inflight: false, reason: form.reason.trim() };
+		const signature = JSON.stringify(input);
+		if (createKey.current.signature !== signature) createKey.current = { signature, key: `model-lifecycle-plan-${globalThis.crypto.randomUUID()}` };
+		createInflight.current = true;
+		setFormState({ busy: true, error: null });
+		try {
+			const plan = await client.createModelLifecyclePlan(model.model_id, input, createKey.current.key);
+			createKey.current = { signature: '', key: '' };
+			setFormState({ busy: false, error: null }); setPlanAction({ type: 'APPROVE', plan }); setPlanRefreshVersion((value) => value + 1);
+		} catch (error) { setFormState({ busy: false, error: { code: error.code || 'LIFECYCLE_PLAN_UNAVAILABLE', requestID: error.requestID || '' } }); }
+		finally { createInflight.current = false; }
+	};
   return <div className="adm-model-detail-stack">
     <section className="adm-card adm-model-detail-panel" aria-labelledby="model-lifecycle-heading"><h2 id="model-lifecycle-heading">{copy.detailLifecycle}</h2><p className="adm-source-lead">{copy.detailLifecycleLead}</p><Facts>
       <Fact label={copy.lifecycle}><Status value={model.lifecycle_status} copy={copy} /></Fact>
@@ -187,6 +280,23 @@ function LifecycleTab({ detail, client, copy }) {
         {impact.blockers?.length > 0 && <div className="adm-inline-message warning" role="status">{impact.blockers.map((item) => copy.enumLabels[item] || item).join(' · ')}</div>}
       </>}
     </DetailSource>}
+		<section className="adm-card adm-source-card" aria-labelledby="model-lifecycle-plans-heading">
+			<SourceHeader title={copy.lifecyclePlans} titleID="model-lifecycle-plans-heading" state={plans} copy={copy} onRetry={retryPlans} />
+			<p className="adm-source-lead">{copy.lifecyclePlansLead}</p>
+			<FilterForm source="modelLifecyclePlans" query={query} copy={copy} onQueryChange={onQueryChange} fields={[{ key: 'status', label: copy.status, options: ['PENDING_APPROVAL','SCHEDULED','EXECUTING','APPLIED','CANCELLED','EXPIRED','INVALIDATED','FAILED','UNKNOWN'] }, { key: 'target_lifecycle', label: copy.targetLifecycle, options: ['PUBLISHED','DEPRECATED','REMOVED'] }]} />
+			<SourceFeedback state={plans} copy={copy} onRetry={retryPlans} />
+			{plans.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.planVersion}</th><th>{copy.targetLifecycle}</th><th>{copy.actionEffectiveAt}</th><th>{copy.existingSessionCutoff}</th><th>{copy.replacementModel}</th><th>{copy.status}</th><th>{copy.actions}</th></tr></thead><tbody>{plans.items.map((plan) => <tr key={plan.lifecycle_plan_id}><td data-label={copy.planVersion}>v{plan.lifecycle_plan_version}</td><td data-label={copy.targetLifecycle}><Status value={plan.target_lifecycle} copy={copy} /></td><td data-label={copy.actionEffectiveAt}>{formatDate(plan.effective_at)}</td><td data-label={copy.existingSessionCutoff}>{formatDate(plan.existing_session_cutoff_at)}</td><td data-label={copy.replacementModel}>{plan.replacement_model_id ? <span className="adm-mono">{plan.replacement_model_id}</span> : '—'}</td><td data-label={copy.status}><Status value={plan.status} copy={copy} /></td><td data-label={copy.actions}><div className="adm-row-actions">{canApprovalPlan && plan.status === 'PENDING_APPROVAL' && <button type="button" onClick={() => setPlanAction({ type: 'APPROVE', plan })}>{copy.requestApproval}</button>}{((plan.target_lifecycle === 'PUBLISHED' && canPublishPlan) || (plan.target_lifecycle !== 'PUBLISHED' && canApprovalPlan)) && ['PENDING_APPROVAL','SCHEDULED'].includes(plan.status) && <button type="button" onClick={() => setPlanAction({ type: 'CANCEL', plan })}>{copy.cancelPlan}</button>}</div></td></tr>)}</tbody></table></div>}
+			<Pagination source="modelLifecyclePlans" query={query} state={plans} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} />
+		</section>
+		{canPlan && form.target_lifecycle === 'REMOVED' && <section className="adm-card adm-source-card" aria-labelledby="model-lifecycle-candidates-heading"><SourceHeader title={copy.replacementCandidates} titleID="model-lifecycle-candidates-heading" state={candidates} copy={copy} onRetry={retryCandidates} /><p className="adm-source-lead">{copy.replacementCandidatesLead}</p><div className="adm-model-token-filters"><label><span>{copy.search}</span><input type="search" value={candidateDraft} placeholder={copy.modelSearch} onChange={(event) => setCandidateDraft(event.target.value)} /></label><button type="button" onClick={() => onQueryChange('modelLifecycleCandidates', { q: candidateDraft, cursor: '' })}>{copy.search}</button><button type="button" className="secondary" onClick={() => { setCandidateDraft(''); onQueryChange('modelLifecycleCandidates', { q: '', cursor: '' }); }}>{copy.clear}</button></div><SourceFeedback state={candidates} copy={copy} onRetry={retryCandidates} /><Pagination source="modelLifecycleCandidates" query={candidateQuery} state={candidates} copy={copy} cursorHistory={cursorHistory} onQueryChange={onQueryChange} /></section>}
+		{canPlan && <form className="adm-card adm-model-detail-panel adm-lifecycle-plan-form" onSubmit={createPlan} aria-labelledby="model-lifecycle-plan-create-heading"><h2 id="model-lifecycle-plan-create-heading">{copy.createLifecyclePlan}</h2><p className="adm-source-lead">{copy.lifecyclePlanTimeHint}</p>
+			{activePlans.error && <SourceFeedback state={activePlans} copy={copy} onRetry={() => setPlanRefreshVersion((value) => value + 1)} />}
+			<div className="adm-lifecycle-plan-fields"><label>{copy.targetLifecycle}<select value={form.target_lifecycle} onChange={(event) => setForm((value) => ({ ...value, target_lifecycle: event.target.value, existing_session_cutoff_at: '', replacement_model_id: '' }))}>{model.lifecycle_status === 'DRAFT' && <option value="PUBLISHED">{copy.enumLabels.PUBLISHED}</option>}{model.lifecycle_status === 'PUBLISHED' && <><option value="DEPRECATED">{copy.enumLabels.DEPRECATED}</option><option value="REMOVED">{copy.enumLabels.REMOVED}</option></>}{model.lifecycle_status === 'DEPRECATED' && <option value="REMOVED">{copy.enumLabels.REMOVED}</option>}</select></label><label>{copy.actionEffectiveAt}<input type="datetime-local" required value={form.effective_at} onChange={(event) => setForm((value) => ({ ...value, effective_at: event.target.value }))} /></label>{form.target_lifecycle === 'DEPRECATED' && <label>{copy.existingSessionCutoff}<input type="datetime-local" min={form.effective_at} value={form.existing_session_cutoff_at} onChange={(event) => setForm((value) => ({ ...value, existing_session_cutoff_at: event.target.value }))} /></label>}{form.target_lifecycle === 'REMOVED' && <label>{copy.replacementModel}<select required value={form.replacement_model_id} onChange={(event) => { const item = candidates.items.find((candidate) => candidate.model_id === event.target.value); if (item) setSelectedCandidate(item); setForm((value) => ({ ...value, replacement_model_id: event.target.value })); }}><option value="">{copy.chooseReplacement}</option>{selectedCandidate && !candidates.items.some((item) => item.model_id === selectedCandidate.model_id) && <option value={selectedCandidate.model_id}>{selectedCandidate.display_name}</option>}{candidates.items.filter((item) => item.model_id !== model.model_id).map((item) => <option key={item.model_id} value={item.model_id}>{item.display_name}</option>)}</select></label>}</div>
+			{form.target_lifecycle === 'REMOVED' && <p className="adm-source-lead">{copy.removedCutoffLocked}</p>}<label>{copy.reason}<textarea minLength="10" maxLength="2000" required rows="3" value={form.reason} onChange={(event) => setForm((value) => ({ ...value, reason: event.target.value }))} /></label>{formState.error && <div className="adm-inline-message error" role="alert">{copy.commandErrors?.[formState.error.code] || copy.lifecyclePlanFailed}{formState.error.requestID && <small>{copy.requestID}: {formState.error.requestID}</small>}</div>}<button type="submit" disabled={formState.busy || (form.target_lifecycle === 'REMOVED' && (candidates.loading || Boolean(candidates.error))) || activePlans.loading || Boolean(activePlans.error)}>{formState.busy ? copy.submitting : copy.prepareLifecyclePlan}</button>
+		</form>}
+		{planAction?.type === 'SCHEDULE_PUBLISH' && canPublishPlan && <AdminHighRiskActionDialog action={{ key: `schedule-model-publish-${planAction.command.lifecycle_plan_id}`, impactAction: 'TOKEN_MODEL_PUBLISH', title: copy.publishModel, lead: copy.lifecyclePlanTimeHint }} copy={copy} target={{ label: model.display_name, version: `${copy.planVersion}: ${planAction.command.lifecycle_plan_version}`, effectiveAt: formatDate(planAction.command.effective_at) }} policy="AUDIT_ONLY" recentAuth initialReason={planAction.reason} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_MODEL_PUBLISH', target_resource_type: 'MODEL', target_resource_id: model.model_id, command: planAction.command }, signal), { commandType: 'TOKEN_MODEL_PUBLISH', targetResourceType: 'MODEL', targetResourceID: model.model_id })} onClose={() => setPlanAction(null)} execute={async (payload, key, signal) => requireGovernedTokenCommandResult(await client.createGovernedTokenCommand(await governedTokenEnvelope({ commandType: 'TOKEN_MODEL_PUBLISH', targetResourceType: 'MODEL', targetResourceID: model.model_id, reason: payload.reason, impact: payload.precheck, command: planAction.command }), key, signal), { commandType: 'TOKEN_MODEL_PUBLISH', targetResourceType: 'MODEL', targetResourceID: model.model_id })} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_MODEL_PUBLISH', targetResourceType: 'MODEL', targetResourceID: model.model_id })} onCompleted={() => setPlanRefreshVersion((value) => value + 1)} />}
+		{planAction?.type === 'APPROVE' && canApprovalPlan && <AdminHighRiskActionDialog action={{ key: `approve-lifecycle-plan-${planAction.plan.lifecycle_plan_id}`, impactAction: `MODEL_LIFECYCLE_${planAction.plan.target_lifecycle}`, title: copy.requestLifecycleApproval, lead: copy.lifecycleApprovalLead }} copy={copy} target={{ label: model.display_name, version: `${copy.planVersion}: ${planAction.plan.lifecycle_plan_version}`, effectiveAt: formatDate(planAction.plan.effective_at) }} policy="APPROVAL_REQUIRED" recentAuth dangerous={planAction.plan.target_lifecycle === 'REMOVED'} initialReason={planAction.plan.reason} impactLoader={async (signal) => requireTokenApprovalImpact(await client.modelLifecycleImpact(model.model_id, planAction.plan.target_lifecycle, planAction.plan.replacement_model_id || '', signal, planAction.plan.lifecycle_plan_id), { action: `MODEL_LIFECYCLE_${planAction.plan.target_lifecycle}`, commandType: 'TOKEN_MODEL_LIFECYCLE_CHANGE', targetResourceID: model.model_id, targetStatus: planAction.plan.target_lifecycle })} onClose={() => setPlanAction(null)} execute={(payload, key, signal) => submitLifecycleApproval(client, lifecycleApprovalDraft(planAction.plan, payload.reason, payload.precheck, key), signal)} recover={(reference, signal, payload) => recoverLifecycleApproval(client, reference, lifecycleApprovalDraft(planAction.plan, payload.reason, payload.precheck, ''), signal)} onCompleted={() => setPlanRefreshVersion((value) => value + 1)} />}
+		{planAction?.type === 'CANCEL' && canPlan && <AdminHighRiskActionDialog action={{ key: `cancel-lifecycle-plan-${planAction.plan.lifecycle_plan_id}`, impactAction: `MODEL_LIFECYCLE_${planAction.plan.target_lifecycle}`, title: copy.cancelLifecyclePlan, lead: copy.cancelLifecyclePlanLead }} copy={copy} target={{ label: model.display_name, version: `${copy.planVersion}: ${planAction.plan.lifecycle_plan_version}`, effectiveAt: formatDate(planAction.plan.effective_at) }} policy="AUDIT_ONLY" initialReason={copy.cancelLifecyclePlanDefaultReason} precheckEnabled={false} impactRequired={false} onClose={() => setPlanAction(null)} execute={async (payload, key, signal) => { try { return await client.cancelModelLifecyclePlan(model.model_id, planAction.plan.lifecycle_plan_id, { expected_plan_version: planAction.plan.lifecycle_plan_version, reason: payload.reason }, key, signal); } catch (error) { throw Object.assign(error, { commandReference: planAction.plan.lifecycle_plan_id }); } }} recover={async (_, signal) => { const current = await client.modelLifecyclePlan(model.model_id, planAction.plan.lifecycle_plan_id, signal); if (current.status !== 'CANCELLED') throw Object.assign(new Error('cancellation outcome remains unknown'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', commandReference: planAction.plan.lifecycle_plan_id }); return current; }} onCompleted={() => setPlanRefreshVersion((value) => value + 1)} />}
   </div>;
 }
 
@@ -212,7 +322,7 @@ function AuditTab({ modelID, client, copy, query, onQueryChange, cursorHistory }
   </section>;
 }
 
-export function AdminModelDetailWorkspace({ modelID, client, copy, permissions, routeVersion, onRouteChange, onQueryChange, cursorHistory, onTabsKeyDown }) {
+export function AdminModelDetailWorkspace({ modelID, client, copy, permissions, actionsEnabled = false, routeVersion, onRouteChange, onQueryChange, cursorHistory, onTabsKeyDown }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [copied, setCopied] = useState(false);
   const requestedTab = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_detail_tab') || 'overview', [routeVersion]);
@@ -231,8 +341,10 @@ export function AdminModelDetailWorkspace({ modelID, client, copy, permissions, 
   const provisioningQuery = useMemo(() => readAdminModelTokenQuery('modelProvisionings'), [routeVersion]);
   const auditQuery = useMemo(() => readAdminModelTokenQuery('modelAudit'), [routeVersion]);
   const historyQuery = useMemo(() => readAdminModelTokenQuery('modelHistory'), [routeVersion]);
+	const lifecyclePlanQuery = useMemo(() => readAdminModelTokenQuery('modelLifecyclePlans'), [routeVersion]);
+	const lifecycleCandidateQuery = useMemo(() => readAdminModelTokenQuery('modelLifecycleCandidates'), [routeVersion]);
   useEffect(() => setCopied(false), [modelID]);
-  const back = () => onRouteChange({ model_id: null, model_detail_tab: null, ...adminModelTokenQueryUpdates('modelProvisionings', {}), ...adminModelTokenQueryUpdates('modelAudit', {}), ...adminModelTokenQueryUpdates('modelHistory', {}) }, 'push');
+  const back = () => onRouteChange({ model_id: null, model_detail_tab: null, ...adminModelTokenQueryUpdates('modelProvisionings', {}), ...adminModelTokenQueryUpdates('modelAudit', {}), ...adminModelTokenQueryUpdates('modelHistory', {}), ...adminModelTokenQueryUpdates('modelLifecyclePlans', {}), ...adminModelTokenQueryUpdates('modelLifecycleCandidates', {}) }, 'push');
   return <article className="adm-model-detail">
     <header className="adm-card adm-model-detail-header">
       <button type="button" className="adm-back" onClick={back}>← {copy.backToModelDirectory}</button>
@@ -247,7 +359,7 @@ export function AdminModelDetailWorkspace({ modelID, client, copy, permissions, 
         {tab === 'capabilities' && <CapabilitiesTab detail={detail} client={client} copy={copy} historyQuery={historyQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
         {tab === 'operations' && <OperationsTab modelID={modelID} client={client} copy={copy} query={provisioningQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
         {tab === 'pricing' && <PricingTab detail={detail} client={client} copy={copy} />}
-        {tab === 'lifecycle' && <LifecycleTab detail={detail} client={client} copy={copy} />}
+        {tab === 'lifecycle' && <LifecycleTab detail={detail} client={client} copy={copy} permissions={permissions} actionsEnabled={actionsEnabled} query={lifecyclePlanQuery} candidateQuery={lifecycleCandidateQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
         {tab === 'audit' && <AuditTab modelID={modelID} client={client} copy={copy} query={auditQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
       </div>
     </>}

@@ -68,7 +68,13 @@ func credentialRevokeCriticalFromEvidence(accountID, credentialID uuid.UUID, evi
 }
 
 func (e *PostgresApprovedCredentialExecutor) PrecheckApprovedTokenCommand(ctx context.Context, commandType string, envelope TokenCommandEnvelope) (json.RawMessage, error) {
-	if e == nil || e.repository == nil || commandType != "TOKEN_CREDENTIAL_REVOKE" {
+	if e == nil || e.repository == nil {
+		return nil, ErrTokenCommandInvalid
+	}
+	if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+		return e.precheckApprovedLifecyclePlan(ctx, envelope)
+	}
+	if commandType != "TOKEN_CREDENTIAL_REVOKE" {
 		return nil, ErrTokenCommandInvalid
 	}
 	command, expected, err := parseCredentialRevokeEnvelope(envelope)

@@ -24,6 +24,7 @@ type adminPaginationRepository interface {
 	reserveAdminQueryRate(context.Context, uuid.UUID, string, string, bool) error
 	adminModelsByIDs(context.Context, []string) ([]AdminCatalogModel, error)
 	adminModelVersionsByIDs(context.Context, uuid.UUID, []string) ([]AdminModelVersion, error)
+	adminLifecyclePlansByIDs(context.Context, uuid.UUID, []string) ([]LifecyclePlan, error)
 	adminProtocolsByIDs(context.Context, []string) ([]ProtocolDefinition, error)
 	adminFormulasByIDs(context.Context, []string) ([]ProtocolFormulaVersion, error)
 	adminTokenAccountsByIDs(context.Context, []string) ([]AdminTokenAccount, error)

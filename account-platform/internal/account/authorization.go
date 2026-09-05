@@ -38,6 +38,7 @@ const (
 	PermissionPlatformRegistrationsRepair        = "platform.registrations.repair"
 	PermissionPlatformProfileChangesRepair       = "platform.profile-changes.repair"
 	PermissionPlatformTokenOwnerCandidatesRead   = "platform.tokens.owner-candidates.read"
+	PermissionPlatformModelsLifecycleRequest     = "platform.models.lifecycle.request"
 	PermissionPersonalSessionLogin               = "personal.session.login"
 	PermissionPersonalProfileRead                = "personal.profile.read"
 	PermissionPersonalProfileUpdate              = "personal.profile.update"

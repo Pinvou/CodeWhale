@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，123 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，7 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，1 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，124 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，7 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -157,7 +157,7 @@
 | APT-131 | 模型与 Token 结构化高风险交互与未知结果恢复 | UI-52 | APT-123–APT-130 | CODE | DONE |
 | APT-132 | 模型独立详情、六页签与资源审计 | UI-53 | APT-121, APT-126–APT-128, APT-131 | CODE | DONE |
 | APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | DONE |
-| APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | IN_REVIEW |
+| APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | DONE |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | PENDING |
 | APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | PENDING |
 | APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138 | CODE+ENV | PENDING |
@@ -375,9 +375,9 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-134 模型生命周期计划与依赖分析
 
-> 实现状态（2026-09-05）：`IN_REVIEW / REOPENED_REMEDIATION`。首轮审核的替代模型服务覆盖与固定全序漂移证据、`REMOVED` 精确截止、down 历史保护、弃用/下架 Account→Token 审批执行链以及 Portal 替代候选分页五项已完成整改并获二轮复审认可。计划发布仍待按已冻结合同整改：复用 APT-124 `TOKEN_MODEL_PUBLISH / AUDIT_ONLY` 权威预检，原子产生 `SCHEDULED` 计划，到期再复用即时发布的单一领域效果；不得进入 Account 审批。当前既有发布计划实现与测试证据不能作为完成证据，二轮代码复审通过前保持本任务未完成、未提交、未推送、未部署。领域 worker 仍未在生产 main 注册，APT-138 激活边界不变。
+> 实现状态（2026-09-05）：`DONE`。模型发布、弃用与下架均已形成不可变计划、权威依赖/价格/路由/Provisioning/在途请求证据、版本与 CAS、取消/过期/冲突及审计闭环；`REMOVED` 的新会话与存量会话截止统一冻结为精确生效时间。`DRAFT → PUBLISHED` 复用 `TOKEN_MODEL_PUBLISH / AUDIT_ONLY`，在同一 Token 事务持久化 governed result 与 `SCHEDULED` 计划，到期才按即时发布等价语义锁定、重验、生成目录版本并删除草稿；弃用/下架继续走 Account 独立审批、授权事件、执行租约和 Token executor。生产 worker 仍未在 main 注册，APT-138 激活边界不变；当前未推送、未部署。
 
-> APT-134 首轮代码审核整改记录（2026-09-05）：身份 B 指出替代模型缺少完整可服务覆盖与漂移证据、下架截止冻结值和最终事实不一致、down 会删除待审批历史、真实 PostgreSQL 未穿 Account 审批全链、替代模型选择器只加载首屏，以及计划发布未交付。身份 A 对前五项的整改已在第二轮获确认：替代模型与目标模型的目录、resolved 健康路由、有效匹配凭据和 READY Provisioning 进入固定全序证据，独立 Billing 快照继续证明价格；`REMOVED` 截止与最终目录一致；down 对任一 plan/event 失败关闭；弃用/下架隔离链穿过 Account 强授权、独立审批、授权事件、执行租约、Token executor 与 due worker；Portal 候选使用服务端搜索分页和 410 重建。第二轮确认 `DRAFT → PUBLISHED` 不能复用该审批链，现有直接复制 DRAFT 目录行的实现尚不合格，必须按本节冻结的 `TOKEN_MODEL_PUBLISH / AUDIT_ONLY` 计划子合同重新实现和验证；因此本轮不宣称计划发布、全量 CI 或 APT-134 已完成。
+> APT-134 代码审核记录（2026-09-05）：身份 B 经五轮独立复审后 `PASS`。前四轮依次闭合替代模型完整可服务覆盖与固定全序漂移证据、精确截止/down 历史保护、真实 Account→Token 审批链、服务端候选分页、计划发布真实草稿语义、合法迁移对、幂等键轮换、按目标权限取消、权威 request fingerprint、legacy `IMMEDIATE` 兼容、15 字段冻结证据及即时/计划结果互斥；第五轮确认 UTC 整秒 JS/Go 固定指纹向量、错误权限族对现有/随机计划不可区分且零写，以及草稿删除/协议失效等确定性 worker 漂移原子进入 `INVALIDATED` 且不再领取。Token/Account Go、闭合 Ajv/合同、OpenAPI、ESLint、Portal build、i18n、架构、任务、授权、迁移清单与 diff 门禁通过，模型操作和模型详情生产 Chromium smoke 均连续 5/5 通过。本地未配置 PostgreSQL URL 时具名用例明确 `SKIP`，PR 隔离库已登记 no-SKIP。APT-135/136 未实现，APT-138 consumer/worker 激活未启动。
 
 - **目标/范围**：主目标 `UI-55`。修改 `migrations/token/000027_*`、`internal/token/{catalog.go,catalog_http.go}` 及 lifecycle plan/worker、Token OpenAPI、Portal 模型详情既有“生命周期与依赖”页签和测试；本任务唯一拥有计划版本、计划状态与执行租约 schema，只向 APT-132 已冻结页签增量交付内容，不新建/改名/拆分页签。
 - **治理/兼容/回滚**：展示 APT-124 价格/路由/Provisioning/在途请求/会话/替代模型依赖，支持计划发布、弃用、下架以及新会话/存量会话截止时间。计划发布冻结 `expected_catalog_version`、`expected_draft_version`、完整草稿内容及即时发布的协议/能力/别名/价格/路由证据，通过既有 `TOKEN_MODEL_PUBLISH / AUDIT_ONLY` governed command 后进入 `SCHEDULED`；弃用/下架才提交 APT-123 lifecycle v2 审批，把 `lifecycle_plan_version` 纳入 13+6 快照并由 worker 消费获批事件。gate 关闭先停止新计划与 worker 领租，保留既有计划只读和审计，禁止用 down 反向恢复已执行生命周期事实。

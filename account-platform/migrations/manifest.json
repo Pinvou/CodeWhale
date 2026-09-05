@@ -1278,6 +1278,16 @@
         "file": "000026_credential_isolation.up.sql",
         "version": 26,
         "sha256": "a0024f770eae00b2e4a6c20636289d3a3e3a66edf3ddf9fd3c4e213082e6b0cd"
+      },
+      {
+        "file": "000027_model_lifecycle_plans.down.sql",
+        "version": 27,
+        "sha256": "ed21e7ae5bc532243cc632365aee9247a7f89a6f5006d48b05dfdec21b3537aa"
+      },
+      {
+        "file": "000027_model_lifecycle_plans.up.sql",
+        "version": 27,
+        "sha256": "f2d3ae85f7bd50d1599df649f1a51e667e43560ecc4076e3338571b9ab7480de"
       }
     ]
   }

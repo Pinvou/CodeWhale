@@ -791,6 +791,8 @@ func TestModelTokenActionGateRejectsLegacyV2AndAccountApprovalWritesBeforeProxy(
 	}{
 		{name: "legacy token write", method: http.MethodPost, resource: "admin/v1/models:sync", status: http.StatusNotFound},
 		{name: "v2 token write", method: http.MethodPut, resource: "admin/v2/token-accounts/0198fbf7-c3ba-7bc4-8849-c157740963de/routes", status: http.StatusNotFound},
+		{name: "lifecycle plan create", method: http.MethodPost, resource: "admin/v1/models/0198fbf7-c3ba-7bc4-8849-c157740963de/lifecycle-plans", status: http.StatusNotFound},
+		{name: "lifecycle plan cancel", method: http.MethodPost, resource: "admin/v1/models/0198fbf7-c3ba-7bc4-8849-c157740963de/lifecycle-plans/0198fbf7-c3ba-7bc4-8849-c157740963df/cancel", status: http.StatusNotFound},
 		{name: "token approval draft", method: http.MethodPost, resource: "admin/v1/approval-requests", body: `{"command_type":"TOKEN_MODEL_LIFECYCLE_CHANGE"}`, account: true, status: http.StatusNotFound},
 		{name: "unclassified approval draft", method: http.MethodPost, resource: "admin/v1/approval-requests", body: `{"reason":"missing command classification"}`, account: true, status: http.StatusServiceUnavailable},
 		{name: "malformed approval draft", method: http.MethodPost, resource: "admin/v1/approval-requests", body: `{"command_type":`, account: true, status: http.StatusServiceUnavailable},

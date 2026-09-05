@@ -836,7 +836,9 @@ func validTokenApprovalCriticalValue(policy approvalpolicy.Policy, name string, 
 			return parsed == policy.PolicyVersion
 		}
 		if name == "lifecycle_plan_version" {
-			return parsed == 0
+			// Zero is the N-1 immediate lifecycle approval sentinel. Positive
+			// versions are immutable APT-134 lifecycle plan revisions.
+			return parsed >= 0
 		}
 		return parsed >= 1
 	}
@@ -860,7 +862,7 @@ func validTokenApprovalCriticalValue(policy approvalpolicy.Policy, name string, 
 		return slices.Contains([]string{"PENDING", "ACTIVE", "RETIRED", "REVOKED"}, strings.ToUpper(text))
 	}
 	if name == "current_lifecycle" || name == "target_lifecycle" {
-		return slices.Contains([]string{"PUBLISHED", "DEPRECATED", "REMOVED"}, strings.ToUpper(text))
+		return slices.Contains([]string{"DRAFT", "PUBLISHED", "DEPRECATED", "REMOVED"}, strings.ToUpper(text))
 	}
 	return true
 }

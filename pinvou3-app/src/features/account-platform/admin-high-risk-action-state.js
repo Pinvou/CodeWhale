@@ -25,6 +25,17 @@ export function highRiskPayloadKey(value) {
   return JSON.stringify(stable(value));
 }
 
+function canonicalTokenCommand(commandType, command) {
+  const normalized = commandType === 'TOKEN_MODEL_PUBLISH' && !command.publish_mode
+    ? { ...command, publish_mode: 'IMMEDIATE' }
+    : { ...command };
+  if (commandType === 'TOKEN_MODEL_PUBLISH' && normalized.publish_mode === 'SCHEDULED') {
+    const instant = Date.parse(String(normalized.effective_at || ''));
+    if (Number.isFinite(instant)) normalized.effective_at = new Date(Math.floor(instant / 1000) * 1000).toISOString().replace('.000Z', 'Z');
+  }
+  return normalized;
+}
+
 async function sha256(value) {
   const bytes = new TextEncoder().encode(value);
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
@@ -32,8 +43,9 @@ async function sha256(value) {
 }
 
 export async function governedTokenEnvelope({ commandType, targetResourceType, targetResourceID, reason, impact, expectedVersions = {}, command = {} }) {
+  const normalizedCommand = canonicalTokenCommand(commandType, command);
   const frozenVersions = impact?.expected_versions && typeof impact.expected_versions === 'object' && !Array.isArray(impact.expected_versions) ? impact.expected_versions : expectedVersions;
-  const requestFingerprint = await sha256(highRiskPayloadKey({ commandType, targetResourceType, targetResourceID, expectedVersions: frozenVersions, command }));
+  const requestFingerprint = await sha256(highRiskPayloadKey({ commandType, targetResourceType, targetResourceID, expectedVersions: frozenVersions, command: normalizedCommand }));
   const versionEvidence = { ...frozenVersions, request_fingerprint: requestFingerprint };
   if (precheckVersionCommands.has(commandType)) versionEvidence.precheck_fingerprint = impact.precheck_fingerprint;
   return {
@@ -43,7 +55,7 @@ export async function governedTokenEnvelope({ commandType, targetResourceType, t
     target_resource_id: targetResourceID,
     expected_versions: versionEvidence,
     precheck_fingerprint: impact.precheck_fingerprint,
-    command,
+    command: normalizedCommand,
   };
 }
 

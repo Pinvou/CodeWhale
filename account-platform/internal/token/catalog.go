@@ -463,6 +463,22 @@ func (r *PostgresRepository) PublishCatalogDraft(ctx context.Context, modelID uu
 		}
 		return item, tx.Commit(ctx)
 	}
+	item, err := publishCatalogDraftEffect(ctx, tx, modelID, expectedCatalog, expectedDraft, reason, actor, capabilities, now)
+	if err != nil {
+		return CatalogModel{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2,result_model_id=$3 WHERE idempotency_key=$1`, key, item.CatalogVersion, modelID); err != nil {
+		return CatalogModel{}, err
+	}
+	return item, tx.Commit(ctx)
+}
+
+// publishCatalogDraftEffect is the single transactional domain effect shared
+// by immediate and scheduled publication. The caller owns the transaction and
+// must hold the catalog publication lock. It deliberately does not claim an
+// immediate-publication idempotency row: scheduled publication is governed by
+// token_command_results and the immutable lifecycle plan instead.
+func publishCatalogDraftEffect(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, expectedCatalog, expectedDraft int64, reason string, actor uuid.UUID, capabilities []GatewayProtocolCapability, now time.Time) (CatalogModel, error) {
 	current, err := currentCatalogVersion(ctx, tx)
 	if err != nil || current != expectedCatalog {
 		return CatalogModel{}, ErrCatalogVersionConflict
@@ -510,9 +526,6 @@ SELECT $1,e.model_id,$2,$3,$4,$5,'PUBLISHED',$6,$7,e.source_available,e.source_m
 	if _, err := tx.Exec(ctx, `DELETE FROM model_catalog_drafts WHERE model_id=$1`, modelID); err != nil {
 		return CatalogModel{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2,result_model_id=$3 WHERE idempotency_key=$1`, key, version, modelID); err != nil {
-		return CatalogModel{}, err
-	}
 	if err := appendCatalogAudit(ctx, tx, actor, "MODEL_PUBLISHED", &modelID, strPtr("DRAFT"), strPtr("PUBLISHED"), version, reason, map[string]any{"draft_version": expectedDraft}); err != nil {
 		return CatalogModel{}, err
 	}
@@ -520,7 +533,7 @@ SELECT $1,e.model_id,$2,$3,$4,$5,'PUBLISHED',$6,$7,e.source_available,e.source_m
 	if err != nil {
 		return CatalogModel{}, err
 	}
-	return item, tx.Commit(ctx)
+	return item, nil
 }
 
 func ensureCapabilityVersion(ctx context.Context, tx pgx.Tx, modelID, protocolID uuid.UUID, contextLength, maximumOutput int64, modalities []byte, tokenizer string, actor uuid.UUID, now time.Time) (uuid.UUID, error) {

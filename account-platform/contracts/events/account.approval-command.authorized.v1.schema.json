@@ -35,6 +35,12 @@
           "then": {
             "required": ["financial_snapshot"],
             "properties": {
+              "normalized_command": {
+                "oneOf": [
+                  { "$ref": "#/$defs/tokenModelLifecycleImmediateCommand" },
+                  { "$ref": "#/$defs/tokenModelLifecyclePlanCommand" }
+                ]
+              },
               "critical_resource_versions": { "$ref": "#/$defs/tokenModelLifecycleSnapshot" },
               "financial_snapshot": { "$ref": "#/$defs/tokenFinancialSnapshot" }
             }
@@ -67,13 +73,20 @@
     "tokenModelLifecycleSnapshot": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "target_lifecycle": { "const": "REMOVED" } }, "required": ["target_lifecycle"] },
+          "then": { "properties": { "existing_session_cutoff_at": { "type": "string", "format": "date-time" }, "replacement_model_id": { "type": "string", "format": "uuid" } } },
+          "else": { "properties": { "replacement_model_id": { "type": "null" } } }
+        }
+      ],
       "required": ["model_id", "catalog_version", "current_lifecycle", "target_lifecycle", "lifecycle_plan_version", "effective_at", "existing_session_cutoff_at", "replacement_model_id", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"],
       "properties": {
         "model_id": { "type": "string", "format": "uuid" },
         "catalog_version": { "type": "integer", "minimum": 1 },
         "current_lifecycle": { "enum": ["PUBLISHED", "DEPRECATED"] },
         "target_lifecycle": { "enum": ["DEPRECATED", "REMOVED"] },
-        "lifecycle_plan_version": { "const": 0 },
+        "lifecycle_plan_version": { "type": "integer", "minimum": 0 },
         "effective_at": { "type": "string", "format": "date-time" },
         "existing_session_cutoff_at": { "type": ["string", "null"], "format": "date-time" },
         "replacement_model_id": { "type": ["string", "null"], "format": "uuid" },
@@ -82,6 +95,39 @@
         "provisioning_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "inflight_request_set_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "policy_version": { "const": 2 }
+      }
+    },
+    "tokenModelLifecycleImmediateCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "target_lifecycle", "effective_at", "existing_session_cutoff_at", "replacement_model_id"],
+      "properties": {
+        "model_id": { "type": "string", "format": "uuid" },
+        "target_lifecycle": { "enum": ["DEPRECATED", "REMOVED"] },
+        "effective_at": { "type": "string", "format": "date-time" },
+        "existing_session_cutoff_at": { "type": ["string", "null"], "format": "date-time" },
+        "replacement_model_id": { "type": ["string", "null"], "format": "uuid" }
+      }
+    },
+    "tokenModelLifecyclePlanCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": { "properties": { "target_lifecycle": { "const": "REMOVED" } }, "required": ["target_lifecycle"] },
+          "then": { "properties": { "existing_session_cutoff_at": { "type": "string", "format": "date-time" }, "replacement_model_id": { "type": "string", "format": "uuid" } } },
+          "else": { "properties": { "replacement_model_id": { "type": "null" } } }
+        }
+      ],
+      "required": ["model_id", "lifecycle_plan_id", "lifecycle_plan_version", "target_lifecycle", "effective_at", "existing_session_cutoff_at", "replacement_model_id"],
+      "properties": {
+        "model_id": { "type": "string", "format": "uuid" },
+        "lifecycle_plan_id": { "type": "string", "format": "uuid" },
+        "lifecycle_plan_version": { "type": "integer", "minimum": 1 },
+        "target_lifecycle": { "enum": ["DEPRECATED", "REMOVED"] },
+        "effective_at": { "type": "string", "format": "date-time" },
+        "existing_session_cutoff_at": { "type": ["string", "null"], "format": "date-time" },
+        "replacement_model_id": { "type": ["string", "null"], "format": "uuid" }
       }
     },
     "tokenCatalogRollbackSnapshot": {

@@ -230,7 +230,7 @@ func TestApprovedTokenExecutorRejectsCrossDomainIdentityAndRequiresStableExecuti
 	approvalID := uuid.New()
 	fingerprint := strings.Repeat("a", 64)
 	envelope := TokenCommandEnvelope{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", Reason: "apply approved model lifecycle transition", TargetResourceType: "MODEL", TargetResourceID: uuid.NewString(), ExpectedVersions: json.RawMessage(`{}`), PrecheckFingerprint: fingerprint, Command: json.RawMessage(`{}`)}
-	body := approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: uuid.New(), AuthorizationVersion: 1, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_LIFECYCLE_CHANGE:" + fingerprint, Envelope: envelope}
+	body := approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: uuid.New(), AuthorizationVersion: 1, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_LIFECYCLE_CHANGE:" + fingerprint, Envelope: envelope, CriticalResourceVersions: json.RawMessage(`{}`), FinancialSnapshot: json.RawMessage(`{}`)}
 	raw, _ := json.Marshal(body)
 	for _, scenario := range []struct {
 		name, service string

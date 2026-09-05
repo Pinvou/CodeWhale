@@ -1153,6 +1153,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if parts[2] == "models" {
 		return (len(parts) == 4 && method == http.MethodGet) ||
 			(len(parts) == 5 && parts[4] == "versions" && method == http.MethodGet) ||
+			(len(parts) == 5 && parts[4] == "lifecycle-plans" && (method == http.MethodGet || method == http.MethodPost)) ||
+			(len(parts) == 6 && parts[4] == "lifecycle-plans" && method == http.MethodGet && func() bool { _, err := uuid.Parse(parts[5]); return err == nil }()) ||
+			(len(parts) == 7 && parts[4] == "lifecycle-plans" && parts[6] == "cancel" && method == http.MethodPost && func() bool { _, err := uuid.Parse(parts[5]); return err == nil }()) ||
 			(len(parts) == 6 && parts[4] == "impact" && parts[5] == "lifecycle" && method == http.MethodGet)
 	}
 	if parts[2] == "provisionings" {

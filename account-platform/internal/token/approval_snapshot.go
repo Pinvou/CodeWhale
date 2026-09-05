@@ -74,17 +74,40 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 		}
 		var command struct {
 			ModelID                 uuid.UUID  `json:"model_id"`
+			LifecyclePlanID         *uuid.UUID `json:"lifecycle_plan_id,omitempty"`
+			LifecyclePlanVersion    *int64     `json:"lifecycle_plan_version,omitempty"`
 			TargetLifecycle         string     `json:"target_lifecycle"`
 			EffectiveAt             time.Time  `json:"effective_at"`
 			ExistingSessionCutoffAt *time.Time `json:"existing_session_cutoff_at"`
 			ReplacementModelID      *uuid.UUID `json:"replacement_model_id"`
 		}
-		if decodeCommand(request.NormalizedCommand, &command) != nil || command.ModelID != modelID || command.EffectiveAt.IsZero() {
+		if decodeCommand(request.NormalizedCommand, &command) != nil || command.ModelID != modelID || command.EffectiveAt.IsZero() || (command.LifecyclePlanID == nil) != (command.LifecyclePlanVersion == nil) {
 			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
 		}
 		command.TargetLifecycle = strings.ToUpper(strings.TrimSpace(command.TargetLifecycle))
 		if command.TargetLifecycle != "DEPRECATED" && command.TargetLifecycle != "REMOVED" || command.ReplacementModelID != nil && *command.ReplacementModelID == modelID {
 			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
+		}
+		if command.TargetLifecycle == "REMOVED" && (command.ReplacementModelID == nil || command.ExistingSessionCutoffAt == nil || !command.ExistingSessionCutoffAt.Equal(command.EffectiveAt)) || command.TargetLifecycle == "DEPRECATED" && command.ExistingSessionCutoffAt != nil && command.ExistingSessionCutoffAt.Before(command.EffectiveAt) {
+			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
+		}
+		planVersion := int64(0)
+		if command.LifecyclePlanID != nil {
+			if *command.LifecyclePlanID == uuid.Nil || command.LifecyclePlanVersion == nil || *command.LifecyclePlanVersion < 1 {
+				return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid
+			}
+			plans, ok := s.repository.(*PostgresRepository)
+			if !ok {
+				return ApprovalSnapshotProjection{}, errors.New("lifecycle plan repository unavailable")
+			}
+			plan, err := plans.LifecyclePlan(ctx, modelID, *command.LifecyclePlanID)
+			if err != nil {
+				return ApprovalSnapshotProjection{}, err
+			}
+			if !containsString([]string{"PENDING_APPROVAL", "SCHEDULED", "EXECUTING"}, plan.Status) || plan.PlanVersion != *command.LifecyclePlanVersion || plan.TargetLifecycle != command.TargetLifecycle || !plan.EffectiveAt.Equal(command.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, command.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, command.ReplacementModelID) {
+				return ApprovalSnapshotProjection{}, ErrCatalogVersionConflict
+			}
+			planVersion = plan.PlanVersion
 		}
 		evidence, err := repository.ModelLifecycleImpact(ctx, modelID, command.ReplacementModelID)
 		if err != nil {
@@ -100,7 +123,7 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 		}
 		result = ImpactPrecheckResult{Action: "MODEL_LIFECYCLE_" + command.TargetLifecycle, Evidence: evidence, PriceCoverage: &price, Blockers: []string{}, CriticalResourceVersions: map[string]any{
 			"model_id": modelID, "catalog_version": catalogVersion, "current_lifecycle": evidence.CurrentStatus,
-			"target_lifecycle": command.TargetLifecycle, "lifecycle_plan_version": int64(0), "effective_at": command.EffectiveAt.UTC(),
+			"target_lifecycle": command.TargetLifecycle, "lifecycle_plan_version": planVersion, "effective_at": command.EffectiveAt.UTC(),
 			"existing_session_cutoff_at": command.ExistingSessionCutoffAt, "replacement_model_id": command.ReplacementModelID,
 			"billing_price_version": price.FinancialFactRevision, "route_set_fingerprint": evidence.RouteSetFingerprint,
 			"provisioning_set_fingerprint": evidence.ProvisioningSetFingerprint, "inflight_request_set_fingerprint": evidence.InflightSetFingerprint, "policy_version": int64(2),
@@ -114,7 +137,7 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 		if command.TargetLifecycle == "REMOVED" && evidence.Dependencies.InflightRequests > 0 {
 			result.Blockers = append(result.Blockers, "INFLIGHT_REQUESTS_PRESENT")
 		}
-		finalizeImpactResult(&result, "effective_at="+command.EffectiveAt.UTC().Format(time.RFC3339Nano), "replacement_model_id="+valueUUID(command.ReplacementModelID))
+		finalizeImpactResult(&result, "target_status="+command.TargetLifecycle, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+command.EffectiveAt.UTC().Format(time.RFC3339Nano), "replacement_model_id="+valueUUID(command.ReplacementModelID))
 	case "TOKEN_MODEL_CATALOG_ROLLBACK":
 		if request.TargetResourceType != "MODEL_CATALOG" {
 			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid

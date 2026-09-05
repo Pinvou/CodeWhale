@@ -32,6 +32,8 @@ const adminModelTokenQueryParameters = Object.freeze({
   ownerCandidates: Object.freeze({ q: 'owner_candidate_q', owner_type: 'owner_candidate_type', status: 'owner_candidate_status', organization_id: 'owner_candidate_organization_id', cursor: 'owner_candidate_cursor' }),
   modelAudit: Object.freeze({ action: 'model_audit_action', actor_id: 'model_audit_actor_id', occurred_from: 'model_audit_occurred_from', occurred_to: 'model_audit_occurred_to', cursor: 'model_audit_cursor' }),
   modelHistory: Object.freeze({ cursor: 'model_history_cursor' }),
+	modelLifecyclePlans: Object.freeze({ status: 'model_lifecycle_plan_status', target_lifecycle: 'model_lifecycle_plan_target', cursor: 'model_lifecycle_plan_cursor' }),
+	modelLifecycleCandidates: Object.freeze({ q: 'model_lifecycle_candidate_q', cursor: 'model_lifecycle_candidate_cursor' }),
   tokenAudit: Object.freeze({ action: 'token_audit_action', actor_id: 'token_audit_actor_id', occurred_from: 'token_audit_occurred_from', occurred_to: 'token_audit_occurred_to', cursor: 'token_audit_cursor' }),
   modelProvisionings: Object.freeze({ q: 'model_provisioning_q', status: 'model_provisioning_status', cursor: 'model_provisioning_cursor' }),
   tokenProvisionings: Object.freeze({ q: 'token_provisioning_q', status: 'token_provisioning_status', cursor: 'token_provisioning_cursor' }),
@@ -46,7 +48,7 @@ const adminModelTokenPageParameters = Object.freeze([
   'operations_tab', 'provisioning_id', 'usage_request_id',
 ]);
 const adminModelTokenDetailParameters = Object.freeze({
-  model: Object.freeze(['model_id', 'model_detail_tab', ...Object.values(adminModelTokenQueryParameters.modelAudit), ...Object.values(adminModelTokenQueryParameters.modelHistory), ...Object.values(adminModelTokenQueryParameters.modelProvisionings)]),
+  model: Object.freeze(['model_id', 'model_detail_tab', ...Object.values(adminModelTokenQueryParameters.modelAudit), ...Object.values(adminModelTokenQueryParameters.modelHistory), ...Object.values(adminModelTokenQueryParameters.modelProvisionings), ...Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), ...Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates)]),
   token: Object.freeze(['token_account_id', 'token_detail_tab', ...Object.values(adminModelTokenQueryParameters.tokenAudit), ...Object.values(adminModelTokenQueryParameters.tokenProvisionings), ...Object.values(adminModelTokenQueryParameters.tokenCredentials), ...Object.values(adminModelTokenQueryParameters.tokenRoutes)]),
   provisioning: Object.freeze(['provisioning_id', ...Object.values(adminModelTokenQueryParameters.provisioningAttempts)]),
   usage: Object.freeze(['usage_request_id', ...Object.values(adminModelTokenQueryParameters.usageEvidence)]),
@@ -57,7 +59,7 @@ const adminModelTokenTabParameters = Object.freeze({
   reconciliation: Object.freeze([...Object.values(adminModelTokenQueryParameters.reconciliation), ...adminModelTokenDetailParameters.usage]),
 });
 const adminModelTokenSectionParameters = Object.freeze({
-  models: Object.freeze(['model_tab', 'model_id', 'model_detail_tab', ...['models', 'protocols', 'formulas', 'modelAudit', 'modelHistory', 'modelProvisionings'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+  models: Object.freeze(['model_tab', 'model_id', 'model_detail_tab', ...['models', 'protocols', 'formulas', 'modelAudit', 'modelHistory', 'modelProvisionings', 'modelLifecyclePlans', 'modelLifecycleCandidates'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
   tokenResources: Object.freeze(['token_account_id', 'token_detail_tab', ...['tokenAccounts', 'ownerCandidates', 'tokenAudit', 'tokenProvisionings', 'tokenCredentials', 'tokenRoutes'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
   modelOperations: Object.freeze(['operations_tab', 'provisioning_id', 'usage_request_id', ...['provisionings', 'usage', 'reconciliation', 'provisioningAttempts', 'usageEvidence'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
 });
@@ -255,10 +257,16 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
       clearParameters(Object.values(adminModelTokenQueryParameters.modelProvisionings), updates);
       clearParameters(Object.values(adminModelTokenQueryParameters.modelAudit), updates);
       clearParameters(Object.values(adminModelTokenQueryParameters.modelHistory), updates);
+			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), updates);
+			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates), updates);
     }
     if (detailTab !== 'operations') clearParameters(Object.values(adminModelTokenQueryParameters.modelProvisionings), updates);
     if (detailTab !== 'audit') clearParameters(Object.values(adminModelTokenQueryParameters.modelAudit), updates);
     if (detailTab !== 'capabilities') clearParameters(Object.values(adminModelTokenQueryParameters.modelHistory), updates);
+		if (detailTab !== 'lifecycle') {
+			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), updates);
+			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates), updates);
+		}
   }
   if (permissions !== null && requested === 'tokenResources' && search.get('token_account_id') && updates.token_account_id !== null) {
     const detailTab = search.get('token_detail_tab') || 'overview';

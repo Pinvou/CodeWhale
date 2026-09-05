@@ -21,18 +21,18 @@ function ImpactFacts({ impact, copy }) {
   </>;
 }
 
-export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, payloadDetails = {}, execute, recover, onClose, onCompleted, reasonMin = 10, reasonMax = 2000, dangerous = false, children }) {
+export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = {}, execute, recover, onClose, onCompleted, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
   const root = useRef(null);
   const first = useRef(null);
   const previousFocus = useRef(document.activeElement);
   const command = useRef({ command: null, inflight: false });
   const impactLoaderRef = useRef(impactLoader);
   const executionController = useRef(null);
-  const [reason, setReason] = useState('');
+  const [reason, setReason] = useState(initialReason);
   const [confirmed, setConfirmed] = useState(!dangerous);
   const [impact, setImpact] = useState(null);
   const [impactGeneration, setImpactGeneration] = useState(0);
-  const [state, setState] = useState({ loading: Boolean(impactLoader && precheckEnabled), busy: false, error: null, commandError: false, unknown: false, success: '' });
+  const [state, setState] = useState({ loading: Boolean(impactRequired && impactLoader && precheckEnabled), busy: false, error: null, commandError: false, unknown: false, success: '' });
   impactLoaderRef.current = impactLoader;
   useEffect(() => {
     first.current?.focus();
@@ -42,6 +42,7 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
     };
   }, []);
   useEffect(() => {
+    if (!impactRequired) { setImpact(null); setState((current) => ({ ...current, loading: false, error: null })); return undefined; }
     if (!impactLoaderRef.current || !precheckEnabled) { setImpact(null); setState((current) => ({ ...current, loading: false, error: { code: 'PRECHECK_UNAVAILABLE', requestID: '' } })); return undefined; }
     const controller = new globalThis.AbortController();
     setState((current) => ({ ...current, loading: true, error: null }));
@@ -54,12 +55,12 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
       if (!controller.signal.aborted) setState((current) => ({ ...current, loading: false, commandError: false, error: { code: error.code || 'PRECHECK_UNAVAILABLE', requestID: error.requestID || '' } }));
     });
     return () => controller.abort();
-  }, [action.key, impactGeneration, precheckEnabled]);
+  }, [action.key, impactGeneration, impactRequired, precheckEnabled]);
   const normalizedReason = reason.trim();
   const reasonLength = [...normalizedReason].length;
   const frozenReference = command.current?.command?.unknown ? command.current.command.error?.commandReference : '';
   const recoveryBlocked = state.unknown && (!recover || !frozenReference);
-  const blocked = !impact || impact.blockers?.length > 0 || state.loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmed;
+  const blocked = (impactRequired && (!impact || impact.blockers?.length > 0)) || state.loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmed;
   const closeDialog = () => {
     const completed = state.success;
     onClose();

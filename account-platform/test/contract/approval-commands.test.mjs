@@ -60,6 +60,14 @@ test('every management write is classified and financial facts use the independe
         assert.match(line, /requireCredentialIsolationEnabled\(\).*adminRevokeCredentialLaunch/, `unguarded one-time credential window abort: ${line.trim()}`);
         continue;
       }
+      if (/admin\.POST\("\/models\/:model_id\/lifecycle-plans\/:lifecycle_plan_id\/cancel"/.test(line)) {
+        assert.match(line, /authorizer\.RequireAny\("platform\.models\.manage", "platform\.models\.lifecycle\.request"\).*requireNewTokenCommandGovernanceActive\(\)/, `unguarded lifecycle plan cancel: ${line.trim()}`);
+        continue;
+      }
+      if (/admin\.POST\("\/models\/:model_id\/lifecycle-plans"/.test(line)) {
+        assert.match(line, /authorizer\.Require\("platform\.models\.lifecycle\.request"\).*requireNewTokenCommandGovernanceActive\(\)/, `unguarded lifecycle plan write: ${line.trim()}`);
+        continue;
+      }
       assert.match(line, /approvalpolicy\.(?:Require|RequireLegacyTokenDirect)\(/, `unclassified management write: ${line.trim()}`);
     }
   }

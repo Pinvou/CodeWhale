@@ -78,6 +78,11 @@ INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstre
 	if json.Unmarshal(precheck.ExpectedVersions, &frozen) != nil || len(frozen) != 13 || frozen["model_id"] != modelID.String() || frozen["price_set_fingerprint"] != strings.Repeat("b", 64) || frozen["stable_route_count"] != float64(1) || frozen["provisioning_count"] != float64(1) || frozen["ready_route_count"] != float64(1) {
 		t.Fatalf("unexpected frozen versions: %s", precheck.ExpectedVersions)
 	}
+	explicitCommand := mustMarshalJSON(t, modelPublishCommand{ModelID: modelID, PublishMode: "IMMEDIATE"})
+	explicitPrecheck, err := service.buildTokenCommandPrecheck(ctx, TokenCommandPrecheckRequest{CommandType: "TOKEN_MODEL_PUBLISH", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Command: explicitCommand})
+	if err != nil || explicitPrecheck.PrecheckFingerprint != precheck.PrecheckFingerprint || !jsonSemanticEqual(explicitPrecheck.ExpectedVersions, precheck.ExpectedVersions) {
+		t.Fatalf("legacy precheck=%s explicit=%s err=%v", precheck.PrecheckFingerprint, explicitPrecheck.PrecheckFingerprint, err)
+	}
 
 	authorizationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Authorization-Version", "7")
@@ -96,9 +101,7 @@ INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstre
 		t.Fatal(err)
 	}
 	versions := cloneExpectedVersions(t, precheck.ExpectedVersions)
-	versions["precheck_fingerprint"] = precheck.PrecheckFingerprint
-	versions["request_fingerprint"] = strings.Repeat("c", 64)
-	envelope := TokenCommandEnvelope{CommandType: "TOKEN_MODEL_PUBLISH", Reason: "publish only after authoritative model and price review", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), ExpectedVersions: mustMarshalJSON(t, versions), PrecheckFingerprint: precheck.PrecheckFingerprint, Command: command}
+	envelope := bindModelPublishRequestFingerprint(t, TokenCommandEnvelope{CommandType: "TOKEN_MODEL_PUBLISH", Reason: "publish only after authoritative model and price review", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), PrecheckFingerprint: precheck.PrecheckFingerprint, Command: command}, versions)
 	response := performModelPublishGovernedCommand(t, service, envelope, "model-publish-precheck-0001")
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "COMMAND_PRECHECK_CHANGED") {
 		t.Fatalf("drift response=%d %s", response.Code, response.Body.String())
@@ -123,11 +126,9 @@ INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstre
 		t.Fatalf("equal-count route mutation was not fingerprinted: before=%s after=%s blockers=%v err=%v", equalCountPrecheck.PrecheckFingerprint, changedCountPrecheck.PrecheckFingerprint, changedCountPrecheck.Blockers, err)
 	}
 	equalCountVersions := cloneExpectedVersions(t, equalCountPrecheck.ExpectedVersions)
-	equalCountVersions["precheck_fingerprint"] = equalCountPrecheck.PrecheckFingerprint
-	equalCountVersions["request_fingerprint"] = strings.Repeat("e", 64)
 	equalCountEnvelope := envelope
-	equalCountEnvelope.ExpectedVersions = mustMarshalJSON(t, equalCountVersions)
 	equalCountEnvelope.PrecheckFingerprint = equalCountPrecheck.PrecheckFingerprint
+	equalCountEnvelope = bindModelPublishRequestFingerprint(t, equalCountEnvelope, equalCountVersions)
 	response = performModelPublishGovernedCommand(t, service, equalCountEnvelope, "model-publish-precheck-0004")
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "COMMAND_PRECHECK_CHANGED") {
 		t.Fatalf("equal-count drift response=%d %s", response.Code, response.Body.String())
@@ -149,6 +150,21 @@ INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstre
 		t.Fatalf("extra command response=%d %s", response.Code, response.Body.String())
 	}
 	assertNoModelPublishCommand(t, ctx, repository, actorID)
+
+	currentPrecheck, err := service.buildTokenCommandPrecheck(ctx, TokenCommandPrecheckRequest{CommandType: "TOKEN_MODEL_PUBLISH", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Command: explicitCommand})
+	if err != nil || len(currentPrecheck.Blockers) != 0 {
+		t.Fatalf("current publish precheck=%+v err=%v", currentPrecheck, err)
+	}
+	currentVersions := cloneExpectedVersions(t, currentPrecheck.ExpectedVersions)
+	explicitEnvelope := bindModelPublishRequestFingerprint(t, TokenCommandEnvelope{CommandType: "TOKEN_MODEL_PUBLISH", Reason: "publish normalized compatibility command after review", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), PrecheckFingerprint: currentPrecheck.PrecheckFingerprint, Command: explicitCommand}, currentVersions)
+	legacyEnvelope := explicitEnvelope
+	legacyEnvelope.Command = command
+	first := performModelPublishGovernedCommand(t, service, legacyEnvelope, "model-publish-legacy-replay")
+	second := performModelPublishGovernedCommand(t, service, explicitEnvelope, "model-publish-legacy-replay")
+	var firstResult, secondResult TokenCommandResult
+	if first.Code != http.StatusAccepted || second.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstResult) != nil || json.Unmarshal(second.Body.Bytes(), &secondResult) != nil || firstResult.CommandReference != secondResult.CommandReference {
+		t.Fatalf("legacy replay first=%d/%s second=%d/%s", first.Code, first.Body.String(), second.Code, second.Body.String())
+	}
 }
 
 func performModelPublishGovernedCommand(t *testing.T, service *Service, envelope TokenCommandEnvelope, key string) *httptest.ResponseRecorder {

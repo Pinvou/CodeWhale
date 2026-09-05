@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import puppeteer from 'puppeteer-core';
 import { listenOnChromiumSafePort } from './chromium-safe-port.mjs';
+import { governedTokenEnvelope } from '../src/features/account-platform/admin-high-risk-action-state.js';
 
 const browserPath = [
   process.env.CHROME,
@@ -24,6 +25,31 @@ let actionsEnabled = true;
 let impactDelay = false;
 let commandResultMode = 'SUCCEEDED';
 const observations = { impactCalls: 0, impactAborted: 0, precheckCalls: [], commandCalls: [], resultCalls: 0, approvalCreates: [], approvalSubmits: 0, approvalReads: 0, legacyProtocolWrites: 0 };
+
+const portalFingerprintFixture = await governedTokenEnvelope({
+  commandType: 'TOKEN_MODEL_PUBLISH',
+  targetResourceType: 'MODEL',
+  targetResourceID: '018f4f72-9b3a-7abc-8def-1234567890ab',
+  reason: 'publish reviewed immediate draft',
+  impact: {
+    precheck_fingerprint: '5'.repeat(64),
+    expected_versions: {
+      model_id: '018f4f72-9b3a-7abc-8def-1234567890ab', expected_catalog_version: 4, expected_draft_version: 2,
+      draft_fingerprint: '1'.repeat(64), protocol_definition_id: '018f4f72-9b3a-7abc-8def-1234567890ac', protocol_version: 1,
+      stable_route_count: 1, stable_route_set_fingerprint: '2'.repeat(64), provisioning_count: 1, ready_route_count: 1,
+      provisioning_set_fingerprint: '3'.repeat(64), financial_fact_revision: 7, price_set_fingerprint: '4'.repeat(64),
+    },
+  },
+  command: { model_id: '018f4f72-9b3a-7abc-8def-1234567890ab', publish_mode: 'IMMEDIATE' },
+});
+assert.equal(portalFingerprintFixture.expected_versions.request_fingerprint, '2f4f93843cf8f35a065298fb6239977ccc2b8e9dacaac88c3a434ac0225f551b', 'Portal and Token use the same canonical request fingerprint fixture');
+const scheduledPortalFingerprintFixture = await governedTokenEnvelope({
+  commandType: 'TOKEN_MODEL_PUBLISH', targetResourceType: 'MODEL', targetResourceID: '018f4f72-9b3a-7abc-8def-1234567890ab', reason: 'schedule reviewed model publication',
+  impact: portalFingerprintFixture.expected_versions && { precheck_fingerprint: '5'.repeat(64), expected_versions: Object.fromEntries(Object.entries(portalFingerprintFixture.expected_versions).filter(([key]) => !['request_fingerprint', 'precheck_fingerprint'].includes(key))) },
+  command: { model_id: '018f4f72-9b3a-7abc-8def-1234567890ab', publish_mode: 'SCHEDULED', lifecycle_plan_id: '018f4f72-9b3a-7abc-8def-1234567890ad', lifecycle_plan_version: 3, effective_at: '2026-09-05T12:30:00.000Z' },
+});
+assert.equal(scheduledPortalFingerprintFixture.command.effective_at, '2026-09-05T12:30:00Z', 'scheduled commands freeze UTC whole-second time before hashing');
+assert.equal(scheduledPortalFingerprintFixture.expected_versions.request_fingerprint, '859a6a99a84e58655a4fc89e139ee01eac31835f13e7783d5980150afdfd86e1', 'scheduled Portal and Token fingerprints share the fixed time-canonical fixture');
 
 function json(response, payload, status = 200) {
   if (response.destroyed || response.writableEnded) return;
@@ -133,7 +159,9 @@ function commandResult(status, commandType = 'TOKEN_MODEL_PUBLISH', resourceType
     target_resource_type: resourceType,
     target_resource_id: resourceID,
     status,
-    redacted_result: { catalog_version: 8 },
+    redacted_result: commandType === 'TOKEN_MODEL_PUBLISH' && status === 'SUCCEEDED'
+      ? { command_reference: commandID, command_type: commandType, model_id: resourceID, catalog_version: 8, status: 'PUBLISHED' }
+      : undefined,
     stable_error_code: ['REJECTED', 'FAILED'].includes(status) ? 'COMMAND_PRECHECK_FAILED' : null,
     approval_request_id: null,
     audit_request_id: 'model-action-audit',
@@ -342,10 +370,12 @@ try {
   const command = (await state(page)).commandCalls.at(-1);
   assert.match(command.key, /^admin-token-action-/);
   assert.equal(command.body.command_type, 'TOKEN_MODEL_PUBLISH');
+  assert.equal(command.body.command.publish_mode, 'IMMEDIATE', 'legacy immediate UI intent is canonicalized before fingerprint and persistence');
   assert.equal(command.body.reason, 'publish this validated model draft');
   assert.equal(command.body.expected_versions.expected_catalog_version, 7);
   assert.equal(command.body.expected_versions.expected_draft_version, 3);
   assert.equal(command.body.precheck_fingerprint, 'a'.repeat(64));
+  assert.match(command.body.expected_versions.request_fingerprint, /^[0-9a-f]{64}$/);
   assert.equal((await state(page)).commandCalls.length, before + 1, 'same-tick double submit dispatches one model publish command');
   assert.equal((await state(page)).resultCalls, 1, 'unknown command recovery queries the frozen command reference instead of issuing another write');
 

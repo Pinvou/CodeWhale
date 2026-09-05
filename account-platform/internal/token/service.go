@@ -235,6 +235,10 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/models", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogModels))
 		admin.GET("/models/:model_id", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminModelDetail))
 		admin.GET("/models/:model_id/versions", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminModelVersions))
+		admin.GET("/models/:model_id/lifecycle-plans", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminLifecyclePlans))
+		admin.GET("/models/:model_id/lifecycle-plans/:lifecycle_plan_id", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminLifecyclePlan))
+		admin.POST("/models/:model_id/lifecycle-plans", s.authorizer.Require("platform.models.lifecycle.request"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateLifecyclePlan))
+		admin.POST("/models/:model_id/lifecycle-plans/:lifecycle_plan_id/cancel", s.authorizer.RequireAny("platform.models.manage", "platform.models.lifecycle.request"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCancelLifecyclePlan))
 		admin.PUT("/models/:model_id/draft", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_DRAFT_SAVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSaveCatalogDraft))
 		admin.POST("/models/:model_id/publish", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishCatalogDraft))
 		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_LIFECYCLE_CHANGE"), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
@@ -810,6 +814,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle version or state conflicts with current facts"
 	case errors.Is(err, ErrCatalogVersionConflict):
 		status, code, message = http.StatusConflict, "MODEL_CATALOG_VERSION_CONFLICT", "the model catalog or draft version has changed"
+	case errors.Is(err, ErrTokenCommandInvalid):
+		status, code, message = http.StatusBadRequest, "INVALID_LIFECYCLE_PLAN", "the lifecycle plan input is invalid"
 	case errors.Is(err, ErrCatalogAliasConflict):
 		status, code, message = http.StatusConflict, "MODEL_ALIAS_CONFLICT", "the model name or alias is ambiguous"
 	case errors.Is(err, ErrIdempotencyConflict):

@@ -3,6 +3,11 @@ package account
 import (
 	"bytes"
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,6 +24,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	tokenservice "github.com/Pinvou/pinvou3/account-platform/internal/token"
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -48,18 +54,22 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	requester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_MODEL_ADMIN", "snapshot-requester")
 	secondRequester := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_MODEL_ADMIN", "snapshot-requester-two")
 	approver := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PLATFORM_SUPER_ADMIN", "snapshot-approver")
+	unprivileged := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PERSONAL_USER", "snapshot-member")
 	requesterPrincipal := approvalIntegrationPrincipal(requester)
 	secondRequesterPrincipal := approvalIntegrationPrincipal(secondRequester)
 	approverPrincipal := approvalIntegrationPrincipal(approver)
+	unprivilegedPrincipal := approvalIntegrationPrincipal(unprivileged)
 	tokenRepository, tokenConnection := newApprovalSnapshotTokenRepository(t, ctx, tokenDatabaseURL)
 	modelID := seedApprovalSnapshotTokenModel(t, ctx, tokenConnection)
+	lifecyclePlanID, lifecyclePlanVersion, _, lifecycleEffectiveAt := seedApprovalSnapshotLifecyclePlan(t, ctx, tokenConnection, requester.ID, modelID)
 	pricing := approvalSnapshotPricingStub{modelID: modelID, observedAt: time.Now().UTC(), fingerprint: strings.Repeat("b", 64)}
 	tokenService := tokenservice.NewService(tokenRepository, nil, nil, nil, tokenservice.ProviderURLPolicy{}, nil, nil, 0).WithImpactPrechecks(true, tokenRepository, pricing)
 	serviceToken := "snapshot-integration-token"
 	tokenHandler := tokenService.Handler(serviceToken, func(context.Context, string) (identity.Principal, error) { return identity.Principal{}, ErrForbidden })
 	draft := ApprovalDraft{
 		CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", IdempotencyKey: "snapshot-lifecycle-create-0001",
-		NormalizedCommand:  json.RawMessage(`{"model_id":"` + modelID.String() + `","target_lifecycle":"DEPRECATED","effective_at":"2026-09-04T08:00:00Z","existing_session_cutoff_at":null,"replacement_model_id":null}`),
+		NormalizedCommand: json.RawMessage(fmt.Sprintf(`{"model_id":"%s","lifecycle_plan_id":"%s","lifecycle_plan_version":%d,"target_lifecycle":"DEPRECATED","effective_at":"%s","existing_session_cutoff_at":null,"replacement_model_id":null}`,
+			modelID, lifecyclePlanID, lifecyclePlanVersion, lifecycleEffectiveAt.Format(time.RFC3339Nano))),
 		TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Reason: "deprecate after independent impact review",
 		RedactedEvidence: json.RawMessage(`[]`), ExpectedImpact: json.RawMessage(`{}`), CriticalResourceVersions: json.RawMessage(`{}`), FinancialSnapshot: json.RawMessage(`{}`),
 	}
@@ -111,6 +121,10 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	var missingRows int
 	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM approval_requests WHERE idempotency_key='credential-financial-invalid-missing'`).Scan(&missingRows); err != nil || missingResponse.Code != http.StatusBadRequest || missingRows != 0 || sourceCalls.Load() != 0 {
 		t.Fatalf("missing credential financial status=%d rows=%d downstream=%d err=%v body=%s", missingResponse.Code, missingRows, sourceCalls.Load(), err, missingResponse.Body.String())
+	}
+	unauthorized := performApprovalIntegrationRequest(t, service.adminCreateApprovalDraft, unprivilegedPrincipal, http.MethodPost, "/admin/v1/approval-requests", "", approvalDraftBodyFromModel(draft))
+	if unauthorized.Code != http.StatusForbidden || sourceCalls.Load() != 0 {
+		t.Fatalf("unauthorized lifecycle create status=%d downstream=%d body=%s", unauthorized.Code, sourceCalls.Load(), unauthorized.Body.String())
 	}
 
 	// The test-only gate opens only the otherwise dormant create branch. Two
@@ -224,6 +238,10 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	if submit.Code != http.StatusOK || json.Unmarshal(submit.Body.Bytes(), &submitted) != nil || submitted.Status != "SUBMITTED" || submitted.Version != 2 || sourceCalls.Load() != 3 {
 		t.Fatalf("submit status=%d body=%s calls=%d", submit.Code, submit.Body.String(), sourceCalls.Load())
 	}
+	selfDecision := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequest, requesterPrincipal, http.MethodPost, "/admin/v1/approval-requests/"+seeded.ID.String()+"/actions/decide", seeded.ID.String(), map[string]any{"expected_version": 2, "decision": "APPROVED", "reason": "requester must not approve own lifecycle plan", "observed_versions": json.RawMessage(critical)})
+	if selfDecision.Code != http.StatusConflict || !strings.Contains(selfDecision.Body.String(), "APPROVAL_SELF_DECISION") {
+		t.Fatalf("self decision status=%d body=%s", selfDecision.Code, selfDecision.Body.String())
+	}
 
 	transientDraft := draft
 	transientDraft.IdempotencyKey = "snapshot-lifecycle-transient-0002"
@@ -256,6 +274,9 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 		t.Fatalf("drift status=%d body=%s", drift.Code, drift.Body.String())
 	}
 	assertApprovalStatusVersion(t, ctx, repository, driftID, "INVALIDATED", 2)
+	if _, err := tokenConnection.Exec(ctx, `UPDATE model_catalog_entries SET lifecycle_status='PUBLISHED' WHERE model_id=$1`, modelID); err != nil {
+		t.Fatal(err)
+	}
 
 	sourceMode.Store(0)
 	decide := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequest, approverPrincipal, http.MethodPost, "/admin/v1/approval-requests/"+seeded.ID.String()+"/actions/decide", seeded.ID.String(), map[string]any{"expected_version": 2, "decision": "APPROVED", "reason": "independent evidence approved", "observed_versions": json.RawMessage(critical)})
@@ -266,6 +287,14 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	var eventPayload json.RawMessage
 	if err := repository.pool.QueryRow(ctx, `SELECT payload FROM outbox_events WHERE event_type='account.approval-command.authorized.v1' AND aggregate_id=$1`, seeded.ID).Scan(&eventPayload); err != nil || !strings.Contains(string(eventPayload), `"financial_snapshot"`) || !strings.Contains(string(eventPayload), strings.Repeat("b", 64)) {
 		t.Fatalf("authorized event payload=%s err=%v", eventPayload, err)
+	}
+	var authorizedEvent struct {
+		NormalizedCommand        json.RawMessage `json:"normalized_command"`
+		CriticalResourceVersions json.RawMessage `json:"critical_resource_versions"`
+		FinancialSnapshot        json.RawMessage `json:"financial_snapshot"`
+	}
+	if json.Unmarshal(eventPayload, &authorizedEvent) != nil || !sameJSONObject(authorizedEvent.NormalizedCommand, draft.NormalizedCommand) || !sameJSONObject(authorizedEvent.CriticalResourceVersions, critical) || !sameJSONObject(authorizedEvent.FinancialSnapshot, financial) {
+		t.Fatalf("authorized event did not retain the approved command and snapshots: %s", eventPayload)
 	}
 
 	executionCtx, err := serviceauth.ContextForJob(context.Background(), "token-command-executor", "APPROVAL_EXECUTION", "snapshot-chain")
@@ -281,6 +310,54 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	var lease ApprovalExecution
 	if executionResponse.Code != http.StatusOK || json.Unmarshal(executionResponse.Body.Bytes(), &lease) != nil || lease.Status != "EXECUTING" || !sameJSONObject(lease.CriticalResourceVersions, critical) || !sameJSONObject(lease.FinancialSnapshot, financial) {
 		t.Fatalf("execution lease status=%d body=%s", executionResponse.Code, executionResponse.Body.String())
+	}
+	currentProjection, err := source.PrecheckApprovalSnapshot(ctx, ApprovalSnapshotRequest{CommandType: draft.CommandType, TargetResourceType: draft.TargetResourceType, TargetResourceID: draft.TargetResourceID, NormalizedCommand: draft.NormalizedCommand})
+	if err != nil || !sameJSONObject(currentProjection.CriticalResourceVersions, critical) || !sameJSONObject(currentProjection.FinancialSnapshot, financial) {
+		t.Fatalf("execution projection=%+v err=%v", currentProjection, err)
+	}
+	tokenService.WithApprovedTokenCommandExecutor(tokenservice.NewPostgresApprovedCredentialExecutor(tokenRepository)).
+		WithTokenCommandGovernanceActivation(accountLifecycleActivationReader{})
+	executorHandler, executorToken, executorClient := newApprovalExecutorTokenHandler(t, tokenService, requester.ID)
+	envelope := tokenservice.TokenCommandEnvelope{CommandType: lease.CommandType, Reason: draft.Reason, TargetResourceType: lease.TargetResourceType, TargetResourceID: lease.TargetResourceID, ExpectedVersions: lease.CriticalResourceVersions, PrecheckFingerprint: currentProjection.PrecheckFingerprint, Command: lease.NormalizedCommand}
+	executeBody := map[string]any{
+		"approval_request_id": seeded.ID, "requester_user_id": seeded.RequesterUserID, "authorization_version": seeded.RequesterAuthorizationVersion,
+		"command_fingerprint": lease.CommandFingerprint, "execution_idempotency_key": lease.ExecutionIdempotencyKey,
+		"critical_resource_versions": critical, "financial_snapshot": financial, "command": envelope,
+	}
+	firstCommand := performApprovalExecutorRequest(t, executorHandler, executorToken, executorClient, executeBody)
+	var executed tokenservice.TokenCommandResult
+	if firstCommand.Code != http.StatusOK || json.Unmarshal(firstCommand.Body.Bytes(), &executed) != nil || executed.Status != "SUCCEEDED" || executed.ApprovalRequestID == nil || *executed.ApprovalRequestID != seeded.ID {
+		t.Fatalf("execute approved lifecycle status=%d body=%s", firstCommand.Code, firstCommand.Body.String())
+	}
+	replayedCommand := performApprovalExecutorRequest(t, executorHandler, executorToken, executorClient, executeBody)
+	var replayed tokenservice.TokenCommandResult
+	if replayedCommand.Code != http.StatusOK || json.Unmarshal(replayedCommand.Body.Bytes(), &replayed) != nil || replayed.CommandReference != executed.CommandReference || replayed.Status != "SUCCEEDED" {
+		t.Fatalf("replay approved lifecycle status=%d body=%s", replayedCommand.Code, replayedCommand.Body.String())
+	}
+	var commandRows, approvedPlanEvents int
+	if err = tokenConnection.QueryRow(ctx, `SELECT count(*) FROM token_command_results WHERE approval_request_id=$1`, seeded.ID).Scan(&commandRows); err != nil {
+		t.Fatal(err)
+	}
+	if err = tokenConnection.QueryRow(ctx, `SELECT count(*) FROM model_lifecycle_plan_events WHERE plan_id=$1 AND event_type='APPROVED'`, lifecyclePlanID).Scan(&approvedPlanEvents); err != nil {
+		t.Fatal(err)
+	}
+	if commandRows != 1 || approvedPlanEvents != 1 {
+		t.Fatalf("approved execution rows commands=%d plan_events=%d", commandRows, approvedPlanEvents)
+	}
+	worker := tokenservice.NewLifecyclePlanWorker(tokenService, tokenRepository, "account-snapshot-lifecycle-worker")
+	worked, err := worker.RunOnce(ctx)
+	if err != nil || !worked {
+		t.Fatalf("lifecycle worker worked=%v err=%v", worked, err)
+	}
+	var planStatus, lifecycleStatus string
+	if err = tokenConnection.QueryRow(ctx, `SELECT status FROM model_lifecycle_plans WHERE id=$1`, lifecyclePlanID).Scan(&planStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err = tokenConnection.QueryRow(ctx, `SELECT lifecycle_status FROM model_catalog_entries WHERE catalog_version=(SELECT max(version) FROM model_catalog_versions) AND model_id=$1`, modelID).Scan(&lifecycleStatus); err != nil {
+		t.Fatal(err)
+	}
+	if planStatus != "APPLIED" || lifecycleStatus != "DEPRECATED" {
+		t.Fatalf("approved lifecycle final plan=%s catalog=%s", planStatus, lifecycleStatus)
 	}
 
 	// Credential revocation uses the same Account HTTP/create/submit chain but
@@ -479,4 +556,88 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 		t.Fatal(err)
 	}
 	return modelID
+}
+
+func seedApprovalSnapshotLifecyclePlan(t *testing.T, ctx context.Context, connection *pgx.Conn, actorID, modelID uuid.UUID) (uuid.UUID, int64, int64, time.Time) {
+	t.Helper()
+	planID := uuid.New()
+	planVersion := int64(1)
+	effectiveAt := time.Now().UTC().Add(-time.Minute)
+	createdAt := effectiveAt.Add(-10 * time.Minute)
+	var catalogVersion int64
+	if err := connection.QueryRow(ctx, `SELECT max(version) FROM model_catalog_versions`).Scan(&catalogVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `
+INSERT INTO model_lifecycle_plans(id,model_id,plan_version,expected_catalog_version,current_lifecycle,target_lifecycle,effective_at,existing_session_cutoff_at,replacement_model_id,force_cancel_inflight,status,reason,request_digest,idempotency_key_digest,created_by,created_at,updated_at)
+VALUES($1,$2,$3,$4,'PUBLISHED','DEPRECATED',$5,NULL,NULL,false,'PENDING_APPROVAL','execute through the complete Account and Token approval chain',$6,$7,$8,$9,$9);
+INSERT INTO model_lifecycle_plan_events(id,plan_id,plan_version,event_type,actor_type,actor_id,reason,evidence,occurred_at)
+VALUES($10,$1,$3,'CREATED','USER',$8::text,'execute through the complete Account and Token approval chain','{}'::jsonb,$9)`, planID, modelID, planVersion, catalogVersion, effectiveAt, strings.Repeat("1", 64), strings.Repeat("2", 64), actorID, createdAt, uuid.New()); err != nil {
+		t.Fatal(err)
+	}
+	return planID, planVersion, catalogVersion, effectiveAt
+}
+
+type accountLifecycleActivationReader struct{}
+
+func (accountLifecycleActivationReader) CurrentTokenCommandGovernanceActivation(context.Context) (tokenservice.TokenCommandGovernanceActivation, error) {
+	return tokenservice.TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}, nil
+}
+
+func newApprovalExecutorTokenHandler(t *testing.T, service *tokenservice.Service, actorID uuid.UUID) (http.Handler, string, *http.Client) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var issuer *httptest.Server
+	issuer = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jwks" {
+			http.NotFound(w, r)
+			return
+		}
+		n := base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes())
+		e := base64.RawURLEncoding.EncodeToString([]byte{1, 0, 1})
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "approval-executor", "n": n, "e": e}}})
+	}))
+	t.Cleanup(issuer.Close)
+	audience := "account-token-approval-integration"
+	t.Setenv("WORKLOAD_IDENTITY_ISSUER", issuer.URL)
+	t.Setenv("WORKLOAD_IDENTITY_AUDIENCE", audience)
+	t.Setenv("WORKLOAD_IDENTITY_JWKS_URL", issuer.URL+"/jwks")
+	rules, _ := json.Marshal([]map[string]any{{"subject": actorID.String(), "service": "token-command-executor", "permissions": []string{"internal.token.model-lifecycle.execute"}}})
+	t.Setenv("WORKLOAD_IDENTITY_RULES_JSON", string(rules))
+	now := time.Now().UTC()
+	token, err := signApprovalExecutorJWT(key, map[string]any{"iss": issuer.URL, "sub": actorID.String(), "aud": audience, "exp": now.Add(time.Minute).Unix(), "iat": now.Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service.Handler("", func(context.Context, string) (identity.Principal, error) { return identity.Principal{}, ErrForbidden }), token, issuer.Client()
+}
+
+func signApprovalExecutorJWT(key *rsa.PrivateKey, claims map[string]any) (string, error) {
+	header, _ := json.Marshal(map[string]string{"alg": "RS256", "kid": "approval-executor", "typ": "JWT"})
+	payload, _ := json.Marshal(claims)
+	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
+	digest := sha256.Sum256([]byte(unsigned))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	if err != nil {
+		return "", err
+	}
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+func performApprovalExecutorRequest(t *testing.T, handler http.Handler, token string, tlsClient *http.Client, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/commands/model-lifecycle/execute", bytes.NewReader(raw))
+	request = request.WithContext(oidc.ClientContext(request.Context(), tlsClient))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }

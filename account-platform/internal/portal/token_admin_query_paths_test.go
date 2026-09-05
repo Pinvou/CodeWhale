@@ -52,6 +52,7 @@ func TestTokenAdminQueryProjectionAllowlistIsReadOnly(t *testing.T) {
 
 func TestTokenAdminStableRouteAllowlistIsExact(t *testing.T) {
 	accountID := uuid.NewString()
+	planID := uuid.NewString()
 	for _, item := range []struct {
 		method string
 		path   string
@@ -64,6 +65,10 @@ func TestTokenAdminStableRouteAllowlistIsExact(t *testing.T) {
 		{http.MethodPost, "/admin/v1/commands"},
 		{http.MethodGet, "/admin/v1/commands/" + uuid.NewString()},
 		{http.MethodGet, "/admin/v1/models/" + accountID + "/impact/lifecycle"},
+		{http.MethodGet, "/admin/v1/models/" + accountID + "/lifecycle-plans"},
+		{http.MethodPost, "/admin/v1/models/" + accountID + "/lifecycle-plans"},
+		{http.MethodGet, "/admin/v1/models/" + accountID + "/lifecycle-plans/" + planID},
+		{http.MethodPost, "/admin/v1/models/" + accountID + "/lifecycle-plans/" + planID + "/cancel"},
 		{http.MethodGet, "/admin/v1/model-catalog/impact/rollback"},
 	} {
 		if !tokenAdminPathAllowed(item.method, item.path) {
@@ -83,6 +88,9 @@ func TestTokenAdminStableRouteAllowlistIsExact(t *testing.T) {
 		{http.MethodGet, "/admin/v1/commands/not-a-uuid"},
 		{http.MethodDelete, "/admin/v1/commands/" + uuid.NewString()},
 		{http.MethodGet, "/admin/v1/token-accounts/" + accountID + "/impact/status/extra"},
+		{http.MethodPost, "/admin/v1/models/not-a-uuid/lifecycle-plans"},
+		{http.MethodPost, "/admin/v1/models/" + accountID + "/lifecycle-plans/not-a-uuid/cancel"},
+		{http.MethodDelete, "/admin/v1/models/" + accountID + "/lifecycle-plans/" + planID},
 	} {
 		if tokenAdminPathAllowed(item.method, item.path) {
 			t.Fatalf("unexpected stable route path allowed: %s %s", item.method, item.path)

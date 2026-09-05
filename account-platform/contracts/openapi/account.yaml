@@ -1118,6 +1118,10 @@ components:
         - if: { properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE } }, required: [command_type] }
           then:
             properties:
+              normalized_command:
+                oneOf:
+                  - { $ref: "#/components/schemas/TokenModelLifecycleImmediateCommand" }
+                  - { $ref: "#/components/schemas/TokenModelLifecyclePlanCommand" }
               critical_resource_versions: { $ref: "#/components/schemas/TokenModelLifecycleApprovalSnapshot" }
               financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshot" }
         - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }, required: [command_type] }
@@ -1133,13 +1137,22 @@ components:
     TokenModelLifecycleApprovalSnapshot:
       type: object
       additionalProperties: false
+      allOf:
+        - if: { properties: { target_lifecycle: { const: REMOVED } }, required: [target_lifecycle] }
+          then:
+            properties:
+              existing_session_cutoff_at: { type: string, format: date-time }
+              replacement_model_id: { type: string, format: uuid }
+          else:
+            properties:
+              replacement_model_id: { type: "null" }
       required: [model_id, catalog_version, current_lifecycle, target_lifecycle, lifecycle_plan_version, effective_at, existing_session_cutoff_at, replacement_model_id, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
       properties:
         model_id: { type: string, format: uuid }
         catalog_version: { type: integer, format: int64, minimum: 1 }
         current_lifecycle: { type: string, enum: [PUBLISHED, DEPRECATED, REMOVED] }
         target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
-        lifecycle_plan_version: { type: integer, format: int64, const: 0 }
+        lifecycle_plan_version: { type: integer, format: int64, minimum: 0, description: "Positive values identify immutable scheduled plans; zero is retained for pre-APT-134 history." }
         effective_at: { type: string, format: date-time }
         existing_session_cutoff_at: { type: [string, "null"], format: date-time }
         replacement_model_id: { type: [string, "null"], format: uuid }
@@ -1148,6 +1161,38 @@ components:
         provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         policy_version: { type: integer, const: 2 }
+    TokenModelLifecycleImmediateCommand:
+      type: object
+      additionalProperties: false
+      description: Read-compatible N-1 immediate lifecycle approval command; its critical lifecycle_plan_version is zero.
+      required: [model_id, target_lifecycle, effective_at, existing_session_cutoff_at, replacement_model_id]
+      properties:
+        model_id: { type: string, format: uuid }
+        target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
+        effective_at: { type: string, format: date-time }
+        existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+        replacement_model_id: { type: [string, "null"], format: uuid }
+    TokenModelLifecyclePlanCommand:
+      type: object
+      additionalProperties: false
+      allOf:
+        - if: { properties: { target_lifecycle: { const: REMOVED } }, required: [target_lifecycle] }
+          then:
+            properties:
+              existing_session_cutoff_at: { type: string, format: date-time }
+              replacement_model_id: { type: string, format: uuid }
+          else:
+            properties:
+              replacement_model_id: { type: "null" }
+      required: [model_id, lifecycle_plan_id, lifecycle_plan_version, target_lifecycle, effective_at, existing_session_cutoff_at, replacement_model_id]
+      properties:
+        model_id: { type: string, format: uuid }
+        lifecycle_plan_id: { type: string, format: uuid }
+        lifecycle_plan_version: { type: integer, format: int64, minimum: 1 }
+        target_lifecycle: { type: string, enum: [DEPRECATED, REMOVED] }
+        effective_at: { type: string, format: date-time }
+        existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+        replacement_model_id: { type: [string, "null"], format: uuid }
     TokenCatalogRollbackApprovalSnapshot:
       type: object
       additionalProperties: false

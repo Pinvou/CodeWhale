@@ -12,6 +12,7 @@ const TOKEN_ADMIN_FILTERS = Object.freeze({
   ownerCandidates: ['q', 'owner_type', 'status', 'organization_id'],
   resourceAudit: ['resource_type', 'resource_id', 'action', 'actor_id', 'occurred_from', 'occurred_to'],
   modelVersions: [],
+	modelLifecyclePlans: ['status', 'target_lifecycle'],
   provisioningAttempts: ['status'],
   usageEvidence: ['evidence_type'],
 	tokenCredentials: ['status'],
@@ -605,6 +606,18 @@ export class AdminPlatformClient {
   modelVersions(modelID, filters = {}, signal) {
     return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/versions?${tokenAdminCollectionQuery('modelVersions', filters)}`, signal);
   }
+	modelLifecyclePlans(modelID, filters = {}, signal) {
+		return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans?${tokenAdminCollectionQuery('modelLifecyclePlans', filters)}`, signal);
+	}
+	modelLifecyclePlan(modelID, planID, signal) {
+		return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans/${encodeURIComponent(planID)}`, signal);
+	}
+	createModelLifecyclePlan(modelID, input, idempotencyKey, signal) {
+		return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans`, 'POST', input, idempotencyKey, signal);
+	}
+	cancelModelLifecyclePlan(modelID, planID, input, idempotencyKey, signal) {
+		return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle-plans/${encodeURIComponent(planID)}/cancel`, 'POST', input, idempotencyKey, signal);
+	}
   protocols(filters = {}, signal) {
     return this.request('token', `/admin/v1/protocols?${tokenAdminCollectionQuery('protocols', filters)}`, signal);
   }
@@ -649,9 +662,10 @@ export class AdminPlatformClient {
   publishModelDraft(modelID, input) {
     return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/publish`, 'POST', input);
   }
-  modelLifecycleImpact(modelID, targetStatus, replacementModelID = '', signal) {
+  modelLifecycleImpact(modelID, targetStatus, replacementModelID = '', signal, lifecyclePlanID = '') {
     const query = new URLSearchParams({ target_status: targetStatus });
     if (replacementModelID) query.set('replacement_model_id', replacementModelID);
+		if (lifecyclePlanID) query.set('lifecycle_plan_id', lifecyclePlanID);
     return this.request('token', `/admin/v1/models/${encodeURIComponent(modelID)}/impact/lifecycle?${query}`, signal);
   }
   catalogRollbackImpact(sourceCatalogVersion, signal) {

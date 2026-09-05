@@ -51,6 +51,44 @@ type runtimeGovernedCommand struct {
 	EvidenceHighWatermark int64
 }
 
+type modelPublishCommand struct {
+	ModelID              uuid.UUID  `json:"model_id"`
+	PublishMode          string     `json:"publish_mode,omitempty"`
+	LifecyclePlanID      *uuid.UUID `json:"lifecycle_plan_id,omitempty"`
+	LifecyclePlanVersion *int64     `json:"lifecycle_plan_version,omitempty"`
+	EffectiveAt          *time.Time `json:"effective_at,omitempty"`
+}
+
+func parseModelPublishCommand(raw json.RawMessage) (modelPublishCommand, error) {
+	var command modelPublishCommand
+	if decodeCommand(raw, &command) != nil || command.ModelID == uuid.Nil {
+		return modelPublishCommand{}, ErrTokenCommandInvalid
+	}
+	// The pre-APT-134 shape remains the canonical immediate compatibility
+	// request. New callers must state the discriminator explicitly.
+	if command.PublishMode == "" {
+		command.PublishMode = "IMMEDIATE"
+	}
+	switch command.PublishMode {
+	case "IMMEDIATE":
+		if command.LifecyclePlanID != nil || command.LifecyclePlanVersion != nil || command.EffectiveAt != nil {
+			return modelPublishCommand{}, ErrTokenCommandInvalid
+		}
+	case "SCHEDULED":
+		if command.LifecyclePlanID == nil || *command.LifecyclePlanID == uuid.Nil || command.LifecyclePlanVersion == nil || *command.LifecyclePlanVersion < 1 || command.EffectiveAt == nil || command.EffectiveAt.IsZero() {
+			return modelPublishCommand{}, ErrTokenCommandInvalid
+		}
+		// Portal Date serialisation uses millisecond precision while Go omits a
+		// zero fractional component. Freeze scheduled commands at UTC-second
+		// precision before either side hashes or persists the envelope.
+		effective := command.EffectiveAt.UTC().Truncate(time.Second)
+		command.EffectiveAt = &effective
+	default:
+		return modelPublishCommand{}, ErrTokenCommandInvalid
+	}
+	return command, nil
+}
+
 var directCommandPrecheckTypes = map[string]string{
 	"TOKEN_PROTOCOL_DRAFT_CREATE":      "PROTOCOL",
 	"TOKEN_PROTOCOL_PUBLISH":           "PROTOCOL",
@@ -117,6 +155,20 @@ func (s *Service) buildTokenCommandPrecheck(ctx context.Context, input TokenComm
 	resourceType, resourceID := strings.TrimSpace(input.TargetResourceType), strings.TrimSpace(input.TargetResourceID)
 	if !supported || expectedType != strings.ToUpper(resourceType) || resourceID == "" || validateOwnedCommandPrecheckTarget(commandType, resourceID, input.Command) != nil || commandType == "TOKEN_MODEL_CATALOG_SYNC" && (input.CommandType != commandType || input.TargetResourceType != "MODEL_CATALOG" || input.TargetResourceID != "CURRENT") {
 		return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
+	}
+	if commandType == "TOKEN_MODEL_PUBLISH" {
+		command, err := parseModelPublishCommand(input.Command)
+		if err != nil {
+			return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
+		}
+		input.Command, err = json.Marshal(command)
+		if err != nil {
+			return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
+		}
+		input.Command, err = canonicalJSON(input.Command)
+		if err != nil {
+			return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
+		}
 	}
 	var snapshot commandPrecheckSnapshot
 	var observedAt time.Time
@@ -241,12 +293,8 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 			return ErrTokenCommandInvalid
 		}
 	case "TOKEN_MODEL_PUBLISH":
-		var command struct {
-			ModelID uuid.UUID `json:"model_id"`
-		}
-		if decodeCommand(raw, &command) != nil || command.ModelID == uuid.Nil {
-			return ErrTokenCommandInvalid
-		}
+		_, err := parseModelPublishCommand(raw)
+		return err
 	case "TOKEN_MODEL_CATALOG_SYNC":
 		var command struct{}
 		if decodeCommand(raw, &command) != nil {
@@ -291,11 +339,9 @@ func validateOwnedCommandPrecheckTarget(commandType, targetID string, raw json.R
 	if commandType != "TOKEN_MODEL_PUBLISH" {
 		return nil
 	}
-	var command struct {
-		ModelID uuid.UUID `json:"model_id"`
-	}
+	command, parseErr := parseModelPublishCommand(raw)
 	modelID, err := uuid.Parse(strings.TrimSpace(targetID))
-	if err != nil || decodeCommand(raw, &command) != nil || command.ModelID != modelID {
+	if err != nil || parseErr != nil || command.ModelID != modelID {
 		return ErrTokenCommandInvalid
 	}
 	return nil
@@ -592,10 +638,8 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 		if err != nil || modelID == uuid.Nil {
 			return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
 		}
-		var command struct {
-			ModelID uuid.UUID `json:"model_id"`
-		}
-		if decodeCommand(raw, &command) != nil || command.ModelID != modelID {
+		command, parseErr := parseModelPublishCommand(raw)
+		if parseErr != nil || command.ModelID != modelID {
 			return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
 		}
 		var currentCatalog int64
@@ -711,6 +755,10 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 			"provisioning_count=" + strconv.FormatInt(provisioningCount, 10), "ready_route_count=" + strconv.FormatInt(readyRouteCount, 10),
 			"provisioning_set_fingerprint=" + provisioningSetFingerprint,
 		}, unitCodes...)
+		evidenceValues = append(evidenceValues, "publish_mode="+command.PublishMode)
+		if command.PublishMode == "SCHEDULED" {
+			evidenceValues = append(evidenceValues, "lifecycle_plan_id="+command.LifecyclePlanID.String(), "lifecycle_plan_version="+strconv.FormatInt(*command.LifecyclePlanVersion, 10), "effective_at="+command.EffectiveAt.UTC().Format(time.RFC3339Nano))
+		}
 		return commandPrecheckSnapshot{Status: "DRAFT", ExpectedVersions: expectedVersions, EvidenceValues: evidenceValues, PriceDimensions: dimensions, Blockers: blockers}, nil
 	case "TOKEN_CREDENTIAL_VALIDATE":
 		credentialID, err := uuid.Parse(targetID)

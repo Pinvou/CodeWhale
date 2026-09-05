@@ -157,6 +157,25 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	target := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("target_status")))
+	planVersion := int64(0)
+	effectiveAt := time.Time{}
+	var existingSessionCutoff *time.Time
+	var plan *LifecyclePlan
+	if rawPlanID := strings.TrimSpace(r.URL.Query().Get("lifecycle_plan_id")); rawPlanID != "" {
+		planID, parseErr := uuid.Parse(rawPlanID)
+		plans, available := s.repository.(*PostgresRepository)
+		if parseErr != nil || planID == uuid.Nil || !available {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "lifecycle_plan_id is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		item, loadErr := plans.LifecyclePlan(r.Context(), modelID, planID)
+		if loadErr != nil {
+			s.writeImpactError(w, r, loadErr)
+			return
+		}
+		plan = &item
+		target, planVersion, effectiveAt, existingSessionCutoff = item.TargetLifecycle, item.PlanVersion, item.EffectiveAt, item.ExistingSessionCutoffAt
+	}
 	if target != "PUBLISHED" && target != "DEPRECATED" && target != "REMOVED" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "target_status is invalid", httpserver.RequestID(r.Context()))
 		return
@@ -169,6 +188,13 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 			return
 		}
 		replacement = &parsed
+	}
+	if plan != nil {
+		if replacement != nil && !sameOptionalUUID(replacement, plan.ReplacementModelID) {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "replacement_model_id does not match the lifecycle plan", httpserver.RequestID(r.Context()))
+			return
+		}
+		replacement = plan.ReplacementModelID
 	}
 	evidence, err := repository.ModelLifecycleImpact(r.Context(), modelID, replacement)
 	if err != nil {
@@ -184,11 +210,17 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 	if !price.FullyCovered {
 		result.Blockers = append(result.Blockers, "PRICE_COVERAGE_MISSING")
 	}
+	if target == "PUBLISHED" && evidence.Dependencies.ReadyProvisionings < 1 {
+		result.Blockers = append(result.Blockers, "MODEL_SERVING_COVERAGE_MISSING")
+	}
 	if replacement != nil && (evidence.ReplacementReady == nil || !*evidence.ReplacementReady) {
 		result.Blockers = append(result.Blockers, "REPLACEMENT_MODEL_UNAVAILABLE")
 	}
 	if target == "REMOVED" && evidence.Dependencies.InflightRequests > 0 {
 		result.Blockers = append(result.Blockers, "INFLIGHT_REQUESTS_PRESENT")
+	}
+	if target == "REMOVED" && replacement == nil {
+		result.Blockers = append(result.Blockers, "REPLACEMENT_MODEL_REQUIRED")
 	}
 	replacementValue := any(nil)
 	if replacement != nil {
@@ -201,16 +233,19 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 	if catalogVersion < 1 || price.FinancialFactRevision < 1 || !validImpactFingerprint(price.PriceSetFingerprint) || !validImpactFingerprint(evidence.RouteSetFingerprint) || !validImpactFingerprint(evidence.ProvisioningSetFingerprint) || !validImpactFingerprint(evidence.InflightSetFingerprint) {
 		result.Blockers = append(result.Blockers, "APPROVAL_SNAPSHOT_UNAVAILABLE")
 	}
+	if effectiveAt.IsZero() {
+		effectiveAt = evidence.ObservedAt.UTC()
+	}
 	result.CriticalResourceVersions = map[string]any{
 		"model_id": modelID.String(), "catalog_version": catalogVersion,
-		"current_lifecycle": evidence.CurrentStatus, "target_lifecycle": target, "lifecycle_plan_version": int64(0),
-		"effective_at": evidence.ObservedAt.UTC(), "existing_session_cutoff_at": nil, "replacement_model_id": replacementValue,
+		"current_lifecycle": evidence.CurrentStatus, "target_lifecycle": target, "lifecycle_plan_version": planVersion,
+		"effective_at": effectiveAt.UTC(), "existing_session_cutoff_at": existingSessionCutoff, "replacement_model_id": replacementValue,
 		"billing_price_version": price.FinancialFactRevision, "route_set_fingerprint": evidence.RouteSetFingerprint,
 		"provisioning_set_fingerprint": evidence.ProvisioningSetFingerprint, "inflight_request_set_fingerprint": evidence.InflightSetFingerprint,
 		"policy_version": int64(2),
 	}
 	result.FinancialSnapshot = financialImpactSnapshot(price)
-	finalizeImpactResult(&result, "target_status="+target, "replacement_model_id="+valueUUID(replacement))
+	finalizeImpactResult(&result, "target_status="+target, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+effectiveAt.UTC().Format(time.RFC3339Nano), "replacement_model_id="+valueUUID(replacement))
 	api.WriteJSON(w, http.StatusOK, result)
 }
 
@@ -638,20 +673,6 @@ func (r *PostgresRepository) ModelLifecycleImpact(ctx context.Context, modelID u
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
-	evidence.ReplacementModelID = replacementID
-	if replacementID != nil {
-		var ready bool
-		var replacementProtocol string
-		err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2 AND lifecycle_status='PUBLISHED' AND source_available),COALESCE((SELECT protocol.protocol_code FROM model_catalog_entries entry JOIN protocol_definitions protocol ON protocol.id=entry.protocol_definition_id WHERE entry.catalog_version=$1 AND entry.model_id=$2),'')`, *evidence.CurrentVersion.CatalogVersion, *replacementID).Scan(&ready, &replacementProtocol)
-		if err != nil {
-			return ImpactLocalEvidence{}, err
-		}
-		evidence.ReplacementReady = &ready
-		evidence.ModelIDs = append(evidence.ModelIDs, *replacementID)
-		if replacementProtocol != "" {
-			evidence.PriceDimensions = append(evidence.PriceDimensions, ImpactPriceQuery{ModelID: *replacementID, ProtocolCode: replacementProtocol, CreditUnit: "MICROCREDIT"})
-		}
-	}
 	evidence.ModelIDs = uniqueUUIDs(evidence.ModelIDs)
 	evidence.CurrentVersion.EvidenceETag = localImpactETag(evidence)
 	return evidence, commitReadOnly(ctx, tx)
@@ -763,6 +784,26 @@ func modelImpactInTx(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replacem
 	evidence.ResourceType, evidence.ResourceID, evidence.CurrentVersion.CatalogVersion = "MODEL", modelID.String(), &version
 	evidence.ModelIDs = []uuid.UUID{modelID}
 	evidence.PriceDimensions = []ImpactPriceQuery{{ModelID: modelID, ProtocolCode: protocol, CreditUnit: "MICROCREDIT"}}
+	evidence.ReplacementModelID = replacementID
+	if replacementID != nil {
+		var replacementProtocol string
+		err = tx.QueryRow(ctx, `SELECT protocol.protocol_code FROM model_catalog_entries entry JOIN protocol_definitions protocol ON protocol.id=entry.protocol_definition_id WHERE entry.catalog_version=$1 AND entry.model_id=$2`, version, *replacementID).Scan(&replacementProtocol)
+		if errors.Is(err, pgx.ErrNoRows) {
+			ready := false
+			evidence.ReplacementReady = &ready
+		} else if err != nil {
+			return ImpactLocalEvidence{}, err
+		} else {
+			ready, readyErr := replacementModelReadyInTx(ctx, tx, version, *replacementID)
+			if readyErr != nil {
+				return ImpactLocalEvidence{}, readyErr
+			}
+			evidence.ReplacementReady = &ready
+			evidence.ModelIDs = append(evidence.ModelIDs, *replacementID)
+			evidence.PriceDimensions = append(evidence.PriceDimensions, ImpactPriceQuery{ModelID: *replacementID, ProtocolCode: replacementProtocol, CreditUnit: "MICROCREDIT"})
+		}
+	}
+	modelIDs := uniqueUUIDs(evidence.ModelIDs)
 	err = tx.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM routing_policies WHERE model IN ($1,$2)),
 		(SELECT count(*) FROM routing_policies WHERE (model_id::text=$1 OR model=$2) AND reference_status='RESOLVED' AND health_status='HEALTHY' AND health_expires_at>transaction_timestamp()),
@@ -778,15 +819,15 @@ func modelImpactInTx(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replacem
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
-	evidence.CurrentVersion.EvidenceSetSHA256, err = modelImpactKeySet(ctx, tx, modelID, upstream, replacementID)
+	evidence.CurrentVersion.EvidenceSetSHA256, err = modelImpactKeySet(ctx, tx, modelID, replacementID)
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
-	evidence.RouteSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,model_id,protocol_version_id,route_version,route_generation,reference_status,health_status)::text FROM routing_policies WHERE model_id=$1 OR model IN ($1::text,$2) ORDER BY id`, modelID, upstream)
+	evidence.RouteSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(route.id,route.model_id,route.protocol_version_id,route.route_version,route.route_generation,route.reference_status,route.health_version,route.health_status,route.health_diagnostic_code,route.health_observed_at,route.health_expires_at,account.status,account.management_version,credential.id,credential.version,credential.status,credential.validation_status,credential.provider,credential.fingerprint,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(credential.allowed_models) value))::text FROM routing_policies route JOIN token_accounts account ON account.id=route.token_account_id LEFT JOIN provider_credentials credential ON credential.token_account_id=route.token_account_id WHERE route.model_id=ANY($1::uuid[]) ORDER BY route.id,credential.id`, modelIDs)
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
-	evidence.ProvisioningSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,protocol_version_id)::text FROM route_provisionings WHERE model_id=$1 ORDER BY id`, modelID)
+	evidence.ProvisioningSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id,status,stage,desired_generation,actual_generation,policy_version,lease_until,active_token_account_id,active_credential_id,updated_at)::text FROM route_provisionings WHERE model_id=ANY($1::uuid[]) ORDER BY model_id,id`, modelIDs)
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
@@ -795,6 +836,15 @@ func modelImpactInTx(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replacem
 		return ImpactLocalEvidence{}, err
 	}
 	return evidence, nil
+}
+
+func replacementModelReadyInTx(ctx context.Context, tx pgx.Tx, catalogVersion int64, modelID uuid.UUID) (bool, error) {
+	var catalogReady bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2 AND lifecycle_status='PUBLISHED' AND source_available)`, catalogVersion, modelID).Scan(&catalogReady); err != nil || !catalogReady {
+		return false, err
+	}
+	coverage, err := canServeCoverageCount(ctx, tx, []uuid.UUID{modelID}, nil, "", nil, nil)
+	return coverage > 0, err
 }
 
 func (r *PostgresRepository) TokenAccountImpact(ctx context.Context, accountID uuid.UUID) (ImpactLocalEvidence, error) {
@@ -1090,21 +1140,23 @@ func impactRowsFingerprint(ctx context.Context, tx pgx.Tx, query string, args ..
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-func modelImpactKeySet(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, upstream string, replacementID *uuid.UUID) (string, error) {
+func modelImpactKeySet(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replacementID *uuid.UUID) (string, error) {
 	digest := sha256.New()
 	replacement := uuid.Nil
+	modelIDs := []uuid.UUID{modelID}
 	if replacementID != nil {
 		replacement = *replacementID
+		modelIDs = uniqueUUIDs(append(modelIDs, replacement))
 	}
 	queries := []struct {
 		sql  string
 		args []any
 	}{
 		{`SELECT 'catalog|'||jsonb_build_array(entry.catalog_version,entry.model_id,entry.lifecycle_status,entry.model_capability_version_id,entry.protocol_definition_id,entry.source_available,entry.replacement_model_id,entry.new_session_cutoff_at,entry.continuation_cutoff_at,entry.force_cancel_inflight)::text FROM model_catalog_entries entry WHERE entry.catalog_version=(SELECT max(version) FROM model_catalog_versions) AND entry.model_id=$1`, []any{modelID}},
-		{`SELECT 'route|'||jsonb_build_array(id,model,protocol_code,route_generation,'PRESENT',health_status)::text FROM routing_policies WHERE model IN ($1,$2) ORDER BY id`, []any{modelID.String(), upstream}},
-		{`SELECT 'provisioning|'||jsonb_build_array(id,status,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code,protocol_version_id)::text FROM route_provisionings WHERE model_id=$1 ORDER BY id`, []any{modelID}},
+		{`SELECT 'route|'||jsonb_build_array(route.id,route.model_id,route.protocol_version_id,route.route_version,route.route_generation,route.reference_status,route.health_version,route.health_status,route.health_diagnostic_code,route.health_observed_at,route.health_expires_at,account.status,account.management_version)::text FROM routing_policies route JOIN token_accounts account ON account.id=route.token_account_id WHERE route.model_id=ANY($1::uuid[]) ORDER BY route.model_id,route.id`, []any{modelIDs}},
+		{`SELECT 'provisioning|'||jsonb_build_array(id,status,stage,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code,protocol_version_id)::text FROM route_provisionings WHERE model_id=ANY($1::uuid[]) ORDER BY model_id,id`, []any{modelIDs}},
 		{`SELECT 'request|'||jsonb_build_array(id,session_id,status,execution_status)::text FROM usage_requests WHERE model_id=$1 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, []any{modelID}},
-		{`SELECT DISTINCT 'credential|'||jsonb_build_array(credential.id,credential.version,credential.status,credential.validation_status,credential.provider,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(credential.allowed_models) value),route.model,route.protocol_code)::text FROM routing_policies route JOIN provider_credentials credential ON credential.token_account_id=route.token_account_id WHERE route.model IN ($1,$2) ORDER BY 1`, []any{modelID.String(), upstream}},
+		{`SELECT DISTINCT 'credential|'||jsonb_build_array(credential.id,credential.version,credential.status,credential.validation_status,credential.provider,credential.fingerprint,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(credential.allowed_models) value),route.model_id,route.protocol_version_id)::text FROM routing_policies route JOIN provider_credentials credential ON credential.token_account_id=route.token_account_id WHERE route.model_id=ANY($1::uuid[]) ORDER BY 1`, []any{modelIDs}},
 		{`SELECT 'replacement|'||jsonb_build_array(entry.model_id,entry.lifecycle_status,entry.model_capability_version_id,entry.protocol_definition_id,entry.source_available)::text FROM model_catalog_entries entry WHERE $1<>$2 AND entry.catalog_version=(SELECT max(version) FROM model_catalog_versions) AND entry.model_id=$1`, []any{replacement, uuid.Nil}},
 	}
 	for _, item := range queries {

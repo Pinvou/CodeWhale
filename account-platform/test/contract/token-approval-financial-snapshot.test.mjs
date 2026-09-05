@@ -22,6 +22,13 @@ const critical = {
   effective_at: '2026-09-04T08:00:00Z', existing_session_cutoff_at: null, replacement_model_id: null, billing_price_version: 11,
   route_set_fingerprint: digest('a'), provisioning_set_fingerprint: digest('b'), inflight_request_set_fingerprint: digest('c'), policy_version: 2,
 };
+const lifecycleImmediate = {
+  model_id: critical.model_id,
+  target_lifecycle: critical.target_lifecycle,
+  effective_at: critical.effective_at,
+  existing_session_cutoff_at: critical.existing_session_cutoff_at,
+  replacement_model_id: critical.replacement_model_id,
+};
 const financial = { billing_price_revision: 11, price_set_fingerprint: digest('d'), models_checked: 1, models_covered: 1, fully_covered: true, billing_as_of: '2026-09-04T08:00:01Z' };
 
 test('Billing unit validation exposes a closed authoritative snapshot', async () => {
@@ -102,7 +109,7 @@ test('model publish precheck is a closed stable-target and full price-evidence c
 test('Account execution lease retains the exact snapshots for Token commands and legacy compatibility elsewhere', async () => {
   const contract = YAML.parse(await read('contracts/openapi/account.yaml'));
   const validate = compile(contract.components.schemas, 'ApprovalExecutionLease');
-  const value = { approval_request_id: id('3'), command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', policy_version: 2, command_fingerprint: digest('a'), normalized_command: {}, target_resource_type: 'MODEL', target_resource_id: critical.model_id, critical_resource_versions: critical, financial_snapshot: financial, requester_user_id: id('4'), approver_user_id: id('5'), decision_reason: 'approved', execution_idempotency_key: 'approval:key', executor_identity: 'token-command-executor', status: 'EXECUTING' };
+  const value = { approval_request_id: id('3'), command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', policy_version: 2, command_fingerprint: digest('a'), normalized_command: lifecycleImmediate, target_resource_type: 'MODEL', target_resource_id: critical.model_id, critical_resource_versions: critical, financial_snapshot: financial, requester_user_id: id('4'), approver_user_id: id('5'), decision_reason: 'approved', execution_idempotency_key: 'approval:key', executor_identity: 'token-command-executor', status: 'EXECUTING' };
   assert.equal(validate(value), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...value, financial_snapshot: { ...financial, extra: 1 } }), false);
   assert.equal(validate({ ...value, command_type: 'WALLET_ADJUSTMENT', critical_resource_versions: {}, financial_snapshot: {} }), true, JSON.stringify(validate.errors));
@@ -117,7 +124,7 @@ test('authorized event carries the same closed snapshots without secret fields',
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   addFormats(ajv);
   const validate = ajv.compile(schema);
-  const event = { event_id: id('6'), event_type: 'account.approval-command.authorized.v1', aggregate_id: id('7'), aggregate_version: 2, occurred_at: '2026-09-04T08:00:02Z', trace_id: 'trace', payload: { approval_request_id: id('7'), command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', command_fingerprint: digest('a'), policy_version: 2, executor_identity: 'token-command-executor', execution_deadline: '2026-09-04T08:05:00Z', normalized_command: {}, target_resource_type: 'MODEL', target_resource_id: critical.model_id, critical_resource_versions: critical, financial_snapshot: financial } };
+  const event = { event_id: id('6'), event_type: 'account.approval-command.authorized.v1', aggregate_id: id('7'), aggregate_version: 2, occurred_at: '2026-09-04T08:00:02Z', trace_id: 'trace', payload: { approval_request_id: id('7'), command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', command_fingerprint: digest('a'), policy_version: 2, executor_identity: 'token-command-executor', execution_deadline: '2026-09-04T08:05:00Z', normalized_command: lifecycleImmediate, target_resource_type: 'MODEL', target_resource_id: critical.model_id, critical_resource_versions: critical, financial_snapshot: financial } };
   assert.equal(validate(event), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...event, payload: { ...event.payload, financial_snapshot: { ...financial, api_key: 'forbidden' } } }), false);
   const credentialID = id('8');
