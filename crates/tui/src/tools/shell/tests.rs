@@ -397,6 +397,65 @@ fn execute_shell(
 }
 
 #[test]
+fn forkguard_shell_catalog_guidance_matches_execution() {
+    let tool = BashTool::new("Bash");
+    let schema = tool.input_schema();
+    let command = schema["properties"]["command"]["description"]
+        .as_str()
+        .unwrap();
+    let dispatcher = crate::shell_dispatcher::global_dispatcher();
+    assert!(command.contains(dispatcher.kind().binary()));
+    assert!(tool.description().contains(command));
+    assert_eq!(tool.name(), "Bash");
+    assert!(!tool.model_visible());
+    assert!(tool.description().contains("background=true"));
+    let readonly = BashTool::read_only("Bash");
+    assert!(readonly.description().contains("never through a shell"));
+    assert!(
+        !readonly
+            .input_schema()
+            .to_string()
+            .contains("Actual execution shell")
+    );
+    let alias = BashTool::alias("exec_shell", "run");
+    assert_eq!(alias.description(), tool.description());
+    // The model-facing `bash` contract tool carries the same runtime guidance.
+    let contract = LowercaseBashTool;
+    let contract_schema = contract.input_schema();
+    let contract_command = contract_schema["properties"]["command"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(contract_command.contains(dispatcher.kind().binary()));
+    let workspace = tempdir().unwrap();
+    let mut registry = crate::tools::ToolRegistry::new(ToolContext::new(workspace.path()));
+    registry.register(std::sync::Arc::new(LowercaseBashTool));
+    let catalog = registry.to_api_tools();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].description, contract.description());
+    assert_eq!(
+        catalog[0].input_schema["properties"]["command"]["description"],
+        contract_command
+    );
+}
+
+#[test]
+#[ignore = "Exports model-visible shell fixtures for opt-in live model evaluation"]
+fn export_shell_guidance_eval_fixture() {
+    let path = std::env::var_os("SHELL_GUIDANCE_FIXTURE").expect("SHELL_GUIDANCE_FIXTURE");
+    let tool = BashTool::new("Bash");
+    let mut schema = tool.input_schema();
+    crate::tools::schema_sanitize::sanitize(&mut schema);
+    crate::tools::schema_canonicalize::canonicalize_schema(&mut schema);
+    let fixture = json!({
+        "name": tool.name(),
+        "description": tool.description(),
+        "input_schema": schema,
+        "shell": crate::shell_dispatcher::global_dispatcher().kind().binary(),
+    });
+    std::fs::write(path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+}
+
+#[test]
 fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
     let workspace = tempdir().expect("workspace");
     let stale = workspace.path().join("deleted-session-workspace");
