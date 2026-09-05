@@ -3,6 +3,7 @@ import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-n
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
 import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact, validApprovalRequest } from './admin-high-risk-action-state.js';
+import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 
 const MODEL_DETAIL_TABS = Object.freeze(['overview', 'capabilities', 'operations', 'pricing', 'lifecycle', 'audit']);
 
@@ -128,29 +129,44 @@ function OperationsTab({ modelID, client, copy, query, onQueryChange, cursorHist
   </section>;
 }
 
-function PricingTab({ detail, client, copy }) {
+function ProjectionUnits({ point, copy }) {
+  if (!point?.price?.units?.length) return null;
+  return <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.unitCode}</th><th>{copy.resolvedPrice}</th><th>{copy.priceSource}</th><th>{copy.roundingRule}</th></tr></thead><tbody>{point.price.units.map((unit) => <tr key={unit.unit_definition_id}><td data-label={copy.unitCode}>{unit.unit_code} · v{unit.unit_version}</td><td data-label={copy.resolvedPrice}>{unit.resolved_price} / {unit.price_denominator}</td><td data-label={copy.priceSource}>{copy.enumLabels[unit.price_source_scope] || unit.price_source_scope}<small className="adm-secondary-id">{unit.source_price_version_id}</small></td><td data-label={copy.roundingRule}>{copy.enumLabels[unit.rounding_rule] || unit.rounding_rule}</td></tr>)}</tbody></table></div>;
+}
+
+function PricingTab({ detail, client, copy, pricingCopy, permissions, pricingEditEnabled, manageRequested, onRouteChange }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
   const formula = detail.formula;
+  const canManage = pricingEditEnabled && permissions.includes('platform.pricing.manage');
   const query = useMemo(() => ({ model_id: detail.model.model_id, protocol_code: detail.protocol.protocol_code, formula_version_id: formula?.formula_version_id || '', credit_unit: 'MICROCREDIT' }), [detail, formula]);
   const load = useMemo(() => async (filters, signal) => asCollection(await client.modelPriceProjection(filters.model_id, filters.protocol_code, filters.formula_version_id, filters.credit_unit, signal)), [client]);
   const state = useAdminSource({ enabled: Boolean(formula), load, query, refreshVersion });
   if (!formula) return <section className="adm-card adm-model-detail-panel"><h2>{copy.detailPricing}</h2><p className="adm-source-lead">{copy.priceFormulaMissing}</p></section>;
   const projection = state.items[0];
-  return <DetailSource title={copy.detailPricing} titleID="model-pricing-heading" state={state} copy={copy} onRetry={() => setRefreshVersion((value) => value + 1)}>
-    <p className="adm-source-lead">{copy.detailPricingLead}</p>
-    {projection && <>
+  return <div className="adm-model-detail-stack">
+    <DetailSource title={copy.detailPricing} titleID="model-pricing-heading" state={state} copy={copy} onRetry={() => setRefreshVersion((value) => value + 1)}>
+      <div className="adm-pricing-context-head"><p className="adm-source-lead">{copy.detailPricingLead}</p>{canManage && <button type="button" onClick={() => onRouteChange({ model_price_manage: manageRequested ? null : '1' }, 'push')}>{manageRequested ? copy.closePricingManager : copy.manageModelPricing}</button>}</div>
+      {projection && <>
       <div className="adm-billing-authority"><div><strong>{copy.billingAuthority}</strong><span>{copy.independentBillingSnapshot} · {formatDate(projection.as_of)}</span></div><Status value={projection.current?.coverage_status} copy={copy} /></div>
       <Facts>
         <Fact label={copy.protocol}>{projection.protocol_code}</Fact>
         <Fact label={copy.safeFormula}><span className="adm-mono">{projection.formula_version_id}</span></Fact>
         <Fact label={copy.creditUnit}>{projection.credit_unit}</Fact>
         <Fact label={copy.priceVersion}>{projection.current?.price?.price_version_id || '—'}</Fact>
+        <Fact label={copy.priceSpaceETag}>{projection.current?.price?.space_etag ?? '—'}</Fact>
         <Fact label={copy.effectiveFrom}>{formatDate(projection.current?.price?.effective_from)}</Fact>
         <Fact label={copy.nextPriceChange}>{projection.next_change ? formatDate(projection.next_change.effective_at) : copy.noneScheduled}</Fact>
+        <Fact label={copy.nextCoverage}>{projection.next_change ? <Status value={projection.next_change.coverage_status} copy={copy} /> : copy.noneScheduled}</Fact>
       </Facts>
-      {projection.current?.price?.units?.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.unitCode}</th><th>{copy.resolvedPrice}</th><th>{copy.priceSource}</th><th>{copy.roundingRule}</th></tr></thead><tbody>{projection.current.price.units.map((unit) => <tr key={unit.unit_definition_id}><td data-label={copy.unitCode}>{unit.unit_code}</td><td data-label={copy.resolvedPrice}>{unit.resolved_price}</td><td data-label={copy.priceSource}>{unit.price_source_scope}</td><td data-label={copy.roundingRule}>{unit.rounding_rule}</td></tr>)}</tbody></table></div>}
-    </>}
-  </DetailSource>;
+      <h3>{copy.currentPriceUnits}</h3>
+      <ProjectionUnits point={projection.current} copy={copy} />
+      {projection.current?.coverage_status !== 'AVAILABLE' && <p className="adm-source-lead">{copy.noResolvedPrice}</p>}
+      {projection.next_change && <><h3>{copy.futurePriceUnits}</h3><ProjectionUnits point={projection.next_change} copy={copy} />{projection.next_change.coverage_status !== 'AVAILABLE' && <p className="adm-source-lead">{copy.futurePriceUnavailable}</p>}</>}
+      </>}
+    </DetailSource>
+    {manageRequested && canManage && <section className="adm-card adm-model-pricing-editor" aria-labelledby="model-pricing-editor-heading"><h2 id="model-pricing-editor-heading">{copy.sharedPricingEditor}</h2><p className="adm-source-lead">{copy.sharedPricingEditorLead}</p><PricingLifecycleWorkspace key={`${detail.model.model_id}:${formula.formula_version_id}`} copy={pricingCopy} client={client} permissions={permissions} contextModel={detail.model} contextFormula={formula} onExit={() => onRouteChange({ model_price_manage: null }, 'push')} /></section>}
+    {!pricingEditEnabled && permissions.includes('platform.pricing.manage') && <section className="adm-card adm-model-detail-panel"><p className="adm-source-lead">{copy.pricingEditorGateOff}</p></section>}
+  </div>;
 }
 
 function lifecycleApprovalDraft(plan, reason, impact, idempotencyKey) {
@@ -322,10 +338,12 @@ function AuditTab({ modelID, client, copy, query, onQueryChange, cursorHistory }
   </section>;
 }
 
-export function AdminModelDetailWorkspace({ modelID, client, copy, permissions, actionsEnabled = false, routeVersion, onRouteChange, onQueryChange, cursorHistory, onTabsKeyDown }) {
+export function AdminModelDetailWorkspace({ modelID, client, copy, pricingCopy, permissions, actionsEnabled = false, pricingEditEnabled = false, routeVersion, onRouteChange, onNavigate, onQueryChange, cursorHistory, onTabsKeyDown }) {
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [copied, setCopied] = useState(false);
   const requestedTab = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_detail_tab') || 'overview', [routeVersion]);
+  const managePricing = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_price_manage') === '1', [routeVersion]);
+  const priceReturn = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_price_return') === 'products', [routeVersion]);
   const tabs = useMemo(() => MODEL_DETAIL_TABS
     .filter((tab) => tab !== 'operations' || permissions.includes('platform.tokens.read'))
     .filter((tab) => tab !== 'pricing' || permissions.includes('platform.pricing.read'))
@@ -344,10 +362,13 @@ export function AdminModelDetailWorkspace({ modelID, client, copy, permissions, 
 	const lifecyclePlanQuery = useMemo(() => readAdminModelTokenQuery('modelLifecyclePlans'), [routeVersion]);
 	const lifecycleCandidateQuery = useMemo(() => readAdminModelTokenQuery('modelLifecycleCandidates'), [routeVersion]);
   useEffect(() => setCopied(false), [modelID]);
-  const back = () => onRouteChange({ model_id: null, model_detail_tab: null, ...adminModelTokenQueryUpdates('modelProvisionings', {}), ...adminModelTokenQueryUpdates('modelAudit', {}), ...adminModelTokenQueryUpdates('modelHistory', {}), ...adminModelTokenQueryUpdates('modelLifecyclePlans', {}), ...adminModelTokenQueryUpdates('modelLifecycleCandidates', {}) }, 'push');
+  const back = () => {
+    if (priceReturn) { onNavigate?.('products', { finance_tab: 'prices' }); return; }
+    onRouteChange({ model_id: null, model_detail_tab: null, model_price_manage: null, model_price_return: null, ...adminModelTokenQueryUpdates('modelProvisionings', {}), ...adminModelTokenQueryUpdates('modelAudit', {}), ...adminModelTokenQueryUpdates('modelHistory', {}), ...adminModelTokenQueryUpdates('modelLifecyclePlans', {}), ...adminModelTokenQueryUpdates('modelLifecycleCandidates', {}) }, 'push');
+  };
   return <article className="adm-model-detail">
     <header className="adm-card adm-model-detail-header">
-      <button type="button" className="adm-back" onClick={back}>← {copy.backToModelDirectory}</button>
+      <button type="button" className="adm-back" onClick={back}>← {priceReturn ? copy.backToPricingGovernance : copy.backToModelDirectory}</button>
       <div><p>{copy.modelDetail}</p><h2>{detail?.model?.display_name || copy.loading}</h2><div className="adm-model-id"><span className="adm-mono">{modelID}</span><button type="button" onClick={async () => { try { await globalThis.navigator?.clipboard?.writeText(modelID); setCopied(true); } catch { setCopied(false); } }}>{copied ? copy.copied : copy.copyID}</button></div></div>
       <div><small>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</small><button type="button" disabled={state.loading} onClick={() => setRefreshVersion((value) => value + 1)}>{copy.refreshSource}</button></div>
     </header>
@@ -358,7 +379,7 @@ export function AdminModelDetailWorkspace({ modelID, client, copy, permissions, 
         {tab === 'overview' && <OverviewTab detail={detail} copy={copy} />}
         {tab === 'capabilities' && <CapabilitiesTab detail={detail} client={client} copy={copy} historyQuery={historyQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
         {tab === 'operations' && <OperationsTab modelID={modelID} client={client} copy={copy} query={provisioningQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
-        {tab === 'pricing' && <PricingTab detail={detail} client={client} copy={copy} />}
+        {tab === 'pricing' && <PricingTab detail={detail} client={client} copy={copy} pricingCopy={pricingCopy} permissions={permissions} pricingEditEnabled={pricingEditEnabled} manageRequested={managePricing} onRouteChange={onRouteChange} />}
         {tab === 'lifecycle' && <LifecycleTab detail={detail} client={client} copy={copy} permissions={permissions} actionsEnabled={actionsEnabled} query={lifecyclePlanQuery} candidateQuery={lifecycleCandidateQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
         {tab === 'audit' && <AuditTab modelID={modelID} client={client} copy={copy} query={auditQuery} onQueryChange={onQueryChange} cursorHistory={cursorHistory} />}
       </div>

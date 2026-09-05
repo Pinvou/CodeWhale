@@ -42,6 +42,7 @@ type Config struct {
 	AdminTokenResourceFormsEnabled     bool
 	AdminModelOperationsDetailsEnabled bool
 	AdminModelDetailsEnabled           bool
+	AdminModelPricingEditEnabled       bool
 	AdminTokenDetailsEnabled           bool
 	AdminModelTokenActionsEnabled      bool
 	CredentialOrigin                   *url.URL
@@ -287,6 +288,7 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 			"admin_token_resource_forms":     s.config.AdminTokenResourceFormsEnabled,
 			"admin_model_operations_details": s.config.AdminModelOperationsDetailsEnabled,
 			"admin_model_details":            s.config.AdminModelDetailsEnabled,
+			"admin_model_pricing_edit":       s.config.AdminModelPricingEditEnabled,
 			"admin_token_details":            s.config.AdminTokenDetailsEnabled,
 			"admin_model_token_actions":      s.config.AdminModelTokenActionsEnabled,
 		},

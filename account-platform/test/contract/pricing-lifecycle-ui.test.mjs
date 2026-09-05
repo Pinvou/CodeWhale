@@ -147,7 +147,7 @@ test('admin pricing UI exposes the complete Billing lifecycle without legacy wri
   assert.match(workspace, /disabled=\{Boolean\(unknownMutation\)\}/);
   assert.match(workspace, /if \(!canManage\)/);
   assert.match(workspace, /managedPriceSpace/);
-  assert.match(workspace, /disabled=\{Boolean\(editor\.price_version_id\)\}/);
+  assert.match(workspace, /disabled=\{contextual \|\| Boolean\(editor\.price_version_id\)\}/);
   assert.match(workspace, /client\.catalogModels/);
   assert.match(workspace, /generations\.current\.models \+= 1/);
   assert.match(workspace, /lifecycle_status !== 'REMOVED'/);

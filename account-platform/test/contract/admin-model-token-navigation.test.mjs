@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   adminModelTokenOverviewRoute,
+  adminModelPricingEditGateEnabled,
   adminModelTokenQueryUpdates,
   adminNavigationGroupsForGate,
   adminSectionURL,
@@ -319,11 +320,31 @@ test('new page source keeps independent loading, error, refresh and last-updated
   const initialNormalize = view.indexOf('const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled');
   const initialDenied = view.indexOf('if (visible.length === 0)', initialNormalize);
   assert.ok(initialNormalize >= 0 && initialNormalize < initialDenied, 'initial authorization normalizes before rendering zero-permission denial');
-  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelDetailsEnabled: nextDetailsEnabled, tokenDetailsEnabled: nextTokenDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
-  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, tokenDetailsEnabled, modelTokenActionsEnabled \}\)/);
+  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelDetailsEnabled: nextDetailsEnabled, modelPricingEditEnabled: nextPricingEditEnabled, tokenDetailsEnabled: nextTokenDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
+  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, modelPricingEditEnabled, tokenDetailsEnabled, modelTokenActionsEnabled \}\)/);
   assert.match(operationsSource, /provisioningRequest &&/);
   assert.match(operationsSource, /usageRequest &&/);
   assert.match(operationsSource, /reconciliationRequest &&/);
+});
+
+test('model pricing editor URL state is independently gated and cleaned before render', () => {
+  const model = '00000000-0000-4000-8000-000000000101';
+  assert.equal(adminModelPricingEditGateEnabled({ feature_flags: { admin_model_pricing_edit: true } }), true);
+  assert.equal(adminModelPricingEditGateEnabled({ feature_flags: { admin_model_pricing_edit: false } }), false);
+  const route = locationLike(`?section=models&model_id=${model}&model_detail_tab=pricing&model_price_manage=1&model_price_return=products`);
+  const allowed = normalizeAdminModelTokenEntry('models', ['models'], true, route, ['platform.models.read', 'platform.pricing.read', 'platform.pricing.manage'], { modelDetailsEnabled: true, modelPricingEditEnabled: true });
+  assert.equal(allowed.updates.model_price_manage, undefined);
+  assert.equal(allowed.updates.model_price_return, undefined);
+  const revoked = normalizeAdminModelTokenEntry('models', ['models'], true, route, ['platform.models.read', 'platform.pricing.read'], { modelDetailsEnabled: true, modelPricingEditEnabled: true });
+  assert.equal(revoked.updates.model_price_manage, null);
+  assert.equal(revoked.updates.model_price_return, undefined);
+  const gateOff = normalizeAdminModelTokenEntry('models', ['models'], true, route, ['platform.models.read', 'platform.pricing.read', 'platform.pricing.manage'], { modelDetailsEnabled: true, modelPricingEditEnabled: false });
+  assert.equal(gateOff.updates.model_price_manage, null);
+  const writeWithoutRead = normalizeAdminModelTokenEntry('models', ['models'], true, route, ['platform.models.read', 'platform.pricing.manage'], { modelDetailsEnabled: true, modelPricingEditEnabled: true });
+  assert.equal(writeWithoutRead.updates.model_detail_tab, 'overview');
+  assert.equal(writeWithoutRead.updates.model_price_manage, null, 'write permission alone cannot retain a hidden pricing editor in the same normalization');
+  const otherTab = normalizeAdminModelTokenEntry('models', ['models'], true, locationLike(`?section=models&model_id=${model}&model_detail_tab=overview&model_price_manage=1&model_price_return=products`), ['platform.models.read', 'platform.pricing.read', 'platform.pricing.manage'], { modelDetailsEnabled: true, modelPricingEditEnabled: true });
+  assert.equal(otherTab.updates.model_price_manage, null);
 });
 
 test('APT-127 presentation keeps three-language labels, visible focus, and a 320px layout boundary', async () => {

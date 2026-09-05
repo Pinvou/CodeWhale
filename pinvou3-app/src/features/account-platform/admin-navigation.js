@@ -44,11 +44,11 @@ const adminModelTokenQueryParameters = Object.freeze({
 });
 
 const adminModelTokenPageParameters = Object.freeze([
-  'model_tab', 'model_id', 'model_detail_tab', 'token_account_id', 'token_detail_tab',
+  'model_tab', 'model_id', 'model_detail_tab', 'model_price_manage', 'model_price_return', 'token_account_id', 'token_detail_tab',
   'operations_tab', 'provisioning_id', 'usage_request_id',
 ]);
 const adminModelTokenDetailParameters = Object.freeze({
-  model: Object.freeze(['model_id', 'model_detail_tab', ...Object.values(adminModelTokenQueryParameters.modelAudit), ...Object.values(adminModelTokenQueryParameters.modelHistory), ...Object.values(adminModelTokenQueryParameters.modelProvisionings), ...Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), ...Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates)]),
+  model: Object.freeze(['model_id', 'model_detail_tab', 'model_price_manage', 'model_price_return', ...Object.values(adminModelTokenQueryParameters.modelAudit), ...Object.values(adminModelTokenQueryParameters.modelHistory), ...Object.values(adminModelTokenQueryParameters.modelProvisionings), ...Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), ...Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates)]),
   token: Object.freeze(['token_account_id', 'token_detail_tab', ...Object.values(adminModelTokenQueryParameters.tokenAudit), ...Object.values(adminModelTokenQueryParameters.tokenProvisionings), ...Object.values(adminModelTokenQueryParameters.tokenCredentials), ...Object.values(adminModelTokenQueryParameters.tokenRoutes)]),
   provisioning: Object.freeze(['provisioning_id', ...Object.values(adminModelTokenQueryParameters.provisioningAttempts)]),
   usage: Object.freeze(['usage_request_id', ...Object.values(adminModelTokenQueryParameters.usageEvidence)]),
@@ -88,6 +88,10 @@ export function adminModelOperationsDetailsGateEnabled(session = {}) {
 
 export function adminModelDetailsGateEnabled(session = {}) {
   return session?.feature_flags?.admin_model_details === true;
+}
+
+export function adminModelPricingEditGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_model_pricing_edit === true;
 }
 
 export function adminTokenDetailsGateEnabled(session = {}) {
@@ -260,10 +264,15 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
 			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), updates);
 			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates), updates);
     }
-    if (detailTab !== 'operations') clearParameters(Object.values(adminModelTokenQueryParameters.modelProvisionings), updates);
-    if (detailTab !== 'audit') clearParameters(Object.values(adminModelTokenQueryParameters.modelAudit), updates);
-    if (detailTab !== 'capabilities') clearParameters(Object.values(adminModelTokenQueryParameters.modelHistory), updates);
-		if (detailTab !== 'lifecycle') {
+    const effectiveDetailTab = allowedTabs.has(detailTab) ? detailTab : 'overview';
+    const canManageModelPrice = options.modelPricingEditEnabled === true && permissions.includes('platform.pricing.read') && permissions.includes('platform.pricing.manage');
+    if (effectiveDetailTab !== 'pricing' || !canManageModelPrice) updates.model_price_manage = null;
+    if (search.get('model_price_manage') && search.get('model_price_manage') !== '1') updates.model_price_manage = null;
+    if (search.get('model_price_return') && search.get('model_price_return') !== 'products') updates.model_price_return = null;
+    if (effectiveDetailTab !== 'operations') clearParameters(Object.values(adminModelTokenQueryParameters.modelProvisionings), updates);
+    if (effectiveDetailTab !== 'audit') clearParameters(Object.values(adminModelTokenQueryParameters.modelAudit), updates);
+    if (effectiveDetailTab !== 'capabilities') clearParameters(Object.values(adminModelTokenQueryParameters.modelHistory), updates);
+		if (effectiveDetailTab !== 'lifecycle') {
 			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), updates);
 			clearParameters(Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates), updates);
 		}

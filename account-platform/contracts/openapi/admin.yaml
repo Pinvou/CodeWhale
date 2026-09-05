@@ -784,7 +784,7 @@ paths:
       operationId: listAdminMeteringUnitVersions
       summary: List immutable versioned metering unit definitions
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/MeteringUnitVersionCollection" }
         "403": { $ref: "#/components/responses/Error" }
     post:
       operationId: createAdminMeteringUnitVersion
@@ -818,7 +818,7 @@ paths:
         - { name: formula_version_id, in: query, schema: { type: string, format: uuid } }
         - { name: credit_unit, in: query, schema: { type: string, default: MICROCREDIT } }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200": { $ref: "#/components/responses/ManagedPriceRead" }
         "403": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/pricing/drafts:
     post:
@@ -5113,6 +5113,48 @@ components:
         unit_definition_id: { type: string, format: uuid }
         config_type: { type: string, enum: [FIXED_PRICE, INHERIT_GLOBAL] }
         fixed_price_per_denominator: { type: [integer, "null"], format: int64, minimum: 0 }
+    ManagedPriceVersion:
+      type: object
+      additionalProperties: false
+      required: [price_version_id, scope_type, protocol_code, formula_version_id, credit_unit, lifecycle_status, derived_status, version, space_etag, current_space_etag, effective_from, units]
+      properties:
+        price_version_id: { type: string, format: uuid }
+        scope_type: { type: string, enum: [GLOBAL, MODEL] }
+        scope_id: { type: string, minLength: 1, maxLength: 160 }
+        protocol_code: { type: string, minLength: 1 }
+        formula_version_id: { type: string, format: uuid }
+        credit_unit: { type: string, const: MICROCREDIT }
+        lifecycle_status: { type: string, enum: [DRAFT, PUBLISHED, ACTIVE, CANCELLED, ENDED] }
+        derived_status: { type: string, enum: [DRAFT, PUBLISHED, ACTIVE, CANCELLED, ENDED] }
+        version: { type: integer, format: int64, minimum: 1 }
+        space_etag: { type: integer, format: int64, minimum: 1 }
+        current_space_etag: { type: integer, format: int64, minimum: 1 }
+        effective_from: { type: string, format: date-time }
+        effective_to: { type: string, format: date-time }
+        published_at: { type: string, format: date-time }
+        units: { type: array, minItems: 1, items: { $ref: "#/components/schemas/PriceUnitConfiguration" } }
+        successor_price_version_id: { type: string, format: uuid }
+      allOf:
+        - if: { properties: { scope_type: { const: MODEL } } }
+          then:
+            required: [scope_id]
+            properties: { scope_id: { type: string, minLength: 1, maxLength: 160 } }
+        - if: { properties: { scope_type: { const: GLOBAL } } }
+          then: { properties: { scope_id: false } }
+    MeteringUnitVersion:
+      type: object
+      additionalProperties: false
+      required: [unit_definition_id, unit_code, version, minimum_precision, price_denominator, rounding_rule, status, created_at]
+      properties:
+        unit_definition_id: { type: string, format: uuid }
+        unit_code: { type: string, minLength: 1, maxLength: 80 }
+        version: { type: integer, format: int64, minimum: 1 }
+        minimum_precision: { type: integer, format: int64, minimum: 1 }
+        price_denominator: { type: integer, format: int64, minimum: 1 }
+        rounding_rule: { type: string, enum: [CEILING, FLOOR, HALF_UP] }
+        status: { type: string, enum: [ACTIVE, INACTIVE] }
+        created_at: { type: string, format: date-time }
+        deactivated_at: { type: string, format: date-time }
     PriceDraft:
       type: object
       additionalProperties: false
@@ -5587,6 +5629,39 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ModelPriceProjection" }
+    ManagedPriceRead:
+      description: Billing-owned managed-price view; list, exact version, and exact pricing-space variants share one closed item schema.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/ManagedPriceVersion" } }
+              - type: object
+                additionalProperties: false
+                required: [item]
+                properties:
+                  item: { $ref: "#/components/schemas/ManagedPriceVersion" }
+              - type: object
+                additionalProperties: false
+                required: [current_space_etag, items, has_more]
+                properties:
+                  current_space_etag: { type: integer, format: int64, minimum: 1 }
+                  items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/ManagedPriceVersion" } }
+                  has_more: { type: boolean }
+    MeteringUnitVersionCollection:
+      description: Billing-owned immutable metering-unit version collection.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items: { type: array, items: { $ref: "#/components/schemas/MeteringUnitVersion" } }
     TokenOverview:
       description: Permission-filtered Token route and usage counters
       content:

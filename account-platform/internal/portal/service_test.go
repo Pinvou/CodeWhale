@@ -496,6 +496,21 @@ func TestSessionEndpointExposesOnlyNonSensitiveModelDetailsGate(t *testing.T) {
 	}
 }
 
+func TestSessionEndpointExposesOnlyNonSensitiveModelPricingEditGate(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AdminModelPricingEditEnabled = true
+	session := Session{ID: "model-pricing-edit-session", AccessToken: "access-secret", RefreshToken: "refresh-secret", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("p", 32)}
+	_ = store.SaveSession(context.Background(), session)
+	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if body := response.Body.String(); response.Code != http.StatusOK || !strings.Contains(body, `"admin_model_pricing_edit":true`) || strings.Contains(body, "access-secret") || strings.Contains(body, "refresh-secret") {
+		t.Fatalf("unexpected model pricing edit feature session response: %d %s", response.Code, body)
+	}
+}
+
 func TestSessionEndpointExposesOnlyNonSensitiveModelTokenActionsGate(t *testing.T) {
 	store := newMemoryStore()
 	service := testService(t, store)

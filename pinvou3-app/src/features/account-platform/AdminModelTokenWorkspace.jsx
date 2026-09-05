@@ -102,7 +102,7 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
   );
 }
 
-export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelDetailsEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
+export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelDetailsEnabled = false, modelPricingEditEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
   const modelTokenCopy = copy.modelToken;
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
@@ -126,7 +126,7 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   return <>
     {notice && <div className="adm-inline-message info" role="status">{notice}</div>}
     {!modelTokenActionsEnabled && <div className="adm-inline-message info" role="status">{modelTokenCopy.actionsReadOnly}</div>}
-    {section === 'models' && modelDetailsEnabled && modelID && granted.has('platform.models.read') && <AdminModelDetailWorkspace modelID={modelID} client={client} copy={modelTokenCopy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} routeVersion={routeVersion} onRouteChange={onRouteChange} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} />}
+    {section === 'models' && modelDetailsEnabled && modelID && granted.has('platform.models.read') && <AdminModelDetailWorkspace modelID={modelID} client={client} copy={modelTokenCopy} pricingCopy={copy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} pricingEditEnabled={modelPricingEditEnabled} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} />}
     {section === 'models' && (!modelDetailsEnabled || !modelID) && <>
       <div className="adm-tabs adm-model-tabs" role="tablist" aria-label={modelTokenCopy.modelViews} onKeyDown={moveOperationsTab}>
         {modelTabs.visible.map((tab) => <button type="button" role="tab" id={`model-tab-${tab}`} aria-controls={`model-panel-${tab}`} aria-selected={modelTabs.tab === tab} tabIndex={modelTabs.tab === tab ? 0 : -1} className={modelTabs.tab === tab ? 'active' : ''} key={tab} onClick={() => onRouteChange({ model_tab: tab }, 'push')}>{tab === 'directory' ? modelTokenCopy.modelDirectory : modelTokenCopy.protocolFormulaView}</button>)}

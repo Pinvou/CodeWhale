@@ -60,6 +60,14 @@ INSERT INTO pricing_space_versions(scope_type,scope_key,protocol_code,formula_ve
 			t.Fatalf("inheritance source not projected: %+v", unit)
 		}
 	}
+	scopeID := modelID.String()
+	etag, managed, hasMore, err := repository.ReadManagedPriceSpace(ctx, ManagedPriceSpaceQuery{ScopeType: "MODEL", ScopeID: &scopeID, ProtocolCode: "CHAT", FormulaVersionID: formulaID, CreditUnit: "MICROCREDIT"}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if etag != projection.NextChange.Price.SpaceETag || hasMore || len(managed) != 1 || managed[0].PriceVersionID != projection.NextChange.Price.PriceVersionID || managed[0].CurrentSpaceETag != etag {
+		t.Fatalf("model-detail projection and shared managed-price space diverged: projection=%+v etag=%d managed=%+v has_more=%v", projection.NextChange.Price, etag, managed, hasMore)
+	}
 	blockedAt := databaseNow.Add(-time.Minute)
 	if _, err := repository.pool.Exec(ctx, `INSERT INTO pricing_blocks(id,model_id,protocol_code,formula_version_id,credit_unit,effective_from,reason,created_by,created_at) VALUES($1,$2,'CHAT',$3,'MICROCREDIT',$4,'integration',$5,$4)`, uuid.New(), modelID.String(), formulaID, blockedAt, uuid.New()); err != nil {
 		t.Fatal(err)

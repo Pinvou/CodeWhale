@@ -224,6 +224,7 @@ spec:
             - { name: PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED, value: {{ $root.Values.portal.adminTokenResourceFormsEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED, value: {{ $root.Values.portal.adminModelOperationsDetailsEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_DETAILS_ENABLED, value: {{ $root.Values.portal.adminModelDetailsEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED, value: {{ $root.Values.portal.adminModelPricingEditEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED, value: {{ $root.Values.portal.adminModelTokenActionsEnabled | quote }} }
             - name: TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-admin-pagination-cursor-hmac-key-base64, optional: true } }
