@@ -2222,10 +2222,12 @@ pub struct SubAgentRuntime {
     /// Session mode of the orchestrating parent at spawn time (Wave 7 M4/M5).
     pub parent_mode: AppMode,
     /// Shared rate-limit governor for the fleet that spawned this runtime.
-    /// Stamped by the spawning manager (`spawn_background_*`), so every
-    /// descendant LLM attempt reports 429s/successes to the fleet's adaptive
-    /// scheduler; cloned into child runtimes. `None` for runtimes built
-    /// outside a manager (tests, tool-only runtimes).
+    /// Stamped by the spawning manager in
+    /// `spawn_background_with_assignment_options` (the single chokepoint all
+    /// spawn variants funnel through), so every descendant LLM attempt
+    /// reports 429s/successes to the fleet's adaptive scheduler; cloned into
+    /// child runtimes. `None` for runtimes built outside a manager (tests,
+    /// tool-only runtimes).
     pub(crate) governor: Option<Arc<governor::RateLimitGovernor>>,
 }
 
@@ -2278,10 +2280,11 @@ impl SubAgentRuntime {
             speech_output_dir: None,
             todos: crate::tools::todo::new_shared_todo_list(),
             parent_mode: AppMode::Agent,
-            // Stamped by the spawning manager (`spawn_background_*`), so
-            // every descendant LLM attempt reports 429s/successes to the
-            // fleet's rate-limit governor. `None` for runtimes built outside
-            // a manager (tests, tool-only runtimes).
+            // Stamped by the spawning manager in
+            // `spawn_background_with_assignment_options`, so every descendant
+            // LLM attempt reports 429s/successes to the fleet's rate-limit
+            // governor. `None` for runtimes built outside a manager (tests,
+            // tool-only runtimes).
             governor: None,
         }
     }
@@ -3076,20 +3079,19 @@ impl SubAgentManager {
     /// Set the number of direct children that may execute concurrently
     /// before further launches queue (#3095). Clamped to `1..=max_agents`.
     /// Applied to the live gate capacity, so this also takes effect when
-    /// called after children have started.
+    /// called after children have started. Routed through the governor so a
+    /// rate-limit pause is not silently lifted by a limit change.
     #[must_use]
     pub fn with_launch_concurrency(self, limit: usize) -> Self {
         let limit = limit.clamp(1, self.max_agents);
-        self.launch_gate.set_capacity(limit);
         self.governor.set_max_capacity(limit);
         self
     }
 
     /// The rate-limit governor backing [`Self::launch_gate`]; exposed so the
-    /// engine and tests can observe or drive the adaptive scheduler. (The
-    /// engine-side wiring — surfacing governor state in status events — is a
-    /// parent-repo follow-up; unused until then.)
-    #[allow(dead_code)] // engine-side wiring is a parent-repo follow-up
+    /// engine can stamp it onto root runtimes and tests can drive the
+    /// adaptive scheduler. (Surfacing governor state in status events is a
+    /// parent-repo follow-up.)
     #[must_use]
     pub(crate) fn rate_limit_governor(&self) -> Arc<governor::RateLimitGovernor> {
         Arc::clone(&self.governor)
@@ -3665,7 +3667,8 @@ impl SubAgentManager {
             running_heartbeat_timeout
         };
         let launch_concurrency = launch_concurrency.clamp(1, self.max_agents);
-        self.launch_gate.set_capacity(launch_concurrency);
+        // Routed through the governor so a rate-limit pause (gate capacity 0)
+        // is not silently lifted by a runtime limit change.
         self.governor.set_max_capacity(launch_concurrency);
         true
     }
@@ -5443,6 +5446,12 @@ impl SubAgentManager {
         allowed_tools: Option<Vec<String>>,
         options: SubAgentSpawnOptions,
     ) -> Result<SubAgentResult> {
+        // Every manager-spawned runtime carries the fleet governor, so the
+        // spawned agent and its whole descendant tree report 429s/successes
+        // to the adaptive scheduler. Runtimes built outside a manager (tests,
+        // tool-only runtimes) keep `governor: None`.
+        runtime.governor = Some(Arc::clone(&self.governor));
+
         self.cleanup(COMPLETED_AGENT_RETENTION);
 
         self.check_admission_capacity()?;
@@ -9030,19 +9039,40 @@ async fn acquire_queued_launch_permit(
         SUBAGENT_QUEUED_LAUNCH_REASON
     };
     record_queued_launch_progress(task, queued_reason).await;
-    tokio::select! {
-        biased;
-        () = task.runtime.cancel_token.cancelled() => {
-            record_agent_progress(
-                &task.runtime,
-                &task.agent_id,
-                AgentProgressEventMeta::new(AgentWorkerStatus::Cancelled),
-                "cancelled while queued for a sub-agent launch slot".to_string(),
-            );
-            None
-        }
-        permit = gate.acquire() => {
-            Some(permit)
+    // While queued, periodically probe the governor: if a rate-limit pause
+    // outlives its window (the in-flight fleet finished before any success
+    // could lift the pause), the probe resumes launches instead of leaving
+    // the queue frozen until each child's wall-time deadline.
+    let mut recovery_probe = tokio::time::interval(
+        task.runtime
+            .governor
+            .as_ref()
+            .map(|_| std::time::Duration::from_secs(5))
+            .unwrap_or(std::time::Duration::from_secs(3600)),
+    );
+    loop {
+        tokio::select! {
+            biased;
+            () = task.runtime.cancel_token.cancelled() => {
+                record_agent_progress(
+                    &task.runtime,
+                    &task.agent_id,
+                    AgentProgressEventMeta::new(AgentWorkerStatus::Cancelled),
+                    "cancelled while queued for a sub-agent launch slot".to_string(),
+                );
+                return None;
+            }
+            _ = recovery_probe.tick() => {
+                if let Some(governor) = task.runtime.governor.as_ref() {
+                    governor.recover_if_window_drained(Instant::now());
+                }
+                // If the probe lifted a pause it raised the gate capacity,
+                // which grants queued waiters; `gate.acquire` below is
+                // re-polled either way on the next loop iteration.
+            }
+            permit = gate.acquire() => {
+                return Some(permit);
+            }
         }
     }
 }
