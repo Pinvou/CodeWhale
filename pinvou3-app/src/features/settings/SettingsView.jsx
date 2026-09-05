@@ -2051,7 +2051,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       </div>
     );
 
-    /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsRetention: (days: number) => string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
+    /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
     const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
@@ -2656,10 +2656,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               <ChevronLeft size={15} />
               {settingsCopy.behaviorAnalyticsBack}
             </button>
-            <IOSSection
-              title={settingsCopy.behaviorAnalyticsTitle}
-              footer={settingsCopy.behaviorAnalyticsRetention(behaviorTelemetry.retention_days || 35)}
-            >
+            <IOSSection title={settingsCopy.behaviorAnalyticsTitle}>
               <IOSRow
                 label={settingsCopy.behaviorAnalyticsLabel}
                 desc={behaviorTelemetry.configured ? settingsCopy.behaviorAnalyticsDesc : settingsCopy.behaviorAnalyticsNotConfigured}

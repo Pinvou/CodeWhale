@@ -10,6 +10,11 @@ const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_tel
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
 const settingsView = readFileSync(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
+const settingsCopy = {
+  en: readFileSync(new URL('../src/shared/i18n/en.js', import.meta.url), 'utf8'),
+  ja: readFileSync(new URL('../src/shared/i18n/ja.js', import.meta.url), 'utf8'),
+  zh: readFileSync(new URL('../src/shared/i18n/zh.js', import.meta.url), 'utf8'),
+};
 const appLib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
 const acpProviderForm = readFileSync(new URL('../src/features/settings/ProviderFormModal.jsx', import.meta.url), 'utf8');
 const schema = JSON.parse(readFileSync(new URL('../../docs/schemas/behavior-telemetry-v1.schema.json', import.meta.url), 'utf8'));
@@ -56,6 +61,17 @@ test('internal preview defaults on while persisting an explicit user on/off choi
   assert.match(settingsView, /behaviorAnalyticsEntryTitle[\s\S]*setActiveSection\('data'\)/);
   assert.doesNotMatch(settingsView, /<SectionButton id="data"/);
   assert.doesNotMatch(settingsView, /deleteBehaviorTelemetry|deleteRemoteBehaviorTelemetryData/);
+});
+
+test('privacy settings copy states collection boundaries without default or retention claims', () => {
+  assert.match(settingsCopy.zh, /仅收集受控的功能使用结果、耗时和错误分类，不收集对话、文件内容、路径或凭据。/);
+  for (const source of Object.values(settingsCopy)) {
+    assert.doesNotMatch(source, /behaviorAnalyticsRetention/);
+  }
+  assert.doesNotMatch(settingsCopy.zh, /内测期间默认开启|你的开启或关闭选择会保留|可关联数据最多保留/);
+  assert.doesNotMatch(settingsCopy.en, /Enabled by default during preview|Your on\/off choice is retained|Linkable data is retained/);
+  assert.doesNotMatch(settingsCopy.ja, /プレビュー期間中は既定で有効|オン／オフの選択は保持|関連付け可能なデータの保持期間/);
+  assert.doesNotMatch(settingsView, /behaviorAnalyticsRetention/);
 });
 
 test('packaged clients reuse the deployed telemetry bootstrap defaults', () => {
