@@ -39,6 +39,7 @@ use windows::core::PCWSTR;
 #[cfg(not(target_env = "ohos"))]
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+mod guidance;
 mod output;
 
 use super::shell_output::{summarize_output, truncate_with_meta};
@@ -3405,7 +3406,7 @@ impl ToolSpec for BashTool {
         if self.read_only {
             "Inspect the workspace with the bounded read-only command subset. Commands run directly as argv, never through a shell; only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
-            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" polls a background task; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
+            guidance::description()
         }
     }
 
@@ -3423,7 +3424,7 @@ impl ToolSpec for BashTool {
                 },
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute (action=run)"
+                    "description": guidance::runtime_command_guidance()
                 },
                 "timeout_ms": {
                     "type": "integer",
