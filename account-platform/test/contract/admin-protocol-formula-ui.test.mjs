@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { AdminPlatformClient } from '../../../pinvou3-app/src/features/account-platform/admin-client.js';
+import { classifyHighRiskFailure, requireGovernedTokenCommandResult } from '../../../pinvou3-app/src/features/account-platform/admin-high-risk-action-state.js';
 import { normalizeAdminModelTokenEntry, readAdminModelTokenModelTab } from '../../../pinvou3-app/src/features/account-platform/admin-navigation.js';
 import { createProtocolFormulaIdempotencyKey, formulaDraftCommand, protocolDraftCommand, protocolFormulaCommandReceipt, safeFormulaPreviewSummary, safeProtocolFormulaFailure, safeProtocolFormulaWriteFailure, validateProtocolFormulaCommandResult } from '../../../pinvou3-app/src/features/account-platform/admin-protocol-formula-state.js';
 import { adminPlatformCopy } from '../../../pinvou3-app/src/shared/admin-platform-i18n.js';
@@ -44,6 +45,63 @@ test('APT-128 command builders accept only structured JSON and allow-listed form
     { unitCode: 'OUTPUT_TOKEN', unitDefinitionID: 'ABCDEF01-ABCD-4000-8ABC-ABCDEFABCDEF', input: 'max_output_tokens' },
   ], expectedProtocolVersion: 1, reason: 'reject duplicate unit id' }).error, 'invalidFormulaRows');
   assert.equal(createProtocolFormulaIdempotencyKey('publish', () => '00000000-0000-4000-8000-000000000001'), 'admin-publish-00000000-0000-4000-8000-000000000001');
+});
+
+test('APT-122-R2 Portal distinguishes terminal T1 results from command-scoped proven zero-write failures', () => {
+  const command = { commandType: 'TOKEN_FORMULA_PUBLISH' };
+  for (const [status, code] of [[503, 'COMMAND_RETRYABLE'], [422, 'FORMULA_UNIT_VALIDATION_REJECTED']]) {
+    const failure = classifyHighRiskFailure(command, { status, code });
+    assert.equal(failure.provenNoWrite, true, `${status}:${code} must allow the same idempotency key`);
+    assert.equal(failure.unknown, false);
+    assert.equal(failure.error.commandReference, '');
+  }
+  assert.equal(classifyHighRiskFailure({ commandType: 'TOKEN_MODEL_PUBLISH' }, { status: 503, code: 'COMMAND_RETRYABLE' }).unknown, true, 'the zero-write pair must not broaden other command families');
+
+  const reference = '018f57a9-9c17-7efc-a450-35c445492910';
+  const expected = { commandType: 'TOKEN_FORMULA_PUBLISH', targetResourceType: 'FORMULA', targetResourceID: '018f57a9-9c17-7efc-a450-35c445492912' };
+  const terminalResult = {
+    command_reference: reference,
+    command_type: 'TOKEN_FORMULA_PUBLISH',
+    policy_version: 1,
+    actor_user_id: '018f57a9-9c17-7efc-a450-35c445492911',
+    actor_permission: 'platform.pricing.manage',
+    authorization_version: 9,
+    idempotency_fingerprint: 'a'.repeat(64),
+    target_resource_type: 'FORMULA',
+    target_resource_id: '018f57a9-9c17-7efc-a450-35c445492912',
+    status: 'FAILED',
+    stable_error_code: 'BILLING_BINDING_CONFLICT',
+    audit_request_id: 'audit-terminal',
+    created_at: '2026-09-05T08:00:00Z',
+    completed_at: '2026-09-05T08:00:01Z',
+  };
+  assert.throws(() => requireGovernedTokenCommandResult(terminalResult, expected), (error) => {
+    const failure = classifyHighRiskFailure(command, error);
+    assert.equal(failure.terminal, true);
+    assert.equal(failure.unknown, false);
+    assert.equal(failure.error.commandReference, reference);
+    assert.equal(failure.error.code, 'BILLING_BINDING_CONFLICT');
+    return true;
+  });
+  for (const malformed of [
+    { ...terminalResult, completed_at: undefined },
+    { ...terminalResult, stable_error_code: undefined },
+    { ...terminalResult, stable_error_code: 'PROVIDER_SECRET_ERROR' },
+    { ...terminalResult, status: 'SUCCEEDED', stable_error_code: 'COMMAND_PRECHECK_FAILED' },
+    { ...terminalResult, status: 'PENDING', stable_error_code: undefined },
+    { ...terminalResult, created_at: '0' },
+    { ...terminalResult, created_at: 0 },
+    { ...terminalResult, created_at: '2026-02-30T08:00:00Z' },
+    { ...terminalResult, completed_at: '0' },
+    { ...terminalResult, completed_at: 0 },
+    { ...terminalResult, completed_at: '2026-02-30T08:00:01Z' },
+  ]) {
+    assert.throws(() => requireGovernedTokenCommandResult(malformed, expected), (error) => {
+      const failure = classifyHighRiskFailure(command, error);
+      return error.code === 'INVALID_COMMAND_RESPONSE' && error.commandReference === reference
+        && failure.error.code === 'INVALID_COMMAND_RESPONSE' && failure.unknown && !failure.terminal;
+    });
+  }
 });
 
 test('APT-128 safe projections never expose raw formulas, private errors, or untrusted command references', () => {

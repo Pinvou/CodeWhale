@@ -96,14 +96,15 @@ type CreateAccountRequest struct {
 }
 
 type PostgresRepository struct {
-	pool                   *pgxpool.Pool
-	secrets                SecretProvider
-	now                    func() time.Time
-	adminPagination        adminPaginationRuntime
-	adminPaginationMetrics *AdminPaginationMetrics
-	routeHealthMetrics     *RouteHealthMetrics
-	routeActivationGuard   TokenRouteActivationTransactionGuard
-	credentialAuthGuard    CredentialIsolationAuthorityGuard
+	pool                    *pgxpool.Pool
+	secrets                 SecretProvider
+	now                     func() time.Time
+	adminPagination         adminPaginationRuntime
+	adminPaginationMetrics  *AdminPaginationMetrics
+	routeHealthMetrics      *RouteHealthMetrics
+	routeActivationGuard    TokenRouteActivationTransactionGuard
+	credentialAuthGuard     CredentialIsolationAuthorityGuard
+	protocolFormulaT1Commit func(context.Context, pgx.Tx) error
 }
 
 type Repository interface {

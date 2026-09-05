@@ -144,8 +144,13 @@ test('successful command and route responses are action-bound closed projections
   assert.equal(validGovernedTokenCommandResult({ ...command, command_type: 'TOKEN_ACCOUNT_STATUS_CHANGE' }, { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: impact.evidence.resource_id }), false);
   assert.equal(validGovernedTokenCommandResult({ ...command, secret: 'must-not-pass' }, { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: impact.evidence.resource_id }), false);
   const expectedCommand = { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: impact.evidence.resource_id };
+  assert.throws(() => requireGovernedTokenCommandResult({ ...command, status: 'FAILED', stable_error_code: 'COMMAND_PRECHECK_FAILED' }, expectedCommand), (error) => {
+    const failure = classifyHighRiskFailure({ commandType: 'TOKEN_ROUTE_DELETE' }, error);
+    return error.code === 'INVALID_COMMAND_RESPONSE' && failure.error.code === 'INVALID_COMMAND_RESPONSE' && failure.unknown && !failure.terminal;
+  });
   assert.throws(() => requireGovernedTokenCommandResult({ ...command, status: 'PENDING' }, expectedCommand), (error) => error.code === 'COMMAND_RESULT_UNKNOWN' && error.commandReference === command.command_reference);
-  assert.throws(() => requireGovernedTokenCommandResult({ ...command, status: 'REJECTED', stable_error_code: 'COMMAND_PRECHECK_FAILED' }, expectedCommand), (error) => error.finalResult === true && error.code === 'COMMAND_PRECHECK_FAILED');
+  assert.throws(() => requireGovernedTokenCommandResult({ ...command, status: 'REJECTED', stable_error_code: 'COMMAND_PRECHECK_FAILED', completed_at: '2026-09-04T12:00:01Z' }, expectedCommand), (error) => error.finalResult === true && error.code === 'COMMAND_PRECHECK_FAILED');
+  assert.throws(() => requireGovernedTokenCommandResult({ ...command, status: 'UNKNOWN', stable_error_code: 'COMMAND_RESULT_UNKNOWN', completed_at: '2026-09-04T12:00:01Z' }, expectedCommand), (error) => error.code === 'COMMAND_RESULT_UNKNOWN' && error.commandReference === command.command_reference);
   assert.equal(requireGovernedTokenCommandResult({ ...command, status: 'SUCCEEDED', completed_at: '2026-09-04T12:00:01Z' }, expectedCommand).status, 'SUCCEEDED');
 
   const route = {

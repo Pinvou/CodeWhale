@@ -82,6 +82,17 @@ func (s *Service) requireNewTokenCommandGovernanceActive() gin.HandlerFunc {
 	}
 }
 
+// rejectProtocolFormulaDirectWrite keeps the resource-specific APT-122 URLs
+// as compatibility sentinels only. PRE/SAFE fail closed in the activation
+// middleware and ACTIVE directs every human mutation through /commands, so a
+// second audit/result path cannot become reachable.
+func rejectProtocolFormulaDirectWrite() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		api.WriteError(ctx.Writer, http.StatusGone, "DIRECT_TOKEN_COMMAND_RETIRED", "use the governed Token command endpoint", httpserver.RequestID(ctx.Request.Context()))
+		ctx.Abort()
+	}
+}
+
 func writeTokenCommandGovernanceInactive(ctx *gin.Context) {
 	api.WriteError(ctx.Writer, http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "Token command governance is not active", httpserver.RequestID(ctx.Request.Context()))
 	ctx.Abort()

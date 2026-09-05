@@ -24,6 +24,7 @@ let permissions = [...fullPermissions];
 let actionsEnabled = true;
 let impactDelay = false;
 let commandResultMode = 'SUCCEEDED';
+let commandPostMode = 'PENDING';
 const observations = { impactCalls: 0, impactAborted: 0, precheckCalls: [], commandCalls: [], resultCalls: 0, approvalCreates: [], approvalSubmits: 0, approvalReads: 0, legacyProtocolWrites: 0 };
 
 const portalFingerprintFixture = await governedTokenEnvelope({
@@ -199,7 +200,8 @@ const server = createServer(async (request, response) => {
     if (url.searchParams.has('gate')) actionsEnabled = url.searchParams.get('gate') === '1';
     if (url.searchParams.has('impact-delay')) impactDelay = url.searchParams.get('impact-delay') === '1';
     if (url.searchParams.has('result')) commandResultMode = url.searchParams.get('result').toUpperCase();
-    return json(response, { permissions, actionsEnabled, impactDelay, commandResultMode });
+    if (url.searchParams.has('post-result')) commandPostMode = url.searchParams.get('post-result').toUpperCase();
+    return json(response, { permissions, actionsEnabled, impactDelay, commandResultMode, commandPostMode });
   }
   if (url.pathname === '/__test__/state') return json(response, observations);
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test', feature_flags: { admin_model_token_ia: true, admin_model_token_actions: actionsEnabled } });
@@ -256,6 +258,14 @@ const server = createServer(async (request, response) => {
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     observations.commandCalls.push({ key: request.headers['idempotency-key'], body });
+    if (commandPostMode === 'PRECHECK') return json(response, { code: 'COMMAND_PRECHECK_CHANGED', message: 'authoritative precheck changed' }, 409);
+    if (commandPostMode === 'RETRYABLE') return json(response, { code: 'COMMAND_RETRYABLE', message: 'no command persisted' }, 503);
+    if (commandPostMode === 'FAILED') return json(response, commandResult('FAILED', body.command_type, body.target_resource_type, body.target_resource_id), 201);
+    if (commandPostMode === 'MALFORMED') {
+      const malformed = commandResult('FAILED', body.command_type, body.target_resource_type, body.target_resource_id);
+      delete malformed.completed_at;
+      return json(response, malformed, 201);
+    }
     return json(response, commandResult('PENDING', body.command_type, body.target_resource_type, body.target_resource_id), 202);
   }
   if (url.pathname === `/api/admin/token/admin/v1/commands/${commandID}` && request.method === 'GET') {
@@ -477,7 +487,13 @@ try {
     throw error;
   }
   await page.click('.adm-protocol-dialog button[type="submit"]');
-  await page.waitForFunction(() => [...document.querySelectorAll('.adm-protocol-dialog button')].some((button) => button.textContent.trim() === 'Query original command' && !button.disabled));
+  try {
+    await page.waitForFunction(() => [...document.querySelectorAll('.adm-protocol-dialog button')].some((button) => button.textContent.trim() === 'Query original command' && !button.disabled), { timeout: 5000 });
+  } catch (error) {
+    const diagnostic = { remote: await state(page), dialog: await page.$eval('.adm-protocol-dialog', (dialog) => ({ text: dialog.textContent, html: dialog.innerHTML })) };
+    error.message = `${error.message}: ${JSON.stringify(diagnostic)}`;
+    throw error;
+  }
   assert.equal(await page.$$eval('.adm-protocol-dialog input, .adm-protocol-dialog textarea, .adm-protocol-dialog select', (nodes) => nodes.every((node) => node.disabled)), true, 'an unknown protocol command freezes all mutable inputs while retaining the original reference');
   assert.equal(await page.$eval('.adm-protocol-dialog', (dialog) => dialog.textContent.includes('0199a100-0001-7000-8000-000000000204')), true, 'recovery displays the frozen server command reference');
   await page.click('.adm-protocol-dialog button[type="submit"]');
@@ -500,6 +516,79 @@ try {
   assert.equal(protocolState.commandCalls.at(-1).body.command_type, 'TOKEN_PROTOCOL_DRAFT_CREATE');
   assert.equal(protocolState.commandCalls.at(-1).body.target_resource_id, 'CHAT_V2');
   assert.equal(protocolState.legacyProtocolWrites, 0, 'protocol UI never falls back to the legacy direct POST');
+
+  // A deterministic post-T1 failure is returned as a complete governed
+  // result. The production component must treat it as terminal immediately,
+  // retain its server reference, and never offer UNKNOWN recovery.
+  await configure(page, 'post-result=failed');
+  await page.evaluate(() => [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'New protocol draft').click());
+  await page.waitForSelector('.adm-protocol-dialog input');
+  await page.type('.adm-protocol-dialog input', 'TERMINAL_V2');
+  let textareas = await page.$$('.adm-protocol-dialog textarea');
+  await textareas.at(-1).type('verify terminal governed result');
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => !document.querySelector('.adm-protocol-dialog button[type="submit"]').disabled);
+  const terminalPostsBefore = (await state(page)).commandCalls.length;
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-protocol-dialog [role="alert"]') && !document.querySelector('.adm-protocol-dialog button[type="submit"]'));
+  assert.equal(await page.$eval('.adm-protocol-dialog', (dialog) => dialog.textContent.includes('0199a100-0001-7000-8000-000000000204')), true, 'terminal result retains the server command reference');
+  assert.equal((await state(page)).commandCalls.length, terminalPostsBefore + 1, 'terminal result submits exactly once');
+  await page.click('.adm-protocol-dialog footer button:first-child');
+  await page.waitForFunction(() => !document.querySelector('.adm-protocol-dialog'));
+
+  // A malformed 2xx result is not a trusted rejection. The production
+  // component preserves its valid reference, locks the command, and only
+  // recovers through GET.
+  await configure(page, 'post-result=malformed&result=succeeded');
+  await page.evaluate(() => [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'New protocol draft').click());
+  await page.waitForSelector('.adm-protocol-dialog input');
+  await page.type('.adm-protocol-dialog input', 'MALFORMED_V2');
+  textareas = await page.$$('.adm-protocol-dialog textarea');
+  await textareas.at(-1).type('reject malformed governed response');
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => !document.querySelector('.adm-protocol-dialog button[type="submit"]').disabled);
+  const malformedPostsBefore = (await state(page)).commandCalls.length;
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-protocol-dialog [data-error-code="INVALID_COMMAND_RESPONSE"]'));
+  assert.equal(await page.$$eval('.adm-protocol-dialog button[type="submit"]', (nodes) => nodes.some((node) => node.textContent.trim() === 'Query original command' && !node.disabled)), true, 'malformed 2xx remains UNKNOWN and exposes only reference recovery');
+  assert.equal(await page.$eval('.adm-protocol-dialog', (dialog) => dialog.textContent.includes('0199a100-0001-7000-8000-000000000204')), true, 'malformed 2xx retains the validated server reference');
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-inline-message.success')?.textContent.includes('model-action-audit'));
+  assert.equal((await state(page)).commandCalls.length, malformedPostsBefore + 1, 'malformed 2xx recovery never repeats POST');
+
+  // A command-scoped pre-T1 503 proves zero writes, so the same dialog and
+  // idempotency key may retry. Once a reference exists, recovery switches to
+  // GET and never submits another POST.
+  await configure(page, 'post-result=precheck');
+  await page.evaluate(() => [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'New protocol draft').click());
+  await page.waitForSelector('.adm-protocol-dialog input');
+  await page.type('.adm-protocol-dialog input', 'RETRYABLE_V2');
+  textareas = await page.$$('.adm-protocol-dialog textarea');
+  await textareas.at(-1).type('verify proven zero write retry');
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => !document.querySelector('.adm-protocol-dialog button[type="submit"]').disabled);
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-protocol-dialog [data-error-code="COMMAND_PRECHECK_CHANGED"]'));
+  const retryableFirst = (await state(page)).commandCalls.at(-1);
+  await configure(page, 'post-result=retryable');
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-protocol-dialog [data-error-code="COMMAND_RETRYABLE"]'));
+  const retryableSecond = (await state(page)).commandCalls.at(-1);
+  assert.equal(retryableSecond.key, retryableFirst.key, 'pre-T1 4xx retry preserves the original idempotency key');
+  await configure(page, 'post-result=pending&result=succeeded');
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  try {
+    await page.waitForFunction(() => document.querySelector('.adm-protocol-dialog [data-error-code="COMMAND_RESULT_UNKNOWN"]'), { timeout: 5000 });
+  } catch (error) {
+    const diagnostic = { remote: await state(page), dialog: await page.$eval('.adm-protocol-dialog', (dialog) => ({ text: dialog.textContent, html: dialog.innerHTML })) };
+    error.message = `${error.message}: ${JSON.stringify(diagnostic)}`;
+    throw error;
+  }
+  const pendingAttempt = (await state(page)).commandCalls.at(-1);
+  assert.equal(pendingAttempt.key, retryableFirst.key, 'pre-T1 5xx retry preserves the original idempotency key');
+  await page.click('.adm-protocol-dialog button[type="submit"]');
+  await page.waitForFunction(() => document.querySelector('.adm-inline-message.success')?.textContent.includes('model-action-audit'));
+  assert.equal((await state(page)).commandCalls.filter((call) => call.key === retryableFirst.key).length, 3, 'UNKNOWN recovery uses GET instead of another POST');
   assert.deepEqual(pageErrors, []);
   console.log('Admin model actions UI smoke passed');
 } finally {

@@ -1,5 +1,6 @@
 const fingerprintPattern = /^[0-9a-f]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const rfc3339Pattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/;
 const safeNoWrite = new Set([
   '400:INVALID_REQUEST', '400:INVALID_COMMAND', '400:INVALID_ROUTE_COMMAND', '400:INVALID_REASON', '400:IDEMPOTENCY_KEY_REQUIRED',
   '401:LOGIN_REQUIRED', '401:RECENT_AUTHENTICATION_REQUIRED',
@@ -8,6 +9,14 @@ const safeNoWrite = new Set([
   '409:CATALOG_VERSION_CONFLICT', '409:COMMAND_PRECHECK_CHANGED', '409:TOKEN_ROUTE_VERSION_CONFLICT', '409:IDEMPOTENCY_KEY_REUSED',
   '412:DRAFT_ETAG_MISMATCH', '422:COMMAND_PRECHECK_FAILED', '422:TOKEN_ROUTE_REFERENCE_INVALID',
   '503:TOKEN_COMMAND_GOVERNANCE_INACTIVE', '503:IMPACT_PRECHECK_DISABLED',
+]);
+const protocolFormulaSafeNoWrite = new Set([
+  '422:FORMULA_UNIT_VALIDATION_REJECTED',
+  '503:COMMAND_RETRYABLE',
+]);
+const protocolFormulaCommands = new Set([
+  'TOKEN_PROTOCOL_DRAFT_CREATE', 'TOKEN_PROTOCOL_PUBLISH',
+  'TOKEN_FORMULA_DRAFT_CREATE', 'TOKEN_FORMULA_PUBLISH',
 ]);
 const precheckVersionCommands = new Set([
   'TOKEN_MODEL_DRAFT_SAVE', 'TOKEN_MODEL_PUBLISH', 'TOKEN_ACCOUNT_CREATE', 'TOKEN_ACCOUNT_STATUS_CHANGE',
@@ -19,6 +28,20 @@ function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stable(value[key])]));
+}
+
+function validDateTime(value) {
+  if (typeof value !== 'string') return false;
+  const match = value.match(rfc3339Pattern);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, zone, offsetHourText = '0', offsetMinuteText = '0'] = match;
+  const [year, month, day, hour, minute, second, offsetHour, offsetMinute] = [yearText, monthText, dayText, hourText, minuteText, secondText, offsetHourText, offsetMinuteText].map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= monthDays[month - 1]
+    && hour <= 23 && minute <= 59 && second <= 59
+    && (zone === 'Z' || (offsetHour <= 23 && offsetMinute <= 59))
+    && Number.isFinite(Date.parse(value));
 }
 
 export function highRiskPayloadKey(value) {
@@ -154,14 +177,24 @@ export function validGovernedTokenCommandResult(value, expected) {
   if (value.command_type !== expected.commandType || value.target_resource_type !== expected.targetResourceType || value.target_resource_id !== expected.targetResourceID) return false;
   if (!Number.isInteger(value.policy_version) || value.policy_version < 1 || !Number.isInteger(value.authorization_version) || value.authorization_version < 1) return false;
   if (typeof value.actor_permission !== 'string' || !value.actor_permission || !fingerprintPattern.test(String(value.idempotency_fingerprint || ''))) return false;
-  if (!['PENDING', 'SUCCEEDED', 'REJECTED', 'FAILED', 'UNKNOWN'].includes(value.status) || typeof value.audit_request_id !== 'string' || !value.audit_request_id || Number.isNaN(Date.parse(String(value.created_at || '')))) return false;
+  if (!['PENDING', 'SUCCEEDED', 'REJECTED', 'FAILED', 'UNKNOWN'].includes(value.status) || typeof value.audit_request_id !== 'string' || !value.audit_request_id || !validDateTime(value.created_at)) return false;
   if (value.approval_request_id != null && !uuidPattern.test(String(value.approval_request_id).toLowerCase())) return false;
-  if (value.completed_at != null && Number.isNaN(Date.parse(String(value.completed_at)))) return false;
-  return value.stable_error_code == null || /^[A-Z][A-Z0-9_]{0,119}$/.test(String(value.stable_error_code));
+  const completed = value.completed_at != null && validDateTime(value.completed_at);
+  const stableError = value.stable_error_code != null
+    && /^[A-Z][A-Z0-9_]{0,119}$/.test(String(value.stable_error_code))
+    && !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code));
+  if (value.completed_at != null && !completed) return false;
+  if (value.stable_error_code != null && !stableError) return false;
+  if (value.status === 'PENDING') return !completed && value.stable_error_code == null;
+  if (value.status === 'SUCCEEDED') return completed && value.stable_error_code == null;
+  return completed && stableError;
 }
 
 export function requireGovernedTokenCommandResult(value, expected) {
-  if (!validGovernedTokenCommandResult(value, expected)) throw Object.assign(new Error('invalid Token command response'), { code: 'INVALID_COMMAND_RESPONSE' });
+  if (!validGovernedTokenCommandResult(value, expected)) throw Object.assign(new Error('invalid Token command response'), {
+    code: 'INVALID_COMMAND_RESPONSE',
+    commandReference: uuidPattern.test(String(value?.command_reference || '').toLowerCase()) ? String(value.command_reference) : '',
+  });
   if (['PENDING', 'UNKNOWN'].includes(value.status)) throw Object.assign(new Error('Token command outcome is not final'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', requestID: value.audit_request_id || '', commandReference: value.command_reference });
   if (value.status !== 'SUCCEEDED') throw Object.assign(new Error('Token command completed without success'), { status: 200, code: value.stable_error_code || 'COMMAND_REJECTED', requestID: value.audit_request_id || '', commandReference: value.command_reference, finalResult: true });
   return value;
@@ -203,7 +236,10 @@ export function classifyHighRiskFailure(command, error) {
   const status = Number.isInteger(error?.status) ? error.status : 0;
   const code = String(error?.code || 'REQUEST_FAILED');
   const finalResult = error?.finalResult === true;
-  const provenNoWrite = status !== 504 && safeNoWrite.has(`${status}:${code}`);
+  const pair = `${status}:${code}`;
+  const commandScopedNoWrite = protocolFormulaCommands.has(command?.commandType) && protocolFormulaSafeNoWrite.has(pair);
+  const provenNoWrite = status !== 504 && (safeNoWrite.has(pair) || commandScopedNoWrite);
+  const invalidCommandResponse = code === 'INVALID_COMMAND_RESPONSE';
   return {
     ...command,
     dispatched: true,
@@ -211,7 +247,7 @@ export function classifyHighRiskFailure(command, error) {
     unknown: !provenNoWrite && !finalResult,
     terminal: finalResult,
     locked: !provenNoWrite,
-    error: { status, code: provenNoWrite || finalResult ? code : 'COMMAND_RESULT_UNKNOWN', requestID: String(error?.requestID || ''), commandReference: uuidPattern.test(String(error?.commandReference || error?.details?.command_reference || '').toLowerCase()) ? String(error?.commandReference || error?.details?.command_reference) : '' },
+    error: { status, code: provenNoWrite || finalResult || invalidCommandResponse ? code : 'COMMAND_RESULT_UNKNOWN', requestID: String(error?.requestID || ''), commandReference: uuidPattern.test(String(error?.commandReference || error?.details?.command_reference || '').toLowerCase()) ? String(error?.commandReference || error?.details?.command_reference) : '' },
   };
 }
 

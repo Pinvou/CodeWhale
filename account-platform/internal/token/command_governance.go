@@ -281,6 +281,13 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 	envelope.TargetResourceType = strings.ToUpper(strings.TrimSpace(envelope.TargetResourceType))
 	envelope.TargetResourceID = strings.TrimSpace(envelope.TargetResourceID)
 	envelope.PrecheckFingerprint = strings.ToLower(strings.TrimSpace(envelope.PrecheckFingerprint))
+	if isProtocolFormulaGovernedCommand(envelope.CommandType) {
+		var err error
+		envelope, err = canonicalizeProtocolFormulaEnvelope(envelope)
+		if err != nil {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+	}
 	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
 		command, err := parseModelPublishCommand(envelope.Command)
 		if err != nil {
@@ -318,6 +325,12 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 		}
 	}
+	if isProtocolFormulaGovernedCommand(envelope.CommandType) {
+		requestFingerprint, ok := facts["request_fingerprint"].(string)
+		if !ok || requestFingerprint != governedRequestFingerprint(envelope, facts) {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+	}
 	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
 		modelID, parseErr := uuid.Parse(envelope.TargetResourceID)
 		expected, expectedErr := parseModelPublishExpected(envelope.ExpectedVersions, modelID)
@@ -349,6 +362,10 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 // every object key is ordered before JSON encoding and the two transport-only
 // proofs are excluded from the frozen authoritative facts.
 func modelPublishRequestFingerprint(envelope TokenCommandEnvelope, facts map[string]any) string {
+	return governedRequestFingerprint(envelope, facts)
+}
+
+func governedRequestFingerprint(envelope TokenCommandEnvelope, facts map[string]any) string {
 	domainFacts := make(map[string]any, len(facts))
 	for key, value := range facts {
 		if key != "request_fingerprint" && key != "precheck_fingerprint" {
@@ -370,6 +387,15 @@ func modelPublishRequestFingerprint(envelope TokenCommandEnvelope, facts map[str
 	}
 	digest := sha256.Sum256(payload)
 	return hex.EncodeToString(digest[:])
+}
+
+func isProtocolFormulaGovernedCommand(commandType string) bool {
+	switch commandType {
+	case "TOKEN_PROTOCOL_DRAFT_CREATE", "TOKEN_PROTOCOL_PUBLISH", "TOKEN_FORMULA_DRAFT_CREATE", "TOKEN_FORMULA_PUBLISH":
+		return true
+	default:
+		return false
+	}
 }
 
 func containsSensitiveCommandField(raw json.RawMessage) bool {
@@ -653,6 +679,67 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		api.WriteJSON(w, http.StatusOK, item)
 		return
 	}
+	if isProtocolFormulaGovernedCommand(envelope.CommandType) {
+		item, created, governedErr := s.ExecuteProtocolFormulaTokenCommand(r.Context(), repository, runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
+		// Once Formula Publish has persisted its cross-domain T1 anchor, no
+		// downstream or transaction-guard error may be advertised as a proven
+		// zero-write response. Preserve the reference so the client only polls the
+		// persisted result; recovery must not depend on replaying the POST.
+		if governedErr != nil && item.CommandReference != uuid.Nil && item.Status == "PENDING" {
+			api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "COMMAND_RESULT_UNKNOWN", Message: "query the same command reference before retrying", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"command_reference": item.CommandReference, "result_query": "/token/admin/v1/commands/" + item.CommandReference.String()}})
+			return
+		}
+		// A deterministic failure after Formula Publish T1 is itself the durable
+		// governed result. Return that closed result rather than a generic error
+		// envelope so the client can verify the reference and terminal state.
+		if governedErr != nil && item.CommandReference != uuid.Nil && item.Status == "FAILED" {
+			status := http.StatusOK
+			if created {
+				status = http.StatusCreated
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			api.WriteJSON(w, status, item)
+			return
+		}
+		var billingErr *BillingHTTPError
+		switch {
+		case errors.Is(governedErr, ErrTokenCommandResultMismatch):
+			api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command or Billing binding", httpserver.RequestID(r.Context()))
+			return
+		case errors.Is(governedErr, ErrTokenCommandInvalid):
+			api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+			return
+		case errors.Is(governedErr, ErrCatalogVersionConflict), errors.Is(governedErr, ErrProtocolHeadVersionConflict), errors.Is(governedErr, ErrFormulaHeadVersionConflict), errors.Is(governedErr, ErrProtocolDraftETagMismatch), errors.Is(governedErr, ErrFormulaDraftETagMismatch), errors.Is(governedErr, ErrProtocolFormulaPrecheck), errors.Is(governedErr, ErrNotFound):
+			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
+			return
+		case errors.Is(governedErr, ErrTokenRouteActivationChanged):
+			writeTokenCommandGovernanceInactiveHTTP(w, r)
+			return
+		case errors.As(governedErr, &billingErr) && billingErr.Status == http.StatusConflict:
+			api.WriteError(w, http.StatusConflict, "FORMULA_BINDING_CONFLICT", "Billing already holds a different immutable formula binding", httpserver.RequestID(r.Context()))
+			return
+		case errors.As(governedErr, &billingErr) && billingErr.Status >= 400 && billingErr.Status < 500:
+			api.WriteError(w, http.StatusUnprocessableEntity, "FORMULA_UNIT_VALIDATION_REJECTED", "Billing rejected the protocol or formula evidence", httpserver.RequestID(r.Context()))
+			return
+		case governedErr != nil:
+			if item.CommandReference == uuid.Nil {
+				api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RETRYABLE", "no command was persisted; retry with the same idempotency key", httpserver.RequestID(r.Context()))
+				return
+			}
+			details := map[string]any{}
+			details["command_reference"] = item.CommandReference
+			details["result_query"] = "/token/admin/v1/commands/" + item.CommandReference.String()
+			api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "COMMAND_RESULT_UNKNOWN", Message: "query the same command reference before retrying", RequestID: httpserver.RequestID(r.Context()), Details: details})
+			return
+		}
+		status := http.StatusOK
+		if created {
+			status = http.StatusCreated
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, status, item)
+		return
+	}
 	if isRuntimeGovernedCommand(envelope.CommandType) {
 		item, _, runtimeErr := repository.ExecuteRuntimeTokenCommand(r.Context(), runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
 		if errors.Is(runtimeErr, ErrTokenCommandResultMismatch) {
@@ -806,6 +893,24 @@ func (s *Service) adminTokenCommandResult(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the command result was not found", httpserver.RequestID(r.Context()))
 		return
+	}
+	if item.CommandType == "TOKEN_FORMULA_PUBLISH" && item.Status == "PENDING" {
+		pending, pendingErr := repository.pendingFormulaPublishCommand(r.Context(), reference, actor)
+		if pendingErr != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNAVAILABLE", "the command result could not be recovered", httpserver.RequestID(r.Context()))
+			return
+		}
+		resumed, _, resumeErr := s.resumeGovernedFormulaPublishResult(r.Context(), repository, pending, reference, false)
+		if resumed.CommandReference != uuid.Nil {
+			item = resumed
+		}
+		// A transport or authority failure leaves the durable row PENDING. GET is
+		// still a safe, actor-scoped observation and the client may poll the same
+		// reference; it never needs the original plaintext idempotency key.
+		if resumeErr != nil && item.Status != "PENDING" && item.Status != "FAILED" {
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNAVAILABLE", "the command result could not be recovered", httpserver.RequestID(r.Context()))
+			return
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Authorization-Version", strconv.FormatInt(item.AuthorizationVersion, 10))

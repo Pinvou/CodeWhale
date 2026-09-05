@@ -382,16 +382,17 @@ func (r *PostgresRepository) PublishProtocolCommand(ctx context.Context, metadat
 
 func (r *PostgresRepository) FormulaDraft(ctx context.Context, id uuid.UUID) (ProtocolFormulaVersion, error) {
 	var item ProtocolFormulaVersion
+	var protocolStatus string
 	var required, expression []byte
-	err := r.pool.QueryRow(ctx, `SELECT formula.id,formula.protocol_definition_id,protocol.protocol_code,formula.version,formula.status,formula.required_unit_versions,formula.expression,formula.evaluator_version,formula.created_at,formula.published_at FROM protocol_formula_versions formula JOIN protocol_definitions protocol ON protocol.id=formula.protocol_definition_id WHERE formula.id=$1`, id).Scan(&item.ID, &item.ProtocolDefinitionID, &item.ProtocolCode, &item.Version, &item.Status, &required, &expression, &item.EvaluatorVersion, &item.CreatedAt, &item.PublishedAt)
+	err := r.pool.QueryRow(ctx, `SELECT formula.id,formula.protocol_definition_id,protocol.protocol_code,protocol.status,formula.version,formula.status,formula.required_unit_versions,formula.expression,formula.evaluator_version,formula.created_at,formula.published_at FROM protocol_formula_versions formula JOIN protocol_definitions protocol ON protocol.id=formula.protocol_definition_id WHERE formula.id=$1`, id).Scan(&item.ID, &item.ProtocolDefinitionID, &item.ProtocolCode, &protocolStatus, &item.Version, &item.Status, &required, &expression, &item.EvaluatorVersion, &item.CreatedAt, &item.PublishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, ErrNotFound
 	}
 	if err != nil {
 		return item, err
 	}
-	if json.Unmarshal(required, &item.RequiredUnitVersions) != nil || json.Unmarshal(expression, &item.Expression) != nil {
-		return item, ErrForbidden
+	if protocolStatus != "PUBLISHED" || item.EvaluatorVersion != "SAFE_PARAMETER_MAP_V1" || json.Unmarshal(required, &item.RequiredUnitVersions) != nil || json.Unmarshal(expression, &item.Expression) != nil || validateSafeFormula(item.RequiredUnitVersions, item.Expression) != nil {
+		return item, ErrProtocolFormulaPrecheck
 	}
 	item.ETag = protocolFormulaETag(item)
 	return item, nil

@@ -675,10 +675,12 @@ jobs:
           printf '%s\n' "$token_policy_output"
           grep -F -- '--- PASS: TestTokenProtocolFormulaPoliciesPostgresIntegration' <<< "$token_policy_output"
           ! grep -F -- '--- SKIP: TestTokenProtocolFormulaPoliciesPostgresIntegration' <<< "$token_policy_output"
-          token_command_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^TestTokenAdminProtocolFormulaCommandsPostgresIntegration$' -count=1 -v ./internal/token)"
+          token_command_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^(TestTokenAdminProtocolFormulaCommandsPostgresIntegration|TestTokenProtocolFormulaGovernedCommandsPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_command_output"
-          grep -F -- '--- PASS: TestTokenAdminProtocolFormulaCommandsPostgresIntegration' <<< "$token_command_output"
-          ! grep -F -- '--- SKIP: TestTokenAdminProtocolFormulaCommandsPostgresIntegration' <<< "$token_command_output"
+          for test_name in TestTokenAdminProtocolFormulaCommandsPostgresIntegration TestTokenProtocolFormulaGovernedCommandsPostgresIntegration; do
+            grep -F -- "--- PASS: $test_name" <<< "$token_command_output"
+            ! grep -F -- "--- SKIP: $test_name" <<< "$token_command_output"
+          done
           model_publish_precheck_output="$(go test -run '^TestModelPublishPrecheckPostgresIntegration$' -count=1 -v ./internal/token)"
           printf '%s\n' "$model_publish_precheck_output"
           grep -F -- '--- PASS: TestModelPublishPrecheckPostgresIntegration' <<< "$model_publish_precheck_output"

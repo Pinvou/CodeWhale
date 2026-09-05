@@ -124,7 +124,7 @@ function Dialog({ action, copy, units, busy, onClose, onSubmit }) {
     {['PROTOCOL_PUBLISH', 'FORMULA_PUBLISH'].includes(action.type) && <p className="adm-safe-preview-note">{copy.recentAuthRequired}</p>}
     <label>{copy.reason}<textarea required disabled={fieldsLocked} minLength="10" maxLength="2000" rows="4" value={reason} onChange={(event) => setReason(event.target.value)} /></label>
     {errorKey && <div className="adm-field-error" role="alert">{copy.validationErrors[errorKey]}</div>}
-		<footer><button type="button" disabled={closeLocked} onClick={onClose}>{terminal ? copy.close : copy.cancel}</button>{!terminal && <button type="submit" disabled={locked || Boolean(action.failure && !action.failure.unknown) || Boolean(action.precheck?.blockers?.length)}>{busy ? copy.submitting : action.failure?.unknown ? copy.actionRecoverSameKey : action.precheck ? copy.confirm : copy.actionLoadingImpact}</button>}</footer>
+		<footer><button type="button" disabled={closeLocked} onClick={onClose}>{terminal ? copy.close : copy.cancel}</button>{!terminal && <button type="submit" disabled={locked || Boolean(action.failure?.locked && !action.failure?.unknown) || Boolean(action.precheck?.blockers?.length)}>{busy ? copy.submitting : action.failure?.unknown ? copy.actionRecoverSameKey : action.precheck ? copy.confirm : copy.actionLoadingImpact}</button>}</footer>
   </form></div>;
 }
 
@@ -209,12 +209,12 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
     setBusy(true); setReceipt(null);
     const controller = new globalThis.AbortController();
     mutationController.current = controller;
+		const descriptor = protocolFormulaDescriptor(next);
     try {
-			const descriptor = protocolFormulaDescriptor(next);
 			const expected = { commandType: descriptor.commandType, targetResourceType: descriptor.targetResourceType, targetResourceID: descriptor.targetResourceID };
 			if (next.failure?.unknown) {
 				const payload = requireGovernedTokenCommandResult(await client.governedTokenCommandResult(next.failure.commandReference, controller.signal), expected);
-				setReceipt({ commandReference: payload.command_reference, auditRequestID: payload.audit_request_id, commandType: payload.command_type, status: payload.status, billingSync: payload.redacted_result?.billing_sync || '', verifiedUnitCount: Number(payload.redacted_result?.verified_unit_count || 0) });
+				setReceipt({ commandReference: payload.command_reference, auditRequestID: payload.audit_request_id, commandType: payload.command_type, status: payload.status, billingSync: payload.redacted_result?.billing_sync?.status || '', verifiedUnitCount: Number(payload.redacted_result?.verified_unit_count || 0) });
 				setAction(null);
 				if (next.type.startsWith('PROTOCOL')) setProtocolRefresh((value) => value + 1); else setFormulaRefresh((value) => value + 1);
 				return;
@@ -227,14 +227,14 @@ export function AdminProtocolFormulaWorkspace({ client, copy, canManage, routeVe
 			}
 			const envelope = await governedTokenEnvelope({ ...descriptor, reason: next.reason, impact: next.precheck });
 			const payload = requireGovernedTokenCommandResult(await client.createGovernedTokenCommand(envelope, next.idempotencyKey, controller.signal), expected);
-			setReceipt({ commandReference: payload.command_reference, auditRequestID: payload.audit_request_id, commandType: payload.command_type, status: payload.status, billingSync: payload.redacted_result?.billing_sync || '', verifiedUnitCount: Number(payload.redacted_result?.verified_unit_count || 0) });
+			setReceipt({ commandReference: payload.command_reference, auditRequestID: payload.audit_request_id, commandType: payload.command_type, status: payload.status, billingSync: payload.redacted_result?.billing_sync?.status || '', verifiedUnitCount: Number(payload.redacted_result?.verified_unit_count || 0) });
       setAction(null);
       if (next.type.startsWith('PROTOCOL')) setProtocolRefresh((value) => value + 1);
       else setFormulaRefresh((value) => value + 1);
 		} catch (error) {
 			if (!controller.signal.aborted && error?.name !== 'AbortError') {
 				const dispatched = Boolean(next.precheck && next.precheckKey === highRiskPayloadKey(protocolFormulaDescriptor(next)));
-				const classified = dispatched ? classifyHighRiskFailure({}, error) : null;
+				const classified = dispatched ? classifyHighRiskFailure({ commandType: descriptor.commandType }, error) : null;
 				const failure = classified
 					? { ...classified.error, unknown: classified.unknown, terminal: classified.terminal, locked: classified.locked }
 					: { ...safeProtocolFormulaFailure(error), terminal: false };

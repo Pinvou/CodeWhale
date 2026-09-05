@@ -157,6 +157,13 @@ func (s *Service) buildTokenCommandPrecheck(ctx context.Context, input TokenComm
 	if !supported || expectedType != strings.ToUpper(resourceType) || resourceID == "" || validateOwnedCommandPrecheckTarget(commandType, resourceID, input.Command) != nil || commandType == "TOKEN_MODEL_CATALOG_SYNC" && (input.CommandType != commandType || input.TargetResourceType != "MODEL_CATALOG" || input.TargetResourceID != "CURRENT") {
 		return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
 	}
+	if isProtocolFormulaGovernedCommand(commandType) {
+		canonicalCommand, err := canonicalizeProtocolFormulaCommand(commandType, input.Command)
+		if err != nil {
+			return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
+		}
+		input.Command = canonicalCommand
+	}
 	if commandType == "TOKEN_MODEL_PUBLISH" {
 		command, err := parseModelPublishCommand(input.Command)
 		if err != nil {
@@ -283,7 +290,7 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 			ExpectedProtocolVersion int64  `json:"expected_protocol_version"`
 			DraftETag               string `json:"draft_etag"`
 		}
-		if decodeCommand(raw, &command) != nil || command.ExpectedProtocolVersion < 1 || !validImpactETag(command.DraftETag) {
+		if decodeCommand(raw, &command) != nil || command.ExpectedProtocolVersion < 1 || !validCommandETag(command.DraftETag) {
 			return ErrTokenCommandInvalid
 		}
 	case "TOKEN_FORMULA_DRAFT_CREATE":
@@ -302,7 +309,7 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 			ExpectedFormulaVersion int64  `json:"expected_formula_version"`
 			DraftETag              string `json:"draft_etag"`
 		}
-		if decodeCommand(raw, &command) != nil || command.ExpectedFormulaVersion < 1 || !validImpactETag(command.DraftETag) {
+		if decodeCommand(raw, &command) != nil || command.ExpectedFormulaVersion < 1 || !validCommandETag(command.DraftETag) {
 			return ErrTokenCommandInvalid
 		}
 	case "TOKEN_MODEL_PUBLISH":
@@ -406,19 +413,7 @@ func parseRuntimeGovernedCommand(commandType, targetID string, raw json.RawMessa
 	return result, nil
 }
 
-func validImpactETag(value string) bool {
-	value = strings.TrimSpace(value)
-	return strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) && len(value) >= 10 && len(value) <= 160
-}
-
 func (s *Service) validateCommandBillingPrecheck(ctx context.Context, commandType, targetID string, raw json.RawMessage) (*time.Time, []string, error) {
-	validator, ok := s.billing.(FormulaDraftValidationClient)
-	if !ok {
-		if commandType == "TOKEN_FORMULA_DRAFT_CREATE" || commandType == "TOKEN_FORMULA_PUBLISH" || commandType == "TOKEN_PROTOCOL_PUBLISH" {
-			return nil, nil, errors.New("Billing validation unavailable")
-		}
-		return nil, nil, nil
-	}
 	unitSets := []map[string]uuid.UUID{}
 	switch commandType {
 	case "TOKEN_FORMULA_DRAFT_CREATE":
@@ -471,6 +466,10 @@ func (s *Service) validateCommandBillingPrecheck(ctx context.Context, commandTyp
 	default:
 		return nil, nil, nil
 	}
+	return s.validateFormulaUnitSets(ctx, unitSets)
+}
+
+func (s *Service) validateFormulaUnitSets(ctx context.Context, unitSets []map[string]uuid.UUID) (*time.Time, []string, error) {
 	combined := map[string]uuid.UUID{}
 	for _, required := range unitSets {
 		for rawCode, id := range required {
@@ -484,8 +483,15 @@ func (s *Service) validateCommandBillingPrecheck(ctx context.Context, commandTyp
 	if len(combined) == 0 {
 		return nil, nil, nil
 	}
+	validator, ok := s.billing.(FormulaDraftValidationClient)
+	if !ok {
+		return nil, nil, errors.New("Billing validation unavailable")
+	}
 	validation, err := validator.ValidateFormulaDraftUnits(ctx, combined)
-	if err != nil || validateFormulaDraftValidation(combined, validation) != nil || validation.ObservedAt.IsZero() || !validImpactFingerprint(validation.UnitSetFingerprint) {
+	if err != nil {
+		return nil, nil, err
+	}
+	if validateFormulaDraftValidation(combined, validation) != nil || validation.ObservedAt.IsZero() || !validImpactFingerprint(validation.UnitSetFingerprint) {
 		return nil, nil, ErrProtocolFormulaPrecheck
 	}
 	values := stableUnitMappingValues(combined)
@@ -575,21 +581,17 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 		if decodeCommand(raw, &command) != nil {
 			return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
 		}
-		var protocol ProtocolDefinition
-		var formulaDigest string
-		err = tx.QueryRow(ctx, `SELECT p.id,p.protocol_code,p.version,p.status,p.request_schema,p.created_at,p.published_at,COALESCE((SELECT encode(digest(string_agg(f.id::text||':'||f.version::text||':'||f.status||':'||encode(digest(f.required_unit_versions::text||f.expression::text||f.evaluator_version,'sha256'),'hex'),E'\\x00' ORDER BY f.id),'sha256'),'hex') FROM protocol_formula_versions f WHERE f.protocol_definition_id=p.id),'') FROM protocol_definitions p WHERE p.id=$1`, id).Scan(&protocol.ID, &protocol.ProtocolCode, &protocol.Version, &protocol.Status, &protocol.RequestSchema, &protocol.CreatedAt, &protocol.PublishedAt, &formulaDigest)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return commandPrecheckSnapshot{}, ErrNotFound
-		}
+		facts, err := loadProtocolPublicationFacts(ctx, tx, id)
 		if err != nil {
 			return commandPrecheckSnapshot{}, err
 		}
+		protocol := facts.Protocol
 		etag := protocolDefinitionETag(protocol)
 		blockers := []string{}
 		if protocol.Status != "DRAFT" || command.ExpectedProtocolVersion != protocol.Version || strings.ToLower(strings.TrimSpace(command.DraftETag)) != etag {
 			blockers = append(blockers, "PROTOCOL_DRAFT_CHANGED")
 		}
-		return commandPrecheckSnapshot{Status: protocol.Status, ExpectedVersions: map[string]any{"protocol_definition_id": id, "expected_protocol_version": protocol.Version, "draft_etag": etag}, EvidenceValues: []string{protocol.ProtocolCode, strconv.FormatInt(protocol.Version, 10), protocol.Status, etag, formulaDigest}, Blockers: blockers}, nil
+		return commandPrecheckSnapshot{Status: protocol.Status, ExpectedVersions: map[string]any{"protocol_definition_id": id, "expected_protocol_version": protocol.Version, "draft_etag": etag, "formula_set_sha256": facts.FormulaSetSHA256, "model_draft_set_sha256": facts.ModelDraftSetSHA256, "model_draft_reference_count": facts.ModelDraftReferenceCount}, EvidenceValues: []string{protocol.ProtocolCode, strconv.FormatInt(protocol.Version, 10), protocol.Status, etag, facts.FormulaSetSHA256, facts.ModelDraftSetSHA256, strconv.FormatInt(facts.ModelDraftReferenceCount, 10)}, Blockers: blockers}, nil
 	case "TOKEN_FORMULA_DRAFT_CREATE":
 		id, err := uuid.Parse(targetID)
 		if err != nil {
@@ -628,11 +630,7 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 		if decodeCommand(raw, &command) != nil {
 			return commandPrecheckSnapshot{}, ErrTokenCommandInvalid
 		}
-		var formula ProtocolFormulaVersion
-		err = tx.QueryRow(ctx, `SELECT id,protocol_definition_id,protocol_code,version,status,required_unit_versions,expression,evaluator_version,created_at,published_at FROM protocol_formula_versions WHERE id=$1`, id).Scan(&formula.ID, &formula.ProtocolDefinitionID, &formula.ProtocolCode, &formula.Version, &formula.Status, &formula.RequiredUnitVersions, &formula.Expression, &formula.EvaluatorVersion, &formula.CreatedAt, &formula.PublishedAt)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return commandPrecheckSnapshot{}, ErrNotFound
-		}
+		formula, err := loadFormulaPublicationFacts(ctx, tx, id)
 		if err != nil {
 			return commandPrecheckSnapshot{}, err
 		}

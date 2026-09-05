@@ -210,167 +210,24 @@ func TestTokenAdminProtocolFormulaCommandsPostgresIntegration(t *testing.T) {
 	active := newProtocolFormulaIntegrationHandler(t, repository, billingServer.URL, actorID, tokenCommandActivationReaderFunc(func(context.Context) (TokenCommandGovernanceActivation, error) {
 		return TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 3}, nil
 	}), true)
-	billingMode.Store(4)
-	beforeAudit, beforeOutbox = protocolFormulaFactCounts(t, repository, ctx)
-	concurrentResponse := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/protocols/"+concurrent.Protocol.ID.String()+"/publish", map[string]any{"expected_protocol_version": 1, "draft_etag": concurrent.Protocol.ETag, "reason": "verify Billing outage leaves protocol draft unchanged"}, "handler-protocol-billing-unavailable", 0)
-	if concurrentResponse.Code != http.StatusServiceUnavailable || !strings.Contains(concurrentResponse.Body.String(), "FORMULA_UNIT_VALIDATION_UNAVAILABLE") {
-		t.Fatalf("Billing-unavailable protocol preflight: %d %s", concurrentResponse.Code, concurrentResponse.Body.String())
-	}
-	afterAudit, afterOutbox = protocolFormulaFactCounts(t, repository, ctx)
-	if beforeAudit != afterAudit || beforeOutbox != afterOutbox {
-		t.Fatal("Billing-unavailable protocol preflight must not append audit or outbox")
-	}
-	if err := repository.pool.QueryRow(ctx, `SELECT status FROM protocol_definitions WHERE id=$1`, concurrent.Protocol.ID).Scan(&incompatibleStatus); err != nil || incompatibleStatus != "DRAFT" {
-		t.Fatalf("Billing-unavailable protocol changed status=%s err=%v", incompatibleStatus, err)
-	}
-	billingMode.Store(0)
-	protocolResponse := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/protocols", map[string]any{"protocol_code": "HANDLER_V2", "request_schema": map[string]any{"type": "object"}, "expected_protocol_head_version": 0, "reason": "创建协议草稿用于完整链路验证"}, "handler-protocol-create-01", 0)
-	if protocolResponse.Code != http.StatusCreated {
-		t.Fatalf("create protocol handler: %d %s", protocolResponse.Code, protocolResponse.Body.String())
-	}
-	var protocolCreated ProtocolFormulaCommandResult
-	if json.Unmarshal(protocolResponse.Body.Bytes(), &protocolCreated) != nil || protocolCreated.Protocol == nil {
-		t.Fatalf("invalid protocol result: %s", protocolResponse.Body.String())
-	}
-	protocolResponse = performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/protocols/"+protocolCreated.Protocol.ID.String()+"/publish", map[string]any{"expected_protocol_version": 1, "draft_etag": protocolCreated.Protocol.ETag, "reason": "发布已经校验完成的协议版本"}, "handler-protocol-publish-01", 0)
-	if protocolResponse.Code != http.StatusOK {
-		t.Fatalf("publish protocol handler: %d %s", protocolResponse.Code, protocolResponse.Body.String())
-	}
-	for _, failure := range []struct {
-		name       string
-		mode       int32
-		wantStatus int
-		timeout    time.Duration
-	}{
-		{name: "unit rejected", mode: 5, wantStatus: http.StatusUnprocessableEntity},
-		{name: "unit authority unavailable", mode: 4, wantStatus: http.StatusServiceUnavailable},
-		{name: "unit authority timeout", mode: 6, wantStatus: http.StatusServiceUnavailable, timeout: 20 * time.Millisecond},
+	for _, target := range []struct{ method, path string }{
+		{http.MethodPost, "/admin/v1/protocols"},
+		{http.MethodPost, "/admin/v1/protocols/018f57a9-9c17-7efc-a450-35c445491201/publish"},
+		{http.MethodPost, "/admin/v1/protocols/018f57a9-9c17-7efc-a450-35c445491201/formulas"},
+		{http.MethodPost, "/admin/v1/formulas/018f57a9-9c17-7efc-a450-35c445491202/publish"},
 	} {
-		t.Run(failure.name, func(t *testing.T) {
-			billingMode.Store(failure.mode)
-			beforeAudit, beforeOutbox := protocolFormulaFactCounts(t, repository, ctx)
-			response := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/protocols/"+protocolCreated.Protocol.ID.String()+"/formulas", map[string]any{"required_unit_versions": map[string]uuid.UUID{"INPUT_TOKEN": unitID}, "expression": map[string]string{"INPUT_TOKEN": "estimated_input_tokens"}, "expected_protocol_version": 1, "expected_formula_head_version": 0, "reason": "verify rejected unit validation leaves no Token facts"}, "handler-formula-validation-"+failure.name, failure.timeout)
-			if response.Code != failure.wantStatus {
-				t.Fatalf("status=%d want=%d body=%s", response.Code, failure.wantStatus, response.Body.String())
-			}
-			afterAudit, afterOutbox := protocolFormulaFactCounts(t, repository, ctx)
-			if beforeAudit != afterAudit || beforeOutbox != afterOutbox {
-				t.Fatal("failed formula unit validation must not append Token facts")
-			}
-		})
+		response := performProtocolFormulaCommand(active, target.method, target.path, map[string]any{}, "retired-direct-command-01", 0)
+		if response.Code != http.StatusGone || !strings.Contains(response.Body.String(), "DIRECT_TOKEN_COMMAND_RETIRED") {
+			t.Fatalf("active direct path must be retired: %s status=%d body=%s", target.path, response.Code, response.Body.String())
+		}
 	}
-	billingMode.Store(0)
-	formulaResponse := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/protocols/"+protocolCreated.Protocol.ID.String()+"/formulas", map[string]any{"required_unit_versions": map[string]uuid.UUID{"INPUT_TOKEN": unitID}, "expression": map[string]string{"INPUT_TOKEN": "estimated_input_tokens"}, "expected_protocol_version": 1, "expected_formula_head_version": 0, "reason": "创建采用权威计量单位的公式草稿"}, "handler-formula-create-001", 0)
-	if formulaResponse.Code != http.StatusCreated {
-		t.Fatalf("create formula handler: %d %s", formulaResponse.Code, formulaResponse.Body.String())
-	}
-	var formulaCreated ProtocolFormulaCommandResult
-	if json.Unmarshal(formulaResponse.Body.Bytes(), &formulaCreated) != nil || formulaCreated.Formula == nil || formulaCreated.Precheck["metering_unit_version_count"] != float64(1) || !strings.Contains(formulaResponse.Body.String(), `"version":7`) {
-		t.Fatalf("invalid authoritative formula result: %s", formulaResponse.Body.String())
-	}
-	formulaResponse = performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/formulas/"+formulaCreated.Formula.ID.String()+"/publish", map[string]any{"expected_formula_version": 1, "draft_etag": formulaCreated.Formula.ETag, "reason": "发布已经完成计量核验的公式版本"}, "handler-formula-publish-01", 0)
-	if formulaResponse.Code != http.StatusOK || !strings.Contains(formulaResponse.Body.String(), `"billing_sync":"SYNCHRONIZED"`) {
-		t.Fatalf("publish formula handler: %d %s", formulaResponse.Code, formulaResponse.Body.String())
-	}
-
-	for index, failure := range []struct {
-		name       string
-		mode       int32
-		wantStatus int
-		timeout    time.Duration
-	}{
-		{name: "billing rejects", mode: 1, wantStatus: http.StatusUnprocessableEntity},
-		{name: "billing unavailable", mode: 2, wantStatus: http.StatusGatewayTimeout},
-		{name: "billing timeout", mode: 3, wantStatus: http.StatusGatewayTimeout, timeout: 20 * time.Millisecond},
-	} {
-		t.Run(failure.name, func(t *testing.T) {
-			billingMode.Store(0)
-			formulaDraft := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/protocols/"+protocolCreated.Protocol.ID.String()+"/formulas", map[string]any{"required_unit_versions": map[string]uuid.UUID{"INPUT_TOKEN": unitID}, "expression": map[string]string{"INPUT_TOKEN": "estimated_input_tokens"}, "expected_protocol_version": 1, "expected_formula_head_version": index + 1, "reason": "创建用于验证账务失败关闭的公式"}, "handler-formula-failure-"+strconv.Itoa(index), 0)
-			if formulaDraft.Code != http.StatusCreated {
-				t.Fatalf("create failure draft: %d %s", formulaDraft.Code, formulaDraft.Body.String())
-			}
-			var created ProtocolFormulaCommandResult
-			if json.Unmarshal(formulaDraft.Body.Bytes(), &created) != nil || created.Formula == nil {
-				t.Fatalf("invalid formula draft: %s", formulaDraft.Body.String())
-			}
-			beforeAudit, beforeOutbox := protocolFormulaFactCounts(t, repository, ctx)
-			billingMode.Store(failure.mode)
-			published := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/formulas/"+created.Formula.ID.String()+"/publish", map[string]any{"expected_formula_version": index + 2, "draft_etag": created.Formula.ETag, "reason": "验证账务拒绝时保持公式草稿不变"}, "handler-formula-publish-failure-"+strconv.Itoa(index), failure.timeout)
-			if published.Code != failure.wantStatus {
-				t.Fatalf("status=%d want=%d body=%s", published.Code, failure.wantStatus, published.Body.String())
-			}
-			if failure.wantStatus == http.StatusGatewayTimeout && !strings.Contains(published.Body.String(), "COMMAND_RESULT_UNKNOWN") {
-				t.Fatalf("unknown result must expose stable command reference: %s", published.Body.String())
-			}
-			var status string
-			if err := repository.pool.QueryRow(ctx, `SELECT status FROM protocol_formula_versions WHERE id=$1`, created.Formula.ID).Scan(&status); err != nil || status != "DRAFT" {
-				t.Fatalf("failed Billing sync changed Token formula: status=%s err=%v", status, err)
-			}
-			afterAudit, afterOutbox := protocolFormulaFactCounts(t, repository, ctx)
-			if beforeAudit != afterAudit || beforeOutbox != afterOutbox {
-				t.Fatalf("failed/unknown Billing sync wrote Token facts: audit %d→%d outbox %d→%d", beforeAudit, afterAudit, beforeOutbox, afterOutbox)
-			}
-		})
-	}
-
-	billingMode.Store(0)
-	recoveringRepository := &failOnceProtocolFormulaRepository{PostgresRepository: repository}
-	recovering := newProtocolFormulaIntegrationHandler(t, recoveringRepository, billingServer.URL, actorID, tokenCommandActivationReaderFunc(func(context.Context) (TokenCommandGovernanceActivation, error) {
-		return TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 3}, nil
-	}), true)
-	recoveryDraftResponse := performProtocolFormulaCommand(recovering, http.MethodPost, "/admin/v1/protocols/"+protocolCreated.Protocol.ID.String()+"/formulas", map[string]any{"required_unit_versions": map[string]uuid.UUID{"INPUT_TOKEN": unitID}, "expression": map[string]string{"INPUT_TOKEN": "estimated_input_tokens"}, "expected_protocol_version": 1, "expected_formula_head_version": 4, "reason": "create formula for cross-domain retry convergence"}, "handler-formula-recovery-create", 0)
-	var recoveryDraft ProtocolFormulaCommandResult
-	if recoveryDraftResponse.Code != http.StatusCreated || json.Unmarshal(recoveryDraftResponse.Body.Bytes(), &recoveryDraft) != nil || recoveryDraft.Formula == nil {
-		t.Fatalf("create recovery draft: %d %s", recoveryDraftResponse.Code, recoveryDraftResponse.Body.String())
-	}
-	recoveringRepository.failPublish.Store(true)
-	recoveryBody := map[string]any{"expected_formula_version": 5, "draft_etag": recoveryDraft.Formula.ETag, "reason": "retry same Billing receipt after Token transaction failure"}
-	firstRecovery := performProtocolFormulaCommand(recovering, http.MethodPost, "/admin/v1/formulas/"+recoveryDraft.Formula.ID.String()+"/publish", recoveryBody, "handler-formula-recovery-publish", 0)
-	if firstRecovery.Code != http.StatusGatewayTimeout || !strings.Contains(firstRecovery.Body.String(), "COMMAND_RESULT_UNKNOWN") {
-		t.Fatalf("injected Token failure must be recoverable unknown: %d %s", firstRecovery.Code, firstRecovery.Body.String())
-	}
-	secondRecovery := performProtocolFormulaCommand(recovering, http.MethodPost, "/admin/v1/formulas/"+recoveryDraft.Formula.ID.String()+"/publish", recoveryBody, "handler-formula-recovery-publish", 0)
-	var recovered ProtocolFormulaCommandResult
-	if secondRecovery.Code != http.StatusOK || json.Unmarshal(secondRecovery.Body.Bytes(), &recovered) != nil || recovered.Formula == nil || recovered.Formula.PublishedAt == nil || !recovered.Formula.PublishedAt.Equal(protocolFormulaBillingPublishedAt()) {
-		t.Fatalf("same Billing receipt did not converge Token publish: %d %s", secondRecovery.Code, secondRecovery.Body.String())
-	}
-
-	responseLossDraftResponse := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/protocols/"+protocolCreated.Protocol.ID.String()+"/formulas", map[string]any{"required_unit_versions": map[string]uuid.UUID{"INPUT_TOKEN": unitID}, "expression": map[string]string{"INPUT_TOKEN": "estimated_input_tokens"}, "expected_protocol_version": 1, "expected_formula_head_version": 5, "reason": "create formula for Billing response-loss recovery"}, "handler-formula-response-loss-create", 0)
-	var responseLossDraft ProtocolFormulaCommandResult
-	if responseLossDraftResponse.Code != http.StatusCreated || json.Unmarshal(responseLossDraftResponse.Body.Bytes(), &responseLossDraft) != nil || responseLossDraft.Formula == nil {
-		t.Fatalf("create response-loss draft: %d %s", responseLossDraftResponse.Code, responseLossDraftResponse.Body.String())
-	}
-	responseLossBody := map[string]any{"expected_formula_version": 6, "draft_etag": responseLossDraft.Formula.ETag, "reason": "retry immutable Billing receipt after response loss"}
-	billingMode.Store(7)
-	lost := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/formulas/"+responseLossDraft.Formula.ID.String()+"/publish", responseLossBody, "handler-formula-response-loss-publish", 0)
-	if lost.Code != http.StatusGatewayTimeout || !strings.Contains(lost.Body.String(), "COMMAND_RESULT_UNKNOWN") {
-		t.Fatalf("lost Billing response must be unknown: %d %s", lost.Code, lost.Body.String())
-	}
-	billingMode.Store(0)
-	retried := performProtocolFormulaCommand(active, http.MethodPost, "/admin/v1/formulas/"+responseLossDraft.Formula.ID.String()+"/publish", responseLossBody, "handler-formula-response-loss-publish", 0)
-	var responseLossRecovered ProtocolFormulaCommandResult
-	if retried.Code != http.StatusOK || json.Unmarshal(retried.Body.Bytes(), &responseLossRecovered) != nil || responseLossRecovered.Formula == nil || responseLossRecovered.Formula.PublishedAt == nil || !responseLossRecovered.Formula.PublishedAt.Equal(protocolFormulaBillingPublishedAt()) {
-		t.Fatalf("lost Billing response did not recover original T1: %d %s", retried.Code, retried.Body.String())
-	}
-}
-
-type failOnceProtocolFormulaRepository struct {
-	*PostgresRepository
-	failPublish atomic.Bool
-}
-
-func (r *failOnceProtocolFormulaRepository) PublishFormulaCommand(ctx context.Context, metadata ProtocolFormulaCommandMetadata, id uuid.UUID, expectedVersion int64, draftETag string, sync FormulaBindingSync) (ProtocolFormulaCommandResult, error) {
-	if r.failPublish.Swap(false) {
-		return ProtocolFormulaCommandResult{}, errors.New("injected Token transaction failure")
-	}
-	return r.PostgresRepository.PublishFormulaCommand(ctx, metadata, id, expectedVersion, draftETag, sync)
 }
 
 func protocolFormulaBillingPublishedAt() time.Time {
 	return time.Date(2026, 9, 3, 10, 15, 0, 0, time.UTC)
 }
 
-func newProtocolFormulaBillingServer(t *testing.T, unitID uuid.UUID, mode *atomic.Int32) *httptest.Server {
+func newProtocolFormulaBillingServer(t *testing.T, unitID uuid.UUID, mode *atomic.Int32, putCounters ...*atomic.Int32) *httptest.Server {
 	t.Helper()
 	var bindingMutex sync.Mutex
 	bindingReceipts := make(map[uuid.UUID]FormulaBindingReceipt)
@@ -396,10 +253,13 @@ func newProtocolFormulaBillingServer(t *testing.T, unitID uuid.UUID, mode *atomi
 				http.Error(w, `{"code":"PRICE_MISSING"}`, http.StatusUnprocessableEntity)
 				return
 			}
-			_ = json.NewEncoder(w).Encode(FormulaDraftValidation{VerifiedCount: 1, UnitVersions: []MeteringUnitVersionReference{{UnitCode: "INPUT_TOKEN", UnitDefinitionID: unitID, Version: 7, Status: "ACTIVE"}}})
+			_ = json.NewEncoder(w).Encode(FormulaDraftValidation{VerifiedCount: 1, UnitVersions: []MeteringUnitVersionReference{{UnitCode: "INPUT_TOKEN", UnitDefinitionID: unitID, Version: 7, Status: "ACTIVE"}}, ObservedAt: time.Date(2026, 9, 3, 10, 10, 0, 0, time.UTC), UnitSetFingerprint: strings.Repeat("c", 64)})
 			return
 		}
 		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/internal/v1/pricing/formula-bindings/") {
+			if len(putCounters) == 1 && putCounters[0] != nil {
+				putCounters[0].Add(1)
+			}
 			switch mode.Load() {
 			case 1:
 				http.Error(w, `{"code":"PRICE_MISSING"}`, http.StatusUnprocessableEntity)
@@ -417,7 +277,7 @@ func newProtocolFormulaBillingServer(t *testing.T, unitID uuid.UUID, mode *atomi
 				Snapshot     json.RawMessage `json:"formula_snapshot"`
 			}
 			formulaID, formulaIDErr := uuid.Parse(strings.TrimPrefix(r.URL.Path, "/internal/v1/pricing/formula-bindings/"))
-			if json.NewDecoder(r.Body).Decode(&body) != nil || formulaIDErr != nil || formulaID == uuid.Nil || body.ProtocolCode != "HANDLER_V2" || len(body.Required) != 1 || body.Required[0] != unitID || !strings.Contains(string(body.Snapshot), `"evaluator_version":"SAFE_PARAMETER_MAP_V1"`) || !strings.Contains(string(body.Snapshot), "estimated_input_tokens") {
+			if json.NewDecoder(r.Body).Decode(&body) != nil || formulaIDErr != nil || formulaID == uuid.Nil || body.ProtocolCode != "HANDLER_V2" && body.ProtocolCode != "GOVERNED_V2" || len(body.Required) != 1 || body.Required[0] != unitID || !strings.Contains(string(body.Snapshot), `"evaluator_version":"SAFE_PARAMETER_MAP_V1"`) || !strings.Contains(string(body.Snapshot), `"expression":`) {
 				http.Error(w, `{"code":"BILLING_CONFLICT"}`, http.StatusConflict)
 				return
 			}
