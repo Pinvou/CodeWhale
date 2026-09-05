@@ -14,7 +14,7 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
   </a>
 </p>
 <p align="center">
-  <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4"><strong>▶ 观看 90 秒功能演示：7 月 17—23 日功能更新</strong></a>
+  <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4"><strong>▶ 观看 90 秒功能演示（中文）</strong></a>
 </p>
 
 ## 三种工作方式
@@ -93,10 +93,10 @@ PINVOU 支持本地 vLLM 和 OpenAI-compatible API。应用内可保存多个模
 ```bash
 export DEEPSEEK_BASE_URL="http://127.0.0.1:8000/v1"
 export DEEPSEEK_API_KEY="local-no-auth"
-export DEEPSEEK_MODEL="qwen36_35b_256k"
+export DEEPSEEK_MODEL="your-model-name"
 ```
 
-模型地址、模型名和密钥也可以直接在应用设置中管理。对于非本机的明文 HTTP 端点，开发环境还需显式设置 `DEEPSEEK_ALLOW_INSECURE_HTTP=1`。
+模型地址、模型名和密钥也可以直接在应用设置中管理。对于可信开发网络内的非本机明文 HTTP 端点，开发环境还需显式设置 `DEEPSEEK_ALLOW_INSECURE_HTTP=1`。
 
 ## 架构
 
@@ -135,7 +135,9 @@ CodeWhale（Agent 底座 submodule）
 
 > **Linux 用户**：发布包支持 Ubuntu 22.04 及以上系统（glibc 2.35+，x86_64 与 arm64）；deb 另要求 WebKitGTK 2.40+，已应用标准更新源的 Ubuntu 22.04 系统可满足该要求。
 
-> **macOS 用户**：pinvou3 支持 Apple Silicon (arm64) + macOS 11.0+。语音识别引擎已内置打包；文件解析（PDF/Office/OCR/压缩包等）依赖可选外部工具，通过 Homebrew 或各工具官网安装——详见 [macOS 运行环境要求](docs/macos-requirements.md)。
+> **macOS 用户**：pinvou3 支持 Apple Silicon (arm64) + macOS 11.0+。语音识别引擎已内置打包；平台要求详见 [macOS 运行环境要求](docs/macos-requirements.md)。
+
+> **文件解析依赖**：PDF、Office、OCR、压缩包等能力依赖可选外部工具，详见 [安装说明](pinvou3-app/INSTALL.md)。
 
 ### 启动应用
 
@@ -197,7 +199,7 @@ docs/                 架构设计、验证报告与维护文档
 - [macOS 运行环境要求](docs/macos-requirements.md)
 - [CodeWhale fork 策略](docs/fork-policy.md)
 - [当前 fork 修改清单](docs/fork-modifications.md)
-- [工具市场设计](docs/工具市场.md)
+- [工具市场概览](docs/工具市场.md)
 - [应用内升级设计](docs/应用内升级-设计.md)
 - [终端用户资料包](资料包/README.md)
 
