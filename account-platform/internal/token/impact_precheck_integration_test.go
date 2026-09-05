@@ -256,4 +256,21 @@ INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstre
 	if err != nil || create.CurrentStatus != "CREATE" || create.CurrentVersion.RouteGeneration == nil || *create.CurrentVersion.RouteGeneration != 0 {
 		t.Fatalf("missing UPSERT=%+v err=%v", create, err)
 	}
+	newModelID, newCapabilityID, newCatalogID := uuid.New(), uuid.New(), uuid.New()
+	var newCatalogVersion int64
+	if err := repository.pool.QueryRow(ctx, `INSERT INTO model_catalog_versions(id,reason,created_by,created_at,published_at) VALUES($1,'difference integration',$2,$3,$3) RETURNING version`, newCatalogID, actorID, now.Add(time.Second)).Scan(&newCatalogVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `
+INSERT INTO model_identities(id,provider_id,adapter_version,upstream_model_ref,upstream_model_ref_digest,created_by,created_at) VALUES($1,'provider','v1','model-three',$2,$3,$4);
+INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($5,$1,1,$6,128000,8192,'["TEXT"]','v1',$3,$4);
+INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES
+($7,$8,'Model One Changed','model one changed','','{}','PUBLISHED',$9,$6,true),
+($7,$1,'Model Three','model three','','{}','PUBLISHED',$5,$6,true)`, newModelID, strings.Repeat("d", 64), actorID, now.Add(time.Second), newCapabilityID, protocolID, newCatalogVersion, modelID, capabilityID); err != nil {
+		t.Fatal(err)
+	}
+	difference, err := repository.CatalogRollbackImpact(ctx, catalogVersion)
+	if err != nil || difference.CatalogDiff == nil || difference.CatalogDiff.BaselineCatalogVersion != newCatalogVersion || difference.CatalogDiff.TargetCatalogVersion == nil || *difference.CatalogDiff.TargetCatalogVersion != catalogVersion || difference.CatalogDiff.AddedCount != 1 || difference.CatalogDiff.ModifiedCount != 1 || difference.CatalogDiff.RemovedCount != 1 || difference.CatalogDiff.TotalCount != 3 || difference.CatalogDiff.Truncated {
+		t.Fatalf("rollback catalog difference=%+v err=%v", difference.CatalogDiff, err)
+	}
 }

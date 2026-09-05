@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { executeHighRiskCommand, resetHighRiskCommandAfterSafeFailure, validImpactPrecheck } from './admin-high-risk-action-state.js';
+import { validateCatalogDifference } from './admin-model-operations-overview.js';
 
 function trapFocus(event, root) {
   if (event.key !== 'Tab') return;
@@ -16,7 +17,12 @@ function ImpactFacts({ impact, copy }) {
     [copy.actionInflight, dependencies.inflight_requests], [copy.actionSessions, dependencies.active_sessions],
     [copy.actionCoverageGaps, dependencies.coverage_gaps], [copy.actionAlternatives, Number(dependencies.alternative_credentials || 0) + Number(dependencies.alternative_accounts || 0)],
   ];
+  const catalogDiff = validateCatalogDifference(impact?.catalog_diff);
+  const catalogDiffUnavailable = Object.hasOwn(impact || {}, 'catalog_diff') && !catalogDiff;
+  const providerObservation = catalogDiff?.target_observed_version !== null;
   return <><dl className="adm-command-target adm-high-risk-impact">{facts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{Number(value || 0).toLocaleString()}</dd></div>)}</dl>
+    {catalogDiff && <section className="adm-catalog-diff" aria-labelledby="catalog-diff-title"><h4 id="catalog-diff-title">{copy.catalogDiffTitle}</h4><dl><div><dt>{copy.catalogAdded}</dt><dd>{catalogDiff.added_count.toLocaleString()}</dd></div><div><dt>{copy.catalogModified}</dt><dd>{catalogDiff.modified_count.toLocaleString()}</dd></div><div><dt>{providerObservation ? copy.catalogMissing : copy.catalogRemoved}</dt><dd>{catalogDiff.removed_count.toLocaleString()}</dd></div></dl>{catalogDiff.total_count === 0 ? <p>{copy.catalogDiffEmpty}</p> : <ul>{catalogDiff.items.map((item, index) => <li key={item.model_id || `${item.change_type}-${index}`}><span>{item.change_type === 'REMOVED' && providerObservation ? copy.catalogMissing : copy.catalogChangeTypes[item.change_type]}</span><strong>{item.display_name || copy.catalogUnnamedModel}</strong>{item.model_id && <code>{item.model_id}</code>}</li>)}</ul>}{catalogDiff.truncated && <small>{copy.catalogDiffTruncated(catalogDiff.total_count, catalogDiff.items.length)}</small>}<small>{catalogDiff.target_catalog_version ? copy.catalogVersionPair(catalogDiff.baseline_catalog_version, catalogDiff.target_catalog_version) : copy.catalogObservedTarget(catalogDiff.baseline_catalog_version)}</small></section>}
+    {catalogDiffUnavailable && <div className="adm-inline-message error" role="alert">{copy.catalogDiffUnavailable}</div>}
     {impact.blockers.length > 0 && <div className="adm-inline-message error" role="alert"><strong>{copy.actionBlocked}</strong><ul>{impact.blockers.map((blocker) => <li key={blocker}>{copy.impactBlockers?.[blocker] || blocker}</li>)}</ul></div>}
   </>;
 }
@@ -60,7 +66,8 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
   const reasonLength = [...normalizedReason].length;
   const frozenReference = command.current?.command?.unknown ? command.current.command.error?.commandReference : '';
   const recoveryBlocked = state.unknown && (!recover || !frozenReference);
-  const blocked = (impactRequired && (!impact || impact.blockers?.length > 0)) || state.loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmed;
+  const malformedCatalogDiff = Object.hasOwn(impact || {}, 'catalog_diff') && !validateCatalogDifference(impact.catalog_diff);
+  const blocked = (impactRequired && (!impact || impact.blockers?.length > 0 || malformedCatalogDiff)) || state.loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmed;
   const closeDialog = () => {
     const completed = state.success;
     onClose();

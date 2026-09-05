@@ -627,6 +627,32 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
+	if envelope.CommandType == "TOKEN_MODEL_CATALOG_SYNC" {
+		item, _, syncErr := s.executeGovernedCatalogSync(r.Context(), repository, runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
+		if errors.Is(syncErr, ErrTokenCommandResultMismatch) {
+			api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(syncErr, ErrTokenCommandInvalid) {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(syncErr, ErrCatalogVersionConflict) || errors.Is(syncErr, ErrNotFound) || errors.Is(syncErr, ErrForbidden) {
+			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
+			return
+		}
+		if errors.Is(syncErr, ErrTokenRouteActivationChanged) {
+			writeTokenCommandGovernanceInactiveHTTP(w, r)
+			return
+		}
+		if syncErr != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNKNOWN", "query the same command reference before retrying", httpserver.RequestID(r.Context()))
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusOK, item)
+		return
+	}
 	if isRuntimeGovernedCommand(envelope.CommandType) {
 		item, _, runtimeErr := repository.ExecuteRuntimeTokenCommand(r.Context(), runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
 		if errors.Is(runtimeErr, ErrTokenCommandResultMismatch) {
@@ -736,6 +762,10 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Retry-After", "2")
 	api.WriteJSON(w, status, item)
+}
+
+func writeTokenCommandGovernanceInactiveHTTP(w http.ResponseWriter, r *http.Request) {
+	api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "Token command governance is not active", httpserver.RequestID(r.Context()))
 }
 
 func isRuntimeGovernedCommand(commandType string) bool {

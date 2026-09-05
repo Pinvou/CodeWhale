@@ -29,26 +29,27 @@ import (
 )
 
 type Config struct {
-	PublicURL                          *url.URL
-	AuthorizationURL                   *url.URL
-	TokenURL                           *url.URL
-	ClientID                           string
-	AccountURL                         *url.URL
-	BillingURL                         *url.URL
-	TokenGatewayURL                    *url.URL
-	ClientVersion                      string
-	TokenAdminProxyHMACKey             []byte
-	AdminModelTokenIAEnabled           bool
-	AdminTokenResourceFormsEnabled     bool
-	AdminModelOperationsDetailsEnabled bool
-	AdminModelDetailsEnabled           bool
-	AdminModelPricingEditEnabled       bool
-	AdminTokenDetailsEnabled           bool
-	AdminModelTokenActionsEnabled      bool
-	CredentialOrigin                   *url.URL
-	SystemProbes                       []SystemProbe
-	SecureCookies                      bool
-	SessionMaxAge                      time.Duration
+	PublicURL                           *url.URL
+	AuthorizationURL                    *url.URL
+	TokenURL                            *url.URL
+	ClientID                            string
+	AccountURL                          *url.URL
+	BillingURL                          *url.URL
+	TokenGatewayURL                     *url.URL
+	ClientVersion                       string
+	TokenAdminProxyHMACKey              []byte
+	AdminModelTokenIAEnabled            bool
+	AdminTokenResourceFormsEnabled      bool
+	AdminModelOperationsDetailsEnabled  bool
+	AdminModelDetailsEnabled            bool
+	AdminModelPricingEditEnabled        bool
+	AdminModelOperationsOverviewEnabled bool
+	AdminTokenDetailsEnabled            bool
+	AdminModelTokenActionsEnabled       bool
+	CredentialOrigin                    *url.URL
+	SystemProbes                        []SystemProbe
+	SecureCookies                       bool
+	SessionMaxAge                       time.Duration
 }
 
 const defaultSessionMaxAge = 30 * 24 * time.Hour
@@ -284,13 +285,14 @@ func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 		"authenticated": true,
 		"csrf_token":    session.CSRFToken,
 		"feature_flags": map[string]bool{
-			"admin_model_token_ia":           s.config.AdminModelTokenIAEnabled,
-			"admin_token_resource_forms":     s.config.AdminTokenResourceFormsEnabled,
-			"admin_model_operations_details": s.config.AdminModelOperationsDetailsEnabled,
-			"admin_model_details":            s.config.AdminModelDetailsEnabled,
-			"admin_model_pricing_edit":       s.config.AdminModelPricingEditEnabled,
-			"admin_token_details":            s.config.AdminTokenDetailsEnabled,
-			"admin_model_token_actions":      s.config.AdminModelTokenActionsEnabled,
+			"admin_model_token_ia":            s.config.AdminModelTokenIAEnabled,
+			"admin_token_resource_forms":      s.config.AdminTokenResourceFormsEnabled,
+			"admin_model_operations_details":  s.config.AdminModelOperationsDetailsEnabled,
+			"admin_model_details":             s.config.AdminModelDetailsEnabled,
+			"admin_model_pricing_edit":        s.config.AdminModelPricingEditEnabled,
+			"admin_model_operations_overview": s.config.AdminModelOperationsOverviewEnabled,
+			"admin_token_details":             s.config.AdminTokenDetailsEnabled,
+			"admin_model_token_actions":       s.config.AdminModelTokenActionsEnabled,
 		},
 		"credential_origin": credentialOriginProjection(s.config),
 	})

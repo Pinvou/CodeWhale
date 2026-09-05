@@ -391,6 +391,7 @@ services:
       PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED: ${PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED:-false}
       PORTAL_ADMIN_MODEL_DETAILS_ENABLED: ${PORTAL_ADMIN_MODEL_DETAILS_ENABLED:-false}
       PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED: ${PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED:-false}
+      PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED: ${PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED:-false}
       PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED: ${PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED:-false}
       TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64: ${TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64:-}
       SYSTEM_PROBES_JSON: '[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://mock-newapi:8080/health/ready"},{"key":"event-bus","kind":"http","url":"http://nats:8222/healthz"},{"key":"account-event-relay","kind":"relay","url":"http://account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://token-event-relay:9090"}]'

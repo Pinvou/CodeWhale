@@ -167,12 +167,17 @@ func currentCatalogVersion(ctx context.Context, database interface {
 	return version, err
 }
 
-func (r *PostgresRepository) ListCatalog(ctx context.Context) (int64, []CatalogModel, error) {
-	version, err := currentCatalogVersion(ctx, r.pool)
+type catalogQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func listCatalog(ctx context.Context, database catalogQueryer) (int64, []CatalogModel, error) {
+	version, err := currentCatalogVersion(ctx, database)
 	if err != nil || version == 0 {
 		return version, []CatalogModel{}, err
 	}
-	rows, err := r.pool.Query(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.lifecycle_status<>'REMOVED' ORDER BY e.display_name,e.model_id`, version)
+	rows, err := database.Query(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.lifecycle_status<>'REMOVED' ORDER BY e.display_name,e.model_id`, version)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -186,6 +191,10 @@ func (r *PostgresRepository) ListCatalog(ctx context.Context) (int64, []CatalogM
 		items = append(items, item)
 	}
 	return version, items, rows.Err()
+}
+
+func (r *PostgresRepository) ListCatalog(ctx context.Context) (int64, []CatalogModel, error) {
+	return listCatalog(ctx, r.pool)
 }
 
 func (r *PostgresRepository) ResolveCatalogModel(ctx context.Context, reference, conversationMode string, now time.Time) (CatalogModel, error) {
@@ -747,6 +756,17 @@ func (r *PostgresRepository) SyncCatalog(ctx context.Context, providerID, adapte
 	if err := lockCatalogPublication(ctx, tx); err != nil {
 		return 0, false, err
 	}
+	version, changed, err := r.syncCatalogTx(ctx, tx, providerID, adapterVersion, discovered, contextLength, maximumOutput, actor)
+	if err != nil {
+		return 0, false, err
+	}
+	return version, changed, tx.Commit(ctx)
+}
+
+// syncCatalogTx applies only the exact normalized provider observation passed
+// by its caller. Callers that govern a human command must acquire the catalog
+// publication lock and validate the frozen observation before entering here.
+func (r *PostgresRepository) syncCatalogTx(ctx context.Context, tx pgx.Tx, providerID, adapterVersion string, discovered []DiscoveredModel, contextLength, maximumOutput int64, actor uuid.UUID) (int64, bool, error) {
 	now := r.now()
 	current, err := currentCatalogVersion(ctx, tx)
 	if err != nil {
@@ -844,7 +864,7 @@ func (r *PostgresRepository) SyncCatalog(ctx context.Context, providerID, adapte
 		rows.Close()
 	}
 	if len(mutations) == 0 {
-		return current, false, tx.Commit(ctx)
+		return current, false, nil
 	}
 	version, err := createCatalogVersion(ctx, tx, nil, "adapter catalog synchronization", actor, now)
 	if err != nil {
@@ -872,7 +892,7 @@ func (r *PostgresRepository) SyncCatalog(ctx context.Context, providerID, adapte
 			return 0, false, err
 		}
 	}
-	return version, true, tx.Commit(ctx)
+	return version, true, nil
 }
 
 func mutationFromCatalog(item CatalogModel, available bool, missingSince *time.Time, confirmations int) catalogEntryMutation {
@@ -910,6 +930,18 @@ type CatalogSyncPreview struct {
 	Added                  int
 	Missing                int
 	ObservedAt             time.Time
+	Difference             *CatalogDifference
+}
+
+type catalogSyncObservation struct {
+	ProviderID     string                        `json:"provider_id"`
+	AdapterVersion string                        `json:"adapter_version"`
+	Models         []catalogSyncObservationModel `json:"models"`
+}
+
+type catalogSyncObservationModel struct {
+	UpstreamModelRef string `json:"upstream_model_ref"`
+	DisplayName      string `json:"display_name"`
 }
 
 func NewCatalogSynchronizer(repository CatalogRepository, adapter UpstreamClient, providerID, baseURL string, secret []byte, contextLength, maximumOutput int64, interval time.Duration) (*CatalogSynchronizer, error) {
@@ -926,15 +958,76 @@ func NewCatalogSynchronizer(repository CatalogRepository, adapter UpstreamClient
 }
 
 func (s *CatalogSynchronizer) Sync(ctx context.Context) (int64, bool, error) {
-	models, err := s.adapter.DiscoverModels(ctx, s.baseURL, s.secret)
+	preview, err := s.Preview(ctx)
 	if err != nil {
 		return 0, false, err
+	}
+	return s.SyncObserved(ctx, preview.AdapterObservedVersion)
+}
+
+// SyncObserved performs the sole write-before re-observation allowed by the
+// catalog synchronization contract. The exact normalized observation whose
+// digest is compared here is passed to the repository; it is never discovered
+// a third time between approval and persistence.
+func (s *CatalogSynchronizer) SyncObserved(ctx context.Context, expectedObservedVersion string) (int64, bool, error) {
+	models, observedVersion, err := s.discoverObservation(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(expectedObservedVersion) != 64 || strings.ToLower(expectedObservedVersion) != expectedObservedVersion || observedVersion != expectedObservedVersion {
+		return 0, false, ErrCatalogVersionConflict
 	}
 	return s.repository.SyncCatalog(ctx, s.providerID, s.adapterVersion, models, s.contextLength, s.maximumOutput, s.actor)
 }
 
-func (s *CatalogSynchronizer) Preview(ctx context.Context) (CatalogSyncPreview, error) {
+func (s *CatalogSynchronizer) discoverObservation(ctx context.Context) ([]DiscoveredModel, string, error) {
 	discovered, err := s.adapter.DiscoverModels(ctx, s.baseURL, s.secret)
+	if err != nil {
+		return nil, "", err
+	}
+	return normalizeCatalogObservation(s.providerID, s.adapterVersion, discovered)
+}
+
+func normalizeCatalogObservation(providerID, adapterVersion string, discovered []DiscoveredModel) ([]DiscoveredModel, string, error) {
+	byReference := make(map[string]string, len(discovered))
+	for _, item := range discovered {
+		reference := strings.TrimSpace(item.UpstreamModelRef)
+		if reference == "" {
+			continue
+		}
+		displayName := strings.TrimSpace(item.DisplayName)
+		if previous, exists := byReference[reference]; exists && previous != displayName {
+			return nil, "", ErrCatalogVersionConflict
+		}
+		byReference[reference] = displayName
+	}
+	normalized := make([]DiscoveredModel, 0, len(byReference))
+	for reference, displayName := range byReference {
+		normalized = append(normalized, DiscoveredModel{UpstreamModelRef: reference, DisplayName: displayName})
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		if normalized[i].UpstreamModelRef != normalized[j].UpstreamModelRef {
+			return normalized[i].UpstreamModelRef < normalized[j].UpstreamModelRef
+		}
+		return normalized[i].DisplayName < normalized[j].DisplayName
+	})
+	observedModels := make([]catalogSyncObservationModel, 0, len(normalized))
+	for _, item := range normalized {
+		observedModels = append(observedModels, catalogSyncObservationModel{
+			UpstreamModelRef: item.UpstreamModelRef,
+			DisplayName:      item.DisplayName,
+		})
+	}
+	payload, err := json.Marshal(catalogSyncObservation{ProviderID: providerID, AdapterVersion: adapterVersion, Models: observedModels})
+	if err != nil {
+		return nil, "", err
+	}
+	digest := sha256.Sum256(payload)
+	return normalized, hex.EncodeToString(digest[:]), nil
+}
+
+func (s *CatalogSynchronizer) Preview(ctx context.Context) (CatalogSyncPreview, error) {
+	discovered, observedVersion, err := s.discoverObservation(ctx)
 	if err != nil {
 		return CatalogSyncPreview{}, err
 	}
@@ -942,36 +1035,71 @@ func (s *CatalogSynchronizer) Preview(ctx context.Context) (CatalogSyncPreview, 
 	if err != nil {
 		return CatalogSyncPreview{}, err
 	}
+	return catalogPreviewFromObservation(version, current, discovered, observedVersion, s.providerID, time.Now().UTC()), nil
+}
+
+func catalogPreviewFromObservation(version int64, current []CatalogModel, discovered []DiscoveredModel, observedVersion, providerID string, observedAt time.Time) CatalogSyncPreview {
 	currentRefs := make([]string, 0, len(current))
-	currentSet := make(map[string]struct{}, len(current))
+	currentSet := make(map[string]CatalogModel, len(current))
 	for _, item := range current {
+		if strings.ToUpper(strings.TrimSpace(item.ProviderID)) != providerID || item.LifecycleStatus == "REMOVED" {
+			continue
+		}
 		key := strings.TrimSpace(item.UpstreamModelRef)
 		currentRefs = append(currentRefs, key)
-		currentSet[key] = struct{}{}
+		currentSet[key] = item
 	}
 	discoveredRefs := make([]string, 0, len(discovered))
 	discoveredSet := make(map[string]struct{}, len(discovered))
-	added := 0
+	added, modified := 0, 0
+	differenceItems := make([]CatalogDifferenceItem, 0)
 	for _, item := range discovered {
 		key := strings.TrimSpace(item.UpstreamModelRef)
+		if key == "" {
+			continue
+		}
+		if _, duplicate := discoveredSet[key]; duplicate {
+			continue
+		}
 		discoveredRefs = append(discoveredRefs, key)
 		discoveredSet[key] = struct{}{}
-		if _, exists := currentSet[key]; !exists {
+		currentItem, exists := currentSet[key]
+		if !exists {
 			added++
+			differenceItems = append(differenceItems, CatalogDifferenceItem{ChangeType: "ADDED", DisplayName: strings.TrimSpace(item.DisplayName)})
+		} else if !currentItem.SourceAvailable {
+			modified++
+			id := currentItem.ModelID
+			differenceItems = append(differenceItems, CatalogDifferenceItem{ChangeType: "MODIFIED", ModelID: &id, DisplayName: currentItem.DisplayName})
 		}
 	}
 	missing := 0
-	for key := range currentSet {
+	for key, item := range currentSet {
 		if _, exists := discoveredSet[key]; !exists {
 			missing++
+			id := item.ModelID
+			differenceItems = append(differenceItems, CatalogDifferenceItem{ChangeType: "REMOVED", ModelID: &id, DisplayName: item.DisplayName})
 		}
 	}
+	sort.Slice(differenceItems, func(i, j int) bool {
+		if differenceItems[i].ChangeType != differenceItems[j].ChangeType {
+			return differenceItems[i].ChangeType < differenceItems[j].ChangeType
+		}
+		if differenceItems[i].DisplayName != differenceItems[j].DisplayName {
+			return differenceItems[i].DisplayName < differenceItems[j].DisplayName
+		}
+		return valueUUID(differenceItems[i].ModelID) < valueUUID(differenceItems[j].ModelID)
+	})
 	sort.Strings(currentRefs)
 	sort.Strings(discoveredRefs)
-	observedDigest := sha256.Sum256([]byte(strings.Join(append([]string{s.providerID, s.adapterVersion}, discoveredRefs...), "\x00")))
-	observedVersion := hex.EncodeToString(observedDigest[:])
 	diffDigest := sha256.Sum256([]byte(strings.Join(append(append([]string{strconv.FormatInt(version, 10), observedVersion}, currentRefs...), discoveredRefs...), "\x00")))
-	return CatalogSyncPreview{CatalogVersion: version, AdapterObservedVersion: observedVersion, DiffFingerprint: hex.EncodeToString(diffDigest[:]), Added: added, Missing: missing, ObservedAt: time.Now().UTC()}, nil
+	observed := observedVersion
+	visible := differenceItems
+	if len(visible) > catalogDifferencePreviewLimit {
+		visible = visible[:catalogDifferencePreviewLimit]
+	}
+	difference := &CatalogDifference{BaselineCatalogVersion: version, TargetObservedVersion: &observed, AddedCount: int64(added), ModifiedCount: int64(modified), RemovedCount: int64(missing), TotalCount: int64(added + modified + missing), Truncated: len(differenceItems) > len(visible), Items: append([]CatalogDifferenceItem(nil), visible...)}
+	return CatalogSyncPreview{CatalogVersion: version, AdapterObservedVersion: observedVersion, DiffFingerprint: hex.EncodeToString(diffDigest[:]), Added: added, Missing: missing, ObservedAt: observedAt.UTC(), Difference: difference}
 }
 
 func (s *CatalogSynchronizer) Run(ctx context.Context) {

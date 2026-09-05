@@ -42,6 +42,7 @@ type commandPrecheckSnapshot struct {
 	EvidenceValues   []string
 	PriceDimensions  []ImpactPriceQuery
 	Blockers         []string
+	CatalogDiff      *CatalogDifference
 }
 
 type runtimeGovernedCommand struct {
@@ -181,10 +182,7 @@ func (s *Service) buildTokenCommandPrecheck(ctx context.Context, input TokenComm
 			return TokenCommandPrecheckResult{}, err
 		}
 		observedAt = preview.ObservedAt
-		snapshot = commandPrecheckSnapshot{Status: "READY", ExpectedVersions: map[string]any{
-			"expected_catalog_version": preview.CatalogVersion, "adapter_observed_version": preview.AdapterObservedVersion,
-			"catalog_diff_fingerprint": preview.DiffFingerprint,
-		}, EvidenceValues: []string{strconv.FormatInt(preview.CatalogVersion, 10), preview.AdapterObservedVersion, preview.DiffFingerprint, strconv.Itoa(preview.Added), strconv.Itoa(preview.Missing)}}
+		snapshot = catalogSyncCommandSnapshot(preview)
 	} else {
 		tx, err := repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 		if err != nil {
@@ -223,18 +221,10 @@ func (s *Service) buildTokenCommandPrecheck(ctx context.Context, input TokenComm
 			snapshot.Blockers = append(snapshot.Blockers, "PRICE_COVERAGE_MISSING")
 		}
 	}
-	expectedJSON, err := json.Marshal(snapshot.ExpectedVersions)
+	expectedJSON, fingerprint, err := commandPrecheckFingerprint(commandType, expectedType, input.TargetResourceID, input.Command, snapshot)
 	if err != nil {
 		return TokenCommandPrecheckResult{}, err
 	}
-	canonicalCommand, err := canonicalJSON(input.Command)
-	if err != nil {
-		return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
-	}
-	values := []string{commandType, expectedType, input.TargetResourceID, string(expectedJSON), string(canonicalCommand)}
-	values = append(values, snapshot.EvidenceValues...)
-	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
-	fingerprint := hex.EncodeToString(digest[:])
 	evidenceDigest := sha256.Sum256([]byte(strings.Join(snapshot.EvidenceValues, "\x00")))
 	evidenceHash := hex.EncodeToString(evidenceDigest[:])
 	result := TokenCommandPrecheckResult{
@@ -247,12 +237,35 @@ func (s *Service) buildTokenCommandPrecheck(ctx context.Context, input TokenComm
 			SnapshotSemantics: "INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS", PrecheckFingerprint: fingerprint, RequiresCASRevalidation: true,
 		}, ExpectedVersions: expectedJSON,
 	}
+	result.CatalogDiff = snapshot.CatalogDiff
 	result.PriceCoverage = priceCoverage
 	if billingObservedAt != nil {
 		observed := billingObservedAt.UTC()
 		result.BillingObservedAt = &observed
 	}
 	return result, nil
+}
+
+func catalogSyncCommandSnapshot(preview CatalogSyncPreview) commandPrecheckSnapshot {
+	return commandPrecheckSnapshot{Status: "READY", ExpectedVersions: map[string]any{
+		"expected_catalog_version": preview.CatalogVersion, "adapter_observed_version": preview.AdapterObservedVersion,
+		"catalog_diff_fingerprint": preview.DiffFingerprint,
+	}, EvidenceValues: []string{strconv.FormatInt(preview.CatalogVersion, 10), preview.AdapterObservedVersion, preview.DiffFingerprint, strconv.Itoa(preview.Added), strconv.Itoa(preview.Missing)}, CatalogDiff: preview.Difference}
+}
+
+func commandPrecheckFingerprint(commandType, resourceType, resourceID string, raw json.RawMessage, snapshot commandPrecheckSnapshot) (json.RawMessage, string, error) {
+	expectedJSON, err := json.Marshal(snapshot.ExpectedVersions)
+	if err != nil {
+		return nil, "", err
+	}
+	canonicalCommand, err := canonicalJSON(raw)
+	if err != nil {
+		return nil, "", ErrTokenCommandInvalid
+	}
+	values := []string{commandType, resourceType, resourceID, string(expectedJSON), string(canonicalCommand)}
+	values = append(values, snapshot.EvidenceValues...)
+	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
+	return expectedJSON, hex.EncodeToString(digest[:]), nil
 }
 
 func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error {

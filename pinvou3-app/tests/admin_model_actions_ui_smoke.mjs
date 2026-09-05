@@ -98,6 +98,15 @@ const impact = {
   blockers: [],
   evidence: { resource_type: 'MODEL', resource_id: modelID, current_status: 'PUBLISHED', current_version: { evidence_etag: `"impact-${'b'.repeat(64)}"`, evidence_set_sha256: 'c'.repeat(64) }, dependencies },
 };
+const catalogDiff = (targetCatalogVersion = null, targetObservedVersion = null) => ({
+  baseline_catalog_version: 7, target_catalog_version: targetCatalogVersion, target_observed_version: targetObservedVersion,
+  added_count: 1, modified_count: 1, removed_count: 1, total_count: 3, truncated: false,
+  items: [
+    { change_type: 'ADDED', model_id: targetCatalogVersion ? '0199a100-0001-7000-8000-000000000298' : null, display_name: 'New catalog model' },
+    { change_type: 'MODIFIED', model_id: modelID, display_name: 'Updated model' },
+    { change_type: 'REMOVED', model_id: '0199a100-0001-7000-8000-000000000299', display_name: 'Removed model' },
+  ],
+});
 
 function lifecycleImpact(targetLifecycle = 'DEPRECATED') {
   return {
@@ -124,6 +133,7 @@ function rollbackImpact(sourceVersion = 3) {
       inflight_request_set_fingerprint: '3'.repeat(64), policy_version: 2,
     },
     financial_snapshot: { billing_price_revision: 4, price_set_fingerprint: '9'.repeat(64), models_checked: 1, models_covered: 1, fully_covered: true, billing_as_of: '2026-09-04T12:00:00Z' },
+    catalog_diff: catalogDiff(sourceVersion, null),
   };
 }
 
@@ -138,12 +148,13 @@ function governedPrecheck(commandType, resourceType, resourceID) {
           provisioning_count: 1, ready_route_count: 1, provisioning_set_fingerprint: '8'.repeat(64),
           financial_fact_revision: 4, price_set_fingerprint: '9'.repeat(64),
         }
-    : { expected_catalog_version: 7, adapter_observed_version: 'adapter-v7', catalog_diff_fingerprint: '4'.repeat(64) };
+    : { expected_catalog_version: 7, adapter_observed_version: '5'.repeat(64), catalog_diff_fingerprint: '4'.repeat(64) };
   return {
     ...impact,
     action: commandType,
     evidence: { ...impact.evidence, resource_type: resourceType, resource_id: resourceID, current_status: 'READY' },
     expected_versions: expectedVersions,
+    ...(commandType === 'TOKEN_MODEL_CATALOG_SYNC' ? { catalog_diff: catalogDiff(null, '5'.repeat(64)) } : {}),
   };
 }
 
@@ -399,6 +410,7 @@ try {
   await page.waitForSelector('.adm-high-risk-dialog input[type="number"]');
   await page.type('.adm-high-risk-dialog input[type="number"]', '3');
   await page.type('.adm-high-risk-dialog textarea', 'rollback after complete dependency and financial review');
+  await page.waitForFunction(() => document.querySelector('.adm-catalog-diff')?.textContent.includes('New catalog model') && document.querySelector('.adm-catalog-diff')?.textContent.includes('Removed model'));
   await page.click('.adm-high-risk-dialog .adm-danger-confirm input');
   await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
   await page.click('.adm-high-risk-dialog button[type="submit"]');
@@ -413,6 +425,7 @@ try {
 
   await page.evaluate(() => [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === 'Sync model catalog').click());
   await page.waitForSelector('.adm-high-risk-dialog textarea');
+  await page.waitForFunction(() => document.querySelector('.adm-catalog-diff')?.textContent.includes('New catalog model') && document.querySelector('.adm-catalog-diff')?.textContent.includes('Missing from upstream catalog'));
   await page.type('.adm-high-risk-dialog textarea', 'synchronize the reviewed provider catalog');
   await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
   const beforeSync = (await state(page)).commandCalls.length;
@@ -420,9 +433,13 @@ try {
   await page.waitForFunction((count) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.commandCalls.length === count + 1), {}, beforeSync);
   assert.equal((await state(page)).precheckCalls.at(-1).command_type, 'TOKEN_MODEL_CATALOG_SYNC');
   assert.equal((await state(page)).commandCalls.at(-1).body.command_type, 'TOKEN_MODEL_CATALOG_SYNC');
+  const syncPrecheckCount = (await state(page)).precheckCalls.length;
   await page.waitForSelector('.adm-high-risk-dialog .adm-command-unknown');
   await page.click('.adm-high-risk-dialog button[type="submit"]');
   await page.waitForFunction(() => document.querySelector('.adm-high-risk-dialog .adm-inline-message.success'));
+  const recoveredSync = await state(page);
+  assert.equal(recoveredSync.precheckCalls.length, syncPrecheckCount, 'response recovery must not rediscover the provider catalog');
+  assert.equal(recoveredSync.commandCalls.length, beforeSync + 1, 'response recovery must not submit a second catalog command');
   await page.click('.adm-high-risk-dialog footer button:first-child');
   await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
 

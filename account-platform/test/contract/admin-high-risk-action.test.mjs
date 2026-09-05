@@ -89,6 +89,7 @@ test('double submit dispatches once and unknown outcomes never repeat a write', 
 test('only exact status and code pairs prove zero write; 504 is always unknown', () => {
   const command = prepareHighRiskCommand(null, { reason: 'validated request' }, () => '00000000-0000-4000-8000-000000000003');
   assert.equal(classifyHighRiskFailure(command, { status: 400, code: 'INVALID_REASON' }).provenNoWrite, true);
+  assert.equal(classifyHighRiskFailure(command, { status: 409, code: 'COMMAND_PRECHECK_CHANGED' }).provenNoWrite, true);
   assert.equal(classifyHighRiskFailure(command, { status: 409, code: 'INTERNAL_ERROR' }).unknown, true);
   assert.equal(classifyHighRiskFailure(command, { status: 504, code: 'PERMISSION_DENIED' }).unknown, true);
   assert.equal(classifyHighRiskFailure(command, new TypeError('fetch failed')).unknown, true);

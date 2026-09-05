@@ -4,6 +4,7 @@ import { planAdminModelTokenOperationRequests } from './admin-model-token-state.
 import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.jsx';
 import { AdminTokenResourcesWorkspace } from './AdminTokenResourcesWorkspace.jsx';
 import { AdminModelOperationsWorkspace } from './AdminModelOperationsWorkspace.jsx';
+import { AdminModelOperationsOverview } from './AdminModelOperationsOverview.jsx';
 import { AdminModelDetailWorkspace } from './AdminModelDetailWorkspace.jsx';
 import { AdminTokenAccountDetailWorkspace } from './AdminTokenAccountDetailWorkspace.jsx';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
@@ -102,7 +103,7 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
   );
 }
 
-export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelDetailsEnabled = false, modelPricingEditEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
+export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelOperationsOverviewEnabled = false, modelDetailsEnabled = false, modelPricingEditEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
   const modelTokenCopy = copy.modelToken;
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
@@ -111,6 +112,8 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   const operationRequests = useMemo(() => planAdminModelTokenOperationRequests(permissions, client), [permissions, client]);
   const modelID = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('model_id') || '', [routeVersion]);
 	const tokenAccountID = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('token_account_id') || '', [routeVersion]);
+  const operationDetailOpen = useMemo(() => { const query = new URLSearchParams(globalThis.location?.search || ''); return Boolean(query.get('provisioning_id') || query.get('usage_request_id')); }, [routeVersion]);
+  const canReadOperationsOverview = modelOperationsOverviewEnabled && ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'].every((permission) => granted.has(permission));
   const onQueryChange = (source, query, mode = 'push') => onRouteChange(adminModelTokenQueryUpdates(source, query), mode);
   const notice = routeNotice === 'invalid' ? modelTokenCopy.invalidLink : routeNotice === 'conflict' ? modelTokenCopy.conflictingDetail : '';
   const moveOperationsTab = (event) => {
@@ -126,6 +129,7 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   return <>
     {notice && <div className="adm-inline-message info" role="status">{notice}</div>}
     {!modelTokenActionsEnabled && <div className="adm-inline-message info" role="status">{modelTokenCopy.actionsReadOnly}</div>}
+    {canReadOperationsOverview && ((section === 'models' && !modelID && modelTabs.tab === 'directory') || (section === 'modelOperations' && !operationDetailOpen)) && <AdminModelOperationsOverview client={client} copy={modelTokenCopy} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} />}
     {section === 'models' && modelDetailsEnabled && modelID && granted.has('platform.models.read') && <AdminModelDetailWorkspace modelID={modelID} client={client} copy={modelTokenCopy} pricingCopy={copy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} pricingEditEnabled={modelPricingEditEnabled} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} />}
     {section === 'models' && (!modelDetailsEnabled || !modelID) && <>
       <div className="adm-tabs adm-model-tabs" role="tablist" aria-label={modelTokenCopy.modelViews} onKeyDown={moveOperationsTab}>

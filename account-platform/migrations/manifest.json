@@ -1288,6 +1288,16 @@
         "file": "000027_model_lifecycle_plans.up.sql",
         "version": 27,
         "sha256": "f2d3ae85f7bd50d1599df649f1a51e667e43560ecc4076e3338571b9ab7480de"
+      },
+      {
+        "file": "000028_operations_overview_indexes.down.sql",
+        "version": 28,
+        "sha256": "38e3222d53a4f0305b8d05f2c110e01aeb9120b0b2ae359af1619b34d8a6ae44"
+      },
+      {
+        "file": "000028_operations_overview_indexes.up.sql",
+        "version": 28,
+        "sha256": "36020c29cdcac4f5893cfc0da0b8b12949d0d9b8f7a3cfa955cfb589681b59f9"
       }
     ]
   }

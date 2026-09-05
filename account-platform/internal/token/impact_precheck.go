@@ -71,6 +71,27 @@ type ImpactLocalEvidence struct {
 	CatalogDiffFingerprint       string                  `json:"-"`
 	CredentialFingerprint        string                  `json:"-"`
 	ReplacementCredentialVersion *int                    `json:"-"`
+	CatalogDiff                  *CatalogDifference      `json:"-"`
+}
+
+const catalogDifferencePreviewLimit = 20
+
+type CatalogDifferenceItem struct {
+	ChangeType  string     `json:"change_type"`
+	ModelID     *uuid.UUID `json:"model_id"`
+	DisplayName string     `json:"display_name"`
+}
+
+type CatalogDifference struct {
+	BaselineCatalogVersion int64                   `json:"baseline_catalog_version"`
+	TargetCatalogVersion   *int64                  `json:"target_catalog_version"`
+	TargetObservedVersion  *string                 `json:"target_observed_version"`
+	AddedCount             int64                   `json:"added_count"`
+	ModifiedCount          int64                   `json:"modified_count"`
+	RemovedCount           int64                   `json:"removed_count"`
+	TotalCount             int64                   `json:"total_count"`
+	Truncated              bool                    `json:"truncated"`
+	Items                  []CatalogDifferenceItem `json:"items"`
 }
 
 type ImpactPriceSummary struct {
@@ -107,6 +128,7 @@ type ImpactPrecheckResult struct {
 	RequiresCASRevalidation  bool                `json:"requires_cas_revalidation"`
 	CriticalResourceVersions map[string]any      `json:"critical_resource_versions,omitempty"`
 	FinancialSnapshot        map[string]any      `json:"financial_snapshot,omitempty"`
+	CatalogDiff              *CatalogDifference  `json:"catalog_diff,omitempty"`
 }
 
 type ImpactPrecheckRepository interface {
@@ -275,7 +297,7 @@ func (s *Service) adminCatalogRollbackImpact(w http.ResponseWriter, r *http.Requ
 	if evidence.Dependencies.InflightRequests > 0 {
 		blockers = append(blockers, "INFLIGHT_REQUESTS_PRESENT")
 	}
-	result := ImpactPrecheckResult{Action: "MODEL_CATALOG_ROLLBACK", Evidence: evidence, PriceCoverage: &price, Blockers: blockers}
+	result := ImpactPrecheckResult{Action: "MODEL_CATALOG_ROLLBACK", Evidence: evidence, PriceCoverage: &price, Blockers: blockers, CatalogDiff: evidence.CatalogDiff}
 	catalogVersion := int64(0)
 	if evidence.CurrentVersion.CatalogVersion != nil {
 		catalogVersion = *evidence.CurrentVersion.CatalogVersion
@@ -747,6 +769,10 @@ func (r *PostgresRepository) CatalogRollbackImpact(ctx context.Context, sourceVe
 	if err != nil {
 		return ImpactLocalEvidence{}, err
 	}
+	evidence.CatalogDiff, err = catalogRollbackDifference(ctx, tx, current, sourceVersion)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
 	evidence.RouteSetFingerprint, err = impactRowsFingerprint(ctx, tx, `SELECT jsonb_build_array(route.id,route.model_id,route.protocol_version_id,route.route_version,route.route_generation,route.reference_status,route.health_status)::text FROM routing_policies route WHERE route.model_id=ANY($1::uuid[]) ORDER BY route.id`, ids)
 	if err != nil {
 		return ImpactLocalEvidence{}, err
@@ -761,6 +787,50 @@ func (r *PostgresRepository) CatalogRollbackImpact(ctx context.Context, sourceVe
 	}
 	evidence.CurrentVersion.EvidenceETag = localImpactETag(evidence)
 	return evidence, commitReadOnly(ctx, tx)
+}
+
+func catalogRollbackDifference(ctx context.Context, tx pgx.Tx, currentVersion, sourceVersion int64) (*CatalogDifference, error) {
+	rows, err := tx.Query(ctx, `WITH current_entries AS (
+		SELECT * FROM model_catalog_entries WHERE catalog_version=$1 AND lifecycle_status<>'REMOVED'
+	), target_entries AS (
+		SELECT source.* FROM model_catalog_entries source
+		 WHERE source.catalog_version=$2 AND source.lifecycle_status<>'REMOVED'
+		   AND NOT EXISTS (SELECT 1 FROM model_catalog_entries removed WHERE removed.catalog_version=$1 AND removed.model_id=source.model_id AND removed.lifecycle_status='REMOVED')
+	), changed AS (
+		SELECT COALESCE(current_entries.model_id,target_entries.model_id) model_id,
+		       COALESCE(target_entries.display_name,current_entries.display_name,'') display_name,
+		       CASE WHEN current_entries.model_id IS NULL THEN 'ADDED' WHEN target_entries.model_id IS NULL THEN 'REMOVED' ELSE 'MODIFIED' END change_type
+		  FROM current_entries FULL JOIN target_entries USING(model_id)
+		 WHERE current_entries.model_id IS NULL OR target_entries.model_id IS NULL OR
+		       ROW(current_entries.display_name,current_entries.description,current_entries.aliases,current_entries.lifecycle_status,current_entries.model_capability_version_id,current_entries.protocol_definition_id,current_entries.source_available,current_entries.source_missing_since,current_entries.source_missing_confirmations,current_entries.deprecation_effective_at,current_entries.replacement_model_id,current_entries.new_session_cutoff_at,current_entries.continuation_cutoff_at,current_entries.force_cancel_inflight)
+		       IS DISTINCT FROM
+		       ROW(target_entries.display_name,target_entries.description,target_entries.aliases,target_entries.lifecycle_status,target_entries.model_capability_version_id,target_entries.protocol_definition_id,target_entries.source_available,target_entries.source_missing_since,target_entries.source_missing_confirmations,target_entries.deprecation_effective_at,target_entries.replacement_model_id,target_entries.new_session_cutoff_at,target_entries.continuation_cutoff_at,target_entries.force_cancel_inflight)
+	), ranked AS (
+		SELECT *,count(*) OVER() total_count,count(*) FILTER(WHERE change_type='ADDED') OVER() added_count,count(*) FILTER(WHERE change_type='MODIFIED') OVER() modified_count,count(*) FILTER(WHERE change_type='REMOVED') OVER() removed_count
+		FROM changed
+	)
+	SELECT model_id,display_name,change_type,total_count,added_count,modified_count,removed_count
+	  FROM ranked ORDER BY change_type,lower(display_name),model_id LIMIT $3`, currentVersion, sourceVersion, catalogDifferencePreviewLimit+1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	target := sourceVersion
+	result := &CatalogDifference{BaselineCatalogVersion: currentVersion, TargetCatalogVersion: &target, Items: []CatalogDifferenceItem{}}
+	for rows.Next() {
+		var item CatalogDifferenceItem
+		if err := rows.Scan(&item.ModelID, &item.DisplayName, &item.ChangeType, &result.TotalCount, &result.AddedCount, &result.ModifiedCount, &result.RemovedCount); err != nil {
+			return nil, err
+		}
+		if len(result.Items) < catalogDifferencePreviewLimit {
+			result.Items = append(result.Items, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result.Truncated = result.TotalCount > int64(len(result.Items))
+	return result, nil
 }
 
 func modelImpactInTx(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replacementID *uuid.UUID) (ImpactLocalEvidence, error) {

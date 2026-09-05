@@ -45,7 +45,7 @@ const adminModelTokenQueryParameters = Object.freeze({
 
 const adminModelTokenPageParameters = Object.freeze([
   'model_tab', 'model_id', 'model_detail_tab', 'model_price_manage', 'model_price_return', 'token_account_id', 'token_detail_tab',
-  'operations_tab', 'provisioning_id', 'usage_request_id',
+  'operations_tab', 'provisioning_id', 'usage_request_id', 'model_operations_window',
 ]);
 const adminModelTokenDetailParameters = Object.freeze({
   model: Object.freeze(['model_id', 'model_detail_tab', 'model_price_manage', 'model_price_return', ...Object.values(adminModelTokenQueryParameters.modelAudit), ...Object.values(adminModelTokenQueryParameters.modelHistory), ...Object.values(adminModelTokenQueryParameters.modelProvisionings), ...Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), ...Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates)]),
@@ -100,6 +100,15 @@ export function adminTokenDetailsGateEnabled(session = {}) {
 
 export function adminModelTokenActionsGateEnabled(session = {}) {
   return session?.feature_flags?.admin_model_token_actions === true;
+}
+
+export function adminModelOperationsOverviewGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_model_operations_overview === true;
+}
+
+export function readAdminModelOperationsWindow(locationLike = globalThis.location) {
+  const value = new URLSearchParams(String(locationLike?.search || '')).get('model_operations_window') || '24h';
+  return ['24h', '7d', '30d'].includes(value) ? value : '24h';
 }
 
 export function readAdminModelTokenQuery(source, locationLike = globalThis.location) {
@@ -250,6 +259,13 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
     if (modelTabs.tab !== 'directory') clearParameters(adminModelTokenDetailParameters.model, updates);
     if (options.modelDetailsEnabled !== true) clearParameters(adminModelTokenDetailParameters.model, updates);
   }
+	if (permissions !== null && adminModelTokenSections.includes(requested)) {
+		const canReadOverview = options.modelOperationsOverviewEnabled === true
+			&& ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'].every((permission) => permissions.includes(permission));
+		const overviewWindow = search.get('model_operations_window');
+		if (!canReadOverview && overviewWindow !== null) updates.model_operations_window = null;
+		else if (canReadOverview && overviewWindow !== null && !['24h', '7d', '30d'].includes(overviewWindow)) updates.model_operations_window = '24h';
+	}
   if (permissions !== null && requested === 'models' && search.get('model_id') && updates.model_id !== null) {
     const detailTab = search.get('model_detail_tab') || 'overview';
     const allowedTabs = new Set(['overview', 'capabilities', 'lifecycle']);

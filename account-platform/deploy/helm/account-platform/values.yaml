@@ -40,6 +40,7 @@ portal:
   adminModelOperationsDetailsEnabled: false
   adminModelDetailsEnabled: false
   adminModelPricingEditEnabled: false
+  adminModelOperationsOverviewEnabled: false
   adminModelTokenActionsEnabled: false
 
 replicas:

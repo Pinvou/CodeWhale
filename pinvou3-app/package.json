@@ -123,6 +123,7 @@
     "test:admin-model-operations-ui": "node tests/admin_model_operations_ui_smoke.mjs",
     "test:admin-model-detail-ui": "node tests/admin_model_detail_ui_smoke.mjs",
     "test:admin-model-pricing-ui": "node tests/admin_model_pricing_ui_smoke.mjs",
+    "test:admin-model-operations-overview-ui": "node tests/admin_model_operations_overview_ui_smoke.mjs",
     "test:admin-token-account-detail-ui": "node tests/admin_token_account_detail_ui_gate.mjs",
     "test:browser-smoke": "node ../scripts/run-frontend-smokes.mjs --full",
     "test:webui": "npm run build:web && node ../remote-control-relay/test/web-ui.smoke.cjs",

@@ -281,14 +281,8 @@ func (s *Service) adminRollbackCatalog(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminSyncCatalog(w http.ResponseWriter, r *http.Request) {
-	if s.catalogSync == nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_CATALOG_SYNC_UNAVAILABLE", "model catalog synchronization is not configured", httpserver.RequestID(r.Context()))
-		return
-	}
-	version, changed, err := s.catalogSync.Sync(r.Context())
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"catalog_version": version, "changed": changed})
+	// The historical direct endpoint cannot bind the frozen command precheck to
+	// the publication transaction. Keep it fail-closed during PRE_ACTIVATION;
+	// APT-138 activates only /commands with the governed sync adapter.
+	api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "submit catalog synchronization through the governed command API after activation", httpserver.RequestID(r.Context()))
 }

@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，125 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，5 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，1 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，126 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，5 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -159,7 +159,7 @@
 | APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | DONE |
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | DONE |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | DONE |
-| APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | IN_REVIEW |
+| APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | DONE |
 | APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138 | CODE+ENV | PENDING |
 | APT-138 | 十九项 Token 命令一致性总验收与原子激活 | ADM-64 | APT-122–APT-136 | CODE | PENDING |
 
@@ -398,13 +398,15 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 ### APT-136 目录差异与运行健康趋势
 
 - **目标/范围**：主目标 `UI-57`。修改 Token 模型/运行聚合、目录同步 observation 绑定、具名索引迁移 `000028_operations_overview_indexes`、OpenAPI，Portal 模型/运行概览、目录同步/回滚差异预览、趋势卡片/图表、BFF 映射、i18n/CSS 和可视化/性能合同测试；复用 APT-126 聚合、APT-124 预检与 APT-131 结构化动作，不新建第二份指标事实。
-- **状态/回滚**：`REOPENED_REMEDIATION / IN_REVIEW`。展示已发布/草稿模型、目录版本差异、异常路由、失败 Provisioning、待核对用量及明确时间窗的趋势；各卡片独立 loading/error/refresh，不扫描分页列表计算指标。同步/回滚经 APT-131 结构化动作，回滚命令走 APT-123 rollback v2。关闭二期 overview gate 即隐藏增强卡片。up 仅增加 `usage_requests(started_at,id)` 和谓词精确为 `TOKEN / USAGE_RECONCILIATION_REVIEW / USAGE_REQUEST` 的 `manual_review_cases(created_at,id)` 部分索引（包含核对所需稳定投影列）；down 只删索引、不删事实。APT-138 activation 迁移因此顺延为 `000029`。
+- **状态/回滚**：`DONE`。展示已发布/草稿模型、目录版本差异、异常路由、失败 Provisioning、待核对用量及明确时间窗的趋势；各卡片独立 loading/error/refresh，不扫描分页列表计算指标。同步/回滚经 APT-131 结构化动作，回滚命令走 APT-123 rollback v2。关闭二期 overview gate 即隐藏增强卡片。up 仅增加 `usage_requests(started_at,id)` 和谓词精确为 `TOKEN / USAGE_RECONCILIATION_REVIEW / USAGE_REQUEST` 的 `manual_review_cases(created_at,id)` 部分索引（包含核对所需稳定投影列）；down 只删索引、不删事实。APT-138 activation 迁移因此顺延为 `000029`。
 - **窗口/趋势验收**：客户端只传规范枚举 `window=24h|7d|30d`；Token 用同一只读事务的 `transaction_timestamp()` 派生并响应权威 UTC `[from,to)`，Portal 展示与下穿只复用该响应，不使用浏览器时钟。`24h` 必须为 24 个 3,600 秒桶，`7d/30d` 必须为 7/30 个 86,400 秒桶；首尾、相邻边界、点数、非负计数和总量均闭合，末桶精确结束于 `to`。全零显示无数据，不画最小高度伪柱。覆盖浏览器严重 clock skew、非法窗口、局部失败、旧响应隔离、单位/时区与 320px/200%。
 - **同步验收**：差异覆盖新增/修改/删除、版本选择和空差异。同步写入复用预览的同一 observation，或在写前只重取一次并对 Provider/Adapter/实际消费模型字段的固定全序 fingerprint 做精确匹配后直接消费该集合；两次源结果变化必须在任何目录/命令/审计/Outbox 持久化前失败关闭。提交响应未知仅查询原引用，禁止再次发现或重发。
 - **性能验收**：CI 使用 PostgreSQL 17 Alpine、2 vCPU、4 GiB、`shared_buffers=512MB`、`work_mem=16MB` 和确定性种子：1,000,000 条用量（30 日内/第31～180日为 700,000/300,000，85%终态、10%待核对未停止、5%待核对已停止）及 100,000 条案件（60,000 精确 Token 用量核对、20,000 生产合法其他 case、20,000 生产合法其他 resource，精确案件70%在30日内）。性能测试不得删除或放宽生产 `domain='TOKEN'` CHECK；固定分布断言和 `VACUUM (ANALYZE)` 在 seed 阶段完成。保留卷重启容器后，measure 进程第一次事实表访问必须直接执行生产 30 日单 SQL 的冷缓存 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，不得预先 count/抽样；随后紧接三次相同 SQL作为暖缓存，每次 `Execution Time <= 3s`。计划必须为窗口用量恰一次新增 started_at 索引扫描、点时待核对恰一次既有 `usage_requests_pending_idx` 扫描、窗口精确案件恰一次新增部分索引扫描；案件权威存在性仅允许主键等值 membership probe。禁止重复扫描同一逻辑集合、`Seq Scan`、逐桶相关子查询或客户端分页聚合。CI 命名用例必须 no-SKIP，并验证固定数据分布、buffer、索引名、迁移 up/down 和索引谓词/稳定 tie。
 - **不包含**：不新建指标事实/仓库，不改变健康探测状态机、核对处置或审批策略，不激活 APT-138；同步算法只增加 observation 的冻结/写前一致性边界，不改变目录合并业务语义。
 
 > APT-136 首轮整改记录（2026-09-05）：身份 B 代码复审为 `NEEDS_CHANGES`。当前实现已提供目录差异、运行概览与趋势壳，但同步预览/写入 observation 未绑定、30 日查询缺少专用索引及生产量级执行计划证据、窗口仍受浏览器时钟影响、趋势点数/桶宽和全零图形未闭合。本文先冻结修复所有权与验收，代码仍处 `IN_REVIEW`，不得提前标 `DONE` 或写入通过证据。
+
+> 实现与代码审核记录（2026-09-05）：`DONE`；身份 B 第三轮独立代码审核 `PASS`。同步命令以唯一 Provider 重观测、publication lock 下的目录基线/差异重算及事务 activation state/epoch guard 绑定同一 checked slice，任何 observation、目录或激活 epoch 漂移均在目录、命令、审计、outbox/result 写入前失败关闭；旧同步直写入口保持关闭，生产未注入 APT-138 reader/guard/consumer。运行概览仅接受 `24h/7d/30d`，以数据库权威时间生成闭合趋势桶；具名 `000028` 索引、生产 schema 的 1,000,000/100,000 冷一暖三性能门禁、目录差异、局部状态、URL 下穿、三语、320px/200% 与两套生产 Chromium smoke 已闭合。Go 全量、定向 Node、OpenAPI、迁移清单、任务/i18n/架构、ESLint、Portal build 和两套 smoke 连续五次均通过；本地未配置 Token/性能 PostgreSQL URL，具名用例明确 `SKIP`，PR 工作流逐项拒绝 SKIP。APT-137 灰度和 APT-138 activation/consumer 未提前实现。
 
 ### APT-138 十九项命令一致性总验收与原子激活
 

@@ -33,6 +33,9 @@ test('Token overview and Billing price projection remain separate read contracts
   const tokenPath = contract.paths['/token/admin/v1/operations-overview']?.get;
   const billingPath = contract.paths['/billing/admin/v1/models/{model_id}/price-projection']?.get;
   assert.ok(tokenPath && billingPath);
+  assert.deepEqual(tokenPath.parameters.map(({ name, required, schema }) => ({ name, required, schema })), [
+    { name: 'window', required: true, schema: { type: 'string', enum: ['24h', '7d', '30d'] } },
+  ]);
   for (const status of ['200', '400', '403', '503', '504']) {
     assert.ok(tokenPath.responses[status], `Token overview lacks ${status}`);
     assert.ok(billingPath.responses[status], `Billing projection lacks ${status}`);
@@ -47,11 +50,11 @@ test('Token overview and Billing price projection remain separate read contracts
   assert.doesNotMatch(await read('internal/billing/model_price_projection.go'), /model_catalog_entries|routing_policies|route_provisionings|usage_requests|TOKEN_GATEWAY/);
 });
 
-test('Token overview schema closes metrics, UTC window and denominator semantics', async () => {
+test('Token overview schema closes metrics, UTC window, trends and denominator semantics', async () => {
   const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
   const schema = contract.components.schemas.TokenOperationsOverview;
   assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.required, ['as_of', 'window', 'metrics']);
+  assert.deepEqual(schema.required, ['as_of', 'window', 'metrics', 'trend']);
   assert.equal(schema.properties.metrics.minItems, 11);
   assert.equal(schema.properties.metrics.maxItems, 11);
   assert.equal(contract.components.schemas.TokenOperationsOverviewWindow.properties.timezone.const, 'UTC');
@@ -59,9 +62,15 @@ test('Token overview schema closes metrics, UTC window and denominator semantics
   assert.equal(metric.additionalProperties, false);
   assert.deepEqual(metric.properties.aggregation.enum, ['POINT_IN_TIME', 'WINDOW']);
   assert.deepEqual(metric.properties.denominator_key.enum, ['stable_route_count']);
+  const trend = contract.components.schemas.TokenOperationsOverviewTrend;
+  assert.equal(trend.additionalProperties, false);
+  assert.deepEqual(trend.properties.bucket_seconds.enum, [3600, 86400]);
+  assert.equal(trend.properties.points.maxItems, 30);
   const implementation = await read('internal/token/operations_overview.go');
   assert.match(implementation, /transaction_timestamp\(\) AS as_of/);
-  assert.match(implementation, /request\.started_at>=bounds\.window_from AND request\.started_at<bounds\.window_to/);
+  assert.match(implementation, /request\.started_at>=bucket_config\.window_from AND request\.started_at<bucket_config\.window_to/);
+  assert.match(implementation, /review\.domain='TOKEN' AND review\.case_type='USAGE_RECONCILIATION_REVIEW' AND review\.resource_type='USAGE_REQUEST'/);
+  assert.match(implementation, /EXISTS\(SELECT 1 FROM usage_requests request WHERE request\.id=review\.resource_id\)/);
   assert.doesNotMatch(implementation, /AdminCatalogModels|AdminProvisionings|AdminUsageRequests/);
 });
 
@@ -116,9 +125,45 @@ test('actual Token overview response validates and rejects leaked identifiers', 
       included_statuses: ['PUBLISHED'],
       ...(key === 'healthy_route_count' || key === 'route_attention_count' ? { denominator_key: 'stable_route_count' } : {}),
     })),
+    trend: {
+      bucket_seconds: 3600,
+      points: Array.from({ length: 24 }, (_, index) => ({
+        from: new Date(Date.parse('2026-09-03T08:00:00Z') + index * 3600000).toISOString(),
+        to: new Date(Date.parse('2026-09-03T08:00:00Z') + (index + 1) * 3600000).toISOString(),
+        usage_request_count: 0,
+        reconciliation_attention_count: 0,
+      })),
+    },
   };
   assert.equal(validate(actual), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...actual, token_account_id: 'secret' }), false);
+  assert.equal(validate({ ...actual, trend: { ...actual.trend, worker_id: 'secret' } }), false);
+});
+
+test('catalog difference is a closed redacted top-N projection', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const validate = validator(contract, 'CatalogDifference');
+  const actual = {
+    baseline_catalog_version: 9,
+    target_catalog_version: 8,
+    target_observed_version: null,
+    added_count: 1,
+    modified_count: 1,
+    removed_count: 1,
+    total_count: 3,
+    truncated: false,
+    items: [
+      { change_type: 'ADDED', model_id: null, display_name: 'New model' },
+      { change_type: 'MODIFIED', model_id: '00000000-0000-7000-8000-000000000001', display_name: 'Changed model' },
+      { change_type: 'REMOVED', model_id: '00000000-0000-7000-8000-000000000002', display_name: 'Removed model' },
+    ],
+  };
+  assert.equal(validate(actual), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...actual, target_catalog_version: null, target_observed_version: 'a'.repeat(64), added_count: 1, modified_count: 0, removed_count: 0, total_count: 1, items: [{ ...actual.items[0], model_id: null }] }), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...actual, upstream_model_ref: 'provider-secret-name' }), false);
+  assert.equal(validate({ ...actual, items: [{ ...actual.items[0], provider_id: 'private-provider' }] }), false);
+  assert.equal(validate({ ...actual, target_catalog_version: null }), false, 'exactly one target discriminator is required');
+  assert.equal(validate({ ...actual, target_observed_version: 'not-a-fingerprint' }), false, 'provider observations are opaque fingerprints');
 });
 
 test('authorization inventory registers the composite Token read and Billing keeps an inline exact read', async () => {
@@ -129,4 +174,73 @@ test('authorization inventory registers the composite Token read and Billing kee
   const token = inventory.http_policies.find(item => item.source.endsWith('/token/service.go') && item.path === '/operations-overview');
   assert.deepEqual(token.permissions, ['platform.models.read', 'platform.tokens.read', 'platform.usage.read']);
   assert.match(billingService, /admin\.GET\("\/models\/:model_id\/price-projection", s\.authorizer\.Require\("platform\.pricing\.read"\)/);
+});
+
+test('operations overview rollout gate is default-off in Portal and deployment manifests', async () => {
+  const [portalMain, compose, values, deployment] = await Promise.all([
+    read('cmd/token-portal/main.go'),
+    read('deploy/compose/compose.yaml'),
+    read('deploy/helm/account-platform/values.yaml'),
+    read('deploy/helm/account-platform/templates/app-deployments.yaml'),
+  ]);
+  assert.match(portalMain, /adminModelOperationsOverviewEnabled := false[\s\S]*PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED[\s\S]*strconv\.ParseBool/);
+  assert.match(compose, /PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED:-false/);
+  assert.equal(YAML.parse(values).portal.adminModelOperationsOverviewEnabled, false);
+  assert.match(deployment, /PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED[\s\S]*adminModelOperationsOverviewEnabled/);
+});
+
+test('operations overview performance gate freezes indexes, cold restart and no-SKIP execution', async () => {
+  const [up, down, workflow, performance] = await Promise.all([
+    read('migrations/token/000028_operations_overview_indexes.up.sql'),
+    read('migrations/token/000028_operations_overview_indexes.down.sql'),
+    read('../.github/workflows/pr-check.yml'),
+    read('internal/token/operations_overview_performance_integration_test.go'),
+  ]);
+  assert.match(up, /usage_requests_operations_overview_started_idx[\s\S]*usage_requests\(started_at, id\)/);
+  assert.match(up, /manual_review_cases_token_usage_overview_created_idx[\s\S]*domain\s*=\s*'TOKEN'[\s\S]*case_type\s*=\s*'USAGE_RECONCILIATION_REVIEW'[\s\S]*resource_type\s*=\s*'USAGE_REQUEST'/);
+  assert.match(down, /DROP INDEX IF EXISTS usage_requests_operations_overview_started_idx/);
+  assert.match(workflow, /PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_PHASE=seed[\s\S]*docker restart[\s\S]*PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_PHASE=measure/);
+  assert.match(workflow, /! grep -F -- '--- SKIP: TestTokenOperationsOverviewPerformancePostgresIntegration'/);
+  assert.match(performance, /EXPLAIN \(ANALYZE, BUFFERS, FORMAT JSON\)/);
+  assert.match(performance, /executionMS > 3000/);
+  assert.doesNotMatch(performance, /DROP CONSTRAINT manual_review_cases_domain_check/);
+  assert.match(performance, /if phase == "measure"[\s\S]*measureTokenOverviewPlans\(t, ctx, connection\)[\s\S]*return/);
+  assert.match(performance, /assertTokenOverviewPerformanceSeed\(t, ctx, connection\)[\s\S]*VACUUM \(ANALYZE\)/);
+  assert.match(performance, /usageWindow != 700000[\s\S]*usageHistorical != 300000[\s\S]*committed != 850000[\s\S]*pending != 100000[\s\S]*review != 50000/);
+  assert.match(performance, /relevantReview != 60000[\s\S]*decoyReview != 40000[\s\S]*reviewWindow != 42000/);
+  assert.match(performance, /otherDomain != 0[\s\S]*otherCase != 20000[\s\S]*otherResource != 20000[\s\S]*overlappingDecoy != 0/);
+  assert.match(performance, /bufferFields == 0 \|\| bufferEvidence <= 0/);
+});
+
+test('catalog synchronization binds the governed command to one checked observation and transaction', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const validateEnvelope = validator(contract, 'TokenCommandEnvelope');
+  const validateResult = validator(contract, 'TokenCommandResult');
+  const envelope = {
+    command_type: 'TOKEN_MODEL_CATALOG_SYNC', reason: 'synchronize the reviewed provider catalog',
+    target_resource_type: 'MODEL_CATALOG', target_resource_id: 'CURRENT', command: {},
+    precheck_fingerprint: '1'.repeat(64),
+    expected_versions: { expected_catalog_version: 7, adapter_observed_version: '2'.repeat(64), catalog_diff_fingerprint: '3'.repeat(64), request_fingerprint: '4'.repeat(64) },
+  };
+  assert.equal(validateEnvelope(envelope), true, JSON.stringify(validateEnvelope.errors));
+  assert.equal(validateEnvelope({ ...envelope, command: { rediscover: true } }), false);
+  assert.equal(validateEnvelope({ ...envelope, expected_versions: { ...envelope.expected_versions, extra: 1 } }), false);
+  const result = {
+    command_reference: '0199a136-0001-7000-8000-000000000001', command_type: 'TOKEN_MODEL_CATALOG_SYNC', policy_version: 1,
+    actor_user_id: '0199a136-0001-7000-8000-000000000002', actor_permission: 'platform.models.sync', authorization_version: 7,
+    idempotency_fingerprint: '5'.repeat(64), target_resource_type: 'MODEL_CATALOG', target_resource_id: 'CURRENT', status: 'SUCCEEDED',
+    redacted_result: { catalog_version: 8, changed: true }, audit_request_id: 'catalog-sync-test', created_at: '2026-09-05T00:00:00Z', completed_at: '2026-09-05T00:00:01Z',
+  };
+  assert.equal(validateResult(result), true, JSON.stringify(validateResult.errors));
+  assert.equal(validateResult({ ...result, redacted_result: { ...result.redacted_result, provider_response: 'private' } }), false);
+  const [governance, catalog, legacy, integration] = await Promise.all([
+    read('internal/token/catalog_sync_governance.go'), read('internal/token/catalog.go'), read('internal/token/catalog_http.go'),
+    read('internal/token/catalog_sync_observation_integration_test.go'),
+  ]);
+  assert.match(governance, /lockCatalogPublication[\s\S]*catalogPreviewFromObservation[\s\S]*tokenCommandExpectedVersionsMatch[\s\S]*recheckTokenRouteActivation[\s\S]*syncCatalogTx[\s\S]*completeRuntimeTokenCommandTx/);
+  assert.match(catalog, /syncCatalogTx[\s\S]*exact normalized provider observation/);
+  assert.doesNotMatch(legacy, /catalogSync\.Sync\(r\.Context\(\)\)/);
+  assert.match(integration, /SAFE_ROLLBACK[\s\S]*TOKEN_COMMAND_GOVERNANCE_INACTIVE[\s\S]*assertCatalogSyncFactCounts/);
+  assert.match(integration, /Epoch-only drift[\s\S]*TOKEN_COMMAND_GOVERNANCE_INACTIVE[\s\S]*assertCatalogSyncFactCounts/);
+  assert.equal(contract.paths['/token/admin/v1/models:sync'], undefined);
 });

@@ -78,6 +78,13 @@ func main() {
 			log.Fatal("PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED must be a boolean")
 		}
 	}
+	adminModelOperationsOverviewEnabled := false
+	if raw := strings.TrimSpace(os.Getenv("PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED")); raw != "" {
+		adminModelOperationsOverviewEnabled, err = strconv.ParseBool(raw)
+		if err != nil {
+			log.Fatal("PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED must be a boolean")
+		}
+	}
 	adminTokenDetailsEnabled := false
 	if raw := strings.TrimSpace(os.Getenv("PORTAL_ADMIN_TOKEN_DETAILS_ENABLED")); raw != "" {
 		adminTokenDetailsEnabled, err = strconv.ParseBool(raw)
@@ -97,25 +104,26 @@ func main() {
 		}
 	}
 	service, err := portal.NewService(portal.Config{
-		PublicURL:                          publicURL,
-		AuthorizationURL:                   mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
-		TokenURL:                           mustURL("PORTAL_OIDC_TOKEN_URL"),
-		ClientID:                           os.Getenv("PORTAL_OIDC_CLIENT_ID"),
-		AccountURL:                         mustURL("ACCOUNT_HTTP_URL"),
-		BillingURL:                         mustURL("BILLING_HTTP_URL"),
-		TokenGatewayURL:                    mustURL("TOKEN_GATEWAY_HTTP_URL"),
-		ClientVersion:                      compatibility.Manifest().CurrentClientVersion,
-		TokenAdminProxyHMACKey:             proxyHMACKey,
-		AdminModelTokenIAEnabled:           adminModelTokenIAEnabled,
-		AdminTokenResourceFormsEnabled:     adminTokenResourceFormsEnabled,
-		AdminModelOperationsDetailsEnabled: adminModelOperationsDetailsEnabled,
-		AdminModelDetailsEnabled:           adminModelDetailsEnabled,
-		AdminModelPricingEditEnabled:       adminModelPricingEditEnabled,
-		AdminTokenDetailsEnabled:           adminTokenDetailsEnabled,
-		AdminModelTokenActionsEnabled:      adminModelTokenActionsEnabled,
-		CredentialOrigin:                   credentialOrigin,
-		SystemProbes:                       systemProbes(),
-		SecureCookies:                      publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
+		PublicURL:                           publicURL,
+		AuthorizationURL:                    mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
+		TokenURL:                            mustURL("PORTAL_OIDC_TOKEN_URL"),
+		ClientID:                            os.Getenv("PORTAL_OIDC_CLIENT_ID"),
+		AccountURL:                          mustURL("ACCOUNT_HTTP_URL"),
+		BillingURL:                          mustURL("BILLING_HTTP_URL"),
+		TokenGatewayURL:                     mustURL("TOKEN_GATEWAY_HTTP_URL"),
+		ClientVersion:                       compatibility.Manifest().CurrentClientVersion,
+		TokenAdminProxyHMACKey:              proxyHMACKey,
+		AdminModelTokenIAEnabled:            adminModelTokenIAEnabled,
+		AdminTokenResourceFormsEnabled:      adminTokenResourceFormsEnabled,
+		AdminModelOperationsDetailsEnabled:  adminModelOperationsDetailsEnabled,
+		AdminModelDetailsEnabled:            adminModelDetailsEnabled,
+		AdminModelPricingEditEnabled:        adminModelPricingEditEnabled,
+		AdminModelOperationsOverviewEnabled: adminModelOperationsOverviewEnabled,
+		AdminTokenDetailsEnabled:            adminTokenDetailsEnabled,
+		AdminModelTokenActionsEnabled:       adminModelTokenActionsEnabled,
+		CredentialOrigin:                    credentialOrigin,
+		SystemProbes:                        systemProbes(),
+		SecureCookies:                       publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
 	}, store)
 	if err != nil {
 		log.Fatal(err)

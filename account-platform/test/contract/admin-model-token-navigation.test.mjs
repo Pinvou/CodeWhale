@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   adminModelTokenOverviewRoute,
   adminModelPricingEditGateEnabled,
+  adminModelOperationsOverviewGateEnabled,
   adminModelTokenQueryUpdates,
   adminNavigationGroupsForGate,
   adminSectionURL,
@@ -10,12 +11,14 @@ import {
   normalizeAdminModelTokenEntry,
   normalizeAdminModelTokenNavigation,
   previousAdminModelTokenCursor,
+  readAdminModelOperationsWindow,
   readAdminModelTokenOperationsTab,
   readAdminModelTokenQuery,
   rememberAdminModelTokenNextCursor,
   synchronizeAdminModelTokenCursorHistory,
   writeAdminSection,
 } from '../../../pinvou3-app/src/features/account-platform/admin-navigation.js';
+import { modelOperationsOverviewDrilldown, modelOperationsWindow, validateCatalogDifference, validateModelOperationsOverview } from '../../../pinvou3-app/src/features/account-platform/admin-model-operations-overview.js';
 import {
   executeAdminSourceRequest,
   initialAdminSourceState,
@@ -43,6 +46,65 @@ test('model and Token IA gate preserves the legacy entry off and exposes three c
   assert.equal(gateOffDeepLink.updates.usage_q, null);
   assert.equal(gateOffDeepLink.updates.usage_cursor, null);
   assert.equal(normalizeAdminModelTokenEntry('models', ['products', 'settings'], false, locationLike('?section=models&model_cursor=signed')).section, 'products');
+});
+
+test('operations overview gate, windows and drilldowns preserve only stable URL state', () => {
+  const previousLocation = globalThis.location;
+  try {
+    globalThis.location = locationLike('?section=models&model_operations_window=7d');
+    assert.equal(readAdminModelOperationsWindow(), '7d');
+    globalThis.location = locationLike('?section=models&model_operations_window=private-value');
+    assert.equal(readAdminModelOperationsWindow(), '24h');
+  } finally {
+    globalThis.location = previousLocation;
+  }
+  assert.equal(adminModelOperationsOverviewGateEnabled({ feature_flags: { admin_model_operations_overview: true } }), true);
+  assert.equal(adminModelOperationsOverviewGateEnabled({ feature_flags: { admin_model_operations_overview: false } }), false);
+  assert.equal(modelOperationsWindow('7d'), '7d');
+  assert.equal(modelOperationsWindow('private'), '24h');
+  const bounds = { from: '2026-09-01T12:34:00Z', to: '2026-09-08T12:34:00Z' };
+  assert.deepEqual(modelOperationsOverviewDrilldown('usage_request_count', { from: bounds.from, to: bounds.to }), { section: 'modelOperations', query: { operations_tab: 'usage', usage_started_from: bounds.from, usage_started_to: bounds.to, usage_cursor: null }, exact: true });
+  assert.deepEqual(modelOperationsOverviewDrilldown('stable_route_count', { from: bounds.from, to: bounds.to }), { section: 'tokenResources', query: { token_cursor: null }, exact: false });
+  assert.deepEqual(modelOperationsOverviewDrilldown('healthy_route_count', { from: bounds.from, to: bounds.to }), { section: 'tokenResources', query: { token_health_status: 'HEALTHY', token_cursor: null }, exact: false });
+  const denied = normalizeAdminModelTokenEntry('models', ['models'], true, locationLike('?section=models&model_operations_window=30d'), ['platform.models.read', 'platform.tokens.read'], { modelOperationsOverviewEnabled: true });
+  assert.equal(denied.updates.model_operations_window, null);
+  const disabled = normalizeAdminModelTokenEntry('modelOperations', ['modelOperations'], true, locationLike('?section=modelOperations&model_operations_window=7d'), ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'], { modelOperationsOverviewEnabled: false });
+  assert.equal(disabled.updates.model_operations_window, null);
+  const normalized = normalizeAdminModelTokenEntry('models', ['models'], true, locationLike('?section=models&model_operations_window=private'), ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'], { modelOperationsOverviewEnabled: true });
+  assert.equal(normalized.updates.model_operations_window, '24h');
+});
+
+test('operations overview and catalog difference runtime validators fail closed', () => {
+  const metricKeys = ['published_model_count', 'deprecated_model_count', 'model_draft_count', 'stable_route_count', 'healthy_route_count', 'route_attention_count', 'provisioning_pending_count', 'provisioning_attention_count', 'usage_request_count', 'reconciliation_pending_count', 'reconciliation_stopped_count'];
+  const from = Date.parse('2026-09-07T12:00:00Z');
+  const points = Array.from({ length: 24 }, (_, index) => ({
+    from: new Date(from + index * 3_600_000).toISOString(),
+    to: new Date(from + (index + 1) * 3_600_000).toISOString(),
+    usage_request_count: index === 23 ? 1 : 0,
+    reconciliation_attention_count: index === 23 ? 1 : 0,
+  }));
+  const value = {
+    as_of: '2026-09-08T12:00:00.000Z', window: { from: '2026-09-07T12:00:00.000Z', to: '2026-09-08T12:00:00.000Z', timezone: 'UTC' },
+    metrics: metricKeys.map((key) => ({ key, value: 0, unit: 'COUNT', aggregation: key === 'usage_request_count' ? 'WINDOW' : 'POINT_IN_TIME', included_statuses: ['KNOWN'], ...(['healthy_route_count', 'route_attention_count'].includes(key) ? { denominator_key: 'stable_route_count' } : {}) })),
+    trend: { bucket_seconds: 3600, points },
+  };
+  value.metrics.find((metric) => metric.key === 'usage_request_count').value = 1;
+  for (const key of metricKeys) assert.ok(modelOperationsOverviewDrilldown(key, value.window), `${key} must retain a related or exact drilldown`);
+  assert.ok(validateModelOperationsOverview(value));
+  assert.equal(validateModelOperationsOverview({ ...value, token_account_id: 'leak' }), null);
+  assert.equal(validateModelOperationsOverview({ ...value, trend: { ...value.trend, points: [value.trend.points[1], value.trend.points[0], ...value.trend.points.slice(2)] } }), null);
+  assert.equal(validateModelOperationsOverview({ ...value, trend: { ...value.trend, points: value.trend.points.slice(1) } }), null);
+  assert.equal(validateModelOperationsOverview({ ...value, trend: { ...value.trend, bucket_seconds: 86400 } }), null);
+  assert.equal(validateModelOperationsOverview({ ...value, trend: { ...value.trend, points: value.trend.points.map((point, index) => index === 23 ? { ...point, to: '2026-09-08T11:59:59.000Z' } : point) } }), null);
+  const empty = structuredClone(value);
+  empty.metrics.find((metric) => metric.key === 'usage_request_count').value = 0;
+  empty.trend.points = empty.trend.points.map((point) => ({ ...point, usage_request_count: 0, reconciliation_attention_count: 0 }));
+  assert.equal(validateModelOperationsOverview(empty).trendHasData, false);
+  const difference = { baseline_catalog_version: 9, target_catalog_version: 8, target_observed_version: null, added_count: 0, modified_count: 0, removed_count: 0, total_count: 0, truncated: false, items: [] };
+  assert.ok(validateCatalogDifference(difference));
+  assert.equal(validateCatalogDifference({ ...difference, upstream_model_ref: 'secret' }), null);
+  assert.equal(validateCatalogDifference({ ...difference, target_catalog_version: null }), null);
+  assert.equal(validateCatalogDifference({ ...difference, added_count: 1, total_count: 1 }), null);
 });
 
 test('legacy and unauthorized model-token routes clear all scoped state before a single replacement', () => {
@@ -320,8 +382,8 @@ test('new page source keeps independent loading, error, refresh and last-updated
   const initialNormalize = view.indexOf('const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled');
   const initialDenied = view.indexOf('if (visible.length === 0)', initialNormalize);
   assert.ok(initialNormalize >= 0 && initialNormalize < initialDenied, 'initial authorization normalizes before rendering zero-permission denial');
-  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelDetailsEnabled: nextDetailsEnabled, modelPricingEditEnabled: nextPricingEditEnabled, tokenDetailsEnabled: nextTokenDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
-  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelDetailsEnabled, modelPricingEditEnabled, tokenDetailsEnabled, modelTokenActionsEnabled \}\)/);
+  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelOperationsOverviewEnabled: nextOperationsOverviewEnabled, modelDetailsEnabled: nextDetailsEnabled, modelPricingEditEnabled: nextPricingEditEnabled, tokenDetailsEnabled: nextTokenDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
+  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelOperationsOverviewEnabled, modelDetailsEnabled, modelPricingEditEnabled, tokenDetailsEnabled, modelTokenActionsEnabled \}\)/);
   assert.match(operationsSource, /provisioningRequest &&/);
   assert.match(operationsSource, /usageRequest &&/);
   assert.match(operationsSource, /reconciliationRequest &&/);
@@ -382,6 +444,7 @@ test('new collection calls use the paginated BFF contract while gate-off calls k
     await client.provisioningAttempts('00000000-0000-4000-8000-000000000301', { status: 'FAILED', cursor: 'attempt-page' });
     await client.usageEvidence('00000000-0000-4000-8000-000000000401', { evidence_type: 'SETTLEMENT', cursor: 'evidence-page' });
     await client.provisioning('00000000-0000-4000-8000-000000000301');
+    await client.tokenOperationsOverview('7d');
   } finally {
     globalThis.fetch = previousFetch;
   }
@@ -401,6 +464,7 @@ test('new collection calls use the paginated BFF contract while gate-off calls k
   assert.equal(requested[11], 'https://portal.example/api/admin/token/admin/v1/provisionings/00000000-0000-4000-8000-000000000301/attempts?limit=50&status=FAILED&cursor=attempt-page');
   assert.equal(requested[12], 'https://portal.example/api/admin/token/admin/v1/usage-requests/00000000-0000-4000-8000-000000000401/evidence?limit=50&evidence_type=SETTLEMENT&cursor=evidence-page');
   assert.equal(requested[13], 'https://portal.example/api/admin/token/admin/v2/provisionings/00000000-0000-4000-8000-000000000301');
+  assert.equal(requested[14], 'https://portal.example/api/admin/token/admin/v1/operations-overview?window=7d');
 });
 
 test('Portal BFF explicitly allowlists every APT-127 list source and exposes the gate through session only', async () => {
@@ -411,6 +475,8 @@ test('Portal BFF explicitly allowlists every APT-127 list source and exposes the
   assert.match(service, /feature_flags/);
   assert.match(service, /admin_model_token_ia/);
   assert.match(service, /admin_model_token_actions/);
+  assert.match(service, /admin_model_operations_overview/);
   assert.match(deployment, /PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED/);
   assert.match(deployment, /PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED/);
+  assert.match(deployment, /PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED/);
 });

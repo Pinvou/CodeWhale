@@ -509,6 +509,10 @@ export class AdminPlatformClient {
   tokenOverview(signal) {
     return this.request('token', '/admin/v1/overview', signal);
   }
+  tokenOperationsOverview(window = '24h', signal) {
+    const query = new URLSearchParams({ window });
+    return this.request('token', `/admin/v1/operations-overview?${query}`, signal);
+  }
   tokenAccounts(filtersOrSignal = {}, signal) {
     if (isAbortSignal(filtersOrSignal)) {
       return this.request('token', '/admin/v1/token-accounts?limit=100', filtersOrSignal);
