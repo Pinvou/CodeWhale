@@ -97,7 +97,7 @@ pub(crate) fn rate_limit_retry_delay(retry_number: u32) -> Duration {
 
 #[derive(Debug)]
 struct GateWaiter {
-    sender: oneshot::Sender<()>,
+    sender: oneshot::Sender<DynamicGatePermit>,
 }
 
 #[derive(Debug)]
@@ -113,6 +113,13 @@ struct GateInner {
 /// and wakes one waiter. Reducing capacity below `active` is allowed: the
 /// surplus holders finish naturally and no new permit is granted until the
 /// active count drops under the new capacity.
+///
+/// Waiters receive an *already granted* permit through a oneshot channel, so
+/// a waiter future that is cancelled after the grant is dispatched simply
+/// drops the permit, whose `Drop` hands the slot to the next waiter. (A
+/// wake-and-recheck design would lose that wakeup — the cancelled waiter
+/// never re-checks, and with no remaining holders there is no later release
+/// to re-dispatch it.)
 #[derive(Debug)]
 pub(crate) struct DynamicGate {
     inner: Mutex<GateInner>,
@@ -141,83 +148,96 @@ impl DynamicGate {
         inner.capacity.saturating_sub(inner.active)
     }
 
-    /// Adjust the gate capacity. Raising it wakes as many queued waiters as
-    /// the new headroom allows; lowering it simply stops new admissions until
+    /// Adjust the gate capacity. Raising it grants queued waiters the new
+    /// headroom immediately; lowering it simply stops new admissions until
     /// the active count drains below the new capacity.
-    pub(crate) fn set_capacity(&self, capacity: usize) {
+    pub(crate) fn set_capacity(self: &std::sync::Arc<Self>, capacity: usize) {
         let mut inner = self.inner.lock().expect("launch gate poisoned");
         inner.capacity = capacity;
-        let headroom = capacity.saturating_sub(inner.active);
-        for _ in 0..headroom {
-            match inner.waiters.pop_front() {
-                Some(waiter) => {
-                    // A dropped receiver means the waiter future was cancelled;
-                    // skip it and keep waking until headroom or queue ends.
-                    if waiter.sender.send(()).is_err() {
-                        continue;
-                    }
+        Self::wake_locked(self, &mut inner);
+    }
+
+    /// Grant queued waiters while there is headroom. Called with the lock
+    /// held; each waiter receives an already-counted permit, so a cancelled
+    /// receiver's permit is disarmed (never `Drop`ped under the lock) and the
+    /// slot flows to the next waiter.
+    fn wake_locked(gate: &std::sync::Arc<Self>, inner: &mut GateInner) {
+        while inner.active < inner.capacity {
+            let Some(waiter) = inner.waiters.pop_front() else {
+                break;
+            };
+            let permit = DynamicGatePermit {
+                gate: Some(std::sync::Arc::clone(gate)),
+            };
+            match waiter.sender.send(permit) {
+                Ok(()) => inner.active += 1,
+                Err(mut returned) => {
+                    // The waiter future was cancelled before receiving the
+                    // grant. Disarm instead of dropping: `Drop` would call
+                    // `release()` and re-enter the lock we are holding.
+                    let _ = returned.disarm();
                 }
-                None => break,
             }
         }
     }
 
-    fn grant_locked(inner: &mut GateInner) -> bool {
-        if inner.active < inner.capacity {
-            inner.active += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn release(&self) {
+    fn release(self: &std::sync::Arc<Self>) {
         let mut inner = self.inner.lock().expect("launch gate poisoned");
         inner.active = inner.active.saturating_sub(1);
-        while let Some(waiter) = inner.waiters.pop_front() {
-            if waiter.sender.send(()).is_ok() {
-                // The woken waiter re-checks capacity under the lock; if the
-                // capacity was lowered in the meantime it will re-queue.
-                break;
-            }
-        }
+        Self::wake_locked(self, &mut inner);
     }
 
     /// Try to acquire a permit without waiting.
     pub(crate) fn try_acquire(self: &std::sync::Arc<Self>) -> Option<DynamicGatePermit> {
         let mut inner = self.inner.lock().expect("launch gate poisoned");
-        Self::grant_locked(&mut inner).then(|| DynamicGatePermit {
-            gate: std::sync::Arc::clone(self),
+        (inner.active < inner.capacity).then(|| {
+            inner.active += 1;
+            DynamicGatePermit {
+                gate: Some(std::sync::Arc::clone(self)),
+            }
         })
     }
 
     /// Acquire a permit, waiting until capacity is available. Cancellation
-    /// safe: dropping the future leaves a stale queue entry that releasers
-    /// skip.
+    /// safe: a dropped future either leaves a stale queue entry (skipped and
+    /// disarmed by the granter) or drops an already-dispatched permit (whose
+    /// `Drop` re-releases the slot).
     pub(crate) async fn acquire(self: &std::sync::Arc<Self>) -> DynamicGatePermit {
         loop {
             let rx = {
                 let mut inner = self.inner.lock().expect("launch gate poisoned");
-                if Self::grant_locked(&mut inner) {
+                if inner.active < inner.capacity {
+                    inner.active += 1;
                     return DynamicGatePermit {
-                        gate: std::sync::Arc::clone(self),
+                        gate: Some(std::sync::Arc::clone(self)),
                     };
                 }
                 let (tx, rx) = oneshot::channel();
                 inner.waiters.push_back(GateWaiter { sender: tx });
                 rx
             };
-            // Ignore send failures: a cancelled waiter's entry is drained by
-            // the releaser, and a capacity change wakes us spuriously — the
-            // loop simply re-checks under the lock.
-            let _ = rx.await;
+            // A failed receive means the gate itself was dropped while we
+            // were queued; the loop re-queues under the lock.
+            if let Ok(permit) = rx.await {
+                return permit;
+            }
         }
     }
 }
 
 /// One held launch slot. Released on drop.
+///
+/// The gate is an `Option` so the wake path can disarm a permit whose
+/// receiver vanished without running `Drop` (which would re-enter the locked
+/// `release()`).
 pub(crate) struct DynamicGatePermit {
-    gate: std::sync::Arc<DynamicGate>,
+    gate: Option<std::sync::Arc<DynamicGate>>,
+}
+
+impl DynamicGatePermit {
+    fn disarm(&mut self) -> Option<std::sync::Arc<DynamicGate>> {
+        self.gate.take()
+    }
 }
 
 impl std::fmt::Debug for DynamicGatePermit {
@@ -228,7 +248,9 @@ impl std::fmt::Debug for DynamicGatePermit {
 
 impl Drop for DynamicGatePermit {
     fn drop(&mut self) {
-        self.gate.release();
+        if let Some(gate) = self.gate.take() {
+            gate.release();
+        }
     }
 }
 
@@ -279,13 +301,15 @@ impl RateLimitGovernor {
         std::sync::Arc::clone(&self.gate)
     }
 
-    /// Update the ceiling additive increase may climb to (the configured
-    /// launch concurrency). Never lowers the live capacity directly; the
-    /// AIMD loop converges on the new ceiling.
+    /// Apply a new configured launch capacity: the AIMD ceiling and the gate
+    /// capacity while not throttled. Applies to the live gate immediately
+    /// (raising and lowering alike) unless the governor is paused — a pause
+    /// keeps capacity 0 until recovery, so an external limit change cannot
+    /// silently lift a rate-limit pause.
     pub(crate) fn set_max_capacity(&self, max_capacity: usize) {
         let mut state = self.state.lock().expect("rate limit governor poisoned");
         state.max_capacity = max_capacity.max(1);
-        if !state.paused && self.gate.capacity() > state.max_capacity {
+        if !state.paused {
             self.gate.set_capacity(state.max_capacity);
         }
     }
@@ -315,6 +339,37 @@ impl RateLimitGovernor {
         state.attempts.push_back(now);
     }
 
+    /// Lift a pause whose rate-limit events have all aged out of the window,
+    /// resuming at a conservative quarter of the configured capacity so
+    /// additive increase climbs the rest of the way. Callers must hold the
+    /// state lock; `prune` first.
+    fn unpause_if_window_drained(&self, state: &mut GovernorState) {
+        if !state.paused || !state.limited.is_empty() {
+            return;
+        }
+        state.paused = false;
+        let capacity = (state.max_capacity / 4).max(1);
+        self.gate.set_capacity(capacity);
+        tracing::info!(
+            target: "subagent",
+            launch_capacity = capacity,
+            max_capacity = state.max_capacity,
+            "rate-limit governor resumed launches after window drained"
+        );
+    }
+
+    /// Time-driven recovery probe for queued launches. A pause is normally
+    /// lifted by a successful LLM attempt from an in-flight child, but if the
+    /// entire in-flight fleet finishes while 429 events are still inside the
+    /// window, no success ever arrives — without this probe the queue would
+    /// freeze until each queued child hits its wall-time deadline. Once every
+    /// limit event has aged out, the next probe resumes launches.
+    pub(crate) fn recover_if_window_drained(&self, now: Instant) {
+        let mut state = self.state.lock().expect("rate limit governor poisoned");
+        Self::prune(&mut state, now);
+        self.unpause_if_window_drained(&mut state);
+    }
+
     /// Report a successful sub-agent LLM attempt. Drives AIMD additive
     /// increase and clears the pause once the window has drained.
     pub(crate) fn record_success(&self, now: Instant) {
@@ -322,20 +377,7 @@ impl RateLimitGovernor {
         Self::prune(&mut state, now);
         state.consecutive_successes = state.consecutive_successes.saturating_add(1);
 
-        if state.paused && state.limited.is_empty() {
-            // All observed limits aged out of the window: recover at a
-            // conservative quarter of the configured capacity and let
-            // additive increase climb the rest of the way.
-            state.paused = false;
-            let capacity = (state.max_capacity / 4).max(1);
-            self.gate.set_capacity(capacity);
-            tracing::info!(
-                target: "subagent",
-                launch_capacity = capacity,
-                max_capacity = state.max_capacity,
-                "rate-limit governor resumed launches after window drained"
-            );
-        }
+        self.unpause_if_window_drained(&mut state);
 
         if !state.paused
             && state.consecutive_successes >= SUCCESS_PER_INCREASE_STEP
@@ -654,5 +696,87 @@ mod tests {
         }
         // The cap holds for absurd retry numbers.
         assert_eq!(rate_limit_backoff_base(40), RATE_LIMIT_MAX_BACKOFF);
+    }
+
+    /// A pause must lift via the time-driven probe even when no in-flight
+    /// child ever reports another success (the in-flight fleet drained before
+    /// the window did): otherwise queued children freeze until their
+    /// wall-time deadline.
+    #[test]
+    fn forkguard_rate_limit_governor_pauses_and_time_recovers_after_window_drains() {
+        let (governor, _gate) = RateLimitGovernor::new(8);
+        let t0 = Instant::now();
+        for i in 0..4 {
+            governor.record_attempt(t0 + ms(i));
+            governor.record_rate_limited(t0 + ms(i));
+        }
+        assert!(governor.is_paused(t0 + ms(10)));
+
+        // Probe while 429 events are still inside the window: stays paused.
+        governor.recover_if_window_drained(t0 + ms(20));
+        assert!(governor.is_paused(t0 + ms(30)));
+
+        // Once every limit event has aged out, the probe resumes launches at
+        // a quarter of the configured capacity — no success event required.
+        let late = t0 + RATE_LIMIT_WINDOW + ms(10);
+        governor.recover_if_window_drained(late);
+        assert!(!governor.is_paused(late));
+        assert_eq!(governor.snapshot(late).launch_capacity, 2);
+    }
+
+    /// A runtime launch-concurrency change must not silently lift a pause:
+    /// the gate stays at capacity 0 until the window drains, then resumes at
+    /// a quarter of the *new* configured capacity.
+    #[test]
+    fn forkguard_rate_limit_governor_limit_change_keeps_pause_capacity_zero() {
+        let (governor, gate) = RateLimitGovernor::new(8);
+        let t0 = Instant::now();
+        for i in 0..4 {
+            governor.record_attempt(t0 + ms(i));
+            governor.record_rate_limited(t0 + ms(i));
+        }
+        assert!(governor.is_paused(t0 + ms(1)));
+
+        governor.set_max_capacity(4);
+        assert_eq!(gate.capacity(), 0, "pause must keep capacity 0");
+
+        let late = t0 + RATE_LIMIT_WINDOW + ms(10);
+        governor.recover_if_window_drained(late);
+        assert_eq!(
+            gate.capacity(),
+            1,
+            "resume at a quarter of the new capacity"
+        );
+    }
+
+    /// A waiter cancelled *after* its grant was dispatched must not swallow
+    /// the slot: the permit is dropped with the cancelled future and its
+    /// `Drop` re-releases it for the next waiter.
+    #[test]
+    fn forkguard_dynamic_gate_redispatches_grant_of_cancelled_waiter() {
+        let (_governor, gate) = RateLimitGovernor::new(1);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        rt.block_on(async move {
+            let holder = gate.try_acquire().expect("holder");
+            let g2 = std::sync::Arc::clone(&gate);
+            let waiter = tokio::spawn(async move { g2.acquire().await });
+            tokio::time::sleep(ms(20)).await;
+            assert!(!waiter.is_finished(), "waiter must be queued");
+
+            // Releasing the holder dispatches the grant into the waiter's
+            // channel; on a current-thread runtime the waiter has not polled
+            // yet when we abort it, so the permit is dropped mid-flight.
+            drop(holder);
+            waiter.abort();
+            tokio::time::sleep(ms(20)).await;
+
+            assert!(
+                gate.try_acquire().is_some(),
+                "grant of cancelled waiter must be re-released, not leaked"
+            );
+        });
     }
 }
