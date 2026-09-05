@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，125 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，6 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，125 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，5 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，1 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 是保留原已审核交付历史、同时重开当前需求状态的具名整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -159,7 +159,7 @@
 | APT-133 | Token Account 独立详情与隔离凭据新增/轮换 | UI-54, ADM-58 | APT-121, APT-123, APT-124, APT-127, APT-129, APT-131 | CODE | DONE |
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | DONE |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | DONE |
-| APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | PENDING |
+| APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | IN_REVIEW |
 | APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138 | CODE+ENV | PENDING |
 | APT-138 | 十九项 Token 命令一致性总验收与原子激活 | ADM-64 | APT-122–APT-136 | CODE | PENDING |
 
@@ -231,7 +231,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 ### APT-123 十九项 Token 命令治理与三项强制审批
 
 - **实现状态**：`DONE`；已通过身份 B 第五轮独立代码审核。Account `000045`、Token `000024`、十九项策略注册与通用持久结果、三项审批精确权限/策略、actor 绑定结果查询、最小 executor 内部路由与 workload allowlist、中间提交 PRE_ACTIVATION 门禁已实现。十九项领域 adapter 的最终接入与验收仍由下表对应后续任务负责；activation record/epoch/state machine 及审批事件 consumer 仍唯一归 APT-138，均未在本任务提前实现。尚未推送或部署；本地未配置 Account/Token PostgreSQL URL，真实迁移链命名用例未执行，CI 已强制逐项 PASS 且拒绝 SKIP。
-- **目标/范围**：主目标 `ADM-65`，仅交付 `ADM-64` 的预激活基础且不得关闭 ADM-64。修改 `migrations/account/000045_*`、`migrations/token/000024_*`、`internal/platform/approvalpolicy/{registry.go,registry_test.go}`、`internal/account/{approvals.go,approval_execution.go,approval_worker.go}`、`internal/token` 十九项命令治理中间件/结果查询/审计 outbox/内部执行路由、`cmd/{account-service,token-gateway}` 及对应 OpenAPI、事件和工作负载权限配置。本任务唯一拥有其余十五项策略注册、三项审批权限/策略以及十九项通用命令结果、幂等指纹和恢复索引 schema；APT-122 已拥有四项协议/公式策略版本且本任务不得重写。十九项领域 adapter 不在本任务接入；本任务也不创建 activation record、epoch、状态列、状态机或审批事件 consumer，这些激活对象与 consumer 唯一归 APT-138/`000028_*`。
+- **目标/范围**：主目标 `ADM-65`，仅交付 `ADM-64` 的预激活基础且不得关闭 ADM-64。修改 `migrations/account/000045_*`、`migrations/token/000024_*`、`internal/platform/approvalpolicy/{registry.go,registry_test.go}`、`internal/account/{approvals.go,approval_execution.go,approval_worker.go}`、`internal/token` 十九项命令治理中间件/结果查询/审计 outbox/内部执行路由、`cmd/{account-service,token-gateway}` 及对应 OpenAPI、事件和工作负载权限配置。本任务唯一拥有其余十五项策略注册、三项审批权限/策略以及十九项通用命令结果、幂等指纹和恢复索引 schema；APT-122 已拥有四项协议/公式策略版本且本任务不得重写。十九项领域 adapter 不在本任务接入；本任务也不创建 activation record、epoch、状态列、状态机或审批事件 consumer，这些激活对象与 consumer 唯一归 APT-138/`000029_*`；`000028` 后续由 APT-136 用于运行概览索引。
 - **十九项共同合同**：逐项执行下表所有者映射；所有管理命令创建 API 接受必填 reason、专项 7.2 指定 CAS/版本和 16～128 字符 `Idempotency-Key`（APT-133 隔离 origin 的 `/launch` 不是命令创建 API，固定只接收 `launch_id`），持久化 command type、actor/permission、请求摘要、幂等指纹、预检/关键版本、前后状态、审计 request_id 与脱敏结果。提交前重验权限/CAS/预检；唯一键冲突返回同一结果或 `IDEMPOTENCY_KEY_REUSED`；超时只通过结果查询恢复，禁止盲重试、`force`、`ignore_blocker`。`TOKEN_CREDENTIAL_ENROLL`、`TOKEN_CREDENTIAL_ROTATE` 也必须注册为 `AUDIT_ONLY`，结果只保存不透明引用和脱敏元数据。
 - **审批/权限/执行**：严格写入专项 7.3 三组 13 字段及 exact ordered key array；lifecycle/rollback 保留 v1 并追加 v2，revoke 新增 v1；六权限仅原子授予超级/模型管理员并递增 authorization version。`executableApprovalCommands` 保留全部既有合法项，新增 Token 子集恰为三项；`token-command-executor` 仅持有 approval begin/complete 和三个 `internal.token.*.execute`。人类 direct 固定 403 是已安装但只有 APT-138 `ACTIVE` 才会被路由选择的新分支，不得在预激活阶段提前覆盖旧 v1 direct。
 - **状态/兼容/回滚**：APT-138 的 activation record 不存在即被所有 N/N-1 组件解释为预激活关闭态：旧 v1 direct 保持原行为，新审批入口、executor 消费、新治理 envelope 和新增协议/公式写路径全部关闭；本任务严禁自行持久化 `PRE_ACTIVATION`、epoch 或写 `ACTIVE`。故障回滚只关闭基础 gate，并保留结果、审计及已引用策略；activation 记录缺失语义、最终状态机和原子激活唯一归 APT-138。
@@ -397,18 +397,22 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-136 目录差异与运行健康趋势
 
-- **目标/范围**：主目标 `UI-57`。仅修改 Portal 模型/运行概览、目录同步/回滚差异预览、趋势卡片/图表、BFF 映射、i18n/CSS和可视化合同测试；只消费 APT-126 聚合与 APT-124 预检。
-- **状态/回滚**：展示已发布/草稿模型、目录版本差异、异常路由、失败 Provisioning、待核对用量及明确时间窗的趋势；各卡片独立 loading/error/refresh，不扫描分页列表计算指标。同步/回滚经 APT-131 结构化动作，回滚命令走 APT-123 rollback v2。关闭二期 overview gate 即隐藏增强卡片；无数据库变更。
-- **验收**：差异新增/修改/删除、版本选择、空差异、聚合延迟/数据时间、0 与未知区分、局部失败、审批链、回滚未知恢复、单位/时区和 320px/200% 通过。
-- **不包含**：不新建指标事实/仓库、不改目录同步算法、健康探测状态机、核对处置或审批策略。
+- **目标/范围**：主目标 `UI-57`。修改 Token 模型/运行聚合、目录同步 observation 绑定、具名索引迁移 `000028_operations_overview_indexes`、OpenAPI，Portal 模型/运行概览、目录同步/回滚差异预览、趋势卡片/图表、BFF 映射、i18n/CSS 和可视化/性能合同测试；复用 APT-126 聚合、APT-124 预检与 APT-131 结构化动作，不新建第二份指标事实。
+- **状态/回滚**：`REOPENED_REMEDIATION / IN_REVIEW`。展示已发布/草稿模型、目录版本差异、异常路由、失败 Provisioning、待核对用量及明确时间窗的趋势；各卡片独立 loading/error/refresh，不扫描分页列表计算指标。同步/回滚经 APT-131 结构化动作，回滚命令走 APT-123 rollback v2。关闭二期 overview gate 即隐藏增强卡片。up 仅增加 `usage_requests(started_at,id)` 和谓词精确为 `TOKEN / USAGE_RECONCILIATION_REVIEW / USAGE_REQUEST` 的 `manual_review_cases(created_at,id)` 部分索引（包含核对所需稳定投影列）；down 只删索引、不删事实。APT-138 activation 迁移因此顺延为 `000029`。
+- **窗口/趋势验收**：客户端只传规范枚举 `window=24h|7d|30d`；Token 用同一只读事务的 `transaction_timestamp()` 派生并响应权威 UTC `[from,to)`，Portal 展示与下穿只复用该响应，不使用浏览器时钟。`24h` 必须为 24 个 3,600 秒桶，`7d/30d` 必须为 7/30 个 86,400 秒桶；首尾、相邻边界、点数、非负计数和总量均闭合，末桶精确结束于 `to`。全零显示无数据，不画最小高度伪柱。覆盖浏览器严重 clock skew、非法窗口、局部失败、旧响应隔离、单位/时区与 320px/200%。
+- **同步验收**：差异覆盖新增/修改/删除、版本选择和空差异。同步写入复用预览的同一 observation，或在写前只重取一次并对 Provider/Adapter/实际消费模型字段的固定全序 fingerprint 做精确匹配后直接消费该集合；两次源结果变化必须在任何目录/命令/审计/Outbox 持久化前失败关闭。提交响应未知仅查询原引用，禁止再次发现或重发。
+- **性能验收**：CI 使用 PostgreSQL 17 Alpine、2 vCPU、4 GiB、`shared_buffers=512MB`、`work_mem=16MB` 和确定性种子：1,000,000 条用量（30 日内/第31～180日为 700,000/300,000，85%终态、10%待核对未停止、5%待核对已停止）及 100,000 条案件（60,000 精确 Token 用量核对、40,000 干扰，精确案件70%在30日内）。`VACUUM (ANALYZE)` 后，保留卷重启容器的首次冷缓存与紧接三次暖缓存均执行生产 30 日单 SQL 的 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，每次 `Execution Time <= 3s`。计划必须为窗口用量恰一次新增 started_at 索引扫描、点时待核对恰一次既有 `usage_requests_pending_idx` 扫描、窗口精确案件恰一次新增部分索引扫描；案件权威存在性仅允许主键等值 membership probe。禁止重复扫描同一逻辑集合、`Seq Scan`、逐桶相关子查询或客户端分页聚合。CI 命名用例必须 no-SKIP，并验证固定数据分布、buffer、索引名、迁移 up/down 和索引谓词/稳定 tie。
+- **不包含**：不新建指标事实/仓库，不改变健康探测状态机、核对处置或审批策略，不激活 APT-138；同步算法只增加 observation 的冻结/写前一致性边界，不改变目录合并业务语义。
+
+> APT-136 首轮整改记录（2026-09-05）：身份 B 代码复审为 `NEEDS_CHANGES`。当前实现已提供目录差异、运行概览与趋势壳，但同步预览/写入 observation 未绑定、30 日查询缺少专用索引及生产量级执行计划证据、窗口仍受浏览器时钟影响、趋势点数/桶宽和全零图形未闭合。本文先冻结修复所有权与验收，代码仍处 `IN_REVIEW`，不得提前标 `DONE` 或写入通过证据。
 
 ### APT-138 十九项命令一致性总验收与原子激活
 
-- **目标/范围**：主目标 `ADM-64`。在 APT-122～APT-136 的领域/API 接入全部通过独立审核后，修改 `migrations/token/000028_*`、`internal/token` 治理激活仓储/路由门禁、Account 审批入口激活校验、`internal/platform/approvalpolicy` 总合同测试及发布前集成测试。本任务唯一拥有持久治理激活记录（状态、epoch、策略集合摘要、十九项处理器摘要、操作者、CAS、时间与审计 request_id），不改任何领域事实 schema。
+- **目标/范围**：主目标 `ADM-64`。在 APT-122～APT-136 的领域/API 接入全部通过独立审核后，修改 `migrations/token/000029_*`、`internal/token` 治理激活仓储/路由门禁、Account 审批入口激活校验、`internal/platform/approvalpolicy` 总合同测试及发布前集成测试。本任务唯一拥有持久治理激活记录（状态、epoch、策略集合摘要、十九项处理器摘要、操作者、CAS、时间与审计 request_id），不改任何领域事实 schema；`000028` 已由 APT-136 唯一用于运行概览索引。
 - **状态机/原子边界**：初始只能是 `PRE_ACTIVATION`：旧 v1 direct 保持当前兼容行为，新治理/新审批写入口关闭；全部一致性门禁成功后，只允许一次单事务 CAS 将 activation record 从 `PRE_ACTIVATION → ACTIVE`，同一持久 epoch 的同一次原子路由切换关闭三项旧 direct、接受新审批执行并开放其余十六项新治理 envelope，不允许逐命令、逐实例或重复激活，不存在双写窗口。`ACTIVE → SAFE_ROLLBACK` 只停止十九项新写、审批领取和执行消费，绝不重开旧 direct；修复并重跑全部门禁后只允许 `SAFE_ROLLBACK → ACTIVE`。禁止回到 `PRE_ACTIVATION`、跳过状态、客户端指定状态或仅切一项命令。
 - **N/N-1/故障恢复**：Account 创建审批前强一致校验 Token activation epoch；Token 处理 direct/执行/结果查询时校验同一持久 epoch。N-1 不认识 `ACTIVE/SAFE_ROLLBACK` 或策略集合摘要时失败关闭，新旧实例混跑不得自行降级 direct。切换进程崩溃、数据库提交不确定、事件重复/乱序、Account/Token 网络分区只按 activation CAS 与 command result 查询恢复，不重放写命令。
 - **总验收**：十九项逐一核对策略/权限/近期认证/reason/CAS/持久幂等/影响预检/审计/未知恢复、API handler 和领域存储所有者；三项审批逐字段比对 DB↔registry、allowlist、最小执行身份和 direct 403，十六项 `AUDIT_ONLY` 验证不可绕过中间件。故障注入覆盖切换前、CAS 提交中、提交后响应丢失、混合 N/N-1、重复事件、进入/退出 `SAFE_ROLLBACK`，证明状态迁移合法、零双写、零 direct 复活和审计连续。APT-133 提供的 credential authority guard 接缝在本任务接入真实 Account 权威源时必须使用贯穿事务的严格绝对 deadline；超时或不可确认时失败关闭并释放 Token 行锁，不允许外部查询无限延长持锁时间。
-- **回滚/不包含**：应用回滚只能 CAS 进入 `SAFE_ROLLBACK` 并保留 activation/command/audit 历史；`000028` down 在任何非 `PRE_ACTIVATION` 或有引用时失败关闭。不实现页面、领域命令、预检计算、凭据隔离、TLS/代理或生产部署；发现差异必须退回唯一所属 APT 修复，不能在本任务夹带修补。
+- **回滚/不包含**：应用回滚只能 CAS 进入 `SAFE_ROLLBACK` 并保留 activation/command/audit 历史；`000029` down 在任何非 `PRE_ACTIVATION` 或有引用时失败关闭。不实现页面、领域命令、预检计算、凭据隔离、TLS/代理或生产部署；发现差异必须退回唯一所属 APT 修复，不能在本任务夹带修补。
 
 ### APT-137 分级发布、兼容与总回滚门禁
 

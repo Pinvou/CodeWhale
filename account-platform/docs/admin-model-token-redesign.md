@@ -161,6 +161,20 @@ cursor 必须签名绑定主体、授权版本、资源、规范化筛选、排�
 
 每个页面/页签独立维护 loading、error、retry、last_updated、filter 和 cursor。模型失败不得阻断价格投影，用量失败不得阻断 Provisioning；离页中止请求，代次令牌防止旧响应回写。
 
+### 4.4 目录 observation 与运行趋势合同
+
+目录差异预览返回的 observation 是本次 Adapter 发现结果的不可变规范投影。指纹必须覆盖同步实际消费的 Provider、Adapter 版本及每个发现模型的稳定 upstream 引用和规范显示字段，并按固定全序计算。同步写入只能采用以下一种闭合方式：复用该次冻结 observation；或在写前只重新发现一次、逐字段重算并与请求冻结指纹精确相等后，直接以这次已校验结果进入同一同步事务。禁止预检后再次发现第三份结果。任何新增、删除、改名、重复项归一或来源版本变化都返回稳定冲突，并保证目录、通用命令结果、审计与 Outbox 零写；响应不确定时只查询原 `command_reference`，不得重新发现或重发同步。
+
+运行趋势 API 只接受单值规范枚举 `window=24h|7d|30d`，不接受客户端 `from/to`、重复窗口或大小写/空白变体。Token 在同一只读事务中以 `transaction_timestamp()` 冻结 `as_of`，并推导 UTC 半开窗口 `[from,to)`，其中 `to=as_of`、`from=to-window`；响应必须原样返回三者，Portal 展示及下穿筛选只使用响应边界，浏览器时间快慢、时区或 DST 均不得改变请求和结果。
+
+桶合同闭合为：`24h` 使用 3,600 秒并恰有 24 点，`7d` 与 `30d` 使用 86,400 秒并分别恰有 7/30 点；第一桶从 `from` 开始，相邻桶首尾相接，最后一桶精确结束于 `to`，不生成额外部分桶。每点覆盖左闭右开区间，只返回受控非负整数计数；点数、桶宽、边界、顺序或总量校验失败时该来源进入局部错误，不能渲染旧数据。所有计数均为 0 时显示明确“所选窗口暂无数据”，不得用最小 2% 高度等视觉规则伪造非零柱。
+
+APT-136 唯一拥有 Token 追加迁移 `000028_operations_overview_indexes`：建立 `usage_requests(started_at, id)` 全局时间/稳定 tie 索引，以及 `manual_review_cases(created_at, id)`（包含 `resource_id/status`）且谓词精确为 `domain='TOKEN' AND case_type='USAGE_RECONCILIATION_REVIEW' AND resource_type='USAGE_REQUEST'` 的部分索引。down 只删除这两个索引，不改写或删除事实。APT-138 的 activation 迁移顺延为 `000029`。
+
+性能门禁固定使用 PostgreSQL 17 Alpine 容器、2 vCPU、4 GiB 内存、`shared_buffers=512MB`、`work_mem=16MB`，并用确定性种子装载 1,000,000 条 `usage_requests` 与 100,000 条 `manual_review_cases`。用量中 700,000 条均匀分布在权威 `as_of` 前 30 日、300,000 条均匀分布在第 31～180 日；状态分布为 85% 终态、10% `SETTLEMENT_PENDING/REVIEW` 且未停止、5% `SETTLEMENT_PENDING/REVIEW` 且已停止。案件中 60,000 条满足精确 Token 用量核对谓词、40,000 条均匀分布为其他 domain/case/resource 干扰项，精确案件的 70% 位于 30 日窗口。装载后执行 `VACUUM (ANALYZE)`；冷缓存口径为保留数据卷重启受限 PostgreSQL 容器后第一次生产 SQL，暖缓存口径为紧接的三次相同 SQL，冷缓存一次和三次暖缓存的每次 `Execution Time` 均不得超过 3 秒。
+
+`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` 必须证明三个不同逻辑集合各自恰有一次有界索引扫描：30 日窗口用量使用 `usage_requests(started_at,id)`；不受窗口限制的 `POINT_IN_TIME` 待核对/停止计数使用既有 `usage_requests_pending_idx`（允许在该一次扫描内按受控状态和 stopped 字段聚合）；30 日精确核对案件使用新增部分时间索引。为验证案件 `resource_id` 对应权威用量事实而进行的主键等值 membership probe 可以出现，但不得重新扫描窗口集合或点时集合。禁止任一逻辑集合的重复 scan node、`Seq Scan`、逐桶相关子查询或客户端分页聚合；门禁同时断言索引名、实际行数分布、buffer 统计与迁移 up/down。
+
 ## 5. 权威 owner 候选与权限迁移
 
 新增原子权限 `platform.tokens.owner-candidates.read`，只允许读取创建 Token Account 所需的最小投影：`id/type/display_label/status`。它不等价于 `platform.users.read`、`platform.organizations.read` 或成员目录权限。
