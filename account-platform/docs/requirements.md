@@ -1829,3 +1829,7 @@ APT-123-R2 实测验收补充：ORG_UNIT authority 响应必须含 Account 权�
 负责人批准正式 Portal `https://account.pinvou.com` 配对 `https://credentials.pinvou.com`，CLOUD_UAT Portal `https://account-uat.pinvou.com` 配对 `https://credentials-uat.pinvou.com`。旧 credential 两域从未上线，不保留旧白名单或重定向。本组只调整既有 Token/Portal 受信常量、handoff 实际精确配对及派生 hash，并补既有 Go 正负测试；开发仅保留双 loopback HTTP，正式 Portal 不向本地 HTTP 降级。DNS 待实施清单见 [模型与 Token 域名清单](../deploy/runbooks/model-token-dns.md)。本地代码交付不以 DNS 添加为前提，但不代表 DNS/TLS、OIDC、workload、KMS 或部署已验收。
 
 APT-137 保持 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED。后续发布计划、部署配置、受控角色工具、安全入口探针、离线证据及持续 CI 按独立功能组依赖顺序另行交付，本组不包含这些后续实现或声明 UI-58 整体完成；无推送或部署操作。
+
+### APT-137 G1：离线发布计划合同
+
+在 G0 新固定域名基础上，本组增加十三个既有 gate 的闭合计划/schema 校验、环境与 APP_ENV 映射、activation 声明与摘要/角色分离、分级观察参数，以及绑定候选和环境的证据 envelope 结构校验。默认只校验本地输入，返回 PLAN_VALID 或 ENVELOPE_VALID，始终保留 ENV_PENDING/NOT_DEPLOYED；不联网、不启 gate、不执行迁移/CAS，也不证明数据库状态、身份或报告真实。本组运行说明见 [模型与 Token 发布计划](../deploy/runbooks/model-token-release.md)。部署配置/角色工具/入口探针/原始工件验签和持续 CI 属后续 G2～G6，UI-58 整体仍未完成。

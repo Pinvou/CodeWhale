@@ -543,6 +543,12 @@ APT-123-R2 草稿漂移数据库状态机修订：Account `000047_token_approval
 
 每个能力有独立 feature gate，服务与 Portal 支持 N/N-1。数据库使用前向兼容追加迁移；回滚先停新写和隔离凭据会话，再回滚 Portal/服务。未消费 launch 立即失效，旧 cursor 返回 410，不得在回滚期间重新启用 query 凭据通道。
 
+### 9.1 APT-137 G1 离线计划与 envelope 边界
+
+G0 已固定新域，G1 提供既有十三 gate 的闭合计划 schema 与依赖验证，不添加新业务开关。候选 commit/镜像/配置/迁移/策略/handler 摘要、环境和 APP_ENV、runtime/retired/运维身份声明、INTERNAL→LIMITED→FULL 阶段和正值观察/SLO 参数必须完整；缺失、类型强转、非法角色/旧域/错环境和不满足既有 gate 依赖均失败。真实 PRE 初始摘要为 null；CLI 的空字符串只能在 PRE/0 明确归一，不将缺字段或读取失败解释为 PRE。
+
+证据 envelope 只核结构、候选/环境绑定、基本时间窗口与执行/复核者分离，不能证明原始报告存在、签名来源、当前状态或指标真实。默认 CLI 只读输入、不联网，输出 PLAN_VALID/ENV_PENDING/NOT_DEPLOYED，未提供 apply/GO。精确用法和后续未交付边界见 [发布计划说明](../deploy/runbooks/model-token-release.md)；完整原始字节/签名/观察验收留 G5，部署/运维/探针及 CI 留其他后续组。
+
 ## 10. 发布门禁
 
 实现阶段必须提供以下自动证据：
