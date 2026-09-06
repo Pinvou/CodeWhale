@@ -137,7 +137,7 @@ Keycloak JWKS backchannel. UAT Portal/credential are the frozen pair
 Production uses `https://account.pinvou.com` /
 `https://credentials.pinvou.com`. Dedicated OIDC client and audience,
 actual HTTPS ingress, provider allowlists and dependency CIDRs must be supplied.
-The future G4 delivery will supply credential ingress safety templates;
+G4 provides [credential ingress safety templates](../../nginx/README.md);
 rendering these workloads alone does not expose or validate the public origin.
 
 Governance uses its own image built with the existing Dockerfile's

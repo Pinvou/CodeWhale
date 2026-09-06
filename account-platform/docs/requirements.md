@@ -1841,3 +1841,7 @@ APT-137 保持 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED。后续发布计划、部�
 ### APT-137 G3：独立受控角色与发布操作
 
 本组提供独立 token-release-prepare 与单操作发布包装器，分别显式 inventory/fence/prepare/enable 和既有 migrate/cap/governance 操作，不串联激活或修改领域状态机。目标数据库/审批/维护窗口/角色集合受限，集群级共享控制身份和异常 writer 拒绝；同事务 activation 锁保持到角色启用提交，重试只确认一致状态。读取 verifier 布尔不等于真实认证；Account SHARE NOWAIT 需真实非超级用户受信运维权限而非 runtime。包装器默认零子进程，执行校验候选制品/迁移摘要、两域 DSN 和参数闭集，UNKNOWN 只读恢复、不自动重试。授权入口新增仅此运维 CLI，统计 339 HTTP/27 task/6 event/18 CLI。实际部署和 G4～G6 后续能力仍未完成，不以工具可用解除 DNS/TLS/身份/KMS/备份前置。
+
+### APT-137 G4：安全入口与有界只读探针
+
+本组交付新固定双域的独立 nginx 安全模板、OIDC/workload 前置结构校验、默认零网络的只读 HTTPS 预检和 Chromium fresh scope 工具。保留既有支付/应用握手/CSP/401/303，精确原始路径拒绝别名、单 HSTS 和代理自产错误安全头，不缓存或重试写请求。只读探针不含登录身份/业务POST，不跟重定向或跳TLS；scope由验证完整HTML字节后的JS-off响应重放观测，只证明FRESH_CONTEXT_ONLY，不能冒充真实生产登录/握手。实际source VM新增两新配对和开发双loopback正例、旧域/跨配对/降级零POST负例。G5证据/兼容与G6持续CI及真实环境验收仍待后续，整体ENV_PENDING/NOT_DEPLOYED。

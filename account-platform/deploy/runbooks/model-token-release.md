@@ -1,6 +1,6 @@
-# 模型与 Token 发布计划和可选部署配置（APT-137 G0～G3）
+# 模型与 Token 发布计划和可选部署配置（APT-137 G0～G4）
 
-状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。当前包含已提交 G0 新域基础、G1 离线计划、G2 可选配置与本组 G3 受控角色/操作工具；后续 G4～G6 尚未交付。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
+状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。当前包含已提交 G0 新域基础、G1 离线计划、G2 可选配置、G3 受控工具与本组 G4 安全入口/只读探针；后续 G5～G6 尚未交付。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
 
 ## 1. 实际入口与依赖
 
@@ -40,7 +40,7 @@ G1 已独立提交 `33209285`。本组使用现有 Go Dockerfile的 SERVICE 参�
 
 七个 broker 客户端使用同一受控外部 TLS NATS；Helm 开新治理组件时拒绝内置匿名开发 NATS，URL/creds/Ping 不证明真实 ACL 或 JetStream 历史。受限 workload 排除旧宽策略选择器，checker 核全部命中允许规则；目标 New API 明确只允许 credential 与 gateway 所需入口。Compose 网络本身不充当防火墙，依赖 CIDR/Host/TLS 身份与可信出站边界仍需现场证明。credential 独立 loopback18108、端口/IP范围重叠必须拒绝；所有 runtime/附加容器禁止运维URL，控制Job/entrypoint必须固定只读默认，不可用wrapper或init容器自动执行。
 
-配置从 local AES 切 remote Secret Provider 前，须由既有受控KMS流程证明全部持久密文（provider credential、事件流/结果回放和dispatch等）原 key_id、格式、AAD 可读及备份可恢复；没有本地解密 fallback，不能清旧KEK/删除历史后声称迁移成功。配置 Secret/issuer/ACL/DNS/有效证书/代理与HBA缺项均保持 ENV_PENDING，不绕过启动验证。本组只提供结构/制品，G3 操作包装器由第6节说明，G4 安全反代/HTTPS/scope工具与 G5 验签工具尚未交付；既有 `token-governance` 默认 check 可独立构建，但任何 apply/激活须遵循本节及第6节受控步骤并取得现场授权。
+配置从 local AES 切 remote Secret Provider 前，须由既有受控KMS流程证明全部持久密文（provider credential、事件流/结果回放和dispatch等）原 key_id、格式、AAD 可读及备份可恢复；没有本地解密 fallback，不能清旧KEK/删除历史后声称迁移成功。配置 Secret/issuer/ACL/DNS/有效证书/代理与HBA缺项均保持 ENV_PENDING，不绕过启动验证。本组只提供结构/制品，G3 操作包装器由第6节说明，G4 安全反代/HTTPS/scope工具见第7节，G5 验签工具尚未交付；既有 `token-governance` 默认 check 可独立构建，但任何 apply/激活须遵循本节及第6节受控步骤并取得现场授权。
 
 根对本组精确候选验证 `node --test account-platform/test/contract/model-token-deployment.test.mjs`，并核对相同输入/blob下真实Helm/Compose解析、语义变异和新镜像构建证据；结果另记，不自动把原整树PASS转为本组证据。部署说明详见 [Compose](../compose/README.md) 与 [Helm](../helm/account-platform/README.md)。后续实际部署/灰度/SAFE流程仍待 G3～G6 与现场证据闭合，不 push/deploy，不标 UI-58 DONE。
 
@@ -90,6 +90,28 @@ prepare 程序只从 `TOKEN_RELEASE_DBA_DATABASE_URL` 连接 DBA；`--operation 
 
 本工具并未替代现场 DBA/HBA/KMS/身份/网络授权，角色准备中的 server verifier布尔与隔离trust PG不是真实Secret匹配证明。跨库检查还包括全部受影响控制角色的owner/ACL/默认ACL等共享依赖及无法完整读取的业务库，不因没有DML或仅SELECT就放过；唯一例外是当前会话PID，不忽略同名DBA其他连接。包装器只允许闭合安全DSN查询参数，禁止dbname/database/host/user/options/search_path等覆盖预期目标。
 
-本组授权登记新增token-release-prepare运维专用入口，339 HTTP/27 tasks/6 events不变、CLI由17增18；不改变G2挂起Job的SERVICE=token-governance。根对精确候选另跑单位与operations/授权Node，并仅在实际源码/依赖/原CLI工件一致时继承专属两PG与清理证据。G4入口/探针、G5原始工件签名与G6持续CI未交付，不把此组通过称为现场或总任务完成。
+本组授权登记新增token-release-prepare运维专用入口，339 HTTP/27 tasks/6 events不变、CLI由17增18；不改变G2挂起Job的SERVICE=token-governance。根对精确候选另跑单位与operations/授权Node，并仅在实际源码/依赖/原CLI工件一致时继承专属两PG与清理证据。G4入口/探针由第7节交付，G5原始工件签名与G6持续CI未交付，不把此组通过称为现场或总任务完成。
 
 根在 G2 加本组十个源码/测试/授权文件的精确候选 `0b71b69e728c6f379f3a552de19500cdffb375be` 实际运行 operations六项与授权四项，共十 Node PASS/0 SKIP（10.828 秒）；两具名 Go 单元 PASS（1.548 秒），exit 0。根核对十文件与 `e371d69e58fe9e5831bf0e19a478f88bf80235e7` 实测源码无差异，依赖 G1 与三个原 CLI 同源，因此仅在该完整输入一致范围继承两专属 PG 16.86/64.31 秒、合计82.777秒/0 SKIP/exit0及固定角色/fixture库残留0/0的分项证据；非现场认证/部署证明。六份当前最小文档另交 B，后续 G4～G6 不提前关闭。
+
+## 7. G4 新双域安全入口与显式只读探针
+
+本组在G0～G3已提交依赖上运行，固定PRODUCTION Portal/credential为 account.pinvou.com / credentials.pinvou.com，CLOUD_UAT为 account-uat.pinvou.com / credentials-uat.pinvou.com。任一新域缺DNS、有效证书、可信入口或专用OIDC身份时保持ENV_PENDING，不能改任意域/HTTP或跳验证。DNS/CSP/代理源配置和工具可用不等于现场已部署。实际受控入口可采用TLS终止后的认证加密隧道，但须独立证明端点/监听/访问限制与失败关闭，不把公网明文上游称安全。
+
+### 7.1 本组代理与只读探针保证
+
+本批只交付安全代理配置和前置探针，不新增身份服务、OIDC 业务、launch/凭据协议或站点自动变更。分三个相邻模块：`scripts/account-platform-credential-edge.mjs` 校验闭合环境/固定 origin 对/受控 upstream/TLS 文件/OIDC 端点与专用 client/audience，并渲染 `deploy/nginx/` 下独立 credential server 和 Portal handoff location；`scripts/account-platform-credential-origin-probe.mjs` 显式只读外部 DNS/TLS/HTTP 预检；对应 Node 负例与独立 Chromium 只读 scope 检查。默认仅验证配置，不联网、不输出 Secret、不调用 nginx/reload/certbot；渲染与网络探针各需显式开关。
+
+1. **代理边界**：保留既有开发模板和两个支付精确 callback，新的 credential HTTPS server 仅允许三个既有 assets、POST `/launch`、GET `/session`、GET `/oidc/callback`、POST `/credentials`；未知路径/错误方法失败关闭。HTTP 入口不转发携带 code 的回调到明文后端。handoff 以精确 location 加入当前 Portal HTTPS server，拒 query/路径变体，不经过 SPA 回退；不覆盖其应用生成的 CSP hash、`Referrer-Policy: origin`、COOP，也不将 credential 的 `no-referrer` 提前套在 handoff。credential 响应保留原应用 CSP/COOP/no-referrer/no-store，代理自产拒绝页另加安全头。不加入跨 origin CORS，不重写 redirect、Cookie domain/path 或回调参数，不缓存或重试写请求。
+2. **代理链与日志**：可信 TLS 边缘清除外部可伪造的 forwarding/deadline/source 头后设固定 Host/HTTPS，应用侧只允许明确受信代理来源。upstream 只支持同机 loopback/固定受控加密隧道端口，或验证证书及固定 SNI 的 HTTPS；不允许任意公网明文 HTTP。隧道身份/监听限制/断链失败关闭和其他代理/WAF/APM 的配置属于现场证据，配置声明不是证明。credential 与 handoff 禁止 request/response body、完整 URI/query、Cookie/Authorization/Referer 日志；采用只含固定 route 类别、服务端 request_id、状态与时长的访问格式，敏感 location 的原始 error log 关闭；请求缓冲落盘及响应临时文件关闭。不得通过调试日志重新采集；无法审计某一层时保留缺项。保留无敏感值的可观测计数，不用全站禁日志影响支付排障。
+3. **OIDC/workload 前置**：credential 专用 authorization-code + PKCE S256/client/audience、精确单一 `/oidc/callback` redirect URI、issuer 同源 HTTPS 三端点、无显式端口/userinfo/query/fragment按既有校验；不得拓宽普通 Portal client。workload 继续现有 issuer/JWKS/audience 与每服务精确 subject/permissions，短期 token-file/投射文件及轮换权限引用，不读取、复制或解码真实 token。清单校验拒缺项/通配权/跨用途 client，实际签发、15 分钟期限、轮换、过期拒绝、错误 audience/subject/权限拒绝由既有正式服务授权链实测并留报告，不能仅凭文件存在或 ready 布尔通过。KMS 旧密文兼容与 NATS 同集群 ACL 继续是环境前置，不能被本批 OIDC 结构校验替代。
+4. **只读外部预检**：仅在显式选择固定 Production/CLOUD_UAT 后进行 DNS 和受校验 HTTPS 请求，禁止自定义 host resolver、忽略证书、HTTP 回退、自动跟随重定向和任意目标。检查两域证书主机名/有效期/链、HSTS、handoff 200 的构建期冻结脚本 hash/CSP/无 Cookie、credential 无 Cookie `/session` 的既有拒绝及安全头/本地 assets，并核对受控配置中的 OIDC discovery 与端点来源。所有请求无身份、无 Cookie、无 launch/result ID、无 POST；总量、body 大小和各步骤 deadline 有界，输出只含固定检查码、状态/摘要，不输出响应原文、原始网络错误、地址或证书主体。Chromium 使用 Puppeteer 专属全新 context 和唯一 page，goto 前禁网页 JavaScript 并安装 page request interception，仅接受固定无 query handoff GET/必要 HEAD 主文档，任何子资源、额外请求或 redirectChain 在发送前拒绝；不执行点击、表单或页面脚本。主文档暂停后由正式严格 HTTPS 客户端取得同一 URL，校验**全部冻结 HTML 字节**与精确 CSP/hash，拒绝 Link/Refresh/Report-To/NEL/Alt-Svc 等被动通道头，再只将已验证字节和安全头白名单 `request.respond` 给 JS-off 页面；未知 HTML 不进入解析，不能触发 preconnect/DNS-prefetch/iframe/表单/WS/popup。意外 target 关闭只是附加失败处理，不是前置保障。报告明确 `VALIDATED_HTTPS_REPLAY / FRESH_CONTEXT_ONLY`，不是原生浏览器 TLS 或真实握手；HTTP 层单独证明 TLS。Service Worker 不被禁用或清理，由可信 DevTools 只读检查 controller 和 registration scope，不能证明已有用户 context 或登录流程。代理清理不动真实 Origin、Referer 或 Fetch 元数据；`X-Pinvou-Tunnel-Proto` 在受控隧道模式由可信边缘固定 https，其余模式清空，不能透传外部伪造值。
+5. **证据与测试**：离线严格输入/注入/跨环境/端口/日志/方法/预算/安全头回归，根用公开 fixture 在真实 nginx（兼容既有 1.18）做 `-t`，不 reload；另允许自有临时目录、自签 fixture 证书、独占 loopback 高端口与本地 mock upstream 的隔离 nginx 进程实际请求测试，验证 named error_page、方法/query/安全头与安全日志，结束只停止该精确临时实例。不使用现场私钥、现有监听或业务数据，不发外部流量；该证据仅证明代理实现，不证明公网 TLS 或真实域名链。受控 HTTP/TLS/浏览器 fixture 可用于确定性拒绝测试，但 probe 的现场入口不提供 resolver/TLS 绕过开关。只读预检通过最多 `PREFLIGHT_PASSED / ENV_PENDING / NOT_DEPLOYED`，不输出环境 VERIFIED/GO。专项设计 6.2 的完整十一点的真实双域 Chromium、专用真实 OIDC 登录、一次性隔离测试资源、权限/撤销/刷新/未知恢复以及各层 canary 日志扫描由后续环境验收单独执行；既有 `/start`/固定 launch IDs 的本地 smoke 不可直接当作现场 runner，用户未选环境或缺条件时明确列缺项，绝不发送试探性 launch/credentials 写请求。
+
+### 7.2 实际调用与证据归属
+
+所有可用CLI参数见 [nginx入口说明](../nginx/README.md)，其相对文件、三模板与公开edge config均在本组。配置校验默认零网络；显式render只输出片段，不运行nginx/certbot；HTTP与scope只有显式--probe才访问固定目标。现场CLI不提供fixture resolver/TLS绕过；真实scope测试要求显式CHROME与app锁定puppeteer-core。与scope分开，`credential-domain-rename.test.mjs`直接执行G0实际脚本完整READY/BIND/SUBMIT，四正例恰一次指定目标POST、三十负例零POST/DOM；该VM不是原生浏览器TLS/完整现场登录。
+
+静态/Node/Chrome与隔离nginx实测按根精确候选分项记录；可以在G4模板/固定域/相关原服务字节一致时明确继承新域nginx解析/回环证据，不能继承旧域525候选作为新域已验收。G6的通用renderer、nginx测试镜像/helper和workflow未随本组提交，不声称这些持续门禁已交付或GitHub已绿。完整双origin/IdP握手、安全日志、权限撤销与回滚仍要独立现场证据，不由scope或无Cookie/session401探针替代。
+
+根在G3加本组十一个代码/模板/测试文件的精确候选 `41b501279d6ce12f2df0021a25f97a467e3a3e81` 实际运行十一 Node PASS/0 SKIP（0.649 秒），真实 Chromium scope 2/2 PASS/0 SKIP（10.041 秒），exit 0。根核对十一输入与 `e371d69e58fe9e5831bf0e19a478f88bf80235e7` 无差异，并与 `4a0d59fe5f6488e08eb909ca5888e1e5a1188e47` 新域 host-nginx机制验证输入一致，故仅继承六 profile解析、双runtime安全矩阵与故障/实际SIGTERM精确清理的G4分项，不继承G6受限容器/持续CI完成结论。六份最小文档另交B；无实际DNS/证书/部署变化，不将VM或scope误称现场完整握手。

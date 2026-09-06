@@ -563,6 +563,14 @@ Compose 显式 overlay/profile 和 Helm 可选 Deployment/Service/ServiceAccount
 
 原CLI包装器以绝对候选制品hash/闭合参数/无shell/最小env执行一次明确操作，DSN查询参数不得重绑定库/身份/主机或注入启动选项，原stderr不传播，UNKNOWN仅原request-id/账本查询。运维主体和运行主体分离，SAFE需匹配旧摘要控制制品，不支持任意N/N-1摘要升级。具体调用见已交付发布说明G3节；无自动激活、部署或新领域行为，后续环境和G4～G6仍分离。
 
+### 9.4 APT-137 G4 代理与只读浏览器的分层边界
+
+固定新双origin结构校验与三段nginx渲染不安装站点。edge仅隐藏上游HSTS并输出唯一固定值，保留应用阶段Referrer/CSP/COOP/Cookie/Location；raw request_uri精确校验，nginx自产错误按原状态返回安全头，proxy_intercept_errors off不截改应用401/403/303。仅loopback/受控加密隧道或校验证书SNI的HTTPS上游，可信Forwarded/Host/Tunnel边界不清理真实Origin/Referer/Fetch元数据，日志不得含秘密或完整请求体/参数。
+
+显式只读HTTPS probe仅固定目标、无Cookie/Auth/POST、严格TLS/无重定向、限body与绝对deadline。Chromium在唯一fresh page导航前禁网页JS并严格拦截请求；正式HTTP客户端先取得并验证全部冻结HTML/CSP/hash、拒Link/Refresh/reporting等被动通道，之后才重放安全白名单响应给浏览器。既有Service Worker不禁用/不清理，controller/scope检查只证明该fresh context，不证明所有用户或完整生产握手。实际脚本完整READY/BIND/SUBMIT由受控VM正负矩阵另证，TLS/浏览器scope/实际POST语义分层，不相互替代。现有完整生产等价握手合同不缩减，现场仍需真实IdP/身份/日志与一次性隔离资源。
+
+调用说明见 [nginx入口与探针](../deploy/nginx/README.md) 和发布说明第7节；G5来源签名与G6持续CI仍为后续交付。
+
 ## 10. 发布门禁
 
 实现阶段必须提供以下自动证据：
