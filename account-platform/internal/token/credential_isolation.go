@@ -863,7 +863,7 @@ func (r *PostgresRepository) CompleteCredentialSession(ctx context.Context, sess
 	if _, err = tx.Exec(ctx, `UPDATE token_accounts SET management_version=management_version+1,updated_at=$2 WHERE id=$1`, item.TokenAccountID, now); err != nil {
 		return CredentialIsolationResult{}, err
 	}
-	command, err := tx.Exec(ctx, `UPDATE credential_isolation_sessions SET status='COMPLETED',pkce_verifier_ciphertext='\\x'::bytea,key_id='' WHERE id=$1 AND status='READY'`)
+	command, err := tx.Exec(ctx, `UPDATE credential_isolation_sessions SET status='COMPLETED',pkce_verifier_ciphertext=decode('','hex'),key_id='' WHERE id=$1 AND status='READY'`, sessionID)
 	if err != nil {
 		return CredentialIsolationResult{}, err
 	}
