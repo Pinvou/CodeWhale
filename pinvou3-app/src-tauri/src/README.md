@@ -17,6 +17,10 @@ Tauri 命令按 `app/commands/<domain>.rs` 组织，`app/mod.rs` 与 `app/comman
 3. 只有被多个 feature 共同使用的低层能力才能进入 `platform/`。
 4. 操作系统选择使用 `cfg(target_os)`；Cargo feature 不用于模拟操作系统。
 5. 未支持能力必须显式返回 unsupported，不得静默执行其他平台实现。
+6. 禁止 spawn 外部 `kill` 可执行文件执行进程组或进程树终止。Unix 组杀统一
+   使用 `platform::process::kill_process_tree` /
+   `platform::os::kill_pid_tree` 直接调用 `kill(2)`；此约束由
+   `scripts/architecture-guard.py` 的 `rust_external_group_kill_spawn` 规则检查。
 
 上述依赖和平台边界由仓库根目录的 `scripts/architecture-guard.py` 检查。迁移期保留
 `#[path]`、`include!` 可以用于兼容公共路径或生成代码，语法本身不作为架构违规；是否

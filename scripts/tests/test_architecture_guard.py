@@ -243,6 +243,57 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
                 ],
             )
 
+    def test_rust_scanner_rejects_external_group_kill_spawn(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rust_root = root / "pinvou3-app/src-tauri/src"
+            platform = rust_root / "platform/process.rs"
+            platform.parent.mkdir(parents=True)
+            platform.write_text(
+                'fn run() {\n'
+                '    Command::new("kill");\n'
+                '    Command::new("/usr/bin/kill");\n'
+                '    Path::new("kill");\n'
+                '    connector_cli_command(cmd, "kill");\n'
+                '    Command::new("taskkill");\n'
+                '}\n',
+                encoding="utf-8",
+            )
+
+            rules, _ = self.guard.scan_rust(root)
+
+            self.assertEqual(
+                7,
+                rules["rust_external_group_kill_spawn"][
+                    "pinvou3-app/src-tauri/src/platform/process.rs"
+                ],
+            )
+
+    def test_rust_scanner_rejects_kill_in_stub_shaped_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            rust_root = root / "pinvou3-app/src-tauri/src"
+            stub = rust_root / "platform/os/unsupported.rs"
+            stub.parent.mkdir(parents=True)
+            stub.write_text(
+                "pub fn kill_pid_tree(pid: u32) {\n"
+                "    #[cfg(unix)]\n"
+                "    { let _ = pid; }\n"
+                "    #[cfg(not(unix))]\n"
+                '    { Command::new("kill").args(["-9", "-42"]).output(); }\n'
+                "}\n",
+                encoding="utf-8",
+            )
+
+            rules, _ = self.guard.scan_rust(root)
+
+            self.assertEqual(
+                2,
+                rules["rust_external_group_kill_spawn"][
+                    "pinvou3-app/src-tauri/src/platform/os/unsupported.rs"
+                ],
+            )
+
     def test_guard_does_not_track_file_line_counts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
