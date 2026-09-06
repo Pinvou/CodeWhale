@@ -11,3 +11,5 @@
 既有 `account.pinvou.com` 记录保持不变。实施者须先确认三名称没有冲突 A/AAAA/CNAME 或其他不兼容记录；不能覆盖未核实记录。三条别名沿用既有公共代理入口，但 DNS 同目标不等于同 origin 或相同 upstream：HTTPS 入口必须按精确 SNI/Host 区分三个新名称，Portal 与 credential 分别路由到批准的服务，不回落默认站点，不增加跨环境 Cookie/OIDC/CORS 信任。
 
 需要覆盖各新域的有效证书链、独立 Host 路由、固定 OIDC 回调和安全代理日志策略，并在后续 APT-137 部署验收中逐项验证。旧 `credentials.account.pinvou.com` / `credentials-uat.account.pinvou.com` 从未上线，不新增它们的记录、证书或重定向，也不纳入新白名单。未取得真实 DNS/TLS/代理和身份等证据时保持 ENV_PENDING/NOT_DEPLOYED；不得把自签 fixture 或 CNAME 已填写当部署完成。
+
+代码中的新域配对及检查工具已按依赖分组交付，DNS 仍须由实际环境提供；受控执行及缺项见 [发布手册第9节](model-token-release.md#9-g6-持续门禁与环境交接)。本清单不是 DNS 已添加或部署完成记录。

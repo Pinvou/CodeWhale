@@ -1849,3 +1849,7 @@ APT-137 保持 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED。后续发布计划、部�
 ### APT-137 G5：离线证据与兼容验收
 
 本组交付 evidence/policy/report 三模块、bundle/report/trust 三份闭合 schema 与真实原始字节/签名负例；复用 G1 计划/envelope，不引入签发服务、私钥、网络采集或自动部署。外置独立信任绑定计划/来源/候选/环境，受控根内实际读取报告及工件字节并核 SHA，缺失或不可信不得 VERIFIED；十七 kind、十九命令及版本化具名 case 按事实层级验收。观察采用精确阈值、最低样本/时长与实际末阶段新鲜度，旧链接保留真实 GA 起至少 90 天或后续两生产稳定版取较长者。本组只纠正既有登录/支付测试断言并增加导航兼容回归，不改变业务或删除旧路由。G0～G5 为代码交付范围，G6 持续 CI 和真实环境仍待完成；EVIDENCE_VERIFIED 不等于部署，整体 ENV_PENDING/NOT_DEPLOYED。
+
+### APT-137 G6：持续门禁接线与环境分层交付
+
+G0～G5 已按依赖独立签署，本组只交付既有 CI 的触发/专属角色集群与三原CLI/明确 Chrome/真实配置与代理验证接线、公开测试辅助文件和当前状态文档，保留全部原门禁及有界超时/精确实例清理。未在该候选实际运行的 GitHub Actions 不记为通过；受控 fixture、测试依赖变体和正式环境报告明确分开。代码具备发布计划、运维、门禁及验证工具不代表现场已切换，UI-58 当前为部分实现，APT-137 为 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED；两项旧 Node 断言已由 G5 对齐实际既有行为。真实 DNS/TLS、OIDC/workload、NATS ACL/历史、全部旧密文 KMS 兼容、备份/HBA/角色与分级灰度/SAFE 报告仍必须闭合，不能因 DNS 暂缺阻塞已验证代码交付，也不能以代码提交绕过环境要求。当前证据以 [运行手册第9节](../deploy/runbooks/model-token-release.md#9-g6-持续门禁与环境交接) 和 implementation-status 的 APT-137 记录为准；前述各组“本组/后续”描述保留其独立交付时边界。

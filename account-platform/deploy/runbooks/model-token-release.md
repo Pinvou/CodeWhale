@@ -1,6 +1,6 @@
-# 模型与 Token 发布计划和可选部署配置（APT-137 G0～G5）
+# 模型与 Token 发布计划和可选部署配置（APT-137 G0～G6）
 
-状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。当前包含已提交 G0 新域基础、G1 离线计划、G2 可选配置、G3 受控工具、G4 安全入口/只读探针与本组 G5 离线证据；后续 G6 尚未交付。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
+状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。当前包含已提交 G0 新域基础、G1 离线计划、G2 可选配置、G3 受控工具、G4 安全入口/只读探针、G5 离线证据与本组 G6 持续 CI 接线（代码与隔离门禁已验证）。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
 
 ## 1. 实际入口与依赖
 
@@ -16,19 +16,19 @@ activation 的 NOT_INSTALLED 要求 epoch/安装摘要全 null；真实 PRE/0 �
 
 十三个 gate 全部显式 boolean，默认全 false、既有父子依赖由 schema 校验。写动作声明要求 ACTIVE；隔离凭据要求既有 Token 详情/动作前置及固定 origin；读详情、价格投影和编辑等保持独立开关。它们仍是既有部署配置，不新增业务/客户端 cohort 开关，本组不修改 Compose/Helm 或运行中环境。
 
-两 runtime 身份必须分离、不复用 retired/保护组/运维身份，名称为最多 63 字节的小写无引号 PostgreSQL 标识符；token_gateway 是权限组不是本代登录。Account policy 运维角色声明必须包含 SHARE_NOWAIT 锁合同，不能将其误称纯 SELECT 身份。这里只校验声明，实际非超级用户锁权限、跨库依赖、NOLOGIN/成员链和旧会话 fence 属后续受控角色与现场验收。
+两 runtime 身份必须分离、不复用 retired/保护组/运维身份，名称为最多 63 字节的小写无引号 PostgreSQL 标识符；token_gateway 是权限组不是本代登录。Account policy 运维角色声明必须包含 SHARE_NOWAIT 锁合同，不能将其误称纯 SELECT 身份。这里只校验声明，实际非超级用户锁权限、跨库依赖、NOLOGIN/成员链和旧会话 fence 由第6节工具及现场验收分别证明。
 
 INTERNAL→LIMITED→FULL 固定有序，流量严格增加且末阶段 100%；观察时长/最低样本为正安全整数，cohort/审批/SLO 引用完整，量化 advance_max 不大于 pause_above，未经授权效果阈值必须为零，容量不超过既有 0.70/0.85 边界。阈值和观察参数是提案，不代表已经采集样本或达到推进条件；本组不读取测量报告或决定放量。旧链接真实 GA 时间/版本必须同时有值或同时未知，不以提交日期冒充 GA，兼容保留由第8节判定，真实GA/版本证据仍须提供。
 
 ## 3. Envelope 的有限保证
 
-导出 `validateModelTokenEvidenceEnvelope` 仅校验本组闭合 envelope schema、与计划完全相同的候选/环境、合法起止且结束不晚于输入 now、独立执行者/复核者引用。返回 `ENVELOPE_VALID / ENV_PENDING / NOT_DEPLOYED`，不是对 status、报告内容或来源真实性背书。即使 envelope 写 PASS，也没有验证报告文件存在、实际字节 hash、签名、时效上限/完整 case 或观察指标；不得用于生产放量。完整离线工件与外部信任验证在后续 G5 交付，不引用尚未提交的模块。
+导出 `validateModelTokenEvidenceEnvelope` 仅校验本组闭合 envelope schema、与计划完全相同的候选/环境、合法起止且结束不晚于输入 now、独立执行者/复核者引用。返回 `ENVELOPE_VALID / ENV_PENDING / NOT_DEPLOYED`，不是对 status、报告内容或来源真实性背书。即使 envelope 写 PASS，也没有验证报告文件存在、实际字节 hash、签名、时效上限/完整 case 或观察指标；不得用于生产放量。完整离线工件与外部信任验证由第8节独立工具提供，不可用本节结构检查代替。
 
 ## 4. 精确候选验证与后续交付
 
 本组具名回归：`node --test account-platform/test/contract/model-token-release-plan.test.mjs`，覆盖十三 gate、所有依赖、环境/新域/状态摘要、身份、真实 PRE 归一与类型、观察阈值、envelope 绑定、重复 JSON 和默认 CLI 无 apply/GO。根在 G0 加本组四个代码/schema/test 文件的精确候选 `e96f6387c539d3a44296fea3f1da94df1103f030` 实际运行九项 Node 全 PASS/0 SKIP（1.784 秒），exit 0；本组最小文档另交 B 复核。此为当前四文件依赖已齐的真实运行，不继承原整树 PASS。G5 前其他两项旧 Node 基线断言仍可能失败，须如实记录。
 
-后续仍按 G2 部署配置、G3 受控角色/CLI、G4 安全代理/HTTPS/scope/实际脚本 VM、G5 原始证据与兼容、G6 持续 CI 顺序独立验证/签署。共同文档随已存在接口更新，不能把后续实现提前写成已交付。DNS/TLS、OIDC/workload、KMS 全用途旧密文、同一 NATS 集群/ACL、备份/HBA、实际灰度/SAFE 回滚仍需现场证据；本地 plan PASS 不能关闭 APT-137/UI-58 或解除部署前置。
+G0～G5 已按依赖独立验证/签署，G6 代码与隔离门禁已验证，最后证据文档复核；第5～8节保留各组安全合同与其当时精确候选证据。共同文档随已存在接口更新，不能把后续实现提前写成已交付。DNS/TLS、OIDC/workload、KMS 全用途旧密文、同一 NATS 集群/ACL、备份/HBA、实际灰度/SAFE 回滚仍需现场证据；本地 plan PASS 不能关闭 APT-137/UI-58 或解除部署前置。
 
 ## 5. G2 可选部署配置：只做结构验证，不执行上线
 
@@ -40,7 +40,7 @@ G1 已独立提交 `33209285`。本组使用现有 Go Dockerfile的 SERVICE 参�
 
 七个 broker 客户端使用同一受控外部 TLS NATS；Helm 开新治理组件时拒绝内置匿名开发 NATS，URL/creds/Ping 不证明真实 ACL 或 JetStream 历史。受限 workload 排除旧宽策略选择器，checker 核全部命中允许规则；目标 New API 明确只允许 credential 与 gateway 所需入口。Compose 网络本身不充当防火墙，依赖 CIDR/Host/TLS 身份与可信出站边界仍需现场证明。credential 独立 loopback18108、端口/IP范围重叠必须拒绝；所有 runtime/附加容器禁止运维URL，控制Job/entrypoint必须固定只读默认，不可用wrapper或init容器自动执行。
 
-配置从 local AES 切 remote Secret Provider 前，须由既有受控KMS流程证明全部持久密文（provider credential、事件流/结果回放和dispatch等）原 key_id、格式、AAD 可读及备份可恢复；没有本地解密 fallback，不能清旧KEK/删除历史后声称迁移成功。配置 Secret/issuer/ACL/DNS/有效证书/代理与HBA缺项均保持 ENV_PENDING，不绕过启动验证。本组只提供结构/制品，G3 操作包装器由第6节说明，G4 安全反代/HTTPS/scope工具见第7节，G5 验签工具尚未交付；既有 `token-governance` 默认 check 可独立构建，但任何 apply/激活须遵循本节及第6节受控步骤并取得现场授权。
+配置从 local AES 切 remote Secret Provider 前，须由既有受控KMS流程证明全部持久密文（provider credential、事件流/结果回放和dispatch等）原 key_id、格式、AAD 可读及备份可恢复；没有本地解密 fallback，不能清旧KEK/删除历史后声称迁移成功。配置 Secret/issuer/ACL/DNS/有效证书/代理与HBA缺项均保持 ENV_PENDING，不绕过启动验证。本组只提供结构/制品，G3 操作包装器由第6节说明，G4 安全反代/HTTPS/scope工具见第7节，G5 验签工具见第8节；既有 `token-governance` 默认 check 可独立构建，但任何 apply/激活须遵循本节及第6节受控步骤并取得现场授权。
 
 根对本组精确候选验证 `node --test account-platform/test/contract/model-token-deployment.test.mjs`，并核对相同输入/blob下真实Helm/Compose解析、语义变异和新镜像构建证据；结果另记，不自动把原整树PASS转为本组证据。部署说明详见 [Compose](../compose/README.md) 与 [Helm](../helm/account-platform/README.md)。后续实际部署/灰度/SAFE流程仍待 G3～G6 与现场证据闭合，不 push/deploy，不标 UI-58 DONE。
 
@@ -160,4 +160,46 @@ prepare 程序只从 `TOKEN_RELEASE_DBA_DATABASE_URL` 连接 DBA；`--operation 
 
 ### 8.2 本组验证与后续边界
 
-根精确十代码候选 `b837fc087518594a8005a487235c0630e02eb57b` 全账户 Node 429/429 PASS/0 SKIP（45.093 秒、exit 0）；OpenAPI 有效（9 项既有 warning）、架构守卫与正式授权覆盖 339 HTTP/27 task/6 event/18 CLI 通过。首次归档遗漏同树 vite.config.js 导致 ENOENT，补导后以同一候选完整重跑取得上述结果，不称首次一次全 PASS；没有修改源码或放宽断言。B 四文档静态 PASS，精确合成树/本组最终签署待确认。测试签名与模拟报告仅证明实现的正负判定，未产生正式站点证据。G6 持续 CI 及其 renderer/helper/容器接线尚未在本组交付；代码提交、远端 CI 和真实环境部署分别记录。当前未推送或部署；后续仅在适用批准范围及全部现场前置齐备后执行，校验器不授予写权限，也不会执行推送或部署。
+根精确十代码候选 `b837fc087518594a8005a487235c0630e02eb57b` 全账户 Node 429/429 PASS/0 SKIP（45.093 秒、exit 0）；OpenAPI 有效（9 项既有 warning）、架构守卫与正式授权覆盖 339 HTTP/27 task/6 event/18 CLI 通过。首次归档遗漏同树 vite.config.js 导致 ENOENT，补导后以同一候选完整重跑取得上述结果，不称首次一次全 PASS；没有修改源码或放宽断言。B 本组最终独立 PASS，精确14文件树00550d02已签署43d5acc2。测试签名与模拟报告仅证明实现的正负判定，未产生正式站点证据。G5 不含 G6 持续 CI，其 renderer/helper/容器接线由下节单独交付；代码提交、远端 CI 和真实环境部署分别记录。当前未推送或部署；后续仅在适用批准范围及全部现场前置齐备后执行，校验器不授予写权限，也不会执行推送或部署。
+
+## 9. G6 持续门禁与环境交接
+
+本批在既有 APT-137 范围内收尾，不改前五批领域/工具语义，不新增发布平台或业务能力。修改 `.github/workflows/pr-check.yml` 现有账号平台验证流程，增加可复用、明确参数化的部署验证测试辅助文件和对应 Node 接线合同；保留所有原始权限、迁移、容量、浏览器和镜像门禁，不能用新测试替换已有昂贵测试或屏蔽失败。复用已经实际验证的 nginx 渲染/回环机制，将自有临时路径改为显式参数或本次新建临时目录，删除所有私人机器/站点信息，不另建一套测试服务。
+
+保留原全部工作并将该 job 的有界总预算由 30 分钟调整至 45 分钟；新增专属 PG/原 CLI、scope 和配置/nginx 步骤各有独立 timeout，不靠删除原百万级容量/集成或镜像构建适配。专属 PG 可在明确步骤内启动一次性命名容器并绑定 loopback，步骤 EXIT trap 和 always 清理只针对登记的本次实例，失败/取消同样检查；不对所有 Docker 容器批量清理。测试程序持有自己创建的 nginx/mock 句柄并在 finally 停止，禁止用宽泛 pkill 或系统 nginx reload。
+
+1. **专属角色集群**：CI 为 release-prepare 两具名测试提供第二个隔离 PostgreSQL 17 集群，不能复用已有预建 token_gateway/schema_owner 等固定角色的账号平台 PG。新集群没有业务数据、不加载生产 Secret，端口只绑定 runner loopback，固定角色生命周期由测试负责；明确允许该专用 fixture 使用 trust 认证，以执行真实非超级用户切换，不将其当 SCRAM/HBA/Secret 匹配证明。`PINVOU_TEST_RELEASE_DATABASE_URL` 只注入专属步骤，不全局开启其他 Go 包的重复集成。先用同一候选源码构建 `migrate`、`token-governance`、`token-policy-bootstrap` 三个原 CLI 到本次临时制品目录（既有 `nomsgpack` 构建标签），设置 `PINVOU_TEST_RELEASE_CLI_DIRECTORY`，依次运行 `TestTokenReleasePreparationPostgresIntegration` 与 `TestTokenReleaseOperationsPostgresIntegration`。每项 timeout 有界、exit 0、必须出现具名 PASS 且所有 SKIP 拒绝；结束确认测试自建固定角色/fixture 数据库零残留，再精确停止本次集群。普通 `go test -short` 仍不能代替这两项。
+2. **真实浏览器机制门禁**：沿用 runner 上已要求存在的 Google Chrome/Chromium 与 app 锁定依赖，显式运行 `pinvou3-app/tests/credential_origin_scope_probe.test.mjs`，缺 CHROME 或真实子项 SKIP 必须失败。报告区分默认零网络单元和实际 Chromium 恶意文档/被动通道零副作用及已有 SW 拒绝；该 fixture 不是正式 HTTPS/登录握手。原 Go 完整 credential origin Chromium+PG 门禁继续保留，不被 scope test 替换。
+3. **配置与代理持续实测**：真实 Helm 对默认、staging、production-new、公开新 workload fixture 四 profile lint，渲染新组件实际启用的结果并运行语义 deployment checker；默认镜像/私有 registry 引用规则不降级。Compose 使用两份公开 env example、base+overlay 和三个显式 profile 做 `config --quiet`/JSON 后交同一 checker，不读站点 .env、不 up/run 工作负载；现有服务 build 保留，并验证新增两服务/治理制品可构建。nginx 测试使用明确测试依赖、真实 1.18 兼容二进制，独立临时目录/自签 fixture 证书/loopback 空闲高端口/mock upstream，运行六 profile `-t` 和 loopback/encrypted_tunnel 两组实际响应矩阵。覆盖 raw URI/方法零 upstream、单 HSTS、413/502/504 原状态安全头、应用 401/303、合法 POST/query、转发头/隧道头与实际增长日志 canary 零泄漏。nginx/mock 进程均有有界启动/停止，失败同样精确清理；不得 reload 系统 nginx、读取现场私钥、占用现有监听或外发流量。临时自签证书仅为 fixture 信任，不能产出正式双域 PASS。
+4. **验证器与接线自检**：辅助入口默认只允许公开受控 fixture 参数，不引入任意 SSH/远程主机、站点 Secret 或自动运维模式；清理对象必须是本次创建的目录、容器/进程实例。账号平台 path filter 同步直接输入的 `scripts/account-platform-*.mjs`、account-platform 前端功能模块、scope 测试及相关 app 测试依赖清单，避免只改新 helper 时全部门禁被跳过，不扩大为无关 app 业务。Node 合同检查实际 workflow 步骤、专属集群隔离、三 CLI 构建和两 PG/Chrome 零 SKIP 断言、实际 Helm/Compose/nginx 命令；另执行辅助脚本本身与真实依赖，静态字符串测试不能代替真实执行。独立 CI runner 的报告不具备正式报告签名权限，本任务不自动签署第五批现场 envelope。根按冻结候选验证适用接线与辅助程序，B 审通过才登记“CI 接线已实现”；尚未推送时不能宣称 GitHub Actions 已在该候选运行通过。
+5. **正式环境交接而非提前关闭**：实际目标保持 PRODUCTION/production-new 正式配对。进入实际部署前，由负责人取得并核验 DNS/覆盖新域证书、可信代理链、独立 OIDC/workload 短期签发/轮换与最小权限、同集群 NATS ACL/历史、旧 local 密文的 KMS 兼容或已批准迁移、DBA/备份恢复/HBA 和外部证据公钥来源。旧密文覆盖供应商凭据以及事件流/结果回放、dispatch 等全部使用同一 Secret Provider 的持久数据，逐类验证原 key_id、格式和 AAD 仍可解密/恢复，不能只证明新写入可用或删除历史回放来通过迁移。没有现成 KMS/身份签发条件时报告部署阻断，不临时制造服务或回退 development，但不据此阻塞已验证代码的本地提交。代码按依赖独立功能组由根签署；当前未推送或部署，后续只在适用批准范围及现场前置齐备后执行，真实环境写入仍按第6节受控顺序，首次缺31前置停写/fence/迁移、显式 cap、CAS、关闭短期运维身份后启用本代 writer/Relay、readiness和分级 gates，保留 SAFE 与只读恢复。每一阶段取得真实原始报告、独立复核与受信签名后才使用第五批门禁判断，不以本地 fixtures 填补生产证据。实际执行前重新确认旧写入实例和独占窗口，仍不允许任意 N/N-1 混写。
+6. **完成标准**：逐文件范围自检、B 最终代码/文档独立审核、适用测试/安全/架构/授权/迁移/三语门禁和真实环境缺项表同时闭合。可以单独记录代码实现已交付而环境仍 ENV_PENDING/NOT_DEPLOYED，但整个 APT-137/UI-58 不在必需环境证据缺失时标 DONE。最终报告列明每个不可变候选与相同生产 blob 的继承范围，不把不同运行或编排错误说成一次全量 exit 0。任何超出既有部署方案的领域问题返回其所有者，不为收尾放宽安全边界。
+
+### 9.1 已实现的持续验证入口
+
+- `account-platform-test` 保留原 Go/PG/容量/浏览器/镜像/依赖审计，追加专属角色步骤，默认不向其他包注入 release 测试环境。该步骤命名/标记本次 PostgreSQL 容器，使用 loopback 5433 和独立空集群，三 CLI 从候选源码外部构建后分别运行两个具名测试并拒绝任何 SKIP；EXIT 与 always 清理只操作记录的精确容器 id/label。真实 Secret/HBA 验收不由该 trust fixture 代替。
+- `node scripts/account-platform-render-nginx-fixtures.mjs --output <新建空绝对目录> --runtime-root <nginx内可见的绝对POSIX目录>` 只读取公开 edge example，渲染两环境×三 upstream 模式六份配置及固定 fixture marker；目录非空拒绝，绝不覆盖站点配置。测试使用生成的自签证书，不加载现场证书私钥。所有 nginx 临时文件路径均落入本次目录，使非 root、只读容器可运行。
+- `python3 account-platform/test/deployment/nginx-loopback-test.py --root <同一fixture目录> --profile cloud_uat-loopback|cloud_uat-encrypted_tunnel [--nginx <受信nginx二进制>]` 只接受已标记的 fixture，替换为本机独占高端口并启动实际 nginx/mock。`--exercise-cleanup failure|cancel` 在 nginx 确实 ready 后触发已知失败/取消；预期非零退出、JSON `FAIL`，但两个 `owned_*_stopped` 必须 true，并精确匹配 `exercise_mode` 与 ready 后的 `exercise_reached=true`；cancel 由 `os.kill` 发送实际 SIGTERM，已注册 handler 才能设置 `sigterm_received=true`，前置失败或忽略信号不能冒充取消清理通过。正常矩阵需要 JSON PASS、零隧道伪造、两个 owned stopped true。测试控制选项不是任何生产工具的放宽入口。
+- CI 用 `test/deployment/nginx.Dockerfile` 构建专属旧版 nginx 1.18+Python 测试镜像；只在依赖构建时取公开软件包，运行时 `--network none`、只读根、非 root 用户、drop ALL capabilities，只有本次 fixture 可写和 loopback mock；不把该历史版本镜像部署到站点。六份 `-t`、两个正常响应矩阵、两个失败/取消清理矩阵分别留证。尚未执行远端 GitHub Actions 时只记录接线实现与根的隔离实测，不能声称 CI 已绿。
+
+### 9.2 精确输入验证、测试依赖变体与未完成环境
+
+G6 精确五代码候选 `e3bf4dc40b7b4995614d02b4ac40c3e7bebcd2bc` 与 `e371d69e58fe9e5831bf0e19a478f88bf80235e7` 对应输入无差异；十五文件冻结候选 `bcb25dcb9a31b824d1210009c7d78f15437e8560` 全账户 Node 434/434 PASS、0 SKIP（47.714 秒、exit 0）；任务覆盖 138 tasks/3 remediations/31 incomplete/352 completed、授权 339 HTTP/27 tasks/6 events/18 CLI 和 architecture 均 PASS。代码及隔离门禁已验证，B 已静态 PASS，最终证据文档复核后签署；不是远端 CI 或现场部署通过。相同源码与预构建三个原 CLI 的两项专属 PG 实测 16.86/64.31 秒，合计 82.777 秒、0 SKIP、exit 0，固定角色/fixture 库残留 0/0；真实 Helm 4.2.3 四 profile lint/render checker、Compose config/checker 和三个新增服务镜像构建通过。
+
+nginx 测试镜像须分开记录：仓库保留已审的官方 Alpine 同 host/version/path HTTPS 源及 APK 签名/TLS；官方源构建因网络下载缓慢由根停止，未取得成功结果。根仅在隔离 TEMP 使用已复核的局部依赖镜像源适配取得 nginx 1.18.0/Python 3.8.10 测试制品（镜像 `sha256:5fc7372e9df24e918f30886b893a2e3f0d4f53b377aabbaee6fb9e8a1b94876c`，TEMP 源 SHA-256 `bf05125b9690004ebb0a998c4ac734d504d294f8758a7b64b27f9a9bef1c4f5b`）；未把此适配写回仓库，也不称官方 Dockerfile 原样构建成功。该测试制品以 UID 1000、network none、只读根、cap-drop ALL 运行六 parser、两个 runtime、ready 后 failure 与实际 OS SIGTERM 矩阵，精确 markers/子进程清理均 PASS、driver exit 0、本次 label 容器残留 0。专属测试 PG 最后确认固定角色/fixture 库残留 0/0 后已精确停止，不残留测试服务。这仅闭合受限容器机制验收，不是官方源可用性、GitHub Actions、正式 TLS 或生产部署通过。
+
+此前后端候选 `a266fd10c0c1011cceb813fe0b5d149bcdfb1111` 的全量 Linux `go test -p 1 -short -race -tags=nomsgpack -count=1 ./...` 35 包通过、0 FAIL/0 race；同候选另一次显式 argv `go vet -p 1 -tags=nomsgpack ./...` exit 0。原组合末尾 vet 因外部命令 CRLF 参数未执行，不称组合 exit 0。后续 G0 新域 Go 变更以其独立 Portal/Token 短测和 hash 证明，不把更早后端全量测试冒充新域执行。
+
+G0～G5 分别已签署 `8dcaa87c`、`33209285`、`e63224e9`、`07e29c55`、`0470d83a`、`43d5acc2`，每组代码/文档与相同输入继承范围有独立审核；本组 G6 精确候选 bcb25dcb 的完整 Node/任务/授权/架构验证已通过，最后证据文档交 B 复核后签署。当前没有 GitHub Actions 在最终候选执行通过的声明，也没有正式站点部署/激活。真实 DNS 清单见 [model-token-dns.md](model-token-dns.md)；历史私有环境计数、地址或认证信息不进入本手册。
+
+### 9.3 正式环境缺项和有序交接
+
+| 必需证据 | 执行边界 / 缺失时结果 |
+| --- | --- |
+| 固定双 origin 的 DNS、证书、独立 SNI/Host 与安全代理链 | Portal/credential 必须同环境精确配对，实际浏览器完整握手按专项设计6.2；不得以自签、validated replay 或默认站点替代。缺失 ENV_PENDING |
+| OIDC、短期 workload、同集群 NATS ACL/轮换 | 复用既有可信签发器，每服务窄身份；最长15分钟、错audience/subject/权限拒绝与轮换实测；不能沿用共享development token或丢弃既有JetStream历史 |
+| 全用途旧密文、备份恢复与认证 | 凭据/事件流/结果回放/dispatch全部原key_id/格式/AAD可读，真实恢复与HBA/Secret登录探针；server verifier布尔或隔离trust不构成现场证明 |
+| 角色/版本、cap、000031 与运行注册 | 首次缺31先停写/fence/连续前向迁移再强读PRE；已ACTIVE以摘要匹配旧CLI完成SAFE；不支持摘要变化则阻断。短期运维角色关闭后启用本代gateway/credential/Relay，两worker/三consumer真实ready |
+| 十三gate、旧链接/cursor、观察与回滚 | 依赖分级、先验适用权限/安全恢复，再按第8节独立来源原始证据判定INTERNAL/LIMITED/FULL；SAFE CAS成功后旧epoch零新效果，未知只读原request-id，保留历史/90天与两稳定版更长窗口 |
+
+这些缺项约束实际切换，不阻塞已验证代码签署；反之提交完成不解除前置。现场操作只在适用批准范围、维护窗口及证据齐备后执行。APT-137/UI-58 仍 IN_PROGRESS/部分实现/ENV_PENDING/NOT_DEPLOYED，不以本组收尾自动标整体 DONE。

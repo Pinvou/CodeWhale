@@ -593,3 +593,9 @@ Compose 显式 overlay/profile 和 Helm 可选 Deployment/Service/ServiceAccount
 十七 kind 完整且恰一份、十九命令逐项及版本化 case/验证层级不可由报告自行缩减；FAIL/SKIP/非零退出/缺工件/错环境不得通过。原始 JSON 数字先按数学值拒绝舍入/下溢，保留等价十进制表示；实际观察末阶段 end 绑定报告 end 与外部最长 24 小时新鲜度，不允许新签旧窗口刷新年龄。六指标均 <= advance_max 且样本/窗口 >= 下限才可推进，advance_max < 值 <= pause_above 或样本/时长不足 HOLD，任一 > pause_above、未授权效果 > 0 或 FAIL 优先 NO_GO。
 
 真实 GA 未登记就保留旧链接，不以提交时间或预发布版起算；至少 90 天或两个后续正式稳定版本取更长。既有导航纯函数和安全 return URL 回归保留原行为，支付复用既有 false 合同，不改 Go/登录/支付/cursor 语义。调用和文件限制见 [发布说明第8节](../deploy/runbooks/model-token-release.md#8-g5-离线证据与兼容验收)；本地 fixture 签名不能作为正式环境报告，G6 与部署证据继续独立。
+
+### 9.6 APT-137 G6 持续验证与最终代码边界
+
+保留既有 account-platform-test 全部门禁，路径触发覆盖 account-platform、直接 account-platform-* 脚本、scope/实际脚本测试及其前端依赖/锁文件；job 总预算 45 分钟，新增步骤另有有界 timeout。专属 PG 与原预建固定 Token 角色集群分离，三个原 CLI 从同一候选预先构建，两具名 PG 和真实 Chrome 均拒 SKIP；公开 Helm/Compose 真实解析、三个新镜像及 nginx 六 parser/双 runtime/真实 SIGTERM 门禁分别留证。工具只清理本次精确容器/进程，ready 前失败或未收到实际信号不得冒充注入通过；不删原测试、不关闭安全策略或依赖审计。
+
+G0～G5 已独立签署，G6 精确候选 bcb25dcb 全账户434/434、任务/授权/架构均已通过，代码与隔离门禁已验证，最后证据文档交 B 复核；前述各组后续范围仅描述当时提交，不撤销现有实现。当前 UI-58 部分实现/NOT_DEPLOYED，代码交付与远端 CI、正式环境验收分开。官方依赖构建未成功和 TEMP 受限测试镜像变体通过必须分别记录；不将后者写作原 Dockerfile 成功或正式生产等价。全部现场前置与持续观察仍由运行手册第6～9节约束，不改变 activation 状态机或新域配对。

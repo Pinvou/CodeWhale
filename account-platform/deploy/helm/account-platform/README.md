@@ -160,3 +160,5 @@ The checker validates structure, isolation and shared
 event-cluster wiring, and always retains ENV_PENDING/NOT_DEPLOYED. For production
 rendering use the matching production origin pair and explicit provider/Secret
 references; do not weaken production image, HA or identity validation.
+
+G6 CI preserves all existing gates and validates the four Helm profiles with real lint/render plus the semantic checker. Local isolated rendering is not proof of a successful remote Actions run or production rollout; see [release validation and environment boundaries](../../runbooks/model-token-release.md#9-g6-持续门禁与环境交接).

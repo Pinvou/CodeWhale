@@ -62,3 +62,5 @@ HSTS 由这层 edge 唯一输出：仅移除上游同名 HSTS，并在 credentia
 只读 HTTP 前置检查为 `node scripts/account-platform-credential-origin-probe.mjs --config <受控配置.json>`，默认不联网；显式追加 `--probe` 才请求固定双域、公开 OIDC metadata/workload JWKS，没有 Cookie、身份、业务 POST 或重定向跟随。单步绝对 5 秒、响应最多 256 KiB；即使通过也仅 `PREFLIGHT_PASSED / ENV_PENDING / NOT_DEPLOYED`。这不证明 OIDC client 已注册、JWT 实际签名/权限/轮换成功或 KMS/NATS/DNS/备份的整个发布验收完成。完整真实浏览器/身份/日志门禁边界见运行手册 7.1，不能直接把旧本地 `/start` smoke 用于现场。
 
 独立只读浏览器范围工具为 `node scripts/account-platform-credential-browser-scope.mjs --config <受控配置.json>`；默认不启动浏览器，显式 `--probe` 时要求 `CHROME` 指向受控 Chromium 制品且已安装 app 锁定的 puppeteer-core。它使用全新 context、JS-off 唯一 page、加载前请求拦截和经严格 HTTPS/完整字节核验后的响应重放，只读检查 SW，不清理/禁用 SW。输出明确 `VALIDATED_HTTPS_REPLAY / FRESH_CONTEXT_ONLY / ENV_PENDING`，不冒充原生浏览器 TLS 或完整握手。真实机制负例运行 `node --test pinvou3-app/tests/credential_origin_scope_probe.test.mjs`（同样需 `CHROME`）；fixture 仅测试注入回环 HTTP 文档，现场 CLI 没有该绕过入口。
+
+G6 的公共 fixture renderer、nginx 1.18 测试镜像与有界回环 helper 已纳入持续门禁，包含六 profile 解析、双 runtime、ready 后故障及真实 SIGTERM 精确清理。镜像依赖下载来源与受限容器机制验证分别记录，不能以替代测试制品声称官方依赖构建成功；接口和当前证据见 [发布手册第9节](../runbooks/model-token-release.md#9-g6-持续门禁与环境交接)。

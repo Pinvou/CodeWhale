@@ -258,6 +258,13 @@ jobs:
             account_platform:
               - 'account-platform/**'
               - 'scripts/account-platform.mjs'
+              - 'scripts/account-platform-*.mjs'
+              - 'pinvou3-app/src/features/account-platform/**'
+              - 'pinvou3-app/src/shared/i18n.js'
+              - 'pinvou3-app/tests/credential_origin_scope_probe.test.mjs'
+              - 'pinvou3-app/tests/admin_token_credential_origin_real_smoke.mjs'
+              - 'pinvou3-app/package.json'
+              - 'pinvou3-app/package-lock.json'
               - 'docs/账号组织Token与计费系统-架构设计.md'
               - 'docs/账号组织Token与计费系统-实施任务与验证计划.md'
               - '.github/workflows/pr-check.yml'
@@ -562,7 +569,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17-alpine
@@ -845,6 +852,55 @@ jobs:
           go test -short -race ./...
           go vet ./...
 
+      - name: 专属集群的发布角色与原 CLI 实际闭环
+        timeout-minutes: 8
+        working-directory: account-platform
+        run: |
+          set -euo pipefail
+          release_container="$(docker run --detach --label pinvou.ci=apt137-release --cidfile "$RUNNER_TEMP/apt137-release.cid" --cpus 1 --memory 1g --publish 127.0.0.1:5433:5432 --env POSTGRES_USER=pinvou_release_test --env POSTGRES_DB=postgres --env POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine)"
+          trap 'docker rm --force "$release_container" >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec "$release_container" pg_isready -U pinvou_release_test -d postgres; then break; fi
+            sleep 1
+          done
+          docker exec "$release_container" pg_isready -U pinvou_release_test -d postgres
+          export PINVOU_TEST_RELEASE_DATABASE_URL='postgresql://pinvou_release_test@127.0.0.1:5433/postgres?sslmode=disable'
+          export PINVOU_TEST_RELEASE_CLI_DIRECTORY="$RUNNER_TEMP/apt137-original-cli"
+          mkdir "$PINVOU_TEST_RELEASE_CLI_DIRECTORY"
+          for command in migrate token-governance token-policy-bootstrap; do
+            go build -tags=nomsgpack -trimpath -o "$PINVOU_TEST_RELEASE_CLI_DIRECTORY/$command" "./cmd/$command"
+          done
+          for testcase in TestTokenReleasePreparationPostgresIntegration TestTokenReleaseOperationsPostgresIntegration; do
+            go test -tags=nomsgpack -run "^${testcase}$" -count=1 -timeout=3m -v ./cmd/token-release-prepare | tee "$RUNNER_TEMP/$testcase.log"
+            grep -F -- "--- PASS: $testcase" "$RUNNER_TEMP/$testcase.log"
+            ! grep -F -- '--- SKIP:' "$RUNNER_TEMP/$testcase.log"
+          done
+          test "$(docker exec "$release_container" psql -U pinvou_release_test -d postgres -Atc "SELECT count(*) FROM pg_roles WHERE rolname !~ '^pg_' AND rolname <> 'pinvou_release_test'")" = 0
+          test "$(docker exec "$release_container" psql -U pinvou_release_test -d postgres -Atc "SELECT count(*) FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'")" = 0
+
+      - name: 精确清理发布角色测试实例
+        if: ${{ always() }}
+        run: |
+          if test -f "$RUNNER_TEMP/apt137-release.cid"; then
+            release_container="$(cat "$RUNNER_TEMP/apt137-release.cid")"
+            [[ "$release_container" =~ ^[a-f0-9]{64}$ ]]
+            if docker inspect "$release_container" >/dev/null 2>&1; then
+              test "$(docker inspect --format '{{ index .Config.Labels "pinvou.ci" }}' "$release_container")" = apt137-release
+              docker rm --force "$release_container"
+            fi
+          fi
+
+      - name: 真实 Chromium 的只读 scope 与恶意响应门禁
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          test -n "$CHROME"
+          test -x "$CHROME"
+          node --test --test-reporter=tap pinvou3-app/tests/credential_origin_scope_probe.test.mjs | tee "$RUNNER_TEMP/apt137-scope.tap"
+          grep -E '^ok [0-9]+ - real Chromium scope gate rejects hostile bytes and passive headers before receiver side effects' "$RUNNER_TEMP/apt137-scope.tap"
+          grep -Fx '# skipped 0' "$RUNNER_TEMP/apt137-scope.tap"
+          ! grep -E '# SKIP|^not ok' "$RUNNER_TEMP/apt137-scope.tap"
+
       - name: OpenAPI、事件与迁移契约
         run: |
           npm --prefix account-platform test
@@ -880,6 +936,62 @@ jobs:
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-production-new.yaml
           docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 template pinvou /chart -f /chart/values-production-new.yaml > /tmp/account-platform-production.yaml
           ! grep -E 'payment-simulator|mock-newapi|TOKEN_LOCAL_KEK_BASE64|kind: Secret' /tmp/account-platform-production.yaml
+
+      - name: 新治理 profile 的真实配置与镜像门禁
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          compose=(docker compose --env-file account-platform/deploy/compose/.env.example --env-file account-platform/deploy/compose/model-token.env.example -f account-platform/deploy/compose/compose.yaml -f account-platform/deploy/compose/compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi)
+          "${compose[@]}" config --quiet
+          "${compose[@]}" config --format json > "$RUNNER_TEMP/apt137-compose.json"
+          node scripts/account-platform-model-token-deployment-check.mjs --compose-render "$RUNNER_TEMP/apt137-compose.json"
+          "${compose[@]}" build token-credential-portal token-command-executor token-governance-check
+          chart="$PWD/account-platform/deploy/helm/account-platform"
+          docker run --rm -v "$chart:/chart:ro" alpine/helm:4.2.3 lint /chart
+          for values in values-staging.yaml values-production-new.yaml values-model-token-test.yaml; do
+            docker run --rm -v "$chart:/chart:ro" alpine/helm:4.2.3 lint /chart -f "/chart/$values"
+          done
+          docker run --rm -v "$chart:/chart:ro" alpine/helm:4.2.3 template pinvou /chart -f /chart/values-model-token-test.yaml > "$RUNNER_TEMP/apt137-helm.yaml"
+          node scripts/account-platform-model-token-deployment-check.mjs --helm-render "$RUNNER_TEMP/apt137-helm.yaml"
+
+      - name: nginx 1.18 真实解析和隔离响应矩阵
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          fixture_directory="$(mktemp -d "$RUNNER_TEMP/pinvou-nginx-ci-XXXXXX")"
+          node scripts/account-platform-render-nginx-fixtures.mjs --output "$fixture_directory" --runtime-root /fixture
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$fixture_directory/fixture.key" -out "$fixture_directory/fixture.crt" -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,DNS:account-uat.pinvou.com,DNS:credentials-uat.pinvou.com,DNS:account.pinvou.com,DNS:credentials.pinvou.com' >/dev/null 2>&1
+          docker build -f account-platform/test/deployment/nginx.Dockerfile -t pinvou-nginx-ci:apt137 account-platform/test/deployment
+          for profile in cloud_uat-loopback cloud_uat-encrypted_tunnel cloud_uat-verified_tls production-loopback production-encrypted_tunnel production-verified_tls; do
+            nginx_name="apt137-nginx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-parser-$profile"
+            trap 'docker rm --force "$nginx_name" >/dev/null 2>&1 || true' EXIT
+            docker run --rm --name "$nginx_name" --label pinvou.ci=apt137-nginx --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" --tmpfs /tmp -v "$fixture_directory:/fixture" pinvou-nginx-ci:apt137 nginx -t -p /fixture/ -c "/fixture/$profile.conf"
+          done
+          for profile in cloud_uat-loopback cloud_uat-encrypted_tunnel; do
+            nginx_name="apt137-nginx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$profile"
+            trap 'docker rm --force "$nginx_name" >/dev/null 2>&1 || true' EXIT
+            docker run --rm --name "$nginx_name" --label pinvou.ci=apt137-nginx --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" --tmpfs /tmp -v "$fixture_directory:/fixture" -v "$PWD/account-platform/test/deployment:/tests:ro" pinvou-nginx-ci:apt137 python3 /tests/nginx-loopback-test.py --root /fixture --profile "$profile" | tee "$RUNNER_TEMP/apt137-nginx-$profile.json"
+            node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if(r.result!=="PASS" || r.owned_nginx_stopped!==true || r.owned_mocks_stopped!==true || r.tunnel_header_spoofed!==false) process.exit(1)' "$RUNNER_TEMP/apt137-nginx-$profile.json"
+          done
+          for fault in failure cancel; do
+            nginx_name="apt137-nginx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-cleanup-$fault"
+            trap 'docker rm --force "$nginx_name" >/dev/null 2>&1 || true' EXIT
+            if docker run --rm --name "$nginx_name" --label pinvou.ci=apt137-nginx --network none --read-only --cap-drop ALL --user "$(id -u):$(id -g)" --tmpfs /tmp -v "$fixture_directory:/fixture" -v "$PWD/account-platform/test/deployment:/tests:ro" pinvou-nginx-ci:apt137 python3 /tests/nginx-loopback-test.py --root /fixture --profile cloud_uat-loopback --exercise-cleanup "$fault" | tee "$RUNNER_TEMP/apt137-nginx-cleanup-$fault.json"; then
+              exit 1
+            fi
+            node -e 'const r=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); const mode=process.argv[2]; if(r.result!=="FAIL" || r.owned_nginx_stopped!==true || r.owned_mocks_stopped!==true || r.exercise_mode!==mode || r.exercise_reached!==true || r.sigterm_received!==(mode==="cancel")) process.exit(1)' "$RUNNER_TEMP/apt137-nginx-cleanup-$fault.json" "$fault"
+          done
+
+      - name: 精确清理 nginx 测试实例
+        if: ${{ always() }}
+        run: |
+          for profile in cloud_uat-loopback cloud_uat-encrypted_tunnel cleanup-failure cleanup-cancel parser-cloud_uat-loopback parser-cloud_uat-encrypted_tunnel parser-cloud_uat-verified_tls parser-production-loopback parser-production-encrypted_tunnel parser-production-verified_tls; do
+            nginx_name="apt137-nginx-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$profile"
+            if docker inspect "$nginx_name" >/dev/null 2>&1; then
+              test "$(docker inspect --format '{{ index .Config.Labels "pinvou.ci" }}' "$nginx_name")" = apt137-nginx
+              docker rm --force "$nginx_name"
+            fi
+          done
 
       - name: Go 与 Node 高危依赖审计
         run: |
