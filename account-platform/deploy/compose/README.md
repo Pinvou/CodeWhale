@@ -13,6 +13,16 @@
 
 ## 平台管理台
 
+### APT-137 显式治理部署 overlay
+
+`compose.model-token.yaml` 是受控发布 overlay，不由开发 `dev up` 自动加载。新 credential/executor 仅在 `model-token` profile 中；`token-governance-check` 独立 `governance-operations` profile、默认空参数只检查、无自动 apply。[发布说明](../runbooks/model-token-release.md) 当前仅交付离线计划/配置校验；版本/角色/迁移的受控执行步骤仍待后续 G3 独立交付与现场授权，不得直接创建实例；不能直接拿开发基线与新 overlay 启动来冒充 CLOUD_UAT。继承的开发 Keycloak/NATS、支付模拟器、迁移自动启动规则与站点覆盖仍须现场逐项审查，第三批停写/迁移工具完成前不得用该 overlay 执行正式切换。
+
+公开解析检查（**只 config，不 up/build/run**）：在本目录执行 `docker compose --env-file .env.example --env-file model-token.env.example -f compose.yaml -f compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi config --format json`。`model-token.env.example` 只有不可用占位值；正式 URL/令牌目录/数据库凭据不得写回此文件。把解析输出放受控临时文件，运行根目录 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`，只得到 DEPLOYMENT_CONFIG_VALID/ENV_PENDING，不代表网络/权限实测。
+
+外部可信签发器必须为每个 `pinvou:service:<service>` 主体提供独立、短期、可轮换的 `token` 文件；每服务只挂自己的目录且禁止 Docker 自动创建不存在的目录。Account/Identity/Billing/Token 接收端使用 overlay 的精确 rules，Keycloak 使用既有 `PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE`；清空共享开发静态 Token，不自建或伪造签发器。三服务、三个 Relay 和 Token executor 共用唯一 `MODEL_TOKEN_NATS_URL`，各服务从 `NATS_CREDENTIAL_DIRECTORY/<service>/client.creds` 取最小 NATS 凭据；现场必须证明同一集群/JetStream 历史与 ACL/轮换，不能仅启动一个新总线替代旧审批事件。
+
+gateway 与 Token Relay 共用本代 `TOKEN_GATEWAY_RELEASE_DATABASE_URL`，credential 使用不同本代 `TOKEN_CREDENTIAL_RELEASE_DATABASE_URL`；旧角色 NOLOGIN/fence 覆盖三者及后台实例，executor 不获得数据库 URL。credential 默认只绑定回环 `18108`（`CREDENTIAL_PORTAL_BIND_PORT` 可覆盖，发布前检测占用），外部冻结 origin 不变。专用控制网络隔离新服务与旧 backend；显式 egress 网络不是防火墙，OIDC/KMS/Provider/NATS/观测出站须由站点网络/主机规则限制并留证。内部 New API 通过单独 credential-provider 网络到达，不能因此开放任意 provider host。
+
 Token 账户配额迁移需要独立的 `BILLING_MIGRATION_DB_PASSWORD`、`TOKEN_MIGRATION_DB_PASSWORD` 和 `TOKEN_POLICY_DB_PASSWORD`；不得复用任何服务运行密码，也不得互相复用。部署前置检查在已有数据卷上同样执行，发现复用即阻止迁移；这些秘密仅提供给数据库初始化、迁移和策略配置任务，不注入业务服务。已有数据库不会重新执行初始化脚本，升级前必须由数据库管理员通过受控 Secret 渠道创建对应部署身份或轮换其密码，不能仅修改 `.env`。迁移按 Billing → Token → 配额 bootstrap 顺序执行。
 
 数据库和 `public` schema 分别交由 `token_schema_owner NOLOGIN`、`billing_schema_owner NOLOGIN` 持有，只有对应 migrator 拥有其成员资格；运行账户和策略操作员不得持有数据库/schema 或继承这些所有者。既有业务表所有权保持不变。首次安装由数据库管理员预装 Token 的 `pgcrypto`，旧迁移阶段临时授予运行账户 schema CREATE，再由 Token `000029`、Billing `000053` 收回。已有数据卷必须在停写窗口由 DBA 完成同样的所有权调整与权限核验，不能仅更新初始化脚本。完整停写、迁移和模式身份说明见 [Helm 部署说明](../helm/account-platform/README.md)。

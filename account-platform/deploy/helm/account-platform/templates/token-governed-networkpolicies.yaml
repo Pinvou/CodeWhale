@@ -1,0 +1,96 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . -}}
+{{- range $component := list "token-credential-portal" "token-command-executor" "token-governance-check" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" $root }}-{{ $component }} }
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $component }}
+      pinvou.io/restricted-token-control: "true"
+  policyTypes: [Ingress, Egress]
+  {{- if eq $component "token-credential-portal" }}
+  ingress:
+    - from:
+        - namespaceSelector: {{ toYaml $root.Values.networkPolicy.ingressNamespaceSelector | nindent 12 }}
+          podSelector: {{ toYaml $root.Values.networkPolicy.ingressPodSelector | nindent 12 }}
+      ports: [{ protocol: TCP, port: 8080 }]
+  {{- else }}
+  ingress: []
+  {{- end }}
+  egress:
+    {{- if ne $component "token-governance-check" }}
+    - to:
+        - podSelector:
+            matchLabels: {{ include "pinvou.selector" $root | nindent 14 }}
+            matchExpressions:
+              - key: app.kubernetes.io/component
+                operator: In
+                values: {{ if eq $component "token-command-executor" }}[account-service, token-gateway]{{ else }}[account-service, keycloak]{{ end }}
+      ports: [{ protocol: TCP, port: 8080 }]
+    {{- range $cidr := $root.Values.external.telemetryCollectorCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- range $cidr := $root.Values.external.timeSourceCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: UDP, port: 123 }]
+    {{- end }}
+    {{- end }}
+    {{- if eq $component "token-command-executor" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "pinvou.selector" $root | nindent 14 }}
+              app.kubernetes.io/component: nats
+      ports: [{ protocol: TCP, port: 4222 }]
+    {{- range $cidr := $root.Values.tokenCommandExecutor.natsCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 4222 }, { protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- range $cidr := $root.Values.tokenCommandExecutor.workloadJwksCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- else }}
+    {{- range $cidr := $root.Values.external.postgresCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 5432 }]
+    {{- end }}
+    {{- if eq $component "token-credential-portal" }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "pinvou.selector" $root | nindent 14 }}
+              pinvou.io/newapi-data-plane: "true"
+      ports: [{ protocol: TCP, port: 8080 }]
+    {{- range $cidr := $root.Values.tokenCredentialPortal.egressCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
+    {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- if and .Values.networkPolicy.enabled (or .Values.tokenCredentialPortal.enabled .Values.tokenCommandExecutor.enabled) }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: {{ include "pinvou.fullname" . }}-governed-event-producers }
+spec:
+  podSelector:
+    matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [account-service, billing-service, token-gateway, account-event-relay, billing-event-relay, token-event-relay]
+  policyTypes: [Egress]
+  egress:
+    {{- range $cidr := .Values.tokenCommandExecutor.natsCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 4222 }, { protocol: TCP, port: 443 }]
+    {{- end }}
+{{- end }}

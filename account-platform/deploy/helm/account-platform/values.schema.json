@@ -1,8 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "workloadIdentity", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "tokenAccountPolicyBootstrap", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy"],
+  "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "workloadIdentity", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "tokenAccountPolicyBootstrap", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy", "tokenCredentialPortal", "tokenCommandExecutor", "tokenGovernanceCheck", "portal"],
   "properties": {
+    "tokenCredentialPortal": {"type":"object","additionalProperties":false,"required":["enabled","replicas","runtimeSecret","publicUrl","oidcAuthorizationUrl","oidcTokenUrl","oidcClientId","oidcAudience","egressCidrs","oidcJwksUrl"],"properties":{"enabled":{"type":"boolean"},"replicas":{"type":"integer","minimum":1},"runtimeSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"},"publicUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcAuthorizationUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcTokenUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcClientId":{"type":"string"},"oidcAudience":{"type":"string"},"egressCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}},"oidcJwksUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"}}},
+    "tokenCommandExecutor": {"type":"object","additionalProperties":false,"required":["enabled","replicas","runtimeSecret","natsCidrs","workloadJwksCidrs"],"properties":{"enabled":{"type":"boolean"},"replicas":{"type":"integer","minimum":1},"runtimeSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"},"natsCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}},"workloadJwksCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}}}},
+    "tokenGovernanceCheck": {"type":"object","additionalProperties":false,"required":["enabled","operationsSecret"],"properties":{"enabled":{"type":"boolean"},"operationsSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"}}},
+    "portal": {"type":"object","additionalProperties":false,"required":["adminModelTokenIAEnabled","adminTokenResourceFormsEnabled","adminModelOperationsDetailsEnabled","adminModelDetailsEnabled","adminTokenDetailsEnabled","adminModelPricingEditEnabled","adminModelOperationsOverviewEnabled","adminModelTokenActionsEnabled"],"properties":{"adminModelTokenIAEnabled":{"type":"boolean"},"adminTokenResourceFormsEnabled":{"type":"boolean"},"adminModelOperationsDetailsEnabled":{"type":"boolean"},"adminModelDetailsEnabled":{"type":"boolean"},"adminTokenDetailsEnabled":{"type":"boolean"},"adminModelPricingEditEnabled":{"type":"boolean"},"adminModelOperationsOverviewEnabled":{"type":"boolean"},"adminModelTokenActionsEnabled":{"type":"boolean"}}},
     "global": {
       "type": "object",
       "required": ["environment", "runtimeSecret", "trustedTimeSources", "manualReviewOnCallUserIds"],
@@ -23,6 +27,9 @@
         "billingService": { "$ref": "#/definitions/image" },
         "tokenGateway": { "$ref": "#/definitions/image" },
         "tokenPortal": { "$ref": "#/definitions/image" },
+        "tokenCredentialPortal": { "$ref": "#/definitions/image" },
+        "tokenCommandExecutor": { "$ref": "#/definitions/image" },
+        "tokenGovernance": { "$ref": "#/definitions/image" },
         "eventRelay": { "$ref": "#/definitions/image" },
         "migrate": { "$ref": "#/definitions/image" },
         "newApi": { "$ref": "#/definitions/imageWithDigest" },
@@ -194,6 +201,7 @@
       "additionalProperties": false,
       "properties": {
         "paymentProvider": { "type": "string", "minLength": 1 },
+        "adminModelPriceProjectionEnabled": { "type": "boolean" },
         "allowTentativePrices": { "type": "boolean" },
         "testAdmissionEvidenceTtl": { "type": "string", "pattern": "^[0-9]+h$" },
         "normalRefundCreationEnabled": { "type": "boolean" },
@@ -207,6 +215,10 @@
 	  "required": ["adminPaginationEnabled", "gatewayAdapter", "secretProvider", "secretKeyId", "secretRotationIntervalSeconds", "secretRotationBatchSize", "providerAllowedHosts", "maxInputTokens", "modelCatalogDefaultContextTokens", "modelCatalogDefaultMaxOutputTokens", "modelCatalogSyncMinutes", "clientContractVersion", "minimumClientVersion", "maximumClientVersion", "readinessAttestationKeyId", "readinessAttestationTtlSeconds"],
       "properties": {
 		"adminPaginationEnabled": { "type": "boolean" },
+        "runtimeSecret": { "type": "string" },
+        "impactPrechecksEnabled": { "type": "boolean" },
+        "credentialIsolationEnabled": { "type": "boolean" },
+        "adminOperationsOverviewEnabled": { "type": "boolean" },
         "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
         "secretProvider": { "enum": ["local", "remote"] },
         "secretKeyId": { "type": "string" },

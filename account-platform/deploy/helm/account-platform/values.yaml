@@ -27,6 +27,9 @@ images:
   billingService: { repository: pinvou/billing-service, tag: dev, pullPolicy: IfNotPresent }
   tokenGateway: { repository: pinvou/token-gateway, tag: dev, pullPolicy: IfNotPresent }
   tokenPortal: { repository: pinvou/token-portal, tag: dev, pullPolicy: IfNotPresent }
+  tokenCredentialPortal: { repository: pinvou/token-credential-portal, tag: dev, pullPolicy: IfNotPresent }
+  tokenCommandExecutor: { repository: pinvou/token-command-executor, tag: dev, pullPolicy: IfNotPresent }
+  tokenGovernance: { repository: pinvou/token-governance, tag: dev, pullPolicy: IfNotPresent }
   eventRelay: { repository: pinvou/account-platform-event-relay, tag: dev, pullPolicy: IfNotPresent }
   migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
   newApi: { repository: calciumion/new-api, tag: v1.0.0-rc.11, digest: sha256:bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19, pullPolicy: IfNotPresent }
@@ -39,6 +42,7 @@ portal:
   adminTokenResourceFormsEnabled: false
   adminModelOperationsDetailsEnabled: false
   adminModelDetailsEnabled: false
+  adminTokenDetailsEnabled: false
   adminModelPricingEditEnabled: false
   adminModelOperationsOverviewEnabled: false
   adminModelTokenActionsEnabled: false
@@ -110,6 +114,7 @@ account:
   commerceAdapterBaseUrl: ""
 
 billing:
+  adminModelPriceProjectionEnabled: false
   paymentProvider: h3c_mall
   allowTentativePrices: false
   testAdmissionEvidenceTtl: 720h
@@ -119,6 +124,10 @@ billing:
   paymentCallbackTokenTtlSeconds: 300
 
 tokenGateway:
+  # Set a release-scoped Secret before enabling governed workloads; never reuse retired login.
+  runtimeSecret: ""
+  credentialIsolationEnabled: false
+  adminOperationsOverviewEnabled: false
   adminPaginationEnabled: false
   impactPrechecksEnabled: false
   gatewayAdapter: NEW_API
@@ -142,6 +151,32 @@ tokenGateway:
   maximumClientVersion: 0.8.0
   readinessAttestationKeyId: pinvou-client-readiness-v1
   readinessAttestationTtlSeconds: 600
+
+tokenCredentialPortal:
+  enabled: false
+  replicas: 2
+  runtimeSecret: ""
+  publicUrl: ""
+  oidcAuthorizationUrl: ""
+  oidcTokenUrl: ""
+  oidcJwksUrl: ""
+  oidcClientId: ""
+  oidcAudience: ""
+  # Exact HTTPS dependency CIDRs, not 0.0.0.0/0; no model/payment-wide egress reuse.
+  egressCidrs: []
+
+tokenCommandExecutor:
+  enabled: false
+  replicas: 2
+  runtimeSecret: ""
+  # External NATS and workload JWKS endpoints when not in-cluster.
+  natsCidrs: []
+  workloadJwksCidrs: []
+
+tokenGovernanceCheck:
+  enabled: false
+  # Explicitly created suspended, read-only Job. No hook and no --apply setting.
+  operationsSecret: ""
 
 tokenAccountPolicyBootstrap:
   enabled: false

@@ -66,7 +66,7 @@ spec:
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - name: DATABASE_URL
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }
+              valueFrom: { secretKeyRef: { name: {{ if eq $app.name "token-gateway" }}{{ default $root.Values.global.runtimeSecret $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, key: {{ $app.name }}-database-url } }
             - { name: MANUAL_REVIEW_ON_CALL_USER_IDS, value: {{ join "," $root.Values.global.manualReviewOnCallUserIds | quote }} }
             {{- end }}
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
@@ -81,7 +81,7 @@ spec:
             - { name: WORKLOAD_IDENTITY_AUDIENCE, value: {{ $root.Values.workloadIdentity.audience | quote }} }
             {{- if eq $app.name "account-service" }}
             - name: WORKLOAD_IDENTITY_RULES_JSON
-              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-billing-service" $root.Release.Namespace $fullname) "service" "billing-service" "permissions" (list "internal.authorization.check" "internal.approval-execution.begin" "internal.approval-execution.complete" "internal.account-closure-state.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.authorization.check" "internal.authorization.delegate" "internal.client-compatibility.read" "internal.token-owner-candidates.read" "internal.account.token-owner-authority.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-command-executor" $root.Release.Namespace $fullname) "service" "token-command-executor" "permissions" (list "internal.authorization.check" "internal.approval-execution.begin" "internal.approval-execution.complete")) (dict "subject" (printf "system:serviceaccount:%s:%s-keycloak" $root.Release.Namespace $fullname) "service" "keycloak-mobile-authenticator" "permissions" (list "internal.auth.sms.verify" "internal.authorization.check"))) | quote }}
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-billing-service" $root.Release.Namespace $fullname) "service" "billing-service" "permissions" (list "internal.authorization.check" "internal.approval-execution.begin" "internal.approval-execution.complete" "internal.account-closure-state.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "permissions" (list "internal.authorization.check" "internal.authorization.delegate" "internal.client-compatibility.read" "internal.token-owner-candidates.read" "internal.account.token-owner-authority.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-command-executor" $root.Release.Namespace $fullname) "service" "token-command-executor" "permissions" (list "internal.authorization.check" "internal.approval-execution.begin" "internal.approval-execution.complete")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-credential-portal" $root.Release.Namespace $fullname) "service" "token-credential-portal" "permissions" (list "internal.authorization.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-keycloak" $root.Release.Namespace $fullname) "service" "keycloak-mobile-authenticator" "permissions" (list "internal.auth.sms.verify" "internal.authorization.check"))) | quote }}
             {{- else if eq $app.name "identity-service" }}
             - name: WORKLOAD_IDENTITY_RULES_JSON
               value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.identity.password-reference.validate" "internal.identity.user.create" "internal.identity.registration.read" "internal.identity.user.disable" "internal.identity.username.update" "internal.identity.mobile.update" "internal.identity.password.reset" "internal.identity.sessions.revoke" "internal.identity.user.delete"))) | quote }}
@@ -91,10 +91,13 @@ spec:
             {{- else if eq $app.name "token-gateway" }}
             - { name: TOKEN_ADMIN_PAGINATION_ENABLED, value: {{ $root.Values.tokenGateway.adminPaginationEnabled | quote }} }
             - { name: TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED, value: {{ $root.Values.tokenGateway.impactPrechecksEnabled | quote }} }
+            - { name: TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED, value: {{ $root.Values.tokenGateway.adminOperationsOverviewEnabled | quote }} }
+            - { name: TOKEN_CREDENTIAL_ISOLATION_ENABLED, value: {{ $root.Values.tokenGateway.credentialIsolationEnabled | quote }} }
+            - { name: CREDENTIAL_PORTAL_PUBLIC_URL, value: {{ $root.Values.tokenCredentialPortal.publicUrl | quote }} }
             - name: TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-admin-pagination-cursor-hmac-key-base64, optional: true } }
             - name: WORKLOAD_IDENTITY_RULES_JSON
-              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.token.organization.lifecycle" "internal.token.organization-unit.lifecycle" "internal.token.replay.delete" "internal.token.account-closure-assessment.read" "internal.token.approval-snapshot.read")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-command-executor" $root.Release.Namespace $fullname) "service" "token-command-executor" "permissions" (list "internal.token.model-lifecycle.execute" "internal.token.catalog-rollback.execute" "internal.token.credential-revoke.execute"))) | quote }}
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "permissions" (list "internal.token.organization.lifecycle" "internal.token.organization-unit.lifecycle" "internal.token.replay.delete" "internal.token.account-closure-assessment.read" "internal.token.approval-snapshot.read" "internal.authorization.check")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-command-executor" $root.Release.Namespace $fullname) "service" "token-command-executor" "permissions" (list "internal.token.model-lifecycle.execute" "internal.token.catalog-rollback.execute" "internal.token.credential-revoke.execute" "internal.authorization.check"))) | quote }}
             {{- end }}
             {{- end }}
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
@@ -102,6 +105,8 @@ spec:
             {{- end }}
             {{- if eq $app.name "billing-service" }}
             - { name: NATS_CREDENTIALS_FILE, value: /var/run/secrets/pinvou/nats/billing-command-executor.creds }
+            {{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) }}
+            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/var/run/secrets/pinvou/nats/%s.creds" $app.name | quote }} }
             {{- end }}
             {{- if eq $app.name "account-service" }}
             - { name: ACCOUNT_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
@@ -157,6 +162,7 @@ spec:
             - name: HUMAN_DELEGATION_VERIFICATION_KEYS_JSON
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-verification-keys-json } }
             - { name: BILLING_PAYMENT_PROVIDER, value: {{ $root.Values.billing.paymentProvider | quote }} }
+            - { name: BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED, value: {{ $root.Values.billing.adminModelPriceProjectionEnabled | quote }} }
             - { name: BILLING_ALLOW_TENTATIVE_PRICES, value: {{ $root.Values.billing.allowTentativePrices | quote }} }
             - { name: BILLING_TEST_ADMISSION_EVIDENCE_TTL, value: {{ $root.Values.billing.testAdmissionEvidenceTtl | quote }} }
             - { name: BILLING_NORMAL_REFUND_CREATION_ENABLED, value: {{ $root.Values.billing.normalRefundCreationEnabled | quote }} }
@@ -224,6 +230,7 @@ spec:
             - { name: PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED, value: {{ $root.Values.portal.adminTokenResourceFormsEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED, value: {{ $root.Values.portal.adminModelOperationsDetailsEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_DETAILS_ENABLED, value: {{ $root.Values.portal.adminModelDetailsEnabled | quote }} }
+            - { name: PORTAL_ADMIN_TOKEN_DETAILS_ENABLED, value: {{ $root.Values.portal.adminTokenDetailsEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED, value: {{ $root.Values.portal.adminModelPricingEditEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED, value: {{ $root.Values.portal.adminModelOperationsOverviewEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED, value: {{ $root.Values.portal.adminModelTokenActionsEnabled | quote }} }
@@ -247,7 +254,7 @@ spec:
             {{- if ne $app.name "token-portal" }}
             - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
             {{- end }}
-            {{- if eq $app.name "billing-service" }}
+            {{- if or (eq $app.name "billing-service") (and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway"))) }}
             - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
             {{- end }}
       volumes:
@@ -261,5 +268,8 @@ spec:
         {{- if eq $app.name "billing-service" }}
         - name: nats-credentials
           secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: billing-command-executor.creds, path: billing-command-executor.creds }] }
+        {{- else if and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway")) }}
+        - name: nats-credentials
+          secret: { secretName: {{ if eq $app.name "token-gateway" }}{{ default $root.Values.global.runtimeSecret $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, items: [{ key: {{ printf "%s.creds" $app.name }}, path: {{ printf "%s.creds" $app.name }} }] }
         {{- end }}
 {{- end }}

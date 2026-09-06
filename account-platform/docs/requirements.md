@@ -1833,3 +1833,7 @@ APT-137 保持 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED。后续发布计划、部�
 ### APT-137 G1：离线发布计划合同
 
 在 G0 新固定域名基础上，本组增加十三个既有 gate 的闭合计划/schema 校验、环境与 APP_ENV 映射、activation 声明与摘要/角色分离、分级观察参数，以及绑定候选和环境的证据 envelope 结构校验。默认只校验本地输入，返回 PLAN_VALID 或 ENVELOPE_VALID，始终保留 ENV_PENDING/NOT_DEPLOYED；不联网、不启 gate、不执行迁移/CAS，也不证明数据库状态、身份或报告真实。本组运行说明见 [模型与 Token 发布计划](../deploy/runbooks/model-token-release.md)。部署配置/角色工具/入口探针/原始工件验签和持续 CI 属后续 G2～G6，UI-58 整体仍未完成。
+
+### APT-137 G2：显式治理部署配置
+
+本组在 G0/G1 之上交付 opt-in Compose overlay 与 Helm 新 credential/executor、独立只读默认治理 Job、release-scoped Secret/workload/readiness/十三 gate 透传及网络策略语义校验。Token Relay 与 gateway 共用本代写身份一同 fence；所有事件客户端指向同一受控 TLS NATS，不能以挂凭据文件代替服务器 ACL。新服务默认关闭/需显式 profile，治理 Job 挂起且无 apply，不自动部署或激活。公开 fixture 和真实解析仅证明结构，现场 Secret/HBA/KMS/身份/NATS/DNS/TLS 仍未验收；G3 运维、G4 入口探针、G5 证据与 G6 CI 尚属后续交付，UI-58 整体保持 ENV_PENDING/NOT_DEPLOYED。

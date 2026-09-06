@@ -1,6 +1,6 @@
-# 模型与 Token 离线发布计划（APT-137 G1）
+# 模型与 Token 发布计划和可选部署配置（APT-137 G0～G2）
 
-状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。本提交仅包含已提交 G0 的新域基础与 G1 离线计划/envelope 校验；后续 G2～G6 尚未在本组交付。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
+状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。当前包含已提交 G0 新域基础、G1 离线计划/envelope 与本组 G2 可选部署配置；后续 G3～G6 尚未在本组交付。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
 
 ## 1. 实际入口与依赖
 
@@ -29,3 +29,19 @@ INTERNAL→LIMITED→FULL 固定有序，流量严格增加且末阶段 100%；�
 本组具名回归：`node --test account-platform/test/contract/model-token-release-plan.test.mjs`，覆盖十三 gate、所有依赖、环境/新域/状态摘要、身份、真实 PRE 归一与类型、观察阈值、envelope 绑定、重复 JSON 和默认 CLI 无 apply/GO。根在 G0 加本组四个代码/schema/test 文件的精确候选 `e96f6387c539d3a44296fea3f1da94df1103f030` 实际运行九项 Node 全 PASS/0 SKIP（1.784 秒），exit 0；本组最小文档另交 B 复核。此为当前四文件依赖已齐的真实运行，不继承原整树 PASS。G5 前其他两项旧 Node 基线断言仍可能失败，须如实记录。
 
 后续仍按 G2 部署配置、G3 受控角色/CLI、G4 安全代理/HTTPS/scope/实际脚本 VM、G5 原始证据与兼容、G6 持续 CI 顺序独立验证/签署。共同文档随已存在接口更新，不能把后续实现提前写成已交付。DNS/TLS、OIDC/workload、KMS 全用途旧密文、同一 NATS 集群/ACL、备份/HBA、实际灰度/SAFE 回滚仍需现场证据；本地 plan PASS 不能关闭 APT-137/UI-58 或解除部署前置。
+
+## 5. G2 可选部署配置：只做结构验证，不执行上线
+
+G1 已独立提交 `33209285`。本组使用现有 Go Dockerfile的 SERVICE 参数构建 credential portal、executor 与 token-governance，不增加业务服务职责：gateway 内仍唯一拥有两个 worker。Compose overlay/profile 需显式加载；Helm 三新组件默认 false，governance Job suspend=true、无 hook/自动 apply/重试。runtime 与运维 Secret 分离，executor 不获得数据库/KMS，Token Relay 与 gateway 同代 writer 共同停止/fence/恢复，不能沿用已退休登录。实际角色准备与受控启用程序在后续 G3，当前不得据本组模板直接切换。
+
+公开配置仅用于解析。Compose 在 deploy/compose 目录运行 `docker compose --env-file .env.example --env-file model-token.env.example -f compose.yaml -f compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi config --format json`，输出保存到本次受控临时文件，再从仓库根运行 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`；不能读现场 .env 或用这些不可用占位值 up/run。Helm 对已有默认、staging、production-new 与新增 `values-model-token-test.yaml` lint，渲染 fixture 后用同一 checker 的 `--helm-render <文件>`。真实 Docker/Helm 解析不是静态字符串替代，结构合法仍输出 DEPLOYMENT_CONFIG_VALID/ENV_PENDING/NOT_DEPLOYED。
+
+十三 gate 环境值透传到既有所属服务，不改变领域逻辑。正式配对为 account.pinvou.com / credentials.pinvou.com，公开 UAT fixture 配对为 account-uat.pinvou.com / credentials-uat.pinvou.com。credential OIDC issuer 与 authorization/token/JWKS 必须精确同 origin HTTPS、无任何显式端口，不采用普通 Portal 内网 HTTP JWKS路径。外部可信短期 workload token-file/投射身份和各服务独立 NATS creds 必须就绪；不得继续共享开发静态 Token，也不在本任务临时造签发器。
+
+七个 broker 客户端使用同一受控外部 TLS NATS；Helm 开新治理组件时拒绝内置匿名开发 NATS，URL/creds/Ping 不证明真实 ACL 或 JetStream 历史。受限 workload 排除旧宽策略选择器，checker 核全部命中允许规则；目标 New API 明确只允许 credential 与 gateway 所需入口。Compose 网络本身不充当防火墙，依赖 CIDR/Host/TLS 身份与可信出站边界仍需现场证明。credential 独立 loopback18108、端口/IP范围重叠必须拒绝；所有 runtime/附加容器禁止运维URL，控制Job/entrypoint必须固定只读默认，不可用wrapper或init容器自动执行。
+
+配置从 local AES 切 remote Secret Provider 前，须由既有受控KMS流程证明全部持久密文（provider credential、事件流/结果回放和dispatch等）原 key_id、格式、AAD 可读及备份可恢复；没有本地解密 fallback，不能清旧KEK/删除历史后声称迁移成功。配置 Secret/issuer/ACL/DNS/有效证书/代理与HBA缺项均保持 ENV_PENDING，不绕过启动验证。本组只提供结构/制品，不包含后续 G3 操作包装器、G4 安全反代/HTTPS/scope工具或 G5 验签工具；既有 `token-governance` 默认 check 可独立构建，但任何 apply/激活须另有已批准现场步骤和授权。
+
+根对本组精确候选验证 `node --test account-platform/test/contract/model-token-deployment.test.mjs`，并核对相同输入/blob下真实Helm/Compose解析、语义变异和新镜像构建证据；结果另记，不自动把原整树PASS转为本组证据。部署说明详见 [Compose](../compose/README.md) 与 [Helm](../helm/account-platform/README.md)。后续实际部署/灰度/SAFE流程仍待 G3～G6 与现场证据闭合，不 push/deploy，不标 UI-58 DONE。
+
+根对 G1 加本组十八配置/源码文件的精确候选 `d356fee020a6af006058f3cf33b3f89b9a6b4cd7` 实际运行 G1/G2 合并十八 Node 全 PASS/0 SKIP（1.846 秒），exit 0。本组十八文件、G1 plan/schema 与依赖服务构建源码相对于根第六隔离实测候选 `e371` 均无差异，因此仅在此相同输入范围继承真实 Helm 4.2.3 四 profile lint/render checker、Compose config/checker及三个新服务镜像构建的分项证据；不是把整树或现场 PASS 继承到本组。七份最小文档另交 B，G2 仍不是实际部署或 G6 CI 全部通过。

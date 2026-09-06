@@ -549,6 +549,12 @@ G0 已固定新域，G1 提供既有十三 gate 的闭合计划 schema 与依赖
 
 证据 envelope 只核结构、候选/环境绑定、基本时间窗口与执行/复核者分离，不能证明原始报告存在、签名来源、当前状态或指标真实。默认 CLI 只读输入、不联网，输出 PLAN_VALID/ENV_PENDING/NOT_DEPLOYED，未提供 apply/GO。精确用法和后续未交付边界见 [发布计划说明](../deploy/runbooks/model-token-release.md)；完整原始字节/签名/观察验收留 G5，部署/运维/探针及 CI 留其他后续组。
 
+### 9.2 APT-137 G2 可选部署与最小网络边界
+
+Compose 显式 overlay/profile 和 Helm 可选 Deployment/Service/ServiceAccount/挂起治理 Job 复用现有二进制，不增加领域执行器或重复 gateway 双 worker。独立 Secret 与 workload 文件只给所需服务，runtime 不得获运维 URL，executor 不得获数据库/KMS身份；Token Relay 复用 gateway 同代数据库 Secret。所有新治理事件客户端使用同一外部 TLS NATS，开发匿名总线不可作为受控配置，服务器 ACL/历史仍需环境证明。
+
+新受限 workload 从既有宽 NetworkPolicy 选择器中排除；checker 检查全部实际命中规则的允许并集、精确组件/端口/有界CIDR，而不是只信策略名。Compose 规范化 IPv4/IPv6/mapped 地址、协议与端口范围后拒绝重叠；治理只允许固定只读入口与空参数，拒绝附加容器/initContainer/shell 的自动执行路径。新配置的 OIDC/new origin/门禁规则失败关闭，默认不启动或放量；公开 values/env example 不可部署。完整使用说明见已交付发布说明的 G2 节；角色准备/正式入口与实际来源证据由后续 G3～G6 交付，不能只凭渲染称生产等价。
+
 ## 10. 发布门禁
 
 实现阶段必须提供以下自动证据：

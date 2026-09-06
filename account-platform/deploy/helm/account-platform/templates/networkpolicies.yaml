@@ -57,7 +57,9 @@ metadata: { name: {{ include "pinvou.fullname" . }}-internal-and-approved-egress
 spec:
   podSelector:
     matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
-    matchExpressions: [{ key: pinvou.io/newapi-data-plane, operator: DoesNotExist }]
+    matchExpressions:
+      - { key: pinvou.io/newapi-data-plane, operator: DoesNotExist }
+      - { key: pinvou.io/restricted-token-control, operator: DoesNotExist }
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
@@ -92,6 +94,9 @@ spec:
   ingress:
     - from:
         - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: token-gateway } }
+        {{- if .Values.tokenCredentialPortal.enabled }}
+        - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: token-credential-portal } }
+        {{- end }}
       ports: [{ protocol: TCP, port: 8080 }]
   egress:
     - to:

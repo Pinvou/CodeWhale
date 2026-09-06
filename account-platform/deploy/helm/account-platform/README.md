@@ -96,9 +96,66 @@ each controlled deployment step. This check is read-only and does not revoke
 privileges or terminate sessions automatically.
 
 Hook order is Billing migration 000053, Token migration 000029, then explicit
-policy bootstrap. Creation remains unavailable until APT-138 activation 000030
-is ACTIVE and its polling worker is ready. During rollback, repeat the writer
-fence and drain procedure and evaluate migrations in reverse order; retained
+policy bootstrap. Creation remains unavailable until APT-138 activation 000031
+is ACTIVE and its polling worker is ready. Initial migration quiescence drains
+the legacy creation queue; SAFE recovery preserves historical pending/manual
+work instead of repeating that initial drain requirement. During rollback, fence
+writers and evaluate migrations in reverse order; retained
 receipt, reservation, command or policy history prevents destructive down.
 Old binaries may resume only with read-only database identities, never with
 the former unrestricted creation privileges.
+
+## Governed Token workloads (APT-137, opt-in)
+
+`tokenCredentialPortal.enabled`, `tokenCommandExecutor.enabled` and
+`tokenGovernanceCheck.enabled` default to false. No additional lifecycle or
+account-provisioning worker Deployment is created: those remain supervised by
+the gateway. New workloads require NetworkPolicy and separate runtime Secret
+references. The Token Relay uses the same release-scoped gateway database Secret
+and must be stopped/fenced/restarted with that writer generation. Account and
+Billing Relay identity and event behavior are unchanged.
+
+The gateway release Secret contains `token-gateway-database-url` and
+`token-gateway.creds`; the credential Secret contains `database-url`,
+`secret-provider-url`, `secret-provider-token`; executor has only
+`token-command-executor.creds`. Account runtime additionally needs
+`account-service.creds` when governed workloads are enabled. Existing Billing and
+Relay NATS Secret keys remain unchanged. All consumers/producers use the same
+`dependencies.natsUrl`. Enabling either governed workload requires `nats.enabled=false`,
+an external `tls://` URL and explicit shared `tokenCommandExecutor.natsCidrs`.
+The unauthenticated development NATS is rejected; mounting a credentials file
+does not establish server-side authentication. A narrow producer policy admits
+the six existing broker clients to the same CIDRs, without adding them to the
+new workloads' peer permissions. Issuing scoped credentials, proving the actual
+server ACL/TLS identity and preserving retained JetStream history are environment
+prerequisites, not consequences of rendering.
+
+Credential OIDC authorization/token/JWKS endpoints must use the issuer's exact
+HTTPS origin, without an explicit port. Never reuse the ordinary internal HTTP
+Keycloak JWKS backchannel. UAT Portal/credential are the frozen pair
+`https://account-uat.pinvou.com` / `https://credentials-uat.pinvou.com`;
+Production uses `https://account.pinvou.com` /
+`https://credentials.pinvou.com`. Dedicated OIDC client and audience,
+actual HTTPS ingress, provider allowlists and dependency CIDRs must be supplied.
+The future G4 delivery will supply credential ingress safety templates;
+rendering these workloads alone does not expose or validate the public origin.
+
+Governance uses its own image built with the existing Dockerfile's
+`SERVICE=token-governance`. The opt-in Job is suspended, has no Helm hook, no
+retries and no apply arguments; it references a dedicated operations Secret with
+`token-migrator-database-url` and `account-policy-database-url`. It also inherits
+imagePullSecrets. Only an explicitly approved operation may unsuspend the
+read-only check; a state transition must wait for the separately reviewed G3 operational
+procedure and environment authorization, never Helm install/upgrade hooks. Keep the digest-matched old control artifact for SAFE.
+
+`values-model-token-test.yaml` is an intentionally non-deployable public rendering
+fixture. Render it with the default chart, then run
+`node scripts/account-platform-model-token-deployment-check.mjs --helm-render <output>`
+from the repository root. The checker validates every selecting NetworkPolicy's
+permits (including the control Job), not policy names alone; unbounded peers,
+ports, all-address CIDRs and out-of-scope component/port pairs are rejected.
+CIDR ownership and endpoint identity still require actual environment evidence.
+The checker validates structure, isolation and shared
+event-cluster wiring, and always retains ENV_PENDING/NOT_DEPLOYED. For production
+rendering use the matching production origin pair and explicit provider/Secret
+references; do not weaken production image, HA or identity validation.
