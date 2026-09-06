@@ -304,7 +304,7 @@ func validateCredentialOrigin(origin *url.URL, secure bool) error {
 	}
 	host := strings.ToLower(origin.Hostname())
 	if secure {
-		if origin.Scheme != "https" || (host != "credentials.account.pinvou.com" && host != "credentials-uat.account.pinvou.com") || origin.Port() != "" {
+		if origin.Scheme != "https" || (host != "credentials.pinvou.com" && host != "credentials-uat.pinvou.com") || origin.Port() != "" {
 			return errors.New("credential origin is not in the fixed production or UAT allowlist")
 		}
 		return nil

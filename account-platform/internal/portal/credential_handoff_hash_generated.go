@@ -2,4 +2,4 @@
 
 package portal
 
-const credentialHandoffScriptSHA256 = "fyMYZbwS5YNb7QfMqfoApBSCiuxEOfoL5xXeGyoHJAk="
+const credentialHandoffScriptSHA256 = "xbOxqtnDmEvuAza2/lRlh0TWLFOgbyAzqv1PQPP1d3g="

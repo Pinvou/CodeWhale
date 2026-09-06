@@ -205,20 +205,22 @@ APT-136 唯一拥有 Token 追加迁移 `000028_operations_overview_indexes`：�
 
 ### 6.1 固定 origin 与 CSP
 
+APT-137 G0 按负责人批准统一新域，正式 Portal 固定 `https://account.pinvou.com`，UAT Portal 固定 `https://account-uat.pinvou.com`，分别只对应下表同环境 credential。旧 credential 域未上线，不增加兼容/重定向；handoff 按真实 `location.origin` 选唯一目标，正式 Portal 禁止降级本地 HTTP，原合法开发双 loopback 保留。脚本修改后由现有 `scripts/build-credential-handoff.mjs` 生成 hash 并检查，不手填摘要。除精确域与配对外，权限、会话、MessageChannel、一次 POST 及 CSP 安全合同保持不变。域名代码和 DNS 配置分别验收；后续发布脚本、部署模板、探针与环境门禁尚属独立交付计划，本组不包含其实现。新增域名记录见 [DNS 清单](../deploy/runbooks/model-token-dns.md)，本组不执行 DNS/证书或现场修改。
+
 每个环境只允许一个经部署清单固定、禁止运行时任意覆盖的 credential origin：
 
 | 环境 | credential origin |
 |---|---|
-| Production | `https://credentials.account.pinvou.com` |
-| Cloud UAT | `https://credentials-uat.account.pinvou.com` |
+| Production | `https://credentials.pinvou.com` |
+| Cloud UAT | `https://credentials-uat.pinvou.com` |
 
 Portal 的 CSP 必须由部署环境选择精确值，例如生产：
 
 ```http
-Content-Security-Policy: default-src 'self'; form-action 'self' https://credentials.account.pinvou.com; frame-ancestors 'none'; base-uri 'none'
+Content-Security-Policy: default-src 'self'; form-action 'self' https://credentials.pinvou.com; frame-ancestors 'none'; base-uri 'none'
 ```
 
-不得使用 `https:`、通配子域、调用方传入 origin 或动态重定向。Portal 另提供固定同源 `GET /credential-handoff`；URL 不接受 query、fragment、path 参数或任何 launch/result 引用。它只返回最小静态 HTML 与由专用构建步骤生成、字节冻结的内联 handoff 脚本，不加载 Portal App、第三方代码、字体、像素、遥测或 Service Worker。构建同时生成该脚本的 SHA-256 base64 摘要；CSP 仅允许以精确 `script-src 'sha256-<build-pinned-digest>'` 授权的该内联脚本，并禁止 `script-src 'self'`、`'unsafe-inline'`、`'unsafe-eval'`、动态 nonce 和运行时拼接脚本。响应不读写业务会话、不设置 Cookie，并固定返回 `Cache-Control: no-store`、`Referrer-Policy: origin` 与 `Content-Security-Policy: default-src 'none'; script-src 'sha256-<build-pinned-digest>'; form-action https://credentials.account.pinvou.com; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'`。handoff 在发送 READY 前及接收 BIND 后均必须验证 `navigator.serviceWorker.controller === null`；其注册 scope 不得覆盖 `/credential-handoff`。构建/部署门禁扫描 Service Worker 注册与 scope，Production/UAT 生产等价探针再从浏览器验证；若既有 root scope 会覆盖 handoff，必须先收窄/迁移 scope，否则发布失败关闭。credential origin 自身使用 `default-src 'self'; connect-src 'self' <exact-oidc-origin>; form-action 'self' <exact-oidc-origin>; frame-ancestors 'none'; base-uri 'none'`，且不加载第三方脚本、像素或字体。
+不得使用 `https:`、通配子域、调用方传入 origin 或动态重定向。Portal 另提供固定同源 `GET /credential-handoff`；URL 不接受 query、fragment、path 参数或任何 launch/result 引用。它只返回最小静态 HTML 与由专用构建步骤生成、字节冻结的内联 handoff 脚本，不加载 Portal App、第三方代码、字体、像素、遥测或 Service Worker。构建同时生成该脚本的 SHA-256 base64 摘要；CSP 仅允许以精确 `script-src 'sha256-<build-pinned-digest>'` 授权的该内联脚本，并禁止 `script-src 'self'`、`'unsafe-inline'`、`'unsafe-eval'`、动态 nonce 和运行时拼接脚本。响应不读写业务会话、不设置 Cookie，并固定返回 `Cache-Control: no-store`、`Referrer-Policy: origin` 与 `Content-Security-Policy: default-src 'none'; script-src 'sha256-<build-pinned-digest>'; form-action https://credentials.pinvou.com; worker-src 'none'; frame-ancestors 'none'; base-uri 'none'`。handoff 在发送 READY 前及接收 BIND 后均必须验证 `navigator.serviceWorker.controller === null`；其注册 scope 不得覆盖 `/credential-handoff`。构建/部署门禁扫描 Service Worker 注册与 scope，Production/UAT 生产等价探针再从浏览器验证；若既有 root scope 会覆盖 handoff，必须先收窄/迁移 scope，否则发布失败关闭。credential origin 自身使用 `default-src 'self'; connect-src 'self' <exact-oidc-origin>; form-action 'self' <exact-oidc-origin>; frame-ancestors 'none'; base-uri 'none'`，且不加载第三方脚本、像素或字体。
 
 ### 6.2 Portal 同源 handoff 与顶层 POST launch
 
@@ -230,7 +232,7 @@ Chromium 对直接 `target=_blank` 的跨 origin 表单 POST 会发送不透明 
 4. handoff 同样校验 `event.origin`、`event.source === window.opener`、nonce 格式和闭合 v1 schema，通过所收端口回复 `{version:1,type:"HANDOFF_BOUND",nonce}`。Portal 仅在 3 秒内收到 nonce 匹配的 ACK 后创建 5 分钟、单次消费、最多 3 次尝试的 launch 与不透明 `result_ref`。
 5. Portal 只经绑定端口发送一次闭合 `{version:1,type:"HANDOFF_SUBMIT",nonce,launch_id}`；handoff 只接受 READY→BOUND→SUBMITTED 顺序、同一 nonce 和规范 UUID，并在 3 秒内回复一次 `{version:1,type:"HANDOFF_ACCEPTED",nonce}`。重复、乱序、额外字段、第二端口、来源漂移或超时均关闭端口/窗口；已经创建 launch 时原子撤销并进入稳定失败。
 6. launch ID 仅可短暂存在于 Portal 运行内存、MessagePort 消息和 handoff 为提交即时创建的 DOM API 表单值中；不得进入可见 DOM 文本、URL/query/fragment/path、Cookie、local/session storage、IndexedDB、Cache API、window.name、剪贴板、Referer、Performance、遥测、控制台、访问日志或崩溃报告。handoff 不读取 `document.cookie`，不设置 Cookie，提交后不保留节点。
-7. handoff 收到 SUBMIT 后先在内存中创建尚未挂载的临时 form 并写入唯一 `launch_id`，再发出 ACCEPTED；随后立即关闭 MessagePort、移除监听、清空 nonce/launch JavaScript 变量并执行 `window.opener = null`，最后才挂载该 form、以 `_self` 向部署白名单中的固定 `https://credentials.account.pinvou.com/launch` 提交并移除节点。body 只能是单一 `launch_id`。不得退化为直接 `_blank` 跨 origin POST、fetch、GET、query/fragment、iframe、同页 Portal 导航或复制链接。
+7. handoff 收到 SUBMIT 后先在内存中创建尚未挂载的临时 form 并写入唯一 `launch_id`，再发出 ACCEPTED；随后立即关闭 MessagePort、移除监听、清空 nonce/launch JavaScript 变量并执行 `window.opener = null`，最后才挂载该 form、以 `_self` 向部署白名单中的固定 `https://credentials.pinvou.com/launch` 提交并移除节点。body 只能是单一 `launch_id`。不得退化为直接 `_blank` 跨 origin POST、fetch、GET、query/fragment、iframe、同页 Portal 导航或复制链接。
 8. credential origin 的 `/launch` 只接受 `application/x-www-form-urlencoded` POST，并要求浏览器 `Origin` 与当前环境唯一 Portal origin 精确相等；缺失、`null`、伪造、跨环境或带异常端口的 Origin 一律拒绝且不得消费 launch，Referer 永不作为授权证据。
 9. Portal 在 READY/BIND 阶段保留 opener 仅用于精确 source/origin 握手；handoff ACCEPTED 后主动置空，credential origin 的首个 303 再以 COOP 强制隔离。除上述闭合握手外，双方不得读取或调用对方 DOM。
 10. Portal 只把同一 `result_ref` 作为权威恢复引用。SUBMIT/303/响应丢失或结果未知时只轮询该引用，绝不重新 POST launch、生成新 handoff nonce 或换幂等键盲试；用户取消、权限撤销、gate 关闭、窗口提前关闭、任一阶段 3 秒超时或 10 秒内无首 heartbeat，均以适用稳定原因原子撤销已创建且未终态的 launch。

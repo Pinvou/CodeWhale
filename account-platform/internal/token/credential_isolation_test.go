@@ -77,7 +77,7 @@ func TestCredentialOriginRequiresFixedSecureOrigin(t *testing.T) {
 		return value
 	}
 	base := CredentialOriginConfig{
-		PublicURL: parse("https://credentials.account.pinvou.com"), PortalOrigin: parse("https://account.pinvou.com"), IssuerURL: parse("https://id.example/realms/pinvou"), AuthorizationURL: parse("https://id.example/authorize"),
+		PublicURL: parse("https://credentials.pinvou.com"), PortalOrigin: parse("https://account.pinvou.com"), IssuerURL: parse("https://id.example/realms/pinvou"), AuthorizationURL: parse("https://id.example/authorize"),
 		TokenURL: parse("https://id.example/token"), JWKSURL: parse("https://id.example/certs"), ClientID: "credential-client", SecureCookies: true,
 		Verify: func(context.Context, string, string) (identity.Principal, error) {
 			return identity.Principal{AuthenticatedAt: time.Now()}, nil
@@ -86,7 +86,29 @@ func TestCredentialOriginRequiresFixedSecureOrigin(t *testing.T) {
 	if _, err := NewCredentialOriginService(base, repository, acceptingCredentialValidator{}, ProviderURLPolicy{}); err != nil {
 		t.Fatalf("fixed production origin rejected: %v", err)
 	}
-	for _, raw := range []string{"https://credentials.account.pinvou.com.evil.example", "https://credentials.account.pinvou.com:8443", "https://credentials.account.pinvou.com/path", "https://arbitrary.example"} {
+	for _, pair := range [][2]string{{"https://account.pinvou.com", "https://credentials.pinvou.com"}, {"https://account-uat.pinvou.com", "https://credentials-uat.pinvou.com"}} {
+		candidate := base
+		candidate.PortalOrigin, candidate.PublicURL = parse(pair[0]), parse(pair[1])
+		if _, err := NewCredentialOriginService(candidate, repository, acceptingCredentialValidator{}, ProviderURLPolicy{}); err != nil {
+			t.Fatalf("fixed pair rejected: %v", err)
+		}
+		for _, rejected := range []string{"https://credentials.account.pinvou.com", "https://credentials-uat.account.pinvou.com", "https://" + candidate.PublicURL.Hostname() + ":443", pair[1] + ".", pair[1] + "?x=1", pair[1] + "#x", "https://user@" + candidate.PublicURL.Hostname(), "http://" + candidate.PublicURL.Hostname()} {
+			candidate.PublicURL = parse(rejected)
+			if _, err := NewCredentialOriginService(candidate, repository, acceptingCredentialValidator{}, ProviderURLPolicy{}); err == nil {
+				t.Fatalf("retired or invalid origin accepted: %s", rejected)
+			}
+		}
+		candidate.PublicURL = parse(pair[1])
+		otherPortal := "https://account.pinvou.com"
+		if pair[0] == otherPortal {
+			otherPortal = "https://account-uat.pinvou.com"
+		}
+		candidate.PortalOrigin = parse(otherPortal)
+		if _, err := NewCredentialOriginService(candidate, repository, acceptingCredentialValidator{}, ProviderURLPolicy{}); err == nil {
+			t.Fatal("cross-environment origin pair accepted")
+		}
+	}
+	for _, raw := range []string{"https://credentials.pinvou.com.evil.example", "https://credentials.pinvou.com:8443", "https://credentials.pinvou.com/path", "https://arbitrary.example"} {
 		candidate := base
 		candidate.PublicURL = parse(raw)
 		if _, err := NewCredentialOriginService(candidate, repository, acceptingCredentialValidator{}, ProviderURLPolicy{}); err == nil {

@@ -37,8 +37,12 @@
     const value = document.querySelector('meta[name="pinvou-credential-origin"]')?.content || '';
     try {
       const parsed = new URL(value);
-      const production = parsed.protocol === 'https:' && !parsed.port && ['credentials.account.pinvou.com', 'credentials-uat.account.pinvou.com'].includes(parsed.hostname);
-      const development = parsed.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(parsed.hostname);
+      const pairedOrigin = location.origin === 'https://account.pinvou.com' ? 'https://credentials.pinvou.com'
+        : location.origin === 'https://account-uat.pinvou.com' ? 'https://credentials-uat.pinvou.com' : '';
+      const production = pairedOrigin !== '' && value === pairedOrigin;
+      const portal = new URL(location.origin);
+      const development = portal.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(portal.hostname)
+        && parsed.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(parsed.hostname);
       return (production || development) && parsed.origin === value ? parsed.origin : '';
     } catch {
       return '';

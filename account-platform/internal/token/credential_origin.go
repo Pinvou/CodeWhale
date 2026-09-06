@@ -103,7 +103,7 @@ func NewCredentialOriginService(config CredentialOriginConfig, repository *Postg
 	}
 	host := strings.ToLower(config.PublicURL.Hostname())
 	if config.SecureCookies {
-		if config.PublicURL.Scheme != "https" || config.PublicURL.Port() != "" || host != "credentials.account.pinvou.com" && host != "credentials-uat.account.pinvou.com" {
+		if config.PublicURL.Scheme != "https" || config.PublicURL.Port() != "" || host != "credentials.pinvou.com" && host != "credentials-uat.pinvou.com" {
 			return nil, errors.New("credential origin requires the fixed production or UAT HTTPS origin")
 		}
 	} else if config.PublicURL.Scheme != "http" || host != "127.0.0.1" && host != "localhost" {
@@ -157,7 +157,7 @@ func validateCredentialPortalOrigin(config CredentialOriginConfig) error {
 	}
 	if config.SecureCookies {
 		expectedHost := "account.pinvou.com"
-		if strings.EqualFold(config.PublicURL.Hostname(), "credentials-uat.account.pinvou.com") {
+		if strings.EqualFold(config.PublicURL.Hostname(), "credentials-uat.pinvou.com") {
 			expectedHost = "account-uat.pinvou.com"
 		}
 		if !strings.EqualFold(config.PortalOrigin.Hostname(), expectedHost) {

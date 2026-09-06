@@ -160,7 +160,7 @@
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | DONE |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | DONE |
 | APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | DONE |
-| APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138 | CODE+ENV | PENDING |
+| APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138 | CODE+ENV | IN_PROGRESS |
 | APT-138 | 十九项 Token 命令一致性总验收与原子激活 | ADM-64 | APT-122–APT-136 | CODE | DONE |
 
 ## 3. APT-119～APT-138 详细交付合同
@@ -448,6 +448,10 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **回滚/不包含**：应用回滚只能 CAS 进入 `SAFE_ROLLBACK` 并保留 activation/command/audit 历史；`000031` down 在任何非 `PRE_ACTIVATION` 或有引用时失败关闭。不实现页面、领域命令、预检计算、凭据隔离、TLS/代理或生产部署；发现差异必须退回唯一所属 APT 修复，不能在本任务夹带修补。
 
 ### APT-137 分级发布、兼容与总回滚门禁
+
+- **当前状态**：`IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED`。不将六批功能和环境验收积压为一个提交；DNS 尚未添加不阻塞本地代码交付，但不解除实际部署前置，不授权 push/deploy。
+- **本组 G0**：仅新 credential 域名运行时基础：Token/Portal 白名单、handoff 实际 Portal→credential 精确配对/开发双 loopback、新脚本生成 hash、既有 Go 拒绝矩阵，以及需求/设计/架构当前域说明和独立 DNS 清单。正式/UAT credential 分别为 `credentials.pinvou.com` / `credentials-uat.pinvou.com`；旧域不兼容、不重定向，Portal 两域不变。根对本组 HEAD 加精确文件构建隔离候选后记录实际验证，完整工作树其他功能的历史 PASS 不代替本组证据。
+- **后续依赖提交计划**：G1 离线 plan/schema → G2 部署配置/checker → G3 受控角色/原 CLI 包装与授权登记 → G4 安全入口/HTTPS/scope/实际脚本 VM 组合 → G5 离线证据与两旧断言/兼容测试 → G6 持续 CI 收尾。G4 VM 测试依赖尚未在 G0 引入的 edge/plan，故不孤立入本组。各组共享文档按实际交付语义裁剪，不引用未提交文件、不倒退新域；根逐组验证、B 复核后独立 Signed-off 提交。G5 前全量 Node 可能仍包含两项原基线断言失败，应如实记录，不能声称所有中间提交全量绿。现场 DNS/TLS/身份/KMS/NATS/备份及部署验收仍独立待办，整体不标 DONE。
 
 - **目标/范围**：主目标 `UI-58`。仅修改 Account/Token/Portal 分级发布配置、`deploy/compose`、`deploy/helm`、OpenAPI/Portal 契约门禁、运维 runbook 和发布验证脚本；复用 APT-127 已交付的一期 IA 基础开关，汇总 APT-127～APT-136，并唯一负责跨版本分级发布与生产激活/回滚编排，以及 credential origin 的 DNS/TLS、Portal/credential CSP、固定环境白名单、反向代理/WAF 日志抑制和生产等价健康探针证据，但不夹带功能修复。
 - **发布/兼容/回滚**：冻结一期 IA/列表/协议公式/选择器/运行闭环/结构化操作与二期详情/凭据/生命周期/价格/概览的独立 gate 和依赖顺序；服务端、Portal、cursor envelope、审批事件和隔离凭据入口支持 N/N-1。`section=tokens` 至少保留 90 天且跨两个稳定版本规范化；UI-47 开启后 supersede UI-28/UI-31 canonical。回滚顺序为先停写/worker/launch，再关二期、一期和代理路由；活动 cursor 返回 410，进行中审批/计划/session 按各任务合同收敛。

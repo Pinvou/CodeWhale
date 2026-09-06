@@ -126,7 +126,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if _, err = repository.CredentialIsolationResult(ctx, other, launch.ResultRef); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-actor result err=%v", err)
 	}
-	session, err := repository.ConsumeCredentialLaunch(ctx, launch.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("b", 64), strings.Repeat("s", 64), strings.Repeat("n", 64), strings.Repeat("v", 64), strings.Repeat("c", 64))
+	session, err := repository.ConsumeCredentialLaunch(ctx, launch.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("b", 64), strings.Repeat("s", 64), strings.Repeat("n", 64), strings.Repeat("v", 64), strings.Repeat("c", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if err = repository.pool.QueryRow(ctx, `SELECT authorization_version,gate_epoch FROM credential_isolation_sessions WHERE id=$1`, session.ID).Scan(&storedAuthorizationVersion, &storedGateEpoch); err != nil || storedAuthorizationVersion != authority.AuthorizationVersion || storedGateEpoch != authority.GateEpoch {
 		t.Fatalf("session authority authorization_version=%d gate_epoch=%d err=%v", storedAuthorizationVersion, storedGateEpoch, err)
 	}
-	if _, err = repository.ConsumeCredentialLaunch(ctx, launch.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("b", 64), strings.Repeat("s", 64), strings.Repeat("n", 64), strings.Repeat("v", 64), strings.Repeat("c", 64)); !errors.Is(err, ErrCredentialReplay) {
+	if _, err = repository.ConsumeCredentialLaunch(ctx, launch.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("b", 64), strings.Repeat("s", 64), strings.Repeat("n", 64), strings.Repeat("v", 64), strings.Repeat("c", 64)); !errors.Is(err, ErrCredentialReplay) {
 		t.Fatalf("replayed launch err=%v", err)
 	}
 	if _, err = repository.ConfirmCredentialSession(ctx, session.ID, strings.Repeat("b", 64)); err != nil {
@@ -157,7 +157,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		t.Fatal(err)
 	}
 	secret := []byte("isolated-integration-secret")
-	result, err := repository.CompleteCredentialSession(ctx, session.ID, "https://credentials-uat.account.pinvou.com", strings.Repeat("b", 64), strings.Repeat("c", 64), "NEW_API", "https://provider.example", []string{"model-a"}, secret, acceptingCredentialValidator{}, policy)
+	result, err := repository.CompleteCredentialSession(ctx, session.ID, "https://credentials-uat.pinvou.com", strings.Repeat("b", 64), strings.Repeat("c", 64), "NEW_API", "https://provider.example", []string{"model-a"}, secret, acceptingCredentialValidator{}, policy)
 	if err != nil || result.Status != "SUCCEEDED" || result.CredentialID == nil || result.CredentialVersion == nil || *result.CredentialVersion != 2 {
 		t.Fatalf("completion=%#v err=%v", result, err)
 	}
@@ -174,7 +174,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		t.Fatal(err)
 	}
 	currentAuthorizationVersion.Store(8)
-	if _, err = repository.ConsumeCredentialLaunch(ctx, changedLaunch.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("x", 64), strings.Repeat("y", 64), strings.Repeat("z", 64), strings.Repeat("w", 64), strings.Repeat("c", 64)); !errors.Is(err, ErrTokenRouteActivationChanged) {
+	if _, err = repository.ConsumeCredentialLaunch(ctx, changedLaunch.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("x", 64), strings.Repeat("y", 64), strings.Repeat("z", 64), strings.Repeat("w", 64), strings.Repeat("c", 64)); !errors.Is(err, ErrTokenRouteActivationChanged) {
 		t.Fatalf("authorization drift reached credential intake: %v", err)
 	}
 	var changedStatus string
@@ -184,7 +184,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	}
 	currentAuthorizationVersion.Store(7)
 	currentGateEpoch.Store(12)
-	if _, err = repository.ConsumeCredentialLaunch(ctx, changedLaunch.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("x", 64), strings.Repeat("y", 64), strings.Repeat("z", 64), strings.Repeat("w", 64), strings.Repeat("c", 64)); !errors.Is(err, ErrTokenRouteActivationChanged) {
+	if _, err = repository.ConsumeCredentialLaunch(ctx, changedLaunch.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("x", 64), strings.Repeat("y", 64), strings.Repeat("z", 64), strings.Repeat("w", 64), strings.Repeat("c", 64)); !errors.Is(err, ErrTokenRouteActivationChanged) {
 		t.Fatalf("governance epoch drift reached credential intake: %v", err)
 	}
 	currentGateEpoch.Store(11)
@@ -196,7 +196,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if err != nil {
 		t.Fatal(err)
 	}
-	finalSession, err := repository.ConsumeCredentialLaunch(ctx, finalLaunch.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("L", 64), strings.Repeat("S", 64), strings.Repeat("N", 64), strings.Repeat("V", 64), strings.Repeat("C", 64))
+	finalSession, err := repository.ConsumeCredentialLaunch(ctx, finalLaunch.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("L", 64), strings.Repeat("S", 64), strings.Repeat("N", 64), strings.Repeat("V", 64), strings.Repeat("C", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	finalValidator := &blockingCredentialValidator{entered: make(chan struct{}, 1), release: make(chan struct{})}
 	finalError := make(chan error, 1)
 	go func() {
-		_, completionErr := repository.CompleteCredentialSession(ctx, finalSession.ID, "https://credentials-uat.account.pinvou.com", strings.Repeat("L", 64), strings.Repeat("C", 64), "NEW_API", "https://provider.example", []string{"model-a"}, []byte("must-not-be-stored"), finalValidator, policy)
+		_, completionErr := repository.CompleteCredentialSession(ctx, finalSession.ID, "https://credentials-uat.pinvou.com", strings.Repeat("L", 64), strings.Repeat("C", 64), "NEW_API", "https://provider.example", []string{"model-a"}, []byte("must-not-be-stored"), finalValidator, policy)
 		finalError <- completionErr
 	}()
 	select {
@@ -439,7 +439,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if err != nil {
 		t.Fatal(err)
 	}
-	reenrollSession, err := repository.ConsumeCredentialLaunch(ctx, reenroll.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("q", 64), strings.Repeat("r", 64), strings.Repeat("s", 64), strings.Repeat("t", 64), strings.Repeat("u", 64))
+	reenrollSession, err := repository.ConsumeCredentialLaunch(ctx, reenroll.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("q", 64), strings.Repeat("r", 64), strings.Repeat("s", 64), strings.Repeat("t", 64), strings.Repeat("u", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +450,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		t.Fatal(err)
 	}
 	reenrollSecret := []byte("reenrolled-integration-secret")
-	reenrolled, err := repository.CompleteCredentialSession(ctx, reenrollSession.ID, "https://credentials-uat.account.pinvou.com", strings.Repeat("q", 64), strings.Repeat("u", 64), "NEW_API", "https://provider.example", []string{"model-a"}, reenrollSecret, acceptingCredentialValidator{}, policy)
+	reenrolled, err := repository.CompleteCredentialSession(ctx, reenrollSession.ID, "https://credentials-uat.pinvou.com", strings.Repeat("q", 64), strings.Repeat("u", 64), "NEW_API", "https://provider.example", []string{"model-a"}, reenrollSecret, acceptingCredentialValidator{}, policy)
 	if err != nil || reenrolled.CredentialVersion == nil || *reenrolled.CredentialVersion != 3 {
 		t.Fatalf("reenroll=%#v err=%v", reenrolled, err)
 	}
@@ -467,7 +467,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if err != nil {
 		t.Fatal(err)
 	}
-	blockedSession, err := repository.ConsumeCredentialLaunch(ctx, blocked.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("d", 64), strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("g", 64), strings.Repeat("h", 64))
+	blockedSession, err := repository.ConsumeCredentialLaunch(ctx, blocked.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("d", 64), strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("g", 64), strings.Repeat("h", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +495,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if err != nil {
 		t.Fatal(err)
 	}
-	raceSession, err := repository.ConsumeCredentialLaunch(ctx, raceLaunch.LaunchID, "https://credentials-uat.account.pinvou.com", strings.Repeat("i", 64), strings.Repeat("j", 64), strings.Repeat("k", 64), strings.Repeat("l", 64), strings.Repeat("m", 64))
+	raceSession, err := repository.ConsumeCredentialLaunch(ctx, raceLaunch.LaunchID, "https://credentials-uat.pinvou.com", strings.Repeat("i", 64), strings.Repeat("j", 64), strings.Repeat("k", 64), strings.Repeat("l", 64), strings.Repeat("m", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		if launchErr != nil {
 			t.Fatal(launchErr)
 		}
-		session, consumeErr := repository.ConsumeCredentialLaunch(ctx, launch.LaunchID, "https://credentials-uat.account.pinvou.com", binding, state, nonce, verifier, csrf)
+		session, consumeErr := repository.ConsumeCredentialLaunch(ctx, launch.LaunchID, "https://credentials-uat.pinvou.com", binding, state, nonce, verifier, csrf)
 		if consumeErr != nil {
 			t.Fatal(consumeErr)
 		}
@@ -547,7 +547,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 			secret  string
 		}) {
 			defer concurrent.Done()
-			_, completionErr := repository.CompleteCredentialSession(ctx, candidate.session.ID, "https://credentials-uat.account.pinvou.com", candidate.binding, candidate.csrf, "NEW_API", "https://provider.example", []string{"model-a"}, []byte(candidate.secret), acceptingCredentialValidator{}, policy)
+			_, completionErr := repository.CompleteCredentialSession(ctx, candidate.session.ID, "https://credentials-uat.pinvou.com", candidate.binding, candidate.csrf, "NEW_API", "https://provider.example", []string{"model-a"}, []byte(candidate.secret), acceptingCredentialValidator{}, policy)
 			completionErrors <- completionErr
 		}(candidate)
 	}

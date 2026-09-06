@@ -10,10 +10,25 @@ import (
 	"testing"
 )
 
+func TestCredentialOriginRenamedAllowlist(t *testing.T) {
+	for _, raw := range []string{"https://credentials.pinvou.com", "https://credentials-uat.pinvou.com"} {
+		origin, _ := url.Parse(raw)
+		if err := validateCredentialOrigin(origin, true); err != nil {
+			t.Fatalf("new fixed origin rejected: %v", err)
+		}
+		for _, rejected := range []string{"https://credentials.account.pinvou.com", "https://credentials-uat.account.pinvou.com", raw + ":443", raw + ":8443", raw + ".", raw + ".evil.example", raw + "?x=1", raw + "#x", "https://user@" + origin.Hostname(), "http://" + origin.Hostname()} {
+			candidate, _ := url.Parse(rejected)
+			if err := validateCredentialOrigin(candidate, true); err == nil {
+				t.Fatalf("retired or invalid origin accepted: %s", rejected)
+			}
+		}
+	}
+}
+
 func TestCredentialHandoffIsFixedMinimalAndHashPinned(t *testing.T) {
 	service := testService(t, newMemoryStore())
 	service.config.AdminTokenDetailsEnabled = true
-	service.config.CredentialOrigin, _ = url.Parse("https://credentials-uat.account.pinvou.com")
+	service.config.CredentialOrigin, _ = url.Parse("https://credentials-uat.pinvou.com")
 	response := httptest.NewRecorder()
 	service.Handler(http.NotFoundHandler()).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/credential-handoff", nil))
 	if response.Code != http.StatusOK {
@@ -42,7 +57,7 @@ func TestCredentialHandoffIsFixedMinimalAndHashPinned(t *testing.T) {
 		t.Fatal("handoff must not create a cookie or session")
 	}
 	body := response.Body.String()
-	for _, required := range []string{"credential-handoff", "HANDOFF_READY", "HANDOFF_BOUND", "HANDOFF_SUBMIT", "HANDOFF_ACCEPTED", "navigator.serviceWorker", "credentials-uat.account.pinvou.com"} {
+	for _, required := range []string{"credential-handoff", "HANDOFF_READY", "HANDOFF_BOUND", "HANDOFF_SUBMIT", "HANDOFF_ACCEPTED", "navigator.serviceWorker", "credentials-uat.pinvou.com"} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("handoff document misses %q", required)
 		}
@@ -57,7 +72,7 @@ func TestCredentialHandoffIsFixedMinimalAndHashPinned(t *testing.T) {
 func TestCredentialHandoffRejectsStateInURLAndDisabledGate(t *testing.T) {
 	service := testService(t, newMemoryStore())
 	service.config.AdminTokenDetailsEnabled = true
-	service.config.CredentialOrigin, _ = url.Parse("https://credentials-uat.account.pinvou.com")
+	service.config.CredentialOrigin, _ = url.Parse("https://credentials-uat.pinvou.com")
 	for _, target := range []string{"/credential-handoff?launch_id=secret", "/credential-handoff/extra"} {
 		response := httptest.NewRecorder()
 		service.Handler(http.NotFoundHandler()).ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
