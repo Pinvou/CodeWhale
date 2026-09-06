@@ -159,6 +159,7 @@
     { "name": "hold-recovery", "source": "account-platform/cmd/hold-recovery/main.go", "strategy": "workload.confirmed-expiry-recovery" },
     { "name": "token-policy-bootstrap", "source": "account-platform/cmd/token-policy-bootstrap/main.go", "strategy": "workload.deployment-owner-cap-policy-bootstrap-and-readiness" },
     { "name": "token-governance", "source": "account-platform/cmd/token-governance/main.go", "strategy": "workload.deployment-governance-cas-and-readiness" },
+    { "name": "token-release-prepare", "source": "account-platform/cmd/token-release-prepare/main.go", "strategy": "workload.explicit-dba-release-role-preparation-and-fence" },
     { "name": "token-command-executor", "source": "account-platform/cmd/token-command-executor/main.go", "strategy": "workload.approval-authorized-token-command-executor" },
     { "name": "identity-service", "source": "account-platform/cmd/identity-service/main.go", "strategy": "workload.http-host" },
     { "name": "migrate", "source": "account-platform/cmd/migrate/main.go", "strategy": "workload.deployment-migration-identity" },

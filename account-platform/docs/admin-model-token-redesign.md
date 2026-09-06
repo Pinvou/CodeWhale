@@ -555,6 +555,14 @@ Compose 显式 overlay/profile 和 Helm 可选 Deployment/Service/ServiceAccount
 
 新受限 workload 从既有宽 NetworkPolicy 选择器中排除；checker 检查全部实际命中规则的允许并集、精确组件/端口/有界CIDR，而不是只信策略名。Compose 规范化 IPv4/IPv6/mapped 地址、协议与端口范围后拒绝重叠；治理只允许固定只读入口与空参数，拒绝附加容器/initContainer/shell 的自动执行路径。新配置的 OIDC/new origin/门禁规则失败关闭，默认不启动或放量；公开 values/env example 不可部署。完整使用说明见已交付发布说明的 G2 节；角色准备/正式入口与实际来源证据由后续 G3～G6 交付，不能只凭渲染称生产等价。
 
+### 9.3 APT-137 G3 角色与操作的线性化边界
+
+独立运维工具默认 inventory，只读强核真实数据库/迁移账本；缺31只能 NOT_INSTALLED，不伪造 PRE。prepare/fence/enable 修改前核验全部显式目标并串行持有事务 advisory lock，已安装31时持 activation 行锁到角色修改提交；SAFE先提交则旧epoch不能enable，先持锁的enable可先提交，不能把发出SAFE请求当成已停写。退休登录 NOLOGIN提交后清会话为明确两阶段例外，只终止批准角色，不扫描后任意全局ALTER。
+
+旧卷仅受控迁移 DB/public owner，普通领域owner/历史数据不动；检查所有受影响控制角色/递归成员的跨库依赖与非当前PID会话。候选必须真正继承业务组USAGE而非仅MEMBER，不得继承控制owner。SCRAM verifier支持/有效期只返回布尔，不读取密码；真实认证/Secret仍需现场证明。enable首次同epoch/集合全部NOLOGIN才全量LOGIN；全部已LOGIN重试仅确认，混合/跨epoch拒绝。Account只读操作目的不等于SELECT-only身份，需受信短期SELECT+UPDATE/SHARE锁权限，runtime不得继承。
+
+原CLI包装器以绝对候选制品hash/闭合参数/无shell/最小env执行一次明确操作，DSN查询参数不得重绑定库/身份/主机或注入启动选项，原stderr不传播，UNKNOWN仅原request-id/账本查询。运维主体和运行主体分离，SAFE需匹配旧摘要控制制品，不支持任意N/N-1摘要升级。具体调用见已交付发布说明G3节；无自动激活、部署或新领域行为，后续环境和G4～G6仍分离。
+
 ## 10. 发布门禁
 
 实现阶段必须提供以下自动证据：

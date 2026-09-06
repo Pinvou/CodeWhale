@@ -1837,3 +1837,7 @@ APT-137 保持 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED。后续发布计划、部�
 ### APT-137 G2：显式治理部署配置
 
 本组在 G0/G1 之上交付 opt-in Compose overlay 与 Helm 新 credential/executor、独立只读默认治理 Job、release-scoped Secret/workload/readiness/十三 gate 透传及网络策略语义校验。Token Relay 与 gateway 共用本代写身份一同 fence；所有事件客户端指向同一受控 TLS NATS，不能以挂凭据文件代替服务器 ACL。新服务默认关闭/需显式 profile，治理 Job 挂起且无 apply，不自动部署或激活。公开 fixture 和真实解析仅证明结构，现场 Secret/HBA/KMS/身份/NATS/DNS/TLS 仍未验收；G3 运维、G4 入口探针、G5 证据与 G6 CI 尚属后续交付，UI-58 整体保持 ENV_PENDING/NOT_DEPLOYED。
+
+### APT-137 G3：独立受控角色与发布操作
+
+本组提供独立 token-release-prepare 与单操作发布包装器，分别显式 inventory/fence/prepare/enable 和既有 migrate/cap/governance 操作，不串联激活或修改领域状态机。目标数据库/审批/维护窗口/角色集合受限，集群级共享控制身份和异常 writer 拒绝；同事务 activation 锁保持到角色启用提交，重试只确认一致状态。读取 verifier 布尔不等于真实认证；Account SHARE NOWAIT 需真实非超级用户受信运维权限而非 runtime。包装器默认零子进程，执行校验候选制品/迁移摘要、两域 DSN 和参数闭集，UNKNOWN 只读恢复、不自动重试。授权入口新增仅此运维 CLI，统计 339 HTTP/27 task/6 event/18 CLI。实际部署和 G4～G6 后续能力仍未完成，不以工具可用解除 DNS/TLS/身份/KMS/备份前置。

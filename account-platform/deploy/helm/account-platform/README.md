@@ -145,8 +145,9 @@ Governance uses its own image built with the existing Dockerfile's
 retries and no apply arguments; it references a dedicated operations Secret with
 `token-migrator-database-url` and `account-policy-database-url`. It also inherits
 imagePullSecrets. Only an explicitly approved operation may unsuspend the
-read-only check; a state transition must wait for the separately reviewed G3 operational
-procedure and environment authorization, never Helm install/upgrade hooks. Keep the digest-matched old control artifact for SAFE.
+read-only check; a state transition must follow the now-delivered G3 operational procedure in
+model-token-release.md section 6 and separate environment authorization, never
+Helm install/upgrade hooks. Keep the digest-matched old control artifact for SAFE.
 
 `values-model-token-test.yaml` is an intentionally non-deployable public rendering
 fixture. Render it with the default chart, then run

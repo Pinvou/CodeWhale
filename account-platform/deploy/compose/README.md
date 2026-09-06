@@ -15,7 +15,7 @@
 
 ### APT-137 显式治理部署 overlay
 
-`compose.model-token.yaml` 是受控发布 overlay，不由开发 `dev up` 自动加载。新 credential/executor 仅在 `model-token` profile 中；`token-governance-check` 独立 `governance-operations` profile、默认空参数只检查、无自动 apply。[发布说明](../runbooks/model-token-release.md) 当前仅交付离线计划/配置校验；版本/角色/迁移的受控执行步骤仍待后续 G3 独立交付与现场授权，不得直接创建实例；不能直接拿开发基线与新 overlay 启动来冒充 CLOUD_UAT。继承的开发 Keycloak/NATS、支付模拟器、迁移自动启动规则与站点覆盖仍须现场逐项审查，第三批停写/迁移工具完成前不得用该 overlay 执行正式切换。
+`compose.model-token.yaml` 是受控发布 overlay，不由开发 `dev up` 自动加载。新 credential/executor 仅在 `model-token` profile 中；`token-governance-check` 独立 `governance-operations` profile、默认空参数只检查、无自动 apply。[发布说明](../runbooks/model-token-release.md) 已交付离线计划/配置校验与 G3 显式运维程序；版本/角色/迁移须按其第6节受控步骤和独立现场授权执行，不得直接创建实例；不能直接拿开发基线与新 overlay 启动来冒充 CLOUD_UAT。继承的开发 Keycloak/NATS、支付模拟器、迁移自动启动规则与站点覆盖仍须现场逐项审查，工具已交付不等于具备现场切换证据，不得未经审批用该 overlay 执行正式切换。
 
 公开解析检查（**只 config，不 up/build/run**）：在本目录执行 `docker compose --env-file .env.example --env-file model-token.env.example -f compose.yaml -f compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi config --format json`。`model-token.env.example` 只有不可用占位值；正式 URL/令牌目录/数据库凭据不得写回此文件。把解析输出放受控临时文件，运行根目录 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`，只得到 DEPLOYMENT_CONFIG_VALID/ENV_PENDING，不代表网络/权限实测。
 
