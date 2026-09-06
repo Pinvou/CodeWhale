@@ -430,7 +430,16 @@ func containsSensitiveCommandField(raw json.RawMessage) bool {
 	walk = func(current any) bool {
 		switch typed := current.(type) {
 		case map[string]any:
+			formulaUnitMaps := validGovernedFormulaUnitMaps(typed)
 			for key, child := range typed {
+				if formulaUnitMaps && (key == "required_unit_versions" || key == "expression") {
+					for unit, mapped := range child.(map[string]any) {
+						if !governedTokenMeteringUnit(unit) && sensitiveTokenGovernanceFieldName(normalizeTokenSensitiveFieldName(unit)) || walk(mapped) {
+							return true
+						}
+					}
+					continue
+				}
 				normalized := normalizeTokenSensitiveFieldName(key)
 				if normalized == "credential" {
 					if !validSafeCredentialProjection(child) {
