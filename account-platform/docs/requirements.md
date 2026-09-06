@@ -1845,3 +1845,7 @@ APT-137 保持 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED。后续发布计划、部�
 ### APT-137 G4：安全入口与有界只读探针
 
 本组交付新固定双域的独立 nginx 安全模板、OIDC/workload 前置结构校验、默认零网络的只读 HTTPS 预检和 Chromium fresh scope 工具。保留既有支付/应用握手/CSP/401/303，精确原始路径拒绝别名、单 HSTS 和代理自产错误安全头，不缓存或重试写请求。只读探针不含登录身份/业务POST，不跟重定向或跳TLS；scope由验证完整HTML字节后的JS-off响应重放观测，只证明FRESH_CONTEXT_ONLY，不能冒充真实生产登录/握手。实际source VM新增两新配对和开发双loopback正例、旧域/跨配对/降级零POST负例。G5证据/兼容与G6持续CI及真实环境验收仍待后续，整体ENV_PENDING/NOT_DEPLOYED。
+
+### APT-137 G5：离线证据与兼容验收
+
+本组交付 evidence/policy/report 三模块、bundle/report/trust 三份闭合 schema 与真实原始字节/签名负例；复用 G1 计划/envelope，不引入签发服务、私钥、网络采集或自动部署。外置独立信任绑定计划/来源/候选/环境，受控根内实际读取报告及工件字节并核 SHA，缺失或不可信不得 VERIFIED；十七 kind、十九命令及版本化具名 case 按事实层级验收。观察采用精确阈值、最低样本/时长与实际末阶段新鲜度，旧链接保留真实 GA 起至少 90 天或后续两生产稳定版取较长者。本组只纠正既有登录/支付测试断言并增加导航兼容回归，不改变业务或删除旧路由。G0～G5 为代码交付范围，G6 持续 CI 和真实环境仍待完成；EVIDENCE_VERIFIED 不等于部署，整体 ENV_PENDING/NOT_DEPLOYED。

@@ -585,3 +585,11 @@ Compose 显式 overlay/profile 和 Helm 可选 Deployment/Service/ServiceAccount
 8. 现有管理后台合同测试在后续实施任务中更新：feature gate 开启时断言三页为 canonical，关闭时仍断言历史 Token Gateway；本轮不修改实现测试。
 
 任一门禁缺失时不得把需求状态标记为已实现、不得推送生产部署。
+
+### 9.5 APT-137 G5 原始证据与离线判定
+
+三个职责模块分别负责受控文件/签名验证、版本化 kind/case 策略和报告/观察/保留期语义，仅依赖 G1 纯校验器及 Node 内置密码学，不 import 其他发布 gate 的顶层副作用。Ed25519 签名使用报告专属外部信任与固定 domain separation，绑定计划 SHA、来源和 envelope；不借用 TOK-37 客户端 readiness 的 key/claims 或签发权限。bundle 必须在受控根内，trust 在实际根外，逐个工件真实字节有界读取和 SHA 核验；签名来源负责工件与事实的真实性，路径外置本身不等于组织独立可信。
+
+十七 kind 完整且恰一份、十九命令逐项及版本化 case/验证层级不可由报告自行缩减；FAIL/SKIP/非零退出/缺工件/错环境不得通过。原始 JSON 数字先按数学值拒绝舍入/下溢，保留等价十进制表示；实际观察末阶段 end 绑定报告 end 与外部最长 24 小时新鲜度，不允许新签旧窗口刷新年龄。六指标均 <= advance_max 且样本/窗口 >= 下限才可推进，advance_max < 值 <= pause_above 或样本/时长不足 HOLD，任一 > pause_above、未授权效果 > 0 或 FAIL 优先 NO_GO。
+
+真实 GA 未登记就保留旧链接，不以提交时间或预发布版起算；至少 90 天或两个后续正式稳定版本取更长。既有导航纯函数和安全 return URL 回归保留原行为，支付复用既有 false 合同，不改 Go/登录/支付/cursor 语义。调用和文件限制见 [发布说明第8节](../deploy/runbooks/model-token-release.md#8-g5-离线证据与兼容验收)；本地 fixture 签名不能作为正式环境报告，G6 与部署证据继续独立。

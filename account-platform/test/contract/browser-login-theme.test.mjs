@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
+import { portalLoginLocation } from '../../../pinvou3-app/src/features/account-platform/portal-sections.js';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
@@ -17,7 +18,7 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
     read('deploy/keycloak/themes/pinvou/login/pinvou-login.ftl'),
     read('../pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'),
   ]);
-  assert.match(portal, /portal && \(auth === 'guest' \|\| auth === 'error'\)[\s\S]*location\.replace\('\/auth\/login'\)/);
+  assert.match(portal, /if \(portal && auth === 'guest'\) \{\s*globalThis\.location\.replace\(portalLoginLocation\(globalThis\.location\?\.pathname \|\| '\/', globalThis\.location\?\.search \|\| ''\)\);/);
   assert.match(authenticator, /CLIENT\.precheckPassword\(password\)/);
   assert.match(authenticator, /CLIENT\.createCaptcha\(mobile, purpose\(mode\)\)/);
   assert.match(authenticator, /CLIENT\.sendSMS\(/);
@@ -35,6 +36,24 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
   assert.match(template, /name="captcha_offset"/);
   assert.doesNotMatch(template, /type="hidden"[^>]+name="password"/);
   assert.doesNotMatch(template, /\?html/, 'Keycloak 26 auto-escapes HTML templates and rejects legacy ?html escaping');
+});
+
+test('Portal login preserves local context in one encoded return target without replacing the OIDC boundary', () => {
+  const origin = 'https://account.pinvou.com';
+  for (const [pathname, search, expected] of [
+    ['/admin.html', '?section=tokens&tab=usage&cursor=signed', '/admin.html?section=tokens&tab=usage&cursor=signed'],
+    ['/', '?section=ordersInvoices&order_id=fixture', '/?section=ordersInvoices&order_id=fixture'],
+    ['/admin.html', '?section=models&return_to=https://untrusted.example', '/admin.html?section=models&return_to=https://untrusted.example'],
+    ['https://untrusted.example', '', '/'], ['//untrusted.example', '', '/'], ['bad', '', '/'],
+    ['/\r\nLocation:invalid', '', '/'], [null, '', '/'], [['/admin.html'], '', '/'],
+    ['/admin.html', '\r\n?section=models', '/admin.html'], ['/admin.html', 'section=models', '/admin.html'],
+    ['/admin.html', '?section=models\nignored', '/admin.html'], ['/admin.html', null, '/admin.html'],
+  ]) {
+    const result = new URL(portalLoginLocation(pathname, search), origin);
+    assert.equal(result.origin, origin); assert.equal(result.pathname, '/auth/login');
+    assert.equal(result.hash, ''); assert.deepEqual([...result.searchParams.keys()], ['return_to']);
+    assert.equal(result.searchParams.get('return_to'), expected);
+  }
 });
 
 test('Keycloak browser flow keeps cookie SSO and requires the custom Identity image assets', async () => {

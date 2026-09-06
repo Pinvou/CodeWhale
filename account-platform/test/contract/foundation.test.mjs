@@ -228,7 +228,7 @@ test('late provider payments require audited operator repair before fulfillment'
 test('provider-specific payment rules remain inside the provider adapter', async () => {
   const adapter = await readFile(path.join(root, 'internal/platform/h3cpayment/provider.go'), 'utf8');
   const genericFiles = await Promise.all(['payments.go', 'reconciliation.go', 'refunds.go', 'admin.go'].map(file => readFile(path.join(root, 'internal/billing', file), 'utf8')));
-  assert.match(adapter, /ReusePendingOrderAfterExpiry:\s+true/);
+  assert.match(adapter, /ReusePendingOrderAfterExpiry:\s+false/);
   assert.match(adapter, /ReviewLatePayment:\s+true/);
   for (const source of genericFiles) assert.doesNotMatch(source, /h3c_mall|H3C Mall|新华三/i);
 });

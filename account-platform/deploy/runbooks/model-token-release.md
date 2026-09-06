@@ -1,6 +1,6 @@
-# 模型与 Token 发布计划和可选部署配置（APT-137 G0～G4）
+# 模型与 Token 发布计划和可选部署配置（APT-137 G0～G5）
 
-状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。当前包含已提交 G0 新域基础、G1 离线计划、G2 可选配置、G3 受控工具与本组 G4 安全入口/只读探针；后续 G5～G6 尚未交付。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
+状态：IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED。当前包含已提交 G0 新域基础、G1 离线计划、G2 可选配置、G3 受控工具、G4 安全入口/只读探针与本组 G5 离线证据；后续 G6 尚未交付。DNS 未添加不阻塞本地代码验证/提交，但实际部署仍须完整环境证据；本工具不授权推送、部署或任何现场写入。
 
 ## 1. 实际入口与依赖
 
@@ -18,7 +18,7 @@ activation 的 NOT_INSTALLED 要求 epoch/安装摘要全 null；真实 PRE/0 �
 
 两 runtime 身份必须分离、不复用 retired/保护组/运维身份，名称为最多 63 字节的小写无引号 PostgreSQL 标识符；token_gateway 是权限组不是本代登录。Account policy 运维角色声明必须包含 SHARE_NOWAIT 锁合同，不能将其误称纯 SELECT 身份。这里只校验声明，实际非超级用户锁权限、跨库依赖、NOLOGIN/成员链和旧会话 fence 属后续受控角色与现场验收。
 
-INTERNAL→LIMITED→FULL 固定有序，流量严格增加且末阶段 100%；观察时长/最低样本为正安全整数，cohort/审批/SLO 引用完整，量化 advance_max 不大于 pause_above，未经授权效果阈值必须为零，容量不超过既有 0.70/0.85 边界。阈值和观察参数是提案，不代表已经采集样本或达到推进条件；本组不读取测量报告或决定放量。旧链接真实 GA 时间/版本必须同时有值或同时未知，不以提交日期冒充 GA，兼容保留判定留后续实际证据。
+INTERNAL→LIMITED→FULL 固定有序，流量严格增加且末阶段 100%；观察时长/最低样本为正安全整数，cohort/审批/SLO 引用完整，量化 advance_max 不大于 pause_above，未经授权效果阈值必须为零，容量不超过既有 0.70/0.85 边界。阈值和观察参数是提案，不代表已经采集样本或达到推进条件；本组不读取测量报告或决定放量。旧链接真实 GA 时间/版本必须同时有值或同时未知，不以提交日期冒充 GA，兼容保留由第8节判定，真实GA/版本证据仍须提供。
 
 ## 3. Envelope 的有限保证
 
@@ -115,3 +115,49 @@ prepare 程序只从 `TOKEN_RELEASE_DBA_DATABASE_URL` 连接 DBA；`--operation 
 静态/Node/Chrome与隔离nginx实测按根精确候选分项记录；可以在G4模板/固定域/相关原服务字节一致时明确继承新域nginx解析/回环证据，不能继承旧域525候选作为新域已验收。G6的通用renderer、nginx测试镜像/helper和workflow未随本组提交，不声称这些持续门禁已交付或GitHub已绿。完整双origin/IdP握手、安全日志、权限撤销与回滚仍要独立现场证据，不由scope或无Cookie/session401探针替代。
 
 根在G3加本组十一个代码/模板/测试文件的精确候选 `41b501279d6ce12f2df0021a25f97a467e3a3e81` 实际运行十一 Node PASS/0 SKIP（0.649 秒），真实 Chromium scope 2/2 PASS/0 SKIP（10.041 秒），exit 0。根核对十一输入与 `e371d69e58fe9e5831bf0e19a478f88bf80235e7` 无差异，并与 `4a0d59fe5f6488e08eb909ca5888e1e5a1188e47` 新域 host-nginx机制验证输入一致，故仅继承六 profile解析、双runtime安全矩阵与故障/实际SIGTERM精确清理的G4分项，不继承G6受限容器/持续CI完成结论。六份最小文档另交B；无实际DNS/证书/部署变化，不将VM或scope误称现场完整握手。
+
+## 8. G5 离线证据与兼容验收
+
+本组只实现离线证据判定和既有行为回归，不创建签发服务、身份系统、业务报告采集平台或自动部署流程。新增 `scripts/account-platform-model-token-evidence.mjs` 及 `contracts/deployment/` 下报告/来源/集合闭合合同、独立 Node 合同测试；复用首批 plan/envelope 校验，不 import 有网络/顶层副作用的旧 release-gate。只借用既有 Node 内置 Ed25519 验签和外部固定信任输入的模式，绝不复用 `PINVOU_CLIENT_READINESS_*` 的 TOK-37 key、claims 或签发权限。
+
+1. **外部信任与默认关闭**：CLI 显式读取计划、证据集合和受控报告目录；可信输入由集合目录之外的受控文件/环境提供，包含预先批准的计划原始字节 SHA-256、报告专用 key-id/public-key、允许的来源标识、环境/kind 范围、有效期和审批引用。集合自带公钥、同目录自称可信配置、未知来源、越权签名或缺可信输入都不得通过。信任输入由发布负责人独立固定，脚本不能证明错误管理的信任根可信；缺实际签发/复核流程仍是 ENV_PENDING。只验证公钥，不生成或持有私钥，不联网查询签发者，不为补证据在本地制造现场报告。测试的临时密钥只用于离线正负例。
+2. **签名和字节绑定**：每项 detached Ed25519 签名覆盖固定 domain `PINVOU_MODEL_TOKEN_RELEASE_EVIDENCE_V1`、计划 SHA、来源/key-id 和整个 envelope 的确定性排序 JSON；envelope 的 report_sha256 再绑定实际报告原始字节。重复 JSON key、未知字段、非规范类型、畸形 base64url/公钥、非 Ed25519、错误 domain/plan/candidate/environment、签名不匹配均固定码拒绝。报告只从受控根内相对路径读取，拒绝绝对路径、遍历、symlink/junction 越界和非普通文件；每个文件有大小上限，读取到的同一份字节用于摘要与解析，不先验签文件名再重新读取。报告内候选、环境、kind、执行/复核/审批引用与窗口必须逐项匹配签名 envelope，不允许别的候选报告仅改外层摘要后混用。
+3. **真实来源与覆盖层级**：十七类仍为首批冻结集合，每类恰一项，无重复/遗漏/额外类别；执行和复核身份不同且分别在受控来源允许范围内。报告须有完整具名 case、实际执行时间、原始执行工件摘要/安全引用、PASS/FAIL/SKIP、exit code 和验证层级，全部必需 case PASS、exit 0、零 SKIP 才可进入后续判定。集合必须包含每个引用的脱敏原始执行工件实际字节，验证器按报告内的相对路径在同一受控根内有界读取并核对 SHA-256，缺失、篡改、越界、非普通文件或超限均拒绝；不能仅存在一个外部引用就称机器已验证工件。工件不执行、不联网取回，敏感原始日志须先由可信执行方按既有安全规则产出可核验的脱敏记录，实际日志扫描过程仍由签名来源担保。将稳定 case 列表作为版本化本地策略，不由报告自行声明“所需项”。签名证明来源对报告负责，不自动证明测试事实；可信执行/复核方必须先核验真实原始记录。离线 fixture、loopback PG/nginx、validated HTTPS replay 与正式环境实证分开：前四批实现证据可保留为实现记录，但不能升格满足现场 kind。最终环境集合要求实际目标环境记录；跨候选旧报告只能重跑或另获明确兼容审批，本工具不自动推导等价。
+
+| Kind | 必需事实族（实施时固定具名 case，不能以汇总 PASS 替代） |
+|---|---|
+| GATE_MATRIX | 十三 gate 各自 on/off、依赖拒绝、撤权取消、父页/只读恢复、UNKNOWN 仅 GET、无 direct 回退 |
+| CURSOR_ISOLATION | 既有九源登记逐源；跨源/actor/过滤绑定、过期及 gate-off 410，真实服务/共享签名配置 |
+| LEGACY_LINKS | 三旧 tab 规范化、过时筛选/私有 cursor 清理、无权回退、GA 与生产稳定版本保留证据 |
+| AUTHORIZATION | 三页/各动作精确权限、近期认证、独立 workload 与撤权零效果 |
+| THREE_SERVICE_COMMANDS | 十九命令及三审批实际 HTTP/Account/Token/Billing 适用链、重放/响应未知/零重复事实 |
+| WORKER_READINESS_SAFE | 两 worker 实际注册、ready 前关闭、唯一 lease、SAFE 停止与旧 epoch 零效果 |
+| NATS_CONSUMERS | 同一认证集群、三 durable 首次/重复/未知保留、SAFE 停止、原 Billing consumer 不变 |
+| GOVERNANCE_POLICY_HANDLER | 实际 DB 22 policy、十九安装 adapter 摘要、000031 与 CAS/原 request-id 只读结果 |
+| WRITER_FENCE | N/N-1 实际制品能力、gateway/credential/Relay 同代角色、退休 NOLOGIN/旧连接与跨库边界 |
+| ACCOUNT_POLICY_LOCK | 现场实际非超级用户身份、SHARE NOWAIT 取得/冲突与锁保持到 Token CAS |
+| CAP_BOOTSTRAP | 显式额度/审批、真实 bootstrap/同键重放、存量 grandfather/headroom/readiness |
+| DEADLINES_CAPACITY | 三既有预算链 10→12→14、3→5→7、5→7→9；70%/85% 水位、超时回收与告警 |
+| DUAL_ORIGIN_BROWSER | 正式 DNS/TLS/专属 OIDC 与设计 6.2 十一点真实 Chromium 完整链，不能用 replay/fixture 替代 |
+| PROXY_LOG_SAFETY | 每层代理/WAF/APM/应用的 canary 零泄漏、头/路径/错误处理、可信 upstream 与旧密文兼容前置 |
+| WORKLOAD_ROTATION | 实际签发/15 分钟期限/热轮换/过期及错 audience、subject、权限拒绝 |
+| SAFE_ROLLBACK | 实际 CAS 线性化、旧 epoch 零效果、cursor 410/会话失效、历史结果只读/恢复新身份 |
+| OBSERVATION | 计划对应阶段、cohort/流量、实际窗口/样本、全部六指标、暂停和资源回收告警 |
+
+4. **时间、观察和决策**：外部受控策略给出的最大报告年龄必须为正且不超过 24 小时；窗口严格有效、结束不在未来，签名有效期覆盖执行与验收。每次只请求 INTERNAL/LIMITED/FULL 一个阶段，必须有该阶段及之前阶段的连续有序观察记录，不预先宣称后续全量已通过。实际 cohort/traffic_percent 与计划精确对应，计数为非负安全整数、数值有限。六指标均 `<= advance_max`、实际样本数 `>= minimum_samples`、实际窗口秒数 `>= observation_seconds` 才满足推进条件；样本是下限而非要求恰等于计划数。任一指标 `advance_max < 值 <= pause_above`、时长或样本不足为 HOLD/ENV_PENDING；任一指标 `> pause_above`、`unauthorized_effects > 0` 或 FAIL 为 NO_GO，NO_GO 优先于 HOLD。边界相等按上述包含关系判断，不通过降低阈值、伪扩大窗口或补零推进。全部现场报告及适用阶段通过，最多输出绑定计划/候选/环境/阶段和证据集合摘要的 `EVIDENCE_VERIFIED`（不是自动 GO/apply/激活），deployment_status 仍 NOT_DEPLOYED。报告完整不等于已部署，实际放量始终需要既有独立批准步骤；缺信任、缺工件、FAIL 或 SKIP 不输出 VERIFIED。
+5. **旧链接保留与已有行为**：`section=tokens` 至少自真实 GA 起 90 天或跨两个后续生产稳定版本取较长者，不能以提交日期、UAT 版本、预发布标签或重复版本起算。GA 未登记时只能保持兼容，不能推定期限已满；本任务始终保留兼容实现，不提供删除旧路由选项。报告核对 GA 时间/版本、按时间有序的后续正式稳定版本记录和当前仍兼容的证据，边界测试覆盖第 89/90 天、零/一/两版、重复/倒序/预发布记录和未 GA。gate/navigation 回归直接执行既有纯函数；cursor 真正签名/DB 隔离依赖既有具名服务测试与真实报告，不写假的后端替身宣称九源通过。仅修两处历史测试：登录断言改为实际 `portalLoginLocation(pathname, search)` 并增加 return URL/上下文安全矩阵；支付 Provider 断言对齐既有 `ReusePendingOrderAfterExpiry=false`，不改登录、支付或 cursor 业务代码。
+6. **验收与交付**：严格负例集中覆盖全部 kind/case 缺失、错层级、FAIL/SKIP、签名/来源/计划与字节篡改、过期/未来/类型精度、路径与大小、观察不足/阈值/阶段错序、旧链接保留。CLI 使用固定安全错误码，不打印原报告、身份密钥、URL、连接信息或原始异常；测试验证无网络/子进程/业务写。根冻结候选后实际运行新门禁及受影响 Node，随后全 Node 复验两旧断言真正闭合；B 独立复审。现场报告缺失时可完成门禁实现验收，但总体仍 IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED，不以测试签名的 fixture 产生本次正式发布证据。
+
+### 8.1 调用与输入边界
+
+`node scripts/account-platform-model-token-evidence.mjs --plan <计划文件> --bundle <集合根内的bundle.json> --root <不可变受控集合目录>`；外部只读信任文件由 `PINVOU_MODEL_TOKEN_EVIDENCE_TRUST_FILE` 指定，实际解析路径必须在集合根外。脚本没有 trust/key 的集合内覆写、签发、网络、子进程或 apply 参数；未配置可信输入返回固定错误并非零退出。bundle 必须实际位于 root 内，不能将 root 指向 reports 子目录使 bundle 与 trust 同目录绕过外置信任要求。发布负责人固定此文件的来源、权限与 expected_plan_sha256，路径不同不等于组织层面的独立可信来源。
+
+闭合 schema 为 `model-token-evidence-{bundle,report,trust}.schema.json`。信任 keys 每项限制 key_id、原始 32 字节 Ed25519 公钥的规范 base64url、来源、环境/kind、执行者/复核者/审批引用及有效期；签名是规范 base64url 的 64 字节。`evidence-policy.mjs` 提供版本化必需 case 清单和排序 JSON 签名 bytes，19 项命令清单另以实际 policy manifest 的 Token 项逐项回归，不能靠汇总数填充。候选/环境不匹配或其他来源签名即使密码学有效仍拒绝。
+
+计划、集合、trust、每份结构报告最大 1 MiB；执行工件每份最大 4 MiB，实际读取的报告及去重工件总量最大 32 MiB。文件必须非空普通文件，拒绝符号链接/junction 和根外路径，并核对打开前后文件身份/大小/修改时间；操作者须提供不可变本地导出，不将可并发修改的目录当受控制品。所有 JSON 拒绝重复字段、非 UTF-8 和原始数值失真：数字 token 最多 128 字符、指数范围有界，按十进制数学值与解析数值的规范表示核对，保留 `1e1=10`、`0.10=0.1`，拒绝安全整数溢出、下溢至零或舍入越过阈值。观察的最后阶段实际 ended_at 必须等于报告 ended_at，不能用新外层时间签署七天前数据绕过 max_age。
+
+工件原字节经 SHA 验证但不执行/解析为新的业务事实；受控签发者对具名 case 与工件的关联真实性负责。验证通过输出 `EVIDENCE_VERIFIED / VERIFIED / NOT_DEPLOYED` 及绑定摘要/阶段，HOLD 输出 ENV_PENDING、NO_GO 输出 FAILED，后二者非零退出；非法、缺失或不可信输入仅输出固定错误码并非零退出。上述 VERIFIED 仅在所有目标环境证据真实齐备并由独立可信来源担保时成立，本地测试签名集合不是本次正式站点证据。
+
+### 8.2 本组验证与后续边界
+
+根精确十代码候选 `b837fc087518594a8005a487235c0630e02eb57b` 全账户 Node 429/429 PASS/0 SKIP（45.093 秒、exit 0）；OpenAPI 有效（9 项既有 warning）、架构守卫与正式授权覆盖 339 HTTP/27 task/6 event/18 CLI 通过。首次归档遗漏同树 vite.config.js 导致 ENOENT，补导后以同一候选完整重跑取得上述结果，不称首次一次全 PASS；没有修改源码或放宽断言。B 四文档静态 PASS，精确合成树/本组最终签署待确认。测试签名与模拟报告仅证明实现的正负判定，未产生正式站点证据。G6 持续 CI 及其 renderer/helper/容器接线尚未在本组交付；代码提交、远端 CI 和真实环境部署分别记录。当前未推送或部署；后续仅在适用批准范围及全部现场前置齐备后执行，校验器不授予写权限，也不会执行推送或部署。

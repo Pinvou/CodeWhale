@@ -303,6 +303,44 @@ test('cursor history is filter-bound and browser history cannot reuse a cursor u
   assert.deepEqual(changedFilter.previousByCursor, {});
 });
 
+test('release regression keeps all nine source families isolated across URL updates and cursor history', () => {
+  // Resource audit is one API family with separately scoped model/Token URL cursors.
+  // This is real navigation logic, not a substitute for server signature/PG evidence.
+  const cursors = { models: 'model_cursor', protocols: 'protocol_cursor', formulas: 'formula_cursor', tokenAccounts: 'token_cursor', provisionings: 'provisioning_cursor', usage: 'usage_cursor', reconciliation: 'reconciliation_cursor', ownerCandidates: 'owner_candidate_cursor', modelAudit: 'model_audit_cursor', tokenAudit: 'token_audit_cursor' };
+  const params = new URLSearchParams(Object.entries(cursors).map(([source, parameter]) => [parameter, `fixture-${source}`]));
+  const histories = {};
+  for (const [source, parameter] of Object.entries(cursors)) {
+    const query = readAdminModelTokenQuery(source, locationLike(`?${params}`));
+    assert.equal(query.cursor, `fixture-${source}`);
+    const updates = adminModelTokenQueryUpdates(source, { ...query, cursor: `next-${source}` });
+    assert.equal(updates[parameter], `next-${source}`);
+    for (const other of Object.values(cursors).filter(key => key !== parameter)) assert.equal(Object.hasOwn(updates, other), false);
+    histories[source] = rememberAdminModelTokenNextCursor(synchronizeAdminModelTokenCursorHistory({}, query), `next-${source}`);
+    assert.deepEqual(previousAdminModelTokenCursor(histories[source]), { available: true, cursor: `fixture-${source}` });
+  }
+  const before = structuredClone(histories);
+  histories.formulas = synchronizeAdminModelTokenCursorHistory(histories.formulas, { ...readAdminModelTokenQuery('formulas', locationLike(`?${params}`)), protocol_definition_id: 'different-fixture', cursor: '' });
+  assert.deepEqual(previousAdminModelTokenCursor(histories.formulas), { available: false, cursor: '' });
+  for (const source of Object.keys(cursors).filter(key => key !== 'formulas')) assert.deepEqual(histories[source], before[source]);
+  for (const tab of ['models', 'tokens', 'usage']) {
+    const legacy = locationLike(`?section=tokens&tab=${tab}&q=private&cursor=old&${params}`);
+    const normalized = normalizeAdminModelTokenEntry('tokens', ['models', 'tokenResources', 'modelOperations'], true, legacy, ['platform.models.read', 'platform.tokens.read', 'platform.usage.read']);
+    const result = adminSectionURL(normalized.section, legacy, normalized.updates);
+    const next = new URL(result, 'https://account.pinvou.com');
+    assert.equal(normalized.replace, true); assert.equal(next.searchParams.get('section'), 'models');
+    for (const key of ['tab', 'q', 'cursor', ...Object.values(cursors)]) assert.equal(next.searchParams.has(key), false);
+    const refreshed = normalizeAdminModelTokenEntry('models', ['models'], true, locationLike(next.search), ['platform.models.read']);
+    // The existing model-tab default is a separate canonicalization, not another
+    // legacy migration or restoration of private filters/cursors.
+    assert.equal(refreshed.section, 'models');
+    assert.equal(refreshed.updates.model_tab, 'directory');
+    assert.ok(Object.entries(refreshed.updates).filter(([key]) => key !== 'model_tab').every(([, value]) => value === null));
+    const canonicalURL = new URL(adminSectionURL('models', locationLike(next.search), refreshed.updates), 'https://account.pinvou.com');
+    const stable = normalizeAdminModelTokenEntry('models', ['models'], true, locationLike(canonicalURL.search), ['platform.models.read']);
+    assert.equal(adminSectionURL('models', locationLike(canonicalURL.search), stable.updates), `${canonicalURL.pathname}${canonicalURL.search}`);
+  }
+});
+
 test('production source transitions clear stale queries, reject late results, and isolate source failure', async () => {
   const deferred = () => {
     let resolve;
