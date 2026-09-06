@@ -204,7 +204,7 @@ func addTokenGovernancePolicies(result map[string]Policy) {
 	}
 	audit("TOKEN_ACCOUNT_CREATE", 3, "platform.tokens.manage", 3, "owner_type", "owner_id", "owner_authorization_version", "owner_version", "owner_identity_digest", "owner_account_count", "owner_account_cap", "owner_account_cap_policy_version", "creation_version", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ACCOUNT_STATUS_CHANGE", 2, "platform.tokens.manage", 2, "token_account_id", "expected_account_version", "target_status", "precheck_fingerprint", "request_fingerprint")
-	audit("TOKEN_ROUTE_UPSERT", 2, "platform.tokens.manage", 2, "token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_code", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ROUTE_UPSERT", 3, "platform.tokens.manage", 3, "token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_version_id", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ROUTE_DELETE", 2, "platform.tokens.manage", 2, "token_account_id", "route_id", "expected_account_version", "expected_route_version", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_CREDENTIAL_ENROLL", 1, "platform.tokens.manage", 1, "token_account_id", "expected_account_version", "credential_slot_version", "launch_fingerprint")
 	audit("TOKEN_CREDENTIAL_ROTATE", 1, "platform.tokens.manage", 1, "token_account_id", "expected_account_version", "active_credential_version", "launch_fingerprint")

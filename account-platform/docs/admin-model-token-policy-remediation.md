@@ -30,13 +30,13 @@
 
 ### APT-123-R3
 
-- 状态：DONE / REMEDIATION_REVIEW_PASS；隔离候选树真实验证与 B 最终独立审核已通过，等待根代理独立签署提交。
+- 状态：DONE / REMEDIATION_REVIEW_PASS；隔离候选树真实验证与 B 最终独立审核已通过，已独立签署提交 `e080d263`。
 - 文件所有权：本文件、Account 000048 up/down 与 migration manifest、registry 中 CREATE 一条、manual recovery 的当前政策校验、独立 CREATE/STATUS 精确单元与真实 PG 版本兼容测试；不带 APT-138 的 store/reader/descriptor/worker 等代码。
 - 验收：真实迁移前 v2 行快照与迁移后逐字一致；新 v3 与实际十一字段相等；重跑等价，冲突政策失败；down 后 v2/v3 与历史引用仍存在。真实旧 v2 command 的 GET/同 key 同 payload POST 重放原 reference/result、零第二个领域效果，新 key 使用 v3，异 payload 冲突。v2 MANUAL_REVIEW 在当前 v3 政策下可恢复且仍受原双权限/authority/CAS 约束。STATUS v2 五字段精确不变。B 循环审核通过后独立提交。
 
 ### APT-125-R2
 
-- 状态：PENDING；依赖 APT-123-R3 已独立提交。
+- 状态：DONE / REMEDIATION_REVIEW_PASS；依赖 APT-123-R3 已独立提交（`e080d263`），隔离候选树真实验证与 B 最终独立审核已通过，等待根代理独立签署提交。
 - 文件所有权：本文件后续记录、Account 000049 up/down 与 migration manifest、registry 中 UPSERT 一条、独立路由政策/旧 v2 reference 与幂等重放真实 PG 测试。
 - 验收：v2 原 protocol_code 描述原样保留；新 v3 七字段精确匹配 protocol_version_id；down 保留两版/引用，旧 v2 成功路由结果 GET/同 key 重放保持原 reference/version、零第二次 route mutation，新命令 v3；不放宽真实 parser 接受旧文本模型/协议。B 循环审核通过后独立提交，再恢复 APT-138 严格总门禁。
 
@@ -48,3 +48,6 @@
 - 2026-09-06 A / 根代理实测：仅含 HEAD+本批十个文件的隔离候选树完成验证，未混入 APT-138。Account CREATE/STATUS 精确单元与 000048 真实 PG 前向、等价重跑、冲突拒绝、down 历史保留通过（迁移用例 36.55s）；最终候选 `a210f61c` 的旧 v2 三服务恢复整链通过（13.83s），当前完整恢复政策单元通过，Token 包合计 15.792s、退出 0，无 SKIP。Migration manifest 266 项、architecture guard 与 diffcheck 均通过。
 - 2026-09-06 A：真实验证纠正两项 fixture 预期，不修改生产合同：首次人工恢复正式返回 202，原测试误只接受 200/201，现严格断言 202；合法插入的历史 fixture 不含初始提交事件，不能复用完整新提交流程的聚合计数。现精确校验 CREATED、PROVISIONING_COMPLETED、PROVISIONING_RECOVERY 三类审计各一条，完成事件按 payload command_reference、恢复事件按 aggregate_id 分别一条，成功 Billing 回执一条；重放前后完整持久证据不变。相关 UUID SQL 参数显式先转 uuid 再转 text，避免首次文本推断与 UUID 比较冲突。
 - 2026-09-06 B：APT-123-R3 最终独立审核 PASS；代码、隔离提交边界、修订后的精确事实断言和真实 PG 证据均通过，可独立提交。本结论不代表 APT-125-R2 或 APT-138 完成。
+- 2026-09-06 A：APT-125-R2 已按获批范围追加 Account 000049 和 UPSERT v3/schema v3 七字段，原 000045 与 v2 保持不动；扫描未发现 UPSERT 专属 v2 硬编码，通用 Portal 结果仍兼容整数政策版本。新增真实迁移等价重跑、冲突失败、down 历史保留测试，以及合法插入的旧 v2 成功结果的 reference/key GET、同 key POST 和异 payload 冲突验证；新 key 使用 v3 且只产生一次新效果，旧结果在路由再次变更后仍 existing-first 重放。断言精确检查领域版本、审计、Outbox、旧 mutation 与墓碑数，并比较重放前后完整持久证据；不伪造历史事件，不放宽 protocol_code 文本输入。待仅含 HEAD+本批的隔离候选树与 B 审核通过后独立提交。
+- 2026-09-06 根代理实测：仅含 HEAD+本批七个文件的隔离候选 `c0e87a62` 验证通过。Account 000049 真实 PG 前向、down 历史保留、冲突拒绝通过（用例 23.56s），政策精确单元通过；Token 既有路由治理 PG 12.26s、旧 v2 路由结果兼容 PG 14.31s、两项 parser 单元与 policy/实际字段一致性单元均通过，Token 包合计 33.552s、退出 0，无 SKIP。Migration manifest 268 项、architecture guard 与 diffcheck 通过。
+- 2026-09-06 B：APT-125-R2 最终独立审核 PASS，七文件代码边界与隔离候选真实证据均无阻断，可独立签署提交；提交后才恢复 APT-138 接线，本次未激活生产、推送或部署，也不代表 APT-138 已通过。

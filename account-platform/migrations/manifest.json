@@ -482,6 +482,16 @@
         "file": "000048_token_account_create_policy_v3.up.sql",
         "version": 48,
         "sha256": "d6c95119c448147a5e689c614bc9776932f4abeff5f97b90234902dd574019d5"
+      },
+      {
+        "file": "000049_token_route_upsert_policy_v3.down.sql",
+        "version": 49,
+        "sha256": "982e8a0203d616f0db4c32b71d681d7bf058a62c0fbeb522e847b0dbc3576308"
+      },
+      {
+        "file": "000049_token_route_upsert_policy_v3.up.sql",
+        "version": 49,
+        "sha256": "3e85209b6455106814ac0783376c68a13c676a93a3b86e2a83dab28b079b66d2"
       }
     ],
     "billing": [
