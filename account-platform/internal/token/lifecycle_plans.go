@@ -347,9 +347,12 @@ func (r *PostgresRepository) ScheduleModelPublish(ctx context.Context, begin tok
 	if command.EffectiveAt.Before(now.Add(lifecyclePlanMinimumWindow)) {
 		return TokenCommandResult{}, false, errLifecyclePlanWindowInvalid
 	}
-	var currentLifecycle string
-	if err = tx.QueryRow(ctx, `SELECT lifecycle_status FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2`, expected.ExpectedCatalogVersion, command.ModelID).Scan(&currentLifecycle); err != nil || currentLifecycle != "DRAFT" {
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	// DRAFT is the independent model_catalog_drafts state, never a catalog
+	// entry lifecycle. Publication still requires the discovered catalog base;
+	// the exact draft and its base version are revalidated immediately below.
+	var catalogModelExists bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2)`, expected.ExpectedCatalogVersion, command.ModelID).Scan(&catalogModelExists); err != nil || !catalogModelExists {
+		if err != nil {
 			return TokenCommandResult{}, false, err
 		}
 		return TokenCommandResult{}, false, ErrCatalogVersionConflict
