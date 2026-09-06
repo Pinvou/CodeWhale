@@ -513,7 +513,9 @@ jobs:
 
       - name: 构建 nsis
         working-directory: pinvou3-app
-        run: npm run build:nsis
+        # 此 workflow 只产出无签名 GitHub artifact；正式 WoSign 依赖本地 UKey
+        # 与 gitignored secrets，不能在 GitHub-hosted runner 上调用。
+        run: npm run build:nsis:local
 
       # tauri nsis 产物默认名 pinvou3_<version>_x64-setup.exe,与目标命名一致。
       - name: 校验产物 + sha256
