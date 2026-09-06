@@ -232,6 +232,16 @@ func prepare(ctx context.Context, connection *pgx.Conn) error {
 	if _, err := connection.Exec(ctx, `SELECT pg_advisory_lock(hashtext('pinvou_account_platform_migrations'))`); err != nil {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
+	// PostgreSQL checks schema CREATE even for CREATE TABLE IF NOT EXISTS.
+	// Upgrades retain only ledger DML after schema creation is deliberately
+	// revoked; keep the same search_path and lock without requesting new DDL.
+	var exists bool
+	if err := connection.QueryRow(ctx, `SELECT pg_catalog.to_regclass('schema_migrations') IS NOT NULL`).Scan(&exists); err != nil {
+		return fmt.Errorf("locate schema migrations: %w", err)
+	}
+	if exists {
+		return nil
+	}
 	if _, err := connection.Exec(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version BIGINT PRIMARY KEY,
