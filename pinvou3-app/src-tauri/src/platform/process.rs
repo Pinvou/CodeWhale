@@ -283,23 +283,40 @@ pub(crate) fn std_process_group_leader(command: &mut Command) {
 
 /// 按 pid 杀进程树：Windows 用 taskkill 杀整棵树（脚本会再起子 shell，单杀
 /// 父进程会留下继续运行的子进程）；其他平台按进程组杀（负 pid）——安装进程
-/// 以 `process_group(0)` 独立成组，`kill -9 -pgid` 连 curl | bash / npm 派生
-/// 的子进程一起终止，不孤儿化（评审中危项）。
-pub(crate) fn kill_process_tree(pid: u32) -> std::io::Result<Output> {
-    let pid_arg = pid.to_string();
+/// 以 `process_group(0)` 独立成组，组杀连 curl | bash / npm 派生的子进程一起
+/// 终止，不孤儿化（评审中危项）。Unix 直接调用 kill(2)，不得 spawn 外部 kill
+/// 可执行文件；pid <= 1 或超出 i32 正数范围时拒绝执行，避免触发 kill(0/-1)
+/// 的进程组或用户级特殊语义。ESRCH 表示目标已退出，按成功处理。
+pub(crate) fn kill_process_tree(pid: u32) -> std::io::Result<()> {
     if crate::platform::capabilities::is_windows() {
         external_command(Path::new("taskkill"))
-            .args(["/PID", pid_arg.as_str(), "/T", "/F"])
-            .output()
-    } else {
-        let group_arg = format!("-{pid_arg}");
-        external_command(Path::new("kill"))
-            // `--` is required for portability: without it some `kill`
-            // implementations parse a negative process-group id as another
-            // option/signal instead of as the target process group.
-            .args(["-9", "--", group_arg.as_str()])
-            .output()
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()?;
+        return Ok(());
     }
+    #[cfg(unix)]
+    {
+        let Some(group) = i32::try_from(pid).ok().filter(|group| *group > 1) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing user-wide process group kill for pid {pid}"),
+            ));
+        };
+        // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+        let sent = unsafe { libc::kill(-group, libc::SIGKILL) };
+        if sent != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+    Ok(())
 }
 
 pub(crate) struct HiddenTokioCommand;
@@ -468,6 +485,103 @@ mod tests {
             !finished.exists(),
             "descendant survived process-tree timeout"
         );
+    }
+
+    /// Regression test for Unix group termination: the implementation must
+    /// call kill(2) directly even when a fake `kill` executable is first on
+    /// PATH, and it must terminate both the group leader and its descendant.
+    #[cfg(unix)]
+    #[test]
+    fn kill_process_tree_terminates_group_without_spawning_external_kill() {
+        use std::sync::Mutex;
+
+        static PATH_LOCK: Mutex<()> = Mutex::new(());
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let work = std::env::temp_dir().join(format!(
+            "pinvou3-kill-process-tree-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&work).expect("create test work dir");
+        let marker = work.join("external-kill-invoked");
+        let sleep_pid_file = work.join("sleep-pid");
+        let fake_kill_bin = work.join("kill");
+        std::fs::write(
+            &fake_kill_bin,
+            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 42\n", marker.display()),
+        )
+        .expect("write fake kill");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&fake_kill_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kill");
+
+        let previous_path = std::env::var_os("PATH");
+        let mut split_path = previous_path
+            .as_ref()
+            .map(|value| std::env::split_paths(value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        split_path.insert(0, work.clone());
+        // SAFETY: this test serializes its PATH mutation on PATH_LOCK.
+        unsafe { std::env::set_var("PATH", std::env::join_paths(&split_path).unwrap()) };
+
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!("sleep 30 & echo $! > {}; wait", sleep_pid_file.display()),
+        ]);
+        std_process_group_leader(&mut command);
+        let mut child = command.spawn().expect("spawn sh group leader");
+        let sh_pid = child.id();
+
+        let mut sleep_pid = None;
+        for _ in 0..40 {
+            if let Ok(text) = std::fs::read_to_string(&sleep_pid_file) {
+                if let Ok(value) = text.trim().parse::<u32>() {
+                    sleep_pid = Some(value);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let sleep_pid = sleep_pid.expect("descendant must report its pid");
+
+        let kill_result = kill_process_tree(sh_pid);
+        let _ = child.wait();
+
+        // SAFETY: kill(pid, 0) only probes liveness.
+        let alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) == 0 };
+        let mut both_dead = !alive(sh_pid) && !alive(sleep_pid);
+        for _ in 0..100 {
+            if both_dead {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            both_dead = !alive(sh_pid) && !alive(sleep_pid);
+        }
+        // SAFETY: ensure no fixture process survives a failing assertion.
+        let _ = unsafe { libc::kill(sleep_pid as i32, libc::SIGKILL) };
+
+        // SAFETY: holding PATH_LOCK; restore the saved value.
+        unsafe {
+            match previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let marker_content = std::fs::read_to_string(&marker).ok();
+
+        assert!(kill_result.is_ok(), "group kill failed: {kill_result:?}");
+        assert!(
+            both_dead,
+            "group leader {sh_pid} and descendant {sleep_pid} must both die"
+        );
+        assert!(
+            marker_content.is_none(),
+            "an external kill was spawned: {marker_content:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     #[test]

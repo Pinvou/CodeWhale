@@ -223,15 +223,27 @@ pub fn apply_user_npm_prefix(_cmd: &mut Command) {}
 /// 退出收割用的树杀(macOS 走此实现)。连接器 CLI 是 npm shim(shell→node),
 /// spawn 侧已 `process_group(0)` 成组,这里按负 pid 杀整组;单杀 shim pid 会把
 /// node 孙进程孤儿化。组杀失败(进程未成组的旧登记)追加单 pid 兜底。
+///
+/// 禁止委托外部 kill 可执行文件执行组杀；这里在 Unix 直接调用 kill(2)，并在
+/// API 边界拒绝 pid <= 1 及超出 i32 正数范围的 pid。非 Unix 目标没有 POSIX
+/// 进程组语义，按 unsupported 合约显式不执行任何操作。
 pub fn kill_pid_tree(pid: u32) {
-    let group_arg = format!("-{pid}");
-    let group_ok = Command::new("kill")
-        .args(["-9", group_arg.as_str()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !group_ok {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+    #[cfg(unix)]
+    {
+        let Some(group) = i32::try_from(pid).ok().filter(|group| *group > 1) else {
+            return;
+        };
+        // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+        let group_ok = unsafe { libc::kill(-group, libc::SIGKILL) } == 0;
+        if !group_ok {
+            // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+            let _ = unsafe { libc::kill(group, libc::SIGKILL) };
+        }
+        return;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
     }
 }
 
