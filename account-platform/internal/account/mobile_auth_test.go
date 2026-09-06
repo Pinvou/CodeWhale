@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +58,9 @@ func TestNormalizeRegistrationUsername(t *testing.T) {
 }
 
 type mobileAuthRepositoryFake struct {
+	deliveryMu         sync.Mutex
+	deliveryDone       chan struct{}
+	deliveryOnce       sync.Once
 	mobileExists       bool
 	securityAllowed    bool
 	securityErr        error
@@ -116,13 +120,47 @@ func (f *mobileAuthRepositoryFake) CreateRegistrationOperation(_ context.Context
 }
 
 func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, _ uuid.UUID, _ string, _ []byte) error {
+	f.deliveryMu.Lock()
 	f.challengeSent = true
+	f.deliveryMu.Unlock()
+	f.notifyDeliveryDone()
 	return nil
 }
 
 func (f *mobileAuthRepositoryFake) MarkSMSChallengeFailed(context.Context, uuid.UUID) error {
+	f.deliveryMu.Lock()
 	f.challengeFailed = true
+	f.deliveryMu.Unlock()
+	f.notifyDeliveryDone()
 	return nil
+}
+
+func (f *mobileAuthRepositoryFake) deliveryState() (sent, failed bool) {
+	f.deliveryMu.Lock()
+	defer f.deliveryMu.Unlock()
+	return f.challengeSent, f.challengeFailed
+}
+
+func (f *mobileAuthRepositoryFake) notifyDeliveryDone() {
+	// Async fixtures initialize this channel before calling Send. Synchronous
+	// registration fixtures do not need to install a completion observer.
+	if f.deliveryDone != nil {
+		f.deliveryOnce.Do(func() { close(f.deliveryDone) })
+	}
+}
+
+func (f *mobileAuthRepositoryFake) waitForDelivery(t *testing.T) {
+	t.Helper()
+	if f.deliveryDone == nil {
+		t.Fatal("asynchronous delivery requires a completion observer")
+	}
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-f.deliveryDone:
+	case <-timer.C:
+		t.Fatal("asynchronous delivery did not record a terminal state")
+	}
 }
 
 func (f *mobileAuthRepositoryFake) SMSChallengeReady(context.Context, uuid.UUID, string, SMSPurpose) (SMSVerificationData, error) {
@@ -195,6 +233,8 @@ func (f *mobileAuthRepositoryFake) RegisterMobileIdentity(_ context.Context, _, 
 }
 
 type smsProviderFake struct {
+	deliveryMu      sync.Mutex
+	sendCalls       int
 	sentChallenge   uuid.UUID
 	verifyChallenge uuid.UUID
 	sendErr         error
@@ -208,8 +248,17 @@ func (*smsProviderFake) Descriptor() SMSProviderDescriptor {
 }
 
 func (f *smsProviderFake) SendCode(_ context.Context, _ string, _ SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
+	f.deliveryMu.Lock()
+	defer f.deliveryMu.Unlock()
 	f.sentChallenge = challengeID
+	f.sendCalls++
 	return SMSDelivery{MessageID: "provider-message", VerificationData: []byte("verification")}, f.sendErr
+}
+
+func (f *smsProviderFake) deliveryState() (challenge uuid.UUID, calls int) {
+	f.deliveryMu.Lock()
+	defer f.deliveryMu.Unlock()
+	return f.sentChallenge, f.sendCalls
 }
 
 func (f *smsProviderFake) VerifyCode(_ context.Context, _ string, challengeID uuid.UUID, _ SMSVerificationData, _ string) (bool, error) {
@@ -275,7 +324,9 @@ func TestMobileAuthSendUsesProviderGeneratedChallenge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if challenge.ID == uuid.Nil || challenge.ID != repository.challenge.ID || challenge.ID != sms.sentChallenge || !repository.challengeSent {
+	sent, failed := repository.deliveryState()
+	providerChallenge, sendCalls := sms.deliveryState()
+	if challenge.ID == uuid.Nil || challenge.ID != repository.challenge.ID || challenge.ID != providerChallenge || !sent || failed || sendCalls != 1 {
 		t.Fatalf("challenge was not consistently persisted and sent: %#v", challenge)
 	}
 	if !repository.captchaConsumed {
@@ -306,7 +357,7 @@ func TestMobileAuthSendRejectsInvalidCaptchaBeforeProvider(t *testing.T) {
 	if !errors.Is(err, ErrCaptchaInvalid) {
 		t.Fatalf("expected invalid captcha, got %v", err)
 	}
-	if sms.sentChallenge != uuid.Nil {
+	if providerChallenge, calls := sms.deliveryState(); providerChallenge != uuid.Nil || calls != 0 {
 		t.Fatal("provider must not be called after failed slider verification")
 	}
 }
@@ -319,8 +370,12 @@ func TestMobileAuthSendMarksProviderFailureAndKeepsUnavailableClassification(t *
 	if !errors.Is(err, ErrSMSUnavailable) {
 		t.Fatalf("expected SMS_UNAVAILABLE classification, got %v", err)
 	}
-	if !repository.challengeFailed {
+	sent, failed := repository.deliveryState()
+	if sent || !failed {
 		t.Fatal("provider failure must mark the local challenge as failed")
+	}
+	if providerChallenge, calls := sms.deliveryState(); providerChallenge != repository.challenge.ID || calls != 1 {
+		t.Fatal("provider failure must correspond to exactly one delivery attempt")
 	}
 }
 
@@ -332,7 +387,9 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	if err != nil || challenge.ID == uuid.Nil {
 		t.Fatalf("unknown account response must be indistinguishable: challenge=%#v err=%v", challenge, err)
 	}
-	if sms.sentChallenge != uuid.Nil || repository.challengeSent {
+	sent, failed := repository.deliveryState()
+	providerChallenge, sendCalls := sms.deliveryState()
+	if providerChallenge != uuid.Nil || sendCalls != 0 || sent || failed {
 		t.Fatal("SMS must not be sent to an unknown login account")
 	}
 	if _, err := service.VerifyLogin(context.Background(), "13800138000", challenge.ID, "123456"); !errors.Is(err, ErrSMSInvalid) {
@@ -344,19 +401,20 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 }
 
 func TestMobileAuthKnownLoginHidesProviderFailureBehindSameResponse(t *testing.T) {
-	repository := &mobileAuthRepositoryFake{mobileExists: true}
+	repository := &mobileAuthRepositoryFake{mobileExists: true, deliveryDone: make(chan struct{})}
 	sms := &smsProviderFake{sendErr: errors.New("provider unavailable")}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
 	challenge, err := service.Send(context.Background(), "", "13800138000", "", "", SMSPurposeLogin, uuid.New(), 128, "192.0.2.1", "device-1")
 	if err != nil || challenge.ID == uuid.Nil {
 		t.Fatalf("known account response must not expose provider state: challenge=%#v err=%v", challenge, err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for !repository.challengeFailed && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if !repository.challengeFailed {
+	repository.waitForDelivery(t)
+	sent, failed := repository.deliveryState()
+	if sent || !failed {
 		t.Fatal("asynchronous provider failure must still update challenge state")
+	}
+	if providerChallenge, calls := sms.deliveryState(); providerChallenge != challenge.ID || calls != 1 {
+		t.Fatal("asynchronous provider failure must correspond to exactly one delivery attempt")
 	}
 }
 
@@ -372,19 +430,24 @@ func TestPasswordResetSMSRequiresPersonalSecurityPermission(t *testing.T) {
 		{name: "authorization unavailable", authErr: errors.New("authorization unavailable")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			repository := &mobileAuthRepositoryFake{mobileExists: true, securityAllowed: test.allowed, securityErr: test.authErr}
+			repository := &mobileAuthRepositoryFake{mobileExists: true, securityAllowed: test.allowed, securityErr: test.authErr, deliveryDone: make(chan struct{})}
 			sms := &smsProviderFake{}
 			service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
 			challenge, err := service.Send(context.Background(), "", "13800138000", "", "", SMSPurposePasswordReset, uuid.New(), 128, "192.0.2.1", "device-1")
 			if err != nil || challenge.ID == uuid.Nil {
 				t.Fatalf("anti-enumeration response changed: challenge=%#v err=%v", challenge, err)
 			}
-			deadline := time.Now().Add(time.Second)
-			for test.sent && !repository.challengeSent && time.Now().Before(deadline) {
-				time.Sleep(time.Millisecond)
+			if test.sent {
+				repository.waitForDelivery(t)
 			}
-			if repository.challengeSent != test.sent || (sms.sentChallenge != uuid.Nil) != test.sent {
-				t.Fatalf("sent=%v provider=%s", repository.challengeSent, sms.sentChallenge)
+			sent, failed := repository.deliveryState()
+			providerChallenge, sendCalls := sms.deliveryState()
+			wantCalls := 0
+			if test.sent {
+				wantCalls = 1
+			}
+			if sent != test.sent || failed || (providerChallenge != uuid.Nil) != test.sent || sendCalls != wantCalls || (test.sent && providerChallenge != challenge.ID) {
+				t.Fatalf("sent=%v failed=%v provider=%s calls=%d", sent, failed, providerChallenge, sendCalls)
 			}
 		})
 	}
