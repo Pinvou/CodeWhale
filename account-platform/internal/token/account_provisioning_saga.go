@@ -751,7 +751,7 @@ func (s *Service) adminTokenAccountRecoveryAction(w http.ResponseWriter, r *http
 		return
 	}
 	policy, policyErr := approvalpolicy.Lookup("TOKEN_ACCOUNT_CREATE")
-	if policyErr != nil || policy.Mode != approvalpolicy.AuditOnly || policy.PolicyVersion != 2 {
+	if policyErr != nil || !validTokenAccountRecoveryPolicy(policy) {
 		api.WriteError(w, http.StatusServiceUnavailable, "RECOVERY_POLICY_UNAVAILABLE", "recovery policy is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}

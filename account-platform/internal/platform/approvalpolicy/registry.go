@@ -202,7 +202,7 @@ func addTokenGovernancePolicies(result map[string]Policy) {
 		SnapshotSchemaVersion: 2, CriticalResourceFields: []string{"current_catalog_version", "source_catalog_version", "catalog_diff_fingerprint", "billing_price_version", "route_set_fingerprint", "provisioning_set_fingerprint", "inflight_request_set_fingerprint", "policy_version"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "token-command-executor",
 	}
-	audit("TOKEN_ACCOUNT_CREATE", 2, "platform.tokens.manage", 2, "owner_type", "owner_id", "owner_authorization_version", "creation_version", "precheck_fingerprint", "request_fingerprint")
+	audit("TOKEN_ACCOUNT_CREATE", 3, "platform.tokens.manage", 3, "owner_type", "owner_id", "owner_authorization_version", "owner_version", "owner_identity_digest", "owner_account_count", "owner_account_cap", "owner_account_cap_policy_version", "creation_version", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ACCOUNT_STATUS_CHANGE", 2, "platform.tokens.manage", 2, "token_account_id", "expected_account_version", "target_status", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ROUTE_UPSERT", 2, "platform.tokens.manage", 2, "token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_code", "precheck_fingerprint", "request_fingerprint")
 	audit("TOKEN_ROUTE_DELETE", 2, "platform.tokens.manage", 2, "token_account_id", "route_id", "expected_account_version", "expected_route_version", "precheck_fingerprint", "request_fingerprint")

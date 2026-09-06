@@ -472,6 +472,16 @@
         "file": "000047_token_approval_draft_invalidation.up.sql",
         "version": 47,
         "sha256": "3d3a60704252cae47bc7c3042f2f901cd8c564345c89e8e16ca568f4dc486d21"
+      },
+      {
+        "file": "000048_token_account_create_policy_v3.down.sql",
+        "version": 48,
+        "sha256": "9085a3041b3e99ad7bc82f456e77a32b5d813903e025d40e97a650c680a68a7b"
+      },
+      {
+        "file": "000048_token_account_create_policy_v3.up.sql",
+        "version": 48,
+        "sha256": "d6c95119c448147a5e689c614bc9776932f4abeff5f97b90234902dd574019d5"
       }
     ],
     "billing": [
