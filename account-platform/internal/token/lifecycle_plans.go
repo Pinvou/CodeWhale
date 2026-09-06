@@ -509,7 +509,7 @@ func lifecyclePlanSnapshotSource(modelID uuid.UUID, filter adminQueryFilter) (Ad
 		return nil, err
 	}
 	return func(ctx context.Context, tx pgx.Tx, snapshotID uuid.UUID, _ time.Time, maximum int) error {
-		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `SELECT plan.id::text,row_number() OVER (ORDER BY plan.plan_version DESC,plan.id DESC)-1 FROM model_lifecycle_plans plan WHERE plan.model_id=$3 AND ($4='' OR plan.status=$4) AND ($5='' OR plan.target_lifecycle=$5)`, modelID, status, target)
+		return adminSnapshotInsert(ctx, tx, snapshotID, maximum, `SELECT plan.id::text AS resource_id,row_number() OVER (ORDER BY plan.plan_version DESC,plan.id DESC)-1 AS position FROM model_lifecycle_plans plan WHERE plan.model_id=$3 AND ($4='' OR plan.status=$4) AND ($5='' OR plan.target_lifecycle=$5)`, modelID, status, target)
 	}, nil
 }
 
