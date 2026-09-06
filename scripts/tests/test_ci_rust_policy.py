@@ -98,6 +98,13 @@ def release_changes(old="0.9.0", new="0.9.1"):
             f'[[package]]\nname = "pinvou3-tauri"\nversion = "{new}"\n',
         ),
         change(
+            "pinvou-cli/Cargo.lock",
+            f'[[package]]\nname = "pinvou-knowledge"\nversion = "{old}"\n\n'
+            f'[[package]]\nname = "pinvou3-tauri"\nversion = "{old}"\n',
+            f'[[package]]\nname = "pinvou-knowledge"\nversion = "{new}"\n\n'
+            f'[[package]]\nname = "pinvou3-tauri"\nversion = "{new}"\n',
+        ),
+        change(
             "pinvou3-app/package.json",
             f'{{"name":"pinvou3","version":"{old}"}}\n',
             f'{{"name":"pinvou3","version":"{new}"}}\n',
