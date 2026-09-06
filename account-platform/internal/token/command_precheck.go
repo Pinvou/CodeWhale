@@ -37,6 +37,7 @@ type TokenCommandPrecheckResult struct {
 }
 
 type commandPrecheckSnapshot struct {
+	LocalEvidence    *ImpactLocalEvidence
 	Status           string
 	ExpectedVersions map[string]any
 	EvidenceValues   []string
@@ -100,6 +101,8 @@ var directCommandPrecheckTypes = map[string]string{
 	"TOKEN_MODEL_CATALOG_SYNC":         "MODEL_CATALOG",
 	"TOKEN_ACCOUNT_CREATE":             "TOKEN_ACCOUNT",
 	"TOKEN_ACCOUNT_STATUS_CHANGE":      "TOKEN_ACCOUNT",
+	"TOKEN_ROUTE_UPSERT":               "TOKEN_ROUTE",
+	"TOKEN_ROUTE_DELETE":               "TOKEN_ROUTE",
 	"TOKEN_ROUTE_PROVISIONING_REPAIR":  "PROVISIONING",
 	"TOKEN_USAGE_RECONCILIATION_RETRY": "USAGE_REQUEST",
 	"TOKEN_CREDENTIAL_VALIDATE":        "PROVIDER_CREDENTIAL",
@@ -272,6 +275,9 @@ func (s *Service) buildTokenCommandPrecheck(ctx context.Context, input TokenComm
 		}, ExpectedVersions: expectedJSON,
 	}
 	result.CatalogDiff = snapshot.CatalogDiff
+	if snapshot.LocalEvidence != nil {
+		result.Evidence = *snapshot.LocalEvidence
+	}
 	result.PriceCoverage = priceCoverage
 	if billingObservedAt != nil {
 		observed := billingObservedAt.UTC()
@@ -381,6 +387,10 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 }
 
 func validateOwnedCommandPrecheckTarget(commandType, targetID string, raw json.RawMessage) error {
+	if isRouteGovernedCommand(commandType) {
+		_, err := parseGovernedRouteCommand(commandType, targetID, raw)
+		return err
+	}
 	if err := validateOwnedCommandPrecheck(commandType, raw); err != nil {
 		return err
 	}
@@ -606,6 +616,9 @@ func decodeCommand(raw json.RawMessage, target any) error {
 }
 
 func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, targetID string, raw json.RawMessage) (commandPrecheckSnapshot, error) {
+	if isRouteGovernedCommand(commandType) {
+		return routeCommandPrecheckTx(ctx, tx, commandType, targetID, raw)
+	}
 	switch commandType {
 	case "TOKEN_PROTOCOL_DRAFT_CREATE":
 		var command struct {

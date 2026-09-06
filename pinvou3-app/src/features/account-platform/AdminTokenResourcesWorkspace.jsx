@@ -1,9 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { previousAdminModelTokenCursor, readAdminModelTokenQuery, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
-import { ownerCandidateQuery, routeEditorVisible, serverRouteHealth, stableRouteChange, stableRouteChoices, tokenAccountCreateInput, tokenResourceAccess } from './admin-token-resource-state.js';
+import { ownerCandidateQuery, routeEditorVisible, serverRouteHealth, stableRouteChoices, tokenAccountCreateInput, tokenResourceAccess } from './admin-token-resource-state.js';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
-import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, validStableRouteWriteResult, validTokenAccountRecoveryActionResult } from './admin-high-risk-action-state.js';
+import { governedTokenEnvelope, requireGovernedRouteCommandResult, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, validTokenAccountRecoveryActionResult } from './admin-high-risk-action-state.js';
 
 function useSource(load, query, enabled, refreshVersion = 0) {
   const [state, setState] = useState(initialAdminSourceState);
@@ -186,6 +186,7 @@ function OwnerDialog({ client, copy, query, histories, onQueryChange, onClose, o
 }
 
 function RouteDialog({ client, copy, account, onClose, onSaved }) {
+  const submittedExpected = useRef(null);
   const [query, setQuery] = useState({ q: '', lifecycle_status: 'PUBLISHED', cursor: '' });
   const [searchDraft, setSearchDraft] = useState('');
   const [refresh, setRefresh] = useState(0);
@@ -210,14 +211,14 @@ function RouteDialog({ client, copy, account, onClose, onSaved }) {
     }
     setRefresh((value) => value + 1);
   };
-  const impactLoader = useMemo(() => choice ? (signal) => client.stableTokenRouteImpact(account.token_account_id, { action: 'UPSERT', model_id: choice.modelID, protocol_version_id: choice.protocolVersionID }, signal) : null, [client, account.token_account_id, choice?.modelID, choice?.protocolVersionID]);
-  return <AdminHighRiskActionDialog action={{ key: `route-upsert-${choice?.modelID || 'unselected'}-${choice?.protocolVersionID || ''}`, impactAction: 'TOKEN_ROUTE_UPSERT', title: copy.configureStableRoute, lead: copy.stableRouteLead }} copy={copy} target={{ label: account.name, version: `${copy.actionAccountVersion}: ${account.account_version}` }} policy="AUDIT_ONLY" recentAuth impactLoader={impactLoader} precheckEnabled={Boolean(choice)} payloadDetails={{ model_id: choice?.modelID || '', protocol_version_id: choice?.protocolVersionID || '', priority: Number(priority), default_scope: scope, expected_account_version: account.account_version, expected_route_version: existing?.route_version || 0 }} onClose={onClose} execute={async (payload, key, signal) => {
-    const input = stableRouteChange({ choice, accountVersion: account.account_version, existingRoute: existing, priority, defaultScope: scope, reason: payload.reason });
-    if (!input) throw Object.assign(new Error('invalid route'), { code: 'INVALID_ROUTE', status: 400 });
-    const result = await client.upsertStableTokenRoute(account.token_account_id, input, key, signal);
-    if (!validStableRouteWriteResult(result, { tokenAccountID: account.token_account_id, modelID: choice.modelID, protocolVersionID: choice.protocolVersionID, priority: Number(priority), defaultScope: scope, expectedAccountVersion: account.account_version })) throw Object.assign(new Error('invalid stable route response'), { code: 'INVALID_COMMAND_RESPONSE' });
-    return result;
-  }} onCompleted={onSaved}>
+  const command = useMemo(() => ({ token_account_id: account.token_account_id, model_id: choice?.modelID || '', protocol_version_id: choice?.protocolVersionID || '', priority: Number(priority), default_scope: scope }), [account.token_account_id, choice?.modelID, choice?.protocolVersionID, priority, scope]);
+  const expected = { commandType: 'TOKEN_ROUTE_UPSERT', targetResourceType: 'TOKEN_ROUTE', targetResourceID: account.token_account_id, tokenAccountID: account.token_account_id, modelID: choice?.modelID, protocolVersionID: choice?.protocolVersionID, priority: Number(priority), defaultScope: scope, expectedAccountVersion: account.account_version, expectedRouteVersion: existing?.route_version || 0 };
+  const impactLoader = useMemo(() => choice ? async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_ROUTE_UPSERT', target_resource_type: 'TOKEN_ROUTE', target_resource_id: account.token_account_id, command }, signal), { commandType: 'TOKEN_ROUTE_UPSERT', targetResourceType: 'TOKEN_ROUTE', targetResourceID: account.token_account_id }) : null, [client, account.token_account_id, choice?.modelID, choice?.protocolVersionID, command]);
+  return <AdminHighRiskActionDialog action={{ key: `route-upsert-${choice?.modelID || 'unselected'}-${choice?.protocolVersionID || ''}-${Number(priority)}-${scope}`, impactAction: 'TOKEN_ROUTE_UPSERT', title: copy.configureStableRoute, lead: copy.stableRouteLead }} copy={copy} target={{ label: account.name, version: `${copy.actionAccountVersion}: ${account.account_version}` }} policy="AUDIT_ONLY" recentAuth impactLoader={impactLoader} precheckEnabled={Boolean(choice)} payloadDetails={{ model_id: choice?.modelID || '', protocol_version_id: choice?.protocolVersionID || '', priority: Number(priority), default_scope: scope, expected_account_version: account.account_version, expected_route_version: existing?.route_version || 0 }} onClose={onClose} execute={async (payload, key, signal) => {
+    submittedExpected.current = { ...expected, expectedAccountVersion: payload.precheck.expected_versions.expected_account_version, expectedRouteVersion: payload.precheck.expected_versions.expected_route_version };
+    const result = await client.createGovernedTokenCommand(await governedTokenEnvelope({ ...expected, reason: payload.reason, impact: payload.precheck, command }), key, signal);
+    return requireGovernedRouteCommandResult(result, submittedExpected.current);
+  }} recover={async (reference, signal) => requireGovernedRouteCommandResult(await client.governedTokenCommandResult(reference, signal), submittedExpected.current)} recoverByIdempotencyKey={async (key, signal) => requireGovernedRouteCommandResult(await client.governedTokenCommandByIdempotencyKey('TOKEN_ROUTE_UPSERT', key, signal), submittedExpected.current)} onCompleted={onSaved}>
     <legend>{copy.routeConfiguration}</legend>
     <div className="adm-token-candidate-search"><label><span>{copy.findModel}</span><input type="search" value={searchDraft} placeholder={copy.modelSearchPlaceholder} onChange={(event) => setSearchDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); setQuery((current) => ({ ...current, q: searchDraft, cursor: '' })); } }} /></label><button type="button" onClick={() => setQuery((current) => ({ ...current, q: searchDraft, cursor: '' }))}>{copy.search}</button></div>
     <Feedback state={state} copy={copy} onRetry={retry} />
@@ -229,6 +230,7 @@ function RouteDialog({ client, copy, account, onClose, onSaved }) {
 }
 
 function RouteHealth({ client, copy, accountID, access, onClose }) {
+  const submittedDeleteExpected = useRef(null);
   const [state, setState] = useState({ item: null, loading: true, error: null, updatedAt: null });
   const [refresh, setRefresh] = useState(0);
   const [routeDialog, setRouteDialog] = useState(false);
@@ -244,6 +246,8 @@ function RouteHealth({ client, copy, accountID, access, onClose }) {
   const reload = async () => setRefresh((value) => value + 1);
   const statusTarget = highRiskAction?.type === 'ENABLE' ? 'ACTIVE' : 'DISABLED';
   const statusTitle = statusTarget === 'ACTIVE' ? copy.enableTokenAccount : copy.disableTokenAccount;
+  const deleteExpected = { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: highRiskAction?.route?.route_id, tokenAccountID: accountID, modelID: highRiskAction?.route?.model_id, protocolVersionID: highRiskAction?.route?.protocol_version_id, expectedRouteVersion: highRiskAction?.route?.route_version, expectedAccountVersion: state.item?.account_version };
+  const deleteCommand = { token_account_id: accountID, route_id: highRiskAction?.route?.route_id };
   return <section className="adm-card adm-source-card adm-token-health" aria-labelledby="token-health-title"><div className="adm-source-head"><div><button type="button" className="adm-back" onClick={onClose}>← {copy.backToAccounts}</button><h2 id="token-health-title">{state.item ? `${copy.routeHealth} · ${state.item.name}` : copy.routeHealth}</h2><p>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</p></div><div className="adm-row-actions">{access.manage && state.item?.status === 'ACTIVE' && <button type="button" className="danger" onClick={() => setHighRiskAction({ type: 'DISABLE' })}>{copy.disableTokenAccount}</button>}{access.manage && state.item?.status === 'DISABLED' && <button type="button" onClick={() => setHighRiskAction({ type: 'ENABLE' })}>{copy.enableTokenAccount}</button>}{access.showRouteWrite && state.item && <button type="button" onClick={() => setRouteDialog(true)}>{copy.configureStableRoute}</button>}<button type="button" disabled={state.loading} onClick={reload}>{state.loading ? copy.loading : copy.refreshHealth}</button></div></div>
     {access.explainRouteBlocked && <div className="adm-inline-message info" role="status">{copy.modelPermissionRequired}</div>}
     {state.error && <div className="adm-source-error" role="alert"><strong>{copy.healthUnavailable}</strong>{state.error.requestID && <span>{copy.requestID}: {state.error.requestID}</span>}<button type="button" onClick={reload}>{copy.retry}</button></div>}
@@ -254,10 +258,11 @@ function RouteHealth({ client, copy, accountID, access, onClose }) {
       const result = await client.createGovernedTokenCommand(await governedTokenEnvelope({ commandType: 'TOKEN_ACCOUNT_STATUS_CHANGE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: accountID, reason: payload.reason, impact: payload.precheck, expectedVersions: { token_account_id: accountID, expected_account_version: state.item.account_version, target_status: statusTarget }, command: { target_status: statusTarget } }), key, signal);
       return requireGovernedTokenCommandResult(result, { commandType: 'TOKEN_ACCOUNT_STATUS_CHANGE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: accountID });
     }} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_ACCOUNT_STATUS_CHANGE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: accountID })} onCompleted={reload} />}
-    {highRiskAction?.type === 'DELETE_ROUTE' && state.item && access.manage && <AdminHighRiskActionDialog action={{ key: `route-delete-${highRiskAction.route.route_id}`, impactAction: 'TOKEN_ROUTE_DELETE', title: copy.deleteRoute, lead: copy.deleteRouteLead }} copy={copy} target={{ label: highRiskAction.route.model_id, version: `${copy.actionRouteVersion}: ${highRiskAction.route.route_version}` }} policy="AUDIT_ONLY" recentAuth dangerous payloadDetails={{ token_account_id: accountID, route_id: highRiskAction.route.route_id, expected_account_version: state.item.account_version, expected_route_version: highRiskAction.route.route_version }} impactLoader={(signal) => client.stableTokenRouteImpact(accountID, { action: 'DELETE', route_id: highRiskAction.route.route_id }, signal)} onClose={() => setHighRiskAction(null)} execute={async (payload, key, signal) => {
-      const result = await client.createGovernedTokenCommand(await governedTokenEnvelope({ commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: highRiskAction.route.route_id, reason: payload.reason, impact: payload.precheck, expectedVersions: { token_account_id: accountID, route_id: highRiskAction.route.route_id, expected_account_version: state.item.account_version, expected_route_version: highRiskAction.route.route_version }, command: { route_id: highRiskAction.route.route_id } }), key, signal);
-      return requireGovernedTokenCommandResult(result, { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: highRiskAction.route.route_id });
-    }} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: highRiskAction.route.route_id })} onCompleted={reload} />}
+    {highRiskAction?.type === 'DELETE_ROUTE' && state.item && access.manage && <AdminHighRiskActionDialog action={{ key: `route-delete-${highRiskAction.route.route_id}`, impactAction: 'TOKEN_ROUTE_DELETE', title: copy.deleteRoute, lead: copy.deleteRouteLead }} copy={copy} target={{ label: highRiskAction.route.model_id, version: `${copy.actionRouteVersion}: ${highRiskAction.route.route_version}` }} policy="AUDIT_ONLY" recentAuth dangerous payloadDetails={{ ...deleteCommand, expected_account_version: state.item.account_version, expected_route_version: highRiskAction.route.route_version }} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_ROUTE_DELETE', target_resource_type: 'TOKEN_ROUTE', target_resource_id: highRiskAction.route.route_id, command: deleteCommand }, signal), deleteExpected)} onClose={() => setHighRiskAction(null)} execute={async (payload, key, signal) => {
+      submittedDeleteExpected.current = { ...deleteExpected, expectedAccountVersion: payload.precheck.expected_versions.expected_account_version, expectedRouteVersion: payload.precheck.expected_versions.expected_route_version };
+      const result = await client.createGovernedTokenCommand(await governedTokenEnvelope({ ...deleteExpected, reason: payload.reason, impact: payload.precheck, command: deleteCommand }), key, signal);
+      return requireGovernedRouteCommandResult(result, submittedDeleteExpected.current);
+    }} recover={async (reference, signal) => requireGovernedRouteCommandResult(await client.governedTokenCommandResult(reference, signal), submittedDeleteExpected.current)} recoverByIdempotencyKey={async (key, signal) => requireGovernedRouteCommandResult(await client.governedTokenCommandByIdempotencyKey('TOKEN_ROUTE_DELETE', key, signal), submittedDeleteExpected.current)} onCompleted={reload} />}
   </section>;
 }
 

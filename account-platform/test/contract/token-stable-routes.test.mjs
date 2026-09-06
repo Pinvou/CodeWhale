@@ -57,13 +57,13 @@ test('stable route write and account detail schemas validate actual JSON project
   assert.equal(validateDetail({ ...detail, credentials: [{ ...detail.credentials[0], base_url: 'https://must-not-leak.invalid' }] }), false);
 });
 
-test('stable route v2 publishes CAS, idempotency and conflict surfaces without mutating v1', async () => {
+test('stable route v2 retires direct writes without mutating the PRE v1 contract', async () => {
   const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
   const v1 = contract.paths['/token/admin/v1/token-accounts/{token_account_id}/routes'];
   const v2 = contract.paths['/token/admin/v2/token-accounts/{token_account_id}/routes'];
   assert.equal(v1.put.requestBody.content['application/json'].schema.$ref, '#/components/schemas/LegacyTokenRouteChange');
-  assert.deepEqual(Object.keys(v2.put.responses).sort(), ['200', '400', '403', '404', '409', '422', '503']);
-  assert.deepEqual(Object.keys(v2.delete.responses).sort(), ['204', '400', '403', '404', '409', '422', '503']);
+  assert.deepEqual(Object.keys(v2.put.responses).sort(), ['400', '403', '404', '409', '410', '422', '503']);
+  assert.deepEqual(Object.keys(v2.delete.responses).sort(), ['400', '403', '404', '409', '410', '422', '503']);
   for (const operation of [v2.put, v2.delete]) {
     assert.ok(operation.parameters.some(parameter => parameter.$ref === '#/components/parameters/IdempotencyKey'));
   }

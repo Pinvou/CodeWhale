@@ -295,8 +295,8 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	if s.authorizer != nil {
 		adminV2.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccountV2))
 		adminV2.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioningV2))
-		adminV2.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertStableTokenRoute))
-		adminV2.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteStableTokenRoute))
+		adminV2.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), rejectProtocolFormulaDirectWrite())
+		adminV2.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), rejectProtocolFormulaDirectWrite())
 		adminV2.GET("/token-accounts/:token_account_id/impact/route", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminStableTokenRouteImpact))
 	}
 	return router

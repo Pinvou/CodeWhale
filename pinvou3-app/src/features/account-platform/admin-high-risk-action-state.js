@@ -237,6 +237,28 @@ export function validStableRouteWriteResult(value, expected) {
   return Number.isInteger(value.route_version) && value.route_version >= 1 && Number.isInteger(value.route_generation) && value.route_generation >= 1 && value.account_version === expected.expectedAccountVersion + 1 && !Number.isNaN(Date.parse(String(value.updated_at || '')));
 }
 
+export function requireGovernedRouteCommandResult(value, expected) {
+  const result = requireGovernedTokenCommandResult(value, expected);
+  const route = result.redacted_result;
+  let valid = false;
+  if (expected.commandType === 'TOKEN_ROUTE_UPSERT') {
+    valid = validStableRouteWriteResult(route, expected) && route.route_version === expected.expectedRouteVersion + 1
+      && validDateTime(route.updated_at) && (route.health_observed_at == null || validDateTime(route.health_observed_at))
+      && (route.health_expires_at == null || validDateTime(route.health_expires_at));
+  } else if (expected.commandType === 'TOKEN_ROUTE_DELETE') {
+    const keys = ['route_id', 'token_account_id', 'model_id', 'protocol_version_id', 'deleted', 'deleted_route_version', 'route_version', 'route_generation', 'account_version', 'deleted_at'];
+    valid = route && typeof route === 'object' && !Array.isArray(route) && Object.keys(route).length === keys.length && keys.every((key) => Object.hasOwn(route, key))
+      && route.route_id === expected.targetResourceID && route.token_account_id === expected.tokenAccountID
+      && route.model_id === expected.modelID && route.protocol_version_id === expected.protocolVersionID
+      && [route.route_id, route.token_account_id, route.model_id, route.protocol_version_id].every((id) => uuidPattern.test(String(id)))
+      && route.deleted === true && route.deleted_route_version === expected.expectedRouteVersion
+      && route.route_version === expected.expectedRouteVersion + 1 && route.account_version === expected.expectedAccountVersion + 1
+      && Number.isInteger(route.route_generation) && route.route_generation >= 1 && validDateTime(route.deleted_at);
+  }
+  if (!valid) throw Object.assign(new Error('invalid governed route result'), { code: 'INVALID_COMMAND_RESPONSE', commandReference: result.command_reference });
+  return result;
+}
+
 export function validApprovalRequest(value, expected, statuses) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   if (!uuidPattern.test(String(value.approval_request_id || '').toLowerCase()) || !uuidPattern.test(String(value.requester_user_id || '').toLowerCase())) return false;

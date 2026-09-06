@@ -291,6 +291,11 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 		}
 	}
+	if isRouteGovernedCommand(envelope.CommandType) {
+		if _, err := parseGovernedRouteCommand(envelope.CommandType, envelope.TargetResourceID, envelope.Command); err != nil {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+	}
 	if isModelAccountGovernedCommand(envelope.CommandType) {
 		var err error
 		envelope, err = canonicalizeModelAccountEnvelope(envelope)
@@ -327,11 +332,14 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 		}
 	}
-	if isModelAccountGovernedCommand(envelope.CommandType) {
+	if isModelAccountGovernedCommand(envelope.CommandType) || isRouteGovernedCommand(envelope.CommandType) {
 		requestFingerprint, ok := facts["request_fingerprint"].(string)
 		if !ok || requestFingerprint != governedRequestFingerprint(envelope, facts) {
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 		}
+	}
+	if isRouteGovernedCommand(envelope.CommandType) && facts["precheck_fingerprint"] != envelope.PrecheckFingerprint {
+		return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 	}
 	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
 		modelID, parseErr := uuid.Parse(envelope.TargetResourceID)
@@ -636,6 +644,10 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		return
 	}
 	begin := tokenCommandBegin{Envelope: envelope, ActorUserID: actor, ActorPermission: strings.Join(spec.Permissions, "+"), AuthorizationVersion: authorizationVersion, IdempotencyKey: r.Header.Get("Idempotency-Key"), AuditRequestID: httpserver.RequestID(r.Context())}
+	if isRouteGovernedCommand(envelope.CommandType) {
+		s.executeRouteCommandHTTP(w, r, repository, runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
+		return
+	}
 	// Exact model/account replays are resolved before consulting any mutable
 	// owner, catalog, route or Billing authority. This preserves the first
 	// immutable result after the domain effect itself changes those facts (for

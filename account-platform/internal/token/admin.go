@@ -786,7 +786,7 @@ func (r *PostgresRepository) AdminDeleteRoute(ctx context.Context, accountID uui
 	if routeCount > 1 {
 		return ErrAmbiguousRoute
 	}
-	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` route JOIN token_accounts account ON account.id=route.token_account_id WHERE route.token_account_id=$1 AND route.model=$2 AND route.reference_status<>'DELETED' AND account.management_mode='PLATFORM' FOR UPDATE OF route`, accountID, model))
+	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` route WHERE route.token_account_id=$1 AND route.model=$2 AND route.reference_status<>'DELETED' AND EXISTS(SELECT 1 FROM token_accounts account WHERE account.id=route.token_account_id AND account.management_mode='PLATFORM') FOR UPDATE OF route`, accountID, model))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -819,8 +819,8 @@ func (r *PostgresRepository) AdminDeleteRoute(ctx context.Context, accountID uui
 func (r *PostgresRepository) AdminCredentialMetadata(ctx context.Context, accountID, credentialID uuid.UUID) (AdminCredentialMetadata, error) {
 	var item AdminCredentialMetadata
 	err := r.pool.QueryRow(ctx, `
-SELECT id,provider,fingerprint,version,status,validation_status,allowed_models,validated_at,
-       COALESCE(revoked_at,retired_at,activated_at,validated_at,created_at)
+SELECT credential.id,credential.provider,credential.fingerprint,credential.version,credential.status,credential.validation_status,credential.allowed_models,credential.validated_at,
+       COALESCE(credential.revoked_at,credential.retired_at,credential.activated_at,credential.validated_at,credential.created_at)
 FROM provider_credentials credential JOIN token_accounts account ON account.id=credential.token_account_id AND account.management_mode='PLATFORM' WHERE credential.token_account_id=$1 AND credential.id=$2`, accountID, credentialID).Scan(
 		&item.ID, &item.Provider, &item.Fingerprint, &item.Version, &item.Status, &item.ValidationStatus,
 		&item.AllowedModels, &item.ValidatedAt, &item.UpdatedAt,

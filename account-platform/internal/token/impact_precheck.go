@@ -940,6 +940,17 @@ func (r *PostgresRepository) StableTokenRouteImpact(ctx context.Context, account
 		return ImpactLocalEvidence{}, err
 	}
 	defer tx.Rollback(ctx)
+	evidence, err := stableTokenRouteImpactTx(ctx, tx, accountID, input)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
+	return evidence, commitReadOnly(ctx, tx)
+}
+
+// stableTokenRouteImpactTx also runs inside the governed write transaction;
+// it must not open a separate snapshot or commit its caller's transaction.
+func stableTokenRouteImpactTx(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, input StableRouteImpactInput) (ImpactLocalEvidence, error) {
+	var err error
 	var evidence ImpactLocalEvidence
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&evidence.ObservedAt); err != nil {
 		return ImpactLocalEvidence{}, err
@@ -964,7 +975,7 @@ func (r *PostgresRepository) StableTokenRouteImpact(ctx context.Context, account
 		evidence.CurrentVersion.CapabilityVersionID = &reference.CapabilityVersionID
 		evidence.CurrentVersion.ProtocolDefinitionID = &reference.ProtocolVersionID
 		var generation, version int64
-		err = tx.QueryRow(ctx, `SELECT id,route_generation,route_version FROM routing_policies WHERE token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND reference_status='RESOLVED'`, accountID, input.ModelID, input.ProtocolVersionID).Scan(&routeID, &generation, &version)
+		err = tx.QueryRow(ctx, `SELECT id,route_generation,route_version FROM routing_policies WHERE token_account_id=$1 AND ((reference_status='RESOLVED' AND model_id=$2 AND protocol_version_id=$3) OR (reference_status='LEGACY_UNRESOLVED' AND model=$4)) ORDER BY CASE reference_status WHEN 'RESOLVED' THEN 0 ELSE 1 END,id LIMIT 1`, accountID, input.ModelID, input.ProtocolVersionID, reference.UpstreamModel).Scan(&routeID, &generation, &version)
 		if errors.Is(err, pgx.ErrNoRows) {
 			err = nil
 			evidence.CurrentStatus = "CREATE"
@@ -1022,7 +1033,7 @@ func (r *PostgresRepository) StableTokenRouteImpact(ctx context.Context, account
 		return ImpactLocalEvidence{}, err
 	}
 	evidence.CurrentVersion.EvidenceETag = localImpactETag(evidence)
-	return evidence, commitReadOnly(ctx, tx)
+	return evidence, nil
 }
 
 func (r *PostgresRepository) TokenCredentialImpact(ctx context.Context, accountID uuid.UUID, credentialID *uuid.UUID) (ImpactLocalEvidence, error) {
@@ -1249,7 +1260,7 @@ func stableRouteImpactKeySet(ctx context.Context, tx pgx.Tx, accountID, routeID 
 		args []any
 	}{
 		{`SELECT 'account|'||jsonb_build_array(id,status,management_version,updated_at)::text FROM token_accounts WHERE id=$1`, []any{accountID}},
-		{`SELECT 'target-route|'||jsonb_build_array(id,token_account_id,model_id,protocol_version_id,priority,default_scope,reference_status,route_version,route_generation,health_version,health_status,health_diagnostic_code,health_observed_at,health_expires_at,updated_at)::text FROM routing_policies WHERE token_account_id=$1 AND model_id=$2 AND protocol_version_id=$3 AND ($4::uuid='00000000-0000-0000-0000-000000000000' OR id=$4) ORDER BY id`, []any{accountID, reference.ModelID, reference.ProtocolVersionID, routeID}},
+		{`SELECT 'target-route|'||jsonb_build_array(id,token_account_id,model_id,protocol_version_id,priority,default_scope,reference_status,route_version,route_generation,health_version,health_status,health_diagnostic_code,health_observed_at,health_expires_at,updated_at)::text FROM routing_policies WHERE token_account_id=$1 AND (($4::uuid<>'00000000-0000-0000-0000-000000000000' AND id=$4) OR ($4::uuid='00000000-0000-0000-0000-000000000000' AND model_id=$2 AND protocol_version_id=$3)) ORDER BY id`, []any{accountID, reference.ModelID, reference.ProtocolVersionID, routeID}},
 		{`SELECT 'candidate-route|'||jsonb_build_array(id,token_account_id,model_id,protocol_version_id,priority,default_scope,reference_status,route_version,route_generation,health_version,health_status,health_diagnostic_code,health_observed_at,health_expires_at,updated_at)::text FROM routing_policies WHERE model_id=$1 AND protocol_version_id=$2 AND reference_status='RESOLVED' ORDER BY token_account_id,id`, []any{reference.ModelID, reference.ProtocolVersionID}},
 		{`SELECT 'provisioning|'||jsonb_build_array(id,scope_type,scope_id,wallet_id,model_id,protocol_version_id,status,stage,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,updated_at)::text FROM route_provisionings WHERE model_id=$1 AND protocol_version_id=$2 ORDER BY id`, []any{reference.ModelID, reference.ProtocolVersionID}},
 		{`SELECT 'request|'||jsonb_build_array(id,token_account_id,credential_id,session_id,protocol_definition_id,route_generation,status,execution_status,execution_version,updated_at)::text FROM usage_requests WHERE model_id=$1 AND protocol_definition_id=$2 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, []any{reference.ModelID, reference.ProtocolVersionID}},

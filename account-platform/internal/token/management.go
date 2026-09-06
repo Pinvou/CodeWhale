@@ -259,11 +259,11 @@ func (r *PostgresRepository) UpsertStableRoute(ctx context.Context, accountID uu
 		return StableRouteResult{}, ErrForbidden
 	}
 	digest := stableRouteDigest("TOKEN_ROUTE_UPSERT", accountID, input)
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, release, err := r.beginTokenSerializedTransaction(ctx, "TOKEN_ROUTE_ACCOUNT:"+accountID.String())
 	if err != nil {
 		return StableRouteResult{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer release()
 	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
 		return StableRouteResult{}, err
 	}
@@ -288,6 +288,24 @@ func (r *PostgresRepository) UpsertStableRoute(ctx context.Context, accountID uu
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return StableRouteResult{}, err
 	}
+	result, err := r.upsertStableRouteTx(ctx, tx, accountID, input, actorID, true)
+	if err != nil {
+		return StableRouteResult{}, err
+	}
+	snapshot, _ = json.Marshal(result)
+	now := r.now().UTC()
+	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_UPSERT',$3,$4,$5,$6::timestamptz,$6::timestamptz+interval '7 days')`, input.IdempotencyKey, actorID, digest, result.ID, snapshot, now); err != nil {
+		return StableRouteResult{}, err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return StableRouteResult{}, err
+	}
+	return result, tx.Commit(ctx)
+}
+
+// upsertStableRouteTx shares only the domain effect. Its caller owns the
+// transaction, idempotency result, and audit/outbox boundary.
+func (r *PostgresRepository) upsertStableRouteTx(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, input StableRouteInput, actorID uuid.UUID, legacyAudit bool) (StableRouteResult, error) {
 	account, err := getTokenAccount(ctx, tx, accountID, true)
 	if errors.Is(err, pgx.ErrNoRows) || account.ManagementMode != "PLATFORM" {
 		return StableRouteResult{}, ErrNotFound
@@ -349,8 +367,10 @@ VALUES($1,$2,$3,$4,$5,$6,'UNKNOWN',$7,$8,1,$9,$10,'RESOLVED',1,1,'AWAITING_INITI
 	if accountCommand.RowsAffected() != 1 {
 		return StableRouteResult{}, ErrRouteVersionConflict
 	}
-	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('route_id',$6,'model_id',$7,'protocol_version_id',$8,'priority',$9,'default_scope',$10,'route_version',$11,'reason',$12)`, routeID, input.ModelID, input.ProtocolVersionID, input.Priority, input.DefaultScope, input.ExpectedRouteVersion+1, input.Reason); err != nil {
-		return StableRouteResult{}, err
+	if legacyAudit {
+		if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('route_id',$6,'model_id',$7,'protocol_version_id',$8,'priority',$9,'default_scope',$10,'route_version',$11,'reason',$12)`, routeID, input.ModelID, input.ProtocolVersionID, input.Priority, input.DefaultScope, input.ExpectedRouteVersion+1, input.Reason); err != nil {
+			return StableRouteResult{}, err
+		}
 	}
 	item, err := scanRoutingPolicy(tx.QueryRow(ctx, routingPolicyProjection+` WHERE id=$1`, routeID))
 	if err != nil {
@@ -360,14 +380,7 @@ VALUES($1,$2,$3,$4,$5,$6,'UNKNOWN',$7,$8,1,$9,$10,'RESOLVED',1,1,'AWAITING_INITI
 	if err != nil {
 		return StableRouteResult{}, err
 	}
-	snapshot, _ = json.Marshal(result)
-	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_UPSERT',$3,$4,$5,$6,$6+interval '7 days')`, input.IdempotencyKey, actorID, digest, routeID, snapshot, now); err != nil {
-		return StableRouteResult{}, err
-	}
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return StableRouteResult{}, err
-	}
-	return result, tx.Commit(ctx)
+	return result, nil
 }
 
 type StableRouteDeleteInput struct {
@@ -385,11 +398,11 @@ func (r *PostgresRepository) DeleteStableRoute(ctx context.Context, accountID uu
 	}
 	digestInput := StableRouteInput{ExpectedAccountVersion: input.ExpectedAccountVersion, ExpectedRouteVersion: input.ExpectedRouteVersion, IdempotencyKey: input.IdempotencyKey, Reason: input.Reason}
 	digest := stableRouteDigest("TOKEN_ROUTE_DELETE:"+input.RouteID.String(), accountID, digestInput)
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, release, err := r.beginTokenSerializedTransaction(ctx, "TOKEN_ROUTE_ACCOUNT:"+accountID.String())
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer release()
 	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
 		return err
 	}
@@ -409,6 +422,22 @@ func (r *PostgresRepository) DeleteStableRoute(ctx context.Context, accountID uu
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
+	if err = r.deleteStableRouteTx(ctx, tx, accountID, input, actorID, true); err != nil {
+		return err
+	}
+	snapshot, _ := json.Marshal(map[string]any{"route_id": input.RouteID, "deleted": true})
+	now := r.now().UTC()
+	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_DELETE',$3,$4,$5,$6::timestamptz,$6::timestamptz+interval '7 days')`, input.IdempotencyKey, actorID, digest, input.RouteID, snapshot, now); err != nil {
+		return err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) deleteStableRouteTx(ctx context.Context, tx pgx.Tx, accountID uuid.UUID, input StableRouteDeleteInput, actorID uuid.UUID, legacyAudit bool) error {
+	var err error
 	var accountVersion int64
 	if err = tx.QueryRow(ctx, `SELECT management_version FROM token_accounts WHERE id=$1 AND management_mode='PLATFORM' FOR UPDATE`, accountID).Scan(&accountVersion); errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
@@ -425,7 +454,7 @@ func (r *PostgresRepository) DeleteStableRoute(ctx context.Context, accountID uu
 	if err != nil {
 		return err
 	}
-	if item.ModelID == nil || item.ProtocolVersionID == nil || item.RouteVersion != input.ExpectedRouteVersion {
+	if item.ReferenceStatus != "RESOLVED" || item.ModelID == nil || item.ProtocolVersionID == nil || item.RouteVersion != input.ExpectedRouteVersion {
 		return ErrRouteVersionConflict
 	}
 	now := r.now().UTC()
@@ -446,17 +475,12 @@ func (r *PostgresRepository) DeleteStableRoute(ctx context.Context, accountID uu
 	if accountCommand.RowsAffected() != 1 {
 		return ErrRouteVersionConflict
 	}
-	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_DELETED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('route_id',$6,'model_id',$7,'protocol_version_id',$8,'route_version',$9,'reason',$10)`, item.ID, *item.ModelID, *item.ProtocolVersionID, item.RouteVersion, input.Reason); err != nil {
-		return err
+	if legacyAudit {
+		if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_DELETED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('route_id',$6,'model_id',$7,'protocol_version_id',$8,'route_version',$9,'reason',$10)`, item.ID, *item.ModelID, *item.ProtocolVersionID, item.RouteVersion, input.Reason); err != nil {
+			return err
+		}
 	}
-	snapshot, _ := json.Marshal(map[string]any{"route_id": item.ID, "deleted": true})
-	if _, err = tx.Exec(ctx, `INSERT INTO routing_policy_mutations(idempotency_key,actor_id,command_type,request_digest,route_id,result_snapshot,created_at,expires_at) VALUES($1,$2,'TOKEN_ROUTE_DELETE',$3,$4,$5,$6,$6+interval '7 days')`, input.IdempotencyKey, actorID, digest, item.ID, snapshot, now); err != nil {
-		return err
-	}
-	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 func getTokenAccount(ctx context.Context, database interface {

@@ -163,7 +163,7 @@ test('stable route submission freezes idempotency, blocks double dispatch, and f
   assert.notEqual(changedHolder.current.command.idempotencyKey, 'admin-route-0199a100-0001-7000-8000-000000000206');
 });
 
-test('Admin client maps owner paging and stable route writes to exact BFF paths', async () => {
+test('Admin client maps owner paging and governed route writes to exact BFF paths', async () => {
   const previousFetch = globalThis.fetch;
   const requests = [];
   globalThis.fetch = async (url, init = {}) => { requests.push({ url: String(url), init }); return { ok: true, status: 200, headers: new Headers(), json: async () => ({ items: [] }) }; };
@@ -171,11 +171,13 @@ test('Admin client maps owner paging and stable route writes to exact BFF paths'
     const client = new AdminPlatformClient('https://portal.example');
     client.csrfToken = 'csrf';
     await client.tokenOwnerCandidates({ q: '研发', owner_type: 'UNIT', status: 'ACTIVE', organization_id: organizationID, cursor: 'signed' });
-    await client.upsertStableTokenRoute(modelID, { model_id: modelID, protocol_version_id: protocolID }, 'admin-route-fixed-key');
+    await client.createGovernedTokenCommand({ command_type: 'TOKEN_ROUTE_UPSERT', command: { token_account_id: modelID, model_id: modelID, protocol_version_id: protocolID, priority: 100, default_scope: 'NONE' } }, 'admin-route-fixed-key');
+    assert.equal(client.upsertStableTokenRoute, undefined);
+    assert.equal(client.deleteStableTokenRoute, undefined);
   } finally { globalThis.fetch = previousFetch; }
   assert.equal(requests[0].url, `https://portal.example/api/admin/token/admin/v1/owner-candidates?limit=50&q=%E7%A0%94%E5%8F%91&owner_type=UNIT&status=ACTIVE&organization_id=${organizationID}&cursor=signed`);
-  assert.equal(requests[1].url, `https://portal.example/api/admin/token/admin/v2/token-accounts/${modelID}/routes`);
-  assert.equal(requests[1].init.method, 'PUT');
+  assert.equal(requests[1].url, 'https://portal.example/api/admin/token/admin/v1/commands');
+  assert.equal(requests[1].init.method, 'POST');
   assert.equal(requests[1].init.headers['Idempotency-Key'], 'admin-route-fixed-key');
 });
 
@@ -199,6 +201,12 @@ test('Token resource dialogs are keyboard-contained, translated, and collapse at
 	assert.match(workspace, /command_type: 'TOKEN_ACCOUNT_STATUS_CHANGE'/);
 	assert.doesNotMatch(workspace, /client\.createTokenAccount\(input\)/);
 	assert.doesNotMatch(workspace, /client\.setTokenAccountStatus\(/);
+  assert.match(workspace, /command_type: 'TOKEN_ROUTE_UPSERT'/);
+  assert.match(workspace, /command_type: 'TOKEN_ROUTE_DELETE'/);
+  assert.match(workspace, /requireGovernedRouteCommandResult/);
+  assert.match(workspace, /governedTokenCommandByIdempotencyKey\('TOKEN_ROUTE_UPSERT'/);
+  assert.match(workspace, /governedTokenCommandByIdempotencyKey\('TOKEN_ROUTE_DELETE'/);
+  assert.doesNotMatch(workspace, /client\.(?:upsertStableTokenRoute|deleteStableTokenRoute|stableTokenRouteImpact)\(/);
   assert.doesNotMatch(workspace, /route\.(?:upstream|provider|credential_secret)/);
   assert.match(styles, /@media\(max-width:760px\)[\s\S]*\.adm-token-dialog-grid,[^\n]*grid-template-columns:1fr/);
   for (const marker of ['candidateAborted', 'modelAborted', 'replaceCount', 'routeCalls', 'Admin Token resources UI smoke passed']) assert.ok(runtimeSmoke.includes(marker));

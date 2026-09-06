@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type routeHealthProbeStub struct{}
@@ -55,10 +56,14 @@ VALUES($8,'USER',$9,$10,'Route health account','ACTIVE',$3,$4,$4,'PLATFORM');
 INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status)
 VALUES($11,$8,'provider','https://provider.invalid','x'::bytea,'key','route-health-fingerprint',1,'ACTIVE',ARRAY['route-health-model'],$4,$3,$4,'VALID');
 INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by,route_generation,model_id,protocol_version_id,reference_status,route_version,health_version,health_diagnostic_code,next_probe_at)
-VALUES($12,$8,'route-health-model','CHAT',100,'NONE','UNKNOWN',$4,$3,1,$1,$6,'RESOLVED',1,1,'AWAITING_INITIAL_PROBE',$4);`, modelID, strings.Repeat("0", 64), actorID, now, capabilityID, protocolID, catalogVersion, accountID, ownerID, walletID, credentialID, routeID); err != nil {
+VALUES($12,$8,'route-health-model','CHAT',100,'NONE','UNKNOWN',$4,$3,1,$1,$6,'RESOLVED',1,1,'AWAITING_INITIAL_PROBE',$4);`, pgx.QueryExecModeSimpleProtocol, modelID, strings.Repeat("0", 64), actorID, now, capabilityID, protocolID, catalogVersion, accountID, ownerID, walletID, credentialID, routeID); err != nil {
 		t.Fatal(err)
 	}
 
+	metadata, err := repository.AdminCredentialMetadata(ctx, accountID, credentialID)
+	if err != nil || metadata.ID != credentialID || metadata.Status != "ACTIVE" || metadata.ValidationStatus != "VALID" {
+		t.Fatalf("route credential metadata projection=%#v err=%v", metadata, err)
+	}
 	first, err := NewRouteHealthWorker(repository, routeHealthProbeStub{}, policy, time.Second)
 	if err != nil {
 		t.Fatal(err)

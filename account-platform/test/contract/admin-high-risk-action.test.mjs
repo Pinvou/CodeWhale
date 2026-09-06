@@ -7,6 +7,7 @@ import {
   highRiskPayloadKey,
   prepareHighRiskCommand,
   requireGovernedTokenCommandResult,
+  requireGovernedRouteCommandResult,
   requireTokenApprovalImpact,
   validApprovalRequest,
   validGovernedTokenCommandResult,
@@ -162,6 +163,20 @@ test('successful command and route responses are action-bound closed projections
   const expectedRoute = { tokenAccountID: route.token_account_id, modelID: route.model_id, protocolVersionID: route.protocol_version_id, priority: 100, defaultScope: 'NONE', expectedAccountVersion: 4 };
   assert.equal(validStableRouteWriteResult(route, expectedRoute), true);
   assert.equal(validStableRouteWriteResult({ ...route, upstream: 'sensitive' }, expectedRoute), false);
+  const upsertExpected = { ...expectedRoute, expectedRouteVersion: 1, commandType: 'TOKEN_ROUTE_UPSERT', targetResourceType: 'TOKEN_ROUTE', targetResourceID: route.token_account_id };
+  const succeeded = { ...command, command_type: 'TOKEN_ROUTE_UPSERT', target_resource_id: route.token_account_id, status: 'SUCCEEDED', completed_at: '2026-09-04T12:00:01Z', redacted_result: route };
+  assert.equal(requireGovernedRouteCommandResult(succeeded, upsertExpected), succeeded);
+  assert.throws(() => requireGovernedRouteCommandResult({ ...succeeded, redacted_result: { ...route, route_version: 3 } }, upsertExpected), { code: 'INVALID_COMMAND_RESPONSE' });
+  for (const bad of [{ ...route, updated_at: 'September 6, 2026' }, { ...route, updated_at: '2026-02-30T12:00:00Z' }, { ...route, health_observed_at: '2026-02-30T12:00:00Z' }]) {
+    assert.throws(() => requireGovernedRouteCommandResult({ ...succeeded, redacted_result: bad }, upsertExpected), (error) => error.code === 'INVALID_COMMAND_RESPONSE' && error.commandReference === succeeded.command_reference);
+  }
+  const tombstone = { route_id: route.route_id, token_account_id: route.token_account_id, model_id: route.model_id, protocol_version_id: route.protocol_version_id, deleted: true, deleted_route_version: 2, route_version: 3, route_generation: 2, account_version: 6, deleted_at: '2026-09-04T12:00:01Z' };
+  const deleteExpected = { ...expectedRoute, commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: route.route_id, expectedRouteVersion: 2, expectedAccountVersion: 5 };
+  const deleted = { ...succeeded, command_type: 'TOKEN_ROUTE_DELETE', target_resource_id: route.route_id, redacted_result: tombstone };
+  assert.equal(requireGovernedRouteCommandResult(deleted, deleteExpected), deleted);
+  for (const bad of [{}, { ...tombstone, deleted: false }, { ...tombstone, deleted_route_version: 3 }, { ...tombstone, route_version: 2 }, { ...tombstone, deleted_at: '2026-02-30T12:00:00Z' }, { ...tombstone, secret: 'forbidden' }]) {
+    assert.throws(() => requireGovernedRouteCommandResult({ ...deleted, redacted_result: bad }, deleteExpected), (error) => error.code === 'INVALID_COMMAND_RESPONSE' && error.commandReference === deleted.command_reference);
+  }
 });
 
 test('Token Account manual-review commands and recovery actions use closed recovery projections', async () => {

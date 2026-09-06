@@ -546,12 +546,6 @@ export class AdminPlatformClient {
   upsertTokenRoute(tokenAccountID, route) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route);
   }
-  upsertStableTokenRoute(tokenAccountID, route, idempotencyKey, signal) {
-    return this.mutate('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route, idempotencyKey, signal);
-  }
-  deleteStableTokenRoute(tokenAccountID, route, idempotencyKey, signal) {
-    return this.mutate('token', `/admin/v2/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'DELETE', route, idempotencyKey, signal);
-  }
   tokenAccountStatusImpact(tokenAccountID, targetStatus, signal) {
     const query = new URLSearchParams({ target_status: targetStatus });
     return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/impact/status?${query}`, signal);

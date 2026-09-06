@@ -43,7 +43,7 @@ INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id
 INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES($7,$1,'Stable Model','stable model','','{}','PUBLISHED',$5,$6,true);
 INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($8,'USER',$9,$10,'Stable account','ACTIVE',$3,$4,$4,'PLATFORM');
 INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($8,'OWNER_UNIT_ONLY',$4);
-INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($11,$8,'PROVIDER','https://provider.invalid','x'::bytea,'key','stable-fingerprint',1,'ACTIVE',ARRAY['stable-model'],$4,$3,$4,'VALID');`, modelID, strings.Repeat("1", 64), actorA, now, capabilityV1, protocolV1, catalogVersion, accountID, ownerID, walletID, credentialID); err != nil {
+INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($11,$8,'PROVIDER','https://provider.invalid','x'::bytea,'key','stable-fingerprint',1,'ACTIVE',ARRAY['stable-model'],$4,$3,$4,'VALID');`, pgx.QueryExecModeSimpleProtocol, modelID, strings.Repeat("1", 64), actorA, now, capabilityV1, protocolV1, catalogVersion, accountID, ownerID, walletID, credentialID); err != nil {
 			t.Fatal(err)
 		}
 
@@ -70,8 +70,12 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		wg.Wait()
 		close(results)
 		close(errorsFound)
-		if len(results) != 1 || len(errorsFound) != 1 {
-			t.Fatalf("dual actor result count=%d error count=%d", len(results), len(errorsFound))
+		resultCount, errorCount := len(results), len(errorsFound)
+		if resultCount != 1 || errorCount != 1 {
+			for failure := range errorsFound {
+				t.Logf("stable route writer failed: %v", failure)
+			}
+			t.Fatalf("dual actor result count=%d error count=%d", resultCount, errorCount)
 		}
 		var first StableRouteResult
 		var winningActor uuid.UUID
@@ -128,7 +132,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 INSERT INTO protocol_definitions(id,protocol_code,version,status,request_schema,created_at,published_at) VALUES($1,'CHAT',2,'PUBLISHED','{}',$4,$4);
 INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($2,$3,2,$1,128000,8192,'["TEXT"]','v2',$5,$4);
 INSERT INTO model_catalog_versions(id,reason,created_by,created_at,published_at) VALUES($6,'protocol v2',$5,$4,$4);
-INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES((SELECT max(version) FROM model_catalog_versions),$3,'Stable Model','stable model','','{}','PUBLISHED',$2,$1,true);`, protocolV2, capabilityV2, modelID, now, actorA, catalogIDV2); err != nil {
+INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES((SELECT max(version) FROM model_catalog_versions),$3,'Stable Model','stable model','','{}','PUBLISHED',$2,$1,true);`, pgx.QueryExecModeSimpleProtocol, protocolV2, capabilityV2, modelID, now, actorA, catalogIDV2); err != nil {
 			t.Fatal(err)
 		}
 		modelV2 := modelV1
@@ -185,7 +189,7 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 		catalogIDV3 := uuid.New()
 		if _, err = repository.pool.Exec(ctx, `
 INSERT INTO model_catalog_versions(id,reason,created_by,created_at,published_at) VALUES($1,'restore protocol v1',$2,$3,$3);
-INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES((SELECT max(version) FROM model_catalog_versions),$4,'Stable Model','stable model','','{}','PUBLISHED',$5,$6,true);`, catalogIDV3, actorA, now, modelID, capabilityV1, protocolV1); err != nil {
+INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES((SELECT max(version) FROM model_catalog_versions),$4,'Stable Model','stable model','','{}','PUBLISHED',$5,$6,true);`, pgx.QueryExecModeSimpleProtocol, catalogIDV3, actorA, now, modelID, capabilityV1, protocolV1); err != nil {
 			t.Fatal(err)
 		}
 		recreated, err := repository.UpsertStableRoute(ctx, accountID, StableRouteInput{ModelID: modelID, ProtocolVersionID: protocolV1, Priority: 80, DefaultScope: "NONE", ExpectedAccountVersion: 4, ExpectedRouteVersion: 0, IdempotencyKey: "stable-route-key-0004", Reason: "recreate deleted stable route"}, actorA)
@@ -204,7 +208,7 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 			t.Fatalf("same protocol code on another protocol version contaminated exact impact: before=%s after=%s err=%v", exactBefore.CurrentVersion.EvidenceSetSHA256, exactAfterOtherProtocol.CurrentVersion.EvidenceSetSHA256, err)
 		}
 		replacementCredential := uuid.New()
-		if _, err = repository.pool.Exec(ctx, `DELETE FROM provider_credentials WHERE id=$1; INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($2,$3,'PROVIDER','https://provider.invalid','x'::bytea,'key','replacement-fingerprint',2,'ACTIVE',ARRAY['stable-model'],$4,$5,$4,'VALID')`, credentialID, replacementCredential, accountID, now, actorA); err != nil {
+		if _, err = repository.pool.Exec(ctx, `DELETE FROM provider_credentials WHERE id=$1; INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($2,$3,'PROVIDER','https://provider.invalid','x'::bytea,'key','replacement-fingerprint',2,'ACTIVE',ARRAY['stable-model'],$4,$5,$4,'VALID')`, pgx.QueryExecModeSimpleProtocol, credentialID, replacementCredential, accountID, now, actorA); err != nil {
 			t.Fatal(err)
 		}
 		exactAfterEqualReplacement, err := repository.StableTokenRouteImpact(ctx, accountID, StableRouteImpactInput{Action: "DELETE", RouteID: recreated.ID})
@@ -247,12 +251,12 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 		request.Header.Set("Idempotency-Key", "stable-route-key-0005")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
-		if response.Code != http.StatusOK {
-			t.Fatalf("stable HTTP status=%d body=%s", response.Code, response.Body.String())
+		if response.Code != http.StatusGone || !strings.Contains(response.Body.String(), "DIRECT_TOKEN_COMMAND_RETIRED") {
+			t.Fatalf("ACTIVE accepted a v2 direct write instead of the governed command: status=%d body=%s", response.Code, response.Body.String())
 		}
-		var HTTPResult StableRouteResult
-		if err = json.Unmarshal(response.Body.Bytes(), &HTTPResult); err != nil || HTTPResult.ModelID != modelID || HTTPResult.ProtocolVersionID != protocolV1 || HTTPResult.AccountVersion != 6 {
-			t.Fatalf("stable HTTP response=%#v body=%s err=%v", HTTPResult, response.Body.String(), err)
+		var unchangedVersion int64
+		if err = repository.pool.QueryRow(ctx, `SELECT management_version FROM token_accounts WHERE id=$1`, accountID).Scan(&unchangedVersion); err != nil || unchangedVersion != 5 {
+			t.Fatalf("retired v2 direct write changed account version: version=%d err=%v", unchangedVersion, err)
 		}
 		legacyRequest := httptest.NewRequest(http.MethodPut, "/admin/v1/token-accounts/"+accountID.String()+"/routes", bytes.NewBufferString(`{"model":"stable-model","protocol_code":"CHAT","priority":70,"default_scope":"NONE","health_status":"HEALTHY"}`))
 		legacyRequest.Header.Set("Authorization", "Bearer integration")
@@ -270,16 +274,27 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 		if err != nil {
 			t.Fatal(err)
 		}
-		connection, err := repository.pool.Acquire(ctx)
+		// Target the route migration itself. DownOne on the full modern fixture
+		// would only exercise the unrelated owner-cap rollback guard (000029).
+		var routeDownSQL string
+		for _, migration := range loaded {
+			if migration.Version == 25 {
+				routeDownSQL = migration.DownSQL
+			}
+		}
+		if routeDownSQL == "" {
+			t.Fatal("route migration 000025 is missing")
+		}
+		downTx, err := repository.pool.Begin(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer connection.Release()
-		if err = migrations.DownOne(ctx, connection.Conn(), loaded); err == nil || !strings.Contains(err.Error(), "rollback refused") {
-			t.Fatalf("downgrade did not fail closed with immutable route history: %v", err)
+		_, downErr := downTx.Exec(ctx, routeDownSQL)
+		_ = downTx.Rollback(ctx)
+		if downErr == nil || !strings.Contains(downErr.Error(), "rollback refused") {
+			t.Fatalf("downgrade did not fail closed with immutable route history: %v", downErr)
 		}
-		migrations.Unlock(ctx, connection.Conn())
-		if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM routing_policy_mutations`).Scan(&mutations); err != nil || mutations != 5 {
+		if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM routing_policy_mutations`).Scan(&mutations); err != nil || mutations != 4 {
 			t.Fatalf("failed downgrade did not preserve mutation history: mutations=%d err=%v", mutations, err)
 		}
 	})
@@ -332,7 +347,7 @@ INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id
 INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES($10,$1,'A','a','PUBLISHED',$7,$8,true),($10,$3,'B','b','PUBLISHED',$9,$8,true);
 INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($11,'USER',$12,$13,'Ambiguous','ACTIVE',$5,$6,$6,'PLATFORM'),($14,'USER',$12,$13,'Resolvable','ACTIVE',$5,$6,$6,'PLATFORM');
 INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,created_by,created_at,validation_status) VALUES(gen_random_uuid(),$11,'P1','https://p1.invalid','x','key','a1',1,'ACTIVE',ARRAY['same-name'],$5,$6,'VALID'),(gen_random_uuid(),$11,'P2','https://p2.invalid','x','key','a2',2,'RETIRED',ARRAY['same-name'],$5,$6,'VALID'),(gen_random_uuid(),$14,'P1','https://p1.invalid','x','key','r1',1,'ACTIVE',ARRAY['same-name'],$5,$6,'VALID'),(gen_random_uuid(),$14,'P1','https://p1.invalid','x','key','r2',2,'RETIRED',ARRAY['same-name'],$5,$6,'VALID');
-INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,route_generation,protocol_code) VALUES(gen_random_uuid(),$11,'same-name',10,'NONE','HEALTHY',$6,1,'CHAT'),(gen_random_uuid(),$14,'same-name',10,'NONE','HEALTHY',$6,1,'CHAT');`, modelA, strings.Repeat("a", 64), modelB, strings.Repeat("b", 64), actor, now, capabilityA, protocolID, capabilityB, catalogVersion, ambiguousAccount, owner, wallet, resolvableAccount); err != nil {
+INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,route_generation,protocol_code) VALUES(gen_random_uuid(),$11,'same-name',10,'NONE','HEALTHY',$6,1,'CHAT'),(gen_random_uuid(),$14,'same-name',10,'NONE','HEALTHY',$6,1,'CHAT');`, pgx.QueryExecModeSimpleProtocol, modelA, strings.Repeat("a", 64), modelB, strings.Repeat("b", 64), actor, now, capabilityA, protocolID, capabilityB, catalogVersion, ambiguousAccount, owner, wallet, resolvableAccount); err != nil {
 			t.Fatal(err)
 		}
 		if err = migrations.Up(ctx, connection, through); err != nil {
@@ -357,7 +372,7 @@ INSERT INTO routing_policies(
     id,token_account_id,model,priority,default_scope,health_status,updated_at,route_generation,protocol_code,
     model_id,protocol_version_id,reference_status,route_version,health_version,health_observed_at,
     health_diagnostic_code,health_failure_count,next_probe_at
-) VALUES($3,$4,'same-name',9,'NONE','STALE',$2,2,'CHAT',$5,$1,'RESOLVED',1,1,$2,'TEST_SECOND_PROTOCOL',0,$2);`, protocolV2, now, secondRoute, resolvableAccount, modelA); err != nil {
+) VALUES($3,$4,'same-name',9,'NONE','STALE',$2,2,'CHAT',$5,$1,'RESOLVED',1,1,$2,'TEST_SECOND_PROTOCOL',0,$2);`, pgx.QueryExecModeSimpleProtocol, protocolV2, now, secondRoute, resolvableAccount, modelA); err != nil {
 			t.Fatal(err)
 		}
 		if err = migrations.DownOne(ctx, connection, through); err == nil || !strings.Contains(err.Error(), "rollback refused") {

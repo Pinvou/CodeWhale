@@ -1593,8 +1593,8 @@ paths:
   /token/admin/v2/token-accounts/{token_account_id}/routes:
     put:
       operationId: upsertStableAdminTokenRoute
-      summary: Create or replace a stable model routing policy
-      description: Available only after the atomic APT-138 activation. Health and upstream fields are server-owned and rejected.
+      summary: Retired stable route direct-write sentinel
+      description: PRE_ACTIVATION and SAFE_ROLLBACK fail closed with 503. ACTIVE returns 410; use TOKEN_ROUTE_UPSERT through the governed command endpoint.
       parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -1602,7 +1602,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/TokenRouteChange" }
       responses:
-        "200": { description: Frozen stable route command result, content: { application/json: { schema: { $ref: "#/components/schemas/TokenRoute" } } } }
+        "410": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -1611,7 +1611,8 @@ paths:
         "503": { $ref: "#/components/responses/Error" }
     delete:
       operationId: deleteStableAdminTokenRoute
-      summary: Tombstone a stable model routing policy
+      summary: Retired stable route delete sentinel
+      description: PRE_ACTIVATION and SAFE_ROLLBACK fail closed with 503. ACTIVE returns 410; use TOKEN_ROUTE_DELETE through the governed command endpoint. A resource 404 never proves a delete was not committed.
       parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -1619,7 +1620,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/StableTokenRouteDelete" }
       responses:
-        "204": { description: Route deleted or frozen idempotent result replayed }
+        "410": { $ref: "#/components/responses/Error" }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -2498,10 +2499,11 @@ paths:
   /token/admin/v1/commands/by-idempotency-key:
     get:
       operationId: getGovernedTokenCommandByIdempotencyKey
-      summary: Recover an actor-owned account-create command when the POST response lost its reference
+      summary: Recover an actor-owned account-create or route command when the POST response lost its reference
+      description: Route results require platform.tokens.manage. Account creation results require both platform.tokens.manage and platform.tokens.owner-candidates.read. Lookup always uses the current authenticated actor and the original command type/key; another actor's result is indistinguishable from a missing result. A 404 never proves the original command was not committed.
       parameters:
         - { $ref: "#/components/parameters/IdempotencyKey" }
-        - { name: command_type, in: query, required: true, schema: { type: string, enum: [TOKEN_ACCOUNT_CREATE] } }
+        - { name: command_type, in: query, required: true, schema: { type: string, enum: [TOKEN_ACCOUNT_CREATE, TOKEN_ROUTE_UPSERT, TOKEN_ROUTE_DELETE] } }
       responses:
         "200": { description: Existing actor-owned result, content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandResult" } } } }
         "400": { $ref: "#/components/responses/Error" }
@@ -2796,8 +2798,8 @@ components:
       additionalProperties: false
       required: [command_type, target_resource_type, target_resource_id, command]
       properties:
-        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_DRAFT_SAVE, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ACCOUNT_CREATE, TOKEN_ACCOUNT_STATUS_CHANGE, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
-        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, PROVIDER_CREDENTIAL, PROVISIONING, USAGE_REQUEST] }
+        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_DRAFT_SAVE, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ACCOUNT_CREATE, TOKEN_ACCOUNT_STATUS_CHANGE, TOKEN_ROUTE_UPSERT, TOKEN_ROUTE_DELETE, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, TOKEN_ROUTE, PROVIDER_CREDENTIAL, PROVISIONING, USAGE_REQUEST] }
         target_resource_id: { type: string, minLength: 1, maxLength: 160 }
         command: { type: object, additionalProperties: true }
       allOf:
@@ -2908,13 +2910,25 @@ components:
                 allOf:
                   - { $ref: "#/components/schemas/TokenRuntimeGovernedCommand" }
                   - { $ref: "#/components/schemas/TokenUsageReconciliationRetryCommand" }
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_UPSERT } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ROUTE }
+              target_resource_id: { type: string, format: uuid, description: Token Account ID; must equal command.token_account_id. }
+              command: { $ref: "#/components/schemas/TokenRouteUpsertCommand" }
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_DELETE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ROUTE }
+              target_resource_id: { type: string, format: uuid, description: Route ID; must equal command.route_id. }
+              command: { $ref: "#/components/schemas/TokenRouteDeleteCommand" }
     TokenCommandPrecheck:
       allOf:
         - { $ref: "#/components/schemas/TokenImpactPrecheck" }
         - type: object
           required: [expected_versions]
           properties:
-            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_DRAFT_SAVE, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ACCOUNT_CREATE, TOKEN_ACCOUNT_STATUS_CHANGE, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_DRAFT_SAVE, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ACCOUNT_CREATE, TOKEN_ACCOUNT_STATUS_CHANGE, TOKEN_ROUTE_UPSERT, TOKEN_ROUTE_DELETE, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
             expected_versions: { type: object }
         - if: { properties: { action: { const: TOKEN_PROTOCOL_DRAFT_CREATE } }, required: [action] }
           then:
@@ -3021,6 +3035,20 @@ components:
                 properties:
                   resource_type: { const: TOKEN_ACCOUNT }
               expected_versions: { $ref: "#/components/schemas/TokenAccountStatusExpectedVersions" }
+        - if: { properties: { action: { const: TOKEN_ROUTE_UPSERT } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: TOKEN_ROUTE }
+              expected_versions: { $ref: "#/components/schemas/TokenRouteUpsertExpectedVersions" }
+        - if: { properties: { action: { const: TOKEN_ROUTE_DELETE } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: TOKEN_ROUTE }
+              expected_versions: { $ref: "#/components/schemas/TokenRouteDeleteExpectedVersions" }
         - if: { properties: { action: { const: TOKEN_CREDENTIAL_VALIDATE } }, required: [action] }
           then:
             properties:
@@ -3042,6 +3070,81 @@ components:
                 properties:
                   resource_type: { const: USAGE_REQUEST }
               expected_versions: { $ref: "#/components/schemas/TokenUsageReconciliationExpectedVersions" }
+    TokenRouteUpsertCommand:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, model_id, protocol_version_id, priority, default_scope]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        protocol_version_id: { type: string, format: uuid }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        default_scope: { type: string, enum: [NONE, UNIT, ORG] }
+    TokenRouteDeleteCommand:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, route_id]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        route_id: { type: string, format: uuid }
+    TokenRouteUpsertExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, model_id, protocol_version_id, expected_account_version, expected_route_version]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        protocol_version_id: { type: string, format: uuid }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        expected_route_version: { type: integer, format: int64, minimum: 0 }
+    TokenRouteDeleteExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, route_id, expected_account_version, expected_route_version]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        route_id: { type: string, format: uuid }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        expected_route_version: { type: integer, format: int64, minimum: 1 }
+    TokenRouteUpsertEnvelopeExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, model_id, protocol_version_id, expected_account_version, expected_route_version, precheck_fingerprint, request_fingerprint]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        protocol_version_id: { type: string, format: uuid }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        expected_route_version: { type: integer, format: int64, minimum: 0 }
+        precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+    TokenRouteDeleteEnvelopeExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, route_id, expected_account_version, expected_route_version, precheck_fingerprint, request_fingerprint]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        route_id: { type: string, format: uuid }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        expected_route_version: { type: integer, format: int64, minimum: 1 }
+        precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+    TokenRouteDeleteGovernedResult:
+      type: object
+      additionalProperties: false
+      description: Frozen tombstone result. deleted_route_version is the pre-delete version; route_version is exactly one greater. Account version is the post-delete version.
+      required: [route_id, token_account_id, model_id, protocol_version_id, deleted, deleted_route_version, route_version, route_generation, account_version, deleted_at]
+      properties:
+        route_id: { type: string, format: uuid }
+        token_account_id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        protocol_version_id: { type: string, format: uuid }
+        deleted: { type: boolean, const: true }
+        deleted_route_version: { type: integer, format: int64, minimum: 1 }
+        route_version: { type: integer, format: int64, minimum: 2 }
+        route_generation: { type: integer, format: int64, minimum: 1 }
+        account_version: { type: integer, format: int64, minimum: 2 }
+        deleted_at: { type: string, format: date-time }
     TokenProvisioningRepairCommand:
       type: object
       additionalProperties: false
@@ -3414,6 +3517,20 @@ components:
                   target_status: { type: string, enum: [ACTIVE, DISABLED] }
                   precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
                   request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_UPSERT } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ROUTE }
+              target_resource_id: { type: string, format: uuid, description: Token Account ID; must equal command.token_account_id. }
+              command: { $ref: "#/components/schemas/TokenRouteUpsertCommand" }
+              expected_versions: { $ref: "#/components/schemas/TokenRouteUpsertEnvelopeExpectedVersions" }
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_DELETE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ROUTE }
+              target_resource_id: { type: string, format: uuid, description: Route ID; must equal command.route_id. }
+              command: { $ref: "#/components/schemas/TokenRouteDeleteCommand" }
+              expected_versions: { $ref: "#/components/schemas/TokenRouteDeleteEnvelopeExpectedVersions" }
         - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }, required: [command_type] }
           then:
             properties:
@@ -3821,6 +3938,20 @@ components:
               target_resource_type: { const: TOKEN_ACCOUNT }
               target_resource_id: { type: string, format: uuid }
               redacted_result: { $ref: "#/components/schemas/TokenAccountStatusGovernedResult" }
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_UPSERT }, status: { const: SUCCEEDED } }, required: [command_type, status] }
+          then:
+            required: [redacted_result]
+            properties:
+              target_resource_type: { const: TOKEN_ROUTE }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenRoute" }
+        - if: { properties: { command_type: { const: TOKEN_ROUTE_DELETE }, status: { const: SUCCEEDED } }, required: [command_type, status] }
+          then:
+            required: [redacted_result]
+            properties:
+              target_resource_type: { const: TOKEN_ROUTE }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenRouteDeleteGovernedResult" }
         - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK }, status: { const: SUCCEEDED } }, required: [command_type, status] }
           then:
             required: [redacted_result]

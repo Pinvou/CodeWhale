@@ -655,6 +655,10 @@ func (s *Service) recheckRecoveryOperator(ctx context.Context, operator tokenAcc
 }
 
 func (s *Service) adminTokenCommandByIdempotencyKey(w http.ResponseWriter, r *http.Request) {
+	if isRouteGovernedCommand(r.URL.Query().Get("command_type")) {
+		s.adminRouteCommandByIdempotencyKey(w, r)
+		return
+	}
 	if strings.TrimSpace(r.URL.Query().Get("command_type")) != "TOKEN_ACCOUNT_CREATE" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "command type is invalid", httpserver.RequestID(r.Context()))
 		return

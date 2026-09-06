@@ -34,7 +34,10 @@ let queueFailure = false;
 const statusCommandID = '0199a100-0001-7000-8000-000000000108';
 const recoveryActionID = '0199a100-0001-7000-8000-000000000109';
 const recoveryAuditID = '0199a100-0001-7000-8000-000000000110';
-const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, impactCalls: 0, routeCalls: [], commandCalls: [], recoveryCalls: [], queueCalls: [] };
+const routeCommandID = '0199a100-0001-7000-8000-000000000111';
+const routeResults = new Map();
+let lastRouteResult;
+const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, impactCalls: 0, routePrechecks: [], routeCalls: [], directRouteCalls: [], routeResultCalls: [], commandCalls: [], recoveryCalls: [], queueCalls: [] };
 
 function envelope(items) {
   return { items, next_cursor: '', has_more: false, limit: 50, as_of: '2026-09-04T12:00:00Z', snapshot_expires_at: '2026-09-04T12:15:00Z', request_id: 'request-test' };
@@ -179,6 +182,16 @@ const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (['TOKEN_ROUTE_UPSERT', 'TOKEN_ROUTE_DELETE'].includes(input.command_type)) {
+      observations.impactCalls += 1;
+      observations.routePrechecks.push(input.command);
+      return json(response, {
+        ...routeImpact(input.command_type === 'TOKEN_ROUTE_DELETE' ? 'DELETE' : 'UPSERT'),
+        evidence: { ...routeImpact('UPSERT').evidence, resource_id: input.target_resource_id, current_status: 'PRESENT' },
+        expected_versions: { token_account_id: accountID, expected_account_version: 2, expected_route_version: 1,
+          ...(input.command_type === 'TOKEN_ROUTE_DELETE' ? { route_id: routeID } : { model_id: modelID, protocol_version_id: protocolID }) },
+      });
+    }
     return json(response, {
       ...routeImpact('UPSERT'), action: input.command_type,
       evidence: { ...routeImpact('UPSERT').evidence, resource_type: input.target_resource_type, resource_id: input.target_resource_id, current_status: accountStatus },
@@ -190,12 +203,42 @@ const server = createServer(async (request, response) => {
     for await (const chunk of request) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     observations.commandCalls.push({ key: request.headers['idempotency-key'], body: input });
+    if (['TOKEN_ROUTE_UPSERT', 'TOKEN_ROUTE_DELETE'].includes(input.command_type)) {
+      const key = request.headers['idempotency-key'];
+      observations.routeCalls.push({ key, body: input.command, envelope: input });
+      const deleted = input.command_type === 'TOKEN_ROUTE_DELETE';
+      const redacted = deleted ? {
+        route_id: routeID, token_account_id: accountID, model_id: modelID, protocol_version_id: protocolID,
+        deleted: true, deleted_route_version: 1, route_version: 2, route_generation: 1, account_version: 3, deleted_at: '2026-09-04T12:00:01Z',
+      } : {
+        route_id: routeID, token_account_id: accountID, model_id: input.command.model_id, protocol_version_id: input.command.protocol_version_id,
+        protocol_code: 'CHAT', priority: input.command.priority, default_scope: input.command.default_scope,
+        health_status: 'UNKNOWN', health_diagnostic_code: 'ROUTE_CONFIGURATION_CHANGED', health_observed_at: null, health_expires_at: null,
+        route_version: input.expected_versions.expected_route_version + 1, route_generation: 2,
+        account_version: input.expected_versions.expected_account_version + 1, updated_at: '2026-09-04T12:00:01Z',
+      };
+      const result = {
+        command_reference: routeCommandID, command_type: input.command_type, policy_version: 1,
+        actor_user_id: ownerID, actor_permission: 'platform.tokens.manage', authorization_version: 3,
+        idempotency_fingerprint: 'd'.repeat(64), target_resource_type: input.target_resource_type, target_resource_id: input.target_resource_id,
+        status: 'SUCCEEDED', redacted_result: redacted, stable_error_code: null,
+        audit_request_id: 'route-command-audit', created_at: '2026-09-04T12:00:00Z', completed_at: '2026-09-04T12:00:01Z',
+      };
+      if (routeMode === 'safe') return json(response, { code: 'COMMAND_PRECHECK_CHANGED', request_id: 'safe-request' }, 409);
+      routeResults.set(`${input.command_type}:${key}`, result);
+      lastRouteResult = result;
+      if (routeMode === 'unknown') return json(response, { code: 'INTERNAL_ERROR', request_id: 'unknown-request' }, 500);
+      if (routeMode === 'unknown-reference') return json(response, { code: 'COMMAND_RESULT_UNKNOWN', request_id: 'unknown-reference', details: { command_reference: routeCommandID } }, 503);
+      if (routeMode === 'mismatch') return json(response, { code: 'INTERNAL_ERROR', request_id: 'mismatch-request' }, 409);
+      if (routeMode === 'delay-success') return setTimeout(() => json(response, result), 250);
+      return json(response, result);
+    }
     const manualReview = input.command_type === 'TOKEN_ACCOUNT_CREATE' && accountCreateMode === 'manual-review';
     return json(response, {
       command_reference: statusCommandID, command_type: input.command_type, policy_version: 2,
       actor_user_id: ownerID, actor_permission: 'platform.tokens.manage', authorization_version: 3,
       idempotency_fingerprint: 'd'.repeat(64), target_resource_type: input.target_resource_type, target_resource_id: input.target_resource_id,
-      status: manualReview ? 'PENDING' : 'SUCCEEDED', redacted_result: {}, stable_error_code: null, approval_request_id: null,
+      status: manualReview ? 'PENDING' : 'SUCCEEDED', redacted_result: input.command_type === 'TOKEN_ACCOUNT_STATUS_CHANGE' ? { token_account_id: accountID, status: input.command.target_status, account_version: 3 } : {}, stable_error_code: null, approval_request_id: null,
       audit_request_id: 'token-status-audit', created_at: '2026-09-04T12:00:00Z', completed_at: manualReview ? null : '2026-09-04T12:00:01Z',
       ...(manualReview ? { recovery_state: 'MANUAL_REVIEW', recovery_diagnostic_code: 'ACCOUNT_PROVISIONING_MANUAL_REVIEW', recovery_epoch: 3 } : {}),
     });
@@ -211,33 +254,16 @@ const server = createServer(async (request, response) => {
       stable_error_code: null, audit_reference: recoveryAuditID, created_at: '2026-09-04T12:01:00Z', completed_at: '2026-09-04T12:01:01Z',
     });
   }
-  if (url.pathname === `/api/admin/token/admin/v2/token-accounts/${accountID}/routes` && request.method === 'PUT') {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    observations.routeCalls.push({ key: request.headers['idempotency-key'], body });
-    const stableRoute = {
-      route_id: routeID,
-      token_account_id: accountID,
-      model_id: body.model_id,
-      protocol_version_id: body.protocol_version_id,
-      protocol_code: 'CHAT',
-      priority: body.priority,
-      default_scope: body.default_scope,
-      health_status: 'UNKNOWN',
-      health_diagnostic_code: 'ROUTE_CONFIGURATION_CHANGED',
-      health_observed_at: null,
-      health_expires_at: null,
-      route_version: body.expected_route_version + 1,
-      route_generation: 2,
-      account_version: body.expected_account_version + 1,
-      updated_at: '2026-09-04T12:00:01Z',
-    };
-    if (routeMode === 'unknown') return json(response, { code: 'INTERNAL_ERROR', request_id: 'unknown-request' }, 500);
-    if (routeMode === 'mismatch') return json(response, { code: 'INTERNAL_ERROR', request_id: 'mismatch-request' }, 409);
-    if (routeMode === 'safe') return json(response, { code: 'TOKEN_ROUTE_VERSION_CONFLICT', request_id: 'safe-request' }, 409);
-    if (routeMode === 'delay-success') return setTimeout(() => json(response, stableRoute), 250);
-    return json(response, stableRoute);
+  if (request.method === 'GET' && (url.pathname === '/api/admin/token/admin/v1/commands/by-idempotency-key' || url.pathname === `/api/admin/token/admin/v1/commands/${routeCommandID}`)) {
+    const key = request.headers['idempotency-key'];
+    observations.routeResultCalls.push({ path: url.pathname, method: request.method, key });
+    const result = url.pathname.endsWith('by-idempotency-key') ? routeResults.get(`${url.searchParams.get('command_type')}:${key}`) : lastRouteResult;
+    if (routeMode === 'mismatch' || !result) return json(response, { code: 'NOT_FOUND', request_id: 'route-result-missing' }, 404);
+    return json(response, result);
+  }
+  if (/\/admin\/v[12]\/token-accounts\/[^/]+\/routes$/.test(url.pathname) && ['PUT', 'DELETE', 'POST'].includes(request.method)) {
+    observations.directRouteCalls.push({ path: url.pathname, method: request.method });
+    return json(response, { code: 'DIRECT_TOKEN_COMMAND_RETIRED', request_id: 'retired-direct-route' }, 410);
   }
   const relative = url.pathname === '/admin.html' ? 'admin.html' : url.pathname.replace(/^\//, '');
   const target = path.resolve(staticRoot, relative);
@@ -444,6 +470,13 @@ try {
   await configure(page, 'permissions=all&gate=1&action-gate=1&route-mode=delay-success');
   await page.reload({ waitUntil: 'networkidle0' });
   await openRouteDialog(page);
+  const beforePriorityPrecheck = (await state(page)).routePrechecks.length;
+  await page.$eval('.adm-high-risk-dialog input[type="number"]', (input) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '102');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.waitForFunction((before) => fetch('/__test__/state').then(response => response.json()).then(value => value.routePrechecks.length > before && value.routePrechecks.at(-1).priority === 102), {}, beforePriorityPrecheck);
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
   const beforeDouble = (await state(page)).routeCalls.length;
   await submitRoute(page, true);
   await page.waitForFunction((before) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.routeCalls.length === before + 1), {}, beforeDouble);
@@ -451,6 +484,7 @@ try {
   await page.click('.adm-high-risk-dialog footer button:first-child');
   await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
   assert.equal((await state(page)).routeCalls.length, beforeDouble + 1, 'same-tick double click dispatches one stable route write');
+  assert.equal((await state(page)).routeCalls.at(-1).body.priority, 102, 'first submission after editing uses the newly prechecked priority');
 
   await configure(page, 'route-mode=unknown');
   await openRouteDialog(page);
@@ -462,9 +496,11 @@ try {
   await submitRoute(page);
   await new Promise((resolve) => setTimeout(resolve, 80));
   const afterUnknown = await state(page);
-  assert.equal(afterUnknown.routeCalls.length, beforeUnknown + 1, 'unknown direct write is never repeated without a result-query reference');
-  assert.equal(afterUnknown.routeCalls.at(-1).key, unknownCall.key, 'unknown outcome retains the frozen command key for manual correlation');
-  assert.equal(await page.$eval('.adm-high-risk-dialog button[type="submit"]', (button) => button.disabled), true, 'unknown direct write fails closed when recovery has no trusted reference');
+  assert.equal(afterUnknown.routeCalls.length, beforeUnknown + 1, 'unknown governed write is never repeated');
+  assert.equal(afterUnknown.routeCalls.at(-1).key, unknownCall.key, 'unknown outcome retains the frozen command key');
+  await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  assert.equal(afterUnknown.routeResultCalls.at(-1).key, unknownCall.key, 'missing reference recovers by GET with the original key');
+  assert.match(afterUnknown.routeResultCalls.at(-1).path, /by-idempotency-key$/);
   await page.reload({ waitUntil: 'networkidle0' });
 
   await configure(page, 'route-mode=mismatch');
@@ -483,7 +519,28 @@ try {
   assert.equal(afterMismatch.routeCalls.length, beforeMismatch + 1, 'mismatched 409 status/code locks even a changed payload');
   assert.equal(afterMismatch.routeCalls.at(-1).key, mismatchCall.key, 'mismatched response retains the original key');
   assert.equal(await page.$eval('.adm-high-risk-dialog header button', (button) => button.disabled), true, 'unknown result cannot be dismissed into a fresh command');
+  assert.match(afterMismatch.routeResultCalls.at(-1).path, /by-idempotency-key$/, 'mismatched status/code allows only a result GET, even after an attempted input edit');
   await page.reload({ waitUntil: 'networkidle0' });
+
+  await configure(page, 'route-mode=unknown-reference');
+  await page.click('.adm-token-health tbody button.danger');
+  await page.waitForSelector('.adm-high-risk-dialog textarea');
+  await page.type('.adm-high-risk-dialog textarea', 'delete after reviewing the current route dependencies');
+  await page.click('.adm-high-risk-dialog input[type="checkbox"]');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
+  const beforeDelete = (await state(page)).routeCalls.length;
+  await submitRoute(page, true);
+  await page.waitForSelector('.adm-high-risk-dialog .adm-command-unknown');
+  assert.equal((await state(page)).routeCalls.at(-1).envelope.command_type, 'TOKEN_ROUTE_DELETE');
+  await configure(page, 'route-mode=success');
+  await submitRoute(page);
+  await page.waitForSelector('.adm-high-risk-dialog .adm-inline-message.success');
+  const afterDelete = await state(page);
+  assert.equal(afterDelete.routeCalls.length, beforeDelete + 1, 'delete response loss recovers the tombstone without repeating the deletion');
+  assert.equal(afterDelete.routeResultCalls.at(-1).path, `/api/admin/token/admin/v1/commands/${routeCommandID}`);
+  assert.equal(afterDelete.routeResultCalls.at(-1).method, 'GET');
+  await page.click('.adm-high-risk-dialog footer button:first-child');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog'));
 
   await configure(page, 'route-mode=safe');
   await openRouteDialog(page);
@@ -492,16 +549,29 @@ try {
   await page.waitForSelector('.adm-high-risk-dialog [role="alert"]');
   await submitRoute(page);
   await page.waitForFunction((before) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.routeCalls.length === before + 2), {}, beforeSafe);
+  const beforeSafePrecheck = (await state(page)).routePrechecks.length;
   await page.$eval('.adm-high-risk-dialog input[type="number"]', (input) => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, '101');
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
+  await page.waitForFunction((before) => fetch('/__test__/state').then(response => response.json()).then(value => value.routePrechecks.length > before && value.routePrechecks.at(-1).priority === 101), {}, beforeSafePrecheck);
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
   await submitRoute(page);
   await page.waitForFunction((before) => fetch('/__test__/state').then((response) => response.json()).then((value) => value.routeCalls.length === before + 3), {}, beforeSafe);
   const safeCalls = (await state(page)).routeCalls.slice(beforeSafe);
   assert.equal(safeCalls[0].key, safeCalls[1].key, 'exact zero-write status/code reuses key for the same payload');
   assert.notEqual(safeCalls[1].key, safeCalls[2].key, 'payload change after proven zero-write gets a new key');
   assert.equal(safeCalls[2].body.priority, 101);
+
+  const finalState = await state(page);
+  assert.deepEqual(finalState.directRouteCalls, [], 'Portal never writes retired v1/v2 route endpoints');
+  for (const call of finalState.routeCalls) {
+    assert.equal(call.envelope.target_resource_type, 'TOKEN_ROUTE');
+    assert.equal(call.body.token_account_id, accountID);
+    assert.equal(call.body.health_status, undefined);
+    assert.equal(call.body.upstream_model_ref, undefined);
+    assert.match(call.envelope.expected_versions.request_fingerprint, /^[0-9a-f]{64}$/);
+  }
 
   assert.deepEqual(pageErrors, []);
   console.log('Admin Token resources UI smoke passed');
