@@ -51,3 +51,16 @@ APT-138 的真实 PostgreSQL 总验收在 `CompleteCredentialSession` 完成事�
 - 独立 PG 增加数据库约束拒绝前后缀及敏感码、无引用 down/up、已有引用 down 拒绝且结果/审计不变的证明。本批至多七文件：上述四文件、两份前向迁移与 manifest，仅本批登记进入独立候选；不夹带 APT-138 activation 迁移及其他源码。
 - 2026-09-06 根代理：隔离候选 `ace70024`，`TestCredentialProbeLeasePostgresIntegration` 真实 PG 通过（1.74s），同时固定码精确边界与原敏感码回归通过；Token 包 3.606s、退出 0、无 SKIP。包含精确 30 秒、唯一完成/重放、到期 UNKNOWN 零 provider 调用、原 SQL CHECK 负例及有引用 down 55000 保留历史。manifest 仅前向新增本批两文件，共 270 项；APT-138 代码与 000031 均未进入候选。
 - 2026-09-06 B：APT-133-R2 最终独立审核 PASS；租约、固定码双层精确约束、历史回退保护、七文件边界和真实 PG 证据均通过。仅本批独立签署提交，不包含 APT-138 的同文件改动或 000031，不代表总装完成、推送或部署。
+
+## APT-133-R3：审批撤销凭据的审计字段完整性
+
+- 状态：DONE / REMEDIATION_REVIEW_PASS；仅本批三文件的隔离候选真实 PG 与 B 最终独立审核已通过，交根代理独立签署，不代表 APT-138 总装完成。
+- 根因：APT-138 真实 PostgreSQL 调用已批准凭据撤销适配器时，更新仅写 `status='REVOKED'` 与 `revoked_at`，触发历史 `000003` 的 `provider_credentials_revocation_audit` CHECK（SQLSTATE 23514）；该不变量还要求 `revoked_by` 非空、`revocation_reason` 非空白。不得放宽 CHECK 或修改已发布迁移。
+- 最小方案：只在原指定凭据 UPDATE 中补齐撤销人及原因。撤销人使用已与持久命令核对一致的 actor；原因读取同一事务已锁定原 `token_command_results` 的 reason，不由重试时临时文本替换原审计事实。保持原状态/账户/凭据版本 CAS、审批引用、串行化事务与幂等行为，不改变策略版本、公开接口、凭据密文存储或激活机制。
+- 文件边界：本文、`internal/token/credential_revoke_executor.go` 唯一 UPDATE、新增 `internal/token/credential_revoke_audit_integration_test.go`。同文件未提交的 APT-138 guard 不纳入本批候选；从 HEAD 加本批三文件独立验证和签署提交。
+- 验收：真实 ACTIVE/RETIRED 凭据经现有预检、持久 PENDING 命令及原撤销 adapter 成功，三项撤销审计字段来自同一提交且原因等于原命令 reason；其他凭据不变、账户版本只加一、原命令 SUCCEEDED，领域审计及通用审计/Outbox 分型各一次。再次执行只返回原结果，凭据/账户/命令/完整审计与事件事实不增不改。
+- 负例：非原 actor 被拒且零效果；原数据库 CHECK 仍拒绝缺撤销人或空白原因的直接 REVOKED 写入；测试限定的后续 Outbox 写入失败使凭据状态/审计字段、账户版本、原 PENDING 命令及全部审计/事件回滚。测试使用实际 PostgreSQL repository，不禁用生产约束、不依赖未提交 APT-138 接线、不以 SKIP 计通过。
+- 2026-09-06 B：R3 文档正式审核 PASS。A 已完成唯一 UPDATE 及专属真实 PG 测试代码（尚未执行通过），等待静态复审及根代理隔离候选验证。
+- 2026-09-06 B：代码复审要求 late Outbox 失败使用独立 `P0001` 和固定测试 message，并精确断言 `PgError`，防止将前序 SQL 错误误记为后续回滚；A 修复后静态审核 PASS。首轮真实 PG 发现 fixture 同账户两份凭据误用同一指纹、被原唯一约束正确拒绝；仅将第二份测试凭据改为独立指纹，B 复审通过，未放宽生产约束。
+- 2026-09-06 根代理：隔离候选 `3482cb1bed9dbf3a62990a5a74b7c50be2297dec` 仅包含 HEAD 加本批唯一 UPDATE、本文及新测试。`TestApprovedCredentialRevokeAuditPostgresIntegration` 真实 PG 全 PASS，用例 7.80 秒（ACTIVE 1.30 秒、RETIRED 0.33 秒、late_outbox_failure 0.24 秒），Token 包 21.238 秒，退出码 0，无 SKIP。已证明冻结原因、完整撤销审计字段、其他凭据不变、精确一次领域/通用审计与事件、重放持久事实不变、原 CHECK 保持及精确后续失败全事务回滚。
+- 2026-09-06 B：R3 最终独立审核 PASS。仅本三文件可独立签署；同文件 APT-138 epoch guard 未进入本批，后续任务仍按原审核与验收顺序进行，尚未统一推送或部署。

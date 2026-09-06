@@ -130,7 +130,7 @@ func (e *PostgresApprovedCredentialExecutor) ExecuteApprovedCredentialRevoke(ctx
 		return TokenCommandResult{}, ErrCatalogVersionConflict
 	}
 	now := e.repository.now().UTC()
-	mutation, err := tx.Exec(ctx, `UPDATE provider_credentials SET status='REVOKED',revoked_at=$3 WHERE id=$1 AND token_account_id=$2 AND version=$4 AND status=$5`, command.CredentialID, command.TokenAccountID, now, command.CredentialVersion, expected.CredentialStatus)
+	mutation, err := tx.Exec(ctx, `UPDATE provider_credentials SET status='REVOKED',revoked_at=$3,revoked_by=$6,revocation_reason=(SELECT reason FROM token_command_results WHERE command_reference=$7) WHERE id=$1 AND token_account_id=$2 AND version=$4 AND status=$5`, command.CredentialID, command.TokenAccountID, now, command.CredentialVersion, expected.CredentialStatus, actorID, reference)
 	if err != nil || mutation.RowsAffected() != 1 {
 		if err != nil {
 			return TokenCommandResult{}, err
