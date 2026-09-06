@@ -6,6 +6,7 @@ const TOKEN_ADMIN_FILTERS = Object.freeze({
   protocols: ['q', 'status', 'protocol_code', 'published', 'created_from', 'created_to'],
   formulas: ['q', 'status', 'protocol_definition_id', 'metering_unit_code', 'published', 'created_from', 'created_to'],
   tokenAccounts: ['q', 'owner_type', 'owner_id', 'status', 'health_status', 'credential_status'],
+  accountRecovery: ['q'],
   provisionings: ['q', 'status', 'model_id', 'token_account_id', 'scope_type', 'scope_id', 'sla_overdue'],
   usage: ['q', 'execution_status', 'settlement_status', 'model', 'token_account_id', 'organization_id', 'started_from', 'started_to'],
   reconciliation: ['q', 'status', 'severity', 'case_type', 'owner_id', 'sla_overdue'],
@@ -521,9 +522,6 @@ export class AdminPlatformClient {
     const requestSignal = signal;
     return this.request('token', `/admin/v1/token-accounts?${tokenAdminCollectionQuery('tokenAccounts', filters)}`, requestSignal);
   }
-  createTokenAccount(input) {
-    return this.mutate('token', '/admin/v1/token-accounts', 'POST', input);
-  }
   tokenAccount(tokenAccountID, signal) {
     return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal);
   }
@@ -545,9 +543,6 @@ export class AdminPlatformClient {
 	revokeCredentialWindow(resultRef, reasonCode, signal) {
 		return this.mutate('token', `/admin/v1/credential-results/${encodeURIComponent(resultRef)}/revoke-window`, 'POST', { reason_code: reasonCode }, '', signal);
 	}
-  setTokenAccountStatus(tokenAccountID, status, reason) {
-    return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/status`, 'PATCH', { status, reason });
-  }
   upsertTokenRoute(tokenAccountID, route) {
     return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route);
   }
@@ -684,6 +679,22 @@ export class AdminPlatformClient {
   }
   governedTokenCommandResult(commandReference, signal) {
     return this.request('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}`, signal);
+  }
+  governedTokenCommandByIdempotencyKey(commandType, idempotencyKey, signal) {
+    const query = new URLSearchParams({ command_type: commandType });
+    return this.mutate('token', `/admin/v1/commands/by-idempotency-key?${query}`, 'GET', undefined, idempotencyKey, signal);
+  }
+  createTokenAccountRecoveryAction(commandReference, input, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions`, 'POST', input, idempotencyKey, signal);
+  }
+  tokenAccountRecoveryQueue(filters = {}, signal) {
+    return this.request('token', `/admin/v1/commands/recovery-queue?${tokenAdminCollectionQuery('accountRecovery', filters)}`, signal);
+  }
+  tokenAccountRecoveryAction(commandReference, actionID, signal) {
+    return this.request('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions/${encodeURIComponent(actionID)}`, signal);
+  }
+  tokenAccountRecoveryActionByIdempotencyKey(commandReference, idempotencyKey, signal) {
+    return this.mutate('token', `/admin/v1/commands/${encodeURIComponent(commandReference)}/recovery-actions/by-idempotency-key`, 'GET', undefined, idempotencyKey, signal);
   }
   transitionModel(modelID, input) {
     return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle`, 'POST', input);

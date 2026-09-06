@@ -211,7 +211,7 @@ func newTokenOverviewPerformanceRepository(t *testing.T, ctx context.Context, da
 		t.Fatal(err)
 	}
 	if reset {
-		loaded, err := migrations.Load("../../migrations/token")
+		loaded, err := loadTokenIntegrationMigrations("../../migrations/token", schema)
 		if err != nil {
 			t.Fatal(err)
 		}

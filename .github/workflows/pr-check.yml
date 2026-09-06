@@ -612,6 +612,19 @@ jobs:
         run: |
           createdb --host 127.0.0.1 --username account_platform_test account_platform_token_pagination_test
           createdb --host 127.0.0.1 --username account_platform_test account_platform_token_overview_performance_test
+          psql --host 127.0.0.1 --username account_platform_test --dbname postgres --set=ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE token_gateway NOLOGIN;
+          CREATE ROLE token_cap_policy_deployer NOLOGIN;
+          CREATE ROLE token_schema_owner NOLOGIN;
+          CREATE ROLE token_migrator LOGIN NOINHERIT;
+          CREATE ROLE token_policy_operator LOGIN NOINHERIT;
+          GRANT token_gateway, token_cap_policy_deployer, token_schema_owner TO token_migrator;
+          CREATE ROLE billing_service NOLOGIN;
+          CREATE ROLE billing_wallet_receipt_deployer NOLOGIN;
+          CREATE ROLE billing_schema_owner NOLOGIN;
+          CREATE ROLE billing_migrator LOGIN NOINHERIT;
+          GRANT billing_service, billing_wallet_receipt_deployer, billing_schema_owner TO billing_migrator;
+          SQL
 
       - name: Prepare real credential-origin browser gate
         run: |
@@ -640,6 +653,16 @@ jobs:
           printf '%s\n' "$model_price_projection_output"
           grep -F -- '--- PASS: TestModelPriceProjectionPostgresIntegration' <<< "$model_price_projection_output"
           ! grep -F -- '--- SKIP: TestModelPriceProjectionPostgresIntegration' <<< "$model_price_projection_output"
+          wallet_provisioning_output="$(go test -run '^(TestTokenAccountWalletProvisioningPostgresIntegration|TestTokenAccountWalletReceiptMigrationRolesPostgresIntegration)$' -count=1 -v ./internal/billing)"
+          printf '%s\n' "$wallet_provisioning_output"
+          for test_name in TestTokenAccountWalletProvisioningPostgresIntegration TestTokenAccountWalletReceiptMigrationRolesPostgresIntegration; do
+            grep -F -- "--- PASS: $test_name" <<< "$wallet_provisioning_output"
+            ! grep -F -- "--- SKIP: $test_name" <<< "$wallet_provisioning_output"
+          done
+          owner_candidates_output="$(go test -run '^TestTokenOwnerCandidatesPostgresIntegration$' -count=1 -v ./internal/account)"
+          printf '%s\n' "$owner_candidates_output"
+          grep -F -- '--- PASS: TestTokenOwnerCandidatesPostgresIntegration' <<< "$owner_candidates_output"
+          ! grep -F -- '--- SKIP: TestTokenOwnerCandidatesPostgresIntegration' <<< "$owner_candidates_output"
           token_pagination_output="$(PINVOU_TEST_TOKEN_PAGINATION_GATE=1 go test -run '^(TestTokenAdmin(Pagination(PostgresIntegration|PostgresMillionMemberBoundary|MigrationFailsClosedAndIsIdempotent)|QueryAdaptersPostgresIntegration)|TestAdminModelDetailPostgresIntegration|TestTokenImpactPrecheckPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_pagination_output"
           for test_name in \
@@ -685,6 +708,24 @@ jobs:
           printf '%s\n' "$model_publish_precheck_output"
           grep -F -- '--- PASS: TestModelPublishPrecheckPostgresIntegration' <<< "$model_publish_precheck_output"
           ! grep -F -- '--- SKIP: TestModelPublishPrecheckPostgresIntegration' <<< "$model_publish_precheck_output"
+          model_account_governance_output="$(go test -run '^(TestModelAccountGovernancePostgresIntegration|TestTokenAccountCreateAuthorityAndCapacityDriftPostgresIntegration|TestTokenAccountCreateConcurrentOwnerCapPostgresIntegration|TestTokenAccountProvisioningThreeServicePostgresIntegration)$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$model_account_governance_output"
+          for test_name in TestModelAccountGovernancePostgresIntegration TestTokenAccountCreateAuthorityAndCapacityDriftPostgresIntegration TestTokenAccountCreateConcurrentOwnerCapPostgresIntegration TestTokenAccountProvisioningThreeServicePostgresIntegration; do
+            grep -F -- "--- PASS: $test_name" <<< "$model_account_governance_output"
+            ! grep -F -- "--- SKIP: $test_name" <<< "$model_account_governance_output"
+          done
+          owner_cap_policy_output="$(go test -run '^TestTokenAccountOwnerCapPolicyPostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$owner_cap_policy_output"
+          grep -F -- '--- PASS: TestTokenAccountOwnerCapPolicyPostgresIntegration' <<< "$owner_cap_policy_output"
+          ! grep -F -- '--- SKIP: TestTokenAccountOwnerCapPolicyPostgresIntegration' <<< "$owner_cap_policy_output"
+          writer_quiescence_output="$(go test -run '^TestWriterQuiescencePostgres$' -count=1 -timeout=90s -v ./cmd/token-policy-bootstrap)"
+          printf '%s\n' "$writer_quiescence_output"
+          grep -F -- '--- PASS: TestWriterQuiescencePostgres' <<< "$writer_quiescence_output"
+          ! grep -F -- '--- SKIP: TestWriterQuiescencePostgres' <<< "$writer_quiescence_output"
+          catalog_rollback_governance_output="$(go test -run '^TestCatalogRollbackGovernancePostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$catalog_rollback_governance_output"
+          grep -F -- '--- PASS: TestCatalogRollbackGovernancePostgresIntegration' <<< "$catalog_rollback_governance_output"
+          ! grep -F -- '--- SKIP: TestCatalogRollbackGovernancePostgresIntegration' <<< "$catalog_rollback_governance_output"
           runtime_governance_output="$(go test -run '^TestRuntimeGovernedCommandsPostgresIntegration$' -count=1 -v ./internal/token)"
           printf '%s\n' "$runtime_governance_output"
           grep -F -- '--- PASS: TestRuntimeGovernedCommandsPostgresIntegration' <<< "$runtime_governance_output"

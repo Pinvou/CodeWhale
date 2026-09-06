@@ -48,6 +48,8 @@ type Service struct {
 	contexts                    ContextResolver
 	commerceCustomers           CommerceCustomerResolver
 	wallets                     WalletResolver
+	walletProvisioning          WalletProvisioningClient
+	ownerAuthority              OwnerAuthorityClient
 	validator                   CredentialValidator
 	providerURLs                ProviderURLPolicy
 	billing                     BillingClient
@@ -68,9 +70,34 @@ type Service struct {
 	operationsOverviewEnabled   bool
 	operationsOverviewMetrics   *tokenOperationsOverviewMetrics
 	credentialIsolationEnabled  bool
+	tokenAccountCreateReady     bool
 	adminProxyHMACKey           []byte
 	breaker                     *resilience.Breaker
 	activeUpstreamCancels       sync.Map
+}
+
+// WithTokenAccountCreateCapability is an APT-138 assembly seam. Production
+// constructors intentionally never call it while governance is PRE_ACTIVATION.
+func (s *Service) WithTokenAccountCreateCapability(ready bool) *Service {
+	s.tokenAccountCreateReady = ready
+	return s
+}
+
+func (s *Service) WithTokenAccountProvisioning(wallets WalletProvisioningClient, authority OwnerAuthorityClient) *Service {
+	s.walletProvisioning = wallets
+	s.ownerAuthority = authority
+	return s
+}
+
+func (s *Service) requireTokenAccountCreateCapability() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !s.tokenAccountCreateReady {
+			api.WriteError(c.Writer, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_CREATE_NOT_ACTIVE", "Token Account creation is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 func (s *Service) registerActiveUpstream(usageID uuid.UUID, cancel context.CancelFunc) func() {
@@ -210,11 +237,11 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/overview", s.authorizer.RequireAny("platform.tokens.read", "platform.usage.read", "platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/operations-overview", s.authorizer.RequireAnyAnd([]string{"platform.models.read"}, []string{"platform.tokens.read", "platform.usage.read"}), httpserver.AdaptFunc(s.adminTokenOperationsOverview))
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
-		admin.POST("/token-accounts", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateTokenAccount))
+		admin.POST("/token-accounts", s.requireTokenAccountCreateCapability(), s.authorizer.RequireAnyAnd(nil, []string{"platform.tokens.manage", "platform.tokens.owner-candidates.read"}), s.selectLegacyTokenDirect(legacyTokenAuditOnly), approvalpolicy.Require("TOKEN_ACCOUNT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateTokenAccount))
 		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))
 		admin.GET("/token-accounts/:token_account_id/credentials", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenCredentials))
 		admin.GET("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenRoutes))
-		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
+		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenDirect(legacyTokenAuditOnly), approvalpolicy.Require("TOKEN_ACCOUNT_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
 		admin.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenRouteDirect(), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertTokenRoute))
 		admin.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenRouteDirect(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteTokenRoute))
 		admin.POST("/token-accounts/:token_account_id/credential-launches/enroll", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ENROLL", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateCredentialLaunchFor("ENROLL")))
@@ -239,11 +266,11 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/models/:model_id/lifecycle-plans/:lifecycle_plan_id", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminLifecyclePlan))
 		admin.POST("/models/:model_id/lifecycle-plans", s.authorizer.Require("platform.models.lifecycle.request"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateLifecyclePlan))
 		admin.POST("/models/:model_id/lifecycle-plans/:lifecycle_plan_id/cancel", s.authorizer.RequireAny("platform.models.manage", "platform.models.lifecycle.request"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCancelLifecyclePlan))
-		admin.PUT("/models/:model_id/draft", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_DRAFT_SAVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSaveCatalogDraft))
-		admin.POST("/models/:model_id/publish", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishCatalogDraft))
-		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_LIFECYCLE_CHANGE"), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
+		admin.PUT("/models/:model_id/draft", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(legacyTokenAuditOnly), approvalpolicy.Require("TOKEN_MODEL_DRAFT_SAVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSaveCatalogDraft))
+		admin.POST("/models/:model_id/publish", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(legacyTokenAuditOnly), approvalpolicy.Require("TOKEN_MODEL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishCatalogDraft))
+		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(legacyTokenApprovalRequired), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_LIFECYCLE_CHANGE"), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
 		admin.POST("/models:sync", s.authorizer.Require("platform.models.sync"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncCatalog))
-		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_CATALOG_ROLLBACK"), httpserver.AdaptFunc(s.adminRollbackCatalog))
+		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), s.selectLegacyTokenDirect(legacyTokenApprovalRequired), approvalpolicy.RequireLegacyTokenDirect("TOKEN_MODEL_CATALOG_ROLLBACK"), httpserver.AdaptFunc(s.adminRollbackCatalog))
 		admin.GET("/models/:model_id/impact/lifecycle", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminModelLifecycleImpact))
 		admin.GET("/model-catalog/impact/rollback", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogRollbackImpact))
 		admin.GET("/provisionings", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisionings))
@@ -253,7 +280,12 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/resource-audit", s.authorizer.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), httpserver.AdaptFunc(s.adminResourceAudit))
 		admin.POST("/commands:precheck", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandPrecheck))
 		admin.POST("/commands", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateTokenCommand))
+		admin.GET("/commands/by-idempotency-key", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandByIdempotencyKey))
+		admin.GET("/commands/recovery-queue", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryQueue))
 		admin.GET("/commands/:command_reference", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandResult))
+		admin.POST("/commands/:command_reference/recovery-actions", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryAction))
+		admin.GET("/commands/:command_reference/recovery-actions/by-idempotency-key", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryActionByKey))
+		admin.GET("/commands/:command_reference/recovery-actions/:action_id", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryActionResult))
 		admin.GET("/token-accounts/:token_account_id/impact/status", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccountStatusImpact))
 		admin.GET("/token-accounts/:token_account_id/impact/route", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenRouteImpact))
 		admin.GET("/token-accounts/:token_account_id/impact/credential", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenCredentialImpact))
@@ -802,6 +834,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_REFERENCE_INVALID", "the published model or protocol reference is unavailable"
 	case errors.Is(err, ErrTokenRouteActivationChanged):
 		status, code, message = http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_CHANGED", "the token route governance state changed; retry against the selected contract"
+	case errors.Is(err, ErrTokenAccountCapReached):
+		status, code, message = http.StatusConflict, "TOKEN_ACCOUNT_CAP_REACHED", "the selected owner has reached the Token Account limit"
+	case errors.Is(err, ErrTokenAccountPolicyUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "TOKEN_ACCOUNT_POLICY_UNAVAILABLE", "Token Account creation policy is unavailable"
+	case errors.Is(err, ErrTokenAccountPolicyConfigMismatch):
+		status, code, message = http.StatusServiceUnavailable, "TOKEN_ACCOUNT_POLICY_CONFIG_MISMATCH", "Token Account creation policy is inconsistent"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
 	case errors.Is(err, ErrAccountProvisioning):

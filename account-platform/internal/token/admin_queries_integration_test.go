@@ -467,7 +467,7 @@ func newTokenQueryIntegrationRepository(t *testing.T, ctx context.Context, datab
 	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := migrations.Load("../../migrations/token")
+	loaded, err := loadTokenIntegrationMigrations("../../migrations/token", schema)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,6 +475,21 @@ func newTokenQueryIntegrationRepository(t *testing.T, ctx context.Context, datab
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
+	// Every isolated Token integration schema explicitly installs a generous
+	// dev/test owner cap. Production has no implicit default and is bootstrapped
+	// by the privileged policy deployment job.
+	policyEventID := uuid.New()
+	if _, err := connection.Exec(ctx, `INSERT INTO token_account_owner_cap_policy_revisions(policy_version,max_per_owner,config_digest,request_digest,idempotency_key_digest,principal_digest,changed_by,reason,request_id,outbox_event_id)
+OVERRIDING SYSTEM VALUE VALUES(1,1000,$1,$2,$3,$4,'integration-fixture','explicit integration fixture', $5,$6);
+INSERT INTO outbox_events(event_id,event_type,aggregate_id,aggregate_version,payload,trace_id,occurred_at)
+SELECT $6,'token.account-owner-cap-policy.changed.v1',policy_id,1,jsonb_build_object('policy_version',1,'max_per_owner',1000,'config_digest',$1,'changed_by','integration-fixture','request_id',$5),$5::text,transaction_timestamp()
+ FROM token_account_owner_cap_policy_active WHERE singleton_key;
+UPDATE token_account_owner_cap_policy_active SET active_policy_version=1,pointer_version=1,updated_by='integration-fixture',updated_at=transaction_timestamp() WHERE singleton_key`, pgx.QueryExecModeSimpleProtocol, tokenAccountOwnerCapConfigDigest(1000, 1), strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64), uuid.New(), policyEventID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Exec(ctx, `SELECT setval(pg_get_serial_sequence('token_account_owner_cap_policy_revisions','policy_version'),1,true)`); err != nil {
+		t.Fatal(err)
+	}
 	configuration, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		t.Fatal(err)

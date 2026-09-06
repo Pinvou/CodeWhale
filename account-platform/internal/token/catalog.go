@@ -340,37 +340,8 @@ func (r *PostgresRepository) SaveCatalogDraft(ctx context.Context, modelID uuid.
 		return CatalogDraft{}, err
 	}
 	defer tx.Rollback(ctx)
-	current, err := currentCatalogVersion(ctx, tx)
-	if err != nil || current == 0 {
-		return CatalogDraft{}, ErrNotFound
-	}
-	if input.ExpectedCatalogVersion != current {
-		return CatalogDraft{}, ErrCatalogVersionConflict
-	}
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2 AND lifecycle_status<>'REMOVED')`, current, modelID).Scan(&exists); err != nil {
-		return CatalogDraft{}, err
-	}
-	if !exists {
-		return CatalogDraft{}, ErrModelUnavailable
-	}
-	now := r.now()
-	modalities, _ := json.Marshal(input.SupportedModalities)
-	var draft CatalogDraft
-	var storedModalities []byte
-	err = tx.QueryRow(ctx, `INSERT INTO model_catalog_drafts(model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at)
-VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-ON CONFLICT(model_id) DO UPDATE SET base_catalog_version=EXCLUDED.base_catalog_version,draft_version=model_catalog_drafts.draft_version+1,display_name=EXCLUDED.display_name,description=EXCLUDED.description,aliases=EXCLUDED.aliases,protocol_code=EXCLUDED.protocol_code,protocol_version=EXCLUDED.protocol_version,context_length=EXCLUDED.context_length,maximum_output_tokens=EXCLUDED.maximum_output_tokens,supported_modalities=EXCLUDED.supported_modalities,tokenizer_version=EXCLUDED.tokenizer_version,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at
-WHERE model_catalog_drafts.draft_version=$14
-RETURNING model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at`, modelID, current, input.DisplayName, input.Description, input.Aliases, input.ProtocolCode, input.ProtocolVersion, input.ContextLength, input.MaximumOutputTokens, modalities, input.TokenizerVersion, actor, now, input.ExpectedDraftVersion).Scan(&draft.ModelID, &draft.BaseCatalogVersion, &draft.DraftVersion, &draft.DisplayName, &draft.Description, &draft.Aliases, &draft.ProtocolCode, &draft.ProtocolVersion, &draft.ContextLength, &draft.MaximumOutputTokens, &storedModalities, &draft.TokenizerVersion, &draft.UpdatedBy, &draft.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return CatalogDraft{}, ErrCatalogVersionConflict
-	}
+	draft, err := saveCatalogDraftEffect(ctx, tx, modelID, input, actor, r.now())
 	if err != nil {
-		return CatalogDraft{}, err
-	}
-	_ = json.Unmarshal(storedModalities, &draft.SupportedModalities)
-	if err := appendCatalogAudit(ctx, tx, actor, "MODEL_DRAFT_SAVED", &modelID, nil, strPtr("DRAFT"), current, "draft edited", map[string]any{"draft_version": draft.DraftVersion}); err != nil {
 		return CatalogDraft{}, err
 	}
 	return draft, tx.Commit(ctx)
@@ -673,6 +644,21 @@ func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion,
 	if !claimed {
 		return replayedVersion, tx.Commit(ctx)
 	}
+	version, err := rollbackCatalogEffect(ctx, tx, sourceVersion, expectedVersion, reason, actor, capabilities, now)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2 WHERE idempotency_key=$1`, key, version); err != nil {
+		return 0, err
+	}
+	return version, tx.Commit(ctx)
+}
+
+// rollbackCatalogEffect applies a forward-only catalog rollback inside the
+// caller's transaction. Governance adapters use it so the new catalog
+// version, immutable domain audit and generic command result/outbox commit as
+// one Token transaction.
+func rollbackCatalogEffect(ctx context.Context, tx pgx.Tx, sourceVersion, expectedVersion int64, reason string, actor uuid.UUID, capabilities []GatewayProtocolCapability, now time.Time) (int64, error) {
 	current, err := currentCatalogVersion(ctx, tx)
 	if err != nil || current != expectedVersion {
 		return 0, ErrCatalogVersionConflict
@@ -715,13 +701,10 @@ SELECT $2,model_id,display_name,normalized_name,description,aliases,lifecycle_st
 	if err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2 WHERE idempotency_key=$1`, key, version); err != nil {
-		return 0, err
-	}
 	if err := appendCatalogAudit(ctx, tx, actor, "MODEL_CATALOG_ROLLED_BACK", nil, nil, nil, version, reason, map[string]any{"rollback_source_version": sourceVersion, "previous_version": current}); err != nil {
 		return 0, err
 	}
-	return version, tx.Commit(ctx)
+	return version, nil
 }
 
 type catalogEntryMutation struct {

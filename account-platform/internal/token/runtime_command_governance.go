@@ -169,7 +169,7 @@ func completeRuntimeTokenCommandTx(ctx context.Context, tx pgx.Tx, input tokenCo
 		"authorization_version": input.AuthorizationVersion, "reason": envelope.Reason, "idempotency_fingerprint": idempotencyFingerprint,
 		"precheck_fingerprint": envelope.PrecheckFingerprint, "before_state": beforeState, "after_state": nullableJSONObject(afterState),
 		"result": nullableJSONObject(redactedResult), "status": "SUCCEEDED", "stable_error_code": "",
-		"approval_request_id": nil, "request_id": input.AuditRequestID,
+		"approval_request_id": optionalApprovalRequestID(input.ApprovalRequestID), "request_id": input.AuditRequestID,
 	})
 	var now time.Time
 	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
@@ -182,6 +182,13 @@ func completeRuntimeTokenCommandTx(ctx context.Context, tx pgx.Tx, input tokenCo
 		return TokenCommandResult{}, err
 	}
 	return scanTokenCommandResult(tx.QueryRow(ctx, tokenCommandResultSelect+` WHERE command_reference=$1`, reference))
+}
+
+func optionalApprovalRequestID(value uuid.UUID) any {
+	if value == uuid.Nil {
+		return nil
+	}
+	return value
 }
 
 func (r *PostgresRepository) executeGovernedProvisioningRepairTx(ctx context.Context, tx pgx.Tx, reference, actor uuid.UUID, reason string, command runtimeGovernedCommand) (json.RawMessage, json.RawMessage, json.RawMessage, error) {

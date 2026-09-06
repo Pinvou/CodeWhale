@@ -12,6 +12,7 @@ import {
   validGovernedTokenCommandResult,
   validImpactPrecheck,
   validStableRouteWriteResult,
+  validTokenAccountRecoveryActionResult,
 } from '../../../pinvou3-app/src/features/account-platform/admin-high-risk-action-state.js';
 import { chromiumUnsafePorts, listenOnChromiumSafePort } from '../../../pinvou3-app/tests/chromium-safe-port.mjs';
 
@@ -161,6 +162,34 @@ test('successful command and route responses are action-bound closed projections
   const expectedRoute = { tokenAccountID: route.token_account_id, modelID: route.model_id, protocolVersionID: route.protocol_version_id, priority: 100, defaultScope: 'NONE', expectedAccountVersion: 4 };
   assert.equal(validStableRouteWriteResult(route, expectedRoute), true);
   assert.equal(validStableRouteWriteResult({ ...route, upstream: 'sensitive' }, expectedRoute), false);
+});
+
+test('Token Account manual-review commands and recovery actions use closed recovery projections', async () => {
+  const command = {
+    command_reference: '0199a300-0001-7000-8000-000000000071', command_type: 'TOKEN_ACCOUNT_CREATE', policy_version: 2,
+    actor_user_id: '0199a300-0001-7000-8000-000000000072', actor_permission: 'platform.tokens.manage', authorization_version: 4,
+    idempotency_fingerprint: '7'.repeat(64), target_resource_type: 'TOKEN_ACCOUNT', target_resource_id: '0199a300-0001-7000-8000-000000000073',
+    status: 'PENDING', audit_request_id: 'request-recovery', created_at: '2026-09-04T12:00:00Z', completed_at: null,
+    recovery_state: 'MANUAL_REVIEW', recovery_diagnostic_code: 'ACCOUNT_PROVISIONING_MANUAL_REVIEW', recovery_epoch: 3,
+  };
+  const expected = { commandType: 'TOKEN_ACCOUNT_CREATE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: command.target_resource_id };
+  assert.equal(validGovernedTokenCommandResult(command, expected), true);
+  assert.throws(() => requireGovernedTokenCommandResult(command, expected), (error) => error.code === 'COMMAND_RESULT_UNKNOWN' && error.commandResult === command);
+  const payload = { reason: 'create after checking owner authority and capacity', precheck: { ...impact, action: 'TOKEN_ACCOUNT_CREATE', evidence: { ...impact.evidence, resource_type: 'TOKEN_ACCOUNT', resource_id: command.target_resource_id } } };
+  const classified = await executeHighRiskCommand({ current: { command: null, inflight: false } }, payload, async () => requireGovernedTokenCommandResult(command, expected), () => '0199a300-0001-7000-8000-000000000076');
+  assert.equal(classified.error.commandResult, command, 'trusted manual-review result survives failure classification');
+  assert.equal(validGovernedTokenCommandResult({ ...command, recovery_epoch: null }, expected), false);
+  assert.equal(validGovernedTokenCommandResult({ ...command, recovery_diagnostic_code: 'CREDENTIAL_SECRET_LEAK' }, expected), false);
+
+  const action = {
+    action_id: '0199a300-0001-7000-8000-000000000074', command_reference: command.command_reference, command_type: 'TOKEN_ACCOUNT_CREATE', action: 'REQUEUE', status: 'SUCCEEDED',
+    recovery_state: 'PENDING', recovery_epoch: 4, stable_error_code: null, audit_reference: '0199a300-0001-7000-8000-000000000075',
+    created_at: '2026-09-04T12:01:00Z', completed_at: '2026-09-04T12:01:01Z',
+  };
+  assert.equal(validTokenAccountRecoveryActionResult(action, { commandReference: command.command_reference, action: 'REQUEUE' }), true);
+  assert.equal(validTokenAccountRecoveryActionResult({ ...action, completed_at: null }), false);
+  assert.equal(validTokenAccountRecoveryActionResult({ ...action, secret: 'must-not-pass' }), false);
+  assert.equal(validTokenAccountRecoveryActionResult({ ...action, status: 'FAILED', recovery_epoch: null, recovery_state: 'MANUAL_REVIEW', stable_error_code: 'CREDENTIAL_SECRET_LEAK' }), false);
 });
 
 test('approval create and recovery responses preserve the complete frozen command and snapshots', () => {

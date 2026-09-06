@@ -512,34 +512,26 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, request CreateAc
 	if !validOwner(request) || !validShareScope(request.ShareScope) || request.ManagementMode != "PLATFORM" || request.WalletID == uuid.Nil || request.CreatedBy == uuid.Nil || request.Name == "" || request.DefaultPriority < 0 || request.DefaultPriority > 10000 {
 		return TokenAccount{}, ErrForbidden
 	}
-	now := r.now()
-	account := TokenAccount{ID: uuid.Must(uuid.NewV7()), OwnerType: request.OwnerType, OwnerID: request.OwnerID, OwnerOrganization: request.OwnerOrganization, OwnerUnit: request.OwnerUnit, WalletID: request.WalletID, Name: request.Name, Status: "ACTIVE", ShareScope: request.ShareScope, DefaultPriority: request.DefaultPriority, ManagementMode: request.ManagementMode}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return TokenAccount{}, err
 	}
 	defer tx.Rollback(ctx)
-	if request.OwnerUnit != nil && request.OwnerOrganization != nil {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "organization-unit:"+request.OwnerOrganization.String()+":"+request.OwnerUnit.String()); err != nil {
-			return TokenAccount{}, err
-		}
-		var lifecycleStatus string
-		err := tx.QueryRow(ctx, `SELECT status FROM organization_unit_lifecycle_states WHERE organization_id=$1 AND unit_id=$2`, *request.OwnerOrganization, *request.OwnerUnit).Scan(&lifecycleStatus)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return TokenAccount{}, err
-		}
-		if err == nil && lifecycleStatus != "ACTIVE" {
-			return TokenAccount{}, ErrForbidden
-		}
+	if err = lockTokenAccountOwner(ctx, tx, request.OwnerType, request.OwnerID); err != nil {
+		return TokenAccount{}, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,owner_organization_id,owner_unit_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8,$9,$10,$10,$11)`, account.ID, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit, account.WalletID, account.Name, account.DefaultPriority, request.CreatedBy, now, account.ManagementMode)
-	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO token_share_policies(token_account_id,scope,owner_organization_id,owner_unit_id,updated_at) VALUES($1,$2,$3,$4,$5)`, account.ID, account.ShareScope, account.OwnerOrganization, account.OwnerUnit, now)
+	if err = lockTokenAccountOwnerCapPolicy(ctx, tx); err != nil {
+		return TokenAccount{}, err
 	}
+	capacity, err := loadTokenAccountOwnerCapacity(ctx, tx, request.OwnerType, request.OwnerID)
 	if err != nil {
 		return TokenAccount{}, err
 	}
-	if err := recordTokenAudit(ctx, tx, request.CreatedBy, "TOKEN_ACCOUNT_CREATED", "TOKEN_ACCOUNT", account.ID, `jsonb_build_object('owner_type',$6,'owner_id',$7,'management_mode',$8)`, account.OwnerType, account.OwnerID, account.ManagementMode); err != nil {
+	if capacity.Count >= capacity.Policy.MaxPerOwner {
+		return TokenAccount{}, ErrTokenAccountCapReached
+	}
+	account, err := createAccountEffect(ctx, tx, request, r.now())
+	if err != nil {
 		return TokenAccount{}, err
 	}
 	return account, tx.Commit(ctx)

@@ -5,6 +5,7 @@ import test from 'node:test';
 import { AdminPlatformClient } from '../../../pinvou3-app/src/features/account-platform/admin-client.js';
 import { adminTokenResourceFormsGateEnabled, normalizeAdminModelTokenEntry, readAdminModelTokenQuery } from '../../../pinvou3-app/src/features/account-platform/admin-navigation.js';
 import { executeStableRouteCommand, ownerCandidateQuery, routeEditorVisible, serverRouteHealth, stableRouteChange, stableRouteChoices, tokenAccountCreateInput, tokenResourceAccess } from '../../../pinvou3-app/src/features/account-platform/admin-token-resource-state.js';
+import { governedTokenEnvelope, requireGovernedTokenPrecheck } from '../../../pinvou3-app/src/features/account-platform/admin-high-risk-action-state.js';
 
 const modelID = '0199a100-0001-7000-8000-000000000101';
 const protocolID = '0199a100-0001-7000-8000-000000000102';
@@ -42,6 +43,22 @@ test('owner selection pages user, organization, and unit authorities and builds 
   });
   assert.equal(tokenAccountCreateInput({ candidate: unit, organization: null, name: '生产路由' }), null);
   assert.equal(tokenAccountCreateInput({ candidate: { ...unit, status: 'DISABLED' }, organization: { id: organizationID, type: 'ORGANIZATION' }, name: '生产路由' }), null);
+});
+
+test('account create and status changes use governed prechecks and stable command envelopes', async () => {
+  const dependencies = Object.fromEntries(['routes', 'healthy_routes', 'provisionings', 'ready_provisionings', 'active_leases', 'inflight_requests', 'active_sessions', 'alternative_credentials', 'alternative_accounts', 'affected_coverage_tuples', 'remaining_ready_coverage', 'coverage_gaps'].map((key) => [key, 0]));
+  const precheck = {
+    action: 'TOKEN_ACCOUNT_CREATE', blockers: [], precheck_fingerprint: 'a'.repeat(64), requires_cas_revalidation: true,
+    snapshot_semantics: 'INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS', token_observed_at: '2026-09-05T12:00:00Z',
+    evidence: { resource_type: 'TOKEN_ACCOUNT', resource_id: modelID, current_status: 'CREATABLE', current_version: { evidence_etag: `"impact-${'b'.repeat(64)}"`, evidence_set_sha256: 'b'.repeat(64) }, dependencies, observed_at: '2026-09-05T12:00:00Z' },
+    expected_versions: { owner_type: 'USER', owner_id: modelID, owner_authorization_version: 9, owner_account_count: 19, owner_account_cap: 20, owner_account_cap_policy_version: 2, creation_version: 0 },
+  };
+  assert.equal(requireGovernedTokenPrecheck(precheck, { commandType: 'TOKEN_ACCOUNT_CREATE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: modelID }), precheck);
+  const envelope = await governedTokenEnvelope({ commandType: 'TOKEN_ACCOUNT_CREATE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: modelID, reason: 'create the reviewed account', impact: precheck, command: { owner_type: 'USER', owner_id: modelID, owner_organization_id: null, owner_unit_id: null, name: 'Primary', share_scope: 'OWNER_UNIT_ONLY', default_priority: 100 } });
+  assert.equal(envelope.command_type, 'TOKEN_ACCOUNT_CREATE');
+  assert.equal(envelope.expected_versions.precheck_fingerprint, precheck.precheck_fingerprint);
+  assert.match(envelope.expected_versions.request_fingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(Object.hasOwn(envelope.command, 'authorization_version'), false);
 });
 
 test('stable route selector emits stable IDs and never accepts health, upstream, or display text', () => {
@@ -99,6 +116,9 @@ test('owner and route deep links remain stable while revoked detail state is nor
   assert.deepEqual(clean.updates, {});
   const revoked = normalizeAdminModelTokenEntry('tokenResources', ['models'], true, location, ['platform.models.read']);
   assert.equal(revoked.updates.token_account_id, null);
+	const legacyRouteHealth = normalizeAdminModelTokenEntry('tokenResources', ['tokenResources'], true, location, ['platform.tokens.read', 'platform.tokens.manage'], { tokenResourceFormsEnabled: true, tokenDetailsEnabled: false });
+	assert.equal(legacyRouteHealth.updates.token_account_id, undefined);
+	assert.equal(legacyRouteHealth.updates.token_detail_tab, 'routes');
   assert.equal(revoked.updates.owner_candidate_q, null);
 });
 
@@ -175,6 +195,10 @@ test('Token resource dialogs are keyboard-contained, translated, and collapse at
   assert.match(workspace, /access\.requestOwnerCandidates && ownerQuery\.owner_type/);
   assert.match(workspace, /showRouteDialog && state\.item && <RouteDialog/);
   assert.match(workspace, /if \(!access\.showRouteWrite\) setRouteDialog\(false\)/);
+	assert.match(workspace, /command_type: 'TOKEN_ACCOUNT_CREATE'/);
+	assert.match(workspace, /command_type: 'TOKEN_ACCOUNT_STATUS_CHANGE'/);
+	assert.doesNotMatch(workspace, /client\.createTokenAccount\(input\)/);
+	assert.doesNotMatch(workspace, /client\.setTokenAccountStatus\(/);
   assert.doesNotMatch(workspace, /route\.(?:upstream|provider|credential_secret)/);
   assert.match(styles, /@media\(max-width:760px\)[\s\S]*\.adm-token-dialog-grid,[^\n]*grid-template-columns:1fr/);
   for (const marker of ['candidateAborted', 'modelAborted', 'replaceCount', 'routeCalls', 'Admin Token resources UI smoke passed']) assert.ok(runtimeSmoke.includes(marker));

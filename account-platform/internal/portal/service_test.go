@@ -756,8 +756,8 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-policies") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/approval-requests/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests/"+userID+"/actions/decide") {
 		t.Fatal("approval workflow paths must be allowlisted")
 	}
-	if !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts/"+userID) || !tokenAdminPathAllowed(http.MethodPut, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodDelete, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/usage-requests/"+userID) {
-		t.Fatal("admin portal must expose documented Token reads, creation, and the APT-125 v1 route compatibility contract")
+	if tokenAdminPathAllowed(http.MethodPost, "/admin/v1/token-accounts") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts/"+userID) || !tokenAdminPathAllowed(http.MethodPut, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodDelete, "/admin/v1/token-accounts/"+userID+"/routes") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/usage-requests/"+userID) {
+		t.Fatal("admin portal must expose Token reads and the APT-125 PRE route contract without exposing direct account creation")
 	}
 	for _, blocked := range []struct{ method, resource string }{
 		{http.MethodPatch, "/admin/v1/token-accounts/" + userID + "/status"},
@@ -775,6 +775,9 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	}
 	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/protocols") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/formulas/"+userID+"/preview") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/commands:precheck") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/commands") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/commands/"+userID) {
 		t.Fatal("admin portal must expose governed protocol/formula reads, prechecks, commands, and recovery")
+	}
+	if !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/commands/by-idempotency-key") || !tokenAdminPathAllowed(http.MethodPost, "/admin/v1/commands/"+userID+"/recovery-actions") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/commands/"+userID+"/recovery-actions/by-idempotency-key") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/commands/"+userID+"/recovery-actions/"+memberID) {
+		t.Fatal("Token Account provisioning recovery paths must remain narrowly allowlisted")
 	}
 	if tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols") || tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/publish") || tokenAdminPathAllowed(http.MethodPost, "/admin/v1/protocols/"+userID+"/formulas") || tokenAdminPathAllowed(http.MethodPost, "/admin/v1/formulas/"+userID+"/publish") {
 		t.Fatal("legacy direct protocol/formula writes must not remain exposed")

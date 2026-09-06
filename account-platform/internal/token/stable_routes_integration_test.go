@@ -262,7 +262,11 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 		if legacyResponse.Code != http.StatusGone {
 			t.Fatalf("active governance did not retire v1 HTTP contract: status=%d body=%s", legacyResponse.Code, legacyResponse.Body.String())
 		}
-		loaded, err := migrations.Load("../../migrations/token")
+		var schema string
+		if err := repository.pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := loadTokenIntegrationMigrations("../../migrations/token", schema)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -297,7 +301,7 @@ INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normaliz
 		if _, err = connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := migrations.Load("../../migrations/token")
+		loaded, err := loadTokenIntegrationMigrations("../../migrations/token", schema)
 		if err != nil {
 			t.Fatal(err)
 		}

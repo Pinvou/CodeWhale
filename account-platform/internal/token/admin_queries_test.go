@@ -168,6 +168,7 @@ func TestOwnerCandidateNormalizationUsesNFKCAndUnicodeCaseFold(t *testing.T) {
 
 func TestOwnerCandidateAuthorityReceivesOrganizationFilterAndServiceAuth(t *testing.T) {
 	organizationID := uuid.New()
+	candidateID := uuid.New()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" {
 			t.Fatal("missing service authorization")
@@ -175,7 +176,7 @@ func TestOwnerCandidateAuthorityReceivesOrganizationFilterAndServiceAuth(t *test
 		if r.URL.Query().Get("actor_issuer") != "https://issuer.example" || r.URL.Query().Get("actor_subject") != "admin" || r.URL.Query().Get("owner_type") != "UNIT" || r.URL.Query().Get("organization_id") != organizationID.String() {
 			t.Fatalf("unexpected authority query: %s", r.URL.RawQuery)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": uuid.New(), "type": "UNIT", "display_label": "研发", "status": "ACTIVE"}}, "next_cursor": nil, "has_more": false})
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": candidateID, "type": "UNIT", "display_label": "研发", "status": "ACTIVE"}}, "next_cursor": nil, "has_more": false, "authorization_version": 7, "owner_versions": map[string]int64{candidateID.String(): 3}})
 	}))
 	defer server.Close()
 	directory, err := NewHTTPOwnerCandidateDirectory(server.URL, "legacy-service-token")
@@ -190,13 +191,17 @@ func TestOwnerCandidateAuthorityReceivesOrganizationFilterAndServiceAuth(t *test
 	if err != nil || len(items) != 1 || items[0].Type != "UNIT" {
 		t.Fatalf("items=%v err=%v", items, err)
 	}
+	encoded, err := json.Marshal(items[0])
+	if err != nil || bytes.Contains(encoded, []byte("authorization_version")) {
+		t.Fatalf("owner candidate leaked internal authorization version: %s err=%v", encoded, err)
+	}
 }
 
 func TestOwnerCandidateAuthorityFailsClosedForNonSelectableLifecycles(t *testing.T) {
 	for _, status := range []string{"REPAIR_REQUIRED", "CLOSING", "ANONYMIZED", "DELETION_PENDING", "UNKNOWN"} {
 		t.Run(status, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": uuid.New(), "type": "USER", "display_label": "excluded", "status": status}}, "has_more": false})
+				_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{"id": uuid.New(), "type": "USER", "display_label": "excluded", "status": status}}, "has_more": false, "authorization_version": 7})
 			}))
 			defer server.Close()
 			directory, err := NewHTTPOwnerCandidateDirectory(server.URL, "service-token")
@@ -211,6 +216,29 @@ func TestOwnerCandidateAuthorityFailsClosedForNonSelectableLifecycles(t *testing
 				t.Fatalf("status=%s err=%v", status, err)
 			}
 		})
+	}
+}
+
+func TestOwnerCandidateAuthorityRejectsAuthorizationVersionDriftAcrossPages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		version := int64(7)
+		candidateID := uuid.New()
+		response := map[string]any{"items": []map[string]any{{"id": candidateID, "type": "USER", "display_label": "candidate", "status": "ACTIVE"}}, "owner_versions": map[string]int64{candidateID.String(): 2}, "has_more": true, "next_cursor": "page-2", "authorization_version": version}
+		if r.URL.Query().Get("cursor") == "page-2" {
+			response["has_more"] = false
+			response["next_cursor"] = nil
+			response["authorization_version"] = int64(8)
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer server.Close()
+	directory, err := NewHTTPOwnerCandidateDirectory(server.URL, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = directory.Scan(context.Background(), identity.Principal{Issuer: "https://issuer.example", Subject: "admin"}, "USER", nil, func([]AdminOwnerCandidate) error { return nil })
+	if !errors.Is(err, ErrCatalogVersionConflict) {
+		t.Fatalf("authorization version drift err=%v", err)
 	}
 }
 

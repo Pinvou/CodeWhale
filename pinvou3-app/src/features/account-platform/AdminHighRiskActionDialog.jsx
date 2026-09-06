@@ -27,7 +27,7 @@ function ImpactFacts({ impact, copy }) {
   </>;
 }
 
-export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = {}, execute, recover, onClose, onCompleted, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
+export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = {}, execute, recover, recoverByIdempotencyKey, onClose, onCompleted, onManualReview, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
   const root = useRef(null);
   const first = useRef(null);
   const previousFocus = useRef(document.activeElement);
@@ -65,7 +65,7 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
   const normalizedReason = reason.trim();
   const reasonLength = [...normalizedReason].length;
   const frozenReference = command.current?.command?.unknown ? command.current.command.error?.commandReference : '';
-  const recoveryBlocked = state.unknown && (!recover || !frozenReference);
+  const recoveryBlocked = state.unknown && (!(recover && frozenReference) && !recoverByIdempotencyKey);
   const malformedCatalogDiff = Object.hasOwn(impact || {}, 'catalog_diff') && !validateCatalogDifference(impact.catalog_diff);
   const blocked = (impactRequired && (!impact || impact.blockers?.length > 0 || malformedCatalogDiff)) || state.loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmed;
   const closeDialog = () => {
@@ -80,13 +80,17 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
     const payload = { reason: normalizedReason, precheck: impact, details: payloadDetails };
     executionController.current = new globalThis.AbortController();
     const commandReference = frozenReference;
-    if (state.unknown && (!commandReference || !recover)) return;
+    if (state.unknown && (!(commandReference && recover) && !recoverByIdempotencyKey)) return;
     const recovering = state.unknown;
     const send = recovering
       ? async () => {
-					try { return await recover(commandReference, executionController.current.signal, command.current?.command?.payload); }
+					try {
+						if (commandReference && recover) return await recover(commandReference, executionController.current.signal, command.current?.command?.payload);
+						return await recoverByIdempotencyKey(command.current?.command?.idempotencyKey, executionController.current.signal, command.current?.command?.payload);
+					}
           catch (error) {
             if (error?.finalResult === true) throw error;
+						if (error?.status === 404 && error?.code === 'NOT_FOUND') throw error;
             throw Object.assign(new Error('command recovery remains unknown'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', requestID: error?.requestID || '', commandReference });
           }
         }
@@ -98,10 +102,14 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
       setState({ loading: false, busy: false, error: null, commandError: false, unknown: false, terminal: true, success: result.value || {} });
       return;
     }
+		if (result.error?.commandResult?.recovery_state === 'MANUAL_REVIEW') {
+			onManualReview?.(result.error.commandResult);
+			return;
+		}
     setState({ loading: false, busy: false, error: result.error, commandError: true, unknown: result.command.unknown, terminal: result.command.terminal, success: '' });
   };
   const retryPrecheck = () => {
-    resetHighRiskCommandAfterSafeFailure(command);
+    resetHighRiskCommandAfterSafeFailure(command, { preserveKey: action.impactAction === 'TOKEN_ACCOUNT_CREATE' });
     setImpact(null);
     setState((current) => ({ ...current, error: null, loading: Boolean(impactLoaderRef.current) }));
     setImpactGeneration((value) => value + 1);

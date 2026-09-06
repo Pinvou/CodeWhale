@@ -26,29 +26,9 @@ func (r *PostgresRepository) SetAccountStatus(ctx context.Context, accountID uui
 		return TokenAccount{}, err
 	}
 	defer tx.Rollback(ctx)
-	account, err := getTokenAccount(ctx, tx, accountID, true)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return TokenAccount{}, ErrNotFound
-	}
+	account, _, err := setAccountStatusEffect(ctx, tx, accountID, status, actorID, reason, r.now())
 	if err != nil {
 		return TokenAccount{}, err
-	}
-	if account.ManagementMode != "PLATFORM" || account.Status == "FROZEN" {
-		return TokenAccount{}, ErrForbidden
-	}
-	if account.Status != status {
-		now := r.now()
-		command, err := tx.Exec(ctx, `UPDATE token_accounts SET status=$2,status_changed_by=$3,status_change_reason=$4,updated_at=$5 WHERE id=$1 AND status<>'FROZEN'`, accountID, status, actorID, reason, now)
-		if err != nil {
-			return TokenAccount{}, err
-		}
-		if command.RowsAffected() != 1 {
-			return TokenAccount{}, ErrForbidden
-		}
-		account.Status = status
-		if err := recordTokenAudit(ctx, tx, actorID, "TOKEN_ACCOUNT_STATUS_CHANGED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('status',$6,'reason',$7)`, status, reason); err != nil {
-			return TokenAccount{}, err
-		}
 	}
 	return account, tx.Commit(ctx)
 }

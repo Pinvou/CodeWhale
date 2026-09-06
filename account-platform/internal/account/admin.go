@@ -71,6 +71,7 @@ type TokenOwnerCandidate struct {
 	Type         string    `json:"type"`
 	DisplayLabel string    `json:"display_label"`
 	Status       string    `json:"status"`
+	OwnerVersion int64     `json:"-"`
 }
 
 type tokenOwnerCandidateCursor struct {
@@ -111,6 +112,7 @@ type TokenOwnerCandidatePage struct {
 	HasMore              bool                  `json:"has_more"`
 	Limit                int                   `json:"limit"`
 	AuthorizationVersion int64                 `json:"authorization_version"`
+	OwnerVersions        map[string]int64      `json:"owner_versions"`
 	next                 *tokenOwnerCandidateCursor
 }
 

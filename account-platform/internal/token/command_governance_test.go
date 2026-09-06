@@ -65,6 +65,12 @@ func TestNormalizeTokenCommandRejectsUnsafeOrIncompleteInput(t *testing.T) {
 		TargetResourceID: "01a00000-0000-7000-8000-000000000001", PrecheckFingerprint: strings.Repeat("a", 64),
 		ExpectedVersions: json.RawMessage(`{"token_account_id":"01a00000-0000-7000-8000-000000000001","expected_account_version":4,"target_status":"DISABLED","precheck_fingerprint":"` + strings.Repeat("a", 64) + `","request_fingerprint":"` + strings.Repeat("b", 64) + `"}`), Command: json.RawMessage(`{"target_status":"DISABLED"}`),
 	}
+	var expected map[string]any
+	if err := json.Unmarshal(base.ExpectedVersions, &expected); err != nil {
+		t.Fatal(err)
+	}
+	expected["request_fingerprint"] = governedRequestFingerprint(base, expected)
+	base.ExpectedVersions, _ = json.Marshal(expected)
 	if _, _, _, _, err := normalizeTokenCommand(base, "stable-command-key-0001", ""); err != nil {
 		t.Fatalf("valid command was rejected: %v", err)
 	}
@@ -226,6 +232,105 @@ func TestTokenCommandActorUsesAccountAuthorityForNonUUIDSubject(t *testing.T) {
 	}
 }
 
+func TestAccountCreateCommandRequiresOneAtomicDualPermissionSnapshot(t *testing.T) {
+	stableActor := uuid.New()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			AllPermissions []string `json:"all_permissions"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.AllPermissions) != 2 || body.AllPermissions[0] != "platform.tokens.manage" || body.AllPermissions[1] != "platform.tokens.owner-candidates.read" {
+			t.Fatalf("unexpected Account authorization request: %#v", body)
+		}
+		w.Header().Set("X-Authorization-Version", "19")
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed": true, "user_id": stableActor})
+	}))
+	t.Cleanup(server.Close)
+	client, err := authorization.NewClient(server.URL, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor, version, err := (&Service{authorizer: client}).authorizedTokenCommandActor(context.Background(), identity.Principal{Issuer: "https://issuer.example", Subject: "operator"}, "TOKEN_ACCOUNT_CREATE")
+	if err != nil || actor != stableActor || version != 19 {
+		t.Fatalf("actor=%s version=%d err=%v", actor, version, err)
+	}
+}
+
+func TestModelAccountCommandCanonicalizationRejectsTargetDriftAndExtraFields(t *testing.T) {
+	modelID, ownerID, accountID := uuid.New(), uuid.New(), uuid.New()
+	commands := []TokenCommandEnvelope{
+		{CommandType: "TOKEN_MODEL_DRAFT_SAVE", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Command: mustMarshalJSON(t, governedModelDraftCommand{ModelID: modelID, ExpectedCatalogVersion: 2, ExpectedDraftVersion: 0, DisplayName: "Model", Aliases: []string{}, ProtocolCode: "CHAT", ProtocolVersion: 1, ContextLength: 4096, MaximumOutputTokens: 1024, SupportedModalities: []string{"text"}, TokenizerVersion: "v1"})},
+		{CommandType: "TOKEN_MODEL_PUBLISH", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Command: json.RawMessage(`{"model_id":"` + modelID.String() + `"}`)},
+		{CommandType: "TOKEN_ACCOUNT_CREATE", TargetResourceType: "TOKEN_ACCOUNT", TargetResourceID: ownerID.String(), Command: mustMarshalJSON(t, governedAccountCreateCommand{OwnerType: "USER", OwnerID: ownerID, Name: "Primary", ShareScope: "OWNER_UNIT_ONLY", DefaultPriority: 100})},
+		{CommandType: "TOKEN_ACCOUNT_STATUS_CHANGE", TargetResourceType: "TOKEN_ACCOUNT", TargetResourceID: accountID.String(), Command: json.RawMessage(`{"target_status":"disabled"}`)},
+	}
+	for _, envelope := range commands {
+		canonical, err := canonicalizeModelAccountEnvelope(envelope)
+		if err != nil {
+			t.Fatalf("%s canonicalization failed: %v", envelope.CommandType, err)
+		}
+		reordered := envelope
+		var value map[string]any
+		if json.Unmarshal(canonical.Command, &value) != nil {
+			t.Fatal("canonical command is not JSON")
+		}
+		reordered.Command = mustMarshalJSON(t, value)
+		again, err := canonicalizeModelAccountEnvelope(reordered)
+		if err != nil || string(again.Command) != string(canonical.Command) {
+			t.Fatalf("%s did not canonicalize equivalently: %s / %s / %v", envelope.CommandType, canonical.Command, again.Command, err)
+		}
+		extra := envelope
+		value["unexpected"] = true
+		extra.Command = mustMarshalJSON(t, value)
+		if _, err := canonicalizeModelAccountEnvelope(extra); !errors.Is(err, ErrTokenCommandInvalid) {
+			t.Fatalf("%s accepted an extra field: %v", envelope.CommandType, err)
+		}
+		drift := envelope
+		if envelope.CommandType == "TOKEN_ACCOUNT_STATUS_CHANGE" {
+			drift.TargetResourceID = "not-a-uuid"
+		} else {
+			drift.TargetResourceID = uuid.NewString()
+		}
+		if _, err := canonicalizeModelAccountEnvelope(drift); !errors.Is(err, ErrTokenCommandInvalid) {
+			t.Fatalf("%s accepted an invalid or drifting target: %v", envelope.CommandType, err)
+		}
+	}
+}
+
+func TestCatalogRollbackApprovedEnvelopeIsClosedAndBindsEightFacts(t *testing.T) {
+	source := int64(7)
+	critical := governedCatalogRollbackCritical{
+		CurrentCatalogVersion: 9, SourceCatalogVersion: source,
+		CatalogDiffFingerprint: strings.Repeat("a", 64), BillingPriceVersion: 12,
+		RouteSetFingerprint: strings.Repeat("b", 64), ProvisioningSetFingerprint: strings.Repeat("c", 64),
+		InflightRequestFingerprint: strings.Repeat("d", 64), PolicyVersion: 2,
+	}
+	envelope := TokenCommandEnvelope{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", TargetResourceType: "MODEL_CATALOG", TargetResourceID: "7", Command: json.RawMessage(`{"source_catalog_version":7}`), ExpectedVersions: mustMarshalJSON(t, critical)}
+	command, parsed, err := parseGovernedCatalogRollback(envelope)
+	if err != nil || command.SourceCatalogVersion != source || !sameGovernedCatalogRollbackCritical(critical, parsed) {
+		t.Fatalf("command=%+v critical=%+v err=%v", command, parsed, err)
+	}
+	for name, mutate := range map[string]func(*TokenCommandEnvelope){
+		"wrong target": func(item *TokenCommandEnvelope) { item.TargetResourceID = "8" },
+		"extra command": func(item *TokenCommandEnvelope) {
+			item.Command = json.RawMessage(`{"source_catalog_version":7,"force":true}`)
+		},
+		"missing fact": func(item *TokenCommandEnvelope) {
+			item.ExpectedVersions = json.RawMessage(`{"current_catalog_version":9}`)
+		},
+		"wrong policy": func(item *TokenCommandEnvelope) {
+			changed := critical
+			changed.PolicyVersion = 1
+			item.ExpectedVersions = mustMarshalJSON(t, changed)
+		},
+	} {
+		candidate := envelope
+		mutate(&candidate)
+		if _, _, err := parseGovernedCatalogRollback(candidate); !errors.Is(err, ErrTokenCommandInvalid) {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
+	}
+}
+
 func TestApprovedTokenExecutorRejectsCrossDomainIdentityAndRequiresStableExecutionKey(t *testing.T) {
 	approvalID := uuid.New()
 	fingerprint := strings.Repeat("a", 64)
@@ -307,26 +412,36 @@ func TestApprovedExecutorProductionRouteRequiresServiceAuthThenFailsPreActivatio
 func TestLegacyDirectSelectionPreservesPreActivationAndFailsClosedAtActive(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	for _, scenario := range []struct {
-		name       string
-		reader     TokenCommandGovernanceActivationReader
-		wantStatus int
-		wantNext   bool
+		name         string
+		reader       TokenCommandGovernanceActivationReader
+		approvalCode int
+		auditCode    int
+		wantNext     bool
 	}{
-		{name: "record absent", reader: nil, wantStatus: http.StatusNoContent, wantNext: true},
-		{name: "pre activation", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "PRE_ACTIVATION"}}, wantStatus: http.StatusNoContent, wantNext: true},
-		{name: "active", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}}, wantStatus: http.StatusForbidden},
-		{name: "safe rollback", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "SAFE_ROLLBACK", Epoch: 2}}, wantStatus: http.StatusServiceUnavailable},
-		{name: "reader error", reader: testTokenGovernanceActivationReader{err: errors.New("read failed")}, wantStatus: http.StatusServiceUnavailable},
+		{name: "record absent", reader: nil, approvalCode: http.StatusNoContent, auditCode: http.StatusNoContent, wantNext: true},
+		{name: "pre activation", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "PRE_ACTIVATION"}}, approvalCode: http.StatusNoContent, auditCode: http.StatusNoContent, wantNext: true},
+		{name: "active", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}}, approvalCode: http.StatusForbidden, auditCode: http.StatusGone},
+		{name: "safe rollback", reader: testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "SAFE_ROLLBACK", Epoch: 2}}, approvalCode: http.StatusServiceUnavailable, auditCode: http.StatusServiceUnavailable},
+		{name: "reader error", reader: testTokenGovernanceActivationReader{err: errors.New("read failed")}, approvalCode: http.StatusServiceUnavailable, auditCode: http.StatusServiceUnavailable},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			service := &Service{commandGovernanceActivation: scenario.reader}
-			router := gin.New()
-			next := false
-			router.POST("/legacy", service.selectLegacyTokenDirect(), func(c *gin.Context) { next = true; c.Status(http.StatusNoContent) })
-			response := httptest.NewRecorder()
-			router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/legacy", nil))
-			if response.Code != scenario.wantStatus || next != scenario.wantNext {
-				t.Fatalf("status=%d next=%v", response.Code, next)
+			for _, commandClass := range []struct {
+				name string
+				kind legacyTokenDirectClass
+				code int
+			}{
+				{name: "approval", kind: legacyTokenApprovalRequired, code: scenario.approvalCode},
+				{name: "audit", kind: legacyTokenAuditOnly, code: scenario.auditCode},
+			} {
+				router := gin.New()
+				next := false
+				router.POST("/legacy", service.selectLegacyTokenDirect(commandClass.kind), func(c *gin.Context) { next = true; c.Status(http.StatusNoContent) })
+				response := httptest.NewRecorder()
+				router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/legacy", nil))
+				if response.Code != commandClass.code || next != scenario.wantNext {
+					t.Fatalf("%s status=%d next=%v", commandClass.name, response.Code, next)
+				}
 			}
 		})
 	}

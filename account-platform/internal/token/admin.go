@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -317,46 +318,9 @@ func (s *Service) adminTokenAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminCreateTokenAccount(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		OwnerType         string     `json:"owner_type"`
-		OwnerID           uuid.UUID  `json:"owner_id"`
-		OwnerOrganization *uuid.UUID `json:"owner_organization_id"`
-		OwnerUnit         *uuid.UUID `json:"owner_unit_id"`
-		Name              string     `json:"name"`
-		ShareScope        string     `json:"share_scope"`
-		DefaultPriority   int        `json:"default_priority"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		return
-	}
-	body.OwnerType = strings.ToUpper(strings.TrimSpace(body.OwnerType))
-	body.ShareScope = strings.ToUpper(strings.TrimSpace(body.ShareScope))
-	body.Name = strings.TrimSpace(body.Name)
-	if body.DefaultPriority == 0 {
-		body.DefaultPriority = 100
-	}
-	request := CreateAccountRequest{OwnerType: body.OwnerType, OwnerID: body.OwnerID, OwnerOrganization: body.OwnerOrganization, OwnerUnit: body.OwnerUnit, Name: body.Name, ShareScope: body.ShareScope, DefaultPriority: body.DefaultPriority, ManagementMode: "PLATFORM", CreatedBy: tokenAdminActor(r)}
-	if !validOwner(request) || !validShareScope(request.ShareScope) || request.Name == "" || request.DefaultPriority < 0 || request.DefaultPriority > 10000 {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid platform Token Account scope", httpserver.RequestID(r.Context()))
-		return
-	}
-	walletOwnerType, ok := map[string]string{"USER": "PERSONAL", "ORG": "ORGANIZATION", "ORG_UNIT": "ORG_UNIT"}[body.OwnerType]
-	if !ok {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "unsupported Token Account owner type", httpserver.RequestID(r.Context()))
-		return
-	}
-	walletID, err := s.wallets.Ensure(r.Context(), walletOwnerType, body.OwnerID)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	request.WalletID = walletID
-	account, err := s.repository.CreateAccount(r.Context(), request)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusCreated, account)
+	// The immutable PRE endpoint remains routable for N-1 compatibility, but a
+	// new binary cannot create until APT-138 has activated the Saga worker.
+	api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_CREATE_NOT_ACTIVE", "Token Account creation is temporarily unavailable", httpserver.RequestID(r.Context()))
 }
 
 func adminUUID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {
@@ -1004,7 +968,34 @@ func (r *PostgresRepository) AdminRetryReconciliation(ctx context.Context, usage
 	return r.AdminUsageRequest(ctx, usageID)
 }
 
+var tokenAuditParameter = regexp.MustCompile(`\$([0-9]+)\b`)
+
 func recordTokenAudit(ctx context.Context, tx pgx.Tx, actorID uuid.UUID, action, resourceType string, resourceID uuid.UUID, summaryExpression string, summaryArguments ...any) error {
+	// jsonb_build_object accepts polymorphic values. PostgreSQL cannot infer an
+	// otherwise untyped placeholder during the production extended-protocol
+	// prepare step, so bind each audit argument's stable SQL type explicitly.
+	summaryExpression = tokenAuditParameter.ReplaceAllStringFunc(summaryExpression, func(parameter string) string {
+		position, _ := strconv.Atoi(parameter[1:])
+		if position < 6 || position-6 >= len(summaryArguments) {
+			return parameter
+		}
+		switch summaryArguments[position-6].(type) {
+		case uuid.UUID, *uuid.UUID:
+			return parameter + "::uuid"
+		case string, *string:
+			return parameter + "::text"
+		case int, int32, int64, *int64:
+			return parameter + "::bigint"
+		case bool, *bool:
+			return parameter + "::boolean"
+		case time.Time, *time.Time:
+			return parameter + "::timestamptz"
+		case json.RawMessage:
+			return parameter + "::jsonb"
+		default:
+			return parameter
+		}
+	})
 	arguments := []any{uuid.Must(uuid.NewV7()), actorID, action, resourceType, resourceID}
 	arguments = append(arguments, summaryArguments...)
 	arguments = append(arguments, time.Now().UTC())

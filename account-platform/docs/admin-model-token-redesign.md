@@ -458,6 +458,16 @@ T3请求只能由Token backend构造并以mode绑定证据来源。自动worker�
 
 Billing迁移使用`billing_wallet_receipt_deployer NOLOGIN` owner和独立`billing_migrator LOGIN NOINHERIT` migration URL；migrator仅显式assume现有Billing schema owner/deployer执行up/down，runtime `billing_service`不是owner成员，只拥有receipt SELECT/INSERT及受控PENDING→终态UPDATE。cutover顺序为全部create writer/worker quiesce、Billing000053、只向N Billing路由新端点并验capability、Token000029、policy bootstrap且新N create仍关闭、APT138 000030 ACTIVE并注册/证明worker ready，最后才只向N Token打开create。SAFE先关create再停新lease；旧N停写后不再恢复create。down严格反序；N-1 Billing不接新端点，任何receipt/reservation/result/audit/outbox历史或pending/manual-review引用都使对应down失败关闭并保留只读证据。
 
+APT-123-R2 实测审核补充：Account authority 响应增加 `owner_organization_id`（USER 为 null，ORGANIZATION 为自身 ID，ORG_UNIT 为 Account 权威所属组织）。ORG_UNIT 的 owner digest 绑定节点、所属组织、状态和版本；Token 的 T1、T3 与人工恢复均与命令/预占持久化归属比较，父组织非 ACTIVE 时不得 ALLOW，错配不得创建预占、钱包或账户。固定 request/JCS 向量保持不变。人工恢复 action 同时持久化操作者 expected 与 observed 授权版本、actor version/digest、owner version/digest，幂等范围为 operator + command reference + key。独立 MANUAL_REVIEW 队列提供服务端快照分页和操作者绑定游标，仅返回恢复引用与状态，不返回内部权威检查点或钱包信息。
+
+Token/Billing 的数据库和业务 schema 分别归 `token_schema_owner` / `billing_schema_owner`（NOLOGIN）所有，runtime 不得为这些 owner 的成员；migrator 显式 assume schema owner。DBA 预装扩展，旧迁移可临时获得 schema CREATE，000029/000053 在创建受保护对象后回收 runtime、PUBLIC 和对象 deployer 的 CREATE，运行期不得依靠 database owner 或 schema owner 的隐式 CREATE 权限。策略函数仅调用 pg_catalog 的散列和 UUID 原语，阻止 public 函数替换或 schema 劫持。
+
+APT-123-R2 回滚真实验收修订：影响预检的 `precheck_fingerprint` 仅绑定动作参数、Token 事实版本/依赖集合，以及 Billing 事实 revision、价格集合摘要和价格版本集合；独立快照的 `token_observed_at` / `billing_observed_at` 仅作为观测证据展示，不把重新读取的事务时间当作业务变更。审批后的首次执行对财务快照使用严格闭字段、类型与有效日期校验，并仅在事实等价比较中忽略 `billing_as_of`；原已审批快照和其观测时间仍冻结保留在审计中。生命周期生效时间、价格生效区间、租约/健康期限等业务时间仍参与各自事实摘要、业务校验与 CAS；实际版本、集合或动作改变仍须拒绝。
+
+APT-123-R2 草稿漂移数据库状态机修订：Account `000047_token_approval_draft_invalidation` 仅替换 `protect_submitted_approval_request` 函数，保留 000018 的全部既有状态边和不可变字段检查，增加唯一受限状态边：OLD.command_type 属于 `TOKEN_MODEL_LIFECYCLE_CHANGE / TOKEN_MODEL_CATALOG_ROLLBACK / TOKEN_CREDENTIAL_REVOKE`，OLD.status=DRAFT、NEW.status=INVALIDATED 且 NEW.invalidation_code=`AUTHORITATIVE_SNAPSHOT_CHANGED`。已有 service 的失效处理仍同事务记录状态事件，原审批命令及快照不得改写。选择限定三类命令而非全局放宽，因为当前只有这些 Token 权威 snapshot 提交流程需要该路径；其他审批领域状态迁移不在本任务范围。down 恢复原函数定义且不删除任何请求、快照或事件。验证包含正向漂移、其他命令/原因码拒绝、不可变命令篡改拒绝及 down 历史保留。
+
+本轮真实数据库验证同时修正执行实现细节：预检把纯观测钟当事实变化、审批 advisory lock 把含 NUL 的作用域字符串直接送入 PostgreSQL TEXT、UUID/text 混合 SQL 参数缺显式类型转换。锁作用域仍绑定相同主体/命令/幂等键，只将其 SHA-256 十六进制摘要作为锁参数；SQL 类型修正不改变领域事实或冻结历史。000047 原因码判断采用 null-safe 精确比较，NULL 不能借 SQL 三值逻辑放过非法状态边。
+
 ## 8. UI、可访问性与错误语义
 
 - 英文枚举在中文界面转换为“已发布、已弃用、可用、对话”等标签，原枚举可置于 Tooltip。

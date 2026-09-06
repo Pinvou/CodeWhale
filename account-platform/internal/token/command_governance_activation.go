@@ -101,7 +101,18 @@ func writeTokenCommandGovernanceInactive(ctx *gin.Context) {
 // selectLegacyTokenDirect keeps the immutable v1 path selected while no
 // activation reader is installed. Once APT-138 installs the persistent reader,
 // ACTIVE rejects human direct mutation and any unreadable state fails closed.
-func (s *Service) selectLegacyTokenDirect() gin.HandlerFunc {
+type legacyTokenDirectClass string
+
+const (
+	legacyTokenAuditOnly        legacyTokenDirectClass = "AUDIT_ONLY"
+	legacyTokenApprovalRequired legacyTokenDirectClass = "APPROVAL_REQUIRED"
+)
+
+func (s *Service) selectLegacyTokenDirect(classes ...legacyTokenDirectClass) gin.HandlerFunc {
+	class := legacyTokenApprovalRequired
+	if len(classes) == 1 {
+		class = classes[0]
+	}
 	return func(ctx *gin.Context) {
 		if s.commandGovernanceActivation == nil {
 			ctx.Next()
@@ -113,7 +124,11 @@ func (s *Service) selectLegacyTokenDirect() gin.HandlerFunc {
 			return
 		}
 		if activation.State == "ACTIVE" && activation.Epoch > 0 {
-			api.WriteError(ctx.Writer, http.StatusForbidden, "DIRECT_APPROVAL_COMMAND_FORBIDDEN", "submit this command through the approval workflow", httpserver.RequestID(ctx.Request.Context()))
+			if class == legacyTokenAuditOnly {
+				api.WriteError(ctx.Writer, http.StatusGone, "DIRECT_TOKEN_COMMAND_RETIRED", "use the governed Token command endpoint", httpserver.RequestID(ctx.Request.Context()))
+			} else {
+				api.WriteError(ctx.Writer, http.StatusForbidden, "DIRECT_APPROVAL_COMMAND_FORBIDDEN", "submit this command through the approval workflow", httpserver.RequestID(ctx.Request.Context()))
+			}
 			ctx.Abort()
 			return
 		}

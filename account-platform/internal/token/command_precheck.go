@@ -95,8 +95,11 @@ var directCommandPrecheckTypes = map[string]string{
 	"TOKEN_PROTOCOL_PUBLISH":           "PROTOCOL",
 	"TOKEN_FORMULA_DRAFT_CREATE":       "FORMULA",
 	"TOKEN_FORMULA_PUBLISH":            "FORMULA",
+	"TOKEN_MODEL_DRAFT_SAVE":           "MODEL",
 	"TOKEN_MODEL_PUBLISH":              "MODEL",
 	"TOKEN_MODEL_CATALOG_SYNC":         "MODEL_CATALOG",
+	"TOKEN_ACCOUNT_CREATE":             "TOKEN_ACCOUNT",
+	"TOKEN_ACCOUNT_STATUS_CHANGE":      "TOKEN_ACCOUNT",
 	"TOKEN_ROUTE_PROVISIONING_REPAIR":  "PROVISIONING",
 	"TOKEN_USAGE_RECONCILIATION_RETRY": "USAGE_REQUEST",
 	"TOKEN_CREDENTIAL_VALIDATE":        "PROVIDER_CREDENTIAL",
@@ -113,8 +116,16 @@ func (s *Service) adminTokenCommandPrecheck(w http.ResponseWriter, r *http.Reque
 	input.TargetResourceID = strings.TrimSpace(input.TargetResourceID)
 	expectedType, supported := directCommandPrecheckTypes[input.CommandType]
 	strictCatalogSync := input.CommandType != "TOKEN_MODEL_CATALOG_SYNC" || originalCommandType == "TOKEN_MODEL_CATALOG_SYNC" && originalResourceType == "MODEL_CATALOG" && originalResourceID == "CURRENT"
-	if !supported || !strictCatalogSync || input.TargetResourceType != expectedType || input.TargetResourceID == "" || containsSensitiveCommandField(input.Command) || validateOwnedCommandPrecheckTarget(input.CommandType, input.TargetResourceID, input.Command) != nil {
+	strictAccountCreate := input.CommandType != "TOKEN_ACCOUNT_CREATE" || originalCommandType == "TOKEN_ACCOUNT_CREATE"
+	if !supported || !strictCatalogSync || !strictAccountCreate || input.TargetResourceType != expectedType || input.TargetResourceID == "" || containsSensitiveCommandField(input.Command) || validateOwnedCommandPrecheckTarget(input.CommandType, input.TargetResourceID, input.Command) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND_PRECHECK", "the governed command precheck is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	// APT-123-R2 deliberately ships the Saga seam before APT-138 activates its
+	// worker. PRE must reject before identity/Account/Billing/database reads so
+	// a disabled capability cannot be used as an authority or existence oracle.
+	if input.CommandType == "TOKEN_ACCOUNT_CREATE" && !s.tokenAccountCreateReady {
+		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_CREATE_NOT_ACTIVE", "Token Account creation is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	principal, ok := identity.FromContext(r.Context())
@@ -132,9 +143,15 @@ func (s *Service) adminTokenCommandPrecheck(w http.ResponseWriter, r *http.Reque
 	result, err := s.buildTokenCommandPrecheck(r.Context(), input)
 	if err != nil {
 		status, code := http.StatusConflict, "COMMAND_PRECHECK_CHANGED"
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrTokenAccountPolicyUnavailable) {
+			status, code = http.StatusServiceUnavailable, "TOKEN_ACCOUNT_POLICY_UNAVAILABLE"
+		} else if errors.Is(err, ErrTokenAccountPolicyConfigMismatch) {
+			status, code = http.StatusServiceUnavailable, "TOKEN_ACCOUNT_POLICY_CONFIG_MISMATCH"
+		} else if errors.Is(err, ErrNotFound) {
 			status, code = http.StatusNotFound, "NOT_FOUND"
-		} else if errors.Is(err, ErrForbidden) || errors.Is(err, ErrTokenCommandInvalid) {
+		} else if errors.Is(err, ErrForbidden) {
+			status, code = http.StatusForbidden, "PERMISSION_DENIED"
+		} else if errors.Is(err, ErrTokenCommandInvalid) {
 			status, code = http.StatusBadRequest, "INVALID_COMMAND_PRECHECK"
 		} else if !errors.Is(err, ErrCatalogVersionConflict) && !errors.Is(err, ErrProtocolFormulaPrecheck) {
 			status, code = http.StatusServiceUnavailable, "COMMAND_PRECHECK_UNAVAILABLE"
@@ -177,6 +194,16 @@ func (s *Service) buildTokenCommandPrecheck(ctx context.Context, input TokenComm
 		if err != nil {
 			return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
 		}
+	}
+	if commandType == "TOKEN_MODEL_DRAFT_SAVE" || commandType == "TOKEN_ACCOUNT_CREATE" || commandType == "TOKEN_ACCOUNT_STATUS_CHANGE" {
+		canonical, err := canonicalizeModelAccountEnvelope(TokenCommandEnvelope{CommandType: commandType, TargetResourceID: resourceID, Command: input.Command})
+		if err != nil {
+			return TokenCommandPrecheckResult{}, ErrTokenCommandInvalid
+		}
+		input.Command = canonical.Command
+	}
+	if commandType == "TOKEN_ACCOUNT_CREATE" {
+		return s.buildAccountCreatePrecheck(ctx, input)
 	}
 	var snapshot commandPrecheckSnapshot
 	var observedAt time.Time
@@ -315,6 +342,22 @@ func validateOwnedCommandPrecheck(commandType string, raw json.RawMessage) error
 	case "TOKEN_MODEL_PUBLISH":
 		_, err := parseModelPublishCommand(raw)
 		return err
+	case "TOKEN_MODEL_DRAFT_SAVE":
+		// Target equality is checked by validateOwnedCommandPrecheckTarget.
+		var command governedModelDraftCommand
+		if decodeCommand(raw, &command) != nil || command.ModelID == uuid.Nil {
+			return ErrTokenCommandInvalid
+		}
+	case "TOKEN_ACCOUNT_CREATE":
+		var command governedAccountCreateCommand
+		if decodeCommand(raw, &command) != nil || command.OwnerID == uuid.Nil {
+			return ErrTokenCommandInvalid
+		}
+	case "TOKEN_ACCOUNT_STATUS_CHANGE":
+		var command governedAccountStatusCommand
+		if decodeCommand(raw, &command) != nil {
+			return ErrTokenCommandInvalid
+		}
 	case "TOKEN_MODEL_CATALOG_SYNC":
 		var command struct{}
 		if decodeCommand(raw, &command) != nil {
@@ -355,6 +398,18 @@ func validateOwnedCommandPrecheckTarget(commandType, targetID string, raw json.R
 		if err != nil || decodeCommand(raw, &command) != nil || command.CredentialID != id {
 			return ErrTokenCommandInvalid
 		}
+	}
+	if commandType == "TOKEN_MODEL_DRAFT_SAVE" {
+		_, err := parseGovernedModelDraft(targetID, raw)
+		return err
+	}
+	if commandType == "TOKEN_ACCOUNT_CREATE" {
+		_, err := parseGovernedAccountCreate(targetID, raw)
+		return err
+	}
+	if commandType == "TOKEN_ACCOUNT_STATUS_CHANGE" {
+		_, err := parseGovernedAccountStatus(targetID, raw)
+		return err
 	}
 	if commandType != "TOKEN_MODEL_PUBLISH" {
 		return nil
@@ -644,6 +699,70 @@ func loadCommandPrecheckSnapshot(ctx context.Context, tx pgx.Tx, commandType, ta
 			blockers = append(blockers, "FORMULA_DRAFT_CHANGED")
 		}
 		return commandPrecheckSnapshot{Status: formula.Status, ExpectedVersions: map[string]any{"formula_version_id": id, "expected_formula_version": formula.Version, "draft_etag": etag}, EvidenceValues: []string{formula.ProtocolDefinitionID.String(), formula.ProtocolCode, strconv.FormatInt(formula.Version, 10), formula.Status, etag, hex.EncodeToString(unitHash[:]), hex.EncodeToString(expressionHash[:]), formula.EvaluatorVersion}, Blockers: blockers}, nil
+	case "TOKEN_MODEL_DRAFT_SAVE":
+		command, err := parseGovernedModelDraft(targetID, raw)
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		var current, draftHead int64
+		var lifecycle string
+		if err = tx.QueryRow(ctx, `SELECT COALESCE(max(version),0) FROM model_catalog_versions`).Scan(&current); err != nil || current < 1 {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		}
+		if err = tx.QueryRow(ctx, `SELECT lifecycle_status FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2`, current, command.ModelID).Scan(&lifecycle); errors.Is(err, pgx.ErrNoRows) {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		} else if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		if err = tx.QueryRow(ctx, `SELECT COALESCE((SELECT draft_version FROM model_catalog_drafts WHERE model_id=$1),0)`, command.ModelID).Scan(&draftHead); err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		var protocolID uuid.UUID
+		var formulaCount int64
+		err = tx.QueryRow(ctx, `SELECT p.id,(SELECT count(*) FROM protocol_formula_versions f WHERE f.protocol_definition_id=p.id AND f.status='PUBLISHED') FROM protocol_definitions p WHERE p.protocol_code=$1 AND p.version=$2 AND p.status='PUBLISHED'`, command.ProtocolCode, command.ProtocolVersion).Scan(&protocolID, &formulaCount)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		}
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		blockers := []string{}
+		if command.ExpectedCatalogVersion != current || command.ExpectedDraftVersion != draftHead {
+			blockers = append(blockers, "MODEL_DRAFT_CHANGED")
+		}
+		if lifecycle == "REMOVED" {
+			blockers = append(blockers, "MODEL_REMOVED")
+		}
+		if formulaCount < 1 {
+			blockers = append(blockers, "FORMULA_MAPPING_MISSING")
+		}
+		return commandPrecheckSnapshot{Status: lifecycle, ExpectedVersions: map[string]any{"model_id": command.ModelID, "expected_catalog_version": current, "expected_draft_version": draftHead}, EvidenceValues: []string{command.ModelID.String(), strconv.FormatInt(current, 10), strconv.FormatInt(draftHead, 10), lifecycle, protocolID.String(), strconv.FormatInt(formulaCount, 10), modelAccountEvidenceFingerprint(string(raw))}, Blockers: blockers}, nil
+	case "TOKEN_ACCOUNT_STATUS_CHANGE":
+		command, err := parseGovernedAccountStatus(targetID, raw)
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		accountID, _ := uuid.Parse(targetID)
+		var status, mode string
+		var version int64
+		if err = tx.QueryRow(ctx, `SELECT status,management_mode,management_version FROM token_accounts WHERE id=$1`, accountID).Scan(&status, &mode, &version); errors.Is(err, pgx.ErrNoRows) {
+			return commandPrecheckSnapshot{}, ErrNotFound
+		} else if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		var routes, provisionings, leases, inflight int64
+		if err = tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM routing_policies WHERE token_account_id=$1 AND reference_status='RESOLVED'),(SELECT count(*) FROM route_provisionings WHERE active_token_account_id=$1),(SELECT count(*) FROM route_provisionings WHERE active_token_account_id=$1 AND lease_until>transaction_timestamp()),(SELECT count(*) FROM usage_requests WHERE token_account_id=$1 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING'))`, accountID).Scan(&routes, &provisionings, &leases, &inflight); err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		factSet, err := impactRowsFingerprint(ctx, tx, `SELECT value FROM (SELECT jsonb_build_array('ACCOUNT',id,status,management_version,updated_at)::text value FROM token_accounts WHERE id=$1 UNION ALL SELECT jsonb_build_array('ROUTE',id,route_version,route_generation,reference_status)::text FROM routing_policies WHERE token_account_id=$1 UNION ALL SELECT jsonb_build_array('PROVISIONING',id,status,desired_generation,actual_generation,lease_until)::text FROM route_provisionings WHERE active_token_account_id=$1 UNION ALL SELECT jsonb_build_array('USAGE',id,execution_status,execution_version)::text FROM usage_requests WHERE token_account_id=$1 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING')) facts ORDER BY value`, accountID)
+		if err != nil {
+			return commandPrecheckSnapshot{}, err
+		}
+		blockers := []string{}
+		if mode != "PLATFORM" || status == "FROZEN" || status == command.TargetStatus {
+			blockers = append(blockers, "TOKEN_ACCOUNT_STATUS_NOT_CHANGEABLE")
+		}
+		return commandPrecheckSnapshot{Status: status, ExpectedVersions: map[string]any{"token_account_id": accountID, "expected_account_version": version, "target_status": command.TargetStatus}, EvidenceValues: []string{accountID.String(), status, strconv.FormatInt(version, 10), command.TargetStatus, factSet, strconv.FormatInt(routes, 10), strconv.FormatInt(provisionings, 10), strconv.FormatInt(leases, 10), strconv.FormatInt(inflight, 10)}, Blockers: blockers}, nil
 	case "TOKEN_MODEL_PUBLISH":
 		modelID, err := uuid.Parse(targetID)
 		if err != nil || modelID == uuid.Nil {

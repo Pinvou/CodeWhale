@@ -137,7 +137,7 @@ func (s *Service) approvalCommandPrecheck(ctx context.Context, request ApprovalS
 		if command.TargetLifecycle == "REMOVED" && evidence.Dependencies.InflightRequests > 0 {
 			result.Blockers = append(result.Blockers, "INFLIGHT_REQUESTS_PRESENT")
 		}
-		finalizeImpactResult(&result, "target_status="+command.TargetLifecycle, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+command.EffectiveAt.UTC().Format(time.RFC3339Nano), "replacement_model_id="+valueUUID(command.ReplacementModelID))
+		finalizeImpactResult(&result, "target_status="+command.TargetLifecycle, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+command.EffectiveAt.UTC().Format(time.RFC3339Nano), "existing_session_cutoff_at="+valueTime(command.ExistingSessionCutoffAt), "replacement_model_id="+valueUUID(command.ReplacementModelID))
 	case "TOKEN_MODEL_CATALOG_ROLLBACK":
 		if request.TargetResourceType != "MODEL_CATALOG" {
 			return ApprovalSnapshotProjection{}, ErrTokenCommandInvalid

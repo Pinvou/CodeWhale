@@ -57,6 +57,9 @@ type TokenCommandResult struct {
 	AuditRequestID         string          `json:"audit_request_id"`
 	CreatedAt              time.Time       `json:"created_at"`
 	CompletedAt            *time.Time      `json:"completed_at,omitempty"`
+	RecoveryState          *string         `json:"recovery_state,omitempty"`
+	RecoveryDiagnosticCode *string         `json:"recovery_diagnostic_code,omitempty"`
+	RecoveryEpoch          *int64          `json:"recovery_epoch,omitempty"`
 }
 
 type tokenCommandSpec struct {
@@ -76,7 +79,7 @@ var tokenCommandSpecs = map[string]tokenCommandSpec{
 	"TOKEN_MODEL_LIFECYCLE_CHANGE":     {[]string{"platform.models.lifecycle.request"}, true, true, nil},
 	"TOKEN_MODEL_CATALOG_SYNC":         {[]string{"platform.models.sync"}, false, false, []string{"expected_catalog_version", "adapter_observed_version", "catalog_diff_fingerprint", "request_fingerprint"}},
 	"TOKEN_MODEL_CATALOG_ROLLBACK":     {[]string{"platform.models.catalog.rollback.request"}, true, true, nil},
-	"TOKEN_ACCOUNT_CREATE":             {[]string{"platform.tokens.manage", "platform.tokens.owner-candidates.read"}, true, false, []string{"owner_type", "owner_id", "owner_authorization_version", "creation_version", "precheck_fingerprint", "request_fingerprint"}},
+	"TOKEN_ACCOUNT_CREATE":             {[]string{"platform.tokens.manage", "platform.tokens.owner-candidates.read"}, true, false, []string{"owner_type", "owner_id", "owner_authorization_version", "owner_version", "owner_identity_digest", "owner_account_count", "owner_account_cap", "owner_account_cap_policy_version", "creation_version", "precheck_fingerprint", "request_fingerprint"}},
 	"TOKEN_ACCOUNT_STATUS_CHANGE":      {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "expected_account_version", "target_status", "precheck_fingerprint", "request_fingerprint"}},
 	"TOKEN_ROUTE_UPSERT":               {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "expected_account_version", "expected_route_version", "model_id", "protocol_version_id", "precheck_fingerprint", "request_fingerprint"}},
 	"TOKEN_ROUTE_DELETE":               {[]string{"platform.tokens.manage"}, true, false, []string{"token_account_id", "route_id", "expected_account_version", "expected_route_version", "precheck_fingerprint", "request_fingerprint"}},
@@ -288,16 +291,9 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 		}
 	}
-	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
-		command, err := parseModelPublishCommand(envelope.Command)
-		if err != nil {
-			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
-		}
-		envelope.Command, err = json.Marshal(command)
-		if err != nil {
-			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
-		}
-		envelope.Command, err = canonicalJSON(envelope.Command)
+	if isModelAccountGovernedCommand(envelope.CommandType) {
+		var err error
+		envelope, err = canonicalizeModelAccountEnvelope(envelope)
 		if err != nil {
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
 		}
@@ -326,6 +322,12 @@ func normalizeTokenCommand(envelope TokenCommandEnvelope, key, approvalFingerpri
 		}
 	}
 	if isProtocolFormulaGovernedCommand(envelope.CommandType) {
+		requestFingerprint, ok := facts["request_fingerprint"].(string)
+		if !ok || requestFingerprint != governedRequestFingerprint(envelope, facts) {
+			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
+		}
+	}
+	if isModelAccountGovernedCommand(envelope.CommandType) {
 		requestFingerprint, ok := facts["request_fingerprint"].(string)
 		if !ok || requestFingerprint != governedRequestFingerprint(envelope, facts) {
 			return TokenCommandEnvelope{}, "", "", "", ErrTokenCommandInvalid
@@ -590,9 +592,18 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command body is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
-	spec, ok := tokenCommandSpecs[strings.ToUpper(strings.TrimSpace(envelope.CommandType))]
+	canonicalCommandType := strings.ToUpper(strings.TrimSpace(envelope.CommandType))
+	if canonicalCommandType == "TOKEN_ACCOUNT_CREATE" && envelope.CommandType != canonicalCommandType {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command type must be canonical", httpserver.RequestID(r.Context()))
+		return
+	}
+	spec, ok := tokenCommandSpecs[canonicalCommandType]
 	if !ok || spec.Approval {
 		api.WriteError(w, http.StatusForbidden, "DIRECT_APPROVAL_COMMAND_FORBIDDEN", "submit this command through the approval workflow", httpserver.RequestID(r.Context()))
+		return
+	}
+	if canonicalCommandType == "TOKEN_ACCOUNT_CREATE" && !s.tokenAccountCreateReady {
+		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_CREATE_NOT_ACTIVE", "Token Account creation is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	principal, ok := identity.FromContext(r.Context())
@@ -625,6 +636,25 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		return
 	}
 	begin := tokenCommandBegin{Envelope: envelope, ActorUserID: actor, ActorPermission: strings.Join(spec.Permissions, "+"), AuthorizationVersion: authorizationVersion, IdempotencyKey: r.Header.Get("Idempotency-Key"), AuditRequestID: httpserver.RequestID(r.Context())}
+	// Exact model/account replays are resolved before consulting any mutable
+	// owner, catalog, route or Billing authority. This preserves the first
+	// immutable result after the domain effect itself changes those facts (for
+	// example, publication deletes its draft).
+	if isModelAccountGovernedCommand(envelope.CommandType) {
+		existing, existingErr := repository.TokenCommandByActorKey(r.Context(), actor, envelope.CommandType, keyDigest, idempotencyFingerprint)
+		switch {
+		case existingErr == nil:
+			w.Header().Set("Cache-Control", "no-store")
+			api.WriteJSON(w, http.StatusOK, existing)
+			return
+		case errors.Is(existingErr, ErrTokenCommandResultMismatch):
+			api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
+			return
+		case !errors.Is(existingErr, ErrNotFound):
+			api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
 	scheduledModelPublish := false
 	if envelope.CommandType == "TOKEN_MODEL_PUBLISH" {
 		publishCommand, parseErr := parseModelPublishCommand(envelope.Command)
@@ -633,25 +663,6 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 			return
 		}
 		scheduledModelPublish = publishCommand.PublishMode == "SCHEDULED"
-		if scheduledModelPublish {
-			// A completed scheduled publication is immutable. Recover it before
-			// touching Token or Billing precheck sources so later draft drift does
-			// not turn an exact idempotent replay into a different outcome.
-			existing, existingErr := scanTokenCommandResult(repository.pool.QueryRow(r.Context(), tokenCommandResultSelect+` WHERE actor_user_id=$1 AND command_type='TOKEN_MODEL_PUBLISH' AND idempotency_key_digest=$2`, actor, keyDigest))
-			if existingErr == nil {
-				if existing.IdempotencyFingerprint != idempotencyFingerprint {
-					api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
-					return
-				}
-				w.Header().Set("Cache-Control", "no-store")
-				api.WriteJSON(w, http.StatusOK, existing)
-				return
-			}
-			if !errors.Is(existingErr, pgx.ErrNoRows) {
-				api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
-				return
-			}
-		}
 	}
 	if envelope.CommandType == "TOKEN_MODEL_CATALOG_SYNC" {
 		item, _, syncErr := s.executeGovernedCatalogSync(r.Context(), repository, runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint})
@@ -763,7 +774,7 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var authoritativeBefore json.RawMessage
-	if _, requiresAuthoritativePrecheck := directCommandPrecheckTypes[strings.ToUpper(strings.TrimSpace(envelope.CommandType))]; requiresAuthoritativePrecheck {
+	if _, requiresAuthoritativePrecheck := directCommandPrecheckTypes[strings.ToUpper(strings.TrimSpace(envelope.CommandType))]; requiresAuthoritativePrecheck && envelope.CommandType != "TOKEN_ACCOUNT_CREATE" {
 		precheck, precheckErr := s.buildTokenCommandPrecheck(r.Context(), TokenCommandPrecheckRequest{
 			CommandType: envelope.CommandType, TargetResourceType: envelope.TargetResourceType,
 			TargetResourceID: envelope.TargetResourceID, Command: envelope.Command,
@@ -780,13 +791,56 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_PRECHECK_UNAVAILABLE", "the governed command precheck could not be revalidated", httpserver.RequestID(r.Context()))
 			return
 		}
+		if envelope.CommandType == "TOKEN_ACCOUNT_CREATE" && containsString(precheck.Blockers, "TOKEN_ACCOUNT_CAP_REACHED") {
+			api.WriteError(w, http.StatusConflict, "TOKEN_ACCOUNT_CAP_REACHED", "the selected owner has reached the Token Account limit", httpserver.RequestID(r.Context()))
+			return
+		}
 		if envelope.PrecheckFingerprint != precheck.PrecheckFingerprint || !tokenCommandExpectedVersionsMatch(envelope.ExpectedVersions, precheck.ExpectedVersions) || len(precheck.Blockers) > 0 {
 			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
 			return
 		}
 		authoritativeBefore = precheck.ExpectedVersions
+	} else if envelope.CommandType == "TOKEN_ACCOUNT_CREATE" {
+		// Account creation establishes its one authoritative Account snapshot
+		// only after the Token owner/cap locks are held below. Repeating the
+		// cross-service snapshot here creates an avoidable TOCTOU and makes a
+		// permission change between two reads ambiguous.
+		authoritativeBefore = envelope.ExpectedVersions
 	}
 	begin.BeforeState = authoritativeBefore
+	if isModelAccountGovernedCommand(envelope.CommandType) && !scheduledModelPublish {
+		item, created, executeErr := s.executeGovernedModelAccountCommand(r.Context(), repository, runtimeTokenCommandBegin{tokenCommandBegin: begin, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint}, authoritativeBefore)
+		if executeErr != nil && item.CommandReference != uuid.Nil {
+			api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "COMMAND_RESULT_UNKNOWN", Message: "query the same command reference before retrying", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"command_reference": item.CommandReference, "result_query": "/token/admin/v1/commands/" + item.CommandReference.String()}})
+			return
+		}
+		switch {
+		case errors.Is(executeErr, ErrTokenCommandResultMismatch):
+			api.WriteError(w, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "the idempotency key was already used for a different command", httpserver.RequestID(r.Context()))
+		case errors.Is(executeErr, ErrTokenCommandInvalid):
+			api.WriteError(w, http.StatusBadRequest, "INVALID_COMMAND", "the governed command is invalid", httpserver.RequestID(r.Context()))
+		case errors.Is(executeErr, ErrTokenAccountCapReached):
+			api.WriteError(w, http.StatusConflict, "TOKEN_ACCOUNT_CAP_REACHED", "the selected owner has reached the Token Account limit", httpserver.RequestID(r.Context()))
+		case errors.Is(executeErr, ErrTokenAccountPolicyUnavailable):
+			api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_POLICY_UNAVAILABLE", "Token Account creation policy is unavailable", httpserver.RequestID(r.Context()))
+		case errors.Is(executeErr, ErrTokenAccountPolicyConfigMismatch):
+			api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_POLICY_CONFIG_MISMATCH", "Token Account creation policy is inconsistent", httpserver.RequestID(r.Context()))
+		case errors.Is(executeErr, ErrCatalogVersionConflict), errors.Is(executeErr, ErrNotFound), errors.Is(executeErr, ErrModelUnavailable), errors.Is(executeErr, ErrForbidden):
+			api.WriteError(w, http.StatusConflict, "COMMAND_PRECHECK_CHANGED", "the governed command no longer matches the authoritative precheck", httpserver.RequestID(r.Context()))
+		case errors.Is(executeErr, ErrTokenRouteActivationChanged):
+			writeTokenCommandGovernanceInactiveHTTP(w, r)
+		case executeErr != nil:
+			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RETRYABLE", "no command was persisted; retry with the same idempotency key", httpserver.RequestID(r.Context()))
+		default:
+			status := http.StatusOK
+			if created {
+				status = http.StatusCreated
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			api.WriteJSON(w, status, item)
+		}
+		return
+	}
 	if scheduledModelPublish {
 		item, created, scheduleErr := repository.ScheduleModelPublish(r.Context(), begin)
 		switch {
@@ -894,6 +948,7 @@ func (s *Service) adminTokenCommandResult(w http.ResponseWriter, r *http.Request
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the command result was not found", httpserver.RequestID(r.Context()))
 		return
 	}
+	repository.decorateTokenAccountRecovery(r.Context(), &item)
 	if item.CommandType == "TOKEN_FORMULA_PUBLISH" && item.Status == "PENDING" {
 		pending, pendingErr := repository.pendingFormulaPublishCommand(r.Context(), reference, actor)
 		if pendingErr != nil {
@@ -961,13 +1016,13 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
-	canonicalEnvelope, requestDigest, _, idempotencyFingerprint, normalizeErr := normalizeTokenCommand(body.Envelope, body.ExecutionIdempotencyKey, body.CommandFingerprint)
+	canonicalEnvelope, requestDigest, keyDigest, idempotencyFingerprint, normalizeErr := normalizeTokenCommand(body.Envelope, body.ExecutionIdempotencyKey, body.CommandFingerprint)
 	if normalizeErr != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
 	body.Envelope = canonicalEnvelope
-	if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && (!jsonSemanticEqual(body.CriticalResourceVersions, body.Envelope.ExpectedVersions) || len(body.FinancialSnapshot) == 0) {
+	if (commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || commandType == "TOKEN_MODEL_CATALOG_ROLLBACK") && (!jsonSemanticEqual(body.CriticalResourceVersions, body.Envelope.ExpectedVersions) || len(body.FinancialSnapshot) == 0) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command snapshot is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -992,9 +1047,9 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		// the first execution claim. A repeated Account event must replay the
 		// frozen result even when dependencies changed after the plan was
 		// scheduled; otherwise event delivery would cease to be idempotent.
-		if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+		if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || commandType == "TOKEN_MODEL_CATALOG_ROLLBACK" {
 			projection, projectionErr := s.approvalCommandPrecheck(r.Context(), ApprovalSnapshotRequest{CommandType: commandType, TargetResourceType: body.Envelope.TargetResourceType, TargetResourceID: body.Envelope.TargetResourceID, NormalizedCommand: body.Envelope.Command})
-			if projectionErr != nil || projection.PrecheckFingerprint != body.Envelope.PrecheckFingerprint || !jsonSemanticEqual(projection.CriticalResourceVersions, body.CriticalResourceVersions) || !jsonSemanticEqual(projection.FinancialSnapshot, body.FinancialSnapshot) {
+			if projectionErr != nil || projection.PrecheckFingerprint != body.Envelope.PrecheckFingerprint || !jsonSemanticEqual(projection.CriticalResourceVersions, body.CriticalResourceVersions) || !approvalpolicy.SameTokenModelFinancialFacts(projection.FinancialSnapshot, body.FinancialSnapshot) {
 				api.WriteError(w, http.StatusConflict, "PRECHECK_CHANGED", "the approved command no longer matches current resource facts", httpserver.RequestID(r.Context()))
 				return
 			}
@@ -1002,6 +1057,34 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		before, precheckErr := s.approvedCommandExecutor.PrecheckApprovedTokenCommand(r.Context(), commandType, body.Envelope)
 		if precheckErr != nil {
 			api.WriteError(w, http.StatusConflict, "PRECHECK_CHANGED", "the approved command no longer matches current resource facts", httpserver.RequestID(r.Context()))
+			return
+		}
+		if commandType == "TOKEN_MODEL_CATALOG_ROLLBACK" {
+			executor, supported := s.approvedCommandExecutor.(interface {
+				ExecuteApprovedCatalogRollbackCommand(context.Context, runtimeTokenCommandBegin, []GatewayProtocolCapability) (TokenCommandResult, bool, error)
+			})
+			if !supported {
+				api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_EXECUTOR_UNAVAILABLE", "the approved catalog rollback adapter is unavailable", httpserver.RequestID(r.Context()))
+				return
+			}
+			completed, _, executeErr := executor.ExecuteApprovedCatalogRollbackCommand(r.Context(), runtimeTokenCommandBegin{tokenCommandBegin: tokenCommandBegin{
+				Envelope: body.Envelope, ActorUserID: body.RequesterUserID, ActorPermission: policy.RequesterPermission,
+				AuthorizationVersion: body.AuthorizationVersion, IdempotencyKey: body.ExecutionIdempotencyKey,
+				AuditRequestID: httpserver.RequestID(r.Context()), BeforeState: before,
+				ApprovalRequestID: body.ApprovalRequestID, ApprovalFingerprint: body.CommandFingerprint,
+			}, RequestDigest: requestDigest, KeyDigest: keyDigest, IdempotencyFingerprint: idempotencyFingerprint}, s.upstream.Protocols())
+			if completed.CommandReference != uuid.Nil && executeErr != nil && !errors.Is(executeErr, ErrCatalogVersionConflict) && !errors.Is(executeErr, ErrNotFound) && !errors.Is(executeErr, ErrForbidden) && !errors.Is(executeErr, ErrTokenCommandInvalid) {
+				api.WriteJSON(w, http.StatusServiceUnavailable, api.Error{Code: "COMMAND_RESULT_UNKNOWN", Message: "query the same command reference before retrying", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"command_reference": completed.CommandReference, "result_query": "/token/admin/v1/commands/" + completed.CommandReference.String()}})
+				return
+			}
+			switch {
+			case errors.Is(executeErr, ErrCatalogVersionConflict), errors.Is(executeErr, ErrNotFound), errors.Is(executeErr, ErrForbidden), errors.Is(executeErr, ErrTokenCommandInvalid):
+				api.WriteError(w, http.StatusConflict, "PRECHECK_CHANGED", "the approved command no longer matches current resource facts", httpserver.RequestID(r.Context()))
+			case executeErr != nil:
+				api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_COMMAND_UNAVAILABLE", "Token command persistence is unavailable", httpserver.RequestID(r.Context()))
+			default:
+				api.WriteJSON(w, http.StatusOK, completed)
+			}
 			return
 		}
 		var beginErr error

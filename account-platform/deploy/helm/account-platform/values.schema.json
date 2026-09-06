@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "workloadIdentity", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy"],
+  "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "workloadIdentity", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "tokenAccountPolicyBootstrap", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -222,6 +222,14 @@
         "maximumClientVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+" },
         "readinessAttestationKeyId": { "type": "string", "minLength": 1 },
         "readinessAttestationTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 900 }
+      }
+    },
+    "tokenAccountPolicyBootstrap": {
+      "type": "object",
+      "required": ["enabled"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" }
       }
     },
     "external": {

@@ -14,7 +14,6 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/requestdeadline"
 	"github.com/google/uuid"
 )
@@ -601,7 +600,11 @@ func assertLifecycleExpiryAndLeaseRecovery(t *testing.T, ctx context.Context, re
 
 func assertLifecycleMigrationDownFailsClosed(t *testing.T, ctx context.Context, repository *PostgresRepository) {
 	t.Helper()
-	down, err := migrations.Load("../../migrations/token")
+	var schema string
+	if err := repository.pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	down, err := loadTokenIntegrationMigrations("../../migrations/token", schema)
 	if err != nil {
 		t.Fatal(err)
 	}

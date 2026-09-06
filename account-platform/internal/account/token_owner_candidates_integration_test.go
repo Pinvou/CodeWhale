@@ -1,7 +1,10 @@
 package account
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,13 +12,16 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokenauthority"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,6 +33,9 @@ import (
 // ACCOUNT_DATABASE_URL='postgresql://.../isolated_test_db?sslmode=require' go test ./internal/account -run TestTokenOwnerCandidatesPostgresIntegration -count=1
 func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("ACCOUNT_DATABASE_URL"))
+	if databaseURL == "" {
+		databaseURL = strings.TrimSpace(os.Getenv("PINVOU_TEST_ACCOUNT_DATABASE_URL"))
+	}
 	if databaseURL == "" {
 		t.Skip("ACCOUNT_DATABASE_URL is not configured; PostgreSQL integration was not executed")
 	}
@@ -250,6 +259,57 @@ func TestTokenOwnerCandidatesPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSharedServiceLimit(t, ctx, repository, actors)
+	assertTokenAccountCreateCompositeAuthority(t, ctx, repository, superActor)
+}
+
+func assertTokenAccountCreateCompositeAuthority(t *testing.T, ctx context.Context, repository *PostgresRepository, actor integrationActor) {
+	t.Helper()
+	permissions := []string{"platform.tokens.manage", PermissionPlatformTokenOwnerCandidatesRead}
+	decision, err := repository.AuthorizeComposite(ctx, identity.Principal{Issuer: actor.Issuer, Subject: actor.Subject}, nil, permissions)
+	if err != nil || !decision.Allowed || decision.PlatformAuthorizationVersion < 1 || len(decision.GrantedPermissions) != 2 {
+		t.Fatalf("all-only Token Account authority=%+v err=%v", decision, err)
+	}
+	payload, _ := json.Marshal(PermissionCheck{Issuer: actor.Issuer, Subject: actor.Subject, AllPermissions: permissions})
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/authorization/check", bytes.NewReader(payload))
+	request.Header.Set("Authorization", "Bearer integration-service-token")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).WithServiceToken("integration-service-token").Handler(nil).ServeHTTP(response, request)
+	var projection AuthorizationDecision
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &projection) != nil || !projection.Allowed || projection.PlatformAuthorizationVersion != decision.PlatformAuthorizationVersion {
+		t.Fatalf("all-only Account HTTP status=%d body=%s decision=%+v", response.Code, response.Body.String(), decision)
+	}
+	var ownerVersion int64
+	if err := repository.pool.QueryRow(ctx, `SELECT version FROM users WHERE id=$1`, actor.ID).Scan(&ownerVersion); err != nil {
+		t.Fatal(err)
+	}
+	issuer, subject, ownerType, ownerID, commandDigest := actor.Issuer, actor.Subject, "USER", actor.ID.String(), strings.Repeat("a", 64)
+	subjectHash := sha256.Sum256([]byte(subject))
+	authority := tokenauthority.Request{AuthoritySchemaVersion: "1", Mode: tokenauthority.ModeT1Snapshot, IdentityIssuer: &issuer, IdentitySubject: &subject, IdentitySubjectSHA256: authorityString(hex.EncodeToString(subjectHash[:])), OwnerType: &ownerType, OwnerID: &ownerID, RequiredPermissions: tokenauthority.RequiredPermissions, CommandReference: uuid.NewString(), CommandRequestDigest: &commandDigest}
+	authority.AuthorityRequestSHA256 = authority.Digest()
+	callAuthority := func() (int, tokenauthority.Response, string) {
+		raw, _ := json.Marshal(authority)
+		request := httptest.NewRequest(http.MethodPost, "/internal/v1/token-account-authority/snapshot", bytes.NewReader(raw))
+		request.Header.Set("Authorization", "Bearer integration-service-token")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		NewService(repository, &fakeWalletProvisioner{}).WithServiceToken("integration-service-token").Handler(nil).ServeHTTP(response, request)
+		var result tokenauthority.Response
+		_ = json.Unmarshal(response.Body.Bytes(), &result)
+		return response.Code, result, response.Body.String()
+	}
+	status, allowed, body := callAuthority()
+	if status != http.StatusOK || allowed.Decision != "ALLOW" || allowed.ReasonCode != nil || allowed.ObservedPlatformAuthorizationVersion != strconv.FormatInt(decision.PlatformAuthorizationVersion, 10) || allowed.ObservedOwnerVersion == nil || *allowed.ObservedOwnerVersion != strconv.FormatInt(ownerVersion, 10) || allowed.OwnerIdentityDigest == nil || *allowed.OwnerIdentityDigest != tokenauthority.OwnerIdentityDigest("USER", actor.ID, "ACTIVE", ownerVersion) {
+		t.Fatalf("authority allow status=%d result=%+v body=%s", status, allowed, body)
+	}
+	if _, err := repository.pool.Exec(ctx, `DELETE FROM role_permissions WHERE role_code='PLATFORM_SUPER_ADMIN' AND permission_code='platform.tokens.manage'`); err != nil {
+		t.Fatal(err)
+	}
+	status, denied, body := callAuthority()
+	deniedVersion, _ := strconv.ParseInt(denied.ObservedPlatformAuthorizationVersion, 10, 64)
+	if status != http.StatusOK || denied.Decision != "DENY" || denied.ReasonCode == nil || *denied.ReasonCode != "AUTHORIZATION_REVOKED" || deniedVersion <= decision.PlatformAuthorizationVersion || denied.ObservedOwnerVersion == nil || *denied.ObservedOwnerVersion != strconv.FormatInt(ownerVersion, 10) {
+		t.Fatalf("authority revoke status=%d result=%+v body=%s", status, denied, body)
+	}
 }
 
 func assertTokenOwnerCandidateLifecycleWhitelist(t *testing.T, ctx context.Context, repository *PostgresRepository, actor TokenOwnerCandidateActor, creator uuid.UUID) {

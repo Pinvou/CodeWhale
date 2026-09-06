@@ -56,3 +56,49 @@ helm template pinvou deploy/helm/account-platform \
 
 Migration Jobs are pre-install/pre-upgrade hooks. Rollback does not delete PVCs;
 database rollback remains an explicit, separately approved operation.
+
+Token Account provisioning additionally requires separate secret keys
+`account-migration-database-url`, `billing-migration-database-url`,
+`token-migration-database-url`, and `token-policy-database-url`. The latter uses
+the policy operator login; migration URLs use the domain migrator login, never
+the runtime login. Provision the owner roles and migrator membership before the
+Jobs run. Policy bootstrap also requires `token-policy-max-per-owner`,
+`token-policy-expected-version`, `token-policy-idempotency-key`, and
+`token-policy-reason`; production has no implicit capacity default.
+Each deployment login must have an independent credential, different from all
+runtime and other deployment credentials. Never grant schema-owner membership
+to runtime roles. The bootstrap command uses the policy operator URL; its
+`--mode readiness` instead needs a runtime read-only URL with SELECT access,
+and `--mode quiescence` needs the separately controlled inspection identity below.
+
+Before the hooks, a DBA must assign the Token database and its `public` schema
+to `token_schema_owner NOLOGIN`, and the Billing database/schema to
+`billing_schema_owner NOLOGIN`. Only the corresponding migrator is a member of
+its schema owner; runtime and policy-operator logins must not own the database or
+schema or be members of those owner roles. Existing business-table ownership is
+retained. For first installation, provision Token's `pgcrypto` extension as DBA;
+grant runtime schema USAGE/CREATE only for the earlier migrations. Token 000029
+and Billing 000053 revoke runtime/PUBLIC CREATE after assuming the schema owner.
+On existing volumes, perform this ownership preparation during the writer-fenced
+maintenance window; changing the Compose init script or Secret alone does not
+modify an existing database. Do not reopen old write-capable binaries afterward.
+
+Before upgrading, close creation admission, drain pending/manual-review work,
+and stop all old writer instances, including system/default-route creators.
+Disable login for write-capable application and deployment roles and drain
+their database sessions. Run `/token-policy-bootstrap --mode quiescence` with
+an operations connection that can inspect `pg_stat_activity` and lock creation
+tables. The command verifies the database role fence, including inherited table
+privileges and SECURITY DEFINER entry points; an empty queue alone is insufficient.
+Privileged DBA access remains an operational trust boundary. Keep the role fence
+in place after the check, enabling only the migration/operator roles needed for
+each controlled deployment step. This check is read-only and does not revoke
+privileges or terminate sessions automatically.
+
+Hook order is Billing migration 000053, Token migration 000029, then explicit
+policy bootstrap. Creation remains unavailable until APT-138 activation 000030
+is ACTIVE and its polling worker is ready. During rollback, repeat the writer
+fence and drain procedure and evaluate migrations in reverse order; retained
+receipt, reservation, command or policy history prevents destructive down.
+Old binaries may resume only with read-only database identities, never with
+the former unrestricted creation privileges.

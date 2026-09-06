@@ -13,6 +13,10 @@
 
 ## 平台管理台
 
+Token 账户配额迁移需要独立的 `BILLING_MIGRATION_DB_PASSWORD`、`TOKEN_MIGRATION_DB_PASSWORD` 和 `TOKEN_POLICY_DB_PASSWORD`；不得复用任何服务运行密码，也不得互相复用。部署前置检查在已有数据卷上同样执行，发现复用即阻止迁移；这些秘密仅提供给数据库初始化、迁移和策略配置任务，不注入业务服务。已有数据库不会重新执行初始化脚本，升级前必须由数据库管理员通过受控 Secret 渠道创建对应部署身份或轮换其密码，不能仅修改 `.env`。迁移按 Billing → Token → 配额 bootstrap 顺序执行。
+
+数据库和 `public` schema 分别交由 `token_schema_owner NOLOGIN`、`billing_schema_owner NOLOGIN` 持有，只有对应 migrator 拥有其成员资格；运行账户和策略操作员不得持有数据库/schema 或继承这些所有者。既有业务表所有权保持不变。首次安装由数据库管理员预装 Token 的 `pgcrypto`，旧迁移阶段临时授予运行账户 schema CREATE，再由 Token `000029`、Billing `000053` 收回。已有数据卷必须在停写窗口由 DBA 完成同样的所有权调整与权限核验，不能仅更新初始化脚本。完整停写、迁移和模式身份说明见 [Helm 部署说明](../helm/account-platform/README.md)。
+
 平台管理台位于 Token Portal 的 `/admin.html`，复用 Keycloak 登录；实际业务授权由 Account 平台角色和原子权限码决定，Keycloak Realm Role 不再授予后台权限。管理台提供 Account、Billing、Token Gateway、系统运行与审计等受保护的运营功能。审计导出只创建服务端任务，不在浏览器拼接当前列表；文件密钥只在创建响应展示一次，PII 导出必须使用带原因和到期时间的临时授权。供应商凭据只展示状态、指纹和更新时间等元数据，真实密钥不会返回浏览器。
 
 远程部署只向公网开放 Keycloak 的 `/realms/` 与 `/resources/` 登录所需路径，管理控制台 `/admin/` 必须通过受限网络或本地隧道访问，具体见 [`../runbooks/keycloak-admin-access.md`](../runbooks/keycloak-admin-access.md)。

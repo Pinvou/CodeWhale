@@ -30,6 +30,7 @@ const adminModelTokenQueryParameters = Object.freeze({
   usage: Object.freeze({ q: 'usage_q', execution_status: 'usage_execution_status', settlement_status: 'usage_settlement_status', model: 'usage_model', token_account_id: 'usage_token_account_id', organization_id: 'usage_organization_id', started_from: 'usage_started_from', started_to: 'usage_started_to', cursor: 'usage_cursor' }),
   reconciliation: Object.freeze({ q: 'reconciliation_q', status: 'reconciliation_status', severity: 'reconciliation_severity', case_type: 'reconciliation_case_type', owner_id: 'reconciliation_owner_id', sla_overdue: 'reconciliation_sla_overdue', cursor: 'reconciliation_cursor' }),
   ownerCandidates: Object.freeze({ q: 'owner_candidate_q', owner_type: 'owner_candidate_type', status: 'owner_candidate_status', organization_id: 'owner_candidate_organization_id', cursor: 'owner_candidate_cursor' }),
+  accountRecovery: Object.freeze({ q: 'account_recovery_q', cursor: 'account_recovery_cursor' }),
   modelAudit: Object.freeze({ action: 'model_audit_action', actor_id: 'model_audit_actor_id', occurred_from: 'model_audit_occurred_from', occurred_to: 'model_audit_occurred_to', cursor: 'model_audit_cursor' }),
   modelHistory: Object.freeze({ cursor: 'model_history_cursor' }),
 	modelLifecyclePlans: Object.freeze({ status: 'model_lifecycle_plan_status', target_lifecycle: 'model_lifecycle_plan_target', cursor: 'model_lifecycle_plan_cursor' }),
@@ -207,8 +208,17 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
     if (!ownerSelectionAllowed) {
       for (const parameter of Object.values(adminModelTokenQueryParameters.ownerCandidates)) if (search.has(parameter)) updates[parameter] = null;
     }
-		if (options.tokenDetailsEnabled !== true || !granted.has('platform.tokens.read')) {
+		if (!granted.has('platform.tokens.read')) {
 			clearParameters(adminModelTokenDetailParameters.token, updates);
+		} else if (options.tokenDetailsEnabled !== true && search.get('token_account_id')) {
+			// The APT-129 route-health drill-down remains the PRE-compatible
+			// read-only surface while the independent APT-133 account detail gate
+			// is disabled. Strip every new-detail state group and normalize the
+			// surviving stable account link to the legacy routes view.
+			updates.token_detail_tab = 'routes';
+			clearParameters(Object.values(adminModelTokenQueryParameters.tokenCredentials), updates);
+			clearParameters(Object.values(adminModelTokenQueryParameters.tokenProvisionings), updates);
+			clearParameters(Object.values(adminModelTokenQueryParameters.tokenAudit), updates);
 		}
   }
   const clearOrphanOrInvalidDetail = (idKey, parameters) => {

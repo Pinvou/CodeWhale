@@ -43,7 +43,7 @@ func TestFormulaDraftUnitValidationPostgresIntegration(t *testing.T) {
 	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := migrations.Load("../../migrations/billing")
+	loaded, err := loadBillingIntegrationMigrations("../../migrations/billing", schema)
 	if err != nil {
 		t.Fatal(err)
 	}

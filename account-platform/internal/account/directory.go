@@ -128,20 +128,20 @@ SELECT
 		}
 	}
 	rows, err := tx.Query(ctx, `
-SELECT candidate.owner_id,candidate.owner_type,candidate.display_label,candidate.status
+SELECT candidate.owner_id,candidate.owner_type,candidate.display_label,candidate.status,candidate.owner_version
 FROM (
   SELECT account_user.id AS owner_id,'USER'::text AS owner_type,
          COALESCE(NULLIF(btrim(account_user.display_name),''),NULLIF(btrim(account_user.username),''),account_user.user_code) AS display_label,
-         account_user.status,account_user.created_at
+         account_user.status,account_user.version AS owner_version,account_user.created_at
   FROM users account_user
   WHERE account_user.status IN ('ACTIVE','DISABLED','PROVISIONING')
     AND ($6::uuid IS NULL OR EXISTS(SELECT 1 FROM memberships membership WHERE membership.user_id=account_user.id AND membership.organization_id=$6 AND membership.status='ACTIVE'))
   UNION ALL
-  SELECT organization.id,'ORGANIZATION',organization.name,organization.status,organization.created_at
+  SELECT organization.id,'ORGANIZATION',organization.name,organization.status,organization.version,organization.created_at
   FROM organizations organization
   WHERE organization.status IN ('ACTIVE','DISABLED') AND ($6::uuid IS NULL OR organization.id=$6)
   UNION ALL
-  SELECT unit.id,'UNIT',unit.name,unit.status,unit.created_at
+  SELECT unit.id,'UNIT',unit.name,unit.status,unit.version,unit.created_at
   FROM organization_units unit
   JOIN organizations organization ON organization.id=unit.organization_id AND organization.status IN ('ACTIVE','DISABLED')
   WHERE unit.status IN ('ACTIVE','DISABLED') AND ($6::uuid IS NULL OR unit.organization_id=$6)
@@ -157,7 +157,7 @@ LIMIT $5`, filter.OwnerType, highWater, cursorType, cursorID, filter.Limit+1, fi
 	items := make([]TokenOwnerCandidate, 0, filter.Limit+1)
 	for rows.Next() {
 		var item TokenOwnerCandidate
-		if err := rows.Scan(&item.ID, &item.Type, &item.DisplayLabel, &item.Status); err != nil {
+		if err := rows.Scan(&item.ID, &item.Type, &item.DisplayLabel, &item.Status, &item.OwnerVersion); err != nil {
 			rows.Close()
 			return TokenOwnerCandidatePage{}, err
 		}
@@ -178,6 +178,10 @@ LIMIT $5`, filter.OwnerType, highWater, cursorType, cursorID, filter.Limit+1, fi
 		HasMore:              hasMore,
 		Limit:                filter.Limit,
 		AuthorizationVersion: authorizationVersion,
+		OwnerVersions:        make(map[string]int64, len(items)),
+	}
+	for _, item := range items {
+		page.OwnerVersions[item.ID.String()] = item.OwnerVersion
 	}
 	if page.HasMore && len(page.Items) > 0 {
 		last := page.Items[len(page.Items)-1]

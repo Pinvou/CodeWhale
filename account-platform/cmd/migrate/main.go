@@ -74,6 +74,14 @@ func main() {
 	}
 	defer connection.Close(context.Background())
 	defer migrations.Unlock(context.Background(), connection)
+	if migrationRole := strings.TrimSpace(os.Getenv("MIGRATION_ROLE")); migrationRole != "" {
+		if !regexp.MustCompile(`^[a-z][a-z0-9_]{0,62}$`).MatchString(migrationRole) {
+			log.Fatal("MIGRATION_ROLE is invalid")
+		}
+		if _, err = connection.Exec(ctx, "SET ROLE "+pgx.Identifier{migrationRole}.Sanitize()); err != nil {
+			log.Fatal(err)
+		}
+	}
 
 	switch *direction {
 	case "up":

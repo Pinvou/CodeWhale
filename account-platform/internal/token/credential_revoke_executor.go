@@ -74,6 +74,9 @@ func (e *PostgresApprovedCredentialExecutor) PrecheckApprovedTokenCommand(ctx co
 	if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" {
 		return e.precheckApprovedLifecyclePlan(ctx, envelope)
 	}
+	if commandType == "TOKEN_MODEL_CATALOG_ROLLBACK" {
+		return e.precheckApprovedCatalogRollback(ctx, envelope)
+	}
 	if commandType != "TOKEN_CREDENTIAL_REVOKE" {
 		return nil, ErrTokenCommandInvalid
 	}

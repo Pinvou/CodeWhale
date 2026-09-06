@@ -184,11 +184,11 @@ func canonicalPermissionSet(values []string) ([]string, error) {
 // indivisible snapshot. It intentionally supports only platform permissions.
 func (r *PostgresRepository) AuthorizeComposite(ctx context.Context, principal identity.Principal, anyPermissions, allPermissions []string) (AuthorizationDecision, error) {
 	anyPermissions, err := canonicalPermissionSet(anyPermissions)
-	if err != nil || len(anyPermissions) == 0 {
+	if err != nil {
 		return AuthorizationDecision{}, ErrForbidden
 	}
 	allPermissions, err = canonicalPermissionSet(allPermissions)
-	if err != nil {
+	if err != nil || len(anyPermissions)+len(allPermissions) == 0 {
 		return AuthorizationDecision{}, ErrForbidden
 	}
 	requested, err := canonicalPermissionSet(append(append([]string{}, anyPermissions...), allPermissions...))
@@ -244,12 +244,18 @@ GROUP BY principal.id,principal.status,principal.context_version,principal.perso
 		_, ok := granted[permission]
 		allGranted = allGranted && ok
 	}
-	anyGranted := false
+	// An omitted branch is the identity element for its operator: an empty
+	// any-of branch is satisfied while an empty all-of branch is satisfied.
+	// The whole expression is still rejected above when both are empty.
+	anyGranted := len(anyPermissions) == 0
 	for _, permission := range anyPermissions {
 		_, ok := granted[permission]
 		anyGranted = anyGranted || ok
 	}
-	statusPermission := anyPermissions[0]
+	statusPermission := ""
+	if len(anyPermissions) > 0 {
+		statusPermission = anyPermissions[0]
+	}
 	if len(allPermissions) > 0 {
 		statusPermission = allPermissions[0]
 	}

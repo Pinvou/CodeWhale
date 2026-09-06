@@ -25,9 +25,15 @@ type DefaultRouteProvisioner interface {
 }
 
 type PostgresDefaultRouteProvisioner struct {
-	repository *PostgresRepository
-	config     DefaultRouteConfig
-	workerID   string
+	repository         *PostgresRepository
+	config             DefaultRouteConfig
+	workerID           string
+	accountCreateReady bool
+}
+
+func (p *PostgresDefaultRouteProvisioner) WithTokenAccountCreateCapability(ready bool) *PostgresDefaultRouteProvisioner {
+	p.accountCreateReady = ready
+	return p
 }
 
 func NewDefaultRouteProvisioner(repository *PostgresRepository, policy ProviderURLPolicy, config DefaultRouteConfig) (*PostgresDefaultRouteProvisioner, error) {
@@ -65,19 +71,30 @@ func (p *PostgresDefaultRouteProvisioner) provisionResources(ctx context.Context
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, ownerType+":"+ownerID.String()); err != nil {
+	if err := lockTokenAccountOwner(ctx, tx, ownerType, ownerID); err != nil {
 		return err
 	}
 	now := p.repository.now()
-	accountID := uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,owner_organization_id,owner_unit_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode)
-VALUES($1,$2,$3,$4,NULL,$5,$6,'ACTIVE',$7,$8,$9,$9,'PLATFORM')
-ON CONFLICT(owner_type,owner_id,name) DO NOTHING`, accountID, ownerType, ownerID, ownerOrganization, walletID, platformDefaultAccountName, p.config.Priority, resolved.UserID, now)
-	if err != nil {
-		return err
-	}
+	var accountID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM token_accounts WHERE owner_type=$1 AND owner_id=$2 AND name=$3 AND management_mode='PLATFORM' FOR UPDATE`, ownerType, ownerID, platformDefaultAccountName).Scan(&accountID); errors.Is(err, pgx.ErrNoRows) {
-		return ErrForbidden
+		if !p.accountCreateReady {
+			return ErrTokenAccountCreateNotActive
+		}
+		if err := lockTokenAccountOwnerCapPolicy(ctx, tx); err != nil {
+			return err
+		}
+		capacity, capacityErr := loadTokenAccountOwnerCapacity(ctx, tx, ownerType, ownerID)
+		if capacityErr != nil {
+			return capacityErr
+		}
+		if capacity.Count >= capacity.Policy.MaxPerOwner {
+			return ErrTokenAccountCapReached
+		}
+		accountID = uuid.Must(uuid.NewV7())
+		if _, err = tx.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,owner_organization_id,owner_unit_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode)
+VALUES($1,$2,$3,$4,NULL,$5,$6,'ACTIVE',$7,$8,$9,$9,'PLATFORM')`, accountID, ownerType, ownerID, ownerOrganization, walletID, platformDefaultAccountName, p.config.Priority, resolved.UserID, now); err != nil {
+			return err
+		}
 	} else if err != nil {
 		return err
 	}

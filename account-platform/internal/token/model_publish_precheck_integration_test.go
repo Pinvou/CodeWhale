@@ -47,7 +47,7 @@ func TestModelPublishPrecheckPostgresIntegration(t *testing.T) {
 		Items: []ImpactPriceCoverage{{ModelID: modelID, ProtocolCode: "CHAT", FormulaVersionID: &formulaID, CreditUnit: "MICROCREDIT", Covered: true, PriceVersionID: &priceID, PriceVersion: &priceVersion, EffectiveFrom: &now}},
 		AsOf:  now.Add(time.Second), Source: "BILLING", FinancialFactRevision: 12, PriceSetFingerprint: strings.Repeat("b", 64),
 	}}
-	service := NewService(repository, nil, nil, nil, ProviderURLPolicy{}, nil, nil, 0).WithImpactPrechecks(true, nil, pricing)
+	service := NewService(repository, nil, nil, nil, ProviderURLPolicy{}, nil, NewHTTPUpstreamClient(), 0).WithImpactPrechecks(true, nil, pricing)
 	command := json.RawMessage(`{"model_id":"` + modelID.String() + `"}`)
 	missing, err := service.buildTokenCommandPrecheck(ctx, TokenCommandPrecheckRequest{CommandType: "TOKEN_MODEL_PUBLISH", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Command: command})
 	if err != nil || !slices.Contains(missing.Blockers, "MODEL_ROUTE_COVERAGE_MISSING") || !slices.Contains(missing.Blockers, "MODEL_PROVISIONING_COVERAGE_MISSING") {
@@ -162,7 +162,7 @@ INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstre
 	first := performModelPublishGovernedCommand(t, service, legacyEnvelope, "model-publish-legacy-replay")
 	second := performModelPublishGovernedCommand(t, service, explicitEnvelope, "model-publish-legacy-replay")
 	var firstResult, secondResult TokenCommandResult
-	if first.Code != http.StatusAccepted || second.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstResult) != nil || json.Unmarshal(second.Body.Bytes(), &secondResult) != nil || firstResult.CommandReference != secondResult.CommandReference {
+	if first.Code != http.StatusCreated || second.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstResult) != nil || json.Unmarshal(second.Body.Bytes(), &secondResult) != nil || firstResult.CommandReference != secondResult.CommandReference || firstResult.Status != "SUCCEEDED" {
 		t.Fatalf("legacy replay first=%d/%s second=%d/%s", first.Code, first.Body.String(), second.Code, second.Body.String())
 	}
 }

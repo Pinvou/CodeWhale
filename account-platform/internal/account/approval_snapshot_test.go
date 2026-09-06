@@ -13,6 +13,34 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestApprovalFinancialRevalidationPreservesFrozenEvidence(t *testing.T) {
+	frozen := json.RawMessage(`{"billing_price_revision":7,"price_set_fingerprint":"` + strings.Repeat("a", 64) + `","models_checked":1,"models_covered":1,"fully_covered":true,"billing_as_of":"2026-09-06T10:00:00Z"}`)
+	observed := json.RawMessage(strings.Replace(string(frozen), "10:00:00Z", "10:01:00Z", 1))
+	for _, command := range []string{"TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK"} {
+		if !sameApprovalFinancialFacts(command, observed, frozen) || sameJSONObject(observed, frozen) {
+			t.Fatalf("%s must accept a new observation without treating frozen evidence as byte-equivalent", command)
+		}
+		for _, changed := range []json.RawMessage{
+			json.RawMessage(strings.Replace(string(observed), `"billing_price_revision":7`, `"billing_price_revision":8`, 1)),
+			json.RawMessage(strings.Replace(string(observed), strings.Repeat("a", 64), strings.Repeat("b", 64), 1)),
+			json.RawMessage(strings.Replace(string(observed), "2026-09-06T10:01:00Z", "invalid", 1)),
+			json.RawMessage(`{}`),
+		} {
+			if sameApprovalFinancialFacts(command, changed, frozen) {
+				t.Fatalf("%s accepted changed or malformed financial facts: %s", command, changed)
+			}
+		}
+	}
+	for _, command := range []string{"TOKEN_CREDENTIAL_REVOKE", "WALLET_ADJUSTMENT", "UNKNOWN"} {
+		if sameApprovalFinancialFacts(command, observed, frozen) {
+			t.Fatalf("%s must not inherit model-pricing clock equivalence", command)
+		}
+	}
+	if !sameApprovalFinancialFacts("TOKEN_CREDENTIAL_REVOKE", json.RawMessage(`{}`), json.RawMessage(`{}`)) {
+		t.Fatal("credential revocation must preserve its exact empty financial contract")
+	}
+}
+
 func TestHTTPApprovalSnapshotSourceRequiresClosedMatchingProjection(t *testing.T) {
 	modelID := uuid.New()
 	fingerprint := strings.Repeat("a", 64)

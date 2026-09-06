@@ -28,7 +28,7 @@ ALTER TABLE routing_policies DROP CONSTRAINT routing_policies_health_status_chec
 ALTER TABLE routing_policies ADD CONSTRAINT routing_policies_health_status_check
     CHECK (health_status IN ('UNKNOWN','PROBING','HEALTHY','DEGRADED','UNHEALTHY','STALE'));
 
-WITH current_catalog AS MATERIALIZED (
+WITH catalog_head AS MATERIALIZED (
     SELECT max(version) version FROM model_catalog_versions
 ), candidates AS MATERIALIZED (
     SELECT route.id route_id, identity.id model_id, protocol.id protocol_version_id,
@@ -40,7 +40,7 @@ WITH current_catalog AS MATERIALIZED (
       JOIN model_identities identity
         ON identity.provider_id=credential.provider
        AND identity.upstream_model_ref=route.model
-      JOIN current_catalog current ON true
+      JOIN catalog_head current ON true
       JOIN model_catalog_entries entry
         ON entry.catalog_version=current.version
        AND entry.model_id=identity.id

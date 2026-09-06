@@ -334,7 +334,7 @@ func newAdminPaginationIntegrationRepository(t *testing.T, ctx context.Context, 
 	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
 		t.Fatalf("select isolated integration schema: %v", err)
 	}
-	loaded, err := migrations.Load("../../migrations/billing")
+	loaded, err := loadBillingIntegrationMigrations("../../migrations/billing", schema)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1081,9 +1081,6 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/operations-overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit") {
 		return true
 	}
-	if resource == "/admin/v1/token-accounts" && method == http.MethodPost {
-		return true
-	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
@@ -1127,6 +1124,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if resource == "/admin/v1/commands:precheck" {
 		return method == http.MethodPost
 	}
+	if resource == "/admin/v1/commands/by-idempotency-key" || resource == "/admin/v1/commands/recovery-queue" {
+		return method == http.MethodGet
+	}
 	if resource == "/admin/v1/model-catalog/impact/rollback" {
 		return method == http.MethodGet
 	}
@@ -1135,11 +1135,26 @@ func tokenAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	if parts[2] == "commands" {
-		if len(parts) != 4 || method != http.MethodGet {
+		if len(parts) < 4 {
 			return false
 		}
-		_, err := uuid.Parse(parts[3])
-		return err == nil
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		if len(parts) == 4 {
+			return method == http.MethodGet
+		}
+		if len(parts) == 5 && parts[4] == "recovery-actions" {
+			return method == http.MethodPost
+		}
+		if len(parts) == 6 && parts[4] == "recovery-actions" && parts[5] == "by-idempotency-key" {
+			return method == http.MethodGet
+		}
+		if len(parts) == 6 && parts[4] == "recovery-actions" {
+			_, err := uuid.Parse(parts[5])
+			return method == http.MethodGet && err == nil
+		}
+		return false
 	}
 	if _, err := uuid.Parse(parts[3]); err != nil {
 		return false

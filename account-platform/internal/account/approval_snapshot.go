@@ -24,6 +24,15 @@ type ApprovalSnapshotRequest struct {
 	NormalizedCommand  json.RawMessage `json:"normalized_command"`
 }
 
+// Only a fresh model-pricing observation may advance its observation clock.
+// Stored approval snapshots and idempotency fingerprints remain unchanged.
+func sameApprovalFinancialFacts(commandType string, observed, frozen json.RawMessage) bool {
+	if commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || commandType == "TOKEN_MODEL_CATALOG_ROLLBACK" {
+		return approvalpolicy.SameTokenModelFinancialFacts(observed, frozen)
+	}
+	return sameJSONObject(observed, frozen)
+}
+
 type ApprovalSnapshotProjection struct {
 	CommandType              string          `json:"command_type"`
 	TargetResourceType       string          `json:"target_resource_type"`

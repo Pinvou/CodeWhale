@@ -427,9 +427,15 @@ test('organization creation is reserved for platform administrators', async () =
 test('operations API is role protected and limits mutations to documented management workflows', async () => {
   const admin = await readYaml('contracts/openapi/admin.yaml');
   assert.deepEqual(admin.security, [{ oidc: [] }]);
+  const serviceOnlyPaths = new Set([
+    '/account/internal/v1/token-account-authority/snapshot',
+    '/billing/internal/v1/token-account-wallet-provisioning-receipts',
+    '/billing/internal/v1/token-account-wallet-provisioning-receipts/{command_reference}',
+  ]);
   for (const [pathName, pathItem] of Object.entries(admin.paths)) {
-    assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/|\/token\/admin\/v2\/(?:provisionings\/\{provisioning_id\}|token-accounts\/\{token_account_id\}(?:\/(?:routes|impact\/route))?)$)/);
+    if (!serviceOnlyPaths.has(pathName)) assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/|\/token\/admin\/v2\/(?:provisionings\/\{provisioning_id\}|token-accounts\/\{token_account_id\}(?:\/(?:routes|impact\/route))?)$)/);
     for (const operation of Object.values(pathItem)) {
+      if (serviceOnlyPaths.has(pathName)) assert.deepEqual(operation.security, [{ serviceToken: [] }], `${pathName} must remain service-authenticated`);
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
     }
   }
@@ -492,7 +498,8 @@ test('default model routes are asynchronously platform managed and deployment-se
     'utf8',
   );
   assert.match(migration, /management_mode IN \('USER', 'PLATFORM'\)/);
-  assert.match(provisioner, /pg_advisory_xact_lock/);
+  assert.match(provisioner, /lockTokenAccountOwner\(ctx, tx, ownerType, ownerID\)/);
+  assert.match(await readFile(path.join(root, 'internal/token/owner_cap_policy.go'), 'utf8'), /pg_advisory_xact_lock/);
   assert.match(provisioner, /p\.repository\.secrets\.Encrypt/);
   assert.match(gateway, /s\.defaultRoutes\.Ensure[\s\S]*provisioningError[\s\S]*ListCandidates/);
   assert.doesNotMatch(gateway, /provisionResources/);

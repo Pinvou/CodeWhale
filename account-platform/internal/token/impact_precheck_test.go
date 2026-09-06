@@ -321,6 +321,52 @@ func TestPrecheckFingerprintBindsActionReplacementAndPriceVersion(t *testing.T) 
 	}
 }
 
+func TestImpactFingerprintIgnoresObservationClockButBindsFacts(t *testing.T) {
+	observed := time.Date(2026, 9, 6, 1, 0, 0, 0, time.UTC)
+	effective := observed.Add(-time.Hour)
+	priceVersion := int64(7)
+	priceID, formulaID, modelID := uuid.New(), uuid.New(), uuid.New()
+	for _, action := range []string{"MODEL_CATALOG_ROLLBACK", "MODEL_LIFECYCLE_DEPRECATED", "TOKEN_ACCOUNT_DISABLED", "TOKEN_ROUTE_DELETE", "TOKEN_CREDENTIAL_REVOKE"} {
+		t.Run(action, func(t *testing.T) {
+			makeResult := func() ImpactPrecheckResult {
+				return ImpactPrecheckResult{Action: action, Evidence: ImpactLocalEvidence{ResourceType: "MODEL", ResourceID: modelID.String(), ObservedAt: observed, CurrentVersion: ImpactResourceVersion{EvidenceETag: `"same-etag"`, EvidenceSetSHA256: strings.Repeat("a", 64)}}, PriceCoverage: &ImpactPriceSummary{ModelsChecked: 1, ModelsCovered: 1, FullyCovered: true, BillingObservedAt: observed, FinancialFactRevision: 11, PriceSetFingerprint: strings.Repeat("b", 64), Versions: []ImpactPriceEvidence{{ModelID: modelID, ProtocolCode: "CHAT", CreditUnit: "MICROCREDIT", Covered: true, FormulaVersionID: &formulaID, PriceVersionID: &priceID, PriceVersion: &priceVersion, EffectiveFrom: &effective}}}}
+			}
+			base := makeResult()
+			finalizeImpactResult(&base, "effective_at="+effective.Format(time.RFC3339Nano))
+			advanced := makeResult()
+			advanced.Evidence.ObservedAt = observed.Add(time.Minute)
+			advanced.PriceCoverage.BillingObservedAt = observed.Add(2 * time.Minute)
+			finalizeImpactResult(&advanced, "effective_at="+effective.Format(time.RFC3339Nano))
+			if base.PrecheckFingerprint != advanced.PrecheckFingerprint || base.TokenObservedAt.Equal(advanced.TokenObservedAt) || base.BillingObservedAt.Equal(*advanced.BillingObservedAt) {
+				t.Fatal("observation time became a change signal or metadata was lost")
+			}
+			for name, mutate := range map[string]func(*ImpactPrecheckResult){
+				"etag":               func(v *ImpactPrecheckResult) { v.Evidence.CurrentVersion.EvidenceETag = `"changed"` },
+				"dependency set":     func(v *ImpactPrecheckResult) { v.Evidence.CurrentVersion.EvidenceSetSHA256 = strings.Repeat("c", 64) },
+				"financial revision": func(v *ImpactPrecheckResult) { v.PriceCoverage.FinancialFactRevision++ },
+				"price set":          func(v *ImpactPrecheckResult) { v.PriceCoverage.PriceSetFingerprint = strings.Repeat("c", 64) },
+				"price version":      func(v *ImpactPrecheckResult) { id := uuid.New(); v.PriceCoverage.Versions[0].PriceVersionID = &id },
+				"business price effective time": func(v *ImpactPrecheckResult) {
+					at := effective.Add(time.Minute)
+					v.PriceCoverage.Versions[0].EffectiveFrom = &at
+				},
+			} {
+				changed := makeResult()
+				mutate(&changed)
+				finalizeImpactResult(&changed, "effective_at="+effective.Format(time.RFC3339Nano))
+				if changed.PrecheckFingerprint == base.PrecheckFingerprint {
+					t.Fatalf("%s was not bound", name)
+				}
+			}
+			changedAction := makeResult()
+			finalizeImpactResult(&changedAction, "effective_at="+effective.Add(time.Minute).Format(time.RFC3339Nano))
+			if changedAction.PrecheckFingerprint == base.PrecheckFingerprint {
+				t.Fatal("business action time was ignored")
+			}
+		})
+	}
+}
+
 func TestImpactKeyFingerprintStreamsHighCardinalityWithinBudget(t *testing.T) {
 	const keyCount = 1_000_000
 	runtime.GC()

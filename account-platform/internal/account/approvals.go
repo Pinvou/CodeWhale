@@ -151,7 +151,9 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 		return ApprovalRequest{}, err
 	}
 	lockScope := actorID.String() + "\x00" + policy.CommandType + "\x00" + strings.TrimSpace(draft.IdempotencyKey)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lockScope); err != nil {
+	// Keep unambiguous scope boundaries without sending NUL bytes as SQL text.
+	lockDigest := sha256.Sum256([]byte(lockScope))
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, hex.EncodeToString(lockDigest[:])); err != nil {
 		return ApprovalRequest{}, err
 	}
 	var existingID uuid.UUID
@@ -339,7 +341,7 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 			if precheckErr != nil {
 				return ApprovalRequest{}, precheckErr
 			}
-			if !sameJSONObject(projection.CriticalResourceVersions, item.CriticalResourceVersions) || !sameJSONObject(projection.FinancialSnapshot, item.FinancialSnapshot) {
+			if !sameJSONObject(projection.CriticalResourceVersions, item.CriticalResourceVersions) || !sameApprovalFinancialFacts(item.CommandType, projection.FinancialSnapshot, item.FinancialSnapshot) {
 				return r.invalidateApproval(ctx, tx, item, *actorID, "INVALIDATED", "AUTHORITATIVE_SNAPSHOT_CHANGED", map[string]any{}, now, ErrApprovalInvalidated)
 			}
 		}

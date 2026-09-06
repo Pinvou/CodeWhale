@@ -462,6 +462,16 @@
         "file": "000046_approval_execution_financial_snapshot.up.sql",
         "version": 46,
         "sha256": "f68b23040a0db09de25d31fe6699d0956fd0990c2fa90886f8af96e7317b3c93"
+      },
+      {
+        "file": "000047_token_approval_draft_invalidation.down.sql",
+        "version": 47,
+        "sha256": "6a4f9a1f821ff057165553491433b1720be1aacef055843509526b71d39adfcd"
+      },
+      {
+        "file": "000047_token_approval_draft_invalidation.up.sql",
+        "version": 47,
+        "sha256": "3d3a60704252cae47bc7c3042f2f901cd8c564345c89e8e16ca568f4dc486d21"
       }
     ],
     "billing": [
@@ -974,6 +984,16 @@
         "file": "000052_financial_fact_revision.up.sql",
         "version": 52,
         "sha256": "7b551d1325adcdcf73da63faa61ac70790ac149364ed435eb088ca210ddd4dc3"
+      },
+      {
+        "file": "000053_token_account_wallet_provisioning_receipts.down.sql",
+        "version": 53,
+        "sha256": "04dd5636c8940cbe80cf4c95a824f43de50c52bf6a7af2cf0487e56c661508ed"
+      },
+      {
+        "file": "000053_token_account_wallet_provisioning_receipts.up.sql",
+        "version": 53,
+        "sha256": "d442450f15b36db7c8d1b0bcee5a625c605f05f9380bb78f86b2274192f5f7f6"
       }
     ],
     "payment-simulator": [
@@ -1267,7 +1287,7 @@
       {
         "file": "000025_stable_routes_health.up.sql",
         "version": 25,
-        "sha256": "f79cb0529e8bbd11aad1fb8b68b2c2b8eab6e047dd5e12b13d932a422276b75f"
+        "sha256": "ae91955051536c28168db0ccb0bf8f1c9cf527fd7f0753b949ce02239c8bc86d"
       },
       {
         "file": "000026_credential_isolation.down.sql",
@@ -1298,6 +1318,16 @@
         "file": "000028_operations_overview_indexes.up.sql",
         "version": 28,
         "sha256": "36020c29cdcac4f5893cfc0da0b8b12949d0d9b8f7a3cfa955cfb589681b59f9"
+      },
+      {
+        "file": "000029_token_account_owner_cap_policy.down.sql",
+        "version": 29,
+        "sha256": "46d30725765a61f335e2809675181414794a9bf23fc60c75ecce6a3811b5bdd7"
+      },
+      {
+        "file": "000029_token_account_owner_cap_policy.up.sql",
+        "version": 29,
+        "sha256": "47f091b38bb1fbc78a014e45f51dc31464c791bc8d8de2d40f13c583f864d783"
       }
     ]
   }

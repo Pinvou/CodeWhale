@@ -46,9 +46,9 @@ func TestTokenCommandGovernancePostgresIntegration(t *testing.T) {
 	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := migrations.Load("../../migrations/token")
-	if err != nil || len(loaded) == 0 || loaded[len(loaded)-1].Version != 27 {
-		t.Fatalf("expected Token migration 27 last: %v", err)
+	loaded, err := loadTokenIntegrationMigrations("../../migrations/token", schema)
+	if err != nil || len(loaded) == 0 || loaded[len(loaded)-1].Version != 29 {
+		t.Fatalf("expected Token migration 29 last: %v", err)
 	}
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)

@@ -7,7 +7,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -20,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
@@ -27,6 +31,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // TestApprovalSnapshotLifecyclePostgresIntegration exercises the production
@@ -62,7 +67,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	tokenRepository, tokenConnection := newApprovalSnapshotTokenRepository(t, ctx, tokenDatabaseURL)
 	modelID := seedApprovalSnapshotTokenModel(t, ctx, tokenConnection)
 	lifecyclePlanID, lifecyclePlanVersion, _, lifecycleEffectiveAt := seedApprovalSnapshotLifecyclePlan(t, ctx, tokenConnection, requester.ID, modelID)
-	pricing := approvalSnapshotPricingStub{modelID: modelID, observedAt: time.Now().UTC(), fingerprint: strings.Repeat("b", 64)}
+	pricing := &approvalSnapshotPricingStub{modelID: modelID, observedAt: time.Now().UTC(), fingerprint: strings.Repeat("b", 64)}
 	tokenService := tokenservice.NewService(tokenRepository, nil, nil, nil, tokenservice.ProviderURLPolicy{}, nil, nil, 0).WithImpactPrechecks(true, tokenRepository, pricing)
 	serviceToken := "snapshot-integration-token"
 	tokenHandler := tokenService.Handler(serviceToken, func(context.Context, string) (identity.Principal, error) { return identity.Principal{}, ErrForbidden })
@@ -76,6 +81,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 
 	var sourceMode atomic.Int32
 	var sourceCalls atomic.Int32
+	var sourceResponse atomic.Value
 	sourceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sourceCalls.Add(1)
 		if sourceMode.Load() == 1 {
@@ -86,7 +92,14 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 			http.Error(w, `{"code":"UPSTREAM_TIMEOUT"}`, http.StatusGatewayTimeout)
 			return
 		}
-		tokenHandler.ServeHTTP(w, r)
+		response := httptest.NewRecorder()
+		tokenHandler.ServeHTTP(response, r)
+		sourceResponse.Store(fmt.Sprintf("%d/%s", response.Code, response.Body.String()))
+		for key, values := range response.Header() {
+			w.Header()[key] = values
+		}
+		w.WriteHeader(response.Code)
+		_, _ = w.Write(response.Body.Bytes())
 	}))
 	t.Cleanup(sourceServer.Close)
 	source, err := NewHTTPApprovalSnapshotSource(sourceServer.URL, serviceToken)
@@ -145,7 +158,8 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	for index, response := range responses {
 		var item ApprovalRequest
 		if response.Code != http.StatusCreated || json.Unmarshal(response.Body.Bytes(), &item) != nil || item.Status != "DRAFT" || len(item.CriticalResourceVersions) == 0 || len(item.FinancialSnapshot) == 0 {
-			t.Fatalf("idempotent create status=%d body=%s", response.Code, response.Body.String())
+			_, evidenceErr := tokenRepository.ModelLifecycleImpact(ctx, modelID, nil)
+			t.Fatalf("idempotent create status=%d body=%s source=%v evidence_error=%v", response.Code, response.Body.String(), sourceResponse.Load(), evidenceErr)
 		}
 		if index == 0 {
 			seeded = item
@@ -163,7 +177,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM approval_request_snapshots WHERE approval_request_id=$1`, seeded.ID).Scan(&snapshotRows); err != nil {
 		t.Fatal(err)
 	}
-	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM approval_request_state_events WHERE approval_request_id=$1 AND reason_code='CREATED'`, seeded.ID).Scan(&createEvents); err != nil {
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM approval_state_events WHERE approval_request_id=$1 AND reason_code='CREATED'`, seeded.ID).Scan(&createEvents); err != nil {
 		t.Fatal(err)
 	}
 	if requestRows != 1 || snapshotRows != 1 || createEvents != 1 {
@@ -266,17 +280,15 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	driftDraft.IdempotencyKey = "snapshot-lifecycle-drift-0003"
 	driftID := seedApprovalSnapshotDraft(t, ctx, repository, requester.ID, driftDraft)
 	sourceMode.Store(0)
-	if _, err := tokenConnection.Exec(ctx, `UPDATE model_catalog_entries SET lifecycle_status='DEPRECATED' WHERE model_id=$1`, modelID); err != nil {
-		t.Fatal(err)
-	}
+	// Published catalog history is immutable. Drift a current authoritative
+	// price-set fact instead of illegally rewriting a published catalog row.
+	pricing.fingerprint = strings.Repeat("c", 64)
 	drift := performApprovalIntegrationRequest(t, service.adminSubmitApprovalRequest, requesterPrincipal, http.MethodPost, "/admin/v1/approval-requests/"+driftID.String()+"/actions/submit", driftID.String(), map[string]any{"expected_version": 1})
 	if drift.Code != http.StatusConflict || !strings.Contains(drift.Body.String(), "APPROVAL_REQUEST_INVALIDATED") {
 		t.Fatalf("drift status=%d body=%s", drift.Code, drift.Body.String())
 	}
 	assertApprovalStatusVersion(t, ctx, repository, driftID, "INVALIDATED", 2)
-	if _, err := tokenConnection.Exec(ctx, `UPDATE model_catalog_entries SET lifecycle_status='PUBLISHED' WHERE model_id=$1`, modelID); err != nil {
-		t.Fatal(err)
-	}
+	pricing.fingerprint = strings.Repeat("b", 64)
 
 	sourceMode.Store(0)
 	decide := performApprovalIntegrationRequest(t, service.adminDecideApprovalRequest, approverPrincipal, http.MethodPost, "/admin/v1/approval-requests/"+seeded.ID.String()+"/actions/decide", seeded.ID.String(), map[string]any{"expected_version": 2, "decision": "APPROVED", "reason": "independent evidence approved", "observed_versions": json.RawMessage(critical)})
@@ -301,7 +313,11 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	executionBody, _ := json.Marshal(map[string]any{"job_run_id": "snapshot-chain-job", "observed_versions": json.RawMessage(critical), "observed_financial_snapshot": json.RawMessage(financial)})
+	observedProjection, err := source.PrecheckApprovalSnapshot(ctx, ApprovalSnapshotRequest{CommandType: draft.CommandType, TargetResourceType: draft.TargetResourceType, TargetResourceID: draft.TargetResourceID, NormalizedCommand: draft.NormalizedCommand})
+	if err != nil || !sameApprovalFinancialFacts(draft.CommandType, observedProjection.FinancialSnapshot, financial) || sameJSONObject(observedProjection.FinancialSnapshot, financial) {
+		t.Fatalf("fresh observation must advance time but preserve facts: %+v err=%v", observedProjection, err)
+	}
+	executionBody, _ := json.Marshal(map[string]any{"job_run_id": "snapshot-chain-job", "observed_versions": json.RawMessage(critical), "observed_financial_snapshot": observedProjection.FinancialSnapshot})
 	executionRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/approval-requests/"+seeded.ID.String()+"/executions", bytes.NewReader(executionBody)).WithContext(executionCtx)
 	executionRequest.SetPathValue("approval_request_id", seeded.ID.String())
 	executionRequest.Header.Set("Content-Type", "application/json")
@@ -312,7 +328,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 		t.Fatalf("execution lease status=%d body=%s", executionResponse.Code, executionResponse.Body.String())
 	}
 	currentProjection, err := source.PrecheckApprovalSnapshot(ctx, ApprovalSnapshotRequest{CommandType: draft.CommandType, TargetResourceType: draft.TargetResourceType, TargetResourceID: draft.TargetResourceID, NormalizedCommand: draft.NormalizedCommand})
-	if err != nil || !sameJSONObject(currentProjection.CriticalResourceVersions, critical) || !sameJSONObject(currentProjection.FinancialSnapshot, financial) {
+	if err != nil || !sameJSONObject(currentProjection.CriticalResourceVersions, critical) || !sameApprovalFinancialFacts(draft.CommandType, currentProjection.FinancialSnapshot, financial) {
 		t.Fatalf("execution projection=%+v err=%v", currentProjection, err)
 	}
 	tokenService.WithApprovedTokenCommandExecutor(tokenservice.NewPostgresApprovedCredentialExecutor(tokenRepository)).
@@ -366,7 +382,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	credentialAccountID, credentialID := uuid.New(), uuid.New()
 	if _, err := tokenConnection.Exec(ctx, `
 INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Credential approval snapshot','ACTIVE',$4,$5,$5,'PLATFORM');
-INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,created_by,created_at,validation_status) VALUES($6,$1,'provider','https://private.invalid','secret'::bytea,'private-key',$7,1,'RETIRED',ARRAY['model-one'],$4,$5,'VALID')`, credentialAccountID, uuid.New(), uuid.New(), approver.ID, time.Now().UTC(), credentialID, strings.Repeat("d", 64)); err != nil {
+INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,created_by,created_at,validation_status) VALUES($6,$1,'provider','https://private.invalid','secret'::bytea,'private-key',$7,1,'RETIRED',ARRAY['model-one'],$4,$5,'VALID')`, pgx.QueryExecModeSimpleProtocol, credentialAccountID, uuid.New(), uuid.New(), approver.ID, time.Now().UTC(), credentialID, strings.Repeat("d", 64)); err != nil {
 		t.Fatal(err)
 	}
 	credentialDraft := map[string]any{
@@ -389,6 +405,83 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if credentialSubmit.Code != http.StatusOK || json.Unmarshal(credentialSubmit.Body.Bytes(), &credentialSubmitted) != nil || credentialSubmitted.Status != "SUBMITTED" || !sameJSONObject(credentialSubmitted.CriticalResourceVersions, credentialApproval.CriticalResourceVersions) || string(credentialSubmitted.FinancialSnapshot) != "{}" {
 		t.Fatalf("credential approval submit status=%d body=%s", credentialSubmit.Code, credentialSubmit.Body.String())
 	}
+	assertTokenApprovalDraftInvalidationGuard(t, ctx, repository, seeded.ID)
+}
+
+func assertTokenApprovalDraftInvalidationGuard(t *testing.T, ctx context.Context, repository *PostgresRepository, exampleID uuid.UUID) {
+	t.Helper()
+	tx, err := repository.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	// Exercise the actual installed trigger function against a temporary row
+	// copy, without fabricating foreign keys or mutating approved history.
+	if _, err = tx.Exec(ctx, `CREATE TEMP TABLE approval_transition_fixture ON COMMIT DROP AS SELECT * FROM approval_requests WHERE id=$1`, exampleID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `UPDATE approval_transition_fixture SET status='DRAFT'; CREATE TRIGGER approval_transition_guard BEFORE UPDATE ON approval_transition_fixture FOR EACH ROW EXECUTE FUNCTION protect_submitted_approval_request()`); err != nil {
+		t.Fatal(err)
+	}
+	allowedCode := "AUTHORITATIVE_SNAPSHOT_CHANGED"
+	check := func(command string, code any, tamper, wantAllowed bool) {
+		t.Helper()
+		if _, err := tx.Exec(ctx, `SAVEPOINT guard_case`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE approval_transition_fixture SET command_type=$1`, command); err != nil {
+			t.Fatal(err)
+		}
+		_, updateErr := tx.Exec(ctx, `UPDATE approval_transition_fixture SET status='INVALIDATED',invalidation_code=$1,reason=CASE WHEN $2::boolean THEN reason||' changed' ELSE reason END`, code, tamper)
+		if _, err := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT guard_case`); err != nil {
+			t.Fatal(err)
+		}
+		if wantAllowed && updateErr != nil {
+			t.Fatalf("allowed draft invalidation %s: %v", command, updateErr)
+		}
+		if !wantAllowed {
+			pgError, ok := updateErr.(*pgconn.PgError)
+			if !ok || (pgError.Code != "23514" && pgError.Code != "55000") {
+				t.Fatalf("guard accepted invalid transition %s/%v/tamper=%v: %v", command, code, tamper, updateErr)
+			}
+		}
+	}
+	commands := []string{"TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE"}
+	for _, command := range commands {
+		check(command, allowedCode, false, true)
+		check(command, nil, false, false)
+		check(command, "OTHER_REASON", false, false)
+		check(command, allowedCode, true, false)
+	}
+	check("WALLET_ADJUSTMENT", allowedCode, false, false)
+	var before, after string
+	const history = `SELECT jsonb_build_array((SELECT count(*) FROM approval_requests),(SELECT count(*) FROM approval_requests WHERE status='INVALIDATED'),(SELECT count(*) FROM approval_request_snapshots),(SELECT count(*) FROM approval_state_events))::text`
+	if err := tx.QueryRow(ctx, history).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, migration := range loaded {
+		if migration.Version == 47 {
+			found = true
+			if _, err := tx.Exec(ctx, migration.DownSQL); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("missing draft invalidation down migration")
+	}
+	for _, command := range commands {
+		check(command, allowedCode, false, false)
+	}
+	if err := tx.QueryRow(ctx, history).Scan(&after); err != nil || before != after {
+		t.Fatalf("down changed approval history: %s/%s err=%v", before, after, err)
+	}
+	// Rollback restores the installed up function; down itself removed no data.
 }
 
 func approvalIntegrationPrincipal(actor integrationActor) identity.Principal {
@@ -475,9 +568,10 @@ type approvalSnapshotPricingStub struct {
 	modelID     uuid.UUID
 	observedAt  time.Time
 	fingerprint string
+	reads       atomic.Int64
 }
 
-func (stub approvalSnapshotPricingStub) ImpactPriceCoverage(_ context.Context, queries []tokenservice.ImpactPriceQuery) (tokenservice.ImpactPriceCoverageResult, error) {
+func (stub *approvalSnapshotPricingStub) ImpactPriceCoverage(_ context.Context, queries []tokenservice.ImpactPriceQuery) (tokenservice.ImpactPriceCoverageResult, error) {
 	formulaID, priceID, priceVersion := uuid.MustParse("00000000-0000-7000-8300-000000000001"), uuid.MustParse("00000000-0000-7000-8300-000000000002"), int64(11)
 	effectiveFrom := stub.observedAt.Add(-time.Hour)
 	items := make([]tokenservice.ImpactPriceCoverage, 0, len(queries))
@@ -487,7 +581,7 @@ func (stub approvalSnapshotPricingStub) ImpactPriceCoverage(_ context.Context, q
 		}
 		items = append(items, tokenservice.ImpactPriceCoverage{ModelID: query.ModelID, ProtocolCode: query.ProtocolCode, FormulaVersionID: &formulaID, CreditUnit: query.CreditUnit, Covered: true, PriceVersionID: &priceID, PriceVersion: &priceVersion, EffectiveFrom: &effectiveFrom})
 	}
-	return tokenservice.ImpactPriceCoverageResult{Items: items, AsOf: stub.observedAt, Source: "BILLING", FinancialFactRevision: 11, PriceSetFingerprint: stub.fingerprint}, nil
+	return tokenservice.ImpactPriceCoverageResult{Items: items, AsOf: stub.observedAt.Add(time.Duration(stub.reads.Add(1)) * time.Millisecond), Source: "BILLING", FinancialFactRevision: 11, PriceSetFingerprint: stub.fingerprint}, nil
 }
 
 func newApprovalSnapshotTokenRepository(t *testing.T, ctx context.Context, databaseURL string) (*tokenservice.PostgresRepository, *pgx.Conn) {
@@ -513,6 +607,21 @@ func newApprovalSnapshotTokenRepository(t *testing.T, ctx context.Context, datab
 	loaded, err := migrations.Load("../../migrations/token")
 	if err != nil {
 		t.Fatal(err)
+	}
+	// This legacy fixture uses an isolated schema, not a deployment-role gate.
+	// Preserve migration 29's qualification inside that schema; real database
+	// ownership/ACL safety is covered by the dedicated non-superuser gates.
+	for index := range loaded {
+		if loaded[index].Version != 29 {
+			continue
+		}
+		sql := strings.ReplaceAll(loaded[index].UpSQL, "to_regnamespace('public')", "to_regnamespace('"+schema+"')")
+		sql = strings.ReplaceAll(sql, "SCHEMA public", "SCHEMA "+identifier)
+		sql = strings.ReplaceAll(sql, "public.", identifier+".")
+		loaded[index].UpSQL = "ALTER SCHEMA " + identifier + " OWNER TO token_schema_owner;\n" + sql + "\nRESET ROLE;"
+		normalized := strings.ReplaceAll(strings.ReplaceAll(loaded[index].UpSQL, "\r\n", "\n"), "\r", "\n")
+		digest := sha256.Sum256([]byte(normalized))
+		loaded[index].Checksum = hex.EncodeToString(digest[:])
 	}
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
@@ -552,7 +661,7 @@ func seedApprovalSnapshotTokenModel(t *testing.T, ctx context.Context, connectio
 	if _, err := connection.Exec(ctx, `
 INSERT INTO model_identities(id,provider_id,adapter_version,upstream_model_ref,upstream_model_ref_digest,created_by,created_at) VALUES($1,'INTEGRATION','v1','account-snapshot-model',$2,$3,$4);
 INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($5,$1,1,$6,4096,1024,'["TEXT"]','integration-v1',$3,$4);
-INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES($7,$1,'Account snapshot model','account snapshot model','','{}','PUBLISHED',$5,$6,true);`, modelID, strings.Repeat("a", 64), actorID, now, capabilityID, protocolID, catalogVersion); err != nil {
+INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES($7,$1,'Account snapshot model','account snapshot model','','{}','PUBLISHED',$5,$6,true);`, pgx.QueryExecModeSimpleProtocol, modelID, strings.Repeat("a", 64), actorID, now, capabilityID, protocolID, catalogVersion); err != nil {
 		t.Fatal(err)
 	}
 	return modelID
@@ -562,7 +671,9 @@ func seedApprovalSnapshotLifecyclePlan(t *testing.T, ctx context.Context, connec
 	t.Helper()
 	planID := uuid.New()
 	planVersion := int64(1)
-	effectiveAt := time.Now().UTC().Add(-time.Minute)
+	// PostgreSQL persists timestamps at microsecond precision; the frozen
+	// request must use the exact persisted plan time, not extra Go nanoseconds.
+	effectiveAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	createdAt := effectiveAt.Add(-10 * time.Minute)
 	var catalogVersion int64
 	if err := connection.QueryRow(ctx, `SELECT max(version) FROM model_catalog_versions`).Scan(&catalogVersion); err != nil {
@@ -572,7 +683,7 @@ func seedApprovalSnapshotLifecyclePlan(t *testing.T, ctx context.Context, connec
 INSERT INTO model_lifecycle_plans(id,model_id,plan_version,expected_catalog_version,current_lifecycle,target_lifecycle,effective_at,existing_session_cutoff_at,replacement_model_id,force_cancel_inflight,status,reason,request_digest,idempotency_key_digest,created_by,created_at,updated_at)
 VALUES($1,$2,$3,$4,'PUBLISHED','DEPRECATED',$5,NULL,NULL,false,'PENDING_APPROVAL','execute through the complete Account and Token approval chain',$6,$7,$8,$9,$9);
 INSERT INTO model_lifecycle_plan_events(id,plan_id,plan_version,event_type,actor_type,actor_id,reason,evidence,occurred_at)
-VALUES($10,$1,$3,'CREATED','USER',$8::text,'execute through the complete Account and Token approval chain','{}'::jsonb,$9)`, planID, modelID, planVersion, catalogVersion, effectiveAt, strings.Repeat("1", 64), strings.Repeat("2", 64), actorID, createdAt, uuid.New()); err != nil {
+VALUES($10,$1,$3,'CREATED','USER',$8::text,'execute through the complete Account and Token approval chain','{}'::jsonb,$9)`, pgx.QueryExecModeSimpleProtocol, planID, modelID, planVersion, catalogVersion, effectiveAt, strings.Repeat("1", 64), strings.Repeat("2", 64), actorID, createdAt, uuid.New()); err != nil {
 		t.Fatal(err)
 	}
 	return planID, planVersion, catalogVersion, effectiveAt
@@ -601,6 +712,19 @@ func newApprovalExecutorTokenHandler(t *testing.T, service *tokenservice.Service
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "approval-executor", "n": n, "e": e}}})
 	}))
 	t.Cleanup(issuer.Close)
+	// Workload JWKS is fetched by the authenticator's background key set,
+	// not the incoming request context. Trust only this test issuer's CA;
+	// certificate verification remains enabled and production is unchanged.
+	previousTransport := http.DefaultTransport
+	trustedTransport := previousTransport.(*http.Transport).Clone()
+	roots := x509.NewCertPool()
+	roots.AddCert(issuer.Certificate())
+	trustedTransport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	http.DefaultTransport = trustedTransport
+	t.Cleanup(func() {
+		http.DefaultTransport = previousTransport
+		trustedTransport.CloseIdleConnections()
+	})
 	audience := "account-token-approval-integration"
 	t.Setenv("WORKLOAD_IDENTITY_ISSUER", issuer.URL)
 	t.Setenv("WORKLOAD_IDENTITY_AUDIENCE", audience)
@@ -612,7 +736,7 @@ func newApprovalExecutorTokenHandler(t *testing.T, service *tokenservice.Service
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service.Handler("", func(context.Context, string) (identity.Principal, error) { return identity.Principal{}, ErrForbidden }), token, issuer.Client()
+	return httpserver.CorrelationHandler(service.Handler("", func(context.Context, string) (identity.Principal, error) { return identity.Principal{}, ErrForbidden })), token, issuer.Client()
 }
 
 func signApprovalExecutorJWT(key *rsa.PrivateKey, claims map[string]any) (string, error) {

@@ -23,11 +23,13 @@ import (
 )
 
 type AdminOwnerCandidate struct {
-	ID           uuid.UUID `json:"id"`
-	Type         string    `json:"type"`
-	DisplayLabel string    `json:"display_label"`
-	Status       string    `json:"status"`
-	Normalized   string    `json:"-"`
+	ID                   uuid.UUID `json:"id"`
+	Type                 string    `json:"type"`
+	DisplayLabel         string    `json:"display_label"`
+	Status               string    `json:"status"`
+	AuthorizationVersion int64     `json:"-"`
+	OwnerVersion         int64     `json:"-"`
+	Normalized           string    `json:"-"`
 }
 
 type OwnerCandidateDirectory interface {
@@ -54,6 +56,7 @@ func NewHTTPOwnerCandidateDirectory(rawURL, serviceToken string) (*HTTPOwnerCand
 
 func (d *HTTPOwnerCandidateDirectory) Scan(ctx context.Context, principal identity.Principal, ownerType string, organizationID *uuid.UUID, consume func([]AdminOwnerCandidate) error) error {
 	cursor := ""
+	authorityVersion := int64(0)
 	for {
 		endpoint := *d.endpoint
 		query := endpoint.Query()
@@ -103,17 +106,30 @@ func (d *HTTPOwnerCandidateDirectory) Scan(ctx context.Context, principal identi
 			return errors.New("owner candidate authority unavailable")
 		}
 		var page struct {
-			Items      []AdminOwnerCandidate `json:"items"`
-			NextCursor *string               `json:"next_cursor"`
-			HasMore    bool                  `json:"has_more"`
+			Items                []AdminOwnerCandidate `json:"items"`
+			NextCursor           *string               `json:"next_cursor"`
+			HasMore              bool                  `json:"has_more"`
+			AuthorizationVersion int64                 `json:"authorization_version"`
+			OwnerVersions        map[string]int64      `json:"owner_versions"`
 		}
 		err = json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(&page)
 		response.Body.Close()
 		if err != nil {
 			return err
 		}
-		for _, item := range page.Items {
-			if item.ID == uuid.Nil || !slices.Contains([]string{"USER", "ORGANIZATION", "UNIT"}, item.Type) || !slices.Contains([]string{"ACTIVE", "DISABLED", "PROVISIONING"}, item.Status) {
+		if page.AuthorizationVersion < 1 {
+			return errors.New("owner candidate authority returned an invalid authorization version")
+		}
+		if authorityVersion == 0 {
+			authorityVersion = page.AuthorizationVersion
+		} else if authorityVersion != page.AuthorizationVersion {
+			return ErrCatalogVersionConflict
+		}
+		for index := range page.Items {
+			page.Items[index].AuthorizationVersion = page.AuthorizationVersion
+			page.Items[index].OwnerVersion = page.OwnerVersions[page.Items[index].ID.String()]
+			item := page.Items[index]
+			if item.ID == uuid.Nil || item.OwnerVersion < 1 || !slices.Contains([]string{"USER", "ORGANIZATION", "UNIT"}, item.Type) || !slices.Contains([]string{"ACTIVE", "DISABLED", "PROVISIONING"}, item.Status) {
 				return errors.New("owner candidate authority returned a non-selectable lifecycle")
 			}
 		}

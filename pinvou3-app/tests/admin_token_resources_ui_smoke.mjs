@@ -28,8 +28,13 @@ let candidateDelay = false;
 let modelDelay = false;
 let routeMode = 'success';
 let accountStatus = 'ACTIVE';
+let accountCreateMode = 'success';
+let persistedQueue = false;
+let queueFailure = false;
 const statusCommandID = '0199a100-0001-7000-8000-000000000108';
-const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, impactCalls: 0, routeCalls: [], commandCalls: [] };
+const recoveryActionID = '0199a100-0001-7000-8000-000000000109';
+const recoveryAuditID = '0199a100-0001-7000-8000-000000000110';
+const observations = { candidateCalls: 0, candidateAborted: 0, modelCalls: 0, modelAborted: 0, impactCalls: 0, routeCalls: [], commandCalls: [], recoveryCalls: [], queueCalls: [] };
 
 function envelope(items) {
   return { items, next_cursor: '', has_more: false, limit: 50, as_of: '2026-09-04T12:00:00Z', snapshot_expires_at: '2026-09-04T12:15:00Z', request_id: 'request-test' };
@@ -134,12 +139,22 @@ const server = createServer(async (request, response) => {
     if (url.searchParams.has('model-delay')) modelDelay = url.searchParams.get('model-delay') === '1';
     if (url.searchParams.has('route-mode')) routeMode = url.searchParams.get('route-mode');
     if (url.searchParams.has('account-status')) accountStatus = url.searchParams.get('account-status');
-    return json(response, { permissions, formsEnabled, actionsEnabled, routeMode, accountStatus });
+    if (url.searchParams.has('account-create-mode')) accountCreateMode = url.searchParams.get('account-create-mode');
+    if (url.searchParams.has('queue')) persistedQueue = url.searchParams.get('queue') === '1';
+    if (url.searchParams.has('queue-failure')) queueFailure = url.searchParams.get('queue-failure') === '1';
+    return json(response, { permissions, formsEnabled, actionsEnabled, routeMode, accountStatus, accountCreateMode });
   }
   if (url.pathname === '/__test__/state') return json(response, observations);
   if (url.pathname === '/api/session') return json(response, { authenticated: true, csrf_token: 'csrf-test', feature_flags: { admin_model_token_ia: true, admin_token_resource_forms: formsEnabled, admin_model_token_actions: actionsEnabled } });
   if (url.pathname === '/api/account/v1/account/bootstrap') return json(response, { user_id: ownerID, platform_permissions: permissions });
   if (url.pathname === '/api/admin/token/admin/v1/token-accounts') return json(response, envelope([{ ...account, status: accountStatus }]));
+  if (url.pathname === '/api/admin/token/admin/v1/commands/recovery-queue') {
+    observations.queueCalls.push(url.search);
+    if (queueFailure) return json(response, { code: 'SOURCE_UNAVAILABLE', request_id: 'recovery-queue-failure' }, 503);
+    const nextPage = Boolean(url.searchParams.get('cursor'));
+    const item = { command_reference: nextPage ? recoveryActionID : statusCommandID, command_type: 'TOKEN_ACCOUNT_CREATE', status: 'PENDING', recovery_state: 'MANUAL_REVIEW', recovery_epoch: 3, created_at: '2026-09-04T12:00:00Z', updated_at: '2026-09-04T12:00:01Z' };
+    return json(response, { ...envelope(persistedQueue ? [item] : []), has_more: persistedQueue && !nextPage, next_cursor: persistedQueue && !nextPage ? 'opaque-account-recovery-next-page-cursor' : '' });
+  }
   if (url.pathname === `/api/admin/token/admin/v1/token-accounts/${accountID}`) return json(response, { ...accountDetail, status: accountStatus });
   if (url.pathname === '/api/admin/token/admin/v1/owner-candidates') {
     observations.candidateCalls += 1;
@@ -160,17 +175,40 @@ const server = createServer(async (request, response) => {
   if (url.pathname === `/api/admin/token/admin/v1/token-accounts/${accountID}/impact/status`) {
     return json(response, { ...routeImpact('UPSERT'), action: `TOKEN_ACCOUNT_STATUS_${url.searchParams.get('target_status')}`, evidence: { ...routeImpact('UPSERT').evidence, resource_type: 'TOKEN_ACCOUNT', resource_id: accountID } });
   }
+  if (url.pathname === '/api/admin/token/admin/v1/commands:precheck' && request.method === 'POST') {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    return json(response, {
+      ...routeImpact('UPSERT'), action: input.command_type,
+      evidence: { ...routeImpact('UPSERT').evidence, resource_type: input.target_resource_type, resource_id: input.target_resource_id, current_status: accountStatus },
+      expected_versions: { token_account_id: accountID, expected_account_version: 2, target_status: input.command.target_status },
+    });
+  }
   if (url.pathname === '/api/admin/token/admin/v1/commands' && request.method === 'POST') {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     observations.commandCalls.push({ key: request.headers['idempotency-key'], body: input });
+    const manualReview = input.command_type === 'TOKEN_ACCOUNT_CREATE' && accountCreateMode === 'manual-review';
     return json(response, {
       command_reference: statusCommandID, command_type: input.command_type, policy_version: 2,
       actor_user_id: ownerID, actor_permission: 'platform.tokens.manage', authorization_version: 3,
       idempotency_fingerprint: 'd'.repeat(64), target_resource_type: input.target_resource_type, target_resource_id: input.target_resource_id,
-      status: 'SUCCEEDED', redacted_result: {}, stable_error_code: null, approval_request_id: null,
-      audit_request_id: 'token-status-audit', created_at: '2026-09-04T12:00:00Z', completed_at: '2026-09-04T12:00:01Z',
+      status: manualReview ? 'PENDING' : 'SUCCEEDED', redacted_result: {}, stable_error_code: null, approval_request_id: null,
+      audit_request_id: 'token-status-audit', created_at: '2026-09-04T12:00:00Z', completed_at: manualReview ? null : '2026-09-04T12:00:01Z',
+      ...(manualReview ? { recovery_state: 'MANUAL_REVIEW', recovery_diagnostic_code: 'ACCOUNT_PROVISIONING_MANUAL_REVIEW', recovery_epoch: 3 } : {}),
+    });
+  }
+  if (url.pathname === `/api/admin/token/admin/v1/commands/${statusCommandID}/recovery-actions` && request.method === 'POST') {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    observations.recoveryCalls.push({ path: url.pathname, method: request.method, key: request.headers['idempotency-key'], body });
+    return json(response, {
+      action_id: recoveryActionID, command_reference: statusCommandID, command_type: 'TOKEN_ACCOUNT_CREATE', action: body.action,
+      status: 'SUCCEEDED', recovery_state: body.action === 'REQUEUE' ? 'PENDING' : 'FAILED', recovery_epoch: body.action === 'REQUEUE' ? 4 : 3,
+      stable_error_code: null, audit_reference: recoveryAuditID, created_at: '2026-09-04T12:01:00Z', completed_at: '2026-09-04T12:01:01Z',
     });
   }
   if (url.pathname === `/api/admin/token/admin/v2/token-accounts/${accountID}/routes` && request.method === 'PUT') {
@@ -269,7 +307,7 @@ try {
   await page.goto(`${origin}/admin.html?section=tokenResources`, { waitUntil: 'networkidle0' });
   await configure(page, 'permissions=all&gate=1&action-gate=1&candidate-delay=1');
   await page.evaluate(() => { globalThis.__tokenResourceTest.replaceCount = 0; });
-  await page.click('.adm-source-head .adm-row-actions button:first-child');
+  await page.click('#admin-root .adm-source-head .adm-row-actions button:first-child');
   await page.waitForFunction(() => fetch('/__test__/state').then((response) => response.json()).then((value) => value.candidateCalls >= 1));
   await configure(page, 'permissions=no-owner');
   await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
@@ -283,8 +321,8 @@ try {
 
   await configure(page, 'permissions=all&candidate-delay=0&model-delay=1');
   await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
-  await page.waitForFunction(() => document.querySelectorAll('.adm-source-head .adm-row-actions button').length === 2);
-  await page.click('tbody tr button');
+  await page.waitForFunction(() => document.querySelectorAll('#admin-root .adm-source-head .adm-row-actions button').length === 2);
+  await page.click('#admin-root .adm-source-card .adm-table tbody tr td:last-child button');
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.match(page.url(), /token_account_id=/, `route action did not update URL: ${await page.$eval('main', (node) => node.textContent)}`);
   await page.waitForSelector('.adm-token-health');
@@ -312,7 +350,67 @@ try {
   assert.equal(await page.$$eval('.adm-token-health button.danger,.adm-token-health .adm-row-actions button:not(:last-child)', (nodes) => nodes.length), 0, 'action gate off leaves Token resources read-only');
   assert.equal(await page.$$eval('.adm-high-risk-dialog', (nodes) => nodes.length), 0, 'action gate off renders no command dialog');
 
-  await configure(page, 'permissions=all&gate=1&action-gate=1&account-status=DISABLED');
+  // The queue is server-backed: a new page/operator can discover work without
+  // opening a create dialog or replaying the original creation command.
+  await configure(page, 'permissions=all&gate=1&action-gate=1&queue=1');
+  await page.goto(`${origin}/admin.html?section=tokenResources`, { waitUntil: 'networkidle0' });
+  const queueSelector = '[aria-labelledby="account-recovery-queue-title"]';
+  await page.waitForSelector(`${queueSelector} tbody tr`);
+  const commandsBeforeQueue = (await state(page)).commandCalls.length;
+  await page.click(`${queueSelector} .adm-pagination button:last-child`);
+  await page.waitForFunction((value) => document.querySelector('[aria-labelledby="account-recovery-queue-title"] tbody')?.textContent.includes(value), {}, recoveryActionID);
+  assert.match(page.url(), /account_recovery_cursor=/);
+  await page.reload({ waitUntil: 'networkidle0' });
+  assert.ok(await page.$eval(`${queueSelector} tbody`, (node, value) => node.textContent.includes(value), recoveryActionID), 'reload restores the server-backed queue page');
+  await page.goto(`${origin}/admin.html?section=tokenResources`, { waitUntil: 'networkidle0' });
+  await page.click(`${queueSelector} tbody button`);
+  await page.waitForSelector('[aria-labelledby="token-account-recovery-title"]');
+  assert.equal((await state(page)).commandCalls.length, commandsBeforeQueue, 'reviewing persisted work never replays account creation');
+  await page.click('[aria-labelledby="token-account-recovery-title"] header button');
+  await configure(page, 'queue-failure=1');
+  await page.click(`${queueSelector} .adm-source-head button`);
+  await page.waitForSelector(`${queueSelector} [role="alert"]`);
+  assert.ok(await page.$eval('.adm-source-card tbody', node => node.textContent.includes('Production account')), 'queue failure leaves account list usable');
+  await configure(page, 'queue-failure=0');
+  await page.click(`${queueSelector} [role="alert"] button`);
+  await page.waitForSelector(`${queueSelector} tbody tr`);
+  await configure(page, 'permissions=no-owner');
+  await page.evaluate(() => globalThis.dispatchEvent(new Event('focus')));
+  await page.waitForFunction(() => !document.querySelector('[aria-labelledby="account-recovery-queue-title"]'));
+  const queueCallsAfterRevoke = (await state(page)).queueCalls.length;
+  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal((await state(page)).queueCalls.length, queueCallsAfterRevoke, 'revoked permission stops hidden queue requests');
+
+  await configure(page, 'permissions=all&gate=1&action-gate=1&account-create-mode=manual-review&queue=0');
+  await page.goto(`${origin}/admin.html?section=tokenResources`, { waitUntil: 'networkidle0' });
+  await page.click('#admin-root .adm-source-head .adm-row-actions button:first-child');
+  await page.waitForSelector('[aria-labelledby="token-owner-dialog-title"] [role="option"]');
+  await page.click('[aria-labelledby="token-owner-dialog-title"] [role="option"]');
+  await page.type('[aria-labelledby="token-owner-dialog-title"] input:not([type="search"]):not([type="number"])', 'Manual review account');
+  await page.click('[aria-labelledby="token-owner-dialog-title"] button[type="submit"]');
+  await page.waitForSelector('.adm-high-risk-dialog textarea');
+  await page.type('.adm-high-risk-dialog textarea', 'create after checking owner authority and capacity');
+  await page.waitForFunction(() => !document.querySelector('.adm-high-risk-dialog button[type="submit"]').disabled);
+  const beforeManualCommand = (await state(page)).commandCalls.length;
+  await page.click('.adm-high-risk-dialog button[type="submit"]');
+  try {
+    await page.waitForSelector('[aria-labelledby="token-account-recovery-title"]', { timeout: 10000 });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({ text: document.querySelector('main')?.textContent || '', dialogs: [...document.querySelectorAll('[role="dialog"]')].map((node) => node.getAttribute('aria-labelledby')) }));
+    throw new Error(`manual recovery dialog did not open: ${JSON.stringify({ diagnostic, observations: await state(page) })}`, { cause: error });
+  }
+  assert.equal((await state(page)).commandCalls.length, beforeManualCommand + 1, 'manual review preserves one account-create command');
+  await page.type('[aria-labelledby="token-account-recovery-title"] textarea', 'requeue after reviewing the current authority evidence');
+  await page.waitForFunction(() => !document.querySelector('[aria-labelledby="token-account-recovery-title"] button[type="submit"]').disabled);
+  await page.click('[aria-labelledby="token-account-recovery-title"] button[type="submit"]');
+  await page.waitForFunction(() => !document.querySelector('[aria-labelledby="token-account-recovery-title"]'));
+  const recoveryCall = (await state(page)).recoveryCalls.at(-1);
+  assert.equal(recoveryCall.body.action, 'REQUEUE');
+  assert.equal(recoveryCall.body.expected_recovery_epoch, 3);
+  assert.match(recoveryCall.key, /^token-account-recovery-/);
+
+  await configure(page, 'account-create-mode=success&account-status=DISABLED');
+  await page.goto(`${origin}/admin.html?section=tokenResources&token_account_id=${accountID}&token_detail_tab=routes`, { waitUntil: 'networkidle0' });
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForFunction(() => [...document.querySelectorAll('.adm-token-health .adm-row-actions button')].some((button) => button.textContent.includes('Re-enable Token Account')));
   await page.evaluate(() => [...document.querySelectorAll('.adm-token-health .adm-row-actions button')].find((button) => button.textContent.includes('Re-enable Token Account')).click());

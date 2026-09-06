@@ -37,7 +37,7 @@ test('organization unit deletion becomes restrictive before cross-domain finaliz
     load('internal/token/organization_unit_blockers.go'),
     load('migrations/billing/000019_organization_unit_blockers.up.sql'),
     load('migrations/token/000009_organization_unit_blockers.up.sql'),
-    load('internal/token/postgres.go'),
+    Promise.all([load('internal/token/postgres.go'), load('internal/token/model_account_governance.go')]).then((parts) => parts.join('\n')),
     load('internal/billing/service.go'),
     load('internal/token/service.go'),
     load('internal/platform/approvalpolicy/registry.go'),

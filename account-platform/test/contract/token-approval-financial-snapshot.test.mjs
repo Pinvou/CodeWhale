@@ -106,6 +106,43 @@ test('model publish precheck is a closed stable-target and full price-evidence c
   assert.equal(validateResponse({ ...response, billing_observed_at: undefined }), false);
 });
 
+test('APT-123-R2 immediate model and account envelopes and results are closed', async () => {
+  const contract = YAML.parse(await read('contracts/openapi/admin.yaml'));
+  const validateEnvelope = compile(contract.components.schemas, 'TokenCommandEnvelope');
+  const validateResult = compile(contract.components.schemas, 'TokenCommandResult');
+  const modelID = id('6');
+  const ownerID = id('7');
+  const precheck = digest('a');
+  const request = digest('b');
+  const draft = {
+    command_type: 'TOKEN_MODEL_DRAFT_SAVE', reason: 'save the reviewed model draft', target_resource_type: 'MODEL', target_resource_id: modelID,
+    expected_versions: { model_id: modelID, expected_catalog_version: 4, expected_draft_version: 0, precheck_fingerprint: precheck, request_fingerprint: request }, precheck_fingerprint: precheck,
+    command: { model_id: modelID, expected_catalog_version: 4, expected_draft_version: 0, display_name: 'Model', description: '', aliases: [], protocol_code: 'CHAT', protocol_version: 1, context_length: 4096, maximum_output_tokens: 1024, supported_modalities: ['text'], tokenizer_version: 'v1' },
+  };
+  const create = {
+    command_type: 'TOKEN_ACCOUNT_CREATE', reason: 'create the reviewed account', target_resource_type: 'TOKEN_ACCOUNT', target_resource_id: ownerID,
+    expected_versions: { owner_type: 'USER', owner_id: ownerID, owner_authorization_version: 9, owner_version: 3, owner_identity_digest: digest('d'), owner_account_count: 19, owner_account_cap: 20, owner_account_cap_policy_version: 2, creation_version: 0, precheck_fingerprint: precheck, request_fingerprint: request }, precheck_fingerprint: precheck,
+    command: { owner_type: 'USER', owner_id: ownerID, owner_organization_id: null, owner_unit_id: null, name: 'Primary', share_scope: 'OWNER_UNIT_ONLY', default_priority: 100 },
+  };
+  const status = {
+    command_type: 'TOKEN_ACCOUNT_STATUS_CHANGE', reason: 'disable after the reviewed impact', target_resource_type: 'TOKEN_ACCOUNT', target_resource_id: modelID,
+    expected_versions: { token_account_id: modelID, expected_account_version: 2, target_status: 'DISABLED', precheck_fingerprint: precheck, request_fingerprint: request }, precheck_fingerprint: precheck,
+    command: { target_status: 'DISABLED' },
+  };
+  for (const value of [draft, create, status]) {
+    assert.equal(validateEnvelope(value), true, `${value.command_type}: ${JSON.stringify(validateEnvelope.errors)}`);
+    assert.equal(validateEnvelope({ ...value, command: { ...value.command, extra: true } }), false);
+    assert.equal(validateEnvelope({ ...value, expected_versions: { ...value.expected_versions, extra: true } }), false);
+  }
+  const common = { command_reference: id('1'), policy_version: 2, actor_user_id: id('2'), actor_permission: 'platform.models.manage', authorization_version: 9, idempotency_fingerprint: digest('c'), status: 'SUCCEEDED', audit_request_id: 'request-1', created_at: '2026-09-05T12:00:00Z', completed_at: '2026-09-05T12:00:01Z' };
+  const result = { ...common, command_type: 'TOKEN_MODEL_DRAFT_SAVE', target_resource_type: 'MODEL', target_resource_id: modelID, redacted_result: { model_id: modelID, base_catalog_version: 4, draft_version: 1 } };
+  assert.equal(validateResult(result), true, JSON.stringify(validateResult.errors));
+  assert.equal(validateResult({ ...result, redacted_result: { ...result.redacted_result, secret: 'forbidden' } }), false);
+  const accountResult = { ...common, actor_permission: 'platform.tokens.manage', command_type: 'TOKEN_ACCOUNT_CREATE', target_resource_type: 'TOKEN_ACCOUNT', target_resource_id: ownerID, redacted_result: { token_account_id: modelID, owner_type: 'USER', owner_id: ownerID, status: 'ACTIVE', account_version: 1 } };
+  assert.equal(validateResult(accountResult), true, JSON.stringify(validateResult.errors));
+  assert.equal(validateResult({ ...accountResult, redacted_result: { ...accountResult.redacted_result, account_version: 0 } }), false);
+});
+
 test('Account execution lease retains the exact snapshots for Token commands and legacy compatibility elsewhere', async () => {
   const contract = YAML.parse(await read('contracts/openapi/account.yaml'));
   const validate = compile(contract.components.schemas, 'ApprovalExecutionLease');

@@ -7,6 +7,7 @@ const safeNoWrite = new Set([
   '403:CSRF_REJECTED', '403:PERMISSION_DENIED', '403:TOKEN_FORBIDDEN',
   '404:NOT_FOUND', '404:TOKEN_ACCOUNT_NOT_FOUND',
   '409:CATALOG_VERSION_CONFLICT', '409:COMMAND_PRECHECK_CHANGED', '409:TOKEN_ROUTE_VERSION_CONFLICT', '409:IDEMPOTENCY_KEY_REUSED',
+  '409:TOKEN_ACCOUNT_CAP_REACHED', '503:TOKEN_ACCOUNT_POLICY_UNAVAILABLE', '503:TOKEN_ACCOUNT_POLICY_CONFIG_MISMATCH',
   '412:DRAFT_ETAG_MISMATCH', '422:COMMAND_PRECHECK_FAILED', '422:TOKEN_ROUTE_REFERENCE_INVALID',
   '503:TOKEN_COMMAND_GOVERNANCE_INACTIVE', '503:IMPACT_PRECHECK_DISABLED',
 ]);
@@ -17,6 +18,9 @@ const protocolFormulaSafeNoWrite = new Set([
 const protocolFormulaCommands = new Set([
   'TOKEN_PROTOCOL_DRAFT_CREATE', 'TOKEN_PROTOCOL_PUBLISH',
   'TOKEN_FORMULA_DRAFT_CREATE', 'TOKEN_FORMULA_PUBLISH',
+]);
+const tokenAccountCreateSafeNoWrite = new Set([
+  '503:TOKEN_ACCOUNT_CREATE_NOT_ACTIVE',
 ]);
 const precheckVersionCommands = new Set([
   'TOKEN_MODEL_DRAFT_SAVE', 'TOKEN_MODEL_PUBLISH', 'TOKEN_ACCOUNT_CREATE', 'TOKEN_ACCOUNT_STATUS_CHANGE',
@@ -91,8 +95,9 @@ export function validImpactPrecheck(value, expectedAction = '') {
   const evidence = value.evidence;
   const version = evidence?.current_version;
   const dependencies = evidence?.dependencies;
-  const expectedResourceType = expectedAction.startsWith('MODEL_LIFECYCLE_') ? 'MODEL'
-    : expectedAction === 'TOKEN_MODEL_PUBLISH' ? 'MODEL'
+	const expectedResourceType = expectedAction.startsWith('MODEL_LIFECYCLE_') ? 'MODEL'
+		: ['TOKEN_MODEL_DRAFT_SAVE', 'TOKEN_MODEL_PUBLISH'].includes(expectedAction) ? 'MODEL'
+		: expectedAction === 'TOKEN_ACCOUNT_CREATE' ? 'TOKEN_ACCOUNT'
     : expectedAction.startsWith('TOKEN_ACCOUNT_STATUS_') ? 'TOKEN_ACCOUNT'
 				: expectedAction === 'MODEL_CATALOG_ROLLBACK' || expectedAction === 'TOKEN_MODEL_CATALOG_ROLLBACK' || expectedAction === 'TOKEN_MODEL_CATALOG_SYNC' ? 'MODEL_CATALOG'
         : expectedAction.startsWith('TOKEN_PROTOCOL_') ? 'PROTOCOL'
@@ -171,7 +176,7 @@ export function requireTokenApprovalImpact(value, expected) {
 
 export function validGovernedTokenCommandResult(value, expected) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const allowed = new Set(['command_reference', 'command_type', 'policy_version', 'actor_user_id', 'actor_permission', 'authorization_version', 'idempotency_fingerprint', 'target_resource_type', 'target_resource_id', 'status', 'redacted_result', 'stable_error_code', 'approval_request_id', 'audit_request_id', 'created_at', 'completed_at']);
+  const allowed = new Set(['command_reference', 'command_type', 'policy_version', 'actor_user_id', 'actor_permission', 'authorization_version', 'idempotency_fingerprint', 'target_resource_type', 'target_resource_id', 'status', 'redacted_result', 'stable_error_code', 'approval_request_id', 'audit_request_id', 'created_at', 'completed_at', 'recovery_state', 'recovery_diagnostic_code', 'recovery_epoch']);
   if (Object.keys(value).some((key) => !allowed.has(key))) return false;
   if (!uuidPattern.test(String(value.command_reference || '').toLowerCase()) || !uuidPattern.test(String(value.actor_user_id || '').toLowerCase())) return false;
   if (value.command_type !== expected.commandType || value.target_resource_type !== expected.targetResourceType || value.target_resource_id !== expected.targetResourceID) return false;
@@ -185,6 +190,11 @@ export function validGovernedTokenCommandResult(value, expected) {
     && !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code));
   if (value.completed_at != null && !completed) return false;
   if (value.stable_error_code != null && !stableError) return false;
+  const recoveryFields = ['recovery_state', 'recovery_diagnostic_code', 'recovery_epoch'].some((field) => Object.hasOwn(value, field));
+  if (value.command_type === 'TOKEN_ACCOUNT_CREATE' && value.status === 'PENDING') {
+    if (!['PENDING', 'MANUAL_REVIEW'].includes(value.recovery_state) || !Number.isInteger(value.recovery_epoch) || value.recovery_epoch < 1) return false;
+    if (value.recovery_state === 'MANUAL_REVIEW' ? value.recovery_diagnostic_code !== 'ACCOUNT_PROVISIONING_MANUAL_REVIEW' : value.recovery_diagnostic_code != null) return false;
+  } else if (recoveryFields) return false;
   if (value.status === 'PENDING') return !completed && value.stable_error_code == null;
   if (value.status === 'SUCCEEDED') return completed && value.stable_error_code == null;
   return completed && stableError;
@@ -195,9 +205,24 @@ export function requireGovernedTokenCommandResult(value, expected) {
     code: 'INVALID_COMMAND_RESPONSE',
     commandReference: uuidPattern.test(String(value?.command_reference || '').toLowerCase()) ? String(value.command_reference) : '',
   });
-  if (['PENDING', 'UNKNOWN'].includes(value.status)) throw Object.assign(new Error('Token command outcome is not final'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', requestID: value.audit_request_id || '', commandReference: value.command_reference });
+  if (['PENDING', 'UNKNOWN'].includes(value.status)) throw Object.assign(new Error('Token command outcome is not final'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', requestID: value.audit_request_id || '', commandReference: value.command_reference, commandResult: value });
   if (value.status !== 'SUCCEEDED') throw Object.assign(new Error('Token command completed without success'), { status: 200, code: value.stable_error_code || 'COMMAND_REJECTED', requestID: value.audit_request_id || '', commandReference: value.command_reference, finalResult: true });
   return value;
+}
+
+export function validTokenAccountRecoveryActionResult(value, expected = {}) {
+  const keys = ['action_id', 'command_reference', 'command_type', 'action', 'status', 'recovery_state', 'recovery_epoch', 'stable_error_code', 'audit_reference', 'created_at', 'completed_at'];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return false;
+  if (![value.action_id, value.command_reference, value.audit_reference].every((item) => uuidPattern.test(String(item || '').toLowerCase())) || value.command_type !== 'TOKEN_ACCOUNT_CREATE') return false;
+  if ((expected.commandReference && value.command_reference !== expected.commandReference)
+    || (expected.action && value.action !== expected.action)) return false;
+  if (!['REQUEUE', 'CANCEL'].includes(value.action) || !['PENDING', 'SUCCEEDED', 'FAILED'].includes(value.status) || !validDateTime(value.created_at)) return false;
+  const completed = value.completed_at != null && validDateTime(value.completed_at);
+  const stableError = value.stable_error_code != null && /^[A-Z][A-Z0-9_]{0,119}$/.test(String(value.stable_error_code)) && !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code));
+  if (value.status === 'PENDING') return value.recovery_state === 'MANUAL_REVIEW' && value.recovery_epoch == null && value.stable_error_code == null && value.completed_at == null;
+  if (value.status === 'FAILED') return value.recovery_state === 'MANUAL_REVIEW' && value.recovery_epoch == null && stableError && completed;
+  return completed && value.stable_error_code == null && Number.isInteger(value.recovery_epoch) && value.recovery_epoch >= 1
+    && (value.action === 'REQUEUE' ? value.recovery_state === 'PENDING' : value.recovery_state === 'FAILED');
 }
 
 export function validStableRouteWriteResult(value, expected) {
@@ -238,7 +263,8 @@ export function classifyHighRiskFailure(command, error) {
   const finalResult = error?.finalResult === true;
   const pair = `${status}:${code}`;
   const commandScopedNoWrite = protocolFormulaCommands.has(command?.commandType) && protocolFormulaSafeNoWrite.has(pair);
-  const provenNoWrite = status !== 504 && (safeNoWrite.has(pair) || commandScopedNoWrite);
+  const accountCreateNoWrite = command?.commandType === 'TOKEN_ACCOUNT_CREATE' && tokenAccountCreateSafeNoWrite.has(pair);
+  const provenNoWrite = status !== 504 && (safeNoWrite.has(pair) || commandScopedNoWrite || accountCreateNoWrite);
   const invalidCommandResponse = code === 'INVALID_COMMAND_RESPONSE';
   return {
     ...command,
@@ -247,7 +273,17 @@ export function classifyHighRiskFailure(command, error) {
     unknown: !provenNoWrite && !finalResult,
     terminal: finalResult,
     locked: !provenNoWrite,
-    error: { status, code: provenNoWrite || finalResult || invalidCommandResponse ? code : 'COMMAND_RESULT_UNKNOWN', requestID: String(error?.requestID || ''), commandReference: uuidPattern.test(String(error?.commandReference || error?.details?.command_reference || '').toLowerCase()) ? String(error?.commandReference || error?.details?.command_reference) : '' },
+    error: {
+      status,
+      code: provenNoWrite || finalResult || invalidCommandResponse ? code : 'COMMAND_RESULT_UNKNOWN',
+      requestID: String(error?.requestID || ''),
+      commandReference: uuidPattern.test(String(error?.commandReference || error?.details?.command_reference || '').toLowerCase()) ? String(error?.commandReference || error?.details?.command_reference) : '',
+      commandResult: validGovernedTokenCommandResult(error?.commandResult, {
+        commandType: command?.payload?.precheck?.action || command?.commandType,
+        targetResourceType: command?.payload?.precheck?.evidence?.resource_type || error?.commandResult?.target_resource_type,
+        targetResourceID: command?.payload?.precheck?.evidence?.resource_id || error?.commandResult?.target_resource_id,
+      }) ? error.commandResult : null,
+    },
   };
 }
 
@@ -275,6 +311,9 @@ export async function executeHighRiskCommand(holder, payload, send, randomUUID =
   }
 }
 
-export function resetHighRiskCommandAfterSafeFailure(holder) {
-  if (holder.current?.command?.provenNoWrite) holder.current = { command: null, inflight: false };
+export function resetHighRiskCommandAfterSafeFailure(holder, { preserveKey = false } = {}) {
+  if (!holder.current?.command?.provenNoWrite) return;
+  holder.current = preserveKey
+    ? { command: { ...holder.current.command, dispatched: false, provenNoWrite: false, unknown: false, terminal: false, locked: false, error: null }, inflight: false }
+    : { command: null, inflight: false };
 }

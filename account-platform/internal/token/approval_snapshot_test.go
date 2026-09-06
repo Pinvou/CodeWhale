@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +31,21 @@ func TestApprovalCommandPrecheckFreezesFullFinancialSnapshotAndDetectsDrift(t *t
 	first, err := service.approvalCommandPrecheck(context.Background(), request)
 	if err != nil || !strings.Contains(string(first.CriticalResourceVersions), `"billing_price_version":11`) || !strings.Contains(string(first.FinancialSnapshot), `"price_set_fingerprint":"`+strings.Repeat("b", 64)+`"`) {
 		t.Fatalf("first projection=%+v err=%v", first, err)
+	}
+	advancedEvidence := evidence
+	advancedEvidence.ObservedAt = evidence.ObservedAt.Add(time.Minute)
+	advancedPricing := pricing(11, strings.Repeat("b", 64))
+	advancedPricing.AsOf = advancedPricing.AsOf.Add(2 * time.Minute)
+	service.WithImpactPrechecks(true, stubImpactRepository{evidence: advancedEvidence}, stubImpactPricing{result: advancedPricing})
+	advanced, err := service.approvalCommandPrecheck(context.Background(), request)
+	if err != nil || first.PrecheckFingerprint != advanced.PrecheckFingerprint || !jsonSemanticEqual(first.CriticalResourceVersions, advanced.CriticalResourceVersions) || !approvalpolicy.SameTokenModelFinancialFacts(first.FinancialSnapshot, advanced.FinancialSnapshot) || string(first.FinancialSnapshot) == string(advanced.FinancialSnapshot) || first.TokenObservedAt.Equal(advanced.TokenObservedAt) {
+		t.Fatalf("observation clock falsely invalidated lifecycle: first=%+v advanced=%+v err=%v", first, advanced, err)
+	}
+	changedSchedule := request
+	changedSchedule.NormalizedCommand = json.RawMessage(strings.Replace(string(request.NormalizedCommand), "2026-09-04T00:00:00Z", "2026-09-04T00:01:00Z", 1))
+	rescheduled, err := service.approvalCommandPrecheck(context.Background(), changedSchedule)
+	if err != nil || rescheduled.PrecheckFingerprint == advanced.PrecheckFingerprint {
+		t.Fatalf("business effective_at was ignored: %+v err=%v", rescheduled, err)
 	}
 	service.impactPricing = stubImpactPricing{result: pricing(12, strings.Repeat("c", 64))}
 	second, err := service.approvalCommandPrecheck(context.Background(), request)

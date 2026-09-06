@@ -3,7 +3,7 @@ import { previousAdminModelTokenCursor, readAdminModelTokenQuery, rememberAdminM
 import { executeAdminSourceRequest, initialAdminSourceState, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
 import { ownerCandidateQuery, routeEditorVisible, serverRouteHealth, stableRouteChange, stableRouteChoices, tokenAccountCreateInput, tokenResourceAccess } from './admin-token-resource-state.js';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
-import { governedTokenEnvelope, requireGovernedTokenCommandResult, validStableRouteWriteResult } from './admin-high-risk-action-state.js';
+import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, validStableRouteWriteResult, validTokenAccountRecoveryActionResult } from './admin-high-risk-action-state.js';
 
 function useSource(load, query, enabled, refreshVersion = 0) {
   const [state, setState] = useState(initialAdminSourceState);
@@ -49,6 +49,69 @@ function Paging({ source, query, state, copy, histories, onChange }) {
   </div></div>;
 }
 
+function TokenAccountRecoveryDialog({ client, copy, command, onClose, onCompleted }) {
+  const root = useRef(null);
+  const first = useRef(null);
+  const controller = useRef(null);
+  const attempt = useRef(null);
+  const [action, setAction] = useState('REQUEUE');
+  const [reason, setReason] = useState('');
+  const [state, setState] = useState({ busy: false, error: null, result: null });
+  useEffect(() => { first.current?.focus(); return () => controller.current?.abort(); }, []);
+  const submit = async (event) => {
+    event.preventDefault();
+    if (state.busy || [...reason.trim()].length < 10 || [...reason.trim()].length > 500) return;
+    const payload = { action, expected_recovery_epoch: command.recovery_epoch, reason: reason.trim() };
+    const payloadKey = JSON.stringify(payload);
+    if (attempt.current?.unknown && attempt.current.payloadKey !== payloadKey) {
+      setState({ busy: false, result: null, error: { code: 'COMMAND_PAYLOAD_LOCKED' } });
+      return;
+    }
+    if (!attempt.current || attempt.current.payloadKey !== payloadKey) attempt.current = { key: `token-account-recovery-${globalThis.crypto.randomUUID()}`, payloadKey, actionID: '', unknown: false };
+    controller.current?.abort();
+    controller.current = new globalThis.AbortController();
+    setState({ busy: true, error: null, result: null });
+    try {
+      let result;
+      if (attempt.current.actionID) {
+        result = await client.tokenAccountRecoveryAction(command.command_reference, attempt.current.actionID, controller.current.signal);
+      } else if (attempt.current.unknown) {
+        try {
+          result = await client.tokenAccountRecoveryActionByIdempotencyKey(command.command_reference, attempt.current.key, controller.current.signal);
+        } catch (lookupError) {
+          if (lookupError?.status !== 404 || lookupError?.code !== 'NOT_FOUND') throw lookupError;
+          attempt.current.unknown = false;
+          result = await client.createTokenAccountRecoveryAction(command.command_reference, payload, attempt.current.key, controller.current.signal);
+        }
+      } else {
+        result = await client.createTokenAccountRecoveryAction(command.command_reference, payload, attempt.current.key, controller.current.signal);
+      }
+      if (!validTokenAccountRecoveryActionResult(result, { commandReference: command.command_reference, action })) throw Object.assign(new Error('invalid recovery action response'), { code: 'INVALID_COMMAND_RESPONSE' });
+      attempt.current.unknown = result.status === 'PENDING';
+      attempt.current.actionID = result.action_id;
+      setState({ busy: false, error: null, result });
+      if (result.status === 'SUCCEEDED') void onCompleted?.(result);
+    } catch (error) {
+      if (error?.name === 'AbortError') return;
+      const actionID = String(error?.details?.action_id || '');
+      if (actionID) attempt.current.actionID = actionID;
+      attempt.current.unknown = Number(error?.status) === 0 || Number(error?.status) >= 500;
+      setState({ busy: false, result: null, error: { code: attempt.current.unknown ? 'COMMAND_RESULT_UNKNOWN' : error?.code || 'REQUEST_FAILED', requestID: error?.requestID || '' } });
+    }
+  };
+  return <div className="adm-protocol-dialog-backdrop"><form ref={root} className="adm-protocol-dialog adm-high-risk-dialog" role="dialog" aria-modal="true" aria-labelledby="token-account-recovery-title" onSubmit={submit} onKeyDown={(event) => { focusWithin(event, root.current); if (event.key === 'Escape' && !state.busy && !attempt.current?.unknown) onClose(); }}>
+    <header><div><h3 id="token-account-recovery-title">{copy.accountRecoveryTitle}</h3><p>{copy.accountRecoveryLead}</p></div><button ref={first} type="button" disabled={state.busy || attempt.current?.unknown} onClick={onClose} aria-label={copy.close}>×</button></header>
+    <dl className="adm-command-target"><div><dt>{copy.commandReference}</dt><dd>{command.command_reference}</dd></div><div><dt>{copy.accountRecoveryEpoch}</dt><dd>{command.recovery_epoch}</dd></div></dl>
+    <div className="adm-inline-message info" role="status">{copy.recentAuthRequired}</div>
+    {state.error && <div className="adm-inline-message error" role="alert"><strong>{state.error.code === 'COMMAND_RESULT_UNKNOWN' ? copy.actionUnknown : copy.accountRecoveryFailed}</strong>{state.error.requestID && <small>{copy.requestID}: {state.error.requestID}</small>}</div>}
+    {state.result && <div className="adm-inline-message success" role="status"><strong>{copy.accountRecoveryAccepted}</strong><small>{copy.actionAuditReference}: {state.result.audit_reference}</small></div>}
+    <label>{copy.accountRecoveryAction}<select value={action} disabled={state.busy || attempt.current?.unknown || state.result?.status === 'SUCCEEDED'} onChange={(event) => { setAction(event.target.value); setState({ busy: false, error: null, result: null }); attempt.current = null; }}><option value="REQUEUE">{copy.accountRecoveryRequeue}</option><option value="CANCEL">{copy.accountRecoveryCancel}</option></select></label>
+    <label>{copy.reason}<textarea required minLength="10" maxLength="500" rows="4" disabled={state.busy || attempt.current?.unknown || state.result?.status === 'SUCCEEDED'} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+    <p className="adm-safe-preview-note">{copy.accountRecoveryNotice}</p>
+    <footer><button type="button" disabled={state.busy || attempt.current?.unknown} onClick={onClose}>{copy.close}</button>{state.result?.status !== 'SUCCEEDED' && <button className={action === 'CANCEL' ? 'danger' : ''} type="submit" disabled={state.busy || [...reason.trim()].length < 10}>{state.busy ? copy.submitting : attempt.current?.unknown ? copy.actionRecoverSameKey : copy.confirm}</button>}</footer>
+  </form></div>;
+}
+
 function OwnerDialog({ client, copy, query, histories, onQueryChange, onClose, onCreated }) {
   const root = useRef(null);
   const first = useRef(null);
@@ -64,6 +127,8 @@ function OwnerDialog({ client, copy, query, histories, onQueryChange, onClose, o
   const [priority, setPriority] = useState(100);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+	const [pendingInput, setPendingInput] = useState(null);
+	const [manualReview, setManualReview] = useState(null);
   const load = useMemo(() => (filters, signal) => client.tokenOwnerCandidates(filters, signal), [client]);
   const state = useSource(load, requestQuery, true, refresh);
   useEffect(() => { first.current?.focus(); return () => previousFocus.current?.focus?.(); }, []);
@@ -90,13 +155,11 @@ function OwnerDialog({ client, copy, query, histories, onQueryChange, onClose, o
     event.preventDefault();
     const input = tokenAccountCreateInput({ candidate: selected, organization: selectedOrganization, name, priority });
     if (!input) { setError({ code: 'INVALID_SELECTION' }); return; }
-    setBusy(true); setError(null);
-    try { await client.createTokenAccount(input); await onCreated(); onClose(); }
-    catch (reason) { setError({ code: reason.code || 'REQUEST_FAILED', requestID: reason.requestID || '' }); }
-    finally { setBusy(false); }
+		setError(null);
+		setPendingInput(input);
   };
   const selectingOrganization = ownerType === 'UNIT' && !organizationID;
-  return <div className="adm-protocol-dialog-backdrop"><form ref={root} className="adm-protocol-dialog adm-token-dialog" role="dialog" aria-modal="true" aria-labelledby="token-owner-dialog-title" onSubmit={submit} onKeyDown={(event) => { focusWithin(event, root.current); if (event.key === 'Escape' && !busy) onClose(); }}>
+	return <>{!pendingInput && <div className="adm-protocol-dialog-backdrop"><form ref={root} className="adm-protocol-dialog adm-token-dialog" role="dialog" aria-modal="true" aria-labelledby="token-owner-dialog-title" onSubmit={submit} onKeyDown={(event) => { focusWithin(event, root.current); if (event.key === 'Escape' && !busy) onClose(); }}>
     <header><div><h3 id="token-owner-dialog-title">{copy.createTokenAccount}</h3><p>{copy.ownerSelectionLead}</p></div><button ref={first} type="button" disabled={busy} onClick={onClose} aria-label={copy.close}>×</button></header>
     {error && <div className="adm-inline-message error" role="alert">{copy.ownerCreateFailed}{error.requestID && <small>{copy.requestID}: {error.requestID}</small>}</div>}
     <div className="adm-token-dialog-grid"><label>{copy.ownerType}<select value={ownerType} onChange={(event) => { setSelectedOrganization(null); update({ owner_type: event.target.value, organization_id: '', q: '', cursor: '', status: 'ACTIVE' }); }}><option value="USER">{copy.enumLabels.USER}</option><option value="ORGANIZATION">{copy.enumLabels.ORGANIZATION}</option><option value="UNIT">{copy.enumLabels.UNIT}</option></select></label><label>{copy.candidateStatus}<select value={query.status || 'ACTIVE'} onChange={(event) => update({ status: event.target.value, cursor: '' })}><option value="ACTIVE">{copy.enumLabels.ACTIVE}</option><option value="DISABLED">{copy.enumLabels.DISABLED}</option><option value="PROVISIONING">{copy.enumLabels.PROVISIONING}</option></select></label></div>
@@ -107,7 +170,19 @@ function OwnerDialog({ client, copy, query, histories, onQueryChange, onClose, o
     <Paging source="ownerCandidates" query={requestQuery} state={state} copy={copy} histories={histories} onChange={(next) => update({ cursor: next.cursor })} />
     {!selectingOrganization && <><div className="adm-token-dialog-grid"><label>{copy.accountName}<input required maxLength="120" value={name} onChange={(event) => setName(event.target.value)} /></label><label>{copy.priority}<input required type="number" min="0" max="10000" value={priority} onChange={(event) => setPriority(event.target.value)} /></label></div><div className="adm-token-selection"><span>{copy.selectedOwner}</span><strong>{selected?.display_label || copy.notSelected}</strong></div></>}
     <footer><button type="button" disabled={busy} onClick={onClose}>{copy.cancel}</button><button type="submit" disabled={busy || selectingOrganization || !selected}>{busy ? copy.submitting : copy.confirmCreate}</button></footer>
-  </form></div>;
+	</form></div>}
+	{pendingInput && <AdminHighRiskActionDialog action={{ key: `token-account-create-${pendingInput.owner_type}-${pendingInput.owner_id}`, impactAction: 'TOKEN_ACCOUNT_CREATE', title: copy.createTokenAccount, lead: copy.ownerSelectionLead }} copy={copy} target={{ label: name, version: selected?.display_label || pendingInput.owner_id }} policy="AUDIT_ONLY" recentAuth payloadDetails={pendingInput} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_ACCOUNT_CREATE', target_resource_type: 'TOKEN_ACCOUNT', target_resource_id: pendingInput.owner_id, command: pendingInput }, signal), { commandType: 'TOKEN_ACCOUNT_CREATE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: pendingInput.owner_id })} onClose={() => setPendingInput(null)} onManualReview={(result) => { setPendingInput(null); setManualReview(result); }} execute={async (payload, key, signal) => {
+		const expected = { commandType: 'TOKEN_ACCOUNT_CREATE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: pendingInput.owner_id };
+		const envelope = await governedTokenEnvelope({ commandType: expected.commandType, targetResourceType: expected.targetResourceType, targetResourceID: expected.targetResourceID, reason: payload.reason, impact: payload.precheck, command: pendingInput });
+		try { return requireGovernedTokenCommandResult(await client.createGovernedTokenCommand(envelope, key, signal), expected); }
+		catch (error) {
+			if (error?.commandReference || error?.finalResult || (Number(error?.status) > 0 && Number(error?.status) < 500)
+				|| ['TOKEN_ACCOUNT_CREATE_NOT_ACTIVE', 'TOKEN_ACCOUNT_POLICY_UNAVAILABLE', 'TOKEN_ACCOUNT_POLICY_CONFIG_MISMATCH'].includes(error?.code)) throw error;
+			return requireGovernedTokenCommandResult(await client.governedTokenCommandByIdempotencyKey(expected.commandType, key, signal), expected);
+		}
+	}} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_ACCOUNT_CREATE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: pendingInput.owner_id })} recoverByIdempotencyKey={async (key, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandByIdempotencyKey('TOKEN_ACCOUNT_CREATE', key, signal), { commandType: 'TOKEN_ACCOUNT_CREATE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: pendingInput.owner_id })} onCompleted={async () => { await onCreated(); onClose(); }} />}
+	{manualReview && <TokenAccountRecoveryDialog client={client} copy={copy} command={manualReview} onClose={() => setManualReview(null)} onCompleted={async () => { await onCreated(); setManualReview(null); onClose(); }} />}
+	</>;
 }
 
 function RouteDialog({ client, copy, account, onClose, onSaved }) {
@@ -175,7 +250,7 @@ function RouteHealth({ client, copy, accountID, access, onClose }) {
     {state.loading && <div className="adm-source-state" role="status">{copy.loading}</div>}
     {state.item && (!state.item.routes?.length ? <div className="adm-source-state">{copy.noRoutes}</div> : <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.model}</th><th>{copy.protocol}</th><th>{copy.health}</th><th>{copy.healthEvidence}</th><th>{copy.routable}</th>{access.manage && <th>{copy.actions}</th>}</tr></thead><tbody>{state.item.routes.map((route) => { const health = serverRouteHealth(route, state.item.as_of); return <tr key={route.route_id}><td data-label={copy.model}><strong>{route.model_id ? copy.stableModel : copy.legacyUnresolved}</strong>{route.model_id && <small className="adm-secondary-id">{route.model_id}</small>}</td><td data-label={copy.protocol}>{route.protocol_code}{route.protocol_version_id && <small className="adm-secondary-id">{route.protocol_version_id}</small>}</td><td data-label={copy.health}><Status value={health.status} copy={copy} /></td><td data-label={copy.healthEvidence}><span>{health.observedAt ? new Date(health.observedAt).toLocaleString() : copy.notObserved}</span><small className="adm-secondary-id">{health.expiresAt ? `${copy.expiresAt} ${new Date(health.expiresAt).toLocaleString()}` : copy.noExpiry}{health.diagnostic ? ` · ${health.diagnostic}` : ''}</small></td><td data-label={copy.routable}>{health.routable ? copy.yes : copy.no}</td>{access.manage && <td data-label={copy.actions}>{route.model_id && route.protocol_version_id && <button type="button" className="danger" onClick={() => setHighRiskAction({ type: 'DELETE_ROUTE', route })}>{copy.deleteRoute}</button>}</td>}</tr>; })}</tbody></table></div>)}
     {showRouteDialog && state.item && <RouteDialog client={client} copy={copy} account={state.item} onClose={() => setRouteDialog(false)} onSaved={reload} />}
-    {['DISABLE', 'ENABLE'].includes(highRiskAction?.type) && state.item && access.manage && <AdminHighRiskActionDialog action={{ key: `token-account-status-${statusTarget.toLowerCase()}`, impactAction: `TOKEN_ACCOUNT_STATUS_${statusTarget}`, title: statusTitle, lead: copy.disableTokenAccountLead }} copy={copy} target={{ label: state.item.name, version: `${copy.actionAccountVersion}: ${state.item.account_version}` }} policy="AUDIT_ONLY" recentAuth dangerous={statusTarget === 'DISABLED'} payloadDetails={{ token_account_id: accountID, expected_account_version: state.item.account_version, target_status: statusTarget }} impactLoader={(signal) => client.tokenAccountStatusImpact(accountID, statusTarget, signal)} onClose={() => setHighRiskAction(null)} execute={async (payload, key, signal) => {
+    {['DISABLE', 'ENABLE'].includes(highRiskAction?.type) && state.item && access.manage && <AdminHighRiskActionDialog action={{ key: `token-account-status-${statusTarget.toLowerCase()}`, impactAction: 'TOKEN_ACCOUNT_STATUS_CHANGE', title: statusTitle, lead: copy.disableTokenAccountLead }} copy={copy} target={{ label: state.item.name, version: `${copy.actionAccountVersion}: ${state.item.account_version}` }} policy="AUDIT_ONLY" recentAuth dangerous={statusTarget === 'DISABLED'} payloadDetails={{ token_account_id: accountID, expected_account_version: state.item.account_version, target_status: statusTarget }} impactLoader={async (signal) => requireGovernedTokenPrecheck(await client.governedTokenCommandPrecheck({ command_type: 'TOKEN_ACCOUNT_STATUS_CHANGE', target_resource_type: 'TOKEN_ACCOUNT', target_resource_id: accountID, command: { target_status: statusTarget } }, signal), { commandType: 'TOKEN_ACCOUNT_STATUS_CHANGE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: accountID })} onClose={() => setHighRiskAction(null)} execute={async (payload, key, signal) => {
       const result = await client.createGovernedTokenCommand(await governedTokenEnvelope({ commandType: 'TOKEN_ACCOUNT_STATUS_CHANGE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: accountID, reason: payload.reason, impact: payload.precheck, expectedVersions: { token_account_id: accountID, expected_account_version: state.item.account_version, target_status: statusTarget }, command: { target_status: statusTarget } }), key, signal);
       return requireGovernedTokenCommandResult(result, { commandType: 'TOKEN_ACCOUNT_STATUS_CHANGE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: accountID });
     }} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_ACCOUNT_STATUS_CHANGE', targetResourceType: 'TOKEN_ACCOUNT', targetResourceID: accountID })} onCompleted={reload} />}
@@ -183,6 +258,32 @@ function RouteHealth({ client, copy, accountID, access, onClose }) {
       const result = await client.createGovernedTokenCommand(await governedTokenEnvelope({ commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: highRiskAction.route.route_id, reason: payload.reason, impact: payload.precheck, expectedVersions: { token_account_id: accountID, route_id: highRiskAction.route.route_id, expected_account_version: state.item.account_version, expected_route_version: highRiskAction.route.route_version }, command: { route_id: highRiskAction.route.route_id } }), key, signal);
       return requireGovernedTokenCommandResult(result, { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: highRiskAction.route.route_id });
     }} recover={async (reference, signal) => requireGovernedTokenCommandResult(await client.governedTokenCommandResult(reference, signal), { commandType: 'TOKEN_ROUTE_DELETE', targetResourceType: 'TOKEN_ROUTE', targetResourceID: highRiskAction.route.route_id })} onCompleted={reload} />}
+  </section>;
+}
+
+function AccountRecoveryQueue({ client, copy, routeVersion, onQueryChange, histories }) {
+  const query = useMemo(() => readAdminModelTokenQuery('accountRecovery'), [routeVersion]);
+  const [refresh, setRefresh] = useState(0);
+  const [selected, setSelected] = useState(null);
+  const load = useMemo(() => (filters, signal) => client.tokenAccountRecoveryQueue(filters, signal), [client]);
+  const state = useSource(load, query, true, refresh);
+  const retry = () => {
+    if (state.error?.status === 410) {
+      delete histories.current.accountRecovery;
+      onQueryChange('accountRecovery', { ...query, cursor: '' }, 'replace');
+    } else setRefresh((value) => value + 1);
+  };
+  return <section className="adm-card adm-source-card" aria-labelledby="account-recovery-queue-title">
+    <div className="adm-source-head"><div><h2 id="account-recovery-queue-title">{copy.accountRecoveryQueue}</h2><p>{copy.accountRecoveryQueueLead}</p></div><button type="button" disabled={state.loading} onClick={retry}>{state.loading ? copy.loading : copy.refreshSource}</button></div>
+    <form key={query.q} className="adm-model-token-filters" onSubmit={(event) => { event.preventDefault(); const values = new globalThis.FormData(event.currentTarget); onQueryChange('accountRecovery', { q: values.get('q'), cursor: '' }); }}>
+      <label><span>{copy.commandReference}</span><input type="search" name="q" defaultValue={query.q} maxLength="36" placeholder={copy.accountRecoverySearch} /></label><button type="submit">{copy.search}</button><button type="button" onClick={() => onQueryChange('accountRecovery', { q: '', cursor: '' })}>{copy.clear}</button>
+    </form>
+    <Feedback state={state} copy={copy} onRetry={retry} />
+    {state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.commandReference}</th><th>{copy.status}</th><th>{copy.accountRecoveryEpoch}</th><th>{copy.lastUpdated}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.command_reference}>
+      <td data-label={copy.commandReference}><span className="adm-secondary-id">{item.command_reference}</span></td><td data-label={copy.status}>{copy.accountRecoveryRequired}</td><td data-label={copy.accountRecoveryEpoch}>{item.recovery_epoch}</td><td data-label={copy.lastUpdated}>{new Date(item.updated_at).toLocaleString()}</td><td data-label={copy.actions}><button type="button" onClick={() => setSelected(item)}>{copy.accountRecoveryHandle}</button></td>
+    </tr>)}</tbody></table></div>}
+    <Paging source="accountRecovery" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('accountRecovery', next)} />
+    {selected && <TokenAccountRecoveryDialog client={client} copy={copy} command={selected} onClose={() => setSelected(null)} onCompleted={() => { delete histories.current.accountRecovery; onQueryChange('accountRecovery', { ...query, cursor: '' }, 'replace'); setRefresh((value) => value + 1); }} />}
   </section>;
 }
 
@@ -209,6 +310,7 @@ export function AdminTokenResourcesWorkspace({ client, copy, permissions, formsE
 			{state.items.length > 0 && <div className="adm-table-wrap"><table className="adm-table"><thead><tr><th>{copy.tokenAccount}</th><th>{copy.owner}</th><th>{copy.status}</th><th>{copy.credentials}</th><th>{copy.routes}</th><th>{copy.actions}</th></tr></thead><tbody>{state.items.map((item) => <tr key={item.token_account_id}><td data-label={copy.tokenAccount}><strong>{item.name}</strong><small className="adm-secondary-id">{item.token_account_id}</small></td><td data-label={copy.owner}>{copy.enumLabels[item.owner_type] || item.owner_type}<small className="adm-secondary-id">{item.owner_id}</small></td><td data-label={copy.status}><Status value={item.status} copy={copy} /></td><td data-label={copy.credentials}>{item.active_credential_count}</td><td data-label={copy.routes}>{item.route_count}</td><td data-label={copy.actions}><button type="button" onClick={() => onRouteChange({ token_account_id: item.token_account_id, token_detail_tab: detailsEnabled ? 'overview' : 'routes' }, 'push')}>{detailsEnabled ? copy.viewDetail : copy.viewRouteHealth}</button></td></tr>)}</tbody></table></div>}
       <Paging source="tokenAccounts" query={query} state={state} copy={copy} histories={histories} onChange={(next) => onQueryChange('tokenAccounts', next)} />
     </section>
+    {actionsEnabled && access.manage && access.ownerCandidates && <AccountRecoveryQueue client={client} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} />}
     {access.requestOwnerCandidates && ownerQuery.owner_type && <OwnerDialog client={client} copy={copy} query={ownerQuery} histories={histories} onQueryChange={onQueryChange} onClose={closeOwner} onCreated={async () => setRefresh((value) => value + 1)} />}
   </>;
 }

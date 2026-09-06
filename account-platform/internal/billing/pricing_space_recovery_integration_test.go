@@ -46,7 +46,7 @@ func TestPricingSpaceRecoveryPostgresIntegration(t *testing.T) {
 		t.Fatalf("select isolated integration schema: %v", err)
 	}
 
-	loaded, err := migrations.Load("../../migrations/billing")
+	loaded, err := loadBillingIntegrationMigrations("../../migrations/billing", schema)
 	if err != nil {
 		t.Fatal(err)
 	}

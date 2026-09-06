@@ -17,12 +17,14 @@ RUN test -n "$SERVICE" && \
       -trimpath \
       -ldflags="-s -w -X github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver.version=${VERSION} -X github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver.commit=${COMMIT}" \
       -o /out/service "./cmd/${SERVICE}" && \
+	CGO_ENABLED=0 go build -tags=nomsgpack -trimpath -ldflags="-s -w" -o /out/token-policy-bootstrap ./cmd/token-policy-bootstrap && \
     CGO_ENABLED=0 go build -tags=nomsgpack -trimpath -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/service /service
 COPY --from=build /out/healthcheck /healthcheck
+COPY --from=build /out/token-policy-bootstrap /token-policy-bootstrap
 COPY --from=build /src/migrations /migrations
 EXPOSE 8080
 USER 65532:65532

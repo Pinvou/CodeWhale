@@ -143,6 +143,9 @@ tokenGateway:
   readinessAttestationKeyId: pinvou-client-readiness-v1
   readinessAttestationTtlSeconds: 600
 
+tokenAccountPolicyBootstrap:
+  enabled: false
+
 external:
   postgresCidrs: []
   paymentProviderCidrs: []

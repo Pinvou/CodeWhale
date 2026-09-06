@@ -23,11 +23,30 @@ x-client-compatibility: &client-compatibility
   PINVOU_CLIENT_RELEASE_MANIFEST: '${PINVOU_CLIENT_RELEASE_MANIFEST:-[{"version":"0.8.0","released_at":"2026-08-01T00:00:00Z"},{"version":"0.7.0","released_at":"2026-06-01T00:00:00Z","deprecation_notice_at":"2026-08-31T00:00:00Z","sunset_at":"2026-10-30T00:00:00Z"},{"version":"0.6.0","released_at":"2026-03-01T00:00:00Z","deprecation_notice_at":"2026-07-03T00:00:00Z","sunset_at":"2026-09-01T00:00:00Z"}]}'
 
 services:
+  deployment-credentials-check:
+    <<: *service-defaults
+    image: postgres:17-bookworm
+    restart: "no"
+    entrypoint: ["/bin/sh", "/opt/pinvou/validate-database-secrets.sh"]
+    environment: &database-credential-check
+      ACCOUNT_DB_PASSWORD: ${ACCOUNT_DB_PASSWORD:?set ACCOUNT_DB_PASSWORD}
+      BILLING_DB_PASSWORD: ${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD}
+      TOKEN_DB_PASSWORD: ${TOKEN_DB_PASSWORD:?set TOKEN_DB_PASSWORD}
+      PAYMENT_SIM_DB_PASSWORD: ${PAYMENT_SIM_DB_PASSWORD:?set PAYMENT_SIM_DB_PASSWORD}
+      NEWAPI_DB_PASSWORD: ${NEWAPI_DB_PASSWORD:?set NEWAPI_DB_PASSWORD}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
+      BILLING_MIGRATION_DB_PASSWORD: ${BILLING_MIGRATION_DB_PASSWORD:?set BILLING_MIGRATION_DB_PASSWORD}
+      TOKEN_MIGRATION_DB_PASSWORD: ${TOKEN_MIGRATION_DB_PASSWORD:?set TOKEN_MIGRATION_DB_PASSWORD}
+      TOKEN_POLICY_DB_PASSWORD: ${TOKEN_POLICY_DB_PASSWORD:?set TOKEN_POLICY_DB_PASSWORD}
+    volumes:
+      - ./validate-database-secrets.sh:/opt/pinvou/validate-database-secrets.sh:ro
+
   postgres:
     image: postgres:17-bookworm
     restart: unless-stopped
     environment:
       POSTGRES_DB: postgres
+      <<: *database-credential-check
       POSTGRES_USER: account_platform_admin
       POSTGRES_PASSWORD: ${ACCOUNT_PLATFORM_POSTGRES_PASSWORD:?set ACCOUNT_PLATFORM_POSTGRES_PASSWORD}
       ACCOUNT_DB_PASSWORD: ${ACCOUNT_DB_PASSWORD:?set ACCOUNT_DB_PASSWORD}
@@ -39,6 +58,7 @@ services:
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./validate-database-secrets.sh:/opt/pinvou/validate-database-secrets.sh:ro
       - ./init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U account_platform_admin -d postgres"]
@@ -306,6 +326,8 @@ services:
         condition: service_healthy
       token-migrate:
         condition: service_completed_successfully
+      token-policy-bootstrap:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     ports:
@@ -513,8 +535,11 @@ services:
         SERVICE: migrate
     command: ["--dir", "/migrations/billing"]
     environment:
-      DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      DATABASE_URL: postgresql://billing_migrator:${BILLING_MIGRATION_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      MIGRATION_ROLE: billing_service
     depends_on:
+      deployment-credentials-check:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 
@@ -528,8 +553,11 @@ services:
         SERVICE: migrate
     command: ["--dir", "/migrations/token"]
     environment:
-      DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
+      DATABASE_URL: postgresql://token_migrator:${TOKEN_MIGRATION_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
+      MIGRATION_ROLE: token_gateway
     depends_on:
+      billing-migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 
@@ -547,6 +575,26 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  token-policy-bootstrap:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        <<: *go-build-args
+        SERVICE: migrate
+    entrypoint: ["/token-policy-bootstrap"]
+    command: ["--mode", "bootstrap"]
+    environment:
+      TOKEN_POLICY_DATABASE_URL: postgresql://token_policy_operator:${TOKEN_POLICY_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
+      TOKEN_POLICY_MAX_PER_OWNER: "20"
+      TOKEN_POLICY_EXPECTED_VERSION: "0"
+      TOKEN_POLICY_IDEMPOTENCY_KEY: pinvou-compose-owner-cap-bootstrap-v1
+      TOKEN_POLICY_REASON: explicit development owner capacity fixture
+    depends_on:
+      token-migrate:
+        condition: service_completed_successfully
 
 networks:
   backend:

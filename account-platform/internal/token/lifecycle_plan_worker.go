@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -72,7 +73,11 @@ func (w *LifecyclePlanWorker) runOnce(ctx context.Context, testAsOf *time.Time) 
 		// otherwise unchanged due plan look stale.
 		criticalMatches = tokenCommandExpectedVersionsMatch(plan.CriticalResourceVersions, critical)
 	}
-	if !criticalMatches || !jsonSemanticEqual(financial, plan.FinancialSnapshot) {
+	financialMatches := jsonSemanticEqual(financial, plan.FinancialSnapshot)
+	if plan.TargetLifecycle != "PUBLISHED" {
+		financialMatches = approvalpolicy.SameTokenModelFinancialFacts(financial, plan.FinancialSnapshot)
+	}
+	if !criticalMatches || !financialMatches {
 		return true, w.repository.FailLifecyclePlan(ctx, plan.ID, w.workerID, "INVALIDATED", "DEPENDENCY_SNAPSHOT_CHANGED")
 	}
 	if plan.TargetLifecycle == "PUBLISHED" && w.service.upstream == nil {

@@ -1497,6 +1497,8 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}:
     get:
       operationId: getAdminTokenAccount
@@ -1533,6 +1535,8 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}/routes:
     get:
       operationId: listAdminTokenAccountRoutes
@@ -2022,8 +2026,11 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelDraftChange" } } } }
       responses:
         "200": { description: Draft saved }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/models/{model_id}/publish:
     post:
       operationId: publishAdminModelDraft
@@ -2032,8 +2039,11 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelPublishCommand" } } } }
       responses:
         "200": { description: New catalog version published }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/models/{model_id}/lifecycle:
     post:
       operationId: transitionAdminModelLifecycle
@@ -2485,8 +2495,125 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands/by-idempotency-key:
+    get:
+      operationId: getGovernedTokenCommandByIdempotencyKey
+      summary: Recover an actor-owned account-create command when the POST response lost its reference
+      parameters:
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+        - { name: command_type, in: query, required: true, schema: { type: string, enum: [TOKEN_ACCOUNT_CREATE] } }
+      responses:
+        "200": { description: Existing actor-owned result, content: { application/json: { schema: { $ref: "#/components/schemas/TokenCommandResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands/recovery-queue:
+    get:
+      operationId: listTokenAccountProvisioningRecoveryQueue
+      summary: Discover manual-review account creation commands across authorized operators
+      description: Requires ACTIVE governance and both Token management and owner-candidate read permissions. Returns only recovery references and lifecycle metadata; authority checkpoints, leases, owner identities and wallet receipts are excluded.
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 36 }, description: Exact command reference }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200": { description: Actor-bound snapshot page of commands awaiting manual recovery, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountRecoveryQueuePage" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands/{command_reference}/recovery-actions:
+    post:
+      operationId: createTokenAccountProvisioningRecoveryAction
+      summary: Requeue or cancel a manual-review Token Account provisioning reservation
+      parameters:
+        - { name: command_reference, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountRecoveryActionRequest" } } } }
+      responses:
+        "200": { description: Replayed terminal action, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountRecoveryActionResult" } } } }
+        "202": { description: Accepted action, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountRecoveryActionResult" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+        "504": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands/{command_reference}/recovery-actions/by-idempotency-key:
+    get:
+      operationId: getTokenAccountRecoveryActionByIdempotencyKey
+      summary: Recover an operator-owned provisioning recovery action after response loss
+      parameters:
+        - { name: command_reference, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      responses:
+        "200": { description: Existing operator-owned action, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountRecoveryActionResult" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/commands/{command_reference}/recovery-actions/{action_id}:
+    get:
+      operationId: getTokenAccountRecoveryAction
+      summary: Read an operator-owned provisioning recovery action
+      parameters:
+        - { name: command_reference, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: action_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Existing operator-owned action, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountRecoveryActionResult" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /billing/internal/v1/token-account-wallet-provisioning-receipts:
+    post:
+      operationId: provisionTokenAccountWallet
+      summary: Ensure an owner wallet and persist its immutable provisioning receipt
+      security: [{ serviceToken: [] }]
+      parameters: []
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountWalletProvisioningRequest" } } } }
+      responses:
+        "200": { description: Existing receipt, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountWalletProvisioningReceipt" } } } }
+        "201": { description: New receipt, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountWalletProvisioningReceipt" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /billing/internal/v1/token-account-wallet-provisioning-receipts/{command_reference}:
+    get:
+      operationId: getTokenAccountWalletProvisioningReceipt
+      summary: Read an immutable Token Account wallet provisioning receipt
+      security: [{ serviceToken: [] }]
+      parameters: [{ name: command_reference, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Existing receipt, content: { application/json: { schema: { $ref: "#/components/schemas/TokenAccountWalletProvisioningReceipt" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /account/internal/v1/token-account-authority/snapshot:
+    post:
+      operationId: checkTokenOwnerAuthority
+      summary: Resolve a single-snapshot actor, platform permission, and owner lifecycle authority envelope for Token Account provisioning
+      security: [{ serviceToken: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/TokenOwnerAuthorityRequest" } } } }
+      responses:
+        "200": { description: Closed authority decision, content: { application/json: { schema: { $ref: "#/components/schemas/TokenOwnerAuthorityDecision" } } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
+    serviceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Service workload identity with the operation's exact internal permission; never accepts a Portal user token.
     oidc:
       type: openIdConnect
       openIdConnectUrl: /realms/pinvou/.well-known/openid-configuration
@@ -2669,8 +2796,8 @@ components:
       additionalProperties: false
       required: [command_type, target_resource_type, target_resource_id, command]
       properties:
-        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
-        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG, PROVIDER_CREDENTIAL, PROVISIONING, USAGE_REQUEST] }
+        command_type: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_DRAFT_SAVE, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ACCOUNT_CREATE, TOKEN_ACCOUNT_STATUS_CHANGE, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+        target_resource_type: { type: string, enum: [PROTOCOL, FORMULA, MODEL, MODEL_CATALOG, TOKEN_ACCOUNT, PROVIDER_CREDENTIAL, PROVISIONING, USAGE_REQUEST] }
         target_resource_id: { type: string, minLength: 1, maxLength: 160 }
         command: { type: object, additionalProperties: true }
       allOf:
@@ -2727,12 +2854,30 @@ components:
               target_resource_type: { const: MODEL }
               target_resource_id: { type: string, format: uuid }
               command: { $ref: "#/components/schemas/TokenModelPublishCommand" }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_DRAFT_SAVE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: MODEL }
+              target_resource_id: { type: string, format: uuid }
+              command: { $ref: "#/components/schemas/TokenModelDraftSaveCommand" }
         - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_SYNC } }, required: [command_type] }
           then:
             properties:
               target_resource_type: { const: MODEL_CATALOG }
               target_resource_id: { const: CURRENT }
               command: { type: object, maxProperties: 0 }
+        - if: { properties: { command_type: { const: TOKEN_ACCOUNT_CREATE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ACCOUNT }
+              target_resource_id: { type: string, format: uuid }
+              command: { $ref: "#/components/schemas/TokenAccountCreateCommand" }
+        - if: { properties: { command_type: { const: TOKEN_ACCOUNT_STATUS_CHANGE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ACCOUNT }
+              target_resource_id: { type: string, format: uuid }
+              command: { $ref: "#/components/schemas/TokenAccountStatusCommand" }
         - if: { properties: { command_type: { const: TOKEN_CREDENTIAL_VALIDATE } }, required: [command_type] }
           then:
             properties:
@@ -2769,7 +2914,7 @@ components:
         - type: object
           required: [expected_versions]
           properties:
-            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
+            action: { type: string, enum: [TOKEN_PROTOCOL_DRAFT_CREATE, TOKEN_PROTOCOL_PUBLISH, TOKEN_FORMULA_DRAFT_CREATE, TOKEN_FORMULA_PUBLISH, TOKEN_MODEL_DRAFT_SAVE, TOKEN_MODEL_PUBLISH, TOKEN_MODEL_CATALOG_SYNC, TOKEN_ACCOUNT_CREATE, TOKEN_ACCOUNT_STATUS_CHANGE, TOKEN_CREDENTIAL_VALIDATE, TOKEN_ROUTE_PROVISIONING_REPAIR, TOKEN_USAGE_RECONCILIATION_RETRY] }
             expected_versions: { type: object }
         - if: { properties: { action: { const: TOKEN_PROTOCOL_DRAFT_CREATE } }, required: [action] }
           then:
@@ -2844,6 +2989,13 @@ components:
                   provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
                   financial_fact_revision: { type: integer, format: int64, minimum: 1 }
                   price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { action: { const: TOKEN_MODEL_DRAFT_SAVE } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: MODEL }
+              expected_versions: { $ref: "#/components/schemas/TokenModelDraftExpectedVersions" }
         - if: { properties: { action: { const: TOKEN_MODEL_CATALOG_SYNC } }, required: [action] }
           then:
             properties:
@@ -2855,6 +3007,20 @@ components:
                   expected_catalog_version: { type: integer, format: int64, minimum: 0 }
                   adapter_observed_version: { type: string, pattern: '^[0-9a-f]{64}$' }
                   catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { action: { const: TOKEN_ACCOUNT_CREATE } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: TOKEN_ACCOUNT }
+              expected_versions: { $ref: "#/components/schemas/TokenAccountCreateExpectedVersions" }
+        - if: { properties: { action: { const: TOKEN_ACCOUNT_STATUS_CHANGE } }, required: [action] }
+          then:
+            properties:
+              evidence:
+                properties:
+                  resource_type: { const: TOKEN_ACCOUNT }
+              expected_versions: { $ref: "#/components/schemas/TokenAccountStatusExpectedVersions" }
         - if: { properties: { action: { const: TOKEN_CREDENTIAL_VALIDATE } }, required: [action] }
           then:
             properties:
@@ -2916,6 +3082,71 @@ components:
             lifecycle_plan_id: { type: string, format: uuid }
             lifecycle_plan_version: { type: integer, format: int64, minimum: 1 }
             effective_at: { type: string, format: date-time, description: Canonicalized by the service to a UTC whole-second instant before precheck and command fingerprinting. }
+    TokenModelDraftSaveCommand:
+      type: object
+      additionalProperties: false
+      required: [model_id, expected_catalog_version, expected_draft_version, display_name, description, aliases, protocol_code, protocol_version, context_length, maximum_output_tokens, supported_modalities, tokenizer_version]
+      properties:
+        model_id: { type: string, format: uuid }
+        expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+        expected_draft_version: { type: integer, format: int64, minimum: 0 }
+        display_name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 1000 }
+        aliases: { type: array, maxItems: 50, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 120 } }
+        protocol_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,79}$' }
+        protocol_version: { type: integer, format: int64, minimum: 1 }
+        context_length: { type: integer, format: int64, minimum: 1 }
+        maximum_output_tokens: { type: integer, format: int64, minimum: 0 }
+        supported_modalities: { type: array, minItems: 1, maxItems: 16, uniqueItems: true, items: { type: string, minLength: 1, maxLength: 40 } }
+        tokenizer_version: { type: string, minLength: 1, maxLength: 120 }
+    TokenAccountCreateCommand:
+      type: object
+      additionalProperties: false
+      required: [owner_type, owner_id, owner_organization_id, owner_unit_id, name, share_scope, default_priority]
+      properties:
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        owner_organization_id: { type: [string, 'null'], format: uuid }
+        owner_unit_id: { type: [string, 'null'], format: uuid }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        share_scope: { type: string, enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS] }
+        default_priority: { type: integer, minimum: 0, maximum: 10000 }
+    TokenAccountStatusCommand:
+      type: object
+      additionalProperties: false
+      required: [target_status]
+      properties:
+        target_status: { type: string, enum: [ACTIVE, DISABLED] }
+    TokenModelDraftExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [model_id, expected_catalog_version, expected_draft_version]
+      properties:
+        model_id: { type: string, format: uuid }
+        expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+        expected_draft_version: { type: integer, format: int64, minimum: 0 }
+    TokenAccountCreateExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [owner_type, owner_id, owner_authorization_version, owner_version, owner_identity_digest, owner_account_count, owner_account_cap, owner_account_cap_policy_version, creation_version]
+      properties:
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        owner_authorization_version: { type: integer, format: int64, minimum: 1 }
+        owner_version: { type: integer, format: int64, minimum: 1 }
+        owner_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        owner_account_count: { type: integer, format: int64, minimum: 0 }
+        owner_account_cap: { type: integer, format: int64, minimum: 1, maximum: 1000 }
+        owner_account_cap_policy_version: { type: integer, format: int64, minimum: 1 }
+        creation_version: { type: integer, format: int64, const: 0 }
+    TokenAccountStatusExpectedVersions:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, expected_account_version, target_status]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        expected_account_version: { type: integer, format: int64, minimum: 1 }
+        target_status: { type: string, enum: [ACTIVE, DISABLED] }
     TokenRuntimeGovernedCommand:
       oneOf:
         - { $ref: "#/components/schemas/TokenProvisioningRepairCommand" }
@@ -2978,6 +3209,39 @@ components:
         validation_status: { type: string, enum: [VALID, INVALID] }
         error_code: { type: string, enum: [CREDENTIAL_CHECK_FAILED] }
         credential: { $ref: "#/components/schemas/TokenAdminCredentialMetadata" }
+    TokenModelDraftGovernedResult:
+      type: object
+      additionalProperties: false
+      required: [model_id, base_catalog_version, draft_version]
+      properties:
+        model_id: { type: string, format: uuid }
+        base_catalog_version: { type: integer, format: int64, minimum: 1 }
+        draft_version: { type: integer, format: int64, minimum: 1 }
+    TokenAccountCreateGovernedResult:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, owner_type, owner_id, status, account_version]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        status: { const: ACTIVE }
+        account_version: { type: integer, format: int64, minimum: 1 }
+    TokenAccountStatusGovernedResult:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, status, account_version]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        account_version: { type: integer, format: int64, minimum: 1 }
+    TokenCatalogRollbackGovernedResult:
+      type: object
+      additionalProperties: false
+      required: [catalog_version, source_catalog_version]
+      properties:
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        source_catalog_version: { type: integer, format: int64, minimum: 1 }
     TokenCommandEnvelope:
       type: object
       additionalProperties: false
@@ -3096,6 +3360,72 @@ components:
               target_resource_id: { type: string, format: uuid }
               command: { $ref: "#/components/schemas/TokenModelPublishCommand" }
               expected_versions: { $ref: "#/components/schemas/TokenModelPublishGovernedExpectedVersions" }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_DRAFT_SAVE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: MODEL }
+              target_resource_id: { type: string, format: uuid }
+              command: { $ref: "#/components/schemas/TokenModelDraftSaveCommand" }
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [model_id, expected_catalog_version, expected_draft_version, precheck_fingerprint, request_fingerprint]
+                properties:
+                  model_id: { type: string, format: uuid }
+                  expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+                  expected_draft_version: { type: integer, format: int64, minimum: 0 }
+                  precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { command_type: { const: TOKEN_ACCOUNT_CREATE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ACCOUNT }
+              target_resource_id: { type: string, format: uuid }
+              command: { $ref: "#/components/schemas/TokenAccountCreateCommand" }
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [owner_type, owner_id, owner_authorization_version, owner_version, owner_identity_digest, owner_account_count, owner_account_cap, owner_account_cap_policy_version, creation_version, precheck_fingerprint, request_fingerprint]
+                properties:
+                  owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+                  owner_id: { type: string, format: uuid }
+                  owner_authorization_version: { type: integer, format: int64, minimum: 1 }
+                  owner_version: { type: integer, format: int64, minimum: 1 }
+                  owner_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  owner_account_count: { type: integer, format: int64, minimum: 0 }
+                  owner_account_cap: { type: integer, format: int64, minimum: 1, maximum: 1000 }
+                  owner_account_cap_policy_version: { type: integer, format: int64, minimum: 1 }
+                  creation_version: { type: integer, format: int64, const: 0 }
+                  precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { command_type: { const: TOKEN_ACCOUNT_STATUS_CHANGE } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: TOKEN_ACCOUNT }
+              target_resource_id: { type: string, format: uuid }
+              command: { $ref: "#/components/schemas/TokenAccountStatusCommand" }
+              expected_versions:
+                type: object
+                additionalProperties: false
+                required: [token_account_id, expected_account_version, target_status, precheck_fingerprint, request_fingerprint]
+                properties:
+                  token_account_id: { type: string, format: uuid }
+                  expected_account_version: { type: integer, format: int64, minimum: 1 }
+                  target_status: { type: string, enum: [ACTIVE, DISABLED] }
+                  precheck_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+                  request_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }, required: [command_type] }
+          then:
+            properties:
+              target_resource_type: { const: MODEL_CATALOG }
+              target_resource_id: { type: string, pattern: '^[1-9][0-9]*$' }
+              command:
+                type: object
+                additionalProperties: false
+                required: [source_catalog_version]
+                properties:
+                  source_catalog_version: { type: integer, format: int64, minimum: 1 }
+              expected_versions: { $ref: "#/components/schemas/TokenCatalogRollbackApprovalSnapshot" }
         - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_SYNC } }, required: [command_type] }
           then:
             properties:
@@ -3162,6 +3492,237 @@ components:
                   token_account_id: { type: string, format: uuid }
                   credential_id: { type: string, format: uuid }
               expected_versions: { $ref: "#/components/schemas/TokenCredentialValidateExpectedVersions" }
+    TokenAccountRecoveryActionRequest:
+      type: object
+      additionalProperties: false
+      required: [action, expected_recovery_epoch, reason]
+      properties:
+        action: { type: string, enum: [REQUEUE, CANCEL] }
+        expected_recovery_epoch: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 10, maxLength: 500 }
+    TokenAccountRecoveryActionResult:
+      type: object
+      additionalProperties: false
+      required: [action_id, command_reference, command_type, action, status, recovery_state, recovery_epoch, stable_error_code, audit_reference, created_at, completed_at]
+      properties:
+        action_id: { type: string, format: uuid }
+        command_reference: { type: string, format: uuid }
+        command_type: { type: string, const: TOKEN_ACCOUNT_CREATE }
+        action: { type: string, enum: [REQUEUE, CANCEL] }
+        status: { type: string, enum: [PENDING, SUCCEEDED, FAILED] }
+        recovery_state: { type: string, enum: [PENDING, MANUAL_REVIEW, FAILED] }
+        recovery_epoch: { oneOf: [{ type: integer, format: int64, minimum: 1 }, { type: "null" }] }
+        stable_error_code: { oneOf: [{ type: string, pattern: '^(?!.*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL))[A-Z][A-Z0-9_]*$' }, { type: "null" }] }
+        audit_reference: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        completed_at: { oneOf: [{ type: string, format: date-time }, { type: "null" }] }
+      oneOf:
+        - properties:
+            status: { const: PENDING }
+            recovery_state: { const: MANUAL_REVIEW }
+            recovery_epoch: { type: "null" }
+            stable_error_code: { type: "null" }
+            completed_at: { type: "null" }
+        - properties:
+            action: { const: REQUEUE }
+            status: { const: SUCCEEDED }
+            recovery_state: { const: PENDING }
+            recovery_epoch: { type: integer, format: int64, minimum: 1 }
+            stable_error_code: { type: "null" }
+            completed_at: { type: string, format: date-time }
+        - properties:
+            action: { const: CANCEL }
+            status: { const: SUCCEEDED }
+            recovery_state: { const: FAILED }
+            recovery_epoch: { type: integer, format: int64, minimum: 1 }
+            stable_error_code: { type: "null" }
+            completed_at: { type: string, format: date-time }
+        - properties:
+            status: { const: FAILED }
+            recovery_state: { const: MANUAL_REVIEW }
+            recovery_epoch: { type: "null" }
+            stable_error_code: { type: string, pattern: '^(?!.*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL))[A-Z][A-Z0-9_]*$' }
+            completed_at: { type: string, format: date-time }
+    TokenAccountWalletProvisioningRequest:
+      type: object
+      additionalProperties: false
+      required: [command_reference, owner_type, owner_id, request_digest]
+      properties:
+        command_reference: { type: string, format: uuid }
+        owner_type: { type: string, enum: [PERSONAL, ORGANIZATION, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        request_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+    TokenAccountWalletProvisioningReceipt:
+      type: object
+      additionalProperties: false
+      required: [command_reference, owner_type, owner_id, request_digest, status, wallet_id, stable_error_code, attempt_count, created_at, completed_at]
+      properties:
+        command_reference: { type: string, format: uuid }
+        owner_type: { type: string, enum: [PERSONAL, ORGANIZATION, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        request_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        status: { type: string, enum: [PENDING, SUCCEEDED, FAILED, UNKNOWN] }
+        wallet_id: { oneOf: [{ type: string, format: uuid }, { type: "null" }] }
+        stable_error_code: { oneOf: [{ type: string, pattern: '^(?!.*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL))[A-Z][A-Z0-9_]*$' }, { type: "null" }] }
+        attempt_count: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        completed_at: { oneOf: [{ type: string, format: date-time }, { type: "null" }] }
+      oneOf:
+        - properties:
+            status: { const: PENDING }
+            wallet_id: { type: "null" }
+            stable_error_code: { type: "null" }
+            completed_at: { type: "null" }
+        - properties:
+            status: { const: SUCCEEDED }
+            wallet_id: { type: string, format: uuid }
+            stable_error_code: { type: "null" }
+            completed_at: { type: string, format: date-time }
+        - properties:
+            status: { enum: [FAILED, UNKNOWN] }
+            wallet_id: { type: "null" }
+            stable_error_code: { type: string, pattern: '^(?!.*(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL))[A-Z][A-Z0-9_]*$' }
+            completed_at: { type: string, format: date-time }
+    TokenOwnerAuthorityRequest:
+      type: object
+      additionalProperties: false
+      required: [authority_schema_version, mode, identity_issuer, identity_subject, identity_subject_sha256, actor_user_id, owner_type, owner_id, required_permissions, command_reference, command_request_digest, expected_platform_authorization_version, expected_actor_version, expected_owner_version, expected_actor_identity_digest, expected_owner_identity_digest, authority_request_sha256]
+      properties:
+        authority_schema_version: { type: string, const: "1" }
+        mode: { type: string, enum: [OPERATOR_AUTHORIZE, T1_SNAPSHOT, T3_CREATOR_RECHECK, T3_OPERATOR_RECHECK] }
+        identity_issuer: { oneOf: [{ type: string, minLength: 1 }, { type: "null" }] }
+        identity_subject: { oneOf: [{ type: string, minLength: 1 }, { type: "null" }], writeOnly: true }
+        identity_subject_sha256: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        actor_user_id: { oneOf: [{ type: string, format: uuid }, { type: "null" }] }
+        owner_type: { oneOf: [{ type: string, enum: [USER, ORGANIZATION, ORG_UNIT] }, { type: "null" }] }
+        owner_id: { oneOf: [{ type: string, format: uuid }, { type: "null" }] }
+        required_permissions:
+          type: array
+          prefixItems:
+            - { type: string, const: platform.tokens.manage }
+            - { type: string, const: platform.tokens.owner-candidates.read }
+          items: false
+          minItems: 2
+          maxItems: 2
+        command_reference: { type: string, format: uuid }
+        command_request_digest: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        expected_platform_authorization_version: { oneOf: [{ type: string, pattern: '^[1-9][0-9]*$' }, { type: "null" }] }
+        expected_actor_version: { oneOf: [{ type: string, pattern: '^[1-9][0-9]*$' }, { type: "null" }] }
+        expected_owner_version: { oneOf: [{ type: string, pattern: '^[1-9][0-9]*$' }, { type: "null" }] }
+        expected_actor_identity_digest: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        expected_owner_identity_digest: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        authority_request_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+      allOf:
+        - if: { properties: { mode: { const: OPERATOR_AUTHORIZE } }, required: [mode] }
+          then:
+            properties:
+              identity_issuer: { type: string, minLength: 1 }
+              identity_subject: { type: string, minLength: 1 }
+              identity_subject_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+              actor_user_id: { type: "null" }
+              owner_type: { type: "null" }
+              owner_id: { type: "null" }
+              command_request_digest: { type: "null" }
+              expected_platform_authorization_version: { type: "null" }
+              expected_actor_version: { type: "null" }
+              expected_owner_version: { type: "null" }
+              expected_actor_identity_digest: { type: "null" }
+              expected_owner_identity_digest: { type: "null" }
+        - if: { properties: { mode: { const: T1_SNAPSHOT } }, required: [mode] }
+          then:
+            properties:
+              identity_issuer: { type: string, minLength: 1 }
+              identity_subject: { type: string, minLength: 1 }
+              identity_subject_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+              actor_user_id: { type: "null" }
+              owner_type: { type: string, enum: [USER, ORGANIZATION, ORG_UNIT] }
+              owner_id: { type: string, format: uuid }
+              command_request_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+              expected_platform_authorization_version: { type: "null" }
+              expected_actor_version: { type: "null" }
+              expected_owner_version: { type: "null" }
+              expected_actor_identity_digest: { type: "null" }
+              expected_owner_identity_digest: { type: "null" }
+        - if: { properties: { mode: { enum: [T3_CREATOR_RECHECK, T3_OPERATOR_RECHECK] } }, required: [mode] }
+          then:
+            properties:
+              identity_issuer: { type: "null" }
+              identity_subject: { type: "null" }
+              identity_subject_sha256: { type: "null" }
+              actor_user_id: { type: string, format: uuid }
+              owner_type: { type: string, enum: [USER, ORGANIZATION, ORG_UNIT] }
+              owner_id: { type: string, format: uuid }
+              command_request_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+              expected_platform_authorization_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              expected_actor_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              expected_owner_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              expected_actor_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+              expected_owner_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+    TokenOwnerAuthorityDecision:
+      type: object
+      additionalProperties: false
+      required: [authority_schema_version, mode, decision, reason_code, actor_user_id, expected_platform_authorization_version, observed_platform_authorization_version, expected_actor_version, expected_actor_identity_digest, observed_actor_version, actor_status, actor_identity_digest, expected_owner_version, expected_owner_identity_digest, observed_owner_version, owner_status, owner_identity_digest, command_reference, command_request_digest, authority_request_sha256, observed_at]
+      properties:
+        authority_schema_version: { type: string, const: "1" }
+        mode: { type: string, enum: [OPERATOR_AUTHORIZE, T1_SNAPSHOT, T3_CREATOR_RECHECK, T3_OPERATOR_RECHECK] }
+        decision: { type: string, enum: [ALLOW, DENY] }
+        reason_code: { oneOf: [{ type: string, enum: [ACTOR_NOT_FOUND, ACTOR_INACTIVE, AUTHORIZATION_REVOKED, OWNER_NOT_FOUND, OWNER_INACTIVE] }, { type: "null" }] }
+        actor_user_id: { type: string, format: uuid }
+        expected_platform_authorization_version: { oneOf: [{ type: string, pattern: '^[1-9][0-9]*$' }, { type: "null" }] }
+        observed_platform_authorization_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        expected_actor_version: { oneOf: [{ type: string, pattern: '^[1-9][0-9]*$' }, { type: "null" }] }
+        expected_actor_identity_digest: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        observed_actor_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        actor_status: { type: string, enum: [ACTIVE, INACTIVE, NOT_FOUND] }
+        actor_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        expected_owner_version: { oneOf: [{ type: string, pattern: '^[1-9][0-9]*$' }, { type: "null" }] }
+        expected_owner_identity_digest: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        observed_owner_version: { oneOf: [{ type: string, pattern: '^[1-9][0-9]*$' }, { type: "null" }] }
+        owner_status: { oneOf: [{ type: string, enum: [ACTIVE, INACTIVE, NOT_FOUND] }, { type: "null" }] }
+        owner_identity_digest: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        owner_organization_id: { oneOf: [{ type: string, format: uuid }, { type: "null" }], description: Authoritative organization identity. USER is null; ORGANIZATION is its own ID; ORG_UNIT is its actual parent organization. Unit owner digests include this identity. }
+        command_reference: { type: string, format: uuid }
+        command_request_digest: { oneOf: [{ type: string, pattern: '^[0-9a-f]{64}$' }, { type: "null" }] }
+        authority_request_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        observed_at: { type: string, format: date-time }
+      allOf:
+        - if: { properties: { decision: { const: ALLOW } }, required: [decision] }
+          then: { properties: { reason_code: { type: "null" } } }
+        - if: { properties: { decision: { const: DENY } }, required: [decision] }
+          then: { properties: { reason_code: { type: string, enum: [ACTOR_NOT_FOUND, ACTOR_INACTIVE, AUTHORIZATION_REVOKED, OWNER_NOT_FOUND, OWNER_INACTIVE] } } }
+        - if: { properties: { mode: { const: OPERATOR_AUTHORIZE } }, required: [mode] }
+          then:
+            properties:
+              expected_platform_authorization_version: { type: "null" }
+              expected_actor_version: { type: "null" }
+              expected_actor_identity_digest: { type: "null" }
+              expected_owner_version: { type: "null" }
+              expected_owner_identity_digest: { type: "null" }
+              observed_owner_version: { type: "null" }
+              owner_status: { type: "null" }
+              owner_identity_digest: { type: "null" }
+        - if: { properties: { mode: { const: T1_SNAPSHOT } }, required: [mode] }
+          then:
+            properties:
+              expected_platform_authorization_version: { type: "null" }
+              expected_actor_version: { type: "null" }
+              expected_actor_identity_digest: { type: "null" }
+              expected_owner_version: { type: "null" }
+              expected_owner_identity_digest: { type: "null" }
+              observed_owner_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              owner_status: { type: string, enum: [ACTIVE, INACTIVE, NOT_FOUND] }
+              owner_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        - if: { properties: { mode: { enum: [T3_CREATOR_RECHECK, T3_OPERATOR_RECHECK] } }, required: [mode] }
+          then:
+            properties:
+              expected_platform_authorization_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              expected_actor_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              expected_actor_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+              expected_owner_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              expected_owner_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+              observed_owner_version: { type: string, pattern: '^[1-9][0-9]*$' }
+              owner_status: { type: string, enum: [ACTIVE, INACTIVE, NOT_FOUND] }
+              owner_identity_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
     TokenCommandResult:
       type: object
       additionalProperties: false
@@ -3190,12 +3751,21 @@ components:
           oneOf:
             - { type: string, format: date-time }
             - { type: "null" }
+        recovery_state: { type: string, enum: [PENDING, MANUAL_REVIEW, COMPLETED, FAILED] }
+        recovery_diagnostic_code: { type: string, const: ACCOUNT_PROVISIONING_MANUAL_REVIEW }
+        recovery_epoch: { type: integer, format: int64, minimum: 1 }
       allOf:
         - if: { properties: { status: { const: PENDING } }, required: [status] }
           then:
             properties:
               stable_error_code: { type: "null" }
               completed_at: { type: "null" }
+        - if: { properties: { command_type: { const: TOKEN_ACCOUNT_CREATE }, status: { const: PENDING } }, required: [command_type, status] }
+          then:
+            required: [recovery_state, recovery_epoch]
+            properties:
+              recovery_state: { enum: [PENDING, MANUAL_REVIEW] }
+              recovery_epoch: { type: integer, format: int64, minimum: 1 }
         - if: { properties: { status: { const: SUCCEEDED } }, required: [status] }
           then:
             required: [completed_at]
@@ -3230,6 +3800,33 @@ components:
                 oneOf:
                   - { $ref: "#/components/schemas/TokenImmediateModelPublishResult" }
                   - { $ref: "#/components/schemas/TokenScheduledModelPublishResult" }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_DRAFT_SAVE }, status: { const: SUCCEEDED } }, required: [command_type, status] }
+          then:
+            required: [redacted_result]
+            properties:
+              target_resource_type: { const: MODEL }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenModelDraftGovernedResult" }
+        - if: { properties: { command_type: { const: TOKEN_ACCOUNT_CREATE }, status: { const: SUCCEEDED } }, required: [command_type, status] }
+          then:
+            required: [redacted_result]
+            properties:
+              target_resource_type: { const: TOKEN_ACCOUNT }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenAccountCreateGovernedResult" }
+        - if: { properties: { command_type: { const: TOKEN_ACCOUNT_STATUS_CHANGE }, status: { const: SUCCEEDED } }, required: [command_type, status] }
+          then:
+            required: [redacted_result]
+            properties:
+              target_resource_type: { const: TOKEN_ACCOUNT }
+              target_resource_id: { type: string, format: uuid }
+              redacted_result: { $ref: "#/components/schemas/TokenAccountStatusGovernedResult" }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK }, status: { const: SUCCEEDED } }, required: [command_type, status] }
+          then:
+            required: [redacted_result]
+            properties:
+              target_resource_type: { const: MODEL_CATALOG }
+              redacted_result: { $ref: "#/components/schemas/TokenCatalogRollbackGovernedResult" }
         - if: { properties: { command_type: { const: TOKEN_ROUTE_PROVISIONING_REPAIR } }, required: [command_type] }
           then:
             properties:
@@ -3918,6 +4515,22 @@ components:
         evidence_type: { type: string }
         evidence: { type: object, description: "Sanitized evidence only; no credential, provider token, request content, or upstream secret", additionalProperties: true }
         observed_at: { type: string, format: date-time }
+    TokenAccountRecoveryQueueItem:
+      type: object
+      additionalProperties: false
+      required: [command_reference, command_type, status, recovery_state, recovery_epoch, created_at, updated_at]
+      properties:
+        command_reference: { type: string, format: uuid }
+        command_type: { type: string, enum: [TOKEN_ACCOUNT_CREATE] }
+        status: { type: string, enum: [PENDING] }
+        recovery_state: { type: string, enum: [MANUAL_REVIEW] }
+        recovery_epoch: { type: integer, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    TokenAccountRecoveryQueuePage:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
+        - { type: object, properties: { items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/TokenAccountRecoveryQueueItem" } } } }
     TokenAdminModelPage:
       allOf:
         - { $ref: "token-gateway.yaml#/components/schemas/AdminPaginationEnvelope" }
@@ -5919,7 +6532,7 @@ components:
       description: Stable reconciliation snapshot page with a closed projection.
       content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminReconciliationPage" } } }
     TokenAdminOwnerCandidateCollection:
-      description: Stable owner-candidate snapshot page; limit and items are capped at 50 and each item has exactly four fields.
+      description: Stable owner-candidate snapshot page; limit and items are capped at 50 and each item has exactly four public fields. Authorization version exists only on the internal Account-to-Token authority envelope and is never exposed by this page or copied into an item.
       content: { application/json: { schema: { $ref: "#/components/schemas/TokenAdminOwnerCandidatePage" } } }
     TokenAdminResourceAuditCollection:
       description: Stable redacted resource-audit snapshot page.

@@ -56,6 +56,13 @@ test('every management write is classified and financial facts use the independe
         assert.match(line, /requireNewTokenCommandGovernanceActive\(\).*adminTokenCommandPrecheck/, `unguarded dynamic precheck: ${line.trim()}`);
         continue;
       }
+      if (/admin\.POST\("\/commands\/:command_reference\/recovery-actions"/.test(line)) {
+        assert.match(line, /requireNewTokenCommandGovernanceActive\(\).*adminTokenAccountRecoveryAction/, `unguarded account recovery: ${line.trim()}`);
+        const recovery = await read('internal/token/account_provisioning_saga.go');
+        assert.match(recovery, /func \(s \*Service\) adminTokenAccountRecoveryAction[\s\S]*authorizeRecoveryOperator/);
+        assert.match(recovery, /approvalpolicy\.Lookup\("TOKEN_ACCOUNT_CREATE"\)/);
+        continue;
+      }
       if (/admin\.POST\("\/credential-results\/:result_ref\/revoke-window"/.test(line)) {
         assert.match(line, /requireCredentialIsolationEnabled\(\).*adminRevokeCredentialLaunch/, `unguarded one-time credential window abort: ${line.trim()}`);
         continue;

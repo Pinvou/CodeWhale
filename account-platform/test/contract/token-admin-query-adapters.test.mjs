@@ -122,6 +122,7 @@ test('all paginated Token projections and pages are closed schemas', async () =>
   }
   assert.equal(contract.components.schemas.RouteProvisioning.additionalProperties, false);
   assert.equal(contract.components.schemas.TokenAdminOwnerCandidate.properties.status.enum.includes('FROZEN'), false);
+  assert.deepEqual(Object.keys(contract.components.schemas.TokenAdminOwnerCandidate.properties).sort(), ['display_label', 'id', 'status', 'type']);
   for (const page of ['TokenAdminModelPage', 'TokenAdminProtocolPage', 'TokenAdminFormulaPage', 'TokenAdminAccountPage', 'TokenAdminProvisioningPage', 'TokenAdminProvisioningAttemptPage', 'TokenAdminUsagePage', 'TokenAdminReconciliationPage', 'TokenAdminOwnerCandidatePage', 'TokenAdminResourceAuditPage', 'TokenAdminUsageEvidencePage']) {
     assert.ok(contract.components.schemas[page].allOf[0].$ref.endsWith('/AdminPaginationEnvelope'), page);
     assert.ok(contract.components.schemas[page].allOf[1].properties.items.items.$ref, `${page} item`);
@@ -375,7 +376,10 @@ test('owner projection stays service-auth only and evidence has a cross-table id
 
 test('PostgreSQL gate applies the production Token migration chain and production loaders/handler', async () => {
   const integration = await read('internal/token/admin_queries_integration_test.go');
-  assert.match(integration, /migrations\.Load\("\.\.\/\.\.\/migrations\/token"\)/);
+  const migrationHelper = await read('internal/token/isolated_migrations_test.go');
+  assert.match(integration, /loadTokenIntegrationMigrations\("\.\.\/\.\.\/migrations\/token", schema\)/);
+  assert.match(migrationHelper, /loaded, err := migrations\.Load\(directory\)/);
+  assert.match(migrationHelper, /loaded\[index\]\.Version != 29/);
   assert.match(integration, /migrations\.Up\(ctx, connection, loaded\)/);
   assert.doesNotMatch(integration, /CREATE TABLE model_catalog_versions|CREATE TABLE token_accounts/);
   for (const loader of ['adminModelsByIDs', 'adminProtocolsByIDs', 'adminFormulasByIDs', 'adminTokenAccountsByIDs', 'adminProvisioningsByIDs', 'adminProvisioningAttemptsByIDs', 'adminUsageByIDs', 'adminReconciliationByIDs', 'adminAuditByIDs', 'adminEvidenceByIDs']) {

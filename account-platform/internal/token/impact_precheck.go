@@ -267,7 +267,7 @@ func (s *Service) adminModelLifecycleImpact(w http.ResponseWriter, r *http.Reque
 		"policy_version": int64(2),
 	}
 	result.FinancialSnapshot = financialImpactSnapshot(price)
-	finalizeImpactResult(&result, "target_status="+target, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+effectiveAt.UTC().Format(time.RFC3339Nano), "replacement_model_id="+valueUUID(replacement))
+	finalizeImpactResult(&result, "target_status="+target, "lifecycle_plan_version="+strconv.FormatInt(planVersion, 10), "effective_at="+effectiveAt.UTC().Format(time.RFC3339Nano), "existing_session_cutoff_at="+valueTime(existingSessionCutoff), "replacement_model_id="+valueUUID(replacement))
 	api.WriteJSON(w, http.StatusOK, result)
 }
 
@@ -490,19 +490,21 @@ func finalizeImpactResult(result *ImpactPrecheckResult, actionParameters ...stri
 	result.TokenObservedAt = result.Evidence.ObservedAt.UTC()
 	result.SnapshotSemantics = "INDEPENDENT_TOKEN_AND_BILLING_SNAPSHOTS"
 	result.RequiresCASRevalidation = true
-	values := []string{result.Action, result.Evidence.ResourceType, result.Evidence.ResourceID, result.Evidence.CurrentVersion.EvidenceETag, result.TokenObservedAt.Format(time.RFC3339Nano)}
+	// Each read gets a fresh transaction timestamp. Only versioned facts and
+	// action parameters can invalidate the proof; retain observation times as
+	// evidence metadata without turning time passing into a false conflict.
+	values := []string{result.Action, result.Evidence.ResourceType, result.Evidence.ResourceID, result.Evidence.CurrentVersion.EvidenceETag, result.Evidence.CurrentVersion.EvidenceSetSHA256}
 	values = append(values, actionParameters...)
 	if result.PriceCoverage != nil {
 		billingObservedAt := result.PriceCoverage.BillingObservedAt.UTC()
 		result.BillingObservedAt = &billingObservedAt
-		values = append(values, "billing_as_of="+billingObservedAt.Format(time.RFC3339Nano))
 		values = append(values, "billing_revision="+strconv.FormatInt(result.PriceCoverage.FinancialFactRevision, 10), "price_set_fingerprint="+result.PriceCoverage.PriceSetFingerprint)
 		versions := append([]ImpactPriceEvidence(nil), result.PriceCoverage.Versions...)
 		sort.Slice(versions, func(i, j int) bool {
 			return impactPriceDimensionKey(ImpactPriceQuery{ModelID: versions[i].ModelID, ProtocolCode: versions[i].ProtocolCode, CreditUnit: versions[i].CreditUnit}) < impactPriceDimensionKey(ImpactPriceQuery{ModelID: versions[j].ModelID, ProtocolCode: versions[j].ProtocolCode, CreditUnit: versions[j].CreditUnit})
 		})
 		for _, version := range versions {
-			values = append(values, impactPriceDimensionKey(ImpactPriceQuery{ModelID: version.ModelID, ProtocolCode: version.ProtocolCode, CreditUnit: version.CreditUnit}), strconv.FormatBool(version.Covered), valueUUID(version.FormulaVersionID), valueUUID(version.PriceVersionID), valueInt64(version.PriceVersion))
+			values = append(values, impactPriceDimensionKey(ImpactPriceQuery{ModelID: version.ModelID, ProtocolCode: version.ProtocolCode, CreditUnit: version.CreditUnit}), strconv.FormatBool(version.Covered), valueUUID(version.FormulaVersionID), valueUUID(version.PriceVersionID), valueInt64(version.PriceVersion), valueTime(version.EffectiveFrom), valueTime(version.EffectiveTo))
 		}
 	}
 	digest := sha256.Sum256([]byte(strings.Join(values, "\x00")))
@@ -740,6 +742,10 @@ func (r *PostgresRepository) CatalogRollbackImpact(ctx context.Context, sourceVe
 	if len(ids) > maximumImpactModels {
 		return ImpactLocalEvidence{}, ErrImpactScopeTooLarge
 	}
+	ids, err = catalogRollbackAffectedModelIDs(ctx, tx, sourceVersion, current)
+	if err != nil {
+		return ImpactLocalEvidence{}, err
+	}
 	var dependencies ImpactDependencySummary
 	if err := tx.QueryRow(ctx, `SELECT
 		count(DISTINCT route.id),count(DISTINCT route.id) FILTER (WHERE route.reference_status='RESOLVED' AND route.health_status='HEALTHY' AND route.health_expires_at>transaction_timestamp()),
@@ -747,12 +753,11 @@ func (r *PostgresRepository) CatalogRollbackImpact(ctx context.Context, sourceVe
 		count(DISTINCT provision.id) FILTER (WHERE provision.lease_until>transaction_timestamp()),
 		count(DISTINCT request.id) FILTER (WHERE request.execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING')),
 		count(DISTINCT request.session_id) FILTER (WHERE request.execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING'))
-		FROM model_catalog_entries entry
-		LEFT JOIN model_identities identity ON identity.id=entry.model_id
-		LEFT JOIN routing_policies route ON route.model IN (entry.model_id::text,identity.upstream_model_ref)
-		LEFT JOIN route_provisionings provision ON provision.model_id=entry.model_id
-		LEFT JOIN usage_requests request ON request.model_id=entry.model_id
-		WHERE entry.catalog_version=$1 AND entry.lifecycle_status<>'REMOVED'`, sourceVersion).Scan(&dependencies.Routes, &dependencies.HealthyRoutes, &dependencies.Provisionings, &dependencies.ReadyProvisionings, &dependencies.ActiveLeases, &dependencies.InflightRequests, &dependencies.ActiveSessions); err != nil {
+		FROM model_identities identity
+		LEFT JOIN routing_policies route ON route.model_id=identity.id OR route.model IN (identity.id::text,identity.upstream_model_ref)
+		LEFT JOIN route_provisionings provision ON provision.model_id=identity.id
+		LEFT JOIN usage_requests request ON request.model_id=identity.id
+		WHERE identity.id=ANY($1::uuid[])`, ids).Scan(&dependencies.Routes, &dependencies.HealthyRoutes, &dependencies.Provisionings, &dependencies.ReadyProvisionings, &dependencies.ActiveLeases, &dependencies.InflightRequests, &dependencies.ActiveSessions); err != nil {
 		return ImpactLocalEvidence{}, err
 	}
 	dependencies.ReadyProvisionings, err = canServeCoverageCount(ctx, tx, ids, nil, "", nil, nil)
@@ -1227,7 +1232,7 @@ func modelImpactKeySet(ctx context.Context, tx pgx.Tx, modelID uuid.UUID, replac
 		{`SELECT 'provisioning|'||jsonb_build_array(id,status,stage,desired_generation,actual_generation,lease_until,active_token_account_id,active_credential_id,upstream_model_ref,protocol_code,protocol_version_id)::text FROM route_provisionings WHERE model_id=ANY($1::uuid[]) ORDER BY model_id,id`, []any{modelIDs}},
 		{`SELECT 'request|'||jsonb_build_array(id,session_id,status,execution_status)::text FROM usage_requests WHERE model_id=$1 AND execution_status IN ('RECEIVED','HOLD_RESERVING','HOLD_RESERVED','DISPATCH_INTENT_PERSISTED','UPSTREAM_DISPATCHING','STREAMING','SETTLEMENT_PENDING') ORDER BY id`, []any{modelID}},
 		{`SELECT DISTINCT 'credential|'||jsonb_build_array(credential.id,credential.version,credential.status,credential.validation_status,credential.provider,credential.fingerprint,(SELECT jsonb_agg(value ORDER BY value) FROM unnest(credential.allowed_models) value),route.model_id,route.protocol_version_id)::text FROM routing_policies route JOIN provider_credentials credential ON credential.token_account_id=route.token_account_id WHERE route.model_id=ANY($1::uuid[]) ORDER BY 1`, []any{modelIDs}},
-		{`SELECT 'replacement|'||jsonb_build_array(entry.model_id,entry.lifecycle_status,entry.model_capability_version_id,entry.protocol_definition_id,entry.source_available)::text FROM model_catalog_entries entry WHERE $1<>$2 AND entry.catalog_version=(SELECT max(version) FROM model_catalog_versions) AND entry.model_id=$1`, []any{replacement, uuid.Nil}},
+		{`SELECT 'replacement|'||jsonb_build_array(entry.model_id,entry.lifecycle_status,entry.model_capability_version_id,entry.protocol_definition_id,entry.source_available)::text FROM model_catalog_entries entry WHERE $1::uuid<>$2::uuid AND entry.catalog_version=(SELECT max(version) FROM model_catalog_versions) AND entry.model_id=$1`, []any{replacement, uuid.Nil}},
 	}
 	for _, item := range queries {
 		if err := appendImpactKeyRows(ctx, tx, digest, item.sql, item.args...); err != nil {
