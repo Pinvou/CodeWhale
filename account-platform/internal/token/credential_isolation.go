@@ -215,7 +215,7 @@ func (r *PostgresRepository) claimCredentialValidationProbe(ctx context.Context,
 		return false, claimedCredentialValidation{}, nil, err
 	}
 	now := r.now().UTC()
-	command, err := tx.Exec(ctx, `UPDATE token_command_results SET credential_probe_claimed_at=$2,credential_probe_lease_until=$2+interval '30 seconds' WHERE command_reference=$1 AND status='PENDING' AND credential_probe_claimed_at IS NULL`, reference, now)
+	command, err := tx.Exec(ctx, `UPDATE token_command_results SET credential_probe_claimed_at=$2::timestamptz,credential_probe_lease_until=$2::timestamptz+interval '30 seconds' WHERE command_reference=$1 AND status='PENDING' AND credential_probe_claimed_at IS NULL`, reference, now)
 	if err != nil || command.RowsAffected() != 1 {
 		clear(secret)
 		if err != nil {

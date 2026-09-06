@@ -1348,6 +1348,16 @@
         "file": "000029_token_account_owner_cap_policy.up.sql",
         "version": 29,
         "sha256": "47f091b38bb1fbc78a014e45f51dc31464c791bc8d8de2d40f13c583f864d783"
+      },
+      {
+        "file": "000030_credential_probe_unknown_code.down.sql",
+        "version": 30,
+        "sha256": "ca0978c5309c9df1f336150e9b0435a065bb1074cd5edeab8bbfeffe4453b2dd"
+      },
+      {
+        "file": "000030_credential_probe_unknown_code.up.sql",
+        "version": 30,
+        "sha256": "71374b59f5295e1a0007e1ca9501dcc840248d88afa12c7bbd18ed0c2543fdeb"
       }
     ]
   }

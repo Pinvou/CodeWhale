@@ -233,6 +233,11 @@ func completeTokenCommandTx(ctx context.Context, tx pgx.Tx, reference uuid.UUID,
 }
 
 func validStableTokenErrorCode(code string) bool {
+	// This fixed domain code contains no provider data. Keep the exception
+	// exact so arbitrary credential-bearing diagnostics remain rejected.
+	if code == "CREDENTIAL_PROBE_OUTCOME_UNKNOWN" {
+		return true
+	}
 	if len(code) < 1 || len(code) > 120 || code != strings.TrimSpace(code) || code[0] < 'A' || code[0] > 'Z' {
 		return false
 	}
