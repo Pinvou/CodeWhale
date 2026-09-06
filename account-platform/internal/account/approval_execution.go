@@ -47,8 +47,11 @@ func (r *PostgresRepository) BeginApprovalExecution(ctx context.Context, request
 		if storedExecutor != executorIdentity {
 			return ApprovalExecution{}, ErrForbidden
 		}
-		execution := ApprovalExecution{ApprovalRequestID: requestID, CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, CommandFingerprint: item.CommandFingerprint, NormalizedCommand: item.NormalizedCommand, TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID, CriticalResourceVersions: frozenCritical, FinancialSnapshot: frozenFinancial, RequesterUserID: item.RequesterUserID, ApproverUserID: approverID, DecisionReason: decisionReason, ExecutionIdempotencyKey: idempotencyKey, ExecutorIdentity: executorIdentity, Status: executionStatus}
+		execution := ApprovalExecution{ApprovalRequestID: requestID, CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, CommandFingerprint: item.CommandFingerprint, NormalizedCommand: item.NormalizedCommand, TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID, CriticalResourceVersions: frozenCritical, FinancialSnapshot: frozenFinancial, RequesterUserID: item.RequesterUserID, RequesterAuthorizationVersion: item.RequesterAuthorizationVersion, RequesterReason: item.Reason, ApproverUserID: approverID, DecisionReason: decisionReason, ExecutionIdempotencyKey: idempotencyKey, ExecutorIdentity: executorIdentity, Status: executionStatus}
 		return execution, tx.Commit(ctx)
+	}
+	if err := r.requireTokenApprovalActive(ctx, item.CommandType); err != nil {
+		return ApprovalExecution{}, err
 	}
 	now := r.now()
 	if item.ExecutionDeadline == nil || !item.ExecutionDeadline.After(now) {
@@ -94,8 +97,9 @@ func (r *PostgresRepository) BeginApprovalExecution(ctx context.Context, request
 	idempotencyKey := fmt.Sprintf("approval:%s:%s:%s", requestID, item.CommandType, item.CommandFingerprint)
 	executionID := uuid.Must(uuid.NewV7())
 	authorizationSnapshot, _ := json.Marshal(map[string]any{"requester_user_id": item.RequesterUserID, "requester_binding_id": requesterBinding, "requester_authorization_version": requesterVersion, "approver_user_id": approverID, "approver_binding_id": approverBinding, "approver_authorization_version": approverVersion, "execution_started_at": now})
-	command, err := tx.Exec(ctx, `INSERT INTO approval_executions(id,approval_request_id,command_type,command_fingerprint,execution_idempotency_key,executor_identity,job_run_id,status,authorization_snapshot,critical_resource_versions,financial_snapshot,started_at) VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,'EXECUTING',$8,$9,$10,$11) ON CONFLICT (approval_request_id,command_type) DO UPDATE SET status=CASE WHEN approval_executions.status='FAILED' THEN 'EXECUTING' ELSE approval_executions.status END,job_run_id=CASE WHEN approval_executions.status='FAILED' THEN EXCLUDED.job_run_id ELSE approval_executions.job_run_id END,started_at=CASE WHEN approval_executions.status='FAILED' THEN EXCLUDED.started_at ELSE approval_executions.started_at END WHERE approval_executions.command_fingerprint=EXCLUDED.command_fingerprint AND approval_executions.executor_identity=EXCLUDED.executor_identity AND approval_executions.critical_resource_versions=EXCLUDED.critical_resource_versions AND approval_executions.financial_snapshot=EXCLUDED.financial_snapshot`, executionID, requestID, item.CommandType, item.CommandFingerprint, idempotencyKey, executorIdentity, jobRunID, authorizationSnapshot, item.CriticalResourceVersions, item.FinancialSnapshot, now)
-	if err != nil || command.RowsAffected() != 1 {
+	var storedExecutionID uuid.UUID
+	err = tx.QueryRow(ctx, `INSERT INTO approval_executions(id,approval_request_id,command_type,command_fingerprint,execution_idempotency_key,executor_identity,job_run_id,status,authorization_snapshot,critical_resource_versions,financial_snapshot,started_at) VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,'EXECUTING',$8,$9,$10,$11) ON CONFLICT (approval_request_id,command_type) DO UPDATE SET status=CASE WHEN approval_executions.status='FAILED' THEN 'EXECUTING' ELSE approval_executions.status END,job_run_id=CASE WHEN approval_executions.status='FAILED' THEN EXCLUDED.job_run_id ELSE approval_executions.job_run_id END,started_at=CASE WHEN approval_executions.status='FAILED' THEN EXCLUDED.started_at ELSE approval_executions.started_at END WHERE approval_executions.command_fingerprint=EXCLUDED.command_fingerprint AND approval_executions.executor_identity=EXCLUDED.executor_identity AND approval_executions.critical_resource_versions=EXCLUDED.critical_resource_versions AND approval_executions.financial_snapshot=EXCLUDED.financial_snapshot RETURNING id`, executionID, requestID, item.CommandType, item.CommandFingerprint, idempotencyKey, executorIdentity, jobRunID, authorizationSnapshot, item.CriticalResourceVersions, item.FinancialSnapshot, now).Scan(&storedExecutionID)
+	if err != nil {
 		return ApprovalExecution{}, ErrConflict
 	}
 	if item.Status == "APPROVED" || item.Status == "EXECUTION_FAILED" {
@@ -106,7 +110,9 @@ func (r *PostgresRepository) BeginApprovalExecution(ctx context.Context, request
 			return ApprovalExecution{}, err
 		}
 	}
-	execution := ApprovalExecution{ApprovalRequestID: requestID, CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, CommandFingerprint: item.CommandFingerprint, NormalizedCommand: item.NormalizedCommand, TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID, CriticalResourceVersions: item.CriticalResourceVersions, FinancialSnapshot: item.FinancialSnapshot, RequesterUserID: item.RequesterUserID, ApproverUserID: approverID, DecisionReason: decisionReason, ExecutionIdempotencyKey: idempotencyKey, ExecutorIdentity: executorIdentity, Status: "EXECUTING"}
+	// RETURNING the durable immutable ID distinguishes a true INSERT from a
+	// FAILED-row conflict update. RowsAffected=1 cannot prove first dispatch.
+	execution := ApprovalExecution{ApprovalRequestID: requestID, CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, CommandFingerprint: item.CommandFingerprint, NormalizedCommand: item.NormalizedCommand, TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID, CriticalResourceVersions: item.CriticalResourceVersions, FinancialSnapshot: item.FinancialSnapshot, RequesterUserID: item.RequesterUserID, RequesterAuthorizationVersion: item.RequesterAuthorizationVersion, RequesterReason: item.Reason, FirstClaim: storedExecutionID == executionID, ApproverUserID: approverID, DecisionReason: decisionReason, ExecutionIdempotencyKey: idempotencyKey, ExecutorIdentity: executorIdentity, Status: "EXECUTING"}
 	return execution, tx.Commit(ctx)
 }
 

@@ -585,6 +585,7 @@ jobs:
       PINVOU_TEST_ACCOUNT_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
       PINVOU_TEST_TOKEN_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_token_pagination_test?sslmode=disable
       PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_token_overview_performance_test?sslmode=disable
+      PINVOU_TEST_NATS_URL: nats://127.0.0.1:4222
     steps:
       - uses: actions/checkout@v7
 
@@ -632,6 +633,15 @@ jobs:
           chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
           test -n "$chrome"
           echo "CHROME=$chrome" >> "$GITHUB_ENV"
+
+      - name: 启动隔离 Token 审批事件测试队列
+        run: |
+          docker run --detach --name apt138-nats --publish 127.0.0.1:4222:4222 --publish 127.0.0.1:8222:8222 nats:2.11-alpine --jetstream --http_port 8222
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8222/healthz; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8222/healthz
 
       - name: Go 格式、测试与静态检查
         working-directory: account-platform
@@ -734,10 +744,32 @@ jobs:
           printf '%s\n' "$token_governance_policy_output"
           grep -F -- '--- PASS: TestTokenCommandGovernancePoliciesPostgresIntegration' <<< "$token_governance_policy_output"
           ! grep -F -- '--- SKIP: TestTokenCommandGovernancePoliciesPostgresIntegration' <<< "$token_governance_policy_output"
+          token_policy_forward_output="$(go test -run '^(TestTokenAccountCreateV3PolicyPostgresIntegration|TestTokenRouteUpsertV3PolicyPostgresIntegration)$' -count=1 -v ./internal/platform/approvalpolicy)"
+          printf '%s\n' "$token_policy_forward_output"
+          for gate in TestTokenAccountCreateV3PolicyPostgresIntegration TestTokenRouteUpsertV3PolicyPostgresIntegration; do
+            grep -F -- "--- PASS: $gate" <<< "$token_policy_forward_output"
+            ! grep -F -- "--- SKIP: $gate" <<< "$token_policy_forward_output"
+          done
+          token_policy_compatibility_output="$(go test -run '^(TestLegacyAccountPolicyV2RecoveryPostgresIntegration|TestLegacyRoutePolicyV2ReplayPostgresIntegration)$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$token_policy_compatibility_output"
+          for gate in TestLegacyAccountPolicyV2RecoveryPostgresIntegration TestLegacyRoutePolicyV2ReplayPostgresIntegration; do
+            grep -F -- "--- PASS: $gate" <<< "$token_policy_compatibility_output"
+            ! grep -F -- "--- SKIP: $gate" <<< "$token_policy_compatibility_output"
+          done
+          token_handler_matrix_output="$(go test -run '^(TestNineteenTokenCommandEnforcementMatrix|TestTokenCommandHandlerManifestMatchesExecutableDispatch)$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$token_handler_matrix_output"
+          for gate in TestNineteenTokenCommandEnforcementMatrix TestTokenCommandHandlerManifestMatchesExecutableDispatch; do
+            grep -F -- "--- PASS: $gate" <<< "$token_handler_matrix_output"
+            ! grep -F -- "--- SKIP: $gate" <<< "$token_handler_matrix_output"
+          done
           approval_snapshot_output="$(go test -run '^TestApprovalSnapshotLifecyclePostgresIntegration$' -count=1 -v ./internal/account)"
           printf '%s\n' "$approval_snapshot_output"
           grep -F -- '--- PASS: TestApprovalSnapshotLifecyclePostgresIntegration' <<< "$approval_snapshot_output"
           ! grep -F -- '--- SKIP: TestApprovalSnapshotLifecyclePostgresIntegration' <<< "$approval_snapshot_output"
+          token_approval_chains_output="$(go test -run '^TestTokenApprovalConsumersPostgresIntegration$' -count=1 -timeout=8m -v ./internal/account)"
+          printf '%s\n' "$token_approval_chains_output"
+          grep -F -- '--- PASS: TestTokenApprovalConsumersPostgresIntegration' <<< "$token_approval_chains_output"
+          ! grep -F -- '--- SKIP: TestTokenApprovalConsumersPostgresIntegration' <<< "$token_approval_chains_output"
           token_governance_result_output="$(PINVOU_TEST_TOKEN_COMMAND_GATE=1 go test -run '^TestTokenCommandGovernancePostgresIntegration$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_governance_result_output"
           grep -F -- '--- PASS: TestTokenCommandGovernancePostgresIntegration' <<< "$token_governance_result_output"
@@ -766,6 +798,46 @@ jobs:
           printf '%s\n' "$credential_isolation_output"
           grep -F -- '--- PASS: TestCredentialIsolationPostgresIntegration' <<< "$credential_isolation_output"
           ! grep -F -- '--- SKIP: TestCredentialIsolationPostgresIntegration' <<< "$credential_isolation_output"
+          credential_completion_output="$(go test -run '^TestCredentialSessionCompletionPostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$credential_completion_output"
+          grep -F -- '--- PASS: TestCredentialSessionCompletionPostgresIntegration' <<< "$credential_completion_output"
+          ! grep -F -- '--- SKIP: TestCredentialSessionCompletionPostgresIntegration' <<< "$credential_completion_output"
+          credential_probe_lease_output="$(go test -run '^TestCredentialProbeLeasePostgresIntegration$' -count=1 -v ./internal/token)"
+          printf '%s\n' "$credential_probe_lease_output"
+          grep -F -- '--- PASS: TestCredentialProbeLeasePostgresIntegration' <<< "$credential_probe_lease_output"
+          ! grep -F -- '--- SKIP: TestCredentialProbeLeasePostgresIntegration' <<< "$credential_probe_lease_output"
+          credential_revoke_audit_output="$(go test -run '^TestApprovedCredentialRevokeAuditPostgresIntegration$' -count=1 -timeout=3m -v ./internal/token)"
+          printf '%s\n' "$credential_revoke_audit_output"
+          grep -F -- '--- PASS: TestApprovedCredentialRevokeAuditPostgresIntegration' <<< "$credential_revoke_audit_output"
+          ! grep -F -- '--- SKIP: TestApprovedCredentialRevokeAuditPostgresIntegration' <<< "$credential_revoke_audit_output"
+          formula_metering_unit_output="$(go test -run '^TestGovernedFormulaMeteringUnitPostgresIntegration$' -count=1 -timeout=3m -v ./internal/token)"
+          printf '%s\n' "$formula_metering_unit_output"
+          grep -F -- '--- PASS: TestGovernedFormulaMeteringUnitPostgresIntegration' <<< "$formula_metering_unit_output"
+          ! grep -F -- '--- SKIP: TestGovernedFormulaMeteringUnitPostgresIntegration' <<< "$formula_metering_unit_output"
+          lifecycle_pagination_output="$(go test -run '^TestLifecyclePlanPaginationPostgresIntegration$' -count=1 -timeout=3m -v ./internal/token)"
+          printf '%s\n' "$lifecycle_pagination_output"
+          grep -F -- '--- PASS: TestLifecyclePlanPaginationPostgresIntegration' <<< "$lifecycle_pagination_output"
+          ! grep -F -- '--- SKIP: TestLifecyclePlanPaginationPostgresIntegration' <<< "$lifecycle_pagination_output"
+          scheduled_publication_output="$(go test -run '^TestScheduledPublicationBaselinePostgresIntegration$' -count=1 -timeout=3m -v ./internal/token)"
+          printf '%s\n' "$scheduled_publication_output"
+          grep -F -- '--- PASS: TestScheduledPublicationBaselinePostgresIntegration' <<< "$scheduled_publication_output"
+          ! grep -F -- '--- SKIP: TestScheduledPublicationBaselinePostgresIntegration' <<< "$scheduled_publication_output"
+          restricted_migration_output="$(go test -run '^TestRestrictedMigrationLedgerPostgresIntegration$' -count=1 -timeout=2m -v ./internal/platform/migrations)"
+          printf '%s\n' "$restricted_migration_output"
+          grep -F -- '--- PASS: TestRestrictedMigrationLedgerPostgresIntegration' <<< "$restricted_migration_output"
+          ! grep -F -- '--- SKIP: TestRestrictedMigrationLedgerPostgresIntegration' <<< "$restricted_migration_output"
+          token_activation_transition_output="$(go test -run '^TestTokenGovernanceTransitionPostgresIntegration$' -count=1 -timeout=5m -v ./internal/token)"
+          printf '%s\n' "$token_activation_transition_output"
+          grep -F -- '--- PASS: TestTokenGovernanceTransitionPostgresIntegration' <<< "$token_activation_transition_output"
+          ! grep -F -- '--- SKIP: TestTokenGovernanceTransitionPostgresIntegration' <<< "$token_activation_transition_output"
+          credential_authority_output="$(go test -run '^TestProductionCredentialAuthorityPostgresIntegration$' -count=1 -timeout=3m -v ./internal/token)"
+          printf '%s\n' "$credential_authority_output"
+          grep -F -- '--- PASS: TestProductionCredentialAuthorityPostgresIntegration' <<< "$credential_authority_output"
+          ! grep -F -- '--- SKIP: TestProductionCredentialAuthorityPostgresIntegration' <<< "$credential_authority_output"
+          token_approval_nats_output="$(go test -run '^TestTokenApprovalConsumersNATSIntegration$' -count=1 -timeout=3m -v ./internal/token)"
+          printf '%s\n' "$token_approval_nats_output"
+          grep -F -- '--- PASS: TestTokenApprovalConsumersNATSIntegration' <<< "$token_approval_nats_output"
+          ! grep -F -- '--- SKIP: TestTokenApprovalConsumersNATSIntegration' <<< "$token_approval_nats_output"
           credential_origin_output="$(PINVOU_REQUIRE_CREDENTIAL_BROWSER=1 go test -run '^TestCredentialOriginServicePostgresIntegration$' -count=1 -v ./internal/token)"
           printf '%s\n' "$credential_origin_output"
           grep -F -- '--- PASS: TestCredentialOriginServicePostgresIntegration' <<< "$credential_origin_output"

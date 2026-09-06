@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -233,7 +234,13 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	if foreignUpdate.Code != http.StatusConflict || sourceCalls.Load() != 1 {
 		t.Fatalf("foreign update status=%d body=%s downstream=%d", foreignUpdate.Code, foreignUpdate.Body.String(), sourceCalls.Load())
 	}
+	// The creation seam also permits active draft updates after APT-138.
+	// Select real PRE explicitly for this zero-write negative case, then return
+	// to the fixture's ACTIVE selection for submit and execution below.
+	preActivation := &consumerChainActivation{state: "PRE_ACTIVATION", epoch: 0}
+	repository.WithTokenGovernanceActivation(preActivation)
 	preActivationUpdate := performApprovalIntegrationRequest(t, service.adminUpdateApprovalDraft, requesterPrincipal, http.MethodPut, "/admin/v1/approval-requests/"+seeded.ID.String(), seeded.ID.String(), updateBody)
+	preActivation.set("ACTIVE", 1)
 	if preActivationUpdate.Code != http.StatusServiceUnavailable || !strings.Contains(preActivationUpdate.Body.String(), "TOKEN_COMMAND_GOVERNANCE_INACTIVE") || sourceCalls.Load() != 1 {
 		t.Fatalf("pre-activation update status=%d body=%s downstream=%d", preActivationUpdate.Code, preActivationUpdate.Body.String(), sourceCalls.Load())
 	}
@@ -309,13 +316,54 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 		t.Fatalf("authorized event did not retain the approved command and snapshots: %s", eventPayload)
 	}
 
-	executionCtx, err := serviceauth.ContextForJob(context.Background(), "token-command-executor", "APPROVAL_EXECUTION", "snapshot-chain")
+	executionCtx, err := serviceauth.ContextForJob(ctx, "token-command-executor", "APPROVAL_EXECUTION", "snapshot-chain")
 	if err != nil {
 		t.Fatal(err)
 	}
 	observedProjection, err := source.PrecheckApprovalSnapshot(ctx, ApprovalSnapshotRequest{CommandType: draft.CommandType, TargetResourceType: draft.TargetResourceType, TargetResourceID: draft.TargetResourceID, NormalizedCommand: draft.NormalizedCommand})
 	if err != nil || !sameApprovalFinancialFacts(draft.CommandType, observedProjection.FinancialSnapshot, financial) || sameJSONObject(observedProjection.FinancialSnapshot, financial) {
 		t.Fatalf("fresh observation must advance time but preserve facts: %+v err=%v", observedProjection, err)
+	}
+	// Competing deliveries may retry only a proven serialization rollback.
+	// Exactly the transaction that INSERTs the durable execution gets first_claim;
+	// neither a concurrent replay nor a later HTTP read may obtain it again.
+	const claimers = 6
+	claims := make([]ApprovalExecution, claimers)
+	claimErrors := make([]error, claimers)
+	startClaims := make(chan struct{})
+	wait.Add(claimers)
+	for index := range claims {
+		go func(index int) {
+			defer wait.Done()
+			select {
+			case <-startClaims:
+			case <-ctx.Done():
+				claimErrors[index] = ctx.Err()
+				return
+			}
+			for attempt := 0; attempt < 3; attempt++ {
+				claims[index], claimErrors[index] = repository.BeginApprovalExecution(executionCtx, seeded.ID, "token-command-executor", fmt.Sprintf("snapshot-first-claim-%d", index), critical, observedProjection.FinancialSnapshot)
+				var pgErr *pgconn.PgError
+				if !errors.As(claimErrors[index], &pgErr) || pgErr.Code != "40001" {
+					return
+				}
+			}
+		}(index)
+	}
+	close(startClaims)
+	wait.Wait()
+	firstClaims := 0
+	for index, claimed := range claims {
+		if claimErrors[index] != nil || claimed.Status != "EXECUTING" || claimed.ApprovalRequestID != seeded.ID || claimed.ExecutionIdempotencyKey != claims[0].ExecutionIdempotencyKey || claimed.RequesterAuthorizationVersion != seeded.RequesterAuthorizationVersion || claimed.RequesterReason != seeded.Reason {
+			t.Fatalf("concurrent execution claim %d status=%s err=%v", index, claimed.Status, claimErrors[index])
+		}
+		if claimed.FirstClaim {
+			firstClaims++
+		}
+	}
+	var executionRows int
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM approval_executions WHERE approval_request_id=$1`, seeded.ID).Scan(&executionRows); err != nil || executionRows != 1 || firstClaims != 1 {
+		t.Fatalf("first claims=%d durable execution rows=%d err=%v", firstClaims, executionRows, err)
 	}
 	executionBody, _ := json.Marshal(map[string]any{"job_run_id": "snapshot-chain-job", "observed_versions": json.RawMessage(critical), "observed_financial_snapshot": observedProjection.FinancialSnapshot})
 	executionRequest := httptest.NewRequest(http.MethodPost, "/internal/v1/approval-requests/"+seeded.ID.String()+"/executions", bytes.NewReader(executionBody)).WithContext(executionCtx)
@@ -324,18 +372,20 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	executionResponse := httptest.NewRecorder()
 	service.beginApprovalExecution(executionResponse, executionRequest)
 	var lease ApprovalExecution
-	if executionResponse.Code != http.StatusOK || json.Unmarshal(executionResponse.Body.Bytes(), &lease) != nil || lease.Status != "EXECUTING" || !sameJSONObject(lease.CriticalResourceVersions, critical) || !sameJSONObject(lease.FinancialSnapshot, financial) {
+	if executionResponse.Code != http.StatusOK || json.Unmarshal(executionResponse.Body.Bytes(), &lease) != nil || lease.Status != "EXECUTING" || lease.FirstClaim || lease.RequesterAuthorizationVersion != seeded.RequesterAuthorizationVersion || lease.RequesterReason != seeded.Reason || !sameJSONObject(lease.CriticalResourceVersions, critical) || !sameJSONObject(lease.FinancialSnapshot, financial) {
 		t.Fatalf("execution lease status=%d body=%s", executionResponse.Code, executionResponse.Body.String())
 	}
 	currentProjection, err := source.PrecheckApprovalSnapshot(ctx, ApprovalSnapshotRequest{CommandType: draft.CommandType, TargetResourceType: draft.TargetResourceType, TargetResourceID: draft.TargetResourceID, NormalizedCommand: draft.NormalizedCommand})
 	if err != nil || !sameJSONObject(currentProjection.CriticalResourceVersions, critical) || !sameApprovalFinancialFacts(draft.CommandType, currentProjection.FinancialSnapshot, financial) {
 		t.Fatalf("execution projection=%+v err=%v", currentProjection, err)
 	}
+	tokenRepository.WithTokenRouteActivationTransactionGuard(preActivation)
 	tokenService.WithApprovedTokenCommandExecutor(tokenservice.NewPostgresApprovedCredentialExecutor(tokenRepository)).
-		WithTokenCommandGovernanceActivation(accountLifecycleActivationReader{})
+		WithTokenCommandGovernanceActivation(preActivation)
 	executorHandler, executorToken, executorClient := newApprovalExecutorTokenHandler(t, tokenService, requester.ID)
 	envelope := tokenservice.TokenCommandEnvelope{CommandType: lease.CommandType, Reason: draft.Reason, TargetResourceType: lease.TargetResourceType, TargetResourceID: lease.TargetResourceID, ExpectedVersions: lease.CriticalResourceVersions, PrecheckFingerprint: currentProjection.PrecheckFingerprint, Command: lease.NormalizedCommand}
 	executeBody := map[string]any{
+		"activation_epoch":    1,
 		"approval_request_id": seeded.ID, "requester_user_id": seeded.RequesterUserID, "authorization_version": seeded.RequesterAuthorizationVersion,
 		"command_fingerprint": lease.CommandFingerprint, "execution_idempotency_key": lease.ExecutionIdempotencyKey,
 		"critical_resource_versions": critical, "financial_snapshot": financial, "command": envelope,
@@ -612,7 +662,7 @@ func newApprovalSnapshotTokenRepository(t *testing.T, ctx context.Context, datab
 	// Preserve migration 29's qualification inside that schema; real database
 	// ownership/ACL safety is covered by the dedicated non-superuser gates.
 	for index := range loaded {
-		if loaded[index].Version != 29 {
+		if loaded[index].Version != 29 && loaded[index].Version != 31 {
 			continue
 		}
 		sql := strings.ReplaceAll(loaded[index].UpSQL, "to_regnamespace('public')", "to_regnamespace('"+schema+"')")

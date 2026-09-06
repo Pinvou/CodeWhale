@@ -1358,6 +1358,16 @@
         "file": "000030_credential_probe_unknown_code.up.sql",
         "version": 30,
         "sha256": "71374b59f5295e1a0007e1ca9501dcc840248d88afa12c7bbd18ed0c2543fdeb"
+      },
+      {
+        "file": "000031_token_command_governance_activation.down.sql",
+        "version": 31,
+        "sha256": "ffea99c31ae50300e5b055ff867d9c36b203c1db61553f8f6a157f192bcf3d07"
+      },
+      {
+        "file": "000031_token_command_governance_activation.up.sql",
+        "version": 31,
+        "sha256": "d957f8cac9de3566b1e30ab286458f80e78acd2cc9d61917e3367a0c8280ee16"
       }
     ]
   }

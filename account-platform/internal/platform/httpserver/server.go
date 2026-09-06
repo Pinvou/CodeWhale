@@ -181,13 +181,23 @@ func RunWithApplication(serviceName string, application http.Handler, ready func
 }
 
 func RunWithApplicationAndCollectors(serviceName string, application http.Handler, ready func(context.Context) error, collectors ...prometheus.Collector) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return runApplication(ctx, serviceName, application, ready, collectors...)
+}
+
+// RunWithApplicationContext lets a required workload supervisor terminate both
+// listeners on failure. Existing callers retain their signal-owned lifecycle.
+func RunWithApplicationContext(ctx context.Context, serviceName string, application http.Handler, ready func(context.Context) error, collectors ...prometheus.Collector) error {
+	return runApplication(ctx, serviceName, application, ready, collectors...)
+}
+
+func runApplication(ctx context.Context, serviceName string, application http.Handler, ready func(context.Context) error, collectors ...prometheus.Collector) error {
 	cfg, err := config.Load(serviceName)
 	if err != nil {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	tracingPreparation.Lock()
 	shutdownTracing := observability.Shutdown(nil)
 	if tracingPreparation.service == serviceName {

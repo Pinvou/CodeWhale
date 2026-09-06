@@ -271,6 +271,11 @@ func repeatFingerprint(value string) string {
 
 func bindModelPublishRequestFingerprint(t *testing.T, envelope TokenCommandEnvelope, expected map[string]any) TokenCommandEnvelope {
 	t.Helper()
+	var err error
+	envelope, err = canonicalizeModelAccountEnvelope(envelope)
+	if err != nil {
+		t.Fatalf("canonical publication fixture: %v", err)
+	}
 	expected["precheck_fingerprint"] = envelope.PrecheckFingerprint
 	expected["request_fingerprint"] = ""
 	envelope.ExpectedVersions = mustMarshalJSON(t, expected)

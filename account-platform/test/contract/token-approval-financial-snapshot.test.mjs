@@ -147,7 +147,16 @@ test('Account execution lease retains the exact snapshots for Token commands and
   const contract = YAML.parse(await read('contracts/openapi/account.yaml'));
   const validate = compile(contract.components.schemas, 'ApprovalExecutionLease');
   const value = { approval_request_id: id('3'), command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', policy_version: 2, command_fingerprint: digest('a'), normalized_command: lifecycleImmediate, target_resource_type: 'MODEL', target_resource_id: critical.model_id, critical_resource_versions: critical, financial_snapshot: financial, requester_user_id: id('4'), approver_user_id: id('5'), decision_reason: 'approved', execution_idempotency_key: 'approval:key', executor_identity: 'token-command-executor', status: 'EXECUTING' };
+  Object.assign(value, { requester_authorization_version: 9, requester_reason: 'review the model lifecycle change', first_claim: true });
   assert.equal(validate(value), true, JSON.stringify(validate.errors));
+  assert.equal(validate({ ...value, first_claim: false }), true, JSON.stringify(validate.errors));
+  for (const [field, wrongType] of Object.entries({ requester_authorization_version: '9', requester_reason: 9, first_claim: 'true' })) {
+    const missing = { ...value };
+    delete missing[field];
+    assert.equal(validate(missing), false, `missing ${field}`);
+    assert.equal(validate({ ...value, [field]: wrongType }), false, `invalid ${field}`);
+  }
+  assert.equal(validate({ ...value, requester_authorization_version: 0 }), false);
   assert.equal(validate({ ...value, financial_snapshot: { ...financial, extra: 1 } }), false);
   assert.equal(validate({ ...value, command_type: 'WALLET_ADJUSTMENT', critical_resource_versions: {}, financial_snapshot: {} }), true, JSON.stringify(validate.errors));
   const credentialID = id('8');

@@ -51,6 +51,11 @@ func NewDefaultRouteProvisioner(repository *PostgresRepository, policy ProviderU
 }
 
 func (p *PostgresDefaultRouteProvisioner) provisionResources(ctx context.Context, resolved AuthorizationContext, walletID uuid.UUID, model CatalogModel) error {
+	var selectionErr error
+	ctx, selectionErr = p.repository.selectConfigurationWorkloadActivation(ctx)
+	if selectionErr != nil {
+		return selectionErr
+	}
 	model.UpstreamModelRef = strings.TrimSpace(model.UpstreamModelRef)
 	if walletID == uuid.Nil || resolved.UserID == uuid.Nil || model.ModelID == uuid.Nil || model.ProtocolDefinitionID == uuid.Nil || model.UpstreamModelRef == "" || model.ProtocolCode == "" || model.LifecycleStatus != "PUBLISHED" || !model.SourceAvailable || model.ProviderID != p.config.Provider || model.AdapterVersion != p.config.AdapterVersion {
 		return ErrNoEligibleRoute
@@ -71,6 +76,9 @@ func (p *PostgresDefaultRouteProvisioner) provisionResources(ctx context.Context
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := p.repository.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
 	if err := lockTokenAccountOwner(ctx, tx, ownerType, ownerID); err != nil {
 		return err
 	}
@@ -145,5 +153,5 @@ ON CONFLICT(token_account_id,model_id,protocol_version_id) WHERE reference_statu
 	if _, err := tx.Exec(ctx, `UPDATE token_accounts SET management_version=management_version+1,updated_at=$2 WHERE id=$1`, accountID, now); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return p.repository.commitGovernedMutation(ctx, tx)
 }

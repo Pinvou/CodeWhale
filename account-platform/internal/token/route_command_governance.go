@@ -30,7 +30,7 @@ type governedRouteCommand struct {
 }
 
 func isRouteGovernedCommand(commandType string) bool {
-	return commandType == "TOKEN_ROUTE_UPSERT" || commandType == "TOKEN_ROUTE_DELETE"
+	return tokenCommandFamily(commandType) == "ROUTE"
 }
 
 func (s *Service) adminRouteCommandByIdempotencyKey(w http.ResponseWriter, r *http.Request) {

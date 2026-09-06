@@ -21,7 +21,7 @@ func loadTokenIntegrationMigrations(directory, schema string) ([]migrations.Migr
 	}
 	qualified := pgx.Identifier{schema}.Sanitize()
 	for index := range loaded {
-		if loaded[index].Version != 29 {
+		if loaded[index].Version != 29 && loaded[index].Version != 31 {
 			continue
 		}
 		loaded[index].UpSQL = "ALTER SCHEMA " + qualified + " OWNER TO token_schema_owner;\n" + rewritePublicSchema(loaded[index].UpSQL, qualified) + "\nRESET ROLE;"

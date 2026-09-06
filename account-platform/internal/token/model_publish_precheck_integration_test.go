@@ -14,6 +14,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // TestModelPublishPrecheckPostgresIntegration proves that the production
@@ -25,6 +26,14 @@ func TestModelPublishPrecheckPostgresIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	repository := newTokenQueryIntegrationRepository(t, ctx, databaseURL)
+	activation := TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}
+	ctx = context.WithValue(ctx, tokenRouteActivationContextKey{}, tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: true})
+	repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(_ context.Context, _ pgx.Tx, selected TokenCommandGovernanceActivation) error {
+		if selected != activation {
+			return ErrTokenRouteActivationChanged
+		}
+		return nil
+	}))
 	now := time.Now().UTC().Add(-time.Minute)
 	actorID, modelID := uuid.New(), uuid.New()
 	var protocolID uuid.UUID
@@ -39,6 +48,15 @@ func TestModelPublishPrecheckPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := repository.pool.Exec(ctx, `INSERT INTO model_catalog_drafts(model_id,base_catalog_version,draft_version,display_name,description,aliases,protocol_code,protocol_version,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,updated_by,updated_at) VALUES($1,$2,1,'Publish model','','{}','CHAT',1,4096,1024,'["text"]','integration-v1',$3,$4)`, modelID, catalogVersion, actorID, now); err != nil {
+		t.Fatal(err)
+	}
+	// Draft publication updates a discovered catalog model; it cannot invent
+	// source availability without a current catalog entry.
+	capabilityID := uuid.New()
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($1,$2,1,$3,4096,1024,'["TEXT"]','integration-v1',$4,$5)`, capabilityID, modelID, protocolID, actorID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES($1,$2,'Publish model','publish model','','{}','PUBLISHED',$3,$4,true)`, catalogVersion, modelID, capabilityID, protocolID); err != nil {
 		t.Fatal(err)
 	}
 	formulaID, priceID := uuid.New(), uuid.New()
@@ -60,7 +78,7 @@ INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_
 INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5);
 INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($6,$1,'integration','https://provider.invalid','x'::bytea,'integration-key','publish-fingerprint',1,'ACTIVE',ARRAY['publish-model'],$5,$4,$5,'VALID');
 INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,model_id,protocol_version_id,reference_status,route_version,route_generation,health_version,health_observed_at,health_expires_at,health_diagnostic_code,health_failure_count,next_probe_at) VALUES($7,$1,'publish-model','CHAT',100,'NONE','UNKNOWN',$5,$8,$9,'RESOLVED',1,1,1,$5,NULL,'NOT_YET_PROBED',0,$5);
-INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,desired_generation,actual_generation,desired_signature,status,stage,policy_version,policy_snapshot,attempt_count,repair_round,max_attempts,sla_deadline_at,lease_owner,lease_until,next_retry_at,last_error_code,last_error_detail,active_token_account_id,active_credential_id,requested_by,created_at,updated_at,protocol_version_id) VALUES($10,'PERSONAL',$2,$3,$8,'publish-model','CHAT',1,1,$11,'PENDING','ROUTE_PENDING',1,'{}',0,0,3,$12,NULL,NULL,$12,NULL,NULL,$1,$6,$4,$5,$5,$9);`, accountID, ownerID, walletID, actorID, now, credentialID, routeID, modelID, protocolID, provisioningID, strings.Repeat("d", 64), now.Add(time.Hour)); err != nil {
+INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,desired_generation,actual_generation,desired_signature,status,stage,policy_version,policy_snapshot,attempt_count,repair_round,max_attempts,sla_deadline_at,lease_owner,lease_until,next_retry_at,last_error_code,last_error_detail,active_token_account_id,active_credential_id,requested_by,created_at,updated_at,protocol_version_id) VALUES($10,'PERSONAL',$2,$3,$8,'publish-model','CHAT',1,1,$11,'PENDING','ROUTE_PENDING',1,'{}',0,0,3,$12,NULL,NULL,$12,NULL,NULL,$1,$6,$4,$5,$5,$9);`, pgx.QueryExecModeSimpleProtocol, accountID, ownerID, walletID, actorID, now, credentialID, routeID, modelID, protocolID, provisioningID, strings.Repeat("d", 64), now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	pending, err := service.buildTokenCommandPrecheck(ctx, TokenCommandPrecheckRequest{CommandType: "TOKEN_MODEL_PUBLISH", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), Command: command})
@@ -180,7 +198,7 @@ func performModelPublishGovernedCommand(t *testing.T, service *Service, envelope
 	response := httptest.NewRecorder()
 	handler := identity.Middleware(func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: "model-operator", SessionID: "model-publish-session", AuthenticatedAt: time.Now().UTC()}, nil
-	}, http.HandlerFunc(service.adminCreateTokenCommand))
+	}, approvedCommandFixtureHandler(service, request.URL.Path, service.adminCreateTokenCommand))
 	handler.ServeHTTP(response, request)
 	return response
 }

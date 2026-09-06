@@ -20,6 +20,8 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
+	"github.com/Pinvou/pinvou3/account-platform/internal/token"
 )
 
 func main() {
@@ -71,6 +73,19 @@ func main() {
 		log.Fatal(err)
 	}
 	serviceCredential := serviceauth.CredentialFromEnvironment()
+	policyDigest, err := approvalpolicy.PolicySetDigest()
+	if err != nil {
+		log.Fatal(err)
+	}
+	handlerDigest, err := token.TokenCommandHandlerDigest()
+	if err != nil {
+		log.Fatal(err)
+	}
+	governance, err := tokengovernance.NewClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential, policyDigest, handlerDigest)
+	if err != nil {
+		log.Fatal("Token governance reader configuration is invalid: ", err)
+	}
+	repository.WithTokenGovernanceActivation(governance)
 	approvalSnapshots, err := account.NewHTTPApprovalSnapshotSource(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)

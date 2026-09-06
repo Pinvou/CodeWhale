@@ -46,6 +46,7 @@ type CredentialIsolationAuthoritySnapshot struct {
 	Subject              string
 	AuthorizationVersion int64
 	GateEpoch            int64
+	RequiredPermission   string // In-memory only; launch/session persistence defaults to tokens.manage.
 }
 
 // CredentialIsolationAuthorityGuard is the APT-138 integration seam. The
@@ -72,6 +73,29 @@ func (r *PostgresRepository) recheckCredentialIsolationAuthority(ctx context.Con
 		return ErrTokenRouteActivationChanged
 	}
 	return r.credentialAuthGuard.LockAndCheckCredentialIsolationAuthority(ctx, tx, snapshot)
+}
+
+func credentialSessionAuthority(item credentialIsolationSession) CredentialIsolationAuthoritySnapshot {
+	return CredentialIsolationAuthoritySnapshot{ActorID: item.ActorID, Issuer: item.ActorIssuer, Subject: item.ActorSubject, AuthorizationVersion: item.AuthorizationVersion, GateEpoch: item.GateEpoch}
+}
+
+func (r *PostgresRepository) commitCredentialIsolationMutation(ctx context.Context, tx pgx.Tx, snapshot CredentialIsolationAuthoritySnapshot) error {
+	if err := r.recheckCredentialIsolationAuthority(ctx, tx, snapshot); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) recheckCredentialValidationAuthority(ctx context.Context, tx pgx.Tx, item TokenCommandResult) error {
+	if r.routeActivationGuard == nil {
+		return nil
+	} // Uninstalled repository fixtures; production always installs both guards.
+	principal, ok := identity.FromContext(ctx)
+	selected, selectionOK := ctx.Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
+	if !ok || !selectionOK || selected.State != "ACTIVE" || !selected.transactional {
+		return ErrTokenRouteActivationChanged
+	}
+	return r.recheckCredentialIsolationAuthority(ctx, tx, CredentialIsolationAuthoritySnapshot{ActorID: item.ActorUserID, Issuer: principal.Issuer, Subject: principal.Subject, AuthorizationVersion: item.AuthorizationVersion, GateEpoch: selected.Epoch, RequiredPermission: "platform.tokens.credentials.validate"})
 }
 
 type CredentialLaunch struct {
@@ -192,13 +216,22 @@ func (r *PostgresRepository) claimCredentialValidationProbe(ctx context.Context,
 		if leaseUntil == nil || leaseUntil.After(now) {
 			return false, claimedCredentialValidation{CommandResult: item}, nil, tx.Commit(ctx)
 		}
+		if err = r.recheckCredentialValidationAuthority(ctx, tx, item); err != nil {
+			return false, claimedCredentialValidation{}, nil, err
+		}
 		after, _ := json.Marshal(map[string]any{"token_account_id": accountID, "credential_id": credentialID, "credential_version": expectedCredentialVersion, "validation_status": "UNKNOWN"})
 		redacted, _ := json.Marshal(map[string]any{"validation_status": "UNKNOWN", "error_code": "CREDENTIAL_PROBE_OUTCOME_UNKNOWN"})
 		completed, completeErr := completeTokenCommandTx(ctx, tx, reference, "FAILED", after, redacted, "CREDENTIAL_PROBE_OUTCOME_UNKNOWN")
 		if completeErr != nil {
 			return false, claimedCredentialValidation{}, nil, completeErr
 		}
-		return false, claimedCredentialValidation{CommandResult: completed}, nil, tx.Commit(ctx)
+		if err = r.recheckCredentialValidationAuthority(ctx, tx, item); err != nil {
+			return false, claimedCredentialValidation{}, nil, err
+		}
+		return false, claimedCredentialValidation{CommandResult: completed}, nil, r.commitGovernedMutation(ctx, tx)
+	}
+	if err = r.recheckCredentialValidationAuthority(ctx, tx, item); err != nil {
+		return false, claimedCredentialValidation{}, nil, err
 	}
 	var credential claimedCredentialValidation
 	var ciphertext []byte
@@ -224,7 +257,11 @@ func (r *PostgresRepository) claimCredentialValidationProbe(ctx context.Context,
 		return false, claimedCredentialValidation{}, nil, ErrCredentialProbeClaimed
 	}
 	credential.CommandResult = item
-	if err = tx.Commit(ctx); err != nil {
+	if err = r.recheckCredentialValidationAuthority(ctx, tx, item); err != nil {
+		clear(secret)
+		return false, claimedCredentialValidation{}, nil, err
+	}
+	if err = r.commitGovernedMutation(ctx, tx); err != nil {
 		clear(secret)
 		return false, claimedCredentialValidation{}, nil, err
 	}
@@ -253,6 +290,9 @@ func (r *PostgresRepository) recordGovernedCredentialValidation(ctx context.Cont
 	}
 	if claimed.Status != "PENDING" {
 		return claimed, tx.Commit(ctx)
+	}
+	if err = r.recheckCredentialValidationAuthority(ctx, tx, claimed); err != nil {
+		return TokenCommandResult{}, err
 	}
 	var probeClaimedAt *time.Time
 	if err = tx.QueryRow(ctx, `SELECT credential_probe_claimed_at FROM token_command_results WHERE command_reference=$1`, reference).Scan(&probeClaimedAt); err != nil || probeClaimedAt == nil {
@@ -289,7 +329,10 @@ func (r *PostgresRepository) recordGovernedCredentialValidation(ctx context.Cont
 	if err != nil {
 		return TokenCommandResult{}, err
 	}
-	return completed, tx.Commit(ctx)
+	if err = r.recheckCredentialValidationAuthority(ctx, tx, claimed); err != nil {
+		return TokenCommandResult{}, err
+	}
+	return completed, r.commitGovernedMutation(ctx, tx)
 }
 
 func credentialDigest(values ...string) string {
@@ -385,7 +428,7 @@ func (r *PostgresRepository) CreateCredentialLaunch(ctx context.Context, account
 	if err = recordTokenAudit(ctx, tx, actorID, "TOKEN_CREDENTIAL_"+input.Action+"_LAUNCHED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('action',$6,'slot',$7,'result_ref',$8,'request_id',$9)`, input.Action, input.Slot, resultRef, auditRequestID); err != nil {
 		return CredentialLaunch{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = r.commitCredentialIsolationMutation(ctx, tx, authority); err != nil {
 		return CredentialLaunch{}, err
 	}
 	return CredentialLaunch{LaunchID: launchID, ResultRef: resultRef, TokenAccountID: accountID, Action: input.Action, Status: "CREATED", ExpiresAt: expiresAt, AuditRequestID: auditRequestID}, nil
@@ -445,7 +488,7 @@ func (r *PostgresRepository) ConsumeCredentialLaunch(ctx context.Context, launch
 	if _, err = tx.Exec(ctx, `UPDATE credential_launches SET status='CONSUMED',browser_binding_digest=$2,consumed_at=$3,heartbeat_deadline=$4 WHERE id=$1 AND status='CREATED'`, launchID, item.BrowserDigest, now, now.Add(10*time.Second)); err != nil {
 		return credentialIsolationSession{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = r.commitCredentialIsolationMutation(ctx, tx, credentialSessionAuthority(item)); err != nil {
 		return credentialIsolationSession{}, err
 	}
 	item.Verifier = verifier
@@ -540,7 +583,7 @@ func (r *PostgresRepository) AuthenticateCredentialSession(ctx context.Context, 
 	if err != nil || command.RowsAffected() != 1 {
 		return ErrCredentialReplay
 	}
-	return tx.Commit(ctx)
+	return r.commitCredentialIsolationMutation(ctx, tx, authority)
 }
 
 // ConfirmCredentialSession records the first browser heartbeat and returns the
@@ -579,7 +622,7 @@ func (r *PostgresRepository) ConfirmCredentialSession(ctx context.Context, sessi
 		if launchStatus != "COMPLETED" || item.HeartbeatAt == nil {
 			return credentialIsolationSession{}, ErrForbidden
 		}
-		if err = tx.Commit(ctx); err != nil {
+		if err = r.commitCredentialIsolationMutation(ctx, tx, credentialSessionAuthority(item)); err != nil {
 			return credentialIsolationSession{}, err
 		}
 		return item, nil
@@ -592,7 +635,7 @@ func (r *PostgresRepository) ConfirmCredentialSession(ctx context.Context, sessi
 	}
 	item.Verifier = string(plaintext)
 	clear(plaintext)
-	if err = tx.Commit(ctx); err != nil {
+	if err = r.commitCredentialIsolationMutation(ctx, tx, credentialSessionAuthority(item)); err != nil {
 		return credentialIsolationSession{}, err
 	}
 	return item, nil
@@ -887,7 +930,7 @@ func (r *PostgresRepository) CompleteCredentialSession(ctx context.Context, sess
 	if err = recordTokenAudit(ctx, tx, item.ActorID, "TOKEN_CREDENTIAL_"+item.Action+"_COMPLETED", "PROVIDER_CREDENTIAL", credentialID, `jsonb_build_object('token_account_id',$6,'credential_version',$7,'status','ACTIVE','validation_status','VALID','fingerprint',$8,'result_ref',$9)`, item.TokenAccountID, version, fingerprint, item.ResultRef); err != nil {
 		return CredentialIsolationResult{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = r.commitCredentialIsolationMutation(ctx, tx, credentialSessionAuthority(item)); err != nil {
 		return CredentialIsolationResult{}, err
 	}
 	return r.CredentialIsolationResult(ctx, item.ActorID, item.ResultRef)
@@ -907,12 +950,15 @@ func (r *PostgresRepository) recordCredentialValidationFailure(ctx context.Conte
 	if launchStatus != "AUTHENTICATED" || sessionStatus != "READY" || attempts >= 3 {
 		return ErrCredentialReplay
 	}
+	if err = r.recheckCredentialIsolationAuthority(ctx, tx, credentialSessionAuthority(item)); err != nil {
+		return err
+	}
 	attempts++
 	if attempts < 3 {
 		if _, err = tx.Exec(ctx, `UPDATE credential_launches SET attempt_count=$2 WHERE id=$1`, item.LaunchID, attempts); err != nil {
 			return err
 		}
-		return tx.Commit(ctx)
+		return r.commitCredentialIsolationMutation(ctx, tx, credentialSessionAuthority(item))
 	}
 	if _, err = tx.Exec(ctx, `UPDATE credential_launches SET attempt_count=$2,status='FAILED',stable_error_code='CREDENTIAL_VALIDATION_FAILED',completed_at=$3 WHERE id=$1`, item.LaunchID, attempts, now); err != nil {
 		return err
@@ -926,7 +972,7 @@ func (r *PostgresRepository) recordCredentialValidationFailure(ctx context.Conte
 	if err = recordTokenAudit(ctx, tx, item.ActorID, "TOKEN_CREDENTIAL_VALIDATION_FAILED", "TOKEN_ACCOUNT", item.TokenAccountID, `jsonb_build_object('result_ref',$6,'launch_id',$7,'attempt_count',$8,'stable_error_code','CREDENTIAL_VALIDATION_FAILED')`, item.ResultRef, item.LaunchID, attempts); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return r.commitCredentialIsolationMutation(ctx, tx, credentialSessionAuthority(item))
 }
 
 func (s *Service) adminCreateCredentialLaunchFor(action string) http.HandlerFunc {

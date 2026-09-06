@@ -10,6 +10,24 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/token-governance/activation:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: getTokenGovernanceActivationInternal
+      summary: Read the authoritative Token governance activation and release identity snapshot
+      description: Requires internal.authorization.check workload permission. APT-138 reads the persistent state without caching or changing it. Unknown state, mismatched policy or handler digests, and an unapproved runtime identity fail closed. This service-only route is never exposed through Portal or public ingress.
+      responses:
+        "200":
+          description: Read-only activation snapshot; PRE_ACTIVATION has epoch zero, empty digests and no approved runtime roles
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenGovernanceActivation" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/approval-command-prechecks:
     post:
       servers: [{ url: / }]
@@ -70,6 +88,126 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/model-lifecycle/precheck:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: precheckApprovedModelLifecycleInternal
+      summary: Recompute this approved command's authoritative facts
+      description: Requires token-command-executor identity and internal.token.model-lifecycle.execute. Read-only, ACTIVE only; the body command type must match this route. Never exposed through Portal or ingress.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalSnapshotRequest" } } } }
+      responses:
+        "200":
+          description: Current authoritative snapshot, without executing or claiming a command
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalSnapshotProjection" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/model-lifecycle/result:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: getApprovedModelLifecycleResultInternal
+      summary: Read the original redacted result without executing or resuming
+      description: Requires token-command-executor identity and internal.token.model-lifecycle.execute. Binds approval ID, this route's command type and frozen fingerprint. Available during SAFE_ROLLBACK with known activation state. A 404 is unconfirmed, not proof of zero writes; it never authorizes another POST. Duplicate or extra query keys are rejected. Never exposed through Portal or ingress.
+      parameters:
+        - { name: approval_request_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: command_fingerprint, in: query, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      responses:
+        "200":
+          description: Original persisted result; no claim, recovery or domain write
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/catalog-rollback/precheck:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: precheckApprovedCatalogRollbackInternal
+      summary: Recompute this approved command's authoritative facts
+      description: Requires token-command-executor identity and internal.token.catalog-rollback.execute. Read-only, ACTIVE only; the body command type must match this route. Never exposed through Portal or ingress.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalSnapshotRequest" } } } }
+      responses:
+        "200":
+          description: Current authoritative snapshot, without executing or claiming a command
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalSnapshotProjection" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/catalog-rollback/result:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: getApprovedCatalogRollbackResultInternal
+      summary: Read the original redacted result without executing or resuming
+      description: Requires token-command-executor identity and internal.token.catalog-rollback.execute. Binds approval ID, this route's command type and frozen fingerprint. Available during SAFE_ROLLBACK with known activation state. A 404 is unconfirmed, not proof of zero writes; it never authorizes another POST. Duplicate or extra query keys are rejected. Never exposed through Portal or ingress.
+      parameters:
+        - { name: approval_request_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: command_fingerprint, in: query, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      responses:
+        "200":
+          description: Original persisted result; no claim, recovery or domain write
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/credential-revoke/precheck:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: precheckApprovedCredentialRevokeInternal
+      summary: Recompute this approved command's authoritative facts
+      description: Requires token-command-executor identity and internal.token.credential-revoke.execute. Read-only, ACTIVE only; the body command type must match this route. Never exposed through Portal or ingress.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalSnapshotRequest" } } } }
+      responses:
+        "200":
+          description: Current authoritative snapshot, without executing or claiming a command
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalSnapshotProjection" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/commands/credential-revoke/result:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: getApprovedCredentialRevokeResultInternal
+      summary: Read the original redacted result without executing or resuming
+      description: Requires token-command-executor identity and internal.token.credential-revoke.execute. Binds approval ID, this route's command type and frozen fingerprint. Available during SAFE_ROLLBACK with known activation state. A 404 is unconfirmed, not proof of zero writes; it never authorizes another POST. Duplicate or extra query keys are rejected. Never exposed through Portal or ingress.
+      parameters:
+        - { name: approval_request_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: command_fingerprint, in: query, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      responses:
+        "200":
+          description: Original persisted result; no claim, recovery or domain write
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/GovernedTokenCommandResult" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /client-compatibility:
     get:
@@ -773,6 +911,36 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    TokenGovernanceActivation:
+      type: object
+      additionalProperties: false
+      required: [state, epoch, policy_set_digest, handler_set_digest, approved_runtime_roles, updated_at]
+      properties:
+        state: { type: string, enum: [PRE_ACTIVATION, ACTIVE, SAFE_ROLLBACK] }
+        epoch: { type: integer, minimum: 0 }
+        policy_set_digest: { type: string, pattern: '^(|[a-f0-9]{64})$' }
+        handler_set_digest: { type: string, pattern: '^(|[a-f0-9]{64})$' }
+        approved_runtime_roles:
+          type: array
+          uniqueItems: true
+          description: Sorted release-scoped database login roles. No credentials are returned.
+          items: { type: string, minLength: 1, maxLength: 63 }
+        updated_at: { type: string, format: date-time }
+      allOf:
+        - if:
+            properties: { state: { const: PRE_ACTIVATION } }
+          then:
+            properties:
+              epoch: { const: 0 }
+              policy_set_digest: { const: '' }
+              handler_set_digest: { const: '' }
+              approved_runtime_roles: { maxItems: 0 }
+          else:
+            properties:
+              epoch: { minimum: 1 }
+              policy_set_digest: { minLength: 64 }
+              handler_set_digest: { minLength: 64 }
+              approved_runtime_roles: { minItems: 1 }
     ApprovalSnapshotRequest:
       oneOf:
         - type: object
@@ -961,9 +1129,10 @@ components:
     ApprovedTokenCommandExecution:
       type: object
       additionalProperties: false
-      description: Executor identity is taken only from the authenticated workload context; it is never accepted in this body. Account issues the stable execution key and retries must reuse it unchanged.
-      required: [approval_request_id, requester_user_id, authorization_version, command_fingerprint, execution_idempotency_key, command]
+      description: Executor identity is taken only from the authenticated workload context; it is never accepted in this body. Account issues the stable execution key and retries must reuse it unchanged. The executor freezes activation_epoch when selecting ACTIVE; the Token entry selection and transaction fence must match that epoch, including across SAFE_ROLLBACK and reactivation.
+      required: [activation_epoch, approval_request_id, requester_user_id, authorization_version, command_fingerprint, execution_idempotency_key, command]
       properties:
+        activation_epoch: { type: integer, format: int64, minimum: 1, description: "Frozen ACTIVE epoch; missing or zero is invalid, and a different current epoch rejects execution without mutation." }
         approval_request_id: { type: string, format: uuid }
         requester_user_id: { type: string, format: uuid }
         authorization_version: { type: integer, format: int64, minimum: 1 }

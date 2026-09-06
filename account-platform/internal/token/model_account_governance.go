@@ -64,12 +64,7 @@ type governedAccountCreateExpected struct {
 }
 
 func isModelAccountGovernedCommand(commandType string) bool {
-	switch commandType {
-	case "TOKEN_MODEL_DRAFT_SAVE", "TOKEN_MODEL_PUBLISH", "TOKEN_ACCOUNT_CREATE", "TOKEN_ACCOUNT_STATUS_CHANGE":
-		return true
-	default:
-		return false
-	}
+	return tokenCommandFamily(commandType) == "MODEL_ACCOUNT"
 }
 
 func canonicalizeModelAccountEnvelope(envelope TokenCommandEnvelope) (TokenCommandEnvelope, error) {

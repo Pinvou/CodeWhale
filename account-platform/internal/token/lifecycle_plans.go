@@ -222,6 +222,9 @@ func (r *PostgresRepository) CreateLifecyclePlan(ctx context.Context, modelID uu
 	if !errors.Is(loadErr, ErrNotFound) {
 		return LifecyclePlan{}, false, loadErr
 	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return LifecyclePlan{}, false, err
+	}
 	var now time.Time
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
 		return LifecyclePlan{}, false, err
@@ -291,7 +294,7 @@ func (r *PostgresRepository) CreateLifecyclePlan(ctx context.Context, modelID uu
 	if err != nil {
 		return LifecyclePlan{}, false, err
 	}
-	return item, true, tx.Commit(ctx)
+	return item, true, r.commitGovernedMutation(ctx, tx)
 }
 
 // ScheduleModelPublish atomically records the governed audit-only command and
@@ -338,6 +341,9 @@ func (r *PostgresRepository) ScheduleModelPublish(ctx context.Context, begin tok
 	}
 	if !errors.Is(loadErr, pgx.ErrNoRows) {
 		return TokenCommandResult{}, false, loadErr
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenCommandResult{}, false, err
 	}
 	var now time.Time
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
@@ -403,7 +409,7 @@ func (r *PostgresRepository) ScheduleModelPublish(ctx context.Context, begin tok
 		if item.IdempotencyFingerprint != fingerprint {
 			return TokenCommandResult{}, false, ErrTokenCommandResultMismatch
 		}
-		return item, false, tx.Commit(ctx)
+		return item, false, r.commitGovernedMutation(ctx, tx)
 	}
 	financial := json.RawMessage(`{}`)
 	_, err = tx.Exec(ctx, `INSERT INTO model_lifecycle_plans(id,model_id,plan_version,expected_catalog_version,current_lifecycle,target_lifecycle,effective_at,existing_session_cutoff_at,replacement_model_id,force_cancel_inflight,status,reason,request_digest,idempotency_key_digest,governed_command_reference,critical_resource_versions,financial_snapshot,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,'DRAFT','PUBLISHED',$5,NULL,NULL,false,'SCHEDULED',$6,$7,$8,$9,$10,$11,$12,$13,$13)`, *command.LifecyclePlanID, command.ModelID, *command.LifecyclePlanVersion, expected.ExpectedCatalogVersion, *command.EffectiveAt, canonical.Reason, requestDigest, keyDigest, commandReference, canonical.ExpectedVersions, financial, begin.ActorUserID, now)
@@ -418,7 +424,7 @@ func (r *PostgresRepository) ScheduleModelPublish(ctx context.Context, begin tok
 	if err != nil {
 		return TokenCommandResult{}, false, err
 	}
-	return item, true, tx.Commit(ctx)
+	return item, true, r.commitGovernedMutation(ctx, tx)
 }
 
 func appendLifecyclePlanEvent(ctx context.Context, tx pgx.Tx, planID uuid.UUID, version int64, eventType, actorType, actorID, reason, stableCode string, evidence any, occurredAt time.Time) error {
@@ -457,6 +463,9 @@ func (r *PostgresRepository) CancelLifecyclePlan(ctx context.Context, modelID, p
 	if item.PlanVersion != expectedVersion || (item.Status != "PENDING_APPROVAL" && item.Status != "SCHEDULED") {
 		return LifecyclePlan{}, ErrCatalogVersionConflict
 	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return LifecyclePlan{}, err
+	}
 	var now time.Time
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
 		return LifecyclePlan{}, err
@@ -471,7 +480,7 @@ func (r *PostgresRepository) CancelLifecyclePlan(ctx context.Context, modelID, p
 	if err != nil {
 		return LifecyclePlan{}, err
 	}
-	return item, tx.Commit(ctx)
+	return item, r.commitGovernedMutation(ctx, tx)
 }
 
 func (r *PostgresRepository) LifecyclePlan(ctx context.Context, modelID, planID uuid.UUID) (LifecyclePlan, error) {
@@ -746,6 +755,9 @@ func (e *PostgresApprovedCredentialExecutor) ExecuteApprovedModelLifecycle(ctx c
 	if claimed.Status != "PENDING" {
 		return claimed, tx.Commit(ctx)
 	}
+	if err = e.repository.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenCommandResult{}, err
+	}
 	plan, err := scanLifecyclePlan(tx.QueryRow(ctx, lifecyclePlanSelect+` WHERE id=$1 AND model_id=$2 FOR UPDATE`, command.LifecyclePlanID, command.ModelID))
 	if err != nil {
 		return TokenCommandResult{}, err
@@ -756,7 +768,7 @@ func (e *PostgresApprovedCredentialExecutor) ExecuteApprovedModelLifecycle(ctx c
 		if completeErr != nil {
 			return TokenCommandResult{}, completeErr
 		}
-		return completed, tx.Commit(ctx)
+		return completed, e.repository.commitGovernedMutation(ctx, tx)
 	}
 	if plan.Status != "PENDING_APPROVAL" || plan.PlanVersion != expected.LifecyclePlanVersion || plan.ExpectedCatalogVersion != expected.CatalogVersion || plan.CurrentLifecycle != expected.CurrentLifecycle || plan.TargetLifecycle != expected.TargetLifecycle || !plan.EffectiveAt.Equal(expected.EffectiveAt.UTC()) || !sameOptionalTime(plan.ExistingSessionCutoffAt, expected.ExistingSessionCutoffAt) || !sameOptionalUUID(plan.ReplacementModelID, expected.ReplacementModelID) {
 		return TokenCommandResult{}, ErrCatalogVersionConflict
@@ -790,7 +802,7 @@ func (e *PostgresApprovedCredentialExecutor) ExecuteApprovedModelLifecycle(ctx c
 	if err != nil {
 		return TokenCommandResult{}, err
 	}
-	return completed, tx.Commit(ctx)
+	return completed, e.repository.commitGovernedMutation(ctx, tx)
 }
 
 func jsonSemanticEqual(left, right json.RawMessage) bool {

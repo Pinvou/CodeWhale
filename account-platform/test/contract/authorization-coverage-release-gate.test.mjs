@@ -21,7 +21,7 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 332, tasks: 26, events: 3, cli: 15 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 339, tasks: 27, events: 6, cli: 17 });
 });
 
 test('authorization release gate fails closed for removed unknown and scope-mismatched policies', async () => {
@@ -40,4 +40,12 @@ test('authorization release gate rejects unregistered tasks events and command s
   await rejectedMutation((catalog) => catalog.tasks.pop(), /unclassified_task/);
   await rejectedMutation((catalog) => catalog.events.pop(), /unclassified_event/);
   await rejectedMutation((catalog) => catalog.cli.pop(), /unclassified_cli/);
+});
+
+test('authorization gate discovers all three unresolved Token approval subscriptions', async () => {
+  for (const durable of ['token-model-lifecycle-executor-v1', 'token-catalog-rollback-executor-v1', 'token-credential-revoke-executor-v1']) {
+    await rejectedMutation((catalog) => {
+      catalog.events = catalog.events.filter((entry) => entry.durable !== durable);
+    }, new RegExp(`unclassified_event:.*${durable}`));
+  }
 });

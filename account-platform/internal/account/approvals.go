@@ -96,21 +96,24 @@ type ApprovalFilter struct {
 }
 
 type ApprovalExecution struct {
-	ApprovalRequestID        uuid.UUID       `json:"approval_request_id"`
-	CommandType              string          `json:"command_type"`
-	PolicyVersion            int64           `json:"policy_version"`
-	CommandFingerprint       string          `json:"command_fingerprint"`
-	NormalizedCommand        json.RawMessage `json:"normalized_command"`
-	TargetResourceType       string          `json:"target_resource_type"`
-	TargetResourceID         string          `json:"target_resource_id"`
-	CriticalResourceVersions json.RawMessage `json:"critical_resource_versions"`
-	FinancialSnapshot        json.RawMessage `json:"financial_snapshot"`
-	RequesterUserID          uuid.UUID       `json:"requester_user_id"`
-	ApproverUserID           uuid.UUID       `json:"approver_user_id"`
-	DecisionReason           string          `json:"decision_reason"`
-	ExecutionIdempotencyKey  string          `json:"execution_idempotency_key"`
-	ExecutorIdentity         string          `json:"executor_identity"`
-	Status                   string          `json:"status"`
+	ApprovalRequestID             uuid.UUID       `json:"approval_request_id"`
+	CommandType                   string          `json:"command_type"`
+	PolicyVersion                 int64           `json:"policy_version"`
+	CommandFingerprint            string          `json:"command_fingerprint"`
+	NormalizedCommand             json.RawMessage `json:"normalized_command"`
+	TargetResourceType            string          `json:"target_resource_type"`
+	TargetResourceID              string          `json:"target_resource_id"`
+	CriticalResourceVersions      json.RawMessage `json:"critical_resource_versions"`
+	FinancialSnapshot             json.RawMessage `json:"financial_snapshot"`
+	RequesterUserID               uuid.UUID       `json:"requester_user_id"`
+	RequesterAuthorizationVersion int64           `json:"requester_authorization_version"`
+	RequesterReason               string          `json:"requester_reason"`
+	FirstClaim                    bool            `json:"first_claim"`
+	ApproverUserID                uuid.UUID       `json:"approver_user_id"`
+	DecisionReason                string          `json:"decision_reason"`
+	ExecutionIdempotencyKey       string          `json:"execution_idempotency_key"`
+	ExecutorIdentity              string          `json:"executor_identity"`
+	Status                        string          `json:"status"`
 }
 
 func (r *PostgresRepository) ApprovalPolicies(context.Context) []approvalpolicy.Policy {
@@ -175,8 +178,8 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	// APT-138 owns activation. Existing same-request replays above remain
 	// readable, while a new executable Token approval fails closed only after
 	// policy, actor and strong authorization have been established.
-	if approvalpolicy.TokenExecutableApproval(policy.CommandType) && !r.tokenApprovalCreateEnabledForTest(policy.CommandType) {
-		return ApprovalRequest{}, ErrTokenGovernanceInactive
+	if err := r.requireTokenApprovalActive(ctx, policy.CommandType); err != nil {
+		return ApprovalRequest{}, err
 	}
 	if draft.SupersedesRequestID != nil {
 		var previousRequester uuid.UUID
@@ -252,8 +255,8 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	if _, _, _, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission); err != nil {
 		return ApprovalRequest{}, err
 	}
-	if approvalpolicy.TokenExecutableApproval(policy.CommandType) {
-		return ApprovalRequest{}, ErrTokenGovernanceInactive
+	if err := r.requireTokenApprovalActive(ctx, policy.CommandType); err != nil {
+		return ApprovalRequest{}, err
 	}
 	draft, err = r.authoritativeApprovalDraft(ctx, draft)
 	if err != nil {
@@ -308,6 +311,9 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 	}
 	if item.RequesterUserID != *actorID {
 		return ApprovalRequest{}, ErrForbidden
+	}
+	if err := r.requireTokenApprovalActive(ctx, item.CommandType); err != nil {
+		return ApprovalRequest{}, err
 	}
 	if item.Status != from || item.Version != expectedVersion {
 		now := r.now()
@@ -383,6 +389,9 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if err := r.requireTokenApprovalActive(ctx, item.CommandType); err != nil {
 		return ApprovalRequest{}, err
 	}
 	if item.Status != "SUBMITTED" || item.Version != expectedVersion {

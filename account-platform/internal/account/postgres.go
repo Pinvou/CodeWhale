@@ -11,6 +11,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokengovernance"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,7 +29,8 @@ type PostgresRepository struct {
 	// owns the eventual activation source; the package integration gate injects
 	// an in-memory decision only to exercise the otherwise dormant transaction
 	// chain without changing PRE_ACTIVATION behavior.
-	tokenApprovalCreateGate func(string) bool
+	tokenApprovalCreateGate   func(string) bool
+	tokenGovernanceActivation tokengovernance.Reader
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {

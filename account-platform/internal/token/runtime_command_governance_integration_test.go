@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // TestRuntimeGovernedCommandsPostgresIntegration is a release gate for the
@@ -23,6 +25,8 @@ func TestRuntimeGovernedCommandsPostgresIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	repository := newTokenQueryIntegrationRepository(t, ctx, databaseURL)
+	activeGuard := tokenRouteActivationGuardFunc(func(context.Context, pgx.Tx, TokenCommandGovernanceActivation) error { return nil })
+	repository.WithTokenRouteActivationTransactionGuard(activeGuard)
 	actorID, otherActorID := uuid.New(), uuid.New()
 	authorizationServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		var input struct {
@@ -45,9 +49,9 @@ func TestRuntimeGovernedCommandsPostgresIntegration(t *testing.T) {
 		WithAuthorizer(authorizer).
 		WithImpactPrechecks(true, nil, nil).
 		WithTokenCommandGovernanceActivation(testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}})
-	handler := service.Handler("", func(_ context.Context, token string) (identity.Principal, error) {
+	handler := httpserver.CorrelationHandler(service.Handler("", func(_ context.Context, token string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: token, SessionID: "runtime-session-" + token, AuthenticatedAt: time.Now().UTC()}, nil
-	})
+	}))
 
 	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	modelID, accountID, credentialID, ownerID, walletID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -58,16 +62,41 @@ INSERT INTO model_identities(id,provider_id,adapter_version,upstream_model_ref,u
 INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($5,'USER',$6,$7,'Runtime account','ACTIVE',$3,$4,$4,'PLATFORM');
 INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($8,$5,'runtime','https://provider.invalid','x'::bytea,'runtime-key','runtime-fingerprint',1,'ACTIVE',ARRAY['runtime-model'],$4,$3,$4,'VALID');
 INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,desired_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,active_token_account_id,active_credential_id,requested_by,created_at,updated_at) VALUES
-($9,'PERSONAL',$6,$7,$1,'runtime-model','CHAT',3,$2,'FAILED','TEST_FAILED',1,'{}',3,$4+interval '1 hour',$5,$8,$3,$4,$4),
-($10,'PERSONAL',$6,$7,$1,'runtime-model','CHAT',4,$2,'REPAIR_REQUIRED','TEST_REPAIR',1,'{}',3,$4+interval '1 hour',$5,$8,$3,$4,$4),
-($11,'PERSONAL',$6,$7,$1,'runtime-model','CHAT',5,$2,'FAILED','TEST_CANONICAL',1,'{}',3,$4+interval '1 hour',$5,$8,$3,$4,$4);
-INSERT INTO usage_requests(id,user_id,session_id,token_account_id,credential_id,wallet_id,model,status,maximum_microcredits,request_snapshot,started_at,updated_at,idempotency_key_digest,request_fingerprint,last_persisted_sequence) VALUES($12,$6,'runtime-session',$5,$8,$7,'runtime-model','REVIEW',100,'{}',$4,$4,$2,$2,9);`, modelID, digest, actorID, now, accountID, ownerID, walletID, credentialID, provisioningID, concurrentProvisioningID, canonicalProvisioningID, usageID); err != nil {
+($9,'PERSONAL',$6,$7,$1,'runtime-model','CHAT',3,$2,'FAILED','TEST_FAILED',1,'{}',3,$4::timestamptz+interval '1 hour',$5,$8,$3,$4,$4),
+($10,'PERSONAL',$6,$7,$1,'runtime-model','CHAT',4,$2,'REPAIR_REQUIRED','TEST_REPAIR',1,'{}',3,$4::timestamptz+interval '1 hour',$5,$8,$3,$4,$4),
+($11,'PERSONAL',$6,$7,$1,'runtime-model','CHAT',5,$2,'FAILED','TEST_CANONICAL',1,'{}',3,$4::timestamptz+interval '1 hour',$5,$8,$3,$4,$4);
+INSERT INTO usage_requests(id,user_id,session_id,token_account_id,credential_id,wallet_id,model,status,maximum_microcredits,request_snapshot,started_at,updated_at,idempotency_key_digest,request_fingerprint,last_persisted_sequence) VALUES($12,$6,'runtime-session',$5,$8,$7,'runtime-model','REVIEW',100,'{}',$4,$4,$2,$2,9);`, pgx.QueryExecModeSimpleProtocol, modelID, digest, actorID, now, accountID, ownerID, walletID, credentialID, provisioningID, concurrentProvisioningID, canonicalProvisioningID, usageID); err != nil {
 		t.Fatal(err)
 	}
 
 	provisioningCommand := mustMarshalJSON(t, map[string]any{"provisioning_id": provisioningID, "expected_provisioning_version": now.Format(time.RFC3339Nano), "target_generation": int64(3), "replay_model_request": false})
 	provisioningPrecheck := runtimePrecheck(t, service, "TOKEN_ROUTE_PROVISIONING_REPAIR", "PROVISIONING", provisioningID, provisioningCommand)
 	provisioningEnvelope := runtimeEnvelope(t, "TOKEN_ROUTE_PROVISIONING_REPAIR", "PROVISIONING", provisioningID, provisioningCommand, provisioningPrecheck)
+	assertActivationRejects := func(envelope TokenCommandEnvelope) {
+		t.Helper()
+		const facts = `SELECT (SELECT count(*) FROM token_command_results)+(SELECT count(*) FROM token_audit_logs)+(SELECT count(*) FROM outbox_events)+(SELECT count(*) FROM route_provisioning_commands)+(SELECT count(*) FROM route_provisioning_audit)+(SELECT count(*) FROM usage_reconciliation_commands)`
+		var before int64
+		if err := repository.pool.QueryRow(ctx, facts).Scan(&before); err != nil {
+			t.Fatal(err)
+		}
+		for _, rejectCall := range []int{1, 2} {
+			calls := 0
+			repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(context.Context, pgx.Tx, TokenCommandGovernanceActivation) error {
+				calls++
+				if calls == rejectCall {
+					return ErrTokenRouteActivationChanged
+				}
+				return nil
+			}))
+			response := runtimeCommandRequest(t, handler, envelope, "runtime-epoch-rejected-command", "actor")
+			var after int64
+			if err := repository.pool.QueryRow(ctx, facts).Scan(&after); err != nil || response.Code != http.StatusServiceUnavailable || calls != rejectCall || after != before {
+				t.Fatalf("activation %s at call %d: status=%d calls=%d facts=%d→%d err=%v body=%s", envelope.CommandType, rejectCall, response.Code, calls, before, after, err, response.Body.String())
+			}
+		}
+		repository.WithTokenRouteActivationTransactionGuard(activeGuard)
+	}
+	assertActivationRejects(provisioningEnvelope)
 	invalidEnvelopes := []TokenCommandEnvelope{provisioningEnvelope, provisioningEnvelope, provisioningEnvelope, provisioningEnvelope, provisioningEnvelope}
 	invalidEnvelopes[0].Command = mustMarshalJSON(t, map[string]any{"provisioning_id": provisioningID, "expected_provisioning_version": now.Format(time.RFC3339Nano), "target_generation": int64(3), "replay_model_request": true})
 	invalidEnvelopes[1].Command = mustMarshalJSON(t, map[string]any{"provisioning_id": provisioningID, "expected_provisioning_version": now.Format(time.RFC3339Nano), "target_generation": int64(3), "replay_model_request": false, "unexpected": "must-not-pass"})
@@ -164,6 +193,7 @@ INSERT INTO usage_requests(id,user_id,session_id,token_account_id,credential_id,
 	usageCommand := mustMarshalJSON(t, map[string]any{"usage_request_id": usageID, "expected_usage_version": now.Format(time.RFC3339Nano), "evidence_high_watermark": int64(9), "replay_model_request": false})
 	usagePrecheck := runtimePrecheck(t, service, "TOKEN_USAGE_RECONCILIATION_RETRY", "USAGE_REQUEST", usageID, usageCommand)
 	usageEnvelope := runtimeEnvelope(t, "TOKEN_USAGE_RECONCILIATION_RETRY", "USAGE_REQUEST", usageID, usageCommand, usagePrecheck)
+	assertActivationRejects(usageEnvelope)
 	usageResponse := runtimeCommandRequest(t, handler, usageEnvelope, "runtime-reconciliation-command-01", "actor")
 	if usageResponse.Code != http.StatusOK {
 		t.Fatalf("usage status=%d body=%s", usageResponse.Code, usageResponse.Body.String())

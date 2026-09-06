@@ -179,7 +179,7 @@ func TestCredentialOriginServicePostgresIntegration(t *testing.T) {
 		}
 		return nil
 	}))
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Origin integration','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, accountID, owner, walletID, actor, now); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Origin integration','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, pgx.QueryExecModeSimpleProtocol, accountID, owner, walletID, actor, now); err != nil {
 		t.Fatal(err)
 	}
 	idp := newControlledCredentialIDP(t, actor, "credential-client")
@@ -296,7 +296,7 @@ func TestCredentialOriginServicePostgresIntegration(t *testing.T) {
 		browserAccounts := make([]uuid.UUID, 0, 5)
 		for index := 0; index < 5; index++ {
 			browserAccount, browserWallet := uuid.New(), uuid.New()
-			if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,$4,'ACTIVE',$5,$6,$6,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$6)`, browserAccount, owner, browserWallet, fmt.Sprintf("Browser credential %d", index), actor, now); err != nil {
+			if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,$4,'ACTIVE',$5,$6,$6,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$6)`, pgx.QueryExecModeSimpleProtocol, browserAccount, owner, browserWallet, fmt.Sprintf("Browser credential %d", index), actor, now); err != nil {
 				t.Fatal(err)
 			}
 			browserLaunch, launchErr := repository.CreateCredentialLaunch(launchContext, browserAccount, actor, CredentialLaunchRequest{Action: "ENROLL", ExpectedAccountVersion: 1, Slot: "PRIMARY", Reason: "exercise the real credential origin in Chromium"}, fmt.Sprintf("browser-credential-launch-key-%d", index), fmt.Sprintf("browser-credential-request-%d", index))
@@ -329,7 +329,7 @@ func TestCredentialOriginServicePostgresIntegration(t *testing.T) {
 	// A Portal revocation that wins before the callback prevents even the IdP
 	// exchange, and therefore cannot reach credential persistence.
 	revokedAccount, revokedWallet := uuid.New(), uuid.New()
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Revoked origin race','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, revokedAccount, owner, revokedWallet, actor, now); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Revoked origin race','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, pgx.QueryExecModeSimpleProtocol, revokedAccount, owner, revokedWallet, actor, now); err != nil {
 		t.Fatal(err)
 	}
 	revokedLaunch, err := repository.CreateCredentialLaunch(launchContext, revokedAccount, actor, CredentialLaunchRequest{Action: "ENROLL", ExpectedAccountVersion: 1, Slot: "PRIMARY", Reason: "revoke before credential callback exchange"}, "credential-origin-revoked-key", "credential-origin-revoked-request")
@@ -352,17 +352,49 @@ func TestCredentialOriginServicePostgresIntegration(t *testing.T) {
 	if err = repository.RevokeCredentialLaunch(ctx, actor, revokedLaunch.ResultRef, "CREDENTIAL_PERMISSION_REVOKED"); err != nil {
 		t.Fatal(err)
 	}
-	response = credentialHTTP(t, revokedClient, http.MethodGet, revokedCallback, nil, "")
-	if response.StatusCode != http.StatusForbidden {
-		t.Fatalf("revoked callback status=%d body=%s", response.StatusCode, readCredentialBody(t, response))
+	expectedTokenHits := int64(1)
+	if os.Getenv("PINVOU_REQUIRE_CREDENTIAL_BROWSER") == "1" {
+		expectedTokenHits += 5
 	}
-	_ = response.Body.Close()
-	if idp.tokenHits.Load() != 1 {
+	if idp.tokenHits.Load() != expectedTokenHits {
+		t.Fatalf("successful flows made %d token exchanges, expected %d", idp.tokenHits.Load(), expectedTokenHits)
+	}
+	beforeRejectedCallback := credentialOriginPersistedFacts(t, ctx, repository)
+	response = credentialHTTP(t, revokedClient, http.MethodGet, revokedCallback, nil, "")
+	var rejected struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal([]byte(readCredentialBody(t, response)), &rejected); err != nil || response.StatusCode != http.StatusUnauthorized || rejected.Code != "CREDENTIAL_SESSION_INVALID" {
+		t.Fatalf("revoked callback status=%d code=%s decode_error=%v", response.StatusCode, rejected.Code, err)
+	}
+	if idp.tokenHits.Load() != expectedTokenHits {
 		t.Fatalf("revoked flow reached IdP token exchange: %d", idp.tokenHits.Load())
+	}
+	if credentialOriginPersistedFacts(t, ctx, repository) != beforeRejectedCallback {
+		t.Fatal("rejected callback changed persistent credential/domain facts")
+	}
+	if err := repository.pool.QueryRow(ctx, `SELECT count(*) FROM provider_credentials WHERE token_account_id=$1`, revokedAccount).Scan(&credentialCount); err != nil || credentialCount != 0 {
+		t.Fatalf("revoked account credential count=%d err=%v", credentialCount, err)
 	}
 	for _, secret := range []string{"origin-integration-secret", "code_verifier", "client_secret"} {
 		if strings.Contains(authorizationBody+callbackBody+credentialBody+terminalBody, secret) {
 			t.Fatalf("credential flow response leaked %q", secret)
 		}
 	}
+}
+
+func credentialOriginPersistedFacts(t *testing.T, ctx context.Context, repository *PostgresRepository) string {
+	t.Helper()
+	var facts string
+	if err := repository.pool.QueryRow(ctx, `SELECT jsonb_build_object(
+'accounts',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM token_accounts a),
+'credentials',(SELECT jsonb_agg(to_jsonb(c) ORDER BY c.id) FROM provider_credentials c),
+'launches',(SELECT jsonb_agg(to_jsonb(l) ORDER BY l.id) FROM credential_launches l),
+'sessions',(SELECT jsonb_agg(to_jsonb(s) ORDER BY s.id) FROM credential_isolation_sessions s),
+'results',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.result_ref) FROM credential_isolation_results r),
+'audits',(SELECT jsonb_agg(to_jsonb(a) ORDER BY a.id) FROM token_audit_logs a),
+'outbox',(SELECT jsonb_agg(to_jsonb(o) ORDER BY o.event_id) FROM outbox_events o))::text`).Scan(&facts); err != nil {
+		t.Fatal(err)
+	}
+	return facts
 }

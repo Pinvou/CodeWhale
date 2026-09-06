@@ -71,8 +71,24 @@ func (broker *NATSBroker) Ping(ctx context.Context) error {
 type ConsumerHandler func(context.Context, Event) error
 
 func (broker *NATSBroker) Consume(ctx context.Context, durable, filterSubject string, handler ConsumerHandler) (func(), error) {
+	return broker.consume(ctx, durable, filterSubject, handler, false)
+}
+
+// ConsumeUntilResolved retains an unresolved authorization delivery instead
+// of terminating it after a retry budget. The handler must emit a stable
+// operator-visible alert and may ACK only a confirmed terminal result or a
+// validated non-target event. Existing consumers keep their original DLQ policy.
+func (broker *NATSBroker) ConsumeUntilResolved(ctx context.Context, durable, filterSubject string, handler ConsumerHandler) (func(), error) {
+	return broker.consume(ctx, durable, filterSubject, handler, true)
+}
+
+func (broker *NATSBroker) consume(ctx context.Context, durable, filterSubject string, handler ConsumerHandler, retainUnresolved bool) (func(), error) {
 	if strings.TrimSpace(durable) == "" || strings.TrimSpace(filterSubject) == "" || handler == nil {
 		return nil, errorsNewConfiguration("consumer durable, filter subject, and handler are required")
+	}
+	maxDeliver := 12
+	if retainUnresolved {
+		maxDeliver = -1
 	}
 	consumer, err := broker.stream.CreateOrUpdateConsumer(ctx, "ACCOUNT_PLATFORM", jetstream.ConsumerConfig{
 		Name:          durable,
@@ -80,7 +96,7 @@ func (broker *NATSBroker) Consume(ctx context.Context, durable, filterSubject st
 		FilterSubject: filterSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       30 * time.Second,
-		MaxDeliver:    12,
+		MaxDeliver:    maxDeliver,
 		BackOff:       []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute},
 	})
 	if err != nil {
@@ -102,7 +118,7 @@ func (broker *NATSBroker) Consume(ctx context.Context, durable, filterSubject st
 			return
 		}
 		metadata, _ := message.Metadata()
-		if metadata != nil && metadata.NumDelivered >= 12 {
+		if !retainUnresolved && metadata != nil && metadata.NumDelivered >= 12 {
 			subject := "account-platform.dead-letter." + message.Subject()
 			messageID := message.Headers().Get(nats.MsgIdHdr) + ":consumer-dead-letter"
 			if messageID == ":consumer-dead-letter" {

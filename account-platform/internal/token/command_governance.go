@@ -109,6 +109,7 @@ type ApprovedTokenCommandExecutor interface {
 }
 
 type approvedTokenCommandBody struct {
+	ActivationEpoch          int64                `json:"activation_epoch"`
 	ApprovalRequestID        uuid.UUID            `json:"approval_request_id"`
 	RequesterUserID          uuid.UUID            `json:"requester_user_id"`
 	AuthorizationVersion     int64                `json:"authorization_version"`
@@ -142,6 +143,19 @@ func (r *PostgresRepository) BeginTokenCommand(ctx context.Context, input tokenC
 	}
 	defer tx.Rollback(ctx)
 	commandReference := uuid.Must(uuid.NewV7())
+	existing, existingErr := scanTokenCommandResult(tx.QueryRow(ctx, tokenCommandResultSelect+` WHERE actor_user_id=$1 AND command_type=$2 AND idempotency_key_digest=$3`, input.ActorUserID, canonical.CommandType, keyDigest))
+	if existingErr == nil {
+		if existing.IdempotencyFingerprint != fingerprint {
+			return TokenCommandResult{}, false, ErrTokenCommandResultMismatch
+		}
+		return existing, false, tx.Commit(ctx)
+	}
+	if !errors.Is(existingErr, pgx.ErrNoRows) {
+		return TokenCommandResult{}, false, existingErr
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenCommandResult{}, false, err
+	}
 	result, err := tx.Exec(ctx, `INSERT INTO token_command_results(command_reference,command_type,policy_version,actor_user_id,actor_permission,authorization_version,idempotency_key_digest,idempotency_fingerprint,request_digest,target_resource_type,target_resource_id,reason,expected_versions,precheck_fingerprint,approval_request_id,approval_command_fingerprint,status,before_state,audit_request_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULLIF($15,'00000000-0000-0000-0000-000000000000')::uuid,NULLIF($16,''),'PENDING',$17,$18) ON CONFLICT(actor_user_id,command_type,idempotency_key_digest) DO NOTHING`, commandReference, canonical.CommandType, policy.PolicyVersion, input.ActorUserID, input.ActorPermission, input.AuthorizationVersion, keyDigest, fingerprint, requestDigest, canonical.TargetResourceType, canonical.TargetResourceID, canonical.Reason, canonical.ExpectedVersions, canonical.PrecheckFingerprint, input.ApprovalRequestID.String(), strings.ToLower(strings.TrimSpace(input.ApprovalFingerprint)), nullableJSONObject(input.BeforeState), input.AuditRequestID)
 	if err != nil {
 		return TokenCommandResult{}, false, err
@@ -153,6 +167,9 @@ func (r *PostgresRepository) BeginTokenCommand(ctx context.Context, input tokenC
 	}
 	if item.IdempotencyFingerprint != fingerprint {
 		return TokenCommandResult{}, false, ErrTokenCommandResultMismatch
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenCommandResult{}, false, err
 	}
 	return item, created, tx.Commit(ctx)
 }
@@ -168,8 +185,24 @@ func (r *PostgresRepository) CompleteTokenCommand(ctx context.Context, reference
 		return TokenCommandResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	existing, existingErr := scanTokenCommandResult(tx.QueryRow(ctx, tokenCommandResultSelect+` WHERE command_reference=$1 FOR UPDATE`, reference))
+	if existingErr != nil {
+		return TokenCommandResult{}, existingErr
+	}
+	if existing.Status != "PENDING" {
+		if existing.Status != status {
+			return TokenCommandResult{}, ErrTokenCommandResultFinal
+		}
+		return existing, tx.Commit(ctx)
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenCommandResult{}, err
+	}
 	item, err := completeTokenCommandTx(ctx, tx, reference, status, afterState, redactedResult, stableErrorCode)
 	if err != nil {
+		return TokenCommandResult{}, err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
 		return TokenCommandResult{}, err
 	}
 	return item, tx.Commit(ctx)
@@ -405,12 +438,7 @@ func governedRequestFingerprint(envelope TokenCommandEnvelope, facts map[string]
 }
 
 func isProtocolFormulaGovernedCommand(commandType string) bool {
-	switch commandType {
-	case "TOKEN_PROTOCOL_DRAFT_CREATE", "TOKEN_PROTOCOL_PUBLISH", "TOKEN_FORMULA_DRAFT_CREATE", "TOKEN_FORMULA_PUBLISH":
-		return true
-	default:
-		return false
-	}
+	return tokenCommandFamily(commandType) == "PROTOCOL_FORMULA"
 }
 
 func containsSensitiveCommandField(raw json.RawMessage) bool {
@@ -604,7 +632,7 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request) {
+func (s *Service) adminCreateTokenCommandBody(w http.ResponseWriter, r *http.Request) {
 	if s.authorizer == nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -624,7 +652,7 @@ func (s *Service) adminCreateTokenCommand(w http.ResponseWriter, r *http.Request
 		api.WriteError(w, http.StatusForbidden, "DIRECT_APPROVAL_COMMAND_FORBIDDEN", "submit this command through the approval workflow", httpserver.RequestID(r.Context()))
 		return
 	}
-	if canonicalCommandType == "TOKEN_ACCOUNT_CREATE" && !s.tokenAccountCreateReady {
+	if canonicalCommandType == "TOKEN_ACCOUNT_CREATE" && !s.tokenAccountCreateReady.Load() {
 		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_CREATE_NOT_ACTIVE", "Token Account creation is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -936,7 +964,7 @@ func writeTokenCommandGovernanceInactiveHTTP(w http.ResponseWriter, r *http.Requ
 }
 
 func isRuntimeGovernedCommand(commandType string) bool {
-	return commandType == "TOKEN_ROUTE_PROVISIONING_REPAIR" || commandType == "TOKEN_USAGE_RECONCILIATION_RETRY"
+	return tokenCommandFamily(commandType) == "RUNTIME"
 }
 
 func (s *Service) adminTokenCommandResult(w http.ResponseWriter, r *http.Request) {
@@ -975,7 +1003,8 @@ func (s *Service) adminTokenCommandResult(w http.ResponseWriter, r *http.Request
 		return
 	}
 	repository.decorateTokenAccountRecovery(r.Context(), &item)
-	if item.CommandType == "TOKEN_FORMULA_PUBLISH" && item.Status == "PENDING" {
+	selection, selected := r.Context().Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
+	if item.CommandType == "TOKEN_FORMULA_PUBLISH" && item.Status == "PENDING" && selected && selection.State == "ACTIVE" {
 		pending, pendingErr := repository.pendingFormulaPublishCommand(r.Context(), reference, actor)
 		if pendingErr != nil {
 			api.WriteError(w, http.StatusServiceUnavailable, "COMMAND_RESULT_UNAVAILABLE", "the command result could not be recovered", httpserver.RequestID(r.Context()))
@@ -1010,15 +1039,15 @@ func (s *Service) authorizedTokenCommandActor(ctx context.Context, principal ide
 }
 
 func (s *Service) executeApprovedModelLifecycle(w http.ResponseWriter, r *http.Request) {
-	s.executeApprovedTokenCommand(w, r, "TOKEN_MODEL_LIFECYCLE_CHANGE")
+	s.registeredTokenHandler("TOKEN_MODEL_LIFECYCLE_CHANGE", "APPROVED")(w, r)
 }
 
 func (s *Service) executeApprovedCatalogRollback(w http.ResponseWriter, r *http.Request) {
-	s.executeApprovedTokenCommand(w, r, "TOKEN_MODEL_CATALOG_ROLLBACK")
+	s.registeredTokenHandler("TOKEN_MODEL_CATALOG_ROLLBACK", "APPROVED")(w, r)
 }
 
 func (s *Service) executeApprovedCredentialRevoke(w http.ResponseWriter, r *http.Request) {
-	s.executeApprovedTokenCommand(w, r, "TOKEN_CREDENTIAL_REVOKE")
+	s.registeredTokenHandler("TOKEN_CREDENTIAL_REVOKE", "APPROVED")(w, r)
 }
 
 func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Request, commandType string) {
@@ -1034,6 +1063,15 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 	var body approvedTokenCommandBody
 	if api.DecodeJSON(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command body is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	selection, selected := r.Context().Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
+	if body.ActivationEpoch < 1 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command activation epoch is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	if !selected || !selection.transactional || selection.State != "ACTIVE" || selection.Epoch != body.ActivationEpoch {
+		api.WriteError(w, http.StatusConflict, "TOKEN_GOVERNANCE_ACTIVATION_CHANGED", "the approved Token command activation changed", httpserver.RequestID(r.Context()))
 		return
 	}
 	policy, err := approvalpolicy.Lookup(commandType)

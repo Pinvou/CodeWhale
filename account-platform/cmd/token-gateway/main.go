@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -101,6 +103,14 @@ func main() {
 	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
+	}
+	governance, err := repository.InstallProductionGovernance(authorizer)
+	if err != nil {
+		log.Fatal("Token governance configuration is invalid: ", err)
+	}
+	ownerAuthority, err := token.NewHTTPOwnerAuthorityClient(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal("Token account authority configuration is invalid: ", err)
 	}
 	ownerCandidates, err := token.NewHTTPOwnerCandidateDirectory(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
 	if err != nil {
@@ -282,6 +292,15 @@ func main() {
 	go observability.RunBackground(workerContext, "default-route-provisioning", defaultRoutes.Run)
 	go observability.RunBackground(workerContext, "route-health-probe", routeHealth.Run)
 	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient).WithAdminOperationsOverview(operationsOverviewEnabled).WithCredentialIsolation(credentialIsolationEnabled).WithApprovedTokenCommandExecutor(token.NewPostgresApprovedCredentialExecutor(repository))
+	service.WithTokenCommandGovernanceActivation(governance).WithTokenAccountProvisioning(wallets, ownerAuthority)
+	governedWorkers, err := token.NewTokenGovernanceSupervisor(service, repository, governance, wallets, ownerAuthority)
+	if err != nil {
+		log.Fatal("Token governed workers are not configured: ", err)
+	}
+	var governanceStopped atomic.Bool
+	go observability.RunBackground(workerContext, "token-governance-supervisor", func(ctx context.Context) {
+		runRequiredGovernanceSupervisor(ctx, stopWorker, &governanceStopped, governedWorkers.Run)
+	})
 	go observability.RunBackground(workerContext, "model-emergency-cancellation", token.NewEmergencyModelCancellationWorker(repository, service, 5*time.Second).Run)
 	ready := repository.Ping
 	if strings.EqualFold(cfg.Environment, "production") || strings.EqualFold(cfg.Environment, "production-new") {
@@ -301,10 +320,37 @@ func main() {
 	}
 	handler := compatibility.Wrap(service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify))
 	handler = requestdeadline.TokenAdminMiddleware(handler, time.Now)
+	handler = token.TokenCredentialDeadlineMiddleware(handler)
+	previousReady := ready
+	ready = func(ctx context.Context) error {
+		if governanceStopped.Load() {
+			return errors.New("Token governance supervisor is not running")
+		}
+		if err := previousReady(ctx); err != nil {
+			return err
+		}
+		_, err := governance.Snapshot(ctx)
+		return err
+	}
 	collectors := append(repository.AdminPaginationCollectors(), service.AdminOperationsOverviewCollectors()...)
-	if err := httpserver.RunWithApplicationAndCollectors("token-gateway", handler, ready, collectors...); err != nil {
+	if err := httpserver.RunWithApplicationContext(workerContext, "token-gateway", handler, ready, collectors...); err != nil {
 		log.Fatal(err)
 	}
+	if governanceStopped.Load() {
+		log.Fatal("TOKEN_GOVERNANCE_SUPERVISOR_STOPPED")
+	}
+}
+
+func runRequiredGovernanceSupervisor(ctx context.Context, stop context.CancelFunc, stopped *atomic.Bool, run func(context.Context) error) {
+	err := run(ctx)
+	if ctx.Err() != nil && (err == nil || errors.Is(err, ctx.Err())) {
+		return // Normal shutdown already owns HTTP and all background workers.
+	}
+	// Any unexpected return (including nil) loses the required worker owner.
+	// Publish not-ready before cancelling HTTP; main then exits nonzero.
+	stopped.Store(true)
+	log.Print("TOKEN_GOVERNANCE_SUPERVISOR_STOPPED")
+	stop()
 }
 
 func valueOrDefault(name, fallback string) string {

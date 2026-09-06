@@ -24,6 +24,14 @@ func TestScheduledPublicationBaselinePostgresIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	repository := newTokenQueryIntegrationRepository(t, ctx, tokenPaginationIntegrationDatabaseURL(t))
+	activation := TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}
+	ctx = context.WithValue(ctx, tokenRouteActivationContextKey{}, tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: true})
+	repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(_ context.Context, _ pgx.Tx, selected TokenCommandGovernanceActivation) error {
+		if selected != activation {
+			return ErrTokenRouteActivationChanged
+		}
+		return nil
+	}))
 	actor := uuid.New()
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	var catalog int64
@@ -85,6 +93,18 @@ func TestScheduledPublicationBaselinePostgresIntegration(t *testing.T) {
 			t.Fatal("rejected schedule mutated persistent domain/command/audit/outbox facts")
 		}
 	}
+	t.Run("wrong_activation_epoch_is_read_only", func(t *testing.T) {
+		envelope, _ := freeze(t, models[0], 1)
+		wrongContext := context.WithValue(ctx, tokenRouteActivationContextKey{}, tokenRouteActivationSelection{TokenCommandGovernanceActivation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 2}, transactional: true})
+		before := scheduledPublicationFacts(t, ctx, repository, false)
+		result, created, err := repository.ScheduleModelPublish(wrongContext, tokenCommandBegin{Envelope: envelope, ActorUserID: actor, ActorPermission: "platform.models.manage", AuthorizationVersion: 7, IdempotencyKey: "schedule-wrong-epoch-" + uuid.NewString(), AuditRequestID: uuid.NewString()})
+		if !errors.Is(err, ErrTokenRouteActivationChanged) || created || result.CommandReference != uuid.Nil {
+			t.Fatalf("wrong epoch must reject before recording a command: created=%v err=%v", created, err)
+		}
+		if after := scheduledPublicationFacts(t, ctx, repository, false); before != after {
+			t.Fatal("wrong epoch changed persistent domain/command/audit/outbox facts")
+		}
+	})
 	var original TokenCommandEnvelope
 	var originalResult TokenCommandResult
 	var originalKey string

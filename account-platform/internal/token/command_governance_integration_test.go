@@ -47,8 +47,8 @@ func TestTokenCommandGovernancePostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := loadTokenIntegrationMigrations("../../migrations/token", schema)
-	if err != nil || len(loaded) == 0 || loaded[len(loaded)-1].Version != 29 {
-		t.Fatalf("expected Token migration 29 last: %v", err)
+	if err != nil || len(loaded) == 0 || loaded[len(loaded)-1].Version != 31 {
+		t.Fatalf("expected Token migration 31 last: %v", err)
 	}
 	if err := migrations.Up(ctx, connection, loaded); err != nil {
 		t.Fatal(err)
@@ -66,11 +66,34 @@ func TestTokenCommandGovernancePostgresIntegration(t *testing.T) {
 	t.Cleanup(pool.Close)
 	repository := &PostgresRepository{pool: pool}
 	actor := uuid.New()
-	envelope := TokenCommandEnvelope{
-		CommandType: "TOKEN_MODEL_DRAFT_SAVE", Reason: "save the reviewed model draft safely", TargetResourceType: "MODEL", TargetResourceID: uuid.NewString(),
-		ExpectedVersions:    json.RawMessage(`{"model_id":"m1","expected_catalog_version":2,"expected_draft_version":3,"precheck_fingerprint":"p","request_fingerprint":"r"}`),
-		PrecheckFingerprint: strings.Repeat("a", 64), Command: json.RawMessage(`{"display_name":"reviewed model"}`),
+	modelID := uuid.New()
+	draftEnvelope := func(displayName string) TokenCommandEnvelope {
+		t.Helper()
+		command, marshalErr := json.Marshal(governedModelDraftCommand{
+			ModelID: modelID, ExpectedCatalogVersion: 2, ExpectedDraftVersion: 3,
+			DisplayName: displayName, Aliases: []string{}, ProtocolCode: "CHAT", ProtocolVersion: 1,
+			ContextLength: 128000, MaximumOutputTokens: 8192, SupportedModalities: []string{"TEXT"}, TokenizerVersion: "v1",
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		envelope, canonicalErr := canonicalizeModelAccountEnvelope(TokenCommandEnvelope{
+			CommandType: "TOKEN_MODEL_DRAFT_SAVE", Reason: "save the reviewed model draft safely",
+			TargetResourceType: "MODEL", TargetResourceID: modelID.String(),
+			PrecheckFingerprint: strings.Repeat("a", 64), Command: command,
+		})
+		if canonicalErr != nil {
+			t.Fatal(canonicalErr)
+		}
+		facts := map[string]any{"model_id": modelID.String(), "expected_catalog_version": 2, "expected_draft_version": 3, "precheck_fingerprint": envelope.PrecheckFingerprint}
+		facts["request_fingerprint"] = governedRequestFingerprint(envelope, facts)
+		envelope.ExpectedVersions, marshalErr = json.Marshal(facts)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return envelope
 	}
+	envelope := draftEnvelope("reviewed model")
 	input := tokenCommandBegin{Envelope: envelope, ActorUserID: actor, ActorPermission: "platform.models.manage", AuthorizationVersion: 7, IdempotencyKey: "token-command-key-0001", AuditRequestID: "request-1", BeforeState: json.RawMessage(`{"draft_version":2}`)}
 	created, inserted, err := repository.BeginTokenCommand(ctx, input)
 	if err != nil || !inserted || created.PolicyVersion != 2 || created.Status != "PENDING" {
@@ -81,11 +104,11 @@ func TestTokenCommandGovernancePostgresIntegration(t *testing.T) {
 		t.Fatalf("idempotent replay=%#v inserted=%v err=%v", replayed, inserted, err)
 	}
 	changed := input
-	changed.Envelope.Command = json.RawMessage(`{"display_name":"different"}`)
+	changed.Envelope = draftEnvelope("different")
 	if _, _, err := repository.BeginTokenCommand(ctx, changed); !errors.Is(err, ErrTokenCommandResultMismatch) {
 		t.Fatalf("idempotency mismatch returned %v", err)
 	}
-	completed, err := repository.CompleteTokenCommand(ctx, created.CommandReference, "SUCCEEDED", json.RawMessage(`{"draft_version":3}`), json.RawMessage(`{"model_id":"m1"}`), "")
+	completed, err := repository.CompleteTokenCommand(ctx, created.CommandReference, "SUCCEEDED", json.RawMessage(`{"draft_version":3}`), json.RawMessage(`{"model_id":"`+modelID.String()+`"}`), "")
 	if err != nil || completed.Status != "SUCCEEDED" || completed.CompletedAt == nil {
 		t.Fatalf("complete=%#v err=%v", completed, err)
 	}

@@ -26,11 +26,14 @@ func (r *PostgresRepository) SetAccountStatus(ctx context.Context, accountID uui
 		return TokenAccount{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenAccount{}, err
+	}
 	account, _, err := setAccountStatusEffect(ctx, tx, accountID, status, actorID, reason, r.now())
 	if err != nil {
 		return TokenAccount{}, err
 	}
-	return account, tx.Commit(ctx)
+	return account, r.commitGovernedMutation(ctx, tx)
 }
 
 func (r *PostgresRepository) RevokeCredential(ctx context.Context, accountID, credentialID, actorID uuid.UUID, reason string) (Credential, error) {

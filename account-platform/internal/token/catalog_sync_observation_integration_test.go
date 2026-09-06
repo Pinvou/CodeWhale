@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/requestdeadline"
 	"github.com/google/uuid"
@@ -255,7 +256,7 @@ func newGovernedCatalogSyncIntegrationHandler(t *testing.T, repository *Postgres
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: actor.String(), SessionID: "catalog-sync-session", AuthenticatedAt: time.Now().UTC()}, nil
 	}
-	return requestdeadline.TokenAdminMiddleware(service.Handler("", verify), time.Now)
+	return httpserver.CorrelationHandler(requestdeadline.TokenAdminMiddleware(service.Handler("", verify), time.Now))
 }
 
 func performCatalogSyncPrecheck(t *testing.T, handler http.Handler) TokenCommandPrecheckResult {

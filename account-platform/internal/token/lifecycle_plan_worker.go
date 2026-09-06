@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,9 +23,7 @@ func NewLifecyclePlanWorker(service *Service, repository *PostgresRepository, wo
 	return &LifecyclePlanWorker{service: service, repository: repository, workerID: strings.TrimSpace(workerID)}
 }
 
-// RunOnce is intentionally not registered by token-gateway main. APT-138
-// activates the Account event consumer and due-plan loop atomically; APT-134
-// only makes the domain implementation ready and directly testable.
+// RunOnce is registered only by the epoch-bound APT-138 supervisor.
 func (w *LifecyclePlanWorker) RunOnce(ctx context.Context) (bool, error) {
 	return w.runOnce(ctx, nil)
 }
@@ -34,6 +33,16 @@ func (w *LifecyclePlanWorker) RunOnce(ctx context.Context) (bool, error) {
 func (w *LifecyclePlanWorker) runOnce(ctx context.Context, testAsOf *time.Time) (bool, error) {
 	if w == nil || w.service == nil || w.repository == nil || w.workerID == "" {
 		return false, ErrTokenCommandInvalid
+	}
+	if w.service.commandGovernanceActivation != nil {
+		activation, err := w.service.commandGovernanceActivation.CurrentTokenCommandGovernanceActivation(ctx)
+		if err != nil || activation.State != "ACTIVE" || activation.Epoch < 1 {
+			return false, ErrTokenRouteActivationChanged
+		}
+		if selected, ok := ctx.Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection); ok && selected.TokenCommandGovernanceActivation != activation {
+			return false, ErrTokenRouteActivationChanged
+		}
+		ctx = context.WithValue(ctx, tokenRouteActivationContextKey{}, tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: true})
 	}
 	expired, err := w.repository.ExpirePendingLifecyclePlan(ctx, w.workerID)
 	if err != nil || expired {
@@ -130,6 +139,9 @@ func (r *PostgresRepository) ExpirePendingLifecyclePlan(ctx context.Context, wor
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
 		return false, err
 	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return false, err
+	}
 	result, err := tx.Exec(ctx, `UPDATE model_lifecycle_plans SET status='EXPIRED',completed_at=$2,updated_at=$2,stable_error_code='PLAN_APPROVAL_EXPIRED' WHERE id=$1 AND status='PENDING_APPROVAL'`, planID, now)
 	if err != nil || result.RowsAffected() != 1 {
 		if err != nil {
@@ -140,7 +152,7 @@ func (r *PostgresRepository) ExpirePendingLifecyclePlan(ctx context.Context, wor
 	if err = appendLifecyclePlanEvent(ctx, tx, plan.ID, plan.PlanVersion, "EXPIRED", "SERVICE", workerID, plan.Reason, "PLAN_APPROVAL_EXPIRED", map[string]any{"approval_ttl_seconds": int64(lifecyclePlanApprovalTTL / time.Second)}, now); err != nil {
 		return false, err
 	}
-	return true, tx.Commit(ctx)
+	return true, r.commitGovernedMutation(ctx, tx)
 }
 
 func (r *PostgresRepository) ClaimDueLifecyclePlan(ctx context.Context, workerID string) (LifecyclePlan, bool, error) {
@@ -175,6 +187,9 @@ func (r *PostgresRepository) claimDueLifecyclePlan(ctx context.Context, workerID
 	}
 	now := asOf
 	leaseUntil := now.Add(lifecyclePlanLeaseTTL)
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return LifecyclePlan{}, false, err
+	}
 	result, err := tx.Exec(ctx, `UPDATE model_lifecycle_plans SET status='EXECUTING',execution_lease_owner=$2,execution_lease_until=$3,execution_attempt=execution_attempt+1,updated_at=$4 WHERE id=$1 AND ((status='SCHEDULED' AND effective_at<=$4) OR (status='EXECUTING' AND execution_lease_until<=$4))`, planID, workerID, leaseUntil, now)
 	if err != nil || result.RowsAffected() != 1 {
 		if err != nil {
@@ -186,10 +201,11 @@ func (r *PostgresRepository) claimDueLifecyclePlan(ctx context.Context, workerID
 	if err != nil {
 		return LifecyclePlan{}, false, err
 	}
-	if err = appendLifecyclePlanEvent(ctx, tx, plan.ID, plan.PlanVersion, "LEASED", "SERVICE", workerID, plan.Reason, "", map[string]any{"execution_attempt": plan.ExecutionAttempt, "lease_until": leaseUntil}, now); err != nil {
+	selection, _ := ctx.Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
+	if err = appendLifecyclePlanEvent(ctx, tx, plan.ID, plan.PlanVersion, "LEASED", "SERVICE", workerID, plan.Reason, "", map[string]any{"execution_attempt": plan.ExecutionAttempt, "lease_until": leaseUntil, "activation_epoch": selection.Epoch}, now); err != nil {
 		return LifecyclePlan{}, false, err
 	}
-	return plan, true, tx.Commit(ctx)
+	return plan, true, r.commitGovernedMutation(ctx, tx)
 }
 
 func (r *PostgresRepository) FailLifecyclePlan(ctx context.Context, planID uuid.UUID, workerID, status, stableCode string) error {
@@ -214,6 +230,12 @@ func (r *PostgresRepository) FailLifecyclePlan(ctx context.Context, planID uuid.
 	if plan.Status != "EXECUTING" {
 		return ErrCatalogVersionConflict
 	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
+	if err = r.checkLifecycleLeaseEpoch(ctx, tx, plan, workerID); err != nil {
+		return err
+	}
 	var now time.Time
 	if err = tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
 		return err
@@ -228,7 +250,7 @@ func (r *PostgresRepository) FailLifecyclePlan(ctx context.Context, planID uuid.
 	if err = appendLifecyclePlanEvent(ctx, tx, plan.ID, plan.PlanVersion, status, "SERVICE", workerID, plan.Reason, stableCode, map[string]any{"execution_attempt": plan.ExecutionAttempt}, now); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return r.commitGovernedMutation(ctx, tx)
 }
 
 func (r *PostgresRepository) ApplyClaimedLifecyclePlan(ctx context.Context, planID uuid.UUID, workerID string, capabilities []GatewayProtocolCapability) error {
@@ -241,6 +263,9 @@ func (r *PostgresRepository) ApplyClaimedLifecyclePlan(ctx context.Context, plan
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
 	if err = lockCatalogPublication(ctx, tx); err != nil {
 		return err
 	}
@@ -258,6 +283,9 @@ func (r *PostgresRepository) ApplyClaimedLifecyclePlan(ctx context.Context, plan
 	var leaseOwner string
 	if err = tx.QueryRow(ctx, `SELECT execution_lease_owner FROM model_lifecycle_plans WHERE id=$1`, planID).Scan(&leaseOwner); err != nil || leaseOwner != workerID {
 		return ErrCatalogVersionConflict
+	}
+	if err = r.checkLifecycleLeaseEpoch(ctx, tx, plan, workerID); err != nil {
+		return err
 	}
 	current, err := currentCatalogVersion(ctx, tx)
 	if err != nil || current != plan.ExpectedCatalogVersion {
@@ -295,7 +323,7 @@ func (r *PostgresRepository) ApplyClaimedLifecyclePlan(ctx context.Context, plan
 		if err = completeAppliedLifecyclePlan(ctx, tx, plan, workerID, published.CatalogVersion, now); err != nil {
 			return err
 		}
-		return tx.Commit(ctx)
+		return r.commitGovernedMutation(ctx, tx)
 	}
 	item, err := scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.model_id=$2`, current, plan.ModelID))
 	if err != nil {
@@ -346,7 +374,23 @@ func (r *PostgresRepository) ApplyClaimedLifecyclePlan(ctx context.Context, plan
 	if err = completeAppliedLifecyclePlan(ctx, tx, plan, workerID, version, now); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return r.commitGovernedMutation(ctx, tx)
+}
+
+func (r *PostgresRepository) checkLifecycleLeaseEpoch(ctx context.Context, tx pgx.Tx, plan LifecyclePlan, workerID string) error {
+	if r.routeActivationGuard == nil {
+		return nil
+	} // historical isolated domain tests only
+	selected, ok := ctx.Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
+	if !ok || !selected.transactional || selected.State != "ACTIVE" || selected.Epoch < 1 {
+		return ErrTokenRouteActivationChanged
+	}
+	var owner, epoch, attempt string
+	err := tx.QueryRow(ctx, `SELECT actor_id,evidence->>'activation_epoch',evidence->>'execution_attempt' FROM model_lifecycle_plan_events WHERE plan_id=$1 AND event_type='LEASED' ORDER BY occurred_at DESC,id DESC LIMIT 1`, plan.ID).Scan(&owner, &epoch, &attempt)
+	if err != nil || owner != workerID || epoch != strconv.FormatInt(selected.Epoch, 10) || attempt != strconv.Itoa(plan.ExecutionAttempt) {
+		return ErrTokenRouteActivationChanged
+	}
+	return nil
 }
 
 func completeAppliedLifecyclePlan(ctx context.Context, tx pgx.Tx, plan LifecyclePlan, workerID string, version int64, now time.Time) error {

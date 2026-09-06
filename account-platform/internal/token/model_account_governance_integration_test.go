@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/tokenauthority"
@@ -198,7 +199,7 @@ UPDATE provider_credentials SET allowed_models=ARRAY['rollback-model','rollback-
 	}
 	envelope := TokenCommandEnvelope{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", Reason: "restore the reviewed catalog snapshot", TargetResourceType: "MODEL_CATALOG", TargetResourceID: strconv.FormatInt(sourceVersion, 10), ExpectedVersions: projection.CriticalResourceVersions, PrecheckFingerprint: projection.PrecheckFingerprint, Command: command}
 	approvalID, fingerprint := uuid.New(), strings.Repeat("e", 64)
-	body := approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 12, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_CATALOG_ROLLBACK:" + fingerprint, CriticalResourceVersions: projection.CriticalResourceVersions, FinancialSnapshot: projection.FinancialSnapshot, Envelope: envelope}
+	body := approvedTokenCommandBody{ActivationEpoch: 1, ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 12, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_CATALOG_ROLLBACK:" + fingerprint, CriticalResourceVersions: projection.CriticalResourceVersions, FinancialSnapshot: projection.FinancialSnapshot, Envelope: envelope}
 	executorContext, err := serviceauth.ContextForJob(ctx, "token-command-executor", "APPROVAL_EXECUTION", uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +212,7 @@ UPDATE provider_credentials SET allowed_models=ARRAY['rollback-model','rollback-
 		request := httptest.NewRequest(http.MethodPost, "/internal/v1/commands/catalog-rollback/execute", bytes.NewReader(raw)).WithContext(executorContext)
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
-		service.executeApprovedCatalogRollback(response, request)
+		approvedCommandFixtureHandler(service, request.URL.Path, service.executeApprovedCatalogRollback).ServeHTTP(response, request)
 		return response
 	}
 	// The approved snapshot must be rechecked before the atomic claim. An
@@ -275,7 +276,7 @@ VALUES($1,$2,'rollback-current-only-session',$3,$4,$5,'rollback-current-only',$6
 		t.Fatalf("refreshed rollback executor precheck: %v; critical=%s", err, envelope.ExpectedVersions)
 	}
 	approvalID, fingerprint = uuid.New(), strings.Repeat("f", 64)
-	body = approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 12, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_CATALOG_ROLLBACK:" + fingerprint, CriticalResourceVersions: projection.CriticalResourceVersions, FinancialSnapshot: projection.FinancialSnapshot, Envelope: envelope}
+	body = approvedTokenCommandBody{ActivationEpoch: 1, ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 12, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_CATALOG_ROLLBACK:" + fingerprint, CriticalResourceVersions: projection.CriticalResourceVersions, FinancialSnapshot: projection.FinancialSnapshot, Envelope: envelope}
 	first, second := perform(), perform()
 	var firstResult, replayResult TokenCommandResult
 	if first.Code != http.StatusOK || second.Code != http.StatusOK || json.Unmarshal(first.Body.Bytes(), &firstResult) != nil || json.Unmarshal(second.Body.Bytes(), &replayResult) != nil || firstResult.Status != "SUCCEEDED" || firstResult.CommandReference != replayResult.CommandReference {
@@ -640,7 +641,7 @@ func newModelAccountGovernanceHandler(t *testing.T, repository *PostgresReposito
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: actorID.String(), SessionID: "apt-123-session", AuthenticatedAt: time.Now().UTC()}, nil
 	}
-	return service.Handler("", verify)
+	return httpserver.CorrelationHandler(service.Handler("", verify))
 }
 
 func newMutableModelAccountGovernanceHandler(t *testing.T, repository *PostgresRepository, wallets WalletResolver, actorID, ownerID uuid.UUID, version *atomic.Int64, allowed *atomic.Bool) http.Handler {
@@ -668,7 +669,7 @@ func newMutableModelAccountGovernanceHandlerWithActivation(t *testing.T, reposit
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: actorID.String(), SessionID: "apt-123-mutable-session", AuthenticatedAt: time.Now().UTC()}, nil
 	}
-	return service.Handler("", verify)
+	return httpserver.CorrelationHandler(service.Handler("", verify))
 }
 
 func executeModelAccountHTTPCommand(t *testing.T, handler http.Handler, commandType, resourceType, resourceID string, command json.RawMessage, reason, key string) TokenCommandResult {

@@ -11,9 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
 )
 
@@ -44,6 +46,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
+	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), serviceauth.CredentialFromEnvironment())
+	if err != nil {
+		log.Fatal("credential authority configuration is invalid: ", err)
+	}
+	governance, err := repository.InstallProductionGovernance(authorizer)
+	if err != nil {
+		log.Fatal("credential governance configuration is invalid: ", err)
+	}
 	providerURLs, err := token.NewProviderURLPolicy(cfg.Environment, strings.Split(os.Getenv("TOKEN_PROVIDER_ALLOWED_HOSTS"), ","))
 	if err != nil {
 		log.Fatal(err)
@@ -73,7 +83,14 @@ func main() {
 			}
 		}
 	}()
-	if err := httpserver.RunWithApplication("token-credential-portal", compatibility.Wrap(service.Handler()), repository.Ping); err != nil {
+	ready := func(ctx context.Context) error {
+		if err := repository.Ping(ctx); err != nil {
+			return err
+		}
+		_, err := governance.Snapshot(ctx)
+		return err
+	}
+	if err := httpserver.RunWithApplication("token-credential-portal", token.CredentialAuthorityDeadlineMiddleware(compatibility.Wrap(service.Handler())), ready); err != nil {
 		log.Fatal(err)
 	}
 }

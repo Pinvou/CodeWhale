@@ -53,6 +53,9 @@ func (r *PostgresRepository) WithTokenRouteActivationTransactionGuard(guard Toke
 func (r *PostgresRepository) recheckTokenRouteActivation(ctx context.Context, tx pgx.Tx) error {
 	selection, ok := ctx.Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
 	if !ok || !selection.transactional {
+		if r.routeActivationGuard != nil {
+			return ErrTokenRouteActivationChanged
+		}
 		return nil
 	}
 	if r.routeActivationGuard == nil {
@@ -61,9 +64,57 @@ func (r *PostgresRepository) recheckTokenRouteActivation(ctx context.Context, tx
 	return r.routeActivationGuard.LockAndCheckTokenRouteActivation(ctx, tx, selection.TokenCommandGovernanceActivation)
 }
 
+func (r *PostgresRepository) commitGovernedMutation(ctx context.Context, tx pgx.Tx) error {
+	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// selectConfigurationWorkloadActivation fences an existing internal
+// configuration effect without relabelling it as a human command. Pure
+// observations/health probes do not call this helper.
+func (r *PostgresRepository) selectConfigurationWorkloadActivation(ctx context.Context) (context.Context, error) {
+	if r.routeActivationGuard == nil {
+		return ctx, nil
+	}
+	if selection, ok := ctx.Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection); ok && selection.transactional {
+		if selection.State == "PRE_ACTIVATION" && selection.Epoch == 0 || selection.State == "ACTIVE" && selection.Epoch > 0 {
+			return ctx, nil
+		}
+		return ctx, ErrTokenRouteActivationChanged
+	}
+	reader, ok := r.routeActivationGuard.(TokenCommandGovernanceActivationReader)
+	if !ok {
+		return ctx, ErrTokenRouteActivationChanged
+	}
+	activation, err := reader.CurrentTokenCommandGovernanceActivation(ctx)
+	if err != nil || !(activation.State == "PRE_ACTIVATION" && activation.Epoch == 0 || activation.State == "ACTIVE" && activation.Epoch > 0) {
+		return ctx, ErrTokenRouteActivationChanged
+	}
+	return context.WithValue(ctx, tokenRouteActivationContextKey{}, tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: true}), nil
+}
+
 func (s *Service) WithTokenCommandGovernanceActivation(reader TokenCommandGovernanceActivationReader) *Service {
 	s.commandGovernanceActivation = reader
 	return s
+}
+
+func (s *Service) internalTokenGovernanceActivation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	reader, ok := s.commandGovernanceActivation.(interface {
+		Snapshot(context.Context) (TokenGovernanceSnapshot, error)
+	})
+	if !ok {
+		writeTokenCommandGovernanceInactiveHTTP(w, r)
+		return
+	}
+	snapshot, err := reader.Snapshot(r.Context())
+	if err != nil {
+		writeTokenCommandGovernanceInactiveHTTP(w, r)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Service) requireNewTokenCommandGovernanceActive() gin.HandlerFunc {
@@ -74,6 +125,25 @@ func (s *Service) requireNewTokenCommandGovernanceActive() gin.HandlerFunc {
 		}
 		activation, err := s.commandGovernanceActivation.CurrentTokenCommandGovernanceActivation(ctx.Request.Context())
 		if err != nil || activation.State != "ACTIVE" || activation.Epoch < 1 {
+			writeTokenCommandGovernanceInactive(ctx)
+			return
+		}
+		selectTokenRouteActivation(ctx, activation, true)
+		ctx.Next()
+	}
+}
+
+// Result recovery accepts a known persistent state, including SAFE. It never
+// turns a read into an ACTIVE write selection or relaxes actor authorization.
+func (s *Service) requireKnownTokenCommandGovernance() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		if s.commandGovernanceActivation == nil {
+			writeTokenCommandGovernanceInactive(ctx)
+			return
+		}
+		activation, err := s.commandGovernanceActivation.CurrentTokenCommandGovernanceActivation(ctx.Request.Context())
+		known := (activation.State == "PRE_ACTIVATION" && activation.Epoch == 0) || ((activation.State == "ACTIVE" || activation.State == "SAFE_ROLLBACK") && activation.Epoch > 0)
+		if err != nil || !known {
 			writeTokenCommandGovernanceInactive(ctx)
 			return
 		}
@@ -133,6 +203,7 @@ func (s *Service) selectLegacyTokenDirect(classes ...legacyTokenDirectClass) gin
 			return
 		}
 		if activation.State == "PRE_ACTIVATION" && activation.Epoch == 0 {
+			selectTokenRouteActivation(ctx, activation, true)
 			ctx.Next()
 			return
 		}

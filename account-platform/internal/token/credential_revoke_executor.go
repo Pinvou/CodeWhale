@@ -129,6 +129,9 @@ func (e *PostgresApprovedCredentialExecutor) ExecuteApprovedCredentialRevoke(ctx
 	if blockers || !sameCredentialRevokeCritical(expected, current) {
 		return TokenCommandResult{}, ErrCatalogVersionConflict
 	}
+	if err = e.repository.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenCommandResult{}, err
+	}
 	now := e.repository.now().UTC()
 	mutation, err := tx.Exec(ctx, `UPDATE provider_credentials SET status='REVOKED',revoked_at=$3,revoked_by=$6,revocation_reason=(SELECT reason FROM token_command_results WHERE command_reference=$7) WHERE id=$1 AND token_account_id=$2 AND version=$4 AND status=$5`, command.CredentialID, command.TokenAccountID, now, command.CredentialVersion, expected.CredentialStatus, actorID, reference)
 	if err != nil || mutation.RowsAffected() != 1 {
@@ -151,6 +154,9 @@ func (e *PostgresApprovedCredentialExecutor) ExecuteApprovedCredentialRevoke(ctx
 	result, _ := json.Marshal(map[string]any{"token_account_id": command.TokenAccountID, "token_account_version": command.ExpectedAccountVersion + 1, "credential_id": command.CredentialID, "credential_version": command.CredentialVersion, "status": "REVOKED"})
 	completed, err := completeTokenCommandTx(ctx, tx, reference, "SUCCEEDED", after, result, "")
 	if err != nil {
+		return TokenCommandResult{}, err
+	}
+	if err = e.repository.recheckTokenRouteActivation(ctx, tx); err != nil {
 		return TokenCommandResult{}, err
 	}
 	return completed, tx.Commit(ctx)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,16 @@ import (
 type testTokenGovernanceActivationReader struct {
 	activation TokenCommandGovernanceActivation
 	err        error
+}
+
+// Domain fixtures use the real entry middleware to select their explicit
+// activation epoch. JWT transport and persistent activation transitions have
+// separate integration gates; this helper does not simulate either boundary.
+func approvedCommandFixtureHandler(service *Service, path string, execute http.HandlerFunc) http.Handler {
+	service.WithTokenCommandGovernanceActivation(testTokenGovernanceActivationReader{activation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}})
+	router := gin.New()
+	router.POST(path, service.requireNewTokenCommandGovernanceActive(), func(c *gin.Context) { execute(c.Writer, c.Request) })
+	return httpserver.CorrelationHandler(router)
 }
 
 type testApprovedTokenExecutor struct{}
@@ -172,7 +183,7 @@ func TestApprovedCredentialRevokeRejectsNonEmptyFinancialSnapshotBeforePersisten
 	} {
 		t.Run(name, func(t *testing.T) {
 			executor := &countingApprovedTokenExecutor{}
-			body := approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 3, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_CREDENTIAL_REVOKE:" + fingerprint, CriticalResourceVersions: expected, FinancialSnapshot: financial, Envelope: envelope}
+			body := approvedTokenCommandBody{ActivationEpoch: 1, ApprovalRequestID: approvalID, RequesterUserID: actorID, AuthorizationVersion: 3, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_CREDENTIAL_REVOKE:" + fingerprint, CriticalResourceVersions: expected, FinancialSnapshot: financial, Envelope: envelope}
 			raw, err := json.Marshal(body)
 			if err != nil {
 				t.Fatal(err)
@@ -183,7 +194,8 @@ func TestApprovedCredentialRevokeRejectsNonEmptyFinancialSnapshotBeforePersisten
 			}
 			request := httptest.NewRequest(http.MethodPost, "/internal/v1/commands/credential-revoke/execute", strings.NewReader(string(raw))).WithContext(ctx)
 			response := httptest.NewRecorder()
-			(&Service{approvedCommandExecutor: executor}).executeApprovedCredentialRevoke(response, request)
+			service := &Service{approvedCommandExecutor: executor}
+			approvedCommandFixtureHandler(service, request.URL.Path, service.executeApprovedCredentialRevoke).ServeHTTP(response, request)
 			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "INVALID_APPROVED_COMMAND") || executor.prechecks != 0 {
 				t.Fatalf("status=%d prechecks=%d body=%s", response.Code, executor.prechecks, response.Body.String())
 			}
@@ -335,7 +347,7 @@ func TestApprovedTokenExecutorRejectsCrossDomainIdentityAndRequiresStableExecuti
 	approvalID := uuid.New()
 	fingerprint := strings.Repeat("a", 64)
 	envelope := TokenCommandEnvelope{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", Reason: "apply approved model lifecycle transition", TargetResourceType: "MODEL", TargetResourceID: uuid.NewString(), ExpectedVersions: json.RawMessage(`{}`), PrecheckFingerprint: fingerprint, Command: json.RawMessage(`{}`)}
-	body := approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: uuid.New(), AuthorizationVersion: 1, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_LIFECYCLE_CHANGE:" + fingerprint, Envelope: envelope, CriticalResourceVersions: json.RawMessage(`{}`), FinancialSnapshot: json.RawMessage(`{}`)}
+	body := approvedTokenCommandBody{ActivationEpoch: 1, ApprovalRequestID: approvalID, RequesterUserID: uuid.New(), AuthorizationVersion: 1, CommandFingerprint: fingerprint, ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_MODEL_LIFECYCLE_CHANGE:" + fingerprint, Envelope: envelope, CriticalResourceVersions: json.RawMessage(`{}`), FinancialSnapshot: json.RawMessage(`{}`)}
 	raw, _ := json.Marshal(body)
 	for _, scenario := range []struct {
 		name, service string
@@ -344,6 +356,8 @@ func TestApprovedTokenExecutorRejectsCrossDomainIdentityAndRequiresStableExecuti
 	}{
 		{name: "billing executor cannot impersonate token", service: "billing-command-executor", want: http.StatusForbidden},
 		{name: "token executor wrong execution key", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.ExecutionIdempotencyKey = "approval:wrong" }, want: http.StatusBadRequest},
+		{name: "missing activation epoch", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.ActivationEpoch = 0 }, want: http.StatusBadRequest},
+		{name: "different activation epoch", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.ActivationEpoch = 3 }, want: http.StatusConflict},
 		{name: "token executor accepted before repository lookup", service: "token-command-executor", want: http.StatusServiceUnavailable},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -360,7 +374,8 @@ func TestApprovedTokenExecutorRejectsCrossDomainIdentityAndRequiresStableExecuti
 			}
 			request := httptest.NewRequest(http.MethodPost, "/internal/v1/commands/model-lifecycle/execute", strings.NewReader(string(raw))).WithContext(ctx)
 			response := httptest.NewRecorder()
-			(&Service{approvedCommandExecutor: testApprovedTokenExecutor{}}).executeApprovedModelLifecycle(response, request)
+			service := &Service{approvedCommandExecutor: testApprovedTokenExecutor{}}
+			approvedCommandFixtureHandler(service, request.URL.Path, service.executeApprovedModelLifecycle).ServeHTTP(response, request)
 			if response.Code != scenario.want {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}

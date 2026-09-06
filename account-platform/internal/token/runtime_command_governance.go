@@ -67,6 +67,9 @@ func (r *PostgresRepository) ExecuteRuntimeTokenCommand(ctx context.Context, inp
 	if canonical.PrecheckFingerprint != precheckFingerprint || !tokenCommandExpectedVersionsMatch(canonical.ExpectedVersions, authoritativeBefore) {
 		return TokenCommandResult{}, false, ErrCatalogVersionConflict
 	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return TokenCommandResult{}, false, err
+	}
 	reference := uuid.Must(uuid.NewV7())
 	result, err := tx.Exec(ctx, `INSERT INTO token_command_results(command_reference,command_type,policy_version,actor_user_id,actor_permission,authorization_version,idempotency_key_digest,idempotency_fingerprint,request_digest,target_resource_type,target_resource_id,reason,expected_versions,precheck_fingerprint,status,before_state,audit_request_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'PENDING',$15,$16) ON CONFLICT(actor_user_id,command_type,idempotency_key_digest) DO NOTHING`, reference, canonical.CommandType, policy.PolicyVersion, input.ActorUserID, input.ActorPermission, input.AuthorizationVersion, keyDigest, fingerprint, requestDigest, canonical.TargetResourceType, canonical.TargetResourceID, canonical.Reason, canonical.ExpectedVersions, canonical.PrecheckFingerprint, authoritativeBefore, input.AuditRequestID)
 	if err != nil {
@@ -93,6 +96,9 @@ func (r *PostgresRepository) ExecuteRuntimeTokenCommand(ctx context.Context, inp
 	}
 	item, err := completeRuntimeTokenCommandTx(ctx, tx, input.tokenCommandBegin, canonical, reference, fingerprint, authoritativeBefore, after, redacted)
 	if err != nil {
+		return TokenCommandResult{}, false, err
+	}
+	if err = r.recheckTokenRouteActivation(ctx, tx); err != nil {
 		return TokenCommandResult{}, false, err
 	}
 	return item, true, tx.Commit(ctx)

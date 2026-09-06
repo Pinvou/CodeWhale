@@ -1097,7 +1097,7 @@ components:
     ApprovalExecutionLease:
       type: object
       additionalProperties: false
-      required: [approval_request_id, command_type, policy_version, command_fingerprint, normalized_command, target_resource_type, target_resource_id, critical_resource_versions, financial_snapshot, requester_user_id, approver_user_id, decision_reason, execution_idempotency_key, executor_identity, status]
+      required: [approval_request_id, command_type, policy_version, command_fingerprint, normalized_command, target_resource_type, target_resource_id, critical_resource_versions, financial_snapshot, requester_user_id, requester_authorization_version, requester_reason, first_claim, approver_user_id, decision_reason, execution_idempotency_key, executor_identity, status]
       properties:
         approval_request_id: { type: string, format: uuid }
         command_type: { type: string, minLength: 1, maxLength: 80 }
@@ -1109,6 +1109,9 @@ components:
         critical_resource_versions: { type: object, additionalProperties: true }
         financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshotOrGeneric" }
         requester_user_id: { type: string, format: uuid }
+        requester_authorization_version: { type: integer, format: int64, minimum: 1, description: Frozen original requester authorization version }
+        requester_reason: { type: string, description: Frozen original request reason; never synthesized by the executor }
+        first_claim: { type: boolean, description: True only when this call created the durable execution record. Replays and failed execution reclaims are false; unknown outcomes permit only original-result queries. }
         approver_user_id: { type: string, format: uuid }
         decision_reason: { type: string }
         execution_idempotency_key: { type: string, minLength: 1, maxLength: 512 }

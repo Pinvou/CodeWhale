@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 )
@@ -338,7 +339,7 @@ func newProtocolFormulaIntegrationHandler(t *testing.T, repository Repository, b
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: subjectID.String(), SessionID: "integration-session", AuthenticatedAt: time.Now().UTC()}, nil
 	}
-	return service.Handler("", verify)
+	return httpserver.CorrelationHandler(service.Handler("", verify))
 }
 
 func performProtocolFormulaCommand(handler http.Handler, method, path string, body any, idempotencyKey string, timeout time.Duration) *httptest.ResponseRecorder {

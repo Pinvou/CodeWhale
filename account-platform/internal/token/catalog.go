@@ -340,11 +340,14 @@ func (r *PostgresRepository) SaveCatalogDraft(ctx context.Context, modelID uuid.
 		return CatalogDraft{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return CatalogDraft{}, err
+	}
 	draft, err := saveCatalogDraftEffect(ctx, tx, modelID, input, actor, r.now())
 	if err != nil {
 		return CatalogDraft{}, err
 	}
-	return draft, tx.Commit(ctx)
+	return draft, r.commitGovernedMutation(ctx, tx)
 }
 
 func strPtr(value string) *string { return &value }
@@ -424,6 +427,9 @@ func (r *PostgresRepository) PublishCatalogDraft(ctx context.Context, modelID uu
 		return CatalogModel{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return CatalogModel{}, err
+	}
 	if err := lockCatalogPublication(ctx, tx); err != nil {
 		return CatalogModel{}, err
 	}
@@ -441,7 +447,7 @@ func (r *PostgresRepository) PublishCatalogDraft(ctx context.Context, modelID uu
 		if scanErr != nil {
 			return CatalogModel{}, scanErr
 		}
-		return item, tx.Commit(ctx)
+		return item, r.commitGovernedMutation(ctx, tx)
 	}
 	item, err := publishCatalogDraftEffect(ctx, tx, modelID, expectedCatalog, expectedDraft, reason, actor, capabilities, now)
 	if err != nil {
@@ -450,7 +456,7 @@ func (r *PostgresRepository) PublishCatalogDraft(ctx context.Context, modelID uu
 	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2,result_model_id=$3 WHERE idempotency_key=$1`, key, item.CatalogVersion, modelID); err != nil {
 		return CatalogModel{}, err
 	}
-	return item, tx.Commit(ctx)
+	return item, r.commitGovernedMutation(ctx, tx)
 }
 
 // publishCatalogDraftEffect is the single transactional domain effect shared
@@ -545,6 +551,9 @@ func (r *PostgresRepository) TransitionCatalogModel(ctx context.Context, modelID
 		return CatalogModel{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return CatalogModel{}, err
+	}
 	if err := lockCatalogPublication(ctx, tx); err != nil {
 		return CatalogModel{}, err
 	}
@@ -562,7 +571,7 @@ func (r *PostgresRepository) TransitionCatalogModel(ctx context.Context, modelID
 		if scanErr != nil {
 			return CatalogModel{}, scanErr
 		}
-		return item, tx.Commit(ctx)
+		return item, r.commitGovernedMutation(ctx, tx)
 	}
 	current, err := currentCatalogVersion(ctx, tx)
 	if err != nil || current != input.ExpectedCatalogVersion {
@@ -620,7 +629,7 @@ SELECT $1,model_id,display_name,normalized_name,description,aliases,$2,model_cap
 	if err != nil {
 		return CatalogModel{}, err
 	}
-	return result, tx.Commit(ctx)
+	return result, r.commitGovernedMutation(ctx, tx)
 }
 
 func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion, expectedVersion int64, key, reason string, actor uuid.UUID, capabilities []GatewayProtocolCapability) (int64, error) {
@@ -632,6 +641,9 @@ func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion,
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := r.recheckTokenRouteActivation(ctx, tx); err != nil {
+		return 0, err
+	}
 	if err := lockCatalogPublication(ctx, tx); err != nil {
 		return 0, err
 	}
@@ -642,7 +654,7 @@ func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion,
 		return 0, err
 	}
 	if !claimed {
-		return replayedVersion, tx.Commit(ctx)
+		return replayedVersion, r.commitGovernedMutation(ctx, tx)
 	}
 	version, err := rollbackCatalogEffect(ctx, tx, sourceVersion, expectedVersion, reason, actor, capabilities, now)
 	if err != nil {
@@ -651,7 +663,7 @@ func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion,
 	if _, err := tx.Exec(ctx, `UPDATE model_catalog_commands SET result_catalog_version=$2 WHERE idempotency_key=$1`, key, version); err != nil {
 		return 0, err
 	}
-	return version, tx.Commit(ctx)
+	return version, r.commitGovernedMutation(ctx, tx)
 }
 
 // rollbackCatalogEffect applies a forward-only catalog rollback inside the

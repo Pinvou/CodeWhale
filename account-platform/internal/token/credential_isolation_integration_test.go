@@ -81,7 +81,7 @@ func TestCredentialIsolationPostgresIntegration(t *testing.T) {
 	if _, err = repository.pool.Exec(ctx, `
 INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Credential integration','ACTIVE',$4,$5,$5,'PLATFORM');
 INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5);
-INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status,activated_at) VALUES($6,$1,'NEW_API','https://provider.example','old'::bytea,'old-key','old-fingerprint',1,'ACTIVE',ARRAY['model-a'],$5,$4,$5,'VALID',$5);`, accountID, ownerID, walletID, actor, now, activeID); err != nil {
+INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status,activated_at) VALUES($6,$1,'NEW_API','https://provider.example','old'::bytea,'old-key','old-fingerprint',1,'ACTIVE',ARRAY['model-a'],$5,$4,$5,'VALID',$5);`, pgx.QueryExecModeSimpleProtocol, accountID, ownerID, walletID, actor, now, activeID); err != nil {
 		t.Fatal(err)
 	}
 	safeDetail, err := repository.AdminTokenAccountSafeDetail(ctx, accountID)
@@ -166,7 +166,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	// change is rejected at the next locked transition and cannot create a
 	// credential, even if the Portal-side revoke response is lost.
 	changedAccount, changedWallet := uuid.New(), uuid.New()
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Changed authority','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, changedAccount, ownerID, changedWallet, actor, now); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Changed authority','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, pgx.QueryExecModeSimpleProtocol, changedAccount, ownerID, changedWallet, actor, now); err != nil {
 		t.Fatal(err)
 	}
 	changedLaunch, err := repository.CreateCredentialLaunch(ctx, changedAccount, actor, CredentialLaunchRequest{Action: "ENROLL", ExpectedAccountVersion: 1, Slot: "PRIMARY", Reason: "freeze authorization before isolated credential intake"}, "changed-authority-launch-key", "changed-authority-request")
@@ -189,7 +189,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	}
 	currentGateEpoch.Store(11)
 	finalAccount, finalWallet := uuid.New(), uuid.New()
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Final authority race','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, finalAccount, ownerID, finalWallet, actor, now); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Final authority race','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, pgx.QueryExecModeSimpleProtocol, finalAccount, ownerID, finalWallet, actor, now); err != nil {
 		t.Fatal(err)
 	}
 	finalLaunch, err := repository.CreateCredentialLaunch(ctx, finalAccount, actor, CredentialLaunchRequest{Action: "ENROLL", ExpectedAccountVersion: 1, Slot: "PRIMARY", Reason: "detect authorization drift before final credential commit"}, "final-authority-launch-key", "final-authority-request")
@@ -212,10 +212,21 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		_, completionErr := repository.CompleteCredentialSession(ctx, finalSession.ID, "https://credentials-uat.account.pinvou.com", strings.Repeat("L", 64), strings.Repeat("C", 64), "NEW_API", "https://provider.example", []string{"model-a"}, []byte("must-not-be-stored"), finalValidator, policy)
 		finalError <- completionErr
 	}()
-	<-finalValidator.entered
+	select {
+	case <-finalValidator.entered:
+	case completionErr := <-finalError:
+		t.Fatalf("completion returned before provider validation: %v", completionErr)
+	case <-ctx.Done():
+		t.Fatalf("waiting for completion validation: %v", ctx.Err())
+	}
 	currentAuthorizationVersion.Store(8)
 	close(finalValidator.release)
-	if err = <-finalError; !errors.Is(err, ErrTokenRouteActivationChanged) {
+	select {
+	case err = <-finalError:
+	case <-ctx.Done():
+		t.Fatalf("waiting for completion result: %v", ctx.Err())
+	}
+	if !errors.Is(err, ErrTokenRouteActivationChanged) {
 		t.Fatalf("authorization drift during validation reached final credential commit: %v", err)
 	}
 	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM provider_credentials WHERE token_account_id=$1`, finalAccount).Scan(&changedCredentialCount); err != nil || changedCredentialCount != 0 {
@@ -254,15 +265,27 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 		validationResults <- item
 		validationErrors <- validationErr
 	}()
-	<-validator.entered
+	select {
+	case <-validator.entered:
+	case validationErr := <-validationErrors:
+		t.Fatalf("credential probe returned before provider validation: %v", validationErr)
+	case <-ctx.Done():
+		t.Fatalf("waiting for credential probe: %v", ctx.Err())
+	}
 	concurrent.Add(1)
+	secondValidationFinished := make(chan struct{})
 	go func() {
 		defer concurrent.Done()
+		defer close(secondValidationFinished)
 		item, validationErr := validationService.executeGovernedCredentialValidation(ctx, repository, commandReference, actor, envelope)
 		validationResults <- item
 		validationErrors <- validationErr
 	}()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-secondValidationFinished:
+	case <-ctx.Done():
+		t.Fatalf("waiting for duplicate credential claim: %v", ctx.Err())
+	}
 	close(validator.release)
 	concurrent.Wait()
 	close(validationResults)
@@ -275,20 +298,22 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 			t.Fatalf("concurrent validation error: %v", validationErr)
 		}
 	}
+	statuses := map[string]int{}
 	for item := range validationResults {
-		if item.CommandReference != commandReference || item.Status != "SUCCEEDED" {
+		if item.CommandReference != commandReference || (item.Status != "SUCCEEDED" && item.Status != "PENDING") {
 			t.Fatalf("concurrent validation result=%#v", item)
 		}
+		statuses[item.Status]++
 	}
-	if validator.calls.Load() != 1 || claimedCount != 1 {
-		t.Fatalf("credential validation probes=%d claimed=%d", validator.calls.Load(), claimedCount)
+	if validator.calls.Load() != 1 || claimedCount != 1 || statuses["SUCCEEDED"] != 1 || statuses["PENDING"] != 1 {
+		t.Fatalf("credential validation probes=%d claimed=%d statuses=%v", validator.calls.Load(), claimedCount, statuses)
 	}
 	// If the process loses the provider response after claiming the durable
 	// lease, the same command reference becomes a stable fail-closed terminal
 	// result after the lease. It must never issue a second provider probe.
 	crashedReference := uuid.Must(uuid.NewV7())
 	claimTime := now.Add(-time.Minute)
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_command_results(command_reference,command_type,policy_version,actor_user_id,actor_permission,authorization_version,idempotency_key_digest,idempotency_fingerprint,request_digest,target_resource_type,target_resource_id,reason,expected_versions,precheck_fingerprint,status,before_state,audit_request_id,credential_probe_claimed_at,credential_probe_lease_until) VALUES($1,'TOKEN_CREDENTIAL_VALIDATE',2,$2,'platform.tokens.credentials.validate',3,$3,$4,$5,'PROVIDER_CREDENTIAL',$6,'recover a lost validation response',$7,$8,'PENDING','{}','credential-validation-crash',$9,$9+interval '30 seconds')`, crashedReference, actor, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), result.CredentialID.String(), []byte(`{"expected_account_version":2,"credential_version":2}`), strings.Repeat("d", 64), claimTime); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_command_results(command_reference,command_type,policy_version,actor_user_id,actor_permission,authorization_version,idempotency_key_digest,idempotency_fingerprint,request_digest,target_resource_type,target_resource_id,reason,expected_versions,precheck_fingerprint,status,before_state,audit_request_id,credential_probe_claimed_at,credential_probe_lease_until) VALUES($1,'TOKEN_CREDENTIAL_VALIDATE',2,$2,'platform.tokens.credentials.validate',3,$3,$4,$5,'PROVIDER_CREDENTIAL',$6,'recover a lost validation response',$7,$8,'PENDING','{}','credential-validation-crash',$9::timestamptz,$9::timestamptz+interval '30 seconds')`, crashedReference, actor, strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64), result.CredentialID.String(), []byte(`{"expected_account_version":2,"credential_version":2}`), strings.Repeat("d", 64), claimTime); err != nil {
 		t.Fatal(err)
 	}
 	crashValidator := &countingCredentialValidator{}
@@ -333,7 +358,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	}
 	for name, financial := range map[string]json.RawMessage{"missing": nil, "null": json.RawMessage(`null`), "array": json.RawMessage(`[]`), "extra": json.RawMessage(`{"unexpected":true}`)} {
 		t.Run("revoke financial "+name, func(t *testing.T) {
-			body := approvedTokenCommandBody{ApprovalRequestID: approvalID, RequesterUserID: actor, AuthorizationVersion: 3, CommandFingerprint: strings.Repeat("8", 64), ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_CREDENTIAL_REVOKE:" + strings.Repeat("8", 64), CriticalResourceVersions: expectedJSON, FinancialSnapshot: financial, Envelope: revokeEnvelope}
+			body := approvedTokenCommandBody{ActivationEpoch: 1, ApprovalRequestID: approvalID, RequesterUserID: actor, AuthorizationVersion: 3, CommandFingerprint: strings.Repeat("8", 64), ExecutionIdempotencyKey: "approval:" + approvalID.String() + ":TOKEN_CREDENTIAL_REVOKE:" + strings.Repeat("8", 64), CriticalResourceVersions: expectedJSON, FinancialSnapshot: financial, Envelope: revokeEnvelope}
 			raw, marshalErr := json.Marshal(body)
 			if marshalErr != nil {
 				t.Fatal(marshalErr)
@@ -344,7 +369,8 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 			}
 			request := httptest.NewRequest(http.MethodPost, "/internal/v1/commands/credential-revoke/execute", bytes.NewReader(raw)).WithContext(executorContext)
 			response := httptest.NewRecorder()
-			(&Service{repository: repository, approvedCommandExecutor: executor}).executeApprovedCredentialRevoke(response, request)
+			service := &Service{repository: repository, approvedCommandExecutor: executor}
+			approvedCommandFixtureHandler(service, request.URL.Path, service.executeApprovedCredentialRevoke).ServeHTTP(response, request)
 			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "INVALID_APPROVED_COMMAND") {
 				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 			}
@@ -361,19 +387,47 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if _, err = executor.PrecheckApprovedTokenCommand(ctx, "TOKEN_CREDENTIAL_REVOKE", revokeEnvelope); err != nil {
 		t.Fatal(err)
 	}
-	revoked, err := executor.ExecuteApprovedCredentialRevoke(ctx, revokeCommand.CommandReference, actor, revokeEnvelope)
+	revokeContext := context.WithValue(ctx, tokenRouteActivationContextKey{}, tokenRouteActivationSelection{TokenCommandGovernanceActivation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}, transactional: true})
+	for _, rejectCall := range []int{1, 2} {
+		calls := 0
+		repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(context.Context, pgx.Tx, TokenCommandGovernanceActivation) error {
+			calls++
+			if calls == rejectCall {
+				return ErrTokenRouteActivationChanged
+			}
+			return nil
+		}))
+		if _, err := executor.ExecuteApprovedCredentialRevoke(revokeContext, revokeCommand.CommandReference, actor, revokeEnvelope); !errors.Is(err, ErrTokenRouteActivationChanged) || calls != rejectCall {
+			t.Fatalf("revoke activation guard %d calls=%d err=%v", rejectCall, calls, err)
+		}
+		var credentialStatus, commandStatus string
+		var accountVersion, effects int64
+		if err := repository.pool.QueryRow(ctx, `SELECT credential.status,account.management_version,result.status,(SELECT count(*) FROM token_audit_logs WHERE action='TOKEN_CREDENTIAL_REVOKED' AND resource_id=$2)+(SELECT count(*) FROM token_audit_logs WHERE action='TOKEN_CREDENTIAL_REVOKE' AND summary->>'command_reference'=($3::uuid)::text)+(SELECT count(*) FROM outbox_events WHERE event_type='token.management-command.executed.v1' AND payload->>'command_reference'=($3::uuid)::text) FROM provider_credentials credential JOIN token_accounts account ON account.id=credential.token_account_id JOIN token_command_results result ON result.command_reference=$3 WHERE account.id=$1 AND credential.id=$2`, accountID, *result.CredentialID, revokeCommand.CommandReference).Scan(&credentialStatus, &accountVersion, &commandStatus, &effects); err != nil || credentialStatus != "ACTIVE" || accountVersion != 2 || commandStatus != "PENDING" || effects != 0 {
+			t.Fatalf("revoke rejected guard changed facts: credential=%s version=%d command=%s effects=%d err=%v", credentialStatus, accountVersion, commandStatus, effects, err)
+		}
+	}
+	repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(context.Context, pgx.Tx, TokenCommandGovernanceActivation) error { return nil }))
+	revoked, err := executor.ExecuteApprovedCredentialRevoke(revokeContext, revokeCommand.CommandReference, actor, revokeEnvelope)
 	if err != nil || revoked.Status != "SUCCEEDED" {
 		t.Fatalf("credential revoke result=%#v err=%v", revoked, err)
 	}
 	var revokedStatus string
 	var revokedAccountVersion int64
-	var revokeAuditCount, revokeOutboxCount int
-	if err = repository.pool.QueryRow(ctx, `SELECT credential.status,account.management_version,(SELECT count(*) FROM token_audit_logs WHERE action='TOKEN_CREDENTIAL_REVOKED' AND resource_id=$2),(SELECT count(*) FROM outbox_events WHERE event_type='token.management-command.executed.v1' AND aggregate_id=$2::text) FROM provider_credentials credential JOIN token_accounts account ON account.id=credential.token_account_id WHERE credential.id=$2 AND account.id=$1`, accountID, *result.CredentialID).Scan(&revokedStatus, &revokedAccountVersion, &revokeAuditCount, &revokeOutboxCount); err != nil {
+	var revokeAuditCount, revokeGenericAuditCount, revokeOutboxCount int
+	if err = repository.pool.QueryRow(ctx, `SELECT credential.status,account.management_version,(SELECT count(*) FROM token_audit_logs WHERE action='TOKEN_CREDENTIAL_REVOKED' AND resource_id=$2),(SELECT count(*) FROM token_audit_logs WHERE action='TOKEN_CREDENTIAL_REVOKE' AND summary->>'command_reference'=($3::uuid)::text),(SELECT count(*) FROM outbox_events WHERE event_type='token.management-command.executed.v1' AND payload->>'command_reference'=($3::uuid)::text) FROM provider_credentials credential JOIN token_accounts account ON account.id=credential.token_account_id WHERE credential.id=$2 AND account.id=$1`, accountID, *result.CredentialID, revokeCommand.CommandReference).Scan(&revokedStatus, &revokedAccountVersion, &revokeAuditCount, &revokeGenericAuditCount, &revokeOutboxCount); err != nil {
 		t.Fatal(err)
 	}
-	if revokedStatus != "REVOKED" || revokedAccountVersion != 3 || revokeAuditCount != 1 || revokeOutboxCount != 1 {
-		t.Fatalf("revoke status=%s account=%d audit=%d outbox=%d", revokedStatus, revokedAccountVersion, revokeAuditCount, revokeOutboxCount)
+	if revokedStatus != "REVOKED" || revokedAccountVersion != 3 || revokeAuditCount != 1 || revokeGenericAuditCount != 1 || revokeOutboxCount != 1 {
+		t.Fatalf("revoke status=%s account=%d audit=%d genericAudit=%d outbox=%d", revokedStatus, revokedAccountVersion, revokeAuditCount, revokeGenericAuditCount, revokeOutboxCount)
 	}
+	repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(context.Context, pgx.Tx, TokenCommandGovernanceActivation) error {
+		t.Error("terminal revoke replay must remain read-only without entering the write guard")
+		return ErrTokenRouteActivationChanged
+	}))
+	if replayed, err := executor.ExecuteApprovedCredentialRevoke(revokeContext, revokeCommand.CommandReference, actor, revokeEnvelope); err != nil || replayed.CommandReference != revoked.CommandReference || replayed.Status != "SUCCEEDED" {
+		t.Fatalf("terminal revoke replay=%+v err=%v", replayed, err)
+	}
+	repository.WithTokenRouteActivationTransactionGuard(nil)
 	var rotationStageCount int
 	if err = repository.pool.QueryRow(ctx, `SELECT count(*) FROM token_audit_logs WHERE resource_id IN ($1,$2) AND action IN ('TOKEN_CREDENTIAL_CANDIDATE_CREATED','TOKEN_CREDENTIAL_RETIRING','TOKEN_CREDENTIAL_ACTIVATED','TOKEN_CREDENTIAL_RETIRED')`, activeID, *result.CredentialID).Scan(&rotationStageCount); err != nil || rotationStageCount != 4 {
 		t.Fatalf("rotation stage audit count=%d err=%v", rotationStageCount, err)
@@ -406,7 +460,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	}
 
 	secondAccount, secondWallet := uuid.New(), uuid.New()
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Blocked window','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, secondAccount, ownerID, secondWallet, actor, now); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Blocked window','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, pgx.QueryExecModeSimpleProtocol, secondAccount, ownerID, secondWallet, actor, now); err != nil {
 		t.Fatal(err)
 	}
 	blocked, err := repository.CreateCredentialLaunch(ctx, secondAccount, actor, CredentialLaunchRequest{Action: "ENROLL", ExpectedAccountVersion: 1, ExpectedCredentialVersion: 0, Slot: "PRIMARY", Reason: "test blocked credential window"}, "blocked-window-idempotency-key", "blocked-window-request")
@@ -434,7 +488,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	}
 
 	raceAccount, raceWallet := uuid.New(), uuid.New()
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Callback race','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, raceAccount, ownerID, raceWallet, actor, now); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Callback race','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, pgx.QueryExecModeSimpleProtocol, raceAccount, ownerID, raceWallet, actor, now); err != nil {
 		t.Fatal(err)
 	}
 	raceLaunch, err := repository.CreateCredentialLaunch(ctx, raceAccount, actor, CredentialLaunchRequest{Action: "ENROLL", ExpectedAccountVersion: 1, ExpectedCredentialVersion: 0, Slot: "PRIMARY", Reason: "test callback and Portal revoke serialization"}, "callback-race-idempotency", "callback-race-request")
@@ -456,7 +510,7 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	}
 
 	concurrentAccount, concurrentWallet := uuid.New(), uuid.New()
-	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Concurrent enroll','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, concurrentAccount, ownerID, concurrentWallet, actor, now); err != nil {
+	if _, err = repository.pool.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($1,'USER',$2,$3,'Concurrent enroll','ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO token_share_policies(token_account_id,scope,updated_at) VALUES($1,'OWNER_UNIT_ONLY',$5)`, pgx.QueryExecModeSimpleProtocol, concurrentAccount, ownerID, concurrentWallet, actor, now); err != nil {
 		t.Fatal(err)
 	}
 	prepareConcurrent := func(key, binding, state, nonce, verifier, csrf string) credentialIsolationSession {

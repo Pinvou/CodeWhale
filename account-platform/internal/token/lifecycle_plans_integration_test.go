@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/requestdeadline"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type lifecyclePricingStub struct{ observedAt time.Time }
@@ -39,6 +42,20 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	repository := newTokenQueryIntegrationRepository(t, ctx, databaseURL)
+	if err := repository.ConfigureAdminPagination(AdminPaginationConfig{Enabled: true, CursorHMACKey: bytes.Repeat([]byte{31}, 32)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SetAdminPaginationGate(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	activation := TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 1}
+	ctx = context.WithValue(ctx, tokenRouteActivationContextKey{}, tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: true})
+	repository.WithTokenRouteActivationTransactionGuard(tokenRouteActivationGuardFunc(func(_ context.Context, _ pgx.Tx, selected TokenCommandGovernanceActivation) error {
+		if selected != activation {
+			return ErrTokenRouteActivationChanged
+		}
+		return nil
+	}))
 	actor, otherActor, modelID, replacementID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC()
 	catalogVersion, draftModelID := seedLifecycleModels(t, ctx, repository, actor, modelID, replacementID, now)
@@ -82,7 +99,7 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	newCredentialID := uuid.New()
-	if _, err = repository.pool.Exec(ctx, `UPDATE provider_credentials SET status='RETIRED' WHERE id=$1; INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) SELECT $2,token_account_id,provider,base_url,ciphertext,key_id,$3,version+1,'ACTIVE',allowed_models,validated_at,created_by,transaction_timestamp(),validation_status FROM provider_credentials WHERE id=$1; UPDATE route_provisionings SET active_credential_id=$2,updated_at=transaction_timestamp() WHERE model_id=$4`, oldCredentialID, newCredentialID, strings.Repeat("e", 64), replacementID); err != nil {
+	if _, err = repository.pool.Exec(ctx, `UPDATE provider_credentials SET status='RETIRED' WHERE id=$1; INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) SELECT $2,token_account_id,provider,base_url,ciphertext,key_id,$3,version+1,'ACTIVE',allowed_models,validated_at,created_by,transaction_timestamp(),validation_status FROM provider_credentials WHERE id=$1; UPDATE route_provisionings SET active_credential_id=$2,updated_at=transaction_timestamp() WHERE model_id=$4`, pgx.QueryExecModeSimpleProtocol, oldCredentialID, newCredentialID, strings.Repeat("e", 64), replacementID); err != nil {
 		t.Fatal(err)
 	}
 	replacedImpact, err := repository.ModelLifecycleImpact(ctx, modelID, &replacementID)
@@ -102,8 +119,17 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	removed := base
 	removed.TargetLifecycle = "REMOVED"
 	removed.ExistingSessionCutoffAt = &removed.EffectiveAt
-	if _, _, err := repository.CreateLifecyclePlan(ctx, modelID, removed, actor, "lifecycle-plan-no-replacement"); !errors.Is(err, ErrModelUnavailable) {
+	// The normalizer identifies the missing replacement; the existing repository
+	// API deliberately collapses input-validation errors before opening a write.
+	beforeMissingReplacement := lifecyclePaginationDomainEvidence(t, ctx, repository)
+	if _, err := normalizeLifecyclePlanInput(modelID, removed); !errors.Is(err, ErrModelUnavailable) {
+		t.Fatalf("missing replacement normalization error=%v", err)
+	}
+	if _, _, err := repository.CreateLifecyclePlan(ctx, modelID, removed, actor, "lifecycle-plan-no-replacement"); !errors.Is(err, ErrTokenCommandInvalid) {
 		t.Fatalf("missing replacement error=%v", err)
+	}
+	if after := lifecyclePaginationDomainEvidence(t, ctx, repository); after != beforeMissingReplacement {
+		t.Fatal("missing replacement rejection mutated lifecycle/domain facts")
 	}
 
 	plan, created, err := repository.CreateLifecyclePlan(ctx, modelID, base, actor, "lifecycle-plan-create-0001")
@@ -181,7 +207,6 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 		t.Fatalf("catalog lifecycle=%q err=%v", lifecycle, err)
 	}
 
-	assertLifecycleExpiryAndLeaseRecovery(t, ctx, repository, actor, replacementID, *applied.ResultCatalogVersion, now)
 	publishDraft, err := repository.SaveCatalogDraft(ctx, draftModelID, CatalogDraftInput{ExpectedCatalogVersion: *applied.ResultCatalogVersion, ExpectedDraftVersion: 0, DisplayName: "lifecycle-model-c", Description: "scheduled publish", ProtocolCode: "CHAT", ProtocolVersion: 1, ContextLength: 4096, MaximumOutputTokens: 1024, SupportedModalities: []string{"TEXT"}, TokenizerVersion: "v1"}, actor)
 	if err != nil {
 		t.Fatalf("save publish draft=%+v err=%v", publishDraft, err)
@@ -193,11 +218,20 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	if publishResult.Status != "SUCCEEDED" || driftedPlan.Status != "SCHEDULED" || driftedPlan.GovernedCommandReference == nil || driftedPlan.ApprovalRequestID != nil {
 		t.Fatalf("scheduled publish plan=%+v result=%+v", driftedPlan, publishResult)
 	}
-	if _, err = repository.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET critical_resource_versions=jsonb_set(critical_resource_versions,'{request_fingerprint}',to_jsonb($2::text)) WHERE id=$1`, driftedPlan.ID, strings.Repeat("f", 64)); err == nil || !strings.Contains(err.Error(), "immutable after one freeze") {
+	beforeFrozenPublication := scheduledPublicationFacts(t, ctx, repository, false)
+	var snapshotError *pgconn.PgError
+	if _, err = repository.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET critical_resource_versions=jsonb_set(critical_resource_versions,'{request_fingerprint}',to_jsonb($2::text)) WHERE id=$1`, driftedPlan.ID, strings.Repeat("f", 64)); !errors.As(err, &snapshotError) || snapshotError.Code != "P0001" || snapshotError.Message != "scheduled model publication requires an exact frozen governed snapshot" {
 		t.Fatalf("scheduled publication snapshot replacement error=%v", err)
 	}
-	if _, err = repository.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET financial_snapshot='{"unexpected":true}'::jsonb WHERE id=$1`, driftedPlan.ID); err == nil || !strings.Contains(err.Error(), "exact frozen governed snapshot") {
+	if scheduledPublicationFacts(t, ctx, repository, false) != beforeFrozenPublication {
+		t.Fatal("rejected publication snapshot replacement mutated persisted facts")
+	}
+	snapshotError = nil
+	if _, err = repository.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET financial_snapshot='{"unexpected":true}'::jsonb WHERE id=$1`, driftedPlan.ID); !errors.As(err, &snapshotError) || snapshotError.Code != "P0001" || snapshotError.Message != "scheduled model publication requires an exact frozen governed snapshot" {
 		t.Fatalf("scheduled publication financial replacement error=%v", err)
+	}
+	if scheduledPublicationFacts(t, ctx, repository, false) != beforeFrozenPublication {
+		t.Fatal("rejected publication financial replacement mutated persisted facts")
 	}
 	if _, err = repository.SaveCatalogDraft(ctx, draftModelID, CatalogDraftInput{ExpectedCatalogVersion: *applied.ResultCatalogVersion, ExpectedDraftVersion: publishDraft.DraftVersion, DisplayName: "lifecycle-model-c", Description: "drift after schedule", ProtocolCode: "CHAT", ProtocolVersion: 1, ContextLength: 4096, MaximumOutputTokens: 1024, SupportedModalities: []string{"TEXT"}, TokenizerVersion: "v1"}, actor); err != nil {
 		t.Fatal(err)
@@ -285,6 +319,9 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	if err = repository.pool.QueryRow(ctx, `SELECT lifecycle_status,new_session_cutoff_at,continuation_cutoff_at FROM model_catalog_entries WHERE catalog_version=$1 AND model_id=$2`, *removedPlan.ResultCatalogVersion, modelID).Scan(&removedLifecycle, &newCutoff, &continuation); err != nil || removedLifecycle != "REMOVED" || !sameOptionalTime(newCutoff, removalDue.ExistingSessionCutoffAt) || !sameOptionalTime(continuation, removalDue.ExistingSessionCutoffAt) {
 		t.Fatalf("removed catalog lifecycle=%q new=%v continuation=%v frozen=%v err=%v", removedLifecycle, newCutoff, continuation, removalDue.ExistingSessionCutoffAt, err)
 	}
+	// Recovery intentionally leaves an EXECUTING lease. Run it after simulated
+	// future worker ticks so that those ticks cannot reclaim this separate plan.
+	assertLifecycleExpiryAndLeaseRecovery(t, ctx, repository, actor, replacementID, *removedPlan.ResultCatalogVersion, now)
 	assertLifecycleMigrationDownFailsClosed(t, ctx, repository)
 }
 
@@ -329,7 +366,7 @@ func newLifecyclePlanPermissionIntegrationHandler(t *testing.T, repository *Post
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: actor.String(), SessionID: session, AuthenticatedAt: time.Now().UTC()}, nil
 	}
-	return requestdeadline.TokenAdminMiddleware(service.Handler("", verify), time.Now)
+	return httpserver.CorrelationHandler(requestdeadline.TokenAdminMiddleware(service.Handler("", verify), time.Now))
 }
 
 func newGovernedPublishIntegrationHandler(t *testing.T, service *Service, actor uuid.UUID) http.Handler {
@@ -347,7 +384,7 @@ func newGovernedPublishIntegrationHandler(t *testing.T, service *Service, actor 
 	verify := func(context.Context, string) (identity.Principal, error) {
 		return identity.Principal{Issuer: "https://issuer.integration.example", Subject: actor.String(), SessionID: "scheduled-publish-session", AuthenticatedAt: time.Now().UTC()}, nil
 	}
-	return requestdeadline.TokenAdminMiddleware(service.Handler("", verify), time.Now)
+	return httpserver.CorrelationHandler(requestdeadline.TokenAdminMiddleware(service.Handler("", verify), time.Now))
 }
 
 func assertLifecyclePlanHTTP(t *testing.T, handler, manageOnlyHandler, revokedHandler http.Handler, repository *PostgresRepository, modelID uuid.UUID, catalogVersion int64, now time.Time) {
@@ -404,7 +441,7 @@ func assertLifecyclePlanHTTP(t *testing.T, handler, manageOnlyHandler, revokedHa
 	randomRequest.Header.Set("Idempotency-Key", "lifecycle-handler-random-plan")
 	randomResponse := httptest.NewRecorder()
 	manageOnlyHandler.ServeHTTP(randomResponse, randomRequest)
-	if randomResponse.Code != response.Code || randomResponse.Body.String() != wrongFamilyBody {
+	if randomResponse.Code != response.Code || lifecyclePermissionResponseFacts(t, randomResponse.Body.Bytes()) != lifecyclePermissionResponseFacts(t, []byte(wrongFamilyBody)) {
 		t.Fatalf("cancel existence oracle existing=%d/%s random=%d/%s", response.Code, wrongFamilyBody, randomResponse.Code, randomResponse.Body.String())
 	}
 	unchanged, err = repository.LifecyclePlan(context.Background(), modelID, created.ID)
@@ -451,7 +488,7 @@ func assertLifecycleCancelPermission(t *testing.T, handler http.Handler, reposit
 		randomRequest.Header.Set("Idempotency-Key", key+"-random")
 		randomResponse := httptest.NewRecorder()
 		handler.ServeHTTP(randomResponse, randomRequest)
-		if randomResponse.Code != response.Code || randomResponse.Body.String() != response.Body.String() {
+		if randomResponse.Code != response.Code || lifecyclePermissionResponseFacts(t, randomResponse.Body.Bytes()) != lifecyclePermissionResponseFacts(t, response.Body.Bytes()) {
 			t.Fatalf("cancel existence oracle target=%s existing=%d/%s random=%d/%s", plan.TargetLifecycle, response.Code, response.Body.String(), randomResponse.Code, randomResponse.Body.String())
 		}
 	}
@@ -462,6 +499,26 @@ func assertLifecycleCancelPermission(t *testing.T, handler http.Handler, reposit
 	if want == http.StatusOK && stored.Status != "CANCELLED" || want != http.StatusOK && stored.Status != plan.Status {
 		t.Fatalf("cancel target=%s result=%s wantHTTP=%d", plan.TargetLifecycle, stored.Status, want)
 	}
+}
+
+// Correlation middleware assigns each request its own ID. Compare every other
+// response field so random/existing resource errors cannot disclose existence.
+func lifecyclePermissionResponseFacts(t *testing.T, body []byte) string {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatal(err)
+	}
+	var requestID string
+	if err := json.Unmarshal(fields["request_id"], &requestID); err != nil || requestID == "" {
+		t.Fatalf("permission response lacks a correlation ID: %s", body)
+	}
+	delete(fields, "request_id")
+	facts, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(facts)
 }
 
 func scheduleModelPublishForTest(t *testing.T, ctx context.Context, service *Service, handler http.Handler, repository *PostgresRepository, modelID uuid.UUID, planVersion int64, effectiveAt time.Time, reason, key string) (LifecyclePlan, TokenCommandResult, func() (TokenCommandResult, int)) {
@@ -488,6 +545,9 @@ func scheduleModelPublishForTest(t *testing.T, ctx context.Context, service *Ser
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		var result TokenCommandResult
+		if response.Code >= http.StatusBadRequest {
+			t.Logf("scheduled publication HTTP rejection: %d %s", response.Code, response.Body.String())
+		}
 		if json.Unmarshal(response.Body.Bytes(), &result) != nil {
 			t.Fatalf("schedule response=%d %s", response.Code, response.Body.String())
 		}
@@ -518,17 +578,19 @@ func seedLifecycleModels(t *testing.T, ctx context.Context, repository *Postgres
 	if err := repository.pool.QueryRow(ctx, `INSERT INTO model_catalog_versions(id,reason,created_by,created_at,published_at) VALUES($1,'lifecycle plan integration',$2,$3,$3) RETURNING version`, uuid.New(), actor, now.Add(-time.Hour)).Scan(&catalogVersion); err != nil {
 		t.Fatal(err)
 	}
+	// This model is already discovered and published. The test later saves
+	// an edited draft and schedules republication; it is not first discovery.
 	draftModelID := uuid.New()
 	for index, fixture := range []struct {
 		id     uuid.UUID
 		status string
-	}{{modelID, "PUBLISHED"}, {replacementID, "PUBLISHED"}, {draftModelID, "DRAFT"}} {
+	}{{modelID, "PUBLISHED"}, {replacementID, "PUBLISHED"}, {draftModelID, "PUBLISHED"}} {
 		model := fixture.id
 		capability := uuid.New()
 		accountID, ownerID, walletID, credentialID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 		upstream := "lifecycle-model-" + string(rune('a'+index))
 		fingerprint := strings.Repeat(string(rune('a'+index)), 64)
-		if _, err := repository.pool.Exec(ctx, `INSERT INTO model_identities(id,provider_id,adapter_version,upstream_model_ref,upstream_model_ref_digest,created_by,created_at) VALUES($1,'integration','v1',$2,$3,$4,$5); INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($6,$1,1,$7,4096,1024,'["TEXT"]','v1',$4,$5); INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES($8,$1,$2,$2,'','{}',$13,$6,$7,true); INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($9,'USER',$10,$11,$2,'ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($12,$9,'integration','https://provider.invalid','x'::bytea,'key',$3,1,'ACTIVE',ARRAY[$2],$5,$4,$5,'VALID'); INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,route_generation,protocol_code,model_id,protocol_version_id,reference_status,route_version,health_version,health_diagnostic_code,health_observed_at,health_expires_at,next_probe_at) VALUES(gen_random_uuid(),$9,$2,100,'NONE','HEALTHY',$5,1,'CHAT',$1,$7,'RESOLVED',1,1,'PROBE_SUCCEEDED',$5,$5+interval '4 minutes',$5+interval '3 minutes'); INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id,desired_generation,actual_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,lease_owner,lease_until,active_token_account_id,active_credential_id,requested_by,created_at,updated_at) VALUES(gen_random_uuid(),'PERSONAL',$10,$11,$1,$2,'CHAT',$7,1,1,$3,'READY','READY',1,'{}',3,$5+interval '1 hour','worker',$5+interval '1 minute',$9,$12,$4,$5,$5)`, model, upstream, fingerprint, actor, now, capability, protocolID, catalogVersion, accountID, ownerID, walletID, credentialID, fixture.status); err != nil {
+		if _, err := repository.pool.Exec(ctx, `INSERT INTO model_identities(id,provider_id,adapter_version,upstream_model_ref,upstream_model_ref_digest,created_by,created_at) VALUES($1,'integration','v1',$2,$3,$4,$5); INSERT INTO model_capability_versions(id,model_id,version,protocol_definition_id,context_length,maximum_output_tokens,supported_modalities,tokenizer_version,created_by,created_at) VALUES($6,$1,1,$7,4096,1024,'["TEXT"]','v1',$4,$5); INSERT INTO model_catalog_entries(catalog_version,model_id,display_name,normalized_name,description,aliases,lifecycle_status,model_capability_version_id,protocol_definition_id,source_available) VALUES($8,$1,$2,$2,'','{}',$13,$6,$7,true); INSERT INTO token_accounts(id,owner_type,owner_id,wallet_id,name,status,created_by,created_at,updated_at,management_mode) VALUES($9,'USER',$10,$11,$2,'ACTIVE',$4,$5,$5,'PLATFORM'); INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status) VALUES($12,$9,'integration','https://provider.invalid','x'::bytea,'key',$3,1,'ACTIVE',ARRAY[$2],$5,$4,$5,'VALID'); INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,route_generation,protocol_code,model_id,protocol_version_id,reference_status,route_version,health_version,health_diagnostic_code,health_observed_at,health_expires_at,next_probe_at) VALUES(gen_random_uuid(),$9,$2,100,'NONE','HEALTHY',$5,1,'CHAT',$1,$7,'RESOLVED',1,1,'PROBE_SUCCEEDED',$5,$5::timestamptz+interval '4 minutes',$5::timestamptz+interval '3 minutes'); INSERT INTO route_provisionings(id,scope_type,scope_id,wallet_id,model_id,upstream_model_ref,protocol_code,protocol_version_id,desired_generation,actual_generation,desired_signature,status,stage,policy_version,policy_snapshot,max_attempts,sla_deadline_at,lease_owner,lease_until,active_token_account_id,active_credential_id,requested_by,created_at,updated_at) VALUES(gen_random_uuid(),'PERSONAL',$10,$11,$1,$2,'CHAT',$7,1,1,$3,'READY','READY',1,'{}',3,$5::timestamptz+interval '1 hour','worker',$5::timestamptz+interval '1 minute',$9,$12,$4,$5,$5)`, pgx.QueryExecModeSimpleProtocol, model, upstream, fingerprint, actor, now, capability, protocolID, catalogVersion, accountID, ownerID, walletID, credentialID, fixture.status); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -568,8 +630,10 @@ func insertDueRemovalLifecyclePlan(t *testing.T, ctx context.Context, repository
 
 func assertLifecycleExpiryAndLeaseRecovery(t *testing.T, ctx context.Context, repository *PostgresRepository, actor, modelID uuid.UUID, catalogVersion int64, now time.Time) {
 	t.Helper()
+	// Version 1 is the cancelled plan retained by the preceding HTTP checks.
+	// Expiry and lease recovery must append versions 2 and 3, preserving history.
 	expiredID := uuid.New()
-	if _, err := repository.pool.Exec(ctx, `INSERT INTO model_lifecycle_plans(id,model_id,plan_version,expected_catalog_version,current_lifecycle,target_lifecycle,effective_at,force_cancel_inflight,status,reason,request_digest,idempotency_key_digest,created_by,created_at,updated_at) VALUES($1,$2,1,$3,'PUBLISHED','DEPRECATED',$4,false,'PENDING_APPROVAL','expire an abandoned lifecycle plan',$5,$6,$7,$8,$8)`, expiredID, modelID, catalogVersion, now.Add(time.Hour), strings.Repeat("d", 64), strings.Repeat("e", 64), actor, now.Add(-25*time.Hour)); err != nil {
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO model_lifecycle_plans(id,model_id,plan_version,expected_catalog_version,current_lifecycle,target_lifecycle,effective_at,force_cancel_inflight,status,reason,request_digest,idempotency_key_digest,created_by,created_at,updated_at) VALUES($1,$2,2,$3,'PUBLISHED','DEPRECATED',$4,false,'PENDING_APPROVAL','expire an abandoned lifecycle plan',$5,$6,$7,$8,$8)`, expiredID, modelID, catalogVersion, now.Add(time.Hour), strings.Repeat("d", 64), strings.Repeat("e", 64), actor, now.Add(-25*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if expired, err := repository.ExpirePendingLifecyclePlan(ctx, "expiry-worker"); err != nil || !expired {
@@ -582,8 +646,8 @@ func assertLifecycleExpiryAndLeaseRecovery(t *testing.T, ctx context.Context, re
 
 	leaseID := uuid.New()
 	approvalID := uuid.New()
-	critical := mustMarshalJSON(t, lifecyclePlanCritical{ModelID: modelID, CatalogVersion: catalogVersion, CurrentLifecycle: "PUBLISHED", TargetLifecycle: "DEPRECATED", LifecyclePlanVersion: 2, EffectiveAt: now.Add(-time.Minute), BillingPriceVersion: 9, RouteSetFingerprint: strings.Repeat("1", 64), ProvisioningSetFingerprint: strings.Repeat("2", 64), InflightRequestSetFingerprint: strings.Repeat("3", 64), PolicyVersion: 2})
-	if _, err := repository.pool.Exec(ctx, `INSERT INTO model_lifecycle_plans(id,model_id,plan_version,expected_catalog_version,current_lifecycle,target_lifecycle,effective_at,force_cancel_inflight,status,reason,request_digest,idempotency_key_digest,created_by,created_at,updated_at) VALUES($1,$2,2,$3,'PUBLISHED','DEPRECATED',$4,false,'PENDING_APPROVAL','recover expired execution lease',$5,$6,$7,$8,$8)`, leaseID, modelID, catalogVersion, now.Add(-time.Minute), strings.Repeat("f", 64), strings.Repeat("0", 64), actor, now.Add(-time.Hour)); err != nil {
+	critical := mustMarshalJSON(t, lifecyclePlanCritical{ModelID: modelID, CatalogVersion: catalogVersion, CurrentLifecycle: "PUBLISHED", TargetLifecycle: "DEPRECATED", LifecyclePlanVersion: 3, EffectiveAt: now.Add(-time.Minute), BillingPriceVersion: 9, RouteSetFingerprint: strings.Repeat("1", 64), ProvisioningSetFingerprint: strings.Repeat("2", 64), InflightRequestSetFingerprint: strings.Repeat("3", 64), PolicyVersion: 2})
+	if _, err := repository.pool.Exec(ctx, `INSERT INTO model_lifecycle_plans(id,model_id,plan_version,expected_catalog_version,current_lifecycle,target_lifecycle,effective_at,force_cancel_inflight,status,reason,request_digest,idempotency_key_digest,created_by,created_at,updated_at) VALUES($1,$2,3,$3,'PUBLISHED','DEPRECATED',$4,false,'PENDING_APPROVAL','recover expired execution lease',$5,$6,$7,$8,$8)`, leaseID, modelID, catalogVersion, now.Add(-time.Minute), strings.Repeat("f", 64), strings.Repeat("0", 64), actor, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET status='SCHEDULED',approval_request_id=$2,approval_command_fingerprint=$3,critical_resource_versions=$4,financial_snapshot='{}'::jsonb,updated_at=$5 WHERE id=$1`, leaseID, approvalID, strings.Repeat("4", 64), critical, now.Add(-time.Hour)); err != nil {

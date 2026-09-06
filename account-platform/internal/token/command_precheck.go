@@ -127,7 +127,7 @@ func (s *Service) adminTokenCommandPrecheck(w http.ResponseWriter, r *http.Reque
 	// APT-123-R2 deliberately ships the Saga seam before APT-138 activates its
 	// worker. PRE must reject before identity/Account/Billing/database reads so
 	// a disabled capability cannot be used as an authority or existence oracle.
-	if input.CommandType == "TOKEN_ACCOUNT_CREATE" && !s.tokenAccountCreateReady {
+	if input.CommandType == "TOKEN_ACCOUNT_CREATE" && !s.tokenAccountCreateReady.Load() {
 		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_CREATE_NOT_ACTIVE", "Token Account creation is temporarily unavailable", httpserver.RequestID(r.Context()))
 		return
 	}

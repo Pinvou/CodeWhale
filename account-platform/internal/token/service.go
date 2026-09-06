@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
@@ -70,7 +71,7 @@ type Service struct {
 	operationsOverviewEnabled   bool
 	operationsOverviewMetrics   *tokenOperationsOverviewMetrics
 	credentialIsolationEnabled  bool
-	tokenAccountCreateReady     bool
+	tokenAccountCreateReady     atomic.Bool
 	adminProxyHMACKey           []byte
 	breaker                     *resilience.Breaker
 	activeUpstreamCancels       sync.Map
@@ -79,7 +80,7 @@ type Service struct {
 // WithTokenAccountCreateCapability is an APT-138 assembly seam. Production
 // constructors intentionally never call it while governance is PRE_ACTIVATION.
 func (s *Service) WithTokenAccountCreateCapability(ready bool) *Service {
-	s.tokenAccountCreateReady = ready
+	s.tokenAccountCreateReady.Store(ready)
 	return s
 }
 
@@ -91,7 +92,7 @@ func (s *Service) WithTokenAccountProvisioning(wallets WalletProvisioningClient,
 
 func (s *Service) requireTokenAccountCreateCapability() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !s.tokenAccountCreateReady {
+		if !s.tokenAccountCreateReady.Load() {
 			api.WriteError(c.Writer, http.StatusServiceUnavailable, "TOKEN_ACCOUNT_CREATE_NOT_ACTIVE", "Token Account creation is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
 			c.Abort()
 			return
@@ -188,6 +189,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	router := httpserver.NewRouter()
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(serviceToken))
+	internal.GET("/token-governance/activation", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.internalTokenGovernanceActivation))
 	internal.PUT("/organizations/:organization_id/lifecycle", serviceauth.Require("internal.token.organization.lifecycle"), approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", serviceauth.Require("internal.token.organization-unit.lifecycle"), approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	internal.DELETE("/users/:user_id/replay-payloads", serviceauth.Require("internal.token.replay.delete"), httpserver.AdaptFunc(s.anonymizeUserReplayPayloads))
@@ -197,6 +199,12 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal.POST("/commands/model-lifecycle/execute", serviceauth.Require("internal.token.model-lifecycle.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.executeApprovedModelLifecycle))
 	internal.POST("/commands/catalog-rollback/execute", serviceauth.Require("internal.token.catalog-rollback.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.executeApprovedCatalogRollback))
 	internal.POST("/commands/credential-revoke/execute", serviceauth.Require("internal.token.credential-revoke.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.executeApprovedCredentialRevoke))
+	internal.POST("/commands/model-lifecycle/precheck", serviceauth.Require("internal.token.model-lifecycle.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.approvedTokenCommandPrecheck("TOKEN_MODEL_LIFECYCLE_CHANGE")))
+	internal.POST("/commands/catalog-rollback/precheck", serviceauth.Require("internal.token.catalog-rollback.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.approvedTokenCommandPrecheck("TOKEN_MODEL_CATALOG_ROLLBACK")))
+	internal.POST("/commands/credential-revoke/precheck", serviceauth.Require("internal.token.credential-revoke.execute"), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.approvedTokenCommandPrecheck("TOKEN_CREDENTIAL_REVOKE")))
+	internal.GET("/commands/model-lifecycle/result", serviceauth.Require("internal.token.model-lifecycle.execute"), s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.approvedTokenCommandResult("TOKEN_MODEL_LIFECYCLE_CHANGE")))
+	internal.GET("/commands/catalog-rollback/result", serviceauth.Require("internal.token.catalog-rollback.execute"), s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.approvedTokenCommandResult("TOKEN_MODEL_CATALOG_ROLLBACK")))
+	internal.GET("/commands/credential-revoke/result", serviceauth.Require("internal.token.credential-revoke.execute"), s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.approvedTokenCommandResult("TOKEN_CREDENTIAL_REVOKE")))
 	internal.POST("/approval-command-prechecks", serviceauth.Require("internal.token.approval-snapshot.read"), httpserver.AdaptFunc(s.internalApprovalCommandPrecheck))
 	router.GET("/v1/client-compatibility", httpserver.AdaptFunc(s.clientCompatibility))
 	protected := router.Group("")
@@ -244,8 +252,8 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenDirect(legacyTokenAuditOnly), approvalpolicy.Require("TOKEN_ACCOUNT_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
 		admin.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenRouteDirect(), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertTokenRoute))
 		admin.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.selectLegacyTokenRouteDirect(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteTokenRoute))
-		admin.POST("/token-accounts/:token_account_id/credential-launches/enroll", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ENROLL", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateCredentialLaunchFor("ENROLL")))
-		admin.POST("/token-accounts/:token_account_id/credential-launches/rotate", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ROTATE", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateCredentialLaunchFor("ROTATE")))
+		admin.POST("/token-accounts/:token_account_id/credential-launches/enroll", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ENROLL", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.registeredTokenHandler("TOKEN_CREDENTIAL_ENROLL", "ISOLATED")))
+		admin.POST("/token-accounts/:token_account_id/credential-launches/rotate", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_CREDENTIAL_ROTATE", approvalpolicy.AuditOnly), s.requireCredentialIsolationEnabled(), s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.registeredTokenHandler("TOKEN_CREDENTIAL_ROTATE", "ISOLATED")))
 		admin.GET("/credential-results/:result_ref", s.authorizer.Require("platform.tokens.read"), s.requireCredentialIsolationEnabled(), httpserver.AdaptFunc(s.adminCredentialIsolationResult))
 		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
 		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
@@ -280,12 +288,12 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/resource-audit", s.authorizer.RequireAnyAnd([]string{"platform.models.read", "platform.tokens.read"}, []string{"platform.audit.read"}), httpserver.AdaptFunc(s.adminResourceAudit))
 		admin.POST("/commands:precheck", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandPrecheck))
 		admin.POST("/commands", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminCreateTokenCommand))
-		admin.GET("/commands/by-idempotency-key", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandByIdempotencyKey))
-		admin.GET("/commands/recovery-queue", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryQueue))
-		admin.GET("/commands/:command_reference", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenCommandResult))
+		admin.GET("/commands/by-idempotency-key", s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.adminTokenCommandByIdempotencyKey))
+		admin.GET("/commands/recovery-queue", s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryQueue))
+		admin.GET("/commands/:command_reference", s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.adminTokenCommandResult))
 		admin.POST("/commands/:command_reference/recovery-actions", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryAction))
-		admin.GET("/commands/:command_reference/recovery-actions/by-idempotency-key", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryActionByKey))
-		admin.GET("/commands/:command_reference/recovery-actions/:action_id", s.requireNewTokenCommandGovernanceActive(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryActionResult))
+		admin.GET("/commands/:command_reference/recovery-actions/by-idempotency-key", s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryActionByKey))
+		admin.GET("/commands/:command_reference/recovery-actions/:action_id", s.requireKnownTokenCommandGovernance(), httpserver.AdaptFunc(s.adminTokenAccountRecoveryActionResult))
 		admin.GET("/token-accounts/:token_account_id/impact/status", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccountStatusImpact))
 		admin.GET("/token-accounts/:token_account_id/impact/route", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenRouteImpact))
 		admin.GET("/token-accounts/:token_account_id/impact/credential", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenCredentialImpact))
@@ -299,7 +307,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		adminV2.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), s.requireNewTokenCommandGovernanceActive(), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), rejectProtocolFormulaDirectWrite())
 		adminV2.GET("/token-accounts/:token_account_id/impact/route", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminStableTokenRouteImpact))
 	}
-	return router
+	return TokenCredentialDeadlineMiddleware(router)
 }
 
 func (s *Service) anonymizeUserReplayPayloads(w http.ResponseWriter, r *http.Request) {
