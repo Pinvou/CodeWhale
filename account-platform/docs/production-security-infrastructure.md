@@ -68,12 +68,14 @@ SECINF-03 继续串行细分：03B 交付固定版本的 TLS/Raft/声明式审�
 
 本机访问私有 KMS 可经既有 SSH 隧道：可选连接覆盖仅允许 loopback IP 和明确端口，HTTP origin、Host 与 TLS 证书验证仍使用包内原始目标，不把 localhost 当成可信证书名，也不关闭验证。隧道由部署步骤建立，operator 不启动外部命令、不自动配置 SSH/DNS。提取共享的纯离线 age/身份读取能力供两个命令复用，默认 `kms-recovery` 保持无网络，不修改已有加密格式。此子项不代替后续策略/运维身份初始化、root 撤销或快照恢复。
 
+03C-3 独立恢复证据：两个真实 Raft 实例使用不同私有网络和数据/审计目录，恢复目标不能访问源实例。源创建 v1 密文并轮换至 v2，在撤销初始 root 后，以仅具 snapshot read/sudo 的限时独立测试身份取快照，外层 age 加密并落盘；恢复前完整解密验证，错误身份与损坏包必须在恢复 API 调用前拒绝。目标为明确全新的隔离实例，仅此测试流程可使用 `snapshot-force` 替换其数据，不向正式 operator 暴露此操作。恢复后使用源份额解封、验证旧密文与 v2 状态、两端旧 root 均拒绝。该证明不等于正式定时备份、保留策略、保管人恢复交接和生产灾备可用性。
+
 | 任务 | 交付与验收 | 状态 |
 | --- | --- | --- |
 | SECINF-01 | 原生 Transit provider、逐调用 token-file、两服务接线；HTTPS、AAD、轮换、权限拒绝、无泄漏、跳转及有界响应测试 | 代码已验证 / NOT_DEPLOYED |
 | SECINF-02 | Keycloak 独立服务客户端配置与轮换器；真实签发/轮换/过期/错 subject、audience、权限拒绝 | 02A/02B 隔离验证通过，整体 NOT_DEPLOYED |
 | SECINF-03A | 保管人已同意的本机离线托管工具；口令无回显、标准 age、加密身份读回、拒绝损坏/覆盖；在正式初始化前完成 | 代码与隔离测试已验证；本机托管身份设置成功，保管人已确认保存 custody，正式恢复包尚未生成 |
-| SECINF-03 | 固定版本 OpenBao/Agent 部署、逐服务策略、TLS/网络、初始化与解封交接、备份恢复；明确单节点边界 | 03B、03C-1 加密捕获与 03C-2 本机解封程序隔离验证通过；快照恢复、PKI/策略初始化及正式交接待完成，整体 NOT_DEPLOYED |
+| SECINF-03 | 固定版本 OpenBao/Agent 部署、逐服务策略、TLS/网络、初始化与解封交接、备份恢复；明确单节点边界 | 03B、03C-1/2/3 加密捕获、本机解封及独立快照恢复隔离验证通过；PKI/策略初始化、正式备份及交接待完成，整体 NOT_DEPLOYED |
 | SECINF-04 | Compose/Helm/生产安全门禁原生 KMS 与 fresh-install 适配、真实依赖验收及部署运行手册 | 待实施 |
 | SECINF-05 | New API 候选兼容与安全验证、精确清理旧测试数据、空库部署及商城生产联调 | 待实施 |
 
@@ -142,3 +144,11 @@ SECINF-03 继续串行细分：03B 交付固定版本的 TLS/Raft/声明式审�
 - 单元 TLS fixture 覆盖解封及已解封不重复、12 类包/绑定/身份/损坏拒绝且零网络请求、原目标 Host 与 TLS 名称通过 loopback 保留、错误 TLS 名称拒绝、5 类写失败不自动重试及不回显、未知/未初始化/错误 Shamir 阈值拒绝、HTTP/路径/查询/用户信息/远程或非数字 loopback 覆盖拒绝。
 - Linux 同源 operator 模块全部测试在独立 OpenBao 2.6.2 TLS/Raft 实例真实执行，无跳过，输出 `OPENBAO_OPERATOR_FIXTURE_PASS`。使用标准 scrypt 加密测试身份及初始化加密包，错误口令拒绝；经透明 loopback TLS 转发实际解封，直连已解封不重复提交；重新封存后再次实际解封，最终撤销测试 root 并验证 403。只在测试控制进程中使用测试 root 完成封存/撤销，正式 operator 解封从不发送 root。
 - 配置测试、架构守卫与差异检查通过。测试容器及临时材料精确清理；未生成正式主密钥、没有更改旧业务服务或数据，独立快照恢复及生产配置接线仍未完成。
+
+## SECINF-03C-3 实测记录
+
+- 同源 Linux operator 测试二进制配合 `--restore-fixture`，在两个新建 internal 网络、独立 Raft 与审计目录的 OpenBao 2.6.2 实例实际运行，输出 `OPENBAO_SNAPSHOT_RESTORE_FIXTURE_PASS` 和 `OPENBAO_OPERATOR_FIXTURE_PASS`，未跳过。没有挂载业务数据或发布宿主端口，结束精确清理两个实例与网络。
+- 源实例产生 v1 密文并轮换 v2；限时 180 秒的 snapshot-only 与 readback 测试身份分别授权，后者不能取快照。撤销源 root 并确认 403 后，再由 snapshot-only 身份取得真实 Raft 快照、age 外层加密落盘，错误解密身份和损坏包拒绝，读回并完整认证后才提交给新恢复目标。
+- 空目标独立初始化和解封后实际执行 `snapshot-force`；随后真实重新封存，使用源恢复包、原逻辑 TLS 身份及受控 loopback 路径再次解封。确认旧 v1 密文读回、密钥版本仍为 v2，源已撤销 root 和恢复目标被替换的 root 都返回 403，不因恢复重新生效。
+- 两个隔离实例仅在本测试中共享临时测试叶证书（包含两个测试 IP），用于模拟同一逻辑 KMS 的替换；不涉及正式 CA/证书复用。快照与 root/份额仅用于此临时证明；正式 operator 没有新增 `snapshot-force` 入口。
+- Go operator 单元 2.624 秒及 vet、4 项配置测试、架构守卫通过。该 fixture 将小型快照限制为 1 MiB，不能据此宣称正式容量/定时备份/留存/介质恢复已验证；正式备份工具、真实介质和容量验收仍需部署交接补齐。

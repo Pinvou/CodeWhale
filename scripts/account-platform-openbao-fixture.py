@@ -54,8 +54,10 @@ def main():
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--initializer-test-binary", help="optional Linux Go initializer test binary; runs initialization suite")
     recovery.add_argument("--operator-test-binary", help="optional Linux Go operator test binary; runs operator suite")
+    parser.add_argument("--restore-fixture", action="store_true", help="create a second isolated empty Raft instance for the operator restore proof")
     args = parser.parse_args()
     require(os.name == "posix" and os.geteuid() == 0, "Linux Docker operator required")
+    require(not args.restore_fixture or args.operator_test_binary, "restore proof requires the operator test binary")
     source = Path(args.config_directory).resolve(strict=True)
     initializer_binary = None
     if args.initializer_test_binary or args.operator_test_binary:
@@ -65,11 +67,14 @@ def main():
     root = Path(tempfile.mkdtemp(prefix="pinvou-openbao-fixture-", dir="/tmp")).resolve()
     prefix = "pinvou-openbao-fixture-" + secrets.token_hex(5)
     network, server = prefix + "-net", prefix + "-server"
+    restore_network, restore_server = prefix + "-restore-net", prefix + "-restore-server"
+    restore_network_created = False
+    restore_ip = ""
     containers = []
     network_created = False
     try:
         os.chmod(root, 0o755)
-        for name in ("config", "tls", "trust", "data", "audit", "gateway-bootstrap", "gateway-token", "credential-bootstrap", "credential-token"):
+        for name in ("config", "tls", "trust", "data", "audit", "restore-data", "restore-audit", "gateway-bootstrap", "gateway-token", "credential-bootstrap", "credential-token"):
             path = root / name
             path.mkdir(mode=0o700)
             os.chown(path, 65532, 65532)
@@ -82,13 +87,20 @@ def main():
         subnet = ipaddress.ip_network(network_info["IPAM"]["Config"][0]["Subnet"])
         require(subnet.version == 4 and subnet.is_private, "fixture subnet is not private IPv4")
         server_ip = str(subnet.network_address + 2)
+        if args.restore_fixture:
+            docker("network", "create", "--internal", restore_network)
+            restore_network_created = True
+            restore_info = json.loads(docker("network", "inspect", restore_network))[0]
+            restore_subnet = ipaddress.ip_network(restore_info["IPAM"]["Config"][0]["Subnet"])
+            require(restore_info["Internal"] is True and restore_subnet.is_private and restore_subnet.version == 4 and not restore_subnet.overlaps(subnet), "restore network is not isolated")
+            restore_ip = str(restore_subnet.network_address + 2)
         # Test-only CA stays on the operator side, never mounted into the server.
         for command in (
             ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=isolated-fixture-ca", "-keyout", str(root / "ca.key"), "-out", str(root / "trust" / "ca.crt")],
             ["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=openbao", "-keyout", str(root / "tls" / "server.key"), "-out", str(root / "server.csr")],
         ):
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        private_write(root / "extensions", "subjectAltName=DNS:openbao,IP:" + server_ip + "\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
+        private_write(root / "extensions", "subjectAltName=DNS:openbao,IP:" + server_ip + (",IP:" + restore_ip if restore_ip else "") + "\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
         subprocess.run(["openssl", "x509", "-req", "-in", str(root / "server.csr"), "-CA", str(root / "trust" / "ca.crt"), "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(root / "extensions"), "-out", str(root / "tls" / "server.crt")], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         os.chmod(root / "ca.key", 0o600)
         for path in (root / "tls" / "server.key", root / "tls" / "server.crt", root / "trust" / "ca.crt"):
@@ -136,6 +148,18 @@ def main():
             raise RuntimeError("fixture readiness failed")
 
         wait_ready(sealed=True)
+        if args.restore_fixture:
+            restore_common = list(common)
+            restore_common[restore_common.index("--network") + 1] = restore_network
+            docker("create", "--name", restore_server, *restore_common, "--memory", "512m", "--network-alias", "openbao", "--ip", restore_ip, *mounts((("config", "/bao/config", True), ("tls", "/bao/tls", True), ("restore-data", "/bao/data", False), ("restore-audit", "/bao/audit", False))), IMAGE, "server", "-config=/bao/config/server.hcl")
+            containers.append(restore_server)
+            docker("start", restore_server)
+            restored_info = json.loads(docker("inspect", restore_server))[0]
+            require(not restored_info["HostConfig"]["PortBindings"] and list(restored_info["NetworkSettings"]["Networks"]) == [restore_network], "restore instance has unexpected exposure or network")
+            source_endpoint = endpoint
+            endpoint = "https://" + restore_ip + ":8200"
+            wait_ready(sealed=True)
+            endpoint = source_endpoint
         # TLS negatives send no credentials.
         try:
             urllib.request.urlopen(endpoint + "/v1/sys/health", context=ssl.create_default_context(), timeout=3)
@@ -154,10 +178,15 @@ def main():
             environment.update(PINVOU_TEST_OPENBAO_INITIALIZER_ISOLATED="1", PINVOU_TEST_OPENBAO_ENDPOINT=endpoint, PINVOU_TEST_OPENBAO_FIXTURE_ROOT=str(root))
             if args.operator_test_binary:
                 environment["PINVOU_TEST_OPENBAO_OPERATOR_ISOLATED"] = "1"
+            if args.restore_fixture:
+                environment["PINVOU_TEST_OPENBAO_RESTORE_ENDPOINT"] = "https://" + restore_ip + ":8200"
             result = subprocess.run([str(initializer_binary), "-test.v", "-test.timeout=120s"], env=environment, capture_output=True, text=True, check=False, timeout=130)
             # The test emits fixed stages only; do not expose arbitrary subprocess output.
             marker = "ACTUAL_OPENBAO_OPERATOR_UNSEAL_PASS" if args.operator_test_binary else "ACTUAL_OPENBAO_ENCRYPTED_INITIALIZATION_PASS"
             require(result.returncode == 0 and marker in result.stdout and "SKIP" not in result.stdout, "actual recovery integration failed")
+            if args.restore_fixture:
+                require("ACTUAL_OPENBAO_SNAPSHOT_RESTORE_PASS" in result.stdout, "actual snapshot restore did not execute")
+                print("OPENBAO_SNAPSHOT_RESTORE_FIXTURE_PASS", flush=True)
             print("OPENBAO_OPERATOR_FIXTURE_PASS" if args.operator_test_binary else "OPENBAO_INITIALIZER_FIXTURE_PASS", flush=True)
             return
         initialized = expect("sys/init", {"secret_shares": 1, "secret_threshold": 1})
@@ -274,6 +303,8 @@ def main():
     finally:
         for name in reversed(containers):
             docker("rm", "--force", name)
+        if restore_network_created:
+            docker("network", "rm", restore_network)
         if network_created:
             docker("network", "rm", network)
         require(root.parent == Path("/tmp") and root.name.startswith("pinvou-openbao-fixture-"), "unsafe fixture cleanup target")

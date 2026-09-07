@@ -172,8 +172,12 @@ func TestOperatorOpenBaoIntegration(t *testing.T) {
 	if !healthy {
 		t.Fatal("resealed instance not ready")
 	}
-	if call("auth/token/revoke-self", "POST", m.Root) != 204 || call("auth/token/lookup-self", "GET", m.Root) != 403 {
-		t.Fatal("fixture root revocation failed")
+	if restoreEndpoint := os.Getenv("PINVOU_TEST_OPENBAO_RESTORE_ENDPOINT"); restoreEndpoint != "" {
+		snapshotRestoreProof(t, cfg, m.Root, id, b, bundle, restoreEndpoint)
+	} else {
+		if call("auth/token/revoke-self", "POST", m.Root) != 204 || call("auth/token/lookup-self", "GET", m.Root) != 403 {
+			t.Fatal("fixture root revocation failed")
+		}
 	}
 	t.Log("ACTUAL_OPENBAO_OPERATOR_UNSEAL_PASS")
 }
