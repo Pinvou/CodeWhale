@@ -37,7 +37,7 @@ func main() {
 	if err != nil {
 		log.Fatal("TOKEN_LOCAL_KEK_BASE64 must be valid base64")
 	}
-	secrets, err := token.NewSecretProvider(token.SecretProviderConfig{Environment: cfg.Environment, Mode: os.Getenv("TOKEN_SECRET_PROVIDER"), KeyID: os.Getenv("TOKEN_SECRET_KEY_ID"), LocalKey: key, RemoteURL: os.Getenv("TOKEN_SECRET_PROVIDER_URL"), RemoteToken: os.Getenv("TOKEN_SECRET_PROVIDER_TOKEN")})
+	secrets, err := token.NewSecretProvider(token.SecretProviderConfig{Environment: cfg.Environment, Mode: os.Getenv("TOKEN_SECRET_PROVIDER"), KeyID: os.Getenv("TOKEN_SECRET_KEY_ID"), LocalKey: key, RemoteURL: os.Getenv("TOKEN_SECRET_PROVIDER_URL"), RemoteToken: os.Getenv("TOKEN_SECRET_PROVIDER_TOKEN"), RemoteTokenFile: os.Getenv("TOKEN_SECRET_PROVIDER_TOKEN_FILE")})
 	if err != nil {
 		log.Fatal(err)
 	}

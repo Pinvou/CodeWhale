@@ -50,12 +50,13 @@ func NewLocalAESProvider(keyID string, key []byte) (*LocalAESProvider, error) {
 }
 
 type SecretProviderConfig struct {
-	Environment string
-	Mode        string
-	KeyID       string
-	LocalKey    []byte
-	RemoteURL   string
-	RemoteToken string
+	Environment     string
+	Mode            string
+	KeyID           string
+	LocalKey        []byte
+	RemoteURL       string
+	RemoteToken     string
+	RemoteTokenFile string
 }
 
 func NewSecretProvider(config SecretProviderConfig) (SecretProvider, error) {
@@ -72,6 +73,9 @@ func NewSecretProvider(config SecretProviderConfig) (SecretProvider, error) {
 	}
 	if mode == "remote" {
 		return NewRemoteEnvelopeProvider(environment, config.KeyID, config.RemoteURL, config.RemoteToken)
+	}
+	if mode == "vault-transit" {
+		return NewTransitProvider(config)
 	}
 	return nil, fmt.Errorf("secret provider %q is not configured", mode)
 }

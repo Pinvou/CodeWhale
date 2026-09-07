@@ -10,6 +10,8 @@
 
 ## 核心文档
 
+- [正式安全基础设施补建](production-security-infrastructure.md)：KMS、服务身份签发及全新部署的需求、设计、串行任务和未完成验收。
+
 - [当前架构](architecture.md)：服务边界、数据归属、信任边界、事件一致性和当前部署形态。
 - [目标需求基线](requirements.md)：只描述产品目标、领域规则、降级策略和可验收结果，不记录实现状态。
 - [当前实现状态与差距](implementation-status.md)：记录当前状态、已知差距，以及待补齐的提交、测试和部署证据。

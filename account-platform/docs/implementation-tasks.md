@@ -471,6 +471,8 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ## 4. 独立提交验收模板
 
+正式安全基础设施补建采用 [SECINF-01～05 串行任务](production-security-infrastructure.md#串行任务与验收)，补齐既有 APT-137 环境依赖，不提前关闭其部署状态。
+
 每个任务提交前记录：
 
 - `task_id` 与全部 `target_requirement_id`。

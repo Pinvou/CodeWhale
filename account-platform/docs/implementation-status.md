@@ -1,5 +1,9 @@
 # 账号平台实现状态与差距
 
+## 2026-09-07 正式安全基础设施补建
+
+部署负责人已授权补建 KMS 与服务身份签发。SECINF-01 原生 OpenBao/Vault Transit 接入及两入口已通过单元、真实隔离 OpenBao 加解密/轮换/撤销、Go vet 和架构检查；仍 NOT_DEPLOYED。服务身份签发/轮换、正式 OpenBao 初始化/解封托管、部署覆盖与 fresh-install 安全门禁、空库上线尚未完成，详见 [补建设计、串行任务及实测记录](production-security-infrastructure.md)。旧测试数据清除已有明确授权，但尚未执行，其他系统不在清理范围。
+
 > 状态：当前实现快照，不能替代目标需求
 >
 > 校准日期：2026-08-26
