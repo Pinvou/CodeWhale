@@ -2,6 +2,8 @@
 
 独立 Go 模块，使用 age v1.3.2 标准格式，不引入业务服务依赖。默认构建的 `kms-recovery` 命令无网络功能，不读取环境或命令行中的口令，不输出解密明文。另有单独构建、显式联网的 Linux [kms-initializer](cmd/kms-initializer/README.md)，不能将两个命令的边界混淆。
 
+本机联网解封由独立的 [kms-operator](cmd/kms-operator/README.md) 提供，需要保管人在本机终端输入口令。两个命令只复用纯离线 age/身份读取库，不向本离线程序添加网络功能。
+
 ## 构建与验证
 
 在本目录执行 `go test -count=1 ./...`、`go vet ./...`、`go build -trimpath -o <受控目录>/kms-recovery.exe .`。

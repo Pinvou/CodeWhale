@@ -51,13 +51,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-directory", required=True)
     parser.add_argument("--isolated-fixture", action="store_true", required=True)
-    parser.add_argument("--initializer-test-binary", help="optional Linux Go initializer test binary; runs only initialization test")
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--initializer-test-binary", help="optional Linux Go initializer test binary; runs initialization suite")
+    recovery.add_argument("--operator-test-binary", help="optional Linux Go operator test binary; runs operator suite")
     args = parser.parse_args()
     require(os.name == "posix" and os.geteuid() == 0, "Linux Docker operator required")
     source = Path(args.config_directory).resolve(strict=True)
     initializer_binary = None
-    if args.initializer_test_binary:
-        initializer_binary = Path(args.initializer_test_binary).resolve(strict=True)
+    if args.initializer_test_binary or args.operator_test_binary:
+        initializer_binary = Path(args.initializer_test_binary or args.operator_test_binary).resolve(strict=True)
         require(initializer_binary.is_file() and initializer_binary.is_absolute(), "initializer test binary missing")
     require(all((source / name).is_file() for name in ("server.hcl", "agent.hcl", "runtime-policy.hcl", "approle.json")), "public fixture config missing")
     root = Path(tempfile.mkdtemp(prefix="pinvou-openbao-fixture-", dir="/tmp")).resolve()
@@ -150,10 +152,13 @@ def main():
         if initializer_binary:
             environment = dict(os.environ)
             environment.update(PINVOU_TEST_OPENBAO_INITIALIZER_ISOLATED="1", PINVOU_TEST_OPENBAO_ENDPOINT=endpoint, PINVOU_TEST_OPENBAO_FIXTURE_ROOT=str(root))
+            if args.operator_test_binary:
+                environment["PINVOU_TEST_OPENBAO_OPERATOR_ISOLATED"] = "1"
             result = subprocess.run([str(initializer_binary), "-test.v", "-test.timeout=120s"], env=environment, capture_output=True, text=True, check=False, timeout=130)
             # The test emits fixed stages only; do not expose arbitrary subprocess output.
-            require(result.returncode == 0 and "ACTUAL_OPENBAO_ENCRYPTED_INITIALIZATION_PASS" in result.stdout and "SKIP" not in result.stdout, "actual initializer integration failed")
-            print("OPENBAO_INITIALIZER_FIXTURE_PASS", flush=True)
+            marker = "ACTUAL_OPENBAO_OPERATOR_UNSEAL_PASS" if args.operator_test_binary else "ACTUAL_OPENBAO_ENCRYPTED_INITIALIZATION_PASS"
+            require(result.returncode == 0 and marker in result.stdout and "SKIP" not in result.stdout, "actual recovery integration failed")
+            print("OPENBAO_OPERATOR_FIXTURE_PASS" if args.operator_test_binary else "OPENBAO_INITIALIZER_FIXTURE_PASS", flush=True)
             return
         initialized = expect("sys/init", {"secret_shares": 1, "secret_threshold": 1})
         root_token = initialized["root_token"]

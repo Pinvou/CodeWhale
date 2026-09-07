@@ -15,39 +15,20 @@ import (
 	"unicode/utf8"
 
 	"filippo.io/age"
+	"github.com/Pinvou/pinvou3/account-platform/tools/kms-recovery/internal/custody"
 	"golang.org/x/term"
 )
 
-const maxMaterial = 1 << 20
+const maxMaterial = custody.MaxMaterial
 
-var errRecovery = errors.New("RECOVERY_OPERATION_FAILED")
+var errRecovery = custody.ErrRecovery
 
 func encrypt(data []byte, recipient age.Recipient) ([]byte, error) {
-	var out bytes.Buffer
-	w, err := age.Encrypt(&out, recipient)
-	if err != nil {
-		return nil, errRecovery
-	}
-	if _, err = w.Write(data); err != nil {
-		return nil, errRecovery
-	}
-	if err = w.Close(); err != nil {
-		return nil, errRecovery
-	}
-	return out.Bytes(), nil
+	return custody.Encrypt(data, recipient)
 }
 
 func decrypt(data []byte, identity age.Identity) ([]byte, error) {
-	r, err := age.Decrypt(bytes.NewReader(data), identity)
-	if err != nil {
-		return nil, errRecovery
-	}
-	out, err := io.ReadAll(io.LimitReader(r, maxMaterial+1))
-	if err != nil || len(out) == 0 || len(out) > maxMaterial {
-		clear(out)
-		return nil, errRecovery
-	}
-	return out, nil
+	return custody.Decrypt(data, identity)
 }
 
 func wrapIdentity(passphrase []byte) ([]byte, string, error) {
@@ -72,20 +53,7 @@ func wrapIdentity(passphrase []byte) ([]byte, string, error) {
 }
 
 func readBounded(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, errRecovery
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 2*maxMaterial {
-		return nil, errRecovery
-	}
-	b, err := io.ReadAll(io.LimitReader(f, 2*maxMaterial+1))
-	if err != nil || len(b) > 2*maxMaterial {
-		return nil, errRecovery
-	}
-	return b, nil
+	return custody.ReadBounded(path)
 }
 
 func writeNew(path string, data []byte) error {
@@ -114,31 +82,7 @@ func writeNew(path string, data []byte) error {
 }
 
 func unlock(dir string, passphrase []byte) (*age.X25519Identity, error) {
-	cipher, err := readBounded(filepath.Join(dir, "identity.age"))
-	if err != nil {
-		return nil, err
-	}
-	password, err := age.NewScryptIdentity(string(passphrase))
-	if err != nil {
-		return nil, errRecovery
-	}
-	// Match the library's default encryption work factor; reject malicious
-	// files that request excessive memory/CPU before authenticating.
-	password.SetMaxWorkFactor(18)
-	plain, err := decrypt(cipher, password)
-	if err != nil {
-		return nil, err
-	}
-	defer clear(plain)
-	id, err := age.ParseX25519Identity(string(plain))
-	if err != nil {
-		return nil, errRecovery
-	}
-	public, err := readBounded(filepath.Join(dir, "recipient.txt"))
-	if err != nil || strings.TrimSpace(string(public)) != id.Recipient().String() {
-		return nil, errRecovery
-	}
-	return id, nil
+	return custody.Unlock(dir, passphrase)
 }
 
 func prepare(dir string, passphrase []byte) error {
