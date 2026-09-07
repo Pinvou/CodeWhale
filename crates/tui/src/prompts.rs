@@ -432,6 +432,18 @@ pub struct StaticPromptCtx<'a> {
 /// segment.
 pub type StaticPromptComposer = dyn Fn(&StaticPromptCtx<'_>) -> String + Send + Sync + 'static;
 
+/// Install an embedder composer that owns the complete static prompt prefix.
+/// First call wins and must happen before any Engine is spawned.
+pub fn set_static_prompt_composer_override(f: Box<StaticPromptComposer>) -> Result<(), ()> {
+    STATIC_PROMPT_COMPOSER.set(f).map_err(|_| ())
+}
+
+/// Whether an embedder owns the complete static prompt prefix.
+#[must_use]
+pub fn static_prompt_composer_installed() -> bool {
+    STATIC_PROMPT_COMPOSER.get().is_some()
+}
+
 /// Replace `BASE_PROMPT` for all subsequent prompt composition. First call
 /// wins; later calls return the rejected string. Set before spawning any
 /// engine.
