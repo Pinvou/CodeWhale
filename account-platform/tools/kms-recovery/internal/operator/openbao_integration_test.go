@@ -175,7 +175,7 @@ func TestOperatorOpenBaoIntegration(t *testing.T) {
 	if restoreEndpoint := os.Getenv("PINVOU_TEST_OPENBAO_RESTORE_ENDPOINT"); restoreEndpoint != "" {
 		snapshotRestoreProof(t, cfg, m.Root, id, b, bundle, restoreEndpoint)
 	} else if os.Getenv("PINVOU_TEST_OPENBAO_BOOTSTRAP_ISOLATED") == "1" {
-		bootstrapProof(t, cfg, id, b, parent)
+		bootstrapProof(t, cfg, id, b, parent, dir, pass)
 	} else {
 		if call("auth/token/revoke-self", "POST", m.Root) != 204 || call("auth/token/lookup-self", "GET", m.Root) != 403 {
 			t.Fatal("fixture root revocation failed")

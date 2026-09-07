@@ -1,6 +1,6 @@
 # 保管人本机解封
 
-单独的联网程序；默认 `kms-recovery` 仍无网络。提供有界 `unseal`、`bootstrap`、`finalize-bootstrap`，没有 init、reset、migrate、任意 URL/API 或密钥打印功能。普通 `unseal` 不解析或发送包中的 root token；只有明确的身份引导/退场操作使用内存中的 root。
+独立运维程序；默认 `kms-recovery` 仍无网络。提供有界联网 `unseal`、`bootstrap`、`finalize-bootstrap` 和离线 `stage-agents`，没有 init、reset、migrate、任意 URL/API 或密钥打印功能。普通 `unseal` 不解析或发送包中的 root token；只有明确的身份引导/退场操作使用内存中的 root。
 
 ## 使用
 
@@ -54,3 +54,15 @@ kms-operator -action finalize-bootstrap -config <相同公开配置> -directory 
 任何创建阶段断网/异常均停止，不自动重试、覆盖或删除，保留已收到的加密响应和初始 root。若完整 `roles.age` 已写入但探测临时失败，可直接用同一包执行 `finalize-bootstrap` 重新验证；没有完整包时必须受控核对部分状态，不能重新运行 bootstrap 或清库。撤销响应不确定时，也只重跑同一包的 finalize：已撤销 root 不再发送撤销请求，验证仍通过才完成标记。已存在的错误标记/权限/包损坏不覆盖。
 
 常规 SecretID 轮换至少每 30 天：先投递新值并验证 Agent 重新认证，再销毁旧 accessor。旧 SecretID 被撤销不立即撤销其既存 token，最长 15 分钟仍有效；紧急泄露还需隔离受影响业务与 Agent 网络。此受限运维角色不授予全局 token accessor 撤销或策略管理；扩大权限及 break-glass 必须走独立受控流程，不能重新启用初始化 root。
+
+## 离线暂存 Agent 引导文件
+
+```text
+kms-operator -action stage-agents -config <相同公开配置> -directory <custody绝对路径> -bundle <roles.age绝对路径> -output-directory <独立staging父目录中的新目录>
+```
+
+本操作只接受 `roles.age` 与同目录 `BOOTSTRAP_FINALIZED` 的匹配摘要，验证完整角色包绑定、身份唯一性及本机口令，不读取初始化包，也不建立网络连接。专用 CA 仍用于核对包的指纹，不等于重新向服务器认证或重新执行 bootstrap。
+
+输出仅包括固定三个目录 `pinvou-token-gateway`、`pinvou-credential-portal`、`pinvou-kms-backup`，每个目录只有 `role-id` 与 `secret-id`，另有 `AGENT_FILES_STAGED` 摘要清单。第四个 `pinvou-kms-operations` 绝不写出；root、解封材料和 custody 私钥不在输入包的读取路径中。所有文件独占创建为 0600 并同步、读回，不覆盖已有输出。
+
+**这些是给 Agent 的长期机器引导秘密，不是给业务的短期 token，也不是离线恢复包。** 必须使用独立受控 staging 父目录（Windows 仅当前用户与 SYSTEM），不能放在 custody 或角色恢复包的上一级目录中。通过验证的 SSH 传输到受控 Agent 目录并逐文件核对摘要/UID/权限；Agent 只读 bootstrap，业务只读各自的短期 sink，不能挂载本目录。只有确认传输及 Agent 登录成功后才精确删除本机暂存副本，恢复能力仍来自原有加密包。失败保留部分文件，不因目录存在认定投递完成；必须有匹配清单及后续部署验收。

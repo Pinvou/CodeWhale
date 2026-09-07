@@ -9,7 +9,7 @@ import (
 	"filippo.io/age"
 )
 
-func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted []byte, parent string) {
+func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted []byte, parent, custodyDir string, pass []byte) {
 	t.Helper()
 	ctx := context.Background()
 	output := filepath.Join(parent, "bootstrap")
@@ -117,5 +117,36 @@ func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted 
 	if _, err := os.Stat(filepath.Join(output, "BOOTSTRAP_FINALIZED")); err != nil {
 		t.Fatal("final state marker absent")
 	}
+	stageParent := t.TempDir()
+	if err := os.Chmod(stageParent, 0700); err != nil {
+		t.Fatal("fixture staging parent permission failed")
+	}
+	stage := filepath.Join(stageParent, "delivery")
+	if err := RunStageAgentFiles(cfg, custodyDir, filepath.Join(output, "roles.age"), pass, stage); err != nil {
+		t.Fatal("BOOTSTRAP_AGENT_STAGING_FAILED", err)
+	}
+	for _, role := range roleNames[:3] {
+		roleID, err := readLocal(filepath.Join(stage, role, "role-id"), true)
+		if err != nil {
+			t.Fatal("staged RoleID absent")
+		}
+		secretID, err := readLocal(filepath.Join(stage, role, "secret-id"), true)
+		if err != nil {
+			t.Fatal("staged SecretID absent")
+		}
+		token, err := s.login(role, roleCredential{RoleID: string(roleID), SecretID: string(secretID)})
+		clear(roleID)
+		clear(secretID)
+		if err != nil || s.verifyOne(role, token) != nil {
+			t.Fatal("staged identity rejected by actual server")
+		}
+		if s.call("auth/token/revoke-self", map[string]any{}, token, nil, 204) != nil {
+			t.Fatal("staged probe token cleanup failed")
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stage, roleNames[3])); !os.IsNotExist(err) {
+		t.Fatal("offline operations role was staged")
+	}
+	t.Log("ACTUAL_OPENBAO_AGENT_STAGING_PASS")
 	t.Log("ACTUAL_OPENBAO_BOOTSTRAP_PASS")
 }

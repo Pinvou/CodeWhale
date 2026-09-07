@@ -211,3 +211,19 @@ SECINF-03 继续串行细分：03B 交付固定版本的 TLS/Raft/声明式审�
 固定真实 OpenBao TLS/Raft/双 Agent fixture 在初始 root 已撤销后运行同源 Linux 业务测试二进制，专用 CA 两组测试与真实 provider 测试无 SKIP，输出 `OPENBAO_TRANSIT_TLS_FIXTURE_PASS` / `OPENBAO_INFRASTRUCTURE_FIXTURE_PASS`。包括真实 CA、文件 token、随机密文、AAD/跨 key 拒绝与错误主机名；Linux 文件权限和只读投影 CA 链接均实际覆盖。该 provider 测试由隔离控制进程执行，不冒充正式业务容器挂载或非 root 端到端验收。
 
 首次新增 TLS 联验被 CA 校验拦截：旧 fixture 根证书依赖宿主 OpenSSL 默认用途。模板已明确指定 CA:TRUE 和 keyCertSign/cRLSign，与正式专用 CA 的限制一致；未放宽应用信任校验，完整重跑通过。自检确认未改全局 TLS/代理、未改 legacy remote 协议、未更改密文格式或移除 token 轮换读取；正式 Compose/Helm、安全门禁和业务接入仍待后续任务。
+
+### SECINF-03C-7 Agent 引导文件受控投递（暂存工具通过，正式投递待执行）
+
+需求：只把网关、凭据服务、快照备份三个 Agent 所需的 role-id/secret-id 投递给对应 Agent，离线运维身份、初始化 root、解封份额、恢复私钥和口令均不得进入投递文件。业务容器只接触短期 token，不读取这些长期机器引导秘密。
+
+实现任务：独立本机 `kms-operator stage-agents` 通过真实终端口令解开既有 `roles.age`，完整验证实例/origin/CA/recipient/身份唯一性及 FINALIZED 摘要标记，不读取初始化包、不联网、不创建身份或撤销权限。只允许输出前三个固定角色的 role-id/secret-id，各文件 0600，逐文件同步与读回，写入受控的新 staging 目录并生成无秘密的摘要清单；既有输出拒绝覆盖。staging 与 custody/恢复包所在目录分离，不能误作为离线恢复备份长期留存。Windows 父目录先核对仅保管人和 SYSTEM；失败保留部分输出、不得宣称交付完成。
+
+部署任务：经既有验证的 SSH 传输到专用 Agent bootstrap 目录，逐文件摘要及 UID/权限核对，Agent 以只读目录挂载，单独的短期 token sink 放在受控 /run 内存目录；仅确认投递和 Agent 登录后精确移除本机明文暂存文件。长期 bootstrap 在 Agent 侧按既定轮换制度保护，不冒充短期凭据。此任务不允许用聊天/工具读取口令或输出文件内容，不生成或恢复 root，不把运维角色捆绑上传。正式备份任务与业务 Compose 接线仍分别验收。
+
+验收：错误身份/绑定/完成标记在写出前拒绝，缺失/重复角色拒绝，只产生六个固定文件与摘要清单、不包含运维或 root 数据，路径重叠/覆盖拒绝；真实隔离 bootstrap 完成后的同一包可正确投递，三身份可登录，离线步骤不发起任何网络请求；实际 Agent 只读 bootstrap、独立 sink 和租约须另行核对后记录现场完成。
+
+03C-7A 实测（2026-09-08）：Windows 工具模块全量测试及 vet 通过（离线 12.750 秒、初始化 6.768 秒、operator 16.269 秒、PKI 5.285 秒）。离线测试先关闭 TLS 服务器再暂存仍成功，网络计数不变；仅六个身份文件和一个摘要清单，运维/root 排除、摘要读回、未退场/错误包/目录重叠与覆盖拒绝均通过。
+
+最新同源 Linux operator 全包在真实隔离实例无 SKIP 通过，输出 `OPENBAO_AGENT_STAGING_FIXTURE_PASS`、`OPENBAO_BOOTSTRAP_FIXTURE_PASS` 和 `OPENBAO_OPERATOR_FIXTURE_PASS`。真实暂存文件中的三个身份再次登录并完成各自权限正负例，探测 token 撤销；四类身份及 root 退场回归也通过。初次 Linux 暂存被父目录权限拦截：Go 测试临时子目录使用 0777 再受 umask 限制，不等于受控 0700。测试现明确创建 0700 staging 父目录，未放宽工具权限要求。
+
+此处仅为受控暂存工具验收；正式暂存需保管人本机输入既有口令，随后仍需验证 SSH 传输、服务端文件隔离、Agent 登录及本机明文副本清理。没有提前声称正式 Agent 已启动或业务已部署。

@@ -207,6 +207,8 @@ def main():
                 print("OPENBAO_SNAPSHOT_RESTORE_FIXTURE_PASS", flush=True)
             if args.bootstrap_fixture:
                 require("ACTUAL_OPENBAO_BOOTSTRAP_PASS" in result.stdout, "actual bootstrap did not execute")
+                require("ACTUAL_OPENBAO_AGENT_STAGING_PASS" in result.stdout, "actual agent staging did not execute")
+                print("OPENBAO_AGENT_STAGING_FIXTURE_PASS", flush=True)
                 print("OPENBAO_BOOTSTRAP_FIXTURE_PASS", flush=True)
             print("OPENBAO_OPERATOR_FIXTURE_PASS" if args.operator_test_binary else "OPENBAO_INITIALIZER_FIXTURE_PASS", flush=True)
             return
