@@ -32,6 +32,8 @@ SECINF-02 按串行可验证交付细分为 02A（投递程序与安全负例）
 
 端点由固定 Keycloak realm issuer 派生为 `protocol/openid-connect/token` 和 `certs`，强制 HTTPS、可信证书、禁止跳转及有界响应；只调用 client-credentials，不请求 refresh token。投递前要求 RS256 签名、精确 issuer/audience/sub/azp、非未来 iat、有效 nbf（若存在）、正数且最多 15 分钟的生命周期，并至少剩余 30 秒有效期。不把 `expires_in` 或未验证 payload 当可信时间。正常在剩余有效期约一半时续取；失败按有界退避重试，只记录固定错误阶段，不输出 HTTP 响应或 JWT。保留旧文件不延长其有效期，接收端和 `-check` 始终按签名与实际 exp 拒绝过期身份。
 
+02B 交付无秘密的 realm 配置生成器：固定账号、身份、计费、Token 网关、命令执行器、凭据 Portal、Keycloak 手机验证器 7 个客户端，沿用既有内部 audience；事件 relay 使用 NATS 身份，不为其增建无用途的 HTTP client。配置不预置 client secret、service-account UUID、管理员或测试用户；Keycloak 创建后通过受控管理接口取得真实账户 UUID 与逐客户端秘密，秘密只进入 agent bootstrap 文件，UUID 进入实际部署授权表。生成器不联网、不部署、不修改既有 realm。隔离联验使用全新专用 realm、随机临时管理员、loopback TLS、无业务数据和公网端口，结束后删除该测试容器；测试秘密与正式设施无关。
+
 投递采用同目录临时文件、0600 权限、sync、原子 rename；运行目录必须预先创建且非符号链接，仅该服务的 agent 可写，业务以相同 UID 只读挂载。不能挂载单个 token 文件（会固定旧 inode），必须挂载单服务目录。正式运行宿主为 Linux；Windows 仅用于开发测试，不能将其 rename 的平台差异视为 Linux 持久化证明。`-check` 仅验证已有投递文件，不申请新令牌，供健康探针使用。02B 固定默认 RS256 与 300 秒有效期，关闭标准/隐式/密码授权/设备授权/Token Exchange 和 offline access，仅保留服务账户；读取服务账户真实 UUID，绑定授权表，禁止自定义 sub 或动态扩权。
 
 ### 部署顺序
@@ -51,7 +53,7 @@ SECINF-02 按串行可验证交付细分为 02A（投递程序与安全负例）
 | 任务 | 交付与验收 | 状态 |
 | --- | --- | --- |
 | SECINF-01 | 原生 Transit provider、逐调用 token-file、两服务接线；HTTPS、AAD、轮换、权限拒绝、无泄漏、跳转及有界响应测试 | 代码已验证 / NOT_DEPLOYED |
-| SECINF-02 | Keycloak 独立服务客户端配置与轮换器；真实签发/轮换/过期/错 subject、audience、权限拒绝 | 02A 已验证；02B 待实施，整体 NOT_DEPLOYED |
+| SECINF-02 | Keycloak 独立服务客户端配置与轮换器；真实签发/轮换/过期/错 subject、audience、权限拒绝 | 02A/02B 隔离验证通过，整体 NOT_DEPLOYED |
 | SECINF-03A | 保管人已同意的本机离线托管工具；口令无回显、标准 age、加密身份读回、拒绝损坏/覆盖；在正式初始化前完成 | 代码与隔离测试已验证；本机托管身份设置成功（仅核对就绪标记与加密文件元数据），正式恢复包和离线备份尚待完成 |
 | SECINF-03 | 固定版本 OpenBao/Agent 部署、逐服务策略、TLS/网络、初始化与解封交接、备份恢复；明确单节点边界 | 待实施 |
 | SECINF-04 | Compose/Helm/生产安全门禁原生 KMS 与 fresh-install 适配、真实依赖验收及部署运行手册 | 待实施 |
@@ -86,3 +88,13 @@ SECINF-02 按串行可验证交付细分为 02A（投递程序与安全负例）
 - Linux 独立容器、非 root UID、network none、只读根目录、无业务挂载，7 个顶层测试全部 PASS（无 SKIP），其中包含 40 次替换下并发读取完整性、0600 权限、公开秘密文件/符号链接/可写目录拒绝。容器执行结束已自动移除；只使用随机隔离测试签名密钥及假客户端秘密。
 - Windows 首次并发替换测试实际暴露普通读句柄阻止 rename 的平台差异；未增加不安全的删除重建或宽松回退。正式 agent 明确仅支持 Linux，Windows 对 POSIX 权限和并发替换 2 项显式跳过，不能将 Windows 结果冒充生产原子性证明。
 - 对应 Go 测试及 vet、架构守卫、既有 workload 身份契约 3 项已通过。上述签发端是隔离 TLS fixture，不是 Keycloak 联验；真实 realm、服务账户 UUID 与权限拒绝仍需 SECINF-02B。
+
+## SECINF-02B 实测记录
+
+- 无秘密 realm 生成器 4 项 Python 测试通过；显式固定 7 个 confidential client、300 秒 RS256、无交互式授权/离线/刷新/交换/设备授权，不预置 secret、用户 UUID 或角色。
+- 真实官方 Keycloak 26.7.3 固定摘要 `sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54`；隔离容器 network none、无公开端口/业务挂载、独立 H2 测试数据，TLS 证书真实验证。具名 `TestKeycloakWorkloadIntegration` 实际 PASS（114.64 秒），无 SKIP；退出后测试容器、数据、临时秘密、启动日志均清理。
+- 通过真实管理 API 核对 7 个客户端实际导入后的授权模式及 scope，读取 Keycloak 生成的服务账户 UUID 和随机客户端秘密；实际签发并验证 300 秒令牌，未使用测试进程自签 JWT 代替 Keycloak。
+- 错 subject/audience 拒绝；另一个真实服务账户对未授权接收端 403；同一主体未授予的接口 403；服务 token 访问 Keycloak 管理 API 403。客户端秘密真正轮换后旧秘密无法再签发，新秘密自动读回并成功续取。
+- 实际验证不返回 refresh token，密码授权、offline access、Token Exchange 和设备授权被拒绝。仅隔离客户端临时缩短为 40 秒后签发真实令牌、禁用客户端，再验证续期失败保留文件；等待真实 exp 后，健康检查失败且接收端返回 401。正式生成器仍固定 300 秒，未缩短生产策略。
+- 过程发现并修复两项 fixture/配置问题：导入文件名必须与 realm 一致；省略 realm 层 scope 声明会自动附加内置 scope，已显式置空并补回归断言。早期 Go 测试进程 137 实际与 Keycloak 启动退出 1 关联，不能认定为 OOM；最终容器 memory.events 的 max/oom/oom_kill 均为 0。调试日志使用受限本地驱动，修复 max-file=1 与压缩冲突，并保证先 create 再 start、失败清理准确目标。
+- 这些证明是独立签发器与接收端链路的真实隔离验证，不是手机认证扩展镜像回归、正式域名/realm 部署、KMS 初始化、恢复演练或全系统上线验收。正式设施创建、精确 subject 授权表和 secret-file 投递配置仍由 SECINF-03/04 部署。

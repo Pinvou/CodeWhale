@@ -1,6 +1,6 @@
 # 服务身份轮换器
 
-状态：SECINF-02A 实施交付；独立 Keycloak realm、真实签发联验及 Compose/Helm 接线尚未完成，不能单独以本文宣告生产就绪。
+状态：SECINF-02A/02B 已通过隔离验证；正式 realm 部署及 Compose/Helm 接线尚未完成，不能单独以本文宣告生产就绪。
 
 ## 边界
 
@@ -43,3 +43,15 @@
 本地：`go test -tags=nomsgpack ./internal/platform/workload ./internal/platform/serviceauth ./cmd/workload-token-agent`。Windows 不以 POSIX mode bit 判断 ACL；相关权限断言只在 Linux 执行，Windows 开发目录由操作者收紧 ACL。Windows 普通读句柄会阻止并发 rename，不能运行本 agent 的正式投递服务；并发读写原子性断言同样仅在 Linux 执行。Windows 单次功能测试不能代替这两项 Linux 验证。真实部署固定 Linux。
 
 SECINF-02B 必须在隔离 Keycloak 验证真实签发、服务账户 UUID、错误主体/受众、权限拒绝、续期与过期；关闭用户交互授权、密码授权、隐式授权、设备授权、Token Exchange、offline access 和 refresh token，不给服务账户 realm-management 权限。此后 SECINF-04 才将已验证配置与镜像纳入部署 overlay，不直接沿用旧模板中的示例 subject。
+
+## 独立 realm 配置
+
+`scripts/account-platform-workload-realm.py` 是无网络、无秘密的配置生成器，默认 realm 为 `pinvou-workload`，默认 audience 沿用 `pinvou-account-platform-internal`。只创建既有 7 个 HTTP 服务客户端，不创建额外 HTTP relay 身份，不预置用户、管理员、角色、秘密或自定义 subject mapper。
+
+Keycloak 导入要求文件名严格为 `<realm>-realm.json`，默认必须保存为 `pinvou-workload-realm.json`。realm 层 `clientScopes`、`defaultDefaultClientScopes`、`defaultOptionalClientScopes` 也显式置空，防止导入时自动附加内置 scope；只清空客户端字段并不足够。使用独立 realm，不能覆盖用户登录 realm；一次性创建后不能把重复 import 当幂等更新方案。正式导入、读取逐服务 secret/真实 UUID、生成私密 bootstrap 文件及精确授权映射由 SECINF-04 的受控初始化阶段接线；不得把管理 API 返回值直接打印到终端或日志。密码、角色或 Keycloak 主密钥不能放入本生成器产物。
+
+固定候选镜像为 Keycloak 26.7.3，摘要 `sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54`。它是独立签发联验的官方镜像，不代表现有自定义手机认证扩展镜像已经升级或通过回归。
+
+隔离联验：在 Linux 编译 `./internal/platform/workload` 的 Go 测试二进制，再由有 Docker 权限的操作员运行 `scripts/account-platform-workload-keycloak-fixture.py --isolated-fixture --binary <测试二进制绝对路径> --generator <配置生成器绝对路径>`。脚本只使用新建的临时目录与容器、随机测试管理员、一次性 TLS 证书、network none 和无公开端口；正式域名/秘密不能注入。以真实 Admin API 读取服务账户 UUID，检查实际导入配置，再运行 `TestKeycloakWorkloadIntegration`；必须具名 PASS、无 SKIP。测试容器结束即移除，测试签名密钥、H2 数据及有界启动日志随之丢弃；无业务数据迁移或删除。
+
+参考：[Keycloak 服务账户](https://www.keycloak.org/docs/latest/server_admin/index.html#_service_accounts)、[realm 导入导出](https://www.keycloak.org/server/importExport)。
