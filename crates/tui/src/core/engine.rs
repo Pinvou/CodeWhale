@@ -251,6 +251,18 @@ fn user_shell_turn_outcome(
 
 // === Types ===
 
+/// Application-layer custom tools injected into every turn registry.
+#[derive(Clone, Default)]
+pub struct ExtraTools(pub Vec<Arc<dyn crate::tools::spec::ToolSpec>>);
+
+impl std::fmt::Debug for ExtraTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|tool| tool.name()))
+            .finish()
+    }
+}
+
 /// Configuration for the engine
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -488,6 +500,8 @@ pub struct EngineConfig {
     /// Applied to the per-turn tool registry after built-in tools are registered.
     /// When `None`, no overrides or plugin loading occurs.
     pub tools: Option<crate::config::ToolsConfig>,
+    /// Application-injected tools appended after the native runtime surface.
+    pub extra_tools: ExtraTools,
     /// Whether tools should follow symbolic links. When `true`, symlinked
     /// directories are traversed by walk-based tools and symlinked paths
     /// that resolve outside the workspace are still allowed (the symlink
@@ -607,6 +621,7 @@ impl Default for EngineConfig {
             read_denylist: crate::sandbox::read_guard::ReadDenylist::build(true, &[], &[]),
             verbosity: None,
             tools: None,
+            extra_tools: ExtraTools::default(),
             workspace_follow_symlinks: false,
             exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
             terminal_chrome_enabled: true,

@@ -14,6 +14,11 @@ workspace = true
 [features]
 default = []
 long-running-tests = []
+# Pinvou benchmark controls remain opt-in and are only enabled by the
+# headless evaluation host. Ordinary desktop and upstream builds do not
+# compile these compatibility paths.
+benchmark-observability = []
+benchmark-eval-controls = []
 
 [lib]
 name = "codewhale_tui"

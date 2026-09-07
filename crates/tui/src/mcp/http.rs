@@ -70,7 +70,7 @@ impl McpHttpAuth {
         let mut headers = self.headers.clone();
         for (name, env_var) in &self.env_headers {
             let value = self.reviewed_plugin.as_ref().map_or_else(
-                || std::env::var(env_var),
+                || super::host_env_var(env_var),
                 |source| source.host_environment.var(env_var),
             );
             if let Ok(value) = value
@@ -82,7 +82,7 @@ impl McpHttpAuth {
         if !mcp_headers_have_authorization(&headers)
             && let Some(env_var) = self.bearer_token_env_var.as_deref()
             && let Ok(token) = self.reviewed_plugin.as_ref().map_or_else(
-                || std::env::var(env_var),
+                || super::host_env_var(env_var),
                 |source| source.host_environment.var(env_var),
             )
         {

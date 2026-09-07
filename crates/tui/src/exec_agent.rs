@@ -288,6 +288,7 @@ pub(crate) async fn run_exec_agent(
             device_roots: execution_config.bwrap_dev_roots.clone(),
         },
         read_denylist: execution_config.read_denylist(),
+        extra_tools: crate::core::engine::ExtraTools::default(),
         memory_enabled: execution_config.memory_enabled(),
         memory_path: execution_config.memory_path(),
         speech_output_dir: execution_config.speech_output_dir(),

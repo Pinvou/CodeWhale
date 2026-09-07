@@ -38,6 +38,30 @@ use self::wire::{is_mcp_stale_session_body, is_mcp_stale_session_error};
 use crate::network_policy::{Decision, NetworkPolicyDecider, host_from_url};
 use crate::utils::write_atomic;
 
+/// Host callback that resolves an MCP secret without placing it in the
+/// process environment or persisted MCP configuration.
+pub type McpSecretResolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+static MCP_SECRET_RESOLVER: std::sync::OnceLock<McpSecretResolver> = std::sync::OnceLock::new();
+
+/// Install the host MCP secret resolver. First call wins.
+pub fn install_mcp_secret_resolver(resolver: McpSecretResolver) -> std::result::Result<(), String> {
+    MCP_SECRET_RESOLVER
+        .set(resolver)
+        .map_err(|_| "MCP secret resolver is already installed".to_string())
+}
+
+/// Resolve an MCP environment reference without requiring a process-wide
+/// environment mutation. Unknown names retain the upstream env fallback.
+pub(crate) fn host_env_var(name: &str) -> std::result::Result<String, std::env::VarError> {
+    if let Some(resolver) = MCP_SECRET_RESOLVER.get()
+        && let Some(value) = resolver(name)
+    {
+        return Ok(value);
+    }
+    std::env::var(name)
+}
+
 // === Error diagnostics helpers (#71) ===
 
 /// Bytes of a non-2xx response body to surface in connection errors.
@@ -81,7 +105,7 @@ fn expand_env_placeholders_with(
             anyhow::bail!("invalid environment placeholder in MCP config value");
         }
         let env_value = environment
-            .map_or_else(|| std::env::var(name), |env| env.var(name))
+            .map_or_else(|| host_env_var(name), |env| env.var(name))
             .with_context(|| {
                 format!("environment variable {name} required by MCP config is not set")
             })?;
@@ -1558,10 +1582,11 @@ impl McpConnection {
                         }
                     }));
             }
-            client_builder =
-                configure_mcp_proxy(client_builder, config.reviewed_plugin.is_some(), |name| {
-                    std::env::var(name)
-                });
+            client_builder = configure_mcp_proxy(
+                client_builder,
+                config.reviewed_plugin.is_some(),
+                host_env_var,
+            );
             let client = client_builder.build()?;
             let oauth_runtime = if config.reviewed_plugin.is_some() {
                 None

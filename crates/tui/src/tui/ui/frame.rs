@@ -797,6 +797,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
             device_roots: config.bwrap_dev_roots.clone(),
         },
         read_denylist: config.read_denylist(),
+        extra_tools: crate::core::engine::ExtraTools::default(),
         memory_enabled: config.memory_enabled(),
         memory_path: config.memory_path(),
         speech_output_dir: config.speech_output_dir(),

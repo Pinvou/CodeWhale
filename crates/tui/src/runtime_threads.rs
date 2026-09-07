@@ -8102,6 +8102,7 @@ impl RuntimeThreadManager {
                     device_roots: cfg.bwrap_dev_roots.clone(),
                 },
                 read_denylist: cfg.read_denylist(),
+                extra_tools: crate::core::engine::ExtraTools::default(),
                 memory_enabled: !isolated_chat && cfg.memory_enabled(),
                 memory_path: cfg.memory_path(),
                 speech_output_dir: cfg.speech_output_dir(),
