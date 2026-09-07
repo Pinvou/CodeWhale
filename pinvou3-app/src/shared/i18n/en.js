@@ -1,0 +1,1869 @@
+import { accountPlatformCopy } from '../account-platform-i18n.js';
+import { adminPlatformCopy } from '../admin-platform-i18n.js';
+// English UI dictionary. Loaded lazily via ensureLanguage("en"). Must cover every zh
+// leaf key — enforced by the parity assertion in tests/ui_language_coverage.test.mjs.
+// ja falls back to en via the spread inside i18n/ja.js, so a missing en key breaks both.
+// The i18n.js aggregate shim and Node contract tests (ui_language_coverage) statically import all three;
+// the split only affects browser chunks.
+
+/* eslint-disable sonarjs/no-nested-template-literals, sonarjs/no-unenclosed-multiline-block -- compact i18n dictionary: nested templates mirror the copy structure one-to-one; credential field names are false-positive secrets */
+import { browserEn } from './browser.js';
+
+const conversationEn = {
+  completed:'Completed', failed:'Failed', interrupted:'Interrupted', limitReached:'Limit reached', processing:'Processing', processingActive:'Processing',
+  waitingPermission:'Waiting for permission', waitingInput:'Waiting for your input', waitingInputShort:'Waiting for input',
+  goLatest:label=>`${label}. Go to latest message`,
+  elapsed:milliseconds=>{ const seconds=Math.max(0,Math.floor(milliseconds/1000)); if(seconds<60)return `${seconds}s`; const minutes=Math.floor(seconds/60); const remaining=seconds%60; return remaining?`${minutes}m ${remaining}s`:`${minutes}m`; },
+  segments:count=>`${count} commands`, running:'Running', executionFailed:'Execution failed', executionFinished:'Finished',
+  command:'Command', workingDirectory:'Working directory', output:'Output', webContent:'Web content', iwencaiNews:'iWenCai News', webSearch:'Web search', search:'Search', textContent:'Text', webPage:'Web page', shellCommand:'Run shell command',
+  results:count=>`${count} results`, recognizedResults:count=>`${count} results found`, returnedResults:'Results returned', inProgress:'In progress',
+  searchCompacted:'Search results were passed to the Agent; no stable entries could be extracted from the compacted result.',
+  resultSummaryOnly:'Only recognizable result summaries are shown to reduce context usage.', collapseRaw:'Hide raw data', viewRaw:'View raw data', rawData:'Raw data',
+  requestFailed:'Request failed', returned:'Returned', contentTruncated:'Content truncated', contentPreview:'Content preview',
+  responseTruncated:'The response exceeded the fetch limit. The Agent received the truncated content.',
+  fileChange:'File change', tool:'Tool', arguments:'Arguments', result:'Result', executing:'Executing', executionSteps:'Execution steps',
+  items:count=>`${count} items`, failedItems:count=>`${count} failed`, thinking:'Thinking', thoughtCompleted:'Thinking complete', plan:'Plan',
+  permissionRequest:agent=>`${agent} requests permission`, protectedOperation:'Run a protected operation', operationArguments:'Operation arguments',
+  allowOnce:'Allow once', allowSession:'Allow for this session', reject:'Reject', handled:'Handled', expired:'This request has expired',
+  usage:(input,output)=>`Input ${input} · Output ${output}`, contextUsage:(used,size)=>`Context ${used} / ${size}`,
+  attachment:'Attachment', operations:(count,failedCount)=>`${count} operations${failedCount?` · ${failedCount} failed`:''}`, copyReply:'Copy response', copyReplySuccess:'Copied', copyReplyFailed:'Copy failed',
+  exportReply:'Export', exportReplyTitle:'Export response', exportMarkdown:'Markdown document', exportMarkdownHint:'Default; preserves source formatting', exportHtml:'HTML document', exportHtmlHint:'Best for viewing in a browser', exportSuccess:'Exported', exportFailed:'Export failed', exportTooLarge:'The response exceeds the export size limit',
+  shareReply:'Share', shareReplyTitle:'Share response', shareSystem:'System share', shareSystemHint:'Choose an installed communication app', shareApps:'Copy content and open app', shareSuccess:'Shared', shareCopiedOpen:app=>`Content copied. Tried to open ${app}; paste there to send.`, shareCopiedWeb:app=>`Content copied. Open ${app} and paste to send.`, shareFailed:'Share failed', shareUnavailable:'System share is unavailable; content was copied', shareTargets:{wechat:'WeChat',wecom:'WeCom',feishu:'Feishu',dingtalk:'DingTalk',qq:'QQ'},
+};
+
+const codexEn = {
+  unknownDirectory:'Unknown directory', temporaryWorkspace:'Temporary workspace', projectMissing:'Original project directory no longer exists',
+  applyingConfig:'Applying configuration…', workspace:'Workspace', workspaceTitle:'View Agent workspace files and changes',
+  recreatePrefix:'The original project directory no longer exists. ', recreate:'Recreate session',
+  welcomeTitle:'Use a coding Agent for coding tasks',
+  activeHint:'Tool calls, reasoning, plans, and permission requests are shown with their original ACP semantics, separate from Pinvou work-session messages.',
+  nativeActiveHint:'Tool calls, reasoning, and confirmations are shown with Pinvou Engine semantics, on the same engine lane as work sessions.',
+  draftHint:'Start typing to create a temporary session, or choose a project directory from the lower-left corner of the composer.',
+  nativeDraftHint:'Start typing to create a temporary session, or choose a project directory from the lower-left corner so Pinvou works directly in it.',
+  attentionLatest:'A request needs attention. Go to latest', latest:'Go to latest', removeReference:path=>`Remove workspace reference ${path}`,
+  model:'Model', permissionMode:'Permission mode', sessionModeTitle:'Session mode reported by the ACP Agent',
+  relayNoModelHint:'The active relay provider has no model configured: official models will not work through it. Set a model for this provider in Settings first.',
+  configLabels:{ mode:'Permission mode', collaboration_mode:'Collaboration mode', model:'Model', reasoning_effort:'Reasoning effort', 'fast-mode':'Fast mode' },
+  agentCommands:'Agent commands',
+  placeholder:'Ask the coding Agent to edit code, run commands, or explain the repository…', temporarySession:'Temporary session',
+  chooseProject:'Choose project directory', chooseProjectDesc:'Let the Agent work directly in a real project',
+  temporarySessionDesc:'Use an isolated directory managed by Pinvou', recentProjects:'Recent projects',
+  nativeBlockedNotice:'A dangerous command was blocked and not executed',
+  rewindChip:n=>n>0?`Rewind to turn ${n}`:'Rewind to before turn 1',
+  rewindChipConversationOnly:n=>n>0?`Rewind conversation to turn ${n}`:'Clear conversation only',
+  rewindDialogTitle:'Confirm rewind',
+  rewindChangesToUndo:'Code changes to undo', rewindConversationLabel:'Conversation',
+  rewindConversationTarget:n=>n>0?`The conversation will be truncated to the end of turn ${n}; later turns are removed`:'The entire conversation will be cleared',
+  rewindConversationOnlyNote:'No code snapshot is available for this turn; only the conversation is rewound and your code stays unchanged.',
+  rewindPreRestoreNote:'The current code state is saved as a rollback point first, so you can rewind again to undo this.',
+  rewindNoChanges:'No file changes after this point',
+  rewindAdded:count=>`${count} added`, rewindModified:count=>`${count} modified`, rewindDeleted:count=>`${count} deleted`, rewindOther:count=>`${count} other`,
+  rewindStatus:{added:'Added',modified:'Modified',deleted:'Deleted',renamed:'Renamed',copied:'Copied',gitlink:'Nested repo (not rewound)',other:'Other'},
+  rewindMoreFiles:count=>`${count} more file(s)`,
+  rewindLoading:'Loading changes…', rewindPreviewFailed:'Failed to load the change preview',
+  rewindConfirm:'Rewind', rewindCancel:'Cancel', rewindBusy:'Rewinding…',
+  rewindInFlightBusy:'Another session still has a rewind or undo in progress; please wait for it to finish.',
+  rewindRetryReload:'Retry reload', rewindReloadRetryNote:'The operation took effect, but reloading the session failed. Retrying only reloads the session; it does not repeat the operation.',
+  rewindNoticeRestored:n=>n>0?`Rewound to the end of turn ${n}: code and conversation restored. The pre-rewind code state was saved as a rollback point, so you can undo this.`:'Rewound to before turn 1: code and conversation restored. The pre-rewind code state was saved as a rollback point, so you can undo this.',
+  rewindNoticeDegraded:'Conversation rewound; the code snapshot for that point is unavailable (possibly evicted), so the code was not changed.',
+  rewindNoticeConversationOnly:'Conversation rewound; the code was not changed.',
+  rewindNoticeCompaction:'Note: this session went through conversation compaction, so the model context may still contain earlier summaries after the rewind.',
+  rewindUndo:'Undo rewind', rewindUndoTitle:'Confirm undo rewind',
+  rewindUndoBody:n=>`This restores the code to its pre-rewind state and brings back the ${n} truncated turn(s) of conversation.`,
+  rewindUndoBodyConversationOnly:n=>`That rewind only truncated the conversation (your code was not changed); this brings back the ${n} truncated turn(s) of conversation and leaves the code as is.`,
+  rewindUndoConfirm:'Undo rewind', rewindUndoBusy:'Undoing…',
+  rewindUndoDone:'Rewind undone: code and conversation are back to their pre-rewind state.',
+  compactStart:'Compacting context', compactDone:'Context compacted', compactFail:'Context compaction failed',
+  nativeCompactInactive:'The session engine is not running yet. Send a message before compacting the context',
+  nativeUsageTitle:(used,pct)=>`Context used: ${used}${pct == null ? '' : ` (${pct}%)`}. Click to compact now and free up session memory`,
+  nativeMemory:'Memory', nativeMemoryTitle:'Memories active in this session',
+  // Native-lane Plan approval card: status/failure copy mirrors the bridge BT table.
+  nativePlanApproved:'✅ Approved', nativePlanDiscarded:'🚪 Plan discarded',
+  nativePlanSuperseded:'📜 Superseded by a newer plan', nativePlanHistorical:'📜 Past plan',
+  nativePlanAcceptFailed:'⚠️ accept_plan failed: ', nativePlanDiscardFailed:'⚠️ discard_plan failed: ',
+  addAttachment:'Add attachment', commandsAvailable:'Commands reported by the Agent', commandsAfterSession:'Agent commands sync after a session is created',
+  connectedSuffix:'connected', notReadySuffix:'not ready',
+  notSet:'Not set', choiceTitle:'The Agent needs your choice', submit:'Submit', cancel:'Cancel', submitted:'Submitted', canceled:'Canceled', inputExpired:'This input request has expired',
+  checking:'Checking ACP Agents…', bridgeUnavailable:'Codex ACP Bridge unavailable',
+  viewLoading:'Loading code mode…', viewLoadFailed:'Failed to load code mode, possibly due to an unstable network connection.', viewRetry:'Retry',
+  bridgeRepair:'Repair or reinstall Pinvou. In development, run npm run prepare:codex-bridge.',
+  cliMissing:agent=>`${agent} CLI not detected`, cliOutdated:(version,minVersion)=>`Detected old version ${version} (requires ≥ ${minVersion})`,
+  cliUpdateAvailable:(agent,version,latest)=>`${agent} is ${version || 'unknown'}; the latest official version is ${latest || 'unknown'}. Upgrading is recommended`,
+  cliUpdateRequired:(agent,version,latest)=>latest?`${agent} is ${version || 'unknown'} and must be upgraded to ${latest}`:`${agent}${version ? ` ${version}` : ''} must be upgraded before you can continue`,
+  packageManagerUpgradeHint:source=>source==='brew'?'This version was installed via Homebrew and will be upgraded with the same package manager—no second copy will be installed':source==='npm'?'This version was installed via npm and will be upgraded with the same package manager—no second copy will be installed':'It will be upgraded with the corresponding package manager, without installing a second copy',
+  upgrade:'Upgrade', declineUpgrade:'Not now',
+  officialScriptHint:agent=>`Run the official ${agent} install script (no administrator rights required)`, confirmInstall:'Install', installing:'Installing…',
+  manualInstallHint:agent=>`Install the ${agent} CLI manually, then choose "Check again"`, manageAgentOnDesktop:agent=>`Install, upgrade, or authorize ${agent} on the target desktop, then check again here`,
+  waitingLogin:'Waiting for Codex authorization', notLoggedIn:'Codex is not signed in',
+  waitingAgentLogin:agent=>`Waiting for ${agent} authorization`, agentNotLoggedIn:agent=>`${agent} is not signed in`,
+  finishAgentAuth:agent=>`Complete ${agent} authorization in the browser; Pinvou will connect automatically`,
+  agentLoginHint:agent=>`Authorize with your ${agent} account`,
+  deviceCode:code=>`Device code: ${code}`, authorizationCodePlaceholder:'Paste the Claude authorization code from your browser',
+  submitAuthorizationCode:'Submit authorization code', loginRequiredBeforeSend:'Sign in to the Agent before sending a message',
+  finishBrowserAuth:'Complete ChatGPT authorization in the browser; Pinvou will connect automatically',
+  openingAuth:'Opening the Agent authorization page…', loginHint:'Authorize with Codex CLI / your ChatGPT account',
+  reopenAuth:'Reopen authorization page', waitAuth:'Waiting for authorization…', authorize:'Authorize',
+  chooseProjectDialog:'Choose project directory', addAttachmentDialog:'Add attachments',
+  attachmentsParsing:'Attachments are still being parsed. Please wait', sessionSyncing:'ACP session configuration is still syncing. Please wait',
+  operationFailed:'ACP Agent operation failed. Please retry', showRawErrors:true,
+  recheck:'Check again', setupRequired:'Agent is not ready',
+  setupHints:{ kimi_cli_missing:'Install the Kimi Code CLI first', kimi_auth_required:'Authorize with your Kimi account using the device code', claude_cli_missing:'Install the Claude Code CLI first and make sure claude is on PATH (on macOS: brew install --cask claude-code)', claude_auth_required:'Authorize with your Claude account in the browser, or set ANTHROPIC_API_KEY' },
+  accountAndService:'Account and service status',
+  accountAuthorized:'Account authorized', accountNotAuthorized:'Account not authorized', serviceAbnormal:'Service issue',
+  switchAccount:'Switch account', switchAccountAffectsSessions:'The new account applies to every session using this Agent',
+  entitlementUnavailable:agent=>`${agent} membership is unavailable`,
+  quotaUnavailable:agent=>`${agent} quota is exhausted`,
+  authorizationExpired:agent=>`${agent} authorization expired`,
+  serviceUnavailable:agent=>`${agent} is temporarily unavailable`,
+  accountRecoveryHint:'This account may be expired or out of quota. Switch accounts to continue; existing sessions and messages are preserved.',
+  serviceRecoveryHint:'Check the service again. If the issue continues, retry later or switch accounts.',
+  errorDetails:'View error details', dismissNotice:'Dismiss',
+  runtimeSources:{ system:'System CLI', override:'Custom CLI', bundled:'Bundled bridge', legacy_bundled:'Bundled Codex' },
+};
+
+const acpProvidersEn = {
+  sectionDesc:'Configure third-party relay providers (API URL, model, and key) and switch between them or back to official login with one click. Switching affects every entry point that uses this CLI on this machine (terminal, IDE plugins).',
+  agentCodex:'Codex', agentClaude:'Claude Code', agentKimi:'Kimi',
+  official:'Official login', current:'Active', external:'External relay config detected', externalDesc:'The config file contains a relay configuration that cannot be attributed to a current provider; it may have been written by an external tool or manually. App switching will not overwrite it.', keyOk:'Key saved', keyNone:'No key', notEnabled:'Not enabled',
+  switch:'Switch', switchOk:'Switched', restoredOfficial:'Official login restored', restoreOfficial:'Switch to official', deleted:'Deleted', uninstallDone:'Uninstalled', currentOverriddenByEnv:'Switched · overridden by env', effectiveTitle:'Effective config (from CLI config file)', noAnthropicEndpointWarning:'This provider has no Anthropic-compatible endpoint. Claude Code only supports the Anthropic protocol. Confirm the endpoint works or use another relay.', wireResponses:'Responses',
+  edit:'Edit', delete:'Delete', addProvider:'Add provider',
+  providerName:'Name', providerNamePlaceholder:'e.g. My relay', providerOther:'Other',
+  presetAnthropic:'Anthropic Official', presetOpenai:'OpenAI Official', presetMoonshot:'Moonshot Kimi', presetKimiCode:'Kimi Code', presetDeepseek:'DeepSeek', presetZhipu:'Zhipu GLM', presetQwen:'Tongyi Qwen', presetDoubao:'Doubao', presetMinimax:'MiniMax', presetXai:'xAI Grok', presetOpenrouter:'OpenRouter', presetSiliconflow:'SiliconFlow', presetGroq:'Groq',
+  baseUrl:'Base URL', baseUrlPlaceholder:'https://api.example.com/v1',
+  wireApi:'Wire protocol', wireAnthropic:'Anthropic-compatible', wireOpenai:'OpenAI-compatible', wireKimi:'Kimi native',
+  model:'Model', modelPlaceholder:'e.g. claude-sonnet-4-5 / gpt-5.2', modelOptional:'Optional',
+  modelSlotsTitle:'Fine-grained models (opus / sonnet / haiku / fable / subagent)', modelSlotsHint:'Auto-filled from the model above; edit individually if needed. All are required — empty slots fall back to official traffic.', modelSlotsRequired:'All five fine-grained model slots are required',
+  slot_opus:'Opus slot', slot_sonnet:'Sonnet slot', slot_haiku:'Haiku slot', slot_fable:'Fable slot', slot_subagent:'Subagent',
+  secretSet:'Set (value hidden)',
+  contextWindow:'Context window', contextWindowPlaceholder:'e.g. 200000 / 1048576', contextWindowHint:'Leave empty for the CLI default (200000). A wrong value truncates conversations early—when in doubt, leave it empty.', contextWindowInvalid:'Context window must be a positive integer',
+  apiKey:'API Key', apiKeyPlaceholder:'Enter API Key', apiKeyHint:'A saved key is required to switch',
+  showKey:'Show', hideKey:'Hide',
+  thirdPartyWarning:'Pinvou never uploads your API Key.',
+  cancel:'Cancel', save:'Save', saving:'Saving…',
+  deleteTitle:'Delete provider?', deleteDesc:name=>`This removes ${name} and its saved key. If it is active, official login will be restored automatically.`, deleteConfirm:'Delete',
+  deleteKeyConfirm:'Clearing the API Key field will delete the saved key. Continue?', apiKeyEmptyConfirm:'No API key entered: switching to this provider later requires a saved key. Save anyway?',
+  empty:'No providers yet', emptyHint:'Add a third-party relay, then switch to it with one click.',
+  export:'Export', import:'Import',
+  exportWarningTitle:'The export file contains plaintext keys', exportWarningDesc:'The export file contains API keys in plaintext. Keep it safe and do not share it. Select the text to copy it manually.', exportDone:'Exported', selectAll:'Select all',
+  importWarningTitle:'The import file may contain plaintext keys', importWarningDesc:'Make sure the JSON comes from a trusted source: it may contain API keys in plaintext. Do not forward it to others after importing.',
+  importDone:p=>`Import finished: ${p.imported} added${p.idConflicts?`, ${p.idConflicts} id conflicts regenerated`:''}${p.skipped?`, ${p.skipped} invalid entries skipped`:''}`,
+  envConflictTitle:'Environment variable override detected', envConflictDesc:'These environment variables are set and take precedence over config files: switching providers or restoring official login may not take effect.',
+  envConflictVars:'Variables set',
+  cliSection:'CLI status', version:'Version', authenticated:'Authenticated', notAuthenticated:'Not authenticated', notInstalled:'Not installed',
+  install:'Install', installing:'Installing…', cancelInstall:'Cancel install', installCancelled:'Install cancelled', update:'Update', uninstall:'Uninstall', recheck:'Check again',
+  installCmd:'Command', installLatest:'Latest output', phaseChecking:'Checking…', phaseInstalling:'Installing…', phaseDone:'Done', phaseFailed:'Failed', phaseCancelled:'Cancelled',
+  rechecking:'Checking again…',
+  login:'Log in', logout:'Log out', loggedOut:'Logged out', logoutRelayDisabled:'A relay is active. Switch back to official login before logging out.', loginWaiting:'Finish signing in from your browser…', openLoginUrl:'Open sign-in link', loginCodePlaceholder:'Paste the authorization code', submitCode:'Submit',
+  uninstallTitle:'Uninstall {agent}?', uninstallDesc:'The CLI will be uninstalled according to its install source (brew / npm / official script). Uninstall is blocked while sessions are running.',
+  uninstallCleanup:'Also delete config files, saved providers, and keys', uninstallCleanupHint:'Unchecked by default; deletion cannot be undone',
+  uninstallBusy:'Uninstalling…', loading:'Loading…', loadFailed:'Failed to load', retry:'Retry', configUnreadable:'Config file unreadable', configUnreadableDesc:'The CLI config file for this agent cannot be parsed. Switching is blocked to avoid overwriting your config; fix or remove the file and try again.',
+  sessionProvider:'Session provider', sessionProviderDesc:'Provider pinned to this session; defaults to the global setting', sessionOfficial:'Follow global',
+  faultManage:'Manage providers',
+};
+
+export const dictEn = {
+  ...browserEn,
+        langTag: 'en',
+        acpAgent: 'ACP Agent',
+        newChat: 'New chat', currentChat: 'Current chat', searchChats: 'Search chats', scheduledPlans: 'Scheduled tasks', monitor: 'Status', workflow: 'Workflow', multiAgent: 'Multi-agent', multiAgentDesktopOnly: 'This multi-agent conversation is currently available only in the desktop app.', toolStore: 'Plugin Center', cardPool: 'Card Deck', recent: 'History', pinnedTasks: 'Pinned tasks', regularTasks: 'Tasks', sidebarTaskList: 'Tasks', sidebarTaskFilter: 'Filter', sidebarTaskFilterAll: 'All', sidebarTaskFilterPinned: 'Pinned', sidebarTaskFilterCode: 'Code', sidebarTaskFilterCodeSessions: 'Code sessions', sidebarTaskFilterScheduled: 'Scheduled tasks', sidebarTaskSort: 'Sort', sidebarTaskSortPinnedFirst: 'Pinned first', sidebarTaskSortRecent: 'Recent', sidebarTaskEmpty: 'No tasks', sidebarViewAll: 'View all', sidebarSection: 'Task list', sidebarDateGrouping: 'Group by date', sidebarDateGroupingDesc: 'Group tasks by date; today stays expanded', sidebarNavExpand: 'Expand navigation', sidebarNavCollapse: 'Collapse navigation', sidebarCollapseAll: 'Collapse', sidebarExpandAll: 'Expand', sidebarTaskStyle: 'Style', sidebarResize: 'Drag to resize the sidebar; double-click to reset', settings: 'Settings', localEnv: 'Local Env', megacubeSite: 'Open MegaCube site', tearoffTitle: 'Detached', tearoffHint: 'Pop out to its own window', mobileMore: 'More',
+        previewTaskDailyBrief: 'Daily Briefing', previewTaskFollowUp: 'Follow-up Monitor', previewTaskSalesWeekly: 'Sales Leads Weekly',
+        archiveSession: 'Archive', archiveConfirmTitle: 'Archive this task?', archiveConfirmMessage: 'This task will leave the sidebar.', archiveConfirmDetail: 'The conversation and artifacts stay saved, and can be restored on the chat manager page.', archiveConfirmAction: 'Archive',
+        archiveSuccess: 'Archived', archiveSuccessView: 'View',
+        sessionBatchFailed: n => `${n} task operation${n === 1 ? '' : 's'} failed. Please retry.`,
+        archivedTasks: 'Tasks archived in Settings', archivedTasksDesc: '', archivedEmpty: 'No archived tasks yet', restoreArchived: 'Restore to list',
+        archivedDeleteTitle: 'Delete archived task?', archivedDeleteMessage: 'This permanently deletes the task and its contents. This cannot be undone.', archivedDeleteAction: 'Delete',
+        knowledge: 'Knowledge', remoteKnowledge: 'Shared Knowledge',
+        remoteKbHeroTitle: 'Shared knowledge', remoteKbHeroStep1: 'Connect a knowledge server', remoteKbHeroStep2: 'Manage documents in one place', remoteKbHeroStep3: 'Use them across devices', remoteKbHeroClient: 'PINVOU client', remoteKbHeroNetwork: 'Secure network', remoteKbHeroServer: 'Knowledge server', remoteKbHeroDevices: 'Authorized devices',
+        remoteKbDesc: 'Create shared knowledge on this device, or join your team’s existing library.', remoteKbRefresh: 'Refresh', remoteKbConnectTitle: 'Join shared knowledge', remoteKbInvitePlaceholder: 'Paste a pinvou-knowledge:// invitation', remoteKbDeviceName: 'Enter your name', remoteKbConnect: 'Connect', remoteKbConnected: 'Joined shared knowledge', remoteKbServers: 'Shared knowledge', remoteKbNoServers: 'No shared knowledge yet', remoteKbReady: 'Available', remoteKbNotReady: 'Search unavailable', remoteKbOffline: 'Offline', remoteKbManage: 'Manage', remoteKbReadOnly: 'Read only', remoteKbSelectServer: 'Join or select shared knowledge first', remoteKbShowTrash: 'Show trash', remoteKbDisconnect: 'Disconnect', remoteKbRemoveConfirm: 'Disconnecting removes this connection and all chat attachments on this device. Continue?', remoteKbCollections: 'Shared collections', remoteKbCollectionName: 'New collection name', remoteKbCreate: 'Create', remoteKbCollectionCreated: 'Collection created', remoteKbNoCollections: 'No collections yet', remoteKbDocuments: 'documents', remoteKbChunks: 'chunks', remoteKbRestore: 'Restore', remoteKbTrash: 'Move to trash', remoteKbTrashConfirm: 'Move this collection to trash? Its documents remain recoverable.', remoteKbFiles: 'Documents', remoteKbUpload: 'Upload files', remoteKbUploaded: 'Documents uploaded', remoteKbNoDocuments: 'No documents in this collection', remoteKbStatusPending: 'Processing', remoteKbStatusReady: 'Available', remoteKbStatusFailed: 'Processing failed', remoteKbStatusUnknown: 'Unknown status', remoteKbDownload: 'Download original', remoteKbDownloaded: 'File downloaded', remoteKbTestSearch: 'Test search', remoteKbSearchPlaceholder: 'Enter a question or keywords', remoteKbSearch: 'Search', remoteKbDesktopOnly: 'Shared knowledge requires the PINVOU desktop app.',
+        remoteKbAddServer: 'Join shared knowledge', remoteKbHideConnect: 'Hide connection', remoteKbNewCollection: 'New collection', remoteKbCancel: 'Cancel', remoteKbClose: 'Close', remoteKbCollapse: 'Hide', remoteKbDone: 'Done', remoteKbUploading: 'Processing…', remoteKbUploadTitle: 'Upload documents', remoteKbStartUpload: 'Upload', remoteKbRetryFailed: 'Retry failed', remoteKbUploadingFile: 'Uploading', remoteKbUploadDone: 'Done', remoteKbUploadPendingIndex: 'Processing', remoteKbUploadStillIndexing: 'Still processing', remoteKbUploadIndexFailed: 'Processing failed', remoteKbUploadFailed: 'Upload failed', remoteKbUploadSuccess: '{count} documents uploaded', remoteKbUploadSummary: '{done} done · {processing} processing · {failed} failed', remoteKbUploadRefreshFailed: 'Could not refresh the list: {error}', remoteKbFileName: 'Name', remoteKbStatus: 'Status', remoteKbSize: 'Size',
+        remoteKbReplace: 'Update document', remoteKbReplaced: 'Document updated', remoteKbLoadMoreDocuments: 'Load more', remoteKbLoadingMoreDocuments: 'Loading…',
+        remoteKbNearby: 'Nearby shared knowledge', remoteKbDiscovering: 'Securely checking nearby shared knowledge…', remoteKbNearbyEmpty: 'No available LAN knowledge servers found', remoteKbManualConnect: 'Connect manually', remoteKbVerify: 'Check identity', remoteKbVerifyIdentityDesc: 'Compare this code with “Service and maintenance” on the host. Request access only when the codes match exactly.', remoteKbIdentityCode: 'Service identity code', remoteKbConfirmIdentity: 'Codes match — request access', remoteKbBack: 'Back', remoteKbLan: 'LAN', remoteKbTailnet: 'Tailscale', remoteKbHostIdentity: 'Service identity', remoteKbHostIdentityDesc: 'When a new device connects for the first time, compare this code on both devices.', remoteKbPublishLocal: 'Publish local collection', remoteKbPublishDesc: 'Copy the selected collection and its source documents. Local and shared copies remain independent.', remoteKbPublishChoose: 'Choose a local collection', remoteKbPublishContinue: 'Prepare', remoteKbPublishEmpty: 'This local collection has no documents yet', remoteKbNoLocalCollections: 'No local collections are available to publish',
+        remoteKbJoinSource: 'Share link or private address', remoteKbJoinSourcePlaceholder: 'Paste a share link or enter 192.168.1.20:3210', remoteKbJoinHint: 'Supports LAN addresses, Tailscale 100.x addresses, and *.ts.net:port. Private direct connections require identity verification first.', remoteKbShareLinkOnly: 'Paste a pinvou-knowledge://share… link generated by the owner.', remoteKbJoinRequested: 'Join request sent', remoteKbPendingTitle: 'Waiting for approval', remoteKbPendingDesc: 'PINVOU joins automatically after owner approval.', remoteKbCancelRequest: 'Cancel', remoteKbOwner: 'Owner', remoteKbGovern: 'Manage', remoteKbGovernTitle: 'Sharing and members', remoteKbPeopleTab: 'People and invites', remoteKbServiceTab: 'Service and maintenance',
+        remoteKbShareTitle: 'Invite your team', remoteKbShareDesc: 'Share links are valid for 24 hours by default and can accept multiple requests.', remoteKbCreateShare: 'Create link', remoteKbAutoApproveRead: 'Auto-approve read-only requests while this link is active', remoteKbCopy: 'Copy link', remoteKbLinkCopied: 'Share link copied', remoteKbRecoveryCopied: 'Recovery code copied', remoteKbCopyFailed: 'Copy failed. Select the text and copy it manually.', remoteKbActiveShares: '{count} active share links', remoteKbRequestsTitle: 'Join requests', remoteKbNoRequests: 'No pending requests', remoteKbApproveRead: 'Read only', remoteKbApproveManage: 'Manage', remoteKbReject: 'Reject', remoteKbStopShare: 'Stop', remoteKbAutoReadShort: 'Auto read-only', remoteKbMembersTitle: 'Members', remoteKbThisDevice: 'This device', remoteKbRevoked: 'Revoked', remoteKbRestoreAccess: 'Restore', remoteKbRevokeAccess: 'Revoke', remoteKbMemberAccess: 'Member access', remoteKbRemoveMember: 'Remove member “{name}”', remoteKbRemoveMemberAction: 'Remove member', remoteKbRemoveMemberConfirm: 'Permanently remove “{name}”?',
+        remoteKbPromoteOwner: 'Make owner', remoteKbDemoteOwner: 'Remove owner', remoteKbPromoteOwnerConfirm: 'Make “{name}” an owner? They can manage sharing and members.', remoteKbDemoteOwnerConfirm: 'Remove owner access from “{name}”?', remoteKbModelTitle: 'Semantic search model', remoteKbModelReady: 'Available', remoteKbModelMissing: 'Not downloaded', remoteKbModelDownloading: 'Downloading; this continues after PINVOU closes', remoteKbDownloadModel: 'Download', remoteKbModelDownloadingAction: 'Downloading', remoteKbPermanentDelete: 'Delete permanently', remoteKbPermanentDeleteConfirm: 'Permanently delete “{name}”? This cannot be undone.',
+        remoteKbOtherNetwork: 'Other network address (optional)', remoteKbOtherNetworkPlaceholder: 'For example, 100.64.12.34:3210 or cube.ts.net:3210',
+        remoteKbCreateHost: 'Create shared knowledge', remoteKbHostCreated: 'Shared knowledge created', remoteKbReconnectHost: 'Reconnect this host', remoteKbHostReconnected: 'Local owner access restored', remoteKbUpgradeHost: 'Upgrade service', remoteKbHostUpgraded: 'Shared knowledge service upgraded', remoteKbClientOutdatedTitle: 'Update PINVOU first', remoteKbClientOutdatedDesc: 'PINVOU {appVersion} is older than the host service {serviceVersion}. Service downgrade is blocked to protect your data.', remoteKbHostProgressCreateTitle: 'Creating shared knowledge', remoteKbHostProgressReconnectTitle: 'Restoring the local connection', remoteKbHostProgressUpgradeTitle: 'Upgrading shared knowledge', remoteKbHostProgressPrepare: 'Preparing installation files', remoteKbHostProgressInstall: 'Waiting for system approval and installing the service', remoteKbHostProgressConnect: 'Connecting to the local service', remoteKbHostProgressComplete: 'Complete', remoteKbHostProgressFailed: 'Operation did not finish', remoteKbHostProgressHint: 'Approve the system prompt if it appears. This usually takes less than a minute.', remoteKbHostProgressRetry: 'Retry', remoteKbNoLanEndpoint: 'No team-accessible LAN address was found. Connect this computer to the LAN and retry.', remoteKbHostSettings: 'Host settings', remoteKbHostSettingsDesc: 'Back up, restore, or manage this computer\'s host service.', remoteKbDangerZone: 'Stop or delete', remoteKbDangerZoneDesc: 'Stopping hosting keeps existing data. Deleting the service and data cannot be undone.', remoteKbBackup: 'Create backup', remoteKbRestoreBackup: 'Restore backup', remoteKbRecoveryTitle: 'Save recovery code', remoteKbRecoveryDesc: 'The backup is encrypted. Restoring on this computer needs no code; moving to another host requires this code. Store it separately from the backup.', remoteKbCopyRecovery: 'Copy recovery code', remoteKbRestoreTitle: 'Restore shared knowledge', remoteKbRestoreDesc: 'Leave the recovery code blank to restore on this host, or enter it to migrate to this host.', remoteKbRecoveryPlaceholder: 'Paste the recovery code for migration (leave blank on this host)', remoteKbSameHostMode: 'A same-host restore keeps the current service identity and members, and restores knowledge content only.', remoteKbMigrationMode: 'Migration imports knowledge content under a new service identity. Existing members must join again.', remoteKbRestoreAction: 'Restore', remoteKbRestoreConfirm: 'Restore knowledge content on this host? Current content will be replaced while the service identity and members stay unchanged.', remoteKbMigrateConfirm: 'Migrate this backup to the current host? Current content will be replaced and a new service identity and owner will be created.', remoteKbRestored: 'Shared knowledge restored', remoteKbMigrated: 'Shared knowledge migrated to this host', remoteKbRemoveHost: 'Stop hosting', remoteKbDeleteHost: 'Delete service and data', remoteKbRemoveHostConfirm: 'Stop the shared knowledge service on this computer? Existing data will be kept for a later reinstall.', remoteKbDeleteHostConfirm: 'Permanently delete the shared knowledge service and all data on this computer? This cannot be undone.', remoteKbHostRemoved: 'Shared knowledge hosting stopped; data was kept', remoteKbHostDeleted: 'Shared knowledge service and data deleted',
+        outputs: 'Outputs',
+        kbMount: 'Knowledge', kbMountTitle: 'Manage collections attached to this chat', kbMountPick: 'Pick a collection', kbMountNone: 'No collections yet — create or connect one in Knowledge', kbMountRemove: 'Remove all', kbMountRemoveOne: 'Remove this collection', kbMountEnable: 'Enable', kbMountDisable: 'Disable', kbMountEnabled: 'Enabled', kbMountDisabled: 'Disabled', kbMountCount: n => `${n} knowledge bases`, kbMountedTag: 'Mounted', kbMountNoModel: 'Install the embedding model first (Knowledge → Local Knowledge) to attach a local collection', kbMountNotReady: 'The embedding model is still loading or failed to load, so collections cannot be attached yet',
+        modeYolo: 'YOLO', modePlan: 'Plan', modeSwitchTitle: 'Switch mode', modeYoloDesc: 'Act directly', modePlanDesc: 'Plan first, then execute',
+        modeYoloConfirmTitle: 'Switch to YOLO mode?', modeYoloConfirmBody: 'In this mode the model reads and writes your project directory fully automatically and can run shell commands, without step-by-step approvals.', modeYoloConfirmHint: 'Remembered globally once confirmed — you will not be asked again.', modeYoloConfirmOk: 'Confirm', modeYoloConfirmCancel: 'Cancel',
+        kbTitle: 'Knowledge', kbDesc: 'Manage local and shared knowledge in one place',
+        kbRescan: 'Rescan', kbScanning: 'Scanning', kbDeduping: 'Deduping', kbScanNow: 'Scan this PC',
+        kbTotalFiles: 'Indexed files', kbDupFiles: 'Duplicates', kbWasted: 'Reclaimable',
+        kbTabSearch: 'Search', kbTabDups: 'Duplicates',
+        kbSearchPlaceholder: 'Try: pdf from last week, videos over 10mb', kbSearchBtn: 'Search',
+        kbResults: 'Results', kbNoResults: 'No matching files', kbScanningHint: 'Indexing… scanned',
+        kbEmptyHint: 'No index yet. Scan this PC to instantly search all files and find duplicates.',
+        kbBuildDups: 'Find duplicates', kbDupHint: 'No dedup data yet. Click "Find duplicates" to scan — reads files on demand to fingerprint.',
+        kbDupNote: 'Files with identical content (delete action coming in a later version)', kbNoDups: 'No duplicates found', kbDupCopies: 'copies',
+        kbOpen: 'Open', kbOpenFolder: 'Open folder',
+        kbPageTitle: 'Knowledge', kbFilesSub: 'Search and browse local files, and turn them into an AI-citable knowledge base.', kbKbSub: 'Turn local files into AI-citable knowledge; answers cite their sources.',
+        kbSubFiles: 'Local Files', kbSubKb: 'Local Knowledge', kbSubRemote: 'Shared Knowledge', kbSubOutput: 'Outputs',
+        kbOutSub: 'Everything you and PINVOU have made, all in one place.',
+        kbOutSearch: 'Search outputs', kbOutSearchList: 'Search by name / source chat',
+        kbOutCatAll: 'All', kbOutCatWeb: 'Web', kbOutCatDoc: 'Docs', kbOutCatImg: 'Poster', kbOutCatPpt: 'PPT',
+        kbOutCount: (n) => `${n} items`, kbOutSort: 'Recently modified',
+        kbOutGroupToday: 'Today', kbOutGroupWeek: 'This week', kbOutGroupEarlier: 'Earlier', kbOutGroupCount: (n) => `${n} outputs`,
+        kbOutMonthLabel: (y, m) => `${y}-${String(m).padStart(2, '0')}`, kbOutGroupUnknown: 'Unknown time',
+        kbOutColName: 'Name', kbOutColType: 'Type', kbOutColSource: 'Source chat', kbOutColTime: 'Modified', kbOutColActions: 'Actions',
+        kbOutTodayPrefix: 'Today', kbOutWeekdays: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'],
+        kbOutPreview: 'Preview', kbOutOpenChat: 'Open in chat', kbOutContinue: 'Continue', kbOutNewProject: 'New project', kbOutGallery: 'Gallery', kbOutList: 'List', kbOutOpenExt: 'Open in system', kbOutOpenFolder: 'Open folder',
+        kbOutEmpty: 'No outputs yet', kbOutEmptyHint: 'Chat with PINVOU — things you make together will appear here.',
+        kbOutContinuePrefill: (name) => `Continue refining "${name}"`, kbOutRequirementLabel: 'My request:', kbOutFileCount: (n) => `${n} files`,
+        kbCatAll: 'All', kbCatDoc: 'Docs', kbCatSheet: 'Sheets', kbCatPpt: 'Slides', kbCatPdf: 'PDF', kbCatImg: 'Images', kbCatZip: 'Archives',
+        kbRecent: 'Recently modified', kbAddToKb: 'Add to knowledge', kbAdd: 'Add', kbAddFiles: 'Add files', kbAddFolder: 'Add folder', kbIndexing: 'Parsing',
+        kbBrowseByType: 'Browse by type', kbMonitored: 'Click a type to filter below', kbItemUnit: '', kbMonitoredDirs: 'Watching {n} folders', kbManageFavLink: 'Manage →', kbRecentFiles: 'Recent files', kbAllFiles: 'All files', kbSortByModified: 'Sorted by last modified', kbColName: 'Name', kbColLoc: 'Location', kbColSize: 'Size', kbColTime: 'Modified', kbManageFav: 'Manage →', kbEnter: 'Enter', kbCollUnit: 'knowledge bases', kbColColl: 'Knowledge base', kbStatus: 'Status',
+        kbBannerTitle: 'AI Knowledge · Build your own knowledge base', kbNewColl: 'New collection', kbEditColl: 'Edit collection', kbSave: 'Save',
+        kbStep1: 'Pick local files', kbStep2: 'AI parse & index', kbStep3: 'Cited in chat',
+        kbMyColls: 'My collections', kbNoColls: 'No collections yet. Click "New collection" to start.', kbNoCollsShort: 'No collections yet — create one first.',
+        kbDocs: 'docs', kbUncat: 'Uncategorized', kbCollFiles: 'Files in knowledge', kbBlocks: 'blocks', kbSkipped: 'skipped',
+        kbStReady: 'Ready', kbStIndexing: 'Parsing', kbStPending: 'Pending',
+        kbImportInterrupted: 'Unfinished import found', kbImportInterruptedHint: 'Progress from the previous run was saved. Continue from the unfinished file or chunk.', kbResumeImport: 'Continue import', kbCancelImport: 'Cancel task',
+        kbImportProgress: 'File progress', kbCurrentFile: 'Current file:', kbChunkProgress: 'Chunk progress', kbFailedFiles: 'Failed files', kbRetryFile: 'Retry', kbImportErrors: 'failed', kbImportDoneWithErrors: 'Import finished with errors',
+        kbResumeImportFailed: 'Failed to continue import', kbCancelImportFailed: 'Failed to cancel import', kbRetryImportFailed: 'Failed to retry file',
+        kbLoadMoreFailedFiles: 'Load more failed files', kbLoadingFailedFiles: 'Loading…', kbLoadFailedFilesFailed: 'Failed to load failed files',
+        kbDeleteColl: 'Delete collection', kbRemove: 'Remove', kbCollEmpty: 'No documents yet. Click "Add files".', kbNoCollFiles: 'No files in any knowledge base yet', kbAllColls: 'All', kbDelCollConfirm: 'Delete collection "{n}"?', kbDelCollWarn: 'Only removes the index for its {c} documents. Your original files on disk are NOT deleted.', kbDelete: 'Delete', kbRemoveDocConfirm: 'Remove "{n}" from the knowledge base?', kbRemoveDocWarn: 'Only deletes its index here. Your original file on disk is not affected.', kbRemoveFailed: 'Could not remove document', kbRemoveQ: 'Remove?',
+        kbRetrPlaceholder: 'Search inside this collection…', kbModeSearch: 'Search', kbModeAsk: 'Ask AI', kbAskPlaceholder: 'Ask this collection… (AI answers from its content, with citations)', kbAskBtn: 'Ask', kbAsking: 'Thinking…', kbAnswer: 'Answer', kbSources: 'Sources', kbNoContext: 'Nothing indexed in this collection yet — add files and wait for indexing.', kbAskError: 'Failed to answer — check the local model service.', kbCollNamePh: 'Collection name', kbCollCatPh: 'Category (optional)', kbCancel: 'Cancel', kbCreate: 'Create',
+        kbEmbedOn: 'Semantic search on', kbEmbedOff: 'Semantic search off · full-text only',
+        kbModelTitle: 'Embedding model not installed', kbModelDesc: 'Vectorizing and semantic search rely on a local embedding model. Download and deploy it to start building knowledge bases the AI can answer from.',
+        kbModelLoadingTitle: 'Loading embedding model', kbModelLoadingDesc: 'Local semantic search is initializing. Knowledge bases will become available automatically when it finishes.', kbModelFailedTitle: 'Embedding model failed to load', kbModelFailedDesc: 'Retry loading first. If the local files are incomplete or damaged, download and repair the model.',
+        kbModelPkgName: 'PINVOU Embedding Model', kbModelPkgSub: 'Multilingual vector model · int8 quantized · CPU-only, fully local',
+        kbModelChipDownload: '~{n} MB download', kbModelChipInstalled: '~{n} MB when installed', kbModelChipOffline: 'Fully offline', kbModelChipLang: 'Chinese / multilingual',
+        kbModelItem1: 'bge-m3 multilingual vector model (int8 ONNX)', kbModelItem2: 'Tokenizer & model config files', kbModelItem3: 'CPU inference, no network or GPU',
+        kbModelDownloadBtn: 'Download & deploy', kbModelFoot: 'Install once, then offline · keep using other features while it downloads',
+        kbModelRetryBtn: 'Retry loading', kbModelRepairBtn: 'Download & repair', kbModelLoading: 'Loading model…',
+        kbModelStageDownload: 'Downloading model files…', kbModelStageVerify: 'Verifying…', kbModelStagePrepare: 'Preparing model…', kbModelStageDone: 'Done',
+        sysStatus: 'System Status', sysDesc: 'Real-time performance metrics', gpu: 'GPU', gpuUnavail: 'Unavailable', noSmi: 'nvidia-smi not found',
+        cpu: 'CPU', cpuUnavail: 'CPU info unavailable', cpuTotal: 'Total Usage', cpuProcess: 'App Usage', cpuLogical: 'logical processors',
+        vram: 'VRAM Usage', core: 'Core Usage', temp: 'Temp', power: 'Power', unifiedMem: 'Unified Memory',
+        ram: 'System RAM', used: 'Used', physical: 'Physical RAM', total: 'Total', swap: 'Swap Space',
+        vllm: 'Inference Engine', ctx: 'Context Length', ctxWarn: '⚠️ Small context window (%s, below 128k). Long chats compact often and keep less history; use a model with ≥128k window or raise --max-model-len', queue: 'Task Queue', kv: 'KV Hit Rate', ttft: 'TTFT', tps: 'TPS (Generation Speed)', tokTotal: 'Total Tokens · gen/prompt', clearHold: 'Hold to reset', clearHolding: 'Keep holding…', clearDone: 'Cleared', clearHint: 'Hold "Reset" until full to clear · release to cancel', statsSince: 'Since %t', statsAge: ' · %m min running', statsJustReset: ' · just reset', statsLifetime: 'Lifetime total', app: 'App Service', appRunning: 'Core daemon running',
+        curVer: 'App Version', uiVer: 'UI Version', uptime: 'Uptime', runningMemory: 'Active Memory', temporaryMemory: 'Temporary Memory', memoryPressure: 'Memory Pressure', normal: 'Normal', localProcessor: 'Local Compute', processorLoad: 'Processor Load', graphicsLoad: 'Graphics Load', sharedMemory: 'Shared Memory', deviceTemp: 'Device Temp', currentModel: 'Current Model', localRunning: 'Local', remoteService: 'Remote', available: 'Available', unavailable: 'Unavailable', historyReuse: 'Reuse Rate', modelTextVolume: 'Model Text Volume', modelReadAmount: 'Model Reads', modelOutputAmount: 'Model Outputs', modelReadHint: 'More input means slower responses and higher usage', modelOutputHint: 'More output means longer replies and higher usage', resetCount: 'Reset Count', contextHint: 'Conversation range kept in memory', queueHint: 'Running / waiting', ttftHint: 'Wait before the first word', tpsHint: 'Reply output speed', reuseHint: 'Higher is faster and saves tokens', totalMemory: 'Total Memory',
+        appearance: 'Appearance & Language', lang: 'Language', langDesc: 'Switch application display language', theme: 'Theme', themeDesc: 'Choose your color style',
+        light: 'Light', dark: 'Dark',
+        notifications: 'Notifications',
+        taskCompletedNotif: 'Task completion alert',
+        taskCompletedNotifDesc: 'Send a system notification when a task finishes',
+        searchBackend: 'Web Search', searchSource: 'Search Source', searchBackendDesc: 'Source used by the LLM when invoking the Web search action',
+        searchKey: 'API Key',
+        searchKeyHintBing: 'Bing needs no API key, but Chinese search results are poor',
+        searchKeyHintMetaso: 'Leave empty for community shared key (~100/day, multi-user)',
+        searchKeyHintBocha: 'Required, search will fail without it',
+        searchKeyHintBaidu: 'Required (Baidu Qianfan API Key), search will fail without it',
+        searchKeyHintTavily: 'Required (tvly- prefix), overseas service, needs stable external network',
+        searchKeyPlaceholder: 'Paste API key',
+        searchRestartHint: 'Configuration changed — saving will restart the app',
+        searchGetKey: 'Get your own key',
+        searchGetKeyMetasoSteps: 'Free · 1-min QR-code sign-up (WeChat/phone) · Personal quota',
+        searchGetKeyBochaSteps: 'Free · Get sk- prefixed key from console after sign-up',
+        searchGetKeyBaiduSteps: 'Create API Key in Qianfan console · Pay-as-you-go with free tier',
+        searchGetKeyTavilySteps: 'Overseas · Get tvly- key after sign-up · Free monthly tier, needs external network',
+        modelBackend: 'Model & Backend',
+        modelBackendDesc: 'Choose a local model service or a third-party API for inference',
+        modelPreset: 'Model Source',
+        modelPresetLocalVllm: 'Local model (default)',
+        modelPresetDeepseek: 'DeepSeek',
+        modelPresetKimi: 'Kimi',
+        modelPresetOpenaiCompatible: 'OpenAI Compatible',
+        modelPresetOpenai: 'OpenAI',
+        modelPresetAnthropic: 'Anthropic Claude',
+        modelPresetGemini: 'Google Gemini',
+        modelPresetXai: 'xAI Grok',
+        modelPresetQwen: 'Tongyi Qianwen',
+        modelPresetDoubao: 'Doubao',
+        modelPresetMinimax: 'MiniMax',
+        modelPresetGlm: 'Zhipu GLM',
+        modelPresetMimo: 'Xiaomi MiMo',
+        customModelName: 'Model Name',
+        customBaseUrl: 'API Base URL',
+        modelContextWindow: 'Context Window (tokens)',
+        modelMaxOutput: 'Max Output (tokens)',
+        customApiKey: 'API Key',
+        credEnvOverride: 'Env override', credUnavailable: 'Credential unavailable', credConfigured: 'Configured', credNotConfigured: 'Not configured', credEnterNewKey: 'Enter new key to replace', credKeep: 'Keep', credReplace: 'Replace', credDeleteKey: 'Delete Key', clearSearch: 'Clear search', clearInput: 'Clear input', sendMsg: 'Send', apiKeyGateTitle: 'API Key required', apiKeyGateDesc: 'The current model is a cloud model. Configure an API Key to start chatting.', apiKeyGateBtn: 'Configure',
+        detectLocalVllm: 'Detect local model services',
+        detectingLocalVllm: 'Detecting…',
+        useVllmConfig: 'Use config',
+        vllmDetectFound: n => `${n} available instance${n === 1 ? '' : 's'} found`,
+        vllmDetectNone: 'No local model service found',
+        vllmDetectError: e => `Detection failed: ${e}`,
+        vllmDetectOffline: 'Offline',
+        vllmDetectReady: 'Ready',
+        vllmDetectBusy: 'Busy',
+        vllmDetectMismatch: 'Mismatch',
+        vllmDetectedModel: 'Model',
+        vllmDetectedContext: 'Context',
+        vllmDetectHint: 'Checks only common vLLM, Ollama, and LM Studio ports on 127.0.0.1 / localhost. Remember to save after picking a candidate.',
+        confirmAndRestart: 'Save & Restart',
+        addModel: '＋ Add Model', editModel: 'Edit', deleteModelBtn: 'Delete', setActiveModel: 'Set Default', modelActiveTag: 'Default',
+        modelFormAddTitle: 'Add Model', modelFormEditTitle: 'Edit Model', modelDisplayName: 'Display Name',
+        testConnection: 'Test Connection', testingConn: 'Testing…', modelSaveBtn: 'Save', manageModels: 'Manage models…',
+        switchModelTitle: 'Switch model', modelSwitchBusy: 'Busy generating, cannot switch', modelNonePick: 'Select model', modelDeleteMin: 'Keep at least one model',
+        modelGroupPreset: 'Presets', modelGroupCustom: 'Custom',
+        thinkingDepth: 'Thinking depth', thinkingDepthTiers: { off: 'Off', low: 'Low', medium: 'Medium', high: 'High', max: 'Max' },
+        saveModelFailed: 'Failed to save thinking depth. Please try again',
+        modelEnvLocked: f => `Locked by env vars: ${f}; settings won't apply`, deleteModelConfirm: n => `Delete model "${n}"?`,
+        modelDirtyHint: 'Configuration changed — saving will restart the app',
+        langRestartHint: 'Interface language switched; restart the app to apply it to the assistant',
+        sysPerm: 'System Permissions', sudo: 'Advanced execution (Sudo)', sudoDesc: 'Allow the assistant to run advanced commands such as environment configuration',
+        versionUpdate: 'Version & Update',
+        uiRemote: {
+          title:'Mobile Remote Control', desc:'Once enabled, the remote link can browse local files and run a code Agent in selected folders. Share it only with people you trust.', browser:'Browser connection', stop:'Stop', qrAlt:'Remote control QR code', qrHint:'Scan with your phone or copy the link below', link:'Remote control link', linkHint:'The QR code and link are identical and remain valid after restart. Refreshing or stopping access revokes the old link immediately.', generating:'Generating remote control link…', notStarted:'Remote control is not enabled.', copy:'Copy Link', refresh:'Refresh QR Code', enable:'Enable Access', allowWorkspace:'Allow Local Folders', refreshTitle:'Refresh QR code?', refreshDesc:'The old QR code and link will become invalid immediately, and the current browser will disconnect. Scan the new QR code or copy the new link to reconnect.', refreshing:'Refreshing…', updated:'Remote control status updated.', unavailable:'Remote control is temporarily unavailable. Try again.',
+          status:{ idle:['Not enabled','Enable access to create a persistent remote control link.'], starting:['Starting','Creating the remote control connection.'], connecting_relay:['Connecting','Connecting to the relay…'], waiting_web_client:['Waiting for browser','Paste the link into a browser on your phone or computer.'], web_client_connected:['Browser connected','A browser is connected to this desktop.'], web_client_disconnected:['Browser disconnected','The link remains valid and can reconnect at any time.'], revoked:['Link revoked','Enable remote control again.'], stopped:['Stopped','Open this panel to enable access again.'], error:['Connection error','Remote control is temporarily unavailable. Try again.'] },
+        },
+        uiMonitor: { bridgeNotReady:'Bridge not ready', readFailed:'Read failed', reading:'Loading', configError:'Configuration error', unverified:'Unverified', authFailed:'Authentication failed', bridgeError:'Monitor bridge is not ready. Open this page in the Tauri app window.', readError:e=>`Monitor read failed: ${e}`, activity:'Activity' },
+
+        uiSettings: { common:'Common', system:'System', general:'General', model:'Models', search:'Search', memory:'Memory', community:'User Community', permissions:'Permissions & Environment', data:'Data Management', update:'Updates', help:'Help & Feedback', appearance:'Appearance', language:'Interface Language', languageDesc:'Change the app display language', theme:'Theme', themeDesc:'Choose a light or dark appearance', notifications:'Notifications', taskNotice:'Task Completion Alerts', taskNoticeDesc:'Show a system notification when a task finishes', desktopAssistant:'Desktop Assistant', pet:'Desktop Companion', petDesc:'Show a persistent companion on the desktop', version:'Version', currentVersion:'Current Version', beta:'Beta', releaseNotes:'Release Notes', noReleaseNotes:'No release notes', downloading:p=>`Downloading update ${p}%`, installingUpdate:'Installing update…', installerStarted:'Installer Started', cancelDownload:'Cancel Download', providers:'ACP' },
+        uiSettingsDetail: { modelSection:'Models', settingsLoadFailed:'Failed to load settings', addModel:'Add model', envManaged:'Model settings managed by environment variables remain visible here, but must be changed in the environment.', localModel:'Local model', defaultTag:'Default', edit:'Edit', delete:'Delete', noModels:'No models', localDefaultName:'Local Qwen3.6', searchList:'Search sources', setDefault:'Set as default', addSearch:'Add search source', searchDescriptions:{ bing:'Built-in search', metaso:'Chinese search service', bocha:'Search service', baidu:'Qianfan AI Search', tavily:'International search service' }, searchSourceHint:'Built-in search works without a key; if the selected service fails, searches fall back to it automatically. Adding a Chinese search service improves long Chinese-language queries.', memoryTypes:{ preference:'Long-term preference', work_context:'Work context', current_focus:'Current focus', recent_activity:'Recent activity' }, memoryDetail:'Memory details', content:'Content', editTitle:label=>`Edit ${label}`, userCallName:'Your name', assistantNickname:'Assistant nickname', callNameDesc:'How the assistant addresses you', assistantNameDesc:'How you address the assistant', unnamedMemory:'Untitled memory', view:'View', enableMemory:'Enable memory', enableMemoryDesc:'PINVOU remembers names, preferences, work context, and recent activity', profile:'Profile', notSet:'Not set', longMemory:'Long-term memory', shortMemory:'Short-term memory', noLongMemory:'No long-term memories', noShortMemory:'No short-term memories', hiddenTasks:'Hidden tasks', archivedAt:date=>`Archived ${date}`, restore:'Restore', noHiddenTasks:'No hidden tasks', noHiddenTasksDesc:'Archived tasks appear here', system:'System', advancedPermission:'Advanced execution permission', advancedPermissionDesc:'Allow the assistant to run advanced commands such as environment configuration', missing:'Missing', installMissing:'Install missing dependencies', feedbackTitle:'Submit an issue or suggestion', feedbackDesc:'Attach images or videos; a privacy notice is shown before submission', submitFeedback:'Submit feedback', editSearch:'Edit search source', apiKeyPlaceholder:'Enter API Key', hide:'Hide', show:'Show', cancel:'Cancel', save:'Save', restartSearchTitle:'Restart to apply search settings?', restartLanguageTitle:'Restart to apply language settings?', restartSearchDesc:'Restart the app before the assistant can use the updated search source or credentials.', restartLanguageDesc:'The interface language changed. Restart to also update the assistant response language.', later:'Later', restartNow:'Restart now', deleteModelTitle:'Delete model?', deleteModelDesc:'This removes the model configuration and its saved credentials.', deleteModel:'Delete model', deleteSearchTitle:'Delete search source?', deleteSearchDesc:name=>`This removes ${name} and its saved credentials.`, deleteSearch:'Delete search source', addSearchDesc:'Choose a search source, then enter the required credentials', closeSettings:'Close settings', chooseModelDesc:'Choose a model, then enter the required credentials', collapse:'Collapse', change:'Change', customModel:'Custom model', localModelName:name=>name ? `Local ${name}` : 'Local model', apiKeyReadFailed:'Failed to read API Key', localModelId:'Local model ID', modelId:'Model ID', modelIdPlaceholder:'Enter model ID', customModelTitle:provider=>`Custom ${provider} model`, customModelDesc:'Enter a model ID manually', customLocalDesc:'Enter the model ID exposed by the local service', customCompatibleDesc:'Enter the model ID and service URL manually', modelDescriptions:{ '本地服务默认模型':'Default local service model', '高能力模型':'High-capability model', '快速响应':'Fast responses', '最新通用模型':'Latest general-purpose model', '代码场景':'Coding tasks', '高速代码场景':'High-speed coding tasks', '稳定可用':'Stable release', '最新推荐':'Latest recommended', '高性价比':'Cost-effective', '通用能力':'General-purpose', '兼容保留':'Compatibility option', '高速响应':'High-speed responses', '兼容高速':'High-speed compatibility option', '稳定通用':'Stable general-purpose model', '轻量模型':'Lightweight model', '兼容端点示例':'Compatible endpoint example' } },
+
+        uiPetSettings: { choose:'Choose a companion', placeholder:'Coming soon', preparing:'Preparing animation', animationFailed:'Animation failed to load', coverFailed:'Cover failed to load', retry:'Retry', pets:{ lingling:{name:'Lingling',description:'Star-patterned tail, always lively'}, langlang:{name:'Langlang',description:'Black outfit and glasses, calmly by your side'}, 'ace-taffy':{name:'Ace Taffy',description:'Pink hair and crown, cheering you on'} } },
+        uiScheduled: { title:'Scheduled Tasks', subtitle:'Let PINVOU automatically handle recurring work', newTask:'New Task', templates:'Recommended Templates', myTasks:'My Tasks', loading:'Loading scheduled tasks…', empty:'No matching scheduled tasks', view:n=>`View scheduled task: ${n}`, useTemplate:n=>`Use ${n} template`, running:'Task is running', unread:'Unviewed run conversation', navUnreadAria:'Scheduled tasks have unviewed run conversations', closeError:'Dismiss error', deleteTitle:'Delete scheduled task?', deleteDescription:n=>`“${n}” will stop running and be removed from the task list. Previous run history will be kept.`, cancel:'Cancel', delete:'Delete', save:'Save', filterAll:'All', filterActive:'Enabled', filterPaused:'Paused', active:'Active', paused:'Paused', enabled:'Enabled', unknown:'Unknown', notScheduled:'Not scheduled', noSchedule:'No schedule', waitingDispatch:'Waiting to run', soon:'Starting soon', nextRun:(time,remaining)=>`Next: ${time} (${remaining})`, date:(month,day)=>`${month}/${day} `, daysAfter:(days,hours)=>`in ${days}d${hours ? ` ${hours}h` : ''}`, hoursAfter:(hours,minutes)=>`in ${hours}h${minutes ? ` ${minutes}m` : ''}`, minutesAfter:(minutes,seconds)=>`in ${minutes}m ${seconds}s`, secondsAfter:seconds=>`in ${seconds}s`, runStatus:{ queued:'Queued', running:'Running', completed:'Completed', failed:'Failed', canceled:'Canceled' }, weekdays:[['Monday','Mon'],['Tuesday','Tue'],['Wednesday','Wed'],['Thursday','Thu'],['Friday','Fri'],['Saturday','Sat'],['Sunday','Sun']], hourCount:n=>`${n} hour${n === 1 ? '' : 's'}`, choose:'Choose', autoModel:'Auto select', currentModel:'Current model', reselectModel:n=>`Choose another model · ${n}`, repeatOptions:{ workdays:'Weekdays', daily:'Daily', weekly:'Weekly', hourly:'Hourly', custom:'Custom' }, everyHours:n=>`Every ${n} hours`, startsAt:time=>`from ${time}`, repeat:'Repeat', interval:'Interval', dateLabel:'Days', startTime:'Start time', time:'Time', chooseRepeat:'Choose repeat frequency', chooseInterval:'Choose hourly interval', chooseDate:'Choose run days', chooseStartTime:'Choose start time', chooseRunTime:'Choose run time', setStart:'Set start', createFromTemplate:'Create from template', closeCreate:'Close new task', taskName:'Task name', taskNamePlaceholder:'For example: Daily data backup', taskPrompt:'Instructions', taskPromptPlaceholder:'Describe what should be done on each run…', saveTask:'Save task', editTask:'Edit task', closeDetail:'Close task details', taskNameAria:'Scheduled task name', taskPromptAria:'Scheduled task instructions', aiModel:'AI model', chooseModel:'Choose scheduled task model', runningStatus:'Status', nextExecution:'Next run', enableTask:'Enable task', runNow:'Run now', openFolder:'Open folder', runHistory:'Run history', records:n=>`${n} record${n === 1 ? '' : 's'}`, noRecords:'No records', openRun:'Open run conversation', noOpenRun:'This run has no conversation to open', openRunLabel:s=>`Open run: ${s}`, runInProgress:'Run in progress', viewRunResult:'Open the conversation to view results', noRunSession:'No conversation available', noRunHistory:'No run history yet', saveState:{ saving:'Saving…', saved:'Saved', invalid:'Name and instructions are required', error:'Save failed' }, pause:n=>`Pause ${n}`, resume:n=>`Resume ${n}`, templateMap:{ 'daily-brief':{name:'Daily Briefing',schedule:'Daily at 8:00',description:'Summarize important news, industry updates, and connected workplace announcements',prompt:'Summarize important news and industry updates from the past 24 hours with sources and links; when Lark or WeCom is connected, include company announcements. Do not scan user directories; save results to the task workspace.'}, 'follow-up-monitor':{name:'Follow-up Monitor',schedule:'Weekdays at 9:00',description:'Review overdue and upcoming items, highlighting risks and next steps',prompt:'Summarize overdue, due-today, and upcoming (next 3 workdays) items from connected Lark or WeCom, with risks and next steps by priority. Query and organize only — do not send, approve, or modify; do not scan user directories.'}, 'weekly-review':{name:'Weekly Review',schedule:'Friday at 16:00',description:'Create a structured weekly report from this week’s workplace activity',prompt:'Create a weekly report from this week’s calendar, to-dos, and workplace messages in connected Lark or WeCom, covering progress, carry-over items, risks, and next week’s plan. Do not scan user directories or send automatically.'} } },
+        uiChat: { ready:'Ready', sceneModes:{ personalWorkbench:'Personal workbench', documentWriting:'Document writing', poster:'Poster', dataVisualization:'Data visualization', pptDesign:'PPT design', pptUnavailable:'PPT generation is being repaired', clear:label=>`Clear ${label}`, designGeneralPlaceholder:'Describe what you want to create or adjust' }, askMe:'Try asking', naturalQuestion:'Ask in natural language.', backRuns:'Back to scheduled task run history', scheduledRun:'Scheduled task run', runRecords:'Run history', asrUnavailable:'Speech recognition is not installed. Install it in the desktop app and try again.', gotIt:'Got it', asrDownloadTitle:'Download speech recognition model', asrEnableTitle:'Enable local speech recognition', asrRuntimeMissing:'The local speech runtime is missing. Repair or reinstall the app; models can only be downloaded when the runtime is present.', asrFirstUse:(size,ffmpeg)=>`First use requires a speech recognition download (${size}${ffmpeg ? ' + ffmpeg' : ''}). Processing stays on this device.`, sizeModelOnly:'about 254 MB', sizeFull:'about 174–254 MB', asrStages:{ ffmpeg:'Installing ffmpeg (a system authorization dialog may appear)…', verify:'Verifying model integrity…', cancelling:'Canceling download…', done:'Done', cancelled:'Canceled', failed:'Download failed. Try again.', preparing:'Preparing…' }, downloadingModel:p=>`Downloading model ${p}`, cancelling:'Canceling…', cancelDownload:'Cancel download', cancel:'Cancel', repairInstall:'Repair installation', downloadModel:'Download model', install:'Install', designingCard:'🃏 Designing card…', recordedRecent:'Recent activity recorded', viewMemory:'View it in Memory', memoryUpdated:'Memory updated', processed:'Processed', candidate:'Memory suggestion', remember:'Remember', ignoreOnce:'Ignore this time', neverAsk:'Do not ask again', memoryMeta:{ current_focus:{label:'Current focus',prompt:'I can remember this current focus',hint:'I’ll use it to understand the work you are currently advancing.',notice:'Future chats can refer to this recent item.'}, recent_activity:{label:'Recent activity',prompt:'I can remember this recent activity',hint:'I’ll use it to understand what you just completed.',notice:'Future chats can refer to this completed work.'}, work_context:{label:'Work context',prompt:'I can remember this work context',hint:'I’ll use it to understand your longer-term work context.',notice:'Future chats can refer to this long-term context.'}, profile:{label:'Name',prompt:'I can remember this name',hint:'I’ll use this name when talking with you.',notice:'Future chats will use this name.'}, preference:{label:'Preference',prompt:'I can remember this preference',hint:'I’ll adjust future responses using this preference.',notice:'Future chats can refer to this preference.'} } },
+        uiChatExtra: { transferRevision:type=>`Pinvou · ${type} · Revision handoff`, draftingScheduled:'⏰ Preparing scheduled task draft…' },
+        expertPoolIndividualTab:'Individual Experts', expertPoolTeamTab:'Expert Teams',
+        uiWorkflow: { pick:'Choose a workflow template to begin', empty:'No workflows are available. Check the bundled workflow resources.', workflow:'Workflow', stopFailed:e=>`Failed to stop workflow: ${e}`, completed:'🎉 Workflow complete' },
+        uiToolStore: { title:'Plugin Center', search:'Search connectors, skills, and plugins', myTools:'My Plugins', installedOnly:'Installed only', results:'Search Results', back:'Back to Plugin Center', internal:'Internal · Employees only', internalTitle:'H3C Workplace\nOne-click Access', internalDesc:'Connect to internal systems with your SSO identity—no key required', internalTools:'H3C Internal Plugins', internalCount:n=>`${n} plugins · Intranet required`, view:'View', modePlain:'Plain', modeCode:'Code', modeVisibilityHint:'Configure plugin visibility per session mode', manageVisibility:'Manage Visibility', doneManagingVisibility:'Done', guide:{ title:'Plugin Guide', close:'Close', dragTitle:'Drag to install', dragDesc:'Drag a standard skill, a single .md, an MCP server, or a Pinvou plugin .zip directly into this window to import it, or click "Upload" in the top-right to choose a file.', typesTitle:'Supported forms', types:['Standard skill (SKILL.md folder)','Single .md skill file','MCP server','Pinvou plugin package (recommended)'], formatsNote:'Standard skills, .md, MCP, and Pinvou plugin packages are all importable; the Pinvou plugin package is just the recommended standard form, and the rest are auto-normalized.', dragHintShort:'Drag in a package to add a custom plugin', introTitle:'What is a Pinvou plugin package', introDesc:'One package = one card = one switch. Pack skills, MCP servers (or their combinations) into a zip; on import the type is auto-detected from content, validated, and registered, then toggled and uninstalled uniformly in the store and at runtime.', specTitle:'Plugin package spec', specDesc:'See the "Plugin Package Spec" for the full rules: zip layout, plugin.json (schema v1), mcp manifest.json, SKILL.md, icons, and naming safety.', downloadSpec:'Download spec (Markdown)', downloadHint:'Download and share with third-party package authors; the desktop app opens a save dialog.' } },
+        artifactPreview: { download:'↓ Download', openExternal:'↗ Open externally', loading:'Loading…', fileMissing:'File does not exist or has been deleted', readFailed:e=>`Read failed: ${e}`, imageReadFailed:e=>`Image read failed: ${e}`, previewUnsupported:'Preview is not supported for this type', downloadArtifact:'↓ Download artifact', openExternalArtifact:'↗ Open externally' },
+        uiToolDetails: { tools:{
+          ima:{ title:'Tencent ima', subtitle:'Manage ima notes and knowledge bases through OpenAPI', latency:'Cloud', desc:'Connect the Tencent ima OpenAPI Skill to search, read, create, and append notes, or search and browse knowledge bases and import web pages or content. Credentials stay on this device.', configTitle:'Connect Tencent ima', configDescription:'Credentials stay on this device and are used only to enable the IMA OpenAPI Skill.', configDocLabel:'Get Client ID / API Key', welcomeQueries:['Search my ima knowledge bases','List my ima notes','Create an ima note from this content','Find the product plan in my ima knowledge base'] },
+          tmeet:{ title:'Tencent Meeting', subtitle:'Manage meetings, recordings, minutes, and attendance reports as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official Tencent Meeting CLI and skill to create, query, update, and cancel meetings, and access attendance reports, recordings, transcripts, and AI minutes. Connecting opens the authorization page for QR-code sign-in.', welcomeQueries:['Create a Tencent Meeting for me','Show my Tencent Meeting recordings','Show the latest AI meeting minutes','List the attendees of this Tencent Meeting'] },
+        } },
+        uiPet: { waiting:'Input needed', failed:'Needs attention', review:'Ready to review', running:'Working', sendFailed:'Send failed', noMain:'Cannot connect to the main window', scheduledDone:'Scheduled task complete', done:'Completed', reply:'Reply', collapseReply:'Collapse reply', expandReply:'Expand reply', collapse:'Collapse', expand:'Expand', replyPlaceholder:'Type a reply…', sendReply:'Send reply', back:'Back to PINVOU', ready:n=>`${n} is ready`, backHint:'Click to return to PINVOU', drag:n=>`Click to return to PINVOU; drag ${n} to move`, openScheduled:n=>`Open the latest run of scheduled task ${n}`, closeScheduled:'Dismiss scheduled task completion', openChat:n=>`Open ${n} chat`, closeNotice:n=>`Dismiss ${n} notification`, replyTo:n=>`Reply to ${n}`, expandActivities:n=>`Expand ${n} activities`, collapseActivities:'Collapse activity cards', expandActivity:'Expand activities', collapseActivity:'Collapse activities', loadFailed:'Companion failed to load', retry:'Click to retry', resize:'Drag to resize companion', resizeTitle:'Drag to resize', hide:'Hide Companion' },
+        uiWebConnection: { idle:['Preparing remote control','Initializing browser connection…'], connecting:['Connecting to desktop','Interrupted connections retry automatically; unconfirmed actions are not repeated.'], desktop_offline:['Desktop is offline','Keep this page open; it will reconnect when the desktop returns.'], credentials_missing:['Incomplete link','Enable remote control on the desktop and paste the complete link.'], denied:['Access denied','The link is invalid or was refreshed. Copy a new link from the desktop.'], revoked:['Access stopped','The desktop stopped this remote control link.'], replaced:['Taken over by another browser','Only one active browser is allowed. Refresh this page to take over again.'], incompatible_desktop:['Desktop version incompatible','Update the desktop app, then reopen this link.'], error:['Connection error','Remote control will keep trying to reconnect.'] },
+        uiConversation: conversationEn,
+        uiMultiAgent: {
+          toggleLabel:'Multi-agent mode',
+          toggleHint:'Let this conversation delegate to subagents (expert collaboration); turning it off recycles the engine and cancels any subagents still running',
+          drawerTitle:role=>`Subagent · ${role}`, close:'Close', loadingTranscript:'Loading conversation…',
+          emptyTranscript:'No saved conversation yet. The subagent may have just started.',
+          panelResize:'Resize panel', panelResizeHint:'Drag to resize; double-click to reset',
+          agentCard:{ spawning:'Dispatching', working:'Working', completed:'Completed', failed:'Failed', spawnFailed:'Dispatch failed', interrupted:'Interrupted' },
+          agentsListTitle:'Subagents', agentsEmpty:'No subagents have been dispatched in this conversation yet.', backToAgents:'Back to subagent list',
+          agentsListSummary:(roots,total)=>roots === total ? `${total} total` : `${roots} direct · ${total} total`,
+          childAgentCount:count=>`${count} child${count === 1 ? '' : 'ren'}`, expandChildren:name=>`Expand children of ${name}`, collapseChildren:name=>`Collapse children of ${name}`,
+          coordinationRow:action=>`Coordination · ${action}`,
+          roleCards:{ scout:'Research expert', manager:'Planning expert', builder:'Execution expert', reviewer:'Review expert', general:'General-purpose agent' },
+          blockedTag:'Blocked', pendingTag:'Queued',
+          agentPending:'This subagent is queued or starting; no conversation has been recorded yet.',
+          agentNoTranscript:error=>error ? `The subagent ended before creating a conversation record: ${error}` : 'The subagent ended without creating a conversation record.',
+          showEarlierTranscript:count=>`Show ${count} earlier execution item${count === 1 ? '' : 's'}`,
+          listReadFailed:'⚠️ Failed to read the subagent list; retrying automatically…',
+          webActionHint:'Multi-agent conversations are read-only on the web; perform this action on desktop.',
+          transcriptReadFailed:'⚠️ Failed to read the conversation; retrying automatically…',
+        },
+        uiHomeMode: { work:'Work', design:'Design', code:'Code', providerSettings:'Provider settings' },
+        uiAttachments: { parsing:'Parsing', failed:'Failed', remove:name=>`Remove attachment ${name}`, dropRelease:'Drop to attach', dropWebTitle:'Add anything', dropWebHint:'Drop any file here to add it to the conversation', fileTooLarge:'The file exceeds the 20 MB attachment limit and cannot be added', archiveTooManyEntries:'The archive contains more than 50 entries and cannot be added', archiveExpandedTooLarge:'The archive expands beyond 100 MB and cannot be added', archiveUnsafeEntry:'The archive contains unsafe links or paths and cannot be added' },
+        uiCodex: codexEn,
+        uiAcpProviders: acpProvidersEn,
+
+        uiCodexWorkspace: { changes:{added:'Added',modified:'Modified',deleted:'Deleted',renamed:'Renamed',copied:'Copied',conflict:'Conflict',untracked:'Untracked',unknown:'File'}, origins:{session:'This session',preexisting:'Existed before session',preexisting_modified:'Existed before session · modified in this session',unknown:'Source not recorded'}, addedPath:path=>`Added ${path}`, addPath:path=>`Add ${path} to conversation`, added:'Added to conversation', add:'Add to conversation', back:'Back to workspace list', copyPath:'Copy relative path', reveal:'Show in file manager', open:'Open with system application', reading:'Reading…', noDiff:'No text diff to display', tooLarge:'The file is too large for an embedded preview.', unsupported:'This file does not support embedded preview.', openHint:'You can open it with a system application.', truncated:'Content is too large; only the beginning is shown.', resize:'Resize workspace', resizeHint:'Drag to resize; double-click to restore default', title:'Workspace', temporary:'Temporary workspace', refresh:'Refresh workspace', close:'Close workspace', files:'Files', changed:'Changes', search:'Search files', noFiles:'No matching files', noBaseline:'This older session has no creation baseline, so changes made by this session cannot be determined.', branch:'Branch', staged:'Staged', noChanges:'No workspace changes', copyContent:'Copy content', copied:'Copied', closeViewer:'Close preview', loadFailed:'Failed to load file', resizeWidth:'Resize viewer width', resizeHeight:'Resize viewer height', resizeCorner:'Resize viewer; double-click to restore default', fontDecrease:'Decrease font size', fontIncrease:'Increase font size', openInNewWindow:'Open in code reader', diffSuffix:'(diff)', readerTitle:'Code Reader', readerEmpty:'Choose "Open in code reader" from a workspace file preview; files accumulate here as tabs.', closeTab:'Close tab', noSessionChanges:'Once a session is created, changes made by the session will be listed here.' },
+
+        checkUpdate: 'Check for Updates', checking: 'Checking…', upToDate: 'Up to date',
+        newVersionFound: 'New version available', updateNotes: 'Release Notes',
+        downloadInstall: 'Download & Install', downloading: 'Downloading…', installing: 'Installing…',
+        downloadInstallRestart: 'Update & Restart',
+        cancel: 'Cancel', cancelling: 'Cancelling…',
+        updateComplete: 'Update complete, restart to apply', restartNow: 'Restart Now',
+        updateInstallerStarted: 'Installer started, the app will close automatically',
+        updateCheckFailed: 'Check failed',
+        depCheckTitle: 'Dependency Check', depChecking: 'Checking…', depRecheck: 'Check again',
+        depAllOk: 'All dependencies ready', depMissingSuffix: ' dependency(ies) missing (those features will be unavailable)',
+        depInstalling: 'Installing…', depInstallBtn: 'Install', depGoInstall: 'Install', depInstallNote: 'Installs missing deps via elevated apt (needs network or an apt source)', depInstallNoteWindows: 'Downloads missing models; installs LibreOffice through elevated winget (requires network)', depInstallNoteMac: 'Installs missing deps via Homebrew (needs network; install Homebrew first from brew.sh if missing)',
+        dep_pdf: 'PDF text extraction', dep_office_modern: 'Office docs (docx)', dep_office_legacy: 'Legacy Office / slides & sheets',
+        dep_ocr: 'Image / scanned-PDF OCR', dep_archive: 'Archives (zip/rar/7z)', dep_email: 'Email (.eml / .msg)', dep_voice_asr: 'Local speech recognition',
+        dep_voice_asr_model: 'Speech recognition model (SenseVoice q8)', dep_knowledge_embedding_model: 'Knowledge embedding model (bge-m3)',
+        depHint_email_manual: 'Manual install required: run `sudo cpan -i Email::Outlook::Message` in Terminal (no Homebrew formula). See https://metacpan.org/pod/Email::Outlook::Message',
+        vllmSetupTitle: 'Enable Local Model', vllmSetupDesc: 'A local model environment is pre-installed on this machine. Enable it now? Clicking Enable opens a system authorization dialog; after approval, the inference engine starts and is enabled at boot.',
+        vllmSetupEnable: 'Enable', vllmSetupSkip: 'Not now',
+        vllmSetupRunning: 'Starting the inference engine. The first model load can be slow (up to ~10 min) — keep the app open…',
+        vllmSetupDone: 'Local model is ready. Restart the app to use it.', vllmSetupFailed: 'Enable failed', vllmSetupRetry: 'Retry',
+        vllmStepAuth: 'Waiting for system authorization (confirm in the dialog)', vllmStepWait: 'Waiting for model to load', vllmStepReady: 'Done',
+        vllmDetectStarting: 'The local model is starting. Please try detection again shortly.',
+        vllmElapsed: 'Elapsed', vllmProbing: (n) => 'probe #' + n,
+        vllmSetupNever: "Don't ask again",
+        vllmDeclineTitle: 'Skip local model setup?', vllmDeclineDesc: "This prompt won't show automatically anymore. You'll need to configure a cloud model yourself, or enable the pre-installed local model later via Settings → Models → Detect local model services.",
+        vllmDeclineConfirm: "Don't enable", vllmDeclineReconsider: 'Reconsider',
+        vllmReentryOffer: 'A local model environment is pre-installed on this machine. Enable it now?',
+        communityQrAlt: 'Pinvou QQ group QR code', communityQrPlaceholder: 'QR placeholder', communityChannelTag: 'Chinese QQ community',
+        communityQrHint: 'Scan with mobile QQ to join, or copy the group ID to search manually.',
+        communityGroupLabel: 'Group ID', communityGroupPending: 'To be added', communityCopyGroup: 'Copy group ID', communityCopied: 'Group ID copied',
+        communityDiscussions: 'GitHub Discussions',
+        communitySupportNotice: 'The QQ group is a community space, not an official support or ticket channel. Continue to submit reproducible issues through feedback, and never post suspected vulnerabilities in the group.',
+        feedbackTitle: 'Help & Feedback', feedbackDesc: 'Send issues or suggestions with screenshots or short videos.',
+        feedbackOpen: 'Send feedback', feedbackDialogTitle: 'Send feedback', feedbackType: 'Type',
+        feedbackIssue: 'Issue', feedbackSuggestion: 'Suggestion',
+        feedbackSubject: 'Title', feedbackSubjectPh: 'Short summary (optional)',
+        feedbackBody: 'Details', feedbackBodyPh: 'Describe what happened, what you expected, or your suggestion',
+        feedbackAttachments: 'Attachments', feedbackAddAttachment: 'Add image or video', feedbackNoAttachments: 'No attachments',
+        feedbackAttachmentHint: 'Supports png, jpg, jpeg, gif, webp, mp4, mov, webm; up to 5 files.',
+        feedbackPrivacy: 'This sends your text, selected files, and non-sensitive app context. Chats and keys are not attached automatically.',
+        feedbackSubmit: 'Submit', feedbackSubmitting: 'Submitting…', feedbackSubmitted: 'Feedback submitted. Thank you.',
+        feedbackRetry: 'Retry', feedbackCloseConfirm: 'Feedback draft has not been submitted. Close it?',
+        feedbackBodyRequired: 'Please enter feedback details.', feedbackUnsupportedFile: 'Unsupported attachment format.',
+        feedbackTooManyFiles: 'You can attach up to 5 files.', feedbackPickUnavailable: 'File picker is unavailable.',
+        chatGreeting: 'Hi — what would you like to work on today?', artifacts: 'Artifacts', placeholder: 'Ask PINVOU or enter a command', disclaimer: 'PINVOU may display inaccurate info, so double-check.', ctxUsage: 'Context',
+        chatInputLimitReached: n => `The ${n}-character limit has been reached.`,
+        searchPlaceholder: 'Search chats', searchNoResults: 'No matching chats', searchDateAll: 'All',
+        searchBatchManage: 'Select', searchBatchDone: 'Done', searchSelectAll: 'Select all', searchSelectedCount: n => `${n} selected`,
+        searchArchivedEntry: 'Archived', searchArchivedEmpty: 'No archived chats', searchRestore: 'Restore', searchArchivedAt: d => `Archived ${d}`, searchPanelChats: 'Chats',
+        // —— Card Pool (cp*) ——
+        cpSubtitle: 'Expert Capability Deck',
+        cpTagline: "Equip an expert card so the AI handles this chat to that field's professional standard.",
+        cpTaglineTitle: "Equipping an expert card injects the field's methodology, workflow and delivery standards into the current chat.",
+        cpTarget: 'Equip Target', cpBannerEquipped: 'Equipped', cpBannerNone: 'Not equipped',
+        cpNoSession: 'No active chat — create or open one first',
+        cpNewCard: 'New Card', cpNewCardTitle: 'Create a custom card manually',
+        cpLoading: 'Loading card deck…', cpLoadError: 'Failed to load card deck',
+        cpMyCards: 'My Cards', cpDept: 'Department', cpResetFilter: 'Reset Filters',
+        cpSearchPh: 'Search experts: name / description / department',
+        cpNoMatch: 'No matching experts — try widening the filters',
+        cpBadgeEquipped: 'Equipped', cpBadgeUser: 'Custom', cpNoDesc: '(no description)',
+        cpEdit: '✎ Edit', cpDelQ: 'Del?', cpDelCardTitle: 'Delete this custom card',
+        cpUnequip: 'Remove', cpEquip: 'Equip',
+        cpShowMore: n => `Show more (${n})`,
+        cpCurrentChat: 'current chat',
+        cpToastDeleted: n => `Deleted: ${n}`, cpToastDelFailed: 'Delete failed',
+        cpToastUnequipped: n => `Removed: ${n}`,
+        cpToastEquipped: (target, n) => `Equipped to "${target}": ${n}`,
+        cpToastSaved: n => `Saved: ${n}`, cpToastCreated: n => `Created: ${n}`,
+        cpSavedTitle: 'Saved to card deck', cpSavedDesc: n => `"${n}" added to your cards`, cpSavedLater: 'Not now', cpSavedView: 'View',
+        cpFullBody: 'Full persona (injected once when equipped)',
+        cpBodyLoading: 'Loading persona body…', cpBodyLoadFailed: '(failed to load body)',
+        cpEquippedTap: 'Equipped · tap to remove',
+        cpAll: 'All', cpEquipShort: 'Equip', cpDetailUnequip: 'Unequip', cpReqPh: 'Required', cpMarkdownHint: 'Markdown supported', cpDelThisConfirm: 'Confirm delete',
+        cpEmptyHint: 'Try another search term, or tap + to create a new card.', cpMenuEdit: 'Edit',
+        cpAICreate: 'AI Card', bnrTitleHi: 'Generate an expert card in one tap', bnrStart: 'Start →', bnrStep1: 'Describe', bnrStep2: 'AI generates', bnrStep3: 'Add to pool',
+        chooserRecommend: 'Recommended', chooserAIDesc: 'Describe what you need; AI generates the card', chooserManualTitle: 'Manual', chooserManualDesc: 'Fill in name and persona yourself',
+        bnrFaces: [['Product','Product design'],['ML Engineer','AI models'],['Growth','Growth ops'],['UI Designer','Interface'],['Data Analyst','Insights']],
+        cpEditCard: 'Edit Card',
+        cpFieldName: 'Name', cpFieldDesc: 'One-line description', cpFieldDescPh: 'Shown on the card — 15 characters or fewer',
+        cpFieldBody: 'Persona Body', cpFieldBodyHint: '(full capability profile injected to the AI: duties / workflow / rules / deliverables)',
+        cpNamePh: 'e.g. Short-video Script Expert',
+        cpBodyPh: '# Role\n\nYou are a ...\n\n## Core Duties\n- ...\n\n## Workflow\n1. ...\n\n## Key Rules\n- ...',
+        cpErrName: 'Card name is required', cpErrBody: 'Persona body is required',
+        cpErrSave: e => `Save failed: ${e}`,
+        cpConfirmDelete: 'Delete?', cpDelete: 'Delete', cpCancel: 'Cancel', cpDeleteThis: 'Delete card',
+        cpSaving: 'Saving…', cpSaveEdit: 'Save Changes', cpCreate: 'Create Card',
+        cpLanyardEquip: 'Equip Card', cpLanyardEquipTitle: 'Equip a card',
+        cpLanyardSwap: 'Click to switch expert', cpLanyardRemove: 'Remove',
+        cpDraftLabel: 'Card Draft', cpDraftSaved: 'Saved', cpDraftSavedTitle: 'A custom card with this name already exists',
+        cpDraftView: 'View / Save', cpDraftViewTitle: 'View full content and save to card deck',
+        cpDesigning: '🃏 Designing card…',
+        cpIntroTitle: 'What kind of expert card do you want? Just tell me what you need.',
+        cpEquipBubbleSys: 'System',
+        cpEquipBubbleTitle: n => `Boss equipped an expert card for you: ${n}`,
+        cpDescLabel: 'Description',
+        cpEquipBubbleNote: "Full capability profile injected — the AI will handle following tasks with this expert's methodology.",
+        cpTargetMarkTitle: 'Equip target · experts picked in the card deck are injected into this chat',
+        riGenerating: 'Generating…', riDelQ: 'Delete?', riDelConfirm: 'Confirm delete', riRename: 'Rename', riPin: 'Pin', riUnpin: 'Unpin', riOpenFolder: 'Open folder', riAwaitingInput: 'Awaiting your input',
+        // —— Chat & global chrome ——
+        appTitle: 'PINVOU AI Assistant (Beta)', winMin: 'Minimize', winMax: 'Maximize', winClose: 'Close',
+        sidebarCollapse: 'Collapse sidebar', sidebarExpand: 'Expand sidebar',
+        skillPrefill: name => `I want to use ${name} to: `,
+        queuedTag: 'Queued', queuedCancel: 'Remove', queuedPrioritize: 'Make next', queuedEdit: 'Edit queued message',
+        queuedSave: 'Save', queuedEditCancel: 'Cancel editing', queuedActionFailed: 'The action did not complete; the queued message was left unchanged. Try again later.', queuedEmpty: 'Message cannot be empty', queuedEditInterrupted: 'The queued message left the queue before this edit was saved; the modified text was discarded',
+        queueMsg: 'Send to chat', queueMsgTip: 'While generating: text goes into this turn when possible (otherwise queued); attachments always queue',
+        interruptMsg: 'Interrupt & send', interruptMsgTip: 'Cancel current AI task and send immediately',
+        attachParsing: 'Parsing…', attachFailed: 'Failed', attachProtectedLocation: 'File location is protected', attachAdd: 'Attach file',
+        attachFromDevice: 'Upload from this device', attachFromHost: 'Choose from desktop instance', attachUploading: pct => `Uploading ${pct}%`,
+        attachmentOpen: 'Open with default app', attachmentDownload: 'Download attachment', attachmentCopyAddress: 'Copy address',
+        attachmentCopyName: 'Copy filename', attachmentReveal: 'Show in file manager',
+        voiceStart: 'Voice input', voiceStop: 'Stop recording', voiceCancel: 'Cancel voice input', voiceRetry: 'Retry',
+        voiceRequesting: 'Requesting microphone permission…', voiceRecording: 'Recording, click again to stop', voiceTranscribing: 'Transcribing voice…',
+        voiceCompleted: 'Voice text added', voiceClose: 'Close voice notice', voiceGotoDeps: 'Open dependency check',
+        composerTools: 'Tools', composerModelLabel: name => `Model: ${name}`, composerConnectedServices: 'Connected services', composerConnected: 'Connected', composerInstalledTools: 'Connected tools', composerInstalledSkills: 'Skills', composerNoTools: 'No tools installed', composerToolOn: 'On', composerManageTools: 'Manage tools',
+        composerMode: 'Skill', composerModeNone: 'No skills available',
+        composerBuiltinAuto: 'Built-in · Auto', composerSkillInUse: 'In use', composerSkillAllDisabled: 'All skills for this session type are off — enable them above', composerModeControlled: 'Controlled by mode', composerReadonlySwitch: 'Controlled by mode, cannot be toggled manually',
+        composerProjectSkills: 'Project skills', composerProjectSkillsDesc: 'Scan built-in project skills', composerProjectSkillsWarning: 'Project skill files may contain malicious instructions (prompt injection) — enable only for trusted projects', composerProjectSkillsHelpTitle: 'About project skills', composerProjectSkillsHelpBody: 'When enabled, code sessions bound to a project scan the project\'s convention skill directories, and the model can load and use those skills.', composerProjectSkillsHelpDirsLabel: 'Scanned directories (highest priority first)', composerProjectSkillsHelpDirs: '.agents/skills\n.pinvou/skills\nskills\n.opencode/skills\n.claude/skills\n.cursor/skills\n.codewhale/skills',
+        resend: 'Resend', editResend: 'Edit & resend', messageSending: 'Sending…', messageAccepted: 'Sent', messageFailed: 'Send failed', messageOutcomeUnknown: 'Send status is unknown. Check the conversation list.', selectAllMsg: 'Select all', copyMsg: 'Copy', pasteMsg: 'Paste', copied: 'Copied', backToBottom: 'Back to bottom',
+        thinkingLabel: 'Thinking', thinkingCall: (tool, s) => `Calling ${tool}... ${s}s`,
+        hintSlow30: isLocal => isLocal ? 'local model generating' : 'generating…', hintSlow120: isLocal => isLocal ? 'local model is generating long content, hang tight' : 'generating long content, hang tight',
+        artifactLabel: 'Artifact', clickToOpen: 'Open →',
+        toolRunning: 'Running...', toolDone: 'Done', toolFailed: 'Failed', shellCancelFailed: 'Cancel failed',
+        tsDone: 'completed', tsInProgress: 'in progress', tsPending: 'pending', tsLine: 'L',
+        receiptNote: '⋯ Long output — showing the beginning only', receiptEmpty: '(long output, not expanded)',
+        listDirCount: n => `${n} entries`,
+        grepHits: n => `${n} matches`, grepFiles: n => ` · ${n} files searched`, grepTruncated: ' · truncated',
+        shellStdoutTrunc: ' · stdout truncated',
+        todoProgress: pct => `Progress ${pct}%`,
+        planReady: '✨ Plan ready', planEmpty: '(empty plan)', planLabel: '📋 Plan', planTodos: '✅ Todos',
+        planNext: 'Next:', planGo: '✅ Do it', planEdit: '✏️ Revise', planDrop: '🚪 Never mind', planRevisePrefill: 'Revise the plan: ',
+        stuckExec: tries => `🛑 The AI is stuck (auto-retried ${tries} times without producing real files). You can:`,
+        stuckPlanPre: '⚠️ In Plan mode the AI called', stuckPlanPost: 'but the whitelist blocked it. Plan mode is discussion-only. Two ways out:',
+        handled: 'Handled',
+        stuckReplan: '📋 Ask AI to re-plan', stuckSelf: "I'll do it myself", stuckGo: 'Just do it (skip planning)',
+        // Pinvou review card. 品/悟 glyphs are brand marks, kept; surrounding text follows language.
+        pvLoadingPin: 'Pinvou 品 · Review', pvLoadingWu: 'Pinvou 悟 · Explore',
+        pvLoadingPinSub: 'Checking point by point, hunting for issues', pvLoadingWuSub: 'Comparing completeness dimensions, finding gaps',
+        pvLoadingHint: isLocal => isLocal ? 'Local model is thinking, usually 5–30s, hang tight…' : 'The model is thinking, usually a few seconds…',
+        pvFail: 'Failed: ', pvSkipped: 'Skipped', pvPerspective: ' view', pvAlsoInvolves: 'also covers',
+        pvVerdictPass: '✓ Passed, ready to ship', pvFramework: 'Completeness framework', pvDims: ' dims', pvSuggest: 'Suggest ', pvNeedsVerify: 'Needs check',
+        pvActAdopt: 'Adopt', pvActAsk: 'Have AI ask me', pvActVerify: 'Have AI verify', pvActConfirmed: "It's fine",
+        pvActModify: 'Have AI fix', pvActAccept: 'Accept as is', pvActFill: 'Fill in', pvActSkip: 'Skip for now',
+        pvHandToAi: n => `Hand to AI (${n})`, pvSkip: 'Skip', pvSkipTitle: 'Skip this review card for now',
+        pvBtnPinTitle: '品 · Review: surface risks, omissions, and drift from your intent — fix each via AI or accept as is',
+        pvBtnWuTitle: '悟 · Explore: a domain expert lists dimensions and ideas the artifact could still add; add picks in one click',
+        pvBtnPinLabel: '品 · Review', pvBtnWuLabel: '悟 · Explore',
+        cbTitle: '🛑 Blocked a dangerous operation', cbWant: 'The AI wants to run:', cbWhy: 'Why it was blocked',
+        cbNote: "This built-in safety guard is always on. The AI is never allowed to do this; if you really want it, run it yourself.",
+        cbTechShow: 'Technical details', cbTechHide: 'Hide technical details', cbCmdUnknown: '(unknown command)',
+        rsRoot: 'Tried to delete the system root — would destroy the entire system',
+        rsHome: 'Tried to delete your home directory — almost all personal files live there, unrecoverable',
+        rsRecursive: 'Recursively deletes a whole folder and everything inside it, unrecoverable',
+        rsForce: 'Force delete — skips the trash, unrecoverable',
+        rsForkbomb: 'Would instantly exhaust system resources and freeze the machine',
+        rsOverwrite: 'Would overwrite disk data directly',
+        rsFormat: 'Would format the disk — all data gone',
+        rsDefault: 'This command could damage your files or system',
+        uiqTitle: 'Pinvou needs your input',
+        uiOtherTitle: '💬 Other (write your own)', uiOtherDesc: 'If none of the options fit, say it in your own words', uiOtherPh: 'Type what you want to say...', uiSubmit: 'Submit',
+        uiSubmitted: '✓ Submitted', uiCancelled: '✕ Cancelled', uiSubmitting: 'Submitting…', uiSubmitFailed: e => `⚠️ Submit failed: ${e}`,
+        apEmpty: 'No artifacts yet', apOpenDir: 'Open containing folder', apOpenExt: 'Open externally', apSelect: 'Select an artifact to preview',
+        apLoading: 'Loading...', apMissing: 'File missing or deleted', apReadFail: e => `Read failed: ${e}`,
+        apNoImg: 'Inline image preview not supported yet', apNoPreview: 'Preview not supported for this type', apOpenExtBtn: '↗ Open externally',
+        apTabList: 'Artifacts', apTabPreview: 'Preview', apPreviewHint: 'Pick a file in the Artifacts tab to preview',
+        apBtnOpen: 'Open', apBtnLocate: 'Show in folder', apLocLabel: 'Location', apMtimeLabel: 'Modified', apLastMod: 'Modified',
+        apConverting: 'Generating preview…', apConvertFail: 'Preview failed', apUnsupported: 'Inline preview not available for this type; use Open below',
+        apKinds: { md:'Markdown', html:'HTML document', image:'Image', pdf:'PDF document', docx:'Office document', xlsx:'Spreadsheet', legacy_office:'Office document', text:'Text file', binary:'File' },
+        apMdSaved: 'Saved', apMdSaving: 'Saving...', apMdDirty: 'Unsaved', apMdSaveFailed: 'Save failed',
+        apMdExternalUpdateBlocked: 'The file changed externally. Your unsaved edits were kept and not overwritten.',
+        apMdExternalRemovalBlocked: 'The file was deleted externally. Your unsaved edits remain in this editor; copy them or restore the original file before leaving.',
+        apMdAiEdit: 'AI edit', apMdAiInstructionPlaceholder: 'How should AI edit this?',
+        apMdComposerReplaceConfirm: 'This will fill the chat input with the AI edit instruction. Any existing draft may be replaced. Continue?',
+        apMdAiPrompt: ({ path, selectedText, instruction, fence = '```' }) => `Please edit the selected content in this Markdown artifact.\n\nFile path: ${path}\n\nSelected content:\n${fence}markdown\n${selectedText}\n${fence}\n\nEdit request:\n${instruction}`,
+        depts: { academic:'Academic', design:'Design', engineering:'Engineering', finance:'Finance', 'game-development':'Game Dev', gis:'GIS', hr:'HR', legal:'Legal', marketing:'Marketing', 'paid-media':'Paid Media', product:'Product', 'project-management':'Project Mgmt', sales:'Sales', security:'Security', 'spatial-computing':'Spatial Computing', specialized:'Specialized', 'supply-chain':'Supply Chain', support:'Support', testing:'Testing', tool:'Tools' }
+};
+
+dictEn.uiToolDetails.flow = {
+  incomplete:name=>`${name} connection incomplete`, connected:name=>`${name} connected`, connecting:name=>`Connecting ${name}`,
+  cancel:'Cancel', extracting:pct=>`Extracting ${pct}%`, elapsed:seconds=>`${seconds}s elapsed`, installStarting:'Online install: starting…', browserOpened:'Browser sign-in page opened',
+  browserHint:'Confirm the sign-in in your browser. Reopen the page if it did not appear.', reopen:'Reopen', qrAlt:name=>`${name} QR code`,
+  authorizeStep:'Step 2 of 2: scan to authorize', registerStep:'Step 1 of 2: scan to register the app',
+  scanLogin:name=>`Sign in to ${name}`, scanHint:name=>`Scan with the ${name} app and confirm`, userCode:'Verification code',
+  openBrowser:'Open in browser ↗', connectionIncomplete:'Connection incomplete', close:'Close', retry:'Retry',
+};
+
+dictEn.uiToolDetails.actions = { connectedTmeet:'Tencent Meeting connected', enabled:'Official skill enabled; start a new conversation to use it', disconnectedTmeet:'Tencent Meeting disconnected', connectingIma:'Connecting Tencent ima', validatingIma:'Validating OpenAPI credentials and enabling the Skill…', connectedIma:'Tencent ima connected', imaEnabled:'IMA OpenAPI Skill enabled; start a new conversation to use it.', imaFailed:'IMA connection failed', disconnectedIma:'Tencent ima disconnected', operationFailed:'Operation failed. Please retry' };
+
+dictEn.uiToolDetails.tmeetSteps = [{key:'runtime',label:'Prepare runtime',sub:'Use the app-provided Node runtime'},{key:'cli',label:'Install connector',sub:'tmeet · about 40 seconds on first use'},{key:'qr',label:'Sign in',sub:'Tencent Meeting authorization page'}];
+
+dictEn.uiToolDetails.showRawErrors = false;
+
+Object.assign(dictEn.uiToolDetails.tools, {
+  weather:{ title:'Amap Weather', subtitle:'Real-time weather and multi-day forecasts from Amap', desc:'Query real-time weather and multi-day forecasts for cities nationwide through the Amap Web Service API. Enter your own Amap Web Service API Key; the key is written only to this device\u2019s system credentials.', configTitle:'Amap Weather Key', configDescription:'The Key is stored only in this device\u2019s credentials and is not written to mcp.json.', configDocLabel:'Create a Web Service Key', configFields:[{key:'AMAP_KEY', label:'API Key', helpText:'Choose the \u201cWeb Service\u201d type.', placeholder:'Paste your Amap Web Service Key'}], welcomeQueries:['Weather in Hangzhou today','Will it rain in Beijing this week','What to wear in Shanghai tomorrow'] },
+  iwencai:{ title:'iWenCai', subtitle:'A-share quotes, financials, screening, macro, and news', desc:'Provides 12 financial query tools based on the official iWenCai API. Enter your own iWenCai API Key; the key is written only to this device\u2019s system credentials.', configTitle:'iWenCai Key', configDescription:'The Key is stored only in this device\u2019s credentials and is not written to mcp.json.', configDocLabel:'Open iWenCai SkillHub', configFields:[{key:'IWENCAI_API_KEY', label:'API Key', helpText:'Open any official Skill and copy it from \u201cInstallation\u201d.', placeholder:'Paste your IWENCAI_API_KEY'}], welcomeQueries:['Latest Moutai share price','How is the market doing today','Bank stocks with P/E below 10','Recent rate-cut news'] },
+  card3:{ title:'QQ Mail API', subtitle:'Smart email sending/receiving and thread summarization', desc:'Provides standard interfaces for sending, receiving, searching, and organizing email. Combined with an LLM, you can read mail in natural language, summarize long threads, and automatically archive and manage folders.' },
+  card5:{ title:'Lexiang Docs Connector', subtitle:'Full-text search across enterprise knowledge docs', desc:'Search, create, and manage documents in Lexiang knowledge bases through the API. Supports batch Markdown import, tag-based organization, and real-time subscriptions to team document updates.' },
+  'tencent-docs':{ title:'Tencent Docs MCP', subtitle:'Official remote MCP: read/write online docs, sheets, and slides with collaboration', latency:'Cloud', desc:'Connect the official Tencent Docs remote MCP (general docs plus PPT/Word/Excel precision-editing services): create, read, and edit online documents, spreadsheets, slides, mind maps, and smart sheets under your own account; manage knowledge-base spaces and files; clip web pages and upload local files to the cloud. The official skill (scenario routing + tool API reference) is set up automatically at install time. Requires your Tencent Docs personal token (scan a QR code with QQ/WeChat on the official page); the token is written only to this device\u2019s system credentials.', configTitle:'Connect Tencent Docs', configDescription:'The token is stored only in this device\u2019s system credentials, never written to mcp.json, and never enters conversations.', configDocLabel:'Get a Tencent Docs token', configFields:[{key:'TENCENT_DOCS_TOKEN', label:'Personal token', helpText:'Open the authorization page, sign in by scanning a QR code with QQ or WeChat, and copy the token. Do not add a Bearer prefix.', placeholder:'Paste your Tencent Docs personal token'}], welcomeQueries:['List my recent Tencent Docs','Turn this weekly report into a Tencent smart document','Create an online spreadsheet to track expenses','Read and analyze this Tencent Docs spreadsheet'] },
+  'wecom-bot':{ title:'WeCom Group Bot', subtitle:'Push messages and notifications to WeCom group chats', latency:'Cloud', desc:'Connect the official WeCom group-bot webhook (message push API): let AI push text (with @mentions), Markdown, news cards, images, and files to the bound group chat. Enter your own group-bot webhook key; the key is written only to this device\u2019s system credentials. Data goes through WeCom servers (optional online feature, opt-in).', configTitle:'WeCom Group Bot Key', configDescription:'The Key is stored only in this device\u2019s credentials and is not written to mcp.json.', configDocUrl:'https://developer.work.weixin.qq.com/document/path/91770', configDocLabel:'Open the official group-bot docs', configFields:[{key:'WECOM_BOT_KEY', label:'Webhook Key', helpText:'In a WeCom group, tap \u201c\u2026\u201d (top right) \u2192 Group Bots \u2192 Add a bot, then copy its webhook URL.', placeholder:'Paste the bot key or the full webhook URL'}], welcomeQueries:['Push today\u2019s weather bulletin to my group','Format this weekly report as Markdown and send it to the WeCom group','@everyone: don\u2019t forget the 3 p.m. meeting','Send this file to the WeCom group'] },
+  feishu:{ title:'Feishu (Lark)', subtitle:'Manage Feishu docs, calendars, Bases, spreadsheets, and messages as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official Feishu CLI and official domain skills (MIT): let AI read and write cloud docs, view and edit calendars, work with Bases and spreadsheets, send and receive messages, and manage knowledge bases and tasks as yourself. Click \u201cConnect Feishu\u201d to authorize in the browser with one click\u2014no key required. Data goes through the Feishu cloud OpenAPI (optional online feature, opt-in).', welcomeQueries:['Read a Feishu doc and make a PPT for me','Summarize my Feishu docs','Check my Feishu calendar today','Show my Feishu to-do tasks'] },
+  wecom:{ title:'WeCom', subtitle:'Manage WeCom messages, mail, docs, meetings, and schedules as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official WeCom CLI (@wecom/cli, MIT) and official domain skills: let AI send and receive messages and mail, read and write docs, smart sheets, spreadsheets, and smart pages, manage Drive files, create and query meetings and schedules, manage to-dos, and look up contacts as yourself. Click \u201cConnect\u201d and authorize by scanning a QR code with the WeCom app\u2014no key required. Data goes through the WeCom cloud (optional online feature, opt-in).', welcomeQueries:['Turn this content into a WeCom smart doc','Read the content of one of my WeCom docs','Create a new sub-sheet in a WeCom smart sheet','Query data in a WeCom smart sheet'] },
+  dingtalk:{ title:'DingTalk', subtitle:'Manage DingTalk docs, calendars, sheets, and messages as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official DingTalk Workspace CLI (dws, Apache-2.0) and official skills: let AI read and write DingTalk docs, view and edit calendars, work with AI sheets and online sheets, send and receive group messages, and handle to-dos, approvals, logs, and mail as yourself. Click \u201cConnect\u201d and authorize by scanning a QR code with the DingTalk app\u2014no key required.', welcomeQueries:['Read my DingTalk docs','Check my DingTalk schedule today','Query data in a DingTalk AI sheet','Show my DingTalk to-dos'] },
+  card11:{ title:'TAPD Agile R&D', subtitle:'Automated tracking of defects and iterations', desc:'A core R&D management tool. Lets AI query project iteration progress, automatically break down requirement items, and update defect status, digitizing the full R&D lifecycle from requirements to release.' },
+  card12:{ title:'CNB Cloud-Native Pipeline', subtitle:'Code repositories and CI/CD orchestration', desc:'Brings cloud-native development capabilities to the model. Use natural language to search code repositories, file issues, review PRs, and trigger and monitor pipeline deployments.' },
+  qcc:{ title:'Qichacha', subtitle:'Authorized queries of business registration data', latency:'Cloud', desc:'Connect the qcc-company remote MCP from the Qichacha agent data platform. Clicking \u201cConnect\u201d opens the browser for OAuth authorization with your Qichacha account\u2014no API Key required.', welcomeQueries:['Look up Huawei\u2019s business registration info','Tencent\u2019s business registration details','BYD\u2019s outbound investments','Alibaba\u2019s shareholder structure'] },
+  'patsnap-search':{ title:'Patsnap Patents & Literature', subtitle:'Unified global patent and paper search, with detail retrieval by publication number', latency:'Cloud', desc:'Connect the Patsnap remote MCP to run unified searches across global patent and literature databases, with natural-language, semantic, and keyword search plus multi-dimensional filtering, and pull Markdown details by patent publication number or result URL. You need to enter a Patsnap API Key; the key is written only to this device\u2019s system credentials, and mcp.json stores only an environment-variable placeholder.', configTitle:'Enter your Patsnap API Key', configDescription:'The API Key is stored only in this device\u2019s system credentials and is never written to mcp.json in plain text; it is sent in the Authorization header when connecting to Patsnap services.', configDocLabel:'How to get an API Key', configFields:[{key:'PATSNAP_API_KEY', label:'Patsnap API Key', helpText:'Get it from the Patsnap open platform or the MCP/API credentials provided by your enterprise administrator.', placeholder:'Paste your Patsnap API Key'}], welcomeQueries:['Search patents and papers on solid-state battery electrolytes','Find core CRISPR delivery-system patents and literature from the past five years','Get patent details for publication CN109123456A','Analyze CATL\u2019s patent layout in sodium-ion batteries'] },
+  'canva-mcp':{ title:'Canva', subtitle:'Poster, presentation, cover, and brand template design', latency:'Cloud', desc:'Connect the Canva remote MCP. Generate and edit posters, presentations, Xiaohongshu covers, brand templates, and more with natural language; clicking \u201cConnect\u201d opens the browser to authorize with your Canva account\u2014no API Key required. Design instructions, assets, folders, and brand template content are sent to the Canva remote MCP service.', welcomeQueries:['Generate a product launch poster','Make a three-page product intro presentation','Design a Xiaohongshu cover','Create an event promo image from a brand template'] },
+  obsidian:{ title:'Obsidian Knowledge Base', subtitle:'Search and manage local Obsidian notes; read and write your personal knowledge', desc:'Connect your local Obsidian vault to the model. Supports full-text search, reading, creating, editing, renaming (with automatic wikilink fixing), and deletion\u2014so AI can build on and maintain the knowledge you have accumulated. The currently open vault is detected automatically; no manual setup. Notes stay on this device and so does the model; your knowledge and compute never leave the device.', welcomeQueries:['Search my notes','Create a note to record today\u2019s ideas','What documents are in my knowledge base?','Summarize my notes'] },
+  'yuandian-mcp':{ title:'Huayu Yuandian Legal Data', subtitle:'Laws and regulations, case documents, and corporate judicial risk queries', latency:'Cloud', desc:'Connect the Huayu Yuandian open platform remote MCP. Search legal data such as laws and regulations, adjudicated cases, and corporate judicial risks; clicking \u201cConnect\u201d opens the browser to authorize with your Yuandian account\u2014no API Key required.', welcomeQueries:['Search cases about labor contract termination','Look up regulations on corporate equity liability','Analyze a company\u2019s judicial risks','Find recent adjudication viewpoints'] },
+  pptx:{ title:'PPT Generation', subtitle:'Editable PowerPoint generated locally, with theme templates, real charts, and covers', latency:'Local', desc:'Say \u201cmake a PPT / report\u201d and the AI drafts an outline for your confirmation, then picks a theme (9 available) and generates an editable .pptx\u2014real charts, with a cover thumbnail, fully local and your data never leaves the device. The first install downloads the python-pptx dependency (requires network).', welcomeQueries:['Make a Q2 quarterly report PPT','Make a product intro PPT','Make a project proposal presentation','Make a company intro PPT'] },
+  gongwen:{ title:'Official Document Writing', subtitle:'Party/government official documents as GB/T 9704-compliant .docx', latency:'Local', desc:'Say \u201cwrite a notice / draft an opinion\u201d and the AI writes the content following the document-type structure and fixed phrasing, then the renderer applies the national standard format for party/government documents (FangZheng XiaoBiaoSong title, FangSong_GB2312 body, standard margins, red header and red separator line) to produce a .docx\u2014fully local, your data never leaves the device. Works best with the \u201cOfficial Document Writing\u201d skill. The first install downloads the python-docx dependency (requires network).', welcomeQueries:['Draft a notice on issuing management measures','Write an implementation opinion on strengthening certain work','Draft a meeting notice','Write a situation report'] },
+});
+
+Object.assign(dictEn.uiCodexWorkspace, { showRawErrors:false, operationFailed:'Workspace operation failed. Please retry' });
+
+dictEn.uiComponents = { openNavigation:'Open navigation' };
+
+dictEn.uiToolRender = {
+  running: 'Running', done: 'Done', failed: 'Failed',
+  other: 'Other', toolUnknown: '(unknown)',
+};
+
+dictEn.uiChatView = {
+  comingSoon:'Coming soon',
+  placeholderDesignAdjust:'Describe how you want to adjust the selected element',
+  placeholderDesignDataViz:'Paste data or describe metrics to generate a visualization dashboard',
+  placeholderDesignPoster:'Describe the visual poster you want to generate or adjust',
+  placeholderPersonalWorkbench:'Choose a template, then edit the full prompt',
+  placeholderWorkDocument:'Describe the document topic, type, sender/recipient, and key requirements',
+  agentName:'品悟',
+  designEditGroup:'Edit',
+  designElementFallback:'element',
+  designAdjustSelected:(label, raw)=>`Adjust the currently selected ${label}: ${raw}`,
+};
+
+dictEn.uiMainApp = { petSummon:'Summon Companion', closeNavigation:'Close navigation', superPermFailed:'Unable to enable advanced execution permission', searchTestUnavailable:'Search sources cannot be tested in this environment', searchSaveFailed:'Failed to save search settings. Please try again', petSessionMissing:'Target session does not exist', petTaskStartFailed:'Task failed to start', detachedSessionMissing:'The target Coding session does not exist or was deleted', detachedSessionLoadFailed:'Failed to load the Coding session. Close this window and try again', panelLoadFailed:err=>`Panel failed to load: ${err}`, viewLoadFailed:'Failed to load this page. Check your network and try again', viewReload:'Reload' };
+
+dictEn.uiToolCommon = {
+  open: 'Open', coverAlt: 'Cover',
+  pinAriaLabel: 'Smart review', wuAriaLabel: 'Deep check',
+  diffCollapse: 'Collapse', diffExpand: 'Expand full diff', diffCollapseAria: 'Collapse diff',
+  today: 'Today', tomorrow: 'Tomorrow', dayAfterTomorrow: 'Day after tomorrow', dayN: n => `Day ${n}`,
+  weatherFallback: 'Weather', currentCity: 'Current city',
+  forecastToday: "Today's forecast", forecastTomorrow: "Tomorrow's forecast",
+  humidity: 'Humidity', wind: 'Wind', windLevel: w => `Level ${w}`,
+  tempHigh: 'High', tempLow: 'Low',
+  stockOpen: 'Open', stockHigh: 'High', stockLow: 'Low',
+  builtinEnabled: 'Built-in · Mode-controlled', comingSoon: 'Coming soon',
+  disconnect: 'Disconnect', uninstall: 'Uninstall', reauthorize: 'Reauthorize',
+  connect: 'Connect', configure: 'Configure', install: 'Install', update: 'Update',
+  repair: 'Repair', editDisplay: 'Edit',
+};
+
+dictEn.uiChatScenes = {
+  documentWriting: {
+label: 'Document writing',
+preparing: 'Preparing document writing capability...',
+ready: 'Document writing enabled, starting generation',
+failure: 'Document writing capability could not be prepared. Please try again later.',
+  },
+  dataVisualization: {
+label: 'Data visualization',
+preparing: 'Preparing data visualization capability...',
+ready: 'Data visualization enabled, starting generation',
+failure: 'Data visualization capability could not be prepared. Please try again later.',
+  },
+  missingCapabilities: (ids) => `Missing capabilities: ${ids}`,
+  // Display names for personal-workbench template chips. The zh `title` in
+  // personal-workbench-scene.js stays canonical (draft matching + message meta);
+  // rendering resolves the localized name by template id.
+  workbenchTemplates: {
+    'life-log': 'Life Log',
+    'personal-ledger': 'Personal Ledger',
+    'study-plan': 'Study Plan',
+    'task-board': 'Task Board',
+    'job-tracker': 'Job Tracker',
+    'travel-planner': 'Travel Planner',
+    'fitness-checkin': 'Fitness Check-in',
+  },
+};
+
+Object.assign(dictEn.uiScheduled, {
+  createFromChat: 'Create with AI Chat',
+  chooseHour: 'Select hour',
+  chooseMinute: 'Select minute',
+  daySeparator: ', ',
+  previewTasks: {
+'preview-daily-brief': { name: 'Daily Briefing', scheduleLabel: 'Daily at 08:00', prompt: 'Summarize important news and industry updates from the past 24 hours with sources and links; include company announcements and key risks.' },
+'preview-follow-up': { name: 'Follow-up Monitor', scheduleLabel: 'Weekdays at 09:00', prompt: 'Review overdue and upcoming items, highlighting risks, owners, and suggested next steps.' },
+'preview-weekly-report': { name: 'Sales Leads Weekly', scheduleLabel: 'Friday at 16:00', prompt: 'Summarize this week’s new leads, follow-up status, conversion risks, and key accounts for next week.' },
+  },
+  previewRunError: 'External news source request timed out',
+});
+
+dictEn.uiKnowledge = {
+  downloadOutput: 'Download output',
+  filePathLabel: 'File path: ',
+};
+
+Object.assign(dictEn.uiConversation, {
+  feedbackPositive: 'Helpful',
+  feedbackNegative: 'Not helpful',
+  retryReply: 'Regenerate',
+  callingTool: name => `Calling ${name}`,
+  inputPlaceholder: 'Enter a value',
+  otherAnswer: 'Other',
+  otherPlaceholder: 'Other',
+});
+
+Object.assign(dictEn.uiPet, {
+  activityThinking: 'Thinking…',
+  activityProcessing: 'Processing…',
+  activityUsingTool: n => `Using ${n}`,
+  activityCallingTool: 'Calling a tool…',
+  activityContinuing: 'Continuing…',
+  activityInputNeeded: 'Your input is needed',
+  activityTaskFailed: 'The task ran into a problem',
+  activityTaskDone: 'Task completed',
+  activityStartFailed: 'The task could not be started',
+  activityTitleFallback: 'Current task',
+  loadFailedRetry: (a, b) => `${a}, ${b}`,
+});
+
+dictEn.uiPlatformMisc = {
+  htmlLang: 'en',
+  appTitle: 'PINVOU AI Assistant (Beta)',
+  petTitle: 'PINVOU Desktop Companion',
+  hostFilePicker: {
+pickFolderTitle: 'Choose a folder on the desktop', pickFileTitle: 'Choose files on the desktop',
+close: 'Close', goUp: 'Up one level', loadingPath: 'Reading desktop folder…', loading: 'Loading…',
+cancel: 'Cancel', chooseThisFolder: 'Choose this folder', choose: 'Choose',
+currentFolder: path => `Current folder: ${path}`, selectedCount: n => `${n} selected`,
+thisComputer: 'This PC', home: 'Home', emptyFolder: 'Nothing to select in this folder',
+loadFailed: err => `Failed to read: ${err}`, workspaceNotAuthorized: 'Allow remote access to local folders on the desktop first', alreadyOpen: 'A file picker is already open',
+  },
+  webClientErrors: {
+stateNotReady: 'Remote control state is not ready; desktop events cannot be processed yet',
+unnegotiatedEvent: event => `The desktop sent an unnegotiated remote control event: ${event}`,
+rpcFailed: 'Remote call failed',
+incompatibleDesktop: 'The desktop version does not support remote control. Update the desktop app first.',
+unsupportedCommand: command => `The current desktop does not support this remote control command: ${command}`,
+commandNotAllowed: command => `Remote control does not allow invoking ${command}`,
+invalidRequestId: 'Invalid remote call request ID',
+requestInFlight: 'A remote call request is already in progress',
+invokeTimeout: command => `Remote call timed out: ${command}`,
+  },
+};
+
+dictEn.uiSettingsView = {
+  profileCallName: name => `Name: ${name}`,
+  profileAssistantAlias: alias => `Assistant nickname: ${alias}`,
+  memoryTabRecent: 'Recent memory',
+  memoryDeleteConfirm: 'This memory will no longer be used after deletion. Delete it?',
+  memoryTimeSaved: 'Saved',
+  memoryTimeToday: 'Updated today',
+  memoryTimeDaysAgo: n => (n === 1 ? 'Updated 1 day ago' : `Updated ${n} days ago`),
+  memoryTimeDate: (month, day) => `Updated ${month}/${day}`,
+  memoryConfidenceAuto: 'Auto-organized',
+  memoryConfidenceHigh: 'High confidence',
+  memoryConfidenceMid: 'Medium confidence',
+  memoryConfidenceLow: 'Low confidence',
+  memorySource: 'Source: conversation',
+  memoryMoreActions: 'More actions',
+  memoryArchive: 'Archive',
+  memoryCardTitle: 'Memory',
+  memoryEnabled: 'Enabled',
+  memoryDisabled: 'Off',
+  memoryLoading: 'Loading memory',
+  memorySummaryWithProfile: (profile, total) => `${profile} · ${total} active memories.`,
+  memorySummary: total => `PINVOU remembers your preferences, work context, and recent activities so follow-up conversations pick up the context more easily. ${total} active memories recorded.`,
+  memoryOffDesc: 'Once enabled, PINVOU can remember how to address you, your stable preferences, work context, and recent activities, so you repeat yourself less.',
+  memoryTurnOff: 'Disable memory',
+  memoryTurnOn: 'Enable memory',
+  memoryViewManage: 'View and manage',
+  memoryCenterTitle: 'Memory center',
+  memoryCenterDesc: 'Memories are organized automatically by AI; manual management is rarely needed.',
+  memorySyncing: 'Syncing',
+  memorySync: 'Sync memory',
+  memoryOffNotice: 'Once memory is enabled, PINVOU uses this information in conversations and automatically organizes new long-term and recent memories.',
+  memoryLongTermTabDesc: 'Name, long-term preferences, and work context',
+  memoryRecentTabDesc: 'Current focus and recent activity',
+  memoryItemCount: n => (n === 1 ? '1 item' : `${n} items`),
+  memorySearchPlaceholder: 'Search memory',
+  memoryCallNameLabel: 'Assistant calls me',
+  memoryCallNamePlaceholder: 'e.g. Alex',
+  memoryAssistantAliasLabel: 'I call the assistant',
+  memoryAssistantAliasPlaceholder: 'e.g. Buddy',
+  memoryNoMatchLongTerm: 'No matching long-term memories.',
+  memoryEmptyLongTerm: 'No long-term preferences or work context yet.',
+  memoryLongTermHint: 'Long-term memories are kept to understand your stable preferences, work context, and how you like to be addressed. They never expire automatically, and you can edit or delete them anytime.',
+  memoryNoMatchRecent: 'No matching recent memories.',
+  memoryEmptyRecent: 'No current focus or recent activity yet.',
+  memoryRecentHint: 'Recent memories record what is in progress or just finished, helping PINVOU pick up the context. They fade automatically over time, and you can archive or delete them manually.',
+  memoryEditDesc: 'Changes take effect immediately for future memory injection.',
+  visualDesignSkillName: 'Visual Design',
+  visualDesignSkillDesc: 'Design system → web pages, banners, posters, résumés…',
+  serviceFeishu: 'Feishu (Lark)',
+  serviceWecom: 'WeCom',
+  serviceDingtalk: 'DingTalk',
+  serviceTmeet: 'Tencent Meeting',
+  detectFailed: 'Detection failed',
+  modelLabel: 'Model',
+  codingPlanModelIdPlaceholder: 'e.g. glm-5',
+  searchProviderMetaso: 'Metaso',
+  searchProviderBocha: 'Bocha',
+  searchProviderBaidu: 'Baidu',
+};
+
+dictEn.uiArtifacts = {
+  zoomFit:'Fit window', zoomActual:'Actual size', zoomCustom:'Custom', zoomOut:'Zoom out', zoomIn:'Zoom in',
+  switchArtifact:'Switch artifact', currentMtime:time=>`Last modified ${time}`,
+  closePreviewAria:'Close artifact preview', closePreviewTitle:'Close preview',
+  fsExitEdit:'Exit edit mode and return to side preview', fsEnterEdit:'Enter edit mode: enlarge preview and edit selected elements',
+  fsExitFullBack:'Exit fullscreen and return to side preview', fsEnterPreview:'Show artifact preview fullscreen', fsExit:'Exit fullscreen', fsEnter:'Fullscreen',
+  fsExitEditShort:'Exit edit', fsEditMode:'Edit mode',
+  aiRefreshed:'Artifact refreshed', aiCanContinue:'You can keep describing changes', aiCallingTool:name=>`Calling tool ${name}`,
+  aiThinking:'Thinking', aiWaitingModel:'Waiting for the model', aiSent:'Sent, waiting to be processed',
+  aiUpdated:'Updated', aiNoUpdate:'No update', aiStopped:'Stopped', aiAdjusting:suffix=>`Adjusting${suffix}`,
+  aiPhElement:'Describe how to adjust the selected element', aiPhDesign:'Describe how to adjust this design',
+  send:'Send', previewRefreshed:'Preview refreshed', canContinue:'Keep describing', stop:'Stop',
+  diTypes:{ element:'Element', graphic:'Graphic', button:'Button', link:'Link', input:'Input control', text:'Text', card:'Card', container:'Container' },
+  diNoSelection:'Nothing selected', diSelected:type=>`Selected ${type}`,
+  diFontSystem:'System default', diFontCustom:'Custom font', diFont:'Font',
+  diFontYaHei:'Microsoft YaHei', diFontPingFang:'PingFang SC', diFontSimSun:'SimSun', diFontSimHei:'SimHei', diFontKaiTi:'KaiTi', diFontFangSong:'FangSong', diFontSourceHanSans:'Source Han Sans SC', diFontSourceHanSerif:'Source Han Serif SC',
+  diPickColor:color=>`Pick color ${color}`, diClear:'Clear', diDone:'Done',
+  diChangeFallback:'Design change', diSelectHint:'Select an element in the preview', diCollapseDetails:'Hide details', diViewDetails:'View details',
+  diChangeGroupEdit:'Edit', diChangeGroupTextEdit:'Text edit', diChangeGroupResize:'Resize', diChangeGroupMove:'Move', diChangeTypeText:'Text',
+  diClearChanges:'Clear changes', diNoLocation:'No location info',
+  diSecCommon:'Common edits', diText:'Text', diFontSize:'Font size', diFontWeight:'Font weight', diAlign:'Align',
+  diOptDefault:'Default', diAlignLeft:'Left', diOptCenter:'Center', diAlignRight:'Right', diAlignJustify:'Justify', diTextColor:'Text color',
+  diSecAppearance:'Appearance', diBgColor:'Background', diBorderColor:'Border color', diRadius:'Corner radius', diOpacity:'Opacity', diBgImage:'Background image',
+  diSecSize:'Size', diWidth:'Width', diHeight:'Height',
+  diSecAdvanced:'Advanced styles', diCollapse:'Collapse', diExpand:'Expand',
+  diLineHeight:'Line height', diLetterSpacing:'Letter spacing', diBgSize:'Background size', diBgPosition:'Background position',
+  diRepeat:'Repeat', diRepeatNone:'No repeat', diRepeatX:'Repeat horizontally', diRepeatY:'Repeat vertically',
+  diMinWidth:'Min width', diMaxWidth:'Max width', diMinHeight:'Min height', diMaxHeight:'Max height',
+  diMarginTop:'Margin top', diMarginRight:'Margin right', diMarginBottom:'Margin bottom', diMarginLeft:'Margin left',
+  diPaddingTop:'Padding top', diPaddingRight:'Padding right', diPaddingBottom:'Padding bottom', diPaddingLeft:'Padding left',
+  diGap:'Gap', diRowGap:'Row gap', diColumnGap:'Column gap',
+  diDisplay:'Display', diDisplayBlock:'Block', diDisplayFlex:'Flex', diDisplayGrid:'Grid', diDisplayInline:'Inline', diDisplayInlineBlock:'Inline-block', diOptHidden:'Hidden',
+  diDirection:'Direction', diDirRow:'Row', diDirRowReverse:'Row reverse', diDirColumn:'Column', diDirColumnReverse:'Column reverse',
+  diJustify:'Justify content', diOptStart:'Start', diOptEnd:'End', diJustifyBetween:'Space between', diJustifyAround:'Space around',
+  diAlignItems:'Align items', diStretch:'Stretch',
+  diOverflow:'Overflow', diOptVisible:'Visible', diOverflowClip:'Clip', diOverflowScroll:'Scroll', diOptAuto:'Auto',
+  diPosition:'Position', diPosRelative:'Relative', diPosAbsolute:'Absolute', diPosFixed:'Fixed', diPosSticky:'Sticky',
+  diTop:'Top', diRight:'Right', diBottom:'Bottom', diLeft:'Left', diZIndex:'Z-index',
+  diVisibility:'Visibility', diVisCollapse:'Collapse', diCursor:'Cursor',
+  diChangesLog:n=>`Design changes: ${n}`, diEmpty:'empty',
+};
+
+dictEn.uiCodexView = { ended:'Finished', stepsFailed:'Steps include failures', processing:'Processing', codexTool:'Codex tool' };
+
+Object.assign(dictEn.uiAttachments, { uploading:pct=>`Uploading ${pct}%`, deviceUploadTooLarge:name=>`${name} exceeds the 20 MB attachment limit`, deviceUploadEmpty:name=>`${name} is empty and cannot be attached`, deviceUploadUnavailable:'Uploading from this device is currently unavailable', deviceUploadInvalid:name=>`${name} is not a valid attachment`, deviceUploadFailed:name=>`${name} could not be uploaded. Try again.`, deviceUploadDigestInvalid:'The attachment integrity digest was invalid. Try again', deviceUploadIntegrityMismatch:'The attachment content was corrupted in transit. Upload it again' });
+
+Object.assign(dictEn.uiToolStore, {
+  toolNames:{ feishu:'Feishu', wecom:'WeCom', dingtalk:'DingTalk', tmeet:'Tencent Meeting', ima:'Tencent ima' },
+  connected:'Connected', installed:'Installed', builtin:'Built-in', internalDirect:'Direct intranet', keyRequired:'Key required', localLatency:'Local',
+  cancel:'Cancel', ok:'Got it', newChat:'New Chat',
+  installHint:'New tools take effect in a new conversation', removeHint:'Removed; new conversations will no longer load this tool', firstUseOnlineInstall:'The first connection downloads and verifies the official CLI',
+  configTitle:name=>`Configure ${name}`, configConnect:'Connect', configInstall:'Install', configDocDefault:'View setup guide', configHelpFeishu:'No app yet? Create one on the Feishu Open Platform →',
+  obsidianGuide:{
+not_installed:{ title:'Obsidian required', body:'"Obsidian Vault" works together with Obsidian. It is not installed yet—install Obsidian and create a vault to connect.', primary:'Download Obsidian', retry:'I have installed it—check again' },
+no_vault:{ title:'No vault yet', body:'Obsidian was detected, but no vault has been created yet. Create a vault in Obsidian, then connect.', primary:null, retry:'I have created one—check again' },
+vault_missing:{ title:'Vault folder missing', body:'The previous vault folder could not be found. Reopen it in Obsidian or create a new vault, then connect.', primary:null, retry:'Check again' },
+desktopHint:'Install Obsidian on the desktop and create a vault first, then check again here.',
+  },
+  connectedTool:name=>`${name} connected`, disconnectedTool:name=>`${name} disconnected`,
+  connectedQuoted:name=>`${name} connected`, installedQuoted:name=>`${name} installed`, uninstalledQuoted:name=>`${name} uninstalled`,
+  connectFailed:name=>`${name} connection failed`, connectTitle:name=>`Connect ${name}`,
+  connectedBanner:name=>`${name} connected · official skill enabled; you can give it instructions right away`,
+  connectedBannerIma:'Tencent ima connected · OpenAPI Skill enabled; you can give it instructions right away',
+  uploadedSkill:'User-uploaded skill',
+  oauthBrowserTimeout:'No browser authorization callback received. Confirm whether authorization finished, or try again later.',
+  stoppingAuth:'Stopping the browser authorization wait…', authWaitCancelled:'Stopped waiting for browser authorization; you can authorize again later.', cancelFailed:'Cancel failed—retry available; the authorization wait is still running.',
+  oauthConfigError:'OAuth configuration error', oauthNoServerName:name=>`"${name}" does not declare an MCP server name, so authorization cannot start.`,
+  connectingTool:name=>`Connecting ${name}`, installingTool:name=>`Installing ${name}`,
+  writingMcpConfig:'Writing MCP configuration…', validatingApiKey:'Validating the API key and remote tools…', downloadingDeps:'The first install downloads dependencies—please wait…',
+  waitingBrowserAuth:'Waiting for browser authorization to complete.', browserOpenedWaiting:'Browser opened; waiting for authorization…',
+  operationFailedWith:e=>`Operation failed: ${e}`,
+  importingSkill:'Importing plugin package…', validatingSkillPackage:'Validating and extracting', importFailedWith:e=>`Import failed: ${e}`,
+  editDisplayTitle:name=>`Edit display info for "${name}"`, displayNameLabel:'Display name', displayNamePlaceholder:'Leave empty to fall back to the default name',
+  displayDescriptionLabel:'Display description', displayDescriptionPlaceholder:'Leave empty to fall back to the default description',
+  editDisplayHint:'Only changes how the card looks; the package id and contents are untouched. Single-skill packages sync the description into SKILL.md (clearing restores the original).',
+  editDisplaySave:'Save', editDisplaySaved:'Display settings saved',
+  uploadSkillPackage:'Upload Plugin Package', dropSkillZipHere:'Drop to import a plugin package (zip) or skill file (.md)', zipTooLarge:mb=>`File exceeds the ${mb}MiB limit`, visibilityLoadFailed:'Failed to load visibility settings. Please retry (saved settings are unchanged).',
+  updatedQuoted:name=>`"${name}" updated`, updateSkillTitle:name=>`Update "${name}"`,
+  updateSkillOverwriteHint:'This overwrites the skill with the latest store version. Your local changes to it will be lost.',
+  notConnectedYet:name=>`"${name}" is not connected yet.`,
+  wecomScanHint:'Scan with the WeCom app', wecomQrAlt:'WeCom sign-in QR code', openBrowserFailed:"Couldn't open the browser—please retry", waitingAuth:'Waiting for authorization…', openInBrowser:'Open in browser',
+  mini:{ scan:'Scan pending', install:pct=>`Installing ${pct}%`, extract:pct=>`Extracting ${pct}%`, connecting:'Connecting', title:'Tap to view progress' },
+  feishuSteps:[
+{ key:'runtime', label:'Prepare runtime', sub:'Use the app-provided Node runtime' },
+{ key:'cli', label:'Install connector', sub:'lark-cli · about 40 seconds on first use' },
+{ key:'connect', label:'Connect & authorize', sub:'Create app identity' },
+{ key:'qr', label:'Scan to sign in', sub:'Scan with the Feishu app' },
+  ],
+  wecomSteps:[
+{ key:'runtime', label:'Prepare runtime', sub:'Use the app-provided Node runtime' },
+{ key:'cli', label:'Install connector', sub:'wecom-cli · about 40 seconds on first use' },
+{ key:'qr', label:'Scan to sign in', sub:'Scan with the WeCom app' },
+  ],
+  dingtalkSteps:[
+{ key:'runtime', label:'Prepare runtime', sub:'Use the app-provided Node runtime' },
+{ key:'cli', label:'Install connector', sub:'dws · about 40 seconds on first use' },
+{ key:'qr', label:'Scan to sign in', sub:'Scan with the DingTalk app' },
+  ],
+  connFailed:'Connection failed', dingtalkSkillsFailed:err=>`DingTalk authorized, but enabling the skill failed: ${err}`, tmeetAuthIncomplete:'Tencent Meeting authorization is incomplete—finish the browser sign-in and retry',
+  emptyNoMatch:'No matching tools found', emptyNoInstalled:'No tools installed yet', emptyNoTools:'No tools found',
+  emptyNoMatchHint:'Try a different keyword, or check the spelling.', emptyNoInstalledHint:'Install connectors or skills from the store and they will appear here.', emptyNoInstalledHintReadonly:'No tools or skills installed on the desktop yet.',
+  emptyNoToolsHint:'Try another search term or check the API documentation.',
+  detailInterfaceType:'Interface Type', detailOfficialSupport:'Official support', detailVersion:'Version', detailStableRelease:'Stable release', detailLatency:'Avg Latency', detailGlobalAccel:'Global acceleration',
+  aboutTitle:'About',
+  oauthOutcome:{
+connectedTitle:name=>`Connected to ${name}`, timeoutTitle:name=>`${name} authorization timed out`, cancelledTitle:name=>`${name} authorization cancelled`,
+serviceErrorTitle:name=>`${name} authorization service error`, failedTitle:name=>`${name} authorization failed`,
+tokenMissing:'The authorization flow returned success, but no OAuth token was detected locally; the tool will not be enabled. Please authorize again.', incomplete:'Authorization incomplete—please reconnect.',
+  },
+});
+
+Object.assign(dictEn.uiChatView, { memStatusRemembered:'Remembered', memStatusArchived:'Archived', memStatusDeleted:'Deleted', memStatusArchivedNotice:'Memory archived', memStatusDeletedNotice:'Memory deleted' });
+
+Object.assign(dictEn.uiToolStore, { storeData: {
+  skills: {
+'government-writing': { title:'Official Document Writing', subtitle:'Statutory document types like notices and opinions, with phrasing templates, hierarchical numbering, and self-checks', desc:'Draft standardized party and government official documents (notices, opinions, …): built-in document-type skeletons, a fixed phrasing library, hierarchical numbering, and ledger-style self-checks produce structured official content. Pair with the "Official Document Writing" plugin in the Plugin Center to export GB/T 9704-compliant .docx directly.', latency:'Local' },
+pptx: { title:'PPT Generation', subtitle:'Generate editable PowerPoint locally, with theme templates, real charts, and covers', desc:'Generate editable PowerPoint locally: theme templates, real charts, and covers included—enter a topic to quickly produce a structured presentation.', latency:'Local' },
+visualizer: { title:'Data Visualization', subtitle:'Chart.js dashboards / chart analysis / HTML visualization', desc:'Turn structured data, table summaries, and business metrics into HTML visualization dashboards that match the Pinvou host experience. Chart.js, accessible canvas, custom legends, and flat colors by default, delivered as .html artifact cards.', latency:'Local' },
+'package-author': { title:'Plugin Package Standardization', subtitle:'Standardize skills/MCP/functions into an uploadable plugin package', desc:'Turn scattered skills (SKILL.md), MCP servers, or their combinations into a standard plugin package the Pinvou store can import: add plugin.json, mcp/manifest.json, SKILL.md frontmatter, generate an icon, validate naming and layout, then output a directory or zip.', latency:'Local' },
+'skill-author': { title:'Skill Creation', subtitle:'Turn a one-line description into a proper SKILL.md skill', desc:'Turn a user\'s one-line description into a usable skill (SKILL.md directory): generate the name/description/instructions, and validate naming and structure. When a deliverable uploadable package is wanted, it can continue with the "Plugin Package Standardization" rules to add plugin.json and an icon, export a standard package, then ask the user whether to install.', latency:'Local' },
+'tencent-docs-skill': { title:'Tencent Docs', subtitle:'Create, edit, and manage online docs / sheets / slides / smart sheets', desc:'Official Tencent Docs MCP skill (v1.0.41 adaptation): pair with the "Tencent Docs MCP" connector in the Plugin Center. Ships the official category routing (smart docs / Word / Excel / PPT / mind maps / flowcharts / smart sheets) and the full tool API reference. The token is written by the connector into this device\'s system credentials.', latency:'Cloud' },
+s5: { title:'Visual Design', subtitle:'Design-system-grade webpages / banners / posters / resumes', desc:'Built-in automatic skill: the model loads it on demand to produce webpages, banners, posters, resumes, and more with design-system-grade aesthetics. No installation needed—always available.', version:'Built-in', latency:'Local' },
+  },
+  categories: { all:'All', collab:'Collaboration', docs:'Docs & Knowledge', dev:'Development', finance:'Financial Data', life:'Daily Life', other:'Other' },
+} });
+
+Object.assign(dictEn.uiToolStore, {
+  groupByType:'By Type', groupByBusiness:'By Domain',
+  typeGroups:{ bundle:'Plugin Bundles', mcp:'MCP', skill:'Skills', cli:'CLI Integrations', api:'API & Webhook', upcoming:'Coming Soon' },
+  recycleBin:'Recycle Bin', recycleBinTitle:'Plugin Recycle Bin', recycleBinEmpty:'Recycle bin is empty', recycleBinEmptyHint:'Uploaded plugins you uninstall are moved here; you can restore or permanently delete them.',
+  recycleBinLoadFailed:'Failed to load the recycle bin. Please retry.', recycleBinLoading:'Loading recycle bin…', recycledAt:time=>`Recycled at ${time}`,
+  recycleRestore:'Restore', recycleRestoreUnavailable:'Package files are missing and cannot be restored', recyclePurge:'Delete Permanently',
+  recyclePurgeTitle:name=>`Permanently delete "${name}"?`, recyclePurgeHint:'This cannot be undone. The plugin package files will be permanently removed.',
+  recycleRestored:name=>`"${name}" restored`, recycleRestoredCredentials:name=>`"${name}" restored. Its credentials were removed on uninstall—please fill them in again.`, recyclePurged:name=>`"${name}" permanently deleted`,
+  recycleExport:'Export', recycleExportUnavailable:'Package files are missing and cannot be exported', recycleExported:name=>`Exported as ${name}`,
+  movedToRecycleBinQuoted:name=>`"${name}" uninstalled and moved to the recycle bin`,
+});
+
+Object.assign(dictEn, {
+  remoteKbAddContent:'Add', remoteKbUploadFolder:'Add folders',
+  remoteKbDocumentTrashConfirm:'Move “{name}” to trash?', remoteKbDocumentTrashHint:'You can restore it from “Show trash”.', remoteKbDocumentTrashed:'Moved to trash', remoteKbDocumentRestored:'Document restored',
+  remoteKbUploadExisting:'Already exists', remoteKbUploadExistingIndexing:'Already exists, processing', remoteKbUploadExistingStillIndexing:'Already exists, still processing', remoteKbUploadExistingFailed:'Already exists, processing failed',
+  remoteKbUploadSuccess:'Uploaded: {count}', remoteKbUploadExistingSummary:'Already exists: {count}', remoteKbUploadProcessingSummary:'Processing: {count}', remoteKbUploadFailedSummary:'Failed: {count}',
+  remoteKbFolderSummary:'{count} documents found', remoteKbFolderSkipped:'{count} skipped', remoteKbFolderEmpty:'No supported documents were found in this folder', remoteKbFolderLimitExceeded:'A folder import can contain at most 10,000 documents',
+});
+
+dictEn.uiSettingsDetail.memoryLoadFailed = 'Failed to load memory profile. Please try again.';
+
+dictEn.uiSettingsDetail.memorySaveFailed = 'Failed to save memory profile. Please try again.';
+
+dictEn.uiSettingsDetail.memorySourceUnavailable = 'Some memory sources are temporarily unavailable. The last successfully loaded content is preserved.';
+
+dictEn.uiSettingsDetail.memoryRuntimeRefreshFailed = 'Memory was saved, but the current session context could not be refreshed.';
+
+dictEn.uiSettingsDetail.memorySnapshotRefreshFailed = 'Memory was loaded, but the overview snapshot could not be refreshed.';
+
+dictEn.uiSettingsDetail.memoryTopicCleanupRequired = 'Memory was updated. The previous topic data will be cleaned up automatically after it is released.';
+
+Object.assign(dictEn.uiSettingsDetail, {
+  reasoningEffort:'Thinking depth', reasoningEffortTiers:{ off:'Off', low:'Low', medium:'Medium', high:'High', max:'Max' },
+  reasoningProbePending:'Detecting server type…', reasoningProbeUnsupported:'This endpoint does not support thinking-depth control',
+  reasoningThinkingAlwaysOn:'This model always thinks and cannot be turned off',
+  saving:'Saving', localDetectionTargets:'Detect vLLM, Ollama, and LM Studio',
+  redetect:'Check again', detect:'Detect', noRunningLocalModel:'No running local model detected', modelNotLoadedTag:'Not loaded', modelNotLoadedHint:'Not in memory yet; it will load automatically on first use',
+  add:'Add', manualLocalModel:'Add a local model manually',
+  manualLocalModelDesc:'Enter the API URL and model ID', cloudModels:'Cloud models',
+  localModels:'Local models', toolCalling:'Tool calling', apiKeyRequired:'Requires API Key',
+  testBeforeSave:'Test whether the service is available before saving', modelContextWindowPlaceholder:'e.g. 1048576', modelContextWindowHint:'Leave empty for the system default (uncatalogued models fall back to a 128K conservative value). For a newer model, enter its official window, e.g. 1048576 for 1M.',
+  addProvider:provider=>`Add ${provider}`, editProvider:provider=>`Edit ${provider}`,
+  autoDetectLocalModel:'Automatically detect local models',
+  codingPlanTestUnavailable:'This provider endpoint cannot be tested right now, but you can still save the configuration',
+  connectionMessages:{ ok:'Connection successful; service available', auth_invalid:'Invalid API Key. Check it and try again', auth_forbidden:'This API Key does not have access', rate_limited:'Too many requests or insufficient quota. Try again later', endpoint_not_found:'Endpoint unavailable', method_not_allowed:'The endpoint does not support test requests', http_error:'Connection failed. Check the configuration and retry', unknown:'Connection failed. Try again later' },
+  catalogSections:{ coding_plan:'Coding Plan', official_api:'Official APIs', custom:'Custom compatible endpoints' },
+  providerCatalog:{
+    local:{title:'Local Model',desc:'Default model for the local service'}, glm_coding_plan:{title:'Zhipu Coding Plan / GLM Coding Plan',configTitle:'Zhipu Coding Plan',desc:'Dedicated endpoint for coding and agent tasks'},
+    tencent_coding_plan:{title:'Tencent Cloud Coding Plan',configTitle:'Tencent Cloud Coding Plan',desc:'Tencent Cloud coding-plan endpoint'},
+    tencent_token_plan:{title:'Tencent Cloud Token Plan',configTitle:'Tencent Cloud Token Plan',desc:'Dedicated gateway for Tencent Cloud TokenHub Token Plan subscriptions'},
+    kimi_coding_plan:{title:'Kimi Coding Plan',configTitle:'Kimi Coding Plan',desc:'Dedicated endpoint for Kimi coding tasks'},
+    deepseek:{title:'DeepSeek',configTitle:'DeepSeek',desc:'Official DeepSeek API'}, kimi:{title:'Kimi China',configTitle:'Kimi',desc:'Official Moonshot API'},
+    glm:{title:'Zhipu Open Platform / GLM API',configTitle:'GLM API',desc:'Standard Zhipu Open Platform API'},
+    minimax:{title:'MiniMax China',configTitle:'MiniMax',desc:'Official MiniMax API'}, mimo:{title:'MiMo',desc:'Official Xiaomi MiMo API'},
+    qwen:{title:'Qwen',desc:'Alibaba Cloud DashScope-compatible API'}, doubao:{title:'Doubao',desc:'Official Volcengine Ark API'},
+    glm_coding_plan_global:{title:'Zhipu Coding Plan Global / GLM Coding Plan Global',configTitle:'Zhipu Coding Plan Global',desc:'Dedicated z.ai endpoint for coding and agent tasks'},
+    kimi_global:{title:'Kimi Global',configTitle:'Kimi Global',desc:'Moonshot international API'},
+    glm_global:{title:'Zhipu GLM API (z.ai)',configTitle:'GLM API (z.ai)',desc:'Zhipu international z.ai API'},
+    minimax_global:{title:'MiniMax Global',configTitle:'MiniMax Global',desc:'MiniMax international API (keys are region-locked)'},
+    qwen_token_plan:{title:'Qwen Token Plan',configTitle:'Qwen Token Plan',desc:'Dedicated gateway for Alibaba Token Plan subscriptions'},
+    qwen_global:{title:'Qwen International',configTitle:'Qwen International',desc:'Alibaba Cloud Model Studio international API'},
+    openai:{title:'OpenAI',configTitle:'OpenAI',desc:'Official OpenAI API'},
+    anthropic:{title:'Anthropic Claude',configTitle:'Anthropic Claude',desc:'Official Anthropic API (native Messages protocol)'},
+    gemini:{title:'Google Gemini',configTitle:'Google Gemini',desc:'Gemini API (OpenAI-compatible endpoint)'},
+    xai:{title:'xAI Grok',configTitle:'xAI Grok',desc:'Official xAI API'},
+    openai_compatible:{title:'OpenAI Compatible',desc:'Custom OpenAI-compatible endpoint'},
+  },
+  imageCapability:'Image input', imageCapabilityEnabled:'Supports images', imageCapabilityDisabled:'No image support', imageCapabilityPinvou:'Handled automatically',
+  visionModel:'Vision model', visionModelNone:'None', visionModelDesc:'Used to analyze images when the current model cannot see them',
+  imagePrivacyDesc:'With cloud models, images are sent to the model provider you selected; with local models, images never leave this device.',
+  imageCapabilityTest:'Test image input', imageCapabilityTestHint:'Send a solid-color test image to check whether the model can see images. This calls the model and may incur charges',
+  imageCapabilityTestSupported:'Supports images', imageCapabilityTestUnsupported:'No image recognition',
+  imageCapabilityTestUnverified:'Failed to recognize the image; reason unknown',
+  imageCapabilityTestError:'Test failed. Check the connection and API Key first',
+  imageCapabilityTestReply:summary=>`Model reply: ${summary}`,
+  imageCapabilityTestEnableHint:'You can set image input to “Supports images” above',
+  imageCapabilitySaveFailed:error=>`Save failed: ${error}`,
+  visionModelProbing:'Testing image input…',
+  visionModelProbeError:summary=>`This model failed the image recognition probe and cannot be used as a vision model. Check its configuration and retry${summary ? `: ${summary}` : ''}`,
+});
+
+Object.assign(dictEn.uiAttachments, {
+  imageUnsupported:'The current model does not support images. Switch to an image-capable model, or configure a vision model in model settings.',
+  imageUnknown:'Image input capability of the current model is unknown. If it supports images, set image input to “Supports images” in model settings; you can also configure a vision model.',
+  imageCloudUpload:'Images will be sent to the model provider you selected along with your message.',
+  imageCloudUploadVision:'Images will be sent to the vision model provider you configured for analysis.',
+});
+
+Object.assign(dictEn.uiSettingsDetail.modelDescriptions, {
+  '本地服务默认模型':'Default model for the local service',
+  '旗舰编码模型':'Flagship coding model', '高性能编码模型':'High-performance coding model',
+  '日常编码模型':'Everyday coding model', 'Coding Plan 自动模型':'Coding Plan automatic model',
+  '自动模型，智能路由':'Automatic model with smart routing',
+  'Hy 套餐专属模型':'Exclusive to the Hy plan',
+  '手动填写 Token Plan 模型 ID':'Enter a Token Plan model ID manually',
+  '标准编码模型':'Standard coding model', 'K3 256K 上下文模型':'K3 with 256K context',
+  'K3 长上下文模型':'K3 long-context model', '高速编码模型':'High-speed coding model',
+  '旗舰推理':'Flagship reasoning model',
+  'K3 256K 上下文，价格更低':'K3 with 256K context at a lower price',
+  '官方已转 Legacy，兼容保留':'Officially legacy; kept for compatibility',
+  '官方已转 Legacy，兼容高速':'Officially legacy; high-speed compatibility',
+  '最新旗舰':'Latest flagship', '上代旗舰推理':'Previous-generation flagship reasoning',
+  '均衡性价比':'Balanced and cost-effective', '快速高性价比':'Fast and cost-effective',
+  '正式旗舰，夜间五折':'GA flagship, 50% off at night',
+  '2.4T 旗舰预览，Token Plan 专属，预览结束将下线或替换':'2.4T flagship preview, Token Plan only; will be retired or replaced after the preview',
+  '旗舰推理与编码':'Flagship reasoning and coding', '均衡智能与成本':'Balanced intelligence and cost',
+  '低成本高并发':'Low cost, high volume', '上代旗舰':'Previous-generation flagship',
+  '快速经济':'Fast and economical', '最强旗舰，长程 Agent':'Most capable flagship for long-running agents',
+  '复杂 Agent 编码':'Complex agentic coding', '速度与智能均衡':'Balanced speed and intelligence',
+  '最快，接近旗舰':'Fastest, near-frontier', '最新 Flash，均衡高性价比':'Latest Flash, balanced and cost-effective',
+  '均衡':'Balanced', '旗舰推理（预览）':'Flagship reasoning (preview)',
+  '4.20 推理':'4.20 reasoning', '4.20 非推理':'4.20 non-reasoning',
+  '旗舰编码与 Agent':'Flagship coding and agent model',
+  '通用推理，默认推荐':'General-purpose reasoning, recommended default', '代码 Agent':'Coding agent',
+});
+
+dictEn.uiSettingsDetail.customCodingPlanDesc = 'Enter a Coding Plan model ID manually';
+dictEn.uiSettingsDetail.customTokenPlanDesc = 'Enter a Token Plan model ID manually';
+dictEn.uiSettingsDetail.modelAlias = 'Alias';
+dictEn.uiSettingsDetail.modelAliasPlaceholder = 'Optional, e.g. Daily assistant';
+
+dictEn.uiSettingsDetail.customModelTitles = {
+  glm:'Custom GLM model', qwen:'Custom Qwen model',
+  openai_compatible:'Custom compatible model', glm_coding_plan:'Custom GLM Coding Plan model',
+  tencent_coding_plan:'Custom Tencent Cloud Coding Plan model', tencent_token_plan:'Custom Tencent Cloud Token Plan model', kimi_coding_plan:'Custom Kimi Coding Plan model',
+};
+
+// Official 主线在词典拆分基线之后新增或调整的文案。
+function buildTeamRelayAgentPrompt(language, task, workspace, options = {}) {
+  const copy = {
+    zh: { task: '任务', notes: '要做什么', goal: '交付目标', questions: '待确认', materials: '相关材料', git: '代码参考' },
+    en: { task: 'Task', notes: 'What to do', goal: 'Delivery goal', questions: 'To confirm', materials: 'Related materials', git: 'Code reference' },
+    ja: { task: 'タスク', notes: '作業内容', goal: '完了目標', questions: '要確認', materials: '関連資料', git: 'コード参照' },
+  }[language];
+  const events = Array.isArray(options.events) ? options.events : (task.events || []);
+  const uniqueLines = values => [...new Set(values.map(value => String(value || '').trim()).filter(Boolean))];
+  const noteLines = uniqueLines(events.map(event => event.message));
+  const goalLines = uniqueLines(events.map(event => event.delivery?.expected_next));
+  const questionLines = uniqueLines(events.map(event => event.delivery?.open_questions));
+  const materialLines = uniqueLines((workspace?.materials || []).map(file => file.local_path ? `${file.original_name || file.local_path}：${file.local_path}` : file.original_name));
+  const references = events.flatMap(event => event.delivery?.git_references || []);
+  const gitLines = uniqueLines(references.map(reference => `${reference.repository_url || ''}${reference.commit_sha ? ` @ ${reference.commit_sha}` : ''}${reference.branch ? ` · ${reference.branch}` : ''}${reference.paths?.length ? `\n  ${reference.paths.join(' · ')}` : ''}`));
+  const sections = [
+    `${copy.task}：${task.title}`,
+    noteLines.length ? `${copy.notes}：\n${noteLines.map(line => `- ${line}`).join('\n')}` : '',
+    goalLines.length ? `${copy.goal}：\n${goalLines.map(line => `- ${line}`).join('\n')}` : '',
+    questionLines.length ? `${copy.questions}：\n${questionLines.map(line => `- ${line}`).join('\n')}` : '',
+    materialLines.length ? `${copy.materials}：\n${materialLines.map(line => `- ${line}`).join('\n')}` : '',
+    gitLines.length ? `${copy.git}：\n${gitLines.map(line => `- ${line}`).join('\n')}` : '',
+  ];
+  return sections.filter(Boolean).join('\n\n');
+}
+
+dictEn["teamRelay"] = "Team Relay";
+dictEn["uiTeamRelay"] = {
+  "inviteMembers": "Invite members",
+  "syncNow": "Sync now",
+  "syncingNow": "Syncing…",
+  "sending": "Sending…",
+  "brand": "Pinvou Relay",
+  "title": "Team Relay",
+  "subtitle": "Assign work, keep it moving, and bring delivery home",
+  "assign": "Start relay",
+  "inbox": "Work",
+  "workList": "Work list",
+  "search": "Search",
+  "empty": "No work here yet",
+  "selectWork": "Select work to view its relay thread",
+  "close": "Close",
+  "done": "Done",
+  "cancel": "Cancel",
+  "more": "More",
+  "backToList": "Back to work list",
+  "batonPath": "Relay route",
+  "history": "Relay history",
+  "toggleTheme": "Toggle light or dark theme",
+  "workId": id => `Relay ${id}`,
+  "liveBadge": "Connected",
+  "syncing": "Syncing team work…",
+  "retry": "Sync again",
+  "createJoinPassword": "Team join code",
+  "rotateJoinPassword": "Rotate team join code",
+  "rotateJoinPasswordConfirm": "Generating a new code immediately invalidates the current team join code. Continue?",
+  "joinPasswordReady": "Team join code",
+  "joinPasswordHint": "Send members this 8-character code; they can join through the default Team Relay service. Rotating invalidates the old code.",
+  "copyJoinPassword": "Copy join code",
+  "copiedJoinPassword": "Join code copied",
+  "addFiles": "Add local files",
+  "noFiles": "No files selected",
+  "uploading": "Uploading…",
+  "download": "Download",
+  "returning": "Return to previous owner",
+  "agentOpenFailed": "Could not open a private Agent session. Try again shortly.",
+  "unsupportedTitle": "Team Relay is unavailable here",
+  "unsupportedBody": "Open this page in the Pinvou desktop app. The Web host does not connect to the team service.",
+  "joinCode": {
+    "memberVisibility": "All team members can view and share this code. It remains valid until an owner rotates or pauses it.",
+    "ownerVisibility": "Only team owners can currently view this join code.",
+    "ownerOnly": "An owner has hidden the team join code. Ask an owner for access.",
+    "disabled": "Team joining is paused. Existing join codes cannot be used.",
+    "legacyOwner": "This code was created by an older Hub and cannot be shown again. Rotate it once to make it persistently viewable.",
+    "legacyMember": "An owner must rotate the current code before it can be viewed.",
+    "rotate": "Rotate code",
+    "enable": "Enable joining",
+    "hideFromMembers": "Hide from members",
+    "showToMembers": "Show to members",
+    "disable": "Pause joining",
+    "disableConfirm": "Pausing immediately invalidates the current code and prevents new members from joining. Continue?"
+  },
+  "returnDefault": "The collaboration is complete. Return it to the previous owner.",
+  "acceptDefault": "Delivery confirmed. Approve and close this work.",
+  "acceptTransferDefault": "I accept this task or relay.",
+  "pendingConfirmation": "Waiting for confirmation",
+  "errorMessages": {
+    "hub_unreachable": "Could not reach the Team Relay service. Check the network and try again.",
+    "hub_timeout": "The Team Relay service timed out. Try again shortly.",
+    "resource_not_found": "The Team Relay service does not provide this feature yet. Update it and try again.",
+    "authentication_required": "This local credential is no longer valid. Reconnect to Team Relay.",
+    "membership_required": "You are no longer in this team. Switch to another team.",
+    "join_password_invalid": "The team join code is incorrect. Check it with a member.",
+    "join_code_storage_unavailable": "The join code cannot be read securely. Ask the service administrator to check its encryption configuration.",
+    "email_already_registered": "An account already uses this email. Sign in before joining or creating a team.",
+    "email_change_not_supported": "Changing the registered email is not supported yet.",
+    "rate_limited": "Too many join code attempts. Try again later.",
+    "invite_expired": "The invite is invalid or expired. Ask for a new one.",
+    "invite_already_claimed": "This invite code has already been used.",
+    "member_has_open_work": "This member still has required responsibilities in open work. Finish or hand them off before retrying.",
+    "last_team_owner": "The team owner cannot leave directly. Transfer ownership or dissolve the team first.",
+    "new_owner_unavailable": "This member's account is disabled and cannot take over as team owner.",
+    "team_has_open_work": "The team still has open work. Finish all of it before dissolving the team.",
+    "revision_conflict": "This work changed moments ago. It has been refreshed; review and retry.",
+    "action_not_allowed": "This action is not allowed in the current relay state.",
+    "attachment_too_large": "The file exceeds the 20 MiB limit.",
+    "attachment_type_not_allowed": "This file type is not supported.",
+    "credential_store_failed": "The local credential store could not be accessed securely. Check the system credential store.",
+    "team_relay_settings_delete_failed": "Could not clear the local Team Relay settings. Check the data-directory permissions and try again.",
+    "avatar_too_large": "The avatar exceeds the 1.5 MiB limit.",
+    "avatar_processed_too_large": "The safely processed avatar still exceeds 1.5 MiB. Resize or compress it and try again.",
+    "avatar_type_not_allowed": "Avatars support PNG, JPEG, WebP, and GIF only, and the content must match the extension.",
+    "avatar_image_invalid": "The avatar is damaged or could not be fully decoded. Export it again and retry.",
+    "avatar_image_limits_exceeded": "The avatar dimensions, GIF frame count, or total animated pixels exceed the safe limit.",
+    "avatar_upload_in_progress": "An avatar for this account is already being processed. Try again shortly.",
+    "avatar_processing_busy": "Avatar processing is busy. Try again shortly.",
+    "avatar_upload_rate_limited": "The avatar was updated too often. Try again shortly.",
+    "avatar_unreadable": "The selected avatar could not be read. Choose it again.",
+    "avatar_invalid_name": "The avatar filename is invalid. Rename it and try again."
+  },
+  "setup": {
+    "title": "Sign in to Team Relay",
+    "body": "Use your email and name to enter Team Relay. You can join or create a team afterward.",
+    "service": "Team Relay service",
+    "defaultService": "Pinvou default Team Relay service",
+    "connectedService": "Connected",
+    "email": "Email",
+    "emailPlaceholder": "name@example.com",
+    "displayName": "Your name",
+    "defaultDeviceName": "Pinvou desktop",
+    "submit": "Enter Team Relay",
+    "privacy": "Each email identifies one account and cannot be changed after it is bound. Team members only see your name."
+  },
+  "profile": {
+    "open": "Account and avatar",
+    "title": "Account and avatar",
+    "subtitle": "Your avatar and name are shown in every team you join.",
+    "email": "Email account",
+    "displayName": "Your name",
+    "emailLocked": "Email identifies your account and cannot be changed in this version.",
+    "bindEmail": "This is a legacy identity. Bind an email now; it cannot be changed in this version.",
+    "confirm": "Save",
+    "updated": "Name updated",
+    "logout": "Sign out",
+    "logoutTitle": "Sign out of Team Relay?",
+    "logoutBody": "This removes the Team Relay credential from this device and stops syncing. Your account, team memberships, and relay history remain, and other devices are unaffected.",
+    "logoutConfirm": "Sign out",
+    "loggingOut": "Signing out…",
+    "avatar": "Relay avatar",
+    "avatarHint": "Up to 1.5 MiB. Static images are resized to 512px; GIFs to 384px with at most 60 frames and 4M total pixels. Without one, your name initial is shown.",
+    "uploadAvatar": "Upload avatar",
+    "changeAvatar": "Change avatar",
+    "removeAvatar": "Remove",
+    "removeAvatarConfirm": "Remove the custom avatar and use your name character?",
+    "avatarUpdated": "Avatar updated",
+    "avatarRemoved": "Name avatar restored"
+  },
+  "actionKinds": {
+    "assign": "Task sent",
+    "note": "Note",
+    "progress": "Progress update",
+    "handoff": "Collaboration invitation sent",
+    "accept_transfer": "Task or relay accepted",
+    "decline_transfer": "Request declined",
+    "withdraw_transfer": "Request withdrawn",
+    "reroute_transfer": "Recipient changed",
+    "return": "Returned to previous owner",
+    "final_deliver": "Final delivery",
+    "request_changes": "Changes requested",
+    "accept": "Approved",
+    "cancel": "Task cancelled"
+  },
+  "live": {
+    "actionTitle": (kind, actor, recipient) => recipient && recipient !== '—' ? `${actor} · ${kind} → ${recipient}` : `${actor} · ${kind}`,
+    "yourTurn": {
+      "title": "It is your turn",
+      "body": "Work on this item, invite a teammate to collaborate, or return and deliver it."
+    },
+    "assignmentOffer": sender => ({ title: `${sender} assigned you a task`, body: 'Accept to become its owner and receive full material access, or decline with a reason.' }),
+    "handoffOffer": sender => ({ title: `${sender} invited you to take the relay`, body: 'Accept to become the current actor. Return the result to the person who invited you when done.' }),
+    "waitingTransfer": recipient => ({ title: `Waiting for ${recipient}`, body: 'The baton stays with you until they accept. You can withdraw or choose someone else.' }),
+    "needsReassignment": {
+      "title": "This task needs a new owner",
+      "body": "The previous recipient declined or the assignment was withdrawn. Choose another owner."
+    },
+    "awaitingAcceptance": owner => ({ title: 'Waiting for your approval', body: `${owner} sent a final delivery. Approve and close it, or request changes.` })
+  },
+  "categories": {
+    "attention": "Needs my attention",
+    "waiting": "Waiting on others",
+    "all": "All relays",
+    "ended": "Ended",
+    "hidden": "Archived"
+  },
+  "statuses": {
+    "offer": "Needs confirmation",
+    "reroute": "Needs reassignment",
+    "pending": "To do",
+    "receive": "To approve",
+    "waiting": "Waiting",
+    "ended": "Ended",
+    "hidden": "Archived"
+  },
+  "sourceFilterLabel": "Filter by source",
+  "sourceFilters": {
+    "all": "All",
+    "sent": "Started by me",
+    "received": "Assigned to me",
+    "collaborating": "Collaborating"
+  },
+  "views": {
+    "label": "Relay view",
+    "personal": "My work",
+    "teams": "Teams",
+    "board": "Team details"
+  },
+  "unread": {
+    "nav": "Team Relay has updates or pending actions",
+    "tasks": n => `${n} tasks have updates`,
+    "updates": n => `${n} unread updates`
+  },
+  "teams": {
+    "switchLabel": "Choose team",
+    "filterLabel": "Team filter",
+    "allTeams": "All teams",
+    "create": "New team",
+    "join": "Join team",
+    "directoryTitle": "My teams",
+    "directorySubtitle": "Teams define collaboration scope; they no longer limit what appears in My work.",
+    "joinedCount": "Joined teams",
+    "totalOpenWork": "Active team relays",
+    "teamSummary": (members, work) => `${members} members · ${work} active`,
+    "openTeam": "View team",
+    "backToDirectory": "Back to teams",
+    "emptyTitle": "You have not joined a team yet",
+    "emptyBody": "Use a team join code to enter an existing team, or create a new one.",
+    "openWork": n => `${n} active`,
+    "created": "Team created",
+    "joined": "Joined team",
+    "createDialog": {
+      "title": "Create a temporary team",
+      "subtitle": "Start a lightweight work group for a project or collaboration.",
+      "name": "Team name",
+      "placeholder": "For example: Release preparation",
+      "hint": "You become the team owner and can invite collaborators.",
+      "confirm": "Create and enter"
+    },
+    "joinDialog": {
+      "title": "Join a team",
+      "subtitle": "Use the team join code shared by a team owner.",
+      "code": "Team join code",
+      "placeholder": "For example: K7M4-P9Q2",
+      "hint": "Codes are case-insensitive and the hyphen is optional. After joining, you can see members and assigned work.",
+      "confirm": "Join team"
+    }
+  },
+  "board": {
+    "title": "Team members",
+    "subtitle": "See team roles, current relay workload, and acceptance status.",
+    "sidebar": {
+      "title": "Team"
+    },
+    "summary": {
+      "members": "Members",
+      "inProgress": "In relay",
+      "acceptance": "To accept",
+      "completed": "Ended"
+    },
+    "groups": {
+      "owners": "Team owner",
+      "members": "Team members"
+    },
+    "memberCount": n => `${n} member${n === 1 ? '' : 's'}`,
+    "me": "Me",
+    "roles": {
+      "owner": "Owner",
+      "member": "Member"
+    },
+    "busy": "In relay",
+    "busyCount": n => `${n} active`,
+    "available": "No current blockers.",
+    "availableShort": "Available",
+    "memberWorkSummary": member => `${member.activeCount} working, ${member.waitingCount} waiting for return, and ${member.acceptanceCount} to accept.`,
+    "loadTitle": "Team workload",
+    "loadSubtitle": "Sorted by open work and acceptance",
+    "load": {
+      "active": "Working",
+      "waiting": "Waiting for return",
+      "acceptance": "To accept"
+    },
+    "queue": {
+      "title": "Relay queue",
+      "count": n => `${n} item${n === 1 ? '' : 's'}`,
+      "empty": "No relay is currently in progress",
+      "hint": "Queue and reminders use the current team’s authoritative relay state."
+    },
+    "attention": {
+      "title": "Acceptance reminders",
+      "count": n => `${n} item${n === 1 ? '' : 's'} to accept`,
+      "body": title => `“${title}” has been delivered and is ready for review.`,
+      "empty": "Nothing is waiting for acceptance"
+    },
+    "ownedCount": n => `Owns ${n} work item${n === 1 ? '' : 's'}`,
+    "lastSeen": time => `Last seen ${time}`,
+    "noLastSeen": "No presence yet",
+    "inviteMember": "Team join code",
+    "removeMember": "Remove",
+    "removeConfirm": name => `Remove “${name}” from this team?`,
+    "removed": name => `Removed “${name}” from the team`,
+    "removedAndCodeRotated": name => `Removed “${name}” and rotated the team join code`,
+    "transferOwner": "Transfer owner",
+    "transferConfirm": name => `Transfer team ownership to “${name}”? You will become an ordinary member.`,
+    "transferred": name => `Team ownership transferred to ${name}`,
+    "leaveTeam": "Leave team",
+    "leaveConfirm": name => `Leave “${name}”? You will lose access and the current join code will be rotated immediately.`,
+    "left": name => `Left ${name}`,
+    "dissolveTeam": "Dissolve team",
+    "dissolveConfirm": name => `Permanently dissolve “${name}”? Every member immediately loses access and the join code becomes invalid. Server history is retained but currently has no recovery or viewing entry. This cannot be undone.`,
+    "dissolved": name => `Dissolved ${name}`
+  },
+  "taskInfo": "Task details",
+  "initiator": "Initiator",
+  "owner": "Owner",
+  "currentActor": "Current actor",
+  "finalRecipient": "Final recipient",
+  "attachments": n => `${n} attachment${n === 1 ? '' : 's'}`,
+  "dash": "—",
+  "materialInspector": {
+    "title": "Task materials",
+    "summary": (files, packages) => `${files} files · ${packages} packages`,
+    "empty": "Full materials appear after you accept the task or relay",
+    "agentUpdate": "New context not yet synced to the current Agent",
+    "unavailable": "Material expired",
+    "openPrepared": "Open material",
+    "revealPrepared": "Open containing folder",
+    "download": "Download locally",
+    "introduced": "Added to Agent"
+  },
+  "useMyAgent": "Use my Agent",
+  "continueWithAgent": "Continue Agent work",
+  "updateProgress": "Update progress",
+  "askForHelp": "Invite collaborator",
+  "acceptTask": "Accept task",
+  "declineTask": "Decline task",
+  "acceptHandoff": "Accept relay",
+  "declineHandoff": "Decline relay",
+  "withdrawAssignment": "Withdraw assignment",
+  "withdrawHandoff": "Withdraw invitation",
+  "withdrawTransfer": "Withdraw request",
+  "rerouteTransfer": "Change recipient",
+  "finalDelivery": "Final delivery",
+  "requestSupplement": "Request changes",
+  "acceptDelivery": "Approve and close",
+  "pinned": "Pinned",
+  "pinWork": "Pin work",
+  "unpinWork": "Unpin work",
+  "hideWork": "Archive work",
+  "restoreWork": "Restore to list",
+  "cancelWork": "Cancel task",
+  "privacyNotice": "Only explicitly selected files and notes travel with the relay. Your private workspace and Agent chats are never shared automatically.",
+  "preparedMaterials": (ready, total) => `${ready}/${total} files prepared`,
+  "prepareAllMaterials": "Prepare all materials",
+  "preparingMaterials": "Preparing…",
+  "sourceSession": "Bring in from a session (optional)",
+  "sourceSessionsLoading": "Loading sessions…",
+  "noSourceSession": "No linked session",
+  "chatSessions": "Pinvou chats",
+  "codingSessions": "Pinvou Coding chats",
+  "sourceSessionsFailed": "Could not load sessions. You can still assign without one.",
+  "sourceSessionLoading": "Reading session outputs and workspace status…",
+  "sourceSessionFailed": "Could not read this session. Retry or clear it.",
+  "chatSession": "Chat session",
+  "codingSession": "Coding session",
+  "selectedSourceMaterials": n => `${n} material(s) included`,
+  "chatSessionMaterialHint": n => n ? `All ${n} recognized session output(s) are selected by default. Remove any you do not want to send.` : 'This session has no deliverable outputs.',
+  "noGitRemote": "No shareable Git remote found",
+  "noGitCommit": "No pinned commit available",
+  "detachedHead": "Branch not detected",
+  "codingChanges": n => `${n} workspace change(s)`,
+  "codingSessionChanges": n => `${n} session-related`,
+  "codingStaged": n => `${n} staged`,
+  "dirtyGitWarning": n => `The Git reference is pinned to the current commit and does not include the ${n} uncommitted file(s) below.`,
+  "unshareableGitWarning": "A reliable pinned Git reference is unavailable. Only the explicitly selected files below will be sent.",
+  "sourceSessionPrivacy": "Only the listed materials and code reference are sent—never the session transcript, absolute paths, Git credentials, or full diffs.",
+  "deliveryGoalPlaceholder": "Describe the delivery outcome and how the recipient can tell it is complete",
+  "uploadAttachments": "Local attachments (optional)",
+  "selectedAttachmentCount": n => `${n} file(s) selected`,
+  "attachmentUploadHint": "Files upload only after confirmation. Canceling uploads nothing.",
+  "attachmentLimit": n => `A relay can send at most ${n} files. Remove some materials.`,
+  "materialMountFailed": "File upload failed and the relay was not submitted. Check the files and retry.",
+  "uploadingAndSending": "Uploading and sending…",
+  "removeMaterial": name => `Remove ${name}`,
+  "codingGitReferenceNote": (total, related) => `The Coding Session workspace has ${total} uncommitted change(s); ${related} related path(s) are recorded in this reference.`,
+  "selectFiles": "Materials sent with work",
+  "workTitle": "Work title",
+  "workTitlePlaceholder": "For example: Prepare release notes",
+  "assignTo": "Assign to",
+  "handoffTo": "Invite collaborator",
+  "currentWork": "Current work",
+  "selectedContext": n => `The relay brief and the names of ${n} shared material${n === 1 ? '' : 's'} will be included`,
+  "agentPreviewTitle": "Continue in my private workspace",
+  "agentPreviewBody": "Pinvou prepares the relay context, then creates or opens this work item’s private Agent session. Opening it again reuses the same session.",
+  "preparedForAgent": n => `${n} shared file${n === 1 ? '' : 's'}`,
+  "linkedAgentSession": "Linked Agent session for this work",
+  "agentSessionChoice": "Choose a session",
+  "reuseAgentSession": "Continue current session",
+  "useNewAgentSession": "Create new session",
+  "useNewAgentSessionHint": "Keep the current session and create a new one for this work.",
+  "agentWorkMode": "Work mode",
+  "chatWorkMode": "Pinvou chat",
+  "pinvouCodeWorkMode": "Pinvou Code mode",
+  "codeAgent": "Code Agent",
+  "defaultPinvouAgent": "Pinvou (default)",
+  "otherAcpAgents": "Other ACP Agents",
+  "agentNotReady": "not ready",
+  "localCodeWorkspace": "Local code workspace (optional)",
+  "localCodeWorkspaceHint": "This relay includes a Git reference. You may choose an existing local checkout. Pinvou never clones, checks out, or pulls automatically.",
+  "localCodeWorkspaceOptionalHint": "Without a folder, a temporary code workspace is used.",
+  "chooseWorkspace": "Choose code folder",
+  "changeWorkspace": "Change folder",
+  "agentMaterials": "Materials to bring into the session",
+  "firstMaterialSummary": n => `${n} material(s) selected by default`,
+  "continueMaterialSummary": n => n ? `${n} new material(s) selected by default` : 'No new materials',
+  "introducedMaterialSummary": n => `${n} material${n === 1 ? '' : 's'} already in this session; no need to select again`,
+  "alreadyIntroduced": "already added",
+  "selectAll": "Select all",
+  "clearSelection": "Clear",
+  "gitContext": "Git context in this relay",
+  "contextUpdated": "new context",
+  "agentPrivacy": "Only the task, goal, and selected materials are prefilled, and nothing is sent automatically. Add the specific requirements before sending.",
+  "agentPrepareFailed": "Could not prepare materials or open the Agent session. Check the materials and workspace, then retry.",
+  "agentSessionTitle": title => `Relay · ${title}`,
+  "buildAgentPrompt": (task, workspace, options) => buildTeamRelayAgentPrompt('en', task, workspace, options),
+  "packageId": sequence => `Package P${sequence}`,
+  "acceptedPackage": sequence => `Accepted final package P${sequence}`,
+  "acceptedPackageSummary": (files, gitRefs) => gitRefs ? `${files} file snapshot(s) and ${gitRefs} historical pinned Git reference(s)` : `${files} file snapshot(s)`,
+  "artifactRoleLabel": "Material role",
+  "artifactRoles": {
+    "input": "Input",
+    "intermediate": "Intermediate result",
+    "final": "Final result",
+    "evidence": "Evidence"
+  },
+  "expectedNext": "Expected next step",
+  "expectedNextPlaceholder": "What should the recipient do with this package?",
+  "openQuestions": "Open questions",
+  "openQuestionsPlaceholder": "Items that still need a decision or clarification",
+  "gitReference": "Git delivery reference",
+  "mutableGitWarning": "No pinned commit; this reference can change",
+  "endedStatus": "Ended",
+  "endedBanner": {
+    "title": "Work ended",
+    "body": "The final delivery was accepted. The relay history and shared materials remain in the record."
+  },
+  "cancelledStatus": "Cancelled",
+  "cancelledBanner": {
+    "title": "Work cancelled",
+    "body": "The initiator stopped this work. Its reason, relay history, and shared materials remain in the record."
+  },
+  "dynamic": {
+    "currentAt": name => `Currently with ${name}`,
+    "waitingBanner": name => ({ title: `It is ${name}'s turn`, body: `${name} is working and should return the work through this relay when done.` })
+  },
+  "dialogs": {
+    "assign": {
+      "title": "Assign task",
+      "subtitle": "The recipient becomes the owner and receives full materials only after accepting.",
+      "routeLabel": "Task owner",
+      "taskLabel": "What needs doing",
+      "acceptanceLabel": "Delivery goal",
+      "messagePlaceholder": "For example: Improve the particle page and fix known bugs",
+      "artifactRole": "input",
+      "confirm": "Send task"
+    },
+    "progress": {
+      "title": "Update progress",
+      "subtitle": "Record progress and materials without handing the relay to someone else.",
+      "routeLabel": "Relay stays with",
+      "taskLabel": "Current progress",
+      "acceptanceLabel": "Next step (optional)",
+      "acceptancePlaceholder": "For example: Continue validating the Windows installer",
+      "acceptanceOptional": true,
+      "messagePlaceholder": "Summarize completed work, current activity, validation, or blockers",
+      "artifactRole": "evidence",
+      "confirm": "Post update"
+    },
+    "handoff": {
+      "title": "Invite collaborator",
+      "subtitle": "After accepting, they become the current actor; you remain accountable and receive the result back.",
+      "routeLabel": "Invite collaborator",
+      "taskLabel": "What help is needed",
+      "acceptanceLabel": "How to return it",
+      "messagePlaceholder": "Describe the part to add, verify, or handle",
+      "artifactRole": "intermediate",
+      "confirm": "Send collaboration invite"
+    },
+    "return": {
+      "title": "Return to previous owner",
+      "subtitle": "Return the result and materials to the person who sent this invitation.",
+      "routeLabel": "Return to",
+      "taskLabel": "What was completed",
+      "acceptanceLabel": "What they should do next",
+      "messagePlaceholder": "Summarize changes, locations, validation, and limitations",
+      "artifactRole": "intermediate",
+      "confirm": "Return"
+    },
+    "deliver": {
+      "title": "Final delivery",
+      "subtitle": "Deliver the completed result for acceptance or changes.",
+      "routeLabel": "Deliver to",
+      "taskLabel": "What is being delivered",
+      "acceptanceLabel": "How to accept it",
+      "messagePlaceholder": "Summarize the result, validation, usage, and known limitations",
+      "artifactRole": "final",
+      "confirm": "Deliver"
+    },
+    "supplement": {
+      "title": "Request changes",
+      "subtitle": "Keep the work open and return it to its owner in the same thread.",
+      "routeLabel": "Return to",
+      "taskLabel": "What needs changing",
+      "acceptanceLabel": "Resubmission standard",
+      "messagePlaceholder": "Describe missing, incorrect, or unverified parts",
+      "artifactRole": "input",
+      "confirm": "Return for changes"
+    },
+    "cancelWork": {
+      "title": "Cancel this work",
+      "subtitle": "The relay will stop, but its complete history and materials remain.",
+      "reasonLabel": "Cancellation reason",
+      "messagePlaceholder": "Explain why this work should no longer continue",
+      "auditHint": "The reason becomes a team-visible, immutable relay record.",
+      "confirm": "Cancel work"
+    },
+    "declineTransfer": {
+      "title": "Decline request",
+      "subtitle": "The task or relay will not move to you, and the sender will receive your feedback.",
+      "reasonLabel": "Reason",
+      "messagePlaceholder": "Explain why you cannot take this work",
+      "auditHint": "The reason is kept in the immutable relay history.",
+      "confirm": "Decline"
+    },
+    "withdrawTransfer": {
+      "title": "Withdraw request",
+      "subtitle": "The recipient has not accepted yet. You can choose someone else afterward.",
+      "reasonLabel": "Reason",
+      "messagePlaceholder": "Explain why the request is being withdrawn",
+      "auditHint": "The sent record remains visible in relay history.",
+      "confirm": "Withdraw"
+    },
+    "rerouteTransfer": {
+      "title": "Change recipient",
+      "subtitle": "The previous request expires and the new recipient must confirm.",
+      "routeLabel": "New recipient",
+      "reasonLabel": "Reason",
+      "messagePlaceholder": "Explain why the recipient is changing",
+      "auditHint": "The change is kept in immutable relay history.",
+      "confirm": "Send to new recipient"
+    },
+    "agent": {
+      "title": "Continue with my Agent",
+      "subtitle": "Work privately without sharing your Agent conversation.",
+      "confirm": "Open private session"
+    }
+  },
+  "legacyTransfers": {
+    "askForHelp": "Transfer directly (legacy)",
+    "assignedToast": "Task assigned directly",
+    "handedOffToast": "Transferred directly; waiting for return",
+    "reroutedToast": "Recipient changed and the transfer took effect immediately",
+    "dialogs": {
+      "assign": {
+        "subtitle": "This Hub does not support acceptance yet. The recipient becomes the owner immediately.",
+        "confirm": "Assign directly"
+      },
+      "handoff": {
+        "subtitle": "This Hub does not support relay confirmation yet. The recipient becomes the current actor immediately.",
+        "confirm": "Transfer now"
+      }
+    },
+    "recipientDialogs": {
+      "assign": {
+        "subtitle": "The recipient has not recently used a client that supports acceptance. They will become the owner immediately.",
+        "confirm": "Assign directly"
+      },
+      "handoff": {
+        "subtitle": "The recipient has not recently used a client that supports relay confirmation. They will become the current actor immediately.",
+        "confirm": "Invite directly"
+      },
+      "rerouteTransfer": {
+        "subtitle": "The new recipient has not recently used a confirmation-capable client. The relay will move immediately.",
+        "confirm": "Change and apply now"
+      }
+    }
+  },
+  "toasts": {
+    "assigned": "Task sent; waiting for acceptance",
+    "transferAccepted": "Accepted; the baton is now with you",
+    "transferDeclined": "Declined and the sender was notified",
+    "transferWithdrawn": "Withdrawn; you can choose another recipient",
+    "transferRerouted": "Sent to the new recipient",
+    "progressUpdated": "Progress updated; the relay is still with you",
+    "handedOff": "Relay invitation sent; the baton stays with you until acceptance",
+    "delivered": "Final delivery sent",
+    "supplementRequested": "Returned to owner for changes",
+    "returned": "The collaborator returned the work; it is your turn",
+    "accepted": "Delivery approved and work closed",
+    "cancelled": "Task cancelled and history retained",
+    "pinned": "Pinned for you",
+    "unpinned": "Unpinned",
+    "hidden": "Archived; restore it from Archived",
+    "restored": "Restored to the work list"
+  },
+  "blockingWork": (message, threads) => `${message} Blocking work: ${threads.join('; ')}`,
+  "blockingThread": thread => {
+    const labels = { "active": "In progress", "pending_transfer": "Waiting for confirmation", "awaiting_reassignment": "Needs reassignment", "awaiting_acceptance": "Awaiting approval" };
+    return labels[thread.phase] ? `${thread.title || thread.thread_id} (${labels[thread.phase]})` : `${thread.title || thread.thread_id}`;
+  },
+  "lifecycleSyncPending": "The operation is complete, but team data has not synced yet. Sync again to load the latest state."
+};
+dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+dictEn["uiRemote"]["status"]["idle"] = ["Not enabled", "Enable access to create a persistent remote control link."];
+dictEn["uiRemote"]["status"]["starting"] = ["Starting", "Creating the remote control connection."];
+dictEn["uiRemote"]["status"]["connecting_relay"] = ["Connecting", "Connecting to the relay…"];
+dictEn["uiRemote"]["status"]["waiting_web_client"] = ["Waiting for browser", "Paste the link into a browser on your phone or computer."];
+dictEn["uiRemote"]["status"]["web_client_connected"] = ["Browser connected", "A browser is connected to this desktop."];
+dictEn["uiRemote"]["status"]["web_client_disconnected"] = ["Browser disconnected", "The link remains valid and can reconnect at any time."];
+dictEn["uiRemote"]["status"]["revoked"] = ["Link revoked", "Enable remote control again."];
+dictEn["uiRemote"]["status"]["stopped"] = ["Stopped", "Open this panel to enable access again."];
+dictEn["uiRemote"]["status"]["error"] = ["Connection error", "Remote control is temporarily unavailable. Try again."];
+dictEn["uiSettingsDetail"]["builtinModel"] = "Built-in model";
+dictEn["uiSettingsDetail"]["settingsLoadFailedDetail"] = "Settings cannot be displayed right now. Reopen the page and try again.";
+dictEn["uiScheduled"]["weekdays"] = [["Monday", "Mon"], ["Tuesday", "Tue"], ["Wednesday", "Wed"], ["Thursday", "Thu"], ["Friday", "Fri"], ["Saturday", "Sat"], ["Sunday", "Sun"]];
+dictEn["uiToolStore"]["guide"]["types"] = ["Standard skill (SKILL.md folder)", "Single .md skill file", "MCP server", "Pinvou plugin package (recommended)"];
+dictEn["uiToolStore"]["connectorErrors"] = {
+  "runtime_prepare_failed": "Failed to prepare the connector runtime. Try again.",
+  "cli_install_failed": "Failed to install the connector. Check your network and try again.",
+  "auth_start_failed": "Unable to start sign-in. Try again.",
+  "registration_failed": "App registration was not completed. Reconnect and try again.",
+  "auth_failed": "Sign-in authorization was not completed. Reconnect and try again.",
+  "skills_enable_failed": "Authorization completed, but enabling the skill failed. Try again.",
+  "sso_start_failed": "Unable to start SSO sign-in. Check your intranet connection and try again.",
+  "sso_timeout": "SSO sign-in timed out. Reconnect and try again.",
+  "unknown": "Connection failed. Try again later."
+};
+dictEn["uiToolStore"]["sso"] = {
+  "title": name=>`Sign in to ${name}`,
+  "hint": "Scan the code or finish SSO sign-in in your browser. The tool connects automatically after sign-in (intranet required).",
+  "qrAlt": name=>`${name} sign-in QR code`,
+  "generating": "Generating QR code…",
+  "openBrowser": "Open sign-in in browser",
+  "waiting": "Waiting for sign-in…"
+};
+dictEn["uiToolStore"]["internalDetailDesc"] = "Connect directly to H3C internal systems with your SSO identity. Sign in in the browser or by QR code; no key is required, and data stays on the corporate intranet.";
+dictEn["uiToolStore"]["internalUsageHint"] = "Corporate intranet required · On first connection, complete SSO in the browser or by QR code; no key required";
+dictEn["uiToolStore"]["feishuSteps"] = [{
+    "key": "runtime",
+    "label": "Prepare runtime",
+    "sub": "Use the app-provided Node runtime"
+  }, {
+    "key": "cli",
+    "label": "Install connector",
+    "sub": "lark-cli · about 40 seconds on first use"
+  }, {
+    "key": "connect",
+    "label": "Connect & authorize",
+    "sub": "Create app identity"
+  }, {
+    "key": "qr",
+    "label": "Scan to sign in",
+    "sub": "Scan with the Feishu app"
+  }];
+dictEn["uiToolStore"]["wecomSteps"] = [{
+    "key": "runtime",
+    "label": "Prepare runtime",
+    "sub": "Use the app-provided Node runtime"
+  }, {
+    "key": "cli",
+    "label": "Install connector",
+    "sub": "wecom-cli · about 40 seconds on first use"
+  }, {
+    "key": "qr",
+    "label": "Scan to sign in",
+    "sub": "Scan with the WeCom app"
+  }];
+dictEn["uiToolStore"]["dingtalkSteps"] = [{
+    "key": "runtime",
+    "label": "Prepare runtime",
+    "sub": "Use the app-provided Node runtime"
+  }, {
+    "key": "cli",
+    "label": "Install connector",
+    "sub": "dws · about 40 seconds on first use"
+  }, {
+    "key": "qr",
+    "label": "Scan to sign in",
+    "sub": "Scan with the DingTalk app"
+  }];
+dictEn["uiToolStore"]["toolNames"]["eip"] = "Employee Portal (EIP)";
+dictEn["uiToolStore"]["toolNames"]["zhidao"] = "Zhidao Knowledge Base";
+dictEn["uiToolStore"]["skillLabel"] = "Skill";
+dictEn["uiToolStore"]["storeData"]["categories"]["h3c"] = "H3C Internal";
+dictEn["uiToolDetails"]["tools"]["ima"]["welcomeQueries"] = ["Search my ima knowledge bases", "List my ima notes", "Create an ima note from this content", "Find the product plan in my ima knowledge base"];
+dictEn["uiToolDetails"]["tools"]["tmeet"]["welcomeQueries"] = ["Create a Tencent Meeting for me", "Show my Tencent Meeting recordings", "Show the latest AI meeting minutes", "List the attendees of this Tencent Meeting"];
+dictEn["uiToolDetails"]["tools"]["eip"] = {
+  "title": "H3C Employee Portal (EIP)",
+  "subtitle": "Use your SSO identity to check attendance, leave, overtime, approvals, contacts, news, and spending",
+  "type": "CLI + Official Skill",
+  "latency": "Intranet",
+  "desc": "Connect to the H3C EIP employee portal with your SSO identity to check attendance, leave balances, overtime, pending approvals, colleague details, company news, cafeteria spending, and reimbursements. Sign in through the browser; no key is required. Corporate intranet access is required.",
+  "welcomeQueries": ["Check my attendance exceptions this month", "How many annual leave days do I have", "Show my pending approvals", "Find a colleague’s contact details"]
+};
+dictEn["uiToolDetails"]["tools"]["zhidao"] = {
+  "title": "H3C Zhidao · Internal Knowledge Base",
+  "subtitle": "Search H3C internal knowledge and resources with your SSO identity",
+  "type": "CLI + Official Skill",
+  "latency": "Intranet",
+  "desc": "Connect to the H3C Zhidao internal knowledge base with your SSO identity to search knowledge entries, repositories, and documents, and answer questions using internal company knowledge. Sign in by QR code or through the browser; no key is required. Corporate intranet access is required.",
+  "welcomeQueries": ["Find the switch configuration standards in Zhidao", "Search the internal repository for security solutions", "Find troubleshooting documents for this issue", "Find internal knowledge about this product"]
+};
+dictEn["uiToolDetails"]["tools"]["weather"]["configFields"] = [{
+    "key": "AMAP_KEY",
+    "label": "API Key",
+    "helpText": "Choose the “Web Service” type.",
+    "placeholder": "Paste your Amap Web Service Key"
+  }];
+dictEn["uiToolDetails"]["tools"]["weather"]["welcomeQueries"] = ["Weather in Hangzhou today", "Will it rain in Beijing this week", "What to wear in Shanghai tomorrow"];
+dictEn["uiToolDetails"]["tools"]["iwencai"]["configFields"] = [{
+    "key": "IWENCAI_API_KEY",
+    "label": "API Key",
+    "helpText": "Open any official Skill and copy it from “Installation”.",
+    "placeholder": "Paste your IWENCAI_API_KEY"
+  }];
+dictEn["uiToolDetails"]["tools"]["iwencai"]["welcomeQueries"] = ["Latest Moutai share price", "How is the market doing today", "Bank stocks with P/E below 10", "Recent rate-cut news"];
+dictEn["uiToolDetails"]["tools"]["tencent-docs"]["configFields"] = [{
+    "key": "TENCENT_DOCS_TOKEN",
+    "label": "Personal token",
+    "helpText": "Open the authorization page, sign in by scanning a QR code with QQ or WeChat, and copy the token. Do not add a Bearer prefix.",
+    "placeholder": "Paste your Tencent Docs personal token"
+  }];
+dictEn["uiToolDetails"]["tools"]["tencent-docs"]["welcomeQueries"] = ["List my recent Tencent Docs", "Turn this weekly report into a Tencent smart document", "Create an online spreadsheet to track expenses", "Read and analyze this Tencent Docs spreadsheet"];
+dictEn["uiToolDetails"]["tools"]["wecom-bot"]["configFields"] = [{
+    "key": "WECOM_BOT_KEY",
+    "label": "Webhook Key",
+    "helpText": "In a WeCom group, tap “…” (top right) → Group Bots → Add a bot, then copy its webhook URL.",
+    "placeholder": "Paste the bot key or the full webhook URL"
+  }];
+dictEn["uiToolDetails"]["tools"]["wecom-bot"]["welcomeQueries"] = ["Push today’s weather bulletin to my group", "Format this weekly report as Markdown and send it to the WeCom group", "@everyone: don’t forget the 3 p.m. meeting", "Send this file to the WeCom group"];
+dictEn["uiToolDetails"]["tools"]["feishu"]["welcomeQueries"] = ["Read a Feishu doc and make a PPT for me", "Summarize my Feishu docs", "Check my Feishu calendar today", "Show my Feishu to-do tasks"];
+dictEn["uiToolDetails"]["tools"]["wecom"]["welcomeQueries"] = ["Turn this content into a WeCom smart doc", "Read the content of one of my WeCom docs", "Create a new sub-sheet in a WeCom smart sheet", "Query data in a WeCom smart sheet"];
+dictEn["uiToolDetails"]["tools"]["dingtalk"]["welcomeQueries"] = ["Read my DingTalk docs", "Check my DingTalk schedule today", "Query data in a DingTalk AI sheet", "Show my DingTalk to-dos"];
+dictEn["uiToolDetails"]["tools"]["qcc"]["welcomeQueries"] = ["Look up Huawei’s business registration info", "Tencent’s business registration details", "BYD’s outbound investments", "Alibaba’s shareholder structure"];
+dictEn["uiToolDetails"]["tools"]["patsnap-search"]["configFields"] = [{
+    "key": "PATSNAP_API_KEY",
+    "label": "Patsnap API Key",
+    "helpText": "Get it from the Patsnap open platform or the MCP/API credentials provided by your enterprise administrator.",
+    "placeholder": "Paste your Patsnap API Key"
+  }];
+dictEn["uiToolDetails"]["tools"]["patsnap-search"]["welcomeQueries"] = ["Search patents and papers on solid-state battery electrolytes", "Find core CRISPR delivery-system patents and literature from the past five years", "Get patent details for publication CN109123456A", "Analyze CATL’s patent layout in sodium-ion batteries"];
+dictEn["uiToolDetails"]["tools"]["canva-mcp"]["welcomeQueries"] = ["Generate a product launch poster", "Make a three-page product intro presentation", "Design a Xiaohongshu cover", "Create an event promo image from a brand template"];
+dictEn["uiToolDetails"]["tools"]["obsidian"]["welcomeQueries"] = ["Search my notes", "Create a note to record today’s ideas", "What documents are in my knowledge base?", "Summarize my notes"];
+dictEn["uiToolDetails"]["tools"]["yuandian-mcp"]["welcomeQueries"] = ["Search cases about labor contract termination", "Look up regulations on corporate equity liability", "Analyze a company’s judicial risks", "Find recent adjudication viewpoints"];
+dictEn["uiToolDetails"]["tools"]["pptx"]["welcomeQueries"] = ["Make a Q2 quarterly report PPT", "Make a product intro PPT", "Make a project proposal presentation", "Make a company intro PPT"];
+dictEn["uiToolDetails"]["tools"]["gongwen"]["welcomeQueries"] = ["Draft a notice on issuing management measures", "Write an implementation opinion on strengthening certain work", "Draft a meeting notice", "Write a situation report"];
+dictEn["uiToolDetails"]["tmeetSteps"] = [{
+    "key": "runtime",
+    "label": "Prepare runtime",
+    "sub": "Use the app-provided Node runtime"
+  }, {
+    "key": "cli",
+    "label": "Install connector",
+    "sub": "tmeet · about 40 seconds on first use"
+  }, {
+    "key": "qr",
+    "label": "Sign in",
+    "sub": "Tencent Meeting authorization page"
+  }];
+dictEn["uiWebConnection"]["idle"] = ["Preparing remote control", "Initializing browser connection…"];
+dictEn["uiWebConnection"]["connecting"] = ["Connecting to desktop", "Interrupted connections retry automatically; unconfirmed actions are not repeated."];
+dictEn["uiWebConnection"]["desktop_offline"] = ["Desktop is offline", "Keep this page open; it will reconnect when the desktop returns."];
+dictEn["uiWebConnection"]["credentials_missing"] = ["Incomplete link", "Enable remote control on the desktop and paste the complete link."];
+dictEn["uiWebConnection"]["denied"] = ["Access denied", "The link is invalid or was refreshed. Copy a new link from the desktop."];
+dictEn["uiWebConnection"]["revoked"] = ["Access stopped", "The desktop stopped this remote control link."];
+dictEn["uiWebConnection"]["replaced"] = ["Taken over by another browser", "Only one active browser is allowed. Refresh this page to take over again."];
+dictEn["uiWebConnection"]["incompatible_desktop"] = ["Desktop version incompatible", "Update the desktop app, then reopen this link."];
+dictEn["uiWebConnection"]["error"] = ["Connection error", "Remote control will keep trying to reconnect."];
+dictEn["uiCodex"]["commandMenuClose"] = "Close Agent command menu";
+dictEn["uiCodex"]["workspaceMenuClose"] = "Close working-directory menu";
+dictEn["uiCodex"]["nativeMemoryClose"] = "Close memory panel";
+dictEn["uiCodex"]["closeAccountMenu"] = "Close account menu";
+dictEn["bnrFaces"] = [["Product", "Product design"], ["ML Engineer", "AI models"], ["Growth", "Growth ops"], ["UI Designer", "Interface"], ["Data Analyst", "Insights"]];
+dictEn["uiChatScenes"]["attachmentPrompt"] = "Continue based on the attached content.";
+dictEn["uiSettingsView"]["serviceEip"] = "H3C Employee Portal (EIP)";
+dictEn["uiSettingsView"]["serviceZhidao"] = "H3C Zhidao";
+dictEn["uiTeamRelayAccess"] = {
+  "section": "Beta Features",
+  "title": "Team Relay",
+  "desc": "Show the Team Relay entry in the sidebar after access is enabled.",
+  "open": "Enable Relay",
+  "dialogTitle": "Enable Team Relay",
+  "notice": "This feature is currently in closed beta and is not generally available. Contact customer support for access.",
+  "passwordLabel": "Access password",
+  "passwordPlaceholder": "Enter the access password",
+  "invalid": "Incorrect password. Try again.",
+  "unavailable": "The setting could not be saved. Try again.",
+  "cancel": "Cancel",
+  "confirm": "Enable",
+  "opening": "Verifying…",
+  "close": "Close",
+  "enabledTitle": "Team Relay enabled",
+  "enabledDesc": "The sidebar entry is visible and will remain enabled after PINVOU restarts.",
+  "disable": "Disable Relay",
+  "disabling": "Disabling…",
+  "disableUnavailable": "Team Relay could not be disabled. Try again."
+};
+const behaviorSettingsEn = /** @type {Record<string, string | ((days: number) => string)>} */ (dictEn.uiSettingsDetail);
+behaviorSettingsEn.behaviorAnalyticsTitle = "Privacy and usage analytics";
+behaviorSettingsEn.behaviorAnalyticsEntryTitle = "Data Management";
+behaviorSettingsEn.behaviorAnalyticsEntryDesc = "Manage product improvement and data usage settings";
+behaviorSettingsEn.behaviorAnalyticsBack = "Back to Help & Feedback";
+behaviorSettingsEn.behaviorAnalyticsLabel = "Help improve PINVOU";
+behaviorSettingsEn.behaviorAnalyticsDesc = "Only controlled feature outcomes, timing, and error categories are collected; conversations, file contents, paths, and credentials are never collected.";
+behaviorSettingsEn.behaviorAnalyticsNotConfigured = "Usage analytics is not configured in this build and remains off.";
+behaviorSettingsEn.behaviorAnalyticsEnableConfirm = "PINVOU will collect controlled feature usage and quality data to improve the product. Conversation text, file contents, paths, tool arguments, and credentials are never collected. Enable analytics?";
+behaviorSettingsEn.behaviorAnalyticsDisableConfirm = "Collection stops immediately and pending events are cleared. An offline withdrawal will retry when connectivity returns. Turn analytics off?";
+behaviorSettingsEn.behaviorAnalyticsStatusEnabled = "On";
+behaviorSettingsEn.behaviorAnalyticsStatusDisabled = "Off";
+behaviorSettingsEn.behaviorAnalyticsStatusWithdrawalPending = "Remote withdrawal pending";
+behaviorSettingsEn.behaviorAnalyticsActionFailed = "The operation failed. Try again later.";
+// features/chat background task indicator entries (uiChat exists, merge instead of overwrite)
+Object.assign(dictEn.uiChat, {
+  bgTasks: 'Background Tasks',
+  bgTasksRunning: n => `${n} background task${n === 1 ? '' : 's'} running`,
+});
+
+Object.assign(dictEn.uiSettingsDetail, {
+  platformModels:'Pinvou platform models',
+  platformModelsDesc:'Choose the default model for a new blank conversation. Existing conversations are unchanged.',
+  platformModelsLoading:'Loading platform models…',
+  platformModelsSignIn:'Sign in to your Pinvou account to choose a platform model.',
+  platformModelsUnavailable:'Platform models are temporarily unavailable. Try again later.',
+  appliesToNewSessions:'New conversations',
+  modelDeprecated:'Retiring soon',
+  modelUnavailable:'Unavailable',
+  modelSwitchFailed:'Could not switch models. Try again.',
+});
+dictEn.uiAccountPlatform = accountPlatformCopy.en;
+dictEn.uiModelReplacement = { title:'This model cannot continue the conversation', lead:'The original conversation and messages remain unchanged. Select a current model and continue in a traceable new branch.', create:'Create replacement branch', creating:'Creating…' };
+dictEn.uiAdminPlatform = adminPlatformCopy.en;

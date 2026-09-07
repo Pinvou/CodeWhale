@@ -18,7 +18,7 @@ function ImpactFacts({ impact, copy }) {
     [copy.actionCoverageGaps, dependencies.coverage_gaps], [copy.actionAlternatives, Number(dependencies.alternative_credentials || 0) + Number(dependencies.alternative_accounts || 0)],
   ];
   const catalogDiff = validateCatalogDifference(impact?.catalog_diff);
-  const catalogDiffUnavailable = Object.hasOwn(impact || {}, 'catalog_diff') && !catalogDiff;
+  const catalogDiffUnavailable = Object.prototype.hasOwnProperty.call(impact || {}, 'catalog_diff') && !catalogDiff;
   const providerObservation = catalogDiff?.target_observed_version !== null;
   return <><dl className="adm-command-target adm-high-risk-impact">{facts.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{Number(value || 0).toLocaleString()}</dd></div>)}</dl>
     {catalogDiff && <section className="adm-catalog-diff" aria-labelledby="catalog-diff-title"><h4 id="catalog-diff-title">{copy.catalogDiffTitle}</h4><dl><div><dt>{copy.catalogAdded}</dt><dd>{catalogDiff.added_count.toLocaleString()}</dd></div><div><dt>{copy.catalogModified}</dt><dd>{catalogDiff.modified_count.toLocaleString()}</dd></div><div><dt>{providerObservation ? copy.catalogMissing : copy.catalogRemoved}</dt><dd>{catalogDiff.removed_count.toLocaleString()}</dd></div></dl>{catalogDiff.total_count === 0 ? <p>{copy.catalogDiffEmpty}</p> : <ul>{catalogDiff.items.map((item, index) => <li key={item.model_id || `${item.change_type}-${index}`}><span>{item.change_type === 'REMOVED' && providerObservation ? copy.catalogMissing : copy.catalogChangeTypes[item.change_type]}</span><strong>{item.display_name || copy.catalogUnnamedModel}</strong>{item.model_id && <code>{item.model_id}</code>}</li>)}</ul>}{catalogDiff.truncated && <small>{copy.catalogDiffTruncated(catalogDiff.total_count, catalogDiff.items.length)}</small>}<small>{catalogDiff.target_catalog_version ? copy.catalogVersionPair(catalogDiff.baseline_catalog_version, catalogDiff.target_catalog_version) : copy.catalogObservedTarget(catalogDiff.baseline_catalog_version)}</small></section>}
@@ -27,7 +27,9 @@ function ImpactFacts({ impact, copy }) {
   </>;
 }
 
-export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = {}, execute, recover, recoverByIdempotencyKey, onClose, onCompleted, onManualReview, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
+const EMPTY_ACTION_DETAILS = Object.freeze({});
+
+export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = EMPTY_ACTION_DETAILS, execute, recover, recoverByIdempotencyKey, onClose, onCompleted, onManualReview, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
   const root = useRef(null);
   const first = useRef(null);
   const previousFocus = useRef(document.activeElement);
@@ -66,7 +68,7 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
   const reasonLength = [...normalizedReason].length;
   const frozenReference = command.current?.command?.unknown ? command.current.command.error?.commandReference : '';
   const recoveryBlocked = state.unknown && (!(recover && frozenReference) && !recoverByIdempotencyKey);
-  const malformedCatalogDiff = Object.hasOwn(impact || {}, 'catalog_diff') && !validateCatalogDifference(impact.catalog_diff);
+  const malformedCatalogDiff = Object.prototype.hasOwnProperty.call(impact || {}, 'catalog_diff') && !validateCatalogDifference(impact.catalog_diff);
   const blocked = (impactRequired && (!impact || impact.blockers?.length > 0 || malformedCatalogDiff)) || state.loading || state.busy || state.terminal || recoveryBlocked || reasonLength < reasonMin || reasonLength > reasonMax || !confirmed;
   const closeDialog = () => {
     const completed = state.success;

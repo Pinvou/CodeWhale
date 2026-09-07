@@ -28,6 +28,10 @@ merge queue validates its combined tree against the latest `main`; manually reba
 again only to resolve a real conflict or when the queue reports an integration
 failure that requires a branch change.
 
+When resolving conflicts, preserve compatible functionality and user changes from
+both sides. Do not choose between behaviorally different alternatives without
+explaining the options and their impact to the user.
+
 ## DCO
 
 Every human-authored commit must include a valid `Signed-off-by`:
@@ -36,21 +40,11 @@ Every human-authored commit must include a valid `Signed-off-by`:
 git commit -s
 ```
 
-Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits are exempt.
+Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits and merge commits (more than one parent) are exempt.
 
 ## Where changes belong
 
-Pinvou Agent uses [CodeWhale](https://github.com/Pinvou/CodeWhale) as its agent engine. Do not reimplement engine capabilities in the desktop layer.
-
-| Goal | Location |
-|---|---|
-| Add a domain agent or tool bundle | A `SKILL.md` package |
-| Connect an external API | An independent MCP server or connector |
-| Change model guidance | Bundle `instructions.md` |
-| Change desktop UI, Tauri integration, or runtime configuration | `pinvou3-app/` |
-| Fix a reusable engine issue | CodeWhale, upstream first |
-
-CodeWhale changes must follow the fork boundary in [AGENTS.md](AGENTS.md) and [`docs/fork-policy.md`](docs/fork-policy.md), including the required same-PR documentation, fingerprints, and tests.
+Pinvou Agent uses [CodeWhale](https://github.com/Pinvou/CodeWhale) as its agent engine. Do not reimplement engine capabilities in the desktop layer. The extension-boundary table is defined once in [AGENTS.md](AGENTS.md) §2; CodeWhale changes must follow it and [`docs/fork-policy.md`](docs/fork-policy.md), including the required same-PR documentation, fingerprints, and tests.
 
 ## Commit messages
 
@@ -88,26 +82,61 @@ Tests requiring a live model, network service, credential, or large model asset 
 Pull requests use a staged, path-aware gate. Draft pull requests run fast feedback
 (lint, build, deterministic logic tests, and Rust formatting where applicable).
 Ready pull requests add browser smokes selected from the actual diff, platform
-runtime contracts, and other affected checks. Release-chain changes run lightweight
-contract tests only; full deb, dmg, and nsis packages are built only after a
+runtime contracts, and other affected checks. Ready Rust pull requests run fast
+formatting, lint, dependency-policy, and compile feedback by default. All unknown
+Rust paths fail closed to full regression; only documented isolated leaf-feature
+boundaries use the lightweight route. Dependency, CodeWhale gitlink, app-command,
+platform, permission, credential, session, remote-control, and other high-blast-
+radius paths automatically add full Linux and Windows Rust regression before
+queueing. Maintainers can apply `ci:full-rust` to force the same full regression
+for another ready Rust pull request; the label has no effect on a draft.
+The current lightweight Rust boundaries are internal-only changes under `feedback`,
+`personas`, and `pet`. Changing their registration, app commands, shared platform
+surface, Cargo metadata, or any unclassified Rust path still runs full regression.
+Trusted same-repository `backflow/community-*` pull requests add a content-aware
+decision over the actual base-to-head diff. A pure release is accepted only when
+`VERSION` and every field managed by `scripts/sync-version.mjs` change mechanically
+to one consistent SemVer; it runs the release contract without product compilation.
+Other cross-platform Rust backflows keep lint, portability, affected tests, and
+cumulative `main` coverage, while Windows/platform/path/process/install/permission/
+native changes, Cargo dependency or feature changes, `build.rs`, the toolchain, the
+CodeWhale gitlink, non-version `tauri.conf.json` fields, and edits to the gate
+itself (`pr-check.yml`, `ci-rust-policy.py`) retain the complete Windows job. A
+mismatched source marker,
+fork, base repository, or non-`main` base uses the unchanged ordinary PR routing.
+An incomplete Merge Group member chain, API/diff failure, malformed version field,
+mixed release change, or unknown policy state fails closed to the complete Windows
+job; `required-gate` does not accept a skipped Windows result in that state.
+`ci:full-rust` continues to force the ordinary full route.
+Release-chain changes run lightweight contract tests only; full deb, dmg, and nsis
+packages are built only after a
 `VERSION` change reaches `main`, or through an explicit `workflow_dispatch`.
 
 The merge queue runs the applicable product gates against the actual combined tree
-of the queued pull request and the latest `main`. Rust changes run full Rust tests
-there; frontend changes run the complete browser-smoke set there. Add the
-`ci:full-rust` label to a **ready**, high-risk Rust pull request only when early full
-feedback is worth the extra run; the label does not start full Rust tests on a
-draft. During review, maintainers should inspect only required checks:
+of the queued pull request and the latest `main`. Rust changes run formatting,
+Clippy, compile, and dependency-policy checks there. High-blast-radius Rust changes
+also run the full Linux behavior regression on the combined tree; Windows coverage
+already ran on the ready PR and is not repeated. Frontend changes run browser smokes
+selected from the merge group's actual base/head diff; shared, unknown, or test-
+infrastructure paths fall back to the complete smoke set. Every retained `main` push
+runs cumulative Linux compile verification (full test execution stays on the
+merge-queue leg, which already validates the same combined tree) and native Windows
+checks, and continues to warm the shared caches. The Windows required job runs its
+all-target metadata check and linked native regression as two parallel matrix legs;
+both legs use the same high-risk/main routing and both must pass. See
+[`docs/windows-rust-ci.md`](docs/windows-rust-ci.md) for coverage, cache, timing, and
+rollback details. A red main regression is a stop signal for further queueing until
+it is fixed or reverted. During review, maintainers should inspect only required checks:
 
 ```bash
 gh pr checks <number> --required
 ```
 
-Do not wait for non-required post-merge platform or release builds. Queue independent
-ready pull requests without routine rebases; resolve actual conflicts, and let the
-queue validate freshness. Maintainers may queue at most two low-risk, independent
-pull requests in one merge group. Dependency-lock, CI, release, permission, session,
-CodeWhale gitlink, and other high-risk changes enter alone.
+Do not wait for non-required post-merge platform or release builds when `main` is
+green. Queue independent ready pull requests without routine rebases; resolve actual
+conflicts, and let the queue validate freshness. Maintainers may queue at most two
+low-risk, independent pull requests in one merge group. Dependency-lock, CI, release,
+permission, session, CodeWhale gitlink, and other high-risk changes enter alone.
 
 ## Pull requests
 

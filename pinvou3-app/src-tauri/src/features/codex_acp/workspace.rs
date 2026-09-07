@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -257,6 +257,23 @@ pub fn preview_workspace_file(root: &Path, relative_path: &str) -> Result<Worksp
         data_url: None,
         truncated: false,
     })
+}
+
+pub fn resolve_workspace_resource(root: &Path, resource_path: &str) -> Result<PathBuf> {
+    let root = canonical_workspace(root)?;
+    let path = resource_path_from_uri(resource_path)?;
+    let candidate = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    let canonical = fs::canonicalize(&candidate)
+        .with_context(|| format!("工作区资源不存在: {resource_path}"))?;
+    ensure_path_within_workspace(&root, &canonical)?;
+    if !canonical.is_file() {
+        bail!("工作区资源不是文件: {resource_path}");
+    }
+    Ok(canonical)
 }
 
 pub fn capture_baseline(session_id: &str, root: &Path) -> Result<()> {
@@ -640,6 +657,26 @@ fn normalize_relative_path(raw: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
+fn resource_path_from_uri(raw: &str) -> Result<PathBuf> {
+    let value = raw.trim();
+    if value.is_empty() {
+        bail!("工作区资源路径不能为空");
+    }
+    if value
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+    {
+        let url = tauri::Url::parse(value).context("工作区资源文件链接无效")?;
+        return url
+            .to_file_path()
+            .map_err(|_| anyhow::anyhow!("工作区资源文件链接无效"));
+    }
+    if value.contains("://") {
+        bail!("不支持的工作区资源链接");
+    }
+    Ok(PathBuf::from(value))
+}
+
 fn resolve_existing_path(root: &Path, relative: &str, directory: bool) -> Result<PathBuf> {
     let root = canonical_workspace(root)?;
     let candidate = if relative.is_empty() {
@@ -863,7 +900,7 @@ fn load_baseline(session_id: &str, root: &Path) -> Result<Option<WorkspaceBaseli
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error).with_context(|| format!("读取工作区基线失败: {}", path.display()))
+            return Err(error).with_context(|| format!("读取工作区基线失败: {}", path.display()));
         }
     };
     let baseline: WorkspaceBaseline =
@@ -900,7 +937,7 @@ fn fingerprint(path: &Path, include_hash: bool) -> Result<Option<FileFingerprint
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
-            return Err(error).with_context(|| format!("读取文件信息失败: {}", path.display()))
+            return Err(error).with_context(|| format!("读取文件信息失败: {}", path.display()));
         }
     };
     let sha256 = if include_hash {
@@ -1267,13 +1304,38 @@ mod tests {
 
         let listing = list_workspace(root.path(), None).unwrap();
         assert!(listing.entries.iter().any(|entry| entry.name == "src"));
-        assert!(!listing
-            .entries
-            .iter()
-            .any(|entry| entry.name == "node_modules"));
+        assert!(
+            !listing
+                .entries
+                .iter()
+                .any(|entry| entry.name == "node_modules")
+        );
         let preview = preview_workspace_file(root.path(), "src/main.rs").unwrap();
         assert_eq!(preview.kind, "text");
         assert_eq!(preview.text.as_deref(), Some("fn main() {}"));
+    }
+
+    #[test]
+    fn resolves_workspace_resources_from_relative_absolute_and_file_uri_paths() {
+        let root = TestDir::new("resource-resolve");
+        let path = root.path().join("docs/report file.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "# report\n").unwrap();
+        let path = fs::canonicalize(path).unwrap();
+
+        for resource in [
+            "docs/report file.md".to_string(),
+            path.to_string_lossy().into_owned(),
+            tauri::Url::from_file_path(&path).unwrap().to_string(),
+        ] {
+            assert_eq!(
+                resolve_workspace_resource(root.path(), &resource).unwrap(),
+                path
+            );
+        }
+        assert!(resolve_workspace_resource(root.path(), "https://example.com/report.md").is_err());
+        assert!(resolve_workspace_resource(root.path(), "../report.md").is_err());
+        assert!(resolve_workspace_resource(root.path(), "docs").is_err());
     }
 
     #[test]
@@ -1336,14 +1398,18 @@ mod tests {
         fs::write(root.path().join("added.txt"), "added").unwrap();
 
         let changes = workspace_changes(&session_id, root.path()).unwrap();
-        assert!(changes
-            .changes
-            .iter()
-            .any(|change| change.relative_path == "before.txt" && change.status == "modified"));
-        assert!(changes
-            .changes
-            .iter()
-            .any(|change| change.relative_path == "delete.txt" && change.status == "deleted"));
+        assert!(
+            changes
+                .changes
+                .iter()
+                .any(|change| change.relative_path == "before.txt" && change.status == "modified")
+        );
+        assert!(
+            changes
+                .changes
+                .iter()
+                .any(|change| change.relative_path == "delete.txt" && change.status == "deleted")
+        );
         assert!(changes.changes.iter().any(|change| {
             change.relative_path == "added.txt"
                 && change.status == "added"

@@ -15,9 +15,9 @@ use anyhow::{Context, Result};
 use deepseek_tui::models::{ContentBlock, Message};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::features::assistant::platform::bridge::{prefs::ModelPreset, Pinvou3Bridge};
+use crate::features::assistant::platform::bridge::{Pinvou3Bridge, prefs::ModelPreset};
 
 const PROMPT: &str = r#"你是 Pinvou，Boss 身边的独立检阅顾问，召之即来。
 
@@ -341,7 +341,9 @@ fn latest_artifact_file(messages: &[Message], workspace: &Path) -> Option<(Strin
     let n = content.chars().count();
     let bounded = if n > ARTIFACT_CHAR_LIMIT {
         let head: String = content.chars().take(ARTIFACT_CHAR_LIMIT).collect();
-        format!("{head}\n\n…（产物共 {n} 字，这里是前 {ARTIFACT_CHAR_LIMIT} 字；后半未展示，如需审让 Boss 指定。P1 改 map-reduce 分块全审）")
+        format!(
+            "{head}\n\n…（产物共 {n} 字，这里是前 {ARTIFACT_CHAR_LIMIT} 字；后半未展示，如需审让 Boss 指定。P1 改 map-reduce 分块全审）"
+        )
     } else {
         content
     };
@@ -510,7 +512,9 @@ async fn model_review(
     let provider = bridge.provider();
     let preset = review_model_preset(bridge);
     let model_name = if provider == "vllm" {
-        crate::features::monitor::probe_vllm_model_info(&base_url)
+        // The served-name probe uses an inference-same-origin key:
+        // authenticated vLLM 401s on /v1/models.
+        crate::features::monitor::probe_vllm_model_info(&base_url, Some(bridge.api_key().as_str()))
             .await
             .0
             .unwrap_or_else(|| bridge.model())
@@ -590,6 +594,18 @@ enum ReviewReasoningDialect {
     Minimax,
 }
 
+impl From<crate::core::reasoning_dialect::ReasoningDialect> for ReviewReasoningDialect {
+    fn from(d: crate::core::reasoning_dialect::ReasoningDialect) -> Self {
+        use crate::core::reasoning_dialect::ReasoningDialect as D;
+        match d {
+            D::None => ReviewReasoningDialect::None,
+            D::ThinkingDisabled => ReviewReasoningDialect::ThinkingDisabled,
+            D::QwenEnableThinking => ReviewReasoningDialect::QwenEnableThinking,
+            D::Minimax => ReviewReasoningDialect::Minimax,
+        }
+    }
+}
+
 fn apply_review_reasoning_controls(
     body: &mut Value,
     preset: ModelPreset,
@@ -621,6 +637,9 @@ fn review_reasoning_dialect(
     base_url: &str,
     model: &str,
 ) -> ReviewReasoningDialect {
+    use crate::core::reasoning_dialect::{
+        kimi_supports_disabled_thinking, reasoning_dialect_from_base_url,
+    };
     if provider == "vllm" || preset == ModelPreset::LocalVllm {
         return ReviewReasoningDialect::VllmChatTemplate;
     }
@@ -647,49 +666,8 @@ fn review_reasoning_dialect(
         | ModelPreset::Openai
         | ModelPreset::Anthropic
         | ModelPreset::Gemini
-        | ModelPreset::Xai => review_reasoning_dialect_from_base_url(base_url, model),
+        | ModelPreset::Xai => reasoning_dialect_from_base_url(base_url, model).into(),
     }
-}
-
-fn review_reasoning_dialect_from_base_url(base_url: &str, model: &str) -> ReviewReasoningDialect {
-    let normalized = base_url
-        .trim()
-        .trim_end_matches('/')
-        .trim_end_matches("/chat/completions")
-        .trim_end_matches("/v1")
-        .to_ascii_lowercase();
-
-    if normalized.contains("api.deepseek.com") || normalized.contains("api.deepseeki.com") {
-        ReviewReasoningDialect::ThinkingDisabled
-    } else if normalized.contains("dashscope.aliyuncs.com") {
-        ReviewReasoningDialect::QwenEnableThinking
-    } else if normalized.contains("moonshot.cn") || normalized.contains("moonshot.ai") {
-        if kimi_supports_disabled_thinking(model) {
-            ReviewReasoningDialect::ThinkingDisabled
-        } else {
-            ReviewReasoningDialect::None
-        }
-    } else if normalized.contains("volces.com")
-        || normalized.contains("volcengine")
-        || normalized.contains("byteplus.com")
-    {
-        ReviewReasoningDialect::ThinkingDisabled
-    } else if normalized.contains("minimax.chat") || normalized.contains("minimaxi.com") {
-        ReviewReasoningDialect::Minimax
-    } else if normalized.contains("bigmodel.cn") || normalized.contains("z.ai") {
-        ReviewReasoningDialect::ThinkingDisabled
-    } else if normalized.contains("xiaomimimo.com") {
-        ReviewReasoningDialect::ThinkingDisabled
-    } else {
-        ReviewReasoningDialect::None
-    }
-}
-
-fn kimi_supports_disabled_thinking(model: &str) -> bool {
-    let model = model.to_ascii_lowercase();
-    (model.contains("kimi-k2.5") || model.contains("kimi-k2.6"))
-        && !model.contains("thinking")
-        && !model.contains("k2.7")
 }
 
 fn parse_model_review(content: &str) -> Result<ModelReview> {
@@ -764,6 +742,57 @@ fn full_transcript(messages: &[Message]) -> String {
     lines.join("\n")
 }
 
+/// Section-header prefixes of B1 transfer messages (resolvePinvouReview: after
+/// the Pinvou review dialog checks "let AI fix" and similar actions, both
+/// frontend bridges assemble the message in the UI language — the three
+/// BT_TABLE blocks are identical across the tauri/web bridges — and send it
+/// back to the main session as the Boss). The message is composed of up to
+/// five sections, one per checked action, and **any of them can lead**
+/// (checking only verify makes the message start with "以下几条涉及外部事实" /
+/// "The items below involve external facts" / "以下の項目は外部事実に関わります"),
+/// so matching must cover all prefixes instead of a single starts_with, in
+/// every UI language. Keep in sync with resolvePinvouReview in
+/// `pinvou3-app/src/platform/tauri/bridge/chat.js` and
+/// `pinvou3-app/src/platform/web/bridge.js`; the
+/// `b1_transfer_prefixes_stay_in_sync_with_bridge_sources` test fails when a
+/// bridge copy changes without this table following. The old zh-only prefix
+/// found in historical comments ("请参考下面 Pinvou 的检阅意见") has never been
+/// sent by any frontend since the open-source baseline (e34024e6) — both
+/// bridges always used "请按下面的检阅意见" — so no compatibility branch is
+/// needed beyond the zh entries below.
+const B1_TRANSFER_PREFIXES: &[&str] = &[
+    // zh fix section header (zh entries kept for historical sessions)
+    "请按下面的检阅意见",
+    // zh verify section header
+    "以下几条涉及外部事实",
+    // zh adopt section header
+    "以下事项我已拍板",
+    // zh ask section header
+    "以下待定项请用 request_user_input 正式问我",
+    // zh fill section header
+    "以下维度产物还缺",
+    // en fix section header
+    "Apply the review notes below",
+    // en verify section header
+    "The items below involve external facts",
+    // en adopt section header
+    "The following decisions are final",
+    // en ask section header
+    "For the pending items below, ask me formally",
+    // en fill section header
+    "The artifact is still missing the dimensions below",
+    // ja fix section header
+    "下のレビュー意見に従い",
+    // ja verify section header
+    "以下の項目は外部事実に関わります",
+    // ja adopt section header
+    "以下の事項は確定しました",
+    // ja ask section header
+    "以下の未確定項目については",
+    // ja fill section header
+    "成果物には以下の観点が不足しています",
+];
+
 /// 确定性投影（§4.2，超长降级用）：Boss 原话全留 / request_user_input 决策 /
 /// Web(action=search) 事实截断；丢 checklist、thinking、tool 细节。**产物不在这里**——由
 /// build_context 读 workspace 文件真实内容（修 edit_file bug，§10.10）。
@@ -776,11 +805,21 @@ fn project(messages: &[Message]) -> String {
         let is_user = m.role == "user";
         for b in &m.content {
             match b {
-                // B1 转交消息(applyPinvouReview 固定前缀)是 pinvou 上轮审阅回传,不是 Boss
-                // 原始需求——投影排除,否则其中引用的旧数字会被当成"AI 当前状态"误导;采纳的
-                // 决策已落在产物文件里(产物才是真相)。
+                // B1 transfer messages (fixed section headers assembled by
+                // resolvePinvouReview in the UI language) are the Pinvou
+                // review feedback from the previous round, not the Boss's
+                // original request — project them out, otherwise stale numbers
+                // quoted there get read as "the AI's current state"; adopted
+                // decisions already live in the artifact files (the artifacts
+                // are the truth). The frontend (identical in the tauri/web
+                // bridges) composes one section per checked action and any of
+                // the five headers can lead, so all must be recognized in
+                // every language; see the B1_TRANSFER_PREFIXES docs.
                 ContentBlock::Text { text, .. }
-                    if is_user && !text.starts_with("请参考下面 Pinvou 的检阅意见") =>
+                    if is_user
+                        && !B1_TRANSFER_PREFIXES
+                            .iter()
+                            .any(|prefix| text.starts_with(prefix)) =>
                 {
                     boss_says.push(text.clone())
                 }
@@ -1115,9 +1154,11 @@ mod tests {
     fn output_language_directive_per_locale() {
         let en = output_language_directive("en").expect("en 应有指令");
         assert!(en.contains("English") && en.contains("OVERRIDES"));
-        assert!(output_language_directive("ja")
-            .unwrap()
-            .contains("Japanese"));
+        assert!(
+            output_language_directive("ja")
+                .unwrap()
+                .contains("Japanese")
+        );
         assert!(
             output_language_directive("zh-Hans")
                 .unwrap()
@@ -1253,13 +1294,114 @@ mod tests {
 
     #[test]
     fn project_excludes_b1_transfer_messages() {
-        let messages = vec![
-            user_text("帮我规划欧洲游，预算 2 万"),
-            user_text("请参考下面 Pinvou 的检阅意见，修改前面的内容：\n- 【预算】采纳 8.5w（国庆 5-7w 难实现）"),
+        // Both frontend bridges (tauri/chat.js, web/bridge.js) compose
+        // resolvePinvouReview sections per checked action and any of the five
+        // headers can lead — build one case per real prefix (strings taken
+        // verbatim from the bridge sources). Since the trilingual copy audit
+        // the bridges assemble the sections in the UI language, so every
+        // localized header variant must be recognized too.
+        let real_prefixes = [
+            (
+                "fix",
+                "请按下面的检阅意见，**只定向修改对应段落，不要全文重写**：",
+            ),
+            (
+                "verify",
+                "以下几条涉及外部事实，**先查证再改、标明依据，别凭记忆直接改**：",
+            ),
+            ("adopt", "以下事项我已拍板，按此更新产物："),
+            (
+                "ask",
+                "以下待定项请用 request_user_input 正式问我，别自己猜：",
+            ),
+            (
+                "fill",
+                "以下维度产物还缺，请补充进去（保留其余、只增不改）：",
+            ),
+            (
+                "fix/en",
+                "Apply the review notes below — **revise only the targeted sections, do not rewrite the whole document**:",
+            ),
+            (
+                "verify/en",
+                "The items below involve external facts — **verify first, cite your sources, and don't edit from memory**:",
+            ),
+            (
+                "adopt/en",
+                "The following decisions are final — update the artifacts accordingly:",
+            ),
+            (
+                "ask/en",
+                "For the pending items below, ask me formally via request_user_input instead of guessing:",
+            ),
+            (
+                "fill/en",
+                "The artifact is still missing the dimensions below — add them (keep everything else; add only, don't rewrite):",
+            ),
+            (
+                "fix/ja",
+                "下のレビュー意見に従い、**該当するセクションのみを修正してください。全文の書き直しはしないでください**：",
+            ),
+            (
+                "verify/ja",
+                "以下の項目は外部事実に関わります。**必ず検証してから修正し、根拠を示してください（記憶に頼った編集はしないでください）**：",
+            ),
+            (
+                "adopt/ja",
+                "以下の事項は確定しました。この通り成果物を更新してください：",
+            ),
+            (
+                "ask/ja",
+                "以下の未確定項目については、推測せず request_user_input で正式に私に質問してください：",
+            ),
+            (
+                "fill/ja",
+                "成果物には以下の観点が不足しています。補足してください（既存部分は保持し、追記のみで書き換えないでください）：",
+            ),
         ];
-        let p = project(&messages);
-        assert!(p.contains("帮我规划欧洲游"), "Boss 原话保留: {p}");
-        assert!(!p.contains("5-7w"), "转交消息(含上轮旧数字)要排除: {p}");
+        for (kind, prefix) in real_prefixes {
+            let messages = vec![
+                user_text("帮我规划欧洲游，预算 2 万"),
+                user_text(&format!(
+                    "{prefix}\n- 【预算】采纳 8.5w（国庆 5-7w 难实现）"
+                )),
+            ];
+            let p = project(&messages);
+            assert!(
+                p.contains("帮我规划欧洲游"),
+                "Boss's own words kept ({kind}): {p}"
+            );
+            assert!(
+                !p.contains("5-7w"),
+                "transfer message led by the {kind} header (with last round's stale numbers) must be excluded: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn b1_transfer_prefixes_stay_in_sync_with_bridge_sources() {
+        // The five section headers are owned by the frontend bridges
+        // (resolvePinvouReview, en/ja/zh BT_TABLE blocks). When a bridge copy
+        // changes its wording, this fails until B1_TRANSFER_PREFIXES follows;
+        // the projection test above covers the reverse direction.
+        let tauri_bridge = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/platform/tauri/bridge.js"
+        ));
+        let web_bridge = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../src/platform/web/bridge.js"
+        ));
+        for prefix in B1_TRANSFER_PREFIXES {
+            assert!(
+                tauri_bridge.contains(prefix),
+                "prefix absent from the tauri bridge source: {prefix}"
+            );
+            assert!(
+                web_bridge.contains(prefix),
+                "prefix absent from the web bridge source: {prefix}"
+            );
+        }
     }
 
     #[test]
@@ -1321,7 +1463,7 @@ mod tests {
                     kind: "quality".into(),
                     persona: "budget".into(), // 在 alternates，保留
                     text: "z".into(),
-                    suggestion: "".into(),
+                    suggestion: String::new(),
                 },
             ],
             risk: Some("high".into()),

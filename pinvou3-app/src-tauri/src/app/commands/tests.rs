@@ -1,52 +1,134 @@
+// Command-layer tests borrow platform::paths::tests::ENV_LOCK (a std Mutex) to serialize global env; cargo test runs on multiple threads, but env-writing tests are serialized by the mutex, and within a current_thread runtime holding the lock across await has no reentrant path, so it cannot deadlock.
+// architecture-guard: allow-target-cfg -- artifact 调用链回归需用 Windows 独占句柄模拟 ReplaceFileW 1177 布局
+#![allow(clippy::await_holding_lock)]
+
 use super::prelude::*;
 use super::{
     artifacts::*, attachments::*, files::*, interaction::*, knowledge::*, marketplace::*,
-    personas::*, sessions::*, voice::*, workflows::*,
+    personas::*, sessions::*, voice::*,
 };
 use crate::platform::filesystem::tests::{remove_dir_link, try_link_dir, try_link_file};
 use crate::platform::path_policy::validate_user_path;
 use std::path::{Path, PathBuf};
 
 #[test]
-fn marketplace_auth_status_only_oauth_is_connected_for_oauth_tools() {
+fn generic_file_staging_preserves_the_gui_image_wrapper_contract() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("source.png");
+    std::fs::write(&source, b"image bytes").unwrap();
+    let generic = stage_file_in_workspace(
+        source.to_str().unwrap(),
+        "generic.png",
+        workspace.path(),
+        "attachments",
+    )
+    .unwrap();
+    let image = stage_image_in_workspace(
+        source.to_str().unwrap(),
+        "wrapper.png",
+        workspace.path(),
+        "attachments",
+    )
+    .unwrap();
+    assert_eq!(generic, "attachments/generic.png");
+    assert_eq!(image, "attachments/wrapper.png");
+    assert_eq!(
+        std::fs::read(workspace.path().join(generic)).unwrap(),
+        b"image bytes"
+    );
+    assert_eq!(
+        std::fs::read(workspace.path().join(image)).unwrap(),
+        b"image bytes"
+    );
+}
+
+#[test]
+fn failed_generic_file_copy_removes_the_reserved_partial() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let source = source_dir.path().join("source.txt");
+    std::fs::write(&source, b"private bytes").unwrap();
+
+    let staged = stage_file_in_workspace_with_copier(
+        source.to_str().unwrap(),
+        "partial.txt",
+        workspace.path(),
+        "attachments",
+        |_source, destination| {
+            use std::io::Write;
+
+            destination.write_all(b"partial")?;
+            Err(std::io::Error::other("injected copy failure"))
+        },
+    );
+
+    assert_eq!(staged, None);
+    assert!(!workspace.path().join("attachments/partial.txt").exists());
+}
+
+#[test]
+fn marketplace_auth_status_matrix() {
     use deepseek_tui::mcp::oauth::McpAuthStatus;
 
-    let (status, _, token_present) =
-        marketplace_auth_status_fields(true, true, true, Some(McpAuthStatus::OAuth));
-    assert_eq!(status, "connected");
-    assert!(token_present);
-
-    for auth_status in [
-        McpAuthStatus::NotLoggedIn,
-        McpAuthStatus::Unsupported,
-        McpAuthStatus::BearerToken,
-    ] {
+    // (installed, oauth_required, mcp_configured, auth_status) → (status, token_present)
+    let cases: [(bool, bool, bool, Option<McpAuthStatus>, &str, bool); 7] = [
+        // OAuth tools: a completed OAuth login means connected with a token;
+        // any other login state stays auth-pending
+        (
+            true,
+            true,
+            true,
+            Some(McpAuthStatus::OAuth),
+            "connected",
+            true,
+        ),
+        (
+            true,
+            true,
+            true,
+            Some(McpAuthStatus::NotLoggedIn),
+            "config_installed_auth_pending",
+            false,
+        ),
+        (
+            true,
+            true,
+            true,
+            Some(McpAuthStatus::Unsupported),
+            "config_installed_auth_pending",
+            false,
+        ),
+        (
+            true,
+            true,
+            true,
+            Some(McpAuthStatus::BearerToken),
+            "config_installed_auth_pending",
+            false,
+        ),
+        // OAuth tool without MCP configuration: auth still pending
+        (
+            true,
+            true,
+            false,
+            Some(McpAuthStatus::OAuth),
+            "auth_pending",
+            false,
+        ),
+        // Non-OAuth tools: installed means connected; not installed means not_installed
+        (true, false, false, None, "connected", false),
+        (false, false, false, None, "not_installed", false),
+    ];
+    for (installed, oauth_required, mcp_configured, auth_status, want_status, want_token) in cases {
         let (status, _, token_present) =
-            marketplace_auth_status_fields(true, true, true, Some(auth_status));
-        assert_eq!(status, "config_installed_auth_pending");
-        assert!(!token_present);
+            marketplace_auth_status_fields(installed, oauth_required, mcp_configured, auth_status);
+        assert_eq!(
+            status, want_status,
+            "inputs: installed={installed} oauth={oauth_required} mcp={mcp_configured} auth={auth_status:?}"
+        );
+        assert_eq!(token_present, want_token, "token_present for {want_status}");
     }
-}
-
-#[test]
-fn marketplace_auth_status_preserves_non_oauth_installed_semantics() {
-    let (status, _, token_present) = marketplace_auth_status_fields(true, false, false, None);
-    assert_eq!(status, "connected");
-    assert!(!token_present);
-
-    let (status, _, token_present) = marketplace_auth_status_fields(false, false, false, None);
-    assert_eq!(status, "not_installed");
-    assert!(!token_present);
-}
-
-#[test]
-fn marketplace_auth_status_requires_mcp_config_for_oauth_connected() {
-    use deepseek_tui::mcp::oauth::McpAuthStatus;
-
-    let (status, _, token_present) =
-        marketplace_auth_status_fields(true, true, false, Some(McpAuthStatus::OAuth));
-    assert_eq!(status, "auth_pending");
-    assert!(!token_present);
 }
 
 #[test]
@@ -94,7 +176,8 @@ impl TempPinvou3Home {
         let previous = std::env::var("PINVOU3_HOME").ok();
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         Self { root, previous }
     }
 }
@@ -102,8 +185,10 @@ impl TempPinvou3Home {
 impl Drop for TempPinvou3Home {
     fn drop(&mut self) {
         match &self.previous {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -114,66 +199,6 @@ fn write_json(path: &Path, value: serde_json::Value) {
         std::fs::create_dir_all(parent).unwrap();
     }
     std::fs::write(path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
-}
-
-#[test]
-fn role_logs_merge_real_jsonl_files_and_append_authoritative_failure() {
-    let root = std::env::temp_dir().join(format!(
-        "pinvou3-role-logs-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let state = root.join("_state");
-    std::fs::create_dir_all(&state).unwrap();
-    std::fs::write(
-            state.join("flow_log.jsonl"),
-            concat!(
-                "{\"timestamp\":\"2026-07-21T10:00:00+08:00\",\"event\":\"dispatch\",\"role_id\":\"taizi\"}\n",
-                "{\"timestamp\":\"2026-07-21T10:01:00+08:00\",\"event\":\"agent_failed\",\"role_id\":\"taizi\",\"detail\":\"HTTP 503 upstream unavailable\"}\n",
-                "{\"timestamp\":\"2026-07-21T10:02:00+08:00\",\"event\":\"agent_failed\",\"role_id\":\"zhongshu\"}\n"
-            ),
-        )
-        .unwrap();
-    std::fs::write(
-            state.join("agent_log.jsonl"),
-            "{\"timestamp\":\"2026-07-21T10:00:30+08:00\",\"event\":\"tool_call\",\"role_id\":\"taizi\",\"tool\":\"web_search\"}\n",
-        )
-        .unwrap();
-    write_json(
-        &state.join("workflow_progress.json"),
-        serde_json::json!({
-            "updated_at": "2026-07-21T10:03:00+08:00",
-            "roles": {
-                "taizi": {
-                    "status": "failed",
-                    "error": "subagent 执行失败: HTTP 503 upstream unavailable"
-                }
-            }
-        }),
-    );
-
-    let logs = read_role_logs_from_project(&root, "taizi", 60).unwrap();
-    let events = logs
-        .iter()
-        .filter_map(|record| record.get("event").and_then(serde_json::Value::as_str))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        events,
-        vec!["dispatch", "tool_call", "agent_failed", "failure_state"]
-    );
-    assert_eq!(
-        logs.last()
-            .and_then(|record| record.get("reason"))
-            .and_then(serde_json::Value::as_str),
-        Some("subagent 执行失败: HTTP 503 upstream unavailable")
-    );
-    assert!(!logs
-        .iter()
-        .any(|record| record.get("role_id") == Some(&serde_json::json!("zhongshu"))));
-    let _ = std::fs::remove_dir_all(root);
 }
 
 fn write_test_oauth_marketplace_files(server_name: &str, mcp_server: serde_json::Value) {
@@ -195,8 +220,7 @@ fn write_test_oauth_marketplace_files(server_name: &str, mcp_server: serde_json:
         }]
     });
     write_json(
-        &crate::platform::paths::bundle_mcp_servers_dir()
-            .join("yuandian-mcp")
+        &crate::features::marketplace::mcp_catalog::package_mcp_dir("yuandian-mcp")
             .join("manifest.json"),
         manifest,
     );
@@ -213,7 +237,7 @@ fn write_test_oauth_marketplace_files(server_name: &str, mcp_server: serde_json:
 }
 
 fn test_oauth_store_key(server_name: &str, url: &str) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
 
     let mut payload = Vec::with_capacity(server_name.len() + url.len() + 1);
@@ -391,9 +415,11 @@ fn uninstall_marketplace_tool_deletes_oauth_token_before_mcp_config() {
     uninstall_marketplace_tool_sync("yuandian-mcp").unwrap();
 
     assert!(!test_oauth_token_exists(&key));
-    assert!(!crate::features::marketplace::MarketplaceManager::new()
-        .installed_ids()
-        .contains(&"yuandian-mcp".to_string()));
+    assert!(
+        !crate::features::marketplace::MarketplaceManager::new()
+            .installed_ids()
+            .contains(&"yuandian-mcp".to_string())
+    );
     let mcp_content = std::fs::read_to_string(crate::platform::paths::mcp_config_path()).unwrap();
     let mcp: serde_json::Value = serde_json::from_str(&mcp_content).unwrap();
     assert!(mcp["servers"].get(server_name).is_none());
@@ -416,9 +442,11 @@ fn uninstall_marketplace_tool_aborts_if_oauth_token_delete_fails() {
 
     let err = uninstall_marketplace_tool_sync("yuandian-mcp").unwrap_err();
     assert!(err.contains("删除 MCP OAuth token 失败"));
-    assert!(crate::features::marketplace::MarketplaceManager::new()
-        .installed_ids()
-        .contains(&"yuandian-mcp".to_string()));
+    assert!(
+        crate::features::marketplace::MarketplaceManager::new()
+            .installed_ids()
+            .contains(&"yuandian-mcp".to_string())
+    );
     let mcp_content = std::fs::read_to_string(crate::platform::paths::mcp_config_path()).unwrap();
     let mcp: serde_json::Value = serde_json::from_str(&mcp_content).unwrap();
     assert!(mcp["servers"].get(server_name).is_some());
@@ -433,8 +461,10 @@ struct TestPinvouHome {
 impl Drop for TestPinvouHome {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -448,7 +478,8 @@ fn test_pinvou_home(tag: &str) -> TestPinvouHome {
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     TestPinvouHome {
         root,
         previous,
@@ -463,7 +494,8 @@ struct TestE2EFlag {
 impl TestE2EFlag {
     fn enable() -> Self {
         let previous = std::env::var("PINVOU3_E2E").ok();
-        std::env::set_var("PINVOU3_E2E", "1");
+        // SAFETY: every caller holds the crate-wide ENV_LOCK through TestPinvouHome.
+        unsafe { std::env::set_var("PINVOU3_E2E", "1") };
         Self { previous }
     }
 }
@@ -471,8 +503,10 @@ impl TestE2EFlag {
 impl Drop for TestE2EFlag {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var("PINVOU3_E2E", value),
-            None => std::env::remove_var("PINVOU3_E2E"),
+            // SAFETY: the owning test still holds the crate-wide ENV_LOCK while guards drop.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_E2E", value) },
+            // SAFETY: same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_E2E") },
         }
     }
 }
@@ -484,7 +518,8 @@ struct RemoveE2EOnDrop {
 impl RemoveE2EOnDrop {
     fn clear() -> Self {
         let previous = std::env::var("PINVOU3_E2E").ok();
-        std::env::remove_var("PINVOU3_E2E");
+        // SAFETY: every caller acquires the crate-wide ENV_LOCK before constructing this guard.
+        unsafe { std::env::remove_var("PINVOU3_E2E") };
         Self { previous }
     }
 }
@@ -492,8 +527,10 @@ impl RemoveE2EOnDrop {
 impl Drop for RemoveE2EOnDrop {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var("PINVOU3_E2E", value),
-            None => std::env::remove_var("PINVOU3_E2E"),
+            // SAFETY: the owning test still holds the crate-wide ENV_LOCK while guards drop.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_E2E", value) },
+            // SAFETY: same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_E2E") },
         }
     }
 }
@@ -558,7 +595,8 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
 
     // 用户关闭 visualizer（独立 disabled_skills.json，不再借道连接器文件）→
     // 组合目录计算排除该技能。
@@ -571,9 +609,11 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
         "安装后仍受用户关闭状态约束（plain scope 禁用集）"
     );
     // code scope 未初始化时新装技能默认全禁，初始化后自动加入 code 禁用集。
-    assert!(sm::load_disabled_skills_for(ConnectorScope::Code)
-        .iter()
-        .any(|id| id == "visualizer"));
+    assert!(
+        sm::load_disabled_skills_for(ConnectorScope::Code)
+            .iter()
+            .any(|id| id == "visualizer")
+    );
 
     uninstall_marketplace_skill_sync("visualizer").unwrap();
     // 卸载清除两个 scope 禁用集残留（与连接器同语义）→ 重装后默认启用。
@@ -592,10 +632,201 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
     );
 
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// companion 联动契约：MCP manifest 的 companion_skills 声明真实存在（预置技能可装），
+/// 命令层「装 MCP → 遍历装 companion 技能」的联动路径在临时 home 下可闭环。
+/// 覆盖 gongwen→government-writing（异名配对）与 pptx→pptx（同名配对）。
+#[test]
+fn mcp_install_links_companion_skills() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let root = std::env::temp_dir().join(format!(
+        "pinvou3-companion-link-test-{}",
+        std::process::id()
+    ));
+    let previous = std::env::var("PINVOU3_HOME").ok();
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+
+    let mgr = crate::features::marketplace::MarketplaceManager::new();
+    let skill_mgr = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new();
+    for (mcp_id, skill_id) in [("gongwen", "government-writing"), ("pptx", "pptx")] {
+        let companions = mgr.companion_skills(mcp_id);
+        assert!(
+            companions.contains(&skill_id.to_string()),
+            "{mcp_id} 应声明 companion 技能 {skill_id}"
+        );
+        // 复刻命令层联动路径：装 MCP 后遍历装 companion 技能（技能增强，失败只记日志）
+        for sid in &companions {
+            skill_mgr.install(sid).unwrap();
+        }
+        assert!(
+            skill_mgr
+                .list_skills()
+                .iter()
+                .any(|s| s.id == skill_id && s.installed),
+            "{skill_id} 应随 {mcp_id} 安装落盘"
+        );
+        skill_mgr.uninstall(skill_id).unwrap();
+    }
+
+    match previous {
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 卸载回归：MCP 已装时 companion 技能落盘在 `bundles/<pkg>/skills/`（条件认领，
+/// `skill_owner_package` 以包本体安装态判定归属）。本测试锁定的是**物理扫描
+/// 删除路径**（技能卸载按实际物理位置找包目录副本并删除），而非直接证明调用
+/// 顺序——顺序依赖的正确性由该扫描路径在认领仍有效时能找到副本来体现
+/// （gongwen 先卸 → government-writing 删不掉的回归）。
+#[test]
+fn mcp_uninstall_removes_companion_skills_from_package_dir() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("companion-unlink");
+
+    let mgr = crate::features::marketplace::MarketplaceManager::new();
+    let skill_mgr = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new();
+    // 复刻命令层安装路径的**安装态**而不跑真实 install 管线（`mgr.install`
+    // 会真实执行 pip install python-docx，邻测 mcp_install_links_companion_skills
+    // 因此也不调它）：条件认领（bundle_installed）只查 BundleStore 记录。
+    crate::features::marketplace::store::BundleStore::new()
+        .upsert(
+            crate::features::marketplace::store::BundleRecord::installed_now(
+                "gongwen".to_string(),
+                crate::features::marketplace::store::BundleSource::Preset,
+            ),
+        )
+        .unwrap();
+    for sid in mgr.companion_skills("gongwen") {
+        skill_mgr.install(&sid).unwrap();
+    }
+    let skill_dir = crate::platform::paths::bundles_root()
+        .join("gongwen")
+        .join("skills")
+        .join("government-writing");
+    assert!(skill_dir.is_dir(), "companion 技能应随包装入包目录");
+    for scope in [
+        crate::features::marketplace::ConnectorScope::Plain,
+        crate::features::marketplace::ConnectorScope::Code,
+    ] {
+        crate::features::marketplace::save_disabled_bundles_for(
+            scope,
+            &["government-writing".to_string()],
+        );
+        crate::features::marketplace::save_hidden_bundles_for(
+            scope,
+            &["government-writing".to_string()],
+        );
+        assert_eq!(
+            crate::features::marketplace::load_disabled_bundles_for(scope),
+            vec!["gongwen".to_string()]
+        );
+        assert_eq!(
+            crate::features::marketplace::load_hidden_bundles_for(scope),
+            vec!["gongwen".to_string()]
+        );
+    }
+
+    uninstall_marketplace_tool_sync("gongwen").unwrap();
+
+    assert!(
+        !skill_dir.exists(),
+        "卸 MCP 后 companion 技能目录不得残留（顺序依赖回归）"
+    );
+    assert!(
+        !skill_mgr
+            .list_skills()
+            .iter()
+            .any(|s| s.id == "government-writing" && s.installed),
+        "卸 MCP 后 companion 技能不得仍为已装态"
+    );
+    for scope in [
+        crate::features::marketplace::ConnectorScope::Plain,
+        crate::features::marketplace::ConnectorScope::Code,
+    ] {
+        assert!(
+            crate::features::marketplace::load_disabled_bundles_for(scope).is_empty(),
+            "卸载成功后 companion/package 禁用 scope 必须清理"
+        );
+        assert!(
+            crate::features::marketplace::load_hidden_bundles_for(scope).is_empty(),
+            "卸载成功后 companion/package 隐藏 scope 必须清理"
+        );
+    }
+}
+
+/// Claim-flip guard (safety-relevant): if the companion skill cannot be
+/// deleted, the MCP uninstall must abort and leave the MCP record in place.
+/// Read-time scope normalization maps skill id -> package id one-way; removing
+/// the MCP record after a failed companion delete would flip the claim back to
+/// the skill name, orphaning the stored package-level disabled/hidden entries
+/// and re-materializing a user-disabled skill into sessions. The scope entries
+/// must also stay untouched while the skill is still installed.
+#[test]
+fn mcp_uninstall_aborts_when_companion_uninstall_fails() {
+    let _g = crate::platform::paths::tests::ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _home = TempPinvou3Home::new("companion-abort");
+
+    // gongwen installed (store record drives the conditional claim).
+    crate::features::marketplace::store::BundleStore::new()
+        .upsert(
+            crate::features::marketplace::store::BundleRecord::installed_now(
+                "gongwen".to_string(),
+                crate::features::marketplace::store::BundleSource::Preset,
+            ),
+        )
+        .unwrap();
+    // Failure injection without platform-specific permission tricks: the
+    // companion exists only as an *unmarked* legacy flat dir, which skill
+    // uninstall refuses to delete ("非市场安装" protection).
+    let legacy = crate::platform::paths::bundle_skills_dir().join("government-writing");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(
+        legacy.join("SKILL.md"),
+        "---\nname: government-writing\n---\n",
+    )
+    .unwrap();
+    // The package-level disable entry (normalized to the package id while the
+    // claim holds) must survive the abort.
+    crate::features::marketplace::save_disabled_bundles(&["government-writing".to_string()]);
+
+    let err = uninstall_marketplace_tool_sync("gongwen").unwrap_err();
+    assert!(
+        err.contains("government-writing"),
+        "中止错误应点名失败的配套技能，实际: {err}"
+    );
+    assert!(
+        crate::features::marketplace::store::BundleStore::new()
+            .get("gongwen")
+            .unwrap()
+            .is_some(),
+        "companion 卸载失败时 MCP 记录必须保留（认领不得翻转）"
+    );
+    assert!(legacy.join("SKILL.md").is_file(), "保护对象目录不得被动");
+    assert_eq!(
+        crate::features::marketplace::load_disabled_bundles(),
+        vec!["gongwen".to_string()],
+        "companion 卸载失败时禁用集条目不得清除（仍在装的技能不得被重新启用）"
+    );
 }
 
 #[test]
@@ -628,25 +859,21 @@ fn file_url_from_path_encodes_local_artifact_paths() {
 }
 
 #[test]
-fn write_artifact_text_allows_markdown() {
-    let _home = test_pinvou_home("pinvou3-md-write-test");
-    let md = session_artifact_path("s1", "note.md");
-    std::fs::write(&md, "# Old\n").unwrap();
+fn write_artifact_text_allows_markdown_extensions() {
+    // `.markdown` is a parameterized companion to the `.md` allowed path; both
+    // extensions go through the same loop.
+    for (tag, ext) in [
+        ("pinvou3-md-write-test", "md"),
+        ("pinvou3-markdown-write-test", "markdown"),
+    ] {
+        let _home = test_pinvou_home(tag);
+        let md = session_artifact_path("s1", &format!("note.{ext}"));
+        std::fs::write(&md, "# Old\n").unwrap();
 
-    write_artifact_text_impl(md.to_str().unwrap(), "# New\n\nBody").unwrap();
+        write_artifact_text_impl(md.to_str().unwrap(), "# New\n\nBody").unwrap();
 
-    assert_eq!(std::fs::read_to_string(&md).unwrap(), "# New\n\nBody");
-}
-
-#[test]
-fn write_artifact_text_allows_markdown_extension() {
-    let _home = test_pinvou_home("pinvou3-markdown-write-test");
-    let md = session_artifact_path("s1", "note.markdown");
-    std::fs::write(&md, "old").unwrap();
-
-    write_artifact_text_impl(md.to_str().unwrap(), "new").unwrap();
-
-    assert_eq!(std::fs::read_to_string(&md).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&md).unwrap(), "# New\n\nBody");
+    }
 }
 
 #[test]
@@ -797,6 +1024,150 @@ fn write_artifact_text_cleans_temp_file_on_error() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+#[test]
+fn artifact_public_read_prefers_newer_cross_pid_backup_group() {
+    let root =
+        std::env::temp_dir().join(format!("pinvou3-artifact-cross-pid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let target = root.join("note.md");
+    let older_temp = root.join(".note.md.tmp-9001-100");
+    let newer_temp = root.join(".note.md.tmp-12-300");
+    let newer_backup = root.join(".note.md.bak-12-300");
+    std::fs::write(&older_temp, "uncommitted older temp").unwrap();
+    std::fs::write(&newer_temp, "uncommitted newer replacement").unwrap();
+    std::fs::write(&newer_backup, "authoritative backup").unwrap();
+
+    let restored = read_artifact_text_impl(target.to_str().unwrap()).unwrap();
+
+    assert_eq!(restored, "authoritative backup");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), restored);
+    assert!(!older_temp.exists());
+    assert!(!newer_temp.exists());
+    assert!(!newer_backup.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn artifact_public_read_uses_metadata_when_tokens_are_not_parseable() {
+    let root = std::env::temp_dir().join(format!(
+        "pinvou3-artifact-token-fallback-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let target = root.join("note.md");
+    let older_backup = root.join(".note.md.bak-invalid-old");
+    let newer_backup = root.join(".note.md.bak-invalid-new");
+    std::fs::write(&older_backup, "older authority").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&newer_backup, "newer authority").unwrap();
+
+    assert_eq!(
+        read_artifact_text_impl(target.to_str().unwrap()).unwrap(),
+        "newer authority"
+    );
+    assert!(!older_backup.exists());
+    assert!(!newer_backup.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(windows)]
+#[test]
+fn artifact_read_recovers_an_occupied_1177_layout_after_release() {
+    use std::cell::RefCell;
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let _home = test_pinvou_home("pinvou3-artifact-1177-recovery");
+    let md = session_artifact_path("s1", "note.md");
+    std::fs::write(&md, "old").unwrap();
+    let occupied = RefCell::new(None);
+
+    let error = atomic_write_utf8_unlocked_with(&md, "new", |replacement, target, backup| {
+        crate::platform::filesystem::replace_file_atomically_with(
+            replacement,
+            target,
+            backup,
+            |target, _, backup| {
+                std::fs::rename(target, backup)?;
+                *occupied.borrow_mut() = Some(
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(0)
+                        .open(backup)?,
+                );
+                Err(std::io::Error::from_raw_os_error(1177))
+            },
+        )
+    })
+    .unwrap_err();
+
+    assert!(error.to_string().contains("RecoveryRequired"));
+    assert!(!md.exists());
+    let leftovers_while_occupied: Vec<_> = std::fs::read_dir(md.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.contains(".note.md.tmp-") || name.contains(".note.md.bak-")
+        })
+        .collect();
+    assert_eq!(leftovers_while_occupied.len(), 2);
+
+    drop(occupied.borrow_mut().take());
+    assert_eq!(
+        read_artifact_text_impl(md.to_str().unwrap()).unwrap(),
+        "old"
+    );
+    let leftovers_after_recovery: Vec<_> = std::fs::read_dir(md.parent().unwrap())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.contains(".note.md.tmp-") || name.contains(".note.md.bak-")
+        })
+        .collect();
+    assert!(leftovers_after_recovery.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn artifact_writes_never_expose_partial_utf8_to_concurrent_readers() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let _home = test_pinvou_home("pinvou3-artifact-concurrent-read");
+    let md = session_artifact_path("s1", "note.md");
+    let old = "a".repeat(32 * 1024);
+    let new = "b".repeat(32 * 1024);
+    std::fs::write(&md, &old).unwrap();
+    let running = Arc::new(AtomicBool::new(true));
+    let reader_running = Arc::clone(&running);
+    let reader_path = md.clone();
+    let old_for_reader = old.clone();
+    let new_for_reader = new.clone();
+    let reader = std::thread::spawn(move || {
+        // Bound the loop so a writer panic cannot leave the reader spinning
+        // forever and hang the test runner.
+        let mut spins = 0;
+        while reader_running.load(Ordering::Acquire) && spins < 1_000_000 {
+            spins += 1;
+            if let Ok(value) = std::fs::read_to_string(&reader_path) {
+                assert!(value == old_for_reader || value == new_for_reader);
+            }
+        }
+    });
+
+    for index in 0..16 {
+        let content = if index % 2 == 0 { &new } else { &old };
+        write_artifact_text_impl(md.to_str().unwrap(), content).unwrap();
+    }
+    running.store(false, Ordering::Release);
+    reader.join().unwrap();
+}
+
 /// accept_plan 切 Yolo 后注入的执行指令必须裹住方案全文 + 带"立即执行"信号——
 /// 否则切了模式但 AI 收到一句空指令,不知道要执行什么(切了白切)。
 #[test]
@@ -818,13 +1189,62 @@ fn agentic_guide_mentions_collection_and_kb_search() {
     assert!(g.contains("不要对 XLSX/"));
     assert!(g.contains("绝不凭记忆编造"));
     assert!(g.contains("《团队规范》"));
-    assert!(build_kb_agentic_guide(&[]).contains("《本地知识集》"));
+    assert!(build_kb_agentic_guide(&[]).contains("《知识集》"));
 }
 
 #[test]
 fn parses_local_asr_plain_text_output() {
     let text = parse_local_asr_text("hello from voice\n", "").expect("plain text");
     assert_eq!(text, "hello from voice");
+    assert_eq!(
+        parse_local_asr_text("[0-.5] Hello\n[.5-1] .\n[1-1.5] World\n", ""),
+        Some("Hello. World".to_string())
+    );
+}
+
+#[test]
+fn parses_local_asr_numeric_only_output() {
+    let text = parse_local_asr_text("123\n", "").expect("numeric transcript");
+    assert_eq!(text, "123");
+    assert_eq!(
+        parse_local_asr_text("123\n100%\n", "100/100%\n12:34:56\n"),
+        Some("123".to_string())
+    );
+    assert_eq!(parse_local_asr_text("100%\n", ""), None);
+    assert_eq!(
+        parse_local_asr_text("１２３\n", ""),
+        Some("１２３".to_string())
+    );
+    assert_eq!(
+        parse_local_asr_text(r#"{"text":"123"}"#, ""),
+        Some("123".to_string())
+    );
+    assert_eq!(parse_local_asr_text("", "100/100%\n100\n12:34:56\n"), None);
+    assert_eq!(
+        parse_local_asr_text(
+            "{\"timestamp\":0,\"text\":\"hello\"}\n{\"timestamp\":1,\"text\":\"world\"}\n",
+            ""
+        ),
+        Some("hello world".to_string())
+    );
+    assert_eq!(
+        parse_local_asr_text("1\n00:00:03,000 --> 00:00:04,000\n", ""),
+        None
+    );
+    assert_eq!(
+        parse_local_asr_text("hello world\n", "4\n"),
+        Some("hello world".to_string()),
+        "a lone numeric stderr line must not shadow a plain stdout result"
+    );
+    assert_eq!(
+        parse_local_asr_text("", "4\n"),
+        Some("4".to_string()),
+        "numeric-only speech on a clean stderr stream remains valid"
+    );
+    assert!(
+        parse_local_asr_text("...\n", "[INFO] loading\n").is_none(),
+        "punctuation and log output must not become a transcript"
+    );
 }
 
 #[test]
@@ -881,7 +1301,8 @@ fn resolve_artifact_path_relative_joins_active_workspace() {
     let _g = crate::platform::paths::tests::ENV_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-resolve-test");
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-resolve-test") };
     let store = SessionStore::boot().expect("boot");
 
     // 无 active session 且无显式 session → 相对路径原样返回(行为同旧版)
@@ -935,7 +1356,8 @@ fn scheduled_attachment_staging_and_artifact_resolution_use_task_workspace() {
     ));
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     let scheduled_root = root.join("scheduled");
     std::fs::create_dir_all(&root).expect("test root");
     let source = root.join("source.png");
@@ -1011,8 +1433,10 @@ fn scheduled_attachment_staging_and_artifact_resolution_use_task_workspace() {
 
     drop(store);
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1033,7 +1457,8 @@ fn scheduled_session_metadata_dispatch_supports_rename_pin_archive() {
     ));
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     let store =
         SessionStore::boot_with_scheduled_root(root.join("scheduled")).expect("session store");
     let scheduled = store
@@ -1071,11 +1496,13 @@ fn scheduled_session_metadata_dispatch_supports_rename_pin_archive() {
     // set_session_archived 路径：共用收起表,且归档列表能列出 sched-* 会话。
     store.set_hidden(&id, true);
     assert!(store.is_hidden(&id));
-    assert!(store
-        .list_scheduled()
-        .expect("list scheduled")
-        .iter()
-        .any(|metadata| metadata.id == id));
+    assert!(
+        store
+            .list_scheduled()
+            .expect("list scheduled")
+            .iter()
+            .any(|metadata| metadata.id == id)
+    );
     // 收起会强制取消置顶(与普通会话一致)。
     assert!(!store.is_pinned(&id));
     store.set_hidden(&id, false);
@@ -1085,14 +1512,18 @@ fn scheduled_session_metadata_dispatch_supports_rename_pin_archive() {
     let delete_error = store
         .delete(&id)
         .expect_err("scheduled sessions must not be deleted as ordinary chats");
-    assert!(delete_error
-        .to_string()
-        .contains("deleted through their automation"));
+    assert!(
+        delete_error
+            .to_string()
+            .contains("deleted through their automation")
+    );
 
     drop(store);
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1108,7 +1539,8 @@ fn ordinary_ledger_root_behavior_is_unchanged() {
     ));
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     let store = SessionStore::boot().expect("session store");
     let chat = store
         .create_new(
@@ -1133,8 +1565,10 @@ fn ordinary_ledger_root_behavior_is_unchanged() {
 
     drop(store);
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1190,15 +1624,17 @@ async fn open_external_url_rejects_off_allowlist_targets() {
         "https://www.canva.cn.evil.com/api/action",               // Canva 子域钓鱼
         "https://export-download.canva.cn.evil.com/x.png",        // Canva 资源域钓鱼
         "https://meeting.tencent.com.evil.com/qrcode-login.html", // 腾讯会议授权域钓鱼
-        "https://bce.baidu.com/",                                 // 非 console 子域,不放行
-        "javascript:alert(1)",                                    // js scheme
-        "file:///etc/passwd",                                     // file scheme
-        "https://google.com/",                                    // 任何第三方域
-        "http://localhost.evil.com:8080/",                        // localhost 前缀钓鱼
-        "http://user@localhost:8080/",                            // 不允许 URL 凭据
-        "http://192.168.1.10:8080/",                              // 局域网地址不是 loopback
-        "",                                                       // 空串
-        "metaso.cn/",                                             // 缺 scheme
+        "http://work.weixin.qq.com/ai/qc/gen",                    // WeCom auth page over non-https
+        "http://login.dingtalk.com/device", // DingTalk auth page over non-https
+        "https://bce.baidu.com/",           // 非 console 子域,不放行
+        "javascript:alert(1)",              // js scheme
+        "file:///etc/passwd",               // file scheme
+        "https://google.com/",              // 任何第三方域
+        "http://localhost.evil.com:8080/",  // localhost 前缀钓鱼
+        "http://user@localhost:8080/",      // 不允许 URL 凭据
+        "http://192.168.1.10:8080/",        // 局域网地址不是 loopback
+        "",                                 // 空串
+        "metaso.cn/",                       // 缺 scheme
     ];
     for url in rejected {
         let err = open_external_url(url.to_string()).await.err();
@@ -1269,6 +1705,20 @@ fn external_allowlist_allows_known_targets_rejects_lookalikes() {
     assert!(url_in_external_allowlist(
         "https://meeting.tencent.com/qrcode-login.html?code=abc"
     ));
+    assert!(url_in_external_allowlist(
+        "https://docs.qq.com/scenario/open-claw.html?nlc=1"
+    ));
+    // WeCom scan-to-authorize page (wecom-cli auth init landing page)
+    assert!(url_in_external_allowlist(
+        "https://work.weixin.qq.com/ai/qc/gen?source=wecom_cli_external&scode=abc"
+    ));
+    assert!(url_in_external_allowlist(
+        "https://work.weixin.qq.com/ai/qc/c?s=abc&for_native=true"
+    ));
+    // DingTalk device authorization login page (printed by `dws auth login --device`, carries user_code)
+    assert!(url_in_external_allowlist(
+        "https://login.dingtalk.com/device?user_code=ABCDEF"
+    ));
     assert!(url_in_external_allowlist("http://localhost:8080/"));
     assert!(url_in_external_allowlist("https://127.0.0.1:8443/preview"));
     assert!(url_in_external_allowlist("http://[::1]:3000/"));
@@ -1289,6 +1739,22 @@ fn external_allowlist_allows_known_targets_rejects_lookalikes() {
     assert!(!url_in_external_allowlist(
         "https://meeting.tencent.com.evil.com/qrcode-login.html"
     ));
+    assert!(!url_in_external_allowlist(
+        "https://work.weixin.qq.com.evil.com/ai/qc/gen"
+    ));
+    assert!(!url_in_external_allowlist(
+        "https://login.dingtalk.com.evil.com/device"
+    ));
+    assert!(!url_in_external_allowlist(
+        "https://dingtalk.com.evil.com/device"
+    ));
+    assert!(!url_in_external_allowlist(
+        "https://docs.qq.com.evil.com/scenario/open-claw.html?nlc=1"
+    ));
+    assert!(!url_in_external_allowlist(
+        "https://docs.qq.com.evil.com/openapi/mcp"
+    ));
+    assert!(!url_in_external_allowlist("http://docs.qq.com/"));
     assert!(!url_in_external_allowlist("http://obsidian.md/"));
     assert!(!url_in_external_allowlist("http://meeting.tencent.com/"));
     assert!(!url_in_external_allowlist("http://open.zhihuiya.com/"));
@@ -1313,32 +1779,6 @@ fn pick_vault_path_prefers_open_then_latest() {
     assert_eq!(pick_vault_path(r#"{"vaults":{}}"#), None);
     let j = "\u{feff}{\"vaults\":{\"a\":{\"path\":\"/A\",\"ts\":1,\"open\":true}}}";
     assert_eq!(pick_vault_path(j).as_deref(), Some("/A"));
-}
-
-/// 成品归属推断:成品词出现在质检节时必须归被审对象,不归审核者
-/// (天真就近归因实测把成品判给 xingbu——刑部节里"对礼部整合的最终报告
-/// 进行审核"的关键词全在审核者章节内)。
-#[test]
-fn infer_product_bu_attributes_to_audited_not_auditor() {
-    let report = "\
-## 各部成果\n\n\
-### 4. 礼部（libu_1.md）—— 报告撰写与方案整合\n\n\
-核心产出：将各部数据整合为完整的研究报告\n\n\
-### 5. 刑部（xingbu_1.md）—— 方案质量审核验收\n\n\
-核心产出：对礼部整合的最终报告进行全面质量审核\n\n\
-## 结果对账\n\n\
-| 具体方案交付 | ✅ 达成 | 礼部报告提供三套完整方案 |\n";
-    let (bu, score) = infer_product_bu(report).expect("应有推断结果");
-    assert_eq!(bu, "libu", "成品应归被审的礼部,不归审核者刑部");
-    assert!(score >= 8, "多路信号应汇聚到可信阈值,实得 {score}");
-}
-
-/// libu_ 前缀不得误吃 libu_renshi_N.md(后随数字才算点名)。
-#[test]
-fn infer_product_bu_no_prefix_confusion() {
-    let report = "### 吏部（libu_renshi_1.md）—— 流程规范\n\n整合完整的最终成品汇总\n";
-    let (bu, _) = infer_product_bu(report).expect("应有推断结果");
-    assert_eq!(bu, "libu_renshi");
 }
 
 /// L2-1: A 方案放宽 — /tmp 下任意文件可校验通过（不强 $HOME 限制）。
@@ -1370,7 +1810,7 @@ fn validate_user_path_blocks_ssh() {
 /// L2-3: 系统级敏感前缀拦截 — /etc/shadow 等被列在 BLOCKED_PREFIXES。
 #[test]
 fn validate_user_path_blocks_etc_shadow() {
-    if !crate::platform::capabilities::is_unix() {
+    if !cfg!(unix) {
         return;
     }
     let result = validate_user_path("/etc/shadow");
@@ -1412,6 +1852,226 @@ fn image_attachment_stages_and_guides_image_analyze() {
     assert!(!prompt.contains("没有视觉能力"), "不应再出现无视觉提示");
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── Native 图片输入(设计 §9.2,阶段 D)─────────────────────────────────
+
+fn mk_image_attachment(
+    basename: &str,
+    path: &Path,
+    byte_size: u64,
+) -> crate::features::files::file_ingest::IngestResult {
+    crate::features::files::file_ingest::IngestResult {
+        kind: "image".into(),
+        basename: basename.into(),
+        path: path.to_string_lossy().to_string(),
+        markdown: None,
+        token_estimate: 0,
+        byte_size,
+        warning: None,
+    }
+}
+
+/// Native(v0.9.5 官方标记方案):文字 + 多图 + 文本附件 → 消息文本含图片
+/// `[Attached image: <path>]` 标记行(按用户选择顺序);不注入"看不到图"
+/// 硬规则、不引导 image_analyze;文本附件 markdown 内联行为与 Fallback
+/// 路径一致;标记路径只来自暂存结果(不接受前端直给路径)。
+#[test]
+fn native_image_message_builds_marker_lines_in_order() {
+    let tmp = std::env::temp_dir().join(format!("pinvou3-native-test-{}", std::process::id()));
+    let ws = tmp.join("workspace");
+    std::fs::create_dir_all(&ws).expect("建 workspace");
+    let src_a = tmp.join("a.png");
+    let src_b = tmp.join("b.jpg");
+    std::fs::write(&src_a, b"\x89PNG\r\n\x1a\nfake-a").expect("写假 png");
+    std::fs::write(&src_b, b"\xff\xd8\xfffake-b").expect("写假 jpg");
+    let text_attachment = mk_attachment("text", "notes.txt", 2, 10);
+
+    let segment = prepare_native_user_message_in_dir(
+        "这几张图和笔记说明了什么？".to_string(),
+        vec![
+            mk_image_attachment("a.png", &src_a, 15),
+            text_attachment,
+            mk_image_attachment("b.jpg", &src_b, 11),
+        ],
+        &ws,
+        "attachments",
+    )
+    .expect("Native 构造应成功");
+
+    assert!(segment.contains("这几张图和笔记说明了什么？"));
+    assert!(
+        !segment.contains("看不到这张图") && !segment.contains("image_analyze"),
+        "Native 不得注入 image_analyze 硬规则提示,得到:\n{segment}"
+    );
+    assert!(
+        !segment.contains(src_a.to_string_lossy().as_ref()),
+        "图片的 workspace 外绝对路径不得进模型消息(设计 §10.1)"
+    );
+    assert!(
+        segment.contains("### a.png (image, 15 bytes)")
+            && segment.contains("### b.jpg (image, 11 bytes)"),
+        "附件清单应保留图片条目"
+    );
+    assert!(
+        segment.contains("row-1,value-1"),
+        "文本附件 markdown 应照旧内联"
+    );
+    // 官方标记行按用户选择顺序出现,路径为暂存后的 workspace 路径。
+    let marker_a = format!(
+        "[Attached image: {}]",
+        ws.join("attachments/a.png").display()
+    );
+    let marker_b = format!(
+        "[Attached image: {}]",
+        ws.join("attachments/b.jpg").display()
+    );
+    let marker_a_pos = segment.find(&marker_a).expect("a.png 标记行必须存在");
+    let marker_b_pos = segment.find(&marker_b).expect("b.jpg 标记行必须存在");
+    assert!(
+        marker_a_pos < marker_b_pos,
+        "标记行按用户选择顺序(先 a 后 b):\n{segment}"
+    );
+    // 暂存产物真实落盘,路径来自暂存结果。
+    assert!(ws.join("attachments/a.png").exists());
+    assert!(ws.join("attachments/b.jpg").exists());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Native: 纯图片消息(空文字 + 图片)允许发送,不伪造用户文字(设计 §9.4)。
+#[test]
+fn native_image_message_allows_pure_image() {
+    let tmp = std::env::temp_dir().join(format!("pinvou3-native-pure-{}", std::process::id()));
+    let ws = tmp.join("workspace");
+    std::fs::create_dir_all(&ws).expect("建 workspace");
+    let src = tmp.join("only.png");
+    std::fs::write(&src, b"\x89PNG\r\n\x1a\nfake").expect("写假 png");
+
+    let segment = prepare_native_user_message_in_dir(
+        String::new(),
+        vec![mk_image_attachment("only.png", &src, 13)],
+        &ws,
+        "attachments",
+    )
+    .expect("纯图片消息应允许");
+
+    // 只有附件清单与标记行,没有伪造的用户文字。
+    assert!(segment.contains("用户附上了以下文件"));
+    assert!(
+        segment.contains(&format!(
+            "[Attached image: {}]",
+            ws.join("attachments/only.png").display()
+        )),
+        "图片标记行必须存在:\n{segment}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Native: 任一图片暂存失败 → 整条消息 Err,不静默降级为纯文本(设计 §10.2)。
+#[test]
+fn native_image_message_stage_failure_is_error_not_silent_text() {
+    let tmp = std::env::temp_dir().join(format!("pinvou3-native-fail-{}", std::process::id()));
+    let ws = tmp.join("workspace");
+    std::fs::create_dir_all(&ws).expect("建 workspace");
+    let missing = tmp.join("missing.png"); // 故意不创建
+
+    let result = prepare_native_user_message_in_dir(
+        "看图".to_string(),
+        vec![mk_image_attachment("missing.png", &missing, 0)],
+        &ws,
+        "attachments",
+    );
+    let error = result.expect_err("暂存失败必须报错");
+    assert!(
+        error.contains("missing.png") && error.contains("暂存"),
+        "错误应指明哪张图暂存失败: {error}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Native 构造函数对纯文本/非图片附件的回归:与文本拼接路径结果一致。
+#[test]
+fn native_prepare_text_only_and_non_image_regression() {
+    let ws = mk_test_ws("native-regression");
+
+    let text_only =
+        prepare_native_user_message_in_dir("你好".to_string(), Vec::new(), &ws, "attachments")
+            .expect("纯文本");
+    assert_eq!(text_only, "你好");
+
+    let with_text = prepare_native_user_message_in_dir(
+        "查全文".to_string(),
+        vec![mk_attachment("text", "a.txt", 3, 10)],
+        &ws,
+        "attachments",
+    )
+    .expect("文本附件");
+    let legacy = build_message_with_attachments(
+        "查全文".to_string(),
+        vec![mk_attachment("text", "a.txt", 3, 10)],
+        &ws,
+    );
+    assert_eq!(
+        with_text, legacy,
+        "非图片附件路径必须与现有文本拼接结果一致"
+    );
+
+    let _ = std::fs::remove_dir_all(&ws);
+}
+
+/// Unsupported 路径的稳定错误码(设计 §9.2):前端按码匹配,码后必须带
+/// 用户可操作指引。钉住格式防手滑改码。
+#[test]
+fn image_input_unsupported_error_keeps_stable_code() {
+    assert!(super::chat::IMAGE_INPUT_UNSUPPORTED_ERROR.starts_with("image_input_unsupported"));
+    assert!(super::chat::IMAGE_INPUT_UNSUPPORTED_ERROR.contains("不支持图片"));
+    assert!(super::chat::IMAGE_INPUT_UNSUPPORTED_ERROR.contains("视觉模型"));
+}
+
+/// Unknown 与确认不支持共用稳定错误码前缀,但 Unknown 文案必须给出显式确认出口
+/// (设计 §6.3:Unknown 不冒充支持,允许用户手工开启)。
+#[test]
+fn image_input_unknown_error_offers_explicit_confirm_path() {
+    assert!(super::chat::IMAGE_INPUT_UNKNOWN_ERROR.starts_with("image_input_unsupported"));
+    assert!(super::chat::IMAGE_INPUT_UNKNOWN_ERROR.contains("能力未知"));
+    assert!(super::chat::IMAGE_INPUT_UNKNOWN_ERROR.contains("支持图片"));
+}
+
+/// `get_image_input_capability` 返回体的 wire 形状:前端按字段名与字符串值匹配
+/// (选图即时警告),钉住防手滑改字段。
+#[test]
+fn image_input_capability_info_serializes_stable_fields() {
+    let info = super::settings::ImageInputCapabilityInfo {
+        capability: "unknown".to_string(),
+        image_mode: "vision_tool_fallback".to_string(),
+        has_vision_model: true,
+        is_local_endpoint: false,
+        vision_is_local_endpoint: Some(false),
+    };
+    let value = serde_json::to_value(&info).expect("serialize ImageInputCapabilityInfo");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "capability": "unknown",
+            "image_mode": "vision_tool_fallback",
+            "has_vision_model": true,
+            "is_local_endpoint": false,
+            "vision_is_local_endpoint": false,
+        })
+    );
+    // 未配置视觉模型时字段仍稳定出现(为 null),前端按 fail-open 处理。
+    let no_vision = super::settings::ImageInputCapabilityInfo {
+        capability: "unsupported".to_string(),
+        image_mode: "unsupported".to_string(),
+        has_vision_model: false,
+        is_local_endpoint: true,
+        vision_is_local_endpoint: None,
+    };
+    let value = serde_json::to_value(&no_vision).expect("serialize without vision model");
+    assert_eq!(value["vision_is_local_endpoint"], serde_json::Value::Null);
 }
 
 /// 造一个指定 kind / token 估算的 IngestResult,markdown 是 `rows` 行可定位文本。
@@ -1802,7 +2462,7 @@ fn post_reservation_failure_never_unlinks_the_current_path() {
     let _ = std::fs::remove_dir_all(replacement_workspace);
 }
 
-/// 小附件维持全量内联:内容在代码块里,且明确告知无需 File.read。
+/// 小附件维持全量内联:内容在代码块里,且明确告知无需 read_file。
 #[test]
 fn small_attachment_stays_inline() {
     let ws = mk_test_ws("inline");
@@ -1814,7 +2474,7 @@ fn small_attachment_stays_inline() {
     assert!(prompt.contains("row-10,value-10"), "小附件应全量内联");
     assert!(
         prompt.contains("不需要再调 `File(action=\"read\")`"),
-        "内联段应声明无需 File.read"
+        "内联段应声明无需 read_file"
     );
     assert!(!ws.join("attachments").exists(), "小附件不应落盘");
     let _ = std::fs::remove_dir_all(&ws);

@@ -4,14 +4,21 @@
 //! 取消"逻辑收口在此;各连接器(`feishu.rs` / `wecom.rs`)只持有自己的 [`CliCtx`]
 //! 薄声明 + 一段连接编排函数,调本模块的公共件。
 //!
+//! **drain 多态性说明**:[`drain_for_url`] 只发 URL(`String`),供飞书/企微共享。
+//! tmeet/dingtalk 有各自的私有 drain(`drain_for_auth_url`/`drain_for_auth_event`),
+//! 因为它们在同一管道里额外抓取安全日志行 / user_code,channel 元素类型分别为
+//! `(Option<String>, Option<String>)` 和 `AuthEvent` enum。这是真实业务差异,
+//! 强行泛型化会增加闭包复杂度而收益有限——三者的 `BufReader::lines` 循环骨架
+//! 虽同构,但行处理逻辑不可统一。
+//!
 //! 连接状态(长驻子进程 PID + 取消标志)用一个 [`ConnectorConn`] 按连接器 id 复用,
 //! `lib.rs` 里 `.manage(ConnectorConn::default())` 注册一次,飞书 / 企微共用。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -165,15 +172,28 @@ pub fn parse_json(s: &str) -> Option<Value> {
     serde_json::from_str(&s[start..=end]).ok()
 }
 
+/// 解析 CLI `--version` 输出为三段语义版本:取字符串中首个连续数字段序列,
+/// 不足三段补 0(假想的两段式「2.0」→(2,0,0),避免误判未装而触发降级重装),
+/// 一个数字段都没有则 `None`。wecom/tmeet 的最低版本门共用;
+/// 输出里程序名等位置可能带数字的,调用方先自行切片再传入(tmeet 见 marker 定位)。
+pub fn parse_semver3(s: &str) -> Option<(u64, u64, u64)> {
+    let mut nums = s
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|p| !p.is_empty())
+        .filter_map(|p| p.parse::<u64>().ok());
+    let major = nums.next()?;
+    Some((major, nums.next().unwrap_or(0), nums.next().unwrap_or(0)))
+}
+
 /// 把授权 URL 渲染成二维码(SVG data URL,供前端 `<img src>` 直接显示)。
 /// 纯 Rust(qrcode crate),不依赖具体 CLI 的 qrcode 子命令——各连接器通用。
 /// 失败返回 `None`(前端回退开浏览器)。
 pub fn make_qr(url: &str) -> Option<String> {
-    use qrcode::render::svg;
     use qrcode::QrCode;
+    use qrcode::render::svg;
     let code = QrCode::new(url.as_bytes()).ok()?;
     let svg_xml = code
-        .render::<svg::Color>()
+        .render::<svg::Color<'_>>()
         .min_dimensions(220, 220)
         .quiet_zone(true)
         .build();
@@ -181,6 +201,26 @@ pub fn make_qr(url: &str) -> Option<String> {
         "data:image/svg+xml;base64,{}",
         b64(svg_xml.as_bytes())
     ))
+}
+
+/// Wraps the QR PNG written to disk by the CLI (wecom-cli `--output-qrcode`) as a
+/// data URL so the frontend can show it directly via `<img src>`. Validates the PNG
+/// signature plus the IEND tail; non-PNG / truncated files return `None` (the
+/// caller falls back to [`make_qr`]).
+pub fn png_data_url(bytes: &[u8]) -> Option<String> {
+    const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    // The IEND chunk is always length(0) + type + CRC: the CRC over the IEND
+    // content is fixed, so the whole tail can be compared verbatim. Checking only
+    // the signature would accept a half-written file (header only) and the browser
+    // would render a broken image.
+    const IEND_TAIL: &[u8] = b"\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+    if bytes.len() < PNG_SIGNATURE.len() + IEND_TAIL.len()
+        || !bytes.starts_with(PNG_SIGNATURE)
+        || !bytes.ends_with(IEND_TAIL)
+    {
+        return None;
+    }
+    Some(format!("data:image/png;base64,{}", b64(bytes)))
 }
 
 /// 后台线程:逐行排空一个管道(防写满阻塞),抓到首个本连接器 URL 经 channel 送回。
@@ -253,6 +293,19 @@ impl ConnectorConn {
             m.entry(id).or_default().pid = pid;
         }
     }
+
+    /// 退出收割（lib.rs RunEvent::Exit 调）：杀掉所有槽位登记的长驻子进程树。
+    /// 这些 CLI 子进程（.cmd 拉起的 node）没有 kill_on_drop 兜底，宿主进程
+    /// 退出后若不显式清理会变孤儿进程继续驻留。
+    pub fn kill_all_pids(&self) {
+        if let Ok(m) = self.slots.lock() {
+            for slot in m.values() {
+                if let Some(pid) = slot.pid {
+                    kill_pid_tree(pid);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -322,6 +375,49 @@ pub async fn refresh_connector_auth_gates() -> Result<ConnectorAuthGateRefresh, 
     })
 }
 
+// ─────────────── BundleStore 镜像（marketplace-unification Phase 2）───────────────
+//
+// 过渡期纪律：连接器的授权文件 / 技能目录 / CLI 二进制仍是权威，bundles.json
+// 只镜像安装态；镜像写失败不影响主操作，fail loud 到日志。
+
+/// 连接成功（授权就绪）后登记 CLI 包：`source=Builtin`，assets 按 lock 表钉住的
+/// 版本/SHA-256 登记（连接路径已经过 `ensure_native_cli` 校验；tmeet 走 npm 无
+/// lock 条目，自然无 asset），并清除 `degraded`（重连即修复，§3.2）。
+/// 既有记录保留首次登记时间与 extra（见 `BundleStore::upsert_preserving`）。
+pub fn bundle_store_on_connected(id: &str) {
+    use crate::features::marketplace::bundle;
+    use crate::features::marketplace::store::{
+        ASSET_KIND_CLI, AssetRef, BundleRecord, BundleSource, BundleStore,
+    };
+    let mut record = BundleRecord::installed_now(id, BundleSource::Builtin);
+    if let Some(bin) = bundle::cli_bundle_bin(id) {
+        if let Some(pin) = crate::platform::connector_lock::artifact_pin(bin) {
+            record.assets.push(AssetRef {
+                kind: ASSET_KIND_CLI.to_string(),
+                name: bin.to_string(),
+                version: pin.version,
+                sha256: pin.binary_sha256,
+            });
+        }
+    }
+    if let Err(e) = BundleStore::new().upsert_preserving(record) {
+        log::warn!("[connectors] bundles.json 镜像写入失败（connect {id}）: {e}");
+    }
+}
+
+/// 断开（删授权）≠ 卸载：**记录保留** —— `installed` 是存储态，授权存在与否是
+/// `ready` 派生态、现算且永不进存储（§3.2）。但当前实现断开后 apply_skills 会
+/// 删掉 companion 技能目录，包内容不完整，故按 §3.2 的 Degraded（登记在、资源缺）
+/// 标记；修复动作 = 重新连接（重解包技能），与预置重装/上传重导入同构。
+/// 记录不存在（从未连接成功过）时 mark_degraded 返回 false，天然无操作。
+pub fn bundle_store_on_disconnected(id: &str) {
+    if let Err(e) = crate::features::marketplace::store::BundleStore::new()
+        .mark_degraded(id, "已断开授权：配套技能已随断开移除，重新连接即可恢复")
+    {
+        log::warn!("[connectors] bundles.json 镜像写入失败（disconnect {id}）: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,25 +428,27 @@ mod tests {
         auth_domains: &["work.weixin.qq.com", "weixin.qq.com"],
     };
 
-    /// 命中白名单域、且在空白处截断(扫码 URL 常带 `&` 查询串,不能被切断)。
+    /// extract_url three-branch matrix: whitelisted domain hits truncate at
+    /// whitespace (QR-scan URLs often carry `&` query strings that must not be
+    /// cut), non-whitelisted domains do not count as this connector's URL,
+    /// and no URL yields None.
     #[test]
-    fn extract_url_picks_auth_domain_url() {
-        assert_eq!(
-            TEST_CTX.extract_url("请打开 https://work.weixin.qq.com/x?a=1&b=2 扫码"),
-            Some("https://work.weixin.qq.com/x?a=1&b=2".to_string())
-        );
-    }
-
-    /// 非白名单域不算本连接器的 URL。
-    #[test]
-    fn extract_url_rejects_non_auth_domain() {
-        assert_eq!(TEST_CTX.extract_url("https://example.com/foo"), None);
-    }
-
-    /// 没有 URL 时返回 None。
-    #[test]
-    fn extract_url_none_without_url() {
-        assert_eq!(TEST_CTX.extract_url("纯文本,没有链接"), None);
+    fn extract_url_matrix() {
+        let cases = [
+            (
+                "请打开 https://work.weixin.qq.com/x?a=1&b=2 扫码",
+                Some("https://work.weixin.qq.com/x?a=1&b=2"),
+            ),
+            ("https://example.com/foo", None),
+            ("纯文本,没有链接", None),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                TEST_CTX.extract_url(input),
+                expected.map(str::to_string),
+                "{input:?}"
+            );
+        }
     }
 
     /// 本地生成二维码:任意 URL 都能出码(不依赖各 CLI 的 qrcode 子命令),
@@ -367,6 +465,38 @@ mod tests {
         let b64 = qr.trim_start_matches("data:image/svg+xml;base64,");
         let svg = String::from_utf8(b64_decode(b64)).unwrap();
         assert!(svg.contains("<svg"), "应含 <svg> 根节点");
+    }
+
+    /// CLI-written PNG → data URL; signature + IEND tail validated, non-PNG / truncated bytes rejected (caller falls back to make_qr).
+    #[test]
+    fn png_data_url_validates_signature() {
+        let png = b"\x89PNG\r\n\x1a\nrest-of-file\x00\x00\x00\x00IEND\xae\x42\x60\x82";
+        let data_url = png_data_url(png).expect("bytes with signature and IEND tail should pass");
+        assert!(data_url.starts_with("data:image/png;base64,"));
+        // Decode back to the original bytes to confirm losslessness.
+        let b64 = data_url.trim_start_matches("data:image/png;base64,");
+        assert_eq!(b64_decode(b64), png.to_vec());
+
+        assert!(
+            png_data_url(b"").is_none(),
+            "empty bytes should be rejected"
+        );
+        assert!(
+            png_data_url(b"\x89PNG").is_none(),
+            "shorter than the signature should be rejected"
+        );
+        assert!(
+            png_data_url(b"\x89PNG\r\n\x1a\n").is_none(),
+            "signature without IEND tail (half-written file) should be rejected"
+        );
+        assert!(
+            png_data_url(b"\x89PNG\r\n\x1a\nbody\x00\x00\x00\x00IEND\x00\x00\x00\x00").is_none(),
+            "mismatched IEND CRC should be rejected"
+        );
+        assert!(
+            png_data_url(b"\x89JPEG\r\n\x1a\nrest").is_none(),
+            "wrong signature should be rejected"
+        );
     }
 
     // 测试辅助:标准 base64 解码(生产 b64 的逆运算,仅测试用)。

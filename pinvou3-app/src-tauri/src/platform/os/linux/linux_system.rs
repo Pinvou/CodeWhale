@@ -1,15 +1,15 @@
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::linux_path;
 
+// Shared Unix helpers come from posix.rs, matching the Wave 3 linux_path.rs deduplication.
+pub use super::super::posix::{make_private_dir, process_alive};
+
 pub fn open_target(target: impl AsRef<OsStr>, label: &str) -> Result<(), String> {
-    Command::new("xdg-open")
-        .arg(target.as_ref())
-        .spawn()
-        .map_err(|e| format!("系统打开失败({label}): {e}"))?;
-    Ok(())
+    super::super::posix::spawn_detached_and_reap(Command::new("xdg-open").arg(target.as_ref()))
+        .map_err(|e| format!("系统打开失败({label}): {e}"))
 }
 
 pub fn reveal_target(target: &Path) -> Result<(), String> {
@@ -41,10 +41,6 @@ pub fn reveal_target(target: &Path) -> Result<(), String> {
     open_target(parent, "文件所在目录")
 }
 
-pub fn device_serial_number() -> Option<String> {
-    None
-}
-
 pub fn command_exists(command: &str) -> bool {
     Command::new("which")
         .arg(command)
@@ -52,6 +48,10 @@ pub fn command_exists(command: &str) -> bool {
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
+
+/// Windows-only (ORT_DYLIB_PATH / LibreOffice PATH prepend); Linux has no
+/// startup-window platform env writes, so this is a no-op.
+pub fn startup_platform_env() {}
 
 pub fn pandoc_tool_path() -> std::path::PathBuf {
     linux_path::pandoc_tool_path()
@@ -222,4 +222,10 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
         "/usr/bin/nvidia-smi",
         "/usr/local/bin/nvidia-smi",
     ]
+}
+
+/// Returns the bundled Node.js runtime reused from codex-bridge on Linux.
+/// Consumers fall back to PATH discovery when the runtime is absent.
+pub fn bundled_node() -> Option<PathBuf> {
+    crate::platform::paths::bundled_connector_node()
 }

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
@@ -124,7 +124,9 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         };
         let session_model_ref = session_model_ref.trim();
         if session_model_ref.is_empty() {
-            return Err(anyhow!("model_catalog_selection_required: refresh the catalog and create a session with an available platform model"));
+            return Err(anyhow!(
+                "model_catalog_selection_required: refresh the catalog and create a session with an available platform model"
+            ));
         }
 
         let account = self
@@ -198,14 +200,18 @@ mod tests {
         SavedModel {
             id: "ordinary".to_string(),
             name: "Ordinary".to_string(),
+            alias: None,
             preset: ModelPreset::OpenaiCompatible,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: "ordinary".to_string(),
             base_url: "https://example.invalid/v1".to_string(),
             provider_kind: None,
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
@@ -253,19 +259,21 @@ mod tests {
         assert!(
             runtime_model_limits(json!({"catalog_version": 1, "items": []}), "missing").is_err()
         );
-        assert!(runtime_model_limits(
-            json!({
-                "catalog_version": 1,
-                "items": [{
-                    "model_id": "bad",
-                    "model_capability_version_id": "capability-bad",
-                    "context_length": 4096,
-                    "maximum_output_tokens": 8192
-                }]
-            }),
-            "bad"
-        )
-        .is_err());
+        assert!(
+            runtime_model_limits(
+                json!({
+                    "catalog_version": 1,
+                    "items": [{
+                        "model_id": "bad",
+                        "model_capability_version_id": "capability-bad",
+                        "context_length": 4096,
+                        "maximum_output_tokens": 8192
+                    }]
+                }),
+                "bad"
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

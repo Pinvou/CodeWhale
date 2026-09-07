@@ -26,11 +26,13 @@ function assertResourceSourcesExist(config, label) {
 
 const common = readJson("tauri.conf.json");
 const linux = readJson("config/platforms/linux/tauri.conf.json");
+const linuxX64 = readJson("config/platforms/linux/x86_64/tauri.conf.json");
+const linuxArm64 = readJson("config/platforms/linux/aarch64/tauri.conf.json");
 const macos = readJson("config/platforms/macos/tauri.conf.json");
 const windows = readJson("config/platforms/windows/tauri.conf.json");
 const windowsSigning = readJson("config/platforms/windows/signing.wosign.conf.json");
 
-assert.ok(resourceSources(common).length > 0, "common Tauri config must declare shared resources");
+assert.equal(resourceSources(common).length, 0, "common bundle assets are embedded by the Rust runtime");
 assert.match(common.build.beforeBuildCommand, /scripts\/tauri\/require-wrapper\.js build/);
 assert.match(common.build.beforeBundleCommand, /scripts\/tauri\/require-wrapper\.js bundle/);
 assert.ok(
@@ -41,6 +43,12 @@ assert.ok(
   resourceSources(linux).every((source) => source.startsWith("resources/platforms/linux/")),
   "Linux overlay may only package resources/platforms/linux",
 );
+assert.deepEqual(resourceSources(linuxX64), [
+  "target/linux-asr-runtime/x86_64/sense-voice-main",
+]);
+assert.deepEqual(resourceSources(linuxArm64), [
+  "target/linux-asr-runtime/aarch64/sense-voice-main",
+]);
 assert.ok(
   resourceSources(macos).every((source) => source.startsWith("resources/platforms/macos/")),
   "macOS overlay may only package resources/platforms/macos",
@@ -65,7 +73,7 @@ assert.deepEqual(
   "generated Linux startup config must inherit the complete base main window",
 );
 
-for (const legacyPath of ["resources/bundle", "resources/skill-marketplace", "resources/web-template", "resources/asr"]) {
+for (const legacyPath of ["resources/bundle", "resources/skill-marketplace", "resources/asr"]) {
   assert.equal(fs.existsSync(path.join(tauriRoot, legacyPath)), false, `legacy resource root must be removed: ${legacyPath}`);
 }
 assert.equal(
@@ -170,18 +178,21 @@ assert.ok(
   submoduleUpdates.every((command) => command.endsWith("-- CodeWhale")),
   "Linux CI may only initialize CodeWhale, never the private Windows runtime",
 );
-assert.match(workflow, /npm run test:browser-smoke/);
+assert.match(workflow, /Merge Queue diff-selected browser smoke/);
+assert.match(workflow, /github\.event\.merge_group\.base_sha/);
+assert.match(workflow, /github\.event\.merge_group\.head_sha/);
+assert.doesNotMatch(workflow, /npm run test:browser-smoke/);
 assert.doesNotMatch(workflow, /frontend-test:[\s\S]{0,300}\n\s*if:\s*\$\{\{\s*false\s*\}\}/);
 for (const stalePath of [
   "pinvou3-app/src-tauri/src/app/bridge",
-  "pinvou3-app/src-tauri/src/app/harness.rs",
+  "pinvou3-app/src-tauri/src/features/assistant/harness.rs",
   "resources/common/bundle/connectors/linux-arm64",
 ]) {
   assert.equal(workflow.includes(stalePath), false, `PR workflow still references migrated path: ${stalePath}`);
   assert.equal(connectorWorkflow.includes(stalePath), false, `connector workflow still references migrated path: ${stalePath}`);
 }
-assert.match(workflow, /src\/features\/assistant\/platform\/\*\*/);
-assert.match(workflow, /src\/features\/assistant\/harness\.rs/);
+// l1 filter 已随 strict_mode 测试并入 lib 单测删除;这些 Rust 路径的 CI 触发
+// 由 rust_code filter 的 **/*.rs 通配覆盖,不再逐路径断言。
 assert.match(workflow, /src\/platform\/prefs\.rs/);
 assert.match(connectorWorkflow, /resources\/platforms\/\*\*\/bundle\/connectors\/\*\*/);
 for (const resources of ["linux/aarch64", "linux/x86_64", "macos/aarch64", "macos/x86_64", "windows/x86_64"]) {

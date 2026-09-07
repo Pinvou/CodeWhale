@@ -1,4 +1,4 @@
-import { authenticate, requireMembership } from "./auth.js";
+import { authenticate, CONFIRMED_TRANSFER_CAPABILITY_DAYS, requireMembership } from "./auth.js";
 import {
   decryptJoinCode,
   encryptJoinCode,
@@ -10,7 +10,13 @@ import {
 } from "./crypto.js";
 import { inTransaction } from "./db.js";
 import { AppError } from "./errors.js";
-import { emailHint, membershipFromRow, principalFromRow, teamFromRow } from "./serializers.js";
+import {
+  membershipFromRow,
+  principalFromRow,
+  teamFromRow,
+  teamMemberFromRow,
+} from "./serializers.js";
+import { requireJoinCodeEncryptionKey } from "./team-lifecycle-service.js";
 import { email, exactKeys, integer, text, uuid } from "./validation.js";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -41,28 +47,53 @@ async function insertPrincipal(client, principalId, accountEmail, displayName) {
   }
 }
 
-function requireJoinCodeEncryptionKey(value) {
-  let decoded;
-  try {
-    decoded = Buffer.from(String(value || ""), "base64url");
-  } catch {
-    decoded = null;
-  }
-  if (decoded?.length !== 32) {
-    throw new AppError(503, "join_code_storage_unavailable", "Team join code storage is not configured.");
-  }
-  return value;
-}
-
 async function lockTeam(client, teamId, mode = "share") {
   const lockClause = mode === "update" ? "FOR UPDATE" : "FOR SHARE";
   const result = await client.query(
-    `SELECT id FROM teams WHERE id = $1 ${lockClause}`,
+    `SELECT id FROM teams WHERE id = $1 AND dissolved_at IS NULL ${lockClause}`,
     [teamId],
   );
   if (!result.rowCount) {
     throw new AppError(404, "resource_not_found", "The team was not found.");
   }
+}
+
+async function lockInviteAfterTeam(client, tokenHash) {
+  const lookup = await client.query(
+    "SELECT team_id FROM invites WHERE token_hash = $1",
+    [tokenHash],
+  );
+  if (!lookup.rowCount) return null;
+
+  const teamResult = await client.query(
+    `SELECT id, name, created_by, created_at, dissolved_at,
+            (join_password_hash IS NOT NULL) AS join_password_configured
+       FROM teams
+      WHERE id = $1
+      FOR UPDATE`,
+    [lookup.rows[0].team_id],
+  );
+  if (!teamResult.rowCount) return null;
+
+  const inviteResult = await client.query(
+    "SELECT * FROM invites WHERE token_hash = $1 AND team_id = $2 FOR UPDATE",
+    [tokenHash, teamResult.rows[0].id],
+  );
+  if (!inviteResult.rowCount) return null;
+  return { invite: inviteResult.rows[0], team: teamResult.rows[0] };
+}
+
+function requireUsableInvite(lockedInvite) {
+  if (!lockedInvite || lockedInvite.team.dissolved_at || lockedInvite.invite.revoked_at) {
+    throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
+  }
+  if (lockedInvite.invite.claimed_at) {
+    throw new AppError(409, "invite_already_claimed", "The invitation was already claimed.");
+  }
+  if (new Date(lockedInvite.invite.expires_at).getTime() <= Date.now()) {
+    throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
+  }
+  return lockedInvite;
 }
 
 export async function createTeamWithOwnerInvite(pool, { name, expiresInHours = 24 }) {
@@ -116,7 +147,10 @@ export async function registerAccount(pool, body) {
       [newId(), principal.id, deviceName, sha256(deviceToken)],
     );
     const memberships = await client.query(
-      "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
+      `SELECT m.team_id
+         FROM memberships m
+         JOIN teams t ON t.id = m.team_id
+        WHERE m.principal_id = $1 AND m.removed_at IS NULL AND t.dissolved_at IS NULL`,
       [principal.id],
     );
     return {
@@ -169,26 +203,10 @@ export async function claimEnrollment(pool, body) {
   const deviceToken = newSecret();
 
   return inTransaction(pool, async (client) => {
-    const inviteResult = await client.query(
-      `SELECT i.*, t.name AS team_name, t.created_by AS team_created_by,
-              t.created_at AS team_created_at,
-              (t.join_password_hash IS NOT NULL) AS join_password_configured
-         FROM invites i
-         JOIN teams t ON t.id = i.team_id
-        WHERE i.token_hash = $1
-        FOR UPDATE OF i, t`,
-      [sha256(inviteCode)],
+    const lockedInvite = requireUsableInvite(
+      await lockInviteAfterTeam(client, sha256(inviteCode)),
     );
-    if (inviteResult.rowCount === 0 || inviteResult.rows[0].revoked_at) {
-      throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
-    }
-    const invite = inviteResult.rows[0];
-    if (invite.claimed_at) {
-      throw new AppError(409, "invite_already_claimed", "The invitation was already claimed.");
-    }
-    if (new Date(invite.expires_at).getTime() <= Date.now()) {
-      throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
-    }
+    const { invite, team } = lockedInvite;
 
     const principalId = newId();
     const deviceId = newId();
@@ -236,10 +254,10 @@ export async function claimEnrollment(pool, body) {
       device: deviceResult.rows[0],
       team: {
         id: invite.team_id,
-        name: invite.team_name,
-        created_by: invite.role === "owner" ? principalId : invite.team_created_by,
-        created_at: invite.team_created_at,
-        join_password_configured: Boolean(invite.join_password_configured),
+        name: team.name,
+        created_by: invite.role === "owner" ? principalId : team.created_by,
+        created_at: team.created_at,
+        join_password_configured: Boolean(team.join_password_configured),
       },
       membership: membershipFromRow(membershipResult.rows[0]),
     };
@@ -276,7 +294,7 @@ export async function joinEnrollment(pool, body) {
     const teamResult = await client.query(
       `SELECT id, name, created_by, created_at
          FROM teams
-        WHERE join_password_hash = $1 AND created_by IS NOT NULL
+        WHERE join_password_hash = $1 AND created_by IS NOT NULL AND dissolved_at IS NULL
         FOR SHARE`,
       [sha256(joinPassword)],
     );
@@ -320,10 +338,11 @@ export async function joinEnrollment(pool, body) {
 export async function getMe(pool, token) {
   const auth = await authenticate(pool, token);
   const memberships = await pool.query(
-    `SELECT team_id, principal_id, role, joined_at
-       FROM memberships
-      WHERE principal_id = $1 AND removed_at IS NULL
-      ORDER BY joined_at`,
+    `SELECT m.team_id, m.principal_id, m.role, m.joined_at
+       FROM memberships m
+       JOIN teams t ON t.id = m.team_id
+      WHERE m.principal_id = $1 AND m.removed_at IS NULL AND t.dissolved_at IS NULL
+      ORDER BY m.joined_at`,
     [auth.principalId],
   );
   return {
@@ -350,15 +369,27 @@ export async function updateProfile(pool, token, body) {
     }
     try {
       const updated = await client.query(
-        `UPDATE principals
-            SET display_name = $2,
-                email = coalesce(email, $3)
-          WHERE id = $1
-          RETURNING id, email, display_name, created_at`,
+        `WITH updated AS (
+           UPDATE principals
+              SET display_name = $2,
+                  email = coalesce(email, $3)
+            WHERE id = $1
+            RETURNING id, email, display_name, created_at
+         )
+         SELECT updated.*,
+                avatar.content_type AS avatar_content_type,
+                avatar.byte_size AS avatar_byte_size,
+                avatar.sha256 AS avatar_sha256,
+                avatar.updated_at AS avatar_updated_at
+           FROM updated
+           LEFT JOIN principal_avatars avatar ON avatar.principal_id = updated.id`,
         [auth.principalId, displayName, requestedEmail],
       );
       const memberships = await client.query(
-        "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
+        `SELECT m.team_id
+           FROM memberships m
+           JOIN teams t ON t.id = m.team_id
+          WHERE m.principal_id = $1 AND m.removed_at IS NULL AND t.dissolved_at IS NULL`,
         [auth.principalId],
       );
       return {
@@ -386,7 +417,7 @@ export async function listTeams(pool, token) {
               WHERE w.team_id = t.id AND w.phase NOT IN ('closed', 'cancelled')) AS open_work_count
        FROM memberships m
        JOIN teams t ON t.id = m.team_id
-      WHERE m.principal_id = $1 AND m.removed_at IS NULL
+      WHERE m.principal_id = $1 AND m.removed_at IS NULL AND t.dissolved_at IS NULL
       ORDER BY m.joined_at DESC, t.id`,
     [auth.principalId],
   );
@@ -420,26 +451,22 @@ export async function joinTeam(pool, token, body) {
   );
   const auth = await authenticate(pool, token);
   return inTransaction(pool, async client => {
-    const inviteResult = await client.query(
-      `SELECT i.*, t.name, t.created_by AS team_created_by, t.created_at AS team_created_at,
-              (t.join_password_hash IS NOT NULL) AS join_password_configured
-         FROM invites i JOIN teams t ON t.id = i.team_id
-        WHERE i.token_hash = $1 AND i.revoked_at IS NULL AND i.claimed_at IS NULL
-          AND i.expires_at > now() AND t.created_by IS NOT NULL
-        FOR UPDATE OF i`,
-      [sha256(joinCode)],
-    );
+    const tokenHash = sha256(joinCode);
+    const lockedInvite = await lockInviteAfterTeam(client, tokenHash);
     let team;
     let invite = null;
-    if (inviteResult.rowCount) {
-      invite = inviteResult.rows[0];
-      team = { id: invite.team_id, name: invite.name, created_by: invite.team_created_by, created_at: invite.team_created_at, join_password_configured: invite.join_password_configured };
-      await lockTeam(client, team.id);
+    if (lockedInvite) {
+      if (lockedInvite.team.created_by === null) {
+        throw new AppError(401, "join_password_invalid", "The team join code is invalid.");
+      }
+      ({ invite, team } = requireUsableInvite(lockedInvite));
     } else {
       const teamResult = await client.query(
         `SELECT id, name, created_by, created_at, true AS join_password_configured
-           FROM teams WHERE join_password_hash = $1 AND created_by IS NOT NULL FOR SHARE`,
-        [sha256(joinCode)],
+           FROM teams
+          WHERE join_password_hash = $1 AND created_by IS NOT NULL AND dissolved_at IS NULL
+          FOR SHARE`,
+        [tokenHash],
       );
       if (!teamResult.rowCount) throw new AppError(401, "join_password_invalid", "The team join code is invalid.");
       team = teamResult.rows[0];
@@ -482,16 +509,27 @@ export async function listTeamMembers(pool, token, rawTeamId) {
   const auth = await authenticate(pool, token);
   await requireMembership(pool, teamId, auth.principalId);
   const result = await pool.query(
-    `SELECT p.id, p.email, p.display_name, p.created_at, m.role, max(d.last_seen_at) AS last_seen_at
+    `SELECT p.id, p.email, p.display_name, p.created_at, m.role,
+            max(d.last_seen_at) AS last_seen_at,
+            coalesce(bool_or(
+              d.relay_protocol_version = '0.2'
+              AND d.relay_protocol_seen_at >= now() - ($2 * interval '1 day')
+            ), false) AS confirmed_transfers_supported,
+            avatar.content_type AS avatar_content_type,
+            avatar.byte_size AS avatar_byte_size,
+            avatar.sha256 AS avatar_sha256,
+            avatar.updated_at AS avatar_updated_at
        FROM memberships m
        JOIN principals p ON p.id = m.principal_id
        LEFT JOIN devices d ON d.principal_id = p.id AND d.revoked_at IS NULL
+       LEFT JOIN principal_avatars avatar ON avatar.principal_id = p.id
       WHERE m.team_id = $1 AND m.removed_at IS NULL AND p.disabled_at IS NULL
-      GROUP BY p.id, p.email, p.display_name, p.created_at, m.role
+      GROUP BY p.id, p.email, p.display_name, p.created_at, m.role,
+               avatar.content_type, avatar.byte_size, avatar.sha256, avatar.updated_at
       ORDER BY p.created_at, p.id`,
-    [teamId],
+    [teamId, CONFIRMED_TRANSFER_CAPABILITY_DAYS],
   );
-  return { members: result.rows.map(row => ({ ...row, email: undefined, email_hint: emailHint(row.email) })) };
+  return { members: result.rows.map(teamMemberFromRow) };
 }
 
 export async function createTeamInvite(pool, token, rawTeamId, body) {
@@ -655,82 +693,11 @@ export async function disableTeamJoinPassword(pool, token, rawTeamId) {
   });
 }
 
-export async function removeTeamMember(pool, token, rawTeamId, rawPrincipalId, encryptionKey) {
-  const teamId = uuid(rawTeamId, "team_id");
-  const principalId = uuid(rawPrincipalId, "principal_id");
-  const auth = await authenticate(pool, token);
-
-  await inTransaction(pool, async (client) => {
-    // Serialize membership removal with thread assignment/handoff. Those paths
-    // take FOR SHARE on the same team row before accepting a required actor.
-    const teamResult = await client.query(
-      `SELECT join_password_hash FROM teams WHERE id = $1 FOR UPDATE`,
-      [teamId],
-    );
-    if (!teamResult.rowCount) {
-      throw new AppError(404, "resource_not_found", "The team was not found.");
-    }
-    await requireMembership(client, teamId, auth.principalId, "owner");
-    const targetResult = await client.query(
-      `SELECT role FROM memberships
-        WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL
-        FOR UPDATE`,
-      [teamId, principalId],
-    );
-    if (targetResult.rowCount === 0) {
-      throw new AppError(404, "resource_not_found", "The team member was not found.");
-    }
-    if (targetResult.rows[0].role === "owner") {
-      const owners = await client.query(
-        `SELECT count(*)::integer AS count FROM memberships
-          WHERE team_id = $1 AND role = 'owner' AND removed_at IS NULL`,
-        [teamId],
-      );
-      if (owners.rows[0].count <= 1) {
-        throw new AppError(409, "last_team_owner", "The last team owner cannot be removed.");
-      }
-    }
-    const openWork = await client.query(
-      `SELECT id FROM work_threads
-        WHERE team_id = $1 AND phase NOT IN ('closed', 'cancelled')
-          AND $2 IN (initiator_id, owner_id, current_actor_id, return_to_id, final_recipient_id)
-        LIMIT 1`,
-      [teamId, principalId],
-    );
-    if (openWork.rowCount !== 0) {
-      throw new AppError(
-        409,
-        "member_has_open_work",
-        "The member still has a required role in an open work thread.",
-        { thread_id: openWork.rows[0].id },
-      );
-    }
-    await client.query(
-      `UPDATE memberships SET removed_at = clock_timestamp()
-        WHERE team_id = $1 AND principal_id = $2`,
-      [teamId, principalId],
-    );
-    if (teamResult.rows[0].join_password_hash) {
-      const key = requireJoinCodeEncryptionKey(encryptionKey);
-      const replacement = newJoinCode();
-      await client.query(
-        `UPDATE teams
-            SET join_password_hash = $2,
-                join_password_updated_at = now(),
-                join_password_updated_by = $3,
-                join_code_ciphertext = $4
-          WHERE id = $1`,
-        [teamId, sha256(normalizeJoinCode(replacement)), auth.principalId, encryptJoinCode(replacement, key, teamId)],
-      );
-    }
-  });
-}
-
 export async function getTeam(pool, teamId) {
   const result = await pool.query(
     `SELECT id, name, created_by, created_at,
             (join_password_hash IS NOT NULL) AS join_password_configured
-       FROM teams WHERE id = $1`,
+       FROM teams WHERE id = $1 AND dissolved_at IS NULL`,
     [teamId],
   );
   if (result.rowCount === 0) {

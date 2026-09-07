@@ -1,47 +1,224 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Archive, Briefcase, Check, ChevronDown, Code, Cpu, Database, Edit2, FileText, Globe, Lightbulb, MessageSquare, MoreHorizontal, Paperclip, Plus, RefreshCw, Search, Sparkles, Store, Trash2, User, Users, Video, Wrench, X, Zap } from '../../components/icons.jsx';
+import { Archive, Briefcase, Check, ChevronDown, ChevronLeft, ChevronRight, Code, Cpu, Database, Edit2, FileText, Globe, Lightbulb, MessageSquare, MoreHorizontal, Paperclip, Plus, RefreshCw, Search, Sparkles, Store, Trash2, User, Users, Video, Wrench, X, Zap } from '../../components/icons.jsx';
 import { ArchivedDeleteConfirmDialog } from '../../components/layout/NavigationComponents.jsx';
 import { ComposerPopover } from '../../components/ComposerPopover.jsx';
+import { Toggle } from '../../components/Toggle.jsx';
 import { VllmSetupProgress } from '../../components/VllmSetupProgress.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
-import { bridge, isLocalModel } from '../../hooks/useBridge.js';
+import { bridge, isLocalModel, useBridgeState } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
 import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
 import { can, isWeb } from '../../shared/platform.js';
-import { buildComposerToolMenuState } from './composer-tool-menu-logic.js';
-import { notifyComposerToolsChanged } from '../tools/tool-events.js';
 import qwenIcon from '../../brand-icons/qwen.svg';
 import {
   MODEL_PRESET_DEFS, PROVIDER_KIND_CODING_PLAN, PROVIDER_KIND_OFFICIAL_API, PROVIDER_KIND_CUSTOM,
   MODEL_CATALOG_SECTIONS, MODEL_CATALOG, CLOUD_MODEL_PROVIDERS,
   BRAND_ICON_BY_PRESET, BRAND_ICON_BY_VENDOR,
   presetOptionsI18n, presetProviderLabel,
-  normalizedProviderBaseUrl, findCloudProviderForModel, providerLabelForModel, isCodingPlanModel,
-  groupModelsForSelector, selectorMainLabel, selectorSubLabel,
+  normalizedProviderBaseUrl, findCloudProviderForModel, providerLabelForModel, isCodingPlanModel, catalogItemMatchesModel,
+  catalogImageCapableForModel,
+  groupModelsForSelector,
+  selectorMainLabel,
+  reasoningEffortTiersForModel, reasoningEffortForModelSwitch, normalizeStoredReasoningEffort,
+  alwaysThinkingSpecForModel, localReasoningTiers, reasoningEffortDisplayForTiers, baseUrlUsesLocalOrPrivate,
 } from './model-catalog.js';
-import { invokeTauri } from '../../platform/tauri/client.js';
+import { CommunityPanel } from './CommunityPanel.jsx';
 import {
-  artifactPreviewExternalUrlFromMessage,
-  buildArtifactPreviewDocument,
-} from '../artifacts/artifact-preview-navigation.js';
+  COMMUNITY_DISCUSSIONS_URL,
+  COMMUNITY_QQ_GROUP_NAME,
+  COMMUNITY_QQ_GROUP_NUMBER,
+  COMMUNITY_QQ_QR_IMAGE_SRC,
+} from './community-config.js';
 import { ProvidersSection } from './ProvidersSection.jsx';
 import {
   ACCOUNT_PLATFORM_SOURCE,
   LOCAL_CONFIG_SOURCE,
-  composerPlatformModels,
   platformModelSelectableForNewSession,
-  sameModelSelectionRef,
 } from '../account-platform/model-catalog-selection.js';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
 }
 
-const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, ref) => (
-      <section ref={ref} id={id} style={style} className="rounded-[24px] p-6 bg-[#F0F4F9] dark:bg-[#1E1F20]">
+// 目录视觉能力标注 → 表单「图片输入能力」档位:
+// true→enabled(支持图片),false→disabled(不支持图片),未命中/未标注→pinvou(自动处理)。
+function imageCapabilityForCatalogModel(model) {
+  const flag = catalogImageCapableForModel(model);
+  return flag === true ? 'enabled' : flag === false ? 'disabled' : 'pinvou';
+}
+
+/**
+ * Model record as passed down from the app shell (`bs.savedModels`) and read
+ * by the model selector / delete dialogs.
+ * @typedef {object} SettingsModelEntry
+ * @property {string} id - Stable model id.
+ * @property {string} [name] - Display name.
+ * @property {string} [model] - Wire model identifier.
+ * @property {string} [alias] - User-set alias.
+ * @property {string} [preset] - Provider preset key.
+ * @property {string} [base_url] - Provider endpoint base URL (vision probing).
+ * @property {boolean} [readonly] - Built-in models cannot be edited.
+ * @property {boolean} [system] - System models cannot be deleted.
+ */
+
+/**
+ * Memory list item from `bs.memory` (preferences / work context / focus /
+ * recent activity lists get their `kind` stamped in before rendering).
+ * @typedef {object} MemoryItem
+ * @property {string} id - Stable memory id.
+ * @property {string} kind - Memory list kind the item belongs to.
+ * @property {string} text - Memory body text.
+ * @property {string} [status] - Lifecycle status ('active' items are shown).
+ * @property {number} [confidence] - Confidence score; absent for auto memory.
+ * @property {string} [updated_at] - Last update ISO timestamp.
+ * @property {string} [created_at] - Creation ISO timestamp.
+ * @property {string} [last_seen_at] - Last seen ISO timestamp.
+ * @property {string} [last_used_at] - Last used ISO timestamp.
+ */
+
+/**
+ * Memory-card strings from `t.uiSettingsView`.
+ * @typedef {object} MemoryCardCopy
+ * @property {string} memoryTimeSaved - Copy when no timestamp exists.
+ * @property {string} memoryTimeToday - Copy for same-day updates.
+ * @property {(days: number) => string} memoryTimeDaysAgo - Copy N days back.
+ * @property {(month: number, day: number) => string} memoryTimeDate - Copy for older dates.
+ * @property {string} memorySource - Source line prefix.
+ * @property {string} memoryMoreActions - Overflow menu button title.
+ * @property {string} memoryArchive - Archive menu item label.
+ * @property {string} memoryConfidenceAuto - Confidence label: auto.
+ * @property {string} memoryConfidenceHigh - Confidence label: high.
+ * @property {string} memoryConfidenceMid - Confidence label: mid.
+ * @property {string} memoryConfidenceLow - Confidence label: low.
+ */
+
+/**
+ * Memory detail-dialog strings from `t.uiSettingsDetail`.
+ * @typedef {object} MemoryDetailCopy
+ * @property {{ current_focus: string, recent_activity: string, work_context: string, preference: string }} memoryTypes - Kind display names.
+ * @property {string} edit - Edit menu item label.
+ * @property {string} delete - Delete menu item label.
+ */
+
+// Stable default: avoid creating a fresh array literal on every render (react/no-unstable-default-props).
+/** @type {SettingsModelEntry[]} */
+const EMPTY_MODELS = [];
+const DEFAULT_ENABLED_SEARCH_PROVIDERS = ['bing'];
+
+// Shared style constants and Memory hub helpers: hoisted to module scope so the row component type
+// stays stable, avoiding per-render MemoryRow rebuilds that remount subtrees.
+const subText = 'text-[#444746] dark:text-[#C4C7C5]';
+const faintText = 'text-[#6B7280] dark:text-[#8F969E]';
+const border = 'border-[#DDE3EA] dark:border-[#333537]';
+const cardBg = 'bg-white border-[#DDE3EA] dark:bg-[#17191D] dark:border-white/[0.08]';
+const panelBg = 'bg-[#F8FAFD] text-[#1F1F1F] dark:bg-[#1F2023] dark:text-[#E8EAED]';
+const inputBg = 'bg-white border-[#DDE3EA] text-[#1F1F1F] placeholder:text-[#8A9099] dark:bg-[#131314] dark:border-[#3C4043] dark:text-[#E8EAED] dark:placeholder:text-[#777D86]';
+const ghostBtn = 'bg-[#E1E5EA] text-[#1F1F1F] hover:bg-[#D3D9E0] dark:bg-white/[0.07] dark:text-[#E3E3E3] dark:hover:bg-white/[0.11]';
+const dangerBtn = 'text-[#C5221F] hover:bg-[#FCE8E6] dark:text-[#F28B82] dark:hover:bg-[#3A2425]';
+const primaryBtn = 'bg-[#0B57D0] text-white hover:bg-[#1967D2] dark:bg-[#A8C7FA] dark:text-[#041E49] dark:hover:bg-[#C2D7FB]';
+const selectedTab = 'bg-[#E8F0FE] border-[#B8D1FF] text-[#0B57D0] dark:bg-[rgba(43,119,255,0.16)] dark:border-[rgba(70,145,255,0.35)] dark:text-[#D8E8FF]';
+/**
+ * @param {string} kind - Memory item kind.
+ * @param {MemoryDetailCopy} detailCopy - Localized settings detail copy.
+ */
+const memoryTypeLabel = (kind, detailCopy) => kind === 'current_focus' ? detailCopy.memoryTypes.current_focus
+  : kind === 'recent_activity' ? detailCopy.memoryTypes.recent_activity
+  : kind === 'work_context' ? detailCopy.memoryTypes.work_context
+  : detailCopy.memoryTypes.preference;
+/** @param {string} kind - Memory item kind. */
+const memoryTypeTone = kind => kind === 'work_context' ? 'text-[#8AB4F8] bg-[#1A73E8]/[0.13]'
+  : kind === 'current_focus' ? 'text-[#FDD663] bg-[#FDD663]/[0.12]'
+  : kind === 'recent_activity' ? 'text-[#81C995] bg-[#34A853]/[0.12]'
+  : kind === 'profile' ? 'text-[#C58AF9] bg-[#A142F4]/[0.12]'
+  : 'text-[#A8C7FA] bg-[#A8C7FA]/[0.12]';
+/**
+ * @param {MemoryItem} item - Memory item with timestamps.
+ * @param {MemoryCardCopy} copy - Localized memory card copy.
+ */
+const formatMemoryTime = (item, copy) => {
+  const raw = item.updated_at || item.created_at || item.last_seen_at || item.last_used_at;
+  if (!raw) return copy.memoryTimeSaved;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return copy.memoryTimeSaved;
+  const diff = Date.now() - date.getTime();
+  const day = 24 * 60 * 60 * 1000;
+  if (diff >= 0 && diff < day) return copy.memoryTimeToday;
+  if (diff >= day && diff < 7 * day) return copy.memoryTimeDaysAgo(Math.floor(diff / day));
+  return copy.memoryTimeDate(date.getMonth() + 1, date.getDate());
+};
+/**
+ * @param {MemoryItem} item - Memory item with a confidence score.
+ * @param {MemoryCardCopy} copy - Localized memory card copy.
+ */
+const confidenceText = (item, copy) => {
+  const n = Number(item.confidence);
+  if (!Number.isFinite(n)) return copy.memoryConfidenceAuto;
+  if (n >= 0.85) return copy.memoryConfidenceHigh;
+  if (n >= 0.65) return copy.memoryConfidenceMid;
+  return copy.memoryConfidenceLow;
+};
+/**
+ * @param {{
+ *   item: MemoryItem, copy: MemoryCardCopy, detailCopy: MemoryDetailCopy,
+ *   menuFor: string | null, setMenuFor: (next: string | null) => void,
+ *   startEdit: (item: MemoryItem) => void, archiveItem: (item: MemoryItem) => void,
+ *   deleteItem: (item: MemoryItem) => void,
+ * }} props - Memory item and the card callbacks it closes over.
+ */
+const MemoryRow = ({ item, copy, detailCopy, menuFor, setMenuFor, startEdit, archiveItem, deleteItem }) => {
+  // Select the imported icon component directly by kind (no factory function, keeping the component statically identifiable).
+  const Icon = item.kind === 'current_focus' ? Lightbulb
+    : item.kind === 'recent_activity' ? RefreshCw
+    : item.kind === 'work_context' ? Briefcase
+    : item.kind === 'profile' ? User
+    : Sparkles;
+  const rowKey = `${item.kind}:${item.id}`;
+  return (
+    <div className={`group relative rounded-2xl border px-4 py-4 ${cardBg} shadow-[0_12px_34px_rgba(0,0,0,0.16)]`}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 mb-3">
+            <span className={`w-7 h-7 rounded-full flex items-center justify-center ${memoryTypeTone(item.kind)}`}><Icon size={14} /></span>
+            <span className="text-[13px] font-medium">{memoryTypeLabel(item.kind, detailCopy)}</span>
+            <span className={`ml-auto text-[11px] ${faintText}`}>{formatMemoryTime(item, copy)}</span>
+          </div>
+          <div className="text-[14px] leading-relaxed break-words">{item.text}</div>
+          <div className={`mt-3 text-[12px] ${faintText}`}>
+            {copy.memorySource} · {confidenceText(item, copy)}
+          </div>
+        </div>
+        <button type="button"
+          title={copy.memoryMoreActions}
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenuFor(menuFor === rowKey ? null : rowKey);
+          }}
+          className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors text-[#5F6368] hover:bg-black/[0.06] dark:text-[#AEB4BC] dark:hover:bg-white/[0.08] dark:hover:text-[#F2F3F5]`}
+        >
+          <MoreHorizontal size={17} />
+        </button>
+      </div>
+      {menuFor === rowKey && (
+        // biome-ignore lint/a11y/useKeyWithClickEvents: click-bubbling stop layer; keyboard path handled by the real buttons inside the menu
+        // biome-ignore lint/a11y/noStaticElementInteractions: menu positioning container; menu items are real buttons
+        <div onClick={(e) => e.stopPropagation()} className={`absolute right-4 top-12 z-10 min-w-[118px] rounded-xl border ${border} bg-white text-[#1F1F1F] dark:bg-[#24262B] dark:text-[#E8EAED] shadow-2xl overflow-hidden`}>
+          <button type="button" onClick={() => startEdit(item)} className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-black/[0.04] dark:hover:bg-white/[0.07]`}><Edit2 size={14} />{detailCopy.edit}</button>
+          {(item.kind === 'current_focus' || item.kind === 'recent_activity') && (
+            <button type="button" onClick={() => archiveItem(item)} className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-black/[0.04] dark:hover:bg-white/[0.07]`}><Archive size={14} />{copy.memoryArchive}</button>
+          )}
+          <button type="button" onClick={() => deleteItem(item)} className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] ${dangerBtn}`}><Trash2 size={14} />{detailCopy.delete}</button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SCard = React.forwardRef( // eslint-disable-line react/display-name -- forwardRef display component; no display-name debugging need
+  ({ title, titleAdornment, children, id, style }, ref) => (
+      <section ref={ref} id={id} style={style} className={`rounded-[24px] p-6 bg-[#F0F4F9] dark:bg-[#1E1F20]`}>
         <h2 className="text-[18px] font-medium mb-6 flex items-center gap-2">
           <span>{title}</span>
           {titleAdornment}
@@ -108,24 +285,13 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const [open, setOpen] = useState(false);
       const [tab, setTab] = useState('long_term');
       const [query, setQuery] = useState('');
-      const [menuFor, setMenuFor] = useState(null);
+      const [menuFor, setMenuFor] = useState(/** @type {string | null} */ (null));
       const [draft, setDraft] = useState({
         call_name: identity.call_name || '',
         assistant_alias: identity.assistant_alias || '',
       });
       const [editing, setEditing] = useState(null);
       const [saving, setSaving] = useState(false);
-      const subText = 'text-[#444746] dark:text-[#C4C7C5]';
-      const faintText = 'text-[#6B7280] dark:text-[#8F969E]';
-      const border = 'border-[#DDE3EA] dark:border-[#333537]';
-      const itemBg = 'bg-white dark:bg-[#131314]';
-      const cardBg = 'bg-white border-[#DDE3EA] dark:bg-[#17191D] dark:border-white/[0.08]';
-      const panelBg = 'bg-[#F8FAFD] text-[#1F1F1F] dark:bg-[#1F2023] dark:text-[#E8EAED]';
-      const inputBg = 'bg-white border-[#DDE3EA] text-[#1F1F1F] placeholder:text-[#8A9099] dark:bg-[#131314] dark:border-[#3C4043] dark:text-[#E8EAED] dark:placeholder:text-[#777D86]';
-      const ghostBtn = 'bg-[#E1E5EA] text-[#1F1F1F] hover:bg-[#D3D9E0] dark:bg-white/[0.07] dark:text-[#E3E3E3] dark:hover:bg-white/[0.11]';
-      const dangerBtn = 'text-[#C5221F] hover:bg-[#FCE8E6] dark:text-[#F28B82] dark:hover:bg-[#3A2425]';
-      const primaryBtn = 'bg-[#0B57D0] text-white hover:bg-[#1967D2] dark:bg-[#A8C7FA] dark:text-[#041E49] dark:hover:bg-[#C2D7FB]';
-      const selectedTab = 'bg-[#E8F0FE] border-[#B8D1FF] text-[#0B57D0] dark:bg-[rgba(43,119,255,0.16)] dark:border-[rgba(70,145,255,0.35)] dark:text-[#D8E8FF]';
       const profileCount = (identity.call_name ? 1 : 0) + (identity.assistant_alias ? 1 : 0);
       const profileSummary = [
         identity.call_name ? copy.profileCallName(identity.call_name) : '',
@@ -147,20 +313,6 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         { key: 'recent', label: copy.memoryTabRecent, count: recentCount, icon: RefreshCw },
       ];
       const tabMeta = tabs.find(x => x.key === tab) || tabs[0];
-      const memoryTypeLabel = kind => kind === 'current_focus' ? detailCopy.memoryTypes.current_focus
-        : kind === 'recent_activity' ? detailCopy.memoryTypes.recent_activity
-        : kind === 'work_context' ? detailCopy.memoryTypes.work_context
-        : detailCopy.memoryTypes.preference;
-      const memoryTypeIcon = kind => kind === 'current_focus' ? Lightbulb
-        : kind === 'recent_activity' ? RefreshCw
-        : kind === 'work_context' ? Briefcase
-        : kind === 'profile' ? User
-        : Sparkles;
-      const memoryTypeTone = kind => kind === 'work_context' ? 'text-[#8AB4F8] bg-[#1A73E8]/[0.13]'
-        : kind === 'current_focus' ? 'text-[#FDD663] bg-[#FDD663]/[0.12]'
-        : kind === 'recent_activity' ? 'text-[#81C995] bg-[#34A853]/[0.12]'
-        : kind === 'profile' ? 'text-[#C58AF9] bg-[#A142F4]/[0.12]'
-        : 'text-[#A8C7FA] bg-[#A8C7FA]/[0.12]';
       const normalizedQuery = query.trim().toLowerCase();
       const searchMatch = text => !normalizedQuery || String(text || '').toLowerCase().includes(normalizedQuery);
 
@@ -225,66 +377,6 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       };
       const activeList = tab === 'recent' ? recentItems : longTermItems;
       const filteredList = activeList.filter(item => searchMatch(item.text || item.content));
-
-      const formatMemoryTime = item => {
-        const raw = item.updated_at || item.created_at || item.last_seen_at || item.last_used_at;
-        if (!raw) return copy.memoryTimeSaved;
-        const date = new Date(raw);
-        if (Number.isNaN(date.getTime())) return copy.memoryTimeSaved;
-        const diff = Date.now() - date.getTime();
-        const day = 24 * 60 * 60 * 1000;
-        if (diff >= 0 && diff < day) return copy.memoryTimeToday;
-        if (diff >= day && diff < 7 * day) return copy.memoryTimeDaysAgo(Math.floor(diff / day));
-        return copy.memoryTimeDate(date.getMonth() + 1, date.getDate());
-      };
-      const confidenceText = item => {
-        const n = Number(item.confidence);
-        if (!Number.isFinite(n)) return copy.memoryConfidenceAuto;
-        if (n >= 0.85) return copy.memoryConfidenceHigh;
-        if (n >= 0.65) return copy.memoryConfidenceMid;
-        return copy.memoryConfidenceLow;
-      };
-
-      const MemoryRow = ({ item }) => {
-        const Icon = memoryTypeIcon(item.kind);
-        const rowKey = `${item.kind}:${item.id}`;
-        return (
-          <div className={`group relative rounded-2xl border px-4 py-4 ${cardBg} shadow-[0_12px_34px_rgba(0,0,0,0.16)]`}>
-            <div className="flex items-start justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2 mb-3">
-                  <span className={`w-7 h-7 rounded-full flex items-center justify-center ${memoryTypeTone(item.kind)}`}><Icon size={14} /></span>
-                  <span className="text-[13px] font-medium">{memoryTypeLabel(item.kind)}</span>
-                  <span className={`ml-auto text-[11px] ${faintText}`}>{formatMemoryTime(item)}</span>
-                </div>
-                <div className="text-[14px] leading-relaxed break-words">{item.text}</div>
-                <div className={`mt-3 text-[12px] ${faintText}`}>
-                  {copy.memorySource} · {confidenceText(item)}
-                </div>
-              </div>
-              <button
-                title={copy.memoryMoreActions}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setMenuFor(menuFor === rowKey ? null : rowKey);
-                }}
-                className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors text-[#5F6368] hover:bg-black/[0.06] dark:text-[#AEB4BC] dark:hover:bg-white/[0.08] dark:hover:text-[#F2F3F5]`}
-              >
-                <MoreHorizontal size={17} />
-              </button>
-            </div>
-            {menuFor === rowKey && (
-              <div onClick={(e) => e.stopPropagation()} className={`absolute right-4 top-12 z-10 min-w-[118px] rounded-xl border ${border} bg-white text-[#1F1F1F] dark:bg-[#24262B] dark:text-[#E8EAED] shadow-2xl overflow-hidden`}>
-                <button onClick={() => startEdit(item)} className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-black/[0.04] dark:hover:bg-white/[0.07]`}><Edit2 size={14} />{detailCopy.edit}</button>
-                {(item.kind === 'current_focus' || item.kind === 'recent_activity') && (
-                  <button onClick={() => archiveItem(item)} className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-black/[0.04] dark:hover:bg-white/[0.07]`}><Archive size={14} />{copy.memoryArchive}</button>
-                )}
-                <button onClick={() => deleteItem(item)} className={`w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] ${dangerBtn}`}><Trash2 size={14} />{detailCopy.delete}</button>
-              </div>
-            )}
-          </div>
-        );
-      };
 
       return (
         <>
@@ -379,7 +471,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                         {filteredList.length === 0 ? (
                           <div className={`text-[13px] ${subText}`}>{query.trim() ? copy.memoryNoMatchLongTerm : copy.memoryEmptyLongTerm}</div>
                         ) : (
-                          <div className="space-y-3">{filteredList.map(item => <MemoryRow key={`${item.kind}:${item.id}`} item={item} />)}</div>
+                          <div className="space-y-3">{filteredList.map(item => <MemoryRow key={`${item.kind}:${item.id}`} item={item} copy={copy} detailCopy={detailCopy} menuFor={menuFor} setMenuFor={setMenuFor} startEdit={startEdit} archiveItem={archiveItem} deleteItem={deleteItem} />)}</div>
                         )}
                         <div className={`rounded-2xl border px-4 py-3 bg-white/70 border-[#DDE3EA] dark:bg-white/[0.03] dark:border-white/[0.06]`}>
                           <div className={`text-[12px] leading-relaxed ${faintText}`}>{copy.memoryLongTermHint}</div>
@@ -389,7 +481,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                       <div className={`text-[13px] ${subText}`}>{query.trim() ? copy.memoryNoMatchRecent : copy.memoryEmptyRecent}</div>
                     ) : (
                       <div className="space-y-3">
-                        {filteredList.map(item => <MemoryRow key={`${item.kind}:${item.id}`} item={item} />)}
+                        {filteredList.map(item => <MemoryRow key={`${item.kind}:${item.id}`} item={item} copy={copy} detailCopy={detailCopy} menuFor={menuFor} setMenuFor={setMenuFor} startEdit={startEdit} archiveItem={archiveItem} deleteItem={deleteItem} />)}
                         <div className={`rounded-2xl border px-4 py-3 bg-white/70 border-[#DDE3EA] dark:bg-white/[0.03] dark:border-white/[0.06]`}>
                           <div className={`text-[12px] leading-relaxed ${faintText}`}>{copy.memoryRecentHint}</div>
                         </div>
@@ -407,7 +499,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               <div className={`relative w-full max-w-[560px] rounded-[18px] border ${border} ${panelBg} p-5 shadow-2xl`}>
                 <div className="flex items-center justify-between gap-3 mb-4">
                   <div>
-                    <div className="text-[16px] font-semibold">{detailCopy.editTitle(memoryTypeLabel(editing.kind))}</div>
+                    <div className="text-[16px] font-semibold">{detailCopy.editTitle(memoryTypeLabel(editing.kind, detailCopy))}</div>
                     <div className={`text-[12px] mt-1 ${subText}`}>{copy.memoryEditDesc}</div>
                   </div>
                   <button onClick={() => setEditing(null)} className={`w-8 h-8 rounded-full flex items-center justify-center ${ghostBtn}`}><X size={15} /></button>
@@ -472,230 +564,13 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       );
     };
 
-    // 输入框底栏:模型选择器(iOS 化;darkMode:'class' 故用 dark: 变体)。
-    // 可选“显式会话态驱动”props（代码模块原生车道用）：sessionId/sessionModelId/
-    // busy/onSwitchModel 传入时绕开 bridge 聊天 active 绑定；不传走原 bs/bridge 路径。
-    const ComposerModelSelector = ({
-      t,
-      bs,
-      onGotoSettings,
-      compact,
-      sessionId: sessionIdProp,
-      sessionModelId: sessionModelIdProp,
-      busy: busyProp,
-      onSwitchModel,
-      multiAgentEnabled: multiAgentEnabledProp,
-      multiAgentAvailable: multiAgentAvailableProp,
-      onToggleMultiAgent,
-      accountPlatformClient,
-    }) => {
-      const [open, setOpen] = useState(false);
-      const [platformModels, setPlatformModels] = useState([]);
-      const [platformState, setPlatformState] = useState('idle');
-      const [modelSwitchError, setModelSwitchError] = useState(false);
-      const triggerRef = useRef(null);
-      const canManageModels = can('modelManagement');
-      const canSwitchModels = can('sessionModelSwitch');
-      // 多智能体模式 = 模型列表下方的会话级开关（ADR-0006）。状态权威在
-      // 后端 mode_state，这里只读 bs 镜像；翻转后 bridge 回写权威状态。
-      const canMultiAgent = can('multiAgent') && multiAgentAvailableProp !== false;
-      const multiAgentOn = multiAgentEnabledProp !== undefined
-        ? Boolean(multiAgentEnabledProp)
-        : !!(bs && bs.modeState && bs.modeState.multiAgent);
-      const multiAgentCopy = (t && t.uiMultiAgent) || {};
-      // 防重入（复核点名）：后端事务完成前再点会带着旧状态重复提交，
-      // 其中一次名册推送失败的回滚还会覆盖另一次已开启的状态。切换期间
-      // 禁用按钮；bridge 侧另有 in-flight 丢弃兜底（双入口防线）。
-      const [multiAgentBusy, setMultiAgentBusy] = useState(false);
-      // 揭幕动效只在用户点击开启这一刻播放：会话切换/重启同步出现的
-      // 开启态、弹层关了再开，都不重播揭幕（真机点名），但光晕持续漂移
-      // （真机点名"动画不能停"，挂在常态类上）。触发源是点击处理器而
-      // 不是状态上升沿；点击关闭或弹层关闭时清掉标记，避免误续播。
-      const [multiAgentRevealing, setMultiAgentRevealing] = useState(false);
-      useEffect(() => {
-        if (!open) setMultiAgentRevealing(false);
-      }, [open]);
-      useEffect(() => {
-        if (!open || !accountPlatformClient) return undefined;
-        const controller = new window.AbortController();
-        setPlatformState('loading');
-        accountPlatformClient.session(controller.signal).then(session => {
-          if (!session?.authenticated) {
-            setPlatformModels([]);
-            setPlatformState('auth_required');
-            return null;
-          }
-          return accountPlatformClient.modelCatalog(controller.signal);
-        }).then(catalog => {
-          if (!catalog || controller.signal.aborted) return;
-          setPlatformModels(composerPlatformModels(catalog.items));
-          setPlatformState('ready');
-        }).catch(() => {
-          if (!controller.signal.aborted) setPlatformState('error');
-        });
-        return () => controller.abort();
-      }, [open, accountPlatformClient, bs && bs.activeSessionId]);
-      async function toggleMultiAgent() {
-        if (multiAgentBusy || busy) return;
-        if (!onToggleMultiAgent
-          && !(bridge.available && bridge.interaction && bridge.interaction.setMultiAgentMode)) return;
-        setMultiAgentRevealing(!multiAgentOn);
-        setMultiAgentBusy(true);
-        try {
-          if (onToggleMultiAgent) await onToggleMultiAgent(!multiAgentOn);
-          else await bridge.interaction.setMultiAgentMode(!multiAgentOn);
-        } finally {
-          setMultiAgentBusy(false);
-        }
-      }
-      const savedModels = selectableModels((bs && bs.savedModels) || [])
-        .filter(model => !isBuiltInAccountPlatformModel(model));
-      const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
-      const activeModelId = bs && bs.activeModelId;
-      const currentSessionModelId = sessionModelIdProp !== undefined ? sessionModelIdProp : (bs && bs.currentSessionModelId);
-      const busy = busyProp !== undefined ? busyProp : (bs ? bs.busy : false);
-      const legacyRef = { source: LOCAL_CONFIG_SOURCE, saved_model_id: currentSessionModelId || activeModelId };
-      const effectiveRef = (activeSessionId ? bs?.currentSessionModelRef : bs?.pendingDraftModelRef)
-        || bs?.defaultModelRef
-        || legacyRef;
-      const effectiveLocalId = effectiveRef?.source === LOCAL_CONFIG_SOURCE ? effectiveRef.saved_model_id : null;
-      const effectivePlatformId = effectiveRef?.source === ACCOUNT_PLATFORM_SOURCE ? effectiveRef.model_id : null;
-      const current = savedModels.find(m => m.id === effectiveLocalId);
-      const currentPlatform = platformModels.find(item => item.model_id === effectivePlatformId);
-      const currentLabel = currentPlatform?.display_name || effectivePlatformId || (current ? selectorMainLabel(current, t) : t.modelNonePick);
-      async function pick(modelRef) {
-        setOpen(false);
-        setModelSwitchError(false);
-        const alreadySelected = sameModelSelectionRef(modelRef, effectiveRef);
-        if (alreadySelected) return;
-        try {
-          if (onSwitchModel && modelRef.source === LOCAL_CONFIG_SOURCE) {
-            await onSwitchModel(activeSessionId, modelRef.saved_model_id);
-          } else if (bridge.available) {
-            await bridge.models.switchModelRef(activeSessionId, modelRef);
-          }
-        } catch (_) {
-          setModelSwitchError(true);
-        }
-      }
-      return (
-        <div className="relative min-w-0">
-          <button ref={triggerRef} onClick={() => { if (!busy && canSwitchModels) setOpen(o => !o); }} disabled={busy || !canSwitchModels}
-            title={currentLabel + (busy ? ' · ' + t.modelSwitchBusy : '')}
-            className={`relative shrink-0 flex items-center justify-center ${multiAgentOn ? 'text-[#6d28d9] dark:text-[#c4b5fd]' : 'text-gray-700 dark:text-gray-200'} transition-colors border disabled:opacity-50 ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold min-w-0 max-w-full bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
-            {compact ? (
-              <>
-                <Cpu size={18} className="opacity-80" />
-                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-[#34C759] ring-2 ring-white dark:ring-[#161618]"></span>
-              </>
-            ) : (
-              <>
-                <span className="w-1.5 h-1.5 shrink-0 rounded-full bg-[#34C759]"></span>
-                <span className="max-w-[116px] truncate">{t.composerModelLabel(currentLabel)}</span>
-                <ChevronDown size={13} className="opacity-50 shrink-0" />
-              </>
-            )}
-          </button>
-          <ComposerPopover open={open && canSwitchModels} onClose={() => setOpen(false)} triggerRef={triggerRef} compact={compact}
-            desktopClassName="absolute bottom-full left-0 mb-2 z-50 w-64 max-h-[340px] overflow-y-auto bg-white dark:bg-[#1E1E20] border border-black/5 dark:border-white/10 rounded-2xl shadow-xl p-1.5">
-                {(() => {
-                  const { preset, custom } = groupModelsForSelector(savedModels);
-                  const renderGroup = (label, items, withDivider) => items.length > 0 && (
-                    <>
-                      {withDivider && <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />}
-                      <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{label}</div>
-                      {items.map(m => (
-                        <button key={m.id} onClick={() => pick({ source: LOCAL_CONFIG_SOURCE, saved_model_id: m.id })}
-                          className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white">
-                          <span className="flex items-center gap-2.5 min-w-0">
-                            <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
-                            <span className="min-w-0">
-                              <span className="block text-[13px] truncate text-gray-700 dark:text-gray-200 group-hover:text-white">{selectorMainLabel(m, t)}</span>
-                              <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-hover:text-white/80">{selectorSubLabel(m, t)}</span>
-                            </span>
-                          </span>
-                          {m.id === effectiveLocalId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
-                        </button>
-                      ))}
-                    </>
-                  );
-                  return (
-                    <>
-                      {platformModels.length > 0 && (
-                        <>
-                          <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{t.uiSettingsDetail.platformModels}</div>
-                          {platformModels.map(item => {
-                            const selectable = platformModelSelectableForNewSession(item);
-                            return (
-                              <button key={item.model_id} disabled={!selectable} onClick={() => pick({ source: ACCOUNT_PLATFORM_SOURCE, model_id: item.model_id })}
-                                className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-inherit">
-                                <span className="flex items-center gap-2.5 min-w-0">
-                                  <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
-                                  <span className="min-w-0">
-                                    <span className="block text-[13px] truncate text-gray-700 dark:text-gray-200 group-hover:text-white">{item.display_name || item.model_id}</span>
-                                    <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-hover:text-white/80">{item.model_id}</span>
-                                  </span>
-                                </span>
-                                {item.model_id === effectivePlatformId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
-                              </button>
-                            );
-                          })}
-                        </>
-                      )}
-                      {platformState === 'loading' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsLoading}</div>}
-                      {platformState === 'auth_required' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsSignIn}</div>}
-                      {platformState === 'error' && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.platformModelsUnavailable}</div>}
-                      {renderGroup(t.modelGroupPreset, preset, platformModels.length > 0)}
-                      {renderGroup(t.modelGroupCustom, custom, preset.length > 0 || platformModels.length > 0)}
-                      {modelSwitchError && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.modelSwitchFailed}</div>}
-                    </>
-                  );
-                })()}
-                {canMultiAgent && (
-                  <>
-                    <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                    <button type="button" data-testid="multiagent-toggle" onClick={toggleMultiAgent}
-                      disabled={multiAgentBusy || busy}
-                      title={multiAgentCopy.toggleHint || ''}
-                      onAnimationEnd={(event) => {
-                        if (event.animationName === 'pinvou-ultra-reveal') setMultiAgentRevealing(false);
-                      }}
-                      className={`w-full flex items-center justify-between px-3 py-2.5 text-[13px] rounded-xl ${
-                        multiAgentOn
-                          ? 'pinvou-ultra-row'
-                          : 'text-gray-700 dark:text-gray-200 hover:bg-black/[0.045] dark:hover:bg-white/[0.07]'
-                      } ${multiAgentRevealing ? 'pinvou-ultra-row-reveal' : ''}`}>
-                      <span className="flex items-center gap-2.5 min-w-0">
-                        <Users size={15} className={`shrink-0 ${multiAgentOn ? 'text-current' : 'text-gray-400'}`} />
-                        <span className={`truncate ${multiAgentOn ? 'font-medium' : ''}`}>{multiAgentCopy.toggleLabel || ''}</span>
-                      </span>
-                      <span aria-hidden="true" className={`relative shrink-0 w-8 h-[18px] rounded-full transition-colors ${multiAgentOn ? 'bg-white/30' : 'bg-black/20 dark:bg-white/25'}`}>
-                        <span className={`absolute top-[2px] left-0 w-[14px] h-[14px] rounded-full bg-white shadow transition-transform ${multiAgentOn ? 'translate-x-[16px]' : 'translate-x-[2px]'}`} />
-                      </span>
-                    </button>
-                  </>
-                )}
-                {canManageModels && (
-                  <>
-                    <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                    <button onClick={() => { setOpen(false); if (onGotoSettings) onGotoSettings(); }}
-                      className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-gray-700 dark:text-gray-200 hover:bg-[#007AFF] hover:text-white rounded-xl transition-colors group">
-                      <Plus size={15} className="text-gray-400 group-hover:text-white/90" />
-                      {t.manageModels}
-                    </button>
-                  </>
-                )}
-          </ComposerPopover>
-        </div>
-      );
-    };
-
     const WebAccessModal = ({ theme, bs, t, onClose }) => {
       const canManageWebAccess = can('webAccessAdmin');
       const [refreshConfirmOpen, setRefreshConfirmOpen] = useState(false);
       const [actionBusy, setActionBusy] = useState(false);
       const webAccess = (bs && bs.webAccess) || {};
       const webAccessActive = !!webAccess.active;
+      const hostWorkspaceAuthorized = !!webAccess.host_workspace_authorized;
       const statusKey = webAccess.starting ? 'starting' : (webAccess.status || 'idle');
       const remoteCopy = t.uiRemote;
       const statusColors = { idle:'#8A9097', starting:'#F9AB00', connecting_relay:'#F9AB00', waiting_web_client:'#F9AB00', web_client_connected:'#34A853', web_client_disconnected:'#F9AB00', revoked:'#EA4335', stopped:'#8A9097', error:'#EA4335' };
@@ -703,12 +578,6 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const statusMeta = statusCopy
         ? { label: statusCopy[0], detail: statusKey === 'error' ? (webAccess.last_error || statusCopy[1]) : statusCopy[1], color: statusColors[statusKey] }
         : { label: String(statusKey), detail: remoteCopy.updated, color: '#8A9097' };
-
-      useEffect(() => {
-        if (!webAccessActive && bridge.available) {
-          bridge.remoteControl.startRemoteControl(null).catch(() => {});
-        }
-      }, [canManageWebAccess]);
 
       async function handleRotateWebAccess() {
         if (!bridge.available) return;
@@ -736,7 +605,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       async function handleRetryWebAccess() {
         if (!bridge.available) return;
         setActionBusy(true);
-        try { await bridge.remoteControl.startRemoteControl(null); }
+        try { await bridge.remoteControl.startRemoteControl({ allowHostWorkspace: true }); }
         catch (_) {}
         finally { setActionBusy(false); }
       }
@@ -795,6 +664,8 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               <button onClick={() => navigator.clipboard && navigator.clipboard.writeText(webAccess.url || '')}
                 disabled={!webAccess.url}
                 className={`px-3.5 py-2 rounded-full text-[13px] bg-black/5 hover:bg-black/10 disabled:opacity-40 dark:bg-white/10 dark:hover:bg-white/15 dark:disabled:opacity-40`}>{remoteCopy.copy}</button>
+              {webAccessActive && !hostWorkspaceAuthorized && <button disabled={actionBusy} onClick={handleRetryWebAccess}
+                className="px-3.5 py-2 rounded-full text-[13px] bg-[#0B57D0] text-white hover:bg-[#0842A0] disabled:opacity-50">{remoteCopy.allowWorkspace}</button>}
               {webAccessActive ? <button disabled={actionBusy} onClick={() => setRefreshConfirmOpen(true)}
                 className={`px-3.5 py-2 rounded-full text-[13px] disabled:opacity-50 bg-black/5 hover:bg-black/10 dark:bg-white/10 dark:hover:bg-white/15`}>{remoteCopy.refresh}</button>
                 : <button disabled={actionBusy} onClick={handleRetryWebAccess}
@@ -817,479 +688,9 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       );
     };
 
-    // 输入框底栏:工具菜单(只展示已装工具 + 跳工具商店;无会话级开关——后端无此概念)。
-    // 产物 HTML 预览：测内容自然尺寸，比面板宽就整体等比缩小铺满（只缩不放）。
-    // 治"固定尺寸 banner 在窄预览面板里溢出、出滚动条、只露一角"。响应式整页缩放比≈1、不受影响。
-    const clampPreviewScale = value => Math.max(0.1, Math.min(3, Number(value) || 1));
-    const ScaledHtmlPreview = ({ html, onFrameLoad, onOpenExternal, zoomMode = 'auto-width', customScale = 1, onScaleChange, onCustomScaleChange }) => {
-      const wrapRef = useRef(null);
-      const frameRef = useRef(null);
-      const naturalRef = useRef(null);
-      const [box, setBox] = useState(null); // { w, h, scale }
-      const [ready, setReady] = useState(false);
-      const managedZoom = zoomMode !== 'auto-width';
-      const canvasW = managedZoom ? 1440 : null;
-      const measure = () => {
-        try {
-          const fr = frameRef.current, wrap = wrapRef.current;
-          if (!fr || !wrap || !fr.contentWindow) return;
-          const doc = fr.contentWindow.document;
-          const de = doc.documentElement, bd = doc.body;
-          const panelW = wrap.clientWidth;
-          const panelH = wrap.clientHeight;
-          // Reusing the first natural size prevents iframe growth from feeding back into ResizeObserver.
-          let natural = naturalRef.current;
-          if (!natural) {
-            const width = Math.max(de ? de.scrollWidth : 0, bd ? bd.scrollWidth : 0);
-            const height = Math.max(de ? de.scrollHeight : 0, bd ? bd.scrollHeight : 0);
-            natural = { width, height };
-            if (width > 0 && height > 0) naturalRef.current = natural;
-          }
-          const w = managedZoom ? Math.max(canvasW, natural.width || 0) : natural.width;
-          const h = natural.height;
-          let scale = 1;
-          if (zoomMode === 'fit') {
-            const widthScale = w > 0 && panelW > 0 ? panelW / w : 1;
-            const heightScale = h > 0 && panelH > 0 ? panelH / h : 1;
-            scale = Math.min(widthScale, heightScale);
-          } else if (zoomMode === 'custom') {
-            scale = clampPreviewScale(customScale);
-          } else if (zoomMode === 'fit-width' || zoomMode === 'auto-width') {
-            scale = (w > panelW && w > 0) ? panelW / w : 1;
-          }
-          scale = clampPreviewScale(scale);
-          var nextBox = { w, h, scale, panelW, panelH };
-          setBox(prev => (
-            prev &&
-            Math.abs(prev.w - nextBox.w) < 0.5 &&
-            Math.abs(prev.h - nextBox.h) < 0.5 &&
-            Math.abs(prev.scale - nextBox.scale) < 0.001 &&
-            Math.abs(prev.panelW - nextBox.panelW) < 0.5 &&
-            Math.abs(prev.panelH - nextBox.panelH) < 0.5
-              ? prev
-              : nextBox
-          ));
-          if (onScaleChange) onScaleChange(scale);
-        } catch (e) { /* 未就绪/跨域，忽略 */ }
-      };
-      useEffect(() => { setReady(false); setBox(null); naturalRef.current = null; }, [html]);
-      useEffect(() => { measure(); }, [zoomMode, customScale]);
-      useEffect(() => {
-        if (!wrapRef.current || typeof ResizeObserver === 'undefined') return;
-        const ro = new ResizeObserver(() => measure());
-        ro.observe(wrapRef.current);
-        return () => ro.disconnect();
-      }, [zoomMode, customScale]);
-      const applyWheelZoom = deltaY => {
-        const base = box ? box.scale : customScale;
-        const next = clampPreviewScale(base + (deltaY < 0 ? 0.1 : -0.1));
-        if (onCustomScaleChange) onCustomScaleChange(next);
-      };
-      const handleWheel = event => {
-        if (!managedZoom || !event.ctrlKey) return;
-        event.preventDefault();
-        event.stopPropagation();
-        applyWheelZoom(event.deltaY);
-      };
-      useEffect(() => {
-        const fr = frameRef.current;
-        if (!managedZoom || !fr || !fr.contentWindow) return undefined;
-        let doc = null;
-        try {
-          doc = fr.contentWindow.document;
-        } catch (e) {
-          return undefined;
-        }
-        if (!doc) return undefined;
-        const handleFrameWheel = event => {
-          if (!event.ctrlKey) return;
-          event.preventDefault();
-          event.stopPropagation();
-          applyWheelZoom(event.deltaY);
-        };
-        doc.addEventListener('wheel', handleFrameWheel, { passive: false, capture: true });
-        return () => doc.removeEventListener('wheel', handleFrameWheel, { capture: true });
-      }, [managedZoom, ready, box && box.scale, customScale, onCustomScaleChange]);
-      useEffect(() => {
-        const handlePreviewMessage = event => {
-          const frameWindow = frameRef.current && frameRef.current.contentWindow;
-          if (!frameWindow || event.source !== frameWindow) return;
-          const url = artifactPreviewExternalUrlFromMessage(event.data);
-          if (url && onOpenExternal) onOpenExternal(url);
-        };
-        window.addEventListener('message', handlePreviewMessage);
-        return () => window.removeEventListener('message', handlePreviewMessage);
-      }, [onOpenExternal]);
-      const scaled = box && box.scale !== 1;
-      const scaledW = box ? Math.max(1, Math.ceil(box.w * box.scale)) : 0;
-      const scaledH = box ? Math.max(1, Math.ceil(box.h * box.scale)) : 0;
-      const stageStyle = box
-        ? {
-          minWidth: Math.max(box.panelW || 0, scaledW || box.w) + 'px',
-          minHeight: Math.max(box.panelH || 0, scaledH || box.h) + 'px',
-          display: 'flex',
-          justifyContent: (zoomMode === 'fit' || zoomMode === 'custom') && scaledW <= (box.panelW || 0) ? 'center' : 'flex-start',
-          alignItems: (zoomMode === 'fit' || zoomMode === 'custom') && scaledH <= (box.panelH || 0) ? 'center' : 'flex-start',
-        }
-        : { minWidth: '100%', minHeight: '100%' };
-      const frameStyle = () => {
-        if (box && scaled) {
-          return { position: 'absolute', left: 0, top: 0, width: box.w + 'px', height: box.h + 'px', transform: 'scale(' + box.scale + ')', transformOrigin: 'top left', colorScheme: 'dark' };
-        }
-        if (managedZoom && box) return { width: box.w + 'px', height: box.h + 'px', minHeight: '480px', colorScheme: 'dark' };
-        return { width: '100%', height: '100%', minHeight: '480px', colorScheme: 'dark' };
-      };
-      const wrapStyle = managedZoom
-        ? { minHeight: 0, height: '100%', overflow: zoomMode === 'fit' ? 'hidden' : 'auto' }
-        : (scaled ? { height: scaledH } : { minHeight: 480, height: '100%' });
-      return (
-        <div ref={wrapRef} data-testid="artifact-html-preview-scroll" onWheel={handleWheel} className="relative w-full bg-[#15171a]" style={wrapStyle}>
-          {!ready && <div className="h-[480px] bg-[#15171a]"></div>}
-          <div data-testid="artifact-html-preview-stage" style={managedZoom ? stageStyle : (box && scaled ? { width: scaledW + 'px', height: scaledH + 'px', position: 'relative' } : { width: '100%', height: '100%' })}>
-            <div style={box && scaled ? { width: scaledW + 'px', height: scaledH + 'px', position: 'relative', flex: '0 0 auto' } : (managedZoom && box ? { width: box.w + 'px', height: box.h + 'px', flex: '0 0 auto' } : { width: '100%', height: '100%' })}>
-              <iframe ref={frameRef} sandbox="allow-same-origin allow-scripts" data-testid="artifact-html-preview-frame" onLoad={() => { measure(); if (onFrameLoad) onFrameLoad(frameRef.current); setTimeout(() => setReady(true), 80); }}
-                className={`border-0 block bg-[#15171a] transition-opacity duration-300 ${ready ? 'opacity-100' : 'opacity-0 absolute pointer-events-none'}`}
-                data-zoom-mode={zoomMode}
-                data-zoom-scale={box ? String(box.scale) : ''}
-                style={frameStyle()}
-                srcDoc={buildArtifactPreviewDocument(html)} />
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    // 输入框「技能」入口：⚡ 药丸 + popover。视觉设计=内置自动技能（只读，模型 load_skill 时显"使用中"
-    // 并高亮药丸）。activeSkill 由 bridge 检测 load_skill 设，纯只读指示。
-    const ComposerModeMenu = ({ t, bs, compact }) => {
-      const [open, setOpen] = useState(false);
-      const SKILLS = [
-        { id: 'visual-design', name: t.uiSettingsView.visualDesignSkillName, desc: t.uiSettingsView.visualDesignSkillDesc, kind: 'auto' },
-      ];
-      const activeId = bs && bs.activeSkill;
-      const cur = SKILLS.find(s => s.id === activeId && s.kind === 'auto');
-      return (
-        <div className="relative">
-          <button onClick={() => setOpen(o => !o)} title={cur ? cur.name : t.composerMode}
-            className={`flex items-center shrink-0 font-semibold transition-colors border ${compact ? 'justify-center w-9 h-9 rounded-full' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] whitespace-nowrap'} ${cur
-              ? 'bg-[#007AFF]/[0.1] dark:bg-[#0A84FF]/20 text-[#007AFF] dark:text-[#5AC8FA] border-[#007AFF]/20 dark:border-[#0A84FF]/30'
-              : 'bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] text-gray-700 dark:text-gray-200 border-black/[0.045] dark:border-white/[0.06]'}`}>
-            <Zap size={compact ? 14 : 13} className={cur ? '' : 'opacity-70'} />
-            {!compact && (cur ? cur.name : t.composerMode)}
-            {!compact && <ChevronDown size={13} className="opacity-50 shrink-0" />}
-          </button>
-          {open && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setOpen(false)}></div>
-              <div className="absolute bottom-full left-0 mb-2 z-50 w-64 bg-white dark:bg-[#1E1E20] border border-black/5 dark:border-white/10 rounded-2xl shadow-xl p-1.5">
-                <div className="px-3 py-2 text-[11px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">{t.composerModeTitle}</div>
-                {SKILLS.map(s => {
-                  const soon = s.kind === 'soon';
-                  const inUse = s.kind === 'auto' && activeId === s.id;
-                  return (
-                    <div key={s.id} className={`flex items-start justify-between gap-2 px-3 py-2.5 rounded-xl ${soon ? 'opacity-50' : ''}`}>
-                      <span className="min-w-0">
-                        <span className="block text-[13px] font-medium text-gray-800 dark:text-gray-100 truncate">{s.name}</span>
-                        <span className="block text-[11px] text-gray-400 dark:text-gray-500 truncate">{s.desc}</span>
-                      </span>
-                      {soon
-                        ? <span className="shrink-0 text-[10px] font-semibold text-gray-400 dark:text-gray-500 bg-black/[0.04] dark:bg-white/10 px-2 py-0.5 rounded-full leading-none mt-0.5">{t.composerSkillSoon}</span>
-                        : inUse
-                          ? <span className="shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold text-[#34C759] bg-[#34C759]/10 px-2 py-0.5 rounded-full leading-none mt-0.5"><span className="w-1.5 h-1.5 rounded-full bg-[#34C759]" />{t.composerSkillInUse}</span>
-                          : <span className="shrink-0 text-[10px] font-semibold text-[#007AFF] dark:text-[#5AC8FA] bg-[#007AFF]/10 dark:bg-[#0A84FF]/15 px-2 py-0.5 rounded-full leading-none mt-0.5">{t.composerSkillAuto}</span>}
-                    </div>
-                  );
-                })}
-              </div>
-            </>
-          )}
-        </div>
-      );
-    };
-
-    // 可选触发器变体：triggerVariant='pill' 时触发器渲染为代码页配置组同款 pill
-    //（triggerLabel 为可选 10px 前缀文案；triggerTestId 覆盖默认 testid），
-    // 下拉内容不变；不传变体时聊天页外观逐字节不变。
-    const ComposerToolMenu = ({ t, onGotoTools, compact, activeSkill, triggerVariant, triggerLabel, triggerTestId, scope }) => {
-      const [open, setOpen] = useState(false);
-      const triggerRef = useRef(null);
-      const canMutateToolStore = can('toolStoreMutations');
-      // scope: 'code' = 原生代码会话(独立开关,默认全关),缺省 = 普通会话(plain)。
-      const toolScope = scope === 'code' ? 'code' : 'plain';
-      const [marketplaceTools, setMarketplaceTools] = useState([]);
-      const [marketplaceSkills, setMarketplaceSkills] = useState([]);
-      const [disabled, setDisabled] = useState(() => new Set()); // 被关掉的连接器 id(按 scope 持久)
-      const [disabledSkills, setDisabledSkills] = useState(() => new Set()); // 被关掉的技能 id(按 scope 持久,独立文件)
-      const [projectSkillsEnabled, setProjectSkillsEnabled] = useState(false); // 项目级 skills(仅 code scope 生效)
-      const [projectSkillsHelp, setProjectSkillsHelp] = useState(false); // 项目技能帮助弹窗(功能说明+扫描目录)
-      const [feishuOn, setFeishuOn] = useState(false); // 飞书是否已连接(CLI 路线)
-      const [feishuEnabled, setFeishuEnabled] = useState(true); // 飞书技能是否启用(未手动停用)
-      const [wecomOn, setWecomOn] = useState(false); // 企微是否已连接(CLI 路线)
-      const [wecomEnabled, setWecomEnabled] = useState(true); // 企微技能是否启用(未手动停用)
-      const [dingtalkOn, setDingtalkOn] = useState(false); // 钉钉是否已连接(CLI 路线)
-      const [dingtalkEnabled, setDingtalkEnabled] = useState(true); // 钉钉技能是否启用(未手动停用)
-      const [eipOn, setEipOn] = useState(false); // EIP 是否已连接(SSO 路线)
-      const [zhidaoOn, setZhidaoOn] = useState(false); // 知道是否已连接(SSO 路线)
-      const [tmeetOn, setTmeetOn] = useState(false); // 腾讯会议是否已连接(CLI 路线)
-      const [tmeetEnabled, setTmeetEnabled] = useState(true); // 腾讯会议技能是否启用(未手动停用)
-      // 启动时加载已装工具 + 全局持久的禁用列表(持久语义:新窗口/新对话都继承)
-      async function refreshToolsMenu(isAlive) {
-        try {
-          const list = await invokeTauri('list_marketplace_tools');
-          if (isAlive()) setMarketplaceTools(Array.isArray(list) ? list : []);
-        } catch (e) { /* ignore */ }
-        try {
-          const skills = await invokeTauri('list_marketplace_skills');
-          if (isAlive()) setMarketplaceSkills(Array.isArray(skills) ? skills : []);
-        } catch (e) { /* ignore */ }
-        try {
-          const dis = await invokeTauri('get_disabled_connectors', { scope: toolScope });
-          if (isAlive()) setDisabled(new Set(dis || []));
-        } catch (e) { /* ignore */ }
-        try {
-          const disSkills = await invokeTauri('get_disabled_skills', { scope: toolScope });
-          if (isAlive()) setDisabledSkills(new Set(disSkills || []));
-        } catch (e) { /* ignore */ }
-        try {
-          const proj = await invokeTauri('get_project_skills_enabled');
-          if (isAlive()) setProjectSkillsEnabled(!!proj);
-        } catch (e) { /* ignore */ }
-        try {
-          const fs = await invokeTauri('feishu_skills_state');
-          if (isAlive()) { setFeishuOn(!!(fs && fs.connected)); setFeishuEnabled(!fs || fs.enabled !== false); }
-        } catch (e) { /* ignore */ }
-        try {
-          const ws = await invokeTauri('wecom_skills_state');
-          if (isAlive()) { setWecomOn(!!(ws && ws.connected)); setWecomEnabled(!ws || ws.enabled !== false); }
-        } catch (e) { /* ignore */ }
-        try {
-          const ds = await invokeTauri('dingtalk_skills_state');
-          if (isAlive()) { setDingtalkOn(!!(ds && ds.connected)); setDingtalkEnabled(!ds || ds.enabled !== false); }
-        } catch (e) { /* ignore */ }
-        try {
-          const es = await invokeTauri('eip_status');
-          if (isAlive()) setEipOn(!!(es && es.connected));
-        } catch (e) { /* ignore */ }
-        try {
-          const zs = await invokeTauri('zhidao_status');
-          if (isAlive()) setZhidaoOn(!!(zs && zs.connected));
-        } catch (e) { /* ignore */ }
-        try {
-          const ts = await invokeTauri('tmeet_skills_state');
-          if (isAlive()) { setTmeetOn(!!(ts && ts.connected)); setTmeetEnabled(!ts || ts.enabled !== false); }
-        } catch (e) { /* ignore */ }
-      }
-      useEffect(() => {
-        let alive = true;
-        const isAlive = () => alive;
-        const onChanged = () => refreshToolsMenu(isAlive);
-        refreshToolsMenu(isAlive);
-        window.addEventListener('pinvou:tools-changed', onChanged);
-        return () => { alive = false; window.removeEventListener('pinvou:tools-changed', onChanged); };
-      }, []);
-      // 项目技能帮助弹窗 Esc 关闭（与项目其他 modal 惯例一致，仅弹窗打开时挂监听）
-      useEffect(() => {
-        if (!projectSkillsHelp) return undefined;
-        const onKey = event => { if (event.key === 'Escape') setProjectSkillsHelp(false); };
-        window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
-      }, [projectSkillsHelp]);
-      function toggleTool(id, kind) {
-        if (!canMutateToolStore) return;
-        // 技能行走独立双 scope 开关（disabled_skills.json）；工具/服务行走连接器开关。
-        if (kind === 'skill') {
-          // 技能行 row.id 带 `skill:` 命名空间前缀，后端与组合目录物化按裸 id
-          // 匹配——传前缀会导致开关不落盘、视觉不翻转（strip 对齐契约）。
-          const skillId = id.startsWith('skill:') ? id.slice('skill:'.length) : id;
-          const next = new Set(disabledSkills);
-          next.has(skillId) ? next.delete(skillId) : next.add(skillId);
-          setDisabledSkills(next);
-          if (bridge.available) {
-            invokeTauri('set_disabled_skills',
-              { skillIds: Array.from(next), scope: toolScope }).catch(() => {});
-          }
-          return;
-        }
-        const next = new Set(disabled);
-        next.has(id) ? next.delete(id) : next.add(id);
-        setDisabled(next);
-        // 按 scope 持久:落盘 + 广播给所有在跑引擎,关一次该 scope 所有新对话/新窗口都继承。
-        if (bridge.available) {
-          invokeTauri('set_disabled_connectors',
-            { connectorIds: Array.from(next), scope: toolScope }).catch(() => {});
-        }
-      }
-      function toggleProjectSkills() {
-        if (!canMutateToolStore) return;
-        const next = !projectSkillsEnabled;
-        setProjectSkillsEnabled(next);
-        if (bridge.available) {
-          invokeTauri('set_project_skills_enabled', { enabled: next }).catch(() => {});
-        }
-      }
-      const menuState = buildComposerToolMenuState({
-        marketplaceTools,
-        marketplaceSkills,
-        disabledIds: Array.from(disabled),
-        disabledSkillIds: Array.from(disabledSkills),
-        activeSkill,
-        scope: toolScope,
-        serviceStates: [
-          { id: 'feishu', title: t.uiSettingsView.serviceFeishu, connected: feishuOn, enabled: feishuEnabled },
-          { id: 'wecom', title: t.uiSettingsView.serviceWecom, connected: wecomOn, enabled: wecomEnabled },
-          { id: 'dingtalk', title: t.uiSettingsView.serviceDingtalk, connected: dingtalkOn, enabled: dingtalkEnabled },
-          { id: 'eip', title: t.uiSettingsView.serviceEip, connected: eipOn },
-          { id: 'zhidao', title: t.uiSettingsView.serviceZhidao, connected: zhidaoOn },
-          { id: 'tmeet', title: t.uiSettingsView.serviceTmeet, connected: tmeetOn, enabled: tmeetEnabled },
-        ],
-      });
-      const { connectedServices, toolRows, skillRows, enabledCount } = menuState;
-      // 内置技能名称/描述由 composer-tool-menu-logic.js 数据提供，在 UI 边界按当前语言覆盖
-      const localizedSkillRows = skillRows.map(row => (row.kind === 'builtin-skill' && row.skillId === 'visual-design')
-        ? { ...row, title: t.uiSettingsView.visualDesignSkillName, description: t.uiSettingsView.visualDesignSkillDesc }
-        : row);
-      const statusBadge = (label, tone = 'green') => {
-        const cls = tone === 'blue'
-          ? 'text-[#007AFF] dark:text-[#5AC8FA] bg-[#007AFF]/10 dark:bg-[#0A84FF]/15'
-          : 'text-[#34C759] bg-[#34C759]/10';
-        return <span className={`shrink-0 inline-flex items-center gap-1 text-[10px] font-semibold ${cls} px-2 py-0.5 rounded-full leading-none`}><span className={`w-1.5 h-1.5 rounded-full ${tone === 'blue' ? 'bg-[#007AFF] dark:bg-[#5AC8FA]' : 'bg-[#34C759]'}`} />{label}</span>;
-      };
-      const switchRow = (row) => (
-        <div key={row.id} className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl font-medium">
-          <span className="min-w-0">
-            <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">{row.title}</span>
-          </span>
-          <button onClick={() => toggleTool(row.id, row.kind)} aria-label={row.id} disabled={!canMutateToolStore}
-            className={`relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full transition-colors disabled:cursor-default ${!canMutateToolStore ? 'opacity-70' : ''} ${row.enabled ? 'bg-[#34C759]' : 'bg-[#E5E5EA] dark:bg-[#39393D]'}`}>
-            <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${row.enabled ? 'translate-x-[16px]' : 'translate-x-[2px]'}`} />
-          </button>
-        </div>
-      );
-      const readonlyRow = (row, label, tone = 'green') => (
-        <div key={row.id} className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl font-medium">
-          <span className="min-w-0">
-            <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">{row.title}</span>
-          </span>
-          {statusBadge(label, tone)}
-        </div>
-      );
-      return (
-        <div className="relative shrink-0">
-          {triggerVariant === 'pill' ? (
-            <button
-              ref={triggerRef}
-              type="button"
-              data-testid={triggerTestId || 'composer-tool-menu-trigger'}
-              onClick={() => setOpen(o => !o)}
-              title={t.composerTools}
-              aria-expanded={open}
-              className="inline-flex h-8 min-w-0 max-w-[220px] items-center gap-1.5 overflow-hidden rounded-xl border px-2.5 transition-all cursor-pointer hover:-translate-y-px hover:shadow-sm focus-within:border-[#007AFF]/45 focus-within:ring-2 focus-within:ring-[#007AFF]/10 border-black/[0.07] bg-black/[0.025] text-[#1F1F1F] dark:border-white/[0.09] dark:bg-white/[0.055] dark:text-[#E8EAED]"
-            >
-              {triggerLabel && (
-                <span className="pointer-events-none shrink-0 text-[10px] font-medium text-gray-400 dark:text-gray-500">
-                  {triggerLabel}
-                </span>
-              )}
-              <span className="pointer-events-none min-w-0 truncate text-[11px] font-semibold">
-                {t.composerTools}
-              </span>
-              {enabledCount > 0 && (
-                <span className="min-w-4 h-4 rounded-full bg-[#007AFF] px-1 text-center text-[10px] font-bold leading-4 text-white shrink-0">{enabledCount}</span>
-              )}
-              <ChevronDown
-                size={12}
-                aria-hidden="true"
-                className={`pointer-events-none ml-auto shrink-0 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`}
-              />
-            </button>
-          ) : (
-          <button ref={triggerRef} data-testid={triggerTestId || 'composer-tool-menu-trigger'} onClick={() => setOpen(o => !o)} title={t.composerTools}
-            className={`relative shrink-0 flex items-center justify-center text-gray-700 dark:text-gray-200 transition-colors border ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold whitespace-nowrap bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
-            <Wrench size={compact ? 18 : 13} className="opacity-80" />
-            {!compact && t.composerTools}
-            {enabledCount > 0 && (compact
-              ? <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[10px] leading-4 text-center font-bold bg-[#007AFF] text-white rounded-full">{enabledCount}</span>
-              : <span className="min-w-4 h-4 rounded-full bg-[#007AFF] px-1 text-center text-[10px] font-bold leading-4 text-white shrink-0">{enabledCount}</span>)}
-            {!compact && <ChevronDown size={13} className="opacity-50 shrink-0" />}
-          </button>
-          )}
-          <ComposerPopover open={open} onClose={() => setOpen(false)} triggerRef={triggerRef} compact={compact}
-            menuProps={{ 'data-testid': 'composer-tool-menu' }}
-            desktopClassName="absolute bottom-full left-0 mb-2 w-72 max-h-[420px] z-50 overflow-y-auto custom-scrollbar bg-white dark:bg-[#1E1E20] border border-black/5 dark:border-white/10 rounded-2xl shadow-xl p-1.5">
-                {connectedServices.map(row => readonlyRow(row, t.composerConnected, 'green'))}
-                {toolRows.map(switchRow)}
-                {localizedSkillRows.length === 0 ? (
-                  <div className="px-3 py-2 text-[13px] text-gray-400 dark:text-gray-500">{t.composerModeNone}</div>
-                ) : (
-                  <>
-                    {localizedSkillRows.map(row => row.switchable
-                      ? switchRow(row)
-                      : readonlyRow(row, row.active ? t.composerSkillInUse : t.composerBuiltinAuto, row.active ? 'green' : 'blue'))}
-                    {/* 该 scope 全部技能被关：空态提示（组合目录为空 → 模型看不到任何技能） */}
-                    {skillRows.filter(row => row.kind === 'skill').length > 0
-                      && skillRows.filter(row => row.kind === 'skill').every(row => !row.enabled) && (
-                      <div className="px-3 pt-1 pb-1 text-[11px] text-gray-400 dark:text-gray-500">{t.composerSkillAllDisabled}</div>
-                    )}
-                  </>
-                )}
-                {toolScope === 'code' && (
-                  <>
-                    <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                    <div className="px-3 py-2">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="min-w-0">
-                          <span className="block text-[13px] text-gray-700 dark:text-gray-200 truncate">
-                            {t.composerProjectSkills}
-                            <button onClick={() => setProjectSkillsHelp(true)} aria-label={t.composerProjectSkillsHelpTitle}
-                              className="inline-flex items-center justify-center w-[15px] h-[15px] ml-1 rounded-full text-[10px] font-semibold leading-none text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-black/5 dark:hover:bg-white/10 align-middle">?</button>
-                          </span>
-                          <span className="block text-[10px] text-gray-400 dark:text-gray-500">{t.composerProjectSkillsDesc}</span>
-                        </span>
-                        <button onClick={toggleProjectSkills} aria-label="project-skills" disabled={!canMutateToolStore}
-                          className={`relative inline-flex h-5 w-[34px] shrink-0 items-center rounded-full transition-colors disabled:cursor-default ${!canMutateToolStore ? 'opacity-70' : ''} ${projectSkillsEnabled ? 'bg-[#34C759]' : 'bg-[#E5E5EA] dark:bg-[#39393D]'}`}>
-                          <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${projectSkillsEnabled ? 'translate-x-[16px]' : 'translate-x-[2px]'}`} />
-                        </button>
-                      </div>
-                      {projectSkillsEnabled && (
-                        <div className="mt-1.5 text-[11px] leading-snug text-amber-600 dark:text-amber-400">{t.composerProjectSkillsWarning}</div>
-                      )}
-                    </div>
-                  </>
-                )}
-                <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />
-                <button onClick={() => { setOpen(false); if (onGotoTools) onGotoTools(); }}
-                  className="w-full flex items-center gap-2.5 px-3 py-2.5 text-[13px] text-gray-700 dark:text-gray-200 hover:bg-[#007AFF] hover:text-white rounded-xl transition-colors group">
-                  <Store size={15} className="text-gray-400 group-hover:text-white/90" />
-                  {t.composerManageTools}
-                </button>
-          </ComposerPopover>
-          {projectSkillsHelp && createPortal(
-            <div className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/45" onClick={() => setProjectSkillsHelp(false)}>
-              <div onClick={e => e.stopPropagation()} className="relative w-full max-w-[380px] rounded-[22px] shadow-2xl p-5 bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E3E3E3]">
-                <div className="flex items-start justify-between gap-3 mb-4">
-                  <div className="text-[16px] font-semibold">{t.composerProjectSkillsHelpTitle}</div>
-                  <button onClick={() => setProjectSkillsHelp(false)} className="w-8 h-8 rounded-full flex items-center justify-center hover:bg-black/5 dark:hover:bg-white/10"><X size={17} /></button>
-                </div>
-                <div className="text-[12px] leading-relaxed text-[#5F6368] dark:text-[#AEB4BC]">{t.composerProjectSkillsHelpBody}</div>
-                <div className="mt-3 text-[12px] font-medium">{t.composerProjectSkillsHelpDirsLabel}</div>
-                <div className="mt-1.5 rounded-[14px] border p-3 border-black/10 bg-[#F8F9FA] dark:border-white/10 dark:bg-white/[0.035]">
-                  {String(t.composerProjectSkillsHelpDirs).split('\n').map((dir, i) => (
-                    <div key={dir} className="flex items-center gap-2 text-[11px] font-mono text-gray-600 dark:text-gray-300 py-0.5">
-                      <span className="text-[10px] text-gray-400 dark:text-gray-500">{i + 1}</span>{dir}
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-3 text-[11px] leading-snug text-amber-600 dark:text-amber-400">{t.composerProjectSkillsWarning}</div>
-              </div>
-            </div>,
-            document.body
-          )}
-        </div>
-      );
-    };
-
     // 添加/编辑模型模态弹窗。
-    const ModelFormModal = ({ t, initial, onCancel, onSave, bs }) => {
+      // eslint-disable-next-line sonarjs/cognitive-complexity -- settings page aggregates many form branches; splitting needs a dedicated design; tracked via this suppression for now
+    const ModelFormModal = ({ isDark, t, initial, onCancel, onSave, bs, models = EMPTY_MODELS }) => {
       const settingsCopy = t.uiSettingsDetail;
       const localVllmSupported = !!(bs.platformCapabilities && bs.platformCapabilities.localVllmSupported);
       const modelScope = initial.__scope || (initial.preset === 'local_vllm' ? 'local' : 'cloud');
@@ -1298,10 +699,11 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const initialCatalogMatch = initialCatalogGroups.some(group =>
         group.preset === initial.preset
         && (!initialProvider || group.key === initialProvider.key)
-        && group.items.some(item => !item.custom && item.model === initial.model)
+        && group.items.some(item => !item.custom && catalogItemMatchesModel(item, initial.model))
       );
       const canSetUpLocalModel = can('localModelSetup');
       const [name, setName] = useState(initial.name || '');
+      const [alias, setAlias] = useState(initial.alias || '');
       const [nameTouched, setNameTouched] = useState(!initial.__new && !!initial.name);
       const [preset, setPreset] = useState(initial.preset || (localVllmSupported ? 'local_vllm' : 'deepseek'));
       const [providerKey, setProviderKey] = useState(initialProvider ? initialProvider.key : '');
@@ -1312,6 +714,12 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const [baseUrl, setBaseUrl] = useState(initial.base_url || '');
       const [contextWindow, setContextWindow] = useState(initial.context_window_tokens ? String(initial.context_window_tokens) : '');
       const [maxOutput, setMaxOutput] = useState(initial.max_output_tokens ? String(initial.max_output_tokens) : '');
+      // 思考深度档位：初始取已保存值（先归一——存量可能是底座归一前的旧值，
+      // 如 deepseek 的 medium），无则按模型默认（vllm→off，其余→high；
+      // 底座不支持的模型无默认，保持 null = 未显式设置，避免保存时污染 SavedModel）。
+      const [reasoningEffort, setReasoningEffort] = useState(
+        normalizeStoredReasoningEffort(initial, initial.reasoning_effort)
+      );
       const [apiKey, setApiKey] = useState('');
       const [keyAction, setKeyAction] = useState(initial.__new ? 'replace' : 'keep_existing');
       const [showKey, setShowKey] = useState(false);
@@ -1327,6 +735,34 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const [detectResult, setDetectResult] = useState(null); // { candidates } | { error } | null
       const [localDetecting, setLocalDetecting] = useState(false);
       const [localDetectResult, setLocalDetectResult] = useState(null);
+      // 图片输入能力三档(pinvou/enabled/disabled)与兜底视觉模型引用(阶段 G 设置页控件)。
+      // 已下线的「保存时检测」(auto)档残留值按「自动处理」(pinvou)回显。
+      // 未人工钉死(非 enabled/disabled)时按目录视觉能力标注预填:命中已验证
+      // 多模态条目预填「支持图片」,显式标注不支持预填「不支持图片」,未命中/
+      // 未标注保持「自动处理」。
+      const pinnedImageCapability = initial.image_capability_override === 'enabled'
+        || initial.image_capability_override === 'disabled';
+      const [imageCapability, setImageCapability] = useState(
+        pinnedImageCapability
+          ? initial.image_capability_override
+          : imageCapabilityForCatalogModel(initial.model));
+      // 用户手动改过档位后不再随模型 ID/目录项自动填写,避免覆盖显式选择。
+      const [imageCapabilityTouched, setImageCapabilityTouched] = useState(pinnedImageCapability);
+      const [visionModelId, setVisionModelId] = useState(initial.vision_model_id || '');
+      const [imageCapabilityPickerOpen, setImageCapabilityPickerOpen] = useState(false);
+      const [savingModel, setSavingModel] = useState(false);
+      // 保存失败(连接/写盘错误)行内提示:非空时弹窗保持,交用户修正后重试,
+      // 不静默关闭丢弃表单输入。
+      const [saveError, setSaveError] = useState('');
+      // 视觉模型选择探测:选中模型必须先通过图片识别探测——探测中列表保持
+      // 展开、该行右侧显示忙转圈;通过后收起列表选中,未通过则拒绝并提示排查。
+      const [visionProbingKey, setVisionProbingKey] = useState(null);
+      const [visionProbeError, setVisionProbeError] = useState(null);
+      const [visionModelPickerOpen, setVisionModelPickerOpen] = useState(false);
+      // 测试图片能力(设计 §7.3):仅主动点击触发;表单关键值变化后上一次结果不再可信,清除。
+      const [imageTesting, setImageTesting] = useState(false);
+      const [imageTestResult, setImageTestResult] = useState(null); // { status, verified, summary } | null
+      useEffect(() => { setImageTestResult(null); }, [model, baseUrl, apiKey, preset]);
       // 本机预装大模型「再入口」:检测无运行实例但有预装时,提示启用;走同一 bootstrap。
       const [offerSetup, setOfferSetup] = useState(false);   // 检测到预装,显示启用提示
       const [bootstrapHere, setBootstrapHere] = useState(false); // 从本页发起了 bootstrap(隔离全局态,避免开机引导的成功态串到这里)
@@ -1341,6 +777,71 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         ? localizeProvider(CLOUD_MODEL_PROVIDERS.find(group => group.key === providerKey) || findCloudProviderForModel({ preset, model, base_url: baseUrl, provider_kind: providerKind, vendor }) || null)
         : null;
       const isCodingPlan = providerKind === PROVIDER_KIND_CODING_PLAN || (activeProvider && activeProvider.providerKind === PROVIDER_KIND_CODING_PLAN);
+      // 当前表单模型可切换的思考深度档位（底座不支持的模型为空 = 不提供切换）。
+      // 本地/私网 openai_compatible 端点：按 Rust 探测结果下发真实档位
+      // （vllm→四档、ollama→off/high、lmstudio/generic→不支持），避免 UI
+      // 显示档位但 wire 层空操作的「调了个寂寞」。
+      const [probedKind, setProbedKind] = useState(null);
+      const [probePending, setProbePending] = useState(false);
+      const isLocalCompatible = preset === 'openai_compatible' && baseUrlUsesLocalOrPrivate(baseUrl.trim());
+      const probeSupported = bridge.available && !!bridge.models && typeof bridge.models.probeLocalServerKind === 'function';
+      useEffect(() => {
+        if (!isLocalCompatible) {
+          // eslint-disable-next-line react-hooks/set-state-in-effect -- leaving the local-compatible state must synchronously clear the probe window so stale tiers never render one commit
+          setProbedKind(null);
+          setProbePending(false);
+          return;
+        }
+        let cancelled = false;
+        // Enter pending during the debounce window (round-6 P2): no tiers are
+        // offered from the moment the probe is scheduled (the default four
+        // tiers from localProbeTiersForKind(null) are only the fallback for an
+        // unreachable probe; they must not be exposed during the "probe
+        // incoming" window, or the user could pick/save a misleading tier
+        // before the result is known). An unreachable probe (bridge
+        // unsupported/failed) is reset by then/catch to null + pending=false,
+        // landing on the default four tiers.
+        setProbePending(true);
+        setProbedKind(null);
+        // debounce：base_url 是原始输入 state，不 debounce 时逐键触发探测
+        // （Rust 侧缓存 key 含端口/路径，每个中间态都是新 key、各自串行
+        // 探测最坏 ~12s）。停键 400ms 后才发起一次。
+        const timer = setTimeout(() => {
+          if (probeSupported) {
+            // Credentials share the same source as handleTest: a freshly typed
+            // form key wins, otherwise the saved model id lets Rust read the
+            // stored credential — probing an authenticated vLLM (--api-key)
+            // without a key 401s into generic and falsely reports "thinking
+            // tiers are not supported".
+            bridge.models.probeLocalServerKind(baseUrl.trim(), apiKey.trim(), initial.__new ? null : initial.id)
+              .then((kind) => { if (!cancelled) setProbedKind(kind); })
+              // 探测调用本身失败（命令被拒/版本不支持）≠ 探测出 generic：
+              // 置回 null 走 localProbeTiersForKind 的默认四档，不误报「不支持」。
+              .catch(() => { if (!cancelled) setProbedKind(null); })
+              .finally(() => { if (!cancelled) setProbePending(false); });
+          } else {
+            // web 预览无探测能力：保持默认四档（与旧行为一致），不误报不支持。
+            if (!cancelled) setProbedKind(null);
+            if (!cancelled) setProbePending(false);
+          }
+        }, 400);
+        return () => { cancelled = true; clearTimeout(timer); };
+      }, [isLocalCompatible, baseUrl, apiKey, initial.id, initial.__new, probeSupported]);
+      const reasoningEffortTiers = isLocalCompatible
+        ? (probePending ? [] : (localReasoningTiers(model, probedKind) || []))
+        : (reasoningEffortTiersForModel({ preset, model, vendor, base_url: baseUrl, provider_kind: providerKind }) || []);
+      // Local routes (vllm preset / local-compatible endpoints) hit the "always-thinking,
+      // no-control" knowledge table: the effort-tier area shows an "always on" hint instead of probe-unsupported.
+      const localNoControlThinking = (preset === 'local_vllm' || isLocalCompatible)
+        && !!(alwaysThinkingSpecForModel(model) || {}).noControl;
+      // Highlight fallback: the form value is normalized against the static
+      // four tiers (stored low/medium keep their values), but once ollama is
+      // probed only the off/high tiers render, so those values would land on
+      // no button; the display maps to the nearest tier while saving still
+      // uses the original form value, so a stored tier survives switching back
+      // to a four-tier endpoint.
+      const reasoningEffortDisplay = reasoningEffortDisplayForTiers(reasoningEffort, reasoningEffortTiers);
+      // eslint-disable-next-line sonarjs/cognitive-complexity -- settings page aggregates many form branches; splitting needs a dedicated design; tracked via this suppression for now
       function normalizeConnectionTestResult(value, isCodingPlanProvider) {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
           const code = String(value.code || (value.ok ? 'ok' : 'unknown'));
@@ -1390,9 +891,14 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         setEndpointMode(group.endpointMode || '');
         setBaseUrl(nextBaseUrl);
         setModel(nextModel);
+        // 目录项切换是显式换模型:未手动改过档位时按新条目的视觉能力标注预填。
+        if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
         if (!nameTouched) setName(p === 'local_vllm' ? settingsCopy.localModelName(nextModel) : (item.custom ? group.title : (item.title || presetProviderLabel(p, t))));
         setContextWindow(p === 'local_vllm' ? '262144' : '');
         setMaxOutput(p === 'local_vllm' ? '24576' : '');
+        // 换目录项时重置思考深度到该模型的默认档位（vllm→off，其余→high；
+        // 无档位模型置 null = 未显式设置）。带上 nextBaseUrl 以按新 route 判定档位。
+        setReasoningEffort(reasoningEffortForModelSwitch({ preset: p, model: nextModel, vendor: group.vendor || vendor, base_url: nextBaseUrl }));
         if (p !== 'local_vllm') {
           setApiKey('');
           setKeyAction(initial.__new ? 'replace' : 'keep_existing');
@@ -1403,6 +909,25 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         setCustomModel(!!item.custom);
         setProviderModelPickerOpen(false);
         setPickerOpen(false);
+      }
+      // 手输编辑会改变 reasoning-effort route 的字段（model ID / base_url）后，把思考
+      // 深度归一到新 route：仍在档位表内的值保留（不覆盖用户有效选择，如 vLLM 的 high、
+      // 非 K3 moonshot 的 off），不在档位表内的按底座真实等价值回落（如 K3 的 off→low、
+      // medium→high，或 openai_compatible 改到官方 deepseek 端点后档位从无到有 → 默认
+      // high）。与目录选择（chooseModel / applyCatalogItem）的「重置到默认」区分：目录
+      // 选择是显式换模型，手输是改字段，保留有效值更符合直觉且不会误清用户的旧选择。
+      function renormalizeReasoningEffort(modelDescriptor) {
+        setReasoningEffort(normalizeStoredReasoningEffort(modelDescriptor, reasoningEffort));
+      }
+      function handleModelIdChange(value) {
+        setModel(value);
+        renormalizeReasoningEffort({ preset, model: value, vendor, base_url: baseUrl });
+        // 手输模型 ID 命中目录标注同样预填;手动改过档位后不再跟随。
+        if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(value));
+      }
+      function handleBaseUrlChange(value) {
+        setBaseUrl(value);
+        renormalizeReasoningEffort({ preset, model, vendor, base_url: value });
       }
       async function handleTest() {
         if (!bridge.available) return;
@@ -1415,6 +940,27 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           setTestResult(normalizeConnectionTestResult(e, isCodingPlan));
         }
         finally { setTesting(false); }
+      }
+      // 测试图片能力(设计 §7.3):与测试连接同一模式——表单未保存也按当前表单值发测,
+      // 凭据优先用新填的 key,否则由后端按 model_id 读已保存凭据。
+      function normalizeImageCapabilityTestResult(value) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const status = ['supported', 'unsupported', 'unverified', 'error'].includes(value.status) ? value.status : 'error';
+          return { status, verified: !!value.verified, summary: value.summary ? String(value.summary) : '' };
+        }
+        return { status: 'error', verified: false, summary: String(value || '') };
+      }
+      async function handleImageCapabilityTest() {
+        if (!bridge.available || !bridge.models.testImageInputCapability) return;
+        setImageTesting(true); setImageTestResult(null);
+        const testKey = keyAction === 'replace' || (isLocalPreset && localKeyEnabled) ? apiKey.trim() : '';
+        try {
+          const result = await bridge.models.testImageInputCapability(model.trim(), baseUrl.trim(), testKey, initial.__new ? null : initial.id);
+          setImageTestResult(normalizeImageCapabilityTestResult(result));
+        } catch (e) {
+          setImageTestResult({ status: 'error', verified: false, summary: String(e && e.message ? e.message : e) });
+        }
+        finally { setImageTesting(false); }
       }
       // 探测本机 vLLM：只扫 127.0.0.1/localhost 的 8000-8002，探到唯一可用实例直接自动填充。
       function applyCandidate(c) {
@@ -1429,6 +975,8 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         const modelId = preferred ? preferred.id : (c.model || '');
         if (c.base_url) setBaseUrl(c.base_url);
         if (modelId) { setModel(modelId); if (!name.trim()) setName(modelId); }
+        // 与手输模型 ID 同口径:检测回填是显式换模型,未手动改过档位时按标注预填。
+        if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(modelId || ''));
         setApiKey('');
         setKeyAction(initial.__new ? 'replace' : 'keep_existing');
       }
@@ -1487,7 +1035,8 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const showCustomCloudKeyField = !isLocalPreset && customModel;
       const showLocalKeyField = isLocalPreset && localKeyEnabled;
       const showDisplayNameField = isLocalPreset && !initial.__new;
-      const showConfigFields = showDisplayNameField || showModelIdField || showBaseUrlField || showCustomCloudKeyField;
+      const showAliasField = !isLocalPreset;
+      const showConfigFields = showAliasField || showDisplayNameField || showModelIdField || showBaseUrlField || showCustomCloudKeyField;
       const selectedProvider = isLocalPreset ? presetProviderLabel(preset, t) : (activeProvider ? (activeProvider.configTitle || activeProvider.title) : presetProviderLabel(preset, t));
       const selectedModelLabel = model || settingsCopy.customModel;
       const modalTitle = initial.__new
@@ -1517,8 +1066,10 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         }
         setShowKey(nextVisible);
       }
-      function doSave() {
-        if (!canSave) return;
+      // 保存只落盘,不做连接/识图探测:图片输入能力默认「自动处理」
+      // (pinvou 档,内置已验证能力表兜底);需要确证时用表单内「测试图片能力」。
+      async function doSave() {
+        if (!canSave || savingModel) return;
         const id = initial.__new ? ('m_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)) : initial.id;
         const contextTokens = Number.parseInt(contextWindow, 10);
         const outputTokens = Number.parseInt(maxOutput, 10);
@@ -1528,16 +1079,71 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         const nextApiKey = isLocalPreset
           ? (localKeyEnabled && apiKey.trim() ? apiKey.trim() : '')
           : (!isLocalPreset && apiKey.trim() ? apiKey.trim() : '');
-        onSave({
-          id: id, name: saveName, preset: preset,
-          context_window_tokens: Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : null,
-          max_output_tokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : null,
-          model: model.trim(), base_url: baseUrl.trim(),
-          api_key: nextApiKey, credential_action: nextKeyAction,
-          provider_kind: providerKind || null,
-          vendor: vendor || null,
-          endpoint_mode: endpointMode || null,
-        });
+        setSavingModel(true);
+        setSaveError('');
+        try {
+          await onSave({
+            id: id, name: saveName, preset: preset,
+            alias: showAliasField ? (alias.trim() || null) : null,
+            context_window_tokens: Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens : null,
+            max_output_tokens: Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : null,
+            // 仅当前表单模型支持档位时保存；手输 model 变为无档位模型时置 null(#209)。
+            reasoning_effort: reasoningEffortTiers.length > 0 ? (reasoningEffort || null) : null,
+            model: model.trim(), base_url: baseUrl.trim(),
+            api_key: nextApiKey, credential_action: nextKeyAction,
+            provider_kind: providerKind || null,
+            vendor: vendor || null,
+            endpoint_mode: endpointMode || null,
+            // 图片能力/视觉模型(阶段 G):选了自身等同未配置。
+            image_capability_override: imageCapability || 'pinvou',
+            vision_model_id: visionModelId && visionModelId !== id ? visionModelId : null,
+          });
+          onCancel();
+        } catch (e) {
+          // 保存失败(连接/写盘错误):保持弹窗并给行内提示,不丢弃表单输入。
+          setSaveError(String(e && e.message ? e.message : e));
+        } finally {
+          setSavingModel(false);
+        }
+      }
+      // 视觉模型选择:一律识图探测(无表内加速)——识别出测试图(supported)
+      // 才收起列表并选中;未通过则列表保持展开、该模型被拒绝并提示排查,
+      // 用户可继续选择其他模型。
+      async function handleVisionModelChoose(key) {
+        if (visionProbingKey) return; // 探测中忽略其他点击
+        setVisionProbeError(null);
+        if (!key) {
+          setVisionModelId('');
+          setVisionModelPickerOpen(false);
+          return;
+        }
+        const candidate = visionCandidates.find(item => item.id === key);
+        if (!candidate || !bridge.available || !bridge.models.testImageInputCapability) {
+          setVisionModelId(key);
+          setVisionModelPickerOpen(false);
+          return;
+        }
+        setVisionProbingKey(key); // 列表保持展开,该行右侧显示忙转圈
+        try {
+          const result = await bridge.models.testImageInputCapability(
+            candidate.model || candidate.name || '',
+            candidate.base_url || '',
+            '',
+            candidate.id,
+          );
+          if (result && result.status === 'supported') {
+            setVisionModelId(key);
+            setVisionModelPickerOpen(false); // 成功按最终结果收起列表
+          } else {
+            setVisionProbeError(settingsCopy.visionModelProbeError(
+              result && result.summary ? result.summary : ''));
+          }
+        } catch (e) {
+          setVisionProbeError(settingsCopy.visionModelProbeError(
+            String(e && e.message ? e.message : e)));
+        } finally {
+          setVisionProbingKey(null);
+        }
       }
       function makeModelId() {
         return 'm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -1602,6 +1208,13 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         setLocalKeyEnabled(false);
         setCustomModel(true);
         setPickerOpen(false);
+        // 手动添加本地模型是显式切换:未手动改过档位时回到「自动处理」。
+        if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(''));
+        // 本地模型 → 手动添加是显式切换 route：丢弃草稿残留的思考深度，回落到 vLLM
+        // 默认 off（防 SSE timeout）。否则新建 DeepSeek 草稿初始化的 high 会被当成
+        // 合法 vLLM 档位保留，保存时显式写入 reasoning_effort=high，绕过桥接层
+        // 「vllm→off」的默认约束。与 applyCatalogItem / chooseModel 的切换语义一致。
+        setReasoningEffort(reasoningEffortForModelSwitch({ preset: 'local_vllm', model: '', vendor, base_url: defs.baseUrl }));
       }
       const catalogSectionTitleClass = `px-1 mb-2 text-[12px] leading-4 font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`;
       const catalogGroupClass = `overflow-hidden rounded-[16px] bg-[#F2F2F7] dark:bg-[#2C2C2E]`;
@@ -1610,10 +1223,11 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const formDivider = 'border-black/[0.10] dark:border-white/[0.10]';
       const renderProviderModelField = () => {
         const items = activeProvider ? activeProvider.items : [];
-        const known = items.some(item => !item.custom && item.model === model);
-        const selectedItem = known ? items.find(item => !item.custom && item.model === model) : null;
+        const known = items.some(item => !item.custom && catalogItemMatchesModel(item, model));
+        const selectedItem = known ? items.find(item => !item.custom && catalogItemMatchesModel(item, model)) : null;
         const selectedLabel = customModel || !known ? `${settingsCopy.customModel} ID` : ((selectedItem && selectedItem.title) || model);
         const chooseModel = (item) => {
+          const nextModel = (!item || item.custom) ? '' : item.model;
           if (!item || item.custom) {
             setCustomModel(true);
             setModel('');
@@ -1623,6 +1237,13 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             setModel(item.model);
             if (!nameTouched) setName(item.title || item.model);
           }
+          // 同一 provider 内换模型时重置思考深度到新模型的默认档位：K2.6 选 off 后切 K3
+          // 会残留不在 K3 档位表内的 off，界面无高亮且保存仍写旧值；与 applyCatalogItem 一致。
+          setReasoningEffort(reasoningEffortForModelSwitch({ preset, model: nextModel, vendor, base_url: baseUrl }));
+          // Explicit model switches also reset the manual context window so it never leaks across models (same reset discipline as applyCatalogItem).
+          setContextWindow('');
+          // 与 applyCatalogItem 一致:未手动改过档位时按新条目的视觉能力标注预填。
+          if (!imageCapabilityTouched) setImageCapability(imageCapabilityForCatalogModel(nextModel));
           setProviderModelPickerOpen(false);
         };
         return (
@@ -1642,7 +1263,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             {providerModelPickerOpen && (
               <div className={`border-b last:border-b-0 ${formDivider}`}>
                 {items.map(item => {
-                  const active = item.custom ? (customModel || !known) : (!customModel && item.model === model);
+                  const active = item.custom ? (customModel || !known) : (!customModel && catalogItemMatchesModel(item, model));
                   return (
                     <button
                       type="button"
@@ -1653,7 +1274,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                       <span className="min-w-0 flex-1">
                         <span className={`block text-[14px] leading-5 truncate ${active ? ('text-[#007AFF] dark:text-[#64B5F6]') : ('text-[#1C1C1E] dark:text-[#F2F2F7]')}`}>{item.custom ? ((activeProvider && settingsCopy.customModelTitles[activeProvider.key]) || settingsCopy.customModelTitle(selectedProvider)) : (item.title || item.model || `${settingsCopy.customModel} ID`)}</span>
                         {item.desc && <span className={`block mt-0.5 text-[12px] leading-[16px] truncate text-[#8A8A8E] dark:text-[#8E8E93]`}>{item.custom
-                          ? (activeProvider && activeProvider.providerKind === PROVIDER_KIND_CODING_PLAN ? settingsCopy.customCodingPlanDesc : (activeProvider.preset === 'local_vllm' ? settingsCopy.customLocalDesc : (activeProvider.preset === 'openai_compatible' ? settingsCopy.customCompatibleDesc : settingsCopy.customModelDesc)))
+                          ? (activeProvider && activeProvider.key === 'tencent_token_plan' ? settingsCopy.customTokenPlanDesc : (activeProvider && activeProvider.providerKind === PROVIDER_KIND_CODING_PLAN ? settingsCopy.customCodingPlanDesc : (activeProvider.preset === 'local_vllm' ? settingsCopy.customLocalDesc : (activeProvider.preset === 'openai_compatible' ? settingsCopy.customCompatibleDesc : settingsCopy.customModelDesc))))
                           : (settingsCopy.modelDescriptions[item.desc] || item.desc)}</span>}
                       </span>
                       {active && <Check size={17} strokeWidth={2.4} className={'text-[#007AFF] dark:text-[#64B5F6]'} />}
@@ -1665,13 +1286,13 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             {(customModel || !known) && renderInlineField({
               label: settingsCopy.modelId,
               value: model,
-              onChange: e => setModel(e.target.value),
+              onChange: e => handleModelIdChange(e.target.value),
               placeholder: isCodingPlan ? t.uiSettingsView.codingPlanModelIdPlaceholder : settingsCopy.modelIdPlaceholder,
             })}
           </>
         );
       };
-      const renderInlineField = ({ label, value, onChange, placeholder, type = 'text', trailing, readOnly = false }) => (
+      const renderInlineField = ({ label, value, onChange, placeholder, type = 'text', trailing, readOnly = false, testId, inputMode, spellCheck }) => (
         <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
           <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>{label}</label>
           <input
@@ -1680,6 +1301,9 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             onChange={onChange}
             readOnly={readOnly}
             placeholder={placeholder}
+            data-testid={testId}
+            inputMode={inputMode}
+            spellCheck={spellCheck}
             className={`min-w-0 flex-1 bg-transparent text-right text-[14px] leading-5 outline-none text-[#1C1C1E] placeholder:text-[#8A8A8E] dark:text-[#F2F2F7] dark:placeholder:text-[#636366] ${readOnly ? 'cursor-default' : ''}`}
           />
           {trailing}
@@ -1728,10 +1352,10 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               <div className={catalogSectionTitleClass}>{group.providerKind === PROVIDER_KIND_CODING_PLAN ? group.title : presetProviderLabel(group.preset, t)}</div>
               <div className={catalogGroupClass}>
                 {group.items.map(item => {
-                  const active = preset === group.preset && model === item.model && !item.custom;
+                  const active = preset === group.preset && !item.custom && catalogItemMatchesModel(item, model);
                   const itemTitle = item.custom ? (settingsCopy.customModelTitles[group.key] || settingsCopy.customModelTitle(presetProviderLabel(group.preset, t))) : item.title;
                   const itemDescription = item.custom
-                    ? (group.providerKind === PROVIDER_KIND_CODING_PLAN ? settingsCopy.customCodingPlanDesc : (group.preset === 'local_vllm' ? settingsCopy.customLocalDesc : (group.preset === 'openai_compatible' ? settingsCopy.customCompatibleDesc : settingsCopy.customModelDesc)))
+                    ? (group.key === 'tencent_token_plan' ? settingsCopy.customTokenPlanDesc : (group.providerKind === PROVIDER_KIND_CODING_PLAN ? settingsCopy.customCodingPlanDesc : (group.preset === 'local_vllm' ? settingsCopy.customLocalDesc : (group.preset === 'openai_compatible' ? settingsCopy.customCompatibleDesc : settingsCopy.customModelDesc))))
                     : (settingsCopy.modelDescriptions[item.desc] || item.desc);
                   return (
                     <button
@@ -1811,6 +1435,137 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               </div>
             </section>
           </div>
+        );
+      };
+      // 图片输入能力 + 兜底视觉模型(阶段 G):与发送时后端复核同一组 SavedModel 字段。
+      const imageCapabilityOptions = [
+        // pinvou 决策(pinvou,默认):内置已验证表判断,不探测;能(enabled)/
+        // 不能(disabled):人工钉死。
+        { key: 'pinvou', label: settingsCopy.imageCapabilityPinvou },
+        { key: 'enabled', label: settingsCopy.imageCapabilityEnabled },
+        { key: 'disabled', label: settingsCopy.imageCapabilityDisabled },
+      ];
+      // 视觉兜底候选:显示除当前模型外的全部模型,不做能力过滤——选择时
+      // 一律识图探测,supported 才允许选中(探测是唯一闸门;disabled 可能是
+      // 历史探测误判残留,不应隐藏,如 kimi-for-coding)。
+      const visionCandidates = (models || []).filter(item => item && item.id && item.id !== initial.id);
+      const visionOptions = [{ key: '', label: settingsCopy.visionModelNone }]
+        .concat(visionCandidates.map(item => ({ key: item.id, label: selectorMainLabel(item, t) || item.model })));
+      const renderPickerRow = ({ testId, label, value, options, currentKey, open, onToggle, onChoose, probingKey, probeError }) => (
+        <>
+          <button
+            type="button"
+            data-testid={`${testId}-toggle`}
+            onClick={onToggle}
+            className={`w-full min-h-[54px] flex items-center gap-3 px-4 py-2.5 text-left border-b last:border-b-0 ${formDivider}`}
+          >
+            <span className={`shrink-0 text-[14px] leading-5 ${isDark ? 'text-[#F2F2F7]' : 'text-[#1C1C1E]'}`}>{label}</span>
+            <span className={`min-w-0 flex-1 text-right text-[14px] leading-5 truncate ${isDark ? 'text-[#F2F2F7]' : 'text-[#1C1C1E]'}`}>{value}</span>
+            <ChevronDown
+              size={16}
+              className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''} ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}
+            />
+          </button>
+          {open && (
+            <div className={`border-b last:border-b-0 ${formDivider}`}>
+              {options.map(option => {
+                const active = option.key === currentKey;
+                const probing = probingKey === option.key;
+                return (
+                  <button
+                    type="button"
+                    data-testid={`${testId}-option-${option.key || 'none'}`}
+                    key={option.key || '__none__'}
+                    onClick={() => onChoose(option.key)}
+                    disabled={probingKey ? !probing : false}
+                    className={`w-full min-h-[50px] flex items-center gap-3 pl-7 pr-4 py-2.5 text-left border-b last:border-b-0 ${isDark ? 'border-white/[0.08] hover:bg-white/[0.06]' : 'border-black/[0.08] hover:bg-black/[0.035]'} ${probing ? 'opacity-70' : ''}`}
+                  >
+                    <span className={`min-w-0 flex-1 text-[14px] leading-5 truncate ${active ? (isDark ? 'text-[#64B5F6]' : 'text-[#007AFF]') : (isDark ? 'text-[#F2F2F7]' : 'text-[#1C1C1E]')}`}>{option.label}</span>
+                    {probing ? (
+                      <span data-testid={`${testId}-probing`} className="shrink-0 flex items-center gap-1.5 text-[12px] leading-4 text-[#0A84FF]">
+                        <RefreshCw size={13} className="animate-spin" />
+                        {settingsCopy.visionModelProbing}
+                      </span>
+                    ) : active ? <Check size={17} strokeWidth={2.4} className={isDark ? 'text-[#64B5F6]' : 'text-[#007AFF]'} /> : null}
+                  </button>
+                );
+              })}
+              {probeError && (
+                <div data-testid={`${testId}-probe-error`} className={`px-7 py-2.5 text-[12px] leading-4 border-b last:border-b-0 ${isDark ? 'text-[#FFD60A] border-white/[0.08]' : 'text-[#B25E00] border-black/[0.08]'}`}>{probeError}</div>
+              )}
+            </div>
+          )}
+        </>
+      );
+      const renderImageInputSection = () => {
+        const capabilityLabel = (imageCapabilityOptions.find(option => option.key === imageCapability) || imageCapabilityOptions[0]).label;
+        const visionLabel = (visionOptions.find(option => option.key === visionModelId) || visionOptions[0]).label;
+        // 结果文案:supported 附模型回复摘要;仅当结果为 supported 且档位为「自动处理」时提示可设「支持图片」。
+        // unverified(未识别出测试色 / 400 非图片拒绝)统一「原因未知」,不得宣称支持或不支持。
+        const imageTestText = !imageTestResult
+          ? settingsCopy.imageCapabilityTestHint
+          : imageTestResult.status === 'supported'
+            ? settingsCopy.imageCapabilityTestSupported
+              + (imageTestResult.summary ? ` · ${settingsCopy.imageCapabilityTestReply(imageTestResult.summary)}` : '')
+              + (imageCapability === 'pinvou' ? ` · ${settingsCopy.imageCapabilityTestEnableHint}` : '')
+            : imageTestResult.status === 'unsupported'
+              ? settingsCopy.imageCapabilityTestUnsupported + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '')
+              : imageTestResult.status === 'unverified'
+                // 后端 summary 已自带「未能正确识别图像，原因未知」完整句,直接展示避免重复。
+                ? (imageTestResult.summary || settingsCopy.imageCapabilityTestUnverified)
+                : settingsCopy.imageCapabilityTestError + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '');
+        const imageTestColor = !imageTestResult
+          ? (isDark ? 'text-[#98989D]' : 'text-[#8A8A8E]')
+          : imageTestResult.status === 'supported'
+            ? (isDark ? 'text-[#93D5A6]' : 'text-[#137333]')
+            : imageTestResult.status === 'unsupported'
+              ? (isDark ? 'text-[#FFD60A]' : 'text-[#FF9500]')
+              : imageTestResult.status === 'unverified'
+                ? (isDark ? 'text-[#FFD60A]' : 'text-[#B25E00]')
+                : 'text-[#FF3B30]';
+        return (
+          <section>
+            <div className={formGroup}>
+              {renderPickerRow({
+                testId: 'image-capability',
+                label: settingsCopy.imageCapability,
+                value: capabilityLabel,
+                options: imageCapabilityOptions,
+                currentKey: imageCapability,
+                open: imageCapabilityPickerOpen,
+                onToggle: () => { setImageCapabilityPickerOpen(open => !open); setVisionModelPickerOpen(false); },
+                onChoose: key => { setImageCapability(key); setImageCapabilityTouched(true); setImageCapabilityPickerOpen(false); },
+              })}
+              {renderPickerRow({
+                testId: 'vision-model',
+                label: settingsCopy.visionModel,
+                value: visionLabel,
+                options: visionOptions,
+                currentKey: visionModelId,
+                open: visionModelPickerOpen,
+                onToggle: () => { setVisionModelPickerOpen(open => !open); setImageCapabilityPickerOpen(false); },
+                onChoose: handleVisionModelChoose,
+                // 选择探测:探测中该行右侧显示忙转圈,未通过在该行下方提示排查。
+                probingKey: visionProbingKey,
+                probeError: visionProbeError,
+              })}
+            </div>
+            <div className={`px-1 mt-1.5 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.visionModelDesc}</div>
+            {/* §11.8/§11.9 静态隐私说明:云端模型图片随消息外发,本地模型图片不离开本机。 */}
+            <div data-testid="image-privacy-desc" className={`px-1 mt-1 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.imagePrivacyDesc}</div>
+            <div className={`mt-3 ${formGroup}`}>
+              <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
+                <span data-testid="image-capability-test-result" className={`min-w-0 flex-1 text-[13px] leading-5 ${imageTestColor}`}>
+                  {imageTestText}
+                </span>
+                <button type="button" data-testid="image-capability-test" onClick={handleImageCapabilityTest}
+                  disabled={imageTesting || !model.trim() || !baseUrl.trim()}
+                  className={`shrink-0 min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-45 ${isDark ? 'bg-[#0A84FF]/20 text-[#0A84FF] hover:bg-[#0A84FF]/28' : 'bg-[#007AFF]/10 text-[#007AFF] hover:bg-[#007AFF]/16'}`}>
+                  {imageTesting ? t.testingConn : settingsCopy.imageCapabilityTest}
+                </button>
+              </div>
+            </div>
+          </section>
         );
       };
       if (initial.__new && pickerOpen) {
@@ -1899,9 +1654,49 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                   {keyRevealError && <div className="px-1 mt-1.5 text-[12px] leading-4 text-[#FF3B30]">{keyRevealError}</div>}
                 </section>
               )}
+              {(showConfigFields && (reasoningEffortTiers.length > 0 || isLocalCompatible || localNoControlThinking)) && (
+                <section>
+                  <div className={formGroup}>
+                    <div className="min-h-[54px] flex items-center gap-3 px-4 py-2.5">
+                      <span className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>{settingsCopy.reasoningEffort}</span>
+                      {reasoningEffortTiers.length > 0 ? (
+                        <div className="ml-auto flex flex-wrap justify-end gap-1">
+                          {reasoningEffortTiers.map(tier => (
+                            <button
+                              key={tier}
+                              type="button"
+                              onClick={() => setReasoningEffort(tier)}
+                              className={`h-7 min-w-[52px] px-3 rounded-full text-[13px] font-medium transition-colors ${
+                                reasoningEffortDisplay === tier
+                                  ? 'bg-[#007AFF] text-white dark:bg-[#0A84FF]'
+                                  : 'bg-[#E5E5EA] text-[#636366] hover:bg-[#D9D9DE] dark:bg-white/[0.07] dark:text-[#C7C7CC] dark:hover:bg-white/[0.12]'
+                              }`}
+                            >{settingsCopy.reasoningEffortTiers[tier] || tier}</button>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className={`ml-auto text-right text-[12px] leading-4 ${probePending ? 'text-[#8A8A8E] dark:text-[#98989D]' : 'text-[#FF9500] dark:text-[#FFB340]'}`}>
+                          {probePending
+                            ? (settingsCopy.reasoningProbePending || '正在探测服务类型…')
+                            : localNoControlThinking
+                              ? (settingsCopy.reasoningThinkingAlwaysOn || '该模型思考始终开启，无法关闭')
+                              : (settingsCopy.reasoningProbeUnsupported || '该端点不支持思考档位调节')}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              )}
               {showConfigFields && (
                 <section>
                   <div className={formGroup}>
+                    {showAliasField && renderInlineField({
+                      label: settingsCopy.modelAlias,
+                      value: alias,
+                      onChange: e => setAlias(e.target.value),
+                      placeholder: settingsCopy.modelAliasPlaceholder,
+                      testId: 'model-form-alias',
+                    })}
                     {showDisplayNameField && renderInlineField({
                       label: t.modelDisplayName,
                       value: name,
@@ -1909,7 +1704,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                       placeholder: settingsCopy.localModel,
                     })}
                     {showProviderModelField && renderProviderModelField()}
-                    {showModelIdField && !showProviderModelField && renderInlineField({ label: isLocalPreset ? settingsCopy.localModelId : settingsCopy.modelId, value: model, onChange: e => setModel(e.target.value), placeholder: isLocalPreset ? '' : settingsCopy.modelIdPlaceholder })}
+                    {showModelIdField && !showProviderModelField && renderInlineField({ label: isLocalPreset ? settingsCopy.localModelId : settingsCopy.modelId, value: model, onChange: e => handleModelIdChange(e.target.value), placeholder: isLocalPreset ? '' : settingsCopy.modelIdPlaceholder })}
                     {showCustomCloudKeyField && (
                       <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
                         <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>API Key</label>
@@ -1919,7 +1714,29 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                         <button type="button" onClick={toggleApiKeyVisibility} className="shrink-0 text-[14px] text-[#007AFF]">{showKey ? settingsCopy.hide : settingsCopy.show}</button>
                       </div>
                     )}
-                    {showBaseUrlField && renderInlineField({ label: t.customBaseUrl, value: baseUrl, onChange: e => setBaseUrl(e.target.value) })}
+                    {showBaseUrlField && renderInlineField({ label: t.customBaseUrl, value: baseUrl, onChange: e => handleBaseUrlChange(e.target.value) })}
+                    {/* Context window (optional for cloud models): a newly released
+                        model ID not yet in the catalog cannot be resolved by it, so
+                        the runtime falls back to the conservative 128K window.
+                        Declaring the vendor's rated value here makes route_limits
+                        prefer it; empty = null = today's default (existing doSave
+                        semantics, no change to any stored behavior). local_vllm
+                        presets do not show this field (the probed max_model_len is
+                        the authoritative window); an openai_compatible endpoint
+                        pointing at localhost still shows it, with over-declared
+                        values min-clamped against the runtime probe. Input is
+                        truncated to 9 digits: context_window_tokens is persisted
+                        as u32, so longer input would fail save_model with a raw
+                        deserialization error (or Infinity silently saving null). */}
+                    {!isLocalPreset && renderInlineField({
+                      label: t.modelContextWindow,
+                      value: contextWindow,
+                      onChange: e => setContextWindow(e.target.value.replaceAll(/[^0-9]/g, '').slice(0, 9)), // eslint-disable-line sonarjs/concise-regex -- keep [^0-9] literal instead of \D; readability first
+                      placeholder: settingsCopy.modelContextWindowPlaceholder,
+                      testId: 'model-form-context-window',
+                      inputMode: 'numeric',
+                      spellCheck: false,
+                    })}
                     {isLocalPreset && (
                       <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
                         <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>{settingsCopy.apiKeyRequired}</label>
@@ -1940,9 +1757,13 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                       </div>
                     )}
                   </div>
+                  {!isLocalPreset && (
+                    <div className={`px-1 mt-1.5 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.modelContextWindowHint}</div>
+                  )}
                   {keyRevealError && <div className="px-1 mt-1.5 text-[12px] leading-4 text-[#FF3B30]">{keyRevealError}</div>}
                 </section>
               )}
+              {renderImageInputSection()}
               {showConfigFields && (
                 <section>
                   <div className={formGroup}>
@@ -2024,50 +1845,269 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                 </div>
               )}
             </div>
+            {/* 保存失败行内提示:弹窗保持,交用户修正后重试。 */}
+            {saveError && (
+              <div data-testid="model-form-save-error" className={`px-5 py-3 border-t ${formDivider}`}>
+                <div className={`text-[13px] leading-5 ${isDark ? 'text-[#FF453A]' : 'text-[#D70015]'}`}>
+                  {settingsCopy.imageCapabilitySaveFailed(saveError)}
+                </div>
+              </div>
+            )}
             <div className={`flex justify-end gap-2 px-5 py-4 border-t ${formDivider}`}>
               <button data-testid="model-form-cancel" onClick={onCancel} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{t.cpCancel}</button>
-              <button onClick={doSave} disabled={!canSave}
-                className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">{t.modelSaveBtn}</button>
+              <button data-testid="model-form-save" onClick={() => doSave()} disabled={!canSave || savingModel}
+                className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">
+                {savingModel ? settingsCopy.saving : t.modelSaveBtn}
+              </button>
             </div>
           </div>
         </div>
       );
     };
 
-    const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = ['bing'], onAddSearchProvider, onDeleteSearchProvider, searchApiKey, setSearchApiKey, searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart, languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
-      const settingsCopy = t.uiSettingsDetail;
+    // ==========================================
+    // Settings subcomponents (module scope: types stay stable across renders, avoiding subtree remounts)
+    // ==========================================
+    /** @param {{ title?: string, children: import('react').ReactNode, footer?: string }} props - Section chrome. */
+    const IOSSection = ({ title, children, footer }) => (
+      <section className="mb-6">
+        {title && <div className={`px-3 mb-2 text-[12px] font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`}>{title}</div>}
+        <div className={`overflow-hidden rounded-[18px] bg-white dark:bg-[#2C2C2E]`}>{children}</div>
+        {footer && <div className={`px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]`}>{footer}</div>}
+      </section>
+    );
+    /** @param {{ label: string, desc?: string, value?: string, children?: import('react').ReactNode, onClick?: () => void, danger?: boolean, testId?: string }} props - Row content and optional click behavior. */
+    const IOSRow = ({ label, desc, value, children, onClick, danger, testId }) => {
+      const RowTag = onClick ? 'button' : 'div';
+      return (
+      <RowTag
+        type={onClick ? 'button' : undefined}
+        onClick={onClick}
+        data-testid={testId}
+        className={`w-full min-h-[58px] flex flex-wrap items-center gap-3 px-4 py-2.5 text-left border-b last:border-b-0 max-sm:flex-col max-sm:items-stretch ${
+          'border-black/[0.12] text-[#1C1C1E] dark:border-white/[0.10] dark:text-[#F2F2F7]'
+        } ${onClick ? ('hover:bg-black/[0.035] dark:hover:bg-white/[0.05]') : ''}`}
+      >
+        <div className="flex-1 min-w-[120px] max-sm:min-w-0">
+          <div className={`text-[15px] leading-5 font-normal whitespace-nowrap ${danger ? 'text-[#FF3B30]' : ''}`}>{label}</div>
+          {desc && <div className={`mt-0.5 text-[13px] leading-5 text-[#8A8A8E] dark:text-[#98989D]`}>{desc}</div>}
+        </div>
+        {value && <div className={`text-[14px] shrink-0 text-[#8A8A8E] dark:text-[#98989D]`}>{value}</div>}
+        {children}
+      </RowTag>
+      );
+    };
+    /** @param {{ checked: boolean, onChange: (checked: boolean) => void, disabled?: boolean, ariaLabel?: string }} props - Switch state. */
+    const IOSSwitch = ({ checked, onChange, disabled, ariaLabel }) => <Toggle checked={checked} onChange={onChange} disabled={disabled} aria-label={ariaLabel} size="md" />;
+    /** @param {{ id: string, icon: import('react').ReactNode, label: string, dot?: boolean, active: boolean, onSelect: (id: string) => void }} props - Sidebar section entry. */
+    const SectionButton = ({ id, icon, label, dot, active, onSelect }) => (
+      <button
+        type="button"
+        data-testid={`settings-section-${id}`}
+        onClick={() => onSelect(id)}
+        className={`w-full h-10 px-3 rounded-[14px] flex items-center gap-2.5 text-[14px] transition-colors max-sm:w-auto max-sm:shrink-0 ${
+          active
+            ? ('bg-[#D8EAFE] text-[#007AFF] dark:bg-[#173A5E] dark:text-[#64B5F6]')
+            : ('text-[#1C1C1E] hover:bg-black/[0.04] dark:text-[#F2F2F7] dark:hover:bg-white/[0.06]')
+        }`}
+      >
+        <span className={`w-7 h-7 rounded-[9px] flex items-center justify-center ${active ? 'bg-[#007AFF]/10' : ('bg-black/[0.05] dark:bg-white/[0.08]')}`}>{icon}</span>
+        <span className="font-semibold truncate">{label}</span>
+        {dot && <span className="ml-auto w-2.5 h-2.5 rounded-full bg-[#FF3B30]" />}
+      </button>
+    );
+    /** @param {{ children: import('react').ReactNode }} props - Grouped rows. */
+    const Group = ({ children }) => (
+      <div className={`overflow-hidden rounded-[18px] border bg-white border-black/[0.03] dark:bg-[#2C2C2E] dark:border-white/[0.04]`}>{children}</div>
+    );
+    /** @param {{ children: import('react').ReactNode }} props - Small section heading. */
+    const SectionTitle = ({ children }) => (
+      <div className={`px-3 mb-2 text-[12px] leading-4 font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`}>{children}</div>
+    );
+    /** @param {{ active: boolean }} props - Selection state. */
+    const RadioDot = ({ active }) => (
+      <span className={`block w-5 h-5 rounded-full border-[3px] ${active ? 'border-[#007AFF]' : ('border-[#AEAEB2] dark:border-[#636366]')}`}>
+        {active && <span className="block w-2 h-2 rounded-full bg-[#007AFF] mx-auto mt-[3px]" />}
+      </span>
+    );
+    /** @param {{ children: import('react').ReactNode, tone?: string }} props - Inline status chip. */
+    const Tag = ({ children, tone = 'green' }) => (
+      <span className={`shrink-0 text-[12px] px-2 py-0.5 rounded-md ${
+        tone === 'gray'
+          ? ('bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]')
+          : 'bg-[#34C759]/15 text-[#248A3D]'
+      }`}>{children}</span>
+    );
+    /**
+     * @param {{
+     *   provider: string, isNew: boolean, onClose: () => void, searchOptions: { key: string, label: string, desc: string }[],
+     *   searchHasKey: (provider: string) => boolean,
+     *   settingsCopy: { editSearch: string, apiKeyPlaceholder: string, show: string, hide: string, save: string, cancel: string },
+     *   onAddSearchProvider?: (provider: string) => void, setSearchApiKey: (key: string, provider: string) => void,
+     *   setRestartDialog: (next: string | null) => void,
+     * }} props - Search-source editor modal state and actions.
+     */
+    const SearchSourceModal = ({ provider, isNew, onClose, searchOptions, searchHasKey, settingsCopy, onAddSearchProvider, setSearchApiKey, setRestartDialog }) => {
+      const option = searchOptions.find(x => x.key === provider);
+      const [showSearchKey, setShowSearchKey] = useState(false);
+      const [draftKey, setDraftKey] = useState('');
+      const hasSavedKey = searchHasKey(provider);
+      const canSaveSearch = (provider === 'bing' && isNew) || !!String(draftKey || '').trim();
+      useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- reset the in-progress draft when switching search providers while the modal is open; controlled mirror of the provider prop
+        setDraftKey('');
+        setShowSearchKey(false);
+      }, [provider]);
+      return (
+        // biome-ignore lint/a11y/useKeyWithClickEvents: background click-to-close layer; keyboard path handled by the close button at the modal top-right
+        // biome-ignore lint/a11y/noStaticElementInteractions: background click-to-close layer; non-interactive container
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 animate-in fade-in duration-150" onClick={onClose}>
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: click-bubbling stop layer; keyboard events need no bubbling */}
+          {/* biome-ignore lint/a11y/noStaticElementInteractions: click-bubbling stop layer; non-interactive container */}
+          <div onClick={e => e.stopPropagation()}
+            className={`w-[430px] max-w-[90vw] max-h-[76vh] overflow-y-auto custom-scrollbar rounded-[22px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#1C1C1E] dark:text-[#F2F2F7]`}>
+            <div className={`px-5 py-4 flex items-start justify-between gap-4 border-b border-black/[0.10] dark:border-white/[0.10]`}>
+              <div>
+                <h2 className="text-[20px] leading-6 font-semibold">{settingsCopy.editSearch}</h2>
+                <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{option ? option.label : provider}</p>
+              </div>
+              <button type="button" onClick={onClose} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
+            </div>
+            <div className="space-y-4 px-5 py-4">
+              <section>
+                <div className={`overflow-hidden rounded-[16px] bg-[#F2F2F7] dark:bg-[#2C2C2E]`}>
+                  <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>
+                  {/* biome-ignore lint/a11y/noLabelWithoutControl: field label and input are siblings; the label has no htmlFor association, switching to span would deviate from the existing structure */}
+                  <label className="shrink-0 text-[14px] leading-5">API Key</label>
+                  <input type="text" value={draftKey} onChange={e => setDraftKey(e.target.value)}
+                    // biome-ignore lint/a11y/noAutofocus: the edit-search-source modal focuses the key input on open; focus is the input intent
+                    autoFocus
+                    placeholder={hasSavedKey ? '••••••••' : settingsCopy.apiKeyPlaceholder}
+                    style={showSearchKey ? undefined : { WebkitTextSecurity: 'disc' }}
+                    className={`min-w-0 flex-1 bg-transparent text-right text-[14px] leading-5 outline-none placeholder:text-[#8A8A8E] dark:placeholder:text-[#636366]`} />
+                  <button type="button" onClick={() => setShowSearchKey(v => !v)} className="shrink-0 text-[14px] text-[#007AFF]">{showSearchKey ? settingsCopy.hide : settingsCopy.show}</button>
+                  </div>
+                </div>
+              </section>
+            </div>
+            <div className={`flex justify-end gap-2 px-5 py-4 border-t border-black/[0.10] dark:border-white/[0.10]`}>
+              <button type="button" onClick={onClose} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{settingsCopy.cancel}</button>
+              <button type="button" onClick={() => {
+                if (!canSaveSearch) return;
+                if (isNew) onAddSearchProvider && onAddSearchProvider(provider);
+                if (draftKey.trim()) setSearchApiKey(draftKey, provider);
+                onClose();
+                setRestartDialog('search');
+              }} disabled={!canSaveSearch} className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">{settingsCopy.save}</button>
+            </div>
+          </div>
+        </div>
+      );
+    };
+    /** @param {{ type: string, settingsCopy: { restartSearchTitle: string, restartLanguageTitle: string, restartSearchDesc: string, restartLanguageDesc: string, later: string, restartNow: string }, onSaveSearchConfig?: () => unknown, onConfirmSearchConfig: () => unknown, setRestartDialog: (next: string | null) => void }} props - Restart prompt state and actions. */
+    const RestartDialog = ({ type, settingsCopy, onSaveSearchConfig, onConfirmSearchConfig, setRestartDialog }) => (
+      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+        <div className={`w-[340px] overflow-hidden rounded-[18px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
+          <div className="px-6 pt-6 pb-5 text-center">
+            <h3 className="text-[18px] font-semibold">{type === 'search' ? settingsCopy.restartSearchTitle : settingsCopy.restartLanguageTitle}</h3>
+            <p className={`mt-2 text-[14px] leading-5 text-[#8A8A8E] dark:text-[#98989D]`}>{type === 'search' ? settingsCopy.restartSearchDesc : settingsCopy.restartLanguageDesc}</p>
+          </div>
+          <div className={`grid grid-cols-2 border-t border-black/[0.12] dark:border-white/[0.12]`}>
+            <button type="button" onClick={async () => {
+              if (type === 'search' && onSaveSearchConfig) {
+                const saved = await onSaveSearchConfig();
+                if (saved === false) return;
+              }
+              setRestartDialog(null);
+            }} className={`h-12 text-[17px] font-semibold border-r border-black/[0.12] text-[#007AFF] dark:border-white/[0.12] dark:text-[#0A84FF]`}>{settingsCopy.later}</button>
+            <button type="button" onClick={() => { setRestartDialog(null); type === 'search' ? onConfirmSearchConfig() : (bridge.available && bridge.updater.restartApp()); }} className="h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.restartNow}</button>
+          </div>
+        </div>
+      </div>
+    );
+    /** @param {{ model: SettingsModelEntry, settingsCopy: { deleteModelTitle: string, deleteModelDesc: string, deleteModel: string, cancel: string }, onDeleteModel: (model: SettingsModelEntry) => void, setModelDeleteConfirm: (next: SettingsModelEntry | null) => void }} props - Delete-model confirm state and actions. */
+    const ModelDeleteDialog = ({ model, settingsCopy, onDeleteModel, setModelDeleteConfirm }) => (
+      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+        <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
+          <div className="px-5 pt-5 pb-4 text-center">
+            <h3 className="text-[17px] leading-6 font-semibold">{settingsCopy.deleteModelTitle}</h3>
+            <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.deleteModelDesc}</p>
+          </div>
+          <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
+            <button type="button" onClick={() => { onDeleteModel(model); setModelDeleteConfirm(null); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{settingsCopy.deleteModel}</button>
+            <button type="button" onClick={() => setModelDeleteConfirm(null)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.cancel}</button>
+          </div>
+        </div>
+      </div>
+    );
+    /** @param {{ source: { key: string, label: string }, settingsCopy: { deleteSearchTitle: string, deleteSearchDesc: (label: string) => string, deleteSearch: string, cancel: string }, onDeleteSearchProvider?: (key: string) => void, setSearchDeleteConfirm: (next: { key: string, label: string } | null) => void, setRestartDialog: (next: string | null) => void }} props - Delete-search confirm state and actions. */
+    const SearchDeleteDialog = ({ source, settingsCopy, onDeleteSearchProvider, setSearchDeleteConfirm, setRestartDialog }) => (
+      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
+        <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
+          <div className="px-5 pt-5 pb-4 text-center">
+            <h3 className="text-[17px] leading-6 font-semibold">{settingsCopy.deleteSearchTitle}</h3>
+            <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.deleteSearchDesc(source.label)}</p>
+          </div>
+          <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
+            <button type="button" onClick={() => { onDeleteSearchProvider && onDeleteSearchProvider(source.key); setSearchDeleteConfirm(null); setRestartDialog('search'); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{settingsCopy.deleteSearch}</button>
+            <button type="button" onClick={() => setSearchDeleteConfirm(null)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.cancel}</button>
+          </div>
+        </div>
+      </div>
+    );
+
+    /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
+    // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
+    const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
+      const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
       const usesBundledDependencyInstaller = !!platformCapabilities.usesBundledDependencyInstaller;
       const usesHomebrewDependencyInstaller = !!platformCapabilities.usesHomebrewDependencyInstaller;
-      const [activeSection, setActiveSection] = useState(initialSection || 'general');
+      // 「ACP 管理」（原 Provider 管理）并入模型设置页：activeSection 用 'model'，
+      // modelTab 区分「模型 / ACP 管理」两个子页；深链 initialSection='providers'
+      // （代码页错误横幅等入口）映射为模型页 + ACP 子页。
+      const [activeSection, setActiveSection] = useState(initialSection === 'providers' ? 'model' : (initialSection || 'general'));
+      const [modelTab, setModelTab] = useState(initialSection === 'providers' ? 'acp' : 'models');
       const canUsePet = can('pet');
       const canUseSuperPermission = can('superPermission');
       const canUpdateApp = can('appUpdate');
       const canInstallDependencies = can('dependencyInstall');
       const canConfigureDesktopNotifications = can('desktopNotifications');
       const canManageModels = can('modelManagement');
+      const acpProvidersTabVisible = !!platformCapabilities.codexAcpSupported;
       const canPickHostFiles = can('hostFilePicker');
       const [editingModel, setEditingModel] = useState(null);
-      const [modelDeleteConfirm, setModelDeleteConfirm] = useState(null);
+      const [modelDeleteConfirm, setModelDeleteConfirm] = useState(/** @type {SettingsModelEntry | null} */ (null));
       const [platformCatalog, setPlatformCatalog] = useState({ items: [] });
       const [platformCatalogState, setPlatformCatalogState] = useState('idle');
       const [platformDefaultBusy, setPlatformDefaultBusy] = useState('');
       const [editingSearch, setEditingSearch] = useState(null);
       const [pendingSearchProvider, setPendingSearchProvider] = useState(null);
-      const [searchDeleteConfirm, setSearchDeleteConfirm] = useState(null);
+      const [searchDeleteConfirm, setSearchDeleteConfirm] = useState(/** @type {{ key: string, label: string } | null} */ (null));
       const [searchPickerOpen, setSearchPickerOpen] = useState(false);
-      const [restartDialog, setRestartDialog] = useState(null);
+      const [restartDialog, setRestartDialog] = useState(/** @type {string | null} */ (null));
       const modelEnvLocked = (bs && bs.effectiveModelConfig && bs.effectiveModelConfig.env_overrides) || [];
       const [feedbackOpen, setFeedbackOpen] = useState(false);
       const [feedbackDraft, setFeedbackDraft] = useState({ type: 'issue', title: '', description: '', attachments: [] });
       const [feedbackStatus, setFeedbackStatus] = useState({ state: 'idle', message: '', receipt: null });
       const [feedbackNotice, setFeedbackNotice] = useState('');
       const [archivedDeleteConfirm, setArchivedDeleteConfirm] = useState(null);
+      const [behaviorTelemetryBusy, setBehaviorTelemetryBusy] = useState(false);
+      const [behaviorTelemetryError, setBehaviorTelemetryError] = useState('');
       const versionUpdateRef = useRef(null);
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const archivedSessions = (bs && bs.archivedSessions) || [];
       const memorySettingsVisible = !!(bs && bs.settings && bs.settings.language === 'zh-Hans');
+      const behaviorTelemetry = (bs && bs.behaviorTelemetry) || {
+        configured: false,
+        enabled: false,
+        user_enabled: null,
+        withdrawal_pending: false,
+        retention_days: 35,
+        pending_event_count: 0,
+        dropped_event_count: 0,
+      };
       const feedbackTypes = [
         { key: 'issue', label: t.feedbackIssue },
         { key: 'suggestion', label: t.feedbackSuggestion },
@@ -2087,7 +2127,12 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         });
       }, [canUpdateApp, updateFocusTick]);
       useEffect(() => {
-        if (initialSection) setActiveSection(initialSection);
+        if (initialSection === 'providers') {
+          setActiveSection('model');
+          setModelTab('acp');
+        } else if (initialSection) {
+          setActiveSection(initialSection);
+        }
       }, [initialSection]);
       useEffect(() => {
         if (activeSection !== 'model' || !accountPlatformClient) return undefined;
@@ -2114,6 +2159,22 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         const timer = window.setTimeout(() => setFeedbackNotice(''), 2600);
         return () => window.clearTimeout(timer);
       }, [feedbackNotice]);
+      const toggleBehaviorTelemetry = async enabled => {
+        if (!bridge.available || behaviorTelemetryBusy) return;
+        const confirmation = enabled
+          ? settingsCopy.behaviorAnalyticsEnableConfirm
+          : settingsCopy.behaviorAnalyticsDisableConfirm;
+        if (!window.confirm(confirmation)) return;
+        setBehaviorTelemetryBusy(true);
+        setBehaviorTelemetryError('');
+        try {
+          await bridge.settings.setBehaviorTelemetryEnabled(enabled);
+        } catch (error) {
+          setBehaviorTelemetryError(String(error || settingsCopy.behaviorAnalyticsActionFailed));
+        } finally {
+          setBehaviorTelemetryBusy(false);
+        }
+      };
       const resetFeedback = () => {
         setFeedbackDraft({ type: 'issue', title: '', description: '', attachments: [] });
         setFeedbackStatus({ state: 'idle', message: '', receipt: null });
@@ -2209,81 +2270,11 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           window.clearTimeout(timerId);
         };
       }, []);
-      const IOSSection = ({ title, children, footer }) => (
-        <section className="mb-6">
-          {title && <div className={`px-3 mb-2 text-[12px] font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`}>{title}</div>}
-          <div className={`overflow-hidden rounded-[18px] bg-white dark:bg-[#2C2C2E]`}>{children}</div>
-          {footer && <div className={`px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]`}>{footer}</div>}
-        </section>
-      );
-      const IOSRow = ({ label, desc, value, children, onClick, danger }) => {
-        const RowTag = onClick ? 'button' : 'div';
-        return (
-        <RowTag
-          type={onClick ? 'button' : undefined}
-          onClick={onClick}
-          className={`w-full min-h-[58px] flex flex-wrap items-center gap-3 px-4 py-2.5 text-left border-b last:border-b-0 max-sm:flex-col max-sm:items-stretch ${
-            'border-black/[0.12] text-[#1C1C1E] dark:border-white/[0.10] dark:text-[#F2F2F7]'
-          } ${onClick ? ('hover:bg-black/[0.035] dark:hover:bg-white/[0.05]') : ''}`}
-        >
-          <div className="flex-1 min-w-[120px] max-sm:min-w-0">
-            <div className={`text-[15px] leading-5 font-normal whitespace-nowrap ${danger ? 'text-[#FF3B30]' : ''}`}>{label}</div>
-            {desc && <div className={`mt-0.5 text-[13px] leading-5 text-[#8A8A8E] dark:text-[#98989D]`}>{desc}</div>}
-          </div>
-          {value && <div className={`text-[14px] shrink-0 text-[#8A8A8E] dark:text-[#98989D]`}>{value}</div>}
-          {children}
-        </RowTag>
-        );
-      };
-      const IOSSwitch = ({ checked, onChange }) => (
-        <button
-          type="button"
-          role="switch"
-          aria-checked={checked}
-          onClick={() => onChange(!checked)}
-          className={`relative h-[26px] w-[46px] shrink-0 rounded-full transition-colors ${checked ? 'bg-[#34C759]' : ('bg-[#E5E5EA] dark:bg-[#3A3A3C]')}`}
-        >
-          <span className={`absolute left-0 top-[2px] h-[22px] w-[22px] rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-[22px]' : 'translate-x-[2px]'}`} />
-        </button>
-      );
-      const SectionButton = ({ id, icon, label, dot }) => (
-        <button
-          type="button"
-          onClick={() => setActiveSection(id)}
-          className={`w-full h-10 px-3 rounded-[14px] flex items-center gap-2.5 text-[14px] transition-colors max-sm:w-auto max-sm:shrink-0 ${
-            activeSection === id
-              ? ('bg-[#D8EAFE] text-[#007AFF] dark:bg-[#173A5E] dark:text-[#64B5F6]')
-              : ('text-[#1C1C1E] hover:bg-black/[0.04] dark:text-[#F2F2F7] dark:hover:bg-white/[0.06]')
-          }`}
-        >
-          <span className={`w-7 h-7 rounded-[9px] flex items-center justify-center ${activeSection === id ? 'bg-[#007AFF]/10' : ('bg-black/[0.05] dark:bg-white/[0.08]')}`}>{icon}</span>
-          <span className="font-semibold truncate">{label}</span>
-          {dot && <span className="ml-auto w-2.5 h-2.5 rounded-full bg-[#FF3B30]" />}
-        </button>
-      );
       const actionButton = (tone = 'blue') => {
         if (tone === 'green') return 'text-[#34C759] hover:bg-[#34C759]/10';
         if (tone === 'red') return 'text-[#FF3B30] hover:bg-[#FF3B30]/10';
         return 'text-[#007AFF] hover:bg-[#007AFF]/10';
       };
-      const Group = ({ children }) => (
-        <div className={`overflow-hidden rounded-[18px] border bg-white border-black/[0.03] dark:bg-[#2C2C2E] dark:border-white/[0.04]`}>{children}</div>
-      );
-      const SectionTitle = ({ children }) => (
-        <div className={`px-3 mb-2 text-[12px] leading-4 font-semibold text-[#8A8A8E] dark:text-[#8E8E93]`}>{children}</div>
-      );
-      const RadioDot = ({ active }) => (
-        <span className={`block w-5 h-5 rounded-full border-[3px] ${active ? 'border-[#007AFF]' : ('border-[#AEAEB2] dark:border-[#636366]')}`}>
-          {active && <span className="block w-2 h-2 rounded-full bg-[#007AFF] mx-auto mt-[3px]" />}
-        </span>
-      );
-      const Tag = ({ children, tone = 'green' }) => (
-        <span className={`shrink-0 text-[12px] px-2 py-0.5 rounded-md ${
-          tone === 'gray'
-            ? ('bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]')
-            : 'bg-[#34C759]/15 text-[#248A3D]'
-        }`}>{children}</span>
-      );
       const userModels = selectableModels(savedModels || [])
         .filter(model => !isBuiltInAccountPlatformModel(model));
       const activeLocalModelId = defaultModelRef?.source === LOCAL_CONFIG_SOURCE
@@ -2342,6 +2333,18 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       };
       const memoryEnabled = !!(bs && bs.settings && bs.settings.memory_enabled);
       const memory = (bs && bs.memory) || {};
+      const memoryWarning = Array.isArray(memory.warnings) ? memory.warnings[0] : null;
+      const memoryWarningCode = memoryWarning && typeof memoryWarning === 'object' ? memoryWarning.code : '';
+      const memoryError = memory.error || memoryWarning;
+      const memoryErrorMessage = memory.error
+        ? settingsCopy.memoryLoadFailed
+        : memoryWarningCode === 'runtime_refresh_failed'
+          ? settingsCopy.memoryRuntimeRefreshFailed
+          : memoryWarningCode === 'memory_topic_cleanup_required'
+            ? settingsCopy.memoryTopicCleanupRequired
+          : memoryWarningCode === 'snapshot_refresh_failed'
+            ? settingsCopy.memorySnapshotRefreshFailed
+            : settingsCopy.memorySourceUnavailable;
       const identity = (memory.profile && memory.profile.identity) || {};
       const longTermItems = [
         ...(memory.preferences || []).map(item => ({ ...item, kind: 'preference', type: settingsCopy.memoryTypes.preference })),
@@ -2358,6 +2361,9 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         if (updateFocusTick) setActiveSection('update');
       }, [updateFocusTick]);
       const [memoryEditor, setMemoryEditor] = useState(null);
+      const [memorySaving, setMemorySaving] = useState(false);
+      const [memoryEditorError, setMemoryEditorError] = useState('');
+      const [profileSaveError, setProfileSaveError] = useState('');
       const [memoryDeleteConfirm, setMemoryDeleteConfirm] = useState(null);
       const openMemoryItemViewer = item => {
         setMemoryEditor({
@@ -2374,16 +2380,26 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         });
       };
       const saveMemoryEditor = async () => {
-        if (!memoryEditor || !bridge.available) return;
+        if (!memoryEditor || !bridge.available || memorySaving) return;
         const text = String(memoryEditor.value || '').trim();
-        if (memoryEditor.mode === 'memory') {
-          if (!text || !bridge.memory.updateMemoryItem) return;
-          await bridge.memory.updateMemoryItem(memoryEditor.kind, memoryEditor.id, { text });
-        } else if (memoryEditor.mode === 'profile') {
-          if (!bridge.memory.saveMemoryProfilePatch) return;
-          await bridge.memory.saveMemoryProfilePatch({ [memoryEditor.key]: text });
+        setMemorySaving(true);
+        setMemoryEditorError('');
+        setProfileSaveError('');
+        try {
+          if (memoryEditor.mode === 'memory') {
+            if (!text || !bridge.memory.updateMemoryItem) return;
+            await bridge.memory.updateMemoryItem(memoryEditor.kind, memoryEditor.id, { text });
+          } else if (memoryEditor.mode === 'profile') {
+            if (!bridge.memory.saveMemoryProfilePatch) return;
+            await bridge.memory.saveMemoryProfilePatch({ [memoryEditor.key]: text });
+          }
+          setMemoryEditor(null);
+        } catch (error) {
+          setMemoryEditorError(String(error));
+          setProfileSaveError(String(error));
+        } finally {
+          setMemorySaving(false);
         }
-        setMemoryEditor(null);
       };
       const deleteMemoryItem = async item => {
         if (!bridge.available || !bridge.memory.deleteMemoryItem) return;
@@ -2391,6 +2407,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       };
       const editProfile = key => {
         const label = key === 'call_name' ? settingsCopy.userCallName : settingsCopy.assistantNickname;
+        setMemoryEditorError('');
         setMemoryEditor({
           mode: 'profile',
           key,
@@ -2408,7 +2425,11 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         const isReadonly = isReadonlyModel(m);
         const codingPlan = isCodingPlanModel(m);
         const providerLabel = providerLabelForModel(m, t);
-        const title = m.model || m.name;
+        // Alias gating is preset-only, matching the form, selector labels, and
+        // Rust `normalize_alias`; `isLocal`'s extra loopback check applies to
+        // icon/tag/scope only, so a loopback custom endpoint keeps its alias here.
+        const alias = m.preset !== 'local_vllm' ? String(m.alias || '').trim() : '';
+        const title = alias || m.model || m.name;
         return (
           <div key={m.id} className={`min-h-[60px] grid grid-cols-[24px_32px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]`}>
             <button onClick={() => !isActive && onSetActiveModel(m.id)} className="shrink-0" title={t.setActiveModel}>
@@ -2497,6 +2518,25 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       );
       const renderModels = () => (
         <>
+          {acpProvidersTabVisible && (
+            // 左上角小胶囊切换：模型 / ACP 管理（替代原列表上方「模型」小字标题；
+            // 原侧栏「Provider 管理」分节并入为子页）
+            <div data-testid="settings-model-tabs" className="mb-3 inline-flex items-center gap-0.5 p-0.5 rounded-full bg-black/[0.05] dark:bg-white/[0.07]">
+              {[
+                { key: 'models', label: t.uiSettings.model },
+                { key: 'acp', label: t.uiSettings.providers },
+              ].map(tab => (
+                <button key={tab.key} type="button" data-testid={`settings-model-tab-${tab.key}`} onClick={() => setModelTab(tab.key)}
+                  className={`h-7 px-3 rounded-full text-[12px] font-semibold transition-colors ${modelTab === tab.key ? ('bg-white text-[#007AFF] shadow-sm dark:bg-[#3A3A3C] dark:text-[#F2F2F7]') : ('text-[#8A8A8E] hover:text-[#636366] dark:text-[#8E8E93] dark:hover:text-[#C7C7CC]')}`}>
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {modelTab === 'acp' && acpProvidersTabVisible ? (
+            <ProvidersSection t={t} />
+          ) : (
+          <>
           <section className="mb-6" data-testid="settings-platform-models">
             <SectionTitle>{settingsCopy.platformModels}</SectionTitle>
             <Group>
@@ -2535,7 +2575,8 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             <div className="px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]">{settingsCopy.platformModelsDesc}</div>
           </section>
           <section className="mb-6">
-            <SectionTitle>{settingsCopy.modelSection}</SectionTitle>
+            {/* 有 ACP 子页时顶端胶囊切换已承担「模型」标题语义，不再重复小字标题 */}
+            {!acpProvidersTabVisible && <SectionTitle>{settingsCopy.modelSection}</SectionTitle>}
             <Group>
               {(() => {
                 const { preset, custom } = groupModelsForSelector(userModels);
@@ -2566,12 +2607,15 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             </Group>
             {modelEnvLocked.length > 0 && <div className={`px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]`}>{settingsCopy.envManaged}</div>}
           </section>
+          </>
+          )}
         </>
       );
       const renderSearch = () => (
         <>
           <section className="mb-6">
             <SectionTitle>{settingsCopy.searchList}</SectionTitle>
+            <div className={`px-3 mb-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]`}>{settingsCopy.searchSourceHint}</div>
             <Group>
             {enabledSearchList.map(item => {
               return (
@@ -2622,10 +2666,21 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           </IOSSection>
           {memoryEnabled && (
             <>
+              {profileSaveError ? (
+                <div data-testid="memory-settings-error" role="alert" aria-live="polite" className="mb-4 rounded-[14px] bg-[#FF3B30]/10 px-4 py-3 text-[13px] leading-5 text-[#FF3B30]">
+                  {settingsCopy.memorySaveFailed}
+                </div>
+              ) : memoryError && (
+                <div data-testid="memory-settings-error" role="alert" aria-live="polite" className="mb-4 rounded-[14px] bg-[#FF3B30]/10 px-4 py-3 text-[13px] leading-5 text-[#FF3B30]">
+                  {memoryErrorMessage}
+                </div>
+              )}
               <IOSSection title={settingsCopy.profile}>
-                <IOSRow label={settingsCopy.userCallName} desc={settingsCopy.callNameDesc} value={identity.call_name || settingsCopy.notSet} onClick={() => editProfile('call_name')}>
-                  <ChevronDown size={22} className="-rotate-90 opacity-35" />
-                </IOSRow>
+                <div data-testid="memory-profile-call-name">
+                  <IOSRow label={settingsCopy.userCallName} desc={settingsCopy.callNameDesc} value={identity.call_name || settingsCopy.notSet} onClick={() => editProfile('call_name')}>
+                    <ChevronDown size={22} className="-rotate-90 opacity-35" />
+                  </IOSRow>
+                </div>
                 <IOSRow label={settingsCopy.assistantNickname} desc={settingsCopy.assistantNameDesc} value={identity.assistant_alias || 'PINVOU'} onClick={() => editProfile('assistant_alias')}>
                   <ChevronDown size={22} className="-rotate-90 opacity-35" />
                 </IOSRow>
@@ -2636,16 +2691,49 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           )}
         </>
       );
-      const renderData = () => (
-        <IOSSection title={settingsCopy.hiddenTasks}>
-          {archivedSessions.length ? archivedSessions.map(s => (
-            <IOSRow key={s.id} label={s.title || t.newChat} desc={settingsCopy.archivedAt(formatSessionDate(s.archived_at || s.updated_at || s.created_at, language))}>
-              <button onClick={() => onRestoreArchived && onRestoreArchived(s.id)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('blue')}`}>{settingsCopy.restore}</button>
-              <button onClick={() => setArchivedDeleteConfirm(s)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('red')}`}>{settingsCopy.delete}</button>
-            </IOSRow>
-          )) : <IOSRow label={settingsCopy.noHiddenTasks} desc={settingsCopy.noHiddenTasksDesc} />}
-        </IOSSection>
-      );
+      const renderData = () => {
+        const telemetryStatus = behaviorTelemetry.withdrawal_pending
+            ? settingsCopy.behaviorAnalyticsStatusWithdrawalPending
+            : behaviorTelemetry.enabled
+              ? settingsCopy.behaviorAnalyticsStatusEnabled
+              : settingsCopy.behaviorAnalyticsStatusDisabled;
+        return (
+          <>
+            <button
+              type="button"
+              data-testid="behavior-analytics-back"
+              onClick={() => setActiveSection('help')}
+              className="mb-4 inline-flex items-center gap-1 text-[13px] text-[#6E6E73] hover:text-[#1C1C1E] dark:text-[#98989D] dark:hover:text-[#F2F2F7]"
+            >
+              <ChevronLeft size={15} />
+              {settingsCopy.behaviorAnalyticsBack}
+            </button>
+            <IOSSection title={settingsCopy.behaviorAnalyticsTitle}>
+              <IOSRow
+                label={settingsCopy.behaviorAnalyticsLabel}
+                desc={behaviorTelemetry.configured ? settingsCopy.behaviorAnalyticsDesc : settingsCopy.behaviorAnalyticsNotConfigured}
+                value={telemetryStatus}
+              >
+                <IOSSwitch
+                  checked={!!behaviorTelemetry.enabled}
+                  onChange={toggleBehaviorTelemetry}
+                  disabled={!behaviorTelemetry.configured || behaviorTelemetryBusy}
+                  ariaLabel={settingsCopy.behaviorAnalyticsLabel}
+                />
+              </IOSRow>
+            </IOSSection>
+            {behaviorTelemetryError && <div role="alert" className="px-3 -mt-3 mb-4 text-[12px] leading-5 text-[#EA4335] break-words">{behaviorTelemetryError}</div>}
+            <IOSSection title={settingsCopy.hiddenTasks}>
+              {archivedSessions.length ? archivedSessions.map(s => (
+                <IOSRow key={s.id} label={s.title || t.newChat} desc={settingsCopy.archivedAt(formatSessionDate(s.archived_at || s.updated_at || s.created_at, language))}>
+                  <button onClick={() => onRestoreArchived && onRestoreArchived(s.id)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('blue')}`}>{settingsCopy.restore}</button>
+                  <button onClick={() => setArchivedDeleteConfirm(s)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('red')}`}>{settingsCopy.delete}</button>
+                </IOSRow>
+              )) : <IOSRow label={settingsCopy.noHiddenTasks} desc={settingsCopy.noHiddenTasksDesc} />}
+            </IOSSection>
+          </>
+        );
+      };
       const renderUpdate = () => {
         const upd = bs && bs.updateInfo;
         const currentVersion = (bs && bs.appVersion) || (upd && upd.current_version) || '—';
@@ -2760,133 +2848,60 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         );
       };
       const renderHelp = () => (
-        <IOSSection>
-          <IOSRow label={settingsCopy.feedbackTitle} desc={settingsCopy.feedbackDesc}>
-            <button onClick={() => setFeedbackOpen(true)} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.submitFeedback}</button>
-          </IOSRow>
-        </IOSSection>
+        <>
+          <IOSSection>
+            <IOSRow label={settingsCopy.feedbackTitle} desc={settingsCopy.feedbackDesc}>
+              <button onClick={() => setFeedbackOpen(true)} className="h-9 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.submitFeedback}</button>
+            </IOSRow>
+          </IOSSection>
+          <IOSSection>
+            <IOSRow
+              label={settingsCopy.behaviorAnalyticsEntryTitle}
+              desc={settingsCopy.behaviorAnalyticsEntryDesc}
+              onClick={() => setActiveSection('data')}
+              testId="behavior-analytics-entry"
+            >
+              <ChevronRight size={17} className="shrink-0 text-[#C7C7CC] dark:text-[#636366]" />
+            </IOSRow>
+          </IOSSection>
+        </>
       );
-      const renderProviders = () => <ProvidersSection t={t} />;
+      const renderCommunity = () => (
+        <CommunityPanel
+          copy={t}
+          groupName={COMMUNITY_QQ_GROUP_NAME}
+          groupNumber={COMMUNITY_QQ_GROUP_NUMBER}
+          qrImageSrc={COMMUNITY_QQ_QR_IMAGE_SRC}
+          onOpenDiscussions={() => {
+            if (!bridge.available || !bridge.artifacts?.openUserExternalUrl) return;
+            bridge.artifacts.openUserExternalUrl(COMMUNITY_DISCUSSIONS_URL).catch(() => {});
+          }}
+        />
+      );
       const renderContent = () => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
         if (activeSection === 'memory') return renderMemory();
         if (activeSection === 'permissions') return renderPermissions();
         if (activeSection === 'data') return renderData();
-        if (activeSection === 'providers') return renderProviders();
         if (activeSection === 'update') return renderUpdate();
         if (activeSection === 'help') return renderHelp();
+        if (activeSection === 'community') return renderCommunity();
         return renderGeneral();
       };
-      const sectionTitle = {
-        general: t.uiSettings.general,
-        model: t.uiSettings.model,
-        search: t.uiSettings.search,
-        memory: t.uiSettings.memory,
-        permissions: t.uiSettings.permissions,
-        data: t.uiSettings.data,
-        providers: t.uiSettings.providers,
-        update: t.uiSettings.update,
-        help: t.uiSettings.help,
-      }[activeSection] || t.uiSettings.general;
-      const SearchSourceModal = ({ provider, isNew, onClose }) => {
-        const option = searchOptions.find(x => x.key === provider);
-        const [showSearchKey, setShowSearchKey] = useState(false);
-        const [draftKey, setDraftKey] = useState('');
-        const hasSavedKey = searchHasKey(provider);
-        const canSaveSearch = (provider === 'bing' && isNew) || !!String(draftKey || '').trim();
-        useEffect(() => {
-          setDraftKey('');
-          setShowSearchKey(false);
-        }, [provider]);
-        return (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 animate-in fade-in duration-150" onClick={onClose}>
-            <div onClick={e => e.stopPropagation()}
-              className={`w-[430px] max-w-[90vw] max-h-[76vh] overflow-y-auto custom-scrollbar rounded-[22px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#1C1C1E] dark:text-[#F2F2F7]`}>
-              <div className={`px-5 py-4 flex items-start justify-between gap-4 border-b border-black/[0.10] dark:border-white/[0.10]`}>
-                <div>
-                  <h2 className="text-[20px] leading-6 font-semibold">{settingsCopy.editSearch}</h2>
-                  <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{option ? option.label : provider}</p>
-                </div>
-                <button onClick={onClose} className={`h-9 w-9 shrink-0 rounded-full flex items-center justify-center bg-[#E5E5EA] text-[#636366] dark:bg-white/[0.08] dark:text-[#C7C7CC]`}><X size={18} /></button>
-              </div>
-              <div className="space-y-4 px-5 py-4">
-                <section>
-                  <div className={`overflow-hidden rounded-[16px] bg-[#F2F2F7] dark:bg-[#2C2C2E]`}>
-                    <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>
-                    <label className="shrink-0 text-[14px] leading-5">API Key</label>
-                    <input type="text" value={draftKey} onChange={e => setDraftKey(e.target.value)}
-                      autoFocus
-                      placeholder={hasSavedKey ? '••••••••' : settingsCopy.apiKeyPlaceholder}
-                      style={showSearchKey ? undefined : { WebkitTextSecurity: 'disc' }}
-                      className={`min-w-0 flex-1 bg-transparent text-right text-[14px] leading-5 outline-none placeholder:text-[#8A8A8E] dark:placeholder:text-[#636366]`} />
-                    <button type="button" onClick={() => setShowSearchKey(v => !v)} className="shrink-0 text-[14px] text-[#007AFF]">{showSearchKey ? settingsCopy.hide : settingsCopy.show}</button>
-                    </div>
-                  </div>
-                </section>
-              </div>
-              <div className={`flex justify-end gap-2 px-5 py-4 border-t border-black/[0.10] dark:border-white/[0.10]`}>
-                <button onClick={onClose} className={`h-10 px-4 rounded-full text-[15px] font-normal transition-colors text-[#007AFF] hover:bg-black/[0.04] dark:text-[#0A84FF] dark:hover:bg-white/[0.06]`}>{settingsCopy.cancel}</button>
-                <button onClick={() => {
-                  if (!canSaveSearch) return;
-                  if (isNew) onAddSearchProvider && onAddSearchProvider(provider);
-                  if (draftKey.trim()) setSearchApiKey(draftKey, provider);
-                  onClose();
-                  setRestartDialog('search');
-                }} disabled={!canSaveSearch} className="h-10 px-5 rounded-full bg-[#007AFF] text-white text-[15px] font-semibold transition-colors disabled:opacity-35">{settingsCopy.save}</button>
-              </div>
-            </div>
-          </div>
-        );
-      };
-      const RestartDialog = ({ type }) => (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
-          <div className={`w-[340px] overflow-hidden rounded-[18px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
-            <div className="px-6 pt-6 pb-5 text-center">
-              <h3 className="text-[18px] font-semibold">{type === 'search' ? settingsCopy.restartSearchTitle : settingsCopy.restartLanguageTitle}</h3>
-              <p className={`mt-2 text-[14px] leading-5 text-[#8A8A8E] dark:text-[#98989D]`}>{type === 'search' ? settingsCopy.restartSearchDesc : settingsCopy.restartLanguageDesc}</p>
-            </div>
-            <div className={`grid grid-cols-2 border-t border-black/[0.12] dark:border-white/[0.12]`}>
-              <button onClick={async () => {
-                if (type === 'search' && onSaveSearchConfig) {
-                  const saved = await onSaveSearchConfig();
-                  if (saved === false) return;
-                }
-                setRestartDialog(null);
-              }} className={`h-12 text-[17px] font-semibold border-r border-black/[0.12] text-[#007AFF] dark:border-white/[0.12] dark:text-[#0A84FF]`}>{settingsCopy.later}</button>
-              <button onClick={() => { setRestartDialog(null); type === 'search' ? onConfirmSearchConfig() : (bridge.available && bridge.updater.restartApp()); }} className="h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.restartNow}</button>
-            </div>
-          </div>
-        </div>
-      );
-      const ModelDeleteDialog = ({ model }) => (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
-          <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
-            <div className="px-5 pt-5 pb-4 text-center">
-              <h3 className="text-[17px] leading-6 font-semibold">{settingsCopy.deleteModelTitle}</h3>
-              <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.deleteModelDesc}</p>
-            </div>
-            <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
-              <button onClick={() => { onDeleteModel(model); setModelDeleteConfirm(null); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{settingsCopy.deleteModel}</button>
-              <button onClick={() => setModelDeleteConfirm(null)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.cancel}</button>
-            </div>
-          </div>
-        </div>
-      );
-      const SearchDeleteDialog = ({ source }) => (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
-          <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
-            <div className="px-5 pt-5 pb-4 text-center">
-              <h3 className="text-[17px] leading-6 font-semibold">{settingsCopy.deleteSearchTitle}</h3>
-              <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.deleteSearchDesc(source.label)}</p>
-            </div>
-            <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
-              <button onClick={() => { onDeleteSearchProvider && onDeleteSearchProvider(source.key); setSearchDeleteConfirm(null); setRestartDialog('search'); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{settingsCopy.deleteSearch}</button>
-              <button onClick={() => setSearchDeleteConfirm(null)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.cancel}</button>
-            </div>
-          </div>
-        </div>
-      );
+      const sectionTitle = (activeSection === 'model' && modelTab === 'acp' && acpProvidersTabVisible)
+        ? t.uiSettings.providers
+        : ({
+            general: t.uiSettings.general,
+            model: t.uiSettings.model,
+            search: t.uiSettings.search,
+            memory: t.uiSettings.memory,
+            permissions: t.uiSettings.permissions,
+            data: t.uiSettings.data,
+            update: t.uiSettings.update,
+            help: t.uiSettings.help,
+            community: t.uiSettings.community,
+          }[activeSection] || t.uiSettings.general);
       return (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center px-3 py-3 sm:px-5 sm:py-5 bg-black/45 backdrop-blur-[14px] animate-in fade-in duration-200"
@@ -2911,18 +2926,17 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             >
               <div className={`mb-4 px-1 text-[12px] font-semibold max-sm:hidden text-[#8A8A8E] dark:text-[#8E8E93]`}>{t.uiSettings.common}</div>
               <div className="space-y-2 max-sm:flex max-sm:space-y-0 max-sm:gap-2">
-                <SectionButton id="general" icon={<Sparkles size={17} />} label={t.uiSettings.general} />
-                <SectionButton id="model" icon={<Cpu size={17} />} label={t.uiSettings.model} />
-                <SectionButton id="search" icon={<Search size={17} />} label={t.uiSettings.search} />
-                {memorySettingsVisible && <SectionButton id="memory" icon={<Database size={17} />} label={t.uiSettings.memory} />}
+                <SectionButton id="general" icon={<Sparkles size={17} />} label={t.uiSettings.general} active={activeSection === 'general'} onSelect={setActiveSection} />
+                <SectionButton id="model" icon={<Cpu size={17} />} label={t.uiSettings.model} active={activeSection === 'model'} onSelect={setActiveSection} />
+                <SectionButton id="search" icon={<Search size={17} />} label={t.uiSettings.search} active={activeSection === 'search'} onSelect={setActiveSection} />
+                {memorySettingsVisible && <SectionButton id="memory" icon={<Database size={17} />} label={t.uiSettings.memory} active={activeSection === 'memory'} onSelect={setActiveSection} />}
               </div>
               <div className={`mt-7 mb-4 px-1 text-[12px] font-semibold max-sm:hidden text-[#8A8A8E] dark:text-[#8E8E93]`}>{t.uiSettings.system}</div>
               <div className="space-y-2 max-sm:flex max-sm:space-y-0 max-sm:gap-2">
-                {!!platformCapabilities.codexAcpSupported && <SectionButton id="providers" icon={<Globe size={17} />} label={t.uiSettings.providers} />}
-                {canUseSuperPermission && <SectionButton id="permissions" icon={<Wrench size={17} />} label={t.uiSettings.permissions} />}
-                <SectionButton id="data" icon={<Archive size={17} />} label={t.uiSettings.data} />
-                {canUpdateApp && <SectionButton id="update" icon={<RefreshCw size={17} />} label={t.uiSettings.update} dot={hasUpdate} />}
-                <SectionButton id="help" icon={<MessageSquare size={17} />} label={t.uiSettings.help} />
+                {canUseSuperPermission && <SectionButton id="permissions" icon={<Wrench size={17} />} label={t.uiSettings.permissions} active={activeSection === 'permissions'} onSelect={setActiveSection} />}
+                {canUpdateApp && <SectionButton id="update" icon={<RefreshCw size={17} />} label={t.uiSettings.update} dot={hasUpdate} active={activeSection === 'update'} onSelect={setActiveSection} />}
+                <SectionButton id="help" icon={<MessageSquare size={17} />} label={t.uiSettings.help} active={activeSection === 'help'} onSelect={setActiveSection} />
+                <SectionButton id="community" icon={<Users size={17} />} label={t.uiSettings.community} active={activeSection === 'community'} onSelect={setActiveSection} />
               </div>
             </aside>
             {onCloseSettings && (
@@ -2941,12 +2955,13 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             </main>
           </div>
           {canManageModels && editingModel && (
-            <ModelFormModal t={t} initial={editingModel} bs={bs}
+            <ModelFormModal isDark={activeTheme === 'dark'} t={t} initial={editingModel} bs={bs} models={userModels}
               onCancel={() => setEditingModel(null)}
-              onSave={m => { onSaveModel(m); setEditingModel(null); }} />
+              // 保存/错误提示由弹窗内部控制关闭(保存失败保持打开展示行内错误)。
+              onSave={async m => onSaveModel(m)} />
           )}
-          {modelDeleteConfirm && <ModelDeleteDialog model={modelDeleteConfirm} />}
-          {searchDeleteConfirm && <SearchDeleteDialog source={searchDeleteConfirm} />}
+          {modelDeleteConfirm && <ModelDeleteDialog model={modelDeleteConfirm} settingsCopy={settingsCopy} onDeleteModel={onDeleteModel} setModelDeleteConfirm={setModelDeleteConfirm} />}
+          {searchDeleteConfirm && <SearchDeleteDialog source={searchDeleteConfirm} settingsCopy={settingsCopy} onDeleteSearchProvider={onDeleteSearchProvider} setSearchDeleteConfirm={setSearchDeleteConfirm} setRestartDialog={setRestartDialog} />}
           {searchPickerOpen && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 px-4 animate-in fade-in duration-150" onClick={() => setSearchPickerOpen(false)}>
               <div onClick={e => e.stopPropagation()}
@@ -2984,16 +2999,16 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               </div>
             </div>
           )}
-          {editingSearch && <SearchSourceModal provider={editingSearch} isNew={pendingSearchProvider === editingSearch} onClose={() => { setEditingSearch(null); setPendingSearchProvider(null); }} />}
+          {editingSearch && <SearchSourceModal provider={editingSearch} isNew={pendingSearchProvider === editingSearch} onClose={() => { setEditingSearch(null); setPendingSearchProvider(null); }} searchOptions={searchOptions} searchHasKey={searchHasKey} settingsCopy={settingsCopy} onAddSearchProvider={onAddSearchProvider} setSearchApiKey={setSearchApiKey} setRestartDialog={setRestartDialog} />}
           {memoryEditor && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 px-4" onClick={() => setMemoryEditor(null)}>
+            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 px-4" onClick={() => { if (!memorySaving) setMemoryEditor(null); }}>
               <div onClick={e => e.stopPropagation()} className={`w-full max-w-[500px] rounded-[24px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#1C1C1E] dark:text-[#F2F2F7]`}>
                 <div className={`px-6 py-4 flex items-start justify-between border-b border-black/[0.12] dark:border-white/[0.12]`}>
                   <div>
                     <h2 className="text-[22px] leading-7 font-semibold">{memoryEditor.title}</h2>
                     <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{memoryEditor.subtitle}</p>
                   </div>
-                  <button onClick={() => setMemoryEditor(null)} className={`h-10 w-10 rounded-full flex items-center justify-center bg-[#E5E5EA] dark:bg-white/[0.08]`}><X size={20} /></button>
+                  <button onClick={() => setMemoryEditor(null)} disabled={memorySaving} className={`h-10 w-10 rounded-full flex items-center justify-center bg-[#E5E5EA] dark:bg-white/[0.08] disabled:opacity-40`}><X size={20} /></button>
                 </div>
                 <div className="px-6 py-5">
                   <label className="block">
@@ -3007,21 +3022,23 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                       />
                     ) : (
                       <input
+                        data-testid="memory-editor-input"
                         value={memoryEditor.value}
                         onChange={e => setMemoryEditor(prev => ({ ...prev, value: e.target.value }))}
                         className={`w-full rounded-[16px] px-4 py-3 text-[15px] outline-none bg-[#F2F2F7] text-[#1C1C1E] placeholder:text-[#8A8A8E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7] dark:placeholder:text-[#636366]`}
                       />
                     )}
                   </label>
+                  {memoryEditorError && <div data-testid="memory-editor-error" role="alert" aria-live="assertive" className="mt-3 text-[13px] leading-5 text-[#FF3B30]">{settingsCopy.memorySaveFailed}</div>}
                   <div className="mt-6 flex justify-end gap-2.5">
-                    <button onClick={() => setMemoryEditor(null)} className={`h-10 px-4 rounded-full text-[14px] font-semibold bg-[#E5E5EA] dark:bg-[#2C2C2E]`}>{settingsCopy.cancel}</button>
-                    <button onClick={saveMemoryEditor} className="h-10 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold">{settingsCopy.save}</button>
+                    <button onClick={() => setMemoryEditor(null)} disabled={memorySaving} className={`h-10 px-4 rounded-full text-[14px] font-semibold bg-[#E5E5EA] dark:bg-[#2C2C2E] disabled:opacity-40`}>{settingsCopy.cancel}</button>
+                    <button data-testid="memory-editor-save" onClick={saveMemoryEditor} disabled={memorySaving} className="h-10 px-4 rounded-full bg-[#007AFF] text-white text-[14px] font-semibold disabled:opacity-40">{memorySaving ? settingsCopy.saving : settingsCopy.save}</button>
                   </div>
                 </div>
               </div>
             </div>
           )}
-          {restartDialog && <RestartDialog type={restartDialog} />}
+          {restartDialog && <RestartDialog type={restartDialog} settingsCopy={settingsCopy} onSaveSearchConfig={onSaveSearchConfig} onConfirmSearchConfig={onConfirmSearchConfig} setRestartDialog={setRestartDialog} />}
           {archivedDeleteConfirm && createPortal(
             <ArchivedDeleteConfirmDialog
               theme={activeTheme}
@@ -3128,4 +3145,4 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
     // ==========================================
     // 安装工具后新建会话弹出的介绍卡片（纯前端，不发 LLM query，点 chip 才发消息）
 
-export { SCard, SRow, SField, SSegmented, SActionBar, MemorySettingsCard, MODEL_PRESET_DEFS, presetOptionsI18n, presetProviderLabel, ComposerModelSelector, WebAccessModal, ScaledHtmlPreview, ComposerModeMenu, notifyComposerToolsChanged, ComposerToolMenu, ModelFormModal, SettingsView };
+export { SCard, SRow, SField, SSegmented, SActionBar, MemorySettingsCard, MODEL_PRESET_DEFS, presetOptionsI18n, presetProviderLabel, WebAccessModal, ModelFormModal, SettingsView };

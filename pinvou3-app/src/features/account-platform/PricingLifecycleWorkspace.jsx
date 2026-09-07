@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildPriceDraftInput, matchingContinuationDrafts, newModelPriceAllowed, priceDraftForm, priceSpaceQuery, priceTransitionModes, pricingLifecycleMutationLock, publishedPricingFormulas, unknownMutationResolution } from './pricing-lifecycle.js';
 
@@ -6,7 +7,7 @@ const shortID = (value) => {
   return text.length > 16 ? `${text.slice(0, 8)}…${text.slice(-5)}` : text || '—';
 };
 const formatDate = (value) => value ? new Date(value).toLocaleString() : '—';
-const mutationKey = (prefix) => `${prefix}:${crypto.randomUUID()}`;
+const mutationKey = (prefix) => `${prefix}:${secureRequestID()}`;
 const outcomeUnknown = (error) => !Number.isFinite(error?.status) || error.status >= 500;
 const stableUUID = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
 const unknownStorageKey = 'pinvou.admin.pricing-unknown-mutation';

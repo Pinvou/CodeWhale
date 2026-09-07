@@ -8,12 +8,22 @@ pub struct TeamRelaySettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRelayAvatar {
+    pub content_type: String,
+    pub byte_size: u64,
+    pub sha256: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Principal {
     pub id: String,
     #[serde(default)]
     pub email: Option<String>,
     pub display_name: String,
     pub created_at: String,
+    #[serde(default)]
+    pub avatar: Option<TeamRelayAvatar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +84,10 @@ pub struct TeamMember {
     pub created_at: String,
     pub role: String,
     pub last_seen_at: Option<String>,
+    #[serde(default)]
+    pub confirmed_transfers_supported: bool,
+    #[serde(default)]
+    pub avatar: Option<TeamRelayAvatar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +100,12 @@ pub struct WorkThread {
     pub current_actor_id: Option<String>,
     pub return_to_id: Option<String>,
     pub final_recipient_id: String,
+    #[serde(default)]
+    pub pending_transfer_kind: Option<String>,
+    #[serde(default)]
+    pub pending_sender_id: Option<String>,
+    #[serde(default)]
+    pub pending_recipient_id: Option<String>,
     pub phase: String,
     pub revision: u64,
     pub created_at: String,
@@ -111,6 +131,8 @@ pub struct GitReference {
 pub struct DeliveryPackage {
     pub schema_version: u8,
     pub artifact_role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subtype: String,
     #[serde(default)]
     pub expected_next: String,
     #[serde(default)]
@@ -124,6 +146,7 @@ impl Default for DeliveryPackage {
         Self {
             schema_version: 1,
             artifact_role: "intermediate".to_string(),
+            subtype: String::new(),
             expected_next: String::new(),
             open_questions: String::new(),
             git_references: Vec::new(),
@@ -143,6 +166,8 @@ pub struct RelayAction {
     pub message: String,
     pub base_revision: u64,
     pub idempotency_key: String,
+    #[serde(default)]
+    pub transfer_mode: Option<String>,
     pub attachment_ids: Vec<String>,
     #[serde(default)]
     pub delivery: DeliveryPackage,
@@ -156,6 +181,10 @@ pub struct ThreadDetail {
     pub preference: ThreadPreference,
     pub participants: Vec<String>,
     pub actions: Vec<RelayAction>,
+    #[serde(default)]
+    pub read_state: ThreadReadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -166,6 +195,13 @@ pub struct ThreadPreference {
     pub pinned_at: Option<String>,
     pub hidden_at: Option<String>,
     pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ThreadReadState {
+    pub thread_id: String,
+    pub last_read_sequence: u64,
+    pub last_read_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +238,8 @@ pub struct AttachmentUploadProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamRelaySnapshot {
     pub bootstrap: BootstrapResponse,
+    #[serde(default)]
+    pub team_bootstraps: Vec<BootstrapResponse>,
     pub attachments: HashMap<String, Attachment>,
     #[serde(default)]
     pub teams: Vec<TeamSummary>,
@@ -228,6 +266,31 @@ pub struct TeamRelayAccountState {
     pub principal: Principal,
     #[serde(default)]
     pub teams: Vec<TeamSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRelayLifecycleState {
+    pub snapshot: Option<TeamRelaySnapshot>,
+    pub account: TeamRelayAccountState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRelayLifecycleResult {
+    pub committed: bool,
+    pub active_team_id: Option<String>,
+    pub snapshot: Option<TeamRelaySnapshot>,
+    pub account: Option<TeamRelayAccountState>,
+    pub sync_error: Option<String>,
+}
+
+impl TeamRelayLifecycleResult {
+    pub fn record_sync_error(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        self.sync_error = Some(match self.sync_error.take() {
+            Some(existing) => format!("{existing}; {error}"),
+            None => error,
+        });
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +322,8 @@ pub struct ThreadMutationResponse {
     pub thread: WorkThread,
     pub action: RelayAction,
     pub replayed: bool,
+    #[serde(default)]
+    pub transfer_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,7 +428,13 @@ pub struct UpdateProfileResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvatarMutationResponse {
+    pub avatar: TeamRelayAvatar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateThreadInput {
+    pub team_id: String,
     pub title: String,
     pub assignee_id: String,
     pub message: String,
@@ -391,4 +462,47 @@ pub struct CreateActionInput {
 pub struct SetThreadPreferenceInput {
     pub pinned: bool,
     pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkThreadReadInput {
+    pub read_through_sequence: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ThreadDetail;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_thread_detail_keeps_missing_unread_count_absent() {
+        let detail: ThreadDetail = serde_json::from_value(json!({
+            "thread": {
+                "id": "thread-1",
+                "team_id": "team-1",
+                "title": "test",
+                "initiator_id": "principal-1",
+                "owner_id": "principal-2",
+                "current_actor_id": "principal-2",
+                "return_to_id": "principal-1",
+                "final_recipient_id": "principal-1",
+                "phase": "active",
+                "revision": 1,
+                "created_at": "2026-08-13T00:00:00Z",
+                "updated_at": "2026-08-13T00:00:00Z"
+            },
+            "participants": ["principal-1", "principal-2"],
+            "actions": []
+        }))
+        .expect("legacy thread detail should deserialize");
+
+        assert_eq!(detail.unread_count, None);
+        let serialized = serde_json::to_value(detail).expect("thread detail should serialize");
+        assert!(
+            !serialized
+                .as_object()
+                .expect("thread detail should serialize as an object")
+                .contains_key("unread_count")
+        );
+    }
 }

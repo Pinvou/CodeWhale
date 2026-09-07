@@ -1,22 +1,29 @@
-//! pinvou3-app Tauri 后端入口（Week 1 骨架）。
-//!
-//! 启动流程：
-//!  1. 注册 `chat` 命令（前端 invoke 入口）
-//!  2. setup 钩子里异步 spawn CodeWhale Engine + 启动事件转发 task
-//!  3. 把 AppEngine 放进 Tauri State，命令通过 `State<AppEngine>` 拿
-//!
-//! Engine 事件（MessageDelta / ToolCallStarted / ToolCallComplete / TurnComplete）
-//! 由 `engine::spawn_event_forwarder` 转译成 Tauri 事件推到前端。
+//! Pinvou Agent Tauri 后端入口。
 
 mod app;
 mod core;
 pub mod features;
 pub mod platform;
-// L1 harness 的附件 e2e 要走「真实 ingest → 注入分流 → 真 vLLM」全链路:
-// 暴露注入收口函数 + file_ingest。
-pub use app::commands::attachments::build_message_with_attachments;
+
+// The Windows unit-test harness imports TaskDialogIndirect. Link the same
+// Common Controls v6 manifest resource as the Tauri executable so the loader
+// can start the harness before any Rust test code runs.
+#[cfg(all(test, target_os = "windows", target_env = "msvc"))]
+#[link(
+    name = "pinvou3_lib_test_resource",
+    kind = "static",
+    modifiers = "+whole-archive"
+)]
+unsafe extern "C" {}
+
+pub use features::assistant::attachments::{
+    build_message_with_attachments, stage_file_in_workspace,
+};
 
 use tauri::Manager;
+
+#[cfg(feature = "benchmark-hooks")]
+pub use features::assistant::product_runtime::{agentic_task, headless_bridge};
 
 use crate::app::commands;
 use crate::features::{
@@ -28,69 +35,11 @@ use crate::features::{
     monitor::MonitorState,
     pet::{pet_window, selected_pet},
     remote_control::RemoteControlManager,
+    remote_knowledge::RemoteKnowledgeService,
     scheduled::tasks as scheduled_tasks,
     sessions::SessionStore,
 };
 use crate::platform::{notifications, startup, telemetry};
-
-/// 把三省六部「网页类」预置模板 seed 到 `~/.pinvou3/web-template`（工部提示词硬编码此路径,
-/// 要在副本里 `npm run build` 写盘,而随 deb 的 resource_dir 是只读安装目录,故首次启动复制一份)。
-/// 已就位则跳过；用「临时目录 + 原子 rename」防半截复制留下残缺模板。失败只警告——网页类差事
-/// 不可用,但不连累其余工作流。
-fn seed_web_template(src: Option<std::path::PathBuf>) {
-    let dst = crate::platform::paths::web_template_dir();
-    if dst.join("package.json").exists() {
-        return; // 已就位
-    }
-    let Some(src) = src else {
-        eprintln!(
-            "[pinvou3-app] web-template 源缺失(resource_dir / PINVOU3_WEB_TEMPLATE_DIR 都没找到),网页类差事不可用"
-        );
-        return;
-    };
-    if let Some(parent) = dst.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = dst.with_file_name("web-template.seeding");
-    let _ = std::fs::remove_dir_all(&tmp); // 清上次中断的残留
-    match copy_dir_all(&src, &tmp).and_then(|()| std::fs::rename(&tmp, &dst)) {
-        Ok(()) => eprintln!("[pinvou3-app] web-template seeded -> {}", dst.display()),
-        Err(e) => {
-            eprintln!("[pinvou3-app] web-template seed 失败: {e}");
-            let _ = std::fs::remove_dir_all(&tmp);
-        }
-    }
-}
-
-/// 递归复制目录,保留 symlink(node_modules/.bin/* 是相对 symlink,原样重建才不悬空)。
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if ft.is_symlink() {
-            let target = std::fs::read_link(&from)?;
-            #[cfg(unix)]
-            {
-                // 已存在的目标(重试场景)先删,symlink 才能重建
-                let _ = std::fs::remove_file(&to);
-                std::os::unix::fs::symlink(&target, &to)?;
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = target;
-                std::fs::copy(&from, &to)?;
-            }
-        } else if ft.is_dir() {
-            copy_dir_all(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
 
 const RELEASE_ENV_DEFAULTS: &[(&str, &str)] = &[
     // —— vLLM 后端：BASE_URL/MODEL/API_KEY 已在 bridge/mod.rs 有默认常量，
@@ -99,15 +48,16 @@ const RELEASE_ENV_DEFAULTS: &[(&str, &str)] = &[
     //   （env 优先级高于 preset），在「添加模型」多 provider 方案下钉死路由——
     //   切到 kimi/openai/qwen 等仍被当 vllm，且设置页误报「环境变量已锁定 provider」。
     //   provider 现由 active_model.preset 决定（LocalVllm→vllm 默认仍成立）。
-    ("DEEPSEEK_REASONING_EFFORT", "off"),
     ("DEEPSEEK_ALLOW_INSECURE_HTTP", "1"),
     ("DEEPSEEK_FORCE_HTTP1", "1"),
-    ("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576"),
+    // 不再注入 DEEPSEEK_MAX_OUTPUT_TOKENS：它会把所有模型（含云端）的输出上限
+    // 钉死在 24576。云端模型应落到底座请求上限与厂商能力兜底；本地 vLLM 的
+    // 24K 预算由 route_limits_for_model 的 is_local_vllm 分支显式携带。
     // 与 CodeWhale 的 stream_chunk_timeout 默认值保持一致。
     ("DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS", "300"),
     // SSE 首响应头超时(open timeout):底座只认 env,默认 45s 是为云端调的。
-    // 本地 GB10 大上下文 SubAgent 请求首 token TTFT 偶发 >45s → 误杀子 agent
-    // (真机实锤:三省六部 libu~1 首发死于 45s,重派才过)。280s 与
+    // 本地 GB10 大上下文 SubAgent 请求首 token TTFT 偶发 >45s → 误杀子 agent。
+    // 280s 与
     // ~/.deepseek config 的 subagent api_timeout=300 对齐(步级超时须更大)。
     ("DEEPSEEK_STREAM_OPEN_TIMEOUT_SECS", "280"),
 ];
@@ -119,7 +69,14 @@ fn ensure_release_env() {
     crate::platform::ui_cache::configure_runtime_environment();
     for (k, v) in RELEASE_ENV_DEFAULTS {
         if env::var_os(k).is_none() {
-            env::set_var(k, v);
+            // SAFETY: ensure_release_env is only called by the first line of
+            // run() and by the headless benchmark host startup sequence
+            // (headless_bridge.rs run_headless_host, before the tokio runtime
+            // is built); at both call sites the process has only the main
+            // thread — no concurrent env readers (audit conclusion: the first
+            // thread spawn happens in the lib.rs setup phase, after this
+            // function); calls inside tests run under ENV_LOCK serialization.
+            unsafe { env::set_var(k, v) };
         }
     }
 
@@ -136,7 +93,12 @@ fn ensure_release_env() {
                 skills_dir.join("zhidao").join("bin"),
             ];
             if let Some(connector_bin) = crate::platform::paths::managed_connector_bin_dir() {
+                // 旧布局（过渡期保留：未迁移的存量二进制还能按名解析）
                 dirs.push(connector_bin);
+            }
+            // 版本化 CLI 资产目录进 PATH（按 lock 表当前版本逐个登记）
+            for (name, pin) in crate::platform::connector_lock::all_artifact_pins() {
+                dirs.push(crate::platform::paths::assets_cli_dir(&name, &pin.version));
             }
             if let Ok(prefix) = env::var("NPM_CONFIG_PREFIX") {
                 dirs.push(std::path::Path::new(&prefix).join("bin"));
@@ -156,7 +118,8 @@ fn ensure_release_env() {
             }
             dirs.extend(env::split_paths(&old));
             if let Ok(joined) = env::join_paths(dirs) {
-                env::set_var("PATH", joined);
+                // SAFETY: same as above; run() single-threaded startup, no concurrent env readers.
+                unsafe { env::set_var("PATH", joined) };
             }
         }
     }
@@ -172,6 +135,394 @@ fn install_rustls_provider() {
     drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
 }
 
+const SESSION_BROWSER_CLEANUP_INITIAL_RETRY: std::time::Duration =
+    std::time::Duration::from_millis(250);
+const SESSION_BROWSER_CLEANUP_MAX_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+const SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY: usize = 8;
+const SESSION_BROWSER_CLEANUP_ATTEMPT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+#[derive(Debug)]
+struct SessionBrowserCleanupSchedule {
+    ready_at: std::time::Instant,
+    retry_delay: std::time::Duration,
+    failed_attempts: u64,
+    sequence: u64,
+}
+
+#[derive(Debug)]
+struct SessionBrowserCleanupClaim {
+    session_id: String,
+    retry_delay: std::time::Duration,
+    failed_attempts: u64,
+}
+
+#[derive(Default)]
+struct SessionBrowserCleanupQueueState {
+    pending: std::collections::HashMap<String, SessionBrowserCleanupSchedule>,
+    in_flight: std::collections::HashSet<String>,
+    rerun_requested: std::collections::HashSet<String>,
+    next_sequence: u64,
+}
+
+#[derive(Default)]
+struct SessionBrowserCleanupQueue {
+    state: std::sync::Mutex<SessionBrowserCleanupQueueState>,
+    notify: tokio::sync::Notify,
+}
+
+impl SessionBrowserCleanupQueue {
+    fn enqueue(&self, session_id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.pending.contains_key(session_id) {
+            return;
+        }
+        if state.in_flight.contains(session_id) {
+            // A durable deletion notification can race with a successful
+            // cleanup attempt just before it clears the browser deny marker.
+            // Preserve one rerun without creating another concurrent attempt.
+            state.rerun_requested.insert(session_id.to_string());
+            return;
+        }
+        let sequence = state.next_sequence;
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let inserted = state
+            .pending
+            .insert(
+                session_id.to_string(),
+                SessionBrowserCleanupSchedule {
+                    ready_at: std::time::Instant::now(),
+                    retry_delay: SESSION_BROWSER_CLEANUP_INITIAL_RETRY,
+                    failed_attempts: 0,
+                    sequence,
+                },
+            )
+            .is_none();
+        drop(state);
+        if inserted {
+            self.notify.notify_one();
+        }
+    }
+
+    fn claim_ready_up_to(
+        &self,
+        now: std::time::Instant,
+        limit: usize,
+    ) -> Vec<SessionBrowserCleanupClaim> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut claimed = Vec::new();
+        while claimed.len() < limit {
+            // Prefer never-attempted obligations over retries, then preserve
+            // FIFO order within the same retry generation. A continuously
+            // failing task therefore cannot starve a later unique deletion.
+            let selected = state
+                .pending
+                .iter()
+                .filter(|(_, schedule)| schedule.ready_at <= now)
+                .min_by(|(left_id, left), (right_id, right)| {
+                    left.failed_attempts
+                        .cmp(&right.failed_attempts)
+                        .then_with(|| left.ready_at.cmp(&right.ready_at))
+                        .then_with(|| left.sequence.cmp(&right.sequence))
+                        .then_with(|| left_id.cmp(right_id))
+                })
+                .map(|(session_id, _)| session_id.clone());
+            let Some(session_id) = selected else {
+                break;
+            };
+            // session_id was selected from state.pending above under the same
+            // lock, so the entry must still be present.
+            #[allow(clippy::expect_used)]
+            let schedule = state
+                .pending
+                .remove(&session_id)
+                .expect("selected cleanup schedule must remain pending");
+            let inserted = state.in_flight.insert(session_id.clone());
+            debug_assert!(inserted, "cleanup queue must claim each id only once");
+            claimed.push(SessionBrowserCleanupClaim {
+                session_id,
+                retry_delay: schedule.retry_delay,
+                failed_attempts: schedule.failed_attempts,
+            });
+        }
+        claimed
+    }
+
+    fn complete_attempt(
+        &self,
+        claim: SessionBrowserCleanupClaim,
+        succeeded: bool,
+        now: std::time::Instant,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let removed = state.in_flight.remove(&claim.session_id);
+        debug_assert!(removed, "completed cleanup must own an active claim");
+        let rerun_requested = state.rerun_requested.remove(&claim.session_id);
+        if succeeded && !rerun_requested {
+            return;
+        }
+
+        let sequence = state.next_sequence;
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let schedule = if succeeded {
+            SessionBrowserCleanupSchedule {
+                ready_at: now,
+                retry_delay: SESSION_BROWSER_CLEANUP_INITIAL_RETRY,
+                failed_attempts: 0,
+                sequence,
+            }
+        } else {
+            SessionBrowserCleanupSchedule {
+                ready_at: now + claim.retry_delay,
+                retry_delay: next_session_browser_cleanup_retry(claim.retry_delay),
+                failed_attempts: claim.failed_attempts.saturating_add(1),
+                sequence,
+            }
+        };
+        state.pending.insert(claim.session_id, schedule);
+    }
+
+    fn next_ready_delay(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pending
+            .values()
+            .map(|schedule| schedule.ready_at.saturating_duration_since(now))
+            .min()
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pending
+            .len()
+    }
+
+    #[cfg(test)]
+    fn in_flight_len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .in_flight
+            .len()
+    }
+}
+
+fn next_session_browser_cleanup_retry(current: std::time::Duration) -> std::time::Duration {
+    current
+        .saturating_mul(2)
+        .min(SESSION_BROWSER_CLEANUP_MAX_RETRY)
+}
+
+fn session_browser_cleanup_failure_kind(error: &str) -> &'static str {
+    if error == "browser manager is unavailable" {
+        "browser-manager-unavailable"
+    } else if error.starts_with("browser cleanup attempt timed out") {
+        "timeout"
+    } else {
+        "cleanup-error"
+    }
+}
+
+async fn cleanup_deleted_session_browser_once(
+    app: tauri::AppHandle,
+    claim: SessionBrowserCleanupClaim,
+) -> (SessionBrowserCleanupClaim, bool) {
+    let result = match tokio::time::timeout(SESSION_BROWSER_CLEANUP_ATTEMPT_TIMEOUT, async {
+        match app.try_state::<features::browser::BrowserManager>() {
+            Some(browser) => browser.delete_for_session(&claim.session_id).await,
+            None => Err("browser manager is unavailable".to_string()),
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "browser cleanup attempt timed out after {} seconds",
+            SESSION_BROWSER_CLEANUP_ATTEMPT_TIMEOUT.as_secs()
+        )),
+    };
+    if let Err(error) = &result {
+        let attempt = claim.failed_attempts.saturating_add(1);
+        let failure_kind = session_browser_cleanup_failure_kind(error);
+        eprintln!(
+            "[sessions] browser cleanup failed for a deleted session \
+             (reason {failure_kind}, attempt {attempt}); retrying in {} ms",
+            claim.retry_delay.as_millis()
+        );
+    }
+    (claim, result.is_ok())
+}
+
+async fn reconcile_orphaned_session_browser_files_until_success(
+    app: tauri::AppHandle,
+    store: SessionStore,
+) {
+    let mut retry_delay = SESSION_BROWSER_CLEANUP_INITIAL_RETRY;
+    let mut attempt = 1_u64;
+
+    loop {
+        let result = store
+            .list()
+            .and_then(|mut sessions| {
+                sessions.extend(store.list_scheduled()?);
+                Ok(sessions)
+            })
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .map(|session| session.id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|error| format!("failed to read all existing task records: {error}"))
+            .and_then(|active_session_ids| {
+                app.try_state::<features::browser::BrowserManager>()
+                    .ok_or_else(|| "browser manager is unavailable".to_string())?
+                    .reconcile_session_files(&active_session_ids)
+            });
+
+        match result {
+            Ok(()) => return,
+            Err(error) => {
+                eprintln!(
+                    "[sessions] startup browser orphan reconciliation failed \
+                     (attempt {attempt}); retrying in {} ms: {error}",
+                    retry_delay.as_millis()
+                );
+                tokio::time::sleep(retry_delay).await;
+                retry_delay = next_session_browser_cleanup_retry(retry_delay);
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
+}
+
+/// Wire the feature-neutral SessionStore lifecycle seam to browser teardown at
+/// the application composition root. Sessions never depend on browser code;
+/// other per-session resources can subscribe to the same seam later.
+///
+/// There is deliberately no process-lifetime deletion replay. Store boot can
+/// prune sessions before this hook is registered, but no WebView from a prior
+/// process survives; `spawn_orphaned_session_browser_reconciliation` scans and
+/// retries removal of their durable browser artifacts immediately afterwards.
+fn spawn_deleted_session_browser_cleanup(app: tauri::AppHandle, store: SessionStore) {
+    let deletion_queue = std::sync::Arc::new(SessionBrowserCleanupQueue::default());
+    let app_for_hook = app.clone();
+    let queue_for_hook = deletion_queue.clone();
+    store.register_session_deleted_hook(std::sync::Arc::new(move |session_id: &str| {
+        // Deny late wrapper work synchronously at the durable deletion commit
+        // point. WebView/file teardown is fallible and stays in the async retry
+        // worker below so the session deletion path never blocks on browser I/O.
+        if let Some(browser) = app_for_hook.try_state::<features::browser::BrowserManager>() {
+            browser.mark_session_deleted(session_id);
+        }
+        // The obligation map coalesces repeated idempotent notifications.
+        // Notify retains a permit across the claim-to-wait race, so no durable
+        // cleanup request can be lost.
+        queue_for_hook.enqueue(session_id);
+    }));
+
+    tauri::async_runtime::spawn(async move {
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+
+        let mut cleanups = FuturesUnordered::new();
+
+        loop {
+            let available = SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY.saturating_sub(cleanups.len());
+            for claim in deletion_queue.claim_ready_up_to(std::time::Instant::now(), available) {
+                cleanups.push(cleanup_deleted_session_browser_once(app.clone(), claim));
+            }
+
+            // At capacity, notifications cannot open another slot. Await one
+            // bounded attempt directly so a hot producer cannot starve
+            // completions by repeatedly waking the select branch.
+            if cleanups.len() >= SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY {
+                if let Some((claim, succeeded)) = cleanups.next().await {
+                    deletion_queue.complete_attempt(claim, succeeded, std::time::Instant::now());
+                }
+                continue;
+            }
+
+            let retry_delay = deletion_queue.next_ready_delay(std::time::Instant::now());
+            let retry_ready = async move {
+                match retry_delay {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(retry_ready);
+            tokio::select! {
+                _ = deletion_queue.notify.notified() => {}
+                _ = &mut retry_ready => {}
+                Some((claim, succeeded)) = cleanups.next(), if !cleanups.is_empty() => {
+                    deletion_queue.complete_attempt(
+                        claim,
+                        succeeded,
+                        std::time::Instant::now(),
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn spawn_orphaned_session_browser_reconciliation(app: tauri::AppHandle, store: SessionStore) {
+    tauri::async_runtime::spawn(reconcile_orphaned_session_browser_files_until_success(
+        app, store,
+    ));
+}
+
+/// Funnel for process env writes inside the single-threaded startup window
+/// (besides the release defaults of `ensure_release_env`).
+///
+/// Since edition 2024, `set_var` is unsafe and requires no concurrent env
+/// readers or writers. This function is called only from the head region of
+/// `run()` and from the headless benchmark host startup sequence
+/// (`headless_bridge.rs run_headless_host`, before the tokio runtime is
+/// built); at both call sites the process has only the main thread (the same
+/// proven window as `ensure_release_env`). From the multi-threaded phase (the
+/// Tauri setup onward) process env writes are forbidden entirely: MCP secrets
+/// travel via keyring + in-process registry through the foundation resolver
+/// hook, so the runtime no longer needs any env writes.
+///
+/// What it writes:
+/// - `PINVOU3_SESSION_ARTIFACTS`: the binary artifacts landing dir for MCP
+///   stdio subprocesses such as PPT / official-document tools (fixed to
+///   `sessions/default/artifacts/`; a stdio server cannot reliably perceive
+///   the current GUI session — concrete ownership is decided by tool events
+///   carrying `session_id` and by frontend persistence).
+/// - OS-specific startup writes (`platform::os::startup_platform_env`): on
+///   Windows, configure the ONNX Runtime dylib path and prepend LibreOffice
+///   to `PATH`; no-op on other platforms.
+pub(crate) fn startup_process_env() {
+    // SAFETY: single-threaded startup window (see the function docs); no
+    // concurrent env readers.
+    unsafe {
+        std::env::set_var(
+            "PINVOU3_SESSION_ARTIFACTS",
+            crate::platform::paths::default_session_artifacts_dir(),
+        )
+    };
+    crate::platform::os::startup_platform_env();
+}
+
 /// `iframe[srcdoc]` 在 WebKitGTK 中会作为宿主 WebView 的 `about:srcdoc` 导航
 /// 进入 Wry 的 navigation handler。这里只放行浏览器内部的两个空文档地址；
 /// 主窗口和 iframe 的任意外部来源仍走初始 origin 限制。
@@ -180,8 +531,59 @@ fn allow_embedded_document_navigation(url: &tauri::Url, main_origin_initialized:
     main_origin_initialized && matches!(url.as_str(), "about:blank" | "about:srcdoc")
 }
 
+/// Non-blocking synchronous fallback for `RunEvent::Exit`. Explicit `app.restart()`
+/// bypasses this event and uses `prepare_app_restart()` to await the complete
+/// `shutdown_before_restart()` barrier.
+fn shutdown_browser_before_process_end(app: &tauri::AppHandle) {
+    if let Some(browser) = app.try_state::<features::browser::BrowserManager>() {
+        browser.shutdown_on_exit();
+    }
+}
+
+/// Shared asynchronous child-process harvesting before exit and restart. Managed
+/// state is not guaranteed to be dropped (kill_on_drop runs only when Child drops),
+/// so explicitly stop ACP/connector children to prevent orphans. Each closure is
+/// idempotent; even shutdown(), the highest timeout risk, only sends a oneshot and
+/// kills without a long wait.
+pub(crate) async fn harvest_child_processes(app: &tauri::AppHandle) {
+    if let Some(acp_pool) = app.try_state::<crate::features::codex_acp::AcpPool>() {
+        acp_pool.shutdown_all().await;
+    }
+    if let Some(connector_conn) =
+        app.try_state::<crate::features::connectors::connector_cli::ConnectorConn>()
+    {
+        connector_conn.kill_all_pids();
+    }
+}
+
+/// Every `app.restart()` call must pass through this funnel. The browser first saves
+/// restore manifests and destroys native surfaces, then asynchronous children are
+/// harvested. The caller invokes the non-returning restart immediately afterward.
+pub(crate) async fn prepare_app_restart(app: &tauri::AppHandle) {
+    if let Some(browser) = app.try_state::<features::browser::BrowserManager>() {
+        browser.shutdown_before_restart().await;
+    }
+    harvest_child_processes(app).await;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 全 crate 唯一的 `generate_context!()` 展开点。
+///
+/// macOS 的 embed_plist 用 `#[no_mangle] static _EMBED_INFO_PLIST` 让重复
+/// 展开成为链接错误;GUI(`run`)与 headless 评测宿主(benchmark-hooks)必须
+/// 共用这里的单一 Context 构造,不得在别处再展开该宏。
+// The generate_context! macro expansion internally calls process::exit (a
+// missing context means the app cannot start); this is Tauri macro behavior,
+// not a code path of this repo, so it is exempted.
+#[allow(clippy::exit)]
+pub fn build_tauri_context() -> tauri::Context {
+    tauri::generate_context!()
+}
+
 pub fn run() {
+    // WebKitGTK reads its RemoteInspector endpoint while constructing the first
+    // WebContext, so the browser feature must reserve it before Tauri starts.
+    features::browser::prepare_process_environment();
     // 必须最先执行:进程级选定 rustls CryptoProvider。
     // 见 Cargo.toml 的 rustls/reqwest 注释——reqwest 0.13 自带 aws-lc-rs 但只「借用」
     // provider,不写入默认槽;而 oauth2(经 reqwest 0.12)把 rustls 0.23 的 `ring` feature
@@ -190,6 +592,7 @@ pub fn run() {
     // aws-lc-rs(FIPS 可候选、性能优于 ring),在任何 TLS 连接之前装好。
     install_rustls_provider();
     ensure_release_env();
+    startup_process_env();
     startup::init();
     startup::mark("environment:ready");
     // 必须早于 Tauri Builder/WebView 创建：避免升级后 WebKit 复用旧 index.html，
@@ -318,6 +721,12 @@ pub fn run() {
             if let Ok(resource_dir) = app.path().resource_dir() {
                 crate::platform::paths::set_runtime_resource_dir(resource_dir);
             }
+            let _ = std::thread::Builder::new()
+                .name("draft-attachment-sweep".to_string())
+                .spawn(|| {
+                    features::files::attachment_upload::sweep_stale_draft_attachments();
+                });
+            features::browser::install_automation_context(app);
             #[cfg(target_os = "macos")]
             features::updater::cleanup_stale_backup();
             if cfg!(debug_assertions) {
@@ -354,15 +763,13 @@ pub fn run() {
                 }
             }
 
-            // run 实体化一次性迁移：必须在 SessionStore boot **之前**跑
-            // （迁移会动 _skill_bindings.json 和 sessions/ 目录，boot 之后再动
-            // 会跟内存态打架）。失败只警告不 panic——app 仍可用，下次 boot 续跑。
-            startup::mark("workflow_migrate:start");
-            if let Err(e) = crate::features::workflow::workflow_migrate::migrate_if_needed() {
-                eprintln!("[pinvou3-app] workflow migrate failed (will retry next boot): {e}");
-                startup::mark_with_detail("rust", "workflow_migrate:error", &e.to_string());
+            // 必须早于 SessionStore boot：归档退役宿主并清除绑定，避免内存态与磁盘态打架。
+            startup::mark("retired_features:start");
+            if let Err(error) = crate::features::retirement::retire_removed_features() {
+                eprintln!("[pinvou3-app] retired feature cleanup failed (will retry next boot): {error}");
+                startup::mark_with_detail("rust", "retired_features:error", &error);
             }
-            startup::mark("workflow_migrate:done");
+            startup::mark("retired_features:done");
 
             // The Account Platform model cutover owns only client-local data.
             // It must complete before SessionStore loads per-session model IDs.
@@ -397,15 +804,13 @@ pub fn run() {
             startup::mark("session_store:start");
             let session_store = match SessionStore::boot_for_process_startup() {
                 Ok(store) => {
-                    store.load_skill_bindings();
-                    store.load_session_models();
-                    store.load_pinned_sessions();
-                    store.load_hidden_sessions();
+                    // sidecar(per-session 模型 / 置顶 / 隐藏)已由 SessionStore::boot_inner
+                    // 在 boot 时统一加载,setup 不再重复读同一批文件。
                     eprintln!("[pinvou3-app] session store ready");
                     Some(store)
                 }
                 Err(e) => {
-                    eprintln!("[pinvou3-app] session store boot failed: {e:?}");
+                    eprintln!("[pinvou3-app] session store boot failed: {e:#}");
                     None
                 }
             };
@@ -415,10 +820,16 @@ pub fn run() {
             }
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
+            let remote_event_endpoint = remote_control_manager.clone();
             app.handle().manage(platform::app_events::AppEventBus::new(
                 move |event, payload| remote_event_transport.forward_local_event(event, payload),
+                move || remote_event_endpoint.has_active_web_transport(),
             ));
             app.handle().manage(remote_control_manager.clone());
+            let behavior_telemetry =
+                features::behavior_telemetry::BehaviorTelemetry::new();
+            app.handle().manage(behavior_telemetry.clone());
+            behavior_telemetry.start_default_collection();
             // 匿名设备遥测：独立于 UI/Engine，失败只写日志；先 manage 再建 EnginePool，
             // 让每个 session forwarder 都能在 TurnStarted/TurnComplete 取到状态。
             match telemetry::TelemetryState::boot(env!("CARGO_PKG_VERSION")) {
@@ -441,18 +852,54 @@ pub fn run() {
             let store_for_engine = session_store.unwrap_or_else(|| {
                 // store boot 失败时退化用一份临时 store（让 engine 至少能起来）；
                 // 实际使用 session 相关命令会失败,但聊天能跑
-                SessionStore::boot_for_process_startup().expect("session store boot fallback")
+                //
+                // If the second boot still fails (e.g. read-only disk), no
+                // usable store can be constructed and there is no available
+                // failure path on the engine surface — the app is unusable.
+                // Failing fast via panic beats running degraded, so expect
+                // is kept here.
+                #[allow(clippy::expect_used)]
+                || -> SessionStore {
+                    SessionStore::boot_for_process_startup().expect("session store boot fallback")
+                }()
             });
+            // Install the browser transient-protocol startup barrier before any Engine,
+            // scheduler, or remote producer. spawn_watch synchronously isolates the
+            // previous process's host-request directory before accepting current requests.
+            // Installing it after engine_pool could misclassify a boot-time scheduled
+            // task's valid request as a crash artifact and remove it.
+            {
+                let mgr = features::browser::BrowserManager::new();
+                mgr.bind_app(app.handle().clone());
+                let browser_session_store = store_for_engine.clone();
+                mgr.bind_session_validator(std::sync::Arc::new(move |session_id| {
+                    browser_session_store.load(session_id).is_ok()
+                }));
+                app.manage(mgr);
+                features::browser::BrowserManager::spawn_watch(app.handle().clone());
+                spawn_deleted_session_browser_cleanup(
+                    app.handle().clone(),
+                    store_for_engine.clone(),
+                );
+                spawn_orphaned_session_browser_reconciliation(
+                    app.handle().clone(),
+                    store_for_engine.clone(),
+                );
+            }
             // 原生代码会话的执行根解析需要共享 AcpPool 持有的 SessionAgentStore
             // （多实例各自读盘，只有这份 clone 与 AcpPool 同一份 Arc）。
-            let code_session_agents =
+            let (code_session_agents, acp_pool_for_capabilities) =
                 match crate::features::codex_acp::AcpPool::new(handle.clone(), store_for_engine.clone())
                 {
                     Ok(pool) => {
                         let agents = pool.agents().clone();
+                        let capability_pool = pool.clone();
+                        // 空闲回收巡检：ACP 会话是活的子进程，空闲超阈值回收
+                        // （回到 lazy spawn 语义，下次使用重新拉起）。
+                        pool.start_idle_reaper();
                         handle.manage(pool);
                         eprintln!("[pinvou3-app] Codex ACP pool ready (lazy spawn per session)");
-                        agents
+                        (agents, capability_pool)
                     }
                     Err(error) => {
                         panic!("failed to init Codex ACP pool: {error:#}");
@@ -475,10 +922,17 @@ pub fn run() {
             let tool_policy: crate::features::assistant::engine_pool::ToolPolicy =
                 std::sync::Arc::new(|app| {
                     let mut tools = crate::features::marketplace::disabled_tool_names();
-                    let kb_usable = app
-                        .try_state::<knowledge::KnowledgeService>()
-                        .map(|service| service.has_indexed_content() && service.semantic_ready())
-                        .unwrap_or(false);
+                    // 语义与单一真相源见 KnowledgeService::kb_tools_usable:
+                    // 只看有没有内容,不看模型在位状态(可见性随模型波动会让
+                    // 自愈重载路径不可达)。
+                    let kb_usable = knowledge::KnowledgeService::kb_tools_usable(
+                        app.try_state::<knowledge::KnowledgeService>()
+                            .map(|service| service.has_indexed_content())
+                            .unwrap_or(false),
+                        app.try_state::<RemoteKnowledgeService>()
+                            .map(|service| service.has_connections())
+                            .unwrap_or(false),
+                    );
                     if !kb_usable {
                         tools.push("kb_search".to_string());
                         tools.push("kb_open_source".to_string());
@@ -513,12 +967,46 @@ pub fn run() {
                         let agents = code_session_agents.clone();
                         move |session_id: &str| agents.is_code_session(session_id)
                     }));
+                    pool.bridge
+                        .set_external_acp_session_predicate(std::sync::Arc::new({
+                            let acp_pool = acp_pool_for_capabilities.clone();
+                            move |session_id: &str| acp_pool.is_acp(session_id)
+                        }));
                     // sessions feature 自己的 code 判定（mode 默认值解析 + 仅 code
                     // 持久化），与 bridge 共用同一份 SessionAgentStore 闭包。
                     store_for_engine.set_code_session_predicate(std::sync::Arc::new({
                         let agents = code_session_agents.clone();
                         move |session_id: &str| agents.is_code_session(session_id)
                     }));
+                    // SessionStore::delete and deep deletion paths without
+                    // an app handle (retention policy/scheduled cleanup)
+                    // clear process-level per-session keys uniformly via
+                    // the purge hook, matching the delete_session command's
+                    // cleanup (dependency inversion, see SessionPurgedHook —
+                    // sessions must not depend on assistant in reverse).
+                    // MonitorState is managed late in setup while the hook
+                    // only runs at deletion time, so try_state finds it in
+                    // place; if unmanaged (very early deletions) the item is
+                    // skipped.
+                    let app_for_purge_hook = handle.clone();
+                    store_for_engine
+                        .register_session_purged_hook(std::sync::Arc::new(move |session_id: &str| {
+                            crate::features::assistant::timing::clear_session(session_id);
+                            crate::features::assistant::pending_user_input::clear_session(
+                                session_id,
+                            );
+                            crate::features::memory::discard_turn_capture(session_id);
+                            // Self-metrics accumulate per session key
+                            // (warmed_sessions inserts on every TurnComplete
+                            // and is never reclaimed); clear the keys on
+                            // deletion.
+                            if let Some(metrics) = app_for_purge_hook
+                                .try_state::<crate::features::monitor::MonitorState>()
+                                .map(|state| state.self_metrics())
+                            {
+                                metrics.drop_session(session_id);
+                            }
+                        }));
                     // 远程端正式支持代码会话之前，先过滤原生代码会话事件（与 Engine
                     // bridge 共用同一份 SessionAgentStore 判定）。
                     remote_control_manager.set_code_session_predicate(std::sync::Arc::new({
@@ -538,10 +1026,13 @@ pub fn run() {
                             eprintln!("[pinvou3-app] scheduled tasks runtime ready");
                         }
                         Err(e) => {
-                            eprintln!("[pinvou3-app] scheduled tasks runtime init failed: {e:?}");
+                            eprintln!("[pinvou3-app] scheduled tasks runtime init failed: {e:#}");
                         }
                     }
-                    handle.manage(pool);
+                    handle.manage(pool.clone());
+                    // 空闲回收巡检：engine 常驻但不再无限常驻，空闲超阈值回收
+                    // （回到 lazy spawn 语义，下次发消息重建 + 注水历史）。
+                    pool.start_idle_reaper();
                     eprintln!("[pinvou3-app] engine pool ready (lazy spawn per session)");
                     match remote_control_manager.resume() {
                         Ok(true) => eprintln!("[pinvou3-app] persistent Web access resumed"),
@@ -552,14 +1043,14 @@ pub fn run() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[pinvou3-app] failed to init engine pool: {e:?}");
+                    eprintln!("[pinvou3-app] failed to init engine pool: {e:#}");
                 }
             }
             startup::mark("engine_pool:done");
 
-            // 技能双 scope 治理(skill-scope-governance):启动时
-            //   1. 读一次 disabled_skills.json——触发旧数据迁移(裸数组 / 借道
-            //      disabled_connectors.json 的 `skill:` 条目 → plain scope);
+            // 技能/工具开关 scope 治理(已收敛为 disabled_bundles.json):启动时
+            //   1. 读一次 disabled_bundles.json——触发旧双文件迁移(disabled_connectors
+            //      .json / disabled_skills.json → 包 id × SessionMode 单一禁用集);
             //   2. 退役进程级全局 DISABLED_SKILLS(过滤职责移交组合目录,组合目录
             //      空 → 整个 `## Skills` 块不渲染,路径泄露面随之封闭)。
             // 组合目录的物化在 engine spawn 时按会话进行(build_engine_config 注入
@@ -592,11 +1083,6 @@ pub fn run() {
 
             // 知道连接编排状态(SSO 登录取消标志),供 zhidao_connect_begin/cancel 用。
             app.handle().manage(zhidao::ZhidaoConn::default());
-
-            // 工作流 Phase 可视化:skill 绑定挂在 SessionStore.mode_state 上,
-            // per-session 隔离(start_skill_session 命令负责新建 session + bind)。
-            // 不再需要全局 ActiveSkillStore。
-
             // File watcher: 监听 ~/.pinvou3/sessions/ 树,新文件 emit artifact:disk
             file_watcher::spawn(app.handle().clone(), bridge::paths::sessions_root());
             startup::mark("file_watcher:spawned");
@@ -627,36 +1113,19 @@ pub fn run() {
                     app.handle().manage(svc);
                     eprintln!("[pinvou3-app] knowledge service ready");
                 }
-                Err(e) => eprintln!("[pinvou3-app] knowledge service init failed: {e:?}"),
+                Err(e) => eprintln!("[pinvou3-app] knowledge service init failed: {e:#}"),
             }
             startup::mark("knowledge_service:done");
 
-            // 三省六部「网页类」预置模板 seed(工部 `cp -r ~/.pinvou3/web-template ...` 的母版)。
-            // dev 走 env PINVOU3_WEB_TEMPLATE_DIR(run-dev.sh 注入 ~/models/web-template);prod 从
-            // 随 deb 的 resource_dir 容错三布局取(对齐上面 bge-m3 那段)。69M/2904 文件,放后台
-            // 线程复制,不阻塞启动；已就位则秒跳过。
-            {
-                let web_tpl_src = std::env::var_os("PINVOU3_WEB_TEMPLATE_DIR")
-                    .map(std::path::PathBuf::from)
-                    .filter(|d| d.join("package.json").exists())
-                    .or_else(|| {
-                        app.path().resource_dir().ok().and_then(|res| {
-                            [
-                                res.join("web-template"),
-                                res.join("resources/web-template"),
-                                res.join("resources").join("web-template"),
-                            ]
-                            .into_iter()
-                            .find(|d| d.join("package.json").exists())
-                        })
-                    });
-                std::thread::spawn(move || {
-                    startup::mark("web_template_seed:start");
-                    seed_web_template(web_tpl_src);
-                    startup::mark("web_template_seed:done");
-                });
+            match RemoteKnowledgeService::load(RemoteKnowledgeService::default_path()) {
+                Ok(service) => {
+                    app.handle().manage(service);
+                    eprintln!("[pinvou3-app] remote knowledge service ready");
+                }
+                Err(error) => {
+                    eprintln!("[pinvou3-app] remote knowledge service init failed: {error}")
+                }
             }
-
             // 桌宠:settings.json 里 pet.enabled 为真时随主窗口一起拉起。
             pet_window::spawn_if_enabled(app.handle());
 
@@ -689,7 +1158,35 @@ pub fn run() {
             commands::account_platform::account_platform_select_catalog_model,
             commands::account_platform::account_platform_select_session_model,
             commands::account_platform::account_platform_branch_replacement_session,
+            commands::chat::steer_chat,
+            commands::chat::withdraw_steer,
+            commands::checkpoints::list_checkpoints,
+            commands::checkpoints::checkpoint_diff,
+            commands::checkpoints::rewind_to_turn,
+            commands::checkpoints::rewind_undo_state,
+            commands::checkpoints::undo_last_rewind,
+            commands::behavior_telemetry::track_behavior_event,
+            commands::behavior_telemetry::get_behavior_telemetry_status,
+            commands::behavior_telemetry::set_behavior_telemetry_enabled,
+            commands::assistant_response::export_assistant_response,
+            commands::assistant_response::open_assistant_share_target,
+            commands::browser::browser_stop,
+            commands::browser::browser_status,
+            commands::browser::browser_prepare,
+            commands::browser::browser_hand_back_to_agent,
+            commands::browser::browser_show_native_surface,
+            commands::browser::browser_hide_native_surface,
+            commands::browser::browser_begin_surface_generation,
+            commands::browser::browser_navigate,
+            commands::browser::browser_back,
+            commands::browser::browser_forward,
+            commands::browser::browser_reload,
+            commands::browser::browser_list_tabs,
+            commands::browser::browser_create_tab,
+            commands::browser::browser_close_tab,
+            commands::browser::browser_activate_tab,
             commands::startup::report_frontend_startup,
+            commands::diagnostics::record_authority_sync_diagnostics,
             commands::startup::reveal_startup_window,
             commands::connectors::refresh_connector_auth_gates,
             commands::connectors::feishu_ensure_cli,
@@ -745,6 +1242,9 @@ pub fn run() {
             commands::team_relay::team_relay_create_first_team,
             commands::team_relay::team_relay_bootstrap,
             commands::team_relay::team_relay_update_profile,
+            commands::team_relay::team_relay_upload_avatar,
+            commands::team_relay::team_relay_remove_avatar,
+            commands::team_relay::team_relay_avatar_data_url,
             commands::team_relay::team_relay_create_team,
             commands::team_relay::team_relay_join_team,
             commands::team_relay::team_relay_switch_team,
@@ -754,9 +1254,13 @@ pub fn run() {
             commands::team_relay::team_relay_set_join_password_visibility,
             commands::team_relay::team_relay_disable_join_password,
             commands::team_relay::team_relay_remove_member,
+            commands::team_relay::team_relay_transfer_owner,
+            commands::team_relay::team_relay_leave_team,
+            commands::team_relay::team_relay_dissolve_team,
             commands::team_relay::team_relay_create_thread,
             commands::team_relay::team_relay_create_action,
             commands::team_relay::team_relay_set_thread_preference,
+            commands::team_relay::team_relay_mark_thread_read,
             commands::team_relay::team_relay_upload_attachment,
             commands::team_relay::team_relay_download_attachment,
             commands::team_relay::team_relay_task_workspace_status,
@@ -779,12 +1283,14 @@ pub fn run() {
             commands::local_llm::decline_local_vllm_setup,
             commands::settings::list_models,
             commands::settings::reveal_model_api_key,
+            commands::settings::probe_local_server_kind,
             commands::settings::save_model,
             commands::settings::delete_model,
             commands::settings::set_active_model,
             commands::settings::set_session_model,
             commands::settings::get_session_model_id,
             commands::settings::get_session_model_ref,
+            commands::settings::get_image_input_capability,
             commands::codex::get_codex_acp_status,
             commands::codex::list_acp_agents,
             commands::codex::get_acp_agent_status,
@@ -826,6 +1332,7 @@ pub fn run() {
             commands::codex::list_codex_workspace,
             commands::codex::search_codex_workspace,
             commands::codex::preview_codex_workspace_file,
+            commands::codex::open_codex_workspace_resource,
             commands::codex::get_codex_workspace_changes,
             commands::codex::get_codex_workspace_diff,
             commands::codex::open_codex_workspace_file,
@@ -833,6 +1340,7 @@ pub fn run() {
             commands::codex::open_code_reader,
             commands::codex::take_code_reader_pending,
             commands::settings::test_model_connection,
+            commands::settings::test_image_input_capability,
             commands::settings::test_search_provider,
             commands::voice::transcribe_voice_audio,
             commands::voice::reset_microphone_permission,
@@ -867,6 +1375,8 @@ pub fn run() {
             commands::sessions::save_session_artifacts,
             commands::sessions::save_session_pinvou_scene_events,
             commands::sessions::get_session_pinvou_scene_events,
+            commands::sessions::save_session_steered_messages,
+            commands::sessions::get_session_steered_messages,
             commands::sessions::list_workspace_files,
             commands::runtime::cancel_generation,
             commands::runtime::list_shell_tasks,
@@ -883,8 +1393,11 @@ pub fn run() {
             commands::remote_control::web_access_rpc_respond,
             commands::remote_control::web_access_publish_event,
             commands::remote_control::web_access_list_host_files,
+            commands::remote_control::web_access_list_sessions,
+            commands::remote_control::web_access_list_archived_sessions,
             commands::remote_control::web_access_create_session,
             commands::remote_control::web_access_create_session_and_chat,
+            commands::remote_control::web_access_cancel_session_download,
             commands::remote_control::web_access_load_session_chunk,
             commands::remote_control::web_access_ingest_file,
             commands::remote_control::web_access_upload_attachment_chunk,
@@ -892,9 +1405,29 @@ pub fn run() {
             commands::remote_control::web_access_discard_attachment,
             commands::remote_control::web_access_read_conversation_attachment_chunk,
             commands::remote_control::web_access_chat,
+            commands::remote_control::web_access_create_codex_acp_session,
+            commands::remote_control::web_access_list_codex_workspace,
+            commands::remote_control::web_access_search_codex_workspace,
+            commands::remote_control::web_access_preview_codex_workspace_file,
+            commands::remote_control::web_access_get_codex_workspace_changes,
+            commands::remote_control::web_access_get_codex_workspace_diff,
+            commands::remote_control::web_access_cancel_codex_acp,
+            commands::remote_control::web_access_codex_acp_prompt,
+            commands::remote_control::web_access_get_codex_acp_timeline,
+            commands::remote_control::web_access_get_codex_acp_session_info,
+            commands::remote_control::web_access_set_codex_acp_model,
+            commands::remote_control::web_access_set_codex_acp_mode,
+            commands::remote_control::web_access_set_codex_acp_config_option,
+            commands::remote_control::web_access_get_codex_acp_pending_permissions,
+            commands::remote_control::web_access_respond_codex_acp_permission,
+            commands::remote_control::web_access_get_codex_acp_pending_elicitations,
+            commands::remote_control::web_access_respond_codex_acp_elicitation,
+            commands::remote_control::web_access_list_codex_acp_sessions,
+            commands::remote_control::web_access_list_acp_agents,
+            commands::remote_control::web_access_get_acp_agent_status,
             commands::remote_control::web_access_save_session_messages_chunk,
             commands::remote_control::web_access_transcribe_voice_audio,
-            commands::remote_control::web_access_start_skill_session,
+            commands::remote_control::web_access_track_behavior_event,
             commands::remote_control::web_access_read_artifact_chunk,
             commands::remote_control::web_access_update_settings,
             commands::remote_control::web_access_artifact_info,
@@ -903,13 +1436,10 @@ pub fn run() {
             commands::remote_control::web_access_read_artifact_image_b64,
             commands::remote_control::web_access_read_artifact_thumbnail,
             commands::remote_control::web_access_render_artifact_visual,
-            commands::remote_control::web_access_list_deliverables,
-            commands::remote_control::web_access_get_role_prompt,
-            commands::remote_control::web_access_get_role_outputs,
-            commands::remote_control::web_access_get_role_logs,
-            commands::remote_control::web_access_get_gate_report,
             commands::connectors::set_disabled_connectors,
             commands::connectors::get_disabled_connectors,
+            commands::connectors::set_bundle_visibility,
+            commands::connectors::get_bundle_visibility,
             commands::connectors::set_disabled_skills,
             commands::connectors::get_disabled_skills,
             commands::connectors::set_project_skills_enabled,
@@ -935,7 +1465,6 @@ pub fn run() {
             commands::memory::edit_last_turn,
             commands::artifacts::read_artifact_text,
             commands::artifacts::write_artifact_text,
-            commands::artifacts::list_deliverables,
             commands::artifacts::list_deliverable_index,
             commands::artifacts::artifact_info,
             commands::artifacts::render_artifact_visual,
@@ -963,6 +1492,9 @@ pub fn run() {
             commands::artifacts::open_external_url,
             commands::artifacts::open_user_external_url,
             commands::files::ingest_file,
+            commands::files::ingest_draft_file_chunk,
+            commands::files::cancel_draft_file_upload,
+            commands::files::adopt_draft_attachment,
             commands::files::ingest_dropped_file_chunk,
             commands::files::cancel_dropped_file_upload,
             commands::files::discard_dropped_attachment,
@@ -975,39 +1507,18 @@ pub fn run() {
             commands::interaction::get_mode_state,
             commands::interaction::get_code_permission_prefs,
             commands::interaction::confirm_code_yolo,
+            commands::interaction::get_mode_defaults,
+            commands::interaction::set_mode_default,
             commands::interaction::set_plan_mode_next,
             commands::interaction::exit_plan_to_yolo,
             commands::interaction::set_multi_agent_mode,
             commands::interaction::accept_plan,
             commands::interaction::discard_plan,
             commands::interaction::read_skill_body,
-            commands::workflows::list_skills_v2,
-            commands::workflows::read_skill_demo,
-            commands::workflows::start_skill_session,
-            commands::workflows::unbind_session_skill,
-            commands::workflows::list_workflows,
-            commands::workflows::start_workflow,
-            commands::workflows::kick_workflow,
-            commands::workflows::retry_workflow_role,
-            commands::workflows::get_role_prompt,
-            commands::workflows::get_role_outputs,
-            commands::workflows::get_role_logs,
-            commands::workflows::get_gate_report,
-            commands::workflows::save_project_config,
-            commands::workflows::save_agent_overrides,
-            commands::workflows::cancel_workflow_role,
-            commands::workflows::stop_workflow,
-            commands::workflows::approve_workflow_gate,
-            commands::workflows::reject_workflow_gate,
-            commands::workflows::get_workflow_state,
-            commands::workflows::find_resumable_run,
-            commands::workflows::get_session_active_skill,
-            commands::workflows::list_session_skill_bindings,
-            // 多智能体执行记录投影（与上方既有调度器无数据交集，见 docs/adr/0006-*）
+            // 多智能体执行记录投影。
             commands::multiagent::list_subagent_transcripts,
             commands::multiagent::read_subagent_transcript,
             commands::interaction::submit_user_input,
-            commands::interaction::add_run_materials,
             commands::interaction::cancel_user_input,
             commands::interaction::get_pending_user_inputs,
             commands::interaction::restart_engine,
@@ -1074,28 +1585,114 @@ pub fn run() {
             commands::knowledge::session_mounted_collection,
             commands::knowledge::session_mounted_collections,
             commands::knowledge::session_mounted_collections_snapshot,
+            commands::remote_knowledge::remote_kb_connections,
+            commands::remote_knowledge::remote_kb_request_join,
+            commands::remote_knowledge::remote_kb_probe_private_endpoint,
+            commands::remote_knowledge::remote_kb_request_join_confirmed,
+            commands::remote_knowledge::remote_kb_connection_identity,
+            commands::remote_knowledge::remote_kb_pending_joins,
+            commands::remote_knowledge::remote_kb_refresh_join,
+            commands::remote_knowledge::remote_kb_cancel_join,
+            commands::remote_knowledge::remote_kb_create_share,
+            commands::remote_knowledge::remote_kb_shares,
+            commands::remote_knowledge::remote_kb_stop_share,
+            commands::remote_knowledge::remote_kb_join_requests,
+            commands::remote_knowledge::remote_kb_approve_join_request,
+            commands::remote_knowledge::remote_kb_reject_join_request,
+            commands::remote_knowledge::remote_kb_model_status,
+            commands::remote_knowledge::remote_kb_download_model,
+            commands::remote_knowledge::remote_kb_devices,
+            commands::remote_knowledge::remote_kb_update_device,
+            commands::remote_knowledge::remote_kb_remove_device,
+            commands::remote_knowledge::remote_kb_trashed_collections,
+            commands::remote_knowledge::remote_kb_trashed_documents,
+            commands::remote_knowledge::remote_kb_permanently_delete_collection,
+            commands::remote_knowledge::remote_kb_permanently_delete_document,
+            commands::shared_knowledge_host::shared_kb_host_status,
+            commands::shared_knowledge_host::shared_kb_host_lan_endpoints,
+            commands::shared_knowledge_host::shared_kb_discover_nearby,
+            commands::shared_knowledge_host::shared_kb_host_install,
+            commands::shared_knowledge_host::shared_kb_host_upgrade,
+            commands::shared_knowledge_host::shared_kb_host_reconnect,
+            commands::shared_knowledge_host::shared_kb_host_set_owner_device,
+            commands::shared_knowledge_host::shared_kb_host_remove,
+            commands::shared_knowledge_host::shared_kb_host_backup,
+            commands::shared_knowledge_host::shared_kb_host_restore,
+            commands::remote_knowledge::remote_kb_remove_connection,
+            commands::remote_knowledge::remote_kb_collections,
+            commands::remote_knowledge::remote_kb_create_collection,
+            commands::remote_knowledge::remote_kb_update_collection,
+            commands::remote_knowledge::remote_kb_delete_collection,
+            commands::remote_knowledge::remote_kb_restore_collection,
+            commands::remote_knowledge::remote_kb_documents,
+            commands::remote_knowledge::remote_kb_document_statuses,
+            commands::remote_knowledge::remote_kb_discover_folder_files,
+            commands::remote_knowledge::remote_kb_upload_files,
+            commands::remote_knowledge::remote_kb_replace_document,
+            commands::remote_knowledge::remote_kb_delete_document,
+            commands::remote_knowledge::remote_kb_restore_document,
+            commands::remote_knowledge::remote_kb_download_document,
+            commands::remote_knowledge::remote_kb_search,
+            commands::remote_knowledge::session_mounted_remote_collections,
+            commands::remote_knowledge::session_add_mounted_remote_collection,
+            commands::remote_knowledge::session_set_mounted_remote_collection_enabled,
+            commands::remote_knowledge::session_remove_mounted_remote_collection,
             commands::marketplace::list_marketplace_skills,
             commands::marketplace::install_marketplace_skill,
+            commands::marketplace::update_marketplace_skill,
+            commands::marketplace::update_bundle_display_meta,
             commands::marketplace::import_skill_package,
+            commands::marketplace::import_skill_package_bytes,
+            commands::marketplace::import_plugin_package_cmd,
+            commands::marketplace::import_plugin_package_bytes_cmd,
+            commands::marketplace::import_skill_md_bytes,
             commands::marketplace::uninstall_marketplace_skill,
+            commands::marketplace::bundle_readiness,
+            commands::marketplace::export_plugin_spec,
             commands::files::verify_upload,
+            commands::marketplace::list_recycled_plugins,
+            commands::marketplace::restore_recycled_plugin,
+            commands::marketplace::purge_recycled_plugin,
+            commands::marketplace::export_recycled_plugin,
+            commands::marketplace::export_installed_plugin,
         ]);
 
     startup::mark("tauri:builder_configured");
     startup::mark("tauri:context:start");
-    let context = tauri::generate_context!();
+    let context = build_tauri_context();
     startup::mark("tauri:context:done");
     // Keep the historical marker so old and new startup runs remain comparable.
     startup::mark("tauri:run_enter");
     startup::mark("tauri:build:start");
+    // Tauri template idiom: a builder.build failure means the window/event loop
+    // cannot be built and the process has not entered a user session; there is
+    // no degradation path — keep expect to fail fast.
+    #[allow(clippy::expect_used)]
     let app = builder
         .build(context)
         .expect("error while building tauri application");
     startup::mark("tauri:build:done");
     startup::mark("tauri:event_loop:run_enter");
     let mut resumed_reported = false;
-    app.run(move |_app, event| match event {
+    app.run(move |app, event| match event {
         tauri::RunEvent::Ready => startup::mark("tauri:event_loop:ready"),
+        tauri::RunEvent::Exit => {
+            startup::mark("tauri:event_loop:exit");
+            // On main-process exit, refresh browser URL restore manifests, destroy
+            // in-app native WebViews, and clean runtime targets/endpoints. Preserve
+            // restore manifests; there is no external Chrome process.
+            shutdown_browser_before_process_end(app);
+            // Exit semantics preserve the latest restore manifest. Do not asynchronously
+            // call ordinary stop() here: if shutdown_on_exit skips explicit close because
+            // of lock contention, a late stop could acquire the lock and delete restore
+            // state with user-stop semantics. Process exit destroys remaining WebViews,
+            // and shutdown_on_exit always removes coordination files.
+            // 退出收割:同步执行——Exit 后进程即将结束,这是最后的清理窗口。
+            // 重启(app.restart())跳过本事件,调用点在 restart 前主动调同一辅助函数。
+            startup::mark("exit:cleanup:start");
+            tauri::async_runtime::block_on(harvest_child_processes(app));
+            startup::mark("exit:cleanup:done");
+        }
         tauri::RunEvent::Resumed if !resumed_reported => {
             resumed_reported = true;
             startup::mark("tauri:event_loop:first_resumed");
@@ -1108,7 +1705,7 @@ pub fn run() {
 #[cfg(test)]
 mod tool_allowlist_contract {
     use crate::features::assistant::tool_policy::{
-        is_pinvou3_allowed, PINVOU3_ALLOWED_TOOLS, PINVOU3_ALWAYS_LOADED_TOOLS,
+        PINVOU3_ALLOWED_TOOLS, PINVOU3_ALWAYS_LOADED_TOOLS, is_pinvou3_allowed,
     };
 
     /// Pinvou 只允许产品需要的 canonical 工具家族；动态 MCP 工具限制在标准命名空间。
@@ -1187,55 +1784,292 @@ mod navigation_policy_tests {
 }
 
 #[cfg(test)]
-mod web_template_seed {
-    #[cfg(unix)]
-    use std::fs;
-    use std::path::PathBuf;
+mod session_browser_cleanup_retry_tests {
+    use super::{
+        SESSION_BROWSER_CLEANUP_INITIAL_RETRY, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY,
+        SESSION_BROWSER_CLEANUP_MAX_RETRY, SessionBrowserCleanupQueue,
+        next_session_browser_cleanup_retry, session_browser_cleanup_failure_kind,
+    };
 
-    fn tmp_root(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("pinvou3-wt-{tag}-{}", std::process::id()))
+    #[test]
+    fn cleanup_failure_diagnostics_use_non_sensitive_categories() {
+        assert_eq!(
+            session_browser_cleanup_failure_kind("browser manager is unavailable"),
+            "browser-manager-unavailable"
+        );
+        assert_eq!(
+            session_browser_cleanup_failure_kind(
+                "browser cleanup attempt timed out after 10 seconds"
+            ),
+            "timeout"
+        );
+        let category = session_browser_cleanup_failure_kind(
+            "failed to delete session private-session-id from C:\\private\\path",
+        );
+        assert_eq!(category, "cleanup-error");
+        assert!(!category.contains("private-session-id"));
+        assert!(!category.contains("private\\path"));
     }
 
-    /// copy_dir_all 的关键不变量:递归复制文件 + **保留 symlink**。
-    /// web-template 的 node_modules/.bin/* 全是相对 symlink,被解引用成普通文件会撑爆体积
-    /// 且破坏 npm 可执行入口 → `npm run build` 失败。
     #[test]
-    #[cfg(unix)]
-    fn copy_dir_all_preserves_files_and_symlinks() {
-        let root = tmp_root("copy");
-        let _ = fs::remove_dir_all(&root);
-        let src = root.join("src");
-        let dst = root.join("dst");
-        fs::create_dir_all(src.join("sub")).unwrap();
-        fs::write(src.join("a.txt"), b"hello").unwrap();
-        fs::write(src.join("sub/b.txt"), b"world").unwrap();
-        std::os::unix::fs::symlink("sub/b.txt", src.join("link")).unwrap();
+    fn pending_queue_coalesces_repeated_ids_before_worker_take() {
+        let queue = SessionBrowserCleanupQueue::default();
 
-        super::copy_dir_all(&src, &dst).unwrap();
+        for _ in 0..10_000 {
+            queue.enqueue("session-a");
+        }
+        queue.enqueue("session-b");
 
-        assert_eq!(fs::read(dst.join("a.txt")).unwrap(), b"hello");
-        assert_eq!(fs::read(dst.join("sub/b.txt")).unwrap(), b"world");
-        let meta = fs::symlink_metadata(dst.join("link")).unwrap();
+        assert_eq!(queue.pending_len(), 2);
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut claimed = queue.claim_ready_up_to(now, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+        claimed.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        assert_eq!(
+            claimed
+                .iter()
+                .map(|claim| claim.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["session-a", "session-b"]
+        );
+        assert_eq!(queue.pending_len(), 0);
+        assert_eq!(queue.in_flight_len(), 2);
+        for claim in claimed {
+            queue.complete_attempt(claim, true, now);
+        }
+        assert_eq!(queue.in_flight_len(), 0);
+    }
+
+    #[test]
+    fn unique_pending_ids_are_concurrency_bounded_without_loss() {
+        let queue = SessionBrowserCleanupQueue::default();
+        let expected = (0..10_000)
+            .map(|index| format!("session-{index}"))
+            .collect::<std::collections::HashSet<_>>();
+        for session_id in &expected {
+            queue.enqueue(session_id);
+        }
+
+        let mut observed = std::collections::HashSet::new();
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while queue.in_flight_len() > 0 || queue.pending_len() > 0 {
+            let batch = queue.claim_ready_up_to(now, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+            assert!(batch.len() <= SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+            assert!(queue.in_flight_len() <= SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+            for claim in batch {
+                assert!(observed.insert(claim.session_id.clone()));
+                queue.complete_attempt(claim, true, now);
+            }
+        }
+
+        assert_eq!(observed, expected);
+        assert_eq!(queue.pending_len(), 0);
+        assert_eq!(queue.in_flight_len(), 0);
+    }
+
+    #[test]
+    fn repeated_events_are_coalesced_and_success_releases_cleanup_bookkeeping() {
+        let queue = SessionBrowserCleanupQueue::default();
+        queue.enqueue("session-a");
+        queue.enqueue("session-b");
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut first = queue.claim_ready_up_to(now, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+        let session_a = first
+            .iter()
+            .position(|claim| claim.session_id == "session-a")
+            .map(|index| first.swap_remove(index))
+            .expect("session A claim");
+        let session_b = first.pop().expect("session B claim");
+
+        queue.enqueue("session-a");
+        queue.enqueue("session-a");
+        queue.complete_attempt(session_a, true, now);
+        queue.complete_attempt(session_b, true, now);
+
+        let rerun = queue.claim_ready_up_to(now, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+        assert_eq!(rerun.len(), 1);
+        assert_eq!(rerun[0].session_id, "session-a");
+        queue.complete_attempt(rerun.into_iter().next().unwrap(), true, now);
+        assert_eq!(queue.pending_len(), 0);
+        assert_eq!(queue.in_flight_len(), 0);
+
+        queue.enqueue("session-a");
+        assert_eq!(queue.claim_ready_up_to(now, 1).len(), 1);
+    }
+
+    #[test]
+    fn persistent_failures_do_not_starve_a_later_unique_cleanup() {
+        let queue = SessionBrowserCleanupQueue::default();
+        let failure_ids = (0..SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY)
+            .map(|index| format!("failure-{index}"))
+            .collect::<std::collections::HashSet<_>>();
+        for index in 0..SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY {
+            queue.enqueue(&format!("failure-{index}"));
+        }
+        queue.enqueue("eventual-success");
+        let mut now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+
+        let first = queue.claim_ready_up_to(now, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+        assert_eq!(first.len(), SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
         assert!(
-            meta.file_type().is_symlink(),
-            "symlink 必须保留为 symlink,不能解引用"
+            first
+                .iter()
+                .all(|claim| failure_ids.contains(&claim.session_id))
         );
-        assert_eq!(
-            fs::read_link(dst.join("link")).unwrap(),
-            PathBuf::from("sub/b.txt"),
-            "symlink target 不变"
-        );
-        assert_eq!(
-            fs::read(dst.join("link")).unwrap(),
-            b"world",
-            "跟随 symlink 仍读到内容"
-        );
+        for claim in first {
+            queue.complete_attempt(claim, false, now);
+        }
 
-        let _ = fs::remove_dir_all(&root);
+        let success = queue.claim_ready_up_to(now, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+        assert_eq!(success.len(), 1);
+        assert_eq!(success[0].session_id, "eventual-success");
+        queue.complete_attempt(success.into_iter().next().unwrap(), true, now);
+
+        for _ in 0..3 {
+            now += SESSION_BROWSER_CLEANUP_MAX_RETRY;
+            let retry = queue.claim_ready_up_to(now, SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+            assert_eq!(retry.len(), SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
+            assert!(
+                retry
+                    .iter()
+                    .all(|claim| failure_ids.contains(&claim.session_id))
+            );
+            for claim in retry {
+                queue.complete_attempt(claim, false, now);
+            }
+        }
+        assert_eq!(queue.in_flight_len(), 0);
+        assert_eq!(queue.pending_len(), SESSION_BROWSER_CLEANUP_MAX_CONCURRENCY);
     }
 
     #[test]
-    fn web_template_dir_named_web_template() {
-        assert!(crate::platform::paths::web_template_dir().ends_with("web-template"));
+    fn cleanup_retry_uses_exponential_backoff_with_a_fixed_cap() {
+        let mut delay = SESSION_BROWSER_CLEANUP_INITIAL_RETRY;
+        for expected_millis in [500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000] {
+            delay = next_session_browser_cleanup_retry(delay);
+            assert_eq!(delay.as_millis(), expected_millis);
+        }
+        assert_eq!(
+            next_session_browser_cleanup_retry(SESSION_BROWSER_CLEANUP_MAX_RETRY),
+            SESSION_BROWSER_CLEANUP_MAX_RETRY
+        );
+    }
+}
+
+#[cfg(test)]
+mod release_env_defaults_guard {
+    /// 全量快照进程环境，保证调用真实 `ensure_release_env` 后完整还原 PATH、UI 环境
+    /// 及测试原有变量；使用 OsString 兼容 POSIX 非 UTF-8 环境变量。
+    struct EnvSnapshot(std::collections::HashMap<std::ffi::OsString, Option<std::ffi::OsString>>);
+
+    impl EnvSnapshot {
+        fn take() -> Self {
+            let mut map = std::collections::HashMap::new();
+            for (key, value) in std::env::vars_os() {
+                map.insert(key, Some(value));
+            }
+            for key in ["DEEPSEEK_MAX_OUTPUT_TOKENS", "PINVOU3_MAX_OUTPUT_TOKENS"] {
+                map.entry(std::ffi::OsString::from(key)).or_insert(None);
+            }
+            Self(map)
+        }
+    }
+
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            for (k, v) in &self.0 {
+                match v {
+                    // SAFETY: holding platform::paths::tests::ENV_LOCK (see each
+                    // use site); env writes in the test process are serialized.
+                    Some(v) => unsafe { std::env::set_var(k, v) },
+                    // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+            let keep: std::collections::HashSet<&std::ffi::OsString> = self.0.keys().collect();
+            let stale: Vec<std::ffi::OsString> = std::env::vars_os()
+                .map(|(key, _)| key)
+                .filter(|key| !keep.contains(key))
+                .collect();
+            for k in stale {
+                // SAFETY: same as above; cleanup-side removal under ENV_LOCK serialization.
+                unsafe { std::env::remove_var(&k) };
+            }
+        }
+    }
+
+    /// Community #210 守卫：release 启动路径不得重新注入全局输出上限。
+    #[test]
+    fn release_env_defaults_must_not_pin_global_output_cap() {
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _snapshot = EnvSnapshot::take();
+
+        assert!(
+            !super::RELEASE_ENV_DEFAULTS
+                .iter()
+                .any(|(key, _)| *key == "DEEPSEEK_MAX_OUTPUT_TOKENS"),
+            "RELEASE_ENV_DEFAULTS 不得包含 DEEPSEEK_MAX_OUTPUT_TOKENS"
+        );
+        assert!(
+            !super::RELEASE_ENV_DEFAULTS
+                .iter()
+                .any(|(key, _)| *key == "PINVOU3_MAX_OUTPUT_TOKENS"),
+            "RELEASE_ENV_DEFAULTS 不得包含 PINVOU3_MAX_OUTPUT_TOKENS"
+        );
+
+        // 第二层：实际注入路径（ensure_release_env 是 run() 启动路径的 release env
+        // 注入函数）。先清掉外部可能残留的 env，确保断言的是注入函数自身的行为。
+        // SAFETY: holding platform::paths::tests::ENV_LOCK (first line of this test); env writes serialized.
+        unsafe { std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS") };
+        // SAFETY: same as above; ENV_LOCK serialization.
+        unsafe { std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS") };
+        super::ensure_release_env();
+        assert!(
+            std::env::var_os("DEEPSEEK_MAX_OUTPUT_TOKENS").is_none(),
+            "ensure_release_env must not re-inject DEEPSEEK_MAX_OUTPUT_TOKENS (would re-pin cloud caps)"
+        );
+        assert!(
+            std::env::var_os("PINVOU3_MAX_OUTPUT_TOKENS").is_none(),
+            "ensure_release_env must not re-inject PINVOU3_MAX_OUTPUT_TOKENS (the Pinvou cap travels only via prefs/route)"
+        );
+    }
+
+    /// `startup_process_env` is the sole injection funnel for
+    /// `PINVOU3_SESSION_ARTIFACTS` (bridge boot runs in the multi-threaded
+    /// phase and must not write the process env; see the dual assertion in
+    /// bridge.rs `forkguard_boot_env_must_not_pin_global_output_cap`).
+    /// This test locks the positive behavior: the single-threaded startup
+    /// function must write the session artifacts dir into the process env for
+    /// MCP stdio subprocesses such as PPT / official-document tools to
+    /// inherit.
+    #[test]
+    fn startup_process_env_writes_session_artifacts() {
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let _snapshot = EnvSnapshot::take();
+
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-startup-env-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create isolated PINVOU3_HOME");
+        // SAFETY: holding platform::paths::tests::ENV_LOCK (first line of this test); env writes serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
+        // SAFETY: same as above; ENV_LOCK serialization.
+        unsafe { std::env::remove_var("PINVOU3_SESSION_ARTIFACTS") };
+
+        super::startup_process_env();
+
+        let expected = crate::platform::paths::default_session_artifacts_dir();
+        assert_eq!(
+            std::env::var("PINVOU3_SESSION_ARTIFACTS").as_deref(),
+            Ok(expected.to_str().expect("isolated home path must be UTF-8")),
+            "startup_process_env must inject PINVOU3_SESSION_ARTIFACTS"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

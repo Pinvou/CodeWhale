@@ -11,7 +11,6 @@
     var addSystemItem = context.addSystemItem;
     var rememberScheduledRunOwner = context.rememberScheduledRunOwner;
     var isScheduledRunTerminal = context.isScheduledRunTerminal;
-    var purgeSessionBuffer = context.purgeSessionBuffer;
     var createNewSession = context.createNewSession;
     var prefillComposer = context.prefillComposer;
     var sessionStates = context.sessionStates;
@@ -24,6 +23,34 @@
     var scheduledRunEventRefreshTimer = null;
     var scheduledTaskPendingLoads = Object.create(null);
     var scheduledTaskAutoCreateInFlight = Object.create(null);
+    var scheduledTelemetryFinishedRuns = Object.create(null);
+    var scheduledTelemetryStartedAt = Date.now();
+  function scheduledRunDuration(run) {
+    var started = Date.parse(run && (run.startedAt || run.createdAt) || "");
+    var ended = Date.parse(run && run.endedAt || "");
+    if (!Number.isFinite(started) || !Number.isFinite(ended)) return 0;
+    return Math.max(0, Math.min(86400000, ended - started));
+  }
+
+  function trackScheduledRunFinished(run) {
+    if (!run || !run.id) return;
+    var automationId = run.automationId || run.automation_id;
+    var status = String(run.status || "").toLowerCase();
+    if (!automationId || ["completed", "failed", "canceled", "cancelled", "interrupted"].indexOf(status) < 0) return;
+    var endedAt = Date.parse(run.endedAt || "");
+    if (!Number.isFinite(endedAt) || endedAt < scheduledTelemetryStartedAt - 5000) return;
+    var key = automationId + ":" + run.id;
+    if (scheduledTelemetryFinishedRuns[key]) return;
+    scheduledTelemetryFinishedRuns[key] = true;
+    invoke("track_behavior_event", { request: {
+      eventName: "scheduled_task_run_finished",
+      scheduledTaskSourceId: automationId,
+      scheduledRunSourceId: run.id,
+      status: status,
+      durationMs: scheduledRunDuration(run),
+      errorCategory: status === "failed" ? "internal_error" : (status === "completed" ? undefined : "user_cancelled"),
+    } }).catch(function () {});
+  }
   function loadScheduledTaskTemplateSources() {
     try {
       var parsed = JSON.parse(window.localStorage.getItem(SCHEDULED_TEMPLATE_SOURCE_STORAGE_KEY) || "{}");
@@ -208,7 +235,8 @@
   function isCurrentScheduledTaskRequest(stamp) {
     if (!stamp || stamp.generation !== scheduledTaskSelectionGeneration) return false;
     if (scheduledTaskRequestTokens[stamp.kind] !== stamp.token) return false;
-    if (stamp.kind !== "tasks" && state.selectedScheduledTaskId !== stamp.id) return false;
+    // id 检查省略：selectedScheduledTaskId 唯一写者是 selectScheduledTask（每次
+    // 改写前 generation+1），id 变化必然被上方 generation 检查拦截（审计清理）。
     return true;
   }
 
@@ -367,10 +395,15 @@
   }
 
   // 聊天创建拿到合法参数后立即落成任务。草稿不会进入可渲染 state，避免再出现一层确认卡。
+  // autoOpenId 全局 last-writer：两会话并发创建时后完成者覆盖，且
+  // startScheduledTaskChat 清空后陈旧 completion 会复活 auto-open（审计 f）。
+  // 全局单调创建序号，仅最新意图可写。
+  var scheduledTaskAutoCreateSeq = 0;
   function autoCreateScheduledTaskDraft(draft, creationSessionId) {
     if (!draft || !creationSessionId || scheduledTaskAutoCreateInFlight[creationSessionId]) return;
     var lockedDraft = lockScheduledTaskDraftModel(draft);
     state.scheduledTaskDraft = null;
+    var creationSeq = ++scheduledTaskAutoCreateSeq;
     var creation = Promise.resolve()
       .then(function () {
         return createScheduledTask(scheduledTaskInputFromDraft(lockedDraft));
@@ -381,7 +414,7 @@
         }
         var creationBuffer = sessionStates[creationSessionId];
         if (creationBuffer) creationBuffer.scheduledTaskDraft = null;
-        if (created && created.id) state.scheduledTaskAutoOpenId = created.id;
+        if (created && created.id && creationSeq === scheduledTaskAutoCreateSeq) state.scheduledTaskAutoOpenId = created.id;
         notify();
         return created;
       })
@@ -457,6 +490,7 @@
     var rows = (state.scheduledTaskRecentRuns || []).slice();
     (Array.isArray(runs) ? runs : []).forEach(function (run) {
       if (!run) return;
+      trackScheduledRunFinished(run);
       rememberScheduledRunOwner(run);
       var merged = Object.assign({}, run, {
         automationId: run.automationId || task.id,
@@ -522,13 +556,14 @@
       });
       var rows = (Array.isArray(runs) ? runs : []).map(function (run) {
         if (!run) return null;
+        trackScheduledRunFinished(run);
         rememberScheduledRunOwner(run);
         var automationId = run.automationId || run.automation_id;
         var task = tasksById[automationId] || null;
         return Object.assign({}, run, {
           automationId: automationId,
-          taskName: task && task.name || bt("scheduledTaskFallbackName"),
-          taskModel: task && task.model || null,
+          taskName: task && task.name || run.taskName || bt("scheduledTaskFallbackName"),
+          taskModel: task && task.model || run.taskModel || null,
         });
       }).filter(function (run) {
         return run && run.sessionId && !run.archived;
@@ -607,11 +642,23 @@
         : SCHEDULED_LINK_POLL_SLOW_MS);
     }
 
+    function taskStillListed() {
+      return (state.scheduledTasks || []).some(function (item) {
+        return item && item.id === automationId;
+      });
+    }
+
     function poll(attempt) {
       invoke("list_scheduled_task_runs", { id: automationId }).then(function (runs) {
+        // 任务已被删除时不再回填：陈旧轮询响应会把已删任务以 fallback 名
+        // 复活回侧边栏（审计 R1）。任务不在列表即收工，不 merge、不续排。
         var task = (state.scheduledTasks || []).find(function (item) {
           return item && item.id === automationId;
-        }) || { id: automationId, name: bt("scheduledTaskFallbackName") };
+        });
+        if (!task) {
+          stop();
+          return;
+        }
         mergeScheduledTaskRecentRuns(task, runs);
         notify();
         // 必须看原始响应:mergeScheduledTaskRecentRuns 会滤掉尚无 sessionId 的记录,
@@ -626,7 +673,15 @@
           return;
         }
         again(attempt);
-      }).catch(function () { again(attempt); });
+      }).catch(function () {
+        // 已删任务的后端响应是 Err 而非空列表（get_automation 文件已移除）。
+        // 任务不在列表即收工，否则会以 1s/5s 空转重试到 30 分钟兜底。
+        if (!taskStillListed()) {
+          stop();
+          return;
+        }
+        again(attempt);
+      });
     }
 
     poll(0);
@@ -634,6 +689,7 @@
 
   function upsertScheduledTaskRun(run) {
     if (!run || !run.id) return;
+    trackScheduledRunFinished(run);
     rememberScheduledRunOwner(run);
     if (state.selectedScheduledTaskId && run.automationId && state.selectedScheduledTaskId !== run.automationId) return;
     var found = false;
@@ -689,6 +745,12 @@
       }
       if (templateId) rememberScheduledTaskTemplateSource(created.id, templateId);
       attachScheduledTaskTemplateSource(created);
+      invoke("track_behavior_event", { request: {
+        eventName: "scheduled_task_created",
+        scheduledTaskSourceId: created.id,
+        scheduleRule: created.rrule || backendInput.rrule || "",
+        taskType: templateId || "custom",
+      } }).catch(function () {});
       // 立即重拉任务列表:新 stamp 会使创建前仍在途的 list_scheduled_tasks 响应失效,
       // 防止旧结果落地时把刚创建的任务从列表里覆盖掉。
       await loadScheduledTasks();
@@ -745,22 +807,12 @@
     return runScheduledTaskAction("delete", async function () {
       invalidateScheduledRecentRuns();
       var deleted = await invoke("delete_scheduled_task", { id: id });
-      var deletedSessionIds = deleted && Array.isArray(deleted.deletedSessionIds)
-        ? deleted.deletedSessionIds
-        : [];
-      var deletedSessionSet = Object.create(null);
-      deletedSessionIds.forEach(function (sessionId) {
-        deletedSessionSet[sessionId] = true;
-        purgeSessionBuffer(sessionId);
-      });
+      // 作废删除前在途的整表 list / detail / runs 读（与 run-now 同模式）：否则
+      // 3 秒轮询的旧 list 响应落地时会把刚删的任务复活回侧边栏（含本 feature
+      // run-now 轮询依赖的 taskStillListed 判断，幽灵窗口会击穿 R1 守卫）。
+      invalidateScheduledTaskReads(id);
       forgetScheduledTaskTemplateSource(id);
       state.scheduledTasks = (state.scheduledTasks || []).filter(function (task) { return task.id !== id; });
-      state.scheduledTaskRecentRuns = (state.scheduledTaskRecentRuns || []).filter(function (run) {
-        return run && run.automationId !== id && !deletedSessionSet[run.sessionId];
-      });
-      state.scheduledTaskRuns = (state.scheduledTaskRuns || []).filter(function (run) {
-        return run && run.automationId !== id && !deletedSessionSet[run.sessionId];
-      });
       if (state.selectedScheduledTaskId === id) selectScheduledTask(null);
       notify();
       return deleted;
@@ -793,6 +845,7 @@
       var prompt = await invoke("scheduled_task_chat_prompt");
       state.scheduledTaskDraft = null;
       state.scheduledTaskCreationSessionId = null;
+      scheduledTaskAutoCreateSeq++; // 清空意图：作废在途 auto-create 的陈旧 completion（审计 f）
       state.scheduledTaskAutoOpenId = null;
       await createNewSession();
       state.scheduledTaskPendingGuide = prompt;

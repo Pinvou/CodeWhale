@@ -12,10 +12,12 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:workspace-panel-session-ui"),
   command("npm", "test:reader-ui"),
   command("npm", "test:reader-diff-ui"),
+  command("npm", "test:team-relay-ui"),
   command("npm", "test:markdown-artifact-ui"),
   command("node", "tests/admin_roles_ui_smoke.mjs"),
   command("npm", "test:admin-finance-overview-ui"),
   command("npm", "test:admin-token-resources-ui"),
+  command("npm", "test:admin-model-actions-ui"),
   command("npm", "test:admin-model-operations-ui"),
   command("npm", "test:admin-model-detail-ui"),
   command("npm", "test:admin-model-pricing-ui"),
@@ -26,17 +28,21 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("node", "tests/update_notice_ui_smoke.js"),
   command("node", "tests/scheduled_tasks_smoke.js"),
   command("npm", "test:diff-ui"),
+  command("npm", "test:choice-card-ui"),
   command("node", "tests/pet_selector_ui_smoke.js"),
+  command("npm", "test:tool-store-grouping"),
+  command("npm", "test:tool-store-import"),
+  command("npm", "test:tool-store-recycle-bin"),
   command("npm", "test:webui"),
 ]);
 
 const CORE_SMOKE = command("npm", "test:ui-smoke");
-
 const FEATURE_COMMANDS = new Map([
   ["account-platform", [
     command("node", "tests/admin_roles_ui_smoke.mjs"),
     command("npm", "test:admin-finance-overview-ui"),
     command("npm", "test:admin-token-resources-ui"),
+    command("npm", "test:admin-model-actions-ui"),
     command("npm", "test:admin-model-operations-ui"),
     command("npm", "test:admin-model-detail-ui"),
     command("npm", "test:admin-model-pricing-ui"),
@@ -47,10 +53,10 @@ const FEATURE_COMMANDS = new Map([
   ["pet", [command("node", "tests/pet_selector_ui_smoke.js")]],
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],
   ["settings", [command("npm", "test:settings-ui")]],
-  ["tools", [command("npm", "test:tool-store")]],
+  ["team-relay", [command("npm", "test:team-relay-ui")]],
+  ["tools", [command("npm", "test:tool-store"), command("npm", "test:tool-store-import"), command("npm", "test:tool-store-grouping"), command("npm", "test:tool-store-recycle-bin")]],
   ["updater", [command("node", "tests/update_notice_ui_smoke.js")]],
   ["web", [command("npm", "test:webui")]],
-  ["workflow", [command("node", "tests/scheduled_tasks_smoke.js")]],
 ]);
 
 const FULL_PREFIXES = [
@@ -68,9 +74,10 @@ const FULL_PREFIXES = [
   "pinvou3-app/src/shared/",
   "pinvou3-app/src-tauri/config/",
   "pinvou3-app/src-tauri/packaging/",
+  "pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/",
   "pinvou3-app/src-tauri/tauri.conf.json",
   "pinvou3-app/tests/",
-  "pinvou3-app/vite.config.js",
+  "pinvou3-app/vite.config.mjs",
   "scripts/mcp-server-contract-smoke.py",
   "scripts/run-frontend-smokes.mjs",
   "scripts/run-user-journey-tests.sh",
@@ -86,10 +93,11 @@ function isFrontendRelevant(path) {
     path.startsWith("pinvou3-app/scripts/tauri/") ||
     path.startsWith("pinvou3-app/src-tauri/config/") ||
     path.startsWith("pinvou3-app/src-tauri/packaging/") ||
+    path.startsWith("pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/") ||
     path.startsWith("remote-control-relay/") ||
     path === "pinvou3-app/package.json" ||
     path === "pinvou3-app/package-lock.json" ||
-    path === "pinvou3-app/vite.config.js" ||
+    path === "pinvou3-app/vite.config.mjs" ||
     path === "pinvou3-app/eslint.config.mjs" ||
     path === "pinvou3-app/src-tauri/tauri.conf.json" ||
     path === "scripts/run-user-journey-tests.sh" ||

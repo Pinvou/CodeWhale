@@ -53,7 +53,6 @@ import {
   applyEvent,
   createPetState,
   deriveActivities,
-  deriveAnimation,
   markSessionViewed,
   removeSessionActivity,
 } from './pet-state.js';
@@ -71,13 +70,17 @@ import {
   resolvePet,
 } from './pet-registry.js';
 import { useReducedMotion } from '../../hooks/useReducedMotion.js';
-import { dict, TAG_TO_LANG } from '../../shared/i18n.js';
+import { dict, ensureLanguage, initialSystemLanguage, TAG_TO_LANG } from '../../shared/i18n.js';
 import './pet.css';
 
 const TICK_MS = 600;
 const DEFAULT_SCALE = 0.5;
 const MAX_SCALE = 1.2;
 const FIRST_AWAKE_MS = 8_000;
+// 活动卡消失后延迟收窗的窗口:多会话并发时事件/快照乱序会让 activities
+// 在 0↔N 间快速抖动,立即收窗会驱动原生窗口反复展开/收起(macOS 上肉眼
+// 可见的闪现)。延迟确认"真的空了"再收,期间恢复显示则取消收起。
+const ACTIVITY_COLLAPSE_DEBOUNCE_MS = 300;
 const PET_EDGE_PADDING = 24;
 const PET_BOTTOM_PADDING = 8;
 const PET_ACTIVITY_WINDOW_HEIGHT = 260;
@@ -134,7 +137,27 @@ function PetSprite({ pet, animation }) {
   );
 }
 
-function PetActivityBody({ text, expanded = false }) {
+// Value-based stable comparison for the 600ms tick: when the list length
+// and every card's (sessionId,status,updatedAt,title,body) all match, the
+// update is considered unchanged, letting setState keep the old reference
+// and skip re-rendering the whole activity-card tree.
+// body must participate: its text derives from the i18n dictionary, and a
+// language switch changes body without touching the event fields — without
+// it, cards would keep showing the pre-switch language forever.
+function sameActivities(prev, next) {
+  if (prev === next) return true;
+  if (!Array.isArray(prev) || !Array.isArray(next) || prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i += 1) {
+    const a = prev[i];
+    const b = next[i];
+    if (!a || !b) return false;
+    if (a.sessionId !== b.sessionId || a.status !== b.status
+      || a.updatedAt !== b.updatedAt || a.title !== b.title || a.body !== b.body) return false;
+  }
+  return true;
+}
+
+const PetActivityBody = React.memo(function PetActivityBody({ text, expanded = false }) {
   const source = String(text || '');
   const className = expanded
     ? 'pet-activity-body pet-activity-body-expanded'
@@ -146,7 +169,7 @@ function PetActivityBody({ text, expanded = false }) {
       dangerouslySetInnerHTML={{ __html: renderPetMarkdown(source) }}
     />
   );
-}
+});
 
 export default function PetWindow({
   allowResize = true,
@@ -157,7 +180,7 @@ export default function PetWindow({
     ? Math.min(MAX_SCALE, Math.max(DEFAULT_SCALE, configuredScale))
     : DEFAULT_SCALE;
   const stateRef = useRef(createPetState());
-  const [language, setLanguage] = useState('zh');
+  const [language, setLanguage] = useState(initialSystemLanguage);
   const t = dict[language] || dict.zh;
   const petCopy = t.uiPet;
   // pet.html 的 <title>/<html lang> 是静态中文,按当前语言同步一次。
@@ -195,6 +218,7 @@ export default function PetWindow({
   const characterSlotRef = useRef(null);
   const activityCardRectRef = useRef(null);
   const activityHeightRef = useRef(null);
+  const activityCollapseTimerRef = useRef(0);
   const openingSessionRef = useRef(null);
   const openingScheduledRunRef = useRef(null);
   const scheduledNoticeRef = useRef(null);
@@ -210,7 +234,6 @@ export default function PetWindow({
   const activateSelectedPet = async (id, startup = false) => {
     const committed = await loadActivePet(id, {
       state: petActivationRef.current,
-      startup,
       defaultPetId: DEFAULT_PET_ID,
       normalizeId: normalizePetId,
       resolvePet,
@@ -283,11 +306,14 @@ export default function PetWindow({
     let disposed = false;
     let unlisten = null;
     invokeTauri('get_settings').then((settings) => {
-      if (!disposed) setLanguage(TAG_TO_LANG[settings?.language] || 'zh');
+      const lang = TAG_TO_LANG[settings?.language] || initialSystemLanguage();
+      // en/ja 惰性词典:本窗口入口首帧只引导系统语言,落盘语言可能未装载
+      if (!disposed) ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
     }).catch(() => {});
     tauriEvents.listen('ui:language_changed', (event) => {
       const next = event.payload?.language;
-      if (!disposed && dict[next]) setLanguage(next);
+      // 主窗切换前已 ensure;本窗仍需各自装载(窗口间不共享 dict 装载状态)
+      if (!disposed) ensureLanguage(next).then((ok) => { if (ok) setLanguage(next); }).catch(() => {});
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;
@@ -300,8 +326,15 @@ export default function PetWindow({
 
   const refresh = () => {
     const now = Date.now();
-    setActivities(deriveActivities(stateRef.current, now, petCopy));
-    setBaseAnimation(deriveAnimation(stateRef.current, now) || 'idle');
+    const next = deriveActivities(stateRef.current, now, petCopy);
+    // Constant 600ms tick: deriveActivities returns fresh array/object
+    // identities every time, so a direct setState would fully re-render
+    // even when idle (each card re-runs its markdown render). The
+    // value-based stable comparison skips unchanged commits.
+    setActivities((prev) => (sameActivities(prev, next) ? prev : next));
+    // deriveAnimation only reads the first card's status: it reuses the derivation above, avoiding a second sort per tick.
+    const nextAnimation = next.length ? next[0].status : null;
+    setBaseAnimation((prev) => (prev === nextAnimation ? prev : (nextAnimation || 'idle')));
   };
 
   useEffect(() => {
@@ -496,6 +529,7 @@ export default function PetWindow({
       disposed = true;
       window.clearInterval(timer);
       window.clearTimeout(scheduledRefreshTimer);
+      window.clearTimeout(activityCollapseTimerRef.current);
       unlisteners.forEach((unlisten) => { try { unlisten(); } catch (_) {} });
     };
   }, [petCopy.sendFailed]);
@@ -517,10 +551,23 @@ export default function PetWindow({
     if (!activityVisible || !list) {
       activityCardRectRef.current = null;
       activityHeightRef.current = null;
-      invokeActivityVisible(false, null);
+      // 收起防抖：先取消未决的收起定时器，再延迟确认。多会话并发时
+      // 卡片在 0↔N 之间快速抖动，立即 invoke(false) 会让原生窗口每抖一次
+      // 就收起又展开一次——macOS 上的"桌宠闪现"。延迟 300ms 确认真空了
+      // 才收窗；期间恢复显示会被下一条 effect 分支取消。
+      window.clearTimeout(activityCollapseTimerRef.current);
+      activityCollapseTimerRef.current = window.setTimeout(() => {
+        activityCollapseTimerRef.current = 0;
+        invokeActivityVisible(false, null);
+      }, ACTIVITY_COLLAPSE_DEBOUNCE_MS);
       return undefined;
     }
 
+    // 有内容立即展开，不等防抖窗口，避免收起→新活动到达时窗口迟滞一帧。
+    if (activityCollapseTimerRef.current) {
+      window.clearTimeout(activityCollapseTimerRef.current);
+      activityCollapseTimerRef.current = 0;
+    }
     activityHeightRef.current = PET_ACTIVITY_WINDOW_HEIGHT;
     measureActivityCard();
     invokeActivityVisible(true, PET_ACTIVITY_WINDOW_HEIGHT);
@@ -1180,7 +1227,7 @@ export default function PetWindow({
     event.preventDefault();
     event.stopPropagation();
     removeSessionActivity(stateRef.current, sessionId);
-    setActivities(deriveActivities(stateRef.current, Date.now(), petCopy));
+    refresh();
     dispatchCardUi({ type: 'dismiss', sessionId });
   };
 

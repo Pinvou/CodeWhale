@@ -14,7 +14,26 @@ pub struct NotificationState {
 
 impl NotificationState {
     pub fn should_notify(&self, key: String) -> bool {
-        self.notified_turns.lock().insert(key)
+        let mut turns = self.notified_turns.lock();
+        // A duplicate with the same key (terminal-event replay)
+        // short-circuits first: otherwise the prefix cleanup below would
+        // remove this very entry and re-inserting it would be misreported
+        // as "first".
+        if turns.contains(&key) {
+            return false;
+        }
+        // Keys look like `{session_id}:{turn_id}`: only the newest dedup
+        // record per session needs to survive (duplicate terminal events
+        // always follow the same turn). Without the prefix cleanup the set
+        // would grow unbounded with completed turns.
+        let session_prefix = match key.split_once(':') {
+            Some((session, _)) => format!("{session}:"),
+            None => String::new(),
+        };
+        if !session_prefix.is_empty() {
+            turns.retain(|existing| !existing.starts_with(&session_prefix));
+        }
+        turns.insert(key)
     }
 }
 
@@ -122,12 +141,8 @@ fn send_native_notification(app: &AppHandle, title: &str, body: &str) -> Result<
 fn send_notify_send(title: &str, body: &str) -> Result<(), String> {
     use std::process::Command;
 
-    Command::new("notify-send")
-        .arg(title)
-        .arg(body)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    crate::platform::os::spawn_detached_and_reap(Command::new("notify-send").arg(title).arg(body))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -148,11 +163,14 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         f(root.clone());
         match old_home {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(root);
     }
@@ -193,6 +211,15 @@ mod tests {
         assert!(state.should_notify("session:turn".to_string()));
         assert!(!state.should_notify("session:turn".to_string()));
         assert!(state.should_notify("session:next-turn".to_string()));
+        assert!(!state.should_notify("session:next-turn".to_string()));
+        // Once the next turn lands, only the newest record per session
+        // survives: the old turn's key was already pruned by prefix (the
+        // set is bounded) and its reappearance is treated as a new event —
+        // duplicate terminal events always follow the same turn, so an old
+        // key reappearing across turns has no real dedup need.
+        assert!(state.should_notify("session:turn".to_string()));
+        // Other sessions are unaffected.
+        assert!(state.should_notify("other:turn".to_string()));
     }
 
     #[test]

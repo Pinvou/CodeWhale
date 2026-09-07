@@ -1,7 +1,11 @@
 use std::ffi::OsStr;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
+
+const MAX_CAPTURE_BYTES: u64 = 4 * 1024 * 1024;
+const CAPTURE_TRUNCATED_MARKER: &[u8] = b"\n[pinvou: subprocess output truncated]\n";
 
 pub(crate) struct HiddenCommand;
 
@@ -11,10 +15,6 @@ impl HiddenCommand {
         hide_std_console(&mut command);
         command
     }
-}
-
-pub(crate) fn python_command() -> Command {
-    HiddenCommand::new(crate::platform::paths::python_command())
 }
 
 fn is_windows_command_script(executable: &Path) -> bool {
@@ -60,48 +60,83 @@ pub(crate) fn external_tokio_command(executable: &Path) -> tokio::process::Comma
 }
 
 /// Capture a subprocess without pipe deadlocks and enforce a wall-clock timeout.
+///
+/// Note: if captured stdout/stderr exceeds `MAX_CAPTURE_BYTES`, the whole process
+/// tree is terminated regardless of the kill-tree flag — a runaway writer is never
+/// allowed to outlive the caller.
 pub(crate) fn output_with_timeout(
     mut command: Command,
     timeout: Duration,
 ) -> Result<Output, String> {
+    std_process_group_leader(&mut command);
+    output_with_timeout_inner(command, timeout, false)
+}
+
+/// Capture a subprocess with a wall-clock timeout and terminate its process tree
+/// on timeout. Use this for helpers that can launch privileged descendants: killing
+/// only the wrapper can otherwise leave the real operation running with inherited
+/// stdout/stderr pipes after the caller has reported a timeout.
+pub(crate) fn output_with_timeout_and_kill_tree(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<Output, String> {
+    std_process_group_leader(&mut command);
+    output_with_timeout_inner(command, timeout, true)
+}
+
+fn output_with_timeout_inner(
+    mut command: Command,
+    timeout: Duration,
+    kill_tree_on_timeout: bool,
+) -> Result<Output, String> {
     let program = command.get_program().to_string_lossy().into_owned();
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Regular files cannot fill a pipe and block the child. They also let us read a
+    // completed parent's output without waiting for a descendant that inherited the
+    // same handles to exit, so the wall-clock timeout remains effective.
+    let mut stdout_file = tempfile::tempfile()
+        .map_err(|error| format!("create {program} stdout capture failed: {error}"))?;
+    let mut stderr_file = tempfile::tempfile()
+        .map_err(|error| format!("create {program} stderr capture failed: {error}"))?;
+    let stdout_target = stdout_file
+        .try_clone()
+        .map_err(|error| format!("clone {program} stdout capture failed: {error}"))?;
+    let stderr_target = stderr_file
+        .try_clone()
+        .map_err(|error| format!("clone {program} stderr capture failed: {error}"))?;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_target))
+        .stderr(Stdio::from(stderr_target));
     let mut child = command
         .spawn()
         .map_err(|error| format!("spawn {program} failed: {error}"))?;
-    let mut stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| format!("{program}: no stdout pipe"))?;
-    let mut stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| format!("{program}: no stderr pipe"))?;
-    let stdout_reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buffer = Vec::new();
-        let _ = stdout.read_to_end(&mut buffer);
-        buffer
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buffer = Vec::new();
-        let _ = stderr.read_to_end(&mut buffer);
-        buffer
-    });
 
     let started = Instant::now();
     let status = loop {
+        if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
+            let _ = kill_process_tree(child.id());
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = read_capture(&mut stdout_file);
+            let stderr = read_capture(&mut stderr_file);
+            let detail = subprocess_output_detail(&stdout, &stderr);
+            return Err(format!(
+                "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}"
+            ));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() <= timeout => {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(None) => {
+                if kill_tree_on_timeout {
+                    let _ = kill_process_tree(child.id());
+                }
                 let _ = child.kill();
                 let _ = child.wait();
-                let stdout = stdout_reader.join().unwrap_or_default();
-                let stderr = stderr_reader.join().unwrap_or_default();
+                let stdout = read_capture(&mut stdout_file);
+                let stderr = read_capture(&mut stderr_file);
                 let detail = subprocess_output_detail(&stdout, &stderr);
                 return Err(format!(
                     "{program} timed out after {}s: {detail}",
@@ -109,20 +144,51 @@ pub(crate) fn output_with_timeout(
                 ));
             }
             Err(error) => {
+                if kill_tree_on_timeout {
+                    let _ = kill_process_tree(child.id());
+                }
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
                 return Err(format!("{program} wait error: {error}"));
             }
         }
     };
 
+    // A fast writer can cross the limit and exit between the last size check
+    // and `try_wait()`. Re-check after completion so overflow is never reported
+    // as a silently truncated success.
+    if capture_limit_exceeded(&stdout_file) || capture_limit_exceeded(&stderr_file) {
+        let _ = kill_process_tree(child.id());
+        let stdout = read_capture(&mut stdout_file);
+        let stderr = read_capture(&mut stderr_file);
+        let detail = subprocess_output_detail(&stdout, &stderr);
+        return Err(format!(
+            "{program} output exceeded {MAX_CAPTURE_BYTES} bytes; subprocess tree termination requested: {detail}"
+        ));
+    }
+
     Ok(Output {
         status,
-        stdout: stdout_reader.join().unwrap_or_default(),
-        stderr: stderr_reader.join().unwrap_or_default(),
+        stdout: read_capture(&mut stdout_file),
+        stderr: read_capture(&mut stderr_file),
     })
+}
+
+fn capture_limit_exceeded(file: &std::fs::File) -> bool {
+    file.metadata()
+        .is_ok_and(|metadata| metadata.len() > MAX_CAPTURE_BYTES)
+}
+
+fn read_capture(file: &mut std::fs::File) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    if file.seek(SeekFrom::Start(0)).is_ok() {
+        let _ = file.take(MAX_CAPTURE_BYTES + 1).read_to_end(&mut buffer);
+    }
+    if buffer.len() as u64 > MAX_CAPTURE_BYTES {
+        buffer.truncate(MAX_CAPTURE_BYTES as usize);
+        buffer.extend_from_slice(CAPTURE_TRUNCATED_MARKER);
+    }
+    buffer
 }
 
 fn subprocess_output_detail(stdout: &[u8], stderr: &[u8]) -> String {
@@ -217,20 +283,40 @@ pub(crate) fn std_process_group_leader(command: &mut Command) {
 
 /// 按 pid 杀进程树：Windows 用 taskkill 杀整棵树（脚本会再起子 shell，单杀
 /// 父进程会留下继续运行的子进程）；其他平台按进程组杀（负 pid）——安装进程
-/// 以 `process_group(0)` 独立成组，`kill -9 -pgid` 连 curl | bash / npm 派生
-/// 的子进程一起终止，不孤儿化（评审中危项）。
-pub(crate) fn kill_process_tree(pid: u32) -> std::io::Result<Output> {
-    let pid_arg = pid.to_string();
+/// 以 `process_group(0)` 独立成组，组杀连 curl | bash / npm 派生的子进程一起
+/// 终止，不孤儿化（评审中危项）。Unix 直接调用 kill(2)，不得 spawn 外部 kill
+/// 可执行文件；pid <= 1 或超出 i32 正数范围时拒绝执行，避免触发 kill(0/-1)
+/// 的进程组或用户级特殊语义。ESRCH 表示目标已退出，按成功处理。
+pub(crate) fn kill_process_tree(pid: u32) -> std::io::Result<()> {
     if crate::platform::capabilities::is_windows() {
         external_command(Path::new("taskkill"))
-            .args(["/PID", pid_arg.as_str(), "/T", "/F"])
-            .output()
-    } else {
-        let group_arg = format!("-{pid_arg}");
-        external_command(Path::new("kill"))
-            .args(["-9", group_arg.as_str()])
-            .output()
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output()?;
+        return Ok(());
     }
+    #[cfg(unix)]
+    {
+        let Some(group) = i32::try_from(pid).ok().filter(|group| *group > 1) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing user-wide process group kill for pid {pid}"),
+            ));
+        };
+        // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+        let sent = unsafe { libc::kill(-group, libc::SIGKILL) };
+        if sent != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+    Ok(())
 }
 
 pub(crate) struct HiddenTokioCommand;
@@ -267,6 +353,87 @@ pub(crate) fn hide_tokio_console(_command: &mut tokio::process::Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    const OUTPUT_FIXTURE_ENV: &str = "PINVOU_PROCESS_OUTPUT_FIXTURE";
+    const OUTPUT_FIXTURE_MARKER_ENV: &str = "PINVOU_PROCESS_OUTPUT_FIXTURE_MARKER";
+    const OUTPUT_FIXTURE_TEST: &str = "platform::process::tests::command_output_fixture";
+
+    fn output_fixture_command(mode: &str) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", OUTPUT_FIXTURE_TEST, "--nocapture"])
+            .env(OUTPUT_FIXTURE_ENV, mode);
+        command
+    }
+
+    fn fixture_marker(extension: &str) -> Option<std::path::PathBuf> {
+        std::env::var_os(OUTPUT_FIXTURE_MARKER_ENV)
+            .map(std::path::PathBuf::from)
+            .map(|path| path.with_extension(extension))
+    }
+
+    fn wait_for_fixture_marker(extension: &str, timeout: Duration) -> bool {
+        let Some(marker) = fixture_marker(extension) else {
+            return false;
+        };
+        let started = Instant::now();
+        while !marker.exists() && started.elapsed() < timeout {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        marker.exists()
+    }
+
+    #[test]
+    fn command_output_fixture() {
+        match std::env::var(OUTPUT_FIXTURE_ENV).as_deref() {
+            Ok("flood") => {
+                let payload = vec![b'x'; 256 * 1024];
+                std::io::stdout().write_all(&payload).unwrap();
+                std::io::stderr().write_all(&payload).unwrap();
+            }
+            Ok("overflow") => {
+                let payload = vec![b'x'; 64 * 1024];
+                loop {
+                    std::io::stdout().write_all(&payload).unwrap();
+                    std::io::stderr().write_all(&payload).unwrap();
+                }
+            }
+            Ok("overflow_exit") => {
+                let payload = vec![b'x'; MAX_CAPTURE_BYTES as usize + 64 * 1024];
+                std::io::stdout().write_all(&payload).unwrap();
+                std::io::stderr().write_all(&payload).unwrap();
+            }
+            Ok("descendant") => {
+                let _child = output_fixture_command("descendant_success")
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap();
+                assert!(wait_for_fixture_marker("running", Duration::from_secs(3)));
+                println!("descendant-started");
+            }
+            Ok("descendant_wait") => {
+                let mut child = output_fixture_command("descendant_timeout")
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap();
+                assert!(wait_for_fixture_marker("running", Duration::from_secs(3)));
+                child.wait().unwrap();
+            }
+            Ok("descendant_success") | Ok("descendant_timeout") => {
+                if let Some(running) = fixture_marker("running") {
+                    std::fs::write(running, b"running").unwrap();
+                }
+                std::thread::sleep(Duration::from_secs(5));
+                if let Some(finished) = fixture_marker("finished") {
+                    std::fs::write(finished, b"finished").unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn windows_command_shims_use_command_interpreter() {
@@ -297,5 +464,184 @@ mod tests {
         let command = external_command_for(Path::new(r"C:\tools\kimi.exe"), true);
         assert_eq!(command.get_program(), r"C:\tools\kimi.exe");
         assert!(command.get_args().next().is_none());
+    }
+
+    #[test]
+    fn timeout_kills_self_contained_process_tree() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("descendant-marker");
+        let running = marker.with_extension("running");
+        let finished = marker.with_extension("finished");
+        let mut command = output_fixture_command("descendant_wait");
+        command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
+        let started = Instant::now();
+        let error = output_with_timeout_and_kill_tree(command, Duration::from_secs(3)).unwrap_err();
+
+        assert!(error.contains("timed out after"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(running.exists(), "descendant did not start before timeout");
+        std::thread::sleep(Duration::from_secs(6));
+        assert!(
+            !finished.exists(),
+            "descendant survived process-tree timeout"
+        );
+    }
+
+    /// Regression test for Unix group termination: the implementation must
+    /// call kill(2) directly even when a fake `kill` executable is first on
+    /// PATH, and it must terminate both the group leader and its descendant.
+    #[cfg(unix)]
+    #[test]
+    fn kill_process_tree_terminates_group_without_spawning_external_kill() {
+        use std::sync::Mutex;
+
+        static PATH_LOCK: Mutex<()> = Mutex::new(());
+        let _path_lock = PATH_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let work = std::env::temp_dir().join(format!(
+            "pinvou3-kill-process-tree-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&work).expect("create test work dir");
+        let marker = work.join("external-kill-invoked");
+        let sleep_pid_file = work.join("sleep-pid");
+        let fake_kill_bin = work.join("kill");
+        std::fs::write(
+            &fake_kill_bin,
+            format!("#!/bin/sh\necho \"$@\" >> {}\nexit 42\n", marker.display()),
+        )
+        .expect("write fake kill");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&fake_kill_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake kill");
+
+        let previous_path = std::env::var_os("PATH");
+        let mut split_path = previous_path
+            .as_ref()
+            .map(|value| std::env::split_paths(value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        split_path.insert(0, work.clone());
+        // SAFETY: this test serializes its PATH mutation on PATH_LOCK.
+        unsafe { std::env::set_var("PATH", std::env::join_paths(&split_path).unwrap()) };
+
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!("sleep 30 & echo $! > {}; wait", sleep_pid_file.display()),
+        ]);
+        std_process_group_leader(&mut command);
+        let mut child = command.spawn().expect("spawn sh group leader");
+        let sh_pid = child.id();
+
+        let mut sleep_pid = None;
+        for _ in 0..40 {
+            if let Ok(text) = std::fs::read_to_string(&sleep_pid_file) {
+                if let Ok(value) = text.trim().parse::<u32>() {
+                    sleep_pid = Some(value);
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let sleep_pid = sleep_pid.expect("descendant must report its pid");
+
+        let kill_result = kill_process_tree(sh_pid);
+        let _ = child.wait();
+
+        // SAFETY: kill(pid, 0) only probes liveness.
+        let alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) == 0 };
+        let mut both_dead = !alive(sh_pid) && !alive(sleep_pid);
+        for _ in 0..100 {
+            if both_dead {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            both_dead = !alive(sh_pid) && !alive(sleep_pid);
+        }
+        // SAFETY: ensure no fixture process survives a failing assertion.
+        let _ = unsafe { libc::kill(sleep_pid as i32, libc::SIGKILL) };
+
+        // SAFETY: holding PATH_LOCK; restore the saved value.
+        unsafe {
+            match previous_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let marker_content = std::fs::read_to_string(&marker).ok();
+
+        assert!(kill_result.is_ok(), "group kill failed: {kill_result:?}");
+        assert!(
+            both_dead,
+            "group leader {sh_pid} and descendant {sleep_pid} must both die"
+        );
+        assert!(
+            marker_content.is_none(),
+            "an external kill was spawned: {marker_content:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn output_capture_does_not_deadlock_when_buffers_are_large() {
+        let output = output_with_timeout_and_kill_tree(
+            output_fixture_command("flood"),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert!(output.stdout.len() >= 256 * 1024);
+        assert!(output.stderr.len() >= 256 * 1024);
+    }
+
+    #[test]
+    fn output_capture_limit_terminates_process_tree() {
+        let started = Instant::now();
+        let error = output_with_timeout_and_kill_tree(
+            output_fixture_command("overflow"),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("output exceeded"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn completed_process_cannot_bypass_output_capture_limit() {
+        let error = output_with_timeout_and_kill_tree(
+            output_fixture_command("overflow_exit"),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("output exceeded"), "{error}");
+    }
+
+    #[test]
+    fn completed_parent_does_not_wait_for_descendant_capture_handles() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker = temporary.path().join("descendant-marker");
+        let finished = marker.with_extension("finished");
+        let mut command = output_fixture_command("descendant");
+        command.env(OUTPUT_FIXTURE_MARKER_ENV, &marker);
+        let started = Instant::now();
+        let output = output_with_timeout_and_kill_tree(command, Duration::from_secs(5)).unwrap();
+
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("descendant-started"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let wait_started = Instant::now();
+        while !finished.exists() && wait_started.elapsed() < Duration::from_secs(7) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            finished.exists(),
+            "descendant fixture did not exit naturally"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }

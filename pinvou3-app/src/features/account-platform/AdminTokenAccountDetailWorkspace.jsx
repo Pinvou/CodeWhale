@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
@@ -10,7 +11,7 @@ import { serverRouteHealth } from './admin-token-resource-state.js';
 const TABS = Object.freeze(['overview', 'credentials', 'routes', 'provisionings', 'audit']);
 const TERMINAL_LAUNCH = new Set(['SUCCEEDED', 'FAILED', 'REVOKED', 'EXPIRED']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const key = (prefix) => `${prefix}-${globalThis.crypto.randomUUID()}`;
+const key = (prefix) => `${prefix}-${secureRequestID()}`;
 const date = (value) => value ? new Date(value).toLocaleString() : '—';
 
 function asCollection(value) {
@@ -20,7 +21,7 @@ function asCollection(value) {
 function exactKeys(value, required, optional = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const allowed = new Set([...required, ...optional]);
-  return required.every((name) => Object.hasOwn(value, name)) && Object.keys(value).every((name) => allowed.has(name));
+  return required.every((name) => Object.prototype.hasOwnProperty.call(value, name)) && Object.keys(value).every((name) => allowed.has(name));
 }
 
 function validCredentialLaunch(value, accountID, action) {

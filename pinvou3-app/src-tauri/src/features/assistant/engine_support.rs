@@ -16,7 +16,7 @@ use crate::features::sessions::{ScheduledRunProfile, SessionStore};
 
 pub(super) fn maybe_notify_task_completed(
     app: &AppHandle,
-    store: &SessionStore,
+    _store: &SessionStore,
     session_id: &str,
     turn_id: Option<String>,
     status: TurnOutcomeStatus,
@@ -25,19 +25,21 @@ pub(super) fn maybe_notify_task_completed(
     if status != TurnOutcomeStatus::Completed || error.is_some() {
         return;
     }
-    if store.mode_state(session_id).active_skill.is_some() {
-        return;
-    }
     if !crate::platform::notifications::task_completion_enabled() {
         return;
     }
     let key = turn_id.unwrap_or_else(|| chrono::Utc::now().timestamp_millis().to_string());
     let notify_key = format!("{session_id}:{key}");
-    if app
+    let notification_state = app
         .try_state::<crate::platform::notifications::NotificationState>()
-        .map(|state| state.should_notify(notify_key))
-        .unwrap_or(true)
-    {
+        .map(|state| state.should_notify(notify_key));
+    #[cfg(feature = "benchmark-hooks")]
+    let should_notify = notification_state.unwrap_or_else(|| {
+        !crate::features::assistant::timing::eval_observation_enabled(session_id)
+    });
+    #[cfg(not(feature = "benchmark-hooks"))]
+    let should_notify = notification_state.unwrap_or(true);
+    if should_notify {
         crate::platform::notifications::notify_task_completed(app);
     }
 }
@@ -261,8 +263,8 @@ pub(super) fn apply_scheduled_turn_policy(
     };
 
     *mode = profile.execution_mode().to_app_mode();
-    *route = Box::new(resolved_route);
-    *compaction = Box::new(compaction_config);
+    **route = resolved_route;
+    **compaction = compaction_config;
     *auto_model = false;
     *allow_shell = profile.allow_shell;
     *trust_mode = profile.trust_mode;

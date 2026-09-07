@@ -3,47 +3,22 @@ import {
   AppWindow, Check, ChevronDown, ChevronRight, ExternalLink, FileText,
   Link, Plus, RefreshCw, Search, X,
 } from '../../components/icons.jsx';
+import { RightDockPanel } from '../../components/layout/RightDock.jsx';
 import { invokeTauri } from '../../platform/tauri/client.js';
+import {
+  listAcpWorkspace,
+  loadAcpWorkspaceChanges,
+  loadAcpWorkspaceDiff,
+  previewAcpWorkspaceFile,
+  searchAcpWorkspace,
+} from './acpClient.js';
 import { FileColoredIcon } from '../../components/files/FileColoredIcon.jsx';
 import { CodeViewerModal } from './CodeViewerModal.jsx';
+import { can, isWeb } from '../../shared/platform.js';
+import { acpErrorMessage } from './acpErrors.js';
+import { isMissingWorkspaceDirectoryError, pruneMissingDirectory } from './workspace-tree.js';
 
 const invoke = invokeTauri;
-const WORKSPACE_WIDTH_KEY = 'pinvou_codex_workspace_width';
-const WORKSPACE_MIN_WIDTH = 360;
-const CONVERSATION_MIN_WIDTH = 360;
-const WORKSPACE_MAX_RATIO = 0.65;
-const WORKSPACE_DEFAULT_WIDTH = 380;
-
-function clampWorkspaceWidth(width, rootWidth) {
-  const maximum = Math.max(
-    WORKSPACE_MIN_WIDTH,
-    Math.min(
-      Math.round(rootWidth * WORKSPACE_MAX_RATIO),
-      rootWidth - CONVERSATION_MIN_WIDTH,
-    ),
-  );
-  return Math.max(WORKSPACE_MIN_WIDTH, Math.min(Math.round(width), maximum));
-}
-
-function savedWorkspaceWidth() {
-  try {
-    const value = Number.parseInt(localStorage.getItem(WORKSPACE_WIDTH_KEY) || '', 10);
-    return Number.isFinite(value) && value >= WORKSPACE_MIN_WIDTH
-      ? value
-      : WORKSPACE_DEFAULT_WIDTH;
-  } catch {
-    return WORKSPACE_DEFAULT_WIDTH;
-  }
-}
-
-function rememberWorkspaceWidth(width) {
-  try {
-    localStorage.setItem(WORKSPACE_WIDTH_KEY, String(Math.round(width)));
-  } catch {
-    // localStorage 不可用时只保留当前窗口内的宽度。
-  }
-}
-
 function changeLabel(status, copy) {
   return copy.changes[status] || status;
 }
@@ -70,6 +45,7 @@ function WorkspaceTree({
   onAddReference,
   onOpenExternal,
   onOpenReader,
+  systemOpenAvailable,
   referencedPaths,
   copy,
 }) {
@@ -110,7 +86,7 @@ function WorkspaceTree({
             <FileColoredIcon name={entry.name} isDir={isDirectory} isOpen={open} size={14} />
             <span className="truncate text-[12px]">{entry.name}</span>
           </button>
-          {!isDirectory && (
+          {!isDirectory && systemOpenAvailable && (
             <button
               type="button"
               aria-label={copy.openInNewWindow}
@@ -147,15 +123,17 @@ function WorkspaceTree({
               >
                 <Plus size={13} />
               </button>
-              <button
-                type="button"
-                aria-label={copy.open}
-                title={copy.open}
-                onClick={() => onOpenExternal(entry)}
-                className="w-6 h-6 shrink-0 rounded-md flex items-center justify-center text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-opacity"
-              >
-                <ExternalLink size={13} />
-              </button>
+              {systemOpenAvailable && (
+                <button
+                  type="button"
+                  aria-label={copy.open}
+                  title={copy.open}
+                  onClick={() => onOpenExternal(entry)}
+                  className="w-6 h-6 shrink-0 rounded-md flex items-center justify-center text-gray-400 opacity-0 group-hover:opacity-100 hover:bg-black/[0.05] dark:hover:bg-white/[0.07] transition-opacity"
+                >
+                  <ExternalLink size={13} />
+                </button>
+              )}
             </>
           )}
         </div>
@@ -171,6 +149,7 @@ function WorkspaceTree({
             onAddReference={onAddReference}
             onOpenExternal={onOpenExternal}
             onOpenReader={onOpenReader}
+            systemOpenAvailable={systemOpenAvailable}
             referencedPaths={referencedPaths}
             copy={copy}
           />
@@ -180,12 +159,17 @@ function WorkspaceTree({
   });
 }
 
+// Stable empty-array default: an inline [] is a new reference on every render, which makes memoized children re-render repeatedly.
+const EMPTY_REFERENCES = [];
+
 export function CodexWorkspacePanel({
   session,
   workspacePath = '',
   visible,
+  activationKey,
+  onActiveChange,
   onClose,
-  references = [],
+  references = EMPTY_REFERENCES,
   onAddReference,
   refreshToken = 0,
   onChangeCount,
@@ -209,98 +193,34 @@ export function CodexWorkspacePanel({
   const previewRequestRef = useRef(0);
   const showError = (nextError) => {
     console.error('Codex workspace operation failed:', nextError);
-    setError(copy.showRawErrors ? String(nextError) : copy.operationFailed);
+    setError(acpErrorMessage(nextError, copy, { allowRaw: !isWeb }));
   };
-  const [panelWidth, setPanelWidth] = useState(savedWorkspaceWidth);
-  const panelRef = useRef(null);
-  const resizeCleanupRef = useRef(null);
   const referencedPaths = useMemo(() => new Set(references), [references]);
-
-  useEffect(() => {
-    if (!visible) return undefined;
-    const clampToViewport = () => {
-      const panel = panelRef.current;
-      const rootWidth = panel?.parentElement?.getBoundingClientRect().width || window.innerWidth;
-      setPanelWidth(current => clampWorkspaceWidth(current, rootWidth));
-    };
-    clampToViewport();
-    window.addEventListener('resize', clampToViewport);
-    return () => window.removeEventListener('resize', clampToViewport);
-  }, [visible]);
-
-  useEffect(() => () => {
-    if (resizeCleanupRef.current) resizeCleanupRef.current();
-  }, []);
-
-  function startPanelResize(event) {
-    event.preventDefault();
-    const panel = panelRef.current;
-    const rootRect = panel?.parentElement?.getBoundingClientRect();
-    if (!panel || !rootRect) return;
-    if (resizeCleanupRef.current) resizeCleanupRef.current();
-
-    const maximum = Math.max(
-      WORKSPACE_MIN_WIDTH,
-      Math.min(
-        Math.round(rootRect.width * WORKSPACE_MAX_RATIO),
-        rootRect.width - CONVERSATION_MIN_WIDTH,
-      ),
-    );
-    let nextWidth = panelWidth;
-    let frame = 0;
-    const onMove = moveEvent => {
-      nextWidth = Math.max(
-        WORKSPACE_MIN_WIDTH,
-        Math.min(rootRect.right - moveEvent.clientX, maximum),
-      );
-      if (frame) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = 0;
-        panel.style.width = `${nextWidth}px`;
-      });
-    };
-    const cleanup = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      window.removeEventListener('blur', onUp);
-      if (frame) window.cancelAnimationFrame(frame);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      resizeCleanupRef.current = null;
-    };
-    const onUp = () => {
-      cleanup();
-      setPanelWidth(nextWidth);
-      rememberWorkspaceWidth(nextWidth);
-    };
-    resizeCleanupRef.current = cleanup;
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    window.addEventListener('blur', onUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  }
-
-  function resetPanelWidth() {
-    const panel = panelRef.current;
-    const rootWidth = panel?.parentElement?.getBoundingClientRect().width || window.innerWidth;
-    const nextWidth = clampWorkspaceWidth(WORKSPACE_DEFAULT_WIDTH, rootWidth);
-    setPanelWidth(nextWidth);
-    rememberWorkspaceWidth(nextWidth);
-  }
+  const systemOpenAvailable = can('externalSystemOpen');
 
   async function loadDirectory(path = '', { force = false } = {}) {
     if (!browsable || (!force && entriesByDirectory[path])) return;
     setLoadingDirectories(current => new Set([...current, path]));
     try {
-      const listing = await invoke('list_codex_workspace', {
+      const listing = await listAcpWorkspace({
         ...scopePayload(),
         relativePath: path || null,
       });
       setEntriesByDirectory(current => ({ ...current, [path]: listing.entries || [] }));
       setError('');
     } catch (nextError) {
-      showError(nextError);
+      // 浏览中的非根目录已从磁盘消失（回退撤销 agent 创建的目录、agent 回合中
+      // 删目录、用户外部删除都会触发）：把它（含子路径）从展开集合与条目缓存
+      // 逐出，树自然折叠到仍存在的祖先。不 showError——折叠本身已如实反映现实，
+      // 而 showError 会随 refresh/轮询对仍挂在 expanded 里的路径无限重复爆错
+      // （联调 bug）。错误判定依赖后端固定文案，见 workspace-tree.js 注释。
+      // 根路径（''）失败保持 showError：那是整个工作区不可用，必须显式提示。
+      if (path && isMissingWorkspaceDirectoryError(nextError)) {
+        setExpanded(current => pruneMissingDirectory(current, {}, path).expanded);
+        setEntriesByDirectory(current => pruneMissingDirectory(new Set(), current, path).entriesByDirectory);
+      } else {
+        showError(nextError);
+      }
     } finally {
       setLoadingDirectories(current => {
         const next = new Set(current);
@@ -313,7 +233,7 @@ export function CodexWorkspacePanel({
   async function loadChanges() {
     if (!sessionId) return;
     try {
-      const result = await invoke('get_codex_workspace_changes', { sessionId });
+      const result = await loadAcpWorkspaceChanges({ sessionId });
       setChanges(result);
       if (onChangeCount) onChangeCount((result.changes || []).length);
       setError('');
@@ -347,10 +267,30 @@ export function CodexWorkspacePanel({
     if (!sessionId || !refreshToken) return;
     const timer = window.setTimeout(() => {
       loadChanges();
-      if (visible && tab === 'files') loadDirectory('', { force: true });
+      if (visible && tab === 'files') {
+        const loadedDirectories = ['', ...expanded];
+        Promise.all(loadedDirectories.map(
+          path => loadDirectory(path, { force: true }),
+        ));
+      }
     }, 350);
     return () => window.clearTimeout(timer);
-  }, [refreshToken, sessionId]);
+  }, [refreshToken, sessionId, visible, tab, expanded]);
+
+  useEffect(() => {
+    if (!visible || !browsable) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      if (tab === 'files') {
+        const loadedDirectories = ['', ...expanded];
+        Promise.all(loadedDirectories.map(
+          path => loadDirectory(path, { force: true }),
+        ));
+      }
+      if (sessionId && tab === 'changes') loadChanges();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [visible, browsable, tab, sessionId, browsePath, expanded]);
 
   useEffect(() => {
     if (!browsable || !query.trim()) {
@@ -361,7 +301,7 @@ export function CodexWorkspacePanel({
     setSearching(true);
     const timer = window.setTimeout(async () => {
       try {
-        const results = await invoke('search_codex_workspace', {
+        const results = await searchAcpWorkspace({
           ...scopePayload(),
           query: query.trim(),
         });
@@ -393,7 +333,7 @@ export function CodexWorkspacePanel({
     const requestId = ++previewRequestRef.current;
     setViewer({ name: entry.name, relativePath: entry.relativePath, preview: null, loading: true, error: '' });
     try {
-      const preview = await invoke('preview_codex_workspace_file', {
+      const preview = await previewAcpWorkspaceFile({
         ...scopePayload(),
         relativePath: entry.relativePath,
       });
@@ -408,7 +348,7 @@ export function CodexWorkspacePanel({
         relativePath: entry.relativePath,
         preview: null,
         loading: false,
-        error: copy.showRawErrors ? String(nextError) : copy.operationFailed,
+        error: acpErrorMessage(nextError, copy, { allowRaw: !isWeb }),
       });
     }
   }
@@ -420,7 +360,7 @@ export function CodexWorkspacePanel({
     const requestId = ++previewRequestRef.current;
     setViewer({ name, relativePath: change.relativePath, preview: null, diff: null, loading: true, error: '' });
     try {
-      const diff = await invoke('get_codex_workspace_diff', {
+      const diff = await loadAcpWorkspaceDiff({
         sessionId,
         relativePath: change.relativePath,
       });
@@ -436,7 +376,7 @@ export function CodexWorkspacePanel({
         preview: null,
         diff: null,
         loading: false,
-        error: copy.showRawErrors ? String(nextError) : copy.operationFailed,
+        error: acpErrorMessage(nextError, copy, { allowRaw: !isWeb }),
       });
     }
   }
@@ -455,20 +395,14 @@ export function CodexWorkspacePanel({
   const rows = query.trim() ? searchResults : null;
 
   return (
-    <aside
-      ref={panelRef}
-      style={{ width: `${panelWidth}px` }}
-      className={`${visible ? 'flex' : 'hidden'} relative max-w-[88vw] min-w-0 shrink-0 border-l border-black/[0.06] dark:border-white/[0.07] bg-white/92 dark:bg-[#17181A]/96 backdrop-blur-xl flex-col`}
+    <RightDockPanel
+      panelId="codex-workspace"
+      visible={visible}
+      activationKey={activationKey}
+      onActiveChange={onActiveChange}
+      className="border-l border-black/[0.06] bg-white/92 backdrop-blur-xl dark:border-white/[0.07] dark:bg-[#17181A]/96"
+      dataTestId="codex-workspace-panel"
     >
-      <div
-        role="separator"
-        aria-label={copy.resize}
-        aria-orientation="vertical"
-        onMouseDown={startPanelResize}
-        onDoubleClick={resetPanelWidth}
-        className="absolute inset-y-0 left-0 z-20 w-1.5 -translate-x-1/2 cursor-col-resize bg-black/10 hover:bg-[#0B57D0]/50 dark:bg-white/10 dark:hover:bg-[#A8C7FA]/60 transition-colors"
-        title={copy.resizeHint}
-      />
       <div className="h-14 shrink-0 px-3 flex items-center gap-2 border-b border-black/[0.05] dark:border-white/[0.06]">
         <div className="min-w-0 flex-1">
           <div className="text-[13px] font-semibold">{copy.title}</div>
@@ -544,6 +478,7 @@ export function CodexWorkspacePanel({
                     onAddReference={onAddReference}
                     onOpenExternal={(entry) => openWorkspacePath('open_codex_workspace_file', entry.relativePath)}
                     onOpenReader={(entry) => openWorkspacePath('open_code_reader', entry.relativePath)}
+                    systemOpenAvailable={systemOpenAvailable}
                     referencedPaths={referencedPaths}
                     copy={copy}
                   />
@@ -613,17 +548,23 @@ export function CodexWorkspacePanel({
           loading={viewer.loading}
           error={viewer.error}
           onClose={() => setViewer(null)}
-          onOpen={() => openWorkspacePath('open_codex_workspace_file', viewer.relativePath)}
-          onReveal={() => openWorkspacePath('reveal_codex_workspace_file', viewer.relativePath)}
-          onOpenInNewWindow={async () => {
-            const opened = viewer.diff
-              ? await openWorkspacePath('open_code_reader', viewer.relativePath, { kind: 'diff' })
-              : await openWorkspacePath('open_code_reader', viewer.relativePath);
-            if (opened) setViewer(null);
-          }}
+          onOpen={systemOpenAvailable
+            ? () => openWorkspacePath('open_codex_workspace_file', viewer.relativePath)
+            : undefined}
+          onReveal={systemOpenAvailable
+            ? () => openWorkspacePath('reveal_codex_workspace_file', viewer.relativePath)
+            : undefined}
+          onOpenInNewWindow={systemOpenAvailable
+            ? async () => {
+                const opened = viewer.diff
+                  ? await openWorkspacePath('open_code_reader', viewer.relativePath, { kind: 'diff' })
+                  : await openWorkspacePath('open_code_reader', viewer.relativePath);
+                if (opened) setViewer(null);
+              }
+            : undefined}
           copy={copy}
         />
       )}
-    </aside>
+    </RightDockPanel>
   );
 }

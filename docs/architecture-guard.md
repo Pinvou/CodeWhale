@@ -18,8 +18,14 @@ python scripts/architecture-guard.py
 - Rust feature 不得新增或扩大循环依赖，也不得增加现有循环内部的依赖边和引用。
 - 平台 `target_os` 分支应位于 platform adapter 或组合根；PowerShell、注册表、
   `xdg-open` 等实现细节应位于 platform adapter。合理例外按下文显式登记。
-- `#[tauri::command]` 和 `tauri::generate_handler!` 必须保持在 app 宿主边界内。
+- `#[tauri::command]` 必须位于 `app/commands/` 路径下，`generate_handler!` 条目以
+  `commands::`（或 `crate::app::commands::`）前缀引用。
 - `resources/common` 不得混入 PE、ELF 等平台专属二进制。
+- 禁止 spawn 外部 `kill` 可执行文件执行进程组或进程树终止
+  （`Command::new("kill")`、`Path::new("kill")`、
+  `connector_cli_command(_, "kill")` 等形态）。Unix 组杀必须通过
+  `platform::process::kill_process_tree` / `platform::os::kill_pid_tree`
+  直接调用 `kill(2)`；该规则对所有 Rust 文件生效且没有文件级例外。
 
 门禁只约束可以稳定、客观检测的架构边界，不以文件行数或仓库总代码量作为模块化
 合规条件。模块是否需要拆分，应依据职责、依赖、状态耦合和独立测试能力，遵循根目录

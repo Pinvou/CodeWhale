@@ -1,5 +1,7 @@
 # Rust build artifacts
 CodeWhale/target/
+pinvou-knowledge/target/
+pinvou-cli/target/
 pinvou3-app/src-tauri/target/
 /target/
 debug/
@@ -7,9 +9,15 @@ release/
 *.rs.bk
 *.rlib
 *.prof*
+# Windows 栈 wrapper 由 selector / CI 按需从 .rs 编译,不入库
+# (.exe 及 MSVC 链接生成的 .pdb 均不入库,避免本地 run-dev.sh 首次运行污染工作树)
+pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
+pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.pdb
 
 # Node / frontend
-node_modules/
+# node_modules 不带尾斜杠:带尾斜杠只匹配目录,而 git 对 symlink 按 lstat 判定,
+# worktree 里复用主仓依赖的 node_modules 符号链接不会被忽略,会被误 git add 进提交
+node_modules
 dist/
 build/
 *.log
@@ -45,6 +53,7 @@ scripts/.builtin-secrets.env
 .claude/
 .superpowers/
 .codex-memory.md
+/pinvou-knowledge-data/
 
 # 临时 PR worktree(submodule 的 git worktree,勿提交)
 /CodeWhale-*-env/
@@ -66,6 +75,7 @@ build-logs/
 /pinvou3-app/src-tauri/resources/platforms/macos/x86_64/bundle/connectors/darwin-x64/bin/
 /pinvou3-app/src-tauri/resources/platforms/windows/x86_64/bundle/connectors/windows-x64/bin/
 /pinvou3-app/src-tauri/resources/platforms/linux/asr/sense-voice-main
+/pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/pinvou-knowledge-server
 
 # 图标中间产物(由 icons/ 生成, 不入库)
 pinvou3-app/src-tauri/icon-source-new.png
@@ -87,6 +97,10 @@ pinvou3-app/src-tauri/resources/platforms/linux/codex-bridge/node/
 pinvou3-app/src-tauri/resources/platforms/linux/codex-bridge/acp/
 pinvou3-app/src-tauri/resources/platforms/linux/codex-bridge/manifest.json
 pinvou3-app/src-tauri/resources/platforms/linux/.codex-bridge-build.*/
+pinvou3-app/src-tauri/resources/platforms/macos/codex-bridge/node/
+pinvou3-app/src-tauri/resources/platforms/macos/codex-bridge/acp/
+pinvou3-app/src-tauri/resources/platforms/macos/codex-bridge/manifest.json
+pinvou3-app/src-tauri/resources/platforms/macos/.codex-bridge-build.*/
 .codewhale-worktrees/
 
 # 可选的本地 Windows 私有规则目录

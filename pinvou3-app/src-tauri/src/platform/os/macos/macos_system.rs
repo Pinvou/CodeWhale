@@ -3,6 +3,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::macos_path;
+use objc2_foundation::NSLocale;
+
+pub fn current_system_locale() -> Option<String> {
+    NSLocale::preferredLanguages()
+        .firstObject()
+        .map(|locale| locale.to_string())
+        .filter(|locale| !locale.trim().is_empty())
+}
+
+// Shared Unix helpers come from the same posix.rs implementation as Linux.
+pub use super::super::posix::{make_private_dir, process_alive};
 
 /// 校验路径存在且至少有一个可执行位(owner/group/other 任一有 x bit)。
 /// 与 Linux 侧 `which` 自带的可执行性校验对齐:`command_exists` 此前只调
@@ -16,31 +27,20 @@ fn is_executable(path: &Path) -> bool {
 }
 
 pub fn open_target(target: impl AsRef<OsStr>, label: &str) -> Result<(), String> {
-    Command::new("/usr/bin/open")
-        .arg(target.as_ref())
-        .spawn()
-        .map_err(|e| format!("系统打开失败({label}): {e}"))?;
-    Ok(())
+    super::super::posix::spawn_detached_and_reap(Command::new("/usr/bin/open").arg(target.as_ref()))
+        .map_err(|e| format!("系统打开失败({label}): {e}"))
 }
 
 pub fn reveal_target(target: &Path) -> Result<(), String> {
-    Command::new("/usr/bin/open")
-        .arg("-R")
-        .arg(target)
-        .spawn()
-        .map_err(|error| format!("文件管理器定位失败: {error}"))?;
-    Ok(())
-}
-
-pub fn device_serial_number() -> Option<String> {
-    None
+    super::super::posix::spawn_detached_and_reap(
+        Command::new("/usr/bin/open").arg("-R").arg(target),
+    )
+    .map_err(|error| format!("文件管理器定位失败: {error}"))
 }
 
 pub fn command_exists(command: &str) -> bool {
-    // 从 dmg/Finder 启动的 GUI 进程不继承 shell 的 PATH,/opt/homebrew/bin(Apple Silicon)
-    // 与 /usr/local/bin(Intel) 不在 GUI 进程 PATH 内 → `which` 找不到 brew 装的 pandoc/
-    // poppler/tesseract/soffice,依赖体检系统性误报"缺失"。先走 `which`,命中即返回;
-    // 未命中再补查这两个标准 Homebrew 目录(macOS 适配最常见的实战坑)。
+    // 先走 `which`(含 PATH 内命令),未命中再补查 extra_lookup_dirs() 中的
+    // Homebrew bin 与 cask 应用目录(见该函数注释)。
     if Command::new("/usr/bin/which")
         .arg(command)
         .output()
@@ -49,18 +49,10 @@ pub fn command_exists(command: &str) -> bool {
     {
         return true;
     }
-    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+    for dir in extra_lookup_dirs() {
         let path = Path::new(dir).join(command);
         // is_file() 后再校验可执行位:避免同名无执行权限的残留(手动 touch、
         // 损坏的 brew 链接、备份)被误判为依赖就位。与 Linux 侧 `which` 对齐。
-        if path.is_file() && is_executable(&path) {
-            return true;
-        }
-    }
-    // cask 类 GUI 应用(如 LibreOffice)装在 /Applications/*.app/Contents/MacOS/,
-    // 不在 Homebrew bin 目录,也不在 GUI 进程 PATH 内 → 依赖体检系统性误报缺失。
-    for cask_dir in ["/Applications/LibreOffice.app/Contents/MacOS"] {
-        let path = Path::new(cask_dir).join(command);
         if path.is_file() && is_executable(&path) {
             return true;
         }
@@ -178,6 +170,12 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     Vec::new()
 }
 
+/// Returns the bundled Node.js runtime reused from codex-bridge on macOS.
+/// Consumers fall back to PATH discovery when the runtime is absent.
+pub fn bundled_node() -> Option<PathBuf> {
+    crate::platform::paths::bundled_connector_node()
+}
+
 pub fn libreoffice_tool_path() -> PathBuf {
     if command_exists("soffice") {
         PathBuf::from("soffice")
@@ -208,9 +206,6 @@ pub fn ocr_tool_exists() -> bool {
 pub fn archive_tool_exists() -> bool {
     command_exists("7zz") || command_exists("7z")
 }
-pub fn msg_native_supported() -> bool {
-    false
-}
 pub fn msg_converter_required() -> bool {
     true
 }
@@ -234,33 +229,37 @@ pub fn libreoffice_open_fallback_needed(_path: &Path) -> bool {
 }
 
 /// command_exists 补查的目录列表(Homebrew bin + cask 应用 MacOS 目录)。
-/// 抽取为常量便于测试验证:确保 cask 目录(LibreOffice)在列表内,
-/// 否则 office 文档转换会被系统性误判为依赖缺失。
-#[cfg(test)]
-const EXTRA_LOOKUP_DIRS: &[&str] = &[
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/Applications/LibreOffice.app/Contents/MacOS",
-];
+/// GUI 进程不继承 shell PATH,brew 装的 CLI 与 cask 应用(LibreOffice 装在
+/// /Applications/*.app/Contents/MacOS/)都查不到 → 收敛为单一来源,
+/// 供 command_exists 与测试共用,防止实现与契约两处漂移。
+fn extra_lookup_dirs() -> &'static [&'static str] {
+    &[
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/Applications/LibreOffice.app/Contents/MacOS",
+    ]
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 确保 command_exists 的补查目录列表包含 cask 应用路径(LibreOffice)。
-    /// 若有人误删该路径,此测试会失败 → 防止 office 文档转换功能回归。
+    /// 确保生产补查目录列表(见 extra_lookup_dirs,command_exists 的唯一来源)
+    /// 包含 cask 应用路径(LibreOffice)与两代 Homebrew 目录。若有人误删任一
+    /// 路径,此测试会失败 → 防止 office 文档转换/依赖体检回归。
     #[test]
     fn extra_lookup_dirs_includes_cask_paths() {
+        let dirs = extra_lookup_dirs();
         assert!(
-            EXTRA_LOOKUP_DIRS.contains(&"/Applications/LibreOffice.app/Contents/MacOS"),
+            dirs.contains(&"/Applications/LibreOffice.app/Contents/MacOS"),
             "LibreOffice cask 路径必须在补查目录列表内,否则 office 文档转换不可用"
         );
         assert!(
-            EXTRA_LOOKUP_DIRS.contains(&"/opt/homebrew/bin"),
+            dirs.contains(&"/opt/homebrew/bin"),
             "Apple Silicon Homebrew 路径必须在补查目录列表内"
         );
         assert!(
-            EXTRA_LOOKUP_DIRS.contains(&"/usr/local/bin"),
+            dirs.contains(&"/usr/local/bin"),
             "Intel Mac Homebrew 路径必须在补查目录列表内"
         );
     }

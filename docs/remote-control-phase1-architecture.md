@@ -22,7 +22,7 @@ WebUI 当前刻意隐藏以下仅适合桌面环境的入口：
 
 Web 端在 <640px 紧凑视口启用移动壳层：隐藏侧栏窄轨，改为顶部栏（会话抽屉入口 + 标题 +
 新对话）与底部主导航 Tab（对话 / 工作流 / 知识库 / 更多），其余视图入口收进「更多」底部
-面板，会话列表复用侧栏抽屉。这是 ADR-0001 允许的"必要平台与响应式差异"，同一套 React
+面板，会话列表复用侧栏抽屉。这是允许的必要平台与响应式差异——同一套 React
 源码，不是第二套前端；桌面窗口与 ≥640px 浏览器布局不受影响。
 
 ## 2. 组件关系
@@ -41,9 +41,11 @@ Web 端在 <640px 紧凑视口启用移动壳层：隐藏侧栏窄轨，改为�
 
 - `pinvou3-app/src/`：共享 React UI、平台能力门控、浏览器 bridge；
 - `pinvou3-app/src/platform/web/access-policy.json`：Web 可调用命令和可订阅事件白名单；
-- `pinvou3-app/src-tauri/src/features/remote_control/`：`manager.rs` 编排 endpoint、Relay 与 RPC
-  生命周期，`event_stream.rs` 独占订阅、事件序列和重放状态，`file_access.rs` 负责宿主文件与
-  Session 产物授权读取；
+- `pinvou3-app/src-tauri/src/features/remote_control/`：`manager/` 模块组编排 endpoint、Relay
+  与 RPC 生命周期（`mod.rs` 负责编排，并持有事件订阅集合与 `StreamState` 序列/重放状态；
+  `rpc.rs`、`transfer.rs`、`persistence.rs`、`workspace_grants.rs` 各司其职），
+  `relay_client.rs` 是纯 WebSocket 传输层（连接、重连退避、心跳与背压），
+  `protocol.rs` 定义协议消息，`file_access.rs` 负责宿主文件与 Session 产物授权读取；
 - `remote-control-relay/server.js`：静态站点和 WebSocket v2 Relay；
 - `remote-control-relay/PROTOCOL.md`：线上消息格式的单一协议说明。
 
@@ -203,6 +205,9 @@ Session 索引后再发送 `state_ready=true`，桌面才重放初始化窗口�
   与 `web_access_discard_attachment`
   时才显示"从此设备上传"入口（`deviceFileUpload` 语义能力）；旧桌面实例自动回落为
   原有的单入口远程文件浏览；
+- 远程代码工作区必须由桌面用户在启用远程访问时明确授权；该授权绑定并持久化到当前
+  endpoint，旧配置默认不授权。浏览器不能调用启用命令，未授权 endpoint 无法签发目录
+  handle；授权后的 handle 仍保持端点绑定、限时且一次性消费；
 - 浏览器本机上传走分块 RPC：单块 ≤ 256 KiB（对齐 `MAX_TRANSFER_CHUNK_BYTES`，base64
   后仍在 1 MiB RPC 请求上限内），单文件 ≤ `file_ingest::MAX_FILE_BYTES`（20 MiB，超限
   在传输前拒绝），桌面内存缓冲最多 4 个、总量 64 MiB、闲置 10 分钟过期，取消命令幂等。

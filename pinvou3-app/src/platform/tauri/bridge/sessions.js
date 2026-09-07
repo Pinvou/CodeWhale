@@ -4,6 +4,13 @@
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.sessions = function (context) {
     var state = context.state;
+    // Optional hook: clean host-side per-session side tables when a
+    // session buffer is reclaimed/deleted (bridge.js's modeStateEpochs,
+    // the scene-events localStorage key).
+    // reason === "evict" is an LRU capacity eviction, "delete" a real
+    // session deletion; the host distinguishes them to keep recoverable
+    // data (e.g. the scene cache key) on eviction. No return value.
+    var onSessionBufferPurged = context.onSessionBufferPurged || null;
     var invoke = context.invoke;
     var listen = context.listen;
     var notify = context.notify;
@@ -16,6 +23,8 @@
     var stopThinking = context.stopThinking;
     var rerenderFromMessages = context.rerenderFromMessages;
     var syncModeState = context.syncModeState;
+    var applyAuthoritativeModeState = context.applyAuthoritativeModeState;
+    var currentDraftModeState = context.currentDraftModeState;
     var syncActivePersona = context.syncActivePersona;
     var syncMountedCollection = context.syncMountedCollection;
     var reconcileArtifacts = context.reconcileArtifacts;
@@ -40,12 +49,59 @@
     var loadPinvouSceneEventsForSession = context.loadPinvouSceneEventsForSession || function () { return []; };
     var syncPinvouSceneEventsForSession = context.syncPinvouSceneEventsForSession ||
       function (sid) { return Promise.resolve(loadPinvouSceneEventsForSession(sid)); };
+    var loadSteeredMessagesForSession = context.loadSteeredMessagesForSession || function () { return []; };
+    var syncSteeredMessagesForSession = context.syncSteeredMessagesForSession ||
+      function (sid) { return Promise.resolve(loadSteeredMessagesForSession(sid)); };
     var MAX_SCHEDULED_SESSION_BUFFERS = 64;
     var MAX_SCHEDULED_RUN_SESSION_OWNERS = 64;
-    var sessionBufferTouchClock = 0;
-    var scheduledRunOwnerTouchClock = 0;
-    var scheduledRunOpenInFlight = Object.create(null);
-    var sessionSwitchRequestToken = 0;
+    // All-session buffer cap: each sessionStates entry holds the full
+    // messages+chatItems (with rendered html)+artifacts (heavy sessions
+    // run 1-4MB each); previously only scheduled sessions had a 64-entry
+    // LRU — normal sessions stayed resident forever once visited. Cap at
+    // 32: typical users actively switch among single-digit session
+    // counts, 32 × 1-4MB worst case is ~32-128MB, and cold sessions
+    // beyond 32 have near-zero hit rate; revisiting an evicted session
+    // goes through load_session disk rehydration (already supported by
+    // ensureSessionBufferLoaded/switchTo), costing one reload.
+    var MAX_SESSION_BUFFERS = 32;
+  // Unsent composer drafts are the one piece of a working set that cannot be
+  // rebuilt from disk (transcripts hold committed content only), so eviction
+  // must never drop them: before a buffer is dropped, its draft moves to this
+  // side table and every rebuild path restores it. The table is bounded
+  // (256 entries, 1M chars per draft — 10x the composer input cap), and when
+  // a bound would be exceeded the eviction is refused instead: the buffer
+  // stays resident rather than silently losing user input. Real session
+  // deletion (purgeSessionBuffer) invalidates stashed drafts so they never
+  // flow back into a recycled session id.
+  var MAX_EVICTED_SESSION_DRAFTS = 256;
+  var MAX_EVICTED_SESSION_DRAFT_CHARS = 1000000;
+  var sessionBufferTouchClock = 0;
+  var scheduledRunOwnerTouchClock = 0;
+  var scheduledRunOpenInFlight = Object.create(null);
+  var sessionSwitchRequestToken = 0;
+  var evictedSessionDrafts = Object.create(null);
+  // Returns true when the buffer's non-rehydratable state is safely retained
+  // (or empty) and the caller may drop the buffer; false means eviction must
+  // be skipped so the draft stays in the live buffer.
+  function stashEvictedSessionDraft(id, buf) {
+    if (!id || !buf) return true;
+    var draft = String(buf.composerDraft || "");
+    if (!draft) {
+      delete evictedSessionDrafts[id]; // input was cleared; a stale stash must not resurrect it
+      return true;
+    }
+    if (draft.length > MAX_EVICTED_SESSION_DRAFT_CHARS) return false;
+    if (!evictedSessionDrafts[id]
+        && Object.keys(evictedSessionDrafts).length >= MAX_EVICTED_SESSION_DRAFTS) return false;
+    delete evictedSessionDrafts[id]; // re-stashing moves the entry to the table tail
+    evictedSessionDrafts[id] = draft;
+    return true;
+  }
+  function restoreEvictedSessionDraft(id, buf) {
+    if (!id || !buf || buf.composerDraft) return;
+    var draft = evictedSessionDrafts[id];
+    if (draft) buf.composerDraft = draft;
+  }
   function freshBuffer() {
     return {
       messages: [], chatItems: [], composerDraft: "", turnTimeline: [], activeTurnTimelineId: null, personaEvents: [], pinvouReviews: [], pinvouSceneEvents: [], artifacts: [], busy: false, queued: [],
@@ -81,12 +137,16 @@
   }
   function getBuffer(id) {
     if (!id) return null;
-    if (!sessionStates[id]) sessionStates[id] = freshBuffer();
+    if (!sessionStates[id]) {
+      sessionStates[id] = freshBuffer();
+      restoreEvictedSessionDraft(id, sessionStates[id]);
+    }
     return touchSessionBuffer(id, sessionStates[id], id.indexOf("sched-") === 0);
   }
   function isProtectedScheduledBuffer(id, buf) {
     return id === state.activeSessionId ||
       !!buf.busy ||
+      !!buf.remoteTurnActive ||
       buf.scheduledInitialTurnPhase === "active" ||
       !!(buf.queued && buf.queued.length) ||
       !!(state.scheduledRunContext && state.scheduledRunContext.sessionId === id) ||
@@ -106,9 +166,15 @@
       var id = scheduledIds[i];
       var buf = sessionStates[id];
       if (!buf || id === keepId || isProtectedScheduledBuffer(id, buf)) continue;
+      if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
       delete sessionStates[id];
       delete turnUsageDirty[id];
+      // personaPlaceholderTitles is lightweight session metadata (the marker
+      // for placeholder titles that auto-rename may override); rehydration
+      // never restores it, so capacity eviction must keep it and only real
+      // session deletion (purgeSessionBuffer) cleans it.
       pruneScheduledRunSessionOwner(id);
+      if (onSessionBufferPurged) onSessionBufferPurged(id, "evict");
       overflow -= 1;
     }
   }
@@ -117,11 +183,44 @@
     if (scheduled) buf.scheduledRunSession = true;
     buf.lastTouched = ++sessionBufferTouchClock;
     if (buf.scheduledRunSession) pruneScheduledSessionBuffers(id);
+    pruneSessionBuffers(id);
     return buf;
+  }
+  // All-session LRU: the scheduled protection predicates still apply (busy/
+  // queued/remote turns are never reclaimed); only idle buffers are evicted.
+  // messages/chatItems rehydrate from disk; non-rehydratable drafts such as
+  // composerDraft move to the evictedSessionDrafts side table first and are
+  // restored on rebuild. The active session is covered by isProtected as a
+  // final backstop, and a buffer whose draft cannot be safely stashed is kept
+  // resident rather than evicted.
+  function pruneSessionBuffers(keepId) {
+    var ids = Object.keys(sessionStates);
+    var overflow = ids.length - MAX_SESSION_BUFFERS;
+    if (overflow <= 0) return;
+    ids.sort(function (left, right) {
+      var delta = (sessionStates[left].lastTouched || 0) - (sessionStates[right].lastTouched || 0);
+      return delta || left.localeCompare(right);
+    });
+    for (var i = 0; i < ids.length && overflow > 0; i++) {
+      var id = ids[i];
+      var buf = sessionStates[id];
+      if (!buf || id === keepId || isProtectedScheduledBuffer(id, buf)) continue;
+      if (!stashEvictedSessionDraft(id, buf)) continue; // draft cannot be safely retained; keep the buffer
+      delete sessionStates[id];
+      delete turnUsageDirty[id];
+      // personaPlaceholderTitles survives capacity eviction (see the comment
+      // at the scheduled eviction site); only purgeSessionBuffer (real
+      // deletion) cleans it.
+      if (onSessionBufferPurged) onSessionBufferPurged(id, "evict");
+      overflow -= 1;
+    }
   }
   function purgeSessionBuffer(id) {
     if (typeof id !== "string" || !id) return;
     delete sessionStates[id];
+    // Real session deletion: any stashed draft is invalidated too and must not flow back into a rebuilt buffer with the same id.
+    delete evictedSessionDrafts[id];
+    if (onSessionBufferPurged) onSessionBufferPurged(id, "delete");
     delete turnUsageDirty[id];
     delete personaPlaceholderTitles[id];
     delete scheduledRunSessionOwners[id];
@@ -275,6 +374,7 @@
     buf.personaEvents = state.personaEvents;
     buf.pinvouReviews = state.pinvouReviews;
     buf.pinvouSceneEvents = state.pinvouSceneEvents;
+    buf.steeredMessages = state.steeredMessages;
     buf.busy = buf.scheduledInitialTurnPhase === "active" ? true : state.busy;
     buf.planSnapshot = state.planSnapshot; buf.modeState = state.modeState;
     buf.thinking = state.thinking; buf.tokens = state.tokens; buf.queued = state.queued;
@@ -298,6 +398,7 @@
     state.personaEvents = buf.personaEvents || [];
     state.pinvouReviews = buf.pinvouReviews || [];
     state.pinvouSceneEvents = buf.pinvouSceneEvents || [];
+    state.steeredMessages = buf.steeredMessages || [];
     state.pinvouModal = null; // 切 session 关掉检阅弹窗
     state.turnDirtyArtifacts = []; // turn 临时态,切 session 清空,别串到新 session
     state.turnPresentedArtifacts = [];
@@ -332,6 +433,7 @@
     buf.personaEvents = [];
     buf.pinvouReviews = [];
     buf.pinvouSceneEvents = loadPinvouSceneEventsForSession(saved.metadata && saved.metadata.id);
+    buf.steeredMessages = loadSteeredMessagesForSession(saved.metadata && saved.metadata.id);
     if (completedRemoteTurn) {
       buf.remoteTurnActive = false;
       buf.remoteTerminalSeen = false;
@@ -365,10 +467,14 @@
       buf.loadedFromDisk = true;
       return;
     }
+    // 下载挂起期间后台回合可能已开始（busy 置位、直播流写入中）：此时用磁盘
+    // 快照 hydrate 会截断正在流式生成的内容，必须复检后放弃（审计）。
+    if (buf.busy || buf.remoteTurnActive) return;
     hydrateWorkingSetFromSaved(buf, saved);
     try { buf.personaEvents = await invoke("get_session_persona_events", { sessionId: sid }) || []; } catch (e) { buf.personaEvents = []; }
     try { buf.pinvouReviews = await invoke("get_session_pinvou_reviews", { sessionId: sid }) || []; } catch (e) { buf.pinvouReviews = []; }
     buf.pinvouSceneEvents = await syncPinvouSceneEventsForSession(sid);
+    buf.steeredMessages = await syncSteeredMessagesForSession(sid);
     try { buf.turnTimeline = await invoke("get_session_timeline", { sessionId: sid }) || []; } catch (e) { buf.turnTimeline = []; }
     // 手机可能在桌面仍停留草稿页/其他 session 时先唤醒这个后台 session。
     // 仅 hydrate messages 而把 chatItems 留空，会让后续 switchToSession 命中缓存快路径，
@@ -386,10 +492,29 @@
     // 离开草稿（无论物化还是切去既有会话），未消费的开关寄存意图作废。
     state.pendingDraftMultiAgent = false;
     state.pendingDraftModelRef = null;
-    if (state.activeSessionId) saveWorkingSetTo(getBuffer(state.activeSessionId));
+    // Set the new active before touching the old buffer: the LRU
+    // eviction triggered by touch relies on activeSessionId as the
+    // backstop protecting the target session; touching the old one first
+    // (active still pointing at the old value) would evict an idle target
+    // that happens to be oldest, and the subsequent freshBuffer()
+    // replacement would silently show an empty session.
+    var previousActiveId = state.activeSessionId;
     state.activeSessionId = id;
+    if (previousActiveId) saveWorkingSetTo(getBuffer(previousActiveId));
     var buf = sessionStates[id];
-    if (!buf || (opts && opts.fresh)) buf = sessionStates[id] = freshBuffer();
+    if (!buf || (opts && opts.fresh)) {
+      buf = sessionStates[id] = freshBuffer();
+      // fresh is for sessions just materialized on this side: the empty
+      // buffer is the authoritative view and must be marked
+      // loadedFromDisk — otherwise switchToSessionInternal's fast-path
+      // gate routes it to the slow path as an event-rebuilt incomplete
+      // buffer, the freshBuffer() replacement bypasses the side-table
+      // stash, and the buffer's unsent draft is silently dropped (same
+      // gate as the web bridge). fresh does not restore a side-table
+      // draft: id-reuse scenarios must not resurrect an old stash.
+      if (opts && opts.fresh) buf.loadedFromDisk = true;
+      else restoreEvictedSessionDraft(id, buf);
+    }
     touchSessionBuffer(id, buf, id.indexOf("sched-") === 0);
     loadWorkingSetFrom(buf);
     state.artifacts = filterSessionArtifacts(state.artifacts, id);
@@ -397,16 +522,27 @@
   }
   // 在指定 session 的工作集上跑一段【同步】逻辑。sid 是 active → 直接跑(零行为变化);
   // 否则临时切到该 buffer 跑完再切回(期间不 notify)。
+  // 整表覆盖式刷新：并发调用（list_changed 事件、chat:done 收尾、归档/改名等操作）
+  // 乱序返回时旧列表会覆盖新列表（如刚删除的会话复活、改名被回退）。用请求序号
+  // 做后发者胜（审计）。
+  var historyListSeq = 0;
   async function refreshHistoryList() {
+    var seq = ++historyListSeq;
     try {
-      state.sessions = await invoke("list_sessions");
+      var sessions = await invoke("list_sessions");
+      if (seq !== historyListSeq) return;
+      state.sessions = sessions;
     } catch (e) {
+      if (seq !== historyListSeq) return;
       console.warn("list_sessions failed", e);
       state.sessions = [];
     }
     try {
-      state.archivedSessions = await invoke("list_archived_sessions");
+      var archivedSessions = await invoke("list_archived_sessions");
+      if (seq !== historyListSeq) return;
+      state.archivedSessions = archivedSessions;
     } catch (e) {
+      if (seq !== historyListSeq) return;
       state.archivedSessions = state.archivedSessions || [];
     }
     notify();
@@ -433,12 +569,17 @@
     // 会背离(persona 气泡 / ensureSession 失败的 system 报错卡只进 chatItems),否则残留卡顶掉「你好」。
     if (!state.activeSessionId && state.messages.length === 0 && state.chatItems.length === 0) {
       state.composerDraft = "";
+      // 草稿 mode 显示 = 当前 lane 全局默认（三分 lane 语义）。
+      state.modeState = currentDraftModeState();
       notify();
       return;
     }
     if (state.activeSessionId) saveWorkingSetTo(getBuffer(state.activeSessionId));
     state.activeSessionId = null;
     loadWorkingSetFrom(freshBuffer());
+    // freshBuffer 的 modeState 是通用缺省（yolo）；草稿显示须覆盖为本 lane
+    // 全局默认（work/design 各自的 last_mode）。
+    state.modeState = currentDraftModeState();
     notify();
   }
   // 公开「新建对话」入口(侧边栏按钮)= 进草稿态。名字保留以兼容前端调用。
@@ -453,97 +594,151 @@
 
   // 草稿态首次有实质内容时真正向后端创建 session 并切为 active;已有 active 直接返回。
   // 返回新 session id,创建失败返回 null。调用方:sendMessage(首条消息) / equipPersona(加卡)。
+  // 并发防护（审计）：草稿态双击发送会并发 create_session，导致两条消息分家到两个新
+  // 会话——in-flight 复用同一 promise；create_session await 期间用户切走会物化在错误
+  // 会话（导航被劫持）——物化前校验 activeSessionId 仍为空，已切走则只登记后台 buffer。
+  var ensureSessionInFlight = null;
   async function ensureSession() {
     if (state.activeSessionId) return state.activeSessionId;
-    // 多 session 并发:不预热 engine。新建空 session 的 buffer 由 switchActiveTo({fresh}) 起。
-    try {
-      var meta = await invoke("create_session");
-      // create_session 等待期间用户可能已发送/清空输入，必须读取最新值，
-      // 不能把 await 前的已发送文本带入新 session。
-      var composerDraft = state.composerDraft || "";
-      // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
-      // 清：switchActiveTo 会把寄存意图当作已消费。
-      var pendingMultiAgent = state.pendingDraftMultiAgent === true;
-      var pendingModelRef = state.pendingDraftModelRef;
-      state.pendingDraftMultiAgent = false;
-      state.pendingDraftModelRef = null;
-      switchActiveTo(meta.id, { fresh: true });
-      // 草稿态因首条消息/加卡等实质操作物化为 session 时，输入草稿也要
-      // 跟随迁移；这不是用户主动切换到另一个已有会话。
-      state.composerDraft = composerDraft;
-      sessionStates[meta.id].composerDraft = composerDraft;
-      if (pendingModelRef) {
-        try {
-          if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
-            await invoke("account_platform_select_session_model", {
-              input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
-            });
-          } else if (pendingModelRef.source === "LOCAL_CONFIG") {
-            await invoke("set_session_model", {
-              sessionId: meta.id,
-              modelId: pendingModelRef.saved_model_id,
-            });
-          } else {
-            throw new Error("unsupported model selection source");
-          }
-          state.currentSessionModelRef = pendingModelRef;
-        } catch (modelError) {
+    if (ensureSessionInFlight) return ensureSessionInFlight;
+    // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
+    // 只推进 token 不改 activeSessionId（仍为 null），在途 create_session 返回
+    // 后必须连同 token 一起校验，否则会劫持用户新进的草稿（三审 P1）。
+    var navToken = sessionSwitchRequestToken;
+    var p = (async function () {
+      // 多 session 并发:不预热 engine。新建空 session 的 buffer 由 switchActiveTo({fresh}) 起。
+      try {
+        var meta = await invoke("create_session");
+        // create_session 等待期间用户可能已发送/清空输入，必须读取最新值，
+        // 不能把 await 前的已发送文本带入新 session。
+        var composerDraft = state.composerDraft || "";
+        // create_session 等待期间用户可能已退出草稿（切到既有会话或再进草稿）：
+        // 物化不得劫持 active（审计 F1），新会话登记为后台 buffer 等下次切换，
+        // 调用方按 null 处理不发送本条消息。离开草稿的寄存开关意图一并作废。
+        // 「切到既有会话」→ activeSessionId 非空；「再进草稿」→ activeSessionId
+        // 仍为 null 但导航 token 已前移——两种导航都中止物化（三审 P1）。
+        if (state.activeSessionId || navToken !== sessionSwitchRequestToken) {
+          state.pendingDraftMultiAgent = false;
+          sessionStates[meta.id] = freshBuffer();
+          sessionStates[meta.id].loadedFromDisk = true;
+          return null;
+        }
+        // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
+        // 清：switchActiveTo 会把寄存意图当作已消费。
+        var pendingMultiAgent = state.pendingDraftMultiAgent === true;
+        var pendingModelRef = state.pendingDraftModelRef;
+        state.pendingDraftModelRef = null;
+        state.pendingDraftMultiAgent = false;
+        switchActiveTo(meta.id, { fresh: true });
+        // 草稿态因首条消息/加卡等实质操作物化为 session 时，输入草稿也要
+        // 跟随迁移；这不是用户主动切换到另一个已有会话。
+        state.composerDraft = composerDraft;
+        sessionStates[meta.id].composerDraft = composerDraft;
+        if (pendingModelRef) {
           try {
-            await invoke("delete_session", { id: meta.id });
-          } catch (cleanupError) {
-            // 空会话残留可手动删除，不掩盖模型选择失败。
+            if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+              await invoke("account_platform_select_session_model", {
+                input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+              });
+            } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+              await invoke("set_session_model", {
+                sessionId: meta.id,
+                modelId: pendingModelRef.saved_model_id,
+              });
+            } else {
+              throw new Error("unsupported model selection source");
+            }
+            if (state.activeSessionId === meta.id && navToken === sessionSwitchRequestToken) {
+              state.currentSessionModelRef = pendingModelRef;
+            }
+          } catch (modelError) {
+            try {
+              await invoke("delete_session", { id: meta.id });
+            } catch (cleanupError) {
+              // 空会话残留可手动删除，不掩盖模型选择失败。
+            }
+            if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+            enterDraft();
+            state.pendingDraftModelRef = pendingModelRef;
+            state.pendingDraftMultiAgent = pendingMultiAgent;
+            if (pendingMultiAgent) {
+              state.modeState = { mode: (state.modeState && state.modeState.mode) || "yolo", multiAgent: true };
+            }
+            addSystemItem(bt("newChatFailed"));
+            await refreshHistoryList();
+            notify();
+            return null;
           }
-          enterDraft();
-          state.pendingDraftModelRef = pendingModelRef;
-          state.pendingDraftMultiAgent = pendingMultiAgent;
-          if (pendingMultiAgent) {
+        }
+        if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+        if (pendingMultiAgent) {
+          try {
+            await invoke("set_multi_agent_mode", { sessionId: meta.id, enabled: true });
+          } catch (toggleError) {
+            // 开关落盘失败不得让首条消息静默退化成普通对话（复核 P1）：
+            // 中止物化——删掉刚建的空会话、回到草稿并保留开关意图，等用户
+            // 处理环境或权限问题后重试。调用方以 activeSessionId 为空判定
+            // 中止，不发送本条消息。
+            try {
+              await invoke("delete_session", { id: meta.id });
+            } catch (cleanupError) {
+              // 空会话残留可手动删除，不掩盖主错误。
+            }
+            if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
+            enterDraft();
+            state.pendingDraftModelRef = pendingModelRef;
+            state.pendingDraftMultiAgent = true;
             state.modeState = {
               mode: (state.modeState && state.modeState.mode) || "yolo",
               multiAgent: true,
             };
+            addSystemItem(bt("switchModeFailed") + toggleError);
+            await refreshHistoryList();
+            notify();
+            return null;
           }
-          addSystemItem(bt("newChatFailed"));
-          await refreshHistoryList();
-          notify();
-          return null;
         }
-      }
-      if (pendingMultiAgent) {
-        try {
-          await invoke("set_multi_agent_mode", { sessionId: meta.id, enabled: true });
-        } catch (toggleError) {
-          // 开关落盘失败不得让首条消息静默退化成普通对话（复核 P1）：
-          // 中止物化——删掉刚建的空会话、回到草稿并保留开关意图，等用户
-          // 处理环境或权限问题后重试。调用方以 activeSessionId 为空判定
-          // 中止，不发送本条消息。
+        await refreshHistoryList();
+        await syncModeState();
+        // 三分 lane 语义：后端 plain 缺省恒 Yolo、不区分 work/design 两个 lane；
+        // 新会话所在 lane 的全局默认为 plan 时，在物化此刻显式应用（写入即成为
+        // 该会话自己的 per-session 记录，全局默认不受影响）。
+        var laneDefault = state.modeDefaults
+          && state.modeDefaults[state.modeLane === "design" ? "design" : "work"];
+        // 用物化时捕获的 meta.id 而非 activeSessionId：上面的 await 期间用户
+        // 可能已切走，对当前 active 会话执行 set_plan_mode_next 会改错对象。
+        if (laneDefault === "plan") {
           try {
-            await invoke("delete_session", { id: meta.id });
-          } catch (cleanupError) {
-            // 空会话残留可手动删除，不掩盖主错误。
+            var laneModeState = await invoke("set_plan_mode_next", { sessionId: meta.id });
+            applyAuthoritativeModeState(meta.id, laneModeState);
+          } catch (laneModeError) {
+            runSyncOnSession(meta.id, function () {
+              addSystemItem(bt("switchModeFailed") + laneModeError);
+            });
           }
-          enterDraft();
-          state.pendingDraftModelRef = pendingModelRef;
-          state.pendingDraftMultiAgent = true;
-          state.modeState = {
-            mode: (state.modeState && state.modeState.mode) || "yolo",
-            multiAgent: true,
-          };
-          addSystemItem(bt("switchModeFailed") + toggleError);
-          await refreshHistoryList();
-          notify();
-          return null;
         }
+        await syncActivePersona();
+        await syncMountedCollection();
+        notify();
+        // 尾部这些 await 期间用户仍可能切走（activeSessionId 已是别的会话）或
+        // 再进草稿（activeSessionId 仍为 null 但 token 已前移）：与 create_session
+        // 窗口同一契约——导航即物化中止，返回 null 让调用方放弃（消息回填输入框），
+        // 不得返回切走后的 active 让操作漂进新会话（二审 F1、三审 P1）。
+        // 返回非 null 时 active 必等于 meta.id 且无任何新导航，调用方重读
+        // state.activeSessionId 即为目标会话。
+        return navToken === sessionSwitchRequestToken
+          && state.activeSessionId === meta.id ? meta.id : null;
+      } catch (e) {
+        addSystemItem(bt("newChatFailed") + e);
+        return null;
       }
-      await refreshHistoryList();
-      await syncModeState();
-      await syncActivePersona();
-      await syncMountedCollection();
-      notify();
-      return state.activeSessionId;
-    } catch (e) {
-      addSystemItem(bt("newChatFailed") + e);
-      return null;
-    }
+    })();
+    ensureSessionInFlight = p;
+    p.then(
+      function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; },
+      function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
+    );
+    return p;
   }
 
   function reportSessionSwitchFailure(error, errorScope) {
@@ -726,7 +921,10 @@
       reportSessionSwitchFailure(new Error(bt("runHasNoSession")), errorScope);
       return false;
     }
-    if (hydrateLiveSession && !sessionStates[id]) sessionStates[id] = freshBuffer();
+    if (hydrateLiveSession && !sessionStates[id]) {
+      sessionStates[id] = freshBuffer();
+      restoreEvictedSessionDraft(id, sessionStates[id]);
+    }
     if (id === state.activeSessionId && !forceDurableLoad && !hydrateLiveSession) {
       if (!preserveScheduledRunContext) state.scheduledRunContext = null;
       state.scheduledTaskPendingGuide = null;
@@ -736,7 +934,23 @@
     // 多 session 并发:切换【不再 cancel】旧 session —— 它在自己的 engine 上继续跑,
     // 工作集存进 sessionStates 后台累积。切回来能看到完整(含切走期间产生的)内容。
     // 已有 buffer(切过/在跑)→ 直接换工作集;没有 → load_session 建 buffer + 重渲染。
-    if (sessionStates[id] && !forceDurableLoad && !hydrateLiveSession) {
+    // Event listeners rebuild an unsaved empty buffer via getBuffer for
+    // any session an event names (e.g. a late chat:usage/artifact:disk
+    // after eviction); taking the fast path with such a buffer shows an
+    // empty conversation, so it must fall through to the disk reload
+    // below to self-heal (same loadedFromDisk gate as the web bridge).
+    // Buffers that are busy/remote/have messages still take the fast
+    // path, showing the live partial view completed by the chat:done
+    // reconcile. chatItems must not be the usability check: an empty
+    // buffer rebuilt by a non-turn event (e.g. chat:compaction) carries
+    // only one system chatItem (no busy flag, no messages), and admitting
+    // it by chatItems would permanently show a history-less view with no
+    // self-heal.
+    var existingBuffer = sessionStates[id];
+    var cachedBufferUsable = existingBuffer && (existingBuffer.loadedFromDisk ||
+      existingBuffer.busy || existingBuffer.remoteTurnActive ||
+      (existingBuffer.messages && existingBuffer.messages.length));
+    if (cachedBufferUsable && !forceDurableLoad && !hydrateLiveSession) {
       if (!preserveScheduledRunContext) state.scheduledRunContext = null;
       state.scheduledTaskPendingGuide = null; // 仅在目标会话已确认可用后提交导航状态
       switchActiveTo(id, null);
@@ -765,6 +979,7 @@
     var personaEvents = [];
     var pinvouReviews = [];
     var pinvouSceneEvents = await syncPinvouSceneEventsForSession(id);
+    var steeredMessages = await syncSteeredMessagesForSession(id);
     var turnTimeline = [];
     try { personaEvents = await invoke("get_session_persona_events", { sessionId: id }) || []; } catch (_) {}
     try { pinvouReviews = await invoke("get_session_pinvou_reviews", { sessionId: id }) || []; } catch (_) {}
@@ -793,12 +1008,16 @@
       state.personaEvents = personaEvents.length ? personaEvents : (liveBuffer.personaEvents || []);
       state.pinvouReviews = pinvouReviews.length ? pinvouReviews : (liveBuffer.pinvouReviews || []);
       state.pinvouSceneEvents = pinvouSceneEvents.length ? pinvouSceneEvents : (liveBuffer.pinvouSceneEvents || []);
+      state.steeredMessages = steeredMessages.length ? steeredMessages : (liveBuffer.steeredMessages || []);
       state.turnTimeline = turnTimeline.length ? turnTimeline : (liveBuffer.turnTimeline || []);
       state.artifacts = filterSessionArtifacts(
         mergeHydratedArtifacts(saved.artifacts, liveArtifacts),
         state.activeSessionId
       );
-      rerenderFromMessages();
+      // Live hydration: the buffer's toolMeta may hold in-flight tool
+      // entries (tool_use not yet in messages); keep them for the later
+      // chat:tool_end.
+      rerenderFromMessages({ keepLiveToolMeta: true });
       if (hasLivePresentation) {
         context.currentStreamId = mergeHydratedChatItems(liveChatItems, liveCurrentStreamId);
       } else {
@@ -806,12 +1025,16 @@
       }
       saveWorkingSetTo(liveBuffer);
     } else {
-      loadWorkingSetFrom(sessionStates[id] = freshBuffer());
+      sessionStates[id] = freshBuffer();
+      // The slow-path disk rehydration bypasses getBuffer; the draft stashed at eviction time must be restored here.
+      restoreEvictedSessionDraft(id, sessionStates[id]);
+      loadWorkingSetFrom(sessionStates[id]);
       state.messages = Array.isArray(saved.messages) ? saved.messages : [];
       sessionStates[id].loadedFromDisk = true;
       state.personaEvents = personaEvents;
       state.pinvouReviews = pinvouReviews;
       state.pinvouSceneEvents = pinvouSceneEvents;
+      state.steeredMessages = steeredMessages;
       state.turnTimeline = turnTimeline;
       resetPendingAssistant();
       state.chatItems = [];
@@ -880,7 +1103,7 @@
       automationId: automationId,
       runId: runId,
       taskName: (task && task.name) || (run && (run.taskName || run.name)) || "",
-      model: (task && task.model) || null,
+      model: (task && task.model) || (run && run.taskModel) || null,
       mode: "yolo",
     };
     // 先发布完整会话视图；只有已完成的运行才持久化为已查看。
@@ -1088,6 +1311,10 @@
       var previousRuns = state.scheduledTaskRecentRuns || [];
       var wasViewingRun = state.activeSessionId === id;
       var previousContext = state.scheduledRunContext;
+      // 归档等待期间的导航 token：失败回滚时「activeSessionId === null」不足以
+      // 证明无新导航——用户再进草稿也保持 null（enterDraft 只推进 token），
+      // 仅 token 未前移才允许把 active 拽回归档会话（三审 P1）。
+      var navToken = sessionSwitchRequestToken;
       // 与普通会话收纳同语义:保留 buffer(还能从设置页还原后重开),但要离开当前视图。
       if (wasViewingRun) saveWorkingSetTo(getBuffer(id));
       state.scheduledTaskRecentRuns = previousRuns.filter(function (run) {
@@ -1101,7 +1328,10 @@
         return true;
       } catch (e) {
         state.scheduledTaskRecentRuns = previousRuns;
-        if (wasViewingRun) {
+        // 回滚 active 仅当用户没有新导航（leaveSessionView 已置 null）：
+        // await 期间切到别的会话/再进草稿都不得劫持 active（审计、三审 P1）。
+        if (wasViewingRun && state.activeSessionId === null
+            && navToken === sessionSwitchRequestToken) {
           // active 与 scheduledRunContext 必须成对回滚,否则会落到
           // 「active 有值但 context 空」的错位态(界面回任务列表却仍持有会话)。
           state.activeSessionId = id;
@@ -1116,6 +1346,9 @@
     var s = state.sessions[idx];
     var archived = Object.assign({}, s, { archived: true, archived_at: new Date().toISOString(), pinned: false, pinned_at: null });
     var wasActive = state.activeSessionId === id;
+    // 与 scheduled 分支同源：失败回滚须以导航 token 证明「无新导航」——
+    // 归档等待期间再进草稿 activeSessionId 仍为 null（三审 P1）。
+    var navToken = sessionSwitchRequestToken;
     if (wasActive) saveWorkingSetTo(getBuffer(id));
     state.sessions.splice(idx, 1);
     state.archivedSessions = [archived].concat((state.archivedSessions || []).filter(function (x) { return x.id !== id; }));
@@ -1128,7 +1361,10 @@
     } catch (e) {
       state.sessions.splice(idx, 0, s);
       state.archivedSessions = (state.archivedSessions || []).filter(function (x) { return x.id !== id; });
-      if (wasActive) {
+      // 回滚 active 仅当用户没有新导航（leaveSessionView 已置 null）：
+      // await 期间切到别的会话/再进草稿都不得劫持 active（审计、三审 P1）。
+      if (wasActive && state.activeSessionId === null
+          && navToken === sessionSwitchRequestToken) {
         state.activeSessionId = id;
         loadWorkingSetFrom(getBuffer(id));
       }

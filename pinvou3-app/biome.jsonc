@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": {
+    "includes": ["src/**/*.js", "src/**/*.jsx", "!src/vendor/**"]
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "a11y": {
+        "recommended": true,
+        "noLabelWithoutControl": "warn",
+        "noStaticElementInteractions": "warn",
+        "noSvgWithoutTitle": "warn",
+        "noAutofocus": "warn",
+        "useAriaPropsForRole": "warn",
+        "useAriaPropsSupportedByRole": "warn",
+        "useFocusableInteractive": "warn",
+        "useButtonType": "warn",
+        "useKeyWithClickEvents": "warn",
+        "useSemanticElements": "warn"
+      },
+      "correctness": {
+        "recommended": true,
+        "noInnerDeclarations": "warn"
+      },
+      "suspicious": {
+        "recommended": true,
+        "noAssignInExpressions": "warn",
+        "noControlCharactersInRegex": "warn",
+        "noRedeclare": "warn",
+        "useIterableCallbackReturn": "warn"
+      }
+    }
+  },
+  "formatter": { "enabled": false },
+  "javascript": { "jsxRuntime": "transparent" }
+}

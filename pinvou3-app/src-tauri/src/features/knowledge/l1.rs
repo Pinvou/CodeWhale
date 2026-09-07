@@ -6,14 +6,14 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Barrier;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -97,16 +97,27 @@ pub struct L1Store {
     /// 配了 embedding 模型则启用向量;None → 纯全文 fts。**可换共享槽**:模型按需下载完成后
     /// `set_embedder` 热加载,所有 L1Store clone(含已在跑的后台线程/会话)立即见新,免重启。
     embedder: Arc<RwLock<Option<Arc<Embedder>>>>,
+    /// embedder 空闲卸载巡检的活动时钟（UNIX 秒）：取用模型的路径（向量化、
+    /// 检索向量）经 [`Self::embedder`] 刷新，模型热加载经
+    /// [`Self::note_embed_activity`] 重置。KnowledgeService 的后台巡检据此
+    /// 判定空闲并 `set_embedder(None)` 卸载 ~570MB 模型。u64 秒 + MAX 起始
+    /// 值 → 「从未活动」= 永不触发卸载（保守）。
+    last_embed_activity_epoch: Arc<AtomicU64>,
     /// 单测专用：把后台导入稳定阻塞在 embedding 完成、写检查点之前，以覆盖取消/删除竞态。
     #[cfg(test)]
     checkpoint_gate: Arc<RwLock<Option<(Arc<Barrier>, Arc<Barrier>)>>>,
 }
+
+/// embedder 活动时钟初始值：取 u64::MAX 使 elapsed 计算 saturating 到 0，
+/// “从未活动”的库不会被空闲卸载（模型刚装好不该立刻被收走）。
+const EMBED_ACTIVITY_NEVER: u64 = u64::MAX;
 
 impl L1Store {
     pub fn new(conn: Arc<Mutex<Connection>>, embedder: Option<Arc<Embedder>>) -> Self {
         Self {
             conn,
             embedder: Arc::new(RwLock::new(embedder)),
+            last_embed_activity_epoch: Arc::new(AtomicU64::new(EMBED_ACTIVITY_NEVER)),
             #[cfg(test)]
             checkpoint_gate: Arc::new(RwLock::new(None)),
         }
@@ -126,8 +137,34 @@ impl L1Store {
     }
 
     /// 取当前 embedder 的克隆句柄(只在锁内拷 Arc,立即释锁,不持锁跑推理)。
+    /// 同时刷新空闲时钟：所有真正要用模型推理的路径（向量化、检索向量）
+    /// 都经此取句柄，取即活动，空闲卸载巡检不会收走在用的模型。
     fn embedder(&self) -> Option<Arc<Embedder>> {
-        self.embedder.read().clone()
+        let embedder = self.embedder.read().clone();
+        if embedder.is_some() {
+            self.last_embed_activity_epoch
+                .store(now_epoch_secs(), Ordering::Release);
+        }
+        embedder
+    }
+
+    /// embedder 空闲秒数（供 KnowledgeService 空闲卸载巡检）。从未活动时
+    /// 返回 0（保守：刚加载的模型不该立刻被卸载）。
+    pub fn embedder_idle_secs(&self) -> u64 {
+        let last = self.last_embed_activity_epoch.load(Ordering::Acquire);
+        if last == EMBED_ACTIVITY_NEVER {
+            return 0;
+        }
+        (now().max(0) as u64).saturating_sub(last)
+    }
+
+    /// 刷新 embedder 空闲时钟。主要场景是模型热加载（install_embedder）：
+    /// 下载完成 / kb_model_status 状态查询触发的重载 / 导入前补载都视为
+    /// 用户意图，从加载时刻重新计空闲（防「热加载→巡检马上又卸载」振荡）。
+    /// 幂等、单个原子 store。
+    pub fn note_embed_activity(&self) {
+        self.last_embed_activity_epoch
+            .store(now_epoch_secs(), Ordering::Release);
     }
 
     /// 热加载:换 embedding 模型(模型下载完成后调)。None=卸载回纯全文检索。
@@ -277,7 +314,7 @@ impl L1Store {
              ORDER BY d.parsed_at DESC, d.id DESC LIMIT ?2"
         };
         let mut stmt = c.prepare(sql)?;
-        let map = |r: &rusqlite::Row| -> rusqlite::Result<Document> {
+        let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Document> {
             Ok(Document {
                 id: r.get(0)?,
                 collection_id: r.get(1)?,
@@ -796,7 +833,7 @@ impl L1Store {
         lim: usize,
     ) -> rusqlite::Result<Vec<ChunkHit>> {
         let c = self.conn.lock();
-        let map = |r: &rusqlite::Row| -> rusqlite::Result<ChunkHit> {
+        let map = |r: &rusqlite::Row<'_>| -> rusqlite::Result<ChunkHit> {
             Ok(ChunkHit {
                 document_id: r.get(0)?,
                 text: r.get(1)?,
@@ -818,7 +855,7 @@ impl L1Store {
             let rows = stmt.query_map(params![collection_id, m, lim as i64], map)?;
             rows.collect()
         } else {
-            let like = format!("%{}%", q.replace('%', "").replace('_', ""));
+            let like = format!("%{}%", q.replace(['%', '_'], ""));
             let mut stmt = c.prepare(
                 "SELECT d.id,k.text,0.0 AS score,d.name,d.path,k.ord \
                  FROM chunks k JOIN documents d ON d.id=k.document_id \
@@ -1048,7 +1085,12 @@ impl L1Store {
         )?;
         let mut out: Vec<ChunkHit> = Vec::new();
         for path in order {
-            let (document_id, best, doc_name, ords) = by_doc.remove(&path).expect("aggregated");
+            // `order` and `by_doc` are built in the same loop above, so every
+            // path must have an aggregation entry. If that invariant ever
+            // breaks, skip the path loudly instead of silently losing recall.
+            let Some((document_id, best, doc_name, ords)) = by_doc.remove(&path) else {
+                continue;
+            };
             // 命中 ord 各自 ±radius 的并集（去重、有序）。
             let mut want: BTreeSet<i64> = BTreeSet::new();
             for o in ords {
@@ -1057,8 +1099,11 @@ impl L1Store {
                     want.insert(x);
                 }
             }
-            let lo = *want.iter().next().unwrap();
-            let hi = *want.iter().last().unwrap();
+            // Each aggregation entry is created by at least one hit ord, so
+            // `want` cannot be empty. Guard the invariant the same way.
+            let (Some(&lo), Some(&hi)) = (want.first(), want.last()) else {
+                continue;
+            };
             let rows = stmt.query_map(params![collection_id, path, lo, hi], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
             })?;
@@ -1150,6 +1195,11 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// 空闲卸载时钟用的 UNIX 秒（u64；负数系统时钟截断为 0，只影响判定方向不致误卸载）。
+fn now_epoch_secs() -> u64 {
+    chrono::Utc::now().timestamp().max(0) as u64
+}
+
 fn dedupe_path_key(path: &str) -> String {
     crate::platform::os::filesystem_path_identity_key(path)
 }
@@ -1190,30 +1240,7 @@ fn rrf_merge(fts: Vec<ChunkHit>, vec: Vec<ChunkHit>, k: usize) -> Vec<ChunkHit> 
 /// 把正文切成 ~max_chars 的块，相邻块重叠 overlap 字符。按字符窗口滑动（中文友好）。
 /// 短于一块的整体返回一块；空白块丢弃。
 pub fn chunk_text(text: &str, max_chars: usize, overlap: usize) -> Vec<String> {
-    let normalized = text.trim();
-    if normalized.is_empty() {
-        return vec![];
-    }
-    let chars: Vec<char> = normalized.chars().collect();
-    if chars.len() <= max_chars {
-        return vec![normalized.to_string()];
-    }
-    let step = max_chars.saturating_sub(overlap).max(1);
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let end = (i + max_chars).min(chars.len());
-        let s: String = chars[i..end].iter().collect();
-        let s = s.trim();
-        if !s.is_empty() {
-            out.push(s.to_string());
-        }
-        if end == chars.len() {
-            break;
-        }
-        i += step;
-    }
-    out
+    pinvou_knowledge::chunk_text(text, max_chars, overlap)
 }
 
 #[cfg(test)]
@@ -1227,6 +1254,20 @@ mod tests {
     fn mem() -> L1Store {
         let store = Store::open_in_memory().unwrap();
         L1Store::new(store.conn_arc(), None) // 单测：纯全文,不接 embedding
+    }
+
+    #[test]
+    fn embedder_idle_clock_starts_conservative_and_resets_on_activity() {
+        let l1 = mem();
+        // 从未活动（时钟为 NEVER 哨兵）→ 空闲 0：刚加载的模型不该立刻被卸载。
+        assert_eq!(l1.embedder_idle_secs(), 0);
+        // 显式活动（热加载等）后时钟生效：空闲从 0 起计。
+        l1.note_embed_activity();
+        assert!(l1.embedder_idle_secs() < 60, "活动后应视为刚开始计时");
+        // clone 共享同一时钟：后台线程/会话句柄刷新对巡检可见。
+        let clone = l1.clone();
+        clone.note_embed_activity();
+        assert!(l1.embedder_idle_secs() < 60);
     }
 
     #[test]
@@ -1321,10 +1362,11 @@ mod tests {
             page,
             vec![(1, "chunk-1".to_string()), (2, "chunk-2".to_string())]
         );
-        assert!(l1
-            .document_chunk_window(other, doc, 0, 8)
-            .unwrap()
-            .is_empty());
+        assert!(
+            l1.document_chunk_window(other, doc, 0, 8)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1473,10 +1515,12 @@ mod tests {
             .unwrap();
         l1.replace_doc_chunks(doc, cid, &["语义检索测试段落".to_string()], None)
             .unwrap();
-        assert!(!clone
-            .retrieve_for_chat(cid, "语义检索", 5, 0)
-            .unwrap()
-            .is_empty());
+        assert!(
+            !clone
+                .retrieve_for_chat(cid, "语义检索", 5, 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1660,10 +1704,11 @@ mod tests {
             ),
             ImportIngestOutcome::Completed
         ));
-        assert!(!l1
-            .retrieve_for_chat(collection_id, "旧内容", 5, 0)
-            .unwrap()
-            .is_empty());
+        assert!(
+            !l1.retrieve_for_chat(collection_id, "旧内容", 5, 0)
+                .unwrap()
+                .is_empty()
+        );
 
         fs::write(&file, "   \n").unwrap();
         let (_second_jobs, second_job, second_item) = prepare_import(&l1, collection_id, &file);
@@ -1677,10 +1722,11 @@ mod tests {
             ),
             ImportIngestOutcome::Skipped
         ));
-        assert!(l1
-            .retrieve_for_chat(collection_id, "旧内容", 5, 0)
-            .unwrap()
-            .is_empty());
+        assert!(
+            l1.retrieve_for_chat(collection_id, "旧内容", 5, 0)
+                .unwrap()
+                .is_empty()
+        );
         let document = l1.list_documents(collection_id, 0).unwrap().pop().unwrap();
         assert_eq!(document.parse_status, "skipped");
         assert_eq!(document.n_chunks, 0);
@@ -1731,14 +1777,16 @@ mod tests {
         assert_eq!(after.id, before.id);
         assert_eq!(after.parse_status, before.parse_status);
         assert_eq!(after.n_chunks, before.n_chunks);
-        assert!(!l1
-            .retrieve_for_chat(collection_id, "旧正式内容", 5, 0)
-            .unwrap()
-            .is_empty());
-        assert!(l1
-            .retrieve_for_chat(collection_id, "全新内容", 5, 0)
-            .unwrap()
-            .is_empty());
+        assert!(
+            !l1.retrieve_for_chat(collection_id, "旧正式内容", 5, 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            l1.retrieve_for_chat(collection_id, "全新内容", 5, 0)
+                .unwrap()
+                .is_empty()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1776,10 +1824,11 @@ mod tests {
         assert!(!only[0].text.contains("第一段"), "radius=0 不带邻居");
 
         // 门控:无关键词命中 → 空(不注入)。空 query → 空。
-        assert!(l1
-            .retrieve_for_chat(cid, "彻底无关的查询词组", 5, 1)
-            .unwrap()
-            .is_empty());
+        assert!(
+            l1.retrieve_for_chat(cid, "彻底无关的查询词组", 5, 1)
+                .unwrap()
+                .is_empty()
+        );
         assert!(l1.retrieve_for_chat(cid, "   ", 5, 1).unwrap().is_empty());
     }
 }

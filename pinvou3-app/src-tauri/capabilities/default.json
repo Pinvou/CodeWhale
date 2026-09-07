@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "enables the default permissions",
-  "windows": [
+  "webviews": [
     "main",
     "detached-*",
     "pet",
@@ -15,7 +15,6 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
     "core:window:allow-start-dragging",
-    "core:window:allow-set-position",
-    "core:webview:allow-create-webview-window"
+    "core:window:allow-set-position"
   ]
 }

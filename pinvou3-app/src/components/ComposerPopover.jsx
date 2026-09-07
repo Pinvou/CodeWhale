@@ -1,6 +1,7 @@
-import React, { useLayoutEffect, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { isWeb } from '../shared/platform.js';
+import { useRightDockOcclusion } from './layout/RightDock.jsx';
 
 // 四个输入框下拉菜单（工具 / 知识库 / 模型 / 模式）共用的面板视觉。定位随平台不同，
 // 外观一致，抽出来避免四处复制。
@@ -51,24 +52,56 @@ function useAnchoredPosition(open, triggerRef, active) {
   return style;
 }
 
+// 桌面端外点关闭：不能再渲染 `fixed inset-0` 透明关闭层——composer 祖先的
+// backdrop-filter 会成为 `position: fixed` 的包含块，使关闭层只铺满输入框盒子，
+// 点击弹层外部永远落不到关闭层上。改为 document 级捕获阶段 pointerdown 检测：
+// 命中面板或触发按钮（insideRefs）时忽略，否则关闭。触发按钮必须传入，否则
+// 弹层打开时再点触发按钮会先被外点关闭、随后 toggle 又把它重新打开。
+function useOutsidePointerClose(open, onClose, insideRefs) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const insideRefsRef = useRef(insideRefs);
+  insideRefsRef.current = insideRefs;
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event) => {
+      const refs = insideRefsRef.current || [];
+      const inside = refs.some((ref) => ref && ref.current && ref.current.contains(event.target));
+      if (!inside) onCloseRef.current();
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    return () => document.removeEventListener('pointerdown', handlePointerDown, true);
+  }, [open]);
+}
+
 // composer 下拉外壳。桌面端保持原来的就地 absolute 下拉（外观行为不变）；移动 WebUI
 // portal 到 <body> 并按触发按钮真实屏幕位置锚定。`desktopClassName` 是各菜单原有的桌面
 // 定位样式，移动端统一用 POPOVER_SURFACE + 计算出的 inline 定位。
 const ComposerPopover = ({ open, onClose, triggerRef, compact, desktopClassName, menuProps, children }) => {
+  const popoverId = useId();
+  // The system child WebView sits above React compositing. Before opening this menu, use the
+  // shared Dock occlusion protocol to hide the native surface; otherwise the full-screen
+  // click-away layer cannot receive pointer input over the browser region.
+  const publicationReady = useRightDockOcclusion(`composer-popover-${popoverId}`, open);
   const anchored = isWeb && compact;
   const style = useAnchoredPosition(open, triggerRef, anchored);
-  if (!open) return null;
+  const panelRef = useRef(null);
+  useOutsidePointerClose(open && publicationReady && !anchored, onClose, [panelRef, triggerRef]);
+  if (!open || !publicationReady) return null;
   if (!anchored) {
     return (
-      <>
-        <div className="fixed inset-0 z-40" onClick={onClose}></div>
-        <div {...menuProps} className={desktopClassName}>{children}</div>
-      </>
+      <div {...menuProps} ref={panelRef} className={desktopClassName}>{children}</div>
     );
   }
   return createPortal(
     <>
-      <div className="fixed inset-0 z-40" onClick={onClose}></div>
+      {/* Transparent outside-click dismiss layer: only absorbs pointer clicks to
+          close the popover; the keyboard path is handled by the trigger button
+          (re-activating toggles it closed) and the real <button type="button">
+          menu items inside the panel, so this is a non-interactive element. */}
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: pointer-only outside-click dismiss layer; keyboard path handled by the trigger button and panel buttons */}
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only outside-click dismiss layer, non-interactive container */}
+      <div data-testid="composer-popover-backdrop" className="fixed inset-0 z-40" onClick={onClose}></div>
       <div {...menuProps} style={style || { position: 'fixed', visibility: 'hidden' }} className={`fixed ${POPOVER_SURFACE}`}>
         {children}
       </div>
@@ -77,4 +110,4 @@ const ComposerPopover = ({ open, onClose, triggerRef, compact, desktopClassName,
   );
 };
 
-export { ComposerPopover, POPOVER_SURFACE };
+export { ComposerPopover, POPOVER_SURFACE, useOutsidePointerClose };

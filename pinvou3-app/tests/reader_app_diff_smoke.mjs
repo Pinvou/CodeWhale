@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
-import puppeteer from 'puppeteer-core';
+import * as puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
 
 const appRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -47,7 +47,9 @@ try {
     appType: 'mpa',
     logLevel: 'error',
     plugins: [react()],
-    server: { host: '127.0.0.1', port: 0, strictPort: false },
+    // One-shot smoke page: file watching is never used and only ENOSPC-flakes
+    // server startup on hosts with low inotify limits.
+    server: { host: '127.0.0.1', port: 0, strictPort: false, watch: null },
   });
   await vite.listen();
   const address = vite.httpServer.address();

@@ -7,14 +7,16 @@ Their original licenses remain in effect.
 
 | Component | Version or baseline | Included form | License | Upstream |
 |---|---|---|---|---|
-| CodeWhale | `pinvou-v0.9.0-r4` | Public Git submodule and linked Rust crates | MIT | https://github.com/Pinvou/CodeWhale |
-| DingTalk Workspace CLI (`dws`) and skills | 1.0.51 | Apache-2.0 skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | Apache-2.0 | https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli |
-| Lark CLI and skills | 1.0.65 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/larksuite/cli |
-| WeCom CLI and skills | 0.1.9 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/WecomTeam/wecom-cli |
-| agency-agents-zh | bundle schema `agency-1.0`, 201-role snapshot imported 2026-06-03 | Normalized Chinese persona data and retained upstream license | MIT | https://github.com/jnMetaCode/agency-agents-zh |
-| SenseVoice.cpp | Source pinned by setup script | Built on user setup; no executable stored in Git | MIT | https://github.com/lovemefan/SenseVoice.cpp |
-| marked | 13.0.3 | Vendored browser script | MIT | https://github.com/markedjs/marked |
-| DOMPurify | 3.4.2 | Vendored browser script (`pinvou3-app/src/vendor/purify.min.js`, `remote-control-relay/web/purify.min.js`) | Apache-2.0 OR MPL-2.0 | https://github.com/cure53/DOMPurify |
+| CodeWhale | `pinvou-v0.9.5-r10` | Public Git submodule and linked Rust crates | MIT | https://github.com/Pinvou/CodeWhale |
+| DingTalk Workspace CLI (`dws`) and skills | 1.0.58 | Apache-2.0 skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | Apache-2.0 | https://github.com/DingTalk-Real-AI/dingtalk-workspace-cli |
+| Lark CLI and skills | 1.0.87 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/larksuite/cli |
+| WeCom CLI and skills | 1.1.0 | MIT skill sources; official CLI binaries downloaded and SHA-256-verified by the app on first connector use (linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64) | MIT | https://github.com/WecomTeam/wecom-cli |
+| Tencent Meeting CLI (`tmeet`) and skills | 1.0.15 | MIT skill sources bundled from the upstream `skills/tmeet-skill/`; official CLI installed from npm (`@tencentcloud/tmeet`, version pinned in `tmeet.rs`) | MIT | https://github.com/TencentCloud/tencentmeeting-cli |
+| agency-agents-zh | bundle schema `agency-1.0`, 268-role snapshot imported 2026-08-18 (upstream main@6e158d9c; one telemetry example in a persona body normalized from `web_search` to `search` to satisfy the retired-tool-name lint) | Normalized Chinese persona data and retained upstream license | MIT | https://github.com/jnMetaCode/agency-agents-zh |
+| SenseVoice.cpp | `6503f51c2357034e1443c86dabeb24ad026c4b45` (project version 1.4.0) | Built from the pinned source for each Linux release architecture or on user setup; no executable stored in Git | MIT | https://github.com/lovemefan/SenseVoice.cpp |
+| marked | 14.1.4 | npm dependency bundled by Vite (`pinvou3-app/package.json`; highest major whose browser output stays free of Safari 15.4+ runtime APIs) | MIT | https://github.com/markedjs/marked |
+| DOMPurify | 3.4.14 | npm dependency bundled by Vite (`pinvou3-app/package.json`) | Apache-2.0 OR MPL-2.0 | https://github.com/cure53/DOMPurify |
+| chrome-devtools-mcp | 1.7.0 | Self-contained Windows build vendored at build time into `pinvou3-app/src-tauri/resources/platforms/windows/chrome-devtools-mcp/` (shipped under `runtime/chrome-devtools-mcp`); npm tarball SHA-512-verified; package-internal `build/src/third_party/THIRD_PARTY_NOTICES` preserved | Apache-2.0 | https://github.com/ChromeDevTools/chrome-devtools-mcp |
 | Tailwind CSS Play CDN runtime | 3.4.17 | Vendored browser script | MIT | https://github.com/tailwindlabs/tailwindcss |
 | Material Icon Theme | Iconify snapshot exported 2026-07-29 | 13 SVG file-type glyphs inlined in `pinvou3-app/src/shared/artifact-utils.js` | MIT | https://github.com/material-extensions/vscode-material-icon-theme |
 | Material Icon Theme (file/folder icon subset) | Upstream `main` snapshot downloaded 2026-07-30 | 43 SVG file/folder icons vendored in `pinvou3-app/src/file-icons/theme/` | MIT | https://github.com/material-extensions/vscode-material-icon-theme |
@@ -26,6 +28,10 @@ Vendored script attribution:
   Christopher Jeffrey; its Markdown compatibility code retains the upstream
   John Gruber attribution and BSD-style terms.
 - DOMPurify: Copyright 2025–2026 Dr.-Ing. Mario Heiderich, Cure53.
+- chrome-devtools-mcp: Modified by Pinvou Agent during vendoring:
+  `build/src/McpResponse.js` adds the `target_id` field to structured page
+  entries so the host can enforce conversation and tab ownership. The adapted
+  output is pinned by SHA-256.
 - Tailwind CSS: Copyright (c) Tailwind Labs, Inc.
 - Material Icon Theme: Copyright (c) 2025 Material Extensions. The glyphs
   were exported from the
@@ -44,7 +50,9 @@ next to their resources under `pinvou3-app/src-tauri/resources/`.
 The exact connector URLs and SHA-256 checksums are recorded in the per-platform
 `connectors.lock.json` manifests under
 `pinvou3-app/src-tauri/resources/platforms/<os>/<arch>/bundle/connectors/`
-(linux-arm64, linux-x64, darwin-arm64, darwin-x64, windows-x64), and are
+(real path segments: `linux/aarch64`, `linux/x86_64`, `macos/aarch64`,
+`macos/x86_64`, `windows/x86_64`; the lock files' `platform` fields use the
+compact `linux-arm64`-style names), and are
 fetched on first use by the app itself; `scripts/fetch-connectors.sh` is the CI/reviewer helper that materializes the same artifacts for verification.
 
 ## Package dependencies and SBOM

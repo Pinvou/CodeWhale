@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import pg from "pg";
+import sharp from "sharp";
 import { cleanupAttachments } from "../src/attachment-cleanup.js";
 import { createHubServer } from "../src/http.js";
 import { createTeamWithOwnerInvite } from "../src/identity-service.js";
@@ -19,13 +20,74 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const database = await pool.query("SELECT current_database() AS name");
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-  for (const migrationName of ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql"]) {
+  const confirmedTransferMigration = "0009_confirmed_transfers.sql";
+  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", confirmedTransferMigration, "0010_principal_avatars.sql", "0011_avatar_hardening.sql", "0012_avatar_reduced_motion.sql", "0013_team_lifecycle.sql"];
+  async function applyMigration(migrationName) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
       "utf8",
     );
     await pool.query(migration);
   }
+  for (const migrationName of migrationNames) {
+    if (migrationName === confirmedTransferMigration) break;
+    await applyMigration(migrationName);
+  }
+  const migrationPrincipalA = randomUUID();
+  const migrationPrincipalB = randomUUID();
+  const migrationTeam = randomUUID();
+  const migrationThread = randomUUID();
+  await pool.query(
+    "INSERT INTO principals (id, email, display_name) VALUES ($1, $2, 'Migration A'), ($3, $4, 'Migration B')",
+    [migrationPrincipalA, "migration-a@example.com", migrationPrincipalB, "migration-b@example.com"],
+  );
+  await pool.query(
+    "INSERT INTO devices (id, principal_id, name, token_hash) VALUES ($1, $2, 'Legacy device', $3)",
+    [randomUUID(), migrationPrincipalA, createHash("sha256").update("migration-device").digest("hex")],
+  );
+  await pool.query(
+    "INSERT INTO teams (id, name, created_by) VALUES ($1, 'Migration team', $2)",
+    [migrationTeam, migrationPrincipalA],
+  );
+  await pool.query(
+    "INSERT INTO memberships (team_id, principal_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'member')",
+    [migrationTeam, migrationPrincipalA, migrationPrincipalB],
+  );
+  await pool.query(
+    `INSERT INTO work_threads (id, team_id, title, initiator_id, owner_id, current_actor_id, return_to_id, final_recipient_id, phase, revision)
+     VALUES ($1, $2, 'Existing work', $3, $4, $4, $3, $3, 'active', 1)`,
+    [migrationThread, migrationTeam, migrationPrincipalA, migrationPrincipalB],
+  );
+  await pool.query(
+    "INSERT INTO thread_participants (thread_id, principal_id, first_action_sequence) VALUES ($1, $2, 1), ($1, $3, 1)",
+    [migrationThread, migrationPrincipalA, migrationPrincipalB],
+  );
+  await pool.query(
+    `INSERT INTO relay_actions (id, thread_id, sequence, kind, actor_id, recipient_id, return_to_id, message, base_revision, idempotency_key, request_hash)
+     VALUES ($1, $2, 1, 'assign', $3, $4, $3, 'Existing assignment', 0, $5, $6)`,
+    [
+      randomUUID(),
+      migrationThread,
+      migrationPrincipalA,
+      migrationPrincipalB,
+      randomUUID(),
+      createHash("sha256").update("migration-request").digest("hex"),
+    ],
+  );
+  await applyMigration(confirmedTransferMigration);
+  const migratedCompatibility = await pool.query(
+    `SELECT a.transfer_mode, d.relay_protocol_version, tp.material_access_at
+       FROM relay_actions a
+       JOIN devices d ON d.principal_id = a.actor_id
+       JOIN thread_participants tp ON tp.thread_id = a.thread_id AND tp.principal_id = a.recipient_id
+      WHERE a.thread_id = $1`,
+    [migrationThread],
+  );
+  assert.equal(migratedCompatibility.rows[0].transfer_mode, "direct_legacy");
+  assert.equal(migratedCompatibility.rows[0].relay_protocol_version, "0.1");
+  assert.ok(migratedCompatibility.rows[0].material_access_at, "existing participants keep material access");
+  await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+  for (const migrationName of migrationNames) await applyMigration(migrationName);
   const attachmentDir = await mkdtemp(join(tmpdir(), "pinvou-team-relay-attachments-"));
 
   const config = {
@@ -35,6 +97,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     maxJsonBytes: 1024 * 1024,
     attachmentDir,
     maxAttachmentBytes: 2048,
+    maxAvatarBytes: 2048,
     maxTeamAttachmentBytes: 1600,
     orphanAttachmentHours: 1,
     closedAttachmentDays: 30,
@@ -110,6 +173,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     return api(`/v1/threads/${threadId}/actions`, {
       method: "POST",
       token: member.device_token,
+      headers: options.headers || {},
       body: {
         kind,
         message: options.message || "",
@@ -135,6 +199,46 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
       body: form,
     });
     return { status: response.status, value: await response.json(), uploadId };
+  }
+
+  async function uploadAvatar(member, content, filename) {
+    const form = new FormData();
+    form.append("file", new Blob([content]), filename);
+    const response = await fetch(`${origin}/v1/me/avatar`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${member.device_token}` },
+      body: form,
+    });
+    return { status: response.status, value: await response.json() };
+  }
+
+  async function uploadTruncatedAvatar(member) {
+    const boundary = "pinvou-truncated-avatar-boundary";
+    const response = await fetch(`${origin}/v1/me/avatar`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${member.device_token}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      body: Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="avatar.gif"\r\nContent-Type: image/gif\r\n\r\ntruncated`,
+      ),
+    });
+    return { status: response.status, value: await response.json() };
+  }
+
+  async function readAvatar(member, principalId, teamId, size, reducedMotion = false) {
+    const response = await fetch(
+      `${origin}/v1/principals/${principalId}/avatar?team_id=${teamId}${size ? `&size=${size}` : ""}${reducedMotion ? "&reduced_motion=true" : ""}`,
+      { headers: { Authorization: `Bearer ${member.device_token}` } },
+    );
+    return {
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      digest: response.headers.get("digest"),
+      sourceSha256: response.headers.get("x-avatar-source-sha256"),
+      bytes: Buffer.from(await response.arrayBuffer()),
+    };
   }
 
   async function readSseUntil(reader, pattern) {
@@ -190,6 +294,61 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     } finally {
       await guard.query("ROLLBACK").catch(() => {});
       guard.release();
+    }
+  }
+
+  async function transferOwnerWhileOperationWaits(teamId, previousOwnerId, newOwnerId, operation, message) {
+    const guard = await pool.connect();
+    try {
+      await guard.query("BEGIN");
+      await guard.query("SELECT id FROM teams WHERE id = $1 FOR UPDATE", [teamId]);
+      const pendingOperation = operation();
+      await assertStillPending(pendingOperation, message);
+      await guard.query(
+        "UPDATE memberships SET role = 'member' WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL",
+        [teamId, previousOwnerId],
+      );
+      await guard.query(
+        "UPDATE memberships SET role = 'owner' WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL",
+        [teamId, newOwnerId],
+      );
+      await guard.query("COMMIT");
+      return await pendingOperation;
+    } finally {
+      await guard.query("ROLLBACK").catch(() => {});
+      guard.release();
+    }
+  }
+
+  async function assertInviteOperationLocksTeamFirst(teamId, inviteId, operation, message) {
+    const teamGuard = await pool.connect();
+    const inviteInspector = await pool.connect();
+    let pendingOperation;
+    let inviteLockError = null;
+    try {
+      await teamGuard.query("BEGIN");
+      await teamGuard.query("SELECT id FROM teams WHERE id = $1 FOR UPDATE", [teamId]);
+      pendingOperation = operation();
+      await assertStillPending(pendingOperation, message);
+
+      await inviteInspector.query("BEGIN");
+      try {
+        await inviteInspector.query("SELECT id FROM invites WHERE id = $1 FOR UPDATE NOWAIT", [inviteId]);
+      } catch (error) {
+        inviteLockError = error;
+      } finally {
+        await inviteInspector.query("ROLLBACK").catch(() => {});
+      }
+
+      await teamGuard.query("COMMIT");
+      const result = await pendingOperation;
+      assert.equal(inviteLockError, null, "an invite operation waiting on its team must not lock the invite first");
+      return result;
+    } finally {
+      await teamGuard.query("ROLLBACK").catch(() => {});
+      teamGuard.release();
+      inviteInspector.release();
+      if (pendingOperation) await pendingOperation.catch(() => {});
     }
   }
 
@@ -388,6 +547,50 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(restoredB.status, 200);
 
+  const animatedPixels = Buffer.from([
+    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+    0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+  ]);
+  const animatedGif = await sharp(animatedPixels, {
+    raw: { width: 2, height: 4, channels: 4, pageHeight: 2 },
+  }).gif({ delay: [80, 120], loop: 0 }).toBuffer();
+  const truncatedAvatar = await uploadTruncatedAvatar(a);
+  assert.equal(truncatedAvatar.status, 400);
+  assert.equal(truncatedAvatar.value.error.code, "invalid_request");
+  const uploadedAvatar = await uploadAvatar(a, animatedGif, "avatar.gif");
+  assert.equal(uploadedAvatar.status, 200);
+  assert.equal(uploadedAvatar.value.avatar.content_type, "image/gif");
+  assert.ok(uploadedAvatar.value.avatar.byte_size <= config.maxAvatarBytes);
+  const avatarBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
+  const avatarMember = avatarBootstrap.value.members.find(member => member.id === a.principal.id);
+  assert.equal(avatarMember.avatar.sha256, uploadedAvatar.value.avatar.sha256);
+  const downloadedAvatar = await readAvatar(b, a.principal.id, initial.team_id);
+  assert.equal(downloadedAvatar.status, 200);
+  assert.equal(downloadedAvatar.contentType, "image/gif");
+  assert.equal(downloadedAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
+  assert.equal((await sharp(downloadedAvatar.bytes, { animated: true }).metadata()).pages, 2);
+  const thumbnailAvatar = await readAvatar(b, a.principal.id, initial.team_id, 48);
+  assert.equal(thumbnailAvatar.status, 200);
+  assert.equal(thumbnailAvatar.contentType, "image/gif");
+  assert.equal(thumbnailAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
+  assert.equal((await sharp(thumbnailAvatar.bytes, { animated: true }).metadata()).pages, 2);
+  const reducedMotionAvatar = await readAvatar(b, a.principal.id, initial.team_id, 48, true);
+  assert.equal(reducedMotionAvatar.status, 200);
+  assert.equal(reducedMotionAvatar.contentType, "image/png");
+  assert.equal(reducedMotionAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
+  assert.equal((await sharp(reducedMotionAvatar.bytes).metadata()).pages ?? 1, 1);
+  const invalidAvatarSize = await readAvatar(b, a.principal.id, initial.team_id, 64);
+  assert.equal(invalidAvatarSize.status, 400);
+  const outsideTeamAvatar = await readAvatar(accountEnrollment.value, a.principal.id, initial.team_id);
+  assert.equal(outsideTeamAvatar.status, 403, "avatars are visible only inside a shared active team");
+  const rejectedAvatar = await uploadAvatar(a, Buffer.from("<svg></svg>"), "avatar.svg");
+  assert.equal(rejectedAvatar.status, 415);
+  assert.equal(rejectedAvatar.value.error.code, "avatar_type_not_allowed");
+  const removedAvatar = await api("/v1/me/avatar", { method: "DELETE", token: a.device_token });
+  assert.equal(removedAvatar.status, 204);
+  const missingAvatar = await readAvatar(b, a.principal.id, initial.team_id);
+  assert.equal(missingAvatar.status, 404);
+
   const createdTeam = await api("/v1/teams", { method: "POST", token: a.device_token, body: { name: "Release group" } });
   assert.equal(createdTeam.status, 201);
   assert.equal(createdTeam.value.membership.principal_id, a.principal.id);
@@ -407,6 +610,34 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const secondBootstrap = await api(`/v1/bootstrap?team_id=${createdTeam.value.team.id}`, { token: b.device_token });
   assert.equal(secondBootstrap.status, 200);
   assert.deepEqual(secondBootstrap.value.members.map(member => member.display_name), ["A", "B", "D"]);
+
+  const lockOrderAccount = await api("/v1/enrollments/account", {
+    method: "POST",
+    body: { email: nextEmail(), display_name: "Lock order member", device_name: "Lock order test device" },
+  });
+  assert.equal(lockOrderAccount.status, 201);
+  const lockOrderInvite = await api(`/v1/teams/${createdTeam.value.team.id}/invites`, {
+    method: "POST",
+    token: a.device_token,
+    body: { expires_in_hours: 24 },
+  });
+  assert.equal(lockOrderInvite.status, 201);
+  const lockOrderedJoin = await assertInviteOperationLocksTeamFirst(
+    createdTeam.value.team.id,
+    lockOrderInvite.value.invite_id,
+    () => api("/v1/teams/join", {
+      method: "POST",
+      token: lockOrderAccount.value.device_token,
+      body: { join_code: lockOrderInvite.value.invite_code },
+    }),
+    "an invite join must wait for the team lock before locking its invite",
+  );
+  assert.equal(lockOrderedJoin.status, 200);
+  const removeLockOrderMember = await api(
+    `/v1/teams/${createdTeam.value.team.id}/members/${lockOrderAccount.value.principal.id}`,
+    { method: "DELETE", token: a.device_token },
+  );
+  assert.equal(removeLockOrderMember.status, 204);
 
   const inviteCountBeforeRemovalRace = await pool.query(
     "SELECT count(*)::integer AS count FROM invites WHERE team_id = $1",
@@ -434,17 +665,20 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     "UPDATE memberships SET removed_at = NULL, role = 'member' WHERE team_id = $1 AND principal_id = $2",
     [createdTeam.value.team.id, d.principal.id],
   );
-  await pool.query(
-    "UPDATE memberships SET role = 'owner' WHERE team_id = $1 AND principal_id = $2",
-    [createdTeam.value.team.id, b.principal.id],
-  );
+  const rotationOwnerTransfer = await api(`/v1/teams/${createdTeam.value.team.id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: b.principal.id },
+  });
+  assert.equal(rotationOwnerTransfer.status, 200);
   const joinPasswordBeforeRotationRace = await pool.query(
     "SELECT join_password_hash FROM teams WHERE id = $1",
     [createdTeam.value.team.id],
   );
-  const rejectedRotation = await removeMemberWhileOperationWaits(
+  const rejectedRotation = await transferOwnerWhileOperationWaits(
     createdTeam.value.team.id,
     b.principal.id,
+    a.principal.id,
     () => api(`/v1/teams/${createdTeam.value.team.id}/join-password`, {
       method: "POST",
       token: b.device_token,
@@ -453,7 +687,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     "join code rotation must wait while team membership changes are locked",
   );
   assert.equal(rejectedRotation.status, 403);
-  assert.equal(rejectedRotation.value.error.code, "membership_required");
+  assert.equal(rejectedRotation.value.error.code, "action_not_allowed");
   const joinPasswordAfterRotationRace = await pool.query(
     "SELECT join_password_hash FROM teams WHERE id = $1",
     [createdTeam.value.team.id],
@@ -461,10 +695,6 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(
     joinPasswordAfterRotationRace.rows[0].join_password_hash,
     joinPasswordBeforeRotationRace.rows[0].join_password_hash,
-  );
-  await pool.query(
-    "UPDATE memberships SET removed_at = NULL, role = 'member' WHERE team_id = $1 AND principal_id = $2",
-    [createdTeam.value.team.id, b.principal.id],
   );
 
   const rejectedJoinPasswordRead = await removeMemberWhileOperationWaits(
@@ -721,6 +951,41 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(created.value.action.delivery.git_references[0].commit_sha, "abcdef1234567");
   const threadId = created.value.thread.id;
 
+  const aInitialReadState = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: a.device_token,
+  });
+  const bInitialReadState = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+  });
+  assert.equal(aInitialReadState.value.threads[0].unread_count, 0, "the assigning member must not notify themselves");
+  assert.equal(aInitialReadState.value.threads[0].read_state.last_read_sequence, 1);
+  assert.equal(bInitialReadState.value.threads[0].unread_count, 1, "a new assignment is the recipient's first unread update");
+  assert.equal(bInitialReadState.value.threads[0].read_state.last_read_sequence, 0);
+
+  const bMarkedRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: b.device_token,
+    body: { read_through_sequence: 1 },
+  });
+  assert.equal(bMarkedRead.status, 200);
+  assert.equal(bMarkedRead.value.last_read_sequence, 1);
+  const bAfterRead = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
+  assert.equal(bAfterRead.value.threads[0].unread_count, 0);
+  const futureRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: b.device_token,
+    body: { read_through_sequence: 2 },
+  });
+  assert.equal(futureRead.status, 400);
+  assert.equal(futureRead.value.error.code, "invalid_request");
+  const nonParticipantRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: c.device_token,
+    body: { read_through_sequence: 1 },
+  });
+  assert.equal(nonParticipantRead.status, 403);
+  assert.equal(nonParticipantRead.value.error.code, "thread_access_denied");
+
   const bDownload = await fetch(`${origin}/v1/attachments/${planUpload.value.id}/content`, {
     headers: { Authorization: `Bearer ${b.device_token}` },
   });
@@ -758,10 +1023,54 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   );
   assert.equal(removeActiveOwner.status, 409);
   assert.equal(removeActiveOwner.value.error.code, "member_has_open_work");
+  assert.deepEqual(removeActiveOwner.value.error.details.blocking_threads, [{
+    thread_id: threadId,
+    title: "Prepare team writing plan",
+    phase: "active",
+    responsibilities: ["work_owner", "current_actor"],
+  }]);
+  const ownerTransferWithOpenWork = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: c.principal.id },
+  });
+  assert.equal(ownerTransferWithOpenWork.status, 200, "ownership transfer must not alter or block existing work responsibilities");
+  const threadAfterOwnerTransfer = await api(`/v1/threads/${threadId}`, {
+    token: a.device_token,
+  });
+  assert.equal(threadAfterOwnerTransfer.value.thread.revision, 1, "ownership transfer must not touch open work");
+  assert.equal(threadAfterOwnerTransfer.value.thread.owner_id, b.principal.id, "work responsibility stays with the original owner");
+  assert.equal(threadAfterOwnerTransfer.value.thread.current_actor_id, b.principal.id, "current actor stays unchanged after ownership transfer");
+  const restoreOwner = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: c.device_token,
+    body: { new_owner_id: a.principal.id },
+  });
+  assert.equal(restoreOwner.status, 200);
+  await pool.query("UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1", [c.principal.id]);
+  const disabledOwnerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: c.principal.id },
+  });
+  assert.equal(disabledOwnerTransfer.status, 409);
+  assert.equal(disabledOwnerTransfer.value.error.code, "new_owner_unavailable");
+  await pool.query("UPDATE principals SET disabled_at = NULL WHERE id = $1", [c.principal.id]);
+  const blockedTeamDissolution = await api(`/v1/teams/${initial.team_id}`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(blockedTeamDissolution.status, 409);
+  assert.equal(blockedTeamDissolution.value.error.code, "team_has_open_work");
+  assert.deepEqual(blockedTeamDissolution.value.error.details.blocking_threads, [{
+    thread_id: threadId,
+    title: "Prepare team writing plan",
+    phase: "active",
+  }]);
 
   const sseController = new AbortController();
   t.after(() => sseController.abort());
-  const sse = await fetch(`${origin}/v1/events?team_id=${initial.team_id}`, {
+  const sse = await fetch(`${origin}/v1/events`, {
     headers: { Authorization: `Bearer ${a.device_token}` },
     signal: sseController.signal,
   });
@@ -778,6 +1087,19 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(handedOff.status, 201);
   assert.equal(handedOff.value.thread.current_actor_id, c.principal.id);
   assert.equal(handedOff.value.thread.owner_id, b.principal.id);
+  const aAfterHandoff = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: a.device_token });
+  const bAfterOwnHandoff = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
+  const cAfterJoiningThread = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: c.device_token });
+  assert.equal(aAfterHandoff.value.threads[0].unread_count, 1);
+  assert.equal(bAfterOwnHandoff.value.threads[0].unread_count, 0, "an actor's own update must not notify that actor");
+  assert.equal(cAfterJoiningThread.value.threads[0].unread_count, 1, "a collaborator starts unread at the handoff that added them");
+  const bStaleRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: b.device_token,
+    body: { read_through_sequence: 0 },
+  });
+  assert.equal(bStaleRead.status, 200);
+  assert.equal(bStaleRead.value.last_read_sequence, 1, "a stale device must not move the read cursor backwards");
   const cAfterHandoff = await api(`/v1/attachments/${planUpload.value.id}`, {
     token: c.device_token,
   });
@@ -865,6 +1187,300 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(accepted.value.thread.revision, 8);
   assert.equal(accepted.value.thread.current_actor_id, null);
 
+  const protocol02 = { "X-Pinvou-Team-Relay-Protocol": "0.2" };
+  for (const member of [a, b, c]) {
+    const capabilityBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+      token: member.device_token,
+      headers: protocol02,
+    });
+    assert.equal(capabilityBootstrap.status, 200);
+  }
+  const capabilityView = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: a.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    capabilityView.value.members.find(member => member.id === b.principal.id).confirmed_transfers_supported,
+    true,
+  );
+  const legacyRecipient = await joinTeam(activePassword.value.join_password, "Legacy recipient");
+  const directForLegacy = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: {
+      team_id: initial.team_id,
+      title: "Mixed version assignment",
+      assignee_id: legacyRecipient.principal.id,
+      message: "This must not wait for an unsupported client.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(directForLegacy.status, 201);
+  assert.equal(directForLegacy.value.transfer_mode, "direct_legacy");
+  assert.equal(directForLegacy.value.action.transfer_mode, "direct_legacy");
+  assert.equal(directForLegacy.value.thread.phase, "active");
+  assert.equal(directForLegacy.value.thread.owner_id, legacyRecipient.principal.id);
+  const cancelDirectLegacy = await action(a, directForLegacy.value.thread.id, "cancel", 1, {
+    headers: protocol02,
+    message: "Mixed version behavior verified.",
+  });
+  assert.equal(cancelDirectLegacy.status, 201);
+
+  const confirmedCreateKey = randomUUID();
+  const confirmedCreateBody = {
+    team_id: initial.team_id,
+    title: "Confirm each transfer",
+    assignee_id: b.principal.id,
+    message: "Accept before material access moves.",
+    attachment_ids: [ownerOnlyUpload.value.id],
+    idempotency_key: confirmedCreateKey,
+  };
+  const confirmed = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: confirmedCreateBody,
+  });
+  assert.equal(confirmed.status, 201);
+  assert.equal(confirmed.value.transfer_mode, "confirmed");
+  assert.equal(confirmed.value.action.transfer_mode, "confirmed");
+  assert.equal(confirmed.value.thread.phase, "pending_transfer");
+  assert.equal(confirmed.value.thread.owner_id, a.principal.id);
+  assert.equal(confirmed.value.thread.current_actor_id, a.principal.id);
+  assert.equal(confirmed.value.thread.pending_transfer_kind, "assignment");
+  assert.equal(confirmed.value.thread.pending_recipient_id, b.principal.id);
+  const confirmedThreadId = confirmed.value.thread.id;
+  const confirmedReplay = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: confirmedCreateBody,
+  });
+  assert.equal(confirmedReplay.status, 200);
+  assert.equal(confirmedReplay.value.replayed, true);
+  assert.equal(confirmedReplay.value.thread.id, confirmedThreadId);
+  const crossProtocolReplay = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    body: confirmedCreateBody,
+  });
+  assert.equal(crossProtocolReplay.status, 409);
+  assert.equal(crossProtocolReplay.value.error.code, "idempotency_key_reused");
+
+  const bPendingBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+    headers: protocol02,
+  });
+  const bPending = bPendingBootstrap.value.threads.find((detail) => detail.thread.id === confirmedThreadId);
+  assert.deepEqual(bPending.actions[0].attachment_ids, [], "a pending recipient only receives the task summary");
+  const bPendingAttachment = await api(`/v1/attachments/${ownerOnlyUpload.value.id}`, { token: b.device_token });
+  assert.equal(bPendingAttachment.status, 403);
+
+  const reroutedToC = await action(a, confirmedThreadId, "reroute_transfer", 1, {
+    headers: protocol02,
+    recipientId: c.principal.id,
+    message: "C is a better first recipient.",
+  });
+  assert.equal(reroutedToC.status, 201);
+  assert.equal(reroutedToC.value.thread.pending_recipient_id, c.principal.id);
+  const bAfterReroute = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    bAfterReroute.value.threads.some(detail => detail.thread.id === confirmedThreadId),
+    false,
+    "an unaccepted candidate loses visibility after rerouting",
+  );
+  const staleRecipientAccept = await action(b, confirmedThreadId, "accept_transfer", 2, {
+    headers: protocol02,
+    message: "Too late.",
+  });
+  assert.equal(staleRecipientAccept.status, 403);
+  const cDeclined = await action(c, confirmedThreadId, "decline_transfer", 2, {
+    headers: protocol02,
+    message: "This belongs with B.",
+  });
+  assert.equal(cDeclined.status, 201);
+  assert.equal(cDeclined.value.thread.phase, "awaiting_reassignment");
+  const cAfterDecline = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: c.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    cAfterDecline.value.threads.some(detail => detail.thread.id === confirmedThreadId),
+    false,
+    "an unaccepted candidate loses visibility after declining",
+  );
+
+  const reroutedToB = await action(a, confirmedThreadId, "reroute_transfer", 3, {
+    headers: protocol02,
+    recipientId: b.principal.id,
+    message: "Returning to the original owner.",
+  });
+  assert.equal(reroutedToB.status, 201);
+  const bAccepted = await action(b, confirmedThreadId, "accept_transfer", 4, {
+    headers: protocol02,
+    message: "Accepted.",
+  });
+  assert.equal(bAccepted.status, 201);
+  assert.equal(bAccepted.value.thread.phase, "active");
+  assert.equal(bAccepted.value.thread.owner_id, b.principal.id);
+  const bAcceptedAttachment = await api(`/v1/attachments/${ownerOnlyUpload.value.id}`, { token: b.device_token });
+  assert.equal(bAcceptedAttachment.status, 200, "acceptance grants access to all immutable task materials");
+
+  const directLegacyCollaboration = await action(b, confirmedThreadId, "handoff", 5, {
+    headers: protocol02,
+    recipientId: legacyRecipient.principal.id,
+    message: "Collaborate from an older client.",
+  });
+  assert.equal(directLegacyCollaboration.status, 201);
+  assert.equal(directLegacyCollaboration.value.transfer_mode, "direct_legacy");
+  assert.equal(directLegacyCollaboration.value.thread.phase, "active");
+  assert.equal(directLegacyCollaboration.value.thread.current_actor_id, legacyRecipient.principal.id);
+  const legacyCollaborationReturn = await action(
+    legacyRecipient,
+    confirmedThreadId,
+    "return",
+    6,
+    { message: "Returning from the legacy client." },
+  );
+  assert.equal(legacyCollaborationReturn.status, 201);
+  assert.equal(legacyCollaborationReturn.value.thread.current_actor_id, b.principal.id);
+
+  const firstCollaborationInvite = await action(b, confirmedThreadId, "handoff", 7, {
+    headers: protocol02,
+    recipientId: c.principal.id,
+    message: "Please collaborate.",
+  });
+  assert.equal(firstCollaborationInvite.status, 201);
+  assert.equal(firstCollaborationInvite.value.thread.phase, "pending_transfer");
+  assert.equal(firstCollaborationInvite.value.thread.current_actor_id, b.principal.id, "the baton stays with the owner before acceptance");
+  const withdrawnCollaboration = await action(b, confirmedThreadId, "withdraw_transfer", 8, {
+    headers: protocol02,
+    message: "The scope changed.",
+  });
+  assert.equal(withdrawnCollaboration.status, 201);
+  assert.equal(withdrawnCollaboration.value.thread.phase, "active");
+  assert.equal(withdrawnCollaboration.value.thread.current_actor_id, b.principal.id);
+  const cAfterWithdrawal = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: c.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    cAfterWithdrawal.value.threads.some(detail => detail.thread.id === confirmedThreadId),
+    false,
+    "a first-time collaborator loses visibility when the invitation is withdrawn",
+  );
+  const secondCollaborationInvite = await action(b, confirmedThreadId, "handoff", 9, {
+    headers: protocol02,
+    recipientId: c.principal.id,
+    message: "The updated scope is ready.",
+  });
+  assert.equal(secondCollaborationInvite.status, 201);
+  const cAcceptedRelay = await action(c, confirmedThreadId, "accept_transfer", 10, {
+    headers: protocol02,
+    message: "I can take this relay.",
+  });
+  assert.equal(cAcceptedRelay.status, 201);
+  assert.equal(cAcceptedRelay.value.thread.owner_id, b.principal.id);
+  assert.equal(cAcceptedRelay.value.thread.current_actor_id, c.principal.id);
+  const confirmedReturned = await action(c, confirmedThreadId, "return", 11, {
+    headers: protocol02,
+    message: "Returning to the previous relay owner.",
+  });
+  assert.equal(confirmedReturned.status, 201);
+  assert.equal(confirmedReturned.value.thread.current_actor_id, b.principal.id);
+  const confirmedCancelled = await action(a, confirmedThreadId, "cancel", 12, {
+    headers: protocol02,
+    message: "Confirmed transfer test complete.",
+  });
+  assert.equal(confirmedCancelled.status, 201);
+  assert.equal(confirmedCancelled.value.thread.phase, "cancelled");
+
+  const pendingForLegacyReroute = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: {
+      team_id: initial.team_id,
+      title: "Reroute to a legacy recipient",
+      assignee_id: b.principal.id,
+      message: "Start with a confirmation-capable member.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(pendingForLegacyReroute.value.transfer_mode, "confirmed");
+  const directLegacyReroute = await action(
+    a,
+    pendingForLegacyReroute.value.thread.id,
+    "reroute_transfer",
+    1,
+    {
+      headers: protocol02,
+      recipientId: legacyRecipient.principal.id,
+      message: "The legacy recipient should not be blocked on confirmation.",
+    },
+  );
+  assert.equal(directLegacyReroute.status, 201);
+  assert.equal(directLegacyReroute.value.transfer_mode, "direct_legacy");
+  assert.equal(directLegacyReroute.value.thread.phase, "active");
+  assert.equal(directLegacyReroute.value.thread.owner_id, legacyRecipient.principal.id);
+  const cancelLegacyReroute = await action(
+    a,
+    pendingForLegacyReroute.value.thread.id,
+    "cancel",
+    2,
+    { headers: protocol02, message: "Legacy reroute behavior verified." },
+  );
+  assert.equal(cancelLegacyReroute.status, 201);
+
+  await pool.query(
+    "UPDATE devices SET relay_protocol_seen_at = now() - interval '31 days' WHERE principal_id = $1",
+    [b.principal.id],
+  );
+  const expiredCapabilityView = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: a.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    expiredCapabilityView.value.members.find(member => member.id === b.principal.id).confirmed_transfers_supported,
+    false,
+  );
+  const directForExpiredCapability = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: {
+      team_id: initial.team_id,
+      title: "Expired recipient capability",
+      assignee_id: b.principal.id,
+      message: "An expired capability must fail safe to direct transfer.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(directForExpiredCapability.value.transfer_mode, "direct_legacy");
+  const cancelExpiredCapability = await action(
+    a,
+    directForExpiredCapability.value.thread.id,
+    "cancel",
+    1,
+    { headers: protocol02, message: "Capability expiry verified." },
+  );
+  assert.equal(cancelExpiredCapability.status, 201);
+  const refreshedBCapability = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    refreshedBCapability.value.members.find(member => member.id === b.principal.id).confirmed_transfers_supported,
+    true,
+  );
+
   const bPinned = await api(`/v1/threads/${threadId}/preference`, {
     method: "PUT",
     token: b.device_token,
@@ -874,8 +1490,8 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(bPinned.value.pinned, true);
   const bPreferences = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
   const aPreferences = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: a.device_token });
-  assert.equal(bPreferences.value.threads[0].preference.pinned, true);
-  assert.equal(aPreferences.value.threads[0].preference.pinned, false);
+  assert.equal(bPreferences.value.threads.find(item => item.thread.id === threadId).preference.pinned, true);
+  assert.equal(aPreferences.value.threads.find(item => item.thread.id === threadId).preference.pinned, false);
 
   const bHidden = await api(`/v1/threads/${threadId}/preference`, {
     method: "PUT",
@@ -938,7 +1554,13 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
   await utimes(staleTemporary, staleTime, staleTime);
   const cleaned = await cleanupAttachments(pool, config);
-  assert.deepEqual(cleaned, { temporary: 1, orphaned: 2, expired: 1 });
+  assert.deepEqual(cleaned, {
+    temporary: 1,
+    orphaned: 2,
+    expired: 1,
+    avatarTemporary: 0,
+    avatarOrphaned: 0,
+  });
   const orphanMetadata = await api(`/v1/attachments/${largeOrphan.value.id}`, {
     token: a.device_token,
   });
@@ -1002,11 +1624,170 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(removedMemberOldInvite.status, 410);
   assert.equal(removedMemberOldInvite.value.error.code, "invite_expired");
+  const thirdPartyOldInvite = await api("/v1/enrollments/claim", {
+    method: "POST",
+    body: {
+      invite_code: inviteBeforeRemoval.value.invite_code,
+      email: nextEmail(),
+      display_name: "Revoked invite user",
+      device_name: "Revoked invite test device",
+    },
+  });
+  assert.equal(thirdPartyOldInvite.status, 410, "unused invites created by a removed member must be revoked");
+  assert.equal(thirdPartyOldInvite.value.error.code, "invite_expired");
   const removedBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
     token: c.device_token,
   });
   assert.equal(removedBootstrap.status, 403);
   assert.equal(removedBootstrap.value.error.code, "membership_required");
+
+  const ownerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: b.principal.id },
+  });
+  assert.equal(ownerTransfer.status, 200);
+  assert.deepEqual(ownerTransfer.value, {
+    team_id: initial.team_id,
+    previous_owner_id: a.principal.id,
+    owner_id: b.principal.id,
+  });
+  const membersAfterTransfer = await api(`/v1/teams/${initial.team_id}/members`, {
+    token: b.device_token,
+  });
+  assert.equal(membersAfterTransfer.value.members.find(member => member.id === a.principal.id).role, "member");
+  assert.equal(membersAfterTransfer.value.members.find(member => member.id === b.principal.id).role, "owner");
+
+  const joinCodeBeforeLeave = passwordAfterRemoval.value.join_password;
+  const ownerLeave = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: b.device_token,
+  });
+  assert.equal(ownerLeave.status, 409);
+  assert.equal(ownerLeave.value.error.code, "last_team_owner");
+  const leaveBlocker = await api("/v1/threads", {
+    method: "POST",
+    token: b.device_token,
+    body: {
+      team_id: initial.team_id,
+      title: "Departure blocking follow-up",
+      assignee_id: a.principal.id,
+      message: "Please finish this before leaving.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(leaveBlocker.status, 201);
+  const busyLeave = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(busyLeave.status, 409);
+  assert.equal(busyLeave.value.error.code, "member_has_open_work");
+  const leaveBlockerEntry = busyLeave.value.error.details.blocking_threads
+    .find(entry => entry.thread_id === leaveBlocker.value.thread.id);
+  assert.deepEqual(leaveBlockerEntry, {
+    thread_id: leaveBlocker.value.thread.id,
+    title: "Departure blocking follow-up",
+    phase: "active",
+    responsibilities: ["work_owner", "current_actor"],
+  });
+  const cancelLeaveBlocker = await action(b, leaveBlocker.value.thread.id, "cancel", 1, {
+    message: "Released before departure.",
+  });
+  assert.equal(cancelLeaveBlocker.status, 201);
+  const inviteBeforeLeave = await api(`/v1/teams/${initial.team_id}/invites`, {
+    method: "POST",
+    token: a.device_token,
+    body: { expires_in_hours: 24 },
+  });
+  assert.equal(inviteBeforeLeave.status, 201);
+  const leaveA = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(leaveA.status, 204);
+  const teamsAfterLeave = await api("/v1/teams", { token: a.device_token });
+  assert.deepEqual(teamsAfterLeave.value.teams.map(team => team.name), ["Release group"]);
+  const oldCodeAfterLeave = await api("/v1/teams/join", {
+    method: "POST",
+    token: a.device_token,
+    body: { join_code: joinCodeBeforeLeave },
+  });
+  assert.equal(oldCodeAfterLeave.status, 401);
+  assert.equal(oldCodeAfterLeave.value.error.code, "join_password_invalid");
+  const thirdPartyInviteAfterLeave = await api("/v1/enrollments/claim", {
+    method: "POST",
+    body: {
+      invite_code: inviteBeforeLeave.value.invite_code,
+      email: nextEmail(),
+      display_name: "Departed inviter user",
+      device_name: "Departed inviter test device",
+    },
+  });
+  assert.equal(thirdPartyInviteAfterLeave.status, 410, "unused invites created by a departed member must be revoked");
+  assert.equal(thirdPartyInviteAfterLeave.value.error.code, "invite_expired");
+
+  const passwordBeforeDissolution = await api(
+    `/v1/teams/${initial.team_id}/join-password`,
+    { token: b.device_token },
+  );
+  assert.equal(passwordBeforeDissolution.status, 200);
+  const avatarBeforeDissolution = await uploadAvatar(b, animatedGif, "owner-avatar.gif");
+  assert.equal(avatarBeforeDissolution.status, 200);
+  const dissolveSseController = new AbortController();
+  t.after(() => dissolveSseController.abort());
+  const dissolveSse = await fetch(`${origin}/v1/events`, {
+    headers: { Authorization: `Bearer ${b.device_token}` },
+    signal: dissolveSseController.signal,
+  });
+  assert.equal(dissolveSse.status, 200);
+  const dissolveSseReader = dissolveSse.body.getReader();
+  await readSseUntil(dissolveSseReader, "event: ready");
+  const dissolve = await api(`/v1/teams/${initial.team_id}`, {
+    method: "DELETE",
+    token: b.device_token,
+  });
+  assert.equal(dissolve.status, 204);
+  await readSseUntil(dissolveSseReader, "event: team.dissolved");
+  await waitForSseEnd(dissolveSseReader);
+  const teamsAfterDissolution = await api("/v1/teams", { token: b.device_token });
+  assert.deepEqual(teamsAfterDissolution.value.teams.map(team => team.name), ["Release group"]);
+  const meAfterDissolution = await api("/v1/me", { token: b.device_token });
+  assert.deepEqual(
+    meAfterDissolution.value.memberships.map(membership => membership.team_id),
+    [createdTeam.value.team.id],
+  );
+  const dissolvedBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+  });
+  assert.equal(dissolvedBootstrap.status, 403);
+  assert.equal(dissolvedBootstrap.value.error.code, "membership_required");
+  const dissolvedThread = await api(`/v1/threads/${threadId}`, { token: b.device_token });
+  assert.equal(dissolvedThread.status, 403);
+  assert.equal(dissolvedThread.value.error.code, "membership_required");
+  const dissolvedAttachment = await api(`/v1/attachments/${planUpload.value.id}`, {
+    token: b.device_token,
+  });
+  assert.equal(dissolvedAttachment.status, 404);
+  assert.equal(dissolvedAttachment.value.error.code, "resource_not_found");
+  const dissolvedAvatar = await readAvatar(b, b.principal.id, initial.team_id);
+  assert.equal(dissolvedAvatar.status, 403);
+  const dissolvedJoinCode = await api("/v1/teams/join", {
+    method: "POST",
+    token: a.device_token,
+    body: { join_code: passwordBeforeDissolution.value.join_password },
+  });
+  assert.equal(dissolvedJoinCode.status, 401);
+  assert.equal(dissolvedJoinCode.value.error.code, "join_password_invalid");
+  const historicalTeam = await pool.query(
+    "SELECT dissolved_at, dissolved_by FROM teams WHERE id = $1",
+    [initial.team_id],
+  );
+  assert.ok(historicalTeam.rows[0].dissolved_at);
+  assert.equal(historicalTeam.rows[0].dissolved_by, b.principal.id);
+  const historicalThread = await pool.query("SELECT phase FROM work_threads WHERE id = $1", [threadId]);
+  assert.equal(historicalThread.rows[0].phase, "closed");
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const invalidJoin = await api("/v1/enrollments/join", {

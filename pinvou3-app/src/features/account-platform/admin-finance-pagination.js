@@ -2,7 +2,7 @@ const SNAPSHOT_EXPIRED_CODES = new Set(['PAGINATION_SNAPSHOT_EXPIRED', 'PAGINATI
 
 export function normalizeFinanceCollection(result, query = {}) {
   const payload = result && typeof result === 'object' ? result : {};
-  const hasSnapshotContract = Object.hasOwn(payload, 'next_cursor') && Object.hasOwn(payload, 'snapshot_as_of');
+  const hasSnapshotContract = Object.prototype.hasOwnProperty.call(payload, 'next_cursor') && Object.prototype.hasOwnProperty.call(payload, 'snapshot_as_of');
   return {
     items: Array.isArray(payload.items) ? payload.items : [],
     page: {

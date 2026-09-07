@@ -14,9 +14,19 @@ const packageJson = JSON.parse(
 );
 
 const helperFiles = new Set([
+  "behavior_telemetry_source.mjs",
   "bridge_domain_contract.mjs",
-  "mock_ota_server.js",
+  "chromium-safe-port.mjs",
   "ui_test_server.js",
+]);
+// This gate deliberately runs its child smoke five times, not once.
+const browserGateChildren = new Map([
+  ["admin_token_account_detail_ui_gate.mjs", ["admin_token_account_detail_ui_smoke.mjs"]],
+]);
+// Requires isolated Go/Postgres/OIDC fixtures and five pre-issued launches;
+// the Go integration suite owns setup, invocation, and cleanup.
+const environmentIntegrationSmokes = new Map([
+  ["admin_token_credential_origin_real_smoke.mjs", "../account-platform/internal/token/credential_origin_integration_test.go"],
 ]);
 const platformRuntimeSmokes = new Set([
   "codex_acp_macos_runtime_smoke.js",
@@ -43,6 +53,7 @@ function collectScriptSmokeFiles(scriptName, collected, visiting = new Set()) {
   for (const match of command.matchAll(/\bnode(?:\s+--[^\s&]+)*\s+([^\s&]+)/gu)) {
     const filename = path.basename(match[1]);
     if (/_smoke\.(?:js|mjs)$/u.test(filename)) collected.add(filename);
+    for (const child of browserGateChildren.get(filename) || []) collected.add(child);
   }
 }
 
@@ -64,6 +75,7 @@ test("every JavaScript test file belongs to one explicit layer", () => {
     !nodeTests.includes(name)
     && !browserSmokes.includes(name)
     && !helperFiles.has(name)
+    && !browserGateChildren.has(name)
   ));
   assert.deepEqual(
     unclassified,
@@ -81,33 +93,40 @@ test("the default test command uses Node automatic discovery", () => {
 test("the full browser suite covers every platform-independent smoke", () => {
   const covered = fullSuiteSmokeFiles();
   const missing = browserSmokes.filter((name) => (
-    !platformRuntimeSmokes.has(name) && !covered.has(name)
+    !platformRuntimeSmokes.has(name) && !environmentIntegrationSmokes.has(name) && !covered.has(name)
   ));
   assert.deepEqual(missing, [], "register new browser smokes in FULL_FRONTEND_SMOKES");
+});
+
+test("environment-owned smokes and repeated gates retain executable owners", () => {
+  for (const [smoke, owner] of environmentIntegrationSmokes) {
+    assert.ok(fs.readFileSync(path.resolve(appRoot, owner), "utf8").includes(smoke));
+  }
+  for (const [gate, children] of browserGateChildren) {
+    const source = fs.readFileSync(path.join(testsRoot, gate), "utf8");
+    for (const child of children) assert.ok(source.includes(child));
+    assert.ok(Object.values(packageJson.scripts).some(command => command.includes(gate)));
+  }
 });
 
 test("the full browser suite has unique commands and a portable runner", () => {
   const labels = FULL_FRONTEND_SMOKES.map(({ kind, target }) => `${kind}:${target}`);
   assert.equal(new Set(labels).size, labels.length);
-  assert.deepEqual(commandFor({ kind: "node", target: "tests/example_smoke.js" }), {
-    executable: process.execPath,
-    args: ["tests/example_smoke.js"],
-  });
   const npmCommand = commandFor({ kind: "npm", target: "test:bridge-smoke" });
   if (process.platform === "win32") {
-    assert.equal(npmCommand.executable, process.env.ComSpec || "cmd.exe");
-    assert.deepEqual(npmCommand.args, [
-      "/d",
-      "/s",
-      "/c",
-      "npm.cmd run test:bridge-smoke",
-    ]);
+    assert.equal(npmCommand.executable, process.execPath);
+    assert.match(npmCommand.args[0], /npm-cli\.js$/u);
+    assert.deepEqual(npmCommand.args.slice(1), ["run", "test:bridge-smoke"]);
   } else {
     assert.deepEqual(npmCommand, {
       executable: "npm",
       args: ["run", "test:bridge-smoke"],
     });
   }
+  assert.deepEqual(commandFor({ kind: "node", target: "tests/example_smoke.js" }), {
+    executable: process.execPath,
+    args: ["tests/example_smoke.js"],
+  });
   assert.throws(() => commandFor({ kind: "unknown", target: "x" }), /unsupported/u);
 });
 

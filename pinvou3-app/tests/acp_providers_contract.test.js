@@ -13,7 +13,15 @@ const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const TAU = path.join(ROOT, 'src-tauri', 'src');
 const PROVIDERS = path.join(TAU, 'features', 'codex_acp', 'providers');
-const MOD = fs.readFileSync(path.join(TAU, 'features', 'codex_acp', 'mod.rs'), 'utf8');
+// Wave-2 拆分后 codex_acp 的职责分散在 mod.rs 与 install/login/introspect 等
+// 子模块。契约检查的是「codex_acp 模块整体」的行为不变式,故 MOD 拼接整个
+// 目录的源码;未拆分时(仅 mod.rs)行为不变。
+const MOD = fs
+  .readdirSync(path.join(TAU, 'features', 'codex_acp'))
+  .filter((f) => f.endsWith('.rs'))
+  .sort()
+  .map((f) => fs.readFileSync(path.join(TAU, 'features', 'codex_acp', f), 'utf8'))
+  .join('\n');
 const PROVIDERS_MOD = fs.readFileSync(path.join(PROVIDERS, 'mod.rs'), 'utf8');
 const CLAUDE = fs.readFileSync(path.join(PROVIDERS, 'claude.rs'), 'utf8');
 const CODEX = fs.readFileSync(path.join(PROVIDERS, 'codex.rs'), 'utf8');
@@ -185,8 +193,8 @@ assert.ok(
   '切换/删除当前 Provider 后必须重启该 Agent 运行中会话'
 );
 assert.ok(
-  MOD.includes('invalidate_cli_probe()'),
-  '切换后必须刷新 CLI 探测缓存'
+  MOD.includes('invalidate_auth_cache(backend)'),
+  '切换后必须刷新当前 Agent 的认证缓存'
 );
 assert.ok(
   MOD.includes('configure_codex_provider_env') &&
@@ -232,7 +240,7 @@ const PROVIDER_FORM = fs.readFileSync(
   path.join(ROOT, 'src', 'features', 'settings', 'ProviderFormModal.jsx'),
   'utf8'
 );
-const I18N = fs.readFileSync(path.join(ROOT, 'src', 'shared', 'i18n.js'), 'utf8');
+const I18N = ['zh', 'en', 'ja'].map((l) => fs.readFileSync(path.join(ROOT, 'src', 'shared', 'i18n', `${l}.js`), 'utf8')).join('\n'); // 拆分后三语在 i18n/ 目录,拼起来等价旧单文件扫描
 const HOME_SWITCHER = fs.readFileSync(
   path.join(ROOT, 'src', 'features', 'conversation', 'HomeModeSwitcher.jsx'),
   'utf8'

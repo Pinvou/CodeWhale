@@ -6,13 +6,15 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
 
 模型既可以运行在本地，也可以接入 OpenAI-compatible 服务；工具、Skills 与连接器按需启用。
 
+[官网](https://pinvou.com/) · [QQ 用户群](#用户交流与安全) · [问题反馈](https://github.com/Pinvou/pinvou-agent/issues) · [讨论区](https://github.com/Pinvou/pinvou-agent/discussions) · [安全政策](SECURITY.md)
+
 <p align="center">
   <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4">
     <img src="docs/assets/screenshots/mode-work.webp" alt="PINVOU 工作模式">
   </a>
 </p>
 <p align="center">
-  <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4"><strong>▶ 观看 90 秒功能演示：7 月 17—23 日功能更新</strong></a>
+  <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4"><strong>▶ 观看 90 秒功能演示（中文）</strong></a>
 </p>
 
 ## 三种工作方式
@@ -84,17 +86,17 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
 
 ## 模型接入
 
-PINVOU 支持本地 vLLM 和 OpenAI-compatible API。应用内可保存多个模型配置，并在不同会话间快速切换；当前提供本地 vLLM、DeepSeek、Kimi、通义千问、豆包、MiniMax、智谱、MiMo 等配置模板，也可以填写自定义兼容端点。
+PINVOU 支持本地 vLLM 和 OpenAI-compatible API。应用内可保存多个模型配置，为云端配置设置可选的显示别名，并在不同会话间快速切换；显示别名不会改变发送给模型服务商的模型标识。当前提供本地 vLLM、DeepSeek、Kimi、通义千问、豆包、MiniMax、智谱、MiMo 等配置模板，也可以填写自定义兼容端点。
 
 本地 vLLM 示例：
 
 ```bash
 export DEEPSEEK_BASE_URL="http://127.0.0.1:8000/v1"
 export DEEPSEEK_API_KEY="local-no-auth"
-export DEEPSEEK_MODEL="qwen36_35b_256k"
+export DEEPSEEK_MODEL="your-model-name"
 ```
 
-模型地址、模型名和密钥也可以直接在应用设置中管理。对于非本机的明文 HTTP 端点，开发环境还需显式设置 `DEEPSEEK_ALLOW_INSECURE_HTTP=1`。
+模型地址、模型名和密钥也可以直接在应用设置中管理。对于可信开发网络内的非本机明文 HTTP 端点，开发环境还需显式设置 `DEEPSEEK_ALLOW_INSECURE_HTTP=1`。
 
 ## 架构
 
@@ -131,7 +133,11 @@ CodeWhale（Agent 底座 submodule）
 - Tauri 2.0 对应的系统依赖
 - 一个可访问的 OpenAI-compatible 模型端点
 
-> **macOS 用户**：pinvou3 支持 Apple Silicon (arm64) + macOS 11.0+。语音识别引擎已内置打包；文件解析（PDF/Office/OCR/压缩包等）依赖可选外部工具，通过 Homebrew 或各工具官网安装——详见 [macOS 运行环境要求](docs/macos-requirements.md)。
+> **Linux 用户**：发布包支持 Ubuntu 22.04 及以上系统（glibc 2.35+，x86_64 与 arm64）；deb 另要求 WebKitGTK 2.40+，已应用标准更新源的 Ubuntu 22.04 系统可满足该要求。
+
+> **macOS 用户**：pinvou3 支持 Apple Silicon (arm64) + macOS 11.0+。语音识别引擎已内置打包；平台要求详见 [macOS 运行环境要求](docs/macos-requirements.md)。
+
+> **文件解析依赖**：PDF、Office、OCR、压缩包等能力依赖可选外部工具，详见 [安装说明](pinvou3-app/INSTALL.md)。
 
 ### 启动应用
 
@@ -171,11 +177,21 @@ pinvou3-app/          Tauri 2.0 + React/Vite 桌面应用
 CodeWhale/         Agent 底座 submodule
 pinvou3-app/resources/mcp-servers/
                       独立 MCP 服务
-workflows/            可复用工作流
 scripts/              测试、守卫、构建与发布脚本
 docs/                 架构设计、验证报告与维护文档
 资料包/               面向终端用户的指南与界面素材
 ```
+
+## 用户交流与安全
+
+- **QQ 用户交流群：1108909346** — 扫描下方二维码，或在 QQ 中搜索群号加入
+- [GitHub Issues](https://github.com/Pinvou/pinvou-agent/issues) — 可复现的问题与聚焦的功能建议
+- [GitHub Discussions](https://github.com/Pinvou/pinvou-agent/discussions) — 问题与想法交流
+- **请勿在公开 Issue 或群聊中报告安全漏洞** — 请使用 [SECURITY.md](SECURITY.md) 中的私有渠道
+
+<p align="center">
+  <img src="pinvou3-app/src/assets/community/qq-group-1108909346.png" alt="PINVOU 官方 QQ 用户交流群二维码，群号 1108909346" width="260" />
+</p>
 
 ## 进一步阅读
 
@@ -183,7 +199,7 @@ docs/                 架构设计、验证报告与维护文档
 - [macOS 运行环境要求](docs/macos-requirements.md)
 - [CodeWhale fork 策略](docs/fork-policy.md)
 - [当前 fork 修改清单](docs/fork-modifications.md)
-- [工具市场设计](docs/工具市场.md)
+- [工具市场概览](docs/工具市场.md)
 - [应用内升级设计](docs/应用内升级-设计.md)
 - [终端用户资料包](资料包/README.md)
 

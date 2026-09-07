@@ -1,4 +1,3 @@
-mod event_stream;
 pub(crate) mod file_access;
 pub(crate) mod manager;
 mod platform;
@@ -10,8 +9,8 @@ pub use protocol::{WebAccessInfo, WebAccessStatus};
 
 pub(crate) const MAX_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
 
+use rand::RngExt;
 use rand::distr::Alphanumeric;
-use rand::Rng;
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 

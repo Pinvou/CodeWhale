@@ -1,5 +1,5 @@
 use std::ffi::{OsStr, OsString};
-use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 use std::process::Command;
 
 const PDF_TOOLS: &[&str] = &["pdftotext", "pdftoppm"];
@@ -77,6 +77,11 @@ pub fn filesystem_path_identity_key(path: &str) -> String {
     path.replace('\\', "/").to_lowercase()
 }
 
+/// Windows 空设备名（git 等外部工具的「读空配置」入参）。
+pub fn null_device() -> &'static str {
+    "NUL"
+}
+
 pub fn python_command() -> String {
     if let Ok(p) = std::env::var("PINVOU3_PYTHON") {
         if !p.is_empty() && is_valid_python_candidate(Path::new(&p)) {
@@ -111,9 +116,15 @@ fn connector_cli_program(cli_bin: &str, program: &str) -> OsString {
     }
 
     if !cli_bin.is_empty() && program == cli_bin {
-        // 应用按需下载并校验的连接器 CLI 优先,缺失时回退已有 npm 全局 shim。
+        // 版本化资产库（lock 表钉住版本，单点解析）优先；旧布局（未迁移的存量）
+        // 其次；都没有回退已有 npm 全局 shim。
+        if let Some(path) = crate::platform::connector_lock::locked_cli_path(cli_bin) {
+            if path.is_file() {
+                return path.into_os_string();
+            }
+        }
         if let Some(bin_dir) = crate::platform::paths::managed_connector_bin_dir() {
-            let bundled = bin_dir.join(format!("{cli_bin}.exe"));
+            let bundled = bin_dir.join(crate::platform::connector_lock::executable_name(cli_bin));
             if bundled.is_file() {
                 return bundled.into_os_string();
             }
@@ -213,7 +224,7 @@ fn windows_npm_prefix_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn bundled_node_dir() -> Option<PathBuf> {
+pub(crate) fn bundled_node_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .map(|exe| bundled_runtime_dir_for_exe(&exe, "node"))
@@ -280,16 +291,43 @@ pub fn configure_onnxruntime_dylib() -> Result<(), String> {
     {
         return Ok(());
     }
-    let path = bundled_onnxruntime_dylib_path().ok_or_else(|| {
+    // No runtime env write anymore: under edition 2024 a runtime write racing
+    // uncoordinated concurrent readers (the foundation's child-process env
+    // snapshots, WebKit/glib libc getenv) is a data race. ORT_DYLIB_PATH is
+    // injected by `startup_configure_onnxruntime_dylib` in the
+    // single-threaded startup window; reaching here means the bundled runtime
+    // is missing or not shipped — return an error so knowledge semantic
+    // search degrades gracefully.
+    Err(
         "Windows ONNX Runtime CPU runtime is missing: runtime/onnxruntime/onnxruntime.dll"
-            .to_string()
-    })?;
-    std::env::set_var("ORT_DYLIB_PATH", &path);
+            .to_string(),
+    )
+}
+
+/// Write `ORT_DYLIB_PATH` in the single-threaded startup window (locating
+/// the ONNX dylib for the embedding runtime; must run before any ort
+/// initialization). Not written when the external environment already sets it
+/// or the bundled dylib is missing; the missing case is funneled into the
+/// runtime `configure_onnxruntime_dylib` Err.
+pub fn startup_configure_onnxruntime_dylib() {
+    if std::env::var("ORT_DYLIB_PATH")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return;
+    }
+    let Some(path) = bundled_onnxruntime_dylib_path() else {
+        return;
+    };
+    // SAFETY: called only from the single-threaded startup window
+    // (startup_platform_env ← lib.rs `startup_process_env`, the run()/headless
+    // startup sequence, before the first thread spawn); no concurrent env
+    // readers.
+    unsafe { std::env::set_var("ORT_DYLIB_PATH", &path) };
     eprintln!(
         "[platform] ONNX Runtime dynamic library pinned: {}",
         path.display()
     );
-    Ok(())
 }
 
 pub fn obsidian_config_path() -> Option<PathBuf> {
@@ -692,12 +730,15 @@ mod tests {
         std::fs::write(&python, b"").unwrap();
         let prev = std::env::var("PINVOU3_PYTHON").ok();
 
-        std::env::set_var("PINVOU3_PYTHON", &python);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK (see _g above); env
+        // writes serialized.
+        unsafe { std::env::set_var("PINVOU3_PYTHON", &python) };
         assert_eq!(python_command(), python.to_string_lossy());
 
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_PYTHON", v),
-            None => std::env::remove_var("PINVOU3_PYTHON"),
+            // SAFETY: same as above; restore-side write under ENV_LOCK serialization.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_PYTHON", v) },
+            None => unsafe { std::env::remove_var("PINVOU3_PYTHON") },
         }
         let _ = std::fs::remove_dir_all(dir);
     }

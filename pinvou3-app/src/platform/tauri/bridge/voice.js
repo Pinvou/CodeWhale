@@ -15,6 +15,53 @@
   var VOICE_DEVICE_PROBE_TIMEOUT_MS = 1500;
   var VOICE_DEVICE_REQUEST_TIMEOUT_MS = 8000;
 
+  function voiceToken(prefix) {
+    return prefix + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 14);
+  }
+
+  function trackVoiceEvent(eventName, session, fields) {
+    if (!session || !session.operationId) return;
+    var request = Object.assign({
+      eventName: eventName,
+      operationId: session.operationId,
+    }, fields || {});
+    if (session.telemetrySessionId && request.sessionId == null) request.sessionId = session.telemetrySessionId;
+    invoke("track_behavior_event", { request: request }).catch(function () {});
+  }
+
+  function voiceDurationMs(session) {
+    return Math.max(0, Math.min(86400000, Date.now() - Number(session && session.startedAt || Date.now())));
+  }
+
+  function voiceTelemetryErrorCategory(category) {
+    if (category === "permission_denied") return "permission_denied";
+    if (category === "timeout") return "timeout";
+    if (category === "device_unavailable" || category === "constraint_unsupported") return "unsupported";
+    if (category === "context_mismatch") return "validation_failed";
+    if (category === "cancelled") return "user_cancelled";
+    if (category === "recognition_failed" || category === "empty_result" || category === "recording_failed") return "tool_error";
+    return "internal_error";
+  }
+
+  function trackVoiceTerminal(eventName, session, fields) {
+    if (!session || session.telemetryTerminal) return;
+    session.telemetryTerminal = true;
+    trackVoiceEvent(eventName, session, fields);
+  }
+
+  function abandonCompletedVoiceResult(stage) {
+    var current = state.voiceInput || {};
+    if (current.status !== "completed" || !current.operationId || current.telemetryTerminal) return;
+    trackVoiceEvent("voice_cancelled", {
+      operationId: current.operationId,
+      telemetrySessionId: current.telemetrySessionId,
+    }, {
+      stage: stage || "recognition",
+      durationMs: Math.max(0, Date.now() - Number(current.startedAt || Date.now())),
+    });
+    state.voiceInput = Object.assign({}, current, { telemetryTerminal: true, operationId: null });
+  }
+
   function setVoiceInputStatus(status, patch) {
     var next = Object.assign({}, state.voiceInput, patch || {});
     next.status = status;
@@ -228,6 +275,10 @@
     var session = activeVoiceInput;
     if (!session) return;
     if (cancelled) {
+      trackVoiceTerminal("voice_cancelled", session, {
+        stage: state.voiceInput && state.voiceInput.stage === "permission" ? "permission" : "recording",
+        durationMs: voiceDurationMs(session),
+      });
       cleanupVoiceInputSession(session);
       activeVoiceInput = null;
       setVoiceInputStatus("cancelled", { message: bt("voiceCancelled"), completedAt: Date.now() });
@@ -265,10 +316,25 @@
       if (typeof session.writeback === "function") {
         session.writeback(text, session.draftBeforeStart);
       }
-      setVoiceInputStatus("completed", { message: bt("voiceWrittenBack"), completedAt: Date.now() });
+      trackVoiceEvent("voice_recognition_completed", session, {
+        durationMs: Math.max(0, Date.now() - Number(session.recognitionStartedAt || session.startedAt)),
+        recognizerType: "local",
+      });
+      setVoiceInputStatus("completed", {
+        message: bt("voiceWrittenBack"),
+        completedAt: Date.now(),
+        operationId: session.operationId,
+        telemetrySessionId: session.telemetrySessionId,
+        telemetryTerminal: false,
+        startedAt: session.startedAt,
+      });
       emitVoiceDiagnostic("writeback", "info", "voice text written back", "语音已写入输入框", "");
     } catch (err) {
       var normalized = normalizeVoiceError(err, "transcribing");
+      trackVoiceTerminal("voice_recognition_failed", session, {
+        durationMs: Math.max(0, Date.now() - Number(session.recognitionStartedAt || session.startedAt)),
+        errorCategory: voiceTelemetryErrorCategory(normalized.category),
+      });
       setVoiceInputStatus("failed", {
         message: normalized.message,
         error: normalized.message,
@@ -349,6 +415,8 @@
       return;
     }
 
+    abandonCompletedVoiceResult("recognition");
+
     // 模型下载期间再次点麦克风时保留原下载会话，不能用新的依赖检测结果
     // 覆盖 installing/cancelling/progress，否则新引导框的“取消”只会关 UI，
     // 后端下载仍会继续。
@@ -361,14 +429,19 @@
     // 点击后立即进入可见、可取消的检测态。模型状态查询首次可能需要读取模型文件，
     // 如果等查询结束后才更新 UI，Windows 上会表现为按钮点击后没有任何反馈。
     var session = {
-      id: Date.now().toString(36),
+      id: voiceToken("voice_"),
+      operationId: voiceToken("voiceop_"),
       sessionId: state.activeSessionId || null,
+      telemetrySessionId: state.activeSessionId || voiceToken("draftsession_"),
       draftBeforeStart: String(draftText || ""),
       writeback: writeback,
       chunks: [],
       sampleRate: 16000,
       startedAt: Date.now(),
+      telemetryTerminal: false,
+      permissionRecorded: false,
     };
+    trackVoiceEvent("voice_entry_clicked", session, { entryPoint: "composer" });
     activeVoiceInput = session;
     setVoiceInputStatus("requesting_permission", {
       message: bt("voiceCheckingDevice"),
@@ -384,6 +457,10 @@
       if (activeVoiceInput !== session) return;
       // 未装好即弹安装引导；installable 决定当前平台是否提供内置安装入口。
       if (asrStatus && !asrStatus.ready) {
+        trackVoiceTerminal("voice_recognition_failed", session, {
+          durationMs: voiceDurationMs(session),
+          errorCategory: "configuration_missing",
+        });
         cleanupVoiceInputSession(session);
         activeVoiceInput = null;
         setVoiceInputStatus("idle", { message: "", stage: null, sessionId: null });
@@ -396,7 +473,7 @@
       // 检测失败（如 mock 环境/旧后端）不阻塞，继续走原录音路径（环境变量/兜底引擎）
     }
 
-    var AudioCtor = window.AudioContext || window.webkitAudioContext;
+    var AudioCtor = window.AudioContext || window.webkitAudioContext; // eslint-disable-line compat/compat -- Safari 14.0 ships webkitAudioContext; the || fallback above selects it
     setVoiceInputStatus("requesting_permission", {
       message: bt("voiceRequestingPermission"),
       stage: "permission",
@@ -427,6 +504,8 @@
         cleanupVoiceInputSession(session);
         return;
       }
+      session.permissionRecorded = true;
+      trackVoiceEvent("voice_permission_result", session, { voicePermissionStatus: "granted" });
       session.audioContext = new AudioCtor();
       session.sampleRate = session.audioContext.sampleRate || 16000;
       session.source = session.audioContext.createMediaStreamSource(session.stream);
@@ -442,13 +521,32 @@
       session.processor.connect(session.zeroGain);
       session.zeroGain.connect(session.audioContext.destination);
       session.timeoutId = setTimeout(function () { finishVoiceInput(false, true); }, 10000);
+      session.recognitionStartedAt = Date.now();
       setVoiceInputStatus("recording", { message: bt("voiceRecording"), stage: "recording" });
+      trackVoiceEvent("voice_started", session);
       emitVoiceDiagnostic("recording", "info", "recording started", "", "");
     } catch (err) {
       cleanupVoiceInputSession(session);
       if (activeVoiceInput !== session) return;
       activeVoiceInput = null;
       var normalized = normalizeVoiceError(err, "recording");
+      if (!session.permissionRecorded && normalized.category !== "cancelled") {
+        session.permissionRecorded = true;
+        trackVoiceTerminal("voice_permission_result", session, {
+          voicePermissionStatus: normalized.category === "permission_denied" ? "denied" : "error",
+          errorCategory: voiceTelemetryErrorCategory(normalized.category),
+        });
+      } else if (normalized.category === "cancelled") {
+        trackVoiceTerminal("voice_cancelled", session, {
+          stage: normalized.stage || "permission",
+          durationMs: voiceDurationMs(session),
+        });
+      } else {
+        trackVoiceTerminal("voice_recognition_failed", session, {
+          durationMs: voiceDurationMs(session),
+          errorCategory: voiceTelemetryErrorCategory(normalized.category),
+        });
+      }
       if (normalized.category === "permission_denied") {
         try {
           var permissionReset = await invoke("reset_microphone_permission");
@@ -480,6 +578,7 @@
       finishVoiceInput(true, false);
       return;
     }
+    abandonCompletedVoiceResult("recognition");
     setVoiceInputStatus("idle", {
       message: "",
       error: null,
@@ -487,6 +586,10 @@
       stage: null,
       sessionId: null,
     });
+  }
+
+  function abandonVoiceResult() {
+    abandonCompletedVoiceResult("recognition");
   }
 
   function appendVoiceText(base, text) {
@@ -518,6 +621,7 @@
       closeVoiceAsrSetup: closeVoiceAsrSetup,
       cancelVoiceInput: cancelVoiceInput,
       clearVoiceInput: clearVoiceInput,
+      abandonVoiceResult: abandonVoiceResult,
       appendVoiceText: appendVoiceText,
       runVoiceInputDebugAssertions: runVoiceInputDebugAssertions
     };

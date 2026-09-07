@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useEffect, useMemo, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
@@ -253,12 +254,12 @@ function LifecycleTab({ detail, client, copy, permissions, actionsEnabled, query
 		const activePlan = activePlans.items.find((item) => ['PENDING_APPROVAL', 'SCHEDULED'].includes(item.status));
 		const effectiveAt = new Date(form.effective_at).toISOString();
 		if (form.target_lifecycle === 'PUBLISHED') {
-			setPlanAction({ type: 'SCHEDULE_PUBLISH', command: { model_id: model.model_id, publish_mode: 'SCHEDULED', lifecycle_plan_id: globalThis.crypto.randomUUID(), lifecycle_plan_version: Number(latestPlan?.lifecycle_plan_version || 0) + 1, effective_at: effectiveAt }, reason: form.reason.trim() });
+			setPlanAction({ type: 'SCHEDULE_PUBLISH', command: { model_id: model.model_id, publish_mode: 'SCHEDULED', lifecycle_plan_id: secureRequestID(), lifecycle_plan_version: Number(latestPlan?.lifecycle_plan_version || 0) + 1, effective_at: effectiveAt }, reason: form.reason.trim() });
 			return;
 		}
 		const input = { expected_catalog_version: model.catalog_version, expected_plan_version: Number(activePlan?.lifecycle_plan_version || 0), target_lifecycle: form.target_lifecycle, effective_at: effectiveAt, existing_session_cutoff_at: form.target_lifecycle === 'REMOVED' ? effectiveAt : form.target_lifecycle === 'DEPRECATED' && form.existing_session_cutoff_at ? new Date(form.existing_session_cutoff_at).toISOString() : null, replacement_model_id: form.target_lifecycle === 'REMOVED' ? form.replacement_model_id || null : null, force_cancel_inflight: false, reason: form.reason.trim() };
 		const signature = JSON.stringify(input);
-		if (createKey.current.signature !== signature) createKey.current = { signature, key: `model-lifecycle-plan-${globalThis.crypto.randomUUID()}` };
+		if (createKey.current.signature !== signature) createKey.current = { signature, key: `model-lifecycle-plan-${secureRequestID()}` };
 		createInflight.current = true;
 		setFormState({ busy: true, error: null });
 		try {

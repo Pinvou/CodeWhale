@@ -10,7 +10,7 @@ use std::{
 };
 
 use chrono::Utc;
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Builder as TarBuilder;
@@ -23,6 +23,9 @@ const MAX_VIDEO_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 80 * 1024 * 1024;
 const TOKEN_URL: &str = "https://magic.h3c.com/rest/ihomers/uploadRequest";
 const UPLOAD_URL: &str = "https://magic.h3c.com/rest/ihomers/uploadSysinfoFile";
+// 接收端只为登记过的采集器 SN 签发 token；这里标识反馈接收通道，不是用户设备。
+// 不得替换为 BIOS/主板序列号，否则普通设备会稳定收到 retCode=24。
+const REGISTERED_FEEDBACK_RECEIVER_SN: &str = "219801A4BL522CM00002";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,17 +142,12 @@ impl FeedbackUploader for H3cFeedbackUploader {
         package: &'a PreparedFeedbackPackage,
     ) -> Pin<Box<dyn Future<Output = Result<(), FeedbackError>> + Send + 'a>> {
         Box::pin(async move {
-            let serial = resolve_device_serial().ok_or_else(|| {
-                FeedbackError::Validation(
-                    "当前设备缺少反馈上传通道所需标识，请配置 PINVOU3_FEEDBACK_GW_SN 后重试。"
-                        .to_string(),
-                )
-            })?;
+            let receiver_sn = REGISTERED_FEEDBACK_RECEIVER_SN;
             create_tar_gz_archive(&package.package_dir, &package.tar_gz_path)?;
             xor_to_dbg(&package.tar_gz_path, &package.dbg_path)?;
-            let token = request_upload_token(&serial).await?;
-            let check_code = compute_check_code(&token, &serial);
-            upload_dbg_file(&package.dbg_path, &serial, &check_code).await
+            let token = request_upload_token(receiver_sn).await?;
+            let check_code = compute_check_code(&token, receiver_sn);
+            upload_dbg_file(&package.dbg_path, receiver_sn, &check_code).await
         })
     }
 }
@@ -280,9 +278,11 @@ pub fn build_app_context(request: &FeedbackSubmitRequest) -> BTreeMap<String, se
     );
     context.insert(
         "language".to_string(),
-        serde_json::json!(crate::platform::prefs::UserPrefs::load()
-            .language
-            .locale_tag()),
+        serde_json::json!(
+            crate::platform::prefs::UserPrefs::load()
+                .language
+                .locale_tag()
+        ),
     );
     context.insert(
         "entry_point".to_string(),
@@ -497,7 +497,7 @@ pub fn parse_token_response(body: &str) -> Result<String, FeedbackError> {
             .ok_or_else(|| FeedbackError::Upload("反馈上传 token 为空。".to_string()))
     } else {
         Err(FeedbackError::Upload(format!(
-            "反馈上传 token 获取失败：{}。请确认设备 SN 已在反馈接收通道登记，或通过 PINVOU3_FEEDBACK_GW_SN 配置正确 SN。",
+            "反馈上传 token 获取失败：{}。请稍后重试或联系支持。",
             format_h3c_error(ret_code, parsed.ret_string.as_ref())
         )))
     }
@@ -557,16 +557,6 @@ fn h3c_value_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Null => None,
         _ => Some(value.to_string()),
     }
-}
-
-pub fn resolve_device_serial() -> Option<String> {
-    if let Ok(serial) = std::env::var("PINVOU3_FEEDBACK_GW_SN") {
-        let serial = serial.trim().to_string();
-        if !serial.is_empty() {
-            return Some(serial);
-        }
-    }
-    crate::platform::os::device_serial_number()
 }
 
 fn cleanup_successful_package(package: &PreparedFeedbackPackage) -> Result<(), FeedbackError> {
@@ -754,7 +744,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let root = unique_temp_dir("mock");
-        std::env::set_var("PINVOU3_HOME", &root);
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
 
         let ok = submit_feedback_with_uploader(base_request(), &MockUploader { result: Ok(()) })
             .await
@@ -773,8 +765,18 @@ mod tests {
         assert_eq!(fail.status, FeedbackStatus::FailedRetryable);
         assert!(fail.retryable);
 
-        std::env::remove_var("PINVOU3_HOME");
+        match previous_home {
+            // SAFETY: the crate-wide ENV_LOCK remains held while the original value is restored.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn feedback_receiver_uses_historical_registered_serial() {
+        assert_eq!(REGISTERED_FEEDBACK_RECEIVER_SN, "219801A4BL522CM00002");
     }
 
     #[test]
@@ -787,23 +789,27 @@ mod tests {
         let bad = root.join("bad.exe");
         fs::write(&bad, b"bad").unwrap();
 
-        assert!(validate_attachments(&[FeedbackAttachmentRequest {
-            path: image.to_string_lossy().into_owned(),
-            name: "ok.png".to_string(),
-            media_type: "image".to_string(),
-            mime: None,
-            size_bytes: None,
-        }])
-        .is_ok());
+        assert!(
+            validate_attachments(&[FeedbackAttachmentRequest {
+                path: image.to_string_lossy().into_owned(),
+                name: "ok.png".to_string(),
+                media_type: "image".to_string(),
+                mime: None,
+                size_bytes: None,
+            }])
+            .is_ok()
+        );
 
-        assert!(validate_attachments(&[FeedbackAttachmentRequest {
-            path: video.to_string_lossy().into_owned(),
-            name: "ok.mp4".to_string(),
-            media_type: "video".to_string(),
-            mime: None,
-            size_bytes: None,
-        }])
-        .is_ok());
+        assert!(
+            validate_attachments(&[FeedbackAttachmentRequest {
+                path: video.to_string_lossy().into_owned(),
+                name: "ok.mp4".to_string(),
+                media_type: "video".to_string(),
+                mime: None,
+                size_bytes: None,
+            }])
+            .is_ok()
+        );
 
         assert!(matches!(
             validate_attachments(&[FeedbackAttachmentRequest {
@@ -839,7 +845,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let root = unique_temp_dir("manifest");
-        std::env::set_var("PINVOU3_HOME", &root);
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let image = root.join("source.png");
         fs::write(&image, b"png").unwrap();
         let mut req = base_request();
@@ -856,7 +864,12 @@ mod tests {
         assert!(manifest.contains("attachments/001-image.png"));
         assert!(!manifest.contains(&image.to_string_lossy().to_string()));
 
-        std::env::remove_var("PINVOU3_HOME");
+        match previous_home {
+            // SAFETY: the crate-wide ENV_LOCK remains held while the original value is restored.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
         let _ = fs::remove_dir_all(root);
     }
 

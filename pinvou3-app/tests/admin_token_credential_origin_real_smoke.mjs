@@ -29,7 +29,8 @@ try {
     const handoffPromise = portal.evaluate(async (opaqueLaunchID) => {
       const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
         && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
-      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      // eslint-disable-next-line n/no-unsupported-features/node-builtins -- This callback runs in Chromium, not in Node.
+      const bytes = window.crypto.getRandomValues(new Uint8Array(32));
       const nonce = btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
       const popup = window.open('/credential-handoff', '_blank');
       if (!popup) throw new Error('handoff popup blocked');

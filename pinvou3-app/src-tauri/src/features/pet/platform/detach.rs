@@ -11,7 +11,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// 全局鼠标状态(坐标 + 左键按下)。三平台轮询封装。
-/// - Linux: device_query X11
+/// - Linux: X11 XQueryPointer(root 窗口坐标 = 真·全局虚拟桌面坐标)
 /// - macOS: NSEvent 全局监听线程写的原子快照(见 macos_mouse 模块)
 /// - Windows: GetCursorPos + GetAsyncKeyState 同步读
 pub struct GlobalMouse {
@@ -21,19 +21,78 @@ pub struct GlobalMouse {
 }
 
 #[cfg(target_os = "linux")]
-fn poll_global_mouse(dev: &device_query::DeviceState) -> GlobalMouse {
-    use device_query::DeviceQuery;
-    let m = dev.get_mouse();
-    GlobalMouse {
-        x: m.coords.0,
-        y: m.coords.1,
-        left_down: *m.button_pressed.get(1).unwrap_or(&false),
+struct X11Pointer(*mut x11::xlib::Display);
+
+#[cfg(target_os = "linux")]
+impl X11Pointer {
+    fn new() -> Option<Self> {
+        // SAFETY: passing null to XOpenDisplay connects via the DISPLAY env
+        // var, with no other pointer contract to satisfy; the returned
+        // Display* is null-checked before being stored in Self (Xlib opaque
+        // types can only be held as raw pointers). On pure Wayland (no
+        // XWayland) it returns null — return None so the caller can fall back.
+        unsafe {
+            let d = x11::xlib::XOpenDisplay(std::ptr::null());
+            if d.is_null() { None } else { Some(Self(d)) }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for X11Pointer {
+    fn drop(&mut self) {
+        // SAFETY: self.0 is the Display* successfully returned by XOpenDisplay
+        // in new(), valid while the thread lives; Drop runs once and the value
+        // is unused after the close, so no double free (and no X server-side
+        // connection leak).
+        unsafe {
+            x11::xlib::XCloseDisplay(self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn poll_global_mouse(dev: &X11Pointer) -> GlobalMouse {
+    use std::os::raw::{c_int, c_uint, c_ulong};
+    use x11::xlib::{Button1Mask, XDefaultRootWindow, XQueryPointer};
+    // SAFETY: dev.0 is a valid, not-yet-closed Display* established by
+    // XOpenDisplay; root comes from XDefaultRootWindow on the same Display;
+    // all other arguments are writable locals on this function's stack whose
+    // lifetimes cover the XQueryPointer call.
+    unsafe {
+        let root = XDefaultRootWindow(dev.0);
+        let mut root_return: c_ulong = 0;
+        let mut child_return: c_ulong = 0;
+        let mut root_x: c_int = 0;
+        let mut root_y: c_int = 0;
+        let mut win_x: c_int = 0;
+        let mut win_y: c_int = 0;
+        let mut mask: c_uint = 0;
+        XQueryPointer(
+            dev.0,
+            root,
+            &mut root_return,
+            &mut child_return,
+            &mut root_x,
+            &mut root_y,
+            &mut win_x,
+            &mut win_y,
+            &mut mask,
+        );
+        // 读 root_x/root_y(真·全局虚拟桌面坐标)。device_query 同样以 root 窗口调
+        // XQueryPointer,其 win_x/win_y 在 w=root 时与 root_x/root_y 恒等——
+        // 坐标语义与旧实现一致,直连只是去掉中间封装。
+        GlobalMouse {
+            x: root_x,
+            y: root_y,
+            left_down: mask & Button1Mask != 0,
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
 fn poll_global_mouse(_dev: &()) -> GlobalMouse {
-    // CoreGraphics 同步读全局光标(与 Linux device_query / Windows GetCursorPos 同构):
+    // CoreGraphics 同步读全局光标(与 Linux XQueryPointer / Windows GetCursorPos 同构):
     // 任意线程可调、免授权(仅键盘态/事件合成才需 Accessibility)、无需事件监听器。
     macos_mouse::poll()
 }
@@ -46,6 +105,7 @@ fn poll_global_mouse(_dev: &()) -> GlobalMouse {
     use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
     let mut pt = MaybeUninit::<POINT>::uninit();
+    // SAFETY: GetCursorPos initializes `pt` on success; assume_init is reached only after that check.
     let (x, y) = unsafe {
         if GetCursorPos(pt.as_mut_ptr()) == 0 {
             return GlobalMouse {
@@ -57,6 +117,7 @@ fn poll_global_mouse(_dev: &()) -> GlobalMouse {
         let pt = pt.assume_init();
         (pt.x, pt.y)
     };
+    // SAFETY: GetAsyncKeyState accepts the constant virtual-key code and has no pointer arguments.
     let left_down = unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16) & 0x8000 != 0 };
     GlobalMouse { x, y, left_down }
 }
@@ -70,7 +131,7 @@ fn poll_global_mouse(_dev: &()) -> GlobalMouse {
     }
 }
 
-/// macOS 全局鼠标:CoreGraphics 同步读取(与 Linux device_query / Windows GetCursorPos
+/// macOS 全局鼠标:CoreGraphics 同步读取(与 Linux XQueryPointer / Windows GetCursorPos
 /// 同构)。撕离拖拽的轮询线程直接调用,无需主线程调度、无事件监听器(因此也不会泄漏)。
 ///
 /// 为什么不用 NSEvent global monitor:addGlobalMonitorForEventsMatchingMask 只收**其它
@@ -102,7 +163,7 @@ mod macos_mouse {
     const MOUSE_BUTTON_LEFT: u32 = 0;
 
     #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CGEventCreate(source: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
         fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
         // CGEventSourceButtonState 第一参数是 CGEventSourceStateID(int32 枚举值,如
@@ -114,13 +175,20 @@ mod macos_mouse {
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
+    unsafe extern "C" {
         fn CFRelease(cf: *mut std::ffi::c_void);
     }
 
     /// 同步读全局鼠标位置 + 左键按下态。任意线程可调,免授权。任一 CG 调用失败(罕见,
     /// 如 window server 异常)返回零值快照,轮询循环下一轮重试,不会崩溃。
     pub(super) fn poll() -> GlobalMouse {
+        // SAFETY: CGEventCreate accepts NULL for source (default event
+        // source); the returned event is null-checked and CGEventGetLocation
+        // only reads its internal coordinates; CFRelease releases a
+        // successfully created object exactly once; the first parameter of
+        // CGEventSourceButtonState is an int32 enum value
+        // (HID_SYSTEM_STATE), not a pointer. All three are callable on any
+        // thread without authorization.
         unsafe {
             let event = CGEventCreate(core::ptr::null_mut());
             if event.is_null() {
@@ -168,9 +236,8 @@ pub fn view_title(kind: &str) -> &'static str {
         "session" => "对话",
         "codex-session" => "Coding 对话",
         "persona" => "专家",
-        "workflow" => "工作流",
         "monitor" => "系统监控",
-        "toolstore" => "工具商店",
+        "toolstore" => "插件中心",
         "cardpool" => "专家卡牌池",
         "localenv" => "本地环境",
         "outputs" => "产出物",
@@ -231,7 +298,7 @@ pub fn create_detached_at(
         .build()
         .map_err(|e| format!("build detached window: {e}"))?;
 
-    // 用 PhysicalPosition 落位:device_query 给的是全局物理像素,绕开 logical/scale 换算。
+    // 用 PhysicalPosition 落位:XQueryPointer 给的是全局物理像素,绕开 logical/scale 换算。
     // 落位即"全屏":先放到目标屏,再 maximize → 填满该显示器(保留标题栏可关)。
     if let Some((x, y)) = pos {
         let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
@@ -292,9 +359,15 @@ pub async fn begin_detach_drag(
             }
             let _drag_guard = DragGuard(app_for_thread.clone());
 
-            // 平台特定的轮询设备句柄:Linux 是 device_query DeviceState;其它平台不用句柄。
+            // 平台特定的轮询设备句柄:Linux 是 X11 Display(X11Pointer RAII 包裹,
+            // 纯 Wayland 无 XWayland 时 new() 返回 None → 直接放弃;DRAG_ACTIVE 复位
+            // 与 detach:drag-ended 广播统一由上方 _drag_guard 的 Drop 保证,无需重复 emit)。
+            // 其它平台不用句柄。
             #[cfg(target_os = "linux")]
-            let dev = device_query::DeviceState::new();
+            let dev = match X11Pointer::new() {
+                Some(d) => d,
+                None => return,
+            };
             #[cfg(not(target_os = "linux"))]
             let dev = ();
 
@@ -362,7 +435,7 @@ mod tests {
         );
         assert_ne!(
             detached_label("session", Some("a")),
-            detached_label("workflow", Some("a"))
+            detached_label("persona", Some("a"))
         );
         assert_ne!(
             detached_label("monitor", None),
@@ -372,7 +445,7 @@ mod tests {
 
     #[test]
     fn view_title_known_and_fallback() {
-        assert_eq!(view_title("workflow"), "工作流");
+        assert_eq!(view_title("persona"), "专家");
         assert_eq!(view_title("codex-session"), "Coding 对话");
         assert_eq!(view_title("outputs"), "产出物");
         assert_eq!(view_title("???"), "PINVOU");
@@ -390,15 +463,5 @@ mod tests {
         assert!(!point_in_rect(100, 10, 0, 0, 100, 100)); // 右边界开区间
         assert!(!point_in_rect(-1, 10, 0, 0, 100, 100));
         assert!(point_in_rect(2000, 50, 1920, 0, 1920, 1080)); // 第二屏
-    }
-
-    #[test]
-    fn detached_url_contract_uses_ui_cache_schema() {
-        let query = format!(
-            "ui={}&detached=1&kind={}",
-            crate::platform::ui_cache::UI_CACHE_SCHEMA,
-            urlencode("workflow")
-        );
-        assert_eq!(query, "ui=vite-react-1&detached=1&kind=workflow");
     }
 }

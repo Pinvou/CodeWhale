@@ -61,7 +61,7 @@ SEMANTIC_MERGE_PREFIXES = (
     "pinvou3-app/src-tauri/src/features/connectors/",
     "pinvou3-app/src-tauri/src/features/feedback/",
     "pinvou3-app/src-tauri/src/features/knowledge/model_download.rs",
-    "pinvou3-app/src-tauri/src/features/llmapi_hub/",
+    "pinvou3-app/src-tauri/src/features/account_platform/",
     "pinvou3-app/src-tauri/src/features/local_llm/",
     "pinvou3-app/src-tauri/src/features/remote_control/",
     "pinvou3-app/src-tauri/src/features/runtime_bundle/",

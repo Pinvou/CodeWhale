@@ -5,7 +5,6 @@
 //! `settings.json` 或对应的 `PINVOU3_*` 环境变量调整。
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::core::mode_state::SerializableMode;
@@ -13,6 +12,9 @@ use crate::platform::credential_store::{
     CredentialEditAction, CredentialMigrationResult, CredentialReference, CredentialState,
     CredentialStore, SystemCredentialStore,
 };
+
+mod search;
+pub use search::{SearchCredential, SearchPrefs, SearchProvider};
 
 /// `settings.json` 的进程内统一读写锁。
 ///
@@ -69,6 +71,24 @@ impl Default for Language {
     }
 }
 impl Language {
+    fn from_system_locale(locale: Option<&str>) -> Self {
+        let Some(locale) = locale.map(str::trim).filter(|locale| !locale.is_empty()) else {
+            return Language::En;
+        };
+        let primary = locale
+            .split(['-', '_', '.', '@', ':'])
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match primary.as_str() {
+            "zh" => Language::ZhHans,
+            "ja" => Language::Ja,
+            "en" => Language::En,
+            // 品悟当前只提供中、英、日；其它系统语言使用英文，而不是误显示中文。
+            _ => Language::En,
+        }
+    }
+
     pub fn locale_tag(self) -> &'static str {
         match self {
             Language::ZhHans => "zh-Hans",
@@ -128,16 +148,70 @@ impl Language {
     }
 }
 
-mod model;
+pub(crate) mod model;
+pub use model::{
+    BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+    BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME, BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL,
+    LEGACY_BUILTIN_LLMAPI_MODEL_ID, MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM,
+    MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, select_builtin_account_platform_model,
+};
 use model::{
     identify_coding_plan_endpoint, migrated_minimax_base_url, strip_chat_completions_suffix,
 };
-pub use model::{
-    select_builtin_account_platform_model, ModelPreset, BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL,
-    BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME,
-    BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL, LEGACY_BUILTIN_LLMAPI_MODEL_ID,
-    MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM, MODEL_PROVIDER_KIND_OFFICIAL_API,
-};
+
+/// 用户对某条 [`SavedModel`] 图片输入能力的显式覆盖(模型设置页「图片输入能力」,
+/// 设计 §6.3/§7.3)。`Pinvou` = 走能力解析链(内置已验证表→Unknown);
+/// `Enabled`/`Disabled` 直接钉死,供本地自定义模型人工确认用。
+///
+/// 反序列化手写兜底:未知档位值落 `Pinvou` 而非报错。没有这一层,单个未知值
+/// (未来版本新增枚举后降级运行/手工编辑)会让整份 `UserPrefs` 反序列化失败,
+/// `load` 整体回退默认值,此后任意一次设置写入都会把用户的全部模型条目与
+/// 凭据引用不可逆覆盖。落 `Pinvou` 后写回即规范化为 `"pinvou"`。不能改用
+/// `#[serde(other)]`:它要求挂在最后一个变体上,而"未知=Disabled"语义危险,
+/// 新增兜底变体又会破坏穷举 match 且无法序列化。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageCapabilityOverride {
+    /// pinvou 决策(默认):按内置已验证能力表判断,不探测(原「自动判断」语义)。
+    /// 旧 settings.json 无该字段、或残留已下线的 `"auto"`(保存时检测)档,
+    /// 反序列化即落这里,无感迁移。
+    #[default]
+    Pinvou,
+    /// 用户确认该模型支持图片输入(「能」)。
+    Enabled,
+    /// 用户确认该模型不支持图片输入(「不能」)。
+    Disabled,
+}
+
+impl<'de> Deserialize<'de> for ImageCapabilityOverride {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = ImageCapabilityOverride;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("image capability override (pinvou/enabled/disabled)")
+            }
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    // "auto" 是已下线的「保存时检测」档,残留值按 pinvou 决策迁移。
+                    "pinvou" | "auto" => Ok(ImageCapabilityOverride::Pinvou),
+                    "enabled" => Ok(ImageCapabilityOverride::Enabled),
+                    "disabled" => Ok(ImageCapabilityOverride::Disabled),
+                    // 未知值兜底:见枚举头注释。走 Pinvou 而非 Disabled——
+                    // "判不出"绝不能冒充"确认不支持"。
+                    _ => Ok(ImageCapabilityOverride::Pinvou),
+                }
+            }
+        }
+        deserializer.deserialize_str(Visitor)
+    }
+}
 
 /// Stable, source-aware model selection used by global defaults and session bindings.
 /// Platform catalog model IDs are deliberately not SavedModel IDs: the built-in
@@ -218,6 +292,9 @@ pub struct SavedModel {
     pub id: String,
     /// 用户起的显示名("本地 Qwen"/"DeepSeek 线上")。
     pub name: String,
+    /// Optional user-facing label for cloud model selectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     /// 决定 provider 路由 + 模板,复用现有 9 预设枚举。
     pub preset: ModelPreset,
     /// 该具体部署允许的 context window；与发给服务端的 `model` wire name 解耦。
@@ -226,6 +303,10 @@ pub struct SavedModel {
     /// Pinvou 对该 route 声明的单轮 output 上限；最终仍受进程级请求上限约束。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// 用户选择的思考深度档位（透传底座 reasoning_effort：off/low/medium/high/max）。
+    /// None = 未显式设置，走 provider 默认（vllm→off 防 SSE timeout，其余→high）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub model: String,
     pub base_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,6 +315,13 @@ pub struct SavedModel {
     pub vendor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_mode: Option<String>,
+    /// 图片输入能力覆盖(设计 §6.3):Pinvou 走能力解析链;Enabled/Disabled 强制。
+    #[serde(default)]
+    pub image_capability_override: ImageCapabilityOverride,
+    /// 视觉兜底模型引用(设计 §9.3):指向另一条 SavedModel 的 `id`,复用其
+    /// endpoint 与 `credential_ref`,不保存第二份明文密钥。None = 未配置。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_model_id: Option<String>,
     #[serde(default, skip_serializing)]
     pub api_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,6 +338,8 @@ impl SavedModel {
     pub fn builtin_account_platform() -> Self {
         Self {
             id: BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string(),
+            alias: None,
+            reasoning_effort: None,
             name: BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME.to_string(),
             preset: ModelPreset::OpenaiCompatible,
             context_window_tokens: None,
@@ -259,6 +349,8 @@ impl SavedModel {
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
@@ -271,6 +363,18 @@ impl SavedModel {
         self.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
     }
 
+    fn normalize_alias(&mut self) {
+        if self.preset == ModelPreset::LocalVllm {
+            self.alias = None;
+            return;
+        }
+        self.alias = self
+            .alias
+            .take()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+
     fn normalize_route_limits(&mut self) {
         self.context_window_tokens = self.context_window_tokens.filter(|tokens| *tokens > 0);
         self.max_output_tokens = self.max_output_tokens.filter(|tokens| *tokens > 0);
@@ -281,6 +385,22 @@ impl SavedModel {
             if self.max_output_tokens.is_none() {
                 self.max_output_tokens = Some(24_576);
             }
+        }
+        // reasoning_effort 归一为底座 `ReasoningEffort::parse_strict` 认识的规范档位
+        // （off/low/medium/high/auto/max）。别名（disabled/minimum/light/ultra 等）
+        // 规范化为对应档位，避免底座 wire 层 `apply_reasoning_effort` 只认规范档位
+        // + 少数别名，把 `minimum`/`light`/`ultra`/`maximum` 等静默丢弃；非法值置
+        // None 走 provider 默认，避免被底座 `from_setting` 静默回退成 Max。
+        if let Some(effort) = self.reasoning_effort.as_deref() {
+            self.reasoning_effort = match effort.trim().to_ascii_lowercase().as_str() {
+                "off" | "disabled" | "none" | "false" => Some("off".to_string()),
+                "low" | "minimum" | "minimal" | "light" => Some("low".to_string()),
+                "medium" | "mid" => Some("medium".to_string()),
+                "high" => Some("high".to_string()),
+                "auto" | "automatic" => Some("auto".to_string()),
+                "max" | "maximum" | "xhigh" | "ultra" | "ultracode" => Some("max".to_string()),
+                _ => None,
+            };
         }
     }
 
@@ -358,164 +478,6 @@ impl SavedModel {
         self.credential_state = CredentialState::Unavailable;
         self.has_secret = self.credential_ref.is_some();
         self.clear_plaintext_key();
-    }
-}
-
-/// Search 后端选择。
-/// - `Bing`(默认): HTML scrape,无需 key,但对中文长复合查询相关性差。
-///   DDG 在 GFW + 代理 datacenter IP 段下基本恒返 anomaly-modal,
-///   所以底座 fork patch #42 已把默认翻成 Bing,这里前端默认对齐。
-/// - `Metaso` / `Bocha` / `Baidu`: 国内 AI 搜索 API,中文场景相关性远好于 Bing scrape。
-///   Metaso 留空 key 走底座内置共享 key(~100 次/天);Bocha/Baidu 必须填 key。
-/// - `Tavily`: 海外 agent 搜索 API(<https://app.tavily.com/> 拿 `tvly-` key,API 实际打
-///   `api.tavily.com`)。结果是干净抽取的 content 而非 HTML scrape,质量好;但要稳定外网 +
-///   自带额度,key 必填(留空底座直接报 "requires API key")。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum SearchProvider {
-    Bing,
-    Metaso,
-    Bocha,
-    Baidu,
-    Tavily,
-}
-
-impl Default for SearchProvider {
-    fn default() -> Self {
-        SearchProvider::Bing
-    }
-}
-
-impl SearchProvider {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SearchProvider::Bing => "bing",
-            SearchProvider::Metaso => "metaso",
-            SearchProvider::Bocha => "bocha",
-            SearchProvider::Baidu => "baidu",
-            SearchProvider::Tavily => "tavily",
-        }
-    }
-
-    pub fn supports_api_key(self) -> bool {
-        !matches!(self, SearchProvider::Bing)
-    }
-
-    pub fn env_key_names(self) -> &'static [&'static str] {
-        match self {
-            SearchProvider::Metaso => &["METASO_API_KEY"],
-            SearchProvider::Baidu => &["BAIDU_SEARCH_API_KEY"],
-            SearchProvider::Bing | SearchProvider::Bocha | SearchProvider::Tavily => &[],
-        }
-    }
-
-    pub fn credential_reference(self) -> CredentialReference {
-        CredentialReference::for_search_provider(self.as_str())
-    }
-}
-
-fn default_enabled_search_providers() -> Vec<SearchProvider> {
-    vec![SearchProvider::Bing]
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SearchCredential {
-    #[serde(default, skip_serializing)]
-    pub api_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_ref: Option<CredentialReference>,
-    #[serde(default)]
-    pub credential_state: CredentialState,
-    #[serde(default)]
-    pub has_secret: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_action: Option<CredentialEditAction>,
-}
-
-impl SearchCredential {
-    pub fn clear_plaintext_key(&mut self) {
-        self.api_key.clear();
-        self.credential_action = None;
-    }
-
-    pub fn mark_configured(&mut self, reference: CredentialReference) {
-        self.credential_ref = Some(reference);
-        self.credential_state = CredentialState::Configured;
-        self.has_secret = true;
-        self.clear_plaintext_key();
-    }
-
-    pub fn mark_missing(&mut self) {
-        self.credential_ref = None;
-        self.credential_state = CredentialState::Missing;
-        self.has_secret = false;
-        self.clear_plaintext_key();
-    }
-
-    pub fn mark_unavailable(&mut self) {
-        self.credential_state = CredentialState::Unavailable;
-        self.has_secret = self.credential_ref.is_some();
-        self.clear_plaintext_key();
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SearchPrefs {
-    pub provider: SearchProvider,
-    #[serde(default = "default_enabled_search_providers")]
-    pub enabled_providers: Vec<SearchProvider>,
-    /// 当 `provider = Metaso` 时:None 走底座内置共享 key。
-    /// 当 `provider = Bocha`/`Baidu` 时:None 会让 web_search 直接报错(必填)。
-    #[serde(default, skip_serializing)]
-    pub api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub credentials: BTreeMap<SearchProvider, SearchCredential>,
-}
-
-impl Default for SearchPrefs {
-    fn default() -> Self {
-        Self {
-            provider: SearchProvider::Bing,
-            enabled_providers: default_enabled_search_providers(),
-            api_key: None,
-            credentials: BTreeMap::new(),
-        }
-    }
-}
-
-impl SearchPrefs {
-    /// 传给底座前归一化 key。
-    ///
-    /// 空字符串如果透传成 `Some("")`,部分搜索 API 会返回 HTTP 200 + 业务错误体,
-    /// 底座旧版本可能误解析成 `No results found`。这里统一把空白 key 当未配置。
-    pub fn normalized_api_key(&self) -> Option<String> {
-        self.api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(ToString::to_string)
-    }
-
-    pub fn normalize(&mut self) {
-        self.api_key = None;
-        if self.enabled_providers.is_empty() {
-            self.enabled_providers.push(SearchProvider::Bing);
-        }
-        if !self.enabled_providers.contains(&SearchProvider::Bing) {
-            self.enabled_providers.insert(0, SearchProvider::Bing);
-        }
-        if !self.enabled_providers.contains(&self.provider) {
-            self.enabled_providers.push(self.provider);
-        }
-        self.enabled_providers.sort();
-        self.enabled_providers.dedup();
-        self.credentials
-            .retain(|_, credential| credential.has_secret || credential.credential_ref.is_some());
-        for credential in self.credentials.values_mut() {
-            credential.clear_plaintext_key();
-        }
     }
 }
 
@@ -610,18 +572,32 @@ impl Default for SidebarPrefs {
 
 /// 品悟原生 code 会话权限模式的全局记忆。产品语义（已拍板）：
 /// - 从未用过 code 模式时，新建 code 会话默认 Plan（只读）；
-/// - 新建 code 会话的默认 mode = 上次在 code 会话显式使用的 mode；
+/// - 新建 code 会话的默认 mode = code lane 的全局 last_mode；
+/// - last_mode 只由「code 页草稿态显式切换」写入（已生成会话的切换只写
+///   会话自己的记录，不再渗全局——三分 lane 语义复审拍板）；
 /// - 首次切 yolo 弹一次性确认卡，确认后全局记住、之后切换不再弹。
 ///
 /// 不进设置 UI；写入走字段级事务（同 PetPrefs），per-session mode 另存
-/// `sessions/_code_mode_states.json`（见 `features::sessions`）。
+/// `sessions/_session_mode_states.json`（见 `features::sessions`）。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodePermissionPrefs {
-    /// 上次在任意 code 会话显式使用的 mode。None = 从未使用过 code 模式。
+    /// code lane 的全局默认 mode（草稿态显式切换时写入）。None = 从未使用过
+    /// code 模式。
     pub last_mode: Option<SerializableMode>,
     /// yolo 一次性确认（"全自动读写项目目录、可执行 shell、无逐步审批"）标志。
     pub yolo_confirmed: bool,
+}
+
+/// 工作（work）/ 设计（design）两个 plain lane 的全局默认 mode。
+/// 与 code lane（`code_permission.last_mode`）并列——三个工作区 lane 各有
+/// 独立全局默认；只由对应 lane 草稿态的显式切换写入，已生成会话的切换不碰。
+/// None = 该 lane 从未显式选过 → 缺省 Yolo（与 plain 历史默认一致）。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModeDefaultPrefs {
+    pub work: Option<SerializableMode>,
+    pub design: Option<SerializableMode>,
 }
 
 /// 用户偏好。`settings.json` 顶层结构。
@@ -642,25 +618,88 @@ pub struct UserPrefs {
     pub pet: PetPrefs,
     pub sidebar: SidebarPrefs,
     pub code_permission: CodePermissionPrefs,
+    pub mode_defaults: ModeDefaultPrefs,
     pub advanced: AdvancedPrefs,
 }
 
+struct ParsedSettings {
+    prefs: UserPrefs,
+    allow_normalization_persist: bool,
+}
+
+fn should_persist_normalization(allow_persist: bool, requested: bool, changed: bool) -> bool {
+    requested && changed && allow_persist
+}
+
 impl UserPrefs {
-    /// 从 `~/.pinvou3/settings.json` 读。文件不存在或 JSON 解析失败时返回默认。
+    /// 从 `~/.pinvou3/settings.json` 读。没有有效语言配置时跟随当前系统语言。
     pub fn load() -> Self {
         let _guard = lock_user_prefs();
         Self::load_unlocked(true)
     }
 
+    fn defaults_for_system_locale(locale: Option<&str>) -> Self {
+        Self {
+            language: Language::from_system_locale(locale),
+            ..Self::default()
+        }
+    }
+
+    fn parse_settings_with_state(raw: Option<&str>, system_locale: Option<&str>) -> ParsedSettings {
+        let Some(raw) = raw else {
+            return ParsedSettings {
+                prefs: Self::defaults_for_system_locale(system_locale),
+                allow_normalization_persist: false,
+            };
+        };
+        let value: serde_json::Value = match serde_json::from_str(raw) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
+                );
+                return ParsedSettings {
+                    prefs: Self::defaults_for_system_locale(system_locale),
+                    allow_normalization_persist: false,
+                };
+            }
+        };
+        let has_language = value
+            .as_object()
+            .is_some_and(|settings| settings.contains_key("language"));
+        let mut prefs: Self = match serde_json::from_value(value) {
+            Ok(prefs) => prefs,
+            Err(error) => {
+                eprintln!(
+                    "[pinvou3-app] settings.json parse failed ({error}), using system-language defaults"
+                );
+                return ParsedSettings {
+                    prefs: Self::defaults_for_system_locale(system_locale),
+                    allow_normalization_persist: false,
+                };
+            }
+        };
+        if !has_language {
+            prefs.language = Language::from_system_locale(system_locale);
+        }
+        ParsedSettings {
+            prefs,
+            allow_normalization_persist: true,
+        }
+    }
+
+    #[cfg(test)]
+    fn parse_settings(raw: Option<&str>, system_locale: Option<&str>) -> Self {
+        Self::parse_settings_with_state(raw, system_locale).prefs
+    }
+
     fn load_unlocked(persist_normalized: bool) -> Self {
         let path = super::paths::settings_path();
-        let mut prefs = match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-                eprintln!("[pinvou3-app] settings.json parse failed ({e}), using defaults");
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        };
+        let raw = std::fs::read_to_string(&path).ok();
+        let system_locale = crate::platform::os::current_system_locale();
+        let mut parsed = Self::parse_settings_with_state(raw.as_deref(), system_locale.as_deref());
+        let allow_normalization_persist = parsed.allow_normalization_persist;
+        let prefs = &mut parsed.prefs;
         // 必须在 migrate_models/normalize 改写前记录；否则只能修正本次运行的内存值，
         // save gate 看不到变化，旧域名会永久留在 settings.json 中、每次启动重复迁移。
         let minimax_endpoint_changed = prefs
@@ -674,25 +713,34 @@ impl UserPrefs {
                 .as_deref()
                 .is_some_and(|url| migrated_minimax_base_url(url).is_some());
         let account_platform_migration_changed = prefs.migrate_account_platform_model_path();
+        let local_model_alias_changed = prefs
+            .advanced
+            .saved_models
+            .iter()
+            .any(|model| model.preset == ModelPreset::LocalVllm && model.alias.is_some());
         prefs.migrate_models();
         prefs.ensure_builtin_account_platform_model();
         let model_selection_migration_changed = prefs.migrate_model_selection_ref();
         prefs.normalize_saved_model_metadata();
         let migration = prefs.migrate_plaintext_api_keys_with_store(&SystemCredentialStore::new());
         let memory_policy_changed = prefs.enforce_memory_locale_policy();
-        if persist_normalized
-            && (minimax_endpoint_changed
-                || account_platform_migration_changed
-                || model_selection_migration_changed
-                || migration.settings_sanitized
-                || memory_policy_changed)
-        {
+        let normalization_changed = minimax_endpoint_changed
+            || account_platform_migration_changed
+            || model_selection_migration_changed
+            || local_model_alias_changed
+            || migration.settings_sanitized
+            || memory_policy_changed;
+        if should_persist_normalization(
+            allow_normalization_persist,
+            persist_normalized,
+            normalization_changed,
+        ) {
             if let Err(e) = prefs.save_unlocked() {
-                eprintln!("[pinvou3-app] settings normalization save failed: {e:?}");
+                eprintln!("[pinvou3-app] settings normalization save failed: {e:#}");
             }
         }
         prefs.sanitize_plaintext_api_keys();
-        prefs
+        parsed.prefs
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -713,8 +761,15 @@ impl UserPrefs {
             model.normalize_route_limits();
         }
         normalized.sanitize_plaintext_api_keys();
-        let s = serde_json::to_string_pretty(&normalized).expect("UserPrefs serialize");
-        std::fs::write(path, s)
+        // UserPrefs is plain data (no map keys or custom Serialize failure
+        // paths), so serialization should never fail; still fall back to
+        // error propagation instead of panicking.
+        let s = serde_json::to_string_pretty(&normalized).map_err(std::io::Error::other)?;
+        // 原子写：直接 std::fs::write 在进程中断时可能留下截断文件，而 load 对
+        // 损坏的 settings.json 是回退默认值——code_permission.last_mode 等持久化
+        // 偏好会整体丢失，表现为「重启后设置回到默认」。tmp + rename 保证目标
+        // 文件永远完整。
+        crate::platform::filesystem::atomic_write(&path, s.as_bytes())
     }
 
     /// 在同一临界区内读取磁盘最新偏好、修改指定字段并写回。
@@ -729,13 +784,14 @@ impl UserPrefs {
         mutate(&mut prefs)?;
         prefs
             .save_unlocked()
-            .map_err(|error| format!("save settings failed: {error:?}"))?;
+            .map_err(|error| format!("save settings failed: {error:#}"))?;
         // 返回再次从磁盘解析的规范化结果，保证桥接层内存状态与实际持久化内容一致。
         Ok(Self::load_unlocked(false))
     }
 
     pub fn normalize_saved_model_metadata(&mut self) {
         for model in &mut self.advanced.saved_models {
+            model.normalize_alias();
             model.normalize_provider_metadata();
             model.normalize_route_limits();
         }
@@ -757,6 +813,7 @@ impl UserPrefs {
     pub(crate) fn migrate_models(&mut self) {
         if !self.advanced.saved_models.is_empty() {
             for model in &mut self.advanced.saved_models {
+                model.normalize_alias();
                 model.normalize_provider_metadata();
                 model.normalize_route_limits();
             }
@@ -780,20 +837,25 @@ impl UserPrefs {
         self.advanced.saved_models.push(SavedModel {
             id: id.clone(),
             name: model.clone(),
+            alias: None,
             preset,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model,
             base_url,
             provider_kind: None,
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key,
             credential_ref: None,
             credential_state: CredentialState::Missing,
             has_secret: false,
             credential_action: None,
         });
+        self.advanced.saved_models[0].normalize_alias();
         self.advanced.saved_models[0].normalize_route_limits();
         self.advanced.saved_models[0].normalize_provider_metadata();
         self.advanced.custom_api_key = None;
@@ -1209,6 +1271,7 @@ impl UserPrefs {
 
     /// 增或改(按 id)一条模型。
     pub fn upsert_model(&mut self, mut m: SavedModel) {
+        m.normalize_alias();
         m.normalize_provider_metadata();
         m.normalize_route_limits();
         if let Some(existing) = self.advanced.saved_models.iter_mut().find(|x| x.id == m.id) {
@@ -1242,6 +1305,209 @@ mod tests {
     use super::*;
     use crate::platform::credential_store::MemoryCredentialStore;
     use crate::platform::paths::tests::ENV_LOCK;
+
+    #[test]
+    fn saved_model_alias_is_backward_compatible_and_normalized() {
+        let legacy: SavedModel = serde_json::from_value(serde_json::json!({
+            "id": "legacy-cloud",
+            "name": "Legacy cloud",
+            "preset": "deepseek",
+            "model": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com"
+        }))
+        .expect("deserialize legacy model without alias");
+        assert!(legacy.alias.is_none());
+
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models.clear();
+        prefs.upsert_model(SavedModel {
+            alias: Some("  Daily assistant  ".to_string()),
+            ..legacy.clone()
+        });
+        assert_eq!(
+            prefs.model_by_id("legacy-cloud").unwrap().alias.as_deref(),
+            Some("Daily assistant")
+        );
+
+        prefs.upsert_model(SavedModel {
+            alias: Some("   ".to_string()),
+            ..legacy
+        });
+        assert!(prefs.model_by_id("legacy-cloud").unwrap().alias.is_none());
+    }
+
+    #[test]
+    fn local_model_alias_is_cleared_by_upsert_and_normalization() {
+        let local = SavedModel {
+            id: "local-model".into(),
+            name: "Local model".into(),
+            alias: Some("Must not persist".into()),
+            preset: ModelPreset::LocalVllm,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "qwen36_35b_256k".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        };
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models.clear();
+
+        prefs.upsert_model(local);
+        assert!(prefs.model_by_id("local-model").unwrap().alias.is_none());
+
+        prefs.advanced.saved_models[0].alias = Some("Legacy local alias".into());
+        prefs.normalize_saved_model_metadata();
+        assert!(prefs.model_by_id("local-model").unwrap().alias.is_none());
+        assert!(!serde_json::to_string(&prefs).unwrap().contains("alias"));
+    }
+
+    #[test]
+    fn load_clears_and_persists_legacy_local_model_alias() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("PINVOU3_HOME");
+        let temporary_home = std::env::temp_dir().join(format!(
+            "pinvou3-prefs-local-alias-migration-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        let _ = std::fs::remove_dir_all(&temporary_home);
+        std::fs::create_dir_all(&temporary_home).expect("create temporary prefs home");
+        // SAFETY: holding ENV_LOCK (first line of this test); env writes in the
+        // test process are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &temporary_home) };
+
+        // Fixture must pin LocalVllm explicitly: `ModelPreset::default()` is
+        // platform-aware (Linux=LocalVllm, macOS/Windows=Deepseek), so relying
+        // on `migrate_models()`'s default model makes this test red on
+        // non-Linux while passing the ubuntu-only `rust-test` gate.
+        let mut prefs = UserPrefs::default();
+        prefs.advanced.saved_models.push(SavedModel {
+            id: "local-model".into(),
+            name: "Local model".into(),
+            alias: Some("Legacy local alias".into()),
+            preset: ModelPreset::LocalVllm,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "qwen36_35b_256k".into(),
+            base_url: "http://127.0.0.1:8000/v1".into(),
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        });
+        prefs.advanced.active_model_id = Some("local-model".into());
+        let settings_path = super::super::paths::settings_path();
+        std::fs::write(
+            &settings_path,
+            serde_json::to_string_pretty(&prefs).expect("serialize legacy prefs"),
+        )
+        .expect("write legacy prefs");
+
+        let loaded = UserPrefs::load();
+        assert!(loaded.active_model().unwrap().alias.is_none());
+        let persisted = std::fs::read_to_string(&settings_path).expect("read normalized prefs");
+        assert!(!persisted.contains("Legacy local alias"));
+
+        let _ = std::fs::remove_dir_all(&temporary_home);
+        match old_home {
+            // SAFETY: holding ENV_LOCK (first line of this test); restore-side
+            // env writes serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: same as above; removal serialized under ENV_LOCK.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+    }
+
+    /// reasoning_effort 归一为底座 `ReasoningEffort::parse_strict` 认识的规范档位：
+    /// 非法值置 None（避免被底座静默回退成 Max），合法别名规范化为对应档位。
+    #[test]
+    fn normalize_reasoning_effort_canonicalizes_aliases_and_rejects_unknown() {
+        let base = SavedModel {
+            id: "m1".into(),
+            name: "m1".into(),
+            alias: None,
+            preset: ModelPreset::OpenaiCompatible,
+            context_window_tokens: None,
+            max_output_tokens: None,
+            reasoning_effort: None,
+            model: "m1".into(),
+            base_url: "https://example.invalid/v1".into(),
+            provider_kind: None,
+            vendor: None,
+            endpoint_mode: None,
+            image_capability_override: Default::default(),
+            vision_model_id: None,
+            api_key: String::new(),
+            credential_ref: None,
+            credential_state: CredentialState::Missing,
+            has_secret: false,
+            credential_action: None,
+        };
+        let mut invalid = base.clone();
+        invalid.reasoning_effort = Some("turbo".into());
+        invalid.normalize_route_limits();
+        assert_eq!(
+            invalid.reasoning_effort, None,
+            "非法档位应置 None 而非交给底座静默回退 Max"
+        );
+
+        for (alias, canonical) in [
+            ("off", "off"),
+            ("disabled", "off"),
+            ("none", "off"),
+            ("false", "off"),
+            ("low", "low"),
+            ("minimum", "low"),
+            ("minimal", "low"),
+            ("light", "low"),
+            ("medium", "medium"),
+            ("mid", "medium"),
+            ("high", "high"),
+            ("auto", "auto"),
+            ("automatic", "auto"),
+            ("max", "max"),
+            ("maximum", "max"),
+            ("xhigh", "max"),
+            ("ultra", "max"),
+            ("ultracode", "max"),
+        ] {
+            let mut model = base.clone();
+            model.reasoning_effort = Some(alias.into());
+            model.normalize_route_limits();
+            assert_eq!(
+                model.reasoning_effort.as_deref(),
+                Some(canonical),
+                "别名 {alias} 应规范化为 {canonical}"
+            );
+        }
+    }
+
+    /// 旧版 settings.json（无 reasoning_effort 字段）必须反序列化成功且字段为 None。
+    #[test]
+    fn saved_model_missing_reasoning_effort_field_defaults_to_none() {
+        let json = r#"{"id":"m1","name":"m1","preset":"openai_compatible","model":"gpt-5.4-mini","base_url":"https://api.openai.com/v1"}"#;
+        let model: SavedModel = serde_json::from_str(json).expect("旧数据必须能反序列化");
+        assert_eq!(model.reasoning_effort, None);
+    }
 
     struct TemporaryPrefsHome {
         previous: Option<std::ffi::OsString>,
@@ -1509,14 +1775,18 @@ mod tests {
         prefs.upsert_model(SavedModel {
             id: "glm-coding".into(),
             name: "GLM-5-Turbo".into(),
+            alias: None,
             preset: ModelPreset::OpenaiCompatible,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: "glm-5-turbo".into(),
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions/".into(),
             provider_kind: None,
             vendor: None,
             endpoint_mode: Some("full_chat_completions".into()),
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
@@ -1544,14 +1814,18 @@ mod tests {
         prefs.upsert_model(SavedModel {
             id: "glm-api".into(),
             name: "GLM API".into(),
+            alias: None,
             preset: ModelPreset::Glm,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: "glm-5.2".into(),
             base_url: "https://open.bigmodel.cn/api/paas/v4".into(),
             provider_kind: None,
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
@@ -1584,14 +1858,18 @@ mod tests {
         prefs.upsert_model(SavedModel {
             id: "minimax-api".into(),
             name: "MiniMax".into(),
+            alias: None,
             preset: ModelPreset::Minimax,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: "MiniMax-M3".into(),
             base_url: "https://api.minimax.chat/v1".into(),
             provider_kind: None,
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
@@ -1612,14 +1890,18 @@ mod tests {
         prefs.advanced.saved_models.push(SavedModel {
             id: "minimax-api".into(),
             name: "MiniMax".into(),
+            alias: None,
             preset: ModelPreset::Minimax,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: "MiniMax-M3".into(),
             base_url: "https://api.minimax.chat".into(),
             provider_kind: Some(MODEL_PROVIDER_KIND_OFFICIAL_API.into()),
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
@@ -1651,14 +1933,18 @@ mod tests {
         prefs.upsert_model(SavedModel {
             id: "m2".into(),
             name: "Kimi".into(),
+            alias: None,
             preset: ModelPreset::Kimi,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: "kimi-k2.6".into(),
             base_url: "https://api.moonshot.cn/v1".into(),
             provider_kind: None,
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,
@@ -1683,6 +1969,78 @@ mod tests {
         assert!(!json.contains("sk-test-secret"));
         assert!(!json.contains("sk-legacy-secret"));
         assert!(!json.contains("custom_api_key"));
+    }
+
+    #[test]
+    fn saved_model_image_fields_default_for_legacy_json() {
+        // 旧 settings.json 没有 image_capability_override / vision_model_id:
+        // serde default 保证无感迁移 → Pinvou / None(设计 §6.3,阶段 C)。
+        let legacy = r#"{
+            "id": "m1",
+            "name": "DeepSeek 线上",
+            "preset": "deepseek",
+            "model": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com"
+        }"#;
+        let model: SavedModel = serde_json::from_str(legacy).expect("legacy SavedModel json");
+        assert_eq!(
+            model.image_capability_override,
+            ImageCapabilityOverride::Pinvou
+        );
+        assert!(model.vision_model_id.is_none());
+
+        // 显式值能序列化往返;vision_model_id 为 None 时不写入(保持 settings.json 干净)。
+        let mut overridden = model.clone();
+        overridden.image_capability_override = ImageCapabilityOverride::Enabled;
+        overridden.vision_model_id = Some("vision-1".into());
+        let json = serde_json::to_string(&overridden).unwrap();
+        let back: SavedModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.image_capability_override,
+            ImageCapabilityOverride::Enabled
+        );
+        assert_eq!(back.vision_model_id.as_deref(), Some("vision-1"));
+
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("vision_model_id"));
+    }
+
+    #[test]
+    fn saved_model_image_capability_unknown_value_falls_back_to_pinvou() {
+        // 未知档位值(未来版本新增枚举后降级运行/手工编辑)必须落 Pinvou,
+        // 而不是让整份 UserPrefs 反序列化失败——后者会让 `load` 整体回退
+        // 默认值,此后任意一次设置写入把用户的全部模型条目与凭据引用覆盖。
+        let future = r#"{
+            "id": "m1",
+            "name": "DeepSeek 线上",
+            "preset": "deepseek",
+            "model": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com",
+            "image_capability_override": "agentic_probe_v2"
+        }"#;
+        let model: SavedModel = serde_json::from_str(future).expect("unknown override value");
+        assert_eq!(
+            model.image_capability_override,
+            ImageCapabilityOverride::Pinvou
+        );
+    }
+
+    #[test]
+    fn saved_model_image_capability_legacy_auto_migrates_to_pinvou() {
+        // 已下线的「保存时检测」(auto)档:残留 settings.json 按 pinvou 决策迁移。
+        let legacy = r#"{
+            "id": "m1",
+            "name": "DeepSeek 线上",
+            "preset": "deepseek",
+            "model": "deepseek-v4-pro",
+            "base_url": "https://api.deepseek.com",
+            "image_capability_override": "auto"
+        }"#;
+        let model: SavedModel = serde_json::from_str(legacy).expect("legacy auto override");
+        assert_eq!(
+            model.image_capability_override,
+            ImageCapabilityOverride::Pinvou
+        );
     }
 
     #[test]
@@ -1762,6 +2120,7 @@ mod tests {
             pet: PetPrefs::default(),
             sidebar: SidebarPrefs::default(),
             code_permission: CodePermissionPrefs::default(),
+            mode_defaults: ModeDefaultPrefs::default(),
             advanced: AdvancedPrefs {
                 allow_shell: Some(false),
                 max_output_tokens: Some(8192),
@@ -1796,6 +2155,94 @@ mod tests {
             assert!(prefs.notifications.task_completed);
         }
         assert!(prefs.advanced.allow_shell.is_none());
+    }
+
+    #[test]
+    fn system_locale_maps_to_supported_language() {
+        assert_eq!(
+            Language::from_system_locale(Some("zh_CN.UTF-8")),
+            Language::ZhHans
+        );
+        assert_eq!(
+            Language::from_system_locale(Some("zh-Hant-TW")),
+            Language::ZhHans
+        );
+        assert_eq!(Language::from_system_locale(Some("ja-JP")), Language::Ja);
+        assert_eq!(Language::from_system_locale(Some("en-US")), Language::En);
+        assert_eq!(Language::from_system_locale(Some("fr-FR")), Language::En);
+        assert_eq!(Language::from_system_locale(None), Language::En);
+    }
+
+    #[test]
+    fn missing_settings_uses_system_language() {
+        let prefs = UserPrefs::parse_settings(None, Some("ja-JP"));
+        assert_eq!(prefs.language, Language::Ja);
+    }
+
+    #[test]
+    fn invalid_settings_uses_system_language() {
+        let prefs = UserPrefs::parse_settings(Some("{broken"), Some("en-US"));
+        assert_eq!(prefs.language, Language::En);
+    }
+
+    #[test]
+    fn invalid_settings_never_allow_normalization_persist() {
+        for (raw, locale, expected_language) in [
+            ("{broken", "en-US", Language::En),
+            (r#"{"language":42}"#, "ja-JP", Language::Ja),
+        ] {
+            let mut parsed = UserPrefs::parse_settings_with_state(Some(raw), Some(locale));
+            assert_eq!(parsed.prefs.language, expected_language);
+            assert!(!parsed.allow_normalization_persist);
+            parsed.prefs.memory_enabled = true;
+            let normalization_changed = parsed.prefs.enforce_memory_locale_policy();
+            assert!(normalization_changed);
+            assert!(!should_persist_normalization(
+                parsed.allow_normalization_persist,
+                true,
+                normalization_changed,
+            ));
+        }
+    }
+
+    #[test]
+    fn missing_settings_do_not_allow_normalization_persist() {
+        let parsed = UserPrefs::parse_settings_with_state(None, Some("en-US"));
+        assert!(!parsed.allow_normalization_persist);
+        assert!(!should_persist_normalization(
+            parsed.allow_normalization_persist,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn valid_settings_allow_existing_normalization_persist() {
+        let mut parsed = UserPrefs::parse_settings_with_state(
+            Some(r#"{"language":"en","memory_enabled":true}"#),
+            Some("ja-JP"),
+        );
+        assert!(parsed.allow_normalization_persist);
+        let normalization_changed = parsed.prefs.enforce_memory_locale_policy();
+        assert!(normalization_changed);
+        assert!(should_persist_normalization(
+            parsed.allow_normalization_persist,
+            true,
+            normalization_changed,
+        ));
+    }
+
+    #[test]
+    fn settings_without_language_uses_system_language() {
+        let prefs = UserPrefs::parse_settings(Some(r#"{"theme":"genesis"}"#), Some("ja-JP"));
+        assert_eq!(prefs.theme, Theme::Genesis);
+        assert_eq!(prefs.language, Language::Ja);
+    }
+
+    #[test]
+    fn explicit_language_overrides_system_language() {
+        let prefs = UserPrefs::parse_settings(Some(r#"{"language":"zh-Hans"}"#), Some("en-US"));
+        assert_eq!(prefs.language, Language::ZhHans);
     }
 
     #[test]
@@ -1928,7 +2375,7 @@ mod tests {
 
     #[test]
     fn search_prefs_normalized_api_key_treats_blank_as_none() {
-        for raw in [None, Some("".to_string()), Some("   \n\t ".to_string())] {
+        for raw in [None, Some(String::new()), Some("   \n\t ".to_string())] {
             let prefs = SearchPrefs {
                 provider: SearchProvider::Metaso,
                 api_key: raw,
@@ -1953,6 +2400,7 @@ mod tests {
             "pinvou3-prefs-save-normalize-{}",
             std::process::id()
         ));
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let prefs = UserPrefs {
@@ -1973,7 +2421,9 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
         match old_home {
+            // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
@@ -1989,6 +2439,7 @@ mod tests {
             std::process::id(),
             crate::platform::paths::tests::unique_suffix()
         ));
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let mut initial = UserPrefs::default();
@@ -2027,14 +2478,18 @@ mod tests {
         let saved = UserPrefs::load();
         assert!(saved.model_by_id("concurrent-model").is_some());
         assert_eq!(saved.search.provider, SearchProvider::Tavily);
-        assert!(saved
-            .search
-            .enabled_providers
-            .contains(&SearchProvider::Tavily));
+        assert!(
+            saved
+                .search
+                .enabled_providers
+                .contains(&SearchProvider::Tavily)
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
         match old_home {
+            // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }

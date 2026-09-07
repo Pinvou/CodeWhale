@@ -15,8 +15,7 @@ pub fn bundled_engine_intact(
     true
 }
 
-const ASR_MODEL_URL: &str =
-    "https://www.modelscope.cn/models/lovemefan/SenseVoiceGGUF/resolve/master/sense-voice-small-q4_k.gguf";
+const ASR_MODEL_URL: &str = "https://www.modelscope.cn/models/lovemefan/SenseVoiceGGUF/resolve/master/sense-voice-small-q4_k.gguf";
 const ASR_MODEL_MIRROR_URL: &str =
     "https://huggingface.co/lovemefan/sense-voice-gguf/resolve/main/sense-voice-small-q4_k.gguf";
 const ASR_MODEL_SIZE: u64 = 182_278_688;
@@ -126,5 +125,8 @@ pub fn native_recognition_source() -> &'static str {
 }
 
 pub async fn reset_microphone_permission(_window: tauri::WebviewWindow) -> Result<bool, String> {
+    // Linux webkit2gtk 的麦克风放行是 lib.rs 里无状态的 permission-request 处理器
+    // （每次 getUserMedia 即时 allow），应用侧没有可重置的持久授权；返回 false
+    // 让前端保留原始失败文案（此时失败多在系统层 pipewire/设备，重置无济于事）。
     Ok(false)
 }

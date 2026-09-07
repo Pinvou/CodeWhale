@@ -39,7 +39,7 @@ test('authenticated responses propagate versions and clients invalidate stale co
     rootLoad('pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'),
     rootLoad('pinvou3-app/src/features/account-platform/AccountPlatformPopover.jsx'),
     rootLoad('pinvou3-app/src-tauri/src/features/account_platform/mod.rs'),
-    rootLoad('pinvou3-app/vite.config.js'),
+    rootLoad('pinvou3-app/vite.config.mjs'),
   ]);
 
   assert.match(accountAuth, /contextVersionHeaders/);

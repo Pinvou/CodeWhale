@@ -10,12 +10,39 @@
   "args": ["server.py"],
   "env": {},
   "config_fields": [],
-  "routing_rules": [
-    "用户要写/起草党政机关公文（通知/意见/请示/报告/函/批复…）→ ① 判文种，缺要素（发文机关/事由/主送范围/字号性质/成文日期等）一次性问全；② 按文种结构与固定话术写正文（印发型通知=一句壳话术写进 body、主件写进 attachment_body；意见=总体要求-分项举措-组织保障三段），层级序号严格 一、→（一）→1.；③ 按 make_gongwen 的扁平字段组装（body、attachment_body 是多行纯文本，不是 JSON）；④ 调 `mcp_gongwen_make_gongwen` 生成 .docx（出件前自带合规校验）；⑤ 拿到 path **必须再调 `present_artifact(path, title)`** 上产物卡。内容你写进字段，套版（字体字号/红头/页边距）交给渲染器，**不要自己拼 markdown 当公文**。"
-  ],
-  "tool_table_entries": [
-    "| 公文写作 | `mcp_gongwen_make_gongwen` 把公文字段渲染成 GB/T 9704 合规 .docx（出件前自带校验）→ 再 `present_artifact` 上卡 |"
-  ],
   "pip_dependencies": ["python-docx"],
+  "python_dependencies": {
+    "schema_version": 1,
+    "targets": [
+      {
+        "platform": "windows-x64",
+        "python": "3.13",
+        "imports": ["docx", "lxml"],
+        "wheels": [
+          {
+            "name": "python-docx",
+            "version": "1.2.0",
+            "filename": "python_docx-1.2.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl",
+            "sha256": "3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7"
+          },
+          {
+            "name": "lxml",
+            "version": "6.1.2",
+            "filename": "lxml-6.1.2-cp313-cp313-win_amd64.whl",
+            "url": "https://files.pythonhosted.org/packages/1b/7a/96bac167538748cae2544335855f812fa33e49a9a67bc8b8520dcbd592bd/lxml-6.1.2-cp313-cp313-win_amd64.whl",
+            "sha256": "6cb0c87421946030b92b558be416852780a912454e3dcba0998e4497c9c588d5"
+          },
+          {
+            "name": "typing-extensions",
+            "version": "4.16.0",
+            "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/49/d3/b8441a820a491ddfc024b0b0cf0393375b75ea13866d9c66727e54c2fc80/typing_extensions-4.16.0-py3-none-any.whl",
+            "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+          }
+        ]
+      }
+    ]
+  },
   "companion_skills": ["government-writing"]
 }

@@ -11,25 +11,49 @@
     var invoke = context.invoke;
     var refreshHistoryList = context.refreshHistoryList;
     var listen = context.listen;
-    var publishRemoteLiveSnapshot = context.publishRemoteLiveSnapshot;
     var getBuffer = context.getBuffer;
     var bt = context.bt;
+  var UPDATE_PROGRESS_NOTIFY_INTERVAL_MS = 200;
+  /** @type {number | null} */
+  var updateProgressNotifyTimer = null;
+
+  function cancelScheduledUpdateProgressNotification() {
+    if (updateProgressNotifyTimer === null) return;
+    root.clearTimeout(updateProgressNotifyTimer);
+    updateProgressNotifyTimer = null;
+  }
+
+  /** @param {{ total?: unknown, downloaded?: unknown } | null | undefined} payload - Raw update progress event payload. */
+  function publishUpdateProgress(payload) {
+    var total = Number(payload && payload.total) || 0;
+    var downloaded = Number(payload && payload.downloaded) || 0;
+    var nextProgress = total > 0
+      ? Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)))
+      : 0;
+    if (nextProgress === state.updateProgress) return;
+
+    state.updateProgress = nextProgress;
+    if (nextProgress >= 100) {
+      cancelScheduledUpdateProgressNotification();
+      notify();
+      return;
+    }
+    if (updateProgressNotifyTimer !== null) return;
+    updateProgressNotifyTimer = root.setTimeout(function () {
+      updateProgressNotifyTimer = null;
+      notify();
+    }, UPDATE_PROGRESS_NOTIFY_INTERVAL_MS);
+  }
   // ── 应用内升级 ───────────────────────────────────────────────────
   // 链路: check_for_update(对比服务器 latest.json) → download_update(流式下载+sha256,
   // 进度走 update:progress 事件) → install_update(pkexec apt) → restart_app。
   listen("update:progress", function (e) {
-    var p = e.payload || {};
-    state.updateProgress = p.total ? Math.round((p.downloaded / p.total) * 100) : 0;
-    notify();
+    if (!state.updateDownloading || state.updateCancelling || state.updateProgress >= 100) return;
+    publishUpdateProgress(e.payload || {});
   });
   listen("remote_control:status", function (e) {
     state.remoteControl = Object.assign({}, state.remoteControl, e.payload || {});
     notify();
-  });
-  listen("remote_control:snapshot_requested", function (e) {
-    var sid = e && e.payload && e.payload.session_id;
-    if (!sid) return;
-    publishRemoteLiveSnapshot(sid).catch(function () {});
   });
   listen("remote_control:session_created", function (e) {
     var s = e && e.payload && e.payload.session;
@@ -78,13 +102,21 @@
   // 安装器启动成功后 Windows 退出当前进程；Linux/macOS 在安装后由前端重启。
   async function downloadAndInstallUpdate() {
     if (!state.updateInfo || !state.updateInfo.available || state.updateDownloading) return false;
-    var shouldRestartAfterInstall = state.updateInfo.platform !== "windows";
+    // 入口捕获发起时的更新信息：下载/安装期间静默检查可能替换 updateInfo，
+    // download/install 参数须仍指向发起时的版本（审计）。当前基线的 install_update
+    // 为 unsupported 桩（info 未参与行为），此配对为面向完整平台实现的防御性修复。
+    // invoke 文本保持原样。
+    var info = state.updateInfo;
+    var shouldRestartAfterInstall = info.platform !== "windows";
     var installed = false;
+    cancelScheduledUpdateProgressNotification();
     state.updateDownloading = true; state.updateCancelling = false;
     state.updateProgress = 0; state.updateError = null; notify();
     try {
       var downloadResult = await invoke("download_update", { info: state.updateInfo });
+      cancelScheduledUpdateProgressNotification();
       state.updateProgress = 100; notify();
+      state.updateInfo = info; // 复原：install 用发起时的版本元数据，不随静默检查漂移
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
         await invoke("install_update", { packagePath: downloadResult.package_path, installerPath: downloadResult.installer_path, info: state.updateInfo });
       } else {
@@ -97,6 +129,7 @@
       if (state.updateCancelling) state.updateProgress = 0;
       else state.updateError = String(e);
     }
+    cancelScheduledUpdateProgressNotification();
     state.updateDownloading = false; state.updateCancelling = false; notify();
     if (installed && shouldRestartAfterInstall) restartApp();
     return installed;
@@ -105,6 +138,7 @@
   // 已进入 install(pkexec/apt)则无效(系统接管,装一半不能停)。
   function cancelUpdate() {
     if (!state.updateDownloading || state.updateCancelling) return;
+    cancelScheduledUpdateProgressNotification();
     state.updateCancelling = true; notify();
     invoke("cancel_download").catch(function () { /* 忽略,下载循环超时也会退 */ });
   }

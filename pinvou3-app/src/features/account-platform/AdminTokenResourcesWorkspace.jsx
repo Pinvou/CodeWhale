@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { previousAdminModelTokenCursor, readAdminModelTokenQuery, rememberAdminModelTokenNextCursor, synchronizeAdminModelTokenCursorHistory } from './admin-navigation.js';
 import { executeAdminSourceRequest, initialAdminSourceState, reduceAdminSourceState, visibleAdminSourceState } from './admin-model-token-state.js';
@@ -67,7 +68,7 @@ function TokenAccountRecoveryDialog({ client, copy, command, onClose, onComplete
       setState({ busy: false, result: null, error: { code: 'COMMAND_PAYLOAD_LOCKED' } });
       return;
     }
-    if (!attempt.current || attempt.current.payloadKey !== payloadKey) attempt.current = { key: `token-account-recovery-${globalThis.crypto.randomUUID()}`, payloadKey, actionID: '', unknown: false };
+    if (!attempt.current || attempt.current.payloadKey !== payloadKey) attempt.current = { key: `token-account-recovery-${secureRequestID()}`, payloadKey, actionID: '', unknown: false };
     controller.current?.abort();
     controller.current = new globalThis.AbortController();
     setState({ busy: true, error: null, result: null });

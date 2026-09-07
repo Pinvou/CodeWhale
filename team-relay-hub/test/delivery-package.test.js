@@ -4,9 +4,31 @@ import { normalizeDelivery } from "../src/delivery-package.js";
 
 test("missing delivery package gets an action-specific compatible default", () => {
   assert.equal(normalizeDelivery(undefined, "assign").artifact_role, "input");
+  assert.equal(normalizeDelivery(undefined, "assign").subtype, undefined);
   assert.equal(normalizeDelivery(undefined, "return").artifact_role, "intermediate");
   assert.equal(normalizeDelivery(undefined, "final_deliver").artifact_role, "final");
   assert.equal(normalizeDelivery(undefined, "cancel").artifact_role, "evidence");
+  assert.equal(normalizeDelivery(undefined, "decline_transfer").artifact_role, "evidence");
+});
+
+test("progress is an optional note subtype without changing legacy notes", () => {
+  const base = {
+    schema_version: 1,
+    artifact_role: "evidence",
+    expected_next: "",
+    open_questions: "",
+    git_references: [],
+  };
+  assert.equal(normalizeDelivery(base, "note").subtype, undefined);
+  assert.equal(normalizeDelivery({ ...base, subtype: "progress" }, "note").subtype, "progress");
+  assert.throws(
+    () => normalizeDelivery({ ...base, subtype: "progress" }, "assign"),
+    (error) => error.code === "invalid_request",
+  );
+  assert.throws(
+    () => normalizeDelivery({ ...base, subtype: "unknown" }, "note"),
+    (error) => error.code === "invalid_request",
+  );
 });
 
 test("Git delivery references are normalized without accessing the repository", () => {

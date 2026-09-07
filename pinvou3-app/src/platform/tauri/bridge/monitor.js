@@ -15,7 +15,10 @@
     var monitorIntervalId = null;
     var monitorPollInFlight = false;
     var gpuUtilHistory = [];
-    var maxModelLen = state.tokens.max || 32768;
+    // 0 = no real max_model_len received yet from get_backend_status or the
+    // monitor snapshot; write state.tokens.max back only for real values
+    // (both assignment sites are truthiness-guarded).
+    var maxModelLen = state.tokens.max || 0;
     var MONITOR_BASELINE_KEY = "pinvou3.monitorStatsBaseline.self";
     var monitorBaseline = null;
     try {
@@ -23,29 +26,12 @@
       if (storedBaseline) monitorBaseline = JSON.parse(storedBaseline);
     } catch (error) { monitorBaseline = null; }
   // ── Monitor ──────────────────────────────────────────────────────
-  function fmtMiB(mib) {
-    if (mib == null) return "—";
-    return mib >= 1024 ? (mib / 1024).toFixed(1) + " GB" : mib + " MB";
-  }
-  function fmtKiB(kib) {
-    if (kib == null) return "—";
-    if (kib >= 1024 * 1024) return (kib / 1024 / 1024).toFixed(1) + " GB";
-    if (kib >= 1024) return (kib / 1024).toFixed(0) + " MB";
-    return kib + " KB";
-  }
-  function fmtDuration(secs) {
-    if (secs == null || secs < 0) return "—";
-    var h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60);
-    if (h > 0) return h + "h " + m + "m";
-    if (m > 0) return m + "m " + (secs % 60) + "s";
-    return secs + "s";
-  }
-  function fmtTok(n) {
-    if (n == null) return "—";
-    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
-    if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
-    return String(Math.round(n));
-  }
+  var PinvouFU = window.PinvouFormatUtils || {};
+  var fmtMiB = PinvouFU.fmtMiB || function (mib) { return mib == null ? "—" : String(mib); };
+  var fmtKiB = PinvouFU.fmtKiB || function (kib) { return kib == null ? "—" : String(kib); };
+  var fmtDuration = PinvouFU.fmtDuration || function (secs) { return secs == null ? "—" : String(secs); };
+  var fmtTok = PinvouFU.fmtTok || function (n) { return n == null ? "—" : String(n); };
+
 
   function numOr0(x) { return (typeof x === "number" && isFinite(x)) ? x : 0; }
 

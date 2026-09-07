@@ -9,6 +9,32 @@ pub(crate) struct DesktopCapabilities {
     pub(crate) local_vllm_supported: bool,
     pub(crate) codex_acp_supported: bool,
     pub(crate) team_relay_supported: bool,
+    pub(crate) browser_native_display: bool,
+    pub(crate) browser_agent_automation: bool,
+    pub(crate) browser_cdp: bool,
+}
+
+/// Sole production-release switch for macOS BrowserCore. Keep it `false` until physical
+/// device E2E is complete. Acceptance builds use the non-default `browser-macos-preview`
+/// Cargo feature without changing production defaults.
+const MACOS_BROWSER_RELEASED: bool = false;
+
+fn browser_product_enabled_for(os: &str, macos_preview: bool) -> bool {
+    match os {
+        "windows" | "linux" => true,
+        "macos" => MACOS_BROWSER_RELEASED || macos_preview,
+        _ => false,
+    }
+}
+
+/// Single semantic product gate for the embedded browser. Runtime MCP, the native workspace,
+/// and public capabilities must consume this function together, preventing a half-enabled
+/// state where the Agent has tools but the user has no visible surface.
+pub(crate) fn browser_product_enabled() -> bool {
+    browser_product_enabled_for(
+        std::env::consts::OS,
+        cfg!(feature = "browser-macos-preview"),
+    )
 }
 
 pub(crate) fn current() -> DesktopCapabilities {
@@ -24,6 +50,12 @@ pub(crate) fn current() -> DesktopCapabilities {
         local_vllm_supported: cfg!(target_os = "linux"),
         codex_acp_supported: supports_codex_acp(std::env::consts::OS),
         team_relay_supported: true,
+        // Enable display and Agent automation atomically. Separate platform cfg declarations
+        // could give the model tools while the user cannot see the same page. macOS
+        // acceptance builds use this same semantic helper.
+        browser_native_display: browser_product_enabled(),
+        browser_agent_automation: browser_product_enabled(),
+        browser_cdp: cfg!(target_os = "windows"),
     }
 }
 
@@ -33,10 +65,6 @@ pub(crate) fn supports_codex_acp(os: &str) -> bool {
 
 pub(crate) const fn is_windows() -> bool {
     cfg!(target_os = "windows")
-}
-
-pub(crate) const fn is_linux() -> bool {
-    cfg!(target_os = "linux")
 }
 
 pub(crate) const fn is_unix() -> bool {
@@ -60,15 +88,27 @@ mod tests {
             capabilities.uses_homebrew_dependency_installer,
             cfg!(target_os = "macos")
         );
-        assert_eq!(capabilities.show_super_permission_settings, is_linux());
+        assert_eq!(
+            capabilities.show_super_permission_settings,
+            cfg!(target_os = "linux")
+        );
         assert_eq!(
             capabilities.task_completion_notifications_default,
-            !is_linux()
+            !cfg!(target_os = "linux")
         );
         assert_eq!(
             capabilities.codex_acp_supported,
             supports_codex_acp(std::env::consts::OS)
         );
+        assert_eq!(
+            capabilities.browser_native_display,
+            browser_product_enabled()
+        );
+        assert_eq!(
+            capabilities.browser_agent_automation,
+            browser_product_enabled()
+        );
+        assert_eq!(capabilities.browser_cdp, is_windows());
     }
 
     #[test]
@@ -77,5 +117,17 @@ mod tests {
         assert!(supports_codex_acp("windows"));
         assert!(supports_codex_acp("macos"));
         assert!(!supports_codex_acp("android"));
+    }
+
+    #[test]
+    fn browser_product_gate_matches_release_and_preview_semantics() {
+        assert!(browser_product_enabled_for("windows", false));
+        assert!(browser_product_enabled_for("linux", false));
+        assert_eq!(
+            browser_product_enabled_for("macos", false),
+            MACOS_BROWSER_RELEASED
+        );
+        assert!(browser_product_enabled_for("macos", true));
+        assert!(!browser_product_enabled_for("android", true));
     }
 }

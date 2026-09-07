@@ -7,13 +7,13 @@
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use deepseek_tui::tools::spec::{ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec};
 
 use crate::features::marketplace::skill_marketplace::SkillMarketplaceManager;
 use crate::platform::credential_store::{
-    redact_secret, CredentialReference, CredentialStore, SystemCredentialStore,
+    CredentialReference, CredentialStore, SystemCredentialStore, redact_secret,
 };
 
 const CLIENT_ID_SECRET: &str = "client_id";
@@ -127,12 +127,34 @@ async fn request_ima(
         return Err("IMA 请求 body 必须是 JSON object。".to_string());
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("创建 IMA 客户端失败: {e}"))?;
+    // Process-wide shared client: building a Client per call re-creates the
+    // TLS config/connection pool, wasting all keep-alive/h2 reuse against
+    // the same host (ima.qq.com). The timeout moves to per-request
+    // (reqwest::RequestBuilder::timeout), keeping the same 30s.
+    // Two OnceLock caveats:
+    // 1. reqwest enables system-proxy detection by default; the proxy
+    // config is snapshotted at first build and never re-read for the
+    // process lifetime — changing the system proxy mid-session needs an
+    // app restart to take effect.
+    // 2. A build failure (TLS/system config unavailable) is cached
+    // process-wide as Err with no per-call retry (retrying an identical
+    // failure is pointless; Client::default() panics on the same failure
+    // and is not a usable fallback). Request-level errors (connection
+    // refused/timeout) are unaffected by the cache and still propagate
+    // per call.
+    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
+        std::sync::OnceLock::new();
+    let client = CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .build()
+                .map_err(|e| format!("创建 IMA 客户端失败: {e}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
     let response = client
         .post(format!("{IMA_BASE_URL}/{api_path}"))
+        .timeout(std::time::Duration::from_secs(30))
         .header("ima-openapi-clientid", client_id)
         .header("ima-openapi-apikey", api_key)
         .header(
@@ -262,7 +284,7 @@ impl ToolSpec for ImaOpenApiTool {
             credentials(&SystemCredentialStore::new())
                 .map_err(|e| redact_secret(&e))?
                 .ok_or_else(|| {
-                    "未找到 IMA 凭据。请先在 Pinvou 工具商店连接「腾讯 ima」。".to_string()
+                    "未找到 IMA 凭据。请先在 Pinvou 插件中心连接「腾讯 ima」。".to_string()
                 })
         })
         .await
@@ -307,11 +329,12 @@ pub async fn ima_connect(client_id: String, api_key: String) -> Result<Value, St
                 .set(&api_key_ref(), api_key.trim())
                 .map_err(|e| e.user_message())?;
             SkillMarketplaceManager::new().install(IMA_SKILL_ID)?;
-            // 新装技能默认加入 code 禁用集（外部能力显式开启）；在线会话组合目录
+            // 新装技能默认加入 DenyAll scope（当前 code）禁用集（外部能力显式
+            // 开启）；在线会话组合目录
             // 由命令层（connectors::ima_connect）重写。
             // 注意引用 marketplace::skill_scope（持久化层）而非 assistant：避免
             // connectors → assistant 依赖环（架构守卫 rust_feature_cycles）。
-            crate::features::marketplace::skill_scope::sync_code_scope_after_skill_install(
+            crate::features::marketplace::skill_scope::sync_deny_all_scopes_after_skill_install(
                 IMA_SKILL_ID,
             );
             Ok(())
@@ -346,7 +369,7 @@ pub async fn ima_logout() -> Result<Value, String> {
         let client_result = store.delete(&client_id_ref());
         let api_key_result = store.delete(&api_key_ref());
         let _ = SkillMarketplaceManager::new().uninstall(IMA_SKILL_ID);
-        // 已卸载技能从两个 scope 禁用集清除残留；在线会话组合目录由命令层
+        // 已卸载技能从各 scope 禁用集清除残留；在线会话组合目录由命令层
         // （connectors::ima_logout）重写。引用 marketplace::skill_scope 避免
         // connectors → assistant 依赖环。
         crate::features::marketplace::skill_scope::remove_skill_from_disabled_scopes(IMA_SKILL_ID);

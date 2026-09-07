@@ -12,13 +12,13 @@ export function modelOperationsWindow(value) {
 export function validateModelOperationsOverview(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const top = ['as_of', 'window', 'metrics', 'trend'];
-  if (Object.keys(value).length !== top.length || top.some((key) => !Object.hasOwn(value, key))) return null;
+  if (Object.keys(value).length !== top.length || top.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) return null;
   if (Number.isNaN(Date.parse(value.as_of)) || !value.window || Array.isArray(value.window) || Object.keys(value.window).sort().join(',') !== 'from,timezone,to' || value.window.timezone !== 'UTC' || Number.isNaN(Date.parse(value.window.from)) || Number.isNaN(Date.parse(value.window.to)) || Date.parse(value.window.from) >= Date.parse(value.window.to)) return null;
   if (!Array.isArray(value.metrics) || value.metrics.length !== metricKeys.length) return null;
   const metrics = new Map();
   for (const metric of value.metrics) {
     const keys = ['key', 'value', 'unit', 'aggregation', 'included_statuses', ...(metric.denominator_key ? ['denominator_key'] : [])];
-    if (!metric || Object.keys(metric).length !== keys.length || keys.some((key) => !Object.hasOwn(metric, key)) || !metricKeys.includes(metric.key) || metrics.has(metric.key) || !Number.isSafeInteger(metric.value) || metric.value < 0 || metric.unit !== 'COUNT' || !['POINT_IN_TIME', 'WINDOW'].includes(metric.aggregation) || !Array.isArray(metric.included_statuses) || metric.included_statuses.length < 1) return null;
+    if (!metric || Object.keys(metric).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(metric, key)) || !metricKeys.includes(metric.key) || metrics.has(metric.key) || !Number.isSafeInteger(metric.value) || metric.value < 0 || metric.unit !== 'COUNT' || !['POINT_IN_TIME', 'WINDOW'].includes(metric.aggregation) || !Array.isArray(metric.included_statuses) || metric.included_statuses.length < 1) return null;
     if (metric.denominator_key && metric.denominator_key !== 'stable_route_count') return null;
     metrics.set(metric.key, metric);
   }
@@ -67,7 +67,7 @@ export function modelOperationsOverviewDrilldown(key, window) {
 export function validateCatalogDifference(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const keys = ['baseline_catalog_version', 'target_catalog_version', 'target_observed_version', 'added_count', 'modified_count', 'removed_count', 'total_count', 'truncated', 'items'];
-  if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return null;
+  if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) return null;
   const providerObservation = value.target_observed_version !== null;
   if (!Number.isSafeInteger(value.baseline_catalog_version) || value.baseline_catalog_version < 0
     || providerObservation === (value.target_catalog_version !== null)

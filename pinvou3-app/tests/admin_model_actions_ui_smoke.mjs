@@ -308,7 +308,12 @@ async function state(page) {
 
 async function openDelayedAction(page, label) {
   const before = await state(page);
-  await page.waitForFunction((text) => [...document.querySelectorAll('button')].some((button) => button.textContent.trim() === text), {}, label);
+  try {
+    await page.waitForFunction((text) => [...document.querySelectorAll('button')].some((button) => button.textContent.trim() === text), {}, label);
+  } catch (error) {
+    const buttons = await page.$$eval('button', nodes => nodes.map(button => button.textContent.trim()).filter(Boolean));
+    throw new Error(`Missing model action ${label}; rendered buttons: ${JSON.stringify(buttons)}`, { cause: error });
+  }
   await page.evaluate((text) => [...document.querySelectorAll('button')].find((button) => button.textContent.trim() === text).click(), label);
   await page.waitForSelector('.adm-high-risk-dialog');
   if (label === 'Rollback model catalog') {

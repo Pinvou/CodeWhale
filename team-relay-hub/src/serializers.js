@@ -1,9 +1,21 @@
+export function avatarFromRow(row, prefix = "avatar_") {
+  const sha256 = row[`${prefix}sha256`];
+  if (!sha256) return null;
+  return {
+    content_type: row[`${prefix}content_type`],
+    byte_size: Number(row[`${prefix}byte_size`]),
+    sha256,
+    updated_at: row[`${prefix}updated_at`],
+  };
+}
+
 export function principalFromRow(row, prefix = "") {
   return {
     id: row[`${prefix}id`],
     email: row[`${prefix}email`] || null,
     display_name: row[`${prefix}display_name`],
     created_at: row[`${prefix}created_at`],
+    avatar: avatarFromRow(row, `${prefix}avatar_`),
   };
 }
 
@@ -33,6 +45,19 @@ export function membershipFromRow(row) {
   };
 }
 
+export function teamMemberFromRow(row) {
+  return {
+    id: row.id,
+    display_name: row.display_name,
+    email_hint: emailHint(row.email),
+    created_at: row.created_at,
+    role: row.role,
+    last_seen_at: row.last_seen_at,
+    confirmed_transfers_supported: Boolean(row.confirmed_transfers_supported),
+    avatar: avatarFromRow(row),
+  };
+}
+
 export function threadFromRow(row) {
   return {
     id: row.id,
@@ -43,6 +68,9 @@ export function threadFromRow(row) {
     current_actor_id: row.current_actor_id,
     return_to_id: row.return_to_id,
     final_recipient_id: row.final_recipient_id,
+    pending_transfer_kind: row.pending_transfer_kind || null,
+    pending_sender_id: row.pending_sender_id || null,
+    pending_recipient_id: row.pending_recipient_id || null,
     phase: row.phase,
     revision: Number(row.revision),
     created_at: row.created_at,
@@ -61,6 +89,14 @@ export function threadPreferenceFromRow(row) {
   };
 }
 
+export function threadReadStateFromRow(row) {
+  return {
+    thread_id: row.thread_id || row.id,
+    last_read_sequence: Number(row.last_read_sequence || 0),
+    last_read_at: row.last_read_at || null,
+  };
+}
+
 export function actionFromRow(row, attachmentIds = []) {
   return {
     id: row.id,
@@ -73,6 +109,7 @@ export function actionFromRow(row, attachmentIds = []) {
     message: row.message,
     base_revision: Number(row.base_revision),
     idempotency_key: row.idempotency_key,
+    transfer_mode: row.transfer_mode || null,
     attachment_ids: attachmentIds,
     delivery: row.delivery || {
       schema_version: 1,

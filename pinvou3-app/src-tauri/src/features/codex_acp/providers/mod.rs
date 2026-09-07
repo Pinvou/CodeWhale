@@ -13,8 +13,8 @@ pub(crate) mod lifecycle;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
@@ -122,21 +122,11 @@ pub struct EffectiveEntry {
 /// 从配置文件读出的当前生效状态。`provider_hint` 是能直接从文件反推的 provider id
 /// （claude 的 env 无法反推，为 None）。`entries` 供前端「生效中配置」只读区展示，
 /// 值全部来自实际配置文件（F4 可见化）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectiveConfig {
     pub relay_active: bool,
     pub provider_hint: Option<String>,
     pub entries: Vec<EffectiveEntry>,
-}
-
-impl Default for EffectiveConfig {
-    fn default() -> Self {
-        Self {
-            relay_active: false,
-            provider_hint: None,
-            entries: Vec::new(),
-        }
-    }
 }
 
 /// 统一配置写入契约。根目录由构造参数注入（生产传各 CLI 的 home，单测传临时目录）。
@@ -480,8 +470,8 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 }
 
 pub(crate) use claude::ClaudeConfigWriter;
-pub(crate) use codex::codex_config_relay_env_key_present;
 pub(crate) use codex::CodexConfigWriter;
+pub(crate) use codex::codex_config_relay_env_key_present;
 pub(crate) use kimi::KimiConfigWriter;
 
 /// 统一编排：store + 凭据 + 三写入器。命令层与 AcpPool 只与它交互。
@@ -756,14 +746,18 @@ impl ProviderManager {
                 // store 持久化失败：回滚配置写入（含 kimi 的 default_model），
                 // 保持「失败 = 什么都没发生」语义。回滚失败如实附加（复审 F3）。
                 let mut context = "保存失败：配置已写入但无法保存 Provider 状态，已尝试回滚配置；请检查磁盘后重试".to_string();
-                if let Err(rollback) =
-                    writer.revert_to_official(Some(&ProviderTarget::from_record(&record, None)))
-                {
-                    context = format!("{context}；回滚配置也失败: {rollback:#}");
-                } else if let Err(rollback) = writer
-                    .restore_default_model(self.store.official_default_model(agent).as_deref())
-                {
-                    context = format!("{context}；写回官方 default_model 也失败: {rollback:#}");
+                match writer.revert_to_official(Some(&ProviderTarget::from_record(&record, None))) {
+                    Err(rollback) => {
+                        context = format!("{context}；回滚配置也失败: {rollback:#}");
+                    }
+                    _ => {
+                        if let Err(rollback) = writer.restore_default_model(
+                            self.store.official_default_model(agent).as_deref(),
+                        ) {
+                            context =
+                                format!("{context}；写回官方 default_model 也失败: {rollback:#}");
+                        }
+                    }
                 }
                 return Err(error.context(context));
             }
@@ -836,14 +830,17 @@ impl ProviderManager {
             // 覆盖 default_model，必须一并写回官方值，否则官方登录态断裂。
             // 回滚本身失败时如实附加，不无条件声称已回滚（复审 F3）。
             let mut context = "切换 Provider 失败：配置已写入但无法保存切换状态，已尝试回滚配置；请检查磁盘后重试".to_string();
-            if let Err(rollback) =
-                writer.revert_to_official(Some(&ProviderTarget::from_record(&record, None)))
-            {
-                context = format!("{context}；回滚配置也失败: {rollback:#}");
-            } else if let Err(rollback) =
-                writer.restore_default_model(official_default_model.as_deref())
-            {
-                context = format!("{context}；写回官方 default_model 也失败: {rollback:#}");
+            match writer.revert_to_official(Some(&ProviderTarget::from_record(&record, None))) {
+                Err(rollback) => {
+                    context = format!("{context}；回滚配置也失败: {rollback:#}");
+                }
+                _ => {
+                    if let Err(rollback) =
+                        writer.restore_default_model(official_default_model.as_deref())
+                    {
+                        context = format!("{context}；写回官方 default_model 也失败: {rollback:#}");
+                    }
+                }
             }
             return Err(error.context(context));
         }
@@ -1086,10 +1083,118 @@ mod tests {
         }
     }
 
+    /// Shared behavior contracts of the three CLI ConfigWriters, locked in one
+    /// parameterized matrix (per-writer format tests stay in their own files):
+    /// revert with no managed keys writes no backup, apply on a broken file
+    /// errors and leaves bytes unchanged, and the first apply creates a backup
+    /// that a second apply reuses. Each writer gets its own subdirectory —
+    /// codex/kimi share the config.toml name, and a shared directory would let
+    /// one case's backup pollute the next case's "backup does not exist"
+    /// assertion.
+    #[test]
+    fn shared_writer_contract_matrix() {
+        fn target(provider_id: &str) -> ProviderTarget {
+            ProviderTarget {
+                provider_id: provider_id.into(),
+                name: "中转".into(),
+                base_url: "https://api.example.com/relay/".into(),
+                model: Some("demo-model".into()),
+                model_slots: None,
+                context_window: None,
+                wire_api: ProviderWireApi::Openai,
+                api_key: Some("test-api-key-1234567890".into()),
+            }
+        }
+        fn run_case(
+            name: &str,
+            writer: &dyn AgentConfigWriter,
+            dir: &Path,
+            config_name: &str,
+            initial: &str,
+            broken: &str,
+        ) {
+            let config = dir.join(config_name);
+            let backup = dir.join(format!("{config_name}.pinvou3-bak"));
+
+            // Contract 1: revert with no managed keys writes no backup.
+            std::fs::write(&config, initial).unwrap();
+            writer.revert_to_official(None).unwrap();
+            assert!(
+                !backup.exists(),
+                "{name}: revert with no managed keys must not write a backup"
+            );
+
+            // Contract 2: apply on a broken file errors and leaves bytes
+            // unchanged (never silently overwrite an unparseable config).
+            std::fs::write(&config, broken).unwrap();
+            assert!(
+                writer.apply(&target("pv-aaaaaaaaaaaa")).is_err(),
+                "{name}: apply on a broken config must return Err"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config).unwrap(),
+                broken,
+                "{name}: bytes of a broken config must not change"
+            );
+
+            // Contract 3: the first apply creates a backup (preserving the
+            // initial content) and a second apply reuses the same backup.
+            std::fs::write(&config, initial).unwrap();
+            writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
+            writer.apply(&target("pv-bbbbbbbbbbbb")).unwrap();
+            assert!(
+                backup.exists(),
+                "{name}: a backup must exist after the first apply"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&backup).unwrap(),
+                initial,
+                "{name}: the backup must preserve the initial state"
+            );
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-acp-writer-contract-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cases: [(&str, &str, &str, &str); 3] = [
+            ("claude", "settings.json", r#"{"model":"x"}"#, "{not json"),
+            (
+                "codex",
+                "config.toml",
+                "model = \"gpt-5.2\"\n",
+                "model_provider = \"pv-x\"\n[unclosed",
+            ),
+            (
+                "kimi",
+                "config.toml",
+                "default_model = \"kimi-k2.5\"\n",
+                "default_model = \"x\"\n[unclosed",
+            ),
+        ];
+        for (name, config_name, initial, broken) in cases {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let writer: Box<dyn AgentConfigWriter> = match name {
+                "claude" => Box::new(claude::ClaudeConfigWriter::new(&dir)),
+                "codex" => Box::new(codex::CodexConfigWriter::new(&dir)),
+                _ => Box::new(kimi::KimiConfigWriter::new(&dir)),
+            };
+            run_case(name, writer.as_ref(), &dir, config_name, initial, broken);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn store_roundtrip_and_atomic() {
         let current = std::thread::current();
-        let test = current.name().unwrap_or_default();
+        let test = current
+            .name()
+            .unwrap_or_default()
+            .replace(['/', '\\', ':'], "_");
         let dir = std::env::temp_dir().join(format!("acp-providers-test-{test}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1145,7 +1250,10 @@ mod tests {
     #[test]
     fn remove_clears_current_candidate() {
         let current = std::thread::current();
-        let test = current.name().unwrap_or_default();
+        let test = current
+            .name()
+            .unwrap_or_default()
+            .replace(['/', '\\', ':'], "_");
         let dir = std::env::temp_dir().join(format!("acp-providers-test-rm-{test}"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1185,7 +1293,7 @@ mod tests {
         let a = generate_provider_id();
         let b = generate_provider_id();
         assert!(a.starts_with(PROVIDER_ID_PREFIX));
-        assert!(a.len() == 12 + PROVIDER_ID_PREFIX.len());
+        assert_eq!(a.len(), 12 + PROVIDER_ID_PREFIX.len());
         assert_ne!(a, b);
     }
 

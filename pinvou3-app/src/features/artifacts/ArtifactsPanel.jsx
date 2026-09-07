@@ -3,7 +3,7 @@ import { FileTypeIcon } from '../../components/files/FileTypeIcon.jsx';
 import { Download, ExternalLink, FolderOpen, Maximize2, Minimize2, XCircle } from '../../components/icons.jsx';
 import { bridge } from '../../hooks/useBridge.js';
 import { can, isWeb } from '../../shared/platform.js';
-import { ScaledHtmlPreview } from '../settings/SettingsView.jsx';
+import { ScaledHtmlPreview } from '../settings/composer-shared.jsx';
 import { cardBtnCls } from '../tools/tool-renderers.jsx';
 import { DESIGN_MESSAGE_TYPES, buildDesignRuntimeScript } from './design-runtime.js';
 import { DesignInspectorPanel } from './DesignInspectorPanel.jsx';
@@ -61,7 +61,11 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
       + 'img{max-width:100%;height:auto;}'
       + '</style>';
 
-    const ArtifactsPanel = ({ bs, t, onClose, isWide, onGotoSettings, isFullscreen = false, onToggleFullscreen, preferredArtifactPath, onPreviewArtifact, designMode = false, designCommand, selectedDesignElement, designChanges = [], onDesignRuntimeStatus, onDesignElementSelected, onDesignChangeApplied, onDesignMutation, onDesignApplyChange, onDesignClearChanges, onDesignAiSubmit, designAiState, onDesignAiStateChange }) => {
+    // Stable empty-array default: an inline [] is a new reference on every render, which makes memoized children re-render repeatedly.
+    const EMPTY_DESIGN_CHANGES = [];
+
+    // eslint-disable-next-line sonarjs/cognitive-complexity -- unified preview/design workbench panel: every state-machine branch maps to a preview kind or a design runtime event; splitting would sever the pv/sel linkage
+    const ArtifactsPanel = ({ bs, t, onClose, isWide, onGotoSettings, isFullscreen = false, onToggleFullscreen, preferredArtifactPath, onPreviewArtifact, designMode = false, designCommand, selectedDesignElement, designChanges = EMPTY_DESIGN_CHANGES, onDesignRuntimeStatus, onDesignElementSelected, onDesignChangeApplied, onDesignMutation, onDesignApplyChange, onDesignClearChanges, onDesignAiSubmit, designAiState, onDesignAiStateChange }) => {
       const uiA = t.uiArtifacts;
       const showDesignWorkbench = isFullscreen && designMode;
       const canOpenContainingFolder = can('externalSystemOpen');
@@ -76,7 +80,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
       const [sel, setSel] = useState(initialSelectedArtifact ? { ...initialSelectedArtifact, sessionId: initialSelectedArtifact.sessionId || activeSessionId } : null);        // 选中的 artifact { path, basename }
       const [pv, setPv] = useState(initialSelectedArtifact ? { loading: true } : {});            // 预览态
       const [infos, setInfos] = useState({});      // path → { size, kind, modified }(列表行元信息)
-      const [externalUpdateBlocked, setExternalUpdateBlocked] = useState(false);
+      const [externalUpdateBlocked, setExternalUpdateBlocked] = useState(/** @type {false|'removed'|'modified'} */ (false));
       const [htmlZoomMode, setHtmlZoomMode] = useState('fit');
       const [htmlScale, setHtmlScale] = useState(1);
       const [htmlCustomScale, setHtmlCustomScale] = useState(1);
@@ -602,6 +606,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
           return (
             <ScaledHtmlPreview
               html={pv.text || ''}
+              title={(sel && sel.path) || t.apTabPreview}
               onFrameLoad={handlePreviewFrameLoad}
               onOpenExternal={(url) => bridge.artifacts.openUserExternalUrl(url)}
               zoomMode={showDesignWorkbench ? htmlZoomMode : 'auto-width'}
@@ -621,6 +626,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
             <div className="flex flex-col gap-2 h-full">
               {vis.warning && <div className={`flex items-center gap-2 text-[12px] text-[#E37400] dark:text-[#FDD663]`}><span>⚠️ {vis.warning}</span>{dependencyCheckButton(vis.warning)}</div>}
               <iframe sandbox="allow-same-origin allow-scripts" className="w-full flex-1 min-h-[480px] border-0 block bg-white"
+                title={(sel && sel.path) || t.apTabPreview}
                 data-testid="artifact-html-preview-frame"
                 onLoad={(e) => handlePreviewFrameLoad(e.currentTarget)}
                 srcDoc={(vis.html || '') + OFFICE_HTML_STYLE} />

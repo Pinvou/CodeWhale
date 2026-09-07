@@ -30,9 +30,13 @@ const MODEL_API_KEY_SERVICE: &str = "pinvou3-model-api-key";
 /// `KEY_LOCKS` 为每个 `(service, account)` 维护一把 `Arc<Mutex<()>>`,`get`/`set`/`delete`
 /// 在"访问 Keychain + 读写值缓存"整段持有对应 key 的锁,串行化同一凭据的所有操作;不同 key
 /// 互不阻塞。锁内部从不嵌套 `value_cache`/`KEY_LOCKS` 之外的锁,无死锁风险。
+/// Sole exception: after a successful `delete`, the lock registration is
+/// removed only when no in-flight thread still holds the old lock handle
+/// (`Arc::strong_count` gate); otherwise the registration stays and
+/// converges on the next `delete`, so mutual exclusion never breaks.
 ///
 /// **安全权衡**:缓存值为明文 secret,仅在进程内存(不落盘),与本 crate 内其他明文 secret
-/// 在内存中的驻留(如 bridge 注入给引擎的 api_key、marketplace 重灌进进程 env 的 mcp
+/// 在内存中的驻留(如 bridge 注入给引擎的 api_key、marketplace 经进程内注册表下发的 mcp
 /// secret)同等敏感等级,均仅驻留进程内存、不落盘。Keychain 仍是单一真相源:`set`/`delete`
 /// 同步更新缓存;环境变量路径不经过此缓存。仅 `Ok` 结果缓存(含 `Ok(None)`),`Err` 不缓存,
 /// 允许临时性 Keychain 故障(或用户在授权弹窗上点"拒绝")后下次重试自愈。
@@ -40,7 +44,14 @@ const MODEL_API_KEY_SERVICE: &str = "pinvou3-model-api-key";
 /// **陈旧边界**:`Ok(None)`("已知不存在")会缓存整个进程生命周期;若运行期间用户经"钥匙串
 /// 访问"App 或其它进程新增了该 item,本应用在重启前仍读到 `None`(设置页误显示"未配置")。
 /// 这是进程级内存缓存的固有边界,正常改 keychain 的路径走应用 UI(经 `set`/`delete` 同步
-/// 更新缓存),故影响有限。
+/// updating the cache synchronously), so the impact is limited. The
+/// symmetric cost: after a successful `delete` the `None` placeholder is no
+/// longer kept (preventing unbounded accumulation for dynamic keys), so the
+/// first `get` after a delete touches the keyring backend once more — under
+/// macOS ad-hoc signing this can surface one extra authorization prompt;
+/// this trades "at most one backend access per delete" for cache
+/// correctness and does not affect #175's "no repeated prompts during use"
+/// goal.
 static VALUE_CACHE: OnceLock<Mutex<HashMap<(String, String), Option<String>>>> = OnceLock::new();
 
 fn value_cache() -> &'static Mutex<HashMap<(String, String), Option<String>>> {
@@ -59,7 +70,11 @@ fn key_locks() -> &'static Mutex<HashMap<(String, String), Arc<Mutex<()>>>> {
 /// 在释放 `key_locks` 自身锁的前提下被调用方持有,确保"取锁"不与"持锁"嵌套、无死锁。
 fn key_lock_for(service: &str, account: &str) -> Arc<Mutex<()>> {
     let key = (service.to_string(), account.to_string());
-    let mut locks = key_locks().lock().expect("key locks poisoned");
+    // Only take the lock handle; a holder panic must not take down sessions:
+    // follow the repo-wide poisoned-lock recovery convention.
+    let mut locks = key_locks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     locks
         .entry(key)
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -72,6 +87,8 @@ const ACCOUNT_PLATFORM_REGISTRATION_SERVICE: &str = "pinvou3-account-platform-re
 const IMA_SECRET_SERVICE: &str = "pinvou3-ima-secret";
 const ACP_PROVIDER_KEY_SERVICE: &str = "pinvou3-acp-provider-key";
 const TEAM_RELAY_DEVICE_SERVICE: &str = "pinvou3-team-relay-device";
+const REMOTE_KNOWLEDGE_TOKEN_SERVICE: &str = "pinvou3-remote-knowledge-token";
+const SHARED_KNOWLEDGE_BACKUP_SERVICE: &str = "pinvou3-shared-knowledge-backup";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CredentialReference {
@@ -144,6 +161,30 @@ impl CredentialReference {
         Self {
             service: TEAM_RELAY_DEVICE_SERVICE.to_string(),
             account: format!("hub:{hub_fingerprint}"),
+            version: 1,
+        }
+    }
+
+    pub fn for_remote_knowledge(server_id: &str) -> Self {
+        Self {
+            service: REMOTE_KNOWLEDGE_TOKEN_SERVICE.to_string(),
+            account: format!("server:{server_id}"),
+            version: 1,
+        }
+    }
+
+    pub fn for_remote_knowledge_join(request_id: &str) -> Self {
+        Self {
+            service: REMOTE_KNOWLEDGE_TOKEN_SERVICE.to_string(),
+            account: format!("join:{request_id}"),
+            version: 1,
+        }
+    }
+
+    pub fn for_shared_knowledge_backup() -> Self {
+        Self {
+            service: SHARED_KNOWLEDGE_BACKUP_SERVICE.to_string(),
+            account: "local-restore-identity".to_string(),
             version: 1,
         }
     }
@@ -247,7 +288,12 @@ impl SystemCredentialStore {
             "[credential_store] secrets_for lock wait start service={}",
             service
         );
-        let mut cache = self.cache.lock().expect("credential store cache lock");
+        // On a cache miss the backend is rebuilt and the entry replaced as a
+        // whole, with no partial writes; poisoned-lock recovery keeps consistency.
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         log::info!(
             "[credential_store] secrets_for lock acquired service={} elapsed_ms={}",
             service,
@@ -427,22 +473,41 @@ impl CredentialStore for SystemCredentialStore {
             result.is_ok(),
             started_at.elapsed().as_millis()
         );
-        // 删除成功后缓存为 None(仍在同一临界区内),避免下次 get 再次访问 Keychain(命中"已知不存在")。
+        // After a successful delete, remove the cache entry and the
+        // per-key lock registration outright (still inside the same
+        // critical section): the None placeholder in the value cache and
+        // KEY_LOCKS entries would otherwise accumulate forever under
+        // dynamic keys (e.g. remote-knowledge's per-join request_id) with
+        // no query value after deletion — "known absent" is expressible by
+        // a missing entry. The lock registration is removed only when no
+        // in-flight handle remains (map holds 1 + this function's local
+        // 1 = 2): if a get/set still held the old handle, deregistering
+        // would let later operations create a second lock and lose mutual
+        // exclusion with the in-flight operation (cache and backend
+        // effects could reorder); a leftover registration converges on the
+        // next delete.
         if result.is_ok() {
             if let Ok(mut cache) = value_cache().lock() {
-                cache.insert((reference.service.clone(), reference.account.clone()), None);
+                cache.remove(&(reference.service.clone(), reference.account.clone()));
+            }
+            if let Ok(mut locks) = key_locks().lock() {
+                if Arc::strong_count(&lock) == 2 {
+                    locks.remove(&(reference.service.clone(), reference.account.clone()));
+                }
             }
         }
         result
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
 pub struct MemoryCredentialStore {
     values: Arc<Mutex<HashMap<(String, String), String>>>,
     fail: Arc<Mutex<Option<String>>>,
 }
 
+#[cfg(test)]
 impl MemoryCredentialStore {
     pub fn fail_with(&self, message: impl Into<String>) {
         *self.fail.lock().expect("memory credential fail lock") = Some(message.into());
@@ -461,6 +526,7 @@ impl MemoryCredentialStore {
     }
 }
 
+#[cfg(test)]
 impl CredentialStore for MemoryCredentialStore {
     fn get(&self, reference: &CredentialReference) -> Result<Option<String>, CredentialError> {
         self.maybe_fail()?;
@@ -495,38 +561,35 @@ impl CredentialStore for MemoryCredentialStore {
 }
 
 pub fn redact_secret(input: &str) -> String {
-    let bearer_redacted = redact_bearer_tokens(input);
-    bearer_redacted
-        .split_whitespace()
-        .map(|part| {
-            if is_secret_like(part) {
-                "[REDACTED]"
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn redact_bearer_tokens(input: &str) -> String {
-    let mut output = Vec::new();
+    let mut output = String::with_capacity(input.len());
+    let mut offset = 0;
     let mut redact_next = false;
-    for part in input.split_whitespace() {
-        if redact_next {
-            output.push("[REDACTED]");
+    while offset < input.len() {
+        let whitespace = input[offset..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace);
+        let end = input[offset..]
+            .char_indices()
+            .find_map(|(index, character)| {
+                (index > 0 && character.is_whitespace() != whitespace).then_some(offset + index)
+            })
+            .unwrap_or(input.len());
+        let part = &input[offset..end];
+        if whitespace {
+            output.push_str(part);
+        } else if redact_next || is_secret_like(part) {
+            output.push_str("[REDACTED]");
             redact_next = false;
-            continue;
+        } else {
+            output.push_str(part);
+            redact_next = part
+                .trim_matches(|character: char| matches!(character, '"' | '\'' | ',' | ';' | ':'))
+                .eq_ignore_ascii_case("bearer");
         }
-        output.push(part);
-        if part
-            .trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ';')
-            .eq_ignore_ascii_case("bearer")
-        {
-            redact_next = true;
-        }
+        offset = end;
     }
-    output.join(" ")
+    output
 }
 
 pub fn is_secret_like(value: &str) -> bool {
@@ -672,10 +735,13 @@ mod tests {
         assert_eq!(backend.get_count(), 0, "set 后 get 应命中缓存,不访问后端");
     }
 
-    /// `delete` 成功后缓存为"已知不存在"(None),后续 `get` 命中缓存返回 None,
-    /// 不再访问后端(命中"已知不存在"分支)。
+    /// After a successful `delete`, the cache entry and the per-key lock
+    /// registration are both removed (dynamic keys such as
+    /// remote-knowledge's request_id leave no residue); a later `get` takes
+    /// the cache-miss path → the backend confirms "absent" and still
+    /// returns None.
     #[test]
-    fn system_store_delete_marks_cache_known_absent() {
+    fn system_store_delete_removes_cache_and_lock_entries() {
         let backend = Arc::new(FakeKeyringStore::new());
         backend.seed("model:delete-probe", "sk-will-be-deleted-12345");
         let store = SystemCredentialStore::new();
@@ -692,15 +758,31 @@ mod tests {
             Some("sk-will-be-deleted-12345")
         );
         let count_before_delete = backend.get_count();
-        // delete 后缓存更新为 None。
+        // After the delete the cache entry is removed rather than left as a None placeholder.
         store.delete(&reference).unwrap();
-        // 后续 get 命中"已知不存在",返回 None 且不触后端。
+        assert!(
+            !value_cache()
+                .lock()
+                .unwrap()
+                .contains_key(&(reference.service.clone(), reference.account.clone())),
+            "after delete the cache entry must be removed, not kept as a None placeholder"
+        );
+        assert!(
+            !key_locks()
+                .lock()
+                .unwrap()
+                .contains_key(&(reference.service.clone(), reference.account.clone())),
+            "after delete the per-key lock registration must be removed"
+        );
+        // A later get re-touches the backend (the entry is gone) and confirms absence.
         assert_eq!(store.get(&reference).unwrap(), None);
         assert_eq!(
             backend.get_count(),
-            count_before_delete,
-            "delete 后 get 应命中缓存,不访问后端"
+            count_before_delete + 1,
+            "after delete the cache entry is gone and get re-touches the backend to confirm absence"
         );
+        // A second delete still succeeds (idempotent; the backend no longer has the entry).
+        store.delete(&reference).unwrap();
     }
 
     /// 缓存按 `(service, account)` 隔离:一个凭据的缓存不影响另一凭据的后端访问。
@@ -927,6 +1009,14 @@ mod tests {
         let message = err.user_message();
         assert!(!message.contains("qcc-secret-token"));
         assert!(message.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redaction_preserves_user_visible_whitespace() {
+        assert_eq!(
+            redact_secret("visible\n  Bearer short-token\nnext"),
+            "visible\n  Bearer [REDACTED]\nnext"
+        );
     }
 
     #[test]

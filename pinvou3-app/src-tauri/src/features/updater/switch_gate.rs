@@ -2,8 +2,8 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use ring::signature::{UnparsedPublicKey, ED25519};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -242,25 +242,29 @@ mod tests {
             now,
         )
         .unwrap();
-        assert!(verify_attestation(
-            &attestation,
-            &public,
-            "release-key",
-            "staging",
-            &"a".repeat(64),
-            "0.8.0",
-            now
-        )
-        .is_err());
-        assert!(verify_attestation(
-            &attestation,
-            &public,
-            "release-key",
-            "production",
-            &"b".repeat(64),
-            "0.8.0",
-            now
-        )
-        .is_err());
+        assert!(
+            verify_attestation(
+                &attestation,
+                &public,
+                "release-key",
+                "staging",
+                &"a".repeat(64),
+                "0.8.0",
+                now
+            )
+            .is_err()
+        );
+        assert!(
+            verify_attestation(
+                &attestation,
+                &public,
+                "release-key",
+                "production",
+                &"b".repeat(64),
+                "0.8.0",
+                now
+            )
+            .is_err()
+        );
     }
 }

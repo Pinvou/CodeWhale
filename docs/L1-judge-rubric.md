@@ -2,7 +2,7 @@
 
 > **当前版本: r2** (2026-05-18 起生效)。改版规则见 §6。
 >
-> 用法:L1 跑完 → 用户对话框跟 Claude 说 "评一下 `target/l1-runs/<ts>`" → Claude 按本文件 rubric 评分写报告 → `target/l1-judge/<ts>-report.md`。
+> 用法:L1 跑完 → 用户对话框跟 Claude 说 "评一下 `target/l1-runs/<ts>`" → Claude 按本文件 rubric 评分写报告 → `target/l1-judge/<ts>-r<N>-report.md`。
 >
 > **跟 L1 cargo test PASS/FAIL 完全解耦**。L1 是行为契约(文件落盘/耗时上限,judge 看不见的硬指标),judge 是答案质量评估,两件事。
 >
@@ -14,14 +14,14 @@
 
 ```
 target/l1-runs/<ts>/<scenario>.md     ← harness 自动落档 (record_transcript)
-target/l1-judge/<ts>-report.md        ← Claude 评分后写这里
+target/l1-judge/<ts>-r<N>-report.md   ← Claude 评分后写这里
 ```
 
 `<ts>` 是 unix epoch seconds,同一次 `cargo test --ignored` 跑下的所有 scenario 共享一个 `<ts>` 目录。
 
 ---
 
-## 2. 评分 rubric (4 维 × 1-5 分)
+## 2. 评分 rubric (6 维 × 1-5 分)
 
 ### 维度 1:准确性 (Accuracy)
 
@@ -76,7 +76,7 @@ target/l1-judge/<ts>-report.md        ← Claude 评分后写这里
 
 > "调 subagent 时,任务边界划得清不清楚"
 
-仅当 scenario 涉及 subagent 工具 (`agent_spawn` / `agent_open` / `agent_eval` / `delegate_to_agent` 等) 时评分。否则 N/A。
+仅当 scenario 涉及 subagent 工具 (`agent`) 时评分。否则 N/A。
 
 | 分 | 判别 |
 |---|---|
@@ -133,18 +133,20 @@ ls target/l1-runs/<ts>/
   - 一 turn 内连续多个相同工具→检查是否合理(`batch_create_7_files` 期望 7 次 write_file)
   - Plan 模式 → 不应调 write/edit/exec_shell(底座 sandbox 应该已拦,但 LLM 不该尝试)
   - "不要先 list_dir 探目录" → 不应调 list_dir
-  - **blocklist 工具出现** → 默认工具使用 ≤2 分 (`rlm_*`/`task_*`/`pr_attempt_*`/`git_*`/`apply_patch`/`pandoc_convert`/`image_*`/`todo_*`/`automation_*`/`github_*` —— 完整清单见 `CodeWhale/crates/tui/src/tools/pinvou3_blocklist.rs`)。**豁免**:scenario 用 `PINVOU3_BLOCKLIST_OVERRIDE` env 显式启用的工具不扣 (例如 `subagent_*` scenario 启用 `agent_spawn` 是合法的)
+  - **白名单外工具出现** → 默认工具使用 ≤2 分（`rlm`/`tasks`/`automation`/`github`/`Run` 等未放出家族，以及 `git_*`/`apply_patch`/`exec_shell*` 等 v0.9.5 已退役旧名——模型可见面以 `pinvou3-app/src-tauri/src/features/assistant/tool_policy.rs` 的 `PINVOU3_ALLOWED_TOOLS` 白名单为准，完整机制见 `docs/capability-governance.md`）
   - **过激探目录** → 工具使用 ≤3 分 (translate/简单 QA 等任务调 list_dir/read_file 探环境)
-- **任务拆分合理性 / 结果综合能力 (r2 维度 5/6)**:仅 subagent scenario 评。看 `agent_spawn` 的 prompt 字段、subagent 数量、`agent_result` 后主 agent 输出综合度
+- **任务拆分合理性 / 结果综合能力 (r2 维度 5/6)**:仅 subagent scenario 评。看 `agent` 工具调用的任务描述、subagent 数量、拿到 subagent 结果后主 agent 输出综合度
 
 **每个分附一句话理由**——理由必须具体引用 transcript 内容,不能空洞("还可以"不算理由)。
 
 ### Step 4: 写报告到 `target/l1-judge/<ts>-r<N>-report.md`
 
-`<N>` 是当前 rubric 版本号(本文档顶部"当前版本"),比如 `1779074272-r1-report.md`。
+`<N>` 是当前 rubric 版本号(本文档顶部"当前版本"),比如 `1779074272-r2-report.md`。
 `mkdir -p target/l1-judge/` 若不存在。按 §4 模板。
 
 ### Step 5: append 离群点到 `process.md` (闭环防丢失)
+
+(`process.md` 位于仓库根,是评审者本地维护的工作文件,不入库。)
 
 任一 scenario 任一维度 ≤3 → 把改进建议 append 到 `process.md` 末尾的固定区:
 
@@ -202,7 +204,7 @@ ls target/l1-runs/<ts>/
 - **工具使用 N/A**: 任务本身不需要工具
 
 ### batch_create_7_files — 4.75
-...(每 scenario 4 项 + 一句话理由)
+...(每 scenario 各评分维度一行 + 一句话理由;subagent scenario 含全部 6 维)
 
 ## 离群点
 
@@ -261,7 +263,7 @@ ls target/l1-runs/<ts>/
 ### 版本历史
 
 - **r1** (2026-05-18): 初版,4 维 × 1-5 分,N/A 跳过。Step 3 增加 blocklist 工具/过激探目录扣分条款。
-- **r2** (2026-05-18): 加 2 维 (任务拆分合理性 / 结果综合能力),用于 subagent scenario。blocklist 扣分加 `PINVOU3_BLOCKLIST_OVERRIDE` env 豁免条款。
+- **r2** (2026-05-18): 加 2 维 (任务拆分合理性 / 结果综合能力),用于 subagent scenario。
 
 ### 改版流程
 
@@ -272,12 +274,14 @@ ls target/l1-runs/<ts>/
 
 ### 何时 bump 版本
 
-- 加新维度(从 4 维 → 5 维)
+- 加新维度(如 r2 在 r1 的 4 维上加了 2 维)
 - 改 1-5 分的判别标准(扣分门槛/示例变化)
 - 加新扣分条款(像 r1 的 blocklist 工具 ≤2 分)
 - **不需要 bump**:错别字、补充说明、报告模板调整
 
 ### Baseline 命名约定
+
+(`docs/l1-baselines/` 为评审者本地维护的工作文件,不入库。)
 
 ```
 docs/l1-baselines/v<app_ver>-r<rubric_ver>/

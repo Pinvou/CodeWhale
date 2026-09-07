@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dict } from '../src/shared/i18n.js';
-import '../src/features/settings/settings-i18n.js';
+import { dict } from '../src/shared/i18n-all.js'; // 三语全量断言：浏览器入口惰性装载，测试使用聚合 shim。
 import { errorCode, localizedErrorMessage } from '../src/shared/user-facing-error.js';
 import {
   applyConnectorFailure,
@@ -12,6 +11,13 @@ import {
 } from '../src/features/tools/connector-ui-state.js';
 
 const source = relative => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8');
+// Standalone portals use their complete, domain-specific dictionaries. The
+// desktop's lazy dictionary cannot be indexed synchronously for saved en/ja.
+for (const [entry, copy] of [['admin', 'adminPlatformCopy'], ['account', 'accountPlatformCopy']]) {
+  const portal = source(`app/${entry}-main.jsx`);
+  assert.match(portal, new RegExp(`copy=\\{${copy}\\[language\\]\\}`));
+  assert.doesNotMatch(portal, /from ['"]\.\.\/shared\/i18n\.js['"]/u);
+}
 const tauriSource = relative => readFileSync(new URL(`../src-tauri/src/${relative}`, import.meta.url), 'utf8');
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -30,8 +36,6 @@ assertContainsTranslationKeys(dict.zh, dict.en, 'en');
 assertContainsTranslationKeys(dict.zh, dict.ja, 'ja');
 
 for (const language of ['zh', 'en', 'ja']) {
-  assert.ok(dict[language].expertPoolIndividualTab, `${language}.expertPoolIndividualTab must exist`);
-  assert.ok(dict[language].expertPoolTeamTab, `${language}.expertPoolTeamTab must exist`);
   for (const section of [
     'uiRemote',
     'uiMonitor',
@@ -42,8 +46,8 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiChat',
     'uiChatExtra',
     'uiChatScenes',
+    'artifactPreview',
     'uiAccountPlatform',
-    'uiWorkflow',
     'uiToolStore',
     'uiPet',
     'uiWebConnection',
@@ -147,7 +151,7 @@ for (const language of ['zh', 'en', 'ja']) {
   for (const role of ['scout', 'manager', 'builder', 'reviewer', 'general']) {
     assert.ok(multiAgent.roleCards[role], `${language}.uiMultiAgent.roleCards.${role} must exist`);
   }
-  for (const key of ['toggleLabel', 'toggleHint', 'close', 'loadingTranscript', 'emptyTranscript', 'blockedTag', 'panelResize', 'panelResizeHint', 'agentsListTitle', 'agentsEmpty', 'backToAgents', 'rosterSyncFailed']) {
+  for (const key of ['toggleLabel', 'toggleHint', 'close', 'loadingTranscript', 'emptyTranscript', 'blockedTag', 'panelResize', 'panelResizeHint', 'agentsListTitle', 'agentsEmpty', 'backToAgents']) {
     assert.ok(multiAgent[key], `${language}.uiMultiAgent.${key} must exist`);
   }
   for (const cardKey of ['spawning', 'working', 'completed', 'failed', 'spawnFailed', 'interrupted']) {
@@ -155,6 +159,39 @@ for (const language of ['zh', 'en', 'ja']) {
   }
   for (const deadKey of ['confirmTitle', 'impactLabels', 'startDenied', 'stages', 'terminal', 'workerCount', 'advancedEdit', 'planCompileError']) {
     assert.equal(multiAgent[deadKey], undefined, `${language}.uiMultiAgent.${deadKey} is retired and must stay deleted`);
+  }
+  // The bottom-right code-style toggle was replaced by the All/Code pill in
+  // the task list header; its tooltip copy must not come back as dead keys.
+  for (const deadKey of ['sidebarCodeStyleOn', 'sidebarCodeStyleOff']) {
+    assert.equal(dict[language][deadKey], undefined, `${language}.${deadKey} is retired and must stay deleted`);
+  }
+}
+
+// 三语 key parity:zh 是全集基准,en 必须覆盖 zh 的每个叶子 key(ja 经 en
+// spread 兜底,同样断言)。en/ja 历史上比 zh 多出的 settings 相关键属基线
+// 固有(zh 侧由 UI 层默认值兜底),故只断言方向性覆盖而非严格相等——漏 key
+// 的 en 用户会渲染 undefined,ja 也随 en 一起漏。
+{
+  const leafPaths = (obj, prefix = '') => {
+    const out = [];
+    for (const key of Object.keys(obj)) {
+      const value = obj[key];
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (value && typeof value === 'object' && !Array.isArray(value)) out.push(...leafPaths(value, path));
+      else out.push(path);
+    }
+    return out;
+  };
+  const zhKeys = leafPaths(dict.zh);
+  assert.ok(zhKeys.length > 2000, `zh leaf key count looks wrong: ${zhKeys.length}`);
+  for (const language of ['en', 'ja']) {
+    const known = new Set(leafPaths(dict[language]));
+    const missing = zhKeys.filter((key) => !known.has(key));
+    assert.deepEqual(
+      missing,
+      [],
+      `${language} dictionary misses zh keys (renders undefined): ${missing.slice(0, 10).join(', ')}`,
+    );
   }
 }
 
@@ -172,7 +209,9 @@ for (const key of [
 
 const main = source('app/main.jsx');
 assert.match(main, /emit\(['"]ui:language_changed['"], \{ language: lang \}\)/);
-assert.match(main, /<ToolStoreView[^>]*t=\{t\}/);
+const viewLoaders = source('app/view-loaders.js');
+assert.match(viewLoaders, new RegExp("toolStore: \\(\\) => import\\('\\.\\./features/tools/ToolStoreView\\.jsx'\\)"));
+assert.match(main, /<LazyToolStoreView[^>]*t=\{t\}/);
 assert.match(main, /<WebConnectionStatus[^>]*t=\{t\}/);
 assert.match(main, /<AccountPlatformPopover[\s\S]{0,400}copy=\{t\.uiAccountPlatform\}/);
 assert.match(main, /title=\{t\.uiAccountPlatform\.title\}/);
@@ -185,6 +224,10 @@ assert.doesNotMatch(accountPlatformPopover, />可用余额</);
 assert.equal(dict.zh.uiAccountPlatform.balance, '可用余额');
 assert.equal(dict.zh.uiAccountPlatform.reservedCredits, '使用中');
 assert.match(main, /<SettingsErrorBoundary[^>]*t=\{t\}/);
+assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
+// The main window renders codex through the LazyCodexAcpView wrapper (which
+// internally consumes the same view-loaders chunk); its error fallback copy
+// still flows through i18n.
 assert.match(main, /<CodexAcpView[^>]*t=\{t\}/);
 const settingsErrorBoundary = source('features/settings/SettingsErrorBoundary.jsx');
 assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailed/);
@@ -205,12 +248,6 @@ assert.match(scheduledTasks, /const scheduledCopy = t\.uiScheduled/);
 assert.match(scheduledTasks, /scheduledCopy\.taskName/);
 assert.match(scheduledTasks, /scheduledCopy\.runHistory/);
 assert.doesNotMatch(scheduledTasks, />立即运行</);
-const workflow = source('features/workflow/WorkflowView.jsx');
-assert.match(workflow, /t\.uiWorkflow/);
-assert.match(workflow, /kind:\s*'other',\s*label:\s*t\.uiToolRender\.other/);
-assert.match(workflow, /answers\[qi\]\?\.kind\s*===\s*'other'/);
-assert.doesNotMatch(workflow, /OTHER_ANSWER_LABEL/);
-assert.doesNotMatch(workflow, /label:\s*'其他'/);
 const toolStore = source('features/tools/ToolStoreView.jsx');
 const connectorSsoDialog = source('features/tools/ConnectorSsoDialog.jsx');
 assert.match(toolStore, /const storeCopy = t\.uiToolStore/);
@@ -245,7 +282,7 @@ assert.match(teamRelayAccess, /copy\.disable/);
 assert.doesNotMatch(teamRelayAccess, /当前功能内测中/);
 const settings = source('features/settings/SettingsView.jsx');
 assert.match(settings, /t\.uiSettings/);
-assert.match(settings, /const settingsCopy = t\.uiSettingsDetail/);
+assert.match(settings, /const settingsCopy = (?:\/\*\* @type \{typeof )?t\.uiSettingsDetail/);
 assert.match(settings, /settingsCopy\.addSearch/);
 assert.match(settings, /settingsCopy\.deleteModelTitle/);
 assert.match(settings, /item\.title \|\| presetProviderLabel\(p, t\)/);
@@ -374,7 +411,7 @@ assert.doesNotMatch(providersSection, />切换</);
 assert.doesNotMatch(providersSection, />官方登录</);
 const settingsViewProviders = source('features/settings/SettingsView.jsx');
 assert.match(settingsViewProviders, /t\.uiSettings\.providers/);
-assert.match(settingsViewProviders, /renderProviders\(\)/);
+assert.match(settingsViewProviders, /<ProvidersSection/);
 const providerFormModal = source('features/settings/ProviderFormModal.jsx');
 assert.match(providerFormModal, /invokeTauri\(['"]save_acp_provider['"]/);
 assert.doesNotMatch(providerFormModal, /placeholder=\{?['"]输入 API Key/);
@@ -382,7 +419,29 @@ const codexViewProviders = source('features/codex/CodexAcpView.jsx');
 assert.match(codexViewProviders, /set_codex_acp_session_provider/);
 assert.match(codexViewProviders, /t\.uiAcpProviders/);
 const personas = source('features/personas/Personas.jsx');
-assert.match(personas, /label: t\.expertPoolIndividualTab/);
-assert.doesNotMatch(personas, /expertPoolIndividualTab \|\|/);
+assert.match(personas, /\{t\.cpMyCards\}/);
+assert.doesNotMatch(personas, /ExpertTeamsPanel|expertPoolTeamTab|expertPoolIndividualTab/);
+
+// 设计检查器字体预设:数据侧 label 保留中文原名(选中态比较键),展示走 labelKey;
+// 每个预设都必须声明 labelKey 且三语词典都有该 key,否则 en/ja 用户会看到中文原名。
+const fontPresets = source('features/artifacts/DesignInspectorPanel.jsx');
+const fontLabelKeys = [...fontPresets.matchAll(/labelKey: '(\w+)'/g)].map(m => m[1]);
+assert.ok(fontLabelKeys.length >= 9, `font presets should declare labelKey, found ${fontLabelKeys.length}`);
+for (const language of ['zh', 'en', 'ja']) {
+  for (const key of fontLabelKeys) {
+    assert.ok(dict[language].uiArtifacts[key], `${language}.uiArtifacts.${key} must exist`);
+  }
+}
+
+// 个人工作台模板 chip:每个模板 id 三语都要有展示名;数据侧 zh title 只是
+// 草稿匹配与消息 meta 的正本,不直接展示给 en/ja 用户。
+const workbench = source('features/chat/personal-workbench-scene.js');
+const workbenchTemplateIds = [...workbench.matchAll(/\n {4}id: '([\w-]+)',/g)].map(m => m[1]);
+assert.equal(workbenchTemplateIds.length, 7, `expected 7 workbench templates, found ${workbenchTemplateIds.length}`);
+for (const language of ['zh', 'en', 'ja']) {
+  for (const id of workbenchTemplateIds) {
+    assert.ok(dict[language].uiChatScenes.workbenchTemplates[id], `${language}.uiChatScenes.workbenchTemplates.${id} must exist`);
+  }
+}
 
 console.log('UI language coverage tests passed');

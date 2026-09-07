@@ -27,7 +27,7 @@ run_optional_skip2() {
   return "$rc"
 }
 
-run_required node --test pinvou3-app/tests/render_markdown.test.js
+run_required node pinvou3-app/tests/markdown_syntax_highlight.test.mjs
 run_required node pinvou3-app/tests/windows_runtime_packaging_contract.test.js
 run_required python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 if ! python3 -c 'import pptx, docx' >/dev/null 2>&1; then
@@ -60,6 +60,13 @@ if [ "${PINVOU3_RUN_L1:-0}" = "1" ]; then
   run_required env PINVOU3_L1_REQUIRE_VLLM=1 \
     cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml \
     --test l1_dialog_harness -- --ignored --test-threads=1
+fi
+
+# memory_e2e(集成测试文件,默认 #[ignore]):env 隔离域测试全量 + 真机 vLLM 记忆
+# 行为,与 L1 同为手动验收路径;此前无任何 runner 入口(审计孤儿),在此接线。
+if [ "${PINVOU3_RUN_MEMORY_E2E:-0}" = "1" ]; then
+  run_required cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml \
+    --test memory_e2e -- --ignored --test-threads=1
 fi
 
 echo "ALL USER JOURNEY SMOKES PASSED"

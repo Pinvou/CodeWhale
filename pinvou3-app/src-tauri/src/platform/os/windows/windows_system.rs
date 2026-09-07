@@ -5,10 +5,70 @@ use std::path::{Path, PathBuf};
 
 use super::windows_path;
 use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+use windows_sys::Win32::Globalization::{GetUserPreferredUILanguages, MUI_LANGUAGE_NAME};
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER,
-    KEY_READ, REG_EXPAND_SZ, REG_SZ,
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, KEY_READ, REG_EXPAND_SZ, REG_SZ, RegCloseKey,
+    RegOpenKeyExW, RegQueryValueExW,
 };
+
+pub fn current_system_locale() -> Option<String> {
+    let mut language_count = 0;
+    let mut buffer_len = 0;
+    // MSDN sizing call: null buffer with *pcchLanguagesBuffer = 0 returns TRUE
+    // and stores the required size (trailing double NUL included). Still check
+    // the return value so a failed call leaving buffer_len undefined cannot
+    // trigger a bogus large allocation below.
+    // SAFETY: this is the documented sizing call with a null data buffer and valid count pointers.
+    let sized = unsafe {
+        GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut language_count,
+            std::ptr::null_mut(),
+            &mut buffer_len,
+        )
+    };
+    if sized == 0 || buffer_len <= 1 {
+        return None;
+    }
+    let mut locale_names = vec![0u16; buffer_len as usize];
+    // SAFETY: the buffer uses the size returned by the sizing call and all pointers remain valid.
+    let ok = unsafe {
+        GetUserPreferredUILanguages(
+            MUI_LANGUAGE_NAME,
+            &mut language_count,
+            locale_names.as_mut_ptr(),
+            &mut buffer_len,
+        )
+    };
+    if ok == 0 || language_count == 0 {
+        return None;
+    }
+    let first_len = locale_names.iter().position(|unit| *unit == 0)?;
+    String::from_utf16(&locale_names[..first_len]).ok()
+}
+
+/// Probes process liveness with `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)`.
+/// Access denied also means the process exists under another user or integrity level.
+/// Browser watch uses this before removing a stale port file.
+pub fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: This only queries existence, and every non-null handle is closed immediately.
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if !handle.is_null() {
+        // SAFETY: `handle` is the non-null owned handle returned by OpenProcess and is closed once.
+        unsafe {
+            CloseHandle(handle);
+        }
+        return true;
+    }
+    // SAFETY: GetLastError has no pointer arguments and is read immediately after OpenProcess failed.
+    let err = unsafe { GetLastError() };
+    err == ERROR_ACCESS_DENIED
+}
+
+/// Windows user-profile ACLs provide the directory privacy boundary.
+pub fn make_private_dir(_path: &Path) {}
 
 pub fn open_target(target: impl AsRef<OsStr>, label: &str) -> Result<(), String> {
     HiddenCommand::new("cmd")
@@ -26,10 +86,6 @@ pub fn reveal_target(target: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("文件管理器定位失败: {e}"))?;
     Ok(())
-}
-
-pub fn device_serial_number() -> Option<String> {
-    bios_serial_number().ok()
 }
 
 pub fn command_exists(command: &str) -> bool {
@@ -67,10 +123,7 @@ pub fn command_exists(command: &str) -> bool {
             }
         }
     }
-    if let Some(path) = common_libreoffice_tool_path(command) {
-        if let Some(dir) = path.parent() {
-            ensure_dir_on_process_path(dir.to_path_buf());
-        }
+    if common_libreoffice_tool_path(command).is_some() {
         return true;
     }
     false
@@ -102,9 +155,6 @@ pub fn libreoffice_tool_path() -> PathBuf {
         }
     }
     if let Some(path) = common_libreoffice_tool_path("soffice") {
-        if let Some(dir) = path.parent() {
-            ensure_dir_on_process_path(dir.to_path_buf());
-        }
         return path;
     }
     PathBuf::from("soffice")
@@ -266,6 +316,7 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: Option<&str>) ->
         .unwrap_or(std::ptr::null());
 
     let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: key_path is NUL-terminated and `key` is a valid output pointer closed below on success.
     let opened = unsafe { RegOpenKeyExW(root, key_path.as_ptr(), 0, KEY_READ, &mut key) };
     if opened != ERROR_SUCCESS {
         return None;
@@ -273,6 +324,7 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: Option<&str>) ->
 
     let mut value_type = 0;
     let mut byte_len = 0;
+    // SAFETY: `key` is live and the type/length output pointers are valid for the sizing query.
     let queried = unsafe {
         RegQueryValueExW(
             key,
@@ -284,6 +336,7 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: Option<&str>) ->
         )
     };
     if queried != ERROR_SUCCESS || byte_len < 2 || !matches!(value_type, REG_SZ | REG_EXPAND_SZ) {
+        // SAFETY: `key` was opened successfully and is closed exactly once on this branch.
         unsafe {
             RegCloseKey(key);
         }
@@ -291,6 +344,7 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: Option<&str>) ->
     }
 
     let mut data = vec![0u16; (byte_len as usize + 1) / 2];
+    // SAFETY: `data` is at least the queried byte length and all output pointers are valid.
     let queried = unsafe {
         RegQueryValueExW(
             key,
@@ -301,6 +355,7 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: Option<&str>) ->
             &mut byte_len,
         )
     };
+    // SAFETY: `key` was opened successfully and is closed exactly once after the read.
     unsafe {
         RegCloseKey(key);
     }
@@ -311,11 +366,7 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: Option<&str>) ->
 
     let len = data.iter().position(|&ch| ch == 0).unwrap_or(data.len());
     let value = String::from_utf16_lossy(&data[..len]).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn read_bios_serial_from_powershell() -> Option<String> {
@@ -353,11 +404,7 @@ fn read_bios_serial_from_wmic() -> Option<String> {
 
 fn non_empty_stdout(stdout: Vec<u8>) -> Option<String> {
     let value = String::from_utf8_lossy(&stdout).trim().to_string();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn normalize_bios_serial_for_binding(input: &str) -> Option<String> {
@@ -383,15 +430,32 @@ fn wide_null(value: &str) -> Vec<u16> {
     OsStr::new(value).encode_wide().chain(Some(0)).collect()
 }
 
-fn ensure_dir_on_process_path(dir: std::path::PathBuf) {
+/// Windows env writes in the single-threaded startup window: the ONNX
+/// Runtime dylib path plus the detected LibreOffice program dir are prepended
+/// to PATH (the latter lets soffice and its child processes resolve by name,
+/// so the runtime no longer needs to write PATH). Called only by lib.rs
+/// `startup_process_env` before the first thread spawn; the multi-threaded
+/// phase never writes the process env (edition 2024 concurrent-reader risk).
+pub fn startup_platform_env() {
+    windows_path::startup_configure_onnxruntime_dylib();
+    let Some(soffice) = common_libreoffice_tool_path("soffice") else {
+        return;
+    };
+    let Some(dir) = soffice.parent() else {
+        return;
+    };
     let current = std::env::var_os("PATH").unwrap_or_default();
-    if std::env::split_paths(&current).any(|path| same_path(&path, &dir)) {
+    // Both the read (split_paths) and the write (set_var) happen inside the
+    // single-threaded window; the dedup check avoids duplicate prepends.
+    if std::env::split_paths(&current).any(|path| same_path(&path, dir)) {
         return;
     }
-    let mut paths = vec![dir];
+    let mut paths = vec![dir.to_path_buf()];
     paths.extend(std::env::split_paths(&current));
     if let Ok(joined) = std::env::join_paths(paths) {
-        std::env::set_var("PATH", joined);
+        // SAFETY: called only from the single-threaded startup window (see the
+        // function docs); no concurrent env readers.
+        unsafe { std::env::set_var("PATH", joined) };
     }
 }
 
@@ -439,6 +503,14 @@ pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     Vec::new()
 }
 
+/// Returns the installer-provisioned `runtime/node/node.exe`, resolved through
+/// windows_path::bundled_node_dir. Consumers fall back to PATH when it is absent.
+pub fn bundled_node() -> Option<PathBuf> {
+    windows_path::bundled_node_dir()
+        .map(|dir| dir.join("node.exe"))
+        .filter(|p| p.is_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,11 +528,6 @@ mod tests {
         assert!(is_libreoffice_command("soffice.com"));
         assert!(is_libreoffice_command("libreoffice"));
         assert!(!is_libreoffice_command("pandoc"));
-    }
-
-    #[test]
-    fn libreoffice_tool_path_returns_program() {
-        assert!(!libreoffice_tool_path().as_os_str().is_empty());
     }
 
     #[test]

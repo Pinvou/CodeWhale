@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use toml::Value;
 
 use super::{
-    atomic_write, AgentConfigWriter, EffectiveConfig, EffectiveEntry, ProviderTarget,
-    ProviderWireApi, PROVIDER_ID_PREFIX,
+    AgentConfigWriter, EffectiveConfig, EffectiveEntry, PROVIDER_ID_PREFIX, ProviderTarget,
+    ProviderWireApi, atomic_write,
 };
 
 pub struct KimiConfigWriter {
@@ -35,7 +35,7 @@ impl KimiConfigWriter {
         }
         let raw = fs::read_to_string(&self.config_path)
             .with_context(|| format!("读取 {} 失败", self.config_path.display()))?;
-        raw.parse::<Value>().with_context(|| {
+        toml::from_str::<Value>(&raw).with_context(|| {
             format!(
                 "{} 不是有效的 TOML，拒绝覆盖；请手动修复或删除该文件后重试",
                 self.config_path.display()
@@ -122,10 +122,13 @@ impl AgentConfigWriter for KimiConfigWriter {
             })
             .unwrap_or_default();
         if !managed_providers.is_empty() {
-            let providers = table
-                .get_mut("providers")
-                .and_then(Value::as_table_mut)
-                .expect("managed ids 来自存在的表");
+            // managed_providers was just collected from the providers table
+            // of the same in-memory config, so it must be retrievable again;
+            // if not, the data shape is abnormal and we should error out
+            // instead of panicking.
+            let Some(providers) = table.get_mut("providers").and_then(Value::as_table_mut) else {
+                anyhow::bail!("kimi config.toml providers table lost during rollback");
+            };
             for id in managed_providers {
                 providers.remove(&id);
             }
@@ -146,10 +149,11 @@ impl AgentConfigWriter for KimiConfigWriter {
             })
             .unwrap_or_default();
         if !managed_models.is_empty() {
-            let models = table
-                .get_mut("models")
-                .and_then(Value::as_table_mut)
-                .expect("managed ids 来自存在的表");
+            // Same as above: managed_models was just collected from the
+            // models table of the same in-memory config.
+            let Some(models) = table.get_mut("models").and_then(Value::as_table_mut) else {
+                anyhow::bail!("kimi config.toml models table lost during rollback");
+            };
             for id in managed_models {
                 models.remove(&id);
             }
@@ -184,8 +188,7 @@ impl AgentConfigWriter for KimiConfigWriter {
             .with_context(|| format!("读取 {} 失败", self.config_path.display()))?;
         // 解析失败必须返回 Err（而非静默按官方处理），让 config_unreadable
         // 生效——否则损坏的 config.toml 会显示「官方登录」且无警告条。
-        let config = raw
-            .parse::<Value>()
+        let config = toml::from_str::<Value>(&raw)
             .with_context(|| format!("解析 {} 失败", self.config_path.display()))?;
         let Some(default_model) = config
             .get("default_model")
@@ -266,7 +269,7 @@ impl AgentConfigWriter for KimiConfigWriter {
         }
         let raw = fs::read_to_string(&self.config_path)
             .with_context(|| format!("读取 {} 失败", self.config_path.display()))?;
-        let Ok(config) = raw.parse::<Value>() else {
+        let Ok(config) = toml::from_str::<Value>(&raw) else {
             return Ok(None);
         };
         Ok(config
@@ -344,10 +347,8 @@ mod tests {
         writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
         let raw = fs::read_to_string(dir.join("config.toml")).unwrap();
         // 产物必须通过官方校验函数（真实解析路径）
-        assert!(crate::features::codex_acp::kimi_runtime_config_ready(
-            &raw, false
-        ));
-        let config: Value = raw.parse().unwrap();
+        assert!(crate::features::codex_acp::introspect::kimi_runtime_config_ready(&raw, false));
+        let config: Value = toml::from_str(&raw).unwrap();
         assert_eq!(config["default_model"], "pv-aaaaaaaaaaaa-main".into());
         assert_eq!(
             config["providers"]["pv-aaaaaaaaaaaa"]["type"],
@@ -372,16 +373,14 @@ mod tests {
         target.wire_api = ProviderWireApi::Kimi;
         writer.apply(&target).unwrap();
         let raw = fs::read_to_string(dir.join("config.toml")).unwrap();
-        let config: Value = raw.parse().unwrap();
+        let config: Value = toml::from_str(&raw).unwrap();
         // Kimi 原生协议 → type = "kimi"（Kimi Code 官方文档专用类型）
         assert_eq!(
             config["providers"]["pv-aaaaaaaaaaaa"]["type"],
             "kimi".into()
         );
         // 产物仍通过官方校验函数
-        assert!(crate::features::codex_acp::kimi_runtime_config_ready(
-            &raw, false
-        ));
+        assert!(crate::features::codex_acp::introspect::kimi_runtime_config_ready(&raw, false));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -392,10 +391,8 @@ mod tests {
         let mut custom = target("pv-aaaaaaaaaaaa");
         custom.context_window = Some(262_144);
         writer.apply(&custom).unwrap();
-        let config: Value = fs::read_to_string(dir.join("config.toml"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        let config: Value =
+            toml::from_str(&fs::read_to_string(dir.join("config.toml")).unwrap()).unwrap();
         assert_eq!(
             config["models"]["pv-aaaaaaaaaaaa-main"]["max_context_size"],
             Value::Integer(262_144)
@@ -416,10 +413,8 @@ mod tests {
         )
         .unwrap();
         writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
-        let config: Value = fs::read_to_string(dir.join("config.toml"))
-            .unwrap()
-            .parse()
-            .unwrap();
+        let config: Value =
+            toml::from_str(&fs::read_to_string(dir.join("config.toml")).unwrap()).unwrap();
         // 官方表保留
         assert!(config["providers"]["official-oauth"]["oauth"].is_table());
         assert_eq!(config["models"]["kimi-k2.5"]["model"], "kimi-k2.5".into());
@@ -437,18 +432,22 @@ mod tests {
         .unwrap();
         writer.revert_to_official(None).unwrap();
         let raw = fs::read_to_string(dir.join("config.toml")).unwrap();
-        let config: Value = raw.parse().unwrap();
+        let config: Value = toml::from_str(&raw).unwrap();
         assert!(config.get("default_model").is_none());
-        assert!(config
-            .get("providers")
-            .unwrap()
-            .get("pv-aaaaaaaaaaaa")
-            .is_none());
-        assert!(config
-            .get("models")
-            .unwrap()
-            .get("pv-aaaaaaaaaaaa-main")
-            .is_none());
+        assert!(
+            config
+                .get("providers")
+                .unwrap()
+                .get("pv-aaaaaaaaaaaa")
+                .is_none()
+        );
+        assert!(
+            config
+                .get("models")
+                .unwrap()
+                .get("pv-aaaaaaaaaaaa-main")
+                .is_none()
+        );
         // 官方表保留
         assert_eq!(config["models"]["official"]["model"], "kimi-k2.5".into());
         assert_eq!(
@@ -458,26 +457,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn revert_noop_without_managed_blocks_skips_write() {
-        let dir = tmp_dir();
-        let writer = KimiConfigWriter::new(&dir);
-        fs::write(dir.join("config.toml"), "default_model = \"kimi-k2.5\"\n").unwrap();
-        writer.revert_to_official(None).unwrap();
-        assert!(!dir.join("config.toml.pinvou3-bak").exists());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn refuses_to_overwrite_unparseable_file() {
-        let dir = tmp_dir();
-        let writer = KimiConfigWriter::new(&dir);
-        let broken = "default_model = \"x\"\n[unclosed";
-        fs::write(dir.join("config.toml"), broken).unwrap();
-        assert!(writer.apply(&target("pv-aaaaaaaaaaaa")).is_err());
-        assert_eq!(fs::read_to_string(dir.join("config.toml")).unwrap(), broken);
-        let _ = fs::remove_dir_all(&dir);
-    }
+    // The shared contracts (revert writes no backup / unparseable files refuse
+    // overwrite) were hoisted into the parameterized
+    // providers::tests::shared_writer_contract_matrix; only Kimi-specific
+    // behavior stays here.
 
     #[test]
     fn official_default_model_roundtrip() {
@@ -498,7 +481,7 @@ mod tests {
         // 切换：default_model 被覆盖为受管值
         writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
         let raw = fs::read_to_string(dir.join("config.toml")).unwrap();
-        let config: Value = raw.parse().unwrap();
+        let config: Value = toml::from_str(&raw).unwrap();
         assert_eq!(config["default_model"], "pv-aaaaaaaaaaaa-main".into());
         // 受管值不算官方值
         assert_eq!(writer.current_default_model().unwrap(), None);
@@ -506,17 +489,17 @@ mod tests {
         writer.revert_to_official(None).unwrap();
         writer.restore_default_model(Some("kimi-code/k3")).unwrap();
         let raw = fs::read_to_string(dir.join("config.toml")).unwrap();
-        let config: Value = raw.parse().unwrap();
+        let config: Value = toml::from_str(&raw).unwrap();
         assert_eq!(config["default_model"], "kimi-code/k3".into());
-        assert!(config
-            .get("providers")
-            .unwrap()
-            .get("pv-aaaaaaaaaaaa")
-            .is_none());
+        assert!(
+            config
+                .get("providers")
+                .unwrap()
+                .get("pv-aaaaaaaaaaaa")
+                .is_none()
+        );
         // 恢复后的产物重新通过官方校验（官方登录态不断裂）
-        assert!(crate::features::codex_acp::kimi_runtime_config_ready(
-            &raw, true
-        ));
+        assert!(crate::features::codex_acp::introspect::kimi_runtime_config_ready(&raw, true));
         let _ = fs::remove_dir_all(&dir);
     }
 

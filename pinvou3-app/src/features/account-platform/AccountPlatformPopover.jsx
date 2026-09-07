@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Plus, RefreshCw, User, X } from '../../components/icons.jsx';
 import { formatPoints } from './credit-units.js';
@@ -90,7 +91,7 @@ function SliderCaptcha({ challenge, offset, busy, copy, cardTheme, mutedText, on
 }
 
 function newIdempotencyKey() {
-  return `desktop-recharge-${globalThis.crypto.randomUUID()}`;
+  return `desktop-recharge-${secureRequestID()}`;
 }
 
 function orderRemainingSeconds(order, now) {

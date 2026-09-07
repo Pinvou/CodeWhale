@@ -170,16 +170,16 @@ function ProvisioningDetail({ id, client, copy, routeVersion, onBack, onQueryCha
     {detailFeedback(state, copy, () => setRefreshVersion((value) => value + 1))}
     {item && <>
       <DetailFacts facts={[
-        [copy.provisioning, <span className="adm-mono">{item.provisioning_id}</span>],
-        [copy.status, <Status value={item.status} copy={copy} />],
-        [copy.modelID, <span className="adm-mono">{item.model_id}</span>],
+        [copy.provisioning, <span key="provisioning" className="adm-mono">{item.provisioning_id}</span>],
+        [copy.status, <Status key="status" value={item.status} copy={copy} />],
+        [copy.modelID, <span key="modelID" className="adm-mono">{item.model_id}</span>],
         [copy.protocol, `${item.protocol_code} · ${valueOrDash(item.protocol_version_id)}`],
         [copy.scope, `${item.scope_type} · ${item.scope_id}`],
         [copy.generation, `${item.actual_generation || 0} / ${item.desired_generation}`],
         [copy.stage, item.stage],
-        [copy.slaDeadline, <DateValue value={item.sla_deadline_at} />],
+        [copy.slaDeadline, <DateValue key="slaDeadline" value={item.sla_deadline_at} />],
         [copy.lastError, valueOrDash(item.last_error_code)],
-        [copy.updatedAt, <DateValue value={item.updated_at} />],
+        [copy.updatedAt, <DateValue key="updatedAt" value={item.updated_at} />],
       ]} />
       <Attempts client={client} provisioningID={id} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} />
     </>}
@@ -202,16 +202,16 @@ function UsageDetail({ id, client, copy, permissions, routeVersion, onBack, onQu
     {detailFeedback(state, copy, () => setRefreshVersion((value) => value + 1))}
     {item && <>
       <DetailFacts facts={[
-        [copy.request, <span className="adm-mono">{item.usage_request_id}</span>],
+        [copy.request, <span key="request" className="adm-mono">{item.usage_request_id}</span>],
         [copy.model, item.model],
         [copy.modelID, valueOrDash(item.model_id)],
         [copy.catalogVersion, valueOrDash(item.catalog_version)],
         [copy.capabilityVersion, valueOrDash(item.model_capability_version_id)],
         [copy.priceVersion, valueOrDash(item.price_version_id)],
         [copy.routeGeneration, valueOrDash(item.route_generation)],
-        [copy.executionStatus, <Status value={item.execution_status} copy={copy} />],
-        [copy.settlementStatus, <Status value={item.settlement_status} copy={copy} />],
-        [copy.deliveryStatus, <Status value={item.delivery_status} copy={copy} />],
+        [copy.executionStatus, <Status key="executionStatus" value={item.execution_status} copy={copy} />],
+        [copy.settlementStatus, <Status key="settlementStatus" value={item.settlement_status} copy={copy} />],
+        [copy.deliveryStatus, <Status key="deliveryStatus" value={item.delivery_status} copy={copy} />],
         [copy.holdReference, valueOrDash(item.hold_id)],
         [copy.tokenAccountID, valueOrDash(item.token_account_id)],
         [copy.protocol, valueOrDash(item.protocol_definition_id)],
@@ -221,7 +221,7 @@ function UsageDetail({ id, client, copy, permissions, routeVersion, onBack, onQu
         [copy.tokenUsage, `${item.input_tokens || 0} + ${item.cached_input_tokens || 0} / ${item.output_tokens || 0}`],
         [copy.reconciliationAttempts, item.reconciliation_attempts],
         [copy.reconciliationError, valueOrDash(item.reconciliation_last_error)],
-        [copy.updatedAt, <DateValue value={item.updated_at} />],
+        [copy.updatedAt, <DateValue key="updatedAt" value={item.updated_at} />],
       ]} />
       {permissions.includes('platform.audit.read') && <div className="adm-row-actions adm-operation-audit"><button type="button" onClick={() => onNavigate?.('audit', { audit_resource: id })}>{copy.viewAudit}</button></div>}
       <Evidence client={client} usageID={id} copy={copy} routeVersion={routeVersion} onQueryChange={onQueryChange} histories={histories} />

@@ -1,19 +1,27 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, BarChart2, BookOpen, Brain, Briefcase, Check, ChevronDown, ChevronRight, ClipboardList, Copy, Edit2, FileText, ImageIcon, Mic, Monitor, Package, Palette, Paperclip, Presentation, Send, Sparkles, StopCircle, Trash2, Upload, X, Zap } from '../../components/icons.jsx';
+import {
+  invokeObservedPanelSelection,
+  isSubagentPanelPublicationCurrent,
+} from './subagent-panel-publication.mjs';
+import { AlertTriangle, ArrowLeft, BarChart2, BookOpen, Brain, Briefcase, Check, ChevronDown, ChevronRight, ClipboardList, Copy, Edit2, FileText, Globe, ImageIcon, Mic, Monitor, Package, Palette, Paperclip, PinIcon, Presentation, Send, Sparkles, StopCircle, Terminal, Trash2, Upload, X, Zap } from '../../components/icons.jsx';
 import { bridge, activeModelIsLocal } from '../../hooks/useBridge.js';
 import { can, isWeb } from '../../shared/platform.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
-import { ArtifactsPanel } from '../artifacts/ArtifactsPanel.jsx';
-import { AppIcon, DEPT_ORDER, deptColor, deptLabelFor, personaText } from '../personas/Personas.jsx';
-import { ComposerModelSelector, ComposerToolMenu } from '../settings/SettingsView.jsx';
-import { ComposerPopover } from '../../components/ComposerPopover.jsx';
+import { getSyntaxHighlightVersion, subscribeSyntaxHighlight } from '../../shared/syntax-highlighter.js';
+import { renderMarkdown } from '../../shared/markdown-renderer.js';
+import { AppIcon, DEPT_ORDER, deptColor, deptLabelFor, personaText } from '../personas/persona-shared.jsx';
+import { ComposerModelSelector, ComposerToolMenu } from '../settings/composer-shared.jsx';
+import { ComposerPopover, POPOVER_SURFACE } from '../../components/ComposerPopover.jsx';
 import { PinvouLogo } from '../../components/PinvouLogo.jsx';
-import { ArtifactCard, localizeTool, tsToolsData } from '../tools/tool-common.jsx';
+import { ViewErrorBoundary } from '../../shared/ViewErrorBoundary.jsx';
+import { ArtifactCard, localizeTool, tsToolsData, tsToolWelcomeData } from '../tools/tool-common.jsx';
+import { RightDockPanel, useRightDockOcclusion } from '../../components/layout/RightDock.jsx';
 import { CarefulBlockedCard, PlanCard, PlanStuckCard, ToolCard, UserInputCard, cardBtnCls } from '../tools/tool-renderers.jsx';
 import {
   ConversationActivityIndicator,
   ConversationTimeline,
+  useConversationSecondClock,
 } from '../conversation/ConversationTimeline.jsx';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
 import {
@@ -21,19 +29,61 @@ import {
   projectDeepSeekConversation,
 } from '../conversation/deepseek-conversation.js';
 import {
+  measureConversationScrollGeometry,
+  shouldForceScrollFollow,
+  startConversationBottomFollower,
+  transitionConversationScrollState,
+} from '../conversation/conversation-scroll.js';
+import {
   captureConversationScrollPosition,
   isFetchTool,
-  isNearConversationBottom,
   isSearchTool,
   restoreConversationScrollPosition,
 } from '../conversation/conversation-model.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
-import { AttachmentDropOverlay } from '../attachments/AttachmentDropOverlay.jsx';
+import { formatAttachmentLimitError } from '../attachments/attachment-limit-errors.js';
+import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { ConversationAttachmentBubble } from '../attachments/ConversationAttachmentBubble.jsx';
 import { splitAttachmentLine } from '../attachments/attachment-message.js';
-import { SubagentTranscriptPanel } from '../multiagent/SubagentTranscriptPanel.jsx';
 import { CHAT_INPUT_MAX_LENGTH, constrainChatInput } from './chat-input-limit.js';
+import { deriveRunningShellTasks, formatElapsedMs, tailOutputLines } from './background-tasks.js';
+import { useShellTaskCancel } from './shell-task-cancel.js';
 import { AssistantMessageActions, AssistantMessageFooter } from '../conversation/AssistantMessageActions.jsx';
+// 重面板惰性化:ArtifactsPanel(design/产物场景才出现)与 SubagentTranscriptPanel
+// (专家卡点开才出现)各带一串专属依赖(design-runtime/EditableMarkdownPreview/
+// subagent-conversation 等,合计 ~130KB 源码),条件渲染本就存在。预取挂在打开
+// 动作同 tick,首次打开仍可能挂起一个微任务级窗口——因此各挂载点必须配局部
+// Suspense(面板形状 fallback)与局部 ErrorBoundary,把挂起/失败限制在面板槽位,
+// 不冒泡到应用级边界闪断整视图(口径同 LazyCodexAcpView/WebAccessModal)。
+// 动态 import 收口在本表(口径同 app/view-loaders.js 的 VIEW_LOADERS)。
+const CHAT_PANEL_LOADERS = Object.freeze({
+  artifacts: () => import('../artifacts/ArtifactsPanel.jsx'),
+  subagent: () => import('../multiagent/SubagentTranscriptPanel.jsx'),
+});
+const LazyArtifactsPanel = React.lazy(() => CHAT_PANEL_LOADERS.artifacts().then((m) => ({ default: m.ArtifactsPanel })));
+const LazySubagentTranscriptPanel = React.lazy(() => CHAT_PANEL_LOADERS.subagent().then((m) => ({ default: m.SubagentTranscriptPanel })));
+const prefetchChatPanel = (key) => {
+  const loader = CHAT_PANEL_LOADERS[key];
+  if (loader) loader().catch(() => {});
+};
+
+const reportRightDockSelectionFailure = (error) => {
+  console.error('[chat] Right Dock selection failed', error);
+};
+// 面板槽位级挂起 fallback:与 LazyCodexAcpView 同款容器,懒 chunk 解析的
+// 微任务窗口内占住面板位置,避免挂起冒泡到应用级边界把整视图闪断成 fallback。
+function PanelSuspense({ children }) {
+  return (
+    <React.Suspense fallback={(
+      <div className="flex-1 flex items-center justify-center min-h-0 text-sm text-gray-500 dark:text-gray-300">
+        …
+      </div>
+    )}>
+      {children}
+    </React.Suspense>
+  );
+}
+
 import {
   assistantItemCopyText,
   copyClipboardText,
@@ -88,6 +138,22 @@ import {
 
 const UNIFIED_CONVERSATION_UI_KEY = 'pinvou_conversation_ui_v2';
 const MULTI_AGENT_ENABLED = can('multiAgent');
+const SCENE_REGISTRY = Object.freeze({
+  work: new Set([PERSONAL_WORKBENCH_SCENE_KEY, 'document-writing']),
+  design: new Set(['poster', 'data-visualization', 'ppt']),
+});
+
+function sceneRegistryFields(l1, l2) {
+  const level1 = SCENE_REGISTRY[l1] ? l1 : 'unknown';
+  const level2 = level1 !== 'unknown' && SCENE_REGISTRY[level1].has(l2) ? l2 : 'unknown';
+  return { sceneL1: level1, sceneL2: level2 };
+}
+
+function createSceneViewId() {
+  const bytes = new Uint8Array(12);
+  window.crypto.getRandomValues(bytes);
+  return `scene-view-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
 
 function unifiedConversationUiEnabled() {
   try {
@@ -95,6 +161,32 @@ function unifiedConversationUiEnabled() {
   } catch {
     return true;
   }
+}
+
+// Second-clock wrapper for the composer activity indicator: the tick used to live on ChatView
+// top-level state, so while busy the whole ChatView (including all transcript coordination)
+// re-rendered once per second; the indicator is the only place showing elapsed time, and now the
+// tick re-renders just this small subtree.
+/**
+ * @param {object} props - component props
+ * @param {{ status: string } | null} props.turn - active conversation turn, if any
+ * @param {() => void} props.onRequestAttention - scroll-to-bottom request handler
+ * @param {string} props.className - extra class for the indicator
+ * @param {object} props.copy - conversation copy table
+ * @returns {React.ReactElement | null} the ticking activity indicator
+ */
+function LiveConversationActivityIndicator({ turn, onRequestAttention, className, copy }) {
+  const running = !!turn && turn.status === 'running';
+  const now = useConversationSecondClock(running);
+  return (
+    <ConversationActivityIndicator
+      turn={turn}
+      now={now}
+      onRequestAttention={onRequestAttention}
+      className={className}
+      copy={copy}
+    />
+  );
 }
 
 const WORK_MODE_SUBTABS = [
@@ -107,6 +199,22 @@ const DESIGN_MODE_SUBTABS = [
   { key: 'data-visualization', labelKey: 'dataVisualization', Icon: BarChart2 },
   { key: 'ppt', labelKey: 'pptDesign', Icon: Presentation, disabled: true, disabledReasonKey: 'pptUnavailable' },
 ];
+
+// legacy assistant 气泡由 item.text 现算 markdown(懒语言注册后恢复高亮所必需),
+// 但 ChatBubble 未 memo 化:输入框每个按键、流式每个 delta、秒级 tick 都会全量
+// 重渲染,长会话下每次全量重跑 marked+DOMPurify。content-visibility(#275)只省
+// 浏览器合成,不省 React 渲染。item 引用稳定(bridge 会话数据),按 item 键控、
+// text+syntaxVersion 未变直接复用上次结果;版本号 bump(懒语言注册)自然失效重算。
+const legacyMarkdownCache = new WeakMap();
+function renderLegacyMarkdownCached(item, syntaxVersion) {
+  const cached = legacyMarkdownCache.get(item);
+  if (cached && cached.text === item.text && cached.version === syntaxVersion) {
+    return cached.html;
+  }
+  const html = renderMarkdown(item.text);
+  legacyMarkdownCache.set(item, { text: item.text, version: syntaxVersion, html });
+  return html;
+}
 
 function localizeSceneTabs(items, copy) {
   return items.map(item => ({
@@ -142,7 +250,8 @@ const openChatExternalUrl = (url) => {
 
 const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const [hovered, setHovered] = useState(null);
-      const tool = localizeTool(tsToolsData.find(item => item.backendId === toolId), t);
+      // 组合包化的本地能力(pptx)已无商店连接器卡,欢迎卡数据回退 tsToolWelcomeData
+      const tool = localizeTool(tsToolsData.find(item => item.backendId === toolId) || tsToolWelcomeData.find(item => item.backendId === toolId), t);
       if (!tool || !tool.welcomeQueries) return null;
       const ToolIcon = tool.icon || Sparkles;
       return (
@@ -258,7 +367,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       );
     };
 
-    const SubModePicker = ({ value, onChange, items, icons, testId = 'mode-subtab-picker', comingSoonLabel = '' }) => {
+    const SubModePicker = ({ value, onChange, onImpression, items, icons, testId = 'mode-subtab-picker', comingSoonLabel = '' }) => {
       const trackRef = useRef(null);
       const buttonRefs = useRef({});
       const [indicator, setIndicator] = useState({ left: 0, width: 20, ready: false });
@@ -285,6 +394,27 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         window.addEventListener('resize', updateIndicator);
         return () => window.removeEventListener('resize', updateIndicator);
       }, [items, updateIndicator]);
+
+      useEffect(() => {
+        if (!onImpression) return undefined;
+        const elements = items
+          .map(item => ({ item, element: buttonRefs.current[item.key] }))
+          .filter(entry => entry.element);
+        if (!window.IntersectionObserver) {
+          elements.forEach(({ item }) => onImpression(item));
+          return undefined;
+        }
+        const observer = new window.IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting || entry.intersectionRatio < 0.5) return;
+            const item = items.find(candidate => buttonRefs.current[candidate.key] === entry.target);
+            if (item) onImpression(item);
+            observer.unobserve(entry.target);
+          });
+        }, { threshold: 0.5 });
+        elements.forEach(({ element }) => observer.observe(element));
+        return () => observer.disconnect();
+      }, [items, onImpression]);
 
       return (
         <div
@@ -347,7 +477,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       );
     };
 
-    const PersonalWorkbenchTemplatePicker = ({ selectedIndex, onSelect, templates }) => {
+    const PersonalWorkbenchTemplatePicker = ({ selectedIndex, onSelect, templates, copy }) => {
       return (
         <div
           data-testid="personal-workbench-template-picker"
@@ -356,9 +486,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           <div className="flex max-w-full items-center gap-2 overflow-x-auto px-1 py-1">
             {templates.map((template, index) => {
               const selected = selectedIndex === index;
+              const label = copy?.workbenchTemplates?.[template.id] || template.title;
               return (
                 <button
-                  key={template.title}
+                  key={template.id}
                   type="button"
                   data-testid={`personal-workbench-template-${index}`}
                   aria-pressed={selected}
@@ -369,7 +500,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                       : 'bg-[#EEF0F2] text-[#3C4043] hover:bg-[#E3E5E8] hover:text-[#1D1D1F] dark:bg-[#2A2B2D] dark:text-[#C7C7CC] dark:hover:bg-[#333537] dark:hover:text-white'
                   }`}
                 >
-                  {template.title}
+                  {label}
                 </button>
               );
             })}
@@ -411,7 +542,221 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       );
     };
 
-    const ChatView = ({ theme, t, bs, prefill, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, accountPlatformClient }) => {
+    const ChatRightDockSwitcher = ({
+      theme,
+      artifactsLabel,
+      browserLabel,
+      artifactCount,
+      browserAvailable,
+      browserOpen,
+      activePanelId,
+      onOpenArtifacts,
+      onOpenBrowser,
+    }) => {
+      const [menuOpen, setMenuOpen] = useState(false);
+      const rootRef = useRef(null);
+      const browserSelected = browserAvailable && (
+        activePanelId === 'browser'
+        || (activePanelId !== 'artifact-preview' && browserOpen)
+      );
+      const selectedId = browserSelected ? 'browser' : 'artifact-preview';
+      const selectedLabel = browserSelected ? browserLabel : artifactsLabel;
+      const SelectedIcon = browserSelected ? Globe : Package;
+
+      useEffect(() => {
+        if (!menuOpen) return;
+        const onPointerDown = (event) => {
+          if (!rootRef.current?.contains(event.target)) setMenuOpen(false);
+        };
+        const onKeyDown = (event) => {
+          if (event.key === 'Escape') setMenuOpen(false);
+        };
+        document.addEventListener('pointerdown', onPointerDown);
+        document.addEventListener('keydown', onKeyDown);
+        return () => {
+          document.removeEventListener('pointerdown', onPointerDown);
+          document.removeEventListener('keydown', onKeyDown);
+        };
+      }, [menuOpen]);
+
+      const openPanel = (panelId) => {
+        setMenuOpen(false);
+        const select = panelId === 'browser' ? onOpenBrowser : onOpenArtifacts;
+        void invokeObservedPanelSelection(select, [], reportRightDockSelectionFailure);
+      };
+      const triggerClass = `pointer-events-auto flex h-10 shrink-0 items-center gap-2 rounded-full border px-3 text-[14px] font-medium shadow-sm transition-colors ${
+        theme === 'dark'
+          ? 'border-white/10 bg-[#1E1F20] text-[#E3E3E3] hover:bg-[#333537]'
+          : 'border-black/10 bg-white text-[#1F1F1F] hover:bg-[#F0F4F9]'
+      }`;
+
+      if (!browserAvailable) {
+        return (
+          <button
+            type="button"
+            data-testid="chat-artifacts-entry"
+            onMouseEnter={() => prefetchChatPanel('artifacts')}
+            onFocus={() => prefetchChatPanel('artifacts')}
+            onClick={onOpenArtifacts}
+            className={triggerClass}
+          >
+            <Package size={16} />
+            <span className="max-sm:hidden">{artifactsLabel}</span>
+            {artifactCount > 0 && (
+              <span className="rounded-full bg-[#0B57D0] px-1.5 text-[11px] text-white dark:bg-[#A8C7FA] dark:text-[#062E6F]">
+                {artifactCount}
+              </span>
+            )}
+          </button>
+        );
+      }
+
+      return (
+        <div ref={rootRef} className="pointer-events-auto relative" data-testid="chat-right-dock-switcher">
+          <button
+            type="button"
+            data-testid="chat-right-dock-switcher-trigger"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            title={`${artifactsLabel} / ${browserLabel}`}
+            onMouseEnter={() => prefetchChatPanel('artifacts')}
+            onFocus={() => prefetchChatPanel('artifacts')}
+            onClick={() => setMenuOpen((open) => !open)}
+            className={triggerClass}
+          >
+            <SelectedIcon size={16} />
+            <span className="max-sm:hidden">{selectedLabel}</span>
+            {!browserSelected && artifactCount > 0 && (
+              <span className="rounded-full bg-[#0B57D0] px-1.5 text-[11px] text-white dark:bg-[#A8C7FA] dark:text-[#062E6F]">
+                {artifactCount}
+              </span>
+            )}
+            <ChevronDown
+              size={14}
+              className={`transition-transform ${menuOpen ? 'rotate-180' : ''}`}
+            />
+          </button>
+          {menuOpen && (
+            <div
+              role="menu"
+              className={`absolute right-0 top-full mt-2 w-44 overflow-hidden rounded-xl border p-1 shadow-xl ${
+                theme === 'dark'
+                  ? 'border-white/10 bg-[#252628] text-[#E8EAED]'
+                  : 'border-black/10 bg-white text-[#202124]'
+              }`}
+            >
+              {[
+                { id: 'artifact-preview', label: artifactsLabel, Icon: Package, count: artifactCount },
+                { id: 'browser', label: browserLabel, Icon: Globe, count: 0 },
+              ].map(({ id, label, Icon, count }) => (
+                <button
+                  key={id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selectedId === id}
+                  data-testid={`chat-right-dock-option-${id}`}
+                  onClick={() => openPanel(id)}
+                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors ${
+                    theme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/5'
+                  }`}
+                >
+                  <Icon size={16} className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{label}</span>
+                  {count > 0 && (
+                    <span className="rounded-full bg-[#0B57D0] px-1.5 text-[10px] text-white dark:bg-[#A8C7FA] dark:text-[#062E6F]">
+                      {count}
+                    </span>
+                  )}
+                  {selectedId === id && <Check size={14} className="shrink-0" />}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    // 后台任务指示器（输入框上方"处理中"提示行右侧的蓝色胶囊）：仅当前会话有运行中后台 shell 任务时渲染。
+    // 数据来自 bridge 轮询 reconcile 进 chatItems 的快照（terminal.js
+    // applyShellSnapshots / markBackgroundToolItem），点击弹出列表可查看输出、取消任务。
+    const BackgroundTaskRow = ({ task, t, chatCopy }) => {
+      const { cancelling, cancelError, cancel } = useShellTaskCancel(t);
+      // 计时基线：轮询 reconcile 只在有新输出时改卡片，安静任务的 elapsedMs
+      // 不会变化，走秒由指示器用"基线值 + 本地流逝"自推（每行一个 1s interval，
+      // 仅浮层展开时挂载）。不把秒级 tick 塞进全局 chatItems reconcile——那会让
+      // 整个 ChatView 在后台任务存续期间每秒重渲染一次（second-clock 曾因此
+      // 从 ChatView 顶层移走，见 LiveConversationActivityIndicator 上方注释）。
+      const [now, setNow] = useState(() => Date.now());
+      useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(timer);
+      }, []);
+      // 服务端 elapsedMs 变化（新输出触发 reconcile）时，渲染期同步换基线
+      // （React "adjust state when a prop changes" 模式）；基线时间戳直接用
+      // now 状态，保证渲染纯度。
+      const [elapsedBaseline, setElapsedBaseline] = useState(() => ({ elapsedMs: task.elapsedMs, at: now }));
+      if (elapsedBaseline.elapsedMs !== task.elapsedMs) {
+        setElapsedBaseline({ elapsedMs: task.elapsedMs, at: now });
+      }
+      const elapsedMs = elapsedBaseline.elapsedMs + Math.max(0, now - elapsedBaseline.at);
+      const tail = tailOutputLines(task.output, 3);
+      const lastLine = tailOutputLines(task.output, 1);
+      return (
+        <div className="px-3 py-2 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          data-testid="bg-task-row" data-bg-shell-task-id={task.taskId}>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+            <span className={`flex-1 min-w-0 truncate font-mono text-[12px] ${'text-[#1F1F1F] dark:text-[#E3E3E3]'}`} title={task.command}>{task.command}</span>
+            <span className={`shrink-0 text-[11px] tabular-nums ${'text-[#85888D] dark:text-[#9AA0A6]'}`}>{formatElapsedMs(elapsedMs)}</span>
+            <button type="button" data-testid="bg-cancel-shell-task" disabled={cancelling} onClick={() => cancel(task.sessionId, task.taskId)}
+              aria-label={chatCopy.cancel} title={cancelling ? chatCopy.cancelling : chatCopy.cancel}
+              className={`shrink-0 p-1 rounded-full disabled:opacity-50 transition-colors ${'text-[#85888D] hover:text-[#C5221F] hover:bg-black/5 dark:text-[#9AA0A6] dark:hover:text-[#F28B82] dark:hover:bg-white/10'}`}>
+              <StopCircle size={14} />
+            </button>
+          </div>
+          {lastLine && (
+            <div className={`mt-0.5 pl-3.5 truncate font-mono text-[11px] ${'text-[#9AA0A6] dark:text-[#6E7276]'}`} title={tail}>{lastLine}</div>
+          )}
+          {cancelError && (
+            <div className={`mt-1 ml-3.5 px-2 py-1 rounded-lg text-[11px] truncate ${'bg-red-50 text-[#C5221F] dark:bg-red-500/10 dark:text-[#F28B82]'}`} title={cancelError}>{cancelError}</div>
+          )}
+        </div>
+      );
+    };
+
+    const BackgroundTasksIndicator = ({ tasks, t, chatCopy, compact }) => {
+      const [open, setOpen] = useState(false);
+      const [prevTaskCount, setPrevTaskCount] = useState(tasks.length);
+      const triggerRef = useRef(null);
+      // 任务全部结束时自动收起，避免浮层停留在空列表（渲染期间同步调整 state）。
+      if (prevTaskCount !== tasks.length) {
+        setPrevTaskCount(tasks.length);
+        if (tasks.length === 0) setOpen(false);
+      }
+      if (tasks.length === 0) return null;
+      return (
+        <div className="relative pointer-events-auto">
+          <button type="button" ref={triggerRef} data-testid="chat-bg-tasks-entry"
+            onClick={() => setOpen(value => !value)}
+            aria-label={chatCopy.bgTasks} title={chatCopy.bgTasks}
+            className={`h-6 px-2.5 rounded-full text-[11px] font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 ${'bg-[#E8F0FE] text-[#1967D2] hover:bg-[#D2E3FC] dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#8FB8F8]'}`}>
+            <Terminal size={12} /> <span>{chatCopy.bgTasks}</span>
+            <span className={`px-1 rounded-full text-[10px] ${'bg-white/70 dark:bg-black/15'}`}>{tasks.length}</span>
+          </button>
+          {/* compact 跟随其他输入框弹层的视口契约：窄屏/移动 WebUI 走 portal 锚定路径 */}
+          <ComposerPopover open={open} onClose={() => setOpen(false)} triggerRef={triggerRef} compact={compact}
+            desktopClassName={`absolute bottom-full left-0 mb-2 z-50 w-[360px] max-w-[calc(100vw-24px)] max-h-[420px] overflow-y-auto ${POPOVER_SURFACE}`}>
+            <div className={`px-3 py-2 text-[12px] font-medium ${'text-[#85888D] dark:text-[#9AA0A6]'}`}>{chatCopy.bgTasksRunning(tasks.length)}</div>
+            <div className={`divide-y ${'divide-black/5 dark:divide-white/5'}`}>
+              {tasks.map(task => <BackgroundTaskRow key={task.taskId} task={task} t={t} chatCopy={chatCopy} />)}
+            </div>
+          </ComposerPopover>
+        </div>
+      );
+    };
+
+    // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy main view: session/mode/artifact/browser state is highly cohesive; split refactor tracked separately
+    const ChatView = ({ theme, t, bs, prefill, prefillAppend = false, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, browserDockAvailable = false, browserDockOpen = false, rightDockActivePanelId = null, onRightDockPanelSelectionChange, onOpenBrowserDock, accountPlatformClient }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -441,8 +786,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const [artifactsOpen, setArtifactsOpen] = useState(false);
       const [artifactsFullscreen, setArtifactsFullscreen] = useState(false);
       const [activeArtifactPath, setActiveArtifactPath] = useState(null);
+      const [artifactDockActivation, setArtifactDockActivation] = useState(0);
       const initialPinvouModeScope = createPinvouModeScopeKey(bs && bs.activeSessionId);
       const [pinvouModeState, setPinvouModeState] = useState(() => loadPinvouModeState(undefined, initialPinvouModeScope));
+      const sceneViewIdRef = useRef(createSceneViewId());
+      const sceneImpressionsRef = useRef(new Set());
       const pinvouModeScopeRef = useRef(initialPinvouModeScope);
       const pinvouModeStateRef = useRef(pinvouModeState);
       const pendingModeScopeMigrationRef = useRef(null);
@@ -469,68 +817,14 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           return merged;
         });
       }, []);
-      // ── 产物分栏:宽屏(≥900)并排可拖、窄屏回退覆盖抽屉 ──
-      const ART_MIN = 360, CHAT_MIN = 360, ART_MAX_RATIO = 0.65, ART_DEFAULT_RATIO = 0.45, ART_NARROW = 900;
-      const clampArtifactWidth = (w, rootW) => {
-        const max = Math.max(ART_MIN, Math.min(Math.round(rootW * ART_MAX_RATIO), rootW - CHAT_MIN));
-        return Math.max(ART_MIN, Math.min(Math.round(w), max));
-      };
-      const rootRef = useRef(null);
+      // Artifacts live in the app-level Right Dock; its host owns narrow-layout fallback.
       const artColRef = useRef(null);
-      const [isWide, setIsWide] = useState(() => (typeof window !== 'undefined' ? window.innerWidth : 1200) >= ART_NARROW);
-      const [artifactW, setArtifactW] = useState(() => {
-        const s = parseInt(localStorage.getItem('pinvou_artifactW') || '', 10);
-        const w = (typeof window !== 'undefined' ? window.innerWidth : 1200);
-        const next = Number.isFinite(s) && s >= ART_MIN ? s : Math.round(w * ART_DEFAULT_RATIO);
-        return clampArtifactWidth(next, w);
-      });
-      useEffect(() => {
-        const onResize = () => {
-          const rootW = rootRef.current ? rootRef.current.getBoundingClientRect().width : window.innerWidth;
-          setIsWide(window.innerWidth >= ART_NARROW);
-          setArtifactW(w => clampArtifactWidth(w, rootW));
-        };
-        onResize();                 // 挂载即测一次(maximized 启动时 init 可能读到小值,这里校正)
-        const t = setTimeout(onResize, 300);  // 再补一发,防 webview 首帧尺寸未定
-        window.addEventListener('resize', onResize);
-        return () => { clearTimeout(t); window.removeEventListener('resize', onResize); };
-      }, []);
-      const startArtifactDrag = (e) => {
-        e.preventDefault();
-        const rect = rootRef.current ? rootRef.current.getBoundingClientRect() : { right: window.innerWidth, width: window.innerWidth };
-        const max = Math.max(ART_MIN, Math.min(Math.round(rect.width * ART_MAX_RATIO), rect.width - CHAT_MIN));
-        const col = artColRef.current;
-        let last = artifactW, raf = 0;
-        if (col) col.style.pointerEvents = 'none';   // 拖动时让产物 iframe 不吃 mousemove(否则往右拖发涩)
-        const onMove = (ev) => {
-          last = Math.max(ART_MIN, Math.min(rect.right - ev.clientX, max));
-          if (raf) return;                            // rAF 合帧:每帧最多改一次
-          raf = requestAnimationFrame(() => {
-            raf = 0;
-            if (col) col.style.width = last + 'px';    // 直接改 DOM 宽度,拖动期间不触发 React 重渲染
-          });
-        };
-        const onUp = () => {
-          document.removeEventListener('mousemove', onMove);
-          document.removeEventListener('mouseup', onUp);
-          if (raf) cancelAnimationFrame(raf);
-          if (col) col.style.pointerEvents = '';
-          document.body.style.cursor = ''; document.body.style.userSelect = '';
-          setArtifactW(last);                          // 仅松手时提交一次 state + 落盘
-          localStorage.setItem('pinvou_artifactW', String(Math.round(last)));
-        };
-        document.addEventListener('mousemove', onMove);
-        document.addEventListener('mouseup', onUp);
-        document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
-      };
-      const resetArtifactW = () => {
-        const rootW = rootRef.current ? rootRef.current.getBoundingClientRect().width : window.innerWidth;
-        const w = clampArtifactWidth(Math.round(rootW * ART_DEFAULT_RATIO), rootW);
-        setArtifactW(w); localStorage.setItem('pinvou_artifactW', String(w));
-      };
       const scrollRef = useRef(null);
+      const conversationContentRef = useRef(null);
       const autoScrollRef = useRef(true);
+      const lastUserSnapLengthRef = useRef(0);
       const lastScrollTopRef = useRef(0);
+      const lastScrollHeightRef = useRef(0);
       const subagentPanelScrollRef = useRef(null);
       const [showScrollBottom, setShowScrollBottom] = useState(false);
       const chatRootRef = useRef(null);
@@ -572,27 +866,99 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         ro.observe(el);
         return () => ro.disconnect();
       }, []);
-      const chatItems = bs ? bs.chatItems : [];
+      // Memoization keeps the reference stable: any domain change in the bs snapshot swaps in a new
+      // object, but unchanged chatItems are shared by reference; without this layer the downstream
+      // projection useMemo would invalidate every render in the empty state ([] literal).
+      const chatItems = useMemo(() => (bs ? bs.chatItems : []), [bs]);
       const activeSessionId = bs ? bs.activeSessionId : null;
+      const activeSessionIdRef = useRef(activeSessionId);
+      activeSessionIdRef.current = activeSessionId;
       const busy = bs ? bs.busy : false;
+      // 停止按钮 single-flight:busy 在首次 cancel_generation 返回前就复位,
+      // 双击会发第二个并发取消请求。cancellingSessionIds 在 invoke 完成前禁用
+      // **对应 session** 的按钮（按 session 集合记录而非全局布尔或单个 sid：
+      // ChatView 在切换 active session 时不 remount，全局 single-flight 会阻断
+      // 新会话的停止，直到旧会话的 invoke 返回；单个 sid 无法表示多个会话
+      // 并发取消——A 取消中切到 B 发起取消再切回 A，A 的标记会被 B 覆盖导致
+      // 按钮误启用。Set 让各会话独立记录，配合后端 turn generation 守护，
+      // 消除跨轮误取消窗口）。
+      const [cancellingSessionIds, setCancellingSessionIds] = useState(() => new Set());
       const activeModelLocal = activeModelIsLocal(bs);
       const hasMessages = chatItems.length > 0;
       const attachments = (bs && bs.attachments) || [];
-      const attachmentDragActive = !!(bs && bs.attachmentDragActive);
       const formatAttachmentError = (error) => {
+        const limitError = formatAttachmentLimitError(error, t.uiAttachments);
+        if (limitError) return limitError;
         const raw = String(error || '');
         if (/under sensitive system dir|crosses sensitive (dir|component)/i.test(raw)) {
           return t.attachProtectedLocation;
         }
         return '';
       };
-      const queued = (bs && bs.queued) || []; // 排队待发消息（当前 session 生成中时积压）
+      // 排队待发消息（当前 session 生成中时积压）。Same stability contract as
+      // chatItems above: the effect reconciling an interrupted queue edit
+      // depends on this array by reference.
+      const queued = useMemo(() => (bs && bs.queued) || [], [bs]);
+      const [queuedEdits, setQueuedEdits] = useState({});
+      const [queuedActions, setQueuedActions] = useState({});
+      const [queuedActionErrors, setQueuedActionErrors] = useState({});
+      const queuedEditInputRef = useRef(null);
+      // ChatView survives session switches. Key transient queue UI state by
+      // session instead of clearing it from an effect: a slow withdrawal in
+      // session A must not disable or surface an error in newly active B.
+      const queuedEditCandidate = activeSessionId ? queuedEdits[activeSessionId] || null : null;
+      const queuedEdit = queuedEditCandidate && queued.some(item => item && item.id === queuedEditCandidate.id)
+        ? queuedEditCandidate
+        : null;
+      const queuedAction = activeSessionId ? queuedActions[activeSessionId] || null : null;
+      const queuedActionBusy = !!(queuedAction && queuedAction.id != null);
+      const queuedActionErrorState = activeSessionId ? queuedActionErrors[activeSessionId] || null : null;
+      const queuedActionError = queuedActionErrorState ? queuedActionErrorState.text : '';
+      const queuedEditFocusKey = queuedEdit ? `${activeSessionId}:${queuedEdit.id}` : '';
+      useLayoutEffect(() => {
+        if (!queuedEditFocusKey || !queuedEditInputRef.current) return;
+        queuedEditInputRef.current.focus();
+        queuedEditInputRef.current.select();
+      }, [queuedEditFocusKey]);
+      // The queue drains itself on turn end while an editor may be open: the
+      // item is sent with its pre-edit text, so a modified draft would be
+      // discarded silently. Disclose it once through the shared action-error
+      // notice. A successful save or an explicit cancel removes the entry
+      // while the item is still queued, so neither lands here.
+      useEffect(() => {
+        if (!queuedEditCandidate || !activeSessionId) return;
+        if (queued.some(item => item && item.id === queuedEditCandidate.id)) return;
+        const lostEntry = queuedEditCandidate;
+        const lostSessionId = activeSessionId;
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- the queue lives in the external bridge store; when a flushed item takes an open editor with it, the stale entry must be dropped and the lost draft disclosed in the same commit
+        setQueuedEdits(current => {
+          if (!current[lostSessionId] || current[lostSessionId].id !== lostEntry.id) return current;
+          const next = { ...current };
+          delete next[lostSessionId];
+          return next;
+        });
+        if (String(lostEntry.text || '') !== String(lostEntry.initial || '')) {
+          const notice = { queuedId: lostEntry.id, text: t.queuedEditInterrupted };
+          setQueuedActionErrors(current => ({ ...current, [lostSessionId]: notice }));
+          window.setTimeout(() => {
+            setQueuedActionErrors(current => {
+              if (current[lostSessionId] !== notice) return current;
+              const next = { ...current };
+              delete next[lostSessionId];
+              return next;
+            });
+          }, 5000);
+        }
+      }, [queuedEditCandidate, queued, activeSessionId, t]);
       const ctxTokens = (bs && bs.tokens) || null; // {input, max}，chat:usage 每轮更新
       const ctxPct = ctxTokens && ctxTokens.max > 0 ? ctxTokens.input / ctxTokens.max : 0;
       const fmtCtxTok = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n);
       const artifactItems = (bs && bs.artifacts) || [];
       const artifactCount = artifactItems.length;
       const latestArtifact = artifactItems[artifactItems.length - 1] || null;
+      // 当前会话仍在运行的后台 shell 任务（编译、下载等），驱动输入框上方的胶囊指示器。
+      // chatItems 只含当前会话条目，且由 bridge 轮询保持新鲜，直接派生即可。
+      const runningShellTasks = deriveRunningShellTasks(chatItems);
       const conversationStarted = chatItems.some(item => item && item.type === 'user') || artifactCount > 0;
       const pinvouMode = pinvouModeState.mode;
       const workSubtab = pinvouModeState.workSubtab;
@@ -614,6 +980,31 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           return next;
         });
       }, []);
+      const trackSceneEntry = useCallback((eventName, l1, l2) => {
+        const fields = sceneRegistryFields(l1, l2);
+        invokeTauri(isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event', {
+          request: {
+            eventName,
+            viewId: sceneViewIdRef.current,
+            ...fields,
+            entryPoint: 'composer',
+          },
+        }).catch(() => {});
+      }, []);
+      const trackSceneImpression = useCallback((l1, item) => {
+        const key = `${l1}:${item.key}`;
+        if (sceneImpressionsRef.current.has(key)) return;
+        sceneImpressionsRef.current.add(key);
+        trackSceneEntry('scene_impression', l1, item.key);
+      }, [trackSceneEntry]);
+      const trackWorkSceneImpression = useCallback(
+        item => trackSceneImpression('work', item),
+        [trackSceneImpression],
+      );
+      const trackDesignSceneImpression = useCallback(
+        item => trackSceneImpression('design', item),
+        [trackSceneImpression],
+      );
       useEffect(() => {
         const nextScope = createPinvouModeScopeKey(activeSessionId);
         if (nextScope === pinvouModeScopeRef.current) return;
@@ -642,6 +1033,14 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         pinvouModeStateRef.current = restored;
         setPinvouModeState(restored);
       }, [activeSessionId, chatItems.length]);
+      // 把当前工作区 lane（work/design）同步给 bridge：草稿态 mode 的全局默认
+      // 按 lane 三分（工作/设计/代码各记各的），lane 是纯前端概念，bridge
+      // 自身不读 localStorage。
+      useEffect(() => {
+        if (bridge.available && bridge.interaction && bridge.interaction.setModeLane) {
+          bridge.interaction.setModeLane(pinvouMode);
+        }
+      }, [pinvouMode]);
       useEffect(() => {
         setSelectedDesignElement(null);
         updatePinvouModeState({ type: 'set-selected-design-element', elementId: undefined });
@@ -656,6 +1055,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (mode !== 'work') clearPersonalWorkbenchTemplateDraft();
         if (mode !== 'design') setSelectedDesignElement(null);
         if (mode === 'design' && artifactCount > 0) {
+          prefetchChatPanel('artifacts');
           if (latestArtifact && latestArtifact.path) setActiveArtifactPath(latestArtifact.path);
           setArtifactsOpen(true);
           setArtifactsFullscreen(true);
@@ -670,18 +1070,21 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }, [handlePinvouModeChange, onSwitchHomeMode]);
       const handleWorkSubtabChange = useCallback((subtab) => {
         const nextSubtab = subtab === pinvouModeStateRef.current.workSubtab ? 'general' : subtab;
+        if (nextSubtab !== 'general') trackSceneEntry('scene_selected', 'work', nextSubtab);
         if (nextSubtab !== PERSONAL_WORKBENCH_SCENE_KEY) clearPersonalWorkbenchTemplateDraft();
         updatePinvouModeState({
           type: 'set-work-subtab',
           subtab: nextSubtab,
         });
-      }, [clearPersonalWorkbenchTemplateDraft, updatePinvouModeState]);
+      }, [clearPersonalWorkbenchTemplateDraft, trackSceneEntry, updatePinvouModeState]);
       const handleDesignSubtabChange = useCallback((subtab) => {
+        const nextSubtab = subtab === pinvouModeStateRef.current.designSubtab ? 'general' : subtab;
+        if (nextSubtab !== 'general') trackSceneEntry('scene_selected', 'design', nextSubtab);
         updatePinvouModeState({
           type: 'set-design-subtab',
-          subtab: subtab === pinvouModeStateRef.current.designSubtab ? 'general' : subtab,
+          subtab: nextSubtab,
         });
-      }, [updatePinvouModeState]);
+      }, [trackSceneEntry, updatePinvouModeState]);
       const handleClearActiveScene = useCallback(() => {
         if (pinvouModeStateRef.current.mode === 'work') {
           clearPersonalWorkbenchTemplateDraft();
@@ -708,6 +1111,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }, [setInputText]);
       const handleComposerInputChange = useCallback((value) => {
         setInputText(value);
+        if (!String(value || '').trim() && bridge.voice && typeof bridge.voice.abandonVoiceResult === 'function') {
+          bridge.voice.abandonVoiceResult();
+        }
         const currentTemplate = getPersonalWorkbenchTemplateById(personalWorkbenchTemplateIdRef.current);
         if (!currentTemplate) return;
         if (!isPersonalWorkbenchTemplateDraftForTemplate(value, currentTemplate)) {
@@ -825,64 +1231,98 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               ? chatViewCopy.placeholderWorkDocument
               : t.placeholder
         : t.placeholder;
-      const hasSkill = !!(bs && bs.workflow && bs.workflow.activeSkillName);
       const isScheduledTaskCreationChat = !!(bs && bs.scheduledTaskCreationSessionId && bs.activeSessionId === bs.scheduledTaskCreationSessionId);
       const scheduledRunContext = bs && bs.scheduledRunContext && bs.scheduledRunContext.sessionId === bs.activeSessionId
         ? bs.scheduledRunContext
         : null;
-      let lastUserId = null;
-      for (let i = chatItems.length - 1; i >= 0; i--) { if (chatItems[i].type === 'user') { lastUserId = chatItems[i].id; break; } }
-      const useUnifiedConversationUi = unifiedConversationUiEnabled();
-      const visibleChatItems = chatItems.filter((item) => !(item.type === 'memory_candidate' && !item.resolved));
-      const latestArtIdByPath = {};
-      chatItems.forEach((item) => {
-        if (item.type === 'artifact_card' && item.path) latestArtIdByPath[item.path] = item.id;
-      });
-      const latestArtifactIds = new Set(Object.values(latestArtIdByPath));
-      const conversationProjection = projectDeepSeekConversation({
-        chatItems: conversationItemsForMode(visibleChatItems, useUnifiedConversationUi),
-        busy,
-        thinking: bs && bs.thinking,
-        tokens: ctxTokens,
-        sessionId: bs && bs.activeSessionId,
-        timelineEvents: bs && bs.turnTimeline,
-        allowScheduledTaskDraft: isScheduledTaskCreationChat,
-      });
-      const activeConversationTurn = [...conversationProjection.turns]
-        .reverse()
-        .find(turn => turn.status === 'running') || null;
-      const [conversationNow, setConversationNow] = useState(Date.now());
-      useEffect(() => {
-        if (!busy || !useUnifiedConversationUi) return undefined;
-        setConversationNow(Date.now());
-        const timer = window.setInterval(() => setConversationNow(Date.now()), 1000);
-        return () => window.clearInterval(timer);
-      }, [busy, useUnifiedConversationUi, bs && bs.thinking && bs.thinking.startedAt]);
+      // The rollback switch is read once at mount: the app has no write path for this key (only the
+      // smoke test writes localStorage before the page loads and then reloads the whole page), so
+      // reading localStorage synchronously per render is pure overhead; reading it into state at mount
+      // keeps the observable behavior unchanged.
+      const [useUnifiedConversationUi] = useState(unifiedConversationUiEnabled);
+      // Conversation projection and derived collections. ChatView re-renders on every keystroke
+      // (composer state), every streaming chunk, and every clock tick; this O(messages) group of
+      // projection/filter/scan steps used to rerun in full inside the render body each time. Bridge
+      // subscription snapshots share unchanged values by reference
+      // (platform/tauri/bridge.js subscriptionStateValue), so memoizing on the input references
+      // recomputes only when the underlying conversation data actually changes; the projection itself
+      // is a read-only pure function (no in-place mutation).
+      const chatThinking = bs ? bs.thinking : undefined;
+      const turnTimeline = bs ? bs.turnTimeline : undefined;
+      const derivedConversation = useMemo(() => {
+        const visibleChatItems = chatItems.filter((item) => !(item.type === 'memory_candidate' && !item.resolved));
+        const latestArtIdByPath = {};
+        chatItems.forEach((item) => {
+          if (item.type === 'artifact_card' && item.path) latestArtIdByPath[item.path] = item.id;
+        });
+        const latestArtifactIds = new Set(Object.values(latestArtIdByPath));
+        // The Set is a fresh reference on every recompute; this additionally derives a value-compared
+        // key (a string) for the renderItem stabilization below as a dep: the callback identity stays
+        // stable while the set contents are unchanged.
+        const latestArtifactIdsKey = Object.values(latestArtIdByPath).sort((left, right) => (
+          left < right ? -1 : left > right ? 1 : 0
+        )).join('\u0000');
+        let lastUserId = null;
+        for (let i = chatItems.length - 1; i >= 0; i--) { if (chatItems[i].type === 'user') { lastUserId = chatItems[i].id; break; } }
+        const conversationProjection = projectDeepSeekConversation({
+          chatItems: conversationItemsForMode(visibleChatItems, useUnifiedConversationUi),
+          busy,
+          thinking: chatThinking,
+          tokens: ctxTokens,
+          sessionId: activeSessionId,
+          timelineEvents: turnTimeline,
+          allowScheduledTaskDraft: isScheduledTaskCreationChat,
+        });
+        // Equivalent to [...turns].reverse().find(turn => turn.status === 'running'):
+        // scan backwards for the last running turn, skipping the full reversed copy.
+        let activeConversationTurn = null;
+        const turns = conversationProjection.turns;
+        for (let i = turns.length - 1; i >= 0; i--) {
+          if (turns[i].status === 'running') { activeConversationTurn = turns[i]; break; }
+        }
+        return { visibleChatItems, latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn };
+      }, [chatItems, busy, ctxTokens, isScheduledTaskCreationChat, useUnifiedConversationUi, chatThinking, turnTimeline, activeSessionId]);
+      const { visibleChatItems, latestArtifactIds, latestArtifactIdsKey, lastUserId, conversationProjection, activeConversationTurn } = derivedConversation;
 
-      // 工作流启用时预填输入框
+      // External entries can prefill the composer and focus its end.
+      // Template/navigation entries (KnowledgeView "continue in chat",
+      // scheduled-task guide, markdown preview, ...) use whole-draft
+      // replacement semantics; failure recovery uses append semantics
+      // (prefillAppend=true, joined with a newline) — the user may have
+      // started the next message during the await and replacement would
+      // clobber it (re-review #4: the two consumer classes stay separate;
+      // recovery must not leak back into template entries).
       useEffect(() => {
         if (prefill) {
-          setInputText(prefill);
+          const merged = (prefillAppend && inputTextRef.current)
+            ? inputTextRef.current + '\n' + prefill
+            : prefill;
+          setInputText(merged);
           setTimeout(() => {
             if (composerRef.current) {
               composerRef.current.focus();
-              composerRef.current.setSelectionRange(prefill.length, prefill.length);
+              composerRef.current.setSelectionRange(merged.length, merged.length);
             }
           }, 80);
           if (onPrefillConsumed) onPrefillConsumed();
         }
-      }, [prefill]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- deps reviewed manually: prefill/prefillAppend only when they change; setInputText is a stable callback, adding onPrefillConsumed would retrigger consumption
+      }, [prefill, prefillAppend]);
 
       // 用户向上翻历史时暂停流式自动贴底；回到底部或发送新消息后恢复。
       useEffect(() => {
         const el = scrollRef.current;
         if (!el) return;
         const onScroll = () => {
-          const near = isNearConversationBottom(el);
-          const movingUp = el.scrollTop < lastScrollTopRef.current - 1;
-          lastScrollTopRef.current = el.scrollTop;
-          if (movingUp) autoScrollRef.current = false;
-          else if (near) autoScrollRef.current = true;
+          const transition = transitionConversationScrollState({
+            scrollElement: el,
+            following: autoScrollRef.current,
+            previousScrollTop: lastScrollTopRef.current,
+            previousScrollHeight: lastScrollHeightRef.current,
+          });
+          lastScrollTopRef.current = transition.scrollTop;
+          lastScrollHeightRef.current = transition.scrollHeight;
+          autoScrollRef.current = transition.following;
           const shouldShow = !autoScrollRef.current && el.scrollHeight > el.clientHeight + 4;
           setShowScrollBottom(v => v === shouldShow ? v : shouldShow);
         };
@@ -900,12 +1340,42 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }
 
       // Auto-scroll：只在原本贴底时滚内部容器到底（绝不动外层窗口，避免浏览历史时被拉回底部）
+      // Mid-turn steer: once the injected user bubble becomes the LAST item, the
+      // streaming assistant item keeps growing ABOVE it — keying the follow only
+      // on the last item's traits freezes live output visually until the turn
+      // ends (length/last-html never change while only the streaming item
+      // updates). Follow the last streaming/running item's traits as well.
+      let streamingFollowHtml;
+      let runningFollowOutputLength;
+      for (let followIdx = chatItems.length - 1; followIdx >= 0; followIdx--) {
+        const followItem = chatItems[followIdx];
+        if (followItem?.streaming && streamingFollowHtml === undefined) {
+          streamingFollowHtml = followItem.html;
+        }
+        if (followItem?.state === 'running' && runningFollowOutputLength === undefined) {
+          runningFollowOutputLength = followItem.output?.length;
+        }
+        if (streamingFollowHtml !== undefined && runningFollowOutputLength !== undefined) break;
+      }
       useEffect(() => {
         const el = scrollRef.current;
         if (!el) return;
         const lastItem = chatItems[chatItems.length - 1];
-        if (!lastItem) { autoScrollRef.current = true; setShowScrollBottom(false); return; }
-        if (autoScrollRef.current || lastItem.type === 'user') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously reset the back-to-bottom button when there are no messages
+        if (!lastItem) { autoScrollRef.current = true; lastUserSnapLengthRef.current = 0; setShowScrollBottom(false); return; }
+        // A mid-turn steered bubble parks a user item LAST while the turn's
+        // streaming output above it keeps changing the follow traits this
+        // effect depends on — the snap for it must fire once per appended
+        // item, or every delta would re-force the bottom and overwrite the
+        // scroll listener's "user scrolled up" state for the rest of the
+        // turn (r13 review M1).
+        if (shouldForceScrollFollow({
+          following: autoScrollRef.current,
+          lastItemType: lastItem.type,
+          itemCount: chatItems.length,
+          lastSnapItemCount: lastUserSnapLengthRef.current,
+        })) {
+          lastUserSnapLengthRef.current = chatItems.length;
           el.scrollTop = el.scrollHeight;
           autoScrollRef.current = true;
           setShowScrollBottom(false);
@@ -916,9 +1386,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }, [
         chatItems.length,
         chatItems[chatItems.length - 1]?.html,
+        streamingFollowHtml,
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- streaming output length is an intentionally narrow conditional-expression dep
         chatItems[chatItems.length - 1]?.state === 'running'
           ? chatItems[chatItems.length - 1]?.output?.length
           : 0,
+        runningFollowOutputLength,
         composerH,
       ]);
 
@@ -934,8 +1407,39 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (el) {
           el.scrollTop = el.scrollHeight;
           lastScrollTopRef.current = el.scrollTop;
+          lastScrollHeightRef.current = el.scrollHeight;
         }
       }, [bs && bs.activeSessionId]);
+
+      // Session content can finish measuring after the active-session effect runs, especially
+      // when an inactive WebView resumes or content-visibility replaces intrinsic estimates.
+      // Keep following the bottom across those layout changes, but never override a user who
+      // deliberately scrolled up.
+      useEffect(() => {
+        const scrollElement = scrollRef.current;
+        const contentElement = conversationContentRef.current;
+        if (!scrollElement || !contentElement) return undefined;
+        return startConversationBottomFollower({
+          scrollElement,
+          contentElement,
+          isFollowing: () => autoScrollRef.current,
+          onMeasured: () => {
+            const measurement = measureConversationScrollGeometry({
+              scrollElement,
+              following: autoScrollRef.current,
+              previousScrollTop: lastScrollTopRef.current,
+              previousScrollHeight: lastScrollHeightRef.current,
+            });
+            lastScrollTopRef.current = measurement.scrollTop;
+            lastScrollHeightRef.current = measurement.scrollHeight;
+          },
+          onRestored: (scrollTop) => {
+            lastScrollTopRef.current = scrollTop;
+            lastScrollHeightRef.current = scrollElement.scrollHeight;
+            setShowScrollBottom(false);
+          },
+        });
+      }, [activeSessionId, hasMessages]);
 
       // 安装工具后新建会话 → 本地显示欢迎卡片（不发 LLM query，不浪费 token）。
       // welcomeToolId 是一次性引导态,必须跟随会话身份:只有"装完工具"(justInstalledTool 非
@@ -949,6 +1453,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const isMultiAgentReadOnly = !MULTI_AGENT_ENABLED
         && !!(bs && bs.modeState && bs.modeState.multiAgent);
       const artifactsVisible = Boolean(activeSessionId && artifactsOpen);
+      const artifactFullscreenPublicationReady = useRightDockOcclusion(
+        'artifact-fullscreen',
+        artifactsVisible && artifactsFullscreen,
+      );
       useEffect(() => {
         if (designAiSessionRef.current && designAiSessionRef.current !== activeSessionId) {
           updateDesignAiState({ text: '', status: 'idle', lastPrompt: '', pendingPath: '', startedAt: 0 });
@@ -974,12 +1482,21 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const closeArtifactsPanel = useCallback(() => {
         setArtifactsFullscreen(false);
         setArtifactsOpen(false);
-      }, []);
-      // 子智能体只读执行记录面板（Codex 式右侧列，ADR-0006）。任何工作会话可开
-      // （裸 agent 在普通工作对话同样可用）；与产物面板互斥，否则窄窗下聊天列被挤没。
-      // null=关闭；agentId 为空进列表页。selectionRequestId 让“详情→返回列表→
-      // 再点同一张主对话卡”也成为一次新选择，不能只靠相同 agentId 的 prop 变化。
+        if (browserDockOpen) {
+          void invokeObservedPanelSelection(
+            onRightDockPanelSelectionChange,
+            ['browser', activeSessionId],
+            reportRightDockSelectionFailure,
+          );
+        }
+      }, [activeSessionId, browserDockOpen, onRightDockPanelSelectionChange]);
+      // Read-only subagent transcript panel (Codex-style right column, ADR-0006).
+      // It is available in every work session, including bare agents in normal chats.
+      // null means closed; an empty agentId opens the list. selectionRequestId makes
+      // detail -> list -> same parent card a new selection even when agentId is unchanged.
       const [subagentPanel, setSubagentPanel] = useState(null);
+      const subagentPanelRequestRef = useRef(0);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously close the sub-agent panel on session switch
       useEffect(() => { setSubagentPanel(null); }, [activeSessionId]);
       const rememberScrollBeforeSubagentPanelChange = useCallback(() => {
         subagentPanelScrollRef.current = captureConversationScrollPosition(
@@ -988,9 +1505,37 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         );
       }, []);
       const closeSubagentPanel = useCallback(() => {
-        rememberScrollBeforeSubagentPanelChange();
-        setSubagentPanel(null);
-      }, [rememberScrollBeforeSubagentPanelChange]);
+        const requestId = subagentPanelRequestRef.current + 1;
+        subagentPanelRequestRef.current = requestId;
+        const requestedSessionId = activeSessionId;
+        const restorePanelId = subagentPanel?.restorePanelId || null;
+        const publishClose = ({ isCurrent = () => true } = {}) => {
+          if (!isSubagentPanelPublicationCurrent({
+            transitionCurrent: isCurrent(),
+            requestId,
+            currentRequestId: subagentPanelRequestRef.current,
+            sessionId: requestedSessionId,
+            currentSessionId: activeSessionIdRef.current,
+          })) return false;
+          rememberScrollBeforeSubagentPanelChange();
+          setSubagentPanel(null);
+          return true;
+        };
+        if (browserDockOpen && restorePanelId && onRightDockPanelSelectionChange) {
+          return invokeObservedPanelSelection(
+            onRightDockPanelSelectionChange,
+            [restorePanelId, requestedSessionId, publishClose],
+            reportRightDockSelectionFailure,
+          );
+        }
+        return publishClose();
+      }, [
+        activeSessionId,
+        browserDockOpen,
+        onRightDockPanelSelectionChange,
+        rememberScrollBeforeSubagentPanelChange,
+        subagentPanel,
+      ]);
       useLayoutEffect(() => {
         const snapshot = subagentPanelScrollRef.current;
         if (!snapshot) return;
@@ -999,6 +1544,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (!el) return;
         restoreConversationScrollPosition(el, snapshot);
         lastScrollTopRef.current = el.scrollTop;
+        lastScrollHeightRef.current = el.scrollHeight;
         if (snapshot.stickToBottom) {
           autoScrollRef.current = true;
           setShowScrollBottom(false);
@@ -1009,33 +1555,91 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         const onOpen = (event) => {
           const detail = event && event.detail;
           if (detail?.sessionId && detail.sessionId !== activeSessionId) return;
-          rememberScrollBeforeSubagentPanelChange();
-          setSubagentPanel((current) => ({
-            agentId: (detail && detail.agentId) || null,
-            selectionRequestId: (current?.selectionRequestId || 0) + 1,
-          }));
-          closeArtifactsPanel();
+          const requestedSessionId = activeSessionId;
+          if (!requestedSessionId) return;
+          const requestId = subagentPanelRequestRef.current + 1;
+          subagentPanelRequestRef.current = requestId;
+          prefetchChatPanel('subagent');
+          const publishOpen = ({ isCurrent = () => true } = {}) => {
+            if (!isSubagentPanelPublicationCurrent({
+              transitionCurrent: isCurrent(),
+              requestId,
+              currentRequestId: subagentPanelRequestRef.current,
+              sessionId: requestedSessionId,
+              currentSessionId: activeSessionIdRef.current,
+            })) return false;
+            rememberScrollBeforeSubagentPanelChange();
+            setSubagentPanel((current) => ({
+              agentId: (detail && detail.agentId) || null,
+              selectionRequestId: (current?.selectionRequestId || 0) + 1,
+              // Re-selecting another agent while this panel is already active
+              // must retain the dock that preceded the first open. App has
+              // already moved browserPaneSelected away from `browser` by then.
+              restorePanelId: current
+                ? current.restorePanelId
+                : browserDockOpen ? rightDockActivePanelId : null,
+            }));
+            return true;
+          };
+          if (onRightDockPanelSelectionChange) {
+            void invokeObservedPanelSelection(
+              onRightDockPanelSelectionChange,
+              ['subagent-transcript', requestedSessionId, publishOpen],
+              reportRightDockSelectionFailure,
+            );
+          } else {
+            publishOpen();
+          }
         };
         window.addEventListener('pinvou:open-subagent', onOpen);
-        return () => window.removeEventListener('pinvou:open-subagent', onOpen);
-      }, [activeSessionId, closeArtifactsPanel, rememberScrollBeforeSubagentPanelChange]);
-      useEffect(() => {
-        if (artifactsVisible) setSubagentPanel(null);
-      }, [artifactsVisible]);
+        return () => {
+          subagentPanelRequestRef.current += 1;
+          window.removeEventListener('pinvou:open-subagent', onOpen);
+        };
+      }, [
+        activeSessionId,
+        browserDockOpen,
+        onRightDockPanelSelectionChange,
+        rememberScrollBeforeSubagentPanelChange,
+        rightDockActivePanelId,
+      ]);
       const handlePreviewArtifact = useCallback((artifact) => {
         setActiveArtifactPath(artifact && artifact.path ? artifact.path : null);
+        setArtifactDockActivation((value) => value + 1);
       }, []);
-      const openArtifactsPreview = useCallback(() => {
-        if (latestArtifact && latestArtifact.path) setActiveArtifactPath(latestArtifact.path);
+      const showArtifactsPreview = useCallback((path) => {
+        prefetchChatPanel('artifacts');
+        if (path) setActiveArtifactPath(path);
         setArtifactsOpen(true);
-      }, [latestArtifact]);
+        setArtifactDockActivation((value) => value + 1);
+        void invokeObservedPanelSelection(
+          onRightDockPanelSelectionChange,
+          ['artifact-preview', activeSessionId],
+          reportRightDockSelectionFailure,
+        );
+      }, [activeSessionId, onRightDockPanelSelectionChange]);
+      const openArtifactsPreview = useCallback(() => {
+        showArtifactsPreview(latestArtifact && latestArtifact.path);
+      }, [latestArtifact, showArtifactsPreview]);
+      useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        const onPresentArtifact = (event) => {
+          const detail = event && event.detail;
+          if (!detail || detail.sessionId !== activeSessionId || !detail.path) return;
+          showArtifactsPreview(detail.path);
+        };
+        window.addEventListener('pinvou:present-artifact', onPresentArtifact);
+        return () => window.removeEventListener('pinvou:present-artifact', onPresentArtifact);
+      }, [activeSessionId, showArtifactsPreview]);
       useEffect(() => {
         const previousCount = previousArtifactCountRef.current;
         previousArtifactCountRef.current = artifactCount;
         if (pinvouMode !== 'design') return;
         if (artifactCount <= previousCount || !latestArtifact || !latestArtifact.path) return;
+        prefetchChatPanel('artifacts');
         setActiveArtifactPath(latestArtifact.path);
         setArtifactsOpen(true);
+        setArtifactDockActivation((value) => value + 1);
       }, [artifactCount, latestArtifact, pinvouMode]);
       const draftEpoch = bs ? bs.draftEpoch : 0;
       // 切换 session / 新建草稿会话时读取各自 working set 里的未发送内容。
@@ -1157,14 +1761,73 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             state: pinvouModeStateRef.current,
           };
         }
+        let dispatchResult;
         try {
-          await bridge.chat.sendMessage(visibleOutgoing, meta);
+          dispatchResult = await bridge.chat.sendMessage(visibleOutgoing, meta);
         } catch (error) {
           pendingModeScopeMigrationRef.current = null;
           throw error;
         }
-        return true;
+        // sendMessage resolves true only when something was actually
+        // dispatched (sent / steered / queued). false marks notice-only early
+        // returns (attachments still parsing, remote-turn sync block): nothing
+        // was sent and the composer text was not put back, so the caller must
+        // restore it — returning false routes the resolve through handleSend's
+        // empty-vs-typed restore instead of silently dropping the draft
+        // (#406). "restored" marks paths that already returned the text to the
+        // composer (first-turn materialization abort, session switch);
+        // restoring again would duplicate it.
+        return dispatchResult !== false;
       }, [activeSessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, t, visualPosterSceneActive]);
+      // ConversationTimeline render-callback stabilization: ConversationTurn is React.memoized, so a
+      // per-render callback identity would make every turn fully re-render each time. Callbacks only
+      // rebuild identity when their inputs change; the latestArtifactIds Set is a fresh reference on
+      // every projection recompute, so the dep is the value-stable latestArtifactIdsKey and the latest
+      // set is read through a ref at render time (the callback only runs during actual rendering, by
+      // which point the ref already points at the committed projection result).
+      const latestArtifactIdsRef = useRef(latestArtifactIds);
+      latestArtifactIdsRef.current = latestArtifactIds;
+      const handleTimelineRenderUser = useCallback((item) => (
+        <ChatBubble
+          item={item}
+          sessionId={activeSessionId}
+          theme={theme}
+          t={t}
+          editable={!busy && !isMultiAgentReadOnly && item.id === lastUserId}
+          conversationVariant="unified"
+        />
+      ), [activeSessionId, busy, isMultiAgentReadOnly, lastUserId, t, theme]);
+      const handleTimelineRenderItem = useCallback((item) => {
+        // reasoning items are handled by ConversationTimeline's ReasoningItem and must not be handed to
+        // the legacy ChatBubble; the latter does not know the type and would return null, silently
+        // swallowing real-time thinking the backend already delivered.
+        if (item.type === 'reasoning') return;
+        if (!item.legacyItem) return;
+        return (
+          <ChatBubble
+            item={item.legacyItem}
+            sessionId={activeSessionId}
+            theme={theme}
+            t={t}
+            onPrefill={setInputText}
+            onSend={sendChatMessage}
+            onOpenEditor={onOpenEditor}
+            isLatestArtifact={latestArtifactIdsRef.current.has(item.legacyItem.id)}
+            allowScheduledTaskDraft={isScheduledTaskCreationChat} showAssistantActions={false}
+          />
+        );
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- latestArtifactIdsKey is an intentional extra dep: a content-keyed proxy for the artifact-id Set (read fresh via latestArtifactIdsRef) so the callback identity only changes when the set contents change
+      }, [activeSessionId, isScheduledTaskCreationChat, latestArtifactIdsKey, onOpenEditor, sendChatMessage, setInputText, t, theme]);
+      const handleTimelineRenderToolItem = useCallback((item) => (item.legacyItem
+        && !isSearchTool(item.tool)
+        && !isFetchTool(item.tool)
+        ? <ToolCard item={item.legacyItem} sessionId={activeSessionId} t={t} variant="timeline" />
+        : undefined), [activeSessionId, t]);
+      const timelineAssistantAvatar = useMemo(() => (
+        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center">
+          <PinvouLogo className="h-5 w-5" title={chatViewCopy.agentName} />
+        </div>
+      ), [chatViewCopy.agentName]);
       const handleDesignAiSubmit = useCallback((text) => {
         const raw = String(text || '').trim();
         if (!raw) return;
@@ -1215,6 +1878,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         ? { left: floatingVoicePos.x + 'px', top: floatingVoicePos.y + 'px' }
         : { left: 'calc(100% - 220px)', top: '50%', transform: 'translateY(-50%)' };
       const voiceAsrSetup = (bs && bs.voiceAsrSetup) || { open: false };
+      const voiceAsrSetupPublicationReady = useRightDockOcclusion(
+        'voice-asr-setup',
+        !!voiceAsrSetup.open && canInstallLocalAsr
+      );
       useEffect(() => {
         const sessionKey = `${activeSessionId || 'draft'}:${draftEpoch}`;
         if (justInstalledTool) {
@@ -1293,6 +1960,41 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (bridge.available) bridge.models.loadSessionModel(activeSessionId);
       }, [activeSessionId]);
 
+      // 普通会话选图即时警告(阶段 G):当前模型图片路由为 unsupported 时在附件区提示,
+      // 仅提示不拦截,发送时后端仍按同一路径复核(chat 命令 image_input_unsupported)。
+      // scheduled 会话发送时不做图片路由(固定工具兜底),这里同样不提示。
+      const hasImageAttachment = attachments.some(a => !!(a && a.result && a.result.kind === 'image'));
+      const isScheduledSession = !!(scheduledRunContext || isScheduledTaskCreationChat);
+      const sessionModelKey = (bs && bs.currentSessionModelId) || (bs && bs.activeModelId) || '';
+      const [imageInputInfo, setImageInputInfo] = useState(null);
+      useEffect(() => {
+        if (!hasImageAttachment || isScheduledSession || !bridge.available
+          || !bridge.models || typeof bridge.models.getImageInputCapability !== 'function') {
+          setImageInputInfo(null);
+          return undefined;
+        }
+        let cancelled = false;
+        bridge.models.getImageInputCapability(activeSessionId)
+          .then(info => { if (!cancelled) setImageInputInfo(info || null); })
+          // 查询失败(如凭据未备/旧后端无此命令)按无警告处理,绝不误报。
+          .catch(() => { if (!cancelled) setImageInputInfo(null); });
+        return () => { cancelled = true; };
+      }, [hasImageAttachment, isScheduledSession, activeSessionId, sessionModelKey, bs && bs.savedModels]);
+      const imageInputWarning = imageInputInfo && imageInputInfo.image_mode === 'unsupported'
+        ? (imageInputInfo.capability === 'unknown' ? t.uiAttachments.imageUnknown : t.uiAttachments.imageUnsupported)
+        : '';
+      // 云上传隐私提示(§11.8/§11.9):图片字节离开本机时告知去向——native 直发看主模型
+      // 端点,fallback 看兜底视觉模型端点(图片实际发给视觉模型);本机 loopback 不显示
+      // 任何云上传字样;查询失败或旧后端无对应字段时 fail-open 不显示。
+      const imagePrivacyHint = imageInputInfo && (
+        (imageInputInfo.image_mode === 'native' && imageInputInfo.is_local_endpoint === false)
+        || (imageInputInfo.image_mode === 'vision_tool_fallback' && imageInputInfo.vision_is_local_endpoint === false)
+      )
+        ? (imageInputInfo.image_mode === 'vision_tool_fallback'
+          ? t.uiAttachments.imageCloudUploadVision
+          : t.uiAttachments.imageCloudUpload)
+        : '';
+
       async function handleSend() {
         // 不再因 busy 拦截:bridge.chat.sendMessage 在生成中会把这句排队(本轮跑完自动发)。
         if (isMultiAgentReadOnly || !canSend) return;
@@ -1301,11 +2003,139 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           setInputText(constrained.text);
           return;
         }
-        const accepted = await sendChatMessage(constrained.text);
-        if (accepted) {
-          setInputText('');
-          personalWorkbenchTemplateIdRef.current = null;
-          setPersonalWorkbenchTemplateId(null);
+        const text = constrained.text;
+        // Clear the composer the moment the button is clicked (before the
+        // await returns); on failure (reserve conflict etc.) or a notice-only
+        // not-dispatched resolution (attachments still parsing, remote-turn
+        // sync block — sendMessage reports false) restore the text — a message
+        // is never silently lost. While busy the bridge steers into
+        // the current turn (with attachments it queues locally), see
+        // sendMessage. The restore replaces wholesale only when the composer is
+        // empty: sendChatMessage awaits capability installs etc. and the user
+        // may have started the next message meanwhile — an unconditional
+        // overwrite would clobber it, so a non-empty composer degrades to an
+        // append-style prefill (newline separator, re-review #4) that does not
+        // interrupt typing.
+        setInputText('');
+        try {
+          const accepted = await sendChatMessage(text);
+          if (!accepted) {
+            if (inputTextRef.current === '') setInputText(text);
+            else if (text) bridge.chat.prefillComposer(text, true);
+          }
+        } catch (error) {
+          if (inputTextRef.current === '') setInputText(text);
+          else if (text) bridge.chat.prefillComposer(text, true);
+          // Swallow here: the bridge already surfaced the failure (notice +
+          // restore), and the primary send paths (Enter / send button) have
+          // no catch of their own — a rethrow would only produce an
+          // unhandledrejection next to the visible recovery.
+          console.warn("[pinvou3][chat-ui] send failed", error);
+        }
+        personalWorkbenchTemplateIdRef.current = null;
+        setPersonalWorkbenchTemplateId(null);
+      }
+
+      // Zap-send a queued chip: interrupt the current generation and send
+      // that queued message immediately (cancel + chat path, abandoning the
+      // current AI progress). On failure the bridge restores the message to
+      // the queue with a notice — nothing to do here. No local single-flight
+      // needed: the bridge removes the chip first, so a double click simply
+      // finds no target.
+      async function handleInterruptQueued(queuedId) {
+        if (isMultiAgentReadOnly) return;
+        if (!bridge.chat || typeof bridge.chat.interruptAndSendQueued !== "function") {
+          // Never silent (this guard's silent return is exactly the
+          // historical "composer cleared but nothing happened" bug shape):
+          // dead on current targets (desktop exports it; web hides the
+          // button), but a missing export should be visible in diagnostics.
+          console.warn("[pinvou3][chat-ui] interruptAndSendQueued unavailable on this host");
+          return;
+        }
+        await bridge.chat.interruptAndSendQueued(activeSessionId, queuedId);
+      }
+
+      /**
+       * @param {number|string} queuedId Queue item identifier.
+       * @param {() => boolean|Promise<boolean>} action Session-scoped bridge operation.
+       */
+      async function runQueuedAction(queuedId, action) {
+        if (isMultiAgentReadOnly || queuedActionBusy) return false;
+        const actionSessionId = activeSessionId;
+        if (!actionSessionId) return false;
+        setQueuedActionErrors(current => {
+          const next = { ...current };
+          delete next[actionSessionId];
+          return next;
+        });
+        setQueuedActions(current => ({ ...current, [actionSessionId]: { id: queuedId } }));
+        /** @param {string} text Failure message to display. */
+        const showFailure = (text) => {
+          const notice = { queuedId, text };
+          setQueuedActionErrors(current => ({ ...current, [actionSessionId]: notice }));
+          window.setTimeout(() => {
+            setQueuedActionErrors(current => {
+              if (current[actionSessionId] !== notice) return current;
+              const next = { ...current };
+              delete next[actionSessionId];
+              return next;
+            });
+          }, 5000);
+        };
+        try {
+          const completed = await action();
+          if (!completed) showFailure(t.queuedActionFailed);
+          return !!completed;
+        } catch (error) {
+          console.warn('[pinvou3][chat-ui] queued message action failed', error);
+          showFailure(t.queuedActionFailed);
+          return false;
+        } finally {
+          setQueuedActions(current => {
+            if (!current[actionSessionId] || current[actionSessionId].id !== queuedId) return current;
+            const next = { ...current };
+            delete next[actionSessionId];
+            return next;
+          });
+        }
+      }
+
+      /** @param {number|string} queuedId Queue item identifier. */
+      function handlePrioritizeQueued(queuedId) {
+        if (!bridge.chat || typeof bridge.chat.prioritizeQueued !== 'function') return;
+        void runQueuedAction(queuedId, () => bridge.chat.prioritizeQueued(activeSessionId, queuedId));
+      }
+
+      /** @param {{id: number|string, attachments?: unknown[]}} item Queue item being edited. */
+      async function handleSaveQueuedEdit(item) {
+        if (!queuedEdit || queuedEdit.id !== item.id) return;
+        const editSessionId = activeSessionId;
+        if (!editSessionId) return;
+        const nextText = String(queuedEdit.text || '').trim();
+        if (!nextText && !(item.attachments || []).length) {
+          const notice = { queuedId: item.id, text: t.queuedEmpty };
+          setQueuedActionErrors(current => ({ ...current, [editSessionId]: notice }));
+          window.setTimeout(() => {
+            setQueuedActionErrors(current => {
+              if (current[editSessionId] !== notice) return current;
+              const next = { ...current };
+              delete next[editSessionId];
+              return next;
+            });
+          }, 5000);
+          return;
+        }
+        if (!bridge.chat || typeof bridge.chat.editQueued !== 'function') return;
+        const completed = await runQueuedAction(item.id, () => (
+          bridge.chat.editQueued(editSessionId, item.id, nextText)
+        ));
+        if (completed) {
+          setQueuedEdits(current => {
+            if (!current[editSessionId] || current[editSessionId].id !== item.id) return current;
+            const next = { ...current };
+            delete next[editSessionId];
+            return next;
+          });
         }
       }
 
@@ -1318,8 +2148,26 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         }
       }
 
-      function handleCancel() {
-        if (bridge.available) bridge.chat.cancelGeneration();
+      async function handleCancel() {
+        // single-flight:同一 session 已在取消中则忽略后续点击，避免并发
+        // cancel_generation。按 session 集合记录（而非全局布尔或单个 sid）——
+        // 多个会话可以同时处于取消中（取消 A 期间切到 B 发起取消，再切回 A，
+        // A 的标记不能被 B 覆盖）。各自 Promise 完成时只删除对应 sid。
+        if (!bridge.available || cancellingSessionIds.has(activeSessionId)) return;
+        const cancellingSid = activeSessionId;
+        setCancellingSessionIds(prev => new Set(prev).add(cancellingSid));
+        try {
+          await bridge.chat.cancelGeneration();
+        } finally {
+          // 只清当前 session 自己的取消标记；若期间已切到别的会话并开始了
+          // 新的取消（cancellingSessionIds 里已有其他 sid），不要误清对方。
+          setCancellingSessionIds(prev => {
+            if (!prev.has(cancellingSid)) return prev;
+            const next = new Set(prev);
+            next.delete(cancellingSid);
+            return next;
+          });
+        }
       }
 
       function finishFloatingVoicePointer(pointerId, event, releaseCapture, reason) {
@@ -1468,23 +2316,32 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             reader.onload = () => {
               const bytes = Array.from(new Uint8Array(reader.result));
               const ext = (file.type.split('/')[1] || 'png');
-              if (bridge.available) bridge.attachments.addPasteImage(`paste-${Date.now()}.${ext}`, bytes);
+            if (bridge.available) {
+              bridge.attachments.addPasteImage(
+                `paste-${Date.now()}.${ext}`,
+                bytes,
+                formatAttachmentError,
+              );
+            }
             };
             reader.readAsArrayBuffer(file);
           }
         }
       }
 
+      const responsiveGutterStyle = {
+        paddingInline: 'clamp(16px, calc((100% - 800px) / 2), 160px)',
+      };
+
       return (
-        <div ref={rootRef} className="flex-1 flex flex-row w-full h-full min-h-0 relative z-10 animate-in fade-in duration-300">
+        <div className="flex-1 flex flex-row w-full h-full min-h-0 relative z-10 animate-in fade-in duration-300">
           <div ref={chatRootRef} className="flex-1 flex flex-col min-w-0 relative h-full">
-            <AttachmentDropOverlay
-              active={attachmentDragActive}
+            <ComposerAttachmentDropOverlay
+              enabled={bridge.available && (!isWeb || can('deviceFileUpload'))}
+              onFiles={files => bridge.attachments.uploadDeviceFiles(files)}
               dark={theme === 'dark'}
               variant={isWeb ? 'web' : 'desktop'}
-              releaseLabel={t.uiAttachments.dropRelease}
-              webTitle={t.uiAttachments.dropWebTitle}
-              webHint={t.uiAttachments.dropWebHint}
+              copy={t.uiAttachments}
             />
 
           {/* Top Header (浮动) */}
@@ -1503,15 +2360,18 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               )}
             </div>
             <div className="flex items-center gap-2">
-              {/* 窄屏：只留图标+计数（避免被左侧返回按钮挤到换行），文字标签 ≥sm 才显示 */}
               {activeSessionId && (
-                <button
-                  data-testid="chat-artifacts-entry"
-                  onClick={openArtifactsPreview}
-                  className={`pointer-events-auto px-4 max-sm:px-3 py-2 rounded-full text-[14px] font-medium flex items-center gap-2 whitespace-nowrap shrink-0 ${'bg-white text-[#1F1F1F] hover:bg-[#F0F4F9] shadow-sm dark:bg-[#1E1F20] dark:text-[#E3E3E3] dark:hover:bg-[#333537]'}`}>
-                  <Package size={16} /> <span className="max-sm:hidden">{t.artifacts}</span>
-                  {artifactCount > 0 && <span className={`text-[11px] px-1.5 rounded-full ${'bg-[#0B57D0] text-white dark:bg-[#A8C7FA] dark:text-[#062E6F]'}`}>{artifactCount}</span>}
-                </button>
+                <ChatRightDockSwitcher
+                  theme={theme}
+                  artifactsLabel={t.artifacts}
+                  browserLabel={t.browser}
+                  artifactCount={artifactCount}
+                  browserAvailable={browserDockAvailable}
+                  browserOpen={browserDockOpen}
+                  activePanelId={rightDockActivePanelId}
+                  onOpenArtifacts={openArtifactsPreview}
+                  onOpenBrowser={onOpenBrowserDock}
+                />
               )}
             </div>
           </div>
@@ -1522,8 +2382,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               不把 overflow flex 容器的尾部 padding 完整计入 scrollHeight。
               空态不滚动，仍需 paddingBottom 让欢迎语在悬浮输入框上方居中。 */}
           <div ref={scrollRef} data-testid="chat-scroll"
-            style={hasMessages ? undefined : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }}
-            className={`flex-1 min-h-0 min-w-0 overflow-y-auto ${(artifactsVisible && isWide) ? 'px-4 md:px-8' : 'px-4 md:px-20 lg:px-40'} custom-scrollbar flex flex-col ${hasSkill ? 'pt-3' : 'pt-20'} max-sm:pt-16 ${hasMessages ? 'justify-start' : 'items-center justify-center'}`}>
+            style={{
+              ...responsiveGutterStyle,
+              ...(hasMessages ? {} : { paddingBottom: (composerH ? composerH + 48 : 160) + 'px' }),
+            }}
+            className={`flex-1 min-h-0 min-w-0 overflow-y-auto custom-scrollbar flex flex-col pt-20 max-sm:pt-16 ${hasMessages ? 'justify-start' : 'items-center justify-center'}`}>
 
             {!hasMessages && !welcomeToolId && (
               /* Gemini Style Centered Empty State */
@@ -1542,79 +2405,64 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   t={t}
                   onSend={(q) => {
                     setWelcomeToolId(null);
-                    sendChatMessage(q);
+                    // sendChatMessage's failure path re-throws (the current
+                    // implementation never rejects, but stay consistent with
+                    // handleSend's defense so it cannot become a floating
+                    // rejection later).
+                    Promise.resolve(sendChatMessage(q)).catch((err) => {
+                      console.warn("[pinvou3][chat-ui] welcome-card send failed", err);
+                    });
                   }}
                 />
               </div>
             )}
 
             {hasMessages && (
-              <div className="max-w-[800px] w-full min-w-0 mx-auto space-y-4">
+              <div ref={conversationContentRef} className="max-w-[800px] w-full min-w-0 mx-auto space-y-4">
                 {useUnifiedConversationUi ? (
                   <ConversationTimeline
                     turns={conversationProjection.turns}
-                    now={conversationNow}
+                    sessionId={activeSessionId}
+                    onRetry={(turn) => {
+                      if (!busy && turn.userText && bridge.available) {
+                        bridge.interaction.editLastTurn(turn.userText, { retryReason: 'manual_regenerate' });
+                      }
+                    }}
                     copy={t.uiConversation}
                     agentLabel={chatViewCopy.agentName}
-                    assistantAvatar={(
-                      <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center">
-                        <PinvouLogo className="h-5 w-5" title={chatViewCopy.agentName} />
-                      </div>
-                    )}
-                    renderUser={(item) => (
-                      <ChatBubble
-                        item={item}
-                        sessionId={activeSessionId}
-                        theme={theme}
-                        t={t}
-                        editable={!busy && !isMultiAgentReadOnly && item.id === lastUserId}
-                        conversationVariant="unified"
-                      />
-                    )}
-                    renderItem={(item) => {
-                      // reasoning 由 ConversationTimeline 的 ReasoningItem 负责，
-                      // 不能交给旧 ChatBubble；后者不认识该类型，会返回 null，
-                      // 导致后端已收到的实时 thinking 被静默吞掉。
-                      if (item.type === 'reasoning') return undefined;
-                      if (!item.legacyItem) return undefined;
-                      return (
-                        <ChatBubble
-                          item={item.legacyItem}
-                          sessionId={activeSessionId}
-                          theme={theme}
-                          t={t}
-                          onPrefill={(text) => setInputText(text)}
-                          onSend={sendChatMessage}
-                          onOpenEditor={onOpenEditor}
-                          isLatestArtifact={latestArtifactIds.has(item.legacyItem.id)}
-                          allowScheduledTaskDraft={isScheduledTaskCreationChat} showAssistantActions={false}
-                        />
-                      );
-                    }}
-                    renderToolItem={(item) => item.legacyItem
-                      && !isSearchTool(item.tool)
-                      && !isFetchTool(item.tool)
-                      ? <ToolCard item={item.legacyItem} sessionId={activeSessionId} t={t} variant="timeline" />
-                      : undefined}
+                    assistantAvatar={(timelineAssistantAvatar)}
+                    renderUser={handleTimelineRenderUser}
+                    renderItem={handleTimelineRenderItem}
+                    renderToolItem={handleTimelineRenderToolItem}
                     onOpenExternal={openChatExternalUrl}
                   />
                 ) : (
                   <>
-                    {visibleChatItems.map((item) => (
-                      <ChatBubble
-                        key={item.id}
-                        item={item}
-                        sessionId={activeSessionId}
-                        theme={theme}
-                        t={t}
-                        onPrefill={(text) => setInputText(text)}
-                        onSend={sendChatMessage}
-                        editable={!busy && !isMultiAgentReadOnly && item.id === lastUserId}
-                        onOpenEditor={onOpenEditor}
-                        isLatestArtifact={latestArtifactIds.has(item.id)}
-                        allowScheduledTaskDraft={isScheduledTaskCreationChat}
-                      />
-                    ))}
+                    {visibleChatItems.map((item) => {
+                      // reasoning 由统一 UI 的 ConversationTimeline 负责，legacy 路径不展示；
+                      // ChatBubble 不认识该类型会返回 null。其余 ChatBubble 返回 null 的情况
+                      // （空流式 assistant、已忽略的记忆候选、未知类型）由 .cv-bubble:empty
+                      // 兜底。空内容绝不能被 content-visibility wrapper 包裹：离屏时空 div 会按
+                      // contain-intrinsic-size 各占 600px，污染 scrollHeight 造成滚动条缩跳与
+                      // 滚底跳变（http://localhost 无关，Safari 18+/Chromium 均复现）。
+                      if (item.type === 'reasoning') return null;
+                      return (
+                        <div key={item.id} className="cv-bubble" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 600px' }}>
+                          <ChatBubble
+                            item={item}
+                            sessionId={activeSessionId}
+                            theme={theme}
+                            t={t}
+                            onPrefill={(text) => setInputText(text)}
+                            onSend={sendChatMessage}
+                            editable={!busy && !isMultiAgentReadOnly && item.id === lastUserId}
+                            onOpenEditor={onOpenEditor}
+                            isLatestArtifact={latestArtifactIds.has(item.id)}
+                            allowScheduledTaskDraft={isScheduledTaskCreationChat}
+                          />
+                        </div>
+                      );
+                    })}
                     {busy && <ThinkingBubble thinking={bs && bs.thinking} theme={theme} t={t} isLocal={activeModelLocal} />}
                   </>
                 )}
@@ -1646,8 +2494,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             </div>
           )}
           {hasMessages && chatItems.some((item) => item.type === 'memory_candidate' && !item.resolved) && (
-            <div className={`pointer-events-none absolute inset-x-0 z-[24] ${(artifactsVisible && isWide) ? 'px-4 md:px-8' : 'px-4 md:px-20 lg:px-40'}`}
-              style={{ bottom: (composerH ? composerH + 28 : 148) + 'px' }}>
+            <div className="pointer-events-none absolute inset-x-0 z-[24]"
+              style={{ ...responsiveGutterStyle, bottom: (composerH ? composerH + 28 : 148) + 'px' }}>
               <div className="max-w-[800px] w-full mx-auto flex flex-col items-end gap-3">
                 {chatItems
                   .filter((item) => item.type === 'memory_candidate' && !item.resolved)
@@ -1708,7 +2556,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             </div>
           )}
           {/* Floating Input Area */}
-          <div ref={composerWrapRef} data-testid="chat-composer-wrap" className={`absolute ${isWeb ? 'bottom-2 sm:bottom-8' : 'bottom-8'} inset-x-0 z-20 ${(artifactsVisible && isWide) ? 'px-4 md:px-8' : 'px-4 md:px-20 lg:px-40'}`}>
+          <div
+            ref={composerWrapRef}
+            data-testid="chat-composer-wrap"
+            className={`absolute ${isWeb ? 'bottom-2 sm:bottom-8' : 'bottom-8'} inset-x-0 z-20`}
+            style={responsiveGutterStyle}
+          >
             <div className="max-w-[800px] w-full mx-auto">
               {modelContinuationBlocked && (
                 <div className="mb-3 rounded-2xl border border-amber-300/70 bg-amber-50/95 p-3 text-[12px] text-amber-950 shadow-lg backdrop-blur dark:border-amber-700/60 dark:bg-amber-950/90 dark:text-amber-100">
@@ -1736,6 +2589,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 <SubModePicker
                   value={workSubtab}
                   onChange={handleWorkSubtabChange}
+                  onImpression={trackWorkSceneImpression}
                   items={workModeSubtabs}
                   testId="work-subtab-picker"
                   comingSoonLabel={chatViewCopy.comingSoon}
@@ -1746,27 +2600,128 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   selectedIndex={PERSONAL_WORKBENCH_TEMPLATES.findIndex(template => template.id === personalWorkbenchTemplateId)}
                   onSelect={handlePersonalWorkbenchTemplateSelect}
                   templates={PERSONAL_WORKBENCH_TEMPLATES}
+                  copy={t.uiChatScenes}
                 />
               )}
               {pinvouMode === 'design' && !conversationStarted && (
                 <SubModePicker
                   value={designSubtab}
                   onChange={handleDesignSubtabChange}
+                  onImpression={trackDesignSceneImpression}
                   items={designModeSubtabs}
                   testId="design-subtab-picker"
                   comingSoonLabel={chatViewCopy.comingSoon}
                 />
               )}
-            {/* 排队待发消息 chips（生成中继续输入会积压到这里，本轮跑完自动发） */}
-            {queued.length > 0 && (
-              <div className="flex flex-col gap-1 mb-2 px-2">
-                {queued.map((q) => (
-                  <div key={q.id} className={`flex items-center gap-1.5 pl-3 pr-1.5 py-1 rounded-full text-[12px] self-start max-w-full ${'bg-[#EAEDF1] text-[#444746] dark:bg-[#2A2B2D] dark:text-[#C4C7C5]'}`}>
-                    <span className="opacity-60">{t.queuedTag}</span>
-                    <span className="max-w-[480px] truncate">{q.displayText}</span>
-                    <button onClick={() => bridge.chat.removeQueued(q.id)} title={t.queuedCancel} className={`w-5 h-5 rounded-full flex items-center justify-center ${'hover:bg-[#F0F4F9] dark:hover:bg-[#333537]'}`}>×</button>
+            {/* Queued-message overlay. Pin makes an item the next safe local
+                send without interrupting the current response; edit preserves
+                attachments and scene metadata. Engine-injected steer chips
+                are mutated only after the bridge confirms their withdrawal.
+                ⚡ remains the explicit interrupt-and-send action. */}
+            {(queued.length > 0 || queuedActionError) && (
+              <div className={`mb-2 rounded-2xl border shadow-lg backdrop-blur-xl overflow-hidden max-h-[40vh] overflow-y-auto ${'border-black/[0.06] bg-white/90 dark:border-white/10 dark:bg-[#161618]/90'}`}>
+                {queued.map((q, index) => (
+                  <div key={q.id}
+                    className={`flex items-center gap-2 px-3 py-2 text-[12px] text-[#444746] dark:text-[#C4C7C5] ${index > 0 ? 'border-t border-black/[0.06] dark:border-white/10' : ''}`}>
+                    <span className="opacity-60 shrink-0">{t.queuedTag}</span>
+                    {queuedEdit && queuedEdit.id === q.id ? (
+                      <textarea
+                        data-testid={`queued-message-edit-${q.id}`}
+                        ref={queuedEditInputRef}
+                        value={queuedEdit.text}
+                        rows={2}
+                        aria-label={t.queuedEdit}
+                        onChange={(event) => setQueuedEdits(current => ({
+                          ...current,
+                          [activeSessionId]: { ...current[activeSessionId], text: event.target.value },
+                        }))}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Escape') {
+                            setQueuedEdits(current => {
+                              const next = { ...current };
+                              delete next[activeSessionId];
+                              return next;
+                            });
+                          }
+                          if (event.key === 'Enter' && !event.shiftKey && !isImeComposing(event)) {
+                            event.preventDefault();
+                            void handleSaveQueuedEdit(q);
+                          }
+                        }}
+                        className="flex-1 min-w-0 resize-none rounded-lg border border-black/10 bg-white/80 px-2 py-1 outline-none focus:border-blue-500 dark:border-white/15 dark:bg-white/5"
+                      />
+                    ) : (
+                      <span className="flex-1 min-w-0 truncate">{q.displayText}</span>
+                    )}
+                    {queuedEdit && queuedEdit.id === q.id ? (
+                      <>
+                        <button type="button" onClick={() => void handleSaveQueuedEdit(q)}
+                          data-testid={`queued-message-save-${q.id}`}
+                          disabled={queuedActionBusy}
+                          aria-label={t.queuedSave} title={t.queuedSave}
+                          className="w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-emerald-600 hover:bg-emerald-500/10 disabled:opacity-40 dark:text-emerald-400">
+                          <Check size={14} />
+                        </button>
+                        <button type="button" onClick={() => setQueuedEdits(current => {
+                          const next = { ...current };
+                          delete next[activeSessionId];
+                          return next;
+                        })}
+                          disabled={queuedActionBusy}
+                          aria-label={t.queuedEditCancel} title={t.queuedEditCancel}
+                          className="w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-[#5F6368] hover:bg-black/5 disabled:opacity-40 dark:text-[#C4C7C5] dark:hover:bg-white/10">
+                          <X size={14} />
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button type="button" onClick={() => handlePrioritizeQueued(q.id)}
+                          data-testid={`queued-message-prioritize-${q.id}`}
+                          disabled={queuedActionBusy || !!queuedEdit || isMultiAgentReadOnly}
+                          aria-label={t.queuedPrioritize} title={t.queuedPrioritize}
+                          className="w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-[#5F6368] hover:bg-black/5 disabled:opacity-40 dark:text-[#C4C7C5] dark:hover:bg-white/10">
+                          <PinIcon size={14} />
+                        </button>
+                        <button type="button" onClick={() => {
+                          setQueuedActionErrors(current => {
+                            const next = { ...current };
+                            delete next[activeSessionId];
+                            return next;
+                          });
+                          setQueuedEdits(current => ({
+                            ...current,
+                            [activeSessionId]: { id: q.id, text: String(q.text || ''), initial: String(q.text || '') },
+                          }));
+                        }}
+                          data-testid={`queued-message-edit-action-${q.id}`}
+                          disabled={queuedActionBusy || !!queuedEdit || isMultiAgentReadOnly}
+                          aria-label={t.queuedEdit} title={t.queuedEdit}
+                          className="w-6 h-6 shrink-0 rounded-full flex items-center justify-center text-[#5F6368] hover:bg-black/5 disabled:opacity-40 dark:text-[#C4C7C5] dark:hover:bg-white/10">
+                          <Edit2 size={14} />
+                        </button>
+                      </>
+                    )}
+                    {can('interruptSend') && (
+                      <button type="button" onClick={() => handleInterruptQueued(q.id)}
+                        disabled={queuedActionBusy || !!queuedEdit || isMultiAgentReadOnly}
+                        aria-label={t.interruptMsg} title={t.interruptMsgTip}
+                        className="w-6 h-6 shrink-0 rounded-full flex items-center justify-center transition-colors text-blue-500 dark:text-blue-400 hover:bg-blue-500/10 active:bg-blue-500/15 disabled:opacity-40">
+                        <Zap size={14} />
+                      </button>
+                    )}
+                    <button type="button" onClick={() => bridge.chat.removeQueued(q.id)}
+                      disabled={queuedActionBusy || !!queuedEdit || isMultiAgentReadOnly}
+                      aria-label={t.queuedCancel} title={t.queuedCancel}
+                      className={`w-6 h-6 shrink-0 rounded-full flex items-center justify-center transition-colors text-[#5F6368] dark:text-[#C4C7C5] disabled:opacity-40 ${'hover:bg-[#F0F4F9] dark:hover:bg-[#333537]'}`}>
+                      <X size={14} />
+                    </button>
                   </div>
                 ))}
+                {queuedActionError && (
+                  <div role="status" className="border-t border-black/[0.06] px-3 py-2 text-[11px] text-amber-700 dark:border-white/10 dark:text-amber-300">
+                    {queuedActionError}
+                  </div>
+                )}
               </div>
             )}
             {/* 模型选择器/知识库挂载已挪进下方底栏(ComposerModelSelector/ComposerKbSelector) */}
@@ -1782,6 +2737,19 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               formatError={formatAttachmentError}
               className="mb-2 px-2"
             />
+            {imageInputWarning && (
+              <div data-testid="image-capability-warning"
+                className="flex items-center gap-2 mb-2 px-3 py-2 rounded-2xl text-[12px] leading-5 bg-amber-500/10 text-amber-700 dark:text-amber-300">
+                <AlertTriangle size={14} className="shrink-0 text-amber-500" />
+                <span className="min-w-0">{imageInputWarning}</span>
+              </div>
+            )}
+            {imagePrivacyHint && (
+              <div data-testid="image-privacy-hint"
+                className="mb-2 px-3 text-[11px] leading-4 text-black/45 dark:text-white/45">
+                {imagePrivacyHint}
+              </div>
+            )}
             {voiceNotice && (
               <div className={`flex items-center justify-between gap-2 mb-2 px-3 py-2 rounded-2xl text-[12px] ${
                 voiceInput.status === 'failed'
@@ -1817,7 +2785,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 <button onClick={() => bridge.voice.closeVoiceAsrSetup()} className={`shrink-0 px-2 py-1 rounded-full font-medium ${'hover:bg-black/5 dark:hover:bg-white/10'}`}>{chatCopy.gotIt}</button>
               </div>
             )}
-            {voiceAsrSetup.open && canInstallLocalAsr && (() => {
+            {voiceAsrSetup.open && canInstallLocalAsr && voiceAsrSetupPublicationReady && (() => {
               const su = voiceAsrSetup;
               const prog = su.progress || {};
               const pct = (prog.stage === 'model' && prog.total) ? Math.floor(prog.downloaded / prog.total * 100) : null;
@@ -1827,7 +2795,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               const needEngine = missing.indexOf('engine') >= 0 || missing.indexOf('runtime') >= 0;
               const modelSizeText = (su.status && su.status.engine && needModel && !needFfmpeg) ? chatCopy.sizeModelOnly : chatCopy.sizeFull;
               return (
-                <div className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/45"
+                // biome-ignore lint/a11y/useKeyWithClickEvents: background click-to-close layer; keyboard path handled by the dialog's cancel button
+                // biome-ignore lint/a11y/noStaticElementInteractions: background click-to-close layer; non-interactive container
+                <div data-testid="voice-asr-setup-dialog" className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/45"
                   onClick={() => { if (!su.installing) bridge.voice.closeVoiceAsrSetup(); }}>
                   <div className={`w-full max-w-[440px] rounded-[20px] shadow-2xl p-6 ${'bg-white text-[#1F1F1F] dark:bg-[#1E1F20] dark:text-[#E3E3E3]'}`}
                     onClick={e => e.stopPropagation()}>
@@ -1897,13 +2867,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   clearLabel={sceneCopy.clear(activeScene.label)}
                 />
               )}
-              <ConversationActivityIndicator
-                turn={activeConversationTurn}
-                now={conversationNow}
-                onRequestAttention={scrollChatToBottom}
-                className="mb-0.5"
-                copy={t.uiConversation}
-              />
+              <div className="flex items-center gap-2 mb-0.5">
+                <LiveConversationActivityIndicator
+                  turn={activeConversationTurn}
+                  onRequestAttention={scrollChatToBottom}
+                  copy={t.uiConversation}
+                />
+                {/* 后台 shell 任务胶囊：跟随"处理中"提示行，任务存续期间常驻（轮次结束后仍运行时也保留入口） */}
+                <BackgroundTasksIndicator tasks={runningShellTasks} t={t} chatCopy={chatCopy} compact={composerCompact} />
+              </div>
               {isMultiAgentReadOnly ? (
                 <div
                   role="note"
@@ -1961,30 +2933,43 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     <Trash2 size={18} />
                   </button>
                 )}
-                {busy ? (
-                  <button onClick={handleCancel}
-                    className="w-9 h-9 shrink-0 rounded-full flex items-center justify-center bg-black/5 dark:bg-white/10 text-[#C5221F] dark:text-[#F28B82] hover:bg-black/10 dark:hover:bg-white/20 transition-colors">
-                    <StopCircle size={20} />
-                  </button>
-                ) : (() => {
+                {(() => {
+                  // While busy, Stop is always shown (typing mid-generation
+                  // must still allow "stop but keep the draft").
+                  // The send button while busy = steer into the current turn
+                  // (with attachments, local queuing); zap-send moved onto the
+                  // queued chips (one per entry), not the send area.
                   const ready = canSend && !sceneCapabilityPreparing;
+                  const isQueue = busy && ready;
                   return (
-                    <button onClick={handleSend} disabled={!ready} aria-label={t.sendMsg} title={t.sendMsg}
-                      className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all ${ready ? 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md hover:-translate-y-0.5 active:translate-y-0' : 'bg-black/5 dark:bg-white/10 text-gray-400 cursor-not-allowed'}`}>
-                      <Send size={17} className="translate-x-[1px]" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      {busy && (
+                        <button type="button" onClick={handleCancel} disabled={cancellingSessionIds.has(activeSessionId)}
+                          className="w-9 h-9 shrink-0 rounded-full flex items-center justify-center bg-black/5 dark:bg-white/10 text-[#C5221F] dark:text-[#F28B82] hover:bg-black/10 dark:hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+                          <StopCircle size={20} />
+                        </button>
+                      )}
+                      {(!busy || hasDraftText || hasReadyAttachment) && (
+                        <button type="button" onClick={handleSend} disabled={!ready}
+                          aria-label={busy ? t.queueMsg : t.sendMsg}
+                          title={busy ? (can('interruptSend') ? t.queueMsgTip : t.queueMsg) : t.sendMsg}
+                          className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center transition-all ${ready ? (isQueue ? 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md ring-2 ring-amber-300 dark:ring-amber-400' : 'bg-gradient-to-b from-[#47A1FF] to-[#007AFF] text-white shadow-md hover:-translate-y-0.5 active:translate-y-0') : 'bg-black/5 dark:bg-white/10 text-gray-400 cursor-not-allowed'}`}>
+                          <Send size={17} className="translate-x-[1px]" />
+                        </button>
+                      )}
+                    </div>
                   );
                 })()}
               </div>
                 </>
               )}
             </div>
-            {ctxTokens && ctxTokens.input > 0 && (
+            {ctxTokens && ctxTokens.max > 0 && (
               <div className={`mt-1.5 px-5 text-[11px] font-mono ${
                 ctxPct >= 0.9 ? 'text-[#C5221F] dark:text-[#F28B82]'
                 : ctxPct >= 0.75 ? 'text-[#B06000] dark:text-[#F9AB00]'
                 : 'text-[#9AA0A6] dark:text-[#5F6368]'}`}>
-                {t.ctxUsage} {fmtCtxTok(ctxTokens.input)} / {fmtCtxTok(ctxTokens.max)} · {Math.round(ctxPct * 100)}%
+                {t.ctxUsage} {ctxTokens.input > 0 ? fmtCtxTok(ctxTokens.input) : '—'} / {fmtCtxTok(ctxTokens.max)} · {Math.round(ctxPct * 100)}%
               </div>
             )}
             <div className="flex items-center justify-center mt-3">
@@ -1994,13 +2979,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           </div>
           </div>{/* /对话列 */}
 
-          {artifactsVisible && artifactsFullscreen && createPortal(
+          {artifactsVisible && artifactsFullscreen && artifactFullscreenPublicationReady && createPortal(
             <div
               ref={artColRef}
               className="fixed left-0 right-0 bottom-0 z-[1000] pointer-events-auto"
               style={{ top: can('desktopChrome') ? '36px' : 0 }}
               data-testid="artifact-fullscreen-panel">
-              <ArtifactsPanel
+              <ViewErrorBoundary t={t} variant="panel">
+              <PanelSuspense>
+              <LazyArtifactsPanel
                 bs={bs}
                 t={t}
                 onClose={closeArtifactsPanel}
@@ -2024,19 +3011,22 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 designAiState={designAiState}
                 onDesignAiStateChange={updateDesignAiState}
               />
+              </PanelSuspense>
+              </ViewErrorBoundary>
             </div>,
             document.body
           )}
 
-          {artifactsVisible && isWide && !artifactsFullscreen && (
-            <>
-              <div onMouseDown={startArtifactDrag} onDoubleClick={resetArtifactW} role="separator" aria-orientation="vertical"
-                className={`shrink-0 w-1.5 h-full cursor-col-resize transition-colors ${'bg-black/10 hover:bg-[#0B57D0]/50 dark:bg-white/10 dark:hover:bg-[#A8C7FA]/60'}`} />
-              <div
-                ref={artColRef}
-                className="shrink-0 h-full relative"
-                style={{ width: artifactW + 'px' }}>
-                <ArtifactsPanel
+          {artifactsVisible && !artifactsFullscreen && (
+            <RightDockPanel
+              panelId="artifact-preview"
+              visible={rightDockActivePanelId !== 'browser'}
+              activationKey={artifactDockActivation}
+              dataTestId="artifact-side-panel"
+            >
+              <ViewErrorBoundary t={t} variant="panel">
+              <PanelSuspense>
+                <LazyArtifactsPanel
                   bs={bs}
                   t={t}
                   onClose={closeArtifactsPanel}
@@ -2060,37 +3050,14 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   designAiState={designAiState}
                   onDesignAiStateChange={updateDesignAiState}
                 />
-              </div>
-            </>
-          )}
-          {artifactsVisible && !isWide && !artifactsFullscreen && (
-            <ArtifactsPanel
-              bs={bs}
-              t={t}
-              onClose={closeArtifactsPanel}
-              isWide={false}
-              isFullscreen={false}
-              onToggleFullscreen={() => setArtifactsFullscreen(true)}
-              preferredArtifactPath={activeArtifactPath}
-              onPreviewArtifact={handlePreviewArtifact}
-              onGotoSettings={onGotoSettings}
-              designMode={pinvouMode === 'design'}
-              designCommand={designCommand}
-              selectedDesignElement={selectedDesignElement}
-              designChanges={visibleDesignChanges}
-              onDesignRuntimeStatus={handleDesignRuntimeStatus}
-              onDesignElementSelected={handleDesignElementSelected}
-              onDesignChangeApplied={handleDesignChangeApplied}
-              onDesignMutation={handleDesignMutation}
-              onDesignApplyChange={handleApplyDesignChange}
-              onDesignClearChanges={handleClearDesignChanges}
-              onDesignAiSubmit={handleDesignAiSubmit}
-              designAiState={designAiState}
-              onDesignAiStateChange={updateDesignAiState}
-            />
+              </PanelSuspense>
+              </ViewErrorBoundary>
+            </RightDockPanel>
           )}
           {subagentPanel && (
-            <SubagentTranscriptPanel
+            <ViewErrorBoundary t={t} variant="panel">
+            <PanelSuspense>
+            <LazySubagentTranscriptPanel
               sessionId={activeSessionId}
               initialAgentId={subagentPanel.agentId}
               selectionRequestId={subagentPanel.selectionRequestId}
@@ -2098,6 +3065,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
               theme={theme}
               onClose={closeSubagentPanel}
             />
+            </PanelSuspense>
+            </ViewErrorBoundary>
           )}
         </div>
       );
@@ -2621,6 +3590,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const localizedMemoryStatus = (label) => memoryStatusLabels[label] || label;
       const assistantSelectionHostRef = useRef(null);
       const assistantSelectionTargetRef = useRef(null);
+      // 懒加载语言注册完成会 bump 版本号:legacy assistant 气泡由 item.text 现算
+      // markdown(见下),订阅版本号让注册后本组件重渲染,历史消息恢复高亮。
+      const syntaxVersion = useSyncExternalStore(subscribeSyntaxHighlight, getSyntaxHighlightVersion);
+      void syntaxVersion;
 
       if (item.type === 'artifact_card') return <ArtifactCard item={item} theme={theme} t={t} isLatest={isLatestArtifact} />;
       if (item.type === 'plan_card') return <PlanCard item={item} t={t} onPrefill={onPrefill} />;
@@ -2641,7 +3614,15 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
 
       if (item.type === 'assistant') {
         if (item.streaming && !item.html) return null; // 空流式气泡交给 ThinkingBubble 表示
-        const html = item.html || '';
+        // 旧会话(legacy)的 assistant 气泡由 item.text 现算 markdown:懒语言注册后
+        // (ChatBubble 顶部订阅 syntaxVersion 触发重渲染)历史消息恢复高亮——若
+        // 沿用冻结的 item.html,首次渲染时未注册的语言将永久纯文本。现算结果按
+        // item 缓存(见 renderLegacyMarkdownCached),重渲染零解析成本。流式消息仍
+        // 走 item.html(增量渲染管线);仅存 html 无 text 的旧消息无法现算,保持
+        // 原样(其语言在启动核心集内,不受懒注册影响)。
+        const html = (!item.streaming && item.text)
+          ? renderLegacyMarkdownCached(item, syntaxVersion)
+          : (item.html || '');
         const streamingDraftLabel = /scheduled-task-draft/.test(html) ? t.uiChatExtra.draftingScheduled : (t && t.cpDesigning);
         const pd = item.streaming ? { draft: null, html: hideStreamingDraft(html, streamingDraftLabel) } : parsePersonaDraft(html);
         const sd = (item.streaming || !allowScheduledTaskDraft) ? { draft: null, html: pd.html } : parseScheduledTaskDraft(pd.html);

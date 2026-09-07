@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 const commandReferencePattern = /^[0-9a-f]{64}$/;
 const rfcUUIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const uuidV7Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -33,7 +34,7 @@ export const safeFormulaInputs = Object.freeze([
   'document_count',
 ]);
 
-export function createProtocolFormulaIdempotencyKey(command, randomUUID = () => crypto.randomUUID()) {
+export function createProtocolFormulaIdempotencyKey(command, randomUUID = () => secureRequestID()) {
   return `admin-${command}-${randomUUID()}`;
 }
 
@@ -157,7 +158,7 @@ function validRequiredUnitMap(value) {
 function validExpressionMap(value, required) {
   if (!plainObject(value) || Object.keys(value).length !== Object.keys(required).length) return false;
   return Object.entries(value).every(([code, input]) => canonicalUnitCode(code)
-    && Object.hasOwn(required, code) && typeof input === 'string' && safeFormulaInputs.includes(input));
+    && Object.prototype.hasOwnProperty.call(required, code) && typeof input === 'string' && safeFormulaInputs.includes(input));
 }
 
 function validProtocolResource(item, expectedStatus) {

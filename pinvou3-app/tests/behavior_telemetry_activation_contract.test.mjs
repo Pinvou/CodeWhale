@@ -1,0 +1,152 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
+
+const rust = behaviorTelemetryRust;
+const usageRust = readFileSync(new URL('../src-tauri/src/platform/telemetry.rs', import.meta.url), 'utf8');
+const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
+const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
+const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
+const settingsView = readFileSync(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
+const settingsCopy = {
+  en: readFileSync(new URL('../src/shared/i18n/en.js', import.meta.url), 'utf8'),
+  ja: readFileSync(new URL('../src/shared/i18n/ja.js', import.meta.url), 'utf8'),
+  zh: readFileSync(new URL('../src/shared/i18n/zh.js', import.meta.url), 'utf8'),
+};
+const appLib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+const acpProviderForm = readFileSync(new URL('../src/features/settings/ProviderFormModal.jsx', import.meta.url), 'utf8');
+const schema = JSON.parse(readFileSync(new URL('../../docs/schemas/behavior-telemetry-v1.schema.json', import.meta.url), 'utf8'));
+
+test('activation cohort is persisted before its one-time event is enqueued', () => {
+  assert.match(rust, /let emit_cohort = !state\.control\.cohort_started/);
+  assert.match(rust, /state\.control\.cohort_started = true;[\s\S]*persist_state\(state\)\?/);
+  assert.match(rust, /BehaviorEvent::new\("analytics_cohort_started"\)/);
+  assert.match(rust, /BehaviorEvent::new\("app_opened"\)/);
+  assert.match(rust, /\.string\("eligibility_source", "first_open"\)/);
+});
+
+test('internal preview defaults on while persisting an explicit user on/off choice', () => {
+  assert.match(rust, /fn behavior_telemetry_enabled_by_config[\s\S]*"0" \| "false" \| "no" \| "off"/);
+  assert.match(rust, /pub fn start_default_collection[\s\S]*set_collection_enabled_inner\(true, None\)/);
+  assert.match(rust, /user_enabled: Option<bool>/);
+  assert.match(rust, /set_user_collection_enabled[\s\S]*Some\(enabled\)/);
+  assert.match(rust, /user_enabled == Some\(false\)/);
+  assert.match(appLib, /behavior_telemetry\.start_default_collection\(\)/);
+  for (const privacyCommand of [
+    'get_behavior_telemetry_status',
+    'set_behavior_telemetry_enabled',
+  ]) {
+    assert.ok(command.includes(privacyCommand));
+    assert.ok(appLib.includes(`commands::behavior_telemetry::${privacyCommand}`));
+    assert.ok(settingsBridge.includes(privacyCommand));
+  }
+  assert.ok(bridge.includes('loadBehaviorTelemetryStatus'));
+  assert.ok(bridge.includes('setBehaviorTelemetryEnabled'));
+  for (const hiddenCommand of [
+    'delete_local_behavior_telemetry_data',
+    'delete_remote_behavior_telemetry_data',
+  ]) {
+    assert.ok(!command.includes(hiddenCommand));
+    assert.ok(!appLib.includes(`commands::behavior_telemetry::${hiddenCommand}`));
+    assert.ok(!settingsBridge.includes(hiddenCommand));
+  }
+  assert.ok(!bridge.includes('deleteLocalBehaviorTelemetryData'));
+  assert.ok(!bridge.includes('deleteRemoteBehaviorTelemetryData'));
+  assert.match(settingsView, /behaviorTelemetry/);
+  assert.match(settingsView, /behaviorAnalyticsEnableConfirm/);
+  assert.match(settingsView, /behaviorAnalyticsDisableConfirm/);
+  assert.match(settingsView, /testId="behavior-analytics-entry"/);
+  assert.match(settingsView, /behaviorAnalyticsEntryTitle[\s\S]*setActiveSection\('data'\)/);
+  assert.doesNotMatch(settingsView, /<SectionButton id="data"/);
+  assert.doesNotMatch(settingsView, /deleteBehaviorTelemetry|deleteRemoteBehaviorTelemetryData/);
+});
+
+test('privacy settings copy states collection boundaries without default or retention claims', () => {
+  assert.match(settingsCopy.zh, /仅收集受控的功能使用结果、耗时和错误分类，不收集对话、文件内容、路径或凭据。/);
+  for (const source of Object.values(settingsCopy)) {
+    assert.doesNotMatch(source, /behaviorAnalyticsRetention/);
+  }
+  assert.doesNotMatch(settingsCopy.zh, /内测期间默认开启|你的开启或关闭选择会保留|可关联数据最多保留/);
+  assert.doesNotMatch(settingsCopy.en, /Enabled by default during preview|Your on\/off choice is retained|Linkable data is retained/);
+  assert.doesNotMatch(settingsCopy.ja, /プレビュー期間中は既定で有効|オン／オフの選択は保持|関連付け可能なデータの保持期間/);
+  assert.doesNotMatch(settingsView, /behaviorAnalyticsRetention/);
+});
+
+test('packaged clients reuse the deployed telemetry bootstrap defaults', () => {
+  assert.match(usageRust, /pub\(crate\) const TELEMETRY_DEFAULT_BASE_URL/);
+  assert.match(usageRust, /pub\(crate\) const TELEMETRY_ENROLLMENT_TOKEN/);
+  assert.match(rust, /unwrap_or_else\(\|_\| TELEMETRY_DEFAULT_BASE_URL\.to_string\(\)\)/);
+  assert.match(rust, /unwrap_or_else\(\|_\| DEFAULT_BEHAVIOR_EVENTS_URL\.to_string\(\)\)/);
+  assert.match(rust, /Err\(_\) => Some\(TELEMETRY_ENROLLMENT_TOKEN\.to_string\(\)\)/);
+});
+
+test('provider setup and first task environment use the v1 lifecycle events', () => {
+  for (const eventName of [
+    'onboarding_started',
+    'onboarding_completed',
+    'provider_setup_started',
+    'provider_setup_completed',
+    'provider_setup_failed',
+    'task_environment_ready',
+  ]) {
+    assert(command.includes(`"${eventName}"`), `Rust command must allow ${eventName}`);
+    assert(settingsBridge.includes(`'${eventName}'`), `settings bridge must emit ${eventName}`);
+  }
+  assert(acpProviderForm.includes("eventName: 'provider_setup_started'"));
+  assert(acpProviderForm.includes("eventName: 'provider_setup_completed'"));
+  assert(acpProviderForm.includes("eventName: 'provider_setup_failed'"));
+  assert.match(acpProviderForm, /isWeb \? 'web_access_track_behavior_event' : 'track_behavior_event'/);
+  assert(!settingsBridge.includes('apiKey: trimmedKey'));
+});
+
+test('client privacy allowlist stays aligned with schema and excludes server identity', () => {
+  const allowlistBody = rust.match(/fn client_event_field_allowed[\s\S]*?fn validate_client_event_fields/)?.[0] || '';
+  const actual = Array.from(allowlistBody.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
+    .toSorted((left, right) => left.localeCompare(right));
+  const expected = schema['x-client-optional-fields'].toSorted((left, right) => left.localeCompare(right));
+  assert.deepEqual(actual, expected);
+  assert.ok(schema['x-server-injected-fields'].includes('account_subject_id'));
+  for (const forbidden of ['message', 'content', 'file_path', 'tool_arguments', 'raw_error']) {
+    assert.ok(!actual.includes(forbidden));
+  }
+});
+
+test('retryable delivery and pending privacy controls keep bounded background retry loops', () => {
+  assert.match(rust, /let retryable_remains = telemetry\.outbox[\s\S]*if retryable_remains \{[\s\S]*tokio::time::sleep/);
+  assert.match(rust, /retry_delay = retry_delay\.saturating_mul\(2\)\.min\(RETRY_MAX_DELAY\)/);
+  assert.match(rust, /async fn run_control_worker[\s\S]*while telemetry\.has_pending_control\(\)\.await/);
+  assert.match(rust, /pending control retry deferred[\s\S]*tokio::select!/);
+  assert.match(rust, /fn wake_control_worker[\s\S]*tx\.try_send/);
+  assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await/);
+  assert.match(rust, /pending_request_matches\(state, &pending\)/);
+  assert.match(rust, /behavior_events_url: state\.behavior_events_url\.clone\(\)/);
+  assert.match(rust, /async fn migrate_endpoint_locked/);
+  assert.match(rust, /StatusCode::GONE[\s\S]*device_credentials_expired[\s\S]*recover_expired_credentials/);
+  assert.match(rust, /async fn recover_expired_credentials/);
+  assert.match(rust, /rebind_period\(&started\.collection_period_id, generation\)/);
+  assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
+  assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
+  assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);
+  assert.match(rust, /prepare_disabled_state\(state, generation\)[\s\S]*persist_state\(state\)[\s\S]*clear_local_transient_state\(\)/);
+  assert.match(rust, /fn clear_local_transient_state[\s\S]*tool_install_terminals\.clear_all\(\)/);
+  assert.match(rust, /fn enter_generation_exhausted_fail_close[\s\S]*credential_renewal_in_progress[\s\S]*tool_install_terminals\.clear_all\(\)/);
+  assert.match(rust, /fresh\.retired_endpoints[\s\S]*fresh\.control\.pending_deletions/);
+  assert.match(rust, /authorization_generation[\s\S]*fn lease_is_current/);
+  assert.match(rust, /fn lease_matches_authorization[\s\S]*generation\.load\(Ordering::Acquire\) == lease\.generation/);
+  assert.match(rust, /fn stale_producer_cannot_write_after_delete_and_reauthorization_aba/);
+  assert.match(rust, /fn disabled_state_survives_restart_before_fallible_cleanup/);
+  assert.match(usageRust, /StatusCode::GONE[\s\S]*credential_has_expired[\s\S]*clear_credentials/);
+  assert.match(usageRust, /credential_has_expired[\s\S]*device_credentials_expired/);
+  assert.match(usageRust, /credential_has_expired\("device_data_deleted"\)/);
+});
+
+test('credential and pending-control state is atomically replaced', () => {
+  const persistence = rust.match(/fn persist_state_at[\s\S]*?fn state_path/)?.[0] || '';
+  assert.match(persistence, /filesystem::atomic_write_private\(path, &data\)/);
+  assert.doesNotMatch(persistence, /create_secret_file|File::create|std::fs::write/);
+  assert.match(rust, /telemetry state is unreadable; collection is disabled/);
+  assert.match(rust, /refusing to replace the persisted installation identity/);
+  assert.match(rust, /state_after_authoritative_deletion[\s\S]*collection_blocked = true/);
+});

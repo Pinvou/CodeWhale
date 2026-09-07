@@ -7,8 +7,9 @@
 //!
 //! 设计对照 `.luzeyang/code-plain-decoupling/skill-scope-governance-实施方案.md`
 //! （已归档，按 §2.1/§2.2/§2.3/§2.4 实现）：
-//!   - 开关落 `~/.pinvou3/disabled_skills.json`（`{plain, code, code_initialized}`，
-//!     与 `disabled_connectors.json` 同构；旧裸数组/旧借道 `skill:` 条目迁移为 plain）；
+//!   - 开关落 `~/.pinvou3/disabled_skills.json`（`{scopes: {<mode>: [...]},
+//!     "initialized": [...]}`，scope 键即模式名，与 `disabled_connectors.json`
+//!     同构；旧裸数组/旧借道 `skill:` 条目/旧双 scope 对象迁移为 plain/新 map）；
 //!   - code scope 未初始化时默认全禁已装技能（外部能力显式开启，封泄露面）；
 //!   - 组合目录 = 来源（用户 skills 目录 + bundle/skills）中**启用**的技能，first-wins
 //!     同名去重，另排除该 scope 被禁用连接器的 companion skills（保持现状联动语义）；
@@ -21,8 +22,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::features::marketplace::skill_marketplace::SkillMarketplaceManager;
-use crate::features::marketplace::{ConnectorScope, MarketplaceManager};
+use crate::features::marketplace::ConnectorScope;
 use crate::platform::paths;
 
 // ---------------------------------------------------------------------------
@@ -39,17 +39,30 @@ pub use crate::features::marketplace::skill_scope::*;
 
 /// 技能来源目录（除项目级），**first-wins 顺序（高优先级在前）**。与底座并集
 /// 语义一致：同名技能按高优先级来源入组合目录、低优先级跳过（底座发现时同名
-/// 不重复加入）。用户手放技能（`~/.pinvou3/user/skills/`）覆盖市场安装
-/// （`bundle/skills/`），与工作流视图 list_skills_v2 的合并顺序一致。
+/// 不重复加入）。用户手放技能（`~/.pinvou3/user/skills/`）覆盖市场安装。
+/// 市场技能自 Phase 2 第十刀按包聚合（`bundles/<pkg>/skills/`，§4）；
+/// `bundle/skills/` 仅保留内置释放技能（visual-design 等非市场包，非市场安装态）；
+/// 迁移前的市场技能残留已随强制迁移清空，不再回退读取。
 fn skill_source_dirs() -> Vec<PathBuf> {
-    vec![paths::user_skills_dir(), paths::bundle_skills_dir()]
+    let mut dirs = vec![paths::user_skills_dir()];
+    if let Ok(rd) = std::fs::read_dir(paths::bundles_root()) {
+        for entry in rd.flatten() {
+            let skills = entry.path().join("skills");
+            if skills.is_dir() {
+                dirs.push(skills);
+            }
+        }
+    }
+    dirs.push(paths::bundle_skills_dir());
+    dirs
 }
 
 /// 项目技能来源目录（workspace 内工具约定，按底座上游 #432 优先级降序，
 /// `.pinvou/skills` 为 pinvou3 自有约定，插在 `.agents/skills` 之后）。
-/// 仅当项目级 skills 开关开启且 scope 为 code 时使用（§2.4：项目内文本是
-/// prompt-injection 面，显式开启才扫描；fork #41 已砍断 workspace 并集发现，
-/// 这里在 app 侧按同一来源顺序补上，经组合目录通道物化）。
+/// 仅当项目级 skills 开关开启且该 scope 的 `project_skills_opt_in` 表字段为
+/// true（当前仅 code）时使用（§2.4：项目内文本是 prompt-injection 面，显式
+/// 开启才扫描；fork #41 已砍断 workspace 并集发现，这里在 app 侧按同一来源
+/// 顺序补上，经组合目录通道物化）。
 fn project_skill_source_dirs(project_workspace: &Path) -> Vec<PathBuf> {
     [
         ".agents/skills",
@@ -67,10 +80,11 @@ fn project_skill_source_dirs(project_workspace: &Path) -> Vec<PathBuf> {
 
 /// 该 scope 的启用技能集合（目录名 → 来源路径），按来源优先级排序。
 ///
-/// 排除两类：本 scope 禁用集中的技能（含未初始化 code 的默认全禁）+ 被禁用
-/// 连接器声明的 companion skills（保持「关 MCP → 关联技能一并隐藏」的既有联动）。
-/// `project_workspace` 仅在 code scope 且项目级 skills 开关开启时被扫描（排在
-/// 用户/市场来源之前，项目本地覆盖语义与底座 workspace 目录优先一致）。
+/// 排除两类：本 scope 禁用集中的技能（含未初始化 DenyAll 模式的默认全禁）+
+/// 被禁用连接器声明的 companion skills（保持「关 MCP → 关联技能一并隐藏」的
+/// 既有联动）。`project_workspace` 仅在该 scope 的 `project_skills_opt_in` 表
+/// 字段为 true 且项目级 skills 开关开启时被扫描（排在用户/市场来源之前，
+/// 项目本地覆盖语义与底座 workspace 目录优先一致）。
 pub fn enabled_skills_for(
     scope: ConnectorScope,
     project_workspace: Option<&Path>,
@@ -78,8 +92,11 @@ pub fn enabled_skills_for(
     let disabled = disabled_skill_names_for(scope);
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<(String, PathBuf)> = Vec::new();
-    // 项目技能优先（workspace 目录 > 全局来源，与底座 first-wins 一致）
-    if scope == ConnectorScope::Code && project_skills_enabled() {
+    // 项目技能优先（workspace 目录 > 全局来源，与底座 first-wins 一致）；
+    // 项目门由模式能力表字段驱动（当前仅 code 为 true）。
+    if crate::features::assistant::session_policy::project_skills_opt_in_for(scope)
+        && project_skills_enabled()
+    {
         if let Some(workspace) = project_workspace {
             for src in project_skill_source_dirs(workspace) {
                 collect_source_skills(&src, &disabled, &mut seen, &mut out);
@@ -89,6 +106,11 @@ pub fn enabled_skills_for(
     for src in skill_source_dirs() {
         collect_source_skills(&src, &disabled, &mut seen, &mut out);
     }
+    // 设计期差量：该模式不提供的内置自动技能（如 code 模式的视觉设计），组合目录
+    // 物化时按技能名排除——与 runtime 开关（disabled）正交，用户不可开关。
+    let unavailable_builtin =
+        crate::features::assistant::session_policy::unavailable_builtin_skills_for(scope);
+    out.retain(|(name, _)| !unavailable_builtin.contains(&name.as_str()));
     out
 }
 
@@ -120,19 +142,35 @@ fn collect_source_skills(
     }
 }
 
-/// 禁用集（市场 id → 落盘目录名）+ 被禁用连接器的 companion skills → 目录名集合。
-fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String> {
-    let ids = load_disabled_skills_for(scope);
-    let mut names: HashSet<String> = SkillMarketplaceManager::new()
-        .model_skill_names(&ids)
-        .into_iter()
-        .collect();
-    // companion 联动：scope 中被禁用连接器声明的 companion skills 一并排除
-    // （现状 refresh_disabled_skills 只查 plain scope；这里按 scope 各自联动）。
-    let market = MarketplaceManager::new();
-    for cid in crate::features::marketplace::load_disabled_connectors_for(scope) {
-        for sid in market.companion_skills(&cid) {
-            names.insert(sid);
+/// 禁用集的技能**目录名**（execpolicy 硬拦截与物化排除共用口径）。
+///
+/// scope 收敛后：单一禁用集是**包 id**（`disabled_bundles.json`），companion 联动
+/// 不再借道 `companion_skills` 跨查询——包模型（`bundle::skill_owner_package`）按
+/// 条件认领把 companion 技能归属到其 MCP/CLI 包（所属包已装才归包，否则归技能
+/// 自身；与迁移层同口径，见 skill_marketplace），禁用包即排除其全部技能目录。
+/// 因此这里枚举所有技能来源目录，凡属主包在禁用集内的目录名纳入排除集。
+pub(crate) fn disabled_skill_names_for(scope: ConnectorScope) -> HashSet<String> {
+    // 不可用集 = 开关关(disabled) + 不可见(hidden)：两套门控对物化/execpolicy 都是排除。
+    let disabled_packages: HashSet<String> =
+        crate::features::marketplace::unavailable_bundles_for(scope)
+            .into_iter()
+            .collect();
+    let mut names: HashSet<String> = HashSet::new();
+    for src in skill_source_dirs() {
+        let Ok(rd) = std::fs::read_dir(&src) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let owner = crate::features::marketplace::bundle::skill_owner_package(&name);
+            if disabled_packages.contains(&owner) {
+                names.insert(name);
+            }
         }
     }
     names
@@ -284,11 +322,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let prev = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", &dir);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
         f();
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -304,9 +345,10 @@ mod tests {
         std::fs::write(dir.join("companion.txt"), "x").unwrap();
     }
 
-    /// 写连接器 manifest（companion_skills 联动测试用）。
+    /// 写连接器 manifest（companion_skills 联动测试用）。写到新布局
+    /// `bundles/<id>/mcp/`（旧布局已退役，读路径不再回退）。
     fn write_tool_manifest(tool_id: &str, manifest: &str) {
-        let dir = crate::platform::paths::bundle_mcp_servers_dir().join(tool_id);
+        let dir = crate::features::marketplace::mcp_catalog::package_mcp_dir(tool_id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("manifest.json"), manifest).unwrap();
     }
@@ -330,6 +372,16 @@ mod tests {
                 "---\nname: government-writing\n---\n# GW\n",
             )
             .unwrap();
+            // V5「随包」认领：包本体已装才把 companion 技能归属到包。本场景是
+            // 「禁用已装连接器」，先登记 gongwen 安装态，物化排除才按包映射。
+            crate::features::marketplace::store::BundleStore::new()
+                .upsert(
+                    crate::features::marketplace::store::BundleRecord::installed_now(
+                        "gongwen".to_string(),
+                        crate::features::marketplace::store::BundleSource::Preset,
+                    ),
+                )
+                .unwrap();
 
             // 禁用公文 MCP → 组合目录计算排除关联技能
             crate::features::marketplace::save_disabled_connectors(&["gongwen".to_string()]);
@@ -345,6 +397,98 @@ mod tests {
             assert!(
                 enabled.iter().any(|(n, _)| n == "government-writing"),
                 "启用公文 MCP 后关联技能应恢复"
+            );
+        });
+    }
+
+    /// 独立安装的技能（市场单装/手放）即使目录名与未安装连接器声明的 companion
+    /// 重合，也不得被物化排除：V5 条件认领规定「未装包的 companion 保留独立纯
+    /// 技能包形态」（bundle.rs `skill_owner_package`），物化层不存在按 companion
+    /// 名单旁路排除的口径。钉住该约束——任何把 `unavailable_companion_skills()`
+    /// 直接并入排除集的回归都会让本测试变红。
+    #[test]
+    fn standalone_companion_named_skill_survives_uninstalled_connector() {
+        with_temp_home(|| {
+            write_tool_manifest(
+                "gongwen",
+                r#"{"id":"gongwen","name":"公文写作","description":"d","version":"1.0.0","icon":"file-text","category":"办公","mcp_tools":["mcp_gongwen_make_gongwen"],"command":"python","args":["server.py"],"companion_skills":["government-writing"]}"#,
+            );
+            let skill_dir = paths::bundle_skills_dir().join("government-writing");
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: government-writing\n---\n# GW\n",
+            )
+            .unwrap();
+            // 关键前提：gongwen 连接器未安装（无 BundleStore/installed.json 记录）。
+            // 此时 gongwen 仍在清单里声明 government-writing companion，
+            // unavailable_companion_skills() 非空，但技能必须保持可用。
+            assert!(
+                crate::features::marketplace::MarketplaceManager::new()
+                    .unavailable_companion_skills()
+                    .contains(&"government-writing".to_string())
+            );
+
+            let enabled = enabled_skills_for(ConnectorScope::Plain, None);
+            assert!(
+                enabled.iter().any(|(n, _)| n == "government-writing"),
+                "未装连接器时，同名独立技能必须保留独立纯技能包形态"
+            );
+        });
+    }
+
+    /// CLI 连接器（无 manifest）禁用联动：feishu 进 scope 禁用集 → 9 个 lark-*
+    /// 目录全部从组合目录排除（companion 查能力包注册表静态表，无需 manifest）；
+    /// 开回来 → 恢复。
+    #[test]
+    fn cli_connector_companion_skills_excluded_when_disabled() {
+        with_temp_home(|| {
+            for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
+                write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
+            }
+
+            crate::features::marketplace::save_disabled_connectors(&["feishu".to_string()]);
+            let enabled = enabled_skills_for(ConnectorScope::Plain, None);
+            assert!(
+                !enabled.iter().any(|(n, _)| n.starts_with("lark-")),
+                "禁用 feishu 后 lark-* 技能应从组合目录排除"
+            );
+
+            crate::features::marketplace::save_disabled_connectors(&[]);
+            let enabled = enabled_skills_for(ConnectorScope::Plain, None);
+            assert_eq!(
+                enabled
+                    .iter()
+                    .filter(|(n, _)| n.starts_with("lark-"))
+                    .count(),
+                crate::features::marketplace::bundle::LARK_SKILL_DIRS.len(),
+                "启用 feishu 后 lark-* 技能应全部恢复"
+            );
+        });
+    }
+
+    /// code scope 未初始化「默认全禁」覆盖 CLI 连接器技能：lark-* 不注册在
+    /// 技能市场清单（连接门控直接解包），仍被 code 默认禁用兜住；plain 不受影响。
+    #[test]
+    fn code_scope_default_disables_cli_connector_skills() {
+        with_temp_home(|| {
+            for name in crate::features::marketplace::bundle::LARK_SKILL_DIRS {
+                write_skill(&paths::bundle_skills_dir(), name, "# Lark\n");
+            }
+
+            let enabled = enabled_skills_for(ConnectorScope::Code, None);
+            assert!(
+                !enabled.iter().any(|(n, _)| n.starts_with("lark-")),
+                "code 未初始化时 lark-* 技能应默认全禁"
+            );
+            let enabled_plain = enabled_skills_for(ConnectorScope::Plain, None);
+            assert_eq!(
+                enabled_plain
+                    .iter()
+                    .filter(|(n, _)| n.starts_with("lark-"))
+                    .count(),
+                crate::features::marketplace::bundle::LARK_SKILL_DIRS.len(),
+                "plain scope 不应受影响"
             );
         });
     }
@@ -375,10 +519,12 @@ mod tests {
         });
     }
 
-    /// connector id 和用户上传 skill id 同名时，关闭 connector 不应误停用该 skill
-    /// （companion 排除按连接器 manifest 声明，与技能名无关）。
+    /// 统一包模型下，同名 connector 与用户上传 skill 共享同一包 id（`skill:` 前缀
+    /// 借道已清除，id 命名空间统一）：「一个包 = 一个开关」，禁用该包（无论从连接器
+    /// 开关还是技能开关进入）都会一并排除同名技能目录——与旧双文件「同名不误伤」
+    /// 语义相反，是 scope 收敛（todo A 节）的既定行为变更。
     #[test]
-    fn disabling_connector_id_does_not_hide_same_named_user_skill() {
+    fn disabling_package_hides_same_named_skill_unified() {
         with_temp_home(|| {
             write_tool_manifest(
                 "weather",
@@ -396,16 +542,15 @@ mod tests {
             crate::features::marketplace::save_disabled_connectors(&["weather".to_string()]);
             let enabled = enabled_skills_for(ConnectorScope::Plain, None);
             assert!(
-                enabled.iter().any(|(n, _)| n == "weather"),
-                "禁用同名 connector 不应误排除用户上传 skill"
+                !enabled.iter().any(|(n, _)| n == "weather"),
+                "统一包模型下禁用 weather 包应一并排除同名技能目录"
             );
 
-            // 技能自己的开关（独立文件）才会排除它
-            save_disabled_skills_for(ConnectorScope::Plain, &["weather".to_string()]);
+            crate::features::marketplace::save_disabled_connectors(&[]);
             let enabled = enabled_skills_for(ConnectorScope::Plain, None);
             assert!(
-                !enabled.iter().any(|(n, _)| n == "weather"),
-                "禁用 skill id 才应排除用户上传 skill"
+                enabled.iter().any(|(n, _)| n == "weather"),
+                "开回 weather 包后同名技能应恢复"
             );
         });
     }
@@ -518,19 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_uses_session_private_dir() {
-        with_temp_home(|| {
-            seed_sources();
-            let sid = "session-test-3";
-            materialize_session_skills(sid, ConnectorScope::Plain, None).unwrap();
-            assert_eq!(
-                paths::session_skills_dir(sid),
-                paths::sessions_root().join(sid).join("skills")
-            );
-        });
-    }
-
-    #[test]
     fn project_skills_follow_gate_and_priority() {
         with_temp_home(|| {
             // bundle 基线：市场装 visualizer
@@ -620,6 +752,7 @@ mod tests {
 
     #[test]
     fn session_skills_dir_uses_session_private_root() {
+        // 会话技能物化(materialize_session_skills)落点即本目录(两个原测试断言同一等式)。
         let dir = paths::session_skills_dir("abc-123");
         assert_eq!(dir, paths::sessions_root().join("abc-123").join("skills"));
     }

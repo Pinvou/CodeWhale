@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, paymentControlApprovalAction, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
@@ -1114,7 +1115,10 @@ function OrganizationDeletionDialog({ copy, organization, client, onClose, onDel
   );
 }
 
-function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = { organizationID: '', tab: 'overview' }, organizationDirectory = { q: '', status: '', cursor: '' }, routeVersion = 0 }) {
+const DEFAULT_DIRECTORY_ROUTE = Object.freeze({ organizationID: '', tab: 'overview' });
+const DEFAULT_DIRECTORY_QUERY = Object.freeze({ q: '', status: '', cursor: '' });
+
+function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = DEFAULT_DIRECTORY_ROUTE, organizationDirectory = DEFAULT_DIRECTORY_QUERY, routeVersion = 0 }) {
   const [search, setSearch] = useState('');
   const [userCode, setUserCode] = useState('');
   const [userMode, setUserMode] = useState('directory');
@@ -2360,7 +2364,9 @@ function UnitBranch({ unit, copy, disabled, addDisabled, allUnits, onAddChild, o
   );
 }
 
-function FinanceOverviewBlock({ copy, language, surface, load, onDrilldown, canDrilldown = () => true }) {
+const defaultCanDrilldown = () => true;
+
+function FinanceOverviewBlock({ copy, language, surface, load, onDrilldown, canDrilldown = defaultCanDrilldown }) {
   const [state, setState] = useState({ loading: true, data: null, error: null, forbidden: false });
   const generationRef = useRef(0);
   const controllerRef = useRef(null);
@@ -2491,7 +2497,7 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
     const reason = String(reasons[targetKey] || '').trim();
     let approvalInput = null;
     if (!existingApproval) {
-      if (!requestKeysRef.current.has(targetKey)) requestKeysRef.current.set(targetKey, `payment-control-resume-${crypto.randomUUID()}`);
+      if (!requestKeysRef.current.has(targetKey)) requestKeysRef.current.set(targetKey, `payment-control-resume-${secureRequestID()}`);
       approvalInput = buildPaymentControlApprovalDraft(control, product, reason, requestKeysRef.current.get(targetKey));
     }
     if (!canRequest || (!approvalInput && !existingApproval)) return;
@@ -2585,7 +2591,10 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
   );
 }
 
-function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', routeQuery = {}, routeDetail = { type: '', id: '', query: {} }, routeVersion = 0, onRouteTabChange, onRouteQueryChange, onRouteDetailChange, onNavigate, embedded = false, requestTracker }) {
+const EMPTY_BILLING_QUERY = Object.freeze({});
+const EMPTY_BILLING_DETAIL = Object.freeze({ type: '', id: '', query: EMPTY_BILLING_QUERY });
+
+function Billing({ copy, language, data, client, setData, permissions, surface = 'billing', routeTab = '', routeQuery = EMPTY_BILLING_QUERY, routeDetail = EMPTY_BILLING_DETAIL, routeVersion = 0, onRouteTabChange, onRouteQueryChange, onRouteDetailChange, onNavigate, embedded = false, requestTracker }) {
   const defaultTab = surface === 'payments' ? 'orders' : surface === 'products' ? 'prices' : 'wallets';
   const initialFilter = (targetTab, fallback) => routeTab === targetTab
     ? normalizeAdminFinanceQuery(targetTab, routeQuery)
@@ -2612,7 +2621,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
     businessDate: new Date().toISOString().slice(0, 10),
   });
   const [adjustment, setAdjustment] = useState({ walletID: '', amount: '', reason: '' });
-  const [adjustmentRequestKey, setAdjustmentRequestKey] = useState(() => crypto.randomUUID());
+  const [adjustmentRequestKey, setAdjustmentRequestKey] = useState(() => secureRequestID());
   const [walletFilter, setWalletFilter] = useState(() => initialFilter('wallets', {}));
   const [receivableFilter, setReceivableFilter] = useState(() => initialFilter('receivables', {}));
   const [adjustmentFilter, setAdjustmentFilter] = useState(() => initialFilter('adjustments', {}));
@@ -3042,7 +3051,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
       await ensureAdjustmentApproval(created, reason, adjustmentRequestKey);
       await reload();
       setAdjustment({ walletID: '', amount: '', reason: '' });
-      setAdjustmentRequestKey(crypto.randomUUID());
+      setAdjustmentRequestKey(secureRequestID());
       setNotice(copy.billing.adjustmentSubmitted);
     } catch {
       try {
@@ -5420,23 +5429,23 @@ function TokenAccountDetail({ copy, account, route, setRoute, busy, notice, erro
 function UsageRequestDetail({ copy, language, item, busy, notice, error, onBack, onRetry, canRetry }) {
   const rows = [
     [copy.tokens.model, item.model],
-    [copy.accounts.status, <Status value={item.status} />],
-    [copy.tokens.executionStatus, <Status value={item.execution_status} />],
-    [copy.tokens.deliveryStatus, <Status value={item.delivery_status} />],
-    [copy.tokens.cancelStatus, <Status value={item.cancel_status} />],
-    [copy.tokens.settlementStatus, <Status value={item.settlement_status} />],
+    [copy.accounts.status, <Status key="accounts.status" value={item.status} />],
+    [copy.tokens.executionStatus, <Status key="tokens.executionStatus" value={item.execution_status} />],
+    [copy.tokens.deliveryStatus, <Status key="tokens.deliveryStatus" value={item.delivery_status} />],
+    [copy.tokens.cancelStatus, <Status key="tokens.cancelStatus" value={item.cancel_status} />],
+    [copy.tokens.settlementStatus, <Status key="tokens.settlementStatus" value={item.settlement_status} />],
     [copy.tokens.maximum, formatPoints(item.maximum_microcredits, language)],
     [copy.tokens.actual, formatPoints(item.actual_microcredits, language)],
     [copy.tokens.provider, item.provider_id || '—'],
     [copy.tokens.adapterVersion, item.adapter_version || '—'],
-    [copy.tokens.upstreamReference, <TechnicalID value={item.upstream_request_id} copy={copy} compact={false} />],
+    [copy.tokens.upstreamReference, <TechnicalID key="tokens.upstreamReference" value={item.upstream_request_id} copy={copy} compact={false} />],
     [copy.tokens.attemptStatus, item.attempt_status || '—'],
     [copy.tokens.tokens, `${formatNumber(item.input_tokens)} / ${formatNumber(item.output_tokens)} / ${formatNumber(item.cached_input_tokens)}`],
     [copy.tokens.persistedSequence, formatNumber(item.last_persisted_sequence)],
     [copy.tokens.confirmedSequence, formatNumber(item.last_client_confirmed_sequence)],
     [copy.tokens.reconciliationAttempts, formatNumber(item.reconciliation_attempts)],
     [copy.tokens.lastError, item.reconciliation_last_error || item.error_class || '—'],
-    [copy.tokens.cancellationEvidence, <pre className="adm-json-detail">{JSON.stringify(item.cancellation_evidence || [], null, 2)}</pre>],
+    [copy.tokens.cancellationEvidence, <pre key="tokens.cancellationEvidence" className="adm-json-detail">{JSON.stringify(item.cancellation_evidence || [], null, 2)}</pre>],
     [copy.tokens.started, formatDate(item.started_at)],
     [copy.billing.updated, formatDate(item.updated_at)],
   ];
@@ -6078,10 +6087,10 @@ function AuditDetail({ copy, item, onBack }) {
     [copy.audit.source, 'Account Service'],
     [copy.audit.actor, item.actor_display_name || item.actor_email || <TechnicalID value={item.actor_user_id} copy={copy} compact={false} />],
     [copy.audit.action, item.action],
-    [copy.audit.resource, <span>{item.resource_type} · <TechnicalID value={item.resource_id} copy={copy} compact={false} /></span>],
-    [copy.audit.result, <Status value={item.result} />],
-    [copy.audit.request, <TechnicalID value={item.request_id} copy={copy} compact={false} />],
-    [copy.audit.organization, <TechnicalID value={item.active_organization_id} copy={copy} compact={false} />],
+    [copy.audit.resource, <span key="audit.resource">{item.resource_type} · <TechnicalID value={item.resource_id} copy={copy} compact={false} /></span>],
+    [copy.audit.result, <Status key="audit.result" value={item.result} />],
+    [copy.audit.request, <TechnicalID key="audit.request" value={item.request_id} copy={copy} compact={false} />],
+    [copy.audit.organization, <TechnicalID key="audit.organization" value={item.active_organization_id} copy={copy} compact={false} />],
     [copy.audit.occurred, formatDate(item.occurred_at)],
   ];
   return (

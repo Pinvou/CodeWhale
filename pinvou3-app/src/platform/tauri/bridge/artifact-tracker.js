@@ -55,10 +55,10 @@
   // 办公文档 + markdown 报告 + 数据表 + 图片 + 打包件都算成品(覆盖 AI 常见产出格式)。
   // 中间/草稿(.txt/.json/.xml 等)刻意不在此列 → 不进面板,避免一堆过程文件污染产物列表;
   // 这类格式若确是成品,靠模型 present_artifact 显式挂出(present 过的不受扩展名门控)。
-  var DELIVERABLE_EXTS = [
+  var DELIVERABLE_EXTS = new Set([
     "pptx", "ppt", "docx", "doc", "pdf", "html", "htm", "xlsx", "xls",
     "md", "csv", "png", "jpg", "jpeg", "svg", "gif", "webp", "zip",
-  ];
+  ]);
   // tmp/ 是提示词约定的中间文件目录(instructions.md:中间/临时文件一律写 tmp/,
   // 不进产出物列表)。tmp/ 下的文件即使扩展名是成品型(.md/.html 等)也不算自动成品;
   // 确需展示只能靠模型显式 present_artifact(显式 present 不经 isDeliverable 门控)。
@@ -72,7 +72,36 @@
   function isDeliverable(path) {
     if (isTmpPath(path)) return false;
     var ext = (String(path || "").split(".").pop() || "").toLowerCase();
-    return DELIVERABLE_EXTS.indexOf(ext) >= 0;
+    return DELIVERABLE_EXTS.has(ext);
+  }
+  function artifactType(path) {
+    var ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (["doc", "docx", "md", "rtf"].indexOf(ext) >= 0) return "document";
+    if (["xls", "xlsx", "csv"].indexOf(ext) >= 0) return "spreadsheet";
+    if (["ppt", "pptx", "odp"].indexOf(ext) >= 0) return "slides";
+    if (ext === "pdf") return "pdf";
+    if (["png", "jpg", "jpeg", "gif", "webp", "svg"].indexOf(ext) >= 0) return "image";
+    if (["html", "htm"].indexOf(ext) >= 0) return "html";
+    if (["js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "cpp", "h", "css"].indexOf(ext) >= 0) return "code";
+    return "other";
+  }
+  function artifactTelemetryId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return "artifact_" + window.crypto.randomUUID().replace(/-/g, ""); // safari14-ok: guarded above
+    }
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return "artifact_" + Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
+    }
+    return "artifact_" + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
+  function recordArtifactCreated(artifact, sid) {
+    if (!artifact || !sid) return;
+    invoke("track_behavior_event", { request: {
+      eventName: "artifact_created", artifactId: artifact.telemetryId,
+      artifactType: artifact.telemetryType, sessionId: sid,
+    } }).catch(function () {});
   }
   function trackArtifact(path) {
     if (!path) return;
@@ -82,13 +111,15 @@
         // 已有同名:write_file 跟踪的是相对路径、disk watcher 推的是绝对路径——同一文件
         // 两种 path 会重复。新 path 绝对而旧的相对则用绝对替换(open 可靠),否则忽略重复。
         if (isAbsPath(path) && !isAbsPath(state.artifacts[i].path)) {
-          state.artifacts[i] = { path: path, basename: bn };
+          state.artifacts[i] = Object.assign({}, state.artifacts[i], { path: path, basename: bn });
           notify();
         }
         return;
       }
     }
-    state.artifacts.push({ path: path, basename: bn });
+    var artifact = { path: path, basename: bn, telemetryId: artifactTelemetryId(), telemetryType: artifactType(path) };
+    state.artifacts.push(artifact);
+    recordArtifactCreated(artifact, state.activeSessionId);
     notify();
   }
   function markTurnDirtyArtifact(path) {
@@ -102,19 +133,47 @@
     state.artifacts = state.artifacts.filter(function (a) { return a.path !== path; });
     if (state.artifacts.length !== before) notify();
   }
-  // 自动续卡支撑:这个文件之前是否被 present_artifact 展示过(同 basename)。
-  // 已 present 过 = 用户已确认是成品,后续 File.write/File.edit 修改它就自动
-  // 再弹一张成品卡 —— 不靠 agent 第二次主动调(Qwen3.6 迭代后常漏)。信息直接
-  // 从 chatItems 里的成品卡推导,无需单独 per-session map(chatItems 已按 session
-  // 隔离 + rerender 重建)。返回最近一张同名成品卡(取 title/description 复用)。
+  // Prefer an exact normalized path so an older card is not hidden by a newer
+  // same-named artifact from another directory. Fall back to the basename for
+  // persisted relative paths that must reconcile with an absolute watcher path.
   function findPresentedArtifact(path) {
     var bn = basename(path);
     if (!bn) return null;
+    var normalized = normalizedPath(path);
+    var basenameMatch = null;
     for (var i = state.chatItems.length - 1; i >= 0; i--) {
       var it = state.chatItems[i];
-      if (it.type === "artifact_card" && basename(it.path) === bn) return it;
+      if (it.type !== "artifact_card" || basename(it.path) !== bn) continue;
+      if (normalizedPath(it.path) === normalized) return it;
+      if (!basenameMatch) basenameMatch = it;
     }
-    return null;
+    return basenameMatch;
+  }
+  // Refresh an existing presentation in place so the card keeps its identity
+  // and transcript position. Exact paths win; basename fallback exists only
+  // for persisted relative paths that later resolve to an absolute watcher path.
+  function updatePresentedArtifact(card) {
+    if (!card || !card.path) return null;
+    var existing = findPresentedArtifact(card.path);
+    if (!existing) return null;
+    if (isAbsPath(existing.path) && isAbsPath(card.path) &&
+        normalizedPath(existing.path) !== normalizedPath(card.path)) return null;
+    var bn = basename(card.path);
+    for (var i = state.chatItems.length - 1; i >= 0; i--) {
+      var it = state.chatItems[i];
+      if (it === existing) break;
+      if (it.type === "user") return null;
+      if (it.type === "tool" && fileMutationAction(it.name, it.args) &&
+          extractArtifactPaths(it.args).some(function (ap) { return basename(ap) === bn; })) break;
+    }
+    var stableId = existing.id;
+    var stableAbsolutePath = isAbsPath(existing.path) && !isAbsPath(card.path)
+      ? existing.path
+      : null;
+    Object.assign(existing, card, { type: "artifact_card" });
+    if (stableId !== undefined) existing.id = stableId;
+    if (stableAbsolutePath) existing.path = stableAbsolutePath;
+    return existing;
   }
   // 切换 session 时对账:扫 workspace 磁盘,把实际存在、但跟踪列表里没有的文件补进来。
   // 修「文件已生成在盘上、却因 app 中途重启/跟踪遗漏而不在产物面板」(以磁盘为准)。
@@ -251,6 +310,7 @@
       markTurnDirtyArtifact: markTurnDirtyArtifact,
       untrackArtifact: untrackArtifact,
       findPresentedArtifact: findPresentedArtifact,
+      updatePresentedArtifact: updatePresentedArtifact,
       reconcileArtifacts: reconcileArtifacts,
       extractArtifactPaths: extractArtifactPaths,
       extractArtifactPath: extractArtifactPath,

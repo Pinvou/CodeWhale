@@ -11,7 +11,7 @@ const vm = require('vm');
 
 const indexHtml = [
   'app/main.jsx',
-  'shared/i18n.js',
+  'shared/i18n/zh.js', // 定时任务断言的中文文案在 zh 词典(拆分后)
   'shared/model-options.js',
   'components/layout/NavigationComponents.jsx',
   'features/chat/ChatView.jsx',
@@ -19,11 +19,11 @@ const indexHtml = [
 ].map(file => fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')).join('\n');
 const tauriBridgeFeatureNames = [
   'artifact-tracker', 'chat', 'chat-events', 'sessions', 'terminal', 'scheduled', 'monitor', 'settings', 'memory', 'artifacts', 'personas', 'updater',
-  'remote-control', 'dependencies', 'voice', 'knowledge-model', 'interaction', 'workflow-runtime', 'workflow',
+  'remote-control', 'dependencies', 'voice', 'knowledge-model', 'interaction',
   'multiagent', 'team-relay', 'account-platform'
 ];
 const modelOptionsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'model-options.js'), 'utf8');
-const settingsViewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'SettingsView.jsx'), 'utf8');
+const composerSharedSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'composer-shared.jsx'), 'utf8');
 const bridgeMessages = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'shared', 'bridge-messages.js'),
   'utf8'
@@ -38,6 +38,8 @@ const webBridge = [
   fs.readFileSync(path.join(__dirname, '..', 'src', 'platform', 'web', 'bridge.js'), 'utf8'),
 ].join('\n');
 const scheduledTasksRust = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'features', 'scheduled', 'tasks.rs'), 'utf8');
+// Wave 2 把版本化存储层拆到 stores.rs；read-state 迁移（migrate→default）落该子模块。
+const scheduledStoresRust = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'features', 'scheduled', 'stores.rs'), 'utf8');
 const enginePoolRust = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'features', 'assistant', 'engine_pool.rs'), 'utf8');
 const scheduledTaskPromptRust = scheduledTasksRust.slice(
   scheduledTasksRust.indexOf('const SCHEDULED_TASK_CHAT_PROMPT'),
@@ -91,7 +93,7 @@ assert.ok(
   'App should render the scheduled view'
 );
 assert.ok(
-  /currentView === 'scheduled'\s*&&\s*\([\s\S]{0,1200}scheduledRunContext[\s\S]{0,800}<ChatView[\s\S]{0,1600}<ScheduledTasksView/.test(indexHtml),
+  /currentView === 'scheduled'\s*&&\s*\(\s*[\s\S]{0,1200}scheduledRunContext[\s\S]{0,800}<ChatView[\s\S]{0,1600}<LazyScheduledTasksView/.test(indexHtml),
   'a scheduled run should reuse the full ChatView inside the scheduled route'
 );
 assert.ok(
@@ -146,12 +148,12 @@ assert.ok(
   'the three-second fallback must refresh tasks, selected detail, and runs through one bridge transaction'
 );
 assert.ok(
-  /async function handleSwitchSession\(id\)[\s\S]{0,260}setCurrentView\('chat'\)[\s\S]{0,180}closeMobileSidebar\(\)[\s\S]{0,180}await bridge\.sessions\.switchToSession\(id\)[\s\S]{0,180}if \(!switched\) return;/.test(indexHtml),
-  'ordinary session navigation should enter the chat route immediately while the remote session loads'
+  /const handleSwitchSession = useCallback\(async \(id\) => \{[\s\S]{0,220}runBrowserUiTransition[\s\S]{0,260}setCurrentView\('chat'\)[\s\S]{0,180}await bridge\.sessions\.switchToSession\(id\)[\s\S]{0,180}!switched \|\| !isCurrent\(\)[\s\S]{0,260}channel: 'session'[\s\S]{0,100}hideMode: 'workspace'[\s\S]{0,80}serialize: true/.test(indexHtml),
+  'ordinary session navigation must hide the native browser before publishing the chat route and loading the remote session'
 );
 assert.ok(
-  /async function navigateFromScheduledRun\(nextView[\s\S]{0,480}await bridge\.scheduled\.exitScheduledRunChat\(\)[\s\S]{0,160}if \(!exited\) return false;[\s\S]{0,200}setCurrentView\(nextView\)/.test(indexHtml),
-  'leaving a scheduled run through other navigation must restore its return session first'
+  /async function navigateFromScheduledRun\(nextView[\s\S]{0,520}runBrowserUiTransition[\s\S]{0,260}await bridge\.scheduled\.exitScheduledRunChat\(\)[\s\S]{0,160}!exited \|\| !isCurrent\(\)[\s\S]{0,200}setCurrentView\(nextView\)[\s\S]{0,360}hideMode: bs && bs\.scheduledRunContext[\s\S]{0,80}'workspace'/.test(indexHtml),
+  'leaving a scheduled run must hide the native browser before restoring its return session and publishing the next route'
 );
 assert.ok(
   /onBackScheduledRun=\{\(\) => navigateFromScheduledRun\('scheduled'\)\}/.test(indexHtml),
@@ -233,9 +235,9 @@ assert.ok(
   'blue dots should represent unread run conversations at task and run level'
 );
 assert.ok(
-  indexHtml.includes('data-testid="scheduled-nav-unread"') &&
-    /unread=\{!!\(bs && \(bs\.scheduledTasks \|\| \[\]\)\.some\(task => task\.hasUnreadRuns\)\)\}/.test(indexHtml),
-  'the Scheduled sidebar item should aggregate unread completed runs across tasks'
+  indexHtml.includes("unreadTestId = 'scheduled-nav-unread'") &&
+    /unread=\{!!\(bs && \(\(bs\.scheduledTasks \|\| \[\]\)\.some\(task => task\.hasUnreadRuns\) \|\| \(bs\.scheduledTaskRecentRuns \|\| \[\]\)\.some\(run => run && run\.unread\)\)\)\}/.test(indexHtml),
+  'the Scheduled sidebar item should aggregate unread completed runs across tasks, including retained runs of deleted tasks'
 );
 assert.ok(
   /scheduled_task:run_updated[\s\S]{0,180}scheduleScheduledRunRefresh\(\)/.test(tauriBridge) &&
@@ -250,7 +252,7 @@ assert.ok(
 );
 assert.ok(
   /SCHEDULED_RUN_READ_STATE_SCHEMA_VERSION:\s*u32\s*=\s*2/.test(scheduledTasksRust) &&
-    /registry\.schema_version < SCHEDULED_RUN_READ_STATE_SCHEMA_VERSION[\s\S]{0,220}ScheduledRunReadRegistry::default\(\)/.test(scheduledTasksRust),
+    /impl VersionedRegistry for ScheduledRunReadRegistry[\s\S]{0,700}?fn migrate\([\s\S]*?Self::default\(\)/.test(scheduledStoresRust),
   'legacy read receipts must be reset because they may have been written before completion'
 );
 assert.ok(
@@ -418,13 +420,22 @@ assert.equal(
 );
 assert.ok(
   /selectableModels\(appState\.savedModels \|\| \[\]\)/.test(indexHtml) &&
-    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\]\)/.test(settingsViewSource),
+    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\]\)/.test(composerSharedSource),
   'settings and scheduled tasks should share catalog-only model visibility'
 );
 assert.ok(
   /label:\s*selectorMainLabel\(model, t\)/.test(indexHtml) &&
     !/label:\s*model\.name && model\.name !== model\.model \?/.test(indexHtml),
   'scheduled model selection should display the wire model instead of stale display names'
+);
+assert.ok(
+  /footerAction, alwaysCommit = false,/.test(indexHtml) &&
+    /if \(alwaysCommit \|\| !active\) onChange\(option\.value\);/.test(indexHtml) &&
+    /onChange=\{value => editModel\(value\)\} alwaysCommit/.test(indexHtml) &&
+    (indexHtml.match(/alwaysCommit/g) || []).length === 3,
+  're-selecting the already-active model option must re-commit the binding: ' +
+    'an in-place edited model config keeps its id while its wire name changes, ' +
+    'and the engine rejects the stale binding snapshot until the task is re-saved'
 );
 assert.ok(
   !/data-testid="scheduled-task-pin"/.test(indexHtml) &&
@@ -624,16 +635,40 @@ function tick() {
   return new Promise(function (resolve) { setImmediate(resolve); });
 }
 
+// Stalled-promise guard (self-review P1-5 / re-review #5): event-driven tests
+// that await a guarded race (pre-registered chat:done listener / generation
+// matching) hang forever once that regression fires — the harness's fake
+// timers never drive the 25s fallback, and node --test then exits 0 with the
+// regression live (verified with a minimal repro). Race the await against a
+// REAL 5s timer so the "matching event must unlock" direction also fails
+// loudly instead of stalling silently.
+function withStallGuard(promise, label) {
+  let timerId = null;
+  const guard = new Promise(function (_, reject) {
+    timerId = setTimeout(function () {
+      reject(new Error("test stalled: " + label));
+    }, 5000);
+  });
+  return Promise.race([promise, guard]).finally(function () { clearTimeout(timerId); });
+}
+
 function createBridgeHarness(sharedStorage, runtimeOptions) {
   runtimeOptions = runtimeOptions || {};
   var bridgeKind = runtimeOptions.bridgeKind === "web" ? "web" : "tauri";
   var listeners = Object.create(null);
+  var windowListeners = Object.create(null);
+  var dispatchedWindowEvents = [];
   var handlers = Object.create(null);
   var calls = [];
   var dialogCalls = [];
   var dialogResult = null;
   var createdSession = 0;
+  var structuredCloneCalls = 0;
   var storageData = sharedStorage || Object.create(null);
+  var webSupportedCommands = new Set(runtimeOptions.webSupportedCommands || []);
+  var webCapabilitiesReady = runtimeOptions.webCapabilitiesReady !== false;
+  var webConnectionState = Object.assign({ status: "connected", desktop_online: true }, runtimeOptions.webConnectionState || {});
+  var webConnectionStateReader = null;
   var storage = {
     getItem: function (key) { return Object.prototype.hasOwnProperty.call(storageData, key) ? storageData[key] : null; },
     setItem: function (key, value) { storageData[key] = String(value); },
@@ -648,6 +683,7 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
     if (cmd === "load_session") {
       return {
         metadata: { id: args.id, title: args.id.indexOf("sched-") === 0 ? "Scheduled run" : "New chat" },
+        transcript_revision: "rev-0",
         messages: [],
         artifacts: [],
       };
@@ -662,7 +698,9 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
         active_model_id: "model-active",
       };
     }
-    if (cmd === "list_sessions" || cmd === "list_archived_sessions" || cmd === "list_personas" ||
+    if (cmd === "list_sessions" || cmd === "web_access_list_sessions" ||
+        cmd === "list_archived_sessions" || cmd === "web_access_list_archived_sessions" ||
+        cmd === "list_personas" ||
         cmd === "get_session_persona_events" || cmd === "get_session_pinvou_reviews" ||
         cmd === "get_session_timeline" ||
         cmd === "list_workspace_files" || cmd === "list_scheduled_task_runs" ||
@@ -689,7 +727,12 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
   function invoke(cmd, args) {
     calls.push({ cmd: cmd, args: args || null });
     try {
-      if (handlers[cmd]) return Promise.resolve(handlers[cmd](args || {}));
+      var handler = handlers[cmd];
+      if (!handler && cmd === "web_access_list_sessions") handler = handlers.list_sessions;
+      if (!handler && cmd === "web_access_list_archived_sessions") {
+        handler = handlers.list_archived_sessions;
+      }
+      if (handler) return Promise.resolve(handler(args || {}));
       if (cmd === "web_access_load_session_chunk") {
         var saved = handlers.load_session
           ? handlers.load_session({ id: args.id })
@@ -697,7 +740,7 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
         var encoded = Buffer.from(JSON.stringify(saved), "utf8");
         var offset = Number(args.offset || 0);
         return Promise.resolve({
-          download_id: "test-download-" + args.id,
+          download_id: args.downloadId || args.requestedDownloadId || "test-download-" + args.id,
           offset: offset,
           total: encoded.length,
           data_base64: encoded.subarray(offset).toString("base64"),
@@ -727,8 +770,22 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
         },
       },
     },
-    addEventListener: function () {},
+    addEventListener: function (name, listener) {
+      if (!windowListeners[name]) windowListeners[name] = [];
+      windowListeners[name].push(listener);
+    },
+    removeEventListener: function (name, listener) {
+      windowListeners[name] = (windowListeners[name] || []).filter(function (candidate) {
+        return candidate !== listener;
+      });
+    },
+    dispatchEvent: function (event) {
+      dispatchedWindowEvents.push(event);
+      (windowListeners[event.type] || []).slice().forEach(function (listener) { listener(event); });
+      return true;
+    },
     localStorage: storage,
+    sessionStorage: storage,
     location: { search: "" },
     atob: function (value) { return Buffer.from(String(value), "base64").toString("binary"); },
     btoa: function (value) { return Buffer.from(String(value), "binary").toString("base64"); },
@@ -739,21 +796,35 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
       isWeb: true,
       capabilities: {},
       can: function () { return false; },
-      canInvoke: function () { return false; },
+      canInvoke: function (command) { return webCapabilitiesReady && webSupportedCommands.has(command); },
+      areInvokeCapabilitiesReady: function () { return webCapabilitiesReady; },
+      getConnectionState: function () {
+        return webConnectionStateReader ? webConnectionStateReader(webConnectionState) : webConnectionState;
+      },
     };
   }
   window.window = window;
   window.document = document;
+  function CustomEvent(type, init) {
+    this.type = type;
+    this.detail = init && init.detail;
+  }
+  window.CustomEvent = CustomEvent;
   var context = {
     window: window,
     document: document,
     localStorage: storage,
+    sessionStorage: storage,
+    CustomEvent: CustomEvent,
     console: { log: function () {}, warn: function () {}, error: function () {} },
     setTimeout: runtimeOptions.setTimeout || setTimeout,
     clearTimeout: runtimeOptions.clearTimeout || clearTimeout,
     setInterval: function () { return 0; },
     clearInterval: function () {},
-    structuredClone: function (value) { return JSON.parse(JSON.stringify(value)); },
+    structuredClone: function (value) {
+      structuredCloneCalls += 1;
+      return JSON.parse(JSON.stringify(value));
+    },
     TextDecoder: TextDecoder,
     Uint8Array: Uint8Array,
   };
@@ -767,12 +838,26 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
   var bridge = bridgeKind === "web" ? {
     sessions: {
       switchToSession: function (id) { return rawBridge.switchToSession(id); },
+      createNewSession: function () { return rawBridge.createNewSession(); },
     },
     chat: {
       sendMessage: function (text, meta) { return rawBridge.sendMessage(text, meta); },
+      sendMessageToSession: function (sid, text, meta) { return rawBridge.sendMessageToSession(sid, text, meta); },
+      prioritizeQueued: function (sid, id) { return rawBridge.prioritizeQueued(sid, id); },
+      editQueued: function (sid, id, text) { return rawBridge.editQueued(sid, id, text); },
+    },
+    attachments: {
+      addAttachmentByPath: function (path) { return rawBridge.addAttachmentByPath(path); },
+    },
+    scheduled: {
+      openScheduledRunChat: function (run, task) { return rawBridge.openScheduledRunChat(run, task); },
+    },
+    interaction: {
+      editLastTurn: function (text) { return rawBridge.editLastTurn(text); },
     },
     state: {
       get: function () { return rawBridge.getState(); },
+      getMany: function () { return rawBridge.getState(); },
     },
   } : rawBridge;
 
@@ -783,13 +868,770 @@ function createBridgeHarness(sharedStorage, runtimeOptions) {
     calls: calls,
     storageData: storageData,
     dialogCalls: dialogCalls,
+    getStructuredCloneCalls: function () { return structuredCloneCalls; },
+    getWindowEvents: function (type) {
+      return dispatchedWindowEvents.filter(function (event) { return !type || event.type === type; });
+    },
     setDialogResult: function (value) { dialogResult = value; },
     emit: function (name, payload) {
       assert.ok(listeners[name] && listeners[name].length, "expected listener " + name);
       var event = { payload: payload || {} };
       return Promise.all(listeners[name].map(function (listener) { return listener(event); }));
     },
+    setWebCapabilities: function (commands) {
+      webSupportedCommands = new Set(commands || []);
+      webCapabilitiesReady = true;
+      window.dispatchEvent({
+        type: "pinvou:web-capabilities",
+        detail: { commands: Array.from(webSupportedCommands), events: [] },
+      });
+    },
+    setWebConnection: function (state) {
+      webConnectionState = Object.assign({}, webConnectionState, state || {});
+      window.dispatchEvent({ type: "pinvou:web-connection", detail: webConnectionState });
+    },
+    setWebConnectionStateReader: function (reader) {
+      webConnectionStateReader = typeof reader === "function" ? reader : null;
+    },
   };
+}
+
+async function interruptedWebSessionDownloadReleasesItsLease() {
+  var sharedStorage = Object.create(null);
+  var harness = createBridgeHarness(sharedStorage, {
+    bridgeKind: "web",
+    webSupportedCommands: ["web_access_cancel_session_download"],
+  });
+  var sessionId = "chat-download-cancel";
+  var saved = {
+    metadata: { id: sessionId, title: "Download cancel", message_count: 0 },
+    messages: [],
+    artifacts: [],
+  };
+  var encoded = Buffer.from(JSON.stringify(saved), "utf8");
+  var chunkCalls = 0;
+  var interruptedDownloadId = "";
+  harness.handlers.web_access_load_session_chunk = function (args) {
+    chunkCalls += 1;
+    if (chunkCalls === 1) {
+      interruptedDownloadId = args.requestedDownloadId;
+      assert.ok(interruptedDownloadId && interruptedDownloadId.indexOf("download_web_") === 0);
+      var first = encoded.subarray(0, Math.max(1, Math.floor(encoded.length / 2)));
+      return {
+        download_id: interruptedDownloadId,
+        offset: 0,
+        total: encoded.length,
+        data_base64: first.toString("base64"),
+        eof: false,
+      };
+    }
+    if (chunkCalls === 2) {
+      harness.setWebConnection({ status: "desktop_offline", desktop_online: false });
+      throw new Error("relay connection dropped");
+    }
+    return {
+      download_id: args.requestedDownloadId,
+      offset: 0,
+      total: encoded.length,
+      data_base64: encoded.toString("base64"),
+      eof: true,
+    };
+  };
+  var cancelCalls = 0;
+  harness.handlers.web_access_cancel_session_download = function (args) {
+    cancelCalls += 1;
+    assert.strictEqual(args.id, sessionId);
+    assert.strictEqual(args.downloadId, interruptedDownloadId);
+    if (cancelCalls === 1) throw new Error("relay still disconnected");
+    return true;
+  };
+
+  assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), false);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "web_access_cancel_session_download"; }).length,
+    1,
+    "an interrupted chunk transfer must attempt to release its desktop lease immediately"
+  );
+  assert.ok(sharedStorage["pinvou.web_session_download_leases.v1"],
+    "a failed cancellation must remain durable for the reconnect attempt");
+  harness.setWebConnection({ status: "connected", desktop_online: true });
+  await tick();
+  await tick();
+  assert.strictEqual(cancelCalls, 2, "the connection event must retry the abandoned lease cancellation");
+  assert.strictEqual(sharedStorage["pinvou.web_session_download_leases.v1"], undefined);
+  assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), true);
+
+  sharedStorage["pinvou.web_session_download_leases.v1"] = JSON.stringify([{
+    download_id: "download_reload_12345678",
+    session_id: "chat-download-reload",
+  }]);
+  var reloaded = createBridgeHarness(sharedStorage, {
+    bridgeKind: "web",
+    webSupportedCommands: ["web_access_cancel_session_download"],
+  });
+  reloaded.handlers.web_access_cancel_session_download = function () { return false; };
+  assert.strictEqual(await reloaded.bridge.sessions.switchToSession("chat-download-reload"), true);
+  var transferCalls = reloaded.calls.filter(function (call) {
+    return call.cmd === "web_access_cancel_session_download" || call.cmd === "web_access_load_session_chunk";
+  });
+  assert.deepStrictEqual(
+    transferCalls.slice(0, 2).map(function (call) { return call.cmd; }),
+    ["web_access_cancel_session_download", "web_access_load_session_chunk"],
+    "a page reload must cancel its persisted abandoned lease before opening a replacement download"
+  );
+  assert.strictEqual(sharedStorage["pinvou.web_session_download_leases.v1"], undefined);
+}
+
+async function mismatchedEchoedDownloadIdCancelsBothLeases() {
+  var sharedStorage = Object.create(null);
+  var harness = createBridgeHarness(sharedStorage, {
+    bridgeKind: "web",
+    webSupportedCommands: ["web_access_cancel_session_download"],
+  });
+  var sessionId = "chat-download-id-mismatch";
+  var requestedId = "";
+  var echoedId = "download_server_ignored_requested";
+  harness.handlers.web_access_load_session_chunk = function (args) {
+    requestedId = args.requestedDownloadId;
+    var encoded = Buffer.from(JSON.stringify({
+      metadata: { id: sessionId, title: "Mismatch", message_count: 0 },
+      messages: [],
+      artifacts: [],
+    }), "utf8");
+    return {
+      download_id: echoedId,
+      offset: 0,
+      total: encoded.length,
+      data_base64: encoded.toString("base64"),
+      eof: true,
+    };
+  };
+  var cancelled = [];
+  harness.handlers.web_access_cancel_session_download = function (args) {
+    cancelled.push(args.downloadId);
+    assert.strictEqual(args.id, sessionId);
+    return true;
+  };
+
+  assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), false);
+  assert.ok(requestedId && requestedId !== echoedId);
+  assert.deepStrictEqual(cancelled.sort(), [requestedId, echoedId].sort(),
+    "a protocol mismatch must release both the requested and desktop-echoed leases");
+  assert.strictEqual(sharedStorage["pinvou.web_session_download_leases.v1"], undefined);
+}
+
+async function lostFirstWebSessionChunkStillHasCancellableLease() {
+  var sharedStorage = Object.create(null);
+  var harness = createBridgeHarness(sharedStorage, {
+    bridgeKind: "web",
+    webSupportedCommands: ["web_access_cancel_session_download"],
+  });
+  var sessionId = "chat-download-first-response-lost";
+  var requestedId = "";
+  var loadCalls = 0;
+  harness.handlers.web_access_load_session_chunk = function (args) {
+    loadCalls += 1;
+    if (loadCalls === 1) {
+      requestedId = args.requestedDownloadId;
+      throw new Error("first Relay response was lost");
+    }
+    var saved = {
+      metadata: { id: sessionId, title: "Recovered", message_count: 0 },
+      messages: [],
+      artifacts: [],
+    };
+    var encoded = Buffer.from(JSON.stringify(saved), "utf8");
+    return {
+      download_id: args.requestedDownloadId,
+      offset: 0,
+      total: encoded.length,
+      data_base64: encoded.toString("base64"),
+      eof: true,
+    };
+  };
+  var cancelCalls = 0;
+  harness.handlers.web_access_cancel_session_download = function (args) {
+    cancelCalls += 1;
+    assert.strictEqual(args.downloadId, requestedId);
+    if (cancelCalls === 1) throw new Error("connection unavailable for cancellation");
+    return true;
+  };
+
+  assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), false);
+  assert.ok(requestedId, "the browser must choose and persist the lease id before the first RPC");
+  assert.ok(sharedStorage["pinvou.web_session_download_leases.v1"]);
+  assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), true);
+  assert.strictEqual(cancelCalls, 2);
+  assert.strictEqual(sharedStorage["pinvou.web_session_download_leases.v1"], undefined);
+}
+
+async function subscriptionSnapshotsAvoidTranscriptDeepClone() {
+  var harness = createBridgeHarness();
+  var bridge = harness.bridge;
+  var chatUpdates = [];
+  var combinedUpdates = [];
+  var unsubscribeChat = bridge.state.subscribe("chat", function (snapshot) {
+    chatUpdates.push(snapshot);
+  });
+  var unsubscribeCombined = bridge.state.subscribeMany(["sessions", "chat"], function (snapshot) {
+    combinedUpdates.push(snapshot);
+  });
+  var cloneCallsBeforeNotify = harness.getStructuredCloneCalls();
+
+  await bridge.sessions.createNewSession();
+
+  assert.strictEqual(chatUpdates.length, 1, "one bridge notification should publish one chat subscription update");
+  assert.strictEqual(combinedUpdates.length, 1, "one bridge notification should publish one combined subscription update");
+  assert.strictEqual(
+    harness.getStructuredCloneCalls(),
+    cloneCallsBeforeNotify,
+    "subscription notifications must not deep-clone the transcript"
+  );
+  assert.ok(Object.isFrozen(chatUpdates[0]) && Object.isFrozen(combinedUpdates[0]),
+    "subscription envelopes should be read-only");
+
+  assert.throws(function () {
+    chatUpdates[0].chatItems.push({ type: "system", text: "subscriber-only" });
+  }, /not extensible|read only|frozen/i, "subscription array containers should be read-only");
+  assert.strictEqual(bridge.state.get("chat").chatItems.length, 0,
+    "subscription array containers must not mutate bridge state");
+  var detached = bridge.state.get("chat");
+  detached.thinking.active = true;
+  assert.strictEqual(bridge.state.get("chat").thinking.active, false,
+    "get/getMany must retain their defensive deep-copy contract");
+
+  unsubscribeChat();
+  unsubscribeCombined();
+}
+
+async function reentrantSubscriptionNotificationsStayOrdered() {
+  var harness = createBridgeHarness();
+  var bridge = harness.bridge;
+  var firstOrder = [];
+  var secondOrder = [];
+  var unsubscribeFirst = bridge.state.subscribe("chat", function (snapshot) {
+    var text = snapshot.composerPrefill.text;
+    firstOrder.push(text);
+    if (text === "outer") bridge.chat.prefillComposer("nested");
+  });
+  var unsubscribeSecond = bridge.state.subscribe("chat", function (snapshot) {
+    secondOrder.push(snapshot.composerPrefill.text);
+  });
+
+  bridge.chat.prefillComposer("outer");
+  assert.deepStrictEqual(firstOrder, ["outer", "nested"], "the first subscriber should receive queued revisions in order");
+  assert.deepStrictEqual(secondOrder, ["outer", "nested"], "a later subscriber must not observe nested before outer");
+  assert.strictEqual(bridge.state.get("chat").composerPrefill.text, "nested");
+  unsubscribeFirst();
+  unsubscribeSecond();
+
+  var membershipHarness = createBridgeHarness();
+  var membershipBridge = membershipHarness.bridge;
+  var membershipFirst = [];
+  var membershipSecond = [];
+  var membershipAdded = [];
+  var unsubscribeMembershipSecond;
+  var unsubscribeAdded = function () {};
+  var unsubscribeMembershipFirst = membershipBridge.state.subscribe("chat", function (snapshot) {
+    var text = snapshot.composerPrefill.text;
+    membershipFirst.push(text);
+    if (text === "membership-outer") {
+      unsubscribeMembershipSecond();
+      unsubscribeAdded = membershipBridge.state.subscribe("chat", function (next) {
+        membershipAdded.push(next.composerPrefill.text);
+      });
+      membershipBridge.chat.prefillComposer("membership-nested");
+    }
+  });
+  unsubscribeMembershipSecond = membershipBridge.state.subscribe("chat", function (snapshot) {
+    membershipSecond.push(snapshot.composerPrefill.text);
+  });
+
+  membershipBridge.chat.prefillComposer("membership-outer");
+  assert.deepStrictEqual(membershipFirst, ["membership-outer", "membership-nested"]);
+  assert.deepStrictEqual(membershipSecond, ["membership-outer"],
+    "unsubscribe during a round should apply only to rounds queued afterwards");
+  assert.deepStrictEqual(membershipAdded, ["membership-nested"],
+    "subscribe during a round should apply only to rounds queued afterwards");
+  unsubscribeMembershipFirst();
+  unsubscribeAdded();
+
+  var errorHarness = createBridgeHarness();
+  var errorBridge = errorHarness.bridge;
+  var interruptedSecond = [];
+  var unsubscribeThrowing = errorBridge.state.subscribe("chat", function (snapshot) {
+    if (snapshot.composerPrefill.text === "error-outer") {
+      errorBridge.chat.prefillComposer("discarded-nested");
+      throw new Error("subscriber failed");
+    }
+  });
+  var unsubscribeInterruptedSecond = errorBridge.state.subscribe("chat", function (snapshot) {
+    interruptedSecond.push(snapshot.composerPrefill.text);
+  });
+  assert.throws(function () { errorBridge.chat.prefillComposer("error-outer"); }, /subscriber failed/,
+    "subscriber errors should retain their synchronous propagation behavior");
+  assert.deepStrictEqual(interruptedSecond, [], "a callback error should interrupt the current subscriber round");
+  unsubscribeThrowing();
+  unsubscribeInterruptedSecond();
+
+  var recovered = [];
+  var unsubscribeRecovered = errorBridge.state.subscribe("chat", function (snapshot) {
+    recovered.push(snapshot.composerPrefill.text);
+  });
+  errorBridge.chat.prefillComposer("recovered");
+  assert.deepStrictEqual(recovered, ["recovered"],
+    "queued revisions from an interrupted callback must be discarded before the next notification");
+  unsubscribeRecovered();
+}
+
+async function persistentSubscriptionSnapshotsPreserveJsonEdges() {
+  var harness = createBridgeHarness();
+  var bridge = harness.bridge;
+  var snapshots = [];
+  var negativeZero = true;
+  function settingsResult() {
+    var result = JSON.parse('{"language":"en","__proto__":{"marker":"own-value"}}');
+    Object.defineProperty(result, "nan", { enumerable: true, value: NaN, writable: true });
+    result.zero = negativeZero ? -0 : 0;
+    return result;
+  }
+  harness.handlers.update_settings = settingsResult;
+  harness.handlers.get_effective_model_config = function () { return null; };
+  var unsubscribe = bridge.state.subscribe("settings", function (snapshot) { snapshots.push(snapshot); });
+
+  assert.strictEqual(await bridge.settings.saveSettings({ language: "en" }), true);
+  assert.ok(snapshots.length >= 2, "settings save should publish its effective-model and saved revisions");
+  var first = snapshots[0];
+  var repeated = snapshots[1];
+  assert.ok(Object.prototype.hasOwnProperty.call(first.settings, "__proto__"));
+  assert.strictEqual(first.settings["__proto__"].marker, "own-value");
+  assert.strictEqual(Object.getPrototypeOf(first.settings), Object.getPrototypeOf(first),
+    "snapshots with own __proto__ data must retain the default object prototype");
+  assert.strictEqual(Object.getPrototypeOf(first.settings).marker, undefined, "snapshot prototypes must not be polluted");
+  assert.strictEqual(first.settings, repeated.settings, "Object.is should reuse an unchanged subtree containing NaN");
+  assert.ok(Number.isNaN(first.settings.nan));
+  assert.ok(Object.is(first.settings.zero, -0));
+
+  negativeZero = false;
+  assert.strictEqual(await bridge.settings.saveSettings({ language: "en" }), true);
+  var changed = snapshots[snapshots.length - 1];
+  assert.notStrictEqual(changed.settings, repeated.settings, "Object.is should distinguish -0 from +0");
+  assert.ok(Object.is(changed.settings.zero, 0));
+  assert.ok(Object.prototype.hasOwnProperty.call(changed.settings, "__proto__"),
+    "copy-on-write updates must retain an existing own __proto__ value");
+  assert.strictEqual(changed.settings["__proto__"].marker, "own-value");
+  assert.strictEqual(Object.getPrototypeOf(changed.settings).marker, undefined,
+    "copy-on-write updates must not route __proto__ through the prototype setter");
+  unsubscribe();
+}
+
+async function persistentSubscriptionSnapshotsRejectUnsupportedValues() {
+  async function rejects(result, pattern) {
+    var harness = createBridgeHarness();
+    harness.handlers.ingest_file = function () { return result; };
+    var unsubscribe = harness.bridge.state.subscribe("chat", function () {});
+    await assert.rejects(harness.bridge.attachments.addAttachmentByPath("C:\\snapshot-edge.txt"), pattern);
+    unsubscribe();
+  }
+  await rejects(new Date(0), /only supports arrays and plain objects/);
+  var cyclic = { value: "cycle" };
+  cyclic.self = cyclic;
+  await rejects(cyclic, /must not contain cycles/);
+}
+
+async function longSessionStreamingAvoidsPerDeltaDeepClone() {
+  var harness = createBridgeHarness();
+  var bridge = harness.bridge;
+  var sessionId = "chat-long-stream";
+  var messages = [
+    {
+      role: "assistant",
+      content: [{
+        type: "tool_use",
+        id: "tool-stable-history",
+        name: "shell",
+        input: { command: "echo stable", options: { cwd: "history", environment: { MODE: "test" } } },
+      }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tool-stable-history", content: "stable output" }],
+    },
+  ];
+  for (var index = messages.length; index < 469; index++) {
+    messages.push({
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: [{ type: "text", text: "history-" + index + "-" + "x".repeat(1024) }],
+    });
+  }
+  harness.handlers.load_session = function () {
+    return {
+      metadata: { id: sessionId, title: "Long stream", message_count: messages.length },
+      messages: messages,
+      artifacts: [],
+    };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+
+  var updates = 0;
+  var secondSubscriberUpdates = 0;
+  var snapshots = [];
+  var secondSubscriberSnapshots = [];
+  var unsubscribe = bridge.state.subscribeMany(["sessions", "chat"], function (snapshot) {
+    updates += 1;
+    snapshots.push(snapshot);
+  });
+  var unsubscribeSecond = bridge.state.subscribe("chat", function (snapshot) {
+    secondSubscriberUpdates += 1;
+    secondSubscriberSnapshots.push(snapshot);
+  });
+  var cloneCallsBeforeStream = harness.getStructuredCloneCalls();
+  harness.emit("chat:turn_started", { session_id: sessionId });
+  harness.emit("chat:delta", { session_id: sessionId, text: "abcd" });
+
+  var firstDeltaSnapshot = snapshots[1];
+  var firstDeltaItem = firstDeltaSnapshot.chatItems.filter(function (item) {
+    return item.type === "assistant" && item.streaming;
+  }).pop();
+  assert.strictEqual(firstDeltaItem.text, "abcd", "the first delta snapshot should capture its own text");
+  assert.ok(Object.isFrozen(firstDeltaItem), "nested subscription items should be immutable");
+  assert.strictEqual(Reflect.set(firstDeltaItem, "text", "subscriber-only"), false,
+    "a subscriber must not mutate a nested item");
+  assert.strictEqual(secondSubscriberSnapshots[1].chatItems.filter(function (item) {
+    return item.type === "assistant" && item.streaming;
+  }).pop().text, "abcd", "one subscriber must not affect a second subscriber");
+  assert.strictEqual(bridge.state.get("chat").chatItems.filter(function (item) {
+    return item.type === "assistant" && item.streaming;
+  }).pop().text, "abcd", "one subscriber must not affect bridge state");
+  assert.strictEqual(harness.getStructuredCloneCalls(), cloneCallsBeforeStream + 1,
+    "the explicit state.get isolation check should retain its defensive deep copy");
+  var cloneCallsAfterDefensiveRead = harness.getStructuredCloneCalls();
+
+  harness.emit("chat:delta", { session_id: sessionId, text: "abcd" });
+  assert.strictEqual(firstDeltaItem.text, "abcd", "an older subscription snapshot must remain stable");
+  assert.strictEqual(snapshots[2].chatItems.filter(function (item) {
+    return item.type === "assistant" && item.streaming;
+  }).pop().text, "abcdabcd", "the next snapshot should observe the next delta");
+
+  for (var delta = 2; delta < 1000; delta++) {
+    harness.emit("chat:delta", { session_id: sessionId, text: "abcd" });
+  }
+  await tick();
+
+  assert.strictEqual(updates, 1001, "stream boundaries and deltas should remain immediately observable");
+  assert.strictEqual(secondSubscriberUpdates, 1001,
+    "all subscribers should receive one immediate update per stream boundary and delta");
+  assert.strictEqual(snapshots.length, 1001, "the regression must retain every persistent snapshot");
+  assert.strictEqual(secondSubscriberSnapshots.length, 1001,
+    "the second subscriber must retain every same-round snapshot for identity checks");
+  assert.strictEqual(
+    harness.getStructuredCloneCalls(),
+    cloneCallsAfterDefensiveRead,
+    "a long transcript must not be deep-cloned for each streamed delta"
+  );
+
+  var representativeFrames = [0, 1, 499, 500, 999, 1000];
+  var stableMessages = snapshots[0].messages;
+  var stableHistoryMessage = stableMessages[0];
+  var stableHistoryContent = stableHistoryMessage.content;
+  var stableHistoryBlock = stableHistoryContent[0];
+  var stableToolItem = snapshots[0].chatItems.find(function (item) {
+    return item.type === "tool" && item.toolId === "tool-stable-history";
+  });
+  assert.ok(stableToolItem, "the fixture should expose a historical tool chat item");
+  assert.strictEqual(stableToolItem.args.options.environment.MODE, "test");
+  representativeFrames.forEach(function (frame) {
+    var snapshot = snapshots[frame];
+    var secondSnapshot = secondSubscriberSnapshots[frame];
+    var toolItem = snapshot.chatItems.find(function (item) {
+      return item.type === "tool" && item.toolId === "tool-stable-history";
+    });
+    assert.strictEqual(snapshot.messages, stableMessages,
+      "unchanged history messages arrays must be shared across first/middle/last and adjacent frames");
+    assert.strictEqual(snapshot.messages[0], stableHistoryMessage,
+      "unchanged history message objects must be structurally shared");
+    assert.strictEqual(snapshot.messages[0].content, stableHistoryContent,
+      "unchanged history content arrays must be structurally shared");
+    assert.strictEqual(snapshot.messages[0].content[0], stableHistoryBlock,
+      "unchanged history content blocks must be structurally shared");
+    assert.strictEqual(toolItem, stableToolItem,
+      "unchanged historical tool chat items must be structurally shared");
+    assert.strictEqual(toolItem.args, stableToolItem.args,
+      "unchanged historical tool args must be structurally shared");
+    assert.strictEqual(toolItem.args.options.environment, stableToolItem.args.options.environment,
+      "unchanged historical tool deep subtrees must be structurally shared");
+    assert.strictEqual(secondSnapshot.messages, snapshot.messages,
+      "two subscribers in the same revision must share the messages domain subtree");
+    assert.strictEqual(secondSnapshot.chatItems, snapshot.chatItems,
+      "two subscribers in the same revision must share the chatItems domain subtree");
+  });
+
+  function streamingItemAt(frame) {
+    return snapshots[frame].chatItems.filter(function (item) {
+      return item.type === "assistant" && item.streaming;
+    }).pop();
+  }
+  for (var frame = 1; frame < snapshots.length; frame++) {
+    assert.notStrictEqual(streamingItemAt(frame - 1), streamingItemAt(frame),
+      "the changed streaming item must receive a new reference in every adjacent revision");
+  }
+  assert.strictEqual(streamingItemAt(1).text, "abcd", "the first retained delta must remain stable");
+  assert.strictEqual(streamingItemAt(500).text.length, 2000, "the middle retained delta must remain stable");
+  assert.strictEqual(streamingItemAt(1000).text.length, 4000, "the final retained delta must be complete");
+  var finalAssistant = bridge.state.get("chat").chatItems.filter(function (item) {
+    return item.type === "assistant" && item.streaming;
+  }).pop();
+  assert.strictEqual(finalAssistant.text.length, 4000, "subscription snapshot optimization must not lose text");
+  unsubscribe();
+  unsubscribeSecond();
+}
+
+async function olderDesktopUsesServerGeneratedSessionDownloadId() {
+  var harness = createBridgeHarness(null, { bridgeKind: "web", webSupportedCommands: [] });
+  var sessionId = "chat-legacy-download";
+  var saved = {
+    metadata: { id: sessionId, title: "Legacy download", message_count: 0 },
+    messages: [],
+    artifacts: [],
+  };
+  var encoded = Buffer.from(JSON.stringify(saved), "utf8");
+  var split = Math.max(1, Math.floor(encoded.length / 2));
+  var calls = 0;
+  harness.handlers.web_access_load_session_chunk = function (args) {
+    calls += 1;
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(args, "requestedDownloadId"), false,
+      "legacy first chunk must not send the new requestedDownloadId argument");
+    if (calls === 1) {
+      assert.strictEqual(args.downloadId, null);
+      return {
+        download_id: "download_server_legacy",
+        offset: 0,
+        total: encoded.length,
+        data_base64: encoded.subarray(0, split).toString("base64"),
+        eof: false,
+      };
+    }
+    assert.strictEqual(args.downloadId, "download_server_legacy",
+      "legacy follow-up chunks must use the desktop-generated id");
+    return {
+      download_id: "download_server_legacy",
+      offset: split,
+      total: encoded.length,
+      data_base64: encoded.subarray(split).toString("base64"),
+      eof: true,
+    };
+  };
+
+  assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), true);
+  assert.strictEqual(calls, 2);
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_cancel_session_download"; }),
+    false,
+    "legacy success must not invoke the unsupported cancel command"
+  );
+}
+
+async function sessionDownloadWaitsForCapabilitySnapshot() {
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webCapabilitiesReady: false,
+  });
+  var sessionId = "chat-capabilities-late";
+  var pending = harness.bridge.sessions.switchToSession(sessionId);
+  await tick();
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    false,
+    "connected-before-snapshot must not guess the legacy protocol"
+  );
+  harness.setWebCapabilities(["web_access_cancel_session_download"]);
+  assert.strictEqual(await pending, true);
+  var load = harness.calls.find(function (call) { return call.cmd === "web_access_load_session_chunk"; });
+  assert.ok(load.args.requestedDownloadId,
+    "the post-snapshot request must select the newly advertised cancellable protocol");
+}
+
+async function sessionDownloadCapabilityWaitStopsOnDisconnect() {
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webCapabilitiesReady: false,
+  });
+  var pending = harness.bridge.sessions.switchToSession("chat-capabilities-disconnected");
+  await tick();
+  harness.setWebConnection({ status: "desktop_offline", desktop_online: false });
+  assert.strictEqual(await pending, false);
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    false,
+    "disconnect before the snapshot must reject without issuing a protocol-ambiguous load"
+  );
+}
+
+async function sessionDownloadCapabilityWaitRejectsAlreadyOfflineDesktop() {
+  var capabilityTimeouts = 0;
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webCapabilitiesReady: false,
+    webConnectionState: { status: "desktop_offline", desktop_online: false },
+    setTimeout: function (callback, delay) {
+      if (delay === 10_000) capabilityTimeouts += 1;
+      return setTimeout(callback, delay);
+    },
+  });
+
+  assert.strictEqual(await harness.bridge.sessions.switchToSession("chat-capabilities-already-offline"), false);
+  assert.strictEqual(capabilityTimeouts, 0,
+    "an already-offline desktop must reject before installing the 10 second timeout");
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    false
+  );
+}
+
+async function sessionDownloadCapabilityWaitClosesLostDisconnectEventRace() {
+  var capabilityTimeouts = 0;
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webCapabilitiesReady: false,
+    setTimeout: function (callback, delay) {
+      if (delay === 10_000) capabilityTimeouts += 1;
+      return setTimeout(callback, delay);
+    },
+  });
+  var reads = 0;
+  harness.setWebConnectionStateReader(function () {
+    reads += 1;
+    return reads === 1
+      ? { status: "connected", desktop_online: true }
+      : { status: "desktop_offline", desktop_online: false };
+  });
+
+  assert.strictEqual(await harness.bridge.sessions.switchToSession("chat-capabilities-lost-disconnect"), false);
+  assert.ok(reads >= 2, "connection state must be checked before and after listener registration");
+  assert.strictEqual(capabilityTimeouts, 1,
+    "the race-closing check may install the timeout but must cancel it immediately");
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    false
+  );
+}
+
+async function sessionDownloadCapabilityWaitHasTimeout() {
+  // 能力超时的切换进入宽限等待（5s 内快照到达即自动重试），期间不报错、
+  // 不落失败。能力超时（10s）压成微任务立即触发；宽限 timer（5s）只登记
+  // 不自动触发，模拟真实时序中快照先于宽限到期到达。
+  var graceTimers = [];
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webCapabilitiesReady: false,
+    setTimeout: function (callback, delay) {
+      if (delay === 10_000) {
+        queueMicrotask(callback);
+        return 1;
+      }
+      if (delay === 5_000) {
+        graceTimers.push(callback);
+        return 10 + graceTimers.length;
+      }
+      return setTimeout(callback, delay);
+    },
+  });
+  var switchedPromise = harness.bridge.sessions.switchToSession("chat-capabilities-timeout");
+  for (var waitAttempt = 0; waitAttempt < 4; waitAttempt++) await tick();
+  assert.strictEqual(graceTimers.length, 1,
+    "the capability timeout must arm exactly one grace timer");
+  harness.setWebCapabilities(["web_access_cancel_session_download"]);
+  assert.strictEqual(await switchedPromise, true,
+    "the retried switch must resolve through to its final outcome");
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    true,
+    "a late capability snapshot must automatically retry the switch that timed out"
+  );
+  assert.strictEqual(
+    harness.bridge.state.get("sessions").activeSessionId,
+    "chat-capabilities-timeout"
+  );
+}
+
+async function sessionDownloadCapabilityGraceExpiryFailsOnce() {
+  // 宽限期内快照始终未到：切换按失败收口且只报一次错；随后快照到达也不得
+  // 复活已被取代的等待（无新切换请求时不产生多余 RPC）。
+  var graceFired = false;
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webCapabilitiesReady: false,
+    setTimeout: function (callback, delay) {
+      if (delay === 10_000) {
+        queueMicrotask(callback);
+        return 1;
+      }
+      if (delay === 5_000) {
+        graceFired = true;
+        queueMicrotask(callback);
+        return 2;
+      }
+      return setTimeout(callback, delay);
+    },
+  });
+  assert.strictEqual(await harness.bridge.sessions.switchToSession("chat-capabilities-grace"), false,
+    "the switch must fail once the grace period expires without a snapshot");
+  assert.ok(graceFired, "the grace timer must fire when no snapshot arrives");
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    false
+  );
+  harness.setWebCapabilities(["web_access_cancel_session_download"]);
+  for (var settleAttempt = 0; settleAttempt < 4; settleAttempt++) await tick();
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    false,
+    "an expired grace wait must not be revived by a later snapshot"
+  );
+}
+
+async function sessionDownloadCapabilityGraceSupersededByDraftFailsSilently() {
+  // 宽限等待期间用户进入草稿（enterDraft 使切换 token 失效但不收口 pending）：
+  // 宽限 timer 到期必须按失败静默收口，原调用方收到 false，且不在草稿页
+  // 误报“加载对话失败”（与快照到达路径对已被取代等待的处理一致）。
+  var graceTimers = [];
+  var harness = createBridgeHarness(null, {
+    bridgeKind: "web",
+    webCapabilitiesReady: false,
+    setTimeout: function (callback, delay) {
+      if (delay === 10_000) {
+        queueMicrotask(callback);
+        return 1;
+      }
+      if (delay === 5_000) {
+        graceTimers.push(callback);
+        return 10 + graceTimers.length;
+      }
+      return setTimeout(callback, delay);
+    },
+  });
+  var switchedPromise = harness.bridge.sessions.switchToSession("chat-capabilities-superseded");
+  for (var waitAttempt = 0; waitAttempt < 4; waitAttempt++) await tick();
+  assert.strictEqual(graceTimers.length, 1,
+    "the capability timeout must arm exactly one grace timer");
+  await harness.bridge.sessions.createNewSession();
+  assert.strictEqual(graceTimers.length, 1,
+    "entering the draft view must not arm another grace timer");
+  graceTimers[0]();
+  assert.strictEqual(await switchedPromise, false,
+    "a grace wait superseded by entering the draft must settle as a failure");
+  assert.strictEqual(
+    JSON.stringify(harness.bridge.state.get("chat").chatItems).includes("capability snapshot timed out"),
+    false,
+    "a superseded grace wait must not report a load failure in the draft view"
+  );
+  harness.setWebCapabilities(["web_access_cancel_session_download"]);
+  for (var settleAttempt = 0; settleAttempt < 4; settleAttempt++) await tick();
+  assert.strictEqual(
+    harness.calls.some(function (call) { return call.cmd === "web_access_load_session_chunk"; }),
+    false,
+    "a superseded grace wait must not be retried by a later snapshot"
+  );
 }
 
 async function deepSeekTurnTimelineLifecycleBehavior() {
@@ -828,8 +1670,8 @@ async function deepSeekTurnTimelineLifecycleBehavior() {
   assert.strictEqual(completed[3].error, "模型失败");
 }
 
-async function internalSubagentHandoffStaysOutOfPresentation() {
-  var harness = createBridgeHarness();
+async function internalSubagentHandoffStaysOutOfPresentation(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
   var sessionId = "chat-subagent-handoff";
   var completionText = [
     '<codewhale:runtime_event kind="subagent_completion" visibility="internal">',
@@ -838,14 +1680,31 @@ async function internalSubagentHandoffStaysOutOfPresentation() {
     '<codewhale:subagent.done>{"agent_id":"agent_7fb1c7be","status":"completed"}</codewhale:subagent.done>',
     '</codewhale:runtime_event>',
   ].join('\n');
+  var persistedToolOutput = [
+    'Error: deterministic provider failure',
+    '',
+    '<codewhale:runtime_event kind="stuck_guard" visibility="internal">',
+    'Change strategy instead of repeating the same tool call.',
+    '</codewhale:runtime_event>',
+    '',
+    '<codewhale:runtime_event kind="tool_error_degradation" visibility="internal">',
+    'Switch to an alternate tool or source.',
+    '</codewhale:runtime_event>',
+  ].join('\n');
   harness.handlers.load_session = function () {
     return {
-      metadata: { id: sessionId, title: "Sub-agent handoff", message_count: 3 },
+      metadata: { id: sessionId, title: "Sub-agent handoff", message_count: 5 },
       messages: [
         { role: "user", content: [{ type: "text", text: "请调研这个问题" }] },
         { role: "user", content: [
           { type: "text", text: completionText },
           { type: "text", text: "<turn_meta>\nInput provenance: subagent_handoff\nInput authority: non_authoritative\n</turn_meta>" },
+        ] },
+        { role: "assistant", content: [
+          { type: "tool_use", id: "tool-runtime-guidance", name: "host_failure_probe", input: {} },
+        ] },
+        { role: "user", content: [
+          { type: "tool_result", tool_use_id: "tool-runtime-guidance", content: persistedToolOutput, is_error: true },
         ] },
         { role: "assistant", content: [{ type: "text", text: "这是父智能体的最终汇总" }] },
       ],
@@ -863,6 +1722,11 @@ async function internalSubagentHandoffStaysOutOfPresentation() {
   assert.ok(!visible.includes("codewhale:runtime_event"), "internal runtime XML must stay out of the presentation");
   assert.ok(raw.includes("child-only completion summary"), "sub-agent completion must remain in the parent model context");
   assert.ok(raw.includes("subagent_handoff"), "handoff provenance must remain durable");
+  assert.ok(visible.includes("Error: deterministic provider failure"), "real tool output must remain visible");
+  assert.ok(!visible.includes("Change strategy instead"), "stuck guidance must stay out of restored tool cards");
+  assert.ok(!visible.includes("Switch to an alternate tool"), "degradation guidance must stay out of restored tool cards");
+  assert.ok(raw.includes("Change strategy instead"), "stuck guidance must remain durable for the model");
+  assert.ok(raw.includes("Switch to an alternate tool"), "degradation guidance must remain durable for the model");
 
   await harness.emit("chat:user_message", {
     session_id: sessionId,
@@ -872,6 +1736,254 @@ async function internalSubagentHandoffStaysOutOfPresentation() {
   visible = JSON.stringify(harness.bridge.state.get("chat").chatItems);
   assert.ok(!visible.includes("child-only completion summary"), "live handoff event must not render as a user bubble");
   assert.ok(!visible.includes("codewhale:runtime_event"), "live runtime XML must stay out of the presentation");
+
+  await harness.emit("chat:tool_start", {
+    session_id: sessionId,
+    id: "tool-live-runtime-guidance",
+    name: "host_failure_probe",
+    args: {},
+  });
+  await harness.emit("chat:tool_end", {
+    session_id: sessionId,
+    id: "tool-live-runtime-guidance",
+    success: false,
+    output: persistedToolOutput,
+  });
+  visible = JSON.stringify(harness.bridge.state.get("chat").chatItems);
+  raw = JSON.stringify(harness.bridge.state.get("chat").messages);
+  assert.ok(visible.includes("Error: deterministic provider failure"), bridgeKind + " live tool output must remain visible");
+  assert.ok(!visible.includes("Change strategy instead"), bridgeKind + " live stuck guidance must stay out of tool cards");
+  assert.ok(!visible.includes("Switch to an alternate tool"), bridgeKind + " live degradation guidance must stay out of tool cards");
+  assert.ok(raw.includes("Change strategy instead"), bridgeKind + " live stuck guidance must remain durable");
+  assert.ok(raw.includes("Switch to an alternate tool"), bridgeKind + " live degradation guidance must remain durable");
+}
+
+async function currentInternalProvenanceAndEnvelopeStayOutOfPresentation() {
+  var completionText = [
+    '<codewhale:runtime_event kind="subagent_completion" visibility="internal">',
+    'This is an internal runtime event, not user input.',
+    'current child-only completion summary',
+    '<codewhale:subagent.done>{"agent_id":"agent_current","status":"completed"}</codewhale:subagent.done>',
+    '</codewhale:runtime_event>',
+  ].join('\n');
+  var shellCompletionText = [
+    '<codewhale:runtime_event kind="background_shell_completion" visibility="internal">',
+    'internal shell completion payload',
+    '</codewhale:runtime_event>',
+  ].join('\n');
+  var runtimeTurnMeta = [
+    '<turn_meta>',
+    'Current workspace: /private/workspace',
+    'Input provenance: runtime (non-authoritative)',
+    '</turn_meta>',
+  ].join('\n');
+  var serializedEnvelopeAndMeta = completionText + '\n' + runtimeTurnMeta;
+  var serializedRuntimePromptAndMeta = [
+    'Tool calls have failed for 2 consecutive steps. Do not repeat the same call unchanged.',
+    'Switch to an alternate tool or source.',
+    runtimeTurnMeta,
+  ].join('\n');
+
+  for (var bridgeIndex = 0; bridgeIndex < 2; bridgeIndex++) {
+    var bridgeKind = bridgeIndex === 0 ? "tauri" : "web";
+    var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+    var sessionId = "chat-current-internal-provenance-" + bridgeKind;
+    harness.handlers.load_session = function () {
+      return {
+        metadata: { id: sessionId, title: "Current internal provenance", message_count: 5 },
+        messages: [
+          { role: "user", content: [{ type: "text", text: "real user request" }] },
+          { role: "user", content: [
+            { type: "text", text: completionText },
+            { type: "text", text: [
+              "<turn_meta>",
+              "Current local date: 2026-08-12",
+              "Current workspace: /private/workspace",
+              "Current permission posture: Full Access",
+              "Input provenance: subagent_handoff (non-authoritative)",
+              "</turn_meta>",
+            ].join("\n") },
+          ] },
+          { role: "user", content: [
+            { type: "text", text: "current runtime recovery hint" },
+            { type: "text", text: "<turn_meta>\nInput provenance: runtime (non-authoritative)\n</turn_meta>" },
+          ] },
+          { role: "user", content: [
+            { type: "text", text: shellCompletionText },
+            { type: "text", text: "<turn_meta>\nInput provenance: shell_completion (non-authoritative)\n</turn_meta>" },
+          ] },
+          // 无信封、仅 turn_meta 的 shell_completion：白名单必须单独兜住（遗留双行/裁剪会话形态）。
+          { role: "user", content: [
+            { type: "text", text: "<turn_meta>\nInput provenance: shell_completion (non-authoritative)\n</turn_meta>" },
+          ] },
+          // Some transports flatten the runtime payload and its metadata into one text block.
+          { role: "user", content: [{ type: "text", text: serializedEnvelopeAndMeta }] },
+          { role: "user", content: [{ type: "text", text: serializedRuntimePromptAndMeta }] },
+          { role: "assistant", content: [{ type: "text", text: "parent final answer" }] },
+        ],
+        artifacts: [],
+      };
+    };
+
+    assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), true);
+    var state = harness.bridge.state.get("chat");
+    var visible = JSON.stringify(state.chatItems);
+    var raw = JSON.stringify(state.messages);
+    assert.ok(visible.includes("real user request"), bridgeKind + " must retain real user input");
+    assert.ok(visible.includes("parent final answer"), bridgeKind + " must retain the parent answer");
+    [
+      "current child-only completion summary",
+      "current runtime recovery hint",
+      "internal shell completion payload",
+      "Tool calls have failed for 2 consecutive steps",
+      "codewhale:runtime_event",
+      "Current workspace:",
+      "Input provenance: shell_completion",
+    ].forEach(function (hiddenText) {
+      assert.ok(!visible.includes(hiddenText),
+        bridgeKind + " must hide internal payload: " + hiddenText);
+    });
+    assert.ok(raw.includes("current child-only completion summary"),
+      bridgeKind + " must preserve the child handoff in model context");
+    assert.ok(raw.includes("current runtime recovery hint"),
+      bridgeKind + " must preserve runtime recovery context");
+    assert.ok(raw.includes("internal shell completion payload"),
+      bridgeKind + " must preserve shell completion context");
+    assert.ok(raw.includes("subagent_handoff (non-authoritative)"),
+      bridgeKind + " must preserve current provenance metadata");
+    assert.ok(raw.includes("shell_completion (non-authoritative)"),
+      bridgeKind + " must preserve shell_completion provenance metadata");
+    assert.ok(raw.includes("Tool calls have failed for 2 consecutive steps"),
+      bridgeKind + " must preserve serialized runtime guidance in model context");
+
+    await harness.emit("chat:user_message", {
+      session_id: sessionId,
+      content: serializedEnvelopeAndMeta,
+      operation: "append",
+    });
+    await harness.emit("chat:user_message", {
+      session_id: sessionId,
+      content: serializedRuntimePromptAndMeta,
+      operation: "append",
+    });
+    var afterLiveInternal = JSON.stringify(harness.bridge.state.get("chat").chatItems);
+    assert.ok(!afterLiveInternal.includes("Tool calls have failed for 2 consecutive steps"),
+      bridgeKind + " must hide a live runtime prompt with trailing provenance metadata");
+    assert.ok(!afterLiveInternal.includes("current child-only completion summary"),
+      bridgeKind + " must hide a live envelope with trailing metadata");
+
+    var quotedEnvelope = completionText + "\nPlease explain this literal runtime envelope.";
+    await harness.emit("chat:user_message", {
+      session_id: sessionId,
+      content: quotedEnvelope,
+      operation: "append",
+    });
+    var afterQuotedEnvelope = JSON.stringify(harness.bridge.state.get("chat").chatItems);
+    assert.ok(afterQuotedEnvelope.includes("Please explain this literal runtime envelope."),
+      bridgeKind + " must retain user text following an internal-looking quoted envelope");
+  }
+}
+
+async function autoTitleSkipsInternalAndStripsTurnMeta() {
+  for (var bridgeIndex = 0; bridgeIndex < 2; bridgeIndex++) {
+    var bridgeKind = bridgeIndex === 0 ? "tauri" : "web";
+    var envelopeText = [
+      '<codewhale:runtime_event kind="subagent_completion" visibility="internal">',
+      'This is an internal runtime event, not user input.',
+      'auto-title child completion summary',
+      '</codewhale:runtime_event>',
+    ].join('\n');
+
+    // 场景 1：首条 user 消息为内部信封 → 不得 rename（XML 不得进 sidebar 标题）。
+    var h1 = createBridgeHarness(null, { bridgeKind: bridgeKind });
+    var sid1 = "chat-title-internal-" + bridgeKind;
+    h1.handlers.list_sessions = function () {
+      return [{ id: sid1, title: "New chat" }];
+    };
+    h1.handlers.load_session = function () {
+      return {
+        metadata: { id: sid1, title: "New chat" },
+        messages: [
+          { role: "user", content: [
+            { type: "text", text: envelopeText },
+            { type: "text", text: "<turn_meta>\nInput provenance: subagent_handoff (non-authoritative)\n</turn_meta>" },
+          ] },
+          { role: "assistant", content: [{ type: "text", text: "父汇总" }] },
+        ],
+        artifacts: [],
+      };
+    };
+    assert.strictEqual(await h1.bridge.sessions.switchToSession(sid1), true);
+    await h1.emit("session:list_changed", {});
+    await new Promise(function (r) { setTimeout(r, 50); });
+    await h1.emit("chat:done", { session_id: sid1, status: "Completed" });
+    await new Promise(function (r) { setTimeout(r, 150); });
+    assert.ok(h1.calls.some(function (c) { return c.cmd === "save_session_artifacts"; }),
+      bridgeKind + " persistMessagesFor 应执行（前置条件成立，防止假绿）");
+    var rename1 = h1.calls.filter(function (c) { return c.cmd === "rename_session"; });
+    assert.strictEqual(rename1.length, 0,
+      bridgeKind + " 首条内部信封不得触发自动命名（信封 XML 不得进 sidebar）：" + JSON.stringify(rename1));
+
+    // 场景 2：首条 user 消息为普通消息（引擎标准布局：正文 + 尾随 turn_meta block）
+    // → 标题应为正文，不得拼入 turn_meta/workspace XML。
+    var h2 = createBridgeHarness(null, { bridgeKind: bridgeKind });
+    var sid2 = "chat-title-normal-" + bridgeKind;
+    h2.handlers.list_sessions = function () {
+      return [{ id: sid2, title: "New chat" }];
+    };
+    h2.handlers.load_session = function () {
+      return {
+        metadata: { id: sid2, title: "New chat" },
+        messages: [
+          { role: "user", content: [
+            { type: "text", text: "帮我修登录页" },
+            { type: "text", text: "<turn_meta>\nCurrent workspace: /private/ws\n</turn_meta>" },
+          ] },
+          { role: "assistant", content: [{ type: "text", text: "好的" }] },
+        ],
+        artifacts: [],
+      };
+    };
+    assert.strictEqual(await h2.bridge.sessions.switchToSession(sid2), true);
+    await h2.emit("session:list_changed", {});
+    await new Promise(function (r) { setTimeout(r, 50); });
+    await h2.emit("chat:done", { session_id: sid2, status: "Completed" });
+    await new Promise(function (r) { setTimeout(r, 150); });
+    var rename2 = h2.calls.filter(function (c) { return c.cmd === "rename_session"; });
+    assert.strictEqual(rename2.length, 1,
+      bridgeKind + " 普通首条消息应触发自动命名");
+    var title2 = String(rename2[0] && rename2[0].args && rename2[0].args.title || "");
+    assert.ok(title2.indexOf("帮我修登录页") === 0,
+      bridgeKind + " 标题应以真实正文开头：" + JSON.stringify(title2));
+    assert.ok(title2.indexOf("<turn_meta>") < 0 && title2.indexOf("Current workspace") < 0,
+      bridgeKind + " 标题不得包含 turn_meta/workspace XML：" + JSON.stringify(title2));
+  }
+}
+
+async function webLiveEnvelopeStaysOutOfPresentation() {
+  var bridgeKind = "web";
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var sessionId = "chat-web-live-envelope";
+  var envelopeText = [
+    '<codewhale:runtime_event kind="subagent_completion" visibility="internal">',
+    'This is an internal runtime event, not user input.',
+    'web live child completion summary',
+    '</codewhale:runtime_event>',
+  ].join('\n');
+  harness.handlers.load_session = function () {
+    return {
+      metadata: { id: sessionId, title: "Web live", message_count: 1 },
+      messages: [{ role: "assistant", content: [{ type: "text", text: "既有回答" }] }],
+      artifacts: [],
+    };
+  };
+  assert.strictEqual(await harness.bridge.sessions.switchToSession(sessionId), true);
+  await harness.emit("chat:user_message", { session_id: sessionId, content: envelopeText, operation: "append" });
+  var visible = JSON.stringify(harness.bridge.state.get("chat").chatItems);
+  assert.ok(!visible.includes("web live child completion summary"),
+    "web live 内部信封不得渲染为用户气泡");
+  assert.ok(!visible.includes("codewhale:runtime_event"),
+    "web live 内部信封 XML 不得进入展示");
 }
 
 async function draftToggleFailureAbortsFirstSend() {
@@ -1227,22 +2339,54 @@ async function followupQueuedUntilScheduledInitialTurnTerminal() {
     unread: false,
   }, { id: "automation-followup", name: "Follow-up task" }), true);
   harness.emit("chat:delta", { session_id: "sched-followup", text: "initial scheduled output" });
-  var initialAssistantCount = bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems.filter(function (item) {
-    return item.type === "assistant";
-  }).length;
+  // The load_session mock must return the id from args.id: a fixed id
+  // mislabels switch targets for other sessions and cross-writes the working
+  // set into the wrong buffer on exit.
+  harness.handlers.load_session = function (args) {
+    if (args.id !== "sched-followup") {
+      return { metadata: { id: args.id, title: "Origin" }, messages: [], artifacts: [] };
+    }
+    return {
+      metadata: { id: "sched-followup", title: "Follow-up task", message_count: 2 },
+      transcript_revision: "rev-followup-live",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "原问题" }] },
+        { role: "assistant", content: [{ type: "text", text: "initial scheduled output" }] },
+      ],
+      artifacts: [],
+    };
+  };
+  harness.handlers.steer_chat = function () { return "steer-f1"; };
 
   await bridge.chat.sendMessage("follow up after the scheduled run");
-  var queued = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
-  assert.strictEqual(queued.queued.length, 1, "follow-up input must queue while the initial scheduled turn is active");
+  let queued = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  // Busy send = steer injection: the chip shows immediately and waits for
+  // steer_committed settlement.
+  assert.strictEqual(queued.queued.length, 1, "follow-up chip should linger above input after click");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "steer_chat"; }).length,
+    1,
+    "a mid-turn follow-up steers into the scheduled engine turn"
+  );
   assert.strictEqual(
     harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
     0,
-    "a queued follow-up must not overlap the scheduled engine turn"
+    "a mid-turn follow-up must not overlap the scheduled engine turn via chat command"
   );
-  assert.strictEqual(
-    queued.chatItems.filter(function (item) { return item.type === "assistant"; }).length,
-    initialAssistantCount,
-    "queueing a follow-up must not create an overlapping assistant placeholder"
+  await tick();
+  await tick();
+
+  // Real engine delivery: steer_committed settles the chip by steer_id →
+  // bubble.
+  await harness.emit("chat:steer_committed", { session_id: "sched-followup", steer_id: "steer-f1" });
+  await tick();
+  queued = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(queued.queued.length, 0, "steer_committed consumes the chip");
+  assert.ok(
+    queued.chatItems.some(function (item) {
+      return item.type === "user" && item.text === "follow up after the scheduled run";
+    }),
+    "steer_committed turns the chip into a user bubble"
   );
 
   harness.emit("chat:done", { session_id: "sched-followup" });
@@ -1252,10 +2396,2856 @@ async function followupQueuedUntilScheduledInitialTurnTerminal() {
   assert.strictEqual(flushed.queued.length, 0);
   assert.strictEqual(
     harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
-    1,
-    "the queued follow-up should flush only after the scheduled terminal event"
+    0,
+    "after chat:done the engine has the steer; no second chat command expected"
   );
-  assert.strictEqual(flushed.busy, true, "the flushed follow-up should own the next busy turn");
+}
+
+async function webFollowupQueuedUntilScheduledInitialTurnTerminal() {
+  // Web-bridge mirror of the case above: the scheduled session's terminal
+  // event must release the remote-authority gate (not arm it), so the queued
+  // follow-up drains instead of dead-locking inside reconcileRemoteTurn.
+  var harness = createBridgeHarness(Object.create(null), {
+    bridgeKind: "web",
+    webSupportedCommands: [
+      "web_access_chat", "web_access_load_session_chunk",
+      "web_access_cancel_session_download", "web_access_list_sessions",
+      "web_access_list_archived_sessions",
+      "web_access_create_session_and_chat", "web_access_create_session",
+      "web_access_status",
+    ],
+  });
+  var bridge = harness.bridge;
+  await bridge.sessions.switchToSession("chat-origin");
+  assert.strictEqual(await bridge.scheduled.openScheduledRunChat({
+    id: "run-followup-web",
+    automationId: "automation-followup-web",
+    sessionId: "sched-followup-web",
+    status: "running",
+    unread: false,
+  }, { id: "automation-followup-web", name: "Follow-up task" }), true);
+  harness.emit("chat:delta", { session_id: "sched-followup-web", text: "initial scheduled output" });
+  var initialAssistantCount = bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems.filter(function (item) {
+    return item.type === "assistant";
+  }).length;
+
+  await bridge.chat.sendMessage("follow up after the scheduled run");
+  var queued = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(queued.queued.length, 1, "web: follow-up input must queue while the initial scheduled turn is active");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "web_access_chat" || call.cmd === "chat"; }).length,
+    0,
+    "web: a queued follow-up must not overlap the scheduled engine turn"
+  );
+  assert.strictEqual(
+    queued.chatItems.filter(function (item) { return item.type === "assistant"; }).length,
+    initialAssistantCount,
+    "web: queueing a follow-up must not create an overlapping assistant placeholder"
+  );
+
+  harness.emit("chat:done", { session_id: "sched-followup-web" });
+  await tick();
+  await tick();
+  var flushed = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(flushed.queued.length, 0, "web: the queued follow-up must drain after the scheduled terminal event");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "web_access_chat" || call.cmd === "chat"; }).length,
+    1,
+    "web: exactly one follow-up chat call should be issued after the scheduled terminal"
+  );
+  assert.strictEqual(flushed.busy, true, "web: the flushed follow-up should own the next busy turn");
+}
+
+// ── Queue semantics (busy steer inject / chip × withdraw / chip ⚡ zap-send) ─────────
+async function busySendSteersIntoEngineAndSettlesChip() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-queue-local"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-queue-local" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-1"; };
+
+  await bridge.chat.sendMessage("生成中注入的一句");
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "busy send enters the queue overlay immediately");
+  const steerCalls = harness.calls.filter(function (call) { return call.cmd === "steer_chat"; });
+  assert.strictEqual(steerCalls.length, 1, "busy send steers into the engine immediately (auto-inserted at step gaps)");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "busy send does not start a new turn directly"
+  );
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued[0].steerId, "steer-1", "opaque steer_id backfilled after the invoke resolves");
+
+  // CJK content must also match by steer_id (the old content_hash scheme
+  // necessarily mismatched across the two encodings).
+  await harness.emit("chat:steer_committed", { session_id: "chat-queue-local", steer_id: "steer-1" });
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "steer_committed consumes the chip");
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "user" && item.text === "生成中注入的一句"; }),
+    "steer_committed turns the chip into a user bubble"
+  );
+}
+
+async function removeQueuedSteeredChipWithdrawsFromEngine() {
+  // × on a steered chip: optimistic removal + a real withdraw_steer; the
+  // engine's subsequent steer_dropped is idempotent and must not re-notify.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-queue-cancel"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-queue-cancel" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-w1"; };
+
+  await bridge.chat.sendMessage("会被撤回的一句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  const queuedId = view.queued[0].id;
+
+  bridge.chat.removeQueued(queuedId);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "× removes the chip optimistically");
+  const withdrawCalls = harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; });
+  assert.strictEqual(withdrawCalls.length, 1, "× triggers a real withdraw_steer");
+  assert.strictEqual(withdrawCalls[0].args.sessionId, "chat-queue-cancel");
+  assert.strictEqual(withdrawCalls[0].args.steerId, "steer-w1");
+
+  // Engine confirms the drop: idempotent — the chip is already gone, so
+  // no duplicate notice.
+  await harness.emit("chat:steer_dropped", { session_id: "chat-queue-cancel", steer_id: "steer-w1" });
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0);
+  assert.ok(
+    !view.chatItems.some(function (item) {
+      return item.type === "system" && String(item.text || "").includes("未送达");
+    }),
+    "steer_dropped after a withdrawal settles silently, no duplicate notice"
+  );
+}
+
+async function removeQueuedBeforeSteerIdBackfillWithdrawsOnBackfill() {
+  // × before the invoke resolves (id not backfilled): mark cancelled
+  // locally; the withdrawal fires right after backfill.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-cancel-early"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-cancel-early" });
+  await tick();
+  const steerCall = deferred();
+  harness.handlers.steer_chat = function () { return steerCall.promise; };
+
+  await bridge.chat.sendMessage("id 未回填就取消");
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  bridge.chat.removeQueued(queuedId);
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length, 0);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; }).length,
+    0,
+    "cannot withdraw before the id is backfilled — wait for backfill"
+  );
+
+  steerCall.resolve("steer-w2");
+  await tick();
+  await tick();
+  await tick();
+  const withdrawCalls = harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; });
+  assert.strictEqual(withdrawCalls.length, 1, "withdrawal fires immediately once steer_id is backfilled");
+  assert.strictEqual(withdrawCalls[0].args.steerId, "steer-w2");
+}
+
+async function attachmentQueuedChipCancelNeverTouchesEngine() {
+  // Regression (leftover surface of the original bug): attachment chips
+  // are plain local queue entries (no steer), so × cancel must make zero
+  // engine calls.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-attach-cancel"), true);
+  harness.handlers.ingest_file = function () {
+    return { path: "/tmp/a.png", basename: "a.png" };
+  };
+  await bridge.attachments.addAttachmentByPath("/tmp/a.png");
+  harness.emit("chat:turn_started", { session_id: "chat-attach-cancel" });
+  await tick();
+
+  await bridge.chat.sendMessage("");
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "busy send with attachments goes to plain local queuing");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "steer_chat"; }).length,
+    0,
+    "attachment chips are not steered (the steer channel carries text only)"
+  );
+  const queuedId = view.queued[0].id;
+
+  bridge.chat.removeQueued(queuedId);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "× removes the attachment chip");
+
+  harness.emit("chat:done", { session_id: "chat-attach-cancel" });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    harness.calls.filter(function (call) {
+      return call.cmd === "chat" || call.cmd === "steer_chat" || call.cmd === "withdraw_steer";
+    }).length,
+    0,
+    "× cancel on a plain queued chip makes zero engine calls"
+  );
+}
+
+async function queuedMessageActionsReorderAndEditPlainItems(bridgeKind) {
+  const harness = createBridgeHarness(Object.create(null), bridgeKind === "web" ? {
+    bridgeKind: "web",
+    webSupportedCommands: [
+      "web_access_load_session_chunk", "web_access_cancel_session_download",
+      "web_access_list_sessions", "web_access_list_archived_sessions",
+      "web_access_status",
+    ],
+  } : undefined);
+  const bridge = harness.bridge;
+  const sid = "chat-queue-actions-" + bridgeKind;
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+
+  const ingestCommand = bridgeKind === "web" ? "web_access_ingest_file" : "ingest_file";
+  harness.handlers[ingestCommand] = function (args) {
+    return bridgeKind === "web"
+      ? { handle: "handle-" + args.path, basename: args.path }
+      : { path: "/managed/" + args.path, basename: args.path };
+  };
+  await bridge.attachments.addAttachmentByPath("first.txt");
+  await bridge.chat.sendMessage("first queued", { source: "first" });
+  await bridge.attachments.addAttachmentByPath("second.txt");
+  await bridge.chat.sendMessage("second queued", { source: "second" });
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.deepStrictEqual(
+    Array.from(view.queued, function (item) { return item.text; }),
+    ["first queued", "second queued"],
+    bridgeKind + ": messages start in FIFO order"
+  );
+  const secondId = view.queued[1].id;
+
+  assert.strictEqual(await bridge.chat.editQueued(sid, secondId, "second edited"), true);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued[1].text, "second edited", bridgeKind + ": edit replaces only queued text");
+  assert.ok(view.queued[1].displayText.includes("second edited"), bridgeKind + ": display text follows the edit");
+  assert.ok(view.queued[1].displayText.includes("second.txt"), bridgeKind + ": edit preserves attachment display");
+  assert.strictEqual(view.queued[1].attachments.length, 1, bridgeKind + ": edit preserves attachment payloads");
+  assert.strictEqual(view.queued[1].meta.source, "second", bridgeKind + ": edit preserves message metadata");
+
+  assert.strictEqual(await bridge.chat.prioritizeQueued(sid, secondId), true);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.deepStrictEqual(
+    Array.from(view.queued, function (item) { return item.text; }),
+    ["second edited", "first queued"],
+    bridgeKind + ": prioritize moves the item to the queue front"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) {
+      return call.cmd === "chat" || call.cmd === "web_access_chat" || call.cmd === "cancel_generation";
+    }).length,
+    0,
+    bridgeKind + ": edit/prioritize do not interrupt or start a turn while busy"
+  );
+}
+
+async function queuedSceneEditRebuildsInternalPayload(bridgeKind) {
+  const harness = createBridgeHarness(Object.create(null), bridgeKind === "web" ? {
+    bridgeKind: "web",
+    webSupportedCommands: [
+      "web_access_chat", "web_access_load_session_chunk", "web_access_cancel_session_download",
+      "web_access_list_sessions", "web_access_list_archived_sessions", "web_access_status",
+    ],
+  } : undefined);
+  const bridge = harness.bridge;
+  const sid = "chat-queued-scene-" + bridgeKind;
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  const original = "HTML";
+  const internalGuide = "PRIVATE HTML SCENE GUIDE: load a capability before answering";
+  const originalPayload = internalGuide + "\n\nUser requirement:\n" + original;
+  const meta = {
+    pinvouScene: "work:personal-workbench",
+    pinvouPayloadText: originalPayload,
+    marker: "preserved",
+  };
+  assert.strictEqual(await bridge.chat.sendMessage(original, meta), true);
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  assert.ok(!view.queued[0].steered, bridgeKind + ": scene/context messages remain in the local queue");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "steer_chat"; }).length,
+    0,
+    bridgeKind + ": scene/context payloads never use the text-only steer channel"
+  );
+  assert.strictEqual(view.queued[0].text, original, bridgeKind + ": edit value is user text only");
+  assert.ok(!view.queued[0].displayText.includes(internalGuide), bridgeKind + ": private guide is absent from queue UI text");
+  assert.ok(view.queued[0].payloadText.includes(internalGuide), bridgeKind + ": private guide remains in the model payload");
+
+  assert.strictEqual(await bridge.chat.editQueued(sid, view.queued[0].id, "edited scene request"), true);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued[0].text, "edited scene request");
+  assert.strictEqual(
+    view.queued[0].payloadText,
+    internalGuide + "\n\nUser requirement:\nedited scene request",
+    bridgeKind + ": edit rebuilds the model payload inside its original scene envelope"
+  );
+  assert.strictEqual(view.queued[0].meta.marker, "preserved", bridgeKind + ": unrelated metadata survives editing");
+  assert.strictEqual(view.queued[0].meta.pinvouScene, "work:personal-workbench", bridgeKind + ": scene routing survives editing");
+  assert.strictEqual(
+    view.queued[0].meta.pinvouPayloadText,
+    internalGuide + "\n\nUser requirement:\nedited scene request",
+    bridgeKind + ": scene meta is rebuilt without absorbing an unrelated admission prefix"
+  );
+
+  await harness.emit("chat:done", { session_id: sid });
+  await tick();
+  await tick();
+  const command = bridgeKind === "web" ? "web_access_chat" : "chat";
+  const delivery = harness.calls.find(function (call) { return call.cmd === command; });
+  assert.ok(delivery, bridgeKind + ": edited queue item is delivered after the active turn");
+  assert.strictEqual(delivery.args.message, internalGuide + "\n\nUser requirement:\nedited scene request");
+}
+
+async function queuedEditWithEmptyMetaPayloadStaysPlain(bridgeKind) {
+  const harness = createBridgeHarness(Object.create(null), bridgeKind === "web" ? {
+    bridgeKind: "web",
+    webSupportedCommands: [
+      "web_access_chat", "web_access_load_session_chunk", "web_access_cancel_session_download",
+      "web_access_list_sessions", "web_access_list_archived_sessions", "web_access_status",
+    ],
+  } : undefined);
+  const bridge = harness.bridge;
+  const sid = "chat-queued-empty-meta-" + bridgeKind;
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  const meta = { pinvouScene: "work:personal-workbench", pinvouPayloadText: "", marker: "kept" };
+  assert.strictEqual(await bridge.chat.sendMessage("plain while busy", meta), true);
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+
+  // An empty meta payload must edit like a plain message: send-time admission
+  // treats "" as absence, so the edit must not demand an envelope that was
+  // never built (regression: hasOwnProperty made every save fail forever).
+  assert.strictEqual(await bridge.chat.editQueued(sid, view.queued[0].id, "edited plain"), true);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued[0].text, "edited plain");
+  assert.strictEqual(view.queued[0].payloadText, "edited plain", bridgeKind + ": empty meta payload keeps the edit plain");
+  assert.strictEqual(view.queued[0].meta.marker, "kept", bridgeKind + ": unrelated metadata survives the edit");
+  assert.strictEqual(view.queued[0].meta.pinvouPayloadText, "", bridgeKind + ": empty meta payload is left untouched");
+
+  await harness.emit("chat:done", { session_id: sid });
+  await tick();
+  await tick();
+  const command = bridgeKind === "web" ? "web_access_chat" : "chat";
+  const delivery = harness.calls.find(function (call) { return call.cmd === command; });
+  assert.ok(delivery, bridgeKind + ": edited item is delivered after the active turn");
+  assert.strictEqual(delivery.args.message, "edited plain", bridgeKind + ": delivery matches send-time empty-meta semantics");
+}
+
+async function desktopBusyAdmissionOnlyMessageKeepsFullContract() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  harness.handlers.ingest_file = function () {
+    return { path: "/managed/context.xlsx", basename: "context.xlsx" };
+  };
+  await bridge.scheduled.startScheduledTaskChat();
+  // Materialize the guided draft without consuming its pending prompt. A
+  // knowledge mount uses the shared ensureSession path but does not submit a
+  // chat turn, letting the test establish a real busy session afterwards.
+  await bridge.knowledge.mountCollection(7);
+  const sid = bridge.state.getMany(['sessions', 'chat', 'scheduled']).activeSessionId;
+  await bridge.attachments.addAttachmentByPath("context.xlsx");
+  await harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+
+  const original = "HTML";
+  const sceneGuide = "PRIVATE HTML SCENE GUIDE";
+  const originalScenePayload = sceneGuide + "\n\nUser requirement:\n" + original;
+  const meta = {
+    pinvouScene: "work:personal-workbench",
+    pinvouPayloadText: originalScenePayload,
+    marker: "keep-me",
+  };
+  assert.strictEqual(await bridge.chat.sendMessage(original, meta), true);
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  assert.ok(!view.queued[0].steered, "admission-only message stays local while the current turn is busy");
+  assert.strictEqual(view.queued[0].text, original, "queue chip and edit value contain only user text");
+  assert.ok(!view.queued[0].displayText.includes("scheduled guide"));
+  assert.ok(!view.queued[0].displayText.includes(sceneGuide));
+  assert.ok(view.queued[0].displayText.includes("context.xlsx"), "attachment remains visible without exposing context");
+  assert.strictEqual(view.queued[0].restrictTools, true, "scheduled-task restriction is retained in the queue");
+  assert.strictEqual(view.queued[0].attachments.length, 1);
+  assert.strictEqual(view.queued[0].meta.marker, "keep-me");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "steer_chat"; }).length,
+    0,
+    "payload/context/attachment turns must not use steer_chat"
+  );
+
+  assert.strictEqual(await bridge.chat.editQueued(sid, view.queued[0].id, "edited scheduled scene"), true);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  const expectedScenePayload = sceneGuide + "\n\nUser requirement:\nedited scheduled scene";
+  const expectedPayload = "scheduled guide\n\n" + expectedScenePayload;
+  assert.strictEqual(view.queued[0].payloadText, expectedPayload);
+  assert.strictEqual(view.queued[0].meta.pinvouPayloadText, expectedScenePayload);
+  assert.strictEqual(view.queued[0].restrictTools, true);
+  assert.strictEqual(view.queued[0].attachments[0].basename, "context.xlsx");
+
+  await harness.emit("chat:done", { session_id: sid });
+  await tick();
+  await tick();
+  const delivery = harness.calls.find(function (call) { return call.cmd === "chat"; });
+  assert.ok(delivery, "chat:done flushes the admission-only message through the normal chat path");
+  assert.strictEqual(delivery.args.message, expectedPayload);
+  assert.strictEqual(delivery.args.restrictTools, true);
+  assert.strictEqual(delivery.args.attachments.length, 1);
+  assert.strictEqual(delivery.args.attachments[0].basename, "context.xlsx");
+
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "user" && item.text.includes("edited scheduled scene") && item.pinvouScene === "work:personal-workbench";
+    }),
+    "normal admission preserves the scene marker on the visible user bubble"
+  );
+  assert.ok(!JSON.stringify(view.chatItems).includes(sceneGuide), "live presentation never contains the private scene guide");
+  assert.ok(!JSON.stringify(view.messages).includes(sceneGuide), "frontend persistence snapshot contains display text, not the model guide");
+  assert.ok(!JSON.stringify(view.messages).includes("scheduled guide"), "scheduled guide stays out of the display transcript snapshot");
+}
+
+async function editQueuedSteerWithdrawsBeforeChangingPayload() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  const sid = "chat-queue-edit-steer";
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-edit-1"; };
+  harness.handlers.withdraw_steer = function () { return "retired"; };
+
+  await bridge.chat.sendMessage("old engine payload");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  assert.strictEqual(await bridge.chat.editQueued(sid, queuedId, "new local payload"), true);
+
+  const withdraw = harness.calls.find(function (call) { return call.cmd === "withdraw_steer"; });
+  assert.ok(withdraw, "editing a steered item withdraws its engine copy first");
+  assert.strictEqual(withdraw.args.steerId, "steer-edit-1");
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  assert.strictEqual(view.queued[0].text, "new local payload");
+  assert.strictEqual(view.queued[0].steered, false, "the edited item becomes a safe local queue entry");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat" || call.cmd === "cancel_generation"; }).length,
+    0,
+    "editing never interrupts the active answer"
+  );
+}
+
+async function editQueuedSteerRefusesUncertainWithdrawal() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  const sid = "chat-queue-edit-uncertain";
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-edit-uncertain-1"; };
+  harness.handlers.withdraw_steer = function () { return "not_pending"; };
+
+  await bridge.chat.sendMessage("authoritative old payload");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  assert.strictEqual(
+    await bridge.chat.editQueued(sid, queuedId, "must not be sent"),
+    false,
+    "an uncertain withdrawal refuses the edit"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "uncertain delivery never resends edited text"
+  );
+
+  await harness.emit("chat:steer_committed", { session_id: sid, steer_id: "steer-edit-uncertain-1" });
+  await tick();
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "user" && item.text === "authoritative old payload";
+    }),
+    "the engine-authoritative old payload is rendered after a too-late withdrawal"
+  );
+  assert.ok(
+    !view.chatItems.some(function (item) { return String(item.text || "").includes("must not be sent"); }),
+    "the rejected edit never reaches the transcript"
+  );
+}
+
+async function editQueuedDroppedBeforeNotPendingRestoresOriginal() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  const sid = "chat-queue-edit-dropped-not-pending";
+  const withdraw = deferred();
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-edit-dropped-not-pending"; };
+  harness.handlers.withdraw_steer = function () { return withdraw.promise; };
+
+  await bridge.chat.sendMessage("original before dropped race");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  const editing = bridge.chat.editQueued(sid, queuedId, "edited text must not leak");
+  await tick();
+  await harness.emit("chat:steer_dropped", {
+    session_id: sid,
+    steer_id: "steer-edit-dropped-not-pending",
+  });
+  withdraw.resolve("not_pending");
+  assert.strictEqual(await editing, false);
+  await tick();
+
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0);
+  assert.strictEqual(view.composerDraft, "original before dropped race", "the original user text is restored exactly once");
+  assert.ok(!view.composerDraft.includes("edited text must not leak"));
+  assert.strictEqual(harness.calls.filter(function (call) { return call.cmd === "chat"; }).length, 0);
+}
+
+async function editQueuedDroppedBeforeTimeoutRestoresOriginal() {
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  const sid = "chat-queue-edit-dropped-timeout";
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-edit-dropped-timeout"; };
+  harness.handlers.withdraw_steer = function () { return new Promise(function () {}); };
+
+  await bridge.chat.sendMessage("original before timeout race");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  const editing = bridge.chat.editQueued(sid, queuedId, "timed out edit must not leak");
+  await tick();
+  await harness.emit("chat:steer_dropped", {
+    session_id: sid,
+    steer_id: "steer-edit-dropped-timeout",
+  });
+  const withdrawTimers = timeouts.filter(function (timer) { return timer.ms === 25000; });
+  assert.ok(withdrawTimers.length > 0, "queue mutation arms the bounded withdrawal timeout");
+  withdrawTimers[withdrawTimers.length - 1].fn();
+  assert.strictEqual(await editing, false);
+  await tick();
+
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0);
+  assert.strictEqual(view.composerDraft, "original before timeout race", "timeout reconciliation restores once");
+  assert.ok(!view.composerDraft.includes("timed out edit must not leak"));
+  assert.strictEqual(harness.calls.filter(function (call) { return call.cmd === "chat"; }).length, 0);
+}
+
+async function editQueuedSteerUnchangedTextKeepsSteer() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  const sid = "chat-queue-edit-noop";
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-edit-noop-1"; };
+  harness.handlers.withdraw_steer = function () { return "retired"; };
+
+  await bridge.chat.sendMessage("same text");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  assert.strictEqual(await bridge.chat.editQueued(sid, queuedId, "same text"), true);
+
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  assert.strictEqual(view.queued[0].steered, true, "a no-op save keeps the live steer transport");
+  assert.strictEqual(view.queued[0].steerId, "steer-edit-noop-1");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; }).length,
+    0,
+    "an unchanged text never withdraws the engine copy"
+  );
+}
+
+async function prioritizeQueuedSteerPromotesVisuallyWithoutWithdrawal() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  const sid = "chat-queue-prioritize-steer";
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-prio-1"; };
+  harness.handlers.ingest_file = function () {
+    return { path: "/managed/local-first.txt", basename: "local-first.txt" };
+  };
+  await bridge.attachments.addAttachmentByPath("local-first.txt");
+  await bridge.chat.sendMessage("local first");
+  await tick();
+  await bridge.chat.sendMessage("steered second");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.deepStrictEqual(
+    Array.from(view.queued, function (item) { return item.text; }),
+    ["local first", "steered second"],
+    "the attachment chip queues locally ahead of the steered chip"
+  );
+  const steeredId = view.queued[1].id;
+
+  assert.strictEqual(await bridge.chat.prioritizeQueued(sid, steeredId), true);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.deepStrictEqual(
+    Array.from(view.queued, function (item) { return item.text; }),
+    ["steered second", "local first"],
+    "the steered chip moves to the queue front"
+  );
+  assert.strictEqual(view.queued[0].steered, true, "promotion is visual only: the chip stays steered");
+  assert.strictEqual(view.queued[0].steerId, "steer-prio-1");
+  assert.strictEqual(
+    harness.calls.filter(function (call) {
+      return call.cmd === "withdraw_steer" || call.cmd === "chat" || call.cmd === "cancel_generation";
+    }).length,
+    0,
+    "promoting the first steer never touches the transport"
+  );
+}
+
+async function prioritizeQueuedSteerBehindSteerRefuses() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  const sid = "chat-queue-prioritize-refuse";
+  assert.strictEqual(await bridge.sessions.switchToSession(sid), true);
+  harness.emit("chat:turn_started", { session_id: sid });
+  await tick();
+  let steerSeq = 0;
+  harness.handlers.steer_chat = function () {
+    steerSeq += 1;
+    return "steer-prio-refuse-" + steerSeq;
+  };
+  await bridge.chat.sendMessage("first steer");
+  await tick();
+  await tick();
+  await bridge.chat.sendMessage("second steer");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.deepStrictEqual(
+    Array.from(view.queued, function (item) { return item.text; }),
+    ["first steer", "second steer"]
+  );
+  const secondId = view.queued[1].id;
+
+  assert.strictEqual(
+    await bridge.chat.prioritizeQueued(sid, secondId),
+    false,
+    "a steer cannot leapfrog an earlier engine-side steer"
+  );
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.deepStrictEqual(
+    Array.from(view.queued, function (item) { return item.text; }),
+    ["first steer", "second steer"],
+    "a refused promotion leaves the queue untouched"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; }).length,
+    0,
+    "the refusal never withdraws either copy"
+  );
+}
+
+async function interruptQueuedSteeredChipWithdrawsBeforeSending() {
+  // ⚡ on a steered chip: withdraw_steer first (prevent a leftover engine
+  // copy injecting later as a duplicate), then cancel + chat.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-queue-zap"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-queue-zap" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-z1"; };
+  // cancel confirms the terminal immediately, skipping the chat:done event wait.
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+
+  await bridge.chat.sendMessage("要瞬发的一句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  const queuedId = view.queued[0].id;
+
+  const result = await bridge.chat.interruptAndSendQueued("chat-queue-zap", queuedId);
+  assert.strictEqual(result, true, "zap-send succeeds");
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "chip removed after the zap-send");
+  const indexOf = function (cmd) {
+    return harness.calls.findIndex(function (call) { return call.cmd === cmd; });
+  };
+  const withdrawIndex = indexOf("withdraw_steer");
+  const cancelIndex = indexOf("cancel_generation");
+  const chatIndex = indexOf("chat");
+  assert.ok(withdrawIndex >= 0, "⚡ first withdraws the engine-side steer copy");
+  assert.ok(cancelIndex > withdrawIndex, "withdraw precedes cancel");
+  assert.ok(chatIndex > cancelIndex, "cancel precedes chat");
+  assert.strictEqual(harness.calls[withdrawIndex].args.steerId, "steer-z1");
+  assert.strictEqual(harness.calls[cancelIndex].args.keepInbox, true, "interrupt semantics keep engine-side un-injected steers");
+  assert.strictEqual(harness.calls[chatIndex].args.message, "要瞬发的一句");
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "user" && item.text === "要瞬发的一句"; }),
+    "zap-send renders the user bubble"
+  );
+}
+
+async function interruptQueuedFailureRestoresChipToQueue() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-queue-zap-fail"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-queue-zap-fail" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-f1"; };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.chat = function () { throw new Error("send boom"); };
+
+  await bridge.chat.sendMessage("瞬发失败要回排队区");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const result = await bridge.chat.interruptAndSendQueued("chat-queue-zap-fail", queuedId);
+  assert.strictEqual(result, false, "zap failure returns false");
+  await tick();
+  await tick();
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "zap failure restores the message to the queue (not the composer)");
+  assert.strictEqual(view.queued[0].text, "瞬发失败要回排队区");
+  assert.strictEqual(view.queued[0].steered, false, "the restored chip is degraded to non-steered: the withdrawal is out, staying steered would block flushQueued and the next round never comes");
+  assert.strictEqual(view.queued[0].steerId, null, "steerId cleared after degradation; the chip is consumed normally by flushQueued");
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "system" && String(item.text || "").includes("插队发送失败");
+    }),
+    "zap failure gives a localized notice"
+  );
+}
+
+async function interruptQueuedWhileIdleSendsWithoutCancel() {
+  // Queue leftover while not busy (a legacy backend's steered chip never
+  // gets events) → ⚡ sends directly without cancelling; the chip has no
+  // steerId to withdraw, so just set the cancelled flag.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-queue-zap-idle"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-queue-zap-idle" });
+  await tick();
+  // Legacy backend: steer_chat returns nothing → chip has no steerId.
+  harness.handlers.steer_chat = function () { return null; };
+
+  await bridge.chat.sendMessage("残留后瞬发");
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  // Turn over: the steered chip is not consumed by flushQueued (waiting
+  // for engine events) and the session is no longer busy.
+  harness.emit("chat:done", { session_id: "chat-queue-zap-idle" });
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "steered chip left over (flushQueued yields)");
+  assert.strictEqual(view.busy, false, "the turn has ended");
+
+  const result = await bridge.chat.interruptAndSendQueued("chat-queue-zap-idle", queuedId);
+  assert.strictEqual(result, true);
+  await tick();
+  await tick();
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    0,
+    "while not busy, ⚡ sends directly without cancelling"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; }).length,
+    0,
+    "no withdrawal when the chip has no steerId"
+  );
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "chip removed after the direct ⚡ send");
+}
+
+async function withdrawTooLateCommittedStillBubbles() {
+  // Withdrawal too late: × already fired withdraw_steer but the engine
+  // committed first → the engine wins and the bubble appears anyway.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-withdraw-late"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-withdraw-late" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-late"; };
+
+  await bridge.chat.sendMessage("撤回太迟的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  bridge.chat.removeQueued(queuedId);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; }).length,
+    1,
+    "× fired the withdrawal"
+  );
+
+  await harness.emit("chat:steer_committed", { session_id: "chat-withdraw-late", steer_id: "steer-late" });
+  await tick();
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0);
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "user" && item.text === "撤回太迟的一句"; }),
+    "when the withdrawal is too late (committed first), the bubble still appears"
+  );
+}
+
+async function steerInvokeHangTimesOutAndRestoresInput() {
+  // MAJOR-1 regression: the steer_chat invoke hangs (neither rejects nor
+  // resolves, simulating a wedged engine task) → after the 25s fallback
+  // timeout the failure recovery runs: chip removed, composer text restored,
+  // and no hanging queue head may block flushQueued.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length; // never runs for real; the test fires it manually to simulate the timeout
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-hang"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-hang" });
+  await tick();
+  harness.handlers.steer_chat = function () {
+    return new Promise(function () {}); // never settles
+  };
+
+  await bridge.chat.sendMessage("卡死也要拿回的一句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "the chip shows while the steer invoke is in flight");
+
+  // Fire the steer fallback timeout (25s) manually.
+  const steerTimer = timeouts.find(function (t) { return t.ms === 25000; });
+  assert.ok(steerTimer, "the steer invoke must have a 25s fallback timeout");
+  steerTimer.fn();
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "the hanging chip is removed after the timeout");
+  assert.strictEqual(bridge.state.getMany(['chat']).composerDraft, "卡死也要拿回的一句", "text restored to the composer after the timeout");
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "system" && String(item.text || "").includes("插队失败");
+    }),
+    "the timeout gives a localized notice"
+  );
+}
+
+async function interruptQueuedFailureLeavesFlushableChip() {
+  // MAJOR-2 regression: the zap failure recovery must degrade the chip to
+  // non-steered — the withdrawal is already out and the engine only settles
+  // at the next drain; staying steered would make flushQueued yield and the
+  // next round never come (queue deadlock).
+  // Sixth review round updated expectation: a doSendFor failure resets busy
+  // (see its failure path) and cancel already returned terminal=true (target
+  // terminal confirmed, no further chat:done) — the recovery branch's
+  // idle-compensation flush (end of interruptAndSendQueued's catch) retries
+  // immediately, so the degraded chip does not wait for the next done. The
+  // old expectation "stay queued waiting for chat:done" is exactly the hang
+  // being fixed here (after terminal=true there is no chat:done to wait
+  // for).
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-degrade"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-degrade" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-d1"; };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  let chatAttempts = 0;
+  harness.handlers.chat = function () {
+    chatAttempts += 1;
+    if (chatAttempts === 1) throw new Error("send boom");
+    return "ok";
+  };
+
+  await bridge.chat.sendMessage("降级后要能重发的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  assert.strictEqual(await bridge.chat.interruptAndSendQueued("chat-zap-degrade", queuedId), false, "first zap attempt fails");
+  await tick();
+  await tick();
+
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(chatAttempts, 2, "the idle-compensation flush immediately retries the degraded chip (doSendFor failure already reset busy)");
+  assert.strictEqual(view.queued.length, 0, "retry succeeds; the chip no longer hangs waiting for a chat:done that never comes");
+  const chatCalls = harness.calls.filter(function (call) { return call.cmd === "chat"; });
+  assert.strictEqual(chatCalls[1].args.message, "降级后要能重发的一句", "the retry sends the same message (not lost, not duplicated)");
+}
+
+async function interruptAndSendTimeoutWhileBusyFailsWithoutSending() {  // P2 regression (public-API timeout semantics): after cancel returns
+  // terminal=false and no chat:done arrives, the 25s fallback fires with the
+  // session still busy — interruptAndSend must reject explicitly without
+  // calling chat (sending now would reliably hit session_turn_in_progress;
+  // a caller that ignores the rejection loses the message).
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-interrupt-timeout"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-interrupt-timeout" });
+  await tick();
+  harness.handlers.cancel_generation = function () { return { terminal: false, generation: 7 }; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  let outcome = null;
+  const p = bridge.chat
+    .interruptAndSend("chat-interrupt-timeout", "超时也要保住的一句", null, [], null, false)
+    .then(function () { outcome = "sent"; }, function (e) { outcome = e; });
+  await tick();
+  await tick();
+  await tick();
+
+  // After the sixth review round there are two 25000ms timers: the cancel
+  // invoke's transport timeout (registered first; the race settled and the
+  // harness's no-op clearTimeout leaves it in the list, firing is harmless)
+  // and waitForChatDone's fallback (registered later) — the latter is the
+  // one to fire.
+  const waitTimers = timeouts.filter(function (t) { return t.ms === 25000; });
+  const waitTimer = waitTimers[waitTimers.length - 1];
+  assert.ok(waitTimer, "waitForChatDone must have a 25s fallback timeout");
+  waitTimer.fn();
+  await p;
+  // Note: the bridge runs inside a vm context; the thrown Error is an
+  // instance from another realm and cannot be checked with instanceof.
+  assert.ok(
+    outcome && typeof outcome.message === "string",
+    "timeout while still busy must fail explicitly, never send silently"
+  );
+  assert.ok(
+    /still busy|not sent/.test(String(outcome && outcome.message)),
+    "the error explains the cancel is unfinished and the message was not sent"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "doSendFor must not be attempted while busy after timeout (would hit session_turn_in_progress)"
+  );
+
+  // Once the session finally ends (the cancel unwind completes), the
+  // caller can safely retry the same message.
+  harness.emit("chat:done", { session_id: "chat-interrupt-timeout", generation: 7 });
+  await tick();
+  await tick();
+  const retry = await bridge.chat.interruptAndSend("chat-interrupt-timeout", "超时也要保住的一句", null, [], null, false);
+  assert.strictEqual(retry, true, "retrying the same message after the turn terminal succeeds (message not lost)");
+}
+
+async function interruptAndSendWaitsForMatchingGenerationDone() {
+  // P0-B happy path + generation filtering: after cancel returns
+  // terminal=false, a late old-turn chat:done (mismatched generation) must
+  // not unlock early; sending continues only on the chat:done carrying the
+  // matching generation. A scheduled session (sched- prefix) exempts the
+  // cross-host authoritative reconciliation gate, focusing on the wait
+  // listener's own generation matching.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("sched-interrupt-gen"), true);
+  harness.emit("chat:turn_started", { session_id: "sched-interrupt-gen" });
+  await tick();
+  harness.handlers.cancel_generation = function () { return { terminal: false, generation: 7 }; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  let sent = null;
+  const p = bridge.chat
+    .interruptAndSend("sched-interrupt-gen", "按轮解锁的一句", null, [], null, false)
+    .then(function (r) { sent = r; }, function (e) { sent = e; });
+  await tick();
+  await tick();
+  await tick();
+
+  // Late old-turn terminal (generation 6): must not unlock the wait.
+  harness.emit("chat:done", { session_id: "sched-interrupt-gen", generation: 6 });
+  await tick();
+  await tick();
+  assert.strictEqual(sent, null, "an old-turn chat:done with mismatched generation must not unlock");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no send while the generation mismatches"
+  );
+
+  // Target turn terminal (generation 7): unlock and send. Stall guard:
+  // if a wait regression (lost listener / broken matching) keeps the
+  // matching event from unlocking, a bare `await p` hangs forever, the fake
+  // timers never fire the fallback and node --test exits 0 silently
+  // (self-review P1-5). Race against a real timer so both directions
+  // (wrong unlock / no unlock) fail loudly.
+  harness.emit("chat:done", { session_id: "sched-interrupt-gen", generation: 7 });
+  await withStallGuard(p, "matching-generation chat:done failed to unlock the interrupt wait");
+  assert.strictEqual(sent, true, "sending continues after the chat:done with the matching generation");
+  const chatCalls = harness.calls.filter(function (call) { return call.cmd === "chat"; });
+  assert.strictEqual(chatCalls.length, 1, "sent exactly once");
+  assert.strictEqual(chatCalls[0].args.message, "按轮解锁的一句");
+}
+
+async function steerCommittedBeforeBackfillSettlesViaStash() {
+  // pendingSteerEvents stash race: the engine commits extremely fast and
+  // chat:steer_committed arrives before the steer_chat invoke resolves —
+  // the chip has no backfilled steerId yet, so the event is stashed per
+  // session; once the invoke resolves and backfills, settlement is immediate
+  // (chip becomes a bubble, no hang).
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-race"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-race" });
+  await tick();
+  let resolveSteer = null;
+  harness.handlers.steer_chat = function () {
+    return new Promise(function (resolve) { resolveSteer = resolve; });
+  };
+
+  await bridge.chat.sendMessage("事件比 id 先到的一句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "the chip is queued while the invoke is in flight");
+  assert.strictEqual(view.queued[0].steerId, null, "steerId not yet backfilled");
+
+  // Event first: no id to match → stash it, chip untouched.
+  harness.emit("chat:steer_committed", { session_id: "chat-steer-race", steer_id: "steer-early" });
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "event arriving first is stashed; the chip does not settle early");
+
+  // The invoke resolves and backfills the id: consume the stash
+  // immediately → the chip becomes a user bubble.
+  resolveSteer("steer-early");
+  await tick();
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "the stashed event settles immediately after backfill; chip removed");
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "user" && item.text === "事件比 id 先到的一句"; }),
+    "the user bubble renders after settlement"
+  );
+}
+
+async function interruptAndSendPreRegistersDoneListener() {
+  // Review P2 regression: chat:done arrives **before** the cancel invoke
+  // returns (the engine emits the terminal while the command is being
+  // processed). The listener registered before cancel buffers it, the event
+  // is not lost — no fake 25s wait, the send unlocks directly.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("sched-pre-reg"), true);
+  harness.emit("chat:turn_started", { session_id: "sched-pre-reg" });
+  await tick();
+  harness.handlers.cancel_generation = function () {
+    // The terminal is emitted before the cancel command returns (gap scenario).
+    harness.emit("chat:done", { session_id: "sched-pre-reg", generation: 3 });
+    return { terminal: false, generation: 3 };
+  };
+  harness.handlers.chat = function () { return "ok"; };
+
+  // Stall guard (self-review P1-5): if the pre-registration regresses, the
+  // done lands in the gap, the wait never settles, a bare await hangs forever
+  // and the fake timers never fire — race against a real timer so the
+  // regression fails loudly.
+  const sent = await withStallGuard(
+    bridge.chat.interruptAndSend("sched-pre-reg", "缝隙里的一句", null, [], null, false),
+    "pre-registered chat:done failed to unlock the interrupt wait"
+  );
+  assert.strictEqual(sent, true, "the chat:done arriving inside the gap is buffered by the pre-registered listener; sends normally");
+  const chatCalls = harness.calls.filter(function (call) { return call.cmd === "chat"; });
+  assert.strictEqual(chatCalls.length, 1, "sent exactly once");
+  assert.strictEqual(chatCalls[0].args.message, "缝隙里的一句");
+  assert.ok(
+    !timeouts.some(function (t) { return t.fired; }),
+    "no reliance on the 25s fallback (no timeout timer fired)"
+  );
+}
+
+async function steerLateSuccessAfterTimeoutWithdraws() {
+  // Review P1-2 regression: a late steer_chat success after the 25s
+  // timeout — the engine accepted the original message, and injecting it
+  // would duplicate delivery against the user's resend of the restored text.
+  // The late success must trigger a compensating withdrawal (withdraw_steer);
+  // if already committed the withdrawal is a no-op and the event renders the
+  // bubble.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-late"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-late" });
+  await tick();
+  let resolveSteer = null;
+  harness.handlers.steer_chat = function () {
+    return new Promise(function (resolve) { resolveSteer = resolve; });
+  };
+
+  await bridge.chat.sendMessage("晚到成功的一句");
+  await tick();
+  await tick();
+  const steerTimer = timeouts.find(function (t) { return t.ms === 25000; });
+  assert.ok(steerTimer, "the steer invoke has a 25s fallback");
+  steerTimer.fn();
+  steerTimer.fired = true;
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "timeout recovery: chip removed");
+
+  // The invoke succeeds late: a compensating withdrawal must fire
+  // immediately so a later engine injection cannot duplicate delivery.
+  resolveSteer("steer-late-1");
+  await tick();
+  await tick();
+  const withdrawCalls = harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; });
+  assert.strictEqual(withdrawCalls.length, 1, "the late success triggers the compensating withdrawal");
+  assert.strictEqual(withdrawCalls[0].args.steerId, "steer-late-1");
+
+  // Withdrawal too late (already injected): the committed event renders
+  // the bubble through the withdrawn registration.
+  harness.emit("chat:steer_committed", { session_id: "chat-steer-late", steer_id: "steer-late-1" });
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "user" && item.text === "晚到成功的一句"; }),
+    "committed renders the bubble when the withdrawal is too late"
+  );
+}
+
+async function steerSettleWatchdogDegradesStuckChip() {
+  // Fifth review round regression: the engine is reclaimed after the
+  // steerId backfill (committed/dropped never arrive) and the steered queue
+  // head would make flushQueued yield forever. When the settle watchdog
+  // (60s) fires it first withdraws best-effort, then degrades the chip to a
+  // plain queue entry that the chat:done flush consumes normally.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-watchdog"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-watchdog" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-wd1"; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("看门狗兜底的一句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  assert.strictEqual(view.queued[0].steered, true, "the chip stays steered after backfill");
+  assert.strictEqual(view.queued[0].steerId, "steer-wd1");
+
+  // Engine reclaimed, settle events never arrive → watchdog fires: withdraw + degrade.
+  const watchdog = timeouts.find(function (t) { return t.ms === 60000; });
+  assert.ok(watchdog, "60s settle watchdog armed after steerId backfill");
+  watchdog.fn();
+  await tick();
+  await tick();
+  const withdrawCalls = harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; });
+  assert.strictEqual(withdrawCalls.length, 1, "the watchdog withdraws best-effort first (prevents duplicate injection after an engine revival)");
+  assert.strictEqual(withdrawCalls[0].args.steerId, "steer-wd1");
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "the chip stays in the queue");
+  assert.strictEqual(view.queued[0].steered, false, "degraded to non-steered, no longer blocking flushQueued");
+
+  // Turn over: the degraded chip is consumed by the flush; the message is not lost.
+  harness.emit("chat:done", { session_id: "chat-steer-watchdog", generation: 2 });
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "chat:done flush consumes the degraded chip");
+  const chatCalls = harness.calls.filter(function (call) { return call.cmd === "chat"; });
+  assert.strictEqual(chatCalls.length, 1);
+  assert.strictEqual(chatCalls[0].args.message, "看门狗兜底的一句");
+}
+
+async function interruptQueuedCommittedSteerDoesNotResend() {
+  // Review P1-1 regression: ⚡ awaits an explicit foundation outcome for
+  // the withdrawal. not_pending = the engine already committed (injection
+  // done/in flight) — cancel+resend is forbidden; the bubble comes from the
+  // late/stashed steer_committed (same text, not duplicated).
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-committed"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-committed" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-c1"; };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.withdraw_steer = function () { return "not_pending"; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("已经进引擎的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const result = await bridge.chat.interruptAndSendQueued("chat-zap-committed", queuedId);
+  assert.strictEqual(result, true, "⚡ counts as success (the message is already in the engine)");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no chat resend on not_pending (the same message would enter the transcript twice)"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    0,
+    "no need to interrupt the current turn on not_pending"
+  );
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "the chip is removed");
+
+  // Late committed: renders the bubble through the withdrawn
+  // registration (message not lost).
+  harness.emit("chat:steer_committed", { session_id: "chat-zap-committed", steer_id: "steer-c1" });
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "user" && item.text === "已经进引擎的一句"; }),
+    "the late committed renders the bubble"
+  );
+}
+
+async function interruptQueuedNotPendingExpiryRestoresInput() {
+  // Foundation contract regression: NotPending is not proof of delivery —
+  // when the committed/dropped reconciliation event is lost to an engine
+  // reclaim after ⚡, the 60s watchdog restores the text to the composer with
+  // a notice instead of treating an uncertain message as delivered.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-expiry"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-expiry" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-x1"; };
+  harness.handlers.withdraw_steer = function () { return "not_pending"; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("状态不确定的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const result = await bridge.chat.interruptAndSendQueued("chat-zap-expiry", queuedId);
+  assert.strictEqual(result, true);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no resend on not_pending"
+  );
+
+  // The reconciliation event never arrives (swallowed by the engine
+  // reclaim) → the watchdog restores the text + notice. Note: the harness's
+  // clearTimeout is a no-op, so already-cancelled settle watchdogs (their
+  // chip left the queue; firing is a no-op) may still sit in the list — fire
+  // every 60s timer.
+  const watchdogs = timeouts.filter(function (t) { return t.ms === 60000; });
+  assert.ok(watchdogs.length > 0, "a 60s reconciliation watchdog follows not_pending");
+  watchdogs.forEach(function (t) { t.fn(); });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "状态不确定的一句",
+    "with the event lost, the text is restored to the composer (message not lost)"
+  );
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "system"; }),
+    "with the event lost, a system notice is given"
+  );
+}
+
+async function interruptQueuedNotPendingDroppedSettlesAsRestore() {
+  // Audit P1 regression: after ⚡ with withdraw=not_pending, the reconcile
+  // watchdog keeps the text hostage until a terminal event. A LATE
+  // chat:steer_dropped (engine dropped the steer at turn end; the async event
+  // lands after the invoke response — the foundation answers NotPending for
+  // ids that already settled) is the authoritative "never delivered" answer:
+  // it must restore the text like the watchdog expiry does, not silently
+  // consume the withdrawn registration (which dismantled both safety nets
+  // and lost the message).
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-drop"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-drop" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-d1"; };
+  harness.handlers.withdraw_steer = function () { return "not_pending"; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("迟到 dropped 也要回来的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const result = await bridge.chat.interruptAndSendQueued("chat-zap-drop", queuedId);
+  assert.strictEqual(result, true);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no resend on not_pending"
+  );
+  assert.ok(
+    timeouts.some(function (t) { return t.ms === 60000; }),
+    "reconcile watchdog armed after not_pending"
+  );
+
+  // The dropped event arrives late — before the watchdog fires. It is the
+  // reconcile terminal proving non-delivery: text restored + notice, no
+  // resend, no bubble.
+  harness.emit("chat:steer_dropped", { session_id: "chat-zap-drop", steer_id: "steer-d1" });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "迟到 dropped 也要回来的一句",
+    "late dropped after not_pending restores the text (message not lost)"
+  );
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "system"; }),
+    "a system notice is given"
+  );
+
+  // The registration was consumed by the dropped settle: firing the (already
+  // cleared) watchdog must not restore a second copy.
+  timeouts.filter(function (t) { return t.ms === 60000; }).forEach(function (t) { t.fn(); });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "迟到 dropped 也要回来的一句",
+    "no duplicate restore after the registration was consumed"
+  );
+}
+
+async function interruptQueuedRetiredSteerResends() {
+  // Control group: with outcome=retired (withdrawal effective, the engine
+  // copy never injects), ⚡ proceeds with cancel + resend as usual.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-retired"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-retired" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-r1"; };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.withdraw_steer = function () { return "retired"; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("撤回后重发的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const result = await bridge.chat.interruptAndSendQueued("chat-zap-retired", queuedId);
+  assert.strictEqual(result, true, "zap resend succeeds on retired");
+  const chatCalls = harness.calls.filter(function (call) { return call.cmd === "chat"; });
+  assert.strictEqual(chatCalls.length, 1, "normal resend on retired");
+  assert.strictEqual(chatCalls[0].args.message, "撤回后重发的一句");
+}
+
+async function steerChipStaysSubscriptionSafeDuringStream() {
+  // Live repro (#308 dev run): the zap gate stored the steer settlement
+  // Promise on the queued chip; the subscription snapshot validator only
+  // accepts arrays/plain objects/JSON scalars, so every notify() after the
+  // queue threw "Subscription state only supports arrays and plain objects"
+  // and the streaming UI (text AND thinking) froze until the chip left the
+  // queue at settlement, then rendered everything at once. Chips must stay
+  // JSON-like — the settlement now lives in a module-side table. A real
+  // subscriber forces notify() through the validated snapshot path (the bare
+  // harness has no subscribers, which is why this never failed before).
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-substate"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-substate" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-sub1"; };
+
+  const snapshots = [];
+  const unsubscribe = bridge.state.subscribeMany(["chat"], function (snapshot) {
+    snapshots.push(snapshot);
+  });
+
+  let threw = null;
+  try {
+    await bridge.chat.sendMessage("排队后流式不冻结的一句");
+    await tick();
+    await tick();
+    harness.emit("chat:delta", { session_id: "chat-substate", text: "仍在流式" });
+    await tick();
+    await tick();
+  } catch (e) { threw = e; }
+  assert.strictEqual(threw, null, "queue + stream must not throw in notify (got: " + (threw && threw.message) + ")");
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (i) { return i.type === "assistant" && i.text === "仍在流式"; }),
+    "deltas keep rendering after a busy queue"
+  );
+  assert.ok(snapshots.length > 0, "subscription snapshots were built and delivered");
+  assert.ok(
+    snapshots.every(function (s) { return Array.isArray(s.queued); }),
+    "queued chips stay JSON-like in every snapshot"
+  );
+  unsubscribe();
+}
+
+async function steerCommittedBubbleIsMidTurnAndHydratesClean() {
+  // Steered bubbles carry steeredMidTurn (the conversation projection must
+  // not let a mid-turn injection consume a timing record — a natural queue
+  // showed a phantom "interrupted" badge), and hydration of the engine-side
+  // persisted message must strip the baked <turn_meta> envelope (live repro:
+  // the restarted bubble rendered the raw envelope) and re-apply the same
+  // marker from the envelope's presence (only steered messages persist one).
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-mid"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-mid" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-mid1"; };
+
+  await bridge.chat.sendMessage("中途注入的一句");
+  await tick();
+  await tick();
+  harness.emit("chat:steer_committed", { session_id: "chat-steer-mid", steer_id: "steer-mid1" });
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  const liveBubble = view.chatItems.find(function (i) {
+    return i.type === "user" && i.text === "中途注入的一句";
+  });
+  assert.ok(liveBubble, "steer settlement renders the user bubble");
+  assert.strictEqual(liveBubble.steeredMidTurn, true, "live steer bubble is marked as a mid-turn injection");
+
+  // Hydration replay of the engine-persisted shape (the restart scenario):
+  // the steered message carries a baked turn_meta text block that ordinary
+  // admissions lack. Switch away and back so switchToSession rebuilds
+  // chatItems from disk through rerenderFromMessages.
+  const disk = [
+    { role: "user", content: [{ type: "text", text: "原始问题" }] },
+    { role: "assistant", content: [{ type: "text", text: "第一段回答" }] },
+    { role: "user", content: [
+      { type: "text", text: "中途注入的一句" },
+      { type: "text", text: "<turn_meta>\nCurrent local date: 2026-08-31\n</turn_meta>" },
+    ] },
+    { role: "assistant", content: [{ type: "text", text: "第二段回答" }] },
+  ];
+  harness.handlers.load_session = function () {
+    return {
+      metadata: { id: "chat-steer-mid", title: "Steer", message_count: disk.length },
+      transcript_revision: "rev-hydrate",
+      messages: disk,
+      artifacts: [],
+    };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-hydrate-other"), true);
+  await tick();
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-mid"), true);
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  const hydrated = view.chatItems.find(function (i) {
+    return i.type === "user" && i.text === "中途注入的一句";
+  });
+  assert.ok(hydrated, "hydrated steer bubble survives the replay");
+  assert.strictEqual(
+    hydrated.text.indexOf("<turn_meta>"),
+    -1,
+    "the baked envelope is stripped from the hydrated bubble"
+  );
+  assert.strictEqual(hydrated.steeredMidTurn, true, "hydration re-applies the mid-turn marker from the envelope");
+  const ordinary = view.chatItems.find(function (i) {
+    return i.type === "user" && i.text === "原始问题";
+  });
+  assert.ok(ordinary, "ordinary messages hydrate normally");
+  assert.notStrictEqual(ordinary.steeredMidTurn, true, "ordinary admissions are not marked as steered");
+}
+
+async function zapOnNotBackfilledSteerWaitsThenWithdrawsAndResends() {
+  // Eighth-review MAJOR regression: ⚡ on a chip whose steer_chat invoke is
+  // still in flight must NOT cancel+resend before the engine-side fate is
+  // known — a steer parked by the zap's own keepInbox cancel would commit at
+  // the new turn's first drain and deliver the same message twice (display
+  // dedup does not cover model input). The zap now waits for the settlement,
+  // withdraws with outcome gating, and only then resends.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-inflight"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-inflight" });
+  await tick();
+  let resolveSteer = null;
+  harness.handlers.steer_chat = function () {
+    return new Promise(function (resolve) { resolveSteer = resolve; });
+  };
+  harness.handlers.withdraw_steer = function () { return "retired"; };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("还在途的一句话");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  assert.notStrictEqual(resolveSteer, null, "the steer invoke is in flight (deferred)");
+
+  const zap = bridge.chat.interruptAndSendQueued("chat-zap-inflight", queuedId);
+  await tick();
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    0,
+    "no cancel while the steer invoke is unsettled"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no resend while the steer invoke is unsettled"
+  );
+
+  resolveSteer("steer-g1");
+  const result = await zap;
+  await tick();
+  assert.strictEqual(result, true, "zap completes after the gated withdrawal");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; }).length,
+    1,
+    "the zap withdraws the settled steer itself (outcome-gated)"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    1,
+    "the interrupt runs after the withdrawal came back retired"
+  );
+  const chatCalls = harness.calls.filter(function (call) { return call.cmd === "chat"; });
+  assert.strictEqual(chatCalls.length, 1, "exactly one resend (no duplicate delivery)");
+  assert.strictEqual(chatCalls[0].args.message, "还在途的一句话");
+}
+
+async function zapOnNotBackfilledSteerNotPendingSkipsResend() {
+  // Companion to the in-flight gate: if the settled steer already committed
+  // (withdraw answers not_pending), the zap must not resend — the message is
+  // already in the engine transcript and the bubble settles from the event.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-inflight-np"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-inflight-np" });
+  await tick();
+  let resolveSteer = null;
+  harness.handlers.steer_chat = function () {
+    return new Promise(function (resolve) { resolveSteer = resolve; });
+  };
+  harness.handlers.withdraw_steer = function () { return "not_pending"; };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("已提交的一句话");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const zap = bridge.chat.interruptAndSendQueued("chat-zap-inflight-np", queuedId);
+  await tick();
+  resolveSteer("steer-g2");
+  const result = await zap;
+  await tick();
+  assert.strictEqual(result, true);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no resend when the settled steer turns out not_pending"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    0,
+    "no interrupt either: the message is already delivered"
+  );
+}
+
+async function zapOnStashedDroppedRestoresTextImmediately() {
+  // r13 review P2: the dropped event can land while the steer_chat invoke is
+  // still pending (the engine discards the steer at once; the event is
+  // stashed because the chip has no backfilled id). When the zap then learns
+  // withdraw=not_pending, the stash already holds the authoritative
+  // "never delivered" terminal — the text must be restored immediately, not
+  // held hostage by the 60s reconcile watchdog.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-stash-drop"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-stash-drop" });
+  await tick();
+  let resolveSteer = null;
+  harness.handlers.steer_chat = function () {
+    return new Promise(function (resolve) { resolveSteer = resolve; });
+  };
+  harness.handlers.withdraw_steer = function () { return "not_pending"; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("stash 里已有 dropped 的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const zap = bridge.chat.interruptAndSendQueued("chat-zap-stash-drop", queuedId);
+  await tick();
+  // The engine drops the steer before the invoke resolves: the event is
+  // stashed (the chip cannot match an id it does not have yet).
+  harness.emit("chat:steer_dropped", { session_id: "chat-zap-stash-drop", steer_id: "steer-sd1" });
+  await tick();
+  resolveSteer("steer-sd1");
+  const result = await zap;
+  await tick();
+  assert.strictEqual(result, true);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no resend when the stash already holds the dropped terminal"
+  );
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "stash 里已有 dropped 的一句",
+    "the stashed dropped proof restores the text immediately (no 60s watchdog wait)"
+  );
+  assert.ok(
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems.some(function (item) { return item.type === "system"; }),
+    "a failure notice accompanies the restore"
+  );
+  // Firing the never-armed reconcile timers must not produce a second
+  // restore or a late bubble.
+  timeouts.filter(function (t) { return t.ms === 60000; }).forEach(function (t) { t.fn(); });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "stash 里已有 dropped 的一句",
+    "no duplicate restore after the immediate settlement"
+  );
+}
+
+async function transcriptFallbackSkipsSteerIdChips() {
+  // r13 review P2: the transcript_committed fallback settles only legacy
+  // steered chips (no engine-side id). A queue holding only steer_id chips
+  // settles authoritatively via chat:steer_committed — the fallback must not
+  // pay a full load_session snapshot on every transcript commit.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-fallback-skip"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-fallback-skip" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-fs1"; };
+  await bridge.chat.sendMessage("带 id 的排队一句");
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length, 1,
+    "the steered chip is queued"
+  );
+  const loadsBefore = harness.calls.filter(function (call) { return call.cmd === "load_session"; }).length;
+
+  await harness.emit("chat:transcript_committed", { session_id: "chat-fallback-skip", transcript_revision: "rev-fs1" });
+  await tick();
+  await tick();
+  const loadsAfter = harness.calls.filter(function (call) { return call.cmd === "load_session"; }).length;
+  assert.strictEqual(loadsAfter, loadsBefore,
+    "steer_id chips must not trigger the transcript fallback's load_session snapshot");
+  assert.strictEqual(
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length, 1,
+    "the chip stays queued awaiting its authoritative steer_committed"
+  );
+}
+
+async function zapOnSteerInvokeTimeoutRestoresTextWithoutSend() {
+  // Timeout leg of the in-flight gate: when the steer_chat invoke times out
+  // during a zap, the delivery state is unproven — the text is restored to
+  // the composer with a notice and nothing is sent (never blindly send).
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-inflight-to"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-inflight-to" });
+  await tick();
+  harness.handlers.steer_chat = function () { return new Promise(function () {}); };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("超时未决的一句话");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  const zap = bridge.chat.interruptAndSendQueued("chat-zap-inflight-to", queuedId);
+  await tick();
+  // Fire the steer invoke's 25s transport timeout.
+  timeouts.filter(function (t) { return t.ms === 25000; }).forEach(function (t) { t.fn(); });
+  const result = await zap;
+  await tick();
+  await tick();
+  assert.strictEqual(result, true, "the zap settles without resending");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "timeout is not proof of delivery — no blind resend"
+  );
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "超时未决的一句话",
+    "the text is restored to the composer (message not lost)"
+  );
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "system"; }),
+    "an explicit notice replaces the silent drop"
+  );
+}
+
+async function secondZapWhileInterruptInFlightIsRejectedWithNotice() {
+  // Concurrency P2 → entry guard regression: a second ⚡ while one interrupt
+  // is in flight must be rejected before touching the queue — an overlapping
+  // cancel_generation could claim the first zap's freshly started turn, and
+  // flushQueued could slip a chip between the two interrupts.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-guard"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-guard" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-h1"; };
+  harness.handlers.withdraw_steer = function () { return "retired"; };
+  let resolveCancel = null;
+  harness.handlers.cancel_generation = function () {
+    return new Promise(function (resolve) { resolveCancel = resolve; });
+  };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("第一句");
+  await bridge.chat.sendMessage("第二句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 2, "two chips queued");
+  const firstId = view.queued[0].id;
+  const secondId = view.queued[1].id;
+
+  const firstZap = bridge.chat.interruptAndSendQueued("chat-zap-guard", firstId);
+  await tick();
+  assert.notStrictEqual(resolveCancel, null, "the first zap is parked in its cancel");
+
+  const secondResult = await bridge.chat.interruptAndSendQueued("chat-zap-guard", secondId);
+  assert.strictEqual(secondResult, false, "the overlapping zap is rejected");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    1,
+    "only one cancel_generation is in flight"
+  );
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "the rejected zap leaves its chip queued");
+  assert.strictEqual(view.queued[0].id, secondId, "the surviving chip is the second one");
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "system"; }),
+    "the rejection is surfaced as a notice, not silence"
+  );
+
+  resolveCancel({ terminal: true, generation: 1 });
+  assert.strictEqual(await firstZap, true, "the first zap completes normally");
+}
+
+async function steerFailureNoticeSuppressedWhenChipTakenByX() {
+  // Eighth-review MINOR regression: onSteerFailure's notice claimed "your
+  // text was restored to the input" even when the chip had already been
+  // taken by ×/⚡ (text deliberately discarded / owned by the zap) — the
+  // notice must only fire while this callback still owns the chip.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-notice"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-notice" });
+  await tick();
+  let rejectSteer = null;
+  harness.handlers.steer_chat = function () {
+    return new Promise(function (_resolve, reject) { rejectSteer = reject; });
+  };
+
+  await bridge.chat.sendMessage("将被撤销的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+  bridge.chat.removeQueued(queuedId);
+  await tick();
+  rejectSteer(new Error("engine gone"));
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(
+    view.chatItems.filter(function (item) { return item.type === "system"; }).length,
+    0,
+    "no false 'text restored' notice after a deliberate × removal"
+  );
+
+  // Control: the same failure while the chip is untouched does notify.
+  await bridge.chat.sendMessage("正常失败的一句");
+  await tick();
+  rejectSteer(new Error("engine gone"));
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "system"; }),
+    "the notice still fires when the callback owns the chip"
+  );
+}
+
+async function transcriptFallbackTailScanTerminatesWithoutEnoughUserTail() {
+  // P0 infinite-loop regression (sixth review round): the legacy fallback
+  // (chat-events.js transcript_committed) tail-scan loop used i++ (should be
+  // i--) — when the last 16 snapshot entries hold fewer user messages than
+  // the queue length, the loop scans up into undefined forever, never filling
+  // tailCandidates and freezing the webview main thread permanently. Build
+  // two legacy steered chips + a snapshot whose tail has only one historical
+  // user message: before the fix this scenario always dead-looped (this test
+  // finishing proves the fix), and the queue-head chip fails the same-text
+  // check against the history, so it must not be drained by mistake.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  harness.handlers.steer_chat = function () { return null; }; // legacy: no steerId
+  const disk = [
+    { role: "user", content: [{ type: "text", text: "原问题" }] },
+    { role: "assistant", content: [{ type: "text", text: "旧回答" }] },
+  ];
+  harness.handlers.load_session = function () {
+    return {
+      metadata: { id: "chat-tail-scan", title: "Tail", message_count: disk.length },
+      transcript_revision: "rev-live",
+      messages: disk,
+      artifacts: [],
+    };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-tail-scan"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-tail-scan" });
+  await tick();
+
+  await bridge.chat.sendMessage("排队甲");
+  await bridge.chat.sendMessage("排队乙");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 2, "two legacy steered chips in the queue overlay");
+  assert.strictEqual(view.queued[0].steered, true);
+  assert.strictEqual(view.queued[0].steerId, null, "legacy backends do not backfill steerId");
+
+  // The transcript grows but the addition is an assistant message (the
+  // injection is not persisted yet): the last 16 entries hold only 1 user
+  // (the historical one) < queue length 2 — the i++ implementation scans
+  // into undefined and never terminates; after the fix the backwards scan
+  // terminates normally, and since the head chip text differs from the
+  // historical one, the same-text check fails.
+  disk.push({ role: "assistant", content: [{ type: "text", text: "另一句模型输出" }] });
+  await harness.emit("chat:transcript_committed", { session_id: "chat-tail-scan", transcript_revision: "rev-t1" });
+  await tick();
+  await tick();
+
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 2, "same-text check fails: the chip must not be drained by mistake");
+  assert.strictEqual(view.queued[0].steered, true, "the chip stays steered awaiting authoritative settlement");
+  assert.ok(
+    !view.chatItems.some(function (item) { return item.type === "user" && item.text === "排队甲"; }),
+    "a mistaken drain would render a user bubble — none may appear here"
+  );
+}
+
+async function steerDroppedByEngineRestoresDraftText() {
+  // Engine-initiated drop (sixth review round): the chip is still queued
+  // when chat:steer_dropped arrives (including ⏹ stop clearing un-injected
+  // steers) — besides removing the chip + the steerDropped notice, the text
+  // must be restored to the composer draft; every other failure path (steer
+  // failure / watchdog / zap degrade) hands the text back, and an engine drop
+  // must not be the only branch that makes the user retype.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-dropped"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-dropped" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-d1"; };
+
+  await bridge.chat.sendMessage("被引擎丢弃的一句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  assert.strictEqual(view.queued[0].steerId, "steer-d1", "steerId backfilled");
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "",
+    "the composer is cleared after the busy steer send"
+  );
+
+  await harness.emit("chat:steer_dropped", { session_id: "chat-steer-dropped", steer_id: "steer-d1" });
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "the drop settlement removes the chip");
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "被引擎丢弃的一句",
+    "with an empty composer the text is restored to the draft (no retyping)"
+  );
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "system" && String(item.text || "").includes("排队消息未送达");
+    }),
+    "a steerDropped system notice is given"
+  );
+}
+
+async function steerSettleWatchdogNotPendingRemovesChipWithoutResend() {
+  // Watchdog not_pending (sixth review round): the settle watchdog fires
+  // after 60s and the withdraw_steer await returns not_pending = the steer
+  // had just committed but the event was lost — the old implementation always
+  // degraded the chip and the flushQueued resend would duplicate delivery.
+  // Now the chip is removed + the draft restored + a steerFailed notice, and
+  // invoke("chat") resend never happens; retired keeps the degrade semantics
+  // (covered by steerSettleWatchdogDegradesStuckChip), and since re-review #3
+  // Err (engine reclaimed) likewise restores the draft without auto-resend
+  // (steerSettleWatchdogEngineErrRestores).
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-wd-np"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-wd-np" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-np1"; };
+  harness.handlers.withdraw_steer = function () { return "not_pending"; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("看门狗不确定的一句");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1);
+  assert.strictEqual(view.queued[0].steerId, "steer-np1");
+
+  // Settle events never arrive → the watchdog fires: withdraw reports
+  // not_pending → remove the chip.
+  const watchdog = timeouts.find(function (t) { return t.ms === 60000; });
+  assert.ok(watchdog, "60s settle watchdog armed after steerId backfill");
+  watchdog.fn();
+  await tick();
+  await tick();
+  await tick();
+
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "not_pending: chip removed (not degraded in the queue)");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "not_pending must not degrade and resend (already committed; a resend duplicates delivery)"
+  );
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "看门狗不确定的一句",
+    "text restored to the draft; an uncertain message is not treated as delivered"
+  );
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "system" && String(item.text || "").includes("插队失败");
+    }),
+    "a steerFailed system notice is given"
+  );
+}
+
+async function steerSettleWatchdogEngineErrRestoresWithoutResend() {
+  // Re-review #3 / self-review P1-3: when the settle watchdog fires and
+  // withdraw_steer REJECTS (engine reclaimed — forwarder aborted, session
+  // evicted), the old mapping degraded the chip and flushed it, silently
+  // resending a ~minute-old message into a cold-started engine (possibly in
+  // an unwatched background session). Err must restore the text to the owning
+  // session instead — no automatic resend.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-wd-err"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-wd-err" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-err1"; };
+  harness.handlers.withdraw_steer = function () {
+    return Promise.reject(new Error("engine reclaimed"));
+  };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("回收前排队的一句");
+  await tick();
+  await tick();
+  const epochBefore = bridge.state.getMany(['sessions']).draftEpoch;
+
+  const watchdog = timeouts.find(function (t) { return t.ms === 60000; });
+  assert.ok(watchdog, "60s settle watchdog armed after steerId backfill");
+  watchdog.fn();
+  await tick();
+  await tick();
+  await tick();
+
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "Err (engine reclaimed): chip removed, not degraded in the queue");
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "回收前排队的一句",
+    "text restored to the owning session's draft"
+  );
+  assert.ok(
+    bridge.state.getMany(['sessions']).draftEpoch > epochBefore,
+    "the restore takes the observable path (draftEpoch bump), not a store-only silent write"
+  );
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "system" && String(item.text || "").includes("插队失败");
+    }),
+    "a steerFailed system notice is given"
+  );
+  // Turn settles later: the restored chip must NOT be auto-resent.
+  harness.emit("chat:done", { session_id: "chat-wd-err", generation: 2 });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "the Err path never auto-resends a stale message (resending is the user's call)"
+  );
+}
+
+async function steerSettleWatchdogWithdrawTimeoutRestoresWithoutResend() {
+  // JensenChen28 review #2: a timed-out withdraw_steer is NOT "retired" — an
+  // unresolved withdrawal proves nothing (the steer may already be committed
+  // while only the response path is wedged), so degrading + flushing would
+  // risk double delivery. The watchdog's 25s transport race must keep the
+  // timeout distinct: remove the chip, restore the text, never auto-resend.
+  // A late committed still renders the bubble through the withdrawn
+  // registration.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-wd-hang"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-wd-hang" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-hang1"; };
+  harness.handlers.withdraw_steer = function () {
+    return new Promise(function () {}); // wedged: never settles
+  };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("卡死看门狗里的一句");
+  await tick();
+  await tick();
+  const epochBefore = bridge.state.getMany(['sessions']).draftEpoch;
+
+  const watchdog = timeouts.find(function (t) { return t.ms === 60000; });
+  assert.ok(watchdog, "60s settle watchdog armed after steerId backfill");
+  watchdog.fn();
+  await tick();
+  await tick();
+
+  // Withdraw race armed by the watchdog; drive its 25s transport timeout
+  // (the LAST 25000ms timer — earlier ones belong to the settled steer race).
+  const withdrawTimers = timeouts.filter(function (t) { return t.ms === 25000; });
+  const withdrawTimer = withdrawTimers[withdrawTimers.length - 1];
+  assert.ok(withdrawTimer, "the watchdog withdraw await has a 25s transport timeout");
+  withdrawTimer.fn();
+  await tick();
+  await tick();
+  await tick();
+
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "withdrawal timeout removes the chip (uncertain state must not auto-send)");
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "卡死看门狗里的一句",
+    "withdrawal timeout restores the text to the owning session"
+  );
+  assert.ok(
+    bridge.state.getMany(['sessions']).draftEpoch > epochBefore,
+    "the restore takes the observable path (draftEpoch bump)"
+  );
+
+  // The turn settles later: nothing may be auto-resent on an unresolved withdrawal.
+  harness.emit("chat:done", { session_id: "chat-wd-hang", generation: 2 });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "withdrawal timeout never auto-resends (the steer may already be committed)"
+  );
+
+  // Unresolved withdrawal followed by a LATE committed: the engine wins, the
+  // withdrawn registration renders the bubble — no resend, no second notice.
+  harness.emit("chat:steer_committed", { session_id: "chat-wd-hang", steer_id: "steer-hang1" });
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "user" && item.text === "卡死看门狗里的一句";
+    }),
+    "late committed after an unresolved withdrawal renders the bubble"
+  );
+}
+
+async function interruptQueuedWithdrawTimeoutWaitsForReconcile() {
+  // JensenChen28 review #2 (zap path): ⚡ pulls the chip out of the queue
+  // BEFORE awaiting withdraw_steer; when the withdrawal times out, its state
+  // is unproven — the steer may already be committed while only the response
+  // path is wedged. The zap must NOT proceed to cancel + resend; it defers to
+  // the reconcile watchdog (committed → bubble / dropped → silent / event
+  // lost → restore the text with a notice after 60s).
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-wd-hang"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-wd-hang" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-zap-h1"; };
+  harness.handlers.withdraw_steer = function () {
+    return new Promise(function () {}); // wedged: never settles
+  };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("⚡ 撤回卡死也要发出的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  let result = null;
+  const p = bridge.chat
+    .interruptAndSendQueued("chat-zap-wd-hang", queuedId)
+    .then(function (r) { result = r; }, function (e) { result = e; });
+  await tick();
+  await tick();
+
+  // Drive the withdraw transport timeout (the LAST 25000ms timer — the settled
+  // steer race timer lingers because the harness clearTimeout is a no-op).
+  const withdrawTimers = timeouts.filter(function (t) { return t.ms === 25000; });
+  const withdrawTimer = withdrawTimers[withdrawTimers.length - 1];
+  assert.ok(withdrawTimer, "the zap withdraw await has a 25s transport timeout");
+  withdrawTimer.fn();
+  await withStallGuard(p, "zap withdraw timeout failed to settle into the reconcile path");
+  assert.strictEqual(result, true, "the zap is handled without a resend (uncertain withdrawal)");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    0,
+    "withdrawal timeout must not interrupt the running turn"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "withdrawal timeout must not resend (the steer may already be committed)"
+  );
+
+  // Reconcile watchdog armed; the reconciling event never arrives (engine
+  // reclaim) → 60s later the text is restored with a notice.
+  const reconcileTimers = timeouts.filter(function (t) { return t.ms === 60000; });
+  assert.ok(reconcileTimers.length > 0, "a 60s reconcile watchdog follows the unresolved withdrawal");
+  reconcileTimers.forEach(function (t) { t.fn(); });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "⚡ 撤回卡死也要发出的一句",
+    "with the reconciling event lost, the text is restored to the composer"
+  );
+}
+
+async function interruptQueuedWithdrawRejectionWaitsForReconcile() {
+  // zhuowp re-review P1-1 (zap path): the chip has a BACKFILLED steer id (the
+  // engine accepted the steer), and withdraw_steer REJECTS because that engine
+  // was reclaimed. The rejection is ambiguous — the engine may have committed
+  // the steer into the persisted transcript before dying — so it must NOT be
+  // treated as "retired". No cancel, no chat resend; the reconcile watchdog
+  // owns the outcome (a late committed renders the bubble and consumes the
+  // watchdog; nothing arrives → the text is restored after 60s).
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-reject"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-reject" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-rj1"; };
+  harness.handlers.withdraw_steer = function () {
+    return Promise.reject(new Error("engine reclaimed after accepting the steer"));
+  };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("引擎回收后撤回被拒的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  let result = null;
+  const p = bridge.chat
+    .interruptAndSendQueued("chat-zap-reject", queuedId)
+    .then(function (r) { result = r; }, function (e) { result = e; });
+  await withStallGuard(p, "zap withdraw rejection failed to settle into the reconcile path");
+  assert.strictEqual(result, true, "the zap is handled without a resend (engine gone, delivery state ambiguous)");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "withdraw_steer"; }).length,
+    1,
+    "the withdrawal was attempted"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "cancel_generation"; }).length,
+    0,
+    "a rejected withdrawal must not interrupt the running turn"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "a rejected withdrawal must not resend (the reclaimed engine may have committed the steer)"
+  );
+
+  // Reconcile direction A — the engine did commit before dying: the late
+  // committed event renders the bubble through the withdrawn registration and
+  // consumes the reconcile watchdog (no composer restore alongside).
+  harness.emit("chat:steer_committed", { session_id: "chat-zap-reject", steer_id: "steer-rj1" });
+  await tick();
+  await tick();
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "user" && item.text === "引擎回收后撤回被拒的一句";
+    }),
+    "a late committed after a rejected withdrawal renders the bubble"
+  );
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "",
+    "engine truth wins: no text restore next to the rendered bubble"
+  );
+  // The already-consumed watchdog must no-op (no duplicate restore/notice).
+  timeouts.filter(function (t) { return t.ms === 60000; }).forEach(function (t) { t.fn(); });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "",
+    "the consumed reconcile watchdog no-ops"
+  );
+}
+
+async function steerDropRestoresAccumulateAcrossChips() {
+  // Self-review P0 / re-review #1: two steered chips dropped in the same tick
+  // (⏹ clears the un-injected inbox) must BOTH survive. The old empty-check
+  // restore wrote the first text store-only (invisible — the composer only
+  // re-reads on [activeSessionId, draftEpoch]) and the second chip's prefill
+  // write-through then destroyed it. restoreSteerText appends with a "\n"
+  // separator at the store level and bumps draftEpoch once per restore.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-drop-acc"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-drop-acc" });
+  await tick();
+  let steerSeq = 0;
+  harness.handlers.steer_chat = function () {
+    steerSeq += 1;
+    return "steer-acc-" + steerSeq;
+  };
+
+  await bridge.chat.sendMessage("第一条被丢弃的");
+  await bridge.chat.sendMessage("第二条被丢弃的");
+  await tick();
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 2, "two steered chips in the queue overlay");
+  const epochBefore = view.draftEpoch;
+
+  // Both drops arrive in the same tick (⏹ clears the whole pending inbox).
+  harness.emit("chat:steer_dropped", { session_id: "chat-drop-acc", steer_id: "steer-acc-1" });
+  harness.emit("chat:steer_dropped", { session_id: "chat-drop-acc", steer_id: "steer-acc-2" });
+  await tick();
+  await tick();
+
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "both chips are removed");
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "第一条被丢弃的\n第二条被丢弃的",
+    "both texts are restored and accumulate newline-separated (the first must not be clobbered by the second)"
+  );
+  assert.ok(
+    view.draftEpoch >= epochBefore + 1,
+    "the restore takes the observable path: the draftEpoch bump makes ChatView re-read the draft"
+  );
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerPrefill.text,
+    "",
+    "the restore must not use the global prefill channel (its write-through would clobber the first text in the store)"
+  );
+}
+
+async function steerDropRestoresToOwningBackgroundSession() {
+  // Self-review P0 / re-review #1 (background isolation): a steer dropped
+  // while its owning session is in the background must restore into THAT
+  // session's buffer only. The old path went through the global composer
+  // draft/prefill channel and could leak background text into the active
+  // session's composer.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-drop"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-bg-drop" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-bg-1"; };
+
+  await bridge.chat.sendMessage("后台被丢弃的一句");
+  await tick();
+  await tick();
+  assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length, 1);
+
+  // Switch away, then the engine drops the background session's steer.
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-drop-other"), true);
+  await tick();
+  await bridge.chat.setComposerDraft("前台正在打的字");
+  harness.emit("chat:steer_dropped", { session_id: "chat-bg-drop", steer_id: "steer-bg-1" });
+  await tick();
+  await tick();
+
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "前台正在打的字",
+    "a background session's restore must not write into the active session's composer"
+  );
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerPrefill.text,
+    "",
+    "a background restore must not use the global prefill channel"
+  );
+
+  // Switch back: the owning session's draft carries the restored text.
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-drop"), true);
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "后台被丢弃的一句",
+    "after switching back to the owning session the restored text is still there (session-buffer restore)"
+  );
+}
+
+async function prefillRecoveryAppendFlagContract() {
+  // Re-review #4: prefillComposer keeps REPLACE semantics for template /
+  // navigation entries (no flag) and exposes an explicit append mode for
+  // failure recovery (flag=true, separator-joined by ChatView). Locks the
+  // bridge-level contract so the modes cannot silently merge again.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-prefill-flag"), true);
+  bridge.chat.prefillComposer("模板整体替换");
+  let prefill = bridge.state.getMany(['chat']).composerPrefill;
+  assert.strictEqual(prefill.text, "模板整体替换");
+  assert.strictEqual(prefill.append, false, "default (template/navigation entries) keeps whole-draft replacement semantics");
+
+  bridge.chat.prefillComposer("失败恢复追加", true);
+  prefill = bridge.state.getMany(['chat']).composerPrefill;
+  assert.strictEqual(prefill.text, "失败恢复追加");
+  assert.strictEqual(prefill.append, true, "the failure-recovery entry carries explicit append semantics");
+}
+
+async function interruptQueuedCancelInvokeHangRestoresChip() {
+  // Cancel invoke transport timeout (sixth review round), zap path: a
+  // wedged engine (turn_lock held, not draining) never settles
+  // cancel_generation — the old implementation's await hung forever:
+  // interruptInFlight never cleared (flushQueued yields) and the chip was
+  // already taken out of the queue before the call, so the recovery catch
+  // never ran → silent message loss. The 25s timeout must fail explicitly,
+  // restore the chip to the queue, and clean interruptInFlight in finally.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-zap-cancel-hang"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-zap-cancel-hang" });
+  await tick();
+  harness.handlers.steer_chat = function () { return "steer-h1"; };
+  harness.handlers.withdraw_steer = function () { return "retired"; };
+  harness.handlers.cancel_generation = function () {
+    return new Promise(function () { /* engine wedged: never settles */ });
+  };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("卡在 cancel 的一句");
+  await tick();
+  await tick();
+  const queuedId = bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued[0].id;
+
+  let outcome = null;
+  const p = bridge.chat
+    .interruptAndSendQueued("chat-zap-cancel-hang", queuedId)
+    .then(function (r) { outcome = r; });
+  await tick();
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length,
+    0,
+    "the chip is already out of the queue when ⚡ is called (waiting on cancel)"
+  );
+
+  // 25s transport timeout (the steer 25s timer settled long ago,
+  // re-firing is harmless): cancel counts as failed → interruptAndSend
+  // throws → the ⚡ catch restores the chip to the queue.
+  const cancelTimers = timeouts.filter(function (t) { return t.ms === 25000; });
+  assert.ok(cancelTimers.length > 0, "the cancel invoke has a 25s transport fallback");
+  cancelTimers.forEach(function (t) { t.fn(); });
+  await p;
+  await tick();
+  await tick();
+  assert.strictEqual(outcome, false, "⚡ fails explicitly (no fake success)");
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "the chip is restored to the queue (message not lost)");
+  assert.strictEqual(view.queued[0].steered, false, "the restored chip is degraded to plain local queuing");
+  assert.strictEqual(view.queued[0].text, "卡在 cancel 的一句");
+  assert.ok(
+    view.chatItems.some(function (item) {
+      return item.type === "system" && String(item.text || "").includes("插队发送失败");
+    }),
+    "an interruptQueuedFailed system notice is given"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "session still busy: no premature send after recovery"
+  );
+
+  // After the turn ends, the chat:done flush must consume the restored
+  // chip — which also proves interruptInFlight is cleared (flushQueued
+  // yields to interruptInFlight), i.e. interruptAndSend's finally really ran
+  // after the timeout throw.
+  harness.emit("chat:done", { session_id: "chat-zap-cancel-hang", generation: 1 });
+  await tick();
+  await tick();
+  await tick();
+  const chatCalls = harness.calls.filter(function (call) { return call.cmd === "chat"; });
+  assert.strictEqual(chatCalls.length, 1, "with interruptInFlight cleared, the flush consumes the restored chip");
+  assert.strictEqual(chatCalls[0].args.message, "卡在 cancel 的一句");
+}
+
+async function interruptAndSendCancelInvokeTimeoutRejects() {
+  // Cancel invoke transport timeout (sixth review round), public-API
+  // semantics: bridge.chat.interruptAndSend must reject explicitly at 25s
+  // (rather than hang forever) when cancel_generation never settles, and
+  // must not attempt to send. Ordinary cancel errors keep the old behavior
+  // (warn + outcome=null, continue), covered by the existing interrupt
+  // tests.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-interrupt-cancel-hang"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-interrupt-cancel-hang" });
+  await tick();
+  harness.handlers.cancel_generation = function () {
+    return new Promise(function () { /* never settles */ });
+  };
+  harness.handlers.chat = function () { return "ok"; };
+
+  let outcome = null;
+  const p = bridge.chat
+    .interruptAndSend("chat-interrupt-cancel-hang", "卡在 cancel 的直发", null, [], null, false)
+    .then(function () { outcome = "sent"; }, function (e) { outcome = e; });
+  await tick();
+  await tick();
+  await tick();
+  const cancelTimer = timeouts.find(function (t) { return t.ms === 25000; });
+  assert.ok(cancelTimer, "the cancel invoke has a 25s transport fallback");
+  cancelTimer.fn();
+  await p;
+  assert.ok(
+    outcome && typeof outcome.message === "string" && outcome.message.includes("cancel_generation timed out"),
+    "a cancel transport timeout must reject explicitly (the caller recovers the message from it)"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    0,
+    "no send attempt while the cancel is unfinished"
+  );
+}
+
+async function mainPathSendFailureRejectsToCaller() {
+  // Fifth review round leftover regression: a non-busy main-path doSendFor
+  // failure must reject to the caller (ChatView has cleared the composer and
+  // recovers the text from the rejection); the error must not be swallowed
+  // into a fake success.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-main-fail"), true);
+  harness.handlers.chat = function () { throw new Error("reserve boom"); };
+
+  let outcome = null;
+  await bridge.chat.sendMessage("主路径失败的一句").then(
+    function () { outcome = "resolved"; },
+    function (e) { outcome = e; }
+  );
+  assert.ok(
+    outcome && typeof outcome.message === "string" && outcome.message.includes("reserve boom"),
+    "a main-path failure must reject (the caller restores the composer from it)"
+  );
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "a failure leaves no queue leftover");
+  assert.strictEqual(view.busy, false, "busy resets after the failure");
+}
+
+async function steerTimeoutDoesNotClobberFreshInput() {
+  // Regression: the steer failure recovery must not unconditionally
+  // overwrite the composer — the invoke can take up to 25s to time out and
+  // anything the user retyped meanwhile must survive. With a non-empty
+  // composer the recovery degrades the chip to a plain queued entry (the
+  // text rides the queue instead of the composer).
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-steer-clobber"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-steer-clobber" });
+  await tick();
+  harness.handlers.steer_chat = function () {
+    return new Promise(function () {}); // never settles
+  };
+
+  await bridge.chat.sendMessage("超时前已发出去的一句");
+  await tick();
+  await tick();
+  // The user starts retyping during the wait.
+  bridge.chat.setComposerDraft("等待时新打的半句");
+
+  const steerTimer = timeouts.find(function (t) { return t.ms === 25000; });
+  assert.ok(steerTimer, "the steer invoke must have a 25s fallback timeout");
+  steerTimer.fn();
+  await tick();
+  await tick();
+
+  assert.strictEqual(
+    bridge.state.getMany(['chat']).composerDraft,
+    "等待时新打的半句",
+    "timeout recovery must not overwrite fresh input typed during the wait"
+  );
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "with a non-empty composer the chip is degraded and kept in the queue (text not lost)");
+  assert.strictEqual(view.queued[0].steered, false, "degraded to non-steered, no longer blocking flushQueued");
+  // The chip is degraded to plain local queuing and can still be
+  // withdrawn (the × exit stays available).
+  bridge.chat.removeQueued(view.queued[0].id);
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "× removes the degraded chip normally");
+}
+
+async function steerTimeoutWhileSwitchedAwayUnblocksBackgroundQueue() {
+  // Regression: the user switches sessions while the steer is in flight →
+  // the timeout recovery must route by sid to the original session's queue
+  // and degrade the hanging chip; otherwise the chip (steered:true) sticks
+  // at the background session's queue head forever, flushQueued yields, and
+  // every queued message in that session starves.
+  const timeouts = [];
+  const harness = createBridgeHarness(null, {
+    setTimeout: function (fn, ms) {
+      timeouts.push({ fn, ms });
+      return timeouts.length;
+    },
+    clearTimeout: function () {},
+  });
+  const bridge = harness.bridge;
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-steer"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-bg-steer" });
+  await tick();
+  harness.handlers.steer_chat = function () {
+    return new Promise(function () {}); // never settles
+  };
+  harness.handlers.cancel_generation = function () { return { terminal: true, generation: 1 }; };
+  harness.handlers.chat = function () { return "ok"; };
+
+  await bridge.chat.sendMessage("切走前注入的一句");
+  await tick();
+  await tick();
+  // Steer in flight: switch to another session (load_session builds a new buffer).
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-other"), true);
+  await tick();
+  assert.strictEqual(bridge.state.get("sessions").activeSessionId, "chat-bg-other");
+
+  const steerTimer = timeouts.find(function (t) { return t.ms === 25000; });
+  assert.ok(steerTimer, "the steer invoke must have a 25s fallback timeout");
+  steerTimer.fn();
+  await tick();
+  await tick();
+
+  // The original session's background queue: the chip must be degraded
+  // (non-steered) and the (new session's) composer untouched.
+  const other = bridge.state.getMany(['chat']);
+  assert.strictEqual(other.composerDraft, "", "recovery must not write the old session's text into the active session's composer");
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-steer"), true);
+  await tick();
+  let view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 1, "the chip stays in the original session's queue");
+  assert.strictEqual(view.queued[0].steered, false, "after the timeout recovery the chip is degraded to non-steered");
+
+  // The degraded chip no longer blocks flushQueued: it is sent normally
+  // after the turn terminal, un-sticking the background queue.
+  harness.emit("chat:done", { session_id: "chat-bg-steer", generation: 1 });
+  await tick();
+  await tick();
+  view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "after chat:done the flush consumes the degraded chip (the background queue is no longer stuck)");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "chat"; }).length,
+    1,
+    "the degraded chip is sent normally by flushQueued"
+  );
+}
+
+async function transcriptFallbackRecoversAfterCompactionShrink() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  // Legacy backend: steer_chat returns nothing → chip has no steerId;
+  // falls back to transcript counting.
+  harness.handlers.steer_chat = function () { return null; };
+  let disk = [
+    { role: "user", content: [{ type: "text", text: "原问题" }] },
+    { role: "assistant", content: [{ type: "text", text: "旧回答" }] },
+  ];
+  harness.handlers.load_session = function () {
+    return {
+      metadata: { id: "chat-compact-fallback", title: "Compact", message_count: disk.length },
+      transcript_revision: "rev-live",
+      messages: disk,
+      artifacts: [],
+    };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-compact-fallback"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-compact-fallback" });
+  await tick();
+
+  await bridge.chat.sendMessage("兜底恢复甲");
+  disk.push({ role: "user", content: [{ type: "text", text: "兜底恢复甲" }] });
+  harness.emit("chat:transcript_committed", { session_id: "chat-compact-fallback", transcript_revision: "rev-c1" });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length,
+    0,
+    "legacy fallback drains the first chip"
+  );
+
+  // Compaction: the on-disk transcript shrinks (3 → 1); the baseline must
+  // reset with it.
+  await bridge.chat.sendMessage("兜底恢复乙");
+  disk = [{ role: "user", content: [{ type: "text", text: "[compaction summary]" }] }];
+  harness.emit("chat:transcript_committed", { session_id: "chat-compact-fallback", transcript_revision: "rev-c2" });
+  await tick();
+  await tick();
+  assert.strictEqual(
+    bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length,
+    1,
+    "shrink commit only resets the baseline, no false drain"
+  );
+
+  // The engine keeps delivering after the shrink: the fallback must
+  // resume (a monotonic lastSeenMessageCount would stay dead forever).
+  disk.push({ role: "user", content: [{ type: "text", text: "兜底恢复乙" }] });
+  harness.emit("chat:transcript_committed", { session_id: "chat-compact-fallback", transcript_revision: "rev-c3" });
+  await tick();
+  await tick();
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "the fallback resumes draining after the compaction shrink");
+  assert.ok(
+    view.chatItems.some(function (item) { return item.type === "user" && item.text === "兜底恢复乙"; }),
+    "post-compaction fallback turns the chip into a user bubble"
+  );
+}
+
+async function transcriptFallbackRoutesByEventSessionNotActiveQueue() {
+  // R4 regression (PR #308 fifth review round): the legacy fallback's
+  // entry guard must route by the event's sid — the old implementation read
+  // the active session's state.queued and returned wholesale when the user
+  // had switched away after the steer (active queue empty), leaving the
+  // background session's legacy chip hanging and blocking flushQueued's
+  // queue head.
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  harness.handlers.steer_chat = function () { return null; }; // legacy: no steerId
+  const disk = [
+    { role: "user", content: [{ type: "text", text: "背景问题" }] },
+  ];
+  harness.handlers.load_session = function () {
+    return {
+      metadata: { id: "chat-bg-fallback", title: "Bg", message_count: disk.length },
+      transcript_revision: "rev-live",
+      messages: disk,
+      artifacts: [],
+    };
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-fallback"), true);
+  harness.emit("chat:turn_started", { session_id: "chat-bg-fallback" });
+  await tick();
+
+  await bridge.chat.sendMessage("后台兜底消息");
+  // Switch to another session: the chip goes into
+  // sessionStates["chat-bg-fallback"].queued with the working set and the
+  // active queue becomes empty — the old guard returned right here and the
+  // fallback never ran.
+  assert.strictEqual(await bridge.sessions.switchToSession("other-session"), true);
+
+  disk.push({ role: "user", content: [{ type: "text", text: "后台兜底消息" }] });
+  await harness.emit("chat:transcript_committed", { session_id: "chat-bg-fallback", transcript_revision: "rev-bg1" });
+  await tick();
+  await tick();
+
+  // Switch back to the original session to observe (background working-set
+  // snapshots are not in the getMany domain): the chip must have been drained
+  // by the event-routed fallback and a user bubble must be present.
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-bg-fallback"), true);
+  await tick();
+  const view = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.strictEqual(view.queued.length, 0, "background legacy chip settles via event-sid-routed fallback");
+  // The bubble was written into the background session's chatItems
+  // (visible after switching back); switchToSession takes the cached fast
+  // path and does not rebuild items, so the fallback-added item survives the
+  // switch back.
+  const bubble = view.chatItems.some(function (item) { return item.type === "user" && item.text === "后台兜底消息"; });
+  const inMessages = view.messages.some(function (m) { return m && m.role === "user" && JSON.stringify(m.content).includes("后台兜底消息"); });
+  assert.ok(bubble || inMessages,
+    "background legacy chip turns into a user bubble (or is hydrated from the synced transcript) after switching away"
+  );
 }
 
 async function terminalEventWinsStaleRunningOpen() {
@@ -2160,6 +6150,83 @@ async function editLastTurnBlockedWhileAuthorityReconcilePending() {
   );
 }
 
+// Tool results also use role="user" in state.messages. Editing the last turn
+// must cut at the genuine prompt and remove its complete tool round-trip.
+async function editLastTurnCutsAtRealUserMessageBeforeToolResult(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var bridge = harness.bridge;
+  var sessionId = "chat-edit-tool-result-" + bridgeKind;
+  harness.handlers.load_session = function () {
+    return {
+      metadata: { id: sessionId, title: "Edit with tool result", message_count: 4 },
+      messages: [
+        { role: "user", content: [{ type: "text", text: "original question" }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "call_1", name: "Bash", input: {} }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call_1", content: "tool output" }] },
+        { role: "assistant", content: [{ type: "text", text: "final answer" }] },
+      ],
+      artifacts: [],
+    };
+  };
+
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+  var before = bridge.state.get("chat").messages;
+  assert.strictEqual(before.length, 4, "seeded transcript must include the tool round-trip");
+
+  await bridge.interaction.editLastTurn("edited question");
+  var after = bridge.state.get("chat").messages;
+  assert.deepStrictEqual(
+    after,
+    [{ role: "user", content: [{ type: "text", text: "edited question" }] }],
+    "edit must cut the whole last turn including the trailing tool_result"
+  );
+  var editCalls = harness.calls.filter(function (call) { return call.cmd === "edit_last_turn"; });
+  assert.strictEqual(editCalls.length, 1, "edit_last_turn must be invoked exactly once");
+}
+
+async function rejectedEditRestoresAuthoritativeTranscript(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  var bridge = harness.bridge;
+  var sessionId = "chat-edit-rejected-" + bridgeKind;
+  var durable = {
+    metadata: { id: sessionId, title: "Rejected edit", message_count: 3 },
+    messages: [
+      { role: "user", content: [{ type: "text", text: "older editable prompt" }] },
+      { role: "assistant", content: [{ type: "text", text: "older response" }] },
+      { role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] },
+    ],
+    artifacts: [],
+    transcript_revision: "revision-before-rejected-edit",
+  };
+  harness.handlers.load_session = function () {
+    return JSON.parse(JSON.stringify(durable));
+  };
+
+  assert.strictEqual(await bridge.sessions.switchToSession(sessionId), true);
+  await bridge.interaction.editLastTurn("must not replace the older prompt");
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(bridge.state.get("chat").messages)),
+    [{ role: "user", content: [{ type: "text", text: "must not replace the older prompt" }] }],
+    "the edit remains optimistic until the engine publishes its terminal decision"
+  );
+
+  await harness.emit("chat:done", {
+    session_id: sessionId,
+    status: "Failed",
+    error: "Cannot edit the latest user content",
+    operation_rejected: true,
+  });
+  for (var reconcileTick = 0; reconcileTick < 12; reconcileTick++) await tick();
+
+  var state = bridge.state.get("chat");
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(state.messages)),
+    durable.messages,
+    "a rejected edit must hydrate the unchanged durable transcript"
+  );
+  assert.strictEqual(state.busy, false, "a rejected edit must release the busy state");
+}
+
 async function remoteAcceptPlanConvergesAcrossClients() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
@@ -2702,8 +6769,29 @@ async function scheduledBufferLruNeverEvictsLive() {
     session_id: "sched-lru-live",
     text: "live buffer must survive",
   });
+  harness.handlers.load_session = function (args) {
+    if (args.id !== "sched-lru-live") {
+      return { metadata: { id: args.id, title: "Other" }, messages: [], artifacts: [] };
+    }
+    return {
+      metadata: { id: "sched-lru-live", title: "LRU live task", message_count: 2 },
+      transcript_revision: "rev-lru-live",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "原问题" }] },
+        { role: "assistant", content: [{ type: "text", text: "live buffer must survive" }] },
+      ],
+      artifacts: [],
+    };
+  };
   await bridge.chat.sendMessage("queued live follow-up");
+  // Busy send = steer injection: the chip shows immediately and waits for
+  // engine-event settlement.
   assert.strictEqual(bridge.state.getMany(['sessions', 'chat', 'scheduled']).queued.length, 1);
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "steer_chat"; }).length,
+    1,
+    "live follow-up during scheduled turn steers into the engine"
+  );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
 
   for (var i = 0; i < 70; i++) {
@@ -2738,7 +6826,15 @@ async function scheduledBufferLruNeverEvictsLive() {
     JSON.stringify(live.chatItems).includes("live buffer must survive"),
     "LRU must never evict a busy scheduled buffer"
   );
-  assert.strictEqual(live.queued.length, 1, "LRU must never evict a scheduled buffer with queued input");
+  // The steered chip (awaiting engine-event settlement) stays in the live
+  // buffer's queue and is LRU-protected together with the buffer.
+  assert.strictEqual(live.queued.length, 1, "queued steer chip survives with the protected live buffer");
+  assert.strictEqual(live.queued[0].text, "queued live follow-up");
+  assert.strictEqual(
+    harness.calls.filter(function (call) { return call.cmd === "steer_chat"; }).length,
+    1,
+    "exactly one steer_chat call across the whole LRU scenario"
+  );
 
   var saturatedHarness = createBridgeHarness();
   await saturatedHarness.bridge.sessions.switchToSession("chat-origin");
@@ -3066,19 +7162,55 @@ async function scheduledMutationErrorBehavior() {
   assert.strictEqual(chatHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskBusyAction, null);
 }
 
-async function scheduledDeletePurgesOnlyReportedSessionBuffers() {
-  var harness = createBridgeHarness();
-  var bridge = harness.bridge;
-  harness.emit("chat:delta", { session_id: "sched-delete-exact", text: "purge this exact buffer" });
+async function scheduledDeletePreservesHistoryAndSessionBuffers() {
+  const harness = createBridgeHarness();
+  const bridge = harness.bridge;
+  harness.emit("chat:delta", { session_id: "sched-delete-exact", text: "retain this exact buffer" });
   harness.emit("chat:delta", { session_id: "sched-delete-retain", text: "retain this sibling buffer" });
+  harness.handlers.list_scheduled_tasks = function () {
+    return [{ id: "automation-delete", name: "Deleted task", model: "model-delete" }];
+  };
+  harness.handlers.list_scheduled_runs = function () {
+    return [
+      {
+        id: "run-delete-exact",
+        automationId: "automation-delete",
+        sessionId: "sched-delete-exact",
+        status: "completed",
+        archived: false,
+      },
+      {
+        id: "run-delete-retain",
+        automationId: "automation-other",
+        sessionId: "sched-delete-retain",
+        status: "completed",
+        archived: false,
+        taskName: "Sibling task",
+      },
+    ];
+  };
   harness.handlers.delete_scheduled_task = function () {
     return {
       id: "automation-delete",
-      deletedSessionIds: ["sched-delete-exact"],
+      deletedSessionIds: [],
     };
   };
+  await bridge.scheduled.loadScheduledTasks();
+  await bridge.scheduled.loadScheduledTaskRecentRuns();
   await bridge.scheduled.deleteScheduledTask("automation-delete");
 
+  const afterDelete = bridge.state.getMany(['sessions', 'chat', 'scheduled']);
+  assert.ok(
+    afterDelete.scheduledTasks.every(function (task) { return task.id !== "automation-delete"; }),
+    "deleting a task must remove only its schedule definition"
+  );
+  assert.deepStrictEqual(
+    afterDelete.scheduledTaskRecentRuns
+      .map(function (run) { return run.id; })
+      .sort((left, right) => left.localeCompare(right)),
+    ["run-delete-exact", "run-delete-retain"],
+    "deleting a task must keep both its run history and unrelated run history"
+  );
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat({
     id: "run-delete-exact",
     automationId: "automation-delete",
@@ -3086,8 +7218,8 @@ async function scheduledDeletePurgesOnlyReportedSessionBuffers() {
     status: "running",
   }, { id: "automation-delete", name: "Deleted task" }), true);
   assert.ok(
-    !JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems).includes("purge this exact buffer"),
-    "a backend-reported deleted session id must purge exactly that scheduled buffer"
+    JSON.stringify(bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems).includes("retain this exact buffer"),
+    "deleting a task must preserve its scheduled conversation buffer"
   );
   assert.strictEqual(await bridge.scheduled.exitScheduledRunChat(), true);
   assert.strictEqual(await bridge.scheduled.openScheduledRunChat({
@@ -3101,43 +7233,41 @@ async function scheduledDeletePurgesOnlyReportedSessionBuffers() {
     "deleting one task must not guess at or purge unreported scheduled session ids"
   );
 
-  var noIdsHarness = createBridgeHarness();
-  noIdsHarness.handlers.list_scheduled_tasks = function () {
-    return [{ id: "automation-no-ids", name: "No ids task" }];
+  const restartHarness = createBridgeHarness();
+  restartHarness.handlers.list_scheduled_tasks = function () {
+    return [];
   };
-  noIdsHarness.handlers.list_scheduled_runs = function () {
+  restartHarness.handlers.list_scheduled_runs = function () {
     return [{
-      id: "run-delete-no-ids",
-      automationId: "automation-no-ids",
-      sessionId: "sched-delete-no-ids",
+      id: "run-archived",
+      automationId: "automation-archived",
+      sessionId: "sched-archived",
       status: "completed",
       archived: false,
+      taskName: "Archived task",
+      taskModel: "archived-model",
     }];
   };
-  noIdsHarness.emit("chat:delta", {
-    session_id: "sched-delete-no-ids",
-    text: "retain when backend reports no ids",
+  restartHarness.emit("chat:delta", {
+    session_id: "sched-archived",
+    text: "retained after restart",
   });
-  noIdsHarness.handlers.delete_scheduled_task = function () {
-    return { id: "automation-no-ids" };
-  };
-  await noIdsHarness.bridge.scheduled.loadScheduledTasks();
-  await noIdsHarness.bridge.scheduled.loadScheduledTaskRecentRuns();
-  await noIdsHarness.bridge.scheduled.deleteScheduledTask("automation-no-ids");
+  await restartHarness.bridge.scheduled.loadScheduledTasks();
+  await restartHarness.bridge.scheduled.loadScheduledTaskRecentRuns();
+  const archivedRows = restartHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns;
   assert.strictEqual(
-    noIdsHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.length,
-    0,
-    "deleting a task must remove its sidebar rows even when the backend reports no session ids"
+    archivedRows[0].taskName,
+    "Archived task",
+    "an archived run must retain its task-name snapshot after restart"
   );
-  assert.strictEqual(await noIdsHarness.bridge.scheduled.openScheduledRunChat({
-    id: "run-delete-no-ids",
-    automationId: "automation-no-ids",
-    sessionId: "sched-delete-no-ids",
-    status: "running",
-  }, { id: "automation-no-ids", name: "No ids task" }), true);
-  assert.ok(
-    JSON.stringify(noIdsHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).chatItems).includes("retain when backend reports no ids"),
-    "a deletion response without deletedSessionIds must not trigger heuristic purging"
+  assert.strictEqual(await restartHarness.bridge.scheduled.openScheduledRunChat(
+    archivedRows[0],
+    null
+  ), true);
+  assert.strictEqual(
+    restartHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledRunContext.model,
+    "archived-model",
+    "an archived run must retain its task-model snapshot after restart"
   );
 }
 
@@ -3149,7 +7279,7 @@ async function scheduledRecentRunsIgnoreStaleAggregate() {
   };
   harness.handlers.list_scheduled_runs = function () { return staleRuns.promise; };
   harness.handlers.delete_scheduled_task = function () {
-    return { id: "automation-stale", deletedSessionIds: ["sched-stale"] };
+    return { id: "automation-stale", deletedSessionIds: [] };
   };
   await harness.bridge.scheduled.loadScheduledTasks();
   var loading = harness.bridge.scheduled.loadScheduledTaskRecentRuns();
@@ -3166,7 +7296,7 @@ async function scheduledRecentRunsIgnoreStaleAggregate() {
   assert.strictEqual(
     harness.bridge.state.getMany(['sessions', 'chat', 'scheduled']).scheduledTaskRecentRuns.length,
     0,
-    "an older aggregate response must not resurrect a deleted scheduled run"
+    "an older aggregate response must not overwrite the post-delete history snapshot"
   );
 }
 
@@ -3877,8 +8007,8 @@ async function scheduledRunNowPollStopsOnTerminalBehavior() {
   );
 }
 
-async function presentationReconciliationUsesStableEventIdentity() {
-  var harness = createBridgeHarness();
+async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
+  var harness = createBridgeHarness(null, { bridgeKind: bridgeKind });
   var bridge = harness.bridge;
   var sessionId = "chat-presentation-identity";
   var durable = {
@@ -3970,6 +8100,241 @@ async function presentationReconciliationUsesStableEventIdentity() {
     "the artifact panel must use the same semantic identity as chat cards"
   );
 
+  function presentArtifact(id, artifactPath, title, resolvedPath) {
+    var result = { ok: true };
+    var outputPath = resolvedPath === undefined ? artifactPath : resolvedPath;
+    if (outputPath) result.abs_path = outputPath;
+    var payload = {
+      session_id: sessionId,
+      id: id,
+      name: "present_artifact",
+      args: { path: artifactPath, title, description: title + " description" },
+    };
+    harness.emit("chat:tool_start", payload);
+    harness.emit("chat:tool_end", {
+      session_id: sessionId,
+      id: id,
+      success: true,
+      output: JSON.stringify(result),
+    });
+  }
+
+  var reportPath = "C:\\Users\\tester\\.pinvou3\\sessions\\" + sessionId +
+    "\\workspace\\report.md";
+  var summaryPath = "C:\\Users\\tester\\.pinvou3\\sessions\\" + sessionId +
+    "\\workspace\\summary.pptx";
+  presentArtifact("tool-present-report", reportPath, "Report");
+  presentArtifact("tool-present-summary", summaryPath, "Summary");
+
+  var threeCardState = bridge.state.get("chat");
+  var threeCards = threeCardState.chatItems.filter(function (item) {
+    return item.type === "artifact_card";
+  });
+  assert.strictEqual(threeCards.length, 3, "the setup must contain exactly three artifact cards");
+  var originalSnakeCard = threeCards.find(function (item) {
+    return /snake-game\.html$/.test(item.path || "");
+  });
+  var originalSnakeIndex = threeCardState.chatItems.findIndex(function (item) {
+    return item.id === originalSnakeCard.id;
+  });
+
+  var editPayload = {
+    session_id: sessionId,
+    id: "tool-edit-snake",
+    name: "File",
+    args: { action: "edit", path: "snake-game.html", old_string: "v1", new_string: "v2" },
+  };
+  harness.emit("chat:tool_start", editPayload);
+  harness.emit("chat:tool_end", {
+    session_id: sessionId,
+    id: editPayload.id,
+    success: true,
+    output: "Updated snake-game.html",
+  });
+  var presentationEventsBeforeUpdate = harness.getWindowEvents("pinvou:present-artifact").length;
+  presentArtifact("tool-present-snake-update", "snake-game.html", "Snake game v2", null);
+
+  var updatedCardState = bridge.state.get("chat");
+  var updatedCards = updatedCardState.chatItems.filter(function (item) {
+    return item.type === "artifact_card";
+  });
+  var updatedSnakeCards = updatedCards.filter(function (item) {
+    return /snake-game\.html$/.test(item.path || "");
+  });
+  assert.strictEqual(updatedCards.length, 3,
+    "updating one of three artifact cards must not create a fourth card");
+  assert.strictEqual(updatedSnakeCards.length, 1,
+    "the updated artifact must still have exactly one card");
+  assert.strictEqual(updatedSnakeCards[0].id, originalSnakeCard.id,
+    "the updated artifact must preserve its card id");
+  assert.strictEqual(updatedCardState.chatItems.findIndex(function (item) {
+    return item.id === originalSnakeCard.id;
+  }), originalSnakeIndex, "the updated artifact must preserve its card position");
+  assert.strictEqual(updatedSnakeCards[0].title, "Snake game v2",
+    "the existing card must receive the latest presentation metadata");
+  assert.strictEqual(updatedSnakeCards[0].path, absoluteArtifactPath,
+    "a relative presentation update must preserve the existing absolute openable path");
+  var presentationEventsAfterUpdate = harness.getWindowEvents("pinvou:present-artifact");
+  assert.strictEqual(presentationEventsAfterUpdate.length, presentationEventsBeforeUpdate + 1,
+    bridgeKind + " must emit a presentation request even when artifact count stays unchanged");
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(presentationEventsAfterUpdate[presentationEventsAfterUpdate.length - 1].detail)),
+    {
+      sessionId: sessionId,
+      path: absoluteArtifactPath,
+      toolCallId: "tool-present-snake-update",
+    },
+    bridgeKind + " must present the reconciled absolute card path",
+  );
+
+  // A same-named artifact from another absolute directory gets its own card.
+  var exportSummaryPath = "C:\\Users\\tester\\exports\\summary.pptx";
+  presentArtifact("tool-present-summary-export", exportSummaryPath, "Summary export");
+  var exportCardState = bridge.state.get("chat");
+  var exportCards = exportCardState.chatItems.filter(function (item) {
+    return item.type === "artifact_card";
+  });
+  assert.strictEqual(exportCards.length, 4,
+    "a same-named artifact in another directory must append its own card");
+  var summaryCards = exportCards.filter(function (item) {
+    return /summary\.pptx$/.test(item.path || "");
+  });
+  assert.strictEqual(summaryCards.length, 2,
+    "both same-named files must keep their own cards");
+  assert.strictEqual(exportCards[exportCards.length - 1].path, exportSummaryPath,
+    "the appended card must point at the newly presented file");
+  var originalSummaryCard = summaryCards.find(function (item) { return item.path !== exportSummaryPath; });
+  assert.strictEqual(originalSummaryCard.path, summaryPath,
+    "the original card must keep its own openable path");
+
+  presentArtifact("tool-present-summary-original-update", summaryPath, "Summary revised");
+  var exactUpdateState = bridge.state.get("chat");
+  var exactUpdateCards = exactUpdateState.chatItems.filter(function (item) {
+    return item.type === "artifact_card";
+  });
+  assert.strictEqual(exactUpdateCards.length, 4,
+    bridgeKind + " must update an older exact-path card without appending a duplicate");
+  assert.strictEqual(exactUpdateCards.find(function (item) {
+    return item.path === summaryPath;
+  }).title, "Summary revised",
+    bridgeKind + " must update the older card selected by its exact path");
+  assert.strictEqual(exactUpdateCards.find(function (item) {
+    return item.path === exportSummaryPath;
+  }).title, "Summary export",
+    bridgeKind + " must leave the newer same-named card unchanged");
+
+  await bridge.chat.sendMessage("Update the original summary");
+  var editOriginalSummary = {
+    session_id: sessionId,
+    id: "tool-edit-summary-original",
+    name: "File",
+    args: { action: "edit", path: summaryPath, old_string: "v1", new_string: "v2" },
+  };
+  harness.emit("chat:tool_start", editOriginalSummary);
+  harness.emit("chat:tool_end", {
+    session_id: sessionId,
+    id: editOriginalSummary.id,
+    success: true,
+    output: "Updated original summary",
+  });
+  await harness.emit("chat:done", { session_id: sessionId, status: "Completed" });
+  await tick();
+  await tick();
+  var fallbackUpdateCards = bridge.state.get("chat").chatItems.filter(function (item) {
+    return item.type === "artifact_card";
+  });
+  assert.strictEqual(fallbackUpdateCards.length, 4,
+    bridgeKind + " chat:done fallback must update the older exact card without appending");
+  assert.strictEqual(fallbackUpdateCards.find(function (item) {
+    return item.path === summaryPath;
+  }).title, "Summary revised",
+    bridgeKind + " chat:done fallback must retain the older card metadata");
+  assert.strictEqual(fallbackUpdateCards.find(function (item) {
+    return item.path === exportSummaryPath;
+  }).title, "Summary export",
+    bridgeKind + " chat:done fallback must not borrow metadata from the newer card");
+
+  // Re-presenting after a user request appends a visible feedback card.
+  await harness.emit("chat:user_message", { session_id: sessionId, content: "再把 report 给我看一次" });
+  presentArtifact("tool-present-report-again", reportPath, "Report again");
+  var feedbackCardState = bridge.state.get("chat");
+  var feedbackCards = feedbackCardState.chatItems.filter(function (item) {
+    return item.type === "artifact_card";
+  });
+  assert.strictEqual(feedbackCards.length, 5,
+    "a user-requested re-presentation of an unchanged artifact must append a visible new card");
+  var reportCards = feedbackCards.filter(function (item) {
+    return /report\.md$/.test(item.path || "");
+  });
+  assert.strictEqual(reportCards.length, 2,
+    "the original report card and the user-requested one must coexist");
+  assert.strictEqual(feedbackCards[feedbackCards.length - 1].title, "Report again",
+    "the appended card must carry the fresh presentation title");
+
+  var replayFirstPresentId = "replay-present-snake-absolute";
+  var replayRelativeUpdateId = "replay-present-snake-relative";
+  durable = {
+    metadata: { id: sessionId, title: "Presentation identity", message_count: 5 },
+    messages: [
+      { role: "assistant", content: [{
+        type: "tool_use",
+        id: replayFirstPresentId,
+        name: "present_artifact",
+        input: {
+          path: "snake-game.html",
+          title: "Snake game v1",
+          description: "First presentation",
+        },
+      }] },
+      { role: "user", content: [{
+        type: "tool_result",
+        tool_use_id: replayFirstPresentId,
+        content: JSON.stringify({ ok: true, abs_path: absoluteArtifactPath }),
+      }] },
+      { role: "assistant", content: [{ type: "text", text: "First version ready." }] },
+      { role: "assistant", content: [{
+        type: "tool_use",
+        id: replayRelativeUpdateId,
+        name: "present_artifact",
+        input: {
+          path: "snake-game.html",
+          title: "Snake game v3",
+          description: "Latest replayed presentation",
+        },
+      }] },
+      { role: "user", content: [{
+        type: "tool_result",
+        tool_use_id: replayRelativeUpdateId,
+        content: JSON.stringify({ ok: true }),
+      }] },
+    ],
+    artifacts: [absoluteArtifactPath],
+    transcript_revision: "rev-2",
+  };
+  var recoveryHarness = createBridgeHarness(null, { bridgeKind: bridgeKind });
+  recoveryHarness.handlers.load_session = function () { return durable; };
+  await recoveryHarness.bridge.sessions.switchToSession(sessionId);
+
+  var replayedCardState = recoveryHarness.bridge.state.get("chat");
+  var replayedArtifactCards = replayedCardState.chatItems.filter(function (item) {
+    return item.type === "artifact_card";
+  });
+  assert.strictEqual(replayedArtifactCards.length, 1,
+    "session replay must reconcile repeated presentations to one artifact card");
+  assert.strictEqual(replayedArtifactCards[0].path, absoluteArtifactPath,
+    "session replay must preserve the first presentation's absolute openable path");
+  assert.strictEqual(replayedArtifactCards[0].title, "Snake game v3",
+    "session replay must apply the latest relative presentation metadata");
+  assert.strictEqual(replayedArtifactCards[0].description, "Latest replayed presentation",
+    "session replay must apply the latest presentation description");
+  assert.strictEqual(replayedCardState.chatItems.indexOf(replayedArtifactCards[0]), 0,
+    "session replay must retain the first presentation's card position after an update");
+  assert.ok(replayedCardState.chatItems.some(function (item) {
+    return item.type === "assistant" && item.text === "First version ready.";
+  }), "the replay assertion must include transcript content between the two presentations");
+
+
+
   var questions = [{ id: "choice", header: "选择", question: "继续吗？", options: [] }];
   harness.emit("chat:user_input_required", {
     session_id: sessionId, id: "tool-question", questions: questions,
@@ -4031,6 +8396,7 @@ async function multipleKnowledgeMountBehavior() {
   var bridge = harness.bridge;
   assert.strictEqual(await bridge.sessions.switchToSession("chat-multi-kb"), true);
   var serverMounted = [];
+  var serverRemoteMounted = [];
   var revision = 0;
   function snapshot() {
     revision += 1;
@@ -4052,6 +8418,20 @@ async function multipleKnowledgeMountBehavior() {
     return snapshot();
   };
   harness.handlers.session_unmount_collection = function () { serverMounted = []; return snapshot(); };
+  harness.handlers.session_add_mounted_remote_collection = function (args) {
+    var existing = serverRemoteMounted.find(function (entry) {
+      return entry.serverId === args.serverId && entry.collectionId === args.collectionId;
+    });
+    if (existing) existing.enabled = true;
+    else serverRemoteMounted.push({ serverId: args.serverId, collectionId: args.collectionId, enabled: true });
+    return serverRemoteMounted;
+  };
+  harness.handlers.session_remove_mounted_remote_collection = function (args) {
+    serverRemoteMounted = serverRemoteMounted.filter(function (entry) {
+      return entry.serverId !== args.serverId || entry.collectionId !== args.collectionId;
+    });
+    return serverRemoteMounted;
+  };
 
   await bridge.knowledge.mountCollection(7);
   await bridge.knowledge.mountCollection(8);
@@ -4078,13 +8458,27 @@ async function multipleKnowledgeMountBehavior() {
   assert.strictEqual(mounted.mountedCollection, null, "a disabled-only mount list has no legacy active id");
 
   await bridge.knowledge.mountCollection(7);
+  await bridge.knowledge.mountRemoteCollection("cube", 101);
   mounted = bridge.state.get('knowledge');
   assert.strictEqual(mounted.mountedCollections[0].enabled, true, "mounting again re-enables in place");
   assert.strictEqual(mounted.mountedCollection, 7);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(mounted.mountedRemoteCollections)),
+    [{ serverId: "cube", collectionId: 101, enabled: true }],
+    "remote and local mounts must coexist before clearing all"
+  );
 
   await bridge.knowledge.unmountCollection();
   mounted = bridge.state.get('knowledge');
   assert.deepStrictEqual(JSON.parse(JSON.stringify(mounted.mountedCollections)), []);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(mounted.mountedRemoteCollections)), [],
+    "clearing all mounts must also remove remote collections");
+  assert.deepStrictEqual(serverRemoteMounted, [], "the remote mount fact source must be cleared");
+  var remoteRemove = harness.calls.find(function (call) {
+    return call.cmd === "session_remove_mounted_remote_collection";
+  });
+  assert.strictEqual(remoteRemove.args.sessionId, "chat-multi-kb",
+    "remove-all must keep remote cleanup bound to the clicked session");
   assert.strictEqual(mounted.mountedCollection, null, "clearing all mounts updates both state shapes");
 }
 
@@ -4177,6 +8571,65 @@ async function remoteKnowledgeMountSnapshotDeduplicatesCollections() {
   assert.strictEqual(mounted.mountedCollectionsRevision, 2);
 }
 
+async function remoteKnowledgeDeletionEventRefreshesRemoteMounts() {
+  var harness = createBridgeHarness();
+  var bridge = harness.bridge;
+  var serverRemoteMounted = [
+    { serverId: "cube", collectionId: 7, enabled: true },
+    { serverId: "cube", collectionId: 8, enabled: true },
+    { serverId: "other", collectionId: 7, enabled: false },
+  ];
+  harness.handlers.session_mounted_remote_collections = function () {
+    return serverRemoteMounted;
+  };
+  assert.strictEqual(await bridge.sessions.switchToSession("chat-kb-remote-delete"), true);
+  var readsBeforePayload = harness.calls.filter(function (call) {
+    return call.cmd === "session_mounted_remote_collections";
+  }).length;
+
+  await harness.emit("remote_control:kb_mount_changed", {
+    session_id: "chat-kb-remote-delete",
+    revision: 0,
+    collections: [],
+    remote_collections: [
+      { serverId: "cube", collectionId: 8, enabled: true },
+      { serverId: "other", collectionId: 7, enabled: false },
+    ],
+  });
+
+  var mounted = bridge.state.get("knowledge");
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(mounted.mountedRemoteCollections)),
+    [
+      { serverId: "cube", collectionId: 8, enabled: true },
+      { serverId: "other", collectionId: 7, enabled: false },
+    ],
+    "the post-delete event must immediately remove only the exact server and collection mount"
+  );
+  assert.strictEqual(
+    harness.calls.filter(function (call) {
+      return call.cmd === "session_mounted_remote_collections";
+    }).length,
+    readsBeforePayload,
+    "an authoritative event payload must take priority over an extra IPC read"
+  );
+
+  serverRemoteMounted = [{ serverId: "other", collectionId: 7, enabled: false }];
+  await harness.emit("remote_control:kb_mount_changed", {
+    session_id: "chat-kb-remote-delete",
+    revision: 0,
+    collections: [],
+  });
+  await tick();
+  await tick();
+  mounted = bridge.state.get("knowledge");
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(mounted.mountedRemoteCollections)),
+    [{ serverId: "other", collectionId: 7, enabled: false }],
+    "events from older producers must re-read the remote mount fact source"
+  );
+}
+
 async function draftKnowledgeMountsCreateOneSession() {
   var harness = createBridgeHarness();
   var bridge = harness.bridge;
@@ -4251,14 +8704,35 @@ async function draftKnowledgeQueueStaysOnMaterializedSessionAfterSwitch() {
 }
 
 Promise.resolve()
+  .then(subscriptionSnapshotsAvoidTranscriptDeepClone)
+  .then(reentrantSubscriptionNotificationsStayOrdered)
+  .then(persistentSubscriptionSnapshotsPreserveJsonEdges)
+  .then(persistentSubscriptionSnapshotsRejectUnsupportedValues)
+  .then(longSessionStreamingAvoidsPerDeltaDeepClone)
   .then(multipleKnowledgeMountBehavior)
   .then(queuedKnowledgeMountKeepsOriginalSession)
   .then(staleKnowledgeSnapshotDoesNotCrossSessions)
   .then(remoteKnowledgeMountSnapshotDeduplicatesCollections)
+  .then(remoteKnowledgeDeletionEventRefreshesRemoteMounts)
   .then(draftKnowledgeMountsCreateOneSession)
   .then(draftKnowledgeQueueStaysOnMaterializedSessionAfterSwitch)
+  .then(interruptedWebSessionDownloadReleasesItsLease)
+  .then(lostFirstWebSessionChunkStillHasCancellableLease)
+  .then(mismatchedEchoedDownloadIdCancelsBothLeases)
+  .then(olderDesktopUsesServerGeneratedSessionDownloadId)
+  .then(sessionDownloadWaitsForCapabilitySnapshot)
+  .then(sessionDownloadCapabilityWaitStopsOnDisconnect)
+  .then(sessionDownloadCapabilityWaitRejectsAlreadyOfflineDesktop)
+  .then(sessionDownloadCapabilityWaitClosesLostDisconnectEventRace)
+  .then(sessionDownloadCapabilityWaitHasTimeout)
+  .then(sessionDownloadCapabilityGraceExpiryFailsOnce)
+  .then(sessionDownloadCapabilityGraceSupersededByDraftFailsSilently)
   .then(deepSeekTurnTimelineLifecycleBehavior)
-  .then(internalSubagentHandoffStaysOutOfPresentation)
+  .then(function () { return internalSubagentHandoffStaysOutOfPresentation("tauri"); })
+  .then(function () { return internalSubagentHandoffStaysOutOfPresentation("web"); })
+  .then(currentInternalProvenanceAndEnvelopeStayOutOfPresentation)
+  .then(autoTitleSkipsInternalAndStripsTurnMeta)
+  .then(webLiveEnvelopeStaysOutOfPresentation)
   .then(multiAgentToggleFailureIsRoutedToTriggerSession)
   .then(draftToggleFailureAbortsFirstSend)
   .then(scheduledRunViewExitBehavior)
@@ -4270,6 +8744,67 @@ Promise.resolve()
   .then(scheduledRunUnreadBehavior)
   .then(openingRunningMarksBusyBeforeHydration)
   .then(followupQueuedUntilScheduledInitialTurnTerminal)
+  .then(webFollowupQueuedUntilScheduledInitialTurnTerminal)
+  .then(busySendSteersIntoEngineAndSettlesChip)
+  .then(removeQueuedSteeredChipWithdrawsFromEngine)
+  .then(removeQueuedBeforeSteerIdBackfillWithdrawsOnBackfill)
+  .then(attachmentQueuedChipCancelNeverTouchesEngine)
+  .then(function () { return queuedMessageActionsReorderAndEditPlainItems("tauri"); })
+  .then(function () { return queuedMessageActionsReorderAndEditPlainItems("web"); })
+  .then(function () { return queuedSceneEditRebuildsInternalPayload("tauri"); })
+  .then(function () { return queuedSceneEditRebuildsInternalPayload("web"); })
+  .then(function () { return queuedEditWithEmptyMetaPayloadStaysPlain("tauri"); })
+  .then(function () { return queuedEditWithEmptyMetaPayloadStaysPlain("web"); })
+  .then(desktopBusyAdmissionOnlyMessageKeepsFullContract)
+  .then(editQueuedSteerWithdrawsBeforeChangingPayload)
+  .then(editQueuedSteerRefusesUncertainWithdrawal)
+  .then(editQueuedDroppedBeforeNotPendingRestoresOriginal)
+  .then(editQueuedDroppedBeforeTimeoutRestoresOriginal)
+  .then(editQueuedSteerUnchangedTextKeepsSteer)
+  .then(prioritizeQueuedSteerPromotesVisuallyWithoutWithdrawal)
+  .then(prioritizeQueuedSteerBehindSteerRefuses)
+  .then(interruptQueuedSteeredChipWithdrawsBeforeSending)
+  .then(interruptQueuedFailureRestoresChipToQueue)
+  .then(interruptQueuedWhileIdleSendsWithoutCancel)
+  .then(steerInvokeHangTimesOutAndRestoresInput)
+  .then(interruptQueuedFailureLeavesFlushableChip)
+  .then(interruptAndSendTimeoutWhileBusyFailsWithoutSending)
+  .then(interruptAndSendWaitsForMatchingGenerationDone)
+  .then(steerCommittedBeforeBackfillSettlesViaStash)
+  .then(interruptAndSendPreRegistersDoneListener)
+  .then(steerLateSuccessAfterTimeoutWithdraws)
+  .then(steerSettleWatchdogDegradesStuckChip)
+  .then(mainPathSendFailureRejectsToCaller)
+  .then(interruptQueuedCommittedSteerDoesNotResend)
+  .then(interruptQueuedNotPendingExpiryRestoresInput)
+  .then(interruptQueuedNotPendingDroppedSettlesAsRestore)
+  .then(interruptQueuedRetiredSteerResends)
+  .then(steerChipStaysSubscriptionSafeDuringStream)
+  .then(steerCommittedBubbleIsMidTurnAndHydratesClean)
+  .then(zapOnNotBackfilledSteerWaitsThenWithdrawsAndResends)
+  .then(zapOnNotBackfilledSteerNotPendingSkipsResend)
+  .then(zapOnStashedDroppedRestoresTextImmediately)
+  .then(zapOnSteerInvokeTimeoutRestoresTextWithoutSend)
+  .then(secondZapWhileInterruptInFlightIsRejectedWithNotice)
+  .then(steerFailureNoticeSuppressedWhenChipTakenByX)
+  .then(transcriptFallbackTailScanTerminatesWithoutEnoughUserTail)
+  .then(transcriptFallbackSkipsSteerIdChips)
+  .then(steerDroppedByEngineRestoresDraftText)
+  .then(steerSettleWatchdogNotPendingRemovesChipWithoutResend)
+  .then(steerSettleWatchdogEngineErrRestoresWithoutResend)
+  .then(steerSettleWatchdogWithdrawTimeoutRestoresWithoutResend)
+  .then(interruptQueuedWithdrawTimeoutWaitsForReconcile)
+  .then(interruptQueuedWithdrawRejectionWaitsForReconcile)
+  .then(steerDropRestoresAccumulateAcrossChips)
+  .then(steerDropRestoresToOwningBackgroundSession)
+  .then(prefillRecoveryAppendFlagContract)
+  .then(interruptQueuedCancelInvokeHangRestoresChip)
+  .then(interruptAndSendCancelInvokeTimeoutRejects)
+  .then(steerTimeoutDoesNotClobberFreshInput)
+  .then(steerTimeoutWhileSwitchedAwayUnblocksBackgroundQueue)
+  .then(withdrawTooLateCommittedStillBubbles)
+  .then(transcriptFallbackRecoversAfterCompactionShrink)
+  .then(transcriptFallbackRoutesByEventSessionNotActiveQueue)
   .then(terminalEventWinsStaleRunningOpen)
   .then(completedRunReopenPreservesStreamingFollowup)
   .then(scheduledDoneBeforeBufferCreatesTerminalTombstone)
@@ -4286,6 +8821,10 @@ Promise.resolve()
   .then(completedTurnFallsBackWhenSnapshotLacksRevision)
   .then(completedTurnAdoptsRevisionBumpDuringRetry)
   .then(editLastTurnBlockedWhileAuthorityReconcilePending)
+  .then(function () { return editLastTurnCutsAtRealUserMessageBeforeToolResult("tauri"); })
+  .then(function () { return editLastTurnCutsAtRealUserMessageBeforeToolResult("web"); })
+  .then(function () { return rejectedEditRestoresAuthoritativeTranscript("tauri"); })
+  .then(function () { return rejectedEditRestoresAuthoritativeTranscript("web"); })
   .then(remoteAcceptPlanConvergesAcrossClients)
   .then(activePlanSurvivesUnrelatedTerminalHydrate)
   .then(activePlanHydrateMigratesTicketWithoutDuplicate)
@@ -4297,14 +8836,15 @@ Promise.resolve()
   .then(scheduledOwnerRegistryIsBoundedAndProtectsLive)
   .then(scheduledBufferLruNeverEvictsLive)
   .then(scheduledRunningHydrationRaceBehavior)
-  .then(presentationReconciliationUsesStableEventIdentity)
+  .then(function () { return presentationReconciliationUsesStableEventIdentity("tauri"); })
+  .then(function () { return presentationReconciliationUsesStableEventIdentity("web"); })
   .then(scheduledUnreadPollingRaceBehavior)
   .then(scheduledFolderPickerBehavior)
   .then(scheduledTemplateSourcePersistenceBehavior)
   .then(scheduledSelectionGenerationBehavior)
   .then(scheduledRefreshDoesNotOverlap)
   .then(scheduledMutationErrorBehavior)
-  .then(scheduledDeletePurgesOnlyReportedSessionBuffers)
+  .then(scheduledDeletePreservesHistoryAndSessionBuffers)
   .then(scheduledRecentRunsIgnoreStaleAggregate)
   .then(scheduledRunRecordSessionActionsBehavior)
   .then(scheduledSessionPersistenceBehavior)

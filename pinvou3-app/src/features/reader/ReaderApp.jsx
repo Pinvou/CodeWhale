@@ -4,7 +4,7 @@ import {
 } from '../../components/icons.jsx';
 import { FileColoredIcon } from '../../components/files/FileColoredIcon.jsx';
 import { invokeTauri, listenTauri, tauriEvents } from '../../platform/tauri/client.js';
-import { dict, TAG_TO_LANG } from '../../shared/i18n.js';
+import { dict, ensureLanguage, initialSystemLanguage, TAG_TO_LANG } from '../../shared/i18n.js';
 import {
   CodeViewerContent,
   clampViewerFontSize,
@@ -43,7 +43,7 @@ function ReaderTabContent({ tab, state, fontSize, copy }) {
 }
 
 export function ReaderApp() {
-  const [language, setLanguage] = useState('zh');
+  const [language, setLanguage] = useState(initialSystemLanguage);
   const copy = (dict[language] || dict.zh).uiCodexWorkspace;
   const [tabs, setTabs] = useState([]);
   const [activeKey, setActiveKey] = useState('');
@@ -59,13 +59,14 @@ export function ReaderApp() {
     let unlisten = null;
     invokeTauri('get_settings').then((settings) => {
       if (disposed) return;
-      setLanguage(TAG_TO_LANG[settings?.language] || 'zh');
+      const lang = TAG_TO_LANG[settings?.language] || initialSystemLanguage();
+      ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
       // 后端 Theme 枚举只认 genesis/liquid-light/liquid-dark；深色=genesis，浅色=liquid-light。
       document.documentElement.classList.toggle('dark', settings?.theme !== 'liquid-light');
     }).catch(() => {});
     tauriEvents.listen('ui:language_changed', (event) => {
       const next = event.payload?.language;
-      if (!disposed && dict[next]) setLanguage(next);
+      if (!disposed) ensureLanguage(next).then((ok) => { if (ok) setLanguage(next); }).catch(() => {});
     }).then((fn) => {
       if (disposed) fn();
       else unlisten = fn;

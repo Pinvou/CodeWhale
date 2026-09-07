@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   canGrantRole,
@@ -194,7 +195,7 @@ function GrantDrawer({ copy, client, roles, users, organizations, onClose, onGra
         unit_id: form.scope === 'UNIT' ? form.unitID : null,
         starts_at: form.startsAt ? new Date(form.startsAt).toISOString() : null,
         expires_at: form.expiresAt ? new Date(form.expiresAt).toISOString() : null,
-        idempotency_key: `admin-role-${crypto.randomUUID()}`,
+        idempotency_key: `admin-role-${secureRequestID()}`,
         reason: form.reason.trim(),
       });
       await onGranted();

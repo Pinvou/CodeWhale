@@ -62,11 +62,16 @@ const knowledgeView = fs.readFileSync(
 assert.match(pinvouLogo, /resolveAppAssetUrl\('assets\/brand\/brand-blue\.png'\)/);
 assert.match(knowledgeView, /const fileIconSrc = \(ext, category\) => resolveAppAssetUrl\(/);
 
-const viteConfig = fs.readFileSync(path.join(root, 'vite.config.js'), 'utf8');
+const viteConfig = fs.readFileSync(path.join(root, 'vite.config.mjs'), 'utf8');
 assert.match(
   viteConfig,
   /'shared\/bridge-messages\.js'/,
   'classic shared bridge dependencies must be copied into built UI assets',
+);
+assert.match(
+  viteConfig,
+  /'shared\/chunked-file-upload\.js'/,
+  'the shared chunk uploader must be copied into built UI assets',
 );
 
 console.log('web asset base-path tests passed');

@@ -4,6 +4,7 @@
 
 感谢你帮助改进 Pinvou Agent。我们欢迎问题修复、文档、连接器、Skills、工作流、平台支持和边界清晰的产品改进。
 
+本文是 [CONTRIBUTING.md](CONTRIBUTING.md) 的中文参考版；两者内容冲突时以英文版为准。
 本文只说明贡献流程；项目级实现与质量边界以 [AGENTS.md](AGENTS.md) 为准。
 
 ## 开始之前
@@ -26,6 +27,9 @@ git submodule update --init --recursive
 日常更新而反复 rebase。PR Ready 后由 Merge Queue 在最新 `main` 组合
 提交上验证；仅真实冲突，或队列集成失败需要修改分支时手工 rebase。
 
+解决冲突时保留双方兼容的功能与用户改动；不得在没有向用户说明各选项
+及其影响的情况下，在行为不同的方案之间擅自二选一。
+
 ## DCO
 
 每个人工提交都必须包含有效的 `Signed-off-by`：
@@ -34,21 +38,11 @@ git submodule update --init --recursive
 git commit -s
 ```
 
-修改或 rebase 已有提交时使用 `--signoff`。详情见 [DCO.md](DCO.md)。未签署的人工提交会被 CI 拦截；受信任的 Dependabot 和 GitHub Actions bot 提交除外。
+修改或 rebase 已有提交时使用 `--signoff`。详情见 [Developer Certificate of Origin](https://developercertificate.org/)。未签署的人工提交会被 CI 拦截；受信任的 Dependabot 和 GitHub Actions bot 提交，以及合并提交（多于一个父提交）除外。
 
 ## 改动应放在哪里
 
-Pinvou Agent 使用 [CodeWhale](https://github.com/Pinvou/CodeWhale) 作为 Agent 底座，不在桌面层重复实现底座能力。
-
-| 目标 | 位置 |
-|---|---|
-| 增加领域 Agent 或工具组合 | `SKILL.md` 包 |
-| 连接外部 API | 独立 MCP server 或 connector |
-| 调整模型行为引导 | bundle `instructions.md` |
-| 修改桌面 UI、Tauri 集成或运行时配置 | `pinvou3-app/` |
-| 修复可复用的底座问题 | CodeWhale，上游优先 |
-
-CodeWhale 改动必须遵循 [AGENTS.md](AGENTS.md) 和 [`docs/fork-policy.md`](docs/fork-policy.md) 的 fork 边界，包括同 PR 配套的文档、指纹和测试要求。
+Pinvou Agent 使用 [CodeWhale](https://github.com/Pinvou/CodeWhale) 作为 Agent 底座，不在桌面层重复实现底座能力。扩展落位边界表单点维护在 [AGENTS.md](AGENTS.md) 第 2 节；CodeWhale 改动必须遵循该边界和 [`docs/fork-policy.md`](docs/fork-policy.md)，包括同 PR 配套的文档、指纹和测试要求。
 
 ## Commit 信息
 
@@ -64,6 +58,12 @@ CodeWhale 改动必须遵循 [AGENTS.md](AGENTS.md) 和 [`docs/fork-policy.md`](
 Issue 和 PR 可使用中文或英文。完整提交规则见 [`docs/Git Commit 信息规范文档.md`](docs/Git%20Commit%20信息规范文档.md)。
 
 ## 本地检查
+
+可选：启用本地 commit-msg 钩子，在推送前提前拦截提交信息格式问题：
+
+```bash
+git config core.hooksPath .githooks
+```
 
 按实际影响范围执行检查，常用基线为：
 
@@ -85,20 +85,45 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 PR 使用分层、按路径选择的门禁。Draft 跑 lint、build、确定性逻辑测试和
 适用的 Rust fmt 快检；Ready PR 追加由实际 diff 选定的浏览器 smoke、平台
-Runtime 契约和其他受影响检查。发布链路改动只跑轻量契约测试；完整
+Runtime 契约和其他受影响检查。Ready Rust PR 默认运行快速的格式、lint、
+依赖策略和编译反馈；未知 Rust 路径默认进入完整回归，只有明确登记的孤立叶子
+功能边界走轻量路径。依赖、CodeWhale gitlink、应用命令、平台、权限、凭据、
+Session、远控及其他高爆炸半径路径会在入队前自动追加完整 Linux/Windows Rust 回归。
+其他 Ready Rust PR 可用 `ci:full-rust` 强制追加同款全量回归；Draft 不响应该
+标签。目前轻量 Rust 边界仅限 `feedback`、`personas`、`pet` 模块内部改动；它们的
+注册、应用命令、共享平台接口、Cargo 元数据或任何未分类 Rust 路径仍进入完整回归。
+Official 同仓 `backflow/community-*` 可信回流会继续读取实际 base→head 差异并做内容
+语义分类。只有 `VERSION` 与 `scripts/sync-version.mjs` 管理的全部派生字段机械同步为
+同一个 SemVer 时，才按纯 Release 只运行发布契约；普通跨平台 Rust 回流保留 lint、
+三平台 portability、影响范围内的定向测试和 `main` 累计验证。Windows/平台/路径/
+进程/安装/权限/原生语义、Cargo 依赖或 feature、`build.rs`、工具链、CodeWhale
+gitlink、`tauri.conf.json` 非版本字段以及门禁自身（`pr-check.yml`、
+`ci-rust-policy.py`）变化仍运行完整 Windows 门禁。来源 marker、head/base 仓库或
+非 `main` base 不可信时保持普通 PR 的既有路由；Merge Group 成员链无法完整证明、
+API/diff 失败、版本内容异常、Release 混合改动或未知策略状态时 fail closed 强制
+完整 Windows，`required-gate` 不接受此状态下的 skipped。`ci:full-rust` 仍会强制
+普通完整路由。
+发布链路改动只跑轻量契约测试；完整
 deb、dmg、nsis 安装包仅在 `VERSION` 改动进入 `main` 后，或人工明确触发
 `workflow_dispatch` 时构建。
 
 Merge Queue 在入队 PR 与最新 `main` 的实际组合树上运行适用门禁：Rust 改动
-执行完整 Rust 测试，前端改动执行完整浏览器 smoke。仅 Ready 且高风险的
-Rust PR 需要提前完整反馈时添加 `ci:full-rust`；该标签不会在 Draft 上启动
-完整 Rust 测试。评审阶段只查看 required checks：
+运行格式、Clippy、编译和依赖策略检查；高爆炸半径 Rust 改动还会在组合树上执行
+完整 Linux 行为回归，Windows 已在 Ready PR 验证，不在队列重复。前端改动按
+merge group 的真实 base/head diff 选择浏览器 smoke，共享、未知或测试设施路径
+fail-closed 回退全套。每个保留下来的 `main` push 都执行 Linux 累计编译验证
+（全量测试由 Merge Queue 在同一组合树上完成，push 不重复执行）与 Windows
+原生检查，并持续写暖缓存。Windows required job 将全目标 metadata check 与链接后的
+原生回归拆成两个并行 matrix leg；两条腿共用同一高风险/main 路由且必须全部通过，覆盖、
+缓存、计时与回滚规则见 [`docs/windows-rust-ci.md`](docs/windows-rust-ci.md)。main 回归
+变红后应停止继续入队，直至修复或回滚。
+评审阶段只查看 required checks：
 
 ```bash
 gh pr checks <编号> --required
 ```
 
-不要等待非 required 的合入后平台构建或发布构建。无真实冲突的独立 Ready PR
+main 绿色时不要等待非 required 的合入后平台构建或发布构建。无真实冲突的独立 Ready PR
 可直接入队，由队列验证新鲜度。每个 merge group 最多放两个低风险、相互独立的
 PR；依赖锁、CI、发布、权限、Session、CodeWhale gitlink 及其他高风险改动单独入队。
 

@@ -2,11 +2,12 @@ import { lstat, readdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { inTransaction } from "./db.js";
 import { storagePath } from "./attachment-service.js";
+import { avatarStoragePath } from "./avatar-storage.js";
 
 const UUID_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const AVATAR_SHARD_PATTERN = /^[0-9a-f]{2}$/;
 
-async function removeStaleTemporaryFiles(config) {
-  const temporaryDir = resolve(config.attachmentDir, ".tmp");
+async function removeStaleTemporaryFilesAt(temporaryDir, cutoff) {
   let names;
   try {
     names = await readdir(temporaryDir);
@@ -14,7 +15,6 @@ async function removeStaleTemporaryFiles(config) {
     if (error?.code === "ENOENT") return 0;
     throw error;
   }
-  const cutoff = Date.now() - config.orphanAttachmentHours * 60 * 60 * 1000;
   let removed = 0;
   for (const name of names) {
     if (!UUID_FILE_PATTERN.test(name)) continue;
@@ -31,6 +31,73 @@ async function removeStaleTemporaryFiles(config) {
     removed += 1;
   }
   return removed;
+}
+
+async function removeStaleTemporaryFiles(config) {
+  const cutoff = Date.now() - config.orphanAttachmentHours * 60 * 60 * 1000;
+  return removeStaleTemporaryFilesAt(resolve(config.attachmentDir, ".tmp"), cutoff);
+}
+
+async function removeAvatarOrphans(pool, config) {
+  const root = resolve(config.attachmentDir, "avatars");
+  const temporary = await removeStaleTemporaryFilesAt(
+    resolve(root, ".tmp"),
+    Date.now() - config.orphanAttachmentHours * 60 * 60 * 1000,
+  );
+  let shards;
+  try {
+    shards = await readdir(root, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return { temporary, orphaned: 0 };
+    throw error;
+  }
+
+  const cutoff = Date.now() - config.orphanAttachmentHours * 60 * 60 * 1000;
+  let candidates = [];
+  let orphaned = 0;
+  async function flushCandidates() {
+    if (candidates.length === 0) return;
+    const referenced = await pool.query(
+      `SELECT storage_key FROM principal_avatars WHERE storage_key = ANY($1::text[])
+        UNION
+       SELECT storage_key FROM principal_avatar_variants WHERE storage_key = ANY($1::text[])`,
+      [candidates.map(candidate => candidate.storageKey)],
+    );
+    const referencedKeys = new Set(referenced.rows.map(row => row.storage_key));
+    for (const candidate of candidates) {
+      if (orphaned >= 500) break;
+      if (!referencedKeys.has(candidate.storageKey)) {
+        await rm(candidate.path, { force: true });
+        orphaned += 1;
+      }
+    }
+    candidates = [];
+  }
+
+  for (const shard of shards.sort((left, right) => left.name.localeCompare(right.name))) {
+    if (orphaned >= 500) break;
+    if (!shard.isDirectory() || !AVATAR_SHARD_PATTERN.test(shard.name)) continue;
+    const shardPath = resolve(root, shard.name);
+    const names = (await readdir(shardPath)).sort();
+    for (const name of names) {
+      if (!UUID_FILE_PATTERN.test(name)) continue;
+      const storageKey = `${shard.name}/${name}`;
+      const path = avatarStoragePath(config, storageKey);
+      let metadata;
+      try {
+        metadata = await lstat(path);
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
+      if ((!metadata.isFile() && !metadata.isSymbolicLink()) || metadata.mtimeMs >= cutoff) continue;
+      candidates.push({ storageKey, path });
+      if (candidates.length >= 500) await flushCandidates();
+      if (orphaned >= 500) break;
+    }
+  }
+  if (orphaned < 500) await flushCandidates();
+  return { temporary, orphaned };
 }
 
 async function removeOrphan(pool, config, candidate) {
@@ -68,6 +135,7 @@ export async function expireClosed(pool, config, candidate, removeFile = rm) {
 
 export async function cleanupAttachments(pool, config) {
   const temporary = await removeStaleTemporaryFiles(config);
+  const avatars = await removeAvatarOrphans(pool, config);
   const orphanCandidates = await pool.query(
     `SELECT id, storage_key FROM attachments
       WHERE bound_at IS NULL AND deleted_at IS NULL
@@ -97,5 +165,13 @@ export async function cleanupAttachments(pool, config) {
   for (const candidate of closedCandidates.rows) {
     if (await expireClosed(pool, config, candidate)) expired += 1;
   }
-  return { temporary, orphaned, expired };
+  return {
+    temporary,
+    orphaned,
+    expired,
+    avatarTemporary: avatars.temporary,
+    avatarOrphaned: avatars.orphaned,
+  };
 }
+
+export { removeAvatarOrphans, removeStaleTemporaryFilesAt };

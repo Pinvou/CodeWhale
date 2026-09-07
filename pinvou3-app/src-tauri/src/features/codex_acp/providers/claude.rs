@@ -11,9 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::{atomic_write, AgentConfigWriter, EffectiveConfig, EffectiveEntry, ProviderTarget};
+use super::{AgentConfigWriter, EffectiveConfig, EffectiveEntry, ProviderTarget, atomic_write};
 
 const ENV_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 const ENV_AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
@@ -328,16 +328,20 @@ mod tests {
         writer.revert_to_official(None).unwrap();
         let config: Value =
             serde_json::from_str(&fs::read_to_string(dir.join("settings.json")).unwrap()).unwrap();
-        assert!(config
-            .get("env")
-            .unwrap()
-            .get("ANTHROPIC_BASE_URL")
-            .is_none());
-        assert!(config
-            .get("env")
-            .unwrap()
-            .get("ANTHROPIC_AUTH_TOKEN")
-            .is_none());
+        assert!(
+            config
+                .get("env")
+                .unwrap()
+                .get("ANTHROPIC_BASE_URL")
+                .is_none()
+        );
+        assert!(
+            config
+                .get("env")
+                .unwrap()
+                .get("ANTHROPIC_AUTH_TOKEN")
+                .is_none()
+        );
         assert!(config.get("env").unwrap().get("ANTHROPIC_MODEL").is_none());
         // 其他 env 键与顶层保留
         assert_eq!(config["env"]["CUSTOM"], "v");
@@ -347,44 +351,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn revert_noop_without_managed_keys_skips_write() {
-        let dir = tmp_dir();
-        let writer = ClaudeConfigWriter::new(&dir);
-        fs::write(dir.join("settings.json"), r#"{"model":"x"}"#).unwrap();
-        writer.revert_to_official(None).unwrap();
-        assert!(!dir.join("settings.json.pinvou3-bak").exists());
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn refuses_to_overwrite_unparseable_file() {
-        let dir = tmp_dir();
-        let writer = ClaudeConfigWriter::new(&dir);
-        let broken = "{not json";
-        fs::write(dir.join("settings.json"), broken).unwrap();
-        assert!(writer.apply(&target("pv-aaaaaaaaaaaa")).is_err());
-        // 字节不变
-        assert_eq!(
-            fs::read_to_string(dir.join("settings.json")).unwrap(),
-            broken
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn backup_created_once_on_first_write() {
-        let dir = tmp_dir();
-        let writer = ClaudeConfigWriter::new(&dir);
-        fs::write(dir.join("settings.json"), r#"{"model":"x"}"#).unwrap();
-        writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
-        writer.apply(&target("pv-bbbbbbbbbbbb")).unwrap();
-        let backup = dir.join("settings.json.pinvou3-bak");
-        assert!(backup.exists());
-        // 备份保留初始状态且只写一次
-        assert_eq!(fs::read_to_string(backup).unwrap(), r#"{"model":"x"}"#);
-        let _ = fs::remove_dir_all(&dir);
-    }
+    // The shared contracts (revert writes no backup / unparseable files refuse
+    // overwrite / backup created once) were hoisted into the parameterized
+    // providers::tests::shared_writer_contract_matrix; only Claude-specific
+    // behavior stays here.
 
     #[test]
     fn effective_detects_relay() {
@@ -421,7 +391,7 @@ mod tests {
         let writer = ClaudeConfigWriter::new(&dir);
         writer.apply(&target("pv-aaaaaaaaaaaa")).unwrap();
         let effective = writer.effective().unwrap();
-        assert_eq!(effective.relay_active, true);
+        assert!(effective.relay_active);
         // base_url 与 model 展示；AUTH_TOKEN（凭据）绝不出现
         let keys: Vec<&str> = effective
             .entries

@@ -6,7 +6,7 @@ const ARTIFACT_ROLES = new Set(["input", "intermediate", "final", "evidence"]);
 function defaultArtifactRole(kind) {
   if (kind === "assign" || kind === "request_changes") return "input";
   if (kind === "final_deliver" || kind === "accept") return "final";
-  if (kind === "note" || kind === "cancel") return "evidence";
+  if (kind === "note" || kind === "cancel" || kind.endsWith("_transfer")) return "evidence";
   return "intermediate";
 }
 
@@ -40,10 +40,20 @@ export function normalizeDelivery(value, kind) {
   if (value === undefined || value === null) {
     return { schema_version: 1, artifact_role: defaultArtifactRole(kind), expected_next: "", open_questions: "", git_references: [] };
   }
-  exactKeys(value, ["schema_version", "artifact_role", "expected_next", "open_questions", "git_references"]);
+  exactKeys(
+    value,
+    ["schema_version", "artifact_role", "expected_next", "open_questions", "git_references"],
+    ["subtype"],
+  );
   if (value.schema_version !== 1) throw new AppError(400, "invalid_request", "delivery.schema_version must be 1.");
   const artifactRole = text(value.artifact_role, "delivery.artifact_role", { minimum: 1, maximum: 32 });
   if (!ARTIFACT_ROLES.has(artifactRole)) throw new AppError(400, "invalid_request", "delivery.artifact_role is invalid.");
+  const subtype = value.subtype === undefined
+    ? ""
+    : text(value.subtype, "delivery.subtype", { maximum: 32 }).trim();
+  if (!new Set(["", "progress"]).has(subtype) || (subtype === "progress" && kind !== "note")) {
+    throw new AppError(400, "invalid_request", "delivery.subtype is invalid for this action.");
+  }
   if (!Array.isArray(value.git_references) || value.git_references.length > 5) {
     throw new AppError(400, "invalid_request", "delivery.git_references must contain at most 5 items.");
   }
@@ -67,6 +77,7 @@ export function normalizeDelivery(value, kind) {
   return {
     schema_version: 1,
     artifact_role: artifactRole,
+    ...(subtype ? { subtype } : {}),
     expected_next: text(value.expected_next, "delivery.expected_next", { maximum: 2_000 }).trim(),
     open_questions: text(value.open_questions, "delivery.open_questions", { maximum: 2_000 }).trim(),
     git_references: gitReferences,

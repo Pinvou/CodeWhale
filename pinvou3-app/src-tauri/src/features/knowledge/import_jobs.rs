@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 const FAILED_FILES_PREVIEW_LIMIT: usize = 20;
@@ -483,7 +483,7 @@ fn read_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, i64, Strin
 
 pub(super) fn unique_existing_files(files: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     let mut files: Vec<_> = files.into_iter().filter(|p| p.is_file()).collect();
-    files.sort_by(|a, b| path_key(a).cmp(&path_key(b)));
+    files.sort_by_key(|a| path_key(a));
     files.dedup_by(|a, b| path_key(a) == path_key(b));
     files
 }

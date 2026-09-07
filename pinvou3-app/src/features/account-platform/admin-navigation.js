@@ -119,7 +119,7 @@ export function readAdminModelTokenQuery(source, locationLike = globalThis.locat
   const result = {};
   for (const [key, parameter] of Object.entries(parameters)) result[key] = String(search.get(parameter) || '').trim();
   for (const key of ['source_missing', 'published', 'sla_overdue']) {
-    if (Object.hasOwn(result, key) && result[key] !== 'true' && result[key] !== 'false') result[key] = '';
+    if (Object.prototype.hasOwnProperty.call(result, key) && result[key] !== 'true' && result[key] !== 'false') result[key] = '';
   }
   return result;
 }
@@ -145,7 +145,7 @@ export function rememberAdminModelTokenNextCursor(history, nextCursor) {
 
 export function previousAdminModelTokenCursor(history) {
   const current = String(history?.currentCursor || '');
-  if (!current || !Object.hasOwn(history?.previousByCursor || {}, current)) return { available: false, cursor: '' };
+  if (!current || !Object.prototype.hasOwnProperty.call(history?.previousByCursor || {}, current)) return { available: false, cursor: '' };
   return { available: true, cursor: history.previousByCursor[current] || '' };
 }
 
@@ -423,7 +423,7 @@ const financeDetailFilterValues = Object.freeze({
 export const financePaginatedTabs = Object.freeze(Object.keys(financeQueryParameters));
 
 export function isAdminFinancePaginatedTab(tab) {
-  return Object.hasOwn(financeQueryParameters, tab);
+  return Object.prototype.hasOwnProperty.call(financeQueryParameters, tab);
 }
 
 export function readAdminFinanceTab(section, locationLike = globalThis.location) {
@@ -443,12 +443,12 @@ export function normalizeAdminFinanceQuery(tab, input = {}) {
     if (!allowed.has(normalized[key])) normalized[key] = defaults[key];
   }
   for (const key of ['created_from', 'created_to', 'entered_from', 'entered_to', 'next_review_before']) {
-    if (Object.hasOwn(normalized, key)) {
+    if (Object.prototype.hasOwnProperty.call(normalized, key)) {
       if (normalized[key] && (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(normalized[key]) || Number.isNaN(new Date(normalized[key]).getTime()))) normalized[key] = '';
     }
   }
   for (const key of ['business_date_from', 'business_date_to']) {
-    if (Object.hasOwn(normalized, key) && normalized[key] && !/^\d{4}-\d{2}-\d{2}$/.test(normalized[key])) normalized[key] = '';
+    if (Object.prototype.hasOwnProperty.call(normalized, key) && normalized[key] && !/^\d{4}-\d{2}-\d{2}$/.test(normalized[key])) normalized[key] = '';
   }
   return normalized;
 }

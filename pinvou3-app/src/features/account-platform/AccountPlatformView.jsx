@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
@@ -10,7 +11,7 @@ import { localeNames, supportedLocales } from '../../shared/supported-locales.js
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
-const idempotencyKey = (prefix) => `${prefix}-${globalThis.crypto.randomUUID()}`;
+const idempotencyKey = (prefix) => `${prefix}-${secureRequestID()}`;
 
 function Field({ label, children }) {
   return (
@@ -1929,7 +1930,9 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   );
 }
 
-function Wallet({ copy, language, products, balance, packages, orders = [], billingUnavailable, detailsUnavailable, order, qrData, busy, canRecharge = true, onRecharge, onActivateRecharge, embedded = false }) {
+const EMPTY_WALLET_ORDERS = Object.freeze([]);
+
+function Wallet({ copy, language, products, balance, packages, orders = EMPTY_WALLET_ORDERS, billingUnavailable, detailsUnavailable, order, qrData, busy, canRecharge = true, onRecharge, onActivateRecharge, embedded = false }) {
   const [productId, setProductIdState] = useState('');
   const [channel, setChannel] = useState('');
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);

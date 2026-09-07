@@ -1,9 +1,9 @@
 //! 专家面具池（卡牌池）—— **Side B: agency-agents-zh 全正文版 + 用户自创卡**。
 //!
 //! 三个数据源（[`all_summaries`] / [`get`] 合并）:
-//! 1. **agency 内嵌**（`source="builtin"`）: jnMetaCode/agency-agents-zh(MIT, 201 个),
+//! 1. **agency 内嵌**（`source="builtin"`）: jnMetaCode/agency-agents-zh(MIT, 268 个),
 //!    每个带 ~6K 字完整人设正文。编译期 `include_str!`，OnceLock 缓存。
-//! 2. **pinvou3 内置卡**（`source="builtin"`）: 目前只有「卡牌制造专家」(见 [`builtin_extra`])。
+//! 2. **pinvou3 内置卡**（`source="builtin"`）: 目前只有「卡牌制造专家」(见 `builtin_extra`)。
 //! 3. **用户自创卡**（`source="user"`）: 扫 `~/.pinvou3/user/personas/<id>.json`,
 //!    可增删改，永不被 bundle 覆写。改动后 [`reload_user`] 刷新内存缓存。
 //!
@@ -13,6 +13,7 @@
 //! License: agency-agents.json 数据 MIT，见 resources/common/bundle/personas/AGENCY-AGENTS-LICENSE。
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,6 +85,8 @@ struct PersonaPoolFile {
 static EMBEDDED: OnceLock<Vec<PersonaCard>> = OnceLock::new();
 // ── 用户自创卡: RwLock 缓存,create/update/delete 后 reload_user 刷新 ──
 static USER: OnceLock<RwLock<Vec<PersonaCard>>> = OnceLock::new();
+/// 用户专家池内存版本；多智能体全局名册以它做增量缓存失效。
+static USER_REVISION: AtomicU64 = AtomicU64::new(0);
 
 fn embedded() -> &'static [PersonaCard] {
     EMBEDDED.get_or_init(|| {
@@ -131,7 +134,23 @@ fn load_user_cards() -> Vec<PersonaCard> {
 
 /// 重新从磁盘加载用户卡（create/update/delete 后调，让 list/get 立即看到）。
 pub fn reload_user() {
-    *user_lock().write().expect("user persona lock poisoned") = load_user_cards();
+    // The card pool is replaced wholesale with no partial writes; a panic while
+    // holding the lock must not take down sessions: keep the repo-wide lock
+    // poisoning recovery convention.
+    *user_lock()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = load_user_cards();
+    // 卡池内容先发布，再推进版本；Acquire 读取到新版本时必然能看到新卡。
+    USER_REVISION.fetch_add(1, Ordering::Release);
+}
+
+/// 当前可执行专家池版本。内嵌卡在进程内不可变，因此只需跟踪用户卡变更。
+#[must_use]
+pub fn executable_revision() -> u64 {
+    // 确保 USER 首次从磁盘初始化发生在版本读取之前；否则第一次 capture 可能
+    // 在旧缓存与惰性初始化之间缺少明确的发布点。
+    let _ = user_lock();
+    USER_REVISION.load(Ordering::Acquire)
 }
 
 /// 全部卡的轻量摘要(list_personas 用)。内嵌 + 用户,user 在后。
@@ -140,28 +159,32 @@ pub fn all_summaries() -> Vec<PersonaSummary> {
     out.extend(
         user_lock()
             .read()
-            .expect("user lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .map(|c| c.summary()),
     );
     out
 }
 
-/// 可承担工具任务的专家卡轻量摘要。纯对话元卡仍展示在专家池，但不能作为子智能体 profile。
-/// 多智能体匹配走此接口，避免每轮仅为名称/简介评分就克隆约 1.2MB 的全部正文。
-pub fn executable_summaries() -> Vec<PersonaSummary> {
-    let mut out: Vec<PersonaSummary> = embedded()
+/// 可承担工具任务的专家卡完整快照。
+///
+/// 多智能体名册与当轮候选提醒必须从同一次读取生成，不能先取摘要、再逐张
+/// [`get`]：用户在两次读取之间编辑或删除卡片时，会让模型看到的 profile id
+/// 与实际可派名册错位。这里一次持有用户卡读锁并克隆完整集合，调用方随后可
+/// 在不持锁的情况下构造底座配置和轻量候选索引。
+pub fn executable_cards() -> Vec<PersonaCard> {
+    let mut out: Vec<PersonaCard> = embedded()
         .iter()
         .filter(|card| !card.conversational_only)
-        .map(PersonaCard::summary)
+        .cloned()
         .collect();
     out.extend(
         user_lock()
             .read()
-            .expect("user lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .filter(|card| !card.conversational_only)
-            .map(PersonaCard::summary),
+            .cloned(),
     );
     out
 }
@@ -173,7 +196,7 @@ pub fn get(id: &str) -> Option<PersonaCard> {
     }
     user_lock()
         .read()
-        .expect("user lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .iter()
         .find(|c| c.id == id)
         .cloned()
@@ -199,11 +222,7 @@ fn slugify(name: &str) -> String {
         }
     }
     let s = s.trim_matches('-').to_string();
-    if s.is_empty() {
-        "card".to_string()
-    } else {
-        s
-    }
+    if s.is_empty() { "card".to_string() } else { s }
 }
 
 fn gen_user_id(name: &str) -> String {
@@ -274,7 +293,7 @@ pub fn delete_user_persona(id: &str) -> Result<(), String> {
 
 // ── 加持注入 ───────────────────────────────────────────────────────
 
-/// **一次性**注入的完整人设(加持后首条消息 prepend 一次,仿 skill pending_instruction)。
+/// **一次性**注入完整人设（加持后的首条消息 prepend 一次）。
 pub fn equip_body_injection(card: &PersonaCard) -> String {
     format!(
         "【你被加持了一张专家面具:{name}】\n\
@@ -335,7 +354,7 @@ const CARD_CREATOR_BODY: &str = r##"# 卡牌制造专家
    - **关键规则 / 质量标准**:必须遵守什么、什么算合格
    - **典型交付物**:产出什么、什么格式
    - **沟通风格**:怎么跟用户说话
-3. **选部门 dept**(英文 code):engineering / design / product / marketing / finance / sales / testing / project-management / paid-media / support / academic / game-development / spatial-computing / supply-chain / hr / legal / specialized。挑最贴的一个。
+3. **选部门 dept**(英文 code):engineering / design / product / marketing / finance / sales / testing / project-management / paid-media / support / academic / game-development / spatial-computing / gis / security / supply-chain / hr / legal / specialized。挑最贴的一个。
 4. **产出成品**:把设计好的卡以一个 `persona-card` 代码块输出,里面是严格 JSON:
 
 ```persona-card
@@ -413,23 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn executable_summaries_exclude_conversational_meta_cards() {
-        let summaries = executable_summaries();
-        assert!(
-            summaries
-                .iter()
-                .any(|card| card.id == "engineering-frontend-developer"),
-            "执行型内置专家应进入轻量候选源"
-        );
-        assert!(
-            summaries
-                .iter()
-                .all(|card| card.id != "pinvou-card-creator"),
-            "纯对话卡牌制造器不得进入子智能体候选源"
-        );
-    }
-
-    #[test]
     fn get_finds_builtin_creator() {
         let c = get("pinvou-card-creator").expect("应能查到内置卡");
         assert_eq!(c.name, "卡牌制造专家");
@@ -474,7 +476,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        std::env::set_var("PINVOU3_HOME", &tmp);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let mk = |id: &str, name: &str| PersonaCard {
             id: id.to_string(),
@@ -515,8 +518,10 @@ mod tests {
 
         // cleanup
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         reload_user();
         let _ = std::fs::remove_dir_all(&tmp);

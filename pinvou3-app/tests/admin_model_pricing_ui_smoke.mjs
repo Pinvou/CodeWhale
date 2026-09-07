@@ -179,7 +179,8 @@ try {
   assert.equal(await page.$('.adm-pricing-action'), null, 'an aborted continuation lookup must not open a transition dialog');
 
   await page.evaluate((unknown) => {
-    sessionStorage.setItem('pinvou.admin.pricing-unknown-mutation', JSON.stringify(unknown));
+    // eslint-disable-next-line n/no-unsupported-features/node-builtins -- This callback runs in Chromium, not in Node.
+    window.sessionStorage.setItem('pinvou.admin.pricing-unknown-mutation', JSON.stringify(unknown));
   }, { phase: 'DISPATCHED', kind: 'DRAFT_CREATE', input: { scope_type: 'MODEL', scope_id: modelID, protocol_code: 'CHAT', formula_version_id: formulaID, credit_unit: 'MICROCREDIT' }, beforeIDs: [priceID] });
   await page.evaluate(() => fetch('/__test__/configure?gate=1&manage=1&delay='));
   await page.goto(`${origin}/admin.html?section=models&model_id=${modelID}&model_detail_tab=pricing&model_price_manage=1`, { waitUntil: 'networkidle0' });
@@ -191,7 +192,8 @@ try {
   await page.waitForFunction(() => fetch('/__test__/state').then((response) => response.json()).then((state) => state.recoveryAborted >= 1));
   assert.equal(await page.$('.adm-model-pricing-editor'), null);
   assert.equal(calls.writes, 0, 'aborted transient reads must never dispatch a mutation');
-  await page.evaluate(() => sessionStorage.removeItem('pinvou.admin.pricing-unknown-mutation'));
+  // eslint-disable-next-line n/no-unsupported-features/node-builtins -- This callback runs in Chromium, not in Node.
+  await page.evaluate(() => window.sessionStorage.removeItem('pinvou.admin.pricing-unknown-mutation'));
 
   await page.evaluate(() => fetch('/__test__/configure?projection=forbidden'));
   await page.evaluate(() => document.querySelector('#model-pricing-heading').closest('.adm-source-head').querySelector('button').click());

@@ -20,11 +20,31 @@ class CommunityBackflowSkillTests(unittest.TestCase):
 
     def test_merge_queue_requires_current_head_gates(self):
         self.assertIn(
-            "gh pr merge --auto --squash --delete-branch",
+            "node scripts/community-backflow.mjs enqueue --repo Pinvou/pinvou3 --pull <official-pr-number> --head <current-head-sha>",
             self.skill,
         )
         self.assertIn("当前 head SHA", self.skill)
         self.assertIn("gh pr checks --required", self.skill)
+
+    def test_event_automation_is_opt_in_and_defers_release_cleanup(self):
+        self.assertIn("COMMUNITY_BACKFLOW_AUTOMATION_ENABLED", self.skill)
+        self.assertIn("workflow_run", self.skill)
+        self.assertIn("pull_request_target.closed", self.skill)
+        self.assertIn("不 checkout PR head", self.skill)
+        self.assertIn("deferred-release", self.skill)
+        self.assertIn("不删除分支、不修改标签、不关闭", self.skill)
+
+    def test_event_automation_documents_concurrency_guards(self):
+        self.assertIn("expectedHeadOid", self.skill)
+        self.assertIn("mergeQueue.configuration.mergeMethod", self.skill)
+        self.assertIn("`MERGE`", self.skill)
+        self.assertIn("`REBASE`", self.skill)
+        self.assertIn("`VERSION`", self.skill)
+        self.assertIn("ref", self.skill)
+        self.assertIn("backflow:synced", self.skill)
+        self.assertIn("open+synced", self.skill)
+        self.assertIn("GET→DELETE", self.skill)
+        self.assertIn("不得删除远端分支", self.skill)
 
     def test_cross_platform_fast_path_and_dependency_waves_are_required(self):
         self.assertIn("node scripts/community-backflow.mjs plan", self.skill)
@@ -55,12 +75,16 @@ class CommunityBackflowSkillTests(unittest.TestCase):
         self.assertIn("run ID/URL", self.skill)
         self.assertIn("不发布 OTA", self.skill)
 
-    def test_backflow_pr_defers_full_rust_test_to_latest_main(self):
+    def test_backflow_rust_policy_is_semantic_and_fail_closed(self):
         self.assertIn(
-            "Official 同仓 `backflow/community-*` PR 不重复运行完整 `rust-test`",
+            "普通跨平台 Rust 可信回流不重复运行完整 `rust-test` 或完整 Windows Rust",
             self.skill,
         )
-        self.assertIn("外部 fork 的同名分支不适用此例外", self.skill)
+        self.assertIn("base→head 实际 diff", self.skill)
+        self.assertIn("派生版本字段机械一致变化", self.skill)
+        self.assertIn("API/diff 失败或 Merge Group", self.skill)
+        self.assertIn("required-gate` 不得接受 skipped", self.skill)
+        self.assertIn("外部 fork 的同名分支", self.skill)
         self.assertIn("只保留最新 main 的累计状态验证", self.skill)
         self.assertIn("不等待合入后的 main Rust 测试完成", self.skill)
 

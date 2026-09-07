@@ -20,17 +20,24 @@ pub(crate) fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// Validate and normalize a client-provided whole-file sha256 digest (64 hex
+/// characters; surrounding whitespace and letter case are tolerated). The
+/// desktop staging-file check and the web upload-buffer check share this one
+/// format rule so a rule change happens in one place. Returns None for an
+/// invalid format; callers provide their own error copy.
+pub(crate) fn normalize_sha256_hex(expected: &str) -> Option<String> {
+    let expected = expected.trim().to_ascii_lowercase();
+    (expected.len() == 64 && expected.bytes().all(|b| b.is_ascii_hexdigit())).then_some(expected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn empty() {
-        assert_eq!(hex_lower(&[]), "");
-    }
-
-    #[test]
     fn known_vectors() {
+        // 空输入 → 空串(原 empty 测试)。
+        assert_eq!(hex_lower(&[]), "");
         assert_eq!(hex_lower(&[0x00]), "00");
         assert_eq!(hex_lower(&[0x0f, 0x10, 0xff]), "0f10ff");
         // SHA-256("") = e3b0c442...(前 16 字节)
@@ -53,19 +60,32 @@ mod tests {
     }
 
     #[test]
-    fn output_length_is_two_chars_per_byte() {
-        // 每个字节固定编码为两个十六进制字符。
-        // String 只保证容量不小于预分配值，不能把“容量恰好相等”当成跨平台契约。
-        let s = hex_lower(&[0xab; 32]);
-        assert_eq!(s.len(), 64);
+    fn output_length_and_lowercase() {
+        // 每字节恰好两个十六进制字符(原 output_length_is_two_chars_per_byte;
+        // String 只保证容量不小于预分配值,不能把"容量恰好相等"当跨平台契约)。
+        assert_eq!(hex_lower(&[0xab; 32]).len(), 64);
+        // 输出只含小写 hex 字符(原 lowercase_only)。
+        let s = hex_lower(&[0xfa, 0xbc]);
+        assert_eq!(s, "fabc");
+        assert!(
+            s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
     }
 
     #[test]
-    fn lowercase_only() {
-        let s = hex_lower(&[0xfa, 0xbc]);
-        assert_eq!(s, "fabc");
-        assert!(s
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    fn sha256_digest_normalization() {
+        // Valid: 64 hex characters; surrounding whitespace trimmed, uppercase
+        // normalized to lowercase.
+        let digest = "a".repeat(63) + "B";
+        assert_eq!(
+            normalize_sha256_hex(&format!(" {digest} ")),
+            Some("a".repeat(63) + "b")
+        );
+        // Wrong length or non-hex characters → None.
+        assert_eq!(normalize_sha256_hex(&"a".repeat(63)), None);
+        assert_eq!(normalize_sha256_hex(&"g".repeat(64)), None);
+        assert_eq!(normalize_sha256_hex("not-hex"), None);
+        assert_eq!(normalize_sha256_hex(""), None);
     }
 }

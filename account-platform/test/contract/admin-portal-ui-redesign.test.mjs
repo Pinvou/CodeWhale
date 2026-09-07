@@ -175,7 +175,8 @@ test('admin portal follows the approved HTML visual system and business-page com
   assert.ok(builtCSS.includes('#3159e8'));
   assert.ok(builtCSS.includes('--adm-sidebar:272px'));
   assert.ok(builtJS.includes('adm-page-head'));
-  assert.ok(builtCSS.includes('@media (width<=760px)'));
+  // Main's Safari 14 build target retains the compatible max-width syntax.
+  assert.match(builtCSS, /@media\s*\(max-width:\s*760px\)/);
   assert.ok(builtCSS.includes('@media (pointer:coarse)'));
   assert.ok(builtCSS.includes('prefers-reduced-motion:reduce'));
   for (const state of ['loading', 'error', 'denied', 'guest']) assert.ok(view.includes(`'${state}'`) || view.includes(`"${state}"`));

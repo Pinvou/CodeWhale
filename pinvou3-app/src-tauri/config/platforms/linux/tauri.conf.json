@@ -3,15 +3,20 @@
   "bundle": {
     "targets": ["deb"],
     "resources": {
-      "resources/platforms/linux/asr/": "runtime/asr",
-      "resources/platforms/linux/codex-bridge/": "runtime/codex-bridge"
+      "resources/platforms/linux/asr/pinvou3-asr-shim.py": "runtime/asr/pinvou3-asr-shim.py",
+      "resources/platforms/linux/asr/SenseVoice.LICENSE": "runtime/asr/SenseVoice.LICENSE",
+      "resources/platforms/linux/codex-bridge/": "runtime/codex-bridge",
+      "resources/platforms/linux/knowledge-host/": "runtime/knowledge-host"
     },
     "linux": {
       "deb": {
         "desktopTemplate": "packaging/linux/deb/pinvou3.desktop",
         "postInstallScript": "packaging/linux/deb/scripts/postinst.sh",
         "preRemoveScript": "packaging/linux/deb/scripts/prerm.sh",
-        "depends": [],
+        "depends": [
+          "libwebkit2gtk-4.1-0 (>= 2.40)",
+          "webkit2gtk-driver"
+        ],
         "recommends": [
           "poppler-utils",
           "tesseract-ocr",

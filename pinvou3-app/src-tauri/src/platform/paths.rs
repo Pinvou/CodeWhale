@@ -29,6 +29,11 @@ pub fn settings_path() -> PathBuf {
     pinvou3_home().join("settings.json")
 }
 
+/// `~/.pinvou3/eval/` —— 产品模式与官方兼容模式的评测报告目录。
+pub fn eval_reports_dir() -> PathBuf {
+    pinvou3_home().join("eval")
+}
+
 /// `~/.pinvou3/logs/memory-review.log` —— 对话记忆复盘诊断日志。
 /// 只记录阶段、分类和计数，不记录对话原文或记忆正文。
 pub fn memory_review_log() -> PathBuf {
@@ -44,10 +49,11 @@ pub fn bundle_instructions() -> PathBuf {
 pub fn bundle_skills_dir() -> PathBuf {
     bundle_root().join("skills")
 }
-/// 工作流(Harness Loop)定义目录,跟 `skills/` 并列。
-/// skill = LLM 挂载的标准附件(pinvou-review-*);workflow = harness 读、LLM 不挂载(h3c-ppt)。
-pub fn bundle_workflow_dir() -> PathBuf {
-    bundle_root().join("workflow")
+/// `~/.pinvou3/bundles/` —— 按包聚合的包目录根（marketplace-unification §4：
+/// 一个包 = 一个目录 = 一个属主）。市场技能落 `bundles/<pkg-id>/skills/<name>/`；
+/// 内置释放技能（visual-design 等，非市场包）仍住 `bundle/skills/`。
+pub fn bundles_root() -> PathBuf {
+    pinvou3_home().join("bundles")
 }
 pub fn bundle_mcp_json() -> PathBuf {
     bundle_root().join("mcp.json")
@@ -56,15 +62,49 @@ pub fn bundle_mcp_json() -> PathBuf {
 pub fn bundle_mcp_servers_dir() -> PathBuf {
     bundle_root().join("mcp-servers")
 }
+
 pub fn managed_connectors_dir() -> PathBuf {
     pinvou3_home().join("connectors")
 }
+/// 旧版（无版本）CLI 布局：`connectors/<platform>/bin/`。Phase 2 第四刀起新装
+/// 落 `assets/cli/<name>/<version>/`，本入口保留给存量迁移与 spawn 回退解析。
 pub fn managed_connector_bin_dir() -> Option<PathBuf> {
     managed_connector_bin_dir_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 pub fn managed_connector_bin_dir_for(os: &str, arch: &str) -> Option<PathBuf> {
     connector_platform_dir(os, arch)
         .map(|platform| managed_connectors_dir().join(platform).join("bin"))
+}
+
+/// `~/.pinvou3/assets/` —— 版本化外部资产库（marketplace-unification §4：
+/// 包只引用不拥有，生命周期由 lock 表驱动）。
+pub fn assets_root() -> PathBuf {
+    pinvou3_home().join("assets")
+}
+
+/// `~/.pinvou3/assets/cli/<name>/<version>/` —— CLI 二进制按 lock 表钉住的版本落位，
+/// 升级 = 新版本目录就位，不再原地覆盖。
+pub fn assets_cli_dir(name: &str, version: &str) -> PathBuf {
+    assets_root().join("cli").join(name).join(version)
+}
+
+/// `~/.pinvou3/assets/.staging/` —— 下载/解包暂存（收编退役的 `cache/connectors/`）。
+pub fn assets_staging_dir() -> PathBuf {
+    assets_root().join(".staging")
+}
+
+/// Windows 内置 Python 的按需 wheel 下载缓存。文件名使用内容 SHA-256，
+/// 不同 MCP 声明相同 wheel 时只下载一份。
+pub fn python_wheel_cache_dir() -> PathBuf {
+    assets_root().join("python-wheels")
+}
+
+/// 依赖锁对应的隔离 site-packages。目录名是完整 lock hash，应用升级不覆盖。
+pub fn python_packages_dir(lock_id: &str) -> PathBuf {
+    pinvou3_home()
+        .join("runtimes")
+        .join("python-packages")
+        .join(lock_id)
 }
 
 /// 支持按需下载安装连接器 CLI 的平台目录名。目录名同时用于选择编译期锁文件，
@@ -130,16 +170,105 @@ fn bundled_connector_runtime_paths_for(
 pub fn bundle_present_artifact_server() -> PathBuf {
     bundle_mcp_servers_dir().join("present_artifact_server.py")
 }
+/// Local Python MCP bootstrap that adds the tool's isolated dependency directory before running
+/// its server script.
+pub fn bundle_mcp_python_runner() -> PathBuf {
+    bundle_mcp_servers_dir().join("python_dependency_runner.py")
+}
+/// bundle 版本号文件（`~/.pinvou3/bundle/VERSION`）绝对路径。
 pub fn bundle_version_file() -> PathBuf {
     bundle_root().join("VERSION")
 }
 
-/// `~/.pinvou3/web-template` —— 三省六部「网页类」差事的预置脚手架(Vite + React +
-/// vite-plugin-singlefile,含预装 node_modules,离线可 `npm run build` 出单文件 HTML)。
-/// 工部(gongbu)角色提示词硬编码此路径:`cp -r ~/.pinvou3/web-template deliverables/<站名>`。
-/// 由首次启动 seed(从只读 resource_dir 复制过来,见 lib.rs::seed_web_template)。
-pub fn web_template_dir() -> PathBuf {
-    pinvou3_home().join("web-template")
+// --- Browser feature paths (features/browser) ---
+
+/// Coordination, runtime-mapping, and restoration directory for the in-app native browser:
+/// `~/.pinvou3/browser/`.
+pub fn browser_home() -> PathBuf {
+    pinvou3_home().join("browser")
+}
+/// CDP port coordination file: `{ port, pid, owner: "app"|"mcp", started_at }`.
+/// Rust BrowserManager and browser-wrapper.mjs use it to coordinate one instance
+/// idempotently.
+pub fn browser_cdp_port_json() -> PathBuf {
+    browser_home().join("cdp-port.json")
+}
+/// Dedicated data directory for the native Windows WebView2 surface.
+///
+/// It persists sign-in state across tasks and application restarts. It is never used for
+/// external Chrome and has no screenshot-stream compatibility fallback.
+pub fn browser_webview_profile_dir() -> PathBuf {
+    browser_home().join("webview2-profile")
+}
+/// Directory for on-demand startup requests written when an MCP wrapper first needs the
+/// browser. Each wrapper uses its own file so concurrent first calls in two conversations
+/// cannot overwrite one another.
+pub fn browser_host_requests_dir() -> PathBuf {
+    browser_home().join("host-requests")
+}
+/// Authoritative runtime mapping for the native browser. Only the corresponding MCP wrapper
+/// uses it to synchronize the host's tabToken-to-automation-target bijection. It must be
+/// deleted on application exit, and its target IDs must never be reused across processes.
+pub fn browser_workspaces_dir() -> PathBuf {
+    browser_home().join("workspaces")
+}
+pub fn browser_workspace_state_json(session_token: &str) -> PathBuf {
+    browser_workspaces_dir().join(format!("{session_token}.json"))
+}
+/// Restorable page manifest for a conversation browser. The path uses a stable session
+/// digest. The content stores only URL order and active index, never the raw session ID,
+/// session/tab tokens, target IDs, leases, or cookies. After restart, the host creates new
+/// WebView/tab identities and automation targets from this manifest.
+pub fn browser_workspace_restore_dir() -> PathBuf {
+    browser_home().join("restore")
+}
+pub fn browser_workspace_restore_json(session_token: &str) -> PathBuf {
+    browser_workspace_restore_dir().join(format!("{session_token}.json"))
+}
+/// Most recent native-host or app-owned CDP connection failure: `{ reason, at }`. The
+/// wrapper writes it and Rust may inject an allowlisted model-visible explanation while it
+/// remains fresh for 24 hours. It never describes external Chrome state.
+pub fn browser_last_error_json() -> PathBuf {
+    browser_home().join("last-error.json")
+}
+/// Work-mode session-specific mcp.json containing global mcp.json plus the browser entry.
+/// Browser MCP tools are exposed only to Work-mode assistant Engine sessions. Global
+/// mcp.json never registers the browser entry, and external Agents such as Codex ACP do not
+/// read this file.
+pub fn browser_work_mcp_json() -> PathBuf {
+    browser_home().join("mcp.work.json")
+}
+/// Conversation-scoped Browser MCP configuration. The filename uses only a stable token
+/// without path characters and never embeds the raw session ID, preventing invalid path
+/// characters and directory traversal.
+pub fn browser_session_mcp_dir() -> PathBuf {
+    browser_home().join("mcp-sessions")
+}
+pub fn browser_session_mcp_json(session_id: &str) -> PathBuf {
+    browser_session_mcp_dir().join(format!("{}.json", browser_session_token(session_id)))
+}
+
+/// Stable FNV-1a token for a session ID. It is used only for local filenames, WebView labels,
+/// and initial-page markers, not authentication. Requests retain the complete session_id,
+/// which the main application recomputes and validates.
+pub fn browser_session_token(session_id: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in session_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+/// Browser MCP wrapper embedded at compile time and extracted to
+/// `~/.pinvou3/bundle/mcp-servers/`.
+pub fn bundle_browser_wrapper() -> PathBuf {
+    bundle_mcp_servers_dir().join("browser-wrapper.mjs")
+}
+/// Vendored chrome-devtools-mcp entry point distributed through the package resource_dir.
+pub fn bundled_chrome_devtools_mcp_bin() -> Option<PathBuf> {
+    let res = runtime_resource_dir()?;
+    let bin = res.join("runtime/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js");
+    bin.is_file().then_some(bin)
 }
 
 /// 拉起 python MCP server(present_artifact / pptx 等)用的解释器命令。
@@ -151,6 +280,24 @@ pub fn web_template_dir() -> PathBuf {
 ///   依赖由 marketplace 的自动 pip 安装)。
 pub fn python_command() -> String {
     crate::platform::os::python_command()
+}
+
+/// Locked Python dependencies may only load through the app's bundled interpreter.
+/// On Windows `PINVOU3_PYTHON` and the system Python are refused so user site/sitecustomize cannot fill in missing locked dependencies.
+pub fn managed_python_command() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        return crate::platform::os::windows::bundled_python_path()
+            .map(|path| path.to_string_lossy().into_owned())
+            .ok_or_else(|| {
+                "bundled Python runtime is missing; cannot safely load locked MCP dependencies"
+                    .to_string()
+            });
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(python_command())
+    }
 }
 
 pub fn user_root() -> PathBuf {
@@ -168,10 +315,9 @@ pub fn user_personas_dir() -> PathBuf {
     user_root().join("personas")
 }
 
-/// `~/.deepseek/skills/` — CodeWhale 标准用户 skills 目录,h3c-ppt /
-/// skill-creator 这种由 `/skill install` 装的 skill 都在这里。跟
-/// [`user_skills_dir`](pinvou3 私有 `~/.pinvou3/user/skills/`) 平行,工作流
-/// 视图 list_skills_v2 把两个目录合并去重展示 (user 覆盖 deepseek 覆盖 bundle)。
+/// `~/.deepseek/skills/` — CodeWhale 标准用户 skills 目录；通过
+/// `/skill install` 安装的 skill 都在这里。它与 Pinvou 私有的
+/// [`user_skills_dir`] 平行；会话物化时用户 Skill 覆盖同名 bundle Skill。
 pub fn deepseek_skills_dir() -> PathBuf {
     user_home_dir().join(".deepseek").join("skills")
 }
@@ -276,26 +422,6 @@ fn sanitize_memory_runtime_id(raw: &str) -> String {
     }
 }
 
-/// `~/.pinvou3/workflows/` —— 工作流 run 第一公民的根目录（独立于 sessions/）。
-pub fn workflows_root() -> PathBuf {
-    pinvou3_home().join("workflows")
-}
-
-/// `~/.pinvou3/workflows/<run_id>/` —— 单个 run 的家（run.json + project/）。
-pub fn workflow_run_dir(run_id: &str) -> PathBuf {
-    workflows_root().join(run_id)
-}
-
-/// `~/.pinvou3/workflows/<run_id>/project/` —— 项目目录 = 该 run 的 engine workspace 本身。
-pub fn workflow_project_dir(run_id: &str) -> PathBuf {
-    workflow_run_dir(run_id).join("project")
-}
-
-/// `~/.pinvou3/workflows/index.json` —— 台账。纯缓存可丢弃，决策读取须与 _state 互证。
-pub fn workflows_index_path() -> PathBuf {
-    workflows_root().join("index.json")
-}
-
 /// `~/.pinvou3/updates/` —— 应用内升级下载的 deb 暂存目录。
 /// 不用 /tmp：tmpfs 受内存限制 + 重启清空（下载完提示重启后文件就没了）。
 pub fn updates_dir() -> PathBuf {
@@ -378,6 +504,17 @@ pub fn session_pinvou_scene_events(session_id: &str) -> PathBuf {
         .join("pinvou_scene_events.json")
 }
 
+/// `~/.pinvou3/sessions/<session_id>/steered_messages.json` —— 会话内 mid-turn
+/// steer 消息的位置标记（每条 `{pos, text}`）。steer 落盘与普通 admission 对齐、
+/// 不含 `<turn_meta>` 块，重载投影无法再从信封反推"非 turn admission"，因此把
+/// 该展示层事实显式持久化。与 scene sidecar 一样独立于 messages：纯 UI 元数据
+/// 不进 LLM 上下文；`text` 用于压实/编辑漂移后的保守校验，失配即不标记。
+pub fn session_steered_messages(session_id: &str) -> PathBuf {
+    sessions_root()
+        .join(session_id)
+        .join("steered_messages.json")
+}
+
 /// `~/.pinvou3/sessions/<session_id>/timing_events.jsonl` —— 每轮对话端到端耗时
 /// 事件(sidecar)。刻意独立于 messages/session schema, 避免影响上下文和产物逻辑。
 pub fn session_timing_events(session_id: &str) -> PathBuf {
@@ -407,16 +544,23 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// 进程级 env var 是测试的硬隔离障碍:cargo test 默认并行跑,多个测试
-    /// 同时改 PINVOU3_HOME 会互相覆盖断言。这是 **crate 级唯一的 env 锁源**:
-    /// bridge/mod.rs(EnvGuard,DEEPSEEK_*)、feedback、notifications、telemetry 等模块
-    /// 所有 mutate env var 的测试都借用这把锁串行执行,使 env 写测试彼此串行。
+    /// Process-wide env vars are a hard isolation obstacle for tests: cargo
+    /// test runs tests in parallel by default, and concurrent modifications of
+    /// PINVOU3_HOME would clobber each other's assertions. This is the
+    /// **crate-wide single env lock source**: every test that mutates env
+    /// vars (bridge/mod.rs EnvGuard/DEEPSEEK_*, feedback, notifications, and
+    /// other modules) borrows this lock, so env-writing tests serialize
+    /// against one another.
     ///
-    /// 注意:锁源单一只让 **持锁的 env 写测试** 之间互斥,**不代表** 可以撤掉
-    /// `--test-threads=1`——未持锁的 env 读取者仍可能观察到其他测试的临时值。
-    /// Mutex poison 后通过 `PoisonError::into_inner()` 取得的仍是已加锁 guard,
-    /// 不会绕过互斥。CI 暂时串行执行；根治需消除测试对进程级 env 的依赖,
-    /// 或让所有读写都通过同一隔离层。
+    /// Note: a single lock source only provides mutual exclusion between
+    /// **env-writing tests that hold the lock**; it does **not** mean
+    /// `--test-threads=1` can be dropped — env readers that do not take the
+    /// lock may still observe another test's temporary value. After mutex
+    /// poisoning, the guard obtained via `PoisonError::into_inner()` is
+    /// still a locked guard, so mutual exclusion is not bypassed. CI runs
+    /// tests single-threaded for now; the real fix is to remove tests'
+    /// dependence on process-level env vars, or route all reads and writes
+    /// through a single isolation layer.
     pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// 生成**进程内**唯一的单调递增后缀,供测试临时目录/会话 ID 命名用。
@@ -439,7 +583,8 @@ pub(crate) mod tests {
     fn pinvou3_home_respects_env_override() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-test-override");
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-test-override") };
         assert_eq!(
             pinvou3_home(),
             crate::platform::os::platform_compat_path("/tmp/pinvou3-test-override")
@@ -450,8 +595,55 @@ pub(crate) mod tests {
                 .join("settings.json")
         );
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn managed_python_rejects_pinvou3_python_override() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = std::env::var_os("PINVOU3_PYTHON");
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-managed-python-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ambient = root.join("python.exe");
+        std::fs::write(&ambient, b"ambient").unwrap();
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_PYTHON", &ambient) };
+
+        assert_eq!(python_command(), ambient.to_string_lossy());
+        assert!(managed_python_command().is_err());
+
+        match previous {
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_PYTHON", value) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_PYTHON") },
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn eval_reports_are_scoped_under_pinvou_home() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let previous = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: this test holds platform::paths::tests::ENV_LOCK; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-eval-paths") };
+
+        assert_eq!(eval_reports_dir(), pinvou3_home().join("eval"));
+
+        match previous {
+            // SAFETY: this test holds platform::paths::tests::ENV_LOCK; env writes are serialized.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: this test holds platform::paths::tests::ENV_LOCK; env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 
@@ -459,7 +651,8 @@ pub(crate) mod tests {
     fn scheduled_paths_are_derived_from_pinvou_home() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let previous = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-scheduled-paths");
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-scheduled-paths") };
 
         assert_eq!(scheduled_runs_root(), pinvou3_home().join("scheduled-runs"));
         assert_eq!(scheduled_tasks_root(), pinvou3_home().join("scheduled"));
@@ -483,9 +676,11 @@ pub(crate) mod tests {
                 .join("read-state.json")
         );
         if let Some(value) = previous {
-            std::env::set_var("PINVOU3_HOME", value);
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            unsafe { std::env::set_var("PINVOU3_HOME", value) };
         } else {
-            std::env::remove_var("PINVOU3_HOME");
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            unsafe { std::env::remove_var("PINVOU3_HOME") };
         }
     }
 
@@ -495,39 +690,12 @@ pub(crate) mod tests {
         assert!(!user_home_dir().as_os_str().is_empty());
     }
 
-    /// workflow run 目录族必须落在 ~/.pinvou3/workflows/ 下（独立于 sessions/）。
-    #[test]
-    fn workflow_paths_layout() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-wf-paths-test");
-        let root = crate::platform::os::platform_compat_path("/tmp/pinvou3-wf-paths-test");
-        assert_eq!(workflows_root(), root.join("workflows"));
-        assert_eq!(
-            workflow_run_dir("wf-20260610-1432-a3f9"),
-            root.join("workflows").join("wf-20260610-1432-a3f9")
-        );
-        assert_eq!(
-            workflow_project_dir("wf-20260610-1432-a3f9"),
-            root.join("workflows")
-                .join("wf-20260610-1432-a3f9")
-                .join("project")
-        );
-        assert_eq!(
-            workflows_index_path(),
-            root.join("workflows").join("index.json")
-        );
-        match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
-        }
-    }
-
     #[test]
     fn connector_bin_dir_covers_all_on_demand_platforms() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-connector-path-test");
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-connector-path-test") };
         let root = crate::platform::os::platform_compat_path("/tmp/pinvou3-connector-path-test");
         let expected = |platform: &str| Some(root.join("connectors").join(platform).join("bin"));
         assert_eq!(
@@ -553,8 +721,10 @@ pub(crate) mod tests {
         assert_eq!(managed_connector_bin_dir_for("windows", "aarch64"), None);
         assert_eq!(managed_connector_bin_dir_for("freebsd", "x86_64"), None);
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 
@@ -594,7 +764,8 @@ pub(crate) mod tests {
     fn session_artifacts_layout() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-artifacts-layout-test");
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-artifacts-layout-test") };
         let root = crate::platform::os::platform_compat_path("/tmp/pinvou3-artifacts-layout-test");
         assert_eq!(
             session_artifacts_dir("abc123"),
@@ -605,8 +776,10 @@ pub(crate) mod tests {
             root.join("sessions").join("default").join("artifacts")
         );
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 }

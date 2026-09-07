@@ -122,62 +122,7 @@ fn compact_process_output(stdout: &str, stderr: &str) -> String {
 }
 
 pub(super) fn parse_local_asr_text(stdout: &str, stderr: &str) -> Option<String> {
-    let combined = format!("{stdout}\n{stderr}");
-    let result_prefixes = [
-        "result:",
-        "asr result:",
-        "recognition result:",
-        "text:",
-        "output:",
-    ];
-
-    for line in combined.lines().rev() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let lower = line.to_ascii_lowercase();
-        for prefix in result_prefixes {
-            if lower.starts_with(prefix) {
-                let text = line[prefix.len()..].trim();
-                if !text.is_empty() {
-                    return Some(text.to_string());
-                }
-            }
-        }
-        if (line.starts_with("['") && line.ends_with("']"))
-            || (line.starts_with("[\"") && line.ends_with("\"]"))
-        {
-            let text = line
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .trim_matches('\'')
-                .trim_matches('"')
-                .trim();
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
-        }
-        if lower.contains("error")
-            || lower.contains("warning")
-            || lower.contains("paddlespeech")
-            || lower.contains("sensevoice")
-            || lower.contains("funasr")
-            || lower.contains("gguf")
-            || lower.contains("python")
-            || lower.contains("download")
-            || lower.starts_with('[')
-        {
-            continue;
-        }
-        if line
-            .chars()
-            .any(|ch| ch.is_alphabetic() || ('\u{4e00}'..='\u{9fff}').contains(&ch))
-        {
-            return Some(line.to_string());
-        }
-    }
-    None
+    crate::features::voice::parse_asr_transcript(stdout, stderr)
 }
 
 fn run_local_asr_cli(wav_path: &std::path::Path) -> Result<LocalAsrOutput, VoiceCommandError> {
@@ -317,8 +262,8 @@ pub async fn transcribe_voice_audio(
         // 平台选择封装在 `features::voice::recognize_native`（platform/ 适配器），
         // 此处只按返回值分发，不出现 cfg(target_os)。
         let result = {
-            // 识别语言跟随 UI 语言偏好（默认 zh-Hans → zh-CN）：系统默认 locale
-            // 可能是 en-US，会把中文音频当英文解析 → 无意义英文字母。
+            // 识别语言跟随 UI 语言偏好（首次启动时由系统 locale 决定）：避免 UI 与
+            // 识别模型语言错配，例如中文 UI 却把中文音频当英文解析。
             let locale_tag = crate::platform::prefs::UserPrefs::load()
                 .language
                 .speech_recognition_locale();

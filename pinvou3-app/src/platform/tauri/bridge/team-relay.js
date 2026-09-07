@@ -15,25 +15,108 @@
     var joinPasswordReadPromise = null;
     var refreshTimer = null;
     var pendingRequests = {};
+    var legacyReadCursorKey = "pinvou.team-relay.read-cursors.v1";
+    var legacyReadCursors = loadLegacyReadCursors();
+    var connectionGeneration = 0;
+    var AVATAR_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+    var AVATAR_CACHE_MAX_ENTRIES = 256;
+    var AVATAR_CACHE_ENTRY_OVERHEAD_BYTES = 256;
+    var avatarSources = new Map();
+    var avatarRequests = new Map();
+    var avatarPrincipalVersions = new Map();
+    var avatarCacheBytes = 0;
+    var avatarCacheEpoch = 0;
 
     function uuid() {
-      if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID();
+      if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID(); // safari14-ok: guarded above
       throw new Error("This platform cannot generate a secure request identifier");
     }
 
     function patch(value) {
+      if (value && value.snapshot) {
+        value = Object.assign({}, value, { snapshot: applyLegacyUnreadFallback(value.snapshot) });
+      }
       state.teamRelay = Object.assign({}, state.teamRelay, value);
       notify();
     }
 
-    async function load() {
+    function loadLegacyReadCursors() {
+      try {
+        var parsed = JSON.parse(root.localStorage && root.localStorage.getItem(legacyReadCursorKey) || "{}");
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function saveLegacyReadCursors() {
+      try {
+        if (!root.localStorage) return;
+        var entries = Object.entries(legacyReadCursors);
+        if (entries.length > 2000) legacyReadCursors = Object.fromEntries(entries.slice(-2000));
+        root.localStorage.setItem(legacyReadCursorKey, JSON.stringify(legacyReadCursors));
+      } catch (_) {
+        /* A denied local cache must not block Team Relay. */
+      }
+    }
+
+    function setLegacyReadCursor(threadId, sequence) {
+      var previous = Number(legacyReadCursors[threadId] || 0);
+      legacyReadCursors[threadId] = Math.max(previous, Number(sequence || 0));
+      saveLegacyReadCursors();
+      return legacyReadCursors[threadId];
+    }
+
+    function applyLegacyUnreadFallback(snapshot) {
+      if (!snapshot) return snapshot;
+      var initialized = false;
+      function patchBootstrap(bootstrap) {
+        if (!bootstrap || !Array.isArray(bootstrap.threads)) return bootstrap;
+        var meId = bootstrap.me && bootstrap.me.id;
+        var changed = false;
+        var threads = bootstrap.threads.map(function (detail) {
+          if (!detail || !detail.thread || Object.prototype.hasOwnProperty.call(detail, "unread_count")) return detail;
+          changed = true;
+          var actions = detail.actions || [];
+          var revision = Number(detail.thread.revision || 0);
+          var cursor = Number(legacyReadCursors[detail.thread.id]);
+          if (!Number.isFinite(cursor)) {
+            var latest = actions[actions.length - 1];
+            cursor = latest && latest.actor_id !== meId ? Math.max(0, revision - 1) : revision;
+            legacyReadCursors[detail.thread.id] = cursor;
+            initialized = true;
+          }
+          var unreadCount = actions.filter(function (action) {
+            return Number(action.sequence || 0) > cursor && action.actor_id !== meId;
+          }).length;
+          return Object.assign({}, detail, {
+            read_state: { thread_id: detail.thread.id, last_read_sequence: cursor, last_read_at: null },
+            unread_count: unreadCount,
+          });
+        });
+        return changed ? Object.assign({}, bootstrap, { threads: threads }) : bootstrap;
+      }
+      var next = Object.assign({}, snapshot, {
+        bootstrap: patchBootstrap(snapshot.bootstrap),
+        team_bootstraps: (snapshot.team_bootstraps || []).map(patchBootstrap),
+      });
+      if (initialized) saveLegacyReadCursors();
+      return next;
+    }
+
+    async function load(options) {
       if (refreshPromise) return refreshPromise;
-      refreshPromise = (async function () {
-        patch({ loading: true, error: null });
+      var silent = options && options.silent === true;
+      var generation = connectionGeneration;
+      function patchCurrent(value) {
+        if (generation === connectionGeneration) patch(value);
+      }
+      var request = (async function () {
+        if (!silent) patchCurrent({ loading: true, error: null });
         try {
           var status = await invoke("team_relay_status");
           if (!status.configured) {
-            patch({ loading: false, status: status, snapshot: null, account: null });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: null, syncPending: false });
             return null;
           }
           if (!status.team_id) {
@@ -41,23 +124,43 @@
             if (account.teams && account.teams.length) {
               var restoredSnapshot = await invoke("team_relay_switch_team", { teamId: account.teams[0].id });
               var restoredStatus = Object.assign({}, status, { team_id: restoredSnapshot.bootstrap.team.id });
-              patch({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now() });
+              patchCurrent({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now(), syncPending: false });
               return restoredSnapshot;
             }
-            patch({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now() });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now(), syncPending: false });
             return account;
           }
-          var snapshot = await invoke("team_relay_bootstrap");
-          patch({ loading: false, status: status, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
+          var snapshot;
+          try {
+            snapshot = await invoke("team_relay_bootstrap");
+          } catch (error) {
+            var bootstrapError = String(error);
+            var invalidCurrentTeam = bootstrapError.indexOf("team_relay_team_required:") !== -1
+              || bootstrapError.indexOf("membership_required:") !== -1;
+            if (!invalidCurrentTeam) throw error;
+            var recoveredAccount = await invoke("team_relay_account");
+            if (recoveredAccount.teams && recoveredAccount.teams.length) {
+              var fallbackSnapshot = await invoke("team_relay_switch_team", { teamId: recoveredAccount.teams[0].id });
+              var fallbackStatus = Object.assign({}, status, { team_id: fallbackSnapshot.bootstrap.team.id });
+              patchCurrent({ loading: false, status: fallbackStatus, snapshot: fallbackSnapshot, account: { principal: fallbackSnapshot.bootstrap.me, teams: fallbackSnapshot.teams || recoveredAccount.teams }, lastSyncedAt: Date.now(), syncPending: false });
+              return fallbackSnapshot;
+            }
+            var emptyStatus = Object.assign({}, status, { team_id: null });
+            patchCurrent({ loading: false, status: emptyStatus, snapshot: null, account: recoveredAccount, lastSyncedAt: Date.now(), syncPending: false });
+            return recoveredAccount;
+          }
+          var recoveredStatus = Object.assign({}, status, { team_id: snapshot.bootstrap.team.id });
+          patchCurrent({ loading: false, status: recoveredStatus, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now(), syncPending: false });
           return snapshot;
         } catch (error) {
-          patch({ loading: false, error: String(error) });
+          if (!silent) patchCurrent({ loading: false, error: String(error) });
           throw error;
         } finally {
-          refreshPromise = null;
+          if (refreshPromise === request) refreshPromise = null;
         }
       })();
-      return refreshPromise;
+      refreshPromise = request;
+      return request;
     }
 
     function verifyAccess(accessCode) {
@@ -114,11 +217,194 @@
       return mutate("team_relay_update_profile", { input: input });
     }
 
+    function avatarDigest(avatar) {
+      var digest = String(avatar && avatar.sha256 || "").trim().toLowerCase();
+      return /^[0-9a-f]{64}$/.test(digest) ? digest : "";
+    }
+
+    function avatarDisplaySize(value) {
+      var size = Number(value);
+      return size === 48 || size === 96 ? size : null;
+    }
+
+    function avatarCacheKey(teamId, principalId, digest, displaySize, reducedMotion) {
+      var scope = String(teamId || "").trim() || "current";
+      var id = String(principalId || "").trim();
+      if (!id || !digest) return "";
+      return scope + ":" + id + ":" + digest + ":" + (displaySize || "original")
+        + ":" + (reducedMotion ? "static" : "animated");
+    }
+
+    function removeAvatarCacheEntry(key) {
+      var entry = avatarSources.get(key);
+      if (!entry) return;
+      avatarCacheBytes = Math.max(0, avatarCacheBytes - entry.byteSize);
+      avatarSources.delete(key);
+    }
+
+    function forgetAvatarSources(principalId) {
+      var id = String(principalId || "").trim();
+      if (!id || !avatarPrincipalVersions.has(id)) return;
+      avatarPrincipalVersions.delete(id);
+      for (var entry of avatarSources.entries()) {
+        if (entry[1].principalId === id) removeAvatarCacheEntry(entry[0]);
+      }
+      for (var pending of avatarRequests.entries()) {
+        if (pending[1].principalId === id) avatarRequests.delete(pending[0]);
+      }
+    }
+
+    function clearAvatarSources() {
+      avatarCacheEpoch += 1;
+      avatarCacheBytes = 0;
+      avatarSources.clear();
+      avatarRequests.clear();
+      avatarPrincipalVersions.clear();
+    }
+
+    async function acrossAvatarCacheBoundary(operation) {
+      // Scope-changing requests can overlap renders from the old screen. Clear
+      // on both sides so neither an old cached entry nor a response completed
+      // during the transition can cross Principal, Hub, or team boundaries.
+      clearAvatarSources();
+      try {
+        return await operation();
+      } finally {
+        clearAvatarSources();
+      }
+    }
+
+    function currentAvatarVersion(principalId, digest) {
+      var current = avatarPrincipalVersions.get(principalId);
+      if (current && current.digest === digest) return current;
+      if (current) forgetAvatarSources(principalId);
+      var version = { digest: digest };
+      avatarPrincipalVersions.set(principalId, version);
+      return version;
+    }
+
+    function avatarSourceByteSize(key, source) {
+      // JavaScript engines may store strings as UTF-16. Count that conservative
+      // representation plus a small entry/key allowance when enforcing the cap.
+      return ((key.length + source.length) * 2) + AVATAR_CACHE_ENTRY_OVERHEAD_BYTES;
+    }
+
+    function rememberAvatarSource(key, entry) {
+      entry.byteSize = avatarSourceByteSize(key, entry.source);
+      if (entry.byteSize > AVATAR_CACHE_MAX_BYTES) return;
+      removeAvatarCacheEntry(key);
+      avatarSources.set(key, entry);
+      avatarCacheBytes += entry.byteSize;
+      while (avatarSources.size > AVATAR_CACHE_MAX_ENTRIES || avatarCacheBytes > AVATAR_CACHE_MAX_BYTES) {
+        var oldestKey = avatarSources.keys().next().value;
+        if (oldestKey === undefined) break;
+        removeAvatarCacheEntry(oldestKey);
+      }
+    }
+
+    async function avatarSource(principalId, avatar, requestedDisplaySize, requestedReducedMotion, requestedTeamId) {
+      var teamId = String(requestedTeamId || "").trim();
+      var id = String(principalId || "").trim();
+      var digest = avatarDigest(avatar);
+      if (!id || !digest) {
+        if (id) forgetAvatarSources(id);
+        return null;
+      }
+      var displaySize = avatarDisplaySize(requestedDisplaySize);
+      var reducedMotion = requestedReducedMotion === true;
+      var version = currentAvatarVersion(id, digest);
+      var key = avatarCacheKey(teamId, id, digest, displaySize, reducedMotion);
+      var cached = avatarSources.get(key);
+      if (cached) {
+        // Map insertion order doubles as an O(1) LRU queue.
+        avatarSources.delete(key);
+        avatarSources.set(key, cached);
+        return cached.source;
+      }
+      var pending = avatarRequests.get(key);
+      if (pending) return pending.promise;
+      var epoch = avatarCacheEpoch;
+      var requestEntry = {
+        principalId: id,
+        digest: digest,
+        displaySize: displaySize,
+        reducedMotion: reducedMotion,
+        version: version,
+        promise: null,
+      };
+      var args = {
+        principalId: id,
+        expectedSha256: digest,
+      };
+      if (teamId) args.teamId = teamId;
+      if (displaySize) args.displaySize = displaySize;
+      if (reducedMotion) args.reducedMotion = true;
+      requestEntry.promise = invoke("team_relay_avatar_data_url", args).then(function (source) {
+        var normalizedSource = typeof source === "string" && source ? source : null;
+        var latest = avatarPrincipalVersions.get(id);
+        if (normalizedSource
+          && avatarRequests.get(key) === requestEntry
+          && avatarCacheEpoch === epoch
+          && latest === requestEntry.version) {
+          rememberAvatarSource(key, {
+            source: normalizedSource,
+            principalId: id,
+            digest: digest,
+            displaySize: displaySize,
+            reducedMotion: reducedMotion,
+            byteSize: 0,
+          });
+        }
+        return normalizedSource;
+      }).finally(function () {
+        if (avatarRequests.get(key) === requestEntry) avatarRequests.delete(key);
+      });
+      avatarRequests.set(key, requestEntry);
+      return requestEntry.promise;
+    }
+
+    async function uploadAvatar() {
+      if (!dialogOpen) throw new Error("File picker is unavailable");
+      var selected = await dialogOpen({
+        multiple: false,
+        filters: [{ name: "PNG, JPEG, WebP, GIF", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+      });
+      var path = Array.isArray(selected) ? selected[0] : selected;
+      if (!path) return null;
+      var principalId = state.teamRelay.snapshot && state.teamRelay.snapshot.bootstrap
+        ? state.teamRelay.snapshot.bootstrap.me.id
+        : null;
+      var result = await mutate("team_relay_upload_avatar", { path: String(path) });
+      forgetAvatarSources(principalId);
+      return result;
+    }
+
+    async function removeAvatar() {
+      var principalId = state.teamRelay.snapshot && state.teamRelay.snapshot.bootstrap
+        ? state.teamRelay.snapshot.bootstrap.me.id
+        : null;
+      var result = await mutate("team_relay_remove_avatar");
+      forgetAvatarSources(principalId);
+      return result;
+    }
+
     async function mutate(command, args) {
       patch({ mutating: true, error: null });
       try {
         var result = await invoke(command, args);
-        if (result && result.bootstrap && result.attachments) patch({ snapshot: result });
+        if (result && result.committed === true) {
+          var activeTeamId = result.active_team_id || null;
+          var lifecyclePatch = {
+            status: Object.assign({}, state.teamRelay.status, { team_id: activeTeamId }),
+          };
+          if (result.snapshot || !activeTeamId) lifecyclePatch.snapshot = result.snapshot || null;
+          if (result.account) lifecyclePatch.account = result.account;
+          lifecyclePatch.syncPending = Boolean(result.sync_error);
+          if (!result.sync_error) lifecyclePatch.lastSyncedAt = Date.now();
+          patch(lifecyclePatch);
+          if (result.sync_error) load({ silent: true }).catch(function () {});
+        }
+        else if (result && result.bootstrap && result.attachments) patch({ snapshot: result });
         else load().catch(function () {});
         return result;
       } catch (error) {
@@ -145,23 +431,51 @@
     }
 
     async function createTeam(name) {
-      var snapshot = await mutate("team_relay_create_team", { name: name });
+      var snapshot = await acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_create_team", { name: name });
+      });
       if (snapshot && snapshot.bootstrap) patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }), account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] } });
       return snapshot;
     }
 
     async function joinTeam(joinCode) {
-      var snapshot = await mutate("team_relay_join_team", { joinCode: joinCode });
+      var snapshot = await acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_join_team", { joinCode: joinCode });
+      });
       if (snapshot && snapshot.bootstrap) patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }), account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] } });
       return snapshot;
     }
 
-    function switchTeam(teamId) {
-      return mutate("team_relay_switch_team", { teamId: teamId });
+    async function switchTeam(teamId) {
+      var snapshot = await acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_switch_team", { teamId: teamId });
+      });
+      if (snapshot && snapshot.bootstrap) {
+        patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }) });
+      }
+      return snapshot;
     }
 
     function removeMember(principalId) {
       return mutate("team_relay_remove_member", { principalId: principalId });
+    }
+
+    function transferOwner(newOwnerId) {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_transfer_owner", { newOwnerId: newOwnerId });
+      });
+    }
+
+    function leaveTeam() {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_leave_team");
+      });
+    }
+
+    function dissolveTeam() {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_dissolve_team");
+      });
     }
 
     function rotateJoinPassword() {
@@ -217,6 +531,57 @@
       return mutate("team_relay_set_thread_preference", { threadId: threadId, input: input });
     }
 
+    function patchThreadReadState(snapshot, threadId, readState) {
+      if (!snapshot || !readState) return snapshot;
+      function patchBootstrap(bootstrap) {
+        if (!bootstrap || !Array.isArray(bootstrap.threads)) return bootstrap;
+        var meId = bootstrap.me && bootstrap.me.id;
+        var changed = false;
+        var threads = bootstrap.threads.map(function (detail) {
+          if (!detail || !detail.thread || detail.thread.id !== threadId) return detail;
+          changed = true;
+          var cursor = Math.max(
+            Number(detail.read_state && detail.read_state.last_read_sequence || 0),
+            Number(readState.last_read_sequence || 0)
+          );
+          var unreadCount = (detail.actions || []).filter(function (action) {
+            return Number(action.sequence || 0) > cursor && action.actor_id !== meId;
+          }).length;
+          return Object.assign({}, detail, {
+            read_state: Object.assign({}, readState, { last_read_sequence: cursor }),
+            unread_count: unreadCount,
+          });
+        });
+        return changed ? Object.assign({}, bootstrap, { threads: threads }) : bootstrap;
+      }
+      return Object.assign({}, snapshot, {
+        bootstrap: patchBootstrap(snapshot.bootstrap),
+        team_bootstraps: (snapshot.team_bootstraps || []).map(patchBootstrap),
+      });
+    }
+
+    async function markThreadRead(threadId, readThroughSequence) {
+      patch({ error: null });
+      var localReadState = {
+        thread_id: threadId,
+        last_read_sequence: setLegacyReadCursor(threadId, readThroughSequence),
+        last_read_at: new Date().toISOString(),
+      };
+      patch({ snapshot: patchThreadReadState(state.teamRelay.snapshot, threadId, localReadState) });
+      try {
+        var readState = await invoke("team_relay_mark_thread_read", {
+          threadId: threadId,
+          input: { read_through_sequence: readThroughSequence },
+        });
+        patch({ snapshot: patchThreadReadState(state.teamRelay.snapshot, threadId, readState) });
+        return readState;
+      } catch (error) {
+        if (String(error).indexOf("resource_not_found:") !== -1) return localReadState;
+        patch({ error: String(error) });
+        throw error;
+      }
+    }
+
     async function pickDraftAttachments() {
       if (!dialogOpen) throw new Error("File picker is unavailable");
       var selected = await dialogOpen({
@@ -257,8 +622,8 @@
       return workspace;
     }
 
-    async function taskWorkspaceStatus(threadId) {
-      var workspace = await invoke("team_relay_task_workspace_status", { threadId: threadId });
+    async function taskWorkspaceStatus(threadId, teamId) {
+      var workspace = await invoke("team_relay_task_workspace_status", { threadId: threadId, teamId: teamId || null });
       return rememberTaskWorkspace(workspace);
     }
 
@@ -275,10 +640,11 @@
       }
     }
 
-    async function setTaskAgentSession(threadId, input) {
+    async function setTaskAgentSession(threadId, input, teamId) {
       var workspace = await invoke("team_relay_set_task_agent_session", {
         threadId: threadId,
         input: input,
+        teamId: teamId || null,
       });
       return rememberTaskWorkspace(workspace);
     }
@@ -295,16 +661,43 @@
       return invoke(command, { path: path, sessionId: null });
     }
 
-    function revealPreparedMaterial(threadId, attachmentId) {
+    function revealPreparedMaterial(threadId, attachmentId, teamId) {
       return invoke("team_relay_reveal_prepared_material", {
         threadId: threadId,
         attachmentId: attachmentId,
+        teamId: teamId || null,
       });
     }
 
     async function disconnect() {
-      await invoke("team_relay_disconnect");
-      patch({ status: { configured: false, hub_url: null, team_id: null }, snapshot: null, account: null, error: null });
+      patch({ mutating: true, error: null });
+      try {
+        await acrossAvatarCacheBoundary(function () {
+          return invoke("team_relay_disconnect");
+        });
+        connectionGeneration += 1;
+        refreshPromise = null;
+        if (refreshTimer) root.clearTimeout(refreshTimer);
+        refreshTimer = null;
+        joinPasswordReadPromise = null;
+        pendingRequests = {};
+        patch({
+          status: { configured: false, hub_url: null, team_id: null },
+          snapshot: null,
+          account: null,
+          taskWorkspaces: {},
+          uploadProgress: null,
+          preparingWorkspace: null,
+          workspaceError: null,
+          error: null,
+          syncPending: false,
+        });
+      } catch (error) {
+        patch({ error: String(error) });
+        throw error;
+      } finally {
+        patch({ mutating: false });
+      }
     }
 
     function pathName(path) {
@@ -495,8 +888,10 @@
       };
     }
 
-    async function mountDraftMaterials(materials) {
+    async function mountDraftMaterials(materials, teamId) {
       var selected = Array.isArray(materials) ? materials : [];
+      teamId = teamId || state.teamRelay?.snapshot?.bootstrap?.team?.id || state.teamRelay?.status?.team_id;
+      if (!teamId) throw new Error("team_relay_team_required");
       var uploaded = [];
       for (var index = 0; index < selected.length; index++) {
         var material = selected[index] || {};
@@ -504,6 +899,7 @@
         uploaded.push(await invoke("team_relay_upload_attachment", {
           path: material.localPath,
           uploadId: material.uploadId,
+          teamId: teamId,
         }));
       }
       return uploaded;
@@ -525,10 +921,16 @@
       claim: claim,
       createFirstTeam: createFirstTeam,
       updateProfile: updateProfile,
+      avatarSource: avatarSource,
+      uploadAvatar: uploadAvatar,
+      removeAvatar: removeAvatar,
       createTeam: createTeam,
       joinTeam: joinTeam,
       switchTeam: switchTeam,
       removeMember: removeMember,
+      transferOwner: transferOwner,
+      leaveTeam: leaveTeam,
+      dissolveTeam: dissolveTeam,
       createInvite: createInvite,
       getJoinPassword: getJoinPassword,
       rotateJoinPassword: rotateJoinPassword,
@@ -537,6 +939,7 @@
       createThread: createThread,
       createAction: createAction,
       setThreadPreference: setThreadPreference,
+      markThreadRead: markThreadRead,
       listDraftSourceSessions: listDraftSourceSessions,
       readDraftSourceSession: readDraftSourceSession,
       mountDraftMaterials: mountDraftMaterials,

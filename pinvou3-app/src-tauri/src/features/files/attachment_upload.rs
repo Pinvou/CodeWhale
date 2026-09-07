@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use tokio::io::AsyncWriteExt;
 
 use super::file_ingest::{self, IngestResult, MAX_FILE_BYTES};
 
 pub const MAX_ATTACHMENT_CHUNK_BYTES: usize = 256 * 1024;
-const STALE_STAGING_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const STALE_ATTACHMENT_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const CONVERSATION_ATTACHMENT_REFS_FILE: &str = "conversation-attachments.json";
 static CONVERSATION_ATTACHMENT_REFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -201,6 +202,10 @@ fn upload_completed_dir(workspace: &Path, upload_id: &str) -> PathBuf {
     completed_root(workspace).join(upload_id)
 }
 
+pub(crate) fn draft_attachment_workspace() -> PathBuf {
+    crate::platform::paths::pinvou3_home().join("draft-attachments")
+}
+
 async fn remove_dir_if_present(path: &Path) -> Result<(), String> {
     match tokio::fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
@@ -209,29 +214,207 @@ async fn remove_dir_if_present(path: &Path) -> Result<(), String> {
     }
 }
 
-async fn cleanup_stale_staging(workspace: &Path, keep_upload_id: &str) {
-    let mut entries = match tokio::fs::read_dir(staging_root(workspace)).await {
-        Ok(entries) => entries,
-        Err(_) => return,
+fn sweep_stale_upload_root(root: &Path, now: SystemTime) -> usize {
+    super::platform::stale_attachment_cleanup::sweep_stale_upload_root(
+        root,
+        now,
+        STALE_ATTACHMENT_AGE,
+        |name| validate_upload_id(name).is_ok(),
+        |name| validate_filename(name).is_ok(),
+    )
+}
+
+fn sweep_stale_draft_attachment_workspace(workspace: &Path, now: SystemTime) -> usize {
+    sweep_stale_upload_root(&staging_root(workspace), now)
+        + sweep_stale_upload_root(&completed_root(workspace), now)
+}
+
+/// Remove abandoned sessionless uploads at process startup. This is a
+/// best-effort sweep over application-owned directories only. It deliberately
+/// never runs while accepting uploads, so a long-lived ready draft cannot be
+/// removed by a later upload in the same process.
+pub(crate) fn sweep_stale_draft_attachments() -> usize {
+    sweep_stale_draft_attachment_workspace(&draft_attachment_workspace(), SystemTime::now())
+}
+
+/// Append a browser `File` into an application-owned draft area. Unlike the
+/// legacy session-scoped drop command this does not require, or create, a
+/// conversation. The completed upload is adopted by the target session only
+/// when the user actually sends the draft.
+pub async fn append_draft_chunk(
+    upload_id: &str,
+    filename: &str,
+    offset: usize,
+    total: usize,
+    data: &[u8],
+    commit: bool,
+    sha256: Option<&str>,
+) -> Result<Option<IngestResult>, String> {
+    let workspace = draft_attachment_workspace();
+    append_draft_chunk_in_workspace(
+        &workspace, upload_id, filename, offset, total, data, commit, sha256,
+    )
+    .await
+}
+
+async fn append_draft_chunk_in_workspace(
+    workspace: &Path,
+    upload_id: &str,
+    filename: &str,
+    offset: usize,
+    total: usize,
+    data: &[u8],
+    commit: bool,
+    sha256: Option<&str>,
+) -> Result<Option<IngestResult>, String> {
+    append_chunk(
+        workspace, upload_id, filename, offset, total, data, commit, sha256,
+    )
+    .await
+}
+
+/// Re-hash the assembled staging file and compare it with the client-provided
+/// whole-file digest. A mismatch aborts the commit; the command layer's abort
+/// path then removes the staging upload, so corrupted bytes never reach
+/// ingest.
+async fn verify_staging_sha256(staging_path: &Path, expected: &str) -> Result<(), String> {
+    let Some(expected) = crate::platform::encoding::normalize_sha256_hex(expected) else {
+        return Err("附件完整性校验值无效".into());
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_name().to_str() == Some(keep_upload_id) {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata().await else {
-            continue;
-        };
-        if !metadata.is_dir()
-            || !metadata
-                .modified()
-                .ok()
-                .and_then(|modified| modified.elapsed().ok())
-                .is_some_and(|age| age >= STALE_STAGING_AGE)
-        {
-            continue;
-        }
-        let _ = tokio::fs::remove_dir_all(entry.path()).await;
+    let staging_path = staging_path.to_path_buf();
+    let actual =
+        tokio::task::spawn_blocking(move || crate::platform::hashing::sha256_file(&staging_path))
+            .await
+            .map_err(|error| format!("附件完整性校验任务失败：{error}"))?
+            .map_err(|error| format!("读取附件暂存文件失败：{error}"))?;
+    if actual != expected {
+        return Err("附件完整性校验失败，上传内容在传输中损坏".into());
     }
+    Ok(())
+}
+
+pub async fn abort_draft_upload(upload_id: &str) -> Result<(), String> {
+    abort_staging_upload(&draft_attachment_workspace(), upload_id).await
+}
+
+pub async fn cancel_draft_upload(upload_id: &str) -> Result<(), String> {
+    cancel_upload(&draft_attachment_workspace(), upload_id).await
+}
+
+async fn managed_completed_file(
+    workspace: &Path,
+    upload_id: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let upload_id = validate_upload_id(upload_id)?;
+    let root = completed_root(workspace);
+    let canonical_root = tokio::fs::canonicalize(&root)
+        .await
+        .map_err(|_| "附件草稿不存在".to_string())?;
+    let upload_dir = upload_completed_dir(workspace, upload_id);
+    let canonical_dir = tokio::fs::canonicalize(&upload_dir)
+        .await
+        .map_err(|_| "附件草稿不存在".to_string())?;
+    if canonical_dir.parent() != Some(canonical_root.as_path()) {
+        return Err("附件草稿目录无效".into());
+    }
+
+    let mut entries = tokio::fs::read_dir(&canonical_dir)
+        .await
+        .map_err(|error| format!("读取附件草稿失败：{error}"))?;
+    let mut file = None;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("读取附件草稿失败：{error}"))?
+    {
+        let metadata = tokio::fs::symlink_metadata(entry.path())
+            .await
+            .map_err(|error| format!("读取附件草稿失败：{error}"))?;
+        if !metadata.file_type().is_file() || file.is_some() {
+            return Err("附件草稿内容无效".into());
+        }
+        file = Some(entry.path());
+    }
+    let file = file.ok_or_else(|| "附件草稿为空".to_string())?;
+    let filename = file
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "附件草稿文件名无效".to_string())?;
+    validate_filename(filename)?;
+    Ok((canonical_dir, file))
+}
+
+/// Move a sessionless draft upload into the target session workspace. Copy is
+/// used instead of rename because project workspaces may live on another
+/// volume. A repeated call is idempotent so an IPC response lost after the
+/// copy cannot strand the attachment.
+pub async fn adopt_draft_upload(
+    target_workspace: &Path,
+    upload_id: &str,
+) -> Result<IngestResult, String> {
+    validate_upload_id(upload_id)?;
+    let draft_workspace = draft_attachment_workspace();
+    adopt_upload(&draft_workspace, target_workspace, upload_id).await
+}
+
+async fn adopt_upload(
+    source_workspace: &Path,
+    target_workspace: &Path,
+    upload_id: &str,
+) -> Result<IngestResult, String> {
+    validate_upload_id(upload_id)?;
+    let target_dir = upload_completed_dir(target_workspace, upload_id);
+
+    if tokio::fs::try_exists(&target_dir).await.unwrap_or(false) {
+        let (_, target_file) = managed_completed_file(target_workspace, upload_id).await?;
+        return match ingest_managed_file(&target_file) {
+            Ok(result) => {
+                let _ =
+                    remove_dir_if_present(&upload_completed_dir(source_workspace, upload_id)).await;
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = remove_dir_if_present(&target_dir).await;
+                Err(error)
+            }
+        };
+    }
+
+    let (source_dir, source_file) = managed_completed_file(source_workspace, upload_id).await?;
+    let filename = source_file
+        .file_name()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "附件草稿文件名无效".to_string())?;
+    tokio::fs::create_dir_all(completed_root(target_workspace))
+        .await
+        .map_err(|error| format!("创建会话附件目录失败：{error}"))?;
+    tokio::fs::create_dir(&target_dir)
+        .await
+        .map_err(|error| format!("创建会话附件目录失败：{error}"))?;
+    let target_file = target_dir.join(&filename);
+    if let Err(error) = tokio::fs::copy(&source_file, &target_file).await {
+        let _ = remove_dir_if_present(&target_dir).await;
+        return Err(format!("迁移附件草稿失败：{error}"));
+    }
+    let result = match ingest_managed_file(&target_file) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = remove_dir_if_present(&target_dir).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = remove_dir_if_present(&source_dir).await {
+        eprintln!("[attachment] cleanup adopted draft failed: {error}");
+    }
+    Ok(result)
+}
+
+fn ingest_managed_file(path: &Path) -> Result<IngestResult, String> {
+    // Windows canonicalization adds a `\\?\` prefix. Keep the idempotent
+    // retry response byte-for-byte stable with the first adoption while still
+    // using the canonical path for containment validation above.
+    let compatible = crate::platform::os::platform_compat_path(&path.to_string_lossy());
+    file_ingest::ingest_attachment(&compatible)
 }
 
 /// Append one HTML5 drop chunk inside a session-owned workspace.
@@ -239,6 +422,9 @@ async fn cleanup_stale_staging(workspace: &Path, keep_upload_id: &str) {
 /// Incomplete bytes live below `.pinvou3/attachment-drop-staging/`. Commit is
 /// an atomic rename into `attachments/<upload_id>/`, so the application keeps
 /// exactly one managed copy and session deletion owns its final lifecycle.
+/// When the client provides a whole-file SHA-256 on the committing chunk the
+/// assembled staging file is re-hashed before the rename, so corrupted bytes
+/// from the transport never reach the ingest pipeline.
 pub async fn append_chunk(
     workspace: &Path,
     upload_id: &str,
@@ -247,11 +433,15 @@ pub async fn append_chunk(
     total: usize,
     data: &[u8],
     commit: bool,
+    sha256: Option<&str>,
 ) -> Result<Option<IngestResult>, String> {
     let upload_id = validate_upload_id(upload_id)?;
     let filename = validate_filename(filename)?;
-    if total == 0 || total as u64 > MAX_FILE_BYTES {
-        return Err("附件为空或超过 20 MiB 上限".into());
+    if total == 0 {
+        return Err("附件为空".into());
+    }
+    if total as u64 > MAX_FILE_BYTES {
+        return Err(file_ingest::ATTACHMENT_FILE_TOO_LARGE.into());
     }
     if data.len() > MAX_ATTACHMENT_CHUNK_BYTES {
         return Err("附件分块超过 256 KiB".into());
@@ -266,7 +456,6 @@ pub async fn append_chunk(
     let staging_dir = upload_staging_dir(workspace, upload_id);
     let staging_path = staging_dir.join(filename);
     if offset == 0 {
-        cleanup_stale_staging(workspace, upload_id).await;
         remove_dir_if_present(&staging_dir).await?;
         tokio::fs::create_dir_all(&staging_dir)
             .await
@@ -305,6 +494,9 @@ pub async fn append_chunk(
     if end != total {
         return Err(format!("附件提交大小不完整：应为 {total}，实际为 {end}"));
     }
+    if let Some(expected) = sha256 {
+        verify_staging_sha256(&staging_path, expected).await?;
+    }
 
     let completed_dir = upload_completed_dir(workspace, upload_id);
     tokio::fs::create_dir_all(completed_root(workspace))
@@ -317,7 +509,14 @@ pub async fn append_chunk(
         .await
         .map_err(|error| format!("提交会话附件失败：{error}"))?;
     let completed_path = completed_dir.join(filename);
-    Ok(Some(file_ingest::ingest(&completed_path)))
+    let result = match ingest_managed_file(&completed_path) {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = remove_dir_if_present(&completed_dir).await;
+            return Err(error);
+        }
+    };
+    Ok(Some(result))
 }
 
 /// Clean up bytes from a failed append without touching a previously completed
@@ -388,12 +587,24 @@ pub async fn discard_attachment(workspace: &Path, path: &str) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::{
-        abort_staging_upload, append_chunk, conversation_attachment_names_for_display_prefix,
-        conversation_attachment_refs_path, discard_attachment, record_conversation_attachments,
-        resolve_conversation_attachment, upload_staging_dir, validate_filename, validate_upload_id,
         ConversationAttachmentRecord, ConversationAttachmentReference, MAX_ATTACHMENT_CHUNK_BYTES,
+        MAX_FILE_BYTES, STALE_ATTACHMENT_AGE, abort_staging_upload, adopt_upload, append_chunk,
+        append_draft_chunk_in_workspace, conversation_attachment_names_for_display_prefix,
+        conversation_attachment_refs_path, discard_attachment, record_conversation_attachments,
+        resolve_conversation_attachment, sweep_stale_draft_attachment_workspace,
+        upload_staging_dir, validate_filename, validate_upload_id,
     };
     use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    fn set_file_modified(path: &std::path::Path, modified: SystemTime) {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
 
     fn test_workspace(name: &str) -> PathBuf {
         crate::platform::os::user_home_dir().join(format!(
@@ -421,6 +632,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn startup_sweep_removes_stale_staging_and_completed_drafts() {
+        let workspace = test_workspace("startup-sweep");
+        let staging = super::staging_root(&workspace).join("desktop_attach_stale_staging");
+        let completed = super::completed_root(&workspace).join("desktop_attach_stale_completed");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::create_dir_all(&completed).unwrap();
+        std::fs::write(staging.join("partial.bin"), b"partial").unwrap();
+        std::fs::write(completed.join("draft.txt"), b"draft").unwrap();
+
+        assert_eq!(
+            sweep_stale_draft_attachment_workspace(&workspace, std::time::SystemTime::now()),
+            0
+        );
+        assert!(staging.exists());
+        assert!(completed.exists());
+
+        let after_ttl =
+            std::time::SystemTime::now() + STALE_ATTACHMENT_AGE + Duration::from_secs(1);
+        assert_eq!(
+            sweep_stale_draft_attachment_workspace(&workspace, after_ttl),
+            2
+        );
+        assert!(!staging.exists());
+        assert!(!completed.exists());
+        assert!(workspace.exists());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn startup_sweep_preserves_unknown_entries_and_shapes() {
+        let workspace = test_workspace("startup-sweep-unknown");
+        let root = super::completed_root(&workspace);
+        let managed = root.join("desktop_attach_managed_old");
+        let unknown_name = root.join("unknown.dir");
+        let unknown_shape = root.join("desktop_attach_unexpected_shape");
+        let unknown_file = root.join("README.txt");
+        for directory in [&managed, &unknown_name, &unknown_shape] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(managed.join("managed.txt"), b"managed").unwrap();
+        std::fs::write(unknown_name.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(unknown_shape.join("one.txt"), b"one").unwrap();
+        std::fs::write(unknown_shape.join("two.txt"), b"two").unwrap();
+        std::fs::write(&unknown_file, b"keep").unwrap();
+
+        let after_ttl = SystemTime::now() + STALE_ATTACHMENT_AGE + Duration::from_secs(1);
+        assert_eq!(
+            sweep_stale_draft_attachment_workspace(&workspace, after_ttl),
+            1
+        );
+        assert!(!managed.exists());
+        assert!(unknown_name.join("keep.txt").exists());
+        assert!(unknown_shape.join("one.txt").exists());
+        assert!(unknown_shape.join("two.txt").exists());
+        assert!(unknown_file.exists());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn startup_sweep_rejects_replaced_root_without_touching_external_data() {
+        let workspace = test_workspace("startup-sweep-link-root");
+        let outside = test_workspace("startup-sweep-link-outside");
+        let outside_upload = outside.join("desktop_attach_external_old");
+        let outside_file = outside_upload.join("outside.txt");
+        std::fs::create_dir_all(&outside_upload).unwrap();
+        std::fs::write(&outside_file, b"must survive").unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let replaced_root = super::completed_root(&workspace);
+        crate::features::files::platform::stale_attachment_cleanup::create_test_directory_link(
+            &outside,
+            &replaced_root,
+        );
+
+        let after_ttl = SystemTime::now() + STALE_ATTACHMENT_AGE + Duration::from_secs(1);
+        assert_eq!(
+            sweep_stale_draft_attachment_workspace(&workspace, after_ttl),
+            0
+        );
+        assert_eq!(std::fs::read(&outside_file).unwrap(), b"must survive");
+
+        crate::features::files::platform::stale_attachment_cleanup::remove_test_directory_link(
+            &replaced_root,
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[tokio::test]
+    async fn later_upload_keeps_stale_but_still_active_completed_draft() {
+        let workspace = test_workspace("long-lived-composer");
+        let active_upload = super::completed_root(&workspace).join("desktop_attach_active_old");
+        let active_file = active_upload.join("old.txt");
+        std::fs::create_dir_all(&active_upload).unwrap();
+        std::fs::write(&active_file, b"still referenced by composer").unwrap();
+        set_file_modified(
+            &active_file,
+            SystemTime::now()
+                .checked_sub(STALE_ATTACHMENT_AGE + Duration::from_secs(1))
+                .unwrap(),
+        );
+        let new_bytes = b"new upload";
+        append_draft_chunk_in_workspace(
+            &workspace,
+            "desktop_attach_new_upload",
+            "new.txt",
+            0,
+            new_bytes.len(),
+            new_bytes,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(active_upload.join("old.txt")).unwrap(),
+            b"still referenced by composer"
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
     #[tokio::test]
     async fn commits_once_into_session_workspace_and_discards_safely() {
         let workspace = test_workspace("lifecycle");
@@ -434,6 +767,7 @@ mod tests {
             bytes.len(),
             bytes,
             true,
+            None,
         )
         .await
         .unwrap()
@@ -445,11 +779,13 @@ mod tests {
             .join("hello.txt");
         assert_eq!(PathBuf::from(&result.path), expected);
         assert_eq!(std::fs::read(&expected).unwrap(), bytes);
-        assert!(!workspace
-            .join(".pinvou3")
-            .join("attachment-drop-staging")
-            .join(upload_id)
-            .exists());
+        assert!(
+            !workspace
+                .join(".pinvou3")
+                .join("attachment-drop-staging")
+                .join(upload_id)
+                .exists()
+        );
 
         discard_attachment(&workspace, &result.path).await.unwrap();
         assert!(!expected.exists());
@@ -461,18 +797,43 @@ mod tests {
     async fn rejects_oversized_chunks_without_writing() {
         let workspace = test_workspace("chunk-cap");
         let bytes = vec![0_u8; MAX_ATTACHMENT_CHUNK_BYTES + 1];
-        assert!(append_chunk(
-            &workspace,
-            "desktop_attach_chunk_cap",
-            "large.bin",
-            0,
-            bytes.len(),
-            &bytes,
-            true,
-        )
-        .await
-        .is_err());
+        assert!(
+            append_chunk(
+                &workspace,
+                "desktop_attach_chunk_cap",
+                "large.bin",
+                0,
+                bytes.len(),
+                &bytes,
+                true,
+                None,
+            )
+            .await
+            .is_err()
+        );
         assert!(!workspace.exists());
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_declared_attachment_before_writing() {
+        let workspace = test_workspace("file-cap");
+        let upload_id = "desktop_attach_file_cap";
+        assert_eq!(
+            append_chunk(
+                &workspace,
+                upload_id,
+                "large.bin",
+                0,
+                MAX_FILE_BYTES as usize + 1,
+                &[],
+                false,
+                None,
+            )
+            .await
+            .unwrap_err(),
+            crate::features::files::file_ingest::ATTACHMENT_FILE_TOO_LARGE
+        );
+        assert!(!upload_staging_dir(&workspace, upload_id).exists());
     }
 
     #[tokio::test]
@@ -487,26 +848,137 @@ mod tests {
             8,
             b"original",
             true,
+            None,
         )
         .await
         .unwrap()
         .unwrap();
 
-        assert!(append_chunk(
-            &workspace,
-            upload_id,
-            "replacement.txt",
-            0,
-            11,
-            b"replacement",
-            true,
-        )
-        .await
-        .is_err());
+        assert!(
+            append_chunk(
+                &workspace,
+                upload_id,
+                "replacement.txt",
+                0,
+                11,
+                b"replacement",
+                true,
+                None,
+            )
+            .await
+            .is_err()
+        );
         abort_staging_upload(&workspace, upload_id).await.unwrap();
 
         assert_eq!(std::fs::read(&original.path).unwrap(), b"original");
         assert!(!upload_staging_dir(&workspace, upload_id).exists());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn adopts_sessionless_draft_into_target_workspace_idempotently() {
+        let source_workspace = test_workspace("draft-source");
+        let target_workspace = test_workspace("draft-target");
+        let upload_id = "desktop_attach_adopt_draft";
+        let bytes = b"draft attachment";
+        let source = append_chunk(
+            &source_workspace,
+            upload_id,
+            "draft.txt",
+            0,
+            bytes.len(),
+            bytes,
+            true,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let adopted = adopt_upload(&source_workspace, &target_workspace, upload_id)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&adopted.path).unwrap(), bytes);
+        assert!(!std::path::Path::new(&source.path).exists());
+        assert!(std::path::Path::new(&adopted.path).starts_with(&target_workspace));
+
+        let retried = adopt_upload(&source_workspace, &target_workspace, upload_id)
+            .await
+            .unwrap();
+        assert_eq!(retried.path, adopted.path);
+
+        if source_workspace.exists() {
+            std::fs::remove_dir_all(source_workspace).unwrap();
+        }
+        std::fs::remove_dir_all(target_workspace).unwrap();
+    }
+
+    #[tokio::test]
+    async fn commit_verifies_client_provided_sha256() {
+        use sha2::{Digest, Sha256};
+
+        let workspace = test_workspace("sha256-commit");
+        let upload_id = "desktop_attach_sha256";
+        let bytes = b"integrity checked payload";
+
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        let good = crate::platform::encoding::hex_lower(&hasher.finalize());
+
+        let committed = append_chunk(
+            &workspace,
+            upload_id,
+            "notes.txt",
+            0,
+            bytes.len(),
+            bytes,
+            true,
+            Some(&good),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(std::fs::read(&committed.path).unwrap(), bytes);
+
+        // A digest that does not match the assembled staging file must abort
+        // the commit and leave no completed upload behind.
+        assert!(
+            append_chunk(
+                &workspace,
+                "desktop_attach_sha256_bad",
+                "notes.txt",
+                0,
+                bytes.len(),
+                bytes,
+                true,
+                Some(&"a".repeat(64)),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            !workspace
+                .join("attachments")
+                .join("desktop_attach_sha256_bad")
+                .exists()
+        );
+
+        // Malformed digests are rejected before hashing.
+        assert!(
+            append_chunk(
+                &workspace,
+                "desktop_attach_sha256_invalid",
+                "notes.txt",
+                0,
+                bytes.len(),
+                bytes,
+                true,
+                Some("not-hex"),
+            )
+            .await
+            .is_err()
+        );
+
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
@@ -604,16 +1076,18 @@ mod tests {
             .unwrap(),
             replacement
         );
-        assert!(resolve_conversation_attachment(
-            &workspace,
-            "session-a",
-            false,
-            3,
-            0,
-            "one.txt",
-            "first",
-        )
-        .is_err());
+        assert!(
+            resolve_conversation_attachment(
+                &workspace,
+                "session-a",
+                false,
+                3,
+                0,
+                "one.txt",
+                "first",
+            )
+            .is_err()
+        );
         assert_eq!(
             resolve_conversation_attachment(
                 &workspace,
@@ -627,26 +1101,30 @@ mod tests {
             .unwrap(),
             second
         );
-        assert!(resolve_conversation_attachment(
-            &workspace,
-            "session-a",
-            false,
-            3,
-            0,
-            "two.txt",
-            "first",
-        )
-        .is_err());
-        assert!(resolve_conversation_attachment(
-            &workspace,
-            "session-b",
-            false,
-            4,
-            0,
-            "two.txt",
-            "second",
-        )
-        .is_err());
+        assert!(
+            resolve_conversation_attachment(
+                &workspace,
+                "session-a",
+                false,
+                3,
+                0,
+                "two.txt",
+                "first",
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_conversation_attachment(
+                &workspace,
+                "session-b",
+                false,
+                4,
+                0,
+                "two.txt",
+                "second",
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
@@ -696,16 +1174,18 @@ mod tests {
             .unwrap(),
             file
         );
-        assert!(resolve_conversation_attachment(
-            &workspace,
-            "scheduled-session",
-            false,
-            0,
-            0,
-            "legacy.txt",
-            "legacy display",
-        )
-        .is_err());
+        assert!(
+            resolve_conversation_attachment(
+                &workspace,
+                "scheduled-session",
+                false,
+                0,
+                0,
+                "legacy.txt",
+                "legacy display",
+            )
+            .is_err()
+        );
         std::fs::remove_dir_all(workspace).unwrap();
     }
 
@@ -742,16 +1222,18 @@ mod tests {
         }
 
         for session_id in ["session-a", "session-b"] {
-            assert!(resolve_conversation_attachment(
-                &workspace,
-                session_id,
-                false,
-                0,
-                0,
-                &format!("{session_id}.txt"),
-                "display text is not an identity",
-            )
-            .is_ok());
+            assert!(
+                resolve_conversation_attachment(
+                    &workspace,
+                    session_id,
+                    false,
+                    0,
+                    0,
+                    &format!("{session_id}.txt"),
+                    "display text is not an identity",
+                )
+                .is_ok()
+            );
         }
         std::fs::remove_dir_all(workspace).unwrap();
     }

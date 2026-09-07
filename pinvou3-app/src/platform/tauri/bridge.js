@@ -27,15 +27,7 @@
     return;
   }
 
-  var invokeErrorObserver = function () {};
-  var modelAvailabilityError = function () { return null; };
-  const rawInvoke = TAURI.core.invoke;
-  const invoke = function (command, args) {
-    return rawInvoke(command, args).catch(function (error) {
-      invokeErrorObserver(error, command);
-      throw error;
-    });
-  };
+  const invoke = TAURI.core.invoke;
   const { listen } = TAURI.event;
   const dialogOpen = TAURI.dialog?.open;
   const dialogSave = TAURI.dialog?.save;
@@ -131,30 +123,27 @@
   // 关键:在 marked.parse 【之后】做替换,而不是之前。原因:marked 给代码块/inline code 的
   // 输出本身就已经把 < 转义成 &lt;(不会有真 <script>),只有用户在正文里裸写 HTML 时才会
   // 透传出 <script>。post-process 只命中后者,不会双重转义代码块里的 `<script>` 字面量。
-  var DANGEROUS_TAGS_RE = /<(\/?(?:script|style|iframe|object|embed|link|meta)\b[^>]*)>/gi;
-  function neutralizeRawDangerousTags(html) {
-    return html.replace(DANGEROUS_TAGS_RE, function (_, inner) { return "&lt;" + inner + "&gt;"; });
-  }
-  function renderMarkdown(text) {
-    if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
-      return window.PinvouMarkdownRenderer.renderMarkdown(text);
-    }
-    if (!window.marked || !window.DOMPurify) return escapeHtml(text);
-    var html = neutralizeRawDangerousTags(marked.parse(text || ""));
-    return DOMPurify.sanitize(html, {
-      // 兜底:即使 neutralize 有漏网(罕见 HTML 注释/CDATA 等),DOMPurify 仍剥掉这些
-      FORBID_TAGS: ["style", "iframe", "object", "embed", "link", "meta"],
-      FORBID_ATTR: ["onerror", "onload", "onclick", "onmouseover", "onfocus", "onblur"],
-    });
-  }
+  // 优先委托共享渲染器 window.PinvouMarkdownRenderer（npm 版，含语法高亮）；在其尚未安装的
+  // 短暂窗口退回 vendor 全局兜底。兜底实现已收敛到 shared/markdown-bridge-fallback.js
+  // （随 index.html 以普通脚本加载，暴露 window.PinvouMarkdownBridgeFallback），消除两份逐字复制。
+  // 最末级 fallback 必须自带 escapeHtml：共享脚本未加载时 renderMarkdown 仍会被
+  // dangerouslySetInnerHTML 消费，原文返回即 fail-open。escapeHtml 作为安全原语保留在本文件
+  // （不依赖任何外部脚本），仅 marked.parse+sanitize 这段较重的兜底被抽到共享文件。
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
     });
   }
-  if (window.marked) {
-    marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
+  function renderMarkdown(text) {
+    if (window.PinvouMarkdownRenderer && typeof window.PinvouMarkdownRenderer.renderMarkdown === "function") {
+      return window.PinvouMarkdownRenderer.renderMarkdown(text);
+    }
+    if (window.PinvouMarkdownBridgeFallback && typeof window.PinvouMarkdownBridgeFallback.renderMarkdown === "function") {
+      return window.PinvouMarkdownBridgeFallback.renderMarkdown(text);
+    }
+    return escapeHtml(text || "");
   }
+
 
   // The pet is a separate WebView and must not own a second copy of the main
   // application state. Keep only the renderer used by its activity cards and
@@ -220,6 +209,9 @@
     pinvouReviews: [],
     // 专业子模式用户消息标签(sidecar, 不进 messages/LLM)。每项 {pos, scene}。
     pinvouSceneEvents: [],
+    // mid-turn steer 消息位置标记(sidecar, 不进 messages/LLM)。每项 {pos, text}：
+    // steer 落盘与 admission 对齐、无 <turn_meta> 尾块, 重载靠它恢复 steeredMidTurn。
+    steeredMessages: [],
     // Pinvou 检阅结果弹窗(不进对话流);null=关闭。一次只一个,裁决/跳过直接操作它的 review、不靠 pos。
     pinvouModal: null,
     // 本 turn 被 write/append/edit 改过的产物 path(去重)。chat:done 时给每个补一张成品卡
@@ -241,8 +233,12 @@
       codexAcpSupported: false,
       teamRelaySupported: true,
       accountPlatformEnabled: false,
+      browserNativeDisplay: false,
+      browserAgentAutomation: false,
+      browserCdp: false,
     },
     settings: null,
+    behaviorTelemetry: null,
     selectedPet: "lingling",
     memory: {
       loading: false,
@@ -267,6 +263,14 @@
     pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
+    // 三个工作区 lane（work/design/code）的全局默认 mode（null=该 lane 未显式
+    // 选过；缺省 code→plan、work/design→yolo）。草稿态 chip 显示与切换的事实源，
+    // 启动时经 get_mode_defaults 拉取；草稿切换经 set_mode_default 写回。
+    modeDefaults: { work: null, design: null, code: null },
+    // 当前聊天页所处 lane（work/design；code 页车道有自己的草稿控件逻辑）。
+    // lane 是纯前端概念，由 ChatView 随 pinvouMode 显式传入，bridge 不读
+    // localStorage。
+    modeLane: "work",
     // 草稿态寄存的多智能体开关意图：不物化会话，首条消息创建会话时落后端。
     pendingDraftMultiAgent: false,
     // 最新 plan/todos 快照（用于 mode header 进度 chip，与 plan_ready 卡解耦）
@@ -281,33 +285,13 @@
     queued: [],
     // 输入框待发附件 [{ id, basename, status:'parsing'|'ready'|'error', result, error }]
     attachments: [],
-    attachmentDragActive: false,
-    // token 预算（input_tokens / maxModelLen）
-    tokens: { input: 0, max: 32768 },
+    // Token budget (input_tokens / maxModelLen). max=0 means the window is
+    // unknown: the context meter line stays hidden (its render guard needs
+    // max > 0) until a real window lands — a chat:usage context_window or a
+    // local backend max_model_len. No fabricated denominator.
+    tokens: { input: 0, max: 0 },
     // 思考指示器：active 时 React 渲染计时气泡（Braille + 思考中/调用工具 + 秒数）
     thinking: { active: false, phase: "thinking", toolName: "", startedAt: 0 },
-    // 工作流状态
-    workflow: {
-      skills: [],
-      loadState: "idle", // idle | loading | ready | error
-      activeSkillName: null,
-      phases: [],
-      currentPhaseId: null,
-      reachedPhaseIds: [],
-      bindings: {},      // session_id → skill_name
-      demo: null,        // { open, name, loading, kind, content, error, description, duration }
-      // 卡片流工作流运行态（无聊天，事件驱动看板）。详见 09-ui-plane 决策。
-      run: {
-        active: false,       // 是否有进行中的工作流
-        sessionId: null,
-        projectDir: null,
-        scenario: null,
-        status: "idle",      // idle | running | complete | blocked | stopped
-        agents: {},          // role_id → { id, name, status, last_gate_verdict, outputs_present, last_run_ts, depends_on }
-        cards: [],           // 底部交互卡片队列 [{ cardId, kind:'user_input'|'gate'|'system', resolved, ... }]
-        selectedRole: null,  // 右抽屉选中的角色
-      },
-    },
     // 卡片池: 专家面具。activePersona = 当前 session 加持的专家卡(完整对象)或 null,
     // 驱动聊天室右上角挂件。
     activePersona: null,
@@ -315,9 +299,10 @@
     // 仅驻内存(后端也只驻内存),重启回到未挂载。名字由前端用知识集列表解析。
     mountedCollection: null,
     mountedCollections: [],
+    mountedRemoteCollections: [],
     mountedCollectionsRevision: 0,
     // personaPool 只放轻量元信息(loadState),1078 张卡放模块级 personaPoolCache,
-    // 不进 notify() 的 JSON 深拷贝(否则每个流式 token 都克隆 ~950KB,卡顿)。
+    // 不进 state/订阅快照，避免每个流式 token 都复制完整卡池。
     personaPool: { loadState: "idle" }, // idle | loading | ready | error
     // 应用内升级: updateInfo = check_for_update 返回值(available=true 才有意义)
     appVersion: null,
@@ -330,6 +315,7 @@
       status: "idle",
       relay_url: "",
       web_client_connected: false,
+      host_workspace_authorized: false,
       last_error: null,
       starting: false,
     },
@@ -378,7 +364,7 @@
       startupLoading: false, // 已安装模型在首帧后的后台加载状态
       startupReady: null, // null=未知；true=当前进程可用；false=未安装或加载失败
       status: null,       // kb_model_status 返回 { installed, ready, loading, downloading, ... }
-      progress: null,     // kb_model:progress 事件 { stage:'download'|'verify'|'extract'|'done', downloaded, total, ready }
+      progress: null,     // kb_model:progress 事件 { stage:'download'|'verify'|'prepare'|'done', downloaded, total, ready }
       error: null,
     },
     scheduledTasks: [],
@@ -407,6 +393,7 @@
       workspaceError: null,
       uploadProgress: null,
       lastSyncedAt: null,
+      syncPending: false,
     },
     // 「通过聊天创建」的引导词:只随该会话首条消息发给模型,永不显示在气泡里。
     scheduledTaskPendingGuide: null,
@@ -432,25 +419,71 @@
       console.info.apply(console, arguments);
     }
   }
+  function recordAuthoritySyncDiagnostic(event, details) {
+    try {
+      var diagnostics = window.PinvouAuthoritySyncDiagnostics;
+      if (diagnostics && typeof diagnostics.record === "function") {
+        diagnostics.record(event, details || {});
+      }
+    } catch (_) {}
+  }
+  function authoritySyncBufferSnapshot(sid, buf) {
+    return {
+      session_id: sid || "",
+      active_session_id: state.activeSessionId || "",
+      buffer_present: !!buf,
+      local_turn_owned: !!(buf && buf.localTurnOwned),
+      remote_turn_active: !!(buf && buf.remoteTurnActive),
+      remote_terminal_seen: !!(buf && buf.remoteTerminalSeen),
+      loaded_from_disk: !!(buf && buf.loadedFromDisk),
+      buffer_busy: !!(buf && buf.busy),
+      ui_busy: !!state.busy,
+      message_count: buf && Array.isArray(buf.messages) ? buf.messages.length : null,
+      chat_item_count: buf && Array.isArray(buf.chatItems) ? buf.chatItems.length : null,
+      queued_count: buf && Array.isArray(buf.queued) ? buf.queued.length : null,
+      session_revision: String(buf && buf.sessionRevision || ""),
+      committed_revision: String(buf && buf.remoteCommittedRevision || ""),
+      expected_assistant_key_length: String(buf && buf.remoteExpectedAssistantKey || "").length,
+      baseline_message_count: buf && buf.remoteBaselineMessageCount != null
+        ? Number(buf.remoteBaselineMessageCount)
+        : null,
+      baseline_trusted: !!(buf && buf.remoteBaselineTrusted),
+    };
+  }
 
   // ── bridge 层 UI 文案（系统消息/状态标签）──────────────────────
   // bridge 在事件回调里生成文案,拿不到 React 的 t;按 state.settings.language 取词,中文兜底。
-  // 注意:发给 LLM 的指令不在此表,保持中文。
+  // 发给 LLM 的检阅/计划补充指令也按界面语言取词。
   var BT_TABLE = {
     en: {
       newChatFailed: "⚠️ Failed to create chat: ", loadChatFailed: "⚠️ Failed to load chat: ", deleteFailed: "⚠️ Delete failed: ",
       personaUnequipped: "🎴 Expert card removed: ",
+      reviewFixHeader: "Apply the review notes below — **revise only the targeted sections, do not rewrite the whole document**:",
+      reviewVerifyHeader: "The items below involve external facts — **verify first, cite your sources, and don't edit from memory**:",
+      reviewAdoptHeader: "The following decisions are final — update the artifacts accordingly:",
+      reviewAskHeader: "For the pending items below, ask me formally via request_user_input instead of guessing:",
+      reviewFillHeader: "The artifact is still missing the dimensions below — add them (keep everything else; add only, don't rewrite):",
+      reviewFillFooter: "(For anything involving external facts, verify before writing and cite sources — don't fabricate from memory.)",
+      planStuckReplanPrompt: "Use the todo_write tool to lay out the full plan steps — don't call write tools directly.",
+      planStuckGoPrompt: "Continue the task per the plan discussed above — write files / run commands directly; no more plan discussion.",
       planHistorical: "📜 Past plan", planSuperseded: "📜 Superseded by a newer plan",
       attachStillParsing: "⚠️ Attachment still parsing, try again shortly",
+      imageUnsupported: "The current model does not support images. Switch to an image-capable model, or configure a vision model in model settings.",
+      imageUnknown: "Image input capability of the current model is unknown. If it supports images, set image input to “Supports images” in model settings; you can also configure a vision model.",
       turnAlreadyInProgress: "⚠️ This chat is already processing a turn. The duplicate send was not executed.",
+      steerDropped: "Queued message was not delivered (turn interrupted), cancelled",
+      steerFailed: "Interrupt failed (session unavailable or engine not running); your text was restored to the input",
+      interruptQueuedFailed: "Interrupt & send failed; the message was restored to the queue",
+      interruptBusy: "Another interrupt is already in progress; the message stays queued — retry in a moment",
       compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactAuto: " (auto)",
       compactPruneMerged: "Auto-compaction: tool-result cleanup, messages unchanged",
+      compactInactive: "The session engine is not running yet. Send a message before compacting the context",
       gpuUnavailable: "GPU info unavailable",
       cpuUnavailable: "CPU info unavailable",
       superOn: "⚠️ Super permission enabled", superOff: "Super permission disabled",
       approved: "✅ Approved", echoGo: "✅ Do it",
       acceptPlanFailed: "⚠️ accept_plan failed: ",
-      planDiscarded: "🚪 Plan discarded", discardPlanFailed: "⚠️ discard_plan failed: ", exitPlanFailed: "⚠️ Failed to exit Plan: ", switchModeFailed: "⚠️ Failed to switch mode: ",
+      planDiscarded: "🚪 Plan discarded", discardPlanFailed: "⚠️ discard_plan failed: ", exitPlanFailed: "⚠️ Failed to exit Plan: ", switchModeFailed: "⚠️ Failed to switch mode: ", planContinueFailed: "⚠️ Failed to send continue instruction: ",
       replanRequested: "📋 Asking the AI to re-plan…",
       openFailed: "⚠️ Open failed: ", pasteImageFailed: "⚠️ Paste image failed: ",
       filePickUnavailable: "⚠️ File picker unavailable", filePickFailed: "⚠️ File selection failed: ",
@@ -475,7 +508,7 @@
       voiceRecognitionFailed: "Speech recognition failed. Please try again later.",
       voiceInputFailed: "Voice input failed. Check the microphone and try again.",
       voiceCancelled: "Voice input cancelled",
-      voiceDeviceTimeout: "Microphone detection timed out; no recording device found. Check the device connection and Windows microphone settings, then try again.",
+      voiceDeviceTimeout: "Microphone detection timed out; no recording device found. Check the device connection and the system microphone settings, then try again.",
       voiceTranscribing: "Transcribing…",
       voiceRecordingTooShort: "Recording is too short. Please try again.",
       voiceWrittenBack: "Transcribed text inserted into the input box",
@@ -485,33 +518,18 @@
       voiceWebviewNoRecording: "This WebView does not support audio recording.",
       voiceNoDeviceConnect: "No available microphone detected. Connect or enable a recording device, then try again.",
       voiceRecording: "Recording… tap again to finish",
-      voicePermissionDeniedRetry: "Microphone permission was denied. Tap voice input again and choose Allow in the prompt; if it still fails, check Windows microphone settings.",
+      voicePermissionDeniedRetry: "Microphone permission was denied. Tap voice input again and choose Allow in the prompt; if it still fails, check the system microphone settings.",
       scheduledDraftInvalid: "The scheduled task draft is missing a name, task description, or schedule rule",
       scheduledCreateFailed: "Failed to create scheduled task: ",
       scheduledTaskFallbackName: "Scheduled task",
       scheduledActionBusy: "Another scheduled task operation is still in progress",
       scheduledCreateNoId: "Failed to create scheduled task: backend returned no task ID",
       scheduledChatPrefill: "I want to create a scheduled task: ",
-      workflowBlockedPrefix: "⚙️ Workflow blocked: ",
-      workflowBlockedUnknown: "unknown reason",
-      workflowCompleteArtifact: "🎉 Workflow complete — deliverable generated",
-      workflowActivateFailed: "⚠️ Failed to activate workflow: ",
-      workflowCreateFailed: "⚠️ Failed to create workflow: ",
-      workflowStartFailed: "⚠️ Failed to start workflow: ",
-      workflowNoStoppableRun: "There is no workflow run to stop",
-      workflowSubmitFailed: "⚠️ Submit failed: ",
-      workflowMaterialsAdded: (count, names) => "✅ Added " + count + " material(s) to materials folder: " + names.join(", "),
-      workflowFolderPickerUnavailable: "Cannot open the folder picker in this environment",
-      workflowPickWorkDirTitle: "Choose a working directory",
+      pickFolderTitle: "Choose a working directory",
+      fileMediaFilterName: "Images and videos",
       kbPickFolderTitle: "Choose folders to import into the knowledge base",
-      workflowMediaFilterName: "Images and videos",
-      workflowApproveFailed: "⚠️ Approve failed: ",
-      workflowRejectFailed: "⚠️ Reject failed: ",
-      workflowRejectDefaultReason: "Sent back by the user. Please improve and try again.",
-      workflowRerunPrefix: "🔄 Rerun ",
-      workflowRerunFailed: "⚠️ Rerun failed: ",
       memoryWriteFailed: "Memory write failed: ", memoryIgnoreFailed: "Failed to ignore memory: ", memoryNeverFailed: "Failed to set \"never ask\": ",
-      attachNeedSession: "⚠️ Start a new chat before adding attachments", attachTooLarge: "Attachment exceeds the 20 MiB limit", attachEmptyFile: "Empty files cannot be added", attachAddCancelled: "Attachment add canceled", attachInvalidResult: "Attachment add returned no valid result",
+      attachNeedSession: "⚠️ Start a new chat before adding attachments", attachEmptyFile: "Empty files cannot be added", attachAddCancelled: "Attachment add canceled", attachInvalidResult: "Attachment add returned no valid result", deviceUploadFailed: "⚠️ Upload failed: ",
       planTicketInvalid: "⚠️ The plan credential is no longer valid. Regenerate the plan before executing.",
       remoteTurnSyncing: "⚠️ This chat is still syncing a turn finished on another device. Try again shortly.",
       mountCollectionFailed: "Failed to mount collection: ",
@@ -527,17 +545,32 @@
     ja: {
       newChatFailed: "⚠️ 新規チャットの作成に失敗: ", loadChatFailed: "⚠️ チャットの読み込みに失敗: ", deleteFailed: "⚠️ 削除に失敗: ",
       personaUnequipped: "🎴 エキスパートカードを外しました: ",
+      reviewFixHeader: "下のレビュー意見に従い、**該当するセクションのみを修正してください。全文の書き直しはしないでください**：",
+      reviewVerifyHeader: "以下の項目は外部事実に関わります。**必ず検証してから修正し、根拠を示してください（記憶に頼った編集はしないでください）**：",
+      reviewAdoptHeader: "以下の事項は確定しました。この通り成果物を更新してください：",
+      reviewAskHeader: "以下の未確定項目については、推測せず request_user_input で正式に私に質問してください：",
+      reviewFillHeader: "成果物には以下の観点が不足しています。補足してください（既存部分は保持し、追記のみで書き換えないでください）：",
+      reviewFillFooter: "（外部事実に関わる部分は、検証してから記述し、根拠を示してください。記憶からの創作はしないでください。）",
+      planStuckReplanPrompt: "todo_write ツールで計画の全ステップを出力してください。書き込み系ツールを直接実行しないでください。",
+      planStuckGoPrompt: "上で議論した計画に従ってタスクを続行してください。ファイルの書き込みやコマンドの実行を直接行い、計画の再議論はしないでください。",
       planHistorical: "📜 過去のプラン", planSuperseded: "📜 新しいプランで上書きされました",
       attachStillParsing: "⚠️ 添付ファイルを解析中です。少し待ってから送信してください",
+      imageUnsupported: "現在のモデルは画像に対応していません。画像対応モデルに切り替えるか、モデル設定でビジョンモデルを構成してください。",
+      imageUnknown: "現在のモデルの画像入力能力は不明です。画像に対応している場合は、モデル設定で画像入力能力を「画像対応」に設定してください。ビジョンモデルを構成することもできます。",
       turnAlreadyInProgress: "⚠️ このチャットでは別のターンを処理中です。重複した送信は実行されませんでした。",
+      steerDropped: "キューしたメッセージが未達（ターン中断）のため取り消しました",
+      steerFailed: "割り込みに失敗しました（セッション無効またはエンジン未起動）。内容は入力欄に復元しました",
+      interruptQueuedFailed: "割り込み送信に失敗しました。メッセージはキューに復元しました",
+      interruptBusy: "別の割り込みが進行中のため実行できません。メッセージはキューに残ります。しばらくしてから再試行してください",
       compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactAuto: "（自動）",
       compactPruneMerged: "自動圧縮: ツール結果を整理、メッセージ数は不変",
+      compactInactive: "セッション Engine はまだ起動していません。メッセージを送信してからコンテキストを圧縮してください",
       gpuUnavailable: "GPU 情報を取得できません",
       cpuUnavailable: "CPU 情報を取得できません",
       superOn: "⚠️ スーパー権限が有効になりました", superOff: "スーパー権限が無効になりました",
       approved: "✅ 承認済み", echoGo: "✅ これでいく",
       acceptPlanFailed: "⚠️ accept_plan に失敗: ",
-      planDiscarded: "🚪 プランを破棄", discardPlanFailed: "⚠️ discard_plan に失敗: ", exitPlanFailed: "⚠️ Plan の終了に失敗: ", switchModeFailed: "⚠️ モード切替に失敗: ",
+      planDiscarded: "🚪 プランを破棄", discardPlanFailed: "⚠️ discard_plan に失敗: ", exitPlanFailed: "⚠️ Plan の終了に失敗: ", switchModeFailed: "⚠️ モード切替に失敗: ", planContinueFailed: "⚠️ 継続指示の送信に失敗: ",
       replanRequested: "📋 AI にプランを出し直させています…",
       openFailed: "⚠️ 開けませんでした: ", pasteImageFailed: "⚠️ 画像の貼り付けに失敗: ",
       filePickUnavailable: "⚠️ ファイル選択を利用できません", filePickFailed: "⚠️ ファイル選択に失敗: ",
@@ -562,7 +595,7 @@
       voiceRecognitionFailed: "音声認識に失敗しました。しばらくしてから再試行してください。",
       voiceInputFailed: "音声入力に失敗しました。マイクを確認して再試行してください。",
       voiceCancelled: "音声入力をキャンセルしました",
-      voiceDeviceTimeout: "マイク検出がタイムアウトし、録音デバイスが見つかりませんでした。デバイスの接続と Windows のマイク設定を確認して再試行してください。",
+      voiceDeviceTimeout: "マイク検出がタイムアウトし、録音デバイスが見つかりませんでした。デバイスの接続とシステムのマイク設定を確認して再試行してください。",
       voiceTranscribing: "音声を認識中…",
       voiceRecordingTooShort: "録音時間が短すぎます。再試行してください。",
       voiceWrittenBack: "音声を入力ボックスに書き込みました",
@@ -572,33 +605,18 @@
       voiceWebviewNoRecording: "この WebView は音声録音に対応していません。",
       voiceNoDeviceConnect: "利用可能なマイクが見つかりません。録音デバイスを接続または有効にして再試行してください。",
       voiceRecording: "録音中です。もう一度タップすると終了します",
-      voicePermissionDeniedRetry: "マイクの権限が拒否されています。もう一度音声入力をタップし、許可を選択してください。それでも失敗する場合は Windows のマイク設定を確認してください。",
+      voicePermissionDeniedRetry: "マイクの権限が拒否されています。もう一度音声入力をタップし、許可を選択してください。それでも失敗する場合はシステムのマイク設定を確認してください。",
       scheduledDraftInvalid: "スケジュールタスクの下書きに名前・タスク説明・時間ルールのいずれかが不足しています",
       scheduledCreateFailed: "スケジュールタスクの作成に失敗：",
       scheduledTaskFallbackName: "スケジュールタスク",
       scheduledActionBusy: "別のスケジュールタスク操作がまだ実行中です",
       scheduledCreateNoId: "スケジュールタスクの作成に失敗：バックエンドがタスク ID を返しませんでした",
       scheduledChatPrefill: "スケジュールタスクを作成したい：",
-      workflowBlockedPrefix: "⚙️ ワークフローが停止：",
-      workflowBlockedUnknown: "原因不明",
-      workflowCompleteArtifact: "🎉 ワークフロー完了、成果物が生成されました",
-      workflowActivateFailed: "⚠️ ワークフローの有効化に失敗: ",
-      workflowCreateFailed: "⚠️ ワークフローの作成に失敗: ",
-      workflowStartFailed: "⚠️ ワークフローの開始に失敗: ",
-      workflowNoStoppableRun: "停止できるワークフローがありません",
-      workflowSubmitFailed: "⚠️ 送信に失敗: ",
-      workflowMaterialsAdded: (count, names) => "✅ 素材を " + count + " 件、付属資料に追加しました：" + names.join("、"),
-      workflowFolderPickerUnavailable: "現在の環境ではフォルダー選択を開けません",
-      workflowPickWorkDirTitle: "作業ディレクトリを選択",
+      pickFolderTitle: "作業ディレクトリを選択",
+      fileMediaFilterName: "画像と動画",
       kbPickFolderTitle: "知識ベースにインポートするフォルダーを選択",
-      workflowMediaFilterName: "画像と動画",
-      workflowApproveFailed: "⚠️ 承認に失敗: ",
-      workflowRejectFailed: "⚠️ 差し戻しに失敗: ",
-      workflowRejectDefaultReason: "ユーザーによる差し戻し。改善して再試行してください。",
-      workflowRerunPrefix: "🔄 再実行 ",
-      workflowRerunFailed: "⚠️ 再実行に失敗: ",
       memoryWriteFailed: "メモリの書き込みに失敗: ", memoryIgnoreFailed: "メモリの無視に失敗: ", memoryNeverFailed: "「今後表示しない」の設定に失敗: ",
-      attachNeedSession: "⚠️ 添付ファイルを追加する前に新しいチャットを開始してください", attachTooLarge: "添付ファイルが 20 MiB の上限を超えています", attachEmptyFile: "空のファイルは追加できません", attachAddCancelled: "添付ファイルの追加はキャンセルされました", attachInvalidResult: "添付ファイルの追加で有効な結果が返されませんでした",
+      attachNeedSession: "⚠️ 添付ファイルを追加する前に新しいチャットを開始してください", attachEmptyFile: "空のファイルは追加できません", attachAddCancelled: "添付ファイルの追加はキャンセルされました", attachInvalidResult: "添付ファイルの追加で有効な結果が返されませんでした", deviceUploadFailed: "⚠️ アップロードに失敗: ",
       planTicketInvalid: "⚠️ プランの資格情報が無効になりました。プランを再生成してから実行してください。",
       remoteTurnSyncing: "⚠️ このセッションは別の端末で完了したターンを同期中です。しばらくしてから再試行してください。",
       mountCollectionFailed: "ナレッジセットのマウントに失敗: ",
@@ -614,17 +632,32 @@
     zh: {
       newChatFailed: "⚠️ 新建对话失败: ", loadChatFailed: "⚠️ 加载对话失败: ", deleteFailed: "⚠️ 删除失败: ",
       personaUnequipped: "🎴 已卸下专家卡牌: ",
+      reviewFixHeader: "请按下面的检阅意见，**只定向修改对应段落，不要全文重写**：",
+      reviewVerifyHeader: "以下几条涉及外部事实，**先查证再改、标明依据，别凭记忆直接改**：",
+      reviewAdoptHeader: "以下事项我已拍板，按此更新产物：",
+      reviewAskHeader: "以下待定项请用 request_user_input 正式问我，别自己猜：",
+      reviewFillHeader: "以下维度产物还缺，请补充进去（保留其余、只增不改）：",
+      reviewFillFooter: "（涉及外部事实的，先查证再写、标依据，别凭记忆编。）",
+      planStuckReplanPrompt: "请用 todo_write 工具输出完整方案步骤,不要直接调写工具。",
+      planStuckGoPrompt: "按上面讨论的方案继续执行任务,直接写文件/跑命令,不要再讨论方案。",
       planHistorical: "📜 历史方案", planSuperseded: "📜 已被新方案覆盖",
       attachStillParsing: "⚠️ 附件还在解析,请稍后再发",
+      imageUnsupported: "当前模型不支持图片。请切换到支持图片的模型，或在模型设置中配置视觉模型。",
+      imageUnknown: "当前模型的图片输入能力未知。如果它支持图片，请在模型设置中将图片输入能力设为“支持图片”后重试；也可以配置视觉模型。",
       turnAlreadyInProgress: "⚠️ 当前会话已有一轮正在处理，本次重复发送未执行。",
+      steerDropped: "排队消息未送达（回合中断），已取消",
+      steerFailed: "插队失败（会话不可用或引擎未运行），内容已恢复到输入框",
+      interruptQueuedFailed: "插队发送失败，消息已恢复到排队区",
+      interruptBusy: "已有打断正在进行，消息保留在排队区，请稍后重试",
       compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactAuto: "（自动）",
       compactPruneMerged: "自动压缩：已整理工具结果，消息数不变",
+      compactInactive: "会话引擎尚未运行。请先发送一条消息，再压缩上下文",
       gpuUnavailable: "GPU 信息不可用",
       cpuUnavailable: "CPU 信息不可用",
       superOn: "⚠️ 超级权限已开启", superOff: "超级权限已关闭",
       approved: "✅ 已批准", echoGo: "✅ 就这么干",
       acceptPlanFailed: "⚠️ accept_plan 失败: ",
-      planDiscarded: "🚪 已放弃此方案", discardPlanFailed: "⚠️ discard_plan 失败: ", exitPlanFailed: "⚠️ 退出 Plan 失败: ", switchModeFailed: "⚠️ 切换模式失败: ",
+      planDiscarded: "🚪 已放弃此方案", discardPlanFailed: "⚠️ discard_plan 失败: ", exitPlanFailed: "⚠️ 退出 Plan 失败: ", switchModeFailed: "⚠️ 切换模式失败: ", planContinueFailed: "⚠️ 发送继续执行指令失败: ",
       replanRequested: "📋 让 AI 重出方案…",
       openFailed: "⚠️ 打开失败: ", pasteImageFailed: "⚠️ 粘贴图片失败: ",
       filePickUnavailable: "⚠️ 文件选择不可用", filePickFailed: "⚠️ 选择文件失败: ",
@@ -649,7 +682,7 @@
       voiceRecognitionFailed: "语音识别失败，请稍后重试。",
       voiceInputFailed: "语音输入失败，请检查麦克风后重试。",
       voiceCancelled: "已取消语音输入",
-      voiceDeviceTimeout: "麦克风检测超时，未发现可用录音设备。请检查设备连接和 Windows 麦克风设置后重试。",
+      voiceDeviceTimeout: "麦克风检测超时，未发现可用录音设备。请检查设备连接和系统麦克风设置后重试。",
       voiceTranscribing: "正在识别语音…",
       voiceRecordingTooShort: "录音时间过短，请重试。",
       voiceWrittenBack: "语音已写入输入框",
@@ -659,33 +692,18 @@
       voiceWebviewNoRecording: "当前 WebView 不支持音频录制。",
       voiceNoDeviceConnect: "未检测到可用麦克风，请连接或启用录音设备后重试。",
       voiceRecording: "正在录音，再点一次结束",
-      voicePermissionDeniedRetry: "麦克风权限已被拒绝，请再次点击语音输入并在授权提示中选择允许；若仍失败，请检查 Windows 麦克风设置。",
+      voicePermissionDeniedRetry: "麦克风权限已被拒绝，请再次点击语音输入并在授权提示中选择允许；若仍失败，请检查系统麦克风设置。",
       scheduledDraftInvalid: "定时任务草稿缺少名称、任务说明或时间规则",
       scheduledCreateFailed: "定时任务创建失败：",
       scheduledTaskFallbackName: "定时任务",
       scheduledActionBusy: "另一个定时任务操作仍在进行中",
       scheduledCreateNoId: "创建定时任务失败：后端未返回任务 ID",
       scheduledChatPrefill: "我想创建一个定时任务：",
-      workflowBlockedPrefix: "⚙️ 工作流卡住：",
-      workflowBlockedUnknown: "未知原因",
-      workflowCompleteArtifact: "🎉 工作流完成，成品已生成",
-      workflowActivateFailed: "⚠️ 启用工作流失败: ",
-      workflowCreateFailed: "⚠️ 创建工作流失败: ",
-      workflowStartFailed: "⚠️ 启动工作流失败: ",
-      workflowNoStoppableRun: "当前没有可停止的工作流",
-      workflowSubmitFailed: "⚠️ 提交失败: ",
-      workflowMaterialsAdded: (count, names) => "✅ 已添加 " + count + " 个素材到配套材料：" + names.join("、"),
-      workflowFolderPickerUnavailable: "当前环境无法打开文件夹选择器",
-      workflowPickWorkDirTitle: "选择工作目录",
+      pickFolderTitle: "选择工作目录",
+      fileMediaFilterName: "图片和视频",
       kbPickFolderTitle: "选择要导入知识库的文件夹",
-      workflowMediaFilterName: "图片和视频",
-      workflowApproveFailed: "⚠️ 通过失败: ",
-      workflowRejectFailed: "⚠️ 打回失败: ",
-      workflowRejectDefaultReason: "用户打回，请改进后重试",
-      workflowRerunPrefix: "🔄 重跑 ",
-      workflowRerunFailed: "⚠️ 重跑失败: ",
       memoryWriteFailed: "记忆写入失败：", memoryIgnoreFailed: "忽略记忆失败：", memoryNeverFailed: "设置不再提示失败：",
-      attachNeedSession: "⚠️ 请先新建会话再添加附件", attachTooLarge: "附件超过 20 MiB 上限", attachEmptyFile: "空文件无法添加", attachAddCancelled: "附件添加已取消", attachInvalidResult: "附件添加未返回有效结果",
+      attachNeedSession: "⚠️ 请先新建会话再添加附件", attachEmptyFile: "空文件无法添加", attachAddCancelled: "附件添加已取消", attachInvalidResult: "附件添加未返回有效结果", deviceUploadFailed: "⚠️ 上传失败: ",
       planTicketInvalid: "⚠️ 方案凭证已失效，请重新生成方案后再执行",
       remoteTurnSyncing: "⚠️ 该会话仍在同步另一端完成的回合，请稍后重试",
       mountCollectionFailed: "挂载知识集失败: ",
@@ -704,6 +722,13 @@
     var m = lang === "en" ? BT_TABLE.en : lang === "ja" ? BT_TABLE.ja : BT_TABLE.zh;
     return m[key] !== undefined ? m[key] : BT_TABLE.zh[key];
   }
+  // 转交徽标从已持久化的消息正文恢复；消息沿用发送时的界面语言，
+  // 因此回放必须同时匹配三语，而不能只匹配当前语言。
+  function textMatchesBtKey(text, key) {
+    return text.indexOf(BT_TABLE.zh[key]) >= 0
+      || text.indexOf(BT_TABLE.en[key]) >= 0
+      || text.indexOf(BT_TABLE.ja[key]) >= 0;
+  }
   // 默认会话标题哨兵:三语兜底标题都视为占位(自动改名/显示映射的依据),
   // 与 web 桥和 main.jsx 的同款判断保持一致。
   function isDefaultChatTitle(title) {
@@ -719,19 +744,19 @@
   // 避免把后台渲染成 active。异步收尾(落盘)按显式 session_id 路由,不依赖工作集。
   var sessionStates = {};
   var authoritativeTranscriptSyncs = Object.create(null);
+  var authoritySyncTraceSequence = 0;
   var scheduledRunSessionOwners = Object.create(null);
   var MAX_SCHEDULED_SESSION_BUFFERS = 64;
   var MAX_SCHEDULED_RUN_SESSION_OWNERS = 64;
   var suppressNotify = false;
   function discardManagedAttachment(result) {
+    var draftUploadId = result && result.__pinvouManagedDraftAttachmentId;
+    if (draftUploadId) return invoke("cancel_draft_file_upload", { uploadId: draftUploadId })
+      .catch(function (error) { console.warn("[attachment] failed to discard draft attachment", error); });
     var sessionId = result && result.__pinvouManagedAttachmentSessionId;
     if (!sessionId || !result.path) return Promise.resolve();
-    return invoke("discard_dropped_attachment", {
-      sessionId: sessionId,
-      path: result.path,
-    }).catch(function (error) {
-      console.warn("[attachment] failed to discard managed attachment", error);
-    });
+    return invoke("discard_dropped_attachment", { sessionId: sessionId, path: result.path })
+      .catch(function (error) { console.warn("[attachment] failed to discard managed attachment", error); });
   }
   // sessionId → true:标题当前是「卡牌占位名」(加卡时自动取的),可被首条用户消息覆盖。
   // 卡牌名只在「加了卡但还没开口」时当临时标题;一旦开始对话,对话内容更能区分同卡会话。
@@ -818,6 +843,94 @@
     }
     return "";
   }
+  // ── Steered-message sidecar（mid-turn steer 位置标记）──────────────
+  // steer 落盘与普通 admission 对齐、不含 <turn_meta> 块（Rust sanitize 统一
+  // 剥离），重载投影无法再借信封反推"非 turn admission"，因此结算时把
+  // {pos, text} 显式持久化。text 用于压实/编辑漂移后的保守校验：重载时
+  // 仅在 pos 处展示文本一致才打 steeredMidTurn，失配退化为普通 admission，
+  // 与信封时代的最坏情况相同。
+  var STEERED_MESSAGES_STORAGE_PREFIX = "pinvou_steered_messages_v1:";
+  function steeredMessagesStorageKey(sid) {
+    return STEERED_MESSAGES_STORAGE_PREFIX + String(sid || "").trim();
+  }
+  function normalizeSteeredMessages(events) {
+    var byPos = {};
+    (Array.isArray(events) ? events : []).forEach(function (event) {
+      var pos = Number(event && event.pos);
+      var text = String(event && event.text != null ? event.text : "");
+      if (!Number.isFinite(pos) || pos < 0 || !text) return;
+      byPos[Math.floor(pos)] = { pos: Math.floor(pos), text };
+    });
+    return Object.keys(byPos).map(function (key) { return byPos[key]; })
+      .sort(function (left, right) { return left.pos - right.pos; });
+  }
+  function loadSteeredMessagesForSession(sid) {
+    if (!sid || !window.localStorage) return [];
+    try {
+      return normalizeSteeredMessages(JSON.parse(window.localStorage.getItem(steeredMessagesStorageKey(sid)) || "[]"));
+    } catch (_) {
+      return [];
+    }
+  }
+  function saveSteeredMessagesForSession(sid, events) {
+    if (!sid) return;
+    var normalized = normalizeSteeredMessages(events);
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(steeredMessagesStorageKey(sid), JSON.stringify(normalized));
+      }
+    } catch (_) {
+      // localStorage 只作离线缓存，写失败不影响后端 sidecar。
+    }
+    Promise.resolve().then(function () {
+      return invoke("save_session_steered_messages", {
+        sessionId: sid,
+        events: normalized,
+      });
+    }).catch(function () {});
+  }
+  async function syncSteeredMessagesForSession(sid) {
+    var cached = loadSteeredMessagesForSession(sid);
+    if (!sid) return cached;
+    try {
+      var remote = normalizeSteeredMessages(
+        await invoke("get_session_steered_messages", { sessionId: sid })
+      );
+      if (remote.length) {
+        try {
+          window.localStorage.setItem(steeredMessagesStorageKey(sid), JSON.stringify(remote));
+        } catch (_) { /* fall back to the remote data when the localStorage write fails */ }
+        return remote;
+      }
+      if (cached.length) {
+        await invoke("save_session_steered_messages", { sessionId: sid, events: cached });
+      }
+      return cached;
+    } catch (_) {
+      return cached;
+    }
+  }
+  // 合并写入一批 {pos, text}（同 pos 后写覆盖），并同步当前内存态（活动
+  // session 写 state，后台 session 写其 buffer）。返回归一化后的完整列表。
+  function recordSteeredMessages(sid, entries) {
+    if (!sid || !Array.isArray(entries) || !entries.length) return;
+    var base = sid === state.activeSessionId
+      ? state.steeredMessages
+      : (sessionStates[sid] && sessionStates[sid].steeredMessages) || loadSteeredMessagesForSession(sid);
+    var merged = normalizeSteeredMessages((Array.isArray(base) ? base : []).concat(entries));
+    if (sid === state.activeSessionId) state.steeredMessages = merged;
+    else if (sessionStates[sid]) sessionStates[sid].steeredMessages = merged;
+    saveSteeredMessagesForSession(sid, merged);
+  }
+  // 重载投影查询：pos 命中且展示文本一致才认（压实/编辑会让 pos 漂移，
+  // 文本校验防止把别的 admission 误标为 steer）。
+  function isSteeredMessagePos(pos, text) {
+    var events = normalizeSteeredMessages(state.steeredMessages);
+    for (var i = 0; i < events.length; i++) {
+      if (events[i].pos === pos) return events[i].text === String(text || "");
+    }
+    return false;
+  }
   var artifactTrackerFeature = installBridgeFeature("artifact-tracker", {
     state: state, invoke: invoke, sessionStates: sessionStates,
     notify: function () { return notify.apply(null, arguments); },
@@ -835,6 +948,7 @@
   var markTurnDirtyArtifact = artifactTrackerFeature.markTurnDirtyArtifact;
   var untrackArtifact = artifactTrackerFeature.untrackArtifact;
   var findPresentedArtifact = artifactTrackerFeature.findPresentedArtifact;
+  var updatePresentedArtifact = artifactTrackerFeature.updatePresentedArtifact;
   var reconcileArtifacts = artifactTrackerFeature.reconcileArtifacts;
   var extractArtifactPaths = artifactTrackerFeature.extractArtifactPaths;
   var extractArtifactPath = artifactTrackerFeature.extractArtifactPath;
@@ -849,7 +963,9 @@
     state: state, invoke: invoke, TAURI: TAURI,
     sessionStates: sessionStates, turnUsageDirty: turnUsageDirty,
     personaPlaceholderTitles: personaPlaceholderTitles,
-    renderMarkdown: renderMarkdown, safeConsoleInfo: safeConsoleInfo, bt: bt,
+    renderMarkdown: renderMarkdown, safeConsoleInfo: safeConsoleInfo,
+    recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
+    authoritySyncBufferSnapshot: authoritySyncBufferSnapshot, bt: bt,
     isDefaultChatTitle: isDefaultChatTitle,
     notify: function () { return notify.apply(null, arguments); },
     runSyncOnSession: function () { return runSyncOnSession.apply(null, arguments); },
@@ -859,17 +975,18 @@
     ensureSession: function () { return ensureSession.apply(null, arguments); },
     getBuffer: function () { return getBuffer.apply(null, arguments); },
     recordPinvouSceneForMessage: recordPinvouSceneForMessage,
+    recordSteeredMessages: recordSteeredMessages,
     reconcileRemoteTurn: function () { return reconcileRemoteTurn.apply(null, arguments); },
     markRemoteTurn: function () { return markRemoteTurn.apply(null, arguments); },
-    clearAttachments: function () { return clearAttachments.apply(null, arguments); },
+    adoptManagedAttachments: function () { return adoptManagedAttachments.apply(null, arguments); },
     discardManagedAttachment: discardManagedAttachment,
     isScheduledRunSession: function () { return isScheduledRunSession.apply(null, arguments); },
     basename: basename,
+    userMessageDisplayText: userMessageDisplayText,
     extractArtifactPaths: extractArtifactPaths,
     fileMutationAction: fileMutationAction,
     parseScheduledTaskDraftFromText: function () { return parseScheduledTaskDraftFromText.apply(null, arguments); },
     autoCreateScheduledTaskDraft: function () { return autoCreateScheduledTaskDraft.apply(null, arguments); },
-    modelAvailabilityError: function () { return modelAvailabilityError.apply(null, arguments); },
     get currentStreamText() { return currentStreamText; },
     set currentStreamText(value) { currentStreamText = value; },
     get currentStreamId() { return currentStreamId; },
@@ -885,7 +1002,6 @@
   var toolCallAlreadyStarted = chatFeature.toolCallAlreadyStarted;
   var toolCallAlreadyFinished = chatFeature.toolCallAlreadyFinished;
   var hasChatItemForTool = chatFeature.hasChatItemForTool;
-  var isDuplicateArtifactCard = chatFeature.isDuplicateArtifactCard;
   var addSystemItem = chatFeature.addSystemItem;
   var addAuthoritySyncNotice = chatFeature.addAuthoritySyncNotice;
   var compactPruneRollupText = chatFeature.compactPruneRollupText;
@@ -898,7 +1014,6 @@
   var isBusyFor = chatFeature.isBusyFor;
   var emitPetEvent = chatFeature.emitPetEvent;
   var doSendFor = chatFeature.doSendFor;
-  var publishRemoteUserMessage = chatFeature.publishRemoteUserMessage;
   var flushQueued = chatFeature.flushQueued;
   var sendMessageToSession = chatFeature.sendMessageToSession;
   var sendMessage = chatFeature.sendMessage;
@@ -907,6 +1022,14 @@
   var retryFirstTurn = chatFeature.retryFirstTurn;
   var prefillComposer = chatFeature.prefillComposer;
   var removeQueued = chatFeature.removeQueued;
+  var prioritizeQueued = chatFeature.prioritizeQueued;
+  var editQueued = chatFeature.editQueued;
+  var steer = chatFeature.steer;
+  var interruptAndSend = chatFeature.interruptAndSend;
+  var interruptAndSendQueued = chatFeature.interruptAndSendQueued;
+  var settleSteerCommitted = chatFeature.settleSteerCommitted;
+  var settleSteerDropped = chatFeature.settleSteerDropped;
+  var captureSteerPositions = chatFeature.captureSteerPositions;
   var summonPinvou = chatFeature.summonPinvou;
   var inspectPinvou = chatFeature.inspectPinvou;
   var recordPinvouReview = chatFeature.recordPinvouReview;
@@ -920,11 +1043,41 @@
     state: state, invoke: invoke, listen: listen, notify: notify,
     sessionStates: sessionStates, scheduledRunSessionOwners: scheduledRunSessionOwners,
     personaPlaceholderTitles: personaPlaceholderTitles, turnUsageDirty: turnUsageDirty,
+    // Clean host-side per-session side tables when a session buffer is
+    // deleted/evicted (modeStateEpochs is defined later in this file, so
+    // the reference cannot be passed in directly — a lazy-lookup hook).
+    onSessionBufferPurged: function (id, reason) {
+      delete modeStateEpochs[id];
+      // The localStorage cache of scene events is the only recovery copy
+      // when the sidecar save fails or we are offline
+      // (savePinvouSceneEventsForSession intentionally swallows backend
+      // failures; syncPinvouSceneEventsForSession replays from this
+      // cache). LRU capacity eviction (reason === "evict") ≠ session
+      // deletion: removing the key here would let one failed save +
+      // eviction silently lose all scene mappings, and the key itself is
+      // only a few hundred bytes — keeping it costs far less than losing
+      // data. Clean only on real session deletion ("delete"), preventing
+      // unbounded accumulation across historical sessions (~5MB shared
+      // quota).
+      if (id && reason === "delete" && window.localStorage) {
+        try { window.localStorage.removeItem(PINVOU_SCENE_EVENTS_STORAGE_PREFIX + id); } catch (_) {}
+      }
+      // Steer intermediates (stashed events / withdrawn texts / the
+      // in-flight interrupt flag) are cleared together with the session: on
+      // delete, the engine side is covered by SyncSession's SteerDropped; LRU
+      // eviction (reason === "evict") also clears — the chip left the working
+      // set with the buffer and no consumer remains for its events.
+      if (id && typeof chatFeature.purgeSteerState === "function") {
+        chatFeature.purgeSteerState(id);
+      }
+    },
     runSyncOnSession: runSyncOnSession, persistMessagesFor: persistMessagesFor,
     resetPendingAssistant: function () { return resetPendingAssistant.apply(null, arguments); },
     stopThinking: function () { return stopThinking.apply(null, arguments); },
     rerenderFromMessages: rerenderFromMessages,
     syncModeState: function () { return syncModeState.apply(null, arguments); },
+    applyAuthoritativeModeState: applyAuthoritativeModeState,
+    currentDraftModeState: currentDraftModeState,
     syncActivePersona: function () { return syncActivePersona(); },
     syncMountedCollection: function () { return syncMountedCollection(); },
     reconcileArtifacts: reconcileArtifacts,
@@ -942,6 +1095,8 @@
     bt: bt, userMessageDisplayText: userMessageDisplayText,
     loadPinvouSceneEventsForSession: loadPinvouSceneEventsForSession,
     syncPinvouSceneEventsForSession: syncPinvouSceneEventsForSession,
+    loadSteeredMessagesForSession: loadSteeredMessagesForSession,
+    syncSteeredMessagesForSession: syncSteeredMessagesForSession,
     loadMemoryOverview: function () { return loadMemoryOverview.apply(null, arguments); },
     isScheduledRunSession: isScheduledRunSession,
     get currentStreamText() { return currentStreamText; },
@@ -1009,8 +1164,12 @@
     var bg = sessionStates[sid]; if (!bg) return;
     touchSessionBuffer(sid, bg, isScheduledRunSession(sid));
     var realId = state.activeSessionId;
-    var draftComposer = realId ? "" : (state.composerDraft || "");
-    saveWorkingSetTo(getBuffer(realId));
+    // 进入时就把【当前完整工作集】落进 restoreBuffer：realId 为 null（草稿态）
+    // 时也要保存——草稿态可能已含乐观的 modeState（如刚打开的多智能体开关）、
+    // 未发送文本，finally 里不能拿全新 freshBuffer 覆盖（否则开关状态被后台
+    // 会话事件冲掉，表现为"打开开关后被正在运行的对话覆盖成关"）。
+    var restoreBuffer = realId ? getBuffer(realId) : freshBuffer();
+    saveWorkingSetTo(restoreBuffer);
     loadWorkingSetFrom(bg);
     state.activeSessionId = sid;
     var prev = suppressNotify; suppressNotify = true;
@@ -1019,18 +1178,41 @@
       suppressNotify = prev;
       saveWorkingSetTo(bg);
       state.activeSessionId = realId;
-      // realId 为 null(草稿态)时 getBuffer(null)=null、loadWorkingSetFrom(null) 是 no-op,
-      // 会把刚处理的后台 session 工作集泄漏进草稿视图(activeSessionId=null 却带着它的 chatItems),
-      // 召唤检阅等依赖 activeSessionId 的操作随之错乱。草稿态须切回干净工作集，
-      // 但要保留用户正在输入的未发送文本。
-      var restoreBuffer = realId ? getBuffer(realId) : freshBuffer();
-      if (!realId) restoreBuffer.composerDraft = draftComposer;
+      // 恢复的是进入时的同一工作集对象（草稿态下保留乐观 modeState /
+      // 未发送文本——saveWorkingSetTo 已含 composerDraft），不是全新 buffer。
       loadWorkingSetFrom(restoreBuffer);
     }
   }
+  // ── modeState 权威写回收敛点（评审 P1）────────────────────────────
+  // 任何「invoke 返回 / 事件负载」带来的权威 modeState 更新都必须走
+  // applyAuthoritativeModeState：内部统一 bump per-session epoch（作废
+  // 在途 syncModeState 的旧读取）+ 定向写回触发会话（await 期间用户可能
+  // 已切走）。interaction / chat-events 两个 feature 共享同一份 epoch 表，
+  // 散点手工 bump+写漏一处就会重现「旧读取覆盖权威值」竞态。
+  var modeStateEpochs = {};
+  function bumpModeStateEpoch(sid) {
+    if (!sid) return;
+    modeStateEpochs[sid] = (modeStateEpochs[sid] || 0) + 1;
+  }
+  function applyAuthoritativeModeState(sid, st) {
+    bumpModeStateEpoch(sid);
+    runSyncOnSession(sid || state.activeSessionId, function () {
+      state.modeState = { mode: st.mode || "yolo", multiAgent: !!st.multi_agent };
+    });
+  }
+
+  // 草稿态（无 active 会话）的 modeState：取当前 lane 的全局默认，缺省 yolo
+  // （与后端 plain 缺省方向一致）。三分 lane 语义：草稿显示 = 本 lane 全局默认。
+  function currentDraftModeState() {
+    var lane = state.modeLane === "design" ? "design" : "work";
+    var d = state.modeDefaults && state.modeDefaults[lane];
+    return { mode: d || "yolo", multiAgent: false };
+  }
+
   // 事件监听器统一入口:按 payload.session_id 路由同步逻辑;后台变更后补一次 notify 刷新列表。
-  function markRemoteTurn(sid, buf, preserveCommittedRevision) {
+  function markRemoteTurn(sid, buf, preserveCommittedRevision, cause) {
     if (!sid || !buf || buf.localTurnOwned) return;
+    var wasActive = !!buf.remoteTurnActive;
     if (!buf.remoteTurnActive) {
       var meta = state.sessions.find(function (session) { return session.id === sid; });
       buf.remoteBaselineTrusted = !!buf.loadedFromDisk;
@@ -1048,6 +1230,12 @@
       state.busy = true;
       if (!state.thinking.active) startThinking();
     }
+    if (!wasActive) {
+      recordAuthoritySyncDiagnostic("remote_turn_marked", Object.assign({
+        cause: String(cause || "unspecified"),
+        preserve_committed_revision: !!preserveCommittedRevision,
+      }, authoritySyncBufferSnapshot(sid, buf)));
+    }
   }
   function onSessionEvent(e, fn) {
     var sid = (e && e.payload && e.payload.session_id) || state.activeSessionId;
@@ -1056,7 +1244,7 @@
       var eventName = String((e && e.event) || "");
       var isTurnEvent = /chat:(user_message|turn_started|delta|reasoning_start|reasoning_delta|reasoning_done|tool_start|tool_end|user_input_required|transient_error)$/.test(eventName);
       if (eventBuffer && !eventBuffer.localTurnOwned && (eventBuffer.busy || isTurnEvent)) {
-        markRemoteTurn(sid, eventBuffer);
+        markRemoteTurn(sid, eventBuffer, false, "event:" + eventName);
       }
     }
     var isBg = sid && sid !== state.activeSessionId;
@@ -1093,9 +1281,12 @@
       try { await invoke("save_session_artifacts", { id: sid, paths: arts.map(function (a) { return a.path; }) }); } catch (_) {}
       if (isDefaultChatTitle(meta.title) || personaPlaceholderTitles[sid]) {
         var firstUser = msgs.find(function (m) { return m.role === "user"; });
-        var text = firstUser && firstUser.content && firstUser.content.find(function (c) { return c.type === "text"; });
-        if (text && text.text) {
-          var newTitle = text.text.slice(0, 20);
+        // 自动标题复用展示层过滤（与 web 侧一致）：内部信封/子智能体交接不参与
+        // 命名；hideInternalEnvelope=true 同时剥离 turn_meta/system-reminder 元数据
+        // 块，避免 XML 痕迹进 sidebar 标题。
+        var titleText = firstUser ? userMessageDisplayText(firstUser.content || [], true) : "";
+        if (titleText) {
+          var newTitle = titleText.slice(0, 20);
           await invoke("rename_session", { id: sid, title: newTitle });
           meta.title = newTitle;
           delete personaPlaceholderTitles[sid]; // 已被对话内容命名,卸下占位标记
@@ -1118,8 +1309,15 @@
     if (!sid) return true;
     var buf = sessionStates[sid];
     if (!buf || (!buf.remoteTurnActive && !buf.remoteTerminalSeen)) return true;
-    if (!buf.remoteTerminalSeen && isBusyFor(sid)) return false;
-    if (authoritativeTranscriptSyncs[sid]) return authoritativeTranscriptSyncs[sid];
+    if (!buf.remoteTerminalSeen && isBusyFor(sid)) {
+      recordAuthoritySyncDiagnostic("reconcile_deferred_busy", authoritySyncBufferSnapshot(sid, buf));
+      return false;
+    }
+    if (authoritativeTranscriptSyncs[sid]) {
+      recordAuthoritySyncDiagnostic("reconcile_joined_inflight", authoritySyncBufferSnapshot(sid, buf));
+      return authoritativeTranscriptSyncs[sid];
+    }
+    var traceId = "authority_reconcile_" + Date.now().toString(36) + "_" + (++authoritySyncTraceSequence);
     var expectedAssistantKey = buf.remoteTerminalSeen
       ? String(buf.remoteExpectedAssistantKey || "")
       : "";
@@ -1133,6 +1331,11 @@
     var minimumTerminalMessageCount = expectedAssistantKey && Array.isArray(buf.messages)
       ? buf.messages.length
       : 0;
+    recordAuthoritySyncDiagnostic("reconcile_started", Object.assign({
+      trace_id: traceId,
+      expected_committed_revision: expectedCommittedRevision,
+      minimum_terminal_message_count: minimumTerminalMessageCount,
+    }, authoritySyncBufferSnapshot(sid, buf)));
     var sync = (async function () {
       for (var attempt = 0; attempt < 6; attempt++) {
         if (attempt) await new Promise(function (resolve) { setTimeout(resolve, 250); });
@@ -1144,25 +1347,71 @@
         if (buf.remoteTerminalSeen) {
           expectedCommittedRevision = String(buf.remoteCommittedRevision || "");
         }
+        var attemptStartedAt = Date.now();
         try {
           var saved = await invoke("load_session", { id: sid, setActive: false });
-          if (!saved || !Array.isArray(saved.messages)) continue;
+          if (!saved || !Array.isArray(saved.messages)) {
+            recordAuthoritySyncDiagnostic("reconcile_attempt_rejected", {
+              trace_id: traceId, session_id: sid, attempt: attempt + 1,
+              reason: "invalid_snapshot", elapsed_ms: Date.now() - attemptStartedAt,
+              snapshot_present: !!saved,
+            });
+            continue;
+          }
           var savedRevision = String(saved.transcript_revision || saved.transcriptRevision || "");
           // 仅当快照确实携带 revision 时才用严格相等作为权威屏障;旧后端/旧契约
           // 不含该字段时降级到消息数与 assistant 身份校验,避免「期望非空但快照
           // 无字段」导致对账必然失败(每轮误报)。
           if (expectedCommittedRevision && savedRevision) {
-            if (savedRevision !== expectedCommittedRevision) continue;
+            if (savedRevision !== expectedCommittedRevision) {
+              recordAuthoritySyncDiagnostic("reconcile_attempt_rejected", {
+                trace_id: traceId, session_id: sid, attempt: attempt + 1,
+                reason: "revision_mismatch", elapsed_ms: Date.now() - attemptStartedAt,
+                expected_committed_revision: expectedCommittedRevision,
+                saved_revision: savedRevision,
+                saved_message_count: saved.messages.length,
+              });
+              continue;
+            }
           } else {
-            if (minimumTerminalMessageCount && saved.messages.length < minimumTerminalMessageCount) continue;
+            if (minimumTerminalMessageCount && saved.messages.length < minimumTerminalMessageCount) {
+              recordAuthoritySyncDiagnostic("reconcile_attempt_rejected", {
+                trace_id: traceId, session_id: sid, attempt: attempt + 1,
+                reason: "message_count_short", elapsed_ms: Date.now() - attemptStartedAt,
+                expected_committed_revision: expectedCommittedRevision,
+                saved_revision: savedRevision,
+                minimum_terminal_message_count: minimumTerminalMessageCount,
+                saved_message_count: saved.messages.length,
+              });
+              continue;
+            }
           }
           if ((!expectedCommittedRevision || !savedRevision) && expectedAssistantKey) {
             var hasExpectedAssistant = saved.messages.some(function (message) {
               return message && message.role === "assistant" &&
                 hydratedMessageKey(message, isScheduledRunSession(sid)) === expectedAssistantKey;
             });
-            if (!hasExpectedAssistant) continue;
+            if (!hasExpectedAssistant) {
+              recordAuthoritySyncDiagnostic("reconcile_attempt_rejected", {
+                trace_id: traceId, session_id: sid, attempt: attempt + 1,
+                reason: "assistant_identity_missing", elapsed_ms: Date.now() - attemptStartedAt,
+                expected_committed_revision: expectedCommittedRevision,
+                saved_revision: savedRevision,
+                expected_assistant_key_length: expectedAssistantKey.length,
+                saved_message_count: saved.messages.length,
+                saved_roles: saved.messages.map(function (message) { return message && message.role || "invalid"; }).slice(-12),
+              });
+              continue;
+            }
           }
+          // 写入前回合归属校验（与 web 版对齐，审计 #257）：重试窗口内新回合
+          // 可能已开始（markRemoteTurn 置 busy/remoteTurnActive、重置 revision），
+          // 此时用旧终稿重建工作集会截断新回合直播流——放弃本轮对账，由新回合
+          // 自己的 done 事件重新对账。放弃条件只用 busy：不能用 remoteTurnActive
+          // （正常远端回合 done 后它恒为 true），也不能用 !remoteTerminalSeen
+          // （scheduled run 因 requiresAuthorityReconcile=false 不置 terminalSeen，
+          // 但 flushQueued 仍会走 reconcile，会误伤）。
+          if (buf.busy) return false;
           runSyncOnSession(sid, function () {
             var rawLiveChatItems = Array.isArray(state.chatItems) ? state.chatItems : [];
             var resolvedPlanTickets = Object.create(null);
@@ -1241,9 +1490,33 @@
           buf.busy = false;
           if (sid === state.activeSessionId) saveWorkingSetTo(buf);
           notify();
+          recordAuthoritySyncDiagnostic("reconcile_succeeded", Object.assign({
+            trace_id: traceId,
+            attempt: attempt + 1,
+            elapsed_ms: Date.now() - attemptStartedAt,
+            saved_revision: savedRevision,
+            saved_message_count: saved.messages.length,
+          }, authoritySyncBufferSnapshot(sid, buf)));
           return true;
-        } catch (_) {}
+        } catch (error) {
+          recordAuthoritySyncDiagnostic("reconcile_attempt_failed", {
+            trace_id: traceId,
+            session_id: sid,
+            attempt: attempt + 1,
+            reason: "load_session_error",
+            error_category: "snapshot_load_failed",
+            error_present: true,
+            elapsed_ms: Date.now() - attemptStartedAt,
+            expected_committed_revision: expectedCommittedRevision,
+          });
+        }
       }
+      recordAuthoritySyncDiagnostic("reconcile_exhausted", Object.assign({
+        trace_id: traceId,
+        attempts: 6,
+        expected_committed_revision: expectedCommittedRevision,
+        minimum_terminal_message_count: minimumTerminalMessageCount,
+      }, authoritySyncBufferSnapshot(sid, buf)));
       return false;
     })();
     authoritativeTranscriptSyncs[sid] = sync;
@@ -1253,26 +1526,19 @@
 
   // ── Pub/Sub ──────────────────────────────────────────────────────
   var subscribers = [];
-  function snapshotState() {
-    if (typeof structuredClone === "function") {
-      try { return structuredClone(state); } catch (_) {}
-    }
-    return JSON.parse(JSON.stringify(state));
-  }
   var STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
     sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch"],
-    chat: ["activeSkill", "artifacts", "artifactChange", "attachmentDragActive", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
+    chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
     voice: ["voiceInput", "voiceAsrSetup"],
-    knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedCollectionsRevision"],
+    knowledge: ["kbModelSetup", "mountedCollection", "mountedCollections", "mountedRemoteCollections", "mountedCollectionsRevision"],
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
-    settings: ["settings", "selectedPet"],
+    settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels"],
     vllm: ["vllmBootstrapDone", "vllmBootstrapError", "vllmBootstrapping", "vllmSetup", "vllmSetupAttempt", "vllmSetupDismissed", "vllmSetupPhase"],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     personas: ["activePersona", "personaEvents", "personaPool"],
-    workflow: ["workflow"],
     memory: ["memory"],
     remoteControl: ["webAccess"],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
@@ -1285,7 +1551,7 @@
     var slice = {};
     for (var i = 0; i < fields.length; i++) slice[fields[i]] = state[fields[i]];
     if (typeof structuredClone === "function") {
-      try { return structuredClone(slice); } catch (_) {}
+      try { return structuredClone(slice); } catch (_) {} // safari14-ok: typeof-guarded with JSON fallback
     }
     return JSON.parse(JSON.stringify(slice));
   }
@@ -1297,100 +1563,166 @@
     for (var i = 0; i < domains.length; i++) Object.assign(result, snapshotStateSlice(domains[i]));
     return result;
   }
-  function cloneJson(value, fallback) {
-    try { return JSON.parse(JSON.stringify(value == null ? fallback : value)); }
-    catch (_) { return fallback; }
-  }
-  function remoteWorkingSetFor(sid) {
-    if (!sid) return null;
-    if (sid === state.activeSessionId) {
-      saveWorkingSetTo(getBuffer(sid));
-      return {
-        messages: state.messages, chatItems: state.chatItems, artifacts: state.artifacts,
-        turnTimeline: state.turnTimeline,
-        busy: state.busy, thinking: state.thinking, planSnapshot: state.planSnapshot,
-      };
-    }
-    return sessionStates[sid] || null;
-  }
-  function remoteArtifactSnapshot(artifacts) {
-    return (Array.isArray(artifacts) ? artifacts : []).map(function (a) {
-      var p = a && (a.path || a.path_tail || a.storage_path || "");
-      return {
-        id: (a && a.id) || "",
-        basename: (a && a.basename) || basename(p),
-        path: p,
-        path_tail: p,
-        kind: (a && a.kind) || "",
-        byte_size: (a && a.byte_size) || 0,
-        created_at: (a && a.created_at) || "",
-      };
-    }).filter(function (a) { return !!(a.path || a.basename); });
-  }
-  function buildRemoteLiveSnapshot(sid) {
-    var ws = remoteWorkingSetFor(sid);
-    if (!ws) return null;
-    var meta = state.sessions.find(function (s) { return s.id === sid; }) || {};
-    var msgs = cloneJson(ws.messages, []);
-    var chatItems = cloneJson(ws.chatItems, []);
-    return {
-      snapshot_source: "live",
-      session: {
-        id: sid,
-        title: meta.title || bt("newChatFallbackTitle"),
-        status: ws.busy ? "running" : "idle",
-        updated_at: meta.updated_at || "",
-        message_count: meta.message_count || msgs.length || chatItems.length || 0,
-      },
-      messages: msgs.map(function (m, idx) {
-        var blocks = Array.isArray(m.content) ? m.content : [];
-        return {
-          index: idx,
-          role: m.role,
-          content: blocks.filter(function (b) { return b && b.type === "text"; }).map(function (b) { return b.text || ""; }).join(""),
-          blocks: blocks,
-        };
-      }),
-      chat_items: chatItems,
-      artifacts: remoteArtifactSnapshot(filterSessionArtifacts(ws.artifacts, sid)),
-      busy: !!ws.busy,
-      thinking: cloneJson(ws.thinking, null),
-      plan_snapshot: cloneJson(ws.planSnapshot, null),
-    };
-  }
-  async function publishRemoteLiveSnapshot(sid) {
-    try { await ensureSessionBufferLoaded(sid); }
-    catch (err) { console.warn("remote snapshot hydrate failed", err); }
-    var snapshot = buildRemoteLiveSnapshot(sid);
-    if (!snapshot) return false;
-    await invoke("remote_control_publish_event", {
-      sessionId: sid,
-      kind: "session_snapshot",
-      payload: snapshot,
+  // Subscription snapshots are immutable persistent projections. The first
+  // projection detaches nested state; later notifications reconcile against it
+  // and allocate only changed paths. Long transcripts therefore stay shared
+  // between snapshots while an in-place streaming item mutation still produces
+  // a stable new item for subscribers. get/getMany retain their deep-copy API.
+  function defineSubscriptionStateProperty(target, key, value) {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      enumerable: true,
+      value: value,
+      writable: true,
     });
-    return true;
   }
+  function copySubscriptionStateObject(source) {
+    var result = {};
+    Object.keys(source).forEach(function (key) {
+      defineSubscriptionStateProperty(result, key, source[key]);
+    });
+    return result;
+  }
+  function subscriptionStateValue(value, previous, ancestors) {
+    var valueType = typeof value;
+    if (!value || valueType !== "object") {
+      if (valueType === "function" || valueType === "symbol" || valueType === "bigint") {
+        throw new TypeError("Subscription state only supports JSON-like scalar values");
+      }
+      return value;
+    }
+    var isArray = Array.isArray(value);
+    if (!isArray) {
+      var prototype = Object.getPrototypeOf(value);
+      var isPlainObject = prototype === null || (
+        Object.getPrototypeOf(prototype) === null &&
+        Object.prototype.hasOwnProperty.call(prototype, "constructor") &&
+        prototype.constructor && prototype.constructor.name === "Object"
+      );
+      if (!isPlainObject) {
+        throw new TypeError("Subscription state only supports arrays and plain objects");
+      }
+    }
+    ancestors = ancestors || new WeakSet();
+    if (ancestors.has(value)) throw new TypeError("Subscription state must not contain cycles");
+    ancestors.add(value);
+    try {
+      if (isArray) {
+        var previousArray = Array.isArray(previous) ? previous : null;
+        if (!previousArray) {
+          return Object.freeze(value.map(function (item) {
+            return subscriptionStateValue(item, undefined, ancestors);
+          }));
+        }
+        var nextArray = value.length === previousArray.length ? null : previousArray.slice(0, value.length);
+        for (var arrayIndex = 0; arrayIndex < value.length; arrayIndex++) {
+          var nextItem = subscriptionStateValue(value[arrayIndex], previousArray[arrayIndex], ancestors);
+          if (!Object.is(nextItem, previousArray[arrayIndex])) {
+            if (!nextArray) nextArray = previousArray.slice();
+            nextArray[arrayIndex] = nextItem;
+          }
+        }
+        return nextArray ? Object.freeze(nextArray) : previousArray;
+      }
+
+      var keys = Object.keys(value);
+      var previousObject = previous && typeof previous === "object" && !Array.isArray(previous)
+        ? previous
+        : null;
+      var previousKeys = previousObject ? Object.keys(previousObject) : [];
+      var sameShape = !!previousObject && keys.length === previousKeys.length && keys.every(function (key) {
+        return Object.prototype.hasOwnProperty.call(previousObject, key);
+      });
+      var nextObject = sameShape ? null : {};
+      for (var objectIndex = 0; objectIndex < keys.length; objectIndex++) {
+        var key = keys[objectIndex];
+        var nextValue = subscriptionStateValue(value[key], previousObject && previousObject[key], ancestors);
+        if (!sameShape || !Object.is(nextValue, previousObject[key])) {
+          if (!nextObject) nextObject = copySubscriptionStateObject(previousObject);
+          defineSubscriptionStateProperty(nextObject, key, nextValue);
+        }
+      }
+      return nextObject ? Object.freeze(nextObject) : previousObject;
+    } finally {
+      ancestors.delete(value);
+    }
+  }
+  var subscriptionSliceRevision = 0;
+  var subscriptionSliceCache = Object.create(null);
+  function subscriptionStateSlice(domain) {
+    var fields = STATE_SLICE_FIELDS[domain];
+    if (!fields) throw new Error("Unknown Tauri bridge state slice: " + domain);
+    var cached = subscriptionSliceCache[domain];
+    if (cached && cached.revision === subscriptionSliceRevision) return cached.snapshot;
+    var current = {};
+    for (var i = 0; i < fields.length; i++) {
+      current[fields[i]] = state[fields[i]];
+    }
+    var snapshot = subscriptionStateValue(current, cached && cached.snapshot);
+    subscriptionSliceCache[domain] = { revision: subscriptionSliceRevision, snapshot: snapshot };
+    return snapshot;
+  }
+  function subscriptionStateSlices(domains) {
+    if (!Array.isArray(domains) || domains.length === 0) {
+      throw new Error("Tauri bridge state.subscribeMany requires at least one domain");
+    }
+    var result = {};
+    for (var i = 0; i < domains.length; i++) {
+      Object.assign(result, subscriptionStateSlice(domains[i]));
+    }
+    return Object.freeze(result);
+  }
+  // 远端实时快照已由 transcript 事件流(chat:transcript_committed 等)承载:
+  // 旧 publishRemoteLiveSnapshot 调用的 remote_control_publish_event 命令名
+  // 在 Rust 侧从未注册("session_snapshot" 也不在任何事件白名单),属 v1
+  // 遗留死调用,已删除。
+
+  var notificationQueue = [];
+  var notificationDispatching = false;
   function notify() {
     if (suppressNotify) return;
     // 会话列表「工作中」指示:active 取活动工作集 state.busy,其余取各自 buffer.busy
     state.sessionBusy = {};
     for (var id in sessionStates) state.sessionBusy[id] = !!sessionStates[id].busy;
     if (state.activeSessionId) state.sessionBusy[state.activeSessionId] = !!state.busy;
-    var snapshot = snapshotState();
-    for (var i = 0; i < subscribers.length; i++) subscribers[i](snapshot);
+    subscriptionSliceRevision += 1;
+    // Membership and state are fixed when a round is queued. Subscribe or
+    // unsubscribe during a callback affects only rounds queued afterwards.
+    var members = subscribers.slice();
+    notificationQueue.push(members.map(function (subscriber) {
+      return { callback: subscriber.callback, snapshot: subscriber.snapshot() };
+    }));
+    if (notificationDispatching) return;
+    notificationDispatching = true;
+    try {
+      while (notificationQueue.length) {
+        var round = notificationQueue.shift();
+        for (var i = 0; i < round.length; i++) round[i].callback(round[i].snapshot);
+      }
+    } catch (error) {
+      // Preserve synchronous callback error propagation. Later queued rounds may
+      // depend on the interrupted callback, so discard them instead of replaying
+      // stale work on the next notification.
+      notificationQueue = [];
+      throw error;
+    } finally {
+      notificationDispatching = false;
+    }
   }
-  function subscribe(fn) {
-    subscribers.push(fn);
+  function subscribe(snapshot, callback) {
+    var subscriber = { snapshot: snapshot, callback: callback };
+    subscribers.push(subscriber);
     return function () {
-      subscribers = subscribers.filter(function (f) { return f !== fn; });
+      subscribers = subscribers.filter(function (candidate) { return candidate !== subscriber; });
     };
   }
   function subscribeStateSlice(domain, fn) {
-    return subscribe(function () { fn(snapshotStateSlice(domain)); });
+    subscriptionStateSlice(domain);
+    return subscribe(function () { return subscriptionStateSlice(domain); }, fn);
   }
   function subscribeStateSlices(domains, fn) {
-    snapshotStateSlices(domains);
-    return subscribe(function () { fn(snapshotStateSlices(domains)); });
+    subscriptionStateSlices(domains);
+    return subscribe(function () { return subscriptionStateSlices(domains); }, fn);
   }
 
   var scheduledFeature = installBridgeFeature("scheduled", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addSystemItem: addSystemItem, rememberScheduledRunOwner: rememberScheduledRunOwner, isScheduledRunTerminal: isScheduledRunTerminal, purgeSessionBuffer: purgeSessionBuffer, createNewSession: createNewSession, prefillComposer: prefillComposer, sessionStates: sessionStates });
@@ -1446,7 +1778,7 @@
   var runScheduledTaskNow = scheduledFeature.runScheduledTaskNow;
   var startScheduledTaskChat = scheduledFeature.startScheduledTaskChat;
   // ── Session management ───────────────────────────────────────────
-  var PLAN_TOOLS = ["update_plan", "checklist_write", "todo_write"];
+  var PLAN_TOOLS = new Set(["update_plan", "checklist_write", "todo_write"]);
 
   // tool_result.content 可能是 string 或 Anthropic content blocks 数组，归一成纯文本。
   function toolResultText(content) {
@@ -1455,6 +1787,35 @@
       return content.map(function (b) { return b && typeof b.text === "string" ? b.text : ""; }).join("");
     }
     return "";
+  }
+
+  // CodeWhale may append model-only recovery guidance to a persisted tool result
+  // to preserve strict provider role ordering. Keep that guidance in durable/model
+  // context, but remove only the two known internal suffix kinds from tool cards.
+  function stripInternalToolRuntimeSuffix(value) {
+    var text = String(value == null ? "" : value);
+    var marker = "\n\n<codewhale:runtime_event";
+    while (true) {
+      var start = text.lastIndexOf(marker);
+      if (start < 0) return text;
+      var suffix = text.slice(start + 2);
+      var opening = suffix.match(/^<codewhale:runtime_event\b[^>]*>/i);
+      if (!opening || !/<\/codewhale:runtime_event>\s*$/i.test(suffix)) return text;
+      var tag = opening[0];
+      var knownKind = /\bkind=(["'])(?:stuck_guard|tool_error_degradation)\1/i.test(tag);
+      var internal = /\bvisibility=(["'])internal\1/i.test(tag);
+      if (!knownKind || !internal) return text;
+      text = text.slice(0, start);
+    }
+  }
+
+  function toolResultDisplayContent(content) {
+    if (typeof content === "string") return stripInternalToolRuntimeSuffix(content);
+    if (!Array.isArray(content)) return content;
+    return content.map(function (block) {
+      if (!block || typeof block.text !== "string") return block;
+      return Object.assign({}, block, { text: stripInternalToolRuntimeSuffix(block.text) });
+    });
   }
 
   // plan 类工具结果格式："...updated:\n{json}"——切第一个换行后 parse（与 engine.rs 一致）。
@@ -1467,16 +1828,23 @@
 
   // request_user_input 结果是纯 JSON {answers:[{id,label,value}]}（turn_loop.rs ToolResult::json）。
   // 按 question.id 匹配，还原成 UserInputCard 的 answers 数组（顺序对齐 questions）。
+  // multi_select 多选保留全部同 id 答案、不塌缩（与 code-native-lane parseNativeUserAnswers 对齐）。
   function parseUserAnswers(content, questions) {
     var ans;
     try { ans = JSON.parse(toolResultText(content)).answers; } catch (_) { return null; }
     if (!Array.isArray(ans)) return null;
-    var byId = {};
-    ans.forEach(function (a) { if (a && a.id != null) byId[a.id] = a; });
-    return questions.map(function (q) {
-      var a = byId[q.id];
-      return a ? { id: q.id, label: a.label, value: a.value } : null;
-    });
+    // 用无原型对象：question id 仅后端校验非空，constructor/toString/__proto__ 是合法输入，
+    // 普通 {} 会让这些键命中 Object.prototype 继承属性，.push 抛 TypeError（复核 P1）。
+    var byId = Object.create(null);
+    ans.forEach(function (a) { if (a && a.id != null) (byId[a.id] = byId[a.id] || []).push(a); });
+    var out = [];
+    for (var qi = 0; qi < questions.length; qi++) {
+      var q = questions[qi];
+      var matches = byId[q.id];
+      if (!matches || !matches.length) { out.push(null); continue; }
+      matches.forEach(function (a) { out.push({ id: q.id, label: a.label, value: a.value }); });
+    }
+    return out;
   }
 
   // careful hook 拦截结果(shell.rs BLOCKED 固定格式)→ 反解出 careful_blocked 卡所需 metadata。
@@ -1493,20 +1861,15 @@
   }
 
   function userMessageInputProvenance(blocks) {
-    var textBlocks = Array.isArray(blocks) ? blocks : [];
-    for (var i = 0; i < textBlocks.length; i++) {
-      var block = textBlocks[i];
-      if (!block || block.type !== "text") continue;
-      var text = String(block.text || "").trim();
-      if (text.indexOf("<turn_meta>") !== 0) continue;
-      var match = text.match(/(?:^|\n)Input provenance:\s*([^\r\n<]+)/);
-      if (match && match[1]) return match[1].trim();
-    }
-    return "";
+    return window.PinvouBridgeMessages.userMessageInputProvenance(blocks);
   }
 
   function isInternalUserMessageProvenance(provenance) {
-    return provenance === "runtime" || provenance === "subagent_handoff";
+    return window.PinvouBridgeMessages.isInternalUserMessageProvenance(provenance);
+  }
+
+  function isInternalRuntimeEnvelopeText(value) {
+    return window.PinvouBridgeMessages.isInternalRuntimeUserMessage(value);
   }
 
   // Engine 的运行时恢复提示为了兼容模型协议会以 role=user 持久化，但它不是用户输入。
@@ -1517,6 +1880,7 @@
     var textParts = (Array.isArray(blocks) ? blocks : [])
       .filter(function (block) { return block && block.type === "text"; })
       .map(function (block) { return String(block.text || ""); });
+    if (textParts.some(isInternalRuntimeEnvelopeText)) return "";
     if (isInternalUserMessageProvenance(userMessageInputProvenance(blocks))) return "";
     if (!hideInternalEnvelope) return textParts.join("");
 
@@ -1532,9 +1896,24 @@
   }
 
   // ── Rerender from messages (session restore) ─────────────────────
-  function rerenderFromMessages() {
+  // opts.keepLiveToolMeta: passed when hydrating a live session
+  // (hydrateLiveSession) — the buffer's toolMeta may hold entries for
+  // in-flight tools (tool_use not yet in messages), and clearing it would
+  // leave the later chat:tool_end without its meta (stuck selection
+  // card / degraded artifact card).
+  function rerenderFromMessages(opts) {
     state.chatItems = [];
     itemIdSeq = 0;
+    // Replay re-adds every historical tool_use's metadata (including
+    // write/patch's large args) to toolMeta for tool_result backfill and
+    // never deletes after backfill — the residue resides in the buffer
+    // with the working set, and memory is bounded by the 32-entry
+    // all-session LRU cap. Durable replay clears first (when not live
+    // hydrating), reclaiming only orphan entries left by interrupted
+    // turns (the live event path itself stays insert/delete balanced);
+    // the replay then rebuilds the needed entries for the historical
+    // tool_uses inside messages.
+    if (!(opts && opts.keepLiveToolMeta)) toolMeta = {};
     // 卡牌事件按 pos 插回原位(pos=事件发生时的 messages 数)。让重载历史不割裂。
     var pe = Array.isArray(state.personaEvents) ? state.personaEvents : [];
     function emitPersonaAt(atOrAfter, isTail) {
@@ -1602,14 +1981,27 @@
       var m = state.messages[mi];
       var blocks = Array.isArray(m.content) ? m.content : [];
       if (m.role === "user") {
-        var utext = userMessageDisplayText(blocks, isScheduledRunSession(state.activeSessionId));
+        // Always strip exact internal envelopes: sessions saved before the
+        // persistence alignment still carry the engine-baked <turn_meta>
+        // block on mid-turn steered messages, and without the filter the
+        // hydrated bubble rendered the raw envelope after a restart.
+        var utext = userMessageDisplayText(blocks, true);
         if (utext) {
           // pinvouTransfer 是展示层标记、不在 messages → rerender 从转交固定措辞还原品/悟样式
           var uitem2 = { type: "user", text: utext, time: "", messageIndex: mi };
+          // A mid-turn steer injection is no admission (no timing record):
+          // the conversation projection must not let it consume a lifecycle
+          // record (phantom "interrupted"). New sessions mark it via the
+          // steered-messages sidecar (pos + text verified); the envelope
+          // check stays as the fallback for pre-alignment persisted sessions.
+          if (isSteeredMessagePos(mi, utext) || (Array.isArray(blocks) ? blocks : []).some(function (b) {
+            var t = String(b && b.type === "text" ? b.text : "").trim();
+            return (t.indexOf("<turn_meta>") === 0 && t.endsWith("</turn_meta>")) || t === "<turn_meta_unchanged />";
+          })) uitem2.steeredMidTurn = true;
           var scene = pinvouSceneForMessagePos(mi);
           if (scene) uitem2.pinvouScene = scene;
-          if (utext.indexOf("以下维度产物还缺") >= 0) uitem2.pinvouTransfer = "悟";
-          else if (utext.indexOf("请按下面的检阅意见") >= 0 || utext.indexOf("以下事项我已拍板") >= 0 || utext.indexOf("request_user_input 正式问我") >= 0) uitem2.pinvouTransfer = "品";
+          if (textMatchesBtKey(utext, "reviewFillHeader")) uitem2.pinvouTransfer = "悟";
+          else if (textMatchesBtKey(utext, "reviewFixHeader") || textMatchesBtKey(utext, "reviewAdoptHeader") || textMatchesBtKey(utext, "reviewAskHeader")) uitem2.pinvouTransfer = "品";
           addChatItem(uitem2);
         }
         // tool_result（只回填普通工具卡；选择卡/方案卡的结果已在 tool_use 处还原）
@@ -1621,11 +2013,13 @@
             // careful hook 拦截 → 还原 🛑 红卡(实时由 tool_end metadata 插,重载从文本反解)
             var blockedMd = parseCarefulBlocked(toolResultText(c.content));
             if (blockedMd) {
-              updateToolItem(c.tool_use_id, c.content, false); // 被拦=失败态,与实时一致
+              updateToolItem(c.tool_use_id, toolResultDisplayContent(c.content), false); // 被拦=失败态,与实时一致
               addChatItem({ type: "careful_blocked", args: tm.args, metadata: blockedMd, time: "" });
             } else {
               // load_skill 同样脱敏：重载历史时也不还原 SKILL.md 全文，展开只见占位。
-              var contentForCard = (tm.name === "load_skill") ? bt("skillContentHidden") : c.content;
+              var contentForCard = (tm.name === "load_skill")
+                ? bt("skillContentHidden")
+                : toolResultDisplayContent(c.content);
               updateToolItem(c.tool_use_id, contentForCard, !c.is_error);
             }
           }
@@ -1680,21 +2074,20 @@
             var pares = resultById[b.id];
             if (!(pares && pares.is_error)) {
               var rpp = presentArtifactAbsPath(pares && pares.content, b.input && b.input.path);
-              if (!isDuplicateArtifactCard(rpp)) {
-                addChatItem({
-                  type: "artifact_card",
-                  path: rpp,
-                  title: (b.input && b.input.title) || "",
-                  description: (b.input && b.input.description) || "",
-                  time: "",
-                  sessionId: state.activeSessionId,
-                });
-              }
+              var restoredCard = {
+                type: "artifact_card",
+                path: rpp,
+                title: (b.input && b.input.title) || "",
+                description: (b.input && b.input.description) || "",
+                time: "",
+                sessionId: state.activeSessionId,
+              };
+              if (!updatePresentedArtifact(restoredCard)) addChatItem(restoredCard);
               continue;
             }
           }
           // update_plan / checklist_write / todo_write → 收集快照，本条消息末尾还原方案卡
-          if (PLAN_TOOLS.indexOf(b.name) >= 0) {
+          if (PLAN_TOOLS.has(b.name)) {
             var snap = parsePlanSnapshot(resultById[b.id] && resultById[b.id].content);
             if (snap) {
               if (b.name === "update_plan") planSnap = snap; else todosSnap = snap;
@@ -1709,10 +2102,11 @@
             if (!(gres2 && gres2.is_error) && gap && isDeliverable(gap) && lastDirtyArtifactId[gap] === b.id && !presentedArtifacts[gap] && !presentedArtifactNames[basename(gap)]) {
               var gprev = findPresentedArtifact(gap);
               if (gprev) {
-                addChatItem({
+                var gcard = {
                   type: "artifact_card", path: gprev.path, title: gprev.title,
                   description: gprev.description, time: "", sessionId: state.activeSessionId,
-                });
+                };
+                if (!updatePresentedArtifact(gcard)) addChatItem(gcard);
               } else if (writtenArtifacts[gap]) {
                 addChatItem({ type: "artifact_card", path: gap, title: basename(gap), description: "", time: "", sessionId: state.activeSessionId });
               }
@@ -1728,10 +2122,11 @@
               if ((wres && wres.is_error) || lastDirtyArtifactId[wap] !== b.id) return;
               var wprev = findPresentedArtifact(wap);
               if (wprev) {
-                addChatItem({
+                var wcard = {
                   type: "artifact_card", path: wprev.path, title: wprev.title,
                   description: wprev.description, time: "", sessionId: state.activeSessionId,
-                });
+                };
+                if (!updatePresentedArtifact(wcard)) addChatItem(wcard);
               } else if (writtenArtifacts[wap] && !presentedArtifacts[wap] && !presentedArtifactNames[basename(wap)]) {
                 // AI 写了产物但全程没 present_artifact → 兜底补首卡(与实时 chat:done 对齐)
                 addChatItem({ type: "artifact_card", path: wap, title: basename(wap), description: "", time: "", sessionId: state.activeSessionId });
@@ -1759,6 +2154,7 @@
   var terminalFeature = installBridgeFeature("terminal", { state: state, notify: notify, invoke: invoke, bt: bt, runSyncOnSession: runSyncOnSession, addChatItem: addChatItem });
   var updateToolItem = terminalFeature.updateToolItem;
   var isShellExecutionTool = terminalFeature.isShellExecutionTool;
+  var mentionsShellTool = terminalFeature.mentionsShellTool;
   var utf8Length = terminalFeature.utf8Length;
   var normalizeTerminalTail = terminalFeature.normalizeTerminalTail;
   var formatShellSnapshot = terminalFeature.formatShellSnapshot;
@@ -1822,6 +2218,12 @@
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
+    recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
+    authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
+    // 与历史重载路径共用同一信封判定（userMessageDisplayText 的 isInternalRuntimeEnvelopeText），
+    // 避免 live/restore 两处守卫实现漂移。
+    isInternalRuntimeUserMessage: isInternalRuntimeEnvelopeText,
+    applyAuthoritativeModeState: applyAuthoritativeModeState,
     addChatItem: addChatItem, addSystemItem: addSystemItem,
     addAuthoritySyncNotice: addAuthoritySyncNotice, timeStr: timeStr,
     toolCallAlreadyStarted: toolCallAlreadyStarted,
@@ -1831,6 +2233,10 @@
     flushAssistantMessageToHistory: flushAssistantMessageToHistory,
     resetPendingAssistant: resetPendingAssistant, flushQueued: flushQueued,
     isBusyFor: isBusyFor, doSendFor: doSendFor,
+    settleSteerCommitted: settleSteerCommitted,
+    settleSteerDropped: settleSteerDropped,
+    captureSteerPositions: captureSteerPositions,
+    recordSteeredMessages: recordSteeredMessages,
     ensureSessionBufferLoaded: ensureSessionBufferLoaded,
     getBuffer: getBuffer, markRemoteTurn: markRemoteTurn,
     reconcileRemoteTurn: reconcileRemoteTurn, saveWorkingSetTo: saveWorkingSetTo,
@@ -1851,17 +2257,17 @@
     trackArtifact: trackArtifact, untrackArtifact: untrackArtifact,
     findPresentedArtifact: findPresentedArtifact, isDeliverable: isDeliverable,
     noteArtifactChange: noteArtifactChange,
-    publishRemoteLiveSnapshot: publishRemoteLiveSnapshot,
     persistMessagesFor: persistMessagesFor,
     composePlanMarkdown: composePlanMarkdown,
     refreshHistoryList: refreshHistoryList,
     isShellExecutionTool: isShellExecutionTool,
+    mentionsShellTool: mentionsShellTool,
     scheduleShellPoll: scheduleShellPoll,
     appendToolItemOutput: appendToolItemOutput,
     scheduleShellNotify: scheduleShellNotify,
     markBackgroundToolItem: markBackgroundToolItem,
     patchLastItem: patchLastItem,
-    isDuplicateArtifactCard: isDuplicateArtifactCard,
+    updatePresentedArtifact: updatePresentedArtifact,
     updateToolItem: updateToolItem,
     basename: basename,
     hasUnresolvedItem: hasUnresolvedItem,
@@ -1869,8 +2275,9 @@
     safeConsoleInfo: safeConsoleInfo,
     isScheduledRunSession: isScheduledRunSession,
     markScheduledInitialTurnTerminal: markScheduledInitialTurnTerminal,
-    isAbsPath: isAbsPath,
+    isAbsPath: isAbsPath, normalizedPath: normalizedPath,
     addOrMergePruneCompaction: addOrMergePruneCompaction,
+    toolResultDisplayContent: toolResultDisplayContent,
     get currentStreamText() { return currentStreamText; },
     set currentStreamText(value) { currentStreamText = value; },
     get currentStreamId() { return currentStreamId; },
@@ -1885,33 +2292,15 @@
     set toolMeta(value) { toolMeta = value; },
   });
 
-  var workflowRuntimeFeature = installBridgeFeature("workflow-runtime", {
-    state: state, invoke: invoke, listen: listen, notify: notify, bt: bt,
-    refreshHistoryList: refreshHistoryList,
-    get itemIdSeq() { return itemIdSeq; },
-    set itemIdSeq(value) { itemIdSeq = value; },
-  });
-  var isRunSession = workflowRuntimeFeature.isRunSession;
-  var applyAgentPatch = workflowRuntimeFeature.applyAgentPatch;
-  var markWorkflowRunStopped = workflowRuntimeFeature.markWorkflowRunStopped;
-  var markWorkflowRunBlocked = workflowRuntimeFeature.markWorkflowRunBlocked;
-  var mergeFullState = workflowRuntimeFeature.mergeFullState;
-  var attachRun = workflowRuntimeFeature.attachRun;
-  var resumeWorkflowOnBoot = workflowRuntimeFeature.resumeWorkflowOnBoot;
-  var pushRunCard = workflowRuntimeFeature.pushRunCard;
-  var resolveRunCard = workflowRuntimeFeature.resolveRunCard;
-  var resolveRunCardsForRole = workflowRuntimeFeature.resolveRunCardsForRole;
-  var refreshRunState = workflowRuntimeFeature.refreshRunState;
-
   var monitorFeature = installBridgeFeature("monitor", { state: state, notify: notify, invoke: invoke, bt: bt, safeConsoleInfo: safeConsoleInfo, sessionStates: sessionStates });
   var startMonitorPolling = monitorFeature.startMonitorPolling;
   var stopMonitorPolling = monitorFeature.stopMonitorPolling;
   var clearMonitorStats = monitorFeature.clearMonitorStats;
   var pollBackendStatus = monitorFeature.pollBackendStatus;
   var settingsFeature = installBridgeFeature("settings", { state: state, notify: notify, invoke: invoke, listen: listen });
-  invokeErrorObserver = settingsFeature.observeInvokeError;
-  modelAvailabilityError = settingsFeature.modelAvailabilityError;
   var loadSettings = settingsFeature.loadSettings;
+  var loadBehaviorTelemetryStatus = settingsFeature.loadBehaviorTelemetryStatus;
+  var setBehaviorTelemetryEnabled = settingsFeature.setBehaviorTelemetryEnabled;
   var loadSelectedPet = settingsFeature.loadSelectedPet;
   var setSelectedPet = settingsFeature.setSelectedPet;
   var loadEffectiveModelConfig = settingsFeature.loadEffectiveModelConfig;
@@ -1934,6 +2323,9 @@
   var loadSessionModel = settingsFeature.loadSessionModel;
   var switchModel = settingsFeature.switchModel;
   var testModelConnection = settingsFeature.testModelConnection;
+  var getImageInputCapability = settingsFeature.getImageInputCapability;
+  var testImageInputCapability = settingsFeature.testImageInputCapability;
+  var probeLocalServerKind = settingsFeature.probeLocalServerKind;
   var testSearchProvider = settingsFeature.testSearchProvider;
 
   var interactionFeature = installBridgeFeature("interaction", {
@@ -1941,16 +2333,22 @@
     addSystemItem: addSystemItem, addAuthoritySyncNotice: addAuthoritySyncNotice,
     addChatItem: addChatItem, timeStr: timeStr,
     runSyncOnSession: runSyncOnSession,
+    modeStateEpochs: modeStateEpochs, bumpModeStateEpoch: bumpModeStateEpoch,
+    applyAuthoritativeModeState: applyAuthoritativeModeState,
+    currentDraftModeState: currentDraftModeState,
     flushAssistantMessageToHistory: flushAssistantMessageToHistory,
     resetPendingAssistant: resetPendingAssistant,
     rerenderFromMessages: rerenderFromMessages,
     turnUsageDirty: turnUsageDirty,
-    ensureSession: ensureSession,
     sendMessage: sendMessage,
+    sendMessageToSession: sendMessageToSession,
     getBuffer: getBuffer,
     reconcileRemoteTurn: reconcileRemoteTurn,
     isBusyFor: isBusyFor,
     markRemoteTurn: markRemoteTurn,
+    recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
+    authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
+    userMessageDisplayText: userMessageDisplayText,
     get currentStreamText() { return currentStreamText; },
     set currentStreamText(value) { currentStreamText = value; },
     get currentStreamId() { return currentStreamId; },
@@ -1971,11 +2369,13 @@
   var thinkingTool = interactionFeature.thinkingTool;
   var thinkingIdle = interactionFeature.thinkingIdle;
   var stopThinking = interactionFeature.stopThinking;
-  var applyModeFromState = interactionFeature.applyModeFromState;
   var acceptPlan = interactionFeature.acceptPlan;
   var discardPlan = interactionFeature.discardPlan;
   var exitPlanToYolo = interactionFeature.exitPlanToYolo;
   var setPlanModeNext = interactionFeature.setPlanModeNext;
+  var setDraftMode = interactionFeature.setDraftMode;
+  var setModeLane = interactionFeature.setModeLane;
+  var refreshModeDefaults = interactionFeature.refreshModeDefaults;
   var setMultiAgentMode = interactionFeature.setMultiAgentMode;
   var planStuckReplan = interactionFeature.planStuckReplan;
   var planStuckGo = interactionFeature.planStuckGo;
@@ -1984,7 +2384,7 @@
   var editLastTurn = interactionFeature.editLastTurn;
   var compactNow = interactionFeature.compactNow;
 
-  var memoryFeature = installBridgeFeature("memory", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, runSyncOnSession: runSyncOnSession, patchItemById: patchItemById, runOnSession: runOnSession, addChatItem: addChatItem, timeStr: timeStr });
+  var memoryFeature = installBridgeFeature("memory", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, runSyncOnSession: runSyncOnSession, patchItemById: patchItemById, patchItemByIdFor: patchItemByIdFor, runOnSession: runOnSession, addChatItem: addChatItem, timeStr: timeStr });
   var handleMemoryWrite = memoryFeature.handleMemoryWrite;
   var loadMemoryOverview = memoryFeature.loadMemoryOverview;
   var saveMemoryProfilePatch = memoryFeature.saveMemoryProfilePatch;
@@ -1995,7 +2395,7 @@
   var confirmMemoryCandidate = memoryFeature.confirmMemoryCandidate;
   var ignoreMemoryCandidate = memoryFeature.ignoreMemoryCandidate;
   var neverMemoryCandidate = memoryFeature.neverMemoryCandidate;
-  var artifactsFeature = installBridgeFeature("artifacts", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, dialogOpen: dialogOpen, basename: basename, isDeliverable: isDeliverable, isAbsPath: isAbsPath, sessionStates: sessionStates, ensureSession: function () { return ensureSession.apply(null, arguments); }, discardManagedAttachment: discardManagedAttachment });
+  var artifactsFeature = installBridgeFeature("artifacts", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, dialogOpen: dialogOpen, basename: basename, isDeliverable: isDeliverable, isAbsPath: isAbsPath, sessionStates: sessionStates, discardManagedAttachment: discardManagedAttachment });
   var artifactInfo = artifactsFeature.artifactInfo;
   var readArtifactText = artifactsFeature.readArtifactText;
   var writeArtifactText = artifactsFeature.writeArtifactText;
@@ -2008,7 +2408,6 @@
   var openInSystem = artifactsFeature.openInSystem;
   var openArtifactExternal = artifactsFeature.openArtifactExternal;
   var downloadArtifact = artifactsFeature.downloadArtifact;
-  var listDeliverables = artifactsFeature.listDeliverables;
   var listDeliverableIndex = artifactsFeature.listDeliverableIndex;
   var openExternalUrl = artifactsFeature.openExternalUrl;
   var openUserExternalUrl = artifactsFeature.openUserExternalUrl;
@@ -2018,25 +2417,29 @@
   var clearAttachments = artifactsFeature.clearAttachments;
   var pickAndAttach = artifactsFeature.pickAndAttach;
   var uploadDeviceFiles = artifactsFeature.uploadDeviceFiles;
+  var adoptManagedAttachments = artifactsFeature.adoptManagedAttachments;
   var resolveConversationAttachment = artifactsFeature.resolveConversationAttachment;
   var openConversationAttachment = artifactsFeature.openConversationAttachment;
   var revealConversationAttachment = artifactsFeature.revealConversationAttachment;
-  var personasFeature = installBridgeFeature("personas", { state: state, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, personaPlaceholderTitles: personaPlaceholderTitles });
+  var personasFeature = installBridgeFeature("personas", { state: state, notify: notify, invoke: invoke, listen: listen, bt: bt, isDefaultChatTitle: isDefaultChatTitle, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, runOnSession: runOnSession, personaPlaceholderTitles: personaPlaceholderTitles });
   var loadPersonas = personasFeature.loadPersonas;
   var getPersonas = personasFeature.getPersonas;
   var createPersona = personasFeature.createPersona;
   var updatePersona = personasFeature.updatePersona;
   var deletePersona = personasFeature.deletePersona;
-  var recordPersonaEvent = personasFeature.recordPersonaEvent;
   var equipPersona = personasFeature.equipPersona;
+  var postCardCreatorIntro = personasFeature.postCardCreatorIntro;
   var unequipPersona = personasFeature.unequipPersona;
   var syncActivePersona = personasFeature.syncActivePersona;
   var mountCollection = personasFeature.mountCollection;
   var setCollectionEnabled = personasFeature.setCollectionEnabled;
   var removeCollection = personasFeature.removeCollection;
   var unmountCollection = personasFeature.unmountCollection;
+  var mountRemoteCollection = personasFeature.mountRemoteCollection;
+  var setRemoteCollectionEnabled = personasFeature.setRemoteCollectionEnabled;
+  var removeRemoteCollection = personasFeature.removeRemoteCollection;
   var syncMountedCollection = personasFeature.syncMountedCollection;
-  var updaterFeature = installBridgeFeature("updater", { state: state, notify: notify, invoke: invoke, refreshHistoryList: refreshHistoryList, listen: listen, publishRemoteLiveSnapshot: publishRemoteLiveSnapshot, getBuffer: getBuffer, bt: bt });
+  var updaterFeature = installBridgeFeature("updater", { state: state, notify: notify, invoke: invoke, refreshHistoryList: refreshHistoryList, listen: listen, getBuffer: getBuffer, bt: bt });
   var loadAppVersion = updaterFeature.loadAppVersion;
   var checkForUpdateSilently = updaterFeature.checkForUpdateSilently;
   var checkForUpdate = updaterFeature.checkForUpdate;
@@ -2071,42 +2474,43 @@
   var closeVoiceAsrSetup = voiceFeature.closeVoiceAsrSetup;
   var cancelVoiceInput = voiceFeature.cancelVoiceInput;
   var clearVoiceInput = voiceFeature.clearVoiceInput;
+  var abandonVoiceResult = voiceFeature.abandonVoiceResult;
   var appendVoiceText = voiceFeature.appendVoiceText;
   var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
-  var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke });
+  var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
   var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
   var readMultiAgentSubagent = multiAgentFeature.readSubagentTranscript;
-  var workflowFeature = installBridgeFeature("workflow", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, dialogOpen: dialogOpen, resetPendingAssistant: resetPendingAssistant, syncModeState: syncModeState, refreshHistoryList: refreshHistoryList, markWorkflowRunStopped: markWorkflowRunStopped, refreshRunState: refreshRunState, resolveRunCard: resolveRunCard, resolveRunCardsForRole: resolveRunCardsForRole });
-  var setCurrentPhase = workflowFeature.setCurrentPhase;
-  var loadSkills = workflowFeature.loadSkills;
-  var activateSkill = workflowFeature.activateSkill;
-  var deactivateSkill = workflowFeature.deactivateSkill;
-  var openDemo = workflowFeature.openDemo;
-  var closeDemo = workflowFeature.closeDemo;
-  var startWorkflowTask = workflowFeature.startWorkflowTask;
-  var stopWorkflowTask = workflowFeature.stopWorkflowTask;
-  var listWorkflows = workflowFeature.listWorkflows;
-  var selectWorkflowRole = workflowFeature.selectWorkflowRole;
-  var closeWorkflowDrawer = workflowFeature.closeWorkflowDrawer;
-  var resetWorkflowRun = workflowFeature.resetWorkflowRun;
-  var getRolePrompt = workflowFeature.getRolePrompt;
-  var getRoleOutputs = workflowFeature.getRoleOutputs;
-  var getGateReport = workflowFeature.getGateReport;
-  var getRoleLogs = workflowFeature.getRoleLogs;
-  var submitWorkflowUserInput = workflowFeature.submitWorkflowUserInput;
-  var pickAndAddMaterials = workflowFeature.pickAndAddMaterials;
-  var pickFiles = workflowFeature.pickFiles;
-  var pickFolder = workflowFeature.pickFolder;
-  var pickFolders = workflowFeature.pickFolders;
-  var pickFeedbackFiles = workflowFeature.pickFeedbackFiles;
-  var addMaterialsToSession = workflowFeature.addMaterialsToSession;
-  var approveWorkflowGate = workflowFeature.approveWorkflowGate;
-  var rejectWorkflowGate = workflowFeature.rejectWorkflowGate;
-  var retryWorkflowRole = workflowFeature.retryWorkflowRole;
+  async function pickFiles() {
+    if (!dialogOpen) return [];
+    var selected = await dialogOpen({ multiple: true });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
+  }
+  async function pickFolder() {
+    if (!dialogOpen) return null;
+    var selected = await dialogOpen({ directory: true, multiple: false, title: bt("pickFolderTitle") });
+    if (!selected) return null;
+    return Array.isArray(selected) ? (selected[0] || null) : selected;
+  }
+  async function pickFolders() {
+    if (!dialogOpen) return [];
+    var selected = await dialogOpen({ directory: true, multiple: true, title: bt("kbPickFolderTitle") });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
+  }
+  async function pickFeedbackFiles() {
+    if (!dialogOpen) return [];
+    var selected = await dialogOpen({
+      multiple: true,
+      filters: [{ name: bt("fileMediaFilterName"), extensions: ["png", "jpg", "jpeg", "gif", "webp", "mp4", "mov", "webm"] }],
+    });
+    if (!selected) return [];
+    return Array.isArray(selected) ? selected : [selected];
+  }
   var accountPlatformFeature = installBridgeFeature("account-platform", { invoke: invoke });
   var teamRelayFeature = installBridgeFeature("team-relay", {
     state: state,
@@ -2124,10 +2528,16 @@
   var claimTeamRelay = teamRelayFeature.claim;
   var createFirstTeamRelayTeam = teamRelayFeature.createFirstTeam;
   var updateTeamRelayProfile = teamRelayFeature.updateProfile;
+  var getTeamRelayAvatarSource = teamRelayFeature.avatarSource;
+  var uploadTeamRelayAvatar = teamRelayFeature.uploadAvatar;
+  var removeTeamRelayAvatar = teamRelayFeature.removeAvatar;
   var createTeamRelayTeam = teamRelayFeature.createTeam;
   var joinTeamRelayTeam = teamRelayFeature.joinTeam;
   var switchTeamRelayTeam = teamRelayFeature.switchTeam;
   var removeTeamRelayMember = teamRelayFeature.removeMember;
+  var transferTeamRelayOwner = teamRelayFeature.transferOwner;
+  var leaveTeamRelayTeam = teamRelayFeature.leaveTeam;
+  var dissolveTeamRelayTeam = teamRelayFeature.dissolveTeam;
   var createTeamRelayInvite = teamRelayFeature.createInvite;
   var getTeamRelayJoinPassword = teamRelayFeature.getJoinPassword;
   var rotateTeamRelayJoinPassword = teamRelayFeature.rotateJoinPassword;
@@ -2136,6 +2546,7 @@
   var createTeamRelayThread = teamRelayFeature.createThread;
   var createTeamRelayAction = teamRelayFeature.createAction;
   var setTeamRelayThreadPreference = teamRelayFeature.setThreadPreference;
+  var markTeamRelayThreadRead = teamRelayFeature.markThreadRead;
   var listTeamRelayDraftSourceSessions = teamRelayFeature.listDraftSourceSessions;
   var readTeamRelayDraftSourceSession = teamRelayFeature.readDraftSourceSession;
   var mountTeamRelayDraftMaterials = teamRelayFeature.mountDraftMaterials;
@@ -2153,7 +2564,6 @@
     if (initPromise) return initPromise;
     initPromise = (async function () {
     startupMark("bridge:init_start");
-    await startupAwait("bridge:load_platform_capabilities", loadPlatformCapabilities);
     // Populate the global Scheduled unread summary without requiring the user
     // to visit the Scheduled page first. This stays off the startup critical path.
     if (!isDetachedWindow) {
@@ -2162,12 +2572,25 @@
       });
     }
     startupMark("bridge:monitor_polling_deferred", "starts when monitor view becomes active");
-    await startupAwait("bridge:load_settings", loadSettings);
-    await startupAwait("bridge:load_selected_pet", loadSelectedPet);
-    await startupAwait("bridge:load_effective_model", loadEffectiveModelConfig);
-    await startupAwait("bridge:load_app_version", loadAppVersion);
-    await startupAwait("bridge:load_models", loadModels);
-    await startupAwait("bridge:refresh_history", refreshHistoryList);
+    // 启动加载各自写互不重叠的状态片、彼此无数据依赖(每个 loader 自吞 invoke
+    // 错误并落兜底值),串行 await 只会把 8 个 loader 的 IPC 往返叠进首屏延迟
+    // (refreshHistoryList 含 2 次 invoke,实际 9 次往返)——并行后往返宽度收敛
+    // 为 1。分离会话绑定与 enterDraft 必须等本组完成后再走。
+    var needsSessionRuntime = !isDetachedWindow || detachedWindowKind === "session";
+    var parallelLoads = [
+      startupAwait("bridge:load_platform_capabilities", loadPlatformCapabilities),
+      startupAwait("bridge:load_settings", loadSettings),
+      startupAwait("bridge:load_behavior_telemetry", loadBehaviorTelemetryStatus),
+      startupAwait("bridge:load_selected_pet", loadSelectedPet),
+      startupAwait("bridge:load_effective_model", loadEffectiveModelConfig),
+      startupAwait("bridge:load_app_version", loadAppVersion),
+      startupAwait("bridge:load_models", loadModels),
+      startupAwait("bridge:refresh_history", refreshHistoryList)
+    ];
+    if (needsSessionRuntime) {
+      parallelLoads.push(startupAwait("bridge:refresh_super_permission", refreshSuperPerm));
+    }
+    await Promise.all(parallelLoads);
     // 分离会话必须在同一初始化链内绑定目标 id。此前 DetachedShell 的独立 effect
     // 会与这里的 enterDraft() 并发，慢初始化时已加载的原会话会被重置成空白草稿。
     if (isDetachedWindow && detachedWindowKind === "session" && detachedWindowSessionId) {
@@ -2178,9 +2601,9 @@
       enterDraft(); // 主窗口及非会话分离视图使用本窗口自己的空白工作集
       startupMark("bridge:draft_entered");
     }
-    var needsSessionRuntime = !isDetachedWindow || detachedWindowKind === "session";
     if (needsSessionRuntime) {
-      await startupAwait("bridge:refresh_super_permission", refreshSuperPerm);
+      // lane 全局默认（work/design/code）是草稿态 mode chip 的事实源，启动即拉取。
+      startupAwait("bridge:refresh_mode_defaults", refreshModeDefaults);
     }
     if (!isDetachedWindow || detachedWindowKind === "session" || detachedWindowKind === "cardpool") {
       loadPersonas(); // 会话和卡池需要本窗口自己的卡牌投影，fire-and-forget
@@ -2196,9 +2619,6 @@
     }
     startupMark("bridge:background_checks_started");
     if (!isDetachedWindow) refreshRemoteControlStatus(); // 权威主窗口独占桌面 Web 代理状态
-    if (!isDetachedWindow || detachedWindowKind === "workflow") {
-      await startupAwait("bridge:resume_workflow", resumeWorkflowOnBoot); // 工作流窗口需要恢复后端共享 run
-    }
     notify();
     startupMark("bridge:init_done");
     if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.flush();
@@ -2228,6 +2648,11 @@
       retryFirstTurn: retryFirstTurn,
       prefillComposer: prefillComposer,
       removeQueued: removeQueued,
+      prioritizeQueued: prioritizeQueued,
+      editQueued: editQueued,
+      steer: steer,
+      interruptAndSend: interruptAndSend,
+      interruptAndSendQueued: interruptAndSendQueued,
       cancelGeneration: cancelGeneration,
       cancelShellTask: cancelShellTask,
     },
@@ -2238,6 +2663,7 @@
       closeVoiceAsrSetup: closeVoiceAsrSetup,
       cancelVoiceInput: cancelVoiceInput,
       clearVoiceInput: clearVoiceInput,
+      abandonVoiceResult: abandonVoiceResult,
       appendVoiceText: appendVoiceText,
       runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     },
@@ -2249,6 +2675,9 @@
       setCollectionEnabled: setCollectionEnabled,
       removeCollection: removeCollection,
       unmountCollection: unmountCollection,
+      mountRemoteCollection: mountRemoteCollection,
+      setRemoteCollectionEnabled: setRemoteCollectionEnabled,
+      removeRemoteCollection: removeRemoteCollection,
       listCollections: function () { return invoke("kb_collection_list"); },
       kbModelStatus: function () { return invoke("kb_model_status"); },
     },
@@ -2297,6 +2726,8 @@
       saveSearchSettings: saveSearchSettings,
       saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
       testSearchProvider: testSearchProvider,
+      loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
+      setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
     },
     feedback: { submitFeedback: submitFeedback },
     vllm: {
@@ -2317,13 +2748,22 @@
       switchModel: switchModel,
       switchModelRef: settingsFeature.switchModelRef,
       testModelConnection: testModelConnection,
+      getImageInputCapability: getImageInputCapability,
+      testImageInputCapability: testImageInputCapability,
+      probeLocalServerKind: probeLocalServerKind,
     },
     interaction: { toggleSuperPerm: toggleSuperPerm,
+      // modeState 权威读取（评审 P1 后纳入公开面：main.jsx 从 code 页切回
+      // 工作/设计时拉一次实测值，避免 ChatView 挂载后显示旧 modeState）
+    syncModeState: syncModeState,
       // Plan/YOLO
     acceptPlan: acceptPlan,
     discardPlan: discardPlan,
     exitPlanToYolo: exitPlanToYolo,
     setPlanModeNext: setPlanModeNext,
+    setDraftMode: setDraftMode,
+    setModeLane: setModeLane,
+    refreshModeDefaults: refreshModeDefaults,
     setMultiAgentMode: setMultiAgentMode,
     planStuckReplan: planStuckReplan,
     planStuckGo: planStuckGo,
@@ -2361,7 +2801,6 @@
       openInSystem: openInSystem,
       openArtifactExternal: openArtifactExternal,
       downloadArtifact: downloadArtifact,
-      listDeliverables: listDeliverables,
       listDeliverableIndex: listDeliverableIndex,
       openExternalUrl: openExternalUrl,
       openUserExternalUrl: openUserExternalUrl,
@@ -2382,32 +2821,6 @@
       listSubagentTranscripts: listMultiAgentSubagents,
       readSubagentTranscript: readMultiAgentSubagent,
     },
-    workflow: {
-      loadSkills: loadSkills,
-      activateSkill: activateSkill,
-      deactivateSkill: deactivateSkill,
-      openDemo: openDemo,
-      closeDemo: closeDemo,
-      setCurrentPhase: setCurrentPhase,
-      startWorkflowTask: startWorkflowTask,
-      stopWorkflowTask: stopWorkflowTask,
-      listWorkflows: listWorkflows,
-      resetWorkflowRun: resetWorkflowRun,
-      selectWorkflowRole: selectWorkflowRole,
-      closeWorkflowDrawer: closeWorkflowDrawer,
-      getRolePrompt: getRolePrompt,
-      getRoleOutputs: getRoleOutputs,
-      getGateReport: getGateReport,
-      getRoleLogs: getRoleLogs,
-      submitWorkflowUserInput: submitWorkflowUserInput,
-      pickAndAddMaterials: pickAndAddMaterials,
-      addMaterialsToSession: addMaterialsToSession,
-      attachRun: attachRun,
-      resumeWorkflowOnBoot: resumeWorkflowOnBoot,
-      approveWorkflowGate: approveWorkflowGate,
-      rejectWorkflowGate: rejectWorkflowGate,
-      retryWorkflowRole: retryWorkflowRole,
-    },
     files: {
       pickFiles: pickFiles,
       pickFolders: pickFolders,
@@ -2419,7 +2832,7 @@
       readPersonaBody: function (id) { return invoke("read_persona_body", { personaId: id }); },
       equipPersona: equipPersona,
       unequipPersona: unequipPersona,
-      postCardCreatorIntro: function () { addChatItem({ type: "card_creator_intro", time: "" }); recordPersonaEvent({ kind: "card_creator_intro" }); notify(); },
+      postCardCreatorIntro: postCardCreatorIntro,
       createPersona: createPersona,
       updatePersona: updatePersona,
       deletePersona: deletePersona,
@@ -2471,10 +2884,16 @@
       claim: claimTeamRelay,
       createFirstTeam: createFirstTeamRelayTeam,
       updateProfile: updateTeamRelayProfile,
+      avatarSource: getTeamRelayAvatarSource,
+      uploadAvatar: uploadTeamRelayAvatar,
+      removeAvatar: removeTeamRelayAvatar,
       createTeam: createTeamRelayTeam,
       joinTeam: joinTeamRelayTeam,
       switchTeam: switchTeamRelayTeam,
       removeMember: removeTeamRelayMember,
+      transferOwner: transferTeamRelayOwner,
+      leaveTeam: leaveTeamRelayTeam,
+      dissolveTeam: dissolveTeamRelayTeam,
       createInvite: createTeamRelayInvite,
       getJoinPassword: getTeamRelayJoinPassword,
       rotateJoinPassword: rotateTeamRelayJoinPassword,
@@ -2483,6 +2902,7 @@
       createThread: createTeamRelayThread,
       createAction: createTeamRelayAction,
       setThreadPreference: setTeamRelayThreadPreference,
+      markThreadRead: markTeamRelayThreadRead,
       listDraftSourceSessions: listTeamRelayDraftSourceSessions,
       readDraftSourceSession: readTeamRelayDraftSourceSession,
       mountDraftMaterials: mountTeamRelayDraftMaterials,

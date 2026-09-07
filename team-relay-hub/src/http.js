@@ -6,6 +6,8 @@ import {
   openAttachmentContent,
   uploadAttachment,
 } from "./attachment-service.js";
+import { deleteAvatar, openAvatarContent, uploadAvatar } from "./avatar-service.js";
+import { AvatarProcessingGate, AvatarUploadGate } from "./avatar-processing-gate.js";
 import { asAppError, AppError } from "./errors.js";
 import { sha256 } from "./crypto.js";
 import { JoinRateLimiter } from "./join-rate-limiter.js";
@@ -22,20 +24,30 @@ import {
   listTeams,
   listTeamMembers,
   registerAccount,
-  removeTeamMember,
   rotateTeamJoinPassword,
   setTeamJoinPasswordVisibility,
   updateProfile,
 } from "./identity-service.js";
+import {
+  dissolveTeam,
+  leaveTeam,
+  removeTeamMember,
+  transferTeamOwner,
+} from "./team-lifecycle-service.js";
 import {
   createAction,
   createThread,
   getBootstrap,
   getThread,
   listThreads,
+  markThreadRead,
   setThreadPreference,
 } from "./thread-service.js";
 import { exactKeys, text, uuid } from "./validation.js";
+
+function requestedProtocol(request) {
+  return request.headers["x-pinvou-team-relay-protocol"] === "0.2" ? "0.2" : "0.1";
+}
 
 function bearerToken(request) {
   const header = request.headers.authorization;
@@ -89,23 +101,50 @@ async function readJson(request, maximumBytes) {
   }
 }
 
-class EventBroker {
+export class EventBroker {
   constructor() {
     this.teams = new Map();
+    this.authorizationGeneration = 0;
   }
 
-  subscribe(teamId, principalId, response) {
-    let responses = this.teams.get(teamId);
-    if (!responses) {
-      responses = new Set();
-      this.teams.set(teamId, responses);
+  currentAuthorizationGeneration() {
+    return this.authorizationGeneration;
+  }
+
+  subscribeAuthorized(teamIds, principalId, response, expectedGeneration) {
+    if (expectedGeneration !== this.authorizationGeneration) return null;
+    const subscriptions = [];
+    for (const teamId of teamIds) {
+      let responses = this.teams.get(teamId);
+      if (!responses) {
+        responses = new Set();
+        this.teams.set(teamId, responses);
+      }
+      const subscription = { principalId, response };
+      responses.add(subscription);
+      subscriptions.push({ responses, subscription, teamId });
     }
-    const subscription = { principalId, response };
-    responses.add(subscription);
     return () => {
-      responses.delete(subscription);
-      if (responses.size === 0) this.teams.delete(teamId);
+      for (const { responses, subscription, teamId } of subscriptions) {
+        responses.delete(subscription);
+        if (responses.size === 0) this.teams.delete(teamId);
+      }
     };
+  }
+
+  async authorizeAndSubscribe({ authorize, principalId, response, maximumAttempts = 3 }) {
+    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+      const authorizationGeneration = this.currentAuthorizationGeneration();
+      const teamIds = await authorize();
+      const unsubscribe = this.subscribeAuthorized(
+        teamIds,
+        principalId,
+        response,
+        authorizationGeneration,
+      );
+      if (unsubscribe) return unsubscribe;
+    }
+    return null;
   }
 
   publish(teamId, event, resource = {}) {
@@ -125,6 +164,7 @@ class EventBroker {
   }
 
   revoke(teamId, principalId) {
+    this.authorizationGeneration += 1;
     const responses = this.teams.get(teamId);
     if (!responses) return;
     for (const subscription of [...responses]) {
@@ -137,6 +177,20 @@ class EventBroker {
       }
     }
     if (responses.size === 0) this.teams.delete(teamId);
+  }
+
+  revokeTeam(teamId) {
+    this.authorizationGeneration += 1;
+    const responses = this.teams.get(teamId);
+    if (!responses) return;
+    this.teams.delete(teamId);
+    for (const subscription of responses) {
+      try {
+        subscription.response.end();
+      } catch {
+        subscription.response.destroy();
+      }
+    }
   }
 
   closeAll() {
@@ -168,6 +222,13 @@ export function createHubServer({ pool, config }) {
     maximumFailures: config.joinRateLimitFailures ?? 5,
     windowMs: (config.joinRateLimitWindowSeconds ?? 600) * 1000,
     blockMs: (config.joinRateLimitBlockSeconds ?? 900) * 1000,
+  });
+  const avatarUploadGate = new AvatarUploadGate({
+    maximumAttempts: config.avatarUploadRateLimitAttempts ?? 6,
+    windowMs: (config.avatarUploadRateLimitWindowSeconds ?? 60) * 1000,
+  });
+  const avatarProcessingGate = new AvatarProcessingGate({
+    maximumConcurrent: config.avatarProcessingConcurrency ?? 2,
   });
 
   async function verifyBetaAccess(request) {
@@ -268,6 +329,29 @@ export function createHubServer({ pool, config }) {
         sendJson(response, 200, { principal: result.principal }, requestId);
         return;
       }
+      if (method === "PUT" && pathname === "/v1/me/avatar") {
+        const result = await uploadAvatar(
+          pool,
+          token,
+          request,
+          config,
+          avatarUploadGate,
+          avatarProcessingGate,
+        );
+        for (const teamId of result.teamIds) notify(teamId, "profile.changed");
+        sendJson(response, 200, { avatar: result.avatar }, requestId);
+        return;
+      }
+      if (method === "DELETE" && pathname === "/v1/me/avatar") {
+        const result = await deleteAvatar(pool, token, config);
+        for (const teamId of result.teamIds) notify(teamId, "profile.changed");
+        response.writeHead(204, {
+          "Cache-Control": "no-store",
+          "X-Request-Id": requestId,
+        });
+        response.end();
+        return;
+      }
       if (method === "GET" && pathname === "/v1/teams") {
         sendJson(response, 200, await listTeams(pool, token), requestId);
         return;
@@ -345,6 +429,28 @@ export function createHubServer({ pool, config }) {
         );
         return;
       }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/owner-transfer$/);
+      if (params && method === "POST") {
+        const teamId = uuid(params[0], "team_id");
+        const result = await transferTeamOwner(
+          pool,
+          token,
+          teamId,
+          await readJson(request, config.maxJsonBytes),
+        );
+        notify(teamId, "membership.changed");
+        sendJson(response, 200, result, requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/members\/me$/);
+      if (params && method === "DELETE") {
+        const result = await leaveTeam(pool, token, params[0], config.joinCodeEncryptionKey);
+        events.revoke(result.team_id, result.principal_id);
+        notify(result.team_id, "membership.changed");
+        response.writeHead(204, { "X-Request-Id": requestId, "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
       params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/members\/([^/]+)$/);
       if (params && method === "DELETE") {
         const teamId = uuid(params[0], "team_id");
@@ -362,6 +468,44 @@ export function createHubServer({ pool, config }) {
         response.end();
         return;
       }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)$/);
+      if (params && method === "DELETE") {
+        const result = await dissolveTeam(pool, token, params[0]);
+        notify(result.team_id, "team.dissolved");
+        events.revokeTeam(result.team_id);
+        response.writeHead(204, { "X-Request-Id": requestId, "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+
+      params = pathMatch(pathname, /^\/v1\/principals\/([^/]+)\/avatar$/);
+      if (params && method === "GET") {
+        const { row, handle } = await openAvatarContent(
+          pool,
+          token,
+          params[0],
+          url.searchParams.get("team_id"),
+          url.searchParams.get("size"),
+          url.searchParams.get("reduced_motion"),
+          config,
+        );
+        response.writeHead(200, {
+          "Content-Type": row.content_type,
+          "Content-Length": String(row.byte_size),
+          "Content-Disposition": "inline",
+          Digest: `sha-256=${Buffer.from(row.sha256, "hex").toString("base64")}`,
+          ETag: `"${row.sha256}"`,
+          "X-Avatar-Source-SHA256": row.source_sha256,
+          "Cache-Control": "private, no-store",
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-Id": requestId,
+        });
+        const stream = handle.createReadStream();
+        stream.once("error", () => response.destroy());
+        stream.pipe(response);
+        return;
+      }
 
       if (method === "GET" && pathname === "/v1/threads") {
         sendJson(
@@ -374,7 +518,7 @@ export function createHubServer({ pool, config }) {
       }
       if (method === "POST" && pathname === "/v1/threads") {
         const body = await readJson(request, config.maxJsonBytes);
-        const result = await createThread(pool, token, body, notify);
+        const result = await createThread(pool, token, body, notify, requestedProtocol(request));
         sendJson(response, result.replayed ? 200 : 201, result, requestId);
         return;
       }
@@ -386,7 +530,7 @@ export function createHubServer({ pool, config }) {
       params = pathMatch(pathname, /^\/v1\/threads\/([^/]+)\/actions$/);
       if (params && method === "POST") {
         const body = await readJson(request, config.maxJsonBytes);
-        const result = await createAction(pool, token, params[0], body, notify);
+        const result = await createAction(pool, token, params[0], body, notify, requestedProtocol(request));
         sendJson(response, result.replayed ? 200 : 201, result, requestId);
         return;
       }
@@ -394,6 +538,12 @@ export function createHubServer({ pool, config }) {
       if (params && method === "PUT") {
         const body = await readJson(request, config.maxJsonBytes);
         sendJson(response, 200, await setThreadPreference(pool, token, params[0], body, notify), requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/threads\/([^/]+)\/read$/);
+      if (params && method === "PUT") {
+        const body = await readJson(request, config.maxJsonBytes);
+        sendJson(response, 200, await markThreadRead(pool, token, params[0], body, notify), requestId);
         return;
       }
       if (method === "POST" && pathname === "/v1/attachments") {
@@ -433,15 +583,36 @@ export function createHubServer({ pool, config }) {
         sendJson(
           response,
           200,
-          await getBootstrap(pool, token, url.searchParams.get("team_id")),
+          await getBootstrap(
+            pool,
+            token,
+            url.searchParams.get("team_id"),
+            requestedProtocol(request),
+            notify,
+          ),
           requestId,
         );
         return;
       }
       if (method === "GET" && pathname === "/v1/events") {
-        const teamId = uuid(url.searchParams.get("team_id"), "team_id");
         const auth = await authenticate(pool, token);
-        await requireMembership(pool, teamId, auth.principalId);
+        const requestedTeamId = url.searchParams.get("team_id");
+        const requestedTeam = requestedTeamId ? uuid(requestedTeamId, "team_id") : null;
+        const unsubscribe = await events.authorizeAndSubscribe({
+          authorize: async () => {
+            if (requestedTeam) {
+              await requireMembership(pool, requestedTeam, auth.principalId);
+              return [requestedTeam];
+            }
+            const memberships = await listTeams(pool, token);
+            return memberships.teams.map(team => team.id);
+          },
+          principalId: auth.principalId,
+          response,
+        });
+        if (!unsubscribe) {
+          throw new AppError(503, "service_unavailable", "Event authorization changed while subscribing. Retry the request.");
+        }
         response.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache, no-transform",
@@ -450,7 +621,6 @@ export function createHubServer({ pool, config }) {
           "X-Request-Id": requestId,
         });
         response.write("retry: 3000\nevent: ready\ndata: {}\n\n");
-        const unsubscribe = events.subscribe(teamId, auth.principalId, response);
         const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 20_000);
         heartbeat.unref();
         const cleanup = () => {

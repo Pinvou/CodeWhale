@@ -1,37 +1,61 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { KnowledgeView } from '../features/knowledge/KnowledgeView.jsx';
-import { MonitorView } from '../features/monitor/MonitorView.jsx';
+import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { CodexAcpView as LazyCodexAcpView } from '../features/codex/LazyCodexAcpView.jsx';
 import { ChatView } from '../features/chat/ChatView.jsx';
-import { ToolStoreView } from '../features/tools/ToolStoreView.jsx';
-import { CardPoolView } from '../features/personas/Personas.jsx';
-import { WorkflowView } from '../features/workflow/WorkflowView.jsx';
-import { CodexAcpView } from '../features/codex/CodexAcpView.jsx';
+import { VIEW_LOADERS } from './view-loaders.js';
+// 撕离窗与主窗口共用同一批懒加载视图 chunk(rolldown 自动共享),工厂统一走
+// view-loaders.js 的 VIEW_LOADERS。静态 import 会让对应视图被钉回主 chunk,
+// every view here goes through lazy; each window only actually loads the chunk
+// for its own kind. Two exceptions:
+// - codex: reuses the #159 LazyCodexAcpView wrapper (web capability gating +
+//   checking fallback; internally it also lazy-imports CodexAcpView, sharing
+//   the same chunk);
+// - chat: the main window statically imports ChatView in main.jsx (rendered at
+//   startup), and a detached window loads the same index.html, so the main
+//   chunk is necessarily already loaded; a dynamic import would not produce a
+//   separate chunk, so statically import the same module from the main chunk.
+const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
+const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
+const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
+const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
+const DetachedViewFallback = () => <div className="p-6 text-sm opacity-60">…</div>;
 import { useBridgeState } from '../hooks/useBridge.js';
 import { emitTauri, invokeTauri, isTauriAvailable, listenTauri } from '../platform/tauri/client.js';
-import { dict, TAG_TO_LANG } from '../shared/i18n.js';
+import { listAcpSessions } from '../features/codex/acpClient.js';
+import { dict, ensureLanguage, initialSystemLanguage, TAG_TO_LANG } from '../shared/i18n.js';
+import { ensurePersonaI18nOverlay } from './personas-overlay.js';
 
 function useDetachedBase() {
   const bs = useBridgeState([
     'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
     'settings', 'personas',
-    'workflow',
   ]);
-  const [language, setLanguage] = useState('zh');
+  const [language, setLanguage] = useState(initialSystemLanguage);
   const [activeTheme, setActiveTheme] = useState('dark');
+  const [, setPersonaI18nTick] = useState(0);
   const initRef = useRef(false);
 
   useEffect(() => {
     if (initRef.current || !bs || !bs.settings) return;
     const lang = TAG_TO_LANG[bs.settings.language];
-    if (lang) setLanguage(lang);
+    // en/ja 惰性词典:入口只引导系统语言,落盘语言可能未装载
+    if (lang) ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
     setActiveTheme(bs.settings.theme === 'liquid-light' ? 'light' : 'dark');
     initRef.current = true;
   }, [bs]);
   useEffect(() => {
     document.documentElement.classList.toggle('dark', activeTheme === 'dark');
   }, [activeTheme]);
+  // 与主窗 App 同一兜底:撕离窗加载同一 index.html,「系统中文 + 英/日 UI」时
+  // index.html 快速路径跳过注入,卡池撕离窗卡名会停在中文。UI 语言为 en/ja 时
+  // 兜底注入 overlay,加载完成 bump 一次让卡名重渲染。
+  useEffect(() => {
+    if (language === 'en' || language === 'ja') {
+      ensurePersonaI18nOverlay(() => setPersonaI18nTick(v => v + 1));
+    }
+  }, [language]);
 
-  return { bs, activeTheme, t: dict[language] };
+  // 兜底 zh:词典 chunk 装载失败时按 zh 渲染而非白屏(与 PetWindow/ReaderApp 同口径)。
+  return { bs, activeTheme, t: dict[language] || dict.zh };
 }
 
 class DetachedErrorBoundary extends React.Component {
@@ -67,7 +91,7 @@ function DetachedCodexSessionView({ id, theme, t, bs }) {
     let unlisten = null;
     const refresh = async () => {
       try {
-        const next = await invokeTauri('list_codex_acp_sessions');
+        const next = await listAcpSessions();
         if (!disposed) {
           setSessions(Array.isArray(next) ? next : []);
           setLoadFailed(false);
@@ -98,7 +122,8 @@ function DetachedCodexSessionView({ id, theme, t, bs }) {
     return <div className="p-6 text-sm opacity-70">{t.uiMainApp.detachedSessionMissing}</div>;
   }
   return (
-    <CodexAcpView
+    <Suspense fallback={<DetachedViewFallback />}>
+    <LazyCodexAcpView
       theme={theme}
       t={t}
       sessions={sessions}
@@ -110,6 +135,7 @@ function DetachedCodexSessionView({ id, theme, t, bs }) {
       onGotoTools={() => {}}
       fixedSession
     />
+    </Suspense>
   );
 }
 
@@ -118,12 +144,11 @@ function DetachedCodexSessionView({ id, theme, t, bs }) {
 const DETACHED_VIEWS = {
   session: ({ theme, t, bs }) => <ChatView theme={theme} t={t} bs={bs} prefill="" onPrefillConsumed={() => {}} onOpenEditor={() => {}} justInstalledTool={null} setJustInstalledTool={() => {}} onGotoSettings={() => {}} onGotoTools={() => {}} />,
   'codex-session': ({ id, theme, t, bs }) => <DetachedCodexSessionView id={id} theme={theme} t={t} bs={bs} />,
-  workflow: ({ theme, t, bs }) => <WorkflowView theme={theme} t={t} bs={bs} />,
-  monitor: ({ theme, t, bs }) => <MonitorView theme={theme} t={t} bs={bs} />,
-  cardpool: ({ theme, t, bs }) => <CardPoolView theme={theme} t={t} bs={bs} onEquipped={() => {}} onAICreate={() => {}} initialMyOnly={false} />,
-  toolstore: ({ theme, t }) => <ToolStoreView theme={theme} t={t} onNewChat={() => {}} />,
-  knowledge: ({ theme, t }) => <KnowledgeView theme={theme} t={t} />,
-  outputs: ({ theme, t }) => <KnowledgeView theme={theme} t={t} mode="outputs" />,
+  monitor: ({ theme, t, bs }) => <LazyMonitorView theme={theme} t={t} bs={bs} />,
+  cardpool: ({ theme, t, bs }) => <LazyCardPoolView theme={theme} t={t} bs={bs} onEquipped={() => {}} onAICreate={() => {}} initialMyOnly={false} />,
+  toolstore: ({ theme, t }) => <LazyToolStoreView theme={theme} t={t} onNewChat={() => {}} />,
+  knowledge: ({ theme, t }) => <LazyKnowledgeView theme={theme} t={t} />,
+  outputs: ({ theme, t }) => <LazyKnowledgeView theme={theme} t={t} mode="outputs" />,
 };
 
 export function DetachedShell({ kind, id }) {
@@ -150,7 +175,7 @@ export function DetachedShell({ kind, id }) {
       </div>
       <div className="flex-1 min-h-0 overflow-auto">
         {bs
-          ? <DetachedErrorBoundary t={t}><View id={id} theme={activeTheme} t={t} bs={bs} /></DetachedErrorBoundary>
+          ? <DetachedErrorBoundary t={t}><Suspense fallback={<DetachedViewFallback />}><View id={id} theme={activeTheme} t={t} bs={bs} /></Suspense></DetachedErrorBoundary>
           : <div className="p-6 text-sm opacity-60">…</div>}
       </div>
     </div>

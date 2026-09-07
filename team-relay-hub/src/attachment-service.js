@@ -311,7 +311,7 @@ export async function uploadAttachment(pool, token, uploadIdValue, request, conf
     try {
       const result = await inTransaction(pool, async (client) => {
         const team = await client.query(
-          "SELECT id FROM teams WHERE id = $1 FOR UPDATE",
+          "SELECT id FROM teams WHERE id = $1 AND dissolved_at IS NULL FOR UPDATE",
           [upload.teamId],
         );
         if (!team.rowCount) {
@@ -426,6 +426,7 @@ async function authorizedAttachment(pool, token, rawAttachmentId) {
        FROM attachments a
        JOIN memberships m
          ON m.team_id = a.team_id AND m.principal_id = $2 AND m.removed_at IS NULL
+       JOIN teams t ON t.id = a.team_id AND t.dissolved_at IS NULL
        LEFT JOIN action_attachments aa ON aa.attachment_id = a.id
        LEFT JOIN relay_actions ra ON ra.id = aa.action_id
       WHERE a.id = $1`,
@@ -442,7 +443,7 @@ async function authorizedAttachment(pool, token, rawAttachmentId) {
   } else {
     const participant = await pool.query(
       `SELECT 1 FROM thread_participants
-        WHERE thread_id = $1 AND principal_id = $2`,
+        WHERE thread_id = $1 AND principal_id = $2 AND material_access_at IS NOT NULL`,
       [row.thread_id, auth.principalId],
     );
     if (participant.rowCount === 0) {

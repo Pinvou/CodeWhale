@@ -8,12 +8,13 @@ import { desktopBridgeApi } from './bridge_domain_contract.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bridgeRoot = path.join(root, 'src', 'platform', 'tauri');
+const appMainSource = fs.readFileSync(path.join(root, 'src', 'app', 'main.jsx'), 'utf8');
 
 function read(relativePath) {
   return fs.readFileSync(path.join(bridgeRoot, relativePath), 'utf8');
 }
 
-function extractCalls(source, callee) {
+function extractCalls(source, callee, normalize = true) {
   const calls = [];
   const needle = `${callee}(`;
   let cursor = 0;
@@ -53,7 +54,8 @@ function extractCalls(source, callee) {
       else if (char === ')') depth -= 1;
     }
     assert.equal(depth, 0, `unclosed ${callee} call near offset ${cursor}`);
-    calls.push(source.slice(cursor, index).replace(/\s+/g, ' ').trim());
+    const call = source.slice(cursor, index);
+    calls.push(normalize ? call.replace(/\s+/g, ' ').trim() : call);
     cursor = index;
   }
   return calls;
@@ -75,31 +77,50 @@ const protocolSources = {
   settings: ['bridge/settings.js'],
   updater: ['bridge/updater.js'],
   voice: ['bridge/voice.js'],
-  workflow: ['bridge/workflow-runtime.js', 'bridge/workflow.js'],
   multiAgent: ['bridge/multiagent.js'],
   teamRelay: ['bridge/team-relay.js'],
   accountPlatform: ['bridge/account-platform.js'],
 };
 
 const expectedProtocolHashes = {
-  multiAgent: 'b123eece32980d80787ab9cd7315f3566b0943ab366a2358a1ff0cb247b65491',
-  orchestration: 'e5e333aca4d1fb7e8ed32f879d3b310c01cd0845d0e5cdc2b5ed1e95aee3ea31',
-  artifacts: '9de646442d1192440abd14046e75ec402afc2c8bea1a8a88ff9667aab5e6ac4c',
-  chat: '1debe7cf0bf31dbef5660b46414d6ca37514deb5a91f93ab516fd0a41d5119fd',
+  multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
+  orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
+  artifacts: 'e188b39659ef1f17996807f0effa49fdd6fb6d0b8f7d233121ad529f6579633a',
+  // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
+  // entry + comment translations touching `invoke(` mentions (the extractor
+  // scans raw source, so comment wording is part of the digest). Recomputed
+  // again for the eighth-review fixes: zap resend gating on the in-flight
+  // steer settlement, the per-sid zap entry guard, and the accompanying
+  // comment wording. And again for the streaming-freeze follow-ups: the
+  // settlement side table (a Promise on the queued chip poisoned the
+  // subscription snapshot), steeredMidTurn bubble markers, and the hydration
+  // envelope strip. And again for the r13 follow-ups: the transcript
+  // fallback's legacy-chip pre-check (chat-events.js) and the zap
+  // skip-resend settlement helper (chat.js). And again for the steer
+  // persistence alignment: the steered-messages sidecar save/get invokes
+  // (bridge.js) and the position-capture load_session (chat.js). Recomputed
+  // again for the background-task indicator: the multiagent:agent_progress
+  // listener schedules shell snapshot polling for sub-agent spawned tasks
+  // (chat-events.js). Recomputed for explicit artifact presentation: a
+  // successful present_artifact tool_end now emits a session-scoped request
+  // that opens the preview even when the existing card is updated in place.
+  chat: '5c4a6aa2e723878746f83d9ecf83e0f364c229dfb35b2f7b7156f98ce93cb1d4',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
-  interaction: 'dc75ecf05e5b015833c08ffa4e3de4319f657de5ce300b68f873e966236a4898',
-  knowledge: '3ae1fb7f8b4909601edb91ec1b2df83d37a3a6cc302911517c5913b557b716ca',
+  interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
+  knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
   memory: 'd92cbabf27c277a64b743e7af25b48d8b8b65513e33aeb0f38c906d4b300616b',
   monitor: '01bf9a7c9b9b3f313cf49e975e6503627ff373caed0f4b3be07a6a98492a7c43',
-  personas: '120fe92020f81ed7551b9f2e6efa7e95266ea41871bc0ca012bbec4ae46009d9',
-  remoteControl: '3e8d54d1051d1f59d5b9f41440b73444b82594391e47f4cbce56904afd72fb81',
-  scheduled: '239292d75c308973053cc0091e0ac9437191bf2375fd5fd8181ea26f4f749900',
-  sessions: 'dbe46d38c9d1ceda6aae0c91c5a7cc063d5ed07f5c83a4353c668da931298eed',
-  settings: '26e8f9e2e0f17667cc7328fbdc34a43d62a28ec245a049ca7885a08f03e26a41',
-  updater: '4277a60f49b7093d2c8476142232a63c15d50b3ab5084a2a80c1f40963363085',
-  voice: '2e6789eca3969f27e8e0fd9f034bd82e0b0e1f302152efc65c5714839fbf5b72',
-  workflow: 'c92e92ed3dc3850bae17f451810184fad2cadbfda6bf9f565a8b2862ad0595a1',
-  teamRelay: '557de5c0a8a9e3284c396cb7754b03b1f2252367dcc7a03fceecf923f2f7728e',
+  personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
+  remoteControl: 'b48906332b45fecfb5a9b222264edb694ff39a47c6ae2105f8d1c32a47653830',
+  scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
+  // Main integration: typed account-platform model binding and new main session/
+  // telemetry calls coexist; legacy account calls are retired. Updater retains
+  // the account-platform release precheck alongside main's update protocol.
+  sessions: '35c0c7fedacd6f2f6f5d6c829037b77aea80dbb4d01e54d06a9a55b473651e41',
+  settings: 'b878393113917ab41ad44aa748f346db64b2238e78ff7269239eccaca5939651',
+  updater: '3ed106e55a2272d3d103e5e8115f817b60cae953caf0986b591412b01fc4ba23',
+  voice: 'b26fd3ae1fa7d11f3457f757dae29bc518c4c9467ac138ef0b95a3cd118301b2',
+  teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
   accountPlatform: 'b27255619e222495aaada496eda619a788e7c876607730d36f08c9188780234d',
 };
 
@@ -222,4 +243,32 @@ try {
   if (previousTauri === undefined) delete globalThis.__TAURI__;
   else globalThis.__TAURI__ = previousTauri;
 }
+assert.doesNotMatch(
+  read('bridge.js'),
+  /repairPythonDependenciesAfterFirstFrame|repair_python_dependencies_after_first_frame/u,
+  'marketplace startup repair must not be exposed through the knowledge bridge domain',
+);
+const firstFrameCall = extractCalls(appMainSource, 'window.requestAnimationFrame', false)
+  .find(call => call.includes("mark('react:first_animation_frame')"));
+assert.ok(firstFrameCall, 'first animation frame startup callback must exist');
+const firstFrameBody = firstFrameCall.slice('window.requestAnimationFrame('.length, -1);
+const secondFrameCall = extractCalls(firstFrameBody, 'window.requestAnimationFrame', false)
+  .find(call => call.includes("mark('react:first_frame_presented')"));
+assert.ok(secondFrameCall, 'second animation frame startup callback must exist');
+const marketplaceCommands = fs.readFileSync(
+  path.join(root, 'src-tauri', 'src', 'app', 'commands', 'marketplace.rs'),
+  'utf8',
+);
+const uninstallStart = marketplaceCommands.indexOf('pub async fn uninstall_marketplace_tool(');
+const uninstallEnd = marketplaceCommands.indexOf(
+  'pub(super) fn uninstall_marketplace_tool_sync(',
+  uninstallStart,
+);
+assert.ok(uninstallStart >= 0 && uninstallEnd > uninstallStart, 'marketplace uninstall command boundary must exist');
+const uninstallCommand = marketplaceCommands.slice(uninstallStart, uninstallEnd);
+assert.match(
+  uninstallCommand,
+  /tauri::async_runtime::spawn_blocking\s*\([\s\S]*uninstall_marketplace_tool_sync/u,
+  'desktop marketplace uninstall must not wait for the synchronous tool lock on the async runtime',
+);
 console.log('bridge domain API and protocol contracts passed');

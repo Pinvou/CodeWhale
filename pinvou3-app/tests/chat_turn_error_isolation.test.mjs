@@ -77,7 +77,6 @@ let rejectChat = true;
 const context = {
   state,
   invoke(command) {
-    if (command === 'remote_control_publish_user_message') return Promise.resolve();
     return rejectChat ? Promise.reject(new Error('当前模型不可用')) : Promise.resolve();
   },
   notify() {},
@@ -191,7 +190,17 @@ assert.equal(
   'Shell cleanup warning must provide zh/en/ja translations',
 );
 
-const engineSource = read('src-tauri', 'src', 'features', 'assistant', 'engine.rs');
+// Wave-2 拆分把事件转发(含 Event::TurnComplete 处理)从 engine.rs 移到
+// forwarder.rs。契约检查事件处理顺序,故把 forwarder.rs 拼在前面(它含
+// TurnComplete→timing→emit 的顺序);未拆分的 main 上没有 forwarder.rs,
+// 自动回退为仅 engine.rs。
+let engineSource = read('src-tauri', 'src', 'features', 'assistant', 'engine.rs');
+try {
+  engineSource =
+    read('src-tauri', 'src', 'features', 'assistant', 'forwarder.rs') + engineSource;
+} catch {
+  // main(未拆分)无 forwarder.rs
+}
 const turnCompleteStart = engineSource.indexOf('Event::TurnComplete');
 const turnCompleteSection = engineSource.slice(
   turnCompleteStart,

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Brain, BrainCircuit, CheckCircle2, Clock, Cpu, Database, RefreshCw, RotateCcw, Server } from '../../components/icons.jsx';
 import { PinvouLogo } from '../../components/PinvouLogo.jsx';
 import { bridge } from '../../hooks/useBridge.js';
-import { ListRow, ProgressBar, WidgetCard } from '../workflow/WorkflowView.jsx';
+import { ListRow, ProgressBar, WidgetCard } from '../../components/MetricCards.jsx';
 
 // 界面语言 → BCP 47 locale，用于时钟等本地化格式化
 const MONITOR_CLOCK_LOCALE = { zh: 'zh-CN', en: 'en-US', ja: 'ja-JP' };
@@ -127,7 +127,7 @@ const ClearStatsHold = ({ theme, t, onClear }) => {
       .trim();
     const MonitorBrandIcon = ({ src, className = '' }) => src ? (
       <span className={`inline-flex items-center justify-center rounded-xl bg-white shadow-[0_6px_18px_rgba(15,23,42,0.12)] ring-1 ring-black/[0.05] dark:bg-white dark:ring-white/[0.08] ${className}`}>
-        <img src={src} alt="" className="w-[72%] h-[72%] object-contain" />
+        <img src={src} alt="" loading="lazy" decoding="async" className="w-[72%] h-[72%] object-contain" />
       </span>
     ) : null;
     const MonitorCard = ({ children, className = '', highlight = false }) => (

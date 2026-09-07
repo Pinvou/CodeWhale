@@ -273,8 +273,8 @@ test('manual adjustments create and recover approval requests only from accounts
   const approvals = await readFile(new URL('../../account-platform/internal/portal/static/assets/approval-requests.js', import.meta.url), 'utf8');
 
   assert.match(client, /createAdjustment\(input\)[\s\S]*?\/admin\/v1\/adjustments/);
-  assert.match(client, /createApprovalDraft\(input\)[\s\S]*?\/admin\/v1\/approval-requests/);
-  assert.match(client, /submitApprovalRequest\(requestID, expectedVersion\)/);
+  assert.match(client, /createApprovalDraft\(input, signal\)[\s\S]*?\/admin\/v1\/approval-requests/);
+  assert.match(client, /submitApprovalRequest\(requestID, expectedVersion, signal\)/);
   assert.doesNotMatch(client, /decideAdjustment\(/);
   assert.match(view, /await client\.createAdjustment[\s\S]*?await ensureAdjustmentApproval/);
   assert.match(view, /command_type: 'WALLET_ADJUSTMENT'/);
@@ -1157,7 +1157,7 @@ test('slider verification overlays the login form without changing its layout he
   const loginForm = popover.match(/<form className=\{`space-y-3[\s\S]*?<\/form>/)?.[0] || '';
   assert.doesNotMatch(loginForm, /<SliderCaptcha/);
   assert.match(popover, /role="dialog" aria-modal="true"[\s\S]*?absolute inset-0 z-20/);
-  assert.match(popover, /onClose=\{\(\) => \{ if \(busy\) return; setCaptcha\(null\); setCaptchaOffset\(0\); \}\}/);
+  assert.match(popover, /onClose=\{\(\) => \{\s*if \(busy\) return;\s*setCaptcha\(null\);\s*setCaptchaOffset\(0\);\s*\}\}/);
   assert.match(popover, /if \(captcha && !busy\)[\s\S]*?setCaptcha\(null\)/);
   assert.equal(accountPlatformCopy.zh.captchaClose, '关闭验证');
 });
@@ -1182,7 +1182,7 @@ test('desktop recharge completes inside the account popover without opening a we
   assert.match(popover, /copy\.balance[\s\S]*copy\.recharge/);
   assert.match(popover, /client\.products\(controller\.signal\)/);
   assert.doesNotMatch(popover, /client\.recentRechargeOrder/);
-  assert.match(popover, /const openRecharge = \(\) => \{\s*setOrder\(null\)/);
+  assert.match(popover, /const openRecharge = \(\) => \{\s*if \(!personalSurfaceAccess\(me\)\.rechargeCreate\) \{\s*setError\(copy\.permissionDenied\);\s*return;\s*\}\s*setOrder\(null\)/);
   assert.match(popover, /client\.createRecharge\(productId, channel, newIdempotencyKey\(\)\)/);
   assert.match(popover, /order\?\.qr_data/);
   assert.doesNotMatch(popover, /import\('qrcode'\)/);
@@ -1216,7 +1216,7 @@ test('built-in desktop chat uses the in-memory OIDC session and Token Gateway ro
   assert.match(accountBackend, /token_gateway_openai_base/);
   assert.match(accountBackend, /\("token", &Method::POST, \["v1", "chat", "completions"\], None\)/);
   assert.match(runtimeProvider, /chat_runtime_authorization\(\)/);
-  assert.match(runtimeProvider, /model\.base_url = authorization\.base_url/);
+  assert.match(runtimeProvider, /model\.base_url = self\s*\.model_proxy\s*\.register_session\(\s*&request\.session_id,\s*&authorization\.base_url,/);
   assert.match(runtimeProvider, /RuntimeModelCredential::api_key\([\s\S]*authorization\.access_token/);
 });
 
@@ -1314,11 +1314,14 @@ test('personal center keeps context on overview and cannot create organizations'
   const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
   const desktopClient = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
-  assert.match(i18n, /title:'个人中心'/);
-  assert.match(i18n, /activeContext:'当前身份', switchContext:'切换身份', personal:'个人账号'/);
+  assert.match(i18n, /title:\s*'个人中心'/);
+  assert.equal(accountPlatformCopy.zh.activeContext, '当前身份');
+  assert.equal(accountPlatformCopy.zh.switchContext, '切换身份');
+  assert.equal(accountPlatformCopy.zh.personal, '个人账号');
   assert.doesNotMatch(i18n, /当前上下文|身份上下文/);
   assert.match(view, /function Overview[\s\S]*copy\.activeContext/);
-  assert.equal((view.match(/copy\.activeContext/g) || []).length, 1);
+  const overview = view.slice(view.indexOf('function Overview'), view.indexOf('function Overview') + 8000);
+  assert.equal((overview.match(/copy\.activeContext/g) || []).length, 1);
   assert.match(view, /copy\.organizationIdentity\(activeOrganization\.name\)/);
   assert.doesNotMatch(view, /client\.createOrganization/);
   assert.doesNotMatch(bffClient, /createOrganization\(/);
@@ -1360,7 +1363,7 @@ test('personal center exposes only user-facing usage history instead of Token ad
   const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
   assert.match(view, /section === 'usage'/);
   assert.match(view, /client\.usageHistory\('', request\.signal\)/);
-  assert.match(i18n, /usage:'用量记录'/);
+  assert.match(i18n, /usage:\s*'用量记录'/);
   assert.doesNotMatch(view, /section === 'tokens'|client\.(managedTokens|eligibleTokens|credentials|rotateCredential|createTokenAccount)/);
   assert.doesNotMatch(i18n, /Token 管理|供应商凭据|模型消费准备状态|消费结算状态|可管理 Token/);
   assert.match(bffClient, /usageHistory\(cursor = '', signal\)/);
@@ -1369,7 +1372,7 @@ test('personal center exposes only user-facing usage history instead of Token ad
 });
 
 test('account portal uses stable asset names with revalidated caching', async () => {
-  const viteConfig = await readFile(new URL('../vite.config.js', import.meta.url), 'utf8');
+  const viteConfig = await readFile(new URL('../vite.config.mjs', import.meta.url), 'utf8');
   const portalService = await readFile(new URL('../../account-platform/internal/portal/service.go', import.meta.url), 'utf8');
   assert.match(viteConfig, /entryFileNames: 'assets\/\[name\]\.js'/);
   assert.match(viteConfig, /chunkFileNames: 'assets\/\[name\]\.js'/);
@@ -1479,14 +1482,14 @@ test('payment capabilities isolate provider limitations and enable reviewed-orde
   assert.match(provider, /ProviderID: "h3c_mall"/);
   assert.match(provider, /OrderQuerySupported: true/);
   assert.match(provider, /ManualRepairSupported: true/);
-  assert.match(view, /refundSupported = paymentCapabilities\.refund_supported === true/);
+  assert.match(view, /normalRefundCreationEnabled =\s*paymentCapabilities\.normal_refund_creation_enabled === true &&\s*paymentCapabilities\.refund_supported === true/);
   assert.match(view, /reconciliationSupported = paymentCapabilities\.bill_supported === true/);
   assert.match(view, /reconciliationImportSupported = paymentCapabilities\.bill_file_import_supported === true/);
   assert.match(view, /repairSupported = paymentCapabilities\.manual_repair_supported === true/);
   assert.match(view, /client\.repairPaymentOrder\(item\.order_id, reason\)/);
   assert.doesNotMatch(view, /paymentCapabilities\.provider === 'h3c_mall'/);
-  assert.match(view, /refundSupported && item\.status === 'ACTIVE'/);
-  assert.match(view, /disabled=\{busy \|\| !repairSupported/);
+  assert.match(view, /normalRefundCreationEnabled && item\.status === 'ACTIVE'/);
+  assert.match(view, /disabled=\{busy \|\| !canRequestRepair \|\| !repairSupported/);
   assert.match(view, /paymentCapabilities\.reconciliation_mode/);
   assert.match(i18n, /不支持的退款、主动关单、支付回调或日终账单对账操作已自动禁用/);
 });
@@ -1538,7 +1541,7 @@ test('organization purchases open the shared payment dialog and refresh organiza
   assert.match(view, /client\.organizationBalance\(activeOrganizationId\)/);
   assert.match(view, /client\.organizationEntitlementPackages\(activeOrganizationId\)/);
   assert.match(view, /client\.organizationRechargeOrder\(activeOrganizationId, order\.order_id\)/);
-  assert.match(backend, /\["v1", "organizations", organization_id, "recharge", "orders", order_id\]/);
+  assert.match(backend, /\[\s*"v1",\s*"organizations",\s*organization_id,\s*"recharge",\s*"orders",\s*order_id,?\s*\]/);
   assert.match(backend, /safe_id\(organization_id\) && safe_id\(order_id\)/);
 });
 
@@ -1586,7 +1589,7 @@ test('desktop account popover does not own platform model selection', async () =
 test('settings owns the platform model default for new conversations', async () => {
   const settings = await readFile(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
   const main = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
-  const i18n = await readFile(new URL('../src/shared/i18n.js', import.meta.url), 'utf8');
+  const i18n = (await Promise.all(['zh', 'en', 'ja'].map(language => readFile(new URL('../src/shared/i18n/' + language + '.js', import.meta.url), 'utf8')))).join('');
   assert.match(main, /defaultModelRef=\{bs && bs\.defaultModelRef\}/);
   assert.match(main, /accountPlatformClient=\{accountPlatformClient\}/);
   assert.match(settings, /accountPlatformClient\.modelCatalog/);
@@ -1599,7 +1602,7 @@ test('settings owns the platform model default for new conversations', async () 
 });
 
 test('chat model selection freezes a typed platform reference without changing the global default', async () => {
-  const settings = await readFile(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
+  const settings = await readFile(new URL('../src/features/settings/composer-shared.jsx', import.meta.url), 'utf8');
   const sessions = await readFile(new URL('../src/platform/tauri/bridge/sessions.js', import.meta.url), 'utf8');
   const bridgeSettings = await readFile(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
   const command = await readFile(new URL('../src-tauri/src/app/commands/account_platform.rs', import.meta.url), 'utf8');

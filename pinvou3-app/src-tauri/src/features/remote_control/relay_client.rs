@@ -5,16 +5,16 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use rand::Rng;
-use serde_json::{json, Value};
-use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
+use rand::RngExt;
+use serde_json::{Value, json};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::{Message, protocol::WebSocketConfig},
 };
 use tokio_util::sync::CancellationToken;
 
-use super::protocol::{WebAccessConfig, PROTOCOL_VERSION};
+use super::protocol::{PROTOCOL_VERSION, WebAccessConfig};
 
 const RECONNECT_BASE_DELAY_MS: u64 = 500;
 const RECONNECT_MAX_DELAY_MS: u64 = 10_000;
@@ -819,6 +819,7 @@ mod tests {
             endpoint_id: "ep_1".into(),
             access_token: "browser".into(),
             desktop_secret: "desktop".into(),
+            allow_host_workspace: false,
         }
     }
 
@@ -1117,28 +1118,6 @@ mod tests {
         assert_eq!(websocket.max_message_size, Some(MAX_INBOUND_TEXT_BYTES));
         assert_eq!(websocket.max_frame_size, Some(MAX_INBOUND_TEXT_BYTES));
 
-        let (sender, mut receiver) = mpsc::channel(INBOUND_CHANNEL_CAPACITY);
-        for index in 0..INBOUND_CHANNEL_CAPACITY {
-            sender
-                .try_send(RelayInbound::Connection {
-                    endpoint_id: index.to_string(),
-                    connected: false,
-                    error: None,
-                })
-                .unwrap();
-        }
-        assert!(matches!(
-            sender.try_send(RelayInbound::Connection {
-                endpoint_id: "overflow".into(),
-                connected: false,
-                error: None,
-            }),
-            Err(mpsc::error::TrySendError::Full(_))
-        ));
-        match receiver.try_recv().unwrap() {
-            RelayInbound::Connection { endpoint_id, .. } => assert_eq!(endpoint_id, "0"),
-            RelayInbound::Message(_) => panic!("unexpected message"),
-        }
         assert!(!inbound_text_too_large(MAX_INBOUND_TEXT_BYTES));
         assert!(inbound_text_too_large(MAX_INBOUND_TEXT_BYTES + 1));
     }
@@ -1175,10 +1154,8 @@ mod tests {
             ),
             Some(RelayTerminal::Missing)
         );
-    }
-
-    #[test]
-    fn terminal_messages_are_scoped_to_the_registered_endpoint() {
+        // 终结判定只对已注册 endpoint 生效:他端点消息不得终结本连接
+        // (原 terminal_messages_are_scoped_to_the_registered_endpoint)。
         assert_eq!(
             terminal_message(
                 &json!({

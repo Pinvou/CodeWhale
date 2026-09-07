@@ -18,6 +18,9 @@ const DEFAULT_DESKTOP_CAPABILITIES = Object.freeze({
   modelManagement: true,
   toolStoreMutations: true,
   multiAgent: true,
+  acpCodeMode: true,
+  // Zap-send goes through the foundation EnginePool's Tauri command channel; web has no such backend.
+  interruptSend: true,
   // 桌面端的系统选择器本就选择"本机"文件,无需浏览器上传通道;显式关闭
   // 让附件按钮在桌面保持原有单入口行为。
   deviceFileUpload: false,
@@ -29,7 +32,9 @@ const fallbackPlatform = Object.freeze({
   capabilities: DEFAULT_DESKTOP_CAPABILITIES,
 });
 
-export const platform = window.PinvouPlatform || fallbackPlatform;
+// Node 测试环境（node --test 直接 import 依赖本模块的逻辑文件）没有 window，
+// 按桌面兜底（canInvoke 返回 true，与桌面行为一致）。
+export const platform = (typeof window !== 'undefined' && window.PinvouPlatform) || fallbackPlatform;
 export const isWeb = platform.kind === 'web' || platform.isWeb === true;
 
 export function can(capability) {
@@ -44,4 +49,9 @@ export function can(capability) {
 export function canInvoke(command) {
   if (!isWeb) return true;
   return typeof platform.canInvoke === 'function' && platform.canInvoke(command) === true;
+}
+
+export function onPlatformConnectionChange(listener) {
+  if (!isWeb || typeof platform.onConnectionChange !== 'function') return () => {};
+  return platform.onConnectionChange(listener);
 }

@@ -37,20 +37,59 @@ class ReleaseCachePolicyTests(unittest.TestCase):
             "\n  windows-rust-test:", maxsplit=1
         )[0]
 
-        self.assertIn("timeout-minutes: 60", rust_test_job)
-        self.assertIn("shared-key: rust-test", rust_test_job)
+        self.assertIn("timeout-minutes: 120", rust_test_job)
+        self.assertIn("shared-key: rust-test-v2", rust_test_job)
         self.assertIn(MAIN_ONLY_SAVE, rust_test_job)
 
-    def test_arm64_release_validation_finishes_within_runner_window(self):
-        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        arm64_job = workflow.split("\n  build-linux-arm64:", maxsplit=1)[1].split(
-            "\n  build-windows-x64:", maxsplit=1
+    def test_rust_test_restores_lint_cache_before_its_own_cache(self):
+        workflow = PR_CHECK_WORKFLOW.read_text(encoding="utf-8")
+        rust_test_job = workflow.split("\n  rust-test:", maxsplit=1)[1].split(
+            "\n  windows-rust-test:", maxsplit=1
         )[0]
+        lint_cache = rust_test_job.index("shared-key: rust-lint")
+        test_cache = rust_test_job.index("shared-key: rust-test")
+        warm_cache_step = rust_test_job.split(
+            "- name: 恢复 Rust lint 暖缓存", maxsplit=1
+        )[1].split("- name: Cargo test cache", maxsplit=1)[0]
 
-        self.assertIn('CARGO_PROFILE_RELEASE_LTO: "false"', arm64_job)
-        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', arm64_job)
-        self.assertIn('RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', arm64_job)
-        self.assertIn("build-essential pkg-config cmake lld", arm64_job)
+        self.assertLess(lint_cache, test_cache)
+        self.assertIn("save-if: false", warm_cache_step)
+
+    def test_linux_release_jobs_use_hosted_runner_profile(self):
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        linux_jobs = {
+            "x64": workflow.split("\n  build-linux-x64:", maxsplit=1)[1].split(
+                "\n  build-linux-arm64:", maxsplit=1
+            )[0],
+            "arm64": workflow.split(
+                "\n  build-linux-arm64:", maxsplit=1
+            )[1].split("\n  build-windows-x64:", maxsplit=1)[0],
+        }
+
+        for architecture, job in linux_jobs.items():
+            with self.subTest(architecture=architecture):
+                job_env = job.split("\n    steps:", maxsplit=1)[0]
+                self.assertIn(
+                    'CARGO_PROFILE_RELEASE_LTO: "false"', job_env
+                )
+                self.assertIn(
+                    'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', job_env
+                )
+                self.assertIn(
+                    'RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', job_env
+                )
+                self.assertIn("build-essential pkg-config cmake lld", job)
+
+    def test_windows_artifact_release_uses_unsigned_build_entry(self):
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        windows_job = workflow.split(
+            "\n  build-windows-x64:", maxsplit=1
+        )[1].split("\n  build-macos-universal:", maxsplit=1)[0]
+
+        self.assertIn("run: npm run build:nsis:local", windows_job)
+        self.assertNotIn("run: npm run build:nsis\n", windows_job)
+        self.assertNotIn("signing.wosign.conf.json", windows_job)
+        self.assertNotIn(".builtin-secrets.env", windows_job)
 
 
 if __name__ == "__main__":

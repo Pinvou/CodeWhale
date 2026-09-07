@@ -4,6 +4,8 @@
   var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.interaction = function (context) {
     var state = context.state;
+    var recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
+    var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
     var invoke = context.invoke;
     var notify = context.notify;
     var bt = context.bt;
@@ -16,12 +18,20 @@
     var resetPendingAssistant = context.resetPendingAssistant;
     var rerenderFromMessages = context.rerenderFromMessages;
     var turnUsageDirty = context.turnUsageDirty;
-    var ensureSession = context.ensureSession;
     var sendMessage = context.sendMessage;
     var getBuffer = context.getBuffer;
     var reconcileRemoteTurn = context.reconcileRemoteTurn;
     var isBusyFor = context.isBusyFor;
     var markRemoteTurn = context.markRemoteTurn;
+    var sendMessageToSession = context.sendMessageToSession;
+    var userMessageDisplayText = context.userMessageDisplayText;
+    // 共享的 modeState epoch 表与权威写回收敛点（bridge.js 注入，评审 P1）：
+    // interaction 与 chat-events 必须用同一份 epoch 表，否则事件直写与
+    // 本模块的读取校验互不感知，竞态照样敞口。
+    var modeStateEpochs = context.modeStateEpochs;
+    var bumpModeStateEpoch = context.bumpModeStateEpoch;
+    var applyAuthoritativeModeState = context.applyAuthoritativeModeState;
+    var currentDraftModeState = context.currentDraftModeState;
 
   // ── Super permission ─────────────────────────────────────────────
   async function refreshSuperPerm() {
@@ -50,17 +60,85 @@
   }
 
   // ── Mode state ───────────────────────────────────────────────────
+  // 会话级读取。必须防住的竞态：
+  // 1. await 挂起期间用户切走：响应返回后不能写当前 active 会话的显示（否则
+  //    上一个会话的开关/模式状态会串台到新会话，表现为"在一个对话打开开关，
+  //    所有对话都开"）。校验发起时的 sid 仍是 active，否则把结果定向写回
+  //    sid 自己的 buffer，不碰当前显示。
+  // 2. 多智能体开关翻转/模式切换的本地权威改写：乐观翻转已把新状态显示出来
+  //    （后端尚未落盘），或权威写回已完成，此时在途的 get_mode_state 只会
+  //    拿到旧值，把用户刚打开（或关闭）的开关覆盖回去。防法：per-session
+  //    epoch——每次本地权威改写 bump 对应会话的 revision，读取发起时捕获、
+  //    返回后校验，epoch 变了即丢弃陈旧读取，权威值由对应操作写回。
+  //    只看瞬时 in-flight 集合识别不了"toggle 已完成（集合已清空）、旧读取
+  //    才返回"的顺序（审计意见），epoch 一并覆盖在途与已完成两种顺序。
+  //    epoch 表与 bump/权威写回由 bridge.js 共享（评审 P1）：任何权威
+  //    modeState 写回一律走 applyAuthoritativeModeState，禁止散点手工写。
   async function syncModeState() {
-    if (!state.activeSessionId) {
-      state.modeState = { mode: "yolo", multiAgent: false };
+    var sid = state.activeSessionId;
+    if (!sid) {
+      // 草稿态：显示当前 lane 的全局默认（三分 lane 语义），不再恒 yolo。
+      state.modeState = currentDraftModeState();
       return;
     }
+    if (multiAgentToggleInFlight.has(sid)) return;
+    var epoch = modeStateEpochs[sid] || 0;
     try {
       var ms = await invoke("get_mode_state", { sessionId: state.activeSessionId });
+      if ((modeStateEpochs[sid] || 0) !== epoch) return;
+      if (state.activeSessionId !== sid) {
+        runSyncOnSession(sid, function () {
+          state.modeState = { mode: ms.mode || "yolo", multiAgent: !!ms.multi_agent };
+        });
+        return;
+      }
       state.modeState = { mode: ms.mode || "yolo", multiAgent: !!ms.multi_agent };
     } catch (e) {
+      if ((modeStateEpochs[sid] || 0) !== epoch) return;
+      if (state.activeSessionId !== sid) return;
       state.modeState = { mode: "yolo", multiAgent: false };
     }
+  }
+
+  // ── lane 全局默认（工作/设计/代码三分，复审拍板）─────────────────
+  // 草稿态 mode = 本 lane 全局默认；草稿切换只写全局默认（不物化会话），
+  // 已生成会话的切换只写会话自己的记录（set_plan_mode_next 等 per-session
+  // 命令，后端不再渗全局）。
+  async function refreshModeDefaults() {
+    try {
+      var defaults = await invoke("get_mode_defaults");
+      if (defaults) state.modeDefaults = defaults;
+    } catch (e) { /* 读取失败保留旧值/缺省，不打扰交互 */ }
+    if (!state.activeSessionId) {
+      state.modeState = currentDraftModeState();
+      notify();
+    }
+  }
+  // ChatView 随 pinvouMode 传入当前 lane；草稿态立即按新 lane 默认刷新显示。
+  function setModeLane(lane) {
+    var next = lane === "design" ? "design" : "work";
+    if (state.modeLane === next) return;
+    state.modeLane = next;
+    if (!state.activeSessionId) {
+      state.modeState = currentDraftModeState();
+      notify();
+    }
+  }
+  // 草稿态 chip 切换：写本 lane 全局默认（setDraftMode 不物化会话——
+  // 物化时由 ensureSession 把 lane 默认应用到新会话）。
+  async function setDraftMode(target) {
+    var lane = state.modeLane === "design" ? "design" : "work";
+    try {
+      var defaults = await invoke("set_mode_default", { lane: lane, mode: target });
+      if (defaults) state.modeDefaults = defaults;
+      if (!state.activeSessionId) {
+        state.modeState = {
+          mode: target,
+          multiAgent: !!(state.modeState && state.modeState.multiAgent),
+        };
+      }
+    } catch (e) { addSystemItem(bt("switchModeFailed") + e); }
+    notify();
   }
 
   // ── 卡片动作辅助 ─────────────────────────────────────────────────
@@ -99,9 +177,6 @@
   function thinkingTool(name) { state.thinking = { active: true, phase: "tool", toolName: name || "", startedAt: Date.now() }; }
   function thinkingIdle() { state.thinking = { active: true, phase: "thinking", toolName: "", startedAt: Date.now() }; }
   function stopThinking() { state.thinking = { active: false, phase: "thinking", toolName: "", startedAt: 0 }; }
-  function applyModeFromState(st) {
-    state.modeState = { mode: st.mode || "yolo", multiAgent: !!st.multi_agent };
-  }
 
   function isActionablePlanCard(sid, itemId, planId) {
     if (!sid || sid !== state.activeSessionId || !itemId || !planId) return false;
@@ -126,11 +201,15 @@
     }
     var planBuffer = getBuffer(sid);
     if (planBuffer && planBuffer.remoteTurnActive && !(await reconcileRemoteTurn(sid))) {
+      recordAuthoritySyncDiagnostic("remote_sync_blocked_action", Object.assign({
+        operation: "accept_plan",
+      }, authoritySyncBufferSnapshot(sid, planBuffer)));
       addAuthoritySyncNoticeFor(sid, bt("remoteTurnSyncing"));
       notify();
       return;
     }
-    if (state.activeSessionId !== sid || isBusyFor(sid) || !isActionablePlanCard(sid, itemId, planTicket)) return;
+    // sid 前缀省略：isActionablePlanCard 首判已校验 sid === active（审计清理）。
+    if (isBusyFor(sid) || !isActionablePlanCard(sid, itemId, planTicket)) return;
     if (planBuffer) {
       planBuffer.localTurnOwned = true;
       planBuffer.remoteTurnActive = false;
@@ -149,8 +228,10 @@
         planMarkdown: planMarkdown || "",
         displayMessage: displayEcho,
       });
+      // 接受计划 = 后端受理新一轮（reserve_turn + 重跑）：未提交的「打开」转正锁死。
+      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
       if (planBuffer) planBuffer.deferredRemoteUserEvent = null;
-      runOnSession(sid, function () { applyModeFromState(st); });
+      applyAuthoritativeModeState(sid, st);
     } catch (e) {
       var errorText = String(e && e.message ? e.message : e || "");
       var concurrentTurn = errorText.indexOf("session_turn_in_progress") >= 0;
@@ -167,10 +248,12 @@
         state.busy = false;
         stopThinking();
       });
-      if (concurrentTurn && planBuffer) markRemoteTurn(sid, planBuffer);
+      if (concurrentTurn && planBuffer) {
+        markRemoteTurn(sid, planBuffer, false, "accept_plan_concurrent_turn");
+      }
       try {
         var currentMode = await invoke("get_mode_state", { sessionId: sid });
-        runOnSession(sid, function () { applyModeFromState(currentMode); });
+        applyAuthoritativeModeState(sid, currentMode);
       } catch (_) {}
       addSystemItemFor(sid, bt("acceptPlanFailed") + e);
     }
@@ -187,7 +270,7 @@
     notify();
     try {
       var st = await invoke("discard_plan", { sessionId: sid, planId: planTicket });
-      runOnSession(sid, function () { applyModeFromState(st); });
+      applyAuthoritativeModeState(sid, st);
       patchItemByIdFor(sid, itemId, { planResolutionConfirmed: true });
     } catch (e) {
       var errorText = String(e && e.message ? e.message : e || "");
@@ -211,7 +294,7 @@
       if (planNotActive) {
         try {
           var currentMode = await invoke("get_mode_state", { sessionId: sid });
-          runOnSession(sid, function () { applyModeFromState(currentMode); });
+          applyAuthoritativeModeState(sid, currentMode);
         } catch (_) {}
       }
       addSystemItemFor(sid, bt("discardPlanFailed") + e);
@@ -219,23 +302,27 @@
     notify();
   }
   async function exitPlanToYolo() {
-    if (!state.activeSessionId) return;
+    var sid = state.activeSessionId;
+    // 草稿态：不物化会话，改写本 lane 全局默认（三分 lane 语义）。
+    if (!sid) { await setDraftMode("yolo"); return; }
     try {
+      // invoke 形状保持 { sessionId: state.activeSessionId }（协议指纹按文本
+      // 计算）；发起瞬间 activeSessionId === sid，await 返回后按 sid 定向写回。
       var st = await invoke("exit_plan_to_yolo", { sessionId: state.activeSessionId });
-      applyModeFromState(st);
-    } catch (e) { addSystemItem(bt("exitPlanFailed") + e); }
+      applyAuthoritativeModeState(sid, st);
+    } catch (e) { addSystemItemFor(sid, bt("exitPlanFailed") + e); }
     notify();
   }
   // 灯泡 toggle：plan ↔ yolo
   async function setPlanModeNext() {
-    // 草稿态(无 session)先物化:mode 是 per-session 状态,进 Plan 必须先有 session,
-    // 否则草稿页点 Plan 会静默 return 不切换(composer chip 入口暴露的缺陷)。
-    var sid = await ensureSession();
-    if (!sid) return;
+    // 草稿态：不物化会话，改写本 lane 全局默认（三分 lane 语义；旧实现会先
+    // ensureSession 物化——草稿页点 Plan 凭空造出空会话）。
+    var sid = state.activeSessionId;
+    if (!sid) { await setDraftMode("plan"); return; }
     try {
       var st = await invoke("set_plan_mode_next", { sessionId: sid });
-      applyModeFromState(st);
-    } catch (e) { addSystemItem(bt("switchModeFailed") + e); }
+      applyAuthoritativeModeState(sid, st);
+    } catch (e) { addSystemItemFor(sid, bt("switchModeFailed") + e); }
     notify();
   }
   // 多智能体开关（ADR-0006）：模型列表下方的会话级开关。后端做名册装配
@@ -269,6 +356,9 @@
       // 等返回再翻拨杆会像"点了没反应"。先翻显示并 notify，成功后用后端
       // 权威状态复核；失败回滚显示并提示。in-flight 闸已挡并发重入。
       var previousMultiAgent = !!(state.modeState && state.modeState.multiAgent);
+      // 翻转即刻 bump 该会话 epoch：让在途的 get_mode_state 读取全部作废，
+      // 无论其响应在 toggle 进行中还是完成后返回。
+      bumpModeStateEpoch(sid);
       state.modeState = {
         mode: (state.modeState && state.modeState.mode) || "yolo",
         multiAgent: !!enabled,
@@ -276,7 +366,7 @@
       notify();
       try {
         var st = await invoke("set_multi_agent_mode", { sessionId: sid, enabled: !!enabled });
-        runOnSession(sid, function () { applyModeFromState(st); });
+        applyAuthoritativeModeState(sid, st);
       } catch (invokeError) {
         // 回滚与报错必须定向回触发会话：await 期间用户可能已切走，直接改
         // 全局 modeState 会把回滚砸进别的会话、报错落错聊天（复核 P1）。
@@ -298,39 +388,69 @@
   // plan-stuck / fallback / execution-stuck 卡片动作
   async function planStuckReplan(itemId) {
     patchItemById(itemId, { resolved: true, statusLabel: bt("replanRequested") }); notify();
-    await sendMessage("请用 todo_write 工具输出完整方案步骤,不要直接调写工具。");
+    await sendMessage(bt("planStuckReplanPrompt"));
   }
   async function planStuckGo(itemId) {
+    var sid = state.activeSessionId;
+    if (!sid) return;
     patchItemById(itemId, { resolved: true }); notify();
     await exitPlanToYolo();
-    await sendMessage("按上面讨论的方案继续执行任务,直接写文件/跑命令,不要再讨论方案。");
+    // 补充指令必须发往触发会话：await exitPlanToYolo 期间用户可能已切走，
+    // 直接 sendMessage 会把"继续执行"发到切换后的会话（审计遗漏补修）。
+    // sendMessageToSession 校验失败（会话已删/对账中）会 throw，必须接住并
+    // 定向提示，否则成为 React onClick 上的 unhandled rejection，用户无感知。
+    try {
+      await sendMessageToSession(sid, bt("planStuckGoPrompt"));
+    } catch (e) { addSystemItemFor(sid, bt("planContinueFailed") + e); notify(); }
   }
 
   // ── 用户交互卡 ───────────────────────────────────────────────────
+  // 卡片动作链路有 await 边界：entry 先捕获触发会话 sid，invoke 与后续全部 UI 写入
+  // 都定向到 sid（runOnSession / patchItemByIdFor），避免用户提交期间切会话导致
+  // echo/restoredAnswers 漏写触发会话或污染当前会话（与 acceptPlan 同一约定）。
   async function submitUserInput(itemId, toolCallId, answers, questions) {
-    patchItemById(itemId, { submitting: true }); notify();
+    var sid = state.activeSessionId;
+    if (!sid) return;
+    patchItemByIdFor(sid, itemId, { submitting: true }); notify();
     try {
-      await invoke("submit_user_input", { toolCallId: toolCallId, answers: answers, sessionId: state.activeSessionId });
-      var summary = answers.map(function (a, i) {
-        var text = (a.other || a.label === "其他") ? bt("echoOtherPrefix") + a.value : a.label;
-        return (questions[i].header || ("Q" + (i + 1))) + ": " + text;
-      }).join(" · ");
-      pushUserEcho("✓ " + summary, false);
-      flushAssistantMessageToHistory();
-      patchItemById(itemId, { resolved: true, cardState: "submitted", submitting: false });
+      await invoke("submit_user_input", { toolCallId: toolCallId, answers: answers, sessionId: sid });
+      // 摘要按 question 分组拼接：answers 是按选项展开的（multi_select 时同一题多条），
+      // 不能按 answers 索引一一对应 questions（会越界抛 TypeError，复核 P1）。
+      // 用无原型对象：question id 仅后端校验非空，constructor/toString/__proto__ 是合法输入，
+      // 普通 {} 会让这些键命中 Object.prototype 继承属性，.push 抛 TypeError（复核 P1）。
+      var byId = Object.create(null);
+      answers.forEach(function (a) { if (a && a.id != null) (byId[a.id] = byId[a.id] || []).push(a); });
+      var summary = questions.map(function (q, qi) {
+        var list = byId[q.id];
+        if (!list || !list.length) return null;
+        var header = q.header || ("Q" + (qi + 1));
+        return header + ": " + list.map(function (a) {
+          var text = (a.other || a.label === "其他") ? bt("echoOtherPrefix") + a.value : a.label;
+          return text;
+        }).join(" · ");
+      }).filter(Boolean).join(" · ");
+      runOnSession(sid, function () {
+        pushUserEcho("✓ " + summary, false);
+        flushAssistantMessageToHistory();
+      });
+      // 提交时即存答案：切走视图再切回（ChatView 重挂载但 bridge state 保留）时，
+      // QuestionChoiceCard 用 restoredAnswers 恢复选中态；会话级 rerender 另有解析。
+      patchItemByIdFor(sid, itemId, { resolved: true, cardState: "submitted", submitting: false, restoredAnswers: answers });
     } catch (e) {
-      patchItemById(itemId, { submitting: false, error: String(e) });
+      patchItemByIdFor(sid, itemId, { submitting: false, error: String(e) });
     }
     notify();
   }
   async function cancelUserInput(itemId, toolCallId) {
-    try { await invoke("cancel_user_input", { toolCallId: toolCallId, sessionId: state.activeSessionId }); } catch (_) {}
-    patchItemById(itemId, { resolved: true, cardState: "cancelled" });
+    var sid = state.activeSessionId;
+    if (!sid) return;
+    try { await invoke("cancel_user_input", { toolCallId: toolCallId, sessionId: sid }); } catch (_) {}
+    patchItemByIdFor(sid, itemId, { resolved: true, cardState: "cancelled" });
     notify();
   }
 
   // ── 编辑上一轮 / 手动压缩 ─────────────────────────────────────────
-  async function editLastTurn(newText) {
+  async function editLastTurn(newText, options) {
     if (state.busy || !state.activeSessionId) return;
     newText = (newText || "").trim();
     if (!newText) return;
@@ -339,7 +459,10 @@
     // 编辑前先收敛远端对账(与 web bridge 的 editLastTurn 对齐):失败对账
     // 状态下编辑会被陈旧 committed 事件重武装旧 revision,污染新一轮。
     if (editBuffer && editBuffer.remoteTurnActive && !(await reconcileRemoteTurn(sid))) {
-      addAuthoritySyncNotice(bt("remoteTurnSyncing"));
+      recordAuthoritySyncDiagnostic("remote_sync_blocked_action", Object.assign({
+        operation: "edit_last_turn",
+      }, authoritySyncBufferSnapshot(sid, editBuffer)));
+      addAuthoritySyncNoticeFor(sid, bt("remoteTurnSyncing"));
       notify();
       return;
     }
@@ -353,10 +476,23 @@
       editBuffer.remoteTerminalSeen = false;
       editBuffer.remoteCommittedRevision = "";
     }
-    // 删除末尾最近的 user 及之后所有，push 新 user，重渲染
+    // 失败回滚快照（与 web bridge 的 editLastTurn 对齐）：await 期间可能
+    // 切走，恢复必须定向回 sid 的 buffer，不能直接改全局显示。
+    var previous = {
+      messages: state.messages.slice(),
+      chatItems: state.chatItems.slice(),
+      busy: state.busy,
+      thinking: Object.assign({}, state.thinking),
+      currentStreamText: context.currentStreamText,
+      currentStreamId: context.currentStreamId,
+    };
+    // Remove the latest displayable user turn and everything after it, then
+    // append the replacement. Tool results and internal runtime envelopes also
+    // use role="user", so a bare role scan would cut at the wrong boundary.
     var cut = -1;
     for (var i = state.messages.length - 1; i >= 0; i--) {
-      if (state.messages[i].role === "user") { cut = i; break; }
+      var candidate = state.messages[i];
+      if (candidate.role === "user" && userMessageDisplayText(candidate.content)) { cut = i; break; }
     }
     if (cut >= 0) state.messages.splice(cut);
     state.messages.push({ role: "user", content: [{ type: "text", text: newText }] });
@@ -369,17 +505,38 @@
     context.currentStreamId = ++context.itemIdSeq;
     state.chatItems.push({ id: context.currentStreamId, type: "assistant", text: "", html: "", time: timeStr(), streaming: true });
     notify();
-    turnUsageDirty[state.activeSessionId] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护
+    turnUsageDirty[sid] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护（用捕获的 sid，web 对齐）
     try {
-      await invoke("edit_last_turn", { newMessage: newText, sessionId: state.activeSessionId });
+      await invoke("edit_last_turn", {
+        newMessage: newText,
+        sessionId: state.activeSessionId,
+        retryReason: options && options.retryReason || "input_changed",
+      });
+      // 编辑重跑 = 后端受理新一轮：未提交的「打开」转正锁死（同 doSendFor）。
+      try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
     } catch (e) {
-      addSystemItem("⚠️ " + e);
-      state.busy = false;
+      // 失败恢复必须定向触发会话（web 对齐）：直接写全局会把 busy/错误提示
+      // 砸进别的会话（编辑是在 sid 上发起的）。
+      if (editBuffer) editBuffer.localTurnOwned = false;
+      runSyncOnSession(sid, function () {
+        state.messages = previous.messages;
+        state.chatItems = previous.chatItems;
+        state.busy = previous.busy;
+        state.thinking = previous.thinking;
+        context.currentStreamText = previous.currentStreamText;
+        context.currentStreamId = previous.currentStreamId;
+        addSystemItem("⚠️ " + e);
+      });
       notify();
     }
   }
   async function compactNow() {
-    try { await invoke("compact_now", { sessionId: state.activeSessionId }); } catch (e) { addSystemItem(bt("compactFail") + ": " + e); }
+    var sid = state.activeSessionId;
+    if (!sid) return;
+    try { await invoke("compact_now", { sessionId: state.activeSessionId }); } catch (e) {
+      var compactErr = String(e || "");
+      addSystemItemFor(sid, bt("compactFail") + ": " + (compactErr.indexOf("session_engine_not_running") >= 0 ? bt("compactInactive") : compactErr));
+    }
   }
 
 
@@ -397,11 +554,13 @@
       thinkingTool: thinkingTool,
       thinkingIdle: thinkingIdle,
       stopThinking: stopThinking,
-      applyModeFromState: applyModeFromState,
       acceptPlan: acceptPlan,
       discardPlan: discardPlan,
       exitPlanToYolo: exitPlanToYolo,
       setPlanModeNext: setPlanModeNext,
+      setDraftMode: setDraftMode,
+      setModeLane: setModeLane,
+      refreshModeDefaults: refreshModeDefaults,
       setMultiAgentMode: setMultiAgentMode,
       planStuckReplan: planStuckReplan,
       planStuckGo: planStuckGo,

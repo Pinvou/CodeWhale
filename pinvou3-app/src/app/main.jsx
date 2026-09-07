@@ -1,29 +1,57 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { lazy, startTransition as scheduleViewTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import '../styles/base.css';
-import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, IconList, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, FolderOpen, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
+import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
 import { ArchiveConfirmDialog, ArchiveToast, NavItem, RecentItem } from '../components/layout/NavigationComponents.jsx';
+import { SidePanelLayoutProvider } from '../components/layout/ResizableSidePanel.jsx';
+import {
+  RightDockHost,
+  RightDockPanel,
+  RightDockProvider,
+} from '../components/layout/RightDock.jsx';
 import { AcpAgentLogo } from '../features/codex/AcpAgentLogo.jsx';
+import { CodexAcpView } from '../features/codex/LazyCodexAcpView.jsx';
 import { PinvouLogo } from '../components/PinvouLogo.jsx';
 import { MobileMoreSheet, MobileTabBar, MobileTopBar } from '../components/layout/MobileShell.jsx';
 import { VllmSetupProgress } from '../components/VllmSetupProgress.jsx';
-import { bridge, useBridgeState, activeModelIsLocal, shouldShowApiKeyGate } from '../hooks/useBridge.js';
+import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowApiKeyGate } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
-import { dict, LANG_TO_TAG, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
+import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
+import { TEMPORARY_GROUP_KEY, groupSessionsByFolder } from '../shared/sidebar-grouping.js';
 import { runSessionBatch } from '../shared/session-management.js';
 import { can, isWeb } from '../shared/platform.js';
 import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
-import { KnowledgeView } from '../features/knowledge/KnowledgeView.jsx';
-import { MonitorView } from '../features/monitor/MonitorView.jsx';
-import { SettingsView, WebAccessModal } from '../features/settings/SettingsView.jsx';
+import {
+  acquireNativeSurfaceTransitionHide,
+  BrowserView,
+} from '../features/browser/BrowserView.jsx';
+import {
+  createNativeSurfaceTransitionGate,
+  settleBrowserUiPublicationAfterCommit,
+} from '../features/browser/native-surface-transition.mjs';
+import {
+  awaitBrowserListenerReadiness,
+  createBrowserSessionCommandEchoGuard,
+  createBrowserSessionEpochTracker,
+} from '../features/browser/browser-state-sync.mjs';
+import {
+  activateBrowserPane,
+  beginBrowserOpen,
+  browserOpenStateFor,
+  browserPaneStateFor,
+  closeBrowserPane,
+  removeBrowserPaneState,
+  restoreBrowserPane,
+  selectArtifactsPane,
+  settleBrowserOpen,
+} from '../features/browser/browser-pane-state.mjs';
 import { SettingsErrorBoundary } from '../features/settings/SettingsErrorBoundary.jsx';
+import { ViewErrorBoundary } from '../shared/ViewErrorBoundary.jsx';
 import { ChatView } from '../features/chat/ChatView.jsx';
-import { savePinvouModeState } from '../features/chat/pinvou-mode-state.js';
-import { CodexAcpView } from '../features/codex/CodexAcpView.jsx';
-import { ScheduledTasksView } from '../features/scheduled/ScheduledTasksView.jsx';
+import { createPinvouModeScopeKey, savePinvouModeState } from '../features/chat/pinvou-mode-state.js';
 import { WebConnectionStatus } from '../features/web/WebConnectionStatus.jsx';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
@@ -37,32 +65,61 @@ import {
   tauriCommands,
   tauriEvents,
 } from '../platform/tauri/client.js';
+import { listAcpSessions } from '../features/codex/acpClient.js';
 import { revealStartupWindow } from '../platform/tauri/startup-window.js';
 
 // 定时任务创建与运行链路已恢复，展示入口并允许自动跳转。
 const SCHEDULED_TASKS_ENTRY_ENABLED = true;
 
 // 后端默认会话标题哨兵集合(bridge 按当前语言生成三语兜底标题,并据此判断是否自动改名)——
-// 显示层把任意一种哨兵标题映射成当前语言的「新对话」文案。
-const DEFAULT_CHAT_TITLES = new Set(Object.values(dict).map(d => d && d.newChat).filter(Boolean));
-// Static regression anchor: SCHEDULED_TASKS_ENTRY_ENABLED && (<NavItem icon={<Clock size={18} />} label={t.scheduledPlans} unread={!!(bs && (bs.scheduledTasks || []).some(task => task.hasUnreadRuns))} />)
+// 显示层把任意一种哨兵标题映射成当前语言的「新对话」文案。哨兵是跨语言的后端
+// 契约而非当前 UI 文案,直接使用 shared/i18n.js 的静态集合,与词典装载进度无关
+// (zh 主用户不会装载 en/ja chunk,不能从 dict 派生)。
+function isDefaultChatTitle(title) {
+  return DEFAULT_CHAT_TITLES.has(title);
+}
+// Static regression anchor: SCHEDULED_TASKS_ENTRY_ENABLED && (<NavItem icon={<Clock size={18} />} label={t.scheduledPlans} unread={!!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns) || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)))} />)
 const PREVIEW_SCHEDULED_RUN_SHORTCUTS = [
   { id: 'preview-run-1', automationId: 'preview-daily-brief', taskNameKey: 'previewTaskDailyBrief', sessionId: 'preview-session-1', status: 'completed', scheduledFor: '2026-07-14T08:00:00+08:00', unread: true },
   { id: 'preview-run-4', automationId: 'preview-follow-up', taskNameKey: 'previewTaskFollowUp', sessionId: 'preview-session-4', status: 'running', scheduledFor: '2026-07-14T09:00:00+08:00', unread: false },
   { id: 'preview-run-6', automationId: 'preview-weekly-report', taskNameKey: 'previewTaskSalesWeekly', sessionId: 'preview-session-6', status: 'completed', scheduledFor: '2026-07-10T16:00:00+08:00', unread: false },
 ];
-import { ToolStoreView } from '../features/tools/ToolStoreView.jsx';
 import { PinvouSummonCard } from '../features/tools/tool-renderers.jsx';
-import { CardPoolView, Lanyard, PersonaEditorModal } from '../features/personas/Personas.jsx';
-import { WorkflowView } from '../features/workflow/WorkflowView.jsx';
-import { SearchView } from '../features/search/SearchView.jsx';
 import { TeamRelayView } from '../features/team-relay/TeamRelayView.jsx';
 import { AccountPlatformPopover } from '../features/account-platform/AccountPlatformPopover.jsx';
 import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../features/team-relay/team-relay-access.js';
+import { teamRelayHasUnread } from '../features/team-relay/team-relay-state.js';
 import { SearchOverlay } from '../features/search/SearchOverlay.jsx';
 import { UpdateNoticeButton } from '../features/updater/UpdateNoticeButton.jsx';
-import { DetachedShell } from './DetachedShell.jsx';
+import { Lanyard } from '../features/personas/persona-shared.jsx';
+import { VIEW_LOADERS, prefetchView } from './view-loaders.js';
+// Low-traffic views are lazy-loaded: VIEW_LOADERS (see view-loaders.js) is the
+// single dynamic-import outlet; React.lazy and the NavItem hover/focus
+// prefetch share the same factory so they hit the same module cache.
+// codex is the exception: it renders through the LazyCodexAcpView wrapper,
+// which imports the same CodexAcpView module (sharing the prefetch cache) and
+// adds an in-place retry boundary for chunk fetch failures.
+// ChatView and Lanyard render at startup and stay statically imported.
+const LazySettingsView = lazy(() => VIEW_LOADERS.settings().then(m => ({ default: m.SettingsView })));
+const LazyToolStoreView = lazy(() => VIEW_LOADERS.toolStore().then(m => ({ default: m.ToolStoreView })));
+const LazyCardPoolView = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.CardPoolView })));
+const LazyScheduledTasksView = lazy(() => VIEW_LOADERS.scheduled().then(m => ({ default: m.ScheduledTasksView })));
+const LazyKnowledgeView = lazy(() => VIEW_LOADERS.knowledge().then(m => ({ default: m.KnowledgeView })));
+const LazyMonitorView = lazy(() => VIEW_LOADERS.monitor().then(m => ({ default: m.MonitorView })));
+const LazySearchView = lazy(() => VIEW_LOADERS.search().then(m => ({ default: m.SearchView })));
+const LazyPersonaEditorModal = lazy(() => VIEW_LOADERS.cardpool().then(m => ({ default: m.PersonaEditorModal })));
+const LazyWebAccessModal = lazy(() => VIEW_LOADERS.settings().then(m => ({ default: m.WebAccessModal })));
+const LazyDetachedShell = lazy(() => import('./DetachedShell.jsx').then(m => ({ default: m.DetachedShell })));
+
+// 视图 chunk 加载占位:沿用 DetachedShell 的「…」惯例,不引入新视觉语言。
+function ViewFallback() {
+  return <div className="p-6 text-sm opacity-60" data-testid="lazy-view-fallback">…</div>;
+}
+
+// personas-i18n overlay 的 UI 语言兜底注入:实现收敛在 personas-overlay.js,
+// 与撕离窗(DetachedShell 的 useDetachedBase)共用同一模块。
+import { ensurePersonaI18nOverlay } from './personas-overlay.js';
 import { TitleBar } from './DesktopTitleBar.jsx';
 
 installGlobalMarkdownRenderer(window);
@@ -72,8 +129,8 @@ let appFirstRenderMarked = false;
 
 const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
-  'settings', 'models', 'vllm', 'interaction', 'personas', 'workflow',
-  'memory', 'remoteControl', 'updater', 'dependencies',
+  'settings', 'models', 'vllm', 'interaction', 'personas',
+  'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
 ];
 
 function emitPetEvent(ev, name, payload) {
@@ -134,6 +191,21 @@ function workspaceDisplayName(path) {
             if (bridge.available && bridge.knowledge.loadKnowledgeEmbedderAfterFirstFrame) {
               bridge.knowledge.loadKnowledgeEmbedderAfterFirstFrame();
             }
+            // 首帧已呈现后空闲预取低频视图 chunk:桌宠/定时快捷方式会不经侧栏直接
+            // 跳视图(如 scheduledTaskAutoOpenId),悬停预取覆盖不到这些入口。
+            if (typeof window.requestIdleCallback === 'function') {
+              window.requestIdleCallback(() => {
+                prefetchView('scheduled');
+                prefetchView('settings');
+                prefetchView('codex');
+              }, { timeout: 4000 });
+            } else {
+              window.setTimeout(() => {
+                prefetchView('scheduled');
+                prefetchView('settings');
+                prefetchView('codex');
+              }, 1500);
+            }
           });
         });
         // 让首帧先交给 WebView 绘制，再异步校验飞书/企微实时鉴权状态。
@@ -152,13 +224,564 @@ function workspaceDisplayName(path) {
         };
       }, []);
       const [activeChat, setActiveChat] = useState(null);
-      const [currentView, setCurrentView] = useState('chat');
+      const [currentView, setCurrentViewState] = useState('chat');
+      const [sessionSyncEpoch, setSessionSyncEpoch] = useState(0);
       const [activeTheme, setActiveTheme] = useState('dark');
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
+      // Browser state is scoped to workspace sessions: switching chats only shows
+      // that chat's WebView2. The login profile remains globally shared by the
+      // backend. Legacy events without a sessionId must fail closed.
+      const [browserSessions, setBrowserSessions] = useState({});
+      const [browserPaneStates, setBrowserPaneStates] = useState({});
+      const [browserOpenStates, setBrowserOpenStates] = useState({});
+      const browserOpenAttemptsRef = useRef({});
+      const browserOpenAttemptSequenceRef = useRef(0);
+      const browserLifecycleListenersReadyRef = useRef(null);
+      const browserLifecycleEventEpochRef = useRef(null);
+      const browserLifecycleStatusRequestEpochRef = useRef(null);
+      if (!browserLifecycleEventEpochRef.current) {
+        browserLifecycleEventEpochRef.current = createBrowserSessionEpochTracker();
+      }
+      if (!browserLifecycleStatusRequestEpochRef.current) {
+        browserLifecycleStatusRequestEpochRef.current = createBrowserSessionEpochTracker();
+      }
+      const [browserResizeActive, setBrowserResizeActive] = useState(false);
+      const [browserOwnershipSlot, setBrowserOwnershipSlot] = useState(null);
+      const [browserDocumentHidden, setBrowserDocumentHidden] = useState(() => (
+        typeof document !== 'undefined' && document.visibilityState === 'hidden'
+      ));
+      const [rightDockState, setRightDockState] = useState({
+        activePanelId: null,
+        occluded: false,
+      });
+      // Child overlays publish through RightDockProvider. Keep their reservation
+      // in App state in the same React batch as the child permit so BrowserView is
+      // suspended in the very commit that first exposes the overlay.
+      const [rightDockOcclusionPublications, setRightDockOcclusionPublications] = useState([]);
+      const browserSurfaceTransitionContextRef = useRef({
+        sessionId: null,
+        hasWorkspace: false,
+        visible: false,
+        compact: false,
+        scheduledRunChat: false,
+      });
+      const browserTransitionPublishingRef = useRef(0);
+      const browserSessionTransitionPendingRef = useRef(0);
+      const browserBridgeSessionTransitionRef = useRef(null);
+      const [browserSessionCommandEchoGuard] = useState(
+        () => createBrowserSessionCommandEchoGuard(),
+      );
+      const [browserUiCommitEpoch, setBrowserUiCommitEpoch] = useState(0);
+      const browserUiCommitSequenceRef = useRef(0);
+      const browserUiCommitWaitersRef = useRef(new Map());
+      const browserUiCommitMountedRef = useRef(true);
+      const requestBrowserUiCommitAck = useCallback(() => {
+        if (!browserUiCommitMountedRef.current) return Promise.resolve(false);
+        const epoch = browserUiCommitSequenceRef.current + 1;
+        browserUiCommitSequenceRef.current = epoch;
+        const committed = new Promise((resolve) => {
+          browserUiCommitWaitersRef.current.set(epoch, resolve);
+        });
+        // This marker is queued after the publication's state mutations. With
+        // no transition-priority update in the guarded path, its layout effect
+        // proves the target React tree has committed before native show resumes.
+        setBrowserUiCommitEpoch(epoch);
+        return committed;
+      }, []);
+      useLayoutEffect(() => {
+        for (const [epoch, resolve] of browserUiCommitWaitersRef.current) {
+          if (epoch > browserUiCommitEpoch) continue;
+          browserUiCommitWaitersRef.current.delete(epoch);
+          resolve(true);
+        }
+      }, [browserUiCommitEpoch]);
+      useEffect(() => {
+        const waiters = browserUiCommitWaitersRef.current;
+        browserUiCommitMountedRef.current = true;
+        return () => {
+          browserUiCommitMountedRef.current = false;
+          for (const resolve of waiters.values()) resolve(false);
+          waiters.clear();
+        };
+      }, []);
+      const browserUiTransitionGateRef = useRef(null);
+      const createBrowserUiTransitionGate = () => (
+        createNativeSurfaceTransitionGate({
+          acquireHide: acquireNativeSurfaceTransitionHide,
+          getContext: () => browserSurfaceTransitionContextRef.current,
+          onError: (error) => {
+            console.error('[browser] native-surface transition failed', error);
+          },
+        })
+      );
+      if (!browserUiTransitionGateRef.current) {
+        browserUiTransitionGateRef.current = createBrowserUiTransitionGate();
+      }
+      useEffect(() => {
+        if (!browserUiTransitionGateRef.current) {
+          browserUiTransitionGateRef.current = createBrowserUiTransitionGate();
+        }
+        const gate = browserUiTransitionGateRef.current;
+        return () => {
+          gate?.dispose();
+          if (browserUiTransitionGateRef.current === gate) {
+            browserUiTransitionGateRef.current = null;
+          }
+        };
+      }, []);
+      const handleRightDockStateChange = useCallback((next) => {
+        setRightDockState((current) => (
+          current.activePanelId === next.activePanelId
+          && current.occluded === next.occluded
+            ? current
+            : {
+                activePanelId: next.activePanelId,
+                occluded: next.occluded,
+              }
+        ));
+      }, []);
+      // Keep the currently published task identity stable while a bridge session
+      // switch is waiting behind the native-surface hide barrier.
+      const browserSessionId = activeChat || (bs && bs.activeSessionId) || null;
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
+      const browserNativeDisplayAvailable = !!platformCapabilities.browserNativeDisplay;
+      const browserSessionIdRef = useRef(browserSessionId);
+      browserSessionIdRef.current = browserSessionId;
+      const browserPaneState = browserPaneStateFor(browserPaneStates, browserSessionId);
+      const browserOpenState = browserOpenStateFor(browserOpenStates, browserSessionId);
+      const browserPaneOpen = browserPaneState.open;
+      const browserPaneSelected = browserPaneState.browserSelected;
+      const browserDockSelectedPanelId = browserPaneSelected ? 'browser' : 'artifact-preview';
+      const browserDockActivationKey = `${browserSessionId || ''}:${browserPaneState.activation}`;
+      const browserActive = browserNativeDisplayAvailable
+        && !!(browserSessionId && browserSessions[browserSessionId]);
+      const browserViewSessionId = browserSessionId;
+      const browserPaneAllowed = currentView === 'chat'
+        || (currentView === 'scheduled' && !!(bs && bs.scheduledRunContext));
+      const browserWorkspaceStarting = browserOpenState.status === 'starting';
+      const browserWorkspaceError = browserOpenState.status === 'failed'
+        ? browserOpenState.error
+        : '';
+      const runBrowserUiTransition = useCallback((publish, options) => {
+        const tracksSession = options?.channel === 'session';
+        const tracksCommandEcho = tracksSession
+          && options?.sessionSource !== 'bridge'
+          && Object.keys(options).includes('sessionTarget');
+        const sessionCommandToken = tracksCommandEcho
+          ? browserSessionCommandEchoGuard.begin(
+            options.sessionTarget,
+            bridge.activeSessionId || null,
+          )
+          : null;
+        if (tracksSession) browserSessionTransitionPendingRef.current += 1;
+        const finishRequest = () => {
+          if (sessionCommandToken) {
+            browserSessionCommandEchoGuard.settle(sessionCommandToken);
+          }
+          if (!tracksSession) return;
+          browserSessionTransitionPendingRef.current -= 1;
+          if (
+            browserSessionTransitionPendingRef.current === 0
+            && options?.reconcileSessionOnSettle !== false
+            && browserUiCommitMountedRef.current
+          ) {
+            setSessionSyncEpoch((epoch) => epoch + 1);
+          }
+        };
+        let result;
+        try {
+          // Session and view channels are primary navigation (switch chat, new
+          // chat, main tab). When the native hide barrier fails after its
+          // retries they may publish without a successful hide ACK only while
+          // retaining a cleanup lease, rather than silently dropping the
+          // action; overlay/dock channels stay
+          // fail-closed so menus never open above a visible native page.
+          const transitionOptions = {
+            ...options,
+            degradeOnHideFailure: options?.degradeOnHideFailure
+              ?? (options?.channel === 'session' || options?.channel === 'view'),
+          };
+          result = browserUiTransitionGateRef.current.run((transition) => {
+            browserTransitionPublishingRef.current += 1;
+            return settleBrowserUiPublicationAfterCommit({
+              publish: async () => {
+                try {
+                  return await publish(transition);
+                } finally {
+                  // Nested updates may share this publication only until the
+                  // callback (including async work) has settled. Once the commit
+                  // marker is queued, later effects need their own hide barrier.
+                  browserTransitionPublishingRef.current -= 1;
+                }
+              },
+              waitForCommit: requestBrowserUiCommitAck,
+            });
+          }, transitionOptions);
+        } catch (error) {
+          finishRequest();
+          throw error;
+        }
+        if (result && typeof result.then === 'function') {
+          return Promise.resolve(result).finally(finishRequest);
+        }
+        finishRequest();
+        return result;
+      }, [browserSessionCommandEchoGuard, requestBrowserUiCommitAck]);
+      const setCurrentView = useCallback((nextView) => {
+        const resolvedView = typeof nextView === 'function'
+          ? nextView(currentViewRef.current)
+          : nextView;
+        // A publication that already owns the native-surface hide lease must be
+        // urgent: the later React-commit marker is only authoritative when the
+        // target tree cannot remain deferred behind it. Normal view switches keep
+        // the main-branch transition priority so lazy chunks stay interruptible.
+        if (browserTransitionPublishingRef.current > 0) {
+          setCurrentViewState(resolvedView);
+          return true;
+        }
+        const context = browserSurfaceTransitionContextRef.current;
+        const keepsDesktopBrowserVisible = !context.compact && (
+          resolvedView === 'chat'
+          || (resolvedView === 'scheduled' && context.scheduledRunChat)
+        );
+        const needsNativeHide = !!context.visible && !keepsDesktopBrowserVisible;
+        if (!needsNativeHide) {
+          browserUiTransitionGateRef.current.invalidate('view');
+          scheduleViewTransition(() => setCurrentViewState(resolvedView));
+          return true;
+        }
+        return runBrowserUiTransition(() => {
+          setCurrentViewState(resolvedView);
+        }, {
+          channel: 'view',
+          hideMode: 'visible',
+        });
+      }, [runBrowserUiTransition]);
+      const publishRightDockOcclusion = useCallback((occlusionId, publish) => (
+        browserUiTransitionGateRef.current.run(({ isCurrent }) => {
+          if (!isCurrent()) return false;
+          const published = publish();
+          if (published === false) return false;
+          setRightDockOcclusionPublications((current) => (
+            current.includes(occlusionId) ? current : [...current, occlusionId]
+          ));
+          return requestBrowserUiCommitAck().then(() => true);
+        }, {
+          channel: `right-dock-occlusion:${occlusionId}`,
+          hideMode: 'visible',
+        })
+      ), [requestBrowserUiCommitAck]);
+      const releaseRightDockOcclusion = useCallback((occlusionId) => {
+        browserUiTransitionGateRef.current.invalidate(`right-dock-occlusion:${occlusionId}`);
+        setRightDockOcclusionPublications((current) => (
+          current.includes(occlusionId)
+            ? current.filter((id) => id !== occlusionId)
+            : current
+        ));
+      }, []);
+      const selectRightDockPanel = useCallback((panelId, sessionId, publishSelection) => {
+        const selectedSessionId = sessionId || browserSessionIdRef.current;
+        if (!selectedSessionId) return false;
+        const publish = ({ isCurrent }) => {
+          const selectionIsCurrent = () => (
+            isCurrent() && browserSessionIdRef.current === selectedSessionId
+          );
+          if (!selectionIsCurrent()) return false;
+          const childPublished = publishSelection?.({
+            isCurrent: selectionIsCurrent,
+            sessionId: selectedSessionId,
+          });
+          if (childPublished === false || !selectionIsCurrent()) return false;
+          setBrowserPaneStates((current) => (
+            panelId === 'browser'
+              ? activateBrowserPane(current, selectedSessionId)
+              : selectArtifactsPane(current, selectedSessionId)
+          ));
+          return true;
+        };
+        const context = browserSurfaceTransitionContextRef.current;
+        return runBrowserUiTransition(publish, {
+          channel: 'right-dock',
+          hideMode: panelId !== 'browser' && context.sessionId === selectedSessionId
+            ? 'visible'
+            : 'none',
+        });
+      }, [runBrowserUiTransition]);
+      const closeBrowserDock = useCallback((sessionId) => {
+        const selectedSessionId = sessionId || browserSessionIdRef.current;
+        if (!selectedSessionId) return;
+        const context = browserSurfaceTransitionContextRef.current;
+        void runBrowserUiTransition(() => {
+          setBrowserPaneStates((current) => closeBrowserPane(current, selectedSessionId));
+        }, {
+          channel: 'right-dock',
+          hideMode: context.sessionId === selectedSessionId ? 'visible' : 'none',
+        });
+      }, [runBrowserUiTransition]);
+      const openBrowserDock = useCallback(async () => {
+        const requestedSessionId = browserSessionId;
+        if (!browserNativeDisplayAvailable || !requestedSessionId || !browserPaneAllowed) return;
+        setBrowserPaneStates((current) => activateBrowserPane(current, requestedSessionId));
+        if (browserActive) return;
+        const attempt = browserOpenAttemptSequenceRef.current + 1;
+        browserOpenAttemptSequenceRef.current = attempt;
+        browserOpenAttemptsRef.current[requestedSessionId] = attempt;
+        setBrowserOpenStates((current) => (
+          beginBrowserOpen(current, requestedSessionId, attempt)
+        ));
+        try {
+          const prepared = await invokeTauri('browser_prepare', { sessionId: requestedSessionId });
+          if (
+            !browserUiCommitMountedRef.current
+            || browserOpenAttemptsRef.current[requestedSessionId] !== attempt
+          ) return;
+          if (!prepared || prepared.sessionId !== requestedSessionId) {
+            throw new Error('browser_prepare returned an invalid session identity');
+          }
+          setBrowserSessions((current) => ({ ...current, [requestedSessionId]: true }));
+          setBrowserOpenStates((current) => (
+            settleBrowserOpen(current, requestedSessionId, attempt, 'idle')
+          ));
+        } catch (error) {
+          if (
+            !browserUiCommitMountedRef.current
+            || browserOpenAttemptsRef.current[requestedSessionId] !== attempt
+          ) return;
+          setBrowserOpenStates((current) => settleBrowserOpen(
+            current,
+            requestedSessionId,
+            attempt,
+            'failed',
+            typeof error === 'string' ? error : String(error),
+          ));
+        }
+      }, [
+        browserActive,
+        browserNativeDisplayAvailable,
+        browserPaneAllowed,
+        browserSessionId,
+      ]);
+      useEffect(() => {
+        if (!browserNativeDisplayAvailable) {
+          browserLifecycleListenersReadyRef.current = null;
+          setBrowserSessions({});
+          setBrowserPaneStates({});
+          setBrowserOpenStates({});
+          browserOpenAttemptsRef.current = {};
+          return;
+        }
+        let disposed = false;
+        let reconciliationTimer = 0;
+        let listenerRegistrationFailed = false;
+        const unlisteners = [];
+        // Register listeners before the fallback status query. Reversing this
+        // order can miss browser:activated between the query and registration;
+        // Rust will not resend it after setting the activated marker.
+        const registerActivated = tauriEvents.listen('browser:activated', (event) => {
+          if (disposed) return;
+          const sessionId = event.payload?.sessionId;
+          if (!sessionId) return;
+          browserLifecycleEventEpochRef.current.advance(sessionId);
+          browserLifecycleStatusRequestEpochRef.current.advance(sessionId);
+          setBrowserSessions((current) => ({ ...current, [sessionId]: true }));
+          setBrowserPaneStates((current) => activateBrowserPane(current, sessionId));
+          const attempt = browserOpenAttemptsRef.current[sessionId] || 0;
+          setBrowserOpenStates((current) => (
+            settleBrowserOpen(current, sessionId, attempt, 'idle')
+          ));
+        }).then(unlisten => {
+          if (disposed) unlisten();
+          else unlisteners.push(unlisten);
+        }).catch((error) => {
+          if (disposed) return;
+          listenerRegistrationFailed = true;
+          console.error('[browser] failed to register browser:activated listener', error);
+        });
+        const registerStopped = tauriEvents.listen('browser:stopped', (event) => {
+          if (disposed) return;
+          const sessionId = event.payload?.sessionId;
+          browserLifecycleEventEpochRef.current.advance(sessionId || null);
+          browserLifecycleStatusRequestEpochRef.current.advance(sessionId || null);
+          if (sessionId) {
+            browserOpenAttemptSequenceRef.current += 1;
+            browserOpenAttemptsRef.current[sessionId] = browserOpenAttemptSequenceRef.current;
+            setBrowserSessions((current) => {
+              const next = { ...current };
+              delete next[sessionId];
+              return next;
+            });
+            setBrowserPaneStates((current) => removeBrowserPaneState(current, sessionId));
+            setBrowserOpenStates((current) => {
+              const next = { ...current };
+              delete next[sessionId];
+              return next;
+            });
+          } else {
+            browserOpenAttemptsRef.current = {};
+            setBrowserSessions({});
+            setBrowserPaneStates({});
+            setBrowserOpenStates({});
+          }
+        }).then(unlisten => {
+          if (disposed) unlisten();
+          else unlisteners.push(unlisten);
+        }).catch((error) => {
+          if (disposed) return;
+          listenerRegistrationFailed = true;
+          console.error('[browser] failed to register browser:stopped listener', error);
+        });
+        const readiness = awaitBrowserListenerReadiness(
+          [registerActivated, registerStopped],
+          {
+            schedule: window.setTimeout.bind(window),
+            cancel: window.clearTimeout.bind(window),
+          },
+        ).then((listenersReady) => {
+          if (disposed || browserLifecycleListenersReadyRef.current !== readiness) return false;
+          if (!listenersReady) {
+            listenerRegistrationFailed = true;
+            console.error('[browser] lifecycle listener registration timed out; enabling reconciliation');
+          }
+          if (listenerRegistrationFailed) {
+            const reconcileCurrentSession = () => {
+              const requestedSessionId = browserSessionIdRef.current;
+              if (!requestedSessionId) return;
+              const eventEpoch = browserLifecycleEventEpochRef.current.snapshot(requestedSessionId);
+              const requestEpoch = browserLifecycleStatusRequestEpochRef.current.advance(
+                requestedSessionId,
+              );
+              invokeTauri('browser_status', { sessionId: requestedSessionId }).then((st) => {
+                if (
+                  disposed
+                  || browserSessionIdRef.current !== requestedSessionId
+                  || !browserLifecycleEventEpochRef.current.isCurrent(
+                    requestedSessionId,
+                    eventEpoch,
+                  )
+                  || !browserLifecycleStatusRequestEpochRef.current.isCurrent(
+                    requestedSessionId,
+                    requestEpoch,
+                  )
+                  || !st
+                  || st.sessionId !== requestedSessionId
+                ) return;
+                if (!st.running && !st.restoreError) {
+                  setBrowserSessions((current) => {
+                    const next = { ...current };
+                    delete next[requestedSessionId];
+                    return next;
+                  });
+                  setBrowserPaneStates((current) => (
+                    removeBrowserPaneState(current, requestedSessionId)
+                  ));
+                  return;
+                }
+                setBrowserSessions((current) => ({ ...current, [requestedSessionId]: true }));
+                setBrowserPaneStates((current) => restoreBrowserPane(current, requestedSessionId));
+              }).catch((error) => {
+                console.error('[browser] lifecycle reconciliation failed', error);
+              });
+            };
+            reconcileCurrentSession();
+            reconciliationTimer = window.setInterval(reconcileCurrentSession, 2000);
+          }
+          return true;
+        });
+        // The session hydration effect below awaits this exact promise. Merely
+        // starting listen() first is insufficient because Tauri listener
+        // registration itself is asynchronous.
+        browserLifecycleListenersReadyRef.current = readiness;
+        return () => {
+          disposed = true;
+          if (browserLifecycleListenersReadyRef.current === readiness) {
+            browserLifecycleListenersReadyRef.current = null;
+          }
+          if (reconciliationTimer) window.clearInterval(reconciliationTimer);
+          unlisteners.forEach((unlisten) => {
+            if (unlisten) unlisten();
+          });
+        };
+      }, [browserNativeDisplayAvailable]);
+      useEffect(() => {
+        const syncVisibility = () => setBrowserDocumentHidden(document.visibilityState === 'hidden');
+        const handlePageHide = () => setBrowserDocumentHidden(true);
+        document.addEventListener('visibilitychange', syncVisibility);
+        window.addEventListener('pagehide', handlePageHide);
+        window.addEventListener('pageshow', syncVisibility);
+        return () => {
+          document.removeEventListener('visibilitychange', syncVisibility);
+          window.removeEventListener('pagehide', handlePageHide);
+          window.removeEventListener('pageshow', syncVisibility);
+        };
+      }, []);
+      // Query the session after a WebView reload or chat switch. Restore its entry
+      // when pages exist, but retain other sessions so they recover when revisited.
+      useEffect(() => {
+        if (!browserNativeDisplayAvailable || !browserSessionId) return;
+        let disposed = false;
+        const requestedSessionId = browserSessionId;
+        const readiness = browserLifecycleListenersReadyRef.current;
+        if (!readiness) return () => { disposed = true; };
+        Promise.resolve(readiness).then(() => {
+          if (
+            disposed
+            || browserLifecycleListenersReadyRef.current !== readiness
+            || browserSessionIdRef.current !== requestedSessionId
+          ) return null;
+          const eventEpoch = browserLifecycleEventEpochRef.current.snapshot(requestedSessionId);
+          const requestEpoch = browserLifecycleStatusRequestEpochRef.current.advance(
+            requestedSessionId,
+          );
+          return invokeTauri('browser_status', { sessionId: requestedSessionId }).then((st) => ({
+            eventEpoch,
+            requestEpoch,
+            st,
+          }));
+        }).then((snapshot) => {
+          const st = snapshot?.st;
+          if (
+            disposed
+            || !st
+            || browserSessionIdRef.current !== requestedSessionId
+            || !browserLifecycleEventEpochRef.current.isCurrent(
+              requestedSessionId,
+              snapshot.eventEpoch,
+            )
+            || !browserLifecycleStatusRequestEpochRef.current.isCurrent(
+              requestedSessionId,
+              snapshot.requestEpoch,
+            )
+            || st.sessionId !== requestedSessionId
+          ) return;
+          if (!st.running && !st.restoreError) {
+            setBrowserSessions((current) => {
+              const next = { ...current };
+              delete next[requestedSessionId];
+              return next;
+            });
+            setBrowserPaneStates((current) => (
+              removeBrowserPaneState(current, requestedSessionId)
+            ));
+            return;
+          }
+          setBrowserSessions((current) => ({ ...current, [requestedSessionId]: true }));
+          // Expand a restored workspace on first discovery. Preserve any explicit
+          // collapse or artifact selection made for this session in this window.
+          setBrowserPaneStates((current) => restoreBrowserPane(current, requestedSessionId));
+        }).catch((error) => {
+          if (!disposed) console.error('[browser] initial lifecycle hydration failed', error);
+        });
+        return () => { disposed = true; };
+      }, [browserNativeDisplayAvailable, browserSessionId]);
+      // Compact layouts keep the fullscreen browser view; desktop uses the chat dock.
+      useEffect(() => {
+        if (!browserActive && currentView === 'browser') {
+          setCurrentView('chat');
+        }
+      }, [browserActive, currentView, setCurrentView]);
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
-      const codexAcpSupported = !!platformCapabilities.codexAcpSupported;
+      const codexAcpSupported = usePlatformCapability('acpCodeMode') && (isWeb || !!platformCapabilities.codexAcpSupported);
       const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
       const accountPlatformClient = useMemo(
         () => new AccountPlatformDesktopClient(),
@@ -169,6 +792,7 @@ function workspaceDisplayName(path) {
         accountPlatformClient.session(controller.signal).catch(() => {});
         return () => controller.abort();
       }, [accountPlatformClient]);
+      const teamRelayUnread = teamRelayHasUnread(bs && bs.teamRelay && bs.teamRelay.snapshot);
       const [codexSessions, setCodexSessions] = useState([]);
       const [codexDraftEpoch, setCodexDraftEpoch] = useState(0);
       const [codexRelayLaunch, setCodexRelayLaunch] = useState(null);
@@ -195,7 +819,7 @@ function workspaceDisplayName(path) {
           setCodexSessions([]);
           return [];
         }
-        const sessions = await invokeTauri('list_codex_acp_sessions');
+        const sessions = await listAcpSessions();
         const next = Array.isArray(sessions) ? sessions : [];
         setCodexSessions(next);
         return next;
@@ -214,6 +838,20 @@ function workspaceDisplayName(path) {
         disableTeamRelayAccess();
         setTeamRelayEnabled(false);
       }, []);
+      useEffect(() => {
+        if (!teamRelayAvailable || !bridge?.teamRelay?.refresh) return undefined;
+        const refresh = () => bridge.teamRelay.refresh({ silent: true }).catch(() => {});
+        const onVisibilityChange = () => { if (document.visibilityState === 'visible') refresh(); };
+        refresh();
+        const timer = window.setInterval(refresh, 15_000);
+        window.addEventListener('focus', refresh);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+          window.clearInterval(timer);
+          window.removeEventListener('focus', refresh);
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+      }, [teamRelayAvailable]);
       const updateActiveCodexSession = useCallback((id) => {
         const next = id || null;
         setActiveCodexId(next);
@@ -226,6 +864,8 @@ function workspaceDisplayName(path) {
       }, []);
       useEffect(() => {
         if (!codexAcpSupported || !isTauriAvailable()) {
+          // Clear the code-session mirror when bridge capabilities change to avoid stale unreachable sessions;
+          // the synchronous setState guarantees it takes effect in this render pass.
           setCodexSessions([]);
           return undefined;
         }
@@ -342,12 +982,24 @@ function workspaceDisplayName(path) {
       }, [platformCapabilities.localVllmSupported]);
       const [vllmDeclineConfirm, setVllmDeclineConfirm] = useState(false); // 引导框「不再提醒」二次确认子态
       const [language, setLanguage] = useState(() => {
-        if (!isWeb) return 'zh';
+        const systemLanguage = initialSystemLanguage();
+        if (!isWeb) return systemLanguage;
         try {
           const value = window.localStorage.getItem('pinvou.web.language');
-          return value && dict[value] ? value : 'zh';
-        } catch (_) { return 'zh'; }
+          // 首帧引导(文件尾 ensureLanguage)已保证 localStorage 选中的语言词典就位
+          return value && dict[value] ? value : systemLanguage;
+        } catch (_) { return systemLanguage; }
       });
+      // 语言切换统一走该门(handleSetLanguage):装载完成乱序时只落地最新选择。
+      const switchToLanguage = useRef(createLatestLanguageGate()).current;
+      // UI 语言为 en/ja 时确保 personas-i18n overlay 已加载(覆盖「系统中文 + 手动切
+      // 英/日 UI」、index.html 快速路径跳过的场景),加载完成 bump 一次让卡名重渲染。
+      const [, setPersonaI18nTick] = useState(0);
+      useEffect(() => {
+        if (language === 'en' || language === 'ja') {
+          ensurePersonaI18nOverlay(() => setPersonaI18nTick(v => v + 1));
+        }
+      }, [language]);
       const [superPerm, setSuperPerm] = useState(false);
       const defaultTaskCompletedNotif = platformCapabilities.taskCompletionNotificationsDefault !== false;
       const [taskCompletedNotif, setTaskCompletedNotif] = useState(defaultTaskCompletedNotif);
@@ -416,9 +1068,33 @@ function workspaceDisplayName(path) {
         };
       }
       const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+      const [openSidePanelCount, setOpenSidePanelCount] = useState(0);
+      const restoreSidebarAfterConstraintRef = useRef(false);
       // 移动壳层只作用于 Web 端紧凑视口：底部 Tab + 顶栏，侧栏只保留抽屉形态。
       const compactViewport = useCompactViewport();
       const isCompactShell = isWeb && compactViewport;
+      const browserDockAvailable = !isCompactShell
+        && browserNativeDisplayAvailable;
+      // On narrow windows, an open right panel takes priority over the left sidebar.
+      // This is a temporary layout constraint; restore the user's sidebar choice later.
+      useEffect(() => {
+        if (isCompactShell) return;
+        const fitWorkspace = () => {
+          const constrained = openSidePanelCount > 0 && window.innerWidth < 1320;
+          if (constrained) {
+            setIsSidebarOpen((current) => {
+              if (current) restoreSidebarAfterConstraintRef.current = true;
+              return false;
+            });
+          } else if (restoreSidebarAfterConstraintRef.current) {
+            restoreSidebarAfterConstraintRef.current = false;
+            setIsSidebarOpen(true);
+          }
+        };
+        fitWorkspace();
+        window.addEventListener('resize', fitWorkspace);
+        return () => window.removeEventListener('resize', fitWorkspace);
+      }, [isCompactShell, isSidebarOpen, openSidePanelCount]);
       // iOS Safari 上 100dvh 不等于真实可见高度（动态工具栏/安全区），用 visualViewport 兜底。
       const visualViewportHeight = useVisualViewportHeight();
       // iOS Safari 聚焦输入框时会尝试滚动整个文档。紧凑 Web 壳层本身已经按
@@ -463,6 +1139,9 @@ function workspaceDisplayName(path) {
       const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
       const canDetachWindows = can('detachWindows');
       const [chatPrefill, setChatPrefill] = useState('');
+      // Append mode for failure-recovery prefills (replaced template prefills keep
+      // whole-draft replacement semantics, re-review #4).
+      const [chatPrefillAppend, setChatPrefillAppend] = useState(false);
       const [searchOverlayOpen, setSearchOverlayOpen] = useState(false);
       const composerPrefillSeenRef = useRef(0);
       const scheduledTaskAutoOpenSeenRef = useRef(null);
@@ -470,6 +1149,7 @@ function workspaceDisplayName(path) {
       const [savedConfirm, setSavedConfirm] = useState(null); // 存入成功 → iOS 确认窗 {name}
       const [poolMyOnly, setPoolMyOnly] = useState(false); // 跳卡池时是否直接落「我的卡牌」筛选(从确认窗"去查看"进来=true)
       const [webAccessOpen, setWebAccessOpen] = useState(false);
+      const [publishedBrowserOverlayIntent, setPublishedBrowserOverlayIntent] = useState('');
       const [settingsUpdateFocusTick, setSettingsUpdateFocusTick] = useState(0);
       const [settingsInitialSection, setSettingsInitialSection] = useState('general');
       // 收纳 toast「前往查看」→ 对话管理页并直接展开「已收纳」面板(一次性信号,SearchView 消费后复位)
@@ -477,6 +1157,10 @@ function workspaceDisplayName(path) {
       const [petFocusComposerTick, setPetFocusComposerTick] = useState(0);
       const petSnapshotRef = useRef([]);
       const petSnapshotSequenceRef = useRef(0);
+      // 上次广播的快照内容指纹。ref 而非 effect 局部变量:effect 依赖
+      // bs.sessionBusy/sessions 引用,多会话并发时每次 notify 都换引用导致
+      // effect 重跑;指纹必须跨重跑保持,才能挡住"内容没变"的重复广播。
+      const petSnapshotFingerprintRef = useRef('');
 
       // ── 多窗口(撕离/tear-off):长按标签 → 浮起跟手 → 拖到目标屏 → 松手 → 该屏最大化打开 ──
       // dragAvatar = 被拎起的标签副本(跟随光标的 DOM 元素);null=没在拖。原生只判落点,视觉全在这。
@@ -518,7 +1202,8 @@ function workspaceDisplayName(path) {
         return () => { if (un) un(); };
       }, []);
 
-      const t = dict[language];
+      // 兜底 zh:词典 chunk 装载失败时按 zh 渲染而非白屏(与 PetWindow/ReaderApp 同口径)。
+      const t = dict[language] || dict.zh;
       // 静态 HTML 的 <title>/<html lang> 与非模块脚本(远程文件选择器、web bootstrap)拿不到语言上下文,
       // 在此按当前语言同步,并把选择器/bootstrap 错误文案暴露给 platform/web/ 下的脚本。
       // 桌宠窗口标题由 PetWindow 自行同步(主包不做桌宠检测,见 pet_bootstrap_isolation 测试)。
@@ -539,10 +1224,47 @@ function workspaceDisplayName(path) {
         setWebAccessOpen(true);
       }
 
+      // 冷路径预取:该 modal 唯一入口在聊天「存入卡牌池」,此前 cardpool chunk
+      // 可能从未加载;提前发起 import 避免打开动作撞上 chunk 冷启动/失败。
+      // The reference must stay stable across renders: it is passed through to
+      // the structurally compared memoized ConversationTurn; a fresh identity
+      // on every render would invalidate that memo for the whole timeline
+      // during streaming.
+      const handleOpenPersonaEditor = useCallback((initial) => {
+        prefetchView('cardpool');
+        setPersonaEditor({ initial });
+      }, []);
+
       function handleActivateSkill(name) {
+        setCodeModeOn(false);
         setChatPrefill(t.skillPrefill(name));
         setCurrentView('chat');
       }
+
+      // One-shot bootstrap for the model-config draft. When custom values are
+      // absent, use the effective config so the inputs reflect what will run.
+      const initModelConfigFromSettings = (settings, effectiveModelConfig) => {
+        const advanced = settings.advanced || {};
+        const effective = effectiveModelConfig || {};
+        const preset = effective.preset
+          || advanced.model_preset
+          || defaultModelPresetForCapabilities(platformCapabilities);
+        const profiles = { ...advanced.model_profiles };
+        const fallback = {
+          name: effective.model || advanced.custom_model_name || '',
+          baseUrl: effective.base_url || advanced.custom_base_url || '',
+          apiKey: '',
+        };
+        const saved = modelDraftForPreset(preset, profiles, fallback);
+        profiles[preset] = normalizedModelProfile(saved.name, saved.baseUrl, saved.apiKey);
+        setModelProfiles(profiles);
+        setModelPreset(saved.preset);
+        setCustomModelName(saved.name);
+        setCustomBaseUrl(saved.baseUrl);
+        setCustomApiKey(saved.apiKey);
+        savedModelConfigRef.current = saved;
+        modelConfigInitRef.current = true;
+      };
 
       // Sync from bridge state
       useEffect(() => {
@@ -550,31 +1272,75 @@ function workspaceDisplayName(path) {
         // activeChat 始终跟随 bridge(含 null:草稿态清掉近期列表高亮)。仅在物化成
         // 真实 session(非 null)时才强制切回 chat 视图——草稿态/删会话不该把用户从
         // monitor/settings 拽走。
-        if (bs.activeSessionId !== activeChat) {
-          setActiveChat(bs.activeSessionId);
-          if (bs.activeSessionId && currentView !== 'codex' && currentView !== 'monitor' && currentView !== 'settings' && currentView !== 'search' && currentView !== 'scheduled') {
-            setCurrentView('chat');
+        const nextSessionId = bs.activeSessionId;
+        const bridgeTransition = browserBridgeSessionTransitionRef.current;
+        const bridgeObservation = browserSessionCommandEchoGuard.observe(nextSessionId);
+        const isCommandEcho = bridgeObservation.type === 'command-echo';
+        // Intentional nullish check: an HMR-restored ref may be either null or undefined.
+        let bridgeSessionNeedsSync = !isCommandEcho
+          && bridgeTransition != null
+          && bridgeTransition.sessionId !== nextSessionId;
+        if (!isCommandEcho && bs.activeSessionId !== activeChat) {
+          bridgeSessionNeedsSync = true;
+        }
+        if (bridgeSessionNeedsSync) {
+          const publishSession = ({ isCurrent }) => {
+            if (!isCurrent()) return false;
+            setActiveChat(nextSessionId);
+            const publishedView = currentViewRef.current;
+            if (nextSessionId && publishedView !== 'codex' && publishedView !== 'monitor' && publishedView !== 'settings' && publishedView !== 'search' && publishedView !== 'scheduled' && publishedView !== 'browser') {
+              // A normal bridge session must not inherit code-only sidebar/draft state.
+              setCodeModeOn(false);
+              setCurrentView('chat');
+            }
+            return true;
+          };
+          // Every distinct bridge target must enter the serialized gate even
+          // while an older hide ACK is pending. Issuing the newer ticket makes
+          // the older publication stale, and its independently owned hide lease
+          // keeps the native surface hidden until the latest React commit. A
+          // token (not just the session id) avoids an old B→C→B completion from
+          // clearing the newest B request.
+          if (bridgeTransition?.sessionId !== nextSessionId) {
+            const transitionToken = { sessionId: nextSessionId };
+            browserBridgeSessionTransitionRef.current = transitionToken;
+            const transitionResult = runBrowserUiTransition(publishSession, {
+              channel: 'session',
+              hideMode: 'workspace',
+              serialize: true,
+              sessionSource: 'bridge',
+            });
+            void Promise.resolve(transitionResult).finally(() => {
+              if (browserBridgeSessionTransitionRef.current === transitionToken) {
+                browserBridgeSessionTransitionRef.current = null;
+              }
+            });
           }
         }
         if (bs.superPermEnabled !== superPerm) setSuperPerm(bs.superPermEnabled);
         if (bs.composerPrefill && bs.composerPrefill.id && bs.composerPrefill.id !== composerPrefillSeenRef.current) {
           composerPrefillSeenRef.current = bs.composerPrefill.id;
           setChatPrefill(bs.composerPrefill.text || '');
+          setChatPrefillAppend(!!bs.composerPrefill.append);
+          // A composer prefill lands on the normal chat input: same rule — exit code
+          // mode before materializing the chat view.
+          setCodeModeOn(false);
           setCurrentView('chat');
         }
         if (SCHEDULED_TASKS_ENTRY_ENABLED && bs.scheduledTaskAutoOpenId && bs.scheduledTaskAutoOpenId !== scheduledTaskAutoOpenSeenRef.current) {
           scheduledTaskAutoOpenSeenRef.current = bs.scheduledTaskAutoOpenId;
           setCurrentView('scheduled');
         }
-        // UI 语言/主题:启动时从落盘 settings 恢复一次(此前只写不读,重启即回中文+深色)
+        // UI 语言/主题:启动时从落盘 settings 恢复一次；无语言配置时后端已按系统 locale 补齐。
         if (!uiPrefsInitRef.current && bs.settings) {
           if (isWeb) {
             bootedLanguageRef.current = language;
           } else {
             const lang = TAG_TO_LANG[bs.settings.language];
-            if (lang && lang !== language) setLanguage(lang);
+            // 落盘语言可能尚未装载(en/ja 惰性 chunk);ensure 后再切,失败停在系统语言
+            if (lang && lang !== language) ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
             // engine 已用此语言启动,作为「需重启」基线(切语言不重启 engine,见 commands.rs)
-            bootedLanguageRef.current = lang || 'zh';
+            bootedLanguageRef.current = lang || language;
             // 后端 Theme 枚举(prefs.rs)只认 genesis/liquid-light/liquid-dark;深色=genesis,浅色=liquid-light
             const th = bs.settings.theme === 'liquid-light' ? 'light' : 'dark';
             if (th !== activeTheme) setActiveTheme(th);
@@ -614,41 +1380,25 @@ function workspaceDisplayName(path) {
           searchConfigInitRef.current = true;
         }
         // 模型配置：只在第一次从后端加载初始值，后续走草稿模式（确认后才保存），
-        // 避免 useEffect 把未保存的本地修改覆盖回 disk 旧值。
-        // custom_* 为 null 时用 PRESET_DEFAULTS 填成真实值——输入框显示当前生效配置，
-        // 而不是灰色 placeholder 冒充。
-        if (!modelConfigInitRef.current && bs.settings) {
-          const adv = bs.settings.advanced || {};
-          const effective = bs.effectiveModelConfig || {};
-          const preset = effective.preset || adv.model_preset || defaultModelPresetForCapabilities(platformCapabilities);
-          const profiles = { ...(adv.model_profiles || {}) };
-          const fallback = {
-            name: effective.model || adv.custom_model_name || '',
-            baseUrl: effective.base_url || adv.custom_base_url || '',
-            apiKey: '',
-          };
-          const saved = modelDraftForPreset(preset, profiles, fallback);
-          profiles[preset] = normalizedModelProfile(saved.name, saved.baseUrl, saved.apiKey);
-          setModelProfiles(profiles);
-          setModelPreset(saved.preset);
-          setCustomModelName(saved.name);
-          setCustomBaseUrl(saved.baseUrl);
-          setCustomApiKey(saved.apiKey);
-          savedModelConfigRef.current = saved;
-          modelConfigInitRef.current = true;
-        }
-      }, [bs]);
+        if (!modelConfigInitRef.current && bs.settings) initModelConfigFromSettings(bs.settings, bs.effectiveModelConfig);
+        // The effect subscribes to the bridge snapshot bs; one-shot bootstrap/init flags are guarded by internal refs,
+        // and the remaining deps (activeChat/currentView/language, etc.) are render-state reads — including them would
+        // rerun the whole sync logic on every UI change. sessionSyncEpoch intentionally
+        // retriggers reconciliation after the serialized browser session gate settles.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [bs, sessionSyncEpoch]);
 
-      // HMR/旧前端状态可能仍停在已下线入口；立即回到仍可访问的视图。
+      // HMR or legacy frontend state may retain a retired route; return to a valid view.
       useEffect(() => {
         if (!SCHEDULED_TASKS_ENTRY_ENABLED && currentView === 'scheduled') {
+          setCodeModeOn(false);
           setCurrentView('chat');
         } else if (!teamRelayAvailable && currentView === 'teamRelay') {
           setCurrentView('chat');
-        } else if (currentView === 'workflow' || currentView === 'accountPlatform') {
+        } else if (currentView === 'accountPlatform') {
           setCurrentView('cardpool');
         }
-      }, [currentView, teamRelayAvailable]);
+      }, [currentView, setCurrentView, teamRelayAvailable]);
 
       // 草稿 vs 已保存基线 → 模型卡是否显示「保存并重启」操作条
       const savedModel = savedModelConfigRef.current;
@@ -713,16 +1463,15 @@ function workspaceDisplayName(path) {
       const languageNeedsRestart = !!bootedLanguageRef.current && language !== bootedLanguageRef.current;
 
       // Build chat history from sessions
-      const skillBindings = (bs && bs.workflow && bs.workflow.bindings) || {};
       const sessionBusy = (bs && bs.sessionBusy) || {};
       const chatHistory = bs && bs.sessions ? bs.sessions.map(s => {
-        const isPlaceholder = !s.title || DEFAULT_CHAT_TITLES.has(s.title);
+        const isPlaceholder = !s.title || isDefaultChatTitle(s.title);
         const titlePresentation = isPlaceholder
           ? { text: t.newChat, attachments: [] }
           : sessionTitlePresentation(s.title, s.title_attachment_names);
         return {
           id: s.id,
-          // 后端默认标题是三语哨兵之一(见 DEFAULT_CHAT_TITLES;bridge 以此判断是否自动改名)——显示层映射成当前语言
+          // 后端默认标题是三语哨兵之一(见 isDefaultChatTitle;bridge 以此判断是否自动改名)——显示层映射成当前语言
           title: sessionTitlePlainText(titlePresentation),
           titleContent: titlePresentation.attachments.length
             ? <SessionAttachmentTitle presentation={titlePresentation} />
@@ -731,7 +1480,6 @@ function workspaceDisplayName(path) {
           updatedAt: s.updated_at || s.created_at || '',
           pinned: !!s.pinned,
           pinnedAt: s.pinned_at || '',
-          skill: skillBindings[s.id] || null,
           working: !!sessionBusy[s.id], // 多 session 并发:该 session 是否正在后台生成
           leadingIcon: <PinvouLogo className="h-[18px] w-[18px]" />,
           testId: 'regular-sidebar-item',
@@ -740,7 +1488,7 @@ function workspaceDisplayName(path) {
       }) : [];
       const codexHistory = codexSessions.map(session => ({
         id: session.id,
-        title: (!session.title || DEFAULT_CHAT_TITLES.has(session.title))
+        title: (!session.title || isDefaultChatTitle(session.title))
           ? t.newChat
           : session.title,
         subtitle: session.workspace_kind === 'project'
@@ -748,6 +1496,8 @@ function workspaceDisplayName(path) {
           : t.uiCodex.temporarySession,
         date: formatSessionDate(session.updated_at || session.created_at, language),
         updatedAt: session.updated_at || session.created_at || '',
+        workspacePath: session.workspace_path || '',
+        workspaceKind: session.workspace_kind || '',
         pinned: !!session.pinned,
         pinnedAt: session.pinned_at || '',
         working: !!codexBusyBySession[session.id],
@@ -782,7 +1532,7 @@ function workspaceDisplayName(path) {
           // 定时运行会话不进 bs.sessions(list_sessions 隔离 sched-*),标题/置顶
           // 状态由后端 run DTO 直接携带。
           const rawTitle = run.sessionTitle || '';
-          const title = (!rawTitle || DEFAULT_CHAT_TITLES.has(rawTitle))
+          const title = (!rawTitle || isDefaultChatTitle(rawTitle))
             ? (run.taskName || t.scheduledPlans)
             : rawTitle;
           return {
@@ -814,7 +1564,7 @@ function workspaceDisplayName(path) {
 
       function decorateScheduledRunChat(chat, run) {
         if (!run) return chat;
-        const title = (!chat.title || DEFAULT_CHAT_TITLES.has(chat.title))
+        const title = (!chat.title || isDefaultChatTitle(chat.title))
           ? (run.taskName || t.scheduledPlans)
           : chat.title;
           return Object.assign({}, chat, {
@@ -842,9 +1592,141 @@ function workspaceDisplayName(path) {
       const taskFilterRef = useRef(null);
       // 日期组展开状态:未点过的组按默认值走(今天展开、以往折叠),点过后记住用户选择
       const [dateGroupOpen, setDateGroupOpen] = useState({});
+      // Code-style sidebar: enabled by default in code mode (folder grouping +
+      // collapsed primary nav); the 全部/代码 pill switches style explicitly.
+      // null means the user never picked: standard list outside code mode, code
+      // style inside code mode (the long-standing default). Once picked, the
+      // choice is persisted and applies in every mode.
+      const [sidebarCodeStyle, setSidebarCodeStyle] = useState(() => {
+        try {
+          const stored = localStorage.getItem('pinvou_sidebar_code_style');
+          return stored === 'normal' || stored === 'code' ? stored : null;
+        } catch {
+          return null;
+        }
+      });
+      // The 全部/代码 pill drives both state and the persisted choice in one place.
+      const setSidebarCodeStylePersisted = useCallback((next) => {
+        setSidebarCodeStyle(next);
+        try {
+          localStorage.setItem('pinvou_sidebar_code_style', next);
+        } catch {
+          // When the WebView disables storage, still allow switching for this window.
+        }
+      }, []);
+      // Folder group expand state: all expanded by default; once toggled, remember the choice
+      const [folderGroupOpen, setFolderGroupOpen] = useState({});
+      // In code style the primary nav collapses to a single expand row by default;
+      // expanding is remembered for the session (reset when code mode exits)
+      const [codeNavExpanded, setCodeNavExpanded] = useState(false);
+      // Code mode is a mode, not a page: after entering, navigating to output/monitor
+      // pages keeps code mode — the sidebar stays code-styled and New chat still creates
+      // code sessions; only explicitly switching back to work/design, or opening a normal
+      // chat session, exits it.
+      const [codeModeOn, setCodeModeOn] = useState(false);
+      // 任务列表的展示形态由 全部/代码 胶囊决定;未显式选择(null)时普通模式
+      // 默认「全部」标准列表、code 模式默认 code 样式(沿用既有默认)。
+      // codeStyleActive 仍用于主导航折叠等 code 模式专属行为。
+      const sidebarCodeListActive = sidebarCodeStyle === null ? codeModeOn : sidebarCodeStyle === 'code';
+      const codeStyleActive = codeModeOn && sidebarCodeListActive;
+      // Exiting code mode resets the primary-nav collapse bar, so the next entry starts
+      // from the default collapsed form.
+      useEffect(() => {
+        if (!codeModeOn) setCodeNavExpanded(false);
+      }, [codeModeOn]);
+      // code 形态下「代码会话」筛选等同「全部」、「定时任务」恒为空(菜单已隐藏这两项);
+      // 进入 code 形态时若仍挂着这两个筛选,复位为「全部」,避免列表莫名变空。
+      // 用 layout effect 在首帧绘制前完成复位,避免闪现一帧空的「暂无任务」列表。
+      useLayoutEffect(() => {
+        if (sidebarCodeListActive && (taskListFilter === 'code' || taskListFilter === 'scheduled')) {
+          setTaskListFilter('all');
+        }
+      }, [sidebarCodeListActive, taskListFilter]);
       const [archiveConfirm, setArchiveConfirm] = useState(null);
       const [archiveToast, setArchiveToast] = useState(false);
       const [settingsToast, setSettingsToast] = useState('');
+
+      // Expanded sidebar width: drag the right edge to adjust (220~480px), double-click
+      // the handle to reset to default; the choice is persisted.
+      const SIDEBAR_WIDTH_DEFAULT = 280;
+      const SIDEBAR_WIDTH_MIN = 220;
+      const SIDEBAR_WIDTH_MAX = 480;
+      const clampSidebarWidth = (w) => Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, w));
+      const [sidebarWidth, setSidebarWidth] = useState(() => {
+        try {
+          const saved = Number(localStorage.getItem('pinvou_sidebar_width'));
+          return Number.isFinite(saved) && saved > 0 ? clampSidebarWidth(saved) : SIDEBAR_WIDTH_DEFAULT;
+        } catch {
+          return SIDEBAR_WIDTH_DEFAULT;
+        }
+      });
+      // Disable the width transition while dragging to avoid follow lag; the ref lets
+      // pointerup read the latest width for persistence.
+      const [sidebarResizing, setSidebarResizing] = useState(false);
+      const sidebarWidthRef = useRef(sidebarWidth);
+      const applySidebarWidth = (w) => {
+        sidebarWidthRef.current = w;
+        setSidebarWidth(w);
+      };
+      const beginSidebarResize = useCallback((event) => {
+        event.preventDefault();
+        const handle = event.currentTarget;
+        const startX = event.clientX;
+        const startWidth = sidebarWidthRef.current;
+        setSidebarResizing(true);
+        const onMove = (moveEvent) => {
+          applySidebarWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+        };
+        const onUp = () => {
+          setSidebarResizing(false);
+          window.removeEventListener('pointermove', onMove);
+          window.removeEventListener('pointerup', onUp);
+          window.removeEventListener('pointercancel', onUp);
+          try {
+            localStorage.setItem('pinvou_sidebar_width', String(sidebarWidthRef.current));
+          } catch {
+            // When the WebView disables storage, the width applies only this once.
+          }
+        };
+        // Capture the pointer and listen for pointercancel so an interrupted drag
+        // (window blur / touch taken over by a system gesture) still settles; otherwise
+        // resizing sticks at true (transition permanently disabled) and listeners leak.
+        try {
+          handle.setPointerCapture(event.pointerId);
+        } catch {
+          // Fall back to window listeners when an old WebView does not support capture.
+        }
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+      }, []);
+      const resetSidebarWidth = useCallback(() => {
+        applySidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+        try {
+          localStorage.setItem('pinvou_sidebar_width', String(SIDEBAR_WIDTH_DEFAULT));
+        } catch {
+          // Same as above.
+        }
+      }, []);
+      // WAI-ARIA Window Splitter 键盘交互：方向键步进，Shift 加速，
+      // Home/End 跳到边界，并复用拖拽路径的限制与持久化逻辑。
+      const SIDEBAR_RESIZE_KEY_STEP = 24;
+      const keyboardSidebarResize = useCallback((event) => {
+        const step = SIDEBAR_RESIZE_KEY_STEP * (event.shiftKey ? 4 : 1);
+        let next;
+        if (event.key === 'ArrowLeft') next = sidebarWidthRef.current - step;
+        else if (event.key === 'ArrowRight') next = sidebarWidthRef.current + step;
+        else if (event.key === 'Home') next = SIDEBAR_WIDTH_MIN;
+        else if (event.key === 'End') next = SIDEBAR_WIDTH_MAX;
+        else return;
+        event.preventDefault();
+        applySidebarWidth(clampSidebarWidth(next));
+        try {
+          localStorage.setItem('pinvou_sidebar_width', String(sidebarWidthRef.current));
+        } catch {
+          // 存储不可用时仅对当前会话生效。
+        }
+      }, []);
 
       useEffect(() => {
         if (!taskFilterOpen) return undefined;
@@ -870,8 +1752,12 @@ function workspaceDisplayName(path) {
       const sidebarTaskFilterOptions = [
         { id: 'all', label: t.sidebarTaskFilterAll },
         { id: 'pinned', label: t.sidebarTaskFilterPinned },
-        { id: 'code', label: t.sidebarTaskFilterCode },
-        { id: 'scheduled', label: t.sidebarTaskFilterScheduled },
+        // code 形态(胶囊选中「代码」)下列表恒为代码会话:「代码会话」筛选等同
+        // 「全部」、「定时任务」恒为空——两个选项都是死胡同,只在标准形态提供。
+        ...(sidebarCodeListActive ? [] : [
+          { id: 'code', label: t.sidebarTaskFilterCodeSessions },
+          { id: 'scheduled', label: t.sidebarTaskFilterScheduled },
+        ]),
       ];
       const sidebarTaskSortOptions = [
         { id: 'pinned_first', label: t.sidebarTaskSortPinnedFirst },
@@ -931,6 +1817,21 @@ function workspaceDisplayName(path) {
         });
       }
 
+      // Code-style sidebar: lists only code sessions, grouped by folder (workspace);
+      // groups and rows both sort by latest activity descending, temporary sessions merge
+      // into one bottom group; with "pinned first", pinned code sessions hoist above the
+      // folder groups.
+      const sidebarCodeTasks = sidebarCodeListActive
+        ? sidebarTaskHistory.filter(chat => chat.taskKind === 'codex')
+        : [];
+      const sidebarFolderPinned = taskListSort === 'pinned_first'
+        ? sidebarCodeTasks.filter(chat => !!chat.pinned)
+        : [];
+      const sidebarFolderGroups = sidebarCodeListActive
+        ? groupSessionsByFolder(
+            sidebarCodeTasks.filter(chat => !(sidebarFolderPinned.length && chat.pinned)))
+        : [];
+
       petSnapshotRef.current = chatHistory.map(chat => ({
         id: chat.id,
         title: chat.title,
@@ -941,15 +1842,27 @@ function workspaceDisplayName(path) {
         if (!ev) return undefined;
         let disposed = false;
         let unlisten = null;
-        const broadcast = () => {
+        // 内容指纹:多会话并发时 sessionBusy/sessions 每次 notify 都换新引用,
+        // effect 重跑导致快照风暴,桌宠窗口被高频快照淹没。只有会话集合
+        // (id/title/working)真实变化才广播,同一内容的重跑直接跳过。
+        const fingerprint = () => JSON.stringify(
+          (petSnapshotRef.current || []).map(s => [s.id, s.title, !!s.working]),
+        );
+        const broadcast = (force = false) => {
           if (typeof ev.emit !== 'function') return Promise.resolve();
+          const next = fingerprint();
+          if (!force && next === petSnapshotFingerprintRef.current) {
+            return Promise.resolve(false);
+          }
+          petSnapshotFingerprintRef.current = next;
           return ev.emit('pet:activity_snapshot', {
             sequence: ++petSnapshotSequenceRef.current,
             sessions: petSnapshotRef.current,
           }).catch(() => {});
         };
         broadcast();
-        ev.listen('pet:request_snapshot', broadcast).then((fn) => {
+        // 桌宠窗口冷启动/重连时的主动请求必须无条件应答,不能用指纹挡掉。
+        ev.listen('pet:request_snapshot', () => broadcast(true)).then((fn) => {
           if (disposed) fn();
           else unlisten = fn;
         }).catch(() => {});
@@ -960,14 +1873,28 @@ function workspaceDisplayName(path) {
       }, [bs && bs.sessions, bs && bs.sessionBusy, language]);
 
       async function navigateFromScheduledRun(nextView, beforeNavigate) {
-        if (bs && bs.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
-          const exited = await bridge.scheduled.exitScheduledRunChat();
-          if (!exited) return false;
-        }
-        if (beforeNavigate) beforeNavigate();
-        setCurrentView(nextView);
-        closeMobileSidebar();
-        return true;
+        const context = browserSurfaceTransitionContextRef.current;
+        const keepsDesktopBrowserVisible = !context.compact && (
+          nextView === 'chat'
+          || (nextView === 'scheduled' && context.scheduledRunChat)
+        );
+        return runBrowserUiTransition(async ({ isCurrent }) => {
+          if (bs && bs.scheduledRunContext && bridge.available && bridge.scheduled.exitScheduledRunChat) {
+            const exited = await bridge.scheduled.exitScheduledRunChat();
+            if (!exited || !isCurrent()) return false;
+          }
+          if (beforeNavigate) beforeNavigate();
+          if (nextView === 'chat') setCodeModeOn(false);
+          setCurrentView(nextView);
+          if (bs && bs.scheduledRunContext) setActiveChat(bridge.activeSessionId || null);
+          closeMobileSidebar();
+          return true;
+        }, {
+          channel: 'view',
+          hideMode: bs && bs.scheduledRunContext
+            ? 'workspace'
+            : keepsDesktopBrowserVisible ? 'none' : 'visible',
+        });
       }
 
       function openSettingsSection(section = 'general') {
@@ -978,12 +1905,12 @@ function workspaceDisplayName(path) {
         return navigateFromScheduledRun('settings');
       }
 
-      function closeMobileSidebar() {
+      const closeMobileSidebar = useCallback(() => {
         if (!isWeb || typeof window === 'undefined') return;
         if (window.matchMedia && window.matchMedia('(max-width: 639px)').matches) {
           setIsSidebarOpen(false);
         }
-      }
+      }, []);
 
       function scheduledRunLabel(value) {
         return (t.uiScheduled.runStatus[value] || value || t.uiScheduled.unknown);
@@ -991,37 +1918,83 @@ function workspaceDisplayName(path) {
 
       async function handleOpenScheduledRunShortcut(run) {
         if (!run || !run.sessionId) return;
-        if (!bridge.available || !bridge.scheduled.openScheduledRunChat) {
+        // A scheduled-run session is a normal chat: both the fallback and the
+        // successful-open branches land on the scheduled view, so each branch
+        // exits code mode right before navigating. Clearing once at the entry
+        // would also clear it when the open fails, leaving an active code
+        // session behind the standard sidebar and New chat creating plain drafts.
+        return runBrowserUiTransition(async ({ isCurrent }) => {
+          if (!bridge.available || !bridge.scheduled.openScheduledRunChat) {
+            setCodeModeOn(false);
+            setCurrentView('scheduled');
+            closeMobileSidebar();
+            return true;
+          }
+          const task = {
+            id: run.automationId,
+            name: run.taskName || t.scheduledPlans,
+            model: run.taskModel || null,
+          };
+          const opened = await bridge.scheduled.openScheduledRunChat(run, task);
+          if (!opened || !isCurrent()) return false;
+          setCodeModeOn(false);
+          setActiveChat(run.sessionId);
           setCurrentView('scheduled');
-          closeMobileSidebar();
-          return;
-        }
-        const task = {
-          id: run.automationId,
-          name: run.taskName || t.scheduledPlans,
-          model: run.taskModel || null,
-        };
-        const opened = await bridge.scheduled.openScheduledRunChat(run, task);
-        if (opened) setCurrentView('scheduled');
+          return true;
+        }, {
+          channel: 'session',
+          hideMode: 'workspace',
+          serialize: true,
+          sessionTarget: run.sessionId,
+        });
       }
 
-      function handleNewChat(installedToolId) {
+      function handleNewChat(installedToolId, forceMode) {
         // 类型守卫:installedToolId 必须是字符串 toolId。侧边栏按钮 onClick={() => handleNewChat()}
         // 本不传参,但若哪天有调用点写成 onClick={handleNewChat},React 会把事件对象当首参塞进来——
         // 那是 truthy 的 SyntheticEvent,会被当成 toolId 置进 welcomeToolId → ToolWelcomeCard 查不到
         // 工具渲染 null → 欢迎语整块空白。守卫挡住这条暗坑。
-        if (typeof installedToolId === 'string' && installedToolId) {
-          setJustInstalledTool(installedToolId);
-        }
-        if (currentView === 'codex' && codexAcpSupported) {
-          updateActiveCodexSession(null);
-          setCodexDraftEpoch(value => value + 1);
-          setCurrentView('codex');
-        } else {
-          if (bridge.available) bridge.sessions.createNewSession();
-          setCurrentView('chat');
-        }
-        closeMobileSidebar();
+        const toolIntentId = typeof installedToolId === 'string' && installedToolId
+          ? installedToolId
+          : null;
+        // Follow code mode rather than the current page: in code mode, even on
+        // output/monitor tool pages, New chat still creates a code session draft;
+        // forceMode serves call sites that must land on a normal chat, such as AI card
+        // creation.
+        // Calls carrying a tool intent (tool store "new chat with this tool") must also
+        // land on a normal chat: the tool welcome card is only consumed by ChatView, so a
+        // codex draft would silently drop the intent and leak it into the next session.
+        const hasToolIntent = !!toolIntentId;
+        const wantCode = forceMode
+          ? forceMode === 'code'
+          : !hasToolIntent && codeModeOn;
+        return runBrowserUiTransition(async ({ isCurrent }) => {
+          if (!isCurrent()) return false;
+          if (wantCode && codexAcpSupported) {
+            setCodeModeOn(true);
+            updateActiveCodexSession(null);
+            setCodexDraftEpoch(value => value + 1);
+            setCurrentView('codex');
+          } else {
+            // Every landing here is a normal chat (tool intent, forceMode='chat',
+            // code mode off, or codex unsupported on this host). createNewSession
+            // nulls activeSessionId, so the bridge sync guard cannot heal a stale
+            // codeModeOn afterwards — clear it here.
+            setCodeModeOn(false);
+            if (bridge.available) await bridge.sessions.createNewSession();
+            if (!isCurrent()) return false;
+            if (toolIntentId) setJustInstalledTool(toolIntentId);
+            setActiveChat(null);
+            setCurrentView('chat');
+          }
+          closeMobileSidebar();
+          return true;
+        }, {
+          channel: 'session',
+          hideMode: 'workspace',
+          serialize: true,
+          sessionTarget: null,
+        });
       }
 
       async function handleTeamRelayUseAgent(input) {
@@ -1105,16 +2078,39 @@ function workspaceDisplayName(path) {
 
       function handleSwitchHomeMode(mode) {
         if (mode === 'code' && codexAcpSupported) {
+          setCodeModeOn(true);
           updateActiveCodexSession(null);
           setCodexDraftEpoch(value => value + 1);
           setCurrentView('codex');
         } else if (mode === 'design') {
-          savePinvouModeState({ mode: 'design' });
-          if (bridge.available) bridge.sessions.createNewSession();
+          setCodeModeOn(false);
+          // 仅草稿态（无活跃会话）才开新会话：从 code 页切回时 bridge 的
+          // activeSessionId 仍是原工作会话，强制 createNewSession 会新建一个
+          // plain 会话（默认 Yolo），把用户切过的 Plan 顶掉——表现为「从代码
+          // 切回工作/设计，审批模式变回 Yolo」。保留原会话，ChatView 挂载后
+          // 显示其实测 mode。与 ChatView 内 work↔design 本地切换（不建会话）
+          // 行为保持一致。
+          const scopeKey = bridge.activeSessionId
+            ? createPinvouModeScopeKey(bridge.activeSessionId)
+            : undefined;
+          savePinvouModeState({ mode: 'design' }, undefined, scopeKey);
+          if (bridge.available && !bridge.activeSessionId) bridge.sessions.createNewSession();
+          // code 页期间原工作会话的 mode 可能已被修改（code 页独立链路），
+          // 切回前拉一次实测值，避免 ChatView 挂载后显示旧 modeState。
+          if (bridge.available && bridge.activeSessionId) {
+            bridge.interaction.syncModeState().catch(() => {});
+          }
           setCurrentView('chat');
         } else if (mode === 'work') {
-          savePinvouModeState({ mode: 'work' });
-          if (bridge.available) bridge.sessions.createNewSession();
+          setCodeModeOn(false);
+          const scopeKey = bridge.activeSessionId
+            ? createPinvouModeScopeKey(bridge.activeSessionId)
+            : undefined;
+          savePinvouModeState({ mode: 'work' }, undefined, scopeKey);
+          if (bridge.available && !bridge.activeSessionId) bridge.sessions.createNewSession();
+          if (bridge.available && bridge.activeSessionId) {
+            bridge.interaction.syncModeState().catch(() => {});
+          }
           setCurrentView('chat');
         }
         closeMobileSidebar();
@@ -1122,21 +2118,31 @@ function workspaceDisplayName(path) {
 
       // AI 造卡:新对话 + 加持「卡牌制造专家」+ 一条 iOS 引导卡 → 用户在空输入框描述需求,复用 persona-card 草稿流程入库
       async function startAICard() {
-        handleNewChat();
+        const created = await handleNewChat(null, 'chat');
+        if (!created) return;
         if (!bridge.available) return;
-        await bridge.personas.equipPersona('pinvou-card-creator');           // 先加持(落新 session + 加持气泡)
-        bridge.personas.postCardCreatorIntro();                              // 再排在加持气泡之后(持久化,切会话/重启不丢)
+        var card = await bridge.personas.equipPersona('pinvou-card-creator'); // 先加持(落新 session + 加持气泡)
+        if (card) bridge.personas.postCardCreatorIntro();                     // 加持成功才追加引导卡(持久化,切会话/重启不丢);失败则放弃后续,避免错投(二审补充)
       }
 
-      async function handleSwitchSession(id) {
+      const handleSwitchSession = useCallback(async (id) => {
         if (!bridge.available) return;
-        // Web RPC 可能跨公网 Relay：先关闭抽屉并切入聊天路由，后台再加载会话。
-        setCurrentView('chat');
-        closeMobileSidebar();
-        const switched = await bridge.sessions.switchToSession(id);
-        if (!switched) return;
-        setActiveChat(id);
-      }
+        return runBrowserUiTransition(async ({ isCurrent }) => {
+          // Web RPC can cross a public relay. Close the drawer and enter chat before loading.
+          setCodeModeOn(false);
+          setCurrentView('chat');
+          closeMobileSidebar();
+          const switched = await bridge.sessions.switchToSession(id);
+          if (!switched || !isCurrent()) return false;
+          setActiveChat(id);
+          return true;
+        }, {
+          channel: 'session',
+          hideMode: 'workspace',
+          serialize: true,
+          sessionTarget: id,
+        });
+      }, [closeMobileSidebar, runBrowserUiTransition, setCurrentView]);
 
       async function handleSearchSelect(id) {
         await handleSwitchSession(id);
@@ -1144,6 +2150,7 @@ function workspaceDisplayName(path) {
       }
 
       function handleSwitchCodexSession(id) {
+        setCodeModeOn(true);
         updateActiveCodexSession(id);
         setCurrentView('codex');
         closeMobileSidebar();
@@ -1178,7 +2185,7 @@ function workspaceDisplayName(path) {
           disposed = true;
           unlisteners.forEach((fn) => { try { fn(); } catch (_) {} });
         };
-      }, []);
+      }, [handleSwitchSession, runBrowserUiTransition, setCurrentView]);
 
       // 用户从侧栏切进一个已经完成的会话时，也立即收掉对应完成气泡。
       // 运行中的卡不会被 markSessionViewed 删除；等它完成时，上面的
@@ -1218,17 +2225,30 @@ function workspaceDisplayName(path) {
               }
               let opened = false;
               try {
-                opened = await bridge.scheduled.openScheduledRunChat({
-                  id: runId,
-                  automationId,
-                  sessionId,
-                  status: 'completed',
-                  endedAt,
-                  unread: true,
+                const published = await runBrowserUiTransition(async ({ isCurrent }) => {
+                  opened = await bridge.scheduled.openScheduledRunChat({
+                    id: runId,
+                    automationId,
+                    sessionId,
+                    status: 'completed',
+                    endedAt,
+                    unread: true,
+                  }, {
+                    id: automationId,
+                    name: taskName,
+                  });
+                  if (!opened || !isCurrent()) return false;
+                  setCodeModeOn(false);
+                  setActiveChat(sessionId);
+                  setCurrentView('scheduled');
+                  return true;
                 }, {
-                  id: automationId,
-                  name: taskName,
+                  channel: 'session',
+                  hideMode: 'workspace',
+                  serialize: true,
+                  sessionTarget: sessionId,
                 });
+                if (!published) opened = false;
               } catch (error) {
                 console.error('[pet scheduled navigation] open failed', error);
               }
@@ -1236,13 +2256,12 @@ function workspaceDisplayName(path) {
                 emitToPet('pet:scheduled_notice_open_failed', { run_id: runId }).catch(() => {});
                 return;
               }
-              setActiveChat(sessionId);
-              setCurrentView('scheduled');
               emitToPet('pet:scheduled_notice_opened', { run_id: runId }).catch(() => {});
               return;
             }
             const sid = request.session_id || request.sessionId;
             if (!sid) {
+              setCodeModeOn(false);
               setCurrentView('chat');
               setPetFocusComposerTick(value => value + 1);
               return;
@@ -1250,18 +2269,17 @@ function workspaceDisplayName(path) {
             if (!bridge.available) return;
             const sessionExists = petSnapshotRef.current.some((session) => String(session.id) === String(sid));
             if (!sessionExists) {
+              emitToPet('pet:session_unavailable', { session_id: sid }).catch(() => {});
+              setCodeModeOn(false);
               setCurrentView('chat');
               setPetFocusComposerTick(value => value + 1);
-              emitToPet('pet:session_unavailable', { session_id: sid }).catch(() => {});
               return;
             }
-            const switched = await bridge.sessions.switchToSession(sid);
+            const switched = await handleSwitchSession(sid);
             if (!switched) {
               emitToPet('pet:session_unavailable', { session_id: sid }).catch(() => {});
               return;
             }
-            setActiveChat(sid);
-            setCurrentView('chat');
             setPetFocusComposerTick(value => value + 1);
             emitToPet('pet:session_viewed', { session_id: sid }).catch(() => {});
           } catch (error) {
@@ -1282,7 +2300,7 @@ function workspaceDisplayName(path) {
           window.removeEventListener('focus', consumePetNavigation);
           unlisteners.forEach(fn => { try { fn(); } catch (_) {} });
         };
-      }, []);
+      }, [handleSwitchSession, runBrowserUiTransition, setCurrentView]);
 
       useEffect(() => {
         const ev = isTauriAvailable() ? tauriEvents : null;
@@ -1571,17 +2589,24 @@ function workspaceDisplayName(path) {
       }
 
       function handleSetLanguage(lang) {
-        setLanguage(lang);
-        if (isWeb) {
-          try { window.localStorage.setItem('pinvou.web.language', lang); } catch (_) {}
-          return;
-        }
-        if (isTauriAvailable()) {
-          tauriEvents.emit('ui:language_changed', { language: lang }).catch(() => {});
-        }
-        if (bridge.available) {
-          bridge.settings.saveSettings({ language: LANG_TO_TAG[lang] || 'zh-Hans' });
-        }
+        // en/ja 是惰性词典 chunk:先装载再切状态/广播,辅助窗口(桌宠/阅读器)
+        // 收到 ui:language_changed 时词典必须已在本窗就位(各入口首帧引导只保证
+        // 初始语言)。装载失败(资源损坏)保持原语言,不产生半翻译界面。
+        // 经「最新选择胜出」门落地:ja chunk 静态依赖 en chunk,先选 ja 再选
+        // en 时旧 ja 请求可能后完成并覆盖新选择(见 createLatestLanguageGate)。
+        switchToLanguage(lang, () => {
+          setLanguage(lang);
+          if (isWeb) {
+            try { window.localStorage.setItem('pinvou.web.language', lang); } catch (_) {}
+            return;
+          }
+          if (isTauriAvailable()) {
+            tauriEvents.emit('ui:language_changed', { language: lang }).catch(() => {});
+          }
+          if (bridge.available) {
+            bridge.settings.saveSettings({ language: LANG_TO_TAG[lang] || 'zh-Hans' });
+          }
+        });
       }
 
       function handleSetMemoryEnabled(enabled) {
@@ -1683,22 +2708,46 @@ function workspaceDisplayName(path) {
 
       // 移动壳层派生数据：顶栏标题跟随当前视图（对话态显示会话标题）；
       // 未读红点与侧栏入口同源，避免两套提醒逻辑漂移。
-      const scheduledUnread = !!(bs && (bs.scheduledTasks || []).some(task => task.hasUnreadRuns));
+      const scheduledUnread = !!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns)
+        || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)));
       const mobileTitle = currentView === 'chat'
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.sidebarTaskFilterCode)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, workflow: t.workflow, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings, browser: t.browser }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
       };
-      const mobileMoreViews = ['search', ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', 'settings'];
+      const mobileMoreViews = ['search', ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', 'settings', 'browser'];
       const mobileMoreActive = mobileMoreViews.includes(currentView)
         || (currentView === 'scheduled' && !(bs && bs.scheduledRunContext));
 
       // 侧栏任务列表按日期折叠(默认开;settings.sidebar.date_grouping === false 时平铺)
       const sidebarDateGrouping = !bs || !bs.settings || !bs.settings.sidebar || bs.settings.sidebar.date_grouping !== false;
+      // 一键折叠/展开「任务列表」下的全部分组:直接写入各组的展开 map,
+      // 不引入总开关变量;按钮状态由当前可见组的真实聚合推导——
+      // 全部展开显示「折叠」,其余(含全折叠/混合)显示「展开」,
+      // 手动逐组操作后按钮也不会与实际状态脱节。
+      const visibleTaskGroupOpens = sidebarCodeListActive
+        ? sidebarFolderGroups.map(g => folderGroupOpen[g.key] ?? true)
+        : (sidebarDateGrouping ? sidebarTaskGroups.map(g => dateGroupOpen[g.key] ?? (g.key === todayDateKey)) : []);
+      const allTaskGroupsExpanded = visibleTaskGroupOpens.length > 0 && visibleTaskGroupOpens.every(Boolean);
+      const setAllTaskGroups = (open) => {
+        if (sidebarCodeListActive) {
+          setFolderGroupOpen(prev => {
+            const next = { ...prev };
+            for (const g of sidebarFolderGroups) next[g.key] = open;
+            return next;
+          });
+        } else if (sidebarDateGrouping) {
+          setDateGroupOpen(prev => {
+            const next = { ...prev };
+            for (const g of sidebarTaskGroups) next[g.key] = open;
+            return next;
+          });
+        }
+      };
       // 日期分组/平铺两种布局共用的任务项渲染
       const renderSidebarTaskItem = (chat) => {
         const detachKind = chat.taskKind === 'codex' ? 'codex-session' : 'session';
@@ -1731,11 +2780,87 @@ function workspaceDisplayName(path) {
         );
       };
 
+      const apiKeyGateOpen = shouldShowApiKeyGate(bs, currentView, bridge.available);
+      const vllmSetupModalOpen = !!(
+        can('localModelSetup')
+        && bs
+        && bs.vllmSetup
+        && bs.vllmSetup.eligible
+        && !bs.vllmSetupDismissed
+      );
+      const browserOverlayIntent = [
+        archiveConfirm ? 'archive-confirm' : '',
+        searchOverlayOpen ? 'search' : '',
+        personaEditor ? 'persona-editor' : '',
+        savedConfirm ? 'saved-confirm' : '',
+        can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
+        apiKeyGateOpen ? 'api-key' : '',
+        vllmSetupModalOpen ? 'vllm-setup' : '',
+        bs && bs.pinvouModal ? 'pinvou-review' : '',
+        isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
+        isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
+      ].filter(Boolean).join('|');
+      const browserOverlayPublicationReady = !!browserOverlayIntent
+        && publishedBrowserOverlayIntent === browserOverlayIntent;
+      // Keep the surface hidden while one already-published overlay hands off to
+      // another. The replacement itself is still withheld until its own barrier
+      // attempt has settled.
+      const browserOverlayOpen = !!publishedBrowserOverlayIntent;
+      const browserBlockingLayerOpen = !browserPaneAllowed || browserOverlayOpen;
+      const browserSurfaceSuspended = browserResizeActive
+        || browserDocumentHidden
+        || rightDockOcclusionPublications.length > 0
+        || rightDockState.occluded
+        || rightDockState.activePanelId !== 'browser'
+        || browserBlockingLayerOpen;
+      const compactBrowserSurfaceSuspended = browserDocumentHidden
+        || browserOverlayOpen
+        || currentView !== 'browser';
+      const browserNativeSurfaceVisible = isCompactShell
+        ? browserActive && currentView === 'browser' && !compactBrowserSurfaceSuspended
+        : browserActive
+          && browserPaneOpen
+          && browserPaneSelected
+          && !browserSurfaceSuspended;
+      useLayoutEffect(() => {
+        browserSurfaceTransitionContextRef.current = {
+          sessionId: browserViewSessionId,
+          hasWorkspace: browserActive && !!browserViewSessionId,
+          visible: browserNativeSurfaceVisible,
+          compact: isCompactShell,
+          scheduledRunChat: !!(bs && bs.scheduledRunContext),
+        };
+      }, [
+        browserActive,
+        browserNativeSurfaceVisible,
+        browserViewSessionId,
+        bs,
+        isCompactShell,
+      ]);
+      useLayoutEffect(() => {
+        let disposed = false;
+        if (!browserOverlayIntent) {
+          browserUiTransitionGateRef.current.invalidate('overlay');
+          setPublishedBrowserOverlayIntent('');
+          return () => { disposed = true; };
+        }
+        void runBrowserUiTransition(() => {
+          if (disposed) return false;
+          setPublishedBrowserOverlayIntent(browserOverlayIntent);
+          return true;
+        }, {
+          channel: 'overlay',
+          hideMode: 'visible',
+        });
+        return () => { disposed = true; };
+      }, [browserOverlayIntent, runBrowserUiTransition]);
+
       return (
         <div data-testid="app-root" data-current-view={currentView} data-platform={isWeb ? 'web' : 'desktop'}
           className={`flex flex-col h-screen font-sans overflow-hidden antialiased transition-colors duration-300 ${activeTheme === 'dark' ? 'bg-[#131314] text-[#E3E3E3]' : 'bg-white text-[#1F1F1F]'}`}
           style={isWeb ? {
-            ...(isCompactShell ? { position: 'fixed', inset: 0, width: '100%' } : {}),
+            // inset shorthand expanded to physical properties: Safari 14.0 (iOS 14.0 web) cannot parse the shorthand.
+            ...(isCompactShell ? { position: 'fixed', top: 0, right: 0, bottom: 0, left: 0, width: '100%' } : {}),
             height: visualViewportHeight ? `${visualViewportHeight}px` : '100dvh',
             paddingTop: 'env(safe-area-inset-top)',
             paddingRight: 'env(safe-area-inset-right)',
@@ -1756,7 +2881,7 @@ function workspaceDisplayName(path) {
             </div>
           )}
 
-          {archiveConfirm && createPortal(
+          {archiveConfirm && browserOverlayPublicationReady && createPortal(
             <ArchiveConfirmDialog
               theme={activeTheme}
               t={t}
@@ -1787,7 +2912,7 @@ function workspaceDisplayName(path) {
             document.body
           )}
 
-          {searchOverlayOpen && createPortal(
+          {searchOverlayOpen && browserOverlayPublicationReady && createPortal(
             <SearchOverlay
               theme={activeTheme}
               history={chatHistory}
@@ -1806,11 +2931,18 @@ function workspaceDisplayName(path) {
               onNewChat={currentView === 'chat' || currentView === 'codex' ? () => handleNewChat() : undefined} />
           )}
 
+          <SidePanelLayoutProvider onPresenceChange={setOpenSidePanelCount}>
+          <RightDockProvider
+            onStateChange={handleRightDockStateChange}
+            onBeforeOcclusionPublish={publishRightDockOcclusion}
+            onOcclusionRelease={releaseRightDockOcclusion}
+          >
           <div className={`flex flex-1 min-h-0 ${activeTheme === 'dark' ? (isSidebarOpen ? 'bg-[#1E1F20]' : 'bg-[#131314]') : 'bg-[#F0F4F9]'}`}>
 
-          {isWeb && isSidebarOpen && (
+          {isWeb && isSidebarOpen && browserOverlayPublicationReady && (
             <button
               type="button"
+              data-testid="mobile-navigation-close"
               aria-label={t.uiMainApp.closeNavigation}
               onClick={() => setIsSidebarOpen(false)}
               className="fixed inset-0 z-30 hidden bg-black/40 max-sm:block"
@@ -1819,15 +2951,23 @@ function workspaceDisplayName(path) {
 
           {/* ================= Sidebar (Gemini Style) ================= */}
           <div
+            id="app-sidebar"
             data-testid="app-sidebar"
-            style={isCompactShell ? {
-              display: isSidebarOpen ? 'flex' : 'none',
-              position: 'fixed',
-              left: 0,
-              top: 48,
-              bottom: 56,
-            } : undefined}
-            className={`${isSidebarOpen ? 'w-[280px]' : 'w-[68px]'} shrink-0 flex flex-col z-40 transition-all duration-300 ${
+            style={{
+              // The compact-shell drawer does not inherit the persisted desktop width:
+              // the drawer has no drag handle, and a width beyond the viewport would cover
+              // the tap-on-backdrop-to-dismiss channel (the z-30 backdrop sits below the
+              // z-40 sidebar).
+              width: isSidebarOpen && !isCompactShell ? sidebarWidth : undefined,
+              ...(isCompactShell ? {
+                display: isSidebarOpen && browserOverlayPublicationReady ? 'flex' : 'none',
+                position: 'fixed',
+                left: 0,
+                top: 48,
+                bottom: 56,
+              } : {}),
+            }}
+            className={`${isSidebarOpen ? (isCompactShell ? 'w-[280px]' : '') : 'w-[68px]'} relative shrink-0 flex flex-col z-40 ${sidebarResizing ? '' : 'transition-all duration-300'} ${
               activeTheme === 'light'
                 ? 'bg-[#F0F4F9]'
                 : (isSidebarOpen ? 'bg-[#1E1F20]' : 'bg-[#131314]')
@@ -1863,7 +3003,10 @@ function workspaceDisplayName(path) {
               )}
             </div>
 
-            {/* Navigation — shrink-0 固定不滚动,list 再多也不挤压 nav */}
+            {/* Navigation — shrink-0 keeps it from scrolling; no matter how long the
+                list is, it never squeezes the nav. In code style it collapses to a single
+                expand row by default; the remaining nav items can be collapsed again at
+                the bottom after expanding. */}
             <div data-testid="sidebar-primary-nav" className={`shrink-0 flex flex-col gap-0.5 mt-1.5 max-sm:gap-0 max-sm:mt-1 ${isSidebarOpen ? 'px-3' : 'px-2 items-center'}`}>
               <NavItem
                 icon={<Edit2 size={18} />} label={t.newChat}
@@ -1871,6 +3014,8 @@ function workspaceDisplayName(path) {
                 isSidebarOpen={isSidebarOpen}
                 onClick={() => handleNewChat()}
               />
+              {/* On the compact shell search is only reachable from the nav, so it must
+                  stay pinned even when collapsed */}
               {(!isSidebarOpen || isCompactShell) && (
                 <NavItem
                   icon={<Search size={18} />} label={t.searchChats}
@@ -1880,21 +3025,39 @@ function workspaceDisplayName(path) {
                   onClick={() => setSearchOverlayOpen(true)}
                 />
               )}
+              {codeStyleActive && isSidebarOpen && !codeNavExpanded ? (
+                <button
+                  type="button"
+                  data-testid="sidebar-primary-nav-expand"
+                  onClick={() => setCodeNavExpanded(true)}
+                  title={t.sidebarNavExpand}
+                  className={`w-full h-8 px-4 flex items-center justify-between rounded-full text-[13px] font-semibold transition-colors ${activeTheme === 'dark' ? 'text-[#9AA0A6] hover:bg-[#282A2C]' : 'text-[#8A8F94] hover:bg-[#E1E5EA]'}`}
+                >
+                  <span className="truncate">{t.sidebarNavExpand}</span>
+                  <ChevronDown size={14} className="shrink-0" />
+                </button>
+              ) : (
+              <>
               {SCHEDULED_TASKS_ENTRY_ENABLED && (
                 <NavItem
                   icon={<Clock size={18} />} label={t.scheduledPlans}
                   active={currentView === 'scheduled'}
-                  unread={!!(bs && (bs.scheduledTasks || []).some(task => task.hasUnreadRuns))}
+                  unread={!!(bs && ((bs.scheduledTasks || []).some(task => task.hasUnreadRuns) || (bs.scheduledTaskRecentRuns || []).some(run => run && run.unread)))}
                   theme={activeTheme}
                   t={t}
                   isSidebarOpen={isSidebarOpen}
                   onClick={() => navigateFromScheduledRun('scheduled')}
+                  onPointerEnter={() => prefetchView('scheduled')} onFocus={() => prefetchView('scheduled')}
                 />
               )}
               {teamRelayAvailable && (
                 <NavItem
                   icon={<Users size={18} />} label={t.teamRelay}
                   active={currentView === 'teamRelay'}
+                  unread={teamRelayUnread}
+                  unreadLabel={t.uiTeamRelay.unread.nav}
+                  unreadTestId="team-relay-nav-unread"
+                  unreadTone="danger"
                   theme={activeTheme}
                   isSidebarOpen={isSidebarOpen}
                   onClick={() => navigateFromScheduledRun('teamRelay')}
@@ -1906,6 +3069,7 @@ function workspaceDisplayName(path) {
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
                 onClick={() => navigateFromScheduledRun('outputs')}
+                onPointerEnter={() => prefetchView('knowledge')} onFocus={() => prefetchView('knowledge')}
                 dragKind={canDetachWindows ? 'outputs' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'outputs:'} onPickUp={canDetachWindows ? (geom) => beginTearOff('outputs', undefined, t.outputs, geom) : undefined}
               />
               <NavItem
@@ -1913,6 +3077,7 @@ function workspaceDisplayName(path) {
                 active={currentView === 'monitor'}
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
+                onPointerEnter={() => prefetchView('monitor')} onFocus={() => prefetchView('monitor')}
                 onClick={() => {
                   navigateFromScheduledRun('monitor', () => {
                     const liveBridge = window.TauriBridge || bridge;
@@ -1927,6 +3092,7 @@ function workspaceDisplayName(path) {
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
                 onClick={() => navigateFromScheduledRun('toolStore')}
+                onPointerEnter={() => prefetchView('toolStore')} onFocus={() => prefetchView('toolStore')}
                 dragKind={canDetachWindows ? 'toolstore' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'toolstore:'} onPickUp={canDetachWindows ? (geom) => beginTearOff('toolstore', undefined, t.toolStore, geom) : undefined}
               />
               <NavItem
@@ -1935,6 +3101,7 @@ function workspaceDisplayName(path) {
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
                 onClick={() => navigateFromScheduledRun('cardpool', () => setPoolMyOnly(false))}
+                onPointerEnter={() => prefetchView('cardpool')} onFocus={() => prefetchView('cardpool')}
                 dragKind={canDetachWindows ? 'cardpool' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'cardpool:'} onPickUp={canDetachWindows ? (geom) => beginTearOff('cardpool', undefined, t.cardPool, geom) : undefined}
               />
               <NavItem
@@ -1943,6 +3110,7 @@ function workspaceDisplayName(path) {
                 theme={activeTheme}
                 isSidebarOpen={isSidebarOpen}
                 onClick={() => navigateFromScheduledRun('knowledge')}
+                onPointerEnter={() => prefetchView('knowledge')} onFocus={() => prefetchView('knowledge')}
                 dragKind={canDetachWindows ? 'knowledge' : undefined} dragging={canDetachWindows && !!dragAvatar && dragAvatar.key === 'knowledge:'} onPickUp={canDetachWindows ? (geom) => beginTearOff('knowledge', undefined, t.knowledge, geom) : undefined}
               />
               {/* 收起态专属:展开态近期列表的高亮项就是回会话入口,不重复渲染 */}
@@ -1955,6 +3123,19 @@ function workspaceDisplayName(path) {
                   onClick={() => navigateFromScheduledRun('chat')}
                 />
               )}
+              {codeStyleActive && isSidebarOpen && codeNavExpanded && (
+                <button
+                  type="button"
+                  onClick={() => setCodeNavExpanded(false)}
+                  title={t.sidebarNavCollapse}
+                  className={`w-full h-7 px-4 flex items-center justify-between rounded-full text-[12px] transition-colors ${activeTheme === 'dark' ? 'text-[#9AA0A6] hover:bg-[#282A2C]' : 'text-[#8A8F94] hover:bg-[#E1E5EA]'}`}
+                >
+                  <span className="truncate">{t.sidebarNavCollapse}</span>
+                  <ChevronDown size={14} className="shrink-0 rotate-180" />
+                </button>
+              )}
+              </>
+              )}
             </div>
 
             {/* Recents — 独立 flex-1 + overflow-y-auto,只在展开态显示。
@@ -1966,18 +3147,24 @@ function workspaceDisplayName(path) {
               <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar px-3 flex flex-col">
                 <div data-testid="sidebar-recents" className="pt-5 pb-2 max-sm:pt-2">
                   <div ref={taskFilterRef} className="relative mb-2">
-                    <div className={`group h-8 px-4 flex items-center justify-between rounded-full text-[13px] font-semibold ${
+                    {/* 第一行:「任务列表」标题 + 查看全部/筛选按钮;
+                        第二行:全部/代码 胶囊 + 一键折叠(分组)按钮。
+                        胶囊选择任务列表展示形态(标准列表 / code 样式按文件夹分组),
+                        与是否处于 code 模式无关;折叠按钮切换下方任务分组
+                        (日期组 / 文件夹组)的整体展开状态。 */}
+                    <div className={`group flex flex-col gap-1 rounded-2xl text-[13px] font-semibold ${
                       activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#8A8F94]'
                     }`}>
-                      <span className="truncate">
-                        {t.sidebarTaskList} ({sidebarTaskHistory.length})
-                      </span>
-                      <span className="flex items-center">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="h-8 px-1 min-w-0 truncate flex items-center">
+                          {t.sidebarTaskList} ({sidebarCodeListActive ? sidebarCodeTasks.length : sidebarTaskHistory.length})
+                        </span>
+                        <span className="flex items-center shrink-0">
                         {/* 对话管理页入口:悬停任务列表行显现(触屏常显),替代原搜索入口 */}
                         <button
                           type="button"
                           onClick={() => navigateFromScheduledRun('search')}
-                          className={`mr-1 h-6 px-2 shrink-0 rounded-full text-[12px] font-normal transition-opacity opacity-0 group-hover:opacity-100 max-sm:opacity-100 ${activeTheme === 'dark' ? 'text-[#A8C7FA] hover:bg-[#282A2C]' : 'text-[#0B57D0] hover:bg-[#E1E5EA]'}`}
+                          className={`ml-1 h-6 px-2 shrink-0 rounded-full text-[12px] font-normal transition-opacity opacity-0 group-hover:opacity-100 max-sm:opacity-100 ${activeTheme === 'dark' ? 'text-[#A8C7FA] hover:bg-[#282A2C]' : 'text-[#0B57D0] hover:bg-[#E1E5EA]'}`}
                         >
                           {t.sidebarViewAll}
                         </button>
@@ -1994,12 +3181,64 @@ function workspaceDisplayName(path) {
                         >
                           <Filter size={15} />
                         </button>
-                      </span>
+                        </span>
+                      </div>
+                      {/* 全部/代码 胶囊 + 一键折叠(分组)按钮:位于「任务列表」标题下方。
+                          flex-wrap 兜底:ja 等语言在 220px 最小宽度下此行已无富余
+                          (实测正好占满),字体渲染偏宽的环境让折叠按钮换行而非溢出。 */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                        {/* biome-ignore lint/a11y/useSemanticElements: toggle-button pair in an ARIA group, not form controls; a <fieldset> would need its default styles reset */}
+                        <div className="flex items-center gap-0.5" role="group" aria-label={t.sidebarTaskStyle}>
+                        <button
+                          type="button"
+                          data-testid="sidebar-task-pill-all"
+                          aria-pressed={!sidebarCodeListActive}
+                          onClick={() => { setSidebarCodeStylePersisted('normal'); setTaskFilterOpen(false); }}
+                          className={`h-6 px-2.5 rounded-full text-[12px] font-normal transition-colors ${
+                            sidebarCodeListActive
+                              ? (activeTheme === 'dark' ? 'text-[#9AA0A6] hover:bg-[#282A2C]' : 'text-[#8A8F94] hover:bg-[#E1E5EA]')
+                              : (activeTheme === 'dark' ? 'bg-[#333537] text-[#E3E3E3]' : 'bg-[#E1E5EA] text-[#0B57D0]')
+                          }`}
+                        >
+                          {t.sidebarTaskFilterAll}
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="sidebar-task-pill-code"
+                          aria-pressed={sidebarCodeListActive}
+                          onClick={() => { setSidebarCodeStylePersisted('code'); setTaskFilterOpen(false); }}
+                          className={`h-6 px-2.5 rounded-full text-[12px] font-normal transition-colors ${
+                            sidebarCodeListActive
+                              ? (activeTheme === 'dark' ? 'bg-[#333537] text-[#E3E3E3]' : 'bg-[#E1E5EA] text-[#0B57D0]')
+                              : (activeTheme === 'dark' ? 'text-[#9AA0A6] hover:bg-[#282A2C]' : 'text-[#8A8F94] hover:bg-[#E1E5EA]')
+                          }`}
+                        >
+                          {t.sidebarTaskFilterCode}
+                        </button>
+                        </div>
+                        {/* 一键折叠/展开全部任务分组(日期组或文件夹组);
+                            无可分组列表(平铺/空列表)时不渲染,避免空操作 */}
+                        {visibleTaskGroupOpens.length > 0 && (
+                        <button
+                          type="button"
+                          data-testid="sidebar-collapse-all-groups"
+                          onClick={() => setAllTaskGroups(!allTaskGroupsExpanded)}
+                          title={allTaskGroupsExpanded ? t.sidebarCollapseAll : t.sidebarExpandAll}
+                          aria-label={allTaskGroupsExpanded ? t.sidebarCollapseAll : t.sidebarExpandAll}
+                          className={`h-6 px-2 shrink-0 whitespace-nowrap rounded-full text-[12px] font-normal transition-colors ${
+                            activeTheme === 'dark' ? 'text-[#9AA0A6] hover:bg-[#282A2C]' : 'text-[#8A8F94] hover:bg-[#E1E5EA]'
+                          }`}
+                        >
+                          <ChevronDown size={13} className={`inline -mt-0.5 transition-transform ${allTaskGroupsExpanded ? '' : 'rotate-180'}`} />
+                          {allTaskGroupsExpanded ? t.sidebarCollapseAll : t.sidebarExpandAll}
+                        </button>
+                        )}
+                      </div>
                     </div>
                     {taskFilterOpen && (
                       <div
                         data-testid="sidebar-task-filter-menu"
-                        className={`absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-2xl border p-1.5 shadow-xl ${
+                        className={`absolute right-0 top-16 z-50 w-44 overflow-hidden rounded-2xl border p-1.5 shadow-xl ${
                           activeTheme === 'dark' ? 'border-white/10 bg-[#202124]' : 'border-black/10 bg-white'
                         }`}
                       >
@@ -2036,7 +3275,46 @@ function workspaceDisplayName(path) {
                     )}
                   </div>
                   <div className="space-y-1">
-                    {!sidebarDateGrouping ? (
+                    {sidebarCodeListActive ? (
+                      (sidebarFolderPinned.length > 0 || sidebarFolderGroups.length > 0) ? (
+                        <>
+                          {sidebarFolderPinned.length > 0 && (
+                            <div className="space-y-0.5">
+                              {sidebarFolderPinned.map(renderSidebarTaskItem)}
+                            </div>
+                          )}
+                          {sidebarFolderGroups.map((group) => {
+                            const isOpen = folderGroupOpen[group.key] ?? true;
+                            const label = group.key === TEMPORARY_GROUP_KEY
+                              ? t.uiCodex.temporarySession
+                              : workspaceDisplayName(group.key);
+                            return (
+                              <div key={group.key}>
+                                <button
+                                  type="button"
+                                  data-testid="sidebar-folder-group"
+                                  title={group.key === TEMPORARY_GROUP_KEY ? undefined : group.key}
+                                  onClick={() => setFolderGroupOpen(prev => ({ ...prev, [group.key]: !isOpen }))}
+                                  className={`w-full h-7 px-4 flex items-center justify-between rounded-full text-[12px] transition-colors ${activeTheme === 'dark' ? 'text-[#9AA0A6] hover:bg-[#282A2C]' : 'text-[#8A8F94] hover:bg-[#E1E5EA]'}`}
+                                >
+                                  <span className="truncate">{label} ({group.rows.length})</span>
+                                  <ChevronDown size={14} className={`shrink-0 transition-transform ${isOpen ? '' : '-rotate-90'}`} />
+                                </button>
+                                {isOpen && (
+                                  <div className="mt-1 space-y-0.5">
+                                    {group.rows.map(renderSidebarTaskItem)}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </>
+                      ) : (
+                        <div className={`px-3 py-3 text-[13px] ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#8A8F94]'}`}>
+                          {t.sidebarTaskEmpty}
+                        </div>
+                      )
+                    ) : !sidebarDateGrouping ? (
                       <div className="space-y-0.5">
                         {sidebarTaskHistory.length > 0 ? sidebarTaskHistory.map(renderSidebarTaskItem) : (
                           <div className={`px-3 py-3 text-[13px] ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#8A8F94]'}`}>
@@ -2179,10 +3457,34 @@ function workspaceDisplayName(path) {
                 )}
               </div>
             </div>
+
+            {/* 右侧拖拽柄在展开的桌面布局中可用，同时提供键盘 splitter 语义。 */}
+            {isSidebarOpen && !isCompactShell && (
+              <hr
+                data-testid="sidebar-resize-handle"
+                aria-orientation="vertical"
+                tabIndex={0}
+                aria-valuenow={sidebarWidth}
+                aria-valuemin={SIDEBAR_WIDTH_MIN}
+                aria-valuemax={SIDEBAR_WIDTH_MAX}
+                aria-label={t.sidebarResize}
+                aria-controls="app-sidebar"
+                title={t.sidebarResize}
+                onPointerDown={beginSidebarResize}
+                onDoubleClick={resetSidebarWidth}
+                onKeyDown={keyboardSidebarResize}
+                className={`absolute top-0 bottom-0 right-0 w-[6px] border-0 cursor-col-resize z-50 touch-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#0B57D0] ${
+                  sidebarResizing
+                    ? 'bg-[#0B57D0]/40'
+                    : (activeTheme === 'dark' ? 'hover:bg-[#A8C7FA]/30' : 'hover:bg-[#0B57D0]/25')
+                }`}
+              />
+            )}
           </div>
 
           {/* ================= Main Content ================= */}
-          <div className={`flex-1 flex flex-col relative min-w-0 overflow-hidden ${activeTheme === 'dark' ? 'bg-[#131314]' : 'bg-white'} ${isCompactShell ? '' : 'rounded-tl-[28px]'}`}>
+          <div className={`flex-1 flex relative min-w-0 overflow-hidden ${activeTheme === 'dark' ? 'bg-[#131314]' : 'bg-white'} ${isCompactShell ? '' : 'rounded-tl-[28px]'}`}>
+            <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
 
             {/* Gemini Style Background Glow */}
             {(currentView === 'chat'
@@ -2195,10 +3497,15 @@ function workspaceDisplayName(path) {
               )
             )}
 
-            {currentView === 'monitor' && <MonitorView theme={activeTheme} t={t} bs={bs} />}
+            {/* 单一常驻 Suspense 边界:React 19 下切视图时旧视图在本边界内被替换,
+                chunk 未就绪(未被预取覆盖的入口)保持旧视图不闪 fallback;失败由
+                ViewErrorBoundary 兜底(reload 重试绕开 React.lazy 的失败缓存)。 */}
+            <ViewErrorBoundary t={t}>
+              <Suspense fallback={<ViewFallback />}>
+            {currentView === 'monitor' && <LazyMonitorView theme={activeTheme} t={t} bs={bs} />}
             {currentView === 'settings' && (
               <SettingsErrorBoundary theme={activeTheme} t={t}>
-                <SettingsView
+                <LazySettingsView
                   activeTheme={activeTheme} setActiveTheme={handleSetTheme}
                   language={language} setLanguage={handleSetLanguage}
                   superPerm={superPerm} setSuperPerm={handleToggleSuperPerm}
@@ -2238,11 +3545,19 @@ function workspaceDisplayName(path) {
                 />
               </SettingsErrorBoundary>
             )}
-            {currentView === 'workflow' && <WorkflowView theme={activeTheme} t={t} bs={bs} />}
             {teamRelayAvailable && currentView === 'teamRelay' && <TeamRelayView theme={activeTheme} t={t} onThemeChange={handleSetTheme} onUseAgent={handleTeamRelayUseAgent} onLoadCodeAgents={loadTeamRelayCodeAgents} />}
-            {currentView === 'toolStore' && <ToolStoreView theme={activeTheme} t={t} onNewChat={handleNewChat} />}
-            {currentView === 'cardpool' && <CardPoolView theme={activeTheme} t={t} bs={bs} onEquipped={() => setCurrentView('chat')} onAICreate={startAICard} initialMyOnly={poolMyOnly} />}
-            {currentView === 'chat' && <ChatView theme={activeTheme} t={t} bs={bs} prefill={chatPrefill} focusComposerTick={petFocusComposerTick} onPrefillConsumed={() => setChatPrefill('')} onOpenEditor={(initial) => setPersonaEditor({ initial })} justInstalledTool={justInstalledTool} setJustInstalledTool={setJustInstalledTool} onGotoSettings={() => openSettingsSection('general')} onGotoModelSettings={() => openSettingsSection('model')} onGotoTools={() => navigateFromScheduledRun('toolStore')} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} codeModeAvailable={codexAcpSupported} onSwitchHomeMode={handleSwitchHomeMode} accountPlatformClient={accountPlatformClient} />}
+            {isCompactShell && browserActive && currentView === 'browser' && (
+              <BrowserView
+                key={browserViewSessionId}
+                theme={activeTheme}
+                t={t}
+                sessionId={browserViewSessionId}
+                nativeSurfaceSuspended={compactBrowserSurfaceSuspended}
+              />
+            )}
+            {currentView === 'toolStore' && <LazyToolStoreView theme={activeTheme} t={t} onNewChat={handleNewChat} />}
+            {currentView === 'cardpool' && <LazyCardPoolView theme={activeTheme} t={t} bs={bs} onEquipped={() => { setCodeModeOn(false); setCurrentView('chat'); }} onAICreate={startAICard} initialMyOnly={poolMyOnly} />}
+            {currentView === 'chat' && <ChatView theme={activeTheme} t={t} bs={bs} prefill={chatPrefill} prefillAppend={chatPrefillAppend} focusComposerTick={petFocusComposerTick} onPrefillConsumed={() => { setChatPrefill(''); setChatPrefillAppend(false); }} onOpenEditor={handleOpenPersonaEditor} justInstalledTool={justInstalledTool} setJustInstalledTool={setJustInstalledTool} onGotoSettings={() => openSettingsSection('general')} onGotoModelSettings={() => openSettingsSection('model')} onGotoTools={() => navigateFromScheduledRun('toolStore')} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} codeModeAvailable={codexAcpSupported} onSwitchHomeMode={handleSwitchHomeMode} browserDockAvailable={browserDockAvailable} browserDockOpen={browserPaneOpen} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} onOpenBrowserDock={openBrowserDock} accountPlatformClient={accountPlatformClient} />}
             {codexAcpSupported && currentView === 'codex' && (
               <CodexAcpView
                 theme={activeTheme}
@@ -2263,9 +3578,9 @@ function workspaceDisplayName(path) {
             )}
             {SCHEDULED_TASKS_ENTRY_ENABLED && currentView === 'scheduled' && (
               bs && bs.scheduledRunContext ? (
-                <ChatView theme={activeTheme} t={t} bs={bs} prefill="" onPrefillConsumed={() => {}} onOpenEditor={(initial) => setPersonaEditor({ initial })} justInstalledTool={justInstalledTool} setJustInstalledTool={setJustInstalledTool} onGotoSettings={() => openSettingsSection('general')} onGotoModelSettings={() => openSettingsSection('model')} onGotoTools={() => navigateFromScheduledRun('toolStore')} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} accountPlatformClient={accountPlatformClient} />
+                <ChatView theme={activeTheme} t={t} bs={bs} prefill="" onPrefillConsumed={() => {}} onOpenEditor={handleOpenPersonaEditor} justInstalledTool={justInstalledTool} setJustInstalledTool={setJustInstalledTool} onGotoSettings={() => openSettingsSection('general')} onGotoModelSettings={() => openSettingsSection('model')} onGotoTools={() => navigateFromScheduledRun('toolStore')} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} browserDockAvailable={browserDockAvailable} browserDockOpen={browserPaneOpen} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} onOpenBrowserDock={openBrowserDock} accountPlatformClient={accountPlatformClient} />
               ) : (
-                <ScheduledTasksView theme={activeTheme} t={t} onOpenChat={() => setCurrentView('chat')} onGotoModelSettings={() => openSettingsSection('model')} />
+                <LazyScheduledTasksView theme={activeTheme} t={t} onOpenChat={() => { setCodeModeOn(false); setCurrentView('chat'); }} onGotoModelSettings={() => openSettingsSection('model')} />
               )
             )}
             {/* 草稿态(无 session)也渲染挂件,但强制空态——让欢迎页保留「＋加持卡牌」入口。
@@ -2276,7 +3591,7 @@ function workspaceDisplayName(path) {
                 onOpenPicker={() => navigateFromScheduledRun('cardpool', () => setPoolMyOnly(false))} />
             )}
             {currentView === 'search' && (
-              <SearchView
+              <LazySearchView
                 theme={activeTheme} history={allSidebarTasks} t={t} language={language}
                 archived={(bs && bs.archivedSessions) || []}
                 showArchived={searchShowArchived}
@@ -2295,23 +3610,36 @@ function workspaceDisplayName(path) {
                 onRestoreMany={handleBatchRestoreArchived}
               />
             )}
-            {currentView === 'outputs' && <KnowledgeView theme={activeTheme} t={t} mode="outputs" />}
-            {currentView === 'knowledge' && <KnowledgeView theme={activeTheme} t={t} />}
+            {currentView === 'outputs' && <LazyKnowledgeView theme={activeTheme} t={t} mode="outputs" />}
+            {currentView === 'knowledge' && <LazyKnowledgeView theme={activeTheme} t={t} />}
+              </Suspense>
+            </ViewErrorBoundary>
 
-            {can('webAccessAdmin') && webAccessOpen && (
-              <WebAccessModal theme={activeTheme} bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
+            {can('webAccessAdmin') && webAccessOpen && browserOverlayPublicationReady && (
+              <ViewErrorBoundary t={t}>
+              <Suspense fallback={null}>
+              <LazyWebAccessModal theme={activeTheme} bs={bs} t={t} onClose={() => setWebAccessOpen(false)} />
+            </Suspense>
+            </ViewErrorBoundary>
             )}
 
-            {/* App 级自创卡编辑器: 聊天里「存入卡牌池」草稿走这条 */}
-            {personaEditor && (
-              <PersonaEditorModal initial={personaEditor.initial} isDark={activeTheme === 'dark'} t={t}
+            {/* App 级自创卡编辑器: 聊天里「存入卡牌池」草稿走这条。错误边界与
+                WebAccessModal 同款:lazy chunk 拉取失败不能卸载整个应用窗口。 */}
+            {personaEditor && browserOverlayPublicationReady && (
+              <ViewErrorBoundary t={t}>
+              <Suspense fallback={null}>
+              <LazyPersonaEditorModal initial={personaEditor.initial} isDark={activeTheme === 'dark'} t={t}
                 onClose={() => setPersonaEditor(null)}
                 onSaved={(sum) => { const isEdit = personaEditor.initial && personaEditor.initial.id; setPersonaEditor(null); if (!isEdit) setSavedConfirm({ name: sum && sum.name }); }}
                 onDeleted={() => setPersonaEditor(null)} />
+              </Suspense>
+              </ViewErrorBoundary>
             )}
 
             {/* 存入成功 → iOS 确认窗:去查看我的卡牌 / 暂不 */}
-            {savedConfirm && (
+            {savedConfirm && browserOverlayPublicationReady && (
+              // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard users close the dialog through its real buttons
+              // biome-ignore lint/a11y/noStaticElementInteractions: this is a pointer-only backdrop around an accessible dialog card
               <div className="fixed inset-0 z-[80] flex items-center justify-center p-4" style={{ background:'rgba(0,0,0,.4)' }} onClick={() => setSavedConfirm(null)}>
                 <div onClick={(e) => e.stopPropagation()} className="w-[270px] rounded-[14px] overflow-hidden text-center"
                   style={{ background: activeTheme === 'dark' ? 'rgba(44,44,46,.95)' : 'rgba(250,250,250,.95)', backdropFilter:'blur(20px)', WebkitBackdropFilter:'blur(20px)', fontFamily:'-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif' }}>
@@ -2336,7 +3664,7 @@ function workspaceDisplayName(path) {
                 unavailable 对用户管理的凭据同样需拦截:macOS 上用户在 Keychain
                 授权弹窗点"拒绝"时 credential_state 变 unavailable(见 prefs.rs:785),
                 此时不盖遮罩用户仍可发消息 → 命中 Keychain 错误,与 missing 同等后果。 */}
-            {shouldShowApiKeyGate(bs, currentView, bridge.available) && (
+            {apiKeyGateOpen && browserOverlayPublicationReady && (
               <div className="fixed inset-0 z-[57] flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,.5)' }}>
                 <div className="w-full max-w-[400px] rounded-2xl p-6 ts-modal-in"
                      style={{ background: activeTheme === 'dark' ? '#1E1F20' : '#FFFFFF', color: activeTheme === 'dark' ? '#E3E3E3' : '#1F1F1F', boxShadow: '0 12px 48px rgba(0,0,0,.35)' }}>
@@ -2354,7 +3682,9 @@ function workspaceDisplayName(path) {
             )}
 
             {/* MegaCube(GB10) 本地大模型一键引导 —— 全局首屏弹窗;引导中禁止背景关窗 */}
-            {can('localModelSetup') && bs && bs.vllmSetup && bs.vllmSetup.eligible && !bs.vllmSetupDismissed && (
+            {vllmSetupModalOpen && browserOverlayPublicationReady && (
+              // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard users close the dialog through its real buttons
+              // biome-ignore lint/a11y/noStaticElementInteractions: this is a pointer-only backdrop around an accessible dialog card
               <div className="fixed inset-0 z-[56] flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,.5)' }}
                    onClick={() => { if (!bs.vllmBootstrapping) bridge.vllm.dismissVllmSetup(); }}>
                 <div className="w-full max-w-[440px] rounded-2xl p-6 ts-modal-in" onClick={(e) => e.stopPropagation()}
@@ -2414,7 +3744,9 @@ function workspaceDisplayName(path) {
             )}
 
             {/* Pinvou 检阅弹窗(品/悟) —— 居中弹窗 + 毛玻璃背景(虚化身后 app);全局,任何视图都能弹;点背景或卡内「跳过」关闭 */}
-            {bs && bs.pinvouModal && (
+            {bs && bs.pinvouModal && browserOverlayPublicationReady && (
+              // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard users close the dialog through its real close button
+              // biome-ignore lint/a11y/noStaticElementInteractions: this is a pointer-only backdrop around an accessible dialog card
               <div className="fixed inset-0 z-[55] flex items-center justify-center p-6"
                    style={{ background: activeTheme === 'dark' ? 'rgba(0,0,0,.45)' : 'rgba(255,255,255,.35)', backdropFilter: 'blur(20px) saturate(140%)', WebkitBackdropFilter: 'blur(20px) saturate(140%)' }}
                    onClick={() => { if (!bs.pinvouModal.loading) bridge.interaction.dismissPinvouReview(); }}>
@@ -2436,8 +3768,92 @@ function workspaceDisplayName(path) {
               </div>
             )}
 
+            </div>
+            {browserDockAvailable && browserPaneOpen
+              && (browserActive || browserWorkspaceStarting || browserWorkspaceError) && (
+              <RightDockPanel
+                panelId="browser"
+                visible={browserPaneAllowed && browserPaneSelected}
+                activationKey={browserDockActivationKey}
+                className={`overflow-hidden border-l ${
+                  activeTheme === 'dark' ? 'border-[#2A2B2E] bg-[#101113]' : 'border-[#E5E7EB] bg-white'
+                }`}
+                dataTestId="browser-side-pane"
+              >
+                <div
+                  className={`flex h-9 shrink-0 items-center justify-between border-b px-3 text-[13px] ${
+                    activeTheme === 'dark' ? 'border-[#2A2B2E] text-[#E8E8E8]' : 'border-[#E5E7EB] text-[#222]'
+                  }`}
+                >
+                  <span className="truncate">{t.browser}</span>
+                  <div className="flex items-center gap-1">
+                    <div
+                      ref={setBrowserOwnershipSlot}
+                      className="contents"
+                      data-browser-control-slot="ownership"
+                    />
+                    <button
+                      type="button"
+                      className={`rounded p-1 ${activeTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}
+                      title={t.browserPaneClose}
+                      aria-label={t.browserPaneClose}
+                      onClick={() => {
+                        const selectedSessionId = browserSessionIdRef.current;
+                        closeBrowserDock(selectedSessionId);
+                      }}
+                    >
+                      <XIcon size={15} />
+                    </button>
+                  </div>
+                </div>
+                <div className="min-h-0 flex-1">
+                  {browserActive ? (
+                    <BrowserView
+                      key={browserViewSessionId}
+                      theme={activeTheme}
+                      t={t}
+                      sessionId={browserViewSessionId}
+                      nativeSurfaceSuspended={browserSurfaceSuspended}
+                      ownershipSlot={browserOwnershipSlot}
+                    />
+                  ) : (
+                    <div
+                      className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-[13px]"
+                      data-testid="browser-workspace-starting"
+                      style={{ color: activeTheme === 'dark' ? '#B8B8B8' : '#555' }}
+                    >
+                      <Globe size={28} style={{ opacity: 0.45 }} />
+                      <div>{browserWorkspaceStarting ? t.browserLoading : t.browserError}</div>
+                      {browserWorkspaceError && (
+                        <>
+                          <div style={{ opacity: 0.7, wordBreak: 'break-word' }}>{browserWorkspaceError}</div>
+                          <button
+                            type="button"
+                            onClick={openBrowserDock}
+                            className={`rounded-full px-4 py-2 font-medium ${
+                              activeTheme === 'dark'
+                                ? 'bg-[#A8C7FA] text-[#062E6F] hover:bg-[#B8D2FA]'
+                                : 'bg-[#0B57D0] text-white hover:bg-[#0842A0]'
+                            }`}
+                          >
+                            {t.browserRetry}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </RightDockPanel>
+            )}
+            <RightDockHost
+              resizeLabel={t.uiMultiAgent.panelResize}
+              resizeHint={t.uiMultiAgent.panelResizeHint}
+              onResizeActiveChange={setBrowserResizeActive}
+            />
           </div>
           </div>
+          </RightDockProvider>
+          </SidePanelLayoutProvider>
 
           {isCompactShell && (
             <MobileTabBar theme={activeTheme} tabs={[
@@ -2453,20 +3869,22 @@ function workspaceDisplayName(path) {
                   if (liveBridge && typeof liveBridge.startMonitorPolling === 'function') liveBridge.startMonitorPolling();
                 }) },
               { key: 'more', label: t.mobileMore, icon: <MoreHorizontal size={18} />,
-                active: mobileMoreActive, dot: hasUpdate || scheduledUnread,
+                active: mobileMoreActive, dot: hasUpdate || scheduledUnread || teamRelayUnread,
                 onClick: () => setMobileMoreOpen(true) },
             ]} />
           )}
 
-          {isCompactShell && mobileMoreOpen && (
+          {isCompactShell && mobileMoreOpen && browserOverlayPublicationReady && (
             <MobileMoreSheet theme={activeTheme} title={t.mobileMore} onClose={() => setMobileMoreOpen(false)} items={[
               { key: 'search', label: t.searchChats, icon: <Search size={18} />,
                 active: currentView === 'search', onClick: () => mobileNavigate('search') },
+              ...(browserActive ? [{ key: 'browser', label: t.browser, icon: <Globe size={18} />,
+                active: currentView === 'browser', onClick: () => mobileNavigate('browser') }] : []),
               ...(SCHEDULED_TASKS_ENTRY_ENABLED ? [{ key: 'scheduled', label: t.scheduledPlans, icon: <Clock size={18} />,
                 active: currentView === 'scheduled', dot: scheduledUnread,
                 onClick: () => mobileNavigate('scheduled') }] : []),
               ...(teamRelayAvailable ? [{ key: 'teamRelay', label: t.teamRelay, icon: <Users size={18} />,
-                active: currentView === 'teamRelay', onClick: () => mobileNavigate('teamRelay') }] : []),
+                active: currentView === 'teamRelay', dot: teamRelayUnread, onClick: () => mobileNavigate('teamRelay') }] : []),
               { key: 'outputs', label: t.outputs, icon: <Package size={18} />,
                 active: currentView === 'outputs', onClick: () => mobileNavigate('outputs') },
               { key: 'knowledge', label: t.knowledge, icon: <BookOpen size={18} />,
@@ -2500,10 +3918,27 @@ function workspaceDisplayName(path) {
     const root = createRoot(document.getElementById('root'));
     window.__PINVOU_STARTUP__.mark('react:create_root_done');
     const __q = new URLSearchParams(window.location.search);
-    if (__q.get('detached') === '1') {
-      window.__PINVOU_DETACHED__ = true;
-      root.render(<DetachedShell kind={__q.get('kind') || 'monitor'} id={__q.get('id') || ''} />);
-    } else {
-      window.__PINVOU_STARTUP__.mark('react:render_call');
-      root.render(<App />);
-    }
+    // 首帧语言引导:zh 词典内嵌(Promise 已 resolve,仅一个微任务),en/ja 系统
+    // 用户先取惰性词典 chunk 再首渲染,保证 t = dict[language] 首帧即有效。
+    // 装载失败(资源损坏)按 zh 兜底渲染,不空白。
+    const __initialLang = initialSystemLanguage();
+    const __storedLang = (() => {
+      if (!isWeb) return null;
+      try {
+        const value = window.localStorage.getItem('pinvou.web.language');
+        return value && (value === 'zh' || value === 'en' || value === 'ja') ? value : null;
+      } catch (_) { return null; }
+    })();
+    ensureLanguage(__storedLang || __initialLang).catch(() => {}).then(function () {
+      if (__q.get('detached') === '1') {
+        window.__PINVOU_DETACHED__ = true;
+        root.render(
+          <Suspense fallback={<div className="p-6 text-sm opacity-60">…</div>}>
+            <LazyDetachedShell kind={__q.get('kind') || 'monitor'} id={__q.get('id') || ''} />
+          </Suspense>
+        );
+      } else {
+        window.__PINVOU_STARTUP__.mark('react:render_call');
+        root.render(<App />);
+      }
+    });

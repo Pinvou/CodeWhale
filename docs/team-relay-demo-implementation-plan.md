@@ -29,9 +29,9 @@ A 派活给 B
 当前 `feat/team-handoff-tab` worktree 已从交互预览接通真实 Team Relay：
 
 - 团队接力入口；
-- 待我处理、等别人回传、待我接收、我派出去的、已结束；
+- 需要我处理、等待对方、全部接力、已结束、已归档，以及全部接力中的来源筛选；
 - 工作线程与接力路径；
-- 派活、Handoff、回传、最终交付、要求补充、接收结束；
+- 派活、当前持有人更新进展、Handoff、回传、最终交付、要求补充、接收结束；
 - 明确选择文件和私人 Agent 工作区提示；
 - 中、英、日三语和桌面/窄屏适配。
 
@@ -74,6 +74,7 @@ PR #109 当前部署实例继续保持独立。新演示 Hub 使用新的服务�
 - 成员列表和基本在线/最近同步状态；
 - 创建工作线程并派活；
 - 单一当前行动人；
+- 当前行动人可追加进展说明和明确选择的文件，动作进入历史但不移动接力棒；
 - Handoff 给协作者并明确 `return_to`；
 - 演示阶段只允许负责人把工作 Handoff 给一名协作者，协作者完成后必须回传，暂不支持嵌套 Handoff；
 - 回传给原负责人；
@@ -324,7 +325,7 @@ accept
 | active | `final_deliver` | owner 且 current=owner | current=final_recipient，phase=awaiting_acceptance |
 | awaiting_acceptance | `request_changes` | final_recipient | current=owner，return_to=final_recipient，phase=active |
 | awaiting_acceptance | `accept` | final_recipient | current/return_to 为空，phase=closed |
-| active/awaiting_acceptance | `note` | 线程参与者 | 不移动接力棒 |
+| active/awaiting_acceptance | `note` | 线程参与者 | 追加过程记录，不移动接力棒；桌面端“更新进展”入口仅在 active 时向 current_actor 展示 |
 
 所有业务写入在同一个数据库事务中完成：
 
@@ -338,17 +339,18 @@ accept
 
 SSE 发送失败不回滚已提交动作；客户端重连后执行完整 bootstrap 恢复。由于演示团队和线程量很小，完整刷新优先于提前建设游标重放系统。
 
-## 8. 收发箱推导规则
+## 8. 工作箱推导规则
 
-同一线程在主收发箱中只进入一个分类，按以下优先级推导：
+客户端先从 `phase`、`current_actor` 和个人归档偏好推导“待处理、待验收、对方处理中、已结束、已归档”互斥状态，再生成行动视图：
 
-1. `phase=closed` → 已结束；
-2. `phase=awaiting_acceptance && current_actor=me` → 待我接收；
-3. `phase=active && current_actor=me` → 待我处理；
-4. `phase=active && return_to=me && current_actor!=me` → 等别人回传；
-5. `initiator=me || owner=me` 且未命中以上规则 → 我派出去的。
+1. “需要我处理”包含待处理和待验收，待验收优先排列；
+2. “等待对方”包含当前 Principal 发起或负责、但当前轮到其他人的未结束线程；
+3. “全部接力”包含当前 Principal 参与的所有未归档线程；
+4. 已结束和已归档分别提供历史与个人归档视图。
 
-服务端返回结构化线程字段，客户端使用共享纯函数推导分类。服务端列表 API 可以提供相同语义的筛选参数，但不能生成与语言相关的状态文案。
+“全部接力”再按发起人和负责人提供“我派出的、派给我的、我协作的”来源筛选。来源筛选可以与行动状态重叠，不再伪装成互斥状态分类。
+
+服务端返回结构化线程字段，客户端使用共享纯函数推导状态和视图。服务端列表 API 可以提供相同语义的筛选参数，但不能生成与语言相关的状态文案。
 
 ## 9. API 与实时同步契约
 

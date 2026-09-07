@@ -1,8 +1,28 @@
 import {
   commandExecutionDetails,
   presentConversationItems,
-  stripTerminalControlSequences,
 } from '../conversation/conversation-model.js';
+
+export function unifiedConversationUiEnabled() {
+  try {
+    return localStorage.getItem('pinvou_conversation_ui_v2') !== 'false';
+  } catch {
+    return true;
+  }
+}
+
+export function updateAcpAttachmentDraft(drafts, attachmentId, update) {
+  for (const [owner, attachments] of Object.entries(drafts || {})) {
+    if (!attachments.some(attachment => attachment.id === attachmentId)) continue;
+    return {
+      ...drafts,
+      [owner]: attachments.map(attachment => (
+        attachment.id === attachmentId ? update(attachment) : attachment
+      )),
+    };
+  }
+  return drafts;
+}
 
 function contentText(content) {
   if (!content) return '';
@@ -360,6 +380,111 @@ export function appendAcpEvent(events, incoming) {
   return [...(events || []), incoming].sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
 }
 
+// The server-side OrderedWebDelivery watchdog skips a hole after a stalled
+// predecessor times out, so the web live stream can show envelope-seq jumps
+// (the desktop native path persists and broadcasts within the same ordered
+// unit and is unaffected). The tracker records the max live seq per session
+// and reports 'gap' on a jump so the view layer can refetch the authoritative
+// timeline and restore the missing permission/terminal events; reconnect
+// replays and duplicate deliveries return 'duplicate' and are ignored.
+export function createAcpEventSeqTracker() {
+  const lastSeqBySession = new Map();
+  return {
+    note(sessionId, seq) {
+      const value = Number(seq) || 0;
+      if (!sessionId || value <= 0) return 'ignored';
+      const last = lastSeqBySession.get(sessionId) || 0;
+      if (value <= last) return 'duplicate';
+      lastSeqBySession.set(sessionId, value);
+      return last > 0 && value > last + 1 ? 'gap' : 'ok';
+    },
+    // After a snapshot merge, baseline on the known max seq; a higher seq the
+    // live stream already advanced to never regresses.
+    rebase(sessionId, seq) {
+      const value = Number(seq) || 0;
+      if (!sessionId || value <= 0) return;
+      if (value > (lastSeqBySession.get(sessionId) || 0)) lastSeqBySession.set(sessionId, value);
+    },
+  };
+}
+
+// Bounded backoff driver for gap resyncs. note() advances its baseline before
+// reporting 'gap', so after a failed resync the following live envelopes look
+// continuous and never retrigger on their own; without retries a single
+// transient failure would permanently disable healing for that gap. schedule()
+// debounces a burst of gap reports into one attempt; each failure reschedules
+// with exponential backoff until an attempt succeeds or the attempt budget is
+// exhausted. Retry state is scoped to the cycle: schedule() starts a fresh
+// cycle for its session (a burst of gap reports still debounces into one
+// attempt), and cancel() drops any pending attempt (unmount). Both also start
+// a new generation, invalidating any attempt still in flight: its late
+// completion can no longer reset the failure count, cancel the superseding
+// pending attempt, or schedule a retry after cancel().
+export function createAcpGapResyncScheduler(resync, {
+  maxAttempts = 5,
+  baseDelayMs = 800,
+  maxDelayMs = 12800,
+  setTimeout = null,
+  clearTimeout = null,
+  onAttempt = null,
+  onRetry = null,
+  onGiveUp = null,
+} = {}) {
+  const attemptBudget = Math.max(1, Number(maxAttempts) || 1);
+  const firstDelayMs = Math.max(0, Number(baseDelayMs) || 0);
+  const ceilingMs = Math.max(firstDelayMs, Number(maxDelayMs) || 0);
+  const scheduleTimer = setTimeout || globalThis.setTimeout.bind(globalThis);
+  const cancelTimer = clearTimeout || globalThis.clearTimeout.bind(globalThis);
+  let timer = null;
+  let failures = 0;
+  let generation = 0;
+  const delayAfterFailures = count => Math.min(firstDelayMs * 2 ** count, ceilingMs);
+  const clearTimer = () => {
+    if (timer !== null) {
+      cancelTimer(timer);
+      timer = null;
+    }
+  };
+  const fire = async (sessionId, cycle) => {
+    if (cycle !== generation) return;
+    timer = null;
+    if (onAttempt) onAttempt(sessionId, failures + 1);
+    try {
+      await resync(sessionId);
+      if (cycle !== generation) return;
+      failures = 0;
+    } catch (error) {
+      if (cycle !== generation) return;
+      failures += 1;
+      if (failures >= attemptBudget) {
+        if (onGiveUp) onGiveUp(sessionId, failures, error);
+        return;
+      }
+      if (onRetry) onRetry(sessionId, failures, error);
+      timer = scheduleTimer(() => { fire(sessionId, cycle); }, delayAfterFailures(failures));
+    }
+  };
+  return {
+    schedule(sessionId) {
+      generation += 1;
+      failures = 0;
+      clearTimer();
+      const cycle = generation;
+      timer = scheduleTimer(() => { fire(sessionId, cycle); }, firstDelayMs);
+    },
+    cancel() {
+      generation += 1;
+      clearTimer();
+    },
+  };
+}
+
+export function mergeAcpTimelineSnapshot(snapshot, current, sessionId) {
+  return (current || [])
+    .filter(event => event?.sessionId === sessionId)
+    .reduce((merged, event) => appendAcpEvent(merged, event), snapshot || []);
+}
+
 export function resolveAcpSessionControls(info) {
   const configOptions = Array.isArray(info && info.config_options)
     ? info.config_options.filter(option => option && option.type === 'select')
@@ -383,10 +508,40 @@ export function resolveAcpSessionControls(info) {
   };
 }
 
+// ACP elicitation 提交内容构造：answerKey / otherAnswerKey 是 requestedSchema 的 property key，
+// 后端仅校验非空，constructor/toString/__proto__ 是合法输入。普通 {} 会让这些键命中
+// Object.prototype（尤其 __proto__ 赋值触发 setter，字段在 JSON 序列化时静默丢失）；
+// 统一用无原型对象构造，确保 payload 保留全部字段。
+export function buildElicitationContent(groups) {
+  const content = Object.create(null);
+  for (const group of groups) {
+    const custom = group.answers.find(answer => answer.other);
+    if (custom && group.otherAnswerKey) {
+      content[group.otherAnswerKey] = custom.value;
+    } else if (group.multiSelect) {
+      content[group.answerKey] = group.answers.map(answer => answer.value);
+    } else if (group.answers[0]) {
+      content[group.answerKey] = group.answers[0].value;
+    }
+  }
+  return content;
+}
+
 export {
   commandExecutionDetails,
   contentText,
   mergeTool,
-  stripTerminalControlSequences,
   toolItemType,
 };
+
+/**
+ * Not used inside this file; only re-exported for consumers.
+ * tests/codex_acp_timeline.test.mjs copies this file to a temp directory and
+ * dynamically imports the re-export via a computed URL; knip cannot build an
+ * edge for that channel, so the `@public` tag keeps it from being removed as a
+ * dead export.
+ * @public
+ */
+export {
+  stripTerminalControlSequences,
+} from '../conversation/conversation-model.js';

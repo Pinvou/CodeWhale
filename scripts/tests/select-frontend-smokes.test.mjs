@@ -66,6 +66,7 @@ test("account platform changes select its production browser smokes", () => {
       "node:tests/admin_roles_ui_smoke.mjs",
       "npm:test:admin-finance-overview-ui",
       "npm:test:admin-token-resources-ui",
+      "npm:test:admin-model-actions-ui",
       "npm:test:admin-model-operations-ui",
       "npm:test:admin-model-detail-ui",
       "npm:test:admin-model-pricing-ui",
@@ -75,10 +76,32 @@ test("account platform changes select its production browser smokes", () => {
   );
 });
 
+test("knowledge changes select the desktop knowledge smoke", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes(["pinvou3-app/src/features/knowledge/KnowledgeBaseView.jsx"])),
+    ["npm:test:ui-smoke", "npm:test:kb-smoke"],
+  );
+});
+
+test("Linux knowledge host package resources run the full suite", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes([
+      "pinvou3-app/src-tauri/resources/platforms/linux/knowledge-host/pinvou-knowledge-host-helper",
+    ])),
+    fullLabels,
+  );
+});
 test("relay changes select the web UI smoke", () => {
   assert.deepEqual(
     labels(selectFrontendSmokes(["remote-control-relay/server.js"])),
     ["npm:test:ui-smoke", "npm:test:webui"],
+  );
+});
+
+test("team relay changes select its action smoke", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes(["pinvou3-app/src/features/team-relay/TeamRelayView.jsx"])),
+    ["npm:test:ui-smoke", "npm:test:team-relay-ui"],
   );
 });
 

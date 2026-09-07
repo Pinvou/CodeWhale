@@ -5,7 +5,10 @@
 ```text
 config/
 └─ platforms/
-   ├─ linux/tauri.conf.json
+   ├─ linux/
+   │  ├─ tauri.conf.json
+   │  ├─ x86_64/tauri.conf.json
+   │  └─ aarch64/tauri.conf.json
    ├─ macos/tauri.conf.json
    └─ windows/
       ├─ tauri.conf.json
@@ -14,10 +17,12 @@ config/
 ```
 
 - `tauri.conf.json`：对应平台的安装包目标、资源映射和安装器参数；macOS 额外把主窗口覆盖为原生顶栏（`decorations: true` + `titleBarStyle: "Overlay"` + `hiddenTitle`，系统红绿灯替代前端自绘三键）。
+- Linux 的架构 overlay 把统一入口从固定 SenseVoice.cpp commit 构建到
+  `target/linux-asr-runtime/<arch>/` 的当前架构 ELF 映射到 `runtime/asr/`；源码树不存放预编译 ELF。
 - `signing.*.conf.json`：发布签名 overlay，仅由对应发布流程显式加载。
 - `runtime/*.lock.json`：锁定 Windows 独立 runtime 的 submodule commit、manifest、VC++ 最低版本和目标架构；实际资源映射由 staging 后生成的 overlay 提供，不存放制品本身。
 
-`--config` overlay 按 JSON Merge Patch 合并：对象合并、**数组整体替换**。因此 macOS overlay 中的
+`--config` overlay 按 JSON Merge Patch 合并：对象合并、**数组整体替换**。
 macOS overlay 中的 `app.windows` 是基础配置主窗口定义的完整拷贝，改动基础配置 `app.windows` 字段时必须同步。Linux 的隐藏启动 overlay 由 `scripts/tauri/startup-window-config.js` 从基础配置动态生成，开发和 packaging 共用，不重复维护窗口宽高等字段。
 
 `scripts/tauri/build.js` 根据当前操作系统在 **build / bundle** 时加载 `platforms/<os>/tauri.conf.json`

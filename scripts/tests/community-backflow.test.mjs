@@ -52,7 +52,7 @@ test("缺少环境 Token 时不再隐式选择个人 GCM 账号", () => {
   }
 });
 
-test("GitHub API 对临时 5xx 自动重试", { concurrency: false }, async () => {
+test("GitHub API 只读请求对临时 5xx 自动重试", { concurrency: false }, async () => {
   const originalFetch = globalThis.fetch;
   const originalDelay = process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS;
   let attempts = 0;
@@ -70,6 +70,27 @@ test("GitHub API 对临时 5xx 自动重试", { concurrency: false }, async () =
     globalThis.fetch = originalFetch;
     if (originalDelay === undefined) delete process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS;
     else process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS = originalDelay;
+  }
+});
+
+test("GitHub API 写请求遇到模糊网络结果时统一禁止盲重试", { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  const attempts = new Map();
+  globalThis.fetch = async (_url, options) => {
+    const method = options.method;
+    attempts.set(method, (attempts.get(method) || 0) + 1);
+    throw new TypeError("socket closed after request body was sent");
+  };
+  try {
+    for (const method of ["POST", "PATCH", "DELETE"]) {
+      await assert.rejects(
+        githubRequest("test-token", method, "/test", { value: 1 }),
+        /网络结果不明确.*避免重复写入不会自动重试/u,
+      );
+      assert.equal(attempts.get(method), 1, `${method} 不得透明重试`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });
 

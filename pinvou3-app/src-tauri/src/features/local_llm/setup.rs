@@ -313,11 +313,8 @@ fn starting_is_stale(snapshot: &RuntimeSnapshot) -> bool {
 }
 
 fn classify_runtime_state(snapshot: &RuntimeSnapshot) -> LocalVllmEngineState {
-    match snapshot.container_status.as_deref() {
-        Some("exited" | "dead" | "removing" | "paused") => {
-            return LocalVllmEngineState::Failed;
-        }
-        _ => {}
+    if let Some("exited" | "dead" | "removing" | "paused") = snapshot.container_status.as_deref() {
+        return LocalVllmEngineState::Failed;
     }
 
     if snapshot.service_active.as_deref() == Some("failed")
@@ -564,14 +561,18 @@ pub async fn bootstrap_local_vllm(app: tauri::AppHandle) -> Result<BootstrapResu
     prefs.upsert_model(SavedModel {
         id: BOOTSTRAP_MODEL_ID.to_string(),
         name: "本地大模型".to_string(),
+        alias: None,
         preset: ModelPreset::LocalVllm,
         context_window_tokens: None,
         max_output_tokens: None,
+        reasoning_effort: None,
         model: model.clone(),
         base_url: base_url.clone(),
         provider_kind: Some(crate::platform::prefs::MODEL_PROVIDER_KIND_CUSTOM.to_string()),
         vendor: None,
         endpoint_mode: None,
+        image_capability_override: Default::default(),
+        vision_model_id: None,
         api_key: String::new(),
         // 本地 vLLM 无 key,凭证字段同 prefs.rs 内置模型的无 key 缺省
         credential_ref: None,

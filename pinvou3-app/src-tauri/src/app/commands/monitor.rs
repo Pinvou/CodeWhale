@@ -68,7 +68,7 @@ pub async fn discover_local_vllm(
         // 按框架选探测方式：Ollama / LM Studio 的列表接口返回全部已下载模型，
         // 需用各自原生接口区分已加载；vLLM 等 served 即已加载。
         let probe = match local_port_of(&base_url) {
-            Some(11434) => crate::core::model_endpoint::probe_ollama_models(&base_url).await,
+            Some(11434) => crate::core::model_endpoint::probe_ollama_models(&base_url, None).await,
             Some(1234) => crate::core::model_endpoint::probe_lmstudio_models(&base_url).await,
             _ => crate::core::model_endpoint::probe_openai_models(&base_url)
                 .await
@@ -148,7 +148,7 @@ fn local_model_provider_for_url(base_url: &str) -> (&'static str, &'static str) 
     match local_port_of(base_url) {
         Some(11434) => ("ollama", "Ollama"),
         Some(1234) => ("lm_studio", "LM Studio"),
-        Some(8000 | 8001 | 8002) => ("vllm", "vLLM"),
+        Some(8000..=8002) => ("vllm", "vLLM"),
         _ => ("openai_compatible", "OpenAI Compatible"),
     }
 }

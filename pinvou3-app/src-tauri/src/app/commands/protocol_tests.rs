@@ -54,7 +54,6 @@ command_protocol!(
         "read_artifact_text",
         "write_artifact_text",
         "list_deliverable_index",
-        "list_deliverables",
         "artifact_info",
         "read_artifact_image_b64",
         "read_artifact_thumbnail",
@@ -76,23 +75,49 @@ command_protocol!(
     [
         "account_platform_session",
         "account_platform_open_portal",
+        "account_platform_reset_password",
+        "account_platform_login",
+        "account_platform_send_sms",
+        "account_platform_create_slider_captcha",
+        "account_platform_precheck_mobile_registration",
+        "account_platform_register_mobile",
+        "account_platform_registration_status",
+        "account_platform_login_sms",
+        "account_platform_logout",
+        "account_platform_request",
+        "account_platform_model_catalog",
         "account_platform_select_catalog_model",
         "account_platform_select_session_model",
-        "account_platform_model_catalog",
-        "account_platform_branch_replacement_session",
-        "account_platform_login",
-        "account_platform_reset_password",
-        "account_platform_logout",
-        "account_platform_request"
+        "account_platform_branch_replacement_session"
     ]
 );
-command_protocol!(chat_protocol, "chat.rs", ["chat"]);
+command_protocol!(
+    assistant_response_protocol,
+    "assistant_response.rs",
+    ["export_assistant_response", "open_assistant_share_target"]
+);
+command_protocol!(
+    behavior_telemetry_protocol,
+    "behavior_telemetry.rs",
+    [
+        "get_behavior_telemetry_status",
+        "set_behavior_telemetry_enabled",
+        "track_behavior_event",
+    ]
+);
+command_protocol!(
+    chat_protocol,
+    "chat.rs",
+    ["chat", "steer_chat", "withdraw_steer"]
+);
 command_protocol!(
     connectors_protocol,
     "connectors.rs",
     [
         "set_disabled_connectors",
         "get_disabled_connectors",
+        "set_bundle_visibility",
+        "get_bundle_visibility",
         "set_disabled_skills",
         "get_disabled_skills",
         "set_project_skills_enabled",
@@ -153,6 +178,9 @@ command_protocol!(
     "files.rs",
     [
         "ingest_file",
+        "ingest_draft_file_chunk",
+        "cancel_draft_file_upload",
+        "adopt_draft_attachment",
         "ingest_dropped_file_chunk",
         "cancel_dropped_file_upload",
         "discard_dropped_attachment",
@@ -172,6 +200,8 @@ command_protocol!(
         "get_mode_state",
         "get_code_permission_prefs",
         "confirm_code_yolo",
+        "get_mode_defaults",
+        "set_mode_default",
         "set_plan_mode_next",
         "exit_plan_to_yolo",
         "set_multi_agent_mode",
@@ -181,7 +211,6 @@ command_protocol!(
         "read_skill_body",
         "discard_plan",
         "submit_user_input",
-        "add_run_materials",
         "cancel_user_input",
         "get_pending_user_inputs",
         "restart_engine",
@@ -247,10 +276,38 @@ command_protocol!(
         "uninstall_marketplace_tool",
         "list_marketplace_skills",
         "install_marketplace_skill",
+        "update_marketplace_skill",
+        "update_bundle_display_meta",
         "import_skill_package",
-        "uninstall_marketplace_skill"
+        "import_plugin_package_cmd",
+        "import_plugin_package_bytes_cmd",
+        "import_skill_md_bytes",
+        "import_skill_package_bytes",
+        "uninstall_marketplace_skill",
+        "list_recycled_plugins",
+        "restore_recycled_plugin",
+        "purge_recycled_plugin",
+        "export_recycled_plugin",
+        "export_installed_plugin",
+        "bundle_readiness",
+        "export_plugin_spec"
     ]
 );
+
+#[test]
+fn marketplace_uninstall_protocol_keeps_blocking_work_off_async_runtime() {
+    let source = include_str!("marketplace.rs");
+    let start = source
+        .find("pub async fn uninstall_marketplace_tool(")
+        .expect("uninstall command");
+    let end = source[start..]
+        .find("pub(super) fn uninstall_marketplace_tool_sync(")
+        .map(|offset| start + offset)
+        .expect("uninstall sync boundary");
+    let command = &source[start..end];
+    assert!(command.contains("tauri::async_runtime::spawn_blocking"));
+    assert!(command.contains("uninstall_marketplace_tool_sync(&uninstall_tool_id)"));
+}
 command_protocol!(
     memory_protocol,
     "memory.rs",
@@ -349,8 +406,11 @@ command_protocol!(
         "web_access_rpc_respond",
         "web_access_publish_event",
         "web_access_list_host_files",
+        "web_access_list_sessions",
+        "web_access_list_archived_sessions",
         "web_access_create_session",
         "web_access_load_session_chunk",
+        "web_access_cancel_session_download",
         "web_access_ingest_file",
         "web_access_upload_attachment_chunk",
         "web_access_abort_attachment_upload",
@@ -358,16 +418,31 @@ command_protocol!(
         "web_access_read_conversation_attachment_chunk",
         "web_access_create_session_and_chat",
         "web_access_chat",
+        "web_access_create_codex_acp_session",
+        "web_access_list_codex_workspace",
+        "web_access_search_codex_workspace",
+        "web_access_preview_codex_workspace_file",
+        "web_access_get_codex_workspace_changes",
+        "web_access_get_codex_workspace_diff",
+        "web_access_cancel_codex_acp",
+        "web_access_codex_acp_prompt",
+        "web_access_get_codex_acp_timeline",
+        "web_access_get_codex_acp_session_info",
+        "web_access_set_codex_acp_model",
+        "web_access_set_codex_acp_mode",
+        "web_access_set_codex_acp_config_option",
+        "web_access_get_codex_acp_pending_permissions",
+        "web_access_respond_codex_acp_permission",
+        "web_access_get_codex_acp_pending_elicitations",
+        "web_access_respond_codex_acp_elicitation",
+        "web_access_list_codex_acp_sessions",
+        "web_access_list_acp_agents",
+        "web_access_get_acp_agent_status",
         "web_access_save_session_messages_chunk",
         "web_access_transcribe_voice_audio",
-        "web_access_start_skill_session",
+        "web_access_track_behavior_event",
         "web_access_read_artifact_chunk",
         "web_access_update_settings",
-        "web_access_list_deliverables",
-        "web_access_get_role_prompt",
-        "web_access_get_role_outputs",
-        "web_access_get_role_logs",
-        "web_access_get_gate_report",
         "web_access_artifact_info",
         "web_access_read_artifact_text",
         "web_access_write_artifact_text",
@@ -413,6 +488,8 @@ command_protocol!(
         "save_session_artifacts",
         "save_session_pinvou_scene_events",
         "get_session_pinvou_scene_events",
+        "save_session_steered_messages",
+        "get_session_steered_messages",
         "list_workspace_files"
     ]
 );
@@ -424,6 +501,7 @@ command_protocol!(
         "submit_feedback",
         "get_effective_model_config",
         "list_models",
+        "probe_local_server_kind",
         "reveal_model_api_key",
         "save_model",
         "delete_model",
@@ -431,8 +509,10 @@ command_protocol!(
         "set_session_model",
         "get_session_model_id",
         "get_session_model_ref",
+        "get_image_input_capability",
         "test_search_provider",
         "test_model_connection",
+        "test_image_input_capability",
         "update_settings",
         "update_search_settings",
         "save_settings_and_restart",
@@ -461,6 +541,9 @@ command_protocol!(
         "team_relay_create_first_team",
         "team_relay_bootstrap",
         "team_relay_update_profile",
+        "team_relay_upload_avatar",
+        "team_relay_remove_avatar",
+        "team_relay_avatar_data_url",
         "team_relay_create_team",
         "team_relay_join_team",
         "team_relay_switch_team",
@@ -470,9 +553,13 @@ command_protocol!(
         "team_relay_set_join_password_visibility",
         "team_relay_disable_join_password",
         "team_relay_remove_member",
+        "team_relay_transfer_owner",
+        "team_relay_leave_team",
+        "team_relay_dissolve_team",
         "team_relay_create_thread",
         "team_relay_create_action",
         "team_relay_set_thread_preference",
+        "team_relay_mark_thread_read",
         "team_relay_upload_attachment",
         "team_relay_download_attachment",
         "team_relay_task_workspace_status",
@@ -504,34 +591,6 @@ command_protocol!(
         "voice_asr_status",
         "install_voice_asr",
         "cancel_voice_asr"
-    ]
-);
-command_protocol!(
-    workflows_protocol,
-    "workflows.rs",
-    [
-        "list_skills_v2",
-        "read_skill_demo",
-        "start_skill_session",
-        "start_workflow",
-        "kick_workflow",
-        "retry_workflow_role",
-        "get_role_prompt",
-        "get_role_outputs",
-        "get_role_logs",
-        "get_gate_report",
-        "save_project_config",
-        "save_agent_overrides",
-        "cancel_workflow_role",
-        "stop_workflow",
-        "approve_workflow_gate",
-        "reject_workflow_gate",
-        "get_workflow_state",
-        "find_resumable_run",
-        "list_workflows",
-        "unbind_session_skill",
-        "get_session_active_skill",
-        "list_session_skill_bindings"
     ]
 );
 // 多智能体（会话内主动委派，ADR-0006）。独立入口/台账/审批命令已随收缩

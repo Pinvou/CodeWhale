@@ -7,7 +7,7 @@ use crate::features::account_platform::{
 };
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::sessions::SessionStore;
-use crate::platform::prefs::{ModelSelectionRef, UserPrefs, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID};
+use crate::platform::prefs::{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, ModelSelectionRef, UserPrefs};
 
 #[tauri::command]
 pub async fn account_platform_session(
@@ -345,27 +345,35 @@ mod tests {
 
     #[test]
     fn catalog_selection_obeys_new_session_cutoff_and_context_eligibility() {
-        assert!(ensure_new_session_model_selectable(&serde_json::json!({
-            "lifecycle_status":"PUBLISHED", "context_eligible":true
-        }))
-        .is_ok());
-        assert!(ensure_new_session_model_selectable(&serde_json::json!({
-            "lifecycle_status":"PUBLISHED", "context_eligible":false,
-            "eligibility_reason":"ORGANIZATION_MODEL_DENIED"
-        }))
-        .is_err());
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"PUBLISHED", "context_eligible":true
+            }))
+            .is_ok()
+        );
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"PUBLISHED", "context_eligible":false,
+                "eligibility_reason":"ORGANIZATION_MODEL_DENIED"
+            }))
+            .is_err()
+        );
         assert!(ensure_new_session_model_selectable(&serde_json::json!({
             "lifecycle_status":"DEPRECATED", "context_eligible":true,
             "new_session_cutoff_at":(chrono::Utc::now()+chrono::Duration::minutes(5)).to_rfc3339()
         }))
         .is_ok());
-        assert!(ensure_new_session_model_selectable(&serde_json::json!({
-            "lifecycle_status":"DEPRECATED", "context_eligible":true
-        }))
-        .is_err());
-        assert!(ensure_new_session_model_selectable(&serde_json::json!({
-            "lifecycle_status":"REMOVED", "context_eligible":true
-        }))
-        .is_err());
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"DEPRECATED", "context_eligible":true
+            }))
+            .is_err()
+        );
+        assert!(
+            ensure_new_session_model_selectable(&serde_json::json!({
+                "lifecycle_status":"REMOVED", "context_eligible":true
+            }))
+            .is_err()
+        );
     }
 }

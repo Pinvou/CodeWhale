@@ -33,6 +33,10 @@ test("remote-test deploy builds and uploads the shared WebUI dist", () => {
   assert.match(source, /grep -Fq "\$BASE_PATH\/" "\$RELAY_DIR\/web\/dist\/index\.html"/);
   assert.match(source, /test -f "\$RELAY_DIR\/web\/dist\/platform\/tauri\/bridge\.js"/);
   assert.match(source, /package-lock\.json web\/dist web\/stats\.html/);
+  assert.match(source, /behavior-telemetry-schema\.js/);
+  assert.match(source, /docs\/schemas\/behavior-telemetry-v1\.schema\.json/);
+  assert.match(source, /docs\/schemas\/behavior-telemetry-registries\.json/);
+  assert.match(source, /await import\('\.\/telemetry-service\.js'\)/);
 });
 
 test("remote-test tunnel account is restricted to the registered remote forward", () => {

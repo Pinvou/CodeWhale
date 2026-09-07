@@ -1,85 +1,19 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { AppWindow, Award, Briefcase, Check, ChevronLeft, ChevronRight, Cpu, Feather, Globe, Palette, Plus, Radio, Sparkles, Terminal, TrendingUp, User, X } from '../../components/icons.jsx';
-import { IosSearchField, IosSegmentedControl } from '../../components/IosControls.jsx';
+import { ChevronLeft, ChevronRight, Plus, Sparkles, User, X } from '../../components/icons.jsx';
+import { IosSearchField } from '../../components/IosControls.jsx';
 import { bridge } from '../../hooks/useBridge.js';
-import { EXPERT_AVATAR_COUNT as AVATAR_N, expertAvatarSrc as avatarSrc } from '../../shared/expert-avatar.mjs';
-import { ExpertTeamsPanel } from '../workflow/WorkflowView.jsx';
-
-const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', finance:'金融', 'game-development':'游戏', hr:'人力', legal:'法务', marketing:'营销', 'paid-media':'投放', product:'产品', 'project-management':'项管', sales:'销售', 'spatial-computing':'空间计算', specialized:'专项', 'supply-chain':'供应链', support:'客服', testing:'测试', tool:'工具' };
-    // 部门标签按当前 UI 语言取词(t.depts),DEPT_LABELS(中文)兜底
-    function deptLabelFor(t, k) { return (t && t.depts && t.depts[k]) || DEPT_LABELS[k] || k; }
-    // 内置卡名称/简介按 UI 语言显示(personas-i18n.js overlay,按 id 查),中文兜底;自制卡不翻
-    function personaText(c, t) {
-      const L = t && t.langTag;
-      if (!c || !L || L === 'zh' || c.source === 'user') return c || {};
-      const overlays = window.PERSONA_I18N;
-      const tr = (overlays && overlays[c.id] && overlays[c.id][L]) || null;
-      if (!tr) return c;
-      return { ...c, name: tr.name || c.name, description: tr.description || c.description };
-    }
-    const DEPT_ORDER = ['engineering','marketing','specialized','design','product','finance','sales','testing','project-management','paid-media','support','academic','game-development','spatial-computing','supply-chain','hr','legal','tool'];
-    const ALL_DEPT = '__all__'; // 分类「全部」哨兵(语言中立,显示走 t.cpAll)
-    const DEPT_COLOR = { academic:'#8B5CF6', design:'#EC4899', engineering:'#06B6D4', finance:'#10B981', 'game-development':'#F59E0B', hr:'#F472B6', legal:'#6B7280', marketing:'#F97316', 'paid-media':'#EF4444', product:'#7C3AED', 'project-management':'#3B82F6', sales:'#14B8A6', 'spatial-computing':'#6366F1', specialized:'#64748B', 'supply-chain':'#84CC16', support:'#22D3EE', testing:'#A855F7', tool:'#7C3AED' };
-    // 可在编辑器下拉选的部门(排除 tool —— 那是内置工具卡专用)
-    const DEPT_OPTIONS = DEPT_ORDER.filter(function(d){ return d !== 'tool'; });
-    const deptColor = (d) => DEPT_COLOR[d] || '#9aa0a6';
-    // 本地内置头像(50 张 Micah,src/avatars/),按卡 id 哈希固定分配
-    // 头像加载失败时按部门降级到本地图标
-    const DEPT_ICON = { engineering: Terminal, design: Palette, product: AppWindow, marketing: TrendingUp, finance: Briefcase, sales: TrendingUp, testing: Cpu, 'project-management': Briefcase, 'paid-media': Radio, support: User, academic: Award, 'game-development': Cpu, 'spatial-computing': Globe, 'supply-chain': Briefcase, hr: User, legal: Award, specialized: Feather, tool: Cpu };
-    // App Store 风头像块:本地头像图,失败降级图标(绝不显示文字)
-    const AppIcon = ({ card, cls = 'w-14 h-14 rounded-[14px]', fb = 26 }) => {
-      const [err, setErr] = useState(false);
-      const Fallback = DEPT_ICON[(card && card.dept)] || User;
-      return (
-        <div className={cls + ' shrink-0 overflow-hidden flex items-center justify-center bg-[#F2F2F7] dark:bg-[#2C2C2E]'}>
-          {!err
-            ? <img src={avatarSrc(card && (card.id || card.name))} alt="" className="w-full h-full object-cover" onError={() => setErr(true)} />
-            : <Fallback size={fb} style={{ color: '#8E8E93' }} strokeWidth={1.5} />}
-        </div>
-      );
-    };
-    const CLAMP3 = { display:'-webkit-box', WebkitLineClamp:3, WebkitBoxOrient:'vertical', overflow:'hidden' };
-    const CLAMP2 = { display:'-webkit-box', WebkitLineClamp:2, WebkitBoxOrient:'vertical', overflow:'hidden' };
-
-    // 聊天室左上角的专家面具挂件(工牌)。常驻:有对话就挂。
-    //   未加持 → 占位卡"＋ 加持专家", 整卡点击打开专家池(入口)。
-    //   已加持 → 显专家, 点卡片主体=换专家, 点 ✕=摘下。
-    const Lanyard = ({ persona, isDark, onRemove, onOpenPicker, t }) => {
-      // 没加持任何专家 → 整个挂件不显示
-      if (!persona) return null;
-      const cd = personaText(persona, t);
-      return (
-        <div className="absolute top-0 left-6 z-[15]" style={{ width:150, fontFamily:'-apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", sans-serif' }}>
-          <div className="flex flex-col items-center">
-            {/* 挂绳 + 扣环 */}
-            {/* isDark dynamic-value: 保留 (linear-gradient 无法纯 className 化) */}
-            <div style={{ width:2, height:52, background: isDark?'linear-gradient(#3a3a3c,#5a5a5e)':'linear-gradient(#d1d1d6,#aeaeb2)' }}></div>
-            <div className="w-2.5 h-2.5 rounded-full -mt-1 mb-2 bg-[#e8e8ed] dark:bg-[#1c1c1e] border-2 border-[#c7c7cc] dark:border-[#48484a]"></div>
-            {/* 卡片 */}
-            <div onClick={onOpenPicker} title={t.cpLanyardSwap}
-              className="relative rounded-[14px] p-3 w-[150px] cursor-pointer transition-transform hover:-translate-y-0.5 bg-[#fff] dark:bg-[#1C1C1E] border border-[rgba(0,0,0,.06)] dark:border-[#2c2c2e]"
-              style={{ boxShadow:'0 8px 24px -8px rgba(0,0,0,.3)' }}>
-              <button onClick={(e)=>{ e.stopPropagation(); onRemove(); }} title={t.cpLanyardRemove}
-                className="absolute -top-2 -right-2 w-5 h-5 rounded-full flex items-center justify-center text-[11px] leading-none bg-[#fff] dark:bg-[#2C2C2E] border border-[rgba(0,0,0,.1)] dark:border-[#48484a]"
-                style={{ color:'#8E8E93', boxShadow:'0 2px 6px rgba(0,0,0,.15)' }}>✕</button>
-              <div className="flex flex-col items-center text-center gap-2">
-                <AppIcon card={persona} cls="w-12 h-12 rounded-[14px]" fb={22} />
-                <div className="w-full min-w-0">
-                  <div className="text-[13px] font-semibold leading-tight truncate text-[#000] dark:text-[#fff]">{cd.name}</div>
-                  <div className="text-[11px] mt-0.5 truncate text-[rgba(60,60,67,.6)] dark:text-[rgba(235,235,245,.6)]">{deptLabelFor(t, persona.dept)}</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    };
+import { getSyntaxHighlightVersion, subscribeSyntaxHighlight } from '../../shared/syntax-highlighter.js';
+import { deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_OPTIONS, deptColor, AppIcon } from './persona-shared.jsx';
 
     // 双击卡片打开的详情 modal —— FLIP 转场 + 拉取并展示完整人设正文(body)。
+    // 唯一消费方是本文件,留在卡池 chunk;不进 persona-shared(主 chunk 常驻,
+    // 会把弹层 + bridge.rendering 依赖一并拖进主 chunk)。
     const PersonaDetailModal = ({ card, originRect, equipped, onClose, onEquip, t }) => {
       const panelRef = useRef(null);
       const [body, setBody] = useState(null); // null=loading
+      // 懒语言注册完成后 bump 版本号:人设正文是一次性 innerHTML,重算恢复高亮。
+      const syntaxVersion = useSyncExternalStore(subscribeSyntaxHighlight, getSyntaxHighlightVersion);
       useEffect(() => {
         const panel = panelRef.current;
         if (panel && originRect) {
@@ -119,7 +53,7 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
               <p className="text-[12px] uppercase mb-2" style={{ color:'#8E8E93' }}>{t.cpFullBody}</p>
               {body===null
                 ? <div className="text-[14px] py-8 text-center" style={{ color:'#8E8E93' }}>{t.cpBodyLoading}</div>
-                : <div className="persona-body text-[14px] leading-relaxed light-code dark-code text-[#1C1C1E] dark:text-[#C7C7CC]" dangerouslySetInnerHTML={{ __html: bridge.rendering.renderMarkdown ? bridge.rendering.renderMarkdown(body) : body }} />}
+                : <div key={`syntax-${syntaxVersion}`} className="persona-body text-[14px] leading-relaxed light-code dark-code text-[#1C1C1E] dark:text-[#C7C7CC]" dangerouslySetInnerHTML={{ __html: bridge.rendering.renderMarkdown ? bridge.rendering.renderMarkdown(body) : body }} />}
             </div>
             {/* 加持/取消 */}
             <div className="p-4 shrink-0 border-t border-[rgba(198,198,200,.5)] dark:border-[#38383A]">
@@ -255,7 +189,7 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
           <div className="bnr-avatars relative z-0 flex-1 flex items-center justify-evenly" style={{ paddingRight:16 }}>
             {avs.map((a,i) => (
               <div key={i} className="flex flex-col items-center shrink-0" style={{ background:'#fff', borderRadius:18, padding:'14px 14px 11px', boxShadow:'0 10px 26px rgba(83,74,183,.22)', animation:`bnrFloat${(i%3)+1} ${(3.2+i*0.25).toFixed(2)}s ease-in-out infinite ${(i*0.3).toFixed(1)}s` }}>
-                <img src={a.src} width={80} height={80} alt="" style={{ borderRadius:14, display:'block' }} />
+                <img src={a.src} width={80} height={80} alt="" loading="lazy" decoding="async" style={{ borderRadius:14, display:'block' }} />
                 <div style={{ fontSize:13, fontWeight:600, color:'#26215C', marginTop:6, lineHeight:1.15, whiteSpace:'nowrap' }}>{a.name}</div>
                 <div style={{ fontSize:11, color:'#534AB7', opacity:.7, lineHeight:1.15, whiteSpace:'nowrap' }}>{a.role}</div>
               </div>
@@ -267,7 +201,7 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
     const CardPoolView = ({ theme, t, bs, onEquipped, onAICreate, initialMyOnly }) => {
       const isDark = theme === 'dark';
       const pool = (bs && bs.personaPool) || { loadState: 'idle' };
-      // 201 张卡走模块级缓存(不进 notify 快照),loadState 变化驱动重渲染。
+      // 268 张卡走模块级缓存(不进 notify 快照),loadState 变化驱动重渲染。
       const list = (bridge.available && bridge.personas.getPersonas) ? bridge.personas.getPersonas() : [];
       const active = (bs && bs.activePersona) || null;
       // 加持目标 = 当前对话(equipPersona 注入到 state.activeSessionId)。让用户始终知道注入到哪。
@@ -282,7 +216,6 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
       const [chooser, setChooser] = useState(false); // 造卡方式选择(AI/手动)
       const [myOnly, setMyOnly] = useState(!!initialMyOnly); // 「我的卡牌」facet(从存入确认窗"去查看"进来则默认开)
       const [confirmDelId, setConfirmDelId] = useState(null); // 卡上删除二次确认
-      const [activeTab, setActiveTab] = useState('individual');
 
       useEffect(() => { if (bridge.available) bridge.personas.loadPersonas(); }, []);
       useEffect(() => { setVisible(60); }, [query, activeDept, myOnly]);
@@ -336,42 +269,28 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
           <div className="relative z-10 flex-1 min-h-0 overflow-y-auto p-4 custom-scrollbar sm:p-6 lg:p-10">
             <div className="max-w-[1400px] mx-auto">
 
-              {/* 顶部: iOS Tab + 操作 */}
+              {/* 顶部操作 */}
               <div className="border-b border-slate-200/50 dark:border-white/10">
                 <div className="flex flex-col gap-3 pb-6 lg:flex-row lg:items-center lg:justify-between">
-                  <IosSegmentedControl
-                    value={activeTab}
-                    onChange={setActiveTab}
-                    isDark={isDark}
-                    segments={[
-                      { key: 'individual', label: t.expertPoolIndividualTab },
-                      { key: 'team', label: t.expertPoolTeamTab },
-                    ]}
-                  />
                   <div className="flex min-w-0 flex-col gap-3 overflow-hidden lg:ml-8 lg:flex-1 lg:flex-row lg:items-center lg:justify-end">
-                    {activeTab === 'individual' ? (
-                      <IosSearchField
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder={t.cpSearchPh}
-                        isDark={isDark}
-                        compact
-                        className="w-full min-w-0 lg:max-w-[360px] lg:flex-1"
-                      />
-                    ) : null}
+                    <IosSearchField
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder={t.cpSearchPh}
+                      isDark={isDark}
+                      compact
+                      className="w-full min-w-0 lg:max-w-[360px] lg:flex-1"
+                    />
                     <div className="flex shrink-0 items-center justify-end gap-3">
                       <button
                         data-testid="my-personas-toggle"
                         data-active={myOnly ? 'true' : 'false'}
-                        onClick={() => {
-                          setActiveTab('individual');
-                          setMyOnly(activeTab === 'individual' ? !myOnly : true);
-                        }}
+                        onClick={() => setMyOnly(!myOnly)}
                         className="inline-flex h-9 items-center rounded-full px-4 text-[13px] font-semibold shadow-sm transition-colors whitespace-nowrap bg-[#E9E9EB] dark:bg-[#2C2C2E] text-[#1D1D1F] dark:text-white hover:bg-[#DADADD] dark:hover:bg-[#3A3A3C]">
                         <User size={14} className="mr-2 opacity-70" />
                         {t.cpMyCards}
                       </button>
-                      <button onClick={() => { setActiveTab('individual'); setChooser(true); }} title={t.cpNewCardTitle}
+                      <button onClick={() => setChooser(true)} title={t.cpNewCardTitle}
                         className="inline-flex h-9 items-center rounded-full bg-[#007AFF] px-4 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[#0066D6]">
                         <Plus size={14} className="mr-2" />
                         {t.cpNewCard}
@@ -381,8 +300,7 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
                 </div>
               </div>
 
-              {activeTab === 'individual' ? (
-                <>
+              <>
                 {/* AI 造卡推广 banner(搜索框下方,一直显示) */}
                 <div className="pt-3 pb-4">
                   <AICardBanner onStart={onAICreate} isDark={isDark} t={t} />
@@ -444,12 +362,7 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
                     </div>
                   ) : null}
                 </div>
-                </>
-              ) : (
-                <div className="min-h-[520px]">
-                  <ExpertTeamsPanel bs={bs} theme={theme} t={t} />
-                </div>
-              )}
+              </>
 
             </div>
           </div>
@@ -519,4 +432,4 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
     // Shared Components
     // ==========================================
 
-export { DEPT_LABELS, deptLabelFor, personaText, DEPT_ORDER, ALL_DEPT, DEPT_COLOR, DEPT_OPTIONS, deptColor, AVATAR_N, avatarSrc, DEPT_ICON, AppIcon, CLAMP3, CLAMP2, Lanyard, PersonaDetailModal, PersonaEditorModal, AICardBanner, CardPoolView };
+export { PersonaEditorModal, AICardBanner, CardPoolView };

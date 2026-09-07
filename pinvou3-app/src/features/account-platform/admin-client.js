@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 import { mergeObservedVersions } from './authorization-ui.js';
 
 const ADMIN_BILLING_LIMITS = new Set(['25', '50', '100', '200']);
@@ -182,7 +183,7 @@ export class AdminPlatformClient {
     return this.request('account', '/admin/v1/account-closure-requests', signal);
   }
   retryAccountClosure(closureRequestID, reason) {
-    return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(closureRequestID)}/actions/retry`, 'POST', { reason }, `account-closure-retry-${crypto.randomUUID()}`);
+    return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(closureRequestID)}/actions/retry`, 'POST', { reason }, `account-closure-retry-${secureRequestID()}`);
   }
   registrationRepairs(filters = {}, signal) {
     const query = new URLSearchParams({ limit: '100' });
@@ -279,7 +280,7 @@ export class AdminPlatformClient {
       filter,
       reason,
       include_pii: includePII,
-      idempotency_key: `audit-export-${crypto.randomUUID()}`,
+      idempotency_key: `audit-export-${secureRequestID()}`,
     });
   }
   auditExport(exportID, signal) {
@@ -466,7 +467,7 @@ export class AdminPlatformClient {
     const query = billingCollectionQuery(filters, { keys: ['status', 'severity', 'owner_id', 'case_type'], dateTimeKeys: ['created_from', 'created_to'] });
     return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?${query}`, signal);
   }
-  updateReconciliationCase(caseID, command, idempotencyKey = `reconciliation-case-${crypto.randomUUID()}`) {
+  updateReconciliationCase(caseID, command, idempotencyKey = `reconciliation-case-${secureRequestID()}`) {
     return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, idempotencyKey);
   }
   latePaymentReviews(filters = {}, signal) {
@@ -502,7 +503,7 @@ export class AdminPlatformClient {
     return this.request('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}`, signal);
   }
   claimPaymentAnomaly(caseID) {
-    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/claim`, 'POST', {}, `payment-anomaly-claim-${crypto.randomUUID()}`);
+    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/claim`, 'POST', {}, `payment-anomaly-claim-${secureRequestID()}`);
   }
   resolvePaymentAnomaly(caseID, resolution, reason, idempotencyKey) {
     return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, idempotencyKey);

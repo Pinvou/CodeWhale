@@ -1,8 +1,9 @@
 #!/usr/bin/env node
+/* eslint-disable no-promise-executor-return -- Browser-side waits adapt timer and animation callback APIs whose handles are intentionally ignored. */
 /**
  * pinvou3 前端 UI 冒烟回归测试 — headless chromium + mock TauriBridge,加载真 src/index.html。
- * 覆盖三条易回归的前端通路:
- *   ① resumeWorkflowOnBoot:有僵尸 run 时启动仍落草稿页(activeSessionId=null)+ 只挂看板,不劫持聊天会话。
+ * 覆盖易回归的前端通路:
+ *   ① 启动保持在草稿页(activeSessionId=null)。
  *   ② 工具商店渲染出 Obsidian 与钉钉连接器卡。
  *   ③ 聊天流产物卡(artifact_card)挂出「品/悟」召唤 pinvou 按钮。
  *   ④ 记忆候选事件渲染卡片，且确认/忽略/不再提示分别调用正确后端命令。
@@ -41,21 +42,44 @@ const CHROME = process.env.CHROME ||
 if (!CHROME) { console.error('SKIP: 未找到 chromium/chrome,可用 env CHROME=/path/to/chromium 指定'); process.exit(2); }
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'pinvou-smoke-'));
 
-// mock TauriBridge:find_resumable_run 返回僵尸 run;会话同时覆盖 write_file、
-// MCP producer 和含 path 的 exec_shell 诊断结果，验证只有真实 producer 触发 artifact。
+// mock TauriBridge 会话同时覆盖 write_file、MCP producer 和含 path 的
+// exec_shell 诊断结果，验证只有真实 producer 触发 artifact。
 function injectSource() {
   return `(function(){
+    // Poll a UI predicate instead of sleeping a fixed duration: fast environments
+    // resolve in one tick, slow CI runners wait up to the timeout instead of
+    // sampling an unfinished render (the root cause of the browser-pane flakes).
+    window.__uiWait__ = (predicate, timeout) => new Promise((resolve) => {
+      const deadline = Date.now() + (timeout || 2500);
+      const tick = () => {
+        let ok = false;
+        try { ok = !!predicate(); } catch { ok = false; }
+        if (ok || Date.now() >= deadline) { resolve(ok); return; }
+        setTimeout(tick, 25);
+      };
+      tick();
+    });
+    // Wait until a sampled value stops changing (layout/transition settled).
+    window.__uiStable__ = (getter, timeout) => {
+      let prev;
+      return window.__uiWait__(() => {
+        let v;
+        try { v = JSON.stringify(getter()); } catch { return false; }
+        if (v !== undefined && v === prev) return true;
+        prev = v;
+        return false;
+      }, timeout || 1500);
+    };
     window.__TAURI_EVENT_HANDLERS__={};
     window.__TAURI_INVOKES__=[];
-    window.__LLMAPI_STATUS__={backend_user_exists:true,backend_user_state:'exists',stale:true,enabled:true,provisioning_status:'ready'};
+    window.__BROWSER_RUNNING__=false;
+    window.__BROWSER_STATUS_RESOLVERS__=[];
     window.__KB_MODEL_STATUS__={installed:true,ready:true,loading:false};
     window.__KB_MODEL_DOWNLOAD_ARGS__=[];
-    const ZOMBIE={session_id:'s-zombie',project_dir:'/x/wf',scenario:'sansheng_liubu'};
-    const WF_STATE={project_dir:'/x/wf',scenario:'sansheng_liubu',all_completed:false,roles:{taizi:{name:'太子',status:'running'},zhongshu:{name:'中书',status:'pending'}}};
-    const WF_TEMPLATE={id:'sansheng-liubu',name:'三省六部帮你办',enabled:true,scenarios:['sansheng_liubu'],ui:{header:'🏛️ 三省六部帮你办',template:{title:'🏛️ 三省六部帮你办',badge:'11 agent',desc:'太子接旨 → 中书省起草 → 门下省审议 → 尚书省派单 → 六部并行办差 → 回奏呈报。'},agentDefs:[{id:'taizi',name:'太子',color:'#C9A227'},{id:'zhongshu',name:'中书省',color:'#4285F4'}],lanes:[{lane:0,title:'接旨',agents:['taizi']},{lane:1,title:'起草',agents:['zhongshu']}]}};
     let SESSIONS=[
       {id:'s-pinned-old',title:'置顶旧会话',created_at:'2026-06-01T08:00:00Z',updated_at:'2026-06-01T08:00:00Z',pinned:true,pinned_at:'2026-07-20T08:00:00Z'},
       {id:'s-attachment',title:'看看这个\\n\\n📎 PINV',title_attachment_names:['PINVOU-M0-开源决策基线.md'],created_at:Date.now()-2000,updated_at:Date.now()-2000},
+      {id:'s-browser-b',title:'浏览器隔离会话',created_at:Date.now()-1500,updated_at:Date.now()-1500},
       {id:'s1',title:'第三季度财报分析',created_at:Date.now()-1000,updated_at:Date.now()}
     ];
     let CODEX_SESSIONS=[{id:'codex-1',agent_id:'codex',title:'Codex回归会话',created_at:new Date(Date.now()-1000).toISOString(),updated_at:new Date().toISOString(),workspace_kind:'temporary',workspace_path:''}];
@@ -63,6 +87,8 @@ function injectSource() {
     let ARCHIVED_SESSIONS=[];
     let MOUNTED_COLLECTIONS=[];
     let MOUNTED_COLLECTIONS_REVISION=0;
+    let BROWSER_TABS=[{target_id:'browser-tab-1',title:'Example Domain',url:'https://example.com/',active:true}];
+    let BROWSER_ACTIVE='browser-tab-1';
     window.__SHELL_JOBS__=[{
       id:'task-history-done',job_id:'history-1',command:'history-shell',cwd:'C:/tmp',status:'Completed',
       exit_code:0,elapsed_ms:20,stdout_tail:'history output',stderr_tail:'',stdout_len:14,stderr_len:0,
@@ -85,7 +111,7 @@ function injectSource() {
       window.__TAURI_INVOKES__.push({cmd:cmd,args:args||{}});
       switch(cmd){
         case 'get_settings': return Promise.resolve({theme:'liquid-light',language:'zh-Hans'});
-        case 'get_platform_capabilities': return Promise.resolve({codexAcpSupported:true});
+        case 'get_platform_capabilities': return Promise.resolve({codexAcpSupported:true,browserNativeDisplay:true,localModelSetup:true,dependencyInstall:true});
         case 'get_effective_model_config': return Promise.resolve({model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
@@ -118,19 +144,70 @@ function injectSource() {
         case 'ignore_pending_memory': return Promise.resolve({value:true});
         case 'never_pending_memory': return Promise.resolve({value:true});
         case 'check_for_update': return Promise.resolve({available:false});
-        case 'find_resumable_run': return Promise.resolve(ZOMBIE);
-        case 'get_workflow_state': return Promise.resolve(WF_STATE);
-        case 'get_role_logs': return Promise.resolve([
-          {timestamp:'2026-07-21T10:00:00+08:00',event:'agent_failed',role_id:'taizi',agent_id:'agent_diag01',category:'permission',reason:'未产出任何文件；最后一次工具错误: tool write_file failed: access denied',detail:'Tool write_file is not permitted for the read-only custom role'},
-          {timestamp:'2026-07-21T10:00:01+08:00',event:'agent_failure_terminal',role_id:'taizi',reason:'重试次数已用尽',attempt:'3',max_retries:'3'},
-        ]);
-        case 'start_workflow': return Promise.resolve({session_id:'s-kick-fail',project_dir:'/x/kick-fail'});
-        case 'kick_workflow': return window.__KICK_WORKFLOW_ERROR__
-          ? Promise.reject(new Error('模型服务预检失败：HTTP 401'))
-          : Promise.resolve('spawning');
-        case 'stop_workflow': window.__STOP_WORKFLOW_ARGS__=args; return Promise.resolve({ok:true,session_id:'s-zombie',scenario:'sansheng_liubu',brief:{user_request_raw:'原始三省六部需求'}});
         case 'check_dependencies': return Promise.resolve([]);
         case 'list_marketplace_tools': return Promise.resolve([]);
+        case 'browser_status': {
+          const snapshot=function(){
+            const active=BROWSER_TABS.find(function(tab){return tab.target_id===BROWSER_ACTIVE;})||BROWSER_TABS[0];
+            return {sessionId:args.sessionId,running:window.__BROWSER_RUNNING__,activeTab:active&&active.target_id,url:active&&active.url||'about:blank',controlOwner:'agent',controlRevision:1};
+          };
+          if(window.__DELAY_BROWSER_STATUS__) return new Promise(function(resolve){
+            window.__BROWSER_STATUS_RESOLVERS__.push(function(){resolve(snapshot());});
+            window.__RESOLVE_BROWSER_STATUS__=function(){
+              window.__DELAY_BROWSER_STATUS__=false;
+              const resolvers=window.__BROWSER_STATUS_RESOLVERS__.splice(0);
+              window.__RESOLVE_BROWSER_STATUS__=null;
+              resolvers.forEach(function(run){run();});
+            };
+          });
+          return Promise.resolve(snapshot());
+        }
+        case 'browser_prepare': window.__BROWSER_RUNNING__=true; return Promise.resolve({sessionId:args.sessionId});
+        case 'browser_list_tabs': return Promise.resolve(window.__BROWSER_RUNNING__?BROWSER_TABS:[]);
+        case 'browser_begin_surface_generation':
+          if(window.__FAIL_BROWSER_SURFACE_GENERATION__) return Promise.reject(new Error('surface generation unavailable'));
+          window.__BROWSER_SURFACE_GENERATION__=(window.__BROWSER_SURFACE_GENERATION__||0)+1;
+          return Promise.resolve(window.__BROWSER_SURFACE_GENERATION__);
+        case 'browser_show_native_surface':
+          if(window.__FAIL_BROWSER_SURFACE_SHOW__) return Promise.reject(new Error('surface show unavailable'));
+          if(window.__DELAY_BROWSER_SHOW__) return new Promise(function(resolve){
+            window.__RESOLVE_BROWSER_SHOW__=function(value){
+              window.__DELAY_BROWSER_SHOW__=false;
+              window.__RESOLVE_BROWSER_SHOW__=null;
+              resolve(value !== false);
+            };
+          });
+          return Promise.resolve(window.__BROWSER_NATIVE_RESULT__ === true);
+        case 'browser_create_tab': {
+          const id='browser-tab-'+(BROWSER_TABS.length+1);
+          BROWSER_TABS=BROWSER_TABS.map(function(tab){return Object.assign({},tab,{active:false});});
+          BROWSER_TABS.push({target_id:id,title:'新标签页',url:args.url||'about:blank',active:true});
+          BROWSER_ACTIVE=id;
+          return Promise.resolve(id);
+        }
+        case 'browser_activate_tab':
+          BROWSER_ACTIVE=args.targetId;
+          BROWSER_TABS=BROWSER_TABS.map(function(tab){return Object.assign({},tab,{active:tab.target_id===BROWSER_ACTIVE});});
+          return Promise.resolve(null);
+        case 'browser_close_tab':
+          BROWSER_TABS=BROWSER_TABS.filter(function(tab){return tab.target_id!==args.targetId;});
+          if(!BROWSER_TABS.some(function(tab){return tab.target_id===BROWSER_ACTIVE;})) BROWSER_ACTIVE=BROWSER_TABS[0]&&BROWSER_TABS[0].target_id;
+          return Promise.resolve(null);
+        case 'browser_hand_back_to_agent': return Promise.resolve({controlOwner:'agent',controlRevision:3});
+        case 'browser_stop': window.__BROWSER_RUNNING__=false; return Promise.resolve(null);
+        case 'browser_hide_native_surface':
+          if(window.__FAIL_BROWSER_HIDE__) return Promise.reject(new Error('surface hide unavailable'));
+          if(window.__DELAY_BROWSER_HIDE__) return new Promise(function(resolve){
+            window.__RESOLVE_BROWSER_HIDE__=function(){
+              window.__DELAY_BROWSER_HIDE__=false;
+              window.__RESOLVE_BROWSER_HIDE__=null;
+              resolve(null);
+            };
+          });
+          return Promise.resolve(null);
+        case 'voice_asr_status': return Promise.resolve(window.__VOICE_ASR_MISSING__
+          ? {ready:false,installable:true,missing:['model'],engine:{installed:true}}
+          : {ready:true,installable:true,missing:[],engine:{installed:true}});
         case 'create_session': return Promise.resolve({id:'s-new',metadata:{id:'s-new'}});
         case 'set_session_archived':
           if (args && args.archived) {
@@ -176,12 +253,11 @@ function injectSource() {
           {id:7,name:'项目资料',docCount:3},
           {id:8,name:'团队规范',docCount:5},
         ]);
-        case 'list_workflows': return Promise.resolve([WF_TEMPLATE]);
         case 'list_workspace_files': return Promise.resolve([]);
         case 'get_session_persona_events': return Promise.resolve([]);
         case 'get_session_pinvou_reviews': return Promise.resolve([]);
         case 'summon_pinvou': return Promise.resolve({personas:[{id:'travel',label:'旅行规划',primary:true}],alternates:['budget'],trace:'看了下，有几点确认',recommendations:[{topic:'预算',pick:'中档',why:'稳妥'}],issues:[{severity:'high',kind:'quality',persona:'travel',text:'日期冲突',suggestion:'对齐'}],coverage:[],framework:[],risk:'medium',confidence:0.8});
-        case 'load_session': return Promise.resolve(CONV[args&&args.id]||{metadata:{id:'x'},messages:[],artifacts:[]});
+        case 'load_session': return Promise.resolve(CONV[args&&args.id]||{metadata:{id:args&&args.id},messages:[],artifacts:[]});
         case 'get_session_timeline': return Promise.resolve([
           {turn_id:'copy-deepseek',event:'user_start',timestamp:1000,ui_turn_index:0},
           {turn_id:'copy-deepseek',event:'assistant_done',timestamp:3000,status:'Completed',usage:{input_tokens:12,output_tokens:4}},
@@ -276,6 +352,682 @@ async function expand(page) {
       && visualShell.backgroundColor !== 'rgba(0, 0, 0, 0)',
     JSON.stringify(visualShell),
   );
+
+  const artifactPresentation = await page.evaluate(async () => {
+    await window.TauriBridge.sessions.switchToSession('s1');
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-scroll"]'));
+    const stateArtifacts = () => window.TauriBridge.state.get('chat').artifacts;
+    const artifactPath = stateArtifacts()[0]?.path;
+    const countBefore = stateArtifacts().length;
+    const panelVisible = () => document.querySelector('[data-testid="artifact-side-panel"]')
+      ?.getAttribute('aria-hidden') === 'false';
+    window.dispatchEvent(Object.assign(new Event('pinvou:present-artifact'), {
+      detail: { sessionId: 's-browser-b', path: '/home/x/ignored.md', toolCallId: 'background-present' },
+    }));
+    // Poll a full observation window instead of a single sleep so a late misfire
+    // from a lazy chunk or slow React commit cannot slip past the negative check.
+    let backgroundLeaked = false;
+    for (let tick = 0; tick < 20 && !backgroundLeaked; tick++) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      backgroundLeaked = panelVisible();
+    }
+    const backgroundIgnored = !backgroundLeaked;
+    window.dispatchEvent(Object.assign(new Event('pinvou:present-artifact'), {
+      detail: { sessionId: 's1', path: artifactPath, toolCallId: 'active-present' },
+    }));
+    await window.__uiWait__(panelVisible);
+    const activeOpened = panelVisible();
+    await window.__uiWait__(() => [...window.__TAURI_INVOKES__].some(call =>
+      call.cmd === 'read_artifact_text' && call.args?.path === artifactPath));
+    const previewRequested = [...window.__TAURI_INVOKES__].some(call =>
+      call.cmd === 'read_artifact_text' && call.args?.path === artifactPath);
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="artifact-close"]'));
+    document.querySelector('[data-testid="artifact-close"]')?.click();
+    await window.__uiWait__(() => !panelVisible());
+    return {
+      backgroundIgnored,
+      activeOpened,
+      previewRequested,
+      closed: !panelVisible(),
+      countBefore,
+      countAfter: stateArtifacts().length,
+    };
+  });
+  rec(
+    'artifact presentation opens the active work-chat preview without changing the artifact count',
+    artifactPresentation.backgroundIgnored && artifactPresentation.activeOpened
+      && artifactPresentation.previewRequested && artifactPresentation.closed
+      && artifactPresentation.countBefore === artifactPresentation.countAfter,
+    JSON.stringify(artifactPresentation),
+  );
+
+  // After the Agent starts the browser, desktop UI expands the owning task's side panel. The
+  // native-surface command returns false in this headless mock, so the component must show an
+  // explicit unavailable state and must not fall back to a screenshot stream.
+  await page.setViewport({ width: 1228, height: 1000, deviceScaleFactor: 1 });
+  await sleep(120);
+  const browserPane = await page.evaluate(async () => {
+    const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+    document.querySelector('[data-sidebar-toggle]')?.click();
+    await window.__uiWait__(() => (document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0) > 200);
+    const task = [...document.querySelectorAll('[data-testid="regular-sidebar-item"]')]
+      .find(node => (node.textContent || '').includes('第三季度财报分析'));
+    task?.click();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-scroll"]'));
+    const sidebarOpenBeforeBrowser = (document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0) > 200;
+    localStorage.removeItem('pinvou_right_dock_ratio');
+    localStorage.removeItem('pinvou_browser_panel_ratio');
+    localStorage.setItem('pinvou_browser_panel_width', '520');
+    const handlers = window.__TAURI_EVENT_HANDLERS__['browser:activated'] || [];
+    for (const handler of handlers) await handler({ payload: {} });
+    await wait(60);
+    const unscopedIgnored = !document.querySelector('[data-testid="browser-side-pane"]');
+    const defaultDockSwitcher = document.querySelector('[data-testid="chat-right-dock-switcher"]');
+    const defaultDockTrigger = document.querySelector('[data-testid="chat-right-dock-switcher-trigger"]');
+    defaultDockTrigger?.click();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-right-dock-option-browser"]'));
+    const defaultBrowserOption = document.querySelector('[data-testid="chat-right-dock-option-browser"]');
+    const defaultBrowserEntryVisible = !!defaultDockSwitcher && !!defaultBrowserOption;
+    window.__FAIL_BROWSER_SURFACE_SHOW__ = true;
+    window.__DELAY_BROWSER_STATUS__ = true;
+    const nativeShowsBeforeInitialStatus = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length;
+    defaultBrowserOption?.click();
+    await wait(120);
+    const initialStatusGated = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length === nativeShowsBeforeInitialStatus;
+    window.__RESOLVE_BROWSER_STATUS__?.();
+    await window.__uiWait__(() => [...window.__TAURI_INVOKES__].some(call => call.cmd === 'browser_prepare'));
+    const prepareCall = [...window.__TAURI_INVOKES__].reverse().find(call => call.cmd === 'browser_prepare');
+    const dockSwitcher = document.querySelector('[data-testid="chat-right-dock-switcher"]');
+    const dockSwitcherTrigger = document.querySelector('[data-testid="chat-right-dock-switcher-trigger"]');
+    dockSwitcherTrigger?.click();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-right-dock-option-artifact-preview"]')
+      && !!document.querySelector('[data-testid="chat-right-dock-option-browser"]'));
+    const unifiedDockEntry = !!dockSwitcher
+      && !document.querySelector('[data-testid="browser-pane-toggle"]')
+      && !!document.querySelector('[data-testid="chat-right-dock-option-artifact-preview"]')
+      && !!document.querySelector('[data-testid="chat-right-dock-option-browser"]');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    const pane = document.querySelector('[data-testid="browser-side-pane"]');
+    const dockHost = document.querySelector('[data-testid="right-dock-host"]');
+    const close = pane?.querySelector('button[title="收起浏览器侧栏"]');
+    const newTab = pane?.querySelector('button[title="新标签页"]');
+    await window.__uiWait__(() => !!pane?.querySelector('[data-testid="browser-native-unavailable"]'));
+    const generationFailureVisible = !!pane?.querySelector('[data-testid="browser-native-unavailable"]');
+    window.__FAIL_BROWSER_SURFACE_SHOW__ = false;
+    pane?.querySelector('[data-testid="browser-native-unavailable"] button')?.click();
+    await window.__uiWait__(() => window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length >= 2);
+    const generationRecovered = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length >= 2;
+    // Opening the browser collapses the app sidebar with a transition. Let both
+    // the narrow layout and the legacy-width ratio migration settle before
+    // measuring drag geometry; otherwise a ResizeObserver render can race the
+    // synthetic pointer sequence and discard the transient panel width.
+    await window.__uiWait__(() =>
+      (document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0) < 100
+      && (document.querySelector('[data-testid="chat-composer-wrap"]')?.getBoundingClientRect().width || 0) > 300);
+    await window.__uiStable__(() => {
+      const host = document.querySelector('[data-testid="right-dock-host"]');
+      return host ? [
+        host.getBoundingClientRect().width,
+        host.parentElement?.getBoundingClientRect().width || 0,
+        host.dataset.preferredRatio,
+        localStorage.getItem('pinvou_right_dock_ratio'),
+        host.querySelector('[role="separator"]')?.getBoundingClientRect().left,
+      ] : null;
+    });
+    const separator = dockHost?.querySelector('[role="separator"]');
+    const widthBeforeResize = dockHost?.getBoundingClientRect().width || 0;
+    const migratedRatio = Number.parseFloat(localStorage.getItem('pinvou_right_dock_ratio') || '0');
+    const legacyMigrated = migratedRatio > 0 && migratedRatio < 1
+      && localStorage.getItem('pinvou_browser_panel_width') == null;
+    if (separator) {
+      const rect = separator.getBoundingClientRect();
+      const resizeDelta = widthBeforeResize > 500 ? 80 : -80;
+      separator.dispatchEvent(new PointerEvent('pointerdown', {
+        bubbles: true,
+        button: 0,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
+        clientX: rect.left,
+        clientY: rect.top + 20,
+      }));
+      document.dispatchEvent(new PointerEvent('pointermove', {
+        bubbles: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
+        clientX: rect.left + resizeDelta,
+        clientY: rect.top + 20,
+      }));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      document.dispatchEvent(new PointerEvent('pointerup', {
+        bubbles: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
+      }));
+      await window.__uiWait__(() => {
+        const widthNow = dockHost?.getBoundingClientRect().width || 0;
+        return Math.abs(widthBeforeResize - widthNow) > 50;
+      });
+    }
+    const widthAfterResize = dockHost?.getBoundingClientRect().width || 0;
+    const storedRatio = Number.parseFloat(localStorage.getItem('pinvou_right_dock_ratio') || '0');
+    const renderedRatio = Number.parseFloat(dockHost?.dataset.preferredRatio || '0');
+    newTab?.click();
+    await window.__uiWait__(() => !!pane?.querySelector('[data-testid="browser-new-tab-page"]'));
+    const createCall = [...window.__TAURI_INVOKES__].reverse().find(call => call.cmd === 'browser_create_tab');
+    const newTabProductState = !!pane?.querySelector('[data-testid="browser-new-tab-page"]')
+      && pane?.querySelector('[data-testid="browser-url-input"]')?.value === '';
+    for (const handler of (window.__TAURI_EVENT_HANDLERS__['browser:control-changed'] || [])) {
+      await handler({ payload: { sessionId: 's1', owner: 'user', revision: 2 } });
+    }
+    await window.__uiWait__(() => document.querySelector('[data-testid="browser-control-owner"]')?.dataset.owner === 'user');
+    const ownershipBeforeHandBack = document.querySelector('[data-testid="browser-control-owner"]');
+    const handBack = document.querySelector('[data-testid="browser-hand-back"]');
+    const userTakeoverVisible = ownershipBeforeHandBack?.dataset.owner === 'user' && !!handBack;
+    handBack?.click();
+    await window.__uiWait__(() => [...window.__TAURI_INVOKES__].some(call => call.cmd === 'browser_hand_back_to_agent'));
+    const handBackCall = [...window.__TAURI_INVOKES__].reverse().find(call => call.cmd === 'browser_hand_back_to_agent');
+    const beforeClose = {
+      pane: !!pane,
+      chat: !!document.querySelector('[data-testid="chat-scroll"]'),
+      view: !!document.querySelector('[data-testid="browser-view"]'),
+      unscopedIgnored,
+      defaultBrowserEntryVisible,
+      lazyPrepared: prepareCall?.args?.sessionId === 's1',
+      unifiedDockEntry,
+      nativeAttempted: window.__TAURI_INVOKES__.some(call => call.cmd === 'browser_show_native_surface'),
+      generationFailureVisible,
+      initialStatusGated,
+      generationRecovered,
+      legacyMigrated,
+      multiTab: pane?.querySelectorAll('[role="button"][aria-pressed]').length === 2,
+      newTabProductState,
+      scopedCreate: createCall?.args?.sessionId === 's1',
+      userTakeoverVisible,
+      explicitHandBack: handBackCall?.args?.sessionId === 's1',
+      resized: Math.abs(widthBeforeResize - widthAfterResize) > 50,
+      resizeStored: storedRatio > 0 && storedRatio < 1 && Math.abs(storedRatio - renderedRatio) < 0.001,
+      narrowLayoutProtected: sidebarOpenBeforeBrowser
+        && (document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0) < 100
+        && (document.querySelector('[data-testid="chat-composer-wrap"]')?.getBoundingClientRect().width || 0) > 300,
+    };
+    // Later native-surface timing checks must return to a real page. By design, a new tab
+    // hides the native about:blank surface and lets React render it; do not mistake that
+    // security behavior for a show failure.
+    const realTab = [...(pane?.querySelectorAll('[role="button"][aria-pressed]') || [])]
+      .find(node => (node.textContent || '').includes('Example Domain'));
+    realTab?.click();
+    await window.__uiWait__(() => (realTab?.getAttribute('aria-pressed') === 'true'));
+    // After the first successful show, repeated same-size ResizeObserver/window resize
+    // callbacks must not keep hiding and showing the native child WebView, which would cause
+    // IPC churn and visible flicker.
+    await new Promise(resolve => setTimeout(resolve, 160));
+    const successfulShowStart = window.__TAURI_INVOKES__.length;
+    window.__BROWSER_NATIVE_RESULT__ = true;
+    window.dispatchEvent(new Event('resize'));
+    await new Promise(resolve => setTimeout(resolve, 80));
+    for (let i = 0; i < 5; i += 1) window.dispatchEvent(new Event('resize'));
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const successfulVisibilityCalls = window.__TAURI_INVOKES__
+      .slice(successfulShowStart)
+      .filter(call => call.cmd === 'browser_show_native_surface' || call.cmd === 'browser_hide_native_surface');
+    const successfulBoundsKeys = [];
+    let visibleBoundsKey = '';
+    let duplicateBoundsDeduped = false;
+    for (const call of successfulVisibilityCalls) {
+      if (call.cmd === 'browser_hide_native_surface') {
+        visibleBoundsKey = '';
+        continue;
+      }
+      const key = JSON.stringify(call.args?.bounds || null);
+      successfulBoundsKeys.push(key);
+      if (key === visibleBoundsKey) {
+        duplicateBoundsDeduped = false;
+        break;
+      }
+      duplicateBoundsDeduped = true;
+      visibleBoundsKey = key;
+    }
+    const dockBarrierTrigger = document.querySelector('[data-testid="chat-right-dock-switcher-trigger"]');
+    dockBarrierTrigger?.click();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-right-dock-option-artifact-preview"]'));
+    window.__DELAY_BROWSER_HIDE__ = true;
+    document.querySelector('[data-testid="chat-right-dock-option-artifact-preview"]')?.click();
+    await wait(80);
+    const dockSwitchWithheldUntilHideAck = pane?.getAttribute('aria-hidden') === 'false'
+      && document.querySelector('[data-testid="artifact-side-panel"]')
+        ?.getAttribute('aria-hidden') !== 'false';
+    const dockHidePending = typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
+    window.__RESOLVE_BROWSER_HIDE__?.();
+    await window.__uiWait__(() => pane?.getAttribute('aria-hidden') === 'true'
+      && document.querySelector('[data-testid="artifact-side-panel"]')?.getAttribute('aria-hidden') === 'false');
+    const dockSwitchPublishedAfterHideAck = pane?.getAttribute('aria-hidden') === 'true'
+      && document.querySelector('[data-testid="artifact-side-panel"]')
+        ?.getAttribute('aria-hidden') === 'false';
+    // Baseline the hide count only once the previous dock switch stopped emitting:
+    // the fullscreen assertion below is negative (no new hide calls), so a baseline
+    // taken mid-flight would blame the fullscreen toggle for an in-flight call.
+    await window.__uiStable__(() => window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_hide_native_surface').length);
+    const hideCallsBeforeArtifactFullscreen = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_hide_native_surface').length;
+    document.querySelector('[data-testid="artifact-fullscreen-toggle"]')?.click();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="artifact-fullscreen-panel"]'));
+    const artifactFullscreenAfterDockHide = pane?.getAttribute('aria-hidden') === 'true'
+      && !!document.querySelector('[data-testid="artifact-fullscreen-panel"]')
+      && window.__TAURI_INVOKES__
+        .filter(call => call.cmd === 'browser_hide_native_surface').length === hideCallsBeforeArtifactFullscreen;
+    document.querySelector('[data-testid="artifact-fullscreen-toggle"]')?.click();
+    await wait(80);
+    document.querySelector('[data-testid="chat-right-dock-switcher-trigger"]')?.click();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-right-dock-option-browser"]'));
+    document.querySelector('[data-testid="chat-right-dock-option-browser"]')?.click();
+    await window.__uiWait__(() => pane?.getAttribute('aria-hidden') === 'false');
+    const dockBrowserRestored = pane?.getAttribute('aria-hidden') === 'false';
+
+    // A child occlusion layer in RightDock must receive the native hide ACK before
+    // publication. Fail closed on error, and do not let a late ACK publish through a stale
+    // tree that is still mounted.
+    const toolMenuTrigger = document.querySelector('[data-testid="composer-tool-menu-trigger"]');
+    window.__FAIL_BROWSER_HIDE__ = true;
+    toolMenuTrigger?.click();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const composerHideFailureFailClosed = !document.querySelector('[data-testid="composer-tool-menu"]')
+      && pane?.getAttribute('aria-hidden') === 'false';
+    window.__FAIL_BROWSER_HIDE__ = false;
+    toolMenuTrigger?.click();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    window.__DELAY_BROWSER_HIDE__ = true;
+    toolMenuTrigger?.click();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const composerWithheldUntilHideAck = !document.querySelector('[data-testid="composer-tool-menu"]');
+    const composerHidePending = typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
+    toolMenuTrigger?.click();
+    window.__RESOLVE_BROWSER_HIDE__?.();
+    await wait(120);
+    const composerLateAckIgnored = !document.querySelector('[data-testid="composer-tool-menu"]')
+      && pane?.getAttribute('aria-hidden') === 'false';
+    window.__DELAY_BROWSER_HIDE__ = true;
+    toolMenuTrigger?.click();
+    await wait(80);
+    window.__RESOLVE_BROWSER_HIDE__?.();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="composer-tool-menu"]'));
+    const composerPublishedAfterHideAck = !!document.querySelector('[data-testid="composer-tool-menu"]');
+    // Desktop ComposerPopover closes on document-capture pointerdown; only mobile WebUI uses
+    // a portal backdrop. Click a real desktop outside target so this test does not leave the
+    // menu and its native-surface occlusion lease active for later cases.
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    await window.__uiWait__(() => pane?.getAttribute('aria-hidden') === 'false');
+    const browserRestoredAfterComposer = pane?.getAttribute('aria-hidden') === 'false';
+
+    window.__VOICE_ASR_MISSING__ = true;
+    window.__DELAY_BROWSER_HIDE__ = true;
+    document.querySelector('[data-testid="composer-voice-button"]')?.click();
+    await wait(100);
+    const voiceSetupWithheldUntilHideAck = !document.querySelector('[data-testid="voice-asr-setup-dialog"]');
+    const voiceSetupHidePending = typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
+    window.__RESOLVE_BROWSER_HIDE__?.();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="voice-asr-setup-dialog"]'));
+    const voiceSetupPublishedAfterHideAck = !!document.querySelector('[data-testid="voice-asr-setup-dialog"]');
+    window.TauriBridge.voice.closeVoiceAsrSetup();
+    window.__VOICE_ASR_MISSING__ = false;
+    await window.__uiWait__(() => pane?.getAttribute('aria-hidden') === 'false');
+    const browserRestoredAfterVoiceSetup = pane?.getAttribute('aria-hidden') === 'false';
+
+    const dragData = new DataTransfer();
+    dragData.items.add(new File(['native surface gate'], 'native-surface-gate.txt', {type:'text/plain'}));
+    window.__DELAY_BROWSER_HIDE__ = true;
+    document.dispatchEvent(new DragEvent('dragenter', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: dragData,
+    }));
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const attachmentDropBeforeHideAck = document.querySelector('[data-testid="attachment-drop-overlay"]');
+    const attachmentDropWithheldUntilHideAck = !attachmentDropBeforeHideAck
+      || attachmentDropBeforeHideAck.getAttribute('aria-hidden') !== 'false';
+    const attachmentDropHidePending = typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
+    window.__RESOLVE_BROWSER_HIDE__?.();
+    await window.__uiWait__(() => document.querySelector('[data-testid="attachment-drop-overlay"]')
+      ?.getAttribute('aria-hidden') === 'false');
+    const attachmentDropPublishedAfterHideAck = document.querySelector('[data-testid="attachment-drop-overlay"]')
+      ?.getAttribute('aria-hidden') === 'false';
+    document.dispatchEvent(new DragEvent('dragleave', {
+      bubbles: true,
+      cancelable: true,
+      dataTransfer: dragData,
+    }));
+    await window.__uiWait__(() => pane?.getAttribute('aria-hidden') === 'false');
+    const browserRestoredAfterAttachmentDrop = pane?.getAttribute('aria-hidden') === 'false';
+
+    await window.__uiStable__(() => window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_hide_native_surface').length);
+    await window.__uiStable__(() => window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length);
+    const hideCallsBeforeSettings = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_hide_native_surface').length;
+    const showCallsBeforeSettings = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length;
+    const visibilityRaceStart = window.__TAURI_INVOKES__.length;
+    window.__DELAY_BROWSER_SHOW__ = true;
+    const nativeHost = document.querySelector('[data-testid="browser-native-host"]');
+    if (nativeHost) nativeHost.style.transform = 'translateX(1px)';
+    window.dispatchEvent(new Event('resize'));
+    await window.__uiWait__(() => typeof window.__RESOLVE_BROWSER_SHOW__ === 'function');
+    const delayedShowPending = typeof window.__RESOLVE_BROWSER_SHOW__ === 'function';
+    window.__DELAY_BROWSER_HIDE__ = true;
+    document.querySelector('[data-testid="nav-settings"]')?.click();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const settingsWithheldUntilHideAck = !document.querySelector('[data-testid="settings-dialog"]')
+      && !!document.querySelector('[data-testid="browser-side-pane"]');
+    const delayedHidePending = typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
+    const showsWhileHidePending = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length;
+    if (nativeHost) nativeHost.style.transform = 'translateX(2px)';
+    window.dispatchEvent(new Event('resize'));
+    await new Promise(resolve => setTimeout(resolve, 60));
+    const resizeShowBlockedWhileHidePending = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length === showsWhileHidePending;
+    window.__RESOLVE_BROWSER_HIDE__?.();
+    await window.__uiWait__(() => {
+      const host = document.querySelector('[data-testid="right-dock-host"]');
+      return !!document.querySelector('[data-testid="settings-dialog"]') && !!host
+        && getComputedStyle(host).display === 'none';
+    });
+    const settingsDockHost = document.querySelector('[data-testid="right-dock-host"]');
+    const settingsIsolated = !!document.querySelector('[data-testid="settings-dialog"]')
+      && !!settingsDockHost
+      && getComputedStyle(settingsDockHost).display === 'none';
+    const settingsNativeHidden = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_hide_native_surface').length > hideCallsBeforeSettings;
+    window.__RESOLVE_BROWSER_SHOW__?.(true);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const visibilityRaceCalls = window.__TAURI_INVOKES__
+      .slice(visibilityRaceStart)
+      .filter(call => call.cmd === 'browser_show_native_surface' || call.cmd === 'browser_hide_native_surface');
+    const lateShowRehidden = delayedShowPending
+      && visibilityRaceCalls.some(call => call.cmd === 'browser_show_native_surface')
+      && visibilityRaceCalls.at(-1)?.cmd === 'browser_hide_native_surface';
+    document.querySelector('[data-testid="settings-close"]')?.click();
+    await window.__uiWait__(() => !document.querySelector('[data-testid="settings-dialog"]'));
+    const restoredAfterSettings = !!document.querySelector('[data-testid="browser-side-pane"]');
+    const nativeRestoredAfterSettings = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'browser_show_native_surface').length > showCallsBeforeSettings;
+    const restoredPane = document.querySelector('[data-testid="browser-side-pane"]');
+    const restoredClose = restoredPane?.querySelector('button[title="收起浏览器侧栏"]');
+    (restoredClose || close)?.click();
+    await window.__uiWait__(() => !document.querySelector('[data-testid="browser-side-pane"]'));
+    if (nativeHost) nativeHost.style.transform = '';
+    for (const handler of (window.__TAURI_EVENT_HANDLERS__['browser:stopped'] || [])) {
+      await handler({ payload: { sessionId: 's1' } });
+    }
+    return {
+      ...beforeClose,
+      settingsIsolated,
+      settingsWithheldUntilHideAck,
+      delayedHidePending,
+      resizeShowBlockedWhileHidePending,
+      dockSwitchWithheldUntilHideAck,
+      dockHidePending,
+      dockSwitchPublishedAfterHideAck,
+      dockBrowserRestored,
+      artifactFullscreenAfterDockHide,
+      composerHideFailureFailClosed,
+      composerWithheldUntilHideAck,
+      composerHidePending,
+      composerLateAckIgnored,
+      composerPublishedAfterHideAck,
+      browserRestoredAfterComposer,
+      voiceSetupWithheldUntilHideAck,
+      voiceSetupHidePending,
+      voiceSetupPublishedAfterHideAck,
+      browserRestoredAfterVoiceSetup,
+      attachmentDropWithheldUntilHideAck,
+      attachmentDropHidePending,
+      attachmentDropPublishedAfterHideAck,
+      browserRestoredAfterAttachmentDrop,
+      settingsNativeHidden,
+      duplicateBoundsDeduped,
+      successfulBoundsKeys,
+      successfulVisibilityCalls: successfulVisibilityCalls.map(call => ({ cmd: call.cmd, bounds: call.args?.bounds || null })),
+      lateShowRehidden,
+      restoredAfterSettings,
+      nativeRestoredAfterSettings,
+      collapsed: !document.querySelector('[data-testid="browser-side-pane"]'),
+      nativeHidden: window.__TAURI_INVOKES__.some(call => call.cmd === 'browser_hide_native_surface'),
+    };
+  });
+  rec(
+    '⓪c Agent browser expands per task and never falls back to screenshots when native display is unavailable',
+    browserPane.pane && browserPane.chat && browserPane.view && browserPane.unscopedIgnored
+      && browserPane.defaultBrowserEntryVisible && browserPane.lazyPrepared
+      && browserPane.unifiedDockEntry
+      && browserPane.nativeAttempted && browserPane.multiTab && browserPane.scopedCreate
+      && browserPane.newTabProductState
+      && browserPane.generationFailureVisible && browserPane.generationRecovered
+      && browserPane.initialStatusGated
+      && browserPane.userTakeoverVisible && browserPane.explicitHandBack
+      && browserPane.legacyMigrated && browserPane.resized && browserPane.resizeStored
+      && browserPane.narrowLayoutProtected
+      && browserPane.dockSwitchWithheldUntilHideAck && browserPane.dockHidePending
+      && browserPane.dockSwitchPublishedAfterHideAck && browserPane.dockBrowserRestored
+      && browserPane.artifactFullscreenAfterDockHide
+      && browserPane.composerHideFailureFailClosed
+      && browserPane.composerWithheldUntilHideAck && browserPane.composerHidePending
+      && browserPane.composerLateAckIgnored
+      && browserPane.composerPublishedAfterHideAck && browserPane.browserRestoredAfterComposer
+      && browserPane.voiceSetupWithheldUntilHideAck && browserPane.voiceSetupHidePending
+      && browserPane.voiceSetupPublishedAfterHideAck && browserPane.browserRestoredAfterVoiceSetup
+      && browserPane.attachmentDropWithheldUntilHideAck && browserPane.attachmentDropHidePending
+      && browserPane.attachmentDropPublishedAfterHideAck && browserPane.browserRestoredAfterAttachmentDrop
+      && browserPane.settingsWithheldUntilHideAck && browserPane.delayedHidePending
+      && browserPane.resizeShowBlockedWhileHidePending
+      && browserPane.settingsIsolated && browserPane.settingsNativeHidden
+      && browserPane.duplicateBoundsDeduped && browserPane.lateShowRehidden
+      && browserPane.restoredAfterSettings && browserPane.nativeRestoredAfterSettings
+      && browserPane.collapsed && browserPane.nativeHidden,
+    JSON.stringify(browserPane),
+  );
+
+  const browserSessionUiIsolation = await page.evaluate(async () => {
+    const selectedDockOption = async () => {
+      document.querySelector('[data-testid="chat-right-dock-switcher-trigger"]')?.click();
+      await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-right-dock-option-browser"]'));
+      const browser = document.querySelector('[data-testid="chat-right-dock-option-browser"]');
+      const artifacts = document.querySelector('[data-testid="chat-right-dock-option-artifact-preview"]');
+      const result = browser?.getAttribute('aria-checked') === 'true'
+        ? 'browser'
+        : artifacts?.getAttribute('aria-checked') === 'true'
+          ? 'artifact-preview'
+          : '';
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return result;
+    };
+    const browserPaneVisible = () => {
+      const pane = document.querySelector('[data-testid="browser-side-pane"]');
+      return !!pane && pane.getAttribute('aria-hidden') === 'false';
+    };
+    const artifactPanelVisible = () => document.querySelector('[data-testid="artifact-side-panel"]')
+      ?.getAttribute('aria-hidden') === 'false';
+    // Switching sessions swaps the right-dock selection asynchronously; wait for the
+    // expected dock state instead of sampling after a fixed delay.
+    const switchSession = async (sessionId, expect) => {
+      await window.TauriBridge.sessions.switchToSession(sessionId);
+      if (expect) {
+        await window.__uiWait__(() => {
+          if (expect.browser !== undefined && browserPaneVisible() !== expect.browser) return false;
+          if (expect.artifact !== undefined && artifactPanelVisible() !== expect.artifact) return false;
+          return true;
+        });
+      }
+    };
+
+    window.__BROWSER_RUNNING__ = true;
+    for (const handler of (window.__TAURI_EVENT_HANDLERS__['browser:activated'] || [])) {
+      await handler({ payload: { sessionId: 's1' } });
+    }
+    await window.__uiWait__(() => browserPaneVisible());
+    const sessionAInitial = {
+      selected: await selectedDockOption(),
+      browserVisible: browserPaneVisible(),
+    };
+
+    await switchSession('s-browser-b', { browser: false, artifact: true });
+    document.querySelector('[data-testid="chat-right-dock-switcher-trigger"]')?.click();
+    await window.__uiWait__(() => !!document.querySelector('[data-testid="chat-right-dock-option-artifact-preview"]'));
+    document.querySelector('[data-testid="chat-right-dock-option-artifact-preview"]')?.click();
+    await window.__uiWait__(() => artifactPanelVisible());
+    const sessionBArtifact = {
+      selected: await selectedDockOption(),
+      browserVisible: browserPaneVisible(),
+      artifactVisible: artifactPanelVisible(),
+    };
+
+    await switchSession('s1', { browser: true });
+    const sessionARestored = {
+      selected: await selectedDockOption(),
+      browserVisible: browserPaneVisible(),
+    };
+    document.querySelector('[data-testid="browser-side-pane"] button[title="收起浏览器侧栏"]')?.click();
+    await window.__uiWait__(() => !browserPaneVisible());
+
+    await switchSession('s-browser-b', { browser: false, artifact: true });
+    const sessionBRestored = {
+      selected: await selectedDockOption(),
+      browserVisible: browserPaneVisible(),
+      artifactVisible: artifactPanelVisible(),
+    };
+
+    await switchSession('s1', { browser: false });
+    const sessionAStayedClosed = await window.__uiWait__(
+      () => !document.querySelector('[data-testid="browser-side-pane"]'),
+    );
+    return {
+      sessionAInitial,
+      sessionBArtifact,
+      sessionARestored,
+      sessionBRestored,
+      sessionAStayedClosed,
+    };
+  });
+  rec(
+    '⓪c-1 browser side-panel expansion and Dock selection are isolated by session',
+    browserSessionUiIsolation.sessionAInitial.selected === 'browser'
+      && browserSessionUiIsolation.sessionAInitial.browserVisible
+      && browserSessionUiIsolation.sessionBArtifact.selected === 'artifact-preview'
+      && !browserSessionUiIsolation.sessionBArtifact.browserVisible
+      && browserSessionUiIsolation.sessionBArtifact.artifactVisible
+      && browserSessionUiIsolation.sessionARestored.selected === 'browser'
+      && browserSessionUiIsolation.sessionARestored.browserVisible
+      && browserSessionUiIsolation.sessionBRestored.selected === 'artifact-preview'
+      && !browserSessionUiIsolation.sessionBRestored.browserVisible
+      && browserSessionUiIsolation.sessionBRestored.artifactVisible
+      && browserSessionUiIsolation.sessionAStayedClosed,
+    JSON.stringify(browserSessionUiIsolation),
+  );
+
+  // Persist the user's side-panel ratio rather than a temporary narrow-window pixel width.
+  // Verify exact restoration across wide -> single-pane -> wide, including left navigation.
+  await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
+  await sleep(150);
+  const sidePanelCycleBefore = await page.evaluate(async () => {
+    window.__BROWSER_RUNNING__ = true;
+    for (const handler of (window.__TAURI_EVENT_HANDLERS__['browser:activated'] || [])) {
+      await handler({ payload: { sessionId: 's1' } });
+    }
+    const settled = await window.__uiWait__(() => {
+      const pane = document.querySelector('[data-testid="right-dock-host"]');
+      return !!pane && pane.getBoundingClientRect().width > 0 && pane.dataset.layoutMode === 'split';
+    }) && await window.__uiStable__(() => {
+      const pane = document.querySelector('[data-testid="right-dock-host"]');
+      return pane ? [pane.getBoundingClientRect().width, pane.dataset.layoutMode,
+        document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width] : null;
+    });
+    const pane = document.querySelector('[data-testid="right-dock-host"]');
+    return {
+      settled,
+      width: pane?.getBoundingClientRect().width || 0,
+      ratio: pane?.dataset.preferredRatio || '',
+      mode: pane?.dataset.layoutMode || '',
+      sidebarWidth: document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0,
+    };
+  });
+  await page.setViewport({ width: 880, height: 800, deviceScaleFactor: 1 });
+  const sidePanelCycleNarrow = await page.evaluate(async () => {
+    const settled = await window.__uiWait__(() => {
+      const pane = document.querySelector('[data-testid="right-dock-host"]');
+      return pane?.dataset.layoutMode === 'single'
+        && (document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0) < 100;
+    }) && await window.__uiStable__(() => {
+      const pane = document.querySelector('[data-testid="right-dock-host"]');
+      return [pane?.dataset.layoutMode, pane?.dataset.preferredRatio,
+        document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width];
+    });
+    const pane = document.querySelector('[data-testid="right-dock-host"]');
+    return {
+      settled,
+      mode: pane?.dataset.layoutMode || '',
+      ratio: pane?.dataset.preferredRatio || '',
+      sidebarWidth: document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0,
+    };
+  });
+  await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
+  const sidePanelCycleAfter = await page.evaluate(async () => {
+    const settled = await window.__uiWait__(() => {
+      const pane = document.querySelector('[data-testid="right-dock-host"]');
+      return !!pane && pane.dataset.layoutMode === 'split'
+        && pane.getBoundingClientRect().width > 0
+        && (document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0) > 200;
+    }) && await window.__uiStable__(() => {
+      const pane = document.querySelector('[data-testid="right-dock-host"]');
+      return pane ? [pane.getBoundingClientRect().width, pane.dataset.layoutMode,
+        document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width] : null;
+    });
+    const pane = document.querySelector('[data-testid="right-dock-host"]');
+    const result = {
+      settled,
+      width: pane?.getBoundingClientRect().width || 0,
+      ratio: pane?.dataset.preferredRatio || '',
+      mode: pane?.dataset.layoutMode || '',
+      sidebarWidth: document.querySelector('[data-testid="app-sidebar"]')?.getBoundingClientRect().width || 0,
+    };
+    window.__BROWSER_RUNNING__ = false;
+    for (const handler of (window.__TAURI_EVENT_HANDLERS__['browser:stopped'] || [])) {
+      await handler({ payload: { sessionId: 's1' } });
+    }
+    return result;
+  });
+  const sidePanelCycle = {
+    before: sidePanelCycleBefore,
+    narrow: sidePanelCycleNarrow,
+    after: sidePanelCycleAfter,
+  };
+  rec(
+    '⓪④ side panel restores its ratio after narrow single-pane mode',
+    sidePanelCycleBefore.settled
+      && sidePanelCycleBefore.mode === 'split'
+      && sidePanelCycleBefore.width > 0
+      && sidePanelCycleNarrow.settled
+      && sidePanelCycleNarrow.mode === 'single'
+      && sidePanelCycleNarrow.ratio === sidePanelCycleBefore.ratio
+      && sidePanelCycleNarrow.sidebarWidth < 100
+      && sidePanelCycleAfter.settled
+      && sidePanelCycleAfter.mode === 'split'
+      && sidePanelCycleAfter.ratio === sidePanelCycleBefore.ratio
+      && Math.abs(sidePanelCycleAfter.width - sidePanelCycleBefore.width) <= 2
+      && sidePanelCycleAfter.sidebarWidth > 200,
+    JSON.stringify(sidePanelCycle),
+  );
+  // The browser-isolation case temporarily entered s1. Restore the draft page so later
+  // startup-state regressions retain their original precondition.
+  await clickText(page, '新对话');
+  await sleep(250);
 
   // Windows 平板尺寸会展示浮动语音按钮。用浏览器输入通道覆盖鼠标、触控笔与触摸，
   // 并动态验证 capture 丢失、pointercancel、窗口失焦后的视觉态和点击语义。
@@ -590,12 +1342,12 @@ async function expand(page) {
     JSON.stringify(markdownHighlight),
   );
 
-  // ① 启动落草稿页(僵尸 run 不劫持)
+  // ① 启动落草稿页。
   const st = await page.evaluate(() => {
-    const s = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']);
-    return { activeSessionId: s.activeSessionId, wfActive: !!(s.workflow && s.workflow.run && s.workflow.run.active), wfSid: s.workflow && s.workflow.run && s.workflow.run.sessionId };
+    const s = window.TauriBridge.state.getMany(['chat', 'vllm']);
+    return { activeSessionId: s.activeSessionId };
   });
-  rec('① 僵尸run不劫持启动(落草稿页+挂看板)', (st.activeSessionId == null) && st.wfActive === true && st.wfSid === 's-zombie', JSON.stringify(st));
+  rec('① 启动保持草稿页', st.activeSessionId == null, JSON.stringify(st));
 
   await expand(page); await sleep(300);
   const sidebarTaskShell = await page.evaluate(() => ({
@@ -665,11 +1417,12 @@ async function expand(page) {
   await page.keyboard.press('Escape'); await sleep(200);
 
   // ①a-3 对话管理页必须按 Codex 会话类型路由，不能误走普通聊天 switchToSession。
+  // 会话行是「标题 button + 操作按钮并列」结构。
   await clickText(page, '查看全部'); await sleep(500);
   const codexManagedOpen = await page.evaluate(() => {
     const label = [...document.querySelectorAll('span')]
       .find(node => (node.textContent || '').trim() === 'Codex回归会话' && node.getBoundingClientRect().left > 300);
-    const row = label && label.closest('div[class*="cursor-pointer"]');
+    const row = label && label.closest('button');
     if (!row) return { found: false };
     row.click();
     return { found: true };
@@ -871,7 +1624,7 @@ async function expand(page) {
   const managedActiveState = await page.evaluate(() => {
     const label = [...document.querySelectorAll('span')]
       .find(node => (node.textContent || '').trim() === 'Codex回归会话' && node.getBoundingClientRect().left > 300);
-    const row = label && label.closest('div[class*="cursor-pointer"]');
+    const row = label && (label.closest('button')?.parentElement || null);
     return {
       found: !!row,
       activeClass: !!(row && (row.classList.contains('bg-[#333537]') || row.classList.contains('bg-[#E1E5EA]'))),
@@ -897,8 +1650,106 @@ async function expand(page) {
     JSON.stringify(codexBatchArchive));
   await page.evaluate(() => document.querySelector('button[aria-label="取消"]')?.click());
 
-  // ①b 工作流入口已合入专家池：从「专家池 > 专家团队」进入三省六部运行态，
-  // 仍可停止并预填原需求重开。
+  // End of the codex block: opening a code session from the chat manager page enters
+  // code mode (sidebar style, collapsed nav, and New chat behavior all follow the mode).
+  // Later cases rely on the standard sidebar and chat view, so exit code mode explicitly
+  // to avoid polluting downstream assertions.
+  // The exit path must not open any existing normal session (case ③ relies on the first
+  // entry into 「第三季度财报分析」 rehydrating the Shell history card taskId from disk;
+  // pre-opening would route the second entry through the cache path): click 「新对话」
+  // into the code draft page first, then switch back to work mode via the
+  // HomeModeSwitcher — without touching any existing session.
+  await clickText(page, '新对话'); await sleep(500);
+  await page.evaluate(() => document.querySelector('[data-testid="home-mode-work"]')?.click());
+  await sleep(700);
+  const exitedCodeMode = await page.evaluate(() =>
+    document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'chat'
+      && !document.querySelector('[data-testid="sidebar-primary-nav-expand"]'));
+  rec('①a-6 HomeModeSwitcher 切回工作模式退出 code 模式', exitedCodeMode, String(exitedCodeMode));
+
+  // 全部/代码胶囊:三态默认(未选择时 storage 为空且普通模式按「全部」渲染)、
+  // 点击即持久化并切换列表形态;一键折叠按钮聚合当前可见分组的真实状态,
+  // 标签随「全部展开↔存在折叠」翻转。结束前清掉 storage,不污染后续用例。
+  await expand(page); await sleep(300);
+  const sidebarPillState = await page.evaluate(async () => {
+    const settle = () => new Promise(resolve => { setTimeout(resolve, 150); });
+    const inSidebar = (node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.left < 330;
+    };
+    const pillAll = [...document.querySelectorAll('[data-testid="sidebar-task-pill-all"]')].find(inSidebar);
+    const pillCode = [...document.querySelectorAll('[data-testid="sidebar-task-pill-code"]')].find(inSidebar);
+    if (!pillAll || !pillCode) return { found: false };
+    const pressed = (node) => node.getAttribute('aria-pressed') === 'true';
+    const todayLabelVisible = () => [...document.querySelectorAll('span')]
+      .some(node => /^今天 \(\d+\)$/.test((node.textContent || '').trim()) && inSidebar(node));
+    const collapseLabel = () =>
+      document.querySelector('[data-testid="sidebar-collapse-all-groups"]')?.getAttribute('aria-label') || '';
+    // 折叠的真实 DOM 效果:组容器(首个子元素为组头 button)折叠时不再渲染行容器
+    const todayRowsRendered = () => {
+      const group = [...document.querySelectorAll('div')].find(node =>
+        node.children.length >= 1 && node.children[0]?.tagName === 'BUTTON'
+        && /^今天 \(\d+\)$/.test((node.children[0].textContent || '').trim()) && inSidebar(node));
+      return !!group && group.children.length >= 2;
+    };
+    const result = {
+      found: true,
+      freshStoredAbsent: localStorage.getItem('pinvou_sidebar_code_style') === null,
+      freshAllPressed: pressed(pillAll) && !pressed(pillCode),
+      freshTodayShown: todayLabelVisible(),
+    };
+    try {
+      pillCode.click(); await settle();
+      result.codeStored = localStorage.getItem('pinvou_sidebar_code_style') === 'code';
+      result.codePressed = pressed(pillCode) && !pressed(pillAll);
+      result.codeTodayHidden = !todayLabelVisible();
+      pillAll.click(); await settle();
+      result.allStored = localStorage.getItem('pinvou_sidebar_code_style') === 'normal';
+      result.allPressed = pressed(pillAll) && !pressed(pillCode);
+      result.allTodayShown = todayLabelVisible();
+      const before = collapseLabel();
+      const collapseButton = document.querySelector('[data-testid="sidebar-collapse-all-groups"]');
+      result.allCollapseVisible = !!collapseButton && !!before;
+      let labelFlips = false;
+      let domToggles = false;
+      let snapshots = '';
+      if (collapseButton) {
+        const snap = () => collapseLabel() + '|' + todayRowsRendered();
+        const s0 = snap();
+        collapseButton.click(); await settle();
+        const s1 = snap();
+        collapseButton.click(); await settle();
+        const s2 = snap();
+        snapshots = `s0=${s0} s1=${s1} s2=${s2}`;
+        const lbl = (s) => s.split('|')[0];
+        const rows = (s) => s.split('|')[1] === 'true';
+        // 种子会话全部落在「今天」单组:初始即全展开,s0 的 label 即「全展开」基准。
+        // 耦合前提:上方种子中非置顶会话全带今日时间戳、旧种子被默认「置顶优先」
+        // 排序提升出日期组,故此处恰好只有一个可折叠组,label 才能充当
+        // 「全展开⇔行渲染」的代理。若未来加入更早的非置顶种子,这里需改为逐组
+        // 追踪渲染行,而不能继续以 s0 的 label 为基准。
+        const expandedLabel = lbl(s0);
+        labelFlips = !!lbl(s0) && !!lbl(s1) && lbl(s1) !== lbl(s0) && lbl(s2) === lbl(s0);
+        // 每个快照里 label 聚合与行渲染必须一致(全展开⇔行渲染),且初始行确实可见
+        const coherent = (s) => (lbl(s) === expandedLabel) === rows(s);
+        domToggles = rows(s0) === true && coherent(s0) && coherent(s1) && coherent(s2);
+      }
+      result.collapseLabelFlips = labelFlips;
+      result.collapseDomToggles = domToggles;
+      result.snapshots = snapshots;
+    } finally {
+      localStorage.removeItem('pinvou_sidebar_code_style');
+    }
+    return result;
+  });
+  rec('①a-7 任务列表胶囊三态默认/持久化与一键折叠翻转',
+    sidebarPillState.found
+      && sidebarPillState.freshStoredAbsent && sidebarPillState.freshAllPressed && sidebarPillState.freshTodayShown
+      && sidebarPillState.codeStored && sidebarPillState.codePressed && sidebarPillState.codeTodayHidden
+      && sidebarPillState.allStored && sidebarPillState.allPressed && sidebarPillState.allTodayShown
+      && sidebarPillState.allCollapseVisible && sidebarPillState.collapseLabelFlips
+      && sidebarPillState.collapseDomToggles,
+    JSON.stringify(sidebarPillState));
   // 模型表单可能包含尚未保存的名称、地址和密钥，点击遮罩层不能意外丢失草稿；
   // 只有显式点击“取消”才关闭。
   const modelModalOpened = await page.evaluate(() => {
@@ -942,183 +1793,6 @@ async function expand(page) {
     JSON.stringify(modelModalOutsideClick),
   );
 
-  // ①b 工作流运行中可停止；停止后原需求自动进入新任务编辑框。
-  page.on('dialog', async dialog => { await dialog.accept(); });
-  await expand(page); await sleep(300);
-  await page.evaluate(() => document.querySelector('[data-nav="cardpool"]')?.click()); await sleep(700);
-  const expertPoolShell = await page.evaluate(() => {
-    const text = document.body.innerText;
-    return {
-      hasWorkflowNav: !!document.querySelector('[data-nav="workflow"]'),
-      hasExpertPool: text.includes('专家池'),
-      hasIndividualTab: text.includes('个人专家'),
-      hasTeamTab: text.includes('专家团队'),
-      view: document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view'),
-    };
-  });
-  rec('①b-0 工作流入口合入专家池并显示双 Tab',
-    !expertPoolShell.hasWorkflowNav && expertPoolShell.hasExpertPool && expertPoolShell.hasIndividualTab &&
-    expertPoolShell.hasTeamTab && expertPoolShell.view === 'cardpool',
-    JSON.stringify(expertPoolShell));
-  const myPersonasToggle = await page.evaluate(async () => {
-    const button = document.querySelector('[data-testid="my-personas-toggle"]');
-    if (!button) return { found: false };
-    button.click();
-    await new Promise(resolve => setTimeout(resolve, 50));
-    return { found: true, active: button.getAttribute('data-active') };
-  });
-  await clickText(page, '专家团队'); await sleep(700);
-  const myPersonasFromTeam = await page.evaluate(async () => {
-    const button = document.querySelector('[data-testid="my-personas-toggle"]');
-    if (!button) return { found: false };
-    button.click();
-    await new Promise(resolve => setTimeout(resolve, 50));
-    const current = document.querySelector('[data-testid="my-personas-toggle"]');
-    return { found: true, active: current?.getAttribute('data-active') };
-  });
-  rec('①b-1 从专家团队返回“我的专家”保持筛选开启',
-    myPersonasToggle.found && myPersonasToggle.active === 'true' &&
-    myPersonasFromTeam.found && myPersonasFromTeam.active === 'true',
-    JSON.stringify({ initial: myPersonasToggle, fromTeam: myPersonasFromTeam }));
-  await clickText(page, '专家团队'); await sleep(700);
-  const stopButton = await page.evaluate(() => {
-    const button = document.querySelector('[data-testid="workflow-stop-restart"]');
-    if (!button) return false;
-    button.click();
-    return true;
-  });
-  await sleep(700);
-  const stopped = await page.evaluate(() => ({
-    status: window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).workflow.run.status,
-    sessionId: window.__STOP_WORKFLOW_ARGS__ && window.__STOP_WORKFLOW_ARGS__.sessionId,
-    brief: (document.querySelector('textarea') || {}).value || '',
-  }));
-  rec('①b 工作流可停止并预填原需求重开', stopButton && stopped.status === 'stopped' && stopped.sessionId === 's-zombie' && stopped.brief === '原始三省六部需求', JSON.stringify(stopped));
-
-  const workflowModalCoverage = await page.evaluate(() => {
-    const modal = document.querySelector('[data-testid="workflow-new-task-modal"]');
-    const sidebar = document.querySelector('[data-testid="app-sidebar"]');
-    if (!modal || !sidebar) return { found: !!modal, sidebarFound: !!sidebar };
-    const modalRect = modal.getBoundingClientRect();
-    const sidebarRect = sidebar.getBoundingClientRect();
-    const coveredElement = document.elementFromPoint(
-      sidebarRect.left + sidebarRect.width / 2,
-      sidebarRect.top + sidebarRect.height / 2,
-    );
-    return {
-      found: true,
-      sidebarFound: true,
-      mountedAtBody: modal.parentElement === document.body,
-      position: getComputedStyle(modal).position,
-      coversViewport: Math.abs(modalRect.left) < 1 && Math.abs(modalRect.top) < 1
-        && Math.abs(modalRect.width - window.innerWidth) < 1
-        && Math.abs(modalRect.height - window.innerHeight) < 1,
-      coversSidebar: !!coveredElement?.closest('[data-testid="workflow-new-task-modal"]'),
-    };
-  });
-  rec(
-    '①b-2 工作流新建任务弹窗遮罩覆盖包括左侧导航在内的整个窗口',
-    workflowModalCoverage.found && workflowModalCoverage.sidebarFound
-      && workflowModalCoverage.mountedAtBody && workflowModalCoverage.position === 'fixed'
-      && workflowModalCoverage.coversViewport && workflowModalCoverage.coversSidebar,
-    JSON.stringify(workflowModalCoverage),
-  );
-
-  // ①c stop marker 是最终状态：迟到快照即使仍带 running/reviewing，也不能让角色卡回跳。
-  const stoppedAfterLateSnapshot = await page.evaluate(async () => {
-    const handlers = window.__TAURI_EVENT_HANDLERS__['workflow:full_state'] || [];
-    for (const handler of handlers) {
-      await handler({ payload: {
-        session_id: 's-zombie', stopped: true, project_dir: '/x/wf', scenario: 'sansheng_liubu',
-        roles: { taizi: { name: '太子', status: 'running' }, zhongshu: { name: '中书', status: 'reviewing' } },
-      } });
-    }
-    const run = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).workflow.run;
-    return { status: run.status, taizi: run.agents.taizi.status, zhongshu: run.agents.zhongshu.status };
-  });
-  rec(
-    '①c 已停止工作流不被迟到快照恢复为执行中',
-    stoppedAfterLateSnapshot.status === 'stopped'
-      && stoppedAfterLateSnapshot.taizi === 'stopped'
-      && stoppedAfterLateSnapshot.zhongshu === 'stopped',
-    JSON.stringify(stoppedAfterLateSnapshot),
-  );
-  await clickText(page, '取消'); await sleep(300);
-
-  // ①d kick 失败必须 reject 给新建任务弹窗，不能把“项目已创建”误当成启动成功。
-  const kickFailure = await page.evaluate(async () => {
-    window.__KICK_WORKFLOW_ERROR__ = true;
-    let error = '';
-    try {
-      await window.TauriBridge.workflow.startWorkflowTask('sansheng_liubu', { user_request_raw: '测试启动失败' });
-    } catch (e) {
-      error = String((e && e.message) || e);
-    }
-    window.__KICK_WORKFLOW_ERROR__ = false;
-    return {
-      error,
-      calls: window.__TAURI_INVOKES__.filter(call => call.cmd === 'start_workflow' || call.cmd === 'kick_workflow').map(call => call.cmd),
-    };
-  });
-  rec(
-    '①d kick失败向调用方透传具体错误',
-    kickFailure.error.includes('HTTP 401')
-      && kickFailure.calls.slice(-2).join(',') === 'start_workflow,kick_workflow',
-    JSON.stringify(kickFailure),
-  );
-
-  // ①e 后端 blocked 事件和持久化 full_state 都必须把看板置为 blocked，并显示原因。
-  const blockedState = await page.evaluate(async () => {
-    for (const handler of (window.__TAURI_EVENT_HANDLERS__['workflow:project_started'] || [])) {
-      await handler({ payload: { session_id: 's-blocked', project_dir: '/x/blocked', scenario: 'sansheng_liubu' } });
-    }
-    for (const handler of (window.__TAURI_EVENT_HANDLERS__['workflow:blocked'] || [])) {
-      await handler({ payload: { session_id: 's-blocked', status: 'blocked', stage: 'warmup', message: 'HTTP 401: authorization failed' } });
-    }
-    for (const handler of (window.__TAURI_EVENT_HANDLERS__['workflow:full_state'] || [])) {
-      await handler({ payload: {
-        session_id: 's-blocked', blocked: true, blocked_reason: 'HTTP 401: authorization failed',
-        ui: { agentDefs: [{ id: 'taizi', name: '太子', desc: '接旨', color: '#8a1c1c' }], lanes: [{ title: '接旨', agents: ['taizi'] }] },
-        roles: { taizi: { name: '太子', status: 'failed', error: '模型服务鉴权失败：HTTP 401 authorization failed' } },
-      } });
-    }
-    const run = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).workflow.run;
-    return {
-      status: run.status,
-      agentError: run.agents.taizi && run.agents.taizi.error,
-      blockedCards: (run.cards || []).filter(card => card.workflowBlocked).map(card => card.text),
-    };
-  });
-  rec(
-    '①e 预热失败显示权威阻塞状态且不重复错误卡',
-    blockedState.status === 'blocked'
-      && blockedState.blockedCards.length === 1
-      && String(blockedState.blockedCards[0] || '').includes('HTTP 401')
-      && String(blockedState.agentError || '').includes('HTTP 401'),
-    JSON.stringify(blockedState),
-  );
-
-  // ①f 失败角色详情必须同时展示权威 error 和可读的结构化运行日志。
-  const failureDiagnostics = await page.evaluate(async () => {
-    window.TauriBridge.workflow.selectWorkflowRole('taizi');
-    await new Promise(resolve => setTimeout(resolve, 100));
-    return {
-      reason: (document.querySelector('[data-testid="workflow-failure-reason"]') || {}).textContent || '',
-      card: (document.querySelector('[data-testid="workflow-agent-error-taizi"]') || {}).textContent || '',
-      body: document.body.innerText,
-    };
-  });
-  rec(
-    '①f 失败角色展示具体原因和结构化运行日志',
-    failureDiagnostics.reason.includes('HTTP 401')
-      && failureDiagnostics.card.includes('HTTP 401')
-      && failureDiagnostics.body.includes('Tool write_file is not permitted')
-      && failureDiagnostics.body.includes('类型: 工具权限')
-      && failureDiagnostics.body.includes('Agent: agent_diag01')
-      && failureDiagnostics.body.includes('重试: 3/3'),
-    JSON.stringify(failureDiagnostics),
-  );
-  await page.evaluate(() => window.TauriBridge.workflow.closeWorkflowDrawer()); await sleep(100);
 
   // 手机先向尚未在桌面打开的后台 session 发消息：hydration 必须先把磁盘 messages
   // 重建成 chatItems；否则桌面随后切入时只剩这条手机消息，历史和产物卡都像“丢了”。
@@ -1154,10 +1828,10 @@ async function expand(page) {
     .filter(o => o.t.includes('查错') || o.t.includes('发散') || /品|悟/.test(o.x)).length);
   const restored = await page.evaluate(() => {
     const text = document.body.innerText;
-    const artifactPaths = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems
+    const artifactPaths = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems
       .filter(item => item.type === 'artifact_card')
       .map(item => item.path);
-    const restoredShellCards = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.filter(item =>
+    const restoredShellCards = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.filter(item =>
       item.type === 'tool' && item.name === 'exec_shell' && item.args && item.args.command === 'history-shell');
     return {
       history: text.includes('整理纪要'),
@@ -1254,7 +1928,9 @@ async function expand(page) {
     };
     await window.TauriBridge.knowledge.downloadKbModel(false).catch(() => {});
     document.querySelector('[data-nav="knowledge"]')?.click();
-    await wait(300);
+    // 知识库视图为懒加载 chunk:等待加载失败文案出现(chunk 就绪 + 渲染完成)而非固定延时。
+    for (let i = 0; i < 100 && !document.body.innerText.includes('Embedding 模型加载失败'); i++) await wait(50);
+    await wait(100);
     const failedVisible = document.body.innerText.includes('Embedding 模型加载失败');
     const repairButton = [...document.querySelectorAll('button')]
       .find(button => (button.textContent || '').includes('重新下载并修复'));
@@ -1313,6 +1989,128 @@ async function expand(page) {
     assistantCopy.feedback === '已复制' && assistantCopy.title === '已复制' &&
     assistantCopy.singleAction && assistantCopy.sharedFooter && assistantCopy.sameRow,
     JSON.stringify(assistantCopy));
+
+  const assistantExportShare = await page.evaluate(async () => {
+    const action = [...document.querySelectorAll('[data-testid="assistant-message-actions"]')]
+      .find(node => node.closest('[data-conversation-turn]')?.innerText.includes('已生成会议纪要'));
+    const exportButton = action?.querySelector('[data-testid="assistant-message-export"]');
+    const shareButton = action?.querySelector('[data-testid="assistant-message-share"]');
+    if (!exportButton || !shareButton) return { found: false };
+
+    exportButton.click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const exportMenu = document.querySelector('[data-testid="assistant-message-export-menu"]');
+    const markdownOption = exportMenu?.querySelector('[data-testid="assistant-export-md"]');
+    const htmlOption = exportMenu?.querySelector('[data-testid="assistant-export-html"]');
+    const markdownDefault = (markdownOption?.querySelectorAll('svg').length || 0) === 2;
+    const exportAriaLinked = exportButton.getAttribute('aria-controls') === exportMenu?.id &&
+      exportMenu?.getAttribute('aria-labelledby') === exportButton.id &&
+      exportButton.getAttribute('aria-haspopup') === 'menu' &&
+      exportButton.getAttribute('aria-expanded') === 'true';
+    const exportInitialFocus = document.activeElement === markdownOption;
+    exportMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    const exportArrowDown = document.activeElement === htmlOption;
+    exportMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    const exportArrowWrap = document.activeElement === markdownOption;
+    exportMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    const exportArrowUpWrap = document.activeElement === htmlOption;
+    exportMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    const exportHome = document.activeElement === markdownOption;
+    exportMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    const exportEnd = document.activeElement === htmlOption;
+    exportMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const exportEscapeRestored = !document.querySelector('[data-testid="assistant-message-export-menu"]') &&
+      document.activeElement === exportButton && exportButton.getAttribute('aria-expanded') === 'false';
+
+    exportButton.click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    document.querySelector('[data-testid="assistant-export-html"]')?.click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const exportInvoke = [...window.__TAURI_INVOKES__]
+      .reverse()
+      .find(call => call.cmd === 'export_assistant_response');
+    const exportSelectionRestored = document.activeElement === exportButton;
+
+    shareButton.click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    let shareMenu = document.querySelector('[data-testid="assistant-message-share-menu"]');
+    const targets = ['wechat', 'wecom', 'feishu', 'dingtalk', 'qq'];
+    const allTargets = targets.every(target => shareMenu?.querySelector(`[data-testid="assistant-share-${target}"]`));
+    const systemShare = shareMenu?.querySelector('[data-testid="assistant-share-system"]');
+    const qqShare = shareMenu?.querySelector('[data-testid="assistant-share-qq"]');
+    const shareAriaLinked = shareButton.getAttribute('aria-controls') === shareMenu?.id &&
+      shareMenu?.getAttribute('aria-labelledby') === shareButton.id &&
+      shareButton.getAttribute('aria-expanded') === 'true';
+    const shareInitialFocus = document.activeElement === systemShare;
+    const shareStructure = shareMenu?.querySelector('[role="separator"]') &&
+      shareMenu?.querySelector('[role="group"][aria-labelledby]') &&
+      [...shareMenu.querySelectorAll('[role="menuitem"]')].every(item => item.getAttribute('aria-label'));
+    shareMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    const shareEnd = document.activeElement === qqShare;
+    shareMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    const shareArrowWrap = document.activeElement === systemShare;
+    shareMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    const shareArrowUpWrap = document.activeElement === qqShare;
+    shareMenu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const tabClosedWithoutRestore = !document.querySelector('[data-testid="assistant-message-share-menu"]') &&
+      document.activeElement !== shareButton;
+
+    shareButton.click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    shareMenu = document.querySelector('[data-testid="assistant-message-share-menu"]');
+    shareMenu?.querySelector('[data-testid="assistant-share-feishu"]')?.click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    const shareInvoke = [...window.__TAURI_INVOKES__]
+      .reverse()
+      .find(call => call.cmd === 'open_assistant_share_target');
+    return {
+      found: true,
+      exportMenu: Boolean(exportMenu),
+      markdownDefault,
+      exportAriaLinked,
+      exportInitialFocus,
+      exportArrowDown,
+      exportArrowWrap,
+      exportArrowUpWrap,
+      exportHome,
+      exportEnd,
+      exportEscapeRestored,
+      exportSelectionRestored,
+      exportFormat: exportInvoke?.args?.format || '',
+      exportName: exportInvoke?.args?.defaultName || '',
+      htmlStandalone: exportInvoke?.args?.content?.startsWith('<!doctype html>') || false,
+      htmlSafe: !/<script>/i.test(exportInvoke?.args?.content || ''),
+      shareMenu: Boolean(shareMenu),
+      allTargets,
+      shareAriaLinked,
+      shareInitialFocus,
+      shareStructure: Boolean(shareStructure),
+      shareEnd,
+      shareArrowWrap,
+      shareArrowUpWrap,
+      tabClosedWithoutRestore,
+      shareSelectionRestored: document.activeElement === shareButton,
+      shareTarget: shareInvoke?.args?.target || '',
+      shareFeedback: action.innerText,
+    };
+  });
+  rec('③a-4 回复可默认导出 Markdown、选择 HTML，并复制后打开常见通信应用',
+    assistantExportShare.found && assistantExportShare.exportMenu && assistantExportShare.markdownDefault &&
+    assistantExportShare.exportAriaLinked && assistantExportShare.exportInitialFocus &&
+    assistantExportShare.exportArrowDown && assistantExportShare.exportArrowWrap &&
+    assistantExportShare.exportArrowUpWrap && assistantExportShare.exportHome && assistantExportShare.exportEnd &&
+    assistantExportShare.exportEscapeRestored && assistantExportShare.exportSelectionRestored &&
+    assistantExportShare.exportFormat === 'html' && assistantExportShare.exportName.endsWith('.html') &&
+    assistantExportShare.htmlStandalone && assistantExportShare.htmlSafe && assistantExportShare.shareMenu &&
+    assistantExportShare.allTargets && assistantExportShare.shareAriaLinked &&
+    assistantExportShare.shareInitialFocus && assistantExportShare.shareStructure &&
+    assistantExportShare.shareEnd && assistantExportShare.shareArrowWrap && assistantExportShare.shareArrowUpWrap &&
+    assistantExportShare.tabClosedWithoutRestore && assistantExportShare.shareSelectionRestored &&
+    assistantExportShare.shareTarget === 'feishu' &&
+    assistantExportShare.shareFeedback.includes('请粘贴发送'),
+    JSON.stringify(assistantExportShare));
 
   // 会话输入框是页面条件渲染的：跳工具商店会卸载 ChatView，返回同一 session
   // 必须恢复未发送内容，不得因组件重建清空。
@@ -1401,7 +2199,7 @@ async function expand(page) {
   });
   await sleep(200);
   const liveShell = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
     return {
       running: item && item.state === 'running',
       output: item && item.output,
@@ -1419,7 +2217,7 @@ async function expand(page) {
   });
   await sleep(100);
   const liveShellWait = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
+    const item = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
     return {
       running: item && item.state === 'running',
       output: item && item.output,
@@ -1441,7 +2239,7 @@ async function expand(page) {
   });
   await sleep(100);
   const splitTerminal = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal');
+    const item = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal');
     return item && item.output;
   });
   rec('terminal parser preserves CRLF and ANSI state across live chunks',
@@ -1458,7 +2256,7 @@ async function expand(page) {
     await emit('chat:tool_delta', { session_id:'s1', id:'split-terminal-stderr', stream:'stderr', content:'m' });
   });
   const splitTerminalStderr = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal-stderr');
+    const item = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal-stderr');
     return item && item.output;
   });
   rec('terminal parser preserves stderr ANSI state across live chunks',
@@ -1479,7 +2277,7 @@ async function expand(page) {
   });
   await sleep(150);
   const backgroundShell = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
     const button = document.querySelector('[data-testid="cancel-shell-task"][data-shell-task-id="shell-bg-1"]');
     if (button) button.click();
     return {
@@ -1506,7 +2304,7 @@ async function expand(page) {
     }});
   });
   const backgroundKilled = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
     return {
       terminal: item && item.state === 'failed' && item.shellStatus === 'Killed' && item.background === false,
       output: item && item.output,
@@ -1526,7 +2324,7 @@ async function expand(page) {
     await emit('chat:tool_start', { session_id:'s1', id:'live-mcp', name:'mcp_gongwen_make_gongwen', args:{} });
     await emit('chat:tool_end', { session_id:'s1', id:'live-mcp', success:true, output:'{"path":"live-report.docx"}' });
   });
-  const liveArtifacts = await page.evaluate(() => window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).artifacts.map(item => item.path));
+  const liveArtifacts = await page.evaluate(() => window.TauriBridge.state.getMany(['chat', 'vllm']).artifacts.map(item => item.path));
   rec('③b 实时 tool_end 不跟踪 shell path、保留 MCP 产物', liveArtifacts.includes('live-report.docx') && !liveArtifacts.includes('live-validator-fake.html'), JSON.stringify(liveArtifacts));
 
   // ④ 后端 pending 事件必须直达 React 候选卡；三个决策按钮必须调用各自命令。
@@ -1580,13 +2378,13 @@ async function expand(page) {
   });
   await sleep(700);
   const shellRunning = await page.evaluate(() => {
-    const item=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
+    const item=window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
     return item && {state:item.state,taskId:item.taskId,output:item.output};
   });
   await page.evaluate(() => window.TauriBridge.chat.cancelShellTask('s1','task-live-1'));
   await sleep(700);
   const shellCancelled = await page.evaluate(() => {
-    const item=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
+    const item=window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
     return {item:item&&{state:item.state,exitCode:item.exitCode,output:item.output},args:window.__CANCEL_SHELL_ARGS__};
   });
   rec('③c Shell 实时 tail、省略标记、task_id 取消与退出码',
@@ -1613,7 +2411,7 @@ async function expand(page) {
   });
   await sleep(700);
   const ambiguousBeforeEnd = await page.evaluate(() => {
-    const items=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems;
+    const items=window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems;
     return ['dup-tool-a','dup-tool-b'].map(id => {
       const item=items.find(it=>it.toolId===id); return item && item.taskId;
     });
@@ -1627,7 +2425,7 @@ async function expand(page) {
   });
   await sleep(500);
   const shellIdentity = await page.evaluate(() => {
-    const items=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems;
+    const items=window.TauriBridge.state.getMany(['chat', 'vllm']).chatItems;
     const a=items.filter(it=>it.taskId==='task-dup-a');
     const b=items.filter(it=>it.taskId==='task-dup-b');
     const done=items.find(it=>it.taskId==='task-detached-done');
@@ -1698,12 +2496,50 @@ async function expand(page) {
   });
   rec('⑥ chip 渲染+下拉两项+点Plan切到Plan', chip.found && /YOLO/.test(chip.label || '') && chipMenu.yoloDesc && chipMenu.planDesc && /Plan/.test(afterLabel), JSON.stringify({ ...chip, ...chipMenu, afterLabel }));
 
+  // Switching the permission mode affects subsequent turns only. The active
+  // streaming turn must not be cancelled, and later deltas must remain visible.
+  const modeSwitchInvokeStart = await page.evaluate(async () => {
+    const handlers = window.__TAURI_EVENT_HANDLERS__['chat:turn_started'] || [];
+    for (const handler of handlers) await handler({ payload: { session_id: 's1' } });
+    return window.__TAURI_INVOKES__.length;
+  });
+  await page.evaluate(() => {
+    document.querySelector('[title^="切换工作模式"]')?.click();
+  });
+  await sleep(150);
+  await clickText(page, 'YOLO');
+  await sleep(300);
+  const modeSwitchDuringStream = await page.evaluate(async (invokeStart) => {
+    const deltaHandlers = window.__TAURI_EVENT_HANDLERS__['chat:delta'] || [];
+    for (const handler of deltaHandlers) {
+      await handler({ payload: { session_id: 's1', text: 'mode-switch-stream-continued' } });
+    }
+    const recent = window.__TAURI_INVOKES__.slice(invokeStart);
+    return {
+      exitedPlan: recent.some(entry => entry.cmd === 'exit_plan_to_yolo' && entry.args.sessionId === 's1'),
+      cancelled: recent.some(entry => entry.cmd === 'cancel_generation' && entry.args.sessionId === 's1'),
+      busy: window.TauriBridge.state.get('chat').busy,
+      continued: window.TauriBridge.state.get('chat').chatItems.some(item =>
+        item && item.type === 'assistant' && String(item.text || '').includes('mode-switch-stream-continued')),
+    };
+  }, modeSwitchInvokeStart);
+  rec('switching Plan to YOLO keeps the active response streaming',
+    modeSwitchDuringStream.exitedPlan && !modeSwitchDuringStream.cancelled &&
+      modeSwitchDuringStream.busy && modeSwitchDuringStream.continued,
+    JSON.stringify(modeSwitchDuringStream));
+  await page.evaluate(async () => {
+    const handlers = window.__TAURI_EVENT_HANDLERS__['chat:done'] || [];
+    for (const handler of handlers) {
+      await handler({ payload: { session_id: 's1', status: 'Completed' } });
+    }
+  });
+
   // ⑤b 收纳成功 toast 的「前往查看」必须直达对话管理页并展开「已收纳」面板，且按钮不折行。
   await expand(page); await sleep(200);
   const archiveMenuOpened = await page.evaluate(() => {
     const label = [...document.querySelectorAll('span')]
       .find(node => (node.textContent || '').trim() === '第三季度财报分析' && node.getBoundingClientRect().left < 330);
-    const row = label && label.closest('div[class*="cursor-pointer"]');
+    const row = label && label.closest('button');
     if (!row) return false;
     const rect = row.getBoundingClientRect();
     row.dispatchEvent(new MouseEvent('contextmenu', {
@@ -1756,7 +2592,7 @@ async function expand(page) {
   });
   await sleep(3300);
   const timedOutSetup = await page.evaluate(() => {
-    const setup = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).vllmSetup || {};
+    const setup = window.TauriBridge.state.getMany(['chat', 'vllm']).vllmSetup || {};
     return {
       popup: document.body.innerText.includes('启用本地大模型'),
       state: setup.engine_state,
@@ -1806,7 +2642,13 @@ async function expand(page) {
   await expand(page); await sleep(200);
   await page.waitForSelector('[data-testid="codex-sidebar-item"]', { timeout: 10000 }).catch(() => {});
   await page.evaluate(() => document.querySelector('[data-testid="codex-sidebar-item"]')?.click());
-  await sleep(500);
+  // CodexAcpView is lazy-loaded; wait for the legacy timeline instead of assuming
+  // the chunk and hydrated session will settle within a fixed local delay.
+  await page.waitForFunction(() => (
+    document.querySelector('[data-testid="conversation-reasoning-toggle"]')
+    && document.querySelector('[data-testid="conversation-tool-group-summary"]')
+    && document.querySelector('[data-testid="conversation-compact-item-toggle"]')
+  ), { timeout: 20000 }).catch(() => {});
   const legacyConversationA11y = await page.evaluate(async () => {
     const state = (toggle) => {
       const controls = toggle?.getAttribute('aria-controls') || '';
@@ -1889,6 +2731,95 @@ async function expand(page) {
       && !legacyConversationA11y.compactCollapsed.controls
       && !legacyConversationA11y.compactCollapsed.detailsPresent,
     JSON.stringify(legacyConversationA11y));
+
+  // ⑩b legacy 长会话离屏合成不应为 ChatBubble 返回 null 的项（reasoning / 已忽略记忆候选 /
+  // 未知类型）产生空 content-visibility wrapper：空 wrapper 离屏时仍按
+  // contain-intrinsic-size(auto 600px) 占位，会污染 scrollHeight 造成滚动条缩跳与滚底跳变。
+  // 修复 = legacy 列表 map 跳过 reasoning + .cv-bubble:empty{display:none} 兜底其余 null 情况。
+  await clickText(page, '第三季度财报分析');
+  await sleep(1500);
+  const legacyReasoningGuard = await page.evaluate(async () => {
+    const emit = async (name, payload) => {
+      const handlers = window.__TAURI_EVENT_HANDLERS__[name] || [];
+      for (const handler of handlers) await handler({ payload });
+    };
+    // 向普通 s1 会话注入多条 reasoning 历史（每轮一条），模拟长 legacy 会话。
+    for (let i = 0; i < 12; i++) {
+      await emit('chat:reasoning_start', { session_id: 's1', index: `legacy-reasoning-${i}` });
+      await emit('chat:reasoning_delta', { session_id: 's1', index: `legacy-reasoning-${i}`, text: `离屏推理历史 ${i} `.repeat(40) });
+      await emit('chat:reasoning_done', { session_id: 's1', index: `legacy-reasoning-${i}` });
+    }
+    await new Promise(r => setTimeout(r, 400));
+    const wrappers = [...document.querySelectorAll('.cv-bubble')];
+    const emptyWrappers = wrappers.filter(w => w.children.length === 0);
+    const reasoningLeaked = document.body.innerText.includes('离屏推理历史');
+    const totalHeight = wrappers.reduce((sum, w) => sum + w.getBoundingClientRect().height, 0);
+    return {
+      wrapperCount: wrappers.length,
+      emptyCount: emptyWrappers.length,
+      reasoningLeaked,
+      // 12 条空 reasoning 若未被修复，离屏至少占 12 * 600 = 7200px；修复后应为 0。
+      emptyContributionPx: Math.round(totalHeight),
+    };
+  });
+  rec('⑩b legacy 离屏合不为 reasoning/隐藏项留空 wrapper（防 scrollHeight 污染）',
+    legacyReasoningGuard.emptyCount === 0 && !legacyReasoningGuard.reasoningLeaked,
+    JSON.stringify(legacyReasoningGuard));
+
+  // ⑩c 侧栏拖拽柄的 WAI-ARIA Window Splitter 键盘交互。
+  await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
+  await sleep(250);
+  const sidebarWidthOf = () => page.evaluate(() => {
+    const sidebar = document.querySelector('[data-testid="app-sidebar"]');
+    return sidebar ? Math.round(sidebar.getBoundingClientRect().width) : -1;
+  });
+  const pressHandle = (key, shift = false) => page.evaluate((k, withShift) => {
+    const handle = document.querySelector('[data-testid="sidebar-resize-handle"]');
+    if (!handle) throw new Error('sidebar-resize-handle not found');
+    handle.dispatchEvent(new KeyboardEvent('keydown', {
+      key: k, bubbles: true, cancelable: true, shiftKey: withShift,
+    }));
+  }, key, shift);
+  const handleState = await page.evaluate(() => {
+    const handle = document.querySelector('[data-testid="sidebar-resize-handle"]');
+    if (!handle) return null;
+    return {
+      focusable: handle.tabIndex === 0,
+      tag: handle.tagName,
+      value: Number(handle.getAttribute('aria-valuenow')),
+      min: Number(handle.getAttribute('aria-valuemin')),
+      max: Number(handle.getAttribute('aria-valuemax')),
+      label: handle.hasAttribute('aria-label'),
+      controls: handle.getAttribute('aria-controls'),
+      controlsExist: !!document.getElementById(handle.getAttribute('aria-controls') || ''),
+    };
+  });
+  const initialWidth = await sidebarWidthOf();
+  const ariaWidth = () => page.evaluate(() => Number(document.querySelector('[data-testid="sidebar-resize-handle"]')?.getAttribute('aria-valuenow') || -1));
+  await pressHandle('ArrowRight'); await sleep(60);
+  const afterGrow = await ariaWidth();
+  await pressHandle('ArrowLeft', true); await sleep(60);
+  const afterShrink = await ariaWidth();
+  await pressHandle('Home'); await sleep(60);
+  const atMin = await ariaWidth();
+  await pressHandle('ArrowLeft'); await sleep(60);
+  const clampedBelow = await ariaWidth();
+  await pressHandle('End'); await sleep(60);
+  const atMax = await ariaWidth();
+  await pressHandle('ArrowRight'); await sleep(60);
+  const clampedAbove = await ariaWidth();
+  const persistedAtMax = await page.evaluate(() => localStorage.getItem('pinvou_sidebar_width'));
+  await sleep(450);
+  const settledWidth = await sidebarWidthOf();
+  rec('⑩c sidebar splitter 支持方向键/Home/End、边界限制与持久化',
+    !!handleState && handleState.focusable && handleState.tag === 'HR'
+      && handleState.min === 220 && handleState.max === 480 && handleState.label
+      && handleState.controls === 'app-sidebar' && handleState.controlsExist
+      && initialWidth === 280 && afterGrow === 304 && afterShrink === 220
+      && atMin === 220 && clampedBelow === 220
+      && atMax === 480 && clampedAbove === 480
+      && persistedAtMax === '480' && settledWidth === 480,
+    JSON.stringify({ handleState, initialWidth, afterGrow, afterShrink, atMin, clampedBelow, atMax, clampedAbove, persistedAtMax, settledWidth }));
 
   if (errs.length) console.log('⚠️ PAGEERRORS:', errs.slice(0, 3).join(' | '));
   await browser.close();

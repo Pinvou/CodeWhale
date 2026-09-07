@@ -5,9 +5,14 @@ pub use types::*;
 use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
-use futures_util::StreamExt;
-use reqwest::{multipart, Client, Response, StatusCode, Url};
+use futures_util::{StreamExt, future::join_all};
+use reqwest::{
+    Client, Response, StatusCode, Url,
+    header::{CONTENT_TYPE, HeaderMap, HeaderValue},
+    multipart,
+};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -20,6 +25,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_AVATAR_BYTES: u64 = 1536 * 1024;
 const DEFAULT_TEAM_RELAY_HUB_URL: &str = "https://pinvou.com/pinvou3/team-relay";
 
 #[derive(Debug, serde::Deserialize)]
@@ -32,6 +38,8 @@ struct HubError {
     code: String,
     message: String,
     request_id: String,
+    #[serde(default)]
+    details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -50,16 +58,22 @@ pub struct TeamRelayManager {
 
 #[derive(Debug)]
 struct TeamRelayEventTask {
-    team_id: String,
+    scope_key: String,
     handle: tauri::async_runtime::JoinHandle<()>,
 }
 
 impl TeamRelayManager {
     pub fn new() -> Result<Self, String> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-pinvou-team-relay-protocol",
+            HeaderValue::from_static("0.2"),
+        );
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(45))
             .user_agent(concat!("Pinvou-Team-Relay/", env!("CARGO_PKG_VERSION")))
+            .default_headers(headers.clone())
             .build()
             .map_err(|error| format!("team_relay_client_unavailable: {error}"))?;
         // SSE is an intentionally long-lived response. A total request timeout would
@@ -67,6 +81,7 @@ impl TeamRelayManager {
         let event_client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .user_agent(concat!("Pinvou-Team-Relay/", env!("CARGO_PKG_VERSION")))
+            .default_headers(headers)
             .build()
             .map_err(|error| format!("team_relay_event_client_unavailable: {error}"))?;
         Ok(Self {
@@ -159,10 +174,18 @@ impl TeamRelayManager {
 
     pub async fn account_state(&self) -> Result<TeamRelayAccountState, String> {
         let (settings, token) = self.configured()?;
+        self.fetch_account_state(&settings, &token).await
+    }
+
+    async fn fetch_account_state(
+        &self,
+        settings: &TeamRelaySettings,
+        token: &str,
+    ) -> Result<TeamRelayAccountState, String> {
         let me_response = self
             .client
             .get(endpoint(&settings.hub_url, "v1/me"))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(network_error)?;
@@ -170,7 +193,7 @@ impl TeamRelayManager {
         let teams_response = self
             .client
             .get(endpoint(&settings.hub_url, "v1/teams"))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(network_error)?;
@@ -254,10 +277,10 @@ impl TeamRelayManager {
 
     pub async fn bootstrap(&self) -> Result<TeamRelaySnapshot, String> {
         let (settings, token) = self.configured()?;
-        if settings.team_id.is_empty() {
-            return Err("team_relay_team_required: create or join a team first".to_string());
-        }
-        self.bootstrap_for(&settings, &token).await
+        self.recover_current_team(settings, &token)
+            .await?
+            .snapshot
+            .ok_or_else(|| "team_relay_team_required: create or join a team first".to_string())
     }
 
     pub async fn update_profile(
@@ -277,6 +300,176 @@ impl TeamRelayManager {
         self.bootstrap_for(&settings, &token).await
     }
 
+    pub async fn upload_avatar(&self, path: &Path) -> Result<TeamRelaySnapshot, String> {
+        let metadata =
+            std::fs::metadata(path).map_err(|error| format!("avatar_unreadable: {error}"))?;
+        if !metadata.is_file() {
+            return Err("avatar_unreadable: selected path is not a file".to_string());
+        }
+        if metadata.len() == 0 {
+            return Err("avatar_unreadable: selected file is empty".to_string());
+        }
+        if metadata.len() > MAX_AVATAR_BYTES {
+            return Err("avatar_too_large: avatar exceeds 1.5 MiB".to_string());
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "avatar_invalid_name: filename is not valid UTF-8".to_string())?;
+        if !avatar_extension_allowed(path) {
+            return Err(
+                "avatar_type_not_allowed: select a PNG, JPEG, WebP or GIF image".to_string(),
+            );
+        }
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| format!("avatar_unreadable: {error}"))?;
+        let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+        let (settings, token) = self.configured()?;
+        let form = multipart::Form::new().part(
+            "file",
+            multipart::Part::stream_with_length(body, metadata.len())
+                .file_name(file_name.to_string()),
+        );
+        let response = self
+            .client
+            .put(endpoint(&settings.hub_url, "v1/me/avatar"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let _: AvatarMutationResponse = decode(response).await?;
+        self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn remove_avatar(&self) -> Result<TeamRelaySnapshot, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .delete(endpoint(&settings.hub_url, "v1/me/avatar"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn avatar_data_url(
+        &self,
+        requested_team_id: Option<&str>,
+        principal_id: &str,
+        expected_sha256: &str,
+        display_size: Option<u16>,
+        reduced_motion: bool,
+    ) -> Result<Option<String>, String> {
+        validate_local_identifier("principal_id", principal_id)?;
+        let display_size = validate_avatar_display_size(display_size)?;
+        let expected_sha256 = expected_sha256.trim().to_ascii_lowercase();
+        if expected_sha256.len() != 64
+            || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("avatar_digest_invalid: expected SHA-256 digest is invalid".to_string());
+        }
+        let (settings, token) = self.configured()?;
+        let team_id = resolve_avatar_team_id(&settings.team_id, requested_team_id)?;
+        let mut query = vec![("team_id", team_id.to_string())];
+        if let Some(size) = display_size {
+            query.push(("size", size.to_string()));
+        }
+        if reduced_motion {
+            let Some(_) = display_size else {
+                return Err(
+                    "avatar_size_invalid: reduced motion requires a display variant".to_string(),
+                );
+            };
+            query.push(("reduced_motion", "true".to_string()));
+        }
+        let response = self
+            .client
+            .get(endpoint(
+                &settings.hub_url,
+                &format!("v1/principals/{principal_id}/avatar"),
+            ))
+            .bearer_auth(&token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        let source_sha256 = response
+            .headers()
+            .get("x-avatar-source-sha256")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_ascii_lowercase());
+        if source_sha256
+            .as_deref()
+            .is_some_and(|value| value != expected_sha256)
+        {
+            return Err(
+                "avatar_digest_mismatch: Hub avatar version changed during download".to_string(),
+            );
+        }
+        let content_digest = response
+            .headers()
+            .get("digest")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("sha-256="))
+            .map(str::to_string);
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .filter(|value| avatar_content_type_allowed(value))
+            .ok_or_else(|| {
+                "avatar_type_not_allowed: Hub returned an unsupported image".to_string()
+            })?;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_AVATAR_BYTES)
+        {
+            return Err("avatar_too_large: Hub returned more than 1.5 MiB".to_string());
+        }
+        let mut bytes = Vec::new();
+        let mut digest = Sha256::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(network_error)?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_AVATAR_BYTES as usize {
+                return Err("avatar_too_large: Hub returned more than 1.5 MiB".to_string());
+            }
+            digest.update(&chunk);
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Err("hub_response_invalid: Hub returned an empty avatar".to_string());
+        }
+        let actual_digest = digest.finalize();
+        if !avatar_integrity_verified(
+            &expected_sha256,
+            source_sha256.as_deref(),
+            content_digest.as_deref(),
+            &actual_digest,
+        ) {
+            return Err(
+                "avatar_digest_mismatch: Hub avatar failed integrity validation".to_string(),
+            );
+        }
+        Ok(Some(format!(
+            "data:{content_type};base64,{}",
+            BASE64_STANDARD.encode(bytes)
+        )))
+    }
+
     async fn bootstrap_for(
         &self,
         settings: &TeamRelaySettings,
@@ -290,30 +483,43 @@ impl TeamRelayManager {
             .await
             .map_err(network_error)?;
         let teams: ListTeamsResponse = decode(teams_response).await?;
-        let response = self
-            .client
-            .get(endpoint(&settings.hub_url, "v1/bootstrap"))
-            .bearer_auth(&token)
-            .query(&[("team_id", settings.team_id.as_str())])
-            .send()
+        let bootstrap_requests = teams.teams.iter().map(|team| async {
+            let response = self
+                .client
+                .get(endpoint(&settings.hub_url, "v1/bootstrap"))
+                .bearer_auth(token)
+                .query(&[("team_id", team.id.as_str())])
+                .send()
+                .await
+                .map_err(network_error)?;
+            decode::<BootstrapResponse>(response).await
+        });
+        let team_bootstraps = join_all(bootstrap_requests)
             .await
-            .map_err(network_error)?;
-        let bootstrap: BootstrapResponse = decode(response).await?;
-        if bootstrap.protocol_version != "0.1" {
-            return Err(format!(
-                "protocol_version_unsupported: {}",
-                bootstrap.protocol_version
-            ));
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        for bootstrap in &team_bootstraps {
+            if !matches!(bootstrap.protocol_version.as_str(), "0.1" | "0.2") {
+                return Err(format!(
+                    "protocol_version_unsupported: {}",
+                    bootstrap.protocol_version
+                ));
+            }
         }
-
-        let attachment_ids: HashSet<String> = bootstrap
-            .threads
+        let bootstrap = team_bootstraps
             .iter()
+            .find(|item| item.team.id == settings.team_id)
+            .or_else(|| team_bootstraps.first())
+            .cloned()
+            .ok_or_else(|| "team_relay_team_required: create or join a team first".to_string())?;
+
+        let attachment_ids: HashSet<String> = team_bootstraps
+            .iter()
+            .flat_map(|item| item.threads.iter())
             .flat_map(|thread| thread.actions.iter())
             .flat_map(|action| action.attachment_ids.iter().cloned())
             .collect();
-        let mut attachments = HashMap::new();
-        for attachment_id in attachment_ids {
+        let attachment_requests = attachment_ids.into_iter().map(|attachment_id| async move {
             let response = self
                 .client
                 .get(endpoint(
@@ -324,14 +530,84 @@ impl TeamRelayManager {
                 .send()
                 .await
                 .map_err(network_error)?;
-            let attachment: Attachment = decode(response).await?;
+            decode::<Attachment>(response).await
+        });
+        let mut attachments = HashMap::new();
+        for attachment in join_all(attachment_requests).await {
+            let attachment = attachment?;
             attachments.insert(attachment.id.clone(), attachment);
         }
         Ok(TeamRelaySnapshot {
             bootstrap,
+            team_bootstraps,
             attachments,
             teams: teams.teams,
         })
+    }
+
+    async fn recover_current_team(
+        &self,
+        mut settings: TeamRelaySettings,
+        token: &str,
+    ) -> Result<TeamRelayLifecycleState, String> {
+        let account = self.fetch_account_state(&settings, token).await?;
+        let recovered_team_id = account
+            .teams
+            .iter()
+            .find(|team| team.id == settings.team_id)
+            .or_else(|| account.teams.first())
+            .map(|team| team.id.clone())
+            .unwrap_or_default();
+        if settings.team_id != recovered_team_id {
+            settings.team_id = recovered_team_id;
+            self.save_settings(&settings)?;
+        }
+        let snapshot = if settings.team_id.is_empty() {
+            None
+        } else {
+            Some(self.bootstrap_for(&settings, token).await?)
+        };
+        Ok(TeamRelayLifecycleState { snapshot, account })
+    }
+
+    async fn finish_lifecycle_mutation(
+        &self,
+        mut settings: TeamRelaySettings,
+        token: &str,
+        clear_current_team: bool,
+    ) -> TeamRelayLifecycleResult {
+        let fallback_team_id = if clear_current_team || settings.team_id.is_empty() {
+            None
+        } else {
+            Some(settings.team_id.clone())
+        };
+        let mut result = TeamRelayLifecycleResult {
+            committed: true,
+            active_team_id: fallback_team_id,
+            snapshot: None,
+            account: None,
+            sync_error: None,
+        };
+
+        if clear_current_team {
+            settings.team_id.clear();
+            if let Err(error) = self.save_settings(&settings) {
+                result.record_sync_error(error);
+            }
+        }
+
+        match self.recover_current_team(settings, token).await {
+            Ok(state) => {
+                result.active_team_id = state
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.bootstrap.team.id.clone());
+                result.snapshot = state.snapshot;
+                result.account = Some(state.account);
+            }
+            Err(error) => result.record_sync_error(error),
+        }
+        result
     }
 
     pub async fn create_team(&self, name: &str) -> Result<TeamRelaySnapshot, String> {
@@ -478,6 +754,66 @@ impl TeamRelayManager {
         Ok(())
     }
 
+    pub async fn transfer_owner(
+        &self,
+        new_owner_id: &str,
+    ) -> Result<TeamRelayLifecycleResult, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .post(endpoint(
+                &settings.hub_url,
+                &format!("v1/teams/{}/owner-transfer", settings.team_id),
+            ))
+            .bearer_auth(&token)
+            .json(&json!({ "new_owner_id": new_owner_id }))
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        Ok(self
+            .finish_lifecycle_mutation(settings, &token, false)
+            .await)
+    }
+
+    pub async fn leave_team(&self) -> Result<TeamRelayLifecycleResult, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .delete(endpoint(
+                &settings.hub_url,
+                &format!("v1/teams/{}/members/me", settings.team_id),
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        Ok(self.finish_lifecycle_mutation(settings, &token, true).await)
+    }
+
+    pub async fn dissolve_team(&self) -> Result<TeamRelayLifecycleResult, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .delete(endpoint(
+                &settings.hub_url,
+                &format!("v1/teams/{}", settings.team_id),
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        Ok(self.finish_lifecycle_mutation(settings, &token, true).await)
+    }
+
     pub async fn create_thread(
         &self,
         input: CreateThreadInput,
@@ -488,7 +824,7 @@ impl TeamRelayManager {
             .post(endpoint(&settings.hub_url, "v1/threads"))
             .bearer_auth(token)
             .json(&json!({
-                "team_id": settings.team_id,
+                "team_id": input.team_id,
                 "title": input.title,
                 "assignee_id": input.assignee_id,
                 "message": input.message,
@@ -550,11 +886,32 @@ impl TeamRelayManager {
         decode(response).await
     }
 
+    pub async fn mark_thread_read(
+        &self,
+        thread_id: &str,
+        input: MarkThreadReadInput,
+    ) -> Result<ThreadReadState, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .put(endpoint(
+                &settings.hub_url,
+                &format!("v1/threads/{thread_id}/read"),
+            ))
+            .bearer_auth(token)
+            .json(&input)
+            .send()
+            .await
+            .map_err(network_error)?;
+        decode(response).await
+    }
+
     pub async fn upload_attachment(
         &self,
         app: AppHandle,
         path: &Path,
         upload_id: &str,
+        team_id: &str,
     ) -> Result<Attachment, String> {
         let metadata =
             std::fs::metadata(path).map_err(|error| format!("attachment_unreadable: {error}"))?;
@@ -591,7 +948,7 @@ impl TeamRelayManager {
         let body = reqwest::Body::wrap_stream(stream);
         let (settings, token) = self.configured()?;
         let form = multipart::Form::new()
-            .text("team_id", settings.team_id)
+            .text("team_id", team_id.to_string())
             .part(
                 "file",
                 multipart::Part::stream_with_length(body, total_bytes)
@@ -694,25 +1051,21 @@ impl TeamRelayManager {
         }
         drop(file);
         let replace_result = if destination.exists() {
-            crate::platform::filesystem::replace_file_atomically(&temporary, destination, &backup)
+            replace_downloaded_attachment(&temporary, destination, &backup)
         } else {
             match std::fs::rename(&temporary, destination) {
                 Ok(()) => Ok(()),
                 Err(_) if destination.exists() => {
-                    crate::platform::filesystem::replace_file_atomically(
-                        &temporary,
-                        destination,
-                        &backup,
-                    )
+                    replace_downloaded_attachment(&temporary, destination, &backup)
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    let _ = std::fs::remove_file(&backup);
+                    Err(format!("attachment_save_failed: {error}"))
+                }
             }
         };
-        if let Err(error) = replace_result {
-            let _ = std::fs::remove_file(&temporary);
-            let _ = std::fs::remove_file(&backup);
-            return Err(format!("attachment_save_failed: {error}"));
-        }
+        replace_result?;
         if let Ok(directory) = std::fs::File::open(parent) {
             let _ = directory.sync_all();
         }
@@ -722,13 +1075,18 @@ impl TeamRelayManager {
     pub fn task_workspace_status(
         &self,
         thread_id: &str,
+        team_id: Option<&str>,
     ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
         validate_local_identifier("thread_id", thread_id)?;
         let settings = self
             .load_settings()?
             .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
-        let manifest = self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let team_id = team_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&settings.team_id);
+        validate_local_identifier("team_id", team_id)?;
+        let root = self.task_workspace_root(team_id, thread_id);
+        let manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         let materials_dir = root.join("materials");
         let materials = manifest
             .materials
@@ -755,20 +1113,17 @@ impl TeamRelayManager {
         validate_local_identifier("thread_id", thread_id)?;
         let snapshot = self.bootstrap().await?;
         let detail = snapshot
-            .bootstrap
-            .threads
+            .team_bootstraps
             .iter()
+            .flat_map(|bootstrap| bootstrap.threads.iter())
             .find(|detail| detail.thread.id == thread_id)
             .ok_or_else(|| "thread_not_found: the work item is not available".to_string())?;
-        let settings = self
-            .load_settings()?
-            .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
+        let team_id = detail.thread.team_id.as_str();
+        let root = self.task_workspace_root(team_id, thread_id);
         let materials_dir = root.join("materials");
         std::fs::create_dir_all(&materials_dir)
             .map_err(|error| format!("team_relay_workspace_write_failed: {error}"))?;
-        let mut manifest =
-            self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let mut manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         let mut actions = detail.actions.iter().collect::<Vec<_>>();
         actions.sort_by_key(|action| action.sequence);
         let mut seen = HashSet::new();
@@ -860,14 +1215,19 @@ impl TeamRelayManager {
         &self,
         thread_id: &str,
         attachment_id: &str,
+        team_id: Option<&str>,
     ) -> Result<(), String> {
         validate_local_identifier("thread_id", thread_id)?;
         validate_local_identifier("attachment_id", attachment_id)?;
         let settings = self
             .load_settings()?
             .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
-        let manifest = self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let team_id = team_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&settings.team_id);
+        validate_local_identifier("team_id", team_id)?;
+        let root = self.task_workspace_root(team_id, thread_id);
+        let manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         let material = manifest
             .materials
             .iter()
@@ -893,6 +1253,7 @@ impl TeamRelayManager {
         &self,
         thread_id: &str,
         input: SetTeamRelayAgentSessionInput,
+        team_id: Option<&str>,
     ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
         validate_local_identifier("thread_id", thread_id)?;
         validate_local_identifier("session_id", &input.session_id)?;
@@ -921,9 +1282,12 @@ impl TeamRelayManager {
         let settings = self
             .load_settings()?
             .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
-        let mut manifest =
-            self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let team_id = team_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&settings.team_id);
+        validate_local_identifier("team_id", team_id)?;
+        let root = self.task_workspace_root(team_id, thread_id);
+        let mut manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         manifest.agent_session = Some(TeamRelayAgentSessionLink {
             kind: input.kind,
             session_id: input.session_id,
@@ -934,18 +1298,21 @@ impl TeamRelayManager {
             linked_at: Utc::now().to_rfc3339(),
         });
         self.save_task_workspace_manifest(&root, &manifest)?;
-        self.task_workspace_status(thread_id)
+        self.task_workspace_status(thread_id, Some(team_id))
     }
 
-    pub fn start_events(&self, app: AppHandle) -> Result<(), String> {
+    pub fn start_events(&self, app: AppHandle, team_ids: &[String]) -> Result<(), String> {
         let (settings, token) = self.configured()?;
+        let mut subscribed_team_ids = team_ids.to_vec();
+        subscribed_team_ids.sort();
+        let scope_key = format!("{}:{}", settings.hub_url, subscribed_team_ids.join(","));
         let mut task = self
             .event_task
             .lock()
             .map_err(|_| "team_relay_runtime_unavailable".to_string())?;
         if task
             .as_ref()
-            .is_some_and(|active| active.team_id == settings.team_id)
+            .is_some_and(|active| active.scope_key == scope_key)
         {
             return Ok(());
         }
@@ -953,13 +1320,11 @@ impl TeamRelayManager {
             active.handle.abort();
         }
         let client = self.event_client.clone();
-        let team_id = settings.team_id.clone();
         let handle = tauri::async_runtime::spawn(async move {
             loop {
                 let request = client
                     .get(endpoint(&settings.hub_url, "v1/events"))
                     .bearer_auth(&token)
-                    .query(&[("team_id", settings.team_id.as_str())])
                     .send()
                     .await;
                 if let Ok(response) = request {
@@ -989,10 +1354,14 @@ impl TeamRelayManager {
                                 buffer.drain(..index + 2);
                                 let event =
                                     frame.lines().find_map(|line| line.strip_prefix("event: "));
-                                if event.is_some_and(|name| name != "ready") {
-                                    crate::platform::notifications::notify_team_relay_changed(&app);
+                                if let Some(name) = event.filter(|name| *name != "ready") {
+                                    if name == "thread.attention" {
+                                        crate::platform::notifications::notify_team_relay_changed(
+                                            &app,
+                                        );
+                                    }
                                     let _ =
-                                        app.emit("team_relay:changed", json!({ "event": event }));
+                                        app.emit("team_relay:changed", json!({ "event": name }));
                                 }
                             }
                         }
@@ -1001,7 +1370,19 @@ impl TeamRelayManager {
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
         });
-        *task = Some(TeamRelayEventTask { team_id, handle });
+        *task = Some(TeamRelayEventTask { scope_key, handle });
+        Ok(())
+    }
+
+    pub fn stop_events(&self) -> Result<(), String> {
+        if let Some(task) = self
+            .event_task
+            .lock()
+            .map_err(|_| "team_relay_runtime_unavailable".to_string())?
+            .take()
+        {
+            task.handle.abort();
+        }
         Ok(())
     }
 
@@ -1057,7 +1438,7 @@ impl TeamRelayManager {
         let parent = self
             .settings_path
             .parent()
-            .expect("team relay settings parent");
+            .unwrap_or_else(|| std::path::Path::new("."));
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("team_relay_settings_write_failed: {error}"))?;
         let payload = serde_json::to_vec_pretty(settings)
@@ -1066,12 +1447,12 @@ impl TeamRelayManager {
             .map_err(|error| format!("team_relay_settings_write_failed: {error}"))
     }
 
-    fn task_workspace_root(&self, settings: &TeamRelaySettings, thread_id: &str) -> PathBuf {
+    fn task_workspace_root(&self, team_id: &str, thread_id: &str) -> PathBuf {
         self.settings_path
             .parent()
-            .expect("team relay settings parent")
+            .unwrap_or_else(|| std::path::Path::new("."))
             .join("workspaces")
-            .join(path_fingerprint(&settings.team_id))
+            .join(path_fingerprint(team_id))
             .join(path_fingerprint(thread_id))
     }
 
@@ -1120,6 +1501,85 @@ impl TeamRelayManager {
         deepseek_tui::utils::write_atomic(&root.join("workspace.json"), &payload)
             .map_err(|error| format!("team_relay_workspace_write_failed: {error}"))
     }
+}
+
+fn replace_downloaded_attachment(
+    temporary: &Path,
+    destination: &Path,
+    backup: &Path,
+) -> Result<(), String> {
+    replace_downloaded_attachment_with(temporary, destination, backup, |tmp, target, backup| {
+        crate::platform::filesystem::replace_file_atomically(tmp, target, backup)
+    })
+}
+
+fn replace_downloaded_attachment_with<F>(
+    temporary: &Path,
+    destination: &Path,
+    backup: &Path,
+    replace: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path, &Path) -> crate::platform::filesystem::ReplaceResult,
+{
+    use crate::platform::filesystem::ReplaceState;
+
+    match replace(temporary, destination, backup) {
+        Ok(ReplaceState::Committed) => Ok(()),
+        Ok(state) => Err(format!(
+            "attachment_save_failed: unexpected atomic replacement state: {state:?}"
+        )),
+        Err(error) => {
+            // A rolled-back write has a confirmed authoritative destination, so the
+            // transaction-owned candidates may be removed. RecoveryRequired must
+            // preserve every candidate for the next recovery attempt.
+            if error.state() == ReplaceState::RolledBack {
+                let _ = std::fs::remove_file(temporary);
+                let _ = std::fs::remove_file(backup);
+            }
+            Err(format!("attachment_save_failed: {error}"))
+        }
+    }
+}
+
+fn validate_avatar_display_size(size: Option<u16>) -> Result<Option<u16>, String> {
+    match size {
+        None | Some(48) | Some(96) => Ok(size),
+        Some(_) => Err("avatar_size_invalid: supported avatar sizes are 48 and 96".to_string()),
+    }
+}
+
+fn resolve_avatar_team_id<'a>(
+    configured_team_id: &'a str,
+    requested_team_id: Option<&'a str>,
+) -> Result<&'a str, String> {
+    let team_id = requested_team_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| configured_team_id.trim());
+    if team_id.is_empty() {
+        return Err("team_relay_team_required: select a team first".to_string());
+    }
+    validate_local_identifier("team_id", team_id)?;
+    Ok(team_id)
+}
+
+fn avatar_integrity_verified(
+    expected_source_sha256: &str,
+    source_sha256: Option<&str>,
+    content_digest: Option<&str>,
+    actual_digest: &[u8],
+) -> bool {
+    let digest_matches =
+        content_digest.is_some_and(|value| value == BASE64_STANDARD.encode(actual_digest));
+    if let Some(source_sha256) = source_sha256 {
+        return source_sha256 == expected_source_sha256 && digest_matches;
+    }
+    let actual_sha256 = actual_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    actual_sha256 == expected_source_sha256 && content_digest.is_none_or(|_| digest_matches)
 }
 
 fn validate_local_identifier(label: &str, value: &str) -> Result<(), String> {
@@ -1275,6 +1735,24 @@ async fn sha256_file(path: &Path) -> Result<String, String> {
         .collect())
 }
 
+fn avatar_extension_allowed(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif"
+            )
+        })
+}
+
+fn avatar_content_type_allowed(value: &str) -> bool {
+    matches!(
+        value,
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    )
+}
+
 fn endpoint(hub_url: &str, path: &str) -> String {
     format!(
         "{}/{}",
@@ -1326,10 +1804,18 @@ async fn decode<T: DeserializeOwned>(response: Response) -> Result<T, String> {
 async fn decode_error(response: Response) -> String {
     let status = response.status();
     match response.json::<HubErrorEnvelope>().await {
-        Ok(envelope) => format!(
-            "{}: {} (request {})",
-            envelope.error.code, envelope.error.message, envelope.error.request_id
-        ),
+        Ok(envelope) => {
+            let details = envelope
+                .error
+                .details
+                .and_then(|value| serde_json::to_string(&value).ok())
+                .map(|value| format!(" [details={value}]"))
+                .unwrap_or_default();
+            format!(
+                "{}: {} (request {}){}",
+                envelope.error.code, envelope.error.message, envelope.error.request_id, details
+            )
+        }
         Err(_) => format!("hub_http_error: HTTP {}", status.as_u16()),
     }
 }
@@ -1347,6 +1833,64 @@ fn network_error(error: reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn atomic_replace_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "pinvou-team-relay-atomic-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("attachment.txt");
+        let temporary = root.join("attachment.tmp");
+        let backup = root.join("attachment.bak");
+        std::fs::write(&destination, "authoritative").unwrap();
+        std::fs::write(&temporary, "replacement").unwrap();
+        std::fs::write(&backup, "backup").unwrap();
+        (root, destination, temporary, backup)
+    }
+
+    #[test]
+    fn attachment_replace_cleans_candidates_after_confirmed_rollback() {
+        let (root, destination, temporary, backup) = atomic_replace_fixture("rollback");
+        let error =
+            replace_downloaded_attachment_with(&temporary, &destination, &backup, |_, _, _| {
+                Err(crate::platform::filesystem::ReplaceError::new(
+                    crate::platform::filesystem::ReplaceState::RolledBack,
+                    std::io::Error::other("rolled back"),
+                ))
+            })
+            .unwrap_err();
+
+        assert!(error.contains("RolledBack"));
+        assert!(destination.is_file());
+        assert!(!temporary.exists());
+        assert!(!backup.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn attachment_replace_preserves_candidates_when_recovery_is_required() {
+        let (root, destination, temporary, backup) = atomic_replace_fixture("recovery");
+        let error =
+            replace_downloaded_attachment_with(&temporary, &destination, &backup, |_, _, _| {
+                Err(crate::platform::filesystem::ReplaceError::new(
+                    crate::platform::filesystem::ReplaceState::RecoveryRequired,
+                    std::io::Error::other("recovery required"),
+                ))
+            })
+            .unwrap_err();
+
+        assert!(error.contains("RecoveryRequired"));
+        assert!(destination.is_file());
+        assert!(temporary.is_file());
+        assert!(backup.is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn normalizes_https_hub_with_base_path() {
@@ -1452,6 +1996,67 @@ mod tests {
     }
 
     #[test]
+    fn avatar_display_sizes_are_limited_to_generated_variants() {
+        assert_eq!(validate_avatar_display_size(None).unwrap(), None);
+        assert_eq!(validate_avatar_display_size(Some(48)).unwrap(), Some(48));
+        assert_eq!(validate_avatar_display_size(Some(96)).unwrap(), Some(96));
+        for size in [0, 24, 384, u16::MAX] {
+            assert!(validate_avatar_display_size(Some(size)).is_err(), "{size}");
+        }
+    }
+
+    #[test]
+    fn avatar_download_prefers_the_rendered_team_scope() {
+        assert_eq!(
+            resolve_avatar_team_id("team-one", Some(" team-two ")).unwrap(),
+            "team-two"
+        );
+        assert_eq!(
+            resolve_avatar_team_id("team-one", None).unwrap(),
+            "team-one"
+        );
+        assert!(resolve_avatar_team_id("", None).is_err());
+        assert!(resolve_avatar_team_id("team-one", Some("../team-two")).is_err());
+    }
+
+    #[test]
+    fn avatar_variant_integrity_binds_thumbnail_to_current_source() {
+        let source_digest = Sha256::digest(b"source avatar");
+        let source_sha256 = source_digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let variant_digest = Sha256::digest(b"48px variant");
+        let variant_header = BASE64_STANDARD.encode(variant_digest);
+        let source_header = BASE64_STANDARD.encode(source_digest);
+
+        assert!(avatar_integrity_verified(
+            &source_sha256,
+            Some(&source_sha256),
+            Some(&variant_header),
+            &variant_digest,
+        ));
+        assert!(!avatar_integrity_verified(
+            &source_sha256,
+            Some(&"0".repeat(64)),
+            Some(&variant_header),
+            &variant_digest,
+        ));
+        assert!(!avatar_integrity_verified(
+            &source_sha256,
+            Some(&source_sha256),
+            None,
+            &variant_digest,
+        ));
+        assert!(avatar_integrity_verified(
+            &source_sha256,
+            None,
+            Some(&source_header),
+            &source_digest,
+        ));
+    }
+
+    #[test]
     fn older_agent_links_gain_safe_context_tracking_defaults() {
         let link: TeamRelayAgentSessionLink = serde_json::from_value(json!({
             "kind": "coding",
@@ -1463,5 +2068,23 @@ mod tests {
         assert_eq!(link.agent_id, None);
         assert!(link.material_ids.is_empty());
         assert_eq!(link.last_synced_sequence, 0);
+    }
+
+    #[test]
+    fn avatar_allowlist_supports_static_images_and_gif_only() {
+        for name in [
+            "avatar.png",
+            "avatar.JPG",
+            "avatar.jpeg",
+            "avatar.webp",
+            "avatar.gif",
+        ] {
+            assert!(avatar_extension_allowed(Path::new(name)), "{name}");
+        }
+        for name in ["avatar.svg", "avatar.html", "avatar.gif.exe", "avatar"] {
+            assert!(!avatar_extension_allowed(Path::new(name)), "{name}");
+        }
+        assert!(avatar_content_type_allowed("image/gif"));
+        assert!(!avatar_content_type_allowed("image/svg+xml"));
     }
 }

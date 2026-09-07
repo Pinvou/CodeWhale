@@ -3,14 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::body::{to_bytes, Body, Bytes};
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{Path, State};
-use axum::http::{header, Request, Response, StatusCode};
+use axum::http::{Request, Response, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::RngCore as _;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::Rng as _;
 use reqwest::Url;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -359,15 +359,15 @@ fn proxy_error(status: StatusCode, message: &'static str) -> Response<Body> {
 mod tests {
     use std::sync::Arc;
 
+    use axum::Router;
     use axum::body::Bytes;
     use axum::extract::State;
-    use axum::http::{header, HeaderMap};
+    use axum::http::{HeaderMap, header};
     use axum::routing::post;
-    use axum::Router;
     use tokio::sync::Mutex;
 
     use super::{
-        enforce_chat_output_limit, logical_turn_id, request_idempotency_key, ModelGatewayProxy,
+        ModelGatewayProxy, enforce_chat_output_limit, logical_turn_id, request_idempotency_key,
     };
 
     #[test]
@@ -383,9 +383,11 @@ mod tests {
         assert_ne!(first, next_turn);
         assert_ne!(first, other_session);
         assert!((16..=128).contains(&first.len()));
-        assert!(first
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+        assert!(
+            first
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        );
     }
 
     #[test]

@@ -20,6 +20,11 @@ export const PROVENANCE_MARKER_RE =
   /<!--\s*community-backflow-provenance:([A-Za-z0-9_-]+)\s*-->/;
 export const PLAN_MARKER_RE =
   /<!--\s*community-backflow-plan:(\{[^\r\n]*\})\s*-->/;
+export const AUTO_FINALIZED_MARKER_PREFIX = "community-backflow-auto-finalized";
+export const AUTO_RELEASE_DEFERRED_MARKER_PREFIX = "community-backflow-auto-release-deferred";
+export const AUTOMATION_ENV = "COMMUNITY_BACKFLOW_AUTOMATION_ENABLED";
+export const SOURCE_REPO = "Pinvou/pinvou-agent";
+export const SUPPORTED_MERGE_QUEUE_METHODS = new Set(["MERGE", "SQUASH", "REBASE"]);
 
 const RETRYABLE_GITHUB_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
@@ -85,6 +90,13 @@ function parseSourceFromBranch(branch) {
 
 function normalizePath(value) {
   return String(value).replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function uniqueMarkerMatch(body, pattern, label) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matches = [...String(body || "").matchAll(new RegExp(pattern.source, flags))];
+  if (matches.length > 1) fail(`${label} 必须恰好出现一次，实际 ${matches.length} 次`);
+  return matches[0] || null;
 }
 
 export function validateChangedPaths(paths) {
@@ -198,7 +210,11 @@ export function parseQueueIssues(issues) {
   if (!Array.isArray(issues)) fail("Issue 队列必须是数组");
   const items = issues.map((issue) => {
     const issueNumber = Number(issue?.number);
-    const match = PLAN_MARKER_RE.exec(String(issue?.body || ""));
+    const match = uniqueMarkerMatch(
+      issue?.body,
+      PLAN_MARKER_RE,
+      `Issue #${issueNumber || "unknown"} 的 community-backflow-plan marker`,
+    );
     if (!match) fail(`Issue #${issueNumber || "unknown"} 缺少 community-backflow-plan marker`);
     let marker;
     try {
@@ -229,7 +245,7 @@ export function encodeProvenanceMarker(provenance) {
 }
 
 export function parseProvenanceMarker(body) {
-  const match = PROVENANCE_MARKER_RE.exec(String(body || ""));
+  const match = uniqueMarkerMatch(body, PROVENANCE_MARKER_RE, "PR provenance marker");
   if (!match) return null;
   try {
     return JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
@@ -292,7 +308,7 @@ function preflight(options = {}) {
 }
 
 export function verifyPullBody({ body, expectedHead, expectedSource }) {
-  const sourceMatch = BACKFLOW_MARKER_RE.exec(String(body || ""));
+  const sourceMatch = uniqueMarkerMatch(body, BACKFLOW_MARKER_RE, "PR 来源 marker");
   if (!sourceMatch) fail("PR 正文缺少 Community 回流来源 marker");
   const provenance = parseProvenanceMarker(body);
   if (!provenance) fail("PR 正文缺少实际处理平台的 provenance marker");
@@ -349,10 +365,15 @@ function sleep(milliseconds) {
 }
 
 export async function githubRequest(token, method, path, payload) {
+  const normalizedMethod = String(method).toUpperCase();
+  // 只有不产生远端写入的请求允许透明重试。POST/PATCH/DELETE 在连接中断时
+  // 无法判断服务端是否已经提交；盲重试可能重复评论、创建 PR，或让状态机
+  // 越过一次应由回读确认的 mutation。写请求由上层稳定 marker/状态重放收敛。
+  const retrySafe = normalizedMethod === "GET" || normalizedMethod === "HEAD";
   const body = payload == null ? undefined : Buffer.from(JSON.stringify(payload), "utf8");
   const timeout = Number(process.env.COMMUNITY_BACKFLOW_GITHUB_TIMEOUT_MS || 15_000);
   const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 15_000;
-  const maxAttempts = 3;
+  const maxAttempts = retrySafe ? 3 : 1;
   let lastError;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -362,7 +383,7 @@ export async function githubRequest(token, method, path, payload) {
     let text;
     try {
       response = await fetch(`${process.env.GITHUB_API_URL || "https://api.github.com"}${path}`, {
-        method,
+        method: normalizedMethod,
         headers: {
           Accept: "application/vnd.github+json",
           Authorization: `Bearer ${token}`,
@@ -377,7 +398,10 @@ export async function githubRequest(token, method, path, payload) {
     } catch (error) {
       lastError = error;
       if (attempt === maxAttempts) {
-        fail(`GitHub API ${method} ${path} 连续 ${maxAttempts} 次网络请求失败：${error.message || error}`);
+        if (!retrySafe) {
+          fail(`GitHub API ${normalizedMethod} ${path} 网络结果不明确；为避免重复写入不会自动重试：${error.message || error}`);
+        }
+        fail(`GitHub API ${normalizedMethod} ${path} 连续 ${maxAttempts} 次网络请求失败：${error.message || error}`);
       }
       await sleep(retryDelayMs(null, attempt));
       continue;
@@ -387,13 +411,596 @@ export async function githubRequest(token, method, path, payload) {
 
     if (response.ok) return text ? JSON.parse(text) : null;
     const rateLimited = response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0";
-    if ((RETRYABLE_GITHUB_STATUS.has(response.status) || rateLimited) && attempt < maxAttempts) {
+    if (retrySafe && (RETRYABLE_GITHUB_STATUS.has(response.status) || rateLimited) && attempt < maxAttempts) {
       await sleep(retryDelayMs(response, attempt));
       continue;
     }
-    fail(`GitHub API ${method} ${path} 失败：HTTP ${response.status} ${text}`);
+    fail(`GitHub API ${normalizedMethod} ${path} 失败：HTTP ${response.status} ${text}`);
   }
-  fail(`GitHub API ${method} ${path} 失败：${lastError || "未知错误"}`);
+  fail(`GitHub API ${normalizedMethod} ${path} 失败：${lastError || "未知错误"}`);
+}
+
+export async function githubGraphqlRequest(token, query, variables = {}) {
+  const result = await githubRequest(token, "POST", "/graphql", { query, variables });
+  if (Array.isArray(result?.errors) && result.errors.length) {
+    fail(`GitHub GraphQL 失败：${result.errors.map((error) => error.message).join("；")}`);
+  }
+  return result?.data;
+}
+
+function labelNames(issue) {
+  return (issue?.labels || []).map((label) =>
+    typeof label === "string" ? label : String(label?.name || ""));
+}
+
+export function parseIssuePlan(issue) {
+  const match = uniqueMarkerMatch(
+    issue?.body,
+    PLAN_MARKER_RE,
+    `Issue #${issue?.number || "unknown"} 的 community-backflow-plan marker`,
+  );
+  if (!match) return null;
+  let marker;
+  try {
+    marker = JSON.parse(match[1]);
+  } catch {
+    fail(`Issue #${issue?.number || "unknown"} 的 community-backflow-plan marker 无法解析`);
+  }
+  if (
+    marker.schema !== 1 ||
+    !Number.isInteger(Number(marker.source)) ||
+    Number(marker.source) <= 0 ||
+    typeof marker.release !== "boolean"
+  ) {
+    fail(`Issue #${issue?.number || "unknown"} 的 community-backflow-plan marker 无效`);
+  }
+  return {
+    source: Number(marker.source),
+    release: Boolean(marker.release),
+    depends_on: Array.isArray(marker.depends_on) ? marker.depends_on.map(Number) : [],
+  };
+}
+
+function parseIssueSourceMarker(issue) {
+  const match = uniqueMarkerMatch(
+    issue?.body,
+    BACKFLOW_MARKER_RE,
+    `Issue #${issue?.number || "unknown"} 的来源 marker`,
+  );
+  return match ? Number(match[1]) : null;
+}
+
+export function parseAutomationEvent(event) {
+  if (event?.workflow_run) {
+    const run = event.workflow_run;
+    if (
+      event.action !== "completed" ||
+      run.name !== "PR Check" ||
+      run.event !== "pull_request" ||
+      run.conclusion !== "success"
+    ) {
+      return { action: "skip", reason: "workflow-run-not-successful-required-gate" };
+    }
+    const pulls = Array.isArray(run.pull_requests) ? run.pull_requests : [];
+    if (pulls.length !== 1 || !Number.isInteger(Number(pulls[0]?.number))) {
+      return { action: "skip", reason: "workflow-run-pr-not-unique" };
+    }
+    return {
+      action: "advance",
+      pullNumber: Number(pulls[0].number),
+      expectedHead: String(run.head_sha || ""),
+    };
+  }
+  if (event?.pull_request && event.action === "closed") {
+    if (!event.pull_request.merged) return { action: "skip", reason: "pull-request-not-merged" };
+    return {
+      action: "finalize",
+      pullNumber: Number(event.pull_request.number),
+      expectedHead: String(event.pull_request.head?.sha || ""),
+    };
+  }
+  return { action: "skip", reason: "unsupported-event" };
+}
+
+async function collectAutomationIssues(request, token, repo) {
+  const byNumber = new Map();
+  for (const label of ["backflow:pending", "backflow:processing", "backflow:synced"]) {
+    for (let page = 1; ; page += 1) {
+      const issues = await request(
+        token,
+        "GET",
+        `/repos/${repo}/issues?state=all&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
+      );
+      for (const issue of issues) {
+        if (!issue.pull_request) byNumber.set(Number(issue.number), issue);
+      }
+      if (issues.length < 100) break;
+    }
+  }
+  return [...byNumber.values()];
+}
+
+async function collectCommunityPullFiles(request, token, source) {
+  const files = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const current = await request(
+      token,
+      "GET",
+      `/repos/${SOURCE_REPO}/pulls/${source}/files?per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(current)) {
+      fail(`来源 Community PR #${source} 的 files 响应未知，拒绝判定 Release`);
+    }
+    for (const file of current) {
+      if (!file || typeof file.filename !== "string" || !file.filename) {
+        fail(`来源 Community PR #${source} 包含无法识别的 changed file`);
+      }
+      if (file.previous_filename !== undefined && typeof file.previous_filename !== "string") {
+        fail(`来源 Community PR #${source} 包含无法识别的 previous_filename`);
+      }
+      files.push(file);
+    }
+    if (current.length < 100) return files;
+  }
+  fail(`来源 Community PR #${source} 的 files 分页超过安全上限`);
+}
+
+function isReleaseSource(files) {
+  return files.some((file) => file.filename === "VERSION" || file.previous_filename === "VERSION");
+}
+
+async function readAutomationContext({ request, token, repo, pullNumber, expectedHead }) {
+  const pull = await request(token, "GET", `/repos/${repo}/pulls/${pullNumber}`);
+  const source = parseSourceFromBranch(String(pull?.head?.ref || ""));
+  if (!source) return null; // 非回流 PR 与自动器无关，安全跳过而不是制造失败任务
+  if (String(pull?.base?.ref || "") !== "main") fail(`PR #${pullNumber} 的 base 不是 main`);
+  const targetRepo = String(repo).toLocaleLowerCase("en-US");
+  if (
+    String(pull?.base?.repo?.full_name || "").toLocaleLowerCase("en-US") !== targetRepo ||
+    String(pull?.head?.repo?.full_name || "").toLocaleLowerCase("en-US") !== targetRepo
+  ) {
+    fail(`PR #${pullNumber} 不是 Official 同仓 PR`);
+  }
+  const head = String(pull?.head?.sha || "");
+  if (!head || !expectedHead || head !== expectedHead) {
+    fail(`事件 head ${expectedHead || "missing"} 与 PR #${pullNumber} 当前 head ${head || "missing"} 不一致`);
+  }
+  if (pull.draft) fail(`PR #${pullNumber} 仍是 Draft`);
+  if (!pull.merged && pull.mergeable !== true) {
+    fail(`PR #${pullNumber} 尚未确认可合并`);
+  }
+  if (pull.mergeable_state === "dirty") {
+    fail(`PR #${pullNumber} 存在合并冲突`);
+  }
+
+  const provenance = verifyPullBody({ body: pull.body, expectedHead: head, expectedSource: source });
+  const communityPull = await request(token, "GET", `/repos/${SOURCE_REPO}/pulls/${source}`);
+  if (!communityPull?.merged || !communityPull?.merged_at) {
+    fail(`来源 Community PR #${source} 不是 merged 状态`);
+  }
+  const sourceFiles = await collectCommunityPullFiles(request, token, source);
+  const release = isReleaseSource(sourceFiles);
+
+  const issues = await collectAutomationIssues(request, token, repo);
+  const matches = issues.filter((issue) => {
+    const plan = parseIssuePlan(issue);
+    const issueSource = parseIssueSourceMarker(issue);
+    return plan?.source === source && issueSource === source;
+  });
+  if (matches.length !== 1) {
+    fail(`来源 Community PR #${source} 必须关联唯一 Official Issue，实际 ${matches.length} 个`);
+  }
+  const issue = matches[0];
+  const plan = parseIssuePlan(issue);
+  if (plan.release !== release) {
+    fail(
+      `Official Issue #${issue.number} 的 Release 计划为 ${plan.release}，` +
+      `但来源 Community PR #${source} 的根目录 VERSION 变更判定为 ${release}`,
+    );
+  }
+  const labels = labelNames(issue);
+  if (labels.includes("backflow:blocked")) fail(`Official Issue #${issue.number} 带有 backflow:blocked`);
+  if (labels.includes("backflow:dependency-wait")) {
+    fail(`Official Issue #${issue.number} 仍在等待前置回流`);
+  }
+
+  const checkRuns = [];
+  for (let page = 1; ; page += 1) {
+    const checks = await request(
+      token,
+      "GET",
+      `/repos/${repo}/commits/${encodeURIComponent(head)}/check-runs?per_page=100&page=${page}`,
+    );
+    const current = checks?.check_runs || [];
+    checkRuns.push(...current);
+    if (current.length < 100) break;
+  }
+  const requiredGate = checkRuns.find((check) =>
+    check.name === "required-gate" &&
+    check.head_sha === head &&
+    check.status === "completed" &&
+    check.conclusion === "success");
+  if (!requiredGate) fail(`PR #${pullNumber} 当前 head ${head} 没有成功的 required-gate`);
+
+  return {
+    pull,
+    source,
+    head,
+    provenance,
+    communityPull,
+    sourceFiles,
+    release,
+    issue,
+    plan,
+    labels,
+    requiredGate,
+  };
+}
+
+async function enqueueBackflow({ graphql, token, repo, context, dryRun }) {
+  if (context.pull.state !== "open" || context.pull.merged) {
+    return { status: "skipped", reason: "pull-request-not-open" };
+  }
+  if (context.issue.state !== "open" || !context.labels.includes("backflow:processing")) {
+    fail(`Official Issue #${context.issue.number} 不是开放的 processing 状态`);
+  }
+  if (!context.pull.node_id) fail(`PR #${context.pull.number} 缺少 GraphQL node id`);
+  const [owner, name] = repo.split("/");
+  const policy = await graphql(token, `
+    query BackflowMergeQueuePolicy($owner: String!, $name: String!, $branch: String!) {
+      repository(owner: $owner, name: $name) {
+        mergeQueue(branch: $branch) {
+          configuration { mergeMethod }
+        }
+      }
+    }
+  `, { owner, name, branch: "main" });
+  const mergeMethod = policy?.repository?.mergeQueue?.configuration?.mergeMethod;
+  if (!SUPPORTED_MERGE_QUEUE_METHODS.has(mergeMethod)) {
+    fail(
+      `Official main Merge Queue mergeMethod=${mergeMethod || "unknown"}；` +
+      "该配置不受回流契约支持，自动器不会修改规则或绕过 Queue",
+    );
+  }
+  const state = await graphql(token, `
+    query BackflowPullState($id: ID!) {
+      node(id: $id) {
+        ... on PullRequest {
+          mergeQueueEntry { id }
+          autoMergeRequest { enabledAt }
+        }
+      }
+    }
+  `, { id: context.pull.node_id });
+  if (state?.node?.mergeQueueEntry || state?.node?.autoMergeRequest) {
+    return { status: "already-enabled", pull: context.pull.number, head: context.head, mergeMethod };
+  }
+  if (dryRun) {
+    return {
+      status: "dry-run",
+      action: "enqueue",
+      pull: context.pull.number,
+      head: context.head,
+      mergeMethod,
+    };
+  }
+  await graphql(token, `
+    mutation EnqueueBackflowPull($id: ID!, $head: GitObjectID!) {
+      enqueuePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head }) {
+        mergeQueueEntry { id }
+      }
+    }
+  `, { id: context.pull.node_id, head: context.head });
+  return { status: "enqueued", pull: context.pull.number, head: context.head, mergeMethod };
+}
+
+function finalizedMarker(context) {
+  return `<!-- ${AUTO_FINALIZED_MARKER_PREFIX}:${SOURCE_REPO}#${context.source}:${context.pull.merge_commit_sha} -->`;
+}
+
+function releaseDeferredMarker(context) {
+  return `<!-- ${AUTO_RELEASE_DEFERRED_MARKER_PREFIX}:${SOURCE_REPO}#${context.source}:${context.pull.merge_commit_sha} -->`;
+}
+
+function sameLabels(left, right) {
+  return JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+}
+
+async function revalidateFinalizeState({
+  request,
+  token,
+  repo,
+  context,
+  expectedLabels,
+}) {
+  const pull = await request(token, "GET", `/repos/${repo}/pulls/${context.pull.number}`);
+  const source = parseSourceFromBranch(String(pull?.head?.ref || ""));
+  if (
+    !pull?.merged ||
+    pull.state !== "closed" ||
+    source !== context.source ||
+    String(pull?.head?.sha || "") !== context.head ||
+    String(pull?.merge_commit_sha || "") !== String(context.pull.merge_commit_sha || "")
+  ) {
+    fail(`PR #${context.pull.number} 的 merged/head/branch/merge commit 已变化，停止自动收尾`);
+  }
+  if (
+    String(pull?.base?.ref || "") !== "main" ||
+    String(pull?.base?.repo?.full_name || "").toLocaleLowerCase("en-US") !== repo.toLocaleLowerCase("en-US") ||
+    String(pull?.head?.repo?.full_name || "").toLocaleLowerCase("en-US") !== repo.toLocaleLowerCase("en-US")
+  ) {
+    fail(`PR #${context.pull.number} 不再是 Official 同仓 main 回流 PR`);
+  }
+  verifyPullBody({ body: pull.body, expectedHead: context.head, expectedSource: context.source });
+
+  const issue = await request(token, "GET", `/repos/${repo}/issues/${context.issue.number}`);
+  const labels = labelNames(issue);
+  if (labels.includes("backflow:blocked") || labels.includes("backflow:dependency-wait")) {
+    fail(`Official Issue #${issue.number} 新增 blocker/dependency-wait，停止自动收尾`);
+  }
+  if (!sameLabels(labels, expectedLabels)) {
+    fail(`Official Issue #${issue.number} 的标签已变化，停止自动收尾以避免覆盖并发更新`);
+  }
+  const plan = parseIssuePlan(issue);
+  const issueSource = parseIssueSourceMarker(issue);
+  if (
+    plan?.source !== context.source ||
+    issueSource !== context.source ||
+    plan.release !== context.release
+  ) {
+    fail(`Official Issue #${issue.number} 的来源或 Release 计划已变化，停止自动收尾`);
+  }
+  if (issue.state === "closed" && labels.includes("backflow:synced")) {
+    return { pull, issue, labels, alreadyFinalized: true };
+  }
+  if (
+    issue.state !== "open" ||
+    (!labels.includes("backflow:processing") && !labels.includes("backflow:synced"))
+  ) {
+    fail(`Official Issue #${issue.number} 不在可恢复的 open processing/synced 状态`);
+  }
+  return { pull, issue, labels, alreadyFinalized: false };
+}
+
+async function collectIssueComments(request, token, repo, issueNumber) {
+  const comments = [];
+  for (let page = 1; ; page += 1) {
+    const current = await request(
+      token,
+      "GET",
+      `/repos/${repo}/issues/${issueNumber}/comments?per_page=100&page=${page}`,
+    );
+    comments.push(...current);
+    if (current.length < 100) return comments;
+  }
+}
+
+async function finalizeBackflow({ request, token, repo, context, dryRun }) {
+  if (!context.pull.merged || !context.pull.merge_commit_sha) {
+    return { status: "skipped", reason: "pull-request-not-merged" };
+  }
+  if (context.release) {
+    const refreshed = await revalidateFinalizeState({
+      request,
+      token,
+      repo,
+      context,
+      expectedLabels: context.labels,
+    });
+    if (refreshed.alreadyFinalized) {
+      return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
+    }
+    const marker = releaseDeferredMarker(context);
+    if (!dryRun) {
+      const comments = await collectIssueComments(request, token, repo, context.issue.number);
+      if (!comments.some((comment) => String(comment.body || "").includes(marker))) {
+        const body = `${marker}\nRelease 回流 PR 已合并，但自动器不会跳过固件构建契约。` +
+          `请按 Release 回流流程核对 main 版本、复用或触发 \`release-packages.yml\`，` +
+          `记录 run URL 后再标记 synced 并关闭。\n\n` +
+          `- PR：${context.pull.html_url}\n` +
+          `- merge commit：\`${context.pull.merge_commit_sha}\``;
+        const comment = await request(
+          token,
+          "POST",
+          `/repos/${repo}/issues/${context.issue.number}/comments`,
+          { body },
+        );
+        const roundTrip = await request(token, "GET", `/repos/${repo}/issues/comments/${comment.id}`);
+        if (roundTrip.body !== body) fail("Release 延后评论写后回读不一致");
+      }
+    }
+    return {
+      status: dryRun ? "dry-run" : "deferred-release",
+      pull: context.pull.number,
+      issue: context.issue.number,
+      reason: "release-packages-contract-requires-follow-up",
+    };
+  }
+  const marker = finalizedMarker(context);
+  const commentBody = `${marker}\n回流 PR 已合并并自动收尾：${context.pull.html_url}\n\n` +
+    `- 来源：${SOURCE_REPO}#${context.source}\n` +
+    `- PR head：\`${context.head}\`\n` +
+    `- merge commit：\`${context.pull.merge_commit_sha}\`\n` +
+    `- required-gate：${context.requiredGate.html_url || "success"}\n` +
+    `- 分支清理：自动器不执行无 SHA 原子绑定的 ref 删除，请使用人工流程或安全 reaper`;
+  if (dryRun) {
+    const nextLabels = [
+      ...context.labels.filter((label) => !label.startsWith("backflow:")),
+      "backflow:synced",
+    ];
+    return {
+      status: "dry-run",
+      action: "finalize",
+      pull: context.pull.number,
+      issue: context.issue.number,
+      labels: nextLabels,
+    };
+  }
+
+  const refreshed = await revalidateFinalizeState({
+    request,
+    token,
+    repo,
+    context,
+    expectedLabels: context.labels,
+  });
+  if (refreshed.alreadyFinalized) {
+    return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
+  }
+  const comments = await collectIssueComments(request, token, repo, context.issue.number);
+  if (!comments.some((comment) => String(comment.body || "").includes(marker))) {
+    const comment = await request(
+      token,
+      "POST",
+      `/repos/${repo}/issues/${context.issue.number}/comments`,
+      { body: commentBody },
+    );
+    const roundTrip = await request(token, "GET", `/repos/${repo}/issues/comments/${comment.id}`);
+    if (roundTrip.body !== commentBody) fail("自动收尾 Issue 评论写后回读不一致");
+  }
+  const beforeClose = await revalidateFinalizeState({
+    request,
+    token,
+    repo,
+    context,
+    expectedLabels: refreshed.labels,
+  });
+  if (beforeClose.alreadyFinalized) {
+    return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
+  }
+  let syncedState = beforeClose;
+  if (!beforeClose.labels.includes("backflow:synced")) {
+    await request(token, "POST", `/repos/${repo}/issues/${context.issue.number}/labels`, {
+      labels: ["backflow:synced"],
+    });
+    syncedState = await revalidateFinalizeState({
+      request,
+      token,
+      repo,
+      context,
+      expectedLabels: [...beforeClose.labels, "backflow:synced"],
+    });
+    if (syncedState.alreadyFinalized) {
+      return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
+    }
+  }
+  const obsoleteLabels = syncedState.labels.filter((name) =>
+    name.startsWith("backflow:") &&
+    name !== "backflow:synced" &&
+    name !== "backflow:processing");
+  if (syncedState.labels.includes("backflow:processing")) {
+    obsoleteLabels.push("backflow:processing");
+  }
+  for (const label of obsoleteLabels) {
+    try {
+      await request(
+        token,
+        "DELETE",
+        `/repos/${repo}/issues/${context.issue.number}/labels/${encodeURIComponent(label)}`,
+      );
+    } catch (error) {
+      if (!/HTTP 404\b/u.test(String(error?.message || error))) throw error;
+    }
+  }
+  const expectedSyncedLabels = [
+    ...syncedState.labels.filter((label) => !label.startsWith("backflow:")),
+    "backflow:synced",
+  ];
+  const readyToClose = await revalidateFinalizeState({
+    request,
+    token,
+    repo,
+    context,
+    expectedLabels: expectedSyncedLabels,
+  });
+  if (readyToClose.alreadyFinalized) {
+    return { status: "already-finalized", pull: context.pull.number, issue: context.issue.number };
+  }
+  await request(token, "PATCH", `/repos/${repo}/issues/${context.issue.number}`, {
+    state: "closed",
+    state_reason: "completed",
+  });
+  return { status: "finalized", pull: context.pull.number, issue: context.issue.number };
+}
+
+export async function runAutomation({
+  event,
+  repo,
+  token,
+  dryRun = false,
+  enabled = process.env[AUTOMATION_ENV],
+  request = githubRequest,
+  graphql = githubGraphqlRequest,
+}) {
+  if (enabled !== "true") return { status: "skipped", reason: "automation-disabled" };
+  if (!repo || !/^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/u.test(repo)) fail("automation 缺少有效 --repo");
+  if (!token) fail("automation 启用后缺少 GITHUB_TOKEN/GH_TOKEN");
+  const parsed = parseAutomationEvent(event);
+  if (parsed.action === "skip") return { status: "skipped", reason: parsed.reason };
+  const context = await readAutomationContext({
+    request,
+    token,
+    repo,
+    pullNumber: parsed.pullNumber,
+    expectedHead: parsed.expectedHead,
+  });
+  if (!context) return { status: "skipped", reason: "not-a-backflow-pull-request" };
+  if (parsed.action === "advance") return enqueueBackflow({ graphql, token, repo, context, dryRun });
+  return finalizeBackflow({ request, token, repo, context, dryRun });
+}
+
+export async function runManualEnqueue({
+  repo,
+  pullNumber,
+  expectedHead,
+  token,
+  dryRun = false,
+  request = githubRequest,
+  graphql = githubGraphqlRequest,
+}) {
+  if (!repo || !/^[-A-Za-z0-9_.]+\/[-A-Za-z0-9_.]+$/u.test(repo)) {
+    fail("enqueue 缺少有效 --repo");
+  }
+  if (!Number.isInteger(Number(pullNumber)) || Number(pullNumber) <= 0) {
+    fail("enqueue 缺少有效 --pull");
+  }
+  if (!/^[0-9a-f]{40}$/iu.test(String(expectedHead || ""))) {
+    fail("enqueue 缺少有效 --head");
+  }
+  if (!token) fail("enqueue 缺少 GitHub 凭证");
+  const context = await readAutomationContext({
+    request,
+    token,
+    repo,
+    pullNumber: Number(pullNumber),
+    expectedHead: String(expectedHead),
+  });
+  if (!context) fail(`PR #${pullNumber} 不是受支持的回流 PR`);
+  return enqueueBackflow({ graphql, token, repo, context, dryRun });
+}
+
+async function enqueue(options) {
+  return runManualEnqueue({
+    repo: String(options.repo || ""),
+    pullNumber: Number(options.pull),
+    expectedHead: String(options.head || ""),
+    token: githubToken(options),
+    dryRun: Boolean(options["dry-run"]),
+  });
+}
+
+async function automation(options) {
+  if (!options["event-file"]) fail("automation 缺少 --event-file");
+  const event = JSON.parse(readFileSync(resolve(String(options["event-file"])), "utf8"));
+  const enabled = process.env[AUTOMATION_ENV];
+  const token = enabled === "true" ? githubToken(options) : null;
+  return runAutomation({
+    event,
+    repo: String(options.repo || process.env.GITHUB_REPOSITORY || ""),
+    token,
+    dryRun: Boolean(options["dry-run"]),
+    enabled,
+  });
 }
 
 async function collectQueue(options) {
@@ -501,6 +1108,8 @@ function help() {
   node scripts/community-backflow.mjs preflight [--base origin/main] [--head HEAD] [--source N]
   node scripts/community-backflow.mjs verify --body-file pr-body.txt --head SHA [--source N]
   node scripts/community-backflow.mjs submit --repo OWNER/REPO --issue N --source N --title TITLE --body-file FILE [--credential USERNAME] [--no-push]
+  node scripts/community-backflow.mjs enqueue --repo OWNER/REPO --pull N --head SHA [--credential USERNAME] [--dry-run]
+  node scripts/community-backflow.mjs automation --repo OWNER/REPO --event-file EVENT.json [--dry-run]
 `;
 }
 
@@ -541,6 +1150,14 @@ async function main(argv = process.argv.slice(2)) {
   }
   if (command === "submit") {
     process.stdout.write(`${JSON.stringify(await submit(options), null, 2)}\n`);
+    return;
+  }
+  if (command === "enqueue") {
+    process.stdout.write(`${JSON.stringify(await enqueue(options), null, 2)}\n`);
+    return;
+  }
+  if (command === "automation") {
+    process.stdout.write(`${JSON.stringify(await automation(options), null, 2)}\n`);
     return;
   }
   fail(`未知命令：${command}\n${help()}`);

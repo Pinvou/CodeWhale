@@ -18,6 +18,7 @@
     selectedCount: function (n) { return "已选择 " + n + " 项"; },
     thisComputer: "此电脑", home: "用户目录", emptyFolder: "此目录中没有可选内容",
     loadFailed: function (err) { return "读取失败：" + err; },
+    workspaceNotAuthorized: "请先在桌面端允许远程访问本机目录",
     alreadyOpen: "已有文件选择器正在打开",
   };
 
@@ -79,6 +80,9 @@
       var showingRoots = false;
       var disposed = false;
       var loadGeneration = 0;
+      var mintInFlight = false;
+      var initialPath = options.defaultPath || null;
+      var initialPathPending = Boolean(initialPath);
 
       var overlay = element("div", "pinvou-host-picker-overlay");
       var panel = element("div", "pinvou-host-picker-panel");
@@ -142,7 +146,7 @@
         selectionLabel.textContent = directoryMode
           ? (currentPath ? labels.currentFolder(currentPath) : "")
           : (count ? labels.selectedCount(count) : "");
-        confirm.disabled = directoryMode ? !currentPath : count === 0;
+        confirm.disabled = mintInFlight || (directoryMode ? !currentPath : count === 0);
       }
 
       function chooseEntry(entry, row) {
@@ -216,6 +220,10 @@
       function showRoots() {
         if (!rootEntries.length) return;
         loadGeneration += 1;
+        // Navigation supersedes any confirm-mint still in flight; its late
+        // callbacks are ignored via the generation guard, and the confirm
+        // button must become usable again for the newly shown location.
+        mintInFlight = false;
         showingRoots = true;
         currentPath = null;
         parentPath = null;
@@ -236,20 +244,45 @@
         renderEntries(listing && Array.isArray(listing.entries) ? listing.entries.slice() : [], false);
       }
 
+      // Maps stable host-workspace authorization codes to localized copy for
+      // both the listing and the confirm-mint failure paths.
+      function localizedPickerError(error) {
+        var message = String(error && error.message ? error.message : error);
+        var code = String(error && error.code ? error.code : "");
+        if (code === "host_workspace_not_authorized" || message === "host_workspace_not_authorized") {
+          return labels.workspaceNotAuthorized;
+        }
+        return message;
+      }
+
       function load(path) {
         var generation = ++loadGeneration;
+        mintInFlight = false;
         showingRoots = false;
         rootsButton.disabled = rootEntries.length === 0;
         up.disabled = true;
         confirm.disabled = true;
         body.replaceChildren(element("div", "pinvou-host-picker-status", labels.loadingPath));
-        client.invoke("web_access_list_host_files", { path: path || null }).then(function (listing) {
+        client.invoke("web_access_list_host_files", {
+          path: path || null,
+          // Grants are minted only for the directory the user finally
+          // confirms (see the confirm handler); navigating must not mint
+          // one-shot handles for every folder visited along the way.
+          issueWorkspaceHandle: false,
+        }).then(function (listing) {
           if (disposed || generation !== loadGeneration) return;
+          if (initialPathPending && path === initialPath) initialPathPending = false;
           renderListing(listing);
         }).catch(function (error) {
           if (disposed || generation !== loadGeneration) return;
+          if (initialPathPending && path === initialPath) {
+            initialPathPending = false;
+            load(null);
+            return;
+          }
           rootsButton.disabled = rootEntries.length === 0;
-          body.replaceChildren(element("div", "pinvou-host-picker-error", labels.loadFailed(String(error && error.message ? error.message : error))));
+          body.replaceChildren(element("div", "pinvou-host-picker-error",
+            labels.loadFailed(localizedPickerError(error))));
         });
       }
 
@@ -265,17 +298,51 @@
         else if (!showingRoots) showRoots();
       });
       confirm.addEventListener("click", function () {
-        if (directoryMode) finish(currentPath);
+        if (directoryMode && options.workspaceGrant === true) {
+          // Capture the path at click time so a navigation that lands while
+          // the mint RPC is in flight cannot pair the new display path with
+          // the handle minted for the confirmed directory.
+          var confirmedPath = currentPath;
+          var confirmedGeneration = loadGeneration;
+          mintInFlight = true;
+          confirm.disabled = true;
+          client.invoke("web_access_list_host_files", {
+            path: confirmedPath,
+            issueWorkspaceHandle: true,
+          }).then(function (listing) {
+            // A mint that settles after the user navigated away must not
+            // close the picker on the stale directory; navigation already
+            // reset the in-flight state, and the abandoned one-shot handle
+            // is reclaimed by its TTL.
+            if (disposed || confirmedGeneration !== loadGeneration) return;
+            var handle = listing
+              && (listing.workspace_handle || listing.workspaceHandle) || null;
+            if (!handle) throw new Error("workspace handle missing");
+            finish({ path: confirmedPath, workspaceHandle: handle });
+          }).catch(function (error) {
+            // A failure that lands after the picker closed or after a newer
+            // listing rendered must not touch the current UI (finish() keeps
+            // its own disposed guard on the success path).
+            if (disposed || confirmedGeneration !== loadGeneration) return;
+            mintInFlight = false;
+            confirm.disabled = false;
+            body.replaceChildren(element("div", "pinvou-host-picker-error",
+              labels.loadFailed(localizedPickerError(error))));
+          });
+        } else if (directoryMode) finish(currentPath);
         else finish(multiple ? Array.from(selected.keys()) : Array.from(selected.keys())[0] || null);
       });
       window.addEventListener("keydown", onKeyDown);
-      load(null);
+      load(initialPath);
     });
   }
 
   var style = document.createElement("style");
   style.textContent = [
-    ".pinvou-host-picker-overlay{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}",
+    // This file is copied verbatim into dist (never transpiled by the build):
+    // the inset shorthand must stay expanded and backdrop-filter must stay
+    // prefixed, or Safari 14.0 loses the full-screen overlay and the blur.
+    ".pinvou-host-picker-overlay{position:fixed;top:0;right:0;bottom:0;left:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.55);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}",
     ".pinvou-host-picker-panel{display:flex;flex-direction:column;width:min(720px,100%);height:min(680px,88vh);overflow:hidden;border:1px solid #3c4043;border-radius:20px;background:#202124;color:#e8eaed;box-shadow:0 24px 80px rgba(0,0,0,.5)}",
     ".pinvou-host-picker-header,.pinvou-host-picker-toolbar,.pinvou-host-picker-footer{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid #3c4043}",
     ".pinvou-host-picker-header{justify-content:space-between}.pinvou-host-picker-heading{font-size:17px;font-weight:650}",
@@ -289,7 +356,16 @@
   ].join("");
   document.head.appendChild(style);
 
-  window.PinvouHostFilePicker = { open: openRemoteHostPicker };
+  window.PinvouHostFilePicker = {
+    open: openRemoteHostPicker,
+    openWorkspace: function (options) {
+      return openRemoteHostPicker(Object.assign({}, options || {}, {
+        directory: true,
+        multiple: false,
+        workspaceGrant: true,
+      }));
+    },
+  };
   if (window.__TAURI__ && window.__TAURI__.dialog) {
     window.__TAURI__.dialog.open = openRemoteHostPicker;
   }

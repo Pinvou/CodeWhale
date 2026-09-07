@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckCircle2, Plus, Send, Trash2 } from '../../components/icons.jsx';
+import { ArrowLeft, CheckCircle2, Plus, Send, Trash2, User } from '../../components/icons.jsx';
 import { RelayAvatar } from './RelayAvatar.jsx';
 
 function displayTime(value) {
@@ -7,12 +7,12 @@ function displayTime(value) {
   return Number.isNaN(date.getTime()) ? String(value || '') : date.toLocaleString();
 }
 
-function MemberRow({ copy, member, duplicateName, canManage, busy, onRemove }) {
+function MemberRow({ copy, member, duplicateName, canManage, busy, loadAvatarSource, teamId, onRemove, onTransfer }) {
   const workload = member.activeCount + member.waitingCount + member.acceptanceCount;
   const groupLabel = member.role === 'owner' ? copy.board.groups.owners : copy.board.groups.members;
   return <article className={`team-relay-member-card${member.role === 'owner' ? ' is-owner' : ''}`} aria-label={`${groupLabel} · ${member.display_name}`}>
     <div className="team-relay-member-identity">
-      <RelayAvatar name={member.display_name} seed={member.id} className={`team-relay-member-avatar${member.isMe ? ' is-me' : ''}`} />
+      <RelayAvatar name={member.display_name} seed={member.id} avatar={member.avatar} loadSource={loadAvatarSource} teamId={teamId} className={`team-relay-member-avatar${member.isMe ? ' is-me' : ''}`} />
       <span><strong>{member.display_name}{member.isMe ? ` · ${copy.board.me}` : ''}</strong><small>{duplicateName && member.email_hint ? `${member.email_hint} · ` : ''}{copy.board.roles[member.role] || member.role}</small></span>
       {member.role === 'owner' && <b>{copy.board.roles.owner}</b>}
     </div>
@@ -28,7 +28,12 @@ function MemberRow({ copy, member, duplicateName, canManage, busy, onRemove }) {
     <div className="team-relay-member-state">
       <b className={workload ? 'is-busy' : 'is-available'}>{workload ? copy.board.busyCount(workload) : copy.board.availableShort}</b>
       <small>{copy.board.ownedCount(member.ownedCount)}</small>
-      {canManage && !member.isMe && <button type="button" disabled={busy} onClick={() => onRemove(member)}><Trash2 size={13} />{copy.board.removeMember}</button>}
+      {canManage && !member.isMe && <div className="team-relay-member-actions">
+        {member.role === 'member' &&
+        <button type="button" className="is-transfer" disabled={busy} onClick={() => onTransfer(member)}><User size={13} />{copy.board.transferOwner}</button>
+        }
+        <button type="button" disabled={busy} onClick={() => onRemove(member)}><Trash2 size={13} />{copy.board.removeMember}</button>
+      </div>}
     </div>
   </article>;
 }
@@ -41,6 +46,7 @@ function RelayQueue({ copy, tasks, onOpenTask }) {
       {rows.map(task => <button type="button" onClick={() => onOpenTask(task)} key={task.id}>
         <i className={`tone-${task.category}`} />
         <span><strong>{task.title}</strong><small>{task.initiator} → {task.current} · {task.status}</small></span>
+        {!!task.unreadCount && <b className="team-relay-unread-badge" aria-label={copy.unread.updates(task.unreadCount)}>{task.unreadCount > 99 ? '99+' : task.unreadCount}</b>}
       </button>)}
       {!rows.length && <p>{copy.board.queue.empty}</p>}
     </div>
@@ -58,7 +64,7 @@ function AcceptanceReminder({ copy, tasks, onOpenTask }) {
   </section>;
 }
 
-export function TeamBoard({ copy, board, tasks, canManage, busy, joinCodeOpen, joinCodeBanner, onInvite, onJoin, onCreate, onAssign, onOpenTask, onRemove }) {
+export function TeamBoard({ copy, teamName, teamId, board, tasks, canManage, busy, joinCodeOpen, joinCodeBanner, loadAvatarSource, onBack, onInvite, onAssign, onOpenTask, onRemove, onTransfer, onLeave, onDissolve }) {
   const nameCounts = new Map();
   board.members.forEach(member => nameCounts.set(member.display_name, (nameCounts.get(member.display_name) || 0) + 1));
   const duplicateNames = new Set([...nameCounts].filter(([, count]) => count > 1).map(([name]) => name));
@@ -67,15 +73,14 @@ export function TeamBoard({ copy, board, tasks, canManage, busy, joinCodeOpen, j
   return <section className="team-relay-team" data-testid="team-relay-board">
     <div className="team-relay-board-content">
       <header className="team-relay-team-overview">
-        <div><div className="team-relay-board-title-row"><h2>{copy.board.title}</h2><span>{copy.liveBadge}</span></div><p>{copy.board.subtitle}</p></div>
+        <div><button type="button" className="team-relay-team-back" onClick={onBack}><ArrowLeft size={15} />{copy.teams.backToDirectory}</button><div className="team-relay-board-title-row"><h2>{teamName}</h2><span>{copy.liveBadge}</span></div><p>{copy.board.subtitle}</p></div>
         <div className="team-relay-team-overview-actions">
-          <button type="button" className="team-relay-secondary" disabled={busy} onClick={onJoin}>{copy.teams.join}</button>
-          <button type="button" className="team-relay-secondary" disabled={busy} onClick={onCreate}>{copy.teams.create}</button>
+          <button type="button" className="team-relay-secondary team-relay-team-exit" disabled={busy} onClick={canManage ? onDissolve : onLeave}>{canManage ? copy.board.dissolveTeam : copy.board.leaveTeam}</button>
           <button type="button" className={`team-relay-secondary${joinCodeOpen ? ' is-active' : ''}`} aria-pressed={joinCodeOpen} disabled={busy} onClick={onInvite}>{copy.inviteMembers}</button>
           <button type="button" className="team-relay-primary" disabled={busy} onClick={onAssign}><Plus size={16} />{copy.assign}</button>
         </div>
       </header>
-      {joinCodeBanner}
+      {joinCodeOpen && joinCodeBanner}
       <div className="team-relay-board-metrics">
         <span><small>{copy.board.summary.members}</small><strong>{board.summary.members || 0}</strong></span>
         <button type="button" disabled={!inProgressTask} onClick={() => onOpenTask(inProgressTask)}><small>{copy.board.summary.inProgress}</small><strong>{board.summary.inProgress || 0}</strong></button>
@@ -85,7 +90,7 @@ export function TeamBoard({ copy, board, tasks, canManage, busy, joinCodeOpen, j
       <div className="team-relay-board-grid">
         <section className="team-relay-member-group">
           <header><div><h3>{copy.board.loadTitle}</h3><p>{copy.board.loadSubtitle}</p></div></header>
-          <div>{board.members.map(member => <MemberRow copy={copy} member={member} duplicateName={duplicateNames.has(member.display_name)} canManage={canManage} busy={busy} onRemove={onRemove} key={member.id} />)}</div>
+          <div>{board.members.map(member => <MemberRow copy={copy} member={member} duplicateName={duplicateNames.has(member.display_name)} canManage={canManage} busy={busy} loadAvatarSource={loadAvatarSource} teamId={teamId} onRemove={onRemove} onTransfer={onTransfer} key={member.id} />)}</div>
         </section>
         <aside className="team-relay-board-side">
           <RelayQueue copy={copy} tasks={tasks} onOpenTask={onOpenTask} />

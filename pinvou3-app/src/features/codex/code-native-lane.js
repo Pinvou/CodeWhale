@@ -13,6 +13,7 @@
 // 三语文案在渲染层按 key 组装（与 compactPhase 同一约定）。
 
 import { projectDeepSeekConversation } from '../conversation/deepseek-conversation.js';
+import { isInternalRuntimeEnvelopeText, isInternalUserMessage } from '../../shared/internal-message.mjs';
 
 export function createNativeLane() {
   return {
@@ -47,7 +48,7 @@ function timeStr() {
 // ── Plan 审批（语义镜像 bridge chat-events.js 的 plan_snapshot/plan_ready）─────
 // plan 类工具：hydrate 时不还原工具卡，改在本条 assistant 消息末尾还原只读方案卡
 // （对齐 bridge rerenderFromMessages 的 PLAN_TOOLS 处理）。
-const PLAN_TOOLS = ['update_plan', 'checklist_write', 'todo_write'];
+const PLAN_TOOLS = new Set(['update_plan', 'checklist_write', 'todo_write']);
 
 /// plan 类工具结果格式："...updated:\n{json}"——切第一个换行后 parse（对齐 bridge
 /// parsePlanSnapshot / engine.rs）。content 可能是 string 或 Anthropic blocks 数组。
@@ -58,6 +59,36 @@ export function parseNativePlanSnapshot(content) {
   const newline = text.indexOf('\n');
   if (newline < 0) return null;
   try { return JSON.parse(text.slice(newline + 1)); } catch { return null; }
+}
+
+/// tool_result.content 归一成纯文本（对齐 bridge toolResultText）。
+function toolResultText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(block => (block && typeof block.text === 'string' ? block.text : '')).join('');
+  }
+  return '';
+}
+
+/// request_user_input 结果是纯 JSON {answers:[{id,label,value}]}（turn_loop.rs ToolResult::json）。
+/// 按 question.id 匹配，还原成 QuestionChoiceCard 的 answers 数组（顺序对齐 questions，
+/// 未命中的问题占 null，渲染层过滤）。multi_select 多选保留全部同 id 答案、不塌缩，
+/// 与提交时 markNativeInputResolved 存的全量数组一致。
+function parseNativeUserAnswers(content, questions) {
+  let ans;
+  try { ans = JSON.parse(toolResultText(content)).answers; } catch { return null; }
+  if (!Array.isArray(ans)) return null;
+  // 用无原型对象：question id 仅被后端校验非空，constructor/toString/__proto__ 是合法输入，
+  // 普通 {} 会让这些键命中 Object.prototype 继承属性，.push 抛 TypeError（复核 P1）。
+  const byId = Object.create(null);
+  ans.forEach(a => { if (a && a.id != null) (byId[a.id] = byId[a.id] || []).push(a); });
+  const out = [];
+  for (const q of questions) {
+    const matches = byId[q.id];
+    if (!matches || !matches.length) { out.push(null); continue; }
+    matches.forEach(a => out.push({ id: q.id, label: a.label, value: a.value }));
+  }
+  return out;
 }
 
 /// accept_plan 的 plan_markdown 拼法（对齐 bridge composePlanMarkdown）：这段文本会进
@@ -175,6 +206,9 @@ export function applyNativeChatEvent(lane, name, payload) {
     case 'chat:user_message': {
       const content = String(p.content || '');
       if (!content) return false;
+      // 内部运行时信封（subagent handoff / background shell 完成等）：与 bridge 实时
+      // 路径一致不上屏；后续 transcript 重载同样会被 hydrate 过滤，两条路径行为对齐。
+      if (isInternalRuntimeEnvelopeText(content)) return false;
       // accept_plan 的用户回声（本地/远端批准都会广播）：先把命中的 active 方案卡
       // 置为已批准（对齐 bridge chat-events.js 的 action === "accept_plan" 处理），
       // 再走普通用户消息去重/插入。
@@ -334,7 +368,10 @@ export function applyNativeChatEvent(lane, name, payload) {
     case 'chat:usage': {
       const input = Number(p.input_tokens || 0);
       if (input <= 0) return false;
-      lane.tokens = { input, max: lane.tokens.max };
+      // The forwarder resolves context_window for the active route. Preserve the previous
+      // value when legacy or partial payloads omit it.
+      const max = Number(p.context_window || 0);
+      lane.tokens = { input, max: max > 0 ? max : lane.tokens.max };
       return true;
     }
     case 'chat:user_input_required': {
@@ -392,6 +429,12 @@ export function applyNativeChatEvent(lane, name, payload) {
       // 压缩事件渲染为系统提示项；三语文案在渲染层按 compactPhase 组装。
       const phase = String(p.phase || 'done');
       lane.compacting = phase === 'start';
+      // Refresh from the conservative post-compaction estimate instead of showing the old
+      // value until the next authoritative chat:usage event.
+      const postTokens = Number(p.post_tokens || 0);
+      if (phase === 'done' && postTokens > 0) {
+        lane.tokens = { input: postTokens, max: lane.tokens.max };
+      }
       lane.items.push({
         id: nextId(lane),
         type: 'system',
@@ -488,6 +531,11 @@ function messageText(blocks) {
     .trim();
 }
 
+// 与 src/shared/internal-message.mjs 的内部运行时消息判定同源（bridge 侧的
+// 超集实现见 src/shared/bridge-messages.js）：CodeWhale 内部运行时信封
+// （subagent handoff / background shell 完成等）以 role=user 持久化供父模型
+// 上下文使用，展示层不得渲染为用户气泡。
+
 /// SavedSession messages → lane.items（hydration 是 rerenderFromMessages 的精简版：
 /// 覆盖 user / assistant text / thinking / tool_use+tool_result / request_user_input /
 /// plan 工具的历史方案卡；persona、成品卡等主聊天专属形态不在代码会话出现，不做还原）。
@@ -527,6 +575,7 @@ export function hydrateNativeLane(lane, saved, timelineEvents = []) {
       ? raw
       : (typeof raw === 'string' && raw ? [{ type: 'text', text: raw }] : []);
     if (role === 'user') {
+      if (isInternalUserMessage(blocks)) continue; // 内部运行时信封/交接：保留在模型上下文，不上屏
       const text = messageText(blocks);
       if (text) lane.items.push({ id: nextId(lane), type: 'user', text, time: '' });
       for (const block of blocks) {
@@ -580,6 +629,11 @@ export function hydrateNativeLane(lane, saved, timelineEvents = []) {
               questions,
               resolved: true,
               cardState: result.is_error ? 'cancelled' : 'submitted',
+              // 还原用户曾提交的答案：历史卡切走再切回后仍能看到自己选了啥。
+              // （#226 已保证走到这里 result 存在，无需 result && 守卫）
+              restoredAnswers: !result.is_error
+                ? parseNativeUserAnswers(result.content, questions)
+                : null,
               time: '',
             });
           }
@@ -587,7 +641,7 @@ export function hydrateNativeLane(lane, saved, timelineEvents = []) {
         }
         // update_plan / checklist_write / todo_write → 收集快照，本条消息末尾还原
         // 只读方案卡（对齐 work hydration：plan 工具不还原工具卡）。
-        if (PLAN_TOOLS.includes(block.name)) {
+        if (PLAN_TOOLS.has(block.name)) {
           const snap = parseNativePlanSnapshot(resultById[block.id] && resultById[block.id].content);
           if (snap) {
             if (block.name === 'update_plan') planSnap = snap;
@@ -634,6 +688,20 @@ export function hydrateNativeLane(lane, saved, timelineEvents = []) {
     }
   }
   lane.timeline = Array.isArray(timelineEvents) ? [...timelineEvents] : [];
+  // Restore the newest usage-bearing turn or compaction snapshot after the mutable lane is
+  // recreated. Without this, remounting hides the chip or restores pre-compaction usage.
+  const lastUsage = [...lane.timeline].reverse().find(event => (
+    event && (event.event === 'assistant_done' || event.event === 'context_snapshot')
+      && Number(event.usage && event.usage.input_tokens) > 0
+  ));
+  // A live chat:usage event can land while loadSession is still awaiting the timeline;
+  // it is newer than the on-disk snapshot, so hydration must not roll the chip back.
+  const hasLiveUsage = Number(lane.tokens && lane.tokens.input) > 0;
+  if (lastUsage && !hasLiveUsage) {
+    // Legacy events omit context_window, leaving the percentage unavailable.
+    const max = Number(lastUsage.usage.context_window || 0);
+    lane.tokens = { input: Number(lastUsage.usage.input_tokens), max: max > 0 ? max : lane.tokens.max };
+  }
   lane.busy = hadLiveTurn;
   if (!lane.busy) lane.thinking = null;
   lane.hydrated = true;

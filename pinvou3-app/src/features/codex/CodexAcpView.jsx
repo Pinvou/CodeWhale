@@ -1,27 +1,51 @@
-import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { FileTypeIcon } from '../../components/files/FileTypeIcon.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
-import { can } from '../../shared/platform.js';
 import {
-  AlertTriangle, Brain, Check, CheckCircle2, ChevronDown, FileText, FolderOpen, Mic, Paperclip, Plus, Send,
-  RefreshCw, Sparkles, StopCircle, Terminal, User, Wrench,
+  AlertTriangle, Brain, Check, CheckCircle2, ChevronDown, FileText, FolderOpen, Mic, Monitor, Paperclip,
+  Plus, RefreshCw, Send, Sparkles, StopCircle, Terminal, Upload, User, Wrench,
 } from '../../components/icons.jsx';
 import { AcpAgentLogo } from './AcpAgentLogo.jsx';
 import { CodexWorkspacePanel } from './CodexWorkspacePanel.jsx';
+import { SubagentTranscriptPanel } from '../multiagent/SubagentTranscriptPanel.jsx';
+import {
+  refreshAcpAgentCatalog,
+  startSerialStatusPolling,
+  useAcpAgentStatus,
+} from './runtimeStatus.js';
 import {
   classifyAcpServiceFailure,
   isAcpAuthenticationFailure,
-  runtimeInstallInProgress,
-  runtimeLoginInProgress,
-  runtimeNoticeMode,
   runtimeOperationFor,
 } from './runtimeNoticeState.js';
-import { ComposerPopover } from '../../components/ComposerPopover.jsx';
+import {
+  AgentServiceFailureNotice,
+  RuntimeNotice,
+  runtimeSourceLabel,
+} from './AcpRuntimeNotices.jsx';
+import { acpErrorMessage } from './acpErrors.js';
+import {
+  cancelPendingAcpAttachments,
+  isPendingAcpAttachment,
+  runAcpAttachmentTask,
+} from './acp-attachment-lifecycle.js';
+import {
+  createAcpSessionOperationTracker,
+  removeAcpDraftItems,
+  transferAcpDraftItems,
+} from './acp-session-operation.js';
+import { ComposerPopover, useOutsidePointerClose } from '../../components/ComposerPopover.jsx';
 import {
   appendAcpEvent,
+  buildElicitationContent,
+  createAcpEventSeqTracker,
+  createAcpGapResyncScheduler,
+  mergeAcpTimelineSnapshot,
+  updateAcpAttachmentDraft,
   commandExecutionDetails,
   projectAcpTimeline,
-  resolveAcpSessionControls,
+  resolveAcpSessionControls, unifiedConversationUiEnabled,
 } from './acp-state.js';
 import {
   applyNativeChatEvent,
@@ -39,16 +63,34 @@ import {
   resolveNativeModeValue,
 } from './code-permission-state.js';
 import {
+  canApplyNativeControlsRefresh,
+  claimNativeControlsRefreshId,
+  finalizePreparedSessionCreation,
+  resolveNativeModelId,
+} from './native-session-handoff.js';
+import {
+  checkpointRefreshKey,
+  reloadSessionAfterRewind,
+  rewindEntriesByTurnId,
+  rewindNoticeText,
+  rewindUndoAvailable,
+  useSessionCheckpoints,
+} from './checkpoints.js';
+import { RewindChip, RewindConfirmDialog, RewindUndoChip, RewindUndoConfirmDialog } from './RewindChip.jsx';
+import {
   ConversationActivityIndicator,
   ConversationMarkdown,
   ConversationTurn,
+  WorkspaceResourceButtons,
 } from '../conversation/ConversationTimeline.jsx';
+import {
+  measureConversationScrollGeometry,
+  startConversationBottomFollower,
+  transitionConversationScrollState,
+} from '../conversation/conversation-scroll.js';
 import { AssistantMessageActions, AssistantMessageFooter } from '../conversation/AssistantMessageActions.jsx';
 import { assistantResponseAvailable, assistantResponseText } from '../conversation/message-clipboard.js';
-import {
-  ComposerModelSelector,
-  ComposerToolMenu,
-} from '../settings/SettingsView.jsx';
+import { ComposerModelSelector, ComposerToolMenu } from '../settings/composer-shared.jsx';
 import {
   COMPOSER_ICON_BUTTON_CLASS,
   ComposerKbSelector,
@@ -56,10 +98,20 @@ import {
 } from '../chat/composer-controls.jsx';
 import { selectableModels } from '../../shared/model-options.js';
 import { selectorMainLabel } from '../settings/model-catalog.js';
-import { isNearConversationBottom } from '../conversation/conversation-model.js';
+import {
+  captureConversationScrollPosition,
+  collectToolWorkspaceResources,
+  isFetchTool,
+  isSearchTool,
+  restoreConversationScrollPosition,
+  toolWorkspaceResources,
+} from '../conversation/conversation-model.js';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
-import { PlanLayer, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { PlanLayer, ToolCard, cardBoxCls, cardBtnCls } from '../tools/tool-renderers.jsx';
+import { notifyChatRoundCommitted } from '../tools/tool-events.js';
 import { AttachmentChips } from '../attachments/AttachmentChips.jsx';
+import { formatAttachmentLimitError } from '../attachments/attachment-limit-errors.js';
+import { ComposerAttachmentDropOverlay } from '../attachments/ComposerAttachmentDropOverlay.jsx';
 import { HomeModeSwitcher } from '../conversation/HomeModeSwitcher.jsx';
 import { bridge } from '../../hooks/useBridge.js';
 import {
@@ -67,11 +119,39 @@ import {
   listenTauri,
   openTauriDialog,
 } from '../../platform/tauri/client.js';
-
+import {
+  cancelAcpSession,
+  createAcpSession,
+  discardAcpAttachment,
+  getAcpSessionInfo,
+  ingestAcpAttachmentPath,
+  loadAcpPendingElicitations,
+  loadAcpPendingPermissions,
+  loadAcpTimeline,
+  listAcpSessions,
+  openAcpExternalUrl,
+  pickAcpWorkspace,
+  respondAcpElicitation,
+  respondAcpPermission,
+  setAcpConfigOption,
+  setAcpMode,
+  setAcpModel,
+  submitAcpPrompt,
+  uploadAcpDeviceAttachment,
+} from './acpClient.js';
+import { can, canInvoke, isWeb, onPlatformConnectionChange } from '../../shared/platform.js';
 const invoke = invokeTauri;
 const RECENT_WORKSPACES_KEY = 'pinvou_codex_recent_workspaces';
-const UNIFIED_CONVERSATION_UI_KEY = 'pinvou_conversation_ui_v2';
 const DRAFT_ATTACHMENT_KEY = '__codex_draft__';
+
+function codeTelemetryToken(prefix) {
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(12);
+    window.crypto.getRandomValues(bytes);
+    return `${prefix}-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
 
 // 草稿配置快照缓存已抽到 ./acp-draft-controls.js（供设置页共用，避免与
 // SettingsView 的循环引用）。
@@ -81,15 +161,13 @@ import {
   rememberDraftControls,
 } from './acp-draft-controls.js';
 const AGENT_SELECTION_KEY = 'pinvou_codex_agent_selection';
-const CODE_AGENT_IDS = ['pinvou', 'codex', 'claude', 'kimi'];
-
-function unifiedConversationUiEnabled() {
-  try {
-    return localStorage.getItem(UNIFIED_CONVERSATION_UI_KEY) !== 'false';
-  } catch {
-    return true;
-  }
-}
+// Constant collection used only for membership checks: Set.has replaces array .includes (biome prefer-set-has).
+const CODE_AGENT_IDS = new Set(['pinvou', 'codex', 'claude', 'kimi']);
+// Stable empty turns for the draft empty state: an inline [] would invalidate any useMemo depending on its reference on every render.
+/** @type {{ id: string, status: string }[]} */
+const EMPTY_CONVERSATION_TURNS = [];
+// Same idea: the sessions default must be a stable reference; an inline [] is a fresh array on every render.
+const EMPTY_SESSIONS = [];
 
 function workspaceName(path, unknownDirectory) {
   const normalized = String(path || '').replace(/[\\/]+$/, '');
@@ -131,10 +209,16 @@ function forgetWorkspace(path) {
 function loadAgentSelection() {
   try {
     const value = localStorage.getItem(AGENT_SELECTION_KEY);
-    return value && CODE_AGENT_IDS.includes(value) ? value : null;
+    return value && CODE_AGENT_IDS.has(value) ? value : null;
   } catch {
     return null;
   }
+}
+
+function initialDraftAgentSelection() {
+  const saved = loadAgentSelection();
+  if (isWeb) return saved && saved !== 'pinvou' ? saved : 'codex';
+  return saved || 'pinvou';
 }
 
 function saveAgentSelection(agentId) {
@@ -388,30 +472,23 @@ function CommandExecutionItem({ item, now, copy }) {
   );
 }
 
-function GenericToolItem({ item, now, copy, cv }) {
+function GenericToolItem({ item, now, copy, cv, onOpenResource }) {
   const tool = item.tool || {};
   const state = terminalStatus(item.status);
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const duration = copy.elapsed(elapsedMs(item.startedAt, item.completedAt, now));
   const label = item.type === 'file_change' ? copy.fileChange : (tool.kind || cv.codexTool);
+  const resources = toolWorkspaceResources(tool);
   return (
     <div className="rounded-xl border border-black/[0.05] dark:border-white/[0.07] bg-white/45 dark:bg-white/[0.015]">
       <CompactItemRow icon={<Wrench size={13} />} title={tool.title || label}
         meta={`${label} · ${state === 'running' ? `${copy.inProgress} · ${duration}` : state === 'failed' ? copy.failed : `${cv.ended} · ${duration}`}`}
         status={state} open={open} controlsId={detailsId}
         onToggle={() => setOpen(value => !value)} />
+      <WorkspaceResourceButtons resources={resources} onOpenResource={onOpenResource} />
       {open && (
         <div id={detailsId} data-testid="conversation-compact-item-content" className="px-3 pb-3 border-t border-black/[0.05] dark:border-white/[0.06]">
-          {tool.locations && tool.locations.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {tool.locations.map((location, index) => (
-                <span key={index} className="px-2 py-1 rounded-lg bg-blue-500/8 text-[10px] text-blue-600 dark:text-blue-300 font-mono">
-                  {location.path || String(location)}
-                </span>
-              ))}
-            </div>
-          )}
           <StructuredValue label={copy.arguments} value={tool.rawInput} />
           <StructuredValue label={copy.result} value={tool.rawOutput != null ? tool.rawOutput : tool.content} />
         </div>
@@ -420,7 +497,7 @@ function GenericToolItem({ item, now, copy, cv }) {
   );
 }
 
-function ToolGroup({ group, now, copy, cv }) {
+function ToolGroup({ group, now, copy, cv, onOpenResource }) {
   const items = group.items || [];
   const running = items.some(item => terminalStatus(item.status) === 'running');
   const failed = items.some(item => terminalStatus(
@@ -430,6 +507,7 @@ function ToolGroup({ group, now, copy, cv }) {
   const [open, setOpen] = useState(false);
   const detailsId = useId();
   const hasDetails = items.length > 0;
+  const resources = collectToolWorkspaceResources(items);
   return (
     <div className="min-w-0 max-w-full">
       <button type="button" onClick={() => setOpen(value => !value)}
@@ -441,11 +519,12 @@ function ToolGroup({ group, now, copy, cv }) {
         <span>{running ? copy.executing : failed ? cv.stepsFailed : copy.executionSteps} · {items.length}</span>
         <ChevronDown size={13} className={`ml-auto transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
+      <WorkspaceResourceButtons resources={resources} onOpenResource={onOpenResource} />
       {open && hasDetails && (
         <div id={detailsId} data-testid="conversation-tool-group-content" className="min-w-0 max-w-full ml-3 pl-3 border-l border-black/[0.06] dark:border-white/[0.08] space-y-1.5 pb-1">
           {items.map(item => item.type === 'command_execution'
             ? <CommandExecutionItem key={item.id} item={item} now={now} copy={copy} />
-            : <GenericToolItem key={item.id} item={item} now={now} copy={copy} cv={cv} />)}
+            : <GenericToolItem key={item.id} item={item} now={now} copy={copy} cv={cv} onOpenResource={onOpenResource} />)}
         </div>
       )}
     </div>
@@ -581,17 +660,10 @@ function ElicitationCard({ elicitation, pending, onRespond, responding, copy, co
   });
 
   function submit(groups) {
-    const content = {};
-    for (const group of groups) {
-      const custom = group.answers.find(answer => answer.other);
-      if (custom && group.otherAnswerKey) {
-        content[group.otherAnswerKey] = custom.value;
-      } else if (group.multiSelect) {
-        content[group.answerKey] = group.answers.map(answer => answer.value);
-      } else if (group.answers[0]) {
-        content[group.answerKey] = group.answers[0].value;
-      }
-    }
+    // content 用无原型对象构造（见 buildElicitationContent）：answerKey 为
+    // constructor/toString/__proto__ 时普通 {} 会命中 Object.prototype，字段在
+    // JSON 序列化时静默丢失。
+    const content = buildElicitationContent(groups);
     onRespond(elicitation.elicitationId, 'accept', content);
   }
 
@@ -674,6 +746,9 @@ function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput,
       id: group.questionId,
       label: answer.other ? (conversationCopy && conversationCopy.otherAnswer) || answer.label : answer.label,
       value: String(answer.value),
+      // 保留 other 标记：QuestionChoiceCard 还原历史答案时据此把“其他”与预设选项区分开，
+      // 避免“其他值 == 预设 value”被误判为预设（评审 P2）。
+      other: answer.other,
     })));
     onSubmitAnswers(item.toolCallId, answers);
   }
@@ -682,6 +757,7 @@ function NativeUserInputCard({ item, responding, onSubmitAnswers, onCancelInput,
     <QuestionChoiceCard
       title={copy.choiceTitle}
       questions={questions}
+      initialAnswers={item.restoredAnswers || []}
       resolved={!actionable}
       submitting={responding}
       submitLabel={copy.submit}
@@ -764,7 +840,10 @@ function NativeYoloConfirmCard({ theme, t, busy, onConfirm, onCancel }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [busy, onCancel]);
-  return (
+  // portal 到 <body>：该卡片渲染在 composer 容器内，而容器的 backdrop-blur 会成为
+  // `position: fixed` 的包含块，不 portal 的话全屏模态只会盖住输入框区域，
+  // 点击遮罩取消也随之失效。
+  return createPortal(
     <div data-testid="native-yolo-confirm" className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
         type="button"
@@ -788,7 +867,7 @@ function NativeYoloConfirmCard({ theme, t, busy, onConfirm, onCancel }) {
         <div className={`mt-2 text-[13px] leading-relaxed ${isDark ? 'text-[#C4C7C5]' : 'text-[#444746]'}`}>
           {t.modeYoloConfirmBody}
         </div>
-        <div className="mt-2 text-[11px] text-gray-400">{t.modeYoloConfirmHint}</div>
+        <div className="mt-2 text-[12px] text-[#C5221F] dark:text-red-400">{t.modeYoloConfirmHint}</div>
         <div className="mt-4 flex items-center justify-end gap-2">
           <button
             type="button"
@@ -800,13 +879,14 @@ function NativeYoloConfirmCard({ theme, t, busy, onConfirm, onCancel }) {
           <button
             type="button"
             data-testid="native-yolo-confirm-ok"
-            className={cardBtnCls('primary')}
+            className={cardBtnCls('danger')}
             disabled={busy}
             onClick={onConfirm}
           >{t.modeYoloConfirmOk}</button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -822,9 +902,10 @@ function TurnItem({
   onRespondElicitation,
   responding,
   onOpenExternal,
+  onOpenResource,
 }) {
   if (item.type === 'reasoning') return <ReasoningItem item={item} now={now} copy={copy} />;
-  if (item.type === 'tool_group') return <ToolGroup group={item} now={now} copy={copy} cv={cv} />;
+  if (item.type === 'tool_group') return <ToolGroup group={item} now={now} copy={copy} cv={cv} onOpenResource={onOpenResource} />;
   if (item.type === 'plan') return <PlanBlock plan={item.plan} copy={copy} />;
   if (item.type === 'permission') {
     return (
@@ -843,16 +924,21 @@ function TurnItem({
   }
   if (item.type === 'agent_message') {
     const commentary = item.phase === 'commentary';
+    // streaming = the projection's in_progress convention (ACP/deepseek projections agree): while text
+    // can still grow, render through the throttle; when it ends, useThrottledValue replays the full text verbatim.
     return commentary
-      ? <ConversationMarkdown text={item.text} onOpenExternal={onOpenExternal}
+      ? <ConversationMarkdown text={item.text} onOpenExternal={onOpenExternal} onOpenResource={onOpenResource}
+          streaming={item.status === 'in_progress'}
           className="text-[13px] leading-6 text-gray-500 dark:text-gray-400" />
-      : <ConversationMarkdown text={item.text} onOpenExternal={onOpenExternal} />;
+      : <ConversationMarkdown text={item.text} onOpenExternal={onOpenExternal} onOpenResource={onOpenResource}
+          streaming={item.status === 'in_progress'} />;
   }
   return null;
 }
 
 function Turn({
   turn,
+  sessionId,
   now,
   agentId,
   agentName,
@@ -864,6 +950,7 @@ function Turn({
   onRespondElicitation,
   responding,
   onOpenExternal,
+  onOpenResource,
 }) {
   const waitingPermission = turn.permissions.some(permission => !permission.resolved);
   const waitingInput = turn.elicitations.some(elicitation => !elicitation.resolved);
@@ -906,11 +993,16 @@ function Turn({
               agentName={agentName} copy={copy} cv={cv}
               pendingByTool={pendingByTool} pendingByElicitation={pendingByElicitation}
               onRespond={onRespond} onRespondElicitation={onRespondElicitation}
-              responding={responding} onOpenExternal={onOpenExternal} />
+              responding={responding} onOpenExternal={onOpenExternal} onOpenResource={onOpenResource} />
           ))}
           {!running && (assistantAvailable || turn.completedAt || turn.error) && <AssistantMessageFooter>
             {assistantAvailable && (
-              <AssistantMessageActions resolveText={() => assistantResponseText(turn)} copy={copy} />
+              <AssistantMessageActions
+                resolveText={() => assistantResponseText(turn)}
+                copy={copy}
+                sessionId={sessionId}
+                turnId={turn.id}
+              />
             )}
             {(turn.completedAt || turn.error) && <>
               <StatusBadge status={turn.status} copy={copy} />
@@ -925,264 +1017,10 @@ function Turn({
   );
 }
 
-function setupHintText(copy, hint) {
-  return copy.setupHints?.[hint] || '';
-}
-function RuntimeNotice({
-  status,
-  working,
-  operation,
-  error,
-  onInstall,
-  onLogin,
-  onOpenLogin,
-  onSubmitLoginCode,
-  onRefresh,
-  resetKey,
-  suppressAdvisoryUpgrade = false,
-  copy,
-}) {
-  const [authorizationCode, setAuthorizationCode] = useState('');
-  const [declinedUpgrade, setDeclinedUpgrade] = useState(false);
-  useEffect(() => {
-    setAuthorizationCode('');
-  }, [status?.agent_id, status?.login_in_progress]);
-  useEffect(() => {
-    setDeclinedUpgrade(false);
-  }, [resetKey, status?.agent_id, status?.installed, status?.latest_version]);
-  const noticeMode = runtimeNoticeMode(status, declinedUpgrade || suppressAdvisoryUpgrade);
-  if (noticeMode === 'checking') return <div className="text-[13px] text-gray-400">{copy.checking}</div>;
-  const rawError = error || status.error;
-  const visibleError = rawError
-    ? (copy.showRawErrors ? rawError : copy.operationFailed)
-    : '';
-  if (noticeMode === 'bridge_unavailable') {
-    const isCodex = status.agent_id === 'codex';
-    return (
-      <div className="rounded-2xl border border-red-500/20 bg-red-500/[0.05] p-4 flex items-start gap-3">
-        <AlertTriangle size={19} className="text-red-500 shrink-0 mt-0.5" />
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold">{isCodex ? copy.bridgeUnavailable : copy.setupRequired}</div>
-          <div className="mt-1 text-[12px] text-gray-500">{setupHintText(copy, status.setup_hint) || copy.bridgeRepair}</div>
-          {visibleError && <div className="mt-2 text-[11px] text-red-500">{visibleError}</div>}
-        </div>
-        {!isCodex && (
-          <button onClick={onRefresh} className="px-3 py-1.5 rounded-xl border border-red-500/20 text-[12px] font-medium">
-            {copy.recheck}
-          </button>
-        )}
-      </div>
-    );
-  }
-  if (noticeMode === 'install') {
-    const agentName = status.agent_name || 'Agent';
-    const action = status.install_action || 'manual';
-    const isPackageManagerUpgrade = action === 'brew_upgrade' || action === 'npm_upgrade';
-    const canAutoUpgrade = (status.update_available || status.update_required || isPackageManagerUpgrade) && action !== 'manual' && action !== 'none';
-    const canDeferUpgrade = status.update_available && status.installed && !status.update_required;
-    const installing = runtimeInstallInProgress(status, operation);
-    const installHints = {
-      official_script: copy.officialScriptHint(agentName),
-    };
-    const installButtons = {
-      official_script: copy.confirmInstall,
-    };
-    const hint = isPackageManagerUpgrade
-      ? copy.packageManagerUpgradeHint(status.install_source)
-      : installHints[action] || setupHintText(copy, status.setup_hint) || copy.manualInstallHint(agentName);
-    const busyLabel = copy.installing;
-    return (
-      <div className="rounded-2xl border border-blue-500/20 bg-blue-500/[0.05] p-4 flex items-center gap-3">
-        <Terminal size={19} className="text-blue-500 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold">
-            {status.update_required
-              ? copy.cliUpdateRequired(agentName, status.version, status.latest_version)
-              : status.update_available
-                ? copy.cliUpdateAvailable(agentName, status.version, status.latest_version)
-              : status.version
-                ? copy.cliOutdated(status.version, status.min_version)
-                : copy.cliMissing(agentName)}
-          </div>
-          <div className="mt-0.5 text-[12px] text-gray-500">{hint}</div>
-          {visibleError && <div className="mt-1 text-[11px] text-red-500">{visibleError}</div>}
-        </div>
-        {canAutoUpgrade ? (
-          <div className="flex shrink-0 items-center gap-2">
-            {canDeferUpgrade && (
-              <button onClick={() => setDeclinedUpgrade(true)} disabled={working || installing} className="px-3 py-1.5 rounded-xl border border-blue-500/20 text-[12px] font-medium disabled:opacity-50">
-                {copy.declineUpgrade}
-              </button>
-            )}
-            <button onClick={() => onInstall()} disabled={working || installing} className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-[12px] font-medium disabled:opacity-50 inline-flex items-center gap-1.5">
-              {installing && <RefreshCw size={12} className="animate-spin" />}
-              {installing ? busyLabel : copy.upgrade}
-            </button>
-          </div>
-        ) : installButtons[action] ? (
-          <button onClick={() => onInstall()} disabled={working || installing} className="px-3 py-1.5 rounded-xl bg-blue-600 text-white text-[12px] font-medium disabled:opacity-50 inline-flex items-center gap-1.5">
-            {installing && <RefreshCw size={12} className="animate-spin" />}
-            {installing ? busyLabel : installButtons[action]}
-          </button>
-        ) : (
-          <button onClick={onRefresh} className="px-3 py-1.5 rounded-xl border border-blue-500/20 text-[12px] font-medium">
-            {copy.recheck}
-          </button>
-        )}
-      </div>
-    );
-  }
-  if (noticeMode === 'login') {
-    const waitingForLogin = runtimeLoginInProgress(status, operation);
-    const loginUrlReady = waitingForLogin && Boolean(status.login_url);
-    const agentName = status.agent_name || 'Agent';
-    const waitingTitle = copy.waitingAgentLogin
-      ? copy.waitingAgentLogin(agentName)
-      : copy.waitingLogin;
-    const signedOutTitle = copy.agentNotLoggedIn
-      ? copy.agentNotLoggedIn(agentName)
-      : copy.notLoggedIn;
-    const loginHint = copy.agentLoginHint
-      ? copy.agentLoginHint(agentName)
-      : (setupHintText(copy, status.setup_hint) || copy.loginHint);
-    return (
-      <div className="rounded-2xl border border-amber-500/20 bg-amber-500/[0.06] p-4 flex items-start gap-3">
-        <Sparkles size={19} className="text-amber-500 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold">{waitingForLogin ? waitingTitle : signedOutTitle}</div>
-          <div className="text-[12px] text-gray-500">
-            {loginUrlReady
-              ? (copy.finishAgentAuth ? copy.finishAgentAuth(agentName) : copy.finishBrowserAuth)
-              : waitingForLogin
-                ? copy.openingAuth
-                : loginHint}
-          </div>
-          {status.login_code && (
-            <div className="mt-2 inline-flex rounded-lg border border-amber-500/25 bg-white/70 px-2.5 py-1 font-mono text-[13px] font-semibold tracking-wider text-amber-800 dark:bg-black/20 dark:text-amber-200">
-              {copy.deviceCode ? copy.deviceCode(status.login_code) : status.login_code}
-            </div>
-          )}
-          {waitingForLogin && status.login_input_required && status.agent_id === 'claude' && (
-            <form
-              className="mt-2 flex max-w-md items-center gap-2"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const code = authorizationCode.trim();
-                if (code) onSubmitLoginCode(code);
-              }}
-            >
-              <input
-                value={authorizationCode}
-                onChange={event => setAuthorizationCode(event.target.value)}
-                placeholder={copy.authorizationCodePlaceholder}
-                aria-label={copy.authorizationCodePlaceholder}
-                autoComplete="off"
-                className="min-w-0 flex-1 rounded-lg border border-amber-500/25 bg-white/80 px-2.5 py-1.5 text-[12px] outline-none focus:border-amber-500 dark:bg-black/20"
-              />
-              <button
-                type="submit"
-                disabled={!authorizationCode.trim()}
-                className="rounded-lg border border-amber-500/30 px-2.5 py-1.5 text-[12px] font-medium text-amber-700 disabled:opacity-40 dark:text-amber-300"
-              >
-                {copy.submitAuthorizationCode}
-              </button>
-            </form>
-          )}
-          {visibleError && <div className="mt-1 text-[11px] text-red-500">{visibleError}</div>}
-        </div>
-        {loginUrlReady && (
-          <button onClick={onOpenLogin} className="px-3 py-1.5 rounded-xl border border-amber-500/30 text-amber-700 dark:text-amber-300 text-[12px] font-medium">
-            {copy.reopenAuth}
-          </button>
-        )}
-        <button onClick={onLogin} disabled={working || waitingForLogin} className="px-3 py-1.5 rounded-xl bg-amber-500 text-white text-[12px] font-medium disabled:opacity-50">
-          {waitingForLogin ? copy.waitAuth : copy.authorize}
-        </button>
-      </div>
-    );
-  }
-  if (noticeMode === 'error') return <div className="rounded-xl bg-red-500/8 text-red-600 dark:text-red-300 px-3 py-2 text-[12px]">{visibleError}</div>;
-  return null;
-}
-function runtimeSourceLabel(status, copy) {
-  if (!status) return '';
-  return copy?.runtimeSources?.[status.runtime_source] || '';
-}
-
-function AgentServiceFailureNotice({
-  failure,
-  agentName,
-  working,
-  onSwitchAccount,
-  onManageProviders,
-  onDismiss,
-  copy,
-  providerCopy,
-}) {
-  if (!failure) return null;
-  const recoverWithAccount = ['entitlement', 'quota', 'authentication'].includes(failure.kind);
-  const title = failure.kind === 'entitlement'
-    ? copy.entitlementUnavailable(agentName)
-    : failure.kind === 'quota'
-      ? copy.quotaUnavailable(agentName)
-      : failure.kind === 'authentication'
-        ? copy.authorizationExpired(agentName)
-        : copy.serviceUnavailable(agentName);
-  const description = recoverWithAccount
-    ? copy.accountRecoveryHint
-    : copy.serviceRecoveryHint;
-  return (
-    <div data-testid="acp-service-failure" className="rounded-2xl border border-red-500/20 bg-red-500/[0.055] p-4">
-      <div className="flex items-start gap-3">
-        <AlertTriangle size={19} className="mt-0.5 shrink-0 text-red-500" />
-        <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-red-700 dark:text-red-300">{title}</div>
-          <div className="mt-1 text-[12px] leading-5 text-gray-500 dark:text-gray-400">{description}</div>
-          <details className="mt-2">
-            <summary className="cursor-pointer text-[11px] text-gray-400">{copy.errorDetails}</summary>
-            <div className="mt-1 break-words text-[11px] text-red-500">{failure.detail}</div>
-          </details>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {recoverWithAccount && (
-            <button
-              type="button"
-              onClick={onSwitchAccount}
-              disabled={working}
-              className="rounded-xl bg-red-500 px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
-            >
-              {copy.switchAccount}
-            </button>
-          )}
-          {onManageProviders && providerCopy && (
-            <button
-              type="button"
-              data-testid="acp-failure-manage-providers"
-              onClick={onManageProviders}
-              disabled={working}
-              className="rounded-xl border border-red-500/20 px-3 py-1.5 text-[12px] font-medium text-red-600 disabled:opacity-50 dark:text-red-300"
-            >
-              {providerCopy.faultManage}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={onDismiss}
-            disabled={working}
-            className="rounded-xl border border-red-500/20 px-3 py-1.5 text-[12px] font-medium text-red-600 disabled:opacity-50 dark:text-red-300"
-          >
-            {copy.dismissNotice}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function CodexAcpView({
   theme,
   t,
-  sessions = [],
+  sessions = EMPTY_SESSIONS,
   activeId = null,
   draftEpoch = 0,
   relayLaunch = null,
@@ -1196,9 +1034,12 @@ export function CodexAcpView({
   onGotoSettings,
   fixedSession = false,
 }) {
+  const codeTelemetryViewIdRef = useRef(null);
+  const codeTelemetryReportedRef = useRef(false);
+  if (!codeTelemetryViewIdRef.current) codeTelemetryViewIdRef.current = codeTelemetryToken('code-view');
   const codexCopy = t.uiCodex;
-  const [agents, setAgents] = useState([]);
-  const [draftAgentId, setDraftAgentId] = useState(loadAgentSelection() || 'pinvou');
+  const [agents, setAgents] = useState(null); // null=加载中，[] 才允许回退当前 Agent。
+  const [draftAgentId, setDraftAgentId] = useState(initialDraftAgentSelection);
   const [status, setStatus] = useState(null);
   const [events, setEvents] = useState([]);
   const [pending, setPending] = useState([]);
@@ -1208,44 +1049,118 @@ export function CodexAcpView({
   const [sessionLoading, setSessionLoading] = useState(false);
   const [draft, setDraft] = useState('');
   const [attachmentDrafts, setAttachmentDrafts] = useState({});
+  const attachmentDraftsRef = useRef(attachmentDrafts);
+  attachmentDraftsRef.current = attachmentDrafts;
   const [workspaceReferenceDrafts, setWorkspaceReferenceDrafts] = useState({});
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [workspaceDockActive, setWorkspaceDockActive] = useState(false);
+  const [workspaceDockActivation, setWorkspaceDockActivation] = useState(0);
+  const [subagentPanel, setSubagentPanel] = useState(null);
   const [workspaceChangeCount, setWorkspaceChangeCount] = useState(0);
   const [now, setNow] = useState(Date.now());
   const useUnifiedConversationUi = unifiedConversationUiEnabled();
-  const [configApplying, setConfigApplying] = useState('');
-  const [working, setWorking] = useState(false);
+  const [localConfigApplying, setConfigApplying] = useState('');
+  const acpConfigOperationTrackerRef = useRef(null);
+  if (!acpConfigOperationTrackerRef.current) {
+    acpConfigOperationTrackerRef.current = createAcpSessionOperationTracker(activeId);
+  }
+  const acpConfigOperationTracker = acpConfigOperationTrackerRef.current;
+  const [acpConfigOperation, setAcpConfigOperation] = useState(null);
+  const activeAcpConfigOperation = acpConfigOperationTracker.isCurrent(acpConfigOperation)
+    && acpConfigOperation?.sessionId === activeId
+    ? acpConfigOperation
+    : null;
+  const configApplying = localConfigApplying || activeAcpConfigOperation?.key || '';
+  const acpSendOperationTrackerRef = useRef(null);
+  if (!acpSendOperationTrackerRef.current) {
+    acpSendOperationTrackerRef.current = createAcpSessionOperationTracker(
+      activeId || DRAFT_ATTACHMENT_KEY,
+    );
+  }
+  const acpSendOperationTracker = acpSendOperationTrackerRef.current;
+  const [acpSendOperation, setAcpSendOperation] = useState(null);
+  const activeAcpSendOperation = acpSendOperationTracker.isCurrent(acpSendOperation)
+    && acpSendOperation?.sessionId === (activeId || DRAFT_ATTACHMENT_KEY)
+    ? acpSendOperation
+    : null;
+  const [localWorking, setWorking] = useState(false);
+  const working = localWorking || Boolean(activeAcpSendOperation);
   const [runtimeOperations, setRuntimeOperations] = useState({});
   const [runtimeErrors, setRuntimeErrors] = useState({});
   const [error, setError] = useState('');
   const showError = (nextError) => {
     console.error('Codex operation failed:', nextError);
-    setError(codexCopy.showRawErrors ? String(nextError) : codexCopy.operationFailed);
+    setError(acpErrorMessage(nextError, codexCopy, { allowRaw: !isWeb }));
   };
-  const [responding, setResponding] = useState(false);
+  const [respondingSessionId, setRespondingSessionId] = useState(null);
+  const responding = Boolean(activeId && respondingSessionId === activeId);
   const [commandOpen, setCommandOpen] = useState(false);
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  // 这四个 composer 弹层不能用 `fixed inset-0` 关闭层：composer 容器的 backdrop-blur
+  // 会成为 fixed 后代的包含块，使关闭层只覆盖输入框区域、外点失效。统一用
+  // document 级 pointerdown 外点检测（见 ComposerPopover.jsx）。
+  const commandMenuPanelRef = useRef(null);
+  const commandMenuTriggerRef = useRef(null);
+  const workspaceMenuPanelRef = useRef(null);
+  const workspaceMenuTriggerRef = useRef(null);
+  const memoryPanelRef = useRef(null);
+  const memoryTriggerRef = useRef(null);
+  const accountMenuPanelRef = useRef(null);
+  const accountMenuTriggerRef = useRef(null);
+  useOutsidePointerClose(commandOpen, () => setCommandOpen(false), [commandMenuPanelRef, commandMenuTriggerRef]);
+  useOutsidePointerClose(workspaceMenuOpen, () => setWorkspaceMenuOpen(false), [workspaceMenuPanelRef, workspaceMenuTriggerRef]);
+  useOutsidePointerClose(memoryOpen, () => setMemoryOpen(false), [memoryPanelRef, memoryTriggerRef]);
+  useOutsidePointerClose(accountMenuOpen, () => setAccountMenuOpen(false), [accountMenuPanelRef, accountMenuTriggerRef]);
   const [dismissedFailureKey, setDismissedFailureKey] = useState('');
   const [draftWorkspacePath, setDraftWorkspacePath] = useState(null);
+  const [draftWorkspaceHandle, setDraftWorkspaceHandle] = useState(null);
   const [recentWorkspaces, setRecentWorkspaces] = useState(loadRecentWorkspaces);
   const [draftControlsCache, setDraftControlsCache] = useState(loadDraftControlsCache);
   // 草稿态（会话未创建）下用户预选的配置：{ [agentId]: { model?, mode?, configs: { [id]: value } } }
   const [draftConfigSelections, setDraftConfigSelections] = useState({});
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const scroller = useRef(null);
+  const conversationContentRef = useRef(null);
+  const rightPanelScrollRef = useRef(null);
   const autoScrollRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
   const composerRef = useRef(null);
   const attachmentIdRef = useRef(0);
+  const attachmentMenuTriggerRef = useRef(null);
+  const deviceFileInputRef = useRef(null);
+  const cancelledAttachmentIdsRef = useRef(new Set());
   const skipNextActiveLoadRef = useRef(null);
   const relayLaunchConsumedRef = useRef('');
   const sessionLoadRequestRef = useRef(0);
+  const acpEventSeqTrackerRef = useRef(null);
+  if (!acpEventSeqTrackerRef.current) acpEventSeqTrackerRef.current = createAcpEventSeqTracker();
+  const acpGapResyncRef = useRef(null);
+  if (!acpGapResyncRef.current) {
+    acpGapResyncRef.current = createAcpGapResyncScheduler(sessionId => {
+      if (activeIdRef.current !== sessionId) return;
+      return resyncAcpSessionAfterGap(sessionId);
+    }, {
+      onAttempt: (sessionId, attempt) => console.warn(
+        `[acp] live event sequence gap detected for ${sessionId}; resyncing from the authoritative timeline (attempt ${attempt})`,
+      ),
+      onRetry: (_sessionId, attempt, error) => console.warn(
+        `[acp] timeline resync after event sequence gap failed (attempt ${attempt}); retrying with backoff`,
+        error,
+      ),
+      onGiveUp: (_sessionId, attempt, error) => console.warn(
+        `[acp] timeline resync after event sequence gap gave up after ${attempt} attempts; the gap stays unhealed until reconnect or session reopen`,
+        error,
+      ),
+    });
+  }
   const preserveDraftWorkspaceRef = useRef(false);
   const draftEpochRef = useRef(draftEpoch);
   const activeIdRef = useRef(activeId);
-  activeIdRef.current = activeId;
+  const lastActiveSessionIdRef = useRef(activeId);
   useLayoutEffect(() => {
     const element = composerRef.current;
     if (!element) return;
@@ -1254,6 +1169,16 @@ export function CodexAcpView({
     element.style.height = `${nextHeight}px`;
     element.style.overflowY = element.scrollHeight > 192 ? 'auto' : 'hidden';
   }, [activeId, draft, sessionLoading]);
+  if (activeId) lastActiveSessionIdRef.current = activeId;
+  useLayoutEffect(() => {
+    // loadSession may optimistically point this ref at a just-created session before
+    // the parent commits activeId. Do not overwrite that handoff from an intermediate
+    // render carrying the old prop; layout effects still update ordinary session switches
+    // before async responses can commit.
+    activeIdRef.current = activeId;
+    acpConfigOperationTracker.switchSession(activeId);
+    acpSendOperationTracker.switchSession(activeId || DRAFT_ATTACHMENT_KEY);
+  }, [acpConfigOperationTracker, acpSendOperationTracker, activeId]);
   const projection = useMemo(() => projectAcpTimeline(events), [events]);
   // 草稿态（!activeId）没有会话，退回使用该 agent 缓存的配置快照来预展示选项。
   const draftControlsInfo = !activeId ? draftControlsCache[draftAgentId] || null : null;
@@ -1296,6 +1221,19 @@ export function CodexAcpView({
     [sessions, activeId],
   );
   const activeAgentId = activeSession?.agent_id || draftAgentId;
+  useEffect(() => {
+    if (codeTelemetryReportedRef.current || !activeId || !activeAgentId) return;
+    codeTelemetryReportedRef.current = true;
+    invoke(isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event', {
+      request: {
+        eventName: 'code_mode_opened',
+        viewId: codeTelemetryViewIdRef.current,
+        sessionId: activeId,
+        entryPoint: 'sidebar',
+        providerKey: activeAgentId,
+      },
+    }).catch(() => {});
+  }, [activeAgentId, activeId]);
   // 原生（品悟 Engine）代码会话：发消息走 chat 命令 + chat:* 事件，会话状态按
   // session 缓存在 lane Map 里（后台会话的 turn 也能继续推进，切回不丢流式内容）。
   const isNativeAgent = activeAgentId === 'pinvou';
@@ -1330,14 +1268,16 @@ export function CodexAcpView({
     ? nativeLanesRef.current.get(activeId) || null
     : null;
   // 原生车道的用量/压缩/记忆展示数据：直接读 lane（可变对象，靠 nativeLaneTick 重渲染）。
-  // chat:usage 不带 context 上限（tokens.max 恒 0，docs/code-native-agent.md §9 登记的
-  // 已知限制），用量 chip 按降级处理：只显示已用 token，不显示上限与百分比。
+  // Live usage and hydration both restore context_window when available. Legacy timeline
+  // records have no maximum, so the chip falls back to an input-token count only.
   const nativeTokensInput = isNativeAgent && activeNativeLane ? Number(activeNativeLane.tokens.input || 0) : 0;
+  const nativeTokensMax = isNativeAgent && activeNativeLane ? Number(activeNativeLane.tokens.max || 0) : 0;
+  const nativeCtxPct = nativeTokensMax > 0 ? Math.min(100, Math.round((nativeTokensInput / nativeTokensMax) * 100)) : null;
   const nativeCompacting = Boolean(isNativeAgent && activeNativeLane && activeNativeLane.compacting);
   const nativeMemoryItems = isNativeAgent && activeNativeLane && activeNativeLane.memory
     ? activeNativeLane.memory.items
     : [];
-  // 原生车道底栏控件（模型/工具/知识库/模式）的会话态：按 activeId 经 invoke 自查，
+  // 原生车道底栏控件（模型/工具/知识库/模式/多智能体）的会话态：按 activeId 经 invoke 自查，
   // 不读 bridge 聊天 active 绑定（bs.currentSessionModelId/modeState/mountedCollection
   // 都绑聊天 active）。草稿态暂存 nativeDraftControls，建会话成功后再应用。
   // mode 由后端 get_mode_state 驱动（code 会话首次默认 Plan），不写死初值。
@@ -1345,14 +1285,27 @@ export function CodexAcpView({
     modelId: null,
     mountedId: null,
     mode: CODE_MODE_FALLBACK,
+    multiAgent: false,
+    multiAgentAvailable: false,
   });
   const [nativeDraftControls, setNativeDraftControls] = useState({});
+  // First-send session creation persists draft controls before activation. Keep the
+  // staged values associated with that exact session until its authoritative load
+  // completes so the selector never falls back to a different global model in between.
+  const nativeDraftControlsHandoffRef = useRef(null);
   // nativeControls 的会话归属：切会话后、refresh 返回前不展示上一会话的控件值。
   const nativeControlsSessionRef = useRef(null);
+  // refreshNativeControls 请求序号：快速切会话时多个 get_* invoke 并发在途，
+  // 后发起的请求应胜出。没有它，先发起的慢响应会晚返回并把控件值/归属 ref 覆盖
+  // 成旧会话——mode chip 随即显示全局 fallback 而非新会话实测值（串台/陈旧覆盖，
+  // 与聊天页 modeState epoch 修复同款竞态）。序号只对发起时仍归属当前会话的请求
+  // 发放（claimNativeControlsRefreshId）：已切走的陈旧请求反正会被归属检查丢弃，
+  // 占用序号反而会把当前会话在途的权威刷新顶成过期且无人补发。
+  const nativeControlsRequestRef = useRef(0);
   // code 会话权限模式全局偏好（{ last_mode, yolo_confirmed }，null=未拉到）：
   // 驱动草稿态/刷新途中的默认 mode 展示，以及首次切 yolo 的一次性确认门。
   const [codePermPrefs, setCodePermPrefs] = useState(null);
-  // 待确认的 yolo 切换请求（{ draft, chipBusy }）；非 null 时渲染确认卡。
+  // 待确认的 yolo 切换请求（{ draft }）；非 null 时渲染确认卡。
   const [pendingYoloSwitch, setPendingYoloSwitch] = useState(null);
   const [yoloConfirmBusy, setYoloConfirmBusy] = useState(false);
   // 知识库集合列表与 embedding 安装态由 ComposerKbSelector 内部经 bridge.knowledge
@@ -1363,37 +1316,175 @@ export function CodexAcpView({
     // nativeLaneTick 是 lane 内容变化的版本号（lane 本体是可变对象，靠 tick 触发重投影）。
     [isNativeAgent, activeNativeLane, activeId, nativeLaneTick],
   );
-  const visibleTurns = isNativeAgent
-    ? (nativeProjection ? nativeProjection.turns : [])
-    : projection.turns;
+  const visibleTurns = useMemo(
+    () => (isNativeAgent
+      ? (nativeProjection ? nativeProjection.turns : EMPTY_CONVERSATION_TURNS)
+      : projection.turns),
+    [isNativeAgent, nativeProjection, projection.turns],
+  );
   const busy = isNativeAgent
     ? Boolean(activeNativeLane && activeNativeLane.busy)
     : projection.turns.some(turn => turn.status === 'running');
-  const activeConversationTurn = [...visibleTurns]
-    .reverse()
-    .find(turn => turn.status === 'running') || null;
+  // 「回退到第 N 轮」入口（仅原生代码车道）：checkpoint 列表 + turn 边界对齐。
+  // 回退编排（rewind_to_turn）由 confirmRewind 发起；成功后走既有 loadSession
+  // 重载（磁盘对话已截断、engine 已被后端回收重注水）。refreshKey 含 busy 边沿：
+  // 新 turn 的快照在 turn 开始时由 Rust 写入，发送瞬间的拉取可能拿到旧列表，
+  // busy→idle（turn 完成）重拉后入口变体才收敛（联调 Bug A）。ACP 车道与聊天页
+  // 不渲染入口（设计 §7）。
+  const rewindCheckpoints = useSessionCheckpoints({
+    sessionId: activeId,
+    enabled: isNativeAgent && Boolean(activeId),
+    refreshKey: checkpointRefreshKey({ turnCount: visibleTurns.length, busy }),
+  });
+  const rewindEntries = useMemo(
+    () => (isNativeAgent ? rewindEntriesByTurnId(visibleTurns, rewindCheckpoints.checkpoints) : new Map()),
+    [isNativeAgent, visibleTurns, rewindCheckpoints.checkpoints],
+  );
+  // 待确认的回退目标（{ keepTurns, checkpoint, conversationOnly }）；非 null 时渲染确认弹窗。
+  const [rewindTarget, setRewindTarget] = useState(null);
+  const [rewindError, setRewindError] = useState('');
+  const [rewinding, setRewinding] = useState(false);
+  // 回退/撤销是全局单 flight：in-flight 按 sessionId 记账到 ref（state 只是
+  // UI 镜像）。切会话的复位 effect 只清 UI 标志；旧 promise 的 finally 仅在
+  // ref 仍指向本次调用时才清——否则 A 在途时切 B 发起回退，A settle 的
+  // finally 会把 B 的守卫标志抹掉（评审 M2）。
+  const rewindInFlightRef = useRef(null);
+  const rewindUndoInFlightRef = useRef(null);
+  // 「撤销回退」：入口可见性由 rewindCheckpoints.undoState（rewind_undo_state）
+  // 驱动，null 不渲染。确认弹窗由本地条目副本 rewindUndoEntry 驱动（打开时快照
+  // undoState）——后端可反悔状态会因 refreshKey 边沿/记录消费随时变 null，若
+  // 弹窗直接挂在其上，「撤销已生效但重载失败」的重试窗口会被边沿击穿（弹窗关、
+  // 错误吞、重试通道丢）。reloadFailed 重试期内弹窗与 undoState 生命周期解耦。
+  const rewindUndoState = rewindCheckpoints.undoState;
+  const [rewindUndoEntry, setRewindUndoEntry] = useState(null);
+  const [rewindUndoError, setRewindUndoError] = useState('');
+  const [rewindUndoing, setRewindUndoing] = useState(false);
+  useEffect(() => {
+    // 可反悔状态消失（回退后发了新轮/记录被消费）时收回弹窗；reloadFailed
+    // 重试窗口豁免（弹窗由本地副本驱动，重试只补重载、不再发 undo）。
+    if (!rewindUndoAvailable(rewindUndoState)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot mirror of the undo-state lifecycle; same pattern as the session-switch reset below
+      setRewindUndoEntry(current => (current && current.reloadFailed ? current : null));
+    }
+  }, [rewindUndoState]);
+  // Equivalent to [...visibleTurns].reverse().find(status === 'running'): scan backwards for the last
+  // running turn, memoized on the turns reference (both turns branches come from memoized projections,
+  // and the draft empty state uses the module-level constant array), so no reversed copy is rebuilt per render.
+  const activeConversationTurn = useMemo(() => {
+    for (let index = visibleTurns.length - 1; index >= 0; index -= 1) {
+      if (visibleTurns[index].status === 'running') return visibleTurns[index];
+    }
+    return null;
+  }, [visibleTurns]);
   // 原生车道底栏控件的展示值（归属保护：refresh 返回前按默认/暂存显示；
   // 默认 = 全局 code_last_mode，从未用过 code 模式 → Plan 只读）。
+  const nativeDraftControlsHandoff = nativeDraftControlsHandoffRef.current?.sessionId === activeId
+    ? nativeDraftControlsHandoffRef.current.controls
+    : null;
   const nativeModeValue = resolveNativeModeValue({
     activeId,
     controlsSessionId: nativeControlsSessionRef.current,
     controlsMode: nativeControls.mode,
     draftMode: nativeDraftControls.mode,
+    handoffMode: nativeDraftControlsHandoff?.mode,
     prefs: codePermPrefs,
   });
   const nativeModelChoices = selectableModels((bs && bs.savedModels) || [])
     .map(model => ({ value: model.id, name: selectorMainLabel(model, t) || model.id }));
-  const nativeSessionModelId = activeId
-    ? (nativeControlsSessionRef.current === activeId ? nativeControls.modelId : null)
-    : (nativeDraftControls.modelId || null);
+  const nativeSessionModelId = resolveNativeModelId({
+    activeId,
+    controlsSessionId: nativeControlsSessionRef.current,
+    controlsModelId: nativeControls.modelId,
+    draftModelId: nativeDraftControls.modelId,
+    handoffModelId: nativeDraftControlsHandoff?.modelId,
+  });
   const nativeMountedId = activeId
-    ? (nativeControlsSessionRef.current === activeId ? nativeControls.mountedId : null)
+    ? (nativeControlsSessionRef.current === activeId
+      ? nativeControls.mountedId
+      : (nativeDraftControlsHandoff?.mountedId ?? null))
     : (nativeDraftControls.mountedId ?? null);
+  const nativeMultiAgentSelected = activeId
+    ? (nativeControlsSessionRef.current === activeId
+      ? Boolean(nativeControls.multiAgent)
+      : Boolean(nativeDraftControlsHandoff?.multiAgent))
+    : Boolean(nativeDraftControls.multiAgent);
+  // Existing sessions use the backend SessionPolicy result. A Pinvou draft is
+  // known to become a native Code session, so it may stage the same control
+  // before a session id exists.
+  const nativeMultiAgentAvailable = activeId
+    ? (nativeControlsSessionRef.current === activeId && Boolean(nativeControls.multiAgentAvailable))
+    : isNativeAgent;
+  const nativeMultiAgentEnabled = nativeMultiAgentAvailable && nativeMultiAgentSelected;
   const activeAgentName = activeSession?.agent_name
-    || agents.find(agent => agent.agent_id === activeAgentId)?.agent_name
+    || agents?.find(agent => agent.agent_id === activeAgentId)?.agent_name
     || (activeAgentId === 'pinvou' ? '品悟' : activeAgentId === 'claude' ? 'Claude Code' : activeAgentId === 'kimi' ? 'Kimi' : 'Codex');
   const activeAgentIdRef = useRef(activeAgentId);
   activeAgentIdRef.current = activeAgentId;
+  const rememberScrollBeforeRightPanelChange = useCallback(() => {
+    rightPanelScrollRef.current = captureConversationScrollPosition(
+      scroller.current,
+      autoScrollRef.current,
+    );
+  }, []);
+  const closeSubagentPanel = useCallback(() => {
+    rememberScrollBeforeRightPanelChange();
+    setSubagentPanel(null);
+  }, [rememberScrollBeforeRightPanelChange]);
+  const toggleWorkspacePanel = useCallback(() => {
+    rememberScrollBeforeRightPanelChange();
+    if (workspaceOpen && workspaceDockActive) {
+      setWorkspaceOpen(false);
+      return;
+    }
+    setWorkspaceOpen(true);
+    setWorkspaceDockActivation(value => value + 1);
+  }, [rememberScrollBeforeRightPanelChange, workspaceDockActive, workspaceOpen]);
+  const closeWorkspacePanel = useCallback(() => {
+    rememberScrollBeforeRightPanelChange();
+    setWorkspaceOpen(false);
+  }, [rememberScrollBeforeRightPanelChange]);
+  useLayoutEffect(() => {
+    const snapshot = rightPanelScrollRef.current;
+    if (!snapshot) return;
+    rightPanelScrollRef.current = null;
+    const element = scroller.current;
+    if (!element) return;
+    restoreConversationScrollPosition(element, snapshot);
+    lastScrollTopRef.current = element.scrollTop;
+    lastScrollHeightRef.current = element.scrollHeight;
+    if (snapshot.stickToBottom) {
+      autoScrollRef.current = true;
+      setShowScrollBottom(false);
+    }
+  }, [subagentPanel, workspaceDockActivation, workspaceOpen]);
+  useEffect(() => {
+    setSubagentPanel(null);
+    setRewindTarget(null);
+    setRewindError('');
+    setRewindUndoEntry(null);
+    setRewindUndoError('');
+    // in-flight 标志一并复位：回退/撤销进行中切会话时，旧 promise 的 UI 写入
+    // 已被 activeIdRef 守卫拦住，标志留着只会把新会话的入口一直禁用。
+    setRewinding(false);
+    setRewindUndoing(false);
+  }, [activeId]);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !isNativeAgent) return undefined;
+    const onOpen = (event) => {
+      const detail = event && event.detail;
+      const sessionId = detail && detail.sessionId;
+      if (!detail?.agentId || !activeIdRef.current) return;
+      if (sessionId && sessionId !== activeIdRef.current) return;
+      rememberScrollBeforeRightPanelChange();
+      setSubagentPanel(current => ({
+        agentId: detail.agentId,
+        selectionRequestId: (current?.selectionRequestId || 0) + 1,
+      }));
+    };
+    window.addEventListener('pinvou:open-subagent', onOpen);
+    return () => window.removeEventListener('pinvou:open-subagent', onOpen);
+  }, [isNativeAgent, rememberScrollBeforeRightPanelChange]);
+  const { acceptStatus, refreshStatus } = useAcpAgentStatus(activeAgentIdRef, setStatus);
   const activeStatus = status?.agent_id === activeAgentId ? status : null;
   const activeRuntimeOperation = runtimeOperationFor(runtimeOperations, activeAgentId);
   const activeRuntimeBusy = Boolean(activeRuntimeOperation);
@@ -1419,6 +1510,16 @@ export function CodexAcpView({
     ? (!activeId || Boolean(activeNativeLane && activeNativeLane.hydrated))
     : (!activeId || (sessionInfoSessionId === activeId && Boolean(sessionInfo)));
   const sessionSyncing = Boolean(activeId && !sessionReady && sessionLoading);
+  const deviceFileUploadAvailable = can('deviceFileUpload');
+  const runtimeManagementAvailable = [
+    'install_acp_agent',
+    'login_acp_agent',
+    'switch_acp_agent_account',
+  ].every(canInvoke);
+  const providerManagementAvailable = [
+    'list_acp_providers',
+    'set_codex_acp_session_provider',
+  ].every(canInvoke);
 
   function applySessionInfo(info, sessionId = activeIdRef.current) {
     if (sessionId !== activeIdRef.current) return info;
@@ -1430,6 +1531,38 @@ export function CodexAcpView({
       setDraftControlsCache(current => ({ ...current, [agentId]: snapshot }));
     }
     return info;
+  }
+
+  function beginAcpConfigOperation(sessionId, key) {
+    const operation = acpConfigOperationTracker.begin(sessionId, key);
+    setAcpConfigOperation(operation);
+    return operation;
+  }
+
+  function canApplyAcpConfigOperation(operation) {
+    return operation?.sessionId === activeIdRef.current
+      && acpConfigOperationTracker.isCurrent(operation);
+  }
+
+  function finishAcpConfigOperation(operation) {
+    if (!acpConfigOperationTracker.finish(operation)) return;
+    setAcpConfigOperation(current => current?.token === operation.token ? null : current);
+  }
+
+  function beginAcpSendOperation(sessionId) {
+    const operation = acpSendOperationTracker.begin(sessionId || DRAFT_ATTACHMENT_KEY, 'send');
+    setAcpSendOperation(operation);
+    return operation;
+  }
+
+  function canApplyAcpSendOperation(operation) {
+    return operation?.sessionId === (activeIdRef.current || DRAFT_ATTACHMENT_KEY)
+      && acpSendOperationTracker.isCurrent(operation);
+  }
+
+  function finishAcpSendOperation(operation) {
+    if (!acpSendOperationTracker.finish(operation)) return;
+    setAcpSendOperation(current => current?.token === operation.token ? null : current);
   }
 
   function stageDraftConfigSelection(patch) {
@@ -1447,8 +1580,7 @@ export function CodexAcpView({
   // 首次发送创建会话后，把草稿态预选的模型/权限模式/配置应用到新会话。
   // 以新会话实际上报的 config_options 为准自适应：走 config 的项用 set_config_option，
   // 否则退回 set_model/set_mode；与当前值相同或会话未暴露的项跳过。
-  async function applyDraftConfigSelections(targetId, info) {
-    const staged = draftConfigSelections[draftAgentId];
+  async function applyDraftConfigSelections(targetId, info, staged, canReportError = () => true) {
     if (!staged) return info;
     let current = info || null;
     const currentOptionValue = (configId) => {
@@ -1464,8 +1596,8 @@ export function CodexAcpView({
           : String(current && current.current_model_id || '');
         if (String(staged.model) !== currentValue) {
           current = viaConfig
-            ? await invoke('set_codex_acp_config_option', { sessionId: targetId, configId: 'model', valueId: staged.model })
-            : await invoke('set_codex_acp_model', { sessionId: targetId, modelId: staged.model });
+            ? await setAcpConfigOption(targetId, 'model', staged.model)
+            : await setAcpModel(targetId, staged.model);
         }
       }
       if (staged.mode) {
@@ -1475,35 +1607,57 @@ export function CodexAcpView({
           : String(current && current.modes && current.modes.currentModeId || '');
         if (String(staged.mode) !== currentValue) {
           current = viaConfig
-            ? await invoke('set_codex_acp_config_option', { sessionId: targetId, configId: 'mode', valueId: staged.mode })
-            : await invoke('set_codex_acp_mode', { sessionId: targetId, modeId: staged.mode });
+            ? await setAcpConfigOption(targetId, 'mode', staged.mode)
+            : await setAcpMode(targetId, staged.mode);
         }
       }
       for (const [configId, valueId] of Object.entries(staged.configs || {})) {
         const optionValue = currentOptionValue(configId);
         if (optionValue === null || optionValue === String(valueId)) continue;
-        current = await invoke('set_codex_acp_config_option', { sessionId: targetId, configId, valueId });
+        current = await setAcpConfigOption(targetId, configId, valueId);
       }
     } catch (err) {
-      showError(err);
+      if (canReportError()) showError(err);
     }
     return current;
   }
 
   /// 拉取原生会话的模型/知识库/模式状态（全部 per-session 命令，显式 sessionId）。
   async function refreshNativeControls(sessionId) {
+    // 发起时已不归属当前会话的刷新注定被提交前的归属检查丢弃，不得占用序号——
+    // 否则它会把当前会话在途的权威刷新顶成过期且无人补发（跨会话抢占）。
+    const claimed = claimNativeControlsRefreshId({
+      sessionId,
+      activeId: activeIdRef.current,
+      latestRequestId: nativeControlsRequestRef.current,
+    });
+    nativeControlsRequestRef.current = claimed.latestRequestId;
+    const requestId = claimed.requestId;
     const [modelId, mountedId, modeState] = await Promise.all([
       invoke('get_session_model_id', { sessionId }).catch(() => null),
       invoke('session_mounted_collection', { sessionId }).catch(() => null),
       invoke('get_mode_state', { sessionId }).catch(() => null),
     ]);
-    setNativeControls({
+    const controls = {
       modelId: modelId || null,
       mountedId: mountedId ?? null,
       // 读取失败兜底走全局默认（首次使用 → Plan 只读），不回退写死 yolo。
       mode: (modeState && modeState.mode) || nativeModeFallback(codePermPrefs),
-    });
+      multiAgent: Boolean(modeState && modeState.multi_agent),
+      multiAgentAvailable: Boolean(modeState && modeState.multi_agent_available),
+    };
+    // 请求期间可能切换会话；旧响应不得覆盖新会话的模型/模式/多智能体展示。
+    if (!canApplyNativeControlsRefresh({
+      requestId,
+      latestRequestId: nativeControlsRequestRef.current,
+      sessionId,
+      activeId: activeIdRef.current,
+    })) {
+      return controls;
+    }
+    setNativeControls(controls);
     nativeControlsSessionRef.current = sessionId;
+    return controls;
   }
 
   /// 拉取全局 code 权限偏好（last_mode / yolo_confirmed）：草稿态默认 mode
@@ -1520,11 +1674,20 @@ export function CodexAcpView({
     // 仅挂载拉取一次；后续由切换/确认路径就地刷新。
   }, []);
 
-  /// 草稿态暂存的控件选择在新会话上应用；失败报错不静默（逐个应用，mode 最后）。
-  async function applyNativeDraftControls(sessionId) {
-    const staged = nativeDraftControls;
-    const hasStaged = staged.modelId || staged.mountedId != null || staged.mode;
-    if (!hasStaged) return;
+  /// 草稿态暂存的控件选择在新会话上应用；失败报错不静默（逐个应用，多智能体最后）。
+  /// 任一步失败即整体失败：清空暂存并上抛，由 sendNative 外层 catch 兜住（会话已创建，
+  /// 保留半份暂存会在下次创建会话时把过期的部分选择悄悄应用，形成孤儿暂存）。
+  function clearNativeDraftControls(staged) {
+    setNativeDraftControls(current => current === staged ? {} : current);
+    if (nativeDraftControlsHandoffRef.current?.controls === staged) {
+      nativeDraftControlsHandoffRef.current = null;
+    }
+  }
+
+  async function persistNativeDraftControls(sessionId, staged) {
+    const hasMultiAgentSelection = Object.prototype.hasOwnProperty.call(staged, 'multiAgent');
+    const hasStaged = staged.modelId || staged.mountedId != null || staged.mode || hasMultiAgentSelection;
+    if (!hasStaged) return false;
     try {
       if (staged.modelId) {
         await invoke('set_session_model', { sessionId, modelId: staged.modelId });
@@ -1539,10 +1702,19 @@ export function CodexAcpView({
       } else if (staged.mode === 'yolo') {
         await invoke('exit_plan_to_yolo', { sessionId });
       }
-      setNativeDraftControls({});
+      if (hasMultiAgentSelection) {
+        await invoke('set_multi_agent_mode', {
+          sessionId,
+          enabled: Boolean(staged.multiAgent),
+        });
+      }
     } catch (err) {
-      showError(err);
+      // 会话已经创建且部分配置可能已生效：清空暂存避免未来复用过期选择，
+      // 错误继续上抛，由 sendNative 的 catch 提示用户并恢复输入框文本。
+      clearNativeDraftControls(staged);
+      throw err;
     }
+    return true;
   }
 
   /// 切模型：set_session_model 会 evict 该会话 engine，lane busy 时由控件禁用兜底。
@@ -1556,6 +1728,35 @@ export function CodexAcpView({
       await invoke('set_session_model', { sessionId, modelId });
       await refreshNativeControls(sessionId);
     } catch (err) { showError(err); }
+  }
+
+  async function switchNativeMultiAgent(enabled) {
+    if (!nativeMultiAgentAvailable) return;
+    if (!activeId) {
+      setNativeDraftControls(current => ({ ...current, multiAgent: Boolean(enabled) }));
+      return;
+    }
+    if (busy || working) return;
+    const targetSessionId = activeId;
+    const previous = nativeMultiAgentEnabled;
+    setError('');
+    setWorking(true);
+    setConfigApplying('multiagent');
+    setNativeControls(current => ({ ...current, multiAgent: Boolean(enabled) }));
+    try {
+      await invoke('set_multi_agent_mode', { sessionId: targetSessionId, enabled: Boolean(enabled) });
+      await refreshNativeControls(targetSessionId);
+    } catch (err) {
+      // 请求期间可能已切换会话：只有仍是目标会话时才回滚旧值，否则交给
+      // 新会话自身的 refresh 覆盖，避免把上一会话的值串写进当前会话。
+      if (targetSessionId === activeIdRef.current) {
+        setNativeControls(current => ({ ...current, multiAgent: previous }));
+      }
+      showError(err);
+    } finally {
+      setWorking(false);
+      setConfigApplying('');
+    }
   }
 
   async function mountNativeKb(collectionId) {
@@ -1582,27 +1783,36 @@ export function CodexAcpView({
     } catch (err) { showError(err); }
   }
 
-  /// Plan↔Yolo：对齐聊天页语义——切回 Yolo 时若 turn 在跑先取消
-  /// （用代码车道已有的 cancel_generation 显式 sessionId 调用，不经 bridge）。
+  /// Plan↔Yolo 只改变后续 turn 使用的模式。正在运行的 turn 保持提交时捕获
+  /// 的模式并继续流式输出，切换权限配置不应隐式取消用户的回答。
   ///
   /// 首次切 yolo 的一次性确认门（全局记忆，产品已拍板）：未确认先弹卡，
   /// 【确认】调 confirm_code_yolo 写入全局标志后按原路径切换；【取消】留在
   /// 当前 mode。确认是 UI 层语义，后端 exit_plan_to_yolo 不强制门控。
-  async function switchNativeMode(target, { isPlan, busy: chipBusy } = {}) {
+  async function switchNativeMode(target, { isPlan } = {}) {
     if (target === 'yolo' && isPlan) {
       const prefs = await refreshCodePermPrefs();
       if (needsYoloConfirmation(prefs)) {
-        setPendingYoloSwitch({ draft: !activeId, chipBusy: Boolean(chipBusy) });
+        setPendingYoloSwitch({ draft: !activeId });
         return;
       }
     }
-    await performNativeModeSwitch(target, { isPlan, chipBusy });
+    await performNativeModeSwitch(target, { isPlan });
+  }
+
+  /// 草稿态暂存 mode 选择：本地暂存（新建会话时应用）+ 刷新 code lane 全局
+  /// 默认（三分 lane 语义：草稿切换写全局；已生成会话的切换不碰全局）。
+  function stageDraftMode(target) {
+    setNativeDraftControls(current => ({ ...current, mode: target }));
+    invoke('set_mode_default', { lane: 'code', mode: target })
+      .then(() => refreshCodePermPrefs())
+      .catch(err => showError(err));
   }
 
   /// mode chip 切换的实际执行路径（不含 yolo 确认门）。
-  async function performNativeModeSwitch(target, { isPlan, chipBusy } = {}) {
+  async function performNativeModeSwitch(target, { isPlan } = {}) {
     if (!activeId) {
-      setNativeDraftControls(current => ({ ...current, mode: target }));
+      stageDraftMode(target);
       return;
     }
     setError('');
@@ -1610,12 +1820,9 @@ export function CodexAcpView({
       if (target === 'plan' && !isPlan) {
         await invoke('set_plan_mode_next', { sessionId: activeId });
       } else if (target === 'yolo' && isPlan) {
-        if (chipBusy) await invoke('cancel_generation', { sessionId: activeId });
         await invoke('exit_plan_to_yolo', { sessionId: activeId });
       }
       await refreshNativeControls(activeId);
-      // 显式切 mode 会更新全局 code_last_mode：刷新草稿态默认展示。
-      refreshCodePermPrefs().catch(() => {});
     } catch (err) { showError(err); }
   }
 
@@ -1629,9 +1836,9 @@ export function CodexAcpView({
       if (prefs) setCodePermPrefs(prefs);
       setPendingYoloSwitch(null);
       if (pending.draft) {
-        setNativeDraftControls(current => ({ ...current, mode: 'yolo' }));
+        stageDraftMode('yolo');
       } else {
-        await performNativeModeSwitch('yolo', { isPlan: true, chipBusy: pending.chipBusy });
+        await performNativeModeSwitch('yolo', { isPlan: true });
       }
     } catch (err) {
       showError(err);
@@ -1641,23 +1848,24 @@ export function CodexAcpView({
   }
 
   async function refreshSessions() {
-    const next = await invoke('list_codex_acp_sessions');
+    const next = await listAcpSessions();
     const list = next || [];
     if (onSessionsChange) onSessionsChange(list);
     return list;
   }
 
   async function refreshAgents() {
-    const next = await invoke('list_acp_agents');
-    const list = next || [];
-    setAgents(list);
-    return list;
+    return refreshAcpAgentCatalog(setAgents, list => (
+      isWeb || list.some(agent => agent?.agent_id === 'pinvou')
+        ? list
+        : [{ agent_id: 'pinvou', agent_name: '品悟' }, ...list]
+    ));
   }
 
   // 每个 Agent 的 Provider 视图（会话级覆盖下拉与故障引导共用）。
   const [providersViews, setProvidersViews] = useState({});
   async function refreshProviders(agentId = activeAgentId) {
-    if (!agentId) return null;
+    if (!agentId || !providerManagementAvailable) return null;
     try {
       const next = await invoke('list_acp_providers', { agent: agentId });
       setProvidersViews(current => ({ ...current, [agentId]: next }));
@@ -1717,31 +1925,27 @@ export function CodexAcpView({
   const sessionProviderValue = (sessionControlsInfo && sessionControlsInfo.provider) || '__official__';
   async function changeSessionProvider(value) {
     const targetId = activeId;
-    if (!targetId) return;
-    setConfigApplying('provider');
+    const targetAgentId = activeAgentId;
+    if (!targetId || configApplying) return;
+    const operation = beginAcpConfigOperation(targetId, 'provider');
+    if (!operation) return;
     try {
       const next = await invoke('set_codex_acp_session_provider', {
         sessionId: targetId,
         providerId: value === '__official__' ? null : value,
       });
-      applySessionInfo(next);
-      refreshProviders(activeAgentId);
+      if (canApplyAcpConfigOperation(operation)) applySessionInfo(next, targetId);
+      refreshProviders(targetAgentId);
     } catch (err) {
-      showError(err);
+      if (canApplyAcpConfigOperation(operation)) showError(err);
     } finally {
-      setConfigApplying('');
+      finishAcpConfigOperation(operation);
     }
-  }
-
-  async function refreshStatus(agentId = activeAgentId, recheck = false) {
-    // recheck=true 强制后端忽略缓存重新探测（「重新检测」按钮）；轮询不传，保持读缓存。
-    const next = await invoke('get_acp_agent_status', recheck ? { agentId, recheck: true } : { agentId });
-    if (next?.agent_id === activeAgentIdRef.current) setStatus(next);
-    return next;
   }
 
   function selectDraftAgent(agentId) {
     if (activeId || !agentId) return;
+    activeAgentIdRef.current = agentId;
     setDraftAgentId(agentId);
     saveAgentSelection(agentId);
     setStatus(null);
@@ -1792,23 +1996,20 @@ export function CodexAcpView({
         return null;
       }
       const [timeline, permissions, elicitations] = await Promise.all([
-        invoke('get_codex_acp_timeline', { sessionId: id }),
-        invoke('get_codex_acp_pending_permissions', { sessionId: id }),
-        invoke('get_codex_acp_pending_elicitations', { sessionId: id }),
+        loadAcpTimeline(id),
+        loadAcpPendingPermissions(id),
+        loadAcpPendingElicitations(id),
       ]);
       if (sessionLoadRequestRef.current !== requestId) return null;
-      setEvents(timeline || []);
+      setEvents(current => mergeAcpTimelineSnapshot(timeline, current, id));
+      rebaseAcpEventSeqTracker(id, timeline);
       setPending(permissions || []);
       setPendingElicitations(elicitations || []);
-      const session = sessions.find(item => item.id === id);
-      const runtime = await invoke('get_acp_agent_status', {
-        agentId: session?.agent_id || draftAgentId,
-      });
+      const runtime = await refreshStatus(activeAgentIdRef.current);
       if (sessionLoadRequestRef.current !== requestId) return null;
-      if (runtime?.agent_id === activeAgentIdRef.current) setStatus(runtime);
       if (runtime.installed && runtime.node_supported) {
         try {
-          const info = await invoke('get_codex_acp_session_info', { sessionId: id });
+          const info = await getAcpSessionInfo(id);
           if (sessionLoadRequestRef.current !== requestId) return null;
           return applySessionInfo(info, id);
         } catch (err) {
@@ -1821,50 +2022,275 @@ export function CodexAcpView({
     }
   }
 
-  async function createSession(workspacePath = draftWorkspacePath) {
-    setError('');
-    setWorkspaceMenuOpen(false);
-    const metadata = await invoke('create_codex_acp_session', {
-      workspacePath,
-      agentId: draftAgentId,
-    });
-    // loadSession 用 nativeSessionIdsRef 判定分流；新会话先登记，避免它读到旧 prop。
-    if (draftAgentId === 'pinvou') nativeSessionIdsRef.current.add(metadata.id);
-    if (workspacePath) setRecentWorkspaces(rememberWorkspace(workspacePath));
-    await refreshSessions();
-    skipNextActiveLoadRef.current = metadata.id;
-    if (onActiveSessionChange) onActiveSessionChange(metadata.id);
-    const info = await loadSession(metadata.id);
-    return { id: metadata.id, info };
+  // After merging a snapshot, advance the live-seq baseline to the snapshot's
+  // max seq (never regress) so refetches do not misjudge in-order live events
+  // as gaps.
+  function rebaseAcpEventSeqTracker(sessionId, timeline) {
+    const maxSeq = (timeline || []).reduce((max, event) => Math.max(max, Number(event?.seq) || 0), 0);
+    acpEventSeqTrackerRef.current.rebase(sessionId, maxSeq);
   }
 
-  function beginDraft(workspacePath = null, { clearComposer = false } = {}) {
+  // 打开回退确认弹窗；有快照的目标懒加载 diff 预览（「将撤销的变更」摘要）。
+  function openRewindDialog(entry) {
+    setRewindError('');
+    setRewindTarget(entry);
+    if (entry.checkpoint) rewindCheckpoints.preview(entry.checkpoint.id);
+  }
+
+  // 确认回退：rewind_to_turn 编排（恢复代码 + 截断对话 + engine 回收重注水，
+  // 含本会话/跨会话忙碌门）。成功后先重载再收口（联调 Bug B）：loadSession 走
+  // 既有路径按磁盘截断后内容重注水，成败都强制 bump tick 兜底重投影；重载
+  // 失败留在弹窗如实上屏（弹窗不在重载前关闭，错误不再被吞进不可见状态）。
+  // 重载失败时回退已在后端生效：刷新 checkpoint/undo 状态让「撤销回退」入口
+  // 出现（用户自救通道），并把目标标记为 reloadFailed——重试只补重载，不会
+  // 对已截断的对话再发一次 rewind_to_turn（那会必败且文案令人困惑）。
+  async function confirmRewind() {
+    const target = rewindTarget;
+    if (!target || !activeId || rewinding) return;
+    // 单 flight（跨操作类型）：本会话/另一会话的回退或撤销任一在途时不静默
+    // 吞点击，如实上屏（评审 M9）；两个 ref 分别记账回退与撤销，后端执行根
+    // flag 对跨类型并发兜底拒绝（评审 finding：本地门也按跨类型检查，注释
+    // 与行为口径一致）。
+    if (rewindInFlightRef.current || rewindUndoInFlightRef.current) {
+      setRewindError(codexCopy.rewindInFlightBusy);
+      return;
+    }
+    const sessionId = activeId;
+    rewindInFlightRef.current = sessionId;
+    setRewinding(true);
+    setRewindError('');
+    try {
+      const result = target.reloadFailed
+        ? null
+        : await invoke('rewind_to_turn', {
+          sessionId,
+          keepTurns: target.keepTurns,
+          conversationOnly: target.conversationOnly,
+        });
+      const { error: reloadError } = await reloadSessionAfterRewind({
+        // reload 前置归属检查（评审 M4）：回退/撤销在途时用户切到其它会话，
+        // loadSession(原会话) 会把 activeIdRef 改回原会话、作废新会话的在途
+        // 加载并冻结其流式输出。已切走则跳过重载——磁盘已是目标状态，切回时
+        // loadSession 自然重注水；notice 补发走 pendingNotice 暂存。
+        reload: () => (activeIdRef.current === sessionId
+          ? loadSession(sessionId)
+          : Promise.resolve(null)),
+        bumpTick: () => setNativeLaneTick(tick => tick + 1),
+      });
+      // 跨会话竞态：await 期间会话被程序化切换（remote control）时，UI 收口
+      // 动作只认原会话；重载/状态刷新已由上面的调用按 sessionId 定向完成。
+      // 已知取舍：若重载失败且暂存了 pendingNotice，此早退（或用户切会话触发
+      // 的 [activeId] 复位）会丢弃补发——回到该会话时时间线按磁盘重注水，仅
+      // 少一条内联提示；undo 侧有 refresh 重查 rewind_undo_state 的自愈兜底，
+      // rewind 的 notice 无等价物（仅写内存 lane，不落盘）。而「重载失败+用户
+      // 取消重试」路径不补发是有意的：彼时屏上仍是截断前的陈旧时间线，补发
+      // 「已回退」反而误导。
+      if (activeIdRef.current !== sessionId) return;
+      if (reloadError) {
+        // 回退已在后端生效：把成功结果随目标暂存（pendingNotice），重试只补
+        // 重载、成功后补发提示——避免整条流走完时间线却没有「已回退」确认项。
+        // 重试再失败时保留既有暂存（result 为 null 的重试路径不得覆盖）。
+        setRewindTarget({
+          ...target,
+          reloadFailed: true,
+          pendingNotice: result
+            ? rewindNoticeText(codexCopy, result, target.keepTurns)
+            : (target.pendingNotice ?? null),
+        });
+        setRewindError(reloadError);
+        rewindCheckpoints.refresh();
+        return;
+      }
+      setRewindTarget(null);
+      const notice = result
+        ? rewindNoticeText(codexCopy, result, target.keepTurns)
+        : target.pendingNotice;
+      if (notice) {
+        appendNativeSystemItem(getNativeLane(sessionId), notice);
+        setNativeLaneTick(tick => tick + 1);
+      }
+      // 入口可用性随新时间线重算（refreshKey 的 turns/busy 变化通常已触发，此处兜底）。
+      rewindCheckpoints.refresh();
+    } catch (err) {
+      setRewindError(String(err && err.message ? err.message : err));
+    } finally {
+      // 仅当 in-flight 记账仍指向本次调用才清除：切会话后旧 promise 的
+      // finally 不得抹掉新会话（或新调用）的守卫标志（评审 M2）。
+      if (rewindInFlightRef.current === sessionId) {
+        rewindInFlightRef.current = null;
+        setRewinding(false);
+      }
+    }
+  }
+
+  // 撤销回退：undo_last_rewind（恢复代码到绑定回滚点（仅对话降级则跳过）+
+  // 对话从备份还原 + engine 重建）；成功后复用 reloadSessionAfterRewind 重载编排
+  // （与回退后同语义：先重载、成败都 bumpTick、成功才关弹窗），失败错误留在弹窗
+  // 上屏。弹窗状态走本地副本 rewindUndoEntry：重载失败时撤销已在后端生效（记录
+  // 已消费，undoState 随后收敛为 null），把 entry 标记 reloadFailed 留在屏上——
+  // 重试只补重载，不会再发一次必败的 undo_last_rewind。
+  async function confirmRewindUndo() {
+    const entry = rewindUndoEntry;
+    if (!entry || !activeId || rewindUndoing) return;
+    // 与 confirmRewind 同款跨类型单 flight：回退/撤销任一在途时如实上屏（评审 M9）。
+    if (rewindUndoInFlightRef.current || rewindInFlightRef.current) {
+      setRewindUndoError(codexCopy.rewindInFlightBusy);
+      return;
+    }
+    const sessionId = activeId;
+    const reloadOnly = Boolean(entry.reloadFailed);
+    rewindUndoInFlightRef.current = sessionId;
+    setRewindUndoing(true);
+    setRewindUndoError('');
+    try {
+      if (!reloadOnly) {
+        await invoke('undo_last_rewind', { sessionId });
+      }
+      const { error: reloadError } = await reloadSessionAfterRewind({
+        // reload 前置归属检查（评审 M4）：回退/撤销在途时用户切到其它会话，
+        // loadSession(原会话) 会把 activeIdRef 改回原会话、作废新会话的在途
+        // 加载并冻结其流式输出。已切走则跳过重载——磁盘已是目标状态，切回时
+        // loadSession 自然重注水；notice 补发走 pendingNotice 暂存。
+        reload: () => (activeIdRef.current === sessionId
+          ? loadSession(sessionId)
+          : Promise.resolve(null)),
+        bumpTick: () => setNativeLaneTick(tick => tick + 1),
+      });
+      // 跨会话竞态：await 期间会话被程序化切换时不再写原会话的 UI 状态。
+      if (activeIdRef.current !== sessionId) return;
+      if (reloadError) {
+        setRewindUndoEntry({ ...entry, reloadFailed: true });
+        setRewindUndoError(reloadError);
+        // 与回退侧对齐：刷新让 undoState 收敛（记录已消费 → null），用户取消
+        // 弹窗后「撤销回退」入口不会以陈旧状态残留。弹窗由本地 entry 驱动，
+        // 不受 undoState 收敛影响（复位 effect 豁免 reloadFailed 条目）。
+        rewindCheckpoints.refresh();
+        return;
+      }
+      setRewindUndoEntry(null);
+      appendNativeSystemItem(getNativeLane(sessionId), codexCopy.rewindUndoDone);
+      setNativeLaneTick(tick => tick + 1);
+      // refresh 连带重查 rewind_undo_state：撤销后不可再反悔，入口随之消失。
+      rewindCheckpoints.refresh();
+    } catch (err) {
+      setRewindUndoError(String(err && err.message ? err.message : err));
+    } finally {
+      // 与 confirmRewind 同款：in-flight 记账仍指向本次调用才清除。
+      if (rewindUndoInFlightRef.current === sessionId) {
+        rewindUndoInFlightRef.current = null;
+        setRewindUndoing(false);
+      }
+    }
+  }
+
+  // Self-healing for envelope-seq gaps in the web live stream: after the
+  // watchdog skips a stalled predecessor, the missing permission/terminal
+  // envelopes are not re-delivered within the connection. On a detected gap,
+  // debounce-refetch the authoritative timeline and pending state and merge
+  // (merge is idempotent for out-of-order/duplicate arrivals), without
+  // touching the loading spinner or cancelling an in-flight session-switch
+  // load. A failed refetch retries with bounded exponential backoff so a
+  // single transient failure cannot permanently disable healing for that gap.
+  async function resyncAcpSessionAfterGap(sessionId) {
+    const [timeline, permissions, elicitations] = await Promise.all([
+      loadAcpTimeline(sessionId),
+      loadAcpPendingPermissions(sessionId),
+      loadAcpPendingElicitations(sessionId),
+    ]);
+    if (activeIdRef.current !== sessionId) return;
+    setEvents(current => mergeAcpTimelineSnapshot(timeline, current, sessionId));
+    rebaseAcpEventSeqTracker(sessionId, timeline);
+    setPending(permissions || []);
+    setPendingElicitations(elicitations || []);
+  }
+
+  function scheduleAcpGapResync(sessionId) {
+    acpGapResyncRef.current.schedule(sessionId);
+  }
+
+  async function createSession({ shouldActivate = () => true, prepareSession = null } = {}) {
+    const requestedWorkspacePath = draftWorkspacePath;
+    const requestedWorkspaceHandle = draftWorkspaceHandle;
+    const requestedAgentId = draftAgentId;
+    setError('');
+    setWorkspaceMenuOpen(false);
+    const metadata = await createAcpSession({
+      workspacePath: requestedWorkspacePath,
+      workspaceHandle: requestedWorkspaceHandle,
+      agentId: requestedAgentId,
+    });
+    // loadSession 用 nativeSessionIdsRef 判定分流；新会话先登记，避免它读到旧 prop。
+    if (requestedAgentId === 'pinvou') nativeSessionIdsRef.current.add(metadata.id);
+    if (requestedWorkspacePath) setRecentWorkspaces(rememberWorkspace(requestedWorkspacePath));
+    setDraftWorkspaceHandle(current => (
+      current === requestedWorkspaceHandle ? null : current
+    ));
+    await refreshSessions();
+    // Persist native controls before the first load. If persistence fails after the
+    // backend session exists, still activate and load it before surfacing the error;
+    // the restored composer can then retry in that session instead of creating another.
+    return finalizePreparedSessionCreation({
+      sessionId: metadata.id,
+      prepareSession,
+      shouldActivate,
+      activateSession: sessionId => {
+        skipNextActiveLoadRef.current = sessionId;
+        if (onActiveSessionChange) onActiveSessionChange(sessionId);
+      },
+      loadSession,
+      loadInactiveSessionInfo: requestedAgentId === 'pinvou'
+        ? null
+        : getAcpSessionInfo,
+    });
+  }
+
+  function beginDraft(
+    workspacePath = null,
+    { clearComposer = false, workspaceHandle = null } = {},
+  ) {
     preserveDraftWorkspaceRef.current = true;
     setWorkspaceMenuOpen(false);
     setDraftWorkspacePath(workspacePath);
+    setDraftWorkspaceHandle(workspaceHandle);
     // 选定项目工作区即默认展开工作区面板（无会话也可浏览文件）；临时会话无路径可浏览。
-    setWorkspaceOpen(Boolean(workspacePath));
+    setWorkspaceOpen(Boolean(workspacePath) && !isWeb);
     if (clearComposer) {
       setDraft('');
+      const keysToClear = [
+        DRAFT_ATTACHMENT_KEY,
+        activeId || lastActiveSessionIdRef.current,
+      ].filter(Boolean);
+      keysToClear.forEach(key => {
+        const attachmentsToClear = attachmentDraftsRef.current[key] || [];
+        cancelPendingAcpAttachments(attachmentsToClear, cancelledAttachmentIdsRef.current);
+        attachmentsToClear.forEach(attachment => {
+          if (attachment.result) discardAcpAttachment(attachment.result).catch(() => {});
+        });
+      });
       setAttachmentDrafts(current => {
         const next = { ...current };
-        delete next[DRAFT_ATTACHMENT_KEY];
+        keysToClear.forEach(key => { delete next[key]; });
         return next;
       });
       setWorkspaceReferenceDrafts(current => {
         const next = { ...current };
-        delete next[DRAFT_ATTACHMENT_KEY];
+        keysToClear.forEach(key => { delete next[key]; });
         return next;
       });
     } else if (activeId) {
-      setAttachmentDrafts(current => ({
-        ...current,
-        [DRAFT_ATTACHMENT_KEY]: current[activeId] || [],
-      }));
-      setWorkspaceReferenceDrafts(current => ({
-        ...current,
-        [DRAFT_ATTACHMENT_KEY]: current[activeId] || [],
-      }));
+      // The composer moves to the new draft. Browser attachment handles are
+      // one-shot resources, so retaining a second owner on the old session
+      // would let a consumed handle reappear when the user switches back.
+      setAttachmentDrafts(current => {
+        const next = { ...current, [DRAFT_ATTACHMENT_KEY]: current[activeId] || [] };
+        delete next[activeId];
+        return next;
+      });
+      setWorkspaceReferenceDrafts(current => {
+        const next = { ...current, [DRAFT_ATTACHMENT_KEY]: current[activeId] || [] };
+        delete next[activeId];
+        return next;
+      });
     }
     setEvents([]);
     setPending([]);
@@ -1885,16 +2311,14 @@ export function CodexAcpView({
     setWorkspaceMenuOpen(true);
   }
 
-  async function chooseProjectDraft() {
-    const selected = await openTauriDialog({
-      directory: true,
-      multiple: false,
+  async function chooseProjectDraft(defaultPath = null) {
+    const selected = await pickAcpWorkspace({
       title: codexCopy.chooseProjectDialog,
+      defaultPath,
     });
-    const path = Array.isArray(selected) ? selected[0] : selected;
-    if (path) {
-      setRecentWorkspaces(rememberWorkspace(path));
-      beginDraft(path);
+    if (selected?.path) {
+      setRecentWorkspaces(rememberWorkspace(selected.path));
+      beginDraft(selected.path, { workspaceHandle: selected.workspaceHandle });
     }
   }
 
@@ -1910,25 +2334,30 @@ export function CodexAcpView({
   async function addAttachmentByPath(path, sessionId = attachmentKey) {
     if (!path || !sessionId) return;
     const id = `codex-attachment-${++attachmentIdRef.current}`;
+    cancelledAttachmentIdsRef.current.delete(id);
     const basename = String(path).split(/[\\/]/).filter(Boolean).pop() || String(path);
     updateAttachments(sessionId, current => [
       ...current,
       { id, basename, status: 'parsing', result: null, error: null },
     ]);
-    try {
-      const result = await invoke('ingest_file', { path });
-      updateAttachments(sessionId, current => current.map(attachment => (
-        attachment.id === id
-          ? { ...attachment, basename: result.basename || basename, status: 'ready', result }
-          : attachment
-      )));
-    } catch (err) {
-      updateAttachments(sessionId, current => current.map(attachment => (
-        attachment.id === id
-          ? { ...attachment, status: 'error', error: String(err) }
-          : attachment
-      )));
-    }
+    await runAcpAttachmentTask({
+      id,
+      cancelledIds: cancelledAttachmentIdsRef.current,
+      load: () => ingestAcpAttachmentPath(path),
+      discard: discardAcpAttachment,
+      onReady: result => setAttachmentDrafts(current => updateAcpAttachmentDraft(
+        current,
+        id,
+        attachment => ({
+          ...attachment, basename: result.basename || basename, status: 'ready', result,
+        }),
+      )),
+      onError: err => setAttachmentDrafts(current => updateAcpAttachmentDraft(
+        current,
+        id,
+        attachment => ({ ...attachment, status: 'error', error: String(err) }),
+      )),
+    });
   }
 
   useEffect(() => {
@@ -1939,6 +2368,7 @@ export function CodexAcpView({
   }, [activeId, relayLaunch]);
 
   async function pickAttachments() {
+    setAttachmentMenuOpen(false);
     const selected = await openTauriDialog({
       multiple: true,
       directory: false,
@@ -1949,7 +2379,85 @@ export function CodexAcpView({
   }
 
   function removeAttachment(id) {
+    const removed = attachments.find(attachment => attachment.id === id);
+    if (isPendingAcpAttachment(removed)) cancelledAttachmentIdsRef.current.add(id);
+    else cancelledAttachmentIdsRef.current.delete(id);
     updateAttachments(attachmentKey, current => current.filter(attachment => attachment.id !== id));
+    if (removed?.result) discardAcpAttachment(removed.result).catch(() => {});
+  }
+
+  async function uploadDeviceFiles(files, sessionId = attachmentKey) {
+    const selected = Array.from(files || []).filter(Boolean);
+    for (const file of selected) {
+      const id = `codex-attachment-${++attachmentIdRef.current}`;
+      cancelledAttachmentIdsRef.current.delete(id);
+      updateAttachments(sessionId, current => [
+        ...current,
+        {
+          id,
+          basename: file.name,
+          status: 'uploading',
+          progress: 0,
+          result: null,
+          error: null,
+        },
+      ]);
+      await runAcpAttachmentTask({
+        id,
+        cancelledIds: cancelledAttachmentIdsRef.current,
+        load: () => uploadAcpDeviceAttachment(file, {
+          isCancelled: () => cancelledAttachmentIdsRef.current.has(id),
+          onProgress: progress => setAttachmentDrafts(current => updateAcpAttachmentDraft(
+            current, id, attachment => ({ ...attachment, progress }),
+          )),
+        }),
+        discard: discardAcpAttachment,
+        onReady: result => setAttachmentDrafts(current => updateAcpAttachmentDraft(
+          current,
+          id,
+          attachment => ({
+            ...attachment,
+            basename: result.basename || file.name,
+            status: 'ready',
+            progress: 100,
+            result,
+          }),
+        )),
+        onError: err => {
+          if (err?.code === 'device_upload_cancelled') return;
+          // Desktop integrity failures arrive as a stable wire code in
+          // message (transfer.rs); map to the current-language copy instead
+          // of passing the raw error through.
+          const uploadErrorText = String(err?.message || '');
+          const attachmentLimitError = formatAttachmentLimitError(err, t.uiAttachments);
+          const displayError = attachmentLimitError || (err?.code === 'device_upload_empty'
+              ? t.uiAttachments.deviceUploadEmpty(file.name)
+              : err?.code === 'device_upload_unavailable'
+                ? t.uiAttachments.deviceUploadUnavailable
+                : err?.code === 'device_upload_invalid'
+                  ? t.uiAttachments.deviceUploadInvalid(file.name)
+                  : uploadErrorText === 'web_attachment_digest_invalid'
+                    ? t.uiAttachments.deviceUploadDigestInvalid
+                    : uploadErrorText === 'web_attachment_integrity_mismatch'
+                      ? t.uiAttachments.deviceUploadIntegrityMismatch
+                      : t.uiAttachments.deviceUploadFailed(file.name));
+          setAttachmentDrafts(current => updateAcpAttachmentDraft(current, id, attachment => ({
+            ...attachment, status: 'error', error: displayError,
+          })));
+        },
+      });
+    }
+  }
+
+  function chooseDeviceAttachments() {
+    setAttachmentMenuOpen(false);
+    deviceFileInputRef.current?.click();
+  }
+
+  function handleDeviceFilesChosen(event) {
+    const files = event.target.files;
+    if (files?.length) uploadDeviceFiles(files).catch(showError);
+    event.target.value = '';
   }
 
   function addWorkspaceReference(relativePath) {
@@ -2025,10 +2533,15 @@ export function CodexAcpView({
     const items = Array.from(event.clipboardData && event.clipboardData.items || []);
     const images = items.filter(item => item.type && item.type.startsWith('image/'));
     if (!images.length) return;
+    if (!deviceFileUploadAvailable && !canInvoke('save_paste_image')) return;
     event.preventDefault();
     images.forEach(item => {
       const file = item.getAsFile();
       if (!file) return;
+      if (deviceFileUploadAvailable) {
+        uploadDeviceFiles([file]).catch(showError);
+        return;
+      }
       const reader = new FileReader();
       reader.onload = async () => {
         const bytes = Array.from(new Uint8Array(reader.result));
@@ -2040,7 +2553,13 @@ export function CodexAcpView({
           });
           await addAttachmentByPath(path, attachmentKey);
         } catch (err) {
-          showError(err);
+          const limitError = formatAttachmentLimitError(err, t.uiAttachments);
+          if (limitError) {
+            console.error('Codex paste attachment failed:', err);
+            setError(limitError);
+          } else {
+            showError(err);
+          }
         }
       };
       reader.readAsArrayBuffer(file);
@@ -2048,10 +2567,22 @@ export function CodexAcpView({
   }
 
   useEffect(() => {
+    let disposed = false;
     let unlisten = null;
-    Promise.all([refreshAgents(), refreshSessions()]).catch(showError);
+    Promise.all([refreshAgents(), refreshSessions()]).catch(nextError => {
+      if (!disposed) showError(nextError);
+    });
     listenTauri('acp:event', message => {
+      if (disposed) return;
       const incoming = message.payload;
+      // Live seq continuity check runs before merging: after the watchdog
+      // skips a stalled predecessor, later events still arrive in order, and
+      // appendAcpEvent alone would silently keep the hole; on a detected gap,
+      // debounce-refetch the authoritative timeline to self-heal.
+      if (incoming && acpEventSeqTrackerRef.current.note(incoming.sessionId, incoming.seq) === 'gap'
+          && incoming.sessionId === activeIdRef.current) {
+        scheduleAcpGapResync(incoming.sessionId);
+      }
       setEvents(current => incoming && incoming.sessionId === activeIdRef.current ? appendAcpEvent(current, incoming) : current);
       if (incoming && incoming.sessionId === activeIdRef.current) {
         const type = incoming.event && incoming.event.type;
@@ -2077,14 +2608,44 @@ export function CodexAcpView({
           if (type === 'permission_resolved') setPending(current => current.filter(item => item.toolCallId !== data.toolCallId));
           refreshSessions().catch(() => {});
         } else if (type === 'runtime_ready') {
-          invoke('get_codex_acp_session_info', { sessionId: incoming.sessionId })
+          getAcpSessionInfo(incoming.sessionId)
             .then(info => applySessionInfo(info, incoming.sessionId))
             .catch(() => {});
         }
       }
-    }).then(fn => { unlisten = fn; });
-    return () => { if (unlisten) unlisten(); };
+    }).then(fn => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(nextError => {
+      if (!disposed) showError(nextError);
+    });
+    return () => {
+      disposed = true;
+      acpGapResyncRef.current.cancel();
+      if (unlisten) unlisten();
+    };
   }, []);
+
+  useEffect(() => () => {
+    const pendingAttachments = Object.values(attachmentDraftsRef.current).flat();
+    cancelPendingAcpAttachments(pendingAttachments, cancelledAttachmentIdsRef.current);
+    pendingAttachments.forEach(attachment => {
+      if (attachment.result) discardAcpAttachment(attachment.result).catch(() => {});
+    });
+  }, []);
+
+  useEffect(() => onPlatformConnectionChange((connection) => {
+    if (connection?.status !== 'connected') return;
+    Promise.all([refreshAgents(), refreshSessions()]).catch(error => {
+      console.warn('[acp] refresh after remote reconnect failed', error);
+    });
+    const sessionId = activeIdRef.current;
+    if (sessionId) {
+      loadSession(sessionId).catch(error => {
+        console.warn('[acp] restore authoritative session after reconnect failed', error);
+      });
+    }
+  }), []);
 
   // 原生（品悟）会话的 engine 事件：按 session 推进对应 lane，仅当前会话 bump 渲染；
   // turn 边界顺手刷新会话列表（标题/时间戳），与 acp:event 的 turn_completed 处理对齐。
@@ -2114,14 +2675,21 @@ export function CodexAcpView({
   }, []);
 
   useEffect(() => {
-    // 原生（品悟）会话没有 ACP 状态机，跳过 get_acp_agent_status（后端会拒绝非 ACP agent）。
+    // In draft, read the selected agent's status on demand: switching agents
+    // forces a fresh probe (the CLI may have been installed/upgraded outside
+    // the app, and the cache would keep a stale not-installed verdict).
+    // Sessions with an id are covered by loadSession; skip here to avoid
+    // running the CLI/auth probes twice concurrently. Native (pinvou)
+    // sessions have no ACP state machine; skip get_acp_agent_status (the
+    // backend rejects non-ACP agents).
     if (activeAgentId === 'pinvou') {
       setStatus(null);
       return;
     }
-    // 用户主动切换 Agent 后必须绕过进程内探测缓存，立即反映 App 外的安装/卸载。
+    if (activeId) return;
     refreshStatus(activeAgentId, true).catch(showError);
-  }, [activeAgentId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- probe only on agent/session switch edges; refreshStatus/showError reference changes must not retrigger probing
+  }, [activeAgentId, activeId]);
 
   useEffect(() => {
     const latest = events[events.length - 1];
@@ -2208,11 +2776,15 @@ export function CodexAcpView({
     const element = scroller.current;
     if (!element) return undefined;
     const onScroll = () => {
-      const near = isNearConversationBottom(element);
-      const movingUp = element.scrollTop < lastScrollTopRef.current - 1;
-      lastScrollTopRef.current = element.scrollTop;
-      if (movingUp) autoScrollRef.current = false;
-      else if (near) autoScrollRef.current = true;
+      const transition = transitionConversationScrollState({
+        scrollElement: element,
+        following: autoScrollRef.current,
+        previousScrollTop: lastScrollTopRef.current,
+        previousScrollHeight: lastScrollHeightRef.current,
+      });
+      lastScrollTopRef.current = transition.scrollTop;
+      lastScrollHeightRef.current = transition.scrollHeight;
+      autoScrollRef.current = transition.following;
       const shouldShow = !autoScrollRef.current
         && element.scrollHeight > element.clientHeight + 4;
       setShowScrollBottom(current => current === shouldShow ? current : shouldShow);
@@ -2243,9 +2815,36 @@ export function CodexAcpView({
       if (element) {
         element.scrollTop = element.scrollHeight;
         lastScrollTopRef.current = element.scrollTop;
+        lastScrollHeightRef.current = element.scrollHeight;
       }
     });
     return () => window.cancelAnimationFrame(frame);
+  }, [activeId]);
+
+  useEffect(() => {
+    const scrollElement = scroller.current;
+    const contentElement = conversationContentRef.current;
+    if (!scrollElement || !contentElement) return undefined;
+    return startConversationBottomFollower({
+      scrollElement,
+      contentElement,
+      isFollowing: () => autoScrollRef.current,
+      onMeasured: () => {
+        const measurement = measureConversationScrollGeometry({
+          scrollElement,
+          following: autoScrollRef.current,
+          previousScrollTop: lastScrollTopRef.current,
+          previousScrollHeight: lastScrollHeightRef.current,
+        });
+        lastScrollTopRef.current = measurement.scrollTop;
+        lastScrollHeightRef.current = measurement.scrollHeight;
+      },
+      onRestored: (scrollTop) => {
+        lastScrollTopRef.current = scrollTop;
+        lastScrollHeightRef.current = scrollElement.scrollHeight;
+        setShowScrollBottom(false);
+      },
+    });
   }, [activeId]);
 
   function scrollConversationToBottom() {
@@ -2272,7 +2871,9 @@ export function CodexAcpView({
 
   function showRuntimeError(agentId, nextError) {
     console.error(`${agentId} runtime operation failed:`, nextError);
-    const message = codexCopy.showRawErrors ? String(nextError) : codexCopy.operationFailed;
+    const message = !isWeb && codexCopy.showRawErrors
+      ? String(nextError)
+      : codexCopy.operationFailed;
     setRuntimeErrors(current => ({ ...current, [agentId]: message }));
   }
 
@@ -2280,16 +2881,16 @@ export function CodexAcpView({
     const agentId = activeAgentId;
     beginRuntimeOperation(agentId, 'install');
     setError('');
-    const poll = window.setInterval(() => refreshStatus(agentId).catch(() => {}), 500);
+    const stopPolling = startSerialStatusPolling(() => refreshStatus(agentId));
     try {
       const payload = { agent: agentId };
       if (typeof actionOverride === 'string' && actionOverride) payload.action = actionOverride;
       const next = await invoke('install_acp_agent', payload);
-      if (next?.agent_id === activeAgentIdRef.current) setStatus(next);
+      acceptStatus(agentId, next);
     }
     catch (err) { showRuntimeError(agentId, err); }
     finally {
-      window.clearInterval(poll);
+      await stopPolling();
       await refreshStatus(agentId).catch(() => {});
       finishRuntimeOperation(agentId, 'install');
     }
@@ -2301,7 +2902,7 @@ export function CodexAcpView({
     setError('');
     try {
       const next = await invoke('login_acp_agent', { agentId });
-      if (next?.agent_id === activeAgentIdRef.current) setStatus(next);
+      acceptStatus(agentId, next);
     }
     catch (err) { showRuntimeError(agentId, err); }
     finally { finishRuntimeOperation(agentId, 'login'); }
@@ -2315,7 +2916,7 @@ export function CodexAcpView({
     setError('');
     try {
       const next = await invoke('switch_acp_agent_account', { agentId });
-      if (next?.agent_id === activeAgentIdRef.current) setStatus(next);
+      acceptStatus(agentId, next);
     } catch (err) {
       showRuntimeError(agentId, err);
     } finally {
@@ -2343,16 +2944,20 @@ export function CodexAcpView({
 
   async function send() {
     const message = draft.trim();
+    const attachmentsAtSend = attachments;
     const readyAttachments = attachments.filter(attachment => (
       attachment.status === 'ready' && attachment.result
     ));
+    const workspaceReferencesAtSend = workspaceReferences;
+    const draftAgentAtSend = draftAgentId;
+    const draftConfigAtSend = draftConfigSelections[draftAgentAtSend];
     if ((!message && !readyAttachments.length && !workspaceReferences.length)
-      || busy || working || activeRuntimeBusy) return;
+      || busy || working || activeRuntimeBusy || configApplying) return;
     if (!isNativeAgent && !activeStatus?.authenticated) {
       setError(codexCopy.loginRequiredBeforeSend);
       return;
     }
-    if (attachments.some(attachment => attachment.status === 'parsing')) {
+    if (attachments.some(attachment => ['parsing', 'uploading'].includes(attachment.status))) {
       setError(codexCopy.attachmentsParsing);
       return;
     }
@@ -2362,79 +2967,141 @@ export function CodexAcpView({
       await sendNative(message, readyAttachments);
       return;
     }
-    setWorking(true); setError('');
+    let targetId = activeId;
+    let operation = beginAcpSendOperation(targetId);
+    if (!operation) return;
+    setError('');
     try {
-      let targetId = activeId;
       if (!targetId) {
-        const created = await createSession(draftWorkspacePath);
+        const created = await createSession({
+          shouldActivate: () => canApplyAcpSendOperation(operation),
+        });
         targetId = created.id;
-        const appliedInfo = await applyDraftConfigSelections(targetId, created.info);
+        if (created.activated && activeIdRef.current === targetId) {
+          acpSendOperationTracker.switchSession(targetId);
+          operation = beginAcpSendOperation(targetId);
+        }
+        const appliedInfo = await applyDraftConfigSelections(
+          targetId,
+          created.info,
+          draftConfigAtSend,
+          () => canApplyAcpSendOperation(operation),
+        );
         if (appliedInfo && appliedInfo !== created.info) applySessionInfo(appliedInfo, targetId);
         setDraftConfigSelections(current => {
+          if (current[draftAgentAtSend] !== draftConfigAtSend) return current;
           const next = { ...current };
-          delete next[draftAgentId];
+          delete next[draftAgentAtSend];
           return next;
         });
-        setAttachmentDrafts(current => {
-          const draftAttachments = current[DRAFT_ATTACHMENT_KEY] || [];
-          const next = { ...current, [targetId]: draftAttachments };
-          delete next[DRAFT_ATTACHMENT_KEY];
-          return next;
-        });
-        setWorkspaceReferenceDrafts(current => {
-          const draftReferences = current[DRAFT_ATTACHMENT_KEY] || [];
-          const next = { ...current, [targetId]: draftReferences };
-          delete next[DRAFT_ATTACHMENT_KEY];
-          return next;
-        });
+        setAttachmentDrafts(current => transferAcpDraftItems(
+          current,
+          DRAFT_ATTACHMENT_KEY,
+          targetId,
+          attachmentsAtSend,
+          attachment => attachment.id,
+        ));
+        setWorkspaceReferenceDrafts(current => transferAcpDraftItems(
+          current,
+          DRAFT_ATTACHMENT_KEY,
+          targetId,
+          workspaceReferencesAtSend,
+          reference => reference,
+        ));
       }
-      autoScrollRef.current = true;
-      setShowScrollBottom(false);
-      setDraft('');
-      await invoke('codex_acp_prompt', {
+      if (canApplyAcpSendOperation(operation)) {
+        autoScrollRef.current = true;
+        setShowScrollBottom(false);
+        setDraft('');
+      }
+      await submitAcpPrompt({
         sessionId: targetId,
         message,
         attachments: readyAttachments.map(attachment => attachment.result),
-        workspaceReferences,
+        workspaceReferences: workspaceReferencesAtSend,
       });
       updateAttachments(targetId, current => current.filter(
         attachment => !readyAttachments.some(ready => ready.id === attachment.id),
       ));
-      setWorkspaceReferenceDrafts(current => ({ ...current, [targetId]: [] }));
+      setWorkspaceReferenceDrafts(current => removeAcpDraftItems(
+        current,
+        targetId,
+        workspaceReferencesAtSend,
+        reference => reference,
+      ));
     } catch (err) {
-      showError(err);
-      setDraft(message);
+      if (canApplyAcpSendOperation(operation)) {
+        showError(err);
+        setDraft(message);
+      } else {
+        // The user switched sessions before this send failed. The draft
+        // belongs to the original session, so keep the new session's UI
+        // untouched, but never swallow the failure silently.
+        console.error('[codex] background ACP send failed', err);
+      }
     } finally {
-      setWorking(false);
+      finishAcpSendOperation(operation);
     }
   }
 
   /// 原生（品悟 Engine）发送：草稿态先建会话（强制临时工作区），随后走 chat 命令；
   /// 用户气泡乐观插入 lane，chat 命令同步失败（空消息 / turn 占用等）时回滚。
   async function sendNative(message, readyAttachments) {
-    setWorking(true); setError('');
+    const attachmentsAtSend = attachments;
+    const workspaceReferencesAtSend = workspaceReferences;
+    const nativeDraftControlsAtSend = nativeDraftControls;
+    let targetId = activeId;
+    const materializingDraft = !targetId;
+    let operation = beginAcpSendOperation(targetId);
+    if (!operation) return;
+    setError('');
     try {
-      let targetId = activeId;
       if (!targetId) {
-        const created = await createSession(draftWorkspacePath);
+        const created = await createSession({
+          shouldActivate: () => canApplyAcpSendOperation(operation),
+          prepareSession: async sessionId => {
+            const prepared = await persistNativeDraftControls(
+              sessionId,
+              nativeDraftControlsAtSend,
+            );
+            if (prepared) {
+              nativeDraftControlsHandoffRef.current = {
+                sessionId,
+                controls: nativeDraftControlsAtSend,
+              };
+            }
+          },
+        });
         targetId = created.id;
-        // 草稿态暂存的模型/知识库/模式选择先落到新会话（失败会显式报错）。
-        await applyNativeDraftControls(targetId);
-        setAttachmentDrafts(current => {
-          const draftAttachments = current[DRAFT_ATTACHMENT_KEY] || [];
-          const next = { ...current, [targetId]: draftAttachments };
-          delete next[DRAFT_ATTACHMENT_KEY];
-          return next;
-        });
-        setWorkspaceReferenceDrafts(current => {
-          const draftReferences = current[DRAFT_ATTACHMENT_KEY] || [];
-          const next = { ...current, [targetId]: draftReferences };
-          delete next[DRAFT_ATTACHMENT_KEY];
-          return next;
-        });
+        if (created.activated && activeIdRef.current === targetId) {
+          acpSendOperationTracker.switchSession(targetId);
+          operation = beginAcpSendOperation(targetId);
+        }
+        // Activation invalidates the draft-scoped operation token. Report preparation
+        // failures only after rebinding to the created session so the visible error path
+        // remains current and the user's message is restored for retry in this session.
+        if (created.preparationError) throw created.preparationError;
+        // prepareSession has already persisted the draft controls before loadSession,
+        // and the authoritative load now owns the displayed values. Clear only after
+        // that handoff completes so the selected model label remains stable.
+        clearNativeDraftControls(nativeDraftControlsAtSend);
+        setAttachmentDrafts(current => transferAcpDraftItems(
+          current,
+          DRAFT_ATTACHMENT_KEY,
+          targetId,
+          attachmentsAtSend,
+          attachment => attachment.id,
+        ));
+        setWorkspaceReferenceDrafts(current => transferAcpDraftItems(
+          current,
+          DRAFT_ATTACHMENT_KEY,
+          targetId,
+          workspaceReferencesAtSend,
+          reference => reference,
+        ));
       }
-      const referencePrefix = workspaceReferences.length
-        ? `${workspaceReferences.map(path => `@${path}`).join(' ')}\n\n`
+      const referencePrefix = workspaceReferencesAtSend.length
+        ? `${workspaceReferencesAtSend.map(path => `@${path}`).join(' ')}\n\n`
         : '';
       const displayText = message + (readyAttachments.length
         ? `${message ? '\n' : ''}📎 ${readyAttachments.map(attachment => attachment.basename).join(', ')}`
@@ -2442,9 +3109,11 @@ export function CodexAcpView({
       const lane = getNativeLane(targetId);
       const optimisticId = appendLocalUserMessage(lane, displayText);
       setNativeLaneTick(tick => tick + 1);
-      autoScrollRef.current = true;
-      setShowScrollBottom(false);
-      setDraft('');
+      if (canApplyAcpSendOperation(operation)) {
+        autoScrollRef.current = true;
+        setShowScrollBottom(false);
+        setDraft('');
+      }
       try {
         await invoke('chat', {
           message: referencePrefix + message,
@@ -2452,9 +3121,11 @@ export function CodexAcpView({
           sessionId: targetId,
           // 逐轮工具白名单入口（R-2）：参数链路对 code 会话已贯通（后端 op
           // allowed_tools 按此生效），本期恒 false 不限制；S-1 安全分化落地时
-          // 按 SessionPolicy 逐轮驱动（docs/code-plain-decoupling-改动说明.md）。
+          // 按 SessionPolicy 逐轮驱动（docs/code-mode-解耦与权限持久化-改动说明.md）。
           restrictTools: false,
         });
+        // 发送成功 = 新一轮已受理：code scope 未提交的「打开」转正锁死。
+        notifyChatRoundCommitted('code');
       } catch (sendError) {
         removeLocalUserMessage(lane, optimisticId);
         setNativeLaneTick(tick => tick + 1);
@@ -2463,12 +3134,25 @@ export function CodexAcpView({
       updateAttachments(targetId, current => current.filter(
         attachment => !readyAttachments.some(ready => ready.id === attachment.id),
       ));
-      setWorkspaceReferenceDrafts(current => ({ ...current, [targetId]: [] }));
+      setWorkspaceReferenceDrafts(current => removeAcpDraftItems(
+        current,
+        targetId,
+        workspaceReferencesAtSend,
+        reference => reference,
+      ));
     } catch (err) {
-      showError(err);
-      setDraft(message);
+      if (materializingDraft) clearNativeDraftControls(nativeDraftControlsAtSend);
+      if (canApplyAcpSendOperation(operation)) {
+        showError(err);
+        setDraft(message);
+      } else {
+        // The user switched sessions before this send failed. The draft
+        // belongs to the original session, so keep the new session's UI
+        // untouched, but never swallow the failure silently.
+        console.error('[codex] background native send failed', err);
+      }
     } finally {
-      setWorking(false);
+      finishAcpSendOperation(operation);
     }
   }
 
@@ -2478,39 +3162,57 @@ export function CodexAcpView({
       await invoke('cancel_generation', { sessionId: activeId }).catch(showError);
       return;
     }
-    await invoke('cancel_codex_acp', { sessionId: activeId }).catch(showError);
+    await cancelAcpSession(activeId).catch(showError);
   }
 
   /// 原生会话的选择确认卡提交/取消：chat:user_input_required → submit_user_input /
   /// cancel_user_input（显式 sessionId，不经过 bridge 全局 activeSession）。
   async function respondNativeInput(toolCallId, answers) {
     if (!activeId) return;
-    setResponding(true); setError('');
+    // entry 捕获 sid：invoke 挂起期间用户切到别的原生会话时，await 后重新读
+    // activeId 会把 restoredAnswers 写进（或找不到卡而漏写）错误 lane——与 bridge
+    // submitUserInput 的 sid 捕获同一约定。
+    const sid = activeId;
+    setRespondingSessionId(sid); setError('');
     try {
-      await invoke('submit_user_input', { toolCallId, answers, sessionId: activeId });
-      markNativeInputResolved(toolCallId, 'submitted');
-    } catch (err) { showError(err); }
-    finally { setResponding(false); }
+      await invoke('submit_user_input', { toolCallId, answers, sessionId: sid });
+      markNativeInputResolved(sid, toolCallId, 'submitted', answers);
+    } catch (err) {
+      if (sid === activeIdRef.current) showError(err);
+    } finally {
+      setRespondingSessionId(current => current === sid ? null : current);
+    }
   }
 
   async function cancelNativeInput(toolCallId) {
     if (!activeId) return;
-    setResponding(true); setError('');
+    const sid = activeId;
+    setRespondingSessionId(sid); setError('');
     try {
-      await invoke('cancel_user_input', { toolCallId, sessionId: activeId });
-      markNativeInputResolved(toolCallId, 'cancelled');
-    } catch (err) { showError(err); }
-    finally { setResponding(false); }
+      await invoke('cancel_user_input', { toolCallId, sessionId: sid });
+      markNativeInputResolved(sid, toolCallId, 'cancelled');
+    } catch (err) {
+      if (sid === activeIdRef.current) showError(err);
+    } finally {
+      setRespondingSessionId(current => current === sid ? null : current);
+    }
   }
 
-  function markNativeInputResolved(toolCallId, cardState) {
-    const lane = getNativeLane(activeId);
+  function markNativeInputResolved(sessionId, toolCallId, cardState, answers) {
+    const lane = getNativeLane(sessionId);
+    // 无条件按 type + toolCallId 定位：chat:tool_end（applyNativeChatEvent 同样按
+    // !item.resolved 查找）可能先于 invoke 返回把卡置为 resolved，若这里仍要求
+    // !item.resolved 会因竞态漏写 restoredAnswers，重挂载时历史卡丢失选中态。
     const card = [...lane.items].reverse().find(item => (
-      item && item.type === 'user_input' && item.toolCallId === toolCallId && !item.resolved
+      item && item.type === 'user_input' && item.toolCallId === toolCallId
     ));
     if (card) {
       card.resolved = true;
       card.cardState = cardState;
+      // 提交后立即记住答案：即使不切会话、仅组件重挂载，历史卡也能恢复选中态。
+      if (cardState === 'submitted' && Array.isArray(answers) && answers.length) {
+        card.restoredAnswers = answers;
+      }
     }
     setNativeLaneTick(tick => tick + 1);
   }
@@ -2527,7 +3229,11 @@ export function CodexAcpView({
     try {
       await invoke('compact_now', { sessionId: sid });
     } catch (err) {
-      appendNativeSystemItem(lane, `${codexCopy.compactFail}: ${String(err && err.message ? err.message : err || '')}`);
+      const rawError = String(err && err.message ? err.message : err || '');
+      const detail = rawError.includes('session_engine_not_running')
+        ? codexCopy.nativeCompactInactive
+        : rawError;
+      appendNativeSystemItem(lane, `${codexCopy.compactFail}: ${detail}`);
       setNativeLaneTick(tick => tick + 1);
     }
   }
@@ -2564,6 +3270,8 @@ export function CodexAcpView({
         planMarkdown: card.planMarkdown || '',
         displayMessage: echoText,
       });
+      // 接受方案 = 新一轮已受理：code scope 未提交的「打开」转正锁死。
+      notifyChatRoundCommitted('code');
     } catch (err) {
       const errorText = String(err && err.message ? err.message : err || '');
       const planNotActive = errorText.indexOf('plan_not_active') >= 0;
@@ -2625,7 +3333,9 @@ export function CodexAcpView({
       return (
         <ConversationMarkdown
           text={item.legacyItem.text}
+          streaming={item.status === 'in_progress'}
           onOpenExternal={(url) => invoke('open_user_external_url', { url }).catch(showError)}
+          onOpenResource={isWeb ? undefined : openWorkspaceResource}
         />
       );
     }
@@ -2681,75 +3391,116 @@ export function CodexAcpView({
     return undefined;
   }
 
-  async function respond(toolCallId, optionId) {
-    if (!activeId) return;
-    setResponding(true); setError('');
+  async function openWorkspaceResource(resourcePath) {
+    if (!activeId || !resourcePath) return;
     try {
-      await invoke('respond_codex_acp_permission', { sessionId: activeId, toolCallId, optionId });
-      setPending(current => current.filter(item => item.toolCallId !== toolCallId));
-    } catch (err) { showError(err); }
-    finally { setResponding(false); }
+      await invoke('open_codex_workspace_resource', {
+        sessionId: activeId,
+        resourcePath: String(resourcePath),
+      });
+    } catch (err) {
+      showError(err);
+    }
+  }
+
+  async function respond(toolCallId, optionId) {
+    const request = pending.find(item => item.toolCallId === toolCallId);
+    const targetId = request?.sessionId || activeId;
+    if (!targetId || targetId !== activeIdRef.current) return;
+    setRespondingSessionId(targetId); setError('');
+    try {
+      await respondAcpPermission({ sessionId: targetId, toolCallId, optionId });
+      setPending(current => current.filter(item => (
+        item.sessionId !== targetId || item.toolCallId !== toolCallId
+      )));
+    } catch (err) {
+      if (targetId === activeIdRef.current) showError(err);
+    }
+    finally {
+      setRespondingSessionId(current => current === targetId ? null : current);
+    }
   }
 
   async function respondElicitation(elicitationId, action, content) {
-    if (!activeId) return;
-    setResponding(true); setError('');
+    const request = pendingElicitations.find(item => item.elicitationId === elicitationId);
+    const targetId = request?.sessionId || activeId;
+    if (!targetId || targetId !== activeIdRef.current) return;
+    setRespondingSessionId(targetId); setError('');
     try {
-      await invoke('respond_codex_acp_elicitation', {
-        sessionId: activeId,
-        elicitationId,
-        action,
-        content,
-      });
+      await respondAcpElicitation({ sessionId: targetId, elicitationId, action, content });
       setPendingElicitations(current => current.filter(
-        item => item.elicitationId !== elicitationId,
+        item => item.sessionId !== targetId || item.elicitationId !== elicitationId,
       ));
-    } catch (err) { showError(err); }
-    finally { setResponding(false); }
+    } catch (err) {
+      if (targetId === activeIdRef.current) showError(err);
+    }
+    finally {
+      setRespondingSessionId(current => current === targetId ? null : current);
+    }
   }
 
   async function changeModel(modelId) {
-    if (!modelId || activeRuntimeBusy) return;
+    if (!modelId || activeRuntimeBusy || configApplying) return;
     if (!activeId) {
       stageDraftConfigSelection({ model: modelId });
       return;
     }
-    setWorking(true); setConfigApplying('model');
-    try { applySessionInfo(await invoke('set_codex_acp_model', { sessionId: activeId, modelId })); }
-    catch (err) { showError(err); }
-    finally { setWorking(false); setConfigApplying(''); }
+    const targetId = activeId;
+    const operation = beginAcpConfigOperation(targetId, 'model');
+    if (!operation) return;
+    try {
+      const next = await setAcpModel(targetId, modelId);
+      if (canApplyAcpConfigOperation(operation)) applySessionInfo(next, targetId);
+    } catch (err) {
+      if (canApplyAcpConfigOperation(operation)) showError(err);
+    } finally {
+      finishAcpConfigOperation(operation);
+    }
   }
 
   async function changeConfig(configId, valueId) {
-    if (activeRuntimeBusy) return;
+    if (activeRuntimeBusy || configApplying) return;
     if (!activeId) {
       stageDraftConfigSelection({ configs: { [configId]: valueId } });
       return;
     }
-    setWorking(true); setConfigApplying(configId); setError('');
+    const targetId = activeId;
+    const operation = beginAcpConfigOperation(targetId, configId);
+    if (!operation) return;
+    setError('');
     try {
-      applySessionInfo(await invoke('set_codex_acp_config_option', {
-        sessionId: activeId, configId, valueId,
-      }));
-    } catch (err) { showError(err); }
-    finally { setWorking(false); setConfigApplying(''); }
+      const next = await setAcpConfigOption(targetId, configId, valueId);
+      if (canApplyAcpConfigOperation(operation)) applySessionInfo(next, targetId);
+    } catch (err) {
+      if (canApplyAcpConfigOperation(operation)) showError(err);
+    } finally {
+      finishAcpConfigOperation(operation);
+    }
   }
 
   async function changeMode(modeId) {
-    if (!modeId || activeRuntimeBusy) return;
+    if (!modeId || activeRuntimeBusy || configApplying) return;
     if (!activeId) {
       stageDraftConfigSelection({ mode: modeId });
       return;
     }
-    setWorking(true); setConfigApplying('mode'); setError('');
+    const targetId = activeId;
+    const operation = beginAcpConfigOperation(targetId, 'mode');
+    if (!operation) return;
+    setError('');
     try {
-      applySessionInfo(await invoke('set_codex_acp_mode', { sessionId: activeId, modeId }));
-    } catch (err) { showError(err); }
-    finally { setWorking(false); setConfigApplying(''); }
+      const next = await setAcpMode(targetId, modeId);
+      if (canApplyAcpConfigOperation(operation)) applySessionInfo(next, targetId);
+    } catch (err) {
+      if (canApplyAcpConfigOperation(operation)) showError(err);
+    } finally {
+      finishAcpConfigOperation(operation);
+    }
   }
 
   return (
     <div className={`relative h-full min-h-0 flex flex-col ${theme === 'dark' ? 'text-[#E3E3E3]' : 'text-[#1F1F1F]'}`}>
+        <ComposerAttachmentDropOverlay enabled={deviceFileUploadAvailable || (!isWeb && canInvoke('ingest_draft_file_chunk'))} onFiles={files => uploadDeviceFiles(files, attachmentKey)} dark={theme === 'dark'} variant={isWeb ? 'web' : 'desktop'} copy={t.uiAttachments} />
         {activeSession && (
         <header className="h-14 shrink-0 px-5 flex items-center gap-3 border-b border-black/[0.05] dark:border-white/[0.06]">
           <div className="w-8 h-8 rounded-xl bg-black/[0.04] dark:bg-white/[0.08] flex items-center justify-center"><AcpAgentLogo agentId={activeAgentId} className="h-5 w-5" title={activeAgentName} /></div>
@@ -2764,9 +3515,9 @@ export function CodexAcpView({
           {busy && <StatusBadge status="running" copy={t.uiConversation} />}
           <button
             type="button"
-            onClick={() => setWorkspaceOpen(value => !value)}
+            onClick={toggleWorkspacePanel}
             className={`h-8 px-2.5 rounded-lg inline-flex items-center gap-1.5 text-[11px] transition-colors ${
-              workspaceOpen
+              workspaceOpen && workspaceDockActive
                 ? 'bg-blue-500/10 text-blue-600 dark:text-blue-300'
                 : 'text-gray-500 dark:text-gray-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
             }`}
@@ -2782,14 +3533,14 @@ export function CodexAcpView({
           </button>
         </header>
         )}
-        {!activeSession && draftWorkspacePath && (
+        {!isWeb && !activeSession && draftWorkspacePath && (
         <header className="h-14 shrink-0 px-5 flex items-center justify-end border-b border-black/[0.05] dark:border-white/[0.06]">
           <button
             type="button"
             data-testid="codex-workspace-toggle"
-            onClick={() => setWorkspaceOpen(value => !value)}
+            onClick={toggleWorkspacePanel}
             className={`h-8 px-2.5 rounded-lg inline-flex items-center gap-1.5 text-[11px] transition-colors ${
-              workspaceOpen
+              workspaceOpen && workspaceDockActive
                 ? 'bg-blue-500/10 text-blue-600 dark:text-blue-300'
                 : 'text-gray-500 dark:text-gray-400 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'
             }`}
@@ -2804,7 +3555,7 @@ export function CodexAcpView({
         <div className="flex-1 min-h-0 flex">
         <div className="relative min-w-0 flex-1 min-h-0 flex flex-col">
         <div ref={scroller} className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-          <div className="w-full max-w-[920px] min-h-full mx-auto px-6 py-6 flex flex-col gap-7">
+          <div ref={conversationContentRef} className="w-full max-w-[920px] min-h-full mx-auto px-6 py-6 flex flex-col gap-7">
             {workspaceUnavailable ? (
               <div
                 data-testid="codex-workspace-unavailable"
@@ -2832,6 +3583,7 @@ export function CodexAcpView({
                 <RuntimeNotice
                   status={activeStatus}
                   working={working || activeRuntimeBusy}
+                  managementAvailable={runtimeManagementAvailable}
                   operation={activeRuntimeOperation}
                   error={activeRuntimeError || error}
                   onInstall={install}
@@ -2848,9 +3600,10 @@ export function CodexAcpView({
                     failure={visibleServiceFailure}
                     agentName={activeAgentName}
                     working={working || activeRuntimeBusy}
+                    managementAvailable={runtimeManagementAvailable}
                     onSwitchAccount={switchAccount}
                     onManageProviders={
-                      onOpenSettingsSection
+                      providerManagementAvailable && onOpenSettingsSection
                         ? () => onOpenSettingsSection('providers')
                         : null
                     }
@@ -2878,39 +3631,67 @@ export function CodexAcpView({
             )}
             {visibleTurns.map(turn => (useUnifiedConversationUi || isNativeAgent)
               ? (
-                  <ConversationTurn
-                    key={turn.id}
-                    turn={turn}
-                    now={now}
-                    copy={t.uiConversation}
-                    pendingByTool={pendingByTool}
-                    onRespond={respond}
-                    responding={responding}
-                    assistantAvatar={(
-                      <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#1F1F1F] dark:text-[#E3E3E3]">
-                        <AcpAgentLogo agentId={activeAgentId} className="h-5 w-5" title={activeAgentName} />
-                      </div>
+                  <Fragment key={turn.id}>
+                    {isNativeAgent && rewindEntries.has(turn.id) && (
+                      // 原生车道 turn 边界回退入口：turn N+1 前的 chip =「回退到第 N 轮」；
+                      // 无快照的边界为「仅回退对话」变体（rewindEntriesByTurnId 判定）。
+                      <RewindChip
+                        entry={rewindEntries.get(turn.id)}
+                        disabled={busy || rewinding || rewindUndoing}
+                        copy={codexCopy}
+                        onOpen={openRewindDialog}
+                      />
                     )}
-                    renderItem={isNativeAgent
-                      ? (item) => renderNativeItem(item)
-                      : (item) => item.type === 'elicitation'
-                        ? (
-                            <ElicitationCard
-                              elicitation={item.elicitation}
-                              pending={pendingByElicitation[item.elicitation.elicitationId]}
-                              onRespond={respondElicitation}
-                              responding={responding}
-                              copy={codexCopy}
-                              conversationCopy={t.uiConversation}
-                            />
-                          )
+                    <ConversationTurn
+                      turn={turn}
+                      sessionId={activeId}
+                      now={now}
+                      copy={t.uiConversation}
+                      pendingByTool={pendingByTool}
+                      onRespond={respond}
+                      responding={responding}
+                      assistantAvatar={(
+                        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#1F1F1F] dark:text-[#E3E3E3]">
+                          <AcpAgentLogo agentId={activeAgentId} className="h-5 w-5" title={activeAgentName} />
+                        </div>
+                      )}
+                      renderItem={isNativeAgent
+                        ? (item) => renderNativeItem(item)
+                        : (item) => item.type === 'elicitation'
+                          ? (
+                              <ElicitationCard
+                                elicitation={item.elicitation}
+                                pending={pendingByElicitation[item.elicitation.elicitationId]}
+                                onRespond={respondElicitation}
+                                responding={responding}
+                                copy={codexCopy}
+                                conversationCopy={t.uiConversation}
+                              />
+                            )
+                          : undefined}
+                      renderToolItem={isNativeAgent
+                        ? (item) => item.legacyItem
+                          && !isSearchTool(item.tool)
+                          && !isFetchTool(item.tool)
+                          ? (
+                              <ToolCard
+                                item={{ ...item.legacyItem, sessionId: activeId }}
+                                sessionId={activeId}
+                                theme={theme}
+                                t={t}
+                                variant="timeline"
+                              />
+                            )
+                          : undefined
                         : undefined}
-                    agentLabel={activeAgentName}
-                    onOpenExternal={(url) => invoke('open_user_external_url', { url }).catch(showError)}
-                  />
+                      agentLabel={activeAgentName}
+                      onOpenExternal={(url) => openAcpExternalUrl(url).catch(showError)}
+                      onOpenResource={isWeb ? undefined : openWorkspaceResource}
+                    />
+                  </Fragment>
                 )
               : (
-                  <Turn key={turn.id} turn={turn} now={now}
+                  <Turn key={turn.id} turn={turn} now={now} sessionId={activeId}
                     agentId={activeAgentId} agentName={activeAgentName}
                     copy={t.uiConversation}
                     cv={t.uiCodexView}
@@ -2919,8 +3700,19 @@ export function CodexAcpView({
                     onRespond={respond}
                     onRespondElicitation={respondElicitation}
                     responding={responding}
-                    onOpenExternal={(url) => invoke('open_user_external_url', { url }).catch(showError)} />
+                    onOpenExternal={(url) => openAcpExternalUrl(url).catch(showError)}
+                    onOpenResource={isWeb ? undefined : openWorkspaceResource} />
                 ))}
+            {isNativeAgent && rewindUndoAvailable(rewindUndoState) && (
+              // 「撤销回退」入口：渲染在时间线末尾（回退成功的内联提示其后），
+              // 与 RewindChip 同门控（仅原生代码车道）；undoState 为 null 即消失。
+              <RewindUndoChip
+                state={rewindUndoState}
+                disabled={busy || rewinding || rewindUndoing}
+                copy={codexCopy}
+                onOpen={(state) => { setRewindUndoError(''); setRewindUndoEntry({ ...state, reloadFailed: false }); }}
+              />
+            )}
           </div>
         </div>
 
@@ -2948,9 +3740,11 @@ export function CodexAcpView({
                 mode="code"
                 codeSupported
                 codeAgent={activeAgentId}
+                codeAgents={agents}
+                codeAgentsLoading={agents === null}
                 onCodeAgentChange={selectDraftAgent}
                 onManageProviders={
-                  onOpenSettingsSection
+                  providerManagementAvailable && onOpenSettingsSection
                     ? () => onOpenSettingsSection('providers')
                     : null
                 }
@@ -2983,7 +3777,9 @@ export function CodexAcpView({
                 failedLabel={t.uiAttachments.failed}
                 removeLabel={t.uiAttachments.remove}
                 className="mb-2"
-                formatError={value => String(value || '')}
+                formatError={value => (
+                  formatAttachmentLimitError(value, t.uiAttachments) || String(value || '')
+                )}
               />
               {nativeVoiceInput.status !== 'idle' && nativeVoiceInput.message && (
                 <div className={`flex items-center justify-between gap-2 mb-2 px-3 py-2 rounded-2xl text-[12px] ${
@@ -3038,20 +3834,17 @@ export function CodexAcpView({
                 </div>
               )}
               {commandOpen && availableCommands.length > 0 && (
-                <>
-                  <button aria-label={codexCopy.commandMenuClose} className="fixed inset-0 z-30 cursor-default" onClick={() => setCommandOpen(false)} />
-                  <div className="absolute z-40 left-0 right-0 bottom-full mb-2 max-h-72 overflow-y-auto rounded-2xl border border-black/[0.08] dark:border-white/10 bg-white/95 dark:bg-[#202124]/95 backdrop-blur-xl shadow-xl p-2">
-                    <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-400">{codexCopy.agentCommands}</div>
-                    {availableCommands.map(command => (
-                      <button key={command.name} type="button"
-                        onClick={() => { setDraft(`/${command.name}${command.input ? ' ' : ''}`); setCommandOpen(false); }}
-                        className="w-full rounded-xl px-3 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
-                        <span className="block text-[12px] font-semibold">/{command.name}</span>
-                        <span className="block mt-0.5 text-[11px] text-gray-400">{command.description}</span>
-                      </button>
-                    ))}
-                  </div>
-                </>
+                <div ref={commandMenuPanelRef} className="absolute z-40 left-0 right-0 bottom-full mb-2 max-h-72 overflow-y-auto rounded-2xl border border-black/[0.08] dark:border-white/10 bg-white/95 dark:bg-[#202124]/95 backdrop-blur-xl shadow-xl p-2">
+                  <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-400">{codexCopy.agentCommands}</div>
+                  {availableCommands.map(command => (
+                    <button key={command.name} type="button"
+                      onClick={() => { setDraft(`/${command.name}${command.input ? ' ' : ''}`); setCommandOpen(false); }}
+                      className="w-full rounded-xl px-3 py-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+                      <span className="block text-[12px] font-semibold">/{command.name}</span>
+                      <span className="block mt-0.5 text-[11px] text-gray-400">{command.description}</span>
+                    </button>
+                  ))}
+                </div>
               )}
               <textarea ref={composerRef} value={draft} onChange={event => setDraft(event.target.value)}
                 onPaste={handlePaste}
@@ -3071,6 +3864,7 @@ export function CodexAcpView({
                     <div className="relative min-w-0">
                       <button
                         type="button"
+                        ref={workspaceMenuTriggerRef}
                         data-testid="codex-workspace-selector"
                         onClick={() => setWorkspaceMenuOpen(value => !value)}
                         className="h-7 max-w-[180px] rounded-lg px-2 inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400 hover:bg-black/[0.05] dark:hover:bg-white/[0.07]"
@@ -3085,9 +3879,7 @@ export function CodexAcpView({
                         <ChevronDown size={12} className="shrink-0" />
                       </button>
                       {workspaceMenuOpen && (
-                        <>
-                          <button aria-label={codexCopy.workspaceMenuClose} className="fixed inset-0 z-30 cursor-default" onClick={() => setWorkspaceMenuOpen(false)} />
-                          <div className="absolute z-40 bottom-9 left-0 w-[280px] max-w-[calc(100vw-32px)] rounded-2xl border border-black/[0.08] dark:border-white/10 bg-white/95 dark:bg-[#202124]/95 backdrop-blur-xl shadow-xl p-2">
+                        <div ref={workspaceMenuPanelRef} className="absolute z-40 bottom-9 left-0 w-[280px] max-w-[calc(100vw-32px)] rounded-2xl border border-black/[0.08] dark:border-white/10 bg-white/95 dark:bg-[#202124]/95 backdrop-blur-xl shadow-xl p-2">
                             <button type="button" onClick={() => chooseProjectDraft().catch(showError)}
                               className="w-full rounded-xl px-3 py-2.5 flex items-center gap-3 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
                               <FolderOpen size={16} className="text-blue-500 shrink-0" />
@@ -3103,7 +3895,10 @@ export function CodexAcpView({
                                 <div className="px-3 pb-1 text-[10px] uppercase tracking-wider text-gray-400">{codexCopy.recentProjects}</div>
                                 {recentWorkspaces.map(path => (
                                   <button key={path} type="button" title={path}
-                                    onClick={() => beginDraft(path)}
+                                    onClick={() => {
+                                      if (isWeb) chooseProjectDraft(path).catch(showError);
+                                      else beginDraft(path);
+                                    }}
                                     className="w-full rounded-lg px-3 py-1.5 flex items-center gap-2 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
                                     <FolderOpen size={13} className="shrink-0 text-gray-400" />
                                     <span className="truncate text-[11px]">{workspaceName(path, codexCopy.unknownDirectory)}</span>
@@ -3111,20 +3906,57 @@ export function CodexAcpView({
                                 ))}
                               </div>
                             )}
-                          </div>
-                        </>
+                        </div>
                       )}
                     </div>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => pickAttachments().catch(showError)}
-                    className={COMPOSER_ICON_BUTTON_CLASS}
-                    title={codexCopy.addAttachment}
-                    aria-label={codexCopy.addAttachment}
-                  >
-                    <Paperclip size={18} />
-                  </button>
+                  <div className="relative">
+                    <button
+                      ref={attachmentMenuTriggerRef}
+                      type="button"
+                      onClick={() => {
+                        if (deviceFileUploadAvailable) setAttachmentMenuOpen(value => !value);
+                        else pickAttachments().catch(showError);
+                      }}
+                      className={COMPOSER_ICON_BUTTON_CLASS}
+                      title={codexCopy.addAttachment}
+                      aria-label={codexCopy.addAttachment}
+                    >
+                      <Paperclip size={18} />
+                    </button>
+                    <input
+                      ref={deviceFileInputRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      data-testid="codex-device-file-input"
+                      onChange={handleDeviceFilesChosen}
+                    />
+                    <ComposerPopover
+                      open={deviceFileUploadAvailable && attachmentMenuOpen}
+                      onClose={() => setAttachmentMenuOpen(false)}
+                      triggerRef={attachmentMenuTriggerRef}
+                      compact={false}
+                      desktopClassName="absolute bottom-full left-0 mb-2 z-50 w-56 rounded-2xl border border-black/5 bg-white/95 p-1.5 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#1E1E20]/95"
+                    >
+                      <button
+                        type="button"
+                        onClick={chooseDeviceAttachments}
+                        className="group flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-[13px] text-gray-700 transition-colors hover:bg-[#007AFF] hover:text-white dark:text-gray-200"
+                      >
+                        <Upload size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
+                        {t.attachFromDevice}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => pickAttachments().catch(showError)}
+                        className="group flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-[13px] text-gray-700 transition-colors hover:bg-[#007AFF] hover:text-white dark:text-gray-200"
+                      >
+                        <Monitor size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
+                        {t.attachFromHost}
+                      </button>
+                    </ComposerPopover>
+                  </div>
                   <button
                     type="button"
                     data-testid="codex-voice-input"
@@ -3141,10 +3973,19 @@ export function CodexAcpView({
                     } ${nativeVoiceDisabled ? 'opacity-70 cursor-wait' : ''}`}>
                     <Mic size={18} />
                   </button>
-                  <button type="button" onClick={() => setCommandOpen(value => !value)}
-                    disabled={!availableCommands.length}
-                    className="h-7 px-2 rounded-lg text-[11px] font-mono hover:bg-black/[0.05] dark:hover:bg-white/[0.07] disabled:opacity-40"
-                    title={availableCommands.length ? codexCopy.commandsAvailable : codexCopy.commandsAfterSession}>/</button>
+                  {/* 斜杠命令菜单依赖 ACP 的 available_commands_update，原生车道不经 ACP、
+                      命令永不到达；在原生车道隐藏按钮，避免一个永远禁用且提示会误导的控件。 */}
+                  {!isNativeAgent && (
+                    <button type="button" ref={commandMenuTriggerRef} onClick={() => setCommandOpen(value => !value)}
+                      disabled={!availableCommands.length}
+                      className={`h-7 px-2 rounded-lg text-[11px] font-mono hover:bg-black/[0.05] dark:hover:bg-white/[0.07] ${
+                        // 父容器是 text-gray-400，可用态必须显式加深，否则与禁用态肉眼无差别。
+                        availableCommands.length
+                          ? 'font-semibold text-gray-900 dark:text-gray-100'
+                          : 'opacity-40'
+                      }`}
+                      title={availableCommands.length ? codexCopy.commandsAvailable : codexCopy.commandsAfterSession}>/</button>
+                  )}
                   {isNativeAgent && (
                     // 原生（品悟）车道的底栏控件：与工作/设计页共用同一套共享 composer
                     // 控件（ComposerModeChip / ComposerModelSelector / ComposerKbSelector，
@@ -3168,6 +4009,9 @@ export function CodexAcpView({
                           sessionModelId={nativeSessionModelId}
                           busy={busy || working}
                           onSwitchModel={(sessionId, modelId) => switchNativeModel(sessionId, String(modelId))}
+                          multiAgentEnabled={nativeMultiAgentEnabled}
+                          multiAgentAvailable={nativeMultiAgentAvailable}
+                          onToggleMultiAgent={switchNativeMultiAgent}
                         />
                       )}
                       <ComposerToolMenu
@@ -3178,6 +4022,7 @@ export function CodexAcpView({
                         triggerVariant="pill"
                         triggerTestId="native-tools"
                         scope="code"
+                        activeSessionId={activeId}
                       />
                       <ComposerKbSelector
                         t={t}
@@ -3187,18 +4032,25 @@ export function CodexAcpView({
                         onUnmount={unmountNativeKb}
                       />
                       {activeId && nativeTokensInput > 0 && (
-                        // 用量 chip 兼手动压缩入口（compact_now 的后端注释语义即"用户点 token
-                        // 进度条 → 立即压缩"）；tokens.max 恒 0 的已知限制下只显示已用 token。
+                        // The usage chip is also the manual-compaction action. Its background
+                        // shows the percentage while the tooltip carries the full description.
                         <button
                           type="button"
                           data-testid="native-usage-chip"
                           onClick={() => compactNativeSession().catch(showError)}
                           disabled={busy || working || nativeCompacting}
-                          title={codexCopy.nativeCompactTitle}
-                          aria-label={codexCopy.nativeCompactTitle}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-xl border border-black/[0.07] bg-black/[0.025] px-2.5 text-[11px] font-semibold text-[#1F1F1F] transition-all hover:-translate-y-px hover:shadow-sm disabled:cursor-default disabled:opacity-50 dark:border-white/[0.09] dark:bg-white/[0.055] dark:text-[#E8EAED]"
+                          title={codexCopy.nativeUsageTitle(fmtNativeCtxTok(nativeTokensInput), nativeCtxPct)}
+                          aria-label={codexCopy.nativeUsageTitle(fmtNativeCtxTok(nativeTokensInput), nativeCtxPct)}
+                          className="relative inline-flex h-8 items-center gap-1.5 overflow-hidden rounded-xl border border-black/[0.07] bg-black/[0.025] px-2.5 text-[11px] font-semibold text-[#1F1F1F] transition-all hover:-translate-y-px hover:shadow-sm disabled:cursor-default disabled:opacity-50 dark:border-white/[0.09] dark:bg-white/[0.055] dark:text-[#E8EAED]"
                         >
-                          {nativeCompacting ? codexCopy.compactStart : `${t.ctxUsage} ${fmtNativeCtxTok(nativeTokensInput)}`}
+                          {nativeCtxPct != null && (
+                            <span
+                              aria-hidden="true"
+                              className="absolute inset-y-0 left-0 bg-blue-500/15 dark:bg-blue-400/20"
+                              style={{ width: `${nativeCtxPct}%` }}
+                            />
+                          )}
+                          <span className="relative">{nativeCompacting ? codexCopy.compactStart : fmtNativeCtxTok(nativeTokensInput)}</span>
                         </button>
                       )}
                       {nativeMemoryItems.length > 0 && (
@@ -3207,6 +4059,7 @@ export function CodexAcpView({
                         <div className="relative min-w-0">
                           <button
                             type="button"
+                            ref={memoryTriggerRef}
                             data-testid="native-memory-badge"
                             onClick={() => setMemoryOpen(value => !value)}
                             title={codexCopy.nativeMemoryTitle}
@@ -3218,18 +4071,15 @@ export function CodexAcpView({
                             {`${codexCopy.nativeMemory} ${nativeMemoryItems.length}`}
                           </button>
                           {memoryOpen && (
-                            <>
-                              <button type="button" aria-label={codexCopy.nativeMemoryClose} className="fixed inset-0 z-30 cursor-default" onClick={() => setMemoryOpen(false)} />
-                              <div data-testid="native-memory-panel" className="absolute bottom-full left-0 z-40 mb-2 max-h-72 w-[320px] max-w-[calc(100vw-32px)] overflow-y-auto rounded-2xl border border-black/[0.08] bg-white/95 p-2 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#202124]/95">
-                                <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-400">{codexCopy.nativeMemoryTitle}</div>
-                                {nativeMemoryItems.map((item, index) => (
-                                  <div key={item.id || `memory-${index}`} className="rounded-xl px-3 py-2">
-                                    <span className="block text-[10px] font-medium text-gray-400">{nativeMemoryKindLabel(item.kind)}</span>
-                                    <span className="mt-0.5 block text-[12px] text-gray-700 dark:text-gray-200">{item.text}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </>
+                            <div ref={memoryPanelRef} data-testid="native-memory-panel" className="absolute bottom-full left-0 z-40 mb-2 max-h-72 w-[320px] max-w-[calc(100vw-32px)] overflow-y-auto rounded-2xl border border-black/[0.08] bg-white/95 p-2 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#202124]/95">
+                              <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-gray-400">{codexCopy.nativeMemoryTitle}</div>
+                              {nativeMemoryItems.map((item, index) => (
+                                <div key={item.id || `memory-${index}`} className="rounded-xl px-3 py-2">
+                                  <span className="block text-[10px] font-medium text-gray-400">{nativeMemoryKindLabel(item.kind)}</span>
+                                  <span className="mt-0.5 block text-[12px] text-gray-700 dark:text-gray-200">{item.text}</span>
+                                </div>
+                              ))}
+                            </div>
                           )}
                         </div>
                       )}
@@ -3239,6 +4089,7 @@ export function CodexAcpView({
                   <div className="relative min-w-0">
                     <button
                       type="button"
+                      ref={accountMenuTriggerRef}
                       data-testid="acp-account-menu-trigger"
                       onClick={() => setAccountMenuOpen(value => !value)}
                       className="inline-flex h-7 min-w-0 max-w-[260px] items-center gap-1.5 rounded-lg px-2 text-[10px] text-gray-400 hover:bg-black/[0.05] dark:hover:bg-white/[0.07]"
@@ -3259,17 +4110,11 @@ export function CodexAcpView({
                       <ChevronDown size={11} className="shrink-0" />
                     </button>
                     {accountMenuOpen && (
-                      <>
-                        <button
-                          type="button"
-                          aria-label={codexCopy.closeAccountMenu}
-                          className="fixed inset-0 z-30 cursor-default"
-                          onClick={() => setAccountMenuOpen(false)}
-                        />
-                        <div
-                          data-testid="acp-account-menu"
-                          className="absolute bottom-9 left-0 z-40 w-[300px] max-w-[calc(100vw-32px)] rounded-2xl border border-black/[0.08] bg-white/95 p-2 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#202124]/95"
-                        >
+                      <div
+                        ref={accountMenuPanelRef}
+                        data-testid="acp-account-menu"
+                        className="absolute bottom-9 left-0 z-40 w-[300px] max-w-[calc(100vw-32px)] rounded-2xl border border-black/[0.08] bg-white/95 p-2 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#202124]/95"
+                      >
                           <div className="flex items-center gap-3 px-3 py-2.5">
                             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-black/[0.04] dark:bg-white/[0.07]">
                               <AcpAgentLogo agentId={activeAgentId} className="h-5 w-5" title={activeAgentName} />
@@ -3287,18 +4132,24 @@ export function CodexAcpView({
                             </div>
                           </div>
                           <div className="mt-1 border-t border-black/[0.05] pt-1 dark:border-white/[0.06]">
-                            <button
-                              type="button"
-                              onClick={switchAccount}
-                              disabled={working || activeRuntimeBusy || activeStatus?.login_in_progress}
-                              className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[12px] font-medium hover:bg-black/[0.04] disabled:opacity-40 dark:hover:bg-white/[0.06]"
-                            >
-                              <User size={15} className="text-blue-500" />
-                              <span className="min-w-0">
-                                <span className="block">{codexCopy.switchAccount}</span>
-                                <span className="mt-0.5 block text-[10px] font-normal text-gray-400">{codexCopy.switchAccountAffectsSessions}</span>
-                              </span>
-                            </button>
+                            {runtimeManagementAvailable ? (
+                              <button
+                                type="button"
+                                onClick={switchAccount}
+                                disabled={working || activeRuntimeBusy || activeStatus?.login_in_progress}
+                                className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[12px] font-medium hover:bg-black/[0.04] disabled:opacity-40 dark:hover:bg-white/[0.06]"
+                              >
+                                <User size={15} className="text-blue-500" />
+                                <span className="min-w-0">
+                                  <span className="block">{codexCopy.switchAccount}</span>
+                                  <span className="mt-0.5 block text-[10px] font-normal text-gray-400">{codexCopy.switchAccountAffectsSessions}</span>
+                                </span>
+                              </button>
+                            ) : (
+                              <div className="px-3 py-2 text-[10px] leading-4 text-gray-400">
+                                {codexCopy.manageAgentOnDesktop(activeAgentName)}
+                              </div>
+                            )}
                             <button
                               type="button"
                               onClick={() => {
@@ -3311,8 +4162,7 @@ export function CodexAcpView({
                               {codexCopy.recheck}
                             </button>
                           </div>
-                        </div>
-                      </>
+                      </div>
                     )}
                   </div>
                   )}
@@ -3334,7 +4184,7 @@ export function CodexAcpView({
                             tag: activeAgentId === 'claude' ? model.id : undefined,
                           }))}
                           onChange={changeModel}
-                          disabled={busy || working || activeRuntimeBusy}
+                          disabled={busy || working || activeRuntimeBusy || Boolean(configApplying)}
                           unsetLabel={codexCopy.notSet}
                         />
                       )}
@@ -3348,7 +4198,7 @@ export function CodexAcpView({
                             name: item.name || item.id,
                           }))}
                           onChange={changeMode}
-                          disabled={busy || working || activeRuntimeBusy}
+                          disabled={busy || working || activeRuntimeBusy || Boolean(configApplying)}
                           title={codexCopy.sessionModeTitle}
                           unsetLabel={codexCopy.notSet}
                         />
@@ -3368,7 +4218,7 @@ export function CodexAcpView({
                               }))
                             : configChoices(option)}
                           onChange={value => changeConfig(option.id, value)}
-                          disabled={busy || working || activeRuntimeBusy}
+                          disabled={busy || working || activeRuntimeBusy || Boolean(configApplying)}
                           title={option.description || option.name}
                           unsetLabel={codexCopy.notSet}
                         />
@@ -3376,7 +4226,7 @@ export function CodexAcpView({
                       {/* 会话级 Provider 覆盖仅 Codex 生效（spawn 时按会话注入
                           OPENAI_API_KEY）；Claude/Kimi 的 CLI 配置是进程级的，
                           无法按会话隔离，不展示该选项避免误导。 */}
-                      {activeAgentId === 'codex' && Boolean(activeId) && sessionProviderChoices.length > 1 && (
+                      {providerManagementAvailable && activeAgentId === 'codex' && Boolean(activeId) && sessionProviderChoices.length > 1 && (
                         <CodexComposerConfigSelect
                           id="provider"
                           label={(t.uiAcpProviders || {}).sessionProvider || 'Provider'}
@@ -3394,37 +4244,81 @@ export function CodexAcpView({
                 {busy ? (
                   <button onClick={cancel} className="w-9 h-9 rounded-full flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500/15"><StopCircle size={18} /></button>
                 ) : (
-                  <button onClick={send} disabled={!sessionReady || (!draft.trim() && !attachments.some(attachment => attachment.status === 'ready') && !workspaceReferences.length) || working || activeRuntimeBusy || (!isNativeAgent && (!activeStatus || !activeStatus.installed || !activeStatus.authenticated))}
+                  <button onClick={send} disabled={!sessionReady || (!draft.trim() && !attachments.some(attachment => attachment.status === 'ready') && !workspaceReferences.length) || working || activeRuntimeBusy || Boolean(configApplying) || (!isNativeAgent && (!activeStatus || !activeStatus.installed || !activeStatus.authenticated))}
                     className="w-9 h-9 rounded-full flex items-center justify-center bg-[#007AFF] text-white shadow-sm hover:bg-[#006EE6] disabled:bg-black/[0.06] dark:disabled:bg-white/10 disabled:text-gray-400 disabled:shadow-none">
                     <Send size={16} />
                   </button>
                 )}
               </div>
-              {pendingYoloSwitch && (
-                // 首次切 yolo 的一次性确认卡（全局记忆）；确认后继续切换，取消留在 Plan。
-                <NativeYoloConfirmCard
-                  theme={theme}
-                  t={t}
-                  busy={yoloConfirmBusy}
-                  onConfirm={confirmPendingYoloSwitch}
-                  onCancel={() => setPendingYoloSwitch(null)}
-                />
-              )}
             </div>
           </div>
         </div>
         </div>
-        {(activeSession || draftWorkspacePath) && (
+        {pendingYoloSwitch && (
+          // 首次切 yolo 的一次性确认卡（全局记忆）；确认后继续切换，取消留在 Plan。
+          // 必须挂在输入框容器外：该容器带 backdrop-blur-xl，会按 Filter Effects L2
+          // 成为 fixed 后代的包含块，把全屏模态锁进输入框条内（fixed inset-0 相对它解析）。
+          <NativeYoloConfirmCard
+            theme={theme}
+            t={t}
+            busy={yoloConfirmBusy}
+            onConfirm={confirmPendingYoloSwitch}
+            onCancel={() => setPendingYoloSwitch(null)}
+          />
+        )}
+        {rewindTarget && (
+          // 「回退到第 N 轮」确认弹窗：变更摘要（懒加载 diff）+ 对话截断位置 +
+          // 错误如实上屏；确认后 confirmRewind 走 rewind_to_turn 编排。
+          <RewindConfirmDialog
+            entry={rewindTarget}
+            previewState={rewindTarget.checkpoint
+              ? rewindCheckpoints.previews[rewindTarget.checkpoint.id]
+              : null}
+            error={rewindError}
+            busy={rewinding}
+            theme={theme}
+            copy={codexCopy}
+            onCancel={() => { if (!rewinding) setRewindTarget(null); }}
+            onConfirm={confirmRewind}
+          />
+        )}
+        {rewindUndoEntry && (
+          // 「撤销回退」轻量确认：说明将恢复代码（有绑定回滚点时）与被截掉的
+          // N 轮对话；reloadFailed 时降级为「重试加载」语义。本地副本驱动，
+          // 与 undoState 生命周期解耦（见状态声明处注释）。
+          <RewindUndoConfirmDialog
+            state={rewindUndoEntry}
+            error={rewindUndoError}
+            busy={rewindUndoing}
+            theme={theme}
+            copy={codexCopy}
+            onCancel={() => { if (!rewindUndoing) setRewindUndoEntry(null); }}
+            onConfirm={confirmRewindUndo}
+          />
+        )}
+        {(activeSession || (!isWeb && draftWorkspacePath)) && (
           <CodexWorkspacePanel
             session={activeSession}
             workspacePath={activeSession ? '' : (draftWorkspacePath || '')}
             visible={workspaceOpen}
-            onClose={() => setWorkspaceOpen(false)}
+            activationKey={workspaceDockActivation}
+            onActiveChange={setWorkspaceDockActive}
+            onClose={closeWorkspacePanel}
             references={workspaceReferences}
             onAddReference={addWorkspaceReference}
             refreshToken={isNativeAgent ? nativeLaneTick : events.length}
             onChangeCount={setWorkspaceChangeCount}
             copy={t.uiCodexWorkspace}
+          />
+        )}
+        {subagentPanel && activeSession && isNativeAgent && (
+          <SubagentTranscriptPanel
+            sessionId={activeSession.id}
+            initialAgentId={subagentPanel.agentId}
+            selectionRequestId={subagentPanel.selectionRequestId}
+            t={t}
+            theme={theme}
+            onClose={closeSubagentPanel}
           />
         )}
         </div>

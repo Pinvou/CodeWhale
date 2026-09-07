@@ -8,19 +8,9 @@ const repoRoot = path.join(appRoot, "..");
 const read = (relativePath) =>
   fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 
-const macConfig = JSON.parse(
-  read("pinvou3-app/src-tauri/config/platforms/macos/tauri.conf.json"),
-);
-const macResources = macConfig.bundle.resources || {};
-assert.equal(
-  macResources["resources/platforms/macos/aarch64/asr/"],
-  undefined,
-  "macOS must not bundle the legacy SenseVoice runtime",
-);
-assert.ok(
-  !Object.values(macResources).some((destination) => destination === "runtime/asr"),
-  "macOS resources must not target runtime/asr",
-);
+// The asr/ directory exclusion and the runtime/asr target ban are asserted by
+// tauri_effective_config.test.js at both the effective-config and
+// resource-manifest layers (stronger); not repeated here.
 
 const legacyAsrDir = path.join(
   appRoot,
@@ -92,6 +82,16 @@ assert.match(
   "privacy prompt must disclose possible Apple Speech service processing",
 );
 assert.match(
+  infoPlist,
+  /<key>NSAppTransportSecurity<\/key>\s*<dict>[\s\S]*?<key>NSAllowsArbitraryLoadsInWebContent<\/key>\s*<true\/>[\s\S]*?<key>NSAllowsLocalNetworking<\/key>\s*<true\/>[\s\S]*?<\/dict>/,
+  "macOS browser web content must allow HTTP and local-network previews",
+);
+assert.doesNotMatch(
+  infoPlist,
+  /<key>NSAllowsArbitraryLoads<\/key>\s*<true\/>/,
+  "ATS must not be disabled for application networking",
+);
+assert.match(
   verifyScript,
   /for usage_key in[^\n]*NSLocalNetworkUsageDescription/,
   "macOS verification must require the local network privacy purpose",
@@ -101,6 +101,16 @@ assert.match(
   /BUNDLED_INFO_PLIST[\s\S]*?NSLocalNetworkUsageDescription/,
   "macOS verification must inspect the bundled local network privacy purpose",
 );
+for (const atsKey of [
+  "NSAllowsArbitraryLoadsInWebContent",
+  "NSAllowsLocalNetworking",
+]) {
+  assert.match(
+    verifyScript,
+    new RegExp(`BUNDLED_INFO_PLIST[\\s\\S]*?${atsKey}`),
+    `macOS verification must inspect bundled ${atsKey}`,
+  );
+}
 
 const requiredPrivacyKeys = [
   "NSMicrophoneUsageDescription",

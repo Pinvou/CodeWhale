@@ -1,6 +1,6 @@
 ---
 name: community-backflow
-description: 处理 Pinvou Community 已合并 PR 到 Official 的完整回流队列。用于处理全部 backflow:pending Issue、做轻量语义移植、创建并跟进回流 PR，以及在当前 head required checks 通过且没有实际 blocker 时执行管理员 squash merge 和 Issue 收尾。
+description: 处理 Pinvou Community 已合并 PR 到 Official 的完整回流队列。用于处理全部 backflow:pending Issue、做轻量语义移植、创建并跟进回流 PR，以及在当前 head required checks 通过且没有实际 blocker 时加入 Merge Queue 并完成 Issue 收尾。
 ---
 
 # 开源回流处理
@@ -97,10 +97,25 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 
 ## Rust CI 策略
 
-- Official 同仓 `backflow/community-*` PR 不重复运行完整 `rust-test`，但仍运行
-  `rust-lint`、快速门禁及实际影响范围内的前端、平台和本地测试。
+- Official 同仓 `backflow/community-*` PR 以 current head 的 base→head 实际 diff
+  做 CI 语义分类，不得用标题、标签或 Issue 文案替代。只有 `VERSION` 和
+  `scripts/sync-version.mjs` 管理的全部派生版本字段机械一致变化时，才作为纯 Release
+  豁免产品编译类 job（fast-gate、版本一致性、发布契约与三平台 `backflow-portability`
+  仍正常运行）；混合代码、依赖、feature 或格式外改动必须 fail closed。
+- 普通跨平台 Rust 可信回流不重复运行完整 `rust-test` 或完整 Windows Rust，但仍运行
+  `rust-lint`、三平台 `backflow-portability`、快速门禁、实际影响范围内的定向测试，
+  并由合入后的最新 `main` 承担累计 Windows 验证。
+- Windows 专属平台、路径、进程、安装、权限或原生依赖语义，Cargo 依赖/feature、
+  `build.rs`、Rust 工具链、CodeWhale gitlink、`tauri.conf.json` 非版本字段以及门禁
+  自身（`.github/workflows/**`、`scripts/ci-rust-policy.py`）等变化仍必须在 Ready PR
+  运行完整 `windows-rust-test`。来源仓库、固定分支、唯一 marker、base/head diff 或
+  内容解析必须完整校验，base 必须是 Official `main`。不可信 PR 保持普通 PR 的既有
+  策略；API/diff 失败或 Merge Group 无法通过 baseCommit→headCommit 链完整证明全部
+  成员时，必须 fail closed 运行完整 Windows，`required-gate` 不得接受 skipped；
+  `ci:full-rust` 继续强制完整策略。
 - 当前 head 的 required checks 成功且 `rust-test` 为 skipped 是预期状态，不构成
-  blocker；外部 fork 的同名分支不适用此例外。
+  blocker；按上述策略 skipped 的 `windows-rust-test` 同理。外部 fork 的同名分支
+  不适用任何可信回流例外。
 - 管理员合入后，`push main` 会运行完整 Rust 测试。连续合入多个回流 PR 时，
   main 的 concurrency 会取消旧轮次，只保留最新 main 的累计状态验证。
 - 不等待合入后的 main Rust 测试完成才关闭回流 Issue；结果由 GitHub Actions
@@ -108,7 +123,9 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 
 ## 入队与自动合并
 
-满足以下条件就执行 `gh pr merge --auto --squash --delete-branch`，由 Merge Queue 在最新
+满足以下条件就执行
+`node scripts/community-backflow.mjs enqueue --repo Pinvou/pinvou3 --pull <official-pr-number> --head <current-head-sha> --credential <github-username>`，
+由命令重新完成完整回流校验，并由 Merge Queue 在最新
 `main` 组合提交上完成 required checks 后合并：
 
 - 定时任务已明确授权自动加入 Merge Queue。
@@ -128,6 +145,41 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 
 文件多、改动行数大、跨模块或触及某类路径本身都不是 blocker。没有上述问题时，
 不要等待人工复审，直接加入 Merge Queue。
+
+### 事件驱动推进
+
+仓库变量 `COMMUNITY_BACKFLOW_AUTOMATION_ENABLED` 精确配置为 `true` 后，默认分支上的
+`community-backflow-automation.yml` 接管普通回流的等待与收尾：
+
+- `PR Check` 的 `workflow_run` 成功后，使用默认分支受信代码重新回读 PR、来源 Community
+  PR 及分页 changed files、关联 Official Issue 和当前 head 的 `required-gate`，校验通过才加入
+  Merge Queue。根目录 `VERSION` 的真实变更必须与 Issue Release plan 一致，否则失败关闭。
+- `pull_request_target.closed` 确认 PR 实际 merged 后，在各收尾阶段重读 PR/Issue/head/标签。
+  先添加并回读确认 `backflow:synced`，确认前保留 `backflow:processing`；失败重放可从
+  `open+processing+synced` 或 `open+synced` 继续，且不覆盖非回流标签或并发更新。
+- GitHub REST ref DELETE 没有服务端 SHA compare-and-delete，事件自动器不得删除远端分支；
+  分支清理由人工流程或具备原子绑定能力的安全 reaper 完成，不能使用有 H→H2 窗口的
+  GET→DELETE 模式。
+- 入队 mutation 用 `expectedHeadOid` 绑定已通过门禁的 head，并先通过受信 GraphQL API 审计
+  Official `main` 的 `mergeQueue.configuration.mergeMethod`。对 GitHub 明确定义的 `MERGE`、`SQUASH`、`REBASE`
+  遵循仓库当前配置入队；缺失或未知配置都拒绝，自动器不得修改远端规则或绕过组合门禁。
+- 自动器只接受 Official 同仓、base 为 `main`、分支严格匹配
+  `backflow/community-<source-number>` 的 PR；来源 marker、provenance、Issue plan marker 和
+  Issue 来源 marker 都必须各恰好出现一次，重复、冲突或与当前 head 不一致都会失败关闭，
+  不猜测或修正远端状态。
+- workflow 不 checkout PR head，也不执行 PR 提供的脚本。未配置仓库变量时安全跳过；排障可用
+  `node scripts/community-backflow.mjs automation --repo OWNER/REPO --event-file EVENT.json --dry-run`
+  完整只读校验。
+- GitHub API 仅对 `GET/HEAD` 透明重试。评论、标签、关闭、建 PR 和 GraphQL mutation 等写请求
+  若在服务端可能已提交后丢失响应，立即停止而不盲目重试；后续事件通过 stable marker 和远端
+  状态回读幂等收敛，避免同一次调用产生重复评论或重复写入。
+- Release 回流在第一阶段以幂等评论返回 `deferred-release`，不删除分支、不修改标签、不关闭
+  Issue，继续按下方固件构建契约人工完成。自动器不会把缺失固件构建证据的 Release Issue
+  标记 synced。
+
+如果仓库未启用自动器，或自动器未接管当前事件，继续使用上方带明确 PR 与当前 head 的
+`community-backflow.mjs enqueue` 命令和人工收尾流程。该命令不会自动删除远端分支；必须在确认 PR 已合并且
+远端 head 仍等于已验证 SHA 后，按“收尾”要求安全清理。
 
 ## Release 固件构建
 

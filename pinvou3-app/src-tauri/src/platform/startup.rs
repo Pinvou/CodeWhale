@@ -28,6 +28,10 @@ fn elapsed() -> Duration {
     STARTED_AT.get_or_init(Instant::now).elapsed()
 }
 
+pub fn elapsed_ms() -> u64 {
+    elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 fn clean_field(value: &str) -> String {
     crate::platform::credential_store::redact_secret(value)
         .chars()
@@ -175,7 +179,7 @@ pub fn report_frontend_startup(entries: Vec<FrontendStartupEntry>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_field, rotate_if_oversized, MAX_LOG_BYTES};
+    use super::{MAX_LOG_BYTES, clean_field, rotate_if_oversized};
 
     #[test]
     fn startup_log_fields_are_single_line_and_bounded() {

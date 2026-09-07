@@ -165,14 +165,14 @@ const browser = await puppeteer.launch({ executablePath: browserPath, headless: 
 
 async function configure(page, query) { await page.evaluate((value) => fetch(`/__test__/configure?${value}`), query); }
 async function state(page) { return page.evaluate(() => fetch('/__test__/state').then((response) => response.json())); }
-async function newPage() {
+async function newPage(language = 'en') {
   const page = await browser.newPage();
-  await page.evaluateOnNewDocument(() => {
-    localStorage.setItem('pinvou.admin.language', 'en');
+  await page.evaluateOnNewDocument((savedLanguage) => {
+    localStorage.setItem('pinvou.admin.language', savedLanguage);
     globalThis.__operationsSmoke = { replaceCount: 0 };
     const replace = history.replaceState.bind(history);
     history.replaceState = (...args) => { globalThis.__operationsSmoke.replaceCount += 1; return replace(...args); };
-  });
+  }, language);
   return page;
 }
 
@@ -280,6 +280,15 @@ try {
   await page.waitForFunction(() => fetch('/__test__/state').then((response) => response.json()).then((value) => value.usageAborted > 0));
   assert.doesNotMatch(page.url(), /usage_request_id|usage_evidence_/u, 'permission revoke clears the hidden detail URL');
   assert.match(page.url(), /operations_tab=provisionings/u, 'permission revoke selects the remaining authorized source');
+  // Cold starts must work without preloading the desktop's lazy locale chunks.
+  for (const language of ['zh', 'ja']) {
+    const localizedPage = await newPage(language);
+    localizedPage.on('pageerror', (error) => pageErrors.push(error.message));
+    await localizedPage.goto(`${origin}/admin.html?section=modelOperations&operations_tab=provisionings`, { waitUntil: 'networkidle0' });
+    await localizedPage.waitForSelector('#admin-root .adm-page');
+    assert.ok(await localizedPage.$eval('#admin-root', (root) => root.textContent.trim().length > 0), `${language} mounts the admin application`);
+    await localizedPage.close();
+  }
   assert.deepEqual(pageErrors, []);
 } finally {
   await browser.close();

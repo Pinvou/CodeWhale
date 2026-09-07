@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const routeNoWritePairs = new Set([
   '400:INVALID_ROUTE_COMMAND',
@@ -42,7 +43,7 @@ export function routeEditorVisible(access, requested) {
   return Boolean(requested && access?.showRouteWrite);
 }
 
-export function prepareStableRouteCommand(previous, payload, randomUUID = () => globalThis.crypto.randomUUID()) {
+export function prepareStableRouteCommand(previous, payload, randomUUID = () => secureRequestID()) {
   const payloadKey = routePayloadKey(payload);
   if (previous?.payloadKey === payloadKey) return previous.unknown || previous.completed ? { ...previous, locked: true } : previous;
   if (previous?.completed || previous?.dispatched && !previous.provenNoWrite) return { ...previous, locked: true };
@@ -60,7 +61,7 @@ export function failStableRouteCommand(command, error) {
   return { ...command, dispatched: true, provenNoWrite, unknown: !provenNoWrite, locked: !provenNoWrite, error: { status, code, requestID: String(error?.requestID || '') } };
 }
 
-export async function executeStableRouteCommand(holder, payload, send, randomUUID = () => globalThis.crypto.randomUUID()) {
+export async function executeStableRouteCommand(holder, payload, send, randomUUID = () => secureRequestID()) {
   if (holder.current?.inflight) return { ok: false, duplicate: true, command: holder.current.command };
   const prepared = prepareStableRouteCommand(holder.current?.command, payload, randomUUID);
   if (prepared.locked) return { ok: false, duplicate: false, command: prepared, error: { code: 'COMMAND_RESULT_UNKNOWN', status: 0, requestID: prepared.error?.requestID || '' } };

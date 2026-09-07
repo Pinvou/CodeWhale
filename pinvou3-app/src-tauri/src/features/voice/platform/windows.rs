@@ -15,8 +15,7 @@ pub fn bundled_engine_intact(
     true
 }
 
-const ASR_MODEL_URL: &str =
-    "https://www.modelscope.cn/models/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/master/sensevoice-small-q8.gguf";
+const ASR_MODEL_URL: &str = "https://www.modelscope.cn/models/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/master/sensevoice-small-q8.gguf";
 const ASR_MODEL_MIRROR_URL: &str =
     "https://huggingface.co/FunAudioLLM/SenseVoiceSmall-GGUF/resolve/main/sensevoice-small-q8.gguf";
 const ASR_MODEL_SIZE: u64 = 254_208_320;
@@ -126,12 +125,12 @@ pub fn native_recognition_source() -> &'static str {
 pub async fn reset_microphone_permission(window: tauri::WebviewWindow) -> Result<bool, String> {
     use webview2_com::{
         Microsoft::Web::WebView2::Win32::{
-            ICoreWebView2Profile4, ICoreWebView2_13, COREWEBVIEW2_PERMISSION_KIND_MICROPHONE,
-            COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
+            COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_DEFAULT,
+            ICoreWebView2_13, ICoreWebView2Profile4,
         },
         SetPermissionStateCompletedHandler,
     };
-    use windows::core::{Interface, HSTRING};
+    use windows_core::{HSTRING, Interface};
 
     let origin = window
         .url()
@@ -147,7 +146,9 @@ pub async fn reset_microphone_permission(window: tauri::WebviewWindow) -> Result
     window
         .with_webview(move |webview| {
             let callback_sender = Arc::clone(&sender);
-            let schedule_result: windows::core::Result<()> = (|| unsafe {
+            // SAFETY: Tauri invokes this closure on the WebView thread with live COM interfaces;
+            // the completion handler owns its captured sender until WebView2 calls it.
+            let schedule_result: windows_core::Result<()> = (|| unsafe {
                 let webview13 = webview
                     .controller()
                     .CoreWebView2()?

@@ -4,14 +4,15 @@ import { bridge } from '../../hooks/useBridge.js';
 import { can } from '../../shared/platform.js';
 import { expertDelegationText, isAgentWaitCall, isExpertDelegationCall } from '../conversation/conversation-model.js';
 import {
-  extractSubagentId,
   resolveSubagentPresentation,
+  resolveSubagentSpawnResult,
   subagentRoleOrdinals,
   subagentTreeIsDone,
   visibleSubagentDescendantRows,
 } from '../multiagent/subagent-conversation.mjs';
-import { AppIcon } from '../personas/Personas.jsx';
+import { AppIcon } from '../personas/persona-shared.jsx';
 import { QuestionChoiceCard } from '../conversation/QuestionChoiceCard.jsx';
+import { useShellTaskCancel } from '../chat/shell-task-cancel.js';
 import { AcShieldCheck, AcSparkles, ArtifactCard, DiffView, GrepView, ListDirView, OutputError, OutputPre, ReceiptBlock, ShellTextView, ShellView, StockQuoteCard, TODO_TOOLS, TodoView, WeatherCard, isQuietTool, isReceipt, isStockQuoteTool, isWeatherTool, looksDiff, outBox, parseReceipt, toolBasename, toolSummary, tryParseJson, tryTailJson } from './tool-common.jsx';
 
 const isShellExecutionTool = name => [
@@ -153,9 +154,9 @@ function watchExpertCard(sessionId, agentId) {
 }
 
 function openSubagentTranscript(agentId, sessionId) {
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined' || !agentId) return;
   window.dispatchEvent(new CustomEvent('pinvou:open-subagent', {
-    detail: { agentId: agentId || null, sessionId: sessionId || null },
+    detail: { agentId, sessionId: sessionId || null },
   }));
 }
 
@@ -212,10 +213,12 @@ function expertStatusPresentation({ summary, failedSpawn = false, itemState, cop
 const ExpertAgentCard = ({ item, t, sessionId: sessionIdProp }) => {
   const copy = t.uiMultiAgent;
   const args = item.args || {};
-  const agentId = extractSubagentId(item.output);
+  const spawnResult = resolveSubagentSpawnResult(item);
+  const { agentId } = spawnResult;
   const spawnText = expertDelegationText(args);
   const isDelegation = isExpertDelegationCall(item.name, args);
-  const failedSpawn = item.state === 'failed';
+  const failedSpawn = spawnResult.failed;
+  const canOpenTranscript = !!agentId && !failedSpawn;
   const sessionId = sessionIdProp || activeExpertSessionId();
   const sessionSnapshot = expertLedgerSnapshots.get(sessionId);
 
@@ -327,14 +330,17 @@ const ExpertAgentCard = ({ item, t, sessionId: sessionIdProp }) => {
     <div data-testid="expert-agent-tree" className="my-1 w-full max-w-[520px]">
       <div
         data-testid="expert-agent-card"
-        className={`flex w-full items-center rounded-[12px] border px-2 py-1.5 transition-colors ${
-          'border-[#E5E5EA] bg-white hover:bg-[#F2F2F7] dark:border-[#38383A] dark:bg-[#1C1C1E] dark:hover:bg-[#2C2C2E]'
+        className={`flex w-full items-center rounded-[12px] border border-[#E5E5EA] bg-white px-2 py-1.5 transition-colors dark:border-[#38383A] dark:bg-[#1C1C1E] ${
+          canOpenTranscript ? 'hover:bg-[#F2F2F7] dark:hover:bg-[#2C2C2E]' : ''
         }`}
       >
         <button
           type="button"
-          onClick={() => openSubagentTranscript(agentId, sessionId)}
-          className="flex min-w-0 flex-1 items-center gap-2.5 px-1 py-0.5 text-left"
+          disabled={!canOpenTranscript}
+          onClick={canOpenTranscript ? () => openSubagentTranscript(agentId, sessionId) : undefined}
+          className={`flex min-w-0 flex-1 items-center gap-2.5 px-1 py-0.5 text-left ${
+            canOpenTranscript ? 'cursor-pointer' : 'cursor-default'
+          }`}
         >
           <AppIcon
             card={{ id: identity.avatarKey, name: subtitle || name, dept: identity.personaDept }}
@@ -539,17 +545,11 @@ const ToolOutput = ({ item, t }) => {
       return <OutputPre text={out} />;
     };
 
-    const ToolCard = ({ item, t, variant = 'legacy', sessionId }) => {
-      // 委派实例不走通用工具卡：专家卡是多智能体的第一公民展示（ADR-0006）。
-      // 提前返回发生在本组件任何 Hook 之前，且 item.name 对一个实例终生不变，
-      // 因此每个实例的 Hook 数量恒定，不触犯 Hook 规则。
-      if (EXPERT_CARD_ENABLED && (item.name === 'agent' || isAgentWaitCall(item.name, item.args))) {
-        return <ExpertAgentCard item={item} t={t} sessionId={sessionId} />;
-      }
+    const StandardToolCard = ({ item, t, variant = 'legacy' }) => {
       const isTimeline = variant === 'timeline';
       const isRunning = item.state === 'running';
-      const [cancelling, setCancelling] = useState(false);
-      const [shellCancelError, setShellCancelError] = useState('');
+      // eslint-disable-next-line react-hooks/rules-of-hooks -- the early-return branch is constant for an instance's lifetime (see the comment above); the per-instance Hook count is stable
+      const { cancelling, cancelError: shellCancelError, cancel: cancelShellTask } = useShellTaskCancel(t);
       // 有可视化卡片的工具(天气/股票)完成后直接展开,不折叠
       const hasCard = (isWeatherTool(item.name) || isStockQuoteTool(item.name)) && item.state === 'done';
       const hasLiveShellOutput = isShellExecutionTool(item.name)
@@ -584,19 +584,9 @@ const ToolOutput = ({ item, t }) => {
             ? t.uiToolRender.done
             : t.uiToolRender.failed;
       const mutedColor = 'text-[#757575] dark:text-[#8E8E8E]';
-      const cancelBackground = async (event) => {
+      const cancelBackground = (event) => {
         event.stopPropagation();
-        if (!item.taskId || cancelling) return;
-        setCancelling(true);
-        setShellCancelError('');
-        try {
-          await bridge.chat.cancelShellTask(item.sessionId, item.taskId);
-        } catch (error) {
-          console.warn('cancel shell task failed', error);
-          setShellCancelError(`${t.shellCancelFailed || t.toolFailed}: ${String(error)}`);
-        } finally {
-          setCancelling(false);
-        }
+        cancelShellTask(item.sessionId, item.taskId);
       };
       const cancelButton = item.taskId && isRunning ? (
         <button
@@ -718,6 +708,15 @@ const ToolOutput = ({ item, t }) => {
       );
     };
 
+    // 委派实例与通用工具卡是两个独立组件，避免同一组件在提前
+    // return 前后执行不同数量的 Hook。
+    const ToolCard = ({ item, t, variant = 'legacy', sessionId }) => {
+      if (EXPERT_CARD_ENABLED && (item.name === 'agent' || isAgentWaitCall(item.name, item.args))) {
+        return <ExpertAgentCard item={item} t={t} sessionId={sessionId} />;
+      }
+      return <StandardToolCard item={item} t={t} variant={variant} />;
+    };
+
     // ==========================================
     // Plan / 待办 步骤渲染
     // ==========================================
@@ -745,6 +744,8 @@ const ToolOutput = ({ item, t }) => {
     const cardBtnCls = (variant) => {
       const base = 'px-3 py-1.5 rounded-full text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
       if (variant === 'primary') return `${base} bg-[#0B57D0] text-white hover:bg-[#0A4BB8] dark:bg-[#A8C7FA] dark:text-[#062E6F] dark:hover:bg-[#C2DBFF]`;
+      // 危险确认（如首切 YOLO）：红底白字，深浅色同配色（红色在两种主题下对比度都够）。
+      if (variant === 'danger') return `${base} bg-[#C5221F] text-white hover:bg-[#A50E0E]`;
       return `${base} bg-white text-[#1F1F1F] hover:bg-[#E1E5EA] border border-black/10 dark:border-transparent dark:bg-[#333537] dark:text-[#E3E3E3] dark:hover:bg-[#444746]`;
     };
 
@@ -1094,6 +1095,9 @@ const ToolOutput = ({ item, t }) => {
           id: group.questionId,
           label: answer.other ? t.uiToolRender.other : answer.label,
           value: String(answer.value),
+          // 保留 other 标记：QuestionChoiceCard 还原历史答案时据此把“其他”与预设选项区分开，
+          // 避免“其他值 == 预设 value”被误判为预设（评审 P2）。
+          other: answer.other,
         })));
         bridge.interaction.submitUserInput(item.id, item.toolCallId, answers, questions);
       }

@@ -13,7 +13,7 @@ const LONGPRESS_MS = 350;
       };
       const onPointerDown = (e) => {
         if (e.button !== 0 || !kind) return;
-        if (e.target && e.target.closest && e.target.closest('button,input')) return;
+        if (e.target && e.target.closest && e.target.closest('button:not([data-drag-surface]),input')) return;
         const rect = e.currentTarget.getBoundingClientRect();
         startRef.current = { x: e.clientX, y: e.clientY, rect };
         pickedRef.current = false;

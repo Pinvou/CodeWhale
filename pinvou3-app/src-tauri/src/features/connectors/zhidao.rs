@@ -10,8 +10,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use qrcode::{render::svg, QrCode};
-use serde_json::{json, Value};
+use qrcode::{QrCode, render::svg};
+use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
 
 fn b64(data: &[u8]) -> String {
@@ -41,7 +41,7 @@ fn b64(data: &[u8]) -> String {
 fn make_qr(url: &str) -> Option<String> {
     let code = QrCode::new(url.as_bytes()).ok()?;
     let image = code
-        .render::<svg::Color>()
+        .render::<svg::Color<'_>>()
         .min_dimensions(256, 256)
         .dark_color(svg::Color("#000000"))
         .light_color(svg::Color("#ffffff"))
@@ -245,7 +245,9 @@ fn run_login_flow(app: &AppHandle) {
         }
         if is_authed() {
             if set_connected(true) {
-                log::info!("[zhidao] connected state changed; visibility will apply without evicting active turns");
+                log::info!(
+                    "[zhidao] connected state changed; visibility will apply without evicting active turns"
+                );
             }
             emit(app, "zhidao:connected", json!({ "ok": true }));
             return;

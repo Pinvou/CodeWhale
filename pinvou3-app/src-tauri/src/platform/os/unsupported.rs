@@ -1,6 +1,12 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// macOS 侧由 `macos_system::current_system_locale` 显式实现阴影本符号,该目标下
+// unused(unused_imports=deny 会拦);其余 unsupported 平台它是唯一来源,保留。
+#[cfg(not(target_os = "macos"))]
+pub(crate) use super::locale::current_system_locale;
+
 pub fn open_target(_target: impl AsRef<OsStr>, label: &str) -> Result<(), String> {
     Err(format!("当前平台不支持系统打开: {label}"))
 }
@@ -12,13 +18,13 @@ pub fn reveal_target(target: &Path) -> Result<(), String> {
     ))
 }
 
-pub fn device_serial_number() -> Option<String> {
-    None
-}
-
 pub fn command_exists(_command: &str) -> bool {
     false
 }
+
+/// Windows-only (ORT_DYLIB_PATH / LibreOffice PATH prepend); this platform
+/// has no startup-window platform env writes, so this is a no-op.
+pub fn startup_platform_env() {}
 
 pub fn pandoc_tool_path() -> PathBuf {
     PathBuf::from("pandoc")
@@ -57,10 +63,6 @@ pub fn ocr_tool_exists() -> bool {
 }
 
 pub fn archive_tool_exists() -> bool {
-    false
-}
-
-pub fn msg_native_supported() -> bool {
     false
 }
 
@@ -162,10 +164,6 @@ pub fn user_home_dir() -> PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir())
 }
 
-pub fn platform_compat_path(value: &str) -> PathBuf {
-    PathBuf::from(value)
-}
-
 pub fn validate_upload_location(canon: &Path) -> Result<(), String> {
     let home_raw = user_home_dir();
     let home = platform_compat_path(
@@ -179,22 +177,41 @@ pub fn validate_upload_location(canon: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// Unix 通用 helper 从 posix.rs 继承（Wave 3 去重，与 linux_path.rs 一致）。
+// `posix` 模块仅在 `#[cfg(unix)]` 编译，故这里必须守卫：macOS（unix）走
+// re-export；其余非 unix 兜底平台走本地等价实现，避免 E0432 未解析模块。
+#[cfg(unix)]
+pub use super::posix::{path_component_eq, platform_compat_path, python_command};
+
+// macOS 由 macos_path 提供自有实现（APFS 注释在案），经 glob 消费时被显式
+// re-export 遮蔽，这里的转发在其编译面上不可达；仅当 unsupported 自身作为
+// platform（linux/windows/macos 之外的 unix 兜底目标）时才需要从 posix 继承。
+#[cfg(all(unix, not(target_os = "macos")))]
+pub use super::posix::filesystem_path_identity_key;
+
+#[cfg(not(unix))]
 pub fn path_component_eq(component: &OsStr, expected: &str) -> bool {
     component == OsStr::new(expected)
 }
 
+#[cfg(not(unix))]
 pub fn filesystem_path_identity_key(path: &str) -> String {
     path.to_string()
 }
 
+#[cfg(not(unix))]
+pub fn platform_compat_path(value: &str) -> PathBuf {
+    PathBuf::from(value)
+}
+
+#[cfg(not(unix))]
 pub fn python_command() -> String {
-    if which_in_path("python3") {
-        return "python3".to_string();
-    }
-    if which_in_path("python") {
-        return "python".to_string();
-    }
     "python3".to_string()
+}
+
+/// 空设备路径桩（未知平台按 POSIX 约定）。
+pub fn null_device() -> &'static str {
+    "/dev/null"
 }
 
 pub fn connector_cli_command(_cli_bin: &str, program: &str) -> Command {
@@ -203,19 +220,31 @@ pub fn connector_cli_command(_cli_bin: &str, program: &str) -> Command {
 
 pub fn apply_user_npm_prefix(_cmd: &mut Command) {}
 
+/// 退出收割用的树杀(macOS 走此实现)。连接器 CLI 是 npm shim(shell→node),
+/// spawn 侧已 `process_group(0)` 成组,这里按负 pid 杀整组;单杀 shim pid 会把
+/// node 孙进程孤儿化。组杀失败(进程未成组的旧登记)追加单 pid 兜底。
+///
+/// 禁止委托外部 kill 可执行文件执行组杀；这里在 Unix 直接调用 kill(2)，并在
+/// API 边界拒绝 pid <= 1 及超出 i32 正数范围的 pid。非 Unix 目标没有 POSIX
+/// 进程组语义，按 unsupported 合约显式不执行任何操作。
 pub fn kill_pid_tree(pid: u32) {
-    let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
-}
-
-fn which_in_path(cmd: &str) -> bool {
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            if dir.join(cmd).is_file() {
-                return true;
-            }
+    #[cfg(unix)]
+    {
+        let Some(group) = i32::try_from(pid).ok().filter(|group| *group > 1) else {
+            return;
+        };
+        // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+        let group_ok = unsafe { libc::kill(-group, libc::SIGKILL) } == 0;
+        if !group_ok {
+            // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+            let _ = unsafe { libc::kill(group, libc::SIGKILL) };
         }
+        return;
     }
-    false
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
 }
 
 pub fn super_permission_is_enabled() -> bool {
@@ -233,6 +262,19 @@ pub fn disable_super_permission() -> Result<(), String> {
 pub fn super_permission_turn_reminder() -> &'static str {
     "当前系统不支持 Linux sudo 超级权限开关。需要管理员权限时,请使用系统提供的管理员方式执行,不要尝试 sudo/apt/systemctl/pkexec。"
 }
+
+/// Unsupported platforms have no bundled Node.js runtime; consumers fall back to PATH.
+pub fn bundled_node() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Unsupported platforms provide no process-liveness probe.
+pub fn process_alive(_pid: u32) -> bool {
+    false
+}
+
+/// Unsupported platforms do not provide a portable directory-permission primitive.
+pub fn make_private_dir(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {

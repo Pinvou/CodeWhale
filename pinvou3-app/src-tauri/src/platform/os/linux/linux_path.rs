@@ -1,14 +1,16 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+// Unix 通用 helper 从 posix.rs 继承（Wave 3 去重）。
+pub use super::super::posix::{
+    filesystem_path_identity_key, null_device, path_component_eq, platform_compat_path,
+    python_command,
+};
 
 pub fn user_home_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home)
-}
-
-pub fn platform_compat_path(value: &str) -> PathBuf {
-    PathBuf::from(value)
 }
 
 pub fn validate_upload_location(canon: &Path) -> Result<(), String> {
@@ -22,24 +24,6 @@ pub fn validate_upload_location(canon: &Path) -> Result<(), String> {
         return Err(format!("path {} not under $HOME", canon.display()));
     }
     Ok(())
-}
-
-pub fn path_component_eq(component: &OsStr, expected: &str) -> bool {
-    component == OsStr::new(expected)
-}
-
-pub fn filesystem_path_identity_key(path: &str) -> String {
-    path.to_string()
-}
-
-pub fn python_command() -> String {
-    if which_in_path("python3") {
-        return "python3".to_string();
-    }
-    if which_in_path("python") {
-        return "python".to_string();
-    }
-    "python3".to_string()
 }
 
 pub fn configure_onnxruntime_dylib() -> Result<(), String> {
@@ -82,6 +66,12 @@ pub fn connector_cli_command(cli_bin: &str, program: &str) -> Command {
 
 fn connector_cli_program(cli_bin: &str, program: &str) -> OsString {
     if program == cli_bin {
+        // 版本化资产库（lock 表单点解析）优先；旧布局（未迁移存量）其次。
+        if let Some(path) = crate::platform::connector_lock::locked_cli_path(cli_bin) {
+            if path.is_file() {
+                return path.into_os_string();
+            }
+        }
         if let Some(bin_dir) = crate::platform::paths::managed_connector_bin_dir() {
             let bundled = bin_dir.join(cli_bin);
             if bundled.is_file() {
@@ -126,10 +116,24 @@ pub fn apply_user_npm_prefix(cmd: &mut Command) {
     prepend_connector_path_entries(cmd, [bin]);
 }
 
+/// 退出收割用的树杀。连接器 CLI 是 npm shim(shell 脚本→node 子进程),spawn 侧
+/// 已用 `process_group(0)` 让 shim 独立成组,这里按负 pid 杀整组,否则单杀 shim
+/// 的 pid 会把 node 孙进程孤儿化(与 platform::process::kill_process_tree 同语义)。
+/// 若进程恰未成组(旧登记),追加一次单 pid 兜底。
+///
+/// 禁止委托外部 kill 可执行文件执行组杀；procps-ng 4.0.4 可能把合法负 pid
+/// 错解析成 kill(-1)，从而杀死当前用户的全部进程。这里直接调用 kill(2)，并在
+/// API 边界拒绝 pid <= 1 及超出 i32 正数范围的 pid。
 pub fn kill_pid_tree(pid: u32) {
-    let _ = connector_cli_command("", "kill")
-        .args(["-9", &pid.to_string()])
-        .output();
+    let Some(group) = i32::try_from(pid).ok().filter(|group| *group > 1) else {
+        return;
+    };
+    // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+    let group_ok = unsafe { libc::kill(-group, libc::SIGKILL) } == 0;
+    if !group_ok {
+        // SAFETY: libc::kill is a direct kill(2) wrapper; no memory is touched.
+        let _ = unsafe { libc::kill(group, libc::SIGKILL) };
+    }
 }
 
 fn prepend_connector_path_entries(cmd: &mut Command, dirs: impl IntoIterator<Item = PathBuf>) {
@@ -143,17 +147,6 @@ fn prepend_connector_path_entries(cmd: &mut Command, dirs: impl IntoIterator<Ite
     if let Ok(joined) = std::env::join_paths(paths) {
         cmd.env("PATH", joined);
     }
-}
-
-fn which_in_path(cmd: &str) -> bool {
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            if dir.join(cmd).is_file() {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 pub fn pdf_tool_path(command: &str) -> PathBuf {

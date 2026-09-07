@@ -1,32 +1,26 @@
 //! 知识库 embedding 模型（bge-m3）按需下载 + 校验 + 部署 + 热加载。
 //!
-//! 模型不再随 deb 打包（deb 瘦 ~559MB）；用户在知识库页主动下载到 [`super::model_dir`]
-//! （`~/.pinvou3/knowledge/models/bge-m3`）。下载范式照搬语音 ASR：流式 reqwest +
-//! `.part` 临时文件 + 进度事件；额外做 sha256 校验 + tar.gz 解压。候选目录通过真实
+//! 模型不再随安装包打包；用户在知识库页主动下载到 [`super::model_dir`]
+//! （`~/.pinvou3/knowledge/models/bge-m3`）。固定 revision 的五个文件由
+//! `pinvou-knowledge` 统一流式下载并逐文件校验。候选目录通过真实
 //! embedding 加载后才带回滚地替换托管模型并刷新工具门控，**免重启**即可建库/入库/检索。
 //!
-//! 进度事件 `kb_model:progress`：`{ stage: download|verify|extract|done, downloaded, total, ready }`。
+//! 进度事件 `kb_model:progress`：`{ stage: download|verify|prepare|done, downloaded, total, ready }`。
 
-use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-
-use serde::Serialize;
-use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::KnowledgeService;
+use serde::Serialize;
 
-/// 默认下载源（对接 OTA 源，见 `scripts/release-kb-model.sh`）；env `PINVOU3_KB_MODEL_URL` 覆盖（本地测试用）。
-const MODEL_URL: &str = "https://pinvou.com/pinvou3/kb-model/bge-m3.tar.gz";
-/// tar.gz 的 sha256（release-kb-model.sh 发布后回填，服务端 sha256sum 已核验；空=跳过校验）。
-/// env `PINVOU3_KB_MODEL_SHA256` 覆盖。重发模型务必同步更新此值。
-const MODEL_SHA256: &str = "86438791d1ee7c9989c75878d3623ab28a7e4cd57aa3a7816480043d1de62efe";
-/// tar.gz 字节数（content-length 缺失时的进度兜底；2026-06-30 发布实测值）。
-const MODEL_TARGZ_SIZE: u64 = 407_925_014;
-/// 展示用：下载包(~389MB tar.gz) / 安装占用(~558MB 解压后) 近似大小（前端 chip 显示）。
-const DISPLAY_DOWNLOAD_BYTES: u64 = 407_925_014;
-const DISPLAY_INSTALLED_BYTES: u64 = 585_556_897;
+/// 桌面端可单独指定镜像；未配置时回退到两端统一的镜像变量。
+const DESKTOP_HF_BASE_URL_ENV: &str = "PINVOU3_KB_HF_BASE_URL";
+/// 展示用：固定清单的下载量与实际模型文件占用（不含文件系统簇开销）。
+const DISPLAY_DOWNLOAD_BYTES: u64 =
+    pinvou_knowledge::model_download::KNOWLEDGE_MODEL_DOWNLOAD_BYTES;
+const DISPLAY_INSTALLED_BYTES: u64 =
+    pinvou_knowledge::model_download::KNOWLEDGE_MODEL_DOWNLOAD_BYTES;
 /// 模型版本标识（前端 `.pkg-ver` 显示）。
 pub const MODEL_VERSION: &str = "bge-m3";
 
@@ -34,6 +28,10 @@ static DOWNLOADING: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 static MODEL_LOAD: ModelLoadCoordinator = ModelLoadCoordinator::new();
 static MODEL_LOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// 最近一次首帧/热加载跳过确因「无使用场景」门控：模型已装但被故意延迟加载，
+/// 用于让前端把该状态与真实加载失败区分开（故意跳过 ≠ 失败）。任何真实加载
+/// 尝试（成功或失败）都会在入口清除该标记。
+static MODEL_DEFERRED_NO_USAGE: AtomicBool = AtomicBool::new(false);
 
 struct ModelLoadCoordinator {
     lock: tokio::sync::Mutex<()>,
@@ -86,12 +84,28 @@ fn set_model_load_error(error: Option<String>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
 }
 
+/// 任何真实加载尝试（成功或失败）前清除「无使用场景故意延迟」标记:导入补载
+/// 等绕过状态命令的加载入口也在其列——否则首帧被门控跳过的用户导入文件时,
+/// 补载失败仍被前端误标为 deferred(「故意延迟」),真实失败被掩盖。
+pub(super) fn clear_deferred_no_usage() {
+    MODEL_DEFERRED_NO_USAGE.store(false, Ordering::SeqCst);
+}
+
 fn configured_model_dir() -> std::path::PathBuf {
-    std::env::var("PINVOU3_KB_EMBED_MODEL_DIR")
-        .ok()
+    configured_model_dir_from(
+        std::env::var("PINVOU3_KB_EMBED_MODEL_DIR").ok(),
+        super::model_dir(),
+    )
+}
+
+fn configured_model_dir_from(
+    configured: Option<String>,
+    managed: std::path::PathBuf,
+) -> std::path::PathBuf {
+    configured
         .filter(|value| !value.trim().is_empty())
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(super::model_dir)
+        .unwrap_or(managed)
 }
 
 fn uses_external_model_dir() -> bool {
@@ -104,17 +118,7 @@ fn uses_external_model_dir() -> bool {
 }
 
 fn model_directory_is_complete(dir: &Path) -> bool {
-    let onnx = dir.join("model.onnx").is_file()
-        || dir.join("onnx").join("model_int8.onnx").is_file()
-        || dir.join("onnx").join("model.onnx").is_file();
-    onnx && [
-        "tokenizer.json",
-        "config.json",
-        "special_tokens_map.json",
-        "tokenizer_config.json",
-    ]
-    .iter()
-    .all(|file| dir.join(file).is_file())
+    pinvou_knowledge::model_download::model_directory_is_complete(dir)
 }
 
 /// 当前配置模型是否已部署：显式开发覆盖优先，否则检查应用托管目录。
@@ -133,6 +137,9 @@ pub struct KbModelStatus {
     pub loading: bool,
     /// 模型文件存在，但最近一次进程内加载失败。
     pub failed: bool,
+    /// 模型已安装，但因本地无已入库内容且远程无连接被首帧门控故意延迟加载；
+    /// 语义检索退化为全文（既有降级语义），区别于真实加载失败。
+    pub deferred_no_usage: bool,
     /// 最近一次模型加载失败的本地诊断信息。
     pub error: Option<String>,
     /// 正在下载/部署中。
@@ -144,7 +151,7 @@ pub struct KbModelStatus {
     pub version: String,
 }
 
-fn current_status(service: &KnowledgeService) -> KbModelStatus {
+pub(crate) fn current_status(service: &KnowledgeService) -> KbModelStatus {
     let installed = model_installed();
     let ready = service.semantic_ready();
     let loading = MODEL_LOAD.is_loading();
@@ -154,6 +161,11 @@ fn current_status(service: &KnowledgeService) -> KbModelStatus {
         ready,
         loading,
         failed: installed && !ready && !loading && error.is_some(),
+        deferred_no_usage: deferred_no_usage(
+            MODEL_DEFERRED_NO_USAGE.load(Ordering::Acquire),
+            installed,
+            ready,
+        ),
         error,
         downloading: DOWNLOADING.load(Ordering::Relaxed),
         size_bytes: DISPLAY_DOWNLOAD_BYTES,
@@ -167,7 +179,7 @@ pub fn kb_model_status(service: tauri::State<'_, KnowledgeService>) -> KbModelSt
     current_status(&service)
 }
 
-/// 取消进行中的下载（下次 chunk / 解压前生效）。
+/// 取消进行中的下载（下次网络数据块或文件校验边界生效）。
 pub fn kb_model_cancel() {
     CANCEL.store(true, Ordering::Relaxed);
 }
@@ -182,20 +194,12 @@ pub async fn kb_model_load_after_first_frame(
     if service.semantic_ready() {
         return Ok(true);
     }
-    if !model_installed() {
-        return Ok(false);
-    }
 
     crate::platform::startup::mark("knowledge_embedder_async:start");
     let ready = load_installed_embedder(&service, &pool)
         .await
-        .map_err(|e| {
-            crate::platform::startup::mark_with_detail(
-                "rust",
-                "knowledge_embedder_async:error",
-                &e,
-            );
-            e
+        .inspect_err(|e| {
+            crate::platform::startup::mark_with_detail("rust", "knowledge_embedder_async:error", e);
         })?;
     crate::platform::startup::mark_with_detail(
         "rust",
@@ -205,7 +209,7 @@ pub async fn kb_model_load_after_first_frame(
     Ok(ready)
 }
 
-/// 按需下载 + 校验 + 解压部署 embedding 模型，完成后热加载并刷新工具门控（免重启）。
+/// 按需下载 + 校验 + 部署 embedding 模型，完成后热加载并刷新工具门控（免重启）。
 pub async fn kb_model_download(
     app: tauri::AppHandle,
     service: tauri::State<'_, KnowledgeService>,
@@ -217,18 +221,36 @@ pub async fn kb_model_download(
     if DOWNLOADING.load(Ordering::Acquire) {
         return Err("模型正在下载中".into());
     }
+    // 用户主动下载/修复 = 明确使用意图：解除「无使用场景故意延迟」标记，
+    // 保证其后真实的下载/部署/加载失败按失败上报，而不会被 deferred 掩盖。
+    MODEL_DEFERRED_NO_USAGE.store(false, Ordering::SeqCst);
     let repair = repair.unwrap_or(false);
-    if uses_external_model_dir() && (repair || !model_installed()) {
+    let external_model_dir = uses_external_model_dir();
+    let configured_dir = configured_model_dir();
+    if external_model_dir && (repair || !model_directory_is_complete(&configured_dir)) {
         return Err(
             "当前使用 PINVOU3_KB_EMBED_MODEL_DIR 指定的外部模型目录；应用不会覆盖该目录，请修复该目录或移除环境变量后重试"
                 .into(),
         );
     }
-    if model_installed() && !repair {
+    let dir = super::model_dir();
+    // 共享服务与桌面端在 Linux 宿主上复用同一个模型目录。必须在第一次
+    // 完整性检查前获取跨进程锁，并持有到候选模型构造和目录替换完成。
+    // 外部只读模型目录不由应用管理，因此不创建锁文件。
+    let _install_lock = (!external_model_dir)
+        .then(|| pinvou_knowledge::try_lock_knowledge_model_install(&dir))
+        .transpose()?;
+    if !external_model_dir {
+        if let Some(warning) = pinvou_knowledge::model_download::recover_model_directory(&dir)? {
+            eprintln!("[knowledge] {warning}");
+            set_model_load_error(Some(warning));
+        }
+    }
+    if model_directory_is_complete(&configured_dir) && !repair {
         if service.semantic_ready() {
             return Ok(current_status(&service));
         }
-        load_installed_embedder(&service, &pool).await?;
+        load_installed_embedder_unlocked(&service, &pool, configured_dir).await?;
         return Ok(current_status(&service));
     }
     if DOWNLOADING.swap(true, Ordering::SeqCst) {
@@ -236,99 +258,63 @@ pub async fn kb_model_download(
     }
     CANCEL.store(false, Ordering::Relaxed);
     // 守卫：任何提前 return（含 ?、取消）退出时都复位 DOWNLOADING。
-    let _guard = DownloadGuard;
+    let guard = DownloadGuard;
 
-    let dir = super::model_dir();
     let parent = dir
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| dir.clone());
     std::fs::create_dir_all(&parent).map_err(|e| format!("创建目录失败: {e}"))?;
-    let part = parent.join("bge-m3.tar.gz.part");
-
-    // ── 1. 流式下载 → .part ───────────────────────────────────────
-    let url = std::env::var("PINVOU3_KB_MODEL_URL").unwrap_or_else(|_| MODEL_URL.to_string());
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .user_agent("pinvou3-kb/1.0")
-        .build()
-        .map_err(|e| format!("HTTP client 构建失败: {e}"))?;
-    let mut resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("连接模型源失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("模型源响应异常: {e}"))?;
-    let total = resp
-        .content_length()
-        .filter(|n| *n > 0)
-        .unwrap_or(MODEL_TARGZ_SIZE);
-    let mut file = std::fs::File::create(&part).map_err(|e| format!("创建文件失败: {e}"))?;
-    let mut downloaded: u64 = 0;
-    let mut last_emit: u64 = 0;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载中断: {e}"))? {
-        if CANCEL.load(Ordering::Relaxed) {
-            drop(file);
-            let _ = std::fs::remove_file(&part);
-            return Err("已取消".into());
-        }
-        file.write_all(&chunk)
-            .map_err(|e| format!("写盘失败: {e}"))?;
-        downloaded += chunk.len() as u64;
-        if downloaded - last_emit >= 2_097_152 || (total > 0 && downloaded >= total) {
-            last_emit = downloaded;
-            let _ = app.emit(
-                "kb_model:progress",
-                serde_json::json!({ "stage": "download", "downloaded": downloaded, "total": total }),
-            );
-        }
-    }
-    drop(file);
-
-    // ── 2. sha256 校验 + 3. 解压部署（CPU/IO 重，挪 spawn_blocking）───
-    let part2 = part.clone();
-    let dir2 = dir.clone();
-    let app2 = app.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        // 校验：const 或 env 给了 sha256 才校验（占位空串=跳过，dev 用本地包时方便）。
-        let expected = std::env::var("PINVOU3_KB_MODEL_SHA256")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| (!MODEL_SHA256.is_empty()).then(|| MODEL_SHA256.to_string()));
-        if let Some(exp) = expected {
-            let _ = app2.emit(
-                "kb_model:progress",
-                serde_json::json!({ "stage": "verify" }),
-            );
-            let got = sha256_file(&part2)?;
-            if !got.eq_ignore_ascii_case(&exp) {
-                let _ = std::fs::remove_file(&part2);
-                return Err(format!(
-                    "模型校验失败(sha256 不匹配): 期望 {exp:.12} 实际 {got:.12}"
-                ));
-            }
-        }
-        // 解压到临时目录再原子换入（避免半包污染落点）。
-        let _ = app2.emit(
-            "kb_model:progress",
-            serde_json::json!({ "stage": "extract" }),
-        );
-        let tmp = dir2.with_extension("tmp");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).map_err(|e| format!("创建解压目录失败: {e}"))?;
-        extract_targz(&part2, &tmp)?;
-        if !model_directory_is_complete(&tmp) {
-            let _ = std::fs::remove_dir_all(&tmp);
-            return Err("解压结果缺少完整的 ONNX 模型或 tokenizer 配置".into());
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("解压任务失败: {e}"))??;
-
-    // ── 4. 先验证候选模型，再原子换入并热加载（失败时保留旧模型）──────
+    // ── 1. 固定 revision 五文件清单下载 + 逐文件大小/SHA-256 校验 ──
     let tmp = dir.with_extension("tmp");
+    if tmp.exists() {
+        std::fs::remove_dir_all(&tmp)
+            .map_err(|e| format!("清理上次模型候选目录失败({}): {e}", tmp.display()))?;
+    }
+    let hf_base_url = std::env::var(DESKTOP_HF_BASE_URL_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(pinvou_knowledge::model_download::knowledge_model_hf_base_url);
+    let progress_app = app.clone();
+    pinvou_knowledge::model_download::download_knowledge_model_candidate(
+        &tmp,
+        &hf_base_url,
+        move |progress| {
+            let stage = match progress.stage {
+                pinvou_knowledge::model_download::KnowledgeModelDownloadStage::Download => {
+                    "download"
+                }
+                pinvou_knowledge::model_download::KnowledgeModelDownloadStage::Verify => "verify",
+            };
+            let _ = progress_app.emit(
+                "kb_model:progress",
+                serde_json::json!({
+                    "stage": stage,
+                    "downloaded": progress.downloaded_bytes,
+                    "total": progress.total_bytes,
+                    "fileIndex": progress.file_index,
+                    "fileCount": progress.file_count,
+                    "file": progress.source_path,
+                }),
+            );
+        },
+        || CANCEL.load(Ordering::Relaxed),
+    )
+    .await?;
+    if !model_directory_is_complete(&tmp) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err("下载结果缺少完整的 ONNX 模型或 tokenizer 配置".into());
+    }
+
+    // ── 2. 真实加载候选模型，再原子换入并热加载（失败时保留旧模型）──
+    let _ = app.emit(
+        "kb_model:progress",
+        serde_json::json!({
+            "stage": "prepare",
+            "downloaded": DISPLAY_DOWNLOAD_BYTES,
+            "total": DISPLAY_DOWNLOAD_BYTES,
+        }),
+    );
     let load_lease = MODEL_LOAD.acquire().await;
     set_model_load_error(None);
     let service_was_ready = service.semantic_ready();
@@ -342,14 +328,12 @@ pub async fn kb_model_download(
         Ok(Err(error)) => {
             set_model_load_error(Some(error.clone()));
             let _ = std::fs::remove_dir_all(&tmp);
-            let _ = std::fs::remove_file(&part);
             return Err(error);
         }
         Err(error) => {
             let error = format!("embedding 后台加载任务失败: {error}");
             set_model_load_error(Some(error.clone()));
             let _ = std::fs::remove_dir_all(&tmp);
-            let _ = std::fs::remove_file(&part);
             return Err(error);
         }
     };
@@ -372,28 +356,103 @@ pub async fn kb_model_download(
         set_model_load_error(None);
     }
     super::refresh_kb_tool_gate(&pool).await;
-    let _ = std::fs::remove_file(&part);
     let _ = app.emit(
         "kb_model:progress",
         serde_json::json!({ "stage": "done", "ready": ready }),
     );
     drop(load_lease);
-    drop(_guard);
+    drop(guard);
     Ok(current_status(&service))
 }
 
-async fn load_installed_embedder(
+pub(crate) async fn load_installed_embedder(
     service: &KnowledgeService,
     pool: &crate::features::assistant::engine_pool::EnginePool,
 ) -> Result<bool, String> {
+    // 首帧门控（kb_model_load_after_first_frame 与 kb_model_status 热加载共用本
+    // 入口，改这一处两个调用点同时生效）：磁盘目录完整 ≠ 值得加载。本地无已
+    // 入库内容且远程无连接时，加载 ~570MB 模型纯属白占内存（没有任何检索、
+    // 建库路径会用它）；曾建库后清空的用户同样跳过——has_indexed_content 就是
+    // 「当前有可检索内容」的语义。返回 Ok(false) = 未安装式静默降级，语义与
+    // 模型未部署完全一致；用户建库/下载模型/挂载校验的既有路径不受影响。
+    if !knowledge_usage_present(service) {
+        MODEL_DEFERRED_NO_USAGE.store(true, Ordering::SeqCst);
+        crate::platform::startup::mark_with_detail(
+            "rust",
+            "knowledge_embedder_async:skipped_no_usage",
+            &format!(
+                "indexed_content={} remote_connections={}",
+                service.has_indexed_content(),
+                remote_has_connections(),
+            ),
+        );
+        return Ok(false);
+    }
+    // 门控放行 = 即将真实加载：清除故意延迟标记，此后的失败按真实失败上报。
+    MODEL_DEFERRED_NO_USAGE.store(false, Ordering::SeqCst);
+    let external_model_dir = uses_external_model_dir();
+    let configured_dir = configured_model_dir();
+    let _install_lock = (!external_model_dir)
+        .then(|| pinvou_knowledge::try_lock_knowledge_model_install(&configured_dir))
+        .transpose()?;
+    if !external_model_dir {
+        if let Some(warning) =
+            pinvou_knowledge::model_download::recover_model_directory(&configured_dir)?
+        {
+            eprintln!("[knowledge] {warning}");
+            set_model_load_error(Some(warning));
+        }
+    }
+    if !model_directory_is_complete(&configured_dir) {
+        return Ok(false);
+    }
+    load_installed_embedder_unlocked(service, pool, configured_dir).await
+}
+
+/// 是否存在会用到 embedding 模型的使用迹象：本地有已入库内容，或配置了远程
+/// 知识库连接（与 tool_policy 的 kb_usable 同口径：远程连接存在即视为知识库
+/// 可用，宁可保守加载；远程检索本身在服务端嵌入，本地模型只为挂载校验与
+/// 可能的本地混检兜底）。两者皆无 → 首帧不加载。
+fn knowledge_usage_present(service: &KnowledgeService) -> bool {
+    usage_present(service.has_indexed_content(), remote_has_connections())
+}
+
+/// usage_present 的纯函数核心（便于单测）：任一使用迹象存在即加载。
+fn usage_present(indexed_content: bool, remote_connections: bool) -> bool {
+    indexed_content || remote_connections
+}
+
+/// deferred_no_usage 的纯函数核心（便于单测）：只有「已安装、未就绪、最近一次
+/// 跳过确因无使用场景」三者同时成立才算故意延迟。加载成功（ready）或模型目录
+/// 被移除（!installed）自然解除；真实加载尝试（含用户点重试/下载/导入补载）在
+/// 入口即清除标记，因此其后的真实失败不会被误标为 deferred。
+fn deferred_no_usage(deferred_flag: bool, installed: bool, ready: bool) -> bool {
+    deferred_flag && installed && !ready
+}
+
+/// 远程知识库连接是否存在。不经过 Tauri managed state——model_download 不便
+/// 依赖 RemoteKnowledgeService 实例（各 feature 自行 manage 自己的 state），
+/// 因此直接读默认路径的连接文件；读不到（文件缺失/解析失败）按「无连接」
+/// 处理，语义保守（跳过加载，用户连上远程库后热加载钩子会补上）。
+fn remote_has_connections() -> bool {
+    crate::features::remote_knowledge::RemoteKnowledgeService::remote_connections_present()
+}
+
+/// 调用方已经持有模型目录安装锁，或使用不由应用管理的外部只读目录。
+async fn load_installed_embedder_unlocked(
+    service: &KnowledgeService,
+    pool: &crate::features::assistant::engine_pool::EnginePool,
+    model_dir: std::path::PathBuf,
+) -> Result<bool, String> {
+    // 真实加载尝试（含 kb_model_download 绕过门控的补载）：清除故意延迟标记。
+    MODEL_DEFERRED_NO_USAGE.store(false, Ordering::SeqCst);
     let _lease = MODEL_LOAD.acquire().await;
     if service.semantic_ready() {
         return Ok(true);
     }
     set_model_load_error(None);
-    let dir = super::model_dir();
     let embedder = match tokio::task::spawn_blocking(move || {
-        KnowledgeService::load_embedder(Some(&dir))
+        KnowledgeService::load_embedder(Some(&model_dir))
     })
     .await
     {
@@ -412,6 +471,71 @@ async fn load_installed_embedder(
     set_model_load_error(None);
     super::refresh_kb_tool_gate(pool).await;
     Ok(service.semantic_ready())
+}
+
+/// kb_search 自愈路径的租约化重载：模型被空闲卸载/首帧门控跳过后，工具执行时
+/// 按需恢复。与模型下载、首帧加载共用 `MODEL_LOAD` 租约：并发 kb_search（同
+/// turn 并行工具调用）等待先行者完成后在租约内复查短路，不重复读 ~570MB；
+/// 与 kb_model_download 的目录替换互斥，不会读到半替换状态。失败写
+/// `MODEL_LOAD_ERROR`（前端状态页可见）并返回 Err，调用方降级纯全文。
+///
+/// 工具门控（lib.rs tool_policy）不依赖 semantic_ready，重载成败都不需要刷新
+/// disallowed_tools；被 `tokio::time::timeout` 取消等待时，后台加载任务本身
+/// 不受影响（spawn_blocking 闭包继续执行并落位），仅当次检索降级。
+pub(super) async fn reload_installed_embedder_leased(
+    service: &KnowledgeService,
+) -> Result<bool, String> {
+    let model_dir = configured_model_dir();
+    let ready_probe = service.clone();
+    let load_service = service.clone();
+    leased_reload_with(
+        model_installed(),
+        move || ready_probe.semantic_ready(),
+        move || {
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    KnowledgeService::load_embedder(Some(&model_dir))
+                        .map(|embedder| load_service.install_embedder(embedder))
+                })
+                .await
+                .unwrap_or_else(|error| Err(format!("embedding 后台加载任务失败: {error}")))
+            })
+        },
+    )
+    .await
+}
+
+/// 上一方法的可测核心：`installed` 门控 → 清 deferred 标记 → 拿租约 →
+/// **租约内**复查 ready（并发调用等待先行加载后短路）→ 加载并安装。
+/// `ready` 与 `load_and_install` 注入，使并发回归测试无需真实模型文件。
+/// 加载器必须自行把阻塞 IO 放进 spawn_blocking（生产实现已做）。
+async fn leased_reload_with(
+    installed: bool,
+    ready: impl Fn() -> bool,
+    load_and_install: impl FnOnce() -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<bool, String>> + Send>,
+    >,
+) -> Result<bool, String> {
+    if !installed {
+        return Ok(false);
+    }
+    // 真实加载尝试：清除「无使用场景故意延迟」标记，失败按真实失败上报。
+    MODEL_DEFERRED_NO_USAGE.store(false, Ordering::SeqCst);
+    let _lease = MODEL_LOAD.acquire().await;
+    if ready() {
+        return Ok(true);
+    }
+    set_model_load_error(None);
+    match load_and_install().await {
+        Ok(ready) => {
+            set_model_load_error(None);
+            Ok(ready)
+        }
+        Err(error) => {
+            set_model_load_error(Some(error.clone()));
+            Err(error)
+        }
+    }
 }
 
 struct ModelDeployment {
@@ -434,46 +558,7 @@ fn deploy_validated_model(
 }
 
 fn replace_model_directory(candidate: &Path, destination: &Path) -> Result<Option<String>, String> {
-    let backup = destination.with_extension("backup");
-    if backup.exists() {
-        if destination.exists() {
-            std::fs::remove_dir_all(&backup)
-                .map_err(|e| format!("清理上次遗留的模型备份失败({}): {e}", backup.display()))?;
-        } else {
-            std::fs::rename(&backup, destination).map_err(|e| {
-                format!(
-                    "恢复上次中断留下的模型备份失败({} -> {}): {e}",
-                    backup.display(),
-                    destination.display()
-                )
-            })?;
-        }
-    }
-    let had_destination = destination.exists();
-    if had_destination {
-        std::fs::rename(destination, &backup).map_err(|e| format!("备份现有模型失败: {e}"))?;
-    }
-    if let Err(error) = std::fs::rename(candidate, destination) {
-        if had_destination {
-            if let Err(rollback_error) = std::fs::rename(&backup, destination) {
-                return Err(format!(
-                    "部署模型失败: {error}; 回滚旧模型也失败: {rollback_error}; 旧模型仍保留在 {}",
-                    backup.display()
-                ));
-            }
-        }
-        return Err(format!("部署模型失败: {error}"));
-    }
-    let cleanup_warning = had_destination
-        .then(|| std::fs::remove_dir_all(&backup))
-        .and_then(Result::err)
-        .map(|error| {
-            format!(
-                "新模型已部署，但清理旧模型备份失败({}): {error}",
-                backup.display()
-            )
-        });
-    Ok(cleanup_warning)
+    pinvou_knowledge::model_download::install_model_candidate(candidate, destination)
 }
 
 /// `DOWNLOADING` 复位守卫（任何提前 return 都复位，含 `?` 早退与取消）。
@@ -484,36 +569,11 @@ impl Drop for DownloadGuard {
     }
 }
 
-fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut f = std::fs::File::open(path).map_err(|e| format!("打开校验文件失败: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = f
-            .read(&mut buf)
-            .map_err(|e| format!("读校验文件失败: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let digest = hasher.finalize();
-    Ok(crate::platform::encoding::hex_lower(&digest))
-}
-
-fn extract_targz(targz: &Path, dest: &Path) -> Result<(), String> {
-    let f = std::fs::File::open(targz).map_err(|e| format!("打开下载包失败: {e}"))?;
-    let dec = flate2::read::GzDecoder::new(f);
-    let mut ar = tar::Archive::new(dec);
-    ar.unpack(dest).map_err(|e| format!("解压失败: {e}"))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     fn temporary_model_root(label: &str) -> std::path::PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -522,6 +582,48 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn first_frame_load_requires_local_content_or_remote_connections() {
+        // 两者皆无 → 跳过加载（磁盘目录即使完整也不白占 ~570MB）。
+        assert!(!usage_present(false, false));
+        // 本地有已入库内容（含曾建库后仍有文档的用户）→ 加载。
+        assert!(usage_present(true, false));
+        // 远程连接存在（远程检索要本地嵌入查询向量）→ 加载。
+        assert!(usage_present(false, true));
+        assert!(usage_present(true, true));
+    }
+
+    #[test]
+    fn deferred_no_usage_requires_installed_not_ready_and_skip_marker() {
+        // 跳过标记 + 已安装 + 未就绪 → 故意延迟（前端据此区分真实加载失败）。
+        assert!(deferred_no_usage(true, true, false));
+        // 加载成功后 ready=true，即使标记未及时清除也不应再报 deferred。
+        assert!(!deferred_no_usage(true, true, true));
+        // 模型目录被移除（未安装）时按「未安装」语义处理，不算 deferred。
+        assert!(!deferred_no_usage(true, false, false));
+        // 真实加载尝试在入口清除标记：其后的真实失败不得被标为 deferred。
+        assert!(!deferred_no_usage(false, true, false));
+        assert!(!deferred_no_usage(false, false, false));
+    }
+
+    #[test]
+    fn configured_model_directory_prefers_non_empty_external_override() {
+        let managed = std::path::PathBuf::from("managed/bge-m3");
+        let external = std::path::PathBuf::from("external/bge-m3");
+
+        assert_eq!(
+            configured_model_dir_from(
+                Some(external.to_string_lossy().into_owned()),
+                managed.clone()
+            ),
+            external
+        );
+        assert_eq!(
+            configured_model_dir_from(Some("  ".into()), managed.clone()),
+            managed
+        );
     }
 
     #[tokio::test]
@@ -571,6 +673,147 @@ mod tests {
             .expect("cancelled loader must release the coordinator");
         drop(lease);
         assert!(!coordinator.is_loading());
+    }
+
+    /// kb_search 自愈重载的并发回归：N 路并发重载同一槽位，真实加载只允许发生
+    /// 一次（租约串行 + 租约内复查 ready 短路），其余等待者拿到 Ok(true)。
+    /// 复现审计缺陷：并发 kb_search 各自 spawn_blocking 重载 ~570MB 模型。
+    #[tokio::test]
+    async fn leased_reload_concurrent_calls_load_once() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let ready = ready.clone();
+            let loads = loads.clone();
+            let ready_after_load = ready.clone();
+            tasks.push(tokio::spawn(async move {
+                leased_reload_with(
+                    true,
+                    move || ready.load(Ordering::SeqCst),
+                    move || {
+                        let loads = loads.clone();
+                        Box::pin(async move {
+                            loads.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                            ready_after_load.store(true, Ordering::SeqCst);
+                            Ok(true)
+                        })
+                    },
+                )
+                .await
+            }));
+        }
+        for task in tasks {
+            let outcome = task.await.expect("reload task should finish");
+            assert!(outcome.is_ok(), "等待先行加载后短路应返回 Ok: {outcome:?}");
+            assert_eq!(outcome, Ok(true));
+        }
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "并发重载必须只真实加载一次（租约内复查短路）"
+        );
+    }
+
+    /// 未安装时重载直接 Ok(false) 短路，不触碰租约也不发起加载。
+    #[tokio::test]
+    async fn leased_reload_skips_when_not_installed() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        let loads_probe = loads.clone();
+        let outcome = leased_reload_with(
+            false,
+            || false,
+            move || {
+                loads_probe.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(true) })
+            },
+        )
+        .await;
+        assert_eq!(outcome, Ok(false));
+        assert_eq!(loads.load(Ordering::SeqCst), 0);
+    }
+
+    /// 加载失败不落 ready，错误穿透给调用方（kb_search 降级纯全文），后续
+    /// 调用仍会重试（不缓存失败）。
+    #[tokio::test]
+    async fn leased_reload_failure_propagates_and_retries() {
+        let loads = Arc::new(AtomicUsize::new(0));
+        for expected_error in ["第一次失败", "第二次失败"] {
+            let loads = loads.clone();
+            let outcome = leased_reload_with(
+                true,
+                || false,
+                move || {
+                    let loads = loads.clone();
+                    Box::pin(async move {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        Err(expected_error.to_string())
+                    })
+                },
+            )
+            .await;
+            assert_eq!(outcome, Err(expected_error.to_string()));
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 2, "失败不缓存,下次重试");
+        // 真实加载尝试清 deferred 标记（失败按真实失败上报,不误标「故意延迟」）。
+        assert!(!MODEL_DEFERRED_NO_USAGE.load(Ordering::SeqCst));
+    }
+
+    /// 工具门控语义：锚定 lib.rs tool_policy 实际引用的纯函数
+    /// KnowledgeService::kb_tools_usable（此前该测试断言测试内自定义闭包，属
+    /// 同义反复——生产判定若回退掺回 semantic_ready 此灯不会红）。模型卸载
+    /// （!ready）后只要有已入库内容,kb_search/kb_open_source 就必须保持可见
+    /// ——否则快照式重算会把工具写进 disallowed,工具内按需重载的自愈路径不可达。
+    /// 函数签名刻意不含模型状态参数:任何把 semantic_ready 掺回来的改动会直接
+    /// 编译错或在此红灯。
+    #[test]
+    fn kb_tools_stay_visible_after_model_unload_when_content_present() {
+        use super::KnowledgeService;
+        // 有内容（本地任一分支）+ 模型已卸载：工具仍可见（自愈重载路径可达）。
+        assert!(KnowledgeService::kb_tools_usable(true, false));
+        // 有内容 + 远程连接：工具可见（远程检索不依赖本地模型）。
+        assert!(KnowledgeService::kb_tools_usable(false, true));
+        assert!(KnowledgeService::kb_tools_usable(true, true));
+        // 库空且无远程连接：工具不可见（不空宣传能力）。
+        assert!(!KnowledgeService::kb_tools_usable(false, false));
+    }
+
+    /// 集成层：空闲卸载语义（set_embedder(None)）不改变 has_indexed_content 的
+    /// 读数——门控数据源与 embedder 槽解耦。
+    #[test]
+    fn idle_unload_keeps_has_indexed_content_stable() {
+        let dir = std::env::temp_dir().join(format!(
+            "pinvou3_kb_gate_unload_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let service = KnowledgeService::new(&dir.join("index.db")).expect("KnowledgeService::new");
+        let l1 = service.l1();
+        let collection_id = l1
+            .create_collection("回归知识集", None, None)
+            .expect("create collection");
+        let doc_id = l1
+            .upsert_document(
+                collection_id,
+                dir.to_string_lossy().as_ref(),
+                "回归文档",
+                Some("md"),
+                1,
+                0,
+            )
+            .expect("upsert document");
+        assert!(doc_id > 0);
+        assert!(service.has_indexed_content(), "入库后有内容");
+        // 模拟空闲卸载：embedder 槽置空后内容读数不变（工具可见性不波动）。
+        assert!(!service.semantic_ready());
+        service.l1().set_embedder(None);
+        assert!(!service.semantic_ready());
+        assert!(
+            service.has_indexed_content(),
+            "卸载后 has_indexed_content 读数不变"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

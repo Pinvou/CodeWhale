@@ -9,8 +9,9 @@ name: release-packages
 # - workflow_dispatch 手动触发:跳过 diff,无条件全量构建(用于补打/重打某版本)。
 #
 # 版本号单一事实来源 = 根目录 VERSION 文件。gate job 先跑
-# scripts/sync-version.mjs --check 校验各处版本文件(tauri.conf.json / Cargo.toml /
-# package.json / package-lock.json)与 VERSION 一致;构建 job 构建前再跑 sync-version.mjs 同步,
+# scripts/sync-version.mjs --check 校验 VERSION 引用的版本文件(tauri.conf.json /
+# pinvou3-app/src-tauri 的 Cargo.toml / pinvou-knowledge 的 Cargo.toml+Cargo.lock /
+# package.json / package-lock.json;除 package-lock.json 存在才纳入外,其余均为必需)与 VERSION 一致;构建 job 构建前再跑 sync-version.mjs 同步,
 # 保证打进包里的任何版本号都来自 VERSION。
 #
 # 与其他 workflow 的分工:
@@ -31,37 +32,55 @@ on:
     paths:
       - 'VERSION'
       - 'scripts/sync-version.mjs'
+      - 'scripts/asr/build-sensevoice-runtime.sh'
+      - 'scripts/asr/sensevoice-source.env'
+      - 'scripts/check-linux-elf-policy.sh'
+      - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
       - '.gitmodules'
       - 'private-runtimes/windows'
       - 'pinvou3-app/package.json'
       - 'pinvou3-app/package-lock.json'
       - 'pinvou3-app/scripts/tauri/build.js'
+      - 'pinvou3-app/scripts/tauri/linux-asr-runtime.js'
+      - 'pinvou3-app/scripts/tauri/platform-config.js'
       - 'pinvou3-app/scripts/tauri/codex-bridge.js'
       - 'pinvou3-app/scripts/tauri/windows-installer.js'
       - 'pinvou3-app/scripts/tauri/windows-runtime.js'
       - 'pinvou3-app/src-tauri/config/platforms/windows/**'
+      - 'pinvou3-app/src-tauri/config/platforms/linux/**'
+      - 'pinvou3-app/src-tauri/resources/platforms/linux/asr/**'
       - 'pinvou3-app/src-tauri/packaging/windows/**'
       - 'pinvou3-app/tests/codex_acp_windows_*'
       - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
+      - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
   pull_request:
     branches: [main]
     paths:
       - 'VERSION'
       - 'scripts/sync-version.mjs'
+      - 'scripts/asr/build-sensevoice-runtime.sh'
+      - 'scripts/asr/sensevoice-source.env'
+      - 'scripts/check-linux-elf-policy.sh'
+      - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
       - '.gitmodules'
       - 'private-runtimes/windows'
       - 'pinvou3-app/package.json'
       - 'pinvou3-app/package-lock.json'
       - 'pinvou3-app/scripts/tauri/build.js'
+      - 'pinvou3-app/scripts/tauri/linux-asr-runtime.js'
+      - 'pinvou3-app/scripts/tauri/platform-config.js'
       - 'pinvou3-app/scripts/tauri/codex-bridge.js'
       - 'pinvou3-app/scripts/tauri/windows-installer.js'
       - 'pinvou3-app/scripts/tauri/windows-runtime.js'
       - 'pinvou3-app/src-tauri/config/platforms/windows/**'
+      - 'pinvou3-app/src-tauri/config/platforms/linux/**'
+      - 'pinvou3-app/src-tauri/resources/platforms/linux/asr/**'
       - 'pinvou3-app/src-tauri/packaging/windows/**'
       - 'pinvou3-app/tests/codex_acp_windows_*'
       - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
+      - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
   workflow_dispatch:
 
 permissions:
@@ -95,7 +114,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: 版本同步脚本测试
         run: node --test scripts/tests/sync-version.test.mjs
@@ -129,7 +148,7 @@ jobs:
             echo "push 变更路径:"
             printf '%s\n' "$CHANGED_FILES"
             if printf '%s\n' "$CHANGED_FILES" | grep -Eq \
-              '^(VERSION|scripts/sync-version\.mjs|\.github/workflows/release-packages\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/tauri/(build|codex-bridge|windows-installer|windows-runtime)\.js|src-tauri/(config/platforms/windows|packaging/windows)/|tests/(codex_acp_windows_|windows_runtime_packaging_contract\.test\.js)))'; then
+              '^(VERSION|scripts/(sync-version\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|\.github/workflows/release-packages\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|windows_runtime_packaging_contract\.test\.js)))'; then
               echo "✓ 发布链路变化,触发构建"
               BUILD_REQUIRED=true
             else
@@ -149,10 +168,25 @@ jobs:
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-    runs-on: ubuntu-latest
+    # Linux 发布基线是 Ubuntu 22.04 (glibc 2.35)。发布二进制链接构建机的 glibc，
+    # 在更新的 Ubuntu runner 上构建会引入 22.04 不存在的符号引用，导致启动崩溃。
+    # runner 必须钉在 ubuntu-22.04，升级前先调整并验证配套 glibc 下限守卫。
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
+      # 托管 x86_64 runner 的冷 thin-LTO 构建也连续在约 30 分钟收到 shutdown
+      # (exit 143)。与 ARM64 一致，仅对 CI artifact 关闭跨 crate LTO 并提高
+      # 代码生成并行度；Cargo.toml 的正式本地 release profile 保持 thin LTO。
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      # v0.9.5 升级后 release(thin-LTO O3)编译 codewhale-tui 时 rustc/LLVM 栈溢出
+      # (SIGBUS,Linux 与 macOS 同源风险)。.cargo/config.toml 不设置 rustc-wrapper
+      # (全局键无法按平台条件化),由本 Linux 发布 job 显式注入 RUSTC_WRAPPER
+      # 指向 sh 版(wrapper 只作用于编译期 rustc 进程,产物运行时语义不变)。
+      # lld:BFD ld 处理大型 Rust binary 内存效率差,是 link OOM 独立主因(同 arm64)。
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
     steps:
       - name: Checkout (含 submodule)
         uses: actions/checkout@v7
@@ -165,8 +199,13 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: pinvou3-app/src-tauri
-          shared-key: release-linux-x64
+          # 同时缓存独立 target dir 中的 knowledge-host，避免每次发布冷编译。
+          workspaces: |
+            pinvou3-app/src-tauri
+            pinvou-knowledge
+          # jammy 后缀隔离此前由 Ubuntu 24.04 构建的缓存产物，避免高版本
+          # glibc 符号通过 target 缓存混入 Ubuntu 22.04 发布包。
+          shared-key: release-linux-x64-jammy
           # 非 main 手动构建只恢复 main 缓存；禁止写入分支缓存，避免多平台
           # release 缓存重复占满仓库配额并淘汰 pr-check 的 rust-test 暖缓存。
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -182,12 +221,12 @@ jobs:
             librsvg2-dev libssl-dev \
             libx11-dev libxi-dev libxtst-dev \
             libayatana-appindicator3-dev \
-            build-essential pkg-config cmake
+            build-essential pkg-config cmake lld
 
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: pinvou3-app/package-lock.json
 
@@ -211,7 +250,8 @@ jobs:
             : > "$d/$f"
           done
 
-      # build.js 自动注入 config/platforms/linux overlay,并自动准备 codex bridge。
+      # build.js 自动构建当前 x86_64 的固定版本 SenseVoice runtime，注入 Linux
+      # 平台与架构 overlay，并准备 codex bridge。
       # 只打 deb(config overlay 的 targets 也只列了 deb)。
       - name: 构建 deb
         working-directory: pinvou3-app
@@ -229,6 +269,11 @@ jobs:
           echo "deb sha256: $SHA"
           echo "$SHA  $DST" > "$DST.sha256"
           ls -lh "$DST"
+
+      # 同时锁住包内 ELF 架构和 Ubuntu 22.04 ABI，避免把 ARM runtime 混入
+      # x64 deb，或由 runner/依赖升级静默抬高运行系统要求。
+      - name: ELF 架构 + glibc 下限守卫 (Ubuntu 22.04)
+        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_x64.deb" amd64
 
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
@@ -248,15 +293,22 @@ jobs:
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-    runs-on: ubuntu-24.04-arm
+    # 与 x86_64 一致，ARM64 发布包也以 Ubuntu 22.04 (glibc 2.35) 为基线。
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
-      # GitHub 原生 ARM runner 的生命周期不足以稳定完成 fat-LTO 冷构建。
-      # 保留 release 的 opt-level/strip/panic，只调整链接优化与代码生成并行度。
+      # thin-LTO + codegen-units=1 的冷构建在托管 ARM runner 上连续于约 25 分钟
+      # 收到 shutdown(exit 143),且 runner 终止会跳过 Rust cache 保存。仅在该 CI
+      # job 关闭跨 crate LTO 并提高代码生成并行度；保留 release 的 O3/strip/panic，
+      # 其他平台及正式本地 release profile 仍使用 Cargo.toml 的 thin LTO。
       CARGO_PROFILE_RELEASE_LTO: "false"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      # 即使关闭 LTO 也保留 lld，降低大型 Rust binary 的链接内存开销。
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(同 build-linux-x64,
+      # 正式入口按平台注入 RUSTC_WRAPPER,见 config.toml 注释)。
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
     steps:
       - name: Checkout (含 submodule)
         uses: actions/checkout@v7
@@ -269,8 +321,12 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: pinvou3-app/src-tauri
-          shared-key: release-linux-arm64
+          # 与 x64 相同，同时缓存 knowledge-host 的独立 target dir。
+          workspaces: |
+            pinvou3-app/src-tauri
+            pinvou-knowledge
+          # jammy 后缀隔离此前由 Ubuntu 24.04 构建的缓存产物。
+          shared-key: release-linux-arm64-jammy
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: 装 Tauri + pinvou3 Linux 系统依赖
@@ -286,7 +342,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: pinvou3-app/package-lock.json
 
@@ -308,7 +364,8 @@ jobs:
       # 连接器 CLI 不在构建期下载或打入安装包；用户首次连接时，应用按
       # connectors.lock.json 在线下载、校验并安装到用户目录。
       # main VERSION bump 和 workflow_dispatch 统一使用已验证的托管 ARM
-      # 发布配置；PR 阶段只跑轻量契约，避免产出与最终 main 不一致的同版本包。
+      # 发布配置；build.js 先在该原生 runner 构建固定版本的 aarch64
+      # SenseVoice runtime。PR 阶段只跑轻量契约。
       - name: 构建 deb（托管 ARM64 发布配置）
         working-directory: pinvou3-app
         run: node scripts/tauri/build.js build --bundles deb
@@ -324,6 +381,9 @@ jobs:
           echo "deb sha256: $SHA"
           echo "$SHA  $DEB" > "$DEB.sha256"
           ls -lh "$DEB"
+
+      - name: ELF 架构 + glibc 下限守卫 (Ubuntu 22.04)
+        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_arm64.deb" arm64
 
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
@@ -354,7 +414,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: pinvou3-app/package-lock.json
 
@@ -366,6 +426,7 @@ jobs:
         working-directory: pinvou3-app
         run: |
           npm run test:windows-runtime
+          npm run test:windows-runtime-cache
           npm run test:codex-acp-windows-runtime
 
   # ── Job 5: Windows x86_64 nsis(仅受保护的非 PR 上下文) ────────────
@@ -387,6 +448,10 @@ jobs:
       # 用预生成 NASM 对象规避(同 pr-check.yml windows-rust-test 的结论)。
       # 当前 Windows 默认发布目标仅 x86_64。
       AWS_LC_SYS_PREBUILT_NASM: "1"
+      # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(三端统一注入;
+      # Windows 用 .exe 版 wrapper(本 job 先编译):.cmd 经 cmd /C 受 8191 字符
+      # 命令行上限限制,windows-sys 等大型 crate 的 rustc 命令行会超限)。
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -401,6 +466,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # 编译 Windows 专用 .exe 栈 wrapper(源码 scripts/rustc-stack-wrapper.rs)。
+      # 直接调 rustc 编译、不经 cargo,故不受本 job 的 RUSTC_WRAPPER 影响,无自举依赖。
+      - name: 编译 Windows 栈 wrapper(.exe)
+        shell: bash
+        run: rustc -O pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs -o pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -411,7 +482,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: pinvou3-app/package-lock.json
 
@@ -442,7 +513,9 @@ jobs:
 
       - name: 构建 nsis
         working-directory: pinvou3-app
-        run: npm run build:nsis
+        # 此 workflow 只产出无签名 GitHub artifact；正式 WoSign 依赖本地 UKey
+        # 与 gitignored secrets，不能在 GitHub-hosted runner 上调用。
+        run: npm run build:nsis:local
 
       # tauri nsis 产物默认名 pinvou3_<version>_x64-setup.exe,与目标命名一致。
       - name: 校验产物 + sha256
@@ -475,12 +548,20 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: macos-15
-    # 冷缓存双 target + fat LTO 实测可能超过 90 分钟（0.7.4 发布构建曾逼近上限），
-    # 放宽至 150 分钟以覆盖冷缓存与 runner 抖动，避免发布构建被超时取消。
-    timeout-minutes: 150
+    # 冷缓存双 target + thin LTO 的临界路径持续增长：0.8.3 冷缓存全程约 110 分钟，
+    # 0.8.4 依赖面扩大(+72 crate)后冷缓存估算超 160 分钟，150 分钟上限在 pass2 链接
+    # 阶段将构建杀掉(run 32093220066，pass1 90m13s + pass2 被杀于 pinvou3-tauri 链接)。
+    # release-macos 缓存又因仓库缓存总量顶满 10GB LRU 上限基本不可能跨发布存活，
+    # 每次发布都按冷缓存规划。放宽至 240 分钟覆盖依赖增长与 runner 抖动。
+    timeout-minutes: 240
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       VERSION: ${{ needs.check-version-bump.outputs.version }}
+      # v0.9.5 升级后 release(thin-LTO O3)编译 codewhale-tui 时 rustc/LLVM 栈溢出
+      # (SIGBUS,run 31558490865 实证)。.cargo/config.toml 不设置 rustc-wrapper
+      # (全局键无法按平台条件化),由本 macOS 发布 job 显式注入 RUSTC_WRAPPER
+      # 指向 sh 版(wrapper 只作用于编译期 rustc 进程,产物运行时语义不变)。
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
     steps:
       - name: Checkout (含 submodule)
         uses: actions/checkout@v7
@@ -500,7 +581,11 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: pinvou3-app/src-tauri
+          # Same as the Linux release job: also cache the pinvou-knowledge
+          # isolated target dir.
+          workspaces: |
+            pinvou3-app/src-tauri
+            pinvou-knowledge
           shared-key: release-macos-universal
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -521,7 +606,7 @@ jobs:
       - name: Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: pinvou3-app/package-lock.json
 

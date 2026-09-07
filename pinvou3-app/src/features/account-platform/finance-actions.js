@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 export const PAYMENT_ANOMALY_RESOLUTIONS = Object.freeze({
   CHARGEBACK: Object.freeze(['CONFIRM_CHARGEBACK', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR']),
   FORCED_REFUND: Object.freeze(['CONFIRM_FORCED_REFUND', 'DISMISS', 'ESCALATE_FINANCIAL_REPAIR']),
@@ -18,7 +19,7 @@ export function financeActionRequiresRefresh(operation = {}) {
 }
 
 export function createFinanceIdempotencyKey(prefix = 'finance-action') {
-  return `${prefix}-${crypto.randomUUID()}-${crypto.randomUUID()}`;
+  return `${prefix}-${secureRequestID()}-${secureRequestID()}`;
 }
 
 export function isUnknownMutationOutcome(error) {

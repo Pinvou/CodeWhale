@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dict } from '../src/shared/i18n.js';
-import { categoryCounts, deriveBoardColumn, deriveCategory, projectMaterialPackages, projectSnapshot, projectTeamBoard } from '../src/features/team-relay/team-relay-state.js';
+import { dict } from '../src/shared/i18n-all.js';
+import {
+  canUpdateRelayProgress, deriveBoardColumn, deriveCategory, matchesRelayView,
+  matchesSourceFilter, projectMaterialPackages, projectSnapshot, projectTeamBoard,
+  relayViewCounts, teamRelayHasUnread,
+} from '../src/features/team-relay/team-relay-state.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../src/features/team-relay/team-relay-access.js';
 
 assert.equal(loadTeamRelayAccess({ getItem: () => null }), false);
@@ -29,14 +33,24 @@ assert.equal(loadTeamRelayAccess(persistedAccessStorage), false);
 
 assert.equal(deriveCategory({ phase: 'closed' }, 'me'), 'ended');
 assert.equal(deriveCategory({ phase: 'cancelled' }, 'me'), 'ended');
+assert.equal(deriveCategory({ phase: 'pending_transfer', pending_recipient_id: 'me' }, 'me'), 'offer');
+assert.equal(deriveCategory({ phase: 'awaiting_reassignment', initiator_id: 'me' }, 'me'), 'reroute');
 assert.equal(deriveCategory({ phase: 'awaiting_acceptance', current_actor_id: 'me' }, 'me'), 'receive');
 assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'me' }, 'me'), 'pending');
 assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'other', return_to_id: 'me' }, 'me'), 'waiting');
-assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'other', initiator_id: 'me' }, 'me'), 'sent');
+assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'other', initiator_id: 'me' }, 'me'), 'waiting');
+assert.equal(deriveCategory({ phase: 'awaiting_acceptance', current_actor_id: 'other' }, 'me'), 'waiting');
 assert.equal(deriveBoardColumn({ phase: 'active', current_actor_id: 'owner', owner_id: 'owner' }), 'active');
+assert.equal(deriveBoardColumn({ phase: 'pending_transfer', current_actor_id: 'owner', owner_id: 'owner' }), 'active');
 assert.equal(deriveBoardColumn({ phase: 'active', current_actor_id: 'helper', owner_id: 'owner' }), 'collaborating');
 assert.equal(deriveBoardColumn({ phase: 'awaiting_acceptance' }), 'acceptance');
 assert.equal(deriveBoardColumn({ phase: 'closed' }), 'ended');
+assert.equal(canUpdateRelayProgress({ phase: 'active', current_actor_id: 'me' }, 'me'), true);
+assert.equal(canUpdateRelayProgress({ phase: 'active', current_actor_id: 'other' }, 'me'), false);
+assert.equal(canUpdateRelayProgress({ phase: 'pending_transfer', pending_transfer_kind: 'handoff', current_actor_id: 'me' }, 'me'), true);
+assert.equal(canUpdateRelayProgress({ phase: 'pending_transfer', pending_transfer_kind: 'assignment', current_actor_id: 'me' }, 'me'), false);
+assert.equal(canUpdateRelayProgress({ phase: 'awaiting_acceptance', current_actor_id: 'me' }, 'me'), false);
+assert.equal(canUpdateRelayProgress({ phase: 'closed', current_actor_id: null }, 'me'), false);
 
 const snapshot = {
   bootstrap: {
@@ -46,6 +60,8 @@ const snapshot = {
       thread: { id: 'thread', team_id: 'team', title: '方案', initiator_id: 'me', owner_id: 'b', current_actor_id: 'b', return_to_id: 'me', final_recipient_id: 'me', phase: 'active', revision: 1, created_at: '2026-08-04T00:00:00Z', updated_at: '2026-08-04T00:00:00Z' },
       participants: ['me', 'b'],
       actions: [{ id: 'action', thread_id: 'thread', sequence: 1, kind: 'assign', actor_id: 'me', recipient_id: 'b', return_to_id: 'me', message: '请处理', base_revision: 0, idempotency_key: 'key', attachment_ids: ['file'], created_at: '2026-08-04T00:00:00Z' }],
+      read_state: { thread_id: 'thread', last_read_sequence: 0, last_read_at: null },
+      unread_count: 2,
     }],
   },
   attachments: { file: { id: 'file', original_name: '方案.md' } },
@@ -54,10 +70,68 @@ const tasks = projectSnapshot(snapshot, dict.zh.uiTeamRelay);
 assert.equal(tasks.length, 1);
 assert.equal(tasks[0].category, 'waiting');
 assert.equal(tasks[0].owner, 'B');
+assert.equal(tasks[0].ownerAvatar, null);
 assert.equal(tasks[0].files[0].original_name, '方案.md');
 assert.equal(tasks[0].events[0].delivery.artifact_role, 'input');
+assert.equal(tasks[0].events[0].delivery.subtype, '');
 assert.equal(tasks[0].events[0].sequence, 1);
-assert.deepEqual(categoryCounts(tasks), { pending: 0, waiting: 1, receive: 0, sent: 0, ended: 0, hidden: 0 });
+assert.equal(tasks[0].teamId, 'team');
+assert.equal(tasks[0].teamName, 'Demo');
+assert.equal(tasks[0].unreadCount, 2);
+assert.equal(tasks[0].readState.last_read_sequence, 0);
+assert.equal(teamRelayHasUnread(snapshot), true);
+const noUnreadSnapshot = JSON.parse(JSON.stringify(snapshot));
+noUnreadSnapshot.bootstrap.threads[0].unread_count = 0;
+assert.equal(teamRelayHasUnread(noUnreadSnapshot), false);
+const pendingActionSnapshot = JSON.parse(JSON.stringify(noUnreadSnapshot));
+pendingActionSnapshot.bootstrap.me = { id: 'b', display_name: 'B' };
+pendingActionSnapshot.bootstrap.members.find(member => member.id === 'b').avatar = {
+  sha256: 'c'.repeat(64), media_type: 'image/gif', byte_size: 768, updated_at: '2026-08-04T00:00:00Z',
+};
+Object.assign(pendingActionSnapshot.bootstrap.threads[0].thread, {
+  owner_id: 'me', current_actor_id: 'me', phase: 'pending_transfer', pending_transfer_kind: 'assignment', pending_sender_id: 'me', pending_recipient_id: 'b',
+});
+assert.equal(teamRelayHasUnread(pendingActionSnapshot), true, 'an unresolved transfer keeps the navigation dot after it is read');
+const pendingActionTask = projectSnapshot(pendingActionSnapshot, dict.zh.uiTeamRelay)[0];
+assert.equal(pendingActionTask.category, 'offer');
+assert.equal(pendingActionTask.pendingRecipientAvatar.sha256, 'c'.repeat(64));
+assert.equal(matchesRelayView(pendingActionTask, 'attention', 'b'), true);
+assert.equal(matchesSourceFilter(pendingActionTask, 'received', 'b'), true);
+const hiddenUnreadSnapshot = JSON.parse(JSON.stringify(snapshot));
+hiddenUnreadSnapshot.bootstrap.threads[0].preference = { hidden: true };
+assert.equal(teamRelayHasUnread(hiddenUnreadSnapshot), false);
+const optimisticallyReadTasks = projectSnapshot(snapshot, dict.zh.uiTeamRelay, { thread: 1 });
+assert.equal(optimisticallyReadTasks[0].unreadCount, 0, 'a click cursor must clear an authoritative badge before the Hub round trip finishes');
+assert.equal(optimisticallyReadTasks[0].readState.last_read_sequence, 1);
+const legacySnapshot = JSON.parse(JSON.stringify(snapshot));
+delete legacySnapshot.bootstrap.threads[0].read_state;
+delete legacySnapshot.bootstrap.threads[0].unread_count;
+assert.equal(projectSnapshot(legacySnapshot, dict.zh.uiTeamRelay)[0].unreadCount, 0, 'the latest action from myself is not unread on an old Hub');
+legacySnapshot.bootstrap.threads[0].actions[0].actor_id = 'b';
+assert.equal(projectSnapshot(legacySnapshot, dict.zh.uiTeamRelay)[0].unreadCount, 1, 'the latest incoming action is unread on an old Hub');
+assert.equal(projectSnapshot(legacySnapshot, dict.zh.uiTeamRelay, { thread: 1 })[0].unreadCount, 0, 'the local fallback cursor clears an old Hub badge');
+
+const secondBootstrap = JSON.parse(JSON.stringify(snapshot.bootstrap));
+secondBootstrap.team = { id: 'team-two', name: 'Second team' };
+secondBootstrap.threads[0].thread.id = 'thread-two';
+secondBootstrap.threads[0].thread.team_id = 'team-two';
+secondBootstrap.threads[0].thread.title = '跨团队任务';
+secondBootstrap.threads[0].actions[0].id = 'action-two';
+secondBootstrap.threads[0].actions[0].thread_id = 'thread-two';
+const crossTeamTasks = projectSnapshot({ ...snapshot, team_bootstraps: [snapshot.bootstrap, secondBootstrap] }, dict.zh.uiTeamRelay);
+assert.deepEqual(crossTeamTasks.map(task => [task.id, task.teamId, task.teamName]), [
+  ['thread', 'team', 'Demo'],
+  ['thread-two', 'team-two', 'Second team'],
+]);
+assert.deepEqual(relayViewCounts(tasks, 'me'), { attention: 0, waiting: 1, all: 1, ended: 0, hidden: 0 });
+assert.equal(matchesSourceFilter(tasks[0], 'sent', 'me'), true);
+assert.equal(matchesSourceFilter(tasks[0], 'received', 'me'), false);
+assert.equal(matchesSourceFilter(tasks[0], 'collaborating', 'me'), false);
+assert.equal(matchesRelayView({ category: 'pending', raw: { initiator_id: 'other', owner_id: 'me' } }, 'attention', 'me'), true);
+assert.equal(matchesSourceFilter({ raw: { initiator_id: 'other', owner_id: 'me' } }, 'received', 'me'), true);
+assert.equal(matchesSourceFilter({ raw: { initiator_id: 'other', owner_id: 'other' } }, 'collaborating', 'me'), true);
+assert.equal(matchesRelayView({ category: 'waiting', raw: { initiator_id: 'other', owner_id: 'other' } }, 'waiting', 'me'), false);
+assert.equal(matchesRelayView({ category: 'waiting', raw: { initiator_id: 'other', owner_id: 'other' } }, 'all', 'me'), true);
 const board = projectTeamBoard(snapshot, tasks);
 assert.deepEqual(board.summary, { members: 2, inProgress: 1, acceptance: 0, completed: 0 });
 assert.equal(board.columns.active[0].id, 'thread');
@@ -65,6 +139,23 @@ assert.equal(board.members[0].isMe, true);
 assert.equal(board.members.find(member => member.id === 'b').activeCount, 1);
 assert.equal(board.members.find(member => member.id === 'b').waitingCount, 0);
 assert.equal(board.members.find(member => member.id === 'b').ownedCount, 1);
+
+const noteSnapshot = JSON.parse(JSON.stringify(snapshot));
+noteSnapshot.bootstrap.threads[0].actions.push(
+  { id: 'legacy-note', thread_id: 'thread', sequence: 2, kind: 'note', actor_id: 'me', recipient_id: null, return_to_id: null, message: '旧版备注', base_revision: 1, idempotency_key: 'legacy-note-key', attachment_ids: [], created_at: '2026-08-04T01:00:00Z' },
+  { id: 'progress-note', thread_id: 'thread', sequence: 3, kind: 'note', actor_id: 'b', recipient_id: null, return_to_id: null, message: '当前进展', base_revision: 2, idempotency_key: 'progress-note-key', attachment_ids: [], delivery: { schema_version: 1, artifact_role: 'evidence', subtype: 'progress', expected_next: '', open_questions: '', git_references: [] }, created_at: '2026-08-04T02:00:00Z' },
+);
+const noteTask = projectSnapshot(noteSnapshot, dict.zh.uiTeamRelay)[0];
+assert.equal(noteTask.events.find(event => event.id === 'legacy-note').kindLabel, '补充说明');
+assert.match(noteTask.events.find(event => event.id === 'legacy-note').title, /补充说明/);
+assert.equal(noteTask.events.find(event => event.id === 'progress-note').kindLabel, '进展更新');
+assert.match(noteTask.events.find(event => event.id === 'progress-note').title, /进展更新/);
+const acceptanceNoteSnapshot = JSON.parse(JSON.stringify(noteSnapshot));
+acceptanceNoteSnapshot.bootstrap.threads[0].thread.phase = 'awaiting_acceptance';
+acceptanceNoteSnapshot.bootstrap.threads[0].thread.current_actor_id = 'me';
+acceptanceNoteSnapshot.bootstrap.threads[0].actions.push({ id: 'acceptance-note', thread_id: 'thread', sequence: 4, kind: 'note', actor_id: 'me', recipient_id: null, return_to_id: null, message: '验收备注', base_revision: 3, idempotency_key: 'acceptance-note-key', attachment_ids: [], delivery: { schema_version: 1, artifact_role: 'evidence', expected_next: '', open_questions: '', git_references: [] }, created_at: '2026-08-04T03:00:00Z' });
+const acceptanceNote = projectSnapshot(acceptanceNoteSnapshot, dict.zh.uiTeamRelay)[0].events.find(event => event.id === 'acceptance-note');
+assert.equal(acceptanceNote.kindLabel, '补充说明');
 
 const materialTask = JSON.parse(JSON.stringify(tasks[0]));
 materialTask.events.push({
@@ -81,6 +172,9 @@ assert.equal(materialPackages[0].files[0].prepared.local_path, '/private/relay/�
 assert.equal(materialPackages[0].files[0].introduced, true);
 
 const closedSnapshot = JSON.parse(JSON.stringify(snapshot));
+closedSnapshot.bootstrap.members.find(member => member.id === 'b').avatar = {
+  sha256: 'b'.repeat(64), media_type: 'image/gif', byte_size: 1024, updated_at: '2026-08-04T00:00:00Z',
+};
 closedSnapshot.bootstrap.threads[0].thread.phase = 'closed';
 closedSnapshot.bootstrap.threads[0].thread.current_actor_id = null;
 closedSnapshot.bootstrap.threads[0].thread.return_to_id = null;
@@ -91,12 +185,18 @@ closedSnapshot.bootstrap.threads[0].actions.push({
   id: 'accept', thread_id: 'thread', sequence: 3, kind: 'accept', actor_id: 'me', recipient_id: null, return_to_id: null, message: '接受', base_revision: 2, idempotency_key: 'accept-key', attachment_ids: [], created_at: '2026-08-04T02:00:00Z',
 });
 const closedTask = projectSnapshot(closedSnapshot, dict.zh.uiTeamRelay)[0];
+assert.equal(closedTask.currentAvatar, null);
+assert.equal(closedTask.ownerAvatar.sha256, 'b'.repeat(64));
 assert.equal(closedTask.acceptedPackage.id, 'delivery');
 assert.equal(closedTask.acceptedPackage.sequence, 2);
+assert.equal(matchesRelayView(closedTask, 'all', 'me'), true);
+assert.equal(matchesRelayView(closedTask, 'ended', 'me'), true);
 closedSnapshot.bootstrap.threads[0].preference = { pinned: true, hidden: true };
 const hiddenTask = projectSnapshot(closedSnapshot, dict.zh.uiTeamRelay)[0];
 assert.equal(hiddenTask.category, 'hidden');
 assert.equal(hiddenTask.pinned, true);
+assert.equal(matchesRelayView(hiddenTask, 'all', 'me'), false);
+assert.equal(matchesRelayView(hiddenTask, 'hidden', 'me'), true);
 
 for (const language of ['zh', 'en', 'ja']) {
   const copy = dict[language].uiTeamRelay;
@@ -118,10 +218,18 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.joinCode.memberVisibility);
   assert.ok(copy.joinCode.ownerOnly);
   assert.ok(copy.joinCode.disableConfirm);
+  assert.ok(copy.categories.attention);
+  assert.ok(copy.categories.all);
+  assert.ok(copy.statuses.receive);
+  assert.ok(copy.sourceFilters.sent);
+  assert.ok(copy.sourceFilters.received);
+  assert.ok(copy.sourceFilters.collaborating);
   assert.ok(copy.errorMessages.join_password_invalid);
   assert.ok(copy.errorMessages.join_code_storage_unavailable);
   assert.ok(copy.errorMessages.rate_limited);
   assert.ok(copy.actionKinds.handoff);
+  assert.ok(copy.actionKinds.note);
+  assert.ok(copy.actionKinds.progress);
   assert.ok(copy.actionKinds.cancel);
   assert.equal(typeof copy.live.actionTitle, 'function');
   assert.equal(typeof copy.buildAgentPrompt, 'function');
@@ -131,6 +239,9 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.materialInspector.revealPrepared);
   assert.ok(copy.taskInfo);
   assert.ok(copy.views.board);
+  assert.ok(copy.views.teams);
+  assert.equal(typeof copy.unread.tasks, 'function');
+  assert.equal(typeof copy.unread.updates, 'function');
   assert.ok(copy.teams.create);
   assert.equal(typeof copy.teams.openWork, 'function');
   assert.ok(copy.teams.createDialog.confirm);
@@ -142,6 +253,15 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.equal(typeof copy.board.ownedCount, 'function');
   assert.ok(copy.board.inviteMember);
   assert.equal(typeof copy.board.removeConfirm, 'function');
+  assert.ok(copy.board.transferOwner);
+  assert.equal(typeof copy.board.transferConfirm, 'function');
+  assert.ok(copy.board.leaveTeam);
+  assert.equal(typeof copy.board.leaveConfirm, 'function');
+  assert.ok(copy.board.dissolveTeam);
+  assert.equal(typeof copy.board.dissolveConfirm, 'function');
+  assert.ok(copy.errorMessages.team_has_open_work);
+  assert.equal(typeof copy.blockingWork, 'function');
+  assert.equal(typeof copy.blockingThread, 'function');
   assert.equal(typeof copy.preparedMaterials, 'function');
   assert.equal(typeof copy.agentSessionTitle, 'function');
   assert.ok(copy.useNewAgentSession);
@@ -151,6 +271,10 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.setup.email);
   assert.ok(copy.profile.title);
   assert.ok(copy.profile.displayName);
+  assert.ok(copy.profile.logout);
+  assert.ok(copy.profile.logoutTitle);
+  assert.ok(copy.profile.logoutBody);
+  assert.ok(copy.profile.logoutConfirm);
   assert.ok(copy.reuseAgentSession);
   assert.equal(typeof copy.introducedMaterialSummary, 'function');
   assert.ok(copy.pinvouCodeWorkMode);
@@ -172,10 +296,17 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.doesNotMatch(copy.acceptedPackageSummary(1, 0), /Git/);
   assert.match(copy.acceptedPackageSummary(1, 1), /Git/);
   assert.equal(copy.dialogs.return.artifactRole, 'intermediate');
+  assert.equal(copy.dialogs.progress.artifactRole, 'evidence');
+  assert.equal(copy.dialogs.progress.acceptanceOptional, true);
+  assert.ok(copy.dialogs.progress.acceptancePlaceholder);
   assert.ok(copy.dialogs.assign.routeLabel);
   assert.ok(copy.dialogs.handoff.taskLabel);
   assert.ok(copy.dialogs.deliver.acceptanceLabel);
   assert.ok(copy.dialogs.cancelWork.reasonLabel);
+  assert.ok(copy.legacyTransfers.recipientDialogs.assign.subtitle);
+  assert.ok(copy.legacyTransfers.recipientDialogs.handoff.subtitle);
+  assert.ok(copy.legacyTransfers.recipientDialogs.rerouteTransfer.subtitle);
+  assert.ok(copy.legacyTransfers.reroutedToast);
   const agentPrompt = copy.buildAgentPrompt(tasks[0], { materials: [{ original_name: '方案.md', local_path: '/private/relay/方案.md' }] });
   assert.match(agentPrompt, /方案|Proposal|仕事/);
   assert.match(agentPrompt, /\/private\/relay\/方案\.md/);
@@ -216,6 +347,12 @@ assert.match(viewSource, /TauriBridge/);
 assert.doesNotMatch(viewSource, /createPreviewTasks|simulateReturn/);
 assert.match(viewSource, /data-testid="team-relay-page"/);
 assert.match(viewSource, /listDraftSourceSessions/);
+assert.match(viewSource, /bridge\.teamRelay\.transferOwner/);
+assert.match(viewSource, /bridge\.teamRelay\.leaveTeam/);
+assert.match(viewSource, /bridge\.teamRelay\.dissolveTeam/);
+assert.match(viewSource, /relay\.syncPending/);
+assert.match(teamBoardSource, /copy\.board\.transferOwner/);
+assert.match(teamBoardSource, /copy\.board\.dissolveTeam/);
 assert.match(viewSource, /readDraftSourceSession/);
 assert.match(viewSource, /pickDraftAttachments/);
 assert.match(viewSource, /team-relay-session-select/);
@@ -225,6 +362,11 @@ assert.match(viewSource, /team-relay-session-summary/);
 assert.match(viewSource, /team-relay-code-reference/);
 assert.match(viewSource, /team-relay-direct-attachments/);
 assert.match(viewSource, /team-relay-direct-footer/);
+assert.match(viewSource, /canUpdateRelayProgress\(task\.raw, meId\)/);
+assert.match(viewSource, /onDialog\('progress'\)/);
+assert.match(viewSource, /dialog === 'progress'[^\n]+runAction\('note'[^\n]+subtype: 'progress'/);
+assert.match(readFileSync(new URL('../src/features/team-relay/MaterialInspector.jsx', import.meta.url), 'utf8'), /item\.kindLabel/);
+assert.match(viewSource, /required=\{!dialogCopy\.acceptanceOptional\}/);
 assert.match(viewSource, /team-relay-sync-button/);
 assert.match(viewSource, /bridge\.teamRelay\.refresh\(\)/);
 assert.match(viewSource, /attachmentCount \? copy\.uploadingAndSending : copy\.sending/);
@@ -255,6 +397,23 @@ assert.match(viewSource, /final_recipient_id !== task\.raw\.initiator_id/);
 assert.match(viewSource, /team-relay-task-info/);
 assert.match(viewSource, /TeamBoard/);
 assert.match(viewSource, /team-relay-view-switch/);
+assert.match(viewSource, /team-relay-unread-badge/);
+assert.match(viewSource, /markThreadRead\(task\.id, task\.revision\)/);
+assert.match(viewSource, /onAction\('accept_transfer'/);
+assert.match(viewSource, /runAction\('decline_transfer'/);
+assert.match(viewSource, /runAction\('withdraw_transfer'/);
+assert.match(viewSource, /runAction\('reroute_transfer'/);
+assert.match(viewSource, /confirmedTransfers/);
+assert.match(viewSource, /confirmed_transfers_supported/);
+assert.match(viewSource, /result\?\.transfer_mode === 'direct_legacy'/);
+assert.match(viewSource, /legacyTransfers\?\.recipientDialogs/);
+assert.match(viewSource, /pinvou\.team-relay\.read-cursors\.v1/);
+assert.match(mainSource, /setInterval\(refresh, 15_000\)/);
+assert.match(mainSource, /addEventListener\('focus', refresh\)/);
+assert.match(mainSource, /visibilitychange/);
+assert.match(mainSource, /unreadTestId="team-relay-nav-unread"/);
+assert.match(mainSource, /unreadTone="danger"/);
+assert.match(viewSource, /const openTeam = teamId => \{[\s\S]*setSelectedTeamId\(teamId\);[\s\S]*setViewMode\('board'\);[\s\S]*bridge\.teamRelay\.switchTeam\(teamId\)/);
 assert.match(viewSource, /rotateJoinPassword\(\)/);
 assert.match(viewSource, /getJoinPassword\(\)/);
 assert.match(viewSource, /joinCodeRequestRef\.current/);
@@ -275,7 +434,13 @@ assert.match(viewSource, /function AccountLogin/);
 assert.match(viewSource, /registerAccount\(input\)/);
 assert.match(viewSource, /function NoTeam/);
 assert.match(viewSource, /function ProfileDialog/);
+assert.match(viewSource, /function LogoutDialog/);
 assert.match(viewSource, /updateProfile/);
+assert.match(viewSource, /bridge\.teamRelay\.disconnect\(\)/);
+assert.match(viewSource, /onLogout=\{openLogout\}/);
+assert.match(viewSource, /uploadAvatar/);
+assert.match(viewSource, /removeAvatar/);
+assert.match(viewSource, /team-relay-profile-avatar-editor/);
 assert.doesNotMatch(viewSource, /onDialog\('materials'\)|type === 'materials'/);
 assert.match(viewSource, /codingGitReference/);
 assert.match(viewSource, /git_references: gitReference/);

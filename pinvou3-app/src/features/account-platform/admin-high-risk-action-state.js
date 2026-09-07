@@ -1,3 +1,4 @@
+import { secureRequestID } from './request-id.js';
 const fingerprintPattern = /^[0-9a-f]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const rfc3339Pattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/;
@@ -132,7 +133,7 @@ const financialSnapshotFields = Object.freeze(['billing_price_revision', 'price_
 
 function hasExactFields(value, fields) {
 	return value && typeof value === 'object' && !Array.isArray(value)
-		&& Object.keys(value).length === fields.length && fields.every((field) => Object.hasOwn(value, field));
+		&& Object.keys(value).length === fields.length && fields.every((field) => Object.prototype.hasOwnProperty.call(value, field));
 }
 
 export function requireTokenApprovalImpact(value, expected) {
@@ -190,7 +191,7 @@ export function validGovernedTokenCommandResult(value, expected) {
     && !/(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/.test(String(value.stable_error_code));
   if (value.completed_at != null && !completed) return false;
   if (value.stable_error_code != null && !stableError) return false;
-  const recoveryFields = ['recovery_state', 'recovery_diagnostic_code', 'recovery_epoch'].some((field) => Object.hasOwn(value, field));
+  const recoveryFields = ['recovery_state', 'recovery_diagnostic_code', 'recovery_epoch'].some((field) => Object.prototype.hasOwnProperty.call(value, field));
   if (value.command_type === 'TOKEN_ACCOUNT_CREATE' && value.status === 'PENDING') {
     if (!['PENDING', 'MANUAL_REVIEW'].includes(value.recovery_state) || !Number.isInteger(value.recovery_epoch) || value.recovery_epoch < 1) return false;
     if (value.recovery_state === 'MANUAL_REVIEW' ? value.recovery_diagnostic_code !== 'ACCOUNT_PROVISIONING_MANUAL_REVIEW' : value.recovery_diagnostic_code != null) return false;
@@ -212,7 +213,7 @@ export function requireGovernedTokenCommandResult(value, expected) {
 
 export function validTokenAccountRecoveryActionResult(value, expected = {}) {
   const keys = ['action_id', 'command_reference', 'command_type', 'action', 'status', 'recovery_state', 'recovery_epoch', 'stable_error_code', 'audit_reference', 'created_at', 'completed_at'];
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return false;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) return false;
   if (![value.action_id, value.command_reference, value.audit_reference].every((item) => uuidPattern.test(String(item || '').toLowerCase())) || value.command_type !== 'TOKEN_ACCOUNT_CREATE') return false;
   if ((expected.commandReference && value.command_reference !== expected.commandReference)
     || (expected.action && value.action !== expected.action)) return false;
@@ -227,7 +228,7 @@ export function validTokenAccountRecoveryActionResult(value, expected = {}) {
 
 export function validStableRouteWriteResult(value, expected) {
   const keys = ['route_id', 'token_account_id', 'model_id', 'protocol_version_id', 'protocol_code', 'priority', 'default_scope', 'health_status', 'health_diagnostic_code', 'health_observed_at', 'health_expires_at', 'route_version', 'route_generation', 'account_version', 'updated_at'];
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) return false;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) return false;
   if (![value.route_id, value.token_account_id, value.model_id, value.protocol_version_id].every((item) => uuidPattern.test(String(item || '').toLowerCase()))) return false;
   if (value.token_account_id !== expected.tokenAccountID || value.model_id !== expected.modelID || value.protocol_version_id !== expected.protocolVersionID) return false;
   if (typeof value.protocol_code !== 'string' || !value.protocol_code || !Number.isInteger(value.priority) || value.priority !== expected.priority || !['NONE', 'UNIT', 'ORG'].includes(value.default_scope) || value.default_scope !== expected.defaultScope) return false;
@@ -247,7 +248,7 @@ export function requireGovernedRouteCommandResult(value, expected) {
       && (route.health_expires_at == null || validDateTime(route.health_expires_at));
   } else if (expected.commandType === 'TOKEN_ROUTE_DELETE') {
     const keys = ['route_id', 'token_account_id', 'model_id', 'protocol_version_id', 'deleted', 'deleted_route_version', 'route_version', 'route_generation', 'account_version', 'deleted_at'];
-    valid = route && typeof route === 'object' && !Array.isArray(route) && Object.keys(route).length === keys.length && keys.every((key) => Object.hasOwn(route, key))
+    valid = route && typeof route === 'object' && !Array.isArray(route) && Object.keys(route).length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(route, key))
       && route.route_id === expected.targetResourceID && route.token_account_id === expected.tokenAccountID
       && route.model_id === expected.modelID && route.protocol_version_id === expected.protocolVersionID
       && [route.route_id, route.token_account_id, route.model_id, route.protocol_version_id].every((id) => uuidPattern.test(String(id)))
@@ -272,7 +273,7 @@ export function validApprovalRequest(value, expected, statuses) {
     && highRiskPayloadKey(value.financial_snapshot) === highRiskPayloadKey(expected.financial_snapshot);
 }
 
-export function prepareHighRiskCommand(previous, payload, randomUUID = () => globalThis.crypto.randomUUID()) {
+export function prepareHighRiskCommand(previous, payload, randomUUID = () => secureRequestID()) {
   const payloadKey = highRiskPayloadKey(payload);
   if (previous?.payloadKey === payloadKey) return previous;
   if (previous?.unknown || previous?.dispatched && !previous?.provenNoWrite) return { ...previous, locked: true, payloadMismatch: true, error: { status: 0, code: 'COMMAND_PAYLOAD_LOCKED', requestID: previous?.error?.requestID || '' } };
@@ -309,7 +310,7 @@ export function classifyHighRiskFailure(command, error) {
   };
 }
 
-export async function executeHighRiskCommand(holder, payload, send, randomUUID = () => globalThis.crypto.randomUUID(), { recovery = false } = {}) {
+export async function executeHighRiskCommand(holder, payload, send, randomUUID = () => secureRequestID(), { recovery = false } = {}) {
   if (holder.current?.inflight) return { duplicate: true };
   const prepared = prepareHighRiskCommand(holder.current?.command, payload, randomUUID);
   if (prepared.unknown && !recovery) return { ok: false, command: prepared, error: prepared.error, recoveryRequired: true };

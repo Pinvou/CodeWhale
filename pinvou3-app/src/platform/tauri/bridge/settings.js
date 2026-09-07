@@ -10,8 +10,34 @@
   var notify = context.notify;
   var invoke = context.invoke;
   var listen = context.listen;
-  function modelAvailabilityError() { return null; }
-  function observeInvokeError() { return false; }
+  var behaviorTelemetryStatusPollTimer = null;
+
+  function behaviorTelemetryControlPending(status) {
+    return !!(status && (status.withdrawal_pending || status.deletion_pending));
+  }
+
+  function behaviorTelemetryStatusNeedsPoll(status) {
+    return !!(status && (
+      status.enabled
+      || behaviorTelemetryControlPending(status)
+      || (status.configured && status.user_enabled !== false)
+    ));
+  }
+
+  function scheduleBehaviorTelemetryStatusPoll() {
+    if (behaviorTelemetryStatusPollTimer || !behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) return;
+    var delay = behaviorTelemetryControlPending(state.behaviorTelemetry) ? 1000 : 5000;
+    behaviorTelemetryStatusPollTimer = setTimeout(async function pollBehaviorTelemetryStatus() {
+      behaviorTelemetryStatusPollTimer = null;
+      try {
+        state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
+        notify();
+      } catch (_) {}
+      if (behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) {
+        scheduleBehaviorTelemetryStatusPoll();
+      }
+    }, delay);
+  }
   // ── Settings ─────────────────────────────────────────────────────
   // 桌宠开关由 Rust set_pet_enabled 直接写盘(设置页/宠物右键/快捷图标共用),
   // 这里同步进内存副本，保证设置界面立即反映专用命令返回的桌宠状态。
@@ -40,6 +66,33 @@
     }
     notify();
   }
+  async function loadBehaviorTelemetryStatus() {
+    try {
+      state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
+    } catch (_) {
+      state.behaviorTelemetry = {
+        configured: false,
+        enabled: false,
+        user_enabled: null,
+        collection_period_id: null,
+        withdrawal_pending: false,
+        deletion_pending: false,
+        last_deletion_request_id: null,
+        retention_days: 35,
+        pending_event_count: 0,
+        dropped_event_count: 0,
+      };
+    }
+    notify();
+    scheduleBehaviorTelemetryStatusPoll();
+    return state.behaviorTelemetry;
+  }
+  async function setBehaviorTelemetryEnabled(enabled) {
+    state.behaviorTelemetry = await invoke("set_behavior_telemetry_enabled", { enabled: !!enabled });
+    notify();
+    scheduleBehaviorTelemetryStatusPoll();
+    return state.behaviorTelemetry;
+  }
   async function loadSelectedPet() {
     try {
       state.selectedPet = await invoke("get_selected_pet");
@@ -56,7 +109,7 @@
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
       if (requestedSessionId !== (state.activeSessionId || null)) return;
-      state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : config;
+      state.effectiveModelConfig = config;
     } catch (e) {
       state.effectiveModelConfig = null;
     }
@@ -132,16 +185,25 @@
   // 首屏检测「预装但未启用」状态;eligible 时前端弹引导框。
   // 开机加载中不弹框，每 3 秒静默复查；12 分钟后仍 starting 则恢复可重试入口。
   // autoPoll 只供内部定时器续接；用户手动检测会重置本轮截止时间。
+  // 陈旧检测快照覆盖（审计）：检测与长任务引导（bootstrap_local_vllm）并发时，
+  // 旧快照会把已就绪引擎覆盖回 starting。任何新检测与引导完成都递增序号，
+  // 在途读取一律作废。社区版后端 detect 恒 stopped / bootstrap 恒 Err（厂商版
+  // 语义的桩），此守卫为防御性：后端恢复真实探测时竞态即真实存在。
+  var vllmDetectSeq = 0;
   async function detectLocalVllmSetup(options) {
     var autoPoll = !!(options && options.autoPoll);
+    var seq = ++vllmDetectSeq;
     if (vllmSetupPollTimer) {
       clearTimeout(vllmSetupPollTimer);
       vllmSetupPollTimer = null;
     }
     if (!autoPoll) vllmSetupPollStartedAt = Date.now();
     try {
-      state.vllmSetup = await invoke("detect_local_vllm_setup");
+      var snapshot = await invoke("detect_local_vllm_setup");
+      if (seq !== vllmDetectSeq) return state.vllmSetup; // 已作废的陈旧读取
+      state.vllmSetup = snapshot;
     } catch (e) {
+      if (seq !== vllmDetectSeq) return state.vllmSetup;
       state.vllmSetup = null; // 检测失败静默,不打扰(等同不弹)
       vllmSetupPollStartedAt = 0;
     }
@@ -181,8 +243,12 @@
     } catch (e) {
       state.vllmBootstrapError = String(e && e.message ? e.message : e);
     }
+    vllmDetectSeq++; // 引导完成：作废在途的陈旧检测读取（审计）
     state.vllmBootstrapping = false;
     notify();
+    // 作废在途读取会中断 autoPoll 续排链（被作废的检测不再续排定时器），
+    // 引导完成后主动重检一次，让引擎就绪状态及时收敛（审计补充）。
+    detectLocalVllmSetup({ autoPoll: true });
   }
   // 点「跳过」:仅本次会话内不再弹(不写持久标记,下次启动若仍未配好会再次友好提示)。
   function dismissVllmSetup() {
@@ -200,26 +266,94 @@
       sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
     });
   }
+  // 当前有效模型的图片输入能力(普通会话选图即时警告用);后端按会话模型绑定解析。
+  async function getImageInputCapability(sessionId) {
+    return await invoke("get_image_input_capability", {
+      sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
+    });
+  }
 
   // ── 模型列表(「添加模型」方案)─────────────────────────────────
+  // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
+  // （审计 b）。请求序号后发者胜（同 vllmDetectSeq 模式）。
+  var modelsLoadSeq = 0;
   async function loadModels() {
+    var seq = ++modelsLoadSeq;
     try {
       var v = await invoke("list_models");
+      if (seq !== modelsLoadSeq) return;
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
       state.defaultModelRef = (v && v.default_model_ref) || null;
     } catch (e) {
+      if (seq !== modelsLoadSeq) return;
       state.savedModels = []; state.activeModelId = null; state.defaultModelRef = null;
     }
     notify();
   }
   // model 对象字段须是 snake_case(SavedModel serde):
-  // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action}
+  // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
+ function analyticsOperationId(prefix) {
+   var cryptoApi = globalThis.crypto;
+   if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+     var bytes = new Uint8Array(12);
+     cryptoApi.getRandomValues(bytes);
+     return `${prefix}_${Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('')}`;
+   }
+   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+ }
+ function analyticsProviderKey(model) {
+   const raw = String(model.vendor || model.preset || 'unknown').toLowerCase();
+   const normalized = raw.replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z0-9]+/, '').slice(0, 64);
+   return normalized || 'unknown';
+ }
+ function hasConfiguredUserModel() {
+   return (state.savedModels || []).some(item => {
+     if (item && item.kind === 'builtin_account_platform') return false;
+     const credential = item.credential_state || (item.has_secret ? 'configured' : 'missing');
+     return credential === 'configured' || credential === 'env_override';
+   });
+ }
+ async function trackProviderSetup(request) {
+   try { await invoke("track_behavior_event", { request }); } catch (_) { /* analytics is best effort */ }
+ }
  async function saveModel(model) {
-   await invoke("save_model", { model: model });
-   await loadModels();
-   await loadSettings();
-   await loadEffectiveModelConfig();
+   const operationId = analyticsOperationId('provider');
+   const providerKey = analyticsProviderKey(model);
+   const startedAt = Date.now();
+   const initialSetup = !hasConfiguredUserModel();
+   if (initialSetup) {
+     await trackProviderSetup({ eventName: 'onboarding_started', entryPoint: 'settings' });
+   }
+   await trackProviderSetup({
+     eventName: 'provider_setup_started', providerKey, entryPoint: 'settings',
+     operationId, attemptIndex: 1,
+   });
+   try {
+     await invoke("save_model", { model: model });
+     const durationMs = Math.max(0, Date.now() - startedAt);
+     await trackProviderSetup({
+       eventName: 'provider_setup_completed', providerKey, operationId,
+       attemptIndex: 1, durationMs,
+     });
+     if (initialSetup) {
+       await trackProviderSetup({
+         eventName: 'onboarding_completed', durationMs, providerConfigured: true,
+       });
+       await trackProviderSetup({
+         eventName: 'task_environment_ready', readinessSource: 'provider_setup', providerKey,
+       });
+     }
+     await loadModels();
+     await loadSettings();
+     await loadEffectiveModelConfig();
+   } catch (error) {
+     await trackProviderSetup({
+       eventName: 'provider_setup_failed', providerKey, operationId,
+       attemptIndex: 1, errorCategory: 'validation_failed',
+     });
+     throw error;
+   }
  }
  async function revealModelApiKey(id) {
    return await invoke("reveal_model_api_key", { id: id });
@@ -251,7 +385,7 @@
     if (requestedSessionId !== (state.activeSessionId || null)) return;
     state.currentSessionModelId = results[0];
     state.currentSessionModelRef = results[1];
-    state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : results[2];
+    state.effectiveModelConfig = results[2];
     notify();
   }
   // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
@@ -279,19 +413,39 @@
   async function testModelConnection(baseUrl, apiKey, modelId) {
     return await invoke("test_model_connection", { baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
   }
+  // 测试图片输入能力(设计 §7.3):用当前表单的 model/base_url/key 发一张内置纯色图,
+  // 仅由模型编辑弹窗主动点击触发,无任何启动/定时自动测试。
+  async function testImageInputCapability(model, baseUrl, apiKey, modelId) {
+    return await invoke("test_image_input_capability", { model: model, baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
+  }
+  async function probeLocalServerKind(baseUrl, apiKey, modelId) {
+    // 本地/内网 OpenAI 兼容端点的服务类型探测（vllm/ollama/lmstudio/generic）。
+    // Rust 侧按 base_url TTL 缓存；命令失败（老版本桌面/命令被拒）在这里 reject，
+    // 由消费方 catch 降级为「未知」——吞错伪造成 generic 会让 UI 误报
+    // 「该端点不支持思考档位调节」（localProbeTiersForKind('generic') 为 null）。
+    // apiKey/modelId follow testModelConnection: a freshly typed form key
+    // wins, otherwise the saved credential is read — authenticated vLLM
+    // (--api-key) 401s on /v1/models, so probing without credentials
+    // misclassifies the authenticated endpoint as generic.
+    return invoke("probe_local_server_kind", {
+      baseUrl,
+      apiKey: apiKey || null,
+      modelId: modelId || null,
+    });
+  }
   async function testSearchProvider(provider, apiKey) {
     return await invoke("test_search_provider", { provider: provider, apiKey: apiKey || null });
   }
 
     return {
       loadSettings: loadSettings,
+      loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
+      setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
       loadSelectedPet: loadSelectedPet,
       setSelectedPet: setSelectedPet,
       loadEffectiveModelConfig: loadEffectiveModelConfig,
       saveSettings: saveSettings,
       saveSettingsAndRestart: saveSettingsAndRestart,
-      observeInvokeError: observeInvokeError,
-      modelAvailabilityError: modelAvailabilityError,
       saveSearchSettings: saveSearchSettings,
       saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
       submitFeedback: submitFeedback,
@@ -301,6 +455,7 @@
       dismissVllmSetup: dismissVllmSetup,
       declineVllmSetup: declineVllmSetup,
       getEffectiveModelConfig: getEffectiveModelConfig,
+      getImageInputCapability: getImageInputCapability,
       loadModels: loadModels,
       saveModel: saveModel,
       revealModelApiKey: revealModelApiKey,
@@ -310,6 +465,8 @@
       switchModel: switchModel,
       switchModelRef: switchModelRef,
       testModelConnection: testModelConnection,
+      testImageInputCapability: testImageInputCapability,
+      probeLocalServerKind: probeLocalServerKind,
       testSearchProvider: testSearchProvider
     };
   };

@@ -9,7 +9,7 @@ use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
 use crate::platform::prefs::{
-    UserPrefs, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, LEGACY_BUILTIN_LLMAPI_MODEL_ID,
+    BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, LEGACY_BUILTIN_LLMAPI_MODEL_ID, UserPrefs,
 };
 
 const MIGRATION_VERSION: u32 = 1;
@@ -498,7 +498,7 @@ fn read_legacy_model_credential_references(path: &Path) -> Result<(bool, Vec<(St
 mod tests {
     use super::*;
     use crate::platform::credential_store::MemoryCredentialStore;
-    use crate::platform::paths::tests::{unique_suffix, ENV_LOCK};
+    use crate::platform::paths::tests::{ENV_LOCK, unique_suffix};
     use crate::platform::prefs::SavedModel;
 
     struct EnvHomeGuard(Option<std::ffi::OsString>);
@@ -658,10 +658,11 @@ mod tests {
         assert!(!binding_dir.join("bindings.json").exists());
         assert!(!binding_dir.join("device.json").exists());
         assert!(!binding_dir.join("models.json").exists());
-        assert!(root
-            .path()
-            .join("migrations/legacy-llmapi-bindings-v1.json")
-            .exists());
+        assert!(
+            root.path()
+                .join("migrations/legacy-llmapi-bindings-v1.json")
+                .exists()
+        );
         let migrated = UserPrefs::load();
         assert_eq!(
             migrated.advanced.active_model_id.as_deref(),
@@ -671,9 +672,11 @@ mod tests {
             migrated.advanced.account_platform_default_model.as_deref(),
             Some("legacy-wire-model")
         );
-        assert!(migrated
-            .model_by_id(LEGACY_BUILTIN_LLMAPI_MODEL_ID)
-            .is_none());
+        assert!(
+            migrated
+                .model_by_id(LEGACY_BUILTIN_LLMAPI_MODEL_ID)
+                .is_none()
+        );
         assert_eq!(
             serde_json::from_slice::<Value>(
                 &std::fs::read(sessions.join("_session_models.json")).unwrap()
@@ -690,14 +693,16 @@ mod tests {
             BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
         );
         assert_eq!(scheduled_value["run-1"]["label"], "builtin_llmapi");
-        assert!(store
-            .get(&CredentialReference {
-                service: "pinvou3-llmapi-token".into(),
-                account: "llmapi:u_1:dev_1".into(),
-                version: 1,
-            })
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .get(&CredentialReference {
+                    service: "pinvou3-llmapi-token".into(),
+                    account: "llmapi:u_1:dev_1".into(),
+                    version: 1,
+                })
+                .unwrap()
+                .is_none()
+        );
 
         let second = migrate_at(root.path(), &store).expect("idempotent migration");
         assert_eq!(second.state, MigrationState::Complete);

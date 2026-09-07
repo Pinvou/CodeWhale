@@ -28,7 +28,7 @@ pub(super) fn ensure_chat_session(
 ) -> Result<(), String> {
     match store
         .session_kind(id)
-        .map_err(|error| format!("{action}({id}): {error:?}"))?
+        .map_err(|error| format!("{action}({id}): {error:#}"))?
     {
         SessionKind::Chat => Ok(()),
         SessionKind::ScheduledRun => Err(format!(
@@ -131,24 +131,19 @@ pub async fn clear_session() -> Result<(), String> {
 
 /// 列出所有 session 元数据，按 updated_at 倒序。前端历史面板渲染用。
 /// 返回 SessionMetadata 数组（id/title/时间/token/model/workspace 等字段）。
-/// [2026-06-04 白浪:chat 与工作流彻底分开] 过滤工作流宿主 session(绑定带 project_dir
-/// 即是,bindings 开机回灌持久化)——它们仅作 SubAgent 运行时,不进 chat 侧栏。
 /// 代码会话(ACP 与品悟原生)同样不进 chat 侧栏,由 list_codex_acp_sessions 单独提供。
 #[tauri::command]
 pub async fn list_sessions(
     store: State<'_, SessionStore>,
     acp_pool: State<'_, crate::features::codex_acp::AcpPool>,
 ) -> Result<Vec<SessionListItem>, String> {
-    let mut metas = store.list().map_err(|e| format!("list_sessions: {e:?}"))?;
+    let mut metas = store.list().map_err(|e| format!("list_sessions: {e:#}"))?;
     metas.retain(|m| {
         matches!(store.session_kind(&m.id), Ok(SessionKind::Chat))
             && !acp_pool.is_acp_metadata(m)
             // 原生代码会话（code_session 绑定）归属代码列表，不进 chat 侧栏
             && !acp_pool.agents().is_code_session(&m.id)
             && !store.is_hidden(&m.id)
-            && store
-                .active_skill(&m.id)
-                .map_or(true, |b| b.project_dir.is_none())
     });
     Ok(metas
         .into_iter()
@@ -239,7 +234,9 @@ mod default_session_title_tests {
             std::env::temp_dir().join(format!("pinvou3-default-title-test-{}", std::process::id()));
         let previous = std::env::var("PINVOU3_HOME").ok();
         let _ = std::fs::remove_dir_all(&root);
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+        // serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let store = crate::features::sessions::SessionStore::boot_with_scheduled_root(
             root.join("scheduled"),
         )
@@ -290,8 +287,12 @@ mod default_session_title_tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -304,19 +305,14 @@ pub async fn list_archived_sessions(
 ) -> Result<Vec<HiddenSessionListItem>, String> {
     let mut metas = store
         .list()
-        .map_err(|e| format!("list_archived_sessions: {e:?}"))?;
+        .map_err(|e| format!("list_archived_sessions: {e:#}"))?;
     metas.extend(
         store
             .list_scheduled()
-            .map_err(|e| format!("list_archived_sessions: {e:?}"))?,
+            .map_err(|e| format!("list_archived_sessions: {e:#}"))?,
     );
-    metas.retain(|m| {
-        store.is_hidden(&m.id)
-            && store
-                .active_skill(&m.id)
-                .map_or(true, |b| b.project_dir.is_none())
-    });
-    metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    metas.retain(|m| store.is_hidden(&m.id));
+    metas.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     Ok(metas
         .into_iter()
         .map(|metadata| {
@@ -343,7 +339,7 @@ pub(super) fn create_session_record(
     let workspace = pool.bridge.workspace.clone();
     let session = store
         .create_new(model, model_id, workspace)
-        .map_err(|e| format!("create_session: {e:?}"))?;
+        .map_err(|e| format!("create_session: {e:#}"))?;
     if set_active {
         store.set_active(Some(session.metadata.id.clone()));
     }
@@ -383,17 +379,55 @@ pub async fn load_session(
     set_active: Option<bool>,
     store: State<'_, SessionStore>,
 ) -> Result<DesktopSavedSession, String> {
-    let session = store
-        .load(&id)
-        .map_err(|e| format!("load_session({id}): {e:?}"))?;
+    let started = std::time::Instant::now();
+    let session = match store.load(&id) {
+        Ok(session) => session,
+        Err(error) => {
+            crate::features::sessions::diagnostics::record_backend(
+                "desktop_load_session_failed",
+                serde_json::json!({
+                    "session_id": id,
+                    "set_active": set_active.unwrap_or(true),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                    "error_category": "session_load_failed",
+                    "error_present": true,
+                }),
+            );
+            return Err(format!("load_session({id}): {error:#}"));
+        }
+    };
     if set_active.unwrap_or(true) {
         store.set_active(Some(id.clone()));
     }
     // 多 session 并发:切换不再 SyncSession 替换全局引擎(那是旧单引擎模型)。该 session
     // 有自己独立的 engine(已起则持有自己的上下文、还在跑就继续跑;未起则下次 chat 时
     // lazy spawn 并注水这里返回的 messages)。本命令只切 active 指针 + 返回 messages 给前端渲染。
-    let revision = crate::features::sessions::transcript_revision(&session.messages)
-        .map_err(|e| format!("load_session({id}) revision: {e:?}"))?;
+    let revision = match crate::features::sessions::transcript_revision(&session.messages) {
+        Ok(revision) => revision,
+        Err(error) => {
+            crate::features::sessions::diagnostics::record_backend(
+                "desktop_load_session_revision_failed",
+                serde_json::json!({
+                    "session_id": id,
+                    "message_count": session.messages.len(),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                    "error_category": "revision_compute_failed",
+                    "error_present": true,
+                }),
+            );
+            return Err(format!("load_session({id}) revision: {error:#}"));
+        }
+    };
+    crate::features::sessions::diagnostics::record_backend(
+        "desktop_load_session_succeeded",
+        serde_json::json!({
+            "session_id": id,
+            "set_active": set_active.unwrap_or(true),
+            "transcript_revision": revision,
+            "message_count": session.messages.len(),
+            "elapsed_ms": started.elapsed().as_millis(),
+        }),
+    );
     Ok(DesktopSavedSession {
         session,
         transcript_revision: revision,
@@ -412,7 +446,7 @@ pub async fn delete_session(
 ) -> Result<(), String> {
     let result = match store
         .session_kind(&id)
-        .map_err(|e| format!("delete_session({id}): {e:?}"))?
+        .map_err(|e| format!("delete_session({id}): {e:#}"))?
     {
         SessionKind::Chat => {
             acp_pool.evict(&id).await;
@@ -437,6 +471,11 @@ pub async fn delete_session(
     };
     if result.is_ok() {
         pool.forget_session(&id);
+        // Clearing keys of process-level per-session maps (timing/
+        // pending_user_input/memory/monitor) is done uniformly by the
+        // SessionPurgedHook fired on delete paths (registered at the lib.rs
+        // composition root; Chat goes through store.delete, ScheduledRun
+        // through purge_session_side_maps).
         let payload = serde_json::json!({ "id": &id });
         let _ = app.emit("session:deleted", payload.clone());
         crate::features::remote_control::forward_app_event(&app, "session:deleted", payload);
@@ -454,7 +493,7 @@ pub async fn rename_session(
 ) -> Result<(), String> {
     store
         .set_title(&id, title)
-        .map_err(|e| format!("rename_session({id}): {e:?}"))?;
+        .map_err(|e| format!("rename_session({id}): {e:#}"))?;
     emit_session_event(&app, "session:list_changed", &id, "renamed");
     Ok(())
 }
@@ -470,7 +509,7 @@ pub async fn set_session_pinned(
     // 先 load 一次确认 session 存在,避免置顶表残留无效 id。
     store
         .load(&id)
-        .map_err(|e| format!("set_session_pinned({id}): {e:?}"))?;
+        .map_err(|e| format!("set_session_pinned({id}): {e:#}"))?;
     store.set_pinned(&id, pinned);
     let action = if pinned { "pinned" } else { "unpinned" };
     emit_session_event(&app, "session:list_changed", &id, action);
@@ -488,7 +527,7 @@ pub async fn set_session_archived(
     // 先 load 一次确认 session 存在,避免收起表残留无效 id。
     store
         .load(&id)
-        .map_err(|e| format!("set_session_archived({id}): {e:?}"))?;
+        .map_err(|e| format!("set_session_archived({id}): {e:#}"))?;
     store.set_hidden(&id, archived);
     let action = if archived { "archived" } else { "restored" };
     emit_session_event(&app, "session:list_changed", &id, action);
@@ -512,7 +551,7 @@ pub async fn save_session_messages(
     ensure_chat_session(&store, &id, "save_session_messages")?;
     store
         .update_messages(&id, messages)
-        .map_err(|e| format!("save_session_messages({id}): {e:?}"))
+        .map_err(|e| format!("save_session_messages({id}): {e:#}"))
 }
 
 /// 落盘 session 的产物 paths 列表。前端跟踪 File.write / File.edit 调用后调用,
@@ -527,7 +566,7 @@ pub async fn save_session_artifacts(
     ensure_chat_session(&store, &id, "save_session_artifacts")?;
     store
         .update_artifacts(&id, paths)
-        .map_err(|e| format!("save_session_artifacts({id}): {e:?}"))
+        .map_err(|e| format!("save_session_artifacts({id}): {e:#}"))
 }
 
 fn normalize_pinvou_scene_events(events: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -598,6 +637,109 @@ pub async fn get_session_pinvou_scene_events(
     Ok(normalize_pinvou_scene_events(events).unwrap_or_else(|_| serde_json::json!([])))
 }
 
+fn normalize_steered_messages(events: serde_json::Value) -> Result<serde_json::Value, String> {
+    let entries = events
+        .as_array()
+        .ok_or_else(|| "steered messages 必须是数组".to_string())?;
+    if entries.len() > 10_000 {
+        return Err("steered messages 超过 10000 条上限".to_string());
+    }
+    let mut normalized = std::collections::BTreeMap::<u64, String>::new();
+    for entry in entries {
+        let pos = entry
+            .get("pos")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "steered message 缺少有效 pos".to_string())?;
+        let text = entry
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "steered message 缺少有效 text".to_string())?;
+        if text.len() > 64_000 {
+            return Err("steered message text 超过 64000 字符上限".to_string());
+        }
+        normalized.insert(pos, text.to_string());
+    }
+    Ok(serde_json::Value::Array(
+        normalized
+            .into_iter()
+            .map(|(pos, text)| serde_json::json!({ "pos": pos, "text": text }))
+            .collect(),
+    ))
+}
+
+/// 保存 mid-turn steer 消息的位置标记。steer 落盘与普通 admission 对齐、不含
+/// `<turn_meta>` 块，重载投影靠该 sidecar 恢复"非 turn admission"标记；独立于
+/// messages 持久化，桌面端与 WebUI 共享。
+#[tauri::command]
+pub async fn save_session_steered_messages(
+    session_id: String,
+    events: serde_json::Value,
+    store: State<'_, SessionStore>,
+) -> Result<(), String> {
+    ensure_chat_session(&store, &session_id, "save_session_steered_messages")?;
+    let normalized = normalize_steered_messages(events)?;
+    let path = crate::platform::paths::session_steered_messages(&session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("创建 steered sidecar 目录失败: {error}"))?;
+    }
+    let payload = serde_json::to_vec(&normalized)
+        .map_err(|error| format!("序列化 steered sidecar 失败: {error}"))?;
+    deepseek_tui::utils::write_atomic(&path, &payload)
+        .map_err(|error| format!("写 steered sidecar 失败: {error:#}"))
+}
+
+/// 读取 mid-turn steer 消息的位置标记。旧版本或损坏 sidecar 按空数组处理。
+#[tauri::command]
+pub async fn get_session_steered_messages(
+    session_id: String,
+    store: State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    ensure_chat_session(&store, &session_id, "get_session_steered_messages")?;
+    let path = crate::platform::paths::session_steered_messages(&session_id);
+    let Ok(payload) = std::fs::read(&path) else {
+        return Ok(serde_json::json!([]));
+    };
+    let Ok(events) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return Ok(serde_json::json!([]));
+    };
+    Ok(normalize_steered_messages(events).unwrap_or_else(|_| serde_json::json!([])))
+}
+
+#[cfg(test)]
+mod steered_message_tests {
+    use super::normalize_steered_messages;
+
+    #[test]
+    fn steered_messages_are_validated_deduplicated_and_sorted() {
+        let normalized = normalize_steered_messages(serde_json::json!([
+            { "pos": 9, "text": "second steer" },
+            { "pos": 4, "text": "first steer" },
+            { "pos": 9, "text": "second steer edited" }
+        ]))
+        .expect("valid steered messages");
+        assert_eq!(
+            normalized,
+            serde_json::json!([
+                { "pos": 4, "text": "first steer" },
+                { "pos": 9, "text": "second steer edited" }
+            ])
+        );
+    }
+
+    #[test]
+    fn steered_messages_reject_invalid_entries() {
+        assert!(
+            normalize_steered_messages(serde_json::json!([
+                { "pos": -1, "text": "x" }
+            ]))
+            .is_err()
+        );
+        assert!(normalize_steered_messages(serde_json::json!([{ "pos": 1 }])).is_err());
+        assert!(normalize_steered_messages(serde_json::json!({ "pos": 1 })).is_err());
+    }
+}
+
 #[cfg(test)]
 mod pinvou_scene_event_tests {
     use super::normalize_pinvou_scene_events;
@@ -621,14 +763,18 @@ mod pinvou_scene_event_tests {
 
     #[test]
     fn scene_events_reject_unknown_scenes_and_invalid_positions() {
-        assert!(normalize_pinvou_scene_events(serde_json::json!([
-            { "pos": 0, "scene": "design:ppt" }
-        ]))
-        .is_err());
-        assert!(normalize_pinvou_scene_events(serde_json::json!([
-            { "pos": -1, "scene": "design:poster" }
-        ]))
-        .is_err());
+        assert!(
+            normalize_pinvou_scene_events(serde_json::json!([
+                { "pos": 0, "scene": "design:ppt" }
+            ]))
+            .is_err()
+        );
+        assert!(
+            normalize_pinvou_scene_events(serde_json::json!([
+                { "pos": -1, "scene": "design:poster" }
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -723,7 +869,9 @@ mod desktop_saved_session_contract_tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let previous = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+        // serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let store = crate::features::sessions::SessionStore::boot_with_scheduled_root(
             root.join("scheduled"),
         )
@@ -755,8 +903,12 @@ mod desktop_saved_session_contract_tests {
             "flatten 后 metadata 必须仍在顶层"
         );
         match previous {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: platform::paths::tests::ENV_LOCK is held; env writes are
+            // serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&root);
     }

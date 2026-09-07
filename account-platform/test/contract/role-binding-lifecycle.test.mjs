@@ -20,7 +20,7 @@ test('role bindings have validity, idempotent revocation, cache invalidation, an
     read('../pinvou3-app/src/features/account-platform/admin-client.js'),
     read('internal/portal/static/account.html'),
     read('internal/portal/static/admin.html'),
-    read('../pinvou3-app/vite.config.js')
+    read('../pinvou3-app/vite.config.mjs')
   ]);
 
   for (const column of ['starts_at', 'expires_at', 'revoked_at', 'revoked_by', 'grant_source', 'idempotency_key']) {

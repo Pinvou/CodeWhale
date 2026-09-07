@@ -4,6 +4,8 @@
   var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["chat-events"] = function (context) {
     var state = context.state;
+    var recordAuthoritySyncDiagnostic = context.recordAuthoritySyncDiagnostic || function () {};
+    var authoritySyncBufferSnapshot = context.authoritySyncBufferSnapshot || function () { return {}; };
     var listen = context.listen;
     var notify = context.notify;
     var invoke = context.invoke;
@@ -13,6 +15,10 @@
     var bt = context.bt;
     var onSessionEvent = context.onSessionEvent;
     var runSyncOnSession = context.runSyncOnSession;
+    // 权威 modeState 写回收敛点（bridge.js 共享，评审 P1）：事件负载携带的
+    // modeState 更新也必须 bump epoch，否则在途 syncModeState 旧读会覆盖
+    // 事件写回的权威值。
+    var applyAuthoritativeModeState = context.applyAuthoritativeModeState;
     var addChatItem = context.addChatItem;
     var toolCallAlreadyStarted = context.toolCallAlreadyStarted;
     var toolCallAlreadyFinished = context.toolCallAlreadyFinished;
@@ -45,6 +51,7 @@
     var presentArtifactAbsPath = context.presentArtifactAbsPath;
     var extractArtifactPaths = context.extractArtifactPaths;
     var fileMutationAction = context.fileMutationAction;
+    var normalizedPath = context.normalizedPath;
 
     function refreshEffectiveModelConfigAfterAuthError(error) {
       if (!error || !/\b401\b|unauthorized|authentication/i.test(String(error))) return;
@@ -212,17 +219,19 @@
     var findPresentedArtifact = context.findPresentedArtifact;
     var isDeliverable = context.isDeliverable;
     var noteArtifactChange = context.noteArtifactChange;
-    var publishRemoteLiveSnapshot = context.publishRemoteLiveSnapshot;
     var persistMessagesFor = context.persistMessagesFor;
+    var captureSteerPositions = context.captureSteerPositions || function () {};
+    var recordSteeredMessages = context.recordSteeredMessages || function () {};
     var composePlanMarkdown = context.composePlanMarkdown;
     var refreshHistoryList = context.refreshHistoryList;
     var isShellExecutionTool = context.isShellExecutionTool;
+    var mentionsShellTool = context.mentionsShellTool;
     var scheduleShellPoll = context.scheduleShellPoll;
     var appendToolItemOutput = context.appendToolItemOutput;
     var scheduleShellNotify = context.scheduleShellNotify;
     var markBackgroundToolItem = context.markBackgroundToolItem;
     var patchLastItem = context.patchLastItem;
-    var isDuplicateArtifactCard = context.isDuplicateArtifactCard;
+    var updatePresentedArtifact = context.updatePresentedArtifact;
     var updateToolItem = context.updateToolItem;
     var basename = context.basename;
     var hasUnresolvedItem = context.hasUnresolvedItem;
@@ -238,11 +247,7 @@
   // onSessionEvent 按 session_id 把同步逻辑路由到对应 session 的工作集:active 直接跑,
   // 后台临时切工作集跑完再切回。下面每个监听器的 body 与旧单 session 版逐字一致,
   // 只是包了一层路由,所以 active session 行为零变化。
-  function isInternalRuntimeUserMessage(value) {
-    var text = String(value || "").trim();
-    return /^<codewhale:runtime_event\b[^>]*\bvisibility=(["'])internal\1[^>]*>/i.test(text) &&
-      /<\/codewhale:runtime_event>\s*$/i.test(text);
-  }
+  var isInternalRuntimeUserMessage = context.isInternalRuntimeUserMessage;
 
   function applyRemoteUserMessageEvent(e, force) {
     var payload = e && e.payload || {};
@@ -280,7 +285,7 @@
       userBuffer.loadedFromDisk && baseRevision && userBuffer.sessionRevision &&
       userBuffer.sessionRevision !== baseRevision && lastUserText === content
     );
-    markRemoteTurn(sid, userBuffer);
+    markRemoteTurn(sid, userBuffer, false, "remote_user_message_event");
     runSyncOnSession(sid, function () {
       if (action === "accept_plan") {
         state.chatItems.forEach(function (item) {
@@ -292,10 +297,9 @@
           }
         });
         var acceptedMode = payload.mode_state || payload.modeState;
-        state.modeState = {
-          mode: String(acceptedMode && acceptedMode.mode || "yolo"),
-          multiAgent: !!(acceptedMode && acceptedMode.multi_agent),
-        };
+        // 事件按 sid 定向写回 + bump epoch（此回调在 runSyncOnSession(sid) 内，
+        // sid 即触发会话；不能用 active 兜底，await 竞态下两者可能不同）。
+        if (acceptedMode) applyAuthoritativeModeState(sid, acceptedMode);
       }
       state.chatItems = state.chatItems.filter(function (item) { return !item.turnErrorNotice; });
       if (!snapshotAlreadyCoversTurn && !hideInternalRuntimeMessage) {
@@ -332,6 +336,33 @@
     applyRemoteUserMessageEvent(e, false);
   });
 
+  // P0-A: steer delivery confirmation (steer_id edition). The engine
+  // appends the steer to the transcript and emits committed (with the opaque
+  // steer_id); the frontend turns the matching queued chip into a bubble — no
+  // more content_hash fingerprinting (UTF-16/UTF-8 encoding differences made
+  // the two sides disagree for CJK and non-CJK content alike). Settlement
+  // lives in chat.js (the chip owner), including the pending stash for
+  // "event before the invoke returns" and the optimistic removal for "×
+  // withdrawal"; legacy backends (events without steer_id) fall back to
+  // transcript_committed counting. steer_dropped carries both engine-initiated
+  // drops and user × withdrawals (withdraw_steer).
+  const settleSteerCommitted = context.settleSteerCommitted;
+  const settleSteerDropped = context.settleSteerDropped;
+  listen("chat:steer_committed", function (e) {
+    const p = e && e.payload || {};
+    const sid = p.session_id || state.activeSessionId;
+    const steerId = String(p.steer_id || "");
+    if (!sid || !steerId) return;
+    settleSteerCommitted(sid, steerId);
+  });
+  listen("chat:steer_dropped", function (e) {
+    const p = e && e.payload || {};
+    const sid = p.session_id || state.activeSessionId;
+    const steerId = String(p.steer_id || "");
+    if (!sid || !steerId) return;
+    settleSteerDropped(sid, steerId);
+  });
+
   listen("chat:transcript_committed", function (e) {
     var payload = e && e.payload || {};
     var sid = payload.session_id || state.activeSessionId;
@@ -343,11 +374,139 @@
       committedBuffer.sessionRevision = revision;
       committedBuffer.remoteCommittedRevision = revision;
     }
+    recordAuthoritySyncDiagnostic("transcript_committed_event_received", Object.assign({
+      event_revision: revision,
+      terminal_seen_before_event: !!committedBuffer.remoteTerminalSeen,
+    }, authoritySyncBufferSnapshot(sid, committedBuffer)));
     if (committedBuffer.remoteTerminalSeen && !isBusyFor(sid)) {
       reconcileRemoteTurn(sid).then(function (ready) {
         if (ready) flushQueued(sid);
       }).catch(function () {});
     }
+    // Mid-turn inject delivery-completion fallback signal: after turn_loop
+    // appends the steer to session.messages and the forwarder finishes
+    // persisting, it emits chat:transcript_committed.
+    // Authoritative settlement is chat:steer_committed (steer_id matching);
+    // this only covers legacy backends (chip without steerId): the legacy
+    // steer chip still waiting in state.queued should become a user bubble
+    // and sync state.messages.
+    //
+    // This event is also the retry point for steer position capture: the
+    // persist it announces is exactly what captureSteerPositions reads, so
+    // any steer committed before its snapshot became available settles its
+    // sidecar position here.
+    //
+    // The count delta = the number of new messages; consume exactly that
+    // many entries from the head of state.queued. Drain only when the growth
+    // is > 0 and includes new user-role messages, to avoid false triggers on
+    // other commits (subagent completion, runtime follow-up turns).
+    // The guard must route by the event's sid (a background session's chip
+    // lives in sessionStates[sid].queued, not the active working set): reading
+    // the active queue would skip the fallback wholesale for a legacy chip
+    // whose session was switched away after the steer, leaving the background
+    // chip hanging and blocking flushQueued's queue head.
+    const fallbackQueued = sid === state.activeSessionId
+      ? state.queued
+      : (sessionStates[sid] && sessionStates[sid].queued);
+    // Retry pending steer position captures now that the persist this event
+    // announces is durable (no-op when nothing is pending).
+    captureSteerPositions(sid);
+    if (!fallbackQueued || fallbackQueued.length === 0) return;
+    // The fallback settles only legacy steered chips (steered, no engine-side
+    // id). steer_id chips settle authoritatively via chat:steer_committed /
+    // chat:steer_dropped — without this pre-check every transcript commit
+    // during a busy queue would pay a full load_session snapshot that cannot
+    // settle anything.
+    let hasLegacySteerChip = false;
+    for (let i = 0; i < fallbackQueued.length; i++) {
+      const item = fallbackQueued[i];
+      if (item && item.steered && !item.steerId) { hasLegacySteerChip = true; break; }
+    }
+    if (!hasLegacySteerChip) return;
+    invoke("load_session", { id: sid, setActive: false }).then(function (saved) {
+      if (!saved || !Array.isArray(saved.messages)) return;
+      // Lazy-initialized baseline = snapshot length (no earlier trustworthy
+      // count). Pairing does not slice(preCount) to count from the head but
+      // "tail-aligns": match the queue-head legacy chip's same-text user
+      // message backwards from the snapshot tail — same-text old messages in
+      // history always precede the new injection and can never mispair
+      // (fixes the lazy-init first event draining all of history via
+      // slice(0)).
+      const lazyBaseline = committedBuffer.lastSeenMessageCount == null;
+      const preCount = lazyBaseline
+        ? saved.messages.length
+        : committedBuffer.lastSeenMessageCount;
+      const newMessages = saved.messages;
+      // Compaction etc. shrink the transcript: reset the baseline with it,
+      // otherwise newMessages.length <= preCount holds forever and the
+      // fallback never fires again.
+      if (newMessages.length < preCount) {
+        committedBuffer.lastSeenMessageCount = newMessages.length;
+        return;
+      }
+      // Lazy initialization (first fallback) has no "previous frame" to
+      // compare against; continue even when the length is unchanged — right
+      // after an injection, this frame's snapshot tail IS the injection
+      // result, and the tail alignment below validates it.
+      if (!lazyBaseline && newMessages.length === preCount) return;
+      committedBuffer.lastSeenMessageCount = newMessages.length;
+      runSyncOnSession(sid, function () {
+        state.messages = newMessages;
+        // Tail alignment: drainable candidates = the new user messages after
+        // preCount in the snapshot; for lazy init (preCount === length) the
+        // candidate list is empty, but right after an injection the tail
+        // message itself is the injection result — walk backwards from the
+        // tail checking same-text against the queue-head chips and drain only
+        // on a contiguous tail match, so same-text old history never
+        // mispairs.
+        const additions = newMessages.slice(Math.min(preCount, newMessages.length));
+        const userAdditions = additions.filter(function (m) { return m && m.role === "user"; });
+        const tailCandidates = [];
+        for (let i = newMessages.length - 1;
+             i >= 0 && tailCandidates.length < Math.max(fallbackQueued.length, 1) && i >= newMessages.length - 16;
+             i--) {
+          if (newMessages[i] && newMessages[i].role === "user") tailCandidates.unshift(newMessages[i]);
+        }
+        const scanList = userAdditions.length > 0 ? [...userAdditions, ...tailCandidates.slice(userAdditions.length)] : tailCandidates;
+        for (let i = 0; i < scanList.length && fallbackQueued.length > 0; i++) {
+          const message = scanList[i];
+          const item = fallbackQueued[0];
+          // Only settle legacy steer chips (steered without a steerId):
+          // id-carrying ones are settled authoritatively by
+          // chat:steer_committed, plain queued chips belong to flushQueued —
+          // the fallback touches neither, avoiding mispairing.
+          if (!item.steered || item.steerId) break;
+          // Extract the real user input, skipping turn_meta /
+          // system-reminder metadata blocks.
+          const content = Array.isArray(message.content) ? message.content : [];
+          const firstText = content
+            .filter(function (block) { return block && block.type === "text"; })
+            .map(function (block) { return String(block.text || ""); })
+            .filter(function (text) {
+              const t = text.trim();
+              return !(t.indexOf("<turn_meta>") === 0 && t.endsWith("</turn_meta>")) &&
+                !(t.indexOf("<system-reminder>") === 0 && t.endsWith("</system-reminder>"));
+            })
+            .join("");
+          const itemText = String(item.text || "");
+          // Exact match: the old two-way indexOf containment mispaired
+          // different messages with similar prefixes. On mismatch, keep
+          // scanning the later additions (with a zero baseline, historical
+          // user messages precede the additions).
+          if (firstText && firstText === itemText) {
+            fallbackQueued.shift();
+            // Legacy-backend steer settlement: same mid-turn semantics as
+            // settleSteerCommitted's bubble (no admission, no timing record).
+            addChatItem({ type: "user", text: itemText, time: timeStr(), steeredMidTurn: true });
+            // The persisted position is known exactly here (the match ran
+            // against the durable snapshot): record the sidecar marker
+            // directly, no pending-capture retry needed.
+            recordSteeredMessages(sid, [{ pos: newMessages.indexOf(message), text: itemText }]);
+          }
+        }
+      });
+      notify();
+    }).catch(function () { /* silent:fall back to existing behavior */ });
   });
 
   listen("chat:turn_started", function (e) { onSessionEvent(e, function () {
@@ -519,6 +678,8 @@
       var skArg = ((p.args && (p.args.name || p.args.skill)) || "").toString();
       var skLower = skArg.toLowerCase();
       if (skArg.indexOf("视觉设计") >= 0 || skLower.indexOf("visual-design") >= 0) state.activeSkill = "visual-design";
+      else if (skArg.indexOf("插件包标准化") >= 0 || skLower.indexOf("package-author") >= 0) state.activeSkill = "package-author";
+      else if (skArg.indexOf("技能创建") >= 0 || skLower.indexOf("skill-author") >= 0) state.activeSkill = "skill-author";
       else if (skArg.indexOf("公文写作") >= 0 || skLower.indexOf("government-writing") >= 0) state.activeSkill = "government-writing";
       else if (skArg.indexOf("PPT") >= 0 || skArg.indexOf("幻灯片") >= 0 || skLower.indexOf("pptx") >= 0) state.activeSkill = "pptx";
       else if (skArg.indexOf("数据分析可视化") >= 0 || skArg.indexOf("数据可视化") >= 0 || skLower.indexOf("visualizer") >= 0) state.activeSkill = "visualizer";
@@ -544,6 +705,18 @@
     scheduleShellNotify();
   }); });
 
+  // 子智能体不产生 chat:tool_start/chat:tool_end（forwarder 只转发 mailbox 进展），
+  // 它启动的后台 shell 任务若无人调度轮询，就要等到会话切换或顶层 shell 调用
+  // 才会被 applyShellSnapshots 发现。从进展文本认出 shell 工具即补一次调度；
+  // 轮询自身会在没有运行中任务时自停，不会常驻。
+  listen("multiagent:agent_progress", function (e) {
+    var p = e.payload || {};
+    if (p.session_id && mentionsShellTool(p.status)) {
+      scheduleShellPoll(p.session_id, true);
+    }
+  });
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- legacy bridge; refactor tracked separately
   listen("chat:tool_end", function (e) { onSessionEvent(e, function () {
     var p = e.payload || {};
     if (toolCallAlreadyFinished(p.id)) return;
@@ -585,17 +758,16 @@
         // 用 server 解析好的绝对路径(present_artifact_server.py 的 abs_path),而非模型可能
         // 给的相对 args.path → 卡片 path 绝对,点 Open 不再报「path must be absolute」。
         var presentedPath = presentArtifactAbsPath(p.output, meta.args && meta.args.path);
-        // 同一产物没改又 present 一次 → 跳过出卡(防模型啰嗦重复);改完再 present/续卡会保留。
-        if (!isDuplicateArtifactCard(presentedPath)) {
-          addChatItem({
-            type: "artifact_card",
-            path: presentedPath,
-            title: (meta.args && meta.args.title) || "",
-            description: (meta.args && meta.args.description) || "",
-            time: timeStr(),
-            sessionId: p.session_id || state.activeSessionId,
-          });
-        }
+        var presentedCard = {
+          type: "artifact_card",
+          path: presentedPath,
+          title: (meta.args && meta.args.title) || "",
+          description: (meta.args && meta.args.description) || "",
+          time: timeStr(),
+          sessionId: p.session_id || state.activeSessionId,
+        };
+        const presentationCard = updatePresentedArtifact(presentedCard) || presentedCard;
+        if (presentationCard === presentedCard) addChatItem(presentedCard);
         if (presentedPath) state.turnPresentedArtifacts.push(presentedPath); // 本 turn 已出成品卡,chat:done 不再兜底补
         // 同步进产物面板:present_artifact 出卡的产物也算「产出物」。修「自己生成文件、
         // 不走 write_file 的工具(如 make_pptx)→ 卡有、面板无」。trackArtifact 已去重。
@@ -603,6 +775,18 @@
         delete context.toolMeta[p.id];
         context.currentStreamText = ""; context.currentStreamId = 0;
         notify();
+        // Card identity and panel presentation are separate concerns: updating an
+        // existing card keeps its stable transcript position, so every explicit
+        // present_artifact call must still request a visible preview. Use the
+        // reconciled card path because a relative tool argument may have retained
+        // an older absolute path that the preview can actually open.
+        try {
+          window.dispatchEvent(new CustomEvent("pinvou:present-artifact", { detail: {
+            sessionId: presentedCard.sessionId,
+            path: presentationCard.path,
+            toolCallId: p.id,
+          } }));
+        } catch { /* DOM event dispatch failure leaves the artifact available from the dock */ }
         return;
       }
       // 失败:补一张工具卡承载错误输出(tool_start 时跳过了灰卡)
@@ -628,7 +812,9 @@
     }
 
     // load_skill：卡照出，但不把返回的 SKILL.md 全文写进卡，展开只见占位（防设计系统泄露）。
-    var outForCard = (meta && meta.name === "load_skill") ? bt("skillContentHidden") : p.output;
+    var outForCard = (meta && meta.name === "load_skill")
+      ? bt("skillContentHidden")
+      : context.toolResultDisplayContent(p.output);
     var updatedToolItem = updateToolItem(p.id, outForCard, p.success);
     var shellTaskId = p.metadata && (p.metadata.task_id || p.metadata.taskId);
     if (updatedToolItem && shellTaskId) {
@@ -645,6 +831,10 @@
       }
       updatedToolItem.taskId = shellTaskId;
       updatedToolItem.sessionId = p.session_id || state.activeSessionId;
+      // 通用路径也可能承载后台 shell 任务（未走上方 backgrounded 快速通道的平台/分支）：
+      // 补上 background 标记，供后台任务指示器区分“真后台”与被轮询命令匹配回退
+      // 挂上 taskId 的前台卡。
+      if (p.metadata && p.metadata.backgrounded === true) updatedToolItem.background = true;
       var shellStatus = String((p.metadata && p.metadata.status) || "").toLowerCase();
       if (shellStatus === "running" || /running|background/i.test(String(p.output || ""))) {
         updatedToolItem.state = "running";
@@ -718,14 +908,24 @@
     });
     var doneBuffer = sid ? getBuffer(sid) : null;
     var requiresAuthorityReconcile = !isScheduledRunSession(sid);
+    // A rejected local edit never became authoritative in Rust. Reclassify it
+    // as a reconciliation case so hydration rolls back the optimistic cut.
+    var operationRejected = !!(e.payload && e.payload.operation_rejected);
     var completedLocalTurn = !!(
-      requiresAuthorityReconcile && doneBuffer && doneBuffer.localTurnOwned
+      requiresAuthorityReconcile && doneBuffer && doneBuffer.localTurnOwned && !operationRejected
     );
+    recordAuthoritySyncDiagnostic("chat_done_classified", Object.assign({
+      completed_local_turn: completedLocalTurn,
+      operation_rejected: operationRejected,
+      requires_authority_reconcile: requiresAuthorityReconcile,
+      terminal_status: String(e.payload && e.payload.status || ""),
+      terminal_error_present: !!(e.payload && e.payload.error),
+    }, authoritySyncBufferSnapshot(sid, doneBuffer)));
     if (requiresAuthorityReconcile && doneBuffer && !doneBuffer.localTurnOwned) {
       // transcript_committed is emitted before chat:done. A client that joins
       // at the terminal tail may not have seen an earlier turn event, so keep
       // the already received revision while initializing remote-turn state.
-      markRemoteTurn(sid, doneBuffer, true);
+      markRemoteTurn(sid, doneBuffer, true, "chat_done_without_local_owner");
     }
     if (!requiresAuthorityReconcile) markScheduledInitialTurnTerminal(sid);
     runSyncOnSession(sid, function () {
@@ -752,9 +952,9 @@
         terminalStatus === "cancelled" || terminalStatus === "canceled";
       if (interrupted) preserveInterruptedAssistantPresentation();
       else flushAssistantMessageToHistory();
-      // 本 turn 写/改过的产物 → 末尾补一张成品卡(带召唤图标),让 Boss 就近召唤 pinvou。
-      // present 过的复用其 title/desc;AI 没 present 的兜底用文件名补首卡(否则没召唤入口=这次的 bug)。
-      // 本 turn 刚 present_artifact 出过卡的跳过,不重复。edit/append 改多次也只补一张。
+      // Refresh artifacts written in this turn in place when already presented.
+      // Add only the first card for artifacts the model did not present, and
+      // skip artifacts already presented in this turn or changed repeatedly.
       (state.turnDirtyArtifacts || []).forEach(function (ap) {
         // 按 basename 比对:present 存 server 绝对路径、turnDirty 存 write 相对路径,
         // 直接 indexOf 比不中 → present 过的文件会被兜底再补一张(重复)。
@@ -763,9 +963,14 @@
         var prev = findPresentedArtifact(ap);
         // 补卡 path 优先用 disk watcher 落进产物列表的同名**绝对**路径(open 可靠、跨 session 稳);
         // 没有再退回 write_file 的相对 ap(由 sessionId 兜底解析)。
-        var tracked = state.artifacts.find(function (a) { return basename(a.path) === _apbn && isAbsPath(a.path); });
+        var tracked = state.artifacts.find(function (a) {
+          return normalizedPath(a.path) === normalizedPath(ap) && isAbsPath(a.path);
+        }) || state.artifacts.find(function (a) { return basename(a.path) === _apbn && isAbsPath(a.path); });
         var cardPath = (tracked && tracked.path) || ap;
-        if (prev) addChatItem({ type: "artifact_card", path: prev.path, title: prev.title, description: prev.description, time: timeStr(), sessionId: sid });
+        if (prev) {
+          var refreshed = updatePresentedArtifact({ type: "artifact_card", path: cardPath, title: prev.title, description: prev.description, time: timeStr(), sessionId: sid });
+          if (!refreshed) addChatItem({ type: "artifact_card", path: cardPath, title: prev.title, description: prev.description, time: timeStr(), sessionId: sid });
+        }
         else addChatItem({ type: "artifact_card", path: cardPath, title: basename(ap), description: "", time: timeStr(), sessionId: sid });
       });
       state.turnDirtyArtifacts = [];
@@ -800,11 +1005,16 @@
       doneBuffer.remoteTerminalSeen = true;
       doneBuffer.busy = false;
       if (sid === state.activeSessionId) saveWorkingSetTo(doneBuffer);
-    } else if (completedLocalTurn) {
+    } else if (completedLocalTurn || !requiresAuthorityReconcile) {
       // The desktop owns this turn and Rust has already persisted its terminal
       // transcript before emitting chat:done. Do not convert a completed local
       // turn into a remote authority gate: a best-effort readback failure must
-      // never block the user's next local message.
+      // never block the user's next local message. Scheduled-run sessions skip
+      // transcript reconciliation entirely (Rust owns the durable transcript),
+      // so the same full release applies: markRemoteTurn may have armed the
+      // remote-authority gate during the streamed turn, and a stale gate would
+      // send flushQueued into reconcileRemoteTurn, whose write-ownership
+      // busy check then deadlocks the queued follow-up forever.
       doneBuffer.deferredRemoteUserEvent = null;
       doneBuffer.localTurnOwned = false;
       doneBuffer.remoteTurnActive = false;
@@ -827,12 +1037,14 @@
       if (reconciled) await persistMessagesFor(sid);
       await refreshHistoryList();
       if (!reconciled) {
+        recordAuthoritySyncDiagnostic("authority_sync_notice_shown", Object.assign({
+          notice: "desktop_done_sync_pending",
+        }, authoritySyncBufferSnapshot(sid, doneBuffer)));
         runSyncOnSession(sid, function () {
           addAuthoritySyncNotice(bt("desktopDoneSyncPending"));
         });
       }
       notify();
-      publishRemoteLiveSnapshot(sid).catch(function () {});
       // 排队式:本轮跑完,若该 session 不忙且有待发消息 → 自动发下一条
       if (reconciled) flushQueued(sid);
     })();
@@ -840,9 +1052,17 @@
 
   listen("chat:usage", function (e) { onSessionEvent(e, function () {
     var sid = e.payload && e.payload.session_id;
-    if (sid && turnUsageDirty[sid]) return; // 本轮多请求，累加值≠占用，保留上个准确值
+    // 真实窗口是模型能力常量，不随轮内请求数变化，必须先于 dirty guard 消费：
+    // 工具轮（最常见的 Agent 场景）只跳过不可信的累计 input，分母仍要更新。
+    var windowTok = Number(e.payload && e.payload.context_window) || 0;
+    if (windowTok > 0 && windowTok !== state.tokens.max) {
+      state.tokens.max = windowTok; // 云端真实窗口，替代 32K 假分母
+      notify(); // 窗口变化也要通知 UI（即使本轮 input 不可信）
+    }
+    if (sid && turnUsageDirty[sid]) return; // 本轮多请求，累加 input 不可信，保留上个准确值
     var input = Number(e.payload && e.payload.input_tokens || 0);
-    if (input > 0) {
+    // 累加值超过窗口说明仍有多请求（内部重试等无事件轮），跳过避免显示超上限
+    if (input > 0 && input <= state.tokens.max) {
       state.tokens = { input: input, max: state.tokens.max };
       notify();
     }
@@ -875,8 +1095,6 @@
   listen("chat:user_input_required", function (e) { onSessionEvent(e, function () {
     var p = e.payload || {};
     if (hasChatItemForTool("user_input", p.id)) return;
-    if (state.workflow.run.status === "stopped" &&
-        state.workflow.run.sessionId && p.session_id === state.workflow.run.sessionId) return;
     var questions = p.questions || [];
     if (!Array.isArray(questions) || questions.length === 0) return;
     addChatItem({
@@ -977,6 +1195,20 @@
       return { collectionId: collectionId, enabled: typeof entry === "object" ? entry.enabled !== false : true };
     }).filter(Boolean);
   }
+  function normalizeMountedRemoteCollections(value) {
+    if (!Array.isArray(value)) return [];
+    var seen = Object.create(null);
+    return value.map(function (entry) {
+      if (!entry || typeof entry !== "object") return null;
+      var serverId = entry.serverId != null ? entry.serverId : entry.server_id;
+      var collectionId = entry.collectionId != null ? entry.collectionId : entry.collection_id;
+      if (!serverId || collectionId == null) return null;
+      var key = String(serverId) + ":" + String(collectionId);
+      if (seen[key]) return null;
+      seen[key] = true;
+      return { serverId: serverId, collectionId: collectionId, enabled: entry.enabled !== false };
+    }).filter(Boolean);
+  }
   listen("remote_control:kb_mount_changed", function (e) {
     var p = e && e.payload;
     if (!p || !state.activeSessionId) return;
@@ -1003,6 +1235,26 @@
       state.mountedCollection = firstEnabled ? firstEnabled.collectionId : null;
       notify();
     }
+    function commitRemote(value) {
+      if (generation !== kbMountSyncGeneration || state.activeSessionId !== sessionId) return;
+      if (!Array.isArray(value)) return;
+      state.mountedRemoteCollections = normalizeMountedRemoteCollections(value);
+      notify();
+    }
+    var payloadRemote = Array.isArray(p.remote_collections)
+      ? p.remote_collections
+      : (Array.isArray(p.remoteCollections) ? p.remoteCollections : null);
+    if (payloadRemote) {
+      // Collection deletion carries the post-cascade list, so the composer drops its chip
+      // synchronously instead of waiting for another IPC round trip.
+      commitRemote(payloadRemote);
+    } else {
+      // Older producers omit remote mounts. Re-read the session fact source so this shared event
+      // still converges both local and remote mount state.
+      invoke("session_mounted_remote_collections", { sessionId: sessionId })
+        .then(function (collections) { commitRemote(collections); })
+        .catch(function () {});
+    }
     // 事件可能由并发命令乱序发出；重新读取后端事实源，并以 generation 防止旧请求晚回覆盖。
     invoke("session_mounted_collections_snapshot", { sessionId: sessionId })
       .then(function (snapshot) { commit(snapshot); })
@@ -1028,7 +1280,7 @@
     notify();
   });
 
-  // 知识库 embedding 模型下载进度（download → verify → extract → done）
+  // 知识库 embedding 模型下载进度（download → verify → prepare → done）
   listen("kb_model:progress", function (e) {
     var p = e && e.payload;
     if (!p) return;
@@ -1049,7 +1301,9 @@
     var p = e.payload || {};
     var planId = String(p.plan_id || p.planId || "").trim();
     var readyMode = p.mode_state || p.modeState;
-    if (readyMode) state.modeState = { mode: readyMode.mode || "yolo", multiAgent: !!readyMode.multi_agent };
+    // 事件负载的权威 mode 写回走收敛点（bump epoch 防在途旧读覆盖；
+    // sid 取事件 payload，onSessionEvent 内与 state.activeSessionId 一致）。
+    if (readyMode) applyAuthoritativeModeState(state.activeSessionId, readyMode);
     if (planId && state.chatItems.some(function (item) {
       return item && item.type === "plan_card" && String(item.planId || "") === planId;
     })) return;
@@ -1084,29 +1338,13 @@
           item.statusLabel = bt("planDiscarded");
         }
       });
+      var resolvedMode = p.mode_state || p.modeState;
+      // 事件负载的权威 mode 写回走收敛点（bump epoch 防在途旧读覆盖），
+      // 与 web 版对齐：方案在别处（另一窗口/远端）被 discard 时 chip 须刷新。
+      if (resolvedMode) applyAuthoritativeModeState(sid, resolvedMode);
     });
     notify();
   });
-
-  // workflow:project_started —— start_workflow 后端建项目+绑定 session 后 emit。
-  // 必须真正 switchToSession 切过去（load 新 session 的空 messages + sync engine +
-  // syncSessionSkill），否则只设 activeSessionId 会让旧对话的 messages 残留在屏上，
-  // 顶部又叠加 PhaseChips，看起来像"旧对话被 append 了项目名"（Phase A 关键 bug）。
-  // refreshHistoryList 先跑让新 session 进 sidebar 列表 + 刷 bindings(🧭)。
-  // switchToSession 内部已调 syncSessionSkill，切完 App useEffect 自动 setCurrentView('chat')。
-  // [卡片流] start_workflow 后端建项目+绑定 session 后 emit。
-  // 新设计：**不再 switchToSession 跳聊天页** —— 用户停在工作流看板，
-  // 工作流 session 作为后台 session 跑，看板靠下面的 workflow:* 事件按 session_id 驱动。
-  listen("workflow:project_started", async function (e) {
-    var p = e.payload || {};
-    state.workflow.run = {
-      active: true, sessionId: p.session_id || null, projectDir: p.project_dir || null,
-      scenario: p.scenario || null, status: "running", agents: {}, cards: [], selectedRole: null,
-    };
-    await refreshHistoryList();
-    notify();
-  });
-
 
     return {
       latestTimelineCompletion: latestTimelineCompletion,

@@ -13,8 +13,8 @@ pub(crate) mod runtime_model;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::RngCore as _;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use rand::Rng as _;
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1344,7 +1344,14 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         (
             "token",
             &Method::GET,
-            ["v1", "organizations", organization_id, "recharge", "orders", order_id],
+            [
+                "v1",
+                "organizations",
+                organization_id,
+                "recharge",
+                "orders",
+                order_id,
+            ],
             None,
         ) => safe_id(organization_id) && safe_id(order_id),
         ("token", &Method::GET, ["v1", "me", "balance"], Some("consistency=strong")) => true,
@@ -1469,34 +1476,42 @@ mod tests {
 
     #[test]
     fn token_errors_distinguish_password_and_saved_session_failures() {
-        assert!(classify_token_error(
-            TokenFlow::Password,
-            StatusCode::BAD_REQUEST,
-            Some("invalid_grant"),
-            None,
-        )
-        .starts_with("oidc_credentials_invalid:"));
-        assert!(classify_token_error(
-            TokenFlow::Password,
-            StatusCode::UNAUTHORIZED,
-            Some("unauthorized_client"),
-            None,
-        )
-        .starts_with("oidc_direct_grant_disabled:"));
-        assert!(classify_token_error(
-            TokenFlow::Refresh,
-            StatusCode::BAD_REQUEST,
-            Some("invalid_grant"),
-            None,
-        )
-        .starts_with("authentication_required:"));
-        assert!(classify_token_error(
-            TokenFlow::Password,
-            StatusCode::BAD_REQUEST,
-            Some("invalid_grant"),
-            Some("Account is not fully set up"),
-        )
-        .starts_with("oidc_account_setup_incomplete:"));
+        assert!(
+            classify_token_error(
+                TokenFlow::Password,
+                StatusCode::BAD_REQUEST,
+                Some("invalid_grant"),
+                None,
+            )
+            .starts_with("oidc_credentials_invalid:")
+        );
+        assert!(
+            classify_token_error(
+                TokenFlow::Password,
+                StatusCode::UNAUTHORIZED,
+                Some("unauthorized_client"),
+                None,
+            )
+            .starts_with("oidc_direct_grant_disabled:")
+        );
+        assert!(
+            classify_token_error(
+                TokenFlow::Refresh,
+                StatusCode::BAD_REQUEST,
+                Some("invalid_grant"),
+                None,
+            )
+            .starts_with("authentication_required:")
+        );
+        assert!(
+            classify_token_error(
+                TokenFlow::Password,
+                StatusCode::BAD_REQUEST,
+                Some("invalid_grant"),
+                Some("Account is not fully set up"),
+            )
+            .starts_with("oidc_account_setup_incomplete:")
+        );
     }
 
     #[test]
@@ -1533,35 +1548,39 @@ mod tests {
             "https://token.example.test/v1/me/usage-requests?limit=50"
         );
 
-        assert!(prepare_request(
-            &config(),
-            ApiRequest {
-                area: "token".to_string(),
-                resource: "/v1/models".to_string(),
-                method: "GET".to_string(),
-                body: None,
-                idempotency_key: None,
-            },
-        )
-        .is_ok());
+        assert!(
+            prepare_request(
+                &config(),
+                ApiRequest {
+                    area: "token".to_string(),
+                    resource: "/v1/models".to_string(),
+                    method: "GET".to_string(),
+                    body: None,
+                    idempotency_key: None,
+                },
+            )
+            .is_ok()
+        );
 
-        assert!(prepare_request(
-            &config(),
-            ApiRequest {
-                area: "token".to_string(),
-                resource: "/v1/organizations/018f47b4-e124-7dca-9c85-6f7688436600/model-policy"
-                    .to_string(),
-                method: "PUT".to_string(),
-                body: Some(serde_json::json!({
-                    "expected_version": 0,
-                    "mode": "ALLOW_ALL",
-                    "model_ids": [],
-                    "reason": "initial policy"
-                })),
-                idempotency_key: Some("model-policy-0001".to_string()),
-            },
-        )
-        .is_ok());
+        assert!(
+            prepare_request(
+                &config(),
+                ApiRequest {
+                    area: "token".to_string(),
+                    resource: "/v1/organizations/018f47b4-e124-7dca-9c85-6f7688436600/model-policy"
+                        .to_string(),
+                    method: "PUT".to_string(),
+                    body: Some(serde_json::json!({
+                        "expected_version": 0,
+                        "mode": "ALLOW_ALL",
+                        "model_ids": [],
+                        "reason": "initial policy"
+                    })),
+                    idempotency_key: Some("model-policy-0001".to_string()),
+                },
+            )
+            .is_ok()
+        );
 
         assert!(prepare_request(
             &config(),
@@ -1576,17 +1595,19 @@ mod tests {
         )
         .is_ok());
 
-        assert!(prepare_request(
-            &config(),
-            ApiRequest {
-                area: "token".to_string(),
-                resource: "/v1/me/usage-requests?limit=20&cursor=YWJjLTEyMw".to_string(),
-                method: "GET".to_string(),
-                body: None,
-                idempotency_key: None,
-            },
-        )
-        .is_ok());
+        assert!(
+            prepare_request(
+                &config(),
+                ApiRequest {
+                    area: "token".to_string(),
+                    resource: "/v1/me/usage-requests?limit=20&cursor=YWJjLTEyMw".to_string(),
+                    method: "GET".to_string(),
+                    body: None,
+                    idempotency_key: None,
+                },
+            )
+            .is_ok()
+        );
 
         let chat = prepare_request(
             &config(),
@@ -1608,17 +1629,19 @@ mod tests {
             "https://token.example.test/v1/chat/completions"
         );
 
-        assert!(prepare_request(
-            &config(),
-            ApiRequest {
-                area: "token".to_string(),
-                resource: "/v1/chat/completions".to_string(),
-                method: "POST".to_string(),
-                body: Some(serde_json::json!({"model": "example-model", "stream": true})),
-                idempotency_key: Some("desktop-request-0002".to_string()),
-            },
-        )
-        .is_err());
+        assert!(
+            prepare_request(
+                &config(),
+                ApiRequest {
+                    area: "token".to_string(),
+                    resource: "/v1/chat/completions".to_string(),
+                    method: "POST".to_string(),
+                    body: Some(serde_json::json!({"model": "example-model", "stream": true})),
+                    idempotency_key: Some("desktop-request-0002".to_string()),
+                },
+            )
+            .is_err()
+        );
 
         for resource in [
             "https://evil.example/v1/me/balance",
@@ -1628,17 +1651,19 @@ mod tests {
             "/v1/token-accounts",
             "/v1/me/usage-requests?limit=101",
         ] {
-            assert!(prepare_request(
-                &config(),
-                ApiRequest {
-                    area: "token".to_string(),
-                    resource: resource.to_string(),
-                    method: "GET".to_string(),
-                    body: None,
-                    idempotency_key: None,
-                },
-            )
-            .is_err());
+            assert!(
+                prepare_request(
+                    &config(),
+                    ApiRequest {
+                        area: "token".to_string(),
+                        resource: resource.to_string(),
+                        method: "GET".to_string(),
+                        body: None,
+                        idempotency_key: None,
+                    },
+                )
+                .is_err()
+            );
         }
     }
 

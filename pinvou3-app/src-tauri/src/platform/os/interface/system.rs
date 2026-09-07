@@ -6,16 +6,43 @@ pub fn open_target(target: impl AsRef<OsStr>, label: &str) -> Result<(), String>
     super::super::platform::open_target(target, label)
 }
 
+/// Spawn a fire-and-forget process and reap it per platform semantics.
+///
+/// On Unix a posix reaper thread `wait()`s to prevent zombies; Windows has
+/// no waitpid contract and dropping the handle after spawn lets the system
+/// reclaim the process. Meant for reuse from the features layer (browser
+/// launches for open/notify and the like), avoiding per-caller inline
+/// `cfg` platform details.
+pub fn spawn_detached_and_reap(command: &mut std::process::Command) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        super::super::posix::spawn_detached_and_reap(command)
+    }
+    #[cfg(not(unix))]
+    {
+        command.spawn().map(|_| ())
+    }
+}
+
 pub fn reveal_target(target: &Path) -> Result<(), String> {
     super::super::platform::reveal_target(target)
 }
 
-pub fn device_serial_number() -> Option<String> {
-    super::super::platform::device_serial_number()
-}
-
 pub fn command_exists(command: &str) -> bool {
     super::super::platform::command_exists(command)
+}
+
+/// OS-specific single-threaded startup-window env writes (Windows:
+/// `ORT_DYLIB_PATH` / LibreOffice `PATH` prepend; no-op on other
+/// platforms). Called only by lib.rs `startup_process_env` before the
+/// first thread spawn; the multi-threaded phase must not write the
+/// process env (edition 2024 concurrent-reader risk).
+pub fn startup_platform_env() {
+    super::super::platform::startup_platform_env()
+}
+
+pub fn current_system_locale() -> Option<String> {
+    super::super::platform::current_system_locale()
 }
 
 #[cfg(target_os = "windows")]
@@ -57,10 +84,6 @@ pub fn ocr_tool_exists() -> bool {
 
 pub fn archive_tool_exists() -> bool {
     super::super::platform::archive_tool_exists()
-}
-
-pub fn msg_native_supported() -> bool {
-    super::super::platform::msg_native_supported()
 }
 
 pub fn msg_converter_required() -> bool {
@@ -149,6 +172,25 @@ pub fn libreoffice_open_fallback_needed(path: &Path) -> bool {
 
 pub fn nvidia_smi_candidates() -> Vec<&'static str> {
     super::super::platform::nvidia_smi_candidates()
+}
+
+/// Returns the Node.js executable bundled with the application for Browser MCP and other
+/// runtimes, or `None` when no bundled runtime exists. Linux and macOS reuse the codex-bridge
+/// runtime; Windows uses installer-provisioned `runtime/node/node.exe`, shared with connector
+/// execution. See `windows_path::bundled_node_dir`.
+pub fn bundled_node() -> Option<std::path::PathBuf> {
+    super::super::platform::bundled_node()
+}
+
+/// Probes process liveness before browser watch removes a stale port file. Platform details
+/// belong in adapters; feature consumers must not inline `#[cfg(unix)]` behavior.
+pub fn process_alive(pid: u32) -> bool {
+    super::super::platform::process_alive(pid)
+}
+
+/// Restricts a sensitive directory through the active OS adapter.
+pub fn make_private_dir(path: &Path) {
+    super::super::platform::make_private_dir(path)
 }
 
 #[cfg(test)]
