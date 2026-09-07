@@ -216,8 +216,11 @@ impl DynamicGate {
                 inner.waiters.push_back(GateWaiter { sender: tx });
                 rx
             };
-            // A failed receive means the gate itself was dropped while we
-            // were queued; the loop re-queues under the lock.
+            // Defensive: a failed receive requires the queued sender to be
+            // dropped without sending — which requires the gate itself to be
+            // dropped, impossible while this future holds an `Arc` to it.
+            // Loop anyway so a future refactor that breaks that invariant
+            // degrades to re-queueing instead of unwrapping.
             if let Ok(permit) = rx.await {
                 return permit;
             }
@@ -777,6 +780,110 @@ mod tests {
                 gate.try_acquire().is_some(),
                 "grant of cancelled waiter must be re-released, not leaked"
             );
+        });
+    }
+
+    /// The mirror case of the redispatch test: a waiter cancelled *before*
+    /// its grant was dispatched leaves a stale queue entry with a dead
+    /// receiver. The granter must skip that entry — disarming the already
+    /// built permit instead of dropping it, which would re-enter the gate
+    /// lock held by `wake_locked` — and the slot must stay usable.
+    #[test]
+    fn forkguard_dynamic_gate_skips_stale_queued_waiter_without_leaking_slot() {
+        let (_governor, gate) = RateLimitGovernor::new(1);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        rt.block_on(async move {
+            let holder = gate.try_acquire().expect("holder");
+            let g2 = std::sync::Arc::clone(&gate);
+            let waiter = tokio::spawn(async move { g2.acquire().await });
+            tokio::time::sleep(ms(20)).await;
+            assert!(
+                !waiter.is_finished(),
+                "waiter must be queued behind the holder"
+            );
+
+            // Cancel while the gate is full: no grant was ever dispatched,
+            // so the stale entry stays queued with a dead receiver.
+            waiter.abort();
+            tokio::time::sleep(ms(20)).await;
+
+            // Releasing the holder runs the granter over the stale entry.
+            drop(holder);
+            assert_eq!(
+                gate.available_permits(),
+                1,
+                "cancelled queued waiter must neither swallow nor leak the slot"
+            );
+            let permit = gate
+                .try_acquire()
+                .expect("slot usable after the stale entry is skipped");
+            drop(permit);
+        });
+    }
+
+    /// Stress: concurrent acquire/release with aborts and capacity
+    /// oscillation through 0 (a pause). Whatever the interleaving, every
+    /// slot must come home — a lost wakeup or a leaked (never released)
+    /// permit leaves the gate short of full capacity at the end of a round,
+    /// and an over-granted permit keeps a slot alive after all owners are
+    /// gone. Both fail the drain assertion.
+    #[test]
+    fn forkguard_dynamic_gate_stress_drains_to_full_capacity_despite_aborts() {
+        let (_governor, gate) = RateLimitGovernor::new(4);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        rt.block_on(async move {
+            for round in 0..24usize {
+                // Start every round with live headroom, then briefly drop to
+                // 0 mid-round on every third round: the pause case keeps a
+                // full queue parked while nothing holds a permit. Capacity 0
+                // is never left in place while joining — with nobody holding
+                // a permit a permanent 0 would deadlock the round by design,
+                // so the restore below is part of the scenario.
+                gate.set_capacity(1 + (round % 2));
+                let mut handles = Vec::new();
+                for i in 0..16u32 {
+                    let g = std::sync::Arc::clone(&gate);
+                    handles.push(tokio::spawn(async move {
+                        let _permit = g.acquire().await;
+                        tokio::time::sleep(ms(u64::from(i % 4))).await;
+                    }));
+                }
+                // Abort every third task: some while still queued (stale
+                // queue entries), some already holding a permit (the
+                // drop-releases-and-rewakes path).
+                for handle in handles.iter().step_by(3) {
+                    handle.abort();
+                }
+                if round % 3 == 0 {
+                    gate.set_capacity(0);
+                    tokio::time::sleep(ms(2)).await;
+                }
+                gate.set_capacity(4);
+                for handle in handles {
+                    // A task that cannot finish inside the budget means a
+                    // lost wakeup, a leaked permit, or a slot swallowed by a
+                    // stale entry — fail the round instead of hanging.
+                    tokio::time::timeout(ms(2000), handle)
+                        .await
+                        .expect("task must finish: stuck rounds mean lost wakeups or leaked slots")
+                        .ok();
+                }
+                // Let straggler permit drops (cancelled waiter re-release)
+                // run before asserting the drain.
+                tokio::time::sleep(ms(5)).await;
+                assert_eq!(
+                    gate.available_permits(),
+                    4,
+                    "round {round}: gate must drain to full capacity despite aborts and pauses"
+                );
+            }
         });
     }
 }
