@@ -106,7 +106,7 @@ def main():
         for path in (root / "tls" / "server.key", root / "tls" / "server.crt", root / "trust" / "ca.crt"):
             os.chmod(path, 0o600)
             os.chown(path, 65532, 65532)
-        common = ["--network", network, "--user", "65532:65532", "--read-only", "--cap-drop", "ALL", "--cap-add", "IPC_LOCK", "--security-opt", "no-new-privileges", "--ulimit", "memlock=-1:-1", "--pids-limit", "128", "--cpus", "1", "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=2", "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m,mode=1777", "--entrypoint", "/usr/bin/bao"]
+        common = ["--network", network, "--user", "65532:65532", "--read-only", "--cap-drop", "ALL", "--cap-add", "IPC_LOCK", "--security-opt", "no-new-privileges", "--ulimit", "memlock=-1:-1", "--ulimit", "core=0:0", "--pids-limit", "128", "--cpus", "1", "--log-driver", "local", "--log-opt", "max-size=1m", "--log-opt", "max-file=2", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777", "--tmpfs", "/openbao/file:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532", "--tmpfs", "/openbao/logs:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532", "--entrypoint", "/usr/bin/bao"]
         mounts = lambda pairs: [arg for src, dst, readonly in pairs for arg in ("--mount", "type=bind,src=" + str(root / src) + ",dst=" + dst + (",readonly" if readonly else ""))]
         server_args = ["create", "--name", server, *common, "--memory", "512m", "--network-alias", "openbao", "--ip", server_ip, *mounts((("config", "/bao/config", True), ("tls", "/bao/tls", True), ("data", "/bao/data", False), ("audit", "/bao/audit", False))), IMAGE, "server", "-config=/bao/config/server.hcl"]
         docker(*server_args)

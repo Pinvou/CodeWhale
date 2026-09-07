@@ -26,3 +26,15 @@ Raft 快照是含加密密钥的数据备份，不等于解封材料。正式恢
 Linux Docker 操作者先取得上述固定镜像，运行 `python3 scripts/account-platform-openbao-fixture.py --isolated-fixture --config-directory account-platform/deploy/openbao`。只创建独立临时网络、容器和目录，无业务挂载及公开端口；测试结束精确清理，不 prune。需要宿主可路由新建的私有 Docker 网络。
 
 2026-09-07 实际完整运行输出 `OPENBAO_INFRASTRUCTURE_FIXTURE_PASS`：可信 TLS 及证书负例、双 AppRole 隔离、真实 Agent 续租/重认证/旧 token 实际过期、权限拒绝与强制 AAD、v1→v2 轮换、HMAC 审计和 SIGHUP 重开、Raft 重启后封存拒绝与解封后旧密文读回、撤销测试 root 后拒绝。正式租期模板不变；测试只缩短隔离角色租期。另有 4 项静态配置测试通过。此结果不包含快照恢复、正式初始化和离线恢复交接。
+
+## 独立设施启动模板
+
+`compose.yaml` 只定义 KMS，不自动初始化、解封或部署业务服务。使用新建、已核对为 `internal` 的专用 Docker 网络，预留私有 IPv4 并先为它签发证书；仅设置公开变量 `OPENBAO_NETWORK`、`OPENBAO_PRIVATE_IPV4`、`OPENBAO_STATE_DIRECTORY`。部署前核对网络未附加其他业务，状态路径必须是新的受控目录，不得指向旧账号平台/New API 或其他系统数据。
+
+状态目录预置 `config/server.hcl`、`tls/server.crt`、`tls/server.key`、`trust/ca.crt`、空 `data/` 与 `audit/`；配置、证书、数据与审计子目录为 0700、UID/GID 65532，文件为 0600 可被该 UID 读取。Compose 禁止自动创建缺失挂载路径，目录须由部署步骤明确建立。不得上传 CA 明文私钥、custody 私钥、root token 或解封材料。
+
+先 `docker compose --env-file <公开环境文件> -f compose.yaml config` 核对无端口暴露、身份与目录，再启动。模板不发布宿主端口、只读根目录、禁用 core dump、限制 CPU/内存/PID，仅保留 IPC_LOCK。健康检查使用真实 TLS；未初始化或封存时非健康是预期状态，不得修改检查让其假健康。正式初始化须使用已验证的单次加密初始化器，保管人本机解封后才可创建逐服务策略/Agent，并在通过备份及运行门禁前保持业务未接入。
+
+正式定时备份、独立运维身份、证书续签/到期告警、审计轮转容量门禁和业务 Compose/Helm 接线尚需各自验收。此模板启动成功不是完整生产可用证明。
+
+固定镜像声明了未使用的 `/openbao/file` 与 `/openbao/logs` 卷；模板显式用受限 tmpfs 覆盖，避免隐式匿名持久卷。实际业务数据与审计仍仅使用 `/bao/data`、`/bao/audit` 的登记绑定目录。启动前检查真实容器挂载不得出现未登记 volume；不能仅凭 YAML 没写 volume 就认定不存在。

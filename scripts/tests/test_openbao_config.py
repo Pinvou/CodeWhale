@@ -46,6 +46,18 @@ class OpenBaoConfigurationTests(unittest.TestCase):
         self.assertNotIn("secret_id", config)
         self.assertNotIn("role_id", config)
 
+    def test_standalone_facility_does_not_bootstrap_or_expose_ports(self):
+        config = (CONFIG / "compose.yaml").read_text(encoding="utf-8")
+        for required in ('read_only: true', 'user: "65532:65532"', 'cap_drop: ["ALL"]',
+                         'soft: 0', 'hard: 0', 'external: true', 'create_host_path: false',
+                         'BAO_CACERT: /bao/trust/ca.crt', 'OPENBAO_PRIVATE_IPV4:?required'):
+            self.assertIn(required, config)
+        for denied in ('ports:', 'BAO_TOKEN', 'root_token', 'unseal', 'tls_skip_verify', 'privileged:'):
+            self.assertNotIn(denied, config)
+        self.assertEqual(config.count('create_host_path: false'), 5)
+        self.assertIn('/openbao/file:rw,nosuid,nodev,noexec,size=1m', config)
+        self.assertIn('/openbao/logs:rw,nosuid,nodev,noexec,size=1m', config)
+
 
 if __name__ == "__main__":
     unittest.main()
