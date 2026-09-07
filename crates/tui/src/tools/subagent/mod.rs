@@ -361,6 +361,12 @@ const SUBAGENT_QUEUED_LAUNCH_REASON: &str = "queued: waiting for a sub-agent lau
 /// Queued-reason variant used while the rate-limit governor has paused new
 /// sub-agent launches after sustained provider 429s.
 const SUBAGENT_QUEUED_RATE_LIMIT_REASON: &str = "queued: waiting for provider rate-limit recovery";
+/// While queued, probe the governor for a drained rate-limit window at this
+/// period (see `acquire_queued_launch_permit`).
+const LAUNCH_RECOVERY_PROBE_PERIOD: Duration = Duration::from_secs(5);
+/// Placeholder probe period when the runtime has no governor: the probe
+/// branch no-ops, and a queued child's wall-time deadline always fires first.
+const LAUNCH_RECOVERY_PROBE_PERIOD_WITHOUT_GOVERNOR: Duration = Duration::from_secs(3600);
 /// #freeze: minimum spacing between hot-path (per-step checkpoint) state
 /// persists. `update_checkpoint` fires on every step of every agent; at high
 /// fanout an unconditional full-fleet rewrite under the manager write lock
@@ -10262,13 +10268,16 @@ async fn acquire_queued_launch_permit(
     // outlives its window (the in-flight fleet finished before any success
     // could lift the pause), the probe resumes launches instead of leaving
     // the queue frozen until each child's wall-time deadline.
-    let mut recovery_probe = tokio::time::interval(
-        task.runtime
-            .governor
-            .as_ref()
-            .map(|_| std::time::Duration::from_secs(5))
-            .unwrap_or(std::time::Duration::from_secs(3600)),
-    );
+    let mut recovery_probe = tokio::time::interval(if task.runtime.governor.is_some() {
+        LAUNCH_RECOVERY_PROBE_PERIOD
+    } else {
+        LAUNCH_RECOVERY_PROBE_PERIOD_WITHOUT_GOVERNOR
+    });
+    // Hold the acquire future across select iterations. Re-creating it on
+    // every probe tick would leave one stale queue entry per tick per queued
+    // child inside the gate (purged only by the next grant wave), which adds
+    // up over a long pause with a full swarm queue.
+    let mut acquire_permit = std::pin::pin!(gate.acquire());
     loop {
         tokio::select! {
             biased;
@@ -10284,10 +10293,10 @@ async fn acquire_queued_launch_permit(
                     governor.recover_if_window_drained(Instant::now());
                 }
                 // If the probe lifted a pause it raised the gate capacity,
-                // which grants queued waiters; `gate.acquire` below is
-                // re-polled either way on the next loop iteration.
+                // which grants queued waiters; the pinned `acquire_permit`
+                // below observes the grant on the next poll.
             }
-            permit = gate.acquire() => {
+            permit = &mut acquire_permit => {
                 return Some(permit);
             }
         }
