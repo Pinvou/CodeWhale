@@ -971,7 +971,7 @@ pub(crate) enum UserTurnPromptKind {
 
 /// Authoritative target selection for edit-last-turn operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EditLastTurnTarget {
+pub enum EditLastTurnTarget {
     /// Index of the latest editable user-authored turn.
     Editable(usize),
     /// The latest real user turn exists but has no editable text.
@@ -1012,7 +1012,7 @@ pub(crate) fn classify_user_turn_prompt(message: &Message) -> UserTurnPromptKind
 
 /// Locate the latest real user boundary without skipping unsupported content.
 #[must_use]
-pub(crate) fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget {
+pub fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget {
     messages
         .iter()
         .enumerate()
@@ -1025,6 +1025,16 @@ pub(crate) fn edit_last_turn_target(messages: &[Message]) -> EditLastTurnTarget 
             },
         )
         .unwrap_or(EditLastTurnTarget::Missing)
+}
+
+/// True when `message` is an editable, genuine user-authored turn prompt.
+///
+/// Host integrations that mutate history should use [`edit_last_turn_target`]
+/// when selecting a cut point so an unsupported latest user turn cannot be
+/// skipped in favor of an older prompt.
+#[must_use]
+pub fn is_user_turn_prompt(message: &Message) -> bool {
+    classify_user_turn_prompt(message) == UserTurnPromptKind::Editable
 }
 
 /// True when a `role = "user"` message is runtime-owned rather than
@@ -1317,6 +1327,7 @@ mod tests {
             classify_user_turn_prompt(&prompt),
             UserTurnPromptKind::Editable
         );
+        assert!(is_user_turn_prompt(&prompt));
 
         let tool_result = Message {
             role: Role::User,
@@ -1331,6 +1342,7 @@ mod tests {
             classify_user_turn_prompt(&tool_result),
             UserTurnPromptKind::NotPrompt
         );
+        assert!(!is_user_turn_prompt(&tool_result));
 
         let raw = subagent_completion_runtime_message(&completion_payload(
             "agent_abc",
@@ -1341,12 +1353,14 @@ mod tests {
             classify_user_turn_prompt(&raw),
             UserTurnPromptKind::NotPrompt
         );
+        assert!(!is_user_turn_prompt(&raw));
 
         let projected = project_messages_for_restore(&[raw]);
         assert_eq!(
             classify_user_turn_prompt(&projected[0]),
             UserTurnPromptKind::NotPrompt
         );
+        assert!(!is_user_turn_prompt(&projected[0]));
 
         for provenance in [
             "runtime",

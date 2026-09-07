@@ -7385,7 +7385,7 @@ pub(crate) struct TurnMetadataSnapshot<'a> {
 /// model, or context window. Workspace-scoped prompt inputs remain engine
 /// configuration and are documented separately as snapshot dependencies.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NextTurnPromptContext {
+pub struct NextTurnPromptContext {
     pub(crate) provider: ApiProvider,
     pub(crate) model: String,
     pub(crate) route_limits: Option<codewhale_config::route::RouteLimits>,

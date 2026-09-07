@@ -37,7 +37,7 @@ pub use codewhale_tools::{
 
 /// Text plus provider-neutral rich blocks at the conversation boundary.
 #[derive(Debug, Clone)]
-pub(crate) struct RichToolResult {
+pub struct RichToolResult {
     pub result: ToolResult,
     pub content_blocks: Vec<ToolResultContentBlock>,
 }

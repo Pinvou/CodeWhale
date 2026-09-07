@@ -86,6 +86,8 @@ pub enum LimitField {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OverrideSource {
+    /// Limit facts supplied by an embedding host for the exact runtime route.
+    EmbeddingHost,
     /// Operator-configured context window.
     UserContextWindow,
     /// Catalog limits describe the public API offering, not the account-scoped

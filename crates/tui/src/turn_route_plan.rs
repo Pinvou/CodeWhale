@@ -76,7 +76,7 @@ pub(crate) struct PlannedTurnRoute {
 
 /// Durable provenance for the route selected for one turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnRoutingSource {
+pub enum TurnRoutingSource {
     /// The active fixed route was used unchanged. This intentionally does not
     /// guess whether an earlier UI action or persisted config installed it.
     ActiveFixedRoute,
