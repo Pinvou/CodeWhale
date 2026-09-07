@@ -1,0 +1,51 @@
+import json
+from pathlib import Path
+import unittest
+
+CONFIG = Path(__file__).resolve().parents[2] / "account-platform" / "deploy" / "openbao"
+
+
+class OpenBaoConfigurationTests(unittest.TestCase):
+    def test_nondev_raft_tls_and_declarative_audit(self):
+        config = (CONFIG / "server.hcl").read_text(encoding="utf-8")
+        for required in ('storage "raft"', 'tls_min_version = "tls12"', 'tls_key_file = "/bao/tls/server.key"',
+                         'audit "file" "platform-audit"', 'log_raw = "false"', 'hmac_accessor = "true"',
+                         'unsafe_allow_api_audit_creation = false', 'ui = false'):
+            self.assertIn(required, config)
+        for denied in ('tls_disable', 'initialize {', 'log_raw = "true"', 'storage "inmem"', 'file_path = "discard"'):
+            self.assertNotIn(denied, config)
+
+    def test_agent_is_sink_only_and_explicitly_private(self):
+        config = (CONFIG / "agent.hcl").read_text(encoding="utf-8")
+        for required in ('address = "https://openbao:8200"', 'ca_cert = "/bao/trust/ca.crt"',
+                         'method "approle"', 'role_id_file_path = "/bao/bootstrap/role-id"',
+                         'secret_id_file_path = "/bao/bootstrap/secret-id"', 'path = "/bao/token/token"', 'mode = 384'):
+            self.assertIn(required, config)
+        for denied in ('listener ', 'api_proxy ', 'tls_skip_verify', 'token ='):
+            self.assertNotIn(denied, config)
+
+    def test_runtime_policy_has_only_key_and_self_lease_capabilities(self):
+        config = (CONFIG / "runtime-policy.hcl").read_text(encoding="utf-8")
+        paths = [line.split('"')[1] for line in config.splitlines() if line.startswith('path "')]
+        self.assertEqual(paths, ["transit/encrypt/pinvou-token-data", "transit/decrypt/pinvou-token-data",
+                                 "auth/token/lookup-self", "auth/token/renew-self", "auth/token/revoke-self"])
+        self.assertEqual(config.count('"associated_data" = [""]'), 2)
+        self.assertEqual(config.count("required_parameters"), 2)
+        self.assertNotIn('"create"', config)
+        self.assertNotIn('"sudo"', config)
+        self.assertNotIn('"*"', config)
+
+    def test_role_has_bounded_tokens_and_no_shared_policy_or_secret(self):
+        config = json.loads((CONFIG / "approle.json").read_text(encoding="utf-8"))
+        self.assertTrue(config["bind_secret_id"])
+        self.assertTrue(config["token_no_default_policy"])
+        self.assertEqual(config["token_ttl"], 300)
+        self.assertEqual(config["token_max_ttl"], 900)
+        self.assertEqual(config["token_explicit_max_ttl"], 900)
+        self.assertNotIn("token_policies", config)
+        self.assertNotIn("secret_id", config)
+        self.assertNotIn("role_id", config)
+
+
+if __name__ == "__main__":
+    unittest.main()
