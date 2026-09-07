@@ -1069,6 +1069,16 @@ jobs:
           free -h
           swapon --show
 
+      # PR #988 started a cold build with only 7.3 GiB free. All 2,100 lib
+      # tests passed, but the separate telemetry library exhausted the disk.
+      # Reserve room after dependencies, cache restore and swap allocation;
+      # only unused SDKs on this disposable hosted runner are removed.
+      - name: 为两轮 Rust 测试准备磁盘空间
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
+
       # High-risk/explicit PRs and matching merge groups run all lib tests
       # (含真实 relay/Chrome e2e)。Linux lib harness 显式关闭 default 的
       # local-embed feature，避免把 fastembed/ORT 及其图像、并行计算依赖重复链接进
