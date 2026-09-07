@@ -62,6 +62,29 @@ class OpenBaoConfigurationTests(unittest.TestCase):
         self.assertIn('/openbao/file:rw,nosuid,nodev,noexec,size=1m', config)
         self.assertIn('/openbao/logs:rw,nosuid,nodev,noexec,size=1m', config)
 
+    def test_agent_compose_separates_bootstrap_and_memory_sinks(self):
+        config = (CONFIG / "compose.agents.yaml").read_text(encoding="utf-8")
+        for role in ("pinvou-token-gateway", "pinvou-credential-portal", "pinvou-kms-backup"):
+            self.assertEqual(config.count("/bootstrap/" + role), 1)
+            self.assertEqual(config.count("/run/pinvou-kms-agents/" + role), 1)
+        for denied in ("pinvou-kms-operations", "ports:", "BAO_TOKEN", "privileged:", "cap_add:", "healthcheck:"):
+            self.assertNotIn(denied, config)
+        self.assertEqual(config.count('create_host_path: false'), 8)
+        self.assertIn('cap_drop: ["ALL"]', config)
+        self.assertIn('core: {soft: 0, hard: 0}', config)
+        self.assertIn('external: true', config)
+
+    def test_tmpfiles_recreates_directories_only_without_widening_access(self):
+        lines = [line.split() for line in (CONFIG / "pinvou-kms-agents.tmpfiles.conf").read_text().splitlines()
+                 if line and not line.startswith("#")]
+        self.assertEqual(len(lines), 4)
+        for fields in lines:
+            self.assertEqual(fields[0], "d")
+            self.assertEqual(fields[2], "0700")
+            self.assertTrue(fields[1].startswith("/run/pinvou-kms-agents"))
+        self.assertEqual(lines[0][3:5], ["root", "root"])
+        self.assertTrue(all(fields[3:5] == ["65532", "65532"] for fields in lines[1:]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,6 @@
 # 私有 KMS 配置
 
-状态：独立 KMS 已启动并完成加密初始化，等待保管人解封和剩余安全验收；业务未接入（NOT_RELEASED）。这里只包含无秘密配置，不自动初始化，不是完整部署完成证明。
+状态：独立 KMS 已完成初始化、解封、四类身份配置及初始 root 撤销；三个 Agent 已完成投递、最小权限和真实续租验收，业务未接入（NOT_RELEASED）。这里只包含无秘密配置，不自动初始化，不是完整部署完成证明。
 
 固定镜像：`quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641`（2.6.2）。
 
@@ -51,3 +51,13 @@ TOKEN_SECRET_KEY_ID=pinvou-token-data
 网关与凭据服务必须挂载各自的 Agent sink 整个目录，业务只读，不能挂载另一个服务的 sink 或任何 bootstrap。专用 CA 包只影响该 KMS client，不能通过替换全局 `SSL_CERT_FILE` 破坏 OIDC/商城的系统根信任。CA 包需要有效 CA 和显式 CertSign 用途；缺失、损坏或组/全局可写时拒绝启动。Kubernetes 的只读投影符号链接允许解析后读取，但挂载必须不可被业务写入。CA 启动时加载，更新后受控滚动重启；TLS 主机名验证始终开启，KMS client 不继承环境代理。未配置专用 CA 时保留系统 CA 兼容行为，显式配置不能在 local/remote 模式中被静默忽略。
 
 固定镜像声明了未使用的 `/openbao/file` 与 `/openbao/logs` 卷；模板显式用受限 tmpfs 覆盖，避免隐式匿名持久卷。实际业务数据与审计仍仅使用 `/bao/data`、`/bao/audit` 的登记绑定目录。启动前检查真实容器挂载不得出现未登记 volume；不能仅凭 YAML 没写 volume 就认定不存在。
+
+## 独立 Agent 部署
+
+`compose.agents.yaml` 使用独立项目，仅三个固定 Agent，不启动或重建 KMS/业务容器。公开环境变量为 `OPENBAO_AGENT_DIRECTORY`、`OPENBAO_TRUST_DIRECTORY`、`OPENBAO_NETWORK`。前者包含只读 `config/agent.hcl` 和三个 `bootstrap/<角色名>/` 子目录；不允许包含运维身份。根目录 root 0700，配置及角色目录 UID/GID 65532、0700，文件 0600。传输后核验摘要再启动，禁止把机器秘密放入环境变量。
+
+安装 `pinvou-kms-agents.tmpfiles.conf` 到系统 tmpfiles 配置目录，先确认 `/run` 是 tmpfs，再执行该文件的 `systemd-tmpfiles --create`。系统启动时目录重建早于 Docker；KMS 尚未解封时 Agent 会等待，不能以此宣称自动解封。业务将来只读挂载自己的 sink 目录；同一 UID 不等于跨容器共享权限，严禁挂载父目录或另一角色目录。
+
+现场验证运行 `scripts/account-platform-kms-agent-check.py`，指定私有 HTTPS IP endpoint、Agent 目录、CA 信任目录和网络。它只读既有 token、检查真实容器与文件隔离并执行最小权限探测，不读取 bootstrap 内容。运行中令牌须真实有效且为对应唯一角色，期限 300/900 秒；等待真实续租后加 `--require-renewal` 复验。所有输出仅固定状态，不能打印响应诊断。仅文件存在不算健康，因此 Compose 不配置虚假文件存在健康检查；持续在线告警仍需后续监控任务接线。
+
+三角色均验收成功后，精确移除本机六个明文暂存文件，不删除既有加密恢复包。服务端机器引导文件长期保留给 Agent 重新登录，必须按既定周期轮换。备份 Agent 的快照权限验证不会保存快照，不能替代正式加密备份调度和恢复验收。
