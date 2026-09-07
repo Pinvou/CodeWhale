@@ -54,6 +54,7 @@ func main() {
 		Environment: cfg.Environment, Mode: os.Getenv("TOKEN_SECRET_PROVIDER"), KeyID: os.Getenv("TOKEN_SECRET_KEY_ID"), LocalKey: key,
 		RemoteURL: os.Getenv("TOKEN_SECRET_PROVIDER_URL"), RemoteToken: os.Getenv("TOKEN_SECRET_PROVIDER_TOKEN"),
 		RemoteTokenFile: os.Getenv("TOKEN_SECRET_PROVIDER_TOKEN_FILE"),
+		TransitCAFile:   os.Getenv("TOKEN_SECRET_PROVIDER_CA_FILE"),
 	})
 	if err != nil {
 		log.Fatal(err)

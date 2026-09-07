@@ -47,8 +47,15 @@ func NewTransitProvider(config SecretProviderConfig) (*TransitProvider, error) {
 	if (!development && config.RemoteTokenFile == "") || (config.RemoteTokenFile != "" && (config.RemoteToken != "" || !filepath.IsAbs(config.RemoteTokenFile))) {
 		return nil, errors.New("transit secret provider requires an exclusive absolute token file")
 	}
+	if config.TransitCAFile != "" && u.Scheme != "https" {
+		return nil, errors.New("dedicated CA configuration requires HTTPS")
+	}
+	transport, err := newTransitTransport(config.TransitCAFile)
+	if err != nil {
+		return nil, err
+	}
 	p := &TransitProvider{keyID: config.KeyID, baseURL: strings.TrimRight(u.String(), "/"), token: config.RemoteToken, tokenFile: config.RemoteTokenFile,
-		client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+		client: &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	if _, err := p.readToken(); err != nil {
 		return nil, err
 	}
@@ -123,6 +130,7 @@ func (p *TransitProvider) call(operation, keyID, value string, aad []byte) ([]by
 		return nil, ErrInvalidSecret
 	}
 	request.Header.Set("X-Vault-Token", credential)
+	request.GetBody = nil // Never replay authenticated encryption/decryption writes.
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	response, err := p.client.Do(request)

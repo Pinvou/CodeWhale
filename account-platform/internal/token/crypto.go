@@ -57,6 +57,8 @@ type SecretProviderConfig struct {
 	RemoteURL       string
 	RemoteToken     string
 	RemoteTokenFile string
+	// TransitCAFile scopes private trust to the native KMS client only.
+	TransitCAFile string
 }
 
 func NewSecretProvider(config SecretProviderConfig) (SecretProvider, error) {
@@ -64,6 +66,9 @@ func NewSecretProvider(config SecretProviderConfig) (SecretProvider, error) {
 	mode := strings.ToLower(strings.TrimSpace(config.Mode))
 	if mode == "" {
 		mode = "local"
+	}
+	if config.TransitCAFile != "" && mode != "vault-transit" {
+		return nil, errors.New("dedicated CA configuration requires vault-transit mode")
 	}
 	if mode == "local" {
 		if environment == "production" || environment == "production-new" {

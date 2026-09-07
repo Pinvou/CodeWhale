@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -50,13 +51,15 @@ func TestTransitProviderNativeProtocolAndRotation(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	provider, err := NewSecretProvider(SecretProviderConfig{Environment: "production", Mode: "vault-transit", KeyID: "active-key", RemoteURL: server.URL, RemoteTokenFile: file})
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := NewSecretProvider(SecretProviderConfig{Environment: "production", Mode: "vault-transit", KeyID: "active-key", RemoteURL: server.URL, RemoteTokenFile: file, TransitCAFile: caFile})
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := provider.(*TransitProvider)
-	// Only this TLS fixture's private CA is trusted; production uses the system CA pool.
-	p.client.Transport = server.Client().Transport
 	ciphertext, err := p.Encrypt([]byte("secret-value"), []byte("credential-a"))
 	if err != nil {
 		t.Fatal(err)

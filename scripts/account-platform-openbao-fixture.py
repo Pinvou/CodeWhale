@@ -55,6 +55,7 @@ def main():
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--initializer-test-binary", help="optional Linux Go initializer test binary; runs initialization suite")
     recovery.add_argument("--operator-test-binary", help="optional Linux Go operator test binary; runs operator suite")
+    recovery.add_argument("--transit-test-binary", help="optional Linux business-provider binary; runs private CA and real TLS tests after root retirement")
     parser.add_argument("--restore-fixture", action="store_true", help="create a second isolated empty Raft instance for the operator restore proof")
     parser.add_argument("--bootstrap-fixture", action="store_true", help="test bounded role bootstrap and initial root retirement")
     args = parser.parse_args()
@@ -63,6 +64,10 @@ def main():
     require(not args.bootstrap_fixture or (args.operator_test_binary and not args.restore_fixture), "bootstrap proof requires operator and excludes restore")
     source = Path(args.config_directory).resolve(strict=True)
     initializer_binary = None
+    transit_binary = None
+    if args.transit_test_binary:
+        transit_binary = Path(args.transit_test_binary).resolve(strict=True)
+        require(transit_binary.is_file() and transit_binary.is_absolute(), "transit test binary missing")
     if args.initializer_test_binary or args.operator_test_binary:
         initializer_binary = Path(args.initializer_test_binary or args.operator_test_binary).resolve(strict=True)
         require(initializer_binary.is_file() and initializer_binary.is_absolute(), "initializer test binary missing")
@@ -99,7 +104,7 @@ def main():
             restore_ip = str(restore_subnet.network_address + 2)
         # Test-only CA stays on the operator side, never mounted into the server.
         for command in (
-            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=isolated-fixture-ca", "-keyout", str(root / "ca.key"), "-out", str(root / "trust" / "ca.crt")],
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=isolated-fixture-ca", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", str(root / "ca.key"), "-out", str(root / "trust" / "ca.crt")],
             ["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=openbao", "-keyout", str(root / "tls" / "server.key"), "-out", str(root / "server.csr")],
         ):
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -191,6 +196,9 @@ def main():
             if result.returncode != 0:
                 for name in re.findall(r"--- FAIL: (Test[A-Za-z0-9_/]+)", result.stdout):
                     print("fixture failed test: " + name, flush=True)
+                for stage in ("native TLS provider configuration rejected", "actual native TLS encryption failed", "native TLS nonce behavior failed", "actual native TLS roundtrip failed", "actual native TLS AAD mismatch accepted", "actual native TLS ACL mismatch accepted", "native TLS hostname verification bypassed"):
+                    if stage in result.stdout:
+                        print("fixture stage: " + stage, flush=True)
                 for stage in sorted(set(re.findall(r"\b(?:BOOTSTRAP|OPERATOR)_[A-Z0-9_]+\b", result.stdout))):
                     print(stage, flush=True)
             require(result.returncode == 0 and marker in result.stdout and "SKIP" not in result.stdout, "actual recovery integration failed")
@@ -301,6 +309,15 @@ def main():
         expect("auth/token/revoke-self", {}, root_token)
         expect("sys/policies/acl/default", token=root_token, statuses=(403,))
         print("PASS: audit reopen, sealed restart, persisted historical decrypt, root revocation", flush=True)
+        if transit_binary:
+            environment = dict(os.environ)
+            environment.update(PINVOU_TEST_OPENBAO_TRANSIT_TLS_ISOLATED="1", PINVOU_TEST_OPENBAO_FIXTURE_ROOT=str(root), PINVOU_TEST_OPENBAO_ENDPOINT=endpoint)
+            result = subprocess.run([str(transit_binary), "-test.v", "-test.run=^TestTransitProvider(Dedicated.*|OpenBaoTLSIntegration)$", "-test.timeout=60s"], env=environment, capture_output=True, text=True, check=False, timeout=70)
+            if result.returncode != 0:
+                for name in re.findall(r"--- FAIL: (Test[A-Za-z0-9_/]+)", result.stdout):
+                    print("fixture failed test: " + name, flush=True)
+            require(result.returncode == 0 and "ACTUAL_OPENBAO_TRANSIT_TLS_PASS" in result.stdout and "SKIP" not in result.stdout, "native provider TLS integration failed")
+            print("OPENBAO_TRANSIT_TLS_FIXTURE_PASS", flush=True)
         print("OPENBAO_INFRASTRUCTURE_FIXTURE_PASS", flush=True)
     except Exception:
         # Only startup/operational error stages; no request bodies or secrets.

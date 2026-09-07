@@ -39,4 +39,15 @@ Linux Docker 操作者先取得上述固定镜像，运行 `python3 scripts/acco
 
 逐服务身份初始化使用独立本机 [kms-operator](../../tools/kms-recovery/cmd/kms-operator/README.md) 的固定 bootstrap/finalize 流程；原生 2.6.2 创建/轮换 key 返回 200 元数据。该工具已完成真实隔离联验，正式执行需要保管人本机口令，不把初始 root 投递到服务端文件、环境变量或命令参数。输出为加密角色包，Agent bootstrap 文件与定时快照任务仍需后续受控部署。
 
+业务侧 native provider 支持以下接线（完整 Compose/Helm 覆盖仍需 SECINF-04 后续任务，不要直接叠加仍强制 `remote` 的旧覆盖）：
+
+```text
+TOKEN_SECRET_PROVIDER=vault-transit
+TOKEN_SECRET_PROVIDER_CA_FILE=/var/run/secrets/pinvou/kms-trust/ca.crt
+TOKEN_SECRET_PROVIDER_TOKEN_FILE=/var/run/secrets/pinvou/kms/token
+TOKEN_SECRET_KEY_ID=pinvou-token-data
+```
+
+网关与凭据服务必须挂载各自的 Agent sink 整个目录，业务只读，不能挂载另一个服务的 sink 或任何 bootstrap。专用 CA 包只影响该 KMS client，不能通过替换全局 `SSL_CERT_FILE` 破坏 OIDC/商城的系统根信任。CA 包需要有效 CA 和显式 CertSign 用途；缺失、损坏或组/全局可写时拒绝启动。Kubernetes 的只读投影符号链接允许解析后读取，但挂载必须不可被业务写入。CA 启动时加载，更新后受控滚动重启；TLS 主机名验证始终开启，KMS client 不继承环境代理。未配置专用 CA 时保留系统 CA 兼容行为，显式配置不能在 local/remote 模式中被静默忽略。
+
 固定镜像声明了未使用的 `/openbao/file` 与 `/openbao/logs` 卷；模板显式用受限 tmpfs 覆盖，避免隐式匿名持久卷。实际业务数据与审计仍仅使用 `/bao/data`、`/bao/audit` 的登记绑定目录。启动前检查真实容器挂载不得出现未登记 volume；不能仅凭 YAML 没写 volume 就认定不存在。
