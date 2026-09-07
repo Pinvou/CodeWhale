@@ -12,9 +12,102 @@ use crate::tui::app::AppMode;
 use crate::tui::approval::ApprovalMode;
 use codewhale_protocol::runtime::DynamicToolSpec;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Prefix used for tool-call ids created by local composer shell shortcuts.
 pub const USER_SHELL_TOOL_ID_PREFIX: &str = "user_shell_";
+
+/// Process-local exact tool authority for an embedded turn. It is
+/// intentionally non-serializable so transcripts and wire clients cannot
+/// mint execution authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactToolDispatchPolicy {
+    allowed: Arc<[String]>,
+}
+
+impl ExactToolDispatchPolicy {
+    pub fn try_new(names: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        let mut allowed = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for name in names {
+            if name.is_empty() || name.trim() != name || name.contains('*') || name.contains('?') {
+                return Err("invalid exact tool name".to_string());
+            }
+            if name == "agent"
+                || name == "start_mcp_server"
+                || crate::mcp::McpPool::is_mcp_tool(&name)
+            {
+                return Err(
+                    "control-plane and MCP tools are not valid exact dispatch names".to_string(),
+                );
+            }
+            if !seen.insert(name.clone()) {
+                return Err("duplicate exact tool name".to_string());
+            }
+            allowed.push(name);
+        }
+        Ok(Self {
+            allowed: allowed.into(),
+        })
+    }
+
+    pub fn allowed_tools(&self) -> &[String] {
+        &self.allowed
+    }
+
+    pub fn allows(&self, canonical_name: &str) -> bool {
+        self.allowed.iter().any(|allowed| allowed == canonical_name)
+    }
+}
+
+/// Optional process-local hardening supplied by an embedding host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnToolSecurityPolicy {
+    trusted_external_paths_override: Option<Arc<[PathBuf]>>,
+    exact_dispatch: Option<ExactToolDispatchPolicy>,
+    require_read_only_dispatch: bool,
+    allow_hooks: bool,
+}
+
+impl TurnToolSecurityPolicy {
+    pub fn new(
+        trusted_external_paths_override: Option<Vec<PathBuf>>,
+        exact_dispatch: Option<ExactToolDispatchPolicy>,
+    ) -> Self {
+        Self {
+            trusted_external_paths_override: trusted_external_paths_override.map(Into::into),
+            exact_dispatch,
+            require_read_only_dispatch: false,
+            allow_hooks: false,
+        }
+    }
+
+    pub fn trusted_external_paths_override(&self) -> Option<&[PathBuf]> {
+        self.trusted_external_paths_override.as_deref()
+    }
+
+    pub fn exact_dispatch(&self) -> Option<&ExactToolDispatchPolicy> {
+        self.exact_dispatch.as_ref()
+    }
+
+    pub fn with_read_only_dispatch(mut self) -> Self {
+        self.require_read_only_dispatch = true;
+        self
+    }
+
+    pub fn requires_read_only_dispatch(&self) -> bool {
+        self.require_read_only_dispatch
+    }
+
+    pub fn with_trusted_hooks(mut self) -> Self {
+        self.allow_hooks = true;
+        self
+    }
+
+    pub fn allows_hooks(&self) -> bool {
+        self.allow_hooks
+    }
+}
 
 /// Snapshot of session state for saving to disk.
 /// Returned by `Op::GetSessionSnapshot` via a oneshot channel.
@@ -30,6 +123,23 @@ pub struct SessionSnapshot {
     pub workspace: PathBuf,
     pub system_prompt: Option<SystemPrompt>,
     pub mode: String,
+}
+
+/// A mid-turn steer message with an engine-assigned correlation id and a
+/// destination captured before channel capacity is reserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteerMessage {
+    pub id: String,
+    pub(crate) target: SteerTarget,
+    pub content: String,
+}
+
+/// Engine-owned destination for a steer. Embedding hosts only observe the
+/// opaque id returned by `EngineHandle::steer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SteerTarget {
+    pub(crate) session_epoch: u64,
+    pub(crate) turn_generation: u64,
 }
 
 /// Provider request runtime state surfaced by `/provider`.
@@ -145,6 +255,8 @@ pub enum Op {
         /// Structural input origin. This gates whether the turn may inherit
         /// YOLO/auto-approval authority; user-shaped text is not enough.
         provenance: UserInputProvenance,
+        /// Optional process-local security authority for this turn.
+        turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
     },
 
     /// Re-check and dispatch an interactive goal continuation when this
@@ -212,6 +324,9 @@ pub enum Op {
     /// Cancel a running sub-agent by id or session name.
     CancelSubAgent { agent_id: String },
 
+    /// Cancel every running background sub-agent owned by this engine.
+    CancelSubAgents,
+
     /// Deliver an operator follow-up to one child on its own fork: live
     /// delivery to a running child, or a checkpoint continuation (new agent
     /// id) for an interrupted or completed child. Terminal failed/cancelled
@@ -228,6 +343,9 @@ pub enum Op {
         approval_mode: ApprovalMode,
         configured_sandbox_mode: Option<String>,
     },
+
+    /// Replace the engine-level tool deny-list for subsequent turns.
+    SetDisallowedTools { tools: Option<Vec<String>> },
 
     /// Update the model being used and refresh stable prompt context.
     #[allow(dead_code)]

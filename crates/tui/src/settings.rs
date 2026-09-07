@@ -659,13 +659,13 @@ fn normalize_rail_panel(value: &str) -> &'static str {
 /// rail hides via placement off. Explicit new keys win over migrated ones.
 fn migrate_sidebar_settings_to_rail(s: &mut Settings) {
     match s.sidebar_focus.trim().to_ascii_lowercase().as_str() {
-        "hidden" | "hide" | "closed" | "off" | "none" => {
+        "hidden" | "hide" | "closed" | "off" | "none"
+            if !s.work_surface_placement_explicit =>
+        {
             // A legacy hidden sidebar is an explicit intent. Preserve it even
             // now that fresh sessions prefer the responsive left rail, but do
             // not override a newer placement the user explicitly saved.
-            if !s.work_surface_placement_explicit {
-                s.work_surface_placement = "off".to_string();
-            }
+            s.work_surface_placement = "off".to_string();
         }
         // #5141 let users pin a dedicated sessions panel in the classic
         // sidebar; on the unified rail the equivalent surface is the

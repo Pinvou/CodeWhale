@@ -25,6 +25,7 @@ pub enum StepStatus {
 
 impl StepStatus {
     #[allow(dead_code)]
+    #[allow(clippy::should_implement_trait)]
     #[must_use]
     pub fn from_str(value: &str) -> Option<Self> {
         match value.trim().to_lowercase().as_str() {

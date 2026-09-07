@@ -23,6 +23,19 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
 use unicode_normalization::UnicodeNormalization;
 
+const WRITE_FILE_MAX_CONTENT_BYTES: usize = 64 * 1024;
+
+fn validate_write_content_size(content: &str) -> Result<(), ToolError> {
+    if content.len() > WRITE_FILE_MAX_CONTENT_BYTES {
+        return Err(ToolError::invalid_input(format!(
+            "File write content is {} bytes — over the {}KB single-call limit. Split the artifact into multiple files or reduce its size.",
+            content.len(),
+            WRITE_FILE_MAX_CONTENT_BYTES / 1024,
+        )));
+    }
+    Ok(())
+}
+
 // === Content-hash edit guards (#3979) ===
 
 /// Format a file snapshot's content hash as `sha256:<hex>`.
@@ -1364,6 +1377,7 @@ impl WriteFileTool {
         reject_primitive_unknown(&input, "write", &["path", "content"])?;
         let path_str = required_str(&input, "path")?;
         let file_content = required_str(&input, "content")?;
+        validate_write_content_size(file_content)?;
         let file_path = context.resolve_path(path_str)?;
         let mutation_guard = acquire_file_mutation(&file_path, context).await?;
         check_file_operation_cancelled(context)?;
@@ -1466,6 +1480,7 @@ impl ToolSpec for WriteFileTool {
 
         let path_str = required_str(&input, "path")?;
         let file_content = required_str(&input, "content")?;
+        validate_write_content_size(file_content)?;
         let expected_hash = optional_str(&input, "expected_hash")?;
 
         let file_path = context.resolve_path(path_str)?;

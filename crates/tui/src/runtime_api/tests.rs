@@ -3641,7 +3641,7 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
             let _ = tx_event
                 .send(EngineEvent::MessageDelta {
                     index: 0,
-                    content: format!("steer:{steer_text}"),
+                    content: format!("steer:{}", steer_text.content),
                 })
                 .await;
         }

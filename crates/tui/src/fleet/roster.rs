@@ -148,6 +148,43 @@ pub fn project_agent_profiles_enabled() -> bool {
 }
 
 impl FleetRoster {
+    /// Build the immutable, config-origin profile set supplied by an embedding
+    /// host. Unlike [`Self::load`], this never reads plugin, personal, or
+    /// workspace profile directories and does not add built-in members.
+    ///
+    /// Pinvou's host boundary uses this at Agent spawn time so a per-turn
+    /// in-memory profile snapshot can contribute prompt text without
+    /// reviving ambient saved-member dispatch.
+    #[must_use]
+    pub(crate) fn from_host_config(fleet_config: &FleetConfigToml) -> Self {
+        let mut members = fleet_config
+            .profiles
+            .iter()
+            .map(|(id, profile)| {
+                let mut profile = profile.clone();
+                profile.role.name = super::profile::canonical_public_role_name(&profile.role.name);
+                profile.slot = FleetSlot::from_name(&profile.role.name);
+                AgentProfile {
+                    id: id.clone(),
+                    display_name: None,
+                    description: profile.role.description.clone(),
+                    requires: Vec::new(),
+                    profile,
+                    source: PathBuf::from("host-config"),
+                    origin: ProfileOrigin::Config,
+                    plugin_authority: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        members.sort_by_key(|member| member.id.to_ascii_lowercase());
+        Self {
+            members,
+            exact_selection: true,
+            shadowed: Vec::new(),
+            load_error: None,
+        }
+    }
+
     /// Roster containing only the built-in party. Used as the runtime default
     /// before config/workspace layers are wired in.
     #[must_use]

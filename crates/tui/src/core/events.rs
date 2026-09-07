@@ -383,6 +383,12 @@ pub enum Event {
         result: String,
     },
 
+    /// A queued steer was committed into the session transcript.
+    SteerCommitted { steer_id: String },
+
+    /// A queued steer was retired without reaching the transcript.
+    SteerDropped { steer_id: String },
+
     /// Receipt for an operator follow-up sent to a child (`Op::FollowUpSubAgent`).
     /// `Ok` carries the delivery outcome (the target id may differ from the
     /// addressed id when a fork was continued from a checkpoint); `Err` is the

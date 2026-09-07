@@ -21,6 +21,18 @@ use codewhale_core::request::{PrimaryTurnRequest, prepare_primary_turn_request};
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 
+fn tool_log_message_for_policy(
+    restricted: bool,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> String {
+    if restricted {
+        "Planning restricted tool with redacted input".to_string()
+    } else {
+        format!("Planning tool '{tool_name}' with input: {tool_input:?}")
+    }
+}
+
 struct PlannedToolCalls {
     plans: Vec<ToolExecutionPlan>,
     hook_contexts: std::collections::HashMap<String, String>,
@@ -40,7 +52,6 @@ struct StreamOutcome {
     pending_message_complete: bool,
     last_text_index: Option<usize>,
     stream_errors: u32,
-    pending_steers: Vec<String>,
     /// Typed, engine-internal drop-recovery state. `Option` + consume-once
     /// means one drop schedules exactly one resume; see [`StreamResume`].
     pending_resume: Option<StreamResume>,
@@ -104,6 +115,14 @@ pub(super) fn registered_tool_approval_required(
         resolve_tool_permission(&authority, requirement, is_non_bypassable),
         ToolPermission::Prompt
     )
+}
+
+pub(super) fn registered_tool_blocked_in_full_access(
+    tool_name: &str,
+    requirement: ApprovalRequirement,
+    auto_approve: bool,
+) -> bool {
+    auto_approve && registered_tool_forces_prompt(tool_name, requirement)
 }
 
 /// The engine-side half of the in-workspace write carve-out (#5185): true
@@ -551,14 +570,17 @@ impl Engine {
             super::reviewer::ReviewerOutcome::Cancelled => None,
         };
         let result = review.outcome.into_tool_result(context.tool_name);
-        emit_tool_audit(json!({
-            "event": "tool.auto_review",
-            "gate": "guardian",
-            "tool_id": tool_id,
-            "decision": decision,
-            "risk": risk,
-            "reason": result.as_ref().map_or_else(|error| error.to_string(), Clone::clone),
-        }));
+        emit_tool_audit_for_policy(
+            self.active_turn_tool_security.is_some(),
+            json!({
+                "event": "tool.auto_review",
+                "gate": "guardian",
+                "tool_id": tool_id,
+                "decision": decision,
+                "risk": risk,
+                "reason": result.as_ref().map_or_else(|error| error.to_string(), Clone::clone),
+            }),
+        );
         if let Some((verdict, reason)) = receipt {
             let _ = self
                 .tx_event
@@ -710,6 +732,7 @@ impl Engine {
 
         loop {
             if self.cancel_token.is_cancelled() {
+                self.settle_steers_on_interrupt().await;
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 return (TurnOutcomeStatus::Interrupted, None);
             }
@@ -737,31 +760,21 @@ impl Engine {
                 );
             }
 
-            let mut accepted_steer = false;
             while let Ok(steer) = self.rx_steer.try_recv() {
-                let steer = steer.trim().to_string();
-                if steer.is_empty() {
-                    continue;
-                }
-                accepted_steer = true;
-                self.session
-                    .working_set
-                    .observe_user_message(&steer, &self.session.workspace);
-                self.add_session_message(self.user_text_message_with_turn_metadata(steer.clone()))
-                    .await;
-                let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Steer input accepted: {}",
-                        summarize_text(&steer, 120)
-                    )))
-                    .await;
+                self.queue_steer(steer).await;
             }
-            if accepted_steer {
-                grant_turn_end_steer_response_allowance(
-                    turn_end_child_guard_sent,
-                    &mut turn_end_child_coordination_responses_remaining,
-                );
+            if !self.pending_steers.is_empty() {
+                let pending = std::mem::take(&mut self.pending_steers);
+                let mut accepted_steer = false;
+                for steer in pending {
+                    accepted_steer |= self.inject_steer(steer).await;
+                }
+                if accepted_steer {
+                    grant_turn_end_steer_response_allowance(
+                        turn_end_child_guard_sent,
+                        &mut turn_end_child_coordination_responses_remaining,
+                    );
+                }
             }
 
             // Child agents can finish while the parent model is still taking
@@ -983,6 +996,7 @@ impl Engine {
                     self.emit_compaction_cancelled(compaction_id, true, message)
                         .await;
                     if turn_was_canceled {
+                        self.settle_steers_on_interrupt().await;
                         return (TurnOutcomeStatus::Interrupted, None);
                     }
                     continue;
@@ -1006,6 +1020,7 @@ impl Engine {
                                 self.emit_compaction_cancelled(compaction_id, true, message)
                                     .await;
                                 if turn_was_canceled {
+                                    self.settle_steers_on_interrupt().await;
                                     return (TurnOutcomeStatus::Interrupted, None);
                                 }
                                 continue;
@@ -1387,6 +1402,7 @@ impl Engine {
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
+                    self.settle_steers_on_interrupt().await;
                     let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
@@ -1455,7 +1471,6 @@ impl Engine {
                 pending_message_complete,
                 last_text_index,
                 stream_errors,
-                mut pending_steers,
                 pending_resume,
                 stream_start,
                 first_token_at,
@@ -1506,6 +1521,7 @@ impl Engine {
             }
 
             if self.cancel_token.is_cancelled() {
+                self.settle_steers_on_interrupt().await;
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 self.add_interrupted_assistant_text(&current_text_visible)
                     .await;
@@ -1900,24 +1916,24 @@ impl Engine {
             // for turn-owned children → resume, 6) else end. No status
             // claims "ending" before step 6.
             if tool_uses.is_empty() {
-                if !pending_steers.is_empty() {
-                    for steer in pending_steers.drain(..) {
-                        self.session
-                            .working_set
-                            .observe_user_message(&steer, &self.session.workspace);
-                        self.add_session_message(self.user_text_message_with_turn_metadata(steer))
-                            .await;
+                if !self.pending_steers.is_empty() {
+                    let pending = std::mem::take(&mut self.pending_steers);
+                    let mut injected_any = false;
+                    for steer in pending {
+                        injected_any |= self.inject_steer(steer).await;
                     }
-                    let _ = self
-                        .tx_event
-                        .send(Event::status("Continuing — queued steer input".to_string()))
-                        .await;
-                    grant_turn_end_steer_response_allowance(
-                        turn_end_child_guard_sent,
-                        &mut turn_end_child_coordination_responses_remaining,
-                    );
-                    turn.next_step();
-                    continue;
+                    if injected_any {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status("Continuing — queued steer input".to_string()))
+                            .await;
+                        grant_turn_end_steer_response_allowance(
+                            turn_end_child_guard_sent,
+                            &mut turn_end_child_coordination_responses_remaining,
+                        );
+                        turn.next_step();
+                        continue;
+                    }
                 }
 
                 let shell_completions = self.drain_shell_completion_events();
@@ -2324,7 +2340,7 @@ impl Engine {
                         tool_uses.is_empty(),
                         turn_error.is_none(),
                         self.cancel_token.is_cancelled(),
-                        !pending_steers.is_empty(),
+                        !self.pending_steers.is_empty(),
                         false,
                     )
                     && !stop_reason_is_output_limit(stop_reason.as_deref())
@@ -2383,7 +2399,7 @@ impl Engine {
                         tool_uses.is_empty(),
                         turn_error.is_none(),
                         self.cancel_token.is_cancelled(),
-                        !pending_steers.is_empty(),
+                        !self.pending_steers.is_empty(),
                         false,
                     )
                 {
@@ -2431,9 +2447,10 @@ impl Engine {
             }
 
             let tool_exec_lock = self.tool_exec_lock.clone();
-            let mcp_pool = if tool_uses
-                .iter()
-                .any(|tool| McpPool::is_mcp_tool(&tool.name))
+            let mcp_pool = if self.active_turn_tool_security.is_none()
+                && tool_uses
+                    .iter()
+                    .any(|tool| McpPool::is_mcp_tool(&tool.name))
             {
                 match self.ensure_mcp_pool().await {
                     Ok(pool) => Some(pool),
@@ -2488,18 +2505,18 @@ impl Engine {
             )
             .await;
 
-            if !pending_steers.is_empty() {
-                for steer in pending_steers.drain(..) {
-                    self.session
-                        .working_set
-                        .observe_user_message(&steer, &self.session.workspace);
-                    self.add_session_message(self.user_text_message_with_turn_metadata(steer))
-                        .await;
+            if !self.pending_steers.is_empty() {
+                let pending = std::mem::take(&mut self.pending_steers);
+                let mut accepted_steer = false;
+                for steer in pending {
+                    accepted_steer |= self.inject_steer(steer).await;
                 }
-                grant_turn_end_steer_response_allowance(
-                    turn_end_child_guard_sent,
-                    &mut turn_end_child_coordination_responses_remaining,
-                );
+                if accepted_steer {
+                    grant_turn_end_steer_response_allowance(
+                        turn_end_child_guard_sent,
+                        &mut turn_end_child_coordination_responses_remaining,
+                    );
+                }
             }
 
             // Surface an output-limit truncation after the tool result so the
@@ -2528,6 +2545,7 @@ impl Engine {
         }
 
         if self.cancel_token.is_cancelled() {
+            self.settle_steers_on_interrupt().await;
             return (TurnOutcomeStatus::Interrupted, None);
         }
         if let Some(err) = turn_error {
@@ -2630,8 +2648,10 @@ impl Engine {
             let mut tool_name = tool.name.clone();
             let mut tool_input = tool.input.clone();
             let tool_caller = tool.caller.clone();
-            crate::logging::info(format!(
-                "Planning tool '{tool_name}' with input: {tool_input:?}"
+            crate::logging::info(tool_log_message_for_policy(
+                self.active_turn_tool_security.is_some(),
+                &tool_name,
+                &tool_input,
             ));
 
             let requested_tool_name = tool_name.clone();
@@ -2700,6 +2720,12 @@ impl Engine {
                 blocked_error = Some(ToolError::permission_denied(format!(
                     "Tool '{tool_name}' is not in the allowed-tools list for the current command"
                 )));
+            }
+
+            if blocked_error.is_none()
+                && let Some(error) = self.exact_dispatch_error(&tool_name)
+            {
+                blocked_error = Some(error);
             }
 
             if blocked_error.is_none() && !caller_allowed_for_tool(tool_caller.as_ref(), tool_def) {
@@ -2794,17 +2820,23 @@ impl Engine {
             if let Some(prepared) = prepared_policy {
                 let registered_non_bypassable =
                     registered_tool_forces_prompt(&tool_name, prepared.call.approval);
-                approval_required = registered_tool_approval_required(
+                if registered_tool_blocked_in_full_access(
                     &tool_name,
                     prepared.call.approval,
                     prepared.auto_approve,
-                );
-                // Non-bypassable holds force a prompt in every posture
-                // that can open one. Full Access auto-approves instead:
-                // it already grants everything these calls can do, and a
-                // gate that cannot open its own approval UI used to
-                // strand the call entirely (#3866, reversed 2026-08-10).
-                approval_force_prompt = registered_non_bypassable && !prepared.auto_approve;
+                ) {
+                    approval_required = false;
+                    blocked_error = Some(ToolError::permission_denied(format!(
+                        "Tool '{tool_name}' requires explicit approval and is blocked in Full Access because this posture does not open tool-approval prompts. Switch to Ask to review this call."
+                    )));
+                } else {
+                    approval_required = registered_tool_approval_required(
+                        &tool_name,
+                        prepared.call.approval,
+                        prepared.auto_approve,
+                    );
+                    approval_force_prompt = registered_non_bypassable;
+                }
                 approval_description = prepared.call.description;
                 supports_parallel = prepared.call.supports_parallel;
                 read_only = prepared.call.read_only;
@@ -2831,11 +2863,14 @@ impl Engine {
                     )
                 {
                     approval_required = false;
-                    emit_tool_audit(json!({
-                        "event": "tool.workspace_write_carve_out",
-                        "tool_id": tool_id.clone(),
-                        "tool_name": tool_name.clone(),
-                    }));
+                    emit_tool_audit_for_policy(
+                        self.active_turn_tool_security.is_some(),
+                        json!({
+                            "event": "tool.workspace_write_carve_out",
+                            "tool_id": tool_id.clone(),
+                            "tool_name": tool_name.clone(),
+                        }),
+                    );
                 }
 
                 let approval = match prepared.call.approval {
@@ -2843,17 +2878,20 @@ impl Engine {
                     ApprovalRequirement::Suggest => "suggest",
                     ApprovalRequirement::Required => "required",
                 };
-                emit_tool_audit(json!({
-                    "event": "tool.prepared",
-                    "tool_id": tool_id.clone(),
-                    "tool_name": tool_name.clone(),
-                    "read_only": read_only,
-                    "supports_parallel": supports_parallel,
-                    "starts_detached": detached_start,
-                    "approval": approval,
-                    "resources": &resources,
-                    "reprepared_after_hook": reprepared_after_hook,
-                }));
+                emit_tool_audit_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    json!({
+                        "event": "tool.prepared",
+                        "tool_id": tool_id.clone(),
+                        "tool_name": tool_name.clone(),
+                        "read_only": read_only,
+                        "supports_parallel": supports_parallel,
+                        "starts_detached": detached_start,
+                        "approval": approval,
+                        "resources": &resources,
+                        "reprepared_after_hook": reprepared_after_hook,
+                    }),
+                );
             }
 
             if blocked_error.is_none()
@@ -2934,12 +2972,15 @@ impl Engine {
                     &self.config.auto_review_policy,
                     &review_context,
                 );
-                emit_tool_audit(json!({
-                    "event": "tool.auto_review",
-                    "gate": "deterministic",
-                    "tool_id": tool_id.clone(),
-                    "auto_review": audit_event,
-                }));
+                emit_tool_audit_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    json!({
+                        "event": "tool.auto_review",
+                        "gate": "deterministic",
+                        "tool_id": tool_id.clone(),
+                        "auto_review": audit_event,
+                    }),
+                );
                 match decision {
                     AutoReviewPlanDecision::NoChange => {}
                     AutoReviewPlanDecision::Allow => {
@@ -3004,18 +3045,21 @@ impl Engine {
                     &tool_input,
                 )
             {
-                emit_tool_audit(json!({
-                    "event": "tool.repo_law_decision",
-                    "tool_id": tool_id.clone(),
-                    "decision": match &decision {
-                        crate::repo_law::RepoLawPlanDecision::ForcePrompt(_) => "force_prompt",
-                        crate::repo_law::RepoLawPlanDecision::Block(_) => "block",
-                    },
-                    "reason": match &decision {
-                        crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason)
-                        | crate::repo_law::RepoLawPlanDecision::Block(reason) => reason.clone(),
-                    },
-                }));
+                emit_tool_audit_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    json!({
+                        "event": "tool.repo_law_decision",
+                        "tool_id": tool_id.clone(),
+                        "decision": match &decision {
+                            crate::repo_law::RepoLawPlanDecision::ForcePrompt(_) => "force_prompt",
+                            crate::repo_law::RepoLawPlanDecision::Block(_) => "block",
+                        },
+                        "reason": match &decision {
+                            crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason)
+                            | crate::repo_law::RepoLawPlanDecision::Block(reason) => reason.clone(),
+                        },
+                    }),
+                );
                 match decision {
                     crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
                         if repo_law_must_block_without_prompt(
@@ -3059,13 +3103,16 @@ impl Engine {
                     // must not depend on randomized HashSet iteration.
                     deferred_tools_hydrated_in_order.push(tool_name.clone());
                 }
-                emit_tool_audit(json!({
-                    "event": "tool.schema_hydrated",
-                    "tool_id": tool_id.clone(),
-                    "tool_name": tool_name.clone(),
-                    "auto_retry_same_turn": false,
-                    "metadata": result.metadata,
-                }));
+                emit_tool_audit_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    json!({
+                        "event": "tool.schema_hydrated",
+                        "tool_id": tool_id.clone(),
+                        "tool_name": tool_name.clone(),
+                        "auto_retry_same_turn": false,
+                        "metadata": result.metadata,
+                    }),
+                );
                 if should_emit_hydration_status {
                     let status = if requested_tool_name == tool_name {
                         format!(
@@ -3409,6 +3456,8 @@ impl Engine {
                     let context_override =
                         tool_context_for_call(batch_tool_context.clone(), &plan.id);
                     let cancel_token = self.cancel_token.clone();
+                    let turn_tool_security = self.active_turn_tool_security.clone();
+                    let restricted_audit = turn_tool_security.is_some();
 
                     tool_tasks.push(async move {
                         let _shell_permit =
@@ -3429,6 +3478,7 @@ impl Engine {
                             registry,
                             mcp_pool,
                             context_override,
+                            turn_tool_security,
                         )
                         .await;
 
@@ -3445,12 +3495,15 @@ impl Engine {
                                     &session_id,
                                 )
                         {
-                            emit_tool_audit(json!({
-                                "event": "tool.spillover",
-                                "tool_id": plan.id.clone(),
-                                "tool_name": plan.name.clone(),
-                                "path": path.display().to_string(),
-                            }));
+                            emit_tool_audit_for_policy(
+                                restricted_audit,
+                                json!({
+                                    "event": "tool.spillover",
+                                    "tool_id": plan.id.clone(),
+                                    "tool_name": plan.name.clone(),
+                                    "path": path.display().to_string(),
+                                }),
+                            );
                         }
 
                         let content_blocks = result
@@ -3718,11 +3771,14 @@ impl Engine {
                         Option<crate::tools::ToolContext>,
                         Option<ToolApprovalStamp>,
                     ) = if plan.approval_required {
-                        emit_tool_audit(json!({
-                            "event": "tool.approval_required",
-                            "tool_id": tool_id.clone(),
-                            "tool_name": tool_name.clone(),
-                        }));
+                        emit_tool_audit_for_policy(
+                            self.active_turn_tool_security.is_some(),
+                            json!({
+                                "event": "tool.approval_required",
+                                "tool_id": tool_id.clone(),
+                                "tool_name": tool_name.clone(),
+                            }),
+                        );
                         let approval_key = crate::tools::approval_cache::build_approval_key(
                             &tool_name,
                             &tool_input,
@@ -3759,14 +3815,17 @@ impl Engine {
                                 } else {
                                     "approved"
                                 };
-                                emit_tool_audit(json!({
-                                    "event": "tool.approval_decision",
-                                    "tool_id": tool_id.clone(),
-                                    "tool_name": tool_name.clone(),
-                                    "decision": decision,
-                                    "policy": model_requested_policy.as_ref().map(|policy| format!("{policy:?}")),
-                                    "caller": caller_type_for_tool_use(tool_caller.as_ref()),
-                                }));
+                                emit_tool_audit_for_policy(
+                                    self.active_turn_tool_security.is_some(),
+                                    json!({
+                                        "event": "tool.approval_decision",
+                                        "tool_id": tool_id.clone(),
+                                        "tool_name": tool_name.clone(),
+                                        "decision": decision,
+                                        "policy": model_requested_policy.as_ref().map(|policy| format!("{policy:?}")),
+                                        "caller": caller_type_for_tool_use(tool_caller.as_ref()),
+                                    }),
+                                );
                                 if let Some(policy) = model_requested_policy {
                                     let elevated_context = Some(
                                         batch_tool_context
@@ -3784,13 +3843,16 @@ impl Engine {
                                 }
                             }
                             Ok(ApprovalResult::Denied) => {
-                                emit_tool_audit(json!({
-                                    "event": "tool.approval_decision",
-                                    "tool_id": tool_id.clone(),
-                                    "tool_name": tool_name.clone(),
-                                    "decision": "denied",
-                                    "caller": caller_type_for_tool_use(tool_caller.as_ref()),
-                                }));
+                                emit_tool_audit_for_policy(
+                                    self.active_turn_tool_security.is_some(),
+                                    json!({
+                                        "event": "tool.approval_decision",
+                                        "tool_id": tool_id.clone(),
+                                        "tool_name": tool_name.clone(),
+                                        "decision": "denied",
+                                        "caller": caller_type_for_tool_use(tool_caller.as_ref()),
+                                    }),
+                                );
                                 (
                                     Some(Err(ToolError::permission_denied(format!(
                                         // #5146: name the correct next
@@ -3809,14 +3871,17 @@ impl Engine {
                                 )
                             }
                             Ok(ApprovalResult::RetryWithPolicy(policy)) => {
-                                emit_tool_audit(json!({
-                                    "event": "tool.approval_decision",
-                                    "tool_id": tool_id.clone(),
-                                    "tool_name": tool_name.clone(),
-                                    "decision": "retry_with_policy",
-                                    "policy": format!("{policy:?}"),
-                                    "caller": caller_type_for_tool_use(tool_caller.as_ref()),
-                                }));
+                                emit_tool_audit_for_policy(
+                                    self.active_turn_tool_security.is_some(),
+                                    json!({
+                                        "event": "tool.approval_decision",
+                                        "tool_id": tool_id.clone(),
+                                        "tool_name": tool_name.clone(),
+                                        "decision": "retry_with_policy",
+                                        "policy": format!("{policy:?}"),
+                                        "caller": caller_type_for_tool_use(tool_caller.as_ref()),
+                                    }),
+                                );
                                 let elevated_context = batch_tool_context
                                     .clone()
                                     .map(|context| context.with_elevated_sandbox_policy(policy));
@@ -3911,6 +3976,7 @@ impl Engine {
                                         context_override.or_else(|| batch_tool_context.clone()),
                                         &tool_id,
                                     ),
+                                    self.active_turn_tool_security.clone(),
                                 ) => (result, false),
                             }
                         };
@@ -3936,12 +4002,15 @@ impl Engine {
                             &self.session.id,
                         )
                     {
-                        emit_tool_audit(json!({
-                            "event": "tool.spillover",
-                            "tool_id": tool_id.clone(),
-                            "tool_name": tool_name.clone(),
-                            "path": path.display().to_string(),
-                        }));
+                        emit_tool_audit_for_policy(
+                            self.active_turn_tool_security.is_some(),
+                            json!({
+                                "event": "tool.spillover",
+                                "tool_id": tool_id.clone(),
+                                "tool_name": tool_name.clone(),
+                                "path": path.display().to_string(),
+                            }),
+                        );
                     }
 
                     let content_blocks = result
@@ -4060,13 +4129,16 @@ impl Engine {
                         self.session.pending_prefix_change_reason =
                             Some("tool_surface".to_string());
                     }
-                    emit_tool_audit(json!({
-                        "event": "tool.result",
-                        "tool_id": outcome.id.clone(),
-                        "tool_name": outcome.name.clone(),
-                        "status": terminal_status.as_str(),
-                        "success": output.success,
-                    }));
+                    emit_tool_audit_for_policy(
+                        self.active_turn_tool_security.is_some(),
+                        json!({
+                            "event": "tool.result",
+                            "tool_id": outcome.id.clone(),
+                            "tool_name": outcome.name.clone(),
+                            "status": terminal_status.as_str(),
+                            "success": output.success,
+                        }),
+                    );
                     let output_for_context = compact_tool_result_for_route(
                         self.api_provider,
                         &self.session.model,
@@ -4129,16 +4201,19 @@ impl Engine {
                 }
                 Err(e) => {
                     let envelope: ErrorEnvelope = e.clone().into();
-                    emit_tool_audit(json!({
-                        "event": "tool.result",
-                        "tool_id": outcome.id.clone(),
-                        "tool_name": outcome.name.clone(),
-                        "status": terminal_status.as_str(),
-                        "success": false,
-                        "error": e.to_string(),
-                        "category": envelope.category.to_string(),
-                        "severity": envelope.severity.to_string(),
-                    }));
+                    emit_tool_audit_for_policy(
+                        self.active_turn_tool_security.is_some(),
+                        json!({
+                            "event": "tool.result",
+                            "tool_id": outcome.id.clone(),
+                            "tool_name": outcome.name.clone(),
+                            "status": terminal_status.as_str(),
+                            "success": false,
+                            "error": e.to_string(),
+                            "category": envelope.category.to_string(),
+                            "severity": envelope.severity.to_string(),
+                        }),
+                    );
                     let input_schema = tool_catalog
                         .iter()
                         .find(|tool| tool.name == outcome.name)
@@ -4239,7 +4314,6 @@ impl Engine {
         // content-block delta delivered to the consumer).
         let mut any_content_received = false;
         let mut transparent_stream_retries = 0u32;
-        let mut pending_steers: Vec<String> = Vec::new();
         // `stream_start` is reset on a transparent retry so the wall-clock
         // budget restarts with the fresh stream.
         let mut stream_start = Instant::now();
@@ -4297,18 +4371,7 @@ impl Engine {
                 break;
             };
             while let Ok(steer) = self.rx_steer.try_recv() {
-                let steer = steer.trim().to_string();
-                if steer.is_empty() {
-                    continue;
-                }
-                pending_steers.push(steer.clone());
-                let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Steer input queued: {}",
-                        summarize_text(&steer, 120)
-                    )))
-                    .await;
+                self.queue_steer(steer).await;
             }
 
             if self.cancel_token.is_cancelled() {
@@ -4581,9 +4644,13 @@ impl Engine {
                         caller,
                         thought_signature,
                     } => {
-                        crate::logging::info(format!(
-                            "Tool '{name}' block start. Initial input: {input:?}"
-                        ));
+                        if self.active_turn_tool_security.is_some() {
+                            crate::logging::info("Restricted tool block start (details redacted)");
+                        } else {
+                            crate::logging::info(format!(
+                                "Tool '{name}' block start. Initial input: {input:?}"
+                            ));
+                        }
                         current_block_kind = Some(ContentBlockKind::ToolUse);
                         current_tool_indices.insert(index, tool_uses.len());
                         // ToolCallStarted is deferred to ContentBlockStop —
@@ -4601,9 +4668,15 @@ impl Engine {
                         });
                     }
                     ContentBlockStart::ServerToolUse { id, name, input } => {
-                        crate::logging::info(format!(
-                            "Server tool '{name}' block start. Initial input: {input:?}"
-                        ));
+                        if self.active_turn_tool_security.is_some() {
+                            crate::logging::info(
+                                "Restricted server tool block start (details redacted)",
+                            );
+                        } else {
+                            crate::logging::info(format!(
+                                "Server tool '{name}' block start. Initial input: {input:?}"
+                            ));
+                        }
                         current_block_kind = Some(ContentBlockKind::ToolUse);
                         current_tool_indices.insert(index, tool_uses.len());
                         tool_uses.push(ToolUseState {
@@ -4674,7 +4747,11 @@ impl Engine {
                             // whole accumulated buffer on every JSON delta
                             // (O(n²) per tool call) for a log that is
                             // usually disabled.
-                            if crate::logging::is_verbose() {
+                            if self.active_turn_tool_security.is_some() {
+                                crate::logging::info(
+                                    "Restricted tool input delta (details redacted)",
+                                );
+                            } else if crate::logging::is_verbose() {
                                 crate::logging::info(format!(
                                     "Tool '{}' input delta: {} (buffer now: {})",
                                     tool_state.name, partial_json, tool_state.input_buffer
@@ -4682,7 +4759,11 @@ impl Engine {
                             }
                             if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
                                 tool_state.input = value.clone();
-                                if crate::logging::is_verbose() {
+                                if self.active_turn_tool_security.is_some() {
+                                    crate::logging::info(
+                                        "Restricted tool input parsed (details redacted)",
+                                    );
+                                } else if crate::logging::is_verbose() {
                                     crate::logging::info(format!(
                                         "Tool '{}' input parsed: {:?}",
                                         tool_state.name, value
@@ -4730,22 +4811,38 @@ impl Engine {
                     if let Some(tool_idx) = current_tool_indices.remove(&index)
                         && let Some(tool_state) = tool_uses.get_mut(tool_idx)
                     {
-                        crate::logging::info(format!(
-                            "Tool '{}' block stop. Buffer: '{}', Current input: {:?}",
-                            tool_state.name, tool_state.input_buffer, tool_state.input
-                        ));
+                        if self.active_turn_tool_security.is_some() {
+                            crate::logging::info("Restricted tool block stop (details redacted)");
+                        } else {
+                            crate::logging::info(format!(
+                                "Tool '{}' block stop. Buffer: '{}', Current input: {:?}",
+                                tool_state.name, tool_state.input_buffer, tool_state.input
+                            ));
+                        }
                         if !tool_state.input_buffer.trim().is_empty() {
                             if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
                                 tool_state.input = value;
-                                crate::logging::info(format!(
-                                    "Tool '{}' final input: {:?}",
-                                    tool_state.name, tool_state.input
-                                ));
+                                if self.active_turn_tool_security.is_some() {
+                                    crate::logging::info(
+                                        "Restricted tool final input (details redacted)",
+                                    );
+                                } else {
+                                    crate::logging::info(format!(
+                                        "Tool '{}' final input: {:?}",
+                                        tool_state.name, tool_state.input
+                                    ));
+                                }
                             } else {
-                                crate::logging::warn(format!(
-                                    "Tool '{}' failed to parse final input buffer: '{}'",
-                                    tool_state.name, tool_state.input_buffer
-                                ));
+                                if self.active_turn_tool_security.is_some() {
+                                    crate::logging::warn(
+                                        "Restricted tool input parse failed (details redacted)",
+                                    );
+                                } else {
+                                    crate::logging::warn(format!(
+                                        "Tool '{}' failed to parse final input buffer: '{}'",
+                                        tool_state.name, tool_state.input_buffer
+                                    ));
+                                }
                                 let error =
                                     malformed_tool_arguments_error(&tool_state.input_buffer);
                                 tool_state.input_parse_error = Some(error);
@@ -4760,10 +4857,16 @@ impl Engine {
                                     .await;
                             }
                         } else {
-                            crate::logging::warn(format!(
-                                "Tool '{}' input buffer is empty, using initial input: {:?}",
-                                tool_state.name, tool_state.input
-                            ));
+                            if self.active_turn_tool_security.is_some() {
+                                crate::logging::warn(
+                                    "Restricted tool input buffer is empty (details redacted)",
+                                );
+                            } else {
+                                crate::logging::warn(format!(
+                                    "Tool '{}' input buffer is empty, using initial input: {:?}",
+                                    tool_state.name, tool_state.input
+                                ));
+                            }
                         }
 
                         // Now that the input is finalized, announce the
@@ -4811,7 +4914,11 @@ impl Engine {
                         .and_then(Value::as_str)
                         .unwrap_or("provider stream error");
                     let envelope = ErrorEnvelope::classify(message.to_string(), true);
-                    crate::logging::warn(format!("Provider stream error event: {message}"));
+                    if self.active_turn_tool_security.is_some() {
+                        crate::logging::warn("Restricted provider stream error (details redacted)");
+                    } else {
+                        crate::logging::warn(format!("Provider stream error event: {message}"));
+                    }
                     let _ = self.tx_event.send(Event::error(envelope)).await;
                     stream_error.get_or_insert(message.to_string());
                     break;
@@ -4831,7 +4938,6 @@ impl Engine {
             pending_message_complete,
             last_text_index,
             stream_errors,
-            pending_steers,
             pending_resume,
             stream_start,
             first_token_at,
@@ -5873,6 +5979,19 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn forkguard_restricted_planning_log_redacts_private_input() {
+        let private = "PRIVATE_SENTINEL_MUST_NOT_REACH_LOG";
+        let message = tool_log_message_for_policy(
+            true,
+            "File",
+            &serde_json::json!({"path": private, "content": private}),
+        );
+        assert_eq!(message, "Planning restricted tool with redacted input");
+        assert!(!message.contains(private));
+        assert!(!message.contains("File"));
+    }
 
     #[test]
     fn tool_context_for_call_preserves_turn_and_sets_call_origin() {

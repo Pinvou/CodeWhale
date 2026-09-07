@@ -178,7 +178,7 @@ fn posture_bar_permission_outranks_mode_when_only_one_fits() {
         let has_mode = text.contains("operate");
         let has_permission = text.contains("full access");
         assert!(
-            !(has_mode && !has_permission),
+            !has_mode || has_permission,
             "width {width} kept the mode word and shed the permission phrase: {text}"
         );
         if has_permission && !has_mode {

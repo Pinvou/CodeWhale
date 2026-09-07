@@ -142,6 +142,7 @@ impl FleetRole {
     ///
     /// Accepts Fleet role names and, at this parse boundary only, legacy
     /// aliases (`scout` → explore, `plan` → planner, …).
+    #[allow(clippy::should_implement_trait)]
     #[must_use]
     pub fn from_str(s: &str) -> Option<Self> {
         let normalized = s.trim().to_ascii_lowercase();

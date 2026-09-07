@@ -345,10 +345,8 @@ fn tool_payload(app: &App, call_id: &str) -> Result<(&'static str, Value, Value)
             match block {
                 ContentBlock::ToolUse {
                     id, name, input, ..
-                } => {
-                    if id.as_str() == call_id {
-                        found_call = Some((name.clone(), input.clone()));
-                    }
+                } if id.as_str() == call_id => {
+                    found_call = Some((name.clone(), input.clone()));
                 }
                 ContentBlock::ToolResult {
                     tool_use_id,

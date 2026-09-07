@@ -47,6 +47,8 @@ pub struct PromptSessionContext<'a> {
     /// Restrict skill discovery to Codewhale-owned roots plus explicit
     /// `skills_dir` configuration.
     pub skills_scan_codewhale_only: bool,
+    /// Treat `skills_dir` as the complete filesystem Skill authority.
+    pub explicit_skills_root_only: bool,
     /// Immutable plugin snapshot owned by this App/Engine workspace context.
     /// Never sourced from process-global mutable state.
     pub plugin_registry: Option<&'a crate::plugins::PluginRegistry>,
@@ -68,6 +70,7 @@ impl Default for PromptSessionContext<'_> {
             context_window_override: None,
             verbosity: None,
             skills_scan_codewhale_only: false,
+            explicit_skills_root_only: false,
             plugin_registry: None,
             mode: crate::tui::app::AppMode::Agent,
         }
@@ -434,6 +437,7 @@ pub type StaticPromptComposer = dyn Fn(&StaticPromptCtx<'_>) -> String + Send + 
 
 /// Install an embedder composer that owns the complete static prompt prefix.
 /// First call wins and must happen before any Engine is spawned.
+#[allow(clippy::result_unit_err)]
 pub fn set_static_prompt_composer_override(f: Box<StaticPromptComposer>) -> Result<(), ()> {
     STATIC_PROMPT_COMPOSER.set(f).map_err(|_| ())
 }
@@ -1031,6 +1035,7 @@ pub fn system_prompt_for_mode_with_context_and_skills(
             context_window_override: None,
             verbosity: None,
             skills_scan_codewhale_only: false,
+            explicit_skills_root_only: false,
             plugin_registry: None,
             mode: crate::tui::app::AppMode::Agent,
         },
@@ -1103,7 +1108,10 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
         )
     };
 
-    // Load project context from workspace
+    let static_composer_installed = static_prompt_composer_installed();
+
+    // Load project context only when CodeWhale owns that ambient authority
+    // channel. An embedding host supplies reviewed instructions explicitly.
     let project_context = load_project_context_with_parents(workspace);
 
     // 0. Locale-native reinforcement preamble (#1118 follow-up). When the
@@ -1121,7 +1129,9 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     // `load_project_context_with_parents` generates an in-memory bounded
     // overview when no context file exists, so the fallback should usually be
     // available without writing project-local files.
-    let mut full_prompt = if let Some(project_block) = project_context.as_system_block() {
+    let mut full_prompt = if static_composer_installed {
+        composed
+    } else if let Some(project_block) = project_context.as_system_block() {
         format!("{}\n\n{project_block}", composed.trim())
     } else {
         // Extremely unlikely: context generation failed (e.g. filesystem error).
@@ -1134,11 +1144,14 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
         full_prompt = format!("{preamble}\n\n{full_prompt}");
     }
 
-    if let Some(user_constitution_block) = load_user_constitution_block() {
+    if !static_composer_installed
+        && let Some(user_constitution_block) = load_user_constitution_block()
+    {
         full_prompt = format!("{full_prompt}\n\n{user_constitution_block}");
     }
 
-    if session_context.project_context_pack_enabled
+    if !static_composer_installed
+        && session_context.project_context_pack_enabled
         && let Some(pack) = crate::project_context::generate_project_context_pack(workspace)
     {
         full_prompt = format!("{full_prompt}\n\n{pack}");
@@ -1178,8 +1191,17 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     // keeps every skill name. Session-pinned: the window is fixed per route.
     let skills_budget =
         crate::skills::skills_prompt_budget_chars(session_context.context_window_override);
-    let skills_block = match skills_dir {
-        Some(dir) => {
+    let skills_block = match (skills_dir, session_context.explicit_skills_root_only) {
+        (Some(dir), true) => {
+            crate::skills::render_available_skills_context_for_explicit_dir_with_plugins(
+                workspace,
+                dir,
+                session_context.locale_tag,
+                session_context.plugin_registry,
+                skills_budget,
+            )
+        }
+        (Some(dir), false) => {
             crate::skills::render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
                 workspace,
                 dir,
@@ -1189,7 +1211,7 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
                 skills_budget,
             )
         }
-        None => crate::skills::render_available_skills_context_for_workspace_with_mode_and_plugins(
+        (None, _) => crate::skills::render_available_skills_context_for_workspace_with_mode_and_plugins(
             workspace,
             skill_discovery_mode,
             session_context.locale_tag,
@@ -1204,7 +1226,7 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     // 4. Lean, runtime-only coding discipline. Context pressure, prompt-cache
     // accounting, footer presentation, and automatic compaction are host
     // responsibilities; teaching their UI to the model dilutes the task.
-    if !bundled_headless {
+    if !bundled_headless && !static_composer_installed {
         full_prompt.push_str("\n\n");
         full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
     }
@@ -1231,7 +1253,8 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     {
         workspace_parts.push(format!("{memory_block}\n\n{MEMORY_GUIDANCE}"));
     }
-    if prompt_host == PromptHost::Interactive
+    if !static_composer_installed
+        && prompt_host == PromptHost::Interactive
         && let Some(harness_block) = crate::continual_harness::prompt_block(workspace)
     {
         workspace_parts.push(harness_block);
@@ -1269,10 +1292,13 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     // `.cursorrules`, `.clinerules`, `.windsurf/rules/*`, `.gemini/*`,
     // `.github/copilot-instructions.md` etc., beyond the canonical
     // `AGENTS.md` already in the constitution prefix.
-    if let Some(fragment) = codewhale_core::fragments::load_selected_project_instruction_fragment(
-        workspace,
-        &crate::project_context::active_fragment_candidates(),
-    ) {
+    if !static_composer_installed
+        && let Some(fragment) =
+            codewhale_core::fragments::load_selected_project_instruction_fragment(
+                workspace,
+                &crate::project_context::active_fragment_candidates(),
+            )
+    {
         // `BoundedFragment` already enforces `MAX_FRAGMENT_BYTES` (10K-token
         // ceiling) and per-fragment caps; WorldState's `with_*` also clamps.
         world_state = world_state.with_project_instructions(fragment.content);
@@ -1349,7 +1375,12 @@ pub fn world_state_from_session_facts(
         state = state.with_workspace(body);
     }
     if let Some(body) = permissions_body.filter(|s| !s.trim().is_empty()) {
-        state = state.with_permissions(body);
+        state.upsert(crate::model_context::ModelContextFragment::with_max_bytes(
+            crate::model_context::FragmentId::Permissions,
+            crate::model_context::FragmentRole::Permissions,
+            body,
+            INSTRUCTIONS_FILE_MAX_BYTES,
+        ));
     }
     if let Some(body) = route_body.filter(|s| !s.trim().is_empty()) {
         state = state.with_route(body);
@@ -1731,6 +1762,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -1984,7 +2016,7 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_merges_workspace_and_configured_skills_dir() {
+    fn system_prompt_uses_only_explicit_configured_skills_dir() {
         let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         let _home = ScopedHome::set(tmp.path().join("home"));
@@ -1997,16 +2029,34 @@ mod tests {
         );
         write_test_skill(&configured_dir, "configured-skill", "configured skill");
 
-        let text = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
-            &workspace,
-            None,
-            Some(&configured_dir),
-            None,
-            None,
-        ));
+        let text =
+            system_prompt_flat_text(&system_prompt_for_mode_with_context_skills_and_session(
+                &workspace,
+                None,
+                Some(&configured_dir),
+                None,
+                PromptSessionContext {
+                    explicit_skills_root_only: true,
+                    ..PromptSessionContext::default()
+                },
+            ));
 
-        assert!(text.contains("workspace-skill"));
+        assert!(!text.contains("workspace-skill"));
         assert!(text.contains("configured-skill"));
+    }
+
+    #[test]
+    fn forkguard_instruction_fragment_preserves_explicit_host_budget() {
+        let tail = "FORKGUARD_INSTRUCTIONS_TAIL";
+        let body = format!("{}{}", "x".repeat(80 * 1024), tail);
+        let state = world_state_from_session_facts(None, Some(&body), None, None, None, None);
+        let fragment = state
+            .get(crate::model_context::FragmentId::Permissions)
+            .expect("permissions fragment");
+
+        assert_eq!(fragment.max_bytes, INSTRUCTIONS_FILE_MAX_BYTES);
+        assert!(fragment.content.ends_with(tail));
+        assert!(state.validate_caps().is_ok());
     }
 
     struct ScopedHome {
@@ -2154,6 +2204,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2279,6 +2330,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2326,6 +2378,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2419,6 +2472,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2600,6 +2654,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2630,6 +2685,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2674,6 +2730,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2804,6 +2861,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -2835,6 +2893,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -3057,6 +3116,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -3091,6 +3151,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -3182,6 +3243,7 @@ mod tests {
                     context_window_override: Some(1_000_000),
                     verbosity: None,
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -3705,6 +3767,7 @@ mod tests {
                     context_window_override: None,
                     verbosity: Some(" Concise "),
                     skills_scan_codewhale_only: false,
+                    explicit_skills_root_only: false,
                     plugin_registry: None,
                     mode: crate::tui::app::AppMode::Agent,
                 },
@@ -3749,6 +3812,7 @@ mod tests {
                 context_window_override: None,
                 verbosity: Some("concise"),
                 skills_scan_codewhale_only: false,
+                explicit_skills_root_only: false,
                 plugin_registry: None,
                 mode: crate::tui::app::AppMode::Agent,
             },
@@ -3802,6 +3866,7 @@ mod tests {
             context_window_override: None,
             verbosity: None,
             skills_scan_codewhale_only: false,
+            explicit_skills_root_only: false,
             plugin_registry: None,
             mode: crate::tui::app::AppMode::Agent,
         };

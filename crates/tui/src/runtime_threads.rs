@@ -7357,6 +7357,7 @@ impl RuntimeThreadManager {
             approval_mode: policy.permission,
             verbosity,
             provenance: input_source.provenance(),
+            turn_tool_security: None,
         };
 
         // Reserve mailbox capacity before claiming or persisting anything.
@@ -8017,6 +8018,7 @@ impl RuntimeThreadManager {
                 mcp_oauth_callback_url: cfg.mcp_oauth_callback_url.clone(),
                 skills_dir: cfg.skills_dir(),
                 skills_scan_codewhale_only: cfg.skills_config().scan_codewhale_only(),
+                explicit_skills_root_only: false,
                 instructions: if isolated_chat {
                     Vec::new()
                 } else {
@@ -8120,6 +8122,7 @@ impl RuntimeThreadManager {
                     cfg.reasoning_only_reprompt_message().to_string(),
                 ),
                 allowed_tools: isolated_chat.then(Vec::new),
+                turn_tool_security: None,
                 disallowed_tools: None,
                 max_tool_calls: None,
                 hook_executor: None,
@@ -8580,18 +8583,16 @@ impl RuntimeThreadManager {
                 EngineEvent::RouteDispatched {
                     turn_id: dispatched_turn_id,
                     route,
-                } => {
-                    if engine_turn_id
-                        .as_deref()
-                        .is_some_and(|started| started == dispatched_turn_id)
-                    {
-                        let _turn_mutation = self.store.turn_mutation.lock();
-                        let mut turn = self.store.load_turn(&turn_id)?;
-                        if let Some(envelope) = route.cost_envelope() {
-                            turn.persist_effective_route(&envelope);
-                        }
-                        self.store.save_turn(&turn)?;
+                } if engine_turn_id
+                    .as_deref()
+                    .is_some_and(|started| started == dispatched_turn_id) =>
+                {
+                    let _turn_mutation = self.store.turn_mutation.lock();
+                    let mut turn = self.store.load_turn(&turn_id)?;
+                    if let Some(envelope) = route.cost_envelope() {
+                        turn.persist_effective_route(&envelope);
                     }
+                    self.store.save_turn(&turn)?;
                 }
                 EngineEvent::MessageStarted { .. } => {
                     let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);

@@ -11,6 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -68,7 +69,7 @@ use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
-use crate::worker_profile::WorkerRuntimeProfile;
+use crate::worker_profile::{ShellPolicy, WorkerRuntimeProfile};
 use crate::working_set::WorkingSet;
 
 #[cfg(test)]
@@ -78,7 +79,8 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    McpManagerUpdate, Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX,
+    ExactToolDispatchPolicy, McpManagerUpdate, Op, ProviderRuntimeStatus, SessionSnapshot,
+    SteerMessage, SteerTarget, TurnToolSecurityPolicy, USER_SHELL_TOOL_ID_PREFIX,
     UserInputProvenance,
 };
 use super::session::Session;
@@ -89,6 +91,25 @@ use crate::models::Role;
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
 const GOAL_CONTINUATION_FAILURE_DETAIL_MAX_BYTES: usize = 512;
 const PLAN_SHELL_NETWORK_DENIED_HINT: &str = "Shell command blocked: Plan mode runs shell commands in a read-only sandbox — no writes, no network. Use Act mode (`/mode act`) for any command that creates or modifies files, or that needs network access.";
+
+fn project_exact_allowed_tools(
+    exact: Option<&ExactToolDispatchPolicy>,
+    requested: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let Some(exact) = exact else { return requested };
+    Some(
+        exact
+            .allowed_tools()
+            .iter()
+            .filter(|name| {
+                requested
+                    .as_deref()
+                    .is_none_or(|allowed| tool_catalog::tool_allowed(Some(allowed), name))
+            })
+            .cloned()
+            .collect(),
+    )
+}
 
 fn context_pressure_message(usage_percent: f64) -> Option<&'static str> {
     if usage_percent >= crate::tui::context_inspector::CONTEXT_CRITICAL_THRESHOLD_PERCENT {
@@ -311,6 +332,11 @@ pub struct EngineConfig {
     /// Restrict skill discovery to CodeWhale-owned roots plus explicit
     /// `skills_dir` configuration.
     pub skills_scan_codewhale_only: bool,
+    /// Treat `skills_dir` as the complete filesystem Skill authority.
+    ///
+    /// Embedding hosts use this to exclude ambient workspace and home Skill
+    /// roots while retaining their immutable reviewed-plugin snapshot.
+    pub explicit_skills_root_only: bool,
     /// Immutable plugin authority snapshot scoped to `workspace`. Normal App
     /// hosts provide this explicitly; headless/embed callers that leave it
     /// unset receive a fresh workspace-specific snapshot in [`Engine::new`].
@@ -424,6 +450,8 @@ pub struct EngineConfig {
     /// Tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
     pub allowed_tools: Option<Vec<String>>,
+    /// Process-local host authority for restricted embedded turns.
+    pub turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
     /// Tool deny-list.  Deny always wins over allow (#3027).
     /// `None` means no tools are explicitly denied.
     pub disallowed_tools: Option<Vec<String>>,
@@ -544,6 +572,7 @@ impl Default for EngineConfig {
             mcp_oauth_callback_url: None,
             skills_dir: crate::skills::default_skills_dir(),
             skills_scan_codewhale_only: false,
+            explicit_skills_root_only: false,
             plugin_registry: None,
             instructions: Vec::new(),
             project_context_pack_enabled: false,
@@ -589,6 +618,7 @@ impl Default for EngineConfig {
             // indistinguishable from having set nothing.
             reasoning_only_reprompt_message: None,
             allowed_tools: None,
+            turn_tool_security: None,
             disallowed_tools: None,
             max_tool_calls: None,
             hook_executor: None,
@@ -653,6 +683,23 @@ pub enum CancelReason {
     Internal,
 }
 
+/// Disposition for accepted steer inputs when the active turn is cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelMode {
+    /// Interrupt current work while retaining accepted inputs for the next
+    /// turn in the same session.
+    InterruptKeepInbox,
+    /// Stop the turn and retire every input targeted at it.
+    StopDropInbox,
+}
+
+/// Outcome of withdrawing an opaque steer id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerWithdrawal {
+    Retired,
+    NotPending,
+}
+
 impl CancelReason {
     fn describe(self) -> &'static str {
         match self {
@@ -660,6 +707,220 @@ impl CancelReason {
             Self::External => "request cancelled by external caller",
             Self::Preempted => "request was preempted by a new turn",
             Self::Internal => "engine torn down before approval resolved",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SteerControlState {
+    session_epoch: u64,
+    next_turn_generation: u64,
+    active_turn_generation: Option<u64>,
+    drop_through_generation: u64,
+    unsettled: HashMap<String, SteerTarget>,
+    withdrawn: HashSet<String>,
+}
+
+/// Best-effort terminal settlement for abrupt engine drops. Keeping this in a
+/// field-level guard avoids making `Engine` itself implement `Drop`, so callers
+/// and existing tests may still move independent engine fields safely.
+struct SteerDropGuard {
+    control: Arc<StdMutex<SteerControlState>>,
+    tx_event: mpsc::Sender<Event>,
+}
+
+impl Drop for SteerDropGuard {
+    fn drop(&mut self) {
+        let dropped = self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire_session();
+        for steer_id in dropped {
+            let _ = self.tx_event.try_send(Event::SteerDropped { steer_id });
+        }
+    }
+}
+
+impl Default for SteerControlState {
+    fn default() -> Self {
+        Self {
+            session_epoch: 1,
+            next_turn_generation: 0,
+            active_turn_generation: None,
+            drop_through_generation: 0,
+            unsettled: HashMap::new(),
+            withdrawn: HashSet::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerSettlement {
+    Ready,
+    Commit,
+    Drop,
+    Ignore,
+}
+
+impl SteerControlState {
+    fn begin_turn(&mut self) -> SteerTarget {
+        self.next_turn_generation = self.next_turn_generation.saturating_add(1);
+        self.active_turn_generation = Some(self.next_turn_generation);
+        SteerTarget {
+            session_epoch: self.session_epoch,
+            turn_generation: self.next_turn_generation,
+        }
+    }
+
+    fn finish_turn(&mut self, target: SteerTarget) {
+        if target.session_epoch == self.session_epoch
+            && self.active_turn_generation == Some(target.turn_generation)
+        {
+            self.active_turn_generation = None;
+        }
+    }
+
+    fn active_target(&self) -> Result<SteerTarget, &'static str> {
+        let Some(turn_generation) = self.active_turn_generation else {
+            return Err("no active turn can accept steer input");
+        };
+        if turn_generation <= self.drop_through_generation {
+            return Err("active turn is stopping and cannot accept steer input");
+        }
+        Ok(SteerTarget {
+            session_epoch: self.session_epoch,
+            turn_generation,
+        })
+    }
+
+    fn register(&mut self, id: String, target: SteerTarget) -> Result<(), &'static str> {
+        if self.active_target()? != target {
+            return Err("steer target changed while waiting for channel capacity");
+        }
+        self.unsettled.insert(id, target);
+        Ok(())
+    }
+
+    fn abandon(&mut self, id: &str) {
+        self.unsettled.remove(id);
+        self.withdrawn.remove(id);
+    }
+
+    fn withdraw(&mut self, id: &str) -> SteerWithdrawal {
+        if self.unsettled.contains_key(id) {
+            self.withdrawn.insert(id.to_string());
+            SteerWithdrawal::Retired
+        } else {
+            SteerWithdrawal::NotPending
+        }
+    }
+
+    fn is_deliverable(&self, steer: &SteerMessage) -> bool {
+        self.unsettled.get(&steer.id) == Some(&steer.target)
+            && steer.target.session_epoch == self.session_epoch
+            && steer.target.turn_generation > self.drop_through_generation
+            && !self.withdrawn.contains(&steer.id)
+    }
+
+    fn settle(&mut self, steer: &SteerMessage, content_is_empty: bool) -> SteerSettlement {
+        let Some(registered_target) = self.unsettled.get(&steer.id).copied() else {
+            return SteerSettlement::Ignore;
+        };
+        let should_drop = registered_target != steer.target
+            || steer.target.session_epoch != self.session_epoch
+            || steer.target.turn_generation <= self.drop_through_generation
+            || self.withdrawn.contains(&steer.id)
+            || content_is_empty;
+        self.abandon(&steer.id);
+        if should_drop {
+            SteerSettlement::Drop
+        } else {
+            SteerSettlement::Commit
+        }
+    }
+
+    fn prepare(&mut self, steer: &SteerMessage, content_is_empty: bool) -> SteerSettlement {
+        if !content_is_empty && self.is_deliverable(steer) {
+            return SteerSettlement::Ready;
+        }
+        self.settle(steer, content_is_empty)
+    }
+
+    fn cancel(&mut self, mode: CancelMode) {
+        if mode == CancelMode::StopDropInbox {
+            let generation = self
+                .unsettled
+                .values()
+                .filter(|target| target.session_epoch == self.session_epoch)
+                .map(|target| target.turn_generation)
+                .chain(self.active_turn_generation)
+                .max();
+            if let Some(generation) = generation {
+                self.drop_through_generation = self.drop_through_generation.max(generation);
+            }
+        }
+    }
+
+    fn take_stopped(&mut self) -> Vec<String> {
+        let drop_through = self.drop_through_generation;
+        let mut dropped = Vec::new();
+        self.unsettled.retain(|id, target| {
+            let keep =
+                target.session_epoch == self.session_epoch && target.turn_generation > drop_through;
+            if !keep {
+                dropped.push(id.clone());
+            }
+            keep
+        });
+        for id in &dropped {
+            self.withdrawn.remove(id);
+        }
+        dropped
+    }
+
+    fn retire_session(&mut self) -> Vec<String> {
+        self.session_epoch = self.session_epoch.saturating_add(1);
+        self.active_turn_generation = None;
+        self.drop_through_generation = 0;
+        self.withdrawn.clear();
+        self.unsettled.drain().map(|(id, _)| id).collect()
+    }
+}
+
+/// A reserved steer channel slot whose target is frozen before a host makes
+/// durable UI changes.
+pub(crate) struct ReservedSteer {
+    permit: Option<mpsc::OwnedPermit<SteerMessage>>,
+    sent: bool,
+    id: String,
+    target: SteerTarget,
+    control: Arc<StdMutex<SteerControlState>>,
+}
+
+impl ReservedSteer {
+    pub(crate) fn send(mut self, content: String) -> String {
+        let id = self.id.clone();
+        self.permit
+            .take()
+            .expect("reserved steer permit missing")
+            .send(SteerMessage {
+                id: id.clone(),
+                target: self.target,
+                content,
+            });
+        self.sent = true;
+        id
+    }
+}
+
+impl Drop for ReservedSteer {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .abandon(&self.id);
         }
     }
 }
@@ -682,7 +943,8 @@ pub struct EngineHandle {
     /// Send user input responses to the engine
     tx_user_input: mpsc::Sender<UserInputDecision>,
     /// Send steer input for an in-flight turn.
-    tx_steer: mpsc::Sender<String>,
+    tx_steer: mpsc::Sender<SteerMessage>,
+    next_steer_id: Arc<AtomicU64>,
     /// Shared pause flag set by the TUI and read by the turn loop.
     shared_paused: Arc<StdMutex<bool>>,
     /// Whether the host must construct the route's concrete provider client
@@ -693,6 +955,7 @@ pub struct EngineHandle {
     /// change publishes here before its mailbox op is queued, so gates never
     /// consult a stale per-turn copy.
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
+    steer_control: Arc<StdMutex<SteerControlState>>,
     /// Out-of-band authority for one exact compaction request. The engine can
     /// be awaiting a provider while its bounded op mailbox is unable to drain,
     /// so cancellation cannot depend on processing a later mailbox entry.
@@ -791,6 +1054,8 @@ enum McpBootUpdate {
 /// The core engine that processes operations and emits events
 pub struct Engine {
     config: EngineConfig,
+    active_turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
+    control_plane_restricted: bool,
     api_config: Config,
     /// Runtime-host authority consulted only when constructing a later turn
     /// descriptor (goal continuation, idle child completion, `/edit`). Active
@@ -870,7 +1135,10 @@ pub struct Engine {
     /// approval gate still fails closed.
     approval_receipt_store: Result<ApprovalReceiptStore, String>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    rx_steer: mpsc::Receiver<String>,
+    rx_steer: mpsc::Receiver<SteerMessage>,
+    pending_steers: Vec<SteerMessage>,
+    steer_control: Arc<StdMutex<SteerControlState>>,
+    _steer_drop_guard: SteerDropGuard,
     tx_event: mpsc::Sender<Event>,
     /// Wakeup channel for the parent turn loop when a direct child sub-agent
     /// terminates (issue #756). Cloned into `SubAgentRuntime` so the runtime
@@ -1456,6 +1724,7 @@ impl Engine {
         let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
+        let steer_control = Arc::new(StdMutex::new(SteerControlState::default()));
         let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
         let shared_paused = Arc::new(StdMutex::new(false));
         let live_runtime_authority = Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
@@ -1554,6 +1823,7 @@ impl Engine {
                     ),
                     verbosity: config.verbosity.as_deref(),
                     skills_scan_codewhale_only: config.skills_scan_codewhale_only,
+                    explicit_skills_root_only: config.explicit_skills_root_only,
                     plugin_registry: Some(plugin_registry.as_ref()),
                     // Matches `current_mode`'s initial value below; a later
                     // `/mode` switch re-runs `refresh_system_prompt`.
@@ -1656,6 +1926,8 @@ impl Engine {
         };
 
         let active_route_limits = config.active_route_limits;
+        let active_turn_tool_security = config.turn_tool_security.clone();
+        let control_plane_restricted = active_turn_tool_security.is_some();
         let shared_auto_review_policy = Arc::new(config.auto_review_policy.clone());
         #[cfg(not(test))]
         let approval_receipt_store =
@@ -1670,6 +1942,8 @@ impl Engine {
         let turn_wall_clock_budget = config.turn_wall_clock;
         let engine = Engine {
             config,
+            active_turn_tool_security,
+            control_plane_restricted,
             api_config: api_config.clone(),
             authoritative_route_config: None,
             deepseek_client,
@@ -1706,6 +1980,12 @@ impl Engine {
             approval_receipt_store,
             rx_user_input,
             rx_steer,
+            pending_steers: Vec::new(),
+            steer_control: Arc::clone(&steer_control),
+            _steer_drop_guard: SteerDropGuard {
+                control: Arc::clone(&steer_control),
+                tx_event: tx_event.clone(),
+            },
             tx_event,
             tx_subagent_completion,
             rx_subagent_completion,
@@ -1736,9 +2016,11 @@ impl Engine {
             tx_approval,
             tx_user_input,
             tx_steer,
+            next_steer_id: Arc::new(AtomicU64::new(0)),
             shared_paused,
             client_preflight_required: true,
             live_runtime_authority,
+            steer_control,
             compaction_cancellation,
         };
 
@@ -1882,6 +2164,7 @@ impl Engine {
                     Some(&registry),
                     None,
                     None,
+                    self.active_turn_tool_security.clone(),
                 )
                 .await
                 .map(RichToolResult::into_result)
@@ -2343,13 +2626,21 @@ impl Engine {
                     .await
                     .map(|op| EngineRunInput::Operation(Box::new(op)));
             } else {
-                let shell_wake_armed = !host_managed_turns && self.idle_shell_wake_armed();
+                // A per-message restriction is removed from
+                // `active_turn_tool_security` after the turn returns, while
+                // this latch deliberately remains set. Keep runtime-produced
+                // follow-ups queued until a new explicit SendMessage installs
+                // its own authority; otherwise an old child/shell completion
+                // can start a normal unrestricted turn behind the host's back.
+                let automatic_followups_allowed =
+                    !host_managed_turns && !self.control_plane_restricted;
+                let shell_wake_armed = automatic_followups_allowed && self.idle_shell_wake_armed();
                 let mcp_boot_armed = self.mcp_boot_rx.is_some();
                 tokio::select! {
                     op = self.rx_op.recv() => {
                         return op.map(|op| EngineRunInput::Operation(Box::new(op)));
                     }
-                    completion = self.rx_subagent_completion.recv(), if !host_managed_turns => {
+                    completion = self.rx_subagent_completion.recv(), if automatic_followups_allowed => {
                         return completion.map(EngineRunInput::SubAgentCompletion);
                     }
                     // A background child may be waiting on a person's answer
@@ -2570,7 +2861,27 @@ impl Engine {
                         hook_executor,
                         verbosity,
                         provenance,
+                        turn_tool_security,
                     } => {
+                        let configured_security = self.config.turn_tool_security.clone();
+                        self.active_turn_tool_security =
+                            turn_tool_security.or(configured_security.clone());
+                        self.control_plane_restricted = self.active_turn_tool_security.is_some();
+                        if self.active_turn_tool_security.is_some() && !dynamic_tools.is_empty() {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns do not accept dynamic tools".to_string(),
+                                )))
+                                .await;
+                            self.active_turn_tool_security = configured_security;
+                            continue;
+                        }
+                        let previous_allowed_tools = self.config.allowed_tools.clone();
+                        let allowed_tools = project_exact_allowed_tools(
+                            self.exact_dispatch_policy(),
+                            allowed_tools,
+                        );
                         self.handle_send_message(
                             content,
                             mode,
@@ -2594,11 +2905,32 @@ impl Engine {
                             provenance,
                         )
                         .await;
+                        if self.control_plane_restricted {
+                            self.config.allowed_tools = previous_allowed_tools;
+                        }
+                        self.active_turn_tool_security = configured_security;
                     }
                     Op::ContinueGoal {
                         dynamic_tools,
                         engine_schedule_id,
                     } => {
+                        // A restricted host-policy turn cannot be followed by
+                        // an unrestricted synthetic turn. Consume the queued
+                        // engine token too, so the scheduler cannot remain
+                        // latched behind a token that was already dequeued.
+                        if self.control_plane_restricted {
+                            let _ = self.take_scheduled_goal_continuation(
+                                engine_schedule_id,
+                                dynamic_tools,
+                            );
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot continue scheduled goals".to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         // Cancellation can race the delay expiry after the
                         // coalesced token entered the mailbox. Re-check the
                         // same turn token before consuming the schedule so an
@@ -2707,6 +3039,16 @@ impl Engine {
                         auto_approve,
                         approval_mode,
                     } => {
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot execute control-plane shell operations"
+                                        .to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         self.handle_run_shell_command(
                             command,
                             mode,
@@ -2813,7 +3155,29 @@ impl Engine {
                             }
                         }
                     }
+                    Op::CancelSubAgents => {
+                        let cancelled = self
+                            .subagent_manager
+                            .write()
+                            .await
+                            .cancel_all_running_for_session(&self.session.id);
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Cancelled {cancelled} running sub-agent(s)"
+                            )))
+                            .await;
+                    }
                     Op::FollowUpSubAgent { agent_id, text } => {
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot continue sub-agents".to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         let active_session_id = self.session.id.clone();
                         let runtime = self.off_turn_subagent_runtime();
                         let manager_handle = Arc::clone(&self.subagent_manager);
@@ -2851,6 +3215,9 @@ impl Engine {
                         // can never roll authority backward.
                         let authority = self.runtime_authority_snapshot();
                         self.apply_runtime_authority(authority).await;
+                    }
+                    Op::SetDisallowedTools { tools } => {
+                        self.config.disallowed_tools = tools;
                     }
                     Op::SetModel {
                         model,
@@ -2961,6 +3328,7 @@ impl Engine {
                         workspace,
                         mode,
                     } => {
+                        self.drop_all_steers().await;
                         // Deferred tool activations belong to one
                         // conversation. SyncSession installs a conversation's
                         // identity, history, and workspace (including the
@@ -3132,6 +3500,14 @@ impl Engine {
                         }
                     }
                     Op::BootstrapMcp { tx } => {
+                        if self.control_plane_restricted {
+                            let result =
+                                Err("Restricted turns cannot bootstrap MCP pools".to_string());
+                            if let Some(tx) = tx.lock().ok().and_then(|mut guard| guard.take()) {
+                                let _ = tx.send(result);
+                            }
+                            continue;
+                        }
                         let result = self.bootstrap_mcp_pool().await.map_err(|error| {
                             codewhale_config::persistence::redact_secrets(&format!("{error:#}"))
                         });
@@ -3140,6 +3516,14 @@ impl Engine {
                         }
                     }
                     Op::RetryMcpServer { name, tx } => {
+                        if self.control_plane_restricted {
+                            let result =
+                                Err("Restricted turns cannot restart MCP servers".to_string());
+                            if let Some(tx) = tx.lock().ok().and_then(|mut guard| guard.take()) {
+                                let _ = tx.send(result);
+                            }
+                            continue;
+                        }
                         let result = self.retry_mcp_server(&name).await.map_err(|error| {
                             codewhale_config::persistence::redact_secrets(&format!("{error:#}"))
                         });
@@ -3148,6 +3532,16 @@ impl Engine {
                         }
                     }
                     Op::ReloadMcp { config_path, tx } => {
+                        // Reloading can start external processes. A queued
+                        // reload inherits the last restricted-turn latch.
+                        if self.control_plane_restricted {
+                            let result =
+                                Err("Restricted turns cannot reload MCP pools".to_string());
+                            if let Some(tx) = tx.lock().ok().and_then(|mut guard| guard.take()) {
+                                let _ = tx.send(result);
+                            }
+                            continue;
+                        }
                         let result = self.reload_mcp_pool(config_path).await.map_err(|error| {
                             codewhale_config::persistence::redact_secrets(&format!("{error:#}"))
                         });
@@ -3162,6 +3556,20 @@ impl Engine {
                         self.handle_purge().await;
                     }
                     Op::EditLastTurn { new_message } => {
+                        // `/edit` immediately starts another model turn but
+                        // carries no replacement process-local policy. A fresh
+                        // SendMessage is the only operation that can change
+                        // restricted-turn authority.
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot edit and replay the last turn"
+                                        .to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         let route = match self.current_runtime_route() {
                             Ok(route) => route,
                             Err(err) => {
@@ -3256,6 +3664,7 @@ impl Engine {
                         self.config.search_provider = provider;
                     }
                     Op::Shutdown => {
+                        self.drop_all_steers().await;
                         break;
                     }
                 },
@@ -3282,6 +3691,114 @@ impl Engine {
 
     fn host_managed_turns(&self) -> bool {
         self.config.runtime_services.active_thread_id.is_some()
+    }
+
+    fn begin_steer_turn(&self) -> SteerTarget {
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .begin_turn()
+    }
+
+    fn finish_steer_turn(&self, target: SteerTarget) {
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_turn(target);
+    }
+
+    async fn emit_dropped_steers(&self, ids: Vec<String>) {
+        for steer_id in ids {
+            let _ = self.tx_event.send(Event::SteerDropped { steer_id }).await;
+        }
+    }
+
+    pub(super) async fn queue_steer(&mut self, mut steer: SteerMessage) {
+        steer.content = steer.content.trim().to_string();
+        let settlement = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare(&steer, steer.content.is_empty());
+        match settlement {
+            SteerSettlement::Ready => {
+                let _ = self
+                    .tx_event
+                    .send(Event::status(format!(
+                        "Steer input queued: {}",
+                        summarize_text(&steer.content, 120)
+                    )))
+                    .await;
+                self.pending_steers.push(steer);
+            }
+            SteerSettlement::Drop => self.emit_dropped_steers(vec![steer.id]).await,
+            SteerSettlement::Ignore => {}
+            SteerSettlement::Commit => unreachable!("prepare cannot commit a steer"),
+        }
+    }
+
+    pub(super) async fn inject_steer(&mut self, mut steer: SteerMessage) -> bool {
+        steer.content = steer.content.trim().to_string();
+        let settlement = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .settle(&steer, steer.content.is_empty());
+        match settlement {
+            SteerSettlement::Commit => {
+                self.session
+                    .working_set
+                    .observe_user_message(&steer.content, &self.session.workspace);
+                self.add_session_message(
+                    self.user_text_message_with_turn_metadata(steer.content.clone()),
+                )
+                .await;
+                let _ = self
+                    .tx_event
+                    .send(Event::SteerCommitted { steer_id: steer.id })
+                    .await;
+                let _ = self
+                    .tx_event
+                    .send(Event::status(format!(
+                        "Steer input accepted: {}",
+                        summarize_text(&steer.content, 120)
+                    )))
+                    .await;
+                true
+            }
+            SteerSettlement::Drop => {
+                self.emit_dropped_steers(vec![steer.id]).await;
+                false
+            }
+            SteerSettlement::Ignore => false,
+            SteerSettlement::Ready => unreachable!("settle cannot leave a steer ready"),
+        }
+    }
+
+    pub(super) async fn settle_steers_on_interrupt(&mut self) {
+        let dropped = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_stopped();
+        if dropped.is_empty() {
+            return;
+        }
+        self.pending_steers
+            .retain(|steer| !dropped.iter().any(|id| id == &steer.id));
+        while self.rx_steer.try_recv().is_ok() {}
+        self.emit_dropped_steers(dropped).await;
+    }
+
+    async fn drop_all_steers(&mut self) {
+        let dropped = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire_session();
+        self.pending_steers.clear();
+        while self.rx_steer.try_recv().is_ok() {}
+        self.emit_dropped_steers(dropped).await;
     }
 
     async fn emit_session_updated(&self) {
@@ -4337,7 +4854,10 @@ impl Engine {
         // so start_mcp_server can be registered when Feature::Mcp is enabled.
         // A passive snapshot must not create the pool: allocating it is engine
         // state a preview has no business writing.
-        if self.config.features.enabled(Feature::Mcp) && mcp_access.may_connect() {
+        if self.active_turn_tool_security.is_none()
+            && self.config.features.enabled(Feature::Mcp)
+            && mcp_access.may_connect()
+        {
             let _ = self.ensure_mcp_pool().await;
         }
         let builder = self
@@ -4349,10 +4869,15 @@ impl Engine {
                 todo_list,
                 plan_state,
             )
-            .with_dynamic_tools(dynamic_tools);
+            .with_dynamic_tools(if self.active_turn_tool_security.is_some() {
+                &[]
+            } else {
+                dynamic_tools
+            });
 
-        let subagents_available =
-            self.config.subagents_enabled && self.config.features.enabled(Feature::Subagents);
+        let subagents_available = self.active_turn_tool_security.is_none()
+            && self.config.subagents_enabled
+            && self.config.features.enabled(Feature::Subagents);
 
         let fork_context_for_runtime = if subagents_available && wiring.is_live() {
             let state = StructuredState::capture(
@@ -4439,7 +4964,9 @@ impl Engine {
             None
         };
 
-        let mcp_pool = if self.config.features.enabled(Feature::Mcp) {
+        let mcp_pool = if self.active_turn_tool_security.is_none()
+            && self.config.features.enabled(Feature::Mcp)
+        {
             if mcp_access.may_connect() {
                 self.ensure_mcp_pool().await.ok()
             } else {
@@ -4470,6 +4997,7 @@ impl Engine {
                 .with_api_config((*route.api_config).clone())
                 .with_auto_model(route.auto_model)
                 .with_reasoning_effort(route.reasoning_effort.clone(), route.reasoning_effort_auto)
+                .with_host_agent_profiles(Arc::clone(&self.config.fleet_roster))
                 .with_agent_tool_surface_options(
                     self.agent_tool_surface_options(runtime_shell_policy),
                 )
@@ -4528,7 +5056,9 @@ impl Engine {
         let plugin_tool_names =
             configure_plugin_tools(&mut tool_registry, self.config.tools.as_ref());
 
-        let mcp_state = if self.config.features.enabled(Feature::Mcp) {
+        let mcp_state = if self.active_turn_tool_security.is_none()
+            && self.config.features.enabled(Feature::Mcp)
+        {
             if mcp_access.may_connect() {
                 let tools = self.mcp_tools().await;
                 let server_count = match self.mcp_pool.as_ref() {
@@ -4801,11 +5331,11 @@ impl Engine {
         // after the UI changed modes (#3568).
         self.apply_runtime_mode_policy(&input_policy);
 
-        // Drain stale steer messages from previous turns.
-        while self.rx_steer.try_recv().is_ok() {}
-
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
+        // Publish the destination before TurnStarted so hosts can reserve a
+        // steer against this exact turn generation.
+        let steer_target = self.begin_steer_turn();
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`
@@ -4979,6 +5509,7 @@ impl Engine {
                 error: Some(message),
             };
             self.reconcile_non_completed_goal_turn(&outcome).await;
+            self.finish_steer_turn(steer_target);
             return outcome;
         }
 
@@ -5004,7 +5535,15 @@ impl Engine {
             );
         }
         self.config.allowed_tools = allowed_tools;
-        self.config.hook_executor = hook_executor;
+        self.config.hook_executor = if self
+            .active_turn_tool_security
+            .as_ref()
+            .is_none_or(|policy| policy.allows_hooks())
+        {
+            hook_executor
+        } else {
+            None
+        };
         self.session.reasoning_effort = reasoning_effort;
         self.session.reasoning_effort_auto = reasoning_effort_auto;
         self.session.auto_model = auto_model;
@@ -5160,6 +5699,10 @@ impl Engine {
                 )
             }
         };
+        // Close admission before terminal bookkeeping or event awaits. Inputs
+        // already accepted remain queued unless a stop/session boundary
+        // retired them.
+        self.finish_steer_turn(steer_target);
 
         // Update session usage
         self.session.total_usage.add(&turn.usage);
@@ -5866,6 +6409,30 @@ impl Engine {
         models
     }
 
+    fn exact_dispatch_policy(&self) -> Option<&ExactToolDispatchPolicy> {
+        self.active_turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.exact_dispatch())
+    }
+
+    fn exact_dispatch_error(&self, canonical_name: &str) -> Option<ToolError> {
+        self.exact_dispatch_policy()
+            .filter(|policy| !policy.allows(canonical_name))
+            .map(|_| ToolError::permission_denied("Tool blocked by host turn policy".to_string()))
+    }
+
+    fn effective_turn_shell_policy(&self, policy: ShellPolicy) -> ShellPolicy {
+        if self
+            .active_turn_tool_security
+            .as_ref()
+            .is_some_and(|security| security.requires_read_only_dispatch())
+        {
+            policy.min_with(ShellPolicy::ReadOnly)
+        } else {
+            policy
+        }
+    }
+
     fn build_tool_context(&self, mode: AppMode, auto_approve: bool) -> ToolContext {
         let authority = TurnAuthority::from_effective_fields(
             mode,
@@ -5917,6 +6484,7 @@ impl Engine {
             self.session.reasoning_effort.clone(),
             self.session.reasoning_effort_auto,
         )
+        .with_host_agent_profiles(Arc::clone(&self.config.fleet_roster))
         .with_agent_tool_surface_options(self.agent_tool_surface_options(shell_policy))
         .with_max_spawn_depth(self.config.max_spawn_depth)
         .with_step_api_timeout(self.config.subagent_api_timeout)
@@ -5957,7 +6525,7 @@ impl Engine {
         );
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
-        context.set_shell_policy(authority.shell_policy());
+        context.set_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()));
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
             self.api_config.sandbox_mode.as_deref(),
@@ -5984,16 +6552,22 @@ impl Engine {
         // build. Cheap (a small JSON file) and always reflects the latest
         // `/trust add` / `/trust remove` mutations without an explicit cache
         // refresh hook.
-        let trusted = crate::workspace_trust::WorkspaceTrust::load_for(&self.session.workspace);
-        let mut trusted_external_paths = trusted.paths().to_vec();
-        let clipboard_images_dir =
-            crate::tui::clipboard::clipboard_images_dir(&self.session.workspace);
-        if !trusted_external_paths
-            .iter()
-            .any(|path| path == &clipboard_images_dir)
+        let trusted_external_paths = if let Some(paths) = self
+            .active_turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.trusted_external_paths_override())
         {
-            trusted_external_paths.push(clipboard_images_dir);
-        }
+            paths.to_vec()
+        } else {
+            let trusted = crate::workspace_trust::WorkspaceTrust::load_for(&self.session.workspace);
+            let mut paths = trusted.paths().to_vec();
+            let clipboard_images_dir =
+                crate::tui::clipboard::clipboard_images_dir(&self.session.workspace);
+            if !paths.iter().any(|path| path == &clipboard_images_dir) {
+                paths.push(clipboard_images_dir);
+            }
+            paths
+        };
         let mut ctx = ToolContext::with_auto_approve(
             self.session.workspace.clone(),
             authority.trust_mode,
@@ -6015,6 +6589,7 @@ impl Engine {
             self.config.skills_dir.clone(),
             self.config.skills_scan_codewhale_only,
         )
+        .with_explicit_skills_root_only(self.config.explicit_skills_root_only)
         .with_plugin_registry(Arc::clone(&self.plugin_registry))
         .with_session_objects(crate::rlm::session::SessionObjectSnapshot::new(
             self.session.id.clone(),
@@ -6024,7 +6599,7 @@ impl Engine {
             self.session.messages.clone().into(),
         ))
         .with_cancel_token(self.cancel_token.clone())
-        .with_shell_policy(authority.shell_policy())
+        .with_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()))
         .with_trusted_external_paths(trusted_external_paths)
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
         ctx.persist_services_enabled = self.config.runtime_services.persist_services_enabled;
@@ -6791,6 +7366,7 @@ impl Engine {
                     ),
                     verbosity: context.verbosity.as_deref(),
                     skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
+                    explicit_skills_root_only: self.config.explicit_skills_root_only,
                     plugin_registry: Some(self.plugin_registry.as_ref()),
                     mode: context.mode,
                 },
@@ -7275,7 +7851,7 @@ pub(crate) struct MockEngineHandle {
     pub rx_op: mpsc::Receiver<Op>,
     rx_approval: mpsc::Receiver<ApprovalDecision>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    pub rx_steer: mpsc::Receiver<String>,
+    pub rx_steer: mpsc::Receiver<SteerMessage>,
     pub tx_event: mpsc::Sender<Event>,
     pub cancel_token: CancellationToken,
 }
@@ -7353,6 +7929,8 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         ),
     )));
     let compaction_cancellation = Arc::new(StdMutex::new(CompactionCancellationState::default()));
+    let mut steer_control_state = SteerControlState::default();
+    steer_control_state.begin_turn();
     let handle = EngineHandle {
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
@@ -7361,9 +7939,11 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         tx_approval,
         tx_user_input,
         tx_steer,
+        next_steer_id: Arc::new(AtomicU64::new(0)),
         shared_paused,
         client_preflight_required: false,
         live_runtime_authority,
+        steer_control: Arc::new(StdMutex::new(steer_control_state)),
         compaction_cancellation,
     };
 
@@ -7759,7 +8339,7 @@ use self::tool_catalog::{
     execute_tool_search, initial_active_tools, preflight_requested_deferred_tool,
     should_default_defer_tool, tool_allowed, tool_catalog_consistency_issues, tool_denied,
 };
-pub(crate) use self::tool_execution::emit_tool_audit;
+pub(crate) use self::tool_execution::{emit_tool_audit, emit_tool_audit_for_policy};
 use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};
 use crate::tools::js_execution::execute_js_execution_tool;
 

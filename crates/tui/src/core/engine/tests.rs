@@ -693,6 +693,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send exact custom turn");
@@ -1063,6 +1064,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send first goal turn");
@@ -1341,6 +1343,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send saturated goal turn");
@@ -1468,6 +1471,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     };
 
     handle
@@ -2660,6 +2664,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send budgeted goal turn");
@@ -2789,15 +2794,13 @@ async fn current_turn_usage_does_not_stop_budgeted_goal_after_one_provider_call(
         .expect("current-turn budget event");
         match event {
             Event::TurnStarted { .. } => starts += 1,
-            Event::TurnComplete { status, error, .. } => {
-                if status != TurnOutcomeStatus::Completed {
-                    assert!(
-                        error
-                            .as_deref()
-                            .is_some_and(|e| e.contains("no canned turn queued")),
-                        "unexpected non-completed turn: {status:?} {error:?}"
-                    );
-                }
+            Event::TurnComplete { status, error, .. } if status != TurnOutcomeStatus::Completed => {
+                assert!(
+                    error
+                        .as_deref()
+                        .is_some_and(|e| e.contains("no canned turn queued")),
+                    "unexpected non-completed turn: {status:?} {error:?}"
+                );
             }
             Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
                 panic!(
@@ -2903,15 +2906,13 @@ async fn tool_response_crossing_goal_budget_issues_second_provider_request() {
                 assert!(result.expect("get_goal result").success);
                 saw_get_goal = true;
             }
-            Event::TurnComplete { status, error, .. } => {
-                if status != TurnOutcomeStatus::Completed {
-                    assert!(
-                        error
-                            .as_deref()
-                            .is_some_and(|e| e.contains("no canned turn queued")),
-                        "unexpected non-completed turn: {status:?} {error:?}"
-                    );
-                }
+            Event::TurnComplete { status, error, .. } if status != TurnOutcomeStatus::Completed => {
+                assert!(
+                    error
+                        .as_deref()
+                        .is_some_and(|e| e.contains("no canned turn queued")),
+                    "unexpected non-completed turn: {status:?} {error:?}"
+                );
             }
             Event::GoalUpdated { snapshot } if snapshot.status == "paused" => {
                 panic!(
@@ -3116,6 +3117,7 @@ async fn explicit_natural_goal_activates_before_provider_request() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send explicit natural goal turn");
@@ -3225,6 +3227,7 @@ async fn operate_goal_probe(mode: AppMode, prompt: &str) -> (Option<String>, boo
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send probe turn");
@@ -3354,6 +3357,7 @@ async fn operate_contract_is_appended_once_and_an_existing_goal_is_never_replace
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     };
 
     let first =
@@ -3945,10 +3949,8 @@ async fn started_nonretryable_continuation_failure_blocks_goal_with_bounded_reas
                     );
                     saw_failed_turn = true;
                 }
-                Event::Error { envelope, .. } => {
-                    if envelope.message.contains(failure_marker) {
-                        saw_provider_error = true;
-                    }
+                Event::Error { envelope, .. } if envelope.message.contains(failure_marker) => {
+                    saw_provider_error = true;
                 }
                 Event::GoalUpdated { snapshot } if snapshot.status == "blocked" => {
                     saw_blocked_goal = true;
@@ -4038,6 +4040,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send host-owned goal turn");
@@ -4162,6 +4165,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send explicit host turn");
@@ -4944,10 +4948,26 @@ async fn steer_during_final_coordination_response_gets_its_own_provider_reply() 
     };
     let (mut engine, handle) =
         Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let steer_target = engine.begin_steer_turn();
     let tx_steer = handle.tx_steer.clone();
+    let steer_control = Arc::clone(&handle.steer_control);
     mock.push_factory(move |_request| {
+        let target = {
+            let mut control = steer_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let target = control.active_target().expect("turn accepts test steer");
+            control
+                .register("test-final-steer".to_string(), target)
+                .expect("register test steer");
+            target
+        };
         tx_steer
-            .try_send("Include this user steer in the final answer.".to_string())
+            .try_send(SteerMessage {
+                id: "test-final-steer".to_string(),
+                target,
+                content: "Include this user steer in the final answer.".to_string(),
+            })
             .expect("test steer channel remains open");
         canned::tool_call_turn(
             "call-coordination-read-2",
@@ -4983,6 +5003,7 @@ async fn steer_during_final_coordination_response_gets_its_own_provider_reply() 
             None,
         )
         .await;
+    engine.finish_steer_turn(steer_target);
 
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     assert_eq!(mock.call_count(), 5);
@@ -5587,6 +5608,7 @@ fn active_goal_message_op(
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     }
 }
 
@@ -5623,7 +5645,30 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     }
+}
+
+fn restricted_user_message_op(content: &str, config: &Config) -> Op {
+    let mut op = external_user_message_op(content, AppMode::Agent, config);
+    let Op::SendMessage {
+        turn_tool_security,
+        allow_shell,
+        auto_approve,
+        approval_mode,
+        ..
+    } = &mut op
+    else {
+        unreachable!("external user helper always builds SendMessage")
+    };
+    *turn_tool_security = Some(Arc::new(TurnToolSecurityPolicy::new(
+        Some(Vec::new()),
+        Some(ExactToolDispatchPolicy::try_new(Vec::new()).expect("zero-tool policy")),
+    )));
+    *allow_shell = false;
+    *auto_approve = false;
+    *approval_mode = crate::tui::approval::ApprovalMode::Never;
+    op
 }
 
 fn auto_review_message_op(content: &str, config: &Config) -> Op {
@@ -5648,6 +5693,7 @@ fn auto_review_message_op(content: &str, config: &Config) -> Op {
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     }
 }
 
@@ -6261,6 +6307,204 @@ fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
         subagents_enabled: false,
         ..EngineConfig::default()
     }
+}
+
+#[test]
+fn forkguard_steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
+    let mut state = SteerControlState::default();
+    let target = state.begin_turn();
+    state
+        .register("steer-1".to_string(), target)
+        .expect("register steer");
+    assert_eq!(state.withdraw("never-existed"), SteerWithdrawal::NotPending);
+    assert!(
+        state.withdrawn.is_empty(),
+        "unknown ids must not accumulate"
+    );
+    assert_eq!(state.withdraw("steer-1"), SteerWithdrawal::Retired);
+    assert_eq!(state.withdraw("steer-1"), SteerWithdrawal::Retired);
+
+    let steer = SteerMessage {
+        id: "steer-1".to_string(),
+        target,
+        content: "must not commit".to_string(),
+    };
+    assert_eq!(state.settle(&steer, false), SteerSettlement::Drop);
+    assert_eq!(state.withdraw("steer-1"), SteerWithdrawal::NotPending);
+    assert!(state.unsettled.is_empty());
+    assert!(state.withdrawn.is_empty());
+}
+
+#[test]
+fn forkguard_steer_lifecycle_late_withdraw_reconciles_committed_state() {
+    let mut state = SteerControlState::default();
+    let target = state.begin_turn();
+    state
+        .register("steer-committed".to_string(), target)
+        .expect("register steer");
+    let steer = SteerMessage {
+        id: "steer-committed".to_string(),
+        target,
+        content: "commit once".to_string(),
+    };
+    assert_eq!(state.settle(&steer, false), SteerSettlement::Commit);
+    assert_eq!(
+        state.withdraw("steer-committed"),
+        SteerWithdrawal::NotPending
+    );
+    assert_eq!(state.settle(&steer, false), SteerSettlement::Ignore);
+}
+
+#[test]
+fn steer_lifecycle_stop_retires_reserved_input_once() {
+    let mut state = SteerControlState::default();
+    let target = state.begin_turn();
+    state
+        .register("steer-stop".to_string(), target)
+        .expect("register steer");
+    state.cancel(CancelMode::StopDropInbox);
+    assert_eq!(state.take_stopped(), vec!["steer-stop".to_string()]);
+    assert!(state.take_stopped().is_empty());
+}
+
+#[tokio::test]
+async fn forkguard_queued_control_op_keeps_restricted_turn_authority() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("workspace");
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "restricted turn complete",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+
+    handle
+        .send(restricted_user_message_op("evaluate", &config))
+        .await
+        .expect("queue restricted turn");
+    handle
+        .send(Op::RunShellCommand {
+            command: "echo must-not-run".to_string(),
+            mode: AppMode::Agent,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+        })
+        .await
+        .expect("queue control op behind restricted turn");
+
+    let run = tokio::spawn(engine.run());
+    let mut saw_denial = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(Some(event)) = tokio::time::timeout(model_turn_event_timeout(), rx.recv()).await {
+        match event {
+            Event::Error { envelope, .. } => {
+                saw_denial |= envelope
+                    .message
+                    .contains("Restricted turns cannot execute control-plane shell operations");
+                if saw_denial {
+                    break;
+                }
+            }
+            Event::ToolCallStarted { name, .. }
+                if matches!(name.as_str(), "bash" | "Bash" | "exec_shell") =>
+            {
+                panic!("queued shell reached execution after a restricted turn")
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(saw_denial, "queued shell op was not denied");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_queued_goal_edit_and_mcp_keep_restricted_authority() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("workspace");
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "restricted turn complete",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+
+    handle
+        .send(restricted_user_message_op("evaluate", &config))
+        .await
+        .expect("queue restricted turn");
+    handle
+        .send(Op::ContinueGoal {
+            dynamic_tools: Vec::new(),
+            engine_schedule_id: None,
+        })
+        .await
+        .expect("queue continuation");
+    let (reload_tx, mut reload_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::ReloadMcp {
+            config_path: workspace.path().to_path_buf(),
+            tx: Arc::new(std::sync::Mutex::new(Some(reload_tx))),
+        })
+        .await
+        .expect("queue reload");
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "must-not-replay".to_string(),
+        })
+        .await
+        .expect("queue edit");
+
+    let run = tokio::spawn(engine.run());
+    let mut saw_goal = false;
+    let mut saw_edit = false;
+    let mut saw_reload = false;
+    let mut turn_starts = 0usize;
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(Some(event)) = tokio::time::timeout(model_turn_event_timeout(), rx.recv()).await {
+        match event {
+            Event::Error { envelope, .. } => {
+                saw_goal |= envelope
+                    .message
+                    .contains("Restricted turns cannot continue scheduled goals");
+                saw_edit |= envelope
+                    .message
+                    .contains("Restricted turns cannot edit and replay the last turn");
+            }
+            Event::TurnStarted { .. } => {
+                turn_starts += 1;
+                assert_eq!(turn_starts, 1, "restricted follow-up escaped its latch");
+            }
+            _ => {}
+        }
+        if !saw_reload && let Ok(result) = reload_rx.try_recv() {
+            saw_reload = result.as_ref().err().is_some_and(|message| {
+                message.contains("Restricted turns cannot reload MCP pools")
+            });
+        }
+        if saw_goal && saw_edit && saw_reload {
+            break;
+        }
+    }
+    drop(rx);
+    assert!(saw_goal, "queued goal continuation was not denied");
+    assert!(saw_edit, "queued edit was not denied");
+    assert!(saw_reload, "queued MCP reload was not denied");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
 }
 
 #[tokio::test]
@@ -11407,6 +11651,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send Operate model turn");
@@ -11562,6 +11807,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::SubAgentHandoff,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -11696,6 +11942,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send Full Access model turn");
@@ -11739,6 +11986,9 @@ async fn assert_full_access_model_tool_batch_is_blocked(
     assert!(saw_turn_complete);
 }
 
+// Retained as an upstream comparison harness: Pinvou deliberately blocks this
+// path for non-bypassable tools, so the active regression uses the deny helper.
+#[allow(dead_code)]
 async fn assert_full_access_model_tool_batch_runs(
     engine_config: EngineConfig,
     tool_calls: Vec<(&'static str, serde_json::Value)>,
@@ -11901,6 +12151,7 @@ async fn assert_full_access_model_tool_batch_runs(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send Full Access model turn");
@@ -11958,7 +12209,7 @@ async fn assert_full_access_model_tool_batch_runs(
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn full_access_auto_approves_non_bypassable_registered_tools() {
+async fn full_access_blocks_non_bypassable_registered_tools_without_prompting() {
     let _lock = lock_test_env();
     let workspace = tempdir().expect("tempdir");
     let marker = workspace.path().join("runtime-tool-must-run");
@@ -11982,7 +12233,7 @@ async fn full_access_auto_approves_non_bypassable_registered_tools() {
         subagents_enabled: false,
         ..EngineConfig::default()
     };
-    assert_full_access_model_tool_batch_runs(
+    assert_full_access_model_tool_batch_is_blocked(
         engine_config,
         vec![
             (
@@ -11994,13 +12245,23 @@ async fn full_access_auto_approves_non_bypassable_registered_tools() {
                 json!({"action": "eval", "name": "missing-context", "code": rlm_probe}),
             ),
         ],
-        &["start_mcp_server", "rlm"],
+        &[
+            (
+                "start_mcp_server",
+                "requires explicit approval and is blocked in Full Access",
+            ),
+            (
+                "rlm",
+                "requires explicit approval and is blocked in Full Access",
+            ),
+        ],
+        "requires explicit approval and is blocked in Full Access",
     )
     .await;
 
     assert!(
-        marker.exists(),
-        "Full Access auto-approves start_mcp_server, so its server command must actually run"
+        !marker.exists(),
+        "Full Access must not execute non-bypassable runtime tools without explicit approval"
     );
 }
 
@@ -12177,6 +12438,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send Auto-Review model turn");
@@ -12363,6 +12625,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -12378,15 +12641,13 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             Event::ApprovalRequired { .. } => {
                 panic!("Full Access safety holds must fail closed without prompting")
             }
-            Event::ToolCallComplete { name, result, .. } => {
-                if name == "Bash" {
-                    saw_tool_result = true;
-                    let err = result.expect_err("blocked shell should not execute");
-                    assert!(
-                        err.to_string().contains("Built-in safety gate"),
-                        "unexpected shell denial: {err:?}"
-                    );
-                }
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
+                saw_tool_result = true;
+                let err = result.expect_err("blocked shell should not execute");
+                assert!(
+                    err.to_string().contains("Built-in safety gate"),
+                    "unexpected shell denial: {err:?}"
+                );
             }
             Event::TurnComplete { status, .. } => {
                 assert_eq!(status, TurnOutcomeStatus::Completed);
@@ -12503,6 +12764,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -12518,16 +12780,14 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             Event::ApprovalRequired { .. } => {
                 panic!("YOLO mode must not prompt for an ordinary background shell command");
             }
-            Event::ToolCallComplete { name, result, .. } => {
-                if name == "Bash" {
-                    saw_tool_result = true;
-                    let result = result.expect("shell result");
-                    assert!(result.success, "{result:?}");
-                    assert!(
-                        result.content.contains("Background task started"),
-                        "expected a background start, got: {result:?}"
-                    );
-                }
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
+                saw_tool_result = true;
+                let result = result.expect("shell result");
+                assert!(result.success, "{result:?}");
+                assert!(
+                    result.content.contains("Background task started"),
+                    "expected a background start, got: {result:?}"
+                );
             }
             Event::TurnComplete { status, .. } => {
                 assert_eq!(status, TurnOutcomeStatus::Completed);
@@ -12639,6 +12899,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -12779,6 +13040,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -18122,6 +18384,7 @@ async fn code_execution_scenario() {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("code_execution should run through common executor");
@@ -19137,6 +19400,7 @@ async fn run_headless_turn_with_flaky_network(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send flaky-network turn");
@@ -19262,6 +19526,7 @@ async fn terminal_output_limit_followed_by_stream_error_is_charged_and_not_retri
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send terminal-then-drop turn");
@@ -19366,6 +19631,7 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send midstream-error turn");
@@ -19613,6 +19879,7 @@ async fn run_interactive_turn_with_flaky_network(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send interactive flaky-network turn");
@@ -19841,6 +20108,7 @@ async fn interactive_thinking_only_drop_preserves_nothing_and_never_claims_it_di
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send thinking-only drop turn");
@@ -20088,6 +20356,7 @@ async fn run_reasoning_only_turn_with_reprompts(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send reasoning-only turn");
@@ -20582,6 +20851,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         tx_approval: mpsc::channel(1).0,
         tx_user_input: mpsc::channel(1).0,
         tx_steer: mpsc::channel(1).0,
+        next_steer_id: Arc::new(AtomicU64::new(0)),
         shared_paused: Arc::new(StdMutex::new(false)),
         client_preflight_required: true,
         live_runtime_authority: Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
@@ -20594,6 +20864,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
                 None,
             ),
         ))),
+        steer_control: Arc::new(StdMutex::new(SteerControlState::default())),
         compaction_cancellation: Arc::new(StdMutex::new(CompactionCancellationState::default())),
     };
 

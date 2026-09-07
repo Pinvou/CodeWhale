@@ -8,13 +8,16 @@
 //! `submit_user_input` / `cancel_user_input`, and `steer` — moves here
 //! so the agent loop's mailbox API is reviewable on its own.
 
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
 use anyhow::Result;
 use tokio::sync::mpsc;
 
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{
-    CancelReason, EngineHandle, LiveRuntimeAuthority, Op, RuntimePermissionAuthority,
-    UserInputResponse,
+    CancelMode, CancelReason, EngineHandle, LiveRuntimeAuthority, Op, ReservedSteer,
+    RuntimePermissionAuthority, SteerWithdrawal, UserInputResponse,
 };
 
 impl EngineHandle {
@@ -123,20 +126,53 @@ impl EngineHandle {
     /// Reserve capacity for a runtime steer before it mutates durable state.
     /// The owned permit lets the caller persist and dispatch synchronously,
     /// without a cancellation point between those two operations.
-    pub(crate) async fn reserve_steer(&self) -> Result<mpsc::OwnedPermit<String>> {
-        Ok(self.tx_steer.clone().reserve_owned().await?)
+    pub(crate) async fn reserve_steer(&self) -> Result<ReservedSteer> {
+        let id = self.next_steer_id();
+        let target = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_target()
+            .map_err(anyhow::Error::msg)?;
+        let permit = self.tx_steer.clone().reserve_owned().await?;
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register(id.clone(), target)
+            .map_err(anyhow::Error::msg)?;
+        Ok(ReservedSteer {
+            permit: Some(permit),
+            sent: false,
+            id,
+            target,
+            control: Arc::clone(&self.steer_control),
+        })
+    }
+
+    fn next_steer_id(&self) -> String {
+        let seq = self.next_steer_id.fetch_add(1, Ordering::Relaxed) + 1;
+        format!("steer-{seq}")
     }
 
     /// Cancel the current request (user-initiated path — keeps the
     /// public `cancel()` signature stable). Equivalent to
     /// `cancel_with_reason(CancelReason::User)`.
     pub fn cancel(&self) {
-        self.cancel_with_reason(CancelReason::User);
+        self.cancel_with_mode(CancelReason::User, CancelMode::StopDropInbox);
     }
 
     /// Cancel the current request and latch the reason so downstream
     /// "request cancelled" error messages can name a cause.
     pub fn cancel_with_reason(&self, reason: CancelReason) {
+        self.cancel_with_mode(reason, CancelMode::StopDropInbox);
+    }
+
+    /// Atomically publish the steer disposition and cancel the active turn.
+    pub fn cancel_with_mode(&self, reason: CancelReason, mode: CancelMode) {
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancel(mode);
         match self.cancel_reason.lock() {
             Ok(mut slot) => *slot = Some(reason),
             Err(poisoned) => *poisoned.into_inner() = Some(reason),
@@ -231,9 +267,16 @@ impl EngineHandle {
     }
 
     /// Steer an in-flight turn with additional user input.
-    pub async fn steer(&self, content: impl Into<String>) -> Result<()> {
-        self.tx_steer.send(content.into()).await?;
-        Ok(())
+    pub fn withdraw_steer(&self, steer_id: &str) -> SteerWithdrawal {
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .withdraw(steer_id)
+    }
+
+    /// Steer an in-flight turn and return its opaque correlation id.
+    pub async fn steer(&self, content: impl Into<String>) -> Result<String> {
+        Ok(self.reserve_steer().await?.send(content.into()))
     }
 
     /// Request a snapshot of the current session state.

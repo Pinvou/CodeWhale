@@ -2886,6 +2886,11 @@ mod tests {
                 })
                 .await;
             let _ = events
+                .send(TaskExecutionEvent::ThreadCreated {
+                    thread_id: "thr_created".to_string(),
+                })
+                .await;
+            let _ = events
                 .send(TaskExecutionEvent::ThreadLinked {
                     thread_id: "thr_test".to_string(),
                     turn_id: "turn_test".to_string(),
@@ -2983,6 +2988,12 @@ mod tests {
         assert_eq!(finished.status, TaskStatus::Completed);
         assert_eq!(finished.thread_id.as_deref(), Some("thr_test"));
         assert_eq!(finished.turn_id.as_deref(), Some("turn_test"));
+        assert!(
+            finished.timeline.iter().any(|entry| {
+                entry.kind == "runtime_thread" && entry.summary.contains("thr_created")
+            }),
+            "the durable task must record the runtime thread before a turn is linked"
+        );
         assert_eq!(finished.checklist.items.len(), 1);
         assert_eq!(finished.checklist.in_progress_id, Some(1));
         assert!(
@@ -3542,7 +3553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_newer_task_schema_on_recovery() -> Result<()> {
+    async fn forkguard_accepts_legacy_v4_but_rejects_newer_task_schema() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
         let manager =
             TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
@@ -3556,7 +3567,19 @@ mod tests {
 
         let task_path = root.join("tasks").join(format!("{}.json", task.id));
         let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&task_path)?)?;
-        value["schema_version"] = serde_json::json!(999);
+        value["schema_version"] = serde_json::json!(PINVOU_LEGACY_TASK_SCHEMA_VERSION);
+        fs::write(&task_path, serde_json::to_string_pretty(&value)?)?;
+
+        let compatible =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+        assert_eq!(
+            compatible.get_task(&task.id).await?.schema_version,
+            PINVOU_LEGACY_TASK_SCHEMA_VERSION
+        );
+        drop(compatible);
+
+        value["schema_version"] = serde_json::json!(PINVOU_LEGACY_TASK_SCHEMA_VERSION + 1);
         fs::write(&task_path, serde_json::to_string_pretty(&value)?)?;
 
         match TaskManager::start_with_executor(test_config(root), Arc::new(MockExecutor)).await {

@@ -219,6 +219,7 @@ pub(crate) async fn run_exec_agent(
         mcp_oauth_callback_url: None,
         skills_dir: execution_config.skills_dir(),
         skills_scan_codewhale_only: execution_config.skills_config().scan_codewhale_only(),
+        explicit_skills_root_only: false,
         instructions: {
             let mut instrs: Vec<crate::prompts::InstructionSource> = execution_config
                 .instructions_paths()
@@ -306,6 +307,7 @@ pub(crate) async fn run_exec_agent(
                 .to_string(),
         ),
         allowed_tools: allowed_tools.clone(),
+        turn_tool_security: None,
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls,
         hook_executor: None,
@@ -431,6 +433,7 @@ pub(crate) async fn run_exec_agent(
             },
             verbosity: execution_config.verbosity.clone(),
             provenance: crate::core::ops::UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await?;
 
@@ -756,21 +759,19 @@ pub(crate) async fn run_exec_agent(
             }
             Event::TurnUsage {
                 usage, duration_ms, ..
-            } => {
-                if output_format == ExecOutputFormat::StreamJson {
-                    turn_usage_seq = turn_usage_seq.saturating_add(1);
-                    emit_exec_stream_event(&ExecStreamEvent::TurnUsage {
-                        turn: turn_usage_seq,
-                        input_tokens: usage.input_tokens,
-                        output_tokens: usage.output_tokens,
-                        reasoning_tokens: usage.reasoning_tokens,
-                        prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens,
-                        prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
-                        prompt_cache_write_tokens: usage.prompt_cache_write_tokens,
-                        reasoning_replay_tokens: usage.reasoning_replay_tokens,
-                        duration_ms,
-                    })?;
-                }
+            } if output_format == ExecOutputFormat::StreamJson => {
+                turn_usage_seq = turn_usage_seq.saturating_add(1);
+                emit_exec_stream_event(&ExecStreamEvent::TurnUsage {
+                    turn: turn_usage_seq,
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
+                    prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens,
+                    prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens,
+                    prompt_cache_write_tokens: usage.prompt_cache_write_tokens,
+                    reasoning_replay_tokens: usage.reasoning_replay_tokens,
+                    duration_ms,
+                })?;
             }
             Event::TurnComplete {
                 status,

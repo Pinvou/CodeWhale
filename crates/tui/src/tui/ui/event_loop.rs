@@ -3212,6 +3212,8 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::AgentSpawned { .. }
                     | EngineEvent::AgentProgress { .. }
                     | EngineEvent::AgentComplete { .. }
+                    | EngineEvent::SteerCommitted { .. }
+                    | EngineEvent::SteerDropped { .. }
                     | EngineEvent::SubAgentFollowUp { .. }
                     | EngineEvent::AgentList { .. } => {
                         // Process-local senders can outlive a session switch.
@@ -6080,8 +6082,8 @@ pub(crate) async fn run_event_loop(
                 // `commands::update` rather than reimplemented here. Placed
                 // above the readline Ctrl+U arm so the shifted chord is never
                 // swallowed by clear-input.
-                _ if key_shortcuts::is_update_install_shortcut(&key) => {
-                    if execute_command_input(
+                _ if key_shortcuts::is_update_install_shortcut(&key)
+                    && execute_command_input(
                         terminal,
                         app,
                         &mut engine_handle,
@@ -6089,10 +6091,9 @@ pub(crate) async fn run_event_loop(
                         config,
                         "/update install",
                     )
-                    .await?
-                    {
-                        return Ok(());
-                    }
+                    .await? =>
+                {
+                    return Ok(());
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.clear_input_recoverable();
@@ -6115,7 +6116,7 @@ pub(crate) async fn run_event_loop(
                 | KeyCode::Char('S')
                 | KeyCode::Char('g')
                 | KeyCode::Char('G')
-                    if key.modifiers == KeyModifiers::CONTROL =>
+                    if key.modifiers == KeyModifiers::CONTROL && !app.input.is_empty() =>
                 {
                     // #440: park the current draft to the persistent stash and
                     // clear the composer. Ctrl+G is the terminal-safe alias for
@@ -6123,21 +6124,19 @@ pub(crate) async fn run_event_loop(
                     // Empty composers are a no-op so a stray shortcut cannot
                     // pollute the file. Surface a toast so the user sees the
                     // confirmation (no-op feels broken otherwise).
-                    if !app.input.is_empty() {
-                        crate::composer_stash::push_stash(&app.input);
-                        if app.queued_draft.is_some() {
-                            // Stash the edited text while preserving the
-                            // original queued follow-up in its queue slot.
-                            let _ = app.cancel_queued_draft_edit();
-                        } else {
-                            app.clear_input_recoverable();
-                        }
-                        app.push_status_toast(
-                            "Draft stashed — `/stash pop` to restore",
-                            StatusToastLevel::Info,
-                            Some(3_000),
-                        );
+                    crate::composer_stash::push_stash(&app.input);
+                    if app.queued_draft.is_some() {
+                        // Stash the edited text while preserving the
+                        // original queued follow-up in its queue slot.
+                        let _ = app.cancel_queued_draft_edit();
+                    } else {
+                        app.clear_input_recoverable();
                     }
+                    app.push_status_toast(
+                        "Draft stashed — `/stash pop` to restore",
+                        StatusToastLevel::Info,
+                        Some(3_000),
+                    );
                 }
                 KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     // #379: context-sensitive Ctrl+Y.

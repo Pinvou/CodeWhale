@@ -656,6 +656,16 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             id: id.clone(),
             result: result.clone(),
         },
+        Event::SteerCommitted { steer_id } => wire::EventMsg::SteerCommitted {
+            thread_id,
+            session_id,
+            steer_id: steer_id.clone(),
+        },
+        Event::SteerDropped { steer_id } => wire::EventMsg::SteerDropped {
+            thread_id,
+            session_id,
+            steer_id: steer_id.clone(),
+        },
         Event::SubAgentFollowUp {
             owner_session_id,
             agent_id,
@@ -918,6 +928,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             hook_executor: _,
             verbosity,
             provenance,
+            turn_tool_security: _,
         } => wire_op::Op::SendMessage {
             content: content.clone(),
             mode: app_mode_str(*mode).to_string(),
@@ -1003,6 +1014,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
         Op::CancelSubAgent { agent_id } => wire_op::Op::CancelSubAgent {
             agent_id: agent_id.clone(),
         },
+        Op::CancelSubAgents => wire_op::Op::CancelSubAgents,
         Op::FollowUpSubAgent { agent_id, text } => wire_op::Op::FollowUpSubAgent {
             agent_id: agent_id.clone(),
             text: text.clone(),
@@ -1021,6 +1033,9 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             auto_approve: *auto_approve,
             approval_mode: approval_mode_str(*approval_mode).to_string(),
             configured_sandbox_mode: configured_sandbox_mode.clone(),
+        },
+        Op::SetDisallowedTools { tools } => wire_op::Op::SetDisallowedTools {
+            tools: tools.clone(),
         },
         Op::SetModel {
             model,

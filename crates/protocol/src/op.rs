@@ -275,6 +275,7 @@ pub enum Op {
     CancelSubAgent {
         agent_id: String,
     },
+    CancelSubAgents,
     FollowUpSubAgent {
         agent_id: String,
         text: String,
@@ -293,6 +294,11 @@ pub enum Op {
         approval_mode: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         configured_sandbox_mode: Option<String>,
+    },
+
+    SetDisallowedTools {
+        #[serde(default)]
+        tools: Option<Vec<String>>,
     },
 
     SetModel {
@@ -419,8 +425,10 @@ pub const OP_KINDS: &[&str] = &[
     "preview_outbound_request",
     "list_sub_agents",
     "cancel_sub_agent",
+    "cancel_sub_agents",
     "follow_up_sub_agent",
     "change_mode",
+    "set_disallowed_tools",
     "set_model",
     "set_compaction",
     "set_permission_ruleset",
@@ -461,8 +469,10 @@ impl Op {
             Self::PreviewOutboundRequest { .. } => "preview_outbound_request",
             Self::ListSubAgents => "list_sub_agents",
             Self::CancelSubAgent { .. } => "cancel_sub_agent",
+            Self::CancelSubAgents => "cancel_sub_agents",
             Self::FollowUpSubAgent { .. } => "follow_up_sub_agent",
             Self::ChangeMode { .. } => "change_mode",
+            Self::SetDisallowedTools { .. } => "set_disallowed_tools",
             Self::SetModel { .. } => "set_model",
             Self::SetCompaction { .. } => "set_compaction",
             Self::SetPermissionRuleset { .. } => "set_permission_ruleset",
@@ -591,6 +601,7 @@ mod tests {
             Op::CancelSubAgent {
                 agent_id: "a1".into(),
             },
+            Op::CancelSubAgents,
             Op::FollowUpSubAgent {
                 agent_id: "a1".into(),
                 text: "go".into(),
@@ -602,6 +613,9 @@ mod tests {
                 auto_approve: false,
                 approval_mode: "bypass".into(),
                 configured_sandbox_mode: Some("workspace-write".into()),
+            },
+            Op::SetDisallowedTools {
+                tools: Some(vec!["bash".into()]),
             },
             Op::SetModel {
                 model: "m".into(),

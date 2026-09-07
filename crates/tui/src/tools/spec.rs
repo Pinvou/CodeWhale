@@ -615,6 +615,8 @@ pub struct ToolExecutionState {
     pub skills_dir: Option<PathBuf>,
     /// Restrict skill discovery to CodeWhale-owned roots plus `skills_dir`.
     pub skills_scan_codewhale_only: bool,
+    /// Treat `skills_dir` as the complete filesystem Skill authority.
+    pub explicit_skills_root_only: bool,
     /// Immutable registry snapshot for this workspace/engine context.
     pub plugin_registry: Option<Arc<crate::plugins::PluginRegistry>>,
     /// Elevated sandbox policy override (used when retrying after sandbox denial).
@@ -782,6 +784,7 @@ impl ToolContext {
                 mcp_config_path: mcp_config_path.into(),
                 skills_dir: None,
                 skills_scan_codewhale_only: false,
+                explicit_skills_root_only: false,
                 plugin_registry: None,
                 elevated_sandbox_policy: None,
                 persist_services_enabled: false,
@@ -894,6 +897,13 @@ impl ToolContext {
     ) -> Self {
         self.skills_dir = Some(skills_dir.into());
         self.skills_scan_codewhale_only = scan_codewhale_only;
+        self
+    }
+
+    /// Exclude ambient workspace and home Skill roots for embedding hosts.
+    #[must_use]
+    pub fn with_explicit_skills_root_only(mut self, value: bool) -> Self {
+        self.explicit_skills_root_only = value;
         self
     }
 

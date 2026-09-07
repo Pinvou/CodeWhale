@@ -506,6 +506,16 @@ pub enum EventMsg {
         id: String,
         result: String,
     },
+    SteerCommitted {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        steer_id: String,
+    },
+    SteerDropped {
+        thread_id: ThreadId,
+        session_id: SessionId,
+        steer_id: String,
+    },
     SubAgentFollowUp {
         thread_id: ThreadId,
         session_id: SessionId,
@@ -717,6 +727,8 @@ pub const EVENT_KINDS: &[&str] = &[
     "agent_spawned",
     "agent_progress",
     "agent_complete",
+    "steer_committed",
+    "steer_dropped",
     "sub_agent_follow_up",
     "agent_list",
     "sub_agent_mailbox",
@@ -768,6 +780,8 @@ impl EventMsg {
             Self::AgentSpawned { .. } => "agent_spawned",
             Self::AgentProgress { .. } => "agent_progress",
             Self::AgentComplete { .. } => "agent_complete",
+            Self::SteerCommitted { .. } => "steer_committed",
+            Self::SteerDropped { .. } => "steer_dropped",
             Self::SubAgentFollowUp { .. } => "sub_agent_follow_up",
             Self::AgentList { .. } => "agent_list",
             Self::SubAgentMailbox { .. } => "sub_agent_mailbox",
@@ -819,6 +833,8 @@ impl EventMsg {
             | Self::AgentSpawned { thread_id, .. }
             | Self::AgentProgress { thread_id, .. }
             | Self::AgentComplete { thread_id, .. }
+            | Self::SteerCommitted { thread_id, .. }
+            | Self::SteerDropped { thread_id, .. }
             | Self::SubAgentFollowUp { thread_id, .. }
             | Self::AgentList { thread_id, .. }
             | Self::SubAgentMailbox { thread_id, .. }
@@ -870,6 +886,8 @@ impl EventMsg {
             | Self::AgentSpawned { session_id, .. }
             | Self::AgentProgress { session_id, .. }
             | Self::AgentComplete { session_id, .. }
+            | Self::SteerCommitted { session_id, .. }
+            | Self::SteerDropped { session_id, .. }
             | Self::SubAgentFollowUp { session_id, .. }
             | Self::AgentList { session_id, .. }
             | Self::SubAgentMailbox { session_id, .. }
@@ -1121,6 +1139,16 @@ mod tests {
                 owner_session_id: "owner".into(),
                 id: "a1".into(),
                 result: "done".into(),
+            },
+            EventMsg::SteerCommitted {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                steer_id: "steer-1".into(),
+            },
+            EventMsg::SteerDropped {
+                thread_id: t.clone(),
+                session_id: s.clone(),
+                steer_id: "steer-2".into(),
             },
             EventMsg::SubAgentFollowUp {
                 thread_id: t.clone(),

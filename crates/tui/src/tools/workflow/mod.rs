@@ -5181,10 +5181,10 @@ fn host_run_detail(record: &WorkflowRunRecord) -> HostWorkflowRunDetail {
     let mut children: Vec<HostWorkflowChildRow> = Vec::new();
     for event in &record.events {
         match &event.kind {
-            WorkflowUiEventKind::PhaseStarted { title } => {
-                if phases.last().map(String::as_str) != Some(title.as_str()) {
-                    phases.push(title.clone());
-                }
+            WorkflowUiEventKind::PhaseStarted { title }
+                if phases.last().map(String::as_str) != Some(title.as_str()) =>
+            {
+                phases.push(title.clone());
             }
             WorkflowUiEventKind::TaskStarted(started) => children.push(HostWorkflowChildRow {
                 task_id: started.task_id.clone(),

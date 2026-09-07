@@ -47,7 +47,7 @@ use crate::dependencies::{ExternalTool, Git};
 pub use crate::fleet::role::FleetRole;
 use crate::fleet::role::{
     FLEET_ROLE_SCHEMA_VALUES, NETWORK_DENIAL_SENTINEL, SHELL_AUTHORITY_SENTINEL,
-    VALID_ROLE_ALIASES, is_posture_denial, migrate_legacy_role_token, public_role_label,
+    VALID_ROLE_ALIASES, is_posture_denial, migrate_legacy_role_token,
 };
 use crate::llm_client::{LlmClient, LlmError};
 use crate::models::{
@@ -1689,8 +1689,8 @@ struct SpawnRequest {
     /// the child can do. Only the latter can contradict `write_authority`
     /// (#5123).
     agent_type_named: bool,
-    /// Optional Fleet role id (trimmed, lowercased). Resolved at spawn time
-    /// against the closed role set — parsing has no runtime access.
+    /// Optional Fleet role id or exact host-presented profile id. Resolved at
+    /// spawn time — parsing has no runtime access.
     profile: Option<String>,
     assignment: SubAgentAssignment,
     allowed_tools: Option<Vec<String>>,
@@ -2325,6 +2325,12 @@ pub struct SubAgentRuntime {
     pub reasoning_effort: Option<String>,
     pub reasoning_effort_auto: bool,
     pub role_models: HashMap<String, String>,
+    /// Host-provided in-memory Agent profiles. Model-facing spawn accepts
+    /// only `ProfileOrigin::Config` entries from this frozen session snapshot;
+    /// personal/workspace/plugin roster layers remain unavailable here.
+    /// Profiles contribute identity and instruction overlays only — routing,
+    /// permissions, and approvals still come from the v0.9.12 role runtime.
+    pub host_agent_profiles: std::sync::Arc<crate::fleet::roster::FleetRoster>,
     pub context: ToolContext,
     pub allow_shell: bool,
     /// When true, Suggest-level file writes auto-accept for write-capable roles
@@ -2464,6 +2470,9 @@ impl SubAgentRuntime {
             reasoning_effort: None,
             reasoning_effort_auto: false,
             role_models: HashMap::new(),
+            host_agent_profiles: std::sync::Arc::new(
+                crate::fleet::roster::FleetRoster::built_ins_only(),
+            ),
             context,
             allow_shell,
             accept_edits: false,
@@ -2702,6 +2711,20 @@ impl SubAgentRuntime {
         self
     }
 
+    /// Install the immutable roster supplied by the embedding host.
+    ///
+    /// The spawn boundary filters this roster to config-origin members and
+    /// consumes only identity plus prompt text. This deliberately does not
+    /// restore ambient saved-member dispatch removed in v0.9.12.
+    #[must_use]
+    pub fn with_host_agent_profiles(
+        mut self,
+        roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
+    ) -> Self {
+        self.host_agent_profiles = roster;
+        self
+    }
+
     /// Return a child runtime that is deliberately detached from the parent
     /// turn cancellation token and its foreground ownership barrier. Explicit
     /// agent cancellation still aborts its task handle through the manager.
@@ -2758,6 +2781,7 @@ impl SubAgentRuntime {
             reasoning_effort: self.reasoning_effort.clone(),
             reasoning_effort_auto: self.reasoning_effort_auto,
             role_models: self.role_models.clone(),
+            host_agent_profiles: self.host_agent_profiles.clone(),
             context: child_context,
             allow_shell: self.allow_shell,
             accept_edits: self.accept_edits,
@@ -4747,6 +4771,7 @@ impl SubAgentManager {
         self.agents.get(id).is_some_and(|agent| {
             agent.status == SubAgentStatus::Running && !self.is_from_prior_session(agent)
         }) || self.worker_records.get(id).is_some_and(|record| {
+            let paired_agent = self.agents.get(id);
             !record.status.is_terminal()
                 // A headless worker (no paired agent entry) that reaches
                 // WaitingForUser can never be answered: no user path will
@@ -4754,12 +4779,8 @@ impl SubAgentManager {
                 // as a permanent gate on every later writer. A *paired*
                 // waiting child keeps its claim — the user can still answer
                 // and the child will write again.
-                && !(record.status == AgentWorkerStatus::WaitingForUser
-                    && !self.agents.contains_key(id))
-                && !self
-                    .agents
-                    .get(id)
-                    .is_some_and(|agent| self.is_from_prior_session(agent))
+                && (record.status != AgentWorkerStatus::WaitingForUser || paired_agent.is_some())
+                && paired_agent.is_none_or(|agent| !self.is_from_prior_session(agent))
         })
     }
 
@@ -5302,6 +5323,23 @@ impl SubAgentManager {
         // cannot be rebound between the owner check and the exact-id action.
         let agent_id = self.resolve_agent_ref_for_session(active_session_id, agent_ref)?;
         self.cancel_agent(&agent_id)
+    }
+
+    /// Cancel all running children owned by one engine session.
+    pub(crate) fn cancel_all_running_for_session(&mut self, active_session_id: &str) -> usize {
+        let running = self
+            .agents
+            .iter()
+            .filter(|(_, agent)| {
+                agent.status == SubAgentStatus::Running
+                    && self.agent_is_owned_by_session(agent, active_session_id)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        running
+            .into_iter()
+            .filter(|id| self.cancel_agent(id).is_ok())
+            .count()
     }
 
     /// Queue parent mail without waking the child (`agents/message`).
@@ -8255,7 +8293,7 @@ impl ToolSpec for AgentTool {
             "Start with action=start and prompt; returns a turn-owned agent_id immediately. Read-only roles need no extra fields. Set detached=true only for work that must remain independently observable after the turn. ",
             "Use multiple starts for independent parallel tasks. ",
             "type selects the Fleet role: worker (full tool access), scout (fast read-only exploration), planner (grounded strategy, read-only probes), reviewer (reads and grades code), builder (lands focused code changes), verifier (runs tests and reports evidence), consultant (read-only design counsel), or custom (allowed_tools on the parent's posture). ",
-            "profile runs the child as a named Fleet role — pass a profile only when the task needs a different role than type selects. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
+            "profile runs the child as a named Fleet role or an exact prompt-only profile explicitly presented by the embedding host — pass it only when the task needs that identity. Without a profile the child inherits the parent's model; per-call model or thinking overrides are not part of this surface. ",
             "Use action=roster to inspect the Fleet roles and their descriptions before choosing a type or profile. ",
             "Child run budgets (model turns, wall time) come from Fleet role defaults and operator [subagents] config, not per-call fields. ",
             "worktree=true gives the child an isolated git worktree — use it whenever parallel writers must not collide with the parent checkout. ",
@@ -8329,7 +8367,7 @@ impl ToolSpec for AgentTool {
                 },
                 "profile": {
                     "type": "string",
-                    "description": "Optional Fleet role selector. Use a role name (action=roster lists the roles); unknown values are refused. The resolved role supplies the child's posture. There is no per-call model override on this surface."
+                    "description": "Optional Fleet selector. Use a role from action=roster or an exact prompt-only profile id explicitly presented by the embedding host; unknown and ambient saved-profile values are refused. The resolved role supplies the child's posture. There is no per-call model override on this surface."
                 },
                 "worktree": {
                     "type": "boolean",
@@ -8483,9 +8521,10 @@ impl ToolSpec for AgentTool {
         match action {
             AgentToolAction::Start => {}
             AgentToolAction::Roster => {
-                // Role catalog, not a roster: exec spawns resolve roles only
-                // (see `resolve_spawn_role`). The saved-member roster lives in
-                // the durable Fleet UI (`/fleet`); the agent tool never reads it.
+                // This action remains the bounded built-in role catalog. An
+                // embedding host may separately present exact prompt-only
+                // profile ids for the active turn; ambient saved members still
+                // live only in the durable Fleet UI (`/fleet`).
                 let members: Vec<Value> = FleetRole::all()
                     .iter()
                     .map(|role| {
@@ -8502,7 +8541,7 @@ impl ToolSpec for AgentTool {
                     "total_count": members.len(),
                     "truncated": false,
                     "members": members,
-                    "selector_help": "Use type:<role> with one of the listed roles. There are no saved members: every spawn resolves a role only.",
+                    "selector_help": "Use type:<role> with one of the listed roles. A host may separately present exact prompt-only profile ids; ambient saved members are not available to this tool.",
                 });
                 let mut result = ToolResult::json(&payload)
                     .map_err(|error| ToolError::execution_failed(error.to_string()))?;
@@ -9073,7 +9112,8 @@ async fn spawn_subagent_from_input(
         requested_profile: spawn_request.profile.clone(),
         requested_reasoning: subagent_thinking_label(spawn_request.thinking).to_string(),
     };
-    resolve_spawn_role(&mut spawn_request)?;
+    let host_profile =
+        resolve_spawn_role_with_host_profiles(&mut spawn_request, &runtime.host_agent_profiles)?;
     // Role resolution runs before classification so the bounded-write contract
     // sees the effective role: read-only roles stay ergonomic while a
     // manager/builder role can never acquire an implicit repository-wide
@@ -9144,6 +9184,7 @@ async fn spawn_subagent_from_input(
         &child_runtime,
         effective_model.clone(),
         model_selection.source.as_str(),
+        host_profile.as_ref(),
     )?;
 
     if spawn_request.worktree.is_some() {
@@ -9408,15 +9449,9 @@ fn mint_child_route_receipt(
     runtime: &SubAgentRuntime,
     model_id: String,
     route_source: &str,
+    host_profile: Option<&crate::fleet::profile::AgentProfile>,
 ) -> Result<ChildRouteReceipt, ToolError> {
-    // Role-only dispatch: the canonical role comes from the resolved request,
-    // and no saved member is ever bound, so the profile fields stay empty.
-    let canonical_role = request
-        .assignment
-        .role
-        .as_deref()
-        .map(public_role_label)
-        .unwrap_or_else(|| request.agent_type.as_str().to_string());
+    let canonical_role = request.agent_type.as_str().to_string();
     let provider_id = runtime
         .api_config
         .as_ref()
@@ -9425,8 +9460,8 @@ fn mint_child_route_receipt(
     let receipt = ChildRouteReceipt {
         requested_type: requested_route.requested_type.clone(),
         requested_profile: requested_route.requested_profile.clone(),
-        resolved_profile_id: None,
-        profile_origin: None,
+        resolved_profile_id: host_profile.map(|member| member.id.clone()),
+        profile_origin: host_profile.map(|member| member.origin.to_string()),
         canonical_role,
         provider_id,
         model_id,
@@ -9767,10 +9802,18 @@ fn build_subagent_system_prompt_with_skills(
 fn subagent_skill_catalog(context: &ToolContext) -> String {
     let mode =
         crate::skills::SkillDiscoveryMode::from_codewhale_only(context.skills_scan_codewhale_only);
-    let registry = context
-        .skills_dir
-        .as_deref()
-        .map_or_else(
+    let registry = if context.explicit_skills_root_only {
+        context.skills_dir.as_deref().map_or_else(
+            crate::skills::SkillRegistry::default,
+            |skills_dir| {
+                crate::skills::discover_from_explicit_dir_with_plugins(
+                    skills_dir,
+                    context.plugin_registry.as_deref(),
+                )
+            },
+        )
+    } else {
+        context.skills_dir.as_deref().map_or_else(
             || {
                 crate::skills::discover_in_workspace_with_mode_and_plugins(
                     &context.workspace,
@@ -9787,7 +9830,8 @@ fn subagent_skill_catalog(context: &ToolContext) -> String {
                 )
             },
         )
-        .into_enabled();
+    }
+    .into_enabled();
     if registry.list().is_empty() {
         return String::new();
     }
@@ -12811,57 +12855,129 @@ fn validate_roster_selector(value: &str, field: &str) -> Result<String, ToolErro
     Ok(trimmed.to_string())
 }
 
-/// Refresh the role-model defaults from the session `Config` at spawn time
-/// (#5099). The runtime's `role_models` are a launch-time snapshot, so an
-/// explicit `[subagents]` config change mid-session would otherwise stay
-/// invisible. There is no roster to re-read: role-only dispatch resolves
-/// roles, never saved members. Without the session `Config` (tests, legacy
-/// runtimes) the launch-time snapshot is the only source available and is kept.
+/// Refresh the role-model defaults and the host's explicit in-memory profiles
+/// from the session `Config` at spawn time. Ambient profile directories are
+/// deliberately not read: v0.9.12 model-facing dispatch remains role-only
+/// except for the exact config snapshot installed by an embedding host.
 fn refresh_spawn_route_sources(runtime: &mut SubAgentRuntime) {
     let Some(config) = runtime.api_config.as_deref() else {
         return;
     };
-    // No roster to re-read: keep the launch-time role defaults (which include
-    // the roster's model overrides) and overlay the live `[subagents]` config
-    // on top so mid-session config edits still win.
+    // Keep the launch-time role defaults and overlay the live `[subagents]`
+    // config so mid-session route edits still win.
     let mut role_models = std::mem::take(&mut runtime.role_models);
     role_models.extend(config.subagent_model_overrides());
     runtime.role_models = role_models;
+    runtime.host_agent_profiles = std::sync::Arc::new(
+        crate::fleet::roster::FleetRoster::from_host_config(&config.fleet_config()),
+    );
 }
 
-/// Resolve the `profile` spawn parameter against the closed role set and fold
-/// it into the request: agent type (when not explicitly given) and assignment
-/// role.
+/// Resolve the `profile` spawn parameter against the closed role set or an
+/// exact profile explicitly injected by the embedding host.
 ///
-/// Runs at spawn time — `parse_spawn_request` has no runtime access. There is
-/// no roster: `profile` must name a Fleet role (canonical or legacy alias),
-/// and roles carry no provider/model pins, instruction overlays, or delegation
-/// hints — the child's capability posture is governed by its [`FleetRole`]
-/// via `WorkerRuntimeProfile::for_role`. Anything else fails closed with the
-/// role list, the same shape the roster lookup's unknown-member error had.
-fn resolve_spawn_role(request: &mut SpawnRequest) -> Result<(), ToolError> {
+/// Host profiles are prompt-only. They cannot select a provider/model,
+/// reasoning tier, loadout, permissions, or delegation policy; all executable
+/// posture continues to come from the resolved v0.9.12 [`FleetRole`].
+fn resolve_spawn_role_with_host_profiles(
+    request: &mut SpawnRequest,
+    host_profiles: &crate::fleet::roster::FleetRoster,
+) -> Result<Option<crate::fleet::profile::AgentProfile>, ToolError> {
     let Some(profile_id) = request.profile.clone() else {
-        return Ok(());
+        return Ok(None);
     };
-    let Some(role) = FleetRole::from_str(&profile_id) else {
+    if let Some(role) = FleetRole::from_str(&profile_id) {
+        if request.agent_type_explicit && request.agent_type != role {
+            return Err(ToolError::invalid_input(format!(
+                "profile '{}' implies type {}; conflicting explicit type '{}'",
+                profile_id,
+                role.as_str(),
+                request.agent_type.as_str()
+            )));
+        }
+        request.agent_type = role.clone();
+        request.profile = Some(role.as_str().to_string());
+        request.assignment.role = Some(role.as_str().to_string());
+        return Ok(None);
+    }
+
+    let Some(member) = host_profiles
+        .get(&profile_id)
+        .filter(|member| member.origin == crate::fleet::roster::ProfileOrigin::Config)
+        .cloned()
+    else {
         return Err(ToolError::invalid_input(format!(
-            "Unknown Fleet role/profile '{profile_id}'. Fleet profiles are roles: {VALID_ROLE_ALIASES}."
+            "Unknown Fleet role/profile '{profile_id}'. Available built-in roles: {VALID_ROLE_ALIASES}."
         )));
     };
+
+    let prompt_only = member.profile.model.is_none()
+        && member.profile.provider.is_none()
+        && member.profile.reasoning_effort.is_none()
+        && matches!(
+            member.profile.loadout,
+            codewhale_config::FleetLoadout::Inherit
+        )
+        && member.profile.permissions == codewhale_config::FleetProfilePermissions::default()
+        && member.profile.delegation == codewhale_config::FleetDelegationHints::default()
+        && member.requires.is_empty();
+    if !prompt_only {
+        return Err(ToolError::invalid_input(format!(
+            "Host profile '{}' is not prompt-only; model/provider/reasoning/loadout/permission/delegation fields are not accepted by the Agent spawn boundary",
+            member.id
+        )));
+    }
+
+    let role = crate::fleet::worker_runtime::roster_member_agent_type(&member);
     if request.agent_type_explicit && request.agent_type != role {
         return Err(ToolError::invalid_input(format!(
             "profile '{}' implies type {}; conflicting explicit type '{}'",
-            profile_id,
+            member.id,
             role.as_str(),
             request.agent_type.as_str()
         )));
     }
-    request.agent_type = role.clone();
-    // Record the canonical role id after resolution.
-    request.profile = Some(role.as_str().to_string());
-    // Surface the role in prompts and ledger records.
-    request.assignment.role = Some(role.as_str().to_string());
-    Ok(())
+    request.agent_type = role;
+    request.profile = Some(member.id.clone());
+    let role_name = member.profile.role.name.trim();
+    request.assignment.role = Some(if role_name.is_empty() {
+        member.id.clone()
+    } else {
+        role_name.to_string()
+    });
+    if let Some(overlay) = spawn_host_profile_prompt_overlay(&member) {
+        request.prompt.push_str(&overlay);
+    }
+    Ok(Some(member))
+}
+
+#[cfg(test)]
+fn resolve_spawn_role(request: &mut SpawnRequest) -> Result<(), ToolError> {
+    resolve_spawn_role_with_host_profiles(
+        request,
+        &crate::fleet::roster::FleetRoster::built_ins_only(),
+    )
+    .map(|_| ())
+}
+
+fn spawn_host_profile_prompt_overlay(
+    member: &crate::fleet::profile::AgentProfile,
+) -> Option<String> {
+    let description = member.description.as_deref().map(str::trim);
+    let instructions = member.profile.role.instructions.as_deref().map(str::trim);
+    if description.is_none_or(str::is_empty) && instructions.is_none_or(str::is_empty) {
+        return None;
+    }
+    let mut overlay = format!("\n\nHost Agent profile: {}", member.id);
+    if let Some(description) = description.filter(|text| !text.is_empty()) {
+        overlay.push_str("\nProfile description:\n");
+        overlay.push_str(description);
+    }
+    if let Some(instructions) = instructions.filter(|text| !text.is_empty()) {
+        overlay.push_str("\nProfile instructions:\n");
+        overlay.push_str(instructions);
+    }
+    Some(overlay)
 }
 
 /// The active parent's posture, expressed as the upper bound for a child's

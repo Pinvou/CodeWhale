@@ -125,6 +125,7 @@ pub struct ReviewOutput {
 }
 
 impl ReviewOutput {
+    #[allow(clippy::should_implement_trait)]
     #[must_use]
     pub fn from_str(raw: &str) -> Self {
         if let Some(parsed) = parse_review_output_json(raw) {

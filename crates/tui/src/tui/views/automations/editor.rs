@@ -179,25 +179,21 @@ impl TextField {
                 self.insert(&ch.to_string(), multiline)
             }
             KeyCode::Enter if multiline => self.insert("\n", true),
-            KeyCode::Backspace => {
-                if !self.erase_selection() {
-                    let previous = self.value[..self.cursor]
-                        .grapheme_indices(true)
-                        .next_back()
-                        .map_or(0, |(i, _)| i);
-                    self.value.replace_range(previous..self.cursor, "");
-                    self.cursor = previous;
-                }
+            KeyCode::Backspace if !self.erase_selection() => {
+                let previous = self.value[..self.cursor]
+                    .grapheme_indices(true)
+                    .next_back()
+                    .map_or(0, |(i, _)| i);
+                self.value.replace_range(previous..self.cursor, "");
+                self.cursor = previous;
             }
-            KeyCode::Delete => {
-                if !self.erase_selection() {
-                    let next = self.cursor
-                        + self.value[self.cursor..]
-                            .graphemes(true)
-                            .next()
-                            .map_or(0, str::len);
-                    self.value.replace_range(self.cursor..next, "");
-                }
+            KeyCode::Delete if !self.erase_selection() => {
+                let next = self.cursor
+                    + self.value[self.cursor..]
+                        .graphemes(true)
+                        .next()
+                        .map_or(0, str::len);
+                self.value.replace_range(self.cursor..next, "");
             }
             KeyCode::Left => {
                 self.cursor = self.value[..self.cursor]

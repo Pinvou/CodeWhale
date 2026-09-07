@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 
 use crate::skills::{
     Skill, SkillDiscoveryMode, SkillSource, discover_for_workspace_and_dir_with_mode_and_plugins,
-    discover_in_workspace_with_mode_and_plugins, skill_directories_for_workspace_and_dir,
-    skills_directories_for_mode,
+    discover_from_explicit_dir_with_plugins, discover_in_workspace_with_mode_and_plugins,
+    skill_directories_for_workspace_and_dir, skills_directories_for_mode,
 };
 
 use super::spec::{
@@ -83,7 +83,17 @@ impl ToolSpec for LoadSkillTool {
         // can't find.
         let discovery_mode =
             SkillDiscoveryMode::from_codewhale_only(context.skills_scan_codewhale_only);
-        let registry = if let Some(skills_dir) = context.skills_dir.as_deref() {
+        let registry = if context.explicit_skills_root_only {
+            context.skills_dir.as_deref().map_or_else(
+                crate::skills::SkillRegistry::default,
+                |skills_dir| {
+                    discover_from_explicit_dir_with_plugins(
+                        skills_dir,
+                        context.plugin_registry.as_deref(),
+                    )
+                },
+            )
+        } else if let Some(skills_dir) = context.skills_dir.as_deref() {
             discover_for_workspace_and_dir_with_mode_and_plugins(
                 &context.workspace,
                 skills_dir,
@@ -123,11 +133,15 @@ impl ToolSpec for LoadSkillTool {
                     .skills_dir
                     .as_deref()
                     .map(|skills_dir| {
-                        skill_directories_for_workspace_and_dir(
-                            &context.workspace,
-                            skills_dir,
-                            discovery_mode,
-                        )
+                        if context.explicit_skills_root_only {
+                            vec![skills_dir.to_path_buf()]
+                        } else {
+                            skill_directories_for_workspace_and_dir(
+                                &context.workspace,
+                                skills_dir,
+                                discovery_mode,
+                            )
+                        }
                     })
                     .unwrap_or_else(|| {
                         skills_directories_for_mode(&context.workspace, discovery_mode)

@@ -596,11 +596,9 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
             .iter()
             .position(|(_, area)| mouse_hits_rect(mouse, Some(*area)));
         match mouse.kind {
-            MouseEventKind::Moved => {
-                if hit != app.launch.hovered_row {
-                    app.launch.hovered_row = hit;
-                    app.needs_redraw = true;
-                }
+            MouseEventKind::Moved if hit != app.launch.hovered_row => {
+                app.launch.hovered_row = hit;
+                app.needs_redraw = true;
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(index) = hit {

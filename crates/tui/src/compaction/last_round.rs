@@ -178,32 +178,26 @@ pub(super) fn bound_last_round(messages: &[Message]) -> Vec<Message> {
     let mut round = messages.to_vec();
     for message in &mut round {
         for block in &mut message.content {
-            match block {
-                ContentBlock::ToolResult {
-                    content,
-                    content_blocks,
-                    ..
-                } => {
-                    if truncate_retained_block(
-                        "tool result",
-                        content,
-                        LAST_ROUND_TOOL_RESULT_MAX_CHARS,
-                    ) {
-                        *content_blocks = None;
-                    }
+            if let ContentBlock::ToolResult {
+                content,
+                content_blocks,
+                ..
+            } = block
+            {
+                if truncate_retained_block("tool result", content, LAST_ROUND_TOOL_RESULT_MAX_CHARS)
+                {
+                    *content_blocks = None;
                 }
-                ContentBlock::Thinking {
-                    thinking,
-                    signature,
-                    ..
-                } if signature.is_none() => {
-                    truncate_retained_block(
-                        "thinking block",
-                        thinking,
-                        LAST_ROUND_THINKING_MAX_CHARS,
-                    );
-                }
-                _ => {}
+                continue;
+            }
+            if let ContentBlock::Thinking {
+                thinking,
+                signature,
+                ..
+            } = block
+                && signature.is_none()
+            {
+                truncate_retained_block("thinking block", thinking, LAST_ROUND_THINKING_MAX_CHARS);
             }
         }
     }

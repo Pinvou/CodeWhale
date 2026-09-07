@@ -3882,6 +3882,72 @@ fn test_resolve_spawn_role_unknown_lists_roles() {
 }
 
 #[test]
+fn forkguard_host_profile_overlay_is_config_only_and_prompt_only() {
+    let profile_id = "exp-host-reviewer";
+    let sentinel = "HOST_PROFILE_SENTINEL";
+    let mut fleet = codewhale_config::FleetConfigToml::default();
+    fleet.profiles.insert(
+        profile_id.to_string(),
+        codewhale_config::FleetProfile {
+            slot: codewhale_config::FleetSlot::Custom(profile_id.to_string()),
+            role: codewhale_config::FleetRole {
+                name: profile_id.to_string(),
+                description: Some("Host-injected expert".to_string()),
+                instructions: Some(sentinel.to_string()),
+            },
+            ..codewhale_config::FleetProfile::default()
+        },
+    );
+    let host_profiles = FleetRoster::from_host_config(&fleet);
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": profile_id,
+        "write_authority": "read_only"
+    }))
+    .expect("host profile request parses");
+    let resolved = resolve_spawn_role_with_host_profiles(&mut request, &host_profiles)
+        .expect("config-origin prompt-only profile resolves")
+        .expect("host member is returned");
+    assert_eq!(resolved.id, profile_id);
+    assert_eq!(request.agent_type, FleetRole::Worker);
+    assert_eq!(request.profile.as_deref(), Some(profile_id));
+    assert_eq!(request.assignment.role.as_deref(), Some(profile_id));
+    assert!(request.prompt.contains(sentinel));
+
+    let mut ambient_member = resolved.clone();
+    ambient_member.origin = crate::fleet::roster::ProfileOrigin::Workspace;
+    let ambient = FleetRoster::from_members(vec![ambient_member]);
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": profile_id,
+        "write_authority": "read_only"
+    }))
+    .expect("ambient profile request parses");
+    let error = resolve_spawn_role_with_host_profiles(&mut request, &ambient)
+        .expect_err("workspace profile must remain unavailable")
+        .to_string();
+    assert!(error.contains("Unknown Fleet role/profile"), "{error}");
+
+    let mut routed_fleet = fleet;
+    routed_fleet
+        .profiles
+        .get_mut(profile_id)
+        .expect("profile exists")
+        .model = Some("forbidden-route-pin".to_string());
+    let routed_profiles = FleetRoster::from_host_config(&routed_fleet);
+    let mut request = parse_spawn_request(&json!({
+        "prompt": "review the change",
+        "profile": profile_id,
+        "write_authority": "read_only"
+    }))
+    .expect("routed profile request parses");
+    let error = resolve_spawn_role_with_host_profiles(&mut request, &routed_profiles)
+        .expect_err("host profile route pins must fail closed")
+        .to_string();
+    assert!(error.contains("not prompt-only"), "{error}");
+}
+
+#[test]
 fn test_resolve_spawn_role_rejects_conflicting_explicit_type() {
     let mut request = parse_spawn_request(&json!({
         "prompt": "x",
@@ -12670,6 +12736,9 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         reasoning_effort: None,
         reasoning_effort_auto: false,
         role_models: std::collections::HashMap::new(),
+        host_agent_profiles: std::sync::Arc::new(
+            crate::fleet::roster::FleetRoster::built_ins_only(),
+        ),
         context,
         allow_shell: true,
         accept_edits: false,

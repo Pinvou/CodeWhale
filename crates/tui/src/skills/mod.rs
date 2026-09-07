@@ -1056,6 +1056,17 @@ pub fn skill_directories_for_workspace_and_dir(
     dirs
 }
 
+/// Discover only from an explicit host-owned directory plus the immutable
+/// plugin snapshot. This is an embedding authority boundary: unlike ordinary
+/// CodeWhale discovery it never unions ambient workspace or home roots.
+#[must_use]
+pub fn discover_from_explicit_dir_with_plugins(
+    skills_dir: &Path,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
+    discover_from_directories_with_plugins([skills_dir.to_path_buf()], plugins)
+}
+
 fn insert_configured_skills_dir(dirs: &mut Vec<PathBuf>, workspace: &Path, skills_dir: &Path) {
     if !skills_dir.is_dir()
         || dirs
@@ -1355,6 +1366,27 @@ pub fn render_available_skills_context_for_workspace_and_dir_with_mode_and_plugi
         locale,
         workspace,
         configured_skills_root,
+        budget_chars,
+    )
+}
+
+/// Render the model-visible Skills index from a single explicit host root.
+/// Reviewed plugin entries remain eligible because their authority is supplied
+/// as an immutable host snapshot, not discovered from the ambient filesystem.
+#[must_use]
+pub fn render_available_skills_context_for_explicit_dir_with_plugins(
+    workspace: &Path,
+    skills_dir: &Path,
+    locale: &str,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+    budget_chars: usize,
+) -> Option<String> {
+    let registry = discover_from_explicit_dir_with_plugins(skills_dir, plugins).into_enabled();
+    render_skills_block_with_configured_root(
+        &registry,
+        locale,
+        workspace,
+        Some(skills_dir),
         budget_chars,
     )
 }

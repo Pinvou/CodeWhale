@@ -328,6 +328,12 @@ pub struct McpSyncRegistry {
     cache_path_override: Option<PathBuf>,
 }
 
+impl Default for McpSyncRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpSyncRegistry {
     /// Default instance; resolves the cache under `dirs::home_dir()`.
     pub fn new() -> Self {

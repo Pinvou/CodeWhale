@@ -688,10 +688,10 @@ async fn present_operate_board(app: &mut App, config: &Config) {
     // Always-on is durable only if the keepalive automation exists: entering
     // Operate (re)installs it for this workspace, kicking an immediate
     // lead-plan step when the attached operation still needs one.
-    let needs_lead_plan = !operation
+    let needs_lead_plan = operation
         .lead_plan
         .as_ref()
-        .is_some_and(|plan| !plan.slices.is_empty());
+        .is_none_or(|plan| plan.slices.is_empty());
     if let Some(automations) = app
         .runtime_services
         .automations

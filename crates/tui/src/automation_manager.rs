@@ -2820,7 +2820,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automation_enqueue_uses_default_and_explicit_task_settings() -> Result<()> {
+    async fn forkguard_automation_enqueue_preserves_settings_and_conversation_owner() -> Result<()>
+    {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let task_manager = TaskManager::start_with_executor(
             automation_task_config(tempdir.path().join("tasks")),
@@ -2839,6 +2840,11 @@ mod tests {
         assert!(!default_task.allow_shell);
         assert!(!default_task.trust_mode);
         assert!(!default_task.auto_approve);
+        assert_eq!(
+            default_task.conversation_key.as_deref(),
+            Some(default_automation.id.as_str()),
+            "all attempts for one automation must share its stable conversation owner"
+        );
 
         let mut explicit_automation =
             automation_record_with_settings(Some("plan"), Some(true), Some(true), Some(true));
@@ -2853,9 +2859,63 @@ mod tests {
         assert!(explicit_task.allow_shell);
         assert!(explicit_task.trust_mode);
         assert!(explicit_task.auto_approve);
+        assert_eq!(
+            explicit_task.conversation_key.as_deref(),
+            Some(explicit_automation.id.as_str())
+        );
 
         task_manager.shutdown();
         Ok(())
+    }
+
+    #[test]
+    fn forkguard_scheduler_skips_offline_backfill_and_overlapping_runs() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
+        let now = Utc::now();
+
+        let mut offline = automation_record_with_settings(None, None, None, None);
+        offline.next_run_at = Some(now - Duration::minutes(2));
+        manager.save_automation(&offline).expect("save offline");
+        assert!(
+            manager
+                .collect_due_runs(now)
+                .expect("skip offline slot")
+                .is_empty(),
+            "slots outside the grace window must not be backfilled"
+        );
+        assert!(
+            manager
+                .get_automation(&offline.id)
+                .expect("reload offline")
+                .next_run_at
+                .is_some_and(|next| next > now),
+            "offline skips must advance directly to a future slot"
+        );
+
+        let mut overlapping = automation_record_with_settings(None, None, None, None);
+        overlapping.next_run_at = Some(now - Duration::seconds(10));
+        manager
+            .save_automation(&overlapping)
+            .expect("save overlapping");
+        let mut active = queued_run_for(&overlapping);
+        active.status = AutomationRunStatus::Running;
+        active.scheduled_for = now - Duration::minutes(30);
+        manager.save_run(&active).expect("save active run");
+        assert!(
+            manager
+                .collect_due_runs(now)
+                .expect("skip overlap")
+                .is_empty(),
+            "a due slot must not overlap an active attempt"
+        );
+        assert!(
+            manager
+                .get_automation(&overlapping.id)
+                .expect("reload overlapping")
+                .next_run_at
+                .is_some_and(|next| next > now)
+        );
     }
 
     #[tokio::test]
@@ -3096,7 +3156,10 @@ model = "private-model"
     fn once_schedule_fires_once_and_auto_completes() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
-        let due_at = Utc::now() - Duration::minutes(1);
+        // Exercise a due one-shot inside the scheduler's offline-misfire
+        // grace. Older one-shots are intentionally skipped by the Pinvou
+        // no-backfill contract.
+        let due_at = Utc::now() - Duration::seconds(10);
         let automation = AutomationRecord {
             rrule: due_at
                 .format("FREQ=ONCE;AT=%Y-%m-%dT%H:%M:%S+00:00")

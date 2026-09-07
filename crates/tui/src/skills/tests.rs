@@ -1102,10 +1102,9 @@ fn codewhale_only_mode_rejects_workspace_codewhale_symlink_escape() {
 }
 
 #[test]
-fn discover_for_workspace_and_dir_merges_workspace_and_configured_sources() {
+fn forkguard_explicit_skills_dir_excludes_ambient_workspace_sources() {
     let tmpdir = TempDir::new().unwrap();
     let workspace = tmpdir.path().join("workspace");
-    let home = tmpdir.path().join("home");
     let configured_dir = tmpdir.path().join("configured-skills");
     std::fs::create_dir_all(&workspace).unwrap();
     write_skill(
@@ -1121,12 +1120,10 @@ fn discover_for_workspace_and_dir_merges_workspace_and_configured_sources() {
         "body",
     );
 
-    let registry =
-        super::discover_for_workspace_and_dir_with_home(&workspace, &configured_dir, Some(&home));
+    let registry = super::discover_from_explicit_dir_with_plugins(&configured_dir, None);
     let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
 
-    assert!(names.contains(&"workspace-skill"));
-    assert!(names.contains(&"configured-skill"));
+    assert_eq!(names, vec!["configured-skill"]);
 }
 
 #[test]

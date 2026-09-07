@@ -262,6 +262,7 @@ fn issue_5305_builtin_inheritance_and_redaction_are_bounded() {
         &runtime,
         "deepseek-v4-flash".to_string(),
         "run.model",
+        None,
     )
     .expect("bounded receipt");
     let encoded = serde_json::to_string(&receipt).expect("receipt json");

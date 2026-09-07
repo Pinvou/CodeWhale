@@ -1985,9 +1985,8 @@ impl ShellManager {
         )
     }
 
-    /// Test-only owner-aware launch with an explicit immutable session owner.
+    /// Host-facing owner-aware launch with an explicit immutable session owner.
     #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
     pub fn execute_with_options_env_for_owner_and_session(
         &mut self,
         command: &str,
