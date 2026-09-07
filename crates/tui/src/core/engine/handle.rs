@@ -218,6 +218,17 @@ impl EngineHandle {
         true
     }
 
+    /// Publish a stop's steer disposition without firing any cancellation
+    /// token. For hosts whose target turn already completed (the app's
+    /// terminal-closing window): parked steers must still be dropped and the
+    /// cancel reason latched, but the shared slot may already hold a runtime
+    /// self-started follow-up turn's live token (pinvou-agent#254), so no
+    /// token may fire here.
+    pub fn publish_stop_disposition(&self, reason: CancelReason, mode: CancelMode) {
+        self.publish_cancel_disposition(reason, mode);
+        crate::retry_status::clear();
+    }
+
     /// Publish the steer disposition and latch the cancel reason shared by
     /// every cancel entry point. The token fire itself stays with the caller
     /// so turn-bound cancels can resolve the exact token under the slot lock.

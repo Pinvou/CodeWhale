@@ -9662,6 +9662,30 @@ fn engine_handle_cancel_turn_only_fires_the_named_turns_token() {
     assert!(followup_token.is_cancelled());
 }
 
+#[test]
+fn engine_handle_stop_disposition_publishes_without_firing_any_token() {
+    // A stop whose target turn already completed (the app's terminal-closing
+    // window) must still drop parked steers and latch the cancel reason, but
+    // by then the slot may already hold a runtime self-started follow-up
+    // turn's live token (pinvou-agent#254) — the disposition-only entry must
+    // never fire it.
+    let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.install_turn_cancel_token("turn-1");
+    let token = engine.cancel_token.clone();
+
+    handle.publish_stop_disposition(CancelReason::User, CancelMode::StopDropInbox);
+    assert!(
+        !token.is_cancelled(),
+        "disposition-only stop fired the installed turn's token"
+    );
+    assert!(!handle.is_cancelled());
+    assert_eq!(
+        *engine.cancel_reason.lock().expect("cancel reason latch"),
+        Some(CancelReason::User),
+        "disposition-only stop must latch the cancel reason"
+    );
+}
+
 #[tokio::test]
 async fn forkguard_cancel_turn_binding_spares_unnamed_turns_and_hits_the_observed_turn() {
     let workspace = tempdir().expect("tempdir");
