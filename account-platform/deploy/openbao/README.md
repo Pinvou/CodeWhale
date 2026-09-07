@@ -37,4 +37,6 @@ Linux Docker 操作者先取得上述固定镜像，运行 `python3 scripts/acco
 
 正式定时备份、独立运维身份、证书续签/到期告警、审计轮转容量门禁和业务 Compose/Helm 接线尚需各自验收。此模板启动成功不是完整生产可用证明。
 
+逐服务身份初始化使用独立本机 [kms-operator](../../tools/kms-recovery/cmd/kms-operator/README.md) 的固定 bootstrap/finalize 流程；原生 2.6.2 创建/轮换 key 返回 200 元数据。该工具已完成真实隔离联验，正式执行需要保管人本机口令，不把初始 root 投递到服务端文件、环境变量或命令参数。输出为加密角色包，Agent bootstrap 文件与定时快照任务仍需后续受控部署。
+
 固定镜像声明了未使用的 `/openbao/file` 与 `/openbao/logs` 卷；模板显式用受限 tmpfs 覆盖，避免隐式匿名持久卷。实际业务数据与审计仍仅使用 `/bao/data`、`/bao/audit` 的登记绑定目录。启动前检查真实容器挂载不得出现未登记 volume；不能仅凭 YAML 没写 volume 就认定不存在。

@@ -1,6 +1,6 @@
 # 保管人本机解封
 
-单独的联网程序；默认 `kms-recovery` 仍无网络。仅提供 `-action unseal`，没有 init、reset、migrate、任意 URL/API 或密钥打印功能。不会发送包中的 root token。
+单独的联网程序；默认 `kms-recovery` 仍无网络。提供有界 `unseal`、`bootstrap`、`finalize-bootstrap`，没有 init、reset、migrate、任意 URL/API 或密钥打印功能。普通 `unseal` 不解析或发送包中的 root token；只有明确的身份引导/退场操作使用内存中的 root。
 
 ## 使用
 
@@ -35,3 +35,22 @@ kms-operator -action unseal -config <配置绝对路径> -directory <custody绝�
 读取状态确认已初始化且份额阈值匹配后，才发送一次 `sys/unseal`。已解封则不重复发送；成功后重新读取封存状态。没有透明写重试：超时、断线、跳转、响应异常或仍封存报告 `OPERATOR_UNSEAL_RESULT_UNCERTAIN_CHECK_STATE_BEFORE_RETRY`，操作者应先只读核对当前状态再决定是否重试。程序不自动重置解封进度或删除服务。
 
 `KMS_UNSEALED` 仅表示解封后状态已验证，不代表策略/服务身份初始化、root 撤销、快照恢复或生产部署完成。TLS 证书更新到同一可信 CA 下的新叶证书不需要更换恢复包；CA 或 Shamir 主密钥轮换必须走独立受控的恢复材料更新流程，不能放宽绑定校验。
+
+## 固定身份引导与初始化 root 退场
+
+下面两个操作同样只在本机真实终端输入已有口令，每次均重新校验恢复包绑定：
+
+```text
+kms-operator -action bootstrap -config <公开配置> -directory <custody> -bundle <initialization.age> -output-directory <新的受控输出目录>
+kms-operator -action finalize-bootstrap -config <相同公开配置> -directory <custody> -bundle <相同initialization.age> -output-directory <上一步输出目录>
+```
+
+`bootstrap` 只接受已解封且没有 transit/approle 挂载或四个同名策略的新实例；固定策略来自编译时计划，不接受用户传入策略/角色/密钥名。ACL 创建使用 create-only CAS。创建 AES-256-GCM 不可导出业务 key，以及 `pinvou-token-gateway`、`pinvou-credential-portal`、`pinvou-kms-backup`、`pinvou-kms-operations` 四个角色。每角色独立 SecretID，300/900 秒 service token，无 default policy。运维角色可为四个固定角色轮换 SecretID，因而属于特权离线身份，不得投递给业务容器；它不直接加解密、不修改策略/挂载，也不是长期 root。
+
+新目录先写 `BOOTSTRAP_ATTEMPTED`。每个一次性响应立即加密为 `*-response.age`，完整角色材料写 `roles.age`，随后核对固定配置、实际登录、权限正负例、AAD 和真实快照读取，才写 `BOOTSTRAP_PREPARED`。所有文件 0600、同步及读回；Windows 仍需人工核对受控父目录 ACL。没有 root/SecretID 明文文件，runtime 和 backup 的 Agent 文件投递尚由后续受控部署步骤负责。
+
+在退场前将新目录加入既定离线备份。`finalize-bootstrap` 完整验证 `roles.age` 的实例/origin/CA/recipient 绑定及四个唯一身份，然后再次实际验证，才撤销初始化 root；必须看到旧 root 403 且四角色重新登录成功才写 `BOOTSTRAP_FINALIZED`（包含加密包摘要）。探测 token 逐一主动撤销，不留长期测试 token。快照读取仅是有界权限探测（最多 16 MiB），**不是已保存备份**，正式备份调度/加密/异地保留仍须单独验收。
+
+任何创建阶段断网/异常均停止，不自动重试、覆盖或删除，保留已收到的加密响应和初始 root。若完整 `roles.age` 已写入但探测临时失败，可直接用同一包执行 `finalize-bootstrap` 重新验证；没有完整包时必须受控核对部分状态，不能重新运行 bootstrap 或清库。撤销响应不确定时，也只重跑同一包的 finalize：已撤销 root 不再发送撤销请求，验证仍通过才完成标记。已存在的错误标记/权限/包损坏不覆盖。
+
+常规 SecretID 轮换至少每 30 天：先投递新值并验证 Agent 重新认证，再销毁旧 accessor。旧 SecretID 被撤销不立即撤销其既存 token，最长 15 分钟仍有效；紧急泄露还需隔离受影响业务与 Agent 网络。此受限运维角色不授予全局 token accessor 撤销或策略管理；扩大权限及 break-glass 必须走独立受控流程，不能重新启用初始化 root。

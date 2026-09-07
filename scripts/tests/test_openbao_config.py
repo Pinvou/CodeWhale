@@ -46,6 +46,10 @@ class OpenBaoConfigurationTests(unittest.TestCase):
         self.assertNotIn("secret_id", config)
         self.assertNotIn("role_id", config)
 
+    def test_bootstrap_embedded_runtime_policy_matches_deployment(self):
+        embedded = CONFIG.parents[1] / "tools/kms-recovery/internal/operator/plans/runtime-policy.hcl"
+        self.assertEqual(embedded.read_text(encoding="utf-8"), (CONFIG / "runtime-policy.hcl").read_text(encoding="utf-8"))
+
     def test_standalone_facility_does_not_bootstrap_or_expose_ports(self):
         config = (CONFIG / "compose.yaml").read_text(encoding="utf-8")
         for required in ('read_only: true', 'user: "65532:65532"', 'cap_drop: ["ALL"]',

@@ -113,30 +113,40 @@ func client(cfg Config) (*http.Client, string, error) {
 	return &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, hash(ca), nil
 }
 
-func material(cfg Config, caHash string, encrypted []byte, identity *age.X25519Identity) (string, error) {
-	if hash([]byte(identity.Recipient().String())) != cfg.RecipientSHA256 {
-		return "", ErrBinding
+func initResponse(cfg Config, caHash string, encrypted []byte, identity *age.X25519Identity) ([]byte, error) {
+	if identity == nil || hash([]byte(identity.Recipient().String())) != cfg.RecipientSHA256 {
+		return nil, ErrBinding
 	}
 	plain, err := custody.Decrypt(encrypted, identity)
 	if err != nil {
-		return "", ErrBinding
+		return nil, ErrBinding
 	}
 	defer clear(plain)
 	var envelope initialize.Envelope
 	d := json.NewDecoder(bytes.NewReader(plain))
 	d.DisallowUnknownFields()
 	if d.Decode(&envelope) != nil || d.Decode(new(any)) != io.EOF {
-		return "", ErrBinding
+		clear(envelope.Response)
+		return nil, ErrBinding
 	}
-	defer clear(envelope.Response)
 	at, err := time.Parse(time.RFC3339, envelope.CapturedAt)
 	if err != nil || at.After(time.Now().Add(5*time.Minute)) || envelope.Version != 1 || !envelope.Complete || envelope.HTTPStatus != 200 || envelope.InstanceID != cfg.InstanceID || envelope.Endpoint != cfg.Endpoint || envelope.CASHA256 != caHash || envelope.RecipientSHA256 != cfg.RecipientSHA256 {
-		return "", ErrBinding
+		clear(envelope.Response)
+		return nil, ErrBinding
 	}
+	return envelope.Response, nil
+}
+
+func material(cfg Config, caHash string, encrypted []byte, identity *age.X25519Identity) (string, error) {
+	response, err := initResponse(cfg, caHash, encrypted, identity)
+	if err != nil {
+		return "", err
+	}
+	defer clear(response)
 	var m struct {
 		Keys []string `json:"keys_base64"`
 	}
-	if json.Unmarshal(envelope.Response, &m) != nil || len(m.Keys) != 1 {
+	if json.Unmarshal(response, &m) != nil || len(m.Keys) != 1 {
 		return "", ErrBinding
 	}
 	key, err := base64.StdEncoding.Strict().DecodeString(m.Keys[0])
@@ -149,6 +159,11 @@ func material(cfg Config, caHash string, encrypted []byte, identity *age.X25519I
 }
 
 func request(ctx context.Context, c *http.Client, cfg Config, path string, body []byte) (int, []byte, error) {
+	return authenticatedRequest(ctx, c, cfg, path, body, "")
+}
+
+// All callers supply fixed, internal API paths. Unseal always supplies no token.
+func authenticatedRequest(ctx context.Context, c *http.Client, cfg Config, path string, body []byte, token string) (int, []byte, error) {
 	method := "GET"
 	var r io.Reader
 	if body != nil {
@@ -161,6 +176,9 @@ func request(ctx context.Context, c *http.Client, cfg Config, path string, body 
 	}
 	req.GetBody = nil
 	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("X-Vault-Token", token)
+	}
 	response, err := c.Do(req)
 	if err != nil {
 		return 0, nil, ErrPreflight
@@ -168,8 +186,9 @@ func request(ctx context.Context, c *http.Client, cfg Config, path string, body 
 	defer response.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(response.Body, initialize.MaxResponse+1))
 	if err != nil || len(b) > initialize.MaxResponse {
-		clear(b)
-		return 0, nil, ErrPreflight
+		// Preserve the bounded partial bytes for bootstrap's encrypted capture.
+		// All callers own clearing; no caller may treat this as a valid response.
+		return response.StatusCode, b, ErrPreflight
 	}
 	return response.StatusCode, b, nil
 }

@@ -5,6 +5,7 @@ import base64
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import shutil
@@ -55,9 +56,11 @@ def main():
     recovery.add_argument("--initializer-test-binary", help="optional Linux Go initializer test binary; runs initialization suite")
     recovery.add_argument("--operator-test-binary", help="optional Linux Go operator test binary; runs operator suite")
     parser.add_argument("--restore-fixture", action="store_true", help="create a second isolated empty Raft instance for the operator restore proof")
+    parser.add_argument("--bootstrap-fixture", action="store_true", help="test bounded role bootstrap and initial root retirement")
     args = parser.parse_args()
     require(os.name == "posix" and os.geteuid() == 0, "Linux Docker operator required")
     require(not args.restore_fixture or args.operator_test_binary, "restore proof requires the operator test binary")
+    require(not args.bootstrap_fixture or (args.operator_test_binary and not args.restore_fixture), "bootstrap proof requires operator and excludes restore")
     source = Path(args.config_directory).resolve(strict=True)
     initializer_binary = None
     if args.initializer_test_binary or args.operator_test_binary:
@@ -180,13 +183,23 @@ def main():
                 environment["PINVOU_TEST_OPENBAO_OPERATOR_ISOLATED"] = "1"
             if args.restore_fixture:
                 environment["PINVOU_TEST_OPENBAO_RESTORE_ENDPOINT"] = "https://" + restore_ip + ":8200"
+            if args.bootstrap_fixture:
+                environment["PINVOU_TEST_OPENBAO_BOOTSTRAP_ISOLATED"] = "1"
             result = subprocess.run([str(initializer_binary), "-test.v", "-test.timeout=120s"], env=environment, capture_output=True, text=True, check=False, timeout=130)
             # The test emits fixed stages only; do not expose arbitrary subprocess output.
             marker = "ACTUAL_OPENBAO_OPERATOR_UNSEAL_PASS" if args.operator_test_binary else "ACTUAL_OPENBAO_ENCRYPTED_INITIALIZATION_PASS"
+            if result.returncode != 0:
+                for name in re.findall(r"--- FAIL: (Test[A-Za-z0-9_/]+)", result.stdout):
+                    print("fixture failed test: " + name, flush=True)
+                for stage in sorted(set(re.findall(r"\b(?:BOOTSTRAP|OPERATOR)_[A-Z0-9_]+\b", result.stdout))):
+                    print(stage, flush=True)
             require(result.returncode == 0 and marker in result.stdout and "SKIP" not in result.stdout, "actual recovery integration failed")
             if args.restore_fixture:
                 require("ACTUAL_OPENBAO_SNAPSHOT_RESTORE_PASS" in result.stdout, "actual snapshot restore did not execute")
                 print("OPENBAO_SNAPSHOT_RESTORE_FIXTURE_PASS", flush=True)
+            if args.bootstrap_fixture:
+                require("ACTUAL_OPENBAO_BOOTSTRAP_PASS" in result.stdout, "actual bootstrap did not execute")
+                print("OPENBAO_BOOTSTRAP_FIXTURE_PASS", flush=True)
             print("OPENBAO_OPERATOR_FIXTURE_PASS" if args.operator_test_binary else "OPENBAO_INITIALIZER_FIXTURE_PASS", flush=True)
             return
         initialized = expect("sys/init", {"secret_shares": 1, "secret_threshold": 1})
