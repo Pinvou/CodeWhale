@@ -7,9 +7,35 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+func TestWorkloadValidityInterval(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	for _, test := range []struct {
+		name           string
+		issued, expiry time.Time
+		notBefore      int64
+		want           bool
+	}{
+		{"valid", now, now.Add(5 * time.Minute), 0, true},
+		{"maximum", now, now.Add(15 * time.Minute), now.Unix(), true},
+		{"missing-issued", time.Time{}, now.Add(time.Minute), 0, false},
+		{"future-issued", now.Add(time.Second), now.Add(time.Minute), 0, false},
+		{"future-not-before", now, now.Add(time.Minute), now.Add(time.Second).Unix(), false},
+		{"expired", now.Add(-time.Minute), now, 0, false},
+		{"negative-life", now, now.Add(-time.Minute), 0, false},
+		{"long-life", now, now.Add(15*time.Minute + time.Second), 0, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validTokenTimes(test.issued, test.expiry, test.notBefore, now); got != test.want {
+				t.Fatalf("validity = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
 
 func TestMiddlewareRequiresExactToken(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })

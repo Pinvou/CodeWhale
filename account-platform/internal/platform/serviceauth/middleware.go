@@ -154,11 +154,19 @@ func newAuthenticator(expectedToken string) authenticator {
 		if err != nil {
 			return "", err
 		}
-		if token.Subject == "" || token.IssuedAt.IsZero() || token.Expiry.Sub(token.IssuedAt) > defaultMaximumLifetime {
-			return "", errors.New("workload token is missing a subject or exceeds the maximum lifetime")
+		var claims struct {
+			NotBefore int64 `json:"nbf"`
+		}
+		if token.Subject == "" || token.Claims(&claims) != nil || !validTokenTimes(token.IssuedAt, token.Expiry, claims.NotBefore, time.Now()) {
+			return "", errors.New("workload token subject or validity interval is invalid")
 		}
 		return token.Subject, nil
 	}}
+}
+
+func validTokenTimes(issued, expiry time.Time, notBefore int64, now time.Time) bool {
+	lifetime := expiry.Sub(issued)
+	return !issued.IsZero() && !issued.After(now) && expiry.After(now) && lifetime > 0 && lifetime <= defaultMaximumLifetime && (notBefore == 0 || !time.Unix(notBefore, 0).After(now))
 }
 
 func (auth authenticator) authenticate(request *http.Request) (Identity, int) {
