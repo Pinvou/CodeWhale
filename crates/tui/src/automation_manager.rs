@@ -34,6 +34,7 @@ const DEFAULT_AUTOMATION_MODE: &str = "agent";
 const DEFAULT_AUTOMATION_ALLOW_SHELL: bool = false;
 const DEFAULT_AUTOMATION_TRUST_MODE: bool = false;
 const DEFAULT_AUTOMATION_AUTO_APPROVE: bool = false;
+const AUTOMATION_MISFIRE_GRACE_SECS: i64 = 60;
 const DEFAULT_AUTOMATION_DELIVERY_MODE: AutomationDeliveryMode = AutomationDeliveryMode::Task;
 pub const AUTOMATION_WATCHER_NO_REPORT_SENTINEL: &str = "NOTHING_TO_REPORT";
 const MAX_HOURLY_SEARCH_STEPS: usize = 24 * 21;
@@ -1276,6 +1277,65 @@ impl AutomationManager {
         Ok(out)
     }
 
+    /// Return terminal runs exceeding the per-automation retention budget.
+    pub fn terminal_run_prune_candidates(
+        &self,
+        retain_terminal: usize,
+    ) -> Result<Vec<AutomationRunRecord>> {
+        let mut candidates = Vec::new();
+        for automation in self.list_automations()? {
+            let mut terminal = self
+                .list_runs(&automation.id, None)?
+                .into_iter()
+                .filter(|run| {
+                    matches!(
+                        run.status,
+                        AutomationRunStatus::Completed
+                            | AutomationRunStatus::Failed
+                            | AutomationRunStatus::Canceled
+                    )
+                })
+                .collect::<Vec<_>>();
+            terminal.sort_by_key(|run| std::cmp::Reverse(run.ended_at.unwrap_or(run.created_at)));
+            candidates.extend(terminal.into_iter().skip(retain_terminal));
+        }
+        candidates.sort_by_key(|run| run.ended_at.unwrap_or(run.created_at));
+        Ok(candidates)
+    }
+
+    /// Delete one terminal run and its execution task after the host removes
+    /// the corresponding conversation.
+    pub async fn delete_terminal_run(
+        &self,
+        expected: &AutomationRunRecord,
+        task_manager: &SharedTaskManager,
+    ) -> Result<bool> {
+        let sortable_path = self.run_path(expected)?;
+        let legacy_path = self.legacy_run_path(&expected.automation_id, &expected.id)?;
+        let active_path = if sortable_path.exists() {
+            &sortable_path
+        } else if legacy_path.exists() {
+            &legacy_path
+        } else {
+            return Ok(false);
+        };
+        let current = read_run_file(active_path)?;
+        if current.automation_id != expected.automation_id || current.id != expected.id {
+            bail!("Automation run changed identity before retention cleanup");
+        }
+        if matches!(
+            current.status,
+            AutomationRunStatus::Queued | AutomationRunStatus::Running
+        ) {
+            bail!("Refusing to delete active automation run {}", current.id);
+        }
+        if let Some(task_id) = current.task_id.as_deref() {
+            task_manager.delete_terminal_task(task_id).await?;
+        }
+        self.delete_run(&current)?;
+        Ok(true)
+    }
+
     fn save_run(&self, run: &AutomationRunRecord) -> Result<()> {
         let dir = self.runs_dir_for(&run.automation_id)?;
         fs::create_dir_all(&dir).with_context(|| format!("Failed to create {}", dir.display()))?;
@@ -1342,15 +1402,21 @@ impl AutomationManager {
                 continue;
             }
 
-            // Idempotency: if a run already exists for this schedule slot, skip enqueue and
-            // advance next_run_at.
-            let existing_for_slot = self
-                .list_runs(&automation.id, Some(25))?
-                .into_iter()
-                .any(|run| run.scheduled_for == due_at);
+            let runs = self.list_runs(&automation.id, None)?;
+            let existing_for_slot = runs.iter().any(|run| run.scheduled_for == due_at);
+            let has_active_run = runs.iter().any(|run| {
+                matches!(
+                    run.status,
+                    AutomationRunStatus::Queued | AutomationRunStatus::Running
+                )
+            });
+            let missed_while_offline = now.signed_duration_since(due_at)
+                > Duration::seconds(AUTOMATION_MISFIRE_GRACE_SECS);
 
-            if existing_for_slot {
-                self.advance_automation_after_slot(&mut automation, &schedule, due_at, now)?;
+            // Recurring Pinvou tasks neither backfill offline slots nor overlap
+            // an active attempt. Jump directly to the first future slot.
+            if existing_for_slot || has_active_run || missed_while_offline {
+                self.advance_automation_after_slot(&mut automation, &schedule, now, now)?;
                 continue;
             }
 
@@ -1608,7 +1674,10 @@ async fn enqueue_run_task(
         owner_session_id: None,
     };
 
-    match task_manager.add_task(new_task).await {
+    match task_manager
+        .add_task_with_conversation_key(new_task, Some(automation.id.clone()))
+        .await
+    {
         Ok(task) => {
             run.status = AutomationRunStatus::Running;
             run.started_at = Some(Utc::now());
@@ -1770,10 +1839,10 @@ fn apply_task_status(
     run: &mut AutomationRunRecord,
     task: &crate::task_manager::TaskRecord,
 ) -> bool {
+    let mut changed = run.thread_id != task.thread_id || run.turn_id != task.turn_id;
     run.thread_id = task.thread_id.clone();
     run.turn_id = task.turn_id.clone();
 
-    let mut changed = false;
     match task.status {
         TaskStatus::Queued => {
             if !matches!(run.status, AutomationRunStatus::Queued) {
@@ -1815,7 +1884,7 @@ fn apply_task_status(
     changed
 }
 
-async fn reconcile_run_statuses_shared(
+pub async fn reconcile_run_statuses_shared(
     automations: &SharedAutomationManager,
     task_manager: &SharedTaskManager,
 ) -> Result<()> {

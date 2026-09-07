@@ -40,9 +40,18 @@ const EVENT_CURSOR_BATCH: usize = 256;
 const EVENT_CATCHUP_POLL: Duration = Duration::from_millis(200);
 // v3 adds a provider pin; older executors must not silently ignore it.
 const CURRENT_TASK_SCHEMA_VERSION: u32 = 3;
+// Pinvou v0.9.0 persisted an additive v4 schema. Its additional fields are
+// serde-defaulted or safely ignored by this reader, so accept exactly that
+// historical version without widening compatibility to unknown future data.
+const PINVOU_LEGACY_TASK_SCHEMA_VERSION: u32 = 4;
 
 const fn default_task_schema_version() -> u32 {
     CURRENT_TASK_SCHEMA_VERSION
+}
+
+fn is_supported_task_schema_version(schema_version: u32) -> bool {
+    schema_version <= CURRENT_TASK_SCHEMA_VERSION
+        || schema_version == PINVOU_LEGACY_TASK_SCHEMA_VERSION
 }
 
 /// Durable task status.
@@ -282,6 +291,10 @@ pub struct TaskRecord {
     pub trust_mode: bool,
     #[serde(default = "default_auto_approve")]
     pub auto_approve: bool,
+    /// Stable owner for executors that retain one conversation across task
+    /// attempts, such as recurring automation runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_key: Option<String>,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -592,6 +605,7 @@ impl TaskManagerConfig {
 #[derive(Debug, Clone)]
 pub struct ExecutionTask {
     id: String,
+    conversation_key: Option<String>,
     prompt: String,
     model: String,
     model_provider: Option<String>,
@@ -607,6 +621,7 @@ impl From<&TaskRecord> for ExecutionTask {
     fn from(task: &TaskRecord) -> Self {
         Self {
             id: task.id.clone(),
+            conversation_key: task.conversation_key.clone(),
             prompt: task.prompt.clone(),
             model: task.model.clone(),
             model_provider: task.model_provider.clone(),
@@ -621,6 +636,61 @@ impl From<&TaskRecord> for ExecutionTask {
 }
 
 impl ExecutionTask {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn conversation_key(&self) -> Option<&str> {
+        self.conversation_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    #[must_use]
+    pub fn model_provider(&self) -> Option<&str> {
+        self.model_provider.as_deref()
+    }
+
+    #[must_use]
+    pub fn model_provider_id(&self) -> Option<&str> {
+        self.model_provider_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    #[must_use]
+    pub fn mode_label(&self) -> &str {
+        &self.mode_label
+    }
+
+    #[must_use]
+    pub const fn allow_shell(&self) -> bool {
+        self.allow_shell
+    }
+
+    #[must_use]
+    pub const fn trust_mode(&self) -> bool {
+        self.trust_mode
+    }
+
+    #[must_use]
+    pub const fn auto_approve(&self) -> bool {
+        self.auto_approve
+    }
+
     pub(crate) fn thread_request(&self) -> CreateThreadRequest {
         CreateThreadRequest {
             model: Some(self.model.clone()),
@@ -640,6 +710,9 @@ impl ExecutionTask {
 /// Event stream produced by an executor while a task runs.
 #[derive(Debug, Clone)]
 pub enum TaskExecutionEvent {
+    ThreadCreated {
+        thread_id: String,
+    },
     ThreadLinked {
         thread_id: String,
         turn_id: String,
@@ -756,6 +829,14 @@ impl TaskExecutor for EngineTaskExecutor {
                 ));
             }
         };
+
+        emit_task_event(
+            &events,
+            TaskExecutionEvent::ThreadCreated {
+                thread_id: thread.id.clone(),
+            },
+        )
+        .await;
 
         let turn = match self
             .runtime_threads
@@ -1244,7 +1325,18 @@ impl TaskManager {
 
     /// Enqueue a new task.
     pub async fn add_task(&self, req: NewTaskRequest) -> Result<TaskRecord> {
-        self.add_task_with_id(req, Self::new_task_id()).await
+        self.add_task_with_id_and_conversation_key(req, Self::new_task_id(), None)
+            .await
+    }
+
+    /// Enqueue one task attempt under a stable host-owned conversation.
+    pub(crate) async fn add_task_with_conversation_key(
+        &self,
+        req: NewTaskRequest,
+        conversation_key: Option<String>,
+    ) -> Result<TaskRecord> {
+        self.add_task_with_id_and_conversation_key(req, Self::new_task_id(), conversation_key)
+            .await
     }
 
     /// Allocate the durable owner identity before queue insertion so callers
@@ -1260,6 +1352,16 @@ impl TaskManager {
         &self,
         req: NewTaskRequest,
         task_id: String,
+    ) -> Result<TaskRecord> {
+        self.add_task_with_id_and_conversation_key(req, task_id, None)
+            .await
+    }
+
+    async fn add_task_with_id_and_conversation_key(
+        &self,
+        req: NewTaskRequest,
+        task_id: String,
+        conversation_key: Option<String>,
     ) -> Result<TaskRecord> {
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
@@ -1303,6 +1405,7 @@ impl TaskManager {
             // Auto-approval must be opted into explicitly
             // (GHSA-72w5-pf8h-xfp4).
             auto_approve: req.auto_approve.unwrap_or(false),
+            conversation_key,
             status: TaskStatus::Queued,
             created_at: Utc::now(),
             started_at: None,
@@ -1480,6 +1583,42 @@ impl TaskManager {
             .get(&id)
             .cloned()
             .ok_or_else(|| anyhow!("Task not found: {id_or_prefix}"))
+    }
+
+    /// Delete one terminal task and its task-owned artifacts.
+    pub async fn delete_terminal_task(&self, task_id: &str) -> Result<bool> {
+        ensure_safe_storage_id("Task id", task_id)?;
+        let mut state = self.state.lock().await;
+        let Some(task) = state.tasks.get(task_id) else {
+            return Ok(false);
+        };
+        if matches!(task.status, TaskStatus::Queued | TaskStatus::Running) {
+            bail!("Refusing to delete active task {task_id}");
+        }
+
+        let task_path = self.tasks_dir.join(format!("{task_id}.json"));
+        let artifacts_path = self.artifacts_dir.join(task_id);
+        if artifacts_path.exists() {
+            fs::remove_dir_all(&artifacts_path).with_context(|| {
+                format!(
+                    "Failed to delete task artifacts {}",
+                    artifacts_path.display()
+                )
+            })?;
+        }
+        match fs::remove_file(&task_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to delete task {}", task_path.display()));
+            }
+        }
+
+        state.tasks.remove(task_id);
+        state.queue.retain(|queued_id| queued_id != task_id);
+        self.persist_queue_locked(&state.queue)?;
+        Ok(true)
     }
 
     /// Cancel a queued or running task by id/prefix.
@@ -1846,6 +1985,18 @@ impl TaskManager {
         };
 
         match event {
+            TaskExecutionEvent::ThreadCreated { thread_id } => {
+                task.thread_id = Some(thread_id.clone());
+                push_timeline_entry(
+                    task,
+                    TaskTimelineEntry {
+                        timestamp: Utc::now(),
+                        kind: "runtime_thread".to_string(),
+                        summary: format!("Created runtime thread {thread_id}"),
+                        detail_path: None,
+                    },
+                );
+            }
             TaskExecutionEvent::ThreadLinked { thread_id, turn_id } => {
                 task.thread_id = Some(thread_id.clone());
                 task.turn_id = Some(turn_id.clone());
@@ -2339,11 +2490,12 @@ fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
                 .with_context(|| format!("Failed to read task file {}", path.display()))?;
             let mut task: TaskRecord = serde_json::from_str(&content)
                 .with_context(|| format!("Failed to parse task file {}", path.display()))?;
-            if task.schema_version > CURRENT_TASK_SCHEMA_VERSION {
+            if !is_supported_task_schema_version(task.schema_version) {
                 bail!(
-                    "Task schema v{} is newer than supported v{}",
+                    "Task schema v{} is newer than supported v{} and Pinvou legacy v{}",
                     task.schema_version,
-                    CURRENT_TASK_SCHEMA_VERSION
+                    CURRENT_TASK_SCHEMA_VERSION,
+                    PINVOU_LEGACY_TASK_SCHEMA_VERSION
                 );
             }
             if task.status == TaskStatus::Running {
@@ -3126,6 +3278,7 @@ mod tests {
             allow_shell: true,
             trust_mode: false,
             auto_approve: false,
+            conversation_key: None,
             status: TaskStatus::Running,
             created_at: started_at,
             started_at: Some(started_at),
@@ -3789,6 +3942,7 @@ mod tests {
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
+            conversation_key: None,
             status: TaskStatus::Running,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
