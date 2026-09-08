@@ -7,6 +7,7 @@ import { isIP } from 'node:net';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
 import { checkComposeKMS } from './account-platform-kms-compose-check.mjs';
 import { checkHelmKMS } from './account-platform-kms-helm-check.mjs';
+import { checkComposeNATS } from './account-platform-nats-compose-check.mjs';
 const require = createRequire(new URL('../account-platform/package.json', import.meta.url));
 const YAML = require('yaml');
 const success = () => ({ decision: 'DEPLOYMENT_CONFIG_VALID', environment_status: 'ENV_PENDING', deployment_status: 'NOT_DEPLOYED' });
@@ -198,9 +199,7 @@ export function checkGovernedComposeConfiguration(config) {
   check(!('DATABASE_URL' in executor.environment) && !('TOKEN_SECRET_PROVIDER_TOKEN' in executor.environment), 'executor_secret_scope');
   check(credential.environment.DATABASE_URL && credential.environment.DATABASE_URL !== gateway.environment.DATABASE_URL, 'runtime_secret_not_separate');
   check(services['token-event-relay']?.environment?.DATABASE_URL === gateway.environment.DATABASE_URL, 'relay_retired_identity');
-  const eventServices = ['account-service', 'billing-service', 'token-gateway', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor'];
-  check(eventServices.every(name => services[name]?.environment?.NATS_URL === executor.environment.NATS_URL && services[name]?.environment?.NATS_CREDENTIALS_FILE)
-    && /^tls:\/\//.test(executor.environment.NATS_URL), 'event_cluster_or_credentials_mismatch');
+  checkComposeNATS(config);
   const entrypointSafe = control.entrypoint == null || control.entrypoint === '/service'
     || Array.isArray(control.entrypoint) && control.entrypoint.length === 1 && control.entrypoint[0] === '/service';
   const healthcheckDisabled = !control.healthcheck || control.healthcheck.disable === true

@@ -176,3 +176,44 @@ Identity provisioner 使用已完成的 secret-file 接口；Redis URL 和其他
 规则更新与 reload；不使用通配角色、扩大为 host all 或修改密码认证方式。保留原角色拒绝及原有依赖连接的
 回归检查，不能以角色 SQL 已创建声称可登录。DBA 工具执行位置和本机受控连接方式仍须细化，不能临时开放
 超级管理员 TCP 入口。该段只登记已识别前置项，不授权执行迁移、角色创建或数据库配置修改。
+
+### C4B2a 原生 NKey 的 Compose 检查接线（实现与静态验收通过 / NOT_DEPLOYED）
+
+先修正现有 `account-platform-model-token-deployment-check.mjs` 的实际生产输入兼容缺口，独立提交后
+再实现 C4B2 生产模板。当前 Compose 检查硬要求七个服务的 `NATS_CREDENTIALS_FILE`，但本次已验收的
+原生 NKey 只有五个业务 broker 身份和一个受控资源操作身份；Account 与 Gateway 当前没有 broker 连接。
+不能为通过旧检查而给两服务挂多余秘密，也不能配置不存在的 JWT creds 文件或跳过部署门禁。
+
+只扩展 Compose 分支；既有 JWT/creds 的 Compose 与 Helm 验证合同保持。任意服务出现 `NATS_NKEY_SEED_FILE`
+键（包括空值）即进入原生分支，空值拒绝，不能回退旧凭据模式；必须
+完整采用原生分支，不允许某服务降回旧 creds 或 URL 内认证：Billing、三个 Relay、Token Command Executor
+五个消费者连接同一规范 TLS NATS 地址；各自 `NATS_NKEY_SEED_FILE` 指向固定目录内 `nkey.seed`，
+`NATS_CA_FILE` 指向单独公开 CA 目录内 `ca.crt`。种子目录必须为规范绝对路径、互异且不重叠，只读挂载、
+create_host_path=false；CA 可共享同一公开目录，但不得与任何种子目录重叠。不读取文件内容或连接 broker。
+Account/Gateway 不配置 NATS 地址或认证；Identity、Portal、Credential 等其他运行服务不得获得 NATS seed、
+creds 或种子父目录挂载。逐服务匹配，不能只检查“某处存在一个 seed”。
+
+仅可额外包含一个明确命名的 `event-resources` 一次性工具，使用 `event-operations` profile、restart=no、
+固定 `/service` 入口及空 command、关闭健康检查；使用第六个互异且不重叠的种子目录、相同 TLS/CA，
+不随默认业务启动，不在检查器中执行 create-only 或其他资源写入。其他新增 broker 消费方必须另行变更合同，
+不能靠任意额外服务名自动获得例外。
+该工具禁止 post_start/pre_stop 生命周期钩子；其他服务不得通过 depends_on、links、volumes_from 或
+service namespace 引用将它随默认业务拉起。
+
+等效文件来源同样检查：命名卷的 local bind driver_opts.device、Compose secrets/configs.file 都必须
+解析实际声明来源并检查种子目录泄漏及种子/CA 目标覆盖。只接受可证明来源的规范路径；external/不透明命名卷、
+未知驱动及非 file 的 secrets/configs 来源失败关闭，不声称能静态证明其历史内容。无关且来源明确的
+local bind 命名卷、公开配置文件和不覆盖敏感目标的 tmpfs 保持可用；service.tmpfs 简写同样检查目标覆盖，
+不得简单忽略非 bind 类型。
+
+验收扩展真实 renderer 输出形态的 Node 合同：完整五业务和可选第六工具正例；缺/混用凭据、明文或多地址、
+跨集群、重复/祖先目录、非只读/自动建目录、CA 与 seed 重叠、运行服务泄漏及工具自动启动均失败。
+保留既有 Compose/Helm、KMS、端口与治理工具负例；不降低此前安全断言，不改变运行服务 NKey 客户端。
+这一步只完善静态配置验证，不代替已有 TLS/NKey/ACL 的实际隔离验收或本次正式资源检查。
+
+C4B2a 验收：独立审核发现的命名卷及 secrets/configs 等效来源泄漏已修复；自检追加 service.tmpfs 简写
+覆盖拒绝。最终完整相关合同 14/14 通过、无跳过；最终全合同 511 项中 509 通过、0 失败、2 项既有 opt-in
+KMS Compose/Helm 测试未启用，不能将其记为已运行。两份纯公开 fixture 经服务器真实 Docker Compose
+`config --format json` 渲染后，最新实际 CLI 均返回 DEPLOYMENT_CONFIG_VALID / ENV_PENDING / NOT_DEPLOYED，
+分别覆盖五个业务消费者与额外显式资源工具，没有创建容器、访问正式凭据或连接消息服务。
+架构与差异检查通过；实际宿主路径、秘密投递、NATS 资源和业务连接仍属于后续验收。

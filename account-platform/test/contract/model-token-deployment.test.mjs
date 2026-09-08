@@ -53,6 +53,154 @@ function helmFixture() {
   return resources;
 }
 
+const nativeNATSConsumers = ['billing-service', 'account-event-relay', 'billing-event-relay', 'token-event-relay', 'token-command-executor'];
+function nativeNATSFixture(operator = false) {
+  const config = composeFixture();
+  for (const [name, service] of Object.entries(config.services)) {
+    for (const key of ['NATS_URL', 'NATS_CREDENTIALS_FILE']) delete (service.environment ||= {})[key];
+    for (const volume of service.volumes || []) volume.source ||= `/fixture/workload/${name}`;
+  }
+  const names = operator ? [...nativeNATSConsumers, 'event-resources'] : nativeNATSConsumers;
+  if (operator) config.services['event-resources'] = { environment: {}, profiles: ['event-operations'], restart: 'no',
+    entrypoint: ['/service'], command: [], healthcheck: { disable: true } };
+  for (const name of names) {
+    const service = config.services[name];
+    Object.assign(service, { user: '65532:65532', read_only: true });
+    Object.assign(service.environment, { NATS_URL: 'tls://nats.example.invalid:4222',
+      NATS_NKEY_SEED_FILE: '/var/run/secrets/pinvou/nats/nkey.seed', NATS_CA_FILE: '/var/run/secrets/pinvou/nats-ca/ca.crt' });
+    (service.volumes ||= []).push(
+      { type: 'bind', source: `/fixture/nats/${name}`, target: '/var/run/secrets/pinvou/nats', read_only: true, bind: { create_host_path: false } },
+      { type: 'bind', source: '/fixture/nats-public-ca', target: '/var/run/secrets/pinvou/nats-ca', read_only: true, bind: { create_host_path: false } });
+  }
+  return config;
+}
+const nativeSeed = (config, name = 'billing-service') => config.services[name].volumes.find(volume => volume.target === '/var/run/secrets/pinvou/nats');
+
+test('native NKey Compose uses only five real broker clients and optional explicit resource tool', () => {
+  for (const operator of [false, true]) {
+    const config = nativeNATSFixture(operator);
+    assert.equal(checkGovernedComposeConfiguration(config).deployment_status, 'NOT_DEPLOYED');
+    for (const name of ['account-service', 'token-gateway', 'token-portal', 'token-credential-portal']) {
+      assert.equal(config.services[name].environment.NATS_NKEY_SEED_FILE, undefined);
+    }
+  }
+  // A present but empty native setting must not silently select legacy JWT credentials.
+  const legacy = composeFixture(); legacy.services['billing-service'].environment.NATS_NKEY_SEED_FILE = '';
+  assert.throws(() => checkGovernedComposeConfiguration(legacy), /model_token_deployment_nats_/);
+});
+
+test('native NKey Compose rejects missing identities, mixed modes and unbounded clusters', () => {
+  for (const name of nativeNATSConsumers) {
+    for (const key of ['NATS_URL', 'NATS_NKEY_SEED_FILE', 'NATS_CA_FILE']) {
+      const config = nativeNATSFixture(); delete config.services[name].environment[key];
+      assert.throws(() => checkGovernedComposeConfiguration(config), /model_token_deployment_nats_/);
+    }
+  }
+  for (const url of ['nats://nats.example.invalid:4222', 'tls://a:4222,tls://b:4222', 'tls://user:password@nats:4222',
+    'tls://nats:4222/path', 'tls://nats:4222?token=fixture', 'tls://nats:4222#fragment', 'tls://nats', ' tls://nats:4222']) {
+    const config = nativeNATSFixture(); for (const name of nativeNATSConsumers) config.services[name].environment.NATS_URL = url;
+    assert.throws(() => checkGovernedComposeConfiguration(config), /model_token_deployment_nats_/);
+  }
+  for (const mutate of [
+    c => { c.services['billing-service'].environment.NATS_CREDENTIALS_FILE = '/fixture/old.creds'; },
+    c => { c.services['billing-service'].environment.NATS_URL = 'tls://other:4222'; },
+    c => { c.services['billing-service'].environment.NATS_NKEY_SEED_FILE = ''; },
+    c => { c.services['billing-service'].user = '0:0'; },
+    c => { c.services['billing-service'].read_only = false; },
+    c => { c.services['billing-service'].pid = 'host'; },
+  ]) {
+    const config = nativeNATSFixture(); mutate(config);
+    assert.throws(() => checkGovernedComposeConfiguration(config), /model_token_deployment_nats_/);
+  }
+});
+
+test('native NKey Compose rejects shared, unsafe, shadowed or leaked seed mounts', () => {
+  for (const mutate of [
+    c => { nativeSeed(c).source = nativeSeed(c, 'account-event-relay').source; },
+    c => { nativeSeed(c).source = '/fixture/nats'; },
+    c => { nativeSeed(c).source = '/fixture/nats-public-ca/seed'; },
+    c => { nativeSeed(c).source = '/'; },
+    c => { nativeSeed(c).source = '/fixture/../nats'; },
+    c => { nativeSeed(c).read_only = false; },
+    c => { nativeSeed(c).bind.create_host_path = true; },
+    c => { c.services['billing-service'].volumes.push({ ...nativeSeed(c) }); },
+    c => { c.services['billing-service'].volumes.push({ type: 'bind', source: '/fixture/other', target: '/var/run/secrets/pinvou' }); },
+    c => { c.services['billing-service'].volumes[1].source = '/fixture/other-ca'; },
+    c => { c.services['token-portal'].volumes = [{ type: 'bind', source: '/fixture', target: '/leaked', read_only: true }]; },
+    c => { c.services['token-portal'].volumes_from = ['billing-service']; },
+    c => { c.services['token-portal'].pid = 'service:billing-service'; },
+    c => { c.services['account-service'].environment.NATS_URL = 'tls://nats.example.invalid:4222'; },
+    c => { c.services['identity-service'] = { environment: { NATS_NKEY_SEED_FILE: '/fixture/seed' } }; },
+    c => { c.services['token-portal'].environment.NATS_CREDENTIALS_FILE = '/fixture/legacy.creds'; },
+  ]) {
+    const config = nativeNATSFixture(); mutate(config);
+    assert.throws(() => checkGovernedComposeConfiguration(config), /model_token_deployment_nats_/);
+  }
+});
+
+test('native NKey resource operator cannot start implicitly, run hooks or share a seed', () => {
+  for (const mutate of [
+    c => { delete c.services['event-resources'].profiles; },
+    c => { c.services['event-resources'].profiles.push('default'); },
+    c => { c.services['event-resources'].restart = 'always'; },
+    c => { c.services['event-resources'].command = ['-create-only']; },
+    c => { c.services['event-resources'].entrypoint = ['/wrapper']; },
+    c => { c.services['event-resources'].healthcheck = { test: ['CMD', '/service', '-create-only'] }; },
+    c => { c.services['event-resources'].post_start = [{ command: '/service -create-only' }]; },
+    c => { c.services['event-resources'].pre_stop = [{ command: '/service -create-only' }]; },
+    c => { c.services['account-service'].depends_on = { 'event-resources': { condition: 'service_completed_successfully' } }; },
+    c => { c.services['account-service'].network_mode = 'service:event-resources'; },
+    c => { c.services['account-service'].links = ['event-resources:resource-tool']; },
+    c => { c.services['account-service'].volumes_from = ['event-resources']; },
+    c => { nativeSeed(c, 'event-resources').source = nativeSeed(c).source; },
+  ]) {
+    const config = nativeNATSFixture(true); mutate(config);
+    assert.throws(() => checkGovernedComposeConfiguration(config), /model_token_deployment_nats_/);
+  }
+});
+
+test('native NKey follows named bind volumes and Compose file resources without rejecting unrelated files', () => {
+  const volumeFixture = source => {
+    const config = nativeNATSFixture();
+    config.volumes = { mapped: { driver: 'local', driver_opts: { type: 'none', o: 'bind', device: source } } };
+    config.services['token-portal'].volumes = [{ type: 'volume', source: 'mapped', target: '/unrelated', read_only: true }];
+    return config;
+  };
+  assert.equal(checkGovernedComposeConfiguration(volumeFixture('/fixture/unrelated-data')).deployment_status, 'NOT_DEPLOYED');
+  for (const source of ['/fixture/nats/billing-service', '/fixture/nats/billing-service/nkey.seed', '/fixture']) {
+    assert.throws(() => checkGovernedComposeConfiguration(volumeFixture(source)), /nats_identity_leaked/);
+  }
+  for (const declared of [{ external: true }, {}, { driver: 'unknown' }, { driver: 'local', driver_opts: { type: 'none', o: 'bind', device: '/fixture/unknown', extra: 'unproven' } }]) {
+    const config = volumeFixture('/fixture/unrelated-data'); config.volumes.mapped = declared;
+    assert.throws(() => checkGovernedComposeConfiguration(config), /nats_volume_source_unproven/);
+  }
+  for (const kind of ['secrets', 'configs']) {
+    for (const source of ['/fixture/unrelated/public.conf', '/fixture/nats/billing-service/nkey.seed', '/fixture']) {
+      const config = nativeNATSFixture(); config[kind] = { public_file: { file: source } };
+      config.services['token-portal'][kind] = [{ source: 'public_file', target: '/unrelated.conf' }];
+      if (source.includes('unrelated')) assert.equal(checkGovernedComposeConfiguration(config).deployment_status, 'NOT_DEPLOYED');
+      else assert.throws(() => checkGovernedComposeConfiguration(config), /nats_identity_leaked/);
+    }
+    for (const target of ['/var/run/secrets/pinvou/nats/nkey.seed', '/var/run/secrets/pinvou/nats-ca/ca.crt', '/var/run/secrets/pinvou']) {
+      const config = nativeNATSFixture(); config[kind] = { public_file: { file: '/fixture/unrelated/public.conf' } };
+      config.services['billing-service'][kind] = [{ source: 'public_file', target }];
+      assert.throws(() => checkGovernedComposeConfiguration(config), /nats_mount_shadowed/);
+    }
+    const config = nativeNATSFixture(); config[kind] = { unknown: { external: true } }; config.services['token-portal'][kind] = ['unknown'];
+    assert.throws(() => checkGovernedComposeConfiguration(config), /nats_file_source_unproven/);
+  }
+  const tmpfs = nativeNATSFixture(); tmpfs.services['billing-service'].volumes.push({ type: 'tmpfs', target: '/unrelated-cache' });
+  assert.equal(checkGovernedComposeConfiguration(tmpfs).deployment_status, 'NOT_DEPLOYED');
+  tmpfs.services['billing-service'].volumes.at(-1).target = '/var/run/secrets/pinvou/nats';
+  assert.throws(() => checkGovernedComposeConfiguration(tmpfs), /model_token_deployment_nats_/);
+  const shortTmpfs = nativeNATSFixture(); shortTmpfs.services['billing-service'].tmpfs = ['/tmp:rw,noexec,size=16m'];
+  assert.equal(checkGovernedComposeConfiguration(shortTmpfs).deployment_status, 'NOT_DEPLOYED');
+  for (const target of ['/var/run/secrets/pinvou/nats', '/var/run/secrets/pinvou/nats-ca', '/var/run']) {
+    shortTmpfs.services['billing-service'].tmpfs = [`${target}:rw,size=16m`];
+    assert.throws(() => checkGovernedComposeConfiguration(shortTmpfs), /nats_mount_shadowed/);
+  }
+});
+
 test('render checker detects NetworkPolicy permission union, missing readiness, secret leakage and auto Job', () => {
   assert.equal(checkGovernedHelmResources(helmFixture()).environment_status, 'ENV_PENDING');
   for (const mutate of [items => { items.find(item => item.metadata.name.endsWith('internal-and-approved-egress')).spec.podSelector = {}; },
