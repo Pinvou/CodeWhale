@@ -163,8 +163,11 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 /// 0.31: 回流 Community #438 的 wecomcli 第二轮文档审计修复，登记于
 ///       NOTICE-wecom.md。保留 Official 已占用的 0.30 与 H3C 内容哈希，
 ///       使用新语义版本确保已连接用户在启动时刷新企微技能树。
+/// 0.32: 回流 Community #439 的飞书技能文档审计修复，登记于 lark-skills/NOTICE.md。
+///       技能树不参与内容哈希，使用新语义版本确保已连接用户启动时刷新，
+///       并保留 Official 已占用的版本记录及 H3C CLI 内容哈希。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.31-",
+    "0.32-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
