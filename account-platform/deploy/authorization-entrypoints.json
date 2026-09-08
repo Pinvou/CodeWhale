@@ -150,6 +150,7 @@
     { "source": "account-platform/cmd/event-relay/main.go", "durable": "source-bound-outbox-relay", "subject": "account|billing|token.>", "permission": "internal.event.publish.source-bound" }
   ],
   "cli": [
+    { "name": "workload-token-agent", "source": "account-platform/cmd/workload-token-agent/main.go", "strategy": "workload.single-client-verified-token-projection" },
     { "name": "account-security", "source": "account-platform/cmd/account-security/main.go", "strategy": "protocol.controlled-security-terminal" },
     { "name": "account-service", "source": "account-platform/cmd/account-service/main.go", "strategy": "workload.http-and-task-host" },
     { "name": "billing-service", "source": "account-platform/cmd/billing-service/main.go", "strategy": "workload.http-event-and-task-host" },

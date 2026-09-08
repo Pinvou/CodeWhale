@@ -21,7 +21,18 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 339, tasks: 27, events: 6, cli: 18 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 339, tasks: 27, events: 6, cli: 19 });
+});
+
+test('single-client workload token projector has an exact required authorization entry', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.cli.filter(item => item.name === 'workload-token-agent'), [{
+    name: 'workload-token-agent', source: 'account-platform/cmd/workload-token-agent/main.go',
+    strategy: 'workload.single-client-verified-token-projection',
+  }]);
+  await rejectedMutation(catalog => {
+    catalog.cli = catalog.cli.filter(item => item.name !== 'workload-token-agent');
+  }, /unclassified_cli:workload-token-agent/);
 });
 
 test('authorization release gate fails closed for removed unknown and scope-mismatched policies', async () => {
