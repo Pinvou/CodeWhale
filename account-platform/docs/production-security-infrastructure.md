@@ -207,6 +207,14 @@ D2 验收（2026-09-08）：独立 B 代码、测试、公开配置及执行步�
 
 2026-09-08 执行结果：独立 B 分阶段审核公开源码/env、真实 Compose 渲染、D2 完整校验及空目录/资源余量后，按 `create → 实际 inspect → start` 执行。仅四个新容器和一个独立内部网络；无公网端口，全部固定 bind/只读秘密、镜像/UID/资源/根只读/丢弃全部 capabilities/no-new-privileges/core soft=0 hard=0 实际通过。四进程均 Running/healthy、重启 0、无 OOM；数据库健康脚本实际验证与 system identifier 绑定的初始化标记及本机 SQL，标记权限 999:999/0600。诊断适配了 Compose 5.4 JSON 将内存数字序列化为字符串、core 零值省略，以及镜像默认入口与 null 覆盖的表示差异，未修改任何已审服务配置；实际容器逐项验证通过才启动。正式 KMS 仍运行，旧业务与公网未切换；不将本机存活检查当作三域业务身份、消息资源或备份恢复验收。
 
+#### D3 正式连接及消息资源（现场验收通过）
+
+复用已审客户端与资源初始化工具进行限定现场验收，不增加业务接口。PostgreSQL 以 UID999 的临时只读客户端在新私网逐一验证八个正式登录身份与数据库，严格 `verify-full` 使用独立公开 CA；密码只经 stdin，SQL 仅查询。确认 TLS 实际使用、跨库/运行身份提权/管理员 TCP 登录拒绝，禁止打印密码或原始数据库诊断。两个 Redis 用现有 TLS 客户端与三个正式身份只执行 PING/允许前缀 GET 及应拒绝的跨前缀/管理命令、跨实例错误身份，保留主机名验证，不写业务数据。只报告固定检查结果；这些检查不代替后续实际应用进程接线。
+
+仅为固定消息资源初始化，核对 D1 NKey 包与可信摘要后，将 `event-resource-operator` 的唯一 seed 从已核内存快照复制到新的受控临时目录，65532:65532/0700+0600，并回读核对；不得挂原包或其他五个 seed。核对既有 `event-resources` 二进制可信摘要，在固定新私网以非 root、根只读、capabilities 全移除、有限资源的短时容器运行，挂自己 seed 和公开 CA，使用 `tls://nats:4222`。先显式 `-create-only` 创建缺失的唯一 stream 和五 consumer，再以默认只读模式严格验证；失败保留既有资源，不 update/delete/purge，也不删除数据重来。只有该受限初始化连接成功退出并确认短时容器已移除，才精确删除该临时 seed 副本和空目录；D1 原 seed 与加密包始终保留。删除副本不宣称已从服务端撤销 NKey。容量/证书监控、备份恢复与业务接线另行闭合。
+
+2026-09-08 实测：独立 B 审核后，八个 PostgreSQL 正式登录分别确认实际 `current_user`、对应库名及 `pg_stat_ssl.ssl=true`；跨库/管理员 TCP 精确 HBA 拒绝，Billing/Token 运行身份提权精确 SQL 权限拒绝，负例后正向查询仍通过。三个 Redis 正式身份确认 TLS1.2+、实际服务叶与既定证书一致、PING/允许前缀 GET 成功，ACL LIST/跨前缀为精确 NOPERM、跨实例身份为精确 WRONGPASS，未写业务缓存。实际固定 NATS 工具使用唯一临时 operator 副本创建一次，再两次默认只读复核均返回固定成功标记；三短时容器退出/自动移除后只删除该临时 seed 及空目录，原身份及其清单摘要再次确认不变。未运行五个业务 consumer、未变更 stream/consumer 规格或发布业务事件；该结果不代替后续应用身份接线与恢复演练。
+
 ### Native Transit 适配
 
 既有 `remote` 是自定义 `/v1/encrypt|decrypt` 协议，不等于 Vault API，保留其兼容行为。增加显式 `vault-transit` 模式，通过 `/v1/transit/encrypt/{key}`、`decrypt/{key}` 调用原生 API；不部署自制加密中转服务。
