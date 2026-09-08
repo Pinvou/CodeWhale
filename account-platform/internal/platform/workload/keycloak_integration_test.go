@@ -212,6 +212,65 @@ func TestKeycloakWorkloadIntegration(t *testing.T) {
 	}
 	checkRoute(first, "/allowed", 204)
 	checkRoute(first, "/denied", 403)
+	// Client metadata is not issuance evidence: exercise all seven actual
+	// credentials, then bind each real subject to an independent receiver.
+	seenSubjects := make(map[string]bool)
+	for _, service := range []string{"account-service", "identity-service", "billing-service", "token-gateway", "token-command-executor", "token-credential-portal", "keycloak-mobile-authenticator"} {
+		t.Run("actual_identity_"+service, func(t *testing.T) {
+			_, serviceSubject, serviceSecret := lookup(service)
+			if seenSubjects[serviceSubject] {
+				t.Fatal("isolated service accounts share a subject")
+			}
+			seenSubjects[serviceSubject] = true
+			serviceRoot := t.TempDir()
+			for _, directory := range []string{"bootstrap", "projected"} {
+				if os.Mkdir(filepath.Join(serviceRoot, directory), 0o700) != nil {
+					t.Fatal("isolated service directory failed")
+				}
+			}
+			serviceConfig := Config{Issuer: issuer, Audience: audience, ClientID: service, Subject: serviceSubject,
+				ClientSecretFile: filepath.Join(serviceRoot, "bootstrap", "secret"), TokenFile: filepath.Join(serviceRoot, "projected", "token")}
+			if os.WriteFile(serviceConfig.ClientSecretFile, []byte(serviceSecret), 0o600) != nil {
+				t.Fatal("isolated service secret write failed")
+			}
+			serviceAgent, createErr := New(serviceConfig)
+			if createErr != nil {
+				t.Fatal("isolated service agent rejected configuration")
+			}
+			serviceExpiry, refreshErr := serviceAgent.Refresh(ctx)
+			if refreshErr != nil || time.Until(serviceExpiry) < 4*time.Minute || time.Until(serviceExpiry) > 5*time.Minute || serviceAgent.Check(ctx) != nil {
+				t.Fatal("isolated service issuance or verified lifetime failed")
+			}
+			raw, readErr := os.ReadFile(serviceConfig.TokenFile)
+			if readErr != nil {
+				t.Fatal("isolated service projection missing")
+			}
+			defer clear(raw)
+			serviceRules, _ := json.Marshal([]map[string]any{{"subject": serviceSubject, "service": service, "permissions": []string{"internal.fixture.allowed"}}})
+			t.Setenv("WORKLOAD_IDENTITY_RULES_JSON", string(serviceRules))
+			receiver := gin.New()
+			receiver.Use(serviceauth.GinMiddleware(""))
+			for _, route := range []string{"allowed", "denied"} {
+				receiver.GET("/"+route, serviceauth.Require("internal.fixture."+route), func(c *gin.Context) { c.Status(204) })
+			}
+			probe := func(token []byte, path string, want int) {
+				t.Helper()
+				request := httptest.NewRequest("GET", path, nil)
+				request.Header.Set("Authorization", "Bearer "+string(token))
+				response := httptest.NewRecorder()
+				receiver.ServeHTTP(response, request)
+				if response.Code != want {
+					t.Fatalf("isolated per-service receiver status %d, want %d", response.Code, want)
+				}
+			}
+			probe(raw, "/allowed", 204)
+			probe(raw, "/denied", 403)
+			if service != "account-service" {
+				probe(first, "/allowed", 403)
+				checkRoute(raw, "/allowed", 403)
+			}
+		})
+	}
 	for _, mutate := range []func(*Config){func(c *Config) { c.Subject = "wrong-subject" }, func(c *Config) { c.Audience = "wrong-audience" }} {
 		bad := config
 		mutate(&bad)

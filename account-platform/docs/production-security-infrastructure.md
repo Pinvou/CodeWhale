@@ -260,13 +260,19 @@ SECINF-02 按串行可验证交付细分为 02A（投递程序与安全负例）
 
 唯一候选镜像 ID `sha256:8d9a5245c11851ecc154e086b428d2fb69038cf4e4121b7a471ae417c27b5459`。无网络/秘密挂载的受限检查实际返回 Keycloak 26.7.0，UID1000、amd64；`show-config` 显示 production/optimized。进一步从未启动的独立候选容器复制公开 JAR/主题，验证持久属性确为 PostgreSQL/health/metrics、两个 factory 的服务注册及五个认证类、全部七个主题文件与源码逐字节摘要相等；provider JAR SHA-256 为 `ad6844814c000f4ba8682151c4b919e1b471613f9b8ac2fe726d0813b7a96b3b`。导出容器按本次 ID/标签/未启动状态复核后已移除，公开制品保留。三项新合同及原四项 realm 测试、架构守卫、diff 检查通过。无正式数据库连接、身份服务启动、公网变更或用户端登录验收。
 
-### SECINF-04C3B 生产身份启动隔离验收（文档已审、待实现 / NOT_DEPLOYED）
+### SECINF-04C3B 生产身份启动隔离验收（真实隔离验收通过 / NOT_DEPLOYED）
 
 使用 C3A 的实际 26.7.0 定制镜像 ID，不接受可变标签、外部数据库 URL 或正式秘密。新增限定 Linux 隔离验收入口，复用既有 workload realm 生成器和 Go 实际身份测试，不另造签发实现。临时 PostgreSQL 17.11 与 Keycloak 使用同一全新 internal 网络、无宿主端口和正式挂载；证书、管理员及数据库密码全部现场随机测试材料。数据库启用 TLS，Keycloak JDBC 强制 `sslmode=verify-full` 与独立临时 CA，错 CA/主机名必须拒绝；Keycloak 使用 `start --optimized` 和 HTTPS，不使用 H2/start-dev，不改变候选镜像或运行时重新 augmentation。
 
 按顺序验证：生产启动及私网 readiness、实际版本与两个自定义认证器注册、独立用户测试 realm 与七客户端 workload realm、登录主题资源可达；复用 Go 测试验证真实 UUID/issuer/audience/签名、短期续取/过期、错身份/超范围授权/管理员访问拒绝及秘密轮换。增加仅隔离 opt-in 的扩展注册断言，既有非定制官方镜像测试仍明确自身边界。此处主题可达与认证器注册不等于真实短信供应商、商城或端到端用户登录已回归，后者仍需 C4 的业务环境与正式接线验收。
 
 任务：先由 B 审核上述范围，再实现最小隔离入口及所需测试断言；检查实际镜像 ID、UID、资源上限、capabilities/no-new-privileges、无端口、精确只读挂载和测试资源标签。所有响应与测试秘密有界且不回显，原始认证日志不输出。用 Docker 的指定容器检查/复制/执行能力，不扫描或清理其他服务；清理前再次验证本次资源 ID/标签，只删除本次临时容器、网络和已解析的随机测试目录。代码及实测经 B 复审通过后独立提交，不把隔离验收当作正式秘密投递、备份恢复或公网切换完成。
+
+2026-09-08 实测：独立 B 复审后，实际挂载按固定 bind（source/target/读写）和 tmpfs 集合比较，PostgreSQL/Keycloak 实际 image/UID/唯一新网络/只读根/无端口/内存/CPU/PID/core/capabilities 均核验；`no-new-privileges` 精确允许 Docker 的两种正常表示，false/伪后缀拒绝。日志只报告七个已知服务名及固定 marker，不转发 Go 原始输出、动态客户端秘密或 JWT。两项新边界负例测试与原七项 Python 测试通过；Windows workload/serviceauth 测试分别 9.823/9.074 秒及 vet、架构/diff 检查通过。
+
+首轮隔离运行中七身份、续取/实际过期/轮换/拒权、实际 JDBC TLS 分项通过，但自定义表单未渲染，整轮记失败；原因是新测试用户 realm 未配置现有模板依赖的多语言上下文。核对既有 realm 与 `provision-mobile-auth.sh` 后，仅给测试 realm 补入相同的国际化开关、三语言和默认语言，未修改模板/认证器或放宽表单断言。B 审核该修复后，用同一 C3A 候选镜像及同源测试二进制再次完整运行，取得七项 `KEYCLOAK_ACTUAL_IDENTITY_PASS`、`KEYCLOAK_WORKLOAD_REFRESH_EXPIRY_ROTATION_PERMISSIONS_PASS`、`KEYCLOAK_PRODUCTION_POSTGRES_TLS_AND_SEVEN_IDENTITIES_PASS`、`KEYCLOAK_RUNTIME_PROVIDERS_REALM_SEPARATION_AND_THEME_PASS`、`KEYCLOAK_JDBC_WRONG_CA_REJECTED`、`KEYCLOAK_JDBC_WRONG_HOST_REJECTED`，退出 0、无跳过。错 CA/主机名均为实际 JDBC 证书诊断且进程非 OOM、非零退出，不以任意启动失败冒充安全拒绝。
+
+最终 Linux 脚本 SHA-256 `c7b7bfb3113e79ac51b9cbf73f18bf0837055f181e2e76e4a3a45fc3b4e4fab7`，测试二进制 SHA-256 `1a4dbc228f31c0984d54ae2c2e6bc247a7926afc4f20196281a9cdf2d8b58e40`，均传输后独立核验。两轮仅删除各自临时容器、网络及测试目录；候选镜像与公开验收制品保留，正式 KMS、依赖数据和旧业务未改。此结果只闭合 26.7.0 生产模式与身份链隔离验收，正式 realm/七服务秘密及 token-file 投递、短信/注册/商城端到端回归和 D3 数据库备份前置仍未完成。
 
 ### 部署顺序
 

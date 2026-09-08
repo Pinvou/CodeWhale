@@ -50,8 +50,16 @@ SECINF-02B 必须在隔离 Keycloak 验证真实签发、服务账户 UUID、错
 
 Keycloak 导入要求文件名严格为 `<realm>-realm.json`，默认必须保存为 `pinvou-workload-realm.json`。realm 层 `clientScopes`、`defaultDefaultClientScopes`、`defaultOptionalClientScopes` 也显式置空，防止导入时自动附加内置 scope；只清空客户端字段并不足够。使用独立 realm，不能覆盖用户登录 realm；一次性创建后不能把重复 import 当幂等更新方案。正式导入、读取逐服务 secret/真实 UUID、生成私密 bootstrap 文件及精确授权映射由 SECINF-04 的受控初始化阶段接线；不得把管理 API 返回值直接打印到终端或日志。密码、角色或 Keycloak 主密钥不能放入本生成器产物。
 
-固定候选镜像为 Keycloak 26.7.3，摘要 `sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54`。它是独立签发联验的官方镜像，不代表现有自定义手机认证扩展镜像已经升级或通过回归。
+SECINF-02B 历史联验使用 Keycloak 26.7.3 官方镜像，摘要 `sha256:ff4257d0d64efbe99ed1ddfaf07765cc3c36dc7518bf8324d41961327f441c54`，不是当前生产候选。负责人已决定本次固定 26.7.0，不能将此历史结果作为 26.7.0 定制镜像的部署验收，也不因此升级现有自定义手机认证扩展。
 
 隔离联验：在 Linux 编译 `./internal/platform/workload` 的 Go 测试二进制，再由有 Docker 权限的操作员运行 `scripts/account-platform-workload-keycloak-fixture.py --isolated-fixture --binary <测试二进制绝对路径> --generator <配置生成器绝对路径>`。脚本只使用新建的临时目录与容器、随机测试管理员、一次性 TLS 证书、network none 和无公开端口；正式域名/秘密不能注入。以真实 Admin API 读取服务账户 UUID，检查实际导入配置，再运行 `TestKeycloakWorkloadIntegration`；必须具名 PASS、无 SKIP。测试容器结束即移除，测试签名密钥、H2 数据及有界启动日志随之丢弃；无业务数据迁移或删除。
+
+## 26.7.0 生产模式隔离验收
+
+SECINF-04C3A 候选通过后，使用 `scripts/account-platform-keycloak-production-fixture.py --run --image <已核验候选的本机sha256镜像ID> --binary <同源Linux测试二进制绝对路径>`。运行前核对候选、公开配置和二进制摘要；仅接受不可变镜像 ID，不接受正式数据库连接或凭据。脚本复用生产 PostgreSQL 配置，但全部数据库、证书、密码、realm 都是新建的隔离测试材料；无宿主端口、正式挂载或生产 realm 修改。
+
+验收包含 PostgreSQL 严格证书及主机名校验、实际 JDBC TLS、Keycloak `start --optimized`、私网 HTTPS readiness、两个认证器实际注册、用户与 workload realm 分离、自定义登录表单及 CSS/JS、七客户端逐一真实签发与接收端绑定，以及原有短期续取、实际过期、拒权和轮换测试。仅输出固定阶段/具名结果，不回显管理响应、客户端秘密或 JWT。只有整个命令退出 0 且所有实际阶段通过才能记录此隔离验收完成；不等同于短信/注册/商城端到端回归、正式投递、数据库恢复或公网发布。
+
+正常及已知失败仅清理该次核对过 ID/标签的容器、网络和随机测试目录。创建状态不确定时保留现场并失败，不能以全局 prune 或模糊路径删除补救。
 
 参考：[Keycloak 服务账户](https://www.keycloak.org/docs/latest/server_admin/index.html#_service_accounts)、[realm 导入导出](https://www.keycloak.org/server/importExport)。
