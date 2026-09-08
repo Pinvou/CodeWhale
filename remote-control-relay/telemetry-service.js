@@ -220,7 +220,15 @@ export function createIpRegionResolver(options = {}) {
 }
 
 function statsDay(timestamp) {
-  return Math.floor((Number(timestamp) + STATS_TIMEZONE_OFFSET_MS) / DAY_MS);
+  const normalizedTimestamp = normalizeUsageOccurredAt(timestamp);
+  return Math.floor((normalizedTimestamp + STATS_TIMEZONE_OFFSET_MS) / DAY_MS);
+}
+
+function normalizeUsageOccurredAt(value) {
+  const occurredAt = Number(value);
+  if (!Number.isFinite(occurredAt) || occurredAt <= 0) return Number.NaN;
+  if (occurredAt >= 1_000_000_000_000) return occurredAt;
+  return occurredAt * 1_000;
 }
 
 function statsDayLabel(day) {
@@ -231,26 +239,32 @@ function isBehaviorInstallationDevice(device) {
   return device?.hardware_source === "installation_id";
 }
 
+function installationBehaviorEvents(devices, behaviorEvents) {
+  const installationIds = new Set(devices
+    .filter(isBehaviorInstallationDevice)
+    .map((device) => boundedText(device.device_id, 128))
+    .filter(Boolean));
+  return behaviorEvents.filter((event) => installationIds.has(eventIdentity(event)));
+}
+
 function isCoreUserTask(event, eventName) {
   return event?.event_name === eventName
     && event.initiator_type === "user"
     && ["assistant", "code", "team"].includes(event.mode);
 }
 
-function compatibleUsageByDay(devices, usageEvents, behaviorEvents, startDay, endDay) {
-  const deviceById = new Map(devices.map((device) => [device.device_id, device]));
-  const rows = new Map();
-  for (let day = startDay; day <= endDay; day += 1) {
-    rows.set(day, { legacy: new Map(), behavior: new Map() });
-  }
+function attemptIdentityKey(event) {
+  const identity = eventIdentity(event);
+  const attempt = boundedText(event?.attempt_id || event?.turn_id || event?.event_id, 128);
+  return identity && attempt ? `${identity}\u001f${attempt}` : "";
+}
 
-  for (const event of usageEvents) {
-    if (!deviceById.has(event.device_id)) continue;
-    const day = statsDay(event.occurred_at);
-    const row = rows.get(day);
-    if (!row) continue;
-    row.legacy.set(event.device_id, (row.legacy.get(event.device_id) || 0) + 1);
-  }
+function installationConversationsByDay(devices, behaviorEvents, startDay, endDay) {
+  const deviceById = new Map(devices
+    .filter(isBehaviorInstallationDevice)
+    .map((device) => [device.device_id, device]));
+  const rows = new Map();
+  for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Map());
 
   const seenAttempts = new Set();
   for (const event of behaviorEvents) {
@@ -258,23 +272,17 @@ function compatibleUsageByDay(devices, usageEvents, behaviorEvents, startDay, en
     const device = deviceById.get(event.device_id);
     if (!isBehaviorInstallationDevice(device)) continue;
     const day = statsDay(event.occurred_at);
-    const row = rows.get(day);
-    if (!row) continue;
+    const counts = rows.get(day);
+    if (!counts) continue;
     const deviceId = boundedText(event.device_id, 128);
     const attemptId = boundedText(event.attempt_id || event.turn_id || event.event_id, 128);
     if (!deviceId || !attemptId) continue;
     const attemptKey = `${deviceId}\u001f${attemptId}`;
     if (seenAttempts.has(attemptKey)) continue;
     seenAttempts.add(attemptKey);
-    row.behavior.set(deviceId, (row.behavior.get(deviceId) || 0) + 1);
+    counts.set(deviceId, (counts.get(deviceId) || 0) + 1);
   }
-
-  return new Map([...rows].map(([day, row]) => {
-    // 旧设备与新安装身份没有可靠关联键。两代客户端正常情况下不会同时
-    // 生成两类终态，因此保守合并两个来源，但不声称可以跨身份去重。
-    const counts = new Map([...row.legacy, ...row.behavior]);
-    return [day, counts];
-  }));
+  return rows;
 }
 
 function statsArguments(behaviorEventsOrNow, fallbackNow) {
@@ -289,15 +297,14 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   const today = statsDay(now);
   const trendStart = today - 29;
   const activeWeekStart = today - 6;
-  const operationalDevices = devices.filter((device) => !isBehaviorInstallationDevice(device));
-  const deviceById = new Map(devices.map((device) => [device.device_id, device]));
+  const operationalDevices = devices.filter(isBehaviorInstallationDevice);
+  const deviceById = new Map(operationalDevices.map((device) => [device.device_id, device]));
 
   const online = operationalDevices.filter(
     (device) => now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS,
   );
-  const compatibleUsage = compatibleUsageByDay(
-    devices,
-    events,
+  const compatibleUsage = installationConversationsByDay(
+    operationalDevices,
     behaviorEvents,
     trendStart,
     today,
@@ -354,7 +361,8 @@ export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallb
   const { behaviorEvents, now } = statsArguments(behaviorEventsOrNow, fallbackNow);
   const weekStart = statsDay(now) - 6;
   const today = statsDay(now);
-  const usage = compatibleUsageByDay(devices, events, behaviorEvents, weekStart, today);
+  const usage = installationConversationsByDay(devices, behaviorEvents, weekStart, today);
+  const todayUsage = usage.get(today) || new Map();
   const activity = new Map();
   for (const counts of usage.values()) {
     for (const [deviceId, turns] of counts) {
@@ -362,7 +370,7 @@ export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallb
     }
   }
   return devices
-    .filter((device) => !isBehaviorInstallationDevice(device))
+    .filter(isBehaviorInstallationDevice)
     .map((device) => {
       const online = now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS;
       return {
@@ -372,8 +380,9 @@ export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallb
         state: device.state,
         online,
         region: formatDeviceRegion(device.region),
-        first_seen_at: device.first_seen_at,
+        first_seen_at: normalizeUsageOccurredAt(device.first_seen_at),
         last_active_at: device.last_active_at,
+        turns_today: todayUsage.get(device.device_id) || 0,
         turns_7d: activity.get(device.device_id) || 0,
       };
     })
@@ -434,7 +443,7 @@ function uniqueAttempts(events, eventName) {
   const attempts = new Map();
   for (const event of events) {
     if (event.event_name !== eventName) continue;
-    const key = boundedText(event.attempt_id || event.turn_id || event.event_id, 128);
+    const key = attemptIdentityKey(event);
     if (key && !attempts.has(key)) attempts.set(key, event);
   }
   return [...attempts.values()];
@@ -468,7 +477,7 @@ function intersectionSize(values, eligible) {
 
 const EXPLICIT_VALUE_WINDOW_MS = 30 * 60_000;
 const MIN_RELIABLE_SAMPLE = 30;
-const MIN_PRIVACY_GROUP_SUBJECTS = 20;
+const MIN_PRIVACY_GROUP_SUBJECTS = 1;
 
 function reliableRate(part, total) {
   return Number(total) >= MIN_RELIABLE_SAMPLE ? rate(part, total) : null;
@@ -885,6 +894,7 @@ function behaviorToolType(value) {
 }
 
 export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = []) {
+  behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
   const activeByDay = activeIdentityByDay(devices, usageEvents, behaviorEvents, window);
   const activeTotal = periodActiveCount(activeByDay);
@@ -892,11 +902,17 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     filteredBehaviorEvents(behaviorEvents, window),
   );
   const windowEvents = contributionClipping.events;
-  const taskSubmitted = uniqueAttempts(windowEvents, "task_submitted");
-  const activeTaskSubmitted = taskSubmitted.filter((event) => isCoreUserTask(event, "task_submitted"));
-  const taskAdmitted = uniqueAttempts(windowEvents, "task_admitted");
-  const taskRejected = uniqueAttempts(windowEvents, "task_rejected");
-  const taskFinished = uniqueAttempts(windowEvents, "task_finished");
+  const taskSubmitted = uniqueAttempts(windowEvents, "task_submitted")
+    .filter((event) => isCoreUserTask(event, "task_submitted"));
+  const coreAttemptKeys = new Set(taskSubmitted.map(attemptIdentityKey));
+  const activeTaskSubmitted = taskSubmitted;
+  const taskAdmitted = uniqueAttempts(windowEvents, "task_admitted")
+    .filter((event) => coreAttemptKeys.has(attemptIdentityKey(event)));
+  const taskRejected = uniqueAttempts(windowEvents, "task_rejected")
+    .filter((event) => coreAttemptKeys.has(attemptIdentityKey(event)));
+  const coreTaskFinished = uniqueAttempts(windowEvents, "task_finished")
+    .filter((event) => isCoreUserTask(event, "task_finished"));
+  const taskFinished = coreTaskFinished;
   const cohortStarted = filteredBehaviorEvents(behaviorEvents, window, "analytics_cohort_started");
   const maturedCohorts = new Map();
   for (const event of cohortStarted) {
@@ -909,7 +925,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const taskInstallations = new Set(activeTaskSubmitted.map(eventIdentity).filter(Boolean));
   const voiceUsers = new Set(voiceStarted.map(eventIdentity).filter(Boolean));
   const taskStatus = { success: 0, interrupted: 0, failed: 0, cancelled: 0 };
-  for (const event of taskFinished) {
+  for (const event of coreTaskFinished) {
     if (event.status in taskStatus) taskStatus[event.status] += 1;
   }
   const successfulActiveInstallations = successfulActiveIdentities(behaviorEvents, window);
@@ -929,14 +945,14 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   }
   const maturedSubmissionIds = new Set(taskSubmitted
     .filter((event) => Number(event.occurred_at) <= now - DAY_MS)
-    .map((event) => event.attempt_id)
+    .map(attemptIdentityKey)
     .filter(Boolean));
-  const maturedAdmittedForResolution = taskAdmitted.filter((event) => maturedSubmissionIds.has(event.attempt_id));
-  const maturedRejected = taskRejected.filter((event) => maturedSubmissionIds.has(event.attempt_id));
+  const maturedAdmittedForResolution = taskAdmitted.filter((event) => maturedSubmissionIds.has(attemptIdentityKey(event)));
+  const maturedRejected = taskRejected.filter((event) => maturedSubmissionIds.has(attemptIdentityKey(event)));
   const resolvedMatured = maturedAdmittedForResolution.length + maturedRejected.length;
-  const finishedAttemptIds = new Set(taskFinished.map((event) => event.attempt_id));
+  const finishedAttemptIds = new Set(taskFinished.map(attemptIdentityKey));
   const maturedAdmitted = taskAdmitted.filter((event) => Number(event.occurred_at) <= now - DAY_MS);
-  const admittedTerminalCount = maturedAdmitted.filter((event) => finishedAttemptIds.has(event.attempt_id)).length;
+  const admittedTerminalCount = maturedAdmitted.filter((event) => finishedAttemptIds.has(attemptIdentityKey(event))).length;
   const compensatedCount = [...taskRejected, ...taskFinished]
     .filter((event) => event.stage === "shutdown").length;
   const activeDayMetric = perActiveInstallationDay(activeTaskSubmitted, activeByDay);
@@ -967,7 +983,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   }, { accepted: 0, duplicate: 0, rejected: 0, retryable: 0 });
   const pipelineTotal = pipeline.accepted + pipeline.duplicate + pipeline.rejected + pipeline.retryable;
   const explicitValue = buildWeeklyExplicitValueMetric(behaviorEvents, now);
-  const taskFirstOutput = uniqueAttempts(windowEvents, "task_first_output");
+  const taskFirstOutput = uniqueAttempts(windowEvents, "task_first_output")
+    .filter((event) => coreAttemptKeys.has(attemptIdentityKey(event)));
   const taskErrors = Object.fromEntries([...taskFinished.concat(taskRejected).reduce((groups, event) => {
     if (event.error_category) groups.set(event.error_category, (groups.get(event.error_category) || 0) + 1);
     return groups;
@@ -1005,7 +1022,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       task_submitted_count: taskSubmitted.length,
       task_admitted_count: taskAdmitted.length,
       task_rejected_count: taskRejected.length,
-      task_finished_count: taskFinished.length,
+      task_finished_count: coreTaskFinished.length,
       task_active_installations: taskInstallations.size,
       task_submitted_per_active_installation_day: activeDayMetric.value,
       active_installation_days: activeDayMetric.active_installation_days,
@@ -1030,13 +1047,13 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       task_failed_count: taskStatus.failed,
       task_cancelled_count: taskStatus.cancelled,
       task_submission_success_rate: reliableRate(taskStatus.success, taskSubmitted.length),
-      admitted_task_success_rate: reliableRate(taskStatus.success, taskFinished.length),
+      admitted_task_success_rate: reliableRate(taskStatus.success, coreTaskFinished.length),
       task_first_output_rate: reliableRate(taskFirstOutput.length, taskAdmitted.length),
-      task_cancel_rate: reliableRate(taskStatus.cancelled, taskFinished.length),
+      task_cancel_rate: reliableRate(taskStatus.cancelled, coreTaskFinished.length),
       task_first_output_p50_ms: percentile(taskFirstOutput.map(event => event.duration_ms), 0.5),
       task_first_output_p90_ms: percentile(taskFirstOutput.map(event => event.duration_ms), 0.9),
-      task_total_duration_p50_ms: percentile(taskFinished.map(event => event.duration_ms), 0.5),
-      task_total_duration_p90_ms: percentile(taskFinished.map(event => event.duration_ms), 0.9),
+      task_total_duration_p50_ms: percentile(coreTaskFinished.map(event => event.duration_ms), 0.5),
+      task_total_duration_p90_ms: percentile(coreTaskFinished.map(event => event.duration_ms), 0.9),
       tool_call_started_count: toolCallStarted.length,
       tool_call_completed_count: toolCallCompleted.length,
       tool_call_completion_rate: reliableRate(toolCallCompleted.length, toolCallStarted.length),
@@ -1104,6 +1121,7 @@ function sortedRankingRows(groups, countKey, successfulActive, limit = 50, minim
 }
 
 export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, range = "30", type = "call", now = Date.now(), options = {}) {
+  behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
   const minimumSubjects = options.minimumGroupSubjects ?? MIN_PRIVACY_GROUP_SUBJECTS;
   const successfulActive = successfulActiveIdentities(behaviorEvents, window);
@@ -1226,6 +1244,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
 }
 
 export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), options = {}) {
+  behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
   const minimumSubjects = options.minimumGroupSubjects ?? MIN_PRIVACY_GROUP_SUBJECTS;
   const successfulActive = successfulActiveIdentities(behaviorEvents, window);
@@ -1328,6 +1347,7 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
 }
 
 export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), options = {}) {
+  behaviorEvents = installationBehaviorEvents(devices, behaviorEvents);
   const window = rangeWindow(range, now);
   const minimumSubjects = options.minimumGroupSubjects ?? MIN_PRIVACY_GROUP_SUBJECTS;
   const successfulActive = successfulActiveIdentities(behaviorEvents, window);
@@ -1552,31 +1572,40 @@ export class TelemetryStore {
     this.loadDeletionTombstones();
     const saved = loadJson(this.devicesPath, { devices: [] });
     let restoredDeletedDevice = false;
-    let restoredExpiredDevice = false;
-    const deviceCutoff = Date.now() - this.eventRetentionMs;
+    let restoredTimestampDevice = false;
+    const loadedAt = Date.now();
     for (const device of Array.isArray(saved.devices) ? saved.devices : []) {
       if (!device?.device_id || !device?.hardware_hash || !device?.device_token) continue;
       if (this.removedSubjectHashes.has(this.deletionSubjectHash(device.device_id))) {
         restoredDeletedDevice = true;
         continue;
       }
-      if (this.deviceRetentionStartedAt(device) < deviceCutoff) {
-        restoredExpiredDevice = true;
-        this.deletionTombstones.push({
-          subject_hash: this.deletionSubjectHash(device.device_id),
-          token_hash: this.deletionTokenHash(device.device_token),
-          removal_reason: "expired",
-        });
-        continue;
-      }
-      const normalized = {
-        ...device,
-        turns: 0,
+      const normalizedFirstSeenAt = normalizeUsageOccurredAt(device.first_seen_at);
+    const normalizedLastSeenAt = normalizeUsageOccurredAt(device.last_seen_at);
+    const normalizedLastActiveAt = normalizeUsageOccurredAt(device.last_active_at);
+    const normalized = {
+      ...device,
+      first_seen_at: Number.isFinite(normalizedFirstSeenAt)
+        && normalizedFirstSeenAt <= loadedAt + 60_000
+        ? normalizedFirstSeenAt
+        : null,
+      last_seen_at: Number.isFinite(normalizedLastSeenAt)
+        ? Math.min(normalizedLastSeenAt, loadedAt)
+        : 0,
+      last_active_at: Number.isFinite(normalizedLastActiveAt)
+        ? Math.min(normalizedLastActiveAt, loadedAt)
+        : null,
+      turns: 0,
         input_tokens: 0,
         output_tokens: 0,
-        errors: 0,
-      };
-      this.devices.set(device.device_id, normalized);
+      errors: 0,
+    };
+    if (normalized.first_seen_at !== device.first_seen_at
+      || normalized.last_seen_at !== device.last_seen_at
+      || normalized.last_active_at !== device.last_active_at) {
+      restoredTimestampDevice = true;
+    }
+    this.devices.set(device.device_id, normalized);
       this.devicesByHardwareHash.set(device.hardware_hash, normalized);
     }
     this.rebuildDeletionIndexes();
@@ -1596,8 +1625,7 @@ export class TelemetryStore {
       }
       this.saveDeletionTombstones();
     }
-    if (restoredDeletedDevice || restoredExpiredDevice) this.saveNow();
-    if (restoredExpiredDevice) this.saveDeletionTombstones();
+    if (restoredDeletedDevice || restoredTimestampDevice) this.saveNow();
     this.enforcePrivateStoragePermissions();
   }
 
@@ -1729,14 +1757,24 @@ export class TelemetryStore {
     return this.publicDeletionResponse(record);
   }
 
-  loadEvents() {
-    if (!existsSync(this.eventsPath)) return;
-    const lines = readFileSync(this.eventsPath, "utf8").split("\n");
-    let rewriteNeeded = false;
+loadEvents() {
+  if (!existsSync(this.eventsPath)) return;
+  const lines = readFileSync(this.eventsPath, "utf8").split("\n");
+  const now = Date.now();
+  let rewriteNeeded = false;
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const event = JSON.parse(line);
+        let normalizedReceivedAt = normalizeUsageOccurredAt(event.received_at);
+        if (!Number.isFinite(normalizedReceivedAt) || normalizedReceivedAt > now + 60_000) {
+          normalizedReceivedAt = now;
+        }
+        let normalizedOccurredAt = normalizeUsageOccurredAt(event.occurred_at);
+      if (!Number.isFinite(normalizedOccurredAt)) {
+          rewriteNeeded = true;
+          continue;
+        }
         if (!event.event_id || this.eventIds.has(event.event_id)) {
           rewriteNeeded = true;
           continue;
@@ -1744,8 +1782,17 @@ export class TelemetryStore {
         const device = this.devices.get(event.device_id);
         if (!device || this.subjectWasDeleted(event.device_id)) {
           rewriteNeeded = true;
-          continue;
-        }
+        continue;
+      }
+      if (normalizedOccurredAt > now + 60_000) {
+        normalizedOccurredAt = normalizedReceivedAt;
+      }
+      if (event.received_at !== undefined && normalizedReceivedAt !== event.received_at) {
+        event.received_at = normalizedReceivedAt;
+        rewriteNeeded = true;
+      }
+      if (normalizedOccurredAt !== event.occurred_at) rewriteNeeded = true;
+      event.occurred_at = normalizedOccurredAt;
         this.eventIds.add(event.event_id);
         this.events.push(event);
       } catch (error) {
@@ -1753,25 +1800,40 @@ export class TelemetryStore {
         console.error("[telemetry] skipped malformed usage event:", error);
       }
     }
-    this.compactEvents(Date.now(), rewriteNeeded);
+  this.compactEvents(now, rewriteNeeded);
     this.rebuildUsageCounters();
   }
 
-  loadBehaviorEvents() {
-    if (!existsSync(this.behaviorEventsPath)) return;
-    const lines = readFileSync(this.behaviorEventsPath, "utf8").split("\n");
-    let rewriteNeeded = false;
+loadBehaviorEvents() {
+  if (!existsSync(this.behaviorEventsPath)) return;
+  const lines = readFileSync(this.behaviorEventsPath, "utf8").split("\n");
+  const now = Date.now();
+  let rewriteNeeded = false;
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const raw = JSON.parse(line);
         const event = sanitizeStoredBehaviorEvent(raw);
+        let normalizedReceivedAt = normalizeUsageOccurredAt(event.received_at);
+        if (!Number.isFinite(normalizedReceivedAt) || normalizedReceivedAt > now + 60_000) {
+          normalizedReceivedAt = now;
+        }
+        let normalizedOccurredAt = normalizeUsageOccurredAt(event.occurred_at);
+      if (!Number.isFinite(normalizedOccurredAt)) {
+          rewriteNeeded = true;
+          continue;
+        }
         if (!event.event_id || this.behaviorEventIds.has(event.event_id)
           || this.subjectWasDeleted(event.device_id)
           || !STORED_BEHAVIOR_EVENT_NAMES.has(event.event_name)) {
           rewriteNeeded = true;
-          continue;
-        }
+        continue;
+      }
+      if (normalizedOccurredAt > now + 60_000) {
+        normalizedOccurredAt = normalizedReceivedAt;
+      }
+      if (event.received_at !== undefined) event.received_at = normalizedReceivedAt;
+      event.occurred_at = normalizedOccurredAt;
         if (JSON.stringify(event) !== JSON.stringify(raw)) rewriteNeeded = true;
         this.behaviorEventIds.add(event.event_id);
         this.behaviorEvents.push(event);
@@ -1780,7 +1842,7 @@ export class TelemetryStore {
         console.error("[telemetry] skipped malformed behavior event:", error);
       }
     }
-    this.compactBehaviorEvents(Date.now(), rewriteNeeded);
+  this.compactBehaviorEvents(now, rewriteNeeded);
   }
 
   hardwareHash(claim) {
@@ -1811,10 +1873,6 @@ export class TelemetryStore {
       if (region) device.region = region;
       device.region_updated_at = now;
     }
-  }
-
-  deviceRetentionStartedAt(device) {
-    return Number(device?.first_seen_at || device?.last_seen_at || 0);
   }
 
   regionNeedsRefresh(device, now = Date.now()) {
@@ -1880,10 +1938,6 @@ export class TelemetryStore {
   authenticate(deviceId, token) {
     const device = this.devices.get(boundedText(deviceId, 96));
     if (!device || !safeEqual(token, device.device_token)) return null;
-    if (this.deviceRetentionStartedAt(device) < Date.now() - this.eventRetentionMs) {
-      this.compactExpiredData(Date.now());
-      return null;
-    }
     return device;
   }
 
@@ -1894,7 +1948,7 @@ export class TelemetryStore {
     device.app_version = boundedText(input.app_version, 32) || device.app_version;
     device.platform = boundedText(input.platform, 32) || device.platform;
     device.arch = boundedText(input.arch, 32) || device.arch;
-    const activity = Number(input.last_activity_at);
+    const activity = normalizeUsageOccurredAt(input.last_activity_at);
     if (Number.isFinite(activity) && activity > 0 && activity <= now + 60_000) {
       device.last_active_at = Math.max(Number(device.last_active_at || 0), activity);
     }
@@ -1953,40 +2007,9 @@ export class TelemetryStore {
     const behaviorChanged = this.compactBehaviorEvents(now);
     const pipelineChanged = this.compactBehaviorPipelineEvents(now);
     const deletionLedgerChanged = this.compactDeletionTombstones(now);
-    const cutoff = now - this.eventRetentionMs;
-    let devicesChanged = false;
-    const expiredDeviceIds = new Set();
-    for (const [deviceId, device] of this.devices) {
-      if (this.deviceRetentionStartedAt(device) >= cutoff) continue;
-      const subjectHash = this.deletionSubjectHash(deviceId);
-      if (!this.removedSubjectHashes.has(subjectHash)) {
-        this.deletionTombstones.push({
-          subject_hash: subjectHash,
-          token_hash: this.deletionTokenHash(device.device_token),
-          removal_reason: "expired",
-        });
-        this.removedSubjectHashes.add(subjectHash);
-      }
-      this.devices.delete(deviceId);
-      this.devicesByHardwareHash.delete(device.hardware_hash);
-      this.eventRateBuckets.delete(deviceId);
-      expiredDeviceIds.add(deviceId);
-      devicesChanged = true;
-    }
-    if (devicesChanged) {
-      this.events = this.events.filter((event) => !expiredDeviceIds.has(event.device_id));
-      this.eventIds = new Set(this.events.map((event) => event.event_id));
-      this.behaviorEvents = this.behaviorEvents
-        .filter((event) => !expiredDeviceIds.has(event.device_id));
-      this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
-      atomicWriteJsonLines(this.eventsPath, this.events);
-      atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
-      this.saveNow();
-      this.saveDeletionTombstones();
-    }
-    if (usageChanged || devicesChanged) this.rebuildUsageCounters();
+    if (usageChanged) this.rebuildUsageCounters();
     this.lastEventCompactionAt = now;
-    return usageChanged || behaviorChanged || pipelineChanged || deletionLedgerChanged || devicesChanged;
+    return usageChanged || behaviorChanged || pipelineChanged || deletionLedgerChanged;
   }
 
   compactDeletionTombstones(now = Date.now()) {
@@ -2062,7 +2085,7 @@ export class TelemetryStore {
         continue;
       }
       batchEventIds.add(eventId);
-      let occurredAt = Number(raw.occurred_at);
+      let occurredAt = normalizeUsageOccurredAt(raw.occurred_at);
       if (!Number.isFinite(occurredAt) || occurredAt <= 0 || occurredAt > now + 60_000) occurredAt = now;
       const event = {
         event_id: eventId,
@@ -2128,7 +2151,11 @@ export class TelemetryStore {
         });
         continue;
       }
-      const validation = validateBehaviorEventShape(raw, {
+      const normalizedOccurredAt = normalizeUsageOccurredAt(raw.occurred_at);
+      const validationInput = Number.isFinite(normalizedOccurredAt)
+        ? { ...raw, occurred_at: normalizedOccurredAt }
+        : raw;
+      const validation = validateBehaviorEventShape(validationInput, {
         now,
         retentionMs: this.eventRetentionMs,
       });
@@ -2140,8 +2167,10 @@ export class TelemetryStore {
         });
         continue;
       }
+      const occurredAt = normalizedOccurredAt > now + 60_000 ? now : normalizedOccurredAt;
+      const eventInput = { ...validationInput, occurred_at: occurredAt };
       if (collection?.status !== "active"
-        || raw.collection_period_id !== collection.collection_period_id) {
+        || eventInput.collection_period_id !== collection.collection_period_id) {
         response.results.push({
           event_id: eventId,
           status: "rejected",
@@ -2165,11 +2194,11 @@ export class TelemetryStore {
         reason_code: null,
       });
       accepted.push(sanitizeStoredBehaviorEvent({
-        ...raw,
+        ...eventInput,
         received_at: now,
         device_id: device.device_id,
         environment: this.environment,
-        clock_skew_bucket: clockSkewBucket(raw.occurred_at, now),
+        clock_skew_bucket: clockSkewBucket(normalizedOccurredAt, now),
       }));
     }
     if (accepted.length) {

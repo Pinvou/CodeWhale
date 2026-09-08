@@ -9,6 +9,14 @@ import { JSDOM } from "jsdom";
 const testDir = fileURLToPath(new URL(".", import.meta.url));
 const statsHtml = readFileSync(join(testDir, "..", "web", "stats.html"), "utf8");
 
+test("device details expose sortable conversation counts without encoding damage", () => {
+  assert.match(statsHtml, /data-sort="turns_7d"[^>]*>近 7 日对话/);
+  assert.match(statsHtml, /data-sort="turns_today"[^>]*>今日对话/);
+  assert.match(statsHtml, /device\.turns_today/);
+  assert.match(statsHtml, /aria-sort/);
+  assert.doesNotMatch(statsHtml, /�/);
+});
+
 const overview = {
   generated_at: Date.now(),
   counts: { online: 3, active_today: 3, active_7d: 3 },
@@ -18,9 +26,9 @@ const overview = {
 
 const seenAt = Date.parse("2026-08-10T09:00:00+08:00");
 const devices = [
-  { device_id: "alpha", online: true, platform: "windows", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 4 },
-  { device_id: "beta", online: true, platform: "linux", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 3 },
-  { device_id: "gamma", online: true, platform: "macos", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 5 },
+  { device_id: "alpha", online: true, platform: "windows", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 4, turns_today: 1 },
+  { device_id: "beta", online: true, platform: "linux", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 3, turns_today: 5 },
+  { device_id: "gamma", online: true, platform: "macos", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 5, turns_today: 2 },
 ];
 
 test("behavior analytics views render alongside the device dashboard", async () => {
@@ -41,6 +49,15 @@ test("behavior analytics views render alongside the device dashboard", async () 
   try {
     await new Promise((resolve) => dom.window.setTimeout(resolve, 10));
     const { document } = dom.window;
+    const renderedDeviceIds = () => [...document.querySelectorAll("#deviceRows .device b")]
+      .map((element) => element.textContent);
+    assert.deepEqual(renderedDeviceIds(), ["gamma", "alpha", "beta"]);
+    document.querySelector('[data-sort="turns_7d"]').click();
+    assert.deepEqual(renderedDeviceIds(), ["beta", "alpha", "gamma"]);
+    document.querySelector('[data-sort="turns_today"]').click();
+    assert.deepEqual(renderedDeviceIds(), ["beta", "gamma", "alpha"]);
+    document.querySelector('[data-sort="turns_today"]').click();
+    assert.deepEqual(renderedDeviceIds(), ["alpha", "gamma", "beta"]);
     assert.equal(document.querySelector('[data-view="behavior"]').textContent, "行为分析");
     assert.equal(document.querySelector('[data-view="commercial"]').textContent, "商业（未接入）");
     assert.ok(document.querySelector("#valueWevta"));
@@ -52,7 +69,7 @@ test("behavior analytics views render alongside the device dashboard", async () 
     assert.ok(document.querySelector("#behaviorMeta"));
     assert.match(statsHtml, /WEVTA 是可观测价值下界/);
     assert.match(statsHtml, /样本不足 30 时不展示百分比/);
-    assert.match(statsHtml, /细分组安装数低于隐私阈值/);
+    assert.doesNotMatch(statsHtml, /细分组安装数低于隐私阈值|细分组已抑制|隐私分组阈值/);
     assert.match(statsHtml, /主体：安装实例/);
     assert.match(statsHtml, /模型质量排行榜/);
     assert.match(statsHtml, /row\.success_confidence/);

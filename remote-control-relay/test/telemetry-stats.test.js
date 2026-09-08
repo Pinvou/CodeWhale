@@ -21,6 +21,10 @@ import {
 } from "../telemetry-service.js";
 
 const at = (value) => Date.parse(`${value}+08:00`);
+const installationDevicesFor = (events) => [...new Set(events
+  .map((event) => event.identity_id || event.device_id)
+  .filter(Boolean))]
+  .map((device_id) => ({ device_id, hardware_source: "installation_id" }));
 
 function behaviorEvent(collectionPeriodId, overrides = {}) {
   return {
@@ -120,7 +124,16 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
     { event_id: "evt_c_today", device_id: "dev_c", occurred_at: at("2026-07-14T09:00:00"), success: true },
   ];
 
-  const overview = buildStatsOverview(devices, events, now);
+  for (const device of devices) device.hardware_source = "installation_id";
+  const behaviorEvents = events.map((event) => ({
+    ...event,
+    event_name: "task_finished",
+    attempt_id: event.event_id,
+    mode: "assistant",
+    initiator_type: "user",
+    status: event.success === false ? "failed" : "success",
+  }));
+  const overview = buildStatsOverview(devices, [], behaviorEvents, now);
   assert.equal(overview.online_window_seconds, 300);
   assert.deepEqual(overview.counts, { online: 1, active_today: 3, active_7d: 3 });
   assert.deepEqual(overview.active_versions, [
@@ -139,17 +152,135 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
     turns: 3,
   });
 
-  const list = buildDeviceList(devices, events, now);
+  const list = buildDeviceList(devices, [], behaviorEvents, now);
   assert.equal(list[0].device_id, "dev_a");
   assert.equal(list[0].first_seen_at, at("2026-07-06T10:00:00"));
   assert.equal(list[0].region, "广东省 / 深圳市");
+  assert.equal(list[0].turns_today, 1);
   assert.equal(list[0].turns_7d, 2);
+  assert.equal(list[1].turns_today, 1);
   assert.equal(list[1].turns_7d, 1);
   assert.equal(list[1].region, "未知");
   assert.equal("failure_rate_7d" in list[0], false);
 });
 
-test("device dashboard conservatively merges usage and core behavior without replacing hardware inventory", () => {
+test("dashboard normalizes second timestamps for activity and first registration", () => {
+  const now = at("2026-07-14T12:00:00");
+  const firstSeenAt = at("2026-07-14T08:00:00");
+  const occurredAt = at("2026-07-14T10:00:00");
+  const devices = [{
+    device_id: "dev_seconds",
+    first_seen_at: Math.floor(firstSeenAt / 1_000),
+    last_seen_at: now - 10_000,
+    last_active_at: occurredAt,
+    app_version: "0.9.1",
+    platform: "windows",
+  }];
+  const events = [{
+    event_id: "usage_seconds",
+    device_id: "dev_seconds",
+    occurred_at: Math.floor(occurredAt / 1_000),
+  }];
+
+  for (const device of devices) device.hardware_source = "installation_id";
+  const behaviorEvents = events.map((event) => ({
+    ...event,
+    event_name: "task_finished",
+    attempt_id: event.event_id,
+    mode: "assistant",
+    initiator_type: "user",
+    status: event.success === false ? "failed" : "success",
+  }));
+  const overview = buildStatsOverview(devices, [], behaviorEvents, now);
+  assert.deepEqual(overview.counts, { online: 1, active_today: 1, active_7d: 1 });
+  assert.equal(overview.usage_trend.at(-1).turns, 1);
+
+  const list = buildDeviceList(devices, [], behaviorEvents, now);
+  assert.equal(list[0].first_seen_at, firstSeenAt);
+  assert.equal(list[0].turns_today, 1);
+  assert.equal(list[0].turns_7d, 1);
+});
+
+test("store migrates historical device and event timestamps without moving future events to today", (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-timestamp-migration-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  const now = Date.now();
+  const firstSeenAt = now - 2 * 60 * 60_000;
+  const lastSeenAt = now - 30_000;
+  const lastActiveAt = now - 60 * 60_000;
+  const receivedAt = now - 30 * 60_000;
+  const futureAt = now + 24 * 60 * 60_000;
+  const device = {
+    device_id: "dev_migrated",
+    hardware_hash: "hardware_hash_migrated",
+    hardware_source: "windows_cim_uuid",
+    device_token: "device_token_migrated",
+    first_seen_at: Math.floor(firstSeenAt / 1_000),
+    last_seen_at: Math.floor(lastSeenAt / 1_000),
+    last_active_at: Math.floor(lastActiveAt / 1_000),
+  };
+  const invalidFirstSeenDevices = [
+    { suffix: "missing" },
+    { suffix: "zero", first_seen_at: 0 },
+    { suffix: "invalid", first_seen_at: "invalid" },
+    { suffix: "future", first_seen_at: Math.floor(futureAt / 1_000) },
+  ].map(({ suffix, first_seen_at }) => {
+    const candidate = {
+      ...device,
+      device_id: `dev_${suffix}_first_seen`,
+      hardware_hash: `hardware_hash_${suffix}_first_seen`,
+      device_token: `device_token_${suffix}_first_seen`,
+    };
+    if (first_seen_at === undefined) delete candidate.first_seen_at;
+    else candidate.first_seen_at = first_seen_at;
+    return candidate;
+  });
+  writeFileSync(join(dataDir, "devices.json"), JSON.stringify({
+    version: 2,
+    devices: [device, ...invalidFirstSeenDevices],
+  }));
+  writeFileSync(join(dataDir, "usage-events.jsonl"), `${JSON.stringify({
+    event_id: "usage_future_migrated",
+    device_id: device.device_id,
+    occurred_at: Math.floor(futureAt / 1_000),
+    received_at: Math.floor(receivedAt / 1_000),
+  })}\n`);
+  writeFileSync(join(dataDir, "behavior-events.jsonl"), `${JSON.stringify({
+    event_id: "behavior_future_migrated",
+    event_name: "task_finished",
+    device_id: device.device_id,
+    attempt_id: "attempt_future_migrated",
+    mode: "assistant",
+    initiator_type: "user",
+    status: "success",
+    occurred_at: Math.floor(futureAt / 1_000),
+    received_at: Math.floor(receivedAt / 1_000),
+  })}\n`);
+
+  const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+  const migratedDevice = store.devices.get(device.device_id);
+  assert.ok(Math.abs(migratedDevice.first_seen_at - firstSeenAt) < 1_000);
+  assert.ok(Math.abs(migratedDevice.last_seen_at - lastSeenAt) < 1_000);
+  assert.ok(Math.abs(migratedDevice.last_active_at - receivedAt) < 1_000);
+  for (const invalidDevice of invalidFirstSeenDevices) {
+    assert.equal(store.devices.get(invalidDevice.device_id).first_seen_at, null);
+  }
+  assert.ok(Math.abs(store.events[0].occurred_at - receivedAt) < 1_000);
+  assert.ok(Math.abs(store.behaviorEvents[0].occurred_at - receivedAt) < 1_000);
+
+  const persistedDevices = JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8"));
+  assert.equal(persistedDevices.devices[0].first_seen_at, migratedDevice.first_seen_at);
+  assert.equal(persistedDevices.devices.filter((entry) => (
+    invalidFirstSeenDevices.some((invalidDevice) => invalidDevice.device_id === entry.device_id)
+      && entry.first_seen_at === null
+  )).length, invalidFirstSeenDevices.length);
+  const persistedUsage = JSON.parse(readFileSync(join(dataDir, "usage-events.jsonl"), "utf8").trim());
+  const persistedBehavior = JSON.parse(readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8").trim());
+  assert.equal(persistedUsage.occurred_at, store.events[0].occurred_at);
+  assert.equal(persistedBehavior.occurred_at, store.behaviorEvents[0].occurred_at);
+});
+
+test("device dashboard uses installation identities and core behavior exclusively", () => {
   const now = at("2026-09-04T12:00:00");
   const devices = [
     {
@@ -229,31 +360,86 @@ test("device dashboard conservatively merges usage and core behavior without rep
   ];
 
   const overview = buildStatsOverview(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(overview.counts, { online: 1, active_today: 2, active_7d: 3 });
+  assert.deepEqual(overview.counts, { online: 1, active_today: 1, active_7d: 1 });
   assert.deepEqual(overview.usage_trend.at(-2), {
     day: "2026-09-03",
-    active_devices: 1,
-    turns: 1,
+    active_devices: 0,
+    turns: 0,
   });
   assert.deepEqual(overview.usage_trend.at(-1), {
     day: "2026-09-04",
-    active_devices: 2,
-    turns: 4,
+    active_devices: 1,
+    turns: 2,
   });
   assert.deepEqual(overview.active_versions, [
-    { version: "0.9.1", count: 2 },
-    { version: "0.8.3", count: 1 },
+    { version: "0.9.1", count: 1 },
   ]);
 
   const list = buildDeviceList(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(list.map((device) => device.device_id), ["dev_hw", "dev_legacy"]);
-  assert.equal(list.find((device) => device.device_id === "dev_hw").turns_7d, 2);
-  assert.equal(list.find((device) => device.device_id === "dev_hw").last_active_at, at("2026-09-04T10:05:00"));
-  assert.equal(list.find((device) => device.device_id === "dev_legacy").turns_7d, 1);
-  assert.equal(list.some((device) => device.device_id === "dev_install"), false);
+  assert.deepEqual(list.map((device) => device.device_id), ["dev_install"]);
+  assert.equal(list[0].turns_today, 2);
+  assert.equal(list[0].turns_7d, 2);
 });
 
-test("current hardware inventory survives disabled idle and unexpected behavior registrations", () => {
+test("homepage conversations and behavior successes share installation identity and deduplication", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [
+    { device_id: "install_a", hardware_source: "installation_id", last_seen_at: now },
+    { device_id: "install_b", hardware_source: "installation_id", last_seen_at: now },
+    { device_id: "legacy_hw", hardware_source: "windows_cim_uuid", last_seen_at: now },
+  ];
+  const behaviorEvents = [
+    { event_id: "submit_a", event_name: "task_submitted", attempt_id: "shared_attempt", device_id: "install_a", identity_id: "install_a", mode: "assistant", initiator_type: "user", occurred_at: now - 3_000 },
+    { event_id: "finish_a", event_name: "task_finished", attempt_id: "shared_attempt", device_id: "install_a", identity_id: "install_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: now - 2_000 },
+    { event_id: "submit_b", event_name: "task_submitted", attempt_id: "shared_attempt", device_id: "install_b", identity_id: "install_b", mode: "assistant", initiator_type: "user", occurred_at: now - 3_000 },
+    { event_id: "finish_b", event_name: "task_finished", attempt_id: "shared_attempt", device_id: "install_b", identity_id: "install_b", mode: "assistant", initiator_type: "user", status: "failed", occurred_at: now - 2_000 },
+    { event_id: "finish_legacy", event_name: "task_finished", attempt_id: "shared_attempt", device_id: "legacy_hw", identity_id: "legacy_hw", mode: "assistant", initiator_type: "user", status: "success", occurred_at: now - 1_000 },
+  ];
+
+  const homepage = buildStatsOverview(devices, [], behaviorEvents, now);
+  const detail = buildDeviceList(devices, [], behaviorEvents, now);
+  const behavior = buildBehaviorOverview(devices, [], behaviorEvents, "today", now);
+  assert.equal(homepage.usage_trend.at(-1).turns, 2);
+  assert.equal(homepage.counts.active_today, 2);
+  assert.equal(detail.reduce((sum, device) => sum + device.turns_today, 0), 2);
+  assert.equal(behavior.metrics.task_finished_count, 2);
+  assert.equal(behavior.metrics.task_success_count, 1);
+});
+
+test("conversation deduplication falls back per installation to turn and event ids", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [
+    { device_id: "install_a", hardware_source: "installation_id" },
+    { device_id: "install_b", hardware_source: "installation_id" },
+  ];
+  const behaviorEvents = [
+    { event_id: "event_a_1", event_name: "task_finished", turn_id: "shared_turn", device_id: "install_a", identity_id: "install_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: now },
+    { event_id: "event_a_duplicate", event_name: "task_finished", turn_id: "shared_turn", device_id: "install_a", identity_id: "install_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: now },
+    { event_id: "event_b_1", event_name: "task_finished", turn_id: "shared_turn", device_id: "install_b", identity_id: "install_b", mode: "assistant", initiator_type: "user", status: "success", occurred_at: now },
+    { event_id: "event_only", event_name: "task_finished", device_id: "install_a", identity_id: "install_a", mode: "assistant", initiator_type: "user", status: "failed", occurred_at: now },
+  ];
+
+  assert.equal(buildStatsOverview(devices, [], behaviorEvents, now).usage_trend.at(-1).turns, 3);
+  assert.equal(buildBehaviorOverview(devices, [], behaviorEvents, "today", now).metrics.task_finished_count, 3);
+});
+
+test("behavior first-output metrics exclude scheduled and system tasks", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [{ device_id: "install_a", hardware_source: "installation_id" }];
+  const behaviorEvents = [
+    { event_id: "core_submit", event_name: "task_submitted", attempt_id: "core", identity_id: "install_a", mode: "assistant", initiator_type: "user", occurred_at: now - 2_000 },
+    { event_id: "core_output", event_name: "task_first_output", attempt_id: "core", identity_id: "install_a", duration_ms: 100, occurred_at: now - 1_000 },
+    { event_id: "system_submit", event_name: "task_submitted", attempt_id: "system", identity_id: "install_a", mode: "scheduled", initiator_type: "system", occurred_at: now - 2_000 },
+    { event_id: "system_output", event_name: "task_first_output", attempt_id: "system", identity_id: "install_a", duration_ms: 1, occurred_at: now - 1_000 },
+  ];
+
+  const overview = buildBehaviorOverview(devices, [], behaviorEvents, "today", now);
+  assert.equal(overview.metrics.task_submitted_count, 1);
+  assert.equal(overview.metrics.task_first_output_p50_ms, 100);
+  assert.equal(overview.metrics.task_first_output_p90_ms, 100);
+});
+
+test("device inventory contains installation registrations only", () => {
   const now = at("2026-09-04T12:00:00");
   const hardware = {
     device_id: "dev_hw_current",
@@ -274,16 +460,16 @@ test("current hardware inventory survives disabled idle and unexpected behavior 
     device_id: "dev_install_unexpected",
   };
 
-  for (const devices of [[hardware], [hardware, idleBehavior, unexpectedBehavior]]) {
+  for (const [devices, expected] of [[[hardware], 0], [[hardware, idleBehavior, unexpectedBehavior], 2]]) {
     const overview = buildStatsOverview(devices, [], [], now);
-    assert.deepEqual(overview.counts, { online: 1, active_today: 0, active_7d: 0 });
+    assert.deepEqual(overview.counts, { online: expected, active_today: 0, active_7d: 0 });
     const list = buildDeviceList(devices, [], [], now);
-    assert.deepEqual(list.map((device) => device.device_id), ["dev_hw_current"]);
-    assert.equal(list[0].first_seen_at, at("2026-09-04T08:00:00"));
+    assert.equal(list.length, expected);
+    assert.equal(list.some((device) => device.device_id === "dev_hw_current"), false);
   }
 });
 
-test("versionless legacy usage survives a hardware device upgrade", () => {
+test("legacy hardware usage does not enter the new dashboard", () => {
   const now = at("2026-09-04T12:00:00");
   const devices = [{
     device_id: "dev_hw_upgraded",
@@ -300,9 +486,9 @@ test("versionless legacy usage survives a hardware device upgrade", () => {
   }];
 
   const overview = buildStatsOverview(devices, usageEvents, [], now);
-  assert.deepEqual(overview.counts, { online: 1, active_today: 1, active_7d: 1 });
-  assert.equal(overview.usage_trend.at(-1).turns, 1);
-  assert.equal(buildDeviceList(devices, usageEvents, [], now)[0].turns_7d, 1);
+  assert.deepEqual(overview.counts, { online: 0, active_today: 0, active_7d: 0 });
+  assert.equal(overview.usage_trend.at(-1).turns, 0);
+  assert.equal(buildDeviceList(devices, usageEvents, [], now).length, 0);
 });
 
 test("scheduled and system behavior tasks never enter homepage metrics", () => {
@@ -341,14 +527,14 @@ test("scheduled and system behavior tasks never enter homepage metrics", () => {
   ];
 
   const overview = buildStatsOverview(devices, usageEvents, behaviorEvents, now);
-  assert.deepEqual(overview.counts, { online: 1, active_today: 1, active_7d: 1 });
+  assert.deepEqual(overview.counts, { online: 1, active_today: 0, active_7d: 0 });
   assert.deepEqual(overview.usage_trend.at(-1), {
     day: "2026-09-04",
-    active_devices: 1,
-    turns: 1,
+    active_devices: 0,
+    turns: 0,
   });
   assert.deepEqual(buildDeviceList(devices, usageEvents, behaviorEvents, now)
-    .map((device) => device.device_id), ["dev_hw"]);
+    .map((device) => device.device_id), ["dev_install"]);
 });
 
 test("behavior analytics aggregates tasks voice tools installs scenes and models", () => {
@@ -371,7 +557,7 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
     { event_id: "copy_a", event_name: "response_copied", turn_id: "turn_a", identity_id: "dev_a", content_type: "text", occurred_at: at("2026-08-10T09:22:00") },
     { event_id: "task_b", event_name: "task_submitted", attempt_id: "attempt_b", identity_id: "dev_b", mode: "code", initiator_type: "user", occurred_at: at("2026-08-10T10:01:00") },
     { event_id: "task_admit_b", event_name: "task_admitted", attempt_id: "attempt_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:01:01") },
-    { event_id: "task_done_b", event_name: "task_finished", attempt_id: "attempt_b", identity_id: "dev_b", status: "interrupted", occurred_at: at("2026-08-10T10:02:00") },
+    { event_id: "task_done_b", event_name: "task_finished", attempt_id: "attempt_b", identity_id: "dev_b", mode: "code", initiator_type: "user", status: "interrupted", occurred_at: at("2026-08-10T10:02:00") },
     { event_id: "task_c", event_name: "task_submitted", attempt_id: "attempt_c", identity_id: "dev_c", mode: "assistant", initiator_type: "user", occurred_at: at("2026-08-10T11:01:00") },
     { event_id: "task_reject_c", event_name: "task_rejected", attempt_id: "attempt_c", identity_id: "dev_c", stage: "shutdown", occurred_at: at("2026-08-10T11:01:01") },
     { event_id: "voice_a", event_name: "voice_started", identity_id: "dev_a", occurred_at: at("2026-08-12T09:03:00") },
@@ -387,6 +573,7 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
     { event_id: "model_b", event_name: "model_used", identity_id: "dev_b", provider_key: "deepseek", model_key: "deepseek", occurred_at: at("2026-08-12T10:07:00") },
     { event_id: "model_c", event_name: "model_used", identity_id: "dev_a", provider_key: "openai", model_key: "gpt_5", occurred_at: at("2026-08-12T11:07:00") },
   ];
+  for (const device of devices) device.hardware_source = "installation_id";
 
   const overview = buildBehaviorOverview(devices, usageEvents, behaviorEvents, "7", now, [
     { occurred_at: now, accepted: 90, duplicate: 5, rejected: 3, retryable: 2 },
@@ -489,6 +676,10 @@ test("behavior event store validates v1 independently, injects identity and dedu
         event_id: "behavior_event_test_000006",
         account_subject_id: "account_subject_test_001",
       }),
+      behaviorEvent(collection.collection_period_id, {
+        event_id: "behavior_event_test_000007",
+        occurred_at: Date.now() + 10 * 60_000,
+      }),
     ], "batch_behavior_test_000001");
     assert.equal(result.batch_id, "batch_behavior_test_000001");
     assert.deepEqual(result.results, [
@@ -499,8 +690,9 @@ test("behavior event store validates v1 independently, injects identity and dedu
       { event_id: "behavior_event_test_000004", status: "rejected", reason_code: "collection_inactive" },
       { event_id: "behavior_event_test_000005", status: "accepted", reason_code: null },
       { event_id: "behavior_event_test_000006", status: "rejected", reason_code: "invalid_identity_claim" },
+      { event_id: "behavior_event_test_000007", status: "rejected", reason_code: "invalid_time" },
     ]);
-    assert.equal(result.results.length, 7);
+    assert.equal(result.results.length, 8);
     assert.equal(store.behaviorEvents.length, 2);
     assert.equal(store.behaviorEvents[0].schema_version, 1);
     assert.equal(store.behaviorEvents[0].app_version, "0.8.7");
@@ -514,7 +706,7 @@ test("behavior event store validates v1 independently, injects identity and dedu
       occurred_at: store.behaviorPipelineEvents[0].occurred_at,
       accepted: 2,
       duplicate: 1,
-      rejected: 4,
+      rejected: 5,
       retryable: 0,
     }]);
     assert.equal(existsSync(join(dataDir, "behavior-pipeline.jsonl")), true);
@@ -587,7 +779,7 @@ test("P1 dashboard metrics cover retention funnels version quality and confidenc
   ];
   for (let index = 0; index < 30; index += 1) {
     const attempt = `quality_attempt_${index}`;
-    const common = { attempt_id: attempt, identity_id: `quality_${index}`, app_version: "0.8.7", platform: "windows", arch: "x86_64" };
+    const common = { attempt_id: attempt, identity_id: `quality_${index}`, app_version: "0.8.7", platform: "windows", arch: "x86_64", mode: "assistant", initiator_type: "user" };
     behaviorEvents.push(
       { ...common, event_id: `submitted_${index}`, event_name: "task_submitted", occurred_at: at("2026-08-12T09:01:00") + index },
       { ...common, event_id: `admitted_${index}`, event_name: "task_admitted", occurred_at: at("2026-08-12T09:01:01") + index },
@@ -595,7 +787,7 @@ test("P1 dashboard metrics cover retention funnels version quality and confidenc
       { ...common, event_id: `finished_${index}`, event_name: "task_finished", turn_id: `turn_${index}`, mode: "assistant", initiator_type: "user", status: "success", duration_ms: (index + 1) * 10, occurred_at: at("2026-08-12T09:01:03") + index },
     );
   }
-  const overview = buildBehaviorOverview([], [], behaviorEvents, "30", now);
+  const overview = buildBehaviorOverview(installationDevicesFor(behaviorEvents), [], behaviorEvents, "30", now);
   assert.deepEqual(overview.retention.d1, { horizon_days: 1, eligible_installations: 3, retained_installations: 1, retention_rate: null, confidence: "low" });
   assert.equal(overview.retention.d7.retained_installations, 1);
   assert.equal(overview.retention.d30.retained_installations, 1);
@@ -625,7 +817,7 @@ test("P1 tool and scene funnels preserve every stage and value outcome", () => {
     { event_id: "scene_finish", event_name: "task_finished", attempt_id: "scene_attempt", turn_id: "scene_turn", status: "success", duration_ms: 1200, identity_id: "dev_a", occurred_at: at("2026-08-12T10:03:00") },
     { event_id: "scene_copy", event_name: "response_copied", turn_id: "scene_turn", identity_id: "dev_a", occurred_at: at("2026-08-12T10:04:00") },
   ];
-  const tools = buildBehaviorToolRanking([], [], events, "today", "install", now, { minimumGroupSubjects: 0 });
+  const tools = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "install", now, { minimumGroupSubjects: 0 });
   assert.deepEqual(tools.funnel_rows[0], {
     tool_key: "search", tool_name: "search", tool_type: "mcp",
     user_count: 1,
@@ -636,14 +828,14 @@ test("P1 tool and scene funnels preserve every stage and value outcome", () => {
     configuration_to_call_p50_ms: 60_000,
     confidence: "low",
   });
-  const scenes = buildBehaviorSceneRanking([], [], events, "today", now, { minimumGroupSubjects: 0 });
+  const scenes = buildBehaviorSceneRanking(installationDevicesFor(events), [], events, "today", now, { minimumGroupSubjects: 0 });
   assert.equal(scenes.rows[0].selection_rate, null);
   assert.equal(scenes.rows[0].submission_rate, null);
   assert.equal(scenes.rows[0].task_success_rate, null);
   assert.equal(scenes.rows[0].explicit_value_rate, null);
   assert.equal(scenes.rows[0].task_duration_p50_ms, 1200);
-  assert.equal(buildBehaviorToolRanking([], [], events, "today", "install", now).funnel_rows.length, 0);
-  assert.equal(buildBehaviorSceneRanking([], [], events, "today", now).rows.length, 0);
+  assert.equal(buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "install", now).funnel_rows.length, 1);
+  assert.equal(buildBehaviorSceneRanking(installationDevicesFor(events), [], events, "today", now).rows.length, 1);
 });
 
 test("retention ignores opens and failures while terminal completeness excludes tasks still within 24h", () => {
@@ -652,18 +844,20 @@ test("retention ignores opens and failures while terminal completeness excludes 
     { event_id: "cohort_retention", event_name: "analytics_cohort_started", identity_id: "retention_subject", occurred_at: at("2026-08-10T08:00:00") },
     { event_id: "retention_open", event_name: "app_opened", identity_id: "retention_subject", occurred_at: at("2026-08-11T08:00:00") },
     { event_id: "retention_failed", event_name: "task_finished", attempt_id: "failed_retention", mode: "assistant", initiator_type: "user", status: "failed", identity_id: "retention_subject", occurred_at: at("2026-08-11T09:00:00") },
+    { event_id: "submitted_recent", event_name: "task_submitted", attempt_id: "recent_attempt", mode: "assistant", initiator_type: "user", identity_id: "recent_subject", occurred_at: at("2026-08-12T10:59:00") },
     { event_id: "admitted_recent", event_name: "task_admitted", attempt_id: "recent_attempt", identity_id: "recent_subject", occurred_at: at("2026-08-12T11:00:00") },
   ];
-  const recentOnly = buildBehaviorOverview([], [], base, "30", now);
+  const recentOnly = buildBehaviorOverview(installationDevicesFor(base), [], base, "30", now);
   assert.equal(recentOnly.retention.d1.retained_installations, 0);
   assert.equal(recentOnly.metrics.task_terminal_matured_count, 0);
   assert.equal(recentOnly.metrics.task_terminal_pending_within_24h_count, 1);
   assert(!recentOnly.data_quality.warnings.includes("task_terminal_incomplete"));
 
-  const matured = buildBehaviorOverview([], [], [...base, {
-    event_id: "admitted_matured", event_name: "task_admitted", attempt_id: "matured_attempt",
-    identity_id: "matured_subject", occurred_at: at("2026-08-10T09:00:00"),
-  }], "30", now);
+  const maturedEvents = [...base,
+    { event_id: "submitted_matured", event_name: "task_submitted", attempt_id: "matured_attempt", mode: "assistant", initiator_type: "user", identity_id: "matured_subject", occurred_at: at("2026-08-10T08:59:00") },
+    { event_id: "admitted_matured", event_name: "task_admitted", attempt_id: "matured_attempt", identity_id: "matured_subject", occurred_at: at("2026-08-10T09:00:00") },
+  ];
+  const matured = buildBehaviorOverview(installationDevicesFor(maturedEvents), [], maturedEvents, "30", now);
   assert.equal(matured.metrics.task_terminal_matured_count, 1);
   assert.equal(matured.metrics.task_terminal_missing_count, 1);
   assert(matured.data_quality.warnings.includes("task_terminal_incomplete"));
@@ -691,7 +885,7 @@ test("active and feature-adoption denominators use core submissions and successf
     { event_id: "scheduled", event_name: "task_submitted", attempt_id: "scheduled_attempt", identity_id: "scheduled", mode: "scheduled", initiator_type: "system", occurred_at: at("2026-08-12T10:03:00") },
   );
   const overview = buildBehaviorOverview(
-    [{ device_id: "passive_device", last_active_at: at("2026-08-12T11:00:00") }],
+    installationDevicesFor(events),
     [{ event_id: "passive_usage", device_id: "passive_usage", occurred_at: at("2026-08-12T11:00:00") }],
     events,
     "today",
@@ -705,7 +899,7 @@ test("active and feature-adoption denominators use core submissions and successf
   assert.equal(overview.metrics.voice_started_installations, 12);
   assert.equal(overview.metrics.voice_penetration_rate, 0.4);
 
-  const tool = buildBehaviorToolRanking([], [], events, "today", "call", now, { minimumGroupSubjects: 0 }).rows[0];
+  const tool = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "call", now, { minimumGroupSubjects: 0 }).rows[0];
   assert.equal(tool.observed_user_count, 13);
   assert.equal(tool.user_count, 12);
   assert.equal(tool.penetration_sample_size, 30);
@@ -741,7 +935,7 @@ test("WSTA and feature adoption attribute cross-day tasks to their completion da
       occurred_at: at("2026-08-13T00:02:00"),
     },
   ];
-  const overview = buildBehaviorOverview([], [], events, "today", now);
+  const overview = buildBehaviorOverview(installationDevicesFor(events), [], events, "today", now);
   assert.equal(overview.active_installations, 0);
   assert.equal(overview.metrics.task_success_count, 1);
   assert.equal(overview.metrics.wsta_installations, 1);
@@ -777,7 +971,7 @@ test("activation funnel and model ranking expose complete quality dimensions", (
     );
     if (index < 5) events.push({ event_id: `model_selected_${index}`, event_name: "model_selected", provider_key: "deepseek", model_key: "deepseek", selection_scope: "session", identity_id: identity, occurred_at: at("2026-08-12T08:00:00") + index });
   }
-  const overview = buildBehaviorOverview([], [], events, "30", now);
+  const overview = buildBehaviorOverview(installationDevicesFor(events), [], events, "30", now);
   assert.deepEqual(overview.funnels.activation, {
     cohort_installations: 30,
     matured_installations: 30,
@@ -793,7 +987,7 @@ test("activation funnel and model ranking expose complete quality dimensions", (
     first_value_p90_ms: 300_000,
     confidence: "sufficient",
   });
-  const model = buildBehaviorModelRanking([], [], events, "30", now).rows[0];
+  const model = buildBehaviorModelRanking(installationDevicesFor(events), [], events, "30", now).rows[0];
   assert.equal(model.task_terminal_count, 30);
   assert.equal(model.task_success_count, 24);
   assert.equal(model.task_success_rate, 0.8);
@@ -818,7 +1012,7 @@ test("percentage metrics hide 29 samples and appear at 30", () => {
     tool_key: "shell", tool_type: "cli", success: true, identity_id: `enough_${index}`,
     occurred_at: at("2026-08-12T10:00:00") + index,
   });
-  const rows = buildBehaviorToolRanking([], [], events, "today", "call", now).rows;
+  const rows = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "call", now).rows;
   const low = rows.find(row => row.tool_key === "search");
   const enough = rows.find(row => row.tool_key === "shell");
   assert.equal(low.success_sample_size, 29);
@@ -851,8 +1045,8 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
     assert(!persisted.includes(privateModel));
     assert(!persisted.includes("tool_name"));
     assert(!persisted.includes("model_name"));
-    const tools = buildBehaviorToolRanking([], [], store.behaviorEvents, "today", "call", Date.now(), { minimumGroupSubjects: 0 });
-    const models = buildBehaviorModelRanking([], [], store.behaviorEvents, "today", Date.now(), { minimumGroupSubjects: 0 });
+    const tools = buildBehaviorToolRanking(installationDevicesFor(store.behaviorEvents), [], store.behaviorEvents, "today", "call", Date.now(), { minimumGroupSubjects: 0 });
+    const models = buildBehaviorModelRanking(installationDevicesFor(store.behaviorEvents), [], store.behaviorEvents, "today", Date.now(), { minimumGroupSubjects: 0 });
     assert.equal(tools.rows[0].tool_name, "custom");
     assert.equal(models.rows[0].model_key, "custom");
   } finally {
@@ -860,13 +1054,15 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
   }
 });
 
-test("privacy gates suppress small groups and clip per-subject daily contributions", () => {
+test("behavior rankings include small groups and clip per-subject daily contributions", () => {
   const now = at("2026-08-12T12:00:00");
   const events = Array.from({ length: 101 }, (_, index) => ({
     event_id: `privacy_task_${String(index).padStart(4, "0")}`,
     event_name: "task_submitted",
     attempt_id: `privacy_attempt_${String(index).padStart(4, "0")}`,
     identity_id: "privacy_installation",
+    mode: "assistant",
+    initiator_type: "user",
     occurred_at: at("2026-08-12T09:00:00") + index,
   }));
   events.push({
@@ -877,7 +1073,7 @@ test("privacy gates suppress small groups and clip per-subject daily contributio
     identity_id: "privacy_installation",
     occurred_at: at("2026-08-12T10:00:00"),
   });
-  const overview = buildBehaviorOverview([], [], events, "today", now);
+  const overview = buildBehaviorOverview(installationDevicesFor(events), [], events, "today", now);
   assert.equal(overview.metrics.task_submitted_count, 100);
   assert.deepEqual(overview.data_quality.contribution_clipping, {
     subject_count: 1,
@@ -888,10 +1084,11 @@ test("privacy gates suppress small groups and clip per-subject daily contributio
   });
   assert(overview.data_quality.warnings.includes("subject_contribution_clipped"));
 
-  const models = buildBehaviorModelRanking([], [], events, "today", now);
-  assert.equal(models.rows.length, 0);
-  assert.equal(models.suppressed_group_count, 1);
-  assert.equal(models.minimum_group_subjects, 20);
+  const models = buildBehaviorModelRanking(installationDevicesFor(events), [], events, "today", now);
+  assert.equal(models.rows.length, 1);
+  assert.equal(models.rows[0].observed_user_count, 1);
+  assert.equal(models.suppressed_group_count, 0);
+  assert.equal(models.minimum_group_subjects, 1);
 
   const forbiddenKeys = new Set(["device_id", "account_subject_id", "session_id", "turn_id", "attempt_id", "operation_id", "event_id"]);
   const visit = (value) => {
@@ -1041,7 +1238,7 @@ test("removed credentials return gone while unknown credentials stay unauthorize
   }
 });
 
-test("naturally expired credentials return a renewable gone response", async () => {
+test("old device credentials remain valid until explicit deletion", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-expired-credential-status-"));
   const names = [
     "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
@@ -1079,8 +1276,7 @@ test("naturally expired credentials return a renewable gone response", async () 
       undefined,
       { authorization: `Bearer ${original.device_token}` },
     );
-    assert.equal(expired.status, 410);
-    assert.deepEqual(expired.body, { error: "device_credentials_expired" });
+    assert.equal(expired.status, 200);
 
     const renewed = await serviceRequest(
       service,
@@ -1089,8 +1285,8 @@ test("naturally expired credentials return a renewable gone response", async () 
       registrationBody,
     );
     assert.equal(renewed.status, 200);
-    assert.notEqual(renewed.body.device_id, original.device_id);
-    assert.notEqual(renewed.body.device_token, original.device_token);
+    assert.equal(renewed.body.device_id, original.device_id);
+    assert.equal(renewed.body.device_token, original.device_token);
   } finally {
     service?.close();
     for (const name of names) {
@@ -1246,7 +1442,7 @@ test("behavior deletion removes identity and facts while tombstones survive back
   }
 });
 
-test("retention compaction removes expired identity mappings and facts without request traffic", () => {
+test("retention compaction removes expired facts but preserves device registrations", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-retention-control-"));
   try {
     const now = Date.now();
@@ -1270,20 +1466,20 @@ test("retention compaction removes expired identity mappings and facts without r
       output_tokens: 1,
       success: true,
     }]);
+    store.events[0].occurred_at = now - 36 * 24 * 60 * 60_000;
+    store.events[0].received_at = now - 36 * 24 * 60 * 60_000;
     assert.equal(store.devices.size, 1);
     assert.equal(store.events.length, 1);
 
     assert.equal(store.compactExpiredData(now), true);
-    assert.equal(store.devices.size, 0);
-    assert.equal(store.devicesByHardwareHash.size, 0);
+    assert.equal(store.devices.size, 1);
+    assert.equal(store.devicesByHardwareHash.size, 1);
     assert.equal(store.events.length, 0);
-    assert.equal(store.credentialWasRemoved(credential.device_token), true);
-    assert.equal(store.credentialRemovalReason(credential.device_token), "expired");
-    assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
+    assert.equal(store.credentialWasRemoved(credential.device_token), false);
+    assert.equal(store.authenticate(credential.device_id, credential.device_token), device);
+    store.saveNow();
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 1);
     assert.equal(readFileSync(join(dataDir, "usage-events.jsonl"), "utf8"), "");
-    const renewed = store.register(registration, null);
-    assert.notEqual(renewed.device_id, credential.device_id);
-    assert.notEqual(renewed.device_token, credential.device_token);
 
     const staleBackup = JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8"));
     staleBackup.devices = [{
@@ -1294,8 +1490,9 @@ test("retention compaction removes expired identity mappings and facts without r
     }];
     writeFileSync(join(dataDir, "devices.json"), JSON.stringify(staleBackup));
     const reloaded = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
-    assert.equal(reloaded.devices.size, 0);
-    assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
+    assert.equal(reloaded.devices.size, 1);
+    assert.equal(reloaded.authenticate(credential.device_id, credential.device_token).device_id, credential.device_id);
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 1);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
