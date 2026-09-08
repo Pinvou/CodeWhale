@@ -15,6 +15,14 @@
 import { projectDeepSeekConversation, conversationItemsForMode } from '../conversation/deepseek-conversation.js';
 import { isInternalRuntimeEnvelopeText, isInternalUserMessage } from '../../shared/internal-message.mjs';
 
+// Native controls are session-owned; bridge state belongs to the separate
+// chat workspace. During a session handoff no model attribution is safer
+// than borrowing either the previous native session or the chat default.
+export function nativeModelServiceContext(sessionId, controlsSessionId, modelId, savedModels) {
+  if (!sessionId || controlsSessionId !== sessionId || !modelId) return null;
+  return { currentSessionModelId: modelId, savedModels };
+}
+
 export function createNativeLane() {
   return {
     hydrated: false,

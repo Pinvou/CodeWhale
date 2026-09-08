@@ -1141,8 +1141,27 @@ const savedModelErrorHelper = globalThis.PinvouModelServiceErrors;
 globalThis.PinvouModelServiceErrors = modelErrors;
 try {
   const { projectDeepSeekConversation } = await import('../src/features/conversation/deepseek-conversation.js');
-  const { createNativeLane, appendLocalUserMessage, applyNativeChatEvent, projectNativeLane } =
+  const { createNativeLane, appendLocalUserMessage, applyNativeChatEvent, projectNativeLane, nativeModelServiceContext } =
     await import('../src/features/codex/code-native-lane.js');
+  const catalog = [{ id: 'custom', name: 'Custom service' }, { id: 'builtin_llmapi', kind: 'builtin_llmapi' }];
+  for (const [chatModel, nativeModel, managed] of [
+    ['builtin_llmapi', 'custom', false],
+    ['custom', 'builtin_llmapi', true],
+  ]) {
+    const chatState = { currentSessionModelId: chatModel, activeModelId: chatModel, savedModels: catalog };
+    const context = nativeModelServiceContext('native', 'native', nativeModel, chatState.savedModels);
+    const card = modelErrors.build('SSE stream request failed: HTTP 401 invalid API key', {
+      language: 'en', modelServiceState: context,
+    });
+    assert.equal(/contact your administrator/.test(card.message), managed);
+    assert.equal(/API key/.test(card.message), !managed);
+    assert.deepEqual(Object.keys(context).sort(), ['currentSessionModelId', 'savedModels']);
+  }
+  assert.equal(nativeModelServiceContext('next-native', 'previous-native', 'builtin_llmapi', catalog), null);
+  assert.equal(nativeModelServiceContext('native', 'native', null, catalog), null);
+  assert.equal(nativeModelServiceContext(null, null, 'builtin_llmapi', catalog), null);
+  assert.match(read('src', 'features', 'codex', 'CodexAcpView.jsx'),
+    /nativeModelServiceContext\(activeId, nativeControlsOwner, nativeControls\.modelId, nativeSavedModels\)/);
   const options = { language: 'en', modelServiceState: managedState };
   const error = 'SSE stream request failed: HTTP 401 invalid API key; Authorization: Bearer demo-secret-for-test';
   const timelineEvents = [
