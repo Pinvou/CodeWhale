@@ -356,6 +356,97 @@ C3C2A 现场结果（2026-09-08）：生产形态隔离演练完整通过，覆�
 正式七 agent 已通过专属目录权限、精确运行环境/信任根、真实签名、自动续取、健康状态及日志秘密检查。
 此结果仅完成服务身份发行与投递；用户 realm、业务接收端授权矩阵、商城和公网切换仍未完成。
 
+#### C3C2B 用户登录接线任务与边界
+
+按以下顺序串行实施、独立审核并分别提交，不导入开发 realm 或旧测试用户：
+
+1. B1：无秘密生产用户 realm 制品与隔离验收。用户 issuer 使用账户公网 origin 下的
+   `/realms/pinvou`，无 `/auth` 前缀；内部 token/JWKS/admin 连接仍使用私网 HTTPS 和真实证书校验。
+   浏览器沿用已有 Cookie 与 Pinvou 浏览器认证器，桌面沿用已有密码/短信 direct-grant 认证器；
+   不将禁止 workload 交互式登录的规则误套到真实用户客户端。
+2. B1 客户端分离：`pinvou-desktop` 保留桌面密码/短信登录，不开放未使用的通配回调；
+   `pinvou-token-portal` 仅授权码 + S256，精确回调为账户 origin 的 `/auth/callback`；
+   `pinvou-token-credential-portal` 仅授权码 + S256，精确回调为凭据 origin 的 `/oidc/callback`。
+   普通账户/桌面令牌使用既定业务 audience `pinvou-desktop`，凭据令牌只含专用 audience；
+   不为凭据客户端开放密码、隐式或服务账号授权，不让普通 Portal 令牌通过凭据验证。
+   三客户端不共享秘密；公共 PKCE 客户端不人为添加可回显的静态秘密。
+   现有桌面与 Portal 请求 `openid profile email offline_access`，需保留该协议 scope 与可续期会话的兼容性，
+   不借此次部署缩短现有会话策略；其中 email scope 不使邮箱成为必填项，也不开放邮箱登录或新增邮箱管理功能。
+   凭据客户端只接受现有 `openid` 请求，不获得离线访问；服务客户端的禁用离线规则不误用到普通用户登录。
+3. B1 账户预配另用 `pinvou-account-provisioner` 机密服务客户端，仅在用户 realm 持有
+   `manage-users` 单一所需权限，不授予 master、realm-admin、客户端管理或七服务内部权限。
+   固定版本的 `manage-users` 已允许用户查询/查看；不叠加 `view-users`，避免其组合角色隐式带入
+   `query-groups`。直接角色、有效角色和实际令牌权限均精确为 `manage-users`，而非允许任意超集。
+   该角色仍可管理用户 realm 的全部用户（包括设密），不是“仅注册”权限；预配秘密按高敏材料隔离。
+   Keycloak 控制面管理员保留在 master，平台业务角色由 Account 管理，不把单次管理角色拒绝宣称为所有用户操作受限。
+   它与七 workload 身份职责不同，不混入 workload realm。禁用交互授权、离线访问和刷新令牌。
+   保留 26.7.0 对该客户端自动附加的内置 `service_account` scope，并在制品中显式声明；
+   不继承用户 realm 的默认/可选 scope，实际令牌的管理权限仍须精确等于上述单项。
+   手机属性继续只允许管理端写入；邮箱、姓名均不作为登录或注册必填项，不新增邮箱登录入口。
+   为保持既有用户名修改功能，用户 realm 显式允许用户名变更，但 managed profile 的 username
+   仅管理端可写、用户可读；实际更名由 Account/Identity 受控流程执行，不开放绕过平台的直接资料修改。
+   明确登记 `pinvou_bootstrap_managed`、`pinvou_registration_operation_id`、
+   `pinvou_profile_change_operation_id` 三个管理端专用业务属性，保持引导、注册幂等与资料变更闭环；
+   不以开放全部未托管属性替代白名单。预配越权测试同时拒绝跨 realm、管理客户端及提升 realm-admin。
+4. B1 隔离检查必须实际读取发行配置，核对公开发现地址与私有 workload issuer 分离、精确回调、
+   S256、专用 audience、双认证器、预配实际创建/查询/更新/设密/撤销会话/删除及越权拒绝；
+   配置检查不冒充业务登录成功。上述写操作仅使用隔离环境的专属禁用测试用户。
+   C4 的真实登录令牌还需核验业务所需的 `sid/auth_time/phone` 等声明与最终业务授权。
+5. B2：账户预配客户端秘密经既有 age 流程加密保存，再以专属只读文件提供给 Identity 与受控
+   account-security 工具。补齐文件式秘密读取和受限 CA 接线，不在环境变量或命令参数中投递秘密，
+   兼容非生产既有入口；正式环境拒绝明文环境秘密、错误文件权限和缺失受信 CA。
+6. B3：上述制品及客户端隔离检查通过后，备份前后绑定正式数据库，创建唯一正式用户 realm，
+   读取并加密新预配秘密，再投递身份配置。Keycloak 扩展只读自己的短期 token 目录，
+   接线现有 Account/Identity 内部地址；接收端真实 UUID 授权与登录/短信/注册最终回归随 C4 完成。
+   任何不确定写入保留检查点，不覆盖或重建已创建用户 realm。
+
+公网代理只允许所需用户 realm 和静态登录资源，拒绝 master、workload、管理 API 与管理端口。
+临时引导管理员的退场仍由 C3C2C 单独验收，不为加快用户 realm 配置而提前撤销恢复入口。
+
+B1 配置兼容以固定 26.7.0 为准：未托管属性关闭使用 JSON `null`，不是界面标签 `DISABLED`；
+该版本枚举仅定义三种开启方式，见 [UPConfig 源码](https://github.com/keycloak/keycloak/blob/26.7.0/core/src/main/java/org/keycloak/representations/userprofile/config/UPConfig.java)。
+精确回调检查先于 PKCE，缺失 PKCE 参数时应核验回到已验证回调的 302、固定 OAuth 错误及原 state，
+不得跟随重定向或把任意 400 当作 PKCE 拒绝，见 [AuthorizationEndpoint 源码](https://github.com/keycloak/keycloak/blob/26.7.0/services/src/main/java/org/keycloak/protocol/oidc/endpoints/AuthorizationEndpoint.java)。
+局部迭代可显式启用 `--production-user-realm --user-realm-only`，先等待真实 HTTPS readiness 再验收 JDBC；
+输出明确不包含既有 workload 集成测试，最终验收仍使用不带 `--user-realm-only` 的完整模式。
+令牌交换负例发送完整的 access-token 类型参数，精确要求 HTTP 400、`invalid_request` 及
+`Standard token exchange is not enabled for the requested client`；不接受其他缺参错误冒充禁用。
+密码授权与离线 scope 分别精确核验 `unauthorized_client` / `invalid_scope` 及对应固定原因，
+见 [固定版本 TokenExchangeGrantType](https://github.com/keycloak/keycloak/blob/26.7.0/services/src/main/java/org/keycloak/protocol/oidc/grants/TokenExchangeGrantType.java)。
+
+B1 隔离验收结果（2026-09-08）：固定 26.7.0 同一镜像完整模式退出 0、无跳过，取得七类真实身份、
+续取/过期/轮换/拒权、JDBC TLS、认证器/主题、生产文件与 HTTPS readiness 全部通过标记；
+新增用户 realm 的公开发现与私有 issuer 分离、精确客户端/scope/profile、真实单角色权限、
+禁用测试用户创建/查询/更名/设密/登出/删除、跨域与管理提权拒绝、三类精确 OAuth 负例及 PKCE 均通过。
+JDBC 错 CA、错主机名均真实拒绝；本轮隔离容器和网络清理完成，正式 realm 未创建。
+16 项相关 Python 单测、架构守卫与差异检查通过。用户 realm 生成器 SHA-256 为
+`19054b8f52057383a078ae8ab35cfc9b63c4287d616f0e0f3dc91073a769e41a`，
+用户验收脚本为 `cfaa97a7e0e2adedd0331134b63a2a23d4565d5ff8ecaf17020322372eac755b`，
+完整入口为 `e72b262e70df4fc4170b4f9fab141278d4d67744b91dc8be42c9b22ddf19deee`，传输后复核一致。
+上述结果不等于业务登录、短信或正式用户域部署；B2/B3 与 C4 仍待完成。
+
+#### C3C2B2 文件凭据与专用信任接线设计（待实施）
+
+Identity 适配模块新增显式配置构造入口，保留既有非生产字符串构造接口；两处实际消费者
+`identity-service` 与 `account-security` 均接入新入口，按既有 `APP_ENV` 的 production 前缀判定生产。
+生产必须使用 `KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE` 与 `KEYCLOAK_CA_FILE`，拒绝同时提供
+明文环境秘密；非生产可继续旧配置，但文件与明文二选一，不静默优先。秘密只在启动时读取，
+轮换后需受控重启消费者；不宣称本批实现自动秘密轮换。
+
+文件读取限制为规范绝对路径、全链路无符号链接、普通有界文件，打开后复核同一文件。
+POSIX 秘密仅允许 0400/0600；CA 可读但不可被组或其他用户写入，只解析有效 CA 证书，
+不接受混入私钥/其他 PEM。现场另核对专属目录、UID 和只读挂载，Windows 单测不替代 Linux 权限验收。
+新传输配置只作用于该 Keycloak 管理与 token 客户端：专用证书池、TLS 主机名校验、HTTPS、
+禁用代理与跳转，不改变全局信任或外部商城等客户端。保留原超时与管理请求关联信息。
+生产 URL 拒绝用户信息、查询和片段；管理与签发端点必须同一 origin 且签发路径绑定所配用户 realm。
+Identity 的用户 token proxy 同样使用专用 CA，避免只修管理端而登录仍因私有 CA 失败。
+
+实施顺序：B 先审本文范围；A 实现上述窄配置、两个 CLI 与 proxy 接线；新增无网络配置负例及
+真实本地 TLS 正反例，覆盖正确 CA 成功、错 CA/主机名拒绝、重定向不跟随、秘密不回显、
+错误权限/链接/超限/空文件拒绝和旧非生产兼容。Linux 与 Windows 适用测试、既有适配模块回归
+及架构守卫通过后交 B 审核，独立提交。该测试使用一次性本地测试服务器，不冒充正式 Keycloak
+用户登录；正式文件投递和用户域创建仍在 B3，不修改正式数据或引导管理员。
+
 ### 部署顺序
 
 SECINF-03 继续串行细分：03B 交付固定版本的 TLS/Raft/声明式审计/逐服务 AppRole 与 Agent 配置，并以独立实例验证持久化、封存、解封、权限、续租和审计；03C 才处理本机加密初始化响应、正式初始化、离线交接和备份恢复。03B 的随机测试主密钥不用于正式实例，不将其测试结果等同于保管人的正式备份确认。

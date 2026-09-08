@@ -61,6 +61,8 @@ def main():
     parser.add_argument("--binary", required=True)
     parser.add_argument("--production-healthcheck", help="opt into production Compose/file configuration with this same-source binary")
     parser.add_argument("--workload-agent-image", help="also verify seven production agents against this isolated issuer")
+    parser.add_argument("--production-user-realm", action="store_true", help="also verify the secret-free production user realm in isolation")
+    parser.add_argument("--user-realm-only", action="store_true", help="focused user-realm iteration; does not rerun or claim workload integration")
     parser.add_argument("--run", action="store_true", required=True)
     args = parser.parse_args()
     require(os.name == "posix" and os.geteuid() == 0, "LINUX_OPERATOR_REQUIRED")
@@ -71,6 +73,8 @@ def main():
     require(healthcheck is None or healthcheck.is_file(), "HEALTHCHECK_BINARY_REQUIRED")
     require(not args.workload_agent_image or (healthcheck and re.fullmatch(r"sha256:[a-f0-9]{64}", args.workload_agent_image)),
             "WORKLOAD_AGENT_IMAGE_REQUIRES_PRODUCTION_CONFIG")
+    require(not args.user_realm_only or (args.production_user_realm and healthcheck and not args.workload_agent_image),
+            "FOCUSED_USER_REALM_REQUIRES_ITS_PRODUCTION_CONFIG")
     repository = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location("realm", repository / "scripts/account-platform-workload-realm.py")
     realm = importlib.util.module_from_spec(spec)
@@ -266,19 +270,28 @@ def main():
 
         kc = start_issuer("positive")
         # Test binary stays in the issuer namespace: fixed loopback URL, no arbitrary target.
-        result = run(["docker", "exec", "--env", "SSL_CERT_FILE=/fixture/ca.crt", "--env", "GOMEMLIMIT=128MiB",
-                      "--env", "PINVOU_TEST_KEYCLOAK_ISOLATED=1", kc, "/fixture/workload.test",
-                      "-test.run=^TestKeycloakWorkloadIntegration$", "-test.v", "-test.timeout=240s"], timeout=250, check=False)
-        require(not any(value in result.stdout + result.stderr for value in test_secrets), "TEST_SECRET_OUTPUT")
-        require(result.returncode == 0 and "--- PASS: TestKeycloakWorkloadIntegration" in result.stdout and "SKIP" not in result.stdout, "WORKLOAD_ACTUAL_TEST_FAILED")
-        for service in realm.SERVICES:
-            require("--- PASS: TestKeycloakWorkloadIntegration/actual_identity_" + service + " " in result.stdout, "NAMED_SERVICE_ACCEPTANCE_MISSING")
-            print("KEYCLOAK_ACTUAL_IDENTITY_PASS: " + service)
-        print("KEYCLOAK_WORKLOAD_REFRESH_EXPIRY_ROTATION_PERMISSIONS_PASS")
+        if args.user_realm_only:
+            for _ in range(120):
+                state = json.loads(run(["docker", "inspect", kc]).stdout)[0]["State"]
+                if state.get("Health", {}).get("Status") == "healthy":
+                    break
+                time.sleep(1)
+            require(state.get("Health", {}).get("Status") == "healthy", "FOCUSED_USER_REALM_ISSUER_NOT_READY")
+            print("USER_REALM_FOCUSED_RUN_WORKLOAD_INTEGRATION_NOT_RUN")
+        else:
+            result = run(["docker", "exec", "--env", "SSL_CERT_FILE=/fixture/ca.crt", "--env", "GOMEMLIMIT=128MiB",
+                          "--env", "PINVOU_TEST_KEYCLOAK_ISOLATED=1", kc, "/fixture/workload.test",
+                          "-test.run=^TestKeycloakWorkloadIntegration$", "-test.v", "-test.timeout=240s"], timeout=250, check=False)
+            require(not any(value in result.stdout + result.stderr for value in test_secrets), "TEST_SECRET_OUTPUT")
+            require(result.returncode == 0 and "--- PASS: TestKeycloakWorkloadIntegration" in result.stdout and "SKIP" not in result.stdout, "WORKLOAD_ACTUAL_TEST_FAILED")
+            for service in realm.SERVICES:
+                require("--- PASS: TestKeycloakWorkloadIntegration/actual_identity_" + service + " " in result.stdout, "NAMED_SERVICE_ACCEPTANCE_MISSING")
+                print("KEYCLOAK_ACTUAL_IDENTITY_PASS: " + service)
+            print("KEYCLOAK_WORKLOAD_REFRESH_EXPIRY_ROTATION_PERMISSIONS_PASS")
         tls_sql = "SELECT count(*) FROM pg_stat_activity a JOIN pg_stat_ssl s USING(pid) WHERE a.usename='keycloak' AND s.ssl;"
         count = run(["docker", "exec", "-i", "-u", "999:999", pg, "psql", "-X", "-At", "-U", "account_platform_admin", "-d", "postgres", "--set=ON_ERROR_STOP=1"], data=pg_admin + "\n" + tls_sql + "\n").stdout.strip()
         require(count.isdigit() and int(count) > 0, "ACTUAL_JDBC_TLS_NOT_OBSERVED")
-        print("KEYCLOAK_PRODUCTION_POSTGRES_TLS_AND_SEVEN_IDENTITIES_PASS")
+        print("KEYCLOAK_PRODUCTION_POSTGRES_TLS_PASS" if args.user_realm_only else "KEYCLOAK_PRODUCTION_POSTGRES_TLS_AND_SEVEN_IDENTITIES_PASS")
         # Host-side TLS probe only to this inspected temporary container.
         ip = json.loads(run(["docker", "inspect", kc]).stdout)[0]["NetworkSettings"]["Networks"][network_name]["IPAddress"]
         probe_issuer(ip, issuer, admin)
@@ -290,6 +303,20 @@ def main():
                 time.sleep(1)
             require(state["Health"]["Status"] == "healthy", "PRODUCTION_TLS_READINESS_NOT_HEALTHY")
             print("KEYCLOAK_PRODUCTION_FILE_CONFIG_AND_COMPOSE_READINESS_PASS")
+        if args.production_user_realm:
+            user_spec = importlib.util.spec_from_file_location("user_fixture", repository / "scripts/account-platform-user-realm-fixture.py")
+            user_fixture = importlib.util.module_from_spec(user_spec)
+            user_spec.loader.exec_module(user_fixture)
+            try:
+                user_fixture.verify(repository, kc, network_name, issuer, admin)
+            except Exception as error:
+                trace = error.__traceback__
+                lines = []
+                while trace:
+                    lines.append(str(trace.tb_lineno))
+                    trace = trace.tb_next
+                print("USER_REALM_FIXTURE_FAILURE_TYPE=" + type(error).__name__ + " LINES=" + ",".join(lines[-3:]), flush=True)
+                raise
         if args.workload_agent_image:
             workload_spec = importlib.util.spec_from_file_location("workload_fixture", repository / "scripts/account-platform-workload-production-fixture.py")
             workload_fixture = importlib.util.module_from_spec(workload_spec)
