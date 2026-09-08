@@ -150,8 +150,17 @@ func keycloakRoots(filename string) (*x509.CertPool, error) {
 		if !bytes.HasPrefix(body, []byte("-----BEGIN CERTIFICATE-----")) {
 			return nil, ErrKeycloakConfiguration
 		}
-		block, rest := pem.Decode(body)
-		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+		// Bound the first candidate so pem.Decode cannot skip a damaged block.
+		marker := []byte("-----END CERTIFICATE-----")
+		end := bytes.Index(body, marker)
+		if end < 0 {
+			return nil, ErrKeycloakConfiguration
+		}
+		end += len(marker)
+		candidate := body[:end]
+		block, rest := pem.Decode(candidate)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 ||
+			len(bytes.TrimSpace(rest)) != 0 || bytes.Count(candidate, []byte("-----BEGIN ")) != 1 {
 			return nil, ErrKeycloakConfiguration
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
@@ -160,7 +169,7 @@ func keycloakRoots(filename string) (*x509.CertPool, error) {
 		}
 		pool.AddCert(cert)
 		count++
-		body = rest
+		body = body[end:]
 	}
 	if count == 0 {
 		return nil, ErrKeycloakConfiguration

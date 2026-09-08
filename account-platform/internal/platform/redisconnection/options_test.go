@@ -90,3 +90,25 @@ func TestOptionsCAFileValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestOptionsCABundleRejectsSkippedMalformedBlocks(t *testing.T) {
+	first := testCertificate(t, true, time.Now().Add(time.Hour))
+	second := testCertificate(t, true, time.Now().Add(time.Hour))
+	malformed := []byte("-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n")
+	path := filepath.Join(t.TempDir(), "bundle.pem")
+	for _, body := range [][]byte{append(append([]byte{}, malformed...), first...), append(append([]byte{}, first...), malformed...),
+		append([]byte("-----BEGIN CERTIFICATE-----\n!!!\n"), first...)} {
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Options("rediss://redis/0", path); err != ErrConfiguration {
+			t.Fatal("malformed PEM block was silently skipped")
+		}
+	}
+	if err := os.WriteFile(path, append(first, second...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if options, err := Options("rediss://redis/0", path); err != nil || len(options.TLSConfig.RootCAs.Subjects()) != 2 {
+		t.Fatal("valid two-CA bundle rejected or lost a CA")
+	}
+}

@@ -72,8 +72,17 @@ func readTransitCA(path string) (*x509.CertPool, error) {
 		if !bytes.HasPrefix(rest, []byte("-----BEGIN CERTIFICATE-----")) {
 			return nil, errTransitCA
 		}
-		block, next := pem.Decode(rest)
-		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+		// Bound the first candidate so pem.Decode cannot skip a damaged block.
+		marker := []byte("-----END CERTIFICATE-----")
+		end := bytes.Index(rest, marker)
+		if end < 0 {
+			return nil, errTransitCA
+		}
+		end += len(marker)
+		candidate := rest[:end]
+		block, next := pem.Decode(candidate)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 ||
+			len(bytes.TrimSpace(next)) != 0 || bytes.Count(candidate, []byte("-----BEGIN ")) != 1 {
 			return nil, errTransitCA
 		}
 		certificate, err := x509.ParseCertificate(block.Bytes)
@@ -82,7 +91,7 @@ func readTransitCA(path string) (*x509.CertPool, error) {
 		}
 		roots.AddCert(certificate)
 		count++
-		rest = bytes.TrimSpace(next)
+		rest = bytes.TrimSpace(rest[end:])
 	}
 	if count == 0 {
 		return nil, errTransitCA

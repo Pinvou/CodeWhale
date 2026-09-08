@@ -67,8 +67,17 @@ func roots(filename string) (*x509.CertPool, error) {
 		if !bytes.HasPrefix(b, []byte("-----BEGIN CERTIFICATE-----")) {
 			return nil, ErrConfiguration
 		}
-		block, rest := pem.Decode(b)
-		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+		// Bound the first candidate so pem.Decode cannot skip a damaged block.
+		marker := []byte("-----END CERTIFICATE-----")
+		end := bytes.Index(b, marker)
+		if end < 0 {
+			return nil, ErrConfiguration
+		}
+		end += len(marker)
+		candidate := b[:end]
+		block, rest := pem.Decode(candidate)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 ||
+			len(bytes.TrimSpace(rest)) != 0 || bytes.Count(candidate, []byte("-----BEGIN ")) != 1 {
 			return nil, ErrConfiguration
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
@@ -77,7 +86,7 @@ func roots(filename string) (*x509.CertPool, error) {
 		}
 		pool.AddCert(cert)
 		count++
-		b = rest
+		b = b[end:]
 	}
 	if count == 0 {
 		return nil, ErrConfiguration

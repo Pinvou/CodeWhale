@@ -38,6 +38,27 @@ func transitTestCertificate(t *testing.T, ca bool) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
+func TestTransitCABundleRejectsSkippedMalformedBlocks(t *testing.T) {
+	first, second := transitTestCertificate(t, true), transitTestCertificate(t, true)
+	malformed := []byte("-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n")
+	path := filepath.Join(t.TempDir(), "bundle.pem")
+	for _, body := range [][]byte{append(append([]byte{}, malformed...), first...), append(append([]byte{}, first...), malformed...),
+		append([]byte("-----BEGIN CERTIFICATE-----\n!!!\n"), first...)} {
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readTransitCA(path); err != errTransitCA {
+			t.Fatal("malformed PEM block was silently skipped")
+		}
+	}
+	if err := os.WriteFile(path, append(first, second...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if pool, err := readTransitCA(path); err != nil || len(pool.Subjects()) != 2 {
+		t.Fatal("valid two-CA bundle rejected or lost a CA")
+	}
+}
+
 func TestTransitProviderDedicatedCAIsolation(t *testing.T) {
 	calls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

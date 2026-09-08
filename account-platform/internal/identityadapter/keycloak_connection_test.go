@@ -333,3 +333,26 @@ func TestKeycloakFilesAndCABoundaries(t *testing.T) {
 }
 
 func bytesOfSize(size int) []byte { return []byte(strings.Repeat("x", size)) }
+
+func TestKeycloakCABundleRejectsSkippedMalformedBlocks(t *testing.T) {
+	_, firstPath := keycloakTestTLS(t, false, http.NotFoundHandler())
+	_, secondPath := keycloakTestTLS(t, false, http.NotFoundHandler())
+	first, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	malformed := []byte("-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n")
+	for _, body := range [][]byte{append(append([]byte{}, malformed...), first...), append(append([]byte{}, first...), malformed...),
+		append([]byte("-----BEGIN CERTIFICATE-----\n!!!\n"), first...)} {
+		if _, err := keycloakRoots(keycloakTestFile(t, "bundle.pem", body)); err != ErrKeycloakConfiguration {
+			t.Fatal("malformed PEM block was silently skipped")
+		}
+	}
+	if pool, err := keycloakRoots(keycloakTestFile(t, "bundle.pem", append(first, second...))); err != nil || len(pool.Subjects()) != 2 {
+		t.Fatal("valid two-CA bundle rejected or lost a CA")
+	}
+}
