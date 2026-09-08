@@ -120,7 +120,11 @@ func GinMiddleware(expectedToken string) gin.HandlerFunc {
 
 func newAuthenticator(expectedToken string) authenticator {
 	issuer := strings.TrimRight(strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_ISSUER")), "/")
+	caFile := strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_CA_FILE"))
 	if issuer == "" {
+		if caFile != "" {
+			return authenticator{invalid: errWorkloadTrust}
+		}
 		environment := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
 		if environment != "" && environment != "development" && environment != "test" {
 			return authenticator{invalid: errors.New("OIDC workload identity is required outside development and test")}
@@ -147,7 +151,14 @@ func newAuthenticator(expectedToken string) authenticator {
 			}
 		}
 	}
-	keySet := oidc.NewRemoteKeySet(context.Background(), jwksURL)
+	if caFile != "" && (!canonicalWorkloadHTTPS(issuer) || !canonicalWorkloadHTTPS(jwksURL)) {
+		return authenticator{invalid: errWorkloadTrust}
+	}
+	client, err := workloadHTTPClient(caFile)
+	if err != nil {
+		return authenticator{invalid: err}
+	}
+	keySet := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), jwksURL)
 	verifier := oidc.NewVerifier(issuer, keySet, &oidc.Config{ClientID: audience})
 	return authenticator{rules: rules, verify: func(ctx context.Context, raw string) (string, error) {
 		token, err := verifier.Verify(ctx, raw)
