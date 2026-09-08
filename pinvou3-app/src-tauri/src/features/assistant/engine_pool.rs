@@ -1080,6 +1080,34 @@ impl EnginePool {
         self.fresh_bridge_for_policy(session_id, false).await
     }
 
+    /// Prepare an unsent composer's model without borrowing the active chat session
+    /// or creating a synthetic session/task. Credentials follow the same provider as chat.
+    pub(crate) async fn fresh_bridge_for_draft(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Pinvou3Bridge> {
+        let mut bridge = self.bridge.clone();
+        bridge.prefs = UserPrefs::load();
+        let model = match model_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => bridge
+                .prefs
+                .advanced
+                .saved_models
+                .iter()
+                .find(|model| model.id == id)
+                .cloned()
+                .context("Draft model binding is unavailable; select a model again")?,
+            None => bridge
+                .prefs
+                .active_model()
+                .cloned()
+                .context("No effective model is available for draft preparation")?,
+        };
+        let prepared =
+            prepare_draft_runtime_model(self.runtime_model_provider.as_ref(), model).await?;
+        Ok(self.finalize_runtime_bridge(bridge, &prepared, false).await)
+    }
+
     async fn prepare_runtime_model(
         &self,
         session_id: &str,
@@ -2791,6 +2819,25 @@ where
     }
 }
 
+async fn prepare_draft_runtime_model(
+    provider: &dyn RuntimeModelProvider,
+    model: SavedModel,
+) -> Result<PreparedRuntimeModel> {
+    let selected_id = model.id.clone();
+    let prepared = provider
+        .prepare(RuntimeModelRequest {
+            // No task/session exists yet. This is context for credential preparation only.
+            session_id: String::new(),
+            model,
+            scheduled_unattended: false,
+        })
+        .await?;
+    if prepared.model.id != selected_id {
+        bail!("Runtime model provider changed draft model identity");
+    }
+    Ok(prepared)
+}
+
 #[cfg(test)]
 // Tests borrow platform::paths::tests::ENV_LOCK (std Mutex) to serialize global env access;
 // cargo test runs test threads in parallel, but env-writing tests are mutually serialized, and
@@ -2798,6 +2845,68 @@ where
 // so it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 mod scheduled_model_tests {
+    struct DraftModelProvider {
+        calls: AtomicUsize,
+        fail: bool,
+        change_identity: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::features::assistant::runtime_model::RuntimeModelProvider for DraftModelProvider {
+        async fn prepare(
+            &self,
+            request: crate::features::assistant::runtime_model::RuntimeModelRequest,
+        ) -> anyhow::Result<PreparedRuntimeModel> {
+            assert!(request.session_id.is_empty());
+            assert!(!request.scheduled_unattended);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("controlled preparation failure");
+            }
+            let mut model = request.model;
+            if self.change_identity {
+                model.id = "unexpected-model".to_string();
+            }
+            Ok(PreparedRuntimeModel::unchanged(model))
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_draft_builtin_and_custom_use_runtime_provider_without_session() {
+        let provider = DraftModelProvider {
+            calls: AtomicUsize::new(0),
+            fail: false,
+            change_identity: false,
+        };
+        for selected in [
+            SavedModel::builtin_llmapi(),
+            model("custom-draft", "custom-wire"),
+        ] {
+            let expected_id = selected.id.clone();
+            let prepared = super::prepare_draft_runtime_model(&provider, selected)
+                .await
+                .unwrap();
+            assert_eq!(prepared.model.id, expected_id);
+        }
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn voice_draft_model_preparation_fails_closed() {
+        for (fail, change_identity) in [(true, false), (false, true)] {
+            let provider = DraftModelProvider {
+                calls: AtomicUsize::new(0),
+                fail,
+                change_identity,
+            };
+            assert!(
+                super::prepare_draft_runtime_model(&provider, SavedModel::builtin_llmapi())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+        }
+    }
     use super::{
         EvalModelSnapshots, ModelIdentity, ModelUpdateRevisions, Pinvou3Bridge,
         PreparedRuntimeState, SESSION_MODEL_BINDING_STALE_ERROR, ScheduledUnattendedGuard,

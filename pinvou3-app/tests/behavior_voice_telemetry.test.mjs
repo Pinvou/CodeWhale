@@ -28,7 +28,7 @@ test('voice telemetry terminal helper is idempotent and uses controlled categori
     Math,
   };
   vm.createContext(context);
-  vm.runInContext(`${voice.slice(start, end)}\nthis.api = { trackVoiceTerminal, abandonCompletedVoiceResult, voiceTelemetryErrorCategory };`, context);
+  vm.runInContext(`${voice.slice(start, end)}\nthis.api = { trackVoiceTerminal, abandonCompletedVoiceResult, voiceTelemetryErrorCategory, rememberVoiceOperation };`, context);
 
   const session = { operationId: 'voiceop_123456789012', telemetrySessionId: 'session_123456789012' };
   context.api.trackVoiceTerminal('voice_cancelled', session, { stage: 'recording', durationMs: 10 });
@@ -45,6 +45,7 @@ test('voice telemetry terminal helper is idempotent and uses controlled categori
     telemetryTerminal: false,
   };
   context.api.abandonCompletedVoiceResult('recognition');
+  context.api.rememberVoiceOperation(context.state.voiceInput);
   context.api.abandonCompletedVoiceResult('recognition');
   await Promise.resolve();
   assert.equal(calls.filter(({ args }) => args.request.eventName === 'voice_cancelled').length, 2);
@@ -71,7 +72,8 @@ test('desktop and web voice paths cover the complete operation funnel', () => {
 });
 
 test('voice submission is correlated with the authoritative task attempt', () => {
-  assert.match(chat, /eventName:\s*"voice_message_submitted"[\s\S]*?sessionId:\s*sid/);
+  assert.match(chat, /completeVoiceSubmission\(meta\.voiceOperationId, sid, true\)/);
+  assert.match(voice, /trackVoiceEvent\("voice_message_submitted", operation, \{ sessionId: sessionId \}\)/);
   assert.match(behaviorCommand, /track_voice_message_submitted/);
   assert.match(
     behaviorFeature,

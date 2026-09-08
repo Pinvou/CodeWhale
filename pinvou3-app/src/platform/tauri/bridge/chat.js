@@ -4,6 +4,7 @@
   var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.chat = function (context) {
     var state = context.state;
+    var voice = context.voice || function () { return {}; };
     var invoke = context.invoke;
     var notify = context.notify;
     var TAURI = context.TAURI;
@@ -326,6 +327,7 @@
   }
   function queuedMetaNeedsAdmission(meta) {
     if (!meta || typeof meta !== "object") return false;
+    if (meta.voiceOperationId) return true;
     return Object.keys(meta).some(function (key) {
       return key.indexOf("pinvou") === 0;
     });
@@ -415,6 +417,7 @@
     });
     notify();
     emitPetEvent("pet:turn_start", sid);
+    if (meta && meta.voiceOperationId) voice().beginVoiceSubmission(meta.voiceOperationId);
     return invoke("chat", { message: text, attachments: attachmentsPayload, sessionId: sid, restrictTools: !!restrictTools })
       .then(function () {
         // 新一轮已被后端受理：会话中未提交的「打开」（pending enable）自此进入
@@ -431,26 +434,11 @@
           });
           trackSceneSubmitted(sid, meta.pinvouScene);
         }
-        if (meta && meta.voiceOperationId) {
-          invoke("track_behavior_event", {
-            request: {
-              eventName: "voice_message_submitted",
-              operationId: meta.voiceOperationId,
-              sessionId: sid,
-            },
-          }).catch(function () {});
-          if (state.voiceInput && state.voiceInput.operationId === meta.voiceOperationId) {
-            state.voiceInput = Object.assign({}, state.voiceInput, {
-              status: "idle",
-              operationId: null,
-              telemetryTerminal: true,
-            });
-            notify();
-          }
-        }
+        if (meta && meta.voiceOperationId) voice().completeVoiceSubmission(meta.voiceOperationId, sid, true);
         return true;
       })
       .catch(function (err) {
+        if (meta && meta.voiceOperationId) voice().completeVoiceSubmission(meta.voiceOperationId, sid, false);
         console.warn("[pinvou3][chat-ui] send failed", {
           sid: sid,
           error: err && err.toString ? err.toString() : err,
@@ -701,6 +689,10 @@
   // Main-path send failures still throw (surfaceFailure) and the caller
   // restores through its catch.
   async function sendMessage(text, meta) {
+    if (!meta || !meta.voiceOperationId) {
+      var voiceOperationId = voice().getVoiceOperationId && voice().getVoiceOperationId(state.activeSessionId, "chat");
+      if (voiceOperationId) meta = Object.assign({}, meta || {}, { voiceOperationId: voiceOperationId });
+    }
     text = (text || "").trim();
     var readyAttachments = state.attachments.filter(function (a) { return a.status === "ready" && a.result; });
     if (!text && readyAttachments.length === 0) return false;
@@ -729,9 +721,6 @@
       }
     }
     var sid = state.activeSessionId;
-    if (state.voiceInput && state.voiceInput.status === "completed" && state.voiceInput.operationId) {
-      meta = Object.assign({}, meta || {}, { voiceOperationId: state.voiceInput.operationId });
-    }
     function abandonPreparedAttachments() {
       state.attachments = state.attachments.filter(function (attachment) {
         return readyAttachments.indexOf(attachment) < 0;
@@ -986,6 +975,10 @@
   // bubble — see the race notes on settleSteerCommitted).
   function removeQueued(id) {
     var removed = state.queued.find(function (q) { return q.id === id; });
+    if (removed && removed.meta && removed.meta.voiceOperationId) {
+      voice().abandonVoiceResult(removed.meta.voiceOperationId);
+      voice().completeVoiceSubmission(removed.meta.voiceOperationId, state.activeSessionId, false);
+    }
     if (removed && removed.attachments) {
       removed.attachments.forEach(discardManagedAttachment);
     }
