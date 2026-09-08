@@ -107,6 +107,16 @@ class OpenBaoConfigurationTests(unittest.TestCase):
         for required in ('OnCalendar=hourly', 'RandomizedDelaySec=60', 'Persistent=true', 'Unit=pinvou-kms-snapshot.service'):
             self.assertIn(required, timer)
 
+    def test_monitor_is_local_read_only_except_its_status_directory(self):
+        service = (CONFIG / "pinvou-kms-monitor.service").read_text(encoding="utf-8")
+        timer = (CONFIG / "pinvou-kms-monitor.timer").read_text(encoding="utf-8")
+        for required in ('Type=oneshot', 'ProtectSystem=strict', 'ProtectHome=true', 'LimitCORE=0',
+                         'ReadWritePaths=/opt/pinvou-security/monitor', 'TimeoutStartSec=150'):
+            self.assertIn(required, service)
+        self.assertIn('OnUnitActiveSec=5min', timer)
+        for denied in ('ExecStart=-', 'TOKEN=', 'curl', 'webhook', 'rm '):
+            self.assertNotIn(denied, service)
+
 
 if __name__ == "__main__":
     unittest.main()

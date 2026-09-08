@@ -1,6 +1,6 @@
 # 私有 KMS 配置
 
-状态：独立 KMS、四类身份、初始 root 撤销及三个 Agent 权限/续租已通过；每小时加密备份已启用，首包已下载并比对摘要，保管人本机完整校验和离线保存待确认。业务未接入（NOT_RELEASED）。这里只包含无秘密配置，不自动初始化，不是完整部署完成证明。
+状态：独立 KMS、四类身份、初始 root 撤销及三个 Agent 权限/续租已通过；每小时加密备份已启用，保管人已确认首包完整校验及离线保存。每 5 分钟本机运行检查已启用。业务未接入（NOT_RELEASED）。这里只包含无秘密配置，不自动初始化，不是完整部署完成证明。
 
 固定镜像：`quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641`（2.6.2）。
 
@@ -68,4 +68,10 @@ TOKEN_SECRET_KEY_ID=pinvou-token-data
 
 先核对固定镜像与二进制来源、recipient 指纹、真实容器挂载和资源，再安装并启动定时器。每小时生成独立加密包，失败 unit 不算成功；手动运行使用 `systemctl start pinvou-kms-snapshot.service`，查看 `Result`/`ExecMainStatus` 以及完成清单，不能仅看 timer active。保管人已选择定期下载离线保存，不配置异机自动上传。完整命令和恢复边界见 [快照手册](../../tools/kms-recovery/cmd/kms-snapshot/README.md)。
 
-现场首包已成功，单次容器正常退出并移除，timer enabled/active；下载到保管人本机后的密文摘要一致。**本机口令完整认证验证和新包离线保存仍待保管人确认**，尚不算灾备交接完成。初期无自动删除；容量/失败告警和保留策略未闭环前仍不放量。两实例隔离测试已使用同一生产备份函数完成真实恢复，并不等同于对正式实例执行灾难恢复。
+现场首包已成功，单次容器正常退出并移除，timer enabled/active；下载到保管人本机后的密文摘要一致，保管人已反馈 `KMS_SNAPSHOT_OFFLINE_SAVED`，完成首包完整认证校验与离线保存。初期无自动删除；保留策略及剩余运行措施未闭环前仍不放量。两实例隔离测试已使用同一生产备份函数完成真实恢复，并不等同于对正式实例执行灾难恢复。
+
+## 本机运行检测
+
+`pinvou-kms-monitor.service/.timer` 每 5 分钟执行受限检测；公开环境配置 `monitor.env` 只含 `KMS_MONITOR_ENDPOINT`、`KMS_MONITOR_NETWORK`，状态文件为受限 monitor 目录中的 `status.json`。检查真实线上证书（14 天窗口）、服务健康、三个 Agent 身份、备份任务和最近成功包（90 分钟窗口）、磁盘/inode、审计活动，不使用 root token、不续租身份或再次下载快照。
+
+通过 `systemctl status pinvou-kms-monitor.service`、`journalctl -u pinvou-kms-monitor.service` 和状态 JSON 检查结果。非 ok 为非零退出码；状态 `checked_at` 超过 10 分钟必须视为检测器失效，不能沿用旧 ok。本机 journal/failed unit 不等于消息通知到人；当前 `notification_delivery=local_status_only`，外部通知待负责人确定。监控不删除文件、不重启/解封服务器、不调用高风险操作。证书临期必须在到期前由保管人参与受控续签，不能通过关闭 TLS 校验临时放行。

@@ -155,6 +155,7 @@ def main():
     parser.add_argument("--trust-directory", required=True)
     parser.add_argument("--network", required=True)
     parser.add_argument("--require-renewal", action="store_true")
+    parser.add_argument("--lease-only", action="store_true", help="read-only routine monitoring, no crypto or snapshot probes")
     args = parser.parse_args()
     require(os.name == "posix" and os.geteuid() == 0)
     root, trust = Path(args.agent_directory), Path(args.trust_directory)
@@ -182,8 +183,10 @@ def main():
         validate_lease(lease, role)
         if args.require_renewal:
             validate_renewal(lease)
-        verify_permissions(api, role, token)
-    print("KMS_AGENTS_RENEWAL_VERIFIED" if args.require_renewal else "KMS_AGENTS_VERIFIED")
+        if not args.lease_only:
+            verify_permissions(api, role, token)
+    print("KMS_AGENTS_LIVE_LEASES_VERIFIED" if args.lease_only else
+          "KMS_AGENTS_RENEWAL_VERIFIED" if args.require_renewal else "KMS_AGENTS_VERIFIED")
 
 
 if __name__ == "__main__":
