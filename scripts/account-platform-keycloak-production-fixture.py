@@ -62,6 +62,7 @@ def main():
     parser.add_argument("--production-healthcheck", help="opt into production Compose/file configuration with this same-source binary")
     parser.add_argument("--workload-agent-image", help="also verify seven production agents against this isolated issuer")
     parser.add_argument("--production-user-realm", action="store_true", help="also verify the secret-free production user realm in isolation")
+    parser.add_argument("--administrator-recovery", action="store_true", help="also exercise official offline admin recovery in this isolated fixture")
     parser.add_argument("--user-realm-only", action="store_true", help="focused user-realm iteration; does not rerun or claim workload integration")
     parser.add_argument("--run", action="store_true", required=True)
     args = parser.parse_args()
@@ -75,6 +76,8 @@ def main():
             "WORKLOAD_AGENT_IMAGE_REQUIRES_PRODUCTION_CONFIG")
     require(not args.user_realm_only or (args.production_user_realm and healthcheck and not args.workload_agent_image),
             "FOCUSED_USER_REALM_REQUIRES_ITS_PRODUCTION_CONFIG")
+    require(not args.administrator_recovery or (args.production_user_realm and healthcheck and not args.workload_agent_image),
+            "ADMIN_RECOVERY_REQUIRES_ISOLATED_USER_REALM_WITHOUT_CONCURRENT_AGENTS")
     repository = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location("realm", repository / "scripts/account-platform-workload-realm.py")
     realm = importlib.util.module_from_spec(spec)
@@ -333,6 +336,20 @@ def main():
                 while trace.tb_next:
                     trace = trace.tb_next
                 print("WORKLOAD_FIXTURE_FAILURE_TYPE=" + type(error).__name__ + " LINE=" + str(trace.tb_lineno), flush=True)
+                raise
+            uncertain_creation = False
+        if args.administrator_recovery:
+            recovery_spec = importlib.util.spec_from_file_location("recovery_fixture", repository / "scripts/account-platform-keycloak-recovery-fixture.py")
+            recovery_fixture = importlib.util.module_from_spec(recovery_spec)
+            recovery_spec.loader.exec_module(recovery_fixture)
+            uncertain_creation = True
+            try:
+                recovery_fixture.verify(root, kc, pg, network_name, issuer, admin, pg_admin, containers, run, verify_limits, verify_mounts)
+            except Exception as error:
+                trace = error.__traceback__
+                while trace.tb_next:
+                    trace = trace.tb_next
+                print("RECOVERY_FIXTURE_FAILURE_TYPE=" + type(error).__name__ + " LINE=" + str(trace.tb_lineno), flush=True)
                 raise
             uncertain_creation = False
         run(["docker", "stop", "--time", "20", kc])
