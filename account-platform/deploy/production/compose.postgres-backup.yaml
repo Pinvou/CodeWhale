@@ -1,0 +1,28 @@
+# Opt-in overlay. POSTGRES_IMAGE must identify the reviewed tool-extended image.
+services:
+  postgres:
+    volumes:
+      - type: bind
+        source: ./postgres-backup.conf
+        target: /etc/pinvou/postgres/postgres.conf
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres.conf
+        target: /etc/pinvou/postgres/postgres-base.conf
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${POSTGRES_BACKUP_REPOSITORY:?set independent local encrypted repository}
+        target: /var/lib/pgbackrest
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${POSTGRES_BACKUP_SECRETS:?set private backup configuration directory}
+        target: /run/pinvou/postgres-backup
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres-backup.sh
+        target: /opt/pinvou/production/postgres-backup.sh
+        read_only: true
+        bind: {create_host_path: false}

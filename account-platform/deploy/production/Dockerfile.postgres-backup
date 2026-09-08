@@ -1,0 +1,19 @@
+# Tool-only extension: PostgreSQL server/client versions must remain unchanged.
+FROM m.daocloud.io/docker.io/library/postgres@sha256:7bade6d532592ca8ce7ee32def7399dad2607c4ea5583839fc4352a095a11ea6
+USER root
+# The minimal PostgreSQL image has no system CA bundle. Bootstrap public roots
+# from the official Bookworm package over verified HTTPS with a pinned checksum.
+ADD --checksum=sha256:0d5f444f594e48c1e16a41d8fc628a09b24c658916a1274025c2330f2a802bed https://deb.debian.org/debian/pool/main/c/ca-certificates/ca-certificates_20230311+deb12u1_all.deb /tmp/pinvou-ca-bootstrap.deb
+RUN set -eu; \
+    before="$(dpkg-query -W -f='${Package}=${Version}\n' postgresql-17 postgresql-client-17)"; \
+    dpkg-deb -x /tmp/pinvou-ca-bootstrap.deb /tmp/pinvou-ca-bootstrap; \
+    mkdir -p /etc/ssl/certs; \
+    find /tmp/pinvou-ca-bootstrap/usr/share/ca-certificates -type f -name '*.crt' -exec cat {} + > /etc/ssl/certs/ca-certificates.crt; \
+    sed -i 's|http://|https://|g' /etc/apt/sources.list.d/pgdg.list /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=1 -o Acquire::https::Timeout=30 update; \
+    apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates=20230311+deb12u1 pgbackrest=2.59.1-1.pgdg12+1; \
+    test "$before" = "$(dpkg-query -W -f='${Package}=${Version}\n' postgresql-17 postgresql-client-17)"; \
+    test "$(pgbackrest version)" = 'pgBackRest 2.59.1'; \
+    test "$(postgres --version)" = 'postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg12+2)'; \
+    rm -rf /var/lib/apt/lists/* /tmp/pinvou-ca-bootstrap /tmp/pinvou-ca-bootstrap.deb
+USER 999:999
