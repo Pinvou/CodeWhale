@@ -1,5 +1,9 @@
 # 账号平台全量备份、PITR 与恢复
 
+本次部署负责人于 2026-09-08 明确接受先做本机备份，执行
+[`local-backup-rollout.md`](local-backup-rollout.md) 的显式本机模式。以下仍为默认完整容灾
+基线；本次不等待采购异机存储，也不能将本机验收报告为异机不可变或整机丢失可恢复。
+
 本流程适用于生产 Account、Billing、Token、Keycloak。Payment Simulator 仅允许存在于隔离开发/测试环境，不是生产备份对象，也不能作为资金事实恢复来源。目标和分类以 [`../recovery-policy.json`](../recovery-policy.json) 为机器可读单一来源：资金事实 RPO 不超过 60 秒、账号与配置 RPO 不超过 300 秒；核心认证、Account、Billing、Gateway 和支付状态查询 RTO 不超过 60 分钟，报表、导出及非关键后台 RTO 不超过 4 小时。
 
 数据库备份只是完整恢复集的一部分。能够重新启动 PostgreSQL 不等于账号平台已经恢复；NATS JetStream、独立模型网关、站点 Secret、边缘代理/证书/网络配置和目标 Commit 制品必须绑定同一个恢复集。完整新主机重建步骤见 [`full-redeployment.md`](full-redeployment.md)。

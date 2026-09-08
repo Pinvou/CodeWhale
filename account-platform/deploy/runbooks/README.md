@@ -4,6 +4,7 @@
 - [可观测性与告警响应](observability.md)
 - [账号平台完整重部署与现有状态恢复](full-redeployment.md)
 - [账号平台全量备份、PITR 与恢复](backup-restore.md)
+- [本次上线的本机备份模式及风险边界](local-backup-rollout.md)
 - [production-new 切换与回滚](cutover-rollback.md)
 - [模型与 Token 发布工具、安全入口与持续门禁](model-token-release.md)
 - [模型与 Token 固定域名 DNS 清单](model-token-dns.md)

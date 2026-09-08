@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
+import { validateLocalEvidence } from './account-platform-local-recovery-gate.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const policyPath = path.join(repositoryRoot, 'account-platform', 'deploy', 'recovery-policy.json');
@@ -90,6 +91,14 @@ export function validateEvidence(policy, evidence, now = Date.now()) {
 async function main() {
   const policy = JSON.parse(await readFile(policyPath, 'utf8'));
   validatePolicy(policy);
+  if (process.argv[2] === '--local-only') {
+    const args = process.argv.slice(3);
+    requireValue(args[0] === '--deployment-id' && (args.length === 3 || (args.length === 4 && args[2] === '--bootstrap')), 'usage: --local-only --deployment-id <expected-id> [--bootstrap] <evidence.json>');
+    const evidence = JSON.parse(await readFile(path.resolve(args.at(-1)), 'utf8'));
+    console.log(validateLocalEvidence(policy, evidence, { deploymentId: args[1], bootstrap: args.length === 4 }));
+    return;
+  }
+  requireValue(process.argv.length <= 3 && !process.argv[2]?.startsWith('--'), 'unsupported recovery arguments');
   const evidencePath = process.argv[2];
   if (evidencePath) validateEvidence(policy, JSON.parse(await readFile(path.resolve(evidencePath), 'utf8')));
   console.log(evidencePath ? 'production recovery evidence passed' : 'recovery policy passed');
