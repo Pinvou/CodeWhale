@@ -25,7 +25,7 @@ function harness(source) {
   vm.createContext(context);
   vm.runInContext(`${source.slice(start, end)}\nthis.api = {
     rememberVoiceOperation, getVoiceOperationId, beginVoiceSubmission,
-    completeVoiceSubmission, trackVoiceTerminal, dismissVoiceInput,
+    completeVoiceSubmission, trackVoiceTerminal, dismissVoiceInput, voiceOperationSessionId,
   };`, context);
   const operation = (id, ownerKind = 'chat', sessionId = null) => {
     const value = { operationId: id, ownerKind, sessionId, telemetrySessionId: sessionId || 'draft-session',
@@ -154,19 +154,7 @@ for (const [lane, source] of Object.entries(sources)) {
     assert.equal(operation.pendingSubmission, false);
     assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
     assert.equal(h.events.length, 0);
-    assert.match(chat, /const result = await sendChatMessage\(constrained\.text, context\);\s*return result === 'restored' \? false : result;/);
-    const taskStart = chat.indexOf('        sendTask: async (outgoing, context) => {');
-    const taskEnd = chat.indexOf('\n        onTaskAccepted:', taskStart);
-    const task = chat.slice(taskStart, taskEnd).trim().replace(/^sendTask:/, 'this.voiceTask =').replace(/,$/, ';');
-    let draft = 'restored draft';
-    const hook = read('src/features/voice-composer/useComposerVoiceInput.js');
-    const deliver = hook.slice(hook.indexOf('async function deliverVoiceTask('), hook.indexOf('\nfunction useComposerVoiceInput('));
-    Object.assign(h.context, { constrainChatInput: text => ({ text, truncated: false }),
-      setInputText: text => { draft = text; }, trimDraft: text => String(text || '').trim() });
-    vm.runInContext(`${task}\n${deliver}\nthis.deliver = deliverVoiceTask;`, h.context);
-    assert.equal(await h.context.deliver({ sendTask: h.context.voiceTask, getDraft: () => draft,
-      onTaskAccepted: () => { draft = ''; } }, draft, { operationId: operation.operationId }, { current: false }), false);
-    assert.equal(draft, 'restored draft', 'restored text must not be cleared by onTaskAccepted');
+    assert.match(chat, /return result === 'restored' \? false : result;/);
   });
 
   test(`${lane}: queued admission cannot associate the same voice with another manual message`, () => {
@@ -245,7 +233,7 @@ for (const code of ['permission_denied', 'outcome_unknown']) {
     const start = sources.web.indexOf('  async function runFirstTurnSubmission(');
     const end = sources.web.indexOf('  function submitFirstWebTurn(', start);
     Object.assign(h.context, { findFirstTurnItem: () => ({}), firstTurnStillVisible: () => true,
-      restoreFirstTurnUiState() {}, invokeWithRequestId: async () => { throw { code }; } });
+      restoreFirstTurnUiState() {}, invokeWithRequestId: async () => { throw Object.assign(new Error(code), { code }); } });
     vm.runInContext(`${sources.web.slice(start, end)}\nthis.runFirstTurnSubmission = runFirstTurnSubmission;`, h.context);
     const submission = { voiceOperationId: operation.operationId, clientMessageId: 'first-turn' };
     await h.context.runFirstTurnSubmission(submission);
@@ -307,3 +295,105 @@ test('desktop waits for Rust ownership and cannot open a microphone after a reje
   assert.equal(microphoneProbes, 0);
   assert.equal(h.state.voiceInput.status, 'failed');
 });
+
+function bridgeFunction(source, name) {
+  const start = source.search(new RegExp(`^  (?:async )?function ${name}\\(`, 'm'));
+  assert.ok(start >= 0, name);
+  const end = source.indexOf('\n  }', start) + 4;
+  assert.ok(end > start, name);
+  return source.slice(start, end);
+}
+
+for (const lane of ['desktop', 'web']) {
+  for (const outcome of ['restored', 'false', 'throw', 'switched']) {
+    for (const typeDuringAwait of [false, true]) {
+      test(`${lane}: real voice writeback/send/prefill ${outcome}, typing=${typeDuringAwait}, restores exactly once`, async () => {
+        const h = harness(sources[lane]);
+        const chat = read('src/features/chat/ChatView.jsx');
+        const hook = read('src/features/voice-composer/useComposerVoiceInput.js');
+        const sendSource = lane === 'desktop' ? read('src/platform/tauri/bridge/chat.js') : sources.web;
+        const origin = outcome === 'restored' ? null : 'original-session';
+        const operation = h.operation('voiceop-real-recovery', 'chat', origin);
+        const buffers = { 'original-session': { composerDraft: '', remoteTurnActive: outcome === 'switched' },
+          'other-session': { composerDraft: 'other draft' } };
+        Object.assign(h.state, { activeSessionId: origin, composerDraft: '', draftEpoch: 4,
+          composerPrefill: { id: 0, text: '' }, queued: [], chatItems: [],
+          attachments: outcome === 'false' ? [{ status: 'parsing' }] : [] });
+        let unblock;
+        const gate = new Promise(resolve => { unblock = resolve; });
+        let prefillPending = false;
+        let draftSyncPending = false;
+        let accepted = 0;
+        const ctx = h.context;
+        Object.assign(ctx, {
+          sessionStates: buffers, voice: () => h.api, IS_WEB: lane === 'web', canInvoke: () => false,
+          useCallback: fn => fn, useEffect: fn => fn(), activeSessionId: origin,
+          activeSessionIdRef: { current: origin }, draftEpoch: 4, inputTextRef: { current: '' },
+          setInputTextState() {}, setInputLimitReached() {}, constrainChatInput: text => ({ text: String(text), truncated: false }),
+          bt: key => key, addSystemItem() {}, getBuffer: sid => buffers[sid], isBusyFor: () => false,
+          formatAttachmentDisplayText: text => { if (outcome === 'throw') throw new Error('controlled send failure'); return text; },
+          adoptManagedAttachments: () => outcome === 'switched' ? gate : Promise.resolve(), discardManagedAttachment() {},
+          reconcileRemoteTurn: async () => { await gate; return false; },
+          ensureSession: async () => { await gate; return null; },
+          notify: () => { prefillPending ||= !!h.state.composerPrefill.text; draftSyncPending = true; },
+          console: { warn() {} }, setTimeout() {}, composerRef: { current: null },
+          onPrefillConsumed: () => { h.state.composerPrefill.text = ''; },
+          normalizeMode: mode => mode, trimDraft: text => String(text || '').trim(),
+          clearStaleVoiceState() {}, discardVoiceResult() {}, isActiveVoiceTarget: () => true,
+          taskSendInFlightRef: { current: false },
+        });
+        const functions = ['getComposerDraft', 'setComposerDraft', 'prefillComposer', 'restoreTaskDraft',
+          lane === 'desktop' ? 'restoreSteerText' : 'restoreComposerText', 'sendMessage'];
+        vm.runInContext(functions.map(name => bridgeFunction(sendSource, name)).join('\n'), ctx);
+        ctx.bridge = { available: true, voice: h.api, chat: {
+          sendMessage: ctx.sendMessage, setComposerDraft: ctx.setComposerDraft, restoreTaskDraft: ctx.restoreTaskDraft,
+        } };
+        const setStart = chat.indexOf('      const setInputText = useCallback(');
+        const setEnd = chat.indexOf('\n      const [artifactsOpen', setStart);
+        const sendStart = chat.indexOf('      const sendChatMessage = useCallback(');
+        const sendEnd = chat.indexOf('\n      // ConversationTimeline', sendStart);
+        const taskStart = chat.indexOf('        sendTask: async (outgoing, context) => {');
+        const taskEnd = chat.indexOf('\n        onTaskAccepted:', taskStart);
+        const task = chat.slice(taskStart, taskEnd).trim().replace(/^sendTask:/, 'this.voiceTask =').replace(/,$/, ';');
+        ctx.dispatchChatMessage = ctx.sendMessage;
+        vm.runInContext(`${chat.slice(setStart, setEnd)}\n${chat.slice(sendStart, sendEnd)}\n${task}\nthis.setInput = setInputText;`, ctx);
+        ctx.adapterRef = { current: { targetId: 'chat-composer', setDraft: ctx.setInput,
+          getDraft: () => ctx.inputTextRef.current, sendTask: ctx.voiceTask,
+          onTaskAccepted: () => { accepted += 1; ctx.setInput(''); } } };
+        const deliverStart = hook.indexOf('async function deliverVoiceTask(');
+        const deliverEnd = hook.indexOf('\nfunction useComposerVoiceInput(', deliverStart);
+        const resultStart = hook.indexOf('  const handleVoiceResult = useCallback(');
+        const resultEnd = hook.indexOf('\n  // Returns true only', resultStart);
+        const errorStart = hook.indexOf('function createVoiceTaskSendError(');
+        const errorEnd = hook.indexOf('\n// Task-send teardown:', errorStart);
+        vm.runInContext(`${hook.slice(errorStart, errorEnd)}\n${hook.slice(deliverStart, deliverEnd)}\n${hook.slice(resultStart, resultEnd)}\nthis.writeback = handleVoiceResult;`, ctx);
+        const sending = ctx.writeback('voice-session', 'voice task', '', { mode: 'task', operationId: operation.operationId })
+          .then(() => 'accepted', error => error.category);
+        assert.equal(ctx.inputTextRef.current, '', 'owned writeback draft must be consumed before awaiting bridge');
+        if (outcome === 'switched') {
+          h.state.activeSessionId = 'other-session';
+          ctx.activeSessionIdRef.current = 'other-session';
+          ctx.setInput('other draft');
+        }
+        if (typeDuringAwait) ctx.setInput(outcome === 'switched' ? 'other new input' : 'new input');
+        unblock();
+        assert.equal(await sending, 'send_failed');
+        // Consume the actual ChatView prefill effect, not a replacement append stub.
+        if (prefillPending) {
+          ctx.prefill = h.state.composerPrefill.text;
+          ctx.prefillAppend = h.state.composerPrefill.append;
+          const effectStart = chat.indexOf('      useEffect(() => {\n        if (prefill)');
+          const effectEnd = chat.indexOf('}, [prefill, prefillAppend]);', effectStart) + '}, [prefill, prefillAppend]);'.length;
+          vm.runInContext(chat.slice(effectStart, effectEnd), ctx);
+        } else if (draftSyncPending) {
+          ctx.setInput(h.state.composerDraft);
+        }
+        const expected = outcome === 'switched' ? (typeDuringAwait ? 'other new input' : 'other draft')
+          : typeDuringAwait ? 'new input\nvoice task' : 'voice task';
+        assert.equal(ctx.inputTextRef.current, expected);
+        if (outcome === 'switched') assert.equal(buffers['original-session'].composerDraft, 'voice task');
+        assert.equal(accepted, 0, 'rejected/restored task must not clear the restored draft or claim success');
+      });
+    }
+  }
+}

@@ -969,6 +969,20 @@
     };
     notify();
   }
+  function restoreTaskDraft(text, owner) {
+    if (!owner || owner.restored) return false;
+    const sid = owner.sessionId || voice().voiceOperationSessionId(owner.operationId);
+    if (sid) {
+      restoreSteerText(sid, text);
+    } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      prefillComposer(text, true);
+    } else {
+      return false;
+    }
+    owner.restored = true;
+    return true;
+  }
+
   // Undo a pending message (chip ×). A plain queued chip (with attachments)
   // = local removal + discard attachments, zero engine calls; a steered chip
   // = optimistic removal + a real withdraw_steer (the withdrawal is confirmed
@@ -2372,6 +2386,7 @@
       setComposerDraft: setComposerDraft,
       retryFirstTurn: retryFirstTurn,
       prefillComposer: prefillComposer,
+      restoreTaskDraft: restoreTaskDraft,
       removeQueued: removeQueued,
       prioritizeQueued: prioritizeQueued,
       editQueued: editQueued,

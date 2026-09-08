@@ -81,6 +81,10 @@
     }
   }
 
+  function voiceOperationSessionId(operationId) {
+    return voiceOperations.get(operationId)?.sessionId || null;
+  }
+
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
@@ -1348,6 +1352,7 @@
       clearVoiceInput: clearVoiceInput,
       abandonVoiceResult: abandonVoiceResult,
       getVoiceOperationId: getVoiceOperationId,
+      voiceOperationSessionId: voiceOperationSessionId,
       beginVoiceSubmission: beginVoiceSubmission,
       completeVoiceSubmission: completeVoiceSubmission,
       dismissVoiceInput: dismissVoiceInput,

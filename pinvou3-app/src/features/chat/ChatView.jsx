@@ -2228,10 +2228,18 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             setInputText(constrained.text);
             return false;
           }
+          // Consume only the exact draft this task owns. The bridge's #406
+          // restored path may then append it once without duplicating writeback.
+          if (inputTextRef.current !== constrained.text) return false;
+          const owner = { sessionId: activeSessionIdRef.current || null,
+            draftEpoch: Number(draftEpoch || 0), operationId: context?.operationId, restored: false };
+          setInputText('');
           try {
             const result = await sendChatMessage(constrained.text, context);
+            if (result === false) bridge.chat.restoreTaskDraft(constrained.text, owner);
             return result === 'restored' ? false : result;
           } catch (error) {
+            bridge.chat.restoreTaskDraft(constrained.text, owner);
             console.warn('[voice-input] task send failed after writeback', error);
             return false;
           }

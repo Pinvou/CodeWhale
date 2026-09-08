@@ -2712,6 +2712,7 @@
       setComposerDraft: setComposerDraft,
       retryFirstTurn: retryFirstTurn,
       prefillComposer: prefillComposer,
+      restoreTaskDraft: chatFeature.restoreTaskDraft,
       removeQueued: removeQueued,
       prioritizeQueued: prioritizeQueued,
       editQueued: editQueued,

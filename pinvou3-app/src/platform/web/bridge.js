@@ -5620,6 +5620,20 @@
     };
     notify();
   }
+  function restoreTaskDraft(text, owner) {
+    if (!owner || owner.restored) return false;
+    const sid = owner.sessionId || voiceOperationSessionId(owner.operationId);
+    if (sid) {
+      restoreComposerText(sid, text);
+    } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      prefillComposer(text, true);
+    } else {
+      return false;
+    }
+    owner.restored = true;
+    return true;
+  }
+
   // Session-scoped composer text restore for sends abandoned by a session
   // switch mid-send (issue #406; mirrors the tauri bridge's restoreSteerText).
   // A bare setComposerDraft is invisible (the composer is React-local state
@@ -9390,6 +9404,10 @@
     }
   }
 
+  function voiceOperationSessionId(operationId) {
+    return voiceOperations.get(operationId)?.sessionId || null;
+  }
+
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
@@ -10266,6 +10284,7 @@
     setComposerDraft: setComposerDraft,
     retryFirstTurn: retryFirstTurn,
     prefillComposer: prefillComposer,
+    restoreTaskDraft: restoreTaskDraft,
     removeQueued: removeQueued,
     prioritizeQueued: prioritizeQueued,
     editQueued: editQueued,
