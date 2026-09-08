@@ -63,3 +63,21 @@ SECINF-04C3A 候选通过后，使用 `scripts/account-platform-keycloak-product
 正常及已知失败仅清理该次核对过 ID/标签的容器、网络和随机测试目录。创建状态不确定时保留现场并失败，不能以全局 prune 或模糊路径删除补救。
 
 参考：[Keycloak 服务账户](https://www.keycloak.org/docs/latest/server_admin/index.html#_service_accounts)、[realm 导入导出](https://www.keycloak.org/server/importExport)。
+
+## 正式文件配置启动的隔离验收
+
+C3C1 增加生产 `compose.keycloak.yaml` 与 `keycloak.conf.template`。实际配置必须由受控投递生成到专属目录，
+不得把带密码的渲染结果提交。生产入口不默认导入任何 realm；首次 runtime 启动和后续 realm 配置分别审核。
+加入现有 internal 网络使用 external 引用，只读投递本服务配置、叶证书、公开信任根及同源 healthcheck 制品，
+无数据库/admin 密码环境变量，无公开端口。实际环境和命令行仍需核对不存在覆盖文件值的配置。
+
+对既有生产模式 fixture 显式追加 `--production-healthcheck <同源Linux healthcheck绝对路径>`，才验证上述
+Compose/file-config 路径；原调用保持不变。新路径在隔离环境复用真实配置并额外挂载测试工具/测试 realm，
+将 fixture hostname 固定为 localhost，证书额外包含 keycloak 以验证 Compose 的私网 HTTPS 健康检查。
+这些例外只存在于隔离 fixture；不向正式 Compose 引入测试目录、测试 realm 或 localhost 回调。
+
+2026-09-08：四项相关单元/配置检查通过，现有 healthcheck 同源 Linux 静态编译通过；复用未变 26.7.0 镜像和
+已核验的身份测试二进制，完整新路径实跑退出 0，取得 `KEYCLOAK_PRODUCTION_FILE_CONFIG_AND_COMPOSE_READINESS_PASS`，
+七项真实服务身份、续取/过期/权限、JDBC TLS、两认证器及登录主题、错误 CA 和错误主机名拒绝全部通过。
+没有重建镜像或修改正式数据库。开始验证前曾因公开暂存缺少 realm 生成器而提前退出，补齐原文件后才执行完整验证；
+这次准备失败不计为验收通过。

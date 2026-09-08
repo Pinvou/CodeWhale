@@ -1,0 +1,61 @@
+# Independent production identity project; reuse the verified dependency network.
+name: pinvou-production-identity
+services:
+  keycloak:
+    image: ${KEYCLOAK_IMAGE:?set verified Keycloak 26.7.0 image digest}
+    pull_policy: never
+    user: "1000:0"
+    command: ["--config-file=/run/pinvou/keycloak-config/keycloak.conf", "start", "--optimized"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 1536m
+    cpus: 1.0
+    pids_limit: 256
+    ulimits:
+      core: {soft: 0, hard: 0}
+    logging:
+      driver: local
+      options: {max-size: "10m", max-file: "3"}
+    environment:
+      JAVA_OPTS_KC_HEAP: "-Xms128m -Xmx512m"
+      HEALTHCHECK_URL: https://keycloak:9000/health/ready
+      SSL_CERT_FILE: /run/pinvou/keycloak-trust/ca.crt
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m,mode=1777
+      - /opt/keycloak/data:rw,nosuid,nodev,size=128m,uid=1000,gid=0,mode=0700
+    volumes:
+      - type: bind
+        source: ${KEYCLOAK_CONFIG_DIRECTORY:?set dedicated private Keycloak configuration directory}
+        target: /run/pinvou/keycloak-config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${KEYCLOAK_TLS_DIRECTORY:?set Keycloak-only leaf certificate directory}
+        target: /run/pinvou/keycloak-tls
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${KEYCLOAK_TRUST_DIRECTORY:?set public infrastructure trust directory}
+        target: /run/pinvou/keycloak-trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${KEYCLOAK_HEALTHCHECK_BINARY:?set verified same-source Linux healthcheck binary}
+        target: /opt/pinvou/healthcheck
+        read_only: true
+        bind: {create_host_path: false}
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/pinvou/healthcheck >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 12
+    networks:
+      data:
+        aliases: [keycloak]
+networks:
+  data:
+    external: true
+    name: ${KEYCLOAK_DATA_NETWORK:?set independently verified internal dependency network}

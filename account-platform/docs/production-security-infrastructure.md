@@ -283,6 +283,49 @@ D3-L1 文档及门禁、D3-L2 成熟工具加密持续备份与真实恢复，�
 
 最终 Linux 脚本 SHA-256 `c7b7bfb3113e79ac51b9cbf73f18bf0837055f181e2e76e4a3a45fc3b4e4fab7`，测试二进制 SHA-256 `1a4dbc228f31c0984d54ae2c2e6bc247a7926afc4f20196281a9cdf2d8b58e40`，均传输后独立核验。两轮仅删除各自临时容器、网络及测试目录；候选镜像与公开验收制品保留，正式 KMS、依赖数据和旧业务未改。此结果只闭合 26.7.0 生产模式与身份链隔离验收，正式 realm/七服务秘密及 token-file 投递、短信/注册/商城端到端回归和 D3 数据库备份前置仍未完成。
 
+### SECINF-04C3C 正式身份接线（文档先审 / 待实施）
+
+基础数据库已取得显式本机 `LOCAL_BOOTSTRAP_VERIFIED`，此后继续正式身份接线；不再以异机存储阻塞本次上线。
+固定复用 C3A/C3B 已验证的 26.7.0 镜像和六叶 PKI，不重建镜像、不升级、不迁移旧测试 realm/用户/秘密。
+以下两项串行实施、独立审核提交；启动与实际身份投递分别记录，不能以 Keycloak 端口开放宣称登录闭环。
+
+| 子任务 | 实现与验收 | 边界 |
+|---|---|---|
+| C3C1 | 专用生产身份 Compose、受控文件配置/TLS/readiness 接线；隔离验证后，迁移前生成新增量并只启动正式 Keycloak，确认真实 JDBC TLS、HTTPS readiness 与固定 hostname | 不替换四项依赖；不接公网、不导入开发 realm、不发放平台管理员权限 |
+| C3C2 | 独立 workload realm、七客户端真实 UUID/秘密及单服务短期文件；用户 realm/专用凭据客户端/认证器、秘密加密交接与引导管理员退场 | 完整发行配置和真实签发/拒权/续取验证后才允许业务接流量；商城/公网回归仍归 C4/05C |
+
+C3C1 使用独立 Compose 项目加入经核验的既有 internal 数据网络，网络为 external 引用，不重建或修改它。
+Keycloak 仅监听私网 HTTPS，固定 UID 1000:0、只读根、drop ALL、no-new-privileges、1536 MiB、1 CPU、
+256 PID、core=0 和有界日志；临时运行目录使用受限 tmpfs，数据库持久化仍在现有 PostgreSQL。
+每次正式写入前验证集群标识、备份新鲜度和准确映射；失败保留新增正式状态，禁止删除新数据库后重试。
+
+数据库密码放 Keycloak 专用 0600 配置文件，不使用 Compose 环境变量或命令行明文；通过官方
+`--config-file` 读取，JDBC 固定 `verify-full` 和独立公开 CA 文件。只投递本服务叶/私钥，不挂载 PKI 根私钥、
+整个材料目录或其他服务秘密。初始管理密码独立随机生成，先用既有恢复公钥加密并验证密文落盘，再投递配置；
+不复用数据库密码，不通过聊天/日志输出。后续初始化完成后删除临时管理员并从运行配置移除其引导值，
+保留明确离线恢复入口；C3C1 不把临时管理员仍存在标记为身份接线已完成。
+
+readiness 复用现有 `cmd/healthcheck` 的同源 Linux 静态制品，以单文件只读挂载，不为此重建已冻结镜像。
+探测固定私网 HTTPS 地址、核验叶名称与 CA；正式首次验收另外校验 readiness 返回 `UP` 和实际 JDBC TLS，
+不以进程或 TCP 存活替代。探测无需管理员/DB 密码，诊断不输出私密配置。隔离测试使用新临时库、证书和密码，
+覆盖实际配置文件启动、错误证书拒绝、运行边界和既有 SPI/主题；不再重测未变的镜像编译过程。
+
+URL 约束：workload 签发使用固定私网 HTTPS hostname；用户登录仍使用既定公网账户 origin，不能回跳
+127.0.0.1。C3C2 以 realm 的明确 frontend URL 分离用户地址，实际检查发现文档、令牌 issuer 和回调；
+不得仅开启动态 backchannel 就假定 issuer 已分离。公网反代只开放用户 realm 必要端点及静态资源，
+不转发 master/workload/admin/management；hostname-admin 本身不是访问控制。专用凭据 origin 沿用负责人
+确认的命名，不增加另一套价格、账号或权限定义。
+
+依据：[Keycloak 配置文件](https://www.keycloak.org/server/configuration)、
+[hostname、realm frontend URL 与反代边界](https://www.keycloak.org/server/hostname)。
+
+C3C1 现场结果（2026-09-08）：独立审核后的私有投递先生成并验证加密管理员托管包，再投递专用文件；
+叶链、名称、有效期、密钥对及文件归属均验证通过。启动前完成一个新的实际增量备份，原集群五库及四依赖未重建。
+固定 26.7.0 候选已在独立身份项目正式启动，Docker HTTPS 健康检查、独立 TLS readiness `UP`、
+master 的固定私网 issuer 和实际 PostgreSQL TLS 会话均通过；原依赖和 KMS 的 ID/健康保持，无公网端口。
+状态仍明确为 `workload_projection_complete=false` / `initial_administrator_retired=false` /
+`public_cutover=false`；不能以本结果冒充七身份投递、正式用户登录或业务上线完成。
+
 ### 部署顺序
 
 SECINF-03 继续串行细分：03B 交付固定版本的 TLS/Raft/声明式审计/逐服务 AppRole 与 Agent 配置，并以独立实例验证持久化、封存、解封、权限、续租和审计；03C 才处理本机加密初始化响应、正式初始化、离线交接和备份恢复。03B 的随机测试主密钥不用于正式实例，不将其测试结果等同于保管人的正式备份确认。

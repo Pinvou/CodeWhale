@@ -59,12 +59,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="verified local candidate sha256 image ID only")
     parser.add_argument("--binary", required=True)
+    parser.add_argument("--production-healthcheck", help="opt into production Compose/file configuration with this same-source binary")
     parser.add_argument("--run", action="store_true", required=True)
     args = parser.parse_args()
     require(os.name == "posix" and os.geteuid() == 0, "LINUX_OPERATOR_REQUIRED")
     require(re.fullmatch(r"sha256:[a-f0-9]{64}", args.image), "IMMUTABLE_CANDIDATE_REQUIRED")
     binary = Path(args.binary).resolve(strict=True)
     require(binary.is_file(), "TEST_BINARY_REQUIRED")
+    healthcheck = Path(args.production_healthcheck).resolve(strict=True) if args.production_healthcheck else None
+    require(healthcheck is None or healthcheck.is_file(), "HEALTHCHECK_BINARY_REQUIRED")
     repository = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location("realm", repository / "scripts/account-platform-workload-realm.py")
     realm = importlib.util.module_from_spec(spec)
@@ -103,7 +106,8 @@ def main():
         for target, hostname, uid in ((root / "pg-tls", "postgres", 999), (issuer, "localhost", 1000)):
             run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=" + hostname,
                  "-keyout", str(target / "server.key"), "-out", str(target / "server.csr")])
-            private(target / "ext", "subjectAltName=DNS:" + hostname + "\nextendedKeyUsage=serverAuth\n", uid)
+            names = hostname + (",DNS:keycloak" if target == issuer and healthcheck else "")
+            private(target / "ext", "subjectAltName=DNS:" + names + "\nextendedKeyUsage=serverAuth\n", uid)
             run(["openssl", "x509", "-req", "-in", str(target / "server.csr"), "-CA", str(issuer / "ca.crt"),
                  "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-days", "2", "-extfile", str(target / "ext"),
                  "-out", str(target / "server.crt")])
@@ -168,6 +172,8 @@ def main():
 
         def start_issuer(suffix, host="postgres", ca="ca.crt"):
             nonlocal uncertain_creation
+            if healthcheck:
+                return start_file_issuer(suffix, host, ca)
             jdbc = "jdbc:postgresql://" + host + ":5432/account_platform_keycloak?sslmode=verify-full&sslrootcert=/fixture/" + ca
             command = ["docker", "create", "--name", name + "-" + suffix, "--label", "pinvou.fixture=" + name,
                        "--network", network, "--user", "1000:0", "--read-only", "--cap-drop", "ALL",
@@ -198,6 +204,63 @@ def main():
             run(["docker", "start", cid])
             return cid
 
+        def start_file_issuer(suffix, host, ca):
+            nonlocal uncertain_creation
+            production = repository / "account-platform/deploy/production"
+            config = root / ("keycloak-config-" + suffix)
+            config.mkdir(mode=0o700)
+            os.chown(config, 1000, 0)
+            text = (production / "keycloak.conf.template").read_text()
+            text = text.replace("@DATABASE_PASSWORD@", passwords["KEYCLOAK_DB_PASSWORD"])
+            text = text.replace("@BOOTSTRAP_ADMIN_PASSWORD@", admin)
+            text = text.replace("bootstrap-admin-username=pinvou-bootstrap-admin", "bootstrap-admin-username=fixture-admin")
+            text = text.replace("hostname=https://keycloak:8443", "hostname=https://localhost:8443")
+            text = text.replace("jdbc:postgresql://postgres:", "jdbc:postgresql://" + host + ":")
+            text = text.replace("sslrootcert=/run/pinvou/keycloak-trust/ca.crt", "sslrootcert=/run/pinvou/keycloak-trust/" + ca)
+            require("@" not in text, "UNRENDERED_KEYCLOAK_CONFIG")
+            private(config / "keycloak.conf", text, 1000)
+            env = {**os.environ, "KEYCLOAK_IMAGE": args.image, "KEYCLOAK_CONFIG_DIRECTORY": str(config),
+                   "KEYCLOAK_TLS_DIRECTORY": str(issuer), "KEYCLOAK_TRUST_DIRECTORY": str(issuer),
+                   "KEYCLOAK_HEALTHCHECK_BINARY": str(healthcheck), "KEYCLOAK_DATA_NETWORK": network_name}
+            overlay = root / ("keycloak-" + suffix + ".json")
+            fixture_binds = [(str(issuer), "/fixture", True),
+                             (str(issuer / "workload.json"), "/opt/keycloak/data/import/pinvou-fixture-workload-realm.json", True),
+                             (str(issuer / "users.json"), "/opt/keycloak/data/import/pinvou-fixture-users-realm.json", True)]
+            override = {"services": {"keycloak": {
+                "command": ["--config-file=/run/pinvou/keycloak-config/keycloak.conf", "start", "--optimized", "--import-realm"],
+                "volumes": [{"type": "bind", "source": src, "target": dst, "read_only": ro,
+                             "bind": {"create_host_path": False}} for src, dst, ro in fixture_binds]}}}
+            private(overlay, json.dumps(override), 0)
+            project = name + "-" + suffix
+            command = ["docker", "compose", "--project-name", project, "-f", str(production / "compose.keycloak.yaml"), "-f", str(overlay)]
+            rendered = json.loads(run([*command, "config", "--format", "json"], env=env).stdout)
+            require(set(rendered["services"]) == {"keycloak"}, "KEYCLOAK_ONLY_PROJECT")
+            require(rendered["networks"]["data"]["external"] is True
+                    and rendered["networks"]["data"]["name"] == network_name, "KEYCLOAK_FIXED_EXTERNAL_NETWORK")
+            uncertain_creation = True
+            run([*command, "create", "keycloak"], env=env)
+            cid = run([*command, "ps", "--all", "--quiet", "keycloak"], env=env).stdout.strip()
+            require(re.fullmatch(r"[a-f0-9]{64}", cid), "FIXTURE_ISSUER_ID")
+            containers.append((cid, "com.docker.compose.project", project))
+            uncertain_creation = False
+            meta = json.loads(run(["docker", "inspect", cid]).stdout)[0]
+            require(meta["Image"] == args.image and meta["Config"]["User"] == "1000:0"
+                    and not meta["HostConfig"]["Privileged"] and not meta["HostConfig"].get("CapAdd"), "ISSUER_BOUNDARY")
+            require(not any(value.startswith(("KC_DB_", "KC_BOOTSTRAP_", "KC_HOSTNAME", "KC_HTTP", "KC_HTTPS", "KC_PROXY"))
+                            for value in meta["Config"]["Env"]), "ENVIRONMENT_CONFIGURATION_OVERRIDE")
+            require(meta["Config"]["Cmd"] == override["services"]["keycloak"]["command"], "COMMAND_CONFIGURATION_OVERRIDE")
+            require(set(meta["NetworkSettings"]["Networks"]) == {network_name}, "ISSUER_NETWORK")
+            verify_limits(meta, 1536 * 1024 * 1024, 256)
+            verify_mounts(meta, [(str(config), "/run/pinvou/keycloak-config", True),
+                                (str(issuer), "/run/pinvou/keycloak-tls", True),
+                                (str(issuer), "/run/pinvou/keycloak-trust", True),
+                                (str(healthcheck), "/opt/pinvou/healthcheck", True), *fixture_binds],
+                          {"/tmp": "rw,nosuid,nodev,size=128m,mode=1777",
+                           "/opt/keycloak/data": "rw,nosuid,nodev,size=128m,uid=1000,gid=0,mode=0700"})
+            run(["docker", "update", "--restart=no", cid])
+            run(["docker", "start", cid])
+            return cid
+
         kc = start_issuer("positive")
         # Test binary stays in the issuer namespace: fixed loopback URL, no arbitrary target.
         result = run(["docker", "exec", "--env", "SSL_CERT_FILE=/fixture/ca.crt", "--env", "GOMEMLIMIT=128MiB",
@@ -216,6 +279,14 @@ def main():
         # Host-side TLS probe only to this inspected temporary container.
         ip = json.loads(run(["docker", "inspect", kc]).stdout)[0]["NetworkSettings"]["Networks"][network_name]["IPAddress"]
         probe_issuer(ip, issuer, admin)
+        if healthcheck:
+            for _ in range(30):
+                state = json.loads(run(["docker", "inspect", kc]).stdout)[0]["State"]
+                if state.get("Health", {}).get("Status") == "healthy":
+                    break
+                time.sleep(1)
+            require(state["Health"]["Status"] == "healthy", "PRODUCTION_TLS_READINESS_NOT_HEALTHY")
+            print("KEYCLOAK_PRODUCTION_FILE_CONFIG_AND_COMPOSE_READINESS_PASS")
         run(["docker", "stop", "--time", "20", kc])
         for suffix, host, ca, evidence in (("wrong-ca", "postgres", "wrong.crt", "PKIX path building failed"),
                                             ("wrong-host", pg_meta["NetworkSettings"]["Networks"][network_name]["IPAddress"], "ca.crt", "could not be verified by hostnameverifier")):

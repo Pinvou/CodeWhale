@@ -1,0 +1,14 @@
+# Render only into a dedicated UID 1000 private directory. Never commit output.
+# Initial administrator keys must be removed after controlled bootstrap retirement.
+db=postgres
+db-url=jdbc:postgresql://postgres:5432/account_platform_keycloak?sslmode=verify-full&sslrootcert=/run/pinvou/keycloak-trust/ca.crt
+db-username=keycloak
+db-password=@DATABASE_PASSWORD@
+hostname=https://keycloak:8443
+hostname-strict=true
+hostname-backchannel-dynamic=false
+http-enabled=false
+https-certificate-file=/run/pinvou/keycloak-tls/server.crt
+https-certificate-key-file=/run/pinvou/keycloak-tls/server.key
+bootstrap-admin-username=pinvou-bootstrap-admin
+bootstrap-admin-password=@BOOTSTRAP_ADMIN_PASSWORD@
