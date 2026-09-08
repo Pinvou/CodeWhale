@@ -17,6 +17,8 @@ import { MobileMoreSheet, MobileTabBar, MobileTopBar } from '../components/layou
 import { VllmSetupProgress } from '../components/VllmSetupProgress.jsx';
 import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowApiKeyGate } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
+import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
+import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { TEMPORARY_GROUP_KEY, groupSessionsByFolder } from '../shared/sidebar-grouping.js';
@@ -408,7 +410,13 @@ function workspaceDisplayName(path) {
       const [activeChat, setActiveChat] = useState(null);
       const [currentView, setCurrentViewState] = useState('chat');
       const [sessionSyncEpoch, setSessionSyncEpoch] = useState(0);
-      const [activeTheme, setActiveTheme] = useState('dark');
+      // Color-scheme preference: `system` follows the OS (fresh-install default,
+      // live tracking), light/dark are explicit picks. activeTheme is the resolved
+      // theme to render; light when the system preference is undeterminable
+      // (see shared/color-scheme.js).
+      const systemDark = useSystemDarkMode();
+      const [colorScheme, setColorScheme] = useState('system');
+      const activeTheme = resolveTheme(colorScheme, systemDark);
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
       const [llmApiLoading, setLlmApiLoading] = useState(false);
       const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
@@ -1558,15 +1566,18 @@ function workspaceDisplayName(path) {
         if (!uiPrefsInitRef.current && bs.settings) {
           if (isWeb) {
             bootedLanguageRef.current = language;
+            // Retain the existing Web storage key and explicit light/dark choices.
+            let storedScheme = null;
+            try { storedScheme = window.localStorage.getItem(COLOR_SCHEME_STORAGE_KEY); } catch (_) {}
+            setColorScheme(normalizeColorScheme(storedScheme));
           } else {
             const lang = TAG_TO_LANG[bs.settings.language];
             // 落盘语言可能尚未装载(en/ja 惰性 chunk);ensure 后再切,失败停在系统语言
             if (lang && lang !== language) ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
             // engine 已用此语言启动,作为「需重启」基线(切语言不重启 engine,见 commands.rs)
             bootedLanguageRef.current = lang || language;
-            // 后端 Theme 枚举(prefs.rs)只认 genesis/liquid-light/liquid-dark;深色=genesis,浅色=liquid-light
-            const th = bs.settings.theme === 'liquid-light' ? 'light' : 'dark';
-            if (th !== activeTheme) setActiveTheme(th);
+            // The backend migrates missing color_scheme from legacy theme once.
+            setColorScheme(normalizeColorScheme(bs.settings.color_scheme));
           }
           const notifications = bs.settings.notifications || {};
           setTaskCompletedNotif(notifications.task_completed !== false && notifications.enabled !== false);
@@ -2740,14 +2751,18 @@ function workspaceDisplayName(path) {
         }
       }
 
-      function handleSetTheme(th) {
-        setActiveTheme(th);
+      function handleSetTheme(scheme) {
+        setColorScheme(scheme);
         if (isWeb) {
-          try { window.localStorage.setItem('pinvou.web.theme', th); } catch (_) {}
+          try { window.localStorage.setItem(COLOR_SCHEME_STORAGE_KEY, scheme); } catch (_) {}
           return;
         }
         if (bridge.available) {
-          bridge.settings.saveSettings({ theme: th === 'dark' ? 'genesis' : 'liquid-light' });
+          // Mirror the resolved appearance for older clients after a downgrade.
+          bridge.settings.saveSettings({
+            theme: resolveTheme(scheme, systemDark) === 'dark' ? 'genesis' : 'liquid-light',
+            color_scheme: scheme,
+          });
         }
       }
 
@@ -3737,7 +3752,7 @@ function workspaceDisplayName(path) {
             {currentView === 'settings' && (
               <SettingsErrorBoundary theme={activeTheme} t={t}>
                 <LazySettingsView
-                  activeTheme={activeTheme} setActiveTheme={handleSetTheme}
+                  activeTheme={activeTheme} colorScheme={colorScheme} onColorSchemeChange={handleSetTheme}
                   language={language} setLanguage={handleSetLanguage}
                   superPerm={superPerm} setSuperPerm={handleToggleSuperPerm}
                   taskCompletedNotif={taskCompletedNotif} setTaskCompletedNotif={handleSetTaskCompletedNotif}

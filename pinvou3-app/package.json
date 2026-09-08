@@ -90,6 +90,7 @@
     "test:web-access-desktop-proxy": "node tests/web_access_desktop_proxy.test.mjs",
     "test:web-asset-base-path": "node tests/web_asset_base_path.test.mjs",
     "test:ui-language": "node tests/ui_language_coverage.test.mjs",
+    "test:color-scheme": "node --test tests/color_scheme_logic.test.mjs",
     "test:team-relay": "node tests/team_relay_preview.test.mjs && node tests/team_relay_bridge.test.mjs && node tests/team_relay_action_smoke.mjs",
     "test:team-relay-ui": "node tests/team_relay_action_smoke.mjs",
     "test:web-bootstrap": "node tests/web_bootstrap_transport.test.mjs",
