@@ -72,10 +72,10 @@ class API:
         self.origin = "http://" + address + ":3000"
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
-    def request(self, path, body=None, headers=None):
+    def raw_request(self, path, body=None, headers=None, method=None):
         request = urllib.request.Request(self.origin + path,
                                          data=None if body is None else json.dumps(body).encode(),
-                                         headers={"Content-Type": "application/json", **(headers or {})})
+                                         headers={"Content-Type": "application/json", **(headers or {})}, method=method)
         try:
             response = self.opener.open(request, timeout=3)
         except urllib.error.HTTPError as error:
@@ -83,7 +83,11 @@ class API:
         with response:
             raw = response.read(1024 * 1024 + 1)
             require(len(raw) <= 1024 * 1024, "fixture_http_body_too_large")
-            return response.status, json.loads(raw)
+            return response.status, dict(response.headers), raw
+
+    def request(self, path, body=None, headers=None, method=None):
+        status, _, raw = self.raw_request(path, body, headers, method)
+        return status, json.loads(raw)
 
 
 def eventually(probe, stage):
@@ -98,7 +102,7 @@ def eventually(probe, stage):
     raise RuntimeError(stage)
 
 
-def run(newapi_image, postgres_image):
+def run(newapi_image, postgres_image, scenario=None):
     require(os.name == "posix", "fixture_requires_linux")
     validate_image(newapi_image, inspect("image", newapi_image))
     require(re.fullmatch(r"sha256:[a-f0-9]{64}", postgres_image) is not None,
@@ -113,6 +117,8 @@ def run(newapi_image, postgres_image):
     try:
         net = docker("network", "create", "--internal", "--label", LABEL + "=" + run_id, prefix)
         resources.append(("network", net))
+        scenario_env = scenario.prepare(net, resources, run_id) if scenario else {}
+        require(set(scenario_env).issubset({"REDIS_CONN_STRING"}), "scenario_environment_invalid")
         pg_env = "POSTGRES_USER=fixture\nPOSTGRES_DB=fixture\nPOSTGRES_PASSWORD=" + secrets.token_hex(32) + "\n"
         pg_password = pg_env.split("POSTGRES_PASSWORD=", 1)[1].strip()
         pg = docker("create", "--pull=never", "--name", prefix + "-pg", "--network", net,
@@ -139,6 +145,7 @@ def run(newapi_image, postgres_image):
             "GIN_MODE": "release", "TRUSTED_PROXIES": "none", "NODE_TYPE": "master",
             "BATCH_UPDATE_ENABLED": "true", "ERROR_LOG_ENABLED": "true",
         }
+        env.update(scenario_env)
         app = docker("create", "--pull=never", "--name", prefix + "-app", "--network", net,
                      "--label", LABEL + "=" + run_id, "--user", "65532:65532", "--read-only",
                      "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--log-driver", "none",
@@ -190,9 +197,11 @@ def run(newapi_image, postgres_image):
         require(api.request("/api/setup")[1].get("data", {}).get("status") is True, "setup_not_persisted")
         require(sql("SELECT quota FROM users WHERE username='fixtureadmin';") == "5000000000", "quota_not_persisted")
         checks.append("application_restart")
+        if scenario:
+            checks.extend(scenario.verify(api, sql, login))
     finally:
         cleanup(resources, run_id)
-    print(json.dumps({"result": "NEWAPI_FRESH_FIXTURE_PASS", "checks": checks,
+    print(json.dumps({"result": "NEWAPI_BUSINESS_FIXTURE_PASS" if scenario else "NEWAPI_FRESH_FIXTURE_PASS", "checks": checks,
                       "version": "v1.0.0-rc.26", "index": INDEX, "production_changed": False}))
 
 

@@ -25,6 +25,22 @@ fixture 不主动下载镜像、不读取站点配置，使用独立 internal �
 
 `NEWAPI_FRESH_FIXTURE_PASS` 仅表示 PostgreSQL 17 空库、非 root/只读启动、一次性初始化、管理员登录、四类匿名 API 拒绝、用户 quota bigint 的 50 亿值读写、应用进程重启后初始化/额度保留这 7 项基础检查通过。不包含 Redis、数据库重启恢复、真实上游、Token/Channel 配置、流式结算、漏洞扫描或生产网络验收。离线保护测试为 `python -m unittest discover -s scripts/tests -p test_newapi_fixture.py`，不能替代该真实 fixture。
 
+### 真实 API 与模拟上游联验
+
+从本仓 `account-platform` 目录将 `./cmd/mock-newapi` 编译为 Linux/amd64 静态可执行文件，放入操作者管理的公共 fixture 目录（不包含站点配置），另准备本地 Redis 8.2 镜像。执行：
+
+```sh
+python3 scripts/account-platform-newapi-business-fixture.py --isolated-fixture \
+  --newapi-image 'calciumion/new-api@sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d' \
+  --postgres-image '<本地 PostgreSQL 17 sha256 image ID>' \
+  --redis-image '<本地 Redis 8.2 sha256 image ID>' \
+  --mock-binary '<Linux/amd64 mock-newapi 的绝对路径>'
+```
+
+复用基础 fixture 的隔离和精确清理机制，额外只读挂载公开 mock 二进制。Redis 只在此次无外部连通性的临时网络内运行、无认证且不持久化；不能复制此配置到生产，生产 Redis 的 TLS/ACL 另行验收。测试通过真实管理接口创建 Channel、限模型 Token 与独立管理访问 Token，不插入伪造消费日志。`NEWAPI_BUSINESS_FIXTURE_PASS` 覆盖基础 7 项及 Redis/mock、渠道密钥二次验证、Token/模型目录、JSON usage、SSE usage/DONE、精确日志核对且不重复扣费、越权模型/撤销拒绝，共 14 项；它不证明账号平台账本/完整端到端结算或真实供应商可用。
+
+**rc.26 渠道生效延迟**：启用 Redis 会同时启用进程内路由缓存，默认 `SYNC_FREQUENCY=60`；该版本创建 Channel 的事务不会立即刷新此缓存。实际联验首次调用遇到 `503/model_not_found`，按默认周期等待后成功。fixture 在创建后等待一个完整周期，不以反复模型调用轮询缓存；生产创建/变更渠道后须等待所有实例同步并做受控健康验证，再开放平台路由。不要仅凭目录可见/创建成功判定可以调用，也不要将一般 503 都视为可以安全重放的请求。
+
 New API 使用 AGPLv3，并带上游声明的附加归属要求。发布或修改前必须完成许可证、上游模型授权、内容安全、日志留存和适用监管要求复核。
 
 ## 本地 Compose
