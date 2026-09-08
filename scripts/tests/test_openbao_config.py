@@ -117,6 +117,16 @@ class OpenBaoConfigurationTests(unittest.TestCase):
         for denied in ('ExecStart=-', 'TOKEN=', 'curl', 'webhook', 'rm '):
             self.assertNotIn(denied, service)
 
+    def test_audit_rotation_preserves_all_archives_and_requires_verified_reopen(self):
+        config = (CONFIG / "audit.logrotate.conf").read_text(encoding="utf-8")
+        for required in ('size 10M', 'rotate -1', 'nocompress', 'create 0600', 'account-platform-kms-audit-reopen.py'):
+            self.assertIn(required, config)
+        for denied in ('copytruncate', 'maxage', 'missingok', 'killall', '|| true'):
+            self.assertNotIn(denied, config)
+        service = (CONFIG / "pinvou-kms-audit-rotate.service").read_text(encoding="utf-8")
+        self.assertNotIn('ExecStart=-', service)
+        self.assertNotIn('--force', service)
+
 
 if __name__ == "__main__":
     unittest.main()

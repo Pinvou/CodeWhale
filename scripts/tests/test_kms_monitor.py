@@ -58,6 +58,7 @@ class KMSMonitorTests(unittest.TestCase):
         with patch.object(MON, "check_tls", side_effect=ValueError(message)), \
              patch.object(MON, "check_agents", return_value="ok"), \
              patch.object(MON, "check_backup_unit", return_value="ok"), \
+             patch.object(MON, "check_audit_rotation_unit", return_value="ok"), \
              patch.object(MON, "check_snapshot", return_value="ok"), \
              patch.object(MON, "check_disk", return_value="warning"), \
              patch.object(MON, "check_audit", return_value="ok"):

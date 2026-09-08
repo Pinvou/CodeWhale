@@ -273,3 +273,9 @@ sink 使用宿主 `/run` 的 tmpfs，systemd-tmpfiles 在系统启动时先建�
 03C-9A 本机检测已部署：六项真实检查均为 ok（线上 TLS/证书、Agent 租约、备份 unit、快照新鲜度与摘要、磁盘/inode、审计权限与活动）。每 5 分钟 timer 已启用，受限 oneshot 的首轮 `Result=success`、`ExecMainStatus=0`；仅状态目录可写，输出原子状态 JSON 和 journal，不读取 AppRole 内容、不做加解密/取快照探测。状态文件超过 10 分钟未更新必须视为检测器异常，不沿用旧绿色结果。通知方式尚在向负责人确认，当前明确标记 `notification_delivery=local_status_only`，不宣称已通知到人。
 
 验证：监控与既有 Agent 的 Linux 用例全部通过（真实权限/原子状态文件用例无 SKIP），Windows 跳过两项仅 POSIX 适用的文件权限证明；实际新快照摘要验证和受限 unit 运行通过。当前阶段不自动删备份或日志，不声称审计轮转、证书续签或全平台上线已完成。
+
+03C-9B 审计轮转现场通过：安装独立按小时的 10 MiB 阈值轮转，不压缩、不删除历史归档、不 copytruncate。首次受控强制轮转前记录当前 inode/长度/前缀摘要，轮转后确认原 inode 只移至唯一归档且原有字节摘要一致；新日志 inode 不同、UID/GID 65532、0600，实际身份查询继续产生日志。重新打开程序先核对专用容器的镜像、项目/服务标签、启动命令和审计挂载，再向该确切容器 ID 发 HUP，不调用 restart 或其他服务。输出 `FORMAL_AUDIT_ROTATION_PRESERVED_OLD_BYTES_AND_NEW_WRITES_VERIFIED`。
+
+配置校验发现宿主没有名为 `65532` 的账号，logrotate 不能用账号名方式解析 `create 0600 65532 65532`；改为 `create 0600` 继承被轮转文件的原数字 UID/GID，重新打开程序再次强制核对归属。仅 dry-run 失败时没有轮转或更改日志，未为绕过解析而创建新的宿主用户。已根据实际安装版本手册确认 `rotate -1` 且无 `maxage` 保留所有归档。
+
+常规定时器不带 force，只有超过阈值才轮转；首次受控验收与按小时 unit 均成功。检测器增加 `audit_rotation_job`，现场七项全部 ok，KMS 保持 healthy，旧业务及其他团队服务未变。Windows 25 项相关测试中 23 通过、2 项仅 POSIX 用例跳过；Linux 重新打开目标校验和监控测试均通过，真实受限 unit/日志验证通过。外部通知仍待负责人选择，当前不宣称已发送到人；证书续签及原生业务接入仍待后续任务。

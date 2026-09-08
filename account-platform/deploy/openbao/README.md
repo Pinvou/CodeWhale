@@ -75,3 +75,11 @@ TOKEN_SECRET_KEY_ID=pinvou-token-data
 `pinvou-kms-monitor.service/.timer` 每 5 分钟执行受限检测；公开环境配置 `monitor.env` 只含 `KMS_MONITOR_ENDPOINT`、`KMS_MONITOR_NETWORK`，状态文件为受限 monitor 目录中的 `status.json`。检查真实线上证书（14 天窗口）、服务健康、三个 Agent 身份、备份任务和最近成功包（90 分钟窗口）、磁盘/inode、审计活动，不使用 root token、不续租身份或再次下载快照。
 
 通过 `systemctl status pinvou-kms-monitor.service`、`journalctl -u pinvou-kms-monitor.service` 和状态 JSON 检查结果。非 ok 为非零退出码；状态 `checked_at` 超过 10 分钟必须视为检测器失效，不能沿用旧 ok。本机 journal/failed unit 不等于消息通知到人；当前 `notification_delivery=local_status_only`，外部通知待负责人确定。监控不删除文件、不重启/解封服务器、不调用高风险操作。证书临期必须在到期前由保管人参与受控续签，不能通过关闭 TLS 校验临时放行。
+
+## 审计日志轮转
+
+`pinvou-kms-audit-rotate.service/.timer` 独立按小时运行 `audit.logrotate.conf`，10 MiB 阈值、保留全部归档，不压缩、不 copytruncate、不自动删除。`create 0600` 继承原日志的数字 UID/GID，兼容宿主没有容器 UID 同名账号的情况；重新打开程序要求原归属仍为 65532:65532。不要套用全局 logrotate 的删除/压缩策略，也不要对 KMS 日志运行全局 prune。
+
+轮转后脚本先验证专用 KMS 容器身份及审计挂载，再对准确 ID 发 SIGHUP，随后实际查询三个 Agent 并验证新日志继续写入；失败保留所有文件并返回非零。首次现场轮转验证旧文件字节完整保留、新日志持续写入，服务仍 healthy。日常 timer 不使用 force；手工强制轮转仅用于受控验收或运维场景。
+
+检测器包含审计轮转 unit/timer 状态。出现 `KMS_AUDIT_REOPEN_FAILED_PRESERVE_ALL_LOGS` 时，先保留归档与当前文件，检查文件权限、目标容器和 KMS TLS 状态；修复后可独立运行重新打开脚本，不需再次轮转、更不能清空日志。归档默认无限保留，容量预警后应先按保管制度转存并评审精确清理范围，不能静默自动删除证据。

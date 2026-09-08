@@ -113,12 +113,20 @@ def run_command(arguments, expected=None, timeout=10):
     return result.stdout
 
 
-def check_backup_unit():
-    run_command(["systemctl", "is-active", "pinvou-kms-snapshot.timer"], b"active")
-    run_command(["systemctl", "is-enabled", "pinvou-kms-snapshot.timer"], b"enabled")
-    state = run_command(["systemctl", "show", "pinvou-kms-snapshot.service", "-p", "Result", "-p", "ExecMainStatus"])
+def check_scheduled_job(name):
+    run_command(["systemctl", "is-active", name + ".timer"], b"active")
+    run_command(["systemctl", "is-enabled", name + ".timer"], b"enabled")
+    state = run_command(["systemctl", "show", name + ".service", "-p", "Result", "-p", "ExecMainStatus"])
     require(set(state.decode("ascii").strip().splitlines()) == {"Result=success", "ExecMainStatus=0"})
     return "ok"
+
+
+def check_backup_unit():
+    return check_scheduled_job("pinvou-kms-snapshot")
+
+
+def check_audit_rotation_unit():
+    return check_scheduled_job("pinvou-kms-audit-rotate")
 
 
 def check_agents(root, endpoint, network):
@@ -147,6 +155,7 @@ def collect(root, endpoint, network, now):
         "kms_tls_health_and_certificate": lambda: check_tls(endpoint, root / "openbao/trust/ca.crt", now),
         "agent_live_leases": lambda: check_agents(root, endpoint, network),
         "backup_job": check_backup_unit,
+        "audit_rotation_job": check_audit_rotation_unit,
         "snapshot_freshness_and_integrity": lambda: check_snapshot(root / "backup/snapshots", now),
         "disk_and_inodes": lambda: check_disk(root),
         # Successful authenticated Agent queries above must continue to produce audit writes.
