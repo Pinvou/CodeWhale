@@ -2016,7 +2016,36 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_uses_only_explicit_configured_skills_dir() {
+    fn system_prompt_merges_workspace_and_configured_skills_dir() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let _home = ScopedHome::set(tmp.path().join("home"));
+        let workspace = tmp.path().join("workspace");
+        let configured_dir = tmp.path().join("configured-skills");
+        write_test_skill(
+            &workspace.join(".claude").join("skills"),
+            "workspace-skill",
+            "workspace skill",
+        );
+        write_test_skill(&configured_dir, "configured-skill", "configured skill");
+
+        let text = system_prompt_flat_text(&system_prompt_for_mode_with_context_and_skills(
+            &workspace,
+            None,
+            Some(&configured_dir),
+            None,
+            None,
+        ));
+
+        assert!(text.contains("workspace-skill"));
+        assert!(text.contains("configured-skill"));
+    }
+
+    #[test]
+    fn forkguard_system_prompt_uses_only_explicit_configured_skills_dir() {
+        // Fork-policy §3.4: the upstream default merge contract above still
+        // holds. Pinvou selects this separate, explicit-host mode so ambient
+        // workspace Skills cannot join the host-reviewed Skill authority.
         let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         let _home = ScopedHome::set(tmp.path().join("home"));

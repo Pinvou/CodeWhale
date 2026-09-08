@@ -1102,7 +1102,38 @@ fn codewhale_only_mode_rejects_workspace_codewhale_symlink_escape() {
 }
 
 #[test]
+fn discover_for_workspace_and_dir_merges_workspace_and_configured_sources() {
+    let tmpdir = TempDir::new().unwrap();
+    let workspace = tmpdir.path().join("workspace");
+    let home = tmpdir.path().join("home");
+    let configured_dir = tmpdir.path().join("configured-skills");
+    std::fs::create_dir_all(&workspace).unwrap();
+    write_skill(
+        &workspace.join(".claude").join("skills"),
+        "workspace-skill",
+        "workspace visible skill",
+        "body",
+    );
+    write_skill(
+        &configured_dir,
+        "configured-skill",
+        "configured visible skill",
+        "body",
+    );
+
+    let registry =
+        super::discover_for_workspace_and_dir_with_home(&workspace, &configured_dir, Some(&home));
+    let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+
+    assert!(names.contains(&"workspace-skill"));
+    assert!(names.contains(&"configured-skill"));
+}
+
+#[test]
 fn forkguard_explicit_skills_dir_excludes_ambient_workspace_sources() {
+    // Fork-policy §3.4: this is an additional explicit-host path, not a
+    // reversal of the upstream default merge test above. Pinvou uses it to
+    // keep ambient workspace roots outside the reviewed Skill authority.
     let tmpdir = TempDir::new().unwrap();
     let workspace = tmpdir.path().join("workspace");
     let configured_dir = tmpdir.path().join("configured-skills");

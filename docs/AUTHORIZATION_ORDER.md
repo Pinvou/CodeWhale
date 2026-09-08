@@ -19,7 +19,7 @@ The interactive engine evaluates a model-requested tool call in this order:
 | 1 | Effective configuration and posture | User settings, command/runtime overrides, and the project overlay resolve before the turn. A project overlay may tighten `approval_policy`, `sandbox_mode`, or shell availability, but may not loosen them. |
 | 2 | Mode and tool admission | Plan-mode restrictions, input parse errors, per-command tool deny/allow lists, caller restrictions, and missing execution registrations fail before policy rules are considered. A tool present in both command lists is denied. |
 | 3 | Preparation, then `tool_call_before` hooks | Registry preparation is side-effect free. Foreground hooks then fold as `deny > ask > allow`, and a strict matching hook that produces no verdict fails closed. The last `updatedInput` wins; the engine prepares the rewritten input again before later gates inspect it. |
-| 4 | Registered-tool baseline | The prepared tool's `ApprovalRequirement` establishes its ordinary approval need. A hook `ask` is applied after that assignment so the baseline cannot erase it. Non-bypassable registered holds remain forced in postures that can prompt; Full Access auto-approves them instead of opening a contradictory modal. Plan mode also blocks write-capable tools here. |
+| 4 | Registered-tool baseline | The prepared tool's `ApprovalRequirement` establishes its ordinary approval need. A hook `ask` is applied after that assignment so the baseline cannot erase it. Non-bypassable registered holds remain forced in postures that can prompt; Full Access blocks them because that posture cannot open the required human-approval modal. Plan mode also blocks write-capable tools here. |
 | 5 | Typed `permissions.toml` rule | A matching `deny` blocks. A matching `allow` may clear only ordinary registry approval; it cannot clear a hook `ask` or a non-bypassable registered hold. A matching `ask` forces review only in a posture that can prompt. Full Access/auto-approval is not downgraded into a prompt, while an explicit typed `deny` still blocks. |
 | 6 | Auto-review policy and built-in safety floor | Configured block rules run before the built-in floor, then configured allow rules and the deterministic fallback. This layer runs after typed permissions and can add a prompt or block, but cannot remove an earlier hold. Full Access deliberately skips the interactive publish hold; catastrophic destructive background/headless actions remain protected. |
 | 7 | Repository law | Protected path invariants can only add a prompt or block. A repo-law prompt becomes a hard block in Full Access, which has no contradictory approval modal. |
@@ -81,10 +81,11 @@ two should not be interpreted independently.
 - Ask and Auto-Review may surface tool safety approvals. Auto-Review does not
   pause for model-authored user questions, which are a separate channel.
 - Full Access and YOLO-compatible auto-approval paths do not let a typed `ask`
-  downgrade the session into prompting. Non-bypassable registered holds
-  auto-approve in Full Access. Typed deny, catastrophic background/headless
-  safety holds, and repository law still fail closed where their respective
-  layers apply.
+  downgrade the session into prompting. A non-bypassable registered hold that
+  requires a human decision is blocked in Full Access instead of executing or
+  opening a contradictory modal. Typed deny, catastrophic
+  background/headless safety holds, and repository law still fail closed where
+  their respective layers apply.
 - With `approval_policy = "never"`, a matching typed `ask` is forbidden because
   the required prompt cannot be shown.
 
@@ -115,8 +116,8 @@ The contract is exercised by tests at the layers that own each decision:
   prefix denial and the typed `layer → action → specificity → approval-mode`
   sequence through the public execution-policy API.
 - `hook_fold_deny_wins_over_ask_and_allow` covers foreground hook folding.
-- `non_bypassable_registered_tools_auto_approve_in_full_access` covers
-  registered holds.
+- `full_access_blocks_non_bypassable_registered_tools_without_prompting`
+  covers registered holds at the engine execution boundary.
 - `full_access_permission_allow_cannot_bypass_background_catastrophic_floor`
   and `full_access_permission_allow_cannot_bypass_repo_law` cover later safety
   layers overriding a remembered allow.

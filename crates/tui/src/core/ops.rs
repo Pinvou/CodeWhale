@@ -146,11 +146,10 @@ impl TurnToolSecurityPolicy {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "benchmark-eval-controls"))]
 mod turn_security_tests {
     use super::*;
 
-    #[cfg(feature = "benchmark-eval-controls")]
     #[test]
     fn forkguard_benchmark_controls_are_explicit_and_default_off() {
         let default = TurnToolSecurityPolicy::new(Some(Vec::new()), None);

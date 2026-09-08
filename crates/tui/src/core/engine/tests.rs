@@ -6654,6 +6654,74 @@ fn forkguard_steer_lifecycle_late_withdraw_reconciles_committed_state() {
     assert_eq!(state.settle(&steer, false), SteerSettlement::Ignore);
 }
 
+#[tokio::test]
+async fn forkguard_steer_channel_commits_live_and_drops_withdrawn_input_in_turn_loop() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("workspace");
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "steer lifecycle complete",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let steer_target = engine.begin_steer_turn();
+    let committed_id = handle
+        .steer("FORKGUARD_COMMITTED_STEER")
+        .await
+        .expect("queue committed steer through the public handle");
+    let dropped_id = handle
+        .steer("FORKGUARD_WITHDRAWN_STEER")
+        .await
+        .expect("queue withdrawn steer through the public handle");
+    assert_eq!(handle.withdraw_steer(&dropped_id), SteerWithdrawal::Retired);
+
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let surface = test_tool_surface(
+        &engine,
+        crate::tools::ToolRegistry::new(context),
+        None,
+        AppMode::Agent,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    engine.finish_steer_turn(steer_target);
+
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    let request_text = mock.captured_requests()[0]
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(request_text.contains("FORKGUARD_COMMITTED_STEER"));
+    assert!(!request_text.contains("FORKGUARD_WITHDRAWN_STEER"));
+
+    let mut events = handle.rx_event.write().await;
+    let mut saw_committed = false;
+    let mut saw_dropped = false;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            Event::SteerCommitted { steer_id } if steer_id == committed_id => {
+                saw_committed = true;
+            }
+            Event::SteerDropped { steer_id } if steer_id == dropped_id => {
+                saw_dropped = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_committed, "live steer must receive a commit receipt");
+    assert!(saw_dropped, "withdrawn steer must receive a drop receipt");
+}
+
 #[test]
 fn steer_lifecycle_stop_retires_reserved_input_once() {
     let mut state = SteerControlState::default();
@@ -8669,13 +8737,13 @@ fn rlm_eval_required_approval_is_auto_approved_in_full_access() {
 
 #[test]
 fn non_bypassable_registered_tools_auto_approve_in_full_access() {
-    // #3866 reversed (owner decision, 2026-08-10): Full Access already grants
-    // everything these calls can do — shell included — so a hold that cannot
-    // open its own approval modal auto-approves instead of stranding the
-    // call. Ask, which can open the modal, still gates every one of these.
-    // Registry launcher is host-constructed and cache-bound (no free-form
-    // command), so Full Access auto-approves it: `--auto` automation must
-    // be able to complete the discovery flow end to end. Ask still gates it.
+    // Upstream comparison: the shared resolver still returns "do not prompt"
+    // for Bypass. Pinvou's execution boundary deliberately turns that result
+    // into a denial via `registered_tool_blocked_in_full_access`; the
+    // fork-policy §3.4 integration test below records that reversal.
+    // Upstream #3866's resolver contract maps these holds to unprompted in
+    // Full Access while Ask still prompts. The fork keeps that shared helper
+    // unchanged and adds its stricter denial only at final engine dispatch.
     assert!(!registered_tool_approval_required(
         "start_registry_mcp_server",
         ApprovalRequirement::Required,
@@ -12509,6 +12577,10 @@ async fn assert_full_access_model_tool_batch_runs(
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn full_access_blocks_non_bypassable_registered_tools_without_prompting() {
+    // Fork-policy §3.4: this intentionally reverses upstream v0.9.12's
+    // `full_access_auto_approves_non_bypassable_registered_tools`. Pinvou
+    // treats a tool that requires an explicit human decision as unavailable
+    // in Full Access, whose posture cannot open an approval prompt.
     let _lock = lock_test_env();
     let workspace = tempdir().expect("tempdir");
     let marker = workspace.path().join("runtime-tool-must-run");

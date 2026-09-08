@@ -99,6 +99,20 @@ change, a project-file change) into the prefix — append it as a user-role
 message instead. A later request must be `previous ⊕ suffix` unless a logged
 header change or a history reset explains the difference.
 
+## Permissions fragment budget compatibility
+
+Configured `instructions = [...]` files have an existing 100 KiB per-file
+contract. An embedding host that supplies the same reviewed instructions
+inline must not lose their tail when they enter the `Permissions` WorldState
+fragment. That fragment therefore retains the 100 KiB instruction ceiling;
+all other WorldState fragments keep the shared 40 KiB / 10K-token ceiling.
+
+This remains upstreaming debt: the identity-specific budget currently lives in
+the TUI WorldState implementation even though `codewhale-core` owns the shared
+fragment constants and still applies its generic ceiling. The reusable fix is
+to make the core fragment policy own the `Permissions` exception and have the
+TUI delegate to it, without raising the global fragment cap.
+
 ## Deferred: full reconstructability (Layer 3)
 
 DeepSeek Harness derives every request from an append-only session log via a
