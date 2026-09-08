@@ -2758,9 +2758,11 @@ function workspaceDisplayName(path) {
           return;
         }
         if (bridge.available) {
-          // Mirror the resolved appearance for older clients after a downgrade.
+          // Read the current OS snapshot: its change event may not have reached
+          // the React hook yet when the user selects system. Keep old clients
+          // consistent after a downgrade without persisting a stale appearance.
           bridge.settings.saveSettings({
-            theme: resolveTheme(scheme, systemDark) === 'dark' ? 'genesis' : 'liquid-light',
+            theme: resolveTheme(scheme) === 'dark' ? 'genesis' : 'liquid-light',
             color_scheme: scheme,
           });
         }
