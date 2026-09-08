@@ -9,6 +9,18 @@ import addFormats from 'ajv-formats';
 const root = path.resolve(import.meta.dirname, '../..');
 const chart = path.join(root, 'deploy/helm/account-platform');
 
+test('New API Compose and both Helm profiles pin the approved rc.26 index', async () => {
+  const compose = YAML.parse(await readFile(path.join(root, 'deploy/compose/compose.yaml'), 'utf8'));
+  const digest = 'sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d';
+  for (const file of ['values.yaml', 'values-production-new.yaml']) {
+    const values = YAML.parse(await readFile(path.join(chart, file), 'utf8'));
+    assert.equal(values.images.newApi.repository, 'calciumion/new-api', file);
+    assert.equal(values.images.newApi.tag, 'v1.0.0-rc.26', file);
+    assert.equal(values.images.newApi.digest, digest, file);
+    assert.equal(compose.services.newapi.image, `${values.images.newApi.repository}:${values.images.newApi.tag}@${digest}`, file);
+  }
+});
+
 test('Helm production-new values contain references, not secret material or simulators', async () => {
   const raw = await readFile(path.join(chart, 'values-production-new.yaml'), 'utf8');
   const values = YAML.parse(raw);

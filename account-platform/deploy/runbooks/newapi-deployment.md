@@ -1,6 +1,15 @@
 # 真实 New API 部署与初始化
 
-账号平台使用上游 `QuantumNous/new-api` 的官方容器作为真实模型数据面。开发 Compose 与 Helm 当前固定为 `calciumion/new-api:v1.0.0-rc.11`，并锁定多架构镜像摘要 `sha256:bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19`。升级版本前必须重新执行兼容、安全和流式结算测试，不得改用 `latest`。
+账号平台使用上游 `QuantumNous/new-api` 的官方容器作为真实模型数据面。开发 Compose 与 Helm 当前固定为 `calciumion/new-api:v1.0.0-rc.26`，并锁定多架构镜像摘要 `sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d`。该 RC 经本次部署负责人明确选用，并非官方稳定版；固定候选镜像不代表生产验收通过。升级版本前必须重新执行兼容、安全和流式结算测试，不得改用 `latest`。
+
+## rc.26 来源与验收边界（2026-09-08）
+
+- [官方发布记录](https://github.com/QuantumNous/new-api/releases/tag/v1.0.0-rc.26)对应源码提交 `8f6961c675932f406260ff0c218bc2aa0603e9b2`；镜像 OCI revision/source/version 标签与之相符。
+- Docker Hub 原始 OCI index 响应重新计算 SHA-256，与上述摘要一致；`linux/amd64` 子 manifest 为 `sha256:5576e4c2f16c6f8e094268a13c90eb0ee541b374bc9681292bd963a3b384497c`，config 为 `sha256:5c67339bb8c9ff26295f8518a738ce09ce5a9f2f2633c07efab038da11395633`，两者也按原始响应复算。
+- `linux/arm64` 子 manifest 为 `sha256:3b0b727823d102f898e1170c31833ffe9a5330e0ba84ed252e0f565fb3d4e0f0`；本次仅验证 amd64 运行时，不将 `unknown/unknown` 的 attestation 条目当作运行平台，也不将存在 attestation 等同于独立签名验证。
+- 官方镜像没有默认非 root 用户，部署必须保留 `65532:65532`、只读根文件系统、移除 capabilities 和受限可写目录。发布说明要求 64 位系统，并新增大额度字段检查；必须实测独立 PostgreSQL 空库启动及超过 32 位上限的额度，不对旧测试库做迁移。
+- 若 Docker Hub 不可达，可使用缓存仓库传输**同一摘要**的镜像；拉取后核对平台 config ID 和 OCI revision/version，部署引用不得退化成可漂移标签。仓库模板仍以官方仓库为准，不把站点镜像网络配置写入公共模板。
+- 完整安全公告复核、隔离管理/Token API、JSON/SSE 用量和核对兼容性、内部 TLS 与生产依赖门禁仍是切换条件。摘要核验只证明固定了同一镜像，不能证明镜像没有漏洞。正式切换前不得开放 New API 公网入口或导入旧测试数据。
 
 New API 使用 AGPLv3，并带上游声明的附加归属要求。发布或修改前必须完成许可证、上游模型授权、内容安全、日志留存和适用监管要求复核。
 

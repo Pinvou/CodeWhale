@@ -452,7 +452,7 @@ services:
   newapi:
     <<: *service-defaults
     profiles: [real-newapi]
-    image: calciumion/new-api:v1.0.0-rc.11@sha256:bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19
+    image: calciumion/new-api:v1.0.0-rc.26@sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d
     user: "65532:65532"
     cap_drop: [ALL]
     tmpfs:

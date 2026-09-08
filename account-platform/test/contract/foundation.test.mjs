@@ -274,7 +274,7 @@ test('Compose keeps data stores private and simulator development-only', async (
   assert.equal(compose.services['payment-simulator'].environment.APP_ENV, 'development');
   assert.deepEqual(compose.services.newapi.profiles, ['real-newapi']);
   assert.deepEqual(compose.services.newapi.networks, ['backend']);
-  assert.match(compose.services.newapi.image, /^calciumion\/new-api:v1\.0\.0-rc\.11@sha256:[a-f0-9]{64}$/);
+  assert.equal(compose.services.newapi.image, 'calciumion/new-api:v1.0.0-rc.26@sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d');
   assert.deepEqual(compose.services.newapi.ports, ['127.0.0.1:18106:3000']);
   assert.match(compose.services['token-gateway'].environment.TOKEN_PROVIDER_ALLOWED_HOSTS, /(?:^|,)newapi(?:,|$)/);
   assert.match(compose.services['billing-service'].environment.DATABASE_URL, /account_platform_billing/);
