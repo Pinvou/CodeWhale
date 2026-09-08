@@ -1717,6 +1717,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         setArtifactDockActivation((value) => value + 1);
       }, [artifactCount, latestArtifact, pinvouMode]);
       const draftEpoch = bs ? bs.draftEpoch : 0;
+      const draftEpochRef = useRef(draftEpoch);
+      draftEpochRef.current = draftEpoch;
       // 切换 session / 新建草稿会话时读取各自 working set 里的未发送内容。
       // 从设置、工具商店等页面返回时 ChatView 会重新挂载，初始 state 也从
       // 同一份内存草稿恢复。
@@ -1745,7 +1747,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         handleComposerInputChange('');
         composerRef.current?.focus();
       }
-      const dispatchChatMessage = useCallback(async (text, voiceMeta) => {
+      const dispatchChatMessage = useCallback(async (text, voiceMeta, voiceOwner) => {
         if (!bridge.available) return false;
         const outgoing = String(text || '').trim();
         const matchedPersonalWorkbenchDraft = findPersonalWorkbenchTemplateDraft(outgoing);
@@ -1799,6 +1801,10 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         } else {
           setSceneCapabilityStatus(null);
         }
+        // Capability preparation can outlive the originating voice composer.
+        // Do not let the bridge resolve its current active session as our owner.
+        if (voiceOwner && ((activeSessionIdRef.current || null) !== voiceOwner.sessionId
+          || (!voiceOwner.sessionId && Number(draftEpochRef.current || 0) !== voiceOwner.draftEpoch))) return false;
         if (!activeSessionId) {
           pendingModeScopeMigrationRef.current = {
             text: visibleOutgoing,
@@ -1807,7 +1813,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         }
         let dispatchResult;
         try {
-          dispatchResult = await bridge.chat.sendMessage(visibleOutgoing, meta);
+          dispatchResult = await bridge.chat.sendMessage(visibleOutgoing, meta, voiceOwner);
         } catch (error) {
           pendingModeScopeMigrationRef.current = null;
           throw error;
@@ -1828,7 +1834,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           || bridge.voice.getVoiceOperationId(activeSessionId || null, 'chat');
         if (operationId) bridge.voice.beginVoiceSubmission(operationId);
         try {
-          const accepted = await dispatchChatMessage(text, { voiceOperationId: operationId });
+          const accepted = await dispatchChatMessage(text, { voiceOperationId: operationId }, voiceContext?.draftOwner);
           if ((accepted === false || accepted === 'restored') && operationId) {
             bridge.voice.completeVoiceSubmission(operationId, null, false);
           }
@@ -2235,7 +2241,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             draftEpoch: Number(draftEpoch || 0), operationId: context?.operationId, restored: false };
           setInputText('');
           try {
-            const result = await sendChatMessage(constrained.text, context);
+            const result = await sendChatMessage(constrained.text, { ...context, draftOwner: owner });
             if (result === false) bridge.chat.restoreTaskDraft(constrained.text, owner);
             return result === 'restored' ? false : result;
           } catch (error) {

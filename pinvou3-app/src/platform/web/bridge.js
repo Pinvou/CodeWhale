@@ -3160,13 +3160,23 @@
   // 会话——in-flight 复用同一 promise；create_session await 期间用户切走会物化在错误
   // 会话（导航被劫持）——物化前校验 activeSessionId 仍为空，已切走则只登记后台 buffer。
   var ensureSessionInFlight = null;
-  async function ensureSession() {
+  var ensureSessionDraftOutcome = null;
+  async function ensureSession(draftOwner) {
     if (state.activeSessionId) return state.activeSessionId;
-    if (ensureSessionInFlight) return ensureSessionInFlight;
+    if (ensureSessionInFlight) {
+      var pendingOutcome = ensureSessionDraftOutcome;
+      var pendingResult = await ensureSessionInFlight;
+      if (draftOwner && pendingOutcome && draftOwner.draftEpoch === pendingOutcome.epoch) {
+        draftOwner.createdSessionId = pendingOutcome.createdSessionId;
+      }
+      return pendingResult;
+    }
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
     // 只推进 token 不改 activeSessionId（仍为 null），在途 create_session 返回
     // 后必须连同 token 一起校验，否则会劫持用户新进的草稿（三审 P1）。
     var navToken = sessionSwitchRequestToken;
+    var draftOutcome = { epoch: Number(state.draftEpoch || 0), createdSessionId: null };
+    ensureSessionDraftOutcome = draftOutcome;
     var p = (async function () {
       // 多 session 并发:不预热 engine。新建空 session 的 buffer 由 switchActiveTo({fresh}) 起。
       try {
@@ -3182,9 +3192,11 @@
           var bg = sessionStates[meta.id] = freshBuffer();
           bg.loadedFromDisk = true;
           bg.sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+          draftOutcome.createdSessionId = meta.id;
           return null;
         }
         switchActiveTo(meta.id, { fresh: true });
+        draftOutcome.createdSessionId = meta.id;
         state.composerDraft = composerDraft;
         sessionStates[meta.id].composerDraft = composerDraft;
         getBuffer(meta.id).sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
@@ -3228,7 +3240,11 @@
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; },
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
     );
-    return p;
+    var result = await p;
+    if (draftOwner && draftOwner.draftEpoch === draftOutcome.epoch) {
+      draftOwner.createdSessionId = draftOutcome.createdSessionId;
+    }
+    return result;
   }
 
   function reportSessionSwitchFailure(error, errorScope) {
@@ -5439,7 +5455,9 @@
   // - false        nothing dispatched and the text was NOT restored
   //                (notice-only early returns / admission rejected) — the
   //                caller owns putting the draft back.
-  async function sendMessage(text, meta) {
+  async function sendMessage(text, meta, voiceOwner) {
+    if (voiceOwner && ((state.activeSessionId || null) !== voiceOwner.sessionId
+      || (!voiceOwner.sessionId && Number(state.draftEpoch || 0) !== voiceOwner.draftEpoch))) return false;
     if (!meta || !meta.voiceOperationId) {
       var voiceOperationId = getVoiceOperationId && getVoiceOperationId(state.activeSessionId, "chat");
       if (voiceOperationId) meta = Object.assign({}, meta || {}, { voiceOperationId: voiceOperationId });
@@ -5474,16 +5492,18 @@
       // 必须用返回值判空：切走场景 ensureSession 返回 null 但 activeSessionId
       // 非空（用户已切到别的会话），按 activeSessionId 继续会把本条消息发进
       // 错误会话（审计 #257）。
-      var materialized = await ensureSession();
-      // 物化中止（await 期间切走）→ 把输入放回输入框，不静默丢字
+      var draftOwner = { sessionId: null, draftEpoch: Number(state.draftEpoch || 0),
+        operationId: meta && meta.voiceOperationId, restored: false };
+      var materialized = await ensureSession(draftOwner);
+      // 物化中止（await 期间切走）→ 按原始归属恢复，不写入当前其它会话。
       // （与 tauri 版对齐，二审 F3；错误提示由 ensureSession 内如实给出）。
       // append=true: failure-recovery semantics — the user may have started
       // the next message during the await.
-      if (!materialized) {
-        prefillComposer(text, true);
-        // The prefill IS the restore; "restored" stops the caller from doing
-        // it a second time (the prefill lands asynchronously and would then
-        // append a duplicate).
+      if (!materialized || state.activeSessionId !== materialized) {
+        if (materialized) draftOwner.createdSessionId = materialized;
+        restoreTaskDraft(text, draftOwner);
+        // Scoped recovery owns the restore; the caller must not append again
+        // even when the text is retained in a background buffer or draft epoch.
         return "restored";
       }
     }
@@ -5599,7 +5619,15 @@
     notify();
     return false;
   }
+  var pendingTaskDraftRecovery = null;
   function getComposerDraft() {
+    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
+      pendingTaskDraftRecovery = null;
+    }
+    if (pendingTaskDraftRecovery && !state.activeSessionId) {
+      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
+      pendingTaskDraftRecovery = null;
+    }
     return String(state.composerDraft || "");
   }
   function setComposerDraft(value) {
@@ -5622,11 +5650,16 @@
   }
   function restoreTaskDraft(text, owner) {
     if (!owner || owner.restored) return false;
-    const sid = owner.sessionId || voiceOperationSessionId(owner.operationId);
+    const sid = owner.sessionId || owner.createdSessionId || voiceOperationSessionId(owner.operationId);
     if (sid) {
+      if (owner.operationId) completeVoiceSubmission(owner.operationId, sid, false);
       restoreComposerText(sid, text);
     } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
       prefillComposer(text, true);
+    } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
+        ? pendingTaskDraftRecovery.text : "";
+      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
     } else {
       return false;
     }
@@ -9378,6 +9411,9 @@
   var voiceOperations = new Map();
 
   function rememberVoiceOperation(session) {
+    if (!session.sessionId && session.ownerKind === "chat") {
+      session.draftEpoch = Number(state.draftEpoch || 0);
+    }
     for (var entry of voiceOperations) {
       if (entry[1].telemetryTerminal) voiceOperations.delete(entry[0]);
     }
@@ -9389,6 +9425,7 @@
     var operation = candidates.find(function (item) {
       return !item.telemetryTerminal && !item.pendingSubmission && item.voiceResultReady
         && (item.sessionId || null) === (sessionId || null)
+        && (item.sessionId || item.ownerKind !== "chat" || item.draftEpoch === Number(state.draftEpoch || 0))
         && item.ownerKind === (ownerKind || "chat");
     });
     return operation ? operation.operationId : null;

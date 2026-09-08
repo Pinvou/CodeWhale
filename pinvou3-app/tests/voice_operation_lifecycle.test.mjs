@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
+import { prepareSceneCapabilities, requiredCapabilitiesForMeta } from '../src/features/chat/scene-capabilities.js';
 
 const root = path.resolve(import.meta.dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
@@ -216,7 +217,7 @@ test('composer adapters preserve explicit metadata and authoritative native owne
   const chat = read('src/features/chat/ChatView.jsx');
   const native = read('src/features/codex/CodexAcpView.jsx');
   assert.match(hook, /deliverVoiceTask\(current, next, \{ \.\.\.preview\.context, mode: 'edit'/);
-  assert.match(chat, /sendChatMessage\(constrained\.text, context\)/);
+  assert.match(chat, /sendChatMessage\(constrained\.text, \{ \.\.\.context, draftOwner: owner \}\)/);
   assert.match(native, /sendTask: async \(outgoing, context\) => send\(outgoing, context\)/);
   assert.match(native, /nativeControlsSessionRef\.current === activeId \? nativeControls\.modelId : null/);
   assert.match(native, /completeVoiceSubmission\(voiceOperationId, targetId, true\)/);
@@ -305,20 +306,24 @@ function bridgeFunction(source, name) {
 }
 
 for (const lane of ['desktop', 'web']) {
-  for (const outcome of ['restored', 'false', 'throw', 'switched']) {
+  for (const outcome of ['restored', 'false', 'throw', 'switched', 'draft-switched', 'draft-failed-switched',
+    'capability-switched', 'draft-capability-switched', 'draft-epoch-switched']) {
     for (const typeDuringAwait of [false, true]) {
       test(`${lane}: real voice writeback/send/prefill ${outcome}, typing=${typeDuringAwait}, restores exactly once`, async () => {
         const h = harness(sources[lane]);
         const chat = read('src/features/chat/ChatView.jsx');
         const hook = read('src/features/voice-composer/useComposerVoiceInput.js');
         const sendSource = lane === 'desktop' ? read('src/platform/tauri/bridge/chat.js') : sources.web;
-        const origin = outcome === 'restored' ? null : 'original-session';
-        const operation = h.operation('voiceop-real-recovery', 'chat', origin);
+        const origin = outcome === 'restored' || outcome.startsWith('draft-') ? null : 'original-session';
+        const switching = outcome.includes('switched');
+        const preparing = outcome.includes('capability');
+        const createdInBackground = outcome === 'draft-switched' || outcome === 'draft-epoch-switched';
         const buffers = { 'original-session': { composerDraft: '', remoteTurnActive: outcome === 'switched' },
           'other-session': { composerDraft: 'other draft' } };
         Object.assign(h.state, { activeSessionId: origin, composerDraft: '', draftEpoch: 4,
           composerPrefill: { id: 0, text: '' }, queued: [], chatItems: [],
           attachments: outcome === 'false' ? [{ status: 'parsing' }] : [] });
+        const operation = h.operation('voiceop-real-recovery', 'chat', origin);
         let unblock;
         const gate = new Promise(resolve => { unblock = resolve; });
         let prefillPending = false;
@@ -328,7 +333,18 @@ for (const lane of ['desktop', 'web']) {
         Object.assign(ctx, {
           sessionStates: buffers, voice: () => h.api, IS_WEB: lane === 'web', canInvoke: () => false,
           useCallback: fn => fn, useEffect: fn => fn(), activeSessionId: origin,
-          activeSessionIdRef: { current: origin }, draftEpoch: 4, inputTextRef: { current: '' },
+          activeSessionIdRef: { current: origin }, draftEpoch: 4, draftEpochRef: { current: 4 }, inputTextRef: { current: '' },
+          pendingTaskDraftRecovery: null, sessionSwitchRequestToken: 0,
+          findPersonalWorkbenchTemplateDraft: () => null, personalWorkbenchTemplateIdRef: { current: null },
+          pendingModeScopeMigrationRef: { current: null }, pinvouModeStateRef: { current: null },
+          hasReadyAttachment: false, visualPosterSceneActive: false, documentWritingSceneActive: preparing,
+          personalWorkbenchSceneActive: false, dataVisualizationSceneActive: false, pptDesignSceneActive: false,
+          createDocumentWritingMessageMeta: () => ({ pinvouScene: 'work:document-writing' }),
+          requiredCapabilitiesForMeta, prepareSceneCapabilities, canPrepareSceneCapabilities: () => true,
+          isWeb: lane === 'web', can: () => true, setSceneCapabilityStatus() {},
+          t: { uiChatScenes: { documentWriting: { preparing: 'preparing', failure: 'failed' } } },
+          invokeTauri: async command => { await gate; return command === 'list_marketplace_tools'
+            ? [{ id: 'gongwen', installed: true }] : [{ id: 'government-writing', installed: true }]; },
           setInputTextState() {}, setInputLimitReached() {}, constrainChatInput: text => ({ text: String(text), truncated: false }),
           bt: key => key, addSystemItem() {}, getBuffer: sid => buffers[sid], isBusyFor: () => false,
           formatAttachmentDisplayText: text => { if (outcome === 'throw') throw new Error('controlled send failure'); return text; },
@@ -345,8 +361,21 @@ for (const lane of ['desktop', 'web']) {
         const functions = ['getComposerDraft', 'setComposerDraft', 'prefillComposer', 'restoreTaskDraft',
           lane === 'desktop' ? 'restoreSteerText' : 'restoreComposerText', 'sendMessage'];
         vm.runInContext(functions.map(name => bridgeFunction(sendSource, name)).join('\n'), ctx);
+        const sentTargets = [];
+        ctx.doSendFor = async sid => { sentTargets.push(sid); return true; };
+        if (outcome.startsWith('draft-') && !preparing) {
+          const sessionSource = lane === 'desktop' ? read('src/platform/tauri/bridge/sessions.js') : sources.web;
+          Object.assign(ctx, { ensureSessionInFlight: null, ensureSessionDraftOutcome: null,
+            freshBuffer: () => ({ composerDraft: '' }),
+            invoke: async () => { await gate; if (outcome === 'draft-failed-switched') throw new Error('create failed');
+              return { id: 'created-session' }; },
+          });
+          vm.runInContext(bridgeFunction(sessionSource, 'ensureSession'), ctx);
+        }
+        const bridgeTargets = [];
         ctx.bridge = { available: true, voice: h.api, chat: {
-          sendMessage: ctx.sendMessage, setComposerDraft: ctx.setComposerDraft, restoreTaskDraft: ctx.restoreTaskDraft,
+          sendMessage: (...args) => { bridgeTargets.push(h.state.activeSessionId); return ctx.sendMessage(...args); },
+          setComposerDraft: ctx.setComposerDraft, restoreTaskDraft: ctx.restoreTaskDraft,
         } };
         const setStart = chat.indexOf('      const setInputText = useCallback(');
         const setEnd = chat.indexOf('\n      const [artifactsOpen', setStart);
@@ -355,8 +384,8 @@ for (const lane of ['desktop', 'web']) {
         const taskStart = chat.indexOf('        sendTask: async (outgoing, context) => {');
         const taskEnd = chat.indexOf('\n        onTaskAccepted:', taskStart);
         const task = chat.slice(taskStart, taskEnd).trim().replace(/^sendTask:/, 'this.voiceTask =').replace(/,$/, ';');
-        ctx.dispatchChatMessage = ctx.sendMessage;
-        vm.runInContext(`${chat.slice(setStart, setEnd)}\n${chat.slice(sendStart, sendEnd)}\n${task}\nthis.setInput = setInputText;`, ctx);
+        const dispatchStart = chat.indexOf('      const dispatchChatMessage = useCallback(');
+        vm.runInContext(`${chat.slice(setStart, setEnd)}\n${chat.slice(dispatchStart, sendStart)}\n${chat.slice(sendStart, sendEnd)}\n${task}\nthis.setInput = setInputText;`, ctx);
         ctx.adapterRef = { current: { targetId: 'chat-composer', setDraft: ctx.setInput,
           getDraft: () => ctx.inputTextRef.current, sendTask: ctx.voiceTask,
           onTaskAccepted: () => { accepted += 1; ctx.setInput(''); } } };
@@ -370,12 +399,14 @@ for (const lane of ['desktop', 'web']) {
         const sending = ctx.writeback('voice-session', 'voice task', '', { mode: 'task', operationId: operation.operationId })
           .then(() => 'accepted', error => error.category);
         assert.equal(ctx.inputTextRef.current, '', 'owned writeback draft must be consumed before awaiting bridge');
-        if (outcome === 'switched') {
+        if (switching) {
           h.state.activeSessionId = 'other-session';
           ctx.activeSessionIdRef.current = 'other-session';
+          ctx.sessionSwitchRequestToken += 1;
+          if (outcome === 'draft-epoch-switched') { h.state.draftEpoch += 1; ctx.draftEpochRef.current += 1; }
           ctx.setInput('other draft');
         }
-        if (typeDuringAwait) ctx.setInput(outcome === 'switched' ? 'other new input' : 'new input');
+        if (typeDuringAwait) ctx.setInput(switching ? 'other new input' : 'new input');
         unblock();
         assert.equal(await sending, 'send_failed');
         // Consume the actual ChatView prefill effect, not a replacement append stub.
@@ -388,10 +419,32 @@ for (const lane of ['desktop', 'web']) {
         } else if (draftSyncPending) {
           ctx.setInput(h.state.composerDraft);
         }
-        const expected = outcome === 'switched' ? (typeDuringAwait ? 'other new input' : 'other draft')
+        const expected = switching ? (typeDuringAwait ? 'other new input' : 'other draft')
           : typeDuringAwait ? 'new input\nvoice task' : 'voice task';
         assert.equal(ctx.inputTextRef.current, expected);
-        if (outcome === 'switched') assert.equal(buffers['original-session'].composerDraft, 'voice task');
+        if (switching && origin) assert.equal(buffers['original-session'].composerDraft, 'voice task');
+        if (createdInBackground) {
+          assert.equal(buffers['created-session'].composerDraft, 'voice task');
+          assert.equal(operation.sessionId, 'created-session');
+        }
+        assert.deepEqual(sentTargets, [], 'ownership invalidation cannot admit a turn in B');
+        if (preparing) assert.deepEqual(bridgeTargets, [], 'stale capability preparation must not enter sendMessage at all');
+        if (outcome === 'draft-failed-switched' || outcome === 'draft-capability-switched') {
+          assert.equal(ctx.getComposerDraft(), expected, 'reading B cannot consume the pending draft');
+          h.state.activeSessionId = null;
+          h.state.composerDraft = 'draft new input';
+          assert.equal(ctx.getComposerDraft(), 'draft new input\nvoice task');
+          assert.equal(ctx.getComposerDraft(), 'draft new input\nvoice task', 'same epoch recovery is once-only');
+          assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
+          const owner = { sessionId: null, draftEpoch: 4 };
+          h.state.activeSessionId = 'other-session';
+          ctx.restoreTaskDraft('stale draft', owner);
+          h.state.draftEpoch += 1;
+          h.state.activeSessionId = null;
+          h.state.composerDraft = 'fresh draft';
+          assert.equal(ctx.getComposerDraft(), 'fresh draft', 'new epoch cannot inherit retained text');
+          assert.equal(h.api.getVoiceOperationId(null, 'chat'), null, 'new epoch cannot inherit retained voice provenance');
+        }
         assert.equal(accepted, 0, 'rejected/restored task must not clear the restored draft or claim success');
       });
     }

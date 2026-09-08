@@ -40,7 +40,15 @@
   // Composer 草稿是纯前端短期状态：写入时不 notify，避免每次按键都克隆
   // 整个 chat slice 并触发 App 重渲染。会话切换本身会 notify，ChatView 会在
   // activeSessionId 变化后主动读取目标 working set 的草稿。
+  var pendingTaskDraftRecovery = null;
   function getComposerDraft() {
+    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
+      pendingTaskDraftRecovery = null;
+    }
+    if (pendingTaskDraftRecovery && !state.activeSessionId) {
+      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
+      pendingTaskDraftRecovery = null;
+    }
     return String(state.composerDraft || "");
   }
   function setComposerDraft(value) {
@@ -688,7 +696,9 @@
   //                draft back (handleSend's empty-vs-typed restore).
   // Main-path send failures still throw (surfaceFailure) and the caller
   // restores through its catch.
-  async function sendMessage(text, meta) {
+  async function sendMessage(text, meta, voiceOwner) {
+    if (voiceOwner && ((state.activeSessionId || null) !== voiceOwner.sessionId
+      || (!voiceOwner.sessionId && Number(state.draftEpoch || 0) !== voiceOwner.draftEpoch))) return false;
     if (!meta || !meta.voiceOperationId) {
       var voiceOperationId = voice().getVoiceOperationId && voice().getVoiceOperationId(state.activeSessionId, "chat");
       if (voiceOperationId) meta = Object.assign({}, meta || {}, { voiceOperationId: voiceOperationId });
@@ -707,16 +717,16 @@
       // 必须用返回值判空：切走场景 ensureSession 返回 null 但 activeSessionId
       // 非空（用户已切到别的会话），按 activeSessionId 继续会把本条消息发进
       // 错误会话（审计 #257）。
-      var materialized = await ensureSession();
-      if (!materialized) {
-        // 物化中止（如草稿态多智能体开关落盘失败 / await 期间切走）：把输入放回
-        // 输入框，不静默丢字；错误提示由 ensureSession 内如实给出（复核 P1）。
-        // append=true: failure-recovery semantics — the user may have started
-        // the next message during the await; replacing would clobber it.
-        prefillComposer(text, true);
-        // The prefill IS the restore; "restored" stops the caller from doing
-        // it a second time (the prefill lands asynchronously and would then
-        // append a duplicate).
+      var draftOwner = { sessionId: null, draftEpoch: Number(state.draftEpoch || 0),
+        operationId: meta && meta.voiceOperationId, restored: false };
+      var materialized = await ensureSession(draftOwner);
+      if (!materialized || state.activeSessionId !== materialized) {
+        if (materialized) draftOwner.createdSessionId = materialized;
+        // Recover in the created session or the original draft epoch, never
+        // the unrelated active composer. Same-draft recovery remains append-only.
+        restoreTaskDraft(text, draftOwner);
+        // Scoped recovery owns the restore; "restored" stops the caller from doing
+        // it a second time, including when recovery stays in a background buffer.
         return "restored";
       }
     }
@@ -971,11 +981,18 @@
   }
   function restoreTaskDraft(text, owner) {
     if (!owner || owner.restored) return false;
-    const sid = owner.sessionId || voice().voiceOperationSessionId(owner.operationId);
+    const sid = owner.sessionId || owner.createdSessionId
+      || (owner.operationId && voice().voiceOperationSessionId(owner.operationId));
     if (sid) {
+      if (owner.operationId) voice().completeVoiceSubmission(owner.operationId, sid, false);
       restoreSteerText(sid, text);
     } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
       prefillComposer(text, true);
+    } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      // Retain one departed draft in memory, never in the unrelated active session.
+      var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
+        ? pendingTaskDraftRecovery.text : "";
+      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
     } else {
       return false;
     }

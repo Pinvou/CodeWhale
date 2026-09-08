@@ -55,6 +55,9 @@
   var voiceOperations = new Map();
 
   function rememberVoiceOperation(session) {
+    if (!session.sessionId && session.ownerKind === "chat") {
+      session.draftEpoch = Number(state.draftEpoch || 0);
+    }
     for (var entry of voiceOperations) {
       if (entry[1].telemetryTerminal) voiceOperations.delete(entry[0]);
     }
@@ -66,6 +69,7 @@
     var operation = candidates.find(function (item) {
       return !item.telemetryTerminal && !item.pendingSubmission && item.voiceResultReady
         && (item.sessionId || null) === (sessionId || null)
+        && (item.sessionId || item.ownerKind !== "chat" || item.draftEpoch === Number(state.draftEpoch || 0))
         && item.ownerKind === (ownerKind || "chat");
     });
     return operation ? operation.operationId : null;
