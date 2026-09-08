@@ -21,7 +21,7 @@ import (
 
 // This is only reachable from the explicitly enabled two-instance fixture.
 // No snapshot-force capability is exposed by the shipped operator command.
-func snapshotRestoreProof(t *testing.T, source Config, rootToken string, id *age.X25519Identity, sourceBundle []byte, bundlePath, targetEndpoint string) {
+func snapshotRestoreProof(t *testing.T, source Config, rootToken string, id *age.X25519Identity, sourceBundle []byte, bundlePath, targetEndpoint, custodyDirectory string, pass []byte) {
 	t.Helper()
 	u, err := url.Parse(targetEndpoint)
 	if err != nil || u.Scheme != "https" || u.Port() != "8200" || !net.ParseIP(u.Hostname()).IsPrivate() || targetEndpoint == source.Endpoint {
@@ -77,15 +77,16 @@ func snapshotRestoreProof(t *testing.T, source Config, rootToken string, id *age
 	aad := base64.StdEncoding.EncodeToString([]byte("snapshot-fixture-context"))
 	ciphertext := jsonCall(src, "transit/encrypt/pinvou-token-data", rootToken, map[string]string{"plaintext": plaintext, "associated_data": aad})["data"].(map[string]any)["ciphertext"].(string)
 	jsonCall(src, "transit/keys/pinvou-token-data/rotate", rootToken, map[string]any{})
-	backupPolicy := `path "sys/storage/raft/snapshot" { capabilities = ["read", "sudo"] }`
+	backupPolicy := `path "sys/storage/raft/snapshot" { capabilities = ["read", "sudo"] }
+path "auth/token/lookup-self" { capabilities = ["read"] }`
 	readPolicy := `path "transit/decrypt/pinvou-token-data" { capabilities = ["update"] }
 path "transit/keys/pinvou-token-data" { capabilities = ["read"] }`
-	jsonCall(src, "sys/policies/acl/fixture-backup", rootToken, map[string]string{"policy": backupPolicy})
+	jsonCall(src, "sys/policies/acl/pinvou-kms-backup", rootToken, map[string]string{"policy": backupPolicy})
 	jsonCall(src, "sys/policies/acl/fixture-readback", rootToken, map[string]string{"policy": readPolicy})
 	token := func(policy string) string {
 		return jsonCall(src, "auth/token/create-orphan", rootToken, map[string]any{"policies": []string{policy}, "no_default_policy": true, "ttl": "180s", "explicit_max_ttl": "180s", "renewable": false})["auth"].(map[string]any)["client_token"].(string)
 	}
-	backupToken, readToken := token("fixture-backup"), token("fixture-readback")
+	backupToken, readToken := token("pinvou-kms-backup"), token("fixture-readback")
 	if status, _ := src("sys/storage/raft/snapshot", "GET", readToken, nil); status != 403 {
 		t.Fatal("readback identity can take snapshot")
 	}
@@ -93,37 +94,50 @@ path "transit/keys/pinvou-token-data" { capabilities = ["read"] }`
 	if status, _ := src("auth/token/lookup-self", "GET", rootToken, nil); status != 403 {
 		t.Fatal("source root not revoked before backup")
 	}
-	status, snapshot := src("sys/storage/raft/snapshot", "GET", backupToken, nil)
-	if status != 200 || len(snapshot) == 0 {
-		t.Fatal("actual Raft snapshot failed")
+	backupParent := t.TempDir()
+	os.Chmod(backupParent, 0700)
+	for _, name := range []string{"token", "output"} {
+		if os.Mkdir(filepath.Join(backupParent, name), 0700) != nil {
+			t.Fatal("snapshot directory failed")
+		}
 	}
-	encrypted, err := custody.Encrypt(snapshot, id.Recipient())
-	clear(snapshot)
+	backupTokenFile := filepath.Join(backupParent, "token", "token")
+	if os.WriteFile(backupTokenFile, []byte(backupToken), 0600) != nil {
+		t.Fatal("snapshot test sink failed")
+	}
+	backupCfg := SnapshotConfig{Config: source, RecipientFile: filepath.Join(custodyDirectory, "recipient.txt"), TokenFile: backupTokenFile, OutputDirectory: filepath.Join(backupParent, "output")}
+	output, err := CaptureSnapshot(context.Background(), backupCfg)
 	if err != nil {
-		t.Fatal("snapshot outer encryption failed")
+		t.Fatal("SNAPSHOT_CAPTURE_FAILED", err)
 	}
-	snapshotPath := filepath.Join(filepath.Dir(bundlePath), "raft-snapshot.age")
-	if os.WriteFile(snapshotPath, encrypted, 0600) != nil {
-		t.Fatal("encrypted snapshot write failed")
+	snapshotPath := filepath.Join(output, "snapshot.age")
+	encrypted, err := readSnapshotFile(snapshotPath)
+	if err != nil {
+		t.Fatal("snapshot readback failed")
 	}
 	other, _ := age.GenerateX25519Identity()
-	if _, err := custody.Decrypt(encrypted, other); err == nil {
+	if _, err := VerifySnapshot(source, encrypted, other); err == nil {
 		t.Fatal("wrong snapshot identity accepted")
 	}
 	broken := append([]byte(nil), encrypted...)
 	broken[len(broken)-1] ^= 1
-	if _, err := custody.Decrypt(broken, id); err == nil {
+	if _, err := VerifySnapshot(source, broken, id); err == nil {
 		t.Fatal("corrupt snapshot accepted")
 	}
 	encrypted, err = os.ReadFile(snapshotPath)
 	if err != nil {
 		t.Fatal("snapshot readback failed")
 	}
-	verified, err := custody.Decrypt(encrypted, id)
+	verified, err := VerifySnapshot(source, encrypted, id)
 	if err != nil {
 		t.Fatal("snapshot integrity readback failed")
 	}
 	defer clear(verified)
+	if RunVerifySnapshot(source, custodyDirectory, snapshotPath, pass) != nil {
+		t.Fatal("offline interactive snapshot verification failed")
+	}
+	t.Log("ACTUAL_OPENBAO_SCHEDULED_SNAPSHOT_CAPTURE_PASS")
+	var status int
 	parent := t.TempDir()
 	os.Chmod(parent, 0700)
 	pubPath := filepath.Join(parent, "recipient.txt")

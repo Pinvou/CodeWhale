@@ -204,6 +204,8 @@ def main():
             require(result.returncode == 0 and marker in result.stdout and "SKIP" not in result.stdout, "actual recovery integration failed")
             if args.restore_fixture:
                 require("ACTUAL_OPENBAO_SNAPSHOT_RESTORE_PASS" in result.stdout, "actual snapshot restore did not execute")
+                require("ACTUAL_OPENBAO_SCHEDULED_SNAPSHOT_CAPTURE_PASS" in result.stdout, "production snapshot capture did not execute")
+                print("OPENBAO_SCHEDULED_SNAPSHOT_FIXTURE_PASS", flush=True)
                 print("OPENBAO_SNAPSHOT_RESTORE_FIXTURE_PASS", flush=True)
             if args.bootstrap_fixture:
                 require("ACTUAL_OPENBAO_BOOTSTRAP_PASS" in result.stdout, "actual bootstrap did not execute")

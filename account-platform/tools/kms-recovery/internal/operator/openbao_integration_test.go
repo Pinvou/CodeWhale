@@ -173,7 +173,7 @@ func TestOperatorOpenBaoIntegration(t *testing.T) {
 		t.Fatal("resealed instance not ready")
 	}
 	if restoreEndpoint := os.Getenv("PINVOU_TEST_OPENBAO_RESTORE_ENDPOINT"); restoreEndpoint != "" {
-		snapshotRestoreProof(t, cfg, m.Root, id, b, bundle, restoreEndpoint)
+		snapshotRestoreProof(t, cfg, m.Root, id, b, bundle, restoreEndpoint, dir, pass)
 	} else if os.Getenv("PINVOU_TEST_OPENBAO_BOOTSTRAP_ISOLATED") == "1" {
 		bootstrapProof(t, cfg, id, b, parent, dir, pass)
 	} else {
