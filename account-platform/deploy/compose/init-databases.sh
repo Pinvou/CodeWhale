@@ -3,17 +3,17 @@ set -eu
 
 . /opt/pinvou/validate-database-secrets.sh
 
-psql --set=ON_ERROR_STOP=1 \
+psql -X --set=ON_ERROR_STOP=1 \
   --username "$POSTGRES_USER" \
-  --dbname "$POSTGRES_DB" \
-  --set=account_password="$ACCOUNT_DB_PASSWORD" \
-  --set=billing_password="$BILLING_DB_PASSWORD" \
-  --set=token_password="$TOKEN_DB_PASSWORD" \
-  --set=billing_migration_password="$BILLING_MIGRATION_DB_PASSWORD" \
-  --set=token_migration_password="$TOKEN_MIGRATION_DB_PASSWORD" \
-  --set=token_policy_password="$TOKEN_POLICY_DB_PASSWORD" \
-  --set=newapi_password="$NEWAPI_DB_PASSWORD" \
-  --set=keycloak_password="$KEYCLOAK_DB_PASSWORD" <<'SQL'
+  --dbname "$POSTGRES_DB" <<'SQL'
+\getenv account_password ACCOUNT_DB_PASSWORD
+\getenv billing_password BILLING_DB_PASSWORD
+\getenv token_password TOKEN_DB_PASSWORD
+\getenv billing_migration_password BILLING_MIGRATION_DB_PASSWORD
+\getenv token_migration_password TOKEN_MIGRATION_DB_PASSWORD
+\getenv token_policy_password TOKEN_POLICY_DB_PASSWORD
+\getenv newapi_password NEWAPI_DB_PASSWORD
+\getenv keycloak_password KEYCLOAK_DB_PASSWORD
 SELECT format('CREATE ROLE account_service LOGIN PASSWORD %L', :'account_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_service') \gexec
 SELECT format('CREATE ROLE billing_service LOGIN PASSWORD %L', :'billing_password')
@@ -66,10 +66,10 @@ SQL
 # runtime services are deliberately not members of deployment-owner roles.
 
 if [ "${ENABLE_PAYMENT_SIMULATOR_DB:-false}" = "true" ]; then
-  psql --set=ON_ERROR_STOP=1 \
+  psql -X --set=ON_ERROR_STOP=1 \
     --username "$POSTGRES_USER" \
-    --dbname "$POSTGRES_DB" \
-    --set=payment_sim_password="$PAYMENT_SIM_DB_PASSWORD" <<'SQL'
+    --dbname "$POSTGRES_DB" <<'SQL'
+\getenv payment_sim_password PAYMENT_SIM_DB_PASSWORD
 SELECT format('CREATE ROLE payment_simulator LOGIN PASSWORD %L', :'payment_sim_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'payment_simulator') \gexec
 SELECT 'CREATE DATABASE account_platform_payment_sim OWNER payment_simulator'

@@ -34,6 +34,8 @@ test('database credential preflight rejects missing or reused secrets without di
   const fixture = Object.fromEntries([...runtimeKeys, ...deploymentKeys].map((key, index) => [key, `fixture-${index}-independent-value`]));
   const run = env => spawnSync(shell, ['-s'], { input, encoding: 'utf8', env: { ...process.env, ...fixture, ...env } });
   assert.equal(run({}).status, 0);
+  assert.equal(run({ ENABLE_PAYMENT_SIMULATOR_DB: 'false', PAYMENT_SIM_DB_PASSWORD: '' }).status, 0);
+  assert.notEqual(run({ ENABLE_PAYMENT_SIMULATOR_DB: 'true', PAYMENT_SIM_DB_PASSWORD: '' }).status, 0);
   for (const key of deploymentKeys) {
     assert.notEqual(run({ [key]: '' }).status, 0);
     for (const other of [...runtimeKeys, ...deploymentKeys.filter(candidate => candidate !== key)]) {
