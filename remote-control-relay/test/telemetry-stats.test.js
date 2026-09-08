@@ -1433,12 +1433,15 @@ test("behavior deletion removes identity and facts while tombstones survive back
       devices: readFileSync(join(dataDir, "devices.json")),
       usage: readFileSync(join(dataDir, "usage-events.jsonl")),
       behavior: readFileSync(join(dataDir, "behavior-events.jsonl")),
+      pipeline: readFileSync(join(dataDir, "behavior-pipeline.jsonl")),
     };
     const deletion = store.deleteBehaviorData(device, { request_id: "request_delete_0001" });
     assert.equal(deletion.status, "completed");
     assert.match(deletion.deletion_request_id, /^delete_/);
     assert.equal(store.events.length, 0);
     assert.equal(store.behaviorEvents.length, 0);
+    assert.equal(store.behaviorPipelineEvents.length, 0);
+    assert.equal(readFileSync(join(dataDir, "behavior-pipeline.jsonl"), "utf8"), "");
     assert.equal(store.authenticate(credential.device_id, credential.device_token), null);
     assert.throws(
       () => store.register(registration, null),
@@ -1466,6 +1469,7 @@ test("behavior deletion removes identity and facts while tombstones survive back
     writeFileSync(join(dataDir, "devices.json"), backup.devices);
     writeFileSync(join(dataDir, "usage-events.jsonl"), backup.usage);
     writeFileSync(join(dataDir, "behavior-events.jsonl"), backup.behavior);
+    writeFileSync(join(dataDir, "behavior-pipeline.jsonl"), backup.pipeline);
     const deletionLedgerPath = join(dataDir, "behavior-deletion-tombstones.json");
     const deletionLedger = JSON.parse(readFileSync(deletionLedgerPath, "utf8"));
     deletionLedger.records[0].tombstone_expires_at = 1;
@@ -1475,6 +1479,8 @@ test("behavior deletion removes identity and facts while tombstones survive back
     assert.equal(reloaded.authenticate(credential.device_id, credential.device_token), null);
     assert.equal(reloaded.events.length, 0);
     assert.equal(reloaded.behaviorEvents.length, 0);
+    assert.equal(reloaded.behaviorPipelineEvents.length, 0);
+    assert.equal(readFileSync(join(dataDir, "behavior-pipeline.jsonl"), "utf8"), "");
     assert.deepEqual(
       reloaded.priorDeletionResponse("request_delete_0001", credential.device_token),
       deletion,
@@ -1518,7 +1524,7 @@ test("behavior deletion removes identity and facts while tombstones survive back
     assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
     if (process.platform !== "win32") {
       assert.equal(statSync(dataDir).mode & 0o777, 0o700);
-      for (const name of ["devices.json", "usage-events.jsonl", "behavior-events.jsonl", "behavior-deletion-tombstones.json"]) {
+      for (const name of ["devices.json", "usage-events.jsonl", "behavior-events.jsonl", "behavior-pipeline.jsonl", "behavior-deletion-tombstones.json"]) {
         assert.equal(statSync(join(dataDir, name)).mode & 0o777, 0o600);
       }
     }
@@ -1583,7 +1589,7 @@ test("retention compaction removes expired facts but preserves device registrati
   }
 });
 
-test("behavior event rate limits return retryable results without persisting", () => {
+test("behavior event rate limits persist attributable retryable pipeline facts", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-rate-limit-"));
   try {
     const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
@@ -1593,24 +1599,36 @@ test("behavior event rate limits return retryable results without persisting", (
       app_version: "0.8.7",
       platform: "windows",
       arch: "x86_64",
+      hardware_source: "installation_id",
     }, null);
     const device = store.authenticate(credential.device_id, credential.device_token);
     const collection = store.startBehaviorCollection(device, {
       request_id: "request_rate_start_000001",
     });
     store.eventRatePerMinute = 1;
-    const result = store.appendBehaviorEvents(device, [
-      behaviorEvent(collection.collection_period_id),
-      behaviorEvent(collection.collection_period_id, {
-        event_id: "behavior_event_test_000002",
-      }),
-    ], "batch_rate_limited_000001");
-    assert.deepEqual(result.results, [
-      { event_id: "behavior_event_test_000001", status: "retryable", reason_code: "rate_limited" },
-      { event_id: "behavior_event_test_000002", status: "retryable", reason_code: "rate_limited" },
-    ]);
+    const inputEvents = Array.from({ length: 30 }, (_, index) => behaviorEvent(
+      collection.collection_period_id,
+      { event_id: `behavior_rate_limited_${String(index).padStart(4, "0")}` },
+    ));
+    const result = store.appendBehaviorEvents(device, inputEvents, "batch_rate_limited_000001");
+    assert.equal(result.results.length, 30);
+    assert(result.results.every((entry) => entry.status === "retryable"
+      && entry.reason_code === "rate_limited"));
     assert.equal(store.behaviorEvents.length, 0);
     assert.equal(existsSync(join(dataDir, "behavior-events.jsonl")), false);
+    assert.deepEqual(store.behaviorPipelineEvents, [{
+      occurred_at: store.behaviorPipelineEvents[0].occurred_at,
+      device_id: credential.device_id,
+      accepted: 0,
+      duplicate: 0,
+      rejected: 0,
+      retryable: 30,
+    }]);
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "behavior-pipeline.jsonl"), "utf8")).device_id, credential.device_id);
+    const overview = buildBehaviorOverview(
+      [device], [], [], "today", Date.now(), store.behaviorPipelineEvents,
+    );
+    assert.equal(overview.metrics.pipeline_retryable_rate, 1);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

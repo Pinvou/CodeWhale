@@ -2155,7 +2155,7 @@ loadBehaviorEvents() {
         status: "retryable",
         reason_code: "rate_limited",
       }));
-      this.recordBehaviorPipelineResponse(response, now);
+      this.recordBehaviorPipelineResponse(response, now, device.device_id);
       return response;
     }
 
@@ -2241,7 +2241,7 @@ loadBehaviorEvents() {
             reason_code: "storage_unavailable",
           };
         }
-        this.recordBehaviorPipelineResponse(response, now);
+        this.recordBehaviorPipelineResponse(response, now, device.device_id);
         return response;
       }
       for (const event of accepted) {
@@ -2259,16 +2259,26 @@ loadBehaviorEvents() {
   loadBehaviorPipelineEvents() {
     if (!existsSync(this.behaviorPipelinePath)) return;
     const lines = readFileSync(this.behaviorPipelinePath, "utf8").split("\n");
+    let rewriteNeeded = false;
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const entry = JSON.parse(line);
-        if (Number.isFinite(Number(entry?.occurred_at))) this.behaviorPipelineEvents.push(entry);
+        if (!Number.isFinite(Number(entry?.occurred_at))) continue;
+        if (entry.device_id && this.subjectWasDeleted(entry.device_id)) {
+          rewriteNeeded = true;
+          continue;
+        }
+        this.behaviorPipelineEvents.push(entry);
       } catch {
         // Ignore a torn final line; pipeline health must not block service boot.
+        rewriteNeeded = true;
       }
     }
-    this.compactBehaviorPipelineEvents(Date.now());
+    const compacted = this.compactBehaviorPipelineEvents(Date.now());
+    if (rewriteNeeded && !compacted) {
+      atomicWriteJsonLines(this.behaviorPipelinePath, this.behaviorPipelineEvents);
+    }
   }
 
   compactBehaviorPipelineEvents(now = Date.now()) {
@@ -2279,6 +2289,7 @@ loadBehaviorEvents() {
     const changed = retained.length !== this.behaviorPipelineEvents.length;
     this.behaviorPipelineEvents = retained;
     if (changed) atomicWriteJsonLines(this.behaviorPipelinePath, retained);
+    return changed;
   }
 
   recordBehaviorPipelineResponse(response, now = Date.now(), deviceId = "") {
@@ -2408,8 +2419,11 @@ loadBehaviorEvents() {
     this.eventIds = new Set(this.events.map((event) => event.event_id));
     this.behaviorEvents = this.behaviorEvents.filter((event) => event.device_id !== device.device_id);
     this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
+    this.behaviorPipelineEvents = this.behaviorPipelineEvents
+      .filter((entry) => entry.device_id !== device.device_id);
     atomicWriteJsonLines(this.eventsPath, this.events);
     atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
+    atomicWriteJsonLines(this.behaviorPipelinePath, this.behaviorPipelineEvents);
     this.devices.delete(device.device_id);
     this.devicesByHardwareHash.delete(device.hardware_hash);
     this.eventRateBuckets.delete(device.device_id);
