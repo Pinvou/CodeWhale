@@ -36,7 +36,11 @@ spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
+      {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      {{- else }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      {{- end }}
       containers:
         - name: {{ $app.name }}
           image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
@@ -61,9 +65,13 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $app.settings.runtimeSecret }}, key: database-url } }
             - { name: TOKEN_SECRET_PROVIDER, value: {{ $root.Values.tokenGateway.secretProvider | quote }} }
             - { name: TOKEN_SECRET_KEY_ID, value: {{ $root.Values.tokenGateway.secretKeyId | quote }} }
+            {{- if eq $root.Values.tokenGateway.secretProvider "vault-transit" }}
+            {{- include "pinvou.nativeKmsEnv" $root | nindent 12 }}
+            {{- else }}
             {{- range $item := list (dict "env" "TOKEN_SECRET_PROVIDER_URL" "key" "secret-provider-url") (dict "env" "TOKEN_SECRET_PROVIDER_TOKEN" "key" "secret-provider-token") }}
             - name: {{ $item.env }}
               valueFrom: { secretKeyRef: { name: {{ $app.settings.runtimeSecret }}, key: {{ $item.key }} } }
+            {{- end }}
             {{- end }}
             - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
@@ -82,11 +90,20 @@ spec:
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+            {{- include "pinvou.nativeKmsMounts" $root | nindent 12 }}
+            {{- end }}
             - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
             {{- if eq $app.name "token-command-executor" }}
             - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
             {{- end }}
+        {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
+        {{- end }}
       volumes:
+        {{- if and (eq $app.name "token-credential-portal") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsVolumes" (dict "root" $root "component" $app.name) | nindent 8 }}
+        {{- end }}
         - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
         - name: workload-identity
           projected:

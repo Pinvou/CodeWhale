@@ -1071,6 +1071,7 @@ jobs:
           done
           docker run --rm -v "$chart:/chart:ro" alpine/helm:4.2.3 template pinvou /chart -f /chart/values-model-token-test.yaml > "$RUNNER_TEMP/apt137-helm.yaml"
           node scripts/account-platform-model-token-deployment-check.mjs --helm-render "$RUNNER_TEMP/apt137-helm.yaml"
+          PINVOU_TEST_KMS_HELM=1 PINVOU_TEST_KMS_HELM_IMAGE=alpine/helm:4.2.3 node --test account-platform/test/contract/kms-helm.test.mjs
 
       - name: nginx 1.18 真实解析和隔离响应矩阵
         timeout-minutes: 5

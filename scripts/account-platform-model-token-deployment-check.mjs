@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { isIP } from 'node:net';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
 import { checkComposeKMS } from './account-platform-kms-compose-check.mjs';
+import { checkHelmKMS } from './account-platform-kms-helm-check.mjs';
 const require = createRequire(new URL('../account-platform/package.json', import.meta.url));
 const YAML = require('yaml');
 const success = () => ({ decision: 'DEPLOYMENT_CONFIG_VALID', environment_status: 'ENV_PENDING', deployment_status: 'NOT_DEPLOYED' });
@@ -86,7 +87,9 @@ export function validateGovernedNetworkPolicy(policy, workload) {
             check(Object.keys(peer).length === 1 && Object.keys(peer.ipBlock).length === 1 && boundedCIDR(peer.ipBlock.cidr), 'network_cidr_unbounded');
             const permitted = direction === 'egress' && (protocol === 'UDP' && port === 123 && name !== 'token-governance-check'
               || protocol === 'TCP' && (name === 'token-governance-check' ? port === 5432
-                : name === 'token-command-executor' ? [443, 4222].includes(port) : [443, 5432].includes(port)));
+                : name === 'token-command-executor' ? [443, 4222].includes(port) : [443, 5432].includes(port)
+                  || port === 8200 && env(workload.spec.template.spec.containers[0]).TOKEN_SECRET_PROVIDER === 'vault-transit'
+                    && /^https:\/\/[^/?#]+:8200\/?$/.test(env(workload.spec.template.spec.containers[0]).TOKEN_SECRET_PROVIDER_URL)));
             check(permitted, 'network_destination_out_of_scope');
           } else if (peer.namespaceSelector) {
             const namespace = peer.namespaceSelector.matchLabels?.['kubernetes.io/metadata.name'];
@@ -137,6 +140,7 @@ function verifyCredentialEndpoints(environment) {
 }
 
 export function checkGovernedHelmResources(items) {
+  checkHelmKMS(items);
   const deployments = items.filter(item => item?.kind === 'Deployment');
   const get = name => {
     const found = deployments.filter(item => component(item) === name);

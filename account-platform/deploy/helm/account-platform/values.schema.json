@@ -3,6 +3,18 @@
   "type": "object",
   "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "workloadIdentity", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "tokenAccountPolicyBootstrap", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy", "tokenCredentialPortal", "tokenCommandExecutor", "tokenGovernanceCheck", "portal"],
   "properties": {
+    "nativeKms": {
+      "type": "object", "additionalProperties": false,
+      "required": ["endpoint", "port", "caConfigMap", "gatewayBootstrapSecret", "credentialBootstrapSecret", "cidrs"],
+      "properties": {
+        "endpoint": { "type": "string", "pattern": "^(https://[^\\s/?#@]+/?|)$" },
+        "port": { "type": "integer", "enum": [443, 8200] },
+        "caConfigMap": { "$ref": "#/definitions/kmsResourceName" },
+        "gatewayBootstrapSecret": { "$ref": "#/definitions/kmsResourceName" },
+        "credentialBootstrapSecret": { "$ref": "#/definitions/kmsResourceName" },
+        "cidrs": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])/32$" } }
+      }
+    },
     "tokenCredentialPortal": {"type":"object","additionalProperties":false,"required":["enabled","replicas","runtimeSecret","publicUrl","oidcAuthorizationUrl","oidcTokenUrl","oidcClientId","oidcAudience","egressCidrs","oidcJwksUrl"],"properties":{"enabled":{"type":"boolean"},"replicas":{"type":"integer","minimum":1},"runtimeSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"},"publicUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcAuthorizationUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcTokenUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"},"oidcClientId":{"type":"string"},"oidcAudience":{"type":"string"},"egressCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}},"oidcJwksUrl":{"type":"string","pattern":"^(https://[^\\s]+)?$"}}},
     "tokenCommandExecutor": {"type":"object","additionalProperties":false,"required":["enabled","replicas","runtimeSecret","natsCidrs","workloadJwksCidrs"],"properties":{"enabled":{"type":"boolean"},"replicas":{"type":"integer","minimum":1},"runtimeSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"},"natsCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}},"workloadJwksCidrs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":3,"not":{"enum":["0.0.0.0/0","::/0"]}}}}},
     "tokenGovernanceCheck": {"type":"object","additionalProperties":false,"required":["enabled","operationsSecret"],"properties":{"enabled":{"type":"boolean"},"operationsSecret":{"type":"string","maxLength":253,"pattern":"^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"}}},
@@ -220,7 +232,7 @@
         "credentialIsolationEnabled": { "type": "boolean" },
         "adminOperationsOverviewEnabled": { "type": "boolean" },
         "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
-        "secretProvider": { "enum": ["local", "remote"] },
+        "secretProvider": { "enum": ["local", "remote", "vault-transit"] },
         "secretKeyId": { "type": "string" },
         "secretRotationIntervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
         "secretRotationBatchSize": { "type": "integer", "minimum": 1, "maximum": 1000 },
@@ -270,6 +282,7 @@
     "networkPolicy": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } }
   },
   "definitions": {
+    "kmsResourceName": { "type": "string", "maxLength": 253, "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$" },
     "image": {
       "type": "object",
       "required": ["repository", "tag", "pullPolicy"],
@@ -304,13 +317,24 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "tokenGateway": { "type": "object", "properties": { "secretProvider": { "const": "vault-transit" } }, "required": ["secretProvider"] } }, "required": ["tokenGateway"] },
+      "then": {
+        "required": ["nativeKms"],
+        "properties": {
+          "nativeKms": { "type": "object", "properties": { "endpoint": { "type": "string", "minLength": 1 }, "caConfigMap": { "type": "string", "minLength": 1 }, "gatewayBootstrapSecret": { "type": "string", "minLength": 1 }, "cidrs": { "type": "array", "minItems": 1 } } },
+          "tokenGateway": { "type": "object", "properties": { "secretKeyId": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$" } } },
+          "networkPolicy": { "type": "object", "properties": { "enabled": { "const": true } } }
+        }
+      }
+    },
+    {
       "if": { "properties": { "global": { "type": "object", "properties": { "environment": { "const": "production-new" } } } } },
       "then": {
         "properties": {
           "tokenGateway": {
             "type": "object",
             "properties": {
-              "secretProvider": { "const": "remote" },
+              "secretProvider": { "enum": ["remote", "vault-transit"] },
               "secretKeyId": { "type": "string", "minLength": 1 },
               "providerAllowedHosts": { "type": "array", "minItems": 1 }
             }

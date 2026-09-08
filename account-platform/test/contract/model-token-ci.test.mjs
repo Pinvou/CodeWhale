@@ -49,6 +49,7 @@ test('browser and render gates call real engines and never claim fixture environ
   const configuration = step('新治理 profile 的真实配置与镜像门禁').run;
   for (const required of ['model-token.env.example', 'compose.model-token.yaml', '--profile model-token', '--profile governance-operations', '--profile real-newapi', 'config --format json', '--compose-render', '--helm-render', 'values-staging.yaml values-production-new.yaml values-model-token-test.yaml', 'build token-credential-portal token-command-executor token-governance-check']) assert.ok(configuration.includes(required), required);
   assert.ok(configuration.includes('PINVOU_TEST_KMS_COMPOSE=1 node --test account-platform/test/contract/kms-compose.test.mjs'));
+  assert.ok(configuration.includes('PINVOU_TEST_KMS_HELM=1 PINVOU_TEST_KMS_HELM_IMAGE=alpine/helm:4.2.3 node --test account-platform/test/contract/kms-helm.test.mjs'));
   const nginx = step('nginx 1.18 真实解析和隔离响应矩阵');
   assert.equal(nginx['timeout-minutes'], 5);
   for (const required of ['openssl req -x509', '--network none', '--read-only', '--cap-drop ALL', 'nginx -t', 'nginx-loopback-test.py', 'cloud_uat-loopback cloud_uat-encrypted_tunnel', 'owned_nginx_stopped', 'owned_mocks_stopped', 'tunnel_header_spoofed', '--exercise-cleanup', 'for fault in failure cancel', 'exercise_mode!==mode', 'exercise_reached!==true', 'sigterm_received!==(mode==="cancel")', 'trap']) assert.ok(nginx.run.includes(required), required);

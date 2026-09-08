@@ -31,7 +31,7 @@
 {{- end -}}
 {{- if or (eq $c.runtimeSecret "") (eq $c.runtimeSecret .Values.global.runtimeSecret) (eq $c.runtimeSecret $t.runtimeSecret) -}}{{ fail "Credential portal requires its own release-scoped runtime Secret" }}{{- end -}}
 {{- if or (eq $c.oidcClientId "") (eq $c.oidcAudience "") (eq $c.oidcClientId .Values.oidc.portalClientId) (eq $c.oidcAudience .Values.oidc.audience) (eq $c.oidcAuthorizationUrl "") (eq $c.oidcTokenUrl "") -}}{{ fail "Credential portal requires dedicated OIDC client, audience and endpoints" }}{{- end -}}
-{{- if or (ne $t.secretProvider "remote") (eq (len $c.egressCidrs) 0) (eq (len .Values.external.postgresCidrs) 0) -}}{{ fail "Credential portal requires remote secret provider and explicit database/HTTPS egress" }}{{- end -}}
+{{- if or (not (has $t.secretProvider (list "remote" "vault-transit"))) (eq (len $c.egressCidrs) 0) (eq (len .Values.external.postgresCidrs) 0) -}}{{ fail "Credential portal requires an external secret provider and explicit database/HTTPS egress" }}{{- end -}}
 {{- if and (hasPrefix "production" .Values.global.environment) (lt (int $c.replicas) 2) -}}{{ fail "Production credential portal requires at least two replicas" }}{{- end -}}
 {{- end -}}
 {{- if .Values.tokenCommandExecutor.enabled -}}

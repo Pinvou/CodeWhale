@@ -35,6 +35,7 @@ topologySpreadConstraints:
 {{- end }}
 {{- end -}}
 {{- define "pinvou.validate" -}}
+{{- include "pinvou.validateNativeKms" . -}}
 {{- include "pinvou.validateTokenGovernance" . -}}
 {{- if eq .Values.global.environment "production-new" -}}
 {{- if or (not .Values.networkPolicy.enabled) (not .Values.ingress.enabled) -}}{{ fail "production-new requires NetworkPolicy and ingress" }}{{- end -}}

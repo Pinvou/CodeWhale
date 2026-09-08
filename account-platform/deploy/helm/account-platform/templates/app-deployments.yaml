@@ -43,7 +43,11 @@ spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
+      {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+      securityContext: { runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: { type: RuntimeDefault } }
+      {{- else }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      {{- end }}
       containers:
         - name: {{ $app.name }}
           image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
@@ -194,10 +198,14 @@ spec:
             - { name: TOKEN_SECRET_KEY_ID, value: {{ $root.Values.tokenGateway.secretKeyId | quote }} }
             - { name: TOKEN_SECRET_ROTATION_INTERVAL_SECONDS, value: {{ $root.Values.tokenGateway.secretRotationIntervalSeconds | quote }} }
             - { name: TOKEN_SECRET_ROTATION_BATCH_SIZE, value: {{ $root.Values.tokenGateway.secretRotationBatchSize | quote }} }
+            {{- if eq $root.Values.tokenGateway.secretProvider "vault-transit" }}
+            {{- include "pinvou.nativeKmsEnv" $root | nindent 12 }}
+            {{- else }}
             - name: TOKEN_SECRET_PROVIDER_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-url } }
             - name: TOKEN_SECRET_PROVIDER_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-token } }
+            {{- end }}
             - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
             - { name: TOKEN_GATEWAY_MAX_INPUT_TOKENS, value: {{ $root.Values.tokenGateway.maxInputTokens | quote }} }
             - { name: TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS, value: {{ $root.Values.tokenGateway.modelCatalogDefaultContextTokens | quote }} }
@@ -251,13 +259,22 @@ spec:
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts:
             - { name: tmp, mountPath: /tmp }
+            {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+            {{- include "pinvou.nativeKmsMounts" $root | nindent 12 }}
+            {{- end }}
             {{- if ne $app.name "token-portal" }}
             - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
             {{- end }}
             {{- if or (eq $app.name "billing-service") (and (or $root.Values.tokenCredentialPortal.enabled $root.Values.tokenCommandExecutor.enabled) (or (eq $app.name "account-service") (eq $app.name "token-gateway"))) }}
             - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
             {{- end }}
+        {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsAgent" $root | nindent 8 }}
+        {{- end }}
       volumes:
+        {{- if and (eq $app.name "token-gateway") (eq $root.Values.tokenGateway.secretProvider "vault-transit") }}
+        {{- include "pinvou.nativeKmsVolumes" (dict "root" $root "component" $app.name) | nindent 8 }}
+        {{- end }}
         - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
         {{- if ne $app.name "token-portal" }}
         - name: workload-identity

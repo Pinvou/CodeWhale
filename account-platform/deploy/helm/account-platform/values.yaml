@@ -123,6 +123,15 @@ billing:
   paymentCallbackTokenKeyId: payment-callback-v1
   paymentCallbackTokenTtlSeconds: 300
 
+nativeKms:
+  # Used only with tokenGateway.secretProvider=vault-transit. No identities are created.
+  endpoint: ""
+  port: 8200
+  caConfigMap: ""
+  gatewayBootstrapSecret: ""
+  credentialBootstrapSecret: ""
+  cidrs: []
+
 tokenGateway:
   # Set a release-scoped Secret before enabling governed workloads; never reuse retired login.
   runtimeSecret: ""

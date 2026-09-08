@@ -90,7 +90,7 @@ SECINF-03 继续串行细分：03B 交付固定版本的 TLS/Raft/声明式审�
 | 子任务 | 实现与验收边界 | 状态 |
 | --- | --- | --- |
 | 04B1 | Compose 显式原生覆盖层、双服务独立目录只读挂载、专用 CA/私有网络；真实 Compose 合并输出正负例、原 remote 回归 | 代码及真实解析通过 / NOT_DEPLOYED |
-| 04B2 | Helm 类型化原生配置、独立 token 投递卷及 CA、窄网络规则；实际 template/lint 与错误输入拒绝 | 待实施 |
+| 04B2 | Helm 类型化原生配置、独立 token 投递卷及 CA、窄网络规则；实际 template/lint 与错误输入拒绝 | 代码及真实解析通过 / NOT_DEPLOYED |
 | 04B3 | 生产安全门禁区分既有 remote 与 native、迁移与 fresh-install；绑定实际环境的无秘密证据，不伪造旧 key、不跳过完整 gate | 待实施 |
 | 04B4 | 现场非 root 业务容器原生接线、真实轮换/权限/TLS/挂载验收；与服务身份、NATS 和数据库准备合并后才允许业务切换 | 待实施 |
 
@@ -99,6 +99,16 @@ SECINF-03 继续串行细分：03B 交付固定版本的 TLS/Raft/声明式审�
 合并输出检查验证 provider 配对、HTTPS origin、单段 key ID、固定容器 token/CA 路径、非 root/只读根目录、完整只读 bind、两个 sink 不同且不重叠、非 KMS 消费者没有同源或祖先目录挂载。真实宿主目录是否链接、UID/0600、网络实际 internal、令牌身份/租期与 CA 内容在现场另验；静态配置不能证明这些事实。原生模板不自动删除旧业务、不执行初始化或轮换。测试用域名/目录均为无秘密 fixture，实际 Compose config 输出可能包含其他业务秘密，现场不得打印完整配置。
 
 04B1 验证：本机完整合同测试 439 项中 438 通过、1 项 Docker opt-in 跳过；该项已在隔离公共 fixture 目录使用真实 Docker Compose 5.4.0 执行，四项测试全部通过、无 SKIP（宿主 Node 20；本机合同测试 Node 26）。实际解析 remote/native 两组完整合并输出，原生路径无需静态 token，既有工作负载/NATS/端口检查仍通过。拒绝共享/父目录、可写/单文件/阴影挂载、网络别名/共享服务网络和越界身份等配置；未启动业务或修改 KMS。架构守卫及 diff 检查通过。首次全量发现既有 workload 投递器漏登 CLI，已单独修复后完整重跑通过，未改变授权门禁。
+
+04B2 设计：新增闭合的 `nativeKms` Helm 配置，默认不启用；仅选择 `vault-transit` 才为网关及启用的凭据服务各添加一个固定摘要 OpenBao Agent sidecar。两服务使用不同的既有 bootstrap Secret（只取 role-id/secret-id），不得与任何 runtime/operations Secret 同名；业务容器不挂载 bootstrap，Agent 不挂载数据库、业务 JWT 或其他应用秘密。短期 token 写入各 Pod 独立的 memory emptyDir，业务只读整个目录；CA 从仅含公开证书的既有 ConfigMap 只读挂载。不能直接以 Kubernetes Secret 的符号链接 token 替代 Agent sink，也不能修改原生 provider 的安全读取规则来适配错误挂载。
+
+Pod 与 Agent 使用 UID/GID/fsGroup 65532，bootstrap 文件仅 root/该组可读，sink 由 Agent 生成 0600 普通文件；Agent 无监听器/代理、能力全移除、只读根目录及有界资源，独立内存临时目录。初次 Agent 登录之前业务启动可能暂时失败，Kubernetes 重启后重读 token；只有真实应用 readiness 成功才就绪，不以文件存在代替有效身份。副本不共享 token sink；节点转储/swap、etcd Secret 加密和外部 AppRole 周期轮换必须在集群验收中落实。
+
+只向这两个组件增加经显式 CIDR 限制的 KMS TCP 端口（443 或 8200，与 HTTPS origin 一致），不向 executor/其他服务添加此规则。Chart 不创建 KMS、Secret 或 AppRole，不使用宿主路径/静态业务 token。真实 Helm template/lint 必须覆盖原 remote 和 native，缺身份/共享身份/非 HTTPS/宽 CIDR/未知字段拒绝；渲染结果需检查 sidecar 双向秘密隔离和卷/网络边界。渲染测试不等同于集群 token 轮换和 NetworkPolicy 执行，现场步骤仍归 04B4；当前服务器部署继续使用 Compose，不引入 Kubernetes 集群。
+
+04B2 验证：本机 Helm 3.19.0、隔离容器 Helm 4.2.3 均完成真实 remote/native lint/template；类型化配置、安全声明、真实渲染及错误输入三组测试全部通过、无 SKIP。检查实际 sidecar 数量为两份、固定镜像/命令/非 root、独立内存 sink、应用无 bootstrap、Agent 无业务 JWT/数据库挂载，并拒绝共享身份、别名投影、子路径/阴影卷、特权/宿主进程空间和静态 token。新增网络策略仅两类消费者、明确 IPv4 `/32` 与端口；不把 CNI 规则渲染当作执行证明。
+
+完整本机合同测试 442 项中 441 通过、1 项 Compose opt-in 跳过（此前真实 Docker 已独立通过），其中 Helm opt-in 实际运行；后续收紧配置检查后再跑 17 项定向合同及最新 Helm 4 实测均通过。架构守卫和 diff 检查通过。没有修改 Go provider、投递身份、生产服务或 Kubernetes 集群，fresh-install 门禁与现场业务验收仍未完成。
 
 ## 依据
 

@@ -14,6 +14,16 @@
 
 `kms-native.env.example` 仅为解析 fixture，不能用于部署。CI 通过 `PINVOU_TEST_KMS_COMPOSE=1 node --test account-platform/test/contract/kms-compose.test.mjs` 实际解析 remote/native 两条路径；该测试不创建网络/容器、不开启 KMS、不读取真实身份，也不构成现场运行验收。Helm 原生接线与 fresh-install 安全门禁仍独立验收，不能拿 Compose 配置通过替代。
 
+### 原生 KMS 的 Helm 配置（SECINF-04B2）
+
+`tokenGateway.secretProvider: vault-transit` 显式启用，`nativeKms` 提供 HTTPS origin、匹配的 443/8200 端口、公开 CA ConfigMap 名、逐服务的既有 AppRole bootstrap Secret 名和精确 IPv4 `/32` CIDR。不接受宽网段、静态 token、未知字段、共享 bootstrap 或与 runtime/operations Secret 同名的身份。未切换 provider 时非空 native 配置也会拒绝，避免配置被静默忽略。
+
+Chart 为每个网关/凭据 Pod 增加固定镜像摘要的 Agent，只挂载自身 AppRole、公开 CA、无秘密配置和 memory sink；业务只读 token/CA，不接触引导 Secret。多个副本的 token 在各自内存卷中独立生成和续租。`role-id`、`secret-id` 两个键由受控设施预先提供，Chart 不创建或回显它们；公开 CA ConfigMap 必须仅提供 `ca.crt`，不能混入私钥。运行身份不能导出 key 或修改策略。只给两类消费者增加相应 KMS 端口的网络许可，executor 不获得 KMS 身份或新增网络权限。
+
+Agent 首次登录前业务可能启动失败并重启，readiness 必须等待真实应用就绪；不能用空 token 或降低校验来抢先启动。Pod UID/GID/fsGroup 固定 65532，Agent sink 0600、目录挂载不使用 subPath。集群需落实 Secret/etcd 加密、最小 RBAC、节点转储/swap 控制、实际 CNI 执行、Agent 续租及 bootstrap 轮换。当前仅交付 chart 和实际渲染验证，不新建集群，不把该步骤当作 Kubernetes 现场上线证明。
+
+`values-kms-native-test.yaml` 是叠加在 `values-model-token-test.yaml` 后的公开 fixture；CI 使用实际 Helm 进行 lint/template，并对合并资源运行部署校验与负例测试。发布前仍需原生/fresh-install 安全门禁和现场证据。
+
 `node scripts/account-platform-model-token-release-plan.mjs --plan <本地JSON文件>`
 
 只接受上述两个参数，拒绝超过 1 MiB 的 JSON，拒绝任意层重复/转义重复 key、非法 JSON、未知字段与类型强转。依赖仓库既有 Ajv/ajv-formats，以及本组 `contracts/deployment/model-token-release-plan.schema.json` 和 `model-token-release-evidence.schema.json`；无网络请求、无子命令/数据库连接、无 apply 或 GO 模式。成功只输出 `PLAN_VALID / ENV_PENDING / NOT_DEPLOYED`；失败非零退出且仅稳定错误码，不打印原始输入或环境秘密。
