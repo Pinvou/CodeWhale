@@ -3,9 +3,7 @@ package events
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/nats-io/nats.go"
@@ -14,41 +12,41 @@ import (
 )
 
 type NATSBroker struct {
-	connection *nats.Conn
-	stream     jetstream.JetStream
+	connection  *nats.Conn
+	stream      jetstream.JetStream
+	provisioned bool
+	clientName  string
 }
 
-func NewNATSBroker(ctx context.Context, rawURL, clientName string) (*NATSBroker, error) {
+func NewNATSBroker(ctx context.Context, rawURL, clientName string, configuration ...NATSConfig) (*NATSBroker, error) {
 	if strings.TrimSpace(rawURL) == "" || strings.TrimSpace(clientName) == "" {
 		return nil, errorsNewConfiguration("NATS URL and client name are required")
 	}
-	options := []nats.Option{nats.Name(clientName), nats.Timeout(5 * time.Second), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second)}
-	if credentialsFile := strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")); credentialsFile != "" {
-		options = append(options, nats.UserCredentials(credentialsFile))
+	if len(configuration) > 1 {
+		return nil, ErrNATSResources
 	}
-	connection, err := nats.Connect(rawURL, options...)
+	cfg := NATSConfig{}
+	if len(configuration) == 1 {
+		cfg = configuration[0]
+	}
+	provisioned, err := cfg.provisioned()
 	if err != nil {
-		return nil, fmt.Errorf("connect NATS: %w", err)
+		return nil, err
 	}
-	stream, err := jetstream.New(connection)
+	connection, stream, err := connectNATS(rawURL, clientName, cfg)
 	if err != nil {
-		connection.Close()
-		return nil, fmt.Errorf("create JetStream context: %w", err)
+		return nil, err
 	}
-	_, err = stream.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:        "ACCOUNT_PLATFORM",
-		Description: "Pinvou account platform domain events",
-		Subjects:    []string{"account.>", "billing.>", "token.>", "account-platform.dead-letter.>"},
-		Storage:     jetstream.FileStorage,
-		Retention:   jetstream.LimitsPolicy,
-		MaxAge:      30 * 24 * time.Hour,
-		Duplicates:  24 * time.Hour,
-	})
+	if provisioned {
+		err = checkedStream(ctx, stream)
+	} else {
+		_, err = stream.CreateOrUpdateStream(ctx, platformStreamConfig())
+	}
 	if err != nil {
 		connection.Close()
-		return nil, fmt.Errorf("ensure JetStream stream: %w", err)
+		return nil, ErrNATSResources
 	}
-	return &NATSBroker{connection: connection, stream: stream}, nil
+	return &NATSBroker{connection: connection, stream: stream, provisioned: provisioned, clientName: clientName}, nil
 }
 
 func (broker *NATSBroker) Publish(ctx context.Context, subject string, body []byte, messageID string) error {
@@ -86,19 +84,17 @@ func (broker *NATSBroker) consume(ctx context.Context, durable, filterSubject st
 	if strings.TrimSpace(durable) == "" || strings.TrimSpace(filterSubject) == "" || handler == nil {
 		return nil, errorsNewConfiguration("consumer durable, filter subject, and handler are required")
 	}
-	maxDeliver := 12
-	if retainUnresolved {
-		maxDeliver = -1
+	expected := eventConsumerConfig(durable, filterSubject, retainUnresolved)
+	var consumer jetstream.Consumer
+	var err error
+	if broker.provisioned {
+		if !consumerOwnedBy(broker.clientName, expected) {
+			return nil, ErrNATSResources
+		}
+		consumer, err = checkedConsumer(ctx, broker.stream, expected)
+	} else {
+		consumer, err = broker.stream.CreateOrUpdateConsumer(ctx, platformStream, expected)
 	}
-	consumer, err := broker.stream.CreateOrUpdateConsumer(ctx, "ACCOUNT_PLATFORM", jetstream.ConsumerConfig{
-		Name:          durable,
-		Durable:       durable,
-		FilterSubject: filterSubject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       30 * time.Second,
-		MaxDeliver:    maxDeliver,
-		BackOff:       []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute},
-	})
 	if err != nil {
 		return nil, fmt.Errorf("ensure JetStream consumer: %w", err)
 	}

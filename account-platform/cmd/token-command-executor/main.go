@@ -37,7 +37,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Token executor activation configuration is invalid")
 	}
-	broker, err := events.NewNATSBroker(ctx, os.Getenv("NATS_URL"), "token-command-executor")
+	broker, err := events.NewNATSBroker(ctx, os.Getenv("NATS_URL"), "token-command-executor", events.NATSConfig{Environment: os.Getenv("APP_ENV"), CAFile: os.Getenv("NATS_CA_FILE")})
 	if err != nil {
 		log.Fatal("Token executor event connection is unavailable")
 	}

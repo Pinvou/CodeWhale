@@ -21,7 +21,18 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 339, tasks: 27, events: 6, cli: 19 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 339, tasks: 27, events: 6, cli: 20 });
+});
+
+test('fixed NATS resource operator has an exact required authorization entry', async () => {
+  const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
+  assert.deepEqual(catalog.cli.filter(item => item.name === 'event-resources'), [{
+    name: 'event-resources', source: 'account-platform/cmd/event-resources/main.go',
+    strategy: 'workload.fixed-event-resources-check-or-create-only',
+  }]);
+  await rejectedMutation(catalog => {
+    catalog.cli = catalog.cli.filter(item => item.name !== 'event-resources');
+  }, /unclassified_cli:event-resources/);
 });
 
 test('single-client workload token projector has an exact required authorization entry', async () => {

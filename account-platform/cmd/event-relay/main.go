@@ -47,7 +47,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
-	broker, err := events.NewNATSBroker(ctx, os.Getenv("NATS_URL"), source+"-outbox-relay")
+	broker, err := events.NewNATSBroker(ctx, os.Getenv("NATS_URL"), source+"-outbox-relay", events.NATSConfig{Environment: environment, CAFile: os.Getenv("NATS_CA_FILE")})
 	if err != nil {
 		log.Fatal(err)
 	}

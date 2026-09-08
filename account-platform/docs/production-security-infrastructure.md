@@ -21,6 +21,40 @@
 
 验证与发布（2026-09-08）：Go 工具模块全量测试及 vet 通过，operator 10.646 秒；Python 13 项 11 通过、2 项 Windows 不适用的 POSIX 用例跳过。真实隔离双 Agent 验证 Python checker 对附加 entity 策略拒绝、移除恢复；真实 Linux operator 在两个全新 TLS/Raft 实例中验证备份 AppRole 附权后捕获拒绝且零文件，移除后撤销初始 root，再完成加密捕获、离线验证及恢复，三个原有实际通过 marker 齐备，退出 0。独立复审通过后核验新旧 SHA，保留原制品并原子替换精确监测脚本与备份二进制，保全原 owner/mode；正式三身份 `--lease-only --require-renewal` 通过。未手动生成正式快照，未调整调度、策略、角色或密钥；新备份二进制由既有小时计划使用。
 
+### SECINF-04C 生产依赖接线（串行，文档先审）
+
+现场差距：现有 Compose 基础文件仍是 development、Keycloak start-dev、明文 PostgreSQL/Redis/NATS，不能仅更换镜像即宣称生产配置完成。不得为缩短上线时间关闭既有生产身份或 TLS 门禁。现有正式 KMS 与其他团队服务保持独立，不纳入重建。
+
+| 子任务 | 验收边界 | 状态 |
+| --- | --- | --- |
+| 04C1 | NATS 资源初始化与业务运行分离：生产 broker 只读取并校验既定 stream/consumer，业务不得修改共享 stream；开发兼容、缺失/漂移拒绝、真实 JetStream 权限正负例 | 代码与真实隔离验证通过 / NOT_DEPLOYED |
+| 04C2 | 私有 TLS、逐服务 NATS 身份与 ACL、PostgreSQL/Redis 身份及连接校验；公开模板与私密投递分离，不发布依赖公网端口 | 待 04C1 后实施 |
+| 04C3 | Keycloak 生产启动、用户与 workload realm 分离、七个服务真实 subject 及逐服务短期文件接线、凭据专用 OIDC client；真实签发/过期/错角色拒绝 | 待依赖就绪 |
+| 04C4 | 新业务镜像及生产配置组合、空库迁移、原生 KMS fresh-install prepare/保管人轮换/verify、正式外部入口与商城验证 | 待前置验收 |
+| 05C | 精确确认旧测试服务/数据库/卷，按既有授权清理，统一切换与公开入口回归；保全正式 KMS 和范围外系统 | 待切换门禁 |
+
+04C1 需求：当前每个 `NewNATSBroker` 都执行 `CreateOrUpdateStream`，每个消费启动也执行 `CreateOrUpdateConsumer`，无法直接配置只允许业务收发的生产最小权限。生产固定既有 `ACCOUNT_PLATFORM` stream 和五个既有 durable consumer，不新增事件或消费者；资源由一次受控初始化负责，业务启动只能查询/验证。保留当前非生产开发/测试自动初始化，不改变事件格式、去重、保留期、ACK、重试和死信语义。三个 relay 只发布各自领域事件；计费与 Token 命令执行器只使用其既有 consumer，不能借初始化权限修改共享保留策略或扩大订阅范围。
+
+04C1 设计与任务：先提取既有 stream/consumer 配置为唯一规格；生产通过显式的 broker 配置（由各 CLI 已读取的运行环境传入，不在底层隐式猜测环境）选择 provisioned 模式，禁止运行时创建/更新，缺失或关键规格漂移返回固定配置错误且不降级。独立受控初始化入口仅创建缺失的固定资源、已有资源只校验，禁止 update/delete/purge 和任意名称/订阅参数；失败保留已创建部分，按同一规格重入，不覆盖已有资源。业务与初始化使用独立身份，初始化身份不投递到业务。定义核验字段覆盖名称、subjects/filter、存储、保留策略/期限、去重窗口、ACK/重试/无限重试语义及消费权限相关字段；不以存在性代替一致性。测试先覆盖已有行为兼容、精确配置及零变更拒绝，再在独立真实 NATS TLS/JetStream 中验证业务无 create/update 权限仍可发布/消费/确认，跨领域发布和访问其他 consumer 拒绝，初始化重入不覆盖漂移。每批代码经原独立审核者通过后单独提交；仅 04C1 完成不代表 NATS 正式部署。
+
+04C1 固定消费矩阵（所有 consumer 属于 `ACCOUNT_PLATFORM`，无额外 push 订阅）：
+
+| 运行角色 | durable 名称 | filter | MaxDeliver |
+| --- | --- | --- | --- |
+| billing-command-executor | billing-command-executor-v1 | account.approval-command.authorized.v1 | 12 |
+| billing-command-executor | billing-refund-executor-v1 | billing.refund.requested.v1 | 12 |
+| token-command-executor | token-model-lifecycle-executor-v1 | account.approval-command.authorized.v1 | -1 |
+| token-command-executor | token-catalog-rollback-executor-v1 | account.approval-command.authorized.v1 | -1 |
+| token-command-executor | token-credential-revoke-executor-v1 | account.approval-command.authorized.v1 | -1 |
+
+每个运行角色仅校验自己实际使用的 consumer，不为 relay 或 Token 授予其他 consumer 查询权限。三个 relay 保留 `account-platform.dead-letter.<本域事件>` 发布；计费保留两个既定 filter 对应的死信发布，不把“各自领域”误解为阻断既有失败闭环。初始化 CLI 默认只读 check，只有显式 create-only 才可创建；并发已存在或创建失联仅可回读核验，不用 update 重试。create-only 是工具行为约束，NATS 部分 consumer 创建/更新共用 API subject，不能声称仅 ACL 就禁止受控初始化身份更新。
+
+`production` 与 `production-*` 运行强制 provisioned；未知模式或在生产要求 auto 必须拒绝。唯一规格按当前 NATS 实际规范化核验：BackOff 首项 1 秒会覆盖 AckWait 30 秒；默认容量/副本/等待等服务端补全值不能与安全属性混淆。除显式配置外，subject transform、mirror/source/republish、rollup、direct get、push deliver subject、额外 filters、起始序号/时间、headers-only、pause/inactive 等影响隔离与投递的字段必须保持既有安全语义，非允许规范化的漂移拒绝。C1 实际 TLS 测试所需的显式 CA 可通过窄 broker 配置注入，真实域名验证、错误 CA 拒绝，不加跳过校验开关；证书正式签发/投递仍归 C2。真实矩阵覆盖发布、拉取、ACK/NAK/双 ACK、死信以及跨 consumer 拉取/ACK、直接读取 stream 消息和创建/更新的拒绝。
+
+04C1 初始化入口同步登记中央 CLI 授权目录，使用固定策略 `workload.fixed-event-resources-check-or-create-only`，只增加已说明的部署入口，不新增 HTTP/任务/事件权限。合同测试将实际 CLI 数量 19 更新为 20，并验证删除该项仍被授权覆盖门禁拒绝。生产连接使用 `_INBOX.<固定运行角色>` 的独立回复前缀，服务端 ACL 只允许订阅本角色前缀，防止借共享 `_INBOX.>` 旁听其他 consumer 的拉取回复；初始化工具使用自己的前缀。真实验收还直接运行 `Consume` 与 `ConsumeUntilResolved` 的合法事件处理/重投，不以 Fetch 原语代替正式入口验证。
+
+04C1 实测（2026-09-08）：受影响 events 与三个运行 CLI、初始化 CLI 的 Go 测试及 vet 通过；授权覆盖六项合同通过，实际 339 HTTP/27 task/6 event/20 CLI，未扩大业务授权。Windows NATS 2.11.9 与 Linux NATS 2.11.17 的独立真实 TLS/JetStream 测试均取得 `NATS_PROVISIONED_TLS_ACTUAL_PASS`，无跳过。覆盖空资源只读拒绝、create-only/重入、固定配置核验、五种受限角色、错误 CA/明文连接拒绝、逐角色收件箱、正常发布/拉取/NAK/双 ACK/死信、正式两个消费入口失败重投、跨领域与跨 consumer/stream 管理/直读拒绝、已有漂移不覆盖及开发自动初始化兼容。仅使用临时证书、随机测试身份、loopback 端口和临时存储；正式身份/ACL 投递尚未执行，不将该证明当作生产就绪。
+
 ### Native Transit 适配
 
 既有 `remote` 是自定义 `/v1/encrypt|decrypt` 协议，不等于 Vault API，保留其兼容行为。增加显式 `vault-transit` 模式，通过 `/v1/transit/encrypt/{key}`、`decrypt/{key}` 调用原生 API；不部署自制加密中转服务。
