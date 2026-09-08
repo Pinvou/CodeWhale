@@ -1,0 +1,82 @@
+# Explicit migration window only. Do not merge business/development Compose.
+name: pinvou-production-business-migrations
+x-migration: &migration
+  image: ${MIGRATE_IMAGE:?set verified migrate image ID}
+  pull_policy: never
+  profiles: [business-migrations]
+  restart: "no"
+  entrypoint: ["/service"]
+  user: "65532:65532"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 256m
+  cpus: 0.5
+  pids_limit: 96
+  ulimits:
+    core: {soft: 0, hard: 0}
+  tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"]
+  logging:
+    driver: local
+    options: {max-size: "10m", max-file: "3"}
+  healthcheck: {disable: true}
+  networks: [data]
+x-environment: &environment
+  APP_ENV: production
+  PINVOU_DEPLOYMENT_ENVIRONMENT: production-new
+  PGPASSFILE: /var/run/secrets/pinvou/database/pgpass
+  MIGRATION_BACKUP_EVIDENCE_ID: ${MIGRATION_BACKUP_EVIDENCE_ID:?set actual backup label}
+  MIGRATION_BACKUP_COMPLETED_AT: ${MIGRATION_BACKUP_COMPLETED_AT:?set actual backup completion time}
+  MIGRATION_BACKUP_SHA256: ${MIGRATION_BACKUP_SHA256:?set actual encrypted manifest SHA256}
+services:
+  account-migrate:
+    <<: *migration
+    command: ["--dir", "/migrations/account", "--direction", "up"]
+    environment:
+      <<: *environment
+      DATABASE_URL: postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt
+      MIGRATION_ROLE: account_service
+    volumes:
+      - type: bind
+        source: ${ACCOUNT_MIGRATE_DATABASE_DIRECTORY:?set account-only pgpass directory}
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - &trust
+        type: bind
+        source: ${INFRA_CA_DIRECTORY:?set public-only infrastructure CA directory}
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+  billing-migrate:
+    <<: *migration
+    command: ["--dir", "/migrations/billing", "--direction", "up"]
+    environment:
+      <<: *environment
+      DATABASE_URL: postgresql://billing_migrator@postgres:5432/account_platform_billing?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt
+      MIGRATION_ROLE: billing_service
+    volumes:
+      - type: bind
+        source: ${BILLING_MIGRATE_DATABASE_DIRECTORY:?set billing-migration-only pgpass directory}
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - *trust
+  token-migrate:
+    <<: *migration
+    command: ["--dir", "/migrations/token", "--direction", "up"]
+    environment:
+      <<: *environment
+      DATABASE_URL: postgresql://token_migrator@postgres:5432/account_platform_token?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt
+      MIGRATION_ROLE: token_gateway
+    volumes:
+      - type: bind
+        source: ${TOKEN_MIGRATE_DATABASE_DIRECTORY:?set token-migration-only pgpass directory}
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - *trust
+networks:
+  data:
+    external: true
+    name: ${DATA_NETWORK:?set verified existing private data network}

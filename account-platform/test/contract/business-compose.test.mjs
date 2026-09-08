@@ -16,6 +16,10 @@ test('production template: required inputs have no development fallback; raw pri
   const source = readFileSync(new URL('../../deploy/production/compose.business.yaml', import.meta.url), 'utf8');
   assert.equal(source.includes(':-'), false);
   const { input } = businessComposeFixture();
+  for (const service of Object.values(input.services)) {
+    assert.equal(service.mem_limit, '256m');
+    assert.deepEqual(service.ulimits, { core: { soft: 0, hard: 0 } });
+  }
   assert.equal(Object.values(input.services).filter(s => s.env_file).length, 5);
   for (const service of Object.values(input.services)) if (service.env_file) {
     assert.equal(service.env_file.length, 1); assert.equal(service.env_file[0].required, true); assert.equal(service.env_file[0].format, 'raw');
