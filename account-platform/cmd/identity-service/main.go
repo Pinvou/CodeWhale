@@ -24,10 +24,13 @@ func main() {
 		return
 	}
 
-	directory, err := identityadapter.NewKeycloakDirectory(
-		os.Getenv("KEYCLOAK_ADMIN_API_URL"), os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), os.Getenv("KEYCLOAK_REALM"),
-		os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_ID"), os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_SECRET"),
-	)
+	production := strings.HasPrefix(strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))), "production")
+	directory, err := identityadapter.NewKeycloakDirectoryWithConfig(identityadapter.KeycloakConnectionConfig{
+		AdminURL: os.Getenv("KEYCLOAK_ADMIN_API_URL"), TokenURL: os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"),
+		Realm: os.Getenv("KEYCLOAK_REALM"), ClientID: os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_ID"),
+		ClientSecret: os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_SECRET"), SecretFile: os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE"),
+		CAFile: os.Getenv("KEYCLOAK_CA_FILE"), Production: production,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,7 +49,7 @@ func main() {
 		if admissionErr != nil {
 			log.Fatal(admissionErr)
 		}
-		proxy, proxyErr := identityadapter.NewTokenProxy(os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), admission)
+		proxy, proxyErr := identityadapter.NewTokenProxyWithTrust(os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), admission, os.Getenv("KEYCLOAK_CA_FILE"), production)
 		if proxyErr != nil {
 			log.Fatal(proxyErr)
 		}

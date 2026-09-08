@@ -170,11 +170,20 @@ type TokenProxy struct {
 }
 
 func NewTokenProxy(endpoint string, admission tokenAdmission) (*TokenProxy, error) {
+	return NewTokenProxyWithTrust(endpoint, admission, "", false)
+}
+
+// NewTokenProxyWithTrust shares only Keycloak trust, never provisioner credentials.
+func NewTokenProxyWithTrust(endpoint string, admission tokenAdmission, caFile string, production bool) (*TokenProxy, error) {
 	parsed, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || admission == nil {
 		return nil, errors.New("token proxy is not fully configured")
 	}
-	return &TokenProxy{endpoint: parsed.String(), client: &http.Client{Timeout: 15 * time.Second}, admission: admission, now: time.Now, floor: 750 * time.Millisecond}, nil
+	client, err := keycloakHTTPClient(parsed.String(), caFile, production, 15*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	return &TokenProxy{endpoint: parsed.String(), client: client, admission: admission, now: time.Now, floor: 750 * time.Millisecond}, nil
 }
 
 func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {

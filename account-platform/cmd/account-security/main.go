@@ -23,10 +23,12 @@ func main() {
 		log.Fatal("usage: account-security <bootstrap|redeem|break-glass>")
 	}
 	ctx := context.Background()
-	directory, err := identityadapter.NewKeycloakDirectory(
-		os.Getenv("KEYCLOAK_ADMIN_API_URL"), os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), os.Getenv("KEYCLOAK_REALM"),
-		os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_ID"), os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_SECRET"),
-	)
+	directory, err := identityadapter.NewKeycloakDirectoryWithConfig(identityadapter.KeycloakConnectionConfig{
+		AdminURL: os.Getenv("KEYCLOAK_ADMIN_API_URL"), TokenURL: os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"),
+		Realm: os.Getenv("KEYCLOAK_REALM"), ClientID: os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_ID"),
+		ClientSecret: os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_SECRET"), SecretFile: os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE"),
+		CAFile: os.Getenv("KEYCLOAK_CA_FILE"), Production: strings.HasPrefix(strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV"))), "production"),
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
