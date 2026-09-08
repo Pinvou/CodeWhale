@@ -1,0 +1,16 @@
+# Apply after the independently verified user realm and workload projection.
+# This overlay adds only the existing authenticators' business connections.
+services:
+  keycloak:
+    environment:
+      PINVOU_ACCOUNT_AUTH_URL: ${KEYCLOAK_ACCOUNT_AUTH_URL:?set verified private Account origin}
+      PINVOU_IDENTITY_AUTH_URL: ${KEYCLOAK_IDENTITY_AUTH_URL:?set verified private Identity origin}
+      PINVOU_SMS_VERIFY_URL: ${KEYCLOAK_SMS_VERIFY_URL:?set verified private SMS verification endpoint}
+      PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE: /run/pinvou/keycloak-workload/token
+      PINVOU_INTERNAL_SERVICE_TOKEN: ""
+    volumes:
+      - type: bind
+        source: ${KEYCLOAK_WORKLOAD_TOKEN_DIRECTORY:?set only this authenticator projected directory}
+        target: /run/pinvou/keycloak-workload
+        read_only: true
+        bind: {create_host_path: false}
