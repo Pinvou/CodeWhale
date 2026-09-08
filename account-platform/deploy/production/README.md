@@ -1,8 +1,9 @@
 # 生产依赖配置（尚未正式投递）
 
 此目录只包含公开部署制品，不保存 `.env`、密码、证书或恢复包。独立使用
-`compose.dependencies.yaml`，**不与开发 Compose 合并**。当前只交付 PostgreSQL；
-Redis、NATS、Keycloak、业务发布和数据库备份恢复仍需各自验收。
+`compose.dependencies.yaml`，**不与开发 Compose 合并**。当前交付 PostgreSQL 配置及同目录
+独立 NATS `compose.nats.yaml`；Redis、Keycloak、业务发布和数据库备份恢复
+仍需各自验收。
 
 ## PostgreSQL 投递约束
 
@@ -62,3 +63,39 @@ python3 scripts/account-platform-postgres-fixture.py --run
 验证真实生产配置、八身份 SCRAM/TLS、错误 CA/主机名/明文/跨库/错密码/身份提升拒绝，
 初始化失败重启拒绝、错绑定拒绝、删除引导副本后重启持久化及日志不含密码。
 结束仅清理该 fixture 的确切容器 ID、私有网络和临时目录；不能将其通过报告当作正式部署。
+
+## NATS 投递约束
+
+`compose.nats.yaml` 可独立验证，也可与 `compose.dependencies.yaml` 合并到同一个
+`pinvou-production-dependencies` 项目；禁止混入开发文件。`NATS_IMAGE` 同样必须为
+独立核验的不可变制品，预先导入且禁止运行时拉取。
+
+- `NATS_DATA_DIRECTORY`：全新独立数据目录，65532:65532/0700，不能复用旧测试 JetStream。
+- `NATS_TLS_DIRECTORY`：只含 NATS 单独叶证书/私钥，DNS SAN 为 `nats`，目录 0700、
+  文件 0600、属主 65532:65532；不挂其他服务私钥、根包或 KMS 材料。
+- `NATS_AUTHORIZATION_FILE`：既有 `event-resources -render-authorization` 的固定六公钥
+  ACL 产物，逐制品可信摘要和完整身份包核验后才投递，65532:65532/0600，只读挂载。
+  NATS 不持有任何客户端种子或恢复包，不能手工添加无身份用户/通配管理身份。
+
+客户端使用 `tls://nats:4222`、专用 `NATS_CA_FILE` 和自身 `NATS_NKEY_SEED_FILE`，
+不能用全域共享凭据。受控初始化窗口单独投递 `event-resource-operator` 种子，执行已有
+`event-resources -create-only` 后再执行默认只读检查；失败保留资源，禁止 delete/update 重试。
+完成后关闭初始化连接并精确撤除临时种子副本，不能宣称删除文件即可撤销已有连接。
+
+监测 HTTP 仅监听容器自身 `127.0.0.1:8222`；健康检查证明本机 JetStream 响应，不代表
+业务身份/资源就绪。Portal 不再直接访问 `http://nats:8222`；其运行状态证据在业务接线时
+改为受控检测结果，未接通时报告未就绪/未知，不开放无认证监测来恢复绿色状态。
+JetStream 本批最大文件存储 2GB、内存存储 128MB；满容量会拒绝新写入，不因容量不足自动
+purge/delete；原有 30 天保留策略不变。
+业务上线前必须完成 C2D 容量、证书到期、持久数据备份/恢复检查。
+
+隔离联验命令（目录只放已核验的 Linux `age-keygen`、`nats-identities`、`event-resources`
+公开二进制；前者从既有工具模块依赖的官方 age 构建，后两者使用已审核代码）：
+
+```sh
+python3 scripts/account-platform-nats-fixture.py --run --bin-directory /controlled/public/test-binaries
+```
+
+该测试只生成临时恢复身份和 NKey 包，启动真实生产 Compose 模板。验证精确 TLS/无身份/明文
+拒绝、独立错误 CA、非本机监测拒绝、受限实际初始化和重启后只读复查；不会连接正式 KMS
+或使用正式 seed。已有固定 ACL 的业务收发/撤权矩阵沿用 C1/B1/B2 已通过证据。

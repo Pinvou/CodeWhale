@@ -122,6 +122,16 @@ Linux 同源最终三份测试二进制全部通过：加密身份恢复 0.07 �
 
 首轮仅测试夹具在 created 状态读取空 NetworkID 失败，已改成独立查询已创建网络；遗留空网络按确切 ID/项目标签/无连接核对后移除，最终测试容器与网络自动精确清理。私有恢复材料与正式 KMS/旧业务没有修改。17.10 只为本轮缓存验证制品，不声称是当前维护最新版；正式摘要/安全补丁选择、投递、备份恢复和业务验证仍由 C2D 及后续发布完成。
 
+### SECINF-04C2C2 生产 NATS 接线
+
+复用已通过 C1/B1/B2 验证的消息协议、NKey、六身份包和固定 ACL，不再新增 broker 资源或身份发行器。独立生产 `compose.nats.yaml` 与 PostgreSQL 依赖文件使用同一私有项目/网络，可各自验收后组合；不引用开发 Compose。固定已核验镜像、非 root 65532、只读根目录、移除 capabilities、限定 CPU/内存/PID/core/日志。只挂自身 TLS 叶、公开固定授权文件和独立 JetStream 数据；不挂任何 seed、CA 私钥、KMS 或恢复包。数据目录预置 65532/0700，TLS 私钥 65532/0600，配置和公开授权只读，依赖不发布宿主端口。
+
+客户端监听强制 TLS1.2+，使用既有精确六 NKey ACL；监测只绑定容器 loopback，不能从业务网络或公网访问无认证管理端口。JetStream file store 持久化并设总体空间上限，满容量失败须由后续监测报告，不自动 purge/delete。初始化仍仅用单独受控 `event-resources` 身份 create-only，再以默认只读检查确认；五业务不持有初始化种子。生产联验用真实 Compose 启动及现有命令、临时测试证书/六身份包：正确 TLS/NKey 初始化/只读复查，服务重启后固定 stream/五 consumer 持久存在，未认证与明文连接拒绝，独立错误 CA 拒绝，非容器本机不可访问监测端口。部署模板与实际挂载/隔离/只读/资源限制核验；已有六身份 ACL/五业务收发撤权矩阵未变，不重复开发另一份实现。正式材料投递和容量/到期监测仍按 C2D 验收。
+
+04C2C2 实测（2026-09-08）：同源生产模板实际启动缓存 NATS 2.11.17，取得 `PRODUCTION_NATS_TLS_NKEY_PERSISTENCE_PRIVATE_MONITOR_PASS`、退出 0。既有官方 age 与已审六身份/固定 ACL 工具的 Linux 制品传输摘要一致；fixture 只生成临时材料。真实 TLS、无身份 Authorization Violation、明文握手关闭、独立错 CA 的证书验证异常、非本机监测端口拒绝均通过；受限初始化 create-only→只读核验→重启→再次只读核验成功，未通过重新创建掩盖资源丢失。实际容器无公开端口/匿名卷，四个限定 bind、65532 非 root/只读、512 MiB/64 PID 限制通过，日志不含种子；最终容器/网络/临时材料精确清理。
+
+初轮测试误在制品传输完成前启动，不计结果；完整传输后发现 NATS include 按当前配置目录拼接，绝对路径被重复拼接，已改成同目录 `authorization.conf`，实际重跑通过。诊断仅使用不接收种子的隔离 broker，临时日志打印已移除。最终两项 NATS 合同及先前合跑三项 PostgreSQL 合同均通过；既有 Go/ACL/消息协议无变更，不扩大或重写此前矩阵。正式配置投递、容量/到期监测、持久数据备份恢复和业务切换仍未完成。
+
 ### Native Transit 适配
 
 既有 `remote` 是自定义 `/v1/encrypt|decrypt` 协议，不等于 Vault API，保留其兼容行为。增加显式 `vault-transit` 模式，通过 `/v1/transit/encrypt/{key}`、`decrypt/{key}` 调用原生 API；不部署自制加密中转服务。
