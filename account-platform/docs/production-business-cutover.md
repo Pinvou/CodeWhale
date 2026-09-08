@@ -257,6 +257,33 @@ KMS Compose/Helm 测试未启用。架构与差异检查通过。正式依赖与
 
 ### C4C 已识别的前置接线项
 
+C4C1 三库正式迁移与前后备份已完成独立验收，详见 `production-business-migrations.md`。
+NATS 的唯一固定 stream 与五个 consumer 已在正式依赖验收阶段创建并两次复核，记录在
+`production-security-infrastructure.md` 的正式客户端验收段；不将其误列为待初始化，不重复创建。
+
+#### C4C2 已有消息资源的当前制品只读复核
+
+使用 C4B1 已冻结的 `event-resources` image ID，无命令参数（尤其没有 `--create-only`），
+仅复核现有固定规格，不更新、删除、purge、发布或消费业务消息。保持同一正式 NATS 容器、数据目录、
+TLS 证书、授权配置和 network ID；不在此项创建新网络或重新接线依赖，后续业务的专用网另行验收。
+复用已审短时工具接入正式 data 私网的方式；工具没有数据库密码或其他网络访问凭据。
+
+先核对构建回执、NATS 实际 image/project/service/挂载、健康及已有材料 manifest 和可信摘要；
+仅从已核对的正式 `event-resource-operator` seed 派生其独立消费目录（65532:65532/0700+0600），
+另挂只读公开 CA，不挂原包目录或其余五个身份。新窗口目录与回执排他创建并持久化，失败保留不重跑。
+准确新 CID 创建后先核对无参数 `/service`、固定 image、UID65532、只读根、cap_drop=ALL、
+no-new-privileges、core=0、128 MiB/0.5 CPU/64 PIDs、有界日志/noexec tmpfs、无宿主端口、
+只读两挂载、唯一既有内网，随后启动一次；保留原生 45 秒程序期限，外层最多等 65 秒。
+实际退出 0 且只输出 `NATS_FIXED_RESOURCES_VERIFIED`，再核对准确 network ID、正式 NATS/身份/数据库健康
+及原身份/授权摘要未变，保存只读验收回执供独立复核。通过后只移除已退出工具容器，不删除正式资源或原材料。
+这个结果仅证明当前制品能用真实身份验证资源；五个业务消费者的运行接线及业务事件闭环仍待服务启动后验收。
+
+C4C2 实测：私有只读执行器独立审核通过，当前固定 image 无参数执行一次，正常退出并返回准确成功标记。
+现场核对只读两挂载、实际唯一 data network ID、原 NATS image/启动时间/重启次数、原 manifest、
+operator seed 与授权/证书配置摘要不变；原数据库/身份健康复查通过。未创建或修改消息资源，未发布业务事件。
+独立现场复核无参数、准确镜像、退出/输出、隔离配置及原 NATS 未重启/材料未变全部通过，
+随后仅按准确 CID 非 force、非删除卷地清理已退出容器；消费副本、回执、原身份及正式数据保留。
+
 现有生产 PostgreSQL HBA 只允许初始化阶段的固定 Token 角色，新 release-scoped 登录角色尚不在白名单。
 后续准备准确两角色后，须单独审核对目标 Token 库、这两个明确角色、实际来源网段和 TLS/SCRAM 的窄范围
 规则更新与 reload；不使用通配角色、扩大为 host all 或修改密码认证方式。保留原角色拒绝及原有依赖连接的
