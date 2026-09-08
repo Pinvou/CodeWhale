@@ -117,9 +117,13 @@ impl<'a> SearchBackendChain<'a> {
             context, selected,
         )));
         if !matches!(selected, SearchProvider::Bing | SearchProvider::DuckDuckGo) {
+            // Keep the keyless tail reachable from mainland-China networks,
+            // where DuckDuckGo connection failures return before its internal
+            // empty/challenge fallback can run. Bing serves a keyless endpoint
+            // without requiring the engine to guess the user's geography.
             backends.push(Box::new(ConfiguredSearchBackend::from_provider(
                 context,
-                SearchProvider::DuckDuckGo,
+                SearchProvider::Bing,
             )));
         }
         Self { backends }
@@ -351,8 +355,9 @@ impl SearchBackend for ProviderNativeSearchBackend<'_> {
         // Moonshot/Kimi, Z.AI, MiMo, and the Responses-dialect routes cannot
         // express domain filters in their native wire contracts. Declining
         // here must not fail the whole search: report this backend unavailable
-        // so the chain falls back to the configured provider or DuckDuckGo,
-        // which honor domains natively or through post-filtering.
+        // so the chain falls back to the configured provider and, for API
+        // providers, the keyless Bing tail. Those paths honor domains through
+        // their wire contract or post-filtering.
         let domain_limit = client.maximum_domain_count();
         if !query.domains.is_empty() && domain_limit == Some(0) {
             return Err(ToolError::not_available(format!(
@@ -526,6 +531,50 @@ mod tests {
             assert_eq!(
                 backend.capabilities().max_results,
                 super::super::contract::CapabilityState::Supported
+            );
+        }
+    }
+
+    #[test]
+    fn forkguard_api_provider_chain_tail_is_bing() {
+        let api_providers = [
+            SearchProvider::Firecrawl,
+            SearchProvider::Tavily,
+            SearchProvider::Bocha,
+            SearchProvider::Metaso,
+            SearchProvider::Searxng,
+            SearchProvider::Baidu,
+            SearchProvider::Volcengine,
+            SearchProvider::Sofya,
+        ];
+
+        for provider in api_providers {
+            let mut context = ToolContext::new(std::path::PathBuf::from("."));
+            context.search_provider = provider;
+            let chain = SearchBackendChain::from_context(&context);
+            let ids = chain
+                .backends
+                .iter()
+                .map(|backend| backend.id())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                vec![
+                    ConfiguredSearchBackend::from_provider(&context, provider).id(),
+                    BackendId::Bing
+                ],
+                "{provider:?} must bypass an unreachable DuckDuckGo hop"
+            );
+        }
+
+        for provider in [SearchProvider::Bing, SearchProvider::DuckDuckGo] {
+            let mut context = ToolContext::new(std::path::PathBuf::from("."));
+            context.search_provider = provider;
+            let chain = SearchBackendChain::from_context(&context);
+            assert_eq!(
+                chain.backends.len(),
+                1,
+                "an explicit keyless provider must not be duplicated"
             );
         }
     }

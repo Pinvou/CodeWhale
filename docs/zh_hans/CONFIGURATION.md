@@ -1322,9 +1322,9 @@ exec_policy = true
 
 ## 网页搜索 Provider
 
-`web_search` 默认使用无 key 的 Firecrawl。运行时失败或耗尽无 key 配额会通过 DuckDuckGo 和 Bing 可见地降级。中国部署可以显式选择百度、秘塔、火山引擎或受信任的 SearXNG 端点；Codewhale 不从区域设置或模型 provider 猜测地理位置。
+`web_search` 默认使用无 key 的 Firecrawl。运行时失败或耗尽无 key 配额会直接向 Bing 可见地降级，不先依赖 DuckDuckGo 的可达性。中国部署可以显式选择百度、秘塔、火山引擎或受信任的 SearXNG 端点；Codewhale 不从区域设置或模型 provider 猜测地理位置。
 
-配置的 API provider 先被尝试。运行时失败或空结果通过 DuckDuckGo 然后 Bing 可见地降级；结构化搜索回执记录每一步。缺失配置和网络策略拒绝失败关闭，不把查询发送到另一个 provider。
+配置的 API provider 先被尝试。运行时失败或空结果直接向无 key 的 Bing 尾链可见地降级；结构化搜索回执记录该跳转。缺失配置和网络策略拒绝失败关闭，不把查询发送到另一个 provider。
 
 对服务 DuckDuckGo 兼容 HTML 的私有/内部搜索服务，保持 `provider = "duckduckgo"` 并设置 `base_url`；Codewhale 把 `q` 查询参数追加到该端点，并把网络策略应用到它的主机。自定义端点不回退到公共 Bing。`CODEWHALE_SEARCH_BASE_URL` 可按进程覆盖；`DEEPSEEK_SEARCH_BASE_URL` 仍作为旧别名接受。
 

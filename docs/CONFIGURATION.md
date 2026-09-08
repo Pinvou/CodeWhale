@@ -2653,13 +2653,14 @@ graduate behind real gated flags.
 ## Web Search Provider
 
 `web_search` uses keyless Firecrawl by default. Runtime failure or an exhausted
-keyless quota degrades visibly through DuckDuckGo and Bing. China deployments
+keyless quota degrades visibly to Bing without first depending on DuckDuckGo
+reachability. China deployments
 can explicitly select Baidu, Metaso, Volcengine, or a trusted SearXNG endpoint;
 Codewhale does not guess geography from locale or model provider.
 
 Configured API providers are attempted first. Runtime failure or an empty
-result visibly degrades through DuckDuckGo and then Bing; the structured search
-receipt records every hop. Missing configuration and network-policy denials
+result visibly degrades directly to the keyless Bing tail; the structured search
+receipt records the hop. Missing configuration and network-policy denials
 fail closed without sending the query to another provider.
 
 For a private/internal search service that serves DuckDuckGo-compatible HTML,

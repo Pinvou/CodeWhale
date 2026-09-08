@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Search provider enumeration — selects the first backend `web_search` uses.
-/// API-backed providers may visibly degrade through DuckDuckGo → Bing after
+/// API-backed providers visibly degrade directly to the keyless Bing tail after
 /// runtime failure or an empty result. Configuration and
 /// network-policy errors fail closed without crossing providers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]

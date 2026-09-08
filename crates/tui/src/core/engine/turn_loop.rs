@@ -176,12 +176,19 @@ fn repair_benchmark_read_call(
         }
 
         if object.remove("fields").is_some() {
+            // `fields` is only an optional projection over an already bounded
+            // fetch response. Small models emit unsupported JSONPath dialects
+            // or attach it to search calls; returning the full response keeps
+            // the requested evidence while avoiding a projection-only error.
             repairs.push("optional_fields_removed");
         }
         if let Some(max_chars) = object.remove("max_chars") {
             if object.get("max_bytes").is_none() && max_chars.is_number() {
                 object.insert("max_bytes".to_string(), max_chars);
             }
+            // If max_bytes already exists, max_chars is an unsupported
+            // duplicate. Otherwise mapping characters to bytes deliberately
+            // gives multi-byte text the stricter bounded cap.
             repairs.push("max_chars_alias");
         }
         if let Some(format) = object
@@ -252,6 +259,9 @@ fn repair_benchmark_read_call(
             removed_irrelevant |= object.remove(*key).is_some();
         }
         if removed_irrelevant {
+            // These belong to another explicit action and cannot alter the
+            // selected query or URL. Keeping them would only make strict
+            // per-action validation reject an unambiguous read request.
             repairs.push("cross_action_parameters");
         }
     }
@@ -373,6 +383,8 @@ fn repair_benchmark_read_call(
                 "max_results",
                 "limit",
             ][..],
+            // Never sanitize write-shaped or unknown actions. Benchmark
+            // read-only admission must continue to reject them.
             _ => &[][..],
         };
         if !allowed.is_empty() {

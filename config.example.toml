@@ -944,15 +944,16 @@ max_subagents = 10 # optional (default 64, clamped to 1-128)
 # ─────────────────────────────────────────────────────────────────────────────────
 # Web Search Provider
 # ─────────────────────────────────────────────────────────────────────────────────
-# Choose which backend `web_search` uses. Default is DuckDuckGo HTML scraping
-# with Bing fallback — no API key needed. Bing remains selectable for users who
-# explicitly prefer it. Switch to Tavily, Bocha, Metaso, Baidu, Volcengine,
-# Sofya, or a trusted SearXNG instance for API-backed search.
-# API runtime failures and empty responses visibly degrade through DuckDuckGo
-# then Bing. Missing configuration and network-policy denials fail closed.
+# Choose which backend `web_search` uses. Default is keyless Firecrawl with a
+# bounded per-IP quota. API runtime failures and empty responses visibly
+# degrade directly to keyless Bing so the fallback does not depend on
+# DuckDuckGo reachability. Missing configuration and network-policy denials
+# fail closed. DuckDuckGo remains explicitly selectable and keeps its internal
+# Bing fallback for empty/challenge responses.
 #
 # [search]
-# provider = "duckduckgo"  # duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya
+# provider = "firecrawl"  # firecrawl | duckduckgo | bing | tavily | bocha | metaso | searxng | baidu | volcengine | sofya
+#                            # firecrawl: keyless bounded quota or FIRECRAWL_API_KEY
 #                            # duckduckgo: HTML scrape with Bing fallback
 #                            # bing:       HTML scrape, no API key
 #                            # tavily:     https://tavily.com — AI search, needs api_key
