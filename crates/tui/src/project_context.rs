@@ -1445,6 +1445,26 @@ mod tests {
         assert!(block.contains("</project_instructions>"));
     }
 
+
+    #[test]
+    fn test_as_system_block_source_is_file_name_not_absolute_path() {
+        // 提示词前缀含 source 标签且位于 KV 缓存稳定区(块 2):同一份
+        // AGENTS.md 被搬到不同目录后重载,块文本必须逐字节一致,否则整段
+        // 请求(含历史)的提供商前缀缓存全损。
+        let dir_a = tempdir().expect("tempdir a");
+        let dir_b = tempdir().expect("tempdir b");
+        fs::write(dir_a.path().join("AGENTS.md"), "Pinned content").expect("write a");
+        fs::write(dir_b.path().join("AGENTS.md"), "Pinned content").expect("write b");
+
+        let block_a = load_project_context(dir_a.path()).as_system_block().expect("block a");
+        let block_b = load_project_context(dir_b.path()).as_system_block().expect("block b");
+        assert_eq!(block_a, block_b, "目录移动不应改变项目指令块");
+        assert!(block_a.contains("source=\"AGENTS.md\""));
+        assert!(
+            !block_a.contains(&dir_a.path().display().to_string()),
+            "绝对路径不得进入提示词标签"
+        );
+    }
     #[test]
     fn test_empty_file_warning() {
         let tmp = tempdir().expect("tempdir");

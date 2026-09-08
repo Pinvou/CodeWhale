@@ -449,10 +449,14 @@ fn base_source_entries(
     }
 
     if let Some(content) = project_context.instructions.as_deref() {
+        // 与 ProjectContext::as_system_block 同语义:source 只报文件名,报告与
+        // 提示词看到的标签一致,不泄漏绝对路径。
         let source = project_context
             .source_path
             .as_ref()
-            .map_or_else(|| "project".to_string(), |p| p.display().to_string());
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "project".to_string());
         let mut block = format!(
             "<project_instructions source=\"{source}\">\n{content}\n</project_instructions>"
         );
