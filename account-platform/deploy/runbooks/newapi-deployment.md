@@ -11,6 +11,20 @@
 - 若 Docker Hub 不可达，可使用缓存仓库传输**同一摘要**的镜像；拉取后核对平台 config ID 和 OCI revision/version，部署引用不得退化成可漂移标签。仓库模板仍以官方仓库为准，不把站点镜像网络配置写入公共模板。
 - 完整安全公告复核、隔离管理/Token API、JSON/SSE 用量和核对兼容性、内部 TLS 与生产依赖门禁仍是切换条件。摘要核验只证明固定了同一镜像，不能证明镜像没有漏洞。正式切换前不得开放 New API 公网入口或导入旧测试数据。
 
+### 空库基础验收
+
+Linux Docker 操作者先下载固定摘要的 New API 和 PostgreSQL 17 镜像，再显式运行：
+
+```sh
+python3 scripts/account-platform-newapi-fixture.py --isolated-fixture \
+  --newapi-image 'calciumion/new-api@sha256:7b82c866e9c0fb02faca7d5068e9d1261e47edf52462d63d9db7b614e7f1027d' \
+  --postgres-image '<docker image inspect 得到的本地 sha256 image ID>'
+```
+
+fixture 不主动下载镜像、不读取站点配置，使用独立 internal 网络及 tmpfs 数据库，不发布端口；宿主机仅连接已核验归属的临时容器地址。随机凭据通过 stdin 投递，不输出响应正文、原始错误或环境变量。退出前只删除本次创建且所有权标签匹配的容器 ID 和网络 ID，不删除镜像或其他数据。异常退出未能清理时报告 `fixture_cleanup_failed`，不得改用全局 prune。数据库在内存中，结果不可用作备份或生产部署。
+
+`NEWAPI_FRESH_FIXTURE_PASS` 仅表示 PostgreSQL 17 空库、非 root/只读启动、一次性初始化、管理员登录、四类匿名 API 拒绝、用户 quota bigint 的 50 亿值读写、应用进程重启后初始化/额度保留这 7 项基础检查通过。不包含 Redis、数据库重启恢复、真实上游、Token/Channel 配置、流式结算、漏洞扫描或生产网络验收。离线保护测试为 `python -m unittest discover -s scripts/tests -p test_newapi_fixture.py`，不能替代该真实 fixture。
+
 New API 使用 AGPLv3，并带上游声明的附加归属要求。发布或修改前必须完成许可证、上游模型授权、内容安全、日志留存和适用监管要求复核。
 
 ## 本地 Compose
