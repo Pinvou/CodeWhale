@@ -87,10 +87,18 @@ impl ProjectContext {
     /// cross-agent `<project_instructions>` prose. Either may be absent.
     pub fn as_system_block(&self) -> Option<String> {
         let instructions_block = self.instructions.as_ref().map(|content| {
+            // Prompt the source by file name only: the absolute path sits in
+            // the cache-stable prefix (block 2 of the system prompt), so an
+            // unchanged file whose directory moved or was cased differently
+            // would bust the provider's KV prefix cache for the entire
+            // request. Directory identity is still discoverable via the shell
+            // runtime; the `source` attribute is an origin label, not a locator.
             let source = self
                 .source_path
                 .as_ref()
-                .map_or_else(|| "project".to_string(), |p| p.display().to_string());
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "project".to_string());
 
             let mut block = format!(
                 "<project_instructions source=\"{source}\">\n{content}\n</project_instructions>"
