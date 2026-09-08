@@ -85,6 +85,28 @@ class OpenBaoConfigurationTests(unittest.TestCase):
         self.assertEqual(lines[0][3:5], ["root", "root"])
         self.assertTrue(all(fields[3:5] == ["65532", "65532"] for fields in lines[1:]))
 
+    def test_snapshot_worker_only_reads_backup_sink_and_public_inputs(self):
+        config = (CONFIG / "compose.backup.yaml").read_text(encoding="utf-8")
+        self.assertEqual(config.count('create_host_path: false'), 6)
+        self.assertEqual(config.count('read_only: true'), 6)  # Root FS plus five inputs.
+        self.assertIn('source: /run/pinvou-kms-agents/pinvou-kms-backup', config)
+        self.assertIn('target: /bao/output', config)
+        self.assertIn('entrypoint: ["/bao/bin/kms-snapshot"]', config)
+        self.assertIn('user: "65532:65532"', config)
+        for denied in ('bootstrap', 'identity.age', 'BAO_TOKEN', 'ports:', 'cap_add:', 'privileged:', 'restart: unless-stopped'):
+            self.assertNotIn(denied, config)
+
+    def test_snapshot_timer_propagates_failure_and_never_prunes(self):
+        service = (CONFIG / "pinvou-kms-snapshot.service").read_text(encoding="utf-8")
+        timer = (CONFIG / "pinvou-kms-snapshot.timer").read_text(encoding="utf-8")
+        self.assertIn('Type=oneshot', service)
+        self.assertIn('TimeoutStartSec=120', service)
+        self.assertIn('run --rm --no-deps --pull never snapshot', service)
+        self.assertNotIn('ExecStart=-', service)
+        self.assertNotIn('prune', service)
+        for required in ('OnCalendar=hourly', 'RandomizedDelaySec=60', 'Persistent=true', 'Unit=pinvou-kms-snapshot.service'):
+            self.assertIn(required, timer)
+
 
 if __name__ == "__main__":
     unittest.main()

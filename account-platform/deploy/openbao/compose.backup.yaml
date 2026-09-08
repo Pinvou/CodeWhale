@@ -1,0 +1,61 @@
+name: pinvou-kms-backup
+
+services:
+  snapshot:
+    image: quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641
+    entrypoint: ["/bao/bin/kms-snapshot"]
+    command: ["-config", "/bao/config/snapshot.json"]
+    user: "65532:65532"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 32
+    stop_grace_period: 10s
+    ulimits:
+      core: {soft: 0, hard: 0}
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=1m,mode=1777
+      - /openbao/file:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532
+      - /openbao/logs:rw,nosuid,nodev,noexec,size=1m,mode=0700,uid=65532,gid=65532
+    logging:
+      driver: local
+      options: {max-size: 1m, max-file: "2"}
+    volumes:
+      - type: bind
+        source: ${OPENBAO_BACKUP_DIRECTORY:?required}/bin
+        target: /bao/bin
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_BACKUP_DIRECTORY:?required}/config
+        target: /bao/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_BACKUP_DIRECTORY:?required}/recipient
+        target: /bao/recipient
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_TRUST_DIRECTORY:?required}
+        target: /bao/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /run/pinvou-kms-agents/pinvou-kms-backup
+        target: /bao/token
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${OPENBAO_BACKUP_DIRECTORY:?required}/snapshots
+        target: /bao/output
+        bind: {create_host_path: false}
+    networks: [kms]
+
+networks:
+  kms:
+    name: ${OPENBAO_NETWORK:?required}
+    external: true

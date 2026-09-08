@@ -1,6 +1,6 @@
 # 私有 KMS 配置
 
-状态：独立 KMS 已完成初始化、解封、四类身份配置及初始 root 撤销；三个 Agent 已完成投递、最小权限和真实续租验收，业务未接入（NOT_RELEASED）。这里只包含无秘密配置，不自动初始化，不是完整部署完成证明。
+状态：独立 KMS、四类身份、初始 root 撤销及三个 Agent 权限/续租已通过；每小时加密备份已启用，首包已下载并比对摘要，保管人本机完整校验和离线保存待确认。业务未接入（NOT_RELEASED）。这里只包含无秘密配置，不自动初始化，不是完整部署完成证明。
 
 固定镜像：`quay.io/openbao/openbao@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641`（2.6.2）。
 
@@ -35,7 +35,7 @@ Linux Docker 操作者先取得上述固定镜像，运行 `python3 scripts/acco
 
 先 `docker compose --env-file <公开环境文件> -f compose.yaml config` 核对无端口暴露、身份与目录，再启动。模板不发布宿主端口、只读根目录、禁用 core dump、限制 CPU/内存/PID，仅保留 IPC_LOCK。健康检查使用真实 TLS；未初始化或封存时非健康是预期状态，不得修改检查让其假健康。正式初始化须使用已验证的单次加密初始化器，保管人本机解封后才可创建逐服务策略/Agent，并在通过备份及运行门禁前保持业务未接入。
 
-正式定时备份、独立运维身份、证书续签/到期告警、审计轮转容量门禁和业务 Compose/Helm 接线尚需各自验收。此模板启动成功不是完整生产可用证明。
+逐服务身份、独立运维身份及定时备份已有独立验收记录；证书续签/到期告警、审计轮转容量门禁和业务 Compose/Helm 接线仍待完成。此模板启动成功不是完整生产可用证明。
 
 逐服务身份初始化使用独立本机 [kms-operator](../../tools/kms-recovery/cmd/kms-operator/README.md) 的固定 bootstrap/finalize 流程；原生 2.6.2 创建/轮换 key 返回 200 元数据。该工具已完成真实隔离联验，正式执行需要保管人本机口令，不把初始 root 投递到服务端文件、环境变量或命令参数。输出为加密角色包，Agent bootstrap 文件与定时快照任务仍需后续受控部署。
 
@@ -61,3 +61,11 @@ TOKEN_SECRET_KEY_ID=pinvou-token-data
 现场验证运行 `scripts/account-platform-kms-agent-check.py`，指定私有 HTTPS IP endpoint、Agent 目录、CA 信任目录和网络。它只读既有 token、检查真实容器与文件隔离并执行最小权限探测，不读取 bootstrap 内容。运行中令牌须真实有效且为对应唯一角色，期限 300/900 秒；等待真实续租后加 `--require-renewal` 复验。所有输出仅固定状态，不能打印响应诊断。仅文件存在不算健康，因此 Compose 不配置虚假文件存在健康检查；持续在线告警仍需后续监控任务接线。
 
 三角色均验收成功后，精确移除本机六个明文暂存文件，不删除既有加密恢复包。服务端机器引导文件长期保留给 Agent 重新登录，必须按既定周期轮换。备份 Agent 的快照权限验证不会保存快照，不能替代正式加密备份调度和恢复验收。
+
+## 定时加密备份
+
+使用 `compose.backup.yaml` 与 `pinvou-kms-snapshot.service/.timer`；公开变量为 `OPENBAO_BACKUP_DIRECTORY`、`OPENBAO_TRUST_DIRECTORY`、`OPENBAO_NETWORK`。备份目录预置 `bin/kms-snapshot`、`config/snapshot.json`、`recipient/recipient.txt`、`snapshots/`，根目录 root/0700，子目录 UID/GID 65532/0700，二进制 0500、配置和 recipient 0600。只读输入与唯一可写加密输出严格分离，不得将恢复身份、SecretID 或其他 token 放入这些目录。
+
+先核对固定镜像与二进制来源、recipient 指纹、真实容器挂载和资源，再安装并启动定时器。每小时生成独立加密包，失败 unit 不算成功；手动运行使用 `systemctl start pinvou-kms-snapshot.service`，查看 `Result`/`ExecMainStatus` 以及完成清单，不能仅看 timer active。保管人已选择定期下载离线保存，不配置异机自动上传。完整命令和恢复边界见 [快照手册](../../tools/kms-recovery/cmd/kms-snapshot/README.md)。
+
+现场首包已成功，单次容器正常退出并移除，timer enabled/active；下载到保管人本机后的密文摘要一致。**本机口令完整认证验证和新包离线保存仍待保管人确认**，尚不算灾备交接完成。初期无自动删除；容量/失败告警和保留策略未闭环前仍不放量。两实例隔离测试已使用同一生产备份函数完成真实恢复，并不等同于对正式实例执行灾难恢复。
