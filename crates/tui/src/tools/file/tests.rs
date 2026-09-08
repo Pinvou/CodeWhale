@@ -269,6 +269,76 @@ async fn cancelled_queued_pi_write_never_starts() {
     drop(held);
 }
 
+#[tokio::test]
+async fn forkguard_write_primitive_enforces_the_64kib_boundary() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temporary.path());
+    let at_limit = "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES);
+    WriteFileTool::execute_contract_write(
+        json!({"path": "at-limit.txt", "content": at_limit}),
+        &context,
+    )
+    .await
+    .expect("the exact 64KiB boundary remains writable");
+    assert_eq!(
+        std::fs::metadata(temporary.path().join("at-limit.txt"))
+            .expect("written file")
+            .len(),
+        WRITE_FILE_MAX_CONTENT_BYTES as u64
+    );
+
+    let error = WriteFileTool::execute_contract_write(
+        json!({
+            "path": "over-limit.txt",
+            "content": "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES + 1)
+        }),
+        &context,
+    )
+    .await
+    .expect_err("a primitive write above 64KiB must fail before touching disk");
+    assert!(
+        error.to_string().contains("64KB single-call limit"),
+        "{error}"
+    );
+    assert!(!temporary.path().join("over-limit.txt").exists());
+}
+
+#[tokio::test]
+async fn forkguard_write_file_enforces_the_64kib_boundary() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let context = ToolContext::new(temporary.path());
+    let at_limit = "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES);
+    WriteFileTool
+        .execute(
+            json!({"path": "legacy-at-limit.txt", "content": at_limit}),
+            &context,
+        )
+        .await
+        .expect("the hidden write_file path accepts exactly 64KiB");
+    assert_eq!(
+        std::fs::metadata(temporary.path().join("legacy-at-limit.txt"))
+            .expect("written file")
+            .len(),
+        WRITE_FILE_MAX_CONTENT_BYTES as u64
+    );
+
+    let error = WriteFileTool
+        .execute(
+            json!({
+                "path": "legacy-over-limit.txt",
+                "content": "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES + 1)
+            }),
+            &context,
+        )
+        .await
+        .expect_err("write_file above 64KiB must fail before touching disk");
+    assert!(
+        error.to_string().contains("64KB single-call limit"),
+        "{error}"
+    );
+    assert!(!temporary.path().join("legacy-over-limit.txt").exists());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn contract_edit_rejects_read_only_target_before_atomic_replace() {

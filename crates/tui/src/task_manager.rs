@@ -3019,6 +3019,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forkguard_terminal_task_delete_refuses_active_and_is_idempotent() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        let mut task = sample_task_record();
+        task.id = "task_deadbeefdeadbeef".to_string();
+        task.status = TaskStatus::Running;
+        task.started_at = Some(Utc::now());
+        task.ended_at = None;
+        {
+            let mut state = manager.state.lock().await;
+            state.tasks.insert(task.id.clone(), task.clone());
+        }
+        manager.persist_task_locked(&task)?;
+        let artifact_dir = manager.artifacts_dir.join(&task.id);
+        fs::create_dir_all(&artifact_dir)?;
+        fs::write(artifact_dir.join("receipt.txt"), "keep while active")?;
+
+        let error = manager
+            .delete_terminal_task(&task.id)
+            .await
+            .expect_err("active tasks must never be deleted");
+        assert!(error.to_string().contains("Refusing to delete active task"));
+        assert!(
+            manager
+                .tasks_dir
+                .join(format!("{}.json", task.id))
+                .is_file()
+        );
+        assert!(artifact_dir.join("receipt.txt").is_file());
+
+        task.status = TaskStatus::Completed;
+        task.ended_at = Some(Utc::now());
+        {
+            let mut state = manager.state.lock().await;
+            state.tasks.insert(task.id.clone(), task.clone());
+        }
+        manager.persist_task_locked(&task)?;
+        assert!(manager.delete_terminal_task(&task.id).await?);
+        assert!(!manager.tasks_dir.join(format!("{}.json", task.id)).exists());
+        assert!(!artifact_dir.exists());
+        assert!(!manager.delete_terminal_task(&task.id).await?);
+        manager.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn preallocated_task_ids_are_validated_and_collision_safe() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
         let manager =

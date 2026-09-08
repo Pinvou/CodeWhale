@@ -1437,7 +1437,7 @@ impl ToolSpec for WriteFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created. Pass `expected_hash` (the `content_hash` from a prior `read`) to have the overwrite refused if the file changed since that read."
+        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created. Recommended at most 32KB; hard limit 64KB per call. Pass `expected_hash` (the `content_hash` from a prior `read`) to have the overwrite refused if the file changed since that read."
     }
 
     fn input_schema(&self) -> Value {
@@ -1450,7 +1450,7 @@ impl ToolSpec for WriteFileTool {
                 },
                 "content": {
                     "type": "string",
-                    "description": "Content to write"
+                    "description": "Content; aim <=32KB, max 64KB"
                 },
                 "expected_hash": {
                     "type": "string",

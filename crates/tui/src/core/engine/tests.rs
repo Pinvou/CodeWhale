@@ -4198,6 +4198,103 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     run_task.await.expect("engine task");
 }
 
+#[tokio::test]
+async fn forkguard_restricted_turn_defers_idle_subagent_completion_until_new_message() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let workspace = tempdir().expect("workspace");
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("restricted turn complete"),
+        canned::simple_text_turn("explicit turn complete"),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let owner_session_id = engine.session.id.clone();
+    let completion_tx = engine.tx_subagent_completion.clone();
+
+    handle
+        .send(restricted_user_message_op("evaluate", &config))
+        .await
+        .expect("queue restricted turn");
+    let run = tokio::spawn(engine.run());
+
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("restricted turn event timeout")
+            .expect("engine event channel");
+        if matches!(event, Event::TurnComplete { .. }) {
+            break;
+        }
+    }
+    drop(rx);
+
+    completion_tx
+        .send(SubAgentCompletion {
+            owner_session_id,
+            agent_id: "preexisting-child".to_string(),
+            payload: "completion after restricted turn".to_string(),
+        })
+        .expect("queue idle completion");
+
+    let mut rx = handle.rx_event.write().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        assert!(
+            !matches!(event, Event::TurnStarted { .. }),
+            "idle completion started a new turn without replacement authority"
+        );
+    }
+    drop(rx);
+    assert_eq!(
+        mock.captured_requests().len(),
+        1,
+        "idle completion must remain queued behind the restricted latch"
+    );
+
+    handle
+        .send(external_user_message_op(
+            "resume explicitly",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("queue replacement-authority turn");
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("replacement turn event timeout")
+            .expect("engine event channel");
+        if matches!(event, Event::TurnComplete { .. }) {
+            break;
+        }
+    }
+    drop(rx);
+
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "explicit message must start the next turn"
+    );
+    let second_request = serde_json::to_string(&requests[1]).expect("serialize second request");
+    assert!(
+        second_request.contains("completion after restricted turn"),
+        "the deferred completion must be delivered once replacement authority arrives"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
 #[test]
 fn idle_and_in_turn_subagent_delivery_claim_each_completion_once() {
     use crate::tools::subagent::SubAgentCompletion;
@@ -4679,6 +4776,53 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
 }
 
 #[tokio::test]
+async fn forkguard_denied_mcp_is_absent_from_catalog_and_blocked_at_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    const DENIED_MCP: &str = "mcp_private_get_profile";
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call-denied-mcp", DENIED_MCP, r#"{}"#),
+        canned::simple_text_turn("Denied tool handled."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let policy = policy_for_catalog(
+        vec![catalog_tool(DENIED_MCP)],
+        Some(vec![DENIED_MCP.to_string()]),
+        Some(vec!["mcp_private_*".to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert!(policy.denies_tool(DENIED_MCP));
+    assert!(
+        policy.catalog.iter().all(|tool| tool.name != DENIED_MCP),
+        "a denied MCP tool must not reach the model-facing catalog"
+    );
+    assert!(!policy.active_names.contains(DENIED_MCP));
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine.run_turn(&mut turn, policy, None, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let denied = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+        Event::ToolCallComplete { name, result, .. } if name == DENIED_MCP => Some(result),
+        _ => None,
+    });
+    let error = denied
+        .expect("denied MCP completion")
+        .expect_err("denied MCP must not execute");
+    assert_eq!(
+        error.to_string(),
+        "Failed to execute tool: MCP tool failed: Unknown MCP tool name: mcp_private_get_profile"
+    );
+}
+
+#[tokio::test]
 async fn turn_owned_children_receive_exactly_one_coordination_pass_even_at_step_ceiling() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
@@ -5089,6 +5233,161 @@ async fn run_budgeted_read_turn(
         })
         .collect::<Vec<_>>();
     (status, error, completions)
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+async fn run_benchmark_controlled_read_turn(
+    workspace: &Path,
+    mock: std::sync::Arc<crate::llm_client::mock::MockLlmClient>,
+) -> (
+    TurnOutcomeStatus,
+    Option<String>,
+    Vec<(String, Result<ToolResult, ToolError>)>,
+) {
+    let mut engine_config = deterministic_engine_config(workspace);
+    engine_config.max_tool_calls = Some(1);
+    engine_config.turn_tool_security = Some(Arc::new(
+        TurnToolSecurityPolicy::new(
+            Some(Vec::new()),
+            Some(
+                ExactToolDispatchPolicy::try_new(vec!["read".to_string()])
+                    .expect("read-only benchmark policy"),
+            ),
+        )
+        .with_read_only_dispatch()
+        .with_final_only_after_tool_budget()
+        .with_missing_read_action_repair(),
+    ));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file_tool::ReadTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(6);
+
+    let (status, error) = engine.run_turn(&mut turn, surface, None, None).await;
+    let mut events = handle.rx_event.write().await;
+    let completions = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::ToolCallComplete { id, result, .. } => Some((id, result)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (status, error, completions)
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+#[tokio::test]
+async fn forkguard_benchmark_budget_truncates_batch_and_clears_followup_tool_surface() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    for name in ["one.txt", "two.txt", "three.txt"] {
+        fs::write(workspace.path().join(name), name).expect("write fixture");
+    }
+    let mock = Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&[
+            ("call-1", "read", r#"{"path":"one.txt"}"#),
+            ("call-2", "read", r#"{"path":"two.txt"}"#),
+            ("call-3", "read", r#"{"path":"three.txt"}"#),
+        ]),
+        tool_batch_turn(&[("call-after-fuse", "read", r#"{"path":"one.txt"}"#)]),
+        canned::simple_text_turn("FINAL ANSWER: one"),
+    ]));
+
+    let (status, error, completions) =
+        run_benchmark_controlled_read_turn(workspace.path(), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 3);
+    assert_eq!(
+        completions
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["call-1", "call-2"],
+        "the first over-budget call is retained as the only receipt"
+    );
+    assert!(completions[0].1.is_ok(), "{completions:?}");
+    assert!(completions[1].1.is_err(), "{completions:?}");
+    let requests = mock.captured_requests();
+    assert!(
+        requests
+            .first()
+            .and_then(|request| request.tools.as_ref())
+            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "read"))
+    );
+    assert!(
+        requests
+            .iter()
+            .skip(1)
+            .all(|request| request.tools.as_ref().is_none_or(Vec::is_empty)),
+        "all follow-up requests must be final-only"
+    );
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+#[tokio::test]
+async fn forkguard_benchmark_final_only_rejects_repeated_tool_only_responses() {
+    use crate::llm_client::mock::MockLlmClient;
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("one.txt"), "one").expect("write fixture");
+    let repeated = || tool_batch_turn(&[("call-retry", "read", r#"{"path":"one.txt"}"#)]);
+    let mock = Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&[
+            ("call-1", "read", r#"{"path":"one.txt"}"#),
+            ("call-over-budget", "read", r#"{"path":"one.txt"}"#),
+        ]),
+        repeated(),
+        repeated(),
+    ]));
+
+    let (status, error, completions) =
+        run_benchmark_controlled_read_turn(workspace.path(), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("repeated tool-only responses")),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(mock.call_count(), 3, "the final-only fuse must be bounded");
+    assert_eq!(completions.len(), 2);
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+#[tokio::test]
+async fn forkguard_benchmark_turn_repairs_file_aliases_before_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(
+        workspace.path().join("lines.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\n",
+    )
+    .expect("write fixture");
+    let mock = Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&[(
+            "call-aliased",
+            "read",
+            r#"{"action":"read","file_path":"lines.txt","start_line":"5","max_lines":1}"#,
+        )]),
+        canned::simple_text_turn("FINAL ANSWER: five"),
+    ]));
+
+    let (status, error, completions) =
+        run_benchmark_controlled_read_turn(workspace.path(), mock).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(completions.len(), 1);
+    let result = completions[0].1.as_ref().expect("aliased read executes");
+    assert!(result.content.contains("five"), "{result:?}");
+    assert!(
+        !result.content.contains("one\n"),
+        "window must be preserved"
+    );
 }
 
 /// #4415 AC(a): an 8-call cap admits exactly 8 calls; the 9th is rejected
@@ -21718,6 +22017,76 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
     assert!(
         engine.has_scheduled_goal_continuation(),
         "the wake must queue a goal continuation that will claim the evidence"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_restricted_turn_defers_idle_shell_wake_until_new_message() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = EngineConfig {
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+    let owner_session_id = engine.session.id.clone();
+
+    {
+        let mut shell = engine.shell_manager.lock().expect("shell manager");
+        shell
+            .execute_with_options_env_for_owner_and_session(
+                "echo restricted-shell-wake-done",
+                None,
+                30_000,
+                true,
+                None,
+                false,
+                None,
+                std::collections::HashMap::new(),
+                None,
+                &owner_session_id,
+            )
+            .expect("start background job");
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let done = {
+            let mut shell = engine.shell_manager.lock().expect("shell manager");
+            shell.has_finished_unreported_jobs_for_session(&owner_session_id)
+        };
+        if done {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background job never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    engine.control_plane_restricted = true;
+    engine
+        .tx_op
+        .try_send(Op::Shutdown)
+        .expect("queue explicit control operation");
+    let input = tokio::time::timeout(Duration::from_secs(1), engine.next_run_input(false))
+        .await
+        .expect("queued operation should wake the engine")
+        .expect("engine input");
+    assert!(
+        matches!(input, EngineRunInput::Operation(op) if matches!(*op, Op::Shutdown)),
+        "restricted latch must keep the shell wake queued behind explicit operations"
+    );
+
+    engine.control_plane_restricted = false;
+    let input = tokio::time::timeout(Duration::from_secs(10), engine.next_run_input(false))
+        .await
+        .expect("released latch should deliver the deferred shell wake")
+        .expect("engine input");
+    assert!(
+        matches!(input, EngineRunInput::ShellCompletionWake),
+        "deferred shell wake must remain available after replacement authority"
     );
 }
 

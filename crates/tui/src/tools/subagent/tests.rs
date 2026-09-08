@@ -13337,6 +13337,64 @@ fn active_session_owns_every_roster_and_control_resolution() {
 }
 
 #[test]
+fn forkguard_cancel_all_running_is_session_scoped_and_idempotent() {
+    let workspace = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(workspace.path().to_path_buf(), 5);
+    let session_a_first = manager.insert_test_running_agent("cancel_a_first", workspace.path());
+    let session_a_second = manager.insert_test_running_agent("cancel_a_second", workspace.path());
+    let session_b = manager.insert_test_running_agent("keep_b", workspace.path());
+    manager.assign_test_session_owner(&session_a_first, "session-a");
+    manager.assign_test_session_owner(&session_a_second, "session-a");
+    manager.assign_test_session_owner(&session_b, "session-b");
+
+    assert_eq!(manager.cancel_all_running_for_session("session-a"), 2);
+    for agent_id in [&session_a_first, &session_a_second] {
+        assert_eq!(
+            manager
+                .get_result(agent_id)
+                .expect("same-session child remains inspectable")
+                .status,
+            SubAgentStatus::Cancelled
+        );
+        assert_eq!(
+            manager
+                .get_worker_record(agent_id)
+                .expect("worker receipt")
+                .events
+                .iter()
+                .filter(|event| event.status == AgentWorkerStatus::Cancelled)
+                .count(),
+            1,
+            "bulk cancellation records one terminal transition"
+        );
+    }
+    assert_eq!(
+        manager
+            .get_result(&session_b)
+            .expect("foreign child remains live")
+            .status,
+        SubAgentStatus::Running,
+        "closing session A must not cancel a child owned by session B"
+    );
+    assert_eq!(
+        manager.cancel_all_running_for_session("session-a"),
+        0,
+        "repeated session cleanup is idempotent"
+    );
+    assert_eq!(
+        manager
+            .get_worker_record(&session_a_first)
+            .expect("worker receipt")
+            .events
+            .iter()
+            .filter(|event| event.status == AgentWorkerStatus::Cancelled)
+            .count(),
+        1,
+        "idempotent cleanup may not append another terminal event"
+    );
+}
+
+#[test]
 fn ownerless_legacy_rows_fail_closed_and_scoped_close_preserves_foreign_workers() {
     let workspace = tempdir().expect("tempdir");
     let mut manager = SubAgentManager::new(workspace.path().to_path_buf(), 5);

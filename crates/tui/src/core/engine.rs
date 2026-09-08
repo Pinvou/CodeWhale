@@ -2864,9 +2864,17 @@ impl Engine {
                         turn_tool_security,
                     } => {
                         let configured_security = self.config.turn_tool_security.clone();
+                        let previous_turn_was_restricted = self.control_plane_restricted;
                         self.active_turn_tool_security =
                             turn_tool_security.or(configured_security.clone());
                         self.control_plane_restricted = self.active_turn_tool_security.is_some();
+                        if previous_turn_was_restricted != self.control_plane_restricted {
+                            // Restricted and ordinary turns expose different
+                            // tool prefixes. Name that deliberate transition
+                            // before the next prefix-stability check.
+                            self.session.pending_prefix_change_reason =
+                                Some("tool_surface".to_string());
+                        }
                         if self.active_turn_tool_security.is_some() && !dynamic_tools.is_empty() {
                             let _ = self
                                 .tx_event

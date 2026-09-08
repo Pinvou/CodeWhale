@@ -2919,6 +2919,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forkguard_terminal_automation_run_delete_refuses_active_and_is_idempotent()
+    -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let task_manager = TaskManager::start_with_executor(
+            automation_task_config(tempdir.path().join("tasks")),
+            std::sync::Arc::new(AutomationNoopExecutor),
+        )
+        .await?;
+        let manager = AutomationManager::open(tempdir.path().join("automations"))?;
+        let automation = automation_record_with_settings(None, None, None, None);
+        manager.save_automation(&automation)?;
+        let mut run = queued_run_for(&automation);
+        run.status = AutomationRunStatus::Running;
+        run.started_at = Some(Utc::now());
+        manager.save_run(&run)?;
+
+        let error = manager
+            .delete_terminal_run(&run, &task_manager)
+            .await
+            .expect_err("active automation runs must never be deleted");
+        assert!(
+            error
+                .to_string()
+                .contains("Refusing to delete active automation run")
+        );
+        assert_eq!(manager.list_runs(&automation.id, None)?.len(), 1);
+
+        run.status = AutomationRunStatus::Completed;
+        run.ended_at = Some(Utc::now());
+        manager.save_run(&run)?;
+        assert!(manager.delete_terminal_run(&run, &task_manager).await?);
+        assert!(manager.list_runs(&automation.id, None)?.is_empty());
+        assert!(!manager.delete_terminal_run(&run, &task_manager).await?);
+        task_manager.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn automation_provider_pin_survives_active_route_change_and_legacy_inherits() -> Result<()>
     {
         let _env = crate::test_support::lock_test_env();

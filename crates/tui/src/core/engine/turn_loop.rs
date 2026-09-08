@@ -33,10 +33,575 @@ fn tool_log_message_for_policy(
     }
 }
 
+/// Render denied MCP names exactly like unknown MCP names. A distinct denial
+/// would reveal whether a configured server exists behind the deny rule.
+fn denied_tool_error(tool_name: &str) -> ToolError {
+    if McpPool::is_mcp_tool(tool_name) {
+        ToolError::execution_failed(format!(
+            "MCP tool failed: Unknown MCP tool name: {tool_name}"
+        ))
+    } else {
+        ToolError::permission_denied(format!(
+            "Tool '{tool_name}' is in the disallowed-tools list"
+        ))
+    }
+}
+
+/// Repair only benchmark read calls whose intent can be recovered without
+/// changing the requested resource. The caller is feature- and host-gated;
+/// normal engine calls retain strict schema validation.
+#[cfg(feature = "benchmark-eval-controls")]
+fn repair_benchmark_read_call(
+    tool_name: &str,
+    input: &mut serde_json::Value,
+    workspace: &std::path::Path,
+) -> Vec<&'static str> {
+    let Some(object) = input.as_object_mut() else {
+        return Vec::new();
+    };
+    if matches!(
+        tool_name,
+        "read" | "read_file" | "list_dir" | "file_search" | "grep_files"
+    ) {
+        return repair_benchmark_file_primitive(tool_name, object, workspace);
+    }
+    let original_object = object.clone();
+    let mut repairs = Vec::new();
+    let is_web = matches!(tool_name, "Web" | "web" | "web_search" | "fetch_url");
+    let is_file = matches!(tool_name, "File" | "file");
+    let is_image = tool_name == "image_analyze";
+
+    if is_file {
+        match fold_benchmark_alias_group(object, "path", &["file_path", "filePath"]) {
+            Ok(true) => repairs.push("file_parameter_alias"),
+            Ok(false) => {}
+            Err(()) => {
+                *object = original_object;
+                return Vec::new();
+            }
+        }
+    }
+    let has_action = object
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+
+    if !has_action {
+        let inferred = if is_web
+            && object
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            Some("fetch")
+        } else if is_web
+            && (object
+                .get("query")
+                .or_else(|| object.get("q"))
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                || object
+                    .get("search_query")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some())
+        {
+            Some("search")
+        } else if is_file
+            && object
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            Some("search_content")
+        } else if is_file
+            && object
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            Some("search_name")
+        } else if is_file
+            && object
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+            && !["content", "text", "data", "patch", "search", "replace"]
+                .iter()
+                .any(|key| object.contains_key(*key))
+        {
+            Some("read")
+        } else {
+            None
+        };
+        if let Some(inferred) = inferred {
+            object.insert(
+                "action".to_string(),
+                serde_json::Value::String(inferred.to_string()),
+            );
+            repairs.push("action");
+        }
+    }
+
+    if is_web {
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let has_url = object
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_query = object
+            .get("query")
+            .or_else(|| object.get("q"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+            || object
+                .get("search_query")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|value| !value.is_empty());
+        let normalized_action = match action {
+            "get" | "open" | "browse" | "read" if has_url => Some("fetch"),
+            "web_search" | "search_query" if has_query => Some("search"),
+            "fetch" if !has_url && has_query => Some("search"),
+            "search" if !has_query && has_url => Some("fetch"),
+            _ => None,
+        };
+        if let Some(action) = normalized_action {
+            object.insert(
+                "action".to_string(),
+                serde_json::Value::String(action.to_string()),
+            );
+            repairs.push("action_alias");
+        }
+
+        if object.remove("fields").is_some() {
+            repairs.push("optional_fields_removed");
+        }
+        if let Some(max_chars) = object.remove("max_chars") {
+            if object.get("max_bytes").is_none() && max_chars.is_number() {
+                object.insert("max_bytes".to_string(), max_chars);
+            }
+            repairs.push("max_chars_alias");
+        }
+        if let Some(format) = object
+            .get("format")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+        {
+            let normalized = match format.to_ascii_lowercase().as_str() {
+                "txt" | "plain" => Some("text"),
+                "md" => Some("markdown"),
+                "html" | "bytes" | "json" => Some("raw"),
+                _ => None,
+            };
+            if let Some(normalized) = normalized {
+                object.insert(
+                    "format".to_string(),
+                    serde_json::Value::String(normalized.to_string()),
+                );
+                repairs.push("format_alias");
+            }
+        }
+        for key in [
+            "max_results",
+            "timeout_ms",
+            "max_bytes",
+            "port",
+            "poll_interval_ms",
+        ] {
+            if normalize_benchmark_u64(object, key) {
+                repairs.push("numeric_string");
+            }
+        }
+        if let Some(domain) = object
+            .get("domains")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|domain| !domain.is_empty())
+            .map(str::to_owned)
+        {
+            object.insert(
+                "domains".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::String(domain)]),
+            );
+            repairs.push("domains_array");
+        }
+
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let irrelevant = match action {
+            "search" => &["url", "format", "max_bytes", "host", "port"][..],
+            "fetch" => &[
+                "query",
+                "q",
+                "search_query",
+                "max_results",
+                "recency",
+                "domains",
+                "locale",
+                "host",
+                "port",
+            ][..],
+            _ => &[][..],
+        };
+        let mut removed_irrelevant = false;
+        for key in irrelevant {
+            removed_irrelevant |= object.remove(*key).is_some();
+        }
+        if removed_irrelevant {
+            repairs.push("cross_action_parameters");
+        }
+    }
+
+    if is_file {
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let normalized_action = match action {
+            "open" | "cat" | "get" | "read_file" => Some("read"),
+            "ls" | "dir" | "list_dir" => Some("list"),
+            "find" | "file_search" if object.get("query").is_some() => Some("search_name"),
+            "grep" | "grep_files" if object.get("pattern").is_some() => Some("search_content"),
+            _ => None,
+        };
+        if let Some(action) = normalized_action {
+            object.insert(
+                "action".to_string(),
+                serde_json::Value::String(action.to_string()),
+            );
+            repairs.push("file_action_alias");
+        }
+
+        if object.get("action").and_then(serde_json::Value::as_str) == Some("read") {
+            for (canonical, aliases) in [
+                ("start_line", &["offset", "line_offset"][..]),
+                ("max_lines", &["limit", "n_lines", "num_lines"][..]),
+            ] {
+                match fold_benchmark_alias_group(object, canonical, aliases) {
+                    Ok(true) => repairs.push("file_parameter_alias"),
+                    Ok(false) => {}
+                    Err(()) => {
+                        *object = original_object;
+                        return Vec::new();
+                    }
+                }
+            }
+        }
+        if object.get("action").and_then(serde_json::Value::as_str) == Some("search_name")
+            && object.get("extensions").is_none()
+            && let Some(extensions) = object.get("include").and_then(simple_extension_filters)
+        {
+            object.remove("include");
+            object.insert("extensions".to_string(), extensions);
+            repairs.push("extension_filter");
+        }
+        if let Some(page) = object.get("pages").and_then(serde_json::Value::as_u64) {
+            object.insert(
+                "pages".to_string(),
+                serde_json::Value::String(page.to_string()),
+            );
+            repairs.push("page_string");
+        }
+        for key in [
+            "start_line",
+            "max_lines",
+            "limit",
+            "max_results",
+            "context_lines",
+        ] {
+            if normalize_benchmark_u64(object, key) {
+                repairs.push("numeric_string");
+            }
+        }
+        if let Some(path) = object
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        {
+            let path_value = std::path::Path::new(&path);
+            if path_value.components().count() == 1 && !workspace.join(path_value).exists() {
+                let attachment = workspace.join("attachments").join(path_value);
+                if attachment.exists() {
+                    object.insert(
+                        "path".to_string(),
+                        serde_json::Value::String(format!("attachments/{path}")),
+                    );
+                    repairs.push("attachment_path");
+                }
+            }
+        }
+        if object.get("action").and_then(serde_json::Value::as_str) == Some("read")
+            && let Some(path) = object.get("path").and_then(serde_json::Value::as_str)
+            && workspace.join(path).is_dir()
+        {
+            object.insert(
+                "action".to_string(),
+                serde_json::Value::String("list".to_string()),
+            );
+            repairs.push("directory_list");
+        }
+
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let allowed = match action {
+            "read" => &["action", "path", "start_line", "max_lines", "pages"][..],
+            "list" => &["action", "path"][..],
+            "search_name" => &[
+                "action",
+                "query",
+                "path",
+                "limit",
+                "max_results",
+                "extensions",
+                "exclude",
+            ][..],
+            "search_content" => &[
+                "action",
+                "pattern",
+                "query",
+                "path",
+                "include",
+                "exclude",
+                "context_lines",
+                "case_insensitive",
+                "max_results",
+                "limit",
+            ][..],
+            _ => &[][..],
+        };
+        if !allowed.is_empty() {
+            let before = object.len();
+            object.retain(|key, _| allowed.contains(&key.as_str()));
+            if object.len() != before {
+                repairs.push("cross_action_parameters");
+            }
+        }
+    }
+
+    if is_image
+        && let Some(path) = object
+            .get("image_path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    {
+        let path_value = std::path::Path::new(&path);
+        if path_value.components().count() == 1 && !workspace.join(path_value).exists() {
+            let attachment = workspace.join("attachments").join(path_value);
+            if attachment.is_file() {
+                object.insert(
+                    "image_path".to_string(),
+                    serde_json::Value::String(format!("attachments/{path}")),
+                );
+                repairs.push("image_attachment_path");
+            }
+        }
+    }
+
+    repairs
+}
+
+/// Translate legacy read-only spellings onto the exact v0.9.12 primitive
+/// schemas. These tools do not have an action discriminator, so the repair
+/// removes only a matching legacy action and never inserts one.
+#[cfg(feature = "benchmark-eval-controls")]
+fn repair_benchmark_file_primitive(
+    tool_name: &str,
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    workspace: &std::path::Path,
+) -> Vec<&'static str> {
+    let original = object.clone();
+    let mut repairs = Vec::new();
+    let expected_actions: &[&str] = match tool_name {
+        "read" | "read_file" => &["read", "open", "cat", "get", "read_file"],
+        "list_dir" => &["list", "ls", "dir", "list_dir"],
+        "file_search" => &["search_name", "find", "file_search"],
+        "grep_files" => &["search_content", "grep", "grep_files"],
+        _ => return repairs,
+    };
+    if let Some(action) = object.get("action") {
+        let Some(action) = action.as_str() else {
+            return repairs;
+        };
+        if !expected_actions.contains(&action) {
+            return repairs;
+        }
+        object.remove("action");
+        repairs.push("primitive_action_removed");
+    }
+
+    if fold_benchmark_alias_group(object, "path", &["file_path", "filePath"]).is_err() {
+        *object = original;
+        return Vec::new();
+    } else if original
+        .keys()
+        .any(|key| matches!(key.as_str(), "file_path" | "filePath"))
+    {
+        repairs.push("file_parameter_alias");
+    }
+
+    let alias_groups: &[(&str, &[&str])] = match tool_name {
+        "read" => &[
+            ("offset", &["start_line", "line_offset"]),
+            ("limit", &["max_lines", "n_lines", "num_lines"]),
+        ],
+        "read_file" => &[
+            ("start_line", &["offset", "line_offset"]),
+            ("max_lines", &["limit", "n_lines", "num_lines"]),
+        ],
+        "file_search" => &[("limit", &["max_results"])],
+        "grep_files" => &[("pattern", &["query"]), ("max_results", &["limit"])],
+        _ => &[],
+    };
+    for (canonical, aliases) in alias_groups {
+        match fold_benchmark_alias_group(object, canonical, aliases) {
+            Ok(true) => repairs.push("file_parameter_alias"),
+            Ok(false) => {}
+            Err(()) => {
+                *object = original;
+                return Vec::new();
+            }
+        }
+    }
+
+    if tool_name == "file_search"
+        && object.get("extensions").is_none()
+        && let Some(extensions) = object.get("include").and_then(simple_extension_filters)
+    {
+        object.remove("include");
+        object.insert("extensions".to_string(), extensions);
+        repairs.push("extension_filter");
+    }
+    if tool_name == "read_file"
+        && let Some(page) = object.get("pages").and_then(serde_json::Value::as_u64)
+    {
+        object.insert(
+            "pages".to_string(),
+            serde_json::Value::String(page.to_string()),
+        );
+        repairs.push("page_string");
+    }
+    let numeric_keys: &[&str] = match tool_name {
+        "read" => &["offset", "limit"],
+        "read_file" => &["start_line", "max_lines"],
+        "file_search" => &["limit"],
+        "grep_files" => &["context_lines", "max_results"],
+        _ => &[],
+    };
+    for key in numeric_keys {
+        if normalize_benchmark_u64(object, key) {
+            repairs.push("numeric_string");
+        }
+    }
+
+    if matches!(tool_name, "read" | "read_file")
+        && let Some(path) = object
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    {
+        let path_value = std::path::Path::new(&path);
+        if path_value.components().count() == 1 && !workspace.join(path_value).exists() {
+            let attachment = workspace.join("attachments").join(path_value);
+            if attachment.exists() {
+                object.insert(
+                    "path".to_string(),
+                    serde_json::Value::String(format!("attachments/{path}")),
+                );
+                repairs.push("attachment_path");
+            }
+        }
+    }
+
+    repairs
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+fn fold_benchmark_alias_group(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    canonical: &str,
+    aliases: &[&str],
+) -> Result<bool, ()> {
+    let present = aliases
+        .iter()
+        .filter_map(|alias| object.get(*alias).map(|value| (*alias, value.clone())))
+        .collect::<Vec<_>>();
+    let Some((_, value)) = present.first() else {
+        return Ok(false);
+    };
+    if present.iter().any(|(_, candidate)| candidate != value)
+        || object
+            .get(canonical)
+            .is_some_and(|candidate| candidate != value)
+    {
+        return Err(());
+    }
+    object
+        .entry(canonical.to_string())
+        .or_insert_with(|| value.clone());
+    for (alias, _) in present {
+        object.remove(alias);
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+fn normalize_benchmark_u64(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> bool {
+    let Some(value) = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    object.insert(key.to_string(), serde_json::Value::Number(value.into()));
+    true
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+fn simple_extension_filters(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let values = match value {
+        serde_json::Value::String(value) => vec![value.as_str()],
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()?,
+        _ => return None,
+    };
+    let mut extensions = Vec::with_capacity(values.len());
+    for value in values {
+        let extension = value
+            .trim()
+            .strip_prefix("*.")
+            .or_else(|| value.trim().strip_prefix('.'))
+            .unwrap_or(value.trim());
+        if extension.is_empty()
+            || !extension
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return None;
+        }
+        extensions.push(serde_json::Value::String(extension.to_string()));
+    }
+    Some(serde_json::Value::Array(extensions))
+}
+
 struct PlannedToolCalls {
     plans: Vec<ToolExecutionPlan>,
     hook_contexts: std::collections::HashMap<String, String>,
     batch_sandbox_policy: crate::sandbox::SandboxPolicy,
+    benchmark_budget_exhausted: bool,
+    benchmark_skipped_over_budget_tool_ids: std::collections::HashSet<String>,
 }
 
 struct StreamOutcome {
@@ -690,6 +1255,21 @@ impl Engine {
         // catalog; the policy only carries the declared limit, and `None`
         // (no declared budget) leaves the gate below inert.
         let mut tool_call_budget = ToolCallBudget::new(tool_policy.max_tool_calls);
+        #[cfg(feature = "benchmark-eval-controls")]
+        let benchmark_final_only_on_budget = self
+            .active_turn_tool_security
+            .as_ref()
+            .is_some_and(|policy| policy.final_only_after_tool_budget());
+        #[cfg(feature = "benchmark-eval-controls")]
+        let benchmark_tools_disabled_from_start = self
+            .active_turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.exact_dispatch())
+            .is_some_and(|policy| policy.allowed_tools().is_empty());
+        #[cfg(feature = "benchmark-eval-controls")]
+        let mut benchmark_tool_budget_fused = false;
+        #[cfg(feature = "benchmark-eval-controls")]
+        let mut benchmark_final_only_violations = 0_u8;
         let mut goal_continuations_this_turn = 0u32;
         // Turn-scoped empty REPL guard (NOTE-turn-loop-wrongness §2): persists
         // across model steps so 3 consecutive empty blocks end the turn, not
@@ -1809,6 +2389,40 @@ impl Engine {
                 normalize_schema_json_containers(&mut tool.input, schema);
             }
 
+            #[cfg(feature = "benchmark-eval-controls")]
+            if (benchmark_tool_budget_fused || benchmark_tools_disabled_from_start)
+                && !tool_uses.is_empty()
+            {
+                let discarded = tool_uses.len();
+                tool_uses.clear();
+                benchmark_final_only_violations = benchmark_final_only_violations.saturating_add(1);
+                emit_tool_audit_for_policy(
+                    true,
+                    json!({
+                        "event": "tool.benchmark_final_only_markers_discarded",
+                        "discarded": discarded,
+                        "violation": benchmark_final_only_violations,
+                    }),
+                );
+                if final_text.trim().is_empty() {
+                    if benchmark_final_only_violations >= 2 {
+                        let reason =
+                            "benchmark final-only mode produced repeated tool-only responses"
+                                .to_string();
+                        let _ = self.tx_event.send(Event::status(reason.clone())).await;
+                        return (TurnOutcomeStatus::Failed, Some(reason));
+                    }
+                    self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                        "All tools are disabled. The previous tool markers were ignored. Respond now with only the requested final answer in the exact required format."
+                            .to_string(),
+                        UserInputProvenance::Runtime,
+                    ))
+                    .await;
+                    turn.next_step();
+                    continue;
+                }
+            }
+
             if !final_text.is_empty() {
                 content_blocks.push(ContentBlock::Text {
                     text: final_text,
@@ -2467,6 +3081,8 @@ impl Engine {
                 plans,
                 hook_contexts,
                 batch_sandbox_policy,
+                benchmark_budget_exhausted,
+                benchmark_skipped_over_budget_tool_ids,
             } = self
                 .plan_tool_calls(
                     client.as_ref(),
@@ -2480,6 +3096,37 @@ impl Engine {
                     mode,
                 )
                 .await;
+
+            #[cfg(feature = "benchmark-eval-controls")]
+            if benchmark_budget_exhausted && benchmark_final_only_on_budget {
+                benchmark_tool_budget_fused = true;
+            }
+            #[cfg(not(feature = "benchmark-eval-controls"))]
+            let _ = benchmark_budget_exhausted;
+
+            if !benchmark_skipped_over_budget_tool_ids.is_empty() {
+                tool_uses.retain(|tool| {
+                    !benchmark_skipped_over_budget_tool_ids.contains(tool.id.as_str())
+                });
+                if let Some(message) = self.session.messages.last_mut()
+                    && message.role == "assistant"
+                {
+                    message.content.retain(|block| match block {
+                        ContentBlock::ToolUse { id, .. } => {
+                            !benchmark_skipped_over_budget_tool_ids.contains(id.as_str())
+                        }
+                        _ => true,
+                    });
+                }
+                #[cfg(feature = "benchmark-eval-controls")]
+                emit_tool_audit_for_policy(
+                    true,
+                    json!({
+                        "event": "tool.benchmark_over_budget_batch_truncated",
+                        "skipped": benchmark_skipped_over_budget_tool_ids.len(),
+                    }),
+                );
+            }
 
             let outcomes = self
                 .execute_planned_tools(
@@ -2504,6 +3151,26 @@ impl Engine {
                 &hook_contexts,
             )
             .await;
+
+            #[cfg(feature = "benchmark-eval-controls")]
+            if benchmark_budget_exhausted && benchmark_final_only_on_budget {
+                tool_catalog.clear();
+                active_tool_names.clear();
+                self.session.pending_prefix_change_reason =
+                    Some("benchmark_final_only".to_string());
+                self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                    "Tool budget is exhausted. All tools are now disabled for this turn. Do not call any tool again. Use only the evidence already present in the conversation and provide the requested final answer now, in the exact output format requested by the user."
+                        .to_string(),
+                    UserInputProvenance::Runtime,
+                ))
+                .await;
+                let _ = self
+                    .tx_event
+                    .send(Event::status(
+                        "Tool budget exhausted — continuing once in final-only mode".to_string(),
+                    ))
+                    .await;
+            }
 
             if !self.pending_steers.is_empty() {
                 let pending = std::mem::take(&mut self.pending_steers);
@@ -2623,6 +3290,15 @@ impl Engine {
         let mut hook_contexts: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut plans: Vec<ToolExecutionPlan> = Vec::with_capacity(tool_uses.len());
+        #[cfg(feature = "benchmark-eval-controls")]
+        let benchmark_final_only_on_budget = self
+            .active_turn_tool_security
+            .as_ref()
+            .is_some_and(|policy| policy.final_only_after_tool_budget());
+        #[cfg(not(feature = "benchmark-eval-controls"))]
+        let benchmark_final_only_on_budget = false;
+        let mut benchmark_budget_exhausted = false;
+        let mut benchmark_skipped_over_budget_tool_ids = std::collections::HashSet::new();
         // Resolve the batch's effective policy once. Ordinary approval
         // preserves it; an explicit sandbox escalation can replace it for
         // only the exact call that receives separate user approval.
@@ -2645,6 +3321,10 @@ impl Engine {
         );
         for (index, tool) in tool_uses.iter_mut().enumerate() {
             let tool_id = tool.id.clone();
+            if benchmark_final_only_on_budget && benchmark_budget_exhausted {
+                benchmark_skipped_over_budget_tool_ids.insert(tool_id);
+                continue;
+            }
             let mut tool_name = tool.name.clone();
             let mut tool_input = tool.input.clone();
             let tool_caller = tool.caller.clone();
@@ -2658,6 +3338,28 @@ impl Engine {
             let tool_def = resolve_tool_definition(&mut tool_name, tool_catalog, tool_registry);
             if requested_tool_name != tool_name {
                 tool.name = tool_name.clone();
+            }
+
+            // Resolve aliases/casing first. The repair is both compile-time
+            // and host-policy gated, so Desktop keeps strict schema behavior.
+            #[cfg(feature = "benchmark-eval-controls")]
+            if self
+                .active_turn_tool_security
+                .as_ref()
+                .is_some_and(|policy| policy.repairs_missing_read_actions())
+                && !repair_benchmark_read_call(&tool_name, &mut tool_input, &self.session.workspace)
+                    .is_empty()
+            {
+                tool.input = tool_input.clone();
+                emit_tool_audit_for_policy(
+                    true,
+                    json!({
+                        "event": "tool.benchmark_read_call_repaired",
+                        "tool_id": tool_id.clone(),
+                        "tool_name": tool_name.clone(),
+                        "action": tool_input.get("action"),
+                    }),
+                );
             }
 
             let interactive = (matches!(tool_name.as_str(), "bash" | "Bash" | "exec_shell")
@@ -2694,6 +3396,9 @@ impl Engine {
             let budget_debited = admission.is_ok();
             if let Err(exceeded) = admission {
                 blocked_error = Some(exceeded.into_tool_error(&tool_name));
+                if benchmark_final_only_on_budget {
+                    benchmark_budget_exhausted = true;
+                }
             }
 
             if mode_blocks_command_execution(mode, &tool_name) {
@@ -2711,9 +3416,7 @@ impl Engine {
             // #3027: deny wins over allow — check the deny-list first so a
             // tool present in both lists is still blocked.
             if blocked_error.is_none() && tool_policy.denies_tool(&tool_name) {
-                blocked_error = Some(ToolError::permission_denied(format!(
-                    "Tool '{tool_name}' is in the disallowed-tools list"
-                )));
+                blocked_error = Some(denied_tool_error(&tool_name));
             }
 
             if blocked_error.is_none() && !tool_policy.passes_allow_list(&tool_name) {
@@ -3230,6 +3933,8 @@ impl Engine {
             plans,
             hook_contexts,
             batch_sandbox_policy,
+            benchmark_budget_exhausted,
+            benchmark_skipped_over_budget_tool_ids,
         }
     }
 
@@ -5503,6 +6208,126 @@ mod stream_timeout_tests {
     }
 }
 
+#[cfg(all(test, feature = "benchmark-eval-controls"))]
+mod benchmark_eval_control_tests {
+    use super::repair_benchmark_read_call;
+    use crate::tools::file::ListDirTool;
+    use crate::tools::file_search::FileSearchTool;
+    use crate::tools::file_tool::ReadTool;
+    use crate::tools::search::GrepFilesTool;
+    use crate::tools::spec::{ToolContext, ToolSpec};
+    use serde_json::json;
+
+    #[test]
+    fn forkguard_benchmark_repairs_only_unambiguous_read_actions() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        for (tool, mut input, expected) in [
+            ("Web", json!({"url": "https://example.test"}), "fetch"),
+            ("Web", json!({"query": "example"}), "search"),
+            ("File", json!({"path": "/tmp/a"}), "read"),
+            (
+                "File",
+                json!({"path": "/tmp", "pattern": "needle"}),
+                "search_content",
+            ),
+        ] {
+            assert!(!repair_benchmark_read_call(tool, &mut input, workspace.path()).is_empty());
+            assert_eq!(input["action"], expected);
+        }
+
+        let mut canonical = json!({"path": "/tmp/a", "offset": 1});
+        assert!(repair_benchmark_read_call("read", &mut canonical, workspace.path()).is_empty());
+        assert!(canonical.get("action").is_none());
+
+        let mut explicit = json!({"action": "search", "query": "example"});
+        assert!(repair_benchmark_read_call("Web", &mut explicit, workspace.path()).is_empty());
+        assert_eq!(explicit["action"], "search");
+
+        let mut ambiguous = json!({"content": "do not infer a write"});
+        assert!(repair_benchmark_read_call("File", &mut ambiguous, workspace.path()).is_empty());
+        assert!(ambiguous.get("action").is_none());
+    }
+
+    #[tokio::test]
+    async fn forkguard_benchmark_repairs_read_schema_and_attachments() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(workspace.path().join("attachments")).expect("attachments");
+        std::fs::write(
+            workspace.path().join("attachments/data.csv"),
+            "one\ntwo\nneedle\n",
+        )
+        .expect("csv fixture");
+        let context = ToolContext::new(workspace.path().to_path_buf());
+
+        let mut read = json!({
+            "action": "read",
+            "file_path": "data.csv",
+            "start_line": "2",
+            "max_lines": 1
+        });
+        let repairs = repair_benchmark_read_call("read", &mut read, workspace.path());
+        assert!(repairs.contains(&"primitive_action_removed"));
+        assert!(repairs.contains(&"file_parameter_alias"));
+        assert!(repairs.contains(&"attachment_path"));
+        assert_eq!(
+            read,
+            json!({"path": "attachments/data.csv", "offset": 2, "limit": 1})
+        );
+        let read_result = ReadTool
+            .execute(read, &context)
+            .await
+            .expect("repaired direct read executes");
+        assert!(read_result.content.starts_with("two"), "{read_result:?}");
+
+        let mut list = json!({"action": "list", "file_path": "attachments"});
+        repair_benchmark_read_call("list_dir", &mut list, workspace.path());
+        assert_eq!(list, json!({"path": "attachments"}));
+        ListDirTool
+            .execute(list, &context)
+            .await
+            .expect("repaired list_dir executes");
+
+        let mut search = json!({
+            "action": "search_name",
+            "query": "data",
+            "path": "attachments",
+            "include": ["*.csv"],
+            "max_results": "5"
+        });
+        repair_benchmark_read_call("file_search", &mut search, workspace.path());
+        assert_eq!(search["extensions"], json!(["csv"]));
+        assert_eq!(search["limit"], 5);
+        assert!(search.get("action").is_none());
+        FileSearchTool
+            .execute(search, &context)
+            .await
+            .expect("repaired file_search executes");
+
+        let mut grep = json!({
+            "action": "grep",
+            "query": "needle",
+            "path": "attachments",
+            "limit": "5"
+        });
+        repair_benchmark_read_call("grep_files", &mut grep, workspace.path());
+        assert_eq!(grep["pattern"], "needle");
+        assert_eq!(grep["max_results"], 5);
+        assert!(grep.get("action").is_none());
+        GrepFilesTool
+            .execute(grep, &context)
+            .await
+            .expect("repaired grep_files executes");
+
+        let mut write = json!({
+            "action": "write",
+            "path": "answer.txt",
+            "content": "must remain blocked"
+        });
+        assert!(repair_benchmark_read_call("File", &mut write, workspace.path()).is_empty());
+        assert_eq!(write["content"], "must remain blocked");
+    }
+}
+
 #[cfg(test)]
 fn command_allows_tool(allowed_tools: Option<&[String]>, tool_name: &str) -> bool {
     tool_allowed(allowed_tools, tool_name)
@@ -6599,6 +7424,17 @@ mod tests {
             Some(&disallowed),
             "mcp_other_make_thing"
         ));
+    }
+
+    #[test]
+    fn forkguard_denied_mcp_tool_error_matches_the_unknown_tool_error() {
+        let denied = denied_tool_error("mcp_acme_get_profile");
+        assert_eq!(
+            denied.to_string(),
+            "Failed to execute tool: MCP tool failed: Unknown MCP tool name: mcp_acme_get_profile"
+        );
+        let plain = denied_tool_error("exec_shell");
+        assert!(plain.to_string().contains("disallowed-tools list"));
     }
 
     #[test]
