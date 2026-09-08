@@ -846,6 +846,91 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
   });
 });
 
+test("weekly explicit value feedback state is isolated by installation for explicit and fallback ids", () => {
+  const now = at("2026-08-12T12:00:00");
+  const successful = (identity, attempt, turn, occurredAt) => ({
+    event_id: `finished_${identity}`,
+    event_name: "task_finished",
+    attempt_id: attempt,
+    turn_id: turn,
+    identity_id: identity,
+    mode: "assistant",
+    initiator_type: "user",
+    status: "success",
+    occurred_at: occurredAt,
+  });
+  const events = [
+    successful("explicit_a", "shared_attempt", "shared_turn", at("2026-08-10T09:00:00")),
+    successful("explicit_b", "shared_attempt", "shared_turn", at("2026-08-10T09:00:00")),
+    { event_id: "feedback_explicit_a", event_name: "response_feedback_changed", feedback_id: "shared_feedback", feedback_action: "set", rating: "positive", turn_id: "shared_turn", identity_id: "explicit_a", occurred_at: at("2026-08-10T09:05:00") },
+    { event_id: "feedback_explicit_b", event_name: "response_feedback_changed", feedback_id: "shared_feedback", feedback_action: "clear", rating: "positive", turn_id: "shared_turn", identity_id: "explicit_b", occurred_at: at("2026-08-10T09:06:00") },
+    successful("fallback_a", "fallback_attempt", "fallback_turn", at("2026-08-10T10:00:00")),
+    successful("fallback_b", "fallback_attempt", "fallback_turn", at("2026-08-10T10:00:00")),
+    { event_id: "feedback_fallback_a", event_name: "response_feedback_changed", session_id: "shared_session", turn_id: "fallback_turn", feedback_action: "set", rating: "positive", identity_id: "fallback_a", occurred_at: at("2026-08-10T10:05:00") },
+    { event_id: "feedback_fallback_b", event_name: "response_feedback_changed", session_id: "shared_session", turn_id: "fallback_turn", feedback_action: "clear", rating: "positive", identity_id: "fallback_b", occurred_at: at("2026-08-10T10:06:00") },
+  ];
+  const metric = buildWeeklyExplicitValueMetric(events, now);
+
+  assert.equal(metric.weekly_successful_task_installations, 4);
+  assert.equal(metric.wevta_installations, 2);
+  assert.equal(metric.positive_feedback_installations, 2);
+});
+
+test("version quality counts and durations isolate identical attempts by installation", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [];
+  for (let index = 0; index < 30; index += 1) {
+    const common = {
+      attempt_id: "shared_attempt",
+      identity_id: `version_install_${index}`,
+      app_version: "0.9.1",
+      platform: "windows",
+      arch: "x86_64",
+      occurred_at: now - 1_000 + index,
+    };
+    events.push(
+      { ...common, event_id: `version_submit_${index}`, event_name: "task_submitted" },
+      { ...common, event_id: `version_admit_${index}`, event_name: "task_admitted" },
+      { ...common, event_id: `version_output_${index}`, event_name: "task_first_output", duration_ms: index + 1 },
+      { ...common, event_id: `version_finish_${index}`, event_name: "task_finished", status: index < 15 ? "success" : "cancelled", duration_ms: index + 1 },
+    );
+  }
+  const quality = buildBehaviorOverview(
+    installationDevicesFor(events), [], events, "today", now,
+  ).version_quality[0];
+
+  assert.equal(quality.sample_size, 30);
+  assert.equal(quality.admission_rate, 1);
+  assert.equal(quality.success_rate, 0.5);
+  assert.equal(quality.cancellation_rate, 0.5);
+  assert.equal(quality.first_output_p50_ms, 15);
+  assert.equal(quality.first_output_p90_ms, 27);
+  assert.equal(quality.total_duration_p50_ms, 15);
+  assert.equal(quality.total_duration_p90_ms, 27);
+});
+
+test("voice funnel operations and successful attempts are isolated by installation", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = ["voice_a", "voice_b"].flatMap((identity) => [
+    { event_id: `entry_${identity}`, event_name: "voice_entry_clicked", operation_id: "shared_operation", identity_id: identity, occurred_at: now - 6_000 },
+    { event_id: `permission_${identity}`, event_name: "voice_permission_result", operation_id: "shared_operation", voice_permission_status: "granted", identity_id: identity, occurred_at: now - 5_000 },
+    { event_id: `started_${identity}`, event_name: "voice_started", operation_id: "shared_operation", identity_id: identity, occurred_at: now - 4_000 },
+    { event_id: `recognized_${identity}`, event_name: "voice_recognition_completed", operation_id: "shared_operation", identity_id: identity, occurred_at: now - 3_000 },
+    { event_id: `submitted_${identity}`, event_name: "voice_message_submitted", operation_id: "shared_operation", attempt_id: "shared_attempt", identity_id: identity, occurred_at: now - 2_000 },
+    { event_id: `finished_${identity}`, event_name: "task_finished", attempt_id: "shared_attempt", identity_id: identity, mode: "assistant", initiator_type: "user", status: "success", occurred_at: now - 1_000 },
+  ]);
+  const voice = buildBehaviorOverview(
+    installationDevicesFor(events), [], events, "today", now,
+  ).funnels.voice;
+
+  assert.equal(voice.entry_clicked, 2);
+  assert.equal(voice.permission_granted, 2);
+  assert.equal(voice.started, 2);
+  assert.equal(voice.recognition_completed, 2);
+  assert.equal(voice.message_submitted, 2);
+  assert.equal(voice.task_succeeded, 2);
+});
+
 test("P1 dashboard metrics cover retention funnels version quality and confidence", () => {
   const now = at("2026-08-12T12:00:00");
   const behaviorEvents = [
@@ -856,11 +941,11 @@ test("P1 dashboard metrics cover retention funnels version quality and confidenc
     { event_id: "active_d7", event_name: "task_finished", attempt_id: "retention_attempt_d7", mode: "code", initiator_type: "user", status: "success", identity_id: "retained_d7", occurred_at: at("2026-08-11T08:00:00") },
     { event_id: "cohort_d30", event_name: "analytics_cohort_started", identity_id: "retained_d30", occurred_at: at("2026-07-13T08:00:00") },
     { event_id: "active_d30", event_name: "task_finished", attempt_id: "retention_attempt_d30", mode: "team", initiator_type: "user", status: "success", identity_id: "retained_d30", occurred_at: at("2026-08-12T08:00:00") },
-    { event_id: "voice_entry", event_name: "voice_entry_clicked", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:00") },
-    { event_id: "voice_permission", event_name: "voice_permission_result", operation_id: "voice_op", voice_permission_status: "granted", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:01") },
-    { event_id: "voice_started", event_name: "voice_started", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:02") },
-    { event_id: "voice_recognized", event_name: "voice_recognition_completed", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:03") },
-    { event_id: "voice_submitted", event_name: "voice_message_submitted", operation_id: "voice_op", attempt_id: "quality_attempt_0", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:04") },
+    { event_id: "voice_entry", event_name: "voice_entry_clicked", operation_id: "voice_op", identity_id: "quality_0", occurred_at: at("2026-08-12T09:00:00") },
+    { event_id: "voice_permission", event_name: "voice_permission_result", operation_id: "voice_op", voice_permission_status: "granted", identity_id: "quality_0", occurred_at: at("2026-08-12T09:00:01") },
+    { event_id: "voice_started", event_name: "voice_started", operation_id: "voice_op", identity_id: "quality_0", occurred_at: at("2026-08-12T09:00:02") },
+    { event_id: "voice_recognized", event_name: "voice_recognition_completed", operation_id: "voice_op", identity_id: "quality_0", occurred_at: at("2026-08-12T09:00:03") },
+    { event_id: "voice_submitted", event_name: "voice_message_submitted", operation_id: "voice_op", attempt_id: "quality_attempt_0", identity_id: "quality_0", occurred_at: at("2026-08-12T09:00:04") },
   ];
   for (let index = 0; index < 30; index += 1) {
     const attempt = `quality_attempt_${index}`;

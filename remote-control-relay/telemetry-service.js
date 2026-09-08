@@ -671,6 +671,7 @@ function buildVersionQuality(windowEvents) {
       arch,
       submitted: new Set(),
       admitted: new Set(),
+      first_output: new Set(),
       finished: new Set(),
       success: new Set(),
       cancelled: new Set(),
@@ -679,16 +680,17 @@ function buildVersionQuality(windowEvents) {
       errors: new Map(),
       identities: new Set(),
     };
-    const attempt = boundedText(event.attempt_id, 128);
+    const attempt = attemptIdentityKey(event);
     const identity = eventIdentity(event);
     if (identity) row.identities.add(identity);
     if (attempt) {
       if (event.event_name === "task_submitted") row.submitted.add(attempt);
       if (event.event_name === "task_admitted") row.admitted.add(attempt);
-      if (event.event_name === "task_first_output") {
+      if (event.event_name === "task_first_output" && !row.first_output.has(attempt)) {
+        row.first_output.add(attempt);
         row.first_output_ms.push(event.duration_ms);
       }
-      if (event.event_name === "task_finished") {
+      if (event.event_name === "task_finished" && !row.finished.has(attempt)) {
         row.finished.add(attempt);
         row.total_duration_ms.push(event.duration_ms);
         if (event.status === "success") row.success.add(attempt);
@@ -722,23 +724,24 @@ function buildVersionQuality(windowEvents) {
 function buildVoiceFunnel(windowEvents, taskFinished) {
   const operations = eventName => new Set(windowEvents
     .filter(event => event.event_name === eventName)
-    .map(event => event.operation_id).filter(Boolean));
+    .map(event => scopedEventKey(event, event.operation_id)).filter(Boolean));
   const entries = operations("voice_entry_clicked");
   const permissions = new Set(windowEvents
     .filter(event => event.event_name === "voice_permission_result" && event.voice_permission_status === "granted")
-    .map(event => event.operation_id).filter(Boolean));
+    .map(event => scopedEventKey(event, event.operation_id)).filter(Boolean));
   const started = operations("voice_started");
   const recognized = operations("voice_recognition_completed");
   const submittedByOperation = new Map();
   for (const event of windowEvents) {
-    if (event.event_name === "voice_message_submitted" && event.operation_id
-      && !submittedByOperation.has(event.operation_id)) submittedByOperation.set(event.operation_id, event);
+    const operationKey = scopedEventKey(event, event.operation_id);
+    if (event.event_name === "voice_message_submitted" && operationKey
+      && !submittedByOperation.has(operationKey)) submittedByOperation.set(operationKey, event);
   }
   const submittedEvents = [...submittedByOperation.values()];
-  const submittedAttempts = new Set(submittedEvents.map(event => event.attempt_id).filter(Boolean));
+  const submittedAttempts = new Set(submittedEvents.map(attemptIdentityKey).filter(Boolean));
   const successfulAttempts = new Set(taskFinished
     .filter(event => event.status === "success")
-    .map(event => event.attempt_id).filter(attempt => submittedAttempts.has(attempt)));
+    .map(attemptIdentityKey).filter(attempt => submittedAttempts.has(attempt)));
   const failed = operations("voice_recognition_failed");
   const cancelled = operations("voice_cancelled");
   return {
@@ -768,7 +771,10 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
   const latestFeedback = new Map();
   for (const event of behaviorEvents) {
     if (event.event_name !== "response_feedback_changed" || Number(event.occurred_at) > now) continue;
-    const key = boundedText(event.feedback_id || `${event.session_id || ""}:${event.turn_id || ""}`, 256);
+    const fallbackKey = event.session_id && event.turn_id
+      ? `${event.session_id}\u001f${event.turn_id}`
+      : "";
+    const key = scopedEventKey(event, event.feedback_id || fallbackKey);
     const current = latestFeedback.get(key);
     if (key && (!current || Number(event.occurred_at) >= Number(current.occurred_at))) {
       latestFeedback.set(key, event);
@@ -778,7 +784,10 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
     if (Number(event.occurred_at) > now) return false;
     if (["response_copied", "artifact_exported"].includes(event.event_name)) return true;
     if (event.event_name !== "response_feedback_changed") return false;
-    const key = boundedText(event.feedback_id || `${event.session_id || ""}:${event.turn_id || ""}`, 256);
+    const fallbackKey = event.session_id && event.turn_id
+      ? `${event.session_id}\u001f${event.turn_id}`
+      : "";
+    const key = scopedEventKey(event, event.feedback_id || fallbackKey);
     return latestFeedback.get(key) === event
       && event.feedback_action === "set"
       && event.rating === "positive";
