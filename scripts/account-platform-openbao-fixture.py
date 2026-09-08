@@ -56,6 +56,7 @@ def main():
     recovery.add_argument("--initializer-test-binary", help="optional Linux Go initializer test binary; runs initialization suite")
     recovery.add_argument("--operator-test-binary", help="optional Linux Go operator test binary; runs operator suite")
     recovery.add_argument("--transit-test-binary", help="optional Linux business-provider binary; runs private CA and real TLS tests after root retirement")
+    recovery.add_argument("--native-gate-runner", help="optional Node runner for actual native gate and disposable PostgreSQL TLS")
     parser.add_argument("--restore-fixture", action="store_true", help="create a second isolated empty Raft instance for the operator restore proof")
     parser.add_argument("--bootstrap-fixture", action="store_true", help="test bounded role bootstrap and initial root retirement")
     args = parser.parse_args()
@@ -63,6 +64,8 @@ def main():
     require(not args.restore_fixture or args.operator_test_binary, "restore proof requires the operator test binary")
     require(not args.bootstrap_fixture or (args.operator_test_binary and not args.restore_fixture), "bootstrap proof requires operator and excludes restore")
     source = Path(args.config_directory).resolve(strict=True)
+    gate_runner = Path(args.native_gate_runner).resolve(strict=True) if args.native_gate_runner else None
+    require(not gate_runner or gate_runner.is_file(), "native gate runner missing")
     initializer_binary = None
     transit_binary = None
     if args.transit_test_binary:
@@ -103,13 +106,14 @@ def main():
             require(restore_info["Internal"] is True and restore_subnet.is_private and restore_subnet.version == 4 and not restore_subnet.overlaps(subnet), "restore network is not isolated")
             restore_ip = str(restore_subnet.network_address + 2)
         # Test-only CA stays on the operator side, never mounted into the server.
+        certificate_days = "30" if gate_runner else "1"
         for command in (
-            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=isolated-fixture-ca", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", str(root / "ca.key"), "-out", str(root / "trust" / "ca.crt")],
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", certificate_days, "-subj", "/CN=isolated-fixture-ca", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign", "-keyout", str(root / "ca.key"), "-out", str(root / "trust" / "ca.crt")],
             ["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-subj", "/CN=openbao", "-keyout", str(root / "tls" / "server.key"), "-out", str(root / "server.csr")],
         ):
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         private_write(root / "extensions", "subjectAltName=DNS:openbao,IP:" + server_ip + (",IP:" + restore_ip if restore_ip else "") + "\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
-        subprocess.run(["openssl", "x509", "-req", "-in", str(root / "server.csr"), "-CA", str(root / "trust" / "ca.crt"), "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-days", "1", "-extfile", str(root / "extensions"), "-out", str(root / "tls" / "server.crt")], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["openssl", "x509", "-req", "-in", str(root / "server.csr"), "-CA", str(root / "trust" / "ca.crt"), "-CAkey", str(root / "ca.key"), "-CAcreateserial", "-days", certificate_days, "-extfile", str(root / "extensions"), "-out", str(root / "tls" / "server.crt")], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         os.chmod(root / "ca.key", 0o600)
         for path in (root / "tls" / "server.key", root / "tls" / "server.crt", root / "trust" / "ca.crt"):
             os.chmod(path, 0o600)
@@ -222,6 +226,14 @@ def main():
         expect("sys/mounts/transit", {"type": "transit"}, root_token)
         expect("transit/keys/pinvou-token-data", {"type": "aes256-gcm96", "exportable": False, "allow_plaintext_backup": False, "deletion_allowed": False}, root_token)
         expect("sys/auth/approle", {"type": "approle"}, root_token)
+        if gate_runner:
+            from account_platform_native_gate_fixture import run_native_gate_fixture
+            run_native_gate_fixture(root, source, network, prefix, subnet, common, mounts,
+                                    containers, gate_runner, endpoint, expect, root_token)
+            expect("auth/token/revoke-self", {}, root_token)
+            expect("sys/policies/acl/default", token=root_token, statuses=(403,))
+            print("OPENBAO_NATIVE_GATE_FIXTURE_PASS", flush=True)
+            return
         policies = (source / "runtime-policy.hcl").read_text()
         for service in ("gateway", "credential"):
             policy_name = service + "-runtime"

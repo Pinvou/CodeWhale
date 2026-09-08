@@ -103,8 +103,20 @@ SECINF-05A 版本固定：核对官方 tag 对应源码提交、官方镜像仓�
 | --- | --- | --- |
 | 04B1 | Compose 显式原生覆盖层、双服务独立目录只读挂载、专用 CA/私有网络；真实 Compose 合并输出正负例、原 remote 回归 | 代码及真实解析通过 / NOT_DEPLOYED |
 | 04B2 | Helm 类型化原生配置、独立 token 投递卷及 CA、窄网络规则；实际 template/lint 与错误输入拒绝 | 代码及真实解析通过 / NOT_DEPLOYED |
-| 04B3 | 生产安全门禁区分既有 remote 与 native、迁移与 fresh-install；绑定实际环境的无秘密证据，不伪造旧 key、不跳过完整 gate | 待实施 |
+| 04B3 | 生产安全门禁区分既有 remote 与 native、迁移与 fresh-install；绑定实际环境的无秘密证据，不伪造旧 key、不跳过完整 gate | 代码与真实隔离联验通过 / NOT_DEPLOYED |
 | 04B4 | 现场非 root 业务容器原生接线、真实轮换/权限/TLS/挂载验收；与服务身份、NATS 和数据库准备合并后才允许业务切换 | 待实施 |
+
+04B3 设计：保留默认 remote/migration 的旧密钥退役语义；显式 `vault-transit` + `fresh-install` 使用独立原生门禁模块，其他原生安装模式拒绝而非降级。原生 Transit 的稳定 key 名与 `vault:vN` 版本不能混同；新安装不伪造“旧 key 已禁用”，也不降低最低解密版本而破坏未来备份恢复。
+
+原生验收采用 prepare/verify 两阶段：prepare 通过受限 PostgreSQL 只读查询确认六类密文表为空（凭据、四类用量密文及凭据隔离会话的 PKCE），记录数据库身份摘要；使用真实网关 Agent 身份加密随机探针，绑定 endpoint、专用 CA、稳定 key、时间和数据库摘要，将不含实际业务秘密的探针状态独占写入私有文件。prepare 不是 GO。之后只有保管人的本地交互运维工具可读取离线运维身份执行版本轮换；Agent 不取得运维身份、root 或恢复口令。verify 必须在同一数据库和 KMS 上证明新加密版本严格递增、旧探针仍可解密、错误 AAD 被拒绝；两服务各自角色/短租期/实际续租正确且具有所需加解密能力，数据库仍无历史异 key 密文，公开四类入口和业务 readiness 均通过才输出 GO。探针过期、替换数据库/CA/endpoint、同版本、共享 token 文件、读取不安全文件、接口异常均拒绝。
+
+数据库连接来自受限文件，调用本机 `psql` 仅执行固定只读 SQL，密码不进命令行或输出；证据只含计数与身份摘要。仍需另行证明全新服务/卷的精确部署来源、身份及网络隔离，不能把一份配置声明当作现场事实。门禁只探测，不负责删库、KMS 轮换、改变策略或提高自身权限。
+
+查询固定 public 表及 pg_catalog 搜索路径，关闭行安全的静默过滤（受 RLS 限制时查询必须失败），防止“看不见旧行”被误认为空库；仅在 verify 阶段排除已合法清空的 PKCE 墓碑。隔离联验复用全新 OpenBao TLS/Raft fixture，增加全新 PostgreSQL TLS 实例及正式门禁执行，实际验证双 AppRole 续租、空库采样、同版本拒绝、轮换后旧探针解密及六类异 key 拒绝。该联验不读取或改变正式 KMS，测试 schema 的联验不能替代正式迁移与业务容器验收。
+
+04B3 验证（2026-09-08）：8 项定向合同测试无 SKIP 通过；真实 OpenBao 2.6.2 TLS/Raft/双 Agent + PostgreSQL 17 TLS 隔离联验输出 `NATIVE_GATE_ACTUAL_TLS_POSTGRES_ROTATION_PASS` 和 `OPENBAO_NATIVE_GATE_FIXTURE_PASS`，退出 0。除轮换、六表、墓碑及 RLS 场景外，两个真实 entity 分别附加额外身份策略后拒绝、移除后恢复；错误 CA 在 HTTPS 握手失败且不写探针。测试运行后全部所属容器/网络已清理，无业务切换。独立审核发现的 `identity_policies` 附加授权遗漏已修复并经审核通过；只接受缺省/空数组，不因 token policies 正确而忽略 entity/group 权限。首次临时 PostgreSQL IP 与 Agent 自动分配地址冲突，调整隔离地址后完整重跑通过，不冒充生产故障修复。操作说明见 [原生门禁手册](../deploy/runbooks/native-kms-security-gate.md)；现场业务及保管人轮换仍归 04B4。
+
+04B3 全量回归：447 项合同测试中 445 通过、2 项既有 Docker/Helm opt-in 跳过，0 失败；不把跳过算作现场验收。18 项 Python 设施测试 17 通过、1 项 Windows 不适用的 POSIX 检查跳过；架构与 diff 检查通过。首轮全量仅因 Windows PATH 未含 OpenSSL 失败，测试增加标准 Git 安装目录发现后按默认完整命令重跑通过，无 TLS 跳过或生产代码降级。
 
 04B1 设计：既有 `compose.model-token.yaml` 仍默认 remote，但把仅 remote 所需的静态 token 插值改为可空，由合并后的部署检查和业务启动按实际 provider 拒绝缺失；原生覆盖层固定 `vault-transit` 并清空静态 token/local KEK。网关和凭据 Portal 使用两个不同且互不包含的宿主绝对目录，挂载整个 token sink 以跟随 Agent 原子换文件；单文件挂载、共享父目录、可写卷和自动创建缺失目录均拒绝。公开 CA 使用独立只读目录，不挂载包含叶私钥的 TLS 目录。仅这两个业务加入显式指定的既有 internal KMS 网络，不向命令执行器或其他服务开放 KMS 挂载；不部署/重建 KMS 或 Agent。
 
