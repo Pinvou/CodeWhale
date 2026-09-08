@@ -481,7 +481,7 @@
 
   // ── 模型列表(「添加模型」方案)─────────────────────────────────
   // 整表覆盖加载：保存/删除/切换链式 loadModels 并发时旧列表不得覆盖新列表
-  // （审计 b）。请求序号后发者胜（同 vllmDetectSeq 模式）。
+  // （审计 b）。请求序号后发者胜（同本文件请求序号模式）。
   var modelsLoadSeq = 0;
   async function loadModels() {
     var seq = ++modelsLoadSeq;

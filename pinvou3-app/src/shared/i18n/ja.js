@@ -377,7 +377,6 @@ const jaBase = {
         dep_ocr: '画像 / スキャン PDF の OCR', dep_archive: 'アーカイブ（zip/rar/7z）', dep_email: 'メール（.eml / .msg）', dep_voice_asr: 'ローカル音声認識',
         dep_voice_asr_model: '音声認識モデル（SenseVoice q8）', dep_knowledge_embedding_model: 'ナレッジ埋め込みモデル（bge-m3）',
         depHint_email_manual: '手動インストールが必要：ターミナルで `sudo cpan -i Email::Outlook::Message` を実行（Homebrew に formula はありません）。詳細: https://metacpan.org/pod/Email::Outlook::Message',
-
         communityQrAlt: 'Pinvou QQ グループの QR コード', communityQrPlaceholder: 'QR コード準備中', communityChannelTag: '中国語 QQ コミュニティ',
         communityQrHint: 'モバイル QQ でスキャンするか、グループ番号をコピーして手動で検索してください。',
         communityGroupLabel: 'グループ番号', communityGroupPending: '準備中', communityCopyGroup: 'グループ番号をコピー', communityCopied: 'グループ番号をコピーしました',
