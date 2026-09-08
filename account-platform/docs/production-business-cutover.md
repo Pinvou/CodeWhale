@@ -290,7 +290,8 @@ operator seed 与授权/证书配置摘要不变；原数据库/身份健康复�
 回归检查，不能以角色 SQL 已创建声称可登录。C4C3a 已通过冻结原生工具的隔离 Unix Socket 只读清点，
 并清理工具、临时导出及唯一管理员密码消费副本；没有开放超级管理员 TCP，未修改角色、HBA 或治理。
 完整设计、隔离适配及正式证据见 [正式 Token 发布权限窗口](production-token-release-window.md)。
-后续角色准备与激活仍须单独审核，本段不授权角色创建或数据库配置修改。
+角色准备的后续任务及准确执行边界见 [正式 Token 运行角色准备](production-token-role-preparation.md)。
+密码、HBA 与最终激活仍须分别独立审核，本段不授权扩大数据库配置修改范围。
 
 ### C4B2a 原生 NKey 的 Compose 检查接线（实现与静态验收通过 / NOT_DEPLOYED）
 
