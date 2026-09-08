@@ -24,6 +24,14 @@ const snapshotMagic = "PINVOU_KMS_SNAPSHOT_V1\n"
 
 var ErrSnapshot = errors.New("KMS_SNAPSHOT_FAILED_PRESERVE_INCOMPLETE_OUTPUT")
 
+func emptySnapshotIdentityPolicies(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true // Omitted means no identity policies; JSON null is not omitted.
+	}
+	var policies []json.RawMessage
+	return json.Unmarshal(raw, &policies) == nil && policies != nil && len(policies) == 0
+}
+
 type SnapshotConfig struct {
 	Config
 	RecipientFile   string `json:"recipient_file"`
@@ -121,13 +129,14 @@ func CaptureSnapshot(ctx context.Context, cfg SnapshotConfig) (string, error) {
 	defer clear(lease)
 	var identity struct {
 		Data struct {
-			Policies []string `json:"policies"`
-			TTL      int      `json:"ttl"`
-			MaxTTL   int      `json:"explicit_max_ttl"`
-			Type     string   `json:"type"`
+			IdentityPolicies json.RawMessage `json:"identity_policies"`
+			Policies         []string        `json:"policies"`
+			TTL              int             `json:"ttl"`
+			MaxTTL           int             `json:"explicit_max_ttl"`
+			Type             string          `json:"type"`
 		} `json:"data"`
 	}
-	if err != nil || json.Unmarshal(lease, &identity) != nil || len(identity.Data.Policies) != 1 || identity.Data.Policies[0] != "pinvou-kms-backup" || identity.Data.Type != "service" || identity.Data.TTL < 60 || identity.Data.TTL > 300 || identity.Data.MaxTTL < identity.Data.TTL || identity.Data.MaxTTL > 900 {
+	if err != nil || json.Unmarshal(lease, &identity) != nil || !emptySnapshotIdentityPolicies(identity.Data.IdentityPolicies) || len(identity.Data.Policies) != 1 || identity.Data.Policies[0] != "pinvou-kms-backup" || identity.Data.Type != "service" || identity.Data.TTL < 60 || identity.Data.TTL > 300 || identity.Data.MaxTTL < identity.Data.TTL || identity.Data.MaxTTL > 900 {
 		return "", ErrSnapshot
 	}
 	// Reserve an exclusive attempt before requesting snapshot. Failed attempts

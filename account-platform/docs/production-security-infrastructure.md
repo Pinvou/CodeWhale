@@ -15,6 +15,12 @@
 
 ## 设计
 
+### SECINF-03C-9C 附加身份策略检查（已部署）
+
+04B3 独立审核发现 OpenBao `lookup-self` 的 token policies 与 `identity_policies` 分开返回。把同一最小权限约束同步到既有 Agent 现场检查/持续监测和备份捕获器：额外 entity/group 策略、非数组或 null 必须拒绝，缺省及空数组合法。只收紧观察/捕获前置，不修改既有 KMS 策略、角色、密钥或 SecretID，也不重新初始化、解封或索取 custody。先单元及实际隔离身份附权负例通过，再发布监测脚本/备份工具并只读验证正式三身份，最后独立提交。若正式检查出现拒绝，保留失败状态并调查，不自动撤权或放宽门禁。该项不代表新业务已部署。
+
+验证与发布（2026-09-08）：Go 工具模块全量测试及 vet 通过，operator 10.646 秒；Python 13 项 11 通过、2 项 Windows 不适用的 POSIX 用例跳过。真实隔离双 Agent 验证 Python checker 对附加 entity 策略拒绝、移除恢复；真实 Linux operator 在两个全新 TLS/Raft 实例中验证备份 AppRole 附权后捕获拒绝且零文件，移除后撤销初始 root，再完成加密捕获、离线验证及恢复，三个原有实际通过 marker 齐备，退出 0。独立复审通过后核验新旧 SHA，保留原制品并原子替换精确监测脚本与备份二进制，保全原 owner/mode；正式三身份 `--lease-only --require-renewal` 通过。未手动生成正式快照，未调整调度、策略、角色或密钥；新备份二进制由既有小时计划使用。
+
 ### Native Transit 适配
 
 既有 `remote` 是自定义 `/v1/encrypt|decrypt` 协议，不等于 Vault API，保留其兼容行为。增加显式 `vault-transit` 模式，通过 `/v1/transit/encrypt/{key}`、`decrypt/{key}` 调用原生 API；不部署自制加密中转服务。

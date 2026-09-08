@@ -83,6 +83,7 @@ def validate_container(data, role, network, agent_root, trust_root):
 
 def validate_lease(data, role):
     require(data["policies"] == [role] and data["type"] == "service" and data["renewable"] is True)
+    require(data.get("identity_policies", []) == [])
     require(data["orphan"] is True and 0 < data["ttl"] <= 300 and data["explicit_max_ttl"] == 900)
     require(data["path"] == "auth/approle/login" and data["meta"]["role_name"] == role)
 

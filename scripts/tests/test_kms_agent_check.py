@@ -58,6 +58,10 @@ class KMSAgentCheckTests(unittest.TestCase):
         good = dict(policies=[role], type="service", renewable=True, orphan=True,
                     ttl=200, explicit_max_ttl=900, path="auth/approle/login", meta={"role_name": role})
         CHECK.validate_lease(good, role)
+        CHECK.validate_lease({**good, "identity_policies": []}, role)
+        for value in (None, {}, "", False, 0, ["fixture-extra-policy"]):
+            with self.subTest(identity_policies=value), self.assertRaises(ValueError):
+                CHECK.validate_lease({**good, "identity_policies": value}, role)
         for field, value in (("policies", [role, "default"]), ("policies", ["pinvou-kms-backup"]),
                              ("ttl", 0), ("ttl", 301), ("explicit_max_ttl", 0), ("renewable", False),
                              ("orphan", False), ("type", "batch"), ("meta", {"role_name": "other"})):

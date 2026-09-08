@@ -5,7 +5,9 @@ instance. This module cannot discover or connect to formal custody material.
 """
 
 import json
+import importlib.util
 import os
+from pathlib import Path
 import secrets
 import subprocess
 import time
@@ -27,6 +29,11 @@ def run_native_gate_fixture(root, source, network, prefix, subnet, common, mount
     def require(ok, code):
         if not ok:
             raise RuntimeError("native gate fixture: " + code)
+
+    checker_path = Path(__file__).resolve().parent / "account-platform-kms-agent-check.py"
+    spec = importlib.util.spec_from_file_location("native_fixture_agent_checker", checker_path)
+    checker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checker)
 
     def command(args, data=None, timeout=45):
         result = subprocess.run(args, input=data, capture_output=True, text=True, timeout=timeout)
@@ -169,6 +176,15 @@ def run_native_gate_fixture(root, source, network, prefix, subnet, common, mount
         require(bool(entity), "AppRole entity missing")
         expect("identity/entity/id/" + entity, {"policies": [policy]}, root_token)
         gate("extra-policy")
+        lease = expect("auth/token/lookup-self", token=token)["data"]
+        rejected = False
+        try:
+            checker.validate_lease(lease, "pinvou-token-gateway" if service == "gateway" else "pinvou-credential-portal")
+        except ValueError:
+            rejected = True
+        require(rejected, "Agent checker accepted extra entity policy")
         expect("identity/entity/id/" + entity, {"policies": []}, root_token)
+        checker.validate_lease(expect("auth/token/lookup-self", token=token)["data"],
+                               "pinvou-token-gateway" if service == "gateway" else "pinvou-credential-portal")
         gate("verify")
     print("NATIVE_GATE_ACTUAL_TLS_POSTGRES_ROTATION_PASS", flush=True)

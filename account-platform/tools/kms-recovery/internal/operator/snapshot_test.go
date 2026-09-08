@@ -164,6 +164,38 @@ func TestSnapshotRejectsUnsafeIdentityAndResponses(t *testing.T) {
 	}
 }
 
+func TestSnapshotIdentityPoliciesRejectBeforeCapture(t *testing.T) {
+	for _, raw := range []string{"", "[]", "[ ]", "null", "{}", "false", "0", `""`, `["fixture-extra-policy"]`} {
+		t.Run("value="+raw, func(t *testing.T) {
+			f, cfg, _ := newSnapshotFixture(t)
+			old := f.server.Config.Handler
+			f.server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "lookup-self") {
+					data := map[string]any{"policies": []string{"pinvou-kms-backup"}, "ttl": 180, "explicit_max_ttl": 900, "type": "service"}
+					if raw != "" {
+						data["identity_policies"] = json.RawMessage(raw)
+					}
+					json.NewEncoder(w).Encode(map[string]any{"data": data})
+					return
+				}
+				old.ServeHTTP(w, r)
+			})
+			_, err := CaptureSnapshot(context.Background(), cfg)
+			good := raw == "" || raw == "[]" || raw == "[ ]"
+			if good {
+				if err != nil || f.requests.Load() != 1 {
+					t.Fatal("empty identity policy rejected")
+				}
+			} else {
+				entries, readErr := os.ReadDir(cfg.OutputDirectory)
+				if err == nil || f.requests.Load() != 0 || readErr != nil || len(entries) != 0 {
+					t.Fatal("invalid identity policy requested snapshot or wrote an attempt")
+				}
+			}
+		})
+	}
+}
+
 func TestSnapshotRejectsConfigurationAndPermissions(t *testing.T) {
 	for _, mode := range []string{"recipient", "http", "ca", "relative-output", "overlap", "token", "mode"} {
 		t.Run(mode, func(t *testing.T) {

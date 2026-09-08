@@ -86,13 +86,26 @@ path "transit/keys/pinvou-token-data" { capabilities = ["read"] }`
 	token := func(policy string) string {
 		return jsonCall(src, "auth/token/create-orphan", rootToken, map[string]any{"policies": []string{policy}, "no_default_policy": true, "ttl": "180s", "explicit_max_ttl": "180s", "renewable": false})["auth"].(map[string]any)["client_token"].(string)
 	}
-	backupToken, readToken := token("pinvou-kms-backup"), token("fixture-readback")
+	jsonCall(src, "sys/auth/approle", rootToken, map[string]string{"type": "approle"})
+	jsonCall(src, "auth/approle/role/fixture-backup", rootToken, map[string]any{"token_policies": []string{"pinvou-kms-backup"}, "token_no_default_policy": true, "token_ttl": 180, "token_explicit_max_ttl": 180})
+	_, roleResponse := src("auth/approle/role/fixture-backup/role-id", "GET", rootToken, nil)
+	var roleID struct {
+		Data struct {
+			ID string `json:"role_id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(roleResponse, &roleID) != nil || roleID.Data.ID == "" {
+		t.Fatal("fixture backup role missing")
+	}
+	secretID := jsonCall(src, "auth/approle/role/fixture-backup/secret-id", rootToken, map[string]any{})["data"].(map[string]any)["secret_id"].(string)
+	backupAuth := jsonCall(src, "auth/approle/login", "", map[string]string{"role_id": roleID.Data.ID, "secret_id": secretID})["auth"].(map[string]any)
+	backupToken, readToken := backupAuth["client_token"].(string), token("fixture-readback")
+	entity, ok := backupAuth["entity_id"].(string)
+	if !ok || entity == "" {
+		t.Fatal("fixture backup entity missing")
+	}
 	if status, _ := src("sys/storage/raft/snapshot", "GET", readToken, nil); status != 403 {
 		t.Fatal("readback identity can take snapshot")
-	}
-	jsonCall(src, "auth/token/revoke-self", rootToken, map[string]any{})
-	if status, _ := src("auth/token/lookup-self", "GET", rootToken, nil); status != 403 {
-		t.Fatal("source root not revoked before backup")
 	}
 	backupParent := t.TempDir()
 	os.Chmod(backupParent, 0700)
@@ -106,6 +119,20 @@ path "transit/keys/pinvou-token-data" { capabilities = ["read"] }`
 		t.Fatal("snapshot test sink failed")
 	}
 	backupCfg := SnapshotConfig{Config: source, RecipientFile: filepath.Join(custodyDirectory, "recipient.txt"), TokenFile: backupTokenFile, OutputDirectory: filepath.Join(backupParent, "output")}
+	jsonCall(src, "sys/policies/acl/fixture-extra-policy", rootToken, map[string]string{"policy": `path "sys/health" { capabilities = ["read"] }`})
+	jsonCall(src, "identity/entity/id/"+entity, rootToken, map[string]any{"policies": []string{"fixture-extra-policy"}})
+	if _, err := CaptureSnapshot(context.Background(), backupCfg); err == nil {
+		t.Fatal("actual extra identity policy accepted")
+	}
+	entries, err := os.ReadDir(backupCfg.OutputDirectory)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("rejected actual identity wrote snapshot attempt")
+	}
+	jsonCall(src, "identity/entity/id/"+entity, rootToken, map[string]any{"policies": []string{}})
+	jsonCall(src, "auth/token/revoke-self", rootToken, map[string]any{})
+	if status, _ := src("auth/token/lookup-self", "GET", rootToken, nil); status != 403 {
+		t.Fatal("source root not revoked before backup")
+	}
 	output, err := CaptureSnapshot(context.Background(), backupCfg)
 	if err != nil {
 		t.Fatal("SNAPSHOT_CAPTURE_FAILED", err)
