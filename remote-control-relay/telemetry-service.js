@@ -259,6 +259,21 @@ function attemptIdentityKey(event) {
   return identity && attempt ? `${identity}\u001f${attempt}` : "";
 }
 
+function scopedEventKey(event, value, maxLength = 256) {
+  const identity = eventIdentity(event);
+  const key = boundedText(value, maxLength);
+  return identity && key ? `${identity}\u001f${key}` : "";
+}
+
+function coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay) {
+  const eligible = installationBehaviorEvents(devices, behaviorEvents).filter((event) => {
+    if (!isCoreUserTask(event, "task_finished")) return false;
+    const day = statsDay(event.occurred_at);
+    return day >= startDay && day <= endDay;
+  });
+  return uniqueAttempts(clipDailySubjectContributions(eligible).events, "task_finished");
+}
+
 function installationConversationsByDay(devices, behaviorEvents, startDay, endDay) {
   const deviceById = new Map(devices
     .filter(isBehaviorInstallationDevice)
@@ -266,20 +281,14 @@ function installationConversationsByDay(devices, behaviorEvents, startDay, endDa
   const rows = new Map();
   for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Map());
 
-  const seenAttempts = new Set();
-  for (const event of behaviorEvents) {
-    if (!isCoreUserTask(event, "task_finished")) continue;
+  for (const event of coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay)) {
     const device = deviceById.get(event.device_id);
     if (!isBehaviorInstallationDevice(device)) continue;
     const day = statsDay(event.occurred_at);
     const counts = rows.get(day);
     if (!counts) continue;
     const deviceId = boundedText(event.device_id, 128);
-    const attemptId = boundedText(event.attempt_id || event.turn_id || event.event_id, 128);
-    if (!deviceId || !attemptId) continue;
-    const attemptKey = `${deviceId}\u001f${attemptId}`;
-    if (seenAttempts.has(attemptKey)) continue;
-    seenAttempts.add(attemptKey);
+    if (!deviceId) continue;
     counts.set(deviceId, (counts.get(deviceId) || 0) + 1);
   }
   return rows;
@@ -910,8 +919,12 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     .filter((event) => coreAttemptKeys.has(attemptIdentityKey(event)));
   const taskRejected = uniqueAttempts(windowEvents, "task_rejected")
     .filter((event) => coreAttemptKeys.has(attemptIdentityKey(event)));
-  const coreTaskFinished = uniqueAttempts(windowEvents, "task_finished")
-    .filter((event) => isCoreUserTask(event, "task_finished"));
+  const coreTaskFinished = coreTaskFinishedEvents(
+    devices,
+    behaviorEvents,
+    window.startDay,
+    window.endDay,
+  );
   const taskFinished = coreTaskFinished;
   const cohortStarted = filteredBehaviorEvents(behaviorEvents, window, "analytics_cohort_started");
   const maturedCohorts = new Map();
@@ -972,9 +985,15 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     ...event,
     attempt_id: event.operation_id,
   })), "tool_install_completed");
+  const installationIds = new Set(devices
+    .filter(isBehaviorInstallationDevice)
+    .map((device) => boundedText(device.device_id, 128))
+    .filter(Boolean));
   const pipeline = pipelineEvents.filter((entry) => {
     const day = statsDay(entry.occurred_at);
-    return day >= window.startDay && day <= window.endDay;
+    const identity = eventIdentity(entry);
+    return identity && installationIds.has(identity)
+      && day >= window.startDay && day <= window.endDay;
   }).reduce((totals, entry) => {
     for (const key of ["accepted", "duplicate", "rejected", "retryable"]) {
       totals[key] += Number(entry[key] || 0);
@@ -998,7 +1017,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const activationFunnel = buildActivationFunnel(behaviorEvents, window, now);
   const versionQuality = buildVersionQuality(windowEvents);
   const latestReceivedAt = Math.max(0, ...behaviorEvents.map(event => Number(event.received_at || event.occurred_at) || 0));
-  const activeCollectionPresent = devices.some(device => device.behavior_collection?.status === "active");
+  const activeCollectionPresent = devices.some(device => isBehaviorInstallationDevice(device)
+    && device.behavior_collection?.status === "active");
   const dataStatus = behaviorEvents.length === 0
     ? (activeCollectionPresent ? "no_data" : "tracking_not_enabled")
     : (activeCollectionPresent && latestReceivedAt < now - DAY_MS ? "delayed" : "ready");
@@ -1179,8 +1199,8 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       successful_call_events: [],
       users: new Set(),
     };
-    const stageId = boundedText(event.operation_id || event.event_id
-      || `${event.view_id || "view"}:${toolKey}`, 256);
+    const stageId = scopedEventKey(event, event.operation_id || event.event_id
+      || `${event.view_id || "view"}:${toolKey}`);
     const identity = eventIdentity(event);
     if (identity) row.users.add(identity);
     const successfulTerminal = !["tool_install_completed", "tool_configuration_finished", "tool_call_completed"].includes(event.event_name)
@@ -1253,13 +1273,14 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
     filteredBehaviorEvents(behaviorEvents, window),
   ).events;
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
-    .map(event => [event.attempt_id, event]));
+    .map(event => [attemptIdentityKey(event), event]));
   const latestFeedbackByTurn = new Map();
   for (const event of windowEvents) {
     if (event.event_name !== "response_feedback_changed" || !event.turn_id) continue;
-    const previous = latestFeedbackByTurn.get(event.turn_id);
+    const turnKey = scopedEventKey(event, event.turn_id);
+    const previous = latestFeedbackByTurn.get(turnKey);
     if (!previous || Number(event.occurred_at) >= Number(previous.occurred_at)) {
-      latestFeedbackByTurn.set(event.turn_id, event);
+      latestFeedbackByTurn.set(turnKey, event);
     }
   }
   for (const event of windowEvents
@@ -1282,18 +1303,19 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
       durations: [],
     };
     const identity = eventIdentity(event);
-    const eventKey = boundedText(event.operation_id || event.attempt_id || event.event_id, 256);
+    const eventKey = scopedEventKey(event, event.operation_id || event.attempt_id || event.event_id);
     if (event.event_name === "scene_impression" && eventKey) row.impressions.add(eventKey);
     if (event.event_name === "scene_selected" && eventKey) row.selections.add(eventKey);
     if (["scene_submitted", "scene_triggered"].includes(event.event_name) && eventKey) {
       row.submissions.add(eventKey);
-      const finished = finishedByAttempt.get(event.attempt_id);
+      const finished = finishedByAttempt.get(attemptIdentityKey(event));
       if (finished) {
         row.durations.push(finished.duration_ms);
-        if (finished.status === "success") row.task_successes.add(event.attempt_id);
-        const feedback = latestFeedbackByTurn.get(finished.turn_id);
+        const taskKey = attemptIdentityKey(event);
+        if (finished.status === "success") row.task_successes.add(taskKey);
+        const feedback = latestFeedbackByTurn.get(scopedEventKey(finished, finished.turn_id));
         if (feedback?.feedback_action === "set" && feedback.rating === "negative") {
-          row.negative_feedback.add(event.attempt_id);
+          row.negative_feedback.add(taskKey);
         }
         const hasValue = windowEvents.some(signal => (
           eventIdentity(signal) === identity
@@ -1306,7 +1328,7 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
           && eventIdentity(feedback) === identity
           && Number(feedback.occurred_at) >= Number(finished.occurred_at)
           && Number(feedback.occurred_at) <= Number(finished.occurred_at) + EXPLICIT_VALUE_WINDOW_MS);
-        if (finished.status === "success" && hasValue) row.valued_tasks.add(event.attempt_id);
+        if (finished.status === "success" && hasValue) row.valued_tasks.add(taskKey);
       }
     }
     row.total = row.submissions.size;
@@ -1356,7 +1378,7 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
     filteredBehaviorEvents(behaviorEvents, window),
   ).events;
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
-    .map(event => [event.attempt_id, event]));
+    .map(event => [attemptIdentityKey(event), event]));
   for (const event of windowEvents.filter(event => event.event_name === "model_used")) {
     const modelId = controlledKey(event.model_key, CONTROLLED_MODEL_KEYS);
     const providerKey = controlledKey(event.provider_key, CONTROLLED_PROVIDER_KEYS);
@@ -1376,11 +1398,11 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
     row.total += 1;
     const selectionSource = boundedText(event.selection_source, 32) || "unknown";
     row.selection_sources.set(selectionSource, (row.selection_sources.get(selectionSource) || 0) + 1);
-    const attemptId = boundedText(event.attempt_id, 128);
-    const finished = finishedByAttempt.get(attemptId);
-    if (attemptId && finished) {
-      row.finished.add(attemptId);
-      if (finished.status === "success") row.success.add(attemptId);
+    const attemptKey = attemptIdentityKey(event);
+    const finished = finishedByAttempt.get(attemptKey);
+    if (attemptKey && finished) {
+      row.finished.add(attemptKey);
+      if (finished.status === "success") row.success.add(attemptKey);
       if (Number.isFinite(Number(finished.duration_ms))) row.durations.push(Number(finished.duration_ms));
     }
     const identity = eventIdentity(event);
@@ -2230,7 +2252,7 @@ loadBehaviorEvents() {
       device.last_seen_at = now;
       this.saveSoon();
     }
-    this.recordBehaviorPipelineResponse(response, now);
+    this.recordBehaviorPipelineResponse(response, now, device.device_id);
     return response;
   }
 
@@ -2259,9 +2281,10 @@ loadBehaviorEvents() {
     if (changed) atomicWriteJsonLines(this.behaviorPipelinePath, retained);
   }
 
-  recordBehaviorPipelineResponse(response, now = Date.now()) {
+  recordBehaviorPipelineResponse(response, now = Date.now(), deviceId = "") {
     const entry = {
       occurred_at: now,
+      device_id: boundedText(deviceId, 128),
       accepted: 0,
       duplicate: 0,
       rejected: 0,

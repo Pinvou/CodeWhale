@@ -423,6 +423,90 @@ test("conversation deduplication falls back per installation to turn and event i
   assert.equal(buildBehaviorOverview(devices, [], behaviorEvents, "today", now).metrics.task_finished_count, 3);
 });
 
+test("homepage and behavior task totals share clipping before installation-scoped deduplication", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [{ device_id: "install_clip", hardware_source: "installation_id" }];
+  const behaviorEvents = [
+    { event_id: "duplicate_first", event_name: "task_finished", attempt_id: "duplicate", device_id: "install_clip", mode: "assistant", initiator_type: "user", status: "success", occurred_at: now - 1_000 },
+    { event_id: "duplicate_second", event_name: "task_finished", attempt_id: "duplicate", device_id: "install_clip", mode: "assistant", initiator_type: "user", status: "success", occurred_at: now - 999 },
+    ...Array.from({ length: 99 }, (_, index) => ({
+      event_id: `clipped_finished_${index}`,
+      event_name: "task_finished",
+      attempt_id: `unique_${index}`,
+      device_id: "install_clip",
+      mode: "assistant",
+      initiator_type: "user",
+      status: "success",
+      occurred_at: now - 900 + index,
+    })),
+  ];
+  const homepage = buildStatsOverview(devices, [], behaviorEvents, now);
+  const behavior = buildBehaviorOverview(devices, [], behaviorEvents, "today", now);
+
+  assert.equal(homepage.usage_trend.at(-1).turns, 99);
+  assert.equal(buildDeviceList(devices, [], behaviorEvents, now)[0].turns_today, 99);
+  assert.equal(behavior.metrics.task_finished_count, 99);
+  assert.equal(behavior.metrics.task_success_count, 99);
+});
+
+test("scene and model task associations are isolated by installation", () => {
+  const now = at("2026-09-04T12:00:00");
+  const events = [
+    { event_id: "scene_a", event_name: "scene_submitted", operation_id: "shared_scene", attempt_id: "shared_attempt", scene_l1: "work", scene_l2: "writing", identity_id: "install_a", occurred_at: now - 6_000 },
+    { event_id: "scene_b", event_name: "scene_submitted", operation_id: "shared_scene", attempt_id: "shared_attempt", scene_l1: "work", scene_l2: "writing", identity_id: "install_b", occurred_at: now - 6_000 },
+    { event_id: "model_a", event_name: "model_used", attempt_id: "shared_attempt", provider_key: "deepseek", model_key: "deepseek", identity_id: "install_a", occurred_at: now - 5_000 },
+    { event_id: "model_b", event_name: "model_used", attempt_id: "shared_attempt", provider_key: "deepseek", model_key: "deepseek", identity_id: "install_b", occurred_at: now - 5_000 },
+    { event_id: "finish_a", event_name: "task_finished", attempt_id: "shared_attempt", turn_id: "shared_turn", status: "success", duration_ms: 100, identity_id: "install_a", occurred_at: now - 4_000 },
+    { event_id: "finish_b", event_name: "task_finished", attempt_id: "shared_attempt", turn_id: "shared_turn", status: "failed", duration_ms: 900, identity_id: "install_b", occurred_at: now - 4_000 },
+    { event_id: "feedback_a", event_name: "response_feedback_changed", turn_id: "shared_turn", feedback_action: "set", rating: "positive", identity_id: "install_a", occurred_at: now - 3_000 },
+    { event_id: "feedback_b", event_name: "response_feedback_changed", turn_id: "shared_turn", feedback_action: "set", rating: "negative", identity_id: "install_b", occurred_at: now - 2_000 },
+  ];
+  const devices = installationDevicesFor(events);
+  const scene = buildBehaviorSceneRanking(devices, [], events, "today", now, { minimumGroupSubjects: 0 }).rows[0];
+  const model = buildBehaviorModelRanking(devices, [], events, "today", now, { minimumGroupSubjects: 0 }).rows[0];
+
+  assert.equal(scene.trigger_count, 2);
+  assert.equal(scene.task_duration_p50_ms, 100);
+  assert.equal(scene.negative_feedback_rate, null);
+  assert.equal(model.task_terminal_count, 2);
+  assert.equal(model.task_success_count, 1);
+  assert.equal(model.task_duration_p50_ms, 100);
+});
+
+test("tool funnel operation identifiers are isolated by installation", () => {
+  const now = at("2026-09-04T12:00:00");
+  const events = ["install_a", "install_b"].flatMap((identity) => [
+    { event_id: `impression_${identity}`, event_name: "tool_impression", operation_id: "shared_operation", tool_key: "search", tool_type: "mcp", identity_id: identity, occurred_at: now - 3_000 },
+    { event_id: `started_${identity}`, event_name: "tool_install_started", operation_id: "shared_operation", tool_key: "search", tool_type: "mcp", identity_id: identity, occurred_at: now - 2_000 },
+    { event_id: `completed_${identity}`, event_name: "tool_install_completed", operation_id: "shared_operation", tool_key: "search", tool_type: "mcp", success: true, identity_id: identity, occurred_at: now - 1_000 },
+  ]);
+  const funnel = buildBehaviorToolRanking(
+    installationDevicesFor(events), [], events, "today", "install", now, { minimumGroupSubjects: 0 },
+  ).funnel_rows[0];
+
+  assert.equal(funnel.impression_count, 2);
+  assert.equal(funnel.install_started_count, 2);
+  assert.equal(funnel.install_succeeded_count, 2);
+});
+
+test("behavior status and pipeline quality include verifiable installation facts only", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [
+    { device_id: "install_a", hardware_source: "installation_id", behavior_collection: { status: "inactive" } },
+    { device_id: "legacy_hardware", hardware_source: "windows_cim_uuid", behavior_collection: { status: "active" } },
+  ];
+  const pipelineEvents = [
+    { occurred_at: now, accepted: 0, rejected: 100 },
+    { occurred_at: now, device_id: "legacy_hardware", accepted: 0, rejected: 100 },
+    { occurred_at: now, device_id: "install_a", accepted: 99, rejected: 1 },
+  ];
+  const overview = buildBehaviorOverview(devices, [], [], "today", now, pipelineEvents);
+
+  assert.equal(overview.data_status, "tracking_not_enabled");
+  assert.equal(overview.metrics.pipeline_accepted_count, 99);
+  assert.equal(overview.metrics.pipeline_rejection_rate, 0.01);
+});
+
 test("behavior first-output metrics exclude scheduled and system tasks", () => {
   const now = at("2026-09-04T12:00:00");
   const devices = [{ device_id: "install_a", hardware_source: "installation_id" }];
@@ -576,7 +660,7 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   for (const device of devices) device.hardware_source = "installation_id";
 
   const overview = buildBehaviorOverview(devices, usageEvents, behaviorEvents, "7", now, [
-    { occurred_at: now, accepted: 90, duplicate: 5, rejected: 3, retryable: 2 },
+    { occurred_at: now, device_id: "dev_a", accepted: 90, duplicate: 5, rejected: 3, retryable: 2 },
   ]);
   assert.equal(overview.subject, "installation");
   assert.equal(overview.active_installations, 3);
@@ -704,6 +788,7 @@ test("behavior event store validates v1 independently, injects identity and dedu
     assert.equal(readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8").trim().split("\n").length, 2);
     assert.deepEqual(store.behaviorPipelineEvents, [{
       occurred_at: store.behaviorPipelineEvents[0].occurred_at,
+      device_id: credential.device_id,
       accepted: 2,
       duplicate: 1,
       rejected: 5,
