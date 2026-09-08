@@ -19,6 +19,10 @@
 
 连接通过私有 `NATS_URL`（`tls://`）、可选专用 `NATS_CA_FILE`、已有 `NATS_CREDENTIALS_FILE` 输入。禁止把含身份材料的 URL、凭据文件内容放入命令行、仓库、普通日志或共享示例；配置/凭据目录应只读，逐服务隔离。显式 CA 文件必须为受控绝对路径、普通非符号链接文件且无组/其他用户写权限，内容只含当前有效 CA；客户端至少 TLS 1.2，保持域名验证。无专用 CA 时使用系统可信根，不允许跳过证书验证。只读操作也必须使用 TLS。
 
+也可通过 `NATS_NKEY_SEED_FILE` 使用标准用户 NKey。该模式与 `NATS_CREDENTIALS_FILE` 互斥；使用任一文件身份时 URL 不得另含用户名、密码或 token。NKey 即使在开发环境也要求验证 TLS。种子文件使用受控绝对路径，普通非符号链接且不超过 4 KiB；Linux 文件仅本角色可访问、直接父目录私有，Windows 必须由投递 ACL 保证。签名回调每次重连重新核验路径/权限/大小/用户类型并读取种子，但公钥绑定初次连接，文件替换为其他身份会拒绝签名，必须显式重建客户端。不能将种子值直接写入环境变量或共享凭据目录。
+
+NKey 种子不是短期 workload JWT，不自动过期。正常轮换先在 broker 配置中短时并存新旧公钥及相同最小 ACL，再逐角色投递并重建客户端、验证新身份；随后撤除旧公钥并主动让已有旧连接失效，实际验证旧种子拒绝后才算完成。隔离测试用受控 broker 重启应用新公钥集合并断开旧连接；不宣称已验证无停机热重载。疑似泄露先撤旧/断连接，不保留旧身份回滚。固定六身份包、加密离线保管、正式 ACL 与投递仍待 04C2B2/C2D，当前只有客户端接入与测试，不生成或部署正式身份。
+
 初始化工具的 create-only 是代码约束；NATS 的部分 consumer 创建/更新共用 API subject，不能声称初始化身份仅靠 ACL 就完全不能更新。初始化身份仅在串行部署窗口使用，退出后按该身份机制退场；业务不拥有这些 API 权限。
 
 ## 运行权限
@@ -30,3 +34,5 @@
 ## 隔离测试
 
 `PINVOU_TEST_NATS_SERVER_BINARY` 显式指定已核对的本机 NATS server 二进制，运行 `go test ./internal/platform/events -run NATS -count=1 -v`。测试自行新建 loopback/TLS/随机身份/临时 JetStream，不接受已有服务地址，退出清理仅自己创建的进程和临时目录。必须看到具名真实测试及 `NATS_PROVISIONED_TLS_ACTUAL_PASS`，未提供二进制时的跳过不能作为验收。
+
+C2B1 要求上述五角色矩阵的 `password` 和 `nkey` 子用例均通过，并取得独立 `NATS_NKEY_RECONNECT_REVOCATION_ACTUAL_PASS`。JWT 检查只覆盖原官方选项/回调的兼容性，不冒称在此 fixture 完成真实 JWT 签发服务联验。

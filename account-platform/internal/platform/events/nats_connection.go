@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,9 +23,14 @@ func connectNATS(rawURL, name string, cfg NATSConfig) (*nats.Conn, jetstream.Jet
 	if err != nil {
 		return nil, nil, err
 	}
-	options := []nats.Option{nats.Name(name), nats.Timeout(5 * time.Second), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second)}
+	seedFile := strings.TrimSpace(os.Getenv("NATS_NKEY_SEED_FILE"))
+	authentication, err := natsAuthentication(rawURL, seedFile, strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")))
+	if err != nil {
+		return nil, nil, err
+	}
+	options := []nats.Option{nats.Name(name), nats.Timeout(5 * time.Second), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second), nats.ErrorHandler(reportNATSAsyncError)}
 	parsed, parseErr := url.Parse(rawURL)
-	if provisioned || cfg.CAFile != "" {
+	if provisioned || cfg.CAFile != "" || seedFile != "" {
 		if parseErr != nil || parsed.Scheme != "tls" || parsed.Hostname() == "" || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(rawURL, ",") {
 			return nil, nil, ErrNATSResources
 		}
@@ -44,9 +50,7 @@ func connectNATS(rawURL, name string, cfg NATSConfig) (*nats.Conn, jetstream.Jet
 		}
 		options = append(options, nats.CustomInboxPrefix("_INBOX."+name))
 	}
-	if file := strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")); file != "" {
-		options = append(options, nats.UserCredentials(file))
-	}
+	options = append(options, authentication...)
 	connection, err := nats.Connect(rawURL, options...)
 	if err != nil {
 		return nil, nil, ErrNATSResources
@@ -57,6 +61,12 @@ func connectNATS(rawURL, name string, cfg NATSConfig) (*nats.Conn, jetstream.Jet
 		return nil, nil, ErrNATSResources
 	}
 	return connection, js, nil
+}
+
+// The library default prints raw server/callback errors. Keep a stable failure
+// signal without exposing server subjects, connection data or file diagnostics.
+func reportNATSAsyncError(_ *nats.Conn, _ *nats.Subscription, _ error) {
+	slog.Error("NATS_ASYNC_OPERATION_FAILED")
 }
 
 func natsRoots(filename string) (*x509.CertPool, error) {

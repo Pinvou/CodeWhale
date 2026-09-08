@@ -31,6 +31,12 @@ import (
 // random identities, loopback port and t.TempDir JetStream storage. No existing
 // NATS URL or production credentials are accepted by this fixture.
 func TestNATSProvisionedTLSIntegration(t *testing.T) {
+	for _, mode := range []string{"password", "nkey"} {
+		t.Run(mode, func(t *testing.T) { testNATSProvisionedTLSIntegration(t, mode == "nkey") })
+	}
+}
+
+func testNATSProvisionedTLSIntegration(t *testing.T, useNKey bool) {
 	binary := os.Getenv("PINVOU_TEST_NATS_SERVER_BINARY")
 	if binary == "" {
 		t.Skip("explicit isolated NATS binary required")
@@ -39,7 +45,9 @@ func TestNATSProvisionedTLSIntegration(t *testing.T) {
 		t.Fatal("fixture requires absolute binary path")
 	}
 	t.Setenv("NATS_CREDENTIALS_FILE", "")
+	t.Setenv("NATS_NKEY_SEED_FILE", "")
 	root := t.TempDir()
+	os.Chmod(root, 0700)
 	ca, cert, key := natsFixtureTLS(t)
 	for name, data := range map[string][]byte{"ca.crt": ca, "server.crt": cert, "server.key": key} {
 		if os.WriteFile(filepath.Join(root, name), data, 0600) != nil {
@@ -72,6 +80,17 @@ func TestNATSProvisionedTLSIntegration(t *testing.T) {
 		}
 		users = append(users, map[string]any{"user": role, "password": password, "permissions": map[string]any{"publish": pub, "subscribe": []string{"_INBOX." + role + ".>"}}})
 	}
+	seedFiles := map[string]string{}
+	if useNKey {
+		for _, user := range users {
+			role := user["user"].(string)
+			file, public := natsFixtureSeed(t, root, role)
+			seedFiles[role] = file
+			delete(user, "user")
+			delete(user, "password")
+			user["nkey"] = public
+		}
+	}
 	config := map[string]any{"listen": net.JoinHostPort("127.0.0.1", itoaFixture(port)), "jetstream": map[string]any{"store_dir": filepath.Join(root, "data")}, "tls": map[string]any{"cert_file": filepath.Join(root, "server.crt"), "key_file": filepath.Join(root, "server.key"), "min_version": "1.2"}, "authorization": map[string]any{"users": users}}
 	var configJSON bytes.Buffer
 	encoder := json.NewEncoder(&configJSON)
@@ -99,7 +118,15 @@ func TestNATSProvisionedTLSIntegration(t *testing.T) {
 	}
 	defer func() { process.Process.Kill(); process.Wait() }()
 	address := net.JoinHostPort("127.0.0.1", itoaFixture(port))
-	urlFor := func(role string) string { return "tls://" + role + ":" + password + "@" + address }
+	// Each connection snapshots its seed path into the signing callback; changing
+	// the process-boundary fixture environment cannot change existing clients.
+	urlFor := func(role string) string {
+		if useNKey {
+			t.Setenv("NATS_NKEY_SEED_FILE", seedFiles[role])
+			return "tls://" + address
+		}
+		return "tls://" + role + ":" + password + "@" + address
+	}
 	cfg := NATSConfig{Environment: "production-new", CAFile: filepath.Join(root, "ca.crt")}
 	var admin *nats.Conn
 	var js jetstream.JetStream
