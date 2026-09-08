@@ -1108,18 +1108,21 @@ assert.match(
   /modelServiceState: sessionId === activeIdRef\.current \? eventContext\.modelServiceState : null/,
   'background native sessions must not inherit the foreground managed-model context',
 );
-for (const [language, actionable] of [
-  ['zh-Hans', /切换到其他可用模型/],
-  ['en', /switch to another available model/],
-  ['ja', /別の利用可能なモデルに切り替えて/],
+for (const [language, actionable, accessTitle, capacityTitle] of [
+  ['zh-Hans', /切换到其他可用模型/, '内建模型暂时无法访问', '内建模型暂时不可用'],
+  ['en', /switch to another available model/, 'Built-in model is temporarily inaccessible', 'Built-in model is temporarily unavailable'],
+  ['ja', /別の利用可能なモデルに切り替えて/, '内蔵モデルに一時的にアクセスできません', '内蔵モデルは一時的に利用できません'],
 ]) {
   const currentState = { ...managedState, settings: { language } };
   for (const error of ['SSE stream request failed: HTTP 402 insufficient balance',
     'SSE stream request failed: HTTP 401 invalid API key', 'HTTP 429 insufficient_quota',
     'SSE stream request failed: HTTP 403 forbidden']) {
     const card = messageSandbox.window.PinvouBridgeMessages.modelServiceUserError({ error }, currentState);
+    assert.equal(card.title, ['auth', 'permission'].includes(card.kind) ? accessTitle : capacityTitle);
     assert.match(card.message, actionable);
-    assert.doesNotMatch(card.message, /API\s*key|API\s*キー|充值|チャージ|add balance|top.up/i);
+    const managedForbidden = /API\s*key|API\s*キー|账户余额|account balance|充值|チャージ|add balance|top.up/i;
+    assert.doesNotMatch(card.title, managedForbidden);
+    assert.doesNotMatch(modelErrors.noticeText(card), managedForbidden);
     const persisted = modelErrors.build(card, { language, modelServiceState: { activeModelId: 'custom' } });
     assert.equal(persisted.message, card.message, 'persisted managed cards keep their original guidance');
   }

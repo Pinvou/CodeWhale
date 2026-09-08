@@ -632,16 +632,22 @@
   const MANAGED_MODEL_COPY = {
     zh: {
       label: "内建模型",
+      accessTitle: "内建模型暂时无法访问",
+      capacityTitle: "内建模型暂时不可用",
       access: "{stop}请重新登录后重试，或切换到其他可用模型；如果仍不可用，请联系管理员检查内建模型服务。",
       capacity: "{stop}请稍后重试或切换到其他可用模型；如果持续出现，请联系管理员检查内建模型服务的额度与可用性。",
     },
     en: {
       label: "Built-in model",
+      accessTitle: "Built-in model is temporarily inaccessible",
+      capacityTitle: "Built-in model is temporarily unavailable",
       access: "{stop}Sign in again and retry, or switch to another available model. If the problem persists, contact your administrator to check the built-in model service.",
       capacity: "{stop}Try again later or switch to another available model. If the problem persists, contact your administrator to check the built-in model service capacity and availability.",
     },
     ja: {
       label: "内蔵モデル",
+      accessTitle: "内蔵モデルに一時的にアクセスできません",
+      capacityTitle: "内蔵モデルは一時的に利用できません",
       access: "{stop}再ログインして再試行するか、別の利用可能なモデルに切り替えてください。解決しない場合は、管理者に内蔵モデルサービスの確認を依頼してください。",
       capacity: "{stop}しばらくしてから再試行するか、別の利用可能なモデルに切り替えてください。問題が続く場合は、管理者に内蔵モデルサービスの利用枠と稼働状況の確認を依頼してください。",
     },
@@ -727,14 +733,21 @@
       unknown: ["unknownTitle", "unknownMessage", true],
     }[classified.kind] || ["unknownTitle", "unknownMessage", true];
     let message = textFor(language, key[1], provider);
-    if (managed && ["auth", "permission"].includes(classified.kind)) message = managedCopy.access;
-    if (managed && ["billing", "quota"].includes(classified.kind)) message = managedCopy.capacity;
+    let title = textFor(language, key[0], provider);
+    if (managed && ["auth", "permission"].includes(classified.kind)) {
+      title = managedCopy.accessTitle;
+      message = managedCopy.access;
+    }
+    if (managed && ["billing", "quota"].includes(classified.kind)) {
+      title = managedCopy.capacityTitle;
+      message = managedCopy.capacity;
+    }
     const stopPhrase = stopPhraseFor(language, options.terminal !== false);
     message = message.split("{stop}").join(stopPhrase);
     return {
       kind: classified.kind,
       providerLabel: provider,
-      title: textFor(language, key[0], provider),
+      title,
       message,
       retryable: key[2],
       technicalDetail,
