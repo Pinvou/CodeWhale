@@ -26,3 +26,8 @@ services:
         target: /opt/pinvou/production/postgres-backup.sh
         read_only: true
         bind: {create_host_path: false}
+      - type: bind
+        source: ./postgres-backup-job.sh
+        target: /opt/pinvou/production/postgres-backup-job.sh
+        read_only: true
+        bind: {create_host_path: false}

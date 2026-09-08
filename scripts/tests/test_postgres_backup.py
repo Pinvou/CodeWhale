@@ -61,7 +61,7 @@ class PostgresBackupTests(unittest.TestCase):
         overlay = (DEPLOY / 'compose.postgres-backup.yaml').read_text()
         self.assertIn('${POSTGRES_BACKUP_REPOSITORY:?', overlay)
         self.assertIn('${POSTGRES_BACKUP_SECRETS:?', overlay)
-        self.assertEqual(overlay.count('create_host_path: false'), 5)
+        self.assertEqual(overlay.count('create_host_path: false'), 6)
         self.assertNotIn('ports:', overlay)
         self.assertNotIn('environment:', overlay)
 

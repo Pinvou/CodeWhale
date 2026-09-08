@@ -134,7 +134,7 @@ def main():
             '/etc/pinvou/postgres/pg_hba.conf': (source / 'production/pg_hba.conf', True),
             '/docker-entrypoint-initdb.d/10-pinvou.sh': (source / 'production/postgres-init.sh', True),
             **{'/opt/pinvou/production/' + f: (source / 'production' / f, True) for f in
-               ('postgres-common.sh', 'postgres-entrypoint.sh', 'postgres-health.sh', 'postgres-backup.sh')},
+               ('postgres-common.sh', 'postgres-entrypoint.sh', 'postgres-health.sh', 'postgres-backup.sh', 'postgres-backup-job.sh')},
             **{'/opt/pinvou/' + f: (source / 'compose' / f, True) for f in ('init-databases.sh', 'validate-database-secrets.sh')},
             '/var/lib/pgbackrest': (root / 'repo', False),
             '/run/pinvou/postgres-backup': (root / 'backup', True),
@@ -212,6 +212,71 @@ def main():
         require(incremental['prior'] == full['label'], 'INCREMENTAL_NOT_LINKED_TO_FULL')
         print('PG_BACKUP_INCREMENTAL_AND_REAL_WAL_PASS', flush=True)
 
+        # Exercise the production scheduler against this isolated real cluster.
+        job_spec = importlib.util.spec_from_file_location('backup_job', repository / 'scripts/account-platform-postgres-backup-job.py')
+        job = importlib.util.module_from_spec(job_spec)
+        job_spec.loader.exec_module(job)
+        job_root = root / 'job'
+        job_root.mkdir(mode=0o700)
+        state_directory = job_root / 'state'
+        state_directory.mkdir(mode=0o700)
+        job_data = {'container_id': primary, 'image_id': args.image, 'project': name,
+                    'network_id': network,
+                    'system_identifier': source_id, 'data_directory': str(root / 'data'),
+                    'repository': str(root / 'repo'), 'secrets_directory': str(root / 'backup'),
+                    'mounts': [{'source': str(src), 'target': dst, 'read_only': ro} for dst, (src, ro) in expected.items()]}
+        job.atomic(job_root / 'job.json', job_data)
+        job_cli = ['python3', str(repository / 'scripts/account-platform-postgres-backup-job.py'), 'incr',
+                   '--config', str(job_root / 'job.json')]
+        result = json.loads(run(job_cli, timeout=180).stdout)
+        require(result['backup_id'] != incremental['label'] and not (state_directory / 'inflight.json').exists(),
+                'SCHEDULER_DID_NOT_COMPLETE_NEW_REAL_BACKUP')
+        print('PG_BACKUP_PRODUCTION_SCHEDULER_REAL_INCREMENTAL_PASS', flush=True)
+        import fcntl
+        prior_status = (state_directory / 'incr.json').read_bytes()
+        with (state_directory / 'job.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            busy = run(job_cli, check=False)
+            require(busy.returncode == 1 and busy.stdout.strip() == 'POSTGRES_BACKUP_BUSY'
+                    and (state_directory / 'incr.json').read_bytes() == prior_status, 'LOCK_COMPETITION_NOT_REJECTED')
+        job.atomic(job_root / 'job.json', {**job_data, 'image_id': 'sha256:' + '0' * 64})
+        failed_job = run(job_cli, check=False)
+        failed_status = json.loads((state_directory / 'incr.json').read_bytes())
+        require(failed_job.returncode == 1 and failed_status['status'] == 'failed'
+                and failed_status['error_code'] == 'CONTAINER_MISMATCH', 'FAILED_STATUS_NOT_SAVED')
+        job.atomic(job_root / 'job.json', job_data)
+        print('PG_BACKUP_REAL_CLI_LOCK_AND_FAILURE_STATUS_PASS', flush=True)
+
+        # Both missed schedules are made ready while the actual shared lock is
+        # held. They must wait, then complete two real backups without overlap.
+        queued = []
+        try:
+            with (state_directory / 'job.lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                for kind in ('full', 'incr'):
+                    argv = [*job_cli]
+                    argv[2] = kind
+                    queued.append(subprocess.Popen([*argv, '--wait-lock'], stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                time.sleep(2)
+                require(all(child.poll() is None for child in queued), 'QUEUED_BACKUP_DID_NOT_WAIT')
+            results = []
+            for child in queued:
+                output, error = child.communicate(timeout=240)
+                require(child.returncode == 0 and not error, 'QUEUED_REAL_BACKUP_FAILED')
+                results.append(json.loads(output))
+            require(all(item['status'] in ('ok', 'warning') for item in results), 'QUEUED_BACKUP_BAD_STATUS')
+            ordered = sorted(results, key=lambda item: item['lock_acquired_at'])
+            require(ordered[1]['lock_acquired_at'] >= ordered[0]['checked_at']
+                    and results[0]['backup_id'].endswith('F') and results[1]['backup_id'].endswith('I')
+                    and not (state_directory / 'inflight.json').exists(), 'QUEUED_BACKUP_OVERLAP_OR_INCOMPLETE')
+            print('PG_BACKUP_SIMULTANEOUS_FULL_INCREMENTAL_QUEUE_PASS', flush=True)
+        finally:
+            for child in queued:
+                if child.poll() is None:
+                    uncertain = True
+                    child.terminate()
+                child.communicate(timeout=10)
+
         # Use short-lived, explicitly owned restore commands; repository always read-only.
         common = ['--network', 'none', '--user', '999:999', '--read-only', '--cap-drop', 'ALL',
                   '--security-opt', 'no-new-privileges', '--memory', '1g', '--cpus', '1', '--pids-limit', '192',
@@ -240,6 +305,57 @@ def main():
             return cid
 
         command = ['--config=/run/pinvou/postgres-backup/pgbackrest.conf', '--stanza=platform']
+        # Real process cleanup with a living container: exiting PID 1 must not
+        # hide leaked descendants. These scripts only replace fixture mounts.
+        for scenario in ('timeout', 'orphan', 'startup-signal', 'startup-signal-post-pid'):
+            fake = root / ('fake-' + scenario + '.sh')
+            fake.write_text("#!/bin/sh\n" + ("trap '' TERM\n" if scenario == 'timeout' else '')
+                            + 'sleep 120 &\necho $! > /tmp/probe-child.pid\n'
+                            + ('wait\n' if scenario == 'timeout' else 'exit 0\n'))
+            fake.chmod(0o644)
+            runner_path = source / 'production/postgres-backup-job.sh'
+            extra_bindings = {}
+            if scenario.startswith('startup-signal'):
+                original = runner_path.read_text()
+                require(original.count('group=$!') == 1, 'STARTUP_SIGNAL_INJECTION_POINT')
+                runner_path = root / ('runner-' + scenario + '.sh')
+                if scenario == 'startup-signal':
+                    modified = original.replace('group=$!', 'kill -TERM "$$"\ngroup=$!')
+                else:
+                    delayed = root / 'delayed-setsid.sh'
+                    delayed.write_text('#!/bin/sh\nsleep 1\nexec /usr/bin/setsid "$@"\n')
+                    delayed.chmod(0o644)
+                    extra_bindings['/fixture/delayed-setsid.sh'] = (delayed, True)
+                    require(original.count('setsid /usr/bin/timeout') == 1, 'SETSID_DELAY_INJECTION_POINT')
+                    modified = original.replace('setsid /usr/bin/timeout', '/bin/sh /fixture/delayed-setsid.sh /usr/bin/timeout')
+                    modified = modified.replace('group=$!', 'group=$!\nkill -TERM "$$"')
+                runner_path.write_text(modified)
+                runner_path.chmod(0o644)
+            bindings = {**restore_bindings, '/opt/pinvou/production/postgres-backup.sh': (fake, True),
+                        job.RUNNER: (runner_path, True), **extra_bindings}
+            helper = create_helper(name + '-job-' + scenario, bindings, '/bin/sh', ['-c', 'exec sleep 180'])
+            run(['docker', 'start', helper])
+            if scenario.startswith('startup-signal'):
+                isolated_state = root / (scenario + '-state')
+                isolated_state.mkdir(mode=0o700)
+                try:
+                    job.invoke({'container_id': helper}, isolated_state, 'stats')
+                    raise RuntimeError('STARTUP_SIGNAL_WRONGLY_CONFIRMED')
+                except job.Failure as error:
+                    require(str(error) == 'EXECUTION_UNCONFIRMED_REQUIRES_REVIEW'
+                            and (isolated_state / 'inflight.json').is_file(), 'STARTUP_SIGNAL_LATCH_MISSING')
+                print('PG_BACKUP_' + scenario.upper().replace('-', '_') + '_UNCERTAIN_LATCH_PASS', flush=True)
+            else:
+                result = run(['docker', 'exec', helper, '/bin/sh', job.RUNNER, '1', 'stats'], check=False, timeout=25)
+                require(result.stdout.endswith(job.CONFIRMED.decode()) and
+                        (result.returncode in (124, 137) if scenario == 'timeout' else result.returncode == 0),
+                        'JOB_PROCESS_EXIT_NOT_CONFIRMED')
+                require(json.loads(run(['docker', 'inspect', helper]).stdout)[0]['State']['Running'], 'TEST_CONTAINER_NOT_ALIVE')
+                run(['docker', 'exec', helper, '/bin/sh', '-c',
+                     'read child < /tmp/probe-child.pid; if [ -r /proc/$child/stat ]; then '
+                     'line=$(cat /proc/$child/stat); rest=${line##*) }; set -- $rest; [ "$1" = Z ]; fi'])
+                print('PG_BACKUP_PROCESS_' + scenario.upper() + '_CLEANUP_PASS', flush=True)
+
         wrong = create_helper(name + '-wrong', {**restore_bindings, '/run/pinvou/postgres-backup': (root / 'wrong', True),
                                               '/var/lib/postgresql/data': (root / 'wrong-data', False)},
                               '/usr/bin/pgbackrest', [*command, '--set=' + full['label'], '--type=immediate', '--archive-mode=off', 'restore'])
