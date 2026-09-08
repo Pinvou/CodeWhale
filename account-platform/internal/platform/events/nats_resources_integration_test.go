@@ -81,17 +81,38 @@ func testNATSProvisionedTLSIntegration(t *testing.T, useNKey bool) {
 		users = append(users, map[string]any{"user": role, "password": password, "permissions": map[string]any{"publish": pub, "subscribe": []string{"_INBOX." + role + ".>"}}})
 	}
 	seedFiles := map[string]string{}
+	publicKeys := map[string]string{}
 	if useNKey {
+		users = append(users, map[string]any{"user": "event-resource-operator", "password": password})
 		for _, user := range users {
 			role := user["user"].(string)
 			file, public := natsFixtureSeed(t, root, role)
 			seedFiles[role] = file
+			if role != "fixture-admin" {
+				publicKeys[role] = public
+			}
 			delete(user, "user")
 			delete(user, "password")
 			user["nkey"] = public
 		}
 	}
 	config := map[string]any{"listen": net.JoinHostPort("127.0.0.1", itoaFixture(port)), "jetstream": map[string]any{"store_dir": filepath.Join(root, "data")}, "tls": map[string]any{"cert_file": filepath.Join(root, "server.crt"), "key_file": filepath.Join(root, "server.key"), "min_version": "1.2"}, "authorization": map[string]any{"users": users}}
+	if useNKey {
+		artifact, _ := json.Marshal(map[string]any{"version": 1, "purpose": "pinvou-nats-service-identities", "public_keys": publicKeys})
+		policy, err := RenderNATSAuthorization(artifact, nil)
+		if err != nil {
+			t.Fatal("production ACL render failed")
+		}
+		var rendered map[string]any
+		if json.Unmarshal(policy, &rendered) != nil {
+			t.Fatal("rendered ACL parse")
+		}
+		authorization := rendered["authorization"].(map[string]any)
+		// Only this isolated fixture gets an unrelated administrator, solely to
+		// manufacture drift below. The rendered production file contains six users.
+		authorization["users"] = append(authorization["users"].([]any), users[0])
+		config["authorization"] = authorization
+	}
 	var configJSON bytes.Buffer
 	encoder := json.NewEncoder(&configJSON)
 	encoder.SetEscapeHTML(false)
@@ -142,12 +163,21 @@ func testNATSProvisionedTLSIntegration(t *testing.T, useNKey bool) {
 		t.Fatal("fixture verified TLS connection unavailable")
 	}
 	defer admin.Close()
+	initializer := js
+	var resourceOperator *nats.Conn
+	if useNKey {
+		resourceOperator, initializer, err = connectNATS(urlFor("event-resource-operator"), "event-resource-operator", cfg)
+		if err != nil {
+			t.Fatal("fixed operator connection denied")
+		}
+		defer resourceOperator.Close()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	if ProvisionNATSResources(ctx, js, false) == nil {
+	if ProvisionNATSResources(ctx, initializer, false) == nil {
 		t.Fatal("check accepted missing resources")
 	}
-	if ProvisionNATSResources(ctx, js, true) != nil {
+	if ProvisionNATSResources(ctx, initializer, true) != nil {
 		if stream, err := js.Stream(ctx, platformStream); err == nil {
 			t.Logf("isolated stream configuration: %+v", stream.CachedInfo().Config)
 		}
@@ -158,10 +188,13 @@ func testNATSProvisionedTLSIntegration(t *testing.T, useNKey bool) {
 		}
 		t.Fatal("create-only initialization failed")
 	}
-	if ProvisionNATSResources(ctx, js, true) != nil || ProvisionNATSResources(ctx, js, false) != nil {
+	if ProvisionNATSResources(ctx, initializer, true) != nil || ProvisionNATSResources(ctx, initializer, false) != nil {
 		t.Fatal("resource replay changed or rejected configuration")
 	}
 	brokers := map[string]*NATSBroker{}
+	if useNKey {
+		brokers["event-resource-operator"] = &NATSBroker{connection: resourceOperator, stream: initializer}
+	}
 	for _, role := range []string{"account-outbox-relay", "billing-outbox-relay", "token-outbox-relay", "billing-command-executor", "token-command-executor"} {
 		broker, err := NewNATSBroker(ctx, urlFor(role), role, cfg)
 		if err != nil {
@@ -305,7 +338,7 @@ func testNATSProvisionedTLSIntegration(t *testing.T, useNKey bool) {
 	case <-time.After(time.Second):
 		t.Fatal("cross-role inbox subscription not denied")
 	}
-	for _, probe := range []struct{ role, subject string }{
+	probes := []struct{ role, subject string }{
 		{"account-outbox-relay", "billing.unauthorized.v1"},
 		{"account-outbox-relay", "$JS.API.STREAM.UPDATE.ACCOUNT_PLATFORM"},
 		{"account-outbox-relay", "$JS.API.STREAM.CREATE.ACCOUNT_PLATFORM"},
@@ -314,7 +347,13 @@ func testNATSProvisionedTLSIntegration(t *testing.T, useNKey bool) {
 		{"billing-command-executor", "$JS.ACK.ACCOUNT_PLATFORM.token-model-lifecycle-executor-v1.1.1.1.1.0"},
 		{"token-command-executor", "$JS.API.CONSUMER.INFO.ACCOUNT_PLATFORM.billing-command-executor-v1"},
 		{"token-command-executor", "$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.token-model-lifecycle-executor-v1.account.approval-command.authorized.v1"},
-	} {
+	}
+	if useNKey {
+		for _, subject := range []string{"account.fixture.v1", "$JS.API.STREAM.UPDATE.ACCOUNT_PLATFORM", "$JS.API.STREAM.DELETE.ACCOUNT_PLATFORM", "$JS.API.STREAM.PURGE.ACCOUNT_PLATFORM", "$JS.API.STREAM.MSG.GET.ACCOUNT_PLATFORM", "$JS.API.STREAM.CREATE.OTHER", "$JS.API.CONSUMER.CREATE.ACCOUNT_PLATFORM.other.account.approval-command.authorized.v1"} {
+			probes = append(probes, struct{ role, subject string }{"event-resource-operator", subject})
+		}
+	}
+	for _, probe := range probes {
 		denied := make(chan bool, 1)
 		connection := brokers[probe.role].connection
 		connection.SetErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
@@ -340,7 +379,7 @@ func testNATSProvisionedTLSIntegration(t *testing.T, useNKey bool) {
 	if _, err := js.UpdateStream(ctx, drift); err != nil {
 		t.Fatal("fixture drift setup failed")
 	}
-	if ProvisionNATSResources(ctx, js, true) == nil {
+	if ProvisionNATSResources(ctx, initializer, true) == nil {
 		t.Fatal("initializer overwrote existing drift")
 	}
 	stream, _ = js.Stream(ctx, platformStream)

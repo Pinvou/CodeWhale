@@ -28,7 +28,7 @@ test('fixed NATS resource operator has an exact required authorization entry', a
   const catalog = JSON.parse(await readFile(catalogURL, 'utf8'));
   assert.deepEqual(catalog.cli.filter(item => item.name === 'event-resources'), [{
     name: 'event-resources', source: 'account-platform/cmd/event-resources/main.go',
-    strategy: 'workload.fixed-event-resources-check-or-create-only',
+    strategy: 'protocol.offline-fixed-nats-authorization-or-workload-fixed-resources',
   }]);
   await rejectedMutation(catalog => {
     catalog.cli = catalog.cli.filter(item => item.name !== 'event-resources');

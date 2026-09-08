@@ -150,7 +150,7 @@
     { "source": "account-platform/cmd/event-relay/main.go", "durable": "source-bound-outbox-relay", "subject": "account|billing|token.>", "permission": "internal.event.publish.source-bound" }
   ],
   "cli": [
-    { "name": "event-resources", "source": "account-platform/cmd/event-resources/main.go", "strategy": "workload.fixed-event-resources-check-or-create-only" },
+    { "name": "event-resources", "source": "account-platform/cmd/event-resources/main.go", "strategy": "protocol.offline-fixed-nats-authorization-or-workload-fixed-resources" },
     { "name": "workload-token-agent", "source": "account-platform/cmd/workload-token-agent/main.go", "strategy": "workload.single-client-verified-token-projection" },
     { "name": "account-security", "source": "account-platform/cmd/account-security/main.go", "strategy": "protocol.controlled-security-terminal" },
     { "name": "account-service", "source": "account-platform/cmd/account-service/main.go", "strategy": "workload.http-and-task-host" },

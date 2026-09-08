@@ -6,6 +6,7 @@ toolchain go1.26.5
 
 require (
 	filippo.io/age v1.3.2
+	github.com/nats-io/nkeys v0.4.15
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 )

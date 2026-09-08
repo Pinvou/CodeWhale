@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,8 +34,30 @@ func TestNATSUserSeedActualReconnectAndRevocation(t *testing.T) {
 			t.Fatal("fixture TLS setup")
 		}
 	}
-	oldFile, oldPublic := natsFixtureSeed(t, root, "old")
-	newFile, newPublic := natsFixtureSeed(t, root, "new")
+	roleByFile := map[string]string{}
+	packet := func(prefix string) ([]byte, map[string]string) {
+		keys := map[string]string{}
+		files := map[string]string{}
+		for _, role := range fixedNATSRoleNames() {
+			file, public := natsFixtureSeed(t, root, prefix+role)
+			keys[role] = public
+			files[role] = file
+			roleByFile[file] = role
+		}
+		b, _ := json.Marshal(map[string]any{"version": 1, "purpose": "pinvou-nats-service-identities", "public_keys": keys})
+		return b, files
+	}
+	oldArtifact, oldFiles := packet("old-")
+	newArtifact, newFiles := packet("new-")
+	overlapPolicy, err := RenderNATSAuthorization(newArtifact, oldArtifact)
+	if err != nil {
+		t.Fatal("overlap policy")
+	}
+	newPolicy, err := RenderNATSAuthorization(newArtifact, nil)
+	if err != nil {
+		t.Fatal("new-only policy")
+	}
+	oldFile, newFile := oldFiles["account-outbox-relay"], newFiles["account-outbox-relay"]
 	oldSeed, _ := os.ReadFile(oldFile)
 	defer clear(oldSeed)
 	newSeed, _ := os.ReadFile(newFile)
@@ -55,13 +78,13 @@ func TestNATSUserSeedActualReconnectAndRevocation(t *testing.T) {
 		}
 	}
 	defer stop()
-	start := func(publicKeys ...string) {
+	start := func(policy []byte) {
 		t.Helper()
-		users := []map[string]any{}
-		for _, public := range publicKeys {
-			users = append(users, map[string]any{"nkey": public})
+		var rendered map[string]any
+		if json.Unmarshal(policy, &rendered) != nil {
+			t.Fatal("rendered policy parse")
 		}
-		config := map[string]any{"listen": address, "jetstream": map[string]any{"store_dir": filepath.Join(root, "data")}, "tls": map[string]any{"cert_file": filepath.Join(root, "server.crt"), "key_file": filepath.Join(root, "server.key"), "min_version": "1.2"}, "authorization": map[string]any{"users": users}}
+		config := map[string]any{"listen": address, "jetstream": map[string]any{"store_dir": filepath.Join(root, "data")}, "tls": map[string]any{"cert_file": filepath.Join(root, "server.crt"), "key_file": filepath.Join(root, "server.key"), "min_version": "1.2"}, "authorization": rendered["authorization"]}
 		var encoded bytes.Buffer
 		encoder := json.NewEncoder(&encoded)
 		encoder.SetEscapeHTML(false)
@@ -82,7 +105,7 @@ func TestNATSUserSeedActualReconnectAndRevocation(t *testing.T) {
 	cfg := NATSConfig{Environment: "production-fixture", CAFile: filepath.Join(root, "ca.crt")}
 	connect := func(file string) (*nats.Conn, error) {
 		t.Setenv("NATS_NKEY_SEED_FILE", file)
-		connection, _, err := connectNATS("tls://"+address, "fixture-rotation", cfg)
+		connection, _, err := connectNATS("tls://"+address, roleByFile[file], cfg)
 		return connection, err
 	}
 	wait := func(condition func() bool, label string, observed ...*nats.Conn) {
@@ -100,7 +123,7 @@ func TestNATSUserSeedActualReconnectAndRevocation(t *testing.T) {
 		}
 		t.Fatal("fixture condition failed:", label)
 	}
-	start(oldPublic, newPublic)
+	start(overlapPolicy)
 	var original *nats.Conn
 	wait(func() bool { original, err = connect(oldFile); return err == nil }, "initial NKey connection")
 	defer original.Close()
@@ -146,11 +169,41 @@ func TestNATSUserSeedActualReconnectAndRevocation(t *testing.T) {
 		t.Fatal("new identity denied during overlap")
 	}
 	defer newConnection.Close()
+	// All twelve rendered users authenticate during overlap, with no generic
+	// publishing privilege added by carrying the second public key set.
+	for _, files := range []map[string]string{oldFiles, newFiles} {
+		for _, file := range files {
+			connection, err := connect(file)
+			if err != nil {
+				t.Fatal("overlap role denied")
+			}
+			denied := make(chan bool, 1)
+			connection.SetErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+				if strings.Contains(err.Error(), "Permissions Violation") {
+					select {
+					case denied <- true:
+					default:
+					}
+				}
+			})
+			if connection.Publish("forbidden.cross-role", []byte("fixture")) != nil || connection.FlushTimeout(time.Second) != nil {
+				connection.Close()
+				t.Fatal("overlap negative probe transport")
+			}
+			select {
+			case <-denied:
+			case <-time.After(time.Second):
+				connection.Close()
+				t.Fatal("overlap role broadened")
+			}
+			connection.Close()
+		}
+	}
 	// Controlled broker restart applies the new public allowlist and terminates
 	// existing connections. No live or production broker is addressed here.
 	stop()
 	wait(func() bool { return !oldConnection.IsConnected() }, "old connection terminated")
-	start(newPublic)
+	start(newPolicy)
 	// Distinguish child-process startup from client reconnect. Both remain
 	// bounded and the readiness probe must authenticate with the new identity.
 	wait(func() bool {
@@ -165,17 +218,23 @@ func TestNATSUserSeedActualReconnectAndRevocation(t *testing.T) {
 	if oldConnection.IsConnected() || oldConnection.FlushTimeout(time.Second) == nil {
 		t.Fatal("revoked existing identity still usable")
 	}
-	if connection, err := connect(oldFile); err == nil {
-		connection.Close()
-		t.Fatal("revoked old seed reauthenticated")
+	for _, file := range oldFiles {
+		if connection, err := connect(file); err == nil {
+			connection.Close()
+			t.Fatal("revoked old seed reauthenticated")
+		}
 	}
-	final, err := connect(newFile)
-	if err != nil {
-		t.Fatal("new seed fresh connection denied")
-	}
-	defer final.Close()
-	if final.FlushTimeout(time.Second) != nil {
-		t.Fatal("new seed unusable")
+	for _, file := range newFiles {
+		final, err := connect(file)
+		if err != nil {
+			t.Fatal("new seed fresh connection denied")
+		}
+		err = final.FlushTimeout(time.Second)
+		final.Close()
+		if err != nil {
+			t.Fatal("new seed unusable")
+		}
 	}
 	t.Log("NATS_NKEY_RECONNECT_REVOCATION_ACTUAL_PASS")
+	t.Log("NATS_RENDERED_AUTHORIZATION_OVERLAP_REVOCATION_PASS")
 }
