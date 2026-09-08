@@ -4,6 +4,16 @@
 
 ## 1. 实际入口与依赖
 
+### 原生 KMS 的 Compose 配置（SECINF-04B1）
+
+使用 OpenBao 原生 Transit 时，在 `compose.yaml`、`compose.model-token.yaml` 之后显式叠加 `compose.kms-native.yaml`。不要为了旧模板补造静态 KMS token；原生覆盖层将两服务的静态 token/local KEK 清空，固定使用各自 Agent 的 token 文件和专用 CA。原 remote 配置仍使用既有协议与两个独立的受控凭据，空凭据由合并检查及启动校验拒绝。
+
+站点受控配置只提供 KMS HTTPS origin、单段 key 名、既有私有网络名，以及 `KMS_GATEWAY_TOKEN_DIRECTORY`、`KMS_CREDENTIAL_TOKEN_DIRECTORY`、`KMS_CA_DIRECTORY` 三个 Linux 绝对目录。前两个必须是不同且不重叠的单服务 sink，不能是包含所有身份的父目录；第三个仅含公开 `ca.crt`，不能指向保存叶私钥的 TLS 目录。业务以 UID/GID 65532 只读挂载完整目录，不挂载单个 token 文件，否则无法跟随 Agent 的原子替换。缺失目录不得自动创建。
+
+部署前用真实 Compose `config --format json` 的合并输出执行 `account-platform-model-token-deployment-check.mjs --compose-render <受控文件>`。输出可能包含其他业务秘密，必须限制文件权限，禁止写入日志/提交或打印完整输出。仅允许固定成功/失败状态。静态 PASS 不证明宿主路径/UID、真实角色权限、网络隔离或 TLS；另行核验实际外部网络为 internal、两 sink 的所有权/有效短期身份、CA 链、挂载只读及不包含引导材料。门禁未齐不得启动业务。
+
+`kms-native.env.example` 仅为解析 fixture，不能用于部署。CI 通过 `PINVOU_TEST_KMS_COMPOSE=1 node --test account-platform/test/contract/kms-compose.test.mjs` 实际解析 remote/native 两条路径；该测试不创建网络/容器、不开启 KMS、不读取真实身份，也不构成现场运行验收。Helm 原生接线与 fresh-install 安全门禁仍独立验收，不能拿 Compose 配置通过替代。
+
 `node scripts/account-platform-model-token-release-plan.mjs --plan <本地JSON文件>`
 
 只接受上述两个参数，拒绝超过 1 MiB 的 JSON，拒绝任意层重复/转义重复 key、非法 JSON、未知字段与类型强转。依赖仓库既有 Ajv/ajv-formats，以及本组 `contracts/deployment/model-token-release-plan.schema.json` 和 `model-token-release-evidence.schema.json`；无网络请求、无子命令/数据库连接、无 apply 或 GO 模式。成功只输出 `PLAN_VALID / ENV_PENDING / NOT_DEPLOYED`；失败非零退出且仅稳定错误码，不打印原始输入或环境秘密。

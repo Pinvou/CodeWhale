@@ -1,0 +1,51 @@
+# Apply AFTER compose.model-token.yaml. External KMS/Agents must already be verified.
+# No initializer, Agent bootstrap, backup/operations identity or KMS data is mounted.
+x-native-kms: &native-kms
+  TOKEN_SECRET_PROVIDER: vault-transit
+  TOKEN_SECRET_PROVIDER_URL: ${TOKEN_SECRET_PROVIDER_URL:?set verified private KMS HTTPS origin}
+  TOKEN_SECRET_KEY_ID: ${TOKEN_SECRET_KEY_ID:?set single Transit key name}
+  TOKEN_SECRET_PROVIDER_TOKEN: ""
+  TOKEN_LOCAL_KEK_BASE64: ""
+  TOKEN_SECRET_PROVIDER_TOKEN_FILE: /var/run/secrets/pinvou/kms/token
+  TOKEN_SECRET_PROVIDER_CA_FILE: /var/run/secrets/pinvou/kms-ca/ca.crt
+
+services:
+  token-gateway:
+    user: "65532:65532"
+    read_only: true
+    environment: *native-kms
+    volumes:
+      - type: bind
+        source: ${KMS_GATEWAY_TOKEN_DIRECTORY:?set gateway-only Agent sink directory}
+        target: /var/run/secrets/pinvou/kms
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${KMS_CA_DIRECTORY:?set public-only KMS CA directory}
+        target: /var/run/secrets/pinvou/kms-ca
+        read_only: true
+        bind: { create_host_path: false }
+    networks:
+      kms-transit: {}
+  token-credential-portal:
+    user: "65532:65532"
+    read_only: true
+    environment: *native-kms
+    volumes:
+      - type: bind
+        source: ${KMS_CREDENTIAL_TOKEN_DIRECTORY:?set credential-only Agent sink directory}
+        target: /var/run/secrets/pinvou/kms
+        read_only: true
+        bind: { create_host_path: false }
+      - type: bind
+        source: ${KMS_CA_DIRECTORY:?set public-only KMS CA directory}
+        target: /var/run/secrets/pinvou/kms-ca
+        read_only: true
+        bind: { create_host_path: false }
+    networks:
+      kms-transit: {}
+
+networks:
+  kms-transit:
+    external: true
+    name: ${KMS_PRIVATE_NETWORK:?set existing verified internal KMS network}

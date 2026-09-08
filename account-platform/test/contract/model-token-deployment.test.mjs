@@ -27,6 +27,10 @@ function composeFixture() {
   }
   services['token-portal'] = { ports: [{ host_ip: '127.0.0.1', published: '18105', target: 8080, protocol: 'tcp' }] };
   services['token-governance-check'] = { profiles: ['governance-operations'], restart: 'no', command: [], healthcheck: { disable: true } };
+  for (const name of ['token-gateway', 'token-credential-portal']) Object.assign(services[name].environment, {
+    TOKEN_SECRET_PROVIDER: 'remote', TOKEN_SECRET_PROVIDER_URL: 'https://kms.example.invalid',
+    TOKEN_SECRET_KEY_ID: 'fixture-key', TOKEN_SECRET_PROVIDER_TOKEN: `fixture-only-${name}`,
+  });
   return { services };
 }
 function helmFixture() {

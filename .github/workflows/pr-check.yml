@@ -1062,6 +1062,7 @@ jobs:
           "${compose[@]}" config --quiet
           "${compose[@]}" config --format json > "$RUNNER_TEMP/apt137-compose.json"
           node scripts/account-platform-model-token-deployment-check.mjs --compose-render "$RUNNER_TEMP/apt137-compose.json"
+          PINVOU_TEST_KMS_COMPOSE=1 node --test account-platform/test/contract/kms-compose.test.mjs
           "${compose[@]}" build token-credential-portal token-command-executor token-governance-check
           chart="$PWD/account-platform/deploy/helm/account-platform"
           docker run --rm -v "$chart:/chart:ro" alpine/helm:4.2.3 lint /chart

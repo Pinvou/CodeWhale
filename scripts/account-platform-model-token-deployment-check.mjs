@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { isIP } from 'node:net';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
+import { checkComposeKMS } from './account-platform-kms-compose-check.mjs';
 const require = createRequire(new URL('../account-platform/package.json', import.meta.url));
 const YAML = require('yaml');
 const success = () => ({ decision: 'DEPLOYMENT_CONFIG_VALID', environment_status: 'ENV_PENDING', deployment_status: 'NOT_DEPLOYED' });
@@ -188,6 +189,7 @@ export function checkGovernedComposeConfiguration(config) {
   const credential = services['token-credential-portal']; const executor = services['token-command-executor'];
   const control = services['token-governance-check']; const gateway = services['token-gateway'];
   check(credential && executor && control && gateway, 'workload_missing_or_duplicate');
+  checkComposeKMS(config);
   verifyCredentialEndpoints(credential.environment);
   check(!('DATABASE_URL' in executor.environment) && !('TOKEN_SECRET_PROVIDER_TOKEN' in executor.environment), 'executor_secret_scope');
   check(credential.environment.DATABASE_URL && credential.environment.DATABASE_URL !== gateway.environment.DATABASE_URL, 'runtime_secret_not_separate');

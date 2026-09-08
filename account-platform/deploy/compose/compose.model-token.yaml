@@ -81,7 +81,8 @@ services:
       DATABASE_URL: ${TOKEN_GATEWAY_RELEASE_DATABASE_URL:?set new release-scoped gateway database URL}
       TOKEN_SECRET_PROVIDER: remote
       TOKEN_SECRET_PROVIDER_URL: ${TOKEN_SECRET_PROVIDER_URL:?set remote secret provider}
-      TOKEN_SECRET_PROVIDER_TOKEN: ${TOKEN_SECRET_PROVIDER_TOKEN:?set scoped secret provider credential}
+      # Provider-specific validation runs on the merged config; native overlay clears this.
+      TOKEN_SECRET_PROVIDER_TOKEN: ${TOKEN_SECRET_PROVIDER_TOKEN:-}
       TOKEN_SECRET_KEY_ID: ${TOKEN_SECRET_KEY_ID:?set remote secret key reference}
       TOKEN_LOCAL_KEK_BASE64: ""
       TOKEN_PROVIDER_ALLOWED_HOSTS: ${TOKEN_PROVIDER_ALLOWED_HOSTS:?set provider allowlist}
@@ -176,7 +177,7 @@ services:
       TOKEN_SECRET_PROVIDER: remote
       TOKEN_SECRET_KEY_ID: ${TOKEN_SECRET_KEY_ID:?set remote key reference}
       TOKEN_SECRET_PROVIDER_URL: ${TOKEN_SECRET_PROVIDER_URL:?set remote secret provider}
-      TOKEN_SECRET_PROVIDER_TOKEN: ${CREDENTIAL_SECRET_PROVIDER_TOKEN:?set credential-service scoped secret provider credential}
+      TOKEN_SECRET_PROVIDER_TOKEN: ${CREDENTIAL_SECRET_PROVIDER_TOKEN:-}
       TOKEN_PROVIDER_ALLOWED_HOSTS: ${TOKEN_PROVIDER_ALLOWED_HOSTS:?set provider allowlist}
       PORTAL_PUBLIC_URL: ${PORTAL_PUBLIC_URL:?set public Portal origin}
       CREDENTIAL_PORTAL_PUBLIC_URL: ${CREDENTIAL_PORTAL_PUBLIC_URL:?set frozen credential origin}
