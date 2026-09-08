@@ -1,9 +1,10 @@
-# 生产依赖配置（尚未正式投递）
+# 生产依赖配置
 
 此目录只包含公开部署制品，不保存 `.env`、密码、证书或恢复包。独立使用
 `compose.dependencies.yaml`，**不与开发 Compose 合并**。当前交付 PostgreSQL 配置及同目录
 独立 NATS `compose.nats.yaml`、隔离缓存 `compose.redis.yaml`；Keycloak、业务发布和数据库备份恢复
-仍需各自验收。
+仍需各自验收。2026-09-08 四依赖已按本配置正式投递并在独立私网启动，
+本机健康检查通过；正式客户端/消息资源/备份恢复仍在安全设施文档 D3 跟踪，未切换公网业务。
 
 ## PostgreSQL 投递约束
 
@@ -30,7 +31,7 @@ docker compose --env-file /controlled/public/dependencies.env -f account-platfor
 docker compose --env-file /controlled/public/dependencies.env -f account-platform/deploy/production/compose.dependencies.yaml up -d postgres
 ```
 
-正式投递归 SECINF-04C2D，以上不是已执行记录。私有数据网络自动创建且不发布任何宿主端口。
+正式投递实录归 SECINF-04C2D，以上仅为操作示意。私有数据网络自动创建且不发布任何宿主端口。
 后续业务只连接该私有网络，DSN 必须包含 `host=postgres`、`sslmode=verify-full` 以及
 该客户端只读挂载的公开 `sslrootcert`；不同域使用不同数据库身份。
 
