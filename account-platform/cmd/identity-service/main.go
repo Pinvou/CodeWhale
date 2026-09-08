@@ -42,7 +42,7 @@ func main() {
 	var tokenHandlers []http.Handler
 	ready := directory.Ping
 	if strings.TrimSpace(os.Getenv("AUTH_RISK_REDIS_URL")) != "" {
-		admission, admissionErr := identityadapter.NewRedisTokenAdmission(os.Getenv("AUTH_RISK_REDIS_URL"), os.Getenv("AUTH_RISK_HMAC_KEY_BASE64"))
+		admission, admissionErr := identityadapter.NewRedisTokenAdmissionWithCA(os.Getenv("AUTH_RISK_REDIS_URL"), os.Getenv("AUTH_RISK_HMAC_KEY_BASE64"), os.Getenv("AUTH_RISK_REDIS_CA_FILE"))
 		if admissionErr != nil {
 			log.Fatal(admissionErr)
 		}

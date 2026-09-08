@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/redisconnection"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -34,7 +35,11 @@ type RedisTokenAdmission struct {
 }
 
 func NewRedisTokenAdmission(rawURL, rawKey string) (*RedisTokenAdmission, error) {
-	options, err := redis.ParseURL(strings.TrimSpace(rawURL))
+	return NewRedisTokenAdmissionWithCA(rawURL, rawKey, "")
+}
+
+func NewRedisTokenAdmissionWithCA(rawURL, rawKey, caFile string) (*RedisTokenAdmission, error) {
+	options, err := redisconnection.Options(rawURL, caFile)
 	if err != nil {
 		return nil, errors.New("authentication risk Redis URL is invalid")
 	}

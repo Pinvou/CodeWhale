@@ -32,7 +32,7 @@
 | 子任务 | 验收边界 | 状态 |
 | --- | --- | --- |
 | 04C1 | NATS 资源初始化与业务运行分离：生产 broker 只读取并校验既定 stream/consumer，业务不得修改共享 stream；开发兼容、缺失/漂移拒绝、真实 JetStream 权限正负例 | 代码与真实隔离验证通过 / NOT_DEPLOYED |
-| 04C2 | 私有 TLS、逐服务 NATS 身份与 ACL、PostgreSQL/Redis 身份及连接校验；公开模板与私密投递分离，不发布依赖公网端口 | A/B、C 的 PostgreSQL/NATS 配置及独立缓存证书已验收；Redis 接线、D 待实施 |
+| 04C2 | 私有 TLS、逐服务 NATS 身份与 ACL、PostgreSQL/Redis 身份及连接校验；公开模板与私密投递分离，不发布依赖公网端口 | A/B/C 代码与隔离验收通过；D 正式投递待实施 |
 | 04C3 | Keycloak 生产启动、用户与 workload realm 分离、七个服务真实 subject 及逐服务短期文件接线、凭据专用 OIDC client；真实签发/过期/错角色拒绝 | 待依赖就绪 |
 | 04C4 | 新业务镜像及生产配置组合、空库迁移、原生 KMS fresh-install prepare/保管人轮换/verify、正式外部入口与商城验证 | 待前置验收 |
 | 05C | 精确确认旧测试服务/数据库/卷，按既有授权清理，统一切换与公开入口回归；保全正式 KMS 和范围外系统 | 待切换门禁 |
@@ -141,6 +141,19 @@ C3A 为该接线增加必要且固定的第六个 serverAuth 叶 `newapi-redis`�
 C3B 随后交付 Redis 配置/ACL 和实际服务客户端接线验证。Portal 仅允许 `portal:flow:*`、`portal:session:*`、`portal:approval-classification:*`、`portal:refresh:*` 的既有读取/写入/锁；Identity 仅允许三类 `pinvou:auth-admission:*`、`pinvou:auth-failure:*`、`pinvou:auth-alias:*` 与已有风控脚本所需命令，脚本内仍受 key/命令约束。New API 在独立实例访问自己的缓存、限流、会话和目录；命令以该固定版本实际调用集合为准，不开放 ACL/CONFIG/FLUSH/模块加载/复制等管理能力。三身份独立随机密码以受控秘密配置投递，服务端只持密码摘要；客户端使用 rediss 与核验的 `redis`/`newapi-redis` 名称，禁止跳过 CA/主机名校验。容量/持久化/重启和真实越权负例随配置实施核验，不以此规划标记 C3B 或现场完成。
 
 04C2C3A 实测（2026-09-08）：公开 manifest/READY 已明确 v2，新输出六个固定叶与十四制品，原加密根 envelope v1 与输入配置不变。Windows PKI 全包（含原 KMS PKI）3.244 秒及 CLI 编译、两包 vet 通过；同源 Linux 六个顶级测试全部通过、无跳过，六叶双根/双信任/撤旧信任与用途拒绝的实际 TLS 0.20 秒，原 KMS PKI 回归 0.02 秒，保管包认证/输入拒绝/部分现场保护/POSIX 权限均通过。独立审核通过；C3B 尚未实现，没有生成或投递正式依赖证书。
+
+#### C3B 实施与验收边界（代码与隔离验收独立 B 通过 / NOT_DEPLOYED）
+
+1. 两个 Redis 使用同一公开配置和不同只读 ACL/TLS、独立新数据目录；固定核验镜像、65532 非 root、只读根、移除 capabilities、私有网络无发布端口。关闭明文端口/default 用户，TLS 最低 1.2，密码身份认证不要求客户端证书。每实例容器 384 MiB、Redis `maxmemory 96mb`、`noeviction`，AOF `everysec` 并保留正常持久化错误停止写入；不宣称零丢失或跨机高可用。容量失败由客户端报错而不是驱逐登录/限流状态，C2D 补实际备份恢复和告警交接。
+2. 公开 ACL 模板使用不可执行的摘要占位，正式投递时以各自 256 位随机密码的 SHA256 替换并验证，不在 argv/Compose/日志写密码。Portal/Identity 禁止 SCAN/KEYS/随机键/发布订阅与管理命令；Identity 仅增加现有脚本所需 EVAL/EVALSHA，脚本操作仍受自身前缀约束。New API 独占缓存可 SCAN，但只允许固定 rc.26 源码已使用的字符串/哈希/列表/脚本/事务/时间命令和客户端握手，不允许全命令分类授权。禁用 ACL/CONFIG/FLUSH/脚本管理（除 LOAD）/复制/模块/关闭服务。ACL 变更须断开旧连接并做新旧身份正反验，删除密码文件不等于撤权。
+3. 本机 Unix socket 的无身份 PING 必须精确返回 NOAUTH 才可作为进程存活检查；不是认证、TLS、持久性或业务就绪证据，禁止把 redis-cli 退出 0 当作成功。正式启动还必须分别通过实际客户端的认证 TLS 与业务操作检查。socket 只在容器 tmpfs，不能对其他服务挂载。
+4. 小型共享 `internal/platform/redisconnection` 仅负责 Redis 连接选项与专用 CA；Portal、Identity 保留原构造入口并增加显式 CA 参数入口，主程序分别读取 `REDIS_CA_FILE`、`AUTH_RISK_REDIS_CA_FILE`。CA 一旦指定，必须为 rediss、校验主机名、TLS1.2+，拒绝 URL 的 TLS 降级/不安全覆盖；不修改全局系统信任。CA 文件绝对/规范/无软链、不可组或其他用户写、最大 1MiB、只含有效 CA 公钥证书，打开后校验同 inode；错误不泄漏 URL/密码。无 CA 的旧开发调用维持兼容。
+5. New API 原二进制的 rediss 接线不改上游源码；正式单进程 `SSL_CERT_FILE` 使用镜像原有公开系统根与本次基础设施公开根的合并文件，保留公网信任，不含 KMS 根/私钥，不作用于其他容器。真实 New API 业务联验仍是 C4/05C 的必需门禁，本批 Redis 命令矩阵不能冒充完成。
+6. 用真实隔离 Docker Compose Redis、临时证书/三密码验证：实际 Portal 保存/取走 flow、会话读写删、审批证据与刷新锁；实际 Identity admission Lua/失败累计/稳定用户别名；跨前缀及脚本跨前缀、SCAN、管理操作拒绝；独立 New API 身份命令矩阵通过且不能登录账号缓存；TLS 错 CA/主机名/明文/错密码明确拒绝；写入后重启读取持久值；确切挂载/资源限制/日志无密码。新增 Go 连接负例及精确模板合同，沿用未变业务测试，不扩充通用工具。文档审核通过后编码，代码与实测经独立 B 通过后单独提交，再继续 C2D。
+
+04C2C3B 实测（2026-09-08）：缓存 Redis 8.2.8 同源双实例生产 Compose 实际验收退出 0，取得 `PRODUCTION_REDIS_PORTAL_CLIENT_PASS`、`PRODUCTION_REDIS_IDENTITY_CLIENT_PASS`、`PRODUCTION_REDIS_TLS_ACL_CLIENTS_ISOLATION_PERSISTENCE_PASS`。实际 Portal flow 防重放/会话/分类/锁与 Identity Lua/失败阻断/稳定身份聚合均通过；真实命令、脚本跨前缀、枚举和管理操作权限拒绝，新 API 独立缓存命令矩阵和交叉身份拒绝，两个实例错 CA/主机名/密码/default/明文拒绝，三个身份重启后持久值均通过。Linux 连接配置两项测试无跳过通过；实际挂载、资源约束及 stdout/stderr 无三密码检查通过，随机项目所有容器/网络/临时材料完成限定标签复查后清理。
+
+最终 Windows 连接配置/Portal/Identity 三包分别 6.026/6.512/3.473 秒通过，两入口编译及五包 vet 通过；Node 两合同、Python 语法、架构和 diff 检查通过。首轮 ACL 模板注释被 Redis 当作无效指令，已移除；随后 Identity 实际拒绝采用 Redis 8.2 的 `ERR ACL failure in script` 格式，断言改为两种精确权限错误前缀，未放宽权限或接受任意错误。独立静态审核要求的 CA opened 后类型/权限/大小复核、完整双路日志 canary、删除前再次验证容器标签均已修复并进入最终实测。正式材料投递/备份恢复、New API 原二进制信任及真业务尚未完成；现场内核 overcommit 警告留 C2D 评估，未擅自修改影响其他团队的宿主全局参数。
 
 ### Native Transit 适配
 

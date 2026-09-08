@@ -23,7 +23,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	store, err := portal.NewRedisStore(os.Getenv("REDIS_URL"))
+	store, err := portal.NewRedisStoreWithCA(os.Getenv("REDIS_URL"), os.Getenv("REDIS_CA_FILE"))
 	if err != nil {
 		log.Fatal(err)
 	}

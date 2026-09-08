@@ -1,0 +1,80 @@
+# Standalone or combined only with other production dependencies.
+name: pinvou-production-dependencies
+x-redis-common: &redis-common
+  image: ${REDIS_IMAGE:?set independently verified Redis image digest}
+  pull_policy: never
+  user: "65532:65532"
+  entrypoint: ["redis-server", "/etc/pinvou/redis/redis.conf"]
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 384m
+  cpus: 1.0
+  pids_limit: 64
+  ulimits:
+    core: {soft: 0, hard: 0}
+  logging:
+    driver: local
+    options: {max-size: "10m", max-file: "3"}
+  tmpfs:
+    - /run/redis:rw,noexec,nosuid,nodev,size=8m,uid=65532,gid=65532,mode=0700
+  healthcheck:
+    test: ["CMD", "sh", "/etc/pinvou/redis/health.sh"]
+    interval: 10s
+    timeout: 3s
+    start_period: 5s
+    retries: 6
+  networks: [data]
+services:
+  redis:
+    <<: *redis-common
+    volumes:
+      - type: bind
+        source: ${REDIS_DATA_DIRECTORY:?set new account cache data directory}
+        target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${REDIS_TLS_DIRECTORY:?set redis-only leaf directory}
+        target: /run/pinvou/redis-tls
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${REDIS_ACL_FILE:?set verified account cache hash ACL}
+        target: /etc/pinvou/redis/users.acl
+        read_only: true
+        bind: {create_host_path: false}
+      - &redis-config
+        type: bind
+        source: ./redis.conf
+        target: /etc/pinvou/redis/redis.conf
+        read_only: true
+        bind: {create_host_path: false}
+      - &redis-health
+        type: bind
+        source: ./redis-health.sh
+        target: /etc/pinvou/redis/health.sh
+        read_only: true
+        bind: {create_host_path: false}
+  newapi-redis:
+    <<: *redis-common
+    volumes:
+      - type: bind
+        source: ${NEWAPI_REDIS_DATA_DIRECTORY:?set new isolated New API cache directory}
+        target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NEWAPI_REDIS_TLS_DIRECTORY:?set newapi-redis-only leaf directory}
+        target: /run/pinvou/redis-tls
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${NEWAPI_REDIS_ACL_FILE:?set verified New API cache hash ACL}
+        target: /etc/pinvou/redis/users.acl
+        read_only: true
+        bind: {create_host_path: false}
+      - *redis-config
+      - *redis-health
+networks:
+  data:
+    internal: true

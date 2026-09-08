@@ -8,6 +8,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/redisconnection"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -30,7 +31,11 @@ type Store interface {
 type RedisStore struct{ client *redis.Client }
 
 func NewRedisStore(rawURL string) (*RedisStore, error) {
-	options, err := redis.ParseURL(rawURL)
+	return NewRedisStoreWithCA(rawURL, "")
+}
+
+func NewRedisStoreWithCA(rawURL, caFile string) (*RedisStore, error) {
+	options, err := redisconnection.Options(rawURL, caFile)
 	if err != nil {
 		return nil, err
 	}
