@@ -721,6 +721,7 @@
       }
     }
     var sid = state.activeSessionId;
+    if (meta && meta.voiceOperationId) voice().beginVoiceSubmission(meta.voiceOperationId, sid);
     function abandonPreparedAttachments() {
       state.attachments = state.attachments.filter(function (attachment) {
         return readyAttachments.indexOf(attachment) < 0;

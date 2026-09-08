@@ -129,6 +129,46 @@ for (const [lane, source] of Object.entries(sources)) {
     assert.deepEqual(h.events.map(e => e.eventName), ['voice_cancelled']);
   });
 
+  test(`${lane}: rejected materialized first turn belongs to its real session, never another draft`, () => {
+    const h = harness(source);
+    const operation = h.operation('voiceop-materialized');
+    h.api.beginVoiceSubmission(operation.operationId);
+    h.api.completeVoiceSubmission(operation.operationId, 'new-real-session', false);
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), null);
+    assert.equal(h.api.getVoiceOperationId('new-real-session', 'chat'), operation.operationId);
+    h.api.beginVoiceSubmission(operation.operationId);
+    h.api.completeVoiceSubmission(operation.operationId, 'new-real-session', true);
+    assert.equal(h.events[0].sessionId, 'new-real-session');
+  });
+
+  test(`${lane}: restored dispatch clears pending without pretending the voice task was accepted`, async () => {
+    const h = harness(source);
+    const operation = h.operation('voiceop-restored');
+    const chat = read('src/features/chat/ChatView.jsx');
+    const start = chat.indexOf('      const sendChatMessage = useCallback(');
+    const end = chat.indexOf('\n      // ConversationTimeline', start);
+    Object.assign(h.context, { useCallback: fn => fn, activeSessionId: null,
+      bridge: { voice: h.api }, dispatchChatMessage: async () => 'restored' });
+    vm.runInContext(`${chat.slice(start, end)}\nthis.sendChatMessage = sendChatMessage;`, h.context);
+    assert.equal(await h.context.sendChatMessage('restored draft'), 'restored');
+    assert.equal(operation.pendingSubmission, false);
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
+    assert.equal(h.events.length, 0);
+    assert.match(chat, /const result = await sendChatMessage\(constrained\.text, context\);\s*return result === 'restored' \? false : result;/);
+    const taskStart = chat.indexOf('        sendTask: async (outgoing, context) => {');
+    const taskEnd = chat.indexOf('\n        onTaskAccepted:', taskStart);
+    const task = chat.slice(taskStart, taskEnd).trim().replace(/^sendTask:/, 'this.voiceTask =').replace(/,$/, ';');
+    let draft = 'restored draft';
+    const hook = read('src/features/voice-composer/useComposerVoiceInput.js');
+    const deliver = hook.slice(hook.indexOf('async function deliverVoiceTask('), hook.indexOf('\nfunction useComposerVoiceInput('));
+    Object.assign(h.context, { constrainChatInput: text => ({ text, truncated: false }),
+      setInputText: text => { draft = text; }, trimDraft: text => String(text || '').trim() });
+    vm.runInContext(`${task}\n${deliver}\nthis.deliver = deliverVoiceTask;`, h.context);
+    assert.equal(await h.context.deliver({ sendTask: h.context.voiceTask, getDraft: () => draft,
+      onTaskAccepted: () => { draft = ''; } }, draft, { operationId: operation.operationId }, { current: false }), false);
+    assert.equal(draft, 'restored draft', 'restored text must not be cleared by onTaskAccepted');
+  });
+
   test(`${lane}: queued admission cannot associate the same voice with another manual message`, () => {
     const h = harness(source);
     const operation = h.operation('voiceop-queued', 'chat', 'existing-session');
@@ -196,4 +236,74 @@ test('composer adapters preserve explicit metadata and authoritative native owne
   const web = sources.web;
   assert.match(web, /completeVoiceSubmission\(submission\.voiceOperationId, metadata\.id, true\)/);
   assert.doesNotMatch(web, /error: "session_required"/);
+});
+
+for (const code of ['permission_denied', 'outcome_unknown']) {
+  test(`Web first-turn ${code} preserves the correct admission certainty`, async () => {
+    const h = harness(sources.web);
+    const operation = h.operation(`voiceop-${code}`);
+    const start = sources.web.indexOf('  async function runFirstTurnSubmission(');
+    const end = sources.web.indexOf('  function submitFirstWebTurn(', start);
+    Object.assign(h.context, { findFirstTurnItem: () => ({}), firstTurnStillVisible: () => true,
+      restoreFirstTurnUiState() {}, invokeWithRequestId: async () => { throw { code }; } });
+    vm.runInContext(`${sources.web.slice(start, end)}\nthis.runFirstTurnSubmission = runFirstTurnSubmission;`, h.context);
+    const submission = { voiceOperationId: operation.operationId, clientMessageId: 'first-turn' };
+    await h.context.runFirstTurnSubmission(submission);
+    assert.equal(operation.pendingSubmission, code === 'outcome_unknown');
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), code === 'outcome_unknown' ? null : operation.operationId);
+    assert.equal(h.events.length, 0);
+  });
+}
+
+test('stale edit preview is abandoned, while applying a valid edit retains provenance', async () => {
+  for (const stale of [true, false]) {
+    const h = harness(sources.desktop);
+    const operation = h.operation('voiceop-preview');
+    const hook = read('src/features/voice-composer/useComposerVoiceInput.js');
+    const preview = { original: 'original', next: 'edited', context: { operationId: operation.operationId } };
+    let draft = stale ? 'manually changed' : 'original';
+    Object.assign(h.context, {
+      useCallback: fn => fn, trimDraft: value => String(value || '').trim(),
+      editPreview: preview, editPreviewRef: { current: preview }, taskSendInFlightRef: { current: false },
+      setEditPreview() {}, adapterRef: { current: {
+        getDraft: () => draft, setDraft: value => { draft = value; }, bridge: { voice: {
+          dismissVoiceInput: h.api.dismissVoiceInput,
+          abandonVoiceResult: () => h.api.trackVoiceTerminal('voice_cancelled', operation, {}),
+        } },
+      } },
+    });
+    const discard = hook.slice(hook.indexOf('  const discardVoiceResult ='), hook.indexOf('  const cancelVoiceEditPreview ='));
+    const apply = hook.slice(hook.indexOf('  const applyVoiceEditPreview ='), hook.indexOf('  const clearStaleVoiceState ='));
+    vm.runInContext(`${discard}\n${apply}\nthis.applyPreview = applyVoiceEditPreview;`, h.context);
+    assert.equal(await h.context.applyPreview(), !stale);
+    assert.equal(draft, stale ? 'manually changed' : 'edited');
+    assert.equal(h.api.getVoiceOperationId(null, 'chat'), stale ? null : operation.operationId);
+    assert.deepEqual(h.events.map(e => e.eventName), stale ? ['voice_cancelled'] : []);
+  }
+});
+
+test('desktop waits for Rust ownership and cannot open a microphone after a rejected claim', async () => {
+  const h = harness(sources.desktop);
+  let resolveClaim;
+  const claim = new Promise(resolve => { resolveClaim = resolve; });
+  let microphoneProbes = 0;
+  h.state.voiceAsrSetup = {};
+  Object.assign(h.context, {
+    window: { AudioContext() {} }, navigator: { mediaDevices: { getUserMedia() {} } },
+    normalizeVoiceMode: mode => mode, bt: key => key, emitVoiceDiagnostic() {},
+    cleanupVoiceInputSession() {}, normalizeVoiceError: error => error,
+    currentVoiceWindowLabel: () => 'detached-b', syncVoiceShortcutRecording: () => claim,
+    probeVoiceAudioInput: () => { microphoneProbes += 1; return true; },
+    invoke: async command => command === 'voice_asr_status' ? { ready: true } : undefined,
+  });
+  const start = sources.desktop.indexOf('  async function startVoiceInput(');
+  const end = sources.desktop.indexOf('  function cancelVoiceInput(', start);
+  vm.runInContext(`${sources.desktop.slice(start, end)}\nthis.startVoiceInput = startVoiceInput;`, h.context);
+  const starting = h.context.startVoiceInput('', () => {}, { mode: 'dictation' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(microphoneProbes, 0);
+  resolveClaim(false);
+  await starting;
+  assert.equal(microphoneProbes, 0);
+  assert.equal(h.state.voiceInput.status, 'failed');
 });

@@ -3276,6 +3276,7 @@ export function CodexAcpView({
           shouldActivate: () => canApplyAcpSendOperation(operation),
         });
         targetId = created.id;
+        if (voiceOperationId) bridge.voice.beginVoiceSubmission(voiceOperationId, targetId);
         if (created.activated && activeIdRef.current === targetId) {
           acpSendOperationTracker.switchSession(targetId);
           operation = beginAcpSendOperation(targetId);
@@ -3378,6 +3379,7 @@ export function CodexAcpView({
           },
         });
         targetId = created.id;
+        if (voiceOperationId) bridge.voice.beginVoiceSubmission(voiceOperationId, targetId);
         if (created.activated && activeIdRef.current === targetId) {
           acpSendOperationTracker.switchSession(targetId);
           operation = beginAcpSendOperation(targetId);

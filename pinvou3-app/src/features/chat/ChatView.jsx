@@ -1821,7 +1821,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         // (#406). "restored" marks paths that already returned the text to the
         // composer (first-turn materialization abort, session switch);
         // restoring again would duplicate it.
-        return dispatchResult !== false;
+        return dispatchResult;
       }, [activeSessionId, dataVisualizationSceneActive, documentWritingSceneActive, hasReadyAttachment, personalWorkbenchSceneActive, pptDesignSceneActive, t, visualPosterSceneActive]);
       const sendChatMessage = useCallback(async (text, voiceContext) => {
         const operationId = voiceContext?.operationId
@@ -1829,7 +1829,11 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         if (operationId) bridge.voice.beginVoiceSubmission(operationId);
         try {
           const accepted = await dispatchChatMessage(text, { voiceOperationId: operationId });
-          if (!accepted && operationId) bridge.voice.completeVoiceSubmission(operationId, null, false);
+          if ((accepted === false || accepted === 'restored') && operationId) {
+            bridge.voice.completeVoiceSubmission(operationId, null, false);
+          }
+          // Preserve "restored": ordinary send must not restore twice, while
+          // voice task delivery must treat it as not accepted.
           return accepted;
         } catch (error) {
           if (operationId) bridge.voice.completeVoiceSubmission(operationId, null, false);
@@ -2225,7 +2229,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             return false;
           }
           try {
-            return await sendChatMessage(constrained.text, context);
+            const result = await sendChatMessage(constrained.text, context);
+            return result === 'restored' ? false : result;
           } catch (error) {
             console.warn('[voice-input] task send failed after writeback', error);
             return false;

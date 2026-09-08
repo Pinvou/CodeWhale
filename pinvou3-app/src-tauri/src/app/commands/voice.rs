@@ -81,21 +81,21 @@ pub(crate) fn set_voice_shortcut_enabled(enabled: bool) -> Result<(), String> {
 /// Cross-window recording mutual exclusion: the frontend syncs its own window
 /// label when recording starts/ends/fails, and the native shortcut hook uses
 /// it to pick the trigger target window (see
-/// voice_shortcut::set_recording_label). A window may only register its own
+/// voice_shortcut::set_recording_owner). A window may only register its own
 /// label, so a broken or compromised renderer cannot pin an arbitrary window
 /// as the recording window and hijack the global Alt gesture.
 #[tauri::command]
 pub(crate) fn set_voice_shortcut_recording(
     window: tauri::WebviewWindow,
     label: Option<String>,
-) -> Result<(), String> {
+    token: String,
+) -> Result<bool, String> {
     if let Some(label) = &label {
         if label != window.label() {
             return Err("voice shortcut recording label must match the calling window".to_string());
         }
     }
-    crate::features::voice_shortcut::set_recording_label(label);
-    Ok(())
+    crate::features::voice_shortcut::set_recording_owner(window.label(), &token, label.is_some())
 }
 
 impl VoiceCommandError {
@@ -1175,21 +1175,10 @@ pub async fn postprocess_voice_text(
             ));
         }
     };
-    // vllm's /v1/models probe carries its own 3s timeout; both attempts share
-    // this one probe result, so the retry does not pay another 3s.
-    let model_name = if bridge.provider() == "vllm" {
-        // The served-name probe uses an inference-same-origin key:
-        // authenticated vLLM 401s on /v1/models.
-        crate::features::monitor::probe_vllm_model_info(
-            &bridge.base_url(),
-            Some(bridge.api_key().as_str()),
-        )
-        .await
-        .0
-        .unwrap_or_else(|| bridge.model())
-    } else {
-        bridge.model()
-    };
+    // EnginePool already resolved the served model while preparing this bridge.
+    // Keep that effective choice for both attempts: probing the first /v1/models
+    // entry again would replace a user's model B with unrelated model A.
+    let model_name = bridge.model();
     // The frontend times the whole invoke against the same
     // voice_postprocess_timeout budget; both Rust attempts share that budget,
     // each taking only the remaining headroom, so the total latency does not
@@ -1197,7 +1186,7 @@ pub async fn postprocess_voice_text(
     let budget = voice_postprocess_timeout(mode, &raw_text);
     if started_at.elapsed() >= budget {
         // Symmetric with the retry guard below: bridge preparation and the
-        // vllm model probe can consume the whole budget, and handing a zero
+        // model resolution can consume the whole budget, and handing a zero
         // timeout to the first request would guarantee an instant timeout
         // failure.
         log::warn!(

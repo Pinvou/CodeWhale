@@ -71,16 +71,24 @@
     return operation ? operation.operationId : null;
   }
 
-  function beginVoiceSubmission(operationId) {
+  function beginVoiceSubmission(operationId, sessionId) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
     operation.pendingSubmission = true;
+    if (sessionId && !operation.sessionId) {
+      operation.sessionId = sessionId;
+      operation.telemetrySessionId = sessionId;
+    }
   }
 
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
     operation.pendingSubmission = false;
+    if (sessionId && !operation.sessionId) {
+      operation.sessionId = sessionId;
+      operation.telemetrySessionId = sessionId;
+    }
     if (accepted) {
       operation.pendingTerminal = null;
       operation.telemetryTerminal = true;
@@ -537,6 +545,7 @@
 
   function cleanupVoiceInputSession(session) {
     if (!session) return;
+    syncVoiceShortcutRecording(null, session.id);
     if (session.timeoutId) clearTimeout(session.timeoutId);
     if (session.permissionTimeoutId) clearTimeout(session.permissionTimeoutId);
     session.permissionTimeoutId = null;
@@ -1070,6 +1079,7 @@
     };
     rememberVoiceOperation(session);
     state.voiceInput = Object.assign({}, state.voiceInput, { operationId: session.operationId });
+    state.voiceInput.ownershipToken = session.id;
     trackVoiceEvent("voice_entry_clicked", session, { entryPoint: "composer" });
     activeVoiceInput = session;
     setVoiceInputStatus("requesting_permission", {
@@ -1145,6 +1155,14 @@
       if (!AudioCtor) {
         throw { category: "recording_failed", stage: "recording", message: bt("voiceWebviewNoRecording") };
       }
+      const claimed = await syncVoiceShortcutRecording(currentVoiceWindowLabel(), session.id);
+      if (activeVoiceInput !== session) {
+        cleanupVoiceInputSession(session);
+        return;
+      }
+      if (!claimed) {
+        throw { category: "device_unavailable", stage: "device", message: bt("voiceMicUnavailable") };
+      }
       var hasAudioInput = await probeVoiceAudioInput(VOICE_DEVICE_PROBE_TIMEOUT_MS);
       if (activeVoiceInput !== session) return;
       if (hasAudioInput === false) {
@@ -1189,7 +1207,6 @@
       });
       session.recognitionStartedAt = Date.now();
       setVoiceInputStatus("recording", { message: bt("voiceRecording"), stage: "recording" });
-      syncVoiceShortcutRecording(currentVoiceWindowLabel(), session.id);
       trackVoiceEvent("voice_started", session);
       emitVoiceDiagnostic("recording", "info", "recording started", "", "");
     } catch (err) {
@@ -1285,10 +1302,8 @@
     return true;
   }
 
-  // Cross-window recording mutex: the recording lifecycle syncs this window's label to the
-  // native shortcut hook, and Rust uses it to route other windows' Alt gestures to the
-  // recording window as a stop, never double-starting. Silently ignored by old backends
-  // without the command.
+  // The same Rust owner guards both button/shortcut starts and cross-window Alt routing.
+  // Missing native support fails closed before microphone acquisition.
   function currentVoiceWindowLabel() {
     try {
       const windowApi = window.__TAURI__ && window.__TAURI__.window;
@@ -1298,23 +1313,12 @@
     return "";
   }
 
-  // Session token: registration carries the session id, and teardown only dispatches the
-  // clear when the token still matches, preventing a previous session's late teardown
-  // (async window/race) from wiping the mutex label the new session just registered.
-  // Token-less clears (the shortcut Router purging stale registrations) always pass.
-  let voiceShortcutRecordingToken = null;
-
+  // Rust atomically owns (caller window, token). Claim must succeed before opening
+  // a microphone; stale teardown and another WebView can never overwrite ownership.
   function syncVoiceShortcutRecording(label, token) {
-    try {
-      if (label) {
-        voiceShortcutRecordingToken = token || null;
-      } else if (token && voiceShortcutRecordingToken && token !== voiceShortcutRecordingToken) {
-        return;
-      } else {
-        voiceShortcutRecordingToken = null;
-      }
-      Promise.resolve(invoke("set_voice_shortcut_recording", { label: label || null })).catch(function () {});
-    } catch { /* old backend without the command */ }
+    if (!token) return Promise.resolve(false);
+    return Promise.resolve(invoke("set_voice_shortcut_recording", { label: label || null, token: token }))
+      .then(function (claimed) { return claimed === true; }, function () { return false; });
   }
 
   function setVoiceShortcutEnabled(enabled) {

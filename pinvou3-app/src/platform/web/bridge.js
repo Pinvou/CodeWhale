@@ -5337,6 +5337,7 @@
   async function runFirstTurnSubmission(submission) {
     if (!submission || submission.inFlight) return;
     submission.inFlight = true;
+    if (submission.voiceOperationId) beginVoiceSubmission(submission.voiceOperationId);
     var item = findFirstTurnItem(submission.clientMessageId);
     if (item) {
       item.deliveryState = "sending";
@@ -5362,6 +5363,9 @@
       submission.inFlight = false;
       submission.lastErrorCode = String(error && error.code || "rpc_failed");
       submission.lastError = String(error && error.message ? error.message : error || "");
+      if (submission.voiceOperationId && submission.lastErrorCode !== "outcome_unknown") {
+        completeVoiceSubmission(submission.voiceOperationId, null, false);
+      }
       if (!firstTurnStillVisible(submission)) return;
       var failedItem = findFirstTurnItem(submission.clientMessageId);
       if (failedItem) {
@@ -9376,16 +9380,24 @@
     return operation ? operation.operationId : null;
   }
 
-  function beginVoiceSubmission(operationId) {
+  function beginVoiceSubmission(operationId, sessionId) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
     operation.pendingSubmission = true;
+    if (sessionId && !operation.sessionId) {
+      operation.sessionId = sessionId;
+      operation.telemetrySessionId = sessionId;
+    }
   }
 
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
     operation.pendingSubmission = false;
+    if (sessionId && !operation.sessionId) {
+      operation.sessionId = sessionId;
+      operation.telemetrySessionId = sessionId;
+    }
     if (accepted) {
       operation.pendingTerminal = null;
       operation.telemetryTerminal = true;

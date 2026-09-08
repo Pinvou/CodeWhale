@@ -26,6 +26,7 @@ enum VoiceShortcutEvent {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct VoiceShortcutState {
     alt_down: bool,
+    alt_passthrough: bool,
     alt_pending: bool,
     /// The [Alt↓, combo↓] ordered replay has been issued for a combo key (the
     /// platform layer sets this whenever at least the Alt down was injected,
@@ -200,6 +201,30 @@ fn handle_voice_shortcut_key(
     }
 }
 
+fn handle_voice_shortcut_with_modifiers(
+    state: &mut VoiceShortcutState,
+    key: VoiceShortcutKey,
+    key_down: bool,
+    active: bool,
+    foreground_hwnd: isize,
+    time_ms: u32,
+    other_modifier_down: bool,
+) -> VoiceShortcutDecision {
+    // A modifier pressed before Alt belongs to a system chord, not a bare tap.
+    // Its Alt-up remains unpaired in our state and therefore passes through.
+    if key == VoiceShortcutKey::Alt && state.alt_passthrough {
+        if !key_down {
+            state.alt_passthrough = false;
+        }
+        return VoiceShortcutDecision::pass();
+    }
+    if key == VoiceShortcutKey::Alt && key_down && !state.alt_down && other_modifier_down {
+        state.alt_passthrough = true;
+        return VoiceShortcutDecision::pass();
+    }
+    handle_voice_shortcut_key(state, key, key_down, active, foreground_hwnd, time_ms)
+}
+
 #[derive(Clone, Serialize)]
 struct VoiceShortcutTriggerPayload {
     mode: &'static str,
@@ -207,6 +232,7 @@ struct VoiceShortcutTriggerPayload {
     /// Target window label (a window mounting VoiceShortcutRouter); the
     /// frontend consumes it only after checking it matches its own window.
     window_label: String,
+    recording_token: Option<String>,
     /// Routing basis: "recording" (the targeted recording window, used for
     /// stop/mutual exclusion) or "focused" (the focused window, a normal
     /// trigger). The frontend uses this to spot a stale recording-window
@@ -222,24 +248,52 @@ struct VoiceShortcutTriggerPayload {
 /// Used for cross-window recording mutual exclusion: while window A records,
 /// window B's Alt gesture is routed to A (to stop it) and never opens a
 /// second session.
-static RECORDING_LABEL: Mutex<Option<String>> = Mutex::new(None);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RecordingOwner {
+    pub(super) label: String,
+    pub(super) token: String,
+}
+
+static RECORDING_OWNER: Mutex<Option<RecordingOwner>> = Mutex::new(None);
 
 /// Called by the `set_voice_shortcut_recording` command; the frontend syncs
 /// its own window label when recording starts/ends/fails.
-pub(crate) fn set_recording_label(label: Option<String>) {
-    if let Ok(mut guard) = RECORDING_LABEL.lock() {
-        *guard = label.filter(|value| !value.trim().is_empty());
+fn update_recording_owner(
+    owner: &mut Option<RecordingOwner>,
+    label: &str,
+    token: &str,
+    claim: bool,
+) -> bool {
+    let expected = RecordingOwner {
+        label: label.to_string(),
+        token: token.to_string(),
+    };
+    if claim {
+        if owner.as_ref().is_some_and(|current| current != &expected) {
+            return false;
+        }
+        *owner = Some(expected);
+        true
+    } else if owner.as_ref() == Some(&expected) {
+        *owner = None;
+        true
+    } else {
+        false
     }
 }
 
-pub(crate) fn recording_label() -> Option<String> {
-    RECORDING_LABEL.lock().ok().and_then(|guard| guard.clone())
+pub(crate) fn set_recording_owner(label: &str, token: &str, claim: bool) -> Result<bool, String> {
+    if !is_voice_shortcut_router_window(label) || token.trim().is_empty() || token.len() > 128 {
+        return Err("invalid voice recording owner".to_string());
+    }
+    let mut owner = RECORDING_OWNER
+        .lock()
+        .map_err(|_| "voice recording owner unavailable".to_string())?;
+    Ok(update_recording_owner(&mut owner, label, token, claim))
 }
 
-fn clear_recording_label() {
-    if let Ok(mut guard) = RECORDING_LABEL.lock() {
-        *guard = None;
-    }
+pub(super) fn recording_owner() -> Option<RecordingOwner> {
+    RECORDING_OWNER.lock().ok().and_then(|guard| guard.clone())
 }
 
 /// Deregister proactively when a window is destroyed: if a recording window is
@@ -249,8 +303,14 @@ fn clear_recording_label() {
 /// window and the failure fallback never fires — effectively a global
 /// swallow-keys black hole).
 pub(crate) fn forget_recording_window(label: &str) {
-    if recording_label().as_deref() == Some(label) {
-        clear_recording_label();
+    if let Ok(mut owner) = RECORDING_OWNER.lock() {
+        forget_owner_window(&mut owner, label);
+    }
+}
+
+fn forget_owner_window(owner: &mut Option<RecordingOwner>, label: &str) {
+    if owner.as_ref().is_some_and(|current| current.label == label) {
+        *owner = None;
     }
 }
 
@@ -293,7 +353,15 @@ fn emit_shortcut_event(
     event: VoiceShortcutEvent,
     window_label: &str,
     route: &'static str,
+    recording_token: Option<String>,
 ) {
+    if route == "recording"
+        && recording_owner().as_ref().is_none_or(|owner| {
+            owner.label != window_label || Some(owner.token.as_str()) != recording_token.as_deref()
+        })
+    {
+        return;
+    }
     match event {
         VoiceShortcutEvent::TriggerDictation => {
             let result = app.emit_to(
@@ -304,6 +372,7 @@ fn emit_shortcut_event(
                     source: "native",
                     window_label: window_label.to_string(),
                     route,
+                    recording_token: recording_token.clone(),
                 },
             );
             match result {
@@ -322,8 +391,8 @@ fn emit_shortcut_event(
                     // Target window already destroyed: if it is still recorded
                     // as the recording window, clear the stale label so later
                     // gestures are not black-holed.
-                    if recording_label().as_deref() == Some(window_label) {
-                        clear_recording_label();
+                    if let Some(token) = recording_token.as_deref() {
+                        let _ = set_recording_owner(window_label, token, false);
                     }
                 }
             }
@@ -337,6 +406,81 @@ mod tests {
 
     const HWND_A: isize = 100;
     const HWND_B: isize = 200;
+
+    #[test]
+    fn recording_claim_release_and_window_destroy_preserve_authority() {
+        let mut owner = None;
+        assert!(update_recording_owner(&mut owner, "main", "a1", true));
+        assert!(!update_recording_owner(
+            &mut owner,
+            "detached-b",
+            "b1",
+            true
+        ));
+        assert!(!update_recording_owner(&mut owner, "main", "a0", false));
+        assert!(!update_recording_owner(
+            &mut owner,
+            "detached-b",
+            "a1",
+            false
+        ));
+        assert_eq!(
+            resolve_trigger_target(owner.as_ref().map(|o| o.label.as_str()), Some("detached-b")),
+            Some(("main".to_string(), "recording"))
+        );
+        forget_owner_window(&mut owner, "detached-b");
+        assert!(owner.is_some());
+        assert!(update_recording_owner(&mut owner, "main", "a1", false));
+        assert!(update_recording_owner(&mut owner, "detached-b", "b1", true));
+        assert!(!update_recording_owner(&mut owner, "main", "a1", false));
+        forget_owner_window(&mut owner, "main");
+        assert_eq!(
+            resolve_trigger_target(owner.as_ref().map(|o| o.label.as_str()), Some("main")),
+            Some(("detached-b".to_string(), "recording"))
+        );
+        forget_owner_window(&mut owner, "detached-b");
+        assert!(owner.is_none());
+    }
+
+    #[test]
+    fn modifiers_held_before_alt_pass_through_without_pending_or_trigger() {
+        for modifier in ["Shift", "Ctrl", "Win"] {
+            let mut state = VoiceShortcutState::default();
+            let down = handle_voice_shortcut_with_modifiers(
+                &mut state,
+                VoiceShortcutKey::Alt,
+                true,
+                true,
+                HWND_A,
+                100,
+                true,
+            );
+            assert_eq!(down, VoiceShortcutDecision::pass(), "{modifier}");
+            assert!(!state.alt_pending);
+            let repeat = handle_voice_shortcut_with_modifiers(
+                &mut state,
+                VoiceShortcutKey::Alt,
+                true,
+                true,
+                HWND_A,
+                150,
+                false,
+            );
+            assert_eq!(repeat, VoiceShortcutDecision::pass(), "{modifier}");
+            // Even if the other modifier is released before Alt-up, no tap was armed.
+            let up = handle_voice_shortcut_with_modifiers(
+                &mut state,
+                VoiceShortcutKey::Alt,
+                false,
+                true,
+                HWND_A,
+                200,
+                false,
+            );
+            assert_eq!(up, VoiceShortcutDecision::pass(), "{modifier}");
+            assert!(!state.alt_down);
+        }
+    }
 
     #[test]
     fn alt_tap_swallows_down_and_up_symmetrically_and_triggers() {

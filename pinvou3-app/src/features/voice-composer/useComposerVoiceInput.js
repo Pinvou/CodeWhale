@@ -116,19 +116,24 @@ function useComposerVoiceInput(adapter) {
     current.bridge.voice.dismissVoiceInput();
   }, []);
 
-  const cancelVoiceEditPreview = useCallback(() => {
-    const current = adapterRef.current || {};
-    const operationId = editPreviewRef.current?.context?.operationId;
-    if (operationId) current.bridge?.voice.abandonVoiceResult(operationId);
+  const discardVoiceResult = useCallback((context) => {
+    if (context?.operationId) adapterRef.current?.bridge?.voice.abandonVoiceResult(context.operationId);
+  }, []);
+
+  const discardEditPreview = useCallback(() => {
+    discardVoiceResult(editPreviewRef.current?.context);
+    editPreviewRef.current = null;
     setEditPreview(null);
+  }, [discardVoiceResult]);
+
+  const cancelVoiceEditPreview = useCallback(() => {
+    discardEditPreview();
     closeVoice();
-  }, [closeVoice]);
+  }, [closeVoice, discardEditPreview]);
 
   const cancelVoiceOrPreview = useCallback(() => {
     if (editPreviewRef.current) {
-      const operationId = editPreviewRef.current.context?.operationId;
-      if (operationId) adapterRef.current?.bridge?.voice.abandonVoiceResult(operationId);
-      setEditPreview(null);
+      discardEditPreview();
       closeVoice();
       return;
     }
@@ -136,7 +141,7 @@ function useComposerVoiceInput(adapter) {
     if (!current.bridge || !current.bridge.available) return;
     current.bridge.voice.cancelVoiceInput();
     current.bridge.voice.clearVoiceInput();
-  }, [closeVoice]);
+  }, [closeVoice, discardEditPreview]);
 
   const applyVoiceEditPreview = useCallback(async (options = {}) => {
     const current = adapterRef.current || {};
@@ -144,7 +149,7 @@ function useComposerVoiceInput(adapter) {
     if (!preview) return false;
     const next = trimDraft(preview.next);
     if (!next) {
-      setEditPreview(null);
+      discardEditPreview();
       return false;
     }
     // Ignore repeat triggers while a send is in flight (double click, or global Enter and
@@ -158,10 +163,11 @@ function useComposerVoiceInput(adapter) {
     // the preview and keep the draft as-is.
     if (typeof current.getDraft === 'function'
       && trimDraft(current.getDraft()) !== preview.original) {
-      setEditPreview(null);
+      discardEditPreview();
       return false;
     }
     current.setDraft(next);
+    editPreviewRef.current = null;
     setEditPreview(null);
     current.bridge.voice.dismissVoiceInput();
     if (!options.send) return true;
@@ -171,7 +177,7 @@ function useComposerVoiceInput(adapter) {
     }
     if (typeof current.sendTask !== 'function') return false;
     return deliverVoiceTask(current, next, { ...preview.context, mode: 'edit', preview }, taskSendInFlightRef);
-  }, [editPreview, closeVoice]);
+  }, [editPreview, discardEditPreview]);
 
   const clearStaleVoiceState = useCallback((targetId, sessionId) => {
     const current = adapterRef.current || {};
@@ -186,22 +192,25 @@ function useComposerVoiceInput(adapter) {
     const current = adapterRef.current || {};
     const targetId = current.targetId;
     if (!targetId || !isActiveVoiceTarget(targetId, sessionId)) {
+      discardVoiceResult(context);
       clearStaleVoiceState(targetId, sessionId);
       return;
     }
     if (typeof current.isStillActive === 'function' && !current.isStillActive()) {
+      discardVoiceResult(context);
       clearStaleVoiceState(targetId, sessionId);
       return;
     }
 
     const recognized = String(text || '').trim();
-    if (!recognized) return;
+    if (!recognized) { discardVoiceResult(context); return; }
 
     const mode = normalizeMode(context && context.mode);
     if (mode === 'edit') {
       const original = trimDraft(draftBeforeStart);
       const next = trimDraft(recognized);
       if (!original || !next || next === original) {
+        discardVoiceResult(context);
         if (next === original && typeof current.onEditUnchanged === 'function') {
           current.onEditUnchanged({ original, instruction: trimDraft(context && context.rawText), context });
         }
@@ -249,7 +258,7 @@ function useComposerVoiceInput(adapter) {
       // notification is flipped into a failure notification.
       throw createVoiceTaskSendError();
     }
-  }, [clearStaleVoiceState]);
+  }, [clearStaleVoiceState, discardVoiceResult]);
 
   // Returns true only when a fresh voice session was started (the final
   // bridge.voice.startVoiceInput call). Every other branch — including the
@@ -318,7 +327,7 @@ function useComposerVoiceInput(adapter) {
     // global Enter handler later replace the draft wholesale with a rewrite
     // based on the stale original, silently discarding anything the new
     // session dictated into the draft.
-    if (editPreviewRef.current) setEditPreview(null);
+    if (editPreviewRef.current) discardEditPreview();
 
     const sessionId = createVoiceSessionId(current.targetId);
     voiceSessionIdRef.current = sessionId;
@@ -337,7 +346,7 @@ function useComposerVoiceInput(adapter) {
       },
     );
     return true;
-  }, [handleVoiceResult]);
+  }, [handleVoiceResult, discardEditPreview]);
 
   useEffect(() => {
     const current = adapterRef.current || {};
@@ -398,10 +407,10 @@ function useComposerVoiceInput(adapter) {
     voiceContextIdentityRef.current = identity;
     if (previous === null || previous === identity) return;
     if (editPreviewRef.current) {
-      setEditPreview(null);
+      discardEditPreview();
       closeVoice();
     }
-  }, [adapter.targetId, adapter.ownerKind, adapter.workspaceId, adapter.sessionId, closeVoice]);
+  }, [adapter.targetId, adapter.ownerKind, adapter.workspaceId, adapter.sessionId, closeVoice, discardEditPreview]);
 
   useEffect(() => {
     const current = adapterRef.current || {};

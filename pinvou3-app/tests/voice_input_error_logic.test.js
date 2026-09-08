@@ -8,6 +8,16 @@ const bridgePath = path.join(__dirname, "..", "src", "platform", "tauri", "bridg
 const source = fs.readFileSync(bridgePath, "utf8");
 const rustVoicePath = path.join(__dirname, "..", "src-tauri", "src", "app", "commands", "voice.rs");
 const rustVoiceSource = fs.readFileSync(rustVoicePath, "utf8");
+// Multi-model services may list A before the selected B. Runtime preparation
+// already preserves B; voice must use that resolved name for both attempts,
+// never run the first-entry-only monitoring probe again.
+const postprocessCommand = rustVoiceSource.slice(rustVoiceSource.indexOf("pub async fn postprocess_voice_text("));
+assert.match(postprocessCommand, /let bridge = match voice_postprocess_bridge\([\s\S]*?let model_name = bridge\.model\(\);/);
+assert.doesNotMatch(rustVoiceSource, /probe_vllm_model_info/);
+assert.strictEqual((postprocessCommand.match(/&model_name,/g) || []).length, 2,
+  "initial and retry requests must share the prepared user-selected model B, not server-first model A");
+const enginePoolSource = fs.readFileSync(path.join(__dirname, "..", "src-tauri", "src", "features", "assistant", "engine_pool.rs"), "utf8");
+assert.match(enginePoolSource, /resolve_served_model\([\s\S]*?&model\.model,/);
 const chatPath = path.join(__dirname, "..", "src", "features", "chat", "ChatView.jsx");
 const chatSource = fs.readFileSync(chatPath, "utf8");
 const routerPath = path.join(__dirname, "..", "src", "features", "voice-composer", "VoiceShortcutRouter.jsx");
@@ -299,13 +309,13 @@ assert.match(
 // through and never reach gesture handling.
 assert.match(
   rustShortcutPlatformSource,
-  /fn keyboard_hook_proc[\s\S]*?if !shortcut_enabled\(\) \{[\s\S]*?return call_next_hook[\s\S]*?handle_voice_shortcut_key\(/,
+  /fn keyboard_hook_proc[\s\S]*?if !shortcut_enabled\(\) \{[\s\S]*?return call_next_hook[\s\S]*?handle_voice_shortcut_with_modifiers\(/,
   "native voice shortcut hook must gate all keystrokes by the synced settings state before gesture handling",
 );
 // Cross-window recording mutual exclusion: the trigger target resolves to the recording window first.
 assert.match(
   rustShortcutPlatformSource,
-  /resolve_trigger_target\(recording_label\(\)\.as_deref\(\)/,
+  /resolve_trigger_target\(\s*owner\.as_ref\(\)\.map\(\|owner\| owner\.label\.as_str\(\)\)/,
   "native voice shortcut trigger must route to the recording window first",
 );
 assert.match(
@@ -328,7 +338,7 @@ assert.match(
 // triggers are unaffected.
 assert.match(
   routerSource,
-  /payload\.route === 'recording' && !recording[\s\S]*?syncVoiceShortcutRecording\(null\)[\s\S]*?return;/,
+  /payload\.route === 'recording' && !recording[\s\S]*?syncVoiceShortcutRecording\(null, payload\.recording_token\)[\s\S]*?return;/,
   "voice shortcut router must clear a stale native recording registration instead of ghost-starting a recording in a background window",
 );
 // Native events are only emitted when the Rust-side toggle is on (the hook
@@ -376,7 +386,7 @@ assert.match(
 // preview (explicit user apply/cancel is unaffected).
 assert.match(
   voiceHookSource,
-  /voiceContextIdentityRef[\s\S]*?previous === null \|\| previous === identity[\s\S]*?if \(editPreviewRef\.current\) \{[\s\S]*?setEditPreview\(null\);[\s\S]*?closeVoice\(\);/,
+  /voiceContextIdentityRef[\s\S]*?previous === null \|\| previous === identity[\s\S]*?if \(editPreviewRef\.current\) \{[\s\S]*?discardEditPreview\(\);[\s\S]*?closeVoice\(\);/,
   "voice hook must cancel a stale edit preview when the session/workspace identity changes",
 );
 // A pending edit preview is keyed to the old draft snapshot; starting a fresh
@@ -393,7 +403,7 @@ assert.ok(
 const triggerBody = voiceHookSource.slice(triggerBodyStart, triggerBodyEnd);
 assert.match(
   triggerBody,
-  /if \(editPreviewRef\.current\) setEditPreview\(null\);/,
+  /if \(editPreviewRef\.current\) discardEditPreview\(\);/,
   "triggerVoice must dispose a pending edit preview before starting a fresh session",
 );
 // With smart organize off, the edit lane has no LLM available
@@ -431,7 +441,7 @@ assert.match(
 );
 assert.match(
   applyBody,
-  /setEditPreview\(null\)/,
+  /discardEditPreview\(\)/,
   "a drifted draft must dispose the stale preview instead of replacing the draft",
 );
 // Exercise the real randomness of createVoiceSessionRandomPart directly (the
@@ -508,7 +518,7 @@ assert.match(
 );
 assert.match(
   voiceHookSource,
-  /const cancelVoiceOrPreview = useCallback[\s\S]*?editPreviewRef\.current[\s\S]*?setEditPreview\(null\)[\s\S]*?cancelVoiceInput\(\)/,
+  /const cancelVoiceOrPreview = useCallback[\s\S]*?editPreviewRef\.current[\s\S]*?discardEditPreview\(\)[\s\S]*?cancelVoiceInput\(\)/,
   "global voice cancel must dismiss an edit preview before cancelling an active recording",
 );
 assert.match(
@@ -969,16 +979,16 @@ assert.doesNotMatch(
   "voice audio must not cross IPC as a JSON number array",
 );
 
-// Cross-window recording mutex wiring: recording start registers this window's label, finishVoiceInput clears it in one place, and old backends silently ignore it.
+// Cross-window ownership is authoritative and fails closed before opening the mic.
 assert.match(
   source,
-  /invoke\("set_voice_shortcut_recording", \{ label: label \|\| null \}\)\)\.catch\(function \(\) \{\}\)/,
-  "recording label sync must tolerate old backends without the command",
+  /invoke\("set_voice_shortcut_recording", \{ label: label \|\| null, token: token \}\)/,
+  "recording ownership IPC must include the operation token",
 );
 assert.match(
   source,
-  /setVoiceInputStatus\("recording"[\s\S]*?syncVoiceShortcutRecording\(currentVoiceWindowLabel\(\), session\.id\)/,
-  "recording start must register this window label (with the session token) for cross-window mutual exclusion",
+  /const claimed = await syncVoiceShortcutRecording\(currentVoiceWindowLabel\(\), session\.id\);[\s\S]*?if \(!claimed\)[\s\S]*?session\.stream = await requestVoiceMedia/,
+  "claim must succeed before microphone acquisition",
 );
 assert.match(
   source,
@@ -1008,8 +1018,8 @@ assert.match(
 // Token guard: registration carries a token and the clear is only sent when the token matches — a late finish must not erase a newer session's registration.
 assert.match(
   source,
-  /let voiceShortcutRecordingToken = null;[\s\S]*?if \(label\) \{[\s\S]*?voiceShortcutRecordingToken = token \|\| null;[\s\S]*?\} else if \(token && voiceShortcutRecordingToken && token !== voiceShortcutRecordingToken\) \{[\s\S]*?return;/,
-  "recording label clear must be token-guarded so a late finish cannot erase a newer session registration",
+  /if \(!token\) return Promise\.resolve\(false\);/,
+  "tokenless clears must be rejected rather than clearing another WebView",
 );
 
 // ===== Error codes end to end: desktop→web RPC passthrough + both-lane mapping guards =====
