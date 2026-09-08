@@ -2179,6 +2179,7 @@ mod config_update_tests {
             focus: None,
             live_state: None,
             runtime_cost_owner: None,
+            memory_export: crate::compaction::MemoryExportConfig::default(),
         };
 
         assert!(try_apply_model_and_compaction_update(

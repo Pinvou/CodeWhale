@@ -1084,6 +1084,16 @@ impl Engine {
                     Ok(result) => {
                         // Only update if we got valid messages (never corrupt state)
                         if !result.messages.is_empty() || self.session.messages.is_empty() {
+                            let summary_produced = result.summary_prompt.is_some();
+                            // Snapshot only when the memory export will actually
+                            // run — the transcript clone is wasted work otherwise.
+                            let pre_compaction_messages = if summary_produced
+                                && auto_compaction_config.memory_export.enabled
+                            {
+                                self.session.messages.to_vec()
+                            } else {
+                                Vec::new()
+                            };
                             let auto_messages_after = result.messages.len();
                             self.session.replace_messages(result.messages);
                             self.merge_compaction_summary(result.summary_prompt);
@@ -1108,6 +1118,12 @@ impl Engine {
                             )
                             .await;
                             let _ = self.tx_event.send(Event::status(status)).await;
+                            self.maybe_spawn_memory_export(
+                                Some(client.clone()),
+                                &auto_compaction_config,
+                                summary_produced,
+                                pre_compaction_messages,
+                            );
                         } else {
                             let message = "Auto-compaction skipped: empty result".to_string();
                             self.emit_compaction_failed(

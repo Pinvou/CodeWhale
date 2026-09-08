@@ -5087,6 +5087,38 @@ impl Engine {
         }
     }
 
+    /// Best-effort long-term memory export after an LLM compaction succeeded
+    /// (Codex-compatible artifacts; see `compaction::memory_export`). Runs as
+    /// a detached task so it never delays the resumed conversation, and only
+    /// when the pass actually produced an LLM summary — prune-only compaction
+    /// and emergency trim fallbacks carry no new memory signal.
+    fn maybe_spawn_memory_export(
+        &self,
+        client: Option<SharedModelClient>,
+        compaction: &CompactionConfig,
+        summary_produced: bool,
+        pre_compaction_messages: Vec<crate::models::Message>,
+    ) {
+        let Some(client) = client else {
+            return;
+        };
+        if !summary_produced || pre_compaction_messages.is_empty() {
+            return;
+        }
+        crate::compaction::spawn_memory_export(
+            client,
+            crate::compaction::MemoryExportJob {
+                messages: pre_compaction_messages,
+                model: compaction.model.clone(),
+                effective_context_window: compaction.effective_context_window,
+                memory_export: compaction.memory_export.clone(),
+                thread_id: self.session.id.clone(),
+                cwd: self.session.workspace.clone(),
+            },
+            self.tx_event.clone(),
+        );
+    }
+
     async fn handle_manual_compaction(&mut self) {
         let id = format!("compact_{}", &uuid::Uuid::new_v4().to_string()[..8]);
         let zero_usage = Usage {
@@ -5146,6 +5178,15 @@ impl Engine {
         {
             Ok(result) => {
                 if !result.messages.is_empty() || self.session.messages.is_empty() {
+                    let summary_produced = result.summary_prompt.is_some();
+                    // Snapshot only when the memory export will actually run —
+                    // the transcript clone is wasted work otherwise.
+                    let pre_compaction_messages =
+                        if summary_produced && compaction_config.memory_export.enabled {
+                            self.session.messages.to_vec()
+                        } else {
+                            Vec::new()
+                        };
                     let messages_after = result.messages.len();
                     self.session.replace_messages(result.messages);
                     self.merge_compaction_summary(result.summary_prompt);
@@ -5169,6 +5210,12 @@ impl Engine {
                         Some(messages_after),
                     )
                     .await;
+                    self.maybe_spawn_memory_export(
+                        self.model_client.clone(),
+                        &compaction_config,
+                        summary_produced,
+                        pre_compaction_messages,
+                    );
                 } else {
                     let message = "Compaction skipped: produced empty result".to_string();
                     self.emit_compaction_failed(id, false, message.clone())

@@ -1,5 +1,9 @@
 //! Context compaction for long conversations.
 
+pub mod memory_export;
+
+pub use memory_export::{MemoryExportConfig, MemoryExportJob, spawn_memory_export};
+
 use anyhow::Result;
 use regex::Regex;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -46,6 +50,11 @@ pub struct CompactionConfig {
     /// `None` for the foreground TUI. This is accounting provenance only and
     /// is never included in a provider request.
     pub runtime_cost_owner: Option<String>,
+    /// Long-term memory export in Codex-compatible format, run best-effort
+    /// after an LLM compaction succeeds (see [`memory_export`]). Off by
+    /// default; hosts opt in. Sub-agent/worker compaction configs must keep
+    /// this disabled so only root sessions feed the memory store.
+    pub memory_export: MemoryExportConfig,
 }
 
 /// Host-captured live state injected after compaction so the successor agent
@@ -99,6 +108,7 @@ impl Default for CompactionConfig {
             focus: None,
             live_state: None,
             runtime_cost_owner: None,
+            memory_export: MemoryExportConfig::default(),
         }
     }
 }
