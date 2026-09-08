@@ -32,7 +32,7 @@
 | 子任务 | 验收边界 | 状态 |
 | --- | --- | --- |
 | 04C1 | NATS 资源初始化与业务运行分离：生产 broker 只读取并校验既定 stream/consumer，业务不得修改共享 stream；开发兼容、缺失/漂移拒绝、真实 JetStream 权限正负例 | 代码与真实隔离验证通过 / NOT_DEPLOYED |
-| 04C2 | 私有 TLS、逐服务 NATS 身份与 ACL、PostgreSQL/Redis 身份及连接校验；公开模板与私密投递分离，不发布依赖公网端口 | A/B 代码与隔离验证完成；C/D 待实施 |
+| 04C2 | 私有 TLS、逐服务 NATS 身份与 ACL、PostgreSQL/Redis 身份及连接校验；公开模板与私密投递分离，不发布依赖公网端口 | A/B、C 的 PostgreSQL/NATS 配置及独立缓存证书已验收；Redis 接线、D 待实施 |
 | 04C3 | Keycloak 生产启动、用户与 workload realm 分离、七个服务真实 subject 及逐服务短期文件接线、凭据专用 OIDC client；真实签发/过期/错角色拒绝 | 待依赖就绪 |
 | 04C4 | 新业务镜像及生产配置组合、空库迁移、原生 KMS fresh-install prepare/保管人轮换/verify、正式外部入口与商城验证 | 待前置验收 |
 | 05C | 精确确认旧测试服务/数据库/卷，按既有授权清理，统一切换与公开入口回归；保全正式 KMS 和范围外系统 | 待切换门禁 |
@@ -131,6 +131,16 @@ Linux 同源最终三份测试二进制全部通过：加密身份恢复 0.07 �
 04C2C2 实测（2026-09-08）：同源生产模板实际启动缓存 NATS 2.11.17，取得 `PRODUCTION_NATS_TLS_NKEY_PERSISTENCE_PRIVATE_MONITOR_PASS`、退出 0。既有官方 age 与已审六身份/固定 ACL 工具的 Linux 制品传输摘要一致；fixture 只生成临时材料。真实 TLS、无身份 Authorization Violation、明文握手关闭、独立错 CA 的证书验证异常、非本机监测端口拒绝均通过；受限初始化 create-only→只读核验→重启→再次只读核验成功，未通过重新创建掩盖资源丢失。实际容器无公开端口/匿名卷，四个限定 bind、65532 非 root/只读、512 MiB/64 PID 限制通过，日志不含种子；最终容器/网络/临时材料精确清理。
 
 初轮测试误在制品传输完成前启动，不计结果；完整传输后发现 NATS include 按当前配置目录拼接，绝对路径被重复拼接，已改成同目录 `authorization.conf`，实际重跑通过。诊断仅使用不接收种子的隔离 broker，临时日志打印已移除。最终两项 NATS 合同及先前合跑三项 PostgreSQL 合同均通过；既有 Go/ACL/消息协议无变更，不扩大或重写此前矩阵。正式配置投递、容量/到期监测、持久数据备份恢复和业务切换仍未完成。
+
+### SECINF-04C2C3 Redis 生产隔离接线
+
+对固定 rc.26 源码（`8f6961c675932f406260ff0c218bc2aa0603e9b2`）的接线核对发现：New API 的 `pkg/cachex` 使用 SCAN 支持缓存目录管理。Redis 数据库编号和 key ACL 不构成键名枚举隔离，不能让它与 Portal 会话/Identity 风控共享同一进程。保持 New API 现有 Redis 功能，不通过关闭缓存或改变限流语义加速：使用独立 `newapi-redis` 实例/数据/身份/TLS 叶；原 `redis` 仅容纳 Portal 与 Identity，按互不相交的固定 key 前缀和精确命令 ACL 隔离，不授予扫描或管理命令。两个实例均无宿主端口、只连接私有数据网络、TLS1.2+、禁用 default 用户和明文监听；不新增外部服务或购买资源。
+
+C3A 为该接线增加必要且固定的第六个 serverAuth 叶 `newapi-redis`，保持其与 `redis`、其他叶、CA 各自独立私钥。既有 PKI 工具配置输入不变，新生成的公开清单/READY 明确升级 v2，精确十四个制品（根密文、公开根及六对叶证书/私钥）；原根密文恢复结构不变，不修改任何既有输出，不接受任意名称/SAN/用途。C2A 的 v1 五叶包只用于历史隔离验收，尚未生成或部署正式依赖证书，故本次不覆盖或迁移正式材料。后续生产投递须读取 v2 完整闭合清单；旧 v1 保管包保持可保管恢复，但不能被误判为已具备新实例证书。复用现有双包 TLS/恢复/权限/失败保护测试，新增六身份精确清单和 v2 标记断言，不另建证书服务。文档先审后实施并独立审核提交。
+
+C3B 随后交付 Redis 配置/ACL 和实际服务客户端接线验证。Portal 仅允许 `portal:flow:*`、`portal:session:*`、`portal:approval-classification:*`、`portal:refresh:*` 的既有读取/写入/锁；Identity 仅允许三类 `pinvou:auth-admission:*`、`pinvou:auth-failure:*`、`pinvou:auth-alias:*` 与已有风控脚本所需命令，脚本内仍受 key/命令约束。New API 在独立实例访问自己的缓存、限流、会话和目录；命令以该固定版本实际调用集合为准，不开放 ACL/CONFIG/FLUSH/模块加载/复制等管理能力。三身份独立随机密码以受控秘密配置投递，服务端只持密码摘要；客户端使用 rediss 与核验的 `redis`/`newapi-redis` 名称，禁止跳过 CA/主机名校验。容量/持久化/重启和真实越权负例随配置实施核验，不以此规划标记 C3B 或现场完成。
+
+04C2C3A 实测（2026-09-08）：公开 manifest/READY 已明确 v2，新输出六个固定叶与十四制品，原加密根 envelope v1 与输入配置不变。Windows PKI 全包（含原 KMS PKI）3.244 秒及 CLI 编译、两包 vet 通过；同源 Linux 六个顶级测试全部通过、无跳过，六叶双根/双信任/撤旧信任与用途拒绝的实际 TLS 0.20 秒，原 KMS PKI 回归 0.02 秒，保管包认证/输入拒绝/部分现场保护/POSIX 权限均通过。独立审核通过；C3B 尚未实现，没有生成或投递正式依赖证书。
 
 ### Native Transit 适配
 

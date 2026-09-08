@@ -52,13 +52,16 @@ func infrastructureCertificate(t *testing.T, b []byte) *x509.Certificate {
 
 func checkInfrastructureBundle(t *testing.T, cfg InfrastructureConfig, id *age.X25519Identity) (*x509.Certificate, map[string]tls.Certificate) {
 	t.Helper()
+	if strings.Join(infrastructureServices(), ",") != "postgres,redis,nats,keycloak,newapi,newapi-redis" {
+		t.Fatal("production v2 requires exactly six fixed service identities")
+	}
 	read := func(name string) []byte { return infrastructureRead(t, cfg.OutputDirectory, name) }
 	b := read("manifest.json")
 	var manifest InfrastructureManifest
-	if json.Unmarshal(b, &manifest) != nil || manifest.Version != 1 || manifest.Purpose != "pinvou-platform-internal-pki" || manifest.RecipientSHA256 != cfg.RecipientSHA256 || len(manifest.Files) != 12 {
+	if json.Unmarshal(b, &manifest) != nil || manifest.Version != 2 || manifest.Purpose != "pinvou-platform-internal-pki" || manifest.RecipientSHA256 != cfg.RecipientSHA256 || len(manifest.Files) != 14 {
 		t.Fatal("invalid manifest")
 	}
-	if string(read("READY")) != "INFRASTRUCTURE_PKI_READY_V1\n"+infrastructureHash(b)+"\n" {
+	if string(read("READY")) != "INFRASTRUCTURE_PKI_READY_V2\n"+infrastructureHash(b)+"\n" {
 		t.Fatal("unbound READY marker")
 	}
 	expected := map[string]bool{"ca-private.age": true, "ca.crt": true, "manifest.json": true, "READY": true}
@@ -94,7 +97,7 @@ func checkInfrastructureBundle(t *testing.T, cfg InfrastructureConfig, id *age.X
 			t.Fatal("unsafe output permissions")
 		}
 		return nil
-	}); err != nil || count != 14 {
+	}); err != nil || count != 16 {
 		t.Fatal("incomplete output")
 	}
 	ca := infrastructureCertificate(t, read("ca.crt"))

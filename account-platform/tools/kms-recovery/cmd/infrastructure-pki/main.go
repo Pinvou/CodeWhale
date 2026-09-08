@@ -23,5 +23,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, pki.ErrInfrastructurePKI)
 		os.Exit(1)
 	}
-	fmt.Println("INFRASTRUCTURE_PKI_READY: encrypted CA and five isolated server identities; not deployed")
+	fmt.Println("INFRASTRUCTURE_PKI_READY: encrypted CA and six isolated server identities; not deployed")
 }

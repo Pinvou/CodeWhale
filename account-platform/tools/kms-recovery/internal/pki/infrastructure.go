@@ -40,7 +40,7 @@ type InfrastructureManifest struct {
 }
 
 func infrastructureServices() []string {
-	return []string{"postgres", "redis", "nats", "keycloak", "newapi"}
+	return []string{"postgres", "redis", "nats", "keycloak", "newapi", "newapi-redis"}
 }
 
 func LoadInfrastructureConfig(filename string) (InfrastructureConfig, error) {
@@ -78,7 +78,7 @@ func GenerateInfrastructure(cfg InfrastructureConfig) error {
 	if os.Mkdir(cfg.OutputDirectory, 0700) != nil || syncDir(parent) != nil {
 		return ErrInfrastructurePKI
 	}
-	manifest := InfrastructureManifest{Version: 1, Purpose: "pinvou-platform-internal-pki", RecipientSHA256: cfg.RecipientSHA256, Files: map[string]string{}}
+	manifest := InfrastructureManifest{Version: 2, Purpose: "pinvou-platform-internal-pki", RecipientSHA256: cfg.RecipientSHA256, Files: map[string]string{}}
 	persist := func(name string, data []byte) error {
 		if writeNew(cfg.OutputDirectory, filepath.FromSlash(name), data) != nil {
 			return ErrInfrastructurePKI
@@ -141,12 +141,12 @@ func GenerateInfrastructure(cfg InfrastructureConfig) error {
 		}
 	}
 	b, err := json.Marshal(manifest)
-	if err != nil || len(manifest.Files) != 12 || writeNew(cfg.OutputDirectory, "manifest.json", b) != nil {
+	if err != nil || len(manifest.Files) != 14 || writeNew(cfg.OutputDirectory, "manifest.json", b) != nil {
 		return ErrInfrastructurePKI
 	}
 	// The readiness marker binds the exact manifest; deployment must verify all
 	// hashes and the closed file set, not merely test whether this marker exists.
-	if writeNew(cfg.OutputDirectory, "READY", []byte("INFRASTRUCTURE_PKI_READY_V1\n"+infrastructureHash(b)+"\n")) != nil {
+	if writeNew(cfg.OutputDirectory, "READY", []byte("INFRASTRUCTURE_PKI_READY_V2\n"+infrastructureHash(b)+"\n")) != nil {
 		return ErrInfrastructurePKI
 	}
 	return nil
