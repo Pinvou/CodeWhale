@@ -883,8 +883,9 @@ class CiRustPolicyTests(unittest.TestCase):
 
 class CiMergeQueueWaitingEntryTests(unittest.TestCase):
     def setUp(self):
-        # Public queue snapshot from run 34178327652: #1013 was being checked
-        # while #1014, #1012 and #1015 had no generated commit pair yet.
+        # Sanitized live queue shape observed while run 34178327652 was active,
+        # not the run's original GraphQL input (which was not retained): #1013
+        # was being checked; #1014, #1012 and #1015 had no generated commit pair.
         self.base = "7b5edbd202ad1359a8c3367ae259a86d437726ff"
         self.head = "dd2251a0ad74f21ec12aee58f15cdb376e561c93"
         self.event = {"merge_group": {
