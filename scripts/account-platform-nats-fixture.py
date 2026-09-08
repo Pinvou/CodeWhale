@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 
-IMAGE = "sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00"
+IMAGE = "m.daocloud.io/docker.io/library/nats@sha256:065e8355c20a5575b3c77224be1855e8103fd148b68fba05130b9b8ddfa40ccc"
 
 
 def require(ok, code):
@@ -37,6 +37,9 @@ def main():
         require((bins / binary).is_file(), "NATS_FIXTURE_BINARY_MISSING")
     source = Path(__file__).resolve().parents[1] / "account-platform/deploy/production"
     run(["docker", "image", "inspect", IMAGE])
+    version = run(["docker", "run", "--rm", "--network", "none", "--user", "65532:65532", "--read-only",
+                   "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "nats-server", IMAGE, "--version"])
+    require(version == "nats-server: v2.14.6", "NATS_IMAGE_VERSION_MISMATCH")
     project = "pinvou-nats-fixture-" + secrets.token_hex(8)
     container_id = network_id = None
     with tempfile.TemporaryDirectory(prefix="pinvou-nats-fixture-") as raw:

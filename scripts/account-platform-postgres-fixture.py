@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 
-IMAGE = "sha256:bd39a1ca524d0e8c65a36e68f422111a622f7110a8e0a5a8ef1df0ab2de0b24e"
+IMAGE = "m.daocloud.io/docker.io/library/postgres@sha256:7bade6d532592ca8ce7ee32def7399dad2607c4ea5583839fc4352a095a11ea6"
 KEYS = ("ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
         "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD",
         "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD")
@@ -55,6 +55,9 @@ def main():
     source = Path(__file__).resolve().parents[1] / "account-platform/deploy"
     require(source.is_dir(), "FIXTURE_SOURCE_MISSING")
     run(["docker", "image", "inspect", IMAGE])
+    version = run(["docker", "run", "--rm", "--network", "none", "--user", "999:999", "--read-only",
+                   "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "postgres", IMAGE, "--version"]).stdout.strip()
+    require(version == "postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg12+2)", "POSTGRES_IMAGE_VERSION_MISMATCH")
     project = "pinvou-pg-fixture-" + secrets.token_hex(8)
     container_id = None
     network_id = None

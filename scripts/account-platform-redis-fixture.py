@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 
-IMAGE = "sha256:a7859ed111db3c1f5404a973a4747505d559fb5ca32d37e447afc0ef845a2103"
+IMAGE = "m.daocloud.io/docker.io/library/redis@sha256:5abe7a95302345d227a38553bd066c3a3d11044ee616654de2f6471a7676fe1e"
 
 
 def require(ok, code):
@@ -90,6 +90,9 @@ def main():
         require((bins / binary).is_file(), "REDIS_CLIENT_BINARY_MISSING")
     source = Path(__file__).resolve().parents[1] / "account-platform/deploy/production"
     run(["docker", "image", "inspect", IMAGE])
+    version = run(["docker", "run", "--rm", "--network", "none", "--user", "65532:65532", "--read-only",
+                   "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--entrypoint", "redis-server", IMAGE, "--version"])
+    require(version.startswith("Redis server v=8.2.9 "), "REDIS_IMAGE_VERSION_MISMATCH")
     project = "pinvou-redis-fixture-" + secrets.token_hex(8)
     ids, clients, network_id = {}, [], None
     with tempfile.TemporaryDirectory(prefix="pinvou-redis-fixture-") as raw:

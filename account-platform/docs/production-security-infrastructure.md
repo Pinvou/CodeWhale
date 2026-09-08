@@ -179,6 +179,14 @@ D1 正式执行（2026-09-08，经独立 B 执行前审核）：重新验证恢�
 
 D2 验收（2026-09-08）：独立 B 代码、测试、公开配置及执行步骤审核通过后，真实 Linux 两项测试无跳过、0.246 秒通过；官方 age 使用独立临时身份完成加密/恢复，固定十二项、精确清单与权限一致，不安全配置/接收方/二进制/权限/链接拒绝，失败加密与首次密文持久化失败均无明文文件，半包保留且拒绝覆盖。Windows 一项通过、一项 Linux 场景明确跳过；架构、语法与 diff 检查通过。正式只执行一次准备，独立重读精确十五文件集合、root 属主/0700+0600/无链接、逐项摘要及 READY 全部通过；未连接数据库或启动服务。仅密文、清单和 READY 下载至既有受限 ACL 保管目录，对独立记录的摘要再次验证；已请求保管人离线保存本次新增材料，确认仍待收取。实际逐角色投递、依赖运行及恢复交接不在本步完成声明内。
 
+#### D3 前置：当前维护镜像重新验收（隔离实测通过）
+
+本次全新部署的候选依赖固定为 PostgreSQL 17.11-bookworm、Redis 8.2.9-bookworm、NATS 2.14.6-alpine。PostgreSQL 保持 17 主版本；Redis 8.2.9 修复 TLS pending-data 与 ACL 检查等安全问题，不能把先前 8.2.8 的测试制品用于正式部署；NATS 选择当前正式发布版本，不使用 2.15 RC。依据为 [PostgreSQL 维护策略](https://www.postgresql.org/support/versioning/)、[Redis 8.2.9 发布说明](https://github.com/redis/redis/releases/tag/8.2.9)、[NATS 2.14.6 发布说明](https://github.com/nats-io/nats-server/releases/tag/v2.14.6)。不迁移旧 JetStream 数据，仍须实测现有客户端/配置兼容；New API 的用户指定 rc.26 不变。
+
+从 Docker Official Images 的对应标签元数据独立获取 Linux amd64 摘要，镜像代理只作为传输源并固定该摘要，核验下载结果及原二进制版本。三个既有隔离 fixture 仅更新固定镜像及版本断言，不修改 TLS/ACL/失败判定和业务验收矩阵，不生成新的通用测试框架；重跑 PostgreSQL、双 Redis 和 NATS 真实生产配置，并以候选 NATS 原二进制重跑既有收发/重连撤权矩阵。通过前不启动正式依赖；失败保留正式材料，不回退旧补丁绕过门禁。实际版本、摘要、结果及边界回填后独立提交。
+
+2026-09-08 实际验收：三个官方 amd64 manifest 摘要分别为 PostgreSQL `7bade6d532592ca8ce7ee32def7399dad2607c4ea5583839fc4352a095a11ea6`、Redis `5abe7a95302345d227a38553bd066c3a3d11044ee616654de2f6471a7676fe1e`、NATS `065e8355c20a5575b3c77224be1855e8103fd148b68fba05130b9b8ddfa40ccc`；宿主实际 image inspect 的 ID 分别同上述值，原二进制输出 17.11（Debian 17.11-1.pgdg12+2）、8.2.9、2.14.6。三个生产 Compose fixture 全部 exit 0，数据库 TLS/SCRAM/半初始化拒绝/重启、双缓存两个实际客户端/ACL/隔离/持久化、NATS TLS/NKey/受限资源初始化/非本机监测拒绝/重启均通过。候选 NATS 镜像中非 root、无网络隔离执行既有同源事件测试，十一项无跳过通过：实际重连撤权 2.79 秒、password/NKey 两种完整业务矩阵 4.15 秒，固定规格及 overlap 验证保留。首次事件测试未执行是公开测试二进制 0700 导致非 root 启动拒绝，核对相同摘要后仅将该公开二进制改为 0755，未调整服务/秘密权限。架构和 diff 检查通过；所有临时容器/网络由既有 fixture 精确清理，正式服务尚未启动。
+
 ### Native Transit 适配
 
 既有 `remote` 是自定义 `/v1/encrypt|decrypt` 协议，不等于 Vault API，保留其兼容行为。增加显式 `vault-transit` 模式，通过 `/v1/transit/encrypt/{key}`、`decrypt/{key}` 调用原生 API；不部署自制加密中转服务。

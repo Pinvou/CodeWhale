@@ -8,8 +8,8 @@
 ## PostgreSQL 投递约束
 
 - `POSTGRES_IMAGE` 使用独立核验的 PostgreSQL 17 不可变镜像摘要/本机 image ID，
-  预先导入，禁止 latest/可变 tag 和运行时拉取。缓存 17.10 仅作为本批隔离配置验证制品；
-  正式发布须核对当时维护补丁与安全公告，不能把缓存版本叫作最新版。
+  预先导入，禁止 latest/可变 tag 和运行时拉取。2026-09-08 已用 17.11 重跑隔离配置验证；
+  各版本及独立摘要见安全设施文档 D3 前置验收记录，不能把历史缓存版本叫作最新版。
 - `POSTGRES_DATA_DIRECTORY` 必须是本次全新且空的独立目录；不得使用旧测试数据目录，
   更不得指向 KMS 或其他团队数据。固定 UID/GID 999:999、0700。
 - `POSTGRES_TLS_DIRECTORY` 为本次已核验证书包的 PostgreSQL 单独叶目录，
@@ -104,8 +104,8 @@ python3 scripts/account-platform-nats-fixture.py --run --bin-directory /controll
 
 `compose.redis.yaml` 必须同时提供独立 `redis`（Portal、Identity）与 `newapi-redis`
 （New API）实例，不能以不同数据库编号替代隔离。后者的缓存目录功能需要 SCAN，不能
-与登录会话共库。使用预先独立核验的不可变 `REDIS_IMAGE`；本批隔离测试缓存版本为 8.2.8，
-正式发布仍需核对维护补丁与安全公告。
+与登录会话共库。使用预先独立核验的不可变 `REDIS_IMAGE`；2026-09-08 已用 8.2.9 重跑
+完整双实例隔离验证，不使用缺少本次 TLS/ACL 安全补丁的历史 8.2.8 制品正式部署。
 
 - `REDIS_DATA_DIRECTORY` / `NEWAPI_REDIS_DATA_DIRECTORY`：不同、全新空目录。
 - `REDIS_TLS_DIRECTORY` / `NEWAPI_REDIS_TLS_DIRECTORY`：v2 PKI 包中各自独立叶，
