@@ -1,6 +1,22 @@
-# 保管人本机解封
+# 保管人本机运维
 
-独立运维程序；默认 `kms-recovery` 仍无网络。提供有界联网 `unseal`、`bootstrap`、`finalize-bootstrap` 和离线 `stage-agents`，没有 init、reset、migrate、任意 URL/API 或密钥打印功能。普通 `unseal` 不解析或发送包中的 root token；只有明确的身份引导/退场操作使用内存中的 root。
+独立运维程序；默认 `kms-recovery` 仍无网络。提供有界联网 `unseal`、`bootstrap`、`finalize-bootstrap`、`rotate-transit` 和离线 `stage-agents`、`verify-snapshot`，没有 init、reset、migrate、任意 URL/API 或密钥打印功能。普通解封和 Transit 轮换不使用 root token；只有明确的身份引导/退场操作使用内存中的 root。
+
+## 固定 Transit key 版本轮换
+
+仅在全新数据库 prepare 与现场接线就绪后，由保管人在同一串行运维窗口执行。不能与其他操作者或自动轮换同时进行，Transit API 不提供版本 CAS。
+
+```text
+kms-operator -action rotate-transit -config <原公开配置> -directory <custody绝对路径> -bundle <既有roles.age绝对路径> -output-directory <私有父目录中的新操作目录> -expected-version <prepare得到的旧版本整数>
+```
+
+仍只通过真实终端无回显读取已有口令。不读取 initialization.age，不恢复 root，不输出/导出第四个运维身份。先核对角色包、`BOOTSTRAP_FINALIZED` 摘要及实例/endpoint/CA/recipient 绑定，再登录固定 `pinvou-kms-operations`。要求独立最小 token 和无额外 entity/group 策略；只操作 `pinvou-token-data`，保持 AES-GCM、不可导出/明文备份/删除、不使用 derived key、最低解密版本为 1，以保全历史备份。
+
+工具先创建 0700 操作目录、持有操作系统进程锁，并持久化 0600 `ROTATION_CONTEXT`。每次可能签发 token 前，都独占建立 `CURRENT_INVOCATION`；预检通过后才写 `ROTATION_ATTEMPT`，同步文件及父目录并读回，然后只发送一次 rotate。实际版本必须恰好等于预期旧版本加一。确认临时 token 已撤销并归档该次调用后才保存 `ROTATION_VERIFIED`。记录不含口令、token 或 SecretID。轮换命令支持 Windows 和 Linux；其他系统显式拒绝。
+
+响应丢失、错误、并发变化或不完整记录都必须保留原目录。使用相同配置、版本和目录再运行时，只登录、读取状态并撤销新产生的本次 token，**不再发送 rotate**；版本仍未变化也不会重试。目录存在但尝试记录不完整时同样拒绝，不得删除目录或改用新目录绕过不确定状态。记录最多接受 24 小时；超过窗口需独立核查，不能重新发起轮换来“修复”证据。
+
+`KMS_ROTATION_TOKEN_RETIREMENT_UNCONFIRMED_PRESERVE_ATTEMPT` 表示临时 token 撤销未能确认，不能认为交接完成。首次和每次只读重入都分别记录、撤销并归档为 `invocation-<随机编号>`；已有完成标记不能绕过尚未关闭的调用。下次登录前必须先确认其退场标记，或由 KMS 服务端时间证明已经超过经验证的 token 创建时间加 900 秒硬寿命及 5 秒裕量；本机时钟不能代替此证据。若登录响应丢失、尚未验证租约即崩溃或记录损坏，则不能假定 token 已到期，必须保留目录并独立核查，不自动解锁或再次签发。收到但属性不合格的 token 同样使用独立于操作取消的上下文撤销。token 不会明文保存供重用。`KMS_ROTATION_VERIFIED` 仅证明版本变化及受控身份退场条件，之后仍需既有加密快照、离线保存和完整业务安全门禁。原有加密恢复包不能删除；新快照必须包含轮换后的密钥版本。
 
 ## 使用
 

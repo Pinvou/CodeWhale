@@ -83,11 +83,23 @@ func bootstrapProof(t *testing.T, cfg Config, id *age.X25519Identity, encrypted 
 	if s.call("auth/token/lookup-self", nil, s.root, nil, 403) != nil {
 		t.Fatal("initial root survived")
 	}
+	rotationParent := t.TempDir()
+	os.Chmod(rotationParent, 0700)
+	rotationOutput := filepath.Join(rotationParent, "rotation")
+	for range 2 {
+		if err := RunRotateTransit(ctx, cfg, custodyDir, filepath.Join(output, "roles.age"), pass, rotationOutput, 1); err != nil {
+			t.Fatal("ACTUAL_OPERATOR_ROTATION_FAILED", err)
+		}
+	}
+	t.Log("ACTUAL_OPENBAO_OPERATOR_ROTATION_PASS")
 	ops, err := s.login(roleNames[3], e.Roles[roleNames[3]])
 	if err != nil {
 		t.Fatal("operations identity did not survive root")
 	}
 	defer s.call("auth/token/revoke-self", map[string]any{}, ops, nil, 204)
+	if version, err := s.rotationVersion(ops); err != nil || version != 2 {
+		t.Fatal("operator repeated a completed rotation")
+	}
 	if s.call(keyPath+"/rotate", map[string]any{}, ops, nil, 200) != nil {
 		t.Fatal("bounded key rotation unavailable")
 	}

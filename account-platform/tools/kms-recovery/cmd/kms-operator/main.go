@@ -12,14 +12,15 @@ import (
 )
 
 func run() error {
-	action := flag.String("action", "", "unseal, bootstrap, finalize-bootstrap, offline stage-agents, or offline verify-snapshot")
+	action := flag.String("action", "", "unseal, bootstrap, finalize-bootstrap, rotate-transit, offline stage-agents, or offline verify-snapshot")
+	expectedVersion := flag.Int("expected-version", 0, "explicit previous Transit version, only for rotate-transit")
 	config := flag.String("config", "", "absolute public operator configuration")
 	dir := flag.String("directory", "", "absolute local custody directory")
-	bundle := flag.String("bundle", "", "absolute encrypted package (roles.age for stage-agents; snapshot.age for verify-snapshot)")
-	output := flag.String("output-directory", "", "private bootstrap artifact directory")
+	bundle := flag.String("bundle", "", "absolute encrypted package (roles.age for stage-agents/rotate-transit; snapshot.age for verify-snapshot)")
+	output := flag.String("output-directory", "", "private bootstrap artifact or rotation attempt directory")
 	flag.Parse()
 	noOutputAction := *action == "unseal" || *action == "verify-snapshot"
-	if flag.NArg() != 0 || (!noOutputAction && *action != "bootstrap" && *action != "finalize-bootstrap" && *action != "stage-agents") || !term.IsTerminal(int(os.Stdin.Fd())) || (noOutputAction && *output != "") || (!noOutputAction && *output == "") {
+	if flag.NArg() != 0 || (!noOutputAction && *action != "bootstrap" && *action != "finalize-bootstrap" && *action != "stage-agents" && *action != "rotate-transit") || !term.IsTerminal(int(os.Stdin.Fd())) || (noOutputAction && *output != "") || (!noOutputAction && *output == "") || (*action == "rotate-transit" && (*expectedVersion < 1 || *expectedVersion >= 2147483647)) || (*action != "rotate-transit" && *expectedVersion != 0) {
 		return fmt.Errorf("LOCAL_INTERACTIVE_OPERATION_REQUIRED")
 	}
 	cfg, err := operator.LoadConfig(*config)
@@ -38,12 +39,22 @@ func run() error {
 	if *action == "verify-snapshot" {
 		fmt.Fprintln(os.Stderr, "仅离线验证加密快照的完整性和实例绑定；不输出内容，不联网，不执行恢复。")
 	}
+	if *action == "rotate-transit" {
+		fmt.Fprintln(os.Stderr, "仅使用既有运维身份轮换固定 Transit key 一次；已存在的尝试只查询，不重发轮换。不读取初始化 root。")
+	}
 	fmt.Fprint(os.Stderr, "请输入本机恢复口令（输入不回显，不要通过聊天或 Agent 输入）： ")
 	pass, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Fprintln(os.Stderr)
 	defer clear(pass)
 	if err != nil {
 		return fmt.Errorf("LOCAL_PASSPHRASE_READ_FAILED")
+	}
+	if *action == "rotate-transit" {
+		if err := operator.RunRotateTransit(context.Background(), cfg, *dir, *bundle, pass, *output, *expectedVersion); err != nil {
+			return err
+		}
+		fmt.Println("KMS_ROTATION_VERIFIED：固定 key 版本递增已确认；请继续加密快照、离线备份和完整业务门禁。")
+		return nil
 	}
 	if *action == "verify-snapshot" {
 		if err := operator.RunVerifySnapshot(cfg, *dir, *bundle, pass); err != nil {
