@@ -169,16 +169,19 @@ class CiRustPolicyTests(unittest.TestCase):
         }
         entries = queue_page(
             {
+                "state": "AWAITING_CHECKS",
                 "baseCommit": {"oid": "base-main"},
                 "headCommit": {"oid": "first-head"},
                 "pullRequest": pull_request(number=186),
             },
             {
+                "state": "AWAITING_CHECKS",
                 "baseCommit": {"oid": "first-head"},
                 "headCommit": {"oid": "queue-head"},
                 "pullRequest": pull_request(number=187),
             },
             {
+                "state": "AWAITING_CHECKS",
                 "baseCommit": {"oid": "unrelated-base"},
                 "headCommit": {"oid": "unrelated-head"},
                 "pullRequest": pull_request(number=188),
@@ -203,11 +206,13 @@ class CiRustPolicyTests(unittest.TestCase):
         }
         response = queue_page(
             {
+                "state": "AWAITING_CHECKS",
                 "baseCommit": {"oid": "base-main"},
                 "headCommit": {"oid": "first-head"},
                 "pullRequest": pull_request(number=186),
             },
             {
+                "state": "AWAITING_CHECKS",
                 "baseCommit": {"oid": "first-head"},
                 "headCommit": {"oid": "queue-head"},
                 "pullRequest": pull_request(
@@ -264,6 +269,7 @@ class CiRustPolicyTests(unittest.TestCase):
         incomplete_entries = []
 
         null_pr = {
+            "state": "AWAITING_CHECKS",
             "baseCommit": {"oid": "base-main"},
             "headCommit": {"oid": "queue-head"},
             "pullRequest": None,
@@ -276,6 +282,7 @@ class CiRustPolicyTests(unittest.TestCase):
             (
                 "missing critical field",
                 {
+                    "state": "AWAITING_CHECKS",
                     "baseCommit": {"oid": "base-main"},
                     "headCommit": {"oid": "queue-head"},
                     "pullRequest": partial_pr,
@@ -316,6 +323,7 @@ class CiRustPolicyTests(unittest.TestCase):
             "endCursor": "opaque-cursor",
         }
         entry = {
+            "state": "AWAITING_CHECKS",
             "baseCommit": {"oid": "base-main"},
             "headCommit": {"oid": "queue-head"},
             "pullRequest": pr,
@@ -342,6 +350,7 @@ class CiRustPolicyTests(unittest.TestCase):
             }
         }
         entry = {
+            "state": "AWAITING_CHECKS",
             "baseCommit": {"oid": "base-main"},
             "headCommit": {"oid": "queue-head"},
             "pullRequest": pull_request(labels=["ci:full-rust"]),
@@ -368,6 +377,7 @@ class CiRustPolicyTests(unittest.TestCase):
             }
         }
         entry = {
+            "state": "AWAITING_CHECKS",
             "baseCommit": {"oid": "base-main"},
             "headCommit": {"oid": "queue-head"},
             "pullRequest": pull_request(),
@@ -429,6 +439,7 @@ class CiRustPolicyTests(unittest.TestCase):
 
         def entry(base, head, number=186):
             return {
+                "state": "AWAITING_CHECKS",
                 "baseCommit": {"oid": base},
                 "headCommit": {"oid": head},
                 "pullRequest": pull_request(number=number),
@@ -476,6 +487,7 @@ class CiRustPolicyTests(unittest.TestCase):
             }
         }
         valid_entry = {
+            "state": "AWAITING_CHECKS",
             "baseCommit": {"oid": "base-main"},
             "headCommit": {"oid": "queue-head"},
             "pullRequest": pull_request(),
@@ -867,6 +879,140 @@ class CiRustPolicyTests(unittest.TestCase):
         self.assertEqual(changes[0].after, b"fn score() -> u8 { 2 }\n")
         self.assertIn("+fn score() -> u8 { 2 }", changes[0].patch)
         self.assertEqual(POLICY.classify_trusted_diff(changes)[0], "portable_rust")
+
+
+class CiMergeQueueWaitingEntryTests(unittest.TestCase):
+    def setUp(self):
+        # Sanitized live queue shape observed while run 34178327652 was active,
+        # not the run's original GraphQL input (which was not retained): #1013
+        # was being checked; #1014, #1012 and #1015 had no generated commit pair.
+        self.base = "7b5edbd202ad1359a8c3367ae259a86d437726ff"
+        self.head = "dd2251a0ad74f21ec12aee58f15cdb376e561c93"
+        self.event = {"merge_group": {
+            "base_ref": "refs/heads/main", "base_sha": self.base, "head_sha": self.head,
+        }}
+        self.current = {
+            "state": "AWAITING_CHECKS",
+            "baseCommit": {"oid": self.base},
+            "headCommit": {"oid": self.head},
+            "pullRequest": self.source_pr(1013, 440),
+        }
+        self.waiting = [{
+            "state": "QUEUED", "baseCommit": None, "headCommit": None,
+            "pullRequest": self.source_pr(number, source),
+        } for number, source in ((1014, 431), (1012, 438), (1015, 437))]
+
+    @staticmethod
+    def source_pr(number, source):
+        return pull_request(
+            number=number, branch=f"backflow/community-{source}",
+            marker=f"<!-- community-backflow:Pinvou/pinvou-agent#{source} -->",
+        )
+
+    def route(self, *entries, fetch_page=None, expect_diff=False):
+        observed = []
+
+        def inspect(base, head):
+            self.assertTrue(expect_diff, "unproven group reached trusted diff inspection")
+            observed.append((base, head))
+            return [change("docs/architecture.md", "old\n", "new\n")]
+
+        with patch.dict(os.environ, {"GITHUB_EVENT_NAME": "merge_group"}):
+            decision = POLICY.resolve_routing_event(
+                self.event, "Pinvou/pinvou3", "token",
+                fetch_page=fetch_page or (lambda **_: queue_page(*entries)),
+                inspect_diff=inspect,
+            )
+        self.assertEqual(observed, [(self.base, self.head)] if expect_diff else [])
+        return decision
+
+    def test_document_group_with_unbuilt_waiting_snapshot_stays_non_rust(self):
+        self.assertRegex(POLICY.QUEUE_QUERY, r"nodes\s*\{\s*state\s+baseCommit")
+        decision = self.route(self.current, *self.waiting, expect_diff=True)
+        self.assertEqual(decision[:2], (True, "non_rust"))
+        self.assertIn("#1013", decision.reason)
+        self.assertNotIn("#1014", decision.reason)
+
+    def test_only_explicit_queued_double_null_shape_can_be_excluded(self):
+        waiting = self.waiting[0]
+        malformed = [
+            (f"missing {field}", {k: v for k, v in waiting.items() if k != field})
+            for field in ("state", "baseCommit", "headCommit")
+        ]
+        for field in ("baseCommit", "headCommit"):
+            for value in ({"oid": "some-commit"}, {}, "not-a-commit"):
+                malformed.append((f"partial {field}: {value}", {**waiting, field: value}))
+        for state in (None, "", "FUTURE_STATE", [], 7, "AWAITING_CHECKS",
+                      "MERGEABLE", "UNMERGEABLE", "LOCKED"):
+            malformed.append((f"null pair in {state}", {**waiting, "state": state}))
+        for name, entry in malformed:
+            with self.subTest(name=name):
+                decision = self.route(self.current, entry)
+                self.assertEqual(decision[:2], (False, "full"))
+
+    def test_built_entries_also_require_known_explicit_state(self):
+        for state in (None, "FUTURE_STATE", [], 7):
+            with self.subTest(state=state):
+                decision = self.route({**self.current, "state": state}, *self.waiting)
+                self.assertEqual(decision[:2], (False, "full"))
+        without_state = {k: v for k, v in self.current.items() if k != "state"}
+        self.assertEqual(self.route(without_state, *self.waiting)[:2], (False, "full"))
+
+    def test_waiting_entries_do_not_hide_malformed_pull_request_metadata(self):
+        for pr in (None, {}, {**self.waiting[0]["pullRequest"], "labels": None}):
+            with self.subTest(pr=pr):
+                decision = self.route(self.current, {**self.waiting[0], "pullRequest": pr})
+                self.assertEqual(decision[:2], (False, "full"))
+
+    def test_waiting_entries_cannot_complete_a_missing_or_ambiguous_group_chain(self):
+        cases = (
+            (),
+            ({**self.current, "baseCommit": {"oid": "missing-link"}},),
+            (self.current, {**self.current, "pullRequest": pull_request(number=999)}),
+            ({**self.current, "baseCommit": {"oid": self.head}},),
+        )
+        for entries in cases:
+            with self.subTest(entries=entries):
+                self.assertEqual(self.route(*entries, *self.waiting)[:2], (False, "full"))
+
+    def test_waiting_entries_do_not_weaken_any_actual_chain_member(self):
+        # A queued entry that already has commits is a real chain candidate,
+        # not a waiting item. Every earlier link must also remain verified.
+        first = {**self.current, "headCommit": {"oid": "intermediate"}}
+        last = {**self.current, "state": "QUEUED",
+                "baseCommit": {"oid": "intermediate"},
+                "pullRequest": pull_request(number=187)}
+        cases = (
+            (pull_request(repository="someone/pinvou3"), "ordinary"),
+            (pull_request(base_repository="someone/pinvou3"), "ordinary"),
+            (pull_request(base_ref="other"), "ordinary"),
+            (pull_request(branch="feature/ordinary", marker="no marker"), "ordinary"),
+            (pull_request(marker="<!-- community-backflow:Pinvou/pinvou-agent#999 -->"), "ordinary"),
+            (pull_request(labels=["ci:full-rust"]), "full"),
+            ({**pull_request(), "labels": None}, "full"),
+        )
+        self.assertEqual(self.route(first, last, *self.waiting, expect_diff=True)[:2],
+                         (True, "non_rust"))
+        for pr, mode in cases:
+            for index in (0, 1):
+                with self.subTest(pr=pr, chain_index=index):
+                    entries = [first, last]
+                    entries[index] = {**entries[index], "pullRequest": pr}
+                    self.assertEqual(self.route(*entries, *self.waiting)[:2], (False, mode))
+
+    def test_waiting_only_page_does_not_stop_pagination_or_skip_later_members(self):
+        first_page = queue_page(*self.waiting)
+        first_page["data"]["repository"]["mergeQueue"]["entries"]["pageInfo"] = {
+            "hasNextPage": True, "endCursor": "next-page",
+        }
+        seen = []
+
+        def fetch(cursor=None, **_):
+            seen.append(cursor)
+            return first_page if cursor is None else queue_page(self.current)
+
+        self.assertEqual(self.route(fetch_page=fetch, expect_diff=True)[:2], (True, "non_rust"))
+        self.assertEqual(seen, [None, "next-page"])
 
 
 if __name__ == "__main__":
