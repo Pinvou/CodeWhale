@@ -1,0 +1,623 @@
+# Standalone production business project; never merge development Compose.
+# Inputs are verified site metadata. Private env files MUST NOT be rendered to logs.
+# CONFIG_VALID is not permission to start: C4C/D release gates remain mandatory.
+name: pinvou-production-business
+
+x-runtime: &runtime
+  pull_policy: never
+  user: "65532:65532"
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 256m
+  cpus: 0.5
+  pids_limit: 96
+  ulimits:
+    core: {soft: 0, hard: 0}
+  tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,uid=65532,gid=65532,mode=0700"]
+  logging:
+    driver: local
+    options: {max-size: "10m", max-file: "3"}
+  healthcheck:
+    test: ["CMD", "/healthcheck"]
+    interval: 10s
+    timeout: 3s
+    start_period: 20s
+    retries: 6
+
+x-http-environment: &http-environment
+  APP_ENV: production
+  PORT: "8080"
+  METRICS_ADDRESS: ":9090"
+  HEALTHCHECK_URL: http://127.0.0.1:8080/health/ready
+  TRUSTED_TIME_SOURCES: "${TRUSTED_TIME_SOURCES:?set verified TRUSTED_TIME_SOURCES}"
+
+services:
+  account-service:
+    <<: *runtime
+    image: "${ACCOUNT_SERVICE_IMAGE:?set verified ACCOUNT_SERVICE_IMAGE}"
+    env_file:
+      - path: "${ACCOUNT_SERVICE_PRIVATE_ENV_FILE:?set verified ACCOUNT_SERVICE_PRIVATE_ENV_FILE}"
+        required: true
+        format: raw
+    environment:
+      <<: *http-environment
+      PINVOU_API_CONTRACT_VERSION: "account-platform-v1"
+      PINVOU_CLIENT_UPGRADE_URL: "${PINVOU_CLIENT_UPGRADE_URL:?set verified PINVOU_CLIENT_UPGRADE_URL}"
+      PINVOU_CLIENT_RELEASE_MANIFEST: "${PINVOU_CLIENT_RELEASE_MANIFEST:?set verified PINVOU_CLIENT_RELEASE_MANIFEST}"
+      WORKLOAD_IDENTITY_TOKEN_FILE: "/var/run/secrets/pinvou/workload/token"
+      WORKLOAD_IDENTITY_ISSUER: "${WORKLOAD_IDENTITY_ISSUER:?set verified WORKLOAD_IDENTITY_ISSUER}"
+      WORKLOAD_IDENTITY_JWKS_URL: "${WORKLOAD_IDENTITY_JWKS_URL:?set verified WORKLOAD_IDENTITY_JWKS_URL}"
+      WORKLOAD_IDENTITY_AUDIENCE: "pinvou-account-platform-internal"
+      WORKLOAD_IDENTITY_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
+      OIDC_ISSUER: "https://account.pinvou.com/realms/pinvou"
+      OIDC_JWKS_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/certs"
+      OIDC_AUDIENCE: "pinvou-desktop"
+      DATABASE_URL: "postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+      WORKLOAD_IDENTITY_RULES_JSON: "${ACCOUNT_WORKLOAD_RULES_JSON:?set verified ACCOUNT_WORKLOAD_RULES_JSON}"
+      BILLING_HTTP_URL: "http://billing-service:8080"
+      TOKEN_GATEWAY_HTTP_URL: "http://token-gateway:8080"
+      IDENTITY_HTTP_URL: "http://identity-service:8080"
+      MANUAL_REVIEW_ON_CALL_USER_IDS: "${MANUAL_REVIEW_ON_CALL_USER_IDS:?set verified MANUAL_REVIEW_ON_CALL_USER_IDS}"
+      MOBILE_AUTH_ENABLED: "true"
+      SMS_PROVIDER: "aliyun-managed"
+      ALIYUN_SMS_ENDPOINT: "https://dypnsapi.aliyuncs.com"
+      ALIYUN_SMS_SIGN_NAME: "${ALIYUN_SMS_SIGN_NAME:?set verified ALIYUN_SMS_SIGN_NAME}"
+      ALIYUN_SMS_REGISTER_TEMPLATE: "${ALIYUN_SMS_REGISTER_TEMPLATE:?set verified ALIYUN_SMS_REGISTER_TEMPLATE}"
+      ALIYUN_SMS_LOGIN_TEMPLATE: "${ALIYUN_SMS_LOGIN_TEMPLATE:?set verified ALIYUN_SMS_LOGIN_TEMPLATE}"
+      H3C_MALL_BASE_URL: "https://www.h3cmall.com"
+      COMMERCE_PROVIDER_ID: "h3c_mall"
+      COMMERCE_ADAPTER_VERSION: "h3c-mall-v1"
+      ACCOUNT_SERVICE_VERSION: "${BUSINESS_VERSION:?set verified BUSINESS_VERSION}"
+      ACCOUNT_CLIENT_CONTRACT_VERSION: "account-client-v1"
+      WALLET_PROVISIONING_POLICY_VERSION: "wallet-provisioning-v1"
+      WALLET_PROVISIONING_SLA_MINUTES: "15"
+      HUMAN_DELEGATION_SIGNING_KEY_ID: "${HUMAN_DELEGATION_SIGNING_KEY_ID:?set verified HUMAN_DELEGATION_SIGNING_KEY_ID}"
+    volumes:
+      - type: bind
+        source: "${ACCOUNT_SERVICE_DATABASE_DIRECTORY:?set verified ACCOUNT_SERVICE_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${ACCOUNT_SERVICE_WORKLOAD_DIRECTORY:?set verified ACCOUNT_SERVICE_WORKLOAD_DIRECTORY}"
+        target: /var/run/secrets/pinvou/workload
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - target: 8080
+        published: "${ACCOUNT_SERVICE_BIND_PORT:?set verified ACCOUNT_SERVICE_BIND_PORT}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    networks: [backend, business-egress, governance-control, credential-control]
+
+  identity-service:
+    <<: *runtime
+    image: "${IDENTITY_SERVICE_IMAGE:?set verified IDENTITY_SERVICE_IMAGE}"
+    env_file:
+      - path: "${IDENTITY_SERVICE_PRIVATE_ENV_FILE:?set verified IDENTITY_SERVICE_PRIVATE_ENV_FILE}"
+        required: true
+        format: raw
+    environment:
+      <<: *http-environment
+      WORKLOAD_IDENTITY_TOKEN_FILE: "/var/run/secrets/pinvou/workload/token"
+      WORKLOAD_IDENTITY_ISSUER: "${WORKLOAD_IDENTITY_ISSUER:?set verified WORKLOAD_IDENTITY_ISSUER}"
+      WORKLOAD_IDENTITY_JWKS_URL: "${WORKLOAD_IDENTITY_JWKS_URL:?set verified WORKLOAD_IDENTITY_JWKS_URL}"
+      WORKLOAD_IDENTITY_AUDIENCE: "pinvou-account-platform-internal"
+      WORKLOAD_IDENTITY_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
+      WORKLOAD_IDENTITY_RULES_JSON: "${IDENTITY_WORKLOAD_RULES_JSON:?set verified IDENTITY_WORKLOAD_RULES_JSON}"
+      MOBILE_AUTH_ENABLED: "true"
+      AUTH_RISK_REDIS_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
+      KEYCLOAK_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
+      KEYCLOAK_ADMIN_API_URL: "https://keycloak:8443"
+      KEYCLOAK_PROVISIONER_TOKEN_URL: "https://keycloak:8443/realms/pinvou/protocol/openid-connect/token"
+      KEYCLOAK_REALM: "pinvou"
+      KEYCLOAK_PROVISIONER_CLIENT_ID: "pinvou-account-provisioner"
+      KEYCLOAK_PROVISIONER_CLIENT_SECRET_FILE: "/var/run/secrets/pinvou/provisioner/client-secret"
+    volumes:
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${IDENTITY_SERVICE_WORKLOAD_DIRECTORY:?set verified IDENTITY_SERVICE_WORKLOAD_DIRECTORY}"
+        target: /var/run/secrets/pinvou/workload
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${IDENTITY_PROVISIONER_DIRECTORY:?set verified IDENTITY_PROVISIONER_DIRECTORY}"
+        target: /var/run/secrets/pinvou/provisioner
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - target: 8080
+        published: "${IDENTITY_SERVICE_BIND_PORT:?set verified IDENTITY_SERVICE_BIND_PORT}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    networks: [backend, business-egress]
+
+  billing-service:
+    <<: *runtime
+    image: "${BILLING_SERVICE_IMAGE:?set verified BILLING_SERVICE_IMAGE}"
+    env_file:
+      - path: "${BILLING_SERVICE_PRIVATE_ENV_FILE:?set verified BILLING_SERVICE_PRIVATE_ENV_FILE}"
+        required: true
+        format: raw
+    environment:
+      <<: *http-environment
+      PINVOU_API_CONTRACT_VERSION: "account-platform-v1"
+      PINVOU_CLIENT_UPGRADE_URL: "${PINVOU_CLIENT_UPGRADE_URL:?set verified PINVOU_CLIENT_UPGRADE_URL}"
+      PINVOU_CLIENT_RELEASE_MANIFEST: "${PINVOU_CLIENT_RELEASE_MANIFEST:?set verified PINVOU_CLIENT_RELEASE_MANIFEST}"
+      WORKLOAD_IDENTITY_TOKEN_FILE: "/var/run/secrets/pinvou/workload/token"
+      WORKLOAD_IDENTITY_ISSUER: "${WORKLOAD_IDENTITY_ISSUER:?set verified WORKLOAD_IDENTITY_ISSUER}"
+      WORKLOAD_IDENTITY_JWKS_URL: "${WORKLOAD_IDENTITY_JWKS_URL:?set verified WORKLOAD_IDENTITY_JWKS_URL}"
+      WORKLOAD_IDENTITY_AUDIENCE: "pinvou-account-platform-internal"
+      WORKLOAD_IDENTITY_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
+      OIDC_ISSUER: "https://account.pinvou.com/realms/pinvou"
+      OIDC_JWKS_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/certs"
+      OIDC_AUDIENCE: "pinvou-desktop"
+      DATABASE_URL: "postgresql://billing_service@postgres:5432/account_platform_billing?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+      NATS_URL: "tls://nats:4222"
+      NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
+      NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
+      WORKLOAD_IDENTITY_RULES_JSON: "${BILLING_WORKLOAD_RULES_JSON:?set verified BILLING_WORKLOAD_RULES_JSON}"
+      ACCOUNT_HTTP_URL: "http://account-service:8080"
+      MANUAL_REVIEW_ON_CALL_USER_IDS: "${MANUAL_REVIEW_ON_CALL_USER_IDS:?set verified MANUAL_REVIEW_ON_CALL_USER_IDS}"
+      BILLING_PAYMENT_PROVIDER: "h3c_mall"
+      H3C_MALL_BASE_URL: "https://www.h3cmall.com"
+      BILLING_ALLOW_TENTATIVE_PRICES: "false"
+      BILLING_NORMAL_REFUND_CREATION_ENABLED: "${BILLING_NORMAL_REFUND_CREATION_ENABLED:?set verified BILLING_NORMAL_REFUND_CREATION_ENABLED}"
+      BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED: "true"
+      PAYMENT_MERCHANT_ID: "${PAYMENT_MERCHANT_ID:?set verified PAYMENT_MERCHANT_ID}"
+      PAYMENT_CALLBACK_TOKEN_KEY_ID: "${PAYMENT_CALLBACK_TOKEN_KEY_ID:?set verified PAYMENT_CALLBACK_TOKEN_KEY_ID}"
+      PAYMENT_CALLBACK_TOKEN_TTL_SECONDS: "300"
+      BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS: "15"
+      HUMAN_DELEGATION_VERIFICATION_KEYS_JSON: "${HUMAN_DELEGATION_VERIFICATION_KEYS_JSON:?set verified HUMAN_DELEGATION_VERIFICATION_KEYS_JSON}"
+    volumes:
+      - type: bind
+        source: "${BILLING_SERVICE_DATABASE_DIRECTORY:?set verified BILLING_SERVICE_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BILLING_SERVICE_WORKLOAD_DIRECTORY:?set verified BILLING_SERVICE_WORKLOAD_DIRECTORY}"
+        target: /var/run/secrets/pinvou/workload
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BILLING_SERVICE_NATS_DIRECTORY:?set verified BILLING_SERVICE_NATS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${NATS_CA_DIRECTORY:?set verified NATS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats-ca
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - target: 8080
+        published: "${BILLING_SERVICE_BIND_PORT:?set verified BILLING_SERVICE_BIND_PORT}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    networks: [backend, business-egress]
+
+  token-gateway:
+    <<: *runtime
+    image: "${TOKEN_GATEWAY_IMAGE:?set verified TOKEN_GATEWAY_IMAGE}"
+    env_file:
+      - path: "${TOKEN_GATEWAY_PRIVATE_ENV_FILE:?set verified TOKEN_GATEWAY_PRIVATE_ENV_FILE}"
+        required: true
+        format: raw
+    environment:
+      <<: *http-environment
+      PINVOU_API_CONTRACT_VERSION: "account-platform-v1"
+      PINVOU_CLIENT_UPGRADE_URL: "${PINVOU_CLIENT_UPGRADE_URL:?set verified PINVOU_CLIENT_UPGRADE_URL}"
+      PINVOU_CLIENT_RELEASE_MANIFEST: "${PINVOU_CLIENT_RELEASE_MANIFEST:?set verified PINVOU_CLIENT_RELEASE_MANIFEST}"
+      WORKLOAD_IDENTITY_TOKEN_FILE: "/var/run/secrets/pinvou/workload/token"
+      WORKLOAD_IDENTITY_ISSUER: "${WORKLOAD_IDENTITY_ISSUER:?set verified WORKLOAD_IDENTITY_ISSUER}"
+      WORKLOAD_IDENTITY_JWKS_URL: "${WORKLOAD_IDENTITY_JWKS_URL:?set verified WORKLOAD_IDENTITY_JWKS_URL}"
+      WORKLOAD_IDENTITY_AUDIENCE: "pinvou-account-platform-internal"
+      WORKLOAD_IDENTITY_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
+      OIDC_ISSUER: "https://account.pinvou.com/realms/pinvou"
+      OIDC_JWKS_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/certs"
+      OIDC_AUDIENCE: "pinvou-desktop"
+      DATABASE_URL: "postgresql://${TOKEN_GATEWAY_RELEASE_ROLE:?set verified TOKEN_GATEWAY_RELEASE_ROLE}@postgres:5432/account_platform_token?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+      TOKEN_SECRET_PROVIDER: "vault-transit"
+      TOKEN_SECRET_PROVIDER_URL: "${TOKEN_SECRET_PROVIDER_URL:?set verified TOKEN_SECRET_PROVIDER_URL}"
+      TOKEN_SECRET_KEY_ID: "${TOKEN_SECRET_KEY_ID:?set verified TOKEN_SECRET_KEY_ID}"
+      TOKEN_SECRET_PROVIDER_TOKEN_FILE: "/var/run/secrets/pinvou/kms/token"
+      TOKEN_SECRET_PROVIDER_CA_FILE: "/var/run/secrets/pinvou/kms-ca/ca.crt"
+      WORKLOAD_IDENTITY_RULES_JSON: "${TOKEN_WORKLOAD_RULES_JSON:?set verified TOKEN_WORKLOAD_RULES_JSON}"
+      ACCOUNT_HTTP_URL: "http://account-service:8080"
+      BILLING_HTTP_URL: "http://billing-service:8080"
+      MANUAL_REVIEW_ON_CALL_USER_IDS: "${MANUAL_REVIEW_ON_CALL_USER_IDS:?set verified MANUAL_REVIEW_ON_CALL_USER_IDS}"
+      TOKEN_CREDENTIAL_ISOLATION_ENABLED: "true"
+      TOKEN_ADMIN_PAGINATION_ENABLED: "true"
+      TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED: "true"
+      TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED: "true"
+      CREDENTIAL_PORTAL_PUBLIC_URL: "https://credentials.pinvou.com"
+      TOKEN_PROVIDER_ALLOWED_HOSTS: "${TOKEN_PROVIDER_ALLOWED_HOSTS:?set verified TOKEN_PROVIDER_ALLOWED_HOSTS}"
+      TOKEN_DEFAULT_PROVIDER: "new-api"
+      TOKEN_GATEWAY_ADAPTER: "NEW_API"
+      TOKEN_DEFAULT_PROVIDER_BASE_URL: "${NEWAPI_HTTPS_URL:?set verified NEWAPI_HTTPS_URL}"
+      TOKEN_DEFAULT_PROVIDER_MODELS: "${TOKEN_DEFAULT_PROVIDER_MODELS:?set verified TOKEN_DEFAULT_PROVIDER_MODELS}"
+      TOKEN_RECONCILIATION_NEWAPI_BASE_URL: "${NEWAPI_HTTPS_URL:?set verified NEWAPI_HTTPS_URL}"
+      TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID: "${TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID:?set verified TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID}"
+      TOKEN_SERVICE_VERSION: "${BUSINESS_VERSION:?set verified BUSINESS_VERSION}"
+      TOKEN_CLIENT_CONTRACT_VERSION: "client-readiness-v1"
+      TOKEN_MINIMUM_CLIENT_VERSION: "${TOKEN_MINIMUM_CLIENT_VERSION:?set verified TOKEN_MINIMUM_CLIENT_VERSION}"
+      TOKEN_MAXIMUM_CLIENT_VERSION: "${TOKEN_MAXIMUM_CLIENT_VERSION:?set verified TOKEN_MAXIMUM_CLIENT_VERSION}"
+      CLIENT_READINESS_ATTESTATION_KEY_ID: "${CLIENT_READINESS_ATTESTATION_KEY_ID:?set verified CLIENT_READINESS_ATTESTATION_KEY_ID}"
+      CLIENT_READINESS_ATTESTATION_TTL_SECONDS: "600"
+      TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS: "${TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS:?set verified TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS}"
+      TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS: "${TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS:?set verified TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS}"
+      TOKEN_MODEL_CATALOG_SYNC_MINUTES: "15"
+      TOKEN_RECONCILIATION_INTERVAL_SECONDS: "15"
+    volumes:
+      - type: bind
+        source: "${TOKEN_GATEWAY_DATABASE_DIRECTORY:?set verified TOKEN_GATEWAY_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${TOKEN_GATEWAY_WORKLOAD_DIRECTORY:?set verified TOKEN_GATEWAY_WORKLOAD_DIRECTORY}"
+        target: /var/run/secrets/pinvou/workload
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${TOKEN_GATEWAY_KMS_DIRECTORY:?set verified TOKEN_GATEWAY_KMS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/kms
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${KMS_CA_DIRECTORY:?set verified KMS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/kms-ca
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - target: 8080
+        published: "${TOKEN_GATEWAY_BIND_PORT:?set verified TOKEN_GATEWAY_BIND_PORT}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    networks: [backend, business-egress, governance-control, credential-provider, kms-transit]
+
+  token-portal:
+    <<: *runtime
+    image: "${TOKEN_PORTAL_IMAGE:?set verified TOKEN_PORTAL_IMAGE}"
+    env_file:
+      - path: "${TOKEN_PORTAL_PRIVATE_ENV_FILE:?set verified TOKEN_PORTAL_PRIVATE_ENV_FILE}"
+        required: true
+        format: raw
+    environment:
+      <<: *http-environment
+      PINVOU_API_CONTRACT_VERSION: "account-platform-v1"
+      PINVOU_CLIENT_UPGRADE_URL: "${PINVOU_CLIENT_UPGRADE_URL:?set verified PINVOU_CLIENT_UPGRADE_URL}"
+      PINVOU_CLIENT_RELEASE_MANIFEST: "${PINVOU_CLIENT_RELEASE_MANIFEST:?set verified PINVOU_CLIENT_RELEASE_MANIFEST}"
+      PORTAL_PUBLIC_URL: "https://account.pinvou.com"
+      CREDENTIAL_PORTAL_PUBLIC_URL: "https://credentials.pinvou.com"
+      PORTAL_OIDC_AUTHORIZATION_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/auth"
+      PORTAL_OIDC_TOKEN_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/token"
+      PORTAL_OIDC_CLIENT_ID: "pinvou-token-portal"
+      REDIS_CA_FILE: "/var/run/secrets/pinvou/trust/ca.crt"
+      ACCOUNT_HTTP_URL: "http://account-service:8080"
+      BILLING_HTTP_URL: "http://billing-service:8080"
+      TOKEN_GATEWAY_HTTP_URL: "http://token-gateway:8080"
+      TOKEN_ADMIN_INGRESS_MAX_TIMEOUT_SECONDS: "14"
+      SYSTEM_PROBES_JSON: "${SYSTEM_PROBES_JSON:?set verified SYSTEM_PROBES_JSON}"
+      PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED: "true"
+      PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED: "true"
+      PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED: "true"
+      PORTAL_ADMIN_MODEL_DETAILS_ENABLED: "true"
+      PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED: "true"
+      PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED: "true"
+      PORTAL_ADMIN_TOKEN_DETAILS_ENABLED: "true"
+      PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED: "true"
+    volumes:
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - target: 8080
+        published: "${TOKEN_PORTAL_BIND_PORT:?set verified TOKEN_PORTAL_BIND_PORT}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    networks: [backend, business-egress]
+
+  token-credential-portal:
+    <<: *runtime
+    image: "${TOKEN_CREDENTIAL_PORTAL_IMAGE:?set verified TOKEN_CREDENTIAL_PORTAL_IMAGE}"
+    environment:
+      <<: *http-environment
+      PINVOU_API_CONTRACT_VERSION: "account-platform-v1"
+      PINVOU_CLIENT_UPGRADE_URL: "${PINVOU_CLIENT_UPGRADE_URL:?set verified PINVOU_CLIENT_UPGRADE_URL}"
+      PINVOU_CLIENT_RELEASE_MANIFEST: "${PINVOU_CLIENT_RELEASE_MANIFEST:?set verified PINVOU_CLIENT_RELEASE_MANIFEST}"
+      WORKLOAD_IDENTITY_TOKEN_FILE: "/var/run/secrets/pinvou/workload/token"
+      OIDC_ISSUER: "https://account.pinvou.com/realms/pinvou"
+      OIDC_JWKS_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/certs"
+      DATABASE_URL: "postgresql://${TOKEN_CREDENTIAL_RELEASE_ROLE:?set verified TOKEN_CREDENTIAL_RELEASE_ROLE}@postgres:5432/account_platform_token?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+      TOKEN_SECRET_PROVIDER: "vault-transit"
+      TOKEN_SECRET_PROVIDER_URL: "${TOKEN_SECRET_PROVIDER_URL:?set verified TOKEN_SECRET_PROVIDER_URL}"
+      TOKEN_SECRET_KEY_ID: "${TOKEN_SECRET_KEY_ID:?set verified TOKEN_SECRET_KEY_ID}"
+      TOKEN_SECRET_PROVIDER_TOKEN_FILE: "/var/run/secrets/pinvou/kms/token"
+      TOKEN_SECRET_PROVIDER_CA_FILE: "/var/run/secrets/pinvou/kms-ca/ca.crt"
+      ACCOUNT_HTTP_URL: "http://account-service:8080"
+      TOKEN_PROVIDER_ALLOWED_HOSTS: "${TOKEN_PROVIDER_ALLOWED_HOSTS:?set verified TOKEN_PROVIDER_ALLOWED_HOSTS}"
+      PORTAL_PUBLIC_URL: "https://account.pinvou.com"
+      CREDENTIAL_PORTAL_PUBLIC_URL: "https://credentials.pinvou.com"
+      CREDENTIAL_OIDC_AUTHORIZATION_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/auth"
+      CREDENTIAL_OIDC_TOKEN_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/token"
+      CREDENTIAL_OIDC_CLIENT_ID: "pinvou-token-credential-portal"
+      CREDENTIAL_OIDC_AUDIENCE: "pinvou-token-credential-portal"
+    volumes:
+      - type: bind
+        source: "${TOKEN_CREDENTIAL_PORTAL_DATABASE_DIRECTORY:?set verified TOKEN_CREDENTIAL_PORTAL_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${TOKEN_CREDENTIAL_PORTAL_WORKLOAD_DIRECTORY:?set verified TOKEN_CREDENTIAL_PORTAL_WORKLOAD_DIRECTORY}"
+        target: /var/run/secrets/pinvou/workload
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${TOKEN_CREDENTIAL_PORTAL_KMS_DIRECTORY:?set verified TOKEN_CREDENTIAL_PORTAL_KMS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/kms
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${KMS_CA_DIRECTORY:?set verified KMS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/kms-ca
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - target: 8080
+        published: "${TOKEN_CREDENTIAL_PORTAL_BIND_PORT:?set verified TOKEN_CREDENTIAL_PORTAL_BIND_PORT}"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    networks: [credential-control, credential-provider, credential-egress, kms-transit]
+
+  token-command-executor:
+    <<: *runtime
+    image: "${TOKEN_COMMAND_EXECUTOR_IMAGE:?set verified TOKEN_COMMAND_EXECUTOR_IMAGE}"
+    environment:
+      <<: *http-environment
+      WORKLOAD_IDENTITY_TOKEN_FILE: "/var/run/secrets/pinvou/workload/token"
+      NATS_URL: "tls://nats:4222"
+      NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
+      NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
+      ACCOUNT_HTTP_URL: "http://account-service:8080"
+      TOKEN_GATEWAY_HTTP_URL: "http://token-gateway:8080"
+    volumes:
+      - type: bind
+        source: "${TOKEN_COMMAND_EXECUTOR_WORKLOAD_DIRECTORY:?set verified TOKEN_COMMAND_EXECUTOR_WORKLOAD_DIRECTORY}"
+        target: /var/run/secrets/pinvou/workload
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${TOKEN_COMMAND_EXECUTOR_NATS_DIRECTORY:?set verified TOKEN_COMMAND_EXECUTOR_NATS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${NATS_CA_DIRECTORY:?set verified NATS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats-ca
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [governance-control, executor-egress]
+
+  account-event-relay:
+    <<: *runtime
+    image: "${EVENT_RELAY_IMAGE:?set verified EVENT_RELAY_IMAGE}"
+    environment:
+      APP_ENV: "production"
+      EVENT_SOURCE: "account"
+      HEALTHCHECK_URL: "http://127.0.0.1:9090/health/ready"
+      NATS_URL: "tls://nats:4222"
+      NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
+      NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
+      DATABASE_URL: "postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+    volumes:
+      - type: bind
+        source: "${ACCOUNT_EVENT_RELAY_DATABASE_DIRECTORY:?set verified ACCOUNT_EVENT_RELAY_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${ACCOUNT_EVENT_RELAY_NATS_DIRECTORY:?set verified ACCOUNT_EVENT_RELAY_NATS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${NATS_CA_DIRECTORY:?set verified NATS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats-ca
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [backend]
+
+  billing-event-relay:
+    <<: *runtime
+    image: "${EVENT_RELAY_IMAGE:?set verified EVENT_RELAY_IMAGE}"
+    environment:
+      APP_ENV: "production"
+      EVENT_SOURCE: "billing"
+      HEALTHCHECK_URL: "http://127.0.0.1:9090/health/ready"
+      NATS_URL: "tls://nats:4222"
+      NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
+      NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
+      DATABASE_URL: "postgresql://billing_service@postgres:5432/account_platform_billing?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+    volumes:
+      - type: bind
+        source: "${BILLING_EVENT_RELAY_DATABASE_DIRECTORY:?set verified BILLING_EVENT_RELAY_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${BILLING_EVENT_RELAY_NATS_DIRECTORY:?set verified BILLING_EVENT_RELAY_NATS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${NATS_CA_DIRECTORY:?set verified NATS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats-ca
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [backend]
+
+  token-event-relay:
+    <<: *runtime
+    image: "${EVENT_RELAY_IMAGE:?set verified EVENT_RELAY_IMAGE}"
+    environment:
+      APP_ENV: "production"
+      EVENT_SOURCE: "token"
+      HEALTHCHECK_URL: "http://127.0.0.1:9090/health/ready"
+      NATS_URL: "tls://nats:4222"
+      NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
+      NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
+      DATABASE_URL: "postgresql://${TOKEN_GATEWAY_RELEASE_ROLE:?set verified TOKEN_GATEWAY_RELEASE_ROLE}@postgres:5432/account_platform_token?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+    volumes:
+      - type: bind
+        source: "${TOKEN_EVENT_RELAY_DATABASE_DIRECTORY:?set verified TOKEN_EVENT_RELAY_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${TOKEN_EVENT_RELAY_NATS_DIRECTORY:?set verified TOKEN_EVENT_RELAY_NATS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${NATS_CA_DIRECTORY:?set verified NATS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats-ca
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [backend]
+
+  event-resources:
+    <<: *runtime
+    image: "${EVENT_RESOURCES_IMAGE:?set verified EVENT_RESOURCES_IMAGE}"
+    profiles: [event-operations]
+    restart: "no"
+    entrypoint: ["/service"]
+    command: []
+    healthcheck: {disable: true}
+    environment:
+      APP_ENV: "production"
+      NATS_URL: "tls://nats:4222"
+      NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
+      NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
+    volumes:
+      - type: bind
+        source: "${EVENT_RESOURCES_NATS_DIRECTORY:?set verified EVENT_RESOURCES_NATS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${NATS_CA_DIRECTORY:?set verified NATS_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/nats-ca
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [event-operations]
+
+  token-governance-check:
+    <<: *runtime
+    image: "${TOKEN_GOVERNANCE_IMAGE:?set verified TOKEN_GOVERNANCE_IMAGE}"
+    profiles: [governance-operations]
+    restart: "no"
+    entrypoint: ["/service"]
+    command: []
+    healthcheck: {disable: true}
+    environment:
+      APP_ENV: "production"
+      TOKEN_MIGRATOR_DATABASE_URL: "postgresql://token_migrator@postgres:5432/account_platform_token?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      ACCOUNT_POLICY_DATABASE_URL: "postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+    volumes:
+      - type: bind
+        source: "${TOKEN_GOVERNANCE_CHECK_DATABASE_DIRECTORY:?set verified TOKEN_GOVERNANCE_CHECK_DATABASE_DIRECTORY}"
+        target: /var/run/secrets/pinvou/database
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [governance-operations]
+
+networks:
+  backend:
+    external: true
+    name: "${BACKEND_NETWORK:?set verified BACKEND_NETWORK}"
+  business-egress:
+    external: true
+    name: "${BUSINESS_EGRESS_NETWORK:?set verified BUSINESS_EGRESS_NETWORK}"
+  governance-control:
+    external: true
+    name: "${GOVERNANCE_CONTROL_NETWORK:?set verified GOVERNANCE_CONTROL_NETWORK}"
+  credential-control:
+    external: true
+    name: "${CREDENTIAL_CONTROL_NETWORK:?set verified CREDENTIAL_CONTROL_NETWORK}"
+  credential-provider:
+    external: true
+    name: "${CREDENTIAL_PROVIDER_NETWORK:?set verified CREDENTIAL_PROVIDER_NETWORK}"
+  kms-transit:
+    external: true
+    name: "${KMS_TRANSIT_NETWORK:?set verified KMS_TRANSIT_NETWORK}"
+  credential-egress:
+    external: true
+    name: "${CREDENTIAL_EGRESS_NETWORK:?set verified CREDENTIAL_EGRESS_NETWORK}"
+  executor-egress:
+    external: true
+    name: "${EXECUTOR_EGRESS_NETWORK:?set verified EXECUTOR_EGRESS_NETWORK}"
+  event-operations:
+    external: true
+    name: "${EVENT_OPERATIONS_NETWORK:?set verified EVENT_OPERATIONS_NETWORK}"
+  governance-operations:
+    external: true
+    name: "${GOVERNANCE_OPERATIONS_NETWORK:?set verified GOVERNANCE_OPERATIONS_NETWORK}"

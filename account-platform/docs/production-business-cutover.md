@@ -121,7 +121,7 @@ Go buildinfo 与迁移文件摘要全部通过；七个 HTTP 服务的版本/源
 构建结束磁盘仍高于本批 8 GiB 停止线，但低于 20% 容量预警线，仍须继续容量监测。
 三项构建合同、架构与差异检查通过。业务配置、容器内实际连接、运行版本接口及完整业务验收仍待后续步骤。
 
-## C4B2 生产配置接线（设计已审，待实现，不启动）
+## C4B2 生产配置接线（模板已实现，正式材料接线待执行，不启动）
 
 使用独立 production 业务 Compose，不合并开发 Compose，不重新定义或重建已验收的 PostgreSQL、
 Keycloak、Redis、NATS、KMS 与七个签发代理。业务镜像只能引用 C4B1 实测清单中的精确 image ID，
@@ -168,6 +168,92 @@ Identity provisioner 使用已完成的 secret-file 接口；Redis URL 和其他
 验收要求：正例模板可合并、所有镜像与挂载/身份/网络符合清单，负例覆盖缺字段、错误主体、共享秘密父目录、
 开发项、模拟器、明文依赖 URL、凭据加入普通网络和工具默认启动。实际密码文件连接及跨库/错 CA 拒绝
 在 C4C/D 使用原生消费者验证；静态检查不取代真实连接或完整发布门禁。
+
+### C4B2b 独立业务模板交付边界
+
+本批新增 `production/compose.business.yaml`，只定义十个长期业务进程和两个显式工具：
+Account、Identity、Billing、Gateway、Portal、Credential、Executor 及三个 Relay；
+`event-resources` 仅在 `event-operations` profile 中，`token-governance-check` 仅在
+`governance-operations` profile 中。两个工具 restart=no、入口 `/service`、空 command、关闭健康检查，
+没有任何运行服务依赖它们。三个迁移、policy bootstrap、account-security 和 DBA release 工具的执行配置
+随 C4C 的实际数据库/权限准备单独审核，不为了已构建镜像数量而预置危险执行命令。
+
+所有镜像是必填的独立 image ID，pull_policy=never、无 build；公开配置中没有秘密值。
+Account、Identity、Billing、Gateway、Portal 各自一个必需的绝对路径 `env_file`，使用 Compose
+`format: raw` 防止秘密中的 `$` 被解释。文件由宿主 root 持有、0600，不作为目录挂入容器；
+其中只允许各服务实际消费的既有环境秘密，配置检查必须在内存中检查渲染结果，禁止输出完整结果。
+Credential、Executor、Relay 和两个工具不需要该环境秘密文件，不给它们复制多余环境。
+Compose environment 明确设置全部非秘密运行选项；缺失真实身份/值班用户/版本清单等输入即渲染失败。
+
+文件挂载统一使用 long syntax、只读、create_host_path=false，消费 UID/GID=65532:65532：
+
+| 来源（站点绝对路径输入） | 容器目标 | 文件/权限/消费方 |
+| --- | --- | --- |
+| 每个消费者独立 DB 目录 | `/var/run/secrets/pinvou/database` | `pgpass`，0600；Account、Billing、Gateway、Credential、三 Relay；治理工具自己的文件仅含 Token 迁移库与 Account 策略读取所需两项 |
+| 单独公开基础设施 CA 目录 | `/var/run/secrets/pinvou/trust` | `ca.crt`，0600；有 DB、私有 JWKS、Redis 或 Keycloak 客户端的对应服务 |
+| 每个服务自己的 workload projected 目录 | `/var/run/secrets/pinvou/workload` | `token`，0600；Account、Identity、Billing、Gateway、Credential、Executor 六个消费者；不挂 bootstrap 父目录 |
+| 每个 broker 自己的种子目录 | `/var/run/secrets/pinvou/nats` | `nkey.seed`，0600；Billing、Executor、三 Relay 与显式资源工具；对应已验收六身份 |
+| 独立公开 NATS CA 目录 | `/var/run/secrets/pinvou/nats-ca` | `ca.crt`，0600；仅上述六消费者，与种子来源不重叠 |
+| Identity provisioner 目录 | `/var/run/secrets/pinvou/provisioner` | `client-secret`，0600；仅 Identity，独立于 workload |
+| Gateway/Credential 各自 KMS sink 目录 | `/var/run/secrets/pinvou/kms` | `token`，0600；两者来源互异，保持既有 Agent 轮换 |
+| 独立公开 KMS CA 目录 | `/var/run/secrets/pinvou/kms-ca` | `ca.crt`，0600；仅 Gateway/Credential |
+
+各秘密目录 0700，禁止软链与共享祖先挂载；CA 目录也不包含叶私钥、恢复包或其他秘密。
+PGPASSFILE 指向固定目标文件；每条 DSN 无密码、固定对应库与精确角色、verify-full 及上述公开 CA。
+治理工具的两条连接分别指向 Token 库与 Account 库，不把同一个 URL 冒充两个领域。
+它们不投递到运行进程。新 release-scoped 两登录用户仍等待 C4C 验证后才能进入正式配置。
+
+模板仅引用 external 网络，不创建或重建依赖网络；站点投递必须绑定真实 network ID 并检查重名别名：
+
+| 网络逻辑名 | 本模板成员 | 既有/后续依赖接线 |
+| --- | --- | --- |
+| backend | Account、Identity、Billing、Gateway、Portal、三个 Relay | 既有正式 data 网；不接入 Credential/Executor |
+| business-egress | Account、Identity、Billing、Gateway、Portal | 仅上述进程出网，供 HTTPS/实际时间探测；Relay 只访问内部 PG/NATS，不加入出口网 |
+| governance-control | Account、Gateway、Executor | 后续只把已验收 NATS 接入该私网 |
+| credential-control | Account、Credential | 后续只把已验收 PostgreSQL 接入；用户 OIDC 走公开受信 HTTPS，不接私有管理入口 |
+| credential-provider | Credential、Gateway | 后续 New API 的 TLS 数据面；本批不定义 New API |
+| credential-egress | Credential | 独立出口 |
+| executor-egress | Executor | 独立出口 |
+| governance-operations | token-governance-check | 后续仅已验收 PostgreSQL 接入 |
+| event-operations | event-resources | 后续仅已验收 NATS 接入 |
+| kms-transit | Gateway、Credential | 已验收 KMS 私网；不增加其他消费者 |
+
+这里的成员表是允许范围，不代表已建立网络防火墙；私有控制网必须 internal=true，出口网必须单独核验。
+依赖 data 网已有成员不因本表被删除；任何新增连接在 C4C/D 按精确容器 ID 审核执行。
+只允许 Account、Identity、Billing、Gateway、Portal、Credential 的业务 8080 映射到必填且互异的
+宿主 127.0.0.1 端口；9090 指标不发布，工具不发布端口。默认 profile 不触发工具/迁移或用户创建。
+七个普通服务的健康检查显式使用 `http://127.0.0.1:8080/health/ready`；三个 Relay 使用其真实指标服务
+`http://127.0.0.1:9090/health/ready`，通过 `HEALTHCHECK_URL` 传给同一 `/healthcheck` 工具。
+模板合同必须逐项断言端口/路径，不能把通用 8080 健康地址复制给 Relay；两个一次性工具禁用健康检查。
+
+新增独立模板合同检查，复用既有模型/凭据/NKey/KMS 检查而不放宽门禁；补充实例匹配、镜像固定、
+真实 UUID 形态与一对一映射、无密码 DSN、精确网络成员和秘密挂载/环境分配断言。纯公开测试 fixture
+经过真实 Compose 渲染，静态通过只标记 CONFIG_VALID / ENV_PENDING / NOT_DEPLOYED。
+实际 subject 是否存在、文件属性/内容、数据库权限、NTP 可用性及业务秘密有效性仍由正式投递步骤验收。
+
+实施说明：公开库存输入包含 `images`（十二实例名到 C4B1 镜像 ID）和 `subjects`（七服务名到实际
+subject UUID）；必须从已核验签发/构建回执映射，不接受操作员随意生成的 UUID 或仅外形正确的 image ID。
+检查器只证明配置与传入库存一致，不证明库存来源，也不凭路径字符串证明目录中的实际令牌归属。
+正式投递仍需核对文件归属/权限/内容和轮换来源，不能只把两个目录调换后通过字符串检查就启动。
+
+逐服务环境秘密的允许键由 `scripts/account-platform-business-compose-check.mjs` 的
+`businessPrivateEnvironment` 明确列出，额外/缺失键均拒绝。公开模板不能加入这些秘密值，配置输出
+不能写入终端或 CI 日志。纯公开 fixture 可用 CLI 的 `--compose-render FILE --inventory FILE` 检查；
+正式配置应捕获 renderer 输出在内存中调用 `checkProductionBusiness`，只输出固定结果码。
+导出的 JSON 不是部署输入替代物：正式启动始终使用已审原始模板与原始受控 env 文件。
+
+独立代码审核发现 Credential 同样调用 clientcompat，但初稿遗漏其三项显式兼容配置；现已和其余四个
+实际消费者共用同一发布清单、合约版本与升级地址，并增加源码入口/跨消费者一致性回归，未修改旧默认策略。
+实际 Compose 5.4 渲染已覆盖十二服务；三个必填输入缺失及私有 env 文件缺失均拒绝，没有创建容器。
+公开 raw 字符哨兵的美元符和引号在序列化输出中保留；`config` 会将 `$` 再转义成 `$$`，这是输出转义，
+不能把配置输出当成运行进程里的秘密值。依据：[Compose 5.4 输出实现](https://github.com/docker/compose/blob/v5.4.0/cmd/compose/config.go#L181)。
+
+真实 JSON 还会将内存字节数编码成十进制字符串、将零 core soft/hard 省略为显式 `core: {}`、
+为外部网络保留空 `ipam: {}`。检查器只兼容这些已验证等价形态，仍拒绝缺少 core、非零限制、扩大资源额度
+或非空 IPAM 配置；不会把缺失限制解释为零。依据：[compose-go 2.14 类型实现](https://github.com/compose-spec/compose-go/blob/v2.14.0/types/types.go#L626)。
+最终十三组相关合同全通过、无跳过；全量合同 524 项中 522 通过、0 失败、2 项既有 opt-in
+KMS Compose/Helm 测试未启用。架构与差异检查通过。正式依赖与身份九容器复查全部 healthy。
+本项静态与真实 renderer 结果仍为 CONFIG_VALID / ENV_PENDING / NOT_DEPLOYED；正式业务尚未启动。
 
 ### C4C 已识别的前置接线项
 
