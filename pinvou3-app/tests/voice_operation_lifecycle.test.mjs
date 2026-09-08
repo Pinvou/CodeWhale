@@ -27,6 +27,7 @@ function harness(source) {
   vm.runInContext(`${source.slice(start, end)}\nthis.api = {
     rememberVoiceOperation, getVoiceOperationId, beginVoiceSubmission,
     completeVoiceSubmission, trackVoiceTerminal, dismissVoiceInput, voiceOperationSessionId,
+    ...(typeof rebindVoiceDraftAfterRollback === 'function' ? { rebindVoiceDraftAfterRollback } : {}),
   };`, context);
   const operation = (id, ownerKind = 'chat', sessionId = null) => {
     const value = { operationId: id, ownerKind, sessionId, telemetrySessionId: sessionId || 'draft-session',
@@ -303,6 +304,92 @@ function bridgeFunction(source, name) {
   const end = source.indexOf('\n  }', start) + 4;
   assert.ok(end > start, name);
   return source.slice(start, end);
+}
+
+for (const navigation of ['none', 'session', 'new-draft', 'after-rollback']) {
+  test(`desktop: actual multi-agent materialization rollback preserves only its own draft binding, navigation=${navigation}`, async () => {
+    const h = harness(sources.desktop);
+    const ctx = h.context;
+    const sessionSource = read('src/platform/tauri/bridge/sessions.js');
+    const chatSource = read('src/platform/tauri/bridge/chat.js');
+    Object.assign(h.state, { draftEpoch: 4, pendingDraftMultiAgent: true,
+      composerDraft: '', composerPrefill: { id: 0, text: '' }, messages: [], chatItems: [] });
+    const operation = h.operation('voiceop-official-rollback');
+    h.api.beginVoiceSubmission(operation.operationId);
+    const buffers = {};
+    let reachToggle;
+    let finishToggle;
+    const toggleStarted = new Promise(resolve => { reachToggle = resolve; });
+    const toggleGate = new Promise(resolve => { finishToggle = resolve; });
+    Object.assign(ctx, {
+      voice: () => h.api, sessionStates: buffers, ensureSessionInFlight: null,
+      ensureSessionDraftOutcome: null, sessionSwitchRequestToken: 0, pendingTaskDraftRecovery: null,
+      freshBuffer: () => ({ composerDraft: '', messages: [], chatItems: [] }),
+      getBuffer: sid => buffers[sid], saveWorkingSetTo() {},
+      loadWorkingSetFrom: buffer => Object.assign(h.state, buffer),
+      currentDraftModeState: () => ({ mode: 'yolo' }),
+      switchActiveTo: sid => { buffers[sid] = ctx.freshBuffer(); h.state.activeSessionId = sid; },
+      refreshHistoryList: async () => {
+        if (navigation === 'after-rollback') {
+          ctx.sessionSwitchRequestToken += 1;
+          h.state.activeSessionId = 'other-session';
+          h.state.composerDraft = 'unrelated input';
+        }
+      }, addSystemItem() {}, bt: key => key,
+      invoke: async command => {
+        if (command === 'create_session') return { id: 'rolled-back-session' };
+        if (command === 'set_multi_agent_mode') { reachToggle(); await toggleGate; throw new Error('controlled toggle rejection'); }
+        if (command === 'delete_session' && (navigation === 'session' || navigation === 'new-draft')) {
+          if (navigation === 'new-draft') ctx.enterDraft();
+          else { ctx.sessionSwitchRequestToken += 1; h.state.activeSessionId = 'other-session'; }
+          h.state.composerDraft = 'unrelated input';
+        }
+        return null;
+      },
+    });
+    vm.runInContext(['ensureSession', 'enterDraft'].map(name => bridgeFunction(sessionSource, name)).join('\n')
+      + '\n' + ['restoreTaskDraft', 'restoreSteerText', 'prefillComposer', 'getComposerDraft'].map(name => bridgeFunction(chatSource, name)).join('\n'), ctx);
+    const owner = { sessionId: null, draftEpoch: 4, operationId: operation.operationId };
+    const creating = ctx.ensureSession(owner);
+    await toggleStarted;
+    h.state.composerDraft = 'new input while waiting';
+    finishToggle();
+    assert.equal(await creating, null);
+    ctx.restoreTaskDraft('voice task', owner);
+    h.api.completeVoiceSubmission(operation.operationId, null, false);
+    if (navigation === 'none') {
+      assert.equal(h.state.draftEpoch, 5);
+      assert.equal(owner.rollbackFromDraftEpoch, 4);
+      assert.equal(operation.draftEpoch, 5);
+      assert.equal(h.state.composerDraft, 'new input while waiting');
+      assert.equal(h.state.composerPrefill.text, 'voice task');
+      assert.equal(h.state.composerPrefill.append, true);
+      assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
+      assert.equal(h.api.rebindVoiceDraftAfterRollback(operation.operationId, 4, 5), false, 'migration is compare-and-set');
+      ctx.invoke = async (command, args) => { h.events.push({ command, ...args.request }); };
+      h.api.beginVoiceSubmission(operation.operationId, 'retry-session');
+      h.api.completeVoiceSubmission(operation.operationId, 'retry-session', true);
+      assert.equal(h.events.filter(event => event.eventName === 'voice_message_submitted').length, 1);
+    } else if (navigation === 'after-rollback') {
+      assert.equal(operation.draftEpoch, 5, 'proven rollback stays bound when a later history refresh is navigated away from');
+      assert.equal(h.state.composerDraft, 'unrelated input');
+      assert.equal(h.state.composerPrefill.text, '');
+      h.state.activeSessionId = null;
+      h.state.composerDraft = '';
+      assert.equal(ctx.getComposerDraft(), 'voice task');
+      assert.equal(h.api.getVoiceOperationId(null, 'chat'), operation.operationId);
+      ctx.enterDraft();
+      assert.equal(h.api.getVoiceOperationId(null, 'chat'), null);
+    } else {
+      assert.equal(owner.rollbackFromDraftEpoch, undefined, 'real navigation cannot authorize migration');
+      assert.equal(operation.draftEpoch, 4);
+      assert.equal(h.state.composerDraft, 'unrelated input');
+      assert.equal(h.state.composerPrefill.text, '');
+      h.state.activeSessionId = null;
+      h.state.draftEpoch = 5;
+      assert.equal(h.api.getVoiceOperationId(null, 'chat'), null, 'new draft remains isolated');
+    }
+  });
 }
 
 for (const lane of ['desktop', 'web']) {

@@ -89,6 +89,16 @@
     return voiceOperations.get(operationId)?.sessionId || null;
   }
 
+  // Only ensureSession's proven same-draft rollback may advance this binding.
+  function rebindVoiceDraftAfterRollback(operationId, fromEpoch, toEpoch) {
+    var operation = voiceOperations.get(operationId);
+    if (!operation || operation.telemetryTerminal || operation.sessionId || operation.ownerKind !== "chat"
+      || operation.draftEpoch !== fromEpoch || toEpoch !== fromEpoch + 1
+      || Number(state.draftEpoch || 0) !== toEpoch) return false;
+    operation.draftEpoch = toEpoch;
+    return true;
+  }
+
   function completeVoiceSubmission(operationId, sessionId, accepted) {
     var operation = voiceOperations.get(operationId);
     if (!operation || operation.telemetryTerminal) return;
@@ -1357,6 +1367,7 @@
       abandonVoiceResult: abandonVoiceResult,
       getVoiceOperationId: getVoiceOperationId,
       voiceOperationSessionId: voiceOperationSessionId,
+      rebindVoiceDraftAfterRollback: rebindVoiceDraftAfterRollback,
       beginVoiceSubmission: beginVoiceSubmission,
       completeVoiceSubmission: completeVoiceSubmission,
       dismissVoiceInput: dismissVoiceInput,

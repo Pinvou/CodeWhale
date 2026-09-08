@@ -981,6 +981,9 @@
   }
   function restoreTaskDraft(text, owner) {
     if (!owner || owner.restored) return false;
+    if (owner.operationId && owner.rollbackFromDraftEpoch !== undefined) {
+      voice().rebindVoiceDraftAfterRollback(owner.operationId, owner.rollbackFromDraftEpoch, owner.draftEpoch);
+    }
     const sid = owner.sessionId || owner.createdSessionId
       || (owner.operationId && voice().voiceOperationSessionId(owner.operationId));
     if (sid) {

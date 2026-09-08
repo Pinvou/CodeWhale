@@ -593,13 +593,19 @@
   var ensureSessionInFlight = null;
   var ensureSessionDraftOutcome = null;
   async function ensureSession(draftOwner) {
+    function applyDraftOutcome(outcome) {
+      if (!draftOwner || !outcome || draftOwner.draftEpoch !== outcome.epoch) return;
+      draftOwner.createdSessionId = outcome.createdSessionId;
+      if (outcome.rollbackEpoch !== undefined) {
+        draftOwner.rollbackFromDraftEpoch = outcome.epoch;
+        draftOwner.draftEpoch = outcome.rollbackEpoch;
+      }
+    }
     if (state.activeSessionId) return state.activeSessionId;
     if (ensureSessionInFlight) {
       var pendingOutcome = ensureSessionDraftOutcome;
       var pendingResult = await ensureSessionInFlight;
-      if (draftOwner && pendingOutcome && draftOwner.draftEpoch === pendingOutcome.epoch) {
-        draftOwner.createdSessionId = pendingOutcome.createdSessionId;
-      }
+      applyDraftOutcome(pendingOutcome);
       return pendingResult;
     }
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
@@ -651,9 +657,13 @@
               // 空会话残留可手动删除，不掩盖主错误。
             }
             draftOutcome.createdSessionId = null;
+            // A real navigation during the toggle/cleanup awaits is not a rollback.
+            if (navToken !== sessionSwitchRequestToken || state.activeSessionId !== meta.id) return null;
+            var rollbackComposerDraft = state.composerDraft || "";
             enterDraft();
+            state.composerDraft = rollbackComposerDraft;
             // This rollback is still the same logical draft, not user navigation.
-            if (draftOwner) draftOwner.draftEpoch = Number(state.draftEpoch || 0);
+            draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
             state.pendingDraftMultiAgent = true;
             state.modeState = {
               mode: (state.modeState && state.modeState.mode) || "yolo",
@@ -706,9 +716,7 @@
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
     );
     var result = await p;
-    if (draftOwner && draftOwner.draftEpoch === draftOutcome.epoch) {
-      draftOwner.createdSessionId = draftOutcome.createdSessionId;
-    }
+    applyDraftOutcome(draftOutcome);
     return result;
   }
 
