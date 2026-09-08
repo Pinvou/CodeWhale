@@ -482,11 +482,17 @@
           // 透传后端硬编码中文——英/日界面不该看到中文结论;文案与 ChatView
           // 前置警告(t.uiAttachments.*)同源。与 web bridge displayTurnError
           // 同一口径(chat.rs IMAGE_INPUT_*_ERROR)。
-          var errorText = String(err && err.toString ? err.toString() : err || "");
+          // Prefer Error.message: toString() adds "Error: " and prevents
+          // stable-code matching before the model-service redaction fallback.
+          var errorText = String(err && err.message ? err.message : err || "");
           if (errorText.indexOf("image_input_unsupported") === 0) {
             errorText = errorText.indexOf("能力未知") >= 0
               ? bt("imageUnknown")
               : bt("imageUnsupported");
+          } else if (errorText.indexOf("session_model_binding_stale:") === 0) {
+            errorText = bt("sessionModelStale")(
+              errorText.slice("session_model_binding_stale:".length).trim(),
+            );
           } else if (window.PinvouBridgeMessages && typeof window.PinvouBridgeMessages.redactRawError === "function") {
             // Raw submit-failure bodies can also carry gateway bodies or
             // credentials; redact through the same outlet as the
