@@ -60,6 +60,7 @@ def main():
     parser.add_argument("--image", required=True, help="verified local candidate sha256 image ID only")
     parser.add_argument("--binary", required=True)
     parser.add_argument("--production-healthcheck", help="opt into production Compose/file configuration with this same-source binary")
+    parser.add_argument("--workload-agent-image", help="also verify seven production agents against this isolated issuer")
     parser.add_argument("--run", action="store_true", required=True)
     args = parser.parse_args()
     require(os.name == "posix" and os.geteuid() == 0, "LINUX_OPERATOR_REQUIRED")
@@ -68,6 +69,8 @@ def main():
     require(binary.is_file(), "TEST_BINARY_REQUIRED")
     healthcheck = Path(args.production_healthcheck).resolve(strict=True) if args.production_healthcheck else None
     require(healthcheck is None or healthcheck.is_file(), "HEALTHCHECK_BINARY_REQUIRED")
+    require(not args.workload_agent_image or (healthcheck and re.fullmatch(r"sha256:[a-f0-9]{64}", args.workload_agent_image)),
+            "WORKLOAD_AGENT_IMAGE_REQUIRES_PRODUCTION_CONFIG")
     repository = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location("realm", repository / "scripts/account-platform-workload-realm.py")
     realm = importlib.util.module_from_spec(spec)
@@ -287,6 +290,24 @@ def main():
                 time.sleep(1)
             require(state["Health"]["Status"] == "healthy", "PRODUCTION_TLS_READINESS_NOT_HEALTHY")
             print("KEYCLOAK_PRODUCTION_FILE_CONFIG_AND_COMPOSE_READINESS_PASS")
+        if args.workload_agent_image:
+            workload_spec = importlib.util.spec_from_file_location("workload_fixture", repository / "scripts/account-platform-workload-production-fixture.py")
+            workload_fixture = importlib.util.module_from_spec(workload_spec)
+            workload_spec.loader.exec_module(workload_fixture)
+            # Any unconfirmed multi-container creation preserves the entire
+            # isolated environment; never guess cleanup after a partial result.
+            uncertain_creation = True
+            try:
+                workload_fixture.verify(root, repository, kc, network_name, issuer, admin, args.workload_agent_image, containers)
+            except Exception as error:
+                # Fixed type and source line only: never print HTTP bodies,
+                # subprocess output, tokens or arbitrary exception messages.
+                trace = error.__traceback__
+                while trace.tb_next:
+                    trace = trace.tb_next
+                print("WORKLOAD_FIXTURE_FAILURE_TYPE=" + type(error).__name__ + " LINE=" + str(trace.tb_lineno), flush=True)
+                raise
+            uncertain_creation = False
         run(["docker", "stop", "--time", "20", kc])
         for suffix, host, ca, evidence in (("wrong-ca", "postgres", "wrong.crt", "PKIX path building failed"),
                                             ("wrong-host", pg_meta["NetworkSettings"]["Networks"][network_name]["IPAddress"], "ca.crt", "could not be verified by hostnameverifier")):

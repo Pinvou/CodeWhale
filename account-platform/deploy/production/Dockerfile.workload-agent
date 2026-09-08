@@ -1,0 +1,6 @@
+# Build context contains only the verified same-source Go 1.26.5 Linux/amd64
+# CGO_ENABLED=0 workload-token-agent artifact. Private CA is runtime-mounted.
+FROM scratch
+COPY workload-token-agent /workload-token-agent
+USER 65532:65532
+ENTRYPOINT ["/workload-token-agent"]

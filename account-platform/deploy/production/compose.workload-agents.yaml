@@ -1,0 +1,154 @@
+# Fixed seven short-lived identity agents; never merge development Compose.
+name: pinvou-production-workload
+x-agent: &agent
+  image: ${WORKLOAD_AGENT_IMAGE:?set verified same-source workload agent image digest}
+  pull_policy: never
+  user: "65532:65532"
+  command: ["-config", "/run/config/workload.json"]
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  mem_limit: 96m
+  cpus: 0.25
+  pids_limit: 32
+  ulimits:
+    core: {soft: 0, hard: 0}
+  environment:
+    SSL_CERT_FILE: /run/config/ca.crt
+    GOMEMLIMIT: 64MiB
+  logging:
+    driver: local
+    options: {max-size: "2m", max-file: "2"}
+  healthcheck:
+    test: ["CMD", "/workload-token-agent", "-config", "/run/config/workload.json", "-check"]
+    interval: 10s
+    timeout: 15s
+    start_period: 20s
+    retries: 6
+  networks: [data]
+services:
+  account-service:
+    <<: *agent
+    volumes:
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/account-service/config
+        target: /run/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/account-service/bootstrap
+        target: /run/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/account-service/projected
+        target: /run/projected
+        bind: {create_host_path: false}
+  identity-service:
+    <<: *agent
+    volumes:
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/identity-service/config
+        target: /run/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/identity-service/bootstrap
+        target: /run/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/identity-service/projected
+        target: /run/projected
+        bind: {create_host_path: false}
+  billing-service:
+    <<: *agent
+    volumes:
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/billing-service/config
+        target: /run/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/billing-service/bootstrap
+        target: /run/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/billing-service/projected
+        target: /run/projected
+        bind: {create_host_path: false}
+  token-gateway:
+    <<: *agent
+    volumes:
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-gateway/config
+        target: /run/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-gateway/bootstrap
+        target: /run/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-gateway/projected
+        target: /run/projected
+        bind: {create_host_path: false}
+  token-command-executor:
+    <<: *agent
+    volumes:
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-command-executor/config
+        target: /run/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-command-executor/bootstrap
+        target: /run/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-command-executor/projected
+        target: /run/projected
+        bind: {create_host_path: false}
+  token-credential-portal:
+    <<: *agent
+    volumes:
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-credential-portal/config
+        target: /run/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-credential-portal/bootstrap
+        target: /run/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-credential-portal/projected
+        target: /run/projected
+        bind: {create_host_path: false}
+  keycloak-mobile-authenticator:
+    <<: *agent
+    user: "1000:0"
+    volumes:
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/keycloak-mobile-authenticator/config
+        target: /run/config
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/keycloak-mobile-authenticator/bootstrap
+        target: /run/bootstrap
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/keycloak-mobile-authenticator/projected
+        target: /run/projected
+        bind: {create_host_path: false}
+networks:
+  data:
+    external: true
+    name: ${WORKLOAD_DATA_NETWORK:?set verified internal dependency network}
