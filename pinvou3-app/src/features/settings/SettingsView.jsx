@@ -858,11 +858,12 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
           const status = Number(httpMatch[1]);
           const legacy = {
             ok: status >= 200 && status < 300,
-            code: status === 401 ? 'auth_invalid' : status === 403 ? 'auth_forbidden' : status === 429 ? 'rate_limited' : 'http_error',
+            code: status === 401 ? 'auth_invalid' : status === 402 ? 'billing' : status === 403 ? 'auth_forbidden' : status === 429 ? 'rate_limited' : 'http_error',
             message: status === 401 ? settingsCopy.connectionMessages.auth_invalid
-              : status === 403 ? settingsCopy.connectionMessages.auth_forbidden
-                : status === 429 ? settingsCopy.connectionMessages.rate_limited
-                  : (status >= 200 && status < 300 ? settingsCopy.connectionMessages.ok : settingsCopy.connectionMessages.http_error),
+              : status === 402 ? settingsCopy.connectionMessages.billing
+                : status === 403 ? settingsCopy.connectionMessages.auth_forbidden
+                  : status === 429 ? settingsCopy.connectionMessages.rate_limited
+                    : (status >= 200 && status < 300 ? settingsCopy.connectionMessages.ok : settingsCopy.connectionMessages.http_error),
             detail: `HTTP ${status}`,
           };
           if (isCodingPlanProvider && (status === 404 || status === 405)) {
@@ -941,9 +942,18 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       function normalizeImageCapabilityTestResult(value) {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
           const status = ['supported', 'unsupported', 'unverified', 'error'].includes(value.status) ? value.status : 'error';
-          return { status, verified: !!value.verified, summary: value.summary ? String(value.summary) : '' };
+          return {
+            status,
+            verified: !!value.verified,
+            summary: value.summary ? String(value.summary) : '',
+            // http_status is the frontend's billing signal: 402 maps to the
+            // tri-lingual connectionMessages.billing copy (the Rust-side
+            // summary is contracted to carry no hardcoded language prefix;
+            // see settings.rs).
+            httpStatus: value.http_status == null ? null : Number(value.http_status),
+          };
         }
-        return { status: 'error', verified: false, summary: String(value || '') };
+        return { status: 'error', verified: false, summary: String(value || ''), httpStatus: null };
       }
       async function handleImageCapabilityTest() {
         if (!bridge.available || !bridge.models.testImageInputCapability) return;
@@ -953,7 +963,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
           const result = await bridge.models.testImageInputCapability(model.trim(), baseUrl.trim(), testKey, initial.__new ? null : initial.id);
           setImageTestResult(normalizeImageCapabilityTestResult(result));
         } catch (e) {
-          setImageTestResult({ status: 'error', verified: false, summary: String(e && e.message ? e.message : e) });
+          setImageTestResult({ status: 'error', verified: false, summary: String(e && e.message ? e.message : e), httpStatus: null });
         }
         finally { setImageTesting(false); }
       }
@@ -1508,7 +1518,13 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               : imageTestResult.status === 'unverified'
                 // 后端 summary 已自带「未能正确识别图像，原因未知」完整句,直接展示避免重复。
                 ? (imageTestResult.summary || settingsCopy.imageCapabilityTestUnverified)
-                : settingsCopy.imageCapabilityTestError + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '');
+                // A 402 billing failure matches the connection test: reuse
+                // the tri-lingual connectionMessages.billing copy - the Rust
+                // side only passes http_status and the raw provider summary,
+                // never a single-language guidance string.
+                : imageTestResult.httpStatus === 402
+                  ? settingsCopy.connectionMessages.billing + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '')
+                  : settingsCopy.imageCapabilityTestError + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '');
         const imageTestColor = !imageTestResult
           ? (isDark ? 'text-[#98989D]' : 'text-[#8A8A8E]')
           : imageTestResult.status === 'supported'

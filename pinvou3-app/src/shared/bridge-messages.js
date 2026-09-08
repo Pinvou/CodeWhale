@@ -84,6 +84,123 @@
     isInternalRuntimeUserMessage: isInternalRuntimeUserMessage,
     isInternalUserMessageProvenance: isInternalUserMessageProvenance,
     userMessageInputProvenance: userMessageInputProvenance,
+    // Error texts the gate missed (gateway/proxy custom bodies, raw
+    // provider messages) do not become model-service notices but still get
+    // displayed as bare strings / red text. Redact unconditionally in
+    // front of every display surface: classification may miss, credentials
+    // must not. Returned as-is when the helper is missing (falls back to
+    // the existing behavior).
+    redactRawError: function (error, state) {
+      var text = String(error == null ? "" : error);
+      if (!text) return text;
+      var helper = window.PinvouModelServiceErrors;
+      if (!helper || typeof helper.redactTechnicalDetail !== "function") return text;
+      return helper.redactTechnicalDetail(text, state && state.settings && state.settings.language);
+    },
+
+    modelServiceUserError: function (payload, state) {
+      payload = payload || {};
+      state = state || {};
+      var raw = payload && (payload.user_error || payload.userError);
+      var error = payload && payload.error;
+      if (!raw && !error) return null;
+      var helper = window.PinvouModelServiceErrors;
+      if (!helper || typeof helper.build !== "function") return null;
+      if (!raw && typeof helper.isModelServiceError === "function" && !helper.isModelServiceError(error)) {
+        return null;
+      }
+      var language = state.settings && state.settings.language;
+      var userError = helper.build(raw || error, {
+        language: language,
+        modelServiceState: state,
+        providerLabel: helper.providerLabelFromState(state, language),
+        terminal: payload.terminal !== false,
+      });
+      // The structured base code/category forwarded by the forwarder is
+      // kept on the user card: the streaming path currently emits mostly
+      // the generic "transient", so this is controlled semantics retained
+      // for diagnostics only and does not participate in gating or
+      // classification.
+      if (typeof (payload && payload.code) === "string" && payload.code) userError.errorCode = payload.code;
+      if (typeof (payload && payload.category) === "string" && payload.category) userError.errorCategory = payload.category;
+      return userError;
+    },
+
+    addModelServiceErrorNotice: function (payload, state, addSystemItem, legacyConversationOnly, terminalRecord) {
+      payload = payload || {};
+      state = state || {};
+      var helper = window.PinvouModelServiceErrors;
+      payload.terminal = !!legacyConversationOnly;
+      var userError = window.PinvouBridgeMessages.modelServiceUserError(payload, state);
+      if (!helper || !userError) return false;
+      var notice = helper.noticeText(userError);
+      var chatItems = Array.isArray(state.chatItems) ? state.chatItems : [];
+      var nextDetail = userError && userError.technicalDetail;
+      // Dedup keys on the error identity (kind + technical detail), not
+      // the final wording: within one turn a transient notice (recoverable
+      // wording) followed by done (terminal wording) always differs in
+      // text, so exact-text dedup would miss and produce two contradictory
+      // bubbles for one error.
+      var existing = chatItems.find(function (item) {
+        if (!item || !item.turnErrorNotice || !item.userError) return false;
+        if (item.userError.kind !== userError.kind) return false;
+        var existingDetail = item.userError.technicalDetail;
+        if (existingDetail || nextDetail) return existingDetail === nextDetail;
+        return true;
+      });
+      // Hiding the bubble on terminal requires a timeline terminal record
+      // that actually exists and carries an error (the timeline card takes
+      // over). recordTurnCompleted writes no record when openStart/turnId
+      // is missing; hiding anyway would make the error fully invisible
+      // (silent-swallow regression).
+      var timelineTakesOver = !!legacyConversationOnly
+        && !!(terminalRecord && terminalRecord.error);
+      var target = existing || null;
+      if (target) {
+        target.text = notice;
+        target.userError = userError;
+        if (timelineTakesOver) target.legacyConversationOnly = true;
+      } else {
+        target = { turnErrorNotice: true, legacyConversationOnly: timelineTakesOver, userError: userError };
+        addSystemItem(notice, target);
+      }
+      // On terminal takeover, hide the turn's other model-service transient
+      // bubbles too (of a different identity, e.g. a network idle timeout
+      // followed by a billing done): their "will keep retrying" wording
+      // contradicts the terminal "has stopped". The bridge clears
+      // turnErrorNotice items on every send, so everything still present
+      // belongs to the current turn and the previous turn is untouched.
+      if (timelineTakesOver) {
+        chatItems.forEach(function (item) {
+          if (item && item !== target && item.turnErrorNotice && item.userError && !item.legacyConversationOnly) {
+            item.legacyConversationOnly = true;
+          }
+        });
+      }
+      payload.user_error = userError;
+      payload.userError = userError;
+      return true;
+    },
+    // When a successful chat:done (no error) arrives, the turn's transient
+    // model-service bubbles ("will keep retrying") are stale: the turn has
+    // recovered, and an outdated claim must not outlive the recovery it
+    // described. Only items carrying a userError are hidden (their wording
+    // promises future retries); bare-string fallbacks are statements about
+    // errors that did happen and keep the existing behavior. Terminal
+    // errors do not go through this path — addModelServiceErrorNotice
+    // already upgrades/hides them by identity.
+    settleModelServiceErrorNotices: function (state) {
+      state = state || {};
+      var chatItems = Array.isArray(state.chatItems) ? state.chatItems : [];
+      var settled = false;
+      chatItems.forEach(function (item) {
+        if (item && item.turnErrorNotice && item.userError && !item.legacyConversationOnly) {
+          item.legacyConversationOnly = true;
+          settled = true;
+        }
+      });
+      return settled;
+    },
     showShellCleanupFailure: function (payload, state, addSystemItem) {
       if (!payload || !payload.shell_cleanup_failed) return;
       var notice = shellCleanupFailedText(state.settings && state.settings.language);
