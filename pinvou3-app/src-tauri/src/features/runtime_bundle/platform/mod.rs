@@ -160,8 +160,11 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 /// 0.30: 回流 Community #359 的 dws 文档审计修复与确认门禁契约，登记于
 ///       NOTICE-dingtalk.md。钉钉技能树不参与内容哈希，必须递增语义版本，
 ///       让已连接用户在启动时重新解包并刷新技能文档。
+/// 0.31: 回流 Community #438 的 wecomcli 第二轮文档审计修复，登记于
+///       NOTICE-wecom.md。保留 Official 已占用的 0.30 与 H3C 内容哈希，
+///       使用新语义版本确保已连接用户在启动时刷新企微技能树。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.30-",
+    "0.31-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
