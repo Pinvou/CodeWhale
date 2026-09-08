@@ -1,17 +1,23 @@
-FROM golang:1.26.5-alpine AS build
+ARG GO_BUILD_IMAGE=golang:1.26.5-alpine
+FROM ${GO_BUILD_IMAGE} AS build
 
-ARG SERVICE
-ARG VERSION=dev
-ARG COMMIT=unknown
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
+# Build-only limits; the scratch runtime does not inherit these settings.
+ENV GOMEMLIMIT=1GiB GOMAXPROCS=2
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,id=pinvou-account-platform-gomod-go126,target=/go/pkg/mod,sharing=locked \
+    go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY migrations ./migrations
-RUN test -n "$SERVICE" && \
+ARG SERVICE
+ARG VERSION=dev
+ARG COMMIT=unknown
+RUN --mount=type=cache,id=pinvou-account-platform-gomod-go126,target=/go/pkg/mod,sharing=locked \
+    --mount=type=cache,id=pinvou-account-platform-gobuild-go126,target=/root/.cache/go-build,sharing=locked \
+    test -n "$SERVICE" && \
     CGO_ENABLED=0 go build \
       -tags=nomsgpack \
       -trimpath \
