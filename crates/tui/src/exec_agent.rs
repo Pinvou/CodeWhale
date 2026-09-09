@@ -206,6 +206,9 @@ pub(crate) async fn run_exec_agent(
         model: effective_model.clone(),
         active_route_limits,
         workspace: workspace.clone(),
+        workspace_roots: resume_session
+            .as_ref()
+            .map_or_else(Vec::new, |saved| saved.metadata.workspace_roots.clone()),
         session_id: None,
         subagent_state_root: None,
         plugin_registry: Some(std::sync::Arc::clone(&engine_plugin_registry)),

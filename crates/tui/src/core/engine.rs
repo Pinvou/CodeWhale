@@ -294,6 +294,12 @@ pub struct EngineConfig {
     pub active_route_limits: Option<codewhale_config::route::RouteLimits>,
     /// Workspace root for tool execution and file operations.
     pub workspace: PathBuf,
+    /// Additional workspace roots for this engine session; `workspace` stays
+    /// the primary root. Materialized into the per-turn sandbox policy, tool
+    /// context boundary, and exec-policy checks on every turn, so a root-set
+    /// change takes effect on the next turn. Empty preserves single-root
+    /// behavior exactly.
+    pub workspace_roots: Vec<PathBuf>,
     /// Host-owned conversation id the engine adopts at construction.
     ///
     /// Interactive hosts claim a session id before the engine exists: the
@@ -562,6 +568,7 @@ impl Default for EngineConfig {
             model: DEFAULT_TEXT_MODEL.to_string(),
             active_route_limits: None,
             workspace: PathBuf::from("."),
+            workspace_roots: Vec::new(),
             session_id: None,
             subagent_state_root: None,
             allow_shell: true,
@@ -1829,6 +1836,9 @@ impl Engine {
         {
             session.id = session_id.to_string();
         }
+        config.workspace_roots =
+            codewhale_core::normalize_workspace_roots(&config.workspace, &config.workspace_roots);
+        session.workspace_roots = config.workspace_roots.clone();
         // Set up stable system prompt with project context (default to agent mode).
         // Per-turn working-set metadata is injected into the latest user
         // message at request time so file churn does not rewrite this prefix.
@@ -2192,6 +2202,7 @@ impl Engine {
                 &tool_name,
                 &tool_input,
                 &self.session.workspace,
+                &self.session.workspace_roots,
                 self.session.approval_mode,
             );
             if let Some(ToolAskRuleDecision::Block(reason)) = ask_rule_decision {
@@ -3387,7 +3398,7 @@ impl Engine {
                         system_prompt_override,
                         model,
                         workspace,
-                        workspace_roots: _,
+                        workspace_roots,
                         mode,
                     } => {
                         self.drop_all_steers().await;
@@ -3478,10 +3489,14 @@ impl Engine {
                             system_prompt_override && self.session.system_prompt.is_some();
                         self.session.auto_model = model.trim().eq_ignore_ascii_case("auto");
                         self.session.model = model;
+                        let workspace_changed = self.session.workspace != workspace;
                         self.session.workspace = workspace.clone();
+                        self.session.workspace_roots =
+                            codewhale_core::normalize_workspace_roots(&workspace, &workspace_roots);
                         self.current_mode = mode;
                         self.config.model.clone_from(&self.session.model);
                         self.config.workspace = workspace.clone();
+                        self.config.workspace_roots = self.session.workspace_roots.clone();
                         if plugin_workspace_changed {
                             self.plugin_registry =
                                 self.plugin_registry.rediscover_for_workspace(&workspace);
@@ -3490,13 +3505,18 @@ impl Engine {
                             // receipts from the previous workspace snapshot.
                             self.mcp_pool = None;
                         }
-                        let ctx =
-                            crate::project_context::load_project_context_with_parents(&workspace);
-                        self.session.project_context = if ctx.has_instructions() {
-                            Some(ctx)
-                        } else {
-                            None
-                        };
+                        // Project context derives from the primary root only;
+                        // an additional-roots update must not re-read it.
+                        if workspace_changed {
+                            let ctx = crate::project_context::load_project_context_with_parents(
+                                &workspace,
+                            );
+                            self.session.project_context = if ctx.has_instructions() {
+                                Some(ctx)
+                            } else {
+                                None
+                            };
+                        }
                         self.session.rebuild_working_set();
                         self.reconcile_restored_work_bindings().await;
                         self.emit_session_updated().await;
@@ -3529,6 +3549,7 @@ impl Engine {
                             model_provider: self.api_provider.as_str().to_string(),
                             model_provider_id: self.api_provider_id.clone(),
                             workspace: self.session.workspace.clone(),
+                            workspace_roots: self.session.workspace_roots.clone(),
                             system_prompt: self.session.system_prompt.clone(),
                             mode: self.current_mode.as_setting().to_string(),
                         };
@@ -4114,6 +4135,7 @@ impl Engine {
             approval_mode,
             self.api_config.sandbox_mode.as_deref(),
             &self.config.workspace,
+            &self.session.workspace_roots,
             crate::core::authority::SandboxNetworkAccess::from_config(
                 self.api_config.sandbox_network_access,
             ),
@@ -6610,11 +6632,13 @@ impl Engine {
             self.session.auto_approve,
             self.session.approval_mode,
         );
+        context.workspace_roots = self.session.workspace_roots.clone();
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
         context.set_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()));
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
+            &self.session.workspace_roots,
             self.api_config.sandbox_mode.as_deref(),
             crate::core::authority::SandboxNetworkAccess::from_config(
                 self.api_config.sandbox_network_access,
@@ -6662,6 +6686,7 @@ impl Engine {
             self.session.mcp_config_path.clone(),
             authority.auto_approve,
         )
+        .with_workspace_roots(self.session.workspace_roots.clone())
         .with_state_namespace(self.session.id.clone())
         .with_route_context_window(crate::route_budget::route_context_window_tokens(
             route.provider,
@@ -6733,6 +6758,7 @@ impl Engine {
 
         let policy = authority.sandbox_policy(
             &self.session.workspace,
+            &self.session.workspace_roots,
             self.api_config.sandbox_mode.as_deref(),
             crate::core::authority::SandboxNetworkAccess::from_config(
                 self.api_config.sandbox_network_access,
@@ -7708,6 +7734,7 @@ pub(super) fn exec_shell_ask_rule_decision(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     exec_shell_ask_rule_decision_for_policy(
@@ -7715,6 +7742,7 @@ pub(super) fn exec_shell_ask_rule_decision(
         tool_name,
         tool_input,
         workspace,
+        workspace_roots,
         approval_mode,
     )
 }
@@ -7727,6 +7755,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
@@ -7741,6 +7770,7 @@ pub(crate) fn exec_shell_ask_rule_decision_for_policy(
         command,
         None,
         workspace,
+        workspace_roots,
         approval_mode,
     )
 }
@@ -7750,6 +7780,7 @@ pub(super) fn file_tool_ask_rule_decision(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     file_tool_ask_rule_decision_for_policy(
@@ -7757,6 +7788,7 @@ pub(super) fn file_tool_ask_rule_decision(
         tool_name,
         tool_input,
         workspace,
+        workspace_roots,
         approval_mode,
     )
 }
@@ -7769,6 +7801,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
     tool_name: &str,
     tool_input: &Value,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
@@ -7781,6 +7814,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             "",
             None,
             workspace,
+            workspace_roots,
             approval_mode,
         );
     }
@@ -7794,6 +7828,7 @@ pub(crate) fn file_tool_ask_rule_decision_for_policy(
             "",
             Some(&path),
             workspace,
+            workspace_roots,
             approval_mode,
         ) {
             Some(ToolAskRuleDecision::Block(reason)) => {
@@ -7822,6 +7857,7 @@ fn tool_ask_rule_decision_for_context(
     command: &str,
     path: Option<&str>,
     workspace: &Path,
+    workspace_roots: &[PathBuf],
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
     let cwd = workspace.to_string_lossy();
@@ -7839,6 +7875,10 @@ fn tool_ask_rule_decision_for_context(
             path,
             ask_for_approval,
             sandbox_mode: None,
+            workspace_roots: codewhale_core::normalize_workspace_roots(workspace, workspace_roots)
+                .into_iter()
+                .skip(1)
+                .collect(),
         })
         .ok()?;
     if !decision.allow {

@@ -358,6 +358,10 @@ pub enum Op {
         system_prompt_override: bool,
         model: String,
         workspace: PathBuf,
+        /// Additional workspace roots synced with the session; `workspace`
+        /// stays the primary root. Absent on legacy payloads (single root).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        workspace_roots: Vec<PathBuf>,
         #[serde(default = "default_mode")]
         mode: String,
     },
@@ -654,6 +658,7 @@ mod tests {
                 system_prompt_override: false,
                 model: "m".into(),
                 workspace: PathBuf::from("/ws"),
+                workspace_roots: Vec::new(),
                 mode: "agent".into(),
             },
             Op::CompactContext {
