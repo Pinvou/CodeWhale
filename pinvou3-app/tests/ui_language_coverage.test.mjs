@@ -48,7 +48,6 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiHomeMode',
     'uiAttachments',
     'uiCodex',
-    'uiCodexView',
     'uiCodexWorkspace',
     'uiAcpProviders',
     'uiArtifacts',
@@ -192,17 +191,17 @@ assert.doesNotMatch(main, /\}, \[t\.uiAccount\.syncFailed\]\);/);
 assert.match(main, /formatQuotaTokens\(limit, t\.langTag\)/);
 assert.match(main, /t\.uiAccount\.viewQuota/);
 assert.doesNotMatch(main, />查看可用额度</);
-assert.match(main, /<SettingsErrorBoundary[^>]*t=\{t\}/);
+assert.match(main, /<ViewErrorBoundary[^>]*heading=\{t\.uiSettingsDetail\.settingsLoadFailed\}[^>]*detail=\{t\.uiSettingsDetail\.settingsLoadFailedDetail\}[^>]*t=\{t\}/);
 assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
 // The main window renders codex through the LazyCodexAcpView wrapper (which
 // internally consumes the same view-loaders chunk); its error fallback copy
 // still flows through i18n.
 assert.match(main, /<CodexAcpView[^>]*t=\{t\}/);
-const settingsErrorBoundary = source('features/settings/SettingsErrorBoundary.jsx');
-assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailed/);
-assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailedDetail/);
-assert.doesNotMatch(settingsErrorBoundary, /this\.state\.error\.message/);
-assert.doesNotMatch(settingsErrorBoundary, />设置页加载失败</);
+// The settings error boundary has been merged into the shared ViewErrorBoundary; its title flows through i18n via the heading prop, and the settings boundary keeps its friendly detail copy (never the raw error message).
+const viewErrorBoundary = source('shared/ViewErrorBoundary.jsx');
+assert.match(viewErrorBoundary, /this\.props\.heading \|\| copy\.viewLoadFailed/);
+assert.match(viewErrorBoundary, /this\.props\.detail \|\| message/);
+assert.doesNotMatch(viewErrorBoundary, />设置页加载失败</);
 assert.match(main, /t\.uiScheduled\.runStatus\[value\]/);
 assert.doesNotMatch(main, /queued:\s*'等待中'/);
 assert.match(main, /window\.PinvouTauriBridgeStrings = misc\.tauriBridge/);

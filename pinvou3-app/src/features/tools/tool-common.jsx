@@ -4,6 +4,7 @@ import { BookOpen, Briefcase, Building2, ChevronDown, ChevronLeft, ChevronRight,
 import { bridge } from '../../hooks/useBridge.js';
 import { _ARTIFACT_FMT, _artifactKind } from '../../shared/artifact-utils.js';
 import { can, isWeb } from '../../shared/platform.js';
+import { pathBasename } from '../../shared/path-utils.js';
 import { parseUnifiedDiff, diffStats } from './unified-diff-parser.js';
 import { dict } from '../../shared/i18n.js';
 
@@ -123,8 +124,10 @@ const AcFmtIcon = FileTypeIcon;
 
     const toolBasename = (p) => {
       if (typeof p !== 'string' || !p) return '';
-      const parts = p.replace(/\/+$/, '').split('/');
-      return parts[parts.length - 1] || p;
+      // Same implementation as shared/path-utils' pathBasename: strip trailing separators, take the last segment,
+      // fall back to the original path on empty result (all-separator string like '///'). The old inline version
+      // only split on '/'; pathBasename also handles '\\' (more accurate last segment for Windows paths).
+      return pathBasename(p, { collapseTrailing: true, fallback: p });
     };
 
     // A 档摘要：只从结构化 args 提“动作对象”（文件名/命令/模式），稳且免费，不 parse output。

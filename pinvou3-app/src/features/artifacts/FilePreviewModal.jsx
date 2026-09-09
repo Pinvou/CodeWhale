@@ -3,6 +3,7 @@ import { bridge } from '../../hooks/useBridge.js';
 import { can, isWeb } from '../../shared/platform.js';
 import { getSyntaxHighlightVersion, subscribeSyntaxHighlight } from '../../shared/syntax-highlighter.js';
 import { OFFICE_HTML_STYLE } from './ArtifactsPanel.jsx';
+import { loadArtifactPreview } from './artifact-preview.js';
 import { ScaledHtmlPreview } from '../settings/composer-shared.jsx';
 
 const FilePreviewModal = ({ path, sessionId, onClose, t }) => {
@@ -13,42 +14,12 @@ const FilePreviewModal = ({ path, sessionId, onClose, t }) => {
   useEffect(() => {
     let alive = true;
     (async () => {
-      try {
-        const info = await bridge.artifacts.artifactInfo(path, sessionId);
-        if (!alive) return;
-        if (!info || !info.exists) {
-          setPreview({ missing: true });
-          return;
-        }
-        if (['md', 'html', 'text'].includes(info.kind)) {
-          let text = await bridge.artifacts.readArtifactText(path, sessionId);
-          if (!alive) return;
-          let kind = info.kind;
-          if (/\.json$/i.test(path)) {
-            try {
-              text = JSON.stringify(JSON.parse(text), null, 2);
-              kind = 'json';
-            } catch (_) {
-              // Keep malformed JSON readable as plain text.
-            }
-          }
-          setPreview({ kind, text });
-        } else if (info.kind === 'image') {
-          try {
-            const dataUrl = await bridge.artifacts.readArtifactImageB64(path, sessionId);
-            if (alive) setPreview({ kind: 'image', dataUrl });
-          } catch (error) {
-            if (alive) setPreview({ kind: 'image', imageError: String(error) });
-          }
-        } else {
-          const visual = bridge.artifacts.renderArtifactVisual
-            ? await bridge.artifacts.renderArtifactVisual(path, sessionId)
-            : null;
-          if (alive) setPreview({ kind: info.kind || 'other', visual });
-        }
-      } catch (error) {
-        if (alive) setPreview({ error: String(error) });
-      }
+      const result = await loadArtifactPreview(path, sessionId, {
+        includeJson: true,
+        includeImage: true,
+        isCancelled: () => !alive,
+      });
+      if (alive) setPreview(result);
     })();
     return () => { alive = false; };
   }, [path, sessionId]);
