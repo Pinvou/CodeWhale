@@ -8,6 +8,7 @@ import React, {
 } from 'react';
 import { createPetActivationState, loadActivePet } from './pet-active.js';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
+import { useAutoResizeTextarea } from '../../hooks/useAutoResizeTextarea.js';
 import { loadImage } from './load-image.js';
 import {
   buildAnimationSequence,
@@ -1256,10 +1257,10 @@ export default function PetWindow({
     }
   };
 
-  const resizeReplyInput = (element) => {
-    element.style.height = '0';
-    element.style.height = `${Math.min(element.scrollHeight, 52)}px`;
-  };
+  // Reply textarea auto-grows with content (same hook as ChatView's main input):
+  // pet.css already clamps the textarea to min-height:18px / max-height:52px; the hook then converges via scrollHeight.
+  const replyInputRef = useRef(null);
+  useAutoResizeTextarea(replyInputRef, cardUi.draft, { min: 0, max: 52 });
 
   return (
     <div
@@ -1389,6 +1390,7 @@ export default function PetWindow({
                   >
                     <textarea
                       autoFocus
+                      ref={replyInputRef}
                       rows={1}
                       value={cardUi.draft}
                       disabled={pending}
@@ -1398,7 +1400,6 @@ export default function PetWindow({
                         type: 'edit-reply',
                         text: event.target.value,
                       })}
-                      onInput={(event) => resizeReplyInput(event.currentTarget)}
                       onKeyDown={(event) => {
                         event.stopPropagation();
                         if (event.key === 'Escape') {

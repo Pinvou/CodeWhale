@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, FileText, Wrench } from '../../components/icons.jsx';
+import { useEffect, useMemo, useState } from 'react';
+import { ChevronDown, ChevronRight, Wrench } from '../../components/icons.jsx';
+import { StatusDot } from '../../components/StatusDot.jsx';
 import { bridge } from '../../hooks/useBridge.js';
 import { can } from '../../shared/platform.js';
 import { expertDelegationText, isAgentWaitCall, isExpertDelegationCall } from '../conversation/conversation-model.js';
@@ -644,7 +645,7 @@ const ToolOutput = ({ item, t }) => {
                 <span className="block truncate text-[12px] font-medium">{item.name}</span>
                 <span className="block mt-0.5 truncate text-[10px] text-gray-400">{meta}</span>
               </span>
-              {isRunning && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" />}
+              {isRunning && <StatusDot tone="run" />}
               {cancelButton}
               <ChevronDown size={13} className={`shrink-0 text-gray-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />
             </div>
