@@ -1,6 +1,6 @@
 # 正式 Token 策略初始化与治理激活
 
-状态：C4C3c 需求、设计与四项任务拆分已独立审核通过；c1 已实现并通过代码审核与验证，c2–c4 尚未执行。
+状态：C4C3c 需求、设计与四项任务拆分已独立审核通过；c1 已完成并提交；c2 因正式数据库编码前置不满足暂停，c3–c4 尚未执行。
 前置为 [C4C3b2](production-release-credentials.md) 完成：正式凭据与保管、精确 HBA、真实 TLS/授权检查、
 临时运维登录退场及测试资源清理均已独立验收。负责人已明确本次上限为 **100**，不使用测试默认值。
 
@@ -66,6 +66,20 @@ profile 的 governance-operations 是不同网络，本阶段不能把临时工�
    EXECUTE 权限的 operator 可以直接 SELECT 策略表。核验版本 1、上限 100、真实配置摘要与唯一变更事件。
 5. 只允许新增一条 policy revision、一条对应 outbox event、更新唯一 active pointer；其他表、Account 策略、
    治理 PRE_ACTIVATION/epoch=0、角色和 ACL 保持。完成前后备份、临时资源清理、独立审核及单独提交。
+
+执行记录：专项后置差异测试 7 项通过，新组合只读预检与独立审核通过；正式前置加密备份完成，
+原生 quiescence 通过。bootstrap 返回 SQLSTATE `42601`：Unicode normalization 要求 server encoding
+为 UTF8。现场独立检查确认所有新建数据库实际为 `SQL_ASCII`；初始化脚本导出的 `LC_ALL=C` 与
+未显式指定 `--encoding=UTF8` 的初始化参数共同形成此缺口，既有健康检查未覆盖编码要求。
+
+本次策略未提交：revision/outbox 均为 0，唯一指针仍为 NULL/version 0；临时 operator 已关闭、无残留
+领域会话，全部角色、密码摘要、78 张 Token 表、59 张 Account 表及权限、函数与序列状态与前置一致。
+失败窗口已按独立审核的退场流程移除两个退出工具、本窗口 Socket 导出及三份临时消费副本，
+保留全部正式材料、数据库、备份和原始回执；退场后全量数据与前置一致，清理独立现场终验通过。
+本任务尚未完成，不以重跑原脚本恢复。
+不得绕过 NFC 校验、修改冻结函数或直接重建现有正式数据库。负责人已批准按
+[正式 PostgreSQL UTF8 保全迁移与切换](production-postgres-utf8-cutover.md) 执行并行影子集群方案；
+完成初始化合同、流式保全迁移、等价验证、备份恢复与受控切换后，再恢复本阶段。
 
 ### C4C3c3：原生治理 CAS 激活
 

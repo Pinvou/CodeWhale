@@ -24,7 +24,7 @@ services:
       POSTGRES_USER: account_platform_admin
       POSTGRES_DB: postgres
       POSTGRES_PASSWORD_FILE: /run/pinvou/postgres-admin/password
-      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C --auth-local=scram-sha-256 --auth-host=scram-sha-256
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=999,gid=999,mode=1700
       - /var/run/postgresql:rw,noexec,nosuid,nodev,size=8m,uid=999,gid=999,mode=0700

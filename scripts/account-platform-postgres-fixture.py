@@ -180,6 +180,19 @@ def main():
             os.chown(root / "data", 999, 999)
             run(["docker", "start", container_id])
             wait_ready()
+            require(local_sql("SHOW server_encoding;") == "UTF8", "SERVER_ENCODING_NOT_UTF8")
+            require(local_sql("SELECT count(*) FROM pg_database WHERE pg_encoding_to_char(encoding)<>'UTF8' OR datcollate<>'C' OR datctype<>'C';") == "0", "DATABASE_ENCODING_OR_LOCALE_MISMATCH")
+            require(local_sql("DROP DATABASE account_platform_newapi; CREATE DATABASE account_platform_newapi WITH TEMPLATE template0 OWNER new_api ENCODING 'SQL_ASCII' LC_COLLATE 'C' LC_CTYPE 'C';") is not None, "ENCODING_DRIFT_SETUP_FAILED")
+            require(local_sql("SELECT count(*) FROM pg_database;") == "8", "ENCODING_DRIFT_DATABASE_COUNT")
+            require(local_sql("SELECT string_agg(datname,',' ORDER BY datname) FROM pg_database;") == "account_platform_account,account_platform_billing,account_platform_keycloak,account_platform_newapi,account_platform_token,postgres,template0,template1", "ENCODING_DRIFT_DATABASE_NAMES")
+            require(local_sql("SELECT count(*) FROM pg_database WHERE pg_encoding_to_char(encoding)='UTF8';") == "7", "ENCODING_DRIFT_UTF8_CONTROL")
+            require(local_sql("SELECT pg_encoding_to_char(encoding) FROM pg_database WHERE datname='account_platform_newapi';") == "SQL_ASCII", "ENCODING_DRIFT_NOT_CREATED")
+            drift = run(["docker", "exec", "-u", "999:999", container_id, "/bin/sh", "/opt/pinvou/production/postgres-health.sh"], check=False)
+            require(drift.returncode != 0 and "PRODUCTION_DATABASE_CONFIGURATION_REJECTED" in drift.stderr,
+                    "SQL_ASCII_BUSINESS_DATABASE_NOT_REJECTED")
+            require(local_sql("DROP DATABASE account_platform_newapi; CREATE DATABASE account_platform_newapi WITH TEMPLATE template0 OWNER new_api ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C';") is not None, "ENCODING_DRIFT_CLEANUP_FAILED")
+            require(run(["docker", "exec", "-u", "999:999", container_id, "/bin/sh", "/opt/pinvou/production/postgres-health.sh"], check=False).returncode == 0,
+                    "UTF8_HEALTH_DID_NOT_RECOVER")
             for role, db, key in LOGINS:
                 result = client(role, db, passwords[key])
                 require(result.returncode == 0 and result.stdout.strip() == "1", "TLS_LOGIN_FAILED_" + role)
@@ -210,7 +223,10 @@ def main():
             run(["docker", "stop", "--time", "10", container_id])
             marker = root / "data/.pinvou-bootstrap-complete"
             original_marker = marker.read_text()
-            marker.write_text("pinvou-production-postgres-v1 0\n")
+            marker.write_text("pinvou-production-postgres-v1 " + original_marker.split()[1] + "\n")
+            run(["docker", "start", container_id])
+            wait_exit()
+            marker.write_text("pinvou-production-postgres-v2-utf8 0\n")
             run(["docker", "start", container_id])
             wait_exit()
             marker.write_text(original_marker)

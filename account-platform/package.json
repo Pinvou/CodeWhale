@@ -18,6 +18,7 @@
     "check:production-ha": "node ../scripts/account-platform-ha-gate.mjs",
     "check:performance-policy": "node ../scripts/account-platform-performance-gate.mjs",
     "check:production-performance": "node ../scripts/account-platform-performance-gate.mjs --require-evidence",
+    "check:production-postgres": "node ../scripts/account-platform-postgres-compose-check.mjs",
     "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
     "test": "npm run lint:openapi && npm run test:contracts"
   },

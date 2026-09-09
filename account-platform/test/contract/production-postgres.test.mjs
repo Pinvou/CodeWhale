@@ -3,10 +3,33 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import YAML from 'yaml';
+import { checkProductionPostgres } from '../../../scripts/account-platform-postgres-compose-check.mjs';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const read = name => readFileSync(path.join(root, name), 'utf8');
 const config = YAML.parse(read('deploy/production/compose.dependencies.yaml'));
+
+function rejectsArgs(value) {
+  const candidate = structuredClone(config);
+  if (value === undefined) delete candidate.services.postgres.environment.POSTGRES_INITDB_ARGS;
+  else candidate.services.postgres.environment.POSTGRES_INITDB_ARGS = value;
+  assert.throws(() => checkProductionPostgres(candidate), /production_postgres_initdb_args_invalid/);
+}
+
+test('production PostgreSQL deployment checker accepts only explicit UTF8 with C locale', () => {
+  assert.deepEqual(checkProductionPostgres(config), {
+    decision: 'POSTGRES_CONFIG_VALID', encoding: 'UTF8', locale: 'C', environment_status: 'ENV_PENDING',
+  });
+  for (const value of [
+    undefined,
+    '--locale=C --auth-local=scram-sha-256 --auth-host=scram-sha-256',
+    '--encoding=UTF8 --encoding=UTF8 --locale=C --auth-local=scram-sha-256 --auth-host=scram-sha-256',
+    '--encoding=SQL_ASCII --locale=C --auth-local=scram-sha-256 --auth-host=scram-sha-256',
+    '--encoding=UTF8 --auth-local=scram-sha-256 --auth-host=scram-sha-256',
+    '--encoding=UTF8 --locale=C.UTF-8 --auth-local=scram-sha-256 --auth-host=scram-sha-256',
+    '--encoding=UTF8 --locale=C --locale=C --auth-local=scram-sha-256 --auth-host=scram-sha-256',
+  ]) rejectsArgs(value);
+});
 
 test('production PostgreSQL is standalone, nonroot, private and file-credential only', () => {
   assert.deepEqual(Object.keys(config.services), ['postgres']);
@@ -19,7 +42,7 @@ test('production PostgreSQL is standalone, nonroot, private and file-credential 
   assert.equal(config.networks.data.internal, true);
   assert.equal(pg.environment.POSTGRES_PASSWORD, undefined);
   assert.equal(pg.environment.POSTGRES_PASSWORD_FILE, '/run/pinvou/postgres-admin/password');
-  assert.match(pg.environment.POSTGRES_INITDB_ARGS, /auth-local=scram-sha-256/);
+  assert.equal(pg.environment.POSTGRES_INITDB_ARGS, '--encoding=UTF8 --locale=C --auth-local=scram-sha-256 --auth-host=scram-sha-256');
   for (const volume of pg.volumes) {
     assert.equal(volume.type, 'bind');
     assert.equal(volume.bind.create_host_path, false);
@@ -56,12 +79,20 @@ test('production bootstrap fails closed on incomplete data and keeps password ar
   const common = read('deploy/production/postgres-common.sh');
   assert.match(common, /999:999:600/);
   assert.match(common, /Database system identifier/);
-  assert.match(common, /pinvou-production-postgres-v1 \$DB_CONTROL_ID/);
+  assert.match(common, /pinvou-production-postgres-v2-utf8 \$DB_CONTROL_ID/);
+  assert.match(common, /count\(\*\)=8[\s\S]*pg_encoding_to_char\(encoding\)='UTF8'[\s\S]*datcollate='C'[\s\S]*datctype='C'/);
   const init = read('deploy/production/postgres-init.sh');
   assert.match(init, /ENABLE_PAYMENT_SIMULATOR_DB=false/);
-  assert.ok(init.indexOf('. /opt/pinvou/init-databases.sh') < init.indexOf('set -C; printf'));
+  const sharedInitIndex = init.indexOf('. /opt/pinvou/init-databases.sh');
+  const encodingGateIndex = init.indexOf('db_utf8 "$POSTGRES_USER"');
+  const completionMarkerIndex = init.indexOf('set -C; printf');
+  assert.ok(sharedInitIndex >= 0);
+  assert.ok(encodingGateIndex >= 0);
+  assert.ok(completionMarkerIndex >= 0);
+  assert.ok(sharedInitIndex < completionMarkerIndex);
+  assert.ok(encodingGateIndex < completionMarkerIndex);
   assert.match(init, /sync "\$PGDATA\/\.pinvou-bootstrap-complete"/);
-  assert.match(read('deploy/production/postgres-health.sh'), /db_ready[\s\S]*SELECT 1/);
+  assert.match(read('deploy/production/postgres-health.sh'), /db_ready[\s\S]*SELECT 1[\s\S]*db_utf8 account_platform_admin/);
   const shared = read('deploy/compose/init-databases.sh');
   assert.equal((shared.match(/\\getenv /g) || []).length, 9);
   assert.doesNotMatch(shared, /--set=\w*password=/);

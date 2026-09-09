@@ -8,6 +8,12 @@
 
 ## PostgreSQL 投递约束
 
+现有正式集群编码整改与保全切换按
+[正式 PostgreSQL UTF8 保全迁移与切换](../../docs/production-postgres-utf8-cutover.md) 执行。
+业务数据库必须为 UTF8；`SQL_ASCII` 数据目录不得通过启动或健康门禁。
+部署前运行 `npm --prefix account-platform run check:production-postgres`；对实际渲染配置可将
+`docker compose config --format json` 的结果通过标准输入交给 `node scripts/account-platform-postgres-compose-check.mjs -`。
+
 - `POSTGRES_IMAGE` 使用独立核验的 PostgreSQL 17 不可变镜像摘要/本机 image ID，
   预先导入，禁止 latest/可变 tag 和运行时拉取。2026-09-08 已用 17.11 重跑隔离配置验证；
   各版本及独立摘要见安全设施文档 D3 前置验收记录，不能把历史缓存版本叫作最新版。

@@ -32,11 +32,18 @@ db_control_id() {
   case "$DB_CONTROL_ID" in ''|*[!0-9]*) db_fail ;; esac
 }
 
+db_utf8() {
+  [ "$#" -eq 1 ] || db_fail
+  [ -n "$1" ] || db_fail
+  [ "$(psql -X -At --set=ON_ERROR_STOP=1 -h /var/run/postgresql -U "$1" -d postgres -c \
+    "SELECT count(*)=8 AND bool_and(datname=ANY(ARRAY['postgres','template0','template1','account_platform_account','account_platform_billing','account_platform_token','account_platform_newapi','account_platform_keycloak'])) AND bool_and(pg_encoding_to_char(encoding)='UTF8' AND datcollate='C' AND datctype='C') FROM pg_database" 2>/dev/null)" = 't' ] || db_fail
+}
+
 db_ready() {
   db_private_file "$PGDATA/.pinvou-bootstrap-complete"
   [ "$(wc -c < "$PGDATA/.pinvou-bootstrap-complete")" -le 80 ] || db_fail
   db_control_id
-  [ "$(cat "$PGDATA/.pinvou-bootstrap-complete")" = "pinvou-production-postgres-v1 $DB_CONTROL_ID" ] || db_fail
+  [ "$(cat "$PGDATA/.pinvou-bootstrap-complete")" = "pinvou-production-postgres-v2-utf8 $DB_CONTROL_ID" ] || db_fail
 }
 
 [ "$(id -u):$(id -g)" = '999:999' ] || db_fail
