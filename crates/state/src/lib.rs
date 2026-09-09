@@ -75,6 +75,8 @@ pub struct ThreadMetadata {
     pub path: Option<PathBuf>,
     /// Working directory that was active when the thread was created.
     pub cwd: PathBuf,
+    /// Workspace roots attached to the thread; `cwd` is always the primary root.
+    pub workspace_roots: Vec<PathBuf>,
     /// Version of the CLI that created this thread.
     pub cli_version: String,
     /// How this session was initiated.
@@ -636,6 +638,25 @@ impl StateStore {
             ))
             .context("failed to initialize thread goal continuation schema")?;
         }
+        if user_version < 5 {
+            // Same restore/race guard as the v0 block: the column may
+            // already exist even though the header predates version 5.
+            let add_workspace_roots = if column_exists(conn, "threads", "workspace_roots")? {
+                ""
+            } else {
+                "ALTER TABLE threads\n                    ADD COLUMN workspace_roots TEXT NOT NULL DEFAULT '[]';"
+            };
+            conn.execute_batch(&format!(
+                r#"
+                BEGIN;
+                {add_workspace_roots}
+
+                PRAGMA user_version = 5;
+                COMMIT;
+                "#
+            ))
+            .context("failed to initialize thread workspace roots schema")?;
+        }
         Ok(())
     }
 
@@ -650,11 +671,11 @@ impl StateStore {
             INSERT INTO threads (
                 id, rollout_path, preview, ephemeral, model_provider, created_at, updated_at, status, path, cwd,
                 cli_version, source, title, sandbox_policy, approval_mode, archived, archived_at,
-                git_sha, git_branch, git_origin_url, memory_mode
+                git_sha, git_branch, git_origin_url, memory_mode, workspace_roots
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                 ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20, ?21
+                ?18, ?19, ?20, ?21, ?22
             )
             ON CONFLICT(id) DO UPDATE SET
                 rollout_path=excluded.rollout_path,
@@ -676,7 +697,8 @@ impl StateStore {
                 git_sha=excluded.git_sha,
                 git_branch=excluded.git_branch,
                 git_origin_url=excluded.git_origin_url,
-                memory_mode=excluded.memory_mode
+                memory_mode=excluded.memory_mode,
+                workspace_roots=excluded.workspace_roots
             "#,
             params![
                 thread.id,
@@ -700,6 +722,8 @@ impl StateStore {
                 thread.git_branch,
                 thread.git_origin_url,
                 thread.memory_mode,
+                serde_json::to_string(&thread.workspace_roots)
+                    .unwrap_or_else(|_| "[]".to_string()),
             ],
         )
         .context("failed to upsert thread metadata")?;
@@ -722,7 +746,7 @@ impl StateStore {
             r#"
             SELECT id, rollout_path, preview, ephemeral, model_provider, created_at, updated_at, status, path, cwd,
                    cli_version, source, title, sandbox_policy, approval_mode, archived, archived_at,
-                   git_sha, git_branch, git_origin_url, memory_mode, current_leaf_id
+                   git_sha, git_branch, git_origin_url, memory_mode, current_leaf_id, workspace_roots
             FROM threads
             WHERE id = ?1
             "#,
@@ -740,9 +764,9 @@ impl StateStore {
     pub fn list_threads(&self, filters: ThreadListFilters) -> Result<Vec<ThreadMetadata>> {
         let conn = self.conn()?;
         let sql = if filters.include_archived {
-            "SELECT id, rollout_path, preview, ephemeral, model_provider, created_at, updated_at, status, path, cwd, cli_version, source, title, sandbox_policy, approval_mode, archived, archived_at, git_sha, git_branch, git_origin_url, memory_mode, current_leaf_id FROM threads ORDER BY updated_at DESC LIMIT ?1"
+            "SELECT id, rollout_path, preview, ephemeral, model_provider, created_at, updated_at, status, path, cwd, cli_version, source, title, sandbox_policy, approval_mode, archived, archived_at, git_sha, git_branch, git_origin_url, memory_mode, current_leaf_id, workspace_roots FROM threads ORDER BY updated_at DESC LIMIT ?1"
         } else {
-            "SELECT id, rollout_path, preview, ephemeral, model_provider, created_at, updated_at, status, path, cwd, cli_version, source, title, sandbox_policy, approval_mode, archived, archived_at, git_sha, git_branch, git_origin_url, memory_mode, current_leaf_id FROM threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT ?1"
+            "SELECT id, rollout_path, preview, ephemeral, model_provider, created_at, updated_at, status, path, cwd, cli_version, source, title, sandbox_policy, approval_mode, archived, archived_at, git_sha, git_branch, git_origin_url, memory_mode, current_leaf_id, workspace_roots FROM threads WHERE archived = 0 ORDER BY updated_at DESC LIMIT ?1"
         };
 
         let mut stmt = conn.prepare(sql).context("failed to prepare list query")?;
@@ -2019,7 +2043,13 @@ fn row_to_thread(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadMetadata> {
         git_origin_url: row.get(19)?,
         memory_mode: row.get(20)?,
         current_leaf_id: row.get(21)?,
+        workspace_roots: workspace_roots_from_json(row.get::<_, Option<String>>(22)?),
     })
+}
+
+fn workspace_roots_from_json(raw: Option<String>) -> Vec<PathBuf> {
+    raw.and_then(|value| serde_json::from_str::<Vec<PathBuf>>(&value).ok())
+        .unwrap_or_default()
 }
 
 fn row_to_thread_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadGoalRecord> {
@@ -2076,6 +2106,7 @@ mod tests {
             status: ThreadStatus::Running,
             path: None,
             cwd: PathBuf::from("/tmp/codewhale"),
+            workspace_roots: Vec::new(),
             cli_version: "0.0.0-test".to_string(),
             source: SessionSource::Interactive,
             name: None,
@@ -2386,6 +2417,108 @@ mod tests {
         assert!(persisted.is_some());
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migration_to_workspace_roots_is_idempotent() {
+        // A v4 database must gain the workspace_roots column exactly once;
+        // reopening with a stale header re-runs the guarded ALTER without
+        // aborting on "duplicate column name".
+        let dir = temp_state_dir("migration-v5-idempotent");
+        let db_path = dir.join("state.db");
+        drop(StateStore::open(Some(db_path.clone())).expect("initial open"));
+        {
+            let conn = Connection::open(&db_path).expect("raw connection");
+            conn.pragma_update(None, "user_version", 4)
+                .expect("reset user_version to v4");
+        }
+
+        let store = StateStore::open(Some(db_path.clone())).expect("reopen with v4 header");
+        let mut thread = test_thread("thread-v5");
+        thread.workspace_roots = vec![PathBuf::from("/tmp/codewhale")];
+        store
+            .upsert_thread(&thread)
+            .expect("write after guarded v5 migration");
+
+        drop(store);
+        let store = StateStore::open(Some(db_path)).expect("third open");
+        let persisted = store
+            .get_thread("thread-v5")
+            .expect("read after reopen")
+            .expect("thread persisted");
+        assert_eq!(
+            persisted.workspace_roots,
+            vec![PathBuf::from("/tmp/codewhale")]
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workspace_roots_round_trip_and_listing() {
+        let store = temp_state_store("workspace-roots-round-trip");
+        let mut thread = test_thread("thread-roots");
+        thread.workspace_roots = vec![
+            PathBuf::from("/tmp/codewhale"),
+            PathBuf::from("/tmp/shared-lib"),
+        ];
+        store.upsert_thread(&thread).expect("upsert thread");
+
+        let loaded = store
+            .get_thread("thread-roots")
+            .expect("read thread")
+            .expect("thread must exist");
+        assert_eq!(loaded.workspace_roots, thread.workspace_roots);
+
+        let listed = store
+            .list_threads(ThreadListFilters {
+                include_archived: false,
+                limit: Some(10),
+            })
+            .expect("list threads");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].workspace_roots, thread.workspace_roots);
+
+        // Replacing the root set persists through upsert conflict update.
+        let mut updated = loaded;
+        updated.workspace_roots = vec![PathBuf::from("/tmp/codewhale")];
+        store.upsert_thread(&updated).expect("re-upsert thread");
+        let reloaded = store
+            .get_thread("thread-roots")
+            .expect("read thread")
+            .expect("thread must exist");
+        assert_eq!(
+            reloaded.workspace_roots,
+            vec![PathBuf::from("/tmp/codewhale")]
+        );
+    }
+
+    #[test]
+    fn workspace_roots_default_for_rows_predating_the_column() {
+        // A row inserted without the new column (or holding a value written
+        // by an older writer) must decode to an empty root set, not error.
+        let store = temp_state_store("workspace-roots-default");
+        store
+            .upsert_thread(&test_thread("thread-legacy"))
+            .expect("upsert thread");
+        let loaded = store
+            .get_thread("thread-legacy")
+            .expect("read thread")
+            .expect("thread must exist");
+        assert!(loaded.workspace_roots.is_empty());
+    }
+
+    #[test]
+    fn workspace_roots_from_json_tolerates_missing_and_malformed_values() {
+        assert!(workspace_roots_from_json(None).is_empty());
+        assert!(workspace_roots_from_json(Some(String::new())).is_empty());
+        assert!(workspace_roots_from_json(Some("not-json".to_string())).is_empty());
+        assert!(workspace_roots_from_json(Some("{}".to_string())).is_empty());
+        assert!(workspace_roots_from_json(Some("null".to_string())).is_empty());
+        assert_eq!(
+            workspace_roots_from_json(Some(r#"["/a","/b"]"#.to_string())),
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
     }
 
     #[test]
