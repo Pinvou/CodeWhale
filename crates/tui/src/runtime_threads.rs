@@ -8047,6 +8047,7 @@ impl RuntimeThreadManager {
                 model: route_model.clone(),
                 active_route_limits: route_limits,
                 workspace: thread.workspace.clone(),
+                workspace_roots: thread.workspace_roots.clone(),
                 session_id: None,
                 subagent_state_root: None,
                 plugin_registry: thread_plugin_registry.clone(),

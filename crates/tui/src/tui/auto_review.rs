@@ -194,6 +194,7 @@ impl<'a> AutoReviewContext<'a> {
         approval_mode: ApprovalMode,
         workspace_trusted: bool,
         workspace: Option<&std::path::Path>,
+        workspace_roots: &[std::path::PathBuf],
     ) -> Self {
         let category = get_tool_category_for_call(tool_name, params);
         let risk = classify_risk(tool_name, category, params);
@@ -212,7 +213,9 @@ impl<'a> AutoReviewContext<'a> {
                 .zip(file_write_target_paths(tool_name, params))
                 .is_some_and(|(workspace, paths)| {
                     crate::core::authority::paths_within_workspace_write_carve_out(
-                        workspace, &paths,
+                        workspace,
+                        workspace_roots,
+                        &paths,
                     )
                 }),
         }
@@ -1024,7 +1027,15 @@ mod tests {
         run_origin: RunOrigin,
         approval_mode: ApprovalMode,
     ) -> AutoReviewContext<'_> {
-        AutoReviewContext::from_tool_call(tool_name, &params, run_origin, approval_mode, true, None)
+        AutoReviewContext::from_tool_call(
+            tool_name,
+            &params,
+            run_origin,
+            approval_mode,
+            true,
+            None,
+            &[],
+        )
     }
 
     fn assert_safety_gate(decision: &AutoReviewDecision) {
@@ -1081,6 +1092,7 @@ mod tests {
             ApprovalMode::Auto,
             true,
             None,
+            &[],
         );
 
         let decision = policy.evaluate(&ctx);
@@ -1508,6 +1520,7 @@ mod tests {
             ApprovalMode::Suggest,
             true,
             None,
+            &[],
         );
         let decision = policy.evaluate(&ctx);
 
@@ -1563,6 +1576,7 @@ mod tests {
                 ApprovalMode::Auto,
                 true,
                 None,
+                &[],
             );
             assert_eq!(context.tool_name, tool_name);
             assert_eq!(context.category, category, "{tool_name}");
@@ -1630,6 +1644,7 @@ mod tests {
             ApprovalMode::Auto,
             true,
             None,
+            &[],
         );
         let text = build_reviewer_context(
             &ctx,

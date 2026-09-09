@@ -75,6 +75,58 @@ fn test_tool_context_resolve_path_normalizes_parent() {
 }
 
 #[test]
+fn test_tool_context_resolve_path_allows_additional_workspace_roots() {
+    let workspace = tempdir().expect("workspace tempdir");
+    let shared = tempdir().expect("shared root tempdir");
+    std::fs::write(shared.path().join("lib.rs"), "// shared\n").expect("write");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![shared.path().to_path_buf()]);
+
+    // Existing and not-yet-existing files under an additional root resolve.
+    let existing = ctx
+        .resolve_path(shared.path().join("lib.rs").to_string_lossy().as_ref())
+        .expect("existing file under additional root");
+    assert!(existing.ends_with("lib.rs"));
+    let created = ctx
+        .resolve_path(
+            shared
+                .path()
+                .join("new/dir/file.rs")
+                .to_string_lossy()
+                .as_ref(),
+        )
+        .expect("new file under additional root");
+    assert!(created.ends_with("file.rs"));
+
+    // A genuine escape is still denied, and the same path is denied when the
+    // root set is empty (the historical single-root boundary).
+    let escape = ctx.resolve_path("/etc/passwd");
+    assert!(matches!(escape, Err(ToolError::PathEscape { .. })));
+    let single_root = ToolContext::new(workspace.path().to_path_buf());
+    let denied = single_root.resolve_path(shared.path().join("lib.rs").to_string_lossy().as_ref());
+    assert!(matches!(denied, Err(ToolError::PathEscape { .. })));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_tool_context_resolve_path_follow_symlinks_spans_additional_roots() {
+    let workspace = tempdir().expect("workspace tempdir");
+    let shared = tempdir().expect("shared root tempdir");
+    let outside = tempdir().expect("outside tempdir");
+    symlink(outside.path(), shared.path().join("link-out")).expect("symlink");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![shared.path().to_path_buf()])
+        .with_follow_symlinks(true);
+
+    // In follow-symlinks mode the symlink's location is the gate; a link
+    // inside an additional root is accepted just like one in the primary.
+    let resolved = ctx
+        .resolve_path(shared.path().join("link-out").to_string_lossy().as_ref())
+        .expect("symlink inside additional root");
+    assert!(resolved.ends_with("link-out") || resolved == outside.path().canonicalize().unwrap());
+}
+
+#[test]
 fn test_tool_context_trust_mode() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path().to_path_buf()).with_trust_mode(true);
