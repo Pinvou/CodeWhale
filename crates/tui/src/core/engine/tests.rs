@@ -8740,7 +8740,7 @@ fn non_bypassable_registered_tools_auto_approve_in_full_access() {
     // Upstream comparison: the shared resolver still returns "do not prompt"
     // for Bypass. Pinvou's execution boundary deliberately turns that result
     // into a denial via `registered_tool_blocked_in_full_access`; the
-    // fork-policy §3.4 integration test below records that reversal.
+    // result-level integration test below records that registered reversal.
     // Upstream #3866's resolver contract maps these holds to unprompted in
     // Full Access while Ask still prompts. The fork keeps that shared helper
     // unchanged and adds its stricter denial only at final engine dispatch.
@@ -12356,7 +12356,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn full_access_blocks_non_bypassable_registered_tools_without_prompting() {
-    // Fork-policy §3.4: this intentionally reverses upstream v0.9.12's
+    // This intentionally reverses upstream v0.9.12's
     // `full_access_auto_approves_non_bypassable_registered_tools`. Pinvou
     // treats a tool that requires an explicit human decision as unavailable
     // in Full Access, whose posture cannot open an approval prompt.

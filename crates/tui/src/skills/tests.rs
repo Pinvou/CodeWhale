@@ -1131,7 +1131,7 @@ fn discover_for_workspace_and_dir_merges_workspace_and_configured_sources() {
 
 #[test]
 fn forkguard_explicit_skills_dir_excludes_ambient_workspace_sources() {
-    // Fork-policy §3.4: this is an additional explicit-host path, not a
+    // This is an additional registered explicit-host path, not a
     // reversal of the upstream default merge test above. Pinvou uses it to
     // keep ambient workspace roots outside the reviewed Skill authority.
     let tmpdir = TempDir::new().unwrap();

@@ -2043,9 +2043,9 @@ mod tests {
 
     #[test]
     fn forkguard_system_prompt_uses_only_explicit_configured_skills_dir() {
-        // Fork-policy §3.4: the upstream default merge contract above still
-        // holds. Pinvou selects this separate, explicit-host mode so ambient
-        // workspace Skills cannot join the host-reviewed Skill authority.
+        // The registered Pinvou product boundary keeps the upstream default
+        // merge contract above intact while selecting a separate explicit-host
+        // mode so ambient workspace Skills cannot join the reviewed authority.
         let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         let _home = ScopedHome::set(tmp.path().join("home"));
