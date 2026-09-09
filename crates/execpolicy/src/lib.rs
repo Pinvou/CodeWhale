@@ -118,8 +118,11 @@ pub struct ToolAskRule {
     /// cannot silently authorize a later invocation with extra arguments.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub command_exact: bool,
-    /// Optional workspace-relative file path matched exactly after
-    /// normalization.
+    /// Optional file path matched exactly. A workspace-relative rule
+    /// normalizes against the call's workspace; a ROOTED rule (leading `/`,
+    /// `~/`, or a Windows drive) matches the call path exactly after
+    /// separator and case folding, so it can pin locations outside the
+    /// workspace. Traversal segments never match on either channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Optional absolute workspace root that limits this rule to one repo.
@@ -1621,8 +1624,8 @@ mod tests {
             // `dd` has no dash flags at all: its operands are `key=value`.
             "dd if=/dev/zero of=/dev/sda",
             "dd if=boot.img bs=1M of=/dev/sda",
-            // A trailing `*` is allowed and degrades to plain prefix
-            // semantics: once reached, the rule matches.
+            // Deny rules are prefix matches: the anchored tail still denies
+            // when the command continues past it.
             "grep -i root ~/.ssh/id_rsa > /tmp/out",
         ] {
             let decision = engine.check(ctx(command, AskForApproval::Never)).unwrap();
