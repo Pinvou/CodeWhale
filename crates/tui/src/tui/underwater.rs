@@ -879,6 +879,7 @@ fn filesystem_scope_notice(app: &App) -> Option<Cow<'static, str>> {
         app.approval_mode,
         app.configured_sandbox_mode.as_deref(),
         &app.workspace,
+        &[],
         crate::core::authority::SandboxNetworkAccess::from_config(app.configured_sandbox_network),
     );
     // A policy is an intent; enforcement needs a backend. On default Linux

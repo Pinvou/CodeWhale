@@ -700,6 +700,7 @@ fn prepare_acp_tool_admission(
         &call.name,
         &prepared.input,
         workspace,
+        &registry.context().workspace_roots,
         approval_mode,
     )
     .or_else(|| {
@@ -708,6 +709,7 @@ fn prepare_acp_tool_admission(
             &call.name,
             &prepared.input,
             workspace,
+            &registry.context().workspace_roots,
             approval_mode,
         )
     });
@@ -732,6 +734,7 @@ fn prepare_acp_tool_admission(
         approval_mode,
         crate::config::is_workspace_trusted(workspace),
         Some(workspace),
+        &[],
     );
     let (auto_review, _audit) =
         auto_review_plan_decision_for_context(&config.auto_review_policy(), &review_context);
@@ -2102,6 +2105,7 @@ fn build_acp_tool_registry(
         crate::tui::approval::ApprovalMode::Suggest,
         config.sandbox_mode.as_deref(),
         workspace,
+        &[],
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
     );
     let mut context = ToolContext::new(workspace)

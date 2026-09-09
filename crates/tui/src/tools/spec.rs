@@ -603,6 +603,9 @@ pub struct ToolExecutionState {
     pub(crate) tool_authority: Option<Arc<ToolAuthorityEnvelope>>,
     /// Whether to allow paths outside workspace
     pub trust_mode: bool,
+    /// Additional workspace roots tools may touch; `workspace` is always the
+    /// primary root. Empty means the historical single-root boundary.
+    pub workspace_roots: Vec<PathBuf>,
     /// Current sandbox policy
     #[allow(dead_code)]
     pub sandbox_policy: SandboxPolicy,
@@ -779,6 +782,7 @@ impl ToolContext {
                 origin_turn_id: None,
                 tool_authority,
                 trust_mode,
+                workspace_roots: Vec::new(),
                 sandbox_policy: SandboxPolicy::None,
                 notes_path: notes_path.into(),
                 mcp_config_path: mcp_config_path.into(),
@@ -831,6 +835,15 @@ impl ToolContext {
     #[must_use]
     pub fn with_network_policy(mut self, policy: NetworkPolicyDecider) -> Self {
         self.network_policy = Some(policy);
+        self
+    }
+
+    /// Attach the session's additional workspace roots. The primary root
+    /// stays `workspace`; boundary checks accept a path contained in any
+    /// root. An empty set keeps the historical single-root boundary.
+    #[must_use]
+    pub fn with_workspace_roots(mut self, workspace_roots: Vec<PathBuf>) -> Self {
+        self.workspace_roots = workspace_roots;
         self
     }
 
@@ -1058,6 +1071,20 @@ impl ToolContext {
     /// let path = ctx.resolve_path("README.md")?;
     /// # Ok::<(), crate::tools::spec::ToolError>(())
     /// ```
+    /// Boundary roots for escape checks: the primary workspace followed by
+    /// any additional roots, each paired with its canonical (or raw fallback)
+    /// form. With no additional roots configured this is exactly the primary
+    /// root, so single-root sessions take the historical code path.
+    fn boundary_roots(&self) -> Vec<(PathBuf, PathBuf)> {
+        codewhale_core::normalize_workspace_roots(&self.workspace, &self.workspace_roots)
+            .into_iter()
+            .map(|root| {
+                let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
+                (root, canonical)
+            })
+            .collect()
+    }
+
     pub fn resolve_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
         let candidate = if std::path::Path::new(raw).is_absolute() {
             PathBuf::from(raw)
@@ -1071,33 +1098,30 @@ impl ToolContext {
             return Ok(candidate.canonicalize().unwrap_or(candidate));
         }
 
-        // Try to canonicalize the workspace
-        let workspace_canonical = self
-            .workspace
-            .canonicalize()
-            .unwrap_or_else(|_| self.workspace.clone());
+        let boundary_roots = self.boundary_roots();
+        let candidate_normalized = normalize_path(&candidate);
 
         // When follow_symlinks is enabled, check the non-canonical (symlink)
-        // path against the workspace first. A symlink inside the workspace
-        // that resolves outside is allowed — the symlink itself is the gate.
+        // path against each root first. A symlink inside a root that resolves
+        // outside is allowed — the symlink itself is the gate.
         if self.follow_symlinks {
-            let candidate_normalized = normalize_path(&candidate);
-            let workspace_normalized = normalize_path(&self.workspace);
-            let workspace_canonical_normalized = normalize_path(&workspace_canonical);
-
-            if candidate_normalized.starts_with(&workspace_normalized)
-                || candidate_normalized.starts_with(&workspace_canonical_normalized)
-            {
-                // The symlink (or plain path) is inside the workspace.
-                // Return the canonicalized target so file I/O works correctly.
-                if candidate.exists() {
-                    return Ok(candidate.canonicalize().unwrap_or(candidate));
+            for (root, root_canonical) in &boundary_roots {
+                let root_normalized = normalize_path(root);
+                let root_canonical_normalized = normalize_path(root_canonical);
+                if candidate_normalized.starts_with(&root_normalized)
+                    || candidate_normalized.starts_with(&root_canonical_normalized)
+                {
+                    // The symlink (or plain path) is inside this root.
+                    // Return the canonicalized target so file I/O works correctly.
+                    if candidate.exists() {
+                        return Ok(candidate.canonicalize().unwrap_or(candidate));
+                    }
+                    // Non-existent path: canonicalize the deepest existing ancestor
+                    return self.resolve_nonexistent_path(candidate, root_canonical);
                 }
-                // Non-existent path: canonicalize the deepest existing ancestor
-                return self.resolve_nonexistent_path(candidate, &workspace_canonical);
             }
 
-            // Path is outside workspace even before resolving symlinks.
+            // Path is outside every root even before resolving symlinks.
             // Fall through to the standard escape check.
         }
 
@@ -1105,23 +1129,21 @@ impl ToolContext {
         // This handles symlinks like /var -> /private/var on macOS
         let candidate_canonical = candidate
             .canonicalize()
-            .unwrap_or_else(|_| normalize_path(&candidate));
-        let workspace_normalized = normalize_path(&workspace_canonical);
+            .unwrap_or_else(|_| candidate_normalized.clone());
 
-        // Check if the candidate is under the workspace (comparing canonical paths)
-        if !candidate_canonical.starts_with(&workspace_normalized) {
-            // Also try with non-canonical workspace for cases where workspace itself
-            // hasn't been canonicalized yet
-            let workspace_plain = normalize_path(&self.workspace);
-            let candidate_normalized = normalize_path(&candidate);
-            if !candidate_normalized.starts_with(&workspace_plain)
-                && !self.is_trusted_external_path(&candidate_canonical)
-                && !self.is_trusted_external_path(&candidate_normalized)
-            {
-                return Err(ToolError::PathEscape {
-                    path: candidate_canonical,
-                });
-            }
+        // The candidate must sit under at least one root (comparing canonical
+        // paths, then plain paths for roots that do not canonicalize yet).
+        let contained = boundary_roots.iter().any(|(root, root_canonical)| {
+            candidate_canonical.starts_with(normalize_path(root_canonical))
+                || candidate_normalized.starts_with(normalize_path(root))
+        });
+        if !contained
+            && !self.is_trusted_external_path(&candidate_canonical)
+            && !self.is_trusted_external_path(&candidate_normalized)
+        {
+            return Err(ToolError::PathEscape {
+                path: candidate_canonical,
+            });
         }
 
         // For existing paths, use canonicalize directly
@@ -1134,16 +1156,31 @@ impl ToolContext {
                 ))
             })?;
 
-            if !canonical.starts_with(&workspace_canonical)
-                && !self.is_trusted_external_path(&canonical)
-            {
+            let under_root = boundary_roots
+                .iter()
+                .any(|(_, root_canonical)| canonical.starts_with(root_canonical));
+            if !under_root && !self.is_trusted_external_path(&canonical) {
                 return Err(ToolError::PathEscape { path: canonical });
             }
 
             return Ok(canonical);
         }
 
-        self.resolve_nonexistent_path(candidate, &workspace_canonical)
+        // Non-existent path: resolve against the containing root's boundary;
+        // `resolve_nonexistent_path` re-checks trusted external paths itself.
+        let boundary = boundary_roots
+            .iter()
+            .find(|(root, root_canonical)| {
+                candidate_canonical.starts_with(normalize_path(root_canonical))
+                    || candidate_normalized.starts_with(normalize_path(root))
+            })
+            .map(|(_, root_canonical)| root_canonical.clone())
+            .unwrap_or_else(|| {
+                self.workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.workspace.clone())
+            });
+        self.resolve_nonexistent_path(candidate, &boundary)
     }
 
     /// Resolve a non-existent path by canonicalizing its deepest existing

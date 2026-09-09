@@ -8541,6 +8541,7 @@ fn auto_review_plan_decision(
         approval_mode,
         workspace_trusted,
         workspace,
+        &[],
     );
     auto_review_plan_decision_for_context(policy, &context)
 }
@@ -8888,6 +8889,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
             ask.1,
             ask.2,
             workspace,
+            &[],
             tool,
             input,
             ApprovalRequirement::Suggest,
@@ -8948,6 +8950,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
                 approval_mode,
                 auto_approve,
                 workspace,
+                &[],
                 "write_file",
                 &json!({"path": "src/main.rs"}),
                 ApprovalRequirement::Suggest,
@@ -8962,6 +8965,7 @@ fn workspace_write_carve_out_covers_the_default_ask_posture_only() {
         ask.1,
         ask.2,
         workspace,
+        &[],
         "write_file",
         &json!({"path": "src/main.rs"}),
         ApprovalRequirement::Required,
@@ -9292,6 +9296,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9315,6 +9320,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Never,
         );
 
@@ -9337,6 +9343,7 @@ fn exec_shell_scenario() {
             "exec_shell",
             &json!({"command": "git status"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9356,6 +9363,7 @@ fn canonical_bash_run_honors_legacy_typed_ask_rules() {
         "Bash",
         &json!({"action": "run", "command": "cargo test --workspace"}),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Auto,
     );
 
@@ -9384,6 +9392,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         Some(ToolAskRuleDecision::Allow)
@@ -9394,6 +9403,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test --workspace"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         None
@@ -9404,6 +9414,7 @@ fn exec_shell_allow_rule_decision_allows_only_exact_command_in_scoped_repo() {
             "exec_shell",
             &json!({"command": "cargo test"}),
             Path::new("/other"),
+            &[],
             crate::tui::approval::ApprovalMode::Suggest,
         ),
         None
@@ -9425,6 +9436,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9448,6 +9460,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "/repo/secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9471,6 +9484,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "secrets/api_key.txt"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Never,
         );
 
@@ -9493,6 +9507,7 @@ fn file_ask_scenario() {
             "read_file",
             &json!({"path": "docs/readme.md"}),
             Path::new("/repo"),
+            &[],
             crate::tui::approval::ApprovalMode::Auto,
         );
 
@@ -9512,6 +9527,7 @@ fn canonical_file_action_honors_legacy_path_ask_rules() {
         "File",
         &json!({"action": "write", "path": "src/lib.rs", "content": "new\n"}),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Auto,
     );
 
@@ -9549,6 +9565,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Suggest,
     );
     assert_eq!(fully_allowed, Some(ToolAskRuleDecision::Allow));
@@ -9563,6 +9580,7 @@ fn apply_patch_allow_requires_every_touched_path_to_match() {
             ]
         }),
         Path::new("/repo"),
+        &[],
         crate::tui::approval::ApprovalMode::Suggest,
     );
     assert_eq!(partially_allowed, None);
@@ -12453,6 +12471,7 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
             "write_file",
             &tool_input,
             workspace.path(),
+            &[],
             crate::tui::approval::ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
@@ -12745,6 +12764,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             "exec_shell",
             &tool_input,
             workspace.path(),
+            &[],
             crate::tui::approval::ApprovalMode::Bypass,
         ),
         Some(ToolAskRuleDecision::Allow),
@@ -14113,6 +14133,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
             ApprovalMode::Suggest,
             None,
             &workspace,
+            &[],
             SandboxNetworkAccess::Restricted,
         ),
         SandboxPolicy::ReadOnly
@@ -14124,6 +14145,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
         ApprovalMode::Suggest,
         None,
         &workspace,
+        &[],
         SandboxNetworkAccess::Restricted,
     ) {
         SandboxPolicy::WorkspaceWrite {
@@ -14146,6 +14168,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
         ApprovalMode::Suggest,
         None,
         &workspace,
+        &[],
         SandboxNetworkAccess::Allowed,
     ) {
         SandboxPolicy::WorkspaceWrite { network_access, .. } => {
@@ -14164,6 +14187,7 @@ fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
             ApprovalMode::Bypass,
             None,
             &workspace,
+            &[],
             SandboxNetworkAccess::Restricted,
         ),
         SandboxPolicy::DangerFullAccess
@@ -15111,6 +15135,8 @@ async fn sync_session_without_prompt_repins_full_system_prompt_on_next_turn() {
             system_prompt_override: false,
             model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
             workspace: workspace.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+
             mode: AppMode::Agent,
         })
         .await
@@ -15192,6 +15218,8 @@ async fn sync_session_same_id_does_not_finalize_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
+
             mode: AppMode::Agent,
         })
         .await
@@ -15212,6 +15240,8 @@ async fn sync_session_same_id_does_not_finalize_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
+
             mode: AppMode::Agent,
         })
         .await
@@ -15253,6 +15283,8 @@ async fn sync_session_different_id_finalizes_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
+
             mode: AppMode::Agent,
         })
         .await
@@ -15276,6 +15308,8 @@ async fn sync_session_different_id_finalizes_live_worker() {
             system_prompt_override: false,
             model: "deepseek-v4-pro".to_string(),
             workspace: workspace.clone(),
+            workspace_roots: Vec::new(),
+
             mode: AppMode::Agent,
         })
         .await
@@ -15332,6 +15366,8 @@ async fn sync_session_migrates_one_checkpoint_and_strips_its_system_carrier() {
                 system_prompt_override: true,
                 model: "deepseek-v4-pro".to_string(),
                 workspace: tmp.path().to_path_buf(),
+                workspace_roots: Vec::new(),
+
                 mode: AppMode::Agent,
             })
             .await
@@ -15474,6 +15510,107 @@ async fn session_snapshot_omits_id_for_legacy_root_custom_route() {
 
     assert_eq!(snapshot.model_provider, "custom");
     assert_eq!(snapshot.model_provider_id, None);
+    run.abort();
+}
+
+#[test]
+fn tool_context_for_turn_materializes_session_workspace_roots() {
+    let tmp = tempdir().expect("tempdir");
+    let shared = tempdir().expect("shared root");
+    let expected = vec![tmp.path().to_path_buf(), shared.path().to_path_buf()];
+
+    let mut config = deterministic_engine_config(tmp.path());
+    config.workspace_roots = vec![shared.path().to_path_buf()];
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    let ctx = engine.build_tool_context(AppMode::Agent, false);
+    assert_eq!(ctx.workspace_roots, expected);
+    match &ctx.elevated_sandbox_policy {
+        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) => {
+            assert_eq!(writable_roots, &expected);
+        }
+        other => panic!("agent turn must carry a workspace-write policy: {other:?}"),
+    }
+
+    // No configured roots: the session degenerates to the primary root and
+    // the materialized policy is byte-identical to the historical shape.
+    let (engine, _handle) =
+        Engine::new(deterministic_engine_config(tmp.path()), &Config::default());
+    let ctx = engine.build_tool_context(AppMode::Agent, false);
+    assert_eq!(ctx.workspace_roots, vec![tmp.path().to_path_buf()]);
+    match &ctx.elevated_sandbox_policy {
+        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite { writable_roots, .. }) => {
+            assert_eq!(writable_roots, &vec![tmp.path().to_path_buf()]);
+        }
+        other => panic!("agent turn must carry a workspace-write policy: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sync_session_replaces_workspace_roots_for_the_next_turn() {
+    let tmp = tempdir().expect("tempdir");
+    let shared = tempdir().expect("shared root");
+    let (engine, handle) = Engine::new(deterministic_engine_config(tmp.path()), &Config::default());
+    let run = tokio::spawn(engine.run());
+
+    // A roots-only sync (same primary workspace) swaps the materialized set.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("roots-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: vec![shared.path().to_path_buf()],
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert_eq!(
+        snapshot.workspace_roots,
+        vec![tmp.path().to_path_buf(), shared.path().to_path_buf()],
+        "next turn must materialize the replaced root set"
+    );
+
+    // A later sync with no roots configured falls back to the primary root.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("roots-session".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            workspace_roots: Vec::new(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session without roots");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert_eq!(snapshot.workspace_roots, vec![tmp.path().to_path_buf()]);
+
     run.abort();
 }
 

@@ -713,6 +713,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         model: app.model.clone(),
         active_route_limits: app.active_route_limits,
         workspace: app.workspace.clone(),
+        workspace_roots: Vec::new(),
         // The App owns the session id (claimed before the Runtime store lock
         // and used for every checkpoint/autosave); the engine adopts it so the
         // engine conversation and the persisted session are the same record.

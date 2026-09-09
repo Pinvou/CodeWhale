@@ -149,6 +149,7 @@ fn authorization_order_contract_matches_documented_precedence() {
                 path: None,
                 ask_for_approval: case.approval,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .unwrap_or_else(|error| panic!("{}: policy check failed: {error}", case.name));
 

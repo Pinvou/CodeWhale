@@ -1393,6 +1393,7 @@ impl Runtime {
             path: policy_path.as_deref(),
             ask_for_approval: approval_mode,
             sandbox_mode: None,
+            workspace_roots: Vec::new(),
         })?;
         let precheck = policy_precheck_payload(&decision, &command, &policy_cwd, execution_kind);
         let response_id = format!("tool-{}", Uuid::new_v4());

@@ -11952,6 +11952,7 @@ async fn build_direct_workflow_tool(
         },
         config.sandbox_mode.as_deref(),
         workspace,
+        &[],
         crate::core::authority::SandboxNetworkAccess::from_config(config.sandbox_network_access),
     ));
     let network_policy = config.network.clone().map(|network| {

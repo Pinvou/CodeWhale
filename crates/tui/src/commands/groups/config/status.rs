@@ -279,6 +279,7 @@ fn safety_summary(app: &App) -> Cow<'static, str> {
         app.approval_mode,
         app.configured_sandbox_mode.as_deref(),
         &app.workspace,
+        &[],
         crate::core::authority::SandboxNetworkAccess::from_config(app.configured_sandbox_network),
     );
     // The policy is the intent; `sandbox_backend` is what this platform can

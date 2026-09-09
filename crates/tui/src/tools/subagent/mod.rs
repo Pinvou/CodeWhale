@@ -14155,6 +14155,7 @@ impl SubAgentToolRegistry {
             approval_mode,
             workspace_trusted,
             Some(&workspace),
+            &self.gate_runtime.context.workspace_roots,
         );
         let (decision, _audit) = auto_review_plan_decision_for_context(
             &self.gate_runtime.auto_review_policy,
@@ -14535,6 +14536,7 @@ impl SubAgentToolRegistry {
         }
         crate::core::authority::paths_within_workspace_write_carve_out(
             &self.registry.context().workspace,
+            &self.registry.context().workspace_roots,
             &raw_mutation_target_paths(name, input),
         )
     }

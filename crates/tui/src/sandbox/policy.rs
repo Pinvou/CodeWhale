@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 
 use crate::command_safety::SafetyLevel;
 
+/// Symbolic reference to the session's full workspace root set.
+///
+/// Surfaces that mean "every workspace root" rather than the primary cwd
+/// alone carry this symbol; it is materialized into the concrete root list
+/// at each per-turn policy construction point (turn sandbox policy, tool
+/// context, exec-policy checks), so a root-set change made while a session
+/// is running takes effect on the next turn without rewriting persisted
+/// rules or configuration.
+pub const WORKSPACE_ROOTS_SYMBOL: &str = ":workspace_roots";
+
 /// Determines execution restrictions for shell commands.
 ///
 /// The sandbox policy controls filesystem access, network access, and other
