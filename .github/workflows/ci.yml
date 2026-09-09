@@ -654,7 +654,11 @@ jobs:
     # ubuntu-only, so the required "npm wrapper smoke (ubuntu-latest)"
     # context is unaffected. Heavy pull requests execute the Ubuntu smoke
     # here; their branches may not be mirrored to CNB.
-    timeout-minutes: 30
+    # A cold macOS release build can exceed 30 minutes when the optional
+    # sccache service becomes unavailable (the official v0.9.12 release and
+    # Pinvou exact-head verification both hit that path). Keep the smoke
+    # authoritative instead of letting infrastructure cancel it mid-build.
+    timeout-minutes: 60
     runs-on: ${{ needs.changes.outputs.heavy == 'true' && matrix.os || 'ubuntu-latest' }}
     strategy:
       matrix:

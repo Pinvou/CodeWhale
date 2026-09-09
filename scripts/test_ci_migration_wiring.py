@@ -38,6 +38,12 @@ def migration_step_block(ci: str) -> str:
     return ci[step_start:next_step]
 
 
+def npm_wrapper_job_block(ci: str) -> str:
+    start = ci.index("\n  npm-wrapper-smoke:")
+    end = ci.index("\n  mobile-smoke:", start)
+    return ci[start:end]
+
+
 class CiWiringTests(unittest.TestCase):
     def test_boundary_step_still_present(self) -> None:
         ci = load_ci()
@@ -128,6 +134,10 @@ class CiWiringTests(unittest.TestCase):
         self.assertIn("cw-hermetic-home", block)
         self.assertIn("unset CODEWHALE_CONFIG_PATH DEEPSEEK_CONFIG_PATH DEEPSEEK_HOME", block)
         self.assertIn("command_safety auto_review authority sandbox", block)
+
+    def test_npm_wrapper_smoke_allows_a_cold_macos_release_build(self) -> None:
+        block = npm_wrapper_job_block(load_ci())
+        self.assertIn("timeout-minutes: 60", block)
 
     def test_valid_wiring_passes_all_assertions(self) -> None:
         # The live workflow must satisfy every structural invariant above.
