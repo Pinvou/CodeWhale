@@ -10,6 +10,15 @@ use crate::client::ProviderNativeSearchRequest;
 use crate::config::SearchProvider;
 use crate::tools::spec::{ToolContext, ToolError};
 
+const SEARCH_BACKEND_CONFIGURATION_HINT: &str = concat!(
+    "Check network access, or configure `[search] provider` and `[search] api_key` in ",
+    "config.toml. Keyed providers include tavily, bocha, metaso, baidu, volcengine, and ",
+    "sofya; metaso also accepts METASO_API_KEY, baidu accepts BAIDU_SEARCH_API_KEY, ",
+    "volcengine accepts VOLCENGINE_API_KEY / VOLCENGINE_ARK_API_KEY / ARK_API_KEY, and ",
+    "sofya accepts SOFYA_API_KEY. For a keyless route, set ",
+    "`[search] provider = \"firecrawl\"` or `[search] provider = \"bing\"`."
+);
+
 #[async_trait]
 pub(crate) trait SearchBackend: Send + Sync {
     fn id(&self) -> BackendId;
@@ -263,7 +272,7 @@ async fn run_backend_chain(
         .collect::<Vec<_>>()
         .join(", ");
     Err(ToolError::not_available(format!(
-        "web search backends unavailable: {backend_ids}"
+        "web search backends unavailable: {backend_ids}. {SEARCH_BACKEND_CONFIGURATION_HINT}"
     )))
 }
 
@@ -837,7 +846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_unavailable_returns_typed_error_with_backend_ids_only() {
+    async fn all_unavailable_returns_actionable_error_without_private_details() {
         let private_error = "secret provider response";
         let api = FakeBackend {
             id: BackendId::Bocha,
@@ -860,6 +869,23 @@ mod tests {
 
         assert!(matches!(error, ToolError::NotAvailable { .. }));
         assert!(message.contains("bocha, duckduckgo"));
+        for provider in ["tavily", "bocha", "metaso", "baidu", "volcengine"] {
+            assert!(
+                message.contains(provider),
+                "configuration hint must name {provider}: `{message}`"
+            );
+        }
+        assert!(message.contains("[search] provider"));
+        assert!(message.contains("[search] api_key"));
+        assert!(message.contains("config.toml"));
+        assert!(message.contains("METASO_API_KEY"));
+        assert!(message.contains("BAIDU_SEARCH_API_KEY"));
+        assert!(message.contains("VOLCENGINE_API_KEY"));
+        assert!(message.contains("VOLCENGINE_ARK_API_KEY"));
+        assert!(message.contains("ARK_API_KEY"));
+        assert!(message.contains("SOFYA_API_KEY"));
+        assert!(message.contains("provider = \"firecrawl\""));
+        assert!(message.contains("provider = \"bing\""));
         assert!(!message.contains(private_error));
         assert!(!message.contains("different private response"));
     }
