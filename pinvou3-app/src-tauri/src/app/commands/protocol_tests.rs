@@ -311,6 +311,8 @@ command_protocol!(
         "get_memory_overview",
         "list_pending_memory",
         "suggest_memory",
+        "organize_memory",
+        "get_memory_organize_history",
         "confirm_pending_memory",
         "ignore_pending_memory",
         "never_pending_memory",
