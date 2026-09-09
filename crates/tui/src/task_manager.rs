@@ -1611,6 +1611,12 @@ impl TaskManager {
                     .with_context(|| format!("Failed to delete task {}", task_path.display()));
             }
         }
+        // The durable record is gone, so the in-memory state must follow before
+        // artifact cleanup: a cleanup failure may leave orphan files, but never
+        // a live task that the disk no longer knows about.
+        state.tasks.remove(task_id);
+        state.queue.retain(|queued_id| queued_id != task_id);
+        self.persist_queue_locked(&state.queue)?;
         if artifacts_path.exists() {
             fs::remove_dir_all(&artifacts_path).with_context(|| {
                 format!(
@@ -1620,9 +1626,6 @@ impl TaskManager {
             })?;
         }
 
-        state.tasks.remove(task_id);
-        state.queue.retain(|queued_id| queued_id != task_id);
-        self.persist_queue_locked(&state.queue)?;
         Ok(true)
     }
 
@@ -3070,6 +3073,63 @@ mod tests {
         assert!(!artifact_dir.exists());
         assert!(!manager.delete_terminal_task(&task.id).await?);
         manager.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forkguard_terminal_task_delete_artifact_failure_leaves_no_memory_ghost() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        let mut task = sample_task_record();
+        task.id = "task_feedfacefeedface".to_string();
+        task.status = TaskStatus::Completed;
+        task.ended_at = Some(Utc::now());
+        {
+            let mut state = manager.state.lock().await;
+            state.tasks.insert(task.id.clone(), task.clone());
+        }
+        manager.persist_task_locked(&task)?;
+        // A regular file where the artifact directory belongs fails
+        // remove_dir_all on every platform without relying on permission bits
+        // (which a root CI runner would bypass anyway).
+        fs::create_dir_all(&manager.artifacts_dir)?;
+        let orphan_path = manager.artifacts_dir.join(&task.id);
+        fs::write(&orphan_path, "not a directory")?;
+
+        let error = manager
+            .delete_terminal_task(&task.id)
+            .await
+            .expect_err("artifact cleanup failure must still be reported");
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to delete task artifacts"),
+            "{error:#}"
+        );
+
+        // The durable record is gone, so the failure may only leave orphan
+        // files: the in-process ghost must be gone too, and the retry must be
+        // an idempotent no-op instead of a second error.
+        assert!(!manager.tasks_dir.join(format!("{}.json", task.id)).exists());
+        assert!(manager.get_task(&task.id).await.is_err());
+        assert!(!manager.delete_terminal_task(&task.id).await?);
+        assert!(orphan_path.is_file());
+
+        // A restart must observe the same state the failed call left behind.
+        drop(manager);
+        let restarted = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        assert!(restarted.get_task(&task.id).await.is_err());
+        assert!(orphan_path.is_file());
+        restarted.shutdown();
         Ok(())
     }
 
