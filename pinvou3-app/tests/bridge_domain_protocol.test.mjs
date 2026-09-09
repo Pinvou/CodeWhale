@@ -109,7 +109,10 @@ const expectedProtocolHashes = {
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
-  memory: 'd92cbabf27c277a64b743e7af25b48d8b8b65513e33aeb0f38c906d4b300616b',
+  // memory recomputed for the backflowed memory-maintenance feature
+  // (Community #419): organize_memory + get_memory_organize_history invokes
+  // added to bridge/memory.js.
+  memory: 'fc10a0538ac12c7b43b9d14d9846726f5847d1f21d578d1e918b9c68cdca35fd',
   monitor: '01bf9a7c9b9b3f313cf49e975e6503627ff373caed0f4b3be07a6a98492a7c43',
   personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
   remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',

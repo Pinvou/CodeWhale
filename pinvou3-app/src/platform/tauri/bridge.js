@@ -1,4 +1,4 @@
-﻿/**
+/**
  * tauri-bridge.js — Tauri 后端通信桥
  *
  * 封装所有 invoke/listen，维护前端状态，通过 pub/sub 推给 React。
@@ -2444,6 +2444,8 @@
   var confirmMemoryCandidate = memoryFeature.confirmMemoryCandidate;
   var ignoreMemoryCandidate = memoryFeature.ignoreMemoryCandidate;
   var neverMemoryCandidate = memoryFeature.neverMemoryCandidate;
+  var organizeMemory = memoryFeature.organizeMemory;
+  var loadOrganizeHistory = memoryFeature.loadOrganizeHistory;
   var artifactsFeature = installBridgeFeature("artifacts", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, dialogOpen: dialogOpen, basename: basename, isDeliverable: isDeliverable, isAbsPath: isAbsPath, sessionStates: sessionStates, discardManagedAttachment: discardManagedAttachment });
   var artifactInfo = artifactsFeature.artifactInfo;
   var readArtifactText = artifactsFeature.readArtifactText;
@@ -2914,6 +2916,8 @@
       confirmMemoryCandidate: confirmMemoryCandidate,
       ignoreMemoryCandidate: ignoreMemoryCandidate,
       neverMemoryCandidate: neverMemoryCandidate,
+      organizeMemory: organizeMemory,
+      loadOrganizeHistory: loadOrganizeHistory,
     },
     updater: {
       checkForUpdate: checkForUpdate,

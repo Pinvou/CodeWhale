@@ -1430,6 +1430,8 @@ pub fn run() {
             commands::memory::get_memory_overview,
             commands::memory::list_pending_memory,
             commands::memory::suggest_memory,
+            commands::memory::organize_memory,
+            commands::memory::get_memory_organize_history,
             commands::memory::confirm_pending_memory,
             commands::memory::ignore_pending_memory,
             commands::memory::never_pending_memory,
