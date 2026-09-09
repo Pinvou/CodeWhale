@@ -107,6 +107,45 @@ fn test_tool_context_resolve_path_allows_additional_workspace_roots() {
     assert!(matches!(denied, Err(ToolError::PathEscape { .. })));
 }
 
+#[test]
+fn forkguard_workspace_roots_resolve_path_spans_attached_roots() {
+    let workspace = tempdir().expect("workspace tempdir");
+    let attached = tempdir().expect("attached root tempdir");
+    std::fs::write(attached.path().join("lib.rs"), "// attached\n").expect("write");
+    let ctx = ToolContext::new(workspace.path().to_path_buf())
+        .with_workspace_roots(vec![attached.path().to_path_buf()]);
+
+    // Attached root: existing and not-yet-existing targets resolve.
+    assert!(
+        ctx.resolve_path(attached.path().join("lib.rs").to_string_lossy().as_ref())
+            .is_ok()
+    );
+    assert!(
+        ctx.resolve_path(
+            attached
+                .path()
+                .join("new/file.rs")
+                .to_string_lossy()
+                .as_ref()
+        )
+        .is_ok()
+    );
+
+    // A path outside every root still fails closed.
+    assert!(matches!(
+        ctx.resolve_path("/etc/passwd"),
+        Err(ToolError::PathEscape { .. })
+    ));
+
+    // Empty root set = the exact historical single-root boundary: the same
+    // attached-root path is rejected.
+    let single_root = ToolContext::new(workspace.path().to_path_buf());
+    assert!(matches!(
+        single_root.resolve_path(attached.path().join("lib.rs").to_string_lossy().as_ref()),
+        Err(ToolError::PathEscape { .. })
+    ));
+}
+
 #[cfg(unix)]
 #[test]
 fn test_tool_context_resolve_path_follow_symlinks_spans_additional_roots() {

@@ -904,6 +904,89 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn forkguard_workspace_roots_carve_out_spans_attached_roots() {
+        let primary = carve_out_workspace();
+        let attached = carve_out_workspace();
+        let roots = vec![attached.path().to_path_buf()];
+
+        // A write target inside the attached git work tree takes the
+        // carve-out exactly as a primary-root target would.
+        assert!(paths_within_workspace_write_carve_out(
+            primary.path(),
+            &roots,
+            &[attached
+                .path()
+                .join("src/main.rs")
+                .to_string_lossy()
+                .into_owned()],
+        ));
+
+        // The excluded names keep the modal inside attached roots too.
+        for target in [".env", ".git/config", ".codewhale/mcp.json"] {
+            assert!(
+                !paths_within_workspace_write_carve_out(
+                    primary.path(),
+                    &roots,
+                    &[attached.path().join(target).to_string_lossy().into_owned()],
+                ),
+                "{target} must stay excluded under an attached root"
+            );
+        }
+    }
+
+    #[test]
+    fn forkguard_workspace_roots_sandbox_materializes_every_root() {
+        // The symbol is the documented anchor for "the session's full root
+        // set": policy surfaces materialize it per turn into concrete roots.
+        assert_eq!(
+            crate::sandbox::policy::WORKSPACE_ROOTS_SYMBOL,
+            ":workspace_roots"
+        );
+
+        let primary = tempfile::tempdir().expect("primary");
+        let attached = tempfile::tempdir().expect("attached");
+        let roots = vec![attached.path().to_path_buf()];
+        let policy = authority(AppMode::Agent, false, ApprovalMode::Suggest).sandbox_policy(
+            primary.path(),
+            &roots,
+            None,
+            SandboxNetworkAccess::Restricted,
+        );
+
+        let writable: Vec<PathBuf> = policy
+            .get_writable_roots(primary.path())
+            .into_iter()
+            .map(|root| root.root)
+            .collect();
+        let primary_canonical = primary.path().canonicalize().expect("canonical primary");
+        let attached_canonical = attached.path().canonicalize().expect("canonical attached");
+        for expected in [
+            primary.path().to_path_buf(),
+            primary_canonical,
+            attached.path().to_path_buf(),
+            attached_canonical,
+        ] {
+            assert!(
+                writable.contains(&expected),
+                "writable roots {writable:?} must contain {expected:?}"
+            );
+        }
+
+        // Empty root set materializes exactly the historical single-root
+        // policy value.
+        let single = authority(AppMode::Agent, false, ApprovalMode::Suggest).sandbox_policy(
+            Path::new("/work"),
+            &[],
+            None,
+            SandboxNetworkAccess::Restricted,
+        );
+        let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = single else {
+            panic!("agent posture must stay workspace-write");
+        };
+        assert_eq!(writable_roots, vec![PathBuf::from("/work")]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn carve_out_rejects_symlink_escapes() {

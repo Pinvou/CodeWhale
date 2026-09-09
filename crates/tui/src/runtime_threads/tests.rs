@@ -5918,6 +5918,32 @@ fn thread_record_workspace_roots_default_for_legacy_json() {
     );
 }
 
+#[test]
+fn forkguard_workspace_roots_thread_record_persists_and_legacy_defaults_empty() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let mut thread = sample_thread("thr_roots_forkguard");
+    let roots = vec![PathBuf::from("/repo"), PathBuf::from("/shared")];
+    thread.workspace_roots = roots.clone();
+    manager.store.save_thread(&thread)?;
+
+    // The root set survives a durable save→load round trip unchanged.
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots,
+        roots
+    );
+
+    // A record serialized without the key (pre-multi-root shape) loads as an
+    // empty, single-root set.
+    let mut legacy = serde_json::to_value(&thread)?;
+    legacy
+        .as_object_mut()
+        .expect("thread serializes as object")
+        .remove("workspace_roots");
+    let legacy: ThreadRecord = serde_json::from_value(legacy)?;
+    assert!(legacy.workspace_roots.is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn update_thread_workspace_roots_replace_set_and_are_idempotent() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
