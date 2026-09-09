@@ -7791,24 +7791,31 @@ async fn forkguard_subagent_execpolicy_deny_matches_main_line() {
     );
 
     // Ask-rule face: a prompting/fail-closed parent session cannot let the
-    // child run what the main line would only run after approval.
+    // child run what the main line would only run after approval. A File
+    // read is `ApprovalRequirement::Auto` for the held-call gate, so the
+    // refusal below can only come from THIS gate's Prompt handling — pinned
+    // by the distinctive "Delegated tool call" wording, not the generic
+    // "requires approval" substring the held-call gate's refusal shares.
+    std::fs::create_dir_all(tmp.path().join("secret")).expect("secret dir");
+    std::fs::write(tmp.path().join("secret/key.txt"), "rot thirteen").expect("key fixture");
     let ask_engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
-        codewhale_execpolicy::Ruleset::user(Vec::new(), Vec::new())
-            .with_ask_rules(vec![codewhale_execpolicy::ToolAskRule::exec_shell("curl")]),
+        codewhale_execpolicy::Ruleset::user(Vec::new(), Vec::new()).with_ask_rules(vec![
+            codewhale_execpolicy::ToolAskRule::file_path("read_file", "secret/key.txt"),
+        ]),
     ]);
     let prompting = worker_registry_with_engine_and_approval(&tmp, ask_engine.clone(), false);
     let error = prompting
         .execute(
             "agent_policy",
-            "Bash",
-            json!({"action": "run", "command": "curl --version"}),
+            "File",
+            json!({"action": "read", "path": "secret/key.txt"}),
         )
         .await
         .expect_err("an ask rule under a non-auto parent must refuse in the child")
         .to_string();
     assert!(
-        error.contains("requires approval"),
-        "refusal must point at the approval surface: {error}"
+        error.contains("Delegated tool call"),
+        "refusal must come from the delegated-call execpolicy gate, not the held-call gate: {error}"
     );
 
     let output = prompting
@@ -7821,12 +7828,14 @@ async fn forkguard_subagent_execpolicy_deny_matches_main_line() {
         .expect("a command no rule names must dispatch regardless of posture");
     assert!(!output.starts_with("Error:"), "{output}");
 
+    // The same ask rule under parent auto-approve passes like the main
+    // line's auto-run, and the read really dispatches.
     let yolo = worker_registry_with_engine_and_approval(&tmp, ask_engine, true);
     let output = yolo
         .execute(
             "agent_policy",
-            "Bash",
-            json!({"action": "run", "command": "curl --version"}),
+            "File",
+            json!({"action": "read", "path": "secret/key.txt"}),
         )
         .await
         .expect("under parent auto-approve the ask rule must pass like the main line");
@@ -7908,11 +7917,13 @@ async fn subagent_execpolicy_blocks_denied_file_read_but_allows_workspace_relati
     assert!(output.contains("plain notes"), "{output}");
 }
 
-/// Typed ask rules are prompt decisions on the main line. A child has no
-/// prompt surface, so the decision must degrade to pass-through — the call
-/// runs — never to a refusal.
+/// Typed ask rules are prompt decisions on the main line. Under a
+/// parent-auto-approving session the main line would auto-run, so the child
+/// passes the call through and it really executes; the refusal face under a
+/// prompting parent is pinned by
+/// `forkguard_subagent_execpolicy_deny_matches_main_line`.
 #[tokio::test]
-async fn subagent_execpolicy_prompt_decision_does_not_block_delegated_calls() {
+async fn subagent_execpolicy_prompt_decision_passes_under_parent_auto_approve() {
     let tmp = tempdir().expect("tempdir");
     let engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
         codewhale_execpolicy::Ruleset::user(Vec::new(), Vec::new()).with_ask_rules(vec![

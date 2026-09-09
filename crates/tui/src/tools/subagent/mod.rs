@@ -15126,11 +15126,14 @@ impl SubAgentToolRegistry {
         // A Prompt decision follows the main line's #3790 rule — the approval
         // posture is the authority: when the inherited session auto-approves
         // (YOLO), the main line would auto-run, so the call passes; otherwise
-        // the main line would surface an approval prompt, which a child has
-        // no surface to do, so refusing there is the fail-closed answer for
-        // every prompting posture and for the fail-closed `Never` session
-        // alike (the Never wording differs, since the engine still maps to
-        // `OnFailure` here, but the refusal outcome matches). All non-Never
+        // the main line would surface an approval prompt. This gate has no
+        // prompt path of its own — the child's held-call gate above is the
+        // only prompt surface, and it has already spoken by the time the
+        // envelope lets a call through — so refusing there is the fail-closed
+        // answer for every prompting posture and for the fail-closed `Never`
+        // session alike (the Never wording differs, since the engine still
+        // maps to `OnFailure` here, but the refusal outcome matches). All
+        // non-Never
         // modes map to `OnFailure`, so `ApprovalMode::Auto` is
         // decision-equivalent to the parent's mode whenever auto-approve is
         // on. The engine handle shares the parent's live rulesets, so a rule
@@ -15161,12 +15164,14 @@ impl SubAgentToolRegistry {
             // The child cannot show the approval prompt the main line would
             // show for this rule, so without parent auto-approve the only
             // correct answer is to refuse and point the model at the main
-            // conversation.
+            // conversation. The wording is deliberately distinct from the
+            // held-call gate's "Tool {name} requires approval" refusal so a
+            // caller (and a test) can tell which gate spoke.
             Some(crate::core::engine::ToolAskRuleDecision::Prompt(reason))
                 if !self.auto_approve =>
             {
                 return Err(anyhow!(format!(
-                    "Delegated tool call requires approval: {reason}. Sub-agents cannot show an approval prompt; run this tool call in the main conversation so it can be approved."
+                    "Delegated tool call `{name}` requires approval: {reason}. Sub-agents cannot show an approval prompt; run this tool call in the main conversation so it can be approved."
                 )));
             }
             // `Allow` is a user-authored allow rule, and a Prompt under parent
