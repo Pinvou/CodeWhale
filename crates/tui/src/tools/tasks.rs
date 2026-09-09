@@ -885,7 +885,7 @@ impl ToolSpec for TaskShellStartTool {
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout — stop it via the Bash tool's action=cancel with the returned task id." },
+                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout. A running shell task cannot be cancelled from the model surface; it ends when the command finishes." },
                 "stdin": { "type": "string" },
                 "tty": { "type": "boolean" }
             },
@@ -949,7 +949,7 @@ impl ToolSpec for TaskShellWaitTool {
         json!({
             "type": "object",
             "properties": {
-                "task_id": { "type": "string", "description": "Background shell task id returned by task_shell_start or `Bash`." },
+                "task_id": { "type": "string", "description": "Background shell task id returned by task_shell_start." },
                 "wait": { "type": "boolean", "default": false },
                 "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 },
                 "gate": { "type": "string", "enum": ["fmt", "check", "clippy", "test", "custom"] },

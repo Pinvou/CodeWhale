@@ -387,6 +387,36 @@ fn ordinary_engine_default_has_a_finite_step_budget() {
     assert_eq!(EngineConfig::default().max_steps, DEFAULT_MODEL_STEPS);
 }
 
+/// The Registry-first instruction is injected into new-session prompts, so
+/// every tool name it cites must be in the published catalog: hidden
+/// compatibility aliases (`Bash`, `File`) and fully retired names are never
+/// offered to new models (same rule as
+/// `tools::canonical_action::no_advertised_tool_teaches_a_retired_name`).
+#[test]
+fn registry_first_instruction_only_names_published_tools() {
+    for unpublished in [
+        "Bash",
+        "File",
+        "exec_shell",
+        "exec_shell_wait",
+        "exec_shell_cancel",
+        "fetch_url",
+        "web_search",
+        "run_verifiers",
+        "read_file",
+        "write_file",
+        "edit_file",
+    ] {
+        assert!(
+            !MCP_REGISTRY_FIRST_INSTRUCTION.contains(unpublished),
+            "Registry-first instruction cites `{unpublished}`, \
+             which new-session catalogs never publish"
+        );
+    }
+    assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`bash`"));
+    assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`Web`"));
+}
+
 #[test]
 fn registry_first_scenario() {
     // Scenario consolidation of: registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled, registry_first_guidance_is_attached_to_the_shell_fallback_once

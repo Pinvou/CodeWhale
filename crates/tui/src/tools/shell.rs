@@ -4366,7 +4366,7 @@ impl ToolSpec for LowercaseBashTool {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Bash command to execute." },
+                "command": { "type": "string", "description": "Shell command to execute." },
                 "timeout": { "type": "number", "description": "Optional timeout in seconds; when omitted the command is killed after 120 seconds." },
                 "sandbox_permissions": {
                     "type": "string",

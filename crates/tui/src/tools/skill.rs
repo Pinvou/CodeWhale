@@ -39,7 +39,7 @@ impl ToolSpec for LoadSkillTool {
         "Load a skill (SKILL.md body + companion file list) into the next turn's context. \
          Use name=\"list\" to discover the complete enabled catalogue, then load an exact \
          skill when the user names it or the task clearly matches its description. Faster \
-         than File action=\"read\" plus File action=\"list\"."
+         than separate `read` and `list` calls."
     }
 
     fn input_schema(&self) -> Value {
@@ -285,7 +285,7 @@ fn format_skill_body(skill: &Skill) -> String {
     if !companions.is_empty() {
         out.push_str("\n## Companion files\n\n");
         out.push_str(
-            "Sibling files in the skill directory. Open one with File action=\"read\" when the task requires it; a skill stored outside the workspace has to be read through Bash instead.\n\n",
+            "Sibling files in the skill directory. Open one with the `read` tool when the task requires it; a skill stored outside the workspace has to be read through `bash` instead.\n\n",
         );
         for path in &companions {
             out.push_str(&format!("- `{}`\n", path.display()));

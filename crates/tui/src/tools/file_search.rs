@@ -40,7 +40,7 @@ impl ToolSpec for FileSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `Bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts unless `exclude` overrides them. `limit` accepts at most 200. Pass `extensions` to filter by suffix."
+        "Find workspace files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `bash` for filename search. Respects .gitignore; by default skips target/**, node_modules/**, lock files, and similar generated artifacts unless `exclude` overrides them. `limit` accepts at most 200. Pass `extensions` to filter by suffix."
     }
 
     fn input_schema(&self) -> Value {
