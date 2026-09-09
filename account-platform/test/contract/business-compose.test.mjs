@@ -70,6 +70,38 @@ test('production business rejects wrong DB role, password DSN, missing pgpass an
   rejects(c => { c.services['token-gateway'].environment.DATABASE_URL = c.services['token-gateway'].environment.DATABASE_URL.replace('token_gateway_fixture', 'token_gateway'); });
   rejects(c => { c.services['token-governance-check'].environment.ACCOUNT_POLICY_DATABASE_URL = c.services['token-governance-check'].environment.TOKEN_MIGRATOR_DATABASE_URL; });
 });
+test('governance uses a required dedicated Account policy identity, separate from runtime', () => {
+  const { config, inventory, variables } = businessComposeFixture();
+  const tool = config.services['token-governance-check'];
+  assert.equal(new URL(tool.environment.ACCOUNT_POLICY_DATABASE_URL).username, variables.ACCOUNT_POLICY_RELEASE_ROLE);
+  assert.equal(new URL(config.services['account-service'].environment.DATABASE_URL).username, 'account_service');
+  assert.equal(new URL(tool.environment.ACCOUNT_POLICY_DATABASE_URL).pathname, '/account_platform_account');
+  assert.equal(new URL(tool.environment.ACCOUNT_POLICY_DATABASE_URL).searchParams.get('sslmode'), 'verify-full');
+  assert.deepEqual(tool.profiles, ['governance-operations']);
+  assert.equal(checkProductionBusiness(config, inventory).decision, 'CONFIG_VALID');
+  const source = readFileSync(new URL('../../deploy/production/compose.business.yaml', import.meta.url), 'utf8');
+  assert.ok(source.includes('${ACCOUNT_POLICY_RELEASE_ROLE:?set verified ACCOUNT_POLICY_RELEASE_ROLE}'));
+  for (const role of ['account_service', 'token_migrator', 'account_platform_admin', 'pg_read_all_stats',
+    'account_policy_release_', 'account_policy_release_bad-name', 'account_policy_release_bad%40name',
+    'account_policy_release_bad:password', 'account_policy_release_' + 'x'.repeat(64)]) {
+    const fixture = businessComposeFixture();
+    const env = fixture.config.services['token-governance-check'].environment;
+    env.ACCOUNT_POLICY_DATABASE_URL = env.ACCOUNT_POLICY_DATABASE_URL.replace('account_policy_release_fixture@', `${role}@`);
+    assert.throws(() => checkProductionBusiness(fixture.config, fixture.inventory), /account_policy_role_invalid/);
+  }
+  rejects(c => { delete c.services['token-governance-check'].environment.ACCOUNT_POLICY_DATABASE_URL; });
+});
+test('governance Account identity cannot be reused by either Token runtime identity', () => {
+  for (const name of ['token_gateway_fixture', 'token_credential_fixture']) {
+    const { config, inventory } = businessComposeFixture();
+    for (const service of Object.values(config.services)) {
+      if (service.environment.DATABASE_URL) {
+        service.environment.DATABASE_URL = service.environment.DATABASE_URL.replace(`${name}@`, 'account_policy_release_fixture@');
+      }
+    }
+    assert.throws(() => checkProductionBusiness(config, inventory), /account_policy_role_shared/);
+  }
+});
 test('production business rejects public binds, port conflicts and secret network unions', () => {
   rejects(c => { c.services['account-service'].ports[0].host_ip = '0.0.0.0'; });
   rejects(c => { c.services['identity-service'].ports[0].published = c.services['account-service'].ports[0].published; });

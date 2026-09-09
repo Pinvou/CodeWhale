@@ -575,7 +575,7 @@ services:
     environment:
       APP_ENV: "production"
       TOKEN_MIGRATOR_DATABASE_URL: "postgresql://token_migrator@postgres:5432/account_platform_token?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
-      ACCOUNT_POLICY_DATABASE_URL: "postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      ACCOUNT_POLICY_DATABASE_URL: "postgresql://${ACCOUNT_POLICY_RELEASE_ROLE:?set verified ACCOUNT_POLICY_RELEASE_ROLE}@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
       PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
     volumes:
       - type: bind

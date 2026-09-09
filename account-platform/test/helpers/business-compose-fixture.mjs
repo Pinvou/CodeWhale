@@ -23,6 +23,7 @@ export function businessComposeFixture(root = '/fixture/business') {
     WORKLOAD_IDENTITY_JWKS_URL: 'https://keycloak:8443/realms/pinvou-workload/protocol/openid-connect/certs',
     TOKEN_SECRET_PROVIDER_URL: 'https://openbao:8200', TOKEN_SECRET_KEY_ID: 'fixture-transit',
     TOKEN_GATEWAY_RELEASE_ROLE: 'token_gateway_fixture', TOKEN_CREDENTIAL_RELEASE_ROLE: 'token_credential_fixture',
+    ACCOUNT_POLICY_RELEASE_ROLE: 'account_policy_release_fixture',
     MANUAL_REVIEW_ON_CALL_USER_IDS: '00000000-0000-4000-8000-000000000100',
     TRUSTED_TIME_SOURCES: 'one.example.invalid,two.example.invalid,three.example.invalid',
     PINVOU_CLIENT_UPGRADE_URL: 'https://releases.example.invalid/current',

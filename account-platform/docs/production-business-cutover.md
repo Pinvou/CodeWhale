@@ -201,6 +201,9 @@ Compose environment 明确设置全部非秘密运行选项；缺失真实身份
 各秘密目录 0700，禁止软链与共享祖先挂载；CA 目录也不包含叶私钥、恢复包或其他秘密。
 PGPASSFILE 指向固定目标文件；每条 DSN 无密码、固定对应库与精确角色、verify-full 及上述公开 CA。
 治理工具的两条连接分别指向 Token 库与 Account 库，不把同一个 URL 冒充两个领域。
+Account 连接必须提供 `ACCOUNT_POLICY_RELEASE_ROLE`，使用已验证的专用受限 `account_policy_release_` 运维
+身份，不得复用 `account_service` 或两个 Token 运行身份。标识符检查不代替真实数据库权限和登录窗口验收，
+治理工具的私有 pgpass 只包含本次 Token migrator 与该 Account 运维身份两项。
 它们不投递到运行进程。新 release-scoped 两登录用户仍等待 C4C 验证后才能进入正式配置。
 
 模板仅引用 external 网络，不创建或重建依赖网络；站点投递必须绑定真实 network ID 并检查重名别名：

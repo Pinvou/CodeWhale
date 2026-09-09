@@ -142,6 +142,11 @@ export function checkProductionBusiness(config, inventory) {
       && !['token_gateway', 'token_migrator', 'token_policy_operator', 'token_credential_runtime', 'account_platform_admin'].includes(bindings[key]), 'release_role_invalid');
   }
   check(bindings.TOKEN_GATEWAY_RELEASE_ROLE !== bindings.TOKEN_CREDENTIAL_RELEASE_ROLE, 'release_role_shared');
+  const accountPolicyRole = bindings.ACCOUNT_POLICY_RELEASE_ROLE;
+  check(typeof accountPolicyRole === 'string' && /^[a-z][a-z0-9_]{0,62}$/.test(accountPolicyRole)
+    && /^account_policy_release_[a-z0-9_]+$/.test(accountPolicyRole), 'account_policy_role_invalid');
+  check(![bindings.TOKEN_GATEWAY_RELEASE_ROLE, bindings.TOKEN_CREDENTIAL_RELEASE_ROLE].includes(accountPolicyRole),
+    'account_policy_role_shared');
   const onCall = bindings.MANUAL_REVIEW_ON_CALL_USER_IDS.split(',');
   check(onCall.length > 0 && onCall.every(uuid) && new Set(onCall).size === onCall.length, 'on_call_invalid');
   const sources = bindings.TRUSTED_TIME_SOURCES.split(',');
