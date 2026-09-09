@@ -111,6 +111,7 @@ import {
   reducePinvouModeState,
   savePinvouModeState,
 } from './pinvou-mode-state.js';
+import { SceneCardGrid, TemplateCardGrid } from './scene-cards.jsx';
 import { createDesignChange, createDesignChangeScopeKey, reduceScopedDesignChanges, uniqueDesignChanges } from './design-changes.js';
 import { createVisualPosterMessageMeta, shouldUseVisualPosterScene } from './visual-poster-scene.js';
 import {
@@ -202,12 +203,13 @@ function LiveConversationActivityIndicator({ turn, onRequestAttention, className
   );
 }
 
-const WORK_MODE_SUBTABS = [
+// Unified scene table after the design lane was merged into work: a scene
+// only expresses "the professional context of this message" and is
+// lane-independent; scene cards render below the empty-state greeting
+// (scene-cards.jsx).
+const SCENE_TABS = [
   { key: PERSONAL_WORKBENCH_SCENE_KEY, labelKey: 'personalWorkbench', Icon: Briefcase },
   { key: 'document-writing', labelKey: 'documentWriting', Icon: FileText },
-];
-
-const DESIGN_MODE_SUBTABS = [
   { key: 'poster', labelKey: 'poster', Icon: ImageIcon },
   { key: 'data-visualization', labelKey: 'dataVisualization', Icon: BarChart2 },
   { key: 'ppt', labelKey: 'pptDesign', Icon: Presentation },
@@ -233,7 +235,6 @@ function localizeSceneTabs(items, copy) {
   return items.map(item => ({
     ...item,
     label: copy[item.labelKey],
-    disabledReason: item.disabledReasonKey ? copy[item.disabledReasonKey] : undefined,
   }));
 }
 
@@ -380,149 +381,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         </div>
       );
     };
-
-    const SubModePicker = ({ value, onChange, onImpression, items, icons, testId = 'mode-subtab-picker', comingSoonLabel = '' }) => {
-      const trackRef = useRef(null);
-      const buttonRefs = useRef({});
-      const [indicator, setIndicator] = useState({ left: 0, width: 20, ready: false });
-
-      const updateIndicator = useCallback(() => {
-        const track = trackRef.current;
-        const button = buttonRefs.current[value];
-        if (!track || !button) {
-          setIndicator((prev) => (prev.ready ? { left: 0, width: 20, ready: false } : prev));
-          return;
-        }
-        const trackRect = track.getBoundingClientRect();
-        const buttonRect = button.getBoundingClientRect();
-        const width = Math.min(28, Math.max(20, buttonRect.width * 0.32));
-        setIndicator({
-          left: buttonRect.left - trackRect.left + (buttonRect.width - width) / 2,
-          width,
-          ready: true,
-        });
-      }, [value]);
-
-      useLayoutEffect(() => {
-        updateIndicator();
-        window.addEventListener('resize', updateIndicator);
-        return () => window.removeEventListener('resize', updateIndicator);
-      }, [items, updateIndicator]);
-
-      useEffect(() => {
-        if (!onImpression) return undefined;
-        const elements = items
-          .map(item => ({ item, element: buttonRefs.current[item.key] }))
-          .filter(entry => entry.element);
-        if (!window.IntersectionObserver) {
-          elements.forEach(({ item }) => onImpression(item));
-          return undefined;
-        }
-        const observer = new window.IntersectionObserver((entries) => {
-          entries.forEach((entry) => {
-            if (!entry.isIntersecting || entry.intersectionRatio < 0.5) return;
-            const item = items.find(candidate => buttonRefs.current[candidate.key] === entry.target);
-            if (item) onImpression(item);
-            observer.unobserve(entry.target);
-          });
-        }, { threshold: 0.5 });
-        elements.forEach(({ element }) => observer.observe(element));
-        return () => observer.disconnect();
-      }, [items, onImpression]);
-
-      return (
-        <div
-          data-testid={testId}
-          className="mb-1.5 flex justify-center px-1"
-        >
-          <div ref={trackRef} className="relative inline-flex max-w-full items-center justify-center gap-5 overflow-x-auto px-2 py-1">
-            <span
-              aria-hidden="true"
-              className={`absolute bottom-0 h-0.5 rounded-full transition-all duration-200 ease-out ${'bg-[#1D1D1F] dark:bg-[#F5F5F7]'}`}
-              style={{
-                left: `${indicator.left}px`,
-                width: `${indicator.width}px`,
-                opacity: indicator.ready ? 1 : 0,
-              }}
-            />
-            {items.map((item) => {
-              const selected = value === item.key;
-              const disabled = !!item.disabled;
-              const icon = icons && icons[item.key];
-              const ItemIcon = item.Icon;
-              return (
-                <button
-                  ref={(node) => { buttonRefs.current[item.key] = node; }}
-                  key={item.key}
-                  type="button"
-                  data-testid={`${testId}-option-${item.key}`}
-                  title={disabled ? (item.disabledReason || comingSoonLabel) : item.label}
-                  aria-pressed={selected}
-                  aria-disabled={disabled ? 'true' : undefined}
-                  disabled={disabled}
-                  onClick={() => {
-                    if (disabled) return;
-                    if (onChange) onChange(item.key);
-                  }}
-                  className={`relative flex h-7 min-w-0 items-center justify-center gap-1.5 px-0.5 text-[13px] font-medium transition-colors duration-200 ${
-                    disabled
-                      ? 'cursor-not-allowed text-[#A0A4AA] opacity-65 dark:text-[#5F6368] dark:opacity-60'
-                      : selected
-                      ? 'text-[#1D1D1F] dark:text-[#F5F5F7]'
-                      : 'text-[#8E8E93] hover:text-[#1D1D1F] dark:hover:text-[#F5F5F7]'
-                  }`}
-                >
-                  {ItemIcon && (
-                    <ItemIcon size={15} className="shrink-0" />
-                  )}
-                  {icon && (
-                    <span className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] bg-white ${
-                      'ring-1 ring-black/[0.06] dark:shadow-[0_0_0_1px_rgba(255,255,255,.14)]'
-                    }`}>
-                      <img src={icon} alt="" className="h-[13px] w-[13px] object-contain" />
-                    </span>
-                  )}
-                  <span className="min-w-0 truncate">{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      );
-    };
-
-    const PersonalWorkbenchTemplatePicker = ({ selectedIndex, onSelect, templates, copy }) => {
-      return (
-        <div
-          data-testid="personal-workbench-template-picker"
-          className="mb-2 flex justify-center px-1"
-        >
-          <div className="flex max-w-full items-center gap-2 overflow-x-auto px-1 py-1">
-            {templates.map((template, index) => {
-              const selected = selectedIndex === index;
-              const label = copy?.workbenchTemplates?.[template.id] || template.title;
-              return (
-                <button
-                  key={template.id}
-                  type="button"
-                  data-testid={`personal-workbench-template-${index}`}
-                  aria-pressed={selected}
-                  onClick={() => onSelect(index)}
-                  className={`shrink-0 rounded-full px-3 py-1.5 text-[13px] font-medium transition-colors ${
-                    selected
-                      ? 'bg-[#1D1D1F] text-white dark:bg-[#F5F5F7] dark:text-[#1D1D1F]'
-                      : 'bg-[#EEF0F2] text-[#3C4043] hover:bg-[#E3E5E8] hover:text-[#1D1D1F] dark:bg-[#2A2B2D] dark:text-[#C7C7CC] dark:hover:bg-[#333537] dark:hover:text-white'
-                  }`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      );
-    };
-
     const SceneModeTag = ({ scene, onClear, clearLabel }) => {
       if (!scene) return null;
       const SceneIcon = scene.Icon || Sparkles;
@@ -760,8 +618,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
-      const workModeSubtabs = localizeSceneTabs(WORK_MODE_SUBTABS, sceneCopy);
-      const designModeSubtabs = localizeSceneTabs(DESIGN_MODE_SUBTABS, sceneCopy);
+      const sceneTabs = localizeSceneTabs(SCENE_TABS, sceneCopy);
       const canInstallLocalAsr = can('localModelSetup') && can('dependencyInstall');
       const initialInput = constrainChatInput(
         bridge.available && bridge.chat && bridge.chat.getComposerDraft
@@ -802,7 +659,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const [designAiState, setDesignAiState] = useState({ text: '', status: 'idle', lastPrompt: '', pendingPath: '', startedAt: 0 });
       const [sceneCapabilityStatus, setSceneCapabilityStatus] = useState(null);
       const designAiSessionRef = useRef(null);
-      const previousArtifactCountRef = useRef(0);
       const updateDesignAiState = useCallback((valueOrUpdater) => {
         setDesignAiState((prev) => {
           const next = typeof valueOrUpdater === 'function' ? valueOrUpdater(prev) : valueOrUpdater;
@@ -997,8 +853,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const runningShellTasks = deriveRunningShellTasks(chatItems);
       const conversationStarted = chatItems.some(item => item && item.type === 'user') || artifactCount > 0;
       const pinvouMode = pinvouModeState.mode;
-      const workSubtab = pinvouModeState.workSubtab;
-      const designSubtab = pinvouModeState.designSubtab;
+      const sceneSubtab = pinvouModeState.subtab;
       const designScopeKey = createDesignChangeScopeKey(activeSessionId, activeArtifactPath);
       const designChanges = designChangesByScope[designScopeKey] || [];
       const visibleDesignChanges = uniqueDesignChanges(designChanges);
@@ -1035,10 +890,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }, [trackSceneEntry]);
       const trackWorkSceneImpression = useCallback(
         item => trackSceneImpression('work', item),
-        [trackSceneImpression],
-      );
-      const trackDesignSceneImpression = useCallback(
-        item => trackSceneImpression('design', item),
         [trackSceneImpression],
       );
       useEffect(() => {
@@ -1078,26 +929,17 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         }
       }, [pinvouMode]);
       useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- synchronously reset the locally selected element when the design scope switches or fullscreen editing ends (the fullscreen panel unmounts without running its own exit hook)
         setSelectedDesignElement(null);
-        updatePinvouModeState({ type: 'set-selected-design-element', elementId: undefined });
-      }, [designScopeKey, updatePinvouModeState]);
+      }, [designScopeKey, artifactsFullscreen]);
       const clearPersonalWorkbenchTemplateDraft = useCallback(() => {
         if (personalWorkbenchTemplateIdRef.current || findPersonalWorkbenchTemplateDraft(inputTextRef.current)) setInputText('');
         personalWorkbenchTemplateIdRef.current = null;
         setPersonalWorkbenchTemplateId(null);
       }, [setInputText]);
-      // eslint-disable-next-line react-hooks/preserve-manual-memoization -- legacy manual memoization surfaced by compiler lint after floating-ball removal; behavior preserved verbatim
       const handlePinvouModeChange = useCallback((mode) => {
         updatePinvouModeState({ type: 'set-mode', mode });
-        if (mode !== 'work') clearPersonalWorkbenchTemplateDraft();
-        if (mode !== 'design') setSelectedDesignElement(null);
-        if (mode === 'design' && artifactCount > 0) {
-          prefetchChatPanel('artifacts');
-          if (latestArtifact && latestArtifact.path) setActiveArtifactPath(latestArtifact.path);
-          setArtifactsOpen(true);
-          setArtifactsFullscreen(true);
-        }
-      }, [artifactCount, clearPersonalWorkbenchTemplateDraft, latestArtifact, updatePinvouModeState]);
+      }, [updatePinvouModeState]);
       const handleHomeModeChange = useCallback((mode) => {
         if (mode === 'code') {
           if (onSwitchHomeMode) onSwitchHomeMode(mode);
@@ -1105,30 +947,18 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         }
         handlePinvouModeChange(mode);
       }, [handlePinvouModeChange, onSwitchHomeMode]);
-      const handleWorkSubtabChange = useCallback((subtab) => {
-        const nextSubtab = subtab === pinvouModeStateRef.current.workSubtab ? 'general' : subtab;
+      const handleSubtabChange = useCallback((subtab) => {
+        const nextSubtab = subtab === pinvouModeStateRef.current.subtab ? 'general' : subtab;
         if (nextSubtab !== 'general') trackSceneEntry('scene_selected', 'work', nextSubtab);
         if (nextSubtab !== PERSONAL_WORKBENCH_SCENE_KEY) clearPersonalWorkbenchTemplateDraft();
         updatePinvouModeState({
-          type: 'set-work-subtab',
+          type: 'set-subtab',
           subtab: nextSubtab,
         });
       }, [clearPersonalWorkbenchTemplateDraft, trackSceneEntry, updatePinvouModeState]);
-      const handleDesignSubtabChange = useCallback((subtab) => {
-        const nextSubtab = subtab === pinvouModeStateRef.current.designSubtab ? 'general' : subtab;
-        if (nextSubtab !== 'general') trackSceneEntry('scene_selected', 'design', nextSubtab);
-        updatePinvouModeState({
-          type: 'set-design-subtab',
-          subtab: nextSubtab,
-        });
-      }, [trackSceneEntry, updatePinvouModeState]);
       const handleClearActiveScene = useCallback(() => {
-        if (pinvouModeStateRef.current.mode === 'work') {
-          clearPersonalWorkbenchTemplateDraft();
-          updatePinvouModeState({ type: 'set-work-subtab', subtab: 'general' });
-        } else if (pinvouModeStateRef.current.mode === 'design') {
-          updatePinvouModeState({ type: 'set-design-subtab', subtab: 'general' });
-        }
+        clearPersonalWorkbenchTemplateDraft();
+        updatePinvouModeState({ type: 'set-subtab', subtab: 'general' });
       }, [clearPersonalWorkbenchTemplateDraft, updatePinvouModeState]);
       const handlePersonalWorkbenchTemplateSelect = useCallback((index) => {
         const template = getPersonalWorkbenchTemplate(index);
@@ -1158,13 +988,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           setPersonalWorkbenchTemplateId(null);
         }
       }, [setInputText]);
-      const handleDesignRuntimeStatus = useCallback((status) => {
-        updatePinvouModeState({ type: 'set-design-runtime-status', status });
-      }, [updatePinvouModeState]);
       const handleDesignElementSelected = useCallback((element) => {
-        updatePinvouModeState({ type: 'set-selected-design-element', elementId: element && element.id });
         setSelectedDesignElement(element || null);
-      }, [updatePinvouModeState]);
+      }, []);
       const handleApplyDesignChange = useCallback(({ type, property, oldValue, newValue }) => {
         if (!selectedDesignElement || !selectedDesignElement.selector) return;
         if (String(oldValue == null ? '' : oldValue) === String(newValue == null ? '' : newValue)) return;
@@ -1237,40 +1063,33 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           reduceCurrentDesignChanges({ type: 'mark-applied', changeId: change.id, ok: true });
         });
         setSelectedDesignElement(element);
-        updatePinvouModeState({ type: 'set-selected-design-element', elementId: element.id });
-      }, [reduceCurrentDesignChanges, updatePinvouModeState, chatViewCopy]);
+      }, [reduceCurrentDesignChanges, chatViewCopy]);
       const handleClearDesignChanges = useCallback(() => {
         setDesignCommand({ seq: Date.now(), kind: 'clear' });
         reduceCurrentDesignChanges({ type: 'clear' });
         setSelectedDesignElement(null);
       }, [reduceCurrentDesignChanges]);
-      const visualPosterSceneActive = shouldUseVisualPosterScene(pinvouMode, designSubtab);
-      const documentWritingSceneActive = shouldUseDocumentWritingScene(pinvouMode, workSubtab);
-      const personalWorkbenchSceneActive = shouldUsePersonalWorkbenchScene(pinvouMode, workSubtab);
-      const dataVisualizationSceneActive = shouldUseDataVisualizationScene(pinvouMode, designSubtab);
-      const pptDesignSceneActive = shouldUsePptDesignScene(pinvouMode, designSubtab);
-      const activeScene = pinvouMode === 'work'
-        ? workModeSubtabs.find(item => item.key === workSubtab)
-        : pinvouMode === 'design'
-          ? designModeSubtabs.find(item => item.key === designSubtab)
-          : null;
-      const composerPlaceholder = pinvouMode === 'design'
-        ? selectedDesignElement
-          ? chatViewCopy.placeholderDesignAdjust
+      const visualPosterSceneActive = shouldUseVisualPosterScene(sceneSubtab);
+      const documentWritingSceneActive = shouldUseDocumentWritingScene(sceneSubtab);
+      const personalWorkbenchSceneActive = shouldUsePersonalWorkbenchScene(sceneSubtab);
+      const dataVisualizationSceneActive = shouldUseDataVisualizationScene(sceneSubtab);
+      const pptDesignSceneActive = shouldUsePptDesignScene(sceneSubtab);
+      const activeScene = sceneSubtab === 'general'
+        ? null
+        : sceneTabs.find(item => item.key === sceneSubtab) || null;
+      const composerPlaceholder = selectedDesignElement
+        ? chatViewCopy.placeholderSceneAdjust
+        : visualPosterSceneActive
+          ? chatViewCopy.placeholderScenePoster
           : dataVisualizationSceneActive
-            ? chatViewCopy.placeholderDesignDataViz
-          : visualPosterSceneActive
-            ? chatViewCopy.placeholderDesignPoster
-          : pptDesignSceneActive
-            ? chatViewCopy.placeholderDesignPpt
-            : sceneCopy.designGeneralPlaceholder
-        : pinvouMode === 'work'
-          ? personalWorkbenchSceneActive
-            ? chatViewCopy.placeholderPersonalWorkbench
-            : documentWritingSceneActive
-              ? chatViewCopy.placeholderWorkDocument
-              : t.placeholder
-        : t.placeholder;
+            ? chatViewCopy.placeholderSceneDataViz
+            : pptDesignSceneActive
+              ? chatViewCopy.placeholderScenePpt
+              : personalWorkbenchSceneActive
+                ? chatViewCopy.placeholderPersonalWorkbench
+                : documentWritingSceneActive
+                  ? chatViewCopy.placeholderWorkDocument
+                  : t.placeholder;
       const isScheduledTaskCreationChat = !!(bs && bs.scheduledTaskCreationSessionId && bs.activeSessionId === bs.scheduledTaskCreationSessionId);
       const scheduledRunContext = bs && bs.scheduledRunContext && bs.scheduledRunContext.sessionId === bs.activeSessionId
         ? bs.scheduledRunContext
@@ -1690,16 +1509,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         window.addEventListener('pinvou:present-artifact', onPresentArtifact);
         return () => window.removeEventListener('pinvou:present-artifact', onPresentArtifact);
       }, [activeSessionId, showArtifactsPreview]);
-      useEffect(() => {
-        const previousCount = previousArtifactCountRef.current;
-        previousArtifactCountRef.current = artifactCount;
-        if (pinvouMode !== 'design') return;
-        if (artifactCount <= previousCount || !latestArtifact || !latestArtifact.path) return;
-        prefetchChatPanel('artifacts');
-        setActiveArtifactPath(latestArtifact.path);
-        setArtifactsOpen(true);
-        setArtifactDockActivation((value) => value + 1);
-      }, [artifactCount, latestArtifact, pinvouMode]);
       const draftEpoch = bs ? bs.draftEpoch : 0;
       const draftEpochRef = useRef(draftEpoch);
       draftEpochRef.current = draftEpoch;
@@ -2350,11 +2159,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         preferredArtifactPath: activeArtifactPath,
         onPreviewArtifact: handlePreviewArtifact,
         onGotoSettings,
-        designMode: pinvouMode === 'design',
         designCommand,
         selectedDesignElement,
         designChanges: visibleDesignChanges,
-        onDesignRuntimeStatus: handleDesignRuntimeStatus,
         onDesignElementSelected: handleDesignElementSelected,
         onDesignChangeApplied: handleDesignChangeApplied,
         onDesignMutation: handleDesignMutation,
@@ -2426,6 +2233,22 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 <h1 data-testid="chat-greeting" className={`${isWeb ? 'text-[28px] leading-[1.35] px-2 [text-wrap:balance] sm:text-[44px] sm:leading-normal sm:px-0' : 'text-[34px] md:text-[44px] leading-tight whitespace-normal break-words'} font-normal mb-2 ${'text-[#1F1F1F] dark:text-[#E3E3E3]'}`}>
                   {t.chatGreeting}
                 </h1>
+                {/* Scene entry cards: replace the scene-tab stack above the
+                    input area so the composer stays clean */}
+                <SceneCardGrid
+                  items={sceneTabs}
+                  activeKey={sceneSubtab}
+                  onSelect={handleSubtabChange}
+                  onImpression={trackWorkSceneImpression}
+                />
+                {personalWorkbenchSceneActive && (
+                  <TemplateCardGrid
+                    templates={PERSONAL_WORKBENCH_TEMPLATES}
+                    selectedIndex={PERSONAL_WORKBENCH_TEMPLATES.findIndex(template => template.id === personalWorkbenchTemplateId)}
+                    onSelect={handlePersonalWorkbenchTemplateSelect}
+                    copy={t.uiChatScenes}
+                  />
+                )}
               </div>
             )}
 
@@ -2532,34 +2355,6 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                   isDark={theme === 'dark'}
                   onChange={handleHomeModeChange}
                   copy={t.uiHomeMode}
-                />
-              )}
-              {pinvouMode === 'work' && !conversationStarted && (
-                <SubModePicker
-                  value={workSubtab}
-                  onChange={handleWorkSubtabChange}
-                  onImpression={trackWorkSceneImpression}
-                  items={workModeSubtabs}
-                  testId="work-subtab-picker"
-                  comingSoonLabel={chatViewCopy.comingSoon}
-                />
-              )}
-              {personalWorkbenchSceneActive && !conversationStarted && (
-                <PersonalWorkbenchTemplatePicker
-                  selectedIndex={PERSONAL_WORKBENCH_TEMPLATES.findIndex(template => template.id === personalWorkbenchTemplateId)}
-                  onSelect={handlePersonalWorkbenchTemplateSelect}
-                  templates={PERSONAL_WORKBENCH_TEMPLATES}
-                  copy={t.uiChatScenes}
-                />
-              )}
-              {pinvouMode === 'design' && !conversationStarted && (
-                <SubModePicker
-                  value={designSubtab}
-                  onChange={handleDesignSubtabChange}
-                  onImpression={trackDesignSceneImpression}
-                  items={designModeSubtabs}
-                  testId="design-subtab-picker"
-                  comingSoonLabel={chatViewCopy.comingSoon}
                 />
               )}
             {/* Queued-message overlay. Pin makes an item the next safe local

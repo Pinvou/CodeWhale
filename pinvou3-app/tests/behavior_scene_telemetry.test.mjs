@@ -5,24 +5,29 @@ import test from 'node:test';
 import { behaviorTelemetryRust } from './behavior_telemetry_source.mjs';
 
 const chatView = readFileSync(new URL('../src/features/chat/ChatView.jsx', import.meta.url), 'utf8');
+const sceneCards = readFileSync(new URL('../src/features/chat/scene-cards.jsx', import.meta.url), 'utf8');
 const desktopChat = readFileSync(new URL('../src/platform/tauri/bridge/chat.js', import.meta.url), 'utf8');
 const webChat = readFileSync(new URL('../src/platform/web/bridge.js', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const telemetry = behaviorTelemetryRust;
 
 test('scene entries are recorded only after becoming visible and once per view', () => {
-  assert.match(chatView, /new window\.IntersectionObserver/);
-  assert.match(chatView, /entry\.intersectionRatio < 0\.5/);
+  // The IntersectionObserver lives in SceneCardGrid (scene-cards.jsx) since
+  // the design lane merged into work; the once-per-view dedup stays in ChatView.
+  assert.match(sceneCards, /new window\.IntersectionObserver/);
+  assert.match(sceneCards, /entry\.intersectionRatio < 0\.5/);
   assert.match(chatView, /sceneImpressionsRef\.current\.has\(key\)/);
   assert.match(chatView, /trackSceneEntry\('scene_impression'/);
   assert.match(chatView, /viewId: sceneViewIdRef\.current/);
+  // design lane merged into work: the single SceneCardGrid carries the
+  // impression telemetry for every scene under the work lane.
   assert.match(chatView, /onImpression=\{trackWorkSceneImpression\}/);
-  assert.match(chatView, /onImpression=\{trackDesignSceneImpression\}/);
+  assert.doesNotMatch(chatView, /trackDesignSceneImpression/);
 });
 
 test('scene selection is separate from an admitted scene submission', () => {
   assert.match(chatView, /trackSceneEntry\('scene_selected', 'work', nextSubtab\)/);
-  assert.match(chatView, /trackSceneEntry\('scene_selected', 'design', nextSubtab\)/);
+  assert.doesNotMatch(chatView, /'scene_selected', 'design'/);
   assert.match(desktopChat, /\.then\(function \(\) \{[^]*?trackSceneSubmitted\(sid, meta\.pinvouScene\)/);
   assert.match(webChat, /\.then\(function \(\) \{[^]*?trackSceneSubmitted\(sid, meta\.pinvouScene\)/);
   assert.match(webChat, /trackSceneSubmitted\(metadata\.id, submission\.pinvouScene\)/);

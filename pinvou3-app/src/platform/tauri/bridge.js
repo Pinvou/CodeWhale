@@ -269,11 +269,11 @@
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
     superPermEnabled: false,
     modeState: { mode: "yolo" },
-    // 三个工作区 lane（work/design/code）的全局默认 mode（null=该 lane 未显式
-    // 选过；缺省 code→plan、work/design→yolo）。草稿态 chip 显示与切换的事实源，
-    // 启动时经 get_mode_defaults 拉取；草稿切换经 set_mode_default 写回。
-    modeDefaults: { work: null, design: null, code: null },
-    // 当前聊天页所处 lane（work/design；code 页车道有自己的草稿控件逻辑）。
+    // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
+    // lane 未显式选过；缺省 code→plan、work→yolo）。草稿态 chip 显示与切换的
+    // 事实源，启动时经 get_mode_defaults 拉取；草稿切换经 set_mode_default 写回。
+    modeDefaults: { work: null, code: null },
+    // 当前聊天页所处 lane（work；code 页车道有自己的草稿控件逻辑）。
     // lane 是纯前端概念，由 ChatView 随 pinvouMode 显式传入，bridge 不读
     // localStorage。
     modeLane: "work",
@@ -1241,9 +1241,9 @@
   }
 
   // 草稿态（无 active 会话）的 modeState：取当前 lane 的全局默认，缺省 yolo
-  // （与后端 plain 缺省方向一致）。三分 lane 语义：草稿显示 = 本 lane 全局默认。
+  // （与后端 plain 缺省方向一致）。两分 lane 语义：草稿显示 = 本 lane 全局默认。
   function currentDraftModeState() {
-    var lane = state.modeLane === "design" ? "design" : "work";
+    var lane = state.modeLane === "code" ? "code" : "work";
     var d = state.modeDefaults && state.modeDefaults[lane];
     return { mode: d || "yolo", multiAgent: false };
   }
@@ -2657,7 +2657,7 @@
       startupMark("bridge:draft_entered");
     }
     if (needsSessionRuntime) {
-      // lane 全局默认（work/design/code）是草稿态 mode chip 的事实源，启动即拉取。
+      // lane 全局默认（work/code）是草稿态 mode chip 的事实源，启动即拉取。
       startupAwait("bridge:refresh_mode_defaults", refreshModeDefaults);
     }
     if (!isDetachedWindow || detachedWindowKind === "session" || detachedWindowKind === "cardpool") {
