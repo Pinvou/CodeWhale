@@ -1,0 +1,20 @@
+[Unit]
+Description=Pinvou recorded runtime credential expiry (offline, local status only)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /opt/pinvou-release-expiry/account-platform-release-expiry.py --config /opt/pinvou-release-expiry/config/check.json --state /opt/pinvou-release-expiry/state/latest.json
+UMask=0077
+LimitCORE=0
+TimeoutStartSec=30
+MemoryMax=64M
+TasksMax=8
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/pinvou-release-expiry/state
+InaccessiblePaths=-/var/run/docker.sock -/run/docker.sock
+RestrictAddressFamilies=AF_UNIX
+
