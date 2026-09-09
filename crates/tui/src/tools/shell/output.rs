@@ -613,6 +613,26 @@ mod tests {
         assert_eq!(cursor, total);
     }
 
+    #[test]
+    fn forkguard_shell_valid_utf8_prefix_survives_stray_invalid_byte() {
+        // r11 regression: one stray byte in otherwise valid output must not
+        // corrupt the certified UTF-8 prefix before it (a stray 0x92 once
+        // re-mojibaked the whole chunk through the Windows code page). The
+        // raw-stream pipeline keeps the prefix intact: the invalid byte
+        // passes through without stalling, and the lossy render replaces
+        // only that byte.
+        let mut bytes = "中文".as_bytes().to_vec();
+        bytes.push(0x92);
+        let buffer = raw(&bytes);
+        let mut cursor = 0usize;
+        let (delta, total) = take_delta_from_buffer(&buffer, &mut cursor);
+        assert_eq!(
+            cursor, total,
+            "a stray invalid byte must not stall the cursor"
+        );
+        assert_eq!(String::from_utf8_lossy(&delta), "中文\u{FFFD}");
+    }
+
     // === #5472: in-memory retention bounds for the raw `Bash` streams ===
 
     #[test]
