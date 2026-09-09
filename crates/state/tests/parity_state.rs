@@ -16,10 +16,10 @@ fn assert_workflow_trace_schema(conn: &Connection) {
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .expect("read user_version");
-    // v4 (goal-progress migration) adds `thread_goals.continuation_count` on top
-    // of the v3 workflow-trace + thread_goals tables. The table set asserted
-    // below is unchanged; only the schema version advanced.
-    assert_eq!(user_version, 4);
+    // v5 (workspace roots migration) adds `threads.workspace_roots` on top of
+    // the v4 goal-progress schema. The table set asserted below is unchanged;
+    // only the schema version advanced.
+    assert_eq!(user_version, 5);
 
     for table in [
         "workflow_runs",
@@ -56,6 +56,7 @@ fn upsert_and_resume_thread_metadata() {
         status: ThreadStatus::Running,
         path: Some(PathBuf::from("/tmp/project")),
         cwd: PathBuf::from("/tmp/project"),
+        workspace_roots: Vec::new(),
         cli_version: "0.0.0-test".to_string(),
         source: SessionSource::Interactive,
         name: Some("Test Thread".to_string()),
@@ -370,6 +371,7 @@ fn test_fork() {
         status: ThreadStatus::Running,
         path: Some(PathBuf::from("/tmp/project")),
         cwd: PathBuf::from("/tmp/project"),
+        workspace_roots: Vec::new(),
         cli_version: "0.0.0-test".to_string(),
         source: SessionSource::Interactive,
         name: Some("Test Thread".to_string()),
