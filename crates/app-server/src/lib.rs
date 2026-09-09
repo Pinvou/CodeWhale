@@ -2647,6 +2647,7 @@ mod tests {
                 path: None,
                 ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                 sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
             })
             .expect("policy check");
 
@@ -2683,6 +2684,7 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                     sandbox_mode: Some("workspace-write"),
+                    workspace_roots: Vec::new(),
                 })
                 .expect("policy check");
             assert!(decision.matched_rule.is_none());
@@ -2729,6 +2731,7 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                     sandbox_mode: Some("workspace-write"),
+                    workspace_roots: Vec::new(),
                 })
                 .expect("policy check");
             assert!(decision.allow);
@@ -2778,6 +2781,7 @@ mod tests {
                     path: None,
                     ask_for_approval: codewhale_execpolicy::AskForApproval::UnlessTrusted,
                     sandbox_mode: Some("workspace-write"),
+                    workspace_roots: Vec::new(),
                 })
                 .expect("policy check");
             assert!(decision.matched_rule.is_none());

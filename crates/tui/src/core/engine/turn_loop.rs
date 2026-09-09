@@ -781,6 +781,7 @@ pub(super) fn workspace_write_carve_out_applies(
     approval_mode: crate::tui::approval::ApprovalMode,
     auto_approve: bool,
     workspace: &std::path::Path,
+    workspace_roots: &[std::path::PathBuf],
     tool_name: &str,
     input: &serde_json::Value,
     approval: ApprovalRequirement,
@@ -793,7 +794,11 @@ pub(super) fn workspace_write_carve_out_applies(
     let Some(paths) = file_write_tool_target_paths(tool_name, input) else {
         return false;
     };
-    crate::core::authority::paths_within_workspace_write_carve_out(workspace, &paths)
+    crate::core::authority::paths_within_workspace_write_carve_out(
+        workspace,
+        workspace_roots,
+        &paths,
+    )
 }
 
 pub(super) fn registered_tool_forces_prompt(
@@ -3391,6 +3396,7 @@ impl Engine {
             batch_approval_mode,
             self.api_config.sandbox_mode.as_deref(),
             &self.session.workspace,
+            &self.session.workspace_roots,
             crate::core::authority::SandboxNetworkAccess::from_config(
                 self.api_config.sandbox_network_access,
             ),
@@ -3640,6 +3646,7 @@ impl Engine {
                         self.session.approval_mode,
                         self.session.auto_approve,
                         &self.session.workspace,
+                        &self.session.workspace_roots,
                         &tool_name,
                         &tool_input,
                         prepared.call.approval,
@@ -3699,6 +3706,7 @@ impl Engine {
                     &tool_name,
                     &tool_input,
                     &self.session.workspace,
+                    &self.session.workspace_roots,
                     self.session.approval_mode,
                 )
                 .or_else(|| {
@@ -3707,6 +3715,7 @@ impl Engine {
                         &tool_name,
                         &tool_input,
                         &self.session.workspace,
+                        &self.session.workspace_roots,
                         self.session.approval_mode,
                     )
                 });
@@ -3750,6 +3759,7 @@ impl Engine {
                     self.session.approval_mode,
                     crate::config::is_workspace_trusted(&self.session.workspace),
                     Some(&self.session.workspace),
+                    &self.session.workspace_roots,
                 );
                 let (decision, audit_event) = auto_review_plan_decision_for_context(
                     &self.config.auto_review_policy,
