@@ -565,6 +565,7 @@ impl ThreadManager {
             status: ThreadStatus::Running,
             path: None,
             cwd: cwd.clone(),
+            workspace_roots: vec![cwd.clone()],
             cli_version: self.cli_version.clone(),
             source: match source {
                 SessionSource::Interactive => codewhale_protocol::SessionSource::Interactive,
@@ -1863,6 +1864,7 @@ fn to_protocol_thread(thread: ThreadMetadata) -> Thread {
         },
         path: thread.path,
         cwd: thread.cwd,
+        workspace_roots: Vec::new(),
         cli_version: thread.cli_version,
         source: match thread.source {
             SessionSource::Interactive => codewhale_protocol::SessionSource::Interactive,
@@ -3003,6 +3005,7 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: Vec::new(),
             persist_extended_history: false,
         };
 
@@ -3073,6 +3076,7 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: Vec::new(),
             persist_extended_history: false,
         };
 
@@ -3138,6 +3142,7 @@ mod tests {
             base_instructions: None,
             developer_instructions: None,
             personality: None,
+            workspace_roots: Vec::new(),
             persist_extended_history: false,
         };
         manager
