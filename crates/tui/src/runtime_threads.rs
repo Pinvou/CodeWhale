@@ -651,6 +651,12 @@ pub struct ThreadRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
     pub workspace: PathBuf,
+    /// Additional workspace roots attached to this thread; `workspace` is
+    /// always the primary root. Additive like `title`: records written
+    /// before multi-root support have no key and behave as a single-root
+    /// workspace, so the schema version is not bumped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_roots: Vec<PathBuf>,
     pub mode: String,
     /// Named default permission posture for new turns. Absent on legacy
     /// records, whose effective posture is derived from the old fields.
@@ -692,6 +698,7 @@ fn thread_execution_state_matches(left: &ThreadRecord, right: &ThreadRecord) -> 
         && left.reasoning_effort == right.reasoning_effort
         && left.allowed_tools == right.allowed_tools
         && left.workspace == right.workspace
+        && left.workspace_roots == right.workspace_roots
         && left.mode == right.mode
         && left.permission_posture == right.permission_posture
         && left.allow_shell == right.allow_shell
@@ -2175,6 +2182,7 @@ pub struct UpdateThreadRequest {
     pub title: Option<String>,
     pub system_prompt: Option<String>,
     pub workspace: Option<PathBuf>,
+    pub workspace_roots: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -5435,6 +5443,7 @@ impl RuntimeThreadManager {
             task_id: req.task_id,
             title: None,
             session_id: None,
+            workspace_roots: Vec::new(),
         };
         self.store.save_thread(&thread)?;
         if let Err(error) = self
@@ -5693,6 +5702,7 @@ impl RuntimeThreadManager {
             && req.title.is_none()
             && req.system_prompt.is_none()
             && req.workspace.is_none()
+            && req.workspace_roots.is_none()
         {
             bail!("At least one thread field is required");
         }
@@ -5808,15 +5818,45 @@ impl RuntimeThreadManager {
                     changes.insert("system_prompt".to_string(), json!(new_sys));
                 }
             }
+            if let Some(roots) = req.workspace_roots {
+                // Explicit roots replace the whole set, normalized with the
+                // (possibly also-updated) workspace as the primary root.
+                let primary = req
+                    .workspace
+                    .clone()
+                    .unwrap_or_else(|| thread.workspace.clone());
+                let normalized = codewhale_core::normalize_workspace_roots(&primary, &roots);
+                if thread.workspace_roots != normalized {
+                    changes.insert("workspace_roots".to_string(), json!(normalized));
+                    thread.workspace_roots = normalized;
+                }
+            }
             if let Some(workspace) = req.workspace
                 && thread.workspace != workspace
             {
                 changes.insert("workspace".to_string(), json!(workspace));
+                if !changes.contains_key("workspace_roots") {
+                    // A workspace-only change keeps the additional roots and
+                    // hands the primary slot to the new workspace.
+                    let additional: Vec<PathBuf> = thread
+                        .workspace_roots
+                        .iter()
+                        .filter(|root| **root != thread.workspace)
+                        .cloned()
+                        .collect();
+                    let normalized =
+                        codewhale_core::normalize_workspace_roots(&workspace, &additional);
+                    if thread.workspace_roots != normalized {
+                        changes.insert("workspace_roots".to_string(), json!(normalized));
+                        thread.workspace_roots = normalized;
+                    }
+                }
                 thread.workspace = workspace;
             }
 
             let workspace_changed = changes.contains_key("workspace");
-            if workspace_changed
+            let roots_changed = changes.contains_key("workspace_roots");
+            if (workspace_changed || roots_changed)
                 && active
                     .engines
                     .get(id)
@@ -5841,14 +5881,14 @@ impl RuntimeThreadManager {
             } else {
                 thread.updated_at = Utc::now();
                 self.store.save_thread(&thread)?;
-                if workspace_changed {
+                if workspace_changed || roots_changed {
                     active.lru.retain(|thread_id| thread_id != id);
                     active.engines.remove(id).map(|state| state.engine)
                 } else {
                     None
                 }
             };
-            let posture_engine = if posture_changed && !workspace_changed {
+            let posture_engine = if posture_changed && !workspace_changed && !roots_changed {
                 active.engines.get(id).map(|state| state.engine.clone())
             } else {
                 None
@@ -8209,6 +8249,7 @@ impl RuntimeThreadManager {
                         system_prompt_override: thread.system_prompt.is_some(),
                         model: route_model.clone(),
                         workspace: thread.workspace.clone(),
+                        workspace_roots: thread.workspace_roots.clone(),
                         mode: RuntimePolicyProjection::from_persisted(
                             &thread.mode,
                             thread.permission_posture.as_deref(),

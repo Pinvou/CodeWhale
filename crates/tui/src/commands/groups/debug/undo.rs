@@ -265,6 +265,8 @@ pub fn patch_undo(app: &mut App) -> CommandResult {
             system_prompt: app.system_prompt.clone(),
             model: app.model.clone(),
             workspace: app.workspace.clone(),
+            workspace_roots: Vec::new(),
+
             mode: app.mode,
         },
     )

@@ -730,6 +730,7 @@ pub async fn run_tui(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
+                workspace_roots: Vec::new(),
                 mode: app.mode,
             })
             .await;
@@ -1145,6 +1146,7 @@ async fn submit_decided_composer_input(
                     system_prompt_override: false,
                     model: app.model.clone(),
                     workspace: app.workspace.clone(),
+                    workspace_roots: Vec::new(),
                     mode: app.mode,
                 })
                 .await;
@@ -3694,6 +3696,7 @@ pub(crate) async fn run_event_loop(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
+                        workspace_roots: Vec::new(),
                         mode: app.mode,
                     })
                     .await;
