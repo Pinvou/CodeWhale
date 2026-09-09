@@ -10,6 +10,9 @@ const testDir = fileURLToPath(new URL(".", import.meta.url));
 const statsHtml = readFileSync(join(testDir, "..", "web", "stats.html"), "utf8");
 
 test("device details expose sortable conversation counts without encoding damage", () => {
+  assert.match(statsHtml, /<span>今日对话次数<\/span>/);
+  assert.match(statsHtml, /id="todayTurns"/);
+  assert.match(statsHtml, /device-metrics/);
   assert.match(statsHtml, /data-sort="turns_7d"[^>]*>近 7 日对话/);
   assert.match(statsHtml, /data-sort="turns_today"[^>]*>今日对话/);
   assert.match(statsHtml, /device\.turns_today/);
@@ -20,7 +23,7 @@ test("device details expose sortable conversation counts without encoding damage
 const overview = {
   generated_at: Date.now(),
   counts: { online: 3, active_today: 3, active_7d: 3 },
-  usage_trend: [],
+  usage_trend: [{ day: "2026-08-10", active_devices: 3, turns: 12 }],
   active_versions: [],
 };
 
@@ -51,6 +54,7 @@ test("behavior analytics views render alongside the device dashboard", async () 
     const { document } = dom.window;
     const renderedDeviceIds = () => [...document.querySelectorAll("#deviceRows .device b")]
       .map((element) => element.textContent);
+    assert.equal(document.querySelector("#todayTurns").textContent, "12");
     assert.deepEqual(renderedDeviceIds(), ["gamma", "alpha", "beta"]);
     document.querySelector('[data-sort="turns_7d"]').click();
     assert.deepEqual(renderedDeviceIds(), ["beta", "alpha", "gamma"]);
