@@ -397,7 +397,7 @@ impl ToolSpec for WebRunTool {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "ref_id": { "type": "string", "description": "accepts a raw http(s) URL as ref_id" },
+                            "ref_id": { "type": "string", "description": "Page ref_id from an earlier result, or a raw http(s) URL" },
                             "lineno": { "type": "integer" }
                         },
                         "required": ["ref_id"]

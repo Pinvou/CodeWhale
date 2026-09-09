@@ -408,7 +408,7 @@ impl ToolSpec for UpdatePlanTool {
 
     fn model_visible(&self) -> bool {
         // Older transcripts and sessions can still replay this tool, but new
-        // model turns get one progress model (`work_update`) instead of the
+        // model turns get one progress model (`todo_write`) instead of the
         // retired Strategy/Plan surface.
         false
     }

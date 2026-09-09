@@ -112,7 +112,7 @@ Only output English for:\n\
 - Code blocks the user explicitly requests in English\n\n\
 This is a hard display requirement: the user does not read English, \
 so any English prose in your response will block their decision-making. \
-This overrides the ## Language mirroring rule for this session."
+This overrides the ## Language rule for this session."
     )
 }
 
@@ -502,6 +502,12 @@ pub fn set_locale_closer_pt_br_override(s: String) -> Result<(), String> {
 /// the rejected string. Set before spawning any engine.
 pub fn set_locale_closer_vi_override(s: String) -> Result<(), String> {
     set_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, s)
+}
+
+/// Replace the authority-recap trailer. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_authority_recap_override(s: String) -> Result<(), String> {
+    set_prompt_override(&AUTHORITY_RECAP_OVERRIDE, s)
 }
 
 // ── Config-directory prompt overrides (issue #3638) ──

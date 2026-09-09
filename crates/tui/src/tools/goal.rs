@@ -440,7 +440,7 @@ impl GoalState {
     ) -> Result<(), &'static str> {
         if self.objective.is_some() && self.status != Some(GoalStatus::Complete) {
             return Err(
-                "An unfinished goal already exists. Complete it before creating another (blocked/paused goals are cleared by the user/host).",
+                "An unfinished goal already exists. Complete it before creating another; only the user/host can clear an unfinished goal (for example with /goal clear).",
             );
         }
         self.objective = Some(objective);
@@ -909,7 +909,7 @@ impl ToolSpec for CreateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Call this only when the user explicitly asks to use `/goal`, make an objective the goal, or otherwise explicitly requests persistent goal tracking. When the request is explicit, call `create_goal` before doing the rest of the work; acknowledging it in prose is not sufficient. Never infer a goal from an ordinary task, its apparent length, a question, or a one-file edit. Keep the user's full objective, not a shortened one-turn version. Set token_budget only when the user explicitly provides one. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete or clear it before creating another. Root agent only; sub-agents inspect with get_goal."
+        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Call this only when the user explicitly asks to use `/goal`, make an objective the goal, or otherwise explicitly requests persistent goal tracking. When the request is explicit, call `create_goal` before doing the rest of the work; acknowledging it in prose is not sufficient. Never infer a goal from an ordinary task, its apparent length, a question, or a one-file edit. Keep the user's full objective, not a shortened one-turn version. Set token_budget only when the user explicitly provides one. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete it before creating another; only the user can clear a goal (for example with /goal clear). Root agent only; sub-agents inspect with get_goal."
     }
 
     fn input_schema(&self) -> Value {
@@ -1070,7 +1070,7 @@ impl ToolSpec for UpdateGoalTool {
                         "gaps": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Concrete remaining gaps. Required for critical not_achieved reviews; order and duplicate wording do not affect the stall fingerprint. Three identical critical gap sets auto-pause the goal (no_progress)."
+                            "description": "Concrete remaining gaps. Required for critical not_achieved reviews; order and duplicate wording do not affect the stall fingerprint. Repeating an identical gap set increments repeated_gap_count in the goal snapshot; it does not by itself pause the goal — automatic pause comes only from the continuation run limit."
                         }
                     },
                     "required": ["status", "check", "summary"],

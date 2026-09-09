@@ -7,7 +7,7 @@
 //!
 //! Surfacing OCR as a model-callable tool means the model can read an
 //! asset the user drops into the workspace without bouncing through
-//! `exec_shell`.
+//! a shell.
 
 use std::path::Path;
 use std::process::{Command, Stdio};

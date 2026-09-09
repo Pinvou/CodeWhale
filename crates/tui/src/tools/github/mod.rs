@@ -147,7 +147,7 @@ impl ToolSpec for GithubTool {
                 "Read GitHub issue/PR context using gh. Actions: \"issue_context\" and \"pr_context\"; bodies/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
             }
             _ => {
-                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; large bodies become task artifacts when a durable task is active), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping). No push/merge."
+                "Read and guardedly mutate GitHub issues/PRs using gh. Actions: \"issue_context\", \"pr_context\" (read-only; large bodies become task artifacts when a durable task is active), \"comment\" (approval; evidence-backed), \"close_issue\", \"close_pr\" (approval; only with structured acceptance evidence — never close merely because the agent is stopping; rejected when the worktree is dirty unless allow_dirty=true). No push/merge."
             }
         }
     }

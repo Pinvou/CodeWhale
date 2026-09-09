@@ -104,7 +104,7 @@ Actions: \"schedule\" (create a pending trigger; requires approval), \
 \"list\" (recent triggers), \"read\" (one trigger by trigger_id), \
 \"cancel\" (cancel a pending trigger before it fires; requires approval). \
 Use delay_minutes or fire_at (ISO 8601 UTC) — not both. \
-message is required; fire_at must be strictly in the future. \
+message is required for action=schedule; fire_at must be strictly in the future. \
 Returns trigger_id and resolved fire_at."
         }
     }
@@ -186,7 +186,7 @@ Returns trigger_id and resolved fire_at."
         json!({
             "type": "object",
             "properties": properties,
-            "required": ["action", "message"]
+            "required": ["action"]
         })
     }
 

@@ -286,7 +286,7 @@ capability. Then stop.
 "#;
 
 /// Scout output contract — scaled down for small children (see #5189 F5).
-/// Keeps the parseable spine (SUMMARY+EVIDENCE + sentinel) but drops
+/// Keeps the parseable spine (SUMMARY+EVIDENCE) but drops
 /// CHANGES/RISKS/BLOCKERS ceremony; scouts are read-only explorers.
 pub const SUBAGENT_SCOUT_OUTPUT_FORMAT: &str = r#"## Output contract (scout)
 

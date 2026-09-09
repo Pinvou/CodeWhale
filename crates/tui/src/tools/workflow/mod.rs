@@ -1003,7 +1003,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "fleet": {
                     "type": "string",
-                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") is frozen at start: each member's provider, model, reasoning, and permission ceiling are fixed, and any per-task routing/stance override (model, strength, thinking, type, allowed_tools, write_authority) is rejected; write-role members must declare write scope. Runtime derives authority from role and live parent."
+                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") is frozen at start: each member's provider, model, reasoning, and permission ceiling are fixed, and any per-task routing/stance override (model, model_strength, thinking, subagent_type, allowed_tools, write_authority) is rejected; write-role members must declare write scope. Runtime derives authority from role and live parent."
                 },
                 "plan": {
                     "type": "object",

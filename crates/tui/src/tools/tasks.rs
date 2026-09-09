@@ -184,7 +184,7 @@ impl ToolSpec for TasksTool {
                 "Cancel a queued or running durable task through TaskManager. Requires approval because it changes work state."
             }
             Some("gate_run") => {
-                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task. Dangerous commands are BLOCKED; default timeout 120s."
+                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task. Dangerous commands are BLOCKED unless auto-approve is enabled; default timeout 120s."
             }
             Some("pr_attempt_record") => {
                 "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes."
@@ -885,7 +885,7 @@ impl ToolSpec for TaskShellStartTool {
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Applies to the foreground wait; the background task itself is not bounded by it — stop it with action=cancel." },
+                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout — stop it with action=cancel." },
                 "stdin": { "type": "string" },
                 "tty": { "type": "boolean" }
             },
