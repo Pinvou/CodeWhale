@@ -3334,6 +3334,7 @@ impl Engine {
                         system_prompt_override,
                         model,
                         workspace,
+                        workspace_roots: _,
                         mode,
                     } => {
                         self.drop_all_steers().await;

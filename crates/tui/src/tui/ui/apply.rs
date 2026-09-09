@@ -1096,6 +1096,8 @@ pub(crate) async fn apply_provider_fallback_switch(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
+                workspace_roots: Vec::new(),
+
                 mode: app.mode,
             })
             .await;
@@ -1231,6 +1233,8 @@ pub(crate) async fn apply_command_result(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
+                        workspace_roots: Vec::new(),
+
                         mode: app.mode,
                     })
                     .await;
@@ -1262,6 +1266,7 @@ pub(crate) async fn apply_command_result(
                 system_prompt,
                 model,
                 workspace,
+                workspace_roots,
                 mode,
             } => {
                 let mut session_id = session_id;
@@ -1322,6 +1327,7 @@ pub(crate) async fn apply_command_result(
                         system_prompt_override: false,
                         model,
                         workspace,
+                        workspace_roots,
                         mode,
                     })
                     .await;
@@ -1399,6 +1405,8 @@ pub(crate) async fn apply_command_result(
                             system_prompt_override: false,
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
+                            workspace_roots: Vec::new(),
+
                             mode: app.mode,
                         })
                         .await;
@@ -2286,6 +2294,8 @@ pub(crate) async fn apply_command_result(
                                     system_prompt_override: false,
                                     model: app.model.clone(),
                                     workspace: app.workspace.clone(),
+                                    workspace_roots: Vec::new(),
+
                                     mode: app.mode,
                                 })
                                 .await;

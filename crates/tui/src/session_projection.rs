@@ -339,6 +339,7 @@ mod tests {
             model_provider: "deepseek".to_string(),
             model_provider_id: None,
             workspace: PathBuf::from(workspace),
+            workspace_roots: Vec::new(),
             mode: Some("agent".to_string()),
             cost: Default::default(),
             parent_session_id: None,

@@ -159,6 +159,11 @@ pub struct SessionMetadata {
     pub model_provider_id: Option<String>,
     /// Workspace directory
     pub workspace: PathBuf,
+    /// Additional workspace roots attached to this session; `workspace` is
+    /// always the primary root. Sessions written before multi-root support
+    /// have no key and load as an empty set (single-root behavior).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_roots: Vec<PathBuf>,
     /// Optional mode label (agent/plan/etc.)
     #[serde(default)]
     pub mode: Option<String>,
@@ -896,6 +901,7 @@ impl SavedSession {
             model_provider: default_model_provider(),
             model_provider_id: None,
             workspace,
+            workspace_roots: Vec::new(),
             mode: None,
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -2221,6 +2227,7 @@ pub fn create_saved_session_with_id_and_mode(
             model_provider: default_model_provider(),
             model_provider_id: None,
             workspace: workspace.to_path_buf(),
+            workspace_roots: Vec::new(),
             mode: mode.map(str::to_string),
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
@@ -2627,6 +2634,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workspace_roots_default_for_legacy_sessions_and_round_trip() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let messages = vec![make_test_message("user", "hi")];
+        let session = create_saved_session_with_id_and_mode(
+            "roots-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            None,
+        );
+
+        // A session written before multi-root support has no workspace_roots
+        // key; it must load as an empty (single-root) set, and a roots-less
+        // session must keep that key off the wire.
+        let mut value = serde_json::to_value(&session).expect("serialize session");
+        let metadata = value.get_mut("metadata").expect("metadata object");
+        assert!(metadata.get("workspace_roots").is_none());
+        let metadata = metadata.take();
+        let mut metadata: SessionMetadata =
+            serde_json::from_value(metadata).expect("legacy metadata decodes");
+        assert!(metadata.workspace_roots.is_empty());
+
+        // Roots survive a save/load round-trip byte-faithfully.
+        metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("shared")];
+        let mut session = session;
+        session.metadata = metadata;
+        manager.save_session(&session).expect("save session");
+        let loaded = manager.load_session("roots-session").expect("load session");
+        assert_eq!(
+            loaded.metadata.workspace_roots,
+            vec![workspace, tmp.path().join("shared")]
+        );
+    }
+
     /// Coverage state round-trips with the money it qualifies, and a session
     /// written before coverage existed is detected as *unknown* rather than being
     /// read as a complete total covering zero turns (#4318).
@@ -2853,6 +2899,7 @@ mod tests {
                 model_provider: "deepseek".to_string(),
                 model_provider_id: None,
                 workspace: workspace.to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: None,
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
@@ -2894,6 +2941,7 @@ mod tests {
                 model_provider: "deepseek".to_string(),
                 model_provider_id: None,
                 workspace: workspace.to_path_buf(),
+                workspace_roots: Vec::new(),
                 mode: Some("yolo".to_string()),
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,

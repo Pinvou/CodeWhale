@@ -457,6 +457,7 @@ pub enum Op {
         system_prompt_override: bool,
         model: String,
         workspace: PathBuf,
+        workspace_roots: Vec<PathBuf>,
         mode: AppMode,
     },
 
