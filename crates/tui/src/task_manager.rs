@@ -43,6 +43,8 @@ const CURRENT_TASK_SCHEMA_VERSION: u32 = 3;
 // Pinvou v0.9.0 persisted an additive v4 schema. Its additional fields are
 // serde-defaulted or safely ignored by this reader, so accept exactly that
 // historical version without widening compatibility to unknown future data.
+// Note the fields are only preserved on read: TaskRecord has no catch-all, so
+// a load→persist cycle writes v3 and drops them.
 const PINVOU_LEGACY_TASK_SCHEMA_VERSION: u32 = 4;
 
 const fn default_task_schema_version() -> u32 {
@@ -1598,14 +1600,9 @@ impl TaskManager {
 
         let task_path = self.tasks_dir.join(format!("{task_id}.json"));
         let artifacts_path = self.artifacts_dir.join(task_id);
-        if artifacts_path.exists() {
-            fs::remove_dir_all(&artifacts_path).with_context(|| {
-                format!(
-                    "Failed to delete task artifacts {}",
-                    artifacts_path.display()
-                )
-            })?;
-        }
+        // Delete the record before the artifacts: failing after the record is
+        // gone only leaves orphan files, while failing after the artifacts are
+        // gone would leave a live task whose artifacts were destroyed.
         match fs::remove_file(&task_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1613,6 +1610,14 @@ impl TaskManager {
                 return Err(error)
                     .with_context(|| format!("Failed to delete task {}", task_path.display()));
             }
+        }
+        if artifacts_path.exists() {
+            fs::remove_dir_all(&artifacts_path).with_context(|| {
+                format!(
+                    "Failed to delete task artifacts {}",
+                    artifacts_path.display()
+                )
+            })?;
         }
 
         state.tasks.remove(task_id);
