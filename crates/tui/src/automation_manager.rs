@@ -1410,12 +1410,15 @@ impl AutomationManager {
                     AutomationRunStatus::Queued | AutomationRunStatus::Running
                 )
             });
-            let missed_while_offline = now.signed_duration_since(due_at)
-                > Duration::seconds(AUTOMATION_MISFIRE_GRACE_SECS);
+            let missed_recurring_slot = !matches!(&schedule, AutomationSchedule::Once { .. })
+                && now.signed_duration_since(due_at)
+                    > Duration::seconds(AUTOMATION_MISFIRE_GRACE_SECS);
 
-            // Recurring Pinvou tasks neither backfill offline slots nor overlap
-            // an active attempt. Jump directly to the first future slot.
-            if existing_for_slot || has_active_run || missed_while_offline {
+            // Every schedule avoids duplicate and overlapping attempts. Only
+            // recurring tasks skip slots missed while the scheduler was
+            // offline: a one-shot has no future slot to advance to, so it must
+            // remain deliverable until its single run is durably enqueued.
+            if existing_for_slot || has_active_run || missed_recurring_slot {
                 self.advance_automation_after_slot(&mut automation, &schedule, now, now)?;
                 continue;
             }
@@ -3190,14 +3193,20 @@ model = "private-model"
         );
     }
 
-    #[test]
-    fn once_schedule_fires_once_and_auto_completes() {
+    #[tokio::test]
+    async fn forkguard_once_schedule_missed_while_offline_enqueues_exactly_one_run() -> Result<()> {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager = AutomationManager::open(tempdir.path().to_path_buf()).expect("manager");
-        // Exercise a due one-shot inside the scheduler's offline-misfire
-        // grace. Older one-shots are intentionally skipped by the Pinvou
-        // no-backfill contract.
-        let due_at = Utc::now() - Duration::seconds(10);
+        let task_manager = TaskManager::start_with_executor(
+            automation_task_config(tempdir.path().join("tasks")),
+            std::sync::Arc::new(AutomationNoopExecutor),
+        )
+        .await?;
+        let manager = AutomationManager::open(tempdir.path().join("automations"))?;
+        // A one-shot missed while the process was offline has no future slot.
+        // It must still produce its one durable task/run instead of being
+        // silently advanced to `None` and paused.
+        let due_at =
+            Utc::now() - Duration::seconds(AUTOMATION_MISFIRE_GRACE_SECS.saturating_add(30));
         let automation = AutomationRecord {
             rrule: due_at
                 .format("FREQ=ONCE;AT=%Y-%m-%dT%H:%M:%S+00:00")
@@ -3210,28 +3219,35 @@ model = "private-model"
         manager
             .save_automation(&automation)
             .expect("save automation");
+        let shared: SharedAutomationManager = Arc::new(Mutex::new(manager));
 
-        let due = manager
-            .collect_due_runs(Utc::now())
-            .expect("collect due runs");
-        assert_eq!(due.len(), 1);
-        let (_automation, run) = &due[0];
-        assert_eq!(run.scheduled_for, due_at);
+        scheduler_tick_shared(&shared, &task_manager).await?;
 
-        manager
-            .finish_scheduled_run(run, Utc::now())
-            .expect("finish one-shot run");
-        let updated = manager
-            .get_automation(&automation.id)
-            .expect("updated automation");
-        assert_eq!(updated.status, AutomationStatus::Paused);
-        assert_eq!(updated.next_run_at, None);
-        assert!(
-            manager
-                .collect_due_runs(Utc::now() + Duration::hours(1))
-                .expect("later tick")
-                .is_empty()
+        let task_id = {
+            let manager = shared.lock().await;
+            let runs = manager.list_runs(&automation.id, None)?;
+            assert_eq!(runs.len(), 1, "the expired one-shot must form one run");
+            assert_eq!(runs[0].scheduled_for, due_at);
+            let task_id = runs[0]
+                .task_id
+                .clone()
+                .expect("the run must reference its enqueued task");
+            let updated = manager.get_automation(&automation.id)?;
+            assert_eq!(updated.status, AutomationStatus::Paused);
+            assert_eq!(updated.next_run_at, None);
+            task_id
+        };
+        assert_eq!(task_manager.get_task(&task_id).await?.id, task_id);
+
+        scheduler_tick_shared(&shared, &task_manager).await?;
+        assert_eq!(
+            shared.lock().await.list_runs(&automation.id, None)?.len(),
+            1,
+            "a completed one-shot slot must not enqueue twice"
         );
+
+        task_manager.shutdown();
+        Ok(())
     }
 
     #[test]
