@@ -161,7 +161,7 @@ duplicating work. Here is the summary produced by the other language model, use 
 in this summary to assist with your own analysis:";
 
 /// Detection marker for committed compaction-summary text: the stable first
-/// sentence of [`SUMMARY_HEADER`]. `engine/context.rs` restores summaries by
+/// sentence of `SUMMARY_HEADER`. `engine/context.rs` restores summaries by
 /// the same marker on session load.
 pub const COMPACTION_SUMMARY_MARKER: &str = "Another language model started to solve this problem";
 /// Marker written by pre-v0.9.6 compaction; sessions saved under the old

@@ -28,7 +28,7 @@ use crate::worker_profile::{ShellPolicy, ToolScope, WorkerRuntimeProfile};
 /// Canonical model-facing Fleet role values, in schema order. This is the
 /// closed `enum` advertised on the Agent tool's `type` property. Legacy
 /// aliases are accepted only at replay/deserialization boundaries
-/// ([`migrate_legacy_role_token`]) and are never advertised to models.
+/// (`migrate_legacy_role_token`) and are never advertised to models.
 pub(crate) const FLEET_ROLE_SCHEMA_VALUES: [&str; 8] = [
     "general",
     "explore",
@@ -54,7 +54,7 @@ pub(crate) const VALID_ROLE_ALIASES: &str = "general; explore; planner; reviewer
 /// vocabulary one-to-one. Serialization, prompts, receipts, and UI always
 /// use [`Self::as_str`]. Legacy wire spellings (`worker`, `scout`, `plan`,
 /// `review`, `implementer`, …) are accepted only through
-/// [`migrate_legacy_role_token`] at deserialization / parse boundaries.
+/// `migrate_legacy_role_token` at deserialization / parse boundaries.
 ///
 /// This is the closed runtime role set. It is distinct from
 /// `codewhale_config::FleetRole`, which is the open config-side role

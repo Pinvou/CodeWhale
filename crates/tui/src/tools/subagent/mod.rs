@@ -42,7 +42,7 @@ use crate::core::events::{AgentProgressEventMeta, Event};
 use crate::core::session::ToolActivationCache;
 use crate::dependencies::{ExternalTool, Git};
 /// Compatibility re-export: the closed role set lives in
-/// [`crate::fleet::role`], the lightweight role surface every spawn path
+/// `crate::fleet::role`, the lightweight role surface every spawn path
 /// consumes. Existing `tools::subagent::FleetRole` paths keep resolving.
 pub use crate::fleet::role::FleetRole;
 use crate::fleet::role::{
@@ -410,7 +410,7 @@ impl SubAgentAssignment {
 }
 
 /// Role presentation: system prompts and config key lookup. The role itself
-/// ([`FleetRole`], parsing, posture) lives in [`crate::fleet::role`]; this
+/// ([`FleetRole`], parsing, posture) lives in `crate::fleet::role`; this
 /// impl stays on the agent tool because it renders prompt text the tool owns.
 impl FleetRole {
     /// Pre-Fleet model-override key (`explorer_model` / `ni_model` tables).

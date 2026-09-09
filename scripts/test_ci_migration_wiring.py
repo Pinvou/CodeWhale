@@ -68,6 +68,12 @@ class CiWiringTests(unittest.TestCase):
         )
         self.assertIn('--baseline-ref "${baseline}"', block)
 
+    def test_workflow_dispatch_uses_the_exact_heads_parent_as_baseline(self) -> None:
+        block = migration_step_block(load_ci())
+        self.assertIn("EVENT_NAME", block)
+        self.assertIn('"${EVENT_NAME}" == "workflow_dispatch"', block)
+        self.assertIn('baseline="$(git rev-parse HEAD^)"', block)
+
     def test_migration_commands_are_ordered_self_test_first(self) -> None:
         ci = load_ci()
         block = migration_step_block(ci)

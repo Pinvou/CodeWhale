@@ -58,7 +58,7 @@ pub struct TurnRoute {
     pub billing: Option<RouteBillingEnvelope>,
     /// Endpoint this turn's client was frozen against, verbatim.
     ///
-    /// [`crate::route_receipt::TurnRouteReceipt`] deliberately keeps only a
+    /// `crate::route_receipt::TurnRouteReceipt` deliberately keeps only a
     /// redacted endpoint identity, which billing cannot classify from, so the
     /// non-secret URL travels here. Captured from the resolved route candidate
     /// at the client-freeze boundary, before any ambient selection state can
@@ -69,7 +69,7 @@ pub struct TurnRoute {
     /// at the same instant.
     ///
     /// Together with `provider_identity` and `base_url` this is a complete
-    /// [`crate::route_billing::DispatchedReceipt`]: every fact billing needs,
+    /// `crate::route_billing::DispatchedReceipt`: every fact billing needs,
     /// frozen at the client-freeze boundary. Consumers must classify from
     /// these fields and must never re-read an ambient `Config` after the turn
     /// starts — by `TurnComplete` a provider switch, an auto-router hop, or a
@@ -89,7 +89,7 @@ pub struct TurnRoute {
 ///
 /// - `base_url` + `billing_product` + `provider_identity` are frozen at the
 ///   **client-freeze** boundary and answer *which route is this and how does
-///   it bill* — a [`crate::route_billing::DispatchedReceipt`]. They must be
+///   it bill* — a `crate::route_billing::DispatchedReceipt`. They must be
 ///   readable from `TurnStarted` onward so a child turn arriving mid-flight
 ///   can be billed against the parent's frozen route.
 /// - This envelope is stamped at the **wire** boundary and answers *what was

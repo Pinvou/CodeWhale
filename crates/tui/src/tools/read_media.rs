@@ -10,7 +10,7 @@
 //! longest-edge halving) until the payload fits the budget. Results carry a
 //! delivery note stating exactly how the image was delivered (untouched /
 //! downsampled / crop / full) with zoom guidance, and the pre-compression
-//! original is persisted in the content-addressed [`crate::media_originals`]
+//! original is persisted in the content-addressed `crate::media_originals`
 //! store so a later crop read can pull the full-resolution source. When no
 //! ladder result fits the budget the tool fails closed — nothing is sent —
 //! with the exact conversion command to retry with.

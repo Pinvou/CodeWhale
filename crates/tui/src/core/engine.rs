@@ -356,8 +356,8 @@ pub struct EngineConfig {
     pub translation_enabled: bool,
     pub verbosity: Option<String>,
     /// Maximum number of assistant steps before stopping. Ordinary interactive
-    /// hosts use [`UNBOUNDED_MODEL_STEPS`]; explicit test/embed callers may
-    /// still install a finite boundary.
+    /// hosts use the finite `DEFAULT_MODEL_STEPS`; configuration and explicit
+    /// test/embed callers may install a different bounded value.
     pub max_steps: u32,
     /// Maximum number of concurrently active subagents.
     pub max_subagents: usize,
@@ -493,7 +493,7 @@ pub struct EngineConfig {
     /// Cumulative wall-clock budget for one turn (R1). Counted across every
     /// model step of the turn, excluding time blocked on a human approval
     /// decision. Resolved from `[tui].turn_wall_clock_secs`; always finite —
-    /// see [`turn_budget::resolve_turn_wall_clock`].
+    /// see `turn_budget::resolve_turn_wall_clock`.
     pub turn_wall_clock: Duration,
     /// Per-step cap on accumulated streamed content, in bytes (R1). Resolved
     /// from `[tui].stream_max_content_mb`. Pre-R1 this was the hard-coded

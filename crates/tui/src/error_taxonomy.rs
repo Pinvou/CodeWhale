@@ -206,7 +206,7 @@ impl ErrorEnvelope {
     }
 }
 
-/// Classify a boundary error from the typed [`LlmError`] when one is
+/// Classify a boundary error from the typed `LlmError` when one is
 /// available, keeping the caller's display message.
 ///
 /// Boundaries that only have an `anyhow::Error` historically stringified it

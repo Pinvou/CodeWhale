@@ -179,7 +179,7 @@ fn normalize_explicit_goal_objective(raw: &str) -> Option<String> {
 /// this.
 ///
 /// The whole "is this real work?" rule lives here: the prompt is work when it
-/// has at least [`OPERATE_GOAL_MIN_WORDS`] words, or opens (after "please")
+/// has at least `OPERATE_GOAL_MIN_WORDS` words, or opens (after "please")
 /// with an imperative work verb and has at least three words. Greetings,
 /// acknowledgements, and short questions stay chat. The objective is the whole
 /// prompt, whitespace-collapsed and bounded so continuation prompts stay small;

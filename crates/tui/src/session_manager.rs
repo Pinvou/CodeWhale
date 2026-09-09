@@ -181,7 +181,7 @@ pub struct SessionMetadata {
     /// and stay loadable; they are hidden from the default browse surfaces
     /// and are never chosen by auto-resume.
     ///
-    /// This mirrors `ThreadRecord::archived` in [`crate::runtime_threads`] so
+    /// This mirrors `ThreadRecord::archived` in `crate::runtime_threads` so
     /// the TUI session surfaces and the Runtime API/web dashboard project the
     /// same lifecycle field instead of two divergent notions of "put away".
     /// Additive and `skip_serializing_if`-guarded: sessions written before
@@ -377,7 +377,7 @@ pub fn current_session_boot_id() -> &'static str {
 /// Which archive states a session listing includes.
 ///
 /// Deliberately the same three-way shape as
-/// [`crate::runtime_threads::ThreadListFilter`] so `/v1/sessions` and
+/// `crate::runtime_threads::ThreadListFilter` so `/v1/sessions` and
 /// `/v1/threads` answer the same `include_archived` / `archived_only` query
 /// pair with the same semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -508,7 +508,7 @@ impl SessionCostSnapshot {
     /// Session + subagent spend as **one** dual-currency accumulator.
     ///
     /// The persisted USD and CNY columns are projections of per-turn
-    /// [`crate::pricing::CostEstimate`]s that were accumulated jointly; every
+    /// `crate::pricing::CostEstimate`s that were accumulated jointly; every
     /// display total is derived from this single fold so the two currencies
     /// cannot be re-summed by separate code paths that then drift (#4939).
     /// CNY is *not* an FX multiple of USD: a turn carries CNY only when its

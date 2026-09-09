@@ -3169,7 +3169,7 @@ impl McpPool {
 
     /// Connect to all enabled servers, returning errors for failed connections.
     ///
-    /// Servers connect **concurrently** (bounded by [`Self::CONNECT_CONCURRENCY`]).
+    /// Servers connect **concurrently** (bounded by `Self::CONNECT_CONCURRENCY`).
     /// This used to be a sequential loop over `get_or_connect`, so every
     /// server paid the slowest server's spawn+handshake from its own budget:
     /// with the default 10s connect timeout, N servers meant a worst case of

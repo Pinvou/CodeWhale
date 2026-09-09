@@ -405,7 +405,7 @@ impl SkillRegistry {
     /// `.git/`. The provided `dir` itself is always honored, even if
     /// hidden — that's what the user explicitly configured.
     /// Symlinked directories are followed when they resolve to directories,
-    /// with canonical path tracking plus [`Self::MAX_DISCOVERY_DEPTH`] keeping
+    /// with canonical path tracking plus `Self::MAX_DISCOVERY_DEPTH` keeping
     /// the walk finite when a skills layout contains cycles.
     #[must_use]
     pub fn discover(dir: &Path) -> Self {

@@ -1,6 +1,6 @@
 //! Model-facing LSP code-intelligence tool.
 //!
-//! Extends the existing [`crate::lsp::LspManager`] lifecycle — never spawns a
+//! Extends the existing `crate::lsp::LspManager` lifecycle — never spawns a
 //! competing server pool. Operations: diagnostics, read_lints, symbols,
 //! definition, references.
 

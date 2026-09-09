@@ -8,7 +8,7 @@
 //! `execute_code_execution_tool`) keeps the dependency-probe and
 //! tempfile-spawn logic isolated for the test pin.
 //!
-//! Registration is gated by [`crate::dependencies::resolve_node`]:
+//! Registration is gated by `crate::dependencies::resolve_node`:
 //! when Node is missing the tool is simply not advertised, so the
 //! model never sees a runtime it can't actually use. See
 //! `core::engine::tool_catalog::ensure_advanced_tooling` for the

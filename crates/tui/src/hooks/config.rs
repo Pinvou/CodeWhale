@@ -483,7 +483,7 @@ impl HooksConfig {
     /// A condition that references context the event never carries can never
     /// match, so a hook wearing one is inert — the dangerous version of that
     /// is a `deny` gate the operator believes is armed. Those are reported as
-    /// `rejected` and dropped by [`Self::apply_validation`] rather than left
+    /// `rejected` and dropped by `Self::apply_validation` rather than left
     /// to fail silently at dispatch time. Problems that only affect how a
     /// hook is scheduled are reported as warnings and the hook still runs.
     #[must_use]

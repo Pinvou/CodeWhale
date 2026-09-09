@@ -2,7 +2,7 @@
 //! **executes**, **mutates**, or **reaches the network**.
 //!
 //! Before this module the answer was spread across three hand-maintained name
-//! lists ([`crate::fleet::role::RAW_SHELL_DENYLIST`] and its siblings) plus a
+//! lists (`crate::fleet::role::RAW_SHELL_DENYLIST` and its siblings) plus a
 //! role posture that keyed on `ShellPolicy::Full`. That shape had a structural
 //! hole: a name list can only deny the execution primitives someone remembered
 //! to write down, and `shell = "full"` was being read as "may run arbitrary
@@ -24,7 +24,7 @@
 //!
 //! The classification is derived, never listed: it comes from the tool's own
 //! [`ToolCapability`] set and from `is_read_only_for` applied to the **actual
-//! input**, after [`canonical_action_alias`] has resolved the family/action
+//! input**, after `canonical_action_alias` has resolved the family/action
 //! pair. That is what makes it cover tools this file has never heard of —
 //! plugins, runtime MCP servers, and anything registered later.
 //!
@@ -49,7 +49,7 @@
 //!   whole purpose of a read-only verifier, and the shipped `verifier` role is
 //!   exactly `write = false, shell = "full"`. Classifying it by tool name would
 //!   either take the role's job away or hand it a program launcher, so the
-//!   bound is read off the concrete call by [`classify_verification`]:
+//!   bound is read off the concrete call by `classify_verification`:
 //!   argument-free and pure test *selection* both cost shell authority (each
 //!   forks a process, which `analyst`/`scout` were never granted), and
 //!   anything that can name a program is held to the raw-shell bar. Every

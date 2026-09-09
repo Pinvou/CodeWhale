@@ -35,7 +35,7 @@ pub(super) struct BoundedOutputAccumulator {
     full_output_path: Option<PathBuf>,
     /// Why the on-disk spill file could not be created (disk full, descriptor
     /// exhaustion, unwritable temp dir). The stream still runs and the bounded
-    /// tail is still delivered; only "Full output: <path>" is unavailable.
+    /// tail is still delivered; only `Full output: <path>` is unavailable.
     spill_unavailable: Option<String>,
 }
 

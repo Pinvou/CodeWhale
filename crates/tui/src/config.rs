@@ -605,7 +605,7 @@ pub struct ProviderCapability {
     /// behind" — for example the Kimi Code membership ids, whose limits live in
     /// the membership catalog rather than the static model catalogue. Unknown
     /// must stay unknown: callers may **not** substitute a placeholder ceiling,
-    /// and in particular [`crate::route_budget`] does not clamp a requested
+    /// and in particular `crate::route_budget` does not clamp a requested
     /// `max_tokens` against an unknown compatibility cap.
     ///
     /// When `Some`, the value is a documented exact-route maximum or a
@@ -1536,7 +1536,7 @@ pub(crate) fn legacy_deepseek_alias_effort_for_route(
 /// fallback** (#4188).
 ///
 /// Preferred sources are the live Models.dev catalog and the offline bundled
-/// snapshot via [`crate::provider_lake`]. Call this directly only for
+/// snapshot via `crate::provider_lake`. Call this directly only for
 /// Codewhale-only / local providers Models.dev does not represent, or when
 /// probing the fallback table in tests. Picker, inventory, and subagent
 /// surfaces must go through the provider lake.
@@ -2314,7 +2314,7 @@ pub struct GoalConfig {
     /// Goals are unlimited by default; token/time budgets are telemetry only.
     ///
     /// `None` uses the built-in default
-    /// ([`crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS`], currently `0`);
+    /// (`crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS`, currently `0`);
     /// `0` disables the backstop entirely so only terminal status or user
     /// control ends the run.
     #[serde(default)]
@@ -2807,8 +2807,8 @@ pub struct AutoRouterConfig {
     #[serde(default)]
     pub thinking: Option<String>,
     /// Classifier call timeout in seconds. Defaults to
-    /// [`DEFAULT_AUTO_ROUTER_TIMEOUT_SECS`] (4); `0` means "use the default".
-    /// Values above [`MAX_AUTO_ROUTER_TIMEOUT_SECS`] (300) are clamped so a
+    /// `DEFAULT_AUTO_ROUTER_TIMEOUT_SECS` (4); `0` means "use the default".
+    /// Values above `MAX_AUTO_ROUTER_TIMEOUT_SECS` (300) are clamped so a
     /// hung local router cannot stall a turn indefinitely.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
@@ -3728,7 +3728,7 @@ impl NetworkPolicyToml {
     }
 }
 
-/// `[lsp]` table — mirrors [`crate::lsp::LspConfig`]. Documented in
+/// `[lsp]` table — mirrors `crate::lsp::LspConfig`. Documented in
 /// `config.example.toml`. When omitted, defaults from `LspConfig::default()`
 /// apply (enabled, 5 s poll, 20 diagnostics/file, errors only, no overrides).
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -3757,7 +3757,7 @@ pub struct LspConfigToml {
 }
 
 impl LspConfigToml {
-    /// Build a runtime [`crate::lsp::LspConfig`] from the on-disk schema,
+    /// Build a runtime `crate::lsp::LspConfig` from the on-disk schema,
     /// falling back to defaults for any unset fields.
     #[must_use]
     pub fn into_runtime(self) -> crate::lsp::LspConfig {
@@ -4757,8 +4757,8 @@ impl Config {
     }
 
     /// Classifier call timeout for `[auto.router]` in seconds. Defaults to
-    /// [`DEFAULT_AUTO_ROUTER_TIMEOUT_SECS`] (4); `0` means "use the default".
-    /// Values above [`MAX_AUTO_ROUTER_TIMEOUT_SECS`] (300) are clamped so a
+    /// `DEFAULT_AUTO_ROUTER_TIMEOUT_SECS` (4); `0` means "use the default".
+    /// Values above `MAX_AUTO_ROUTER_TIMEOUT_SECS` (300) are clamped so a
     /// hung local router cannot stall a turn indefinitely.
     #[must_use]
     pub fn auto_router_timeout_secs(&self) -> u64 {

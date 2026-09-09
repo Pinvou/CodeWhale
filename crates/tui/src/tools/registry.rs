@@ -1137,7 +1137,7 @@ impl ToolRegistryBuilder {
     }
 
     /// Include the model-facing LSP intelligence tools. They reuse the
-    /// session [`crate::lsp::LspManager`] attached to `ToolContext` and never
+    /// session `crate::lsp::LspManager` attached to `ToolContext` and never
     /// spawn a second server lifecycle.
     #[must_use]
     pub fn with_lsp_tool(self) -> Self {

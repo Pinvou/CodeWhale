@@ -377,11 +377,17 @@ jobs:
       - name: Check command migration manifest
         if: needs.changes.outputs.heavy == 'true'
         env:
+          EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           python3 scripts/test_check_command_migration_manifest.py
           baseline="${PR_BASE_SHA:-${PUSH_BEFORE_SHA:-}}"
+          # workflow_dispatch has neither a PR base nor a push-before SHA.
+          # Exact-head full CI still needs a real previous manifest revision.
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            baseline="$(git rev-parse HEAD^)"
+          fi
           if [[ -n "${baseline}" && ! "${baseline}" =~ ^0+$ ]]; then
             git fetch --no-tags origin "${baseline}"
             python3 scripts/check-command-migration-manifest.py --baseline-ref "${baseline}"

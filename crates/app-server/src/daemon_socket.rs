@@ -4,7 +4,7 @@
 //! daemon over a local socket instead of a TCP port: local multi-client,
 //! peer-credential auth, nothing to firewall (CORE-PROTOCOL spec §5). The
 //! wire is *identical* to the `--stdio` transport — newline-delimited
-//! JSON-RPC 2.0 driven by the same [`crate::run_stdio_loop`] — with exactly
+//! JSON-RPC 2.0 driven by the same `crate::run_stdio_loop` — with exactly
 //! one addition in front of it: a `daemon/attach` handshake that establishes
 //! who this client is and whether it owns the daemon.
 //!

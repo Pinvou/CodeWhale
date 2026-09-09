@@ -372,7 +372,7 @@ pub(crate) fn parse_snapshot_label(label: &str) -> ParsedSnapshotLabel {
 /// Take a `pre-turn:<seq>` workspace snapshot.
 ///
 /// `cap_bytes` is the workspace-size ceiling that gates first-init
-/// (passed through to [`SnapshotRepo::open_or_init_with_cap`]); pass
+/// (passed through to `SnapshotRepo::open_or_init_with_cap`); pass
 /// `0` to disable the cap.
 /// `user_prompt` is an optional snippet of the user's message for this
 /// turn, embedded in the snapshot label so `/restore` listings are

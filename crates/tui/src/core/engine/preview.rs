@@ -12,7 +12,7 @@
 //! - **Never `session.last_tool_catalog`.** That value is one turn stale and
 //!   stores the pre-activation catalog, so it cannot describe what the *next*
 //!   request would send. The catalog is rebuilt through
-//!   [`Engine::build_turn_tool_registry_and_catalog`], which returns the same
+//!   `Engine::build_turn_tool_registry_and_catalog`, which returns the same
 //!   typed policy a real turn consumes.
 //! - **Never invent a route.** For fixed routes, the host resolves the next
 //!   turn through the same shared planner production dispatch uses. Auto would
@@ -21,7 +21,7 @@
 //!   model, billing, tool budget, or body hash is recycled from the installed
 //!   route.
 //! - **Never resolve by side effect.** The catalog build runs with
-//!   [`SubAgentWiring::Inert`] and [`McpAccess::PassiveSnapshot`]: no fork
+//!   `SubAgentWiring::Inert` and `McpAccess::PassiveSnapshot`: no fork
 //!   snapshot, no spawned drainer, no MCP pool creation, no `connect_all`, no
 //!   status events. When the connected MCP state is not already exactly what
 //!   a turn would use, the tool section is reported unavailable rather than

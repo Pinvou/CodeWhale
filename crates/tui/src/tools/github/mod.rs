@@ -6,8 +6,8 @@
 //!
 //! This file is the surface and its guards — which action a call names, and
 //! whether the input is allowed to run it. The work itself is split by
-//! responsibility: [`schema`] declares the input contracts, [`actions`] runs
-//! the actions, [`cli`] builds every `gh`/`git` invocation, and [`shape`]
+//! responsibility: `schema` declares the input contracts, `actions` runs
+//! the actions, `cli` builds every `gh`/`git` invocation, and `shape`
 //! turns payloads into tool results.
 
 use async_trait::async_trait;

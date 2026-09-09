@@ -9,7 +9,7 @@
 //! changelog as ..." workflows that previously required the user
 //! to drop into a terminal between turns.
 //!
-//! Registration is gated by [`crate::dependencies::resolve_pandoc`]
+//! Registration is gated by `crate::dependencies::resolve_pandoc`
 //! (see [`crate::tools::registry::ToolRegistryBuilder::with_pandoc_tools`]).
 //! When pandoc isn't installed the tool simply doesn't appear in the
 //! catalog, so the model never sees a binary it can't actually use.
@@ -25,7 +25,7 @@
 //! system dependencies (LaTeX engines, ImageMagick) beyond pandoc
 //! itself.
 //!
-//! Adding a format: append to [`SUPPORTED_TARGET_FORMATS`] and the
+//! Adding a format: append to `SUPPORTED_TARGET_FORMATS` and the
 //! schema description; the dispatch logic is whitelist-driven so
 //! anything in the list goes through unchanged.
 

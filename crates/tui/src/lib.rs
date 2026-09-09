@@ -20,11 +20,15 @@ use crate::dependencies::ExternalTool;
 use rust_i18n::i18n;
 i18n!("locales", fallback = ["en"]);
 
+// Modules marked `doc(hidden)` below are public only as a downstream host-
+// compatibility bridge. Keep the unstable facade out of generated API docs.
 mod acp_server;
 mod approval_log;
+#[doc(hidden)]
 pub mod artifacts;
 mod audit;
 mod auto_reasoning;
+#[doc(hidden)]
 pub mod automation_manager;
 mod child_env;
 mod client;
@@ -32,15 +36,18 @@ pub mod cloud_dispatch;
 mod codex_model_cache;
 mod command_safety;
 mod commands;
+#[doc(hidden)]
 pub mod compaction;
 mod composer_history;
 mod composer_stash;
 pub mod computer_meter;
+#[doc(hidden)]
 pub mod config;
 mod config_persistence;
 mod context_budget;
 mod context_report;
 mod continual_harness;
+#[doc(hidden)]
 pub mod core;
 mod cost_status;
 mod credentials;
@@ -50,17 +57,20 @@ mod doctor;
 mod doctor_fix;
 mod dsh_credentials;
 mod elapsed;
+#[doc(hidden)]
 pub mod error_taxonomy;
 mod eval;
 mod execpolicy;
 mod external_credentials;
 mod fast_hash;
+#[doc(hidden)]
 pub mod features;
 mod fleet;
 pub use fleet::profile::WORKSPACE_AGENT_PROFILE_DIR;
 pub use fleet::roster::FleetRoster;
 mod goal_loop;
 mod hashing;
+#[doc(hidden)]
 pub mod hooks;
 mod image_attach;
 mod import_claude;
@@ -71,6 +81,7 @@ mod llm_response_cache;
 mod localization;
 mod logging;
 mod lsp;
+#[doc(hidden)]
 pub mod mcp;
 mod mcp_server;
 mod media_originals;
@@ -80,9 +91,11 @@ mod model_inventory;
 mod model_profile;
 mod model_registry;
 mod model_routing;
+#[doc(hidden)]
 pub mod models;
 mod models_dev_live;
 mod native_memory;
+#[doc(hidden)]
 pub mod network_policy;
 mod oauth;
 mod operate;
@@ -93,6 +106,7 @@ mod pricing;
 mod project_context;
 mod project_context_cache;
 mod prompt_zones;
+#[doc(hidden)]
 pub mod prompts;
 mod provider_lake;
 mod provider_readiness;
@@ -110,6 +124,7 @@ pub mod rlm;
 mod route_billing;
 mod route_budget;
 mod route_receipt;
+#[doc(hidden)]
 pub mod route_runtime;
 mod runtime_api;
 mod runtime_chat_relay;
@@ -132,6 +147,7 @@ mod doctor_loader_tests;
 #[cfg(test)]
 mod session_control_acceptance;
 #[allow(dead_code)]
+#[doc(hidden)]
 pub mod session_manager;
 mod session_peek;
 mod session_projection;
@@ -140,9 +156,11 @@ pub mod session_tree;
 mod settings;
 mod shell_dispatcher;
 mod skill_state;
+#[doc(hidden)]
 pub mod skills;
 mod snapshot;
 mod startup_trace;
+#[doc(hidden)]
 pub mod task_manager;
 mod telemetry_notice;
 #[cfg(test)]
@@ -154,11 +172,13 @@ mod todo_snapshot;
 mod tool_history_repair;
 mod tool_inspection;
 mod tool_output_receipts;
+#[doc(hidden)]
 pub mod tools;
 mod tui;
 pub use tui::app::AppMode;
 pub use tui::approval::ApprovalMode;
 mod turn_route_plan;
+#[doc(hidden)]
 pub mod utils;
 mod vision;
 mod work_graph;

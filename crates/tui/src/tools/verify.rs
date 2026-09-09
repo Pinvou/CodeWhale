@@ -10,9 +10,9 @@
 //! # Why elevated reasoning is the mechanism
 //!
 //! The critic request explicitly sets `reasoning_effort` to a high tier
-//! ([`VerifyTool::critic_effort`], default [`ReasoningEffort::Max`]). Elevated
+//! (`VerifyTool::critic_effort`, default `ReasoningEffort::Max`). Elevated
 //! reasoning IS the test-time-compute lever, so the critic never inherits a low
-//! session tier — [`build_critic_request`] threads the effort onto the outgoing
+//! session tier — `build_critic_request` threads the effort onto the outgoing
 //! [`MessageRequest`], which the client forwards to the provider.
 //!
 //! # Bounded / no runaway (hard requirement)
@@ -21,12 +21,12 @@
 //! guards enforce this:
 //!
 //! 1. **Structural (primary):** the critic is a single model call with
-//!    `tools: None` (see [`build_critic_request`]). With no tools of any kind,
+//!    `tools: None` (see `build_critic_request`). With no tools of any kind,
 //!    the critic literally cannot invoke `verify` — recursion is impossible by
 //!    construction, not by a denylist that could be forgotten.
 //! 2. **Re-entry guard (defense in depth):** [`VerifyTool::execute`] refuses if
 //!    it is entered while a critique is already in progress on the same task
-//!    (tracked via the [`static@VERIFY_ACTIVE`] task-local). This protects any
+//!    (tracked via the `VERIFY_ACTIVE` task-local). This protects any
 //!    future path that might run the critic inside a tool loop.
 //!
 //! # Relationship to neighbouring tools
@@ -282,7 +282,7 @@ pub struct VerifyTool {
 }
 
 impl VerifyTool {
-    /// Construct with the default critic effort ([`ReasoningEffort::Max`]).
+    /// Construct with the default critic effort (`ReasoningEffort::Max`).
     #[must_use]
     pub fn new(client: Option<DeepSeekClient>, model: String) -> Self {
         Self {
