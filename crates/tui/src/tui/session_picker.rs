@@ -1263,6 +1263,7 @@ mod tests {
             model_provider: "deepseek".to_string(),
             model_provider_id: None,
             workspace: std::path::PathBuf::from("/tmp"),
+            workspace_roots: Vec::new(),
             mode: Some("agent".to_string()),
             cost: crate::session_manager::SessionCostSnapshot::default(),
             parent_session_id: None,

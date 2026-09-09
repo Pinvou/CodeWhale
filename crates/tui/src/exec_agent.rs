@@ -375,6 +375,7 @@ pub(crate) async fn run_exec_agent(
                 system_prompt_override: false,
                 model: saved.metadata.model,
                 workspace: saved.metadata.workspace,
+                workspace_roots: saved.metadata.workspace_roots.clone(),
                 mode,
             })
             .await?;
