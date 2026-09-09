@@ -591,13 +591,29 @@
   // 会话——in-flight 复用同一 promise；create_session await 期间用户切走会物化在错误
   // 会话（导航被劫持）——物化前校验 activeSessionId 仍为空，已切走则只登记后台 buffer。
   var ensureSessionInFlight = null;
-  async function ensureSession() {
+  var ensureSessionDraftOutcome = null;
+  async function ensureSession(draftOwner) {
+    function applyDraftOutcome(outcome) {
+      if (!draftOwner || !outcome || draftOwner.draftEpoch !== outcome.epoch) return;
+      draftOwner.createdSessionId = outcome.createdSessionId;
+      if (outcome.rollbackEpoch !== undefined) {
+        draftOwner.rollbackFromDraftEpoch = outcome.epoch;
+        draftOwner.draftEpoch = outcome.rollbackEpoch;
+      }
+    }
     if (state.activeSessionId) return state.activeSessionId;
-    if (ensureSessionInFlight) return ensureSessionInFlight;
+    if (ensureSessionInFlight) {
+      var pendingOutcome = ensureSessionDraftOutcome;
+      var pendingResult = await ensureSessionInFlight;
+      applyDraftOutcome(pendingOutcome);
+      return pendingResult;
+    }
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
     // 只推进 token 不改 activeSessionId（仍为 null），在途 create_session 返回
     // 后必须连同 token 一起校验，否则会劫持用户新进的草稿（三审 P1）。
     var navToken = sessionSwitchRequestToken;
+    var draftOutcome = { epoch: Number(state.draftEpoch || 0), createdSessionId: null };
+    ensureSessionDraftOutcome = draftOutcome;
     var p = (async function () {
       // 多 session 并发:不预热 engine。新建空 session 的 buffer 由 switchActiveTo({fresh}) 起。
       try {
@@ -614,6 +630,7 @@
           state.pendingDraftMultiAgent = false;
           sessionStates[meta.id] = freshBuffer();
           sessionStates[meta.id].loadedFromDisk = true;
+          draftOutcome.createdSessionId = meta.id;
           return null;
         }
         // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
@@ -621,6 +638,7 @@
         var pendingMultiAgent = state.pendingDraftMultiAgent === true;
         state.pendingDraftMultiAgent = false;
         switchActiveTo(meta.id, { fresh: true });
+        draftOutcome.createdSessionId = meta.id;
         // 草稿态因首条消息/加卡等实质操作物化为 session 时，输入草稿也要
         // 跟随迁移；这不是用户主动切换到另一个已有会话。
         state.composerDraft = composerDraft;
@@ -638,7 +656,14 @@
             } catch (cleanupError) {
               // 空会话残留可手动删除，不掩盖主错误。
             }
+            draftOutcome.createdSessionId = null;
+            // A real navigation during the toggle/cleanup awaits is not a rollback.
+            if (navToken !== sessionSwitchRequestToken || state.activeSessionId !== meta.id) return null;
+            var rollbackComposerDraft = state.composerDraft || "";
             enterDraft();
+            state.composerDraft = rollbackComposerDraft;
+            // This rollback is still the same logical draft, not user navigation.
+            draftOutcome.rollbackEpoch = Number(state.draftEpoch || 0);
             state.pendingDraftMultiAgent = true;
             state.modeState = {
               mode: (state.modeState && state.modeState.mode) || "yolo",
@@ -690,7 +715,9 @@
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; },
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
     );
-    return p;
+    var result = await p;
+    applyDraftOutcome(draftOutcome);
+    return result;
   }
 
   function reportSessionSwitchFailure(error, errorScope) {
