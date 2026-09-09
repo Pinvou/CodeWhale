@@ -598,6 +598,8 @@ pub(crate) fn begin_launch_session(
         system_prompt: None,
         model: app.model.clone(),
         workspace: app.workspace.clone(),
+        workspace_roots: Vec::new(),
+
         mode: app.mode,
     })
 }
@@ -645,6 +647,8 @@ pub(crate) async fn switch_workspace(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: workspace.clone(),
+                workspace_roots: Vec::new(),
+
                 mode: app.mode,
             })
             .await;

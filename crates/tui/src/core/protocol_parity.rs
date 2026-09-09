@@ -1100,6 +1100,7 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             system_prompt_override,
             model,
             workspace,
+            workspace_roots: _,
             mode,
         } => wire_op::Op::SyncSession {
             engine_session_id: session_id.clone(),
