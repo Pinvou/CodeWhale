@@ -1,5 +1,5 @@
 {
-  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train. The v0.9.9 configured-skills change hides only custom configured-root paths, preserves discoverable default-root paths, normalizes Windows prompt separators, and trims 50 redundant skills-prompt bytes. The skill/memory/goal/handoff identities were re-measured without raising any ceiling. Explicit maintainer decision for #5473/#5492. The v0.9.10 full surfaces intentionally add the safe read_media tool; their measured schemas remain below the prior byte/token ceilings. Representative prompt byte metrics now use the same host-independent normalized text as their identities; the normalized base is 6089 bytes. The v0.9.11 model-visible sub-agent surface intentionally retires six legacy agents/* tools in favor of the canonical agent tool; all affected schema and prompt metrics decrease. The v0.9.12 plugin prompt-match slice intentionally adds the request_plugin_install tool to the full tool surfaces (plan full: +518 schema bytes / +130 estimated tokens / 29 -> 30 tools) so a strong prompt match can surface the human review CTA; explicit maintainer decision for #5663/#5579.",
+  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update The v0.9.8 child-receipt restore grew every production tool surface by 1496 schema bytes / 374 estimated tokens (agent tool). The v0.9.8 workshop read/tool-result byte fields then grew every production tool surface by 371 schema bytes / 93 estimated tokens. Both raises are explicit maintainer decisions; identities stay on the pre-raise digests only if the name set is unchanged \u2014 re-measure on Linux CI if Lint reports identity drift. The v0.9.8 pinned session prefix added the <context_update> sentence to the base prompt (5848 -> 6084 bytes, every representative stage re-hashed), and the host-side Workflow/Goal verbs plus honest child posture grew the tool catalog (active 16531 -> 16602 bytes, full 71473 -> 72371); both are explicit v0.9.8 maintainer decisions measured from the release train. The v0.9.9 configured-skills change hides only custom configured-root paths, preserves discoverable default-root paths, normalizes Windows prompt separators, and trims 50 redundant skills-prompt bytes. The skill/memory/goal/handoff identities were re-measured without raising any ceiling. Explicit maintainer decision for #5473/#5492. The v0.9.10 full surfaces intentionally add the safe read_media tool; their measured schemas remain below the prior byte/token ceilings. Representative prompt byte metrics now use the same host-independent normalized text as their identities; the normalized base is 6089 bytes. The v0.9.11 model-visible sub-agent surface intentionally retires six legacy agents/* tools in favor of the canonical agent tool; all affected schema and prompt metrics decrease. The v0.9.12 plugin prompt-match slice intentionally adds the request_plugin_install tool to the full tool surfaces (plan full: +518 schema bytes / +130 estimated tokens / 29 -> 30 tools) so a strong prompt match can surface the human review CTA; explicit maintainer decision for #5663/#5579. The final v0.9.12 release then added provider-route fields to the canonical automation and tasks full schemas (+548 bytes) while its Agent role-only copy shrank (-361), an official net +187 bytes in Act/Operate full. Pinvou r1 adds bounded write-size guidance and exact host-presented prompt-only profiles (+181 bytes versus the official release). Raising Act/Operate full to 65887 bytes / 16472 estimated tokens while tightening every active surface to 12704 / 3176 and Plan full to 38303 / 9576 is an explicit maintainer decision; tool identities are unchanged.",
   "document_kind": "codewhale.runtime_contract_budget",
   "representative_context": {
     "fixture_id": "representative-v1",
@@ -85,9 +85,9 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 12884,
+          "bytes": 12704,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3221,
+          "tokens_est": 3176,
           "tool_names": [
             "agent",
             "bash",
@@ -100,9 +100,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 65519,
+          "bytes": 65887,
           "identity_sha256": "b5ceb72d89dc1e0e4161bd360ed2a05c433ce7b60b2300987165406c33d155af",
-          "tokens_est": 16380,
+          "tokens_est": 16472,
           "tool_names": [
             "Git",
             "Run",
@@ -161,9 +161,9 @@
       },
       "operate": {
         "active": {
-          "bytes": 12884,
+          "bytes": 12704,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3221,
+          "tokens_est": 3176,
           "tool_names": [
             "agent",
             "bash",
@@ -176,9 +176,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 65519,
+          "bytes": 65887,
           "identity_sha256": "b5ceb72d89dc1e0e4161bd360ed2a05c433ce7b60b2300987165406c33d155af",
-          "tokens_est": 16380,
+          "tokens_est": 16472,
           "tool_names": [
             "Git",
             "Run",
@@ -237,9 +237,9 @@
       },
       "plan": {
         "active": {
-          "bytes": 12884,
+          "bytes": 12704,
           "identity_sha256": "8411bddfc0d7fce72ec53dfeef341f28e6a3cfe37b98a721dc05b17d53b0a13e",
-          "tokens_est": 3221,
+          "tokens_est": 3176,
           "tool_names": [
             "agent",
             "bash",
@@ -252,9 +252,9 @@
           "tools": 7
         },
         "full": {
-          "bytes": 38483,
+          "bytes": 38303,
           "identity_sha256": "ac8af1f4988199825be7b00b054c258724a44074b1d4e6de6c92ade7c1cffe63",
-          "tokens_est": 9621,
+          "tokens_est": 9576,
           "tool_names": [
             "Git",
             "Web",
