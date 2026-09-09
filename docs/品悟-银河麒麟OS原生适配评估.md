@@ -305,11 +305,9 @@ latest-amd64.json
 
 ### 5.9 本地模型边界
 
-品悟当前本地 vLLM 一键启用逻辑明确针对 MegaCube/GB10 出厂环境：
-
-- 固定读取 `/opt/.h3c/packages/vllm/`；
-- 依赖预装 Docker 镜像、模型和启动脚本；
-- 通过 systemd 启动 NVIDIA GB10 推理服务。
+品悟已移除针对 MegaCube/GB10 出厂环境的本地 vLLM 一键启用逻辑，不再读取
+`/opt/.h3c/packages/vllm/`、调用预装启动脚本或通过 systemd 拉起推理服务。当前仅发现
+用户已经启动的 vLLM、Ollama、LM Studio 服务，或由用户手动配置本地模型端点。
 
 因此麒麟适配第一阶段建议定义为：
 

@@ -338,14 +338,6 @@
     depsInstalling: false,    // 一键安装进行中(brew/apt/winget)
     depsInstallError: null,   // 安装失败原因(stderr 透传/取消/包管理器不可用)
     depsInstallProgress: null, // 安装进度 {package,current,total,detail}(后端 deps:install_progress 事件)
-    // MegaCube(GB10) 本地大模型一键引导:首屏检测结果 + 引导执行态
-    vllmSetup: null,          // {eligible, may_offer_setup, has_packages, engine_state:ready|starting|stopped|failed, ...}
-    vllmBootstrapping: false, // 引导进行中(pkexec + 拉起 + 轮询就绪)
-    vllmSetupPhase: null,     // 阶段:'authorizing'|'waiting'|'ready'(后端 vllm-setup:phase 事件驱动步骤指示)
-    vllmSetupAttempt: 0,      // waiting 阶段第几次探测(后端报)
-    vllmBootstrapDone: null,  // 成功结果 {base_url, model}, 据此显示「立即重启」
-    vllmBootstrapError: null, // 失败原因(pkexec stderr / 超时透传)
-    vllmSetupDismissed: false,// 本次会话内点了「跳过」,不再弹(不写持久标记)
     voiceInput: {
       status: "idle",         // idle | requesting_permission | recording | transcribing | postprocessing | completed | cancelled | failed
       message: "",
@@ -1584,7 +1576,7 @@
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
     llmapi: ["llmApiModels", "llmApiStatus"],
-    vllm: ["vllmBootstrapDone", "vllmBootstrapError", "vllmBootstrapping", "vllmSetup", "vllmSetupAttempt", "vllmSetupDismissed", "vllmSetupPhase"],
+    vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
@@ -2371,10 +2363,6 @@
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
-  var detectLocalVllmSetup = settingsFeature.detectLocalVllmSetup;
-  var bootstrapLocalVllm = settingsFeature.bootstrapLocalVllm;
-  var dismissVllmSetup = settingsFeature.dismissVllmSetup;
-  var declineVllmSetup = settingsFeature.declineVllmSetup;
   var getEffectiveModelConfig = settingsFeature.getEffectiveModelConfig;
   var loadModels = settingsFeature.loadModels;
   var saveModel = settingsFeature.saveModel;
@@ -2816,10 +2804,6 @@
     },
     vllm: {
       discoverLocalVllm: discoverLocalVllm,
-      detectLocalVllmSetup: detectLocalVllmSetup,
-      bootstrapLocalVllm: bootstrapLocalVllm,
-      dismissVllmSetup: dismissVllmSetup,
-      declineVllmSetup: declineVllmSetup,
     },
     models: {
       getEffectiveModelConfig: getEffectiveModelConfig,

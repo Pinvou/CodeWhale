@@ -1328,15 +1328,6 @@
     notify();
   });
 
-  // vllm-setup:phase —— MegaCube 本地大模型引导阶段(authorizing→waiting{attempt}→ready),驱动引导框步骤指示。
-  listen("vllm-setup:phase", function (e) {
-    var p = e.payload || {};
-    if (!p.phase) return;
-    state.vllmSetupPhase = p.phase;
-    if (typeof p.attempt === "number") state.vllmSetupAttempt = p.attempt;
-    notify();
-  });
-
   // 知识库 embedding 模型下载进度（download → verify → prepare → done）
   listen("kb_model:progress", function (e) {
     var p = e && e.payload;

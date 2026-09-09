@@ -104,7 +104,8 @@ const expectedProtocolHashes = {
   // successful present_artifact tool_end now emits a session-scoped request
   // that opens the preview even when the existing card is updated in place.
   // #148 preserves Official invocation shapes; the callback body now redacts errors.
-  chat: 'fc72bdeec940db957396e003f7acc6c2b7b26c3f205b4530d0ff4e089a3a0e5d',
+  // Recomputed for the preinstalled-model startup removal on top of #148.
+  chat: '1a5d20b1ff210c2fcb9e0d5079da2c6d658f9eb0cafc3c29c6400104f8b1c99a',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
@@ -114,7 +115,7 @@ const expectedProtocolHashes = {
   remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
   sessions: '43be5b929743f00818492d51d7a725860c71b9a52e7fdcbe72606426472409c0',
-  settings: 'afff0d5112a7f7fb983fac9d3564c2f65f33865e3794749e208801c30bd722cc',
+  settings: 'd202460012a68b3a0c9cd929e47b2438061bb4b7e5c74c3a4af833c887084117',
   updater: 'f48c27f765bd2dce06cc71299f18348fc734f6390667b20820169e3179cb455b',
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',

@@ -1326,7 +1326,7 @@ pub async fn test_image_input_capability(
     Ok(run_image_capability_probe(&model, &base_url, &api_key, model_id.as_deref()).await)
 }
 
-/// 通用设置字段补丁。搜索、桌宠、模型列表和本地模型初始化状态由专用命令管理，
+/// 通用设置字段补丁。搜索、桌宠、模型列表和激活项由专用命令管理，
 /// 不进入这个协议，避免调用方携带旧的完整快照覆盖其他操作刚写入的值。
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1381,11 +1381,9 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         current.sidebar = sidebar;
     }
     if let Some(mut advanced) = patch.advanced {
-        // 这些字段有各自的专用写命令。即使高级设置来自旧快照，也无权覆盖它们。
+        // 模型列表和激活项有各自的专用写命令。即使高级设置来自旧快照，也无权覆盖它们。
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
-        advanced.local_vllm_bootstrapped = current.advanced.local_vllm_bootstrapped;
-        advanced.local_vllm_setup_declined = current.advanced.local_vllm_setup_declined;
         current.advanced = advanced;
     }
 }

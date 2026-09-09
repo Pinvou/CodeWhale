@@ -4,7 +4,6 @@ import { Archive, Briefcase, Check, ChevronDown, ChevronLeft, ChevronRight, Code
 import { ArchivedDeleteConfirmDialog } from '../../components/layout/NavigationComponents.jsx';
 import { ComposerPopover } from '../../components/ComposerPopover.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
-import { VllmSetupProgress } from '../../components/VllmSetupProgress.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
@@ -769,9 +768,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       const [imageTesting, setImageTesting] = useState(false);
       const [imageTestResult, setImageTestResult] = useState(null); // { status, verified, summary } | null
       useEffect(() => { setImageTestResult(null); }, [model, baseUrl, apiKey, preset]);
-      // 本机预装大模型「再入口」:检测无运行实例但有预装时,提示启用;走同一 bootstrap。
-      const [offerSetup, setOfferSetup] = useState(false);   // 检测到预装,显示启用提示
-      const [bootstrapHere, setBootstrapHere] = useState(false); // 从本页发起了 bootstrap(隔离全局态,避免开机引导的成功态串到这里)
       const localizeProvider = group => group
         ? { ...group, ...(settingsCopy.providerCatalog[group.key] || {}) }
         : null;
@@ -998,11 +994,11 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       }
       async function handleDetect() {
         if (!canSetUpLocalModel || !bridge.available || detecting) return;
-        // macOS/Windows 后端无 discover_local_vllm / detect_local_vllm_setup 命令(已 cfg linux),
+        // macOS/Windows 后端无 discover_local_vllm 命令(已 cfg linux),
         // 此处非 Linux 直接返回,避免 invoke 不存在的命令 reject 报错。
         if (!bridge.available || detecting) return;
         if (!localVllmSupported) return;
-        setDetecting(true); setDetectResult(null); setTestResult(null); setOfferSetup(false); setBootstrapHere(false);
+        setDetecting(true); setDetectResult(null); setTestResult(null);
         try {
           const result = await bridge.vllm.discoverLocalVllm({
             currentBaseUrl: baseUrl.trim() || null,
@@ -1020,16 +1016,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               : (c.model ? [{ id: c.model, loaded: null }] : []);
             const loadedEntry = entries.find(e => e && e.id && e.loaded === true);
             if (loadedEntry) applyCandidate({ base_url: c.base_url, model: loadedEntry.id });
-          }
-          else if (online.length === 0) {
-            // 没探到运行中的实例:看本机是否有预装大模型,有则提示一键启用(走同一 bootstrap)。
-            const setup = await bridge.vllm.detectLocalVllmSetup();
-            const canStart = setup && setup.has_packages &&
-              (setup.engine_state ? ['stopped', 'failed'].includes(setup.engine_state) : !setup.vllm_online);
-            if (canStart) setOfferSetup(true);
-            if (setup && setup.engine_state === 'starting') {
-              setDetectResult({ candidates: [], engineState: 'starting' });
-            }
           }
         } catch (e) {
           setDetectResult({ error: String(e) });
@@ -1805,8 +1791,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                 <div className={`rounded-xl border p-3 space-y-2 border-[#E0E3E7] bg-[#F8F9FB] dark:border-[#333537] dark:bg-[#131314]`}>
                   {detectResult.error ? (
                     <span className={`text-[12px] text-[#C5221F] dark:text-[#F28B82]`}>{t.vllmDetectError(detectResult.error)}</span>
-                  ) : detectResult.engineState === 'starting' ? (
-                    <span className={`text-[12px] text-[#0B57D0] dark:text-[#A8C7FA]`}>{t.vllmDetectStarting}</span>
                   ) : detectResult.candidates.length === 0 ? (
                     <span className={`text-[12px] text-[#5F6368] dark:text-[#9AA0A6]`}>{t.vllmDetectNone}</span>
                   ) : (
@@ -1826,44 +1810,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                     </>
                   )}
                   <span className={`text-[11px] block text-[#9AA0A6] dark:text-[#5F6368]`}>{t.vllmDetectHint}</span>
-                </div>
-              )}
-              {preset === 'local_vllm' && canSetUpLocalModel && (offerSetup || bootstrapHere) && (
-                <div className={`rounded-xl border p-3 border-[#E0E3E7] bg-[#F8F9FB] dark:border-[#333537] dark:bg-[#131314]`}>
-                  {bootstrapHere ? (
-                    bs && bs.vllmBootstrapDone ? (
-                      <div>
-                        <div className="text-[13px] leading-relaxed mb-3">{t.vllmSetupDone}</div>
-                        <div className="flex justify-end">
-                          <button onClick={() => bridge.available && bridge.updater.restartApp()}
-                            className="h-8 px-4 rounded-lg text-[13px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.restartNow}</button>
-                        </div>
-                      </div>
-                    ) : bs && bs.vllmBootstrapError ? (
-                      <div>
-                        <div className="text-[12px] font-medium mb-1" style={{ color: '#E5484D' }}>{t.vllmSetupFailed}</div>
-                        <div className="text-[12px] leading-relaxed mb-3 break-words" style={{ opacity: .75 }}>{bs.vllmBootstrapError}</div>
-                        <div className="flex justify-end gap-2">
-                          <button onClick={() => { setBootstrapHere(false); setOfferSetup(false); }}
-                            className={`h-8 px-4 rounded-lg text-[13px] bg-[#F0F4F9] text-[#1F1F1F] dark:bg-[#2B2C2F] dark:text-[#E3E3E3]`}>{t.cpCancel}</button>
-                          <button onClick={() => bridge.vllm.bootstrapLocalVllm()}
-                            className="h-8 px-4 rounded-lg text-[13px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.vllmSetupRetry}</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <VllmSetupProgress phase={bs && bs.vllmSetupPhase} attempt={(bs && bs.vllmSetupAttempt) || 0} t={t} />
-                    )
-                  ) : (
-                    <div>
-                      <div className="text-[13px] leading-relaxed mb-3">{t.vllmReentryOffer}</div>
-                      <div className="flex justify-end gap-2">
-                        <button onClick={() => setOfferSetup(false)}
-                          className={`h-8 px-4 rounded-lg text-[13px] bg-[#F0F4F9] text-[#1F1F1F] dark:bg-[#2B2C2F] dark:text-[#E3E3E3]`}>{t.cpCancel}</button>
-                        <button onClick={() => { setBootstrapHere(true); bridge.vllm.bootstrapLocalVllm(); }}
-                          className="h-8 px-4 rounded-lg text-[13px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.vllmSetupEnable}</button>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
