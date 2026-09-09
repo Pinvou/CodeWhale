@@ -187,14 +187,14 @@ impl ToolSpec for TasksTool {
                 "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task. Dangerous commands are BLOCKED unless auto-approve is enabled; default timeout 120s."
             }
             Some("pr_attempt_record") => {
-                "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes."
+                "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes. Requires approval because it records work state."
             }
             Some("pr_attempt_list") => "List PR attempts recorded on a durable task.",
             Some("pr_attempt_read") => {
                 "Read one recorded PR attempt and its patch artifact reference."
             }
             Some("pr_attempt_preflight") => {
-                "Run `git apply --check` for a recorded attempt patch. This is a no-mutation preflight; actual apply remains explicit and approval-gated elsewhere."
+                "Run `git apply --check` for a recorded attempt patch. This is a no-mutation preflight and itself requires approval; the actual apply stays a separate explicit step."
             }
             _ if self.read_only => {
                 "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
@@ -885,7 +885,7 @@ impl ToolSpec for TaskShellStartTool {
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout — stop it with action=cancel." },
+                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout — stop it via the Bash tool's action=cancel with the returned task id." },
                 "stdin": { "type": "string" },
                 "tty": { "type": "boolean" }
             },

@@ -790,7 +790,7 @@ pub fn thread_goal_status_projection(
 pub fn render_continuation_prompt(snapshot: &GoalSnapshot, continuation_index: u32) -> String {
     let goal_json = serde_json::to_string_pretty(snapshot).unwrap_or_else(|_| "{}".to_string());
     format!(
-        "{}\n\n## Active Goal State\n\n```json\n{}\n```\n\nContinuation pass #{}.\nIf a critical verifier finds remaining work, call `update_goal` with `status: \"not_achieved\"` and its concrete `verification.gaps`; repeated equivalent gap sets pause the loop for inspection instead of spending indefinitely. If the goal is complete, first run or cite a concrete verifier/check when one applies, then call `update_goal` with `status: \"complete\"`, concrete evidence, and `verification: {{\"status\":\"passed\",\"check\":\"...\",\"summary\":\"...\"}}`. For non-verifiable work (docs, research, writing), use `verification: {{\"status\":\"not_applicable\",\"check\":\"...\",\"summary\":\"...\"}}` with a clear rationale instead of fabricating a verifier receipt. If it is blocked, call `update_goal` with `status: \"blocked\"` and the blocker. Otherwise continue making progress toward the objective.",
+        "{}\n\n## Active Goal State\n\n```json\n{}\n```\n\nContinuation pass #{}.\nIf a critical verifier finds remaining work, call `update_goal` with `status: \"not_achieved\"` and its concrete `verification.gaps`; repeating an equivalent gap set only increments `repeated_gap_count` in the goal snapshot — the loop pauses at the continuation run limit, not because of repetition. If the goal is complete, first run or cite a concrete verifier/check when one applies, then call `update_goal` with `status: \"complete\"`, concrete evidence, and `verification: {{\"status\":\"passed\",\"check\":\"...\",\"summary\":\"...\"}}`. For non-verifiable work (docs, research, writing), use `verification: {{\"status\":\"not_applicable\",\"check\":\"...\",\"summary\":\"...\"}}` with a clear rationale instead of fabricating a verifier receipt. If it is blocked, call `update_goal` with `status: \"blocked\"` and the blocker. Otherwise continue making progress toward the objective.",
         crate::prompts::GOAL_CONTINUATION_PROMPT.trim(),
         goal_json,
         continuation_index,
@@ -1914,6 +1914,25 @@ mod tests {
         assert!(prompt.contains("Goal Continuation"));
         assert!(prompt.contains("finish issue 2199"));
         assert!(prompt.contains("Continuation pass #2"));
+    }
+
+    /// `GoalPauseReason::NoProgress` is never constructed: repeating an
+    /// equivalent gap set only bumps the snapshot counter, and the single
+    /// automatic pause is the continuation run limit (`goal_loop` backoff).
+    /// The prompt must not revive the fabricated repetition-pause claim that
+    /// the `update_goal` gaps schema already corrects.
+    #[test]
+    fn continuation_prompt_does_not_claim_gap_repetition_pauses_the_loop() {
+        let snapshot = GoalSnapshot {
+            objective: Some("finish issue 2199".to_string()),
+            status: "active".to_string(),
+            ..Default::default()
+        };
+
+        let prompt = render_continuation_prompt(&snapshot, 2);
+        assert!(!prompt.contains("pause the loop for inspection"));
+        assert!(prompt.contains("repeated_gap_count"));
+        assert!(prompt.contains("continuation run limit"));
     }
 
     #[test]
