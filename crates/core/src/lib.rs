@@ -879,6 +879,12 @@ impl ThreadManager {
             status: to_persisted_status(&thread.status),
             path: thread.path.clone(),
             cwd: thread.cwd.clone(),
+            // Preserve what the row already carries (the protocol Thread
+            // does not surface roots at this stage); the state column stays
+            // the authority until the resume wiring lands.
+            workspace_roots: existing
+                .as_ref()
+                .map_or(Vec::new(), |metadata| metadata.workspace_roots.clone()),
             cli_version: thread.cli_version.clone(),
             source: to_persisted_source(&thread.source),
             name: thread.name.clone(),
@@ -2246,6 +2252,7 @@ mod tests {
             git_origin_url: None,
             memory_mode: None,
             current_leaf_id: None,
+            workspace_roots: Vec::new(),
         }
     }
 
