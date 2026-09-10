@@ -23,7 +23,6 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/requestdeadline"
 	"github.com/google/uuid"
 )
@@ -32,6 +31,7 @@ type Config struct {
 	PublicURL                           *url.URL
 	AuthorizationURL                    *url.URL
 	TokenURL                            *url.URL
+	PrivateCAFile                       string
 	ClientID                            string
 	AccountURL                          *url.URL
 	BillingURL                          *url.URL
@@ -69,6 +69,9 @@ func NewService(config Config, store Store) (*Service, error) {
 	if config.PublicURL.Scheme != "https" && config.SecureCookies {
 		return nil, errors.New("secure portal cookies require an HTTPS public URL")
 	}
+	if strings.TrimSpace(config.PrivateCAFile) != "" && config.TokenURL.Scheme != "https" {
+		return nil, errPortalPrivateCA
+	}
 	if config.AdminTokenDetailsEnabled {
 		if err := validateCredentialOrigin(config.CredentialOrigin, config.SecureCookies); err != nil {
 			return nil, err
@@ -77,7 +80,11 @@ func NewService(config Config, store Store) (*Service, error) {
 	if config.SessionMaxAge <= 0 {
 		config.SessionMaxAge = defaultSessionMaxAge
 	}
-	return &Service{config: config, store: store, client: observability.NewHTTPClient(15 * time.Second), now: func() time.Time { return time.Now().UTC() }, deadlineNow: func() time.Time { return time.Now().UTC() }}, nil
+	client, err := newPortalHTTPClient(config.PrivateCAFile)
+	if err != nil {
+		return nil, err
+	}
+	return &Service{config: config, store: store, client: client, now: func() time.Time { return time.Now().UTC() }, deadlineNow: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (s *Service) Handler(static http.Handler) http.Handler {

@@ -128,6 +128,10 @@ Portal 使用 `REDIS_URL=rediss://portal:…@redis:6379/0` 和专用 `REDIS_CA_F
 Identity 使用 `AUTH_RISK_REDIS_URL=rediss://identity:…@redis:6379/0` 和
 `AUTH_RISK_REDIS_CA_FILE`。这两份 CA 只影响 Redis 连接，不能使用全进程环境替换公网根。
 指定 CA 时拒绝明文、跳过验证、错误 CA/主机名及不合规 CA 文件。旧开发构造入口不变。
+Portal 的浏览器授权地址保持公网 origin，服务端授权码交换必须直连
+`https://keycloak:8443`，并通过 `PORTAL_PRIVATE_CA_FILE` 把基础设施 CA 仅加入 Portal
+自己的 HTTP 客户端；不得把授权码交换发往只接收密码与刷新令牌的公网风控端点，也不得
+用全进程 `SSL_CERT_FILE` 替换系统根。
 New API 使用 `REDIS_CONN_STRING=rediss://newapi:…@newapi-redis:6379/0`；其单容器
 `SSL_CERT_FILE` 由原镜像公开系统根加基础设施公开根组成，不包含 KMS 根或任何私钥。
 该原二进制信任投递与真实业务验证在 C4 完成，本批不冒充 New API 已上线。

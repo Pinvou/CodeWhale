@@ -107,6 +107,7 @@ func main() {
 		PublicURL:                           publicURL,
 		AuthorizationURL:                    mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
 		TokenURL:                            mustURL("PORTAL_OIDC_TOKEN_URL"),
+		PrivateCAFile:                       strings.TrimSpace(os.Getenv("PORTAL_PRIVATE_CA_FILE")),
 		ClientID:                            os.Getenv("PORTAL_OIDC_CLIENT_ID"),
 		AccountURL:                          mustURL("ACCOUNT_HTTP_URL"),
 		BillingURL:                          mustURL("BILLING_HTTP_URL"),

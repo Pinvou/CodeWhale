@@ -161,9 +161,11 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - `KEYCLOAK_PROVISIONER_CLIENT_ID`
 - `KEYCLOAK_PROVISIONER_CLIENT_SECRET`
 - 各服务的 `OIDC_ISSUER`、`OIDC_JWKS_URL`、`OIDC_AUDIENCE`
-- Portal 的 `PORTAL_PUBLIC_URL`、`PORTAL_OIDC_AUTHORIZATION_URL`、`PORTAL_OIDC_TOKEN_URL`、`PORTAL_OIDC_CLIENT_ID`
+- Portal 的 `PORTAL_PUBLIC_URL`、`PORTAL_OIDC_AUTHORIZATION_URL`、`PORTAL_OIDC_TOKEN_URL`、`PORTAL_PRIVATE_CA_FILE`、`PORTAL_OIDC_CLIENT_ID`
 
 `OIDC_ISSUER` 必须与外部 Token 中的 issuer 完全一致；容器访问 JWKS 可使用内部 URL，但不能改变验证的 issuer。
+Portal 的浏览器授权地址使用公开 issuer；服务端授权码交换使用 Keycloak 内部 HTTPS 服务名，并由
+`PORTAL_PRIVATE_CA_FILE` 在 Portal 专用 HTTP 客户端中扩展系统信任。不得把授权码交换发送到只允许密码和刷新令牌的公网风控入口。
 
 ### 6.3 手机认证
 

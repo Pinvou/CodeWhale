@@ -125,6 +125,16 @@ test('production business rejects private environment leakage and insecure Redis
   rejects(c => { c.services['identity-service'].environment.AUTH_RISK_REDIS_URL = 'redis://identity:PUBLIC_FIXTURE_ONLY@redis:6379/0'; });
   rejects(c => { c.services['identity-service'].environment.AUTH_RISK_REDIS_URL = c.services['token-portal'].environment.REDIS_URL; });
 });
+test('Portal keeps browser authorization public but exchanges codes over private verified TLS', () => {
+  const { config } = businessComposeFixture();
+  const environment = config.services['token-portal'].environment;
+  assert.equal(environment.PORTAL_OIDC_AUTHORIZATION_URL, 'https://account.pinvou.com/realms/pinvou/protocol/openid-connect/auth');
+  assert.equal(environment.PORTAL_OIDC_TOKEN_URL, 'https://keycloak:8443/realms/pinvou/protocol/openid-connect/token');
+  assert.equal(environment.PORTAL_PRIVATE_CA_FILE, '/var/run/secrets/pinvou/trust/ca.crt');
+  assert.notEqual(environment.PORTAL_OIDC_TOKEN_URL, environment.PORTAL_OIDC_AUTHORIZATION_URL.replace(/\/auth$/, '/token'));
+  rejects(c => { c.services['token-portal'].environment.PORTAL_OIDC_TOKEN_URL = 'https://account.pinvou.com/realms/pinvou/protocol/openid-connect/token'; });
+  rejects(c => { delete c.services['token-portal'].environment.PORTAL_PRIVATE_CA_FILE; });
+});
 test('production business rejects tool auto-start or modified command', () => {
   rejects(c => { delete c.services['event-resources'].profiles; });
   rejects(c => { c.services['token-governance-check'].command = ['--apply']; });
