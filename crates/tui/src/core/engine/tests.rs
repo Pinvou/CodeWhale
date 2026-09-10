@@ -9617,12 +9617,316 @@ fn engine_handle_cancel_tracks_latest_turn_token() {
     let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
     let stale_token = engine.cancel_token.clone();
 
-    engine.reset_cancel_token();
+    engine.install_cancel_slot(None);
     handle.cancel();
 
     assert!(engine.cancel_token.is_cancelled());
     assert!(handle.is_cancelled());
     assert!(!stale_token.is_cancelled());
+}
+
+#[test]
+fn engine_handle_cancel_turn_only_fires_the_named_turns_token() {
+    let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
+    // No turn installed yet: the slot carries no identity, so every
+    // turn-bound cancel must skip instead of firing the anonymous token.
+    assert!(!handle.cancel_turn("turn-1", CancelReason::User, CancelMode::StopDropInbox));
+    assert!(!handle.is_cancelled());
+
+    engine.install_turn_cancel_token("turn-1");
+    assert!(handle.cancel_turn("turn-1", CancelReason::User, CancelMode::StopDropInbox));
+    assert!(engine.cancel_token.is_cancelled());
+
+    // A follow-up turn swaps the slot — exactly what a runtime self-started
+    // continuation (idle sub-agent completion, background shell wake, goal
+    // continuation) does before the host observes its `TurnStarted`.
+    engine.install_turn_cancel_token("turn-2");
+    let followup_token = engine.cancel_token.clone();
+    // A stale cancel still targeting turn-1 must skip: it may not fire the
+    // follow-up's token, and it must not latch a steer disposition for it.
+    assert!(!handle.cancel_turn("turn-1", CancelReason::User, CancelMode::StopDropInbox));
+    assert!(
+        !followup_token.is_cancelled(),
+        "stale turn-bound cancel must not fire the follow-up turn's token"
+    );
+    assert!(
+        engine
+            .cancel_reason
+            .lock()
+            .expect("cancel reason latch")
+            .is_none(),
+        "stale turn-bound cancel must not latch a cancel reason"
+    );
+    // The follow-up's own cancel still lands on its token.
+    assert!(handle.cancel_turn("turn-2", CancelReason::User, CancelMode::InterruptKeepInbox));
+    assert!(followup_token.is_cancelled());
+}
+
+#[test]
+fn engine_handle_stop_disposition_publishes_without_firing_any_token() {
+    // A stop whose target turn already completed (the app's terminal-closing
+    // window) must still drop parked steers and latch the cancel reason, but
+    // by then the slot may already hold a runtime self-started follow-up
+    // turn's live token (pinvou-agent#254) — the disposition-only entry must
+    // never fire it.
+    let (mut engine, handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.install_turn_cancel_token("turn-1");
+    let token = engine.cancel_token.clone();
+
+    handle.publish_stop_disposition(CancelReason::User, CancelMode::StopDropInbox);
+    assert!(
+        !token.is_cancelled(),
+        "disposition-only stop fired the installed turn's token"
+    );
+    assert!(!handle.is_cancelled());
+    assert_eq!(
+        *engine.cancel_reason.lock().expect("cancel reason latch"),
+        Some(CancelReason::User),
+        "disposition-only stop must latch the cancel reason"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_cancel_turn_binding_spares_unnamed_turns_and_hits_the_observed_turn() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let request_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(BlockingModelClient {
+            entered: std::sync::Arc::clone(&entered),
+            request_dropped: std::sync::Arc::clone(&request_dropped),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Cancel must bind to the observed turn id.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+    let turn_id = {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for TurnStarted")
+                .expect("engine event");
+            if let Event::TurnStarted { turn_id, .. } = event {
+                break turn_id;
+            }
+        }
+    };
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("model request was never entered");
+
+    // A host cancel bound to a turn identity the engine never installed
+    // (stale target, or a follow-up turn the host has not observed yet —
+    // pinvou-agent#254) must not fire the running turn's token and must not
+    // disturb the in-flight provider request.
+    assert!(!handle.cancel_turn(
+        "turn-that-never-ran",
+        CancelReason::User,
+        CancelMode::StopDropInbox,
+    ));
+    assert!(
+        !handle.is_cancelled(),
+        "turn-bound cancel with a foreign turn id fired the live token"
+    );
+    assert!(!request_dropped.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Cancelling the turn id observed from `TurnStarted` lands on exactly
+    // that turn: same interrupted terminal, same dropped provider future as
+    // the mode-less cancel path.
+    assert!(handle.cancel_turn(&turn_id, CancelReason::User, CancelMode::StopDropInbox,));
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for cancellation")
+    {
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+    assert!(
+        request_dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "turn-bound cancellation must drop the active provider future"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+struct CompleteOnceThenBlockModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    request_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for CompleteOnceThenBlockModelClient {
+    fn provider_name(&self) -> &str {
+        "deterministic-complete-then-block"
+    }
+
+    fn model(&self) -> &str {
+        "deterministic-complete-then-block-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        std::future::pending().await
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        use crate::llm_client::mock::canned;
+
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            let events = vec![
+                canned::message_start("first_completed_turn"),
+                canned::text_block_start(0),
+                canned::text_delta(0, "first turn completes"),
+                canned::block_stop(0),
+                canned::message_delta("end_turn", None),
+                canned::message_stop(),
+            ];
+            return Ok(Box::pin(futures_util::stream::iter(
+                events.into_iter().map(|event| Ok(event)),
+            )));
+        }
+        let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn forkguard_idle_subagent_completion_self_start_ignores_a_stale_previous_turn_cancel() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let request_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(CompleteOnceThenBlockModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered: std::sync::Arc::clone(&entered),
+            request_dropped: std::sync::Arc::clone(&request_dropped),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // The completion channel is engine-private; the tests module shares the
+    // engine's private namespace so the idle-wake self-start can be driven
+    // without spawning a real child.
+    let completion_tx = engine.tx_subagent_completion.clone();
+    let owner_session_id = engine.session.id.clone();
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Watch the child agent.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+    let first_turn_id = {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the first turn")
+                .expect("engine event");
+            if let Event::TurnStarted { turn_id, .. } = event {
+                break turn_id;
+            }
+        }
+    };
+    // Deliver an idle child completion while the first turn is still in
+    // flight. The engine consumes it from its idle select only after the turn
+    // ends and self-starts the follow-up before any host reserve — the idle
+    // sub-agent completion self-start from pinvou-agent#254.
+    completion_tx
+        .send(crate::tools::subagent::SubAgentCompletion {
+            owner_session_id,
+            agent_id: "idle-child".to_string(),
+            payload: "child finished its work".to_string(),
+        })
+        .expect("inject idle sub-agent completion");
+    let self_started_turn_id = {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("timed out waiting for the self-started turn")
+                .expect("engine event");
+            if let Event::TurnStarted { turn_id, .. } = event {
+                break turn_id;
+            }
+        }
+    };
+    assert_ne!(
+        first_turn_id, self_started_turn_id,
+        "the idle child completion must self-start a new turn"
+    );
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("self-started turn never entered its model request");
+
+    // The host's view was still on the finished first turn when the engine
+    // self-started the follow-up: its stale cancel must be refused instead of
+    // firing the follow-up turn's token (pinvou-agent#254).
+    assert!(!handle.cancel_turn(
+        &first_turn_id,
+        CancelReason::User,
+        CancelMode::StopDropInbox,
+    ));
+    assert!(
+        !handle.is_cancelled(),
+        "stale cancel fired the self-started follow-up turn's token"
+    );
+    assert!(!request_dropped.load(std::sync::atomic::Ordering::SeqCst));
+
+    // Cancelling the follow-up by the id observed from its own `TurnStarted`
+    // still lands on exactly that turn.
+    assert!(handle.cancel_turn(
+        &self_started_turn_id,
+        CancelReason::User,
+        CancelMode::StopDropInbox,
+    ));
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for cancellation")
+    {
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Interrupted, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+    assert!(
+        request_dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "turn-bound cancellation must drop the active provider future"
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
 }
 
 #[test]
@@ -19876,8 +20180,8 @@ async fn midstream_error_frame_stops_the_stream_and_drops_trailing_deltas() {
 struct CancelAfterTerminalUsageModelClient {
     calls: std::sync::atomic::AtomicUsize,
     // The engine mints a fresh token per turn; read the live one through the
-    // engine's shared cell at stream time.
-    token: std::sync::Mutex<Option<Arc<StdMutex<tokio_util::sync::CancellationToken>>>>,
+    // engine's shared slot cell at stream time.
+    token: std::sync::Mutex<Option<Arc<StdMutex<TurnCancelSlot>>>>,
 }
 
 #[async_trait::async_trait]
@@ -19913,6 +20217,7 @@ impl crate::core::model_client::ModelClient for CancelAfterTerminalUsageModelCli
         let token = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .token
             .clone();
         let mut message_start = canned::message_start("cancel_after_usage");
         if let StreamEvent::MessageStart { message } = &mut message_start {
@@ -21026,7 +21331,10 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
     let handle = EngineHandle {
         tx_op,
         rx_event: Arc::new(RwLock::new(mpsc::channel::<Event>(1).1)),
-        cancel_token: Arc::new(StdMutex::new(cancel_token)),
+        cancel_token: Arc::new(StdMutex::new(super::TurnCancelSlot {
+            turn_id: None,
+            token: cancel_token,
+        })),
         cancel_reason: Arc::new(StdMutex::new(None)),
         tx_approval: mpsc::channel(1).0,
         tx_user_input: mpsc::channel(1).0,
