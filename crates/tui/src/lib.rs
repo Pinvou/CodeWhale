@@ -8030,7 +8030,7 @@ fn run_sessions_export(
         println!("  (no artifacts directory found for this session)");
     }
     println!(
-        "  Restore with: codewhale resume <extracted session.json> (or /resume inside the TUI)"
+        "  Restore (full fidelity): /load <extracted session.json> inside the TUI; /resume imports the conversation only"
     );
     Ok(())
 }

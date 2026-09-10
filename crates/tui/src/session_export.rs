@@ -11,7 +11,9 @@
 //! Archive layout (format version 1):
 //!
 //! - `session.json` — the full [`SavedSession`] serialization, the same shape
-//!   as the on-disk session record. `/resume <file>` accepts it directly.
+//!   as the on-disk session record. Extract it and open it with `/load` in
+//!   the TUI for a full-fidelity restore (system prompt included); note that
+//!   `/resume <file>` imports the conversation transcript only.
 //! - `container.json` — the portable [`SessionImportContainer`] for
 //!   version-tolerant resume across schema changes.
 //! - `artifacts/<...>` — the session-owned artifact directory, when present
@@ -27,13 +29,13 @@
 //! archive or attach.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
+use liblzma::write::XzEncoder;
 use serde::Serialize;
 use tar::Builder;
-use xz2::write::XzEncoder;
 
 use crate::artifacts::ARTIFACTS_DIR_NAME;
 use crate::session_manager::{SavedSession, SessionMetadata};
@@ -307,6 +309,32 @@ enum MemberContents<'a> {
     File(&'a Path),
 }
 
+/// Append exactly `expected` bytes of `reader` under `name`. The bounded read
+/// keeps the tar header and the member payload consistent when the source
+/// file changes size mid-export: growth is capped at the snapshot size
+/// (valid archive, prefix content), while shrinkage — which would otherwise
+/// silently shift every following header and corrupt the archive — fails the
+/// export instead.
+fn append_sized<W: Write, R: Read>(
+    tar: &mut Builder<W>,
+    header: &mut tar::Header,
+    name: &str,
+    reader: R,
+    expected: u64,
+) -> io::Result<()> {
+    let mut limited = reader.take(expected);
+    tar.append_data(header, name, &mut limited)?;
+    if limited.limit() != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "member {name} ended before its recorded size of {expected} bytes; the source changed during export"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn append_member(
     tar: &mut Builder<XzEncoder<fs::File>>,
     name: &str,
@@ -326,7 +354,7 @@ fn append_member(
             let mut file = fs::File::open(path)?;
             let size = file.metadata()?.len();
             let mut header = archive_header(size);
-            tar.append_data(&mut header, name, &mut file)?;
+            append_sized(tar, &mut header, name, &mut file, size)?;
             members.push(SessionArchiveMember {
                 name: name.to_string(),
                 bytes: size,
@@ -390,7 +418,7 @@ mod tests {
 
     fn read_archive_members(path: &Path) -> Vec<(String, Vec<u8>)> {
         let file = fs::File::open(path).expect("archive opens");
-        let mut archive = tar::Archive::new(xz2::read::XzDecoder::new(file));
+        let mut archive = tar::Archive::new(liblzma::read::XzDecoder::new(file));
         archive
             .entries()
             .expect("archive entries")
@@ -556,6 +584,35 @@ mod tests {
                 .iter()
                 .any(|member| member.name.starts_with(ARTIFACTS_DIR_NAME))
         );
+    }
+
+    #[test]
+    fn forkguard_session_archive_rejects_artifact_shorter_than_recorded_size() {
+        // A member whose source shrank between stat and copy must fail the
+        // export instead of being zero-padded into a silently shifted
+        // archive (the growth direction is capped to the snapshot size).
+        let mut tar = Builder::new(Vec::new());
+        let mut header = archive_header(16);
+        let error = append_sized(
+            &mut tar,
+            &mut header,
+            "artifacts/shrinking.bin",
+            &b"only-nine"[..],
+            16,
+        )
+        .expect_err("short member must fail the export");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+
+        let mut tar = Builder::new(Vec::new());
+        let mut header = archive_header(9);
+        append_sized(
+            &mut tar,
+            &mut header,
+            "artifacts/stable.bin",
+            &b"only-nine"[..],
+            9,
+        )
+        .expect("exact-size member succeeds");
     }
 
     #[test]
