@@ -7713,6 +7713,270 @@ async fn scout_shell_respects_parent_shell_and_network_ceilings() {
     }
 }
 
+/// An auto-approved Worker registry (shell-capable, everything else default)
+/// carrying the given exec-policy engine — the smallest fixture that reaches
+/// the delegated-call execpolicy gate past every posture gate.
+fn auto_approved_worker_registry_with_engine(
+    tmp: &tempfile::TempDir,
+    exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
+) -> SubAgentToolRegistry {
+    worker_registry_with_engine_and_approval(tmp, exec_policy_engine, true)
+}
+
+/// The same fixture with the parent session's approval posture under the
+/// caller's control: `false` models every prompting/fail-closed posture
+/// (Suggest/Auto/Never), where the main line would surface an approval
+/// prompt the child has no surface for.
+fn worker_registry_with_engine_and_approval(
+    tmp: &tempfile::TempDir,
+    exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
+    auto_approve: bool,
+) -> SubAgentToolRegistry {
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.context.auto_approve = auto_approve;
+    runtime.allow_shell = true;
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+    SubAgentToolRegistry::new(
+        runtime.with_exec_policy_engine(exec_policy_engine),
+        FleetRole::Worker,
+        None,
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    )
+}
+
+/// Fork-delta behavior test: a command the parent session's execpolicy
+/// hard-denies must fail closed inside the child with the main line's deny
+/// wording — the auto-approve escape hatch this wiring closes — while a
+/// command no rule names still dispatches for real through the same registry.
+/// A typed ask rule mirrors the main line's #3790 posture authority: under a
+/// prompting/fail-closed parent the child refuses (it cannot show the
+/// approval prompt), while under an auto-approving parent it passes like the
+/// main line's auto-run.
+#[tokio::test]
+async fn forkguard_subagent_execpolicy_deny_matches_main_line() {
+    let tmp = tempdir().expect("tempdir");
+    let engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+        codewhale_execpolicy::Ruleset::user(Vec::new(), vec!["sudo".to_string()]),
+    ]);
+    let registry = auto_approved_worker_registry_with_engine(&tmp, engine);
+
+    let error = registry
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "sudo --version"}),
+        )
+        .await
+        .expect_err("a main-line deny rule must block delegated calls too")
+        .to_string();
+    assert!(
+        error.contains("denied prefix rule 'sudo'"),
+        "child must see the main-line deny reason: {error}"
+    );
+
+    let output = registry
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "ls"}),
+        )
+        .await
+        .expect("an allowed command must pass the execpolicy gate untouched");
+    assert!(
+        !output.starts_with("Error:"),
+        "allowed command must really dispatch: {output}"
+    );
+
+    // Ask-rule face: a prompting/fail-closed parent session cannot let the
+    // child run what the main line would only run after approval. A File
+    // read is `ApprovalRequirement::Auto` for the held-call gate, so the
+    // refusal below can only come from THIS gate's Prompt handling — pinned
+    // by the distinctive "Delegated tool call" wording, not the generic
+    // "requires approval" substring the held-call gate's refusal shares.
+    std::fs::create_dir_all(tmp.path().join("secret")).expect("secret dir");
+    std::fs::write(tmp.path().join("secret/key.txt"), "rot thirteen").expect("key fixture");
+    let ask_engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+        codewhale_execpolicy::Ruleset::user(Vec::new(), Vec::new()).with_ask_rules(vec![
+            codewhale_execpolicy::ToolAskRule::file_path("read_file", "secret/key.txt"),
+        ]),
+    ]);
+    let prompting = worker_registry_with_engine_and_approval(&tmp, ask_engine.clone(), false);
+    let error = prompting
+        .execute(
+            "agent_policy",
+            "File",
+            json!({"action": "read", "path": "secret/key.txt"}),
+        )
+        .await
+        .expect_err("an ask rule under a non-auto parent must refuse in the child")
+        .to_string();
+    assert!(
+        error.contains("Delegated tool call"),
+        "refusal must come from the delegated-call execpolicy gate, not the held-call gate: {error}"
+    );
+
+    let output = prompting
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "ls"}),
+        )
+        .await
+        .expect("a command no rule names must dispatch regardless of posture");
+    assert!(!output.starts_with("Error:"), "{output}");
+
+    // The same ask rule under parent auto-approve passes like the main
+    // line's auto-run, and the read really dispatches.
+    let yolo = worker_registry_with_engine_and_approval(&tmp, ask_engine, true);
+    let output = yolo
+        .execute(
+            "agent_policy",
+            "File",
+            json!({"action": "read", "path": "secret/key.txt"}),
+        )
+        .await
+        .expect("under parent auto-approve the ask rule must pass like the main line");
+    assert!(!output.starts_with("Error:"), "{output}");
+}
+
+/// Without a ruleset the delegated path is byte-identical to the unwired
+/// behavior: the gate is a no-op, and the very same call that a deny rule
+/// blocks runs when the rule is absent.
+#[tokio::test]
+async fn subagent_execpolicy_empty_ruleset_keeps_auto_approve_behavior() {
+    let tmp = tempdir().expect("tempdir");
+    let registry = auto_approved_worker_registry_with_engine(
+        &tmp,
+        codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
+    );
+    let output = registry
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "echo execpolicy_unblocked"}),
+        )
+        .await
+        .expect("an empty engine must leave the delegated call unchanged");
+    assert!(output.contains("execpolicy_unblocked"), "{output}");
+
+    let denied_registry = auto_approved_worker_registry_with_engine(
+        &tmp,
+        codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+            codewhale_execpolicy::Ruleset::user(Vec::new(), vec!["echo".to_string()]),
+        ]),
+    );
+    let error = denied_registry
+        .execute(
+            "agent_policy_denied",
+            "Bash",
+            json!({"action": "run", "command": "echo execpolicy_unblocked"}),
+        )
+        .await
+        .expect_err("the deny rule, not the wiring, must be what blocks")
+        .to_string();
+    assert!(error.contains("denied prefix rule 'echo'"), "{error}");
+}
+
+/// A typed Deny rule on a file path blocks the child's File read of that path
+/// while a workspace-relative read outside the rule still lands.
+#[tokio::test]
+async fn subagent_execpolicy_blocks_denied_file_read_but_allows_workspace_relative_read() {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("secret")).expect("secret dir");
+    std::fs::write(tmp.path().join("secret/key.txt"), "rot thirteen").expect("key fixture");
+    std::fs::write(tmp.path().join("notes.txt"), "plain notes").expect("notes fixture");
+    let mut rule = codewhale_execpolicy::ToolAskRule::file_path("read_file", "secret/key.txt");
+    rule.action = codewhale_execpolicy::PermissionAction::Deny;
+    let engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+        codewhale_execpolicy::Ruleset::user(Vec::new(), Vec::new()).with_ask_rules(vec![rule]),
+    ]);
+    let registry = auto_approved_worker_registry_with_engine(&tmp, engine);
+
+    let error = registry
+        .execute(
+            "agent_policy",
+            "File",
+            json!({"action": "read", "path": "secret/key.txt"}),
+        )
+        .await
+        .expect_err("a denied path must not be readable through the child")
+        .to_string();
+    assert!(error.contains("explicitly denies"), "{error}");
+
+    let output = registry
+        .execute(
+            "agent_policy",
+            "File",
+            json!({"action": "read", "path": "notes.txt"}),
+        )
+        .await
+        .expect("a workspace-relative read outside the deny rule passes");
+    assert!(output.contains("plain notes"), "{output}");
+}
+
+/// Typed ask rules are prompt decisions on the main line. Under a
+/// parent-auto-approving session the main line would auto-run, so the child
+/// passes the call through and it really executes; the refusal face under a
+/// prompting parent is pinned by
+/// `forkguard_subagent_execpolicy_deny_matches_main_line`.
+#[tokio::test]
+async fn subagent_execpolicy_prompt_decision_passes_under_parent_auto_approve() {
+    let tmp = tempdir().expect("tempdir");
+    let engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+        codewhale_execpolicy::Ruleset::user(Vec::new(), Vec::new()).with_ask_rules(vec![
+            codewhale_execpolicy::ToolAskRule::exec_shell("echo askme"),
+        ]),
+    ]);
+    let registry = auto_approved_worker_registry_with_engine(&tmp, engine);
+
+    let output = registry
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "echo askme"}),
+        )
+        .await
+        .expect("an ask-rule (prompt) decision must not block a child");
+    assert!(output.contains("askme"), "{output}");
+}
+
+/// The registry's engine handle is the parent's live engine, not a snapshot:
+/// a ruleset installed after the registry was built binds its delegated calls.
+#[tokio::test]
+async fn subagent_execpolicy_ruleset_update_binds_already_delegated_calls() {
+    let tmp = tempdir().expect("tempdir");
+    let mut engine = codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new());
+    let registry = auto_approved_worker_registry_with_engine(&tmp, engine.clone());
+
+    let output = registry
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "echo not_yet_denied"}),
+        )
+        .await
+        .expect("no rule exists yet, so the delegated call runs");
+    assert!(output.contains("not_yet_denied"), "{output}");
+
+    engine.set_ruleset(codewhale_execpolicy::Ruleset::user(
+        Vec::new(),
+        vec!["echo".to_string()],
+    ));
+    let error = registry
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "echo not_yet_denied"}),
+        )
+        .await
+        .expect_err("a mid-session rule must reach the already-built registry")
+        .to_string();
+    assert!(error.contains("denied prefix rule 'echo'"), "{error}");
+}
+
 #[test]
 fn implementer_catalog_inherits_patch_and_fim_when_enabled() {
     let tmp = tempdir().expect("tempdir");
@@ -12772,6 +13036,7 @@ pub(crate) fn stub_runtime() -> SubAgentRuntime {
         // Test stubs run without a manager-stamped governor; the LLM call
         // path treats `None` as "report nothing".
         governor: None,
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
     }
 }
 
