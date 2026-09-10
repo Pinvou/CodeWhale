@@ -81,6 +81,12 @@ Host 分流。公网边缘先安装 `deploy/nginx-pinvou-llmapi-domain-bootstrap
 签发，再替换为 `deploy/nginx-pinvou-llmapi-domain.conf`。不得把 New API 容器端口直接
 开放到公网，也不得复用其他域名证书或关闭主机名校验。
 
+公网反代场景必须把 `TRUSTED_PROXIES` 显式设置为 New API 容器实际看到的最后一跳代理
+IP/CIDR，不能继续使用 `none`，也不能填写公网客户端网段。边缘配置对
+`/api/user/login` 按公网来源 IP 限速；源站只透传边缘重写后的 `X-Forwarded-For`。部署后
+至少发起一次受控请求，并从 New API 日志确认客户端地址不再是 Docker 网关；否则所有用户
+会共用同一个应用限流桶，公网探测流量可导致正常登录返回 429。
+
 Token Gateway 中的 Provider Base URL 使用 `http://newapi:8080`。完成 `/v1/models`、JSON、SSE、usage 结算和客户端断开验证前，不得执行 DNS/API Gateway 切换。
 
 ## 验收与回滚
