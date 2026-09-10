@@ -28,6 +28,8 @@ x-runtime: &runtime
 
 x-http-environment: &http-environment
   APP_ENV: production
+  OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:?set verified OTEL_EXPORTER_OTLP_ENDPOINT}"
+  OTEL_EXPORTER_OTLP_CERTIFICATE: "/var/run/secrets/pinvou/trust/otel-ca.crt"
   PORT: "8080"
   METRICS_ADDRESS: ":9090"
   HEALTHCHECK_URL: http://127.0.0.1:8080/health/ready
@@ -431,6 +433,11 @@ services:
         target: /var/run/secrets/pinvou/nats-ca
         read_only: true
         bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
     networks: [governance-control, executor-egress]
 
   account-event-relay:
@@ -438,6 +445,8 @@ services:
     image: "${EVENT_RELAY_IMAGE:?set verified EVENT_RELAY_IMAGE}"
     environment:
       APP_ENV: "production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:?set verified OTEL_EXPORTER_OTLP_ENDPOINT}"
+      OTEL_EXPORTER_OTLP_CERTIFICATE: "/var/run/secrets/pinvou/trust/otel-ca.crt"
       EVENT_SOURCE: "account"
       HEALTHCHECK_URL: "http://127.0.0.1:9090/health/ready"
       NATS_URL: "tls://nats:4222"
@@ -473,6 +482,8 @@ services:
     image: "${EVENT_RELAY_IMAGE:?set verified EVENT_RELAY_IMAGE}"
     environment:
       APP_ENV: "production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:?set verified OTEL_EXPORTER_OTLP_ENDPOINT}"
+      OTEL_EXPORTER_OTLP_CERTIFICATE: "/var/run/secrets/pinvou/trust/otel-ca.crt"
       EVENT_SOURCE: "billing"
       HEALTHCHECK_URL: "http://127.0.0.1:9090/health/ready"
       NATS_URL: "tls://nats:4222"
@@ -508,6 +519,8 @@ services:
     image: "${EVENT_RELAY_IMAGE:?set verified EVENT_RELAY_IMAGE}"
     environment:
       APP_ENV: "production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:?set verified OTEL_EXPORTER_OTLP_ENDPOINT}"
+      OTEL_EXPORTER_OTLP_CERTIFICATE: "/var/run/secrets/pinvou/trust/otel-ca.crt"
       EVENT_SOURCE: "token"
       HEALTHCHECK_URL: "http://127.0.0.1:9090/health/ready"
       NATS_URL: "tls://nats:4222"
@@ -548,6 +561,8 @@ services:
     healthcheck: {disable: true}
     environment:
       APP_ENV: "production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:?set verified OTEL_EXPORTER_OTLP_ENDPOINT}"
+      OTEL_EXPORTER_OTLP_CERTIFICATE: "/var/run/secrets/pinvou/trust/otel-ca.crt"
       NATS_URL: "tls://nats:4222"
       NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
       NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
@@ -562,6 +577,11 @@ services:
         target: /var/run/secrets/pinvou/nats-ca
         read_only: true
         bind: {create_host_path: false}
+      - type: bind
+        source: "${INFRA_CA_DIRECTORY:?set verified INFRA_CA_DIRECTORY}"
+        target: /var/run/secrets/pinvou/trust
+        read_only: true
+        bind: {create_host_path: false}
     networks: [event-operations]
 
   token-governance-check:
@@ -574,6 +594,8 @@ services:
     healthcheck: {disable: true}
     environment:
       APP_ENV: "production"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:?set verified OTEL_EXPORTER_OTLP_ENDPOINT}"
+      OTEL_EXPORTER_OTLP_CERTIFICATE: "/var/run/secrets/pinvou/trust/otel-ca.crt"
       TOKEN_MIGRATOR_DATABASE_URL: "postgresql://token_migrator@postgres:5432/account_platform_token?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
       ACCOUNT_POLICY_DATABASE_URL: "postgresql://${ACCOUNT_POLICY_RELEASE_ROLE:?set verified ACCOUNT_POLICY_RELEASE_ROLE}@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
       PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
