@@ -355,6 +355,10 @@ impl ActionParams {
     /// continuing would mean guessing which argument was intended — so it
     /// hard-errors rather than dropping the argument and reporting success.
     pub(super) fn reject_unknown(&self, input: &Value) -> Result<(), ToolError> {
+        self.reject_unknown_named(input, &format!("File {}", self.action))
+    }
+
+    pub(super) fn reject_unknown_named(&self, input: &Value, tool: &str) -> Result<(), ToolError> {
         let action = self.action;
         let required = if self.required_is_choice {
             format!("one of {}", quoted_list(self.required, "or"))
@@ -364,7 +368,7 @@ impl ActionParams {
 
         let Some(obj) = input.as_object() else {
             return Err(ToolError::invalid_input(format!(
-                "File {action} input must be an object. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
+                "{tool} input must be an object. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
                 quoted_list(self.allowed, "and"),
             )));
         };
@@ -376,7 +380,7 @@ impl ActionParams {
             .collect();
         if !unexpected.is_empty() {
             return Err(ToolError::invalid_input(format!(
-                "unexpected File {action} parameter(s): {}. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
+                "unexpected {tool} parameter(s): {}. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
                 unexpected.join(", "),
                 quoted_list(self.allowed, "and"),
             )));

@@ -392,7 +392,7 @@ impl ToolSpec for ApplyPatchTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let mut input = input;
         apply_param_aliases(&mut input, PATH_ALIASES, "apply_patch")?;
-        PATCH_PARAMS.reject_unknown(&input)?;
+        PATCH_PARAMS.reject_unknown_named(&input, "apply_patch")?;
         let input = input;
 
         let fuzz = optional_u64(&input, "fuzz", DEFAULT_FUZZ as u64)?.min(MAX_FUZZ as u64);
