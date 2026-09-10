@@ -206,16 +206,16 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Names the v0.9.3 consolidation retired. None of them can dispatch —
-    /// `ToolRegistry::resolve` has no fuzzy step — so any one of them inside a
-    /// model-visible description or schema teaches a call that cannot work.
+    /// Names the v0.9.3 consolidation retired from the advertised catalog.
+    /// Fully removed spellings cannot dispatch at all — `ToolRegistry::resolve`
+    /// has no fuzzy step — and the rest survive only as `model_visible=false`
+    /// replay aliases, so any one of them inside a model-visible description or
+    /// schema teaches a name the model is never offered.
+    // list_dir, file_search and grep_files are published standalone tools again.
     const RETIRED_TOOL_NAMES: &[&str] = &[
         "read_file",
         "write_file",
         "edit_file",
-        "list_dir",
-        "file_search",
-        "grep_files",
         "git_status",
         "git_diff",
         "git_log",
@@ -231,6 +231,13 @@ mod tests {
         "exec_shell_interact",
         "exec_shell_cancel",
     ];
+
+    /// Uppercase action-family aliases that still dispatch for saved v0.9.x
+    /// transcript replay but are `model_visible=false`: new sessions publish
+    /// `bash` and the independent `read`/`write`/`edit` primitives instead
+    /// (`canonical_runtime_tools_hide_compatibility_aliases`). Matching is
+    /// whole-token so prose like "BashHistory" or lowercase `bash` never trips.
+    const HIDDEN_COMPAT_TOOL_NAMES: &[&str] = &["Bash", "File"];
 
     /// The catalog is re-sent on every request, so a retired name in it is a
     /// per-turn lie to every model. `verifier.rs` already guarded one such
@@ -249,15 +256,63 @@ mod tests {
             .with_test_runner_tool()
             .with_web_tools()
             .with_patch_tools()
+            .with_shell_tools()
+            .with_diagnostics_tool()
+            .with_tui_help_tool()
+            .with_pandoc_tools()
+            .with_image_ocr_tools()
+            .with_read_media_tool()
+            .with_skill_tools()
+            .with_project_tools()
+            .with_validation_tools()
+            .with_tool_result_retrieval_tool()
+            .with_runtime_task_tools()
+            .with_runtime_task_shell_tools()
+            .with_user_input_tool()
+            .with_revert_turn_tool()
+            .with_harness_tool()
+            .with_handle_tools()
+            .with_note_tool()
+            .with_remember_tool()
+            .with_verify_tool(None, "test-model".to_string())
+            .with_registry_mcp_sync_tool()
+            .with_runtime_mcp_tool(std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::mcp::McpPool::new(crate::mcp::McpConfig::default()),
+            )))
+            .with_registry_mcp_start_tool(std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::mcp::McpPool::new(crate::mcp::McpConfig::default()),
+            )))
             .build(ToolContext::new(tmp.path().to_path_buf()));
 
-        for tool in registry.to_api_tools() {
+        let api_tools = registry.to_api_tools();
+        let skill = api_tools
+            .iter()
+            .find(|tool| tool.name == "load_skill")
+            .unwrap();
+        for reference in skill.description.split('`').skip(1).step_by(2) {
+            assert!(
+                api_tools.iter().any(|tool| tool.name == reference),
+                "load_skill cites unpublished tool `{reference}`"
+            );
+        }
+        for tool in api_tools {
             let advertised = format!("{} {}", tool.description, tool.input_schema);
             for retired in RETIRED_TOOL_NAMES {
                 assert!(
                     !advertised.contains(retired),
                     "tool `{}` advertises the retired name `{retired}`; \
                      name the canonical action form instead",
+                    tool.name
+                );
+            }
+            let advertised_tokens = advertised
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .collect::<Vec<_>>();
+            for hidden in HIDDEN_COMPAT_TOOL_NAMES {
+                assert!(
+                    !advertised_tokens.contains(hidden),
+                    "tool `{}` advertises the hidden compatibility name `{hidden}`; \
+                     name the published catalog form instead",
                     tool.name
                 );
             }

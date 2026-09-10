@@ -440,7 +440,7 @@ impl GoalState {
     ) -> Result<(), &'static str> {
         if self.objective.is_some() && self.status != Some(GoalStatus::Complete) {
             return Err(
-                "An unfinished goal already exists. Complete or clear it before creating another.",
+                "An unfinished goal already exists. Complete it before creating another; only the user/host can clear an unfinished goal (for example with /goal clear).",
             );
         }
         self.objective = Some(objective);
@@ -790,7 +790,7 @@ pub fn thread_goal_status_projection(
 pub fn render_continuation_prompt(snapshot: &GoalSnapshot, continuation_index: u32) -> String {
     let goal_json = serde_json::to_string_pretty(snapshot).unwrap_or_else(|_| "{}".to_string());
     format!(
-        "{}\n\n## Active Goal State\n\n```json\n{}\n```\n\nContinuation pass #{}.\nIf a critical verifier finds remaining work, call `update_goal` with `status: \"not_achieved\"` and its concrete `verification.gaps`; repeated equivalent gap sets pause the loop for inspection instead of spending indefinitely. If the goal is complete, first run or cite a concrete verifier/check when one applies, then call `update_goal` with `status: \"complete\"`, concrete evidence, and `verification: {{\"status\":\"passed\",\"check\":\"...\",\"summary\":\"...\"}}`. For non-verifiable work (docs, research, writing), use `verification: {{\"status\":\"not_applicable\",\"check\":\"...\",\"summary\":\"...\"}}` with a clear rationale instead of fabricating a verifier receipt. If it is blocked, call `update_goal` with `status: \"blocked\"` and the blocker. Otherwise continue making progress toward the objective.",
+        "{}\n\n## Active Goal State\n\n```json\n{}\n```\n\nContinuation pass #{}.\nIf a critical verifier finds remaining work, call `update_goal` with `status: \"not_achieved\"` and its concrete `verification.gaps`; repeating an equivalent gap set only increments `repeated_gap_count` in the goal snapshot — the loop pauses at the continuation run limit, not because of repetition. If the goal is complete, first run or cite a concrete verifier/check when one applies, then call `update_goal` with `status: \"complete\"`, concrete evidence, and `verification: {{\"status\":\"passed\",\"check\":\"...\",\"summary\":\"...\"}}`. For non-verifiable work (docs, research, writing), use `verification: {{\"status\":\"not_applicable\",\"check\":\"...\",\"summary\":\"...\"}}` with a clear rationale instead of fabricating a verifier receipt. If it is blocked, call `update_goal` with `status: \"blocked\"` and the blocker. Otherwise continue making progress toward the objective.",
         crate::prompts::GOAL_CONTINUATION_PROMPT.trim(),
         goal_json,
         continuation_index,
@@ -909,7 +909,7 @@ impl ToolSpec for CreateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Call this only when the user explicitly asks to use `/goal`, make an objective the goal, or otherwise explicitly requests persistent goal tracking. When the request is explicit, call `create_goal` before doing the rest of the work; acknowledging it in prose is not sufficient. Never infer a goal from an ordinary task, its apparent length, a question, or a one-file edit. Keep the user's full objective, not a shortened one-turn version. Set token_budget only when the user explicitly provides one. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete or clear it before creating another."
+        "Create the session's one persistent goal: a completion objective Codewhale keeps working toward across turns until it is verified complete, blocked, or the user stops it. Call this only when the user explicitly asks to use `/goal`, make an objective the goal, or otherwise explicitly requests persistent goal tracking. When the request is explicit, call `create_goal` before doing the rest of the work; acknowledging it in prose is not sufficient. Never infer a goal from an ordinary task, its apparent length, a question, or a one-file edit. Keep the user's full objective, not a shortened one-turn version. Set token_budget only when the user explicitly provides one. Creating a goal shows the user a one-line receipt (they can /goal pause or /goal clear); do not also ask for confirmation. Only one unfinished goal exists at a time: complete it before creating another; only the user can clear a goal (for example with /goal clear). Root agent only; sub-agents inspect with get_goal."
     }
 
     fn input_schema(&self) -> Value {
@@ -1029,7 +1029,7 @@ impl ToolSpec for UpdateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input."
+        "Update the runtime goal completion gate. Critical verification may seal one immutable completion contract. Advisory review is append-only context and never completes, blocks, or pauses the goal. Mark blocked when progress requires user input. Root agent only; sub-agents inspect with get_goal."
     }
 
     fn input_schema(&self) -> Value {
@@ -1070,7 +1070,7 @@ impl ToolSpec for UpdateGoalTool {
                         "gaps": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Concrete remaining gaps. Required for critical not_achieved reviews; order and duplicate wording do not affect the stall fingerprint."
+                            "description": "Concrete remaining gaps. Required for critical not_achieved reviews; order and duplicate wording do not affect the stall fingerprint. Repeating an identical gap set increments repeated_gap_count in the goal snapshot; it does not by itself pause the goal — automatic pause comes only from the continuation run limit."
                         }
                     },
                     "required": ["status", "check", "summary"],
@@ -1914,6 +1914,25 @@ mod tests {
         assert!(prompt.contains("Goal Continuation"));
         assert!(prompt.contains("finish issue 2199"));
         assert!(prompt.contains("Continuation pass #2"));
+    }
+
+    /// `GoalPauseReason::NoProgress` is never constructed: repeating an
+    /// equivalent gap set only bumps the snapshot counter, and the single
+    /// automatic pause is the continuation run limit (`goal_loop` backoff).
+    /// The prompt must not revive the fabricated repetition-pause claim that
+    /// the `update_goal` gaps schema already corrects.
+    #[test]
+    fn continuation_prompt_does_not_claim_gap_repetition_pauses_the_loop() {
+        let snapshot = GoalSnapshot {
+            objective: Some("finish issue 2199".to_string()),
+            status: "active".to_string(),
+            ..Default::default()
+        };
+
+        let prompt = render_continuation_prompt(&snapshot, 2);
+        assert!(!prompt.contains("pause the loop for inspection"));
+        assert!(prompt.contains("repeated_gap_count"));
+        assert!(prompt.contains("continuation run limit"));
     }
 
     #[test]

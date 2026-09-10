@@ -218,6 +218,7 @@ impl ToolSpec for StartRuntimeMcpServer {
          (like 'https://...'), call this tool immediately to start the server \
          and register its tools. Do NOT suggest editing config files. \
          Accepts a local command (stdio) or a remote URL (HTTP/SSE). \
+         Local commands must be a known runtime (npx/npm/pnpm/yarn/bunx/bun/node/python/python3/uvx/uv/deno/ruby/cargo); shell wrappers are rejected. \
          After the server starts, the response lists each tool's callable name. \
          You MUST copy those exact names when calling the tools. \
          Do NOT construct or guess tool names yourself."

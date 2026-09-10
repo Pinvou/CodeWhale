@@ -13,9 +13,7 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use super::diff_format::make_unified_diff;
-use super::file::{
-    EXPECTED_HASH_DESCRIPTION, PATCH_PARAMS, PATH_ALIASES, apply_param_aliases, content_hash,
-};
+use super::file::{PATCH_PARAMS, PATH_ALIASES, apply_param_aliases, content_hash};
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     lsp_diagnostics_for_paths, optional_bool, optional_str, optional_u64,
@@ -319,7 +317,7 @@ impl ToolSpec for ApplyPatchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Apply a transactional unified-diff patch across one or more files, with fuzzy context matching and a rendered diff."
+        "Apply a unified-diff patch (multi-hunk, multi-file) or full-file replacements via `replace`. Use this instead of `git apply` or `patch` in `bash`, or repeated `edit` calls — single transactional change with fuzzy matching and a rendered diff."
     }
 
     fn input_schema(&self) -> Value {
@@ -368,9 +366,7 @@ impl ToolSpec for ApplyPatchTool {
                 },
                 "expected_hash": {
                     "type": "string",
-                    "description": format!(
-                        "{EXPECTED_HASH_DESCRIPTION} Verifies the patch target — the `path` argument when given, otherwise the first file the patch touches; other files in a multi-file patch are not hash-checked."
-                    )
+                    "description": "Optional sha256:<hex> of the complete target file bytes; a mismatch refuses the patch without writing. Compute it with `bash`; `read` does not return a hash. Verifies the `path` argument when given, otherwise the first file the patch touches; other files in a multi-file patch are not hash-checked."
                 }
             },
             "oneOf": [
@@ -395,8 +391,8 @@ impl ToolSpec for ApplyPatchTool {
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let mut input = input;
-        apply_param_aliases(&mut input, PATH_ALIASES, "File patch")?;
-        PATCH_PARAMS.reject_unknown(&input)?;
+        apply_param_aliases(&mut input, PATH_ALIASES, "apply_patch")?;
+        PATCH_PARAMS.reject_unknown_named(&input, "apply_patch")?;
         let input = input;
 
         let fuzz = optional_u64(&input, "fuzz", DEFAULT_FUZZ as u64)?.min(MAX_FUZZ as u64);
@@ -524,7 +520,7 @@ fn verify_patch_expected_hash(
         .or_else(|| summary.touched_files.first().map(String::as_str))
     else {
         return Err(ToolError::execution_failed(
-            "File `patch` refused: expected_hash was supplied but the patch names no target file to verify it against, so nothing was written.".to_string(),
+            "`apply_patch` refused: expected_hash was supplied but the patch names no target file to verify it against, so nothing was written.".to_string(),
         ));
     };
 
@@ -533,13 +529,13 @@ fn verify_patch_expected_hash(
         // Fail closed, matching `write`: a hash describes a file that was
         // read, so a missing target means the guard cannot be honored.
         return Err(ToolError::execution_failed(format!(
-            "File `patch` refused: expected_hash was supplied but {target} does not exist, so there is no snapshot to verify and nothing was written. Recovery: drop `expected_hash` when creating files."
+            "`apply_patch` refused: expected_hash was supplied but {target} does not exist, so there is no snapshot to verify and nothing was written. Recovery: drop `expected_hash` when creating files."
         )));
     }
 
     let current = fs::read(&resolved).map_err(|e| {
         ToolError::execution_failed(format!(
-            "File `patch` refused: could not read {target} to verify expected_hash ({e}); nothing was written."
+            "`apply_patch` refused: could not read {target} to verify expected_hash ({e}); nothing was written."
         ))
     })?;
     let actual = content_hash(&current);
@@ -547,10 +543,10 @@ fn verify_patch_expected_hash(
         return Ok(());
     }
     Err(ToolError::execution_failed(format!(
-        "File `patch` refused: {target} changed since it was read. \
+        "`apply_patch` refused: {target} changed since it was read. \
          expected_hash was {expected} but the file is now {actual}, so nothing was written. \
-         Recovery: call File with action=\"read\" path=\"{target}\" to get the current contents \
-         and its content_hash, then rebuild the patch against them."
+         Recovery: call `read` path=\"{target}\" to get the current contents \
+         then rebuild the patch. If retaining expected_hash, recompute the SHA-256 of the complete file bytes with `bash` and use the sha256: prefix; `read` does not return a hash."
     )))
 }
 
@@ -1413,7 +1409,7 @@ fn format_hunk_no_match_error(
             let expected_preview = preview_expected_lines(hunk, HUNK_PREVIEW_LINES).join("\n");
             let file_preview = snippet_around(lines, *adjusted_line, SNIPPET_RADIUS).join("\n");
             format!(
-                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call File with action=\"read\" to re-check the current contents, ensure the patch matches the file, increase `fuzz`, or regenerate the patch."
+                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call `read` to re-check the current contents, ensure the patch matches the file, increase `fuzz`, or regenerate the patch."
             )
         }
         ApplyHunkError::ContextAmbiguous {
@@ -1426,7 +1422,7 @@ fn format_hunk_no_match_error(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "could not find matching context near line {expected_line}: the hunk's context appears at multiple locations (lines {candidates}), and the line numbers may be stale after earlier edits, so it is not safe to relocate automatically. Hints: call File with action=\"read\" to inspect the candidate locations above, then regenerate the patch with more surrounding context lines that uniquely identify the target block."
+                "could not find matching context near line {expected_line}: the hunk's context appears at multiple locations (lines {candidates}), and the line numbers may be stale after earlier edits, so it is not safe to relocate automatically. Hints: call `read` to inspect the candidate locations above, then regenerate the patch with more surrounding context lines that uniquely identify the target block."
             )
         }
     }
@@ -2724,6 +2720,8 @@ diff --git a/b.txt b/b.txt
             message.contains("multiple locations"),
             "expected ambiguity error, got: {message}"
         );
+        assert!(message.contains("call `read`"), "{message}");
+        assert!(!message.contains("call File"), "{message}");
         // The two duplicate blocks start at 1-based lines 4 and 9.
         assert!(
             message.contains("lines 4, 9"),
@@ -2871,6 +2869,12 @@ diff --git a/b.txt b/b.txt
         let message = err.to_string();
         assert!(message.contains("changed since it was read"), "{message}");
         assert!(message.contains("nothing was written"), "{message}");
+        assert!(message.contains("call `read`"), "{message}");
+        assert!(
+            message.contains("`read` does not return a hash"),
+            "{message}"
+        );
+        assert!(!message.contains("File"), "{message}");
         assert_eq!(
             fs::read_to_string(tmp.path().join("test.txt")).expect("read"),
             body,

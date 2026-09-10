@@ -357,7 +357,7 @@ impl ToolSpec for WebRunTool {
     }
 
     fn description(&self) -> &'static str {
-        "Browse the web (search/open/click/find/screenshot/image_query) and return structured results with ref_ids for citations."
+        "Browse the web (search/open/click/find/screenshot/image_query) and return structured results with ref_ids for citations. ref_ids are session-cache references (≈30min TTL, ~256 pages); reopen by URL when evicted."
     }
 
     fn input_schema(&self) -> Value {
@@ -384,7 +384,7 @@ impl ToolSpec for WebRunTool {
                         "type": "object",
                         "properties": {
                             "q": { "type": "string" },
-                            "recency": { "type": "integer" },
+                            "recency": { "type": "integer", "description": "Freshness window in days (accepted but not enforced for image search)" },
                             "max_results": { "type": "integer" },
                             "timeout_ms": { "type": "integer" },
                             "domains": { "type": "array", "items": { "type": "string" } }
@@ -397,7 +397,7 @@ impl ToolSpec for WebRunTool {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "ref_id": { "type": "string" },
+                            "ref_id": { "type": "string", "description": "Page ref_id from an earlier result, or a raw http(s) URL" },
                             "lineno": { "type": "integer" }
                         },
                         "required": ["ref_id"]
@@ -427,11 +427,12 @@ impl ToolSpec for WebRunTool {
                 },
                 "screenshot": {
                     "type": "array",
+                    "description": "Screenshot a PDF page. PDF refs only; returns the page's text lines (not an image), pageno is 0-based.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "ref_id": { "type": "string" },
-                            "pageno": { "type": "integer" }
+                            "pageno": { "type": "integer", "description": "0-based page number" }
                         },
                         "required": ["ref_id", "pageno"]
                     }

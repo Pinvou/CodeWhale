@@ -403,12 +403,12 @@ impl ToolSpec for UpdatePlanTool {
     }
 
     fn description(&self) -> &'static str {
-        "Legacy compatibility tool for loading older Plan artifacts. New work uses the canonical work_update list and a normal Plan-mode response."
+        "Legacy compatibility tool for loading older Plan artifacts. New work uses the canonical todo_write list and a normal Plan-mode response."
     }
 
     fn model_visible(&self) -> bool {
         // Older transcripts and sessions can still replay this tool, but new
-        // model turns get one progress model (`work_update`) instead of the
+        // model turns get one progress model (`todo_write`) instead of the
         // retired Strategy/Plan surface.
         false
     }
@@ -466,7 +466,7 @@ impl ToolSpec for UpdatePlanTool {
                 },
                 "plan": {
                     "type": "array",
-                    "description": "Legacy replay field; new work must use work_update",
+                    "description": "Legacy replay field; new work must use todo_write",
                     "deprecated": true,
                     "items": { "type": "object" }
                 }
@@ -602,7 +602,7 @@ mod tests {
 
         assert!(!tool.model_visible());
         assert!(description.contains("Legacy compatibility"));
-        assert!(description.contains("canonical work_update list"));
+        assert!(description.contains("canonical todo_write list"));
     }
 
     #[tokio::test]

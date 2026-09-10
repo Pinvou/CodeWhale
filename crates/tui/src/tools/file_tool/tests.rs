@@ -288,8 +288,14 @@ async fn every_action_refuses_an_unknown_parameter() {
             message.contains("bogus_param"),
             "{action} must name the offending parameter: {message}"
         );
+        // The compatibility patch action delegates to the public apply_patch tool.
+        let tool_name = if action == "patch" {
+            "apply_patch".to_string()
+        } else {
+            format!("File {action}")
+        };
         assert!(
-            message.contains(&format!("unexpected File {action} parameter")),
+            message.contains(&format!("unexpected {tool_name} parameter")),
             "{action} must name the action it refused: {message}"
         );
         assert!(

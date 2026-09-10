@@ -286,13 +286,12 @@ capability. Then stop.
 "#;
 
 /// Scout output contract — scaled down for small children (see #5189 F5).
-/// Keeps the parseable spine (SUMMARY+EVIDENCE + sentinel) but drops
+/// Keeps the parseable spine (SUMMARY+EVIDENCE) but drops
 /// CHANGES/RISKS/BLOCKERS ceremony; scouts are read-only explorers.
 pub const SUBAGENT_SCOUT_OUTPUT_FORMAT: &str = r#"## Output contract (scout)
 
 End with these exact Markdown headings: `### SUMMARY` and `### EVIDENCE`.
 Keep each section compact. Cite only files you actually inspected and
 distinguish child reports from evidence you verified. Write `None.` where
-a section has no entries. If blocked, name the missing fact. Then stop
-with `<codewhale:subagent.done>`.
+a section has no entries. If blocked, name the missing fact. Then stop.
 "#;

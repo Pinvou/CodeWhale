@@ -111,7 +111,8 @@ Only output English for:\n\
 - Technical terms that lack a standard translation in {target_language}\n\
 - Code blocks the user explicitly requests in English\n\n\
 This is a hard display requirement: the user does not read English, \
-so any English prose in your response will block their decision-making."
+so any English prose in your response will block their decision-making. \
+This overrides the ## Language rule for this session."
     )
 }
 
@@ -455,6 +456,60 @@ pub fn set_base_prompt_override(s: String) -> Result<(), String> {
     set_prompt_override(&BASE_PROMPT_OVERRIDE, s)
 }
 
+/// Replace the Simplified Chinese locale preamble. First call wins; later
+/// calls return the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_zh_hans_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_ZH_HANS_OVERRIDE, s)
+}
+
+/// Replace the Japanese locale preamble. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_ja_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_JA_OVERRIDE, s)
+}
+
+/// Replace the Brazilian Portuguese locale preamble. First call wins; later
+/// calls return the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_pt_br_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_PT_BR_OVERRIDE, s)
+}
+
+/// Replace the Vietnamese locale preamble. First call wins; later calls
+/// return the rejected string. Set before spawning any engine.
+pub fn set_locale_preamble_vi_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_PREAMBLE_VI_OVERRIDE, s)
+}
+
+/// Replace the Simplified Chinese locale closer. First call wins; later calls
+/// return the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_zh_hans_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_ZH_HANS_OVERRIDE, s)
+}
+
+/// Replace the Japanese locale closer. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_ja_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_JA_OVERRIDE, s)
+}
+
+/// Replace the Brazilian Portuguese locale closer. First call wins; later
+/// calls return the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_pt_br_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_PT_BR_OVERRIDE, s)
+}
+
+/// Replace the Vietnamese locale closer. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_locale_closer_vi_override(s: String) -> Result<(), String> {
+    set_prompt_override(&LOCALE_CLOSER_VI_OVERRIDE, s)
+}
+
+/// Replace the authority-recap trailer. First call wins; later calls return
+/// the rejected string. Set before spawning any engine.
+pub fn set_authority_recap_override(s: String) -> Result<(), String> {
+    set_prompt_override(&AUTHORITY_RECAP_OVERRIDE, s)
+}
+
 // ── Config-directory prompt overrides (issue #3638) ──
 // Bridge the embedder override hooks above to a user-facing source: an
 // optional file in the Codewhale config directory. This lets users repurpose
@@ -705,6 +760,14 @@ pub(crate) fn effective_authority_recap() -> &'static str {
     effective_prompt_override(&AUTHORITY_RECAP_OVERRIDE, AUTHORITY_RECAP)
 }
 
+/// Whether the authority-recap trailer is appended after WorldState. When an
+/// embedder composer owns the static prompt prefix, the bundled
+/// `### Whose word wins` section the recap points at no longer exists, so
+/// appending the recap would leave a dangling cross-reference.
+fn authority_recap_trailer_appended(composer_installed: bool) -> bool {
+    !composer_installed
+}
+
 /// Optional locale-native reinforcement preamble prepended to the system
 /// prompt when the user's UI locale is non-English.
 ///
@@ -810,7 +873,7 @@ const LOCALE_PREAMBLE_ZH_HANS: &str = "## 语言要求\n\n\
 你正在 codewhale 中运行。无论任务上下文（代码、错误日志、文件名）\
 是英文，无论系统提示的其余部分是英文，你都必须用简体中文进行 \
 `reasoning_content`（内部思考）和最终回复。代码、文件路径、工具名称\
-（例如 `File`、`Bash`）、环境变量、命令行参数和 URL \
+（例如 `bash`、`Web`）、环境变量、命令行参数和 URL \
 保持原样 —— 只有自然语言散文要切换到简体中文。\n\n\
 如果用户在会话中切换到另一种语言，从下一轮开始跟随切换。\
 如果用户明确要求（例如 \"think in English\"），则覆盖此规则。";
@@ -819,8 +882,8 @@ const LOCALE_PREAMBLE_JA: &str = "## 言語要件\n\n\
 codewhale を実行しています。タスクコンテキスト（コード、エラーログ、\
 ファイル名）が英語であっても、システムプロンプトの他の部分が英語で\
 あっても、`reasoning_content`（内部思考）と最終的な返信は日本語で\
-行ってください。コード、ファイルパス、ツール名（例：`File`、\
-`Bash`）、環境変数、コマンドライン引数、URL は元のまま —— \
+行ってください。コード、ファイルパス、ツール名（例：`bash`、\
+`Web`）、環境変数、コマンドライン引数、URL は元のまま —— \
 自然言語の文章のみ日本語に切り替えます。\n\n\
 ユーザーがセッション中に別の言語に切り替えた場合は、次のターンから\
 それに従ってください。ユーザーが明示的に要求した場合（例：\
@@ -832,8 +895,8 @@ Você está rodando dentro do codewhale. Escreva tanto \
 em português do Brasil, mesmo quando o contexto da tarefa (código, \
 logs de erro, nomes de arquivos) estiver em inglês e mesmo quando o \
 resto do system prompt for em inglês. Mantenha código, caminhos de \
-arquivos, nomes de ferramentas (por exemplo `File`, \
-`Bash`), variáveis de ambiente, flags de linha de comando e \
+arquivos, nomes de ferramentas (por exemplo `bash`, \
+`Web`), variáveis de ambiente, flags de linha de comando e \
 URLs no formato original — apenas a prosa em linguagem natural muda \
 para português do Brasil.\n\n\
 Se o usuário mudar de idioma no meio da sessão, mude no próximo turno. \
@@ -873,7 +936,7 @@ const LOCALE_PREAMBLE_VI: &str = "## Yêu cầu ngôn ngữ\n\n\
 Bạn đang chạy trong codewhale. Cho dù ngữ cảnh tác vụ (mã nguồn, nhật ký lỗi, tên tệp) \
 là tiếng Anh, cho dù phần còn lại của system prompt là tiếng Anh, bạn đều phải sử dụng \
 tiếng Việt cho phần `reasoning_content` (suy nghĩ nội bộ) và câu trả lời cuối cùng. Các từ \
-mã nguồn, đường dẫn tệp, tên công cụ (ví dụ `File`, `Bash`), biến môi trường, \
+mã nguồn, đường dẫn tệp, tên công cụ (ví dụ `bash`, `Web`), biến môi trường, \
 tham số dòng lệnh và URL giữ nguyên dạng gốc —— chỉ các văn bản giải thích bằng ngôn ngữ \
 tự nhiên mới được chuyển sang tiếng Việt.\n\n\
 Nếu người dùng chuyển sang ngôn ngữ khác trong phiên làm việc, hãy chuyển theo từ lượt tiếp theo. \
@@ -1312,7 +1375,10 @@ pub(crate) fn system_prompt_for_mode_with_context_skills_session_and_approval_fo
     .to_system_blocks();
 
     // Trailers keep recency bias after WorldState: authority, then locale.
-    if !bundled_headless {
+    // When an embedder composer owns the static prefix, the bundled
+    // `### Whose word wins` section the recap points at no longer exists,
+    // so appending the recap would leave a dangling cross-reference.
+    if !bundled_headless && authority_recap_trailer_appended(static_composer_installed) {
         blocks.push(SystemBlock {
             block_type: "text".to_string(),
             text: effective_authority_recap().trim().to_string(),
@@ -1413,6 +1479,15 @@ mod tests {
     /// Discriminator unique to the injected relay block (not present in the
     /// agent prompt's own discussion of the convention).
     const HANDOFF_BLOCK_MARKER: &str = "left a relay artifact at `.codewhale/handoff.md`";
+
+    /// The recap points at the bundled `### Whose word wins` section; an
+    /// embedder composer that owns the static prefix retires that section,
+    /// so the trailer must be skipped instead of dangling in the blocks.
+    #[test]
+    fn authority_recap_trailer_skipped_when_static_composer_owns_prefix() {
+        assert!(authority_recap_trailer_appended(false));
+        assert!(!authority_recap_trailer_appended(true));
+    }
 
     // Config-directory prompt override resolution (#3638). These exercise the
     // pure file resolver only; the global install path is intentionally not
@@ -2188,9 +2263,10 @@ mod tests {
                 "zh preamble must steer reasoning_content: {preamble:?}"
             );
             assert!(
-                preamble.contains("`File`"),
-                "zh preamble must call out tool-name immutability with a LIVE tool \
-                 name; `read_file` is retired (registry.rs:2067): {preamble:?}"
+                preamble.contains("`bash`") && preamble.contains("`Web`"),
+                "zh preamble must call out tool-name immutability with LIVE tool \
+                 names; `File`/`Bash` are hidden replay aliases (registry.rs \
+                 with_file_tools/with_foreground_shell_tools): {preamble:?}"
             );
             assert!(
                 !preamble.contains("read_file") && !preamble.contains("exec_shell"),

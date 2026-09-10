@@ -4366,7 +4366,7 @@ impl ToolSpec for LowercaseBashTool {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Bash command to execute." },
+                "command": { "type": "string", "description": "Shell command to execute." },
                 "timeout": { "type": "number", "description": "Optional timeout in seconds; when omitted the command is killed after 120 seconds." },
                 "sandbox_permissions": {
                     "type": "string",
@@ -4540,7 +4540,7 @@ impl ToolSpec for BashTool {
         if self.read_only {
             "Inspect the workspace with the bounded read-only command subset. Commands run directly as argv, never through a shell; only action=run plus command, cwd, and timeout_ms are accepted."
         } else {
-            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" blocks for a background task until completion or timeout; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Pass wait=false for a nonblocking task snapshot. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
+            "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" blocks for a background task until completion or timeout; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Pass wait=false for a nonblocking task snapshot. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds. Output is truncated per stream (~30KB: head/tail kept, middle summarized; see metadata flags). Commands run via the user's login shell ($SHELL); when that shell is zsh, a bare word starting with `=` undergoes `=command` PATH expansion (e.g. `echo ===` fails) — quote such arguments, e.g. `echo '==='`."
         }
     }
 
@@ -4562,7 +4562,7 @@ impl ToolSpec for BashTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (the standalone Bash tool caps it at 600000), action=wait 30000, action=interact 1000. A foreground action=run that omits this is bounded by that default and killed with a background-rerun hint; pass an explicit value for longer foreground work, or background=true. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases."
+                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (the standalone Bash tool caps it at 600000), action=wait 30000, action=interact 1000. A foreground action=run that omits this is bounded by that default and killed with a background-rerun hint; pass an explicit value for longer foreground work, or background=true. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases. Background=true tasks are not bounded by it — stop them with action=cancel."
                 },
                 "background": {
                     "type": "boolean",
