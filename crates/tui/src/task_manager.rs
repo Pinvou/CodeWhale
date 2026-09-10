@@ -3120,8 +3120,18 @@ mod tests {
         assert!(!manager.delete_terminal_task(&task.id).await?);
         assert!(orphan_path.is_file());
 
-        // A restart must observe the same state the failed call left behind.
+        // Stop the old workers before reopening the store. Dropping our Arc
+        // alone leaves the workers' strong references alive.
+        let stopped = Arc::downgrade(&manager);
+        manager.shutdown();
         drop(manager);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while stopped.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old task manager workers must exit before reopening the store");
         let restarted = TaskManager::start_with_executor(
             test_config(root.path().to_path_buf()),
             Arc::new(MockExecutor),
