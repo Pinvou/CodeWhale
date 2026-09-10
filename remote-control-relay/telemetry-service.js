@@ -316,6 +316,24 @@ function statsArguments(behaviorEventsOrNow, fallbackNow) {
   return { behaviorEvents: [], now: behaviorEventsOrNow ?? fallbackNow };
 }
 
+function latestBehaviorMetadataByIdentity(behaviorEvents) {
+  const latest = new Map();
+  for (const event of behaviorEvents) {
+    const identity = eventIdentity(event);
+    const appVersion = boundedText(event.app_version, 32);
+    if (!identity || !appVersion) continue;
+    const observedAt = Number(event.received_at || event.occurred_at || 0);
+    const current = latest.get(identity);
+    if (!current || observedAt >= current.observed_at) {
+      latest.set(identity, {
+        app_version: appVersion,
+        observed_at: observedAt,
+      });
+    }
+  }
+  return latest;
+}
+
 export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fallbackNow = Date.now()) {
   const { behaviorEvents, now } = statsArguments(behaviorEventsOrNow, fallbackNow);
   const today = statsDay(now);
@@ -354,15 +372,10 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   for (let day = activeWeekStart; day <= today; day += 1) {
     for (const deviceId of trend.get(day)?.device_ids || []) activeWeek.add(deviceId);
   }
-  const behaviorVersionByDevice = new Map();
-  for (const event of behaviorEvents) {
-    const deviceId = boundedText(event.device_id || eventIdentity(event), 128);
-    const version = boundedText(event.app_version, 32);
-    if (deviceId && version) behaviorVersionByDevice.set(deviceId, version);
-  }
+  const behaviorMetadataByDevice = latestBehaviorMetadataByIdentity(behaviorEvents);
   const versionMap = new Map();
   for (const deviceId of activeWeek) {
-    const version = behaviorVersionByDevice.get(deviceId)
+    const version = behaviorMetadataByDevice.get(deviceId)?.app_version
       || deviceById.get(deviceId)?.app_version
       || "未知";
     versionMap.set(version, (versionMap.get(version) || 0) + 1);
@@ -394,6 +407,7 @@ export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallb
   const usage = installationConversationsByDay(devices, behaviorEvents, weekStart, today);
   const todayUsage = usage.get(today) || new Map();
   const activity = new Map();
+  const behaviorMetadataByDevice = latestBehaviorMetadataByIdentity(behaviorEvents);
   for (const counts of usage.values()) {
     for (const [deviceId, turns] of counts) {
       activity.set(deviceId, (activity.get(deviceId) || 0) + turns);
@@ -405,7 +419,8 @@ export function buildDeviceList(devices, events, behaviorEventsOrNow = [], fallb
       const online = now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS;
       return {
         device_id: device.device_id,
-        app_version: device.app_version,
+        app_version: behaviorMetadataByDevice.get(device.device_id)?.app_version
+          || device.app_version,
         platform: device.platform,
         state: device.state,
         online,

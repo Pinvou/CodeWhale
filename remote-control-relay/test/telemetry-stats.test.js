@@ -21,6 +21,48 @@ import {
 } from "../telemetry-service.js";
 
 const at = (value) => Date.parse(`${value}+08:00`);
+
+test("device details use the latest observed behavior version regardless of event order", () => {
+  const now = at("2026-09-10T12:00:00");
+  const devices = [{
+    device_id: "install_version_current",
+    hardware_source: "installation_id",
+    identity_quality: "installation_only",
+    app_version: "0.9.0",
+    first_seen_at: now - 10_000,
+    last_seen_at: now,
+  }];
+  const common = {
+    event_name: "task_submitted",
+    device_id: "install_version_current",
+    identity_id: "install_version_current",
+    mode: "assistant",
+    initiator_type: "user",
+  };
+  const behaviorEvents = [
+    {
+      ...common,
+      event_id: "version_newer",
+      attempt_id: "attempt_newer",
+      app_version: "0.9.2",
+      occurred_at: now - 1_000,
+      received_at: now - 900,
+    },
+    {
+      ...common,
+      event_id: "version_older_but_later_in_file",
+      attempt_id: "attempt_older",
+      app_version: "0.9.1",
+      occurred_at: now - 5_000,
+      received_at: now - 4_900,
+    },
+  ];
+
+  assert.equal(buildDeviceList(devices, [], behaviorEvents, now)[0].app_version, "0.9.2");
+  assert.deepEqual(buildStatsOverview(devices, [], behaviorEvents, now).active_versions, [
+    { version: "0.9.2", count: 1 },
+  ]);
+});
 const installationDevicesFor = (events) => [...new Set(events
   .map((event) => event.identity_id || event.device_id)
   .filter(Boolean))]
