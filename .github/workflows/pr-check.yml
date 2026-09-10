@@ -1242,6 +1242,16 @@ jobs:
       # 只在编译期 rustc 注入 RUST_MIN_STACK=16MiB,不泄漏到 cargo test 目标进程。
       # 必须用 ${{ github.workspace }} 绝对路径(避免按 cwd 双拼解析)。
       RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
+      # v0.9.12 底座升级后,dev 对依赖开 O2 时 rustc/LLVM 编译 codewhale-tui(lib)
+      # 在 16GB Windows hosted runner 上越线(rustc-LLVM ERROR: out of memory,
+      # PR #1037 regression 实证;v0.9.5 尚可容纳)。与 Linux rust-test job 的
+      # 同源缓解对齐:收敛 codegen units 降低单 crate 的 LLVM 后端峰值。
+      # 只影响本 job 的 dev/test profile;release 仍用 Cargo.toml 的 codegen-units=1。
+      CARGO_PROFILE_DEV_CODEGEN_UNITS: "16"
+      # 完全关闭 debuginfo(line-tables-only 仍产生 PDB 数据):缩小目标文件与
+      # 测试二进制,降低 Windows 链接期内存峰值;panic 的 file:line 由
+      # Location(rodata) 提供,不依赖 debuginfo。
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
