@@ -25,7 +25,9 @@ class WorkloadProductionConfigTests(unittest.TestCase):
         source = (DEPLOY / 'compose.workload-agents.yaml').read_text()
         body = source.split('services:\n', 1)[1].split('networks:\n', 1)[0]
         names = re.findall(r'^  ([a-z][a-z-]+):$', body, re.M)
-        self.assertEqual(names, list(realm.SERVICES))
+        expected_agents = [service + '-workload-agent' for service in realm.SERVICES]
+        self.assertEqual(names, expected_agents)
+        self.assertFalse(set(names).intersection(realm.SERVICES))
         self.assertEqual(source.count('create_host_path: false'), 21)
         self.assertEqual(source.count('target: /run/config'), 7)
         self.assertEqual(source.count('target: /run/bootstrap'), 7)
@@ -35,7 +37,7 @@ class WorkloadProductionConfigTests(unittest.TestCase):
             for directory in ('config', 'bootstrap', 'projected'):
                 self.assertIn('/' + service + '/' + directory, source)
         self.assertIn('user: "65532:65532"', source)
-        self.assertIn('keycloak-mobile-authenticator:\n    <<: *agent\n    user: "1000:0"', source)
+        self.assertIn('keycloak-mobile-authenticator-workload-agent:\n    <<: *agent\n    user: "1000:0"', source)
 
     def test_private_network_healthcheck_and_bounded_runtime(self):
         source = (DEPLOY / 'compose.workload-agents.yaml').read_text()
@@ -43,7 +45,8 @@ class WorkloadProductionConfigTests(unittest.TestCase):
                          'mem_limit: 96m', 'cpus: 0.25', 'pids_limit: 32', 'soft: 0, hard: 0',
                          'SSL_CERT_FILE: /run/config/ca.crt', '"/run/config/workload.json", "-check"'):
             self.assertIn(required, source)
-        for forbidden in ('ports:', 'privileged:', 'env_file:', 'CLIENT_SECRET:', 'TOKEN:', 'network_mode: host'):
+        for forbidden in ('ports:', 'privileged:', 'env_file:', 'CLIENT_SECRET:', 'TOKEN:', 'network_mode: host',
+                          'aliases:'):
             self.assertNotIn(forbidden, source)
         dockerfile = (DEPLOY / 'Dockerfile.workload-agent').read_text()
         self.assertIn('FROM scratch', dockerfile)

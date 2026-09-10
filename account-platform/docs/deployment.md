@@ -297,6 +297,8 @@ Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Cod
 
 Web 首次登录同样使用该 Authorization Code + PKCE 流程，但登录、短信登录与手机注册表单由 Keycloak 的 `pinvou` 主题和 `pinvou-browser-authenticator` 承载。Keycloak 镜像必须由 `deploy/keycloak/Dockerfile` 构建并包含 Authenticator JAR 与主题，不能把 Helm 的 `images.keycloak` 指向未包含扩展的官方裸镜像。运行时必须配置 `PINVOU_ACCOUNT_AUTH_URL`、与 Account `OIDC_ISSUER` 完全一致的 `PINVOU_OIDC_ISSUER`、`PINVOU_IDENTITY_AUTH_URL`、`PINVOU_SMS_VERIFY_URL` 及既有工作负载身份；Account 的工作负载规则只向 Keycloak 开放 `POST /internal/v1/auth/sms/verify` 和 `POST /internal/v1/authorization/check`，缺失或超出路径时认证失败关闭。发布后需分别验证密码登录、手机号密码登录、短信滑块与验证码登录、注册滑块与验证码注册、三语和手机号/来源/设备限流；再撤销 `PERSONAL_USER` 的测试副本、停用测试主体并阻断 Account，逐项确认密码及短信路径都不会签发新客户端/Portal 会话。既有 Cookie SSO 不替代凭据路径的 ID-19 检查，其撤权收敛仍按会话撤销和授权版本失效策略执行。
 
+工作负载令牌 Agent 与业务服务连接同一个内部依赖网络时，Compose 服务名和显式网络别名必须与全部业务服务发现名完全不相交。Agent 使用 `<业务服务名>-workload-agent`，但其 OIDC `client_id`、subject 和投射目录仍使用原业务服务名；不得为了目录或身份一致而复用业务 DNS 名。发布前后必须分别检查业务名只解析到对应业务容器、Agent 名只解析到对应 Agent 容器，并连续验证认证依赖健康，避免 Docker DNS 轮询把认证请求发送到不监听业务端口的 Agent。
+
 ### 6.7 配置完整性与环境分级
 
 `account-platform/deploy/compose/.env.example` 只用于本地开发起步，不是生产配置的完整真相源。每次发布必须以目标版本实际参与渲染的全部 Compose 文件为准执行 `docker compose --env-file <secret-env> <compose-files> config`，归档脱敏后的配置键名、Compose 文件摘要和渲染结果摘要；存在未解析变量、空的必填值、开发默认值或站点 override 未纳入摘要时均为 NO-GO。

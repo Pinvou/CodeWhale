@@ -13,6 +13,7 @@ import urllib.parse
 
 SERVICES = ('account-service', 'identity-service', 'billing-service', 'token-gateway',
             'token-command-executor', 'token-credential-portal', 'keycloak-mobile-authenticator')
+AGENT_SERVICES = {service: service + '-workload-agent' for service in SERVICES}
 
 
 def require(value, marker):
@@ -106,12 +107,15 @@ def verify(root, repository, kc, network_name, issuer_files, admin, image, conta
     compose = ['docker', 'compose', '--project-name', project, '-f',
                str(repository / 'account-platform/deploy/production/compose.workload-agents.yaml')]
     expanded = json.loads(run([*compose, 'config', '--format', 'json'], env=env).stdout)
-    require(set(expanded['services']) == set(SERVICES) and expanded['networks']['data']['external'] is True
+    require(set(expanded['services']) == set(AGENT_SERVICES.values())
+            and not set(expanded['services']).intersection(SERVICES)
+            and expanded['networks']['data']['external'] is True
             and expanded['networks']['data']['name'] == network_name, 'WORKLOAD_COMPOSE_SCOPE_MISMATCH')
     run([*compose, 'create'], env=env)
     ids = {}
     for service in SERVICES:
-        cid = run([*compose, 'ps', '--all', '--quiet', service], env=env).stdout.decode().strip()
+        agent_service = AGENT_SERVICES[service]
+        cid = run([*compose, 'ps', '--all', '--quiet', agent_service], env=env).stdout.decode().strip()
         require(re.fullmatch(r'[a-f0-9]{64}', cid), 'WORKLOAD_CONTAINER_ID_INVALID')
         containers.append((cid, 'com.docker.compose.project', project))
         ids[service] = cid

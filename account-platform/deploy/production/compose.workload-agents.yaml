@@ -1,4 +1,5 @@
-# Fixed seven short-lived identity agents; never merge development Compose.
+# Fixed seven short-lived identity agents. Agent service names must never reuse
+# business-service discovery names on the shared dependency network.
 name: pinvou-production-workload
 x-agent: &agent
   image: ${WORKLOAD_AGENT_IMAGE:?set verified same-source workload agent image digest}
@@ -28,7 +29,7 @@ x-agent: &agent
     retries: 6
   networks: [data]
 services:
-  account-service:
+  account-service-workload-agent:
     <<: *agent
     volumes:
       - type: bind
@@ -45,7 +46,7 @@ services:
         source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/account-service/projected
         target: /run/projected
         bind: {create_host_path: false}
-  identity-service:
+  identity-service-workload-agent:
     <<: *agent
     volumes:
       - type: bind
@@ -62,7 +63,7 @@ services:
         source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/identity-service/projected
         target: /run/projected
         bind: {create_host_path: false}
-  billing-service:
+  billing-service-workload-agent:
     <<: *agent
     volumes:
       - type: bind
@@ -79,7 +80,7 @@ services:
         source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/billing-service/projected
         target: /run/projected
         bind: {create_host_path: false}
-  token-gateway:
+  token-gateway-workload-agent:
     <<: *agent
     volumes:
       - type: bind
@@ -96,7 +97,7 @@ services:
         source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-gateway/projected
         target: /run/projected
         bind: {create_host_path: false}
-  token-command-executor:
+  token-command-executor-workload-agent:
     <<: *agent
     volumes:
       - type: bind
@@ -113,7 +114,7 @@ services:
         source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-command-executor/projected
         target: /run/projected
         bind: {create_host_path: false}
-  token-credential-portal:
+  token-credential-portal-workload-agent:
     <<: *agent
     volumes:
       - type: bind
@@ -130,7 +131,7 @@ services:
         source: ${WORKLOAD_ROOT:?set dedicated per-service identity root}/token-credential-portal/projected
         target: /run/projected
         bind: {create_host_path: false}
-  keycloak-mobile-authenticator:
+  keycloak-mobile-authenticator-workload-agent:
     <<: *agent
     user: "1000:0"
     volumes:
