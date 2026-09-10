@@ -13,7 +13,8 @@ class KeycloakUserAuthConfigTests(unittest.TestCase):
         self.assertIn('create_host_path: false', source)
         self.assertIn('PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE: /run/pinvou/keycloak-workload/token', source)
         self.assertIn('PINVOU_INTERNAL_SERVICE_TOKEN: ""', source)
-        for variable in ('KEYCLOAK_ACCOUNT_AUTH_URL', 'KEYCLOAK_IDENTITY_AUTH_URL', 'KEYCLOAK_SMS_VERIFY_URL'):
+        for variable in ('KEYCLOAK_ACCOUNT_AUTH_URL', 'KEYCLOAK_OIDC_ISSUER', 'KEYCLOAK_IDENTITY_AUTH_URL',
+                         'KEYCLOAK_SMS_VERIFY_URL'):
             self.assertIn(variable + ':?', source)
         for forbidden in ('bootstrap', 'CLIENT_SECRET', 'ports:', 'image:', 'command:', 'networks:'):
             self.assertNotIn(forbidden, source)

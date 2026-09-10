@@ -4,6 +4,7 @@ services:
   keycloak:
     environment:
       PINVOU_ACCOUNT_AUTH_URL: ${KEYCLOAK_ACCOUNT_AUTH_URL:?set verified private Account origin}
+      PINVOU_OIDC_ISSUER: ${KEYCLOAK_OIDC_ISSUER:?set public user realm issuer matching Account}
       PINVOU_IDENTITY_AUTH_URL: ${KEYCLOAK_IDENTITY_AUTH_URL:?set verified private Identity origin}
       PINVOU_SMS_VERIFY_URL: ${KEYCLOAK_SMS_VERIFY_URL:?set verified private SMS verification endpoint}
       PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE: /run/pinvou/keycloak-workload/token
