@@ -274,22 +274,37 @@ function coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay) {
   return uniqueAttempts(clipDailySubjectContributions(eligible).events, "task_finished");
 }
 
+function coreTaskActivityByDay(devices, behaviorEvents, startDay, endDay) {
+  const rows = new Map();
+  for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Set());
+  const installationEvents = installationBehaviorEvents(devices, behaviorEvents);
+  const submittedAttempts = new Set(installationEvents
+    .filter((event) => isCoreUserTask(event, "task_submitted"))
+    .map(attemptIdentityKey)
+    .filter(Boolean));
+  for (const event of installationEvents) {
+    const submitted = isCoreUserTask(event, "task_submitted");
+    const orphanedTerminal = isCoreUserTask(event, "task_finished")
+      && !submittedAttempts.has(attemptIdentityKey(event));
+    if (!submitted && !orphanedTerminal) continue;
+    const day = statsDay(event.occurred_at);
+    const identity = eventIdentity(event);
+    if (rows.has(day) && identity) rows.get(day).add(identity);
+  }
+  return rows;
+}
+
 function installationConversationsByDay(devices, behaviorEvents, startDay, endDay) {
-  const deviceById = new Map(devices
-    .filter(isBehaviorInstallationDevice)
-    .map((device) => [device.device_id, device]));
   const rows = new Map();
   for (let day = startDay; day <= endDay; day += 1) rows.set(day, new Map());
 
   for (const event of coreTaskFinishedEvents(devices, behaviorEvents, startDay, endDay)) {
-    const device = deviceById.get(event.device_id);
-    if (!isBehaviorInstallationDevice(device)) continue;
     const day = statsDay(event.occurred_at);
     const counts = rows.get(day);
     if (!counts) continue;
-    const deviceId = boundedText(event.device_id, 128);
-    if (!deviceId) continue;
-    counts.set(deviceId, (counts.get(deviceId) || 0) + 1);
+    const identity = eventIdentity(event);
+    if (!identity) continue;
+    counts.set(identity, (counts.get(identity) || 0) + 1);
   }
   return rows;
 }
@@ -312,7 +327,13 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   const online = operationalDevices.filter(
     (device) => now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS,
   );
-  const compatibleUsage = installationConversationsByDay(
+  const conversations = installationConversationsByDay(
+    operationalDevices,
+    behaviorEvents,
+    trendStart,
+    today,
+  );
+  const activity = coreTaskActivityByDay(
     operationalDevices,
     behaviorEvents,
     trendStart,
@@ -320,11 +341,11 @@ export function buildStatsOverview(devices, events, behaviorEventsOrNow = [], fa
   );
   const trend = new Map();
   for (let day = trendStart; day <= today; day += 1) {
-    const usage = compatibleUsage.get(day) || new Map();
+    const usage = conversations.get(day) || new Map();
     trend.set(day, {
       day: statsDayLabel(day),
       turns: [...usage.values()].reduce((sum, turns) => sum + turns, 0),
-      device_ids: new Set(usage.keys()),
+      device_ids: activity.get(day) || new Set(),
     });
   }
 
@@ -420,15 +441,7 @@ function eventIdentity(event) {
 }
 
 function activeIdentityByDay(_devices, _usageEvents, behaviorEvents, window) {
-  const activeByDay = new Map(dayRows(window).map((day) => [day, new Set()]));
-  for (const event of behaviorEvents) {
-    if (!isCoreUserTask(event, "task_submitted")) continue;
-    const day = statsDay(event.occurred_at);
-    const bucket = activeByDay.get(day);
-    const identity = eventIdentity(event);
-    if (bucket && identity) bucket.add(identity);
-  }
-  return activeByDay;
+  return coreTaskActivityByDay(_devices, behaviorEvents, window.startDay, window.endDay);
 }
 
 function filteredBehaviorEvents(events, window, eventName = null) {
@@ -1042,8 +1055,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     range: window.range,
     subject: "installation",
     timezone: "Asia/Shanghai",
-    metric_version: "behavior-v1.2",
-    metric_version_started_at: Date.parse("2026-08-27T00:00:00+08:00"),
+    metric_version: "behavior-v1.3",
+    metric_version_started_at: Date.parse("2026-09-10T00:00:00+08:00"),
     data_status: dataStatus,
     latest_event_received_at: latestReceivedAt || null,
     active_installations: activeTotal,
@@ -1612,31 +1625,31 @@ export class TelemetryStore {
         continue;
       }
       const normalizedFirstSeenAt = normalizeUsageOccurredAt(device.first_seen_at);
-    const normalizedLastSeenAt = normalizeUsageOccurredAt(device.last_seen_at);
-    const normalizedLastActiveAt = normalizeUsageOccurredAt(device.last_active_at);
-    const normalized = {
-      ...device,
-      first_seen_at: Number.isFinite(normalizedFirstSeenAt)
-        && normalizedFirstSeenAt <= loadedAt + 60_000
-        ? normalizedFirstSeenAt
-        : null,
-      last_seen_at: Number.isFinite(normalizedLastSeenAt)
-        ? Math.min(normalizedLastSeenAt, loadedAt)
-        : 0,
-      last_active_at: Number.isFinite(normalizedLastActiveAt)
-        ? Math.min(normalizedLastActiveAt, loadedAt)
-        : null,
-      turns: 0,
+      const normalizedLastSeenAt = normalizeUsageOccurredAt(device.last_seen_at);
+      const normalizedLastActiveAt = normalizeUsageOccurredAt(device.last_active_at);
+      const normalized = {
+        ...device,
+        first_seen_at: Number.isFinite(normalizedFirstSeenAt)
+          && normalizedFirstSeenAt <= loadedAt + 60_000
+          ? normalizedFirstSeenAt
+          : null,
+        last_seen_at: Number.isFinite(normalizedLastSeenAt)
+          ? Math.min(normalizedLastSeenAt, loadedAt)
+          : 0,
+        last_active_at: Number.isFinite(normalizedLastActiveAt)
+          ? Math.min(normalizedLastActiveAt, loadedAt)
+          : null,
+        turns: 0,
         input_tokens: 0,
         output_tokens: 0,
-      errors: 0,
-    };
-    if (normalized.first_seen_at !== device.first_seen_at
-      || normalized.last_seen_at !== device.last_seen_at
-      || normalized.last_active_at !== device.last_active_at) {
-      restoredTimestampDevice = true;
-    }
-    this.devices.set(device.device_id, normalized);
+        errors: 0,
+      };
+      if (normalized.first_seen_at !== device.first_seen_at
+        || normalized.last_seen_at !== device.last_seen_at
+        || normalized.last_active_at !== device.last_active_at) {
+        restoredTimestampDevice = true;
+      }
+      this.devices.set(device.device_id, normalized);
       this.devicesByHardwareHash.set(device.hardware_hash, normalized);
     }
     this.rebuildDeletionIndexes();
@@ -1788,11 +1801,11 @@ export class TelemetryStore {
     return this.publicDeletionResponse(record);
   }
 
-loadEvents() {
-  if (!existsSync(this.eventsPath)) return;
-  const lines = readFileSync(this.eventsPath, "utf8").split("\n");
-  const now = Date.now();
-  let rewriteNeeded = false;
+  loadEvents() {
+    if (!existsSync(this.eventsPath)) return;
+    const lines = readFileSync(this.eventsPath, "utf8").split("\n");
+    const now = Date.now();
+    let rewriteNeeded = false;
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
@@ -1802,7 +1815,7 @@ loadEvents() {
           normalizedReceivedAt = now;
         }
         let normalizedOccurredAt = normalizeUsageOccurredAt(event.occurred_at);
-      if (!Number.isFinite(normalizedOccurredAt)) {
+        if (!Number.isFinite(normalizedOccurredAt)) {
           rewriteNeeded = true;
           continue;
         }
@@ -1813,17 +1826,17 @@ loadEvents() {
         const device = this.devices.get(event.device_id);
         if (!device || this.subjectWasDeleted(event.device_id)) {
           rewriteNeeded = true;
-        continue;
-      }
-      if (normalizedOccurredAt > now + 60_000) {
-        normalizedOccurredAt = normalizedReceivedAt;
-      }
-      if (event.received_at !== undefined && normalizedReceivedAt !== event.received_at) {
-        event.received_at = normalizedReceivedAt;
-        rewriteNeeded = true;
-      }
-      if (normalizedOccurredAt !== event.occurred_at) rewriteNeeded = true;
-      event.occurred_at = normalizedOccurredAt;
+          continue;
+        }
+        if (normalizedOccurredAt > now + 60_000) {
+          normalizedOccurredAt = normalizedReceivedAt;
+        }
+        if (event.received_at !== undefined && normalizedReceivedAt !== event.received_at) {
+          event.received_at = normalizedReceivedAt;
+          rewriteNeeded = true;
+        }
+        if (normalizedOccurredAt !== event.occurred_at) rewriteNeeded = true;
+        event.occurred_at = normalizedOccurredAt;
         this.eventIds.add(event.event_id);
         this.events.push(event);
       } catch (error) {
@@ -1831,15 +1844,15 @@ loadEvents() {
         console.error("[telemetry] skipped malformed usage event:", error);
       }
     }
-  this.compactEvents(now, rewriteNeeded);
+    this.compactEvents(now, rewriteNeeded);
     this.rebuildUsageCounters();
   }
 
-loadBehaviorEvents() {
-  if (!existsSync(this.behaviorEventsPath)) return;
-  const lines = readFileSync(this.behaviorEventsPath, "utf8").split("\n");
-  const now = Date.now();
-  let rewriteNeeded = false;
+  loadBehaviorEvents() {
+    if (!existsSync(this.behaviorEventsPath)) return;
+    const lines = readFileSync(this.behaviorEventsPath, "utf8").split("\n");
+    const now = Date.now();
+    let rewriteNeeded = false;
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
@@ -1850,7 +1863,7 @@ loadBehaviorEvents() {
           normalizedReceivedAt = now;
         }
         let normalizedOccurredAt = normalizeUsageOccurredAt(event.occurred_at);
-      if (!Number.isFinite(normalizedOccurredAt)) {
+        if (!Number.isFinite(normalizedOccurredAt)) {
           rewriteNeeded = true;
           continue;
         }
@@ -1858,13 +1871,13 @@ loadBehaviorEvents() {
           || this.subjectWasDeleted(event.device_id)
           || !STORED_BEHAVIOR_EVENT_NAMES.has(event.event_name)) {
           rewriteNeeded = true;
-        continue;
-      }
-      if (normalizedOccurredAt > now + 60_000) {
-        normalizedOccurredAt = normalizedReceivedAt;
-      }
-      if (event.received_at !== undefined) event.received_at = normalizedReceivedAt;
-      event.occurred_at = normalizedOccurredAt;
+          continue;
+        }
+        if (normalizedOccurredAt > now + 60_000) {
+          normalizedOccurredAt = normalizedReceivedAt;
+        }
+        if (event.received_at !== undefined) event.received_at = normalizedReceivedAt;
+        event.occurred_at = normalizedOccurredAt;
         if (JSON.stringify(event) !== JSON.stringify(raw)) rewriteNeeded = true;
         this.behaviorEventIds.add(event.event_id);
         this.behaviorEvents.push(event);
@@ -1873,7 +1886,7 @@ loadBehaviorEvents() {
         console.error("[telemetry] skipped malformed behavior event:", error);
       }
     }
-  this.compactBehaviorEvents(now, rewriteNeeded);
+    this.compactBehaviorEvents(now, rewriteNeeded);
   }
 
   hardwareHash(claim) {
@@ -2456,7 +2469,15 @@ loadBehaviorEvents() {
 
   overview() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildStatsOverview([...this.devices.values()], this.events, this.behaviorEvents);
+    return {
+      ...buildStatsOverview([...this.devices.values()], this.events, this.behaviorEvents),
+      registration_capacity: {
+        used: this.devices.size,
+        limit: this.maxDevices,
+        remaining: Math.max(0, this.maxDevices - this.devices.size),
+        utilization_rate: rate(this.devices.size, this.maxDevices),
+      },
+    };
   }
 
   deviceList() {

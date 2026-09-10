@@ -406,6 +406,33 @@ test("homepage conversations and behavior successes share installation identity 
   assert.equal(behavior.metrics.task_success_count, 1);
 });
 
+test("homepage and behavior activity include submitted tasks without terminal events", () => {
+  const now = at("2026-09-04T12:00:00");
+  const devices = [{
+    device_id: "install_pending",
+    hardware_source: "installation_id",
+    identity_quality: "installation_only",
+    first_seen_at: now - 10_000,
+    last_seen_at: now,
+  }];
+  const behaviorEvents = [{
+    event_id: "pending_submit",
+    event_name: "task_submitted",
+    attempt_id: "pending_attempt",
+    device_id: "install_pending",
+    identity_id: "install_pending",
+    mode: "assistant",
+    initiator_type: "user",
+    occurred_at: now,
+  }];
+
+  const homepage = buildStatsOverview(devices, [], behaviorEvents, now);
+  const behavior = buildBehaviorOverview(devices, [], behaviorEvents, "today", now);
+  assert.equal(homepage.counts.active_today, 1);
+  assert.equal(homepage.usage_trend.at(-1).turns, 0);
+  assert.equal(behavior.active_installations, 1);
+});
+
 test("conversation deduplication falls back per installation to turn and event ids", () => {
   const now = at("2026-09-04T12:00:00");
   const devices = [
@@ -1464,6 +1491,79 @@ test("old device credentials remain valid until explicit deletion", async () => 
       else process.env[name] = previous[name];
     }
     rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
+test("legacy expired tombstones reject old credentials but allow fresh registration", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-legacy-expired-"));
+  const names = [
+    "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+    "PINVOU_TELEMETRY_DEVICE_PEPPER",
+    "PINVOU_STATS_ADMIN_PASSWORD",
+    "PINVOU_TELEMETRY_DATA_DIR",
+  ];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  let service;
+  try {
+    const pepper = "test-device-pepper-at-least-24";
+    process.env.PINVOU_TELEMETRY_ENROLLMENT_TOKEN = "test-enrollment-token-at-least-24";
+    process.env.PINVOU_TELEMETRY_DEVICE_PEPPER = pepper;
+    process.env.PINVOU_STATS_ADMIN_PASSWORD = "operations-admin-password";
+    process.env.PINVOU_TELEMETRY_DATA_DIR = dataDir;
+    const registrationBody = {
+      enrollment_token: "test-enrollment-token-at-least-24",
+      hardware_claim: "legacy-expired-installation-0001",
+      registration_secret: "registration-secret-legacy-expired-0001",
+      hardware_source: "installation_id",
+      identity_quality: "installation_only",
+      app_version: "0.8.7",
+      platform: "windows",
+      arch: "x86_64",
+    };
+    const bootstrap = new TelemetryStore(dataDir, pepper);
+    const original = bootstrap.register(registrationBody, null);
+    bootstrap.saveNow();
+    writeFileSync(join(dataDir, "behavior-deletion-tombstones.json"), JSON.stringify({
+      version: 2,
+      records: [{
+        subject_hash: bootstrap.deletionSubjectHash(original.device_id),
+        token_hash: bootstrap.deletionTokenHash(original.device_token),
+        hardware_hash: bootstrap.hardwareHash(registrationBody.hardware_claim),
+        registration_secret_hash: bootstrap.registrationSecretHash(registrationBody.registration_secret),
+        status: "completed",
+        accepted_at: Date.now() - 36 * 24 * 60 * 60_000,
+        completed_at: Date.now() - 36 * 24 * 60 * 60_000,
+        result_expires_at: Date.now() - 6 * 24 * 60 * 60_000,
+      }],
+    }));
+
+    service = createTelemetryService({ regionResolver: { enabled: false, lookup: async () => null } });
+    const expired = await serviceRequest(
+      service,
+      "GET",
+      `/pinvou3/stats/api/behavior/collection?device_id=${original.device_id}`,
+      undefined,
+      { authorization: `Bearer ${original.device_token}` },
+    );
+    assert.equal(expired.status, 410);
+    assert.deepEqual(expired.body, { error: "device_credentials_expired" });
+
+    const renewed = await serviceRequest(
+      service,
+      "POST",
+      "/pinvou3/telemetry/v1/register",
+      registrationBody,
+    );
+    assert.equal(renewed.status, 200);
+    assert.notEqual(renewed.body.device_id, original.device_id);
+    assert.notEqual(renewed.body.device_token, original.device_token);
+  } finally {
+    service?.close();
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+    rmSync(dataDir, { recursive: true, force: true });
   }
 });
 
