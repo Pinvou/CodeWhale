@@ -75,6 +75,12 @@ kubectl -n <namespace> port-forward service/newapi 13000:8080
 
 随后访问 `http://127.0.0.1:13000` 创建强管理员账号，配置真实上游 Channel，并创建最小权限 API Token。不要在命令行参数、工单或聊天记录中传递管理员密码和 API Token。
 
+正式公网入口使用 `https://llmapi.pinvou.com`。New API 进程继续只绑定生产服务器
+loopback；源站安装 `deploy/nginx-pinvou-llmapi-origin.conf`，通过既有账号平台反向隧道按
+Host 分流。公网边缘先安装 `deploy/nginx-pinvou-llmapi-domain-bootstrap.conf` 完成 ACME
+签发，再替换为 `deploy/nginx-pinvou-llmapi-domain.conf`。不得把 New API 容器端口直接
+开放到公网，也不得复用其他域名证书或关闭主机名校验。
+
 Token Gateway 中的 Provider Base URL 使用 `http://newapi:8080`。完成 `/v1/models`、JSON、SSE、usage 结算和客户端断开验证前，不得执行 DNS/API Gateway 切换。
 
 ## 验收与回滚
