@@ -211,13 +211,11 @@ mod tests {
     /// has no fuzzy step — and the rest survive only as `model_visible=false`
     /// replay aliases, so any one of them inside a model-visible description or
     /// schema teaches a name the model is never offered.
+    // list_dir, file_search and grep_files are published standalone tools again.
     const RETIRED_TOOL_NAMES: &[&str] = &[
         "read_file",
         "write_file",
         "edit_file",
-        "list_dir",
-        "file_search",
-        "grep_files",
         "git_status",
         "git_diff",
         "git_log",
@@ -286,7 +284,18 @@ mod tests {
             )))
             .build(ToolContext::new(tmp.path().to_path_buf()));
 
-        for tool in registry.to_api_tools() {
+        let api_tools = registry.to_api_tools();
+        let skill = api_tools
+            .iter()
+            .find(|tool| tool.name == "load_skill")
+            .unwrap();
+        for reference in skill.description.split('`').skip(1).step_by(2) {
+            assert!(
+                api_tools.iter().any(|tool| tool.name == reference),
+                "load_skill cites unpublished tool `{reference}`"
+            );
+        }
+        for tool in api_tools {
             let advertised = format!("{} {}", tool.description, tool.input_schema);
             for retired in RETIRED_TOOL_NAMES {
                 assert!(

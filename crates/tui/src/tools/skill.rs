@@ -39,7 +39,7 @@ impl ToolSpec for LoadSkillTool {
         "Load a skill (SKILL.md body + companion file list) into the next turn's context. \
          Use name=\"list\" to discover the complete enabled catalogue, then load an exact \
          skill when the user names it or the task clearly matches its description. Faster \
-         than separate `read` and `list` calls."
+         than separate `read` and `list_dir` calls."
     }
 
     fn input_schema(&self) -> Value {
