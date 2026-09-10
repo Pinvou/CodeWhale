@@ -272,6 +272,9 @@
 .team-relay-user-avatar > img { display: block; height: 100%; inset: 0; object-fit: cover; position: absolute; width: 100%; }
 
 .team-relay-detail { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+/* 详情列只有头部与底栏固定；摘要卡、交付包、历史流转统一放进这个滚动容器，
+   保证任何窗口高度下底栏操作按钮都完整可见。 */
+.team-relay-detail-body { flex: 1; min-height: 0; overflow: auto; }
 .team-relay-detail-header { flex: 0 0 auto; min-height: 82px; padding: 0 24px; }
 .team-relay-detail-heading { flex: 1; min-width: 0; }
 .team-relay-detail-heading h2 { font-size: 19px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -353,7 +356,7 @@
 .team-relay-accepted-package p { color: var(--relay-text); font-size: 12px; margin: 4px 0; }
 .team-relay-accepted-package small { color: var(--relay-muted); }
 
-.team-relay-timeline { flex: 1; min-height: 0; overflow: auto; padding: 0 24px 18px; }
+.team-relay-timeline { padding: 0 24px 18px; }
 .team-relay-event { display: flex; gap: 14px; padding-top: 12px; position: relative; }
 .team-relay-event:not(:last-child)::before { background: var(--relay-border); bottom: -12px; content: ''; left: 14px; position: absolute; top: 40px; width: 1px; }
 .team-relay-event-card { background: var(--relay-panel); border: 1px solid var(--relay-border); border-radius: 10px; flex: 1; min-width: 0; padding: 13px 15px; }
@@ -1079,14 +1082,7 @@
   .team-relay-invite-actions { flex-wrap: wrap; }
 }
 
-@media (max-width: 1400px) {
-  .team-relay-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(190px, .45fr); }
-  .team-relay-material-inspector { border-left: 0; border-top: 1px solid var(--relay-border); }
-}
-
 @container team-relay (max-width: 1320px) {
-  .team-relay-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(190px, .45fr); }
-  .team-relay-material-inspector { border-left: 0; border-top: 1px solid var(--relay-border); }
   .team-relay-member-group > div { grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
 }
 
@@ -1361,10 +1357,11 @@
 .team-relay-card.is-selected .team-relay-avatar { box-shadow: none; }
 .team-relay-card-meta { align-items: center; display: flex; gap: 5px; }
 
-.team-relay-workspace { grid-template-columns: minmax(520px, 1fr) clamp(360px, 22cqw, 420px); }
-.team-relay-detail-header { border-bottom: 0; min-height: 112px; padding: 25px 32px 14px; }
+.team-relay-workspace { grid-template-columns: minmax(520px, 1fr) clamp(360px, 22cqw, 420px); grid-template-rows: minmax(0, 1fr); }
+.team-relay-detail-header { border-bottom: 0; min-height: 0; padding: 25px 32px 18px; }
 .team-relay-detail-heading h2 { font-size: 25px; margin-top: 7px; }
 .team-relay-thread-summary { background: var(--relay-panel-soft); border: 0; border-radius: 14px; gap: 17px; grid-template-columns: 1fr; margin: 0 32px; padding: 18px 20px; }
+.team-relay-accepted-package { margin: 10px 32px 0; }
 .team-relay-thread-summary > section > small { font-size: 11px; margin-bottom: 9px; }
 .team-relay-thread-summary > section:first-child .team-relay-avatar { font-size: 19px; height: 36px; width: 36px; }
 .team-relay-thread-summary > section:first-child strong { font-size: 14px; }
@@ -1480,11 +1477,33 @@
 .team-relay-board-side-note { align-items: flex-start; color: var(--relay-muted); display: flex; font-size: 10px; gap: 8px; line-height: 1.5; padding: 0 4px; }
 
 @media (max-width: 1400px) {
-  .team-relay-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(190px, .42fr); }
+  .team-relay-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) clamp(210px, 31%, 280px); }
   .team-relay-material-inspector { border-left: 0; border-top: 1px solid var(--relay-border); }
   .team-relay-board-content { padding: 28px; }
   .team-relay-member-card { grid-template-columns: minmax(165px, 1fr) minmax(200px, 1fr) minmax(115px, .6fr); }
   .team-relay-member-description { display: none; }
+}
+
+/* 宽窗口（>1400px）但接力区被应用侧栏挤压到放不下左右两栏时，由容器查询而非
+   视口媒体查询负责切换为上下叠放；@media 版本仅供不支持容器查询的 Safari 14
+   基线 WebView 回退，workspace 的堆叠值两处必须保持一致。叠放形态下详情列
+   又宽又矮、材料栏是一条窄带：材料栏压成单行头部的浅色抽屉、摘要卡改双列
+   横排，把纵向空间留给时间线。 */
+@container team-relay (max-width: 1400px) {
+  .team-relay-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) clamp(210px, 31%, 280px); }
+  .team-relay-material-inspector { border-left: 0; border-top: 1px solid var(--relay-border); background: var(--relay-panel-soft); }
+  .team-relay-material-inspector > header { align-items: center; min-height: 0; padding: 11px 16px 9px; }
+  .team-relay-material-inspector > header > div { align-items: baseline; flex-direction: row; gap: 10px; }
+  .team-relay-material-inspector-file { background: var(--relay-panel); grid-template-columns: auto minmax(0, 1fr) auto auto; }
+  .team-relay-material-inspector-file-actions { display: flex; gap: 6px; grid-column: auto; }
+  .team-relay-material-inspector-file-actions button { padding: 4px 12px; }
+  .team-relay-material-inspector-package-title { align-items: baseline; flex-direction: row; gap: 12px; justify-content: space-between; }
+  .team-relay-material-inspector-empty { flex-direction: row; gap: 10px; justify-content: flex-start; min-height: 0; padding: 2px 0 8px; text-align: left; }
+}
+
+@container team-relay (min-width: 761px) and (max-width: 1400px) {
+  .team-relay-thread-summary { align-items: center; gap: 24px; grid-template-columns: minmax(190px, .72fr) minmax(300px, 1.28fr); padding: 14px 16px; }
+  .team-relay-banner { border-top: 0; border-left: 1px solid var(--relay-border); grid-column: auto; padding: 3px 0 3px 20px; }
 }
 
 @media (max-width: 1100px) {
@@ -1521,6 +1540,7 @@
   .team-relay-detail-heading h2 { font-size: 21px; }
   .team-relay-thread-summary { grid-template-columns: 1fr; margin: 0 14px; padding: 20px 0; }
   .team-relay-banner,
+  .team-relay-accepted-package,
   .team-relay-history-title { margin-left: 14px; margin-right: 14px; }
   .team-relay-timeline,
   .team-relay-action-bar { padding-left: 14px; padding-right: 14px; }
