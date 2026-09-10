@@ -2410,15 +2410,21 @@ async fn write_without_expected_hash_still_creates_files() {
 
 #[tokio::test]
 async fn expected_hash_is_advertised_on_every_mutating_action() {
-    for schema in [
-        WriteFileTool.input_schema(),
-        EditFileTool.input_schema(),
-        crate::tools::apply_patch::ApplyPatchTool.input_schema(),
+    for (schema, hash_format) in [
+        (WriteFileTool.input_schema(), "content_hash"),
+        (EditFileTool.input_schema(), "content_hash"),
+        // Public `read` has no content_hash field; apply_patch documents how
+        // to compute the full-file SHA-256 instead of promising that field.
+        (
+            crate::tools::apply_patch::ApplyPatchTool.input_schema(),
+            "sha256:<hex>",
+        ),
     ] {
+        assert_eq!(schema["properties"]["expected_hash"]["type"], "string");
         let description = schema["properties"]["expected_hash"]["description"]
             .as_str()
             .expect("expected_hash must be advertised");
-        assert!(description.contains("content_hash"), "{description}");
+        assert!(description.contains(hash_format), "{description}");
     }
 }
 

@@ -184,23 +184,23 @@ impl ToolSpec for TasksTool {
                 "Cancel a queued or running durable task through TaskManager. Requires approval because it changes work state."
             }
             Some("gate_run") => {
-                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task."
+                "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task. Dangerous commands are BLOCKED unless auto-approve is enabled; default timeout 120s."
             }
             Some("pr_attempt_record") => {
-                "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes."
+                "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes. Requires approval because it records work state."
             }
             Some("pr_attempt_list") => "List PR attempts recorded on a durable task.",
             Some("pr_attempt_read") => {
                 "Read one recorded PR attempt and its patch artifact reference."
             }
             Some("pr_attempt_preflight") => {
-                "Run `git apply --check` for a recorded attempt patch. This is a no-mutation preflight; actual apply remains explicit and approval-gated elsewhere."
+                "Run `git apply --check` for a recorded attempt patch. This is a no-mutation preflight and itself requires approval; the actual apply stays a separate explicit step."
             }
             _ if self.read_only => {
                 "Inspect durable tasks and their PR attempts. Actions: \"list\", \"read\", \"pr_attempt_list\", \"pr_attempt_read\"."
             }
             _ => {
-                "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\", \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\". Use task_shell_start for long-running shell work."
+                "Manage durable background tasks through TaskManager. Durable tasks are restart-aware executable work, distinct from sub-agents. Actions: \"create\" (enqueue; approval), \"list\", \"read\", \"cancel\" (approval), \"gate_run\" (run an approved verification gate command and return structured evidence; approval), \"pr_attempt_record\" (approval), \"pr_attempt_list\", \"pr_attempt_read\", \"pr_attempt_preflight\" (approval). Use task_shell_start for long-running shell work."
             }
         }
     }
@@ -885,7 +885,7 @@ impl ToolSpec for TaskShellStartTool {
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 },
+                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Accepted for interface compatibility but not enforced: the command always starts in the background and is not bounded by this timeout. A running shell task cannot be cancelled from the model surface; it ends when the command finishes." },
                 "stdin": { "type": "string" },
                 "tty": { "type": "boolean" }
             },
@@ -949,7 +949,7 @@ impl ToolSpec for TaskShellWaitTool {
         json!({
             "type": "object",
             "properties": {
-                "task_id": { "type": "string", "description": "Background shell task id returned by task_shell_start or `Bash`." },
+                "task_id": { "type": "string", "description": "Background shell task id returned by task_shell_start." },
                 "wait": { "type": "boolean", "default": false },
                 "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 },
                 "gate": { "type": "string", "enum": ["fmt", "check", "clippy", "test", "custom"] },

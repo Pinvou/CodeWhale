@@ -355,6 +355,10 @@ impl ActionParams {
     /// continuing would mean guessing which argument was intended — so it
     /// hard-errors rather than dropping the argument and reporting success.
     pub(super) fn reject_unknown(&self, input: &Value) -> Result<(), ToolError> {
+        self.reject_unknown_named(input, &format!("File {}", self.action))
+    }
+
+    pub(super) fn reject_unknown_named(&self, input: &Value, tool: &str) -> Result<(), ToolError> {
         let action = self.action;
         let required = if self.required_is_choice {
             format!("one of {}", quoted_list(self.required, "or"))
@@ -364,7 +368,7 @@ impl ActionParams {
 
         let Some(obj) = input.as_object() else {
             return Err(ToolError::invalid_input(format!(
-                "File {action} input must be an object. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
+                "{tool} input must be an object. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
                 quoted_list(self.allowed, "and"),
             )));
         };
@@ -376,7 +380,7 @@ impl ActionParams {
             .collect();
         if !unexpected.is_empty() {
             return Err(ToolError::invalid_input(format!(
-                "unexpected File {action} parameter(s): {}. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
+                "unexpected {tool} parameter(s): {}. Allowed parameters are {}. Required: {required}. The {action} was not performed.",
                 unexpected.join(", "),
                 quoted_list(self.allowed, "and"),
             )));
@@ -1985,7 +1989,7 @@ impl ToolSpec for EditFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. Returns a compact unified diff, not the full file. Pass `expected_hash` (the `content_hash` from that `read`) to have the edit refused, with the file untouched, if it changed in between. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
+        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching plus punctuation/line-ending normalization fallbacks automatically. Returns a compact unified diff, not the full file. Pass `expected_hash` (the `content_hash` from that `read`) to have the edit refused, with the file untouched, if it changed in between. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
     }
 
     fn input_schema(&self) -> Value {

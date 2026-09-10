@@ -883,7 +883,7 @@ impl ToolSpec for McpSyncRegistry {
          variables or API keys. If a match plausibly covers the task's core \
          specialized capability, call start_registry_mcp_server with its \
          exact name and inspect its tools before choosing a local \
-         alternative; do not run its package command through exec_shell."
+         alternative; do not run its package command through `bash`."
     }
 
     fn input_schema(&self) -> Value {

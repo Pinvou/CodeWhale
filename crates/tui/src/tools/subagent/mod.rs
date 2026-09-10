@@ -2445,6 +2445,13 @@ pub struct SubAgentRuntime {
     /// Durable approval evidence inherited from the parent session. Legacy
     /// runtimes that do not install a store cannot open child approval prompts.
     approval_receipt_store: Option<Result<crate::approval_log::ApprovalReceiptStore, String>>,
+    /// The parent session's exec-policy engine. Because the engine shares its
+    /// live rulesets across clones, every child registry holding this handle
+    /// evaluates the same typed permission rules — including rules installed
+    /// mid-session — that the parent turn loop enforces on its own tool calls.
+    /// Defaults to an empty engine (no rules), which leaves child behavior
+    /// unchanged for embedders that never thread one.
+    pub exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
 }
 
 impl SubAgentRuntime {
@@ -2505,6 +2512,7 @@ impl SubAgentRuntime {
             ),
             parent_can_prompt: false,
             approval_receipt_store: None,
+            exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
         }
     }
 
@@ -2538,6 +2546,20 @@ impl SubAgentRuntime {
         self.approval_mode = approval_mode;
         self.auto_review_policy = auto_review_policy;
         self.parent_can_prompt = parent_can_prompt;
+        self
+    }
+
+    /// Carry the parent session's exec-policy engine into child registries so
+    /// typed deny rules bind sub-agent tool calls the same way they bind the
+    /// parent's. The engine shares its live rulesets across clones, so this
+    /// handle tracks later `set_ruleset` updates instead of freezing a
+    /// spawn-time snapshot.
+    #[must_use]
+    pub fn with_exec_policy_engine(
+        mut self,
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
+    ) -> Self {
+        self.exec_policy_engine = exec_policy_engine;
         self
     }
 
@@ -2820,6 +2842,7 @@ impl SubAgentRuntime {
             auto_review_policy: Arc::clone(&self.auto_review_policy),
             parent_can_prompt: self.parent_can_prompt,
             approval_receipt_store: self.approval_receipt_store.clone(),
+            exec_policy_engine: self.exec_policy_engine.clone(),
         }
     }
 
@@ -13919,6 +13942,11 @@ struct SubAgentToolRegistry {
     /// [`SubAgentToolRegistry::gate_held_call`]). Cloned from the spawning
     /// runtime so a child is gated exactly like the parent turn.
     gate_runtime: SubAgentRuntime,
+    /// The parent session's exec-policy engine (shared live rulesets; see
+    /// [`SubAgentRuntime::exec_policy_engine`]). Consulted by `execute` so a
+    /// command the parent turn loop would hard-deny cannot be delegated to
+    /// this child and run anyway. Empty by default → checks are no-ops.
+    exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
 }
 
 /// What the child permission gate decided for one held call.
@@ -14008,6 +14036,8 @@ impl SubAgentToolRegistry {
         registry.remove_tool("create_goal");
         registry.remove_tool("update_goal");
 
+        // Copied out before `runtime` moves into `gate_runtime` below.
+        let exec_policy_engine = runtime.exec_policy_engine.clone();
         Self {
             allowed_tools,
             disallowed_tools: effective_profile.denied_tools.clone(),
@@ -14022,6 +14052,7 @@ impl SubAgentToolRegistry {
             enforce_write_claim: true,
             registry,
             gate_runtime: runtime,
+            exec_policy_engine,
         }
     }
 
@@ -15087,6 +15118,66 @@ impl SubAgentToolRegistry {
             )
             .map_err(|refusal| anyhow!(refusal))?;
         }
+        // Fork delta (execpolicy wiring): delegated calls run through the same
+        // typed execpolicy gate the parent turn loop applies between hooks and
+        // approval (`exec_shell_ask_rule_decision` / `file_tool_ask_rule_decision`,
+        // reused verbatim). Positioned after the execution envelope so this
+        // child's own posture still speaks first. A hard Block always refuses.
+        // A Prompt decision follows the main line's #3790 rule — the approval
+        // posture is the authority: when the inherited session auto-approves
+        // (YOLO), the main line would auto-run, so the call passes; otherwise
+        // the main line would surface an approval prompt. This gate has no
+        // prompt path of its own — the child's held-call gate above is the
+        // only prompt surface, and it has already spoken by the time the
+        // envelope lets a call through — so refusing there is the fail-closed
+        // answer for every prompting posture and for the fail-closed `Never`
+        // session alike (the Never wording differs, since the engine still
+        // maps to `OnFailure` here, but the refusal outcome matches). All
+        // non-Never
+        // modes map to `OnFailure`, so `ApprovalMode::Auto` is
+        // decision-equivalent to the parent's mode whenever auto-approve is
+        // on. The engine handle shares the parent's live rulesets, so a rule
+        // installed mid-session binds delegated calls too, and an empty
+        // engine (no rules) leaves this check a no-op.
+        let ask_rule_decision = crate::core::engine::exec_shell_ask_rule_decision_for_policy(
+            &self.exec_policy_engine,
+            name,
+            &input,
+            &self.registry.context().workspace,
+            crate::tui::approval::ApprovalMode::Auto,
+        )
+        .or_else(|| {
+            crate::core::engine::file_tool_ask_rule_decision_for_policy(
+                &self.exec_policy_engine,
+                name,
+                &input,
+                &self.registry.context().workspace,
+                crate::tui::approval::ApprovalMode::Auto,
+            )
+        });
+        match ask_rule_decision {
+            Some(crate::core::engine::ToolAskRuleDecision::Block(reason)) => {
+                // Mirror the main line's blocked refusal so a child model sees
+                // the same familiar wording the parent would have received.
+                return Err(anyhow!(reason));
+            }
+            // The child cannot show the approval prompt the main line would
+            // show for this rule, so without parent auto-approve the only
+            // correct answer is to refuse and point the model at the main
+            // conversation. The wording is deliberately distinct from the
+            // held-call gate's "Tool {name} requires approval" refusal so a
+            // caller (and a test) can tell which gate spoke.
+            Some(crate::core::engine::ToolAskRuleDecision::Prompt(reason))
+                if !self.auto_approve =>
+            {
+                return Err(anyhow!(format!(
+                    "Delegated tool call `{name}` requires approval: {reason}. Sub-agents cannot show an approval prompt; run this tool call in the main conversation so it can be approved."
+                )));
+            }
+            // `Allow` is a user-authored allow rule, and a Prompt under parent
+            // auto-approve matches the main line's auto-run: both pass.
+            _ => {}
+        }
         let scope_aware_write = matches!(
             name,
             "write" | "edit" | "write_file" | "edit_file" | "apply_patch" | "fim_edit"
@@ -15744,8 +15835,7 @@ const EXPLORE_AGENT_INTRO: &str = concat!(
     "Use `read` for bounded file reads and `bash` only for the allowed read-only inspection subset: navigation/rg, safe Git reads (for example `git log -n 5`), and read-only GitHub views such as `gh issue view`. Builds, tests, writes, and shell control actions are unavailable.\n",
     "Use your private `todo_write` list as editable working notes when useful; it is agent-owned state, not permission to write project files. Those tool calls remain in the complete transcript artifact returned to the parent.\n",
     "Honor QUESTION, SCOPE, ALREADY_KNOWN, and STOP_CONDITION. Do not repeat ALREADY_KNOWN work unless evidence contradicts it; do not broaden once QUESTION is answered.\n",
-    "Your value is compressed evidence: cite `path:line-range` for each finding and stop once evidence is sufficient. Return partial findings if the next step would be speculative or duplicative.\n",
-    "CHANGES will almost always be \"None.\" for a scout.\n\n"
+    "Your value is compressed evidence: cite `path:line-range` for each finding and stop once evidence is sufficient. Return partial findings if the next step would be speculative or duplicative.\n\n"
 );
 
 const PLAN_AGENT_INTRO: &str = concat!(

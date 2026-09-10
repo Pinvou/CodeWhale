@@ -82,7 +82,7 @@ impl ToolSpec for GitTool {
                 },
                 "unified": {
                     "type": "integer",
-                    "description": "Number of context lines for diff or show output"
+                    "description": "Number of context lines for diff or show output (default 3, max 50)"
                 },
                 "max_count": {
                     "type": "integer",
