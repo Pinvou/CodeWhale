@@ -43,6 +43,8 @@ const CURRENT_TASK_SCHEMA_VERSION: u32 = 3;
 // Pinvou v0.9.0 persisted an additive v4 schema. Its additional fields are
 // serde-defaulted or safely ignored by this reader, so accept exactly that
 // historical version without widening compatibility to unknown future data.
+// Note the fields are only preserved on read: TaskRecord has no catch-all, so
+// a load→persist cycle writes v3 and drops them.
 const PINVOU_LEGACY_TASK_SCHEMA_VERSION: u32 = 4;
 
 const fn default_task_schema_version() -> u32 {
@@ -1598,14 +1600,9 @@ impl TaskManager {
 
         let task_path = self.tasks_dir.join(format!("{task_id}.json"));
         let artifacts_path = self.artifacts_dir.join(task_id);
-        if artifacts_path.exists() {
-            fs::remove_dir_all(&artifacts_path).with_context(|| {
-                format!(
-                    "Failed to delete task artifacts {}",
-                    artifacts_path.display()
-                )
-            })?;
-        }
+        // Delete the record before the artifacts: failing after the record is
+        // gone only leaves orphan files, while failing after the artifacts are
+        // gone would leave a live task whose artifacts were destroyed.
         match fs::remove_file(&task_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -1614,10 +1611,21 @@ impl TaskManager {
                     .with_context(|| format!("Failed to delete task {}", task_path.display()));
             }
         }
-
+        // The durable record is gone, so the in-memory state must follow before
+        // artifact cleanup: a cleanup failure may leave orphan files, but never
+        // a live task that the disk no longer knows about.
         state.tasks.remove(task_id);
         state.queue.retain(|queued_id| queued_id != task_id);
         self.persist_queue_locked(&state.queue)?;
+        if artifacts_path.exists() {
+            fs::remove_dir_all(&artifacts_path).with_context(|| {
+                format!(
+                    "Failed to delete task artifacts {}",
+                    artifacts_path.display()
+                )
+            })?;
+        }
+
         Ok(true)
     }
 
@@ -3065,6 +3073,73 @@ mod tests {
         assert!(!artifact_dir.exists());
         assert!(!manager.delete_terminal_task(&task.id).await?);
         manager.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forkguard_terminal_task_delete_artifact_failure_leaves_no_memory_ghost() -> Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let manager = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        let mut task = sample_task_record();
+        task.id = "task_feedfacefeedface".to_string();
+        task.status = TaskStatus::Completed;
+        task.ended_at = Some(Utc::now());
+        {
+            let mut state = manager.state.lock().await;
+            state.tasks.insert(task.id.clone(), task.clone());
+        }
+        manager.persist_task_locked(&task)?;
+        // A regular file where the artifact directory belongs fails
+        // remove_dir_all on every platform without relying on permission bits
+        // (which a root CI runner would bypass anyway).
+        fs::create_dir_all(&manager.artifacts_dir)?;
+        let orphan_path = manager.artifacts_dir.join(&task.id);
+        fs::write(&orphan_path, "not a directory")?;
+
+        let error = manager
+            .delete_terminal_task(&task.id)
+            .await
+            .expect_err("artifact cleanup failure must still be reported");
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to delete task artifacts"),
+            "{error:#}"
+        );
+
+        // The durable record is gone, so the failure may only leave orphan
+        // files: the in-process ghost must be gone too, and the retry must be
+        // an idempotent no-op instead of a second error.
+        assert!(!manager.tasks_dir.join(format!("{}.json", task.id)).exists());
+        assert!(manager.get_task(&task.id).await.is_err());
+        assert!(!manager.delete_terminal_task(&task.id).await?);
+        assert!(orphan_path.is_file());
+
+        // Stop the old workers before reopening the store. Dropping our Arc
+        // alone leaves the workers' strong references alive.
+        let stopped = Arc::downgrade(&manager);
+        manager.shutdown();
+        drop(manager);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while stopped.strong_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old task manager workers must exit before reopening the store");
+        let restarted = TaskManager::start_with_executor(
+            test_config(root.path().to_path_buf()),
+            Arc::new(MockExecutor),
+        )
+        .await?;
+        assert!(restarted.get_task(&task.id).await.is_err());
+        assert!(orphan_path.is_file());
+        restarted.shutdown();
         Ok(())
     }
 
