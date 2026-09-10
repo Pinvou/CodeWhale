@@ -16,6 +16,7 @@ env:
 
 jobs:
   gate:
+    name: Contribution intake
     runs-on: ubuntu-latest
     steps:
       - name: Gate unapproved external pull requests
