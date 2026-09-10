@@ -1,0 +1,49 @@
+title = "Codewhale fixture exceptions"
+
+[extend]
+useDefault = true
+
+# Exact synthetic values, restricted to their test source files. Never exclude
+# a whole test tree: these tests deliberately exercise credential redaction.
+[[allowlists]]
+description = "Synthetic redaction marker"
+condition = "AND"
+paths = ['''^crates/(telemetry/src/tests|tui/src/lib)\.rs$''']
+regexes = ['''^sk-live-abcdef0123456789abcdef$''']
+
+[[allowlists]]
+description = "Public URL with explicit HTTPS port, not a credential"
+condition = "AND"
+paths = ['''^crates/config/src/provider\.rs$''']
+regexTarget = "line"
+regexes = ['''^\s*"https://api\.minimax\.io:443/anthropic",\s*$''']
+
+[[allowlists]]
+description = "Intentionally invalid JWT used by the structcopy redaction test"
+condition = "AND"
+paths = ['''^crates/tui/src/commands/groups/session/structcopy\.rs$''']
+regexes = ['''^eyJhbGciOiJIUzI1NiIsFAKE\.eyJGQUtFIjoiZml4dHVyZSJ9\.FAKEFIXTURESIGNATUREnotasecret000$''']
+
+[[allowlists]]
+description = "Synthetic URL query credential for safe-label redaction"
+condition = "AND"
+paths = ['''^crates/tui/src/safe_label\.rs$''']
+regexes = ['''^sk-1234567890abcdef$''']
+
+[[allowlists]]
+description = "Synthetic environment credential for auth diagnostics"
+condition = "AND"
+paths = ['''^crates/cli/src/lib\.rs$''']
+regexes = ['''^diagnostic-env-secret-9012$''']
+
+[[allowlists]]
+description = "Synthetic curl authorization fixture for notification redaction"
+condition = "AND"
+paths = ['''^crates/tui/src/tui/notification_payload\.rs$''']
+regexes = ['''^abcdef123456$''']
+
+[[allowlists]]
+description = "Synthetic workflow receipt credential for redaction"
+condition = "AND"
+paths = ['''^crates/tui/src/tui/widgets/workflow_panel\.rs$''']
+regexes = ['''^sk-receipt-secret-1234567890$''']
