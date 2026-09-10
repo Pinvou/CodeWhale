@@ -3,6 +3,7 @@ package identityadapter
 import (
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
@@ -18,7 +19,11 @@ type Service struct {
 }
 
 func NewService(vault *PasswordVault, serviceToken string, tokenProxy ...http.Handler) (*Service, error) {
-	if vault == nil || strings.TrimSpace(serviceToken) == "" {
+	workloadIdentityConfigured := strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_ISSUER")) != "" &&
+		strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_JWKS_URL")) != "" &&
+		strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_AUDIENCE")) != "" &&
+		strings.TrimSpace(os.Getenv("WORKLOAD_IDENTITY_RULES_JSON")) != ""
+	if vault == nil || (strings.TrimSpace(serviceToken) == "" && !workloadIdentityConfigured) {
 		return nil, errors.New("identity adapter is not fully configured")
 	}
 	service := &Service{vault: vault, serviceToken: strings.TrimSpace(serviceToken)}
