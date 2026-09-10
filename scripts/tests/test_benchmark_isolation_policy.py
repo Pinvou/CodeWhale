@@ -15,11 +15,11 @@ class BenchmarkIsolationPolicyTests(unittest.TestCase):
 
         self.assertIn('default = ["local-embed"]', features)
         self.assertIn(
-            'benchmark-hooks = ["dep:agent-backend-api", "deepseek-tui/benchmark-observability", "deepseek-tui/benchmark-eval-controls"]',
+            'benchmark-hooks = ["dep:agent-backend-api", "deepseek-tui/benchmark-eval-controls"]',
             features,
         )
         codewhale_manifest = self.read("CodeWhale/crates/tui/Cargo.toml")
-        self.assertIn("benchmark-observability = []", codewhale_manifest)
+        self.assertNotIn("benchmark-observability", codewhale_manifest)
         self.assertIn("benchmark-eval-controls = []", codewhale_manifest)
         self.assertIn("agent-backend-api = {", manifest)
         self.assertIn("optional = true", manifest)
@@ -85,6 +85,24 @@ class BenchmarkIsolationPolicyTests(unittest.TestCase):
             '#[cfg(not(any(feature = "benchmark-hooks", test)))]\n'
             "    let is_observation_event = false;",
             timing,
+        )
+
+    def test_benchmark_feature_surface_stays_feature_gated_in_product_runtime(self):
+        product_runtime = self.read(
+            "pinvou3-app/src-tauri/src/features/assistant/product_runtime/mod.rs"
+        )
+        self.assertIn(
+            '#[cfg(all(test, feature = "benchmark-hooks"))]\n'
+            "mod headless_bridge_contract_tests;",
+            product_runtime,
+        )
+        contract_tests = self.read(
+            "pinvou3-app/src-tauri/src/features/assistant/product_runtime/"
+            "headless_bridge_contract_tests.rs"
+        )
+        self.assertIn(
+            "async fn backend_runs_one_private_task_and_closes_its_session()",
+            contract_tests,
         )
 
 

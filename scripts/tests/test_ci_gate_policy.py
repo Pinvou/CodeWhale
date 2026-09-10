@@ -127,7 +127,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
-        self.assertIn('PINVOU_CODEWHALE_TAG="pinvou-v0.9.5-r13"', verifier)
+        self.assertIn('PINVOU_CODEWHALE_BRANCH="pinvou3-clean"', verifier)
+        self.assertIn('PINVOU_CODEWHALE_TAG="pinvou-v0.9.12-r1"', verifier)
+        self.assertIn('[[ "$branch_target" != "$gitlink" ]]', verifier)
+        self.assertIn('[[ "$branch_target" != "$tag_target" ]]', verifier)
         self.assertIn("unknown argument", verifier)
 
     def test_pr_modes_and_stacked_pr_triggers_are_explicit(self):
@@ -360,7 +363,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "pinvou3-app/src-tauri/src/features/voice/voice_asr.rs",
             "pinvou3-app/src-tauri/src/features/updater/mod.rs",
             "pinvou3-app/src-tauri/src/features/future_feature/mod.rs",
-            "pinvou3-app/src-tauri/tests/headless_bridge_contract.rs",
+            "pinvou3-app/src-tauri/src/features/assistant/product_runtime/headless_bridge_contract_tests.rs",
         )
         for path in high_risk_examples:
             self.assertTrue(

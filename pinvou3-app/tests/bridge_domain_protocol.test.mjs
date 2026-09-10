@@ -105,7 +105,10 @@ const expectedProtocolHashes = {
   // that opens the preview even when the existing card is updated in place.
   // #148 preserves Official invocation shapes; the callback body now redacts errors.
   // Recomputed for the preinstalled-model startup removal on top of #148.
-  chat: '1a5d20b1ff210c2fcb9e0d5079da2c6d658f9eb0cafc3c29c6400104f8b1c99a',
+  // Recomputed for the CodeWhale v0.9.12 backflow: canonical `bash` name in the
+  // shell background-task projection, compaction cancel phase, and the new
+  // chat:tool_gate_decision audit listener in chat-events.js.
+  chat: 'abc5f8de44e45b9f60bf24ad4679142133aaa3ed24a372842ebaf6b802722df4',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
