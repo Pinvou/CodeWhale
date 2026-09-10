@@ -77,6 +77,8 @@ jobs:
             551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb \
             "$RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+      - name: Verify fixture exceptions remain narrow
+        run: python3 scripts/check-gitleaks-config.py "$RUNNER_TEMP/gitleaks"
       - name: Scan checked-out tree
         run: '"$RUNNER_TEMP/gitleaks" dir . --redact --no-banner'
       - name: Scan introduced commits
