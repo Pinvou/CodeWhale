@@ -42,6 +42,17 @@ test('every authenticated internal HTTP route declares one exact workload permis
   }
 });
 
+test('Token Gateway wallet resolution is granted the exact Billing ensure permission', async () => {
+  const [resolver, compose, helm] = await Promise.all([
+    readFile(path.join(root, 'internal/token/service.go'), 'utf8'),
+    readFile(path.join(root, 'deploy/compose/compose.model-token.yaml'), 'utf8'),
+    readFile(path.join(root, 'deploy/helm/account-platform/templates/app-deployments.yaml'), 'utf8'),
+  ]);
+  assert.match(resolver, /HTTPWalletResolver[\s\S]*http\.MethodPost[\s\S]*\/internal\/v1\/wallets\/ensure[\s\S]*serviceauth\.SetAuthorization/);
+  assert.match(compose, /"permissions":\["internal\.billing\.wallet\.ensure"[^\]]*\],"service":"token-gateway"/);
+  assert.match(helm, /"service" "token-gateway" "permissions" \(list "internal\.billing\.wallet\.ensure"/);
+});
+
 test('each relay has an independent identity and cannot publish another source subject', async () => {
   const relay = await readFile(path.join(root, 'internal/platform/events/relay.go'), 'utf8');
   const main = await readFile(path.join(root, 'cmd/event-relay/main.go'), 'utf8');
