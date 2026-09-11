@@ -2,7 +2,7 @@
 //! `ProjectContext` value that carries loaded instructions, rules, and the
 //! rendered repo-constitution block into the system prompt.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -87,18 +87,7 @@ impl ProjectContext {
     /// cross-agent `<project_instructions>` prose. Either may be absent.
     pub fn as_system_block(&self) -> Option<String> {
         let instructions_block = self.instructions.as_ref().map(|content| {
-            // Prompt the source by file name only: the absolute path sits in
-            // the cache-stable prefix (block 2 of the system prompt), so an
-            // unchanged file whose directory moved or was cased differently
-            // would bust the provider's KV prefix cache for the entire
-            // request. Directory identity is still discoverable via the shell
-            // runtime; the `source` attribute is an origin label, not a locator.
-            let source = self
-                .source_path
-                .as_ref()
-                .and_then(|path| path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "project".to_string());
+            let source = project_instructions_source_label(self.source_path.as_deref());
 
             let mut block = format!(
                 "<project_instructions source=\"{source}\">\n{content}\n</project_instructions>"
@@ -132,6 +121,20 @@ impl ProjectContext {
             }
         }
     }
+}
+
+/// The `source` label for `<project_instructions>` blocks: the context
+/// file's name only, never its absolute path. The label sits in the
+/// cache-stable prefix of the system prompt (block 2), so an unchanged file
+/// whose directory moved or was recased must not rewrite it — that would
+/// bust the provider KV prefix cache for the entire request, history
+/// included. Directory identity stays discoverable via the shell; the label
+/// names the origin, it is not a locator.
+pub(crate) fn project_instructions_source_label(source_path: Option<&Path>) -> String {
+    source_path
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string())
 }
 
 /// Merge multiple project contexts (e.g., from nested directories)
