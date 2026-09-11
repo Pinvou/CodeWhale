@@ -27,12 +27,23 @@ test("single-row tables enable sorting only after a second row is added", async 
   const dom = renderTable(["调用次数"], [["2 次"]]);
   const button = dom.window.document.querySelector(".stats-sort-trigger");
   assert.equal(button.disabled, true);
+  assert.equal(button.title, "");
   assert.equal(dom.window.document.querySelector("th").hasAttribute("aria-sort"), false);
 
   dom.window.document.querySelector("tbody").insertAdjacentHTML("beforeend", "<tr><td>5 次</td></tr>");
   await flush(dom);
   assert.equal(button.disabled, false);
   assert.equal(dom.window.document.querySelector("th").getAttribute("aria-sort"), "none");
+});
+
+test("single-row composite tables keep their sub-property controls disabled", () => {
+  const dom = renderTable(["总耗时 P50/P90"], [["10 / 100 ms"]]);
+  const header = dom.window.document.querySelector("th");
+  const buttons = dom.window.document.querySelectorAll(".stats-sort-trigger");
+  assert.equal(header.classList.contains("stats-sortable-column"), false);
+  assert.deepEqual(Array.from(buttons, (button) => button.disabled), [true, true]);
+  assert.deepEqual(Array.from(buttons, (button) => button.title), ["", ""]);
+  assert.match(statsHtml, /th:not\(\.stats-sortable-column\) \.stats-sort-options \{ display:none; \}/);
 });
 
 test("numeric values sort in both directions and keep empty values last", () => {

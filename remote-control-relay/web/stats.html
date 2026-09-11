@@ -40,6 +40,7 @@
     }
     .stats-sort-trigger:disabled { cursor:default; }
     .stats-sort-trigger:disabled::after { content:""; }
+    th:not(.stats-sortable-column) .stats-sort-options { display:none; }
     .stats-sort-trigger:focus-visible {
       outline: 2px solid #3267e3;
       outline-offset: 2px;
@@ -244,6 +245,7 @@
               && state.valueIndex === Number(button.dataset.valueIndex)
               && (state.valueKey || "") === (button.dataset.valueKey || "");
             button.disabled = !enabled;
+            button.title = enabled ? `按${button.textContent}排序；再次点击切换方向` : "";
             button.setAttribute("aria-pressed", String(selected));
           });
           if (enabled) {
