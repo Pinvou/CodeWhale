@@ -42,6 +42,27 @@ use crate::features::{
 use crate::platform::{notifications, startup, telemetry};
 
 const RELEASE_ENV_DEFAULTS: &[(&str, &str)] = &[
+    // The account platform is the sole account path. These public endpoints
+    // keep clean release installs aligned with the production realm while
+    // still allowing explicit environment overrides for private deployments.
+    (
+        "PINVOU_ACCOUNT_OIDC_ISSUER",
+        "https://account.pinvou.com/realms/pinvou",
+    ),
+    ("PINVOU_ACCOUNT_OIDC_CLIENT_ID", "pinvou-desktop"),
+    (
+        "PINVOU_ACCOUNT_SERVICE_URL",
+        "https://account.pinvou.com/account",
+    ),
+    (
+        "PINVOU_IDENTITY_SERVICE_URL",
+        "https://account.pinvou.com/identity",
+    ),
+    (
+        "PINVOU_TOKEN_GATEWAY_URL",
+        "https://account.pinvou.com/token",
+    ),
+    ("PINVOU_ACCOUNT_PORTAL_URL", "https://account.pinvou.com"),
     // —— vLLM 后端：BASE_URL/MODEL/API_KEY 已在 bridge/mod.rs 有默认常量，
     // 这里只补 run-dev.sh 额外注入但 Rust 没默认的 ——
     // ⚠️ 不再注入 DEEPSEEK_PROVIDER：它会被 bridge.provider() 当成 env 覆盖
@@ -2032,6 +2053,80 @@ mod release_env_defaults_guard {
         assert!(
             std::env::var_os("PINVOU3_MAX_OUTPUT_TOKENS").is_none(),
             "ensure_release_env must not re-inject PINVOU3_MAX_OUTPUT_TOKENS (the Pinvou cap travels only via prefs/route)"
+        );
+    }
+
+    #[test]
+    fn release_env_defaults_use_the_production_account_client() {
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _snapshot = EnvSnapshot::take();
+
+        for key in [
+            "PINVOU_ACCOUNT_OIDC_ISSUER",
+            "PINVOU_ACCOUNT_OIDC_TOKEN_URL",
+            "PINVOU_ACCOUNT_OIDC_CLIENT_ID",
+            "PINVOU_ACCOUNT_SERVICE_URL",
+            "PINVOU_IDENTITY_SERVICE_URL",
+            "PINVOU_TOKEN_GATEWAY_URL",
+            "PINVOU_ACCOUNT_PORTAL_URL",
+        ] {
+            // SAFETY: holding platform::paths::tests::ENV_LOCK.
+            unsafe { std::env::remove_var(key) };
+        }
+        super::ensure_release_env();
+
+        assert_eq!(
+            std::env::var("PINVOU_ACCOUNT_OIDC_CLIENT_ID").unwrap(),
+            "pinvou-desktop"
+        );
+        assert_eq!(
+            std::env::var("PINVOU_ACCOUNT_OIDC_ISSUER").unwrap(),
+            "https://account.pinvou.com/realms/pinvou"
+        );
+        assert_eq!(
+            std::env::var("PINVOU_ACCOUNT_SERVICE_URL").unwrap(),
+            "https://account.pinvou.com/account"
+        );
+        assert_eq!(
+            std::env::var("PINVOU_IDENTITY_SERVICE_URL").unwrap(),
+            "https://account.pinvou.com/identity"
+        );
+        assert_eq!(
+            std::env::var("PINVOU_TOKEN_GATEWAY_URL").unwrap(),
+            "https://account.pinvou.com/token"
+        );
+        assert_eq!(
+            std::env::var("PINVOU_ACCOUNT_PORTAL_URL").unwrap(),
+            "https://account.pinvou.com"
+        );
+    }
+
+    #[test]
+    fn release_env_keeps_explicit_private_account_configuration() {
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _snapshot = EnvSnapshot::take();
+        // SAFETY: holding platform::paths::tests::ENV_LOCK.
+        unsafe {
+            std::env::set_var("PINVOU_ACCOUNT_OIDC_CLIENT_ID", "private-desktop");
+            std::env::set_var(
+                "PINVOU_ACCOUNT_OIDC_ISSUER",
+                "https://identity.private.example/realms/pinvou",
+            );
+        }
+
+        super::ensure_release_env();
+
+        assert_eq!(
+            std::env::var("PINVOU_ACCOUNT_OIDC_CLIENT_ID").unwrap(),
+            "private-desktop"
+        );
+        assert_eq!(
+            std::env::var("PINVOU_ACCOUNT_OIDC_ISSUER").unwrap(),
+            "https://identity.private.example/realms/pinvou"
         );
     }
 

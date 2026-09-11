@@ -42,7 +42,7 @@ struct AccountPlatformConfig {
     client_id: String,
     account_url: Url,
     identity_url: Option<Url>,
-    token_gateway_url: Url,
+    token_gateway_url: Option<Url>,
 }
 
 impl AccountPlatformConfig {
@@ -71,10 +71,9 @@ impl AccountPlatformConfig {
             identity_url: optional_env(IDENTITY_URL_ENV)
                 .map(|value| parse_service_base(IDENTITY_URL_ENV, &value))
                 .transpose()?,
-            token_gateway_url: parse_service_base(
-                TOKEN_GATEWAY_URL_ENV,
-                &required_env(TOKEN_GATEWAY_URL_ENV)?,
-            )?,
+            token_gateway_url: optional_env(TOKEN_GATEWAY_URL_ENV)
+                .map(|value| parse_service_base(TOKEN_GATEWAY_URL_ENV, &value))
+                .transpose()?,
         })
     }
 }
@@ -670,6 +669,9 @@ impl AccountPlatformState {
         &self,
     ) -> Result<ChatRuntimeAuthorization, String> {
         let config = AccountPlatformConfig::from_env()?;
+        let token_gateway_url = config.token_gateway_url.as_ref().ok_or_else(|| {
+            format!("account_platform_configuration_missing: {TOKEN_GATEWAY_URL_ENV} is required")
+        })?;
         let mut access_token = self.access_token(&config, None).await?;
         let mut account_user_id = self
             .cached_account_identity(&access_token)
@@ -702,7 +704,7 @@ impl AccountPlatformState {
             .map(|session| session.generation)
             .ok_or_else(|| "authentication_required: sign in to Pinvou first".to_string())?;
         Ok(ChatRuntimeAuthorization {
-            base_url: token_gateway_openai_base(&config.token_gateway_url),
+            base_url: token_gateway_openai_base(token_gateway_url),
             access_token,
             revision: format!("oidc-user-{account_user_id}-session-{generation}"),
         })
@@ -982,6 +984,11 @@ impl AccountPlatformState {
         let url = config.account_url.join(path).map_err(|_| {
             "account_platform_configuration_invalid: cannot resolve account endpoint".to_string()
         })?;
+        let operation = account_public_operation(path);
+        let request_id = random_urlsafe(18);
+        log::info!(
+            "[account_platform_auth] request_started operation={operation} request_id={request_id}"
+        );
         let response = self
             .client
             .post(url)
@@ -990,13 +997,25 @@ impl AccountPlatformState {
                 crate::platform::client_version::HEADER,
                 crate::platform::client_version::CURRENT,
             )
-            .header("X-Request-ID", random_urlsafe(18))
+            .header("X-Request-ID", &request_id)
             .header("X-Device-ID", &self.device_id)
             .json(&body)
             .send()
             .await
-            .map_err(|error| format!("account_platform_service_unavailable: {error}"))?;
-        let response = response_to_api(response).await?;
+            .map_err(|error| {
+                let category = transport_error_category(&error);
+                log::warn!(
+                    "[account_platform_auth] request_failed operation={operation} request_id={request_id} phase=transport category={category}"
+                );
+                account_platform_transport_error(&error)
+            })?;
+        let status = response.status().as_u16();
+        let response = response_to_api(response).await.map_err(|error| {
+            log::warn!(
+                "[account_platform_auth] request_failed operation={operation} request_id={request_id} phase=response_decode status={status}"
+            );
+            error
+        })?;
         if !(200..300).contains(&response.status) {
             let code = response
                 .body
@@ -1009,8 +1028,16 @@ impl AccountPlatformState {
                 .and_then(Value::as_u64)
                 .map(|seconds| format!(":{seconds}"))
                 .unwrap_or_default();
+            log::warn!(
+                "[account_platform_auth] request_rejected operation={operation} request_id={request_id} status={} code={code}",
+                response.status
+            );
             return Err(format!("mobile_auth_failed: {code}{retry_after}"));
         }
+        log::info!(
+            "[account_platform_auth] request_succeeded operation={operation} request_id={request_id} status={}",
+            response.status
+        );
         Ok(response.body)
     }
 
@@ -1163,8 +1190,19 @@ fn bootstrap_transport_retryable(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_timeout()
 }
 
-fn account_platform_transport_error(error: &reqwest::Error) -> String {
-    let category = if error.is_timeout() {
+fn account_public_operation(path: &str) -> &'static str {
+    match path {
+        "v1/auth/captcha/challenges" => "captcha_challenge",
+        "v1/auth/sms/challenges" => "sms_challenge",
+        "v1/auth/registration/precheck" => "registration_precheck",
+        "v1/auth/register" => "mobile_registration",
+        "v1/auth/password-resets" => "password_reset",
+        _ => "public_account_request",
+    }
+}
+
+fn transport_error_category(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
         "timeout"
     } else if error.is_connect() {
         "connect"
@@ -1174,7 +1212,11 @@ fn account_platform_transport_error(error: &reqwest::Error) -> String {
         "redirect"
     } else {
         "request"
-    };
+    }
+}
+
+fn account_platform_transport_error(error: &reqwest::Error) -> String {
+    let category = transport_error_category(error);
     let cause = std::error::Error::source(error)
         .map(ToString::to_string)
         .unwrap_or_else(|| "no additional transport detail".to_string());
@@ -1247,7 +1289,9 @@ fn prepare_request(
     }
     let base = match input.area.as_str() {
         "account" => &config.account_url,
-        "token" => &config.token_gateway_url,
+        "token" => config.token_gateway_url.as_ref().ok_or_else(|| {
+            format!("account_platform_configuration_missing: {TOKEN_GATEWAY_URL_ENV} is required")
+        })?,
         _ => return Err("account_platform_request_denied: unknown service area".to_string()),
     };
     let mut url = base
@@ -1459,13 +1503,48 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
 mod tests {
     use super::*;
 
+    struct AccountEnvSnapshot(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl AccountEnvSnapshot {
+        fn take() -> Self {
+            Self(
+                [
+                    ISSUER_ENV,
+                    TOKEN_URL_ENV,
+                    CLIENT_ID_ENV,
+                    ACCOUNT_URL_ENV,
+                    IDENTITY_URL_ENV,
+                    TOKEN_GATEWAY_URL_ENV,
+                ]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+            )
+        }
+    }
+
+    impl Drop for AccountEnvSnapshot {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                // SAFETY: every test using this guard holds the process-wide
+                // environment lock until after the snapshot is dropped.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
     fn config() -> AccountPlatformConfig {
         AccountPlatformConfig {
             token_url: Url::parse("https://id.example.test/token").unwrap(),
             identity_url: Some(Url::parse("https://id.example.test/").unwrap()),
             client_id: "desktop-client".to_string(),
             account_url: Url::parse("https://account.example.test/").unwrap(),
-            token_gateway_url: Url::parse("https://token.example.test/").unwrap(),
+            token_gateway_url: Some(Url::parse("https://token.example.test/").unwrap()),
         }
     }
 
@@ -1511,6 +1590,62 @@ mod tests {
                 Some("Account is not fully set up"),
             )
             .starts_with("oidc_account_setup_incomplete:")
+        );
+    }
+
+    #[test]
+    fn public_account_diagnostics_use_fixed_non_sensitive_operation_names() {
+        assert_eq!(
+            account_public_operation("v1/auth/sms/challenges"),
+            "sms_challenge"
+        );
+        assert_eq!(
+            account_public_operation("v1/auth/captcha/challenges"),
+            "captcha_challenge"
+        );
+        assert_eq!(
+            account_public_operation("unexpected"),
+            "public_account_request"
+        );
+    }
+
+    #[test]
+    fn authentication_configuration_does_not_require_token_gateway() {
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _snapshot = AccountEnvSnapshot::take();
+        // SAFETY: the process-wide environment lock is held for this test.
+        unsafe {
+            std::env::set_var(ISSUER_ENV, "https://identity.example.test/realms/pinvou");
+            std::env::remove_var(TOKEN_URL_ENV);
+            std::env::set_var(CLIENT_ID_ENV, "desktop-client");
+            std::env::set_var(ACCOUNT_URL_ENV, "https://account.example.test/account/");
+            std::env::remove_var(IDENTITY_URL_ENV);
+            std::env::remove_var(TOKEN_GATEWAY_URL_ENV);
+        }
+
+        let config = AccountPlatformConfig::from_env().unwrap();
+        assert_eq!(
+            config.token_url.as_str(),
+            "https://identity.example.test/realms/pinvou/protocol/openid-connect/token"
+        );
+        assert!(config.token_gateway_url.is_none());
+
+        let error = prepare_request(
+            &config,
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/me/balance?consistency=strong".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                idempotency_key: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "account_platform_configuration_missing: PINVOU_TOKEN_GATEWAY_URL is required"
         );
     }
 
