@@ -295,9 +295,9 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录，并通过 `BILLING_TEST_ADM
 - `token_gateway_url`；
 - `account_portal_url`。
 
-官方正式资源的 OIDC、Account、Identity、Token Gateway 与 Portal 均使用 `https://account.pinvou.com` 的对应路径，OIDC 客户端为 `pinvou-desktop`。release 运行时只读取安装资源，不接受操作系统环境变量覆盖；客户端升级时由安装包或 OTA 一并更新该文件。私有发行版和 UAT 必须在构建时打包各自的同路径配置，不得在已发布客户端上依赖全局环境变量切换环境。登录只依赖身份与 Account 服务；Token Gateway 缺失时仅模型调用等 Token 专属操作失败，不得阻断登录。
+官方正式资源的 OIDC、Account、Identity、Token Gateway 与 Portal 均使用 `https://account.pinvou.com` 的对应路径，OIDC 客户端为 `pinvou-desktop`。release 和 debug 运行时都优先读取安装资源，不接受操作系统环境变量覆盖；客户端升级时由安装包或 OTA 一并更新该文件。私有发行版和 UAT 必须在构建时打包各自的同路径配置，不得在已发布客户端上依赖全局环境变量切换环境。登录只依赖身份与 Account 服务；Token Gateway 缺失时仅模型调用等 Token 专属操作失败，不得阻断登录。
 
-开发态 `npm run dev` 不需要每次生成安装包；debug 构建在存在账号平台环境变量时仍优先读取它们，项目标准入口由 `.env.development.local` 注入。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
+开发态 `npm run dev` 不需要每次生成安装包；Tauri 会把同一配置资源复制到 debug 资源目录。只有该资源不存在或无法读取时，debug 构建才回退到 `.env.development.local` 或进程环境中的账号平台变量。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
 
 Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Code + PKCE 重新认证；Identity Client 必须接受 `prompt=login` 与 `max_age=0`，回调地址固定为 `https://account.pinvou.com/auth/callback`。桌面端只保留未登录忘记密码，不承载资料修改。
 

@@ -78,11 +78,12 @@ struct InstalledAccountPlatformConfig {
 
 impl AccountPlatformConfig {
     fn current() -> Result<Self, String> {
+        let installed = Self::from_installed_resource();
         #[cfg(debug_assertions)]
-        if account_environment_present() {
+        if installed.is_err() && account_environment_present() {
             return Self::from_env();
         }
-        Self::from_installed_resource()
+        installed
     }
 
     fn from_installed_resource() -> Result<Self, String> {

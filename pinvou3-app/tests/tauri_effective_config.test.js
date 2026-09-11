@@ -715,6 +715,29 @@ for (const [label, config, manifest] of [
   );
 }
 
+const accountPlatformAdapter = fs.readFileSync(
+  path.join(
+    __dirname,
+    "..",
+    "src-tauri",
+    "src",
+    "features",
+    "account_platform",
+    "mod.rs",
+  ),
+  "utf8",
+);
+assert.match(
+  accountPlatformAdapter,
+  /let installed = Self::from_installed_resource\(\);[\s\S]*?if installed\.is_err\(\) && account_environment_present\(\)/,
+  "debug runs must prefer the packaged account platform resource before environment fallback",
+);
+assert.doesNotMatch(
+  accountPlatformAdapter,
+  /if account_environment_present\(\)\s*\{\s*return Self::from_env\(\);/,
+  "stale development environment variables must not override the packaged account platform resource",
+);
+
 const runtimeBundleExtraction = fs.readFileSync(
   path.join(
     __dirname,

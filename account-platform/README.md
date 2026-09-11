@@ -27,7 +27,7 @@
 
 ## 桌面端 OIDC
 
-官方桌面安装包把公开连接配置随应用安装到 `config/account-platform.json`。正式构建只读取该安装资源，不读取或继承操作系统中的 `PINVOU_ACCOUNT_*` / `PINVOU_IDENTITY_SERVICE_URL` / `PINVOU_TOKEN_GATEWAY_URL`，因此安装包或 OTA 更新可以原子更新账号平台域名和公开 OIDC client ID，旧系统环境变量不会覆盖新版配置。私有发行版应在构建安装包时替换同一资源文件；环境变量仅保留给 debug 开发构建，本地入口仍可通过 `.env.development.local` 配置。
+官方桌面安装包把公开连接配置随应用安装到 `config/account-platform.json`。正式构建和开发构建都优先读取该安装资源，不读取或继承操作系统中的 `PINVOU_ACCOUNT_*` / `PINVOU_IDENTITY_SERVICE_URL` / `PINVOU_TOKEN_GATEWAY_URL`，因此安装包、OTA 更新和 `npm run dev` 都使用同一份可更新配置，旧系统环境变量不会覆盖新版配置。私有发行版应在构建安装包时替换同一资源文件；环境变量只作为 debug 构建在安装资源不存在时的应急回退。
 
 安装配置包含 OIDC issuer/Token URL、公开桌面 client ID、Account、Identity、Token Gateway 和个人中心地址。桌面内登录所用公开客户端必须启用 Direct Access Grants；Web Portal 仍使用 Authorization Code + PKCE。
 
