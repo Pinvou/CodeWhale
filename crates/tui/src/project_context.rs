@@ -28,6 +28,7 @@ use self::pack::generate_bounded_project_overview;
 pub use self::pack::generate_project_context_pack;
 pub use self::types::ProjectContext;
 use self::types::ProjectContextError;
+pub(crate) use self::types::project_instructions_source_label;
 
 /// Names of project context files to look for, in priority order.
 ///
@@ -1445,9 +1446,8 @@ mod tests {
         assert!(block.contains("</project_instructions>"));
     }
 
-
     #[test]
-    fn test_as_system_block_source_is_file_name_not_absolute_path() {
+    fn forkguard_project_instructions_source_is_file_name_not_absolute_path() {
         // 提示词前缀含 source 标签且位于 KV 缓存稳定区(块 2):同一份
         // AGENTS.md 被搬到不同目录后重载,块文本必须逐字节一致,否则整段
         // 请求(含历史)的提供商前缀缓存全损。
@@ -1456,8 +1456,12 @@ mod tests {
         fs::write(dir_a.path().join("AGENTS.md"), "Pinned content").expect("write a");
         fs::write(dir_b.path().join("AGENTS.md"), "Pinned content").expect("write b");
 
-        let block_a = load_project_context(dir_a.path()).as_system_block().expect("block a");
-        let block_b = load_project_context(dir_b.path()).as_system_block().expect("block b");
+        let block_a = load_project_context(dir_a.path())
+            .as_system_block()
+            .expect("block a");
+        let block_b = load_project_context(dir_b.path())
+            .as_system_block()
+            .expect("block b");
         assert_eq!(block_a, block_b, "目录移动不应改变项目指令块");
         assert!(block_a.contains("source=\"AGENTS.md\""));
         assert!(
