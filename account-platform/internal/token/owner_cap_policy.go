@@ -70,7 +70,7 @@ WHERE pointer.singleton_key`, ownerType, ownerID).Scan(&result.Policy.PolicyVers
 // row locks.
 func lockTokenAccountOwnerCapPolicy(ctx context.Context, tx pgx.Tx) error {
 	var activeVersion *int64
-	if err := tx.QueryRow(ctx, `SELECT active_policy_version FROM token_account_owner_cap_policy_active WHERE singleton_key FOR SHARE`).Scan(&activeVersion); errors.Is(err, pgx.ErrNoRows) || isUndefinedOwnerCapPolicy(err) {
+	if err := tx.QueryRow(ctx, `SELECT public.lock_token_account_owner_cap_policy()`).Scan(&activeVersion); errors.Is(err, pgx.ErrNoRows) || isUndefinedOwnerCapPolicy(err) {
 		return ErrTokenAccountPolicyUnavailable
 	} else if err != nil {
 		return err

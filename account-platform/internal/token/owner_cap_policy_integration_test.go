@@ -243,26 +243,39 @@ GRANT token_gateway,token_cap_policy_deployer,token_schema_owner TO token_migrat
 		t.Fatalf("active policy=%+v err=%v", capacity, err)
 	}
 
-	var publicExecute, runtimeExecute, runtimeSelect, runtimeWrite, publicCreate, deployerCreate, runtimeCreate bool
+	var publicExecute, runtimeExecute, publicLockExecute, runtimeLockExecute, runtimeSelect, runtimeWrite, publicCreate, deployerCreate, runtimeCreate bool
 	if err = pool.QueryRow(ctx, `SELECT
  has_function_privilege('public','apply_token_account_owner_cap_policy(integer,bigint,text,text,uuid)','EXECUTE'),
  has_function_privilege('token_gateway','apply_token_account_owner_cap_policy(integer,bigint,text,text,uuid)','EXECUTE'),
+	 has_function_privilege('public','lock_token_account_owner_cap_policy()','EXECUTE'),
+	 has_function_privilege('token_gateway','lock_token_account_owner_cap_policy()','EXECUTE'),
 		has_table_privilege('token_gateway','token_account_owner_cap_policy_revisions','SELECT') AND has_table_privilege('token_gateway','token_account_owner_cap_policy_active','SELECT'),
 		 has_table_privilege('token_gateway','token_account_owner_cap_policy_revisions','INSERT,UPDATE,DELETE') OR has_table_privilege('token_gateway','token_account_owner_cap_policy_active','INSERT,UPDATE,DELETE'),
  has_schema_privilege('public','public','CREATE'),
-		 has_schema_privilege('token_cap_policy_deployer','public','CREATE'),has_schema_privilege('token_gateway','public','CREATE')`).Scan(&publicExecute, &runtimeExecute, &runtimeSelect, &runtimeWrite, &publicCreate, &deployerCreate, &runtimeCreate); err != nil || publicExecute || runtimeExecute || !runtimeSelect || runtimeWrite || publicCreate || deployerCreate || runtimeCreate {
-		t.Fatalf("policy ACL public/runtime execute=%t/%t runtime select/write=%t/%t public/deployer create=%t/%t err=%v", publicExecute, runtimeExecute, runtimeSelect, runtimeWrite, publicCreate, deployerCreate, err)
+		 has_schema_privilege('token_cap_policy_deployer','public','CREATE'),has_schema_privilege('token_gateway','public','CREATE')`).Scan(&publicExecute, &runtimeExecute, &publicLockExecute, &runtimeLockExecute, &runtimeSelect, &runtimeWrite, &publicCreate, &deployerCreate, &runtimeCreate); err != nil || publicExecute || runtimeExecute || publicLockExecute || !runtimeLockExecute || !runtimeSelect || runtimeWrite || publicCreate || deployerCreate || runtimeCreate {
+		t.Fatalf("policy ACL apply public/runtime=%t/%t lock public/runtime=%t/%t runtime select/write=%t/%t public/deployer create=%t/%t err=%v", publicExecute, runtimeExecute, publicLockExecute, runtimeLockExecute, runtimeSelect, runtimeWrite, publicCreate, deployerCreate, err)
 	}
-	var policyTableOwner, policySequenceOwner, applyFunctionOwner string
+	var lockedVersion int64
+	if err = pool.QueryRow(ctx, `SELECT lock_token_account_owner_cap_policy()`).Scan(&lockedVersion); err != nil || lockedVersion != 2 {
+		t.Fatalf("runtime fixed policy lock version=%d err=%v", lockedVersion, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT active_policy_version FROM token_account_owner_cap_policy_active WHERE singleton_key FOR SHARE`).Scan(&lockedVersion); err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("runtime direct policy row lock must remain denied: %v", err)
+	}
+	var policyTableOwner, policySequenceOwner, applyFunctionOwner, lockFunctionOwner string
 	if err = pool.QueryRow(ctx, `SELECT
  pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid='token_account_owner_cap_policy_revisions'::regclass)),
 	 pg_get_userbyid((SELECT relowner FROM pg_class WHERE oid='token_account_owner_cap_policy_revisions_policy_version_seq'::regclass)),
-	 pg_get_userbyid((SELECT proowner FROM pg_proc WHERE oid='apply_token_account_owner_cap_policy(integer,bigint,text,text,uuid)'::regprocedure))`).Scan(&policyTableOwner, &policySequenceOwner, &applyFunctionOwner); err != nil || policyTableOwner != "token_cap_policy_deployer" || policySequenceOwner != "token_cap_policy_deployer" || applyFunctionOwner != "token_cap_policy_deployer" {
-		t.Fatalf("policy owners table/sequence/function=%s/%s/%s err=%v", policyTableOwner, policySequenceOwner, applyFunctionOwner, err)
+	 pg_get_userbyid((SELECT proowner FROM pg_proc WHERE oid='apply_token_account_owner_cap_policy(integer,bigint,text,text,uuid)'::regprocedure)),
+	 pg_get_userbyid((SELECT proowner FROM pg_proc WHERE oid='lock_token_account_owner_cap_policy()'::regprocedure))`).Scan(&policyTableOwner, &policySequenceOwner, &applyFunctionOwner, &lockFunctionOwner); err != nil || policyTableOwner != "token_cap_policy_deployer" || policySequenceOwner != "token_cap_policy_deployer" || applyFunctionOwner != "token_cap_policy_deployer" || lockFunctionOwner != "token_cap_policy_deployer" {
+		t.Fatalf("policy owners table/sequence/apply/lock=%s/%s/%s/%s err=%v", policyTableOwner, policySequenceOwner, applyFunctionOwner, lockFunctionOwner, err)
 	}
 	var functionConfig []string
 	if err = pool.QueryRow(ctx, `SELECT proconfig FROM pg_proc WHERE oid='apply_token_account_owner_cap_policy(integer,bigint,text,text,uuid)'::regprocedure`).Scan(&functionConfig); err != nil || !containsString(functionConfig, "search_path=pg_catalog") {
 		t.Fatalf("policy function search_path=%v err=%v", functionConfig, err)
+	}
+	if err = pool.QueryRow(ctx, `SELECT proconfig FROM pg_proc WHERE oid='lock_token_account_owner_cap_policy()'::regprocedure`).Scan(&functionConfig); err != nil || !containsString(functionConfig, "search_path=pg_catalog") {
+		t.Fatalf("policy lock function search_path=%v err=%v", functionConfig, err)
 	}
 	if _, err = pool.Exec(ctx, `CREATE TABLE public.runtime_shadow_policy(value integer)`); err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("runtime schema CREATE must be denied: %v", err)

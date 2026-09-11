@@ -81,6 +81,9 @@ type Service struct {
 // constructors intentionally never call it while governance is PRE_ACTIVATION.
 func (s *Service) WithTokenAccountCreateCapability(ready bool) *Service {
 	s.tokenAccountCreateReady.Store(ready)
+	if provisioner, ok := s.defaultRoutes.(*PostgresDefaultRouteProvisioner); ok {
+		provisioner.WithTokenAccountCreateCapability(ready)
+	}
 	return s
 }
 
@@ -120,6 +123,9 @@ func (s *Service) abortActiveUpstream(usageID uuid.UUID) bool {
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
 	s.defaultRoutes = provisioner
+	if managed, ok := provisioner.(*PostgresDefaultRouteProvisioner); ok {
+		managed.WithTokenAccountCreateCapability(s.tokenAccountCreateReady.Load())
+	}
 	return s
 }
 

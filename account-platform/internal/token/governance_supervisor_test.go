@@ -49,7 +49,8 @@ func (r *supervisorActivation) set(state string, epoch int64, err error) {
 func TestGovernanceSupervisorEpochReadyAndCancellation(t *testing.T) {
 	reader := &supervisorActivation{}
 	reader.set("PRE_ACTIVATION", 0, nil)
-	service := &Service{}
+	defaultRoutes := &PostgresDefaultRouteProvisioner{}
+	service := &Service{defaultRoutes: defaultRoutes}
 	type loop struct {
 		epoch   int64
 		ready   func()
@@ -76,7 +77,7 @@ func TestGovernanceSupervisorEpochReadyAndCancellation(t *testing.T) {
 		t.Fatal("PRE started workers")
 	case <-time.After(15 * time.Millisecond):
 	}
-	if service.tokenAccountCreateReady.Load() {
+	if service.tokenAccountCreateReady.Load() || defaultRoutes.accountCreateReady.Load() {
 		t.Fatal("PRE create ready")
 	}
 	next := func() loop {
@@ -92,9 +93,9 @@ func TestGovernanceSupervisorEpochReadyAndCancellation(t *testing.T) {
 	waitReady := func(want bool) {
 		t.Helper()
 		deadline := time.Now().Add(time.Second)
-		for service.tokenAccountCreateReady.Load() != want {
+		for service.tokenAccountCreateReady.Load() != want || defaultRoutes.accountCreateReady.Load() != want {
 			if time.Now().After(deadline) {
-				t.Fatalf("create ready did not become %v", want)
+				t.Fatalf("API and default-route create readiness did not both become %v", want)
 			}
 			time.Sleep(time.Millisecond)
 		}

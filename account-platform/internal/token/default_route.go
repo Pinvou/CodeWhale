@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -28,11 +29,11 @@ type PostgresDefaultRouteProvisioner struct {
 	repository         *PostgresRepository
 	config             DefaultRouteConfig
 	workerID           string
-	accountCreateReady bool
+	accountCreateReady atomic.Bool
 }
 
 func (p *PostgresDefaultRouteProvisioner) WithTokenAccountCreateCapability(ready bool) *PostgresDefaultRouteProvisioner {
-	p.accountCreateReady = ready
+	p.accountCreateReady.Store(ready)
 	return p
 }
 
@@ -85,7 +86,7 @@ func (p *PostgresDefaultRouteProvisioner) provisionResources(ctx context.Context
 	now := p.repository.now()
 	var accountID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM token_accounts WHERE owner_type=$1 AND owner_id=$2 AND name=$3 AND management_mode='PLATFORM' FOR UPDATE`, ownerType, ownerID, platformDefaultAccountName).Scan(&accountID); errors.Is(err, pgx.ErrNoRows) {
-		if !p.accountCreateReady {
+		if !p.accountCreateReady.Load() {
 			return ErrTokenAccountCreateNotActive
 		}
 		if err := lockTokenAccountOwnerCapPolicy(ctx, tx); err != nil {

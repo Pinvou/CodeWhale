@@ -46,10 +46,17 @@ func TestTokenGovernanceTransitionPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded[len(loaded)-1].Version != 31 {
-		t.Fatal("activation migration must be the candidate Token head")
+	activationIndex := -1
+	for index := range loaded {
+		if loaded[index].Version == 31 {
+			activationIndex = index
+			break
+		}
 	}
-	if err = migrations.Up(ctx, connection, loaded[:len(loaded)-1]); err != nil {
+	if activationIndex < 0 || loaded[len(loaded)-1].Version != 32 {
+		t.Fatal("activation migration 31 and Token head 32 must both be present")
+	}
+	if err = migrations.Up(ctx, connection, loaded[:activationIndex]); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -114,7 +121,7 @@ func TestTokenGovernanceTransitionPostgresIntegration(t *testing.T) {
 	if _, err = migrator.Exec(ctx, `SET ROLE token_gateway`); err != nil {
 		t.Fatal(err)
 	}
-	if err = migrations.Up(ctx, migrator, loaded); err != nil {
+	if err = migrations.Up(ctx, migrator, loaded[:activationIndex+1]); err != nil {
 		t.Fatalf("non-super migration31: %v", err)
 	}
 	migrations.Unlock(ctx, migrator)
