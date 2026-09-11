@@ -265,6 +265,7 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录，并通过 `BILLING_TEST_ADM
 - `TOKEN_SECRET_ROTATION_INTERVAL_SECONDS`（旧密文批量重加密周期，60 至 86400 秒）
 - `TOKEN_SECRET_ROTATION_BATCH_SIZE`（每批 1 至 1000 条）
 - `TOKEN_PROVIDER_ALLOWED_HOSTS`
+- `TOKEN_PROVIDER_CA_FILE`（可选，仅加载到模型供应商 HTTP 客户端；内部 HTTPS Provider 使用私有 CA 时必须配置为容器内只读 CA 文件，禁止用全进程 `SSL_CERT_FILE` 扩大无关客户端的信任边界）
 - `TOKEN_DEFAULT_PROVIDER`
 - `TOKEN_GATEWAY_ADAPTER`（`NEW_API` 或 `OPENAI_COMPATIBLE`；决定请求构造、上游引用提取与用量证据 Adapter，不改变通用数据库/API 字段）
 - `TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS` / `TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS`（Adapter 目录发现只返回模型标识时采用的保守能力上限；后续只能通过新能力版本调整）
@@ -292,6 +293,8 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录，并通过 `BILLING_TEST_ADM
 - `PINVOU_IDENTITY_SERVICE_URL`
 - `PINVOU_TOKEN_GATEWAY_URL`
 - `PINVOU_ACCOUNT_PORTAL_URL`
+
+官方桌面发布包为未显式配置上述变量的全新安装提供正式账号平台默认值：OIDC、Account、Identity、Token Gateway 与 Portal 均使用 `https://account.pinvou.com` 的对应路径，OIDC 客户端为 `pinvou-desktop`。私有部署、UAT 和本地开发显式提供的环境值始终优先，发布包不得猜测、重写或跨环境回退。登录只依赖身份与 Account 服务；Token Gateway 缺失时仅模型调用等 Token 专属操作失败，不得阻断登录。
 
 开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
 
@@ -553,7 +556,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 
 普通 `/health/ready` 只证明单个进程及其关键依赖达到服务级就绪，不能替代 TOK-37 的客户端切换 readiness。后者还必须验证客户端/服务端兼容版本、OIDC、跨服务契约、模型目录、READY 路由及计价配置，并保证不创建用户 Hold 或费用。
 
-生产环境必须通过 `global.trustedTimeSources` 配置至少三个独立 NTP 源，并在 `external.timeSourceCidrs` 只放行这些源的 UDP/123；示例地址必须替换为部署方实际治理的独立授时源。服务取三源中位偏差，100ms 内为正常目标，超过250ms记录告警，超过1秒使 `/health/ready` 失败并以 `CLOCK_UNSAFE` 拒绝新的 POST/PUT/PATCH/DELETE 时间敏感操作。验收需分别注入100ms、250ms和1秒以上偏差，保存三个源的UTC偏差、告警和拒绝证据；未完成真实授时与偏差注入前不得宣称 NFR-46 已部署。
+生产环境必须通过 `global.trustedTimeSources` 配置至少三个独立 NTP 源，并在 `external.timeSourceCidrs` 只放行这些源的 UDP/123；正式环境建议配置五个独立来源，以允许两个来源短暂超时而仍取得三份可信样本。示例地址必须替换为部署方实际治理的独立授时源。服务取全部成功样本的中位偏差，100ms 内为正常目标，超过250ms记录告警，超过1秒使 `/health/ready` 失败并以 `CLOCK_UNSAFE` 拒绝新的 POST/PUT/PATCH/DELETE 时间敏感操作。验收需分别注入100ms、250ms和1秒以上偏差，保存至少三个成功来源的UTC偏差、告警和拒绝证据；未完成真实授时与偏差注入前不得宣称 NFR-46 已部署。
 
 支付和模型 Provider 熔断按 `provider_id + capability/action + route` 隔离：60秒至少20个非业务样本且失败率达到50%，或连续5次连接/超时/不确定失败时打开；30秒后最多三个安全半开探测，连续三次成功关闭，失败按30秒至15分钟指数重开。余额不足、输入错误、明确拒绝和Provider业务限流不计基础设施失败。支付创建、退款和模型派发属于高风险操作，结果不确定后不能充当半开探测或由熔断器自动重发，只能走只读查询/核对或人工复核。生产验收必须覆盖每个已启用Provider能力和路由，并接通告警。
 
