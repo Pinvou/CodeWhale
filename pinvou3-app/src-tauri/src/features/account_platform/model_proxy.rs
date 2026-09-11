@@ -47,6 +47,7 @@ struct ProxyRegistry {
 #[derive(Clone)]
 struct ProxyTarget {
     upstream: Url,
+    gateway_model_id: String,
     turn_generation: u64,
     maximum_output_tokens: u32,
 }
@@ -56,12 +57,17 @@ impl ModelGatewayProxy {
         &self,
         session_id: &str,
         upstream_base_url: &str,
+        gateway_model_id: &str,
         maximum_output_tokens: u32,
     ) -> Result<String> {
         let upstream = Url::parse(upstream_base_url)
             .context("account platform model gateway URL is invalid")?;
         if !upstream_is_allowed(&upstream) {
             anyhow::bail!("account platform model gateway must use HTTPS or loopback HTTP");
+        }
+        let gateway_model_id = gateway_model_id.trim();
+        if gateway_model_id.is_empty() {
+            anyhow::bail!("account platform gateway model ID is missing");
         }
         let server = self.server.get_or_try_init(start_proxy_server).await?;
         let route = {
@@ -76,10 +82,12 @@ impl ModelGatewayProxy {
                 .entry(route.clone())
                 .and_modify(|target| {
                     target.upstream = upstream.clone();
+                    target.gateway_model_id = gateway_model_id.to_string();
                     target.maximum_output_tokens = maximum_output_tokens;
                 })
                 .or_insert(ProxyTarget {
                     upstream,
+                    gateway_model_id: gateway_model_id.to_string(),
                     turn_generation: 0,
                     maximum_output_tokens,
                 });
@@ -145,7 +153,8 @@ async fn forward_chat(
     let Some(target) = state.registry.read().await.targets.get(&route).cloned() else {
         return proxy_error(StatusCode::NOT_FOUND, "unknown model proxy route");
     };
-    let body = match enforce_chat_output_limit(body, target.maximum_output_tokens) {
+    let body = match prepare_chat_body(body, target.maximum_output_tokens, &target.gateway_model_id)
+    {
         Ok(body) => body,
         Err(_) => return proxy_error(StatusCode::BAD_REQUEST, "invalid chat request body"),
     };
@@ -314,12 +323,19 @@ fn logical_turn_id(route: &str, turn_generation: u64) -> String {
     )
 }
 
-fn enforce_chat_output_limit(body: Bytes, maximum_output_tokens: u32) -> serde_json::Result<Bytes> {
+fn prepare_chat_body(
+    body: Bytes,
+    maximum_output_tokens: u32,
+    gateway_model_id: &str,
+) -> serde_json::Result<Bytes> {
     let mut payload: serde_json::Value = serde_json::from_slice(&body)?;
     let Some(object) = payload.as_object_mut() else {
         return Ok(body);
     };
-    let mut changed = false;
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(gateway_model_id.to_string()),
+    );
     for field in ["max_tokens", "max_completion_tokens"] {
         let Some(value) = object.get_mut(field) else {
             continue;
@@ -329,14 +345,9 @@ fn enforce_chat_output_limit(body: Bytes, maximum_output_tokens: u32) -> serde_j
             .is_some_and(|tokens| tokens > u64::from(maximum_output_tokens))
         {
             *value = serde_json::Value::from(maximum_output_tokens);
-            changed = true;
         }
     }
-    if changed {
-        serde_json::to_vec(&payload).map(Bytes::from)
-    } else {
-        Ok(body)
-    }
+    serde_json::to_vec(&payload).map(Bytes::from)
 }
 
 fn random_route_token() -> String {
@@ -366,9 +377,7 @@ mod tests {
     use axum::routing::post;
     use tokio::sync::Mutex;
 
-    use super::{
-        ModelGatewayProxy, enforce_chat_output_limit, logical_turn_id, request_idempotency_key,
-    };
+    use super::{ModelGatewayProxy, logical_turn_id, prepare_chat_body, request_idempotency_key};
 
     #[test]
     fn idempotency_key_is_stable_bounded_and_scoped_to_session_route() {
@@ -401,29 +410,41 @@ mod tests {
 
     #[test]
     fn output_limit_is_clamped_without_expanding_smaller_requests() {
-        let clamped = enforce_chat_output_limit(
-            Bytes::from_static(br#"{"max_tokens":8192,"messages":[]}"#),
+        let clamped = prepare_chat_body(
+            Bytes::from_static(
+                br#"{"model":"deepseek-v4-flash","max_tokens":8192,"messages":[{"role":"assistant","content":"","reasoning_content":"kept reasoning","tool_calls":[]}]}"#,
+            ),
             4096,
+            "catalog-model-id",
         )
         .expect("clamped request");
         let clamped: serde_json::Value = serde_json::from_slice(&clamped).unwrap();
         assert_eq!(clamped["max_tokens"], 4096);
+        assert_eq!(clamped["model"], "catalog-model-id");
+        assert_eq!(
+            clamped["messages"][0]["reasoning_content"],
+            "kept reasoning"
+        );
 
         let smaller = Bytes::from_static(br#"{"max_completion_tokens":1024,"messages":[]}"#);
-        assert_eq!(
-            enforce_chat_output_limit(smaller.clone(), 4096).expect("smaller request"),
-            smaller
-        );
+        let smaller = prepare_chat_body(smaller, 4096, "stable-model-id").expect("smaller request");
+        let smaller: serde_json::Value = serde_json::from_slice(&smaller).unwrap();
+        assert_eq!(smaller["max_completion_tokens"], 1024);
+        assert_eq!(smaller["model"], "stable-model-id");
     }
 
     #[tokio::test]
     async fn proxy_injects_stable_key_and_preserves_sse_response() {
-        let captures = Arc::new(Mutex::new(Vec::<(String, String, String, u64)>::new()));
+        let captures = Arc::new(Mutex::new(
+            Vec::<(String, String, String, u64, String)>::new(),
+        ));
         let upstream = Router::new()
             .route(
                 "/v1/chat/completions",
                 post(
-                    |State(captures): State<Arc<Mutex<Vec<(String, String, String, u64)>>>>,
+                    |State(captures): State<
+                        Arc<Mutex<Vec<(String, String, String, u64, String)>>>,
+                    >,
                      headers: HeaderMap,
                      body: Bytes| async move {
                         let key = headers
@@ -441,17 +462,23 @@ mod tests {
                             .and_then(|value| value.to_str().ok())
                             .unwrap_or_default()
                             .to_string();
-                        let maximum_output = serde_json::from_slice::<serde_json::Value>(&body)
-                            .ok()
-                            .and_then(|body| {
-                                body.get("max_tokens").and_then(|value| value.as_u64())
-                            })
+                        let payload = serde_json::from_slice::<serde_json::Value>(&body)
+                            .expect("forwarded JSON body");
+                        let maximum_output = payload
+                            .get("max_tokens")
+                            .and_then(|value| value.as_u64())
                             .unwrap_or_default();
+                        let model = payload
+                            .get("model")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or_default()
+                            .to_string();
                         captures.lock().await.push((
                             key,
                             authorization,
                             logical_turn,
                             maximum_output,
+                            model,
                         ));
                         (
                             [(header::CONTENT_TYPE, "text/event-stream")],
@@ -473,7 +500,12 @@ mod tests {
 
         let proxy = ModelGatewayProxy::default();
         let base_url = proxy
-            .register_session("session-a", &format!("http://{upstream_address}/v1"), 4096)
+            .register_session(
+                "session-a",
+                &format!("http://{upstream_address}/v1"),
+                "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
+                4096,
+            )
             .await
             .expect("register proxy route");
         proxy.advance_session_turn("session-a").await;
@@ -489,7 +521,12 @@ mod tests {
         {
             if index == 2 {
                 let next_turn_base = proxy
-                    .register_session("session-a", &format!("http://{upstream_address}/v1"), 4096)
+                    .register_session(
+                        "session-a",
+                        &format!("http://{upstream_address}/v1"),
+                        "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
+                        4096,
+                    )
                     .await
                     .expect("advance proxy turn");
                 assert_eq!(next_turn_base, base_url);
@@ -522,11 +559,16 @@ mod tests {
         assert_ne!(captures[0].2, captures[2].2);
         assert_eq!(captures[2].2, captures[3].2);
         assert!((16..=128).contains(&captures[0].0.len()));
-        assert!(captures.iter().all(
-            |(_, authorization, logical_turn, maximum_output)| authorization
-                == "Bearer oidc-access-token"
-                && logical_turn.starts_with("pinvou-turn-")
-                && *maximum_output == 4096
-        ));
+        assert!(
+            captures
+                .iter()
+                .all(
+                    |(_, authorization, logical_turn, maximum_output, model)| authorization
+                        == "Bearer oidc-access-token"
+                        && logical_turn.starts_with("pinvou-turn-")
+                        && *maximum_output == 4096
+                        && model == "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c"
+                )
+        );
     }
 }

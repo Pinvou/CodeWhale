@@ -27,11 +27,23 @@ struct RuntimeCatalogItem {
 
 #[derive(Debug, PartialEq, Eq)]
 struct RuntimeModelLimits {
-    model_id: String,
+    gateway_model_id: String,
+    engine_model: String,
     catalog_version: u64,
     capability_version_id: String,
     context_tokens: u32,
     output_tokens: u32,
+}
+
+fn engine_model_name(item: &RuntimeCatalogItem) -> String {
+    match item.display_name.trim().to_ascii_lowercase().as_str() {
+        // CodeWhale must see the protocol-bearing model identity so its existing
+        // DeepSeek thinking-mode replay path keeps reasoning_content across tool
+        // calls. The local Account Platform proxy rewrites this back to the
+        // stable catalog UUID before the request leaves the desktop.
+        "deepseek-flash" => "deepseek-v4-flash".to_string(),
+        _ => item.model_id.clone(),
+    }
 }
 
 fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<RuntimeModelLimits> {
@@ -57,7 +69,8 @@ fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<Runti
         anyhow::bail!("account platform model capability version is missing");
     }
     Ok(RuntimeModelLimits {
-        model_id: item.model_id,
+        gateway_model_id: item.model_id.clone(),
+        engine_model: engine_model_name(&item),
         catalog_version: catalog.catalog_version,
         capability_version_id: item.model_capability_version_id,
         context_tokens,
@@ -162,7 +175,7 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         }
         let limits = runtime_model_limits(catalog_response.body, session_model_ref)?;
         let mut model = request.model;
-        model.model = limits.model_id.clone();
+        model.model = limits.engine_model.clone();
         model.context_window_tokens = Some(limits.context_tokens);
         model.max_output_tokens = Some(limits.output_tokens);
         model.base_url = self
@@ -170,6 +183,7 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             .register_session(
                 &request.session_id,
                 &authorization.base_url,
+                &limits.gateway_model_id,
                 limits.output_tokens,
             )
             .await
@@ -257,7 +271,8 @@ mod tests {
         .expect("published model limits");
 
         assert_eq!(limits.catalog_version, 7);
-        assert_eq!(limits.model_id, "model-a");
+        assert_eq!(limits.gateway_model_id, "model-a");
+        assert_eq!(limits.engine_model, "model-a");
         assert_eq!(limits.capability_version_id, "capability-a-v2");
         assert_eq!(limits.context_tokens, 128_000);
         assert_eq!(limits.output_tokens, 4_096);
@@ -280,8 +295,32 @@ mod tests {
         )
         .expect("current model display name");
 
-        assert_eq!(limits.model_id, "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c");
+        assert_eq!(
+            limits.gateway_model_id,
+            "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c"
+        );
+        assert_eq!(limits.engine_model, "deepseek-v4-flash");
         assert_eq!(limits.capability_version_id, "capability-deepseek-flash");
+    }
+
+    #[test]
+    fn unknown_account_platform_model_keeps_opaque_engine_identity() {
+        let limits = runtime_model_limits(
+            json!({
+                "catalog_version": 9,
+                "items": [{
+                    "model_id": "00000000-0000-7000-8000-000000000099",
+                    "display_name": "future-model",
+                    "model_capability_version_id": "capability-future",
+                    "context_length": 128000,
+                    "maximum_output_tokens": 8192
+                }]
+            }),
+            "future-model",
+        )
+        .expect("future model limits");
+
+        assert_eq!(limits.engine_model, limits.gateway_model_id);
     }
 
     #[test]
