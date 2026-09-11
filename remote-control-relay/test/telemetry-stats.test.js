@@ -1305,12 +1305,17 @@ test("tool rankings expose normalized new names without reconstructing historica
   const events = [
     { event_id: "named_tool", event_name: "tool_call_completed", operation_id: "named_op", identity_id: "dev_a", tool_key: "mcp_custom", tool_name: "mcp__private_crm__lookup", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:00:00") },
     { event_id: "legacy_tool", event_name: "tool_call_completed", operation_id: "legacy_op", identity_id: "dev_b", tool_key: "mcp_custom", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:01:00") },
+    { event_id: "known_search", event_name: "tool_call_completed", operation_id: "known_search_op", identity_id: "dev_a", tool_key: "search", tool_name: "search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:02:00") },
+    { event_id: "custom_search", event_name: "tool_call_completed", operation_id: "custom_search_op", identity_id: "dev_b", tool_key: "mcp_custom", tool_name: "search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:03:00") },
   ];
   const result = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "call", now, { minimumGroupSubjects: 0 });
   assert(result.rows.some(row => row.tool_name === "mcp__private_crm__lookup" && row.tool_key === "mcp_custom"));
   assert(result.rows.some(row => row.tool_name === "mcp_custom" && row.tool_key === "mcp_custom"));
   assert(result.funnel_rows.some(row => row.tool_name === "mcp__private_crm__lookup"));
   assert(result.funnel_rows.some(row => row.tool_name === "mcp_custom"));
+  assert.equal(result.rows.filter(row => row.tool_name === "search").length, 2);
+  assert(result.rows.some(row => row.tool_name === "search" && row.tool_key === "search"));
+  assert(result.rows.some(row => row.tool_name === "search" && row.tool_key === "mcp_custom"));
 });
 
 test("behavior rankings include small groups and clip per-subject daily contributions", () => {

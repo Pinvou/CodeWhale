@@ -778,6 +778,8 @@ impl BehaviorEvent {
         name: impl Into<String>,
         tool_type: impl Into<String>,
     ) -> Self {
+        let key = key.into();
+        let name = events::normalized_tool_name(&name.into(), &key);
         self.string("tool_key", key)
             .string("tool_name", name)
             .string("tool_type", tool_type)

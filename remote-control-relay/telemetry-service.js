@@ -1201,7 +1201,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
     const toolName = normalizedToolName(event.tool_name) || toolKey;
     const toolType = behaviorToolType(event.tool_type);
-    const groupKey = `${toolType}\u001f${toolName}`;
+    const groupKey = `${toolKey}\u001f${toolType}\u001f${toolName}`;
     const row = groups.get(groupKey) || {
       tool_key: toolKey,
       tool_name: toolName,
@@ -1232,7 +1232,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
     const toolName = normalizedToolName(event.tool_name) || toolKey;
     const toolType = behaviorToolType(event.tool_type);
-    const groupKey = `${toolType}\u001f${toolName}`;
+    const groupKey = `${toolKey}\u001f${toolType}\u001f${toolName}`;
     const row = funnelGroups.get(groupKey) || {
       tool_key: toolKey,
       tool_name: toolName,

@@ -2471,3 +2471,16 @@ fn stale_producer_cannot_write_after_delete_and_reauthorization_aba() {
         },
     ));
 }
+#[test]
+fn tool_names_are_normalized_at_the_event_boundary() {
+    for (raw_name, expected_name) in [
+        ("MCP__Private_CRM__Lookup", "mcp__private_crm__lookup"),
+        ("https://private.example/tool", "mcp_custom"),
+        (r"C:\private\tool", "mcp_custom"),
+        ("tool --secret=value", "mcp_custom"),
+    ] {
+        let event = BehaviorEvent::new("tool_call_started")
+            .tool("mcp_custom", raw_name, "mcp");
+        assert_eq!(event.fields.get("tool_name"), Some(&json!(expected_name)));
+    }
+}
