@@ -16851,6 +16851,100 @@ fn working_set_reaches_model_as_turn_metadata() {
     assert!(text.contains("src/lib.rs"));
 }
 
+fn turn_meta_text(engine: &mut Engine, input: &str) -> String {
+    let user_msg = engine.user_text_message_with_turn_metadata(input.to_string());
+    user_msg
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Text { text, .. } if text.starts_with("<turn_meta>") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("turn metadata block")
+}
+
+#[test]
+fn forkguard_workspace_roots_turn_meta_lists_attached_roots() {
+    let tmp = tempdir().expect("tempdir");
+    let shared_a = tempdir().expect("shared a");
+    let shared_b = tempdir().expect("shared b");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        workspace_roots: vec![shared_a.path().to_path_buf(), shared_b.path().to_path_buf()],
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let first = turn_meta_text(&mut engine, "one");
+    let expected_line = format!(
+        "Accessible folders: {}, {}",
+        shared_a.path().display(),
+        shared_b.path().display()
+    );
+    assert!(first.contains(&expected_line), "{first}");
+    // The line sits immediately after the workspace line (the model reads the
+    // primary root there and the attached roots here).
+    let workspace_pos = first.find("Current workspace:").expect("workspace line");
+    let folders_pos = first.find("Accessible folders:").expect("folders line");
+    assert!(folders_pos > workspace_pos);
+    assert!(
+        !first[workspace_pos..folders_pos].contains("Current permission posture:"),
+        "the folders line must precede the posture lines: {first}"
+    );
+    // A stable root set renders the line byte-identically every turn.
+    let second = turn_meta_text(&mut engine, "two");
+    assert_eq!(
+        first
+            .lines()
+            .find(|line| line.starts_with("Accessible folders:")),
+        second
+            .lines()
+            .find(|line| line.starts_with("Accessible folders:")),
+    );
+}
+
+#[test]
+fn turn_meta_omits_accessible_folders_for_single_root() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let text = turn_meta_text(&mut engine, "hello");
+    assert!(
+        !text.contains("Accessible folders:"),
+        "single-root sessions keep the historical block byte shape: {text}"
+    );
+}
+
+#[test]
+fn turn_meta_accessible_folders_truncates_long_root_sets() {
+    let tmp = tempdir().expect("tempdir");
+    let roots: Vec<PathBuf> = (0..7)
+        .map(|index| tmp.path().join(format!("root-{index}")))
+        .collect();
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        workspace_roots: roots.clone(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let text = turn_meta_text(&mut engine, "hello");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("Accessible folders:"))
+        .expect("folders line");
+    // At most five attached roots listed, the rest folded into a count.
+    assert!(line.contains("root-0") && line.contains("root-4"), "{line}");
+    assert!(!line.contains("root-5"), "{line}");
+    assert!(line.ends_with("… (+2 more)"), "{line}");
+}
+
 #[test]
 fn turn_metadata_includes_git_workspace_snapshot_in_repo() {
     use crate::dependencies::ExternalTool;

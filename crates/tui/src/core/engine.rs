@@ -4092,6 +4092,37 @@ impl Engine {
             // the static system prefix stays byte-stable across sessions (see
             // `render_environment_block` for the prefix-cache rationale).
             format!("Current workspace: {}", self.config.workspace.display()),
+        ];
+        // The channel by which a multi-root session's model learns it may touch
+        // the attached roots: restricted postures need it for the permission
+        // boundary, full-access postures for plain visibility. The primary root
+        // is already named by the workspace line above. Order is the normalized
+        // storage order, never re-sorted per turn, so a stable root set keeps
+        // the line byte-identical; long sets are truncated to a bound.
+        let attached_roots: Vec<&Path> = self
+            .session
+            .workspace_roots
+            .iter()
+            .skip(1)
+            .map(PathBuf::as_path)
+            .collect();
+        if !attached_roots.is_empty() {
+            const MAX_LISTED_ROOTS: usize = 5;
+            let listed = attached_roots
+                .iter()
+                .take(MAX_LISTED_ROOTS)
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let remainder = attached_roots.len().saturating_sub(MAX_LISTED_ROOTS);
+            let suffix = if remainder > 0 {
+                format!(" … (+{remainder} more)")
+            } else {
+                String::new()
+            };
+            lines.push(format!("Accessible folders: {listed}{suffix}"));
+        }
+        lines.extend([
             format!(
                 "Current permission posture: {}",
                 approval_mode.permission_chip_label()
@@ -4105,7 +4136,7 @@ impl Engine {
                     crate::sandbox::process_hardening::no_new_privs_active(),
                 )
             ),
-        ];
+        ]);
         if approval_mode == crate::tui::approval::ApprovalMode::Never {
             lines.push(
                 "Approval prompts are disabled; do not request escalation for this turn."
