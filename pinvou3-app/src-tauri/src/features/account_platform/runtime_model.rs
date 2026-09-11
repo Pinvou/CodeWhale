@@ -19,6 +19,7 @@ struct RuntimeCatalog {
 #[derive(Debug, Deserialize)]
 struct RuntimeCatalogItem {
     model_id: String,
+    display_name: String,
     model_capability_version_id: String,
     context_length: u64,
     maximum_output_tokens: u64,
@@ -26,6 +27,7 @@ struct RuntimeCatalogItem {
 
 #[derive(Debug, PartialEq, Eq)]
 struct RuntimeModelLimits {
+    model_id: String,
     catalog_version: u64,
     capability_version_id: String,
     context_tokens: u32,
@@ -35,10 +37,14 @@ struct RuntimeModelLimits {
 fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<RuntimeModelLimits> {
     let catalog: RuntimeCatalog =
         serde_json::from_value(body).context("decode account platform model catalog")?;
+    let reference = model_id.trim();
     let item = catalog
         .items
         .into_iter()
-        .find(|item| item.model_id == model_id)
+        .find(|item| {
+            item.model_id.eq_ignore_ascii_case(reference)
+                || item.display_name.trim().eq_ignore_ascii_case(reference)
+        })
         .with_context(|| format!("account platform model {model_id} is absent from the catalog"))?;
     let context_tokens = u32::try_from(item.context_length)
         .context("account platform model context limit is unsupported")?;
@@ -51,6 +57,7 @@ fn runtime_model_limits(body: serde_json::Value, model_id: &str) -> Result<Runti
         anyhow::bail!("account platform model capability version is missing");
     }
     Ok(RuntimeModelLimits {
+        model_id: item.model_id,
         catalog_version: catalog.catalog_version,
         capability_version_id: item.model_capability_version_id,
         context_tokens,
@@ -155,7 +162,7 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
         }
         let limits = runtime_model_limits(catalog_response.body, session_model_ref)?;
         let mut model = request.model;
-        model.model = session_model_ref.to_string();
+        model.model = limits.model_id.clone();
         model.context_window_tokens = Some(limits.context_tokens);
         model.max_output_tokens = Some(limits.output_tokens);
         model.base_url = self
@@ -238,6 +245,7 @@ mod tests {
                 "items": [
                     {
                         "model_id": "model-a",
+                        "display_name": "DeepSeek Flash",
                         "model_capability_version_id": "capability-a-v2",
                         "context_length": 128000,
                         "maximum_output_tokens": 4096
@@ -249,9 +257,31 @@ mod tests {
         .expect("published model limits");
 
         assert_eq!(limits.catalog_version, 7);
+        assert_eq!(limits.model_id, "model-a");
         assert_eq!(limits.capability_version_id, "capability-a-v2");
         assert_eq!(limits.context_tokens, 128_000);
         assert_eq!(limits.output_tokens, 4_096);
+    }
+
+    #[test]
+    fn runtime_limits_resolve_current_display_name_to_stable_model_id() {
+        let limits = runtime_model_limits(
+            json!({
+                "catalog_version": 8,
+                "items": [{
+                    "model_id": "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
+                    "display_name": "deepseek-flash",
+                    "model_capability_version_id": "capability-deepseek-flash",
+                    "context_length": 128000,
+                    "maximum_output_tokens": 8192
+                }]
+            }),
+            "deepseek-flash",
+        )
+        .expect("current model display name");
+
+        assert_eq!(limits.model_id, "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c");
+        assert_eq!(limits.capability_version_id, "capability-deepseek-flash");
     }
 
     #[test]
@@ -265,6 +295,7 @@ mod tests {
                     "catalog_version": 1,
                     "items": [{
                         "model_id": "bad",
+                        "display_name": "bad",
                         "model_capability_version_id": "capability-bad",
                         "context_length": 4096,
                         "maximum_output_tokens": 8192

@@ -151,7 +151,7 @@ tokenGateway:
   modelCatalogSyncMinutes: 15
   defaultProvider: new-api
   defaultProviderBaseUrl: http://newapi:8080
-  defaultProviderModels: [deepseek-v4-flash]
+  defaultProviderModels: [deepseek-flash]
   defaultRoutePriority: 10
   reconciliationNewApiBaseUrl: http://newapi:8080
   reconciliationIntervalSeconds: 15

@@ -1575,7 +1575,7 @@ mod tests {
     #[test]
     fn model_selection_refs_round_trip_with_explicit_sources() {
         let selections = [
-            ModelSelectionRef::account_platform("deepseek-v4-flash"),
+            ModelSelectionRef::account_platform("deepseek-flash"),
             ModelSelectionRef::local("third-party-model"),
         ];
         for selection in selections {

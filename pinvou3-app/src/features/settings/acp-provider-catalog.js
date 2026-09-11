@@ -27,7 +27,7 @@ export const ACP_PROVIDER_PRESETS = [
   // 表名的 kimi-code/ 前缀是别名，实际请求的 model 字段是无前缀的 "k3"）。
   // Kimi Code 托管的 1M 变体仅 k3 一个（k3-256k 等其余档位无 1M 声明）。
   { key: 'kimi-code', nameKey: 'presetKimiCode', name: 'Kimi Code', baseUrl: 'https://api.kimi.com/coding/v1', baseUrlAnthropic: 'https://api.kimi.com/coding', wireApi: 'kimi', models: ['k3', 'k3-256k', 'kimi-for-coding', 'kimi-for-coding-highspeed'], models1m: ['k3[1m]'] },
-  { key: 'deepseek', nameKey: 'presetDeepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', baseUrlAnthropic: 'https://api.deepseek.com/anthropic', wireApi: 'openai', models: ['deepseek-v4-flash', 'deepseek-v4-pro'], models1m: ['deepseek-v4-flash[1m]', 'deepseek-v4-pro[1m]'] },
+  { key: 'deepseek', nameKey: 'presetDeepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', baseUrlAnthropic: 'https://api.deepseek.com/anthropic', wireApi: 'openai', models: ['deepseek-flash'] },
   { key: 'zhipu', nameKey: 'presetZhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', wireApi: 'openai', models: ['glm-5.2', 'glm-5.1', 'glm-5', 'glm-4.7', 'glm-4.6', 'glm-4.7-flash'] },
   { key: 'qwen', nameKey: 'presetQwen', name: '通义千问 Qwen', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', wireApi: 'openai', models: ['qwen3.7-max', 'qwen3.7-plus', 'qwen3.7-flash', 'qwen3-coder-plus'] },
   { key: 'doubao', nameKey: 'presetDoubao', name: '豆包 Doubao', baseUrl: 'https://ark.cn-beijing.volces.com/api/v3', wireApi: 'openai', models: [] },
@@ -45,8 +45,8 @@ export const ACP_MODEL_PRESETS = [
   'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5',
   // OpenAI（developers.openai.com，gpt-5.6 家族为最新）
   'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.2',
-  // DeepSeek（deepseek-chat/reasoner 旧别名已弃用，v4 为官方在列）
-  'deepseek-v4-flash', 'deepseek-v4-pro',
+  // DeepSeek（当前正式模型名；不提供已下线模型名兼容项）
+  'deepseek-flash',
   // Moonshot 开放平台（platform.moonshot.cn，kimi-k2.5 与 moonshot-v1 系列
   // 将于 2026-08-31 全面下线；kimi-k3 为旗舰推荐，kimi-k2.7-code 面向代码场景）
   'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.6', 'kimi-k2.7-code-highspeed',

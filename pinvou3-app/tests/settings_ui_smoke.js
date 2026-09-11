@@ -100,7 +100,7 @@ function injectSource() {
         id: 'cloud-deepseek',
         name: 'DeepSeek',
         preset: 'deepseek',
-        model: 'deepseek-v4-flash',
+        model: 'deepseek-flash',
         base_url: 'https://api.deepseek.com',
         // doSave 会把 provider_kind 写回 settings;官方 API 组未显式声明 baseUrl,
         // 曾导致 findCloudProviderForModel 失配、编辑弹窗隐藏配置区与测试连接。
@@ -581,7 +581,7 @@ async function modalWidth(page, headingText) {
   const modelList = await page.evaluate(() => {
     const text = document.body.innerText;
     const rows = [...document.querySelectorAll('div')].filter(node => typeof node.className === 'string' && node.className.includes('grid-cols-'));
-    const deepseekRow = rows.find(node => (node.textContent || '').includes('deepseek-v4-flash'));
+    const deepseekRow = rows.find(node => (node.textContent || '').includes('deepseek-flash'));
     const localRow = rows.find(node => (node.textContent || '').includes('qwen36_35b_256k') && (node.textContent || '').includes('本地模型'));
     return {
       localTag: text.includes('本地模型'),
@@ -595,12 +595,12 @@ async function modalWidth(page, headingText) {
   });
   rec('② 模型列表符合 iOS 列表交互标识且用户本地模型可删除', Object.values(modelList).every(Boolean), JSON.stringify(modelList));
 
-  await clickRowRadio(page, 'deepseek-v4-flash');
+  await clickRowRadio(page, 'deepseek-flash');
   await sleep(350);
   const activeSet = await page.evaluate(() => window.__SETTINGS_TEST__.activeModelId());
   rec('③ 圆圈单选可设默认模型', activeSet === 'cloud-deepseek', activeSet);
 
-  await clickRowAction(page, 'deepseek-v4-flash', '编辑');
+  await clickRowAction(page, 'deepseek-flash', '编辑');
   await sleep(250);
   const maskedSavedKey = await page.evaluate(() => ({
     maskedPlaceholder: [...document.querySelectorAll('input')].some(node => node.placeholder === '••••••••'),
@@ -623,7 +623,7 @@ async function modalWidth(page, headingText) {
   await sleep(250);
   const sameProviderPicker = await page.evaluate(() => {
     const text = document.body.innerText;
-    return text.includes('deepseek-v4-pro') && text.includes('deepseek-v4-flash') && !text.includes('kimi-k3') && !text.includes('glm-5.2');
+    return text.includes('deepseek-v4-pro') && text.includes('deepseek-flash') && !text.includes('kimi-k3') && !text.includes('glm-5.2');
   });
   rec('④ 编辑模型默认掩码显示已保存 Key，显示后回显且只允许同厂商更换', Object.values(maskedSavedKey).every(Boolean) && Object.values(editModelBehavior).every(Boolean) && sameProviderPicker, JSON.stringify({ ...maskedSavedKey, ...editModelBehavior, sameProviderPicker }));
   await clickExact(page, '取消');
@@ -646,7 +646,7 @@ async function modalWidth(page, headingText) {
   await sleep(200);
 
   const deleteBefore = await callCount(page, 'delete_model');
-  await clickRowAction(page, 'deepseek-v4-flash', '删除');
+  await clickRowAction(page, 'deepseek-flash', '删除');
   await sleep(250);
   const deleteDialog = await page.evaluate(() => document.body.innerText.includes('删除模型？') && document.body.innerText.includes('将移除该模型配置'));
   const deleteWidth = await modalWidth(page, '删除模型？');
@@ -654,7 +654,7 @@ async function modalWidth(page, headingText) {
   rec('④ 删除模型先出 iOS 二次确认且未立即删除', deleteDialog && deleteWidth >= 260 && deleteWidth <= 285 && deleteStillBeforeConfirm === deleteBefore, `width=${deleteWidth}`);
   await clickExact(page, '取消');
   await sleep(200);
-  await clickRowAction(page, 'deepseek-v4-flash', '删除');
+  await clickRowAction(page, 'deepseek-flash', '删除');
   await sleep(200);
   await clickExact(page, '删除模型');
   await sleep(500);
@@ -1562,7 +1562,7 @@ async function modalWidth(page, headingText) {
   await sleep(200);
   await clickModalExact(page, '模型');
   await sleep(250);
-  await clickModalExact(page, 'deepseek-v4-flash');
+  await clickModalExact(page, 'deepseek-flash');
   await sleep(250);
   const capAfterTouched = await capabilityToggleText();
   rec('⑦.img.14 目录视觉能力标注自动填写,手动改档后不再跟随',

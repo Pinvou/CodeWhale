@@ -45,7 +45,7 @@ pub const BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME: &str = "内置模型";
 /// accidental direct request if preparation is bypassed by a future caller.
 pub const BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL: &str =
     "https://account-platform.invalid/v1";
-pub const BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL: &str = "deepseek-v4-flash";
+pub const BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL: &str = "deepseek-flash";
 
 pub fn select_builtin_account_platform_model(configured_default: Option<&str>) -> String {
     configured_default

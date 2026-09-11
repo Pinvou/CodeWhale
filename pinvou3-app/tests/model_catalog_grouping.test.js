@@ -147,6 +147,15 @@ test('Coding Plan 手填 ID -> 自定义', () => {
 test('官方 API 命中目录(deepseek-v4-pro) -> 预设', () => {
   assert.strictEqual(isPresetModel(mk({ preset: 'deepseek', provider_kind: 'official_api', vendor: 'deepseek', base_url: 'https://api.deepseek.com', model: 'deepseek-v4-pro' })), true);
 });
+test('DeepSeek Flash 仅收录当前正式模型名，不提供下线名称别名', () => {
+  const group = MODEL_CATALOG.cloud.find(item => item.key === 'deepseek');
+  const flash = group.items.find(item => item.model === 'deepseek-flash');
+  assert.ok(flash, 'DeepSeek 官方目录应包含 deepseek-flash');
+  assert.strictEqual(flash.imageCapable, true);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(flash, 'legacyAliases'), false);
+  assert.strictEqual(group.items.some(item => item.model === 'deepseek-v4-flash'), false);
+  assert.strictEqual(group.items.some(item => item.model === 'deepseek-v4-flash-vision-exp'), false);
+});
 test('官方 API 手填 ID -> 自定义', () => {
   assert.strictEqual(isPresetModel(mk({ preset: 'deepseek', provider_kind: 'official_api', vendor: 'deepseek', base_url: 'https://api.deepseek.com', model: 'deepseek-v9-fake' })), false);
 });

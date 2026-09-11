@@ -250,7 +250,7 @@ const MODEL_CATALOG = {
       vendor: 'deepseek',
       items: [
         { model: 'deepseek-v4-pro', title: 'deepseek-v4-pro', desc: '高能力模型' },
-        { model: 'deepseek-v4-flash', title: 'deepseek-v4-flash', desc: '快速响应' },
+        { model: 'deepseek-flash', imageCapable: true, title: 'deepseek-flash', desc: 'V4.1 Flash，支持图像理解' },
         { model: '', title: '自定义 DeepSeek 模型', desc: '手动填写模型 ID', custom: true },
       ],
     },
