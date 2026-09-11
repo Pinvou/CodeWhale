@@ -24,14 +24,27 @@ use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
 
+#[cfg(any(debug_assertions, test))]
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
+#[cfg(any(debug_assertions, test))]
 const TOKEN_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_TOKEN_URL";
+#[cfg(any(debug_assertions, test))]
 const CLIENT_ID_ENV: &str = "PINVOU_ACCOUNT_OIDC_CLIENT_ID";
+#[cfg(any(debug_assertions, test))]
 const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
+#[cfg(any(debug_assertions, test))]
 const IDENTITY_URL_ENV: &str = "PINVOU_IDENTITY_SERVICE_URL";
+#[cfg(any(debug_assertions, test))]
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
+#[cfg(any(debug_assertions, test))]
 const PORTAL_URL_ENV: &str = "PINVOU_ACCOUNT_PORTAL_URL";
+#[cfg(any(debug_assertions, test))]
 const DEFAULT_PORTAL_URL: &str = "https://account.pinvou.com/";
+const INSTALLED_CONFIG_RELATIVE_PATH: &str = "config/account-platform.json";
+const ACCOUNT_PORTAL_CONFIG_FIELD: &str = "account_portal_url";
+const IDENTITY_SERVICE_CONFIG_FIELD: &str = "identity_service_url";
+const TOKEN_GATEWAY_CONFIG_FIELD: &str = "token_gateway_url";
+const MAX_INSTALLED_CONFIG_BYTES: u64 = 64 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHAT_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -43,9 +56,93 @@ struct AccountPlatformConfig {
     account_url: Url,
     identity_url: Option<Url>,
     token_gateway_url: Option<Url>,
+    portal_url: Url,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstalledAccountPlatformConfig {
+    schema_version: u32,
+    #[serde(default)]
+    oidc_issuer: Option<String>,
+    #[serde(default)]
+    oidc_token_url: Option<String>,
+    oidc_client_id: String,
+    account_service_url: String,
+    #[serde(default)]
+    identity_service_url: Option<String>,
+    #[serde(default)]
+    token_gateway_url: Option<String>,
+    account_portal_url: String,
 }
 
 impl AccountPlatformConfig {
+    fn current() -> Result<Self, String> {
+        #[cfg(debug_assertions)]
+        if account_environment_present() {
+            return Self::from_env();
+        }
+        Self::from_installed_resource()
+    }
+
+    fn from_installed_resource() -> Result<Self, String> {
+        let resource_dir = crate::platform::paths::runtime_resource_dir().ok_or_else(|| {
+            "account_platform_configuration_missing: installed resource directory is unavailable"
+                .to_string()
+        })?;
+        let path = resource_dir.join(INSTALLED_CONFIG_RELATIVE_PATH);
+        let metadata = std::fs::metadata(&path).map_err(|_| {
+            "account_platform_configuration_missing: installed account platform config is unavailable"
+                .to_string()
+        })?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_INSTALLED_CONFIG_BYTES
+        {
+            return Err(
+                "account_platform_configuration_invalid: installed account platform config has an invalid size"
+                    .to_string(),
+            );
+        }
+        let raw = std::fs::read_to_string(path).map_err(|_| {
+            "account_platform_configuration_invalid: installed account platform config is unreadable"
+                .to_string()
+        })?;
+        Self::from_installed_json(&raw)
+    }
+
+    fn from_installed_json(raw: &str) -> Result<Self, String> {
+        let installed: InstalledAccountPlatformConfig = serde_json::from_str(raw).map_err(|_| {
+            "account_platform_configuration_invalid: installed account platform config is invalid"
+                .to_string()
+        })?;
+        if installed.schema_version != 1 {
+            return Err(
+                "account_platform_configuration_invalid: installed account platform config schema is unsupported"
+                    .to_string(),
+            );
+        }
+        let issuer = nonempty(installed.oidc_issuer);
+        let token_url = nonempty(installed.oidc_token_url)
+            .or_else(|| issuer.as_ref().map(|value| oidc_endpoint(value, "token")))
+            .ok_or_else(|| {
+                "account_platform_configuration_missing: oidc_token_url or oidc_issuer is required"
+                    .to_string()
+            })?;
+        let client_id = validate_client_id(installed.oidc_client_id)?;
+        Ok(Self {
+            token_url: parse_endpoint("oidc_token_url", &token_url)?,
+            client_id,
+            account_url: parse_service_base("account_service_url", &installed.account_service_url)?,
+            identity_url: nonempty(installed.identity_service_url)
+                .map(|value| parse_service_base("identity_service_url", &value))
+                .transpose()?,
+            token_gateway_url: nonempty(installed.token_gateway_url)
+                .map(|value| parse_service_base("token_gateway_url", &value))
+                .transpose()?,
+            portal_url: account_portal_url_from(&installed.account_portal_url)?,
+        })
+    }
+
+    #[cfg(any(debug_assertions, test))]
     fn from_env() -> Result<Self, String> {
         if !platform_supported() {
             return Err(
@@ -57,12 +154,7 @@ impl AccountPlatformConfig {
         let token_url = optional_env(TOKEN_URL_ENV)
             .or_else(|| issuer.as_ref().map(|value| oidc_endpoint(value, "token")))
             .ok_or_else(|| missing_config(TOKEN_URL_ENV, ISSUER_ENV))?;
-        let client_id = required_env(CLIENT_ID_ENV)?;
-        if client_id.len() > 200 || client_id.chars().any(char::is_whitespace) {
-            return Err(format!(
-                "account_platform_configuration_invalid: {CLIENT_ID_ENV} is invalid"
-            ));
-        }
+        let client_id = validate_client_id(required_env(CLIENT_ID_ENV)?)?;
 
         Ok(Self {
             token_url: parse_endpoint(TOKEN_URL_ENV, &token_url)?,
@@ -74,10 +166,47 @@ impl AccountPlatformConfig {
             token_gateway_url: optional_env(TOKEN_GATEWAY_URL_ENV)
                 .map(|value| parse_service_base(TOKEN_GATEWAY_URL_ENV, &value))
                 .transpose()?,
+            portal_url: account_portal_url_from(
+                optional_env(PORTAL_URL_ENV)
+                    .as_deref()
+                    .unwrap_or(DEFAULT_PORTAL_URL),
+            )?,
         })
     }
 }
 
+#[cfg(debug_assertions)]
+fn account_environment_present() -> bool {
+    [
+        ISSUER_ENV,
+        TOKEN_URL_ENV,
+        CLIENT_ID_ENV,
+        ACCOUNT_URL_ENV,
+        IDENTITY_URL_ENV,
+        TOKEN_GATEWAY_URL_ENV,
+        PORTAL_URL_ENV,
+    ]
+    .into_iter()
+    .any(|name| std::env::var_os(name).is_some())
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_client_id(client_id: String) -> Result<String, String> {
+    let client_id = client_id.trim().to_string();
+    if client_id.is_empty() || client_id.len() > 200 || client_id.chars().any(char::is_whitespace) {
+        return Err(
+            "account_platform_configuration_invalid: oidc_client_id is invalid".to_string(),
+        );
+    }
+    Ok(client_id)
+}
+
+#[cfg(any(debug_assertions, test))]
 fn optional_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -85,11 +214,13 @@ fn optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(any(debug_assertions, test))]
 fn required_env(name: &str) -> Result<String, String> {
     optional_env(name)
         .ok_or_else(|| format!("account_platform_configuration_missing: {name} is required"))
 }
 
+#[cfg(any(debug_assertions, test))]
 fn missing_config(primary: &str, fallback: &str) -> String {
     format!("account_platform_configuration_missing: {primary} or {fallback} is required")
 }
@@ -144,15 +275,11 @@ pub fn open_account_portal() -> Result<(), String> {
 }
 
 fn account_portal_url() -> Result<Url, String> {
-    account_portal_url_from(
-        optional_env(PORTAL_URL_ENV)
-            .as_deref()
-            .unwrap_or(DEFAULT_PORTAL_URL),
-    )
+    Ok(AccountPlatformConfig::current()?.portal_url)
 }
 
 fn account_portal_url_from(value: &str) -> Result<Url, String> {
-    let target = parse_endpoint(PORTAL_URL_ENV, value)?;
+    let target = parse_endpoint(ACCOUNT_PORTAL_CONFIG_FIELD, value)?;
     if target.query().is_some() || target.fragment().is_some() {
         return Err("account_platform_configuration_invalid: account portal URL must not contain query or fragment".to_string());
     }
@@ -342,7 +469,7 @@ impl AccountPlatformState {
                 error_code: Some("unsupported_platform"),
             };
         }
-        let config = match AccountPlatformConfig::from_env() {
+        let config = match AccountPlatformConfig::current() {
             Ok(config) => config,
             Err(error) => {
                 let error_code = if error.starts_with("account_platform_configuration_invalid:") {
@@ -379,7 +506,7 @@ impl AccountPlatformState {
 
     pub async fn login(&self, credentials: LoginCredentials) -> Result<SessionStatus, String> {
         let _login = self.login_guard.lock().await;
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let _refresh = self.refresh_guard.lock().await;
         let account = credentials.account.trim();
         if account.is_empty()
@@ -407,7 +534,7 @@ impl AccountPlatformState {
     }
 
     pub async fn send_sms(&self, input: SMSRequest) -> Result<Value, String> {
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let purpose = input.purpose.trim().to_ascii_uppercase();
         if purpose != "REGISTER" && purpose != "LOGIN" && purpose != "PASSWORD_RESET" {
             return Err("mobile_auth_request_invalid: invalid SMS purpose".to_string());
@@ -474,7 +601,7 @@ impl AccountPlatformState {
         &self,
         input: SliderCaptchaRequest,
     ) -> Result<Value, String> {
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let purpose = input.purpose.trim().to_ascii_uppercase();
         if purpose != "REGISTER" && purpose != "LOGIN" && purpose != "PASSWORD_RESET" {
             return Err("mobile_auth_request_invalid: invalid captcha purpose".to_string());
@@ -491,7 +618,7 @@ impl AccountPlatformState {
         &self,
         input: MobileRegistrationPrecheck,
     ) -> Result<Value, String> {
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let reference = self
             .public_identity_request(
                 &config,
@@ -527,7 +654,7 @@ impl AccountPlatformState {
     }
 
     pub async fn register_mobile(&self, input: MobileRegistration) -> Result<Value, String> {
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let query_token = if input.registration_query_token.trim().is_empty() {
             let pending = self.pending_registration()?.ok_or_else(|| {
                 "registration_recovery_missing: pending registration credential is unavailable"
@@ -558,7 +685,7 @@ impl AccountPlatformState {
     }
 
     pub async fn reset_password(&self, input: PasswordReset) -> Result<Value, String> {
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let reference = self
             .public_identity_request(
                 &config,
@@ -581,7 +708,7 @@ impl AccountPlatformState {
         let Some(pending) = self.pending_registration()? else {
             return Ok(Value::Null);
         };
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let mut result = self
             .public_account_registration_status(
                 &config,
@@ -624,7 +751,7 @@ impl AccountPlatformState {
         credentials: SMSLoginCredentials,
     ) -> Result<SessionStatus, String> {
         let _login = self.login_guard.lock().await;
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let _refresh = self.refresh_guard.lock().await;
         self.clear_authentication().await?;
         let form = [
@@ -649,7 +776,7 @@ impl AccountPlatformState {
     }
 
     pub async fn request(&self, input: ApiRequest) -> Result<ApiResponse, String> {
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let prepared = prepare_request(&config, input)?;
         let mut token = self.access_token(&config, None).await?;
         let mut response = self.send(&prepared, &token).await?;
@@ -668,9 +795,11 @@ impl AccountPlatformState {
     pub(crate) async fn chat_runtime_authorization(
         &self,
     ) -> Result<ChatRuntimeAuthorization, String> {
-        let config = AccountPlatformConfig::from_env()?;
+        let config = AccountPlatformConfig::current()?;
         let token_gateway_url = config.token_gateway_url.as_ref().ok_or_else(|| {
-            format!("account_platform_configuration_missing: {TOKEN_GATEWAY_URL_ENV} is required")
+            format!(
+                "account_platform_configuration_missing: {TOKEN_GATEWAY_CONFIG_FIELD} is required"
+            )
         })?;
         let mut access_token = self.access_token(&config, None).await?;
         let mut account_user_id = self
@@ -1048,7 +1177,9 @@ impl AccountPlatformState {
         body: Value,
     ) -> Result<Value, String> {
         let identity_url = config.identity_url.as_ref().ok_or_else(|| {
-            format!("account_platform_configuration_missing: {IDENTITY_URL_ENV} is required for registration")
+            format!(
+                "account_platform_configuration_missing: {IDENTITY_SERVICE_CONFIG_FIELD} is required for registration"
+            )
         })?;
         let url = identity_url.join(path).map_err(|_| {
             "account_platform_configuration_invalid: cannot resolve identity endpoint".to_string()
@@ -1152,13 +1283,15 @@ fn classify_token_error(
             "oidc_credentials_invalid: account or password is incorrect".to_string()
         }
         (TokenFlow::Password, Some("unauthorized_client")) => {
-            "oidc_direct_grant_disabled: in-app password sign-in is disabled".to_string()
+            "oidc_direct_grant_disabled: client configuration is invalid or in-app password sign-in is disabled"
+                .to_string()
         }
         (TokenFlow::Sms, Some("invalid_grant")) => {
             "mobile_auth_code_invalid: SMS code is invalid or expired".to_string()
         }
         (TokenFlow::Sms, Some("unauthorized_client")) => {
-            "oidc_direct_grant_disabled: in-app SMS sign-in is disabled".to_string()
+            "oidc_direct_grant_disabled: client configuration is invalid or in-app SMS sign-in is disabled"
+                .to_string()
         }
         (TokenFlow::Refresh, Some("invalid_grant")) => {
             "authentication_required: saved sign-in has expired".to_string()
@@ -1290,7 +1423,9 @@ fn prepare_request(
     let base = match input.area.as_str() {
         "account" => &config.account_url,
         "token" => config.token_gateway_url.as_ref().ok_or_else(|| {
-            format!("account_platform_configuration_missing: {TOKEN_GATEWAY_URL_ENV} is required")
+            format!(
+                "account_platform_configuration_missing: {TOKEN_GATEWAY_CONFIG_FIELD} is required"
+            )
         })?,
         _ => return Err("account_platform_request_denied: unknown service area".to_string()),
     };
@@ -1515,6 +1650,7 @@ mod tests {
                     ACCOUNT_URL_ENV,
                     IDENTITY_URL_ENV,
                     TOKEN_GATEWAY_URL_ENV,
+                    PORTAL_URL_ENV,
                 ]
                 .into_iter()
                 .map(|key| (key, std::env::var_os(key)))
@@ -1545,12 +1681,48 @@ mod tests {
             client_id: "desktop-client".to_string(),
             account_url: Url::parse("https://account.example.test/").unwrap(),
             token_gateway_url: Some(Url::parse("https://token.example.test/").unwrap()),
+            portal_url: Url::parse("https://portal.example.test/").unwrap(),
         }
     }
 
     #[test]
     fn account_platform_is_the_only_supported_desktop_path() {
         assert_eq!(account_platform_enabled(), platform_supported());
+    }
+
+    #[test]
+    fn installed_configuration_contains_the_canonical_production_endpoints() {
+        let config = AccountPlatformConfig::from_installed_json(include_str!(
+            "../../../resources/common/config/account-platform.json"
+        ))
+        .unwrap();
+        assert_eq!(config.client_id, "pinvou-desktop");
+        assert_eq!(
+            config.token_url.as_str(),
+            "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/token"
+        );
+        assert_eq!(
+            config.account_url.as_str(),
+            "https://account.pinvou.com/account/"
+        );
+        assert_eq!(
+            config.identity_url.as_ref().map(Url::as_str),
+            Some("https://account.pinvou.com/identity/")
+        );
+        assert_eq!(
+            config.token_gateway_url.as_ref().map(Url::as_str),
+            Some("https://account.pinvou.com/token/")
+        );
+        assert_eq!(config.portal_url.as_str(), "https://account.pinvou.com/");
+    }
+
+    #[test]
+    fn installed_configuration_rejects_unknown_or_insecure_fields() {
+        let unknown = r#"{"schema_version":1,"oidc_issuer":"https://id.example.test/realms/pinvou","oidc_client_id":"desktop","account_service_url":"https://account.example.test","account_portal_url":"https://account.example.test","unexpected":true}"#;
+        assert!(AccountPlatformConfig::from_installed_json(unknown).is_err());
+
+        let insecure = r#"{"schema_version":1,"oidc_issuer":"http://id.example.test/realms/pinvou","oidc_client_id":"desktop","account_service_url":"https://account.example.test","account_portal_url":"https://account.example.test"}"#;
+        assert!(AccountPlatformConfig::from_installed_json(insecure).is_err());
     }
 
     #[test]
@@ -1564,15 +1736,14 @@ mod tests {
             )
             .starts_with("oidc_credentials_invalid:")
         );
-        assert!(
-            classify_token_error(
-                TokenFlow::Password,
-                StatusCode::UNAUTHORIZED,
-                Some("unauthorized_client"),
-                None,
-            )
-            .starts_with("oidc_direct_grant_disabled:")
+        let unauthorized_client = classify_token_error(
+            TokenFlow::Password,
+            StatusCode::UNAUTHORIZED,
+            Some("unauthorized_client"),
+            None,
         );
+        assert!(unauthorized_client.starts_with("oidc_direct_grant_disabled:"));
+        assert!(unauthorized_client.contains("client configuration is invalid"));
         assert!(
             classify_token_error(
                 TokenFlow::Refresh,
@@ -1623,6 +1794,7 @@ mod tests {
             std::env::set_var(ACCOUNT_URL_ENV, "https://account.example.test/account/");
             std::env::remove_var(IDENTITY_URL_ENV);
             std::env::remove_var(TOKEN_GATEWAY_URL_ENV);
+            std::env::remove_var(PORTAL_URL_ENV);
         }
 
         let config = AccountPlatformConfig::from_env().unwrap();
@@ -1645,7 +1817,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             error,
-            "account_platform_configuration_missing: PINVOU_TOKEN_GATEWAY_URL is required"
+            "account_platform_configuration_missing: token_gateway_url is required"
         );
     }
 

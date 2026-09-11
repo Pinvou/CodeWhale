@@ -286,17 +286,18 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录，并通过 `BILLING_TEST_ADM
 
 ### 6.6 桌面端
 
-- `PINVOU_ACCOUNT_PLATFORM_ENABLED`
-- `PINVOU_ACCOUNT_OIDC_ISSUER` 或显式 Token URL
-- `PINVOU_ACCOUNT_OIDC_CLIENT_ID`
-- `PINVOU_ACCOUNT_SERVICE_URL`
-- `PINVOU_IDENTITY_SERVICE_URL`
-- `PINVOU_TOKEN_GATEWAY_URL`
-- `PINVOU_ACCOUNT_PORTAL_URL`
+桌面端公开连接配置是随安装包交付的 `config/account-platform.json`，字段包括：
 
-官方桌面发布包为未显式配置上述变量的全新安装提供正式账号平台默认值：OIDC、Account、Identity、Token Gateway 与 Portal 均使用 `https://account.pinvou.com` 的对应路径，OIDC 客户端为 `pinvou-desktop`。私有部署、UAT 和本地开发显式提供的环境值始终优先，发布包不得猜测、重写或跨环境回退。登录只依赖身份与 Account 服务；Token Gateway 缺失时仅模型调用等 Token 专属操作失败，不得阻断登录。
+- `oidc_issuer` 或显式 `oidc_token_url`；
+- `oidc_client_id`；
+- `account_service_url`；
+- `identity_service_url`；
+- `token_gateway_url`；
+- `account_portal_url`。
 
-开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
+官方正式资源的 OIDC、Account、Identity、Token Gateway 与 Portal 均使用 `https://account.pinvou.com` 的对应路径，OIDC 客户端为 `pinvou-desktop`。release 运行时只读取安装资源，不接受操作系统环境变量覆盖；客户端升级时由安装包或 OTA 一并更新该文件。私有发行版和 UAT 必须在构建时打包各自的同路径配置，不得在已发布客户端上依赖全局环境变量切换环境。登录只依赖身份与 Account 服务；Token Gateway 缺失时仅模型调用等 Token 专属操作失败，不得阻断登录。
+
+开发态 `npm run dev` 不需要每次生成安装包；debug 构建在存在账号平台环境变量时仍优先读取它们，项目标准入口由 `.env.development.local` 注入。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
 
 Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Code + PKCE 重新认证；Identity Client 必须接受 `prompt=login` 与 `max_age=0`，回调地址固定为 `https://account.pinvou.com/auth/callback`。桌面端只保留未登录忘记密码，不承载资料修改。
 

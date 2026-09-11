@@ -699,6 +699,21 @@ assert.ok(
   windowsManifest.files.some((file) => file.destination.startsWith("runtime/chrome-devtools-mcp/")),
   "Windows resource manifest must contain chrome-devtools-mcp",
 );
+for (const [label, config, manifest] of [
+  ["Linux", linux, linuxManifest],
+  ["macOS", macos, macosManifest],
+  ["Windows", windows, windowsManifest],
+]) {
+  assert.equal(
+    config.bundle.resources["resources/common/config/account-platform.json"],
+    "config/account-platform.json",
+    `${label} packages must install the account platform configuration at a stable path`,
+  );
+  assert.ok(
+    manifest.files.some((file) => file.destination === "config/account-platform.json"),
+    `${label} resource manifest must contain the installed account platform configuration`,
+  );
+}
 
 const runtimeBundleExtraction = fs.readFileSync(
   path.join(
