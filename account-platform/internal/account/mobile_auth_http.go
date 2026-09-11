@@ -21,6 +21,7 @@ func (s *Service) precheckMobileRegistration(w http.ResponseWriter, r *http.Requ
 		PasswordPolicyVersion string `json:"password_policy_version"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration precheck request", httpserver.RequestID(r.Context()))
 		return
 	}
 	username, err := s.mobileAuth.PrecheckRegistration(r.Context(), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion)
@@ -37,6 +38,7 @@ func (s *Service) createSliderCaptcha(w http.ResponseWriter, r *http.Request) {
 		Purpose SMSPurpose `json:"purpose"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid slider verification request", httpserver.RequestID(r.Context()))
 		return
 	}
 	challenge, err := s.mobileAuth.CreateSliderCaptcha(r.Context(), body.Mobile, SMSPurpose(strings.ToUpper(string(body.Purpose))))
@@ -58,6 +60,7 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 		CaptchaOffset         int        `json:"captcha_offset"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid SMS challenge request", httpserver.RequestID(r.Context()))
 		return
 	}
 	if SMSPurpose(strings.ToUpper(string(body.Purpose))) == SMSPurposeProfileMobile {

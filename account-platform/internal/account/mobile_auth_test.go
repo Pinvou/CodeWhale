@@ -28,6 +28,29 @@ func TestNormalizeMainlandMobile(t *testing.T) {
 	}
 }
 
+func TestPublicMobileAuthRejectsMalformedJSONWithStructuredErrors(t *testing.T) {
+	auth := newMobileAuthForTest(t, &mobileAuthRepositoryFake{}, &smsProviderFake{}, &identityProvisionerFake{})
+	handler := NewService(nil, nil).WithMobileAuth(auth, "internal-service-token-for-tests-123456").Handler(nil)
+
+	for _, path := range []string{
+		"/v1/auth/registration/precheck",
+		"/v1/auth/captcha/challenges",
+		"/v1/auth/sms/challenges",
+	} {
+		t.Run(path, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"malformed"`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+
+			handler.ServeHTTP(response, request)
+
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_REQUEST"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestSMSRateLimitReturnsRemainingCooldown(t *testing.T) {
 	now := time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC)
 	last := now.Add(-17 * time.Second)
