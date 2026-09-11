@@ -153,7 +153,7 @@
   function renderBehavior(){
     const report=state.behavior||{},metrics=report.metrics||{},quality=report.data_quality||{};
     const guardedRatio=(value,confidence=quality.confidence)=>confidence==='low'||value===null||value===undefined?'<span class="confidence-low">样本不足</span>':ratio(value);
-    const duration=value=>Number.isFinite(Number(value))?(Number(value)<1000?`${nf.format(value)} ms`:`${(Number(value)/1000).toFixed(1)} s`):'—';
+    const duration=value=>value!==null&&value!==undefined&&Number.isFinite(Number(value))?(Number(value)<1000?`${nf.format(value)} ms`:`${(Number(value)/1000).toFixed(1)} s`):'—';
     const dataLabels={ready:'数据正常',no_data:'已启用但暂无事件',tracking_not_enabled:'埋点尚未启用',delayed:'数据延迟'};$('behaviorMeta').textContent=`${dataLabels[report.data_status]||'状态未知'} · 主体：安装实例 · 时区：${report.timezone||'Asia/Shanghai'} · 周期：${report.range==='today'?'今日':`${report.range||30} 天`} · 口径：${report.metric_version||'—'}（切换日 2026-09-10） · 最后事件：${report.latest_event_received_at?dateTime(report.latest_event_received_at):'—'} · 报表更新：${dateTime(report.generated_at)}`;$('behaviorMeta').classList.toggle('ok',report.data_status==='ready');
     $('taskPerActive').textContent=decimal(metrics.task_submitted_per_active_installation_day);
     $('taskUsers').textContent=`活跃安装 ${nf.format(metrics.task_active_installations||0)} · WSTA ${nf.format(metrics.wsta_installations||0)}`;

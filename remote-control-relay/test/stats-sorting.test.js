@@ -56,12 +56,12 @@ test("numeric values sort in both directions and keep empty values last", () => 
 });
 
 test("durations with mixed units sort by their millisecond value", () => {
-  const dom = renderTable(["Duration"], [["900 ms"], ["2.5 s"], ["1 分钟"]]);
+  const dom = renderTable(["Duration"], [["900 ms"], ["2.5 s"], ["1 分钟"], ["—"]]);
   const button = dom.window.document.querySelector(".stats-sort-trigger");
   button.click();
-  assert.deepEqual(firstColumn(dom), ["1 分钟", "2.5 s", "900 ms"]);
+  assert.deepEqual(firstColumn(dom), ["1 分钟", "2.5 s", "900 ms", "—"]);
   button.click();
-  assert.deepEqual(firstColumn(dom), ["900 ms", "2.5 s", "1 分钟"]);
+  assert.deepEqual(firstColumn(dom), ["900 ms", "2.5 s", "1 分钟", "—"]);
 });
 
 test("unavailable statistical values always remain after valid values", () => {

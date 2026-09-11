@@ -118,9 +118,11 @@ test("behavior analyst role never requests or exposes device-level views", async
     assert.equal(document.querySelector('[data-view="devices"]').hidden, true);
     assert.equal(document.querySelector('[data-view="commercial"]').hidden, true);
     assert.equal(document.querySelector('[data-view="behavior"]').hidden, false);
-    assert.equal(document.querySelector("#behaviorView").classList.contains("hidden"), false);
-    assert.equal(requested.some(url => url.endsWith("/devices")), false);
-    assert.equal(requested.some(url => url.endsWith("/overview") && !url.includes("/behavior/")), false);
+  assert.equal(document.querySelector("#behaviorView").classList.contains("hidden"), false);
+  assert.equal(requested.some(url => url.endsWith("/devices")), false);
+  assert.equal(requested.some(url => url.endsWith("/overview") && !url.includes("/behavior/")), false);
+  assert.match(document.querySelector("#taskLatency").textContent, /—/);
+  assert.doesNotMatch(document.querySelector("#taskLatency").textContent, /0 ms/);
   } finally {
     dom.window.close();
   }
