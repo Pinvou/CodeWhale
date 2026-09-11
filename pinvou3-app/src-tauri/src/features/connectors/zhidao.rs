@@ -7,7 +7,6 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use qrcode::{QrCode, render::svg};
@@ -182,15 +181,11 @@ fn set_connected(v: bool) -> bool {
 
 #[derive(Default)]
 pub struct ZhidaoConn {
-    cancelled: AtomicBool,
+    flow: super::flow_gate::SsoFlow,
 }
 
 fn emit(app: &AppHandle, event: &str, payload: Value) {
     let _ = app.emit(event, payload);
-}
-
-fn is_cancelled(app: &AppHandle) -> bool {
-    app.state::<ZhidaoConn>().cancelled.load(Ordering::SeqCst)
 }
 pub async fn zhidao_status() -> Result<Value, String> {
     tokio::task::spawn_blocking(|| {
@@ -206,15 +201,39 @@ pub async fn zhidao_status() -> Result<Value, String> {
     .map_err(|e| format!("spawn_blocking: {e}"))?
 }
 pub async fn zhidao_connect_begin(app: AppHandle) -> Result<Value, String> {
-    app.state::<ZhidaoConn>()
-        .cancelled
-        .store(false, Ordering::SeqCst);
-    let app2 = app.clone();
-    tokio::task::spawn_blocking(move || run_login_flow(&app2));
-    Ok(json!({ "started": true }))
+    use super::flow_gate::Begin;
+    let flow = &app.state::<ZhidaoConn>().flow;
+    // 与 eip_connect_begin 同一套单飞语义：进行中复用、取消中等待归还门闩。
+    let wait_start = Instant::now();
+    let decision = loop {
+        match flow.begin() {
+            Begin::Busy => {
+                if wait_start.elapsed() > Duration::from_secs(12) {
+                    return Err("上一个知道登录流程仍在取消中，请几秒后再试".to_string());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            d => break d,
+        }
+    };
+    match decision {
+        Begin::Start => {
+            let app2 = app.clone();
+            tokio::task::spawn_blocking(move || run_login_flow(&app2));
+            Ok(json!({ "started": true }))
+        }
+        Begin::Reuse { payload } => {
+            if let Some((url, qr)) = payload {
+                emit(&app, "zhidao:sso", json!({ "url": url, "qr_data_url": qr }));
+            }
+            Ok(json!({ "started": true, "reused": true }))
+        }
+        Begin::Busy => unreachable!("Busy 已在上面的等待循环处理"),
+    }
 }
 
 fn run_login_flow(app: &AppHandle) {
+    let flow = &app.state::<ZhidaoConn>().flow;
     let login = match get_sso_login() {
         Ok(login) => login,
         Err(e) => {
@@ -223,10 +242,12 @@ fn run_login_flow(app: &AppHandle) {
                 "zhidao:error",
                 json!({ "code": "sso_start_failed", "message": e }),
             );
+            flow.finish();
             return;
         }
     };
     let qr = make_qr(&login.url);
+    flow.arm_payload(login.url.clone(), qr.clone());
     emit(
         app,
         "zhidao:sso",
@@ -235,7 +256,8 @@ fn run_login_flow(app: &AppHandle) {
 
     let deadline = Instant::now() + Duration::from_secs(300);
     while Instant::now() < deadline {
-        if is_cancelled(app) {
+        if flow.is_cancelling() {
+            flow.finish();
             return;
         }
         // 用 zhidao-cli 自己的 poll(复用 H3C session/poll 端点)收 token/AIT 到 zhidao 凭证目录。
@@ -250,6 +272,7 @@ fn run_login_flow(app: &AppHandle) {
                 );
             }
             emit(app, "zhidao:connected", json!({ "ok": true }));
+            flow.finish();
             return;
         }
     }
@@ -261,6 +284,7 @@ fn run_login_flow(app: &AppHandle) {
             "message": "知道 SSO 认证超时，请重新连接"
         }),
     );
+    flow.finish();
 }
 
 struct SsoLogin {
@@ -270,6 +294,7 @@ struct SsoLogin {
 
 fn get_sso_login() -> Result<SsoLogin, String> {
     let cmd = zhidao(&["login"])?;
+    super::flow_gate::throttle_sso_login(); // 同源网关限流:与 EIP 的 auth login 至少间隔 65s
     let (_ok, _code, so, se) = run(cmd)?;
     let p = parse_json(&so)
         .or_else(|| parse_json(&se))
@@ -317,9 +342,7 @@ fn get_sso_login() -> Result<SsoLogin, String> {
     })
 }
 pub async fn zhidao_cancel(app: AppHandle) -> Result<Value, String> {
-    app.state::<ZhidaoConn>()
-        .cancelled
-        .store(true, Ordering::SeqCst);
+    app.state::<ZhidaoConn>().flow.request_cancel();
     Ok(json!({ "ok": true }))
 }
 pub async fn zhidao_logout() -> Result<Value, String> {

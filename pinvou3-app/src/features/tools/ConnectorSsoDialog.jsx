@@ -1,10 +1,12 @@
 import React from 'react';
 import { createPortal } from 'react-dom';
 
-function ConnectorSsoDialog({ state, name, copy, onCancel, onOpen }) {
+function ConnectorSsoDialog({ state, name, copy, onCancel, onOpen, onDismiss }) {
   if (!state) return null;
   return createPortal((
-    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(8px)' }} onClick={onCancel}>
+    // 遮罩点击只收起界面(onDismiss),不取消后台登录流程——收起后扫码照样能连上;
+    // 快速重开由后端单飞门闩重放同一 SSO 会话,避免二次 auth login 撞 429 限流。
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(8px)' }} onClick={onDismiss || onCancel}>
       <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl p-7 w-full max-w-[360px] flex flex-col items-center text-center shadow-2xl" onClick={event => event.stopPropagation()}>
         <h3 className="text-[19px] font-bold text-slate-900 dark:text-white mb-1">{copy.sso.title(name)}</h3>
         <p className="text-[13px] text-slate-500 dark:text-slate-400 mb-5">{copy.sso.hint}</p>

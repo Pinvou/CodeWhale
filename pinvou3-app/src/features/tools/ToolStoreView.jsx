@@ -2441,9 +2441,11 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           })()}
           <ConnectorSsoDialog state={eipSso} name={storeCopy.toolNames.eip} copy={storeCopy}
             onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }); }}
+            onDismiss={() => { setEipSso(null); setBusyId(null); }}
             onCancel={() => { finishToolConfiguration('eip', false); invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(null); }} />
           <ConnectorSsoDialog state={zhidaoSso} name={storeCopy.toolNames.zhidao} copy={storeCopy}
             onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
+            onDismiss={() => { setZhidaoSso(null); setBusyId(null); }}
             onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(null); }} />
           {/* 回收站子页面:点入口后整个插件中心内容区切换为回收站页面(非弹窗),
               返回按钮回到主列表;彻底删除二次确认仍用弹窗(见上方 purgeConfirm) */}

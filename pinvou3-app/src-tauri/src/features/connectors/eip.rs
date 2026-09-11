@@ -1,8 +1,11 @@
 //! H3C EIP 员工门户接入 —— 连接生命周期 + 鉴权编排。
 //!
-//! 路线:A(CLI 连接器)。复用 iClaw 的 `eip-cli` 预编译二进制(多平台:
-//! `eip-cli` / `eip-cli-aarch64` / `eip-cli.exe`;官方只发 Windows/Linux x86_64,
-//! darwin 由 `linux-src` fallback 源构建,见 `build.sh`),内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`。
+//! 路线:A(CLI 连接器)。CLI 二进制内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`,
+//! **五端(Windows / Linux x64 / Linux ARM64 / macOS arm64 / macOS x64)统一由仓库内
+//! 源码 `linux-src/main.go` 交叉编译**,见同目录 `build.sh`。官方 iClaw 只发
+//! Windows/Linux x86_64 且已不可用:SSO 服务端把登录响应 `pollInterval` 从 string
+//! 改为 number 后,其 Go struct 反序列化必失败(auth login / AIT 重登录全挂,报文
+//! 误导读检查网络);自研实现按 `json.RawMessage` 宽容解析,对字段类型变化天然兼容。
 //! 业务命令(考勤/假期/待办…)由模型经 shell 跑 `eip <域> ...`,技能文档教用法
 //! (同飞书 lark-cli)。本模块只负责**连接态**:状态查询、SSO 登录(轮询自动收)、
 //! 取消、登出。
@@ -12,11 +15,10 @@
 //! 凭证由 CLI 用 `AGENT_DEVICE_ID` 派生密钥加密存到 `AGENT_CREDENTIALS_DIR`。
 //! 见《EIP员工门户接入-开发方案》§3。
 //!
-//! ⚠️ 二进制是 H3C IT 内部产物,当前先用 iClaw 这份打包;合规事后补内部知会。
+//! ⚠️ 协议与路由源自 H3C IT 的 iClaw eip-cli(内部产物);合规事后补内部知会。
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use qrcode::{QrCode, render::svg};
@@ -227,18 +229,16 @@ fn set_connected(v: bool) -> bool {
 
 // ──────────────────────────── 连接编排状态 ────────────────────────────
 
-/// 连接编排共享状态:登录轮询的取消标志。`lib.rs` 用 `.manage(EipConn::default())` 注册。
+/// 连接编排共享状态:SSO 登录流程的单飞门闩(见 flow_gate 模块注释——快速重开
+/// 连接界面时复用进行中流程,避免第二次 `auth login` 撞服务端 429 限流)。
+/// `lib.rs` 用 `.manage(EipConn::default())` 注册。
 #[derive(Default)]
 pub struct EipConn {
-    cancelled: AtomicBool,
+    flow: super::flow_gate::SsoFlow,
 }
 
 fn emit(app: &AppHandle, event: &str, payload: Value) {
     let _ = app.emit(event, payload);
-}
-
-fn is_cancelled(app: &AppHandle) -> bool {
-    app.state::<EipConn>().cancelled.load(Ordering::SeqCst)
 }
 
 // ───────────────────────────── Tauri commands ─────────────────────────────
@@ -268,17 +268,43 @@ pub async fn eip_status() -> Result<Value, String> {
 /// 开始连接 EIP(SSO 轮询自动收):
 /// ① `auth login --no-poll --output json` 拿 SSO URL → emit `eip:sso`(前端引导浏览器登录)。
 /// ② 循环 `auth poll` 直到认证成功 / 超时(5min)/ 取消 → emit `eip:connected` / `eip:error`。
-/// 立即返回 `{started:true}`,前端 listen 事件驱动 UI。
+/// 单飞:已有未取消的流程在跑时重放缓存的 SSO 载荷(不二次 `auth login`,防 429);
+/// 旧流程取消中尚未退出时短暂等待其归还门闩。返回 `{started:true}`,前端 listen 事件驱动 UI。
 pub async fn eip_connect_begin(app: AppHandle) -> Result<Value, String> {
-    app.state::<EipConn>()
-        .cancelled
-        .store(false, Ordering::SeqCst);
-    let app2 = app.clone();
-    tokio::task::spawn_blocking(move || run_login_flow(&app2));
-    Ok(json!({ "started": true }))
+    use super::flow_gate::Begin;
+    let flow = &app.state::<EipConn>().flow;
+    // 旧流程取消中:等它退出(一拍 poll+sleep,最坏约 8s)再起步,避免并发双流程。
+    let wait_start = Instant::now();
+    let decision = loop {
+        match flow.begin() {
+            Begin::Busy => {
+                if wait_start.elapsed() > Duration::from_secs(12) {
+                    return Err("上一个 EIP 登录流程仍在取消中，请几秒后再试".to_string());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            d => break d,
+        }
+    };
+    match decision {
+        Begin::Start => {
+            let app2 = app.clone();
+            tokio::task::spawn_blocking(move || run_login_flow(&app2));
+            Ok(json!({ "started": true }))
+        }
+        Begin::Reuse { payload } => {
+            // 流程刚启动、URL 还没拿到时不补发:在途的 eip:sso 随后会送达同一监听器。
+            if let Some((url, qr)) = payload {
+                emit(&app, "eip:sso", json!({ "url": url, "qr_data_url": qr }));
+            }
+            Ok(json!({ "started": true, "reused": true }))
+        }
+        Begin::Busy => unreachable!("Busy 已在上面的等待循环处理"),
+    }
 }
 
 fn run_login_flow(app: &AppHandle) {
+    let flow = &app.state::<EipConn>().flow;
     let url = match get_sso_url() {
         Ok(u) => u,
         Err(e) => {
@@ -287,15 +313,18 @@ fn run_login_flow(app: &AppHandle) {
                 "eip:error",
                 json!({ "code": "sso_start_failed", "message": e }),
             );
+            flow.finish();
             return;
         }
     };
     let qr = make_qr(&url);
+    flow.arm_payload(url.clone(), qr.clone());
     emit(app, "eip:sso", json!({ "url": url, "qr_data_url": qr }));
 
     let start = Instant::now();
     loop {
-        if is_cancelled(app) {
+        if flow.is_cancelling() {
+            flow.finish();
             return; // 取消:静默
         }
         if start.elapsed() > Duration::from_secs(300) {
@@ -307,6 +336,7 @@ fn run_login_flow(app: &AppHandle) {
                     "message": "登录超时(5 分钟内未完成)"
                 }),
             );
+            flow.finish();
             return;
         }
         std::thread::sleep(Duration::from_secs(3));
@@ -321,6 +351,7 @@ fn run_login_flow(app: &AppHandle) {
                 );
             }
             emit(app, "eip:connected", json!({ "ok": true }));
+            flow.finish();
             return;
         }
     }
@@ -329,6 +360,7 @@ fn run_login_flow(app: &AppHandle) {
 /// `auth login --no-poll --output json` → 取 SSO 登录地址(只出 URL 不阻塞)。
 fn get_sso_url() -> Result<String, String> {
     let cmd = eip(&["auth", "login", "--no-poll", "--output", "json"])?;
+    super::flow_gate::throttle_sso_login(); // 同源网关限流:与知道的 login 至少间隔 65s
     let (_ok, _code, so, se) = run(cmd)?;
     let p = parse_json(&so)
         .or_else(|| parse_json(&se))
@@ -347,11 +379,9 @@ fn get_sso_url() -> Result<String, String> {
         })
 }
 
-/// 取消连接:置取消标志(登录轮询下一拍自停)。
+/// 取消连接:请求门闩取消(登录轮询下一拍自停并归还门闩)。
 pub async fn eip_cancel(app: AppHandle) -> Result<Value, String> {
-    app.state::<EipConn>()
-        .cancelled
-        .store(true, Ordering::SeqCst);
+    app.state::<EipConn>().flow.request_cancel();
     Ok(json!({ "ok": true }))
 }
 
