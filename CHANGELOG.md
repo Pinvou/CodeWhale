@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- API-backed `[search]` providers now visibly degrade directly to the
+  keyless Bing tail instead of routing through DuckDuckGo when
+  unavailable: DuckDuckGo is unreachable from mainland-China networks
+  (DNS poisoning plus SNI reset), while Bing serves its global and China
+  endpoints without a key. The all-backends-down guidance names every
+  keyed provider (tavily, bocha, metaso, baidu, volcengine, sofya) and
+  the keyless routes (firecrawl, bing), and the `web_search` tool
+  description no longer claims a DuckDuckGo hop for configured API
+  backends.
+
 ## [0.9.12] - 2026-09-04
 
 Codewhale v0.9.12 puts computer use in the binary, opens two new routes —

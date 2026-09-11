@@ -12033,6 +12033,7 @@ async fn build_direct_workflow_tool(
     } else {
         None
     };
+    let fleet_governor = manager.read().await.rate_limit_governor();
     let runtime = SubAgentRuntime::new(
         client,
         route.model.clone(),
@@ -12041,6 +12042,7 @@ async fn build_direct_workflow_tool(
         Some(event_tx),
         manager.clone(),
     )
+    .with_fleet_governor(fleet_governor)
     .with_locale_tag(
         crate::localization::resolve_locale(
             &crate::settings::Settings::load_persisted()
@@ -12061,7 +12063,11 @@ async fn build_direct_workflow_tool(
     .with_speech_output_dir(config.speech_output_dir())
     .with_mcp_pool(mcp_pool)
     .with_todos(new_shared_todo_list())
-    .with_parent_mode(mode);
+    .with_parent_mode(mode)
+    // Typed permission rules must bind delegated calls like they bind the
+    // parent's own; the handle shares the live rulesets, so mid-session
+    // updates stay effective.
+    .with_exec_policy_engine(config.exec_policy_engine.clone());
 
     Ok((
         crate::tools::workflow::WorkflowTool::new(manager, runtime).with_explicit_cli_approval(),
