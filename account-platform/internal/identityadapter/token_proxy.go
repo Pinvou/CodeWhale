@@ -169,6 +169,8 @@ type TokenProxy struct {
 	floor     time.Duration
 }
 
+const maxUpstreamRetryAfterSeconds = 300
+
 func NewTokenProxy(endpoint string, admission tokenAdmission) (*TokenProxy, error) {
 	return NewTokenProxyWithTrust(endpoint, admission, "", false)
 }
@@ -230,6 +232,22 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	success := response.StatusCode >= 200 && response.StatusCode < 300
+	upstreamError := tokenOAuthError(body)
+	if !success && (upstreamError == "invalid_client" || upstreamError == "unauthorized_client") {
+		waitTokenFloor(r.Context(), started, p.floor)
+		writeOAuthError(w, http.StatusUnauthorized, "unauthorized_client", 0)
+		return
+	}
+	if !success && response.StatusCode == http.StatusTooManyRequests {
+		waitTokenFloor(r.Context(), started, p.floor)
+		writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", upstreamRetryAfter(response.Header.Get("Retry-After"), started))
+		return
+	}
+	if !success && (response.StatusCode >= 500 || upstreamError == "temporarily_unavailable") {
+		waitTokenFloor(r.Context(), started, p.floor)
+		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
+		return
+	}
 	delay, completeErr := p.admission.Complete(r.Context(), d, success, tokenSubject(body))
 	if completeErr != nil && !success {
 		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", 1)
@@ -245,6 +263,38 @@ func (p *TokenProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(body)
+}
+
+func tokenOAuthError(body []byte) string {
+	var envelope struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil {
+		return ""
+	}
+	return strings.TrimSpace(envelope.Error)
+}
+
+func upstreamRetryAfter(raw string, now time.Time) int {
+	raw = strings.TrimSpace(raw)
+	if seconds, err := strconv.Atoi(raw); err == nil {
+		return min(max(seconds, 1), maxUpstreamRetryAfterSeconds)
+	}
+	if deadline, err := http.ParseTime(raw); err == nil {
+		remaining := deadline.Sub(now)
+		if remaining <= 0 {
+			return 1
+		}
+		if remaining >= maxUpstreamRetryAfterSeconds*time.Second {
+			return maxUpstreamRetryAfterSeconds
+		}
+		seconds := int(remaining / time.Second)
+		if remaining%time.Second != 0 {
+			seconds++
+		}
+		return max(seconds, 1)
+	}
+	return 1
 }
 
 func tokenSubject(body []byte) string {

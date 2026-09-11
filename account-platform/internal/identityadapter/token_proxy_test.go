@@ -11,10 +11,11 @@ import (
 )
 
 type admissionFake struct {
-	retry      time.Duration
-	dimensions tokenRiskDimensions
-	success    bool
-	stableUser string
+	retry       time.Duration
+	dimensions  tokenRiskDimensions
+	success     bool
+	stableUser  string
+	completions int
 }
 
 func (f *admissionFake) Admit(_ context.Context, dimensions tokenRiskDimensions) (time.Duration, error) {
@@ -23,6 +24,7 @@ func (f *admissionFake) Admit(_ context.Context, dimensions tokenRiskDimensions)
 }
 
 func (f *admissionFake) Complete(_ context.Context, _ tokenRiskDimensions, success bool, stableUser string) (time.Duration, error) {
+	f.completions++
 	f.success = success
 	f.stableUser = stableUser
 	return 0, nil
@@ -52,8 +54,111 @@ func TestTokenProxyAppliesDimensionsAndNormalizesCredentialFailure(t *testing.T)
 	if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"invalid_grant\"}\n" {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
 	}
-	if admission.dimensions.source != "192.0.2.20" || admission.dimensions.device != "device-1" || admission.dimensions.identifier != "alice" || admission.success {
-		t.Fatalf("dimensions/result = %+v success=%v", admission.dimensions, admission.success)
+	if admission.dimensions.source != "192.0.2.20" || admission.dimensions.device != "device-1" || admission.dimensions.identifier != "alice" || admission.success || admission.completions != 1 {
+		t.Fatalf("dimensions/result = %+v success=%v completions=%d", admission.dimensions, admission.success, admission.completions)
+	}
+}
+
+func TestTokenProxyPreservesClientConfigurationFailuresWithoutCountingCredentialFailure(t *testing.T) {
+	for _, upstreamError := range []string{"invalid_client", "unauthorized_client"} {
+		t.Run(upstreamError, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"` + upstreamError + `"}`))
+			}))
+			defer upstream.Close()
+			admission := &admissionFake{}
+			proxy, _ := NewTokenProxy(upstream.URL, admission)
+			proxy.floor = 0
+			request := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader("grant_type=password&client_id=missing&username=alice&password=secret"))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+
+			proxy.ServeHTTP(response, request)
+
+			if response.Code != http.StatusUnauthorized || response.Body.String() != "{\"error\":\"unauthorized_client\"}\n" {
+				t.Fatalf("response = %d %q", response.Code, response.Body.String())
+			}
+			if admission.completions != 0 {
+				t.Fatalf("client configuration failure counted as credential failure: completions=%d", admission.completions)
+			}
+		})
+	}
+}
+
+func TestTokenProxyMapsUpstreamAvailabilityFailuresWithoutCountingCredentialFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"temporarily_unavailable"}`))
+	}))
+	defer upstream.Close()
+	admission := &admissionFake{}
+	proxy, _ := NewTokenProxy(upstream.URL, admission)
+	proxy.floor = 0
+	request := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader("grant_type=password&client_id=desktop&username=alice&password=secret"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	proxy.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable || response.Body.String() != "{\"error\":\"temporarily_unavailable\"}\n" || response.Header().Get("Retry-After") != "1" {
+		t.Fatalf("response = %d %q retry=%q", response.Code, response.Body.String(), response.Header().Get("Retry-After"))
+	}
+	if admission.completions != 0 {
+		t.Fatalf("availability failure counted as credential failure: completions=%d", admission.completions)
+	}
+}
+
+func TestTokenProxyPreservesBoundedUpstreamRateLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "23")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"temporarily_unavailable"}`))
+	}))
+	defer upstream.Close()
+	admission := &admissionFake{}
+	proxy, _ := NewTokenProxy(upstream.URL, admission)
+	proxy.floor = 0
+	request := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader("grant_type=password&client_id=desktop&username=alice&password=secret"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+
+	proxy.ServeHTTP(response, request)
+
+	if response.Code != http.StatusTooManyRequests || response.Body.String() != "{\"error\":\"temporarily_unavailable\"}\n" || response.Header().Get("Retry-After") != "23" {
+		t.Fatalf("response = %d %q retry=%q", response.Code, response.Body.String(), response.Header().Get("Retry-After"))
+	}
+	if admission.completions != 0 {
+		t.Fatalf("upstream rate limit counted as credential failure: completions=%d", admission.completions)
+	}
+}
+
+func TestUpstreamRetryAfterIsSafeAndBounded(t *testing.T) {
+	now := time.Date(2026, time.September, 11, 10, 0, 0, 0, time.UTC)
+	for name, input := range map[string]struct {
+		raw  string
+		want int
+	}{
+		"missing": {raw: "", want: 1},
+		"invalid": {raw: "later", want: 1},
+		"zero":    {raw: "0", want: 1},
+		"seconds": {raw: "23", want: 23},
+		"bounded": {raw: "999", want: maxUpstreamRetryAfterSeconds},
+		"date":    {raw: now.Add(12 * time.Second).Format(http.TimeFormat), want: 12},
+		"old date": {
+			raw:  now.Add(-12 * time.Second).Format(http.TimeFormat),
+			want: 1,
+		},
+		"far date": {
+			raw:  time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC).Format(http.TimeFormat),
+			want: maxUpstreamRetryAfterSeconds,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := upstreamRetryAfter(input.raw, now); got != input.want {
+				t.Fatalf("upstreamRetryAfter(%q) = %d, want %d", input.raw, got, input.want)
+			}
+		})
 	}
 }
 
