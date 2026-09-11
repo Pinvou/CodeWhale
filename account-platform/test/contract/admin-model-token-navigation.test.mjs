@@ -28,9 +28,18 @@ import {
 } from '../../../pinvou3-app/src/features/account-platform/admin-model-token-state.js';
 import { AdminPlatformClient } from '../../../pinvou3-app/src/features/account-platform/admin-client.js';
 import { adminVisibleSections } from '../../../pinvou3-app/src/features/account-platform/authorization-ui.js';
+import { adminPlatformCopy } from '../../../pinvou3-app/src/shared/admin-platform-i18n.js';
 
 const locationLike = (search) => ({ pathname: '/admin.html', search, hash: '' });
 const authorization = (...permissions) => ({ platform_permissions: permissions });
+
+test('shared admin translations initialize model and Token copy before extension', () => {
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.equal(typeof adminPlatformCopy[language].modelToken, 'object');
+    assert.equal(typeof adminPlatformCopy[language].modelToken.retryAfter, 'function');
+    assert.equal(typeof adminPlatformCopy[language].modelToken.retryCountdown, 'function');
+  }
+});
 
 test('model and Token IA gate preserves the legacy entry off and exposes three canonical sections on', () => {
   assert.deepEqual(adminNavigationGroupsForGate(false).find((group) => group.key === 'models').sections, ['tokens']);

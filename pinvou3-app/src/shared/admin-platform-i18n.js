@@ -1445,6 +1445,10 @@ Object.assign(adminPlatformCopy.en.billing, {
   paymentReference: 'Payment ref / Mobile',
   capabilityLimitations: 'The current payment provider has limited capabilities. Unsupported refund, proactive close, notification, or daily reconciliation actions are disabled.',
 });
+
+adminPlatformCopy.zh.modelToken ||= {};
+adminPlatformCopy.en.modelToken ||= {};
+adminPlatformCopy.ja.modelToken ||= {};
 Object.assign(adminPlatformCopy.zh.modelToken, {
   rateLimited: '请求过于频繁',
   retryAfter: (seconds) => `请在 ${seconds} 秒后重试；已加载的数据仍可继续查看。`,
@@ -1472,9 +1476,6 @@ Object.assign(adminPlatformCopy.ja.billing, {
   capabilityLimitations: '現在の決済プロバイダーには機能制限があります。未対応の返金、能動的なクローズ、通知、日次照合操作は無効です。',
 });
 
-adminPlatformCopy.zh.modelToken ||= {};
-adminPlatformCopy.en.modelToken ||= {};
-adminPlatformCopy.ja.modelToken ||= {};
 Object.assign(adminPlatformCopy.zh.modelToken, {
   catalogDiffTitle: '目录差异预览', catalogAdded: '新增', catalogModified: '修改', catalogRemoved: '移除', catalogMissing: '上游目录缺失', catalogDiffEmpty: '当前版本之间没有目录差异。', catalogDiffUnavailable: '目录差异证据格式异常，当前操作已安全关闭；请重新加载预检。', catalogUnnamedModel: '未命名模型', catalogDiffTruncated: (total, shown) => `共 ${total} 项变更，当前仅展示前 ${shown} 项。`, catalogVersionPair: (from, to) => `目录版本 ${from} → ${to}`, catalogObservedTarget: (from) => `目录版本 ${from} → 本次 Provider 观测`, catalogChangeTypes: { ADDED: '新增', MODIFIED: '修改', REMOVED: '移除' },
   operationsOverview: { eyebrow: '运营概览', title: '目录与运行健康', boundary: '聚合由 Token 服务端按权威事实计算；不会扫描当前列表页。', window: '统计窗口', windows: { '24h': '最近 24 小时', '7d': '最近 7 天', '30d': '最近 30 天' }, unavailable: '运营概览暂时不可用，目录与运行列表仍可独立使用。', groups: { models: '模型目录', routing: '路由与 Provisioning', reconciliation: '用量与核对' }, metrics: { published_model_count: '已发布模型', deprecated_model_count: '已弃用模型', model_draft_count: '待发布草稿', stable_route_count: '稳定路由', healthy_route_count: '健康路由', route_attention_count: '需关注路由', provisioning_pending_count: '待处理 Provisioning', provisioning_attention_count: '异常 Provisioning', usage_request_count: '窗口内用量请求', reconciliation_pending_count: '待核对用量', reconciliation_stopped_count: '已停止自动核对' }, denominator: (key, value) => `分母：${key === 'stable_route_count' ? '稳定路由' : key} ${value}`, windowMetric: '窗口统计', pointMetric: '当前时点', exactDrilldown: '查看精确筛选明细 →', relatedDrilldown: '查看相关明细 →', trendTitle: '用量与核对异常趋势', trendLead: '按服务端固定时间桶展示用量请求和新增核对异常数量。', trendEmpty: '所选窗口暂无用量或核对异常数据。', usageTrend: '用量请求', reconciliationTrend: '新增核对异常', trendAria: (from, to) => `用量与核对异常趋势，${from} 至 ${to}`, bucket: (seconds) => seconds === 3600 ? '每小时' : '每日', halfOpenWindow: (from, to, timezone) => `${from} 至 ${to}（${timezone}，左闭右开）`, asOf: '数据时点', zeroKnown: '0 表示已成功统计且确无记录；加载失败显示不可用', crossDomain: '本卡仅为 Token 域快照，不代表与 Billing 跨域原子一致' },
