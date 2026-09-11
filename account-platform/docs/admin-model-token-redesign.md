@@ -1,6 +1,6 @@
 # 管理后台“模型与 Token”重构专项设计
 
-> 状态：身份 A 修订稿，等待身份 B 独立审核；本文件定义目标需求和设计，不表示代码已实现。
+> 状态：身份 A 于 2026-09-11 增补分区概览整改，等待身份 B 独立审核；本文件定义目标需求和设计，不表示代码已实现。
 >
 > 范围：模型资产、协议与安全计量公式、Token Account、凭据、路由、Provisioning、用量与核对异常，以及模型上下文中的 Billing 价格投影。
 
@@ -54,6 +54,54 @@ Token Account 详情在二期成为独立主内容页，页签为“概览 / 凭
 Provisioning 支持状态、模型、Token Account、owner 和时间筛选，详情展示目标代次、尝试、脱敏证据、SLA 与修复入口。用量支持状态、模型、Token Account、组织和时间筛选，并提供“核对异常”工作队列。
 
 异常闭环为：发现异常 → 查看请求、Hold、上游与结算证据 → 仅重新读取并归并既有证据 → 确认最终结算 → 保存审计。普通“重新核对”不得重新发起推理、不得冒充 `USAGE_SETTLEMENT_REPAIR`，未知结果继续按同一幂等引用查询。
+
+### 2.4 分区顶部概览
+
+`UI-59` 与 `ADM-66` 只替换 UI-57/ADM-59 中概览的页面归属、权限组合和读取投影；UI-57 已冻结的指标状态集合、数据库权威时间、趋势桶、目录 observation 与性能口径继续有效。不得再以“目录与运行健康”把三个领域混成一个组件，也不得在模型管理和运行与用量重复渲染同一组指标。
+
+| 所属页面 | 顶部概览 | 固定指标 | 权限与可见性 | 允许的点击结果 |
+|---|---|---|---|---|
+| `models` 模型管理 | 模型目录概览 | `published_model_count`、`deprecated_model_count`、`model_draft_count` | 整个概览仅要求 `platform.models.read`；进入“协议与公式”或模型详情时不显示 | 下钻仅以 2.4.1 逐指标矩阵为准；保持 `section=models` |
+| `tokenResources` Token 资源 | 路由健康概览 | `stable_route_count`、`healthy_route_count`、`route_attention_count`，健康率同时显示分子和 `stable_route_count` 分母 | 仅要求 `platform.tokens.read`；进入 Token Account 详情时不显示 | 下钻仅以 2.4.1 逐指标矩阵为准；保持 `section=tokenResources` |
+| `modelOperations` 运行与用量 | 运行与用量概览 | Token 权限组：`provisioning_pending_count`、`provisioning_attention_count`；Usage 权限组：`usage_request_count`、`reconciliation_pending_count`、`reconciliation_stopped_count` 及用量/核对趋势 | `platform.tokens.read` 与 `platform.usage.read` 分组裁剪；至少一个权限存在即显示有权组，两者均无时不请求并进入既有无泄露拒绝路径；只有具备 `platform.usage.read` 时显示时间选择器；进入 Provisioning/用量详情时不显示 | 下钻仅以 2.4.1 逐指标矩阵为准；保持 `section=modelOperations` |
+
+时间选择器 `model_operations_window=24h|7d|30d` 及“用量与核对趋势”只在具备 `platform.usage.read` 的 `modelOperations` 列表态存在，只影响窗口用量与趋势请求；token-only 不渲染选择器并按 2.4.2 清除该参数。模型目录和路由健康都是点时指标，不能携带或解释该窗口。切换 section 时继续按第 3 节清除其他区状态；概览下穿不得改变 section。浏览器返回必须恢复概览前的本区页签、筛选、cursor 和适用窗口，刷新与分享链接得到同一状态。
+
+#### 2.4.1 逐指标下钻矩阵
+
+下钻类型只有三种：`EXACT` 表示概览集合与列表筛选集合严格相等；`RELATED` 表示只能进入相关列表或其真子集，卡片及结果区必须持续显示“相关结果/非等价统计”；`NON_INTERACTIVE` 表示仅展示指标，不能使用按钮、链接、tabindex 或点击样式。不得为了让卡片可点击而把不等价集合标为精确。
+
+| 指标/趋势序列 | 类型 | 当前允许行为 | 不精确原因或精确条件 |
+|---|---|---|---|
+| `published_model_count` | EXACT | 留在 `models`，原子替换全部 `model_*` 筛选为 `model_lifecycle_status=PUBLISHED` 并清除 `model_cursor` | 当前模型列表可表达同一 PUBLISHED 集合 |
+| `deprecated_model_count` | EXACT | 留在 `models`，原子替换全部 `model_*` 筛选为 `model_lifecycle_status=DEPRECATED` 并清除 `model_cursor` | 当前模型列表可表达同一 DEPRECATED 集合 |
+| `model_draft_count` | NON_INTERACTIVE | 仅显示 | 指标来自草稿事实，当前模型目录筛选不能证明与草稿集合等价；未新增 additive draft filter |
+| `stable_route_count` | NON_INTERACTIVE | 始终显示服务端真实非负整数，值为零时显示 `0`；不显示 N/A，始终不可点击 | 当前主列表对象是 Token Account，且无 route `reference_status` 列表筛选；只有以它为分母的健康率在值为零时显示不可计算 |
+| `healthy_route_count` | RELATED | 留在 `tokenResources`，原子替换全部 `token_*` 筛选为 `token_health_status=HEALTHY` 并清除 `token_cursor`，结果标题标“相关 Token Account” | 指标计数路由，列表计数 Token Account，二者不保证一一对应 |
+| `route_attention_count` | RELATED | 留在 `tokenResources`，只聚焦 Token Account 列表并清除 `token_cursor`，持续标“相关结果”；不得自动选取某一个异常状态冒充完整集合 | 指标是六类需关注路由的并集，当前列表既按账户聚合又只接受单值 health status |
+| `provisioning_pending_count` | EXACT | 留在 `modelOperations`，原子替换全部 `provisioning_*` 筛选为 `provisioning_status=PENDING`、切换 `operations_tab=provisionings` 并清除 `provisioning_cursor` | 当前 Provisioning 列表可表达同一 PENDING 集合 |
+| `provisioning_attention_count` | RELATED | 留在 `modelOperations`，切换 `operations_tab=provisionings`、清除 `provisioning_cursor` 并标“相关结果”；不写单一状态筛选 | 指标是 FAILED 与 REPAIR_REQUIRED 并集，当前未新增 additive/多值状态筛选 |
+| `usage_request_count` | EXACT | 留在 `modelOperations`，原子替换全部 `usage_*` 筛选为响应 `window.from/to`，切换 `operations_tab=usage` 并清除 `usage_cursor` | 列表 UTC 半开时间条件与服务端窗口集合一致，且不附加其他状态条件 |
+| `reconciliation_pending_count` | RELATED | 留在 `modelOperations`，切换 `operations_tab=reconciliation`、清除 `reconciliation_cursor` 并标“相关结果”；不写伪等价状态 | 指标基于待核对用量请求点时集合，列表对象是核对案件，且当前无等价的多状态请求过滤 |
+| `reconciliation_stopped_count` | RELATED | 留在 `modelOperations`，切换 `operations_tab=reconciliation`、清除 `reconciliation_cursor` 并标“相关结果”；不写伪等价 stopped 筛选 | 当前核对案件列表没有 `reconciliation_stopped` 等价筛选 |
+| 趋势 `usage_request_count` 序列 | EXACT | 点击整条序列或桶时按所选响应窗口/桶边界执行用量列表的同一原子替换规则 | 服务端趋势和列表均按 `started_at` UTC 半开区间表达 |
+| 趋势 `reconciliation_attention_count` 序列 | RELATED | 仅切换核对 Tab、清除其 cursor 并标“相关结果”，或设为不可交互 | 趋势按案件 `created_at` 计数，当前核对列表没有对应时间筛选 |
+
+EXACT 下钻必须在一次 history 写入中完成：先删除目标数据源的全部具名筛选和 cursor，再写入矩阵给出的完整筛选集合；不能在旧筛选上增量叠加。RELATED 下钻同样不能保留会进一步缩小且未向用户说明的旧筛选。该次写入使用 `pushState`，浏览器后退精确恢复下钻前的 URL、筛选、cursor、页签和窗口；popstate 不得追加第二条历史或重新解释为当前默认值。
+
+#### 2.4.2 权限变化与缓存失效
+
+概览缓存键至少绑定稳定用户、授权版本、section、响应变体和（仅 Usage 变体）窗口。授权版本变化、任一相关权限撤销、退出登录、gate 关闭或 section 离开时，Portal 必须先中止在途请求并递增请求代次，再清除已撤销组的成功缓存、错误和下钻状态；随后才能按新权限发起请求。旧授权版本或旧代次的迟到响应不得渲染、写缓存、恢复 URL 或触发下钻。
+
+`modelOperations` 若没有 `platform.usage.read`，必须隐藏时间选择器，并在渲染或请求前以同一次规范化 `replaceState` 删除 `model_operations_window`，不得再写回该参数。若服务端共享 SQL 的参数类型要求内部窗口值，Token 只能在完成授权后于服务内部规范化为固定 `24h` 占位；Usage 分支必须保持 `never executed`，该占位不进入响应、URL、日志或缓存键，也不构成 Usage 数据读取。
+
+#### 2.4.3 零分母与不可评估语义
+
+`stable_route_count` 卡片始终显示服务端真实非负整数，值为零时明确显示 `0`。仅当 `stable_route_count=0` 时，健康率不执行 `healthy_route_count/stable_route_count`，不显示 `0%` 或 `100%`，而显示“不可计算 / 无可评估路由”；三语使用同一语义，并通过文本而非仅颜色表达。此时 `healthy_route_count` 仍显示服务端真实值，但健康率状态不得点击为“零条健康路由”的精确结果。
+
+三个概览分别维护 loading、error、retry、last_updated 和成功缓存。403 表示该概览/指标组无权，接口失败表示暂不可用，合法数值 `0` 与趋势全零无数据保持独立语义；概览失败不卸载或遮挡本页列表、详情入口和操作区。请求在离页、进详情、撤权或 gate 关闭时中止，迟到响应不得回写当前页面。
+
+三个标题、指标、口径、错误、“相关结果”说明和空状态必须提供简体中文、英文、日文。指标使用原生按钮或等价语义，键盘可达且焦点可见；不可精确下穿的卡片不得伪装成按钮。触控目标至少 44×44 CSS px，在 320px 宽与 200% 缩放下不横向遮挡关键操作，并尊重 reduced motion。
 
 ## 3. URL、深链与权限裁剪
 
@@ -161,7 +209,50 @@ cursor 必须签名绑定主体、授权版本、资源、规范化筛选、排�
 
 每个页面/页签独立维护 loading、error、retry、last_updated、filter 和 cursor。模型失败不得阻断价格投影，用量失败不得阻断 Provisioning；离页中止请求，代次令牌防止旧响应回写。
 
-### 4.4 目录 observation 与运行趋势合同
+### 4.4 目录 observation、页面级概览与运行趋势合同
+
+新增页面级只读投影固定为：
+
+| Token Admin API | 必要权限 | 响应范围 | 请求参数 |
+|---|---|---|---|
+| `GET /token/admin/v1/overviews/model-catalog` | `platform.models.read` | 仅模型目录三个点时指标 | 不接受查询参数 |
+| `GET /token/admin/v1/overviews/token-resources` | `platform.tokens.read` | 仅路由三个点时指标及健康率分母 | 不接受查询参数 |
+| `GET /token/admin/v1/overviews/model-operations`（Usage 有权时携带 `?window=24h|7d|30d`） | `platform.tokens.read` 或 `platform.usage.read` | 按授权组裁剪 Provisioning 或用量/核对/趋势；两组均有权时返回同一数据库事务的完整运行投影 | 有 `platform.usage.read` 时要求单值规范 `window`；token-only 请求不得携带窗口 |
+
+三个投影的公共 metric item 固定 `additionalProperties:false`，required keys 恰为 `key,value,unit,aggregation,included_statuses,denominator_key`：`value` 是非负 int64，`unit="COUNT"`；点时指标 `aggregation="POINT_IN_TIME"`，窗口指标 `aggregation="WINDOW"`；`included_statuses` 是固定顺序闭合枚举数组；无分母时 `denominator_key=null`，健康/需关注路由固定为 `"stable_route_count"`。两个点时响应的 exact closed schema 为：
+
+| 端点 | 顶层 required keys（`additionalProperties:false`） | metrics 固定长度、顺序与状态 |
+|---|---|---|
+| `model-catalog` | `schema_version:"1"`、`as_of`、`metrics` | 恰 3 项：`published_model_count/[PUBLISHED]`、`deprecated_model_count/[DEPRECATED]`、`model_draft_count/[DRAFT]`；三项 denominator 均为 null |
+| `token-resources` | `schema_version:"1"`、`as_of`、`metrics` | 恰 3 项：`stable_route_count/[RESOLVED]`、`healthy_route_count/[HEALTHY]`、`route_attention_count/[UNKNOWN,PROBING,DEGRADED,UNHEALTHY,STALE,EXPIRED_HEALTH]`；后两项 denominator 为 `stable_route_count` |
+
+`as_of` 必须是规范 RFC 3339 UTC 时间，两个端点都不接受任何 query；出现任意未知、空名、重复或带值 query 均在仓储调用前返回 400，稳定码分别为 `INVALID_MODEL_CATALOG_OVERVIEW_QUERY`、`INVALID_TOKEN_RESOURCES_OVERVIEW_QUERY`。不得忽略参数、返回宽松 additional properties 或复用运行窗口。
+
+`model-operations` 也使用 `additionalProperties:false`，公共顶层 required keys 为 `schema_version:"1"`、`as_of`、`permission_view`，并使用以下唯一 `oneOf`；服务端只能从权威授权上下文选择变体，客户端不得请求或声明变体：
+
+| 权限组合 | 固定响应字段 | 禁止返回/执行 |
+|---|---|---|
+| token-only | `schema_version:"1"`、`as_of`、`permission_view:"TOKEN_ONLY"`、`provisioning:{metrics:[provisioning_pending_count,provisioning_attention_count]}` | 不返回 `usage/window/trend`；不执行 Usage、核对案件或趋势 SQL 分支 |
+| usage-only | `schema_version:"1"`、`as_of`、`permission_view:"USAGE_ONLY"`、`usage:{window,metrics:[usage_request_count,reconciliation_pending_count,reconciliation_stopped_count],trend}` | 不返回 `provisioning`；不执行 Provisioning SQL 分支 |
+| both | `schema_version:"1"`、`as_of`、`permission_view:"TOKEN_AND_USAGE"`、`provisioning`、`usage` | 只执行两组已授权分支；两个组共享该请求的数据库 `as_of` |
+
+数组项数、key、unit、aggregation、included_statuses 和 denominator_key 均闭合且顺序固定。无权组必须完全省略，不能返回 null、空对象、空数组或数值 0；两个权限均无时在仓储调用前返回无泄露 403。实现可使用一条带布尔授权参数的生产 SQL，但数据库执行计划必须证明无权 CTE/子计划 `never executed`、Actual Loops=0 且零 buffer；也可在服务端选取互斥的闭合 SQL 变体，任何方案都不得先查询再从响应删除。
+
+模型、Token 和运行投影独立裁剪、鉴权、限时、监控与失败；“独立”不表示跨服务请求，它们仍由 Token 服务读取同一事实源。字段缺失、类型或状态集合非法、查询超时及仓储失败均使目标投影返回稳定错误，不返回部分 200 或伪 0；但不影响其他投影及页面列表。
+
+三个新投影的后续实现必须扩展现有 `internal/platform/requestdeadline`，新增 `OverviewRead` class（稳定传输值 `overview-read`），并在 `BudgetFor`中固定 `Business=3s/BFF=5s/Ingress=7s`。`Classify` 必须先于通用“无 cursor 即 snapshot-build”规则，把三个精确 `GET|HEAD /admin/v1/overviews/{model-catalog|token-resources|model-operations}` 路由分类为 `OverviewRead`，未知 overview 路由不得被该 class 接受。这是本次待实现差距：当前代码只有 `snapshot-build/snapshot-read/precheck`，无 cursor 的新概览若不扩展会被错分为 10 秒 `snapshot-build`，不能冒称已具备 3 秒 overview 预算。
+
+Portal 必须复用既有链路：在 `tokenAdminIngressDeadline` 删除浏览器提供的 `X-Pinvou-Absolute-Deadline` 和 `X-Pinvou-Deadline-Class`，以入口当前时刻调用 `requestdeadline.Start(now, OverviewRead)`，并由代理通过 `requestdeadline.ApplyToUpstream` 写入同一份 RFC 3339 Nano 绝对业务 deadline 和 class。Token 继续由 `TokenAdminMiddleware` 按路由选择 `OverviewRead` fallback，使用 `ConsumeBusinessDeadline` 消费：有效且更早的上游绝对期限只能缩短 Token 本地 3 秒预算，绝不能延长或重置；缺失、畸形、class 不匹配或较晚值仍按现有语义退回 Token 接收时刻起的本地 3 秒上限，因此必须以 Portal 始终成功 `Start/ApplyToUpstream` 的合同测试证明正常链路共享入口起点。不新增或虚构 `account-portal` workload 认证；只在现有受信代理拓扑、入口头清理与用户 Bearer 授权边界内消费这两个内部头。SQL statement timeout 必须取当前 context 剩余时间，不另加新的 3 秒。
+
+`OverviewRead` 的 5 秒 BFF 和 7 秒 Ingress deadline 继续由现有 `Contract`/context 机制安装，仅作运输兜底，不重置 3 秒业务期限。Token `writeDeadlineError`/`WriteContextDeadlineError` 与 Portal `writeTokenAdminDeadlineError` 必须扩展为同时根据 `OverviewRead` 和规范资源路径映射错误：`model-catalog`、`token-resources`、`model-operations` 分别返回 504 `MODEL_CATALOG_OVERVIEW_TIMEOUT`、`TOKEN_RESOURCES_OVERVIEW_TIMEOUT`、`MODEL_OPERATIONS_OVERVIEW_TIMEOUT`。Token 已响应时 Portal 原样透传状态、稳定码、`request_id` 和安全响应头；BFF context 先耗尽时也必须以同一规范路径映射该专属 504，而非落入现有 class 默认 `QUERY_TIMEOUT`。浏览器和 BFF 不自动重试，用户显式重试才由 Portal `Start` 创建新合同。
+
+稳定错误合同固定为：沿用 NFR-56 常规读取阈值，每个稳定用户按端点各有独立 `60 次/分钟` 桶，由受信入口规范化的来源 IP 在三个新端点间共享一个 `120 次/分钟` 桶，不得相信浏览器自报的转发头；任一桶超限返回 429 `TOKEN_OVERVIEW_RATE_LIMITED` 并携带服务端计算的 1～60 秒 `Retry-After`。不得为三个端点各建 120/IP 桶，也不得把各指标组另算请求。gate/仓储/容量不可用分别返回 503 `MODEL_CATALOG_OVERVIEW_UNAVAILABLE`、`TOKEN_RESOURCES_OVERVIEW_UNAVAILABLE`、`MODEL_OPERATIONS_OVERVIEW_UNAVAILABLE`；业务 deadline 耗尽分别返回 504 `MODEL_CATALOG_OVERVIEW_TIMEOUT`、`TOKEN_RESOURCES_OVERVIEW_TIMEOUT`、`MODEL_OPERATIONS_OVERVIEW_TIMEOUT`。非法、重复或对 token-only 不适用的窗口返回 400 `INVALID_TIME_WINDOW`。Portal 保留该数据源上次成功值并展示过期标识，429 倒计时结束前禁用重试，不把错误改写为 0。
+
+既有 `GET /token/admin/v1/operations-overview` 保留其当前只读响应和权限合同，作为 UI-58 约束的 N/N-1 兼容入口至少延续至旧 `section=tokens` 的兼容窗口结束；新 Portal 的三个分区概览不得调用它。兼容入口不接受新字段或新写语义，弃用和移除必须走既有正式版本通知与回滚门禁。新投影复用现有事实和查询口径，不新增数据库事实、跨服务聚合或第二份指标来源。
+
+性能门禁必须直接执行三个新 handler 使用的生产 SQL（或上述 `model-operations` 闭合 SQL 变体的同一生产常量），不得以旧 `/operations-overview` SQL、列表 count 或测试专用简化查询替代。沿用本节既有 PostgreSQL 17、2 vCPU、4 GiB、冷一暖三和 3 秒上限，并冻结以下附加数据：`model_catalog_versions` 恰 100 行；`model_catalog_entries` 恰 1,000,000 行，每版 10,000 行，head 版恰为 7,000 PUBLISHED、2,000 DEPRECATED、1,000 REMOVED；`model_catalog_drafts` 恰 50,000 行，draft_version 1/2/3 分布为 30,000/15,000/5,000，base_catalog_version 为 head/head-1/更早版本分布 30,000/15,000/5,000。`routing_policies` 恰 1,000,000 行，其中 800,000 RESOLVED、150,000 LEGACY_UNRESOLVED、50,000 DELETED；RESOLVED 中 400,000 HEALTHY 且 `health_expires_at>as_of`、80,000 HEALTHY 但已过期、80,000 UNKNOWN、80,000 PROBING、80,000 DEGRADED、40,000 UNHEALTHY、40,000 STALE；全部路由的 route_version 1/2/3 分布 500,000/300,000/200,000。seed 必须按数据库冻结 `as_of` 构造并逐项断言这些数量、版本、状态及健康过期边界。
+
+计划门禁要求模型 SQL 对 head 状态集合只使用一次有界扫描并命中既有 `model_catalog_entries_status_idx`，版本 head 使用版本主键/唯一索引；草稿集合恰扫描一次，允许对冻结的 50,000 行使用单次 bounded Seq Scan 或主键 index-only scan，但不得重复扫描。路由 SQL 必须以一次扫描同时聚合 stable/healthy/attention，并命中新追加的具名部分索引 `routing_policies_overview_health_idx`（键为 `health_status,health_expires_at,id`，谓词精确 `reference_status='RESOLVED'`）；禁止对 1,000,000 行路由 Seq Scan 或分别重复扫描三次。运行 SQL 继续满足本节原三个逻辑集合及具名索引断言。保留卷重启后，每条生产 SQL 的第一次事实访问直接执行 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，随后连续三次暖执行；每次不超过 3 秒，且 token-only、usage-only、both 证明无权分支 Actual Loops=0/零 buffer。兼容旧接口继续运行原响应 schema、组合权限、指标/趋势口径和 SQL 回归，不能因新投影拆分而改变旧客户端结果。
 
 目录差异预览返回的 observation 是本次 Adapter 发现结果的不可变规范投影。指纹必须覆盖同步实际消费的 Provider、Adapter 版本及每个发现模型的稳定 upstream 引用和规范显示字段，并按固定全序计算。同步写入只能采用以下一种闭合方式：复用该次冻结 observation；或在写前只重新发现一次、逐字段重算并与请求冻结指纹精确相等后，直接以这次已校验结果进入同一同步事务。禁止预检后再次发现第三份结果。任何新增、删除、改名、重复项归一或来源版本变化都返回稳定冲突，并保证目录、通用命令结果、审计与 Outbox 零写；响应不确定时只查询原 `command_reference`，不得重新发现或重发同步。
 
@@ -531,7 +622,7 @@ APT-123-R2 草稿漂移数据库状态机修订：Account `000047_token_approval
 - 英文枚举在中文界面转换为“已发布、已弃用、可用、对话”等标签，原枚举可置于 Tooltip。
 - 资源名称进入详情，稳定 ID 为次要信息并独立复制；表格主要动作保留一个，其余进入“更多”。
 - 高风险操作使用结构化面板，显示目标、影响、原因、生效时间、资源版本、幂等和未知结果恢复；移动端使用全屏面板，触控目标至少 44×44 CSS px。
-- 首屏可展示已发布模型、待发布草稿、异常路由、失败 Provisioning 和待核对用量，但指标由服务端聚合、明确窗口/时区/分母，403 隐藏、失败显示不可用，不扫描列表计算。
+- 三个列表页首屏按第 2.4 节分别展示模型目录、路由健康、运行与用量概览；不得重复跨域模块或跨 section 下穿。指标由对应页面级投影聚合并明确点时/窗口/时区/分母，403 隐藏、失败显示不可用，不扫描列表计算。
 - 错误必须保留 `request_id`，区分 400 输入、403 无权、409 版本冲突、410 cursor 过期、422 筛选过宽、429 限流、503 容量/快照不可用、504 查询/预检超时。
 - 任何错误、DOM、日志、遥测和审计都不能包含 Secret、密文、Provider Key ID、私有地址、原始错误或无权深链 ID。
 
@@ -542,6 +633,8 @@ APT-123-R2 草稿漂移数据库状态机修订：Account `000047_token_approval
 二期：模型/Token Account 独立详情、隔离凭据新增/轮换、Token 直接脱敏校验、Portal→Account 审批撤销、生命周期依赖与计划生效、模型上下文价格与计量、目录差异/健康/异常趋势。
 
 每个能力有独立 feature gate，服务与 Portal 支持 N/N-1。数据库使用前向兼容追加迁移；回滚先停新写和隔离凭据会话，再回滚 Portal/服务。未消费 launch 立即失效，旧 cursor 返回 410，不得在回滚期间重新启用 query 凭据通道。
+
+2026-09-11 增补的 UI-59/ADM-66 概览整改不属于既有 APT-136 `DONE` 证据，当前仅完成需求与设计修订，尚未创建实施任务、修改代码、提交、推送或部署。后续必须先建立相互独立且可逐项提交的任务，再按服务端投影、Portal 分区接入和验收门禁的依赖顺序实施；旧聚合入口在兼容窗口内保持可回滚。
 
 ### 9.1 APT-137 G1 离线计划与 envelope 边界
 
@@ -583,6 +676,7 @@ Compose 显式 overlay/profile 和 Helm 可选 Deployment/Service/ServiceAccount
 6. 逐区块失败隔离、URL 前进后退、旧 `section=tokens` 兼容、移动端与键盘可访问性测试。
 7. 从真实迁移后数据库对三个强制审批策略与 `internal/platform/approvalpolicy` 逐字段（包括有序 `critical_resource_fields`）比对；`executableApprovalCommands` 保留所有既有合法项，且新增 `TOKEN_*` 子集恰为 lifecycle v2、rollback v2、revoke v1 三项，无其他 Token 命令被放行；任一偏差阻断发布。
 8. 现有管理后台合同测试在后续实施任务中更新：feature gate 开启时断言三页为 canonical，关闭时仍断言历史 Token Gateway；本轮不修改实现测试。
+9. UI-59/ADM-66 的后续实现必须验证三个页面仅出现本区概览、任一指标下穿不改变 `section`、详情态不渲染列表概览、时间选择器只在有 usage 权限的运行页存在；model-only、token-only、usage-only 权限分别只请求并显示允许投影，局部 403/503/504 不阻断列表，前进后退恢复筛选/适用窗口；旧聚合入口在兼容窗口内保持原合同，新 Portal 零调用；简中/英文/日文、键盘、320px、200% 缩放和 reduced-motion 全部通过。
 
 任一门禁缺失时不得把需求状态标记为已实现、不得推送生产部署。
 
