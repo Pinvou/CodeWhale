@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { adminModelTokenQueryUpdates, readAdminModelTokenModelTab, readAdminModelTokenOperationsTab, readAdminModelTokenQuery } from './admin-navigation.js';
+import { adminModelTokenOverviewDrilldownUpdates, adminModelTokenQueryUpdates, readAdminModelTokenModelTab, readAdminModelTokenOperationsTab, readAdminModelTokenOverviewResult, readAdminModelTokenQuery } from './admin-navigation.js';
 import { planAdminModelTokenOperationRequests } from './admin-model-token-state.js';
 import { AdminProtocolFormulaWorkspace } from './AdminProtocolFormulaWorkspace.jsx';
 import { AdminTokenResourcesWorkspace } from './AdminTokenResourcesWorkspace.jsx';
 import { AdminModelOperationsWorkspace } from './AdminModelOperationsWorkspace.jsx';
 import { AdminModelOperationsOverview } from './AdminModelOperationsOverview.jsx';
+import { AdminModelTokenPageOverview } from './AdminModelTokenPageOverview.jsx';
 import { AdminModelDetailWorkspace } from './AdminModelDetailWorkspace.jsx';
 import { AdminTokenAccountDetailWorkspace } from './AdminTokenAccountDetailWorkspace.jsx';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
@@ -103,7 +104,7 @@ function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnab
   );
 }
 
-export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelOperationsOverviewEnabled = false, modelDetailsEnabled = false, modelPricingEditEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
+export function AdminModelTokenWorkspace({ section, copy, client, permissions, routeVersion, onRouteChange, onNavigate, routeNotice, tokenResourceFormsEnabled = false, modelOperationsDetailsEnabled = false, modelOperationsOverviewEnabled = false, modelTokenPageOverviewsEnabled = false, overviewUserID = '', overviewAuthorizationVersion = 0, modelDetailsEnabled = false, modelPricingEditEnabled = false, tokenDetailsEnabled = false, credentialOrigin = '', modelTokenActionsEnabled = false }) {
   const modelTokenCopy = copy.modelToken;
   const granted = new Set(permissions || []);
   const cursorHistory = useRef({});
@@ -114,7 +115,16 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
 	const tokenAccountID = useMemo(() => new URLSearchParams(globalThis.location?.search || '').get('token_account_id') || '', [routeVersion]);
   const operationDetailOpen = useMemo(() => { const query = new URLSearchParams(globalThis.location?.search || ''); return Boolean(query.get('provisioning_id') || query.get('usage_request_id')); }, [routeVersion]);
   const canReadOperationsOverview = modelOperationsOverviewEnabled && ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'].every((permission) => granted.has(permission));
-  const onQueryChange = (source, query, mode = 'push') => onRouteChange(adminModelTokenQueryUpdates(source, query), mode);
+  const resultParameter = { models: 'model_overview_result', tokenResources: 'token_overview_result', modelOperations: 'operations_overview_result' }[section];
+  const onQueryChange = (source, query, mode = 'push') => onRouteChange({ ...adminModelTokenQueryUpdates(source, query), [resultParameter]: null }, mode);
+  const overviewResult = useMemo(() => readAdminModelTokenOverviewResult(section), [routeVersion, section]);
+  const pageOverviewVisible = (section === 'models' && !modelID && modelTabs.tab === 'directory')
+    || (section === 'tokenResources' && !tokenAccountID)
+    || (section === 'modelOperations' && !operationDetailOpen);
+  const onOverviewDrilldown = (target, key) => {
+    const updates = adminModelTokenOverviewDrilldownUpdates(section, target, key);
+    if (updates) onRouteChange(updates, 'push');
+  };
   const notice = routeNotice === 'invalid' ? modelTokenCopy.invalidLink : routeNotice === 'conflict' ? modelTokenCopy.conflictingDetail : '';
   const moveOperationsTab = (event) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
@@ -129,7 +139,9 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
   return <>
     {notice && <div className="adm-inline-message info" role="status">{notice}</div>}
     {!modelTokenActionsEnabled && <div className="adm-inline-message info" role="status">{modelTokenCopy.actionsReadOnly}</div>}
-    {canReadOperationsOverview && ((section === 'models' && !modelID && modelTabs.tab === 'directory') || (section === 'modelOperations' && !operationDetailOpen)) && <AdminModelOperationsOverview client={client} copy={modelTokenCopy} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} />}
+    {!modelTokenPageOverviewsEnabled && canReadOperationsOverview && ((section === 'models' && !modelID && modelTabs.tab === 'directory') || (section === 'modelOperations' && !operationDetailOpen)) && <AdminModelOperationsOverview client={client} copy={modelTokenCopy} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} />}
+    {modelTokenPageOverviewsEnabled && pageOverviewVisible && <AdminModelTokenPageOverview section={section} client={client} copy={modelTokenCopy} permissions={permissions} userID={overviewUserID} authorizationVersion={overviewAuthorizationVersion} routeVersion={routeVersion} enabled={modelTokenPageOverviewsEnabled} onRouteChange={onRouteChange} onDrilldown={onOverviewDrilldown} />}
+    {pageOverviewVisible && overviewResult && <div className="adm-inline-message info adm-overview-related-result" role="status">{modelTokenCopy.pageOverviews.relatedResult(modelTokenCopy.pageOverviews.metrics[overviewResult] || overviewResult)}</div>}
     {section === 'models' && modelDetailsEnabled && modelID && granted.has('platform.models.read') && <AdminModelDetailWorkspace modelID={modelID} client={client} copy={modelTokenCopy} pricingCopy={copy} permissions={permissions} actionsEnabled={modelTokenActionsEnabled} pricingEditEnabled={modelPricingEditEnabled} routeVersion={routeVersion} onRouteChange={onRouteChange} onNavigate={onNavigate} onQueryChange={onQueryChange} cursorHistory={cursorHistory} onTabsKeyDown={moveOperationsTab} />}
     {section === 'models' && (!modelDetailsEnabled || !modelID) && <>
       <div className="adm-tabs adm-model-tabs" role="tablist" aria-label={modelTokenCopy.modelViews} onKeyDown={moveOperationsTab}>
@@ -142,7 +154,7 @@ export function AdminModelTokenWorkspace({ section, copy, client, permissions, r
 		{section === 'tokenResources' && (!tokenDetailsEnabled || !tokenAccountID) && <AdminTokenResourcesWorkspace client={client} copy={modelTokenCopy} permissions={permissions} formsEnabled={tokenResourceFormsEnabled} actionsEnabled={modelTokenActionsEnabled} detailsEnabled={tokenDetailsEnabled} routeVersion={routeVersion} onQueryChange={onQueryChange} onRouteChange={onRouteChange} histories={cursorHistory} />}
     {section === 'modelOperations' && <>
       <div className="adm-tabs" role="tablist" aria-label={modelTokenCopy.operationsViews} onKeyDown={moveOperationsTab}>
-        {operations.visible.map((tab) => <button type="button" role="tab" id={`model-operations-tab-${tab}`} aria-controls={`model-operations-panel-${tab}`} aria-selected={operations.tab === tab} tabIndex={operations.tab === tab ? 0 : -1} className={operations.tab === tab ? 'active' : ''} key={tab} onClick={() => onRouteChange({ operations_tab: tab }, 'push')}>{tab === 'provisionings' ? modelTokenCopy.provisionings : tab === 'usage' ? modelTokenCopy.usageRequests : modelTokenCopy.reconciliationQueue}</button>)}
+        {operations.visible.map((tab) => <button type="button" role="tab" id={`model-operations-tab-${tab}`} aria-controls={`model-operations-panel-${tab}`} aria-selected={operations.tab === tab} tabIndex={operations.tab === tab ? 0 : -1} className={operations.tab === tab ? 'active' : ''} key={tab} onClick={() => onRouteChange({ operations_tab: tab, operations_overview_result: null }, 'push')}>{tab === 'provisionings' ? modelTokenCopy.provisionings : tab === 'usage' ? modelTokenCopy.usageRequests : modelTokenCopy.reconciliationQueue}</button>)}
       </div>
       <AdminModelOperationsWorkspace client={client} copy={modelTokenCopy} permissions={permissions} detailsEnabled={modelOperationsDetailsEnabled} actionsEnabled={modelTokenActionsEnabled} routeVersion={routeVersion} operations={operations} requests={operationRequests} onRouteChange={onRouteChange} onQueryChange={onQueryChange} onNavigate={onNavigate} histories={cursorHistory} />
     </>}

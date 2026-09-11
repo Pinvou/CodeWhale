@@ -1,6 +1,6 @@
 # 管理后台“模型与 Token”重构专项设计
 
-> 状态：2026-09-11 分区概览整改已通过身份 B 独立需求/设计审核；APT-139 后端投影已获身份 B 最终代码审核 PASS，状态 `DONE / REVIEW_PASS / NOT_DEPLOYED`，APT-140 Portal 整改尚未开工。本文件定义目标合同，不表示代码已部署。
+> 状态：2026-09-12 分区概览整改已通过身份 B 独立需求/设计审核；APT-139 后端投影已获身份 B 最终代码审核 PASS，APT-140 Portal 整改已获身份 B 第二轮代码审核 PASS，两项状态均为 `DONE / REVIEW_PASS / NOT_DEPLOYED`。本文件定义目标合同和已审核实现边界，不表示代码已部署。
 >
 > 范围：模型资产、协议与安全计量公式、Token Account、凭据、路由、Provisioning、用量与核对异常，以及模型上下文中的 Billing 价格投影。
 
@@ -636,7 +636,7 @@ APT-123-R2 草稿漂移数据库状态机修订：Account `000047_token_approval
 
 每个能力有独立 feature gate，服务与 Portal 支持 N/N-1。数据库使用前向兼容追加迁移；回滚先停新写和隔离凭据会话，再回滚 Portal/服务。未消费 launch 立即失效，旧 cursor 返回 410，不得在回滚期间重新启用 query 凭据通道。
 
-2026-09-11 增补的 UI-59/ADM-66 概览整改不属于既有 APT-136 `DONE` 证据；需求/设计与 APT-139/140 独立任务拆分均已通过身份 B 审核。APT-139 服务端投影已获身份 B 最终代码审核 PASS，状态 `DONE / REVIEW_PASS / NOT_DEPLOYED`；APT-140 Portal 分区接入仍未开工。两项继续按服务端投影、Portal 分区接入的依赖顺序逐项独立提交；旧聚合入口在兼容窗口内保持可回滚。
+2026-09-11 增补的 UI-59/ADM-66 概览整改不属于既有 APT-136 `DONE` 证据；需求/设计与 APT-139/140 独立任务拆分均已通过身份 B 审核。APT-139 服务端投影已获身份 B 最终代码审核 PASS；APT-140 Portal 分区接入经首轮整改后已获身份 B 第二轮代码审核 PASS，两项状态均为 `DONE / REVIEW_PASS / NOT_DEPLOYED`。两项按服务端投影、Portal 分区接入的依赖顺序独立提交；旧聚合入口在兼容窗口内保持可回滚。
 
 ### 9.1 APT-137 G1 离线计划与 envelope 边界
 

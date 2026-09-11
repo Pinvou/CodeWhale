@@ -44,18 +44,18 @@ function rejected(mutate, expected = /model_token_release_/) {
   assert.throws(() => validateModelTokenReleasePlan(plan), expected);
 }
 
-test('plan freezes thirteen existing gates with closed defaults and exact schema fields', async () => {
+test('plan freezes fifteen existing gates with closed defaults and exact schema fields', async () => {
   const sourceGates = {
-    'token-gateway': ['TOKEN_ADMIN_PAGINATION_ENABLED', 'TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED', 'TOKEN_CREDENTIAL_ISOLATION_ENABLED', 'TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED'],
+    'token-gateway': ['TOKEN_ADMIN_PAGINATION_ENABLED', 'TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED', 'TOKEN_CREDENTIAL_ISOLATION_ENABLED', 'TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED', 'TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED'],
     'billing-service': ['BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED'],
-    'token-portal': ['PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED', 'PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED', 'PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED', 'PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED', 'PORTAL_ADMIN_MODEL_DETAILS_ENABLED', 'PORTAL_ADMIN_TOKEN_DETAILS_ENABLED', 'PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED', 'PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED'],
+    'token-portal': ['PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED', 'PORTAL_ADMIN_TOKEN_RESOURCE_FORMS_ENABLED', 'PORTAL_ADMIN_MODEL_OPERATIONS_DETAILS_ENABLED', 'PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED', 'PORTAL_ADMIN_MODEL_DETAILS_ENABLED', 'PORTAL_ADMIN_TOKEN_DETAILS_ENABLED', 'PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED', 'PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED', 'PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED'],
   };
   assert.deepEqual([...modelTokenGateNames].sort(), Object.values(sourceGates).flat().sort());
   for (const [service, names] of Object.entries(sourceGates)) {
     const source = await readFile(new URL(`../../cmd/${service}/main.go`, import.meta.url), 'utf8');
     for (const name of names) assert.ok(source.includes(`"${name}"`), `existing source gate ${name}`);
   }
-  assert.equal(modelTokenGateNames.length, 13);
+  assert.equal(modelTokenGateNames.length, 15);
   assert.equal(Object.values(closedModelTokenGates()).every(value => value === false), true);
   assert.deepEqual(validateModelTokenReleasePlan(fixture()), { decision: 'PLAN_VALID', environment_status: 'ENV_PENDING', deployment_status: 'NOT_DEPLOYED' });
   for (const mutate of [p => { p.force = true; }, p => { p.gates.UNKNOWN_ENABLED = false; },

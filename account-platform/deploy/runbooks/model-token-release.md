@@ -34,7 +34,7 @@ Agent 首次登录前业务可能启动失败并重启，readiness 必须等待�
 
 activation 的 NOT_INSTALLED 要求 epoch/安装摘要全 null；真实 PRE/0 两摘要为 null，导出的 `activationFromGovernanceSnapshot` 只在明确 PRE/0 将 SQL NULL 或 CLI 空串归一，缺字段/不安全整数/非法摘要拒绝。ACTIVE/SAFE 要求正的安全整数 epoch 和与候选相符摘要；不支持的摘要跨版本切换拒绝，不自动迁移或转换状态。声明 ACTIVE 并不构成数据库强读或可写授权。
 
-十三个 gate 全部显式 boolean，默认全 false、既有父子依赖由 schema 校验。写动作声明要求 ACTIVE；隔离凭据要求既有 Token 详情/动作前置及固定 origin；读详情、价格投影和编辑等保持独立开关。它们仍是既有部署配置，不新增业务/客户端 cohort 开关，本组不修改 Compose/Helm 或运行中环境。
+十五个 gate 全部显式 boolean，默认全 false、既有父子依赖由 schema 校验。APT-140 新增的 `TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED` 与 `PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED` 也必须显式声明：先启用 Token 投影 gate，再启用 Portal 分区概览 gate；回滚时先关闭 Portal、再关闭 Token，N/N-1 期间旧 `TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED`/`PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED` 独立保留。写动作声明要求 ACTIVE；隔离凭据要求既有 Token 详情/动作前置及固定 origin；读详情、价格投影和编辑等保持独立开关。计划校验不执行启用、回滚或部署。
 
 两 runtime 身份必须分离、不复用 retired/保护组/运维身份，名称为最多 63 字节的小写无引号 PostgreSQL 标识符；token_gateway 是权限组不是本代登录。Account policy 运维角色声明必须包含 SHARE_NOWAIT 锁合同，不能将其误称纯 SELECT 身份。这里只校验声明，实际非超级用户锁权限、跨库依赖、NOLOGIN/成员链和旧会话 fence 由第6节工具及现场验收分别证明。
 
@@ -46,7 +46,7 @@ INTERNAL→LIMITED→FULL 固定有序，流量严格增加且末阶段 100%；�
 
 ## 4. 精确候选验证与后续交付
 
-本组具名回归：`node --test account-platform/test/contract/model-token-release-plan.test.mjs`，覆盖十三 gate、所有依赖、环境/新域/状态摘要、身份、真实 PRE 归一与类型、观察阈值、envelope 绑定、重复 JSON 和默认 CLI 无 apply/GO。根在 G0 加本组四个代码/schema/test 文件的精确候选 `e96f6387c539d3a44296fea3f1da94df1103f030` 实际运行九项 Node 全 PASS/0 SKIP（1.784 秒），exit 0；本组最小文档另交 B 复核。此为当前四文件依赖已齐的真实运行，不继承原整树 PASS。G5 前其他两项旧 Node 基线断言仍可能失败，须如实记录。
+本组具名回归：`node --test account-platform/test/contract/model-token-release-plan.test.mjs`，覆盖十五 gate、所有依赖、环境/新域/状态摘要、身份、真实 PRE 归一与类型、观察阈值、envelope 绑定、重复 JSON 和默认 CLI 无 apply/GO。APT-140 仅扩展离线计划的闭合 gate 清单和依赖顺序，仍输出 `ENV_PENDING / NOT_DEPLOYED`；真实 N/N-1 混跑与现场回滚证据继续由 APT-137 收口。早期 G1 精确候选证据保留其当时十三 gate 的历史事实，不继承为当前候选证据。
 
 G0～G5 已按依赖独立验证/签署，G6 代码与隔离门禁已验证，最后证据文档复核；第5～8节保留各组安全合同与其当时精确候选证据。共同文档随已存在接口更新，不能把后续实现提前写成已交付。DNS/TLS、OIDC/workload、KMS 全用途旧密文、同一 NATS 集群/ACL、备份/HBA、实际灰度/SAFE 回滚仍需现场证据；本地 plan PASS 不能关闭 APT-137/UI-58 或解除部署前置。
 
@@ -56,7 +56,7 @@ G1 已独立提交 `33209285`。本组使用现有 Go Dockerfile的 SERVICE 参�
 
 公开配置仅用于解析。Compose 在 deploy/compose 目录运行 `docker compose --env-file .env.example --env-file model-token.env.example -f compose.yaml -f compose.model-token.yaml --profile model-token --profile governance-operations --profile real-newapi config --format json`，输出保存到本次受控临时文件，再从仓库根运行 `node scripts/account-platform-model-token-deployment-check.mjs --compose-render <文件>`；不能读现场 .env 或用这些不可用占位值 up/run。Helm 对已有默认、staging、production-new 与新增 `values-model-token-test.yaml` lint，渲染 fixture 后用同一 checker 的 `--helm-render <文件>`。真实 Docker/Helm 解析不是静态字符串替代，结构合法仍输出 DEPLOYMENT_CONFIG_VALID/ENV_PENDING/NOT_DEPLOYED。
 
-十三 gate 环境值透传到既有所属服务，不改变领域逻辑。正式配对为 account.pinvou.com / credentials.pinvou.com，公开 UAT fixture 配对为 account-uat.pinvou.com / credentials-uat.pinvou.com。credential OIDC issuer 与 authorization/token/JWKS 必须精确同 origin HTTPS、无任何显式端口，不采用普通 Portal 内网 HTTP JWKS路径。外部可信短期 workload token-file/投射身份和各服务独立 NATS creds 必须就绪；不得继续共享开发静态 Token，也不在本任务临时造签发器。
+十五 gate 环境值透传到既有所属服务，不改变领域逻辑；两个页面概览 gate 默认关闭并遵循 Token 后 Portal 的启用顺序、Portal 后 Token 的回滚顺序。正式配对为 account.pinvou.com / credentials.pinvou.com，公开 UAT fixture 配对为 account-uat.pinvou.com / credentials-uat.pinvou.com。credential OIDC issuer 与 authorization/token/JWKS 必须精确同 origin HTTPS、无任何显式端口，不采用普通 Portal 内网 HTTP JWKS路径。外部可信短期 workload token-file/投射身份和各服务独立 NATS creds 必须就绪；不得继续共享开发静态 Token，也不在本任务临时造签发器。
 
 七个 broker 客户端使用同一受控外部 TLS NATS；Helm 开新治理组件时拒绝内置匿名开发 NATS，URL/creds/Ping 不证明真实 ACL 或 JetStream 历史。受限 workload 排除旧宽策略选择器，checker 核全部命中允许规则；目标 New API 明确只允许 credential 与 gateway 所需入口。Compose 网络本身不充当防火墙，依赖 CIDR/Host/TLS 身份与可信出站边界仍需现场证明。credential 独立 loopback18108、端口/IP范围重叠必须拒绝；所有 runtime/附加容器禁止运维URL，控制Job/entrypoint必须固定只读默认，不可用wrapper或init容器自动执行。
 
@@ -146,7 +146,7 @@ prepare 程序只从 `TOKEN_RELEASE_DBA_DATABASE_URL` 连接 DBA；`--operation 
 
 | Kind | 必需事实族（实施时固定具名 case，不能以汇总 PASS 替代） |
 |---|---|
-| GATE_MATRIX | 十三 gate 各自 on/off、依赖拒绝、撤权取消、父页/只读恢复、UNKNOWN 仅 GET、无 direct 回退 |
+| GATE_MATRIX | 十五 gate 各自 on/off、依赖拒绝、撤权取消、父页/只读恢复、UNKNOWN 仅 GET、无 direct 回退 |
 | CURSOR_ISOLATION | 既有九源登记逐源；跨源/actor/过滤绑定、过期及 gate-off 410，真实服务/共享签名配置 |
 | LEGACY_LINKS | 三旧 tab 规范化、过时筛选/私有 cursor 清理、无权回退、GA 与生产稳定版本保留证据 |
 | AUTHORIZATION | 三页/各动作精确权限、近期认证、独立 workload 与撤权零效果 |
@@ -220,6 +220,6 @@ G0～G5 分别已签署 `8dcaa87c`、`33209285`、`e63224e9`、`07e29c55`、`047
 | OIDC、短期 workload、同集群 NATS ACL/轮换 | 复用既有可信签发器，每服务窄身份；最长15分钟、错audience/subject/权限拒绝与轮换实测；不能沿用共享development token或丢弃既有JetStream历史 |
 | 全用途旧密文、备份恢复与认证 | 凭据/事件流/结果回放/dispatch全部原key_id/格式/AAD可读，真实恢复与HBA/Secret登录探针；server verifier布尔或隔离trust不构成现场证明 |
 | 角色/版本、cap、000031 与运行注册 | 首次缺31先停写/fence/连续前向迁移再强读PRE；已ACTIVE以摘要匹配旧CLI完成SAFE；不支持摘要变化则阻断。短期运维角色关闭后启用本代gateway/credential/Relay，两worker/三consumer真实ready |
-| 十三gate、旧链接/cursor、观察与回滚 | 依赖分级、先验适用权限/安全恢复，再按第8节独立来源原始证据判定INTERNAL/LIMITED/FULL；SAFE CAS成功后旧epoch零新效果，未知只读原request-id，保留历史/90天与两稳定版更长窗口 |
+| 十五 gate、旧链接/cursor、观察与回滚 | 依赖分级、先验适用权限/安全恢复，再按第8节独立来源原始证据判定INTERNAL/LIMITED/FULL；SAFE CAS成功后旧epoch零新效果，未知只读原request-id，保留历史/90天与两稳定版更长窗口 |
 
 这些缺项约束实际切换，不阻塞已验证代码签署；反之提交完成不解除前置。现场操作只在适用批准范围、维护窗口及证据齐备后执行。APT-137/UI-58 仍 IN_PROGRESS/部分实现/ENV_PENDING/NOT_DEPLOYED，不以本组收尾自动标整体 DONE。

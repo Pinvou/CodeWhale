@@ -454,8 +454,8 @@ test('new page source keeps independent loading, error, refresh and last-updated
   const initialNormalize = view.indexOf('const normalized = normalizeAdminModelTokenEntry(requested, visible, iaEnabled');
   const initialDenied = view.indexOf('if (visible.length === 0)', initialNormalize);
   assert.ok(initialNormalize >= 0 && initialNormalize < initialDenied, 'initial authorization normalizes before rendering zero-permission denial');
-  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelOperationsOverviewEnabled: nextOperationsOverviewEnabled, modelDetailsEnabled: nextDetailsEnabled, modelPricingEditEnabled: nextPricingEditEnabled, tokenDetailsEnabled: nextTokenDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
-  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelOperationsOverviewEnabled, modelDetailsEnabled, modelPricingEditEnabled, tokenDetailsEnabled, modelTokenActionsEnabled \}\)/);
+  assert.match(view, /normalizeAdminModelTokenEntry\(section, visible, nextIAEnabled, undefined, next\.platform_permissions \|\| \[\], \{ tokenResourceFormsEnabled: nextResourceFormsEnabled, modelOperationsDetailsEnabled: nextOperationsDetailsEnabled, modelOperationsOverviewEnabled: nextOperationsOverviewEnabled, modelTokenPageOverviewsEnabled: nextPageOverviewsEnabled, modelDetailsEnabled: nextDetailsEnabled, modelPricingEditEnabled: nextPricingEditEnabled, tokenDetailsEnabled: nextTokenDetailsEnabled, modelTokenActionsEnabled: nextActionsEnabled \}\)/);
+  assert.match(view, /const normalized = normalizeAdminModelTokenNavigation\(section, visibleSections, modelTokenIAEnabled, platformPermissions, updates, undefined, \{ tokenResourceFormsEnabled, modelOperationsDetailsEnabled, modelOperationsOverviewEnabled, modelTokenPageOverviewsEnabled, modelDetailsEnabled, modelPricingEditEnabled, tokenDetailsEnabled, modelTokenActionsEnabled \}\)/);
   assert.match(operationsSource, /provisioningRequest &&/);
   assert.match(operationsSource, /usageRequest &&/);
   assert.match(operationsSource, /reconciliationRequest &&/);
@@ -597,7 +597,9 @@ test('Portal BFF explicitly allowlists every APT-127 list source and exposes the
   assert.match(service, /admin_model_token_ia/);
   assert.match(service, /admin_model_token_actions/);
   assert.match(service, /admin_model_operations_overview/);
+  assert.match(service, /admin_model_token_page_overviews/);
   assert.match(deployment, /PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED/);
   assert.match(deployment, /PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED/);
   assert.match(deployment, /PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED/);
+  assert.match(deployment, /PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED/);
 });

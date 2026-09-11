@@ -47,6 +47,7 @@ const adminModelTokenQueryParameters = Object.freeze({
 const adminModelTokenPageParameters = Object.freeze([
   'model_tab', 'model_id', 'model_detail_tab', 'model_price_manage', 'model_price_return', 'token_account_id', 'token_detail_tab',
   'operations_tab', 'provisioning_id', 'usage_request_id', 'model_operations_window',
+  'model_overview_result', 'token_overview_result', 'operations_overview_result',
 ]);
 const adminModelTokenDetailParameters = Object.freeze({
   model: Object.freeze(['model_id', 'model_detail_tab', 'model_price_manage', 'model_price_return', ...Object.values(adminModelTokenQueryParameters.modelAudit), ...Object.values(adminModelTokenQueryParameters.modelHistory), ...Object.values(adminModelTokenQueryParameters.modelProvisionings), ...Object.values(adminModelTokenQueryParameters.modelLifecyclePlans), ...Object.values(adminModelTokenQueryParameters.modelLifecycleCandidates)]),
@@ -60,9 +61,21 @@ const adminModelTokenTabParameters = Object.freeze({
   reconciliation: Object.freeze([...Object.values(adminModelTokenQueryParameters.reconciliation), ...adminModelTokenDetailParameters.usage]),
 });
 const adminModelTokenSectionParameters = Object.freeze({
-  models: Object.freeze(['model_tab', 'model_id', 'model_detail_tab', ...['models', 'protocols', 'formulas', 'modelAudit', 'modelHistory', 'modelProvisionings', 'modelLifecyclePlans', 'modelLifecycleCandidates'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
-  tokenResources: Object.freeze(['token_account_id', 'token_detail_tab', ...['tokenAccounts', 'ownerCandidates', 'tokenAudit', 'tokenProvisionings', 'tokenCredentials', 'tokenRoutes'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
-  modelOperations: Object.freeze(['operations_tab', 'provisioning_id', 'usage_request_id', ...['provisionings', 'usage', 'reconciliation', 'provisioningAttempts', 'usageEvidence'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+  models: Object.freeze(['model_tab', 'model_id', 'model_detail_tab', 'model_overview_result', ...['models', 'protocols', 'formulas', 'modelAudit', 'modelHistory', 'modelProvisionings', 'modelLifecyclePlans', 'modelLifecycleCandidates'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+  tokenResources: Object.freeze(['token_account_id', 'token_detail_tab', 'token_overview_result', ...['tokenAccounts', 'ownerCandidates', 'tokenAudit', 'tokenProvisionings', 'tokenCredentials', 'tokenRoutes'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+  modelOperations: Object.freeze(['operations_tab', 'provisioning_id', 'usage_request_id', 'operations_overview_result', ...['provisionings', 'usage', 'reconciliation', 'provisioningAttempts', 'usageEvidence'].flatMap((source) => Object.values(adminModelTokenQueryParameters[source]))]),
+});
+const adminModelTokenOverviewResultParameters = Object.freeze({ models: 'model_overview_result', tokenResources: 'token_overview_result', modelOperations: 'operations_overview_result' });
+const adminModelTokenOverviewResultKeys = Object.freeze({
+  models: Object.freeze([]),
+  tokenResources: Object.freeze(['healthy_route_count', 'route_attention_count']),
+  modelOperations: Object.freeze(['provisioning_attention_count', 'reconciliation_pending_count', 'reconciliation_stopped_count', 'reconciliation_trend']),
+});
+const adminModelTokenOverviewResultTabs = Object.freeze({
+  provisioning_attention_count: 'provisionings',
+  reconciliation_pending_count: 'reconciliation',
+  reconciliation_stopped_count: 'reconciliation',
+  reconciliation_trend: 'reconciliation',
 });
 const legacyTokenParameters = Object.freeze(['tab', 'token_tab', 'tokens_tab', 'q', 'status', 'protocol', 'source', 'owner_type', 'health', 'model_id_filter', 'owner_id_filter', 'from', 'to', 'cursor']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -107,6 +120,16 @@ export function adminModelOperationsOverviewGateEnabled(session = {}) {
   return session?.feature_flags?.admin_model_operations_overview === true;
 }
 
+export function adminModelTokenPageOverviewsGateEnabled(session = {}) {
+  return session?.feature_flags?.admin_model_token_page_overviews === true;
+}
+
+export function readAdminModelTokenOverviewResult(section, locationLike = globalThis.location) {
+  const parameter = adminModelTokenOverviewResultParameters[section];
+  const value = parameter ? String(new URLSearchParams(String(locationLike?.search || '')).get(parameter) || '') : '';
+  return adminModelTokenOverviewResultKeys[section]?.includes(value) ? value : '';
+}
+
 export function readAdminModelOperationsWindow(locationLike = globalThis.location) {
   const value = new URLSearchParams(String(locationLike?.search || '')).get('model_operations_window') || '24h';
   return ['24h', '7d', '30d'].includes(value) ? value : '24h';
@@ -128,6 +151,16 @@ export function adminModelTokenQueryUpdates(source, input = {}) {
   const parameters = adminModelTokenQueryParameters[source];
   if (!parameters) return {};
   return Object.fromEntries(Object.entries(parameters).map(([key, parameter]) => [parameter, String(input[key] || '').trim() || null]));
+}
+
+export function adminModelTokenOverviewDrilldownUpdates(section, target, key) {
+  const resultParameter = adminModelTokenOverviewResultParameters[section];
+  if (!resultParameter || !target || target.section !== section || !target.source) return null;
+  return {
+    ...adminModelTokenQueryUpdates(target.source, target.query),
+    ...(target.page || {}),
+    [resultParameter]: target.interaction === 'RELATED' ? key : null,
+  };
 }
 
 export function synchronizeAdminModelTokenCursorHistory(previous = {}, query = {}) {
@@ -270,8 +303,23 @@ export function normalizeAdminModelTokenEntry(requestedSection, visibleSections,
     if (options.modelDetailsEnabled !== true) clearParameters(adminModelTokenDetailParameters.model, updates);
   }
 	if (permissions !== null && adminModelTokenSections.includes(requested)) {
-		const canReadOverview = options.modelOperationsOverviewEnabled === true
-			&& ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'].every((permission) => permissions.includes(permission));
+		const pageOverviews = options.modelTokenPageOverviewsEnabled === true;
+		const resultParameter = adminModelTokenOverviewResultParameters[requested];
+		const rawResult = resultParameter ? search.get(resultParameter) || '' : '';
+		const allowedResults = new Set(pageOverviews ? adminModelTokenOverviewResultKeys[requested] || [] : []);
+		if (requested === 'modelOperations') {
+			if (!permissions.includes('platform.tokens.read')) allowedResults.delete('provisioning_attention_count');
+			if (!permissions.includes('platform.usage.read')) {
+				for (const key of ['reconciliation_pending_count', 'reconciliation_stopped_count', 'reconciliation_trend']) allowedResults.delete(key);
+			}
+		}
+		const requiredTab = requested === 'modelOperations' ? adminModelTokenOverviewResultTabs[rawResult] : '';
+		const effectiveTab = requested === 'modelOperations' ? readAdminModelTokenOperationsTab(permissions, locationLike).tab : '';
+		if (rawResult && (!allowedResults.has(rawResult) || (requiredTab && requiredTab !== effectiveTab))) updates[resultParameter] = null;
+		const canReadOverview = pageOverviews
+			? requested === 'modelOperations' && permissions.includes('platform.usage.read')
+			: options.modelOperationsOverviewEnabled === true
+				&& ['platform.models.read', 'platform.tokens.read', 'platform.usage.read'].every((permission) => permissions.includes(permission));
 		const overviewWindow = search.get('model_operations_window');
 		if (!canReadOverview && overviewWindow !== null) updates.model_operations_window = null;
 		else if (canReadOverview && overviewWindow !== null && !['24h', '7d', '30d'].includes(overviewWindow)) updates.model_operations_window = '24h';

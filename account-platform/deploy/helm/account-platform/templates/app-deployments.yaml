@@ -242,6 +242,7 @@ spec:
             - { name: PORTAL_ADMIN_TOKEN_DETAILS_ENABLED, value: {{ $root.Values.portal.adminTokenDetailsEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED, value: {{ $root.Values.portal.adminModelPricingEditEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED, value: {{ $root.Values.portal.adminModelOperationsOverviewEnabled | quote }} }
+            - { name: PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED, value: {{ $root.Values.portal.adminModelTokenPageOverviewsEnabled | quote }} }
             - { name: PORTAL_ADMIN_MODEL_TOKEN_ACTIONS_ENABLED, value: {{ $root.Values.portal.adminModelTokenActionsEnabled | quote }} }
             - name: TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-admin-pagination-cursor-hmac-key-base64, optional: true } }

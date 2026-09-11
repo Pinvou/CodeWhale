@@ -151,7 +151,9 @@
         "BILLING_ADMIN_MODEL_PRICE_PROJECTION_ENABLED",
         "PORTAL_ADMIN_MODEL_PRICING_EDIT_ENABLED",
         "TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED",
-        "PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED"
+        "PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED",
+        "TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED",
+        "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED"
       ],
       "properties": {
         "TOKEN_ADMIN_PAGINATION_ENABLED": {
@@ -191,6 +193,12 @@
           "type": "boolean"
         },
         "PORTAL_ADMIN_MODEL_OPERATIONS_OVERVIEW_ENABLED": {
+          "type": "boolean"
+        },
+        "TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED": {
+          "type": "boolean"
+        },
+        "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED": {
           "type": "boolean"
         }
       },
@@ -379,6 +387,28 @@
                 "const": true
               },
               "TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED": {
+                "const": true
+              }
+            },
+            "required": [
+              "PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED"
+            ]
+          },
+          "then": {
+            "properties": {
+              "PORTAL_ADMIN_MODEL_TOKEN_IA_ENABLED": {
+                "const": true
+              },
+              "TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED": {
                 "const": true
               }
             }

@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 140 个正式任务中，127 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，4 个任务为 `PENDING`，1 个任务为 `IN_PROGRESS`，1 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 及 APT-122-R2、APT-123-R2、APT-125-R1 是保留原已审核交付历史、同时修复具名缺口的整改批次，不新增主目标所有权，也不计入 140 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 140 个正式任务中，128 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，3 个任务为 `PENDING`，1 个任务为 `IN_PROGRESS`，1 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 及 APT-122-R2、APT-123-R2、APT-125-R1 是保留原已审核交付历史、同时修复具名缺口的整改批次，不新增主目标所有权，也不计入 140 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -163,7 +163,7 @@
 | APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138–APT-140 | CODE+ENV | IN_PROGRESS |
 | APT-138 | 十九项 Token 命令一致性总验收与原子激活 | ADM-64 | APT-122–APT-136 | CODE | DONE |
 | APT-139 | OverviewRead 期限链与三个页面级 Token 只读投影 | ADM-66 | APT-120, APT-121, APT-125, APT-126, APT-136 | CODE | DONE |
-| APT-140 | Portal 分区概览、同 section 下钻与端到端回归 | UI-59 | APT-127, APT-130, APT-132, APT-133, APT-136, APT-139 | CODE | PENDING |
+| APT-140 | Portal 分区概览、同 section 下钻与端到端回归 | UI-59 | APT-127, APT-130, APT-132, APT-133, APT-136, APT-139 | CODE | DONE |
 
 ## 3. APT-119～APT-140 详细交付合同
 
@@ -483,7 +483,7 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 
 ### APT-140 Portal 分区概览与端到端回归
 
-- **当前状态**：`PENDING / DOC_REVIEW_PASS / NOT_DEPLOYED`。任务拆分已经身份 B 独立审核通过，依赖的 APT-139 已取得身份 B 最终代码审核 `PASS`；本任务仍未开工，也不得绕过后端 gate 或使用假投影。
+- **当前状态**：`DONE / REVIEW_PASS / NOT_DEPLOYED`。任务拆分已经身份 B 独立审核通过，依赖的 APT-139 已取得身份 B 最终代码审核 `PASS`；APT-140 Portal 分区概览、同 section 下钻、权限/授权版本失效、三语及离线/浏览器门禁经首轮整改后，于 2026-09-12 取得身份 B 第二轮代码审核 `PASS`。代码尚未推送、启用或部署，真实 N/N-1、灰度与回滚环境证据继续由 APT-137 收口。
 - **目标/范围**：唯一主目标 `UI-59`。在 APT-139 的公开合同已独立提交后，修改 `pinvou3-app/src/features/account-platform/` 中的 `AdminModelTokenWorkspace`、三个分区 workspace、`AdminPlatformView`、`admin-client`、`admin-navigation`、概览验证/状态模块及 CSS，将现有跨域 `AdminModelOperationsOverview` 按所有权演进为模型目录、路由健康、运行与用量三个页面级组件。同步 `pinvou3-app/src/shared/admin-platform-i18n.js`、Portal feature session/config、Compose/Helm 默认值、离线 release-plan schema/checker、Node 契约与生产制品 Chromium smoke。本任务拥有 Portal gate `PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED`，默认 `false`，且只有 APT-139 后端 gate 可用时才能计划新请求。
 - **页面、请求与权限**：三个概览只在各自 section 的列表态顶部渲染，进入模型、Token Account、Provisioning 或用量详情后必须卸载。模型页在 `platform.models.read` 有权时仅请求一次 model-catalog，Token 页在 `platform.tokens.read` 有权时仅请求一次 token-resources，运行页在 Token/Usage 任一读权存在时仅请求一次 model-operations；客户端不选变体，只严格校验服务端 `TOKEN_ONLY/USAGE_ONLY/TOKEN_AND_USAGE` oneOf 与当前权限相符。无 `platform.usage.read` 时不渲染时间选择器，不发 `window`，并在同次 URL 规范化删除 `model_operations_window`；有 Usage 权时仅允许 `24h/7d/30d`。缓存和请求代次绑定稳定用户、授权版本、section、变体和适用窗口；撤权、登出、关 gate、离页或进详情先 abort 并清理已撤销状态，迟到响应不得回写。
 - **下钻、URL 与历史**：严格以设计 2.4.1 为唯一矩阵。`model_draft_count` 和 `stable_route_count` 为 `NON_INTERACTIVE`；健康/需关注路由、异常 Provisioning、待核对/已停止自动核对及核对趋势仅可为 `RELATED` 并持续标注非等价；只有矩阵列为 `EXACT` 的指标/趋势才能精确下钻。EXACT 在一次 `pushState` 中删除目标数据源全部旧筛选和 cursor、写入完整新筛选；RELATED 也清除会隐性缩小结果的旧筛选。任一操作保持当前 `section`，popstate 不追加历史，后退精确恢复原 section/页签/筛选/cursor/窗口，刷新和分享链接得到同一状态。

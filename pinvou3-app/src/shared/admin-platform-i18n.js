@@ -1477,6 +1477,52 @@ Object.assign(adminPlatformCopy.ja.billing, {
 });
 
 Object.assign(adminPlatformCopy.zh.modelToken, {
+  pageOverviews: {
+    eyebrow: '分区概览', titles: { models: '模型目录概览', tokenResources: '路由健康概览', modelOperations: '运行与用量概览' },
+    boundaries: { models: '仅汇总模型目录权威事实。', tokenResources: '仅汇总稳定路由及其健康状态。', modelOperations: '按当前权限汇总 Provisioning、用量与核对事实。' },
+    groups: { models: '模型目录', tokenResources: '路由健康', provisioning: 'Provisioning', usage: '用量与核对' },
+    metrics: { published_model_count: '已发布模型', deprecated_model_count: '已弃用模型', model_draft_count: '待发布草稿', stable_route_count: '稳定路由', healthy_route_count: '健康路由', route_attention_count: '需关注路由', provisioning_pending_count: '待处理 Provisioning', provisioning_attention_count: '异常 Provisioning', usage_request_count: '窗口内用量请求', reconciliation_pending_count: '待核对用量', reconciliation_stopped_count: '已停止自动核对', usage_trend: '用量趋势', reconciliation_trend: '核对趋势' },
+    window: '统计窗口', windows: { '24h': '最近 24 小时', '7d': '最近 7 天', '30d': '最近 30 天' }, windowMetric: '窗口统计', pointMetric: '当前时点',
+    exactDrilldown: '查看精确结果 →', relatedDrilldown: '查看相关结果（非等价）→', relatedResult: (metric) => `当前显示“${metric}”相关结果；列表筛选与概览口径不完全等价。`,
+    healthUnavailable: '健康率不可计算：无可评估路由', healthRate: (healthy, stable) => `健康率 ${Math.round(healthy / stable * 100)}%（${healthy}/${stable}）`,
+    unavailable: { models: '模型目录概览暂时不可用，目录列表仍可使用。', tokenResources: '路由健康概览暂时不可用，Token 列表仍可使用。', modelOperations: '运行与用量概览暂时不可用，运行列表仍可使用。' },
+    permissionChanged: '权限已变化，概览已停止更新。', stale: '正在显示上次成功结果', retryAfter: (seconds) => `${seconds} 秒后重试`,
+    trendTitle: '用量与核对趋势', trendLead: '用量柱可精确下钻；核对柱仅显示相关结果。', trendEmpty: '所选窗口无用量或核对趋势数据。', usageTrend: '用量请求', reconciliationTrend: '新增核对异常', trendAria: (from, to) => `用量与核对趋势，${from} 至 ${to}`, trendPoint: (series, from, to, value) => `${series}，${from} 至 ${to}，${value}`, bucket: (seconds) => seconds === 3600 ? '每小时' : '每日', halfOpenWindow: (from, to, timezone) => `${from} 至 ${to}（${timezone}，左闭右开）`,
+    asOf: '数据时点', zeroKnown: '0 表示已成功统计且确无记录', snapshotBoundary: '各分区为独立 Token 域快照',
+  },
+});
+Object.assign(adminPlatformCopy.en.modelToken, {
+  pageOverviews: {
+    eyebrow: 'Section overview', titles: { models: 'Model catalog overview', tokenResources: 'Route health overview', modelOperations: 'Operations and usage overview' },
+    boundaries: { models: 'Aggregates authoritative model catalog facts only.', tokenResources: 'Aggregates stable routes and their health only.', modelOperations: 'Aggregates Provisioning, usage, and reconciliation facts allowed by your permissions.' },
+    groups: { models: 'Model catalog', tokenResources: 'Route health', provisioning: 'Provisioning', usage: 'Usage and reconciliation' },
+    metrics: { published_model_count: 'Published models', deprecated_model_count: 'Deprecated models', model_draft_count: 'Drafts awaiting publish', stable_route_count: 'Stable routes', healthy_route_count: 'Healthy routes', route_attention_count: 'Routes needing attention', provisioning_pending_count: 'Pending Provisioning', provisioning_attention_count: 'Provisioning issues', usage_request_count: 'Usage requests in window', reconciliation_pending_count: 'Awaiting reconciliation', reconciliation_stopped_count: 'Automatic reconciliation stopped', usage_trend: 'Usage trend', reconciliation_trend: 'Reconciliation trend' },
+    window: 'Window', windows: { '24h': 'Last 24 hours', '7d': 'Last 7 days', '30d': 'Last 30 days' }, windowMetric: 'Window metric', pointMetric: 'Point in time',
+    exactDrilldown: 'View exact results →', relatedDrilldown: 'View related results (not equivalent) →', relatedResult: (metric) => `Showing results related to “${metric}”; list filters are not equivalent to the overview definition.`,
+    healthUnavailable: 'Health rate unavailable: no evaluable routes', healthRate: (healthy, stable) => `Health rate ${Math.round(healthy / stable * 100)}% (${healthy}/${stable})`,
+    unavailable: { models: 'The model catalog overview is unavailable. The catalog list remains available.', tokenResources: 'The route health overview is unavailable. The Token list remains available.', modelOperations: 'The operations and usage overview is unavailable. Runtime lists remain available.' },
+    permissionChanged: 'Permissions changed, so overview updates stopped.', stale: 'Showing the last successful result', retryAfter: (seconds) => `Retry in ${seconds}s`,
+    trendTitle: 'Usage and reconciliation trend', trendLead: 'Usage bars drill down exactly; reconciliation bars show related results.', trendEmpty: 'No usage or reconciliation trend data exists in the selected window.', usageTrend: 'Usage requests', reconciliationTrend: 'New reconciliation issues', trendAria: (from, to) => `Usage and reconciliation trend from ${from} to ${to}`, trendPoint: (series, from, to, value) => `${series}, ${from} to ${to}, ${value}`, bucket: (seconds) => seconds === 3600 ? 'Hourly' : 'Daily', halfOpenWindow: (from, to, timezone) => `${from} to ${to} (${timezone}, half-open)`,
+    asOf: 'Data as of', zeroKnown: 'Zero means the successful aggregate found no records', snapshotBoundary: 'Each section is an independent Token-domain snapshot',
+  },
+});
+Object.assign(adminPlatformCopy.ja.modelToken, {
+  pageOverviews: {
+    eyebrow: 'セクション概要', titles: { models: 'モデルカタログ概要', tokenResources: 'ルート正常性概要', modelOperations: '運用と使用量の概要' },
+    boundaries: { models: 'モデルカタログの権威ある事実のみを集計します。', tokenResources: '安定ルートとその正常性のみを集計します。', modelOperations: '権限に応じて Provisioning、使用量、照合の事実を集計します。' },
+    groups: { models: 'モデルカタログ', tokenResources: 'ルート正常性', provisioning: 'Provisioning', usage: '使用量と照合' },
+    metrics: { published_model_count: '公開済みモデル', deprecated_model_count: '非推奨モデル', model_draft_count: '公開待ち下書き', stable_route_count: '安定ルート', healthy_route_count: '正常ルート', route_attention_count: '要確認ルート', provisioning_pending_count: '保留中 Provisioning', provisioning_attention_count: '異常 Provisioning', usage_request_count: '期間内の使用量リクエスト', reconciliation_pending_count: '照合待ち使用量', reconciliation_stopped_count: '自動照合停止', usage_trend: '使用量の推移', reconciliation_trend: '照合の推移' },
+    window: '集計期間', windows: { '24h': '直近 24 時間', '7d': '直近 7 日', '30d': '直近 30 日' }, windowMetric: '期間集計', pointMetric: '現在時点',
+    exactDrilldown: '正確な結果を表示 →', relatedDrilldown: '関連結果を表示（非同値）→', relatedResult: (metric) => `「${metric}」の関連結果を表示しています。一覧の条件は概要の定義と完全には一致しません。`,
+    healthUnavailable: '正常率を計算できません：評価可能なルートがありません', healthRate: (healthy, stable) => `正常率 ${Math.round(healthy / stable * 100)}%（${healthy}/${stable}）`,
+    unavailable: { models: 'モデルカタログ概要を取得できません。カタログ一覧は引き続き利用できます。', tokenResources: 'ルート正常性概要を取得できません。Token 一覧は引き続き利用できます。', modelOperations: '運用と使用量の概要を取得できません。実行一覧は引き続き利用できます。' },
+    permissionChanged: '権限が変更されたため、概要の更新を停止しました。', stale: '前回成功した結果を表示中', retryAfter: (seconds) => `${seconds} 秒後に再試行`,
+    trendTitle: '使用量と照合の推移', trendLead: '使用量の棒は正確に絞り込み、照合の棒は関連結果を表示します。', trendEmpty: '選択した期間には使用量または照合の推移データがありません。', usageTrend: '使用量リクエスト', reconciliationTrend: '新規照合異常', trendAria: (from, to) => `使用量と照合の推移、${from} から ${to}`, trendPoint: (series, from, to, value) => `${series}、${from} から ${to}、${value}`, bucket: (seconds) => seconds === 3600 ? '1 時間ごと' : '1 日ごと', halfOpenWindow: (from, to, timezone) => `${from} から ${to}（${timezone}、半開区間）`,
+    asOf: 'データ時点', zeroKnown: '0 は集計成功かつ該当なしを示します', snapshotBoundary: '各セクションは独立した Token ドメインのスナップショットです',
+  },
+});
+
+Object.assign(adminPlatformCopy.zh.modelToken, {
   catalogDiffTitle: '目录差异预览', catalogAdded: '新增', catalogModified: '修改', catalogRemoved: '移除', catalogMissing: '上游目录缺失', catalogDiffEmpty: '当前版本之间没有目录差异。', catalogDiffUnavailable: '目录差异证据格式异常，当前操作已安全关闭；请重新加载预检。', catalogUnnamedModel: '未命名模型', catalogDiffTruncated: (total, shown) => `共 ${total} 项变更，当前仅展示前 ${shown} 项。`, catalogVersionPair: (from, to) => `目录版本 ${from} → ${to}`, catalogObservedTarget: (from) => `目录版本 ${from} → 本次 Provider 观测`, catalogChangeTypes: { ADDED: '新增', MODIFIED: '修改', REMOVED: '移除' },
   operationsOverview: { eyebrow: '运营概览', title: '目录与运行健康', boundary: '聚合由 Token 服务端按权威事实计算；不会扫描当前列表页。', window: '统计窗口', windows: { '24h': '最近 24 小时', '7d': '最近 7 天', '30d': '最近 30 天' }, unavailable: '运营概览暂时不可用，目录与运行列表仍可独立使用。', groups: { models: '模型目录', routing: '路由与 Provisioning', reconciliation: '用量与核对' }, metrics: { published_model_count: '已发布模型', deprecated_model_count: '已弃用模型', model_draft_count: '待发布草稿', stable_route_count: '稳定路由', healthy_route_count: '健康路由', route_attention_count: '需关注路由', provisioning_pending_count: '待处理 Provisioning', provisioning_attention_count: '异常 Provisioning', usage_request_count: '窗口内用量请求', reconciliation_pending_count: '待核对用量', reconciliation_stopped_count: '已停止自动核对' }, denominator: (key, value) => `分母：${key === 'stable_route_count' ? '稳定路由' : key} ${value}`, windowMetric: '窗口统计', pointMetric: '当前时点', exactDrilldown: '查看精确筛选明细 →', relatedDrilldown: '查看相关明细 →', trendTitle: '用量与核对异常趋势', trendLead: '按服务端固定时间桶展示用量请求和新增核对异常数量。', trendEmpty: '所选窗口暂无用量或核对异常数据。', usageTrend: '用量请求', reconciliationTrend: '新增核对异常', trendAria: (from, to) => `用量与核对异常趋势，${from} 至 ${to}`, bucket: (seconds) => seconds === 3600 ? '每小时' : '每日', halfOpenWindow: (from, to, timezone) => `${from} 至 ${to}（${timezone}，左闭右开）`, asOf: '数据时点', zeroKnown: '0 表示已成功统计且确无记录；加载失败显示不可用', crossDomain: '本卡仅为 Token 域快照，不代表与 Billing 跨域原子一致' },
 });

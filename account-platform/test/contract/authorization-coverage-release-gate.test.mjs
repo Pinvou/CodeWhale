@@ -21,7 +21,7 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 339, tasks: 27, events: 6, cli: 20 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 342, tasks: 27, events: 6, cli: 20 });
 });
 
 test('fixed NATS resource operator has an exact required authorization entry', async () => {

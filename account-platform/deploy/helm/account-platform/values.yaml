@@ -45,6 +45,7 @@ portal:
   adminTokenDetailsEnabled: false
   adminModelPricingEditEnabled: false
   adminModelOperationsOverviewEnabled: false
+  adminModelTokenPageOverviewsEnabled: false
   adminModelTokenActionsEnabled: false
 
 replicas:

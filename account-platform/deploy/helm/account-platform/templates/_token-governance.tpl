@@ -2,10 +2,11 @@
 {{- $p := .Values.portal -}}
 {{- $t := .Values.tokenGateway -}}
 {{- if and $p.adminModelTokenIAEnabled (not $t.adminPaginationEnabled) -}}{{ fail "Token IA requires pagination" }}{{- end -}}
-{{- if and (or $p.adminTokenResourceFormsEnabled $p.adminModelOperationsDetailsEnabled $p.adminModelTokenActionsEnabled $p.adminModelDetailsEnabled $p.adminTokenDetailsEnabled $p.adminModelOperationsOverviewEnabled) (not $p.adminModelTokenIAEnabled) -}}{{ fail "Token child gates require IA" }}{{- end -}}
+{{- if and (or $p.adminTokenResourceFormsEnabled $p.adminModelOperationsDetailsEnabled $p.adminModelTokenActionsEnabled $p.adminModelDetailsEnabled $p.adminTokenDetailsEnabled $p.adminModelOperationsOverviewEnabled $p.adminModelTokenPageOverviewsEnabled) (not $p.adminModelTokenIAEnabled) -}}{{ fail "Token child gates require IA" }}{{- end -}}
 {{- if and $p.adminModelTokenActionsEnabled (or (not $t.impactPrechecksEnabled) (not .Values.tokenCommandExecutor.enabled)) -}}{{ fail "Token actions require prechecks and registered executor; persistent ACTIVE is separately verified" }}{{- end -}}
 {{- if and $p.adminModelPricingEditEnabled (or (not $p.adminModelDetailsEnabled) (not .Values.billing.adminModelPriceProjectionEnabled)) -}}{{ fail "Model pricing requires details and Billing projection" }}{{- end -}}
 {{- if and $p.adminModelOperationsOverviewEnabled (or (not $p.adminModelOperationsDetailsEnabled) (not $p.adminModelDetailsEnabled) (not $t.adminOperationsOverviewEnabled)) -}}{{ fail "Operations overview dependencies are missing" }}{{- end -}}
+{{- if and $p.adminModelTokenPageOverviewsEnabled (not $t.adminPageOverviewsEnabled) -}}{{ fail "Page overviews require the Token page overview projection gate" }}{{- end -}}
 {{- if and $t.credentialIsolationEnabled (or (not $p.adminTokenDetailsEnabled) (not $p.adminModelTokenActionsEnabled) (not .Values.tokenCredentialPortal.enabled)) -}}{{ fail "Credential isolation requires details, actions and credential service" }}{{- end -}}
 {{- if or .Values.tokenCredentialPortal.enabled .Values.tokenCommandExecutor.enabled .Values.tokenGovernanceCheck.enabled -}}
 {{- if not .Values.networkPolicy.enabled -}}{{ fail "Governed workloads require NetworkPolicy" }}{{- end -}}

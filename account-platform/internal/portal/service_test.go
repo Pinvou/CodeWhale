@@ -608,6 +608,32 @@ func TestSessionEndpointExposesOnlyNonSensitiveModelOperationsOverviewGate(t *te
 	}
 }
 
+func TestSessionEndpointExposesOnlyNonSensitiveModelTokenPageOverviewsGate(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.AdminModelTokenPageOverviewsEnabled = true
+	service.config.TokenAdminProxyHMACKey = []byte(strings.Repeat("p", 32))
+	session := Session{ID: "model-token-page-overviews-session", AccessToken: "access-secret", RefreshToken: "refresh-secret", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("w", 32)}
+	_ = store.SaveSession(context.Background(), session)
+	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if body := response.Body.String(); response.Code != http.StatusOK || !strings.Contains(body, `"admin_model_token_page_overviews":true`) || strings.Contains(body, "access-secret") || strings.Contains(body, "refresh-secret") {
+		t.Fatalf("unexpected model and Token page overview feature session response: %d %s", response.Code, body)
+	}
+}
+
+func TestModelTokenPageOverviewsGateRequiresStrongProxyKey(t *testing.T) {
+	store := newMemoryStore()
+	config := testService(t, store).config
+	config.AdminModelTokenPageOverviewsEnabled = true
+	config.TokenAdminProxyHMACKey = []byte("short")
+	if _, err := NewService(config, store); err == nil || !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("expected page overview proxy key rejection, got %v", err)
+	}
+}
+
 func TestSessionEndpointExposesOnlyNonSensitiveModelDetailsGate(t *testing.T) {
 	store := newMemoryStore()
 	service := testService(t, store)
