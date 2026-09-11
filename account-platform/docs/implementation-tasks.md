@@ -2,7 +2,7 @@
 
 > 状态：当前执行队列
 >
-> 需求与状态基线：`e5437902aea2558b78b8076f3645834611ea2514`
+> 需求与状态基线：`599e6e48c4b9c5684c78e697339a922c6e9c419c`
 >
 > 代码审计基线：`e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`（APT-001 以本文件所在提交增量闭环）
 >
@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 138 个正式任务中，126 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，5 个任务为 `PENDING`，0 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 及 APT-122-R2、APT-123-R2、APT-125-R1 是保留原已审核交付历史、同时修复具名缺口的整改批次，不新增主目标所有权，也不计入 138 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 140 个正式任务中，127 个任务为 `DONE`，7 个任务保持 `BLOCKED_EXTERNAL`，5 个任务为 `PENDING`，1 个任务为 `IN_PROGRESS`，0 个任务为 `IN_REVIEW`；APT-124-R1、APT-130-R1、APT-131-R1 及 APT-122-R2、APT-123-R2、APT-125-R1 是保留原已审核交付历史、同时修复具名缺口的整改批次，不新增主目标所有权，也不计入 140 个正式任务编号。规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -160,10 +160,12 @@
 | APT-134 | 模型生命周期依赖分析、计划生效与会话截止 | UI-55 | APT-123, APT-124, APT-131, APT-132, APT-133 | CODE | DONE |
 | APT-135 | 模型上下文价格与计量共享编辑入口 | UI-56 | APT-113, APT-126, APT-132 | CODE | DONE |
 | APT-136 | 目录差异、路由/Provisioning 健康与核对异常趋势界面 | UI-57 | APT-124, APT-126, APT-127, APT-130, APT-131 | CODE | DONE |
-| APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138 | CODE+ENV | IN_PROGRESS |
+| APT-137 | 模型与 Token 分级 feature gate、N/N-1 兼容、旧链接与回滚发布门禁 | UI-58 | APT-127–APT-136, APT-138–APT-140 | CODE+ENV | IN_PROGRESS |
 | APT-138 | 十九项 Token 命令一致性总验收与原子激活 | ADM-64 | APT-122–APT-136 | CODE | DONE |
+| APT-139 | OverviewRead 期限链与三个页面级 Token 只读投影 | ADM-66 | APT-120, APT-121, APT-125, APT-126, APT-136 | CODE | PENDING |
+| APT-140 | Portal 分区概览、同 section 下钻与端到端回归 | UI-59 | APT-127, APT-130, APT-132, APT-133, APT-136, APT-139 | CODE | PENDING |
 
-## 3. APT-119～APT-138 详细交付合同
+## 3. APT-119～APT-140 详细交付合同
 
 以下任务严格按依赖顺序开发。每项通过身份 B 独立审核后才可单独提交；任一任务不得顺带实现后续任务的 UI 或 schema。未特别声明的数据库变更均采用前向追加迁移，down 只回滚本任务新增对象并保留历史事实。
 
@@ -464,10 +466,31 @@ ADM-64 的十九个稳定命令不得因共用治理中间件而失去领域所�
 - **本组 G6**：只交付workflow、公共nginx renderer、测试Dockerfile/helper和五项CI接线测试，以及最终状态文档。保留全部原门禁/45分钟有界预算、专属PG和三CLI/真实Chrome/配置与代理/实际SIGTERM精确清理；代码候选e3bf及同输入实测见运行手册第9节，精确十五文件候选bcb25dcb9a31b824d1210009c7d78f15437e8560全Node434/434、0SKIP、47.714秒/exit0；任务138tasks/3remediations/31incomplete/352completed、授权339/27/6/18及architecture均PASS，代码与隔离门禁已验证，最后证据文档交B。官方HTTPS依赖构建未成功，TEMP局部镜像源适配仅证明受限容器机制，不冒充正式环境或GitHub CI。整体任务仍IN_PROGRESS/ENV_PENDING/NOT_DEPLOYED，UI-58部分实现。
 - **分组顺序与历史边界（G0～G5 已签，G6 已验证待签）**：G1 离线 plan/schema → G2 部署配置/checker → G3 受控角色/原 CLI 包装与授权登记 → G4 安全入口/HTTPS/scope/实际脚本 VM 组合 → G5 离线证据与两旧断言/兼容测试 → G6 持续 CI 收尾。G4 VM 测试依赖尚未在 G0 引入的 edge/plan，故不孤立入本组。各组共享文档按实际交付语义裁剪，不引用未提交文件、不倒退新域；根逐组验证、B 复核后独立 Signed-off 提交。G5 前全量 Node 可能仍包含两项原基线断言失败，应如实记录，不能声称所有中间提交全量绿。现场 DNS/TLS/身份/KMS/NATS/备份及部署验收仍独立待办，整体不标 DONE。
 
-- **目标/范围**：主目标 `UI-58`。仅修改 Account/Token/Portal 分级发布配置、`deploy/compose`、`deploy/helm`、OpenAPI/Portal 契约门禁、运维 runbook 和发布验证脚本；复用 APT-127 已交付的一期 IA 基础开关，汇总 APT-127～APT-136，并唯一负责跨版本分级发布与生产激活/回滚编排，以及 credential origin 的 DNS/TLS、Portal/credential CSP、固定环境白名单、反向代理/WAF 日志抑制和生产等价健康探针证据，但不夹带功能修复。
+- **目标/范围**：主目标 `UI-58`。仅修改 Account/Token/Portal 分级发布配置、`deploy/compose`、`deploy/helm`、OpenAPI/Portal 契约门禁、运维 runbook 和发布验证脚本；复用 APT-127 已交付的一期 IA 基础开关，在 APT-139/140 独立签署后汇总 APT-127～APT-140，并唯一负责跨版本分级发布与生产激活/回滚编排，以及 credential origin 的 DNS/TLS、Portal/credential CSP、固定环境白名单、反向代理/WAF 日志抑制和生产等价健康探针证据，但不夹带功能修复。APT-139/140 只能追加新概览 gate 的代码与离线合同，不得改写 G0～G6 已签证据或冒充环境验收；新 gate 的真实 N/N-1、灰度与回滚仍由本任务收口。
 - **发布/兼容/回滚**：冻结一期 IA/列表/协议公式/选择器/运行闭环/结构化操作与二期详情/凭据/生命周期/价格/概览的独立 gate 和依赖顺序；服务端、Portal、cursor envelope、审批事件和隔离凭据入口支持 N/N-1。`section=tokens` 至少保留 90 天且跨两个稳定版本规范化；UI-47 开启后 supersede UI-28/UI-31 canonical。回滚顺序为先停写/worker/launch，再关二期、一期和代理路由；活动 cursor 返回 410，进行中审批/计划/session 按各任务合同收敛。
 - **验收**：逐 gate on/off、混合 N/N-1、滚动升级/回滚、旧链接/书签/popstate、九源 cursor 独立、CSP/origin、DNS/TLS/代理/WAF、10s heartbeat 探针、DB↔registry 逐字段一致、`executableApprovalCommands` 保留既有项且 Token 增量恰三项、容量及 `10→12→14`/`3→5→7`/`5→7→9` 绝对 deadline 链/告警、三语与安全扫描全部成为发布门禁，并记录生产等价环境证据。credential 生产探针必须在真实 Portal/credential 双 origin 与生产等价响应头/代理下覆盖 APT-133 全部 handoff 合同：固定无 ID URL、用户手势先开、CSP 只允许精确 SHA-256 hash 授权的内联脚本并禁止 `script-src 'self'`/`'unsafe-inline'`/`'unsafe-eval'`、`navigator.serviceWorker.controller===null`、所有注册 scope 不覆盖 handoff（既有 root scope 必须先收窄，否则发布失败）、v1 MessageChannel origin/source/nonce/ACK、一次 `_self` body POST、精确非 null Origin、固定 303、安全头与 opener 生命周期、无网络/DOM API/storage/log 泄漏，以及受阻/乱序/超时/撤权/关 gate/未知/刷新/跨浏览器等失败路径；不得用直接跨 origin POST、单 origin mock 或绕过浏览器的 HTTP 测试替代。
 - **不包含**：不新增业务 API/schema/权限/页面，不改审批分类或数据事实；任何验收失败回到其唯一所属 APT 修复后重新审核。
+
+### APT-139 OverviewRead 期限链与页面级只读投影
+
+- **当前状态**：`PENDING / DOC_IN_REVIEW / NOT_DEPLOYED`。本节仅是身份 A 依已通过审核的 ADM-66 拆分的任务合同，等待身份 B 独立文档审核；尚未修改代码、迁移、OpenAPI 或配置，也未提交、推送或部署。
+- **目标/范围**：唯一主目标 `ADM-66`。修改 `internal/platform/requestdeadline/{token_admin.go,token_admin_test.go}`，在不改现有三类期限合同的前提下新增 `OverviewRead/overview-read` 的 3/5/7 秒链；新增 `internal/token/model_token_page_overviews*.go` 的三个只读 handler、闭合投影与生产查询，在 `cmd/token-gateway/main.go` 与现有 Token admin middleware 注册；同步 `contracts/openapi/token-gateway.yaml`、`migrations/token/000033_model_token_page_overview_indexes.{up,down}.sql`、Token/Portal 定向合同及真实 PostgreSQL 性能测试。`internal/portal/service.go` 仅允许三个精确 GET 路径、复用用户 Bearer 代理和既有 `Start/ApplyToUpstream`，并与 Token 一起实现规范路由专属 deadline 错误映射。本任务拥有后端 gate `TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED` 及 Compose/Helm 默认 `false` 配置，但不开启任何环境。
+- **期限与代理合同**：`Classify` 必须先于通用无 cursor 的 `SnapshotBuild` 规则，仅将 `GET|HEAD /admin/v1/overviews/{model-catalog|token-resources|model-operations}` 分类为 `OverviewRead`。Portal 继续删除外部 `X-Pinvou-Absolute-Deadline`/`X-Pinvou-Deadline-Class`，调用 `Start` 并用 `ApplyToUpstream` 传递；Token 继续用 `ConsumeBusinessDeadline` 使有效更早的期限只能缩短本地 3 秒上限。不增加新 Header、workload 身份或第二套 deadline 中间件。Token context 耗尽和 Portal BFF context 耗尽都按规范路由分别返回 `MODEL_CATALOG_OVERVIEW_TIMEOUT`、`TOKEN_RESOURCES_OVERVIEW_TIMEOUT`、`MODEL_OPERATIONS_OVERVIEW_TIMEOUT`，不落入 `QUERY_TIMEOUT`；无有效更早上游期限时保留 `ConsumeBusinessDeadline` 现有本地 fallback 语义，测试必须证明正常 Portal 链路始终传递入口起点。
+- **API、权限与 SQL 合同**：新增 `GET /token/admin/v1/overviews/model-catalog`、`token-resources`、`model-operations`。前两者不接受任何 query，未知/空名/重复/带值参数分别以已冻结稳定 400 码在仓储前拒绝；顶层与 metric item 必须严格匹配设计 4.4 的 `additionalProperties:false`、required keys、顺序、类型、状态集与分母。model-operations 只由服务端同一授权快照选择 `TOKEN_ONLY/USAGE_ONLY/TOKEN_AND_USAGE` 之一；无权组完全省略且其 SQL/CTE 零执行，两权均无在仓储前无泄露 403，token-only 拒绝 `window`，有 usage 权限时要求单值规范窗口。三端点使用稳定用户按端点独立 60/min 与受信来源 IP 三端点共享 120/min，闭合 429/503/504，绝不以失败、无权或超时伪造数值 0。
+- **性能、兼容与回滚**：三个 handler 直接使用的生产 SQL 必须在设计 4.4 冻结的模型/草稿/路由/运行数量、版本、状态与健康过期分布上逐项断言 seed，使用具名索引与限定扫描，每条冷一暖三均不超过 3 秒；token-only/usage-only 计划证明无权分支 `Actual Loops=0` 且零 buffer。`000033` 只追加 `routing_policies_overview_health_idx`，down 只删本索引，不改既有事实。旧 `GET /token/admin/v1/operations-overview`、旧 gate、权限、schema、指标/趋势与生产 SQL 全部保留回归；关闭新后端 gate 即只回到旧行为，不删旧接口或数据。
+- **独立测试与完成条件**：①requestdeadline 单元测试覆盖分类优先级、3/5/7、外部头清理、Start/Apply/Consume 不放大、三路 Token/Portal 专属超时码；②handler/仓储 spy 覆盖全部 query 负例、model-only/token-only/usage-only/both/none、授权版本变化、无权零 SQL、部分成功禁止与闭合 schema；③真实 PostgreSQL 直接执行生产常量和 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`，冻结数据分布、扫描/索引、无权分支和时限；④OpenAPI/Ajv、BFF 精确白名单、授权覆盖、迁移清单和旧接口回归通过。本地无隔离库时具名 PG 用例可如实 SKIP，CI 必须创建隔离库并拒绝 SKIP。只有以上全部通过、身份 B 审核 `PASS`并单独 Signed-off 提交后，才可把 APT-139 与 ADM-66 改为 `DONE/已实现`；仍保持 `NOT_DEPLOYED`。
+- **不包含**：不实现三个 Portal 概览组件、下钻/URL/history、三语或浏览器界面，不改列表/详情交互，不新增数据事实或写入，不移除旧接口，不执行灰度、推送或部署。
+
+### APT-140 Portal 分区概览与端到端回归
+
+- **当前状态**：`PENDING / DOC_IN_REVIEW / NOT_DEPLOYED`。本节仅是身份 A 依已通过审核的 UI-59 拆分的任务合同，等待身份 B 独立文档审核；APT-139 尚未实现，因此本任务不得开工或使用假投影。
+- **目标/范围**：唯一主目标 `UI-59`。在 APT-139 的公开合同已独立提交后，修改 `pinvou3-app/src/features/account-platform/` 中的 `AdminModelTokenWorkspace`、三个分区 workspace、`AdminPlatformView`、`admin-client`、`admin-navigation`、概览验证/状态模块及 CSS，将现有跨域 `AdminModelOperationsOverview` 按所有权演进为模型目录、路由健康、运行与用量三个页面级组件。同步 `pinvou3-app/src/shared/admin-platform-i18n.js`、Portal feature session/config、Compose/Helm 默认值、离线 release-plan schema/checker、Node 契约与生产制品 Chromium smoke。本任务拥有 Portal gate `PORTAL_ADMIN_MODEL_TOKEN_PAGE_OVERVIEWS_ENABLED`，默认 `false`，且只有 APT-139 后端 gate 可用时才能计划新请求。
+- **页面、请求与权限**：三个概览只在各自 section 的列表态顶部渲染，进入模型、Token Account、Provisioning 或用量详情后必须卸载。模型页在 `platform.models.read` 有权时仅请求一次 model-catalog，Token 页在 `platform.tokens.read` 有权时仅请求一次 token-resources，运行页在 Token/Usage 任一读权存在时仅请求一次 model-operations；客户端不选变体，只严格校验服务端 `TOKEN_ONLY/USAGE_ONLY/TOKEN_AND_USAGE` oneOf 与当前权限相符。无 `platform.usage.read` 时不渲染时间选择器，不发 `window`，并在同次 URL 规范化删除 `model_operations_window`；有 Usage 权时仅允许 `24h/7d/30d`。缓存和请求代次绑定稳定用户、授权版本、section、变体和适用窗口；撤权、登出、关 gate、离页或进详情先 abort 并清理已撤销状态，迟到响应不得回写。
+- **下钻、URL 与历史**：严格以设计 2.4.1 为唯一矩阵。`model_draft_count` 和 `stable_route_count` 为 `NON_INTERACTIVE`；健康/需关注路由、异常 Provisioning、待核对/已停止自动核对及核对趋势仅可为 `RELATED` 并持续标注非等价；只有矩阵列为 `EXACT` 的指标/趋势才能精确下钻。EXACT 在一次 `pushState` 中删除目标数据源全部旧筛选和 cursor、写入完整新筛选；RELATED 也清除会隐性缩小结果的旧筛选。任一操作保持当前 `section`，popstate 不追加历史，后退精确恢复原 section/页签/筛选/cursor/窗口，刷新和分享链接得到同一状态。
+- **显示、故障与兼容**：`stable_route_count` 始终显示服务端真实非负整数，0 显示为 `0`且不可点击；只有健康率在分母为 0 时显示“不可计算/无可评估路由”。三源分别维护 loading/error/retry/last_updated/过期成功值，403、429、503、504、合法 0 与趋势全零无数据独立表达，概览失败不遮挡列表或其他 section。新 Portal gate 关闭时保持已有界面和旧 `/operations-overview` 调用；开启时三页只请求新所属投影，对旧端点零调用。不删旧 client/validator/组件或改写旧 schema，以保留 N/N-1 和独立回滚；真实灰度、旧版本混跑与环境回滚证据仍由 APT-137 收口。
+- **三语、无障碍与发布门禁**：标题、指标、口径、RELATED 说明、零分母、过期、错误和空态全部复用共享 i18n，完整提供简中/英文/日文。可交互指标使用原生按钮或等价语义，不可交互指标不得带按钮/tabindex/点击样式；焦点可见、触控目标至少 44×44 CSS px，320px、200% 缩放不遮挡关键操作并尊重 reduced-motion。离线 release plan 必须登记 Token/Portal 新 gate 的依赖、默认关闭、顺序启用与逆序回滚，但仅证明配置合同，不冒充已推送、已灰度或已部署。
+- **独立测试与完成条件**：①Node/Ajv 覆盖三页每页一请求、model/token/usage/both/none 权限、三 oneOf 验证、时间选择器与 URL 清理、撤权 abort/缓存失效/迟到响应、局部失败、429 冷却和旧端点 gate on 零调用；②导航合同逐项覆盖 EXACT/RELATED/NON_INTERACTIVE、原子筛选/cursor、同 section、pushState/popstate/刷新/分享、详情隐藏与旧 `section=tokens` 回归；③生产制品 Chromium 同时覆盖三语、键盘/焦点、44px、320px、200%、reduced-motion、真实 0/零分母、403/429/503/504、分区/详情切换与前进后退；④Portal Go、UI lint/build、i18n、architecture、授权覆盖、离线 release-plan 与 `node scripts/account-platform.mjs verify` 通过。只有以上全部通过、身份 B 审核 `PASS`并单独 Signed-off 提交后，才可把 APT-140 与 UI-59 改为 `DONE/已实现`；仍保持 `NOT_DEPLOYED`，APT-137 在本任务后补真实环境证据。
+- **不包含**：不修改 Token SQL、仓储、迁移、OpenAPI 或 deadline 库，不在前端重算指标或伪造权限变体，不新增 additive/多值列表筛选并不将 RELATED 升级为 EXACT，不删旧概览端点，不执行推送、灰度、激活、回滚或部署。
 
 ## 4. 独立提交验收模板
 
