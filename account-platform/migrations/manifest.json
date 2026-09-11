@@ -1368,6 +1368,16 @@
         "file": "000031_token_command_governance_activation.up.sql",
         "version": 31,
         "sha256": "d957f8cac9de3566b1e30ab286458f80e78acd2cc9d61917e3367a0c8280ee16"
+      },
+      {
+        "file": "000032_token_account_owner_cap_lock.down.sql",
+        "version": 32,
+        "sha256": "88094ab65e8a81c9aee6b4d9de8b791b869a51c2da83adaef7fcca426eb301f5"
+      },
+      {
+        "file": "000032_token_account_owner_cap_lock.up.sql",
+        "version": 32,
+        "sha256": "cabd925dcab9b2f4e00e35281f807fd4cb2c25f550d84ae0d13da01368e19ca4"
       }
     ]
   }

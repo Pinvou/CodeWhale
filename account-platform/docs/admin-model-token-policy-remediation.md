@@ -51,3 +51,9 @@
 - 2026-09-06 A：APT-125-R2 已按获批范围追加 Account 000049 和 UPSERT v3/schema v3 七字段，原 000045 与 v2 保持不动；扫描未发现 UPSERT 专属 v2 硬编码，通用 Portal 结果仍兼容整数政策版本。新增真实迁移等价重跑、冲突失败、down 历史保留测试，以及合法插入的旧 v2 成功结果的 reference/key GET、同 key POST 和异 payload 冲突验证；新 key 使用 v3 且只产生一次新效果，旧结果在路由再次变更后仍 existing-first 重放。断言精确检查领域版本、审计、Outbox、旧 mutation 与墓碑数，并比较重放前后完整持久证据；不伪造历史事件，不放宽 protocol_code 文本输入。待仅含 HEAD+本批的隔离候选树与 B 审核通过后独立提交。
 - 2026-09-06 根代理实测：仅含 HEAD+本批七个文件的隔离候选 `c0e87a62` 验证通过。Account 000049 真实 PG 前向、down 历史保留、冲突拒绝通过（用例 23.56s），政策精确单元通过；Token 既有路由治理 PG 12.26s、旧 v2 路由结果兼容 PG 14.31s、两项 parser 单元与 policy/实际字段一致性单元均通过，Token 包合计 33.552s、退出 0，无 SKIP。Migration manifest 268 项、architecture guard 与 diffcheck 通过。
 - 2026-09-06 B：APT-125-R2 最终独立审核 PASS，七文件代码边界与隔离候选真实证据均无阻断，可独立签署提交；提交后才恢复 APT-138 接线，本次未激活生产、推送或部署，也不代表 APT-138 已通过。
+
+## APT-123-R4：000032 迁移清单补录
+
+- 状态：`DONE / REMEDIATION_REVIEW_PASS / NOT_DEPLOYED`。身份 B 已完成独立审核并给出 `PASS`。提交 `d82e8d45ef72d452c50240111ece82a1258f7762` 为 APT-123-R2/ADM-61 的共享 owner-cap 与默认账户创建并发治理追加 Token `000032_token_account_owner_cap_lock`，但当时遗漏同步不可变迁移清单；APT-123-R3 已由创建策略 v3 整改占用，故本独立流程缺口编号为 APT-123-R4。
+- 范围：仅将 `000032_token_account_owner_cap_lock.up.sql` 与 `.down.sql` 的既有文件名、版本和 SHA-256 补入 `migrations/manifest.json`，并保留本条整改记录；不修改 000032 SQL、运行时代码、既有 APT-123-R2/R3 结论或部署状态，不纳入其他并行迁移或页面概览实现。
+- 验收：清单中 000032 up/down 各且仅有一项，版本均为 32，SHA-256 分别为 `cabd925dcab9b2f4e00e35281f807fd4cb2c25f550d84ae0d13da01368e19ca4` 与 `88094ab65e8a81c9aee6b4d9de8b791b869a51c2da83adaef7fcca426eb301f5`，并与磁盘既有文件逐字节匹配；独立候选不得包含其他并行任务的迁移或实现。身份 B 审核通过后方可独立签署提交，本记录不代表推送、部署或生产迁移已执行。
