@@ -760,12 +760,19 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(overview.metrics.voice_penetration_rate, null);
 
   const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "call", now, { minimumGroupSubjects: 0 });
-    assert.equal(tools.rows[0].tool_key, "search");
-    assert.equal(tools.rows[0].call_count, 2);
-    assert.equal(tools.rows[0].user_count, 1);
-    assert.equal(tools.rows[0].observed_user_count, 2);
-    assert.equal(tools.rows[0].tool_type, "mcp");
-    assert.equal(tools.rows[0].success_rate, null);
+  const mcpTool = tools.rows.find(row => row.tool_type === "mcp");
+  const builtinTool = tools.rows.find(row => row.tool_type === "builtin");
+  assert.equal(mcpTool.tool_key, "search");
+  assert.equal(mcpTool.tool_name, "search");
+  assert.equal(mcpTool.call_count, 1);
+  assert.equal(mcpTool.user_count, 1);
+  assert.equal(mcpTool.observed_user_count, 1);
+  assert.equal(mcpTool.success_rate, null);
+  assert.equal(builtinTool.tool_key, "search");
+  assert.equal(builtinTool.tool_name, "search");
+  assert.equal(builtinTool.call_count, 1);
+  assert.equal(builtinTool.user_count, 0);
+  assert.equal(builtinTool.observed_user_count, 1);
 
   const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "install", now, { minimumGroupSubjects: 0 });
   assert.equal(installs.rows[0].install_count, 1);
@@ -1291,6 +1298,19 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test("tool rankings expose normalized new names without reconstructing historical custom names", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [
+    { event_id: "named_tool", event_name: "tool_call_completed", operation_id: "named_op", identity_id: "dev_a", tool_key: "mcp_custom", tool_name: "mcp__private_crm__lookup", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:00:00") },
+    { event_id: "legacy_tool", event_name: "tool_call_completed", operation_id: "legacy_op", identity_id: "dev_b", tool_key: "mcp_custom", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:01:00") },
+  ];
+  const result = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "call", now, { minimumGroupSubjects: 0 });
+  assert(result.rows.some(row => row.tool_name === "mcp__private_crm__lookup" && row.tool_key === "mcp_custom"));
+  assert(result.rows.some(row => row.tool_name === "mcp_custom" && row.tool_key === "mcp_custom"));
+  assert(result.funnel_rows.some(row => row.tool_name === "mcp__private_crm__lookup"));
+  assert(result.funnel_rows.some(row => row.tool_name === "mcp_custom"));
 });
 
 test("behavior rankings include small groups and clip per-subject daily contributions", () => {

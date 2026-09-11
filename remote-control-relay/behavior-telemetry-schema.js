@@ -67,6 +67,9 @@ export function validateBehaviorEventShape(raw, options = {}) {
     const definition = resolvedDefinition(BEHAVIOR_TELEMETRY_SCHEMA.properties[field]);
     if (!validateValue(field, value, definition)) return invalid("invalid_field", field);
   }
+  if (raw.tool_name !== undefined && !eventName.startsWith("tool_")) {
+    return invalid("invalid_field", "tool_name");
+  }
   if (typeof raw.event_id !== "string" || !ID_PATTERN.test(raw.event_id)) {
     return invalid("invalid_field", "event_id");
   }

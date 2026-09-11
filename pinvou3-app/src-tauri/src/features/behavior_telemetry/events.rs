@@ -762,7 +762,7 @@ pub fn finish_task(
                 .turn(&operation.turn_id)
                 .string("operation_id", operation.operation_id)
                 .integer("attempt_index", 1)
-                .tool(operation.tool_key, operation.tool_key, operation.tool_type)
+                .tool(operation.tool_key, &operation.tool_name, operation.tool_type)
                 .success(false)
                 .integer("duration_ms", now_ms().saturating_sub(operation.started_at))
                 .string(
@@ -846,11 +846,13 @@ pub fn track_tool_call_started(
         return;
     };
     let tool_type = classify_tool(tool_name);
+    let tool_key = tool_registry_key(tool_name);
     let operation = ToolOperation {
         operation_id: token("toolop_", 16),
         started_at: now_ms(),
         turn_id: turn_id.to_string(),
-        tool_key: tool_registry_key(tool_name),
+        tool_key,
+        tool_name: normalized_tool_name(tool_name, tool_key),
         tool_type,
         lease: lease.clone(),
     };
@@ -869,7 +871,7 @@ pub fn track_tool_call_started(
             .turn(turn_id)
             .string("operation_id", &operation.operation_id)
             .integer("attempt_index", 1)
-            .tool(operation.tool_key, operation.tool_key, tool_type),
+            .tool(operation.tool_key, &operation.tool_name, tool_type),
         &lease,
     );
 }
@@ -902,7 +904,7 @@ pub fn track_tool_call_completed(
         .turn(operation.turn_id.clone())
         .string("operation_id", operation.operation_id)
         .integer("attempt_index", 1)
-        .tool(operation.tool_key, operation.tool_key, operation.tool_type)
+        .tool(operation.tool_key, &operation.tool_name, operation.tool_type)
         .success(success)
         .integer("duration_ms", now_ms().saturating_sub(operation.started_at));
     if !success {
@@ -919,13 +921,14 @@ pub fn begin_tool_install(
     let started_at = now_ms();
     let operation_id = token("install_", 16);
     let tool_key = tool_registry_key(tool_name);
+    let tool_name = normalized_tool_name(tool_name, tool_key);
     let lease = app
         .try_state::<BehaviorTelemetry>()
         .and_then(|telemetry| telemetry.current_lease());
     if let (Some(telemetry), Some(lease)) = (app.try_state::<BehaviorTelemetry>(), lease.as_ref()) {
         telemetry.track_for_lease(
             BehaviorEvent::new("tool_install_started")
-                .tool(tool_key, tool_key, tool_type)
+                .tool(tool_key, &tool_name, tool_type)
                 .string("operation_id", &operation_id)
                 .integer("attempt_index", 1),
             lease,
@@ -936,6 +939,7 @@ pub fn begin_tool_install(
         operation_id,
         started_at,
         tool_key,
+        tool_name,
         tool_type,
         authorization_generation: lease.map(|current| current.generation),
         completed: false,
@@ -1118,6 +1122,18 @@ pub fn tool_registry_key(tool_name: &str) -> &'static str {
         _ => "custom",
     };
     controlled_registry_key(key, CONTROLLED_TOOL_KEYS, "unknown")
+}
+
+pub fn normalized_tool_name(tool_name: &str, fallback: &str) -> String {
+    let name = tool_name.trim().to_ascii_lowercase();
+    let valid = !name.is_empty()
+        && name.len() <= 96
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || (index > 0 && matches!(byte, b'_' | b'.' | b'-'))
+        });
+    if valid { name } else { fallback.to_string() }
 }
 
 fn controlled_registry_key(

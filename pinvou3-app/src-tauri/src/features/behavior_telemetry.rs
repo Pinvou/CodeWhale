@@ -255,6 +255,7 @@ struct ToolOperation {
     started_at: u64,
     turn_id: String,
     tool_key: &'static str,
+    tool_name: String,
     tool_type: &'static str,
     lease: CollectionLease,
 }
@@ -502,6 +503,7 @@ pub struct ToolInstallGuard {
     operation_id: String,
     started_at: u64,
     tool_key: &'static str,
+    tool_name: String,
     tool_type: &'static str,
     authorization_generation: Option<u64>,
     completed: bool,
@@ -518,7 +520,7 @@ impl ToolInstallGuard {
 
     fn complete(&mut self, success: bool, error_category: Option<&str>) {
         let mut event = BehaviorEvent::new("tool_install_completed")
-            .tool(self.tool_key, self.tool_key, self.tool_type)
+            .tool(self.tool_key, &self.tool_name, self.tool_type)
             .string("operation_id", &self.operation_id)
             .integer("attempt_index", 1)
             .success(success)
@@ -773,10 +775,12 @@ impl BehaviorEvent {
     pub fn tool(
         self,
         key: impl Into<String>,
-        _name: impl Into<String>,
+        name: impl Into<String>,
         tool_type: impl Into<String>,
     ) -> Self {
-        self.string("tool_key", key).string("tool_type", tool_type)
+        self.string("tool_key", key)
+            .string("tool_name", name)
+            .string("tool_type", tool_type)
     }
 
     pub fn success(self, success: bool) -> Self {

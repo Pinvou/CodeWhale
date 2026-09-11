@@ -255,7 +255,10 @@ pub fn track_behavior_event(
         };
         event = event.tool(
             crate::features::behavior_telemetry::tool_registry_key(raw_tool),
-            "",
+            crate::features::behavior_telemetry::normalized_tool_name(
+                raw_tool,
+                crate::features::behavior_telemetry::tool_registry_key(raw_tool),
+            ),
             tool_type,
         );
     }

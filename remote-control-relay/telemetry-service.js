@@ -575,15 +575,23 @@ function legacyModelKey(value) {
   return name ? "custom" : "unknown";
 }
 
+function normalizedToolName(value) {
+  const name = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[a-z0-9][a-z0-9_.-]{0,95}$/.test(name) ? name : null;
+}
+
 function sanitizeStoredBehaviorEvent(raw) {
   const event = {};
   for (const [field, value] of Object.entries(raw || {})) {
     if (BEHAVIOR_STORED_FIELDS.has(field)) event[field] = value;
   }
   if (raw?.tool_key !== undefined || raw?.tool_name !== undefined) {
+    delete event.tool_name;
     event.tool_key = raw.tool_key !== undefined
       ? controlledKey(raw.tool_key, CONTROLLED_TOOL_KEYS, "custom")
       : legacyToolKey(raw.tool_name);
+    const toolName = raw.tool_key !== undefined ? normalizedToolName(raw.tool_name) : null;
+    if (toolName) event.tool_name = toolName;
   }
   if (raw?.provider_key !== undefined || raw?.provider_name !== undefined) {
     event.provider_key = raw.provider_key !== undefined
@@ -1070,8 +1078,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     range: window.range,
     subject: "installation",
     timezone: "Asia/Shanghai",
-    metric_version: "behavior-v1.3",
-    metric_version_started_at: Date.parse("2026-09-10T00:00:00+08:00"),
+    metric_version: "behavior-v1.4",
+    metric_version_started_at: Date.parse("2026-09-11T00:00:00+08:00"),
     data_status: dataStatus,
     latest_event_received_at: latestReceivedAt || null,
     active_installations: activeTotal,
@@ -1191,10 +1199,13 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
   for (const event of clippedWindowEvents.filter(event => event.event_name === eventName)) {
     if (eventName === "tool_install_completed" && event.success !== true) continue;
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
-    const row = groups.get(toolKey) || {
+    const toolName = normalizedToolName(event.tool_name) || toolKey;
+    const toolType = behaviorToolType(event.tool_type);
+    const groupKey = `${toolType}\u001f${toolName}`;
+    const row = groups.get(groupKey) || {
       tool_key: toolKey,
-      tool_name: toolKey,
-      tool_type: behaviorToolType(event.tool_type),
+      tool_name: toolName,
+      tool_type: toolType,
       total: 0,
       success_count: 0,
       users: new Set(),
@@ -1203,7 +1214,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     if (event.success !== false) row.success_count += 1;
     const identity = eventIdentity(event);
     if (identity) row.users.add(identity);
-    groups.set(toolKey, row);
+    groups.set(groupKey, row);
   }
   const funnelGroups = new Map();
   const stageNames = new Map([
@@ -1219,10 +1230,13 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     const stage = stageNames.get(event.event_name);
     if (!stage) continue;
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
-    const row = funnelGroups.get(toolKey) || {
+    const toolName = normalizedToolName(event.tool_name) || toolKey;
+    const toolType = behaviorToolType(event.tool_type);
+    const groupKey = `${toolType}\u001f${toolName}`;
+    const row = funnelGroups.get(groupKey) || {
       tool_key: toolKey,
-      tool_name: toolKey,
-      tool_type: behaviorToolType(event.tool_type),
+      tool_name: toolName,
+      tool_type: toolType,
       impressions: new Set(),
       details: new Set(),
       install_started: new Set(),
@@ -1237,7 +1251,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       users: new Set(),
     };
     const stageId = scopedEventKey(event, event.operation_id || event.event_id
-      || `${event.view_id || "view"}:${toolKey}`);
+      || `${event.view_id || "view"}:${groupKey}`);
     const identity = eventIdentity(event);
     if (identity) row.users.add(identity);
     const successfulTerminal = !["tool_install_completed", "tool_configuration_finished", "tool_call_completed"].includes(event.event_name)
@@ -1253,7 +1267,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       row.failed.add(stageId);
       if (event.error_category === "user_cancelled") row.cancelled.add(stageId);
     }
-    funnelGroups.set(toolKey, row);
+    funnelGroups.set(groupKey, row);
   }
   const funnelRows = [...funnelGroups.values()].filter(row => row.users.size >= minimumSubjects).map(row => {
     const configurationToCall = row.configuration_completed_events.flatMap(configuration => {
@@ -1287,7 +1301,8 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     };
   }).sort((left, right) => right.impression_count - left.impression_count
     || right.install_started_count - left.install_started_count
-    || left.tool_key.localeCompare(right.tool_key, "zh-CN"));
+    || left.tool_name.localeCompare(right.tool_name, "zh-CN")
+    || left.tool_type.localeCompare(right.tool_type, "zh-CN"));
   return {
     generated_at: now,
     range: window.range,
