@@ -33,10 +33,21 @@ const secretsExample = fs.readFileSync(
   path.join(appRoot, "..", "scripts", ".builtin-secrets.env.example"),
   "utf8",
 );
+const signingGuide = fs.readFileSync(
+  path.join(appRoot, "..", "docs", "Windows-WoSign签名构建.md"),
+  "utf8",
+);
 
 assert.match(signScript, /Join-Path \$PSScriptRoot "wosigncodecmd\.exe"/u);
 assert.doesNotMatch(signScript, /PINVOU3_WOSIGN_TOOL_PATH/u);
 assert.match(signScript, /scripts\/\.builtin-secrets\.env/u);
+assert.match(signScript, /refs\/remotes\/origin\/zwp\/builtin-secrets-20260727/u);
+assert.match(signScript, /refs\/remotes\/gitlab\/zwp\/builtin-secrets-20260727/u);
+assert.match(signScript, /cat-file -e \$sourceSpec 2>\$null/u);
+assert.match(signScript, /@\(& \$gitCommand\.Source show \$sourceSpec 2>\$null\)/u);
+assert.match(signScript, /\$ErrorActionPreference = "Continue"/u);
+assert.match(signScript, /\$gitExitCode -eq 0 -and \$sourceLines\.Count -gt 0/u);
+assert.doesNotMatch(signScript, /Set-Content|Out-File|Add-Content/u);
 assert.match(signScript, /PINVOU3_WOSIGN_THUMBPRINT/u);
 assert.match(signScript, /PINVOU3_WOSIGN_PASSWORD/u);
 assert.doesNotMatch(signScript, /\$Thumbprint\s*=\s*"[0-9A-Fa-f]{40}"/u);
@@ -62,6 +73,8 @@ assert.match(signScript, /Authenticode policy, timestamp, and signer thumbprint 
 assert.match(signScript, /WoSign signing completed/u);
 assert.match(secretsExample, /PINVOU3_WOSIGN_THUMBPRINT=/u);
 assert.match(secretsExample, /PINVOU3_WOSIGN_PASSWORD=/u);
+assert.match(signingGuide, /zwp\/builtin-secrets-20260727/u);
+assert.match(signingGuide, /直接读入内存，不在工作区落盘或打印真值/u);
 assert.ok(packageJson.scripts["build:nsis"].includes("npm run bundle:nsis"));
 assert.ok(packageJson.scripts["bundle:nsis"].includes("--verbose"));
 assert.deepEqual(signingConfig.bundle.windows.signCommand.args.slice(0, 2), [

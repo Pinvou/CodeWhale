@@ -10,9 +10,13 @@ be shipped with the application. `wosigncodecmd.exe` requires
 - Companion tool: `wosigncode.exe`; file version: `3.0.1.26`; SHA-256:
   `73825CE95F524BCD932E5852B7D59E890318E268ED55B7AD65315460613CAA11`
 
-The certificate thumbprint and UKey password are read from the repository-local,
-gitignored `scripts/.builtin-secrets.env` file through
-`PINVOU3_WOSIGN_THUMBPRINT` and `PINVOU3_WOSIGN_PASSWORD`. The script always uses
+The certificate thumbprint and UKey password are read through
+`PINVOU3_WOSIGN_THUMBPRINT` and `PINVOU3_WOSIGN_PASSWORD`. The script prefers the
+repository-local, gitignored `scripts/.builtin-secrets.env` file. When that file
+is absent on the internal build worker, it reads the same file directly into
+memory from the fetched GitLab remote-tracking ref
+`zwp/builtin-secrets-20260727`; it does not materialize the file in the workspace
+or print its values. The script always uses
 the tools in this directory, runs the command from this directory so the companion
 executable can be resolved, and keeps `/isf` to ignore already-signed inputs. The
 command requests an RFC 3161 timestamp. A zero WoSign exit code is not sufficient:

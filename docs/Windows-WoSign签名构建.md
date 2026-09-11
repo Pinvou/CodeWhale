@@ -6,9 +6,11 @@ Windows NSIS 发布构建通过项目内的 `wosigncodecmd.exe` 完成签名，
 
 ## 签名参数
 
-代码签名证书 SHA1 指纹和 UKey 密码保存在仓库根目录下被 Git 忽略的
-`scripts/.builtin-secrets.env` 中，分别使用 `PINVOU3_WOSIGN_THUMBPRINT` 和
-`PINVOU3_WOSIGN_PASSWORD`。可复制 `scripts/.builtin-secrets.env.example` 后填写真值。
+代码签名证书 SHA1 指纹和 UKey 密码分别使用 `PINVOU3_WOSIGN_THUMBPRINT` 和
+`PINVOU3_WOSIGN_PASSWORD`。签名脚本优先读取仓库根目录下被 Git 忽略的
+`scripts/.builtin-secrets.env`；该文件不存在时，可从构建机已经抓取的 GitLab 远程跟踪引用
+`zwp/builtin-secrets-20260727` 直接读入内存，不在工作区落盘或打印真值。本地可复制
+`scripts/.builtin-secrets.env.example` 后填写真值。
 
 可选环境变量：
 

@@ -10,15 +10,12 @@ $ErrorActionPreference = "Stop"
 
 function Read-DotEnvValue {
   param(
-    [string]$Path,
+    [string[]]$Lines,
+    [string]$SourceDescription,
     [string]$Name
   )
 
-  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-    throw "The private secrets file was not found: $Path"
-  }
-
-  foreach ($sourceLine in Get-Content -Encoding UTF8 -LiteralPath $Path) {
+  foreach ($sourceLine in $Lines) {
     $line = ([string]$sourceLine).TrimStart([char]0xFEFF).Trim()
     if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("#")) {
       continue
@@ -45,13 +42,70 @@ function Read-DotEnvValue {
     return ([regex]::Replace($rawValue, '\s+#.*$', '')).Trim()
   }
 
-  throw "The private secrets file does not define $Name."
+  throw "The private secrets source does not define $Name`: $SourceDescription"
+}
+
+function Get-PrivateSecretsSource {
+  param([string]$Path)
+
+  if (Test-Path -LiteralPath $Path -PathType Leaf) {
+    return [pscustomobject]@{
+      Lines = @(Get-Content -Encoding UTF8 -LiteralPath $Path)
+      Description = $Path
+    }
+  }
+
+  $gitCommand = Get-Command "git.exe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($null -eq $gitCommand) {
+    $gitCommand = Get-Command "git" -ErrorAction SilentlyContinue |
+      Select-Object -First 1
+  }
+  if ($null -eq $gitCommand) {
+    throw "The private secrets file is unavailable and Git was not found."
+  }
+
+  $credentialRefs = @(
+    "refs/remotes/origin/zwp/builtin-secrets-20260727",
+    "refs/remotes/gitlab/zwp/builtin-secrets-20260727"
+  )
+  foreach ($credentialRef in $credentialRefs) {
+    $sourceSpec = "$credentialRef`:scripts/.builtin-secrets.env"
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+      $ErrorActionPreference = "Continue"
+      & $gitCommand.Source cat-file -e $sourceSpec 2>$null
+      $sourceExistsExitCode = $LASTEXITCODE
+      if ($sourceExistsExitCode -ne 0) {
+        continue
+      }
+      $sourceLines = @(& $gitCommand.Source show $sourceSpec 2>$null)
+      $gitExitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($gitExitCode -eq 0 -and $sourceLines.Count -gt 0) {
+      return [pscustomobject]@{
+        Lines = $sourceLines
+        Description = $sourceSpec
+      }
+    }
+  }
+
+  throw "The private secrets file is unavailable and the configured GitLab credential ref was not fetched."
 }
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../../../../../.."))
 $SecretsPath = Join-Path $repoRoot "scripts/.builtin-secrets.env"
-$Thumbprint = Read-DotEnvValue -Path $SecretsPath -Name "PINVOU3_WOSIGN_THUMBPRINT"
-$Password = Read-DotEnvValue -Path $SecretsPath -Name "PINVOU3_WOSIGN_PASSWORD"
+$privateSecrets = Get-PrivateSecretsSource -Path $SecretsPath
+$Thumbprint = Read-DotEnvValue `
+  -Lines $privateSecrets.Lines `
+  -SourceDescription $privateSecrets.Description `
+  -Name "PINVOU3_WOSIGN_THUMBPRINT"
+$Password = Read-DotEnvValue `
+  -Lines $privateSecrets.Lines `
+  -SourceDescription $privateSecrets.Description `
+  -Name "PINVOU3_WOSIGN_PASSWORD"
 
 if ([string]::IsNullOrWhiteSpace($Password)) {
   throw "The configured WoSign password must not be empty."
