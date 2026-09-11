@@ -20,7 +20,7 @@ const tokenOperationsOverviewSQL = `WITH clock AS MATERIALIZED (
     SELECT as_of-make_interval(secs=>$1::int) AS window_from,
            as_of AS window_to,as_of
       FROM clock
-), current_catalog AS MATERIALIZED (
+), catalog_head AS MATERIALIZED (
     SELECT max(version) AS version FROM model_catalog_versions
 ), bucket_config AS MATERIALIZED (
     SELECT bounds.*,
@@ -58,8 +58,8 @@ const tokenOperationsOverviewSQL = `WITH clock AS MATERIALIZED (
       LEFT JOIN reconciliation_trend USING(bucket_from)
 )
 SELECT bounds.as_of,bounds.window_from,bounds.window_to,
-    (SELECT count(*) FROM model_catalog_entries entry,current_catalog WHERE entry.catalog_version=current_catalog.version AND entry.lifecycle_status='PUBLISHED'),
-    (SELECT count(*) FROM model_catalog_entries entry,current_catalog WHERE entry.catalog_version=current_catalog.version AND entry.lifecycle_status='DEPRECATED'),
+    (SELECT count(*) FROM model_catalog_entries entry,catalog_head WHERE entry.catalog_version=catalog_head.version AND entry.lifecycle_status='PUBLISHED'),
+    (SELECT count(*) FROM model_catalog_entries entry,catalog_head WHERE entry.catalog_version=catalog_head.version AND entry.lifecycle_status='DEPRECATED'),
     (SELECT count(*) FROM model_catalog_drafts),
     (SELECT count(*) FROM routing_policies route WHERE route.reference_status='RESOLVED'),
     (SELECT count(*) FROM routing_policies route WHERE route.reference_status='RESOLVED' AND route.health_status='HEALTHY' AND route.health_expires_at>bounds.as_of),

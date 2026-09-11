@@ -7,9 +7,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestTokenOperationsOverviewSQLAvoidsPostgresReservedCatalogKeyword(t *testing.T) {
+	if strings.Contains(strings.ToLower(tokenOperationsOverviewSQL), "current_catalog") {
+		t.Fatal("overview query must not use PostgreSQL current_catalog as a CTE or alias")
+	}
+}
 
 type tokenOperationsOverviewStub struct {
 	Repository
