@@ -31,16 +31,23 @@ test('versioned metering and pricing persist deterministic immutable facts', asy
   assert.match(metering, /versioned, deterministic byte rule/);
 });
 
-test('gateway renews and extends the original hold before further delivery', async () => {
-  const [proxy, billingClient, reconciliation] = await Promise.all([
+test('gateway reserves the request maximum and authorizes final overage before stream success', async () => {
+  const [proxy, proxyTests, billingClient, reconciliation] = await Promise.all([
     read('internal/token/proxy.go'),
+    read('internal/token/proxy_test.go'),
     read('internal/token/billing.go'),
     read('internal/token/reconciliation.go'),
   ]);
 
   assert.match(proxy, /renewHold\(/);
+  assert.match(proxy, /maximumUsage, err := EstimateChatUsage\(body, maximumOutput\)/);
+  assert.match(proxy, /maximumCost, err := Cost\(price, maximumUsage\)/);
+  assert.match(proxy, /MaximumCost: maximumCost/);
   assert.match(proxy, /additional_preauthorization_failed/);
   assert.match(proxy, /client\.Extend\(/);
+  assert.match(proxyTests, /TestProxyStreamDoesNotChargeSSEEnvelopeBytesBeyondReservedOutput/);
+  assert.match(proxyTests, /TestProxyStreamAuthorizesAdditionalUsageBeforeDone/);
+  assert.match(proxyTests, /TestProxyStreamWithholdsDoneWhenAdditionalAuthorizationFails/);
   assert.match(billingClient, /"additional_microcredits": additional/);
   assert.match(reconciliation, /PricingSnapshot/);
   assert.match(reconciliation, /PromptTokens - cached/);

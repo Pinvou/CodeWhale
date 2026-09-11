@@ -421,7 +421,7 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	}
 	defer tx.Rollback(ctx)
 	settlementStatus := "REVIEW"
-	if status == "SETTLEMENT_PENDING" || reason == "upstream_transport_unknown" || reason == "upstream_error_unknown_usage" || reason == "stream_usage_missing" || reason == "usage_missing" {
+	if status == "SETTLEMENT_PENDING" || reason == "upstream_transport_unknown" || reason == "upstream_error_unknown_usage" || reason == "stream_usage_missing" || reason == "stream_terminal_missing" || reason == "usage_missing" {
 		settlementStatus = "USAGE_PENDING"
 	}
 	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status=$2,settlement_status=$6,error_class=$3,usage_snapshot=$4,reconciliation_next_at=$5,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, now, settlementStatus)

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use futures_util::{Stream, StreamExt, stream};
 use rand::Rng as _;
 use reqwest::Url;
 use serde_json::json;
@@ -158,6 +160,7 @@ async fn forward_chat(
         Ok(body) => body,
         Err(_) => return proxy_error(StatusCode::BAD_REQUEST, "invalid chat request body"),
     };
+    let expects_sse = chat_request_expects_sse(&body);
     let idempotency_key = request_idempotency_key(&route, target.turn_generation, &body);
     let logical_turn_id = logical_turn_id(&route, target.turn_generation);
     forward(
@@ -169,6 +172,7 @@ async fn forward_chat(
         Some(body),
         Some(&idempotency_key),
         Some(&logical_turn_id),
+        expects_sse,
     )
     .await
 }
@@ -191,6 +195,7 @@ async fn forward_models(
         None,
         None,
         None,
+        false,
     )
     .await
 }
@@ -204,6 +209,7 @@ async fn forward(
     body: Option<Bytes>,
     idempotency_key: Option<&str>,
     logical_turn_id: Option<&str>,
+    expects_sse: bool,
 ) -> Response<Body> {
     let target_url = match Url::parse(&format!(
         "{}/{resource}",
@@ -265,6 +271,27 @@ async fn forward(
     };
     let status = upstream_response.status();
     let upstream_headers = upstream_response.headers().clone();
+    let upstream_is_sse = upstream_headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("text/event-stream")
+        });
+    if expects_sse && status == StatusCode::ACCEPTED {
+        return proxy_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "model gateway request is still reconciling",
+        );
+    }
+    if expects_sse && status.is_success() && !upstream_is_sse {
+        return proxy_error(
+            StatusCode::BAD_GATEWAY,
+            "model gateway returned a non-stream response",
+        );
+    }
     let mut response = Response::builder().status(status);
     for name in [
         header::CONTENT_TYPE,
@@ -280,9 +307,97 @@ async fn forward(
             response = response.header(name, value);
         }
     }
+    let upstream_stream = upstream_response.bytes_stream();
+    let body = if upstream_is_sse {
+        Body::from_stream(require_sse_done(upstream_stream))
+    } else {
+        Body::from_stream(upstream_stream)
+    };
     response
-        .body(Body::from_stream(upstream_response.bytes_stream()))
+        .body(body)
         .unwrap_or_else(|_| proxy_error(StatusCode::BAD_GATEWAY, "invalid gateway response"))
+}
+
+fn chat_request_expects_sse(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|payload| payload.get("stream").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn require_sse_done<S, E>(source: S) -> impl Stream<Item = Result<Bytes, io::Error>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    struct State<S> {
+        source: std::pin::Pin<Box<S>>,
+        line: Vec<u8>,
+        line_overflow: bool,
+        saw_done: bool,
+        emitted_terminal_error: bool,
+    }
+
+    stream::unfold(
+        State {
+            source: Box::pin(source),
+            line: Vec::with_capacity(64),
+            line_overflow: false,
+            saw_done: false,
+            emitted_terminal_error: false,
+        },
+        |mut state| async move {
+            match state.source.next().await {
+                Some(Ok(bytes)) => {
+                    observe_sse_lines(
+                        &mut state.line,
+                        &mut state.line_overflow,
+                        &mut state.saw_done,
+                        &bytes,
+                    );
+                    Some((Ok(bytes), state))
+                }
+                Some(Err(error)) => {
+                    state.emitted_terminal_error = true;
+                    Some((
+                        Err(io::Error::other(format!(
+                            "account platform stream failed: {error}"
+                        ))),
+                        state,
+                    ))
+                }
+                None if state.saw_done || state.emitted_terminal_error => None,
+                None => {
+                    state.emitted_terminal_error = true;
+                    Some((
+                        Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "account platform stream ended before data: [DONE]",
+                        )),
+                        state,
+                    ))
+                }
+            }
+        },
+    )
+}
+
+fn observe_sse_lines(line: &mut Vec<u8>, overflow: &mut bool, saw_done: &mut bool, bytes: &[u8]) {
+    const MAX_TERMINAL_LINE_BYTES: usize = 256;
+    for byte in bytes {
+        if *byte == b'\n' {
+            let candidate = line.strip_suffix(b"\r").unwrap_or(line.as_slice());
+            if !*overflow && candidate == b"data: [DONE]" {
+                *saw_done = true;
+            }
+            line.clear();
+            *overflow = false;
+        } else if line.len() < MAX_TERMINAL_LINE_BYTES {
+            line.push(*byte);
+        } else {
+            *overflow = true;
+        }
+    }
 }
 
 fn transport_error_kind(error: &reqwest::Error) -> &'static str {
@@ -368,16 +483,43 @@ fn proxy_error(status: StatusCode, message: &'static str) -> Response<Body> {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::Arc;
 
     use axum::Router;
     use axum::body::Bytes;
     use axum::extract::State;
-    use axum::http::{HeaderMap, header};
+    use axum::http::{HeaderMap, StatusCode, header};
     use axum::routing::post;
+    use futures_util::{StreamExt, stream};
     use tokio::sync::Mutex;
 
-    use super::{ModelGatewayProxy, logical_turn_id, prepare_chat_body, request_idempotency_key};
+    use super::{
+        ModelGatewayProxy, logical_turn_id, prepare_chat_body, request_idempotency_key,
+        require_sse_done,
+    };
+
+    #[tokio::test]
+    async fn sse_guard_requires_explicit_done_terminal() {
+        let complete = stream::iter(vec![
+            Ok::<_, io::Error>(Bytes::from_static(b"data: {\"choices\":[]}\n\n")),
+            Ok(Bytes::from_static(b"data: [DO")),
+            Ok(Bytes::from_static(b"NE]\r\n\r\n")),
+        ]);
+        let complete = require_sse_done(complete).collect::<Vec<_>>().await;
+        assert!(complete.iter().all(Result::is_ok));
+
+        let incomplete = stream::iter(vec![Ok::<_, io::Error>(Bytes::from_static(
+            b"data: {\"choices\":[]}\n\n",
+        ))]);
+        let incomplete = require_sse_done(incomplete).collect::<Vec<_>>().await;
+        assert_eq!(incomplete.len(), 2);
+        assert!(incomplete[0].is_ok());
+        assert_eq!(
+            incomplete[1].as_ref().unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
 
     #[test]
     fn idempotency_key_is_stable_bounded_and_scoped_to_session_route() {
@@ -570,5 +712,97 @@ mod tests {
                         && model == "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c"
                 )
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_request_rejects_successful_non_sse_responses() {
+        let upstream = Router::new().route(
+            "/v1/chat/completions",
+            post(|body: Bytes| async move {
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&body).expect("forwarded JSON body");
+                let status = if matches!(payload["case"].as_str(), Some("pending" | "pending-sse"))
+                {
+                    StatusCode::ACCEPTED
+                } else {
+                    StatusCode::OK
+                };
+                let content_type = if payload["case"] == "pending-sse" {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
+                (
+                    status,
+                    [(header::CONTENT_TYPE, content_type)],
+                    r#"{"code":"USAGE_REVIEW"}"#,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream");
+        let upstream_address = listener.local_addr().expect("upstream address");
+        tokio::spawn(async move {
+            axum::serve(listener, upstream)
+                .await
+                .expect("serve upstream");
+        });
+
+        let proxy = ModelGatewayProxy::default();
+        let base_url = proxy
+            .register_session(
+                "non-sse-session",
+                &format!("http://{upstream_address}/v1"),
+                "01a08b7a-654d-7e8d-8a7c-87b4506f2c7c",
+                4096,
+            )
+            .await
+            .expect("register proxy route");
+        let client = reqwest::Client::new();
+        for (case, stream, expected_status, expected_message) in [
+            (
+                "pending",
+                true,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "still reconciling",
+            ),
+            (
+                "pending-sse",
+                true,
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "still reconciling",
+            ),
+            (
+                "invalid-success",
+                true,
+                reqwest::StatusCode::BAD_GATEWAY,
+                "non-stream response",
+            ),
+            (
+                "ordinary-json",
+                false,
+                reqwest::StatusCode::OK,
+                "USAGE_REVIEW",
+            ),
+        ] {
+            let response = client
+                .post(format!("{base_url}/chat/completions"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(format!(
+                    r#"{{"model":"m","stream":{stream},"case":"{case}"}}"#
+                ))
+                .send()
+                .await
+                .expect("proxy request");
+            assert_eq!(response.status(), expected_status);
+            assert!(
+                response
+                    .text()
+                    .await
+                    .expect("proxy response body")
+                    .contains(expected_message)
+            );
+        }
     }
 }

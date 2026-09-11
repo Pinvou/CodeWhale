@@ -343,7 +343,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		w.Header().Set("Content-Type", "text/event-stream")
 		_ = s.repository.MarkDelivery(context.WithoutCancel(r.Context()), usageRequest.ID, "DELIVERING")
 		w.WriteHeader(response.StatusCode)
-		s.proxyStream(w, r, usageRequest.ID, holdID, envelope.Price, response.Body, renewalFailed, envelope.MaximumCost, envelope.MaximumOutput)
+		s.proxyStream(w, r, usageRequest.ID, holdID, envelope.Price, response.Body, renewalFailed, envelope.MaximumCost)
 		return
 	}
 	payload, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<20))
@@ -689,67 +689,31 @@ func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(payload)
 }
 
-func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader, renewalFailed <-chan struct{}, authorizedValues ...int64) {
+func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader, renewalFailed <-chan struct{}, authorizedMaximum int64) {
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 2<<20)
 	var usage Usage
 	usageFound := false
-	authorizedMaximum, authorizedOutputTokens := int64(0), int64(0)
-	if len(authorizedValues) > 0 {
-		authorizedMaximum = authorizedValues[0]
-	}
-	if len(authorizedValues) > 1 {
-		authorizedOutputTokens = authorizedValues[1]
-	}
-	outputAuthorization, _ := Cost(price, Usage{OutputTokens: authorizedOutputTokens})
-	var streamedBytes int64
 	var lastSequence int64
 	aggregate := make([]json.RawMessage, 0)
 	deliveryConnected := true
+	doneFound := false
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
-		streamedBytes += int64(len(line))
-		estimatedOutputTokens := streamedBytes / 4
-		if streamedBytes%4 != 0 {
-			estimatedOutputTokens++
-		}
-		if estimatedOutputTokens > authorizedOutputTokens {
-			required, _ := Cost(price, Usage{OutputTokens: estimatedOutputTokens})
-			if required > outputAuthorization {
-				additional := required - outputAuthorization
-				client, ok := s.billing.(SnapshotBillingClient)
-				background := context.WithoutCancel(r.Context())
-				if !ok || client.Extend(background, usageID, holdID, additional) != nil {
-					_ = s.repository.MarkReview(background, usageID, "additional_preauthorization_failed", map[string]any{"stream_stopped": true, "additional_microcredits": additional})
-					return
-				}
-				if repository, ok := s.repository.(interface {
-					IncreaseMaximum(context.Context, uuid.UUID, int64) error
-				}); ok {
-					if repository.IncreaseMaximum(background, usageID, additional) != nil {
-						_ = s.repository.MarkReview(background, usageID, "local_preauthorization_record_pending", map[string]any{"additional_microcredits": additional})
-						return
-					}
-				}
-				authorizedMaximum += additional
-				outputAuthorization = required
-			}
-		}
 		if bytes.HasPrefix(line, []byte("data:")) {
 			payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-			eventType := "CHUNK"
 			if bytes.Equal(payload, []byte("[DONE]")) {
-				eventType = "DONE"
-			} else {
-				if json.Valid(payload) {
-					aggregate = append(aggregate, append(json.RawMessage(nil), payload...))
-				}
-				if parsed, ok := s.upstream.ParseUsage(payload); ok {
-					usage, usageFound = parsed, true
-				}
+				doneFound = true
+				break
 			}
-			sequence, err := s.repository.AppendReplayEvent(context.WithoutCancel(r.Context()), usageID, eventType, payload)
+			if json.Valid(payload) {
+				aggregate = append(aggregate, append(json.RawMessage(nil), payload...))
+			}
+			if parsed, ok := s.upstream.ParseUsage(payload); ok {
+				usage, usageFound = parsed, true
+			}
+			sequence, err := s.repository.AppendReplayEvent(context.WithoutCancel(r.Context()), usageID, "CHUNK", payload)
 			if err != nil {
 				_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageID, "stream_event_persistence_failed", map[string]any{"last_sequence": lastSequence})
 				return
@@ -762,7 +726,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 				}
 			}
 			if deliveryConnected {
-				if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", sequence, strings.ToLower(eventType), payload); err != nil {
+				if _, err := fmt.Fprintf(w, "id: %d\nevent: chunk\ndata: %s\n\n", sequence, payload); err != nil {
 					deliveryConnected = false
 					_ = s.repository.MarkDelivery(context.WithoutCancel(r.Context()), usageID, "DISCONNECTED")
 				} else if flusher != nil {
@@ -779,13 +743,24 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	default:
 	}
 	streamErr := scanner.Err()
-	if streamErr == nil && deliveryConnected {
-		_ = s.repository.MarkDelivery(background, usageID, "DELIVERED")
-	}
-	if streamErr != nil || !usageFound {
-		_ = s.repository.MarkReview(background, usageID, "stream_usage_missing", map[string]any{"stream_error": streamErr != nil})
+	if streamErr != nil || !usageFound || !doneFound {
+		reason := "stream_usage_missing"
+		if !doneFound {
+			reason = "stream_terminal_missing"
+		}
+		_ = s.repository.MarkReview(background, usageID, reason, map[string]any{"stream_error": streamErr != nil, "usage_found": usageFound, "done_found": doneFound})
 		return
 	}
+	authorizedMaximum, authorized := s.authorizeAdditional(background, usageID, holdID, price, usage, authorizedMaximum)
+	if !authorized {
+		return
+	}
+	doneSequence, err := s.repository.AppendReplayEvent(background, usageID, "DONE", []byte("[DONE]"))
+	if err != nil {
+		_ = s.repository.MarkReview(background, usageID, "stream_event_persistence_failed", map[string]any{"last_sequence": lastSequence})
+		return
+	}
+	lastSequence = doneSequence
 	if err := s.repository.MarkResponseReceived(background, usageID); err != nil {
 		_ = s.repository.MarkReview(background, usageID, "response_state_persistence_failed", map[string]any{"last_sequence": lastSequence})
 		return
@@ -794,6 +769,17 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "STREAM_AGGREGATE", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: aggregatePayload, FinalUsage: &usage, LastSequence: lastSequence}) != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"last_sequence": lastSequence})
 		return
+	}
+	if deliveryConnected {
+		if _, err := fmt.Fprintf(w, "id: %d\nevent: done\ndata: [DONE]\n\n", doneSequence); err != nil {
+			deliveryConnected = false
+			_ = s.repository.MarkDelivery(background, usageID, "DISCONNECTED")
+		} else if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if deliveryConnected {
+		_ = s.repository.MarkDelivery(background, usageID, "DELIVERED")
 	}
 	s.settle(background, usageID, holdID, price, usage, authorizedMaximum)
 }
