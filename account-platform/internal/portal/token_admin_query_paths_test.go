@@ -2,6 +2,9 @@ package portal
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +18,7 @@ func TestTokenAdminQueryProjectionAllowlistIsReadOnly(t *testing.T) {
 		"/admin/v1/models", "/admin/v1/protocols", "/admin/v1/formulas",
 		"/admin/v1/token-accounts", "/admin/v1/provisionings", "/admin/v1/usage-requests",
 		"/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit",
+		"/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations",
 		"/admin/v1/usage-requests/" + usageID + "/evidence",
 		"/admin/v1/provisionings/" + usageID + "/attempts",
 	}
@@ -38,12 +42,13 @@ func TestTokenAdminQueryProjectionAllowlistIsReadOnly(t *testing.T) {
 		"/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates",
 		"/admin/v1/resource-audit", "/admin/v1/usage-requests/" + usageID + "/evidence",
 		"/admin/v1/provisionings/" + usageID + "/attempts",
+		"/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations",
 	} {
 		if tokenAdminPathAllowed(http.MethodPost, path) || tokenAdminPathAllowed(http.MethodDelete, path) {
 			t.Fatalf("query projection must remain read-only: %s", path)
 		}
 	}
-	for _, path := range []string{"/admin/v1/owner-candidates/" + uuid.NewString(), "/admin/v1/resource-audit/export", "/admin/v1/usage-requests/not-a-uuid/evidence", "/admin/v1/provisionings/not-a-uuid/attempts", "/admin/v1/provisionings/" + usageID + "/attempts/extra", "/admin/v2/provisionings/not-a-uuid", "/admin/v2/provisionings/" + usageID + "/attempts", "/admin/v2/token-accounts/not-a-uuid", "/admin/v2/token-accounts/" + usageID + "/extra"} {
+	for _, path := range []string{"/admin/v1/owner-candidates/" + uuid.NewString(), "/admin/v1/resource-audit/export", "/admin/v1/overviews", "/admin/v1/overviews/unknown", "/admin/v1/overviews/model-catalog/extra", "/admin/v1/usage-requests/not-a-uuid/evidence", "/admin/v1/provisionings/not-a-uuid/attempts", "/admin/v1/provisionings/" + usageID + "/attempts/extra", "/admin/v2/provisionings/not-a-uuid", "/admin/v2/provisionings/" + usageID + "/attempts", "/admin/v2/token-accounts/not-a-uuid", "/admin/v2/token-accounts/" + usageID + "/extra"} {
 		if tokenAdminPathAllowed(http.MethodGet, path) {
 			t.Fatalf("unexpected Token admin path allowed: %s", path)
 		}
@@ -116,9 +121,19 @@ func TestPortalClientSourceRejectsForgedPublicForwardingHeaders(t *testing.T) {
 func TestPortalSignsOwnedTokenAdminSourceHeader(t *testing.T) {
 	key := bytes.Repeat([]byte{0x42}, 32)
 	service := &Service{config: Config{TokenAdminProxyHMACKey: key}}
-	request := httptest.NewRequest(http.MethodGet, "http://token.internal/admin/v1/models?limit=20", nil)
-	service.applyClientCompatibilityHeaders(request, "203.0.113.19")
-	if request.Header.Get("X-Pinvou-Client-Source") != "203.0.113.19" || request.Header.Get("X-Pinvou-Client-Source-Signature") == "" {
-		t.Fatalf("Portal did not emit the signed source assertion: %v", request.Header)
+	seen := map[string]string{}
+	for _, source := range []string{"203.0.113.19", "203.0.113.20"} {
+		request := httptest.NewRequest(http.MethodGet, "http://token.internal/admin/v1/overviews/model-catalog", nil)
+		service.applyClientCompatibilityHeaders(request, source)
+		provided, err := hex.DecodeString(request.Header.Get("X-Pinvou-Client-Source-Signature"))
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(request.Method + "\n" + request.URL.RequestURI() + "\n" + source))
+		if err != nil || request.Header.Get("X-Pinvou-Client-Source") != source || !hmac.Equal(provided, mac.Sum(nil)) {
+			t.Fatalf("Portal did not emit a valid source assertion for %s: %v", source, request.Header)
+		}
+		seen[source] = request.Header.Get("X-Pinvou-Client-Source-Signature")
+	}
+	if seen["203.0.113.19"] == seen["203.0.113.20"] {
+		t.Fatal("distinct normalized sources shared a signature")
 	}
 }

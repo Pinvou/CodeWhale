@@ -96,6 +96,7 @@ spec:
             - { name: TOKEN_ADMIN_PAGINATION_ENABLED, value: {{ $root.Values.tokenGateway.adminPaginationEnabled | quote }} }
             - { name: TOKEN_ADMIN_IMPACT_PRECHECKS_ENABLED, value: {{ $root.Values.tokenGateway.impactPrechecksEnabled | quote }} }
             - { name: TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED, value: {{ $root.Values.tokenGateway.adminOperationsOverviewEnabled | quote }} }
+            - { name: TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED, value: {{ $root.Values.tokenGateway.adminPageOverviewsEnabled | quote }} }
             - { name: TOKEN_CREDENTIAL_ISOLATION_ENABLED, value: {{ $root.Values.tokenGateway.credentialIsolationEnabled | quote }} }
             - { name: CREDENTIAL_PORTAL_PUBLIC_URL, value: {{ $root.Values.tokenCredentialPortal.publicUrl | quote }} }
             - name: TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64

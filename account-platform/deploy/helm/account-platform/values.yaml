@@ -137,6 +137,7 @@ tokenGateway:
   runtimeSecret: ""
   credentialIsolationEnabled: false
   adminOperationsOverviewEnabled: false
+  adminPageOverviewsEnabled: false
   adminPaginationEnabled: false
   impactPrechecksEnabled: false
   gatewayAdapter: NEW_API

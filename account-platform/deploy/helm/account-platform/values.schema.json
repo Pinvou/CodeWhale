@@ -231,6 +231,7 @@
         "impactPrechecksEnabled": { "type": "boolean" },
         "credentialIsolationEnabled": { "type": "boolean" },
         "adminOperationsOverviewEnabled": { "type": "boolean" },
+        "adminPageOverviewsEnabled": { "type": "boolean" },
         "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
         "secretProvider": { "enum": ["local", "remote", "vault-transit"] },
         "secretKeyId": { "type": "string" },

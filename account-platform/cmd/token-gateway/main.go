@@ -89,6 +89,13 @@ func main() {
 	if err != nil {
 		log.Fatal("TOKEN_ADMIN_OPERATIONS_OVERVIEW_ENABLED must be true or false")
 	}
+	pageOverviewsEnabled, err := strconv.ParseBool(valueOrDefault("TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED", "false"))
+	if err != nil {
+		log.Fatal("TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED must be true or false")
+	}
+	if pageOverviewsEnabled && len(paginationKey) < 32 {
+		log.Fatal("TOKEN_ADMIN_PAGE_OVERVIEWS_ENABLED requires TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64 with at least 32 decoded bytes")
+	}
 	credentialIsolationEnabled, err := strconv.ParseBool(valueOrDefault("TOKEN_CREDENTIAL_ISOLATION_ENABLED", "false"))
 	if err != nil {
 		log.Fatal("TOKEN_CREDENTIAL_ISOLATION_ENABLED must be true or false")
@@ -296,7 +303,7 @@ func main() {
 	go observability.RunBackground(workerContext, "model-catalog-sync", catalogSync.Run)
 	go observability.RunBackground(workerContext, "default-route-provisioning", defaultRoutes.Run)
 	go observability.RunBackground(workerContext, "route-health-probe", routeHealth.Run)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient).WithAdminOperationsOverview(operationsOverviewEnabled).WithCredentialIsolation(credentialIsolationEnabled).WithApprovedTokenCommandExecutor(token.NewPostgresApprovedCredentialExecutor(repository))
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness).WithOwnerCandidateDirectory(ownerCandidates).WithAdminProxyHMACKey(paginationKey).WithImpactPrechecks(impactPrechecksEnabled, repository, billingClient).WithAdminOperationsOverview(operationsOverviewEnabled).WithAdminPageOverviews(pageOverviewsEnabled).WithCredentialIsolation(credentialIsolationEnabled).WithApprovedTokenCommandExecutor(token.NewPostgresApprovedCredentialExecutor(repository))
 	service.WithTokenCommandGovernanceActivation(governance).WithTokenAccountProvisioning(wallets, ownerAuthority)
 	governedWorkers, err := token.NewTokenGovernanceSupervisor(service, repository, governance, wallets, ownerAuthority)
 	if err != nil {

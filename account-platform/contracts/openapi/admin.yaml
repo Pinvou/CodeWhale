@@ -1461,6 +1461,51 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
         "504": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/overviews/model-catalog:
+    get:
+      operationId: getAdminModelCatalogPageOverview
+      summary: Get the model-catalog-only point-in-time overview
+      description: Requires platform.models.read. No query parameter is accepted. The response is a closed projection from one Token database snapshot and never includes route or usage facts.
+      responses:
+        "200": { description: Closed model catalog overview, content: { application/json: { schema: { $ref: "#/components/schemas/ModelCatalogPageOverview" } } } }
+        "400": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "401": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "403": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "429": { $ref: "#/components/responses/ModelTokenPageOverviewRateLimited" }
+        "503": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "504": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+  /token/admin/v1/overviews/token-resources:
+    get:
+      operationId: getAdminTokenResourcesPageOverview
+      summary: Get the stable-route-only point-in-time overview
+      description: Requires platform.tokens.read. No query parameter is accepted. Healthy and attention counts partition stable routes at the database-authoritative as_of instant.
+      responses:
+        "200": { description: Closed Token resources overview, content: { application/json: { schema: { $ref: "#/components/schemas/TokenResourcesPageOverview" } } } }
+        "400": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "401": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "403": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "429": { $ref: "#/components/responses/ModelTokenPageOverviewRateLimited" }
+        "503": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "504": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+  /token/admin/v1/overviews/model-operations:
+    get:
+      operationId: getAdminModelOperationsPageOverview
+      summary: Get one permission-trimmed model operations overview
+      description: Requires platform.tokens.read or platform.usage.read in one authorization snapshot. The server alone selects TOKEN_ONLY, USAGE_ONLY, or TOKEN_AND_USAGE. Usage-authorized requests require one canonical window; token-only requests must not send one. Unauthorized SQL branches are never executed.
+      parameters:
+        - name: window
+          in: query
+          required: false
+          description: Required exactly once when platform.usage.read is granted and forbidden for token-only requests.
+          schema: { type: string, enum: [24h, 7d, 30d] }
+      responses:
+        "200": { description: Closed permission-trimmed model operations overview, content: { application/json: { schema: { $ref: "#/components/schemas/ModelOperationsPageOverview" } } } }
+        "400": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "401": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "403": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "429": { $ref: "#/components/responses/ModelTokenPageOverviewRateLimited" }
+        "503": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
+        "504": { $ref: "#/components/responses/ModelTokenPageOverviewError" }
   /token/admin/v1/token-accounts:
     get:
       operationId: listAdminTokenAccounts
@@ -5925,6 +5970,164 @@ components:
         as_of: { type: string, format: date-time }
         window: { type: "null" }
         metrics: { type: array, minItems: 6, maxItems: 6, items: { $ref: "#/components/schemas/FinanceProductsMetric" } }
+    ModelTokenPageOverviewMetric:
+      type: object
+      additionalProperties: false
+      required: [key, value, unit, aggregation, included_statuses, denominator_key]
+      properties:
+        key:
+          type: string
+          enum: [published_model_count, deprecated_model_count, model_draft_count, stable_route_count, healthy_route_count, route_attention_count, provisioning_pending_count, provisioning_attention_count, usage_request_count, reconciliation_pending_count, reconciliation_stopped_count]
+        value: { type: integer, format: int64, minimum: 0 }
+        unit: { type: string, const: COUNT }
+        aggregation: { type: string, enum: [POINT_IN_TIME, WINDOW] }
+        included_statuses:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { type: string, enum: [PUBLISHED, DEPRECATED, DRAFT, RESOLVED, HEALTHY, UNKNOWN, PROBING, DEGRADED, UNHEALTHY, STALE, EXPIRED_HEALTH, PENDING, FAILED, REPAIR_REQUIRED, CREATED, RESERVED, UPSTREAM_ACTIVE, SETTLEMENT_PENDING, COMMITTED, RELEASED, REVIEW] }
+        denominator_key: { type: [string, "null"], enum: [stable_route_count, null] }
+    ModelCatalogPageOverviewMetrics:
+      type: array
+      minItems: 3
+      maxItems: 3
+      prefixItems:
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: published_model_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [PUBLISHED] }, denominator_key: { type: "null" } }
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: deprecated_model_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [DEPRECATED] }, denominator_key: { type: "null" } }
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: model_draft_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [DRAFT] }, denominator_key: { type: "null" } }
+      items: false
+    TokenResourcesPageOverviewMetrics:
+      type: array
+      minItems: 3
+      maxItems: 3
+      prefixItems:
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: stable_route_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [RESOLVED] }, denominator_key: { type: "null" } }
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: healthy_route_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [HEALTHY] }, denominator_key: { const: stable_route_count } }
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: route_attention_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [UNKNOWN, PROBING, DEGRADED, UNHEALTHY, STALE, EXPIRED_HEALTH] }, denominator_key: { const: stable_route_count } }
+      items: false
+    ModelOperationsProvisioningMetrics:
+      type: array
+      minItems: 2
+      maxItems: 2
+      prefixItems:
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: provisioning_pending_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [PENDING] }, denominator_key: { type: "null" } }
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: provisioning_attention_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [FAILED, REPAIR_REQUIRED] }, denominator_key: { type: "null" } }
+      items: false
+    ModelOperationsUsageMetrics:
+      type: array
+      minItems: 3
+      maxItems: 3
+      prefixItems:
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: usage_request_count }, aggregation: { const: WINDOW }, included_statuses: { const: [CREATED, RESERVED, UPSTREAM_ACTIVE, SETTLEMENT_PENDING, COMMITTED, RELEASED, REVIEW] }, denominator_key: { type: "null" } }
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: reconciliation_pending_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [SETTLEMENT_PENDING, REVIEW] }, denominator_key: { type: "null" } }
+        - allOf:
+            - { $ref: "#/components/schemas/ModelTokenPageOverviewMetric" }
+            - properties: { key: { const: reconciliation_stopped_count }, aggregation: { const: POINT_IN_TIME }, included_statuses: { const: [SETTLEMENT_PENDING, REVIEW] }, denominator_key: { type: "null" } }
+      items: false
+    ModelCatalogPageOverview:
+      type: object
+      additionalProperties: false
+      required: [schema_version, as_of, metrics]
+      properties:
+        schema_version: { type: string, const: "1" }
+        as_of: { type: string, format: date-time }
+        metrics: { $ref: "#/components/schemas/ModelCatalogPageOverviewMetrics" }
+    TokenResourcesPageOverview:
+      type: object
+      additionalProperties: false
+      required: [schema_version, as_of, metrics]
+      properties:
+        schema_version: { type: string, const: "1" }
+        as_of: { type: string, format: date-time }
+        metrics: { $ref: "#/components/schemas/TokenResourcesPageOverviewMetrics" }
+    ModelOperationsOverviewWindow:
+      type: object
+      additionalProperties: false
+      required: [from, to, timezone]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        timezone: { type: string, const: UTC }
+    ModelOperationsOverviewTrendPoint:
+      type: object
+      additionalProperties: false
+      required: [from, to, usage_request_count, reconciliation_attention_count]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        usage_request_count: { type: integer, format: int64, minimum: 0 }
+        reconciliation_attention_count: { type: integer, format: int64, minimum: 0 }
+    ModelOperationsOverviewTrend:
+      type: object
+      additionalProperties: false
+      required: [bucket_seconds, points]
+      properties:
+        bucket_seconds: { type: integer, format: int64, enum: [3600, 86400] }
+        points: { type: array, minItems: 7, maxItems: 30, items: { $ref: "#/components/schemas/ModelOperationsOverviewTrendPoint" } }
+    ModelOperationsProvisioningOverview:
+      type: object
+      additionalProperties: false
+      required: [metrics]
+      properties:
+        metrics: { $ref: "#/components/schemas/ModelOperationsProvisioningMetrics" }
+    ModelOperationsUsageOverview:
+      type: object
+      additionalProperties: false
+      required: [window, metrics, trend]
+      properties:
+        window: { $ref: "#/components/schemas/ModelOperationsOverviewWindow" }
+        metrics: { $ref: "#/components/schemas/ModelOperationsUsageMetrics" }
+        trend: { $ref: "#/components/schemas/ModelOperationsOverviewTrend" }
+    ModelOperationsPageOverview:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [schema_version, as_of, permission_view, provisioning]
+          properties:
+            schema_version: { type: string, const: "1" }
+            as_of: { type: string, format: date-time }
+            permission_view: { type: string, const: TOKEN_ONLY }
+            provisioning: { $ref: "#/components/schemas/ModelOperationsProvisioningOverview" }
+        - type: object
+          additionalProperties: false
+          required: [schema_version, as_of, permission_view, usage]
+          properties:
+            schema_version: { type: string, const: "1" }
+            as_of: { type: string, format: date-time }
+            permission_view: { type: string, const: USAGE_ONLY }
+            usage: { $ref: "#/components/schemas/ModelOperationsUsageOverview" }
+        - type: object
+          additionalProperties: false
+          required: [schema_version, as_of, permission_view, provisioning, usage]
+          properties:
+            schema_version: { type: string, const: "1" }
+            as_of: { type: string, format: date-time }
+            permission_view: { type: string, const: TOKEN_AND_USAGE }
+            provisioning: { $ref: "#/components/schemas/ModelOperationsProvisioningOverview" }
+            usage: { $ref: "#/components/schemas/ModelOperationsUsageOverview" }
+    ModelTokenPageOverviewErrorCode:
+      type: string
+      enum: [AUTH_REQUIRED, PERMISSION_DENIED, AUTHORIZATION_UNAVAILABLE, AUTHORIZATION_VERSION_INVALID, INVALID_MODEL_CATALOG_OVERVIEW_QUERY, INVALID_TOKEN_RESOURCES_OVERVIEW_QUERY, INVALID_TIME_WINDOW, TOKEN_OVERVIEW_RATE_LIMITED, MODEL_CATALOG_OVERVIEW_UNAVAILABLE, TOKEN_RESOURCES_OVERVIEW_UNAVAILABLE, MODEL_OPERATIONS_OVERVIEW_UNAVAILABLE, MODEL_CATALOG_OVERVIEW_TIMEOUT, TOKEN_RESOURCES_OVERVIEW_TIMEOUT, MODEL_OPERATIONS_OVERVIEW_TIMEOUT]
     TokenOperationsOverviewWindow:
       type: object
       additionalProperties: false
@@ -6790,6 +6993,34 @@ components:
             required: [code, message, request_id]
             properties:
               code: { type: string, const: PRECHECK_TIMEOUT }
+              message: { type: string }
+              request_id: { type: string }
+    ModelTokenPageOverviewError:
+      description: Stable page-overview input, authorization, availability, or timeout error
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [code, message]
+            properties:
+              code: { $ref: "#/components/schemas/ModelTokenPageOverviewErrorCode" }
+              message: { type: string }
+              request_id: { type: string }
+    ModelTokenPageOverviewRateLimited:
+      description: Either the 60/min stable-user endpoint bucket or shared 120/min trusted-source bucket was exceeded
+      headers:
+        Retry-After:
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 60 }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [code, message]
+            properties:
+              code: { type: string, const: TOKEN_OVERVIEW_RATE_LIMITED }
               message: { type: string }
               request_id: { type: string }
     Error:

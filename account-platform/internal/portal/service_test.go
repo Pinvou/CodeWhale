@@ -329,6 +329,111 @@ func TestTokenAdminIngressDiscardsForgedDeadlineAndClassifiesCursor(t *testing.T
 	}
 }
 
+func TestTokenAdminIngressClassifiesExactOverviewBeforeSnapshotBuild(t *testing.T) {
+	service := testService(t, newMemoryStore())
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/token/admin/v1/overviews/model-catalog", nil)
+	request.Header.Set(requestdeadline.AbsoluteDeadlineHeader, time.Now().Add(time.Hour).Format(time.RFC3339Nano))
+	request.Header.Set(requestdeadline.DeadlineClassHeader, string(requestdeadline.SnapshotBuild))
+	response := httptest.NewRecorder()
+	service.tokenAdminIngressDeadline(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		contract, ok := requestdeadline.FromContext(r.Context())
+		if !ok || contract.Class != requestdeadline.OverviewRead {
+			t.Fatalf("trusted ingress contract = %+v, %v", contract, ok)
+		}
+		if remaining := time.Until(contract.BusinessDeadline); remaining <= 2*time.Second || remaining > 3*time.Second {
+			t.Fatalf("overview business budget was reset or enlarged: %s", remaining)
+		}
+		if r.Header.Get(requestdeadline.AbsoluteDeadlineHeader) != "" || r.Header.Get(requestdeadline.DeadlineClassHeader) != "" {
+			t.Fatal("client-controlled overview deadline headers reached the application")
+		}
+	})).ServeHTTP(response, request)
+}
+
+func TestTokenPageOverviewProxyFailsClosedWithoutStrongHMACKey(t *testing.T) {
+	for _, key := range [][]byte{nil, []byte(strings.Repeat("k", 31))} {
+		for _, item := range []struct {
+			path, code string
+		}{
+			{"/api/admin/token/admin/v1/overviews/model-catalog", "MODEL_CATALOG_OVERVIEW_UNAVAILABLE"},
+			{"/api/admin/token/admin/v1/overviews/token-resources", "TOKEN_RESOURCES_OVERVIEW_UNAVAILABLE"},
+			{"/api/admin/token/admin/v1/overviews/model-operations?window=24h", "MODEL_OPERATIONS_OVERVIEW_UNAVAILABLE"},
+		} {
+			service := testService(t, newMemoryStore())
+			service.config.TokenAdminProxyHMACKey = key
+			request := httptest.NewRequest(http.MethodGet, item.path, nil)
+			response := httptest.NewRecorder()
+			service.Handler(nil).ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), item.code) {
+				t.Fatalf("key_length=%d path=%s status=%d body=%s", len(key), item.path, response.Code, response.Body.String())
+			}
+		}
+	}
+}
+
+func TestTokenPageOverviewProxyRejectsEveryNonCanonicalAliasBeforeUpstream(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	service.config.TokenAdminProxyHMACKey = []byte(strings.Repeat("c", 32))
+	upstreamHits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.config.TokenGatewayURL = upstreamURL
+	session := Session{ID: "overview-paths", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("c", 32)}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	handler := service.Handler(nil)
+	for _, exact := range []string{
+		"/api/admin/token/admin/v1/overviews/model-catalog",
+		"/api/admin/token/admin/v1/overviews/token-resources",
+		"/api/admin/token/admin/v1/overviews/model-operations?window=24h",
+	} {
+		request := httptest.NewRequest(http.MethodGet, exact, nil)
+		request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("canonical path %q status=%d body=%s", exact, response.Code, response.Body.String())
+		}
+	}
+	if upstreamHits != 3 {
+		t.Fatalf("canonical paths reached upstream %d times, want 3", upstreamHits)
+	}
+
+	aliases := []string{
+		"/api/admin/token/admin/v1/overviews/model-catalog/",
+		"/api/admin/token/admin/v1/overviews/token-resources/",
+		"/api/admin/token/admin/v1/overviews/model-operations/",
+		"/api/admin/token/admin/v1/overviews//model-catalog",
+		"/api/admin/token/admin//v1/overviews/token-resources",
+		"/api/admin/token/admin/v1/overviews/./model-operations",
+		"/api/admin/token/admin/v1/overviews/ignored/../model-catalog",
+		"/api/admin/token/admin/v1/overviews/%6dodel-catalog",
+		"/api/admin/token/admin/v1/overviews/%2e/token-resources",
+		"/api/admin/token/admin/v1/overviews%2fmodel-operations",
+	}
+	for _, alias := range aliases {
+		request := httptest.NewRequest(http.MethodGet, alias, nil)
+		request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), "NOT_FOUND") {
+			t.Fatalf("alias %q status=%d location=%q body=%s", alias, response.Code, response.Header().Get("Location"), response.Body.String())
+		}
+	}
+	if upstreamHits != 3 {
+		t.Fatalf("non-canonical aliases reached upstream: hits=%d", upstreamHits)
+	}
+}
+
 func TestTokenAdminProxyForwardsOneAbsoluteBusinessDeadline(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(requestdeadline.DeadlineClassHeader) != string(requestdeadline.SnapshotBuild) {
@@ -365,7 +470,14 @@ func TestTokenAdminProxyPreservesStableErrorsBeforeOuterDeadline(t *testing.T) {
 		name, path, resource, code string
 		class                      requestdeadline.Class
 		status                     int
-	}{{"build", "/api/admin/token/admin/v1/models", "/admin/v1/models", "PAGINATION_SNAPSHOT_UNAVAILABLE", requestdeadline.SnapshotBuild, 503}, {"read", "/api/admin/token/admin/v1/models?cursor=signed", "/admin/v1/models", "QUERY_TIMEOUT", requestdeadline.SnapshotRead, 504}, {"precheck", "/api/admin/token/admin/v1/models/impact", "/admin/v1/models/impact", "PRECHECK_TIMEOUT", requestdeadline.Precheck, 504}} {
+	}{
+		{"build", "/api/admin/token/admin/v1/models", "/admin/v1/models", "PAGINATION_SNAPSHOT_UNAVAILABLE", requestdeadline.SnapshotBuild, 503},
+		{"read", "/api/admin/token/admin/v1/models?cursor=signed", "/admin/v1/models", "QUERY_TIMEOUT", requestdeadline.SnapshotRead, 504},
+		{"precheck", "/api/admin/token/admin/v1/models/impact", "/admin/v1/models/impact", "PRECHECK_TIMEOUT", requestdeadline.Precheck, 504},
+		{"model-catalog-overview", "/api/admin/token/admin/v1/overviews/model-catalog", "/admin/v1/overviews/model-catalog", "MODEL_CATALOG_OVERVIEW_TIMEOUT", requestdeadline.OverviewRead, 504},
+		{"token-resources-overview", "/api/admin/token/admin/v1/overviews/token-resources", "/admin/v1/overviews/token-resources", "TOKEN_RESOURCES_OVERVIEW_TIMEOUT", requestdeadline.OverviewRead, 504},
+		{"model-operations-overview", "/api/admin/token/admin/v1/overviews/model-operations?window=24h", "/admin/v1/overviews/model-operations", "MODEL_OPERATIONS_OVERVIEW_TIMEOUT", requestdeadline.OverviewRead, 504},
+	} {
 		t.Run(item.name, func(t *testing.T) {
 			observedDeadline := make(chan time.Time, 1)
 			tokenHandler := requestdeadline.TokenAdminMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -109,27 +109,41 @@ func writeAdminQueryError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func (s *Service) trustedAdminQuerySource(r *http.Request) string {
+	if source, ok := s.verifiedAdminQuerySource(r); ok {
+		return source
+	}
 	peerText := strings.TrimSpace(r.RemoteAddr)
 	if host, _, err := net.SplitHostPort(peerText); err == nil {
 		peerText = host
 	}
 	peer := net.ParseIP(peerText)
-	trustedPeer := peer != nil && (peer.IsLoopback() || peer.IsPrivate())
-	if trustedPeer && len(s.adminProxyHMACKey) >= 32 {
-		if source := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Pinvou-Client-Source"))); source != nil {
-			canonical := source.String()
-			provided, err := hex.DecodeString(strings.TrimSpace(r.Header.Get("X-Pinvou-Client-Source-Signature")))
-			mac := hmac.New(sha256.New, s.adminProxyHMACKey)
-			_, _ = mac.Write([]byte(r.Method + "\n" + r.URL.RequestURI() + "\n" + canonical))
-			if err == nil && hmac.Equal(provided, mac.Sum(nil)) {
-				return canonical
-			}
-		}
-	}
 	if peer != nil {
 		return peer.String()
 	}
 	return "untrusted"
+}
+
+func (s *Service) verifiedAdminQuerySource(r *http.Request) (string, bool) {
+	peerText := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(peerText); err == nil {
+		peerText = host
+	}
+	peer := net.ParseIP(peerText)
+	if peer == nil || !peer.IsLoopback() && !peer.IsPrivate() || len(s.adminProxyHMACKey) < 32 {
+		return "", false
+	}
+	source := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Pinvou-Client-Source")))
+	if source == nil {
+		return "", false
+	}
+	canonical := source.String()
+	provided, err := hex.DecodeString(strings.TrimSpace(r.Header.Get("X-Pinvou-Client-Source-Signature")))
+	if err != nil || len(provided) != sha256.Size {
+		return "", false
+	}
+	mac := hmac.New(sha256.New, s.adminProxyHMACKey)
+	_, _ = mac.Write([]byte(r.Method + "\n" + r.URL.RequestURI() + "\n" + canonical))
+	return canonical, hmac.Equal(provided, mac.Sum(nil))
 }
 
 func (s *Service) adminQueryPage(w http.ResponseWriter, r *http.Request, filter adminQueryFilter, resource, scope, sort string, defaultLimit, maximum int, source AdminSnapshotMemberSource, loader func(context.Context, []string) (any, error)) bool {

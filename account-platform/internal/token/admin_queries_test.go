@@ -249,15 +249,57 @@ func TestTrustedAdminQuerySourceRequiresPrivatePeerAndValidPortalSignature(t *te
 	request.RemoteAddr = "10.0.0.8:4321"
 	request.Header.Set("X-Pinvou-Client-Source", "203.0.113.19")
 	request.Header.Set("X-Pinvou-Client-Source-Signature", "forged")
+	if _, ok := service.verifiedAdminQuerySource(request); ok {
+		t.Fatal("forged source passed strict overview verification")
+	}
 	if got := service.trustedAdminQuerySource(request); got != "10.0.0.8" {
 		t.Fatalf("forged source was trusted: %q", got)
 	}
 	signAdminQuerySource(request, key, "203.0.113.19")
+	if got, ok := service.verifiedAdminQuerySource(request); !ok || got != "203.0.113.19" {
+		t.Fatalf("valid strict source=%q ok=%v", got, ok)
+	}
 	if got := service.trustedAdminQuerySource(request); got != "203.0.113.19" {
 		t.Fatalf("valid Portal source was not trusted: %q", got)
 	}
 	request.RemoteAddr = "198.51.100.5:4321"
+	if _, ok := service.verifiedAdminQuerySource(request); ok {
+		t.Fatal("public direct peer passed strict overview verification")
+	}
 	if got := service.trustedAdminQuerySource(request); got != "198.51.100.5" {
 		t.Fatalf("public peer unexpectedly injected a source: %q", got)
+	}
+}
+
+func TestVerifiedAdminQuerySourceFailsClosedForMissingShortOrMismatchedKeys(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://token.internal/admin/v1/overviews/model-catalog", nil)
+	request.RemoteAddr = "10.0.0.8:4321"
+	for _, item := range []struct {
+		name       string
+		serviceKey []byte
+		requestKey []byte
+		source     string
+	}{
+		{"missing-key", nil, bytes.Repeat([]byte{1}, 32), "203.0.113.10"},
+		{"short-key", bytes.Repeat([]byte{1}, 31), bytes.Repeat([]byte{1}, 31), "203.0.113.10"},
+		{"mismatched-key", bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), "203.0.113.10"},
+		{"invalid-source", bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{1}, 32), "not-an-ip"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			candidate := request.Clone(request.Context())
+			signAdminQuerySource(candidate, item.requestKey, item.source)
+			if _, ok := (&Service{adminProxyHMACKey: item.serviceKey}).verifiedAdminQuerySource(candidate); ok {
+				t.Fatal("invalid proxy assertion passed verification")
+			}
+		})
+	}
+
+	service := &Service{adminProxyHMACKey: bytes.Repeat([]byte{3}, 32)}
+	for _, source := range []string{"203.0.113.10", "203.0.113.11"} {
+		candidate := request.Clone(request.Context())
+		signAdminQuerySource(candidate, service.adminProxyHMACKey, source)
+		if got, ok := service.verifiedAdminQuerySource(candidate); !ok || got != source {
+			t.Fatalf("source isolation failed: got=%q ok=%v want=%q", got, ok, source)
+		}
 	}
 }

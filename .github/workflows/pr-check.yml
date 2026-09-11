@@ -810,24 +810,26 @@ jobs:
             ! grep -F -- "--- SKIP: $test_name" <<< "$token_pagination_output"
           done
           ! grep -F -- '--- SKIP:' <<< "$token_pagination_output"
-          token_operations_overview_output="$(go test -run '^(TestTokenOperationsOverviewPostgresIntegration|TestCatalogSyncObservationPostgresIntegration)$' -count=1 -v ./internal/token)"
+          token_operations_overview_output="$(go test -run '^(TestTokenOperationsOverviewPostgresIntegration|TestModelTokenPageOverviewsPostgresIntegration|TestCatalogSyncObservationPostgresIntegration)$' -count=1 -v ./internal/token)"
           printf '%s\n' "$token_operations_overview_output"
-          for test_name in TestTokenOperationsOverviewPostgresIntegration TestCatalogSyncObservationPostgresIntegration; do
+          for test_name in TestTokenOperationsOverviewPostgresIntegration TestModelTokenPageOverviewsPostgresIntegration TestCatalogSyncObservationPostgresIntegration; do
             grep -F -- "--- PASS: $test_name" <<< "$token_operations_overview_output"
             ! grep -F -- "--- SKIP: $test_name" <<< "$token_operations_overview_output"
           done
-          token_operations_overview_seed_output="$(PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_PHASE=seed go test -run '^TestTokenOperationsOverviewPerformancePostgresIntegration$' -count=1 -timeout=10m -v ./internal/token)"
+          token_operations_overview_seed_output="$(PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_PHASE=seed go test -run '^TestTokenOperationsOverviewPerformancePostgresIntegration$' -count=1 -timeout=30m -v ./internal/token)"
           printf '%s\n' "$token_operations_overview_seed_output"
           grep -F -- '--- PASS: TestTokenOperationsOverviewPerformancePostgresIntegration' <<< "$token_operations_overview_seed_output"
           ! grep -F -- '--- SKIP: TestTokenOperationsOverviewPerformancePostgresIntegration' <<< "$token_operations_overview_seed_output"
           postgres_container="$(docker ps --filter publish=5432 --filter ancestor=postgres:17-alpine --format '{{.ID}}')"
           test -n "$postgres_container"
-          docker restart "$postgres_container"
-          until pg_isready --host 127.0.0.1 --username account_platform_test --dbname account_platform_token_overview_performance_test; do sleep 1; done
-          token_operations_overview_performance_output="$(PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_PHASE=measure go test -run '^TestTokenOperationsOverviewPerformancePostgresIntegration$' -count=1 -timeout=10m -v ./internal/token)"
-          printf '%s\n' "$token_operations_overview_performance_output"
-          grep -F -- '--- PASS: TestTokenOperationsOverviewPerformancePostgresIntegration' <<< "$token_operations_overview_performance_output"
-          ! grep -F -- '--- SKIP: TestTokenOperationsOverviewPerformancePostgresIntegration' <<< "$token_operations_overview_performance_output"
+          for overview_target in token-resources model-catalog model-operations-token-only model-operations-usage-only model-operations-both legacy; do
+            docker restart "$postgres_container"
+            until pg_isready --host 127.0.0.1 --username account_platform_test --dbname account_platform_token_overview_performance_test; do sleep 1; done
+            token_operations_overview_performance_output="$(PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_PHASE=measure PINVOU_TEST_TOKEN_OVERVIEW_PERFORMANCE_TARGET="$overview_target" go test -run '^TestTokenOperationsOverviewPerformancePostgresIntegration$' -count=1 -timeout=5m -v ./internal/token)"
+            printf '%s\n' "$token_operations_overview_performance_output"
+            grep -F -- '--- PASS: TestTokenOperationsOverviewPerformancePostgresIntegration' <<< "$token_operations_overview_performance_output"
+            ! grep -F -- '--- SKIP: TestTokenOperationsOverviewPerformancePostgresIntegration' <<< "$token_operations_overview_performance_output"
+          done
           token_policy_output="$(PINVOU_TEST_ACCOUNT_POLICY_GATE=1 go test -run '^TestTokenProtocolFormulaPoliciesPostgresIntegration$' -count=1 -v ./internal/platform/approvalpolicy)"
           printf '%s\n' "$token_policy_output"
           grep -F -- '--- PASS: TestTokenProtocolFormulaPoliciesPostgresIntegration' <<< "$token_policy_output"

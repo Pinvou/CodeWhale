@@ -70,6 +70,7 @@ type Service struct {
 	approvedCommandExecutor     ApprovedTokenCommandExecutor
 	operationsOverviewEnabled   bool
 	operationsOverviewMetrics   *tokenOperationsOverviewMetrics
+	pageOverviewsEnabled        bool
 	credentialIsolationEnabled  bool
 	tokenAccountCreateReady     atomic.Bool
 	adminProxyHMACKey           []byte
@@ -164,6 +165,11 @@ func (s *Service) WithAdminOperationsOverview(enabled bool) *Service {
 	return s
 }
 
+func (s *Service) WithAdminPageOverviews(enabled bool) *Service {
+	s.pageOverviewsEnabled = enabled
+	return s
+}
+
 func (s *Service) WithCredentialIsolation(enabled bool) *Service {
 	s.credentialIsolationEnabled = enabled
 	return s
@@ -250,6 +256,9 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	if s.authorizer != nil {
 		admin.GET("/overview", s.authorizer.RequireAny("platform.tokens.read", "platform.usage.read", "platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/operations-overview", s.authorizer.RequireAnyAnd([]string{"platform.models.read"}, []string{"platform.tokens.read", "platform.usage.read"}), httpserver.AdaptFunc(s.adminTokenOperationsOverview))
+		admin.GET("/overviews/model-catalog", s.authorizer.RequireAny("platform.models.read"), httpserver.AdaptFunc(s.adminModelCatalogOverview))
+		admin.GET("/overviews/token-resources", s.authorizer.RequireAny("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenResourcesOverview))
+		admin.GET("/overviews/model-operations", s.authorizer.RequireAny("platform.tokens.read", "platform.usage.read"), httpserver.AdaptFunc(s.adminModelOperationsPageOverview))
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
 		admin.POST("/token-accounts", s.requireTokenAccountCreateCapability(), s.authorizer.RequireAnyAnd(nil, []string{"platform.tokens.manage", "platform.tokens.owner-candidates.read"}), s.selectLegacyTokenDirect(legacyTokenAuditOnly), approvalpolicy.Require("TOKEN_ACCOUNT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateTokenAccount))
 		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))

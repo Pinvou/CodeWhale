@@ -22,6 +22,7 @@ const (
 	SnapshotBuild Class = "snapshot-build"
 	SnapshotRead  Class = "snapshot-read"
 	Precheck      Class = "precheck"
+	OverviewRead  Class = "overview-read"
 )
 
 type Budget struct {
@@ -38,6 +39,8 @@ func BudgetFor(class Class) (Budget, bool) {
 		return Budget{Business: 3 * time.Second, BFF: 5 * time.Second, Ingress: 7 * time.Second}, true
 	case Precheck:
 		return Budget{Business: 5 * time.Second, BFF: 7 * time.Second, Ingress: 9 * time.Second}, true
+	case OverviewRead:
+		return Budget{Business: 3 * time.Second, BFF: 5 * time.Second, Ingress: 7 * time.Second}, true
 	default:
 		return Budget{}, false
 	}
@@ -69,6 +72,12 @@ func Classify(method, resource, cursor string) (Class, bool) {
 	resource = strings.ToLower(strings.TrimSpace(resource))
 	if !strings.HasPrefix(resource, "/admin/v1/") {
 		return "", false
+	}
+	if method == http.MethodGet || method == http.MethodHead {
+		switch resource {
+		case "/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations":
+			return OverviewRead, true
+		}
 	}
 	if strings.Contains(resource, "/precheck") || strings.Contains(resource, "/impact") {
 		return Precheck, true
@@ -169,8 +178,33 @@ func writeDeadlineError(w http.ResponseWriter, r *http.Request, class Class) {
 		api.WriteError(w, http.StatusServiceUnavailable, "PAGINATION_SNAPSHOT_UNAVAILABLE", "the pagination snapshot could not be built in time", requestID)
 	case Precheck:
 		api.WriteError(w, http.StatusGatewayTimeout, "PRECHECK_TIMEOUT", "the impact precheck timed out", requestID)
+	case OverviewRead:
+		code, message, ok := OverviewTimeoutProblem(r.URL.Path)
+		if !ok {
+			api.WriteError(w, http.StatusGatewayTimeout, "QUERY_TIMEOUT", "the Token administration query timed out", requestID)
+			return
+		}
+		api.WriteError(w, http.StatusGatewayTimeout, code, message, requestID)
 	default:
 		api.WriteError(w, http.StatusGatewayTimeout, "QUERY_TIMEOUT", "the pagination query timed out", requestID)
+	}
+}
+
+// OverviewTimeoutProblem returns the route-specific stable error shared by
+// Token and the Portal BFF. The public Portal prefix is stripped explicitly;
+// unknown overview paths never inherit a valid route's error vocabulary.
+func OverviewTimeoutProblem(resource string) (string, string, bool) {
+	resource = strings.TrimSpace(resource)
+	resource = strings.TrimPrefix(resource, "/api/admin/token")
+	switch resource {
+	case "/admin/v1/overviews/model-catalog":
+		return "MODEL_CATALOG_OVERVIEW_TIMEOUT", "the model catalog overview timed out", true
+	case "/admin/v1/overviews/token-resources":
+		return "TOKEN_RESOURCES_OVERVIEW_TIMEOUT", "the Token resources overview timed out", true
+	case "/admin/v1/overviews/model-operations":
+		return "MODEL_OPERATIONS_OVERVIEW_TIMEOUT", "the model operations overview timed out", true
+	default:
+		return "", "", false
 	}
 }
 

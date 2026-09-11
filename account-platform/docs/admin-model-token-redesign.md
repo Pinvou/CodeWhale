@@ -1,6 +1,6 @@
 # 管理后台“模型与 Token”重构专项设计
 
-> 状态：身份 A 于 2026-09-11 增补分区概览整改，等待身份 B 独立审核；本文件定义目标需求和设计，不表示代码已实现。
+> 状态：2026-09-11 分区概览整改已通过身份 B 独立需求/设计审核；APT-139 后端投影已获身份 B 最终代码审核 PASS，状态 `DONE / REVIEW_PASS / NOT_DEPLOYED`，APT-140 Portal 整改尚未开工。本文件定义目标合同，不表示代码已部署。
 >
 > 范围：模型资产、协议与安全计量公式、Token Account、凭据、路由、Provisioning、用量与核对异常，以及模型上下文中的 Billing 价格投影。
 
@@ -91,7 +91,7 @@ EXACT 下钻必须在一次 history 写入中完成：先删除目标数据源�
 
 #### 2.4.2 权限变化与缓存失效
 
-概览缓存键至少绑定稳定用户、授权版本、section、响应变体和（仅 Usage 变体）窗口。授权版本变化、任一相关权限撤销、退出登录、gate 关闭或 section 离开时，Portal 必须先中止在途请求并递增请求代次，再清除已撤销组的成功缓存、错误和下钻状态；随后才能按新权限发起请求。旧授权版本或旧代次的迟到响应不得渲染、写缓存、恢复 URL 或触发下钻。
+概览缓存键至少绑定稳定用户、授权版本、section、响应变体和（仅 Usage 变体）窗口。三个投影均必须通过 Account 的一次原子授权快照取得权限和严格为正整数的 `X-Authorization-Version`；`model-catalog`、`token-resources` 可复用单元素 `RequireAny`，不得使用不校验版本的普通单权限中间件。授权版本缺失、为零或畸形时必须在限流和投影 SQL 前失败关闭。授权版本变化、任一相关权限撤销、退出登录、gate 关闭或 section 离开时，Portal 必须先中止在途请求并递增请求代次，再清除已撤销组的成功缓存、错误和下钻状态；随后才能按新权限发起请求。旧授权版本或旧代次的迟到响应不得渲染、写缓存、恢复 URL 或触发下钻。
 
 `modelOperations` 若没有 `platform.usage.read`，必须隐藏时间选择器，并在渲染或请求前以同一次规范化 `replaceState` 删除 `model_operations_window`，不得再写回该参数。若服务端共享 SQL 的参数类型要求内部窗口值，Token 只能在完成授权后于服务内部规范化为固定 `24h` 占位；Usage 分支必须保持 `never executed`，该占位不进入响应、URL、日志或缓存键，也不构成 Usage 数据读取。
 
@@ -244,9 +244,11 @@ cursor 必须签名绑定主体、授权版本、资源、规范化筛选、排�
 
 Portal 必须复用既有链路：在 `tokenAdminIngressDeadline` 删除浏览器提供的 `X-Pinvou-Absolute-Deadline` 和 `X-Pinvou-Deadline-Class`，以入口当前时刻调用 `requestdeadline.Start(now, OverviewRead)`，并由代理通过 `requestdeadline.ApplyToUpstream` 写入同一份 RFC 3339 Nano 绝对业务 deadline 和 class。Token 继续由 `TokenAdminMiddleware` 按路由选择 `OverviewRead` fallback，使用 `ConsumeBusinessDeadline` 消费：有效且更早的上游绝对期限只能缩短 Token 本地 3 秒预算，绝不能延长或重置；缺失、畸形、class 不匹配或较晚值仍按现有语义退回 Token 接收时刻起的本地 3 秒上限，因此必须以 Portal 始终成功 `Start/ApplyToUpstream` 的合同测试证明正常链路共享入口起点。不新增或虚构 `account-portal` workload 认证；只在现有受信代理拓扑、入口头清理与用户 Bearer 授权边界内消费这两个内部头。SQL statement timeout 必须取当前 context 剩余时间，不另加新的 3 秒。
 
-`OverviewRead` 的 5 秒 BFF 和 7 秒 Ingress deadline 继续由现有 `Contract`/context 机制安装，仅作运输兜底，不重置 3 秒业务期限。Token `writeDeadlineError`/`WriteContextDeadlineError` 与 Portal `writeTokenAdminDeadlineError` 必须扩展为同时根据 `OverviewRead` 和规范资源路径映射错误：`model-catalog`、`token-resources`、`model-operations` 分别返回 504 `MODEL_CATALOG_OVERVIEW_TIMEOUT`、`TOKEN_RESOURCES_OVERVIEW_TIMEOUT`、`MODEL_OPERATIONS_OVERVIEW_TIMEOUT`。Token 已响应时 Portal 原样透传状态、稳定码、`request_id` 和安全响应头；BFF context 先耗尽时也必须以同一规范路径映射该专属 504，而非落入现有 class 默认 `QUERY_TIMEOUT`。浏览器和 BFF 不自动重试，用户显式重试才由 Portal `Start` 创建新合同。
+`OverviewRead` 的 5 秒 BFF 和 7 秒 Ingress deadline 继续由现有 `Contract`/context 机制安装，仅作运输兜底，不重置 3 秒业务期限。Token `writeDeadlineError`/`WriteContextDeadlineError` 与 Portal `writeTokenAdminDeadlineError` 必须扩展为同时根据 `OverviewRead` 和规范资源路径映射错误：`model-catalog`、`token-resources`、`model-operations` 分别返回 504 `MODEL_CATALOG_OVERVIEW_TIMEOUT`、`TOKEN_RESOURCES_OVERVIEW_TIMEOUT`、`MODEL_OPERATIONS_OVERVIEW_TIMEOUT`。Token 的统一 typed timeout 判定必须识别 `context.DeadlineExceeded`、`context.Canceled` 及 `*pgconn.PgError` 的 SQLSTATE `57014`，不得依赖错误文本；发生于限流或投影查询时均映射所属路由 504，且不得写出部分 200。Token 已响应时 Portal 原样透传状态、稳定码、`request_id` 和安全响应头；BFF context 先耗尽时也必须以同一规范路径映射该专属 504，而非落入现有 class 默认 `QUERY_TIMEOUT`。浏览器和 BFF 不自动重试，用户显式重试才由 Portal `Start` 创建新合同。
 
 稳定错误合同固定为：沿用 NFR-56 常规读取阈值，每个稳定用户按端点各有独立 `60 次/分钟` 桶，由受信入口规范化的来源 IP 在三个新端点间共享一个 `120 次/分钟` 桶，不得相信浏览器自报的转发头；任一桶超限返回 429 `TOKEN_OVERVIEW_RATE_LIMITED` 并携带服务端计算的 1～60 秒 `Retry-After`。不得为三个端点各建 120/IP 桶，也不得把各指标组另算请求。gate/仓储/容量不可用分别返回 503 `MODEL_CATALOG_OVERVIEW_UNAVAILABLE`、`TOKEN_RESOURCES_OVERVIEW_UNAVAILABLE`、`MODEL_OPERATIONS_OVERVIEW_UNAVAILABLE`；业务 deadline 耗尽分别返回 504 `MODEL_CATALOG_OVERVIEW_TIMEOUT`、`TOKEN_RESOURCES_OVERVIEW_TIMEOUT`、`MODEL_OPERATIONS_OVERVIEW_TIMEOUT`。非法、重复或对 token-only 不适用的窗口返回 400 `INVALID_TIME_WINDOW`。Portal 保留该数据源上次成功值并展示过期标识，429 倒计时结束前禁用重试，不把错误改写为 0。
+
+新概览 gate 开启时，Token 与 Portal 必须使用同一份至少 32 字节的代理 HMAC key：Portal 只为规范化来源 IP、请求方法和完整 Request URI 生成签名，Token 仅在直接连接方为 loopback/私网且三项签名输入逐字节匹配时接受该来源。Portal 必须在任何 `path.Clean` 前仅接受三个逐字规范原始资源路径；尾斜杠、双斜杠、`.`/`..` 段、百分号编码或其组合别名固定 404 且零 upstream，不得改变旧路由的既有兼容行为。key 缺失或过短、签名缺失/畸形/不一致、来源非法以及公网直连均按所属路由失败关闭为上述 503，且在限流或投影 SQL 前终止；不得静默退化为连接端地址、浏览器转发头或独立来源桶。三个新 Token Admin API 不支持浏览器或公网客户端绕过 Portal 直连；受控内部诊断若需要直连，也必须经过同一受信代理签名合同，不新增例外身份。限流事务在取得跨实例 advisory lock 后必须以 `READ COMMITTED` 的新语句快照读取已提交计数，并以锁后 `clock_timestamp()` 确定分钟桶；`Retry-After` 对剩余秒数向上取整。投影事务取得连接并成功 `BeginTx` 后必须重新扣除连接池等待时间，再设置不超过当前 context 剩余时间的 `statement_timeout`；期限已耗尽时不得执行投影 SQL。
 
 既有 `GET /token/admin/v1/operations-overview` 保留其当前只读响应和权限合同，作为 UI-58 约束的 N/N-1 兼容入口至少延续至旧 `section=tokens` 的兼容窗口结束；新 Portal 的三个分区概览不得调用它。兼容入口不接受新字段或新写语义，弃用和移除必须走既有正式版本通知与回滚门禁。新投影复用现有事实和查询口径，不新增数据库事实、跨服务聚合或第二份指标来源。
 
@@ -634,7 +636,7 @@ APT-123-R2 草稿漂移数据库状态机修订：Account `000047_token_approval
 
 每个能力有独立 feature gate，服务与 Portal 支持 N/N-1。数据库使用前向兼容追加迁移；回滚先停新写和隔离凭据会话，再回滚 Portal/服务。未消费 launch 立即失效，旧 cursor 返回 410，不得在回滚期间重新启用 query 凭据通道。
 
-2026-09-11 增补的 UI-59/ADM-66 概览整改不属于既有 APT-136 `DONE` 证据，当前仅完成需求与设计修订，尚未创建实施任务、修改代码、提交、推送或部署。后续必须先建立相互独立且可逐项提交的任务，再按服务端投影、Portal 分区接入和验收门禁的依赖顺序实施；旧聚合入口在兼容窗口内保持可回滚。
+2026-09-11 增补的 UI-59/ADM-66 概览整改不属于既有 APT-136 `DONE` 证据；需求/设计与 APT-139/140 独立任务拆分均已通过身份 B 审核。APT-139 服务端投影已获身份 B 最终代码审核 PASS，状态 `DONE / REVIEW_PASS / NOT_DEPLOYED`；APT-140 Portal 分区接入仍未开工。两项继续按服务端投影、Portal 分区接入的依赖顺序逐项独立提交；旧聚合入口在兼容窗口内保持可回滚。
 
 ### 9.1 APT-137 G1 离线计划与 envelope 边界
 

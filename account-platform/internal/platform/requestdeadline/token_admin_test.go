@@ -11,7 +11,7 @@ func TestTokenAdminDeadlineChainsAreFrozen(t *testing.T) {
 	for _, item := range []struct {
 		class                  Class
 		business, bff, ingress time.Duration
-	}{{SnapshotBuild, 10 * time.Second, 12 * time.Second, 14 * time.Second}, {SnapshotRead, 3 * time.Second, 5 * time.Second, 7 * time.Second}, {Precheck, 5 * time.Second, 7 * time.Second, 9 * time.Second}} {
+	}{{SnapshotBuild, 10 * time.Second, 12 * time.Second, 14 * time.Second}, {SnapshotRead, 3 * time.Second, 5 * time.Second, 7 * time.Second}, {Precheck, 5 * time.Second, 7 * time.Second, 9 * time.Second}, {OverviewRead, 3 * time.Second, 5 * time.Second, 7 * time.Second}} {
 		budget, ok := BudgetFor(item.class)
 		if !ok || budget.Business != item.business || budget.BFF != item.bff || budget.Ingress != item.ingress {
 			t.Fatalf("%s budget = %+v", item.class, budget)
@@ -29,11 +29,41 @@ func TestTokenAdminDeadlineClassificationIsMutuallyExclusive(t *testing.T) {
 		method, path, cursor string
 		want                 Class
 		ok                   bool
-	}{{http.MethodGet, "/admin/v1/models", "", SnapshotBuild, true}, {http.MethodGet, "/admin/v1/models", "signed", SnapshotRead, true}, {http.MethodGet, "/admin/v1/models/impact", "signed", Precheck, true}, {http.MethodPost, "/admin/v1/models", "", "", false}, {http.MethodGet, "/v1/models", "", "", false}} {
+	}{
+		{http.MethodGet, "/admin/v1/models", "", SnapshotBuild, true},
+		{http.MethodGet, "/admin/v1/models", "signed", SnapshotRead, true},
+		{http.MethodGet, "/admin/v1/models/impact", "signed", Precheck, true},
+		{http.MethodGet, "/admin/v1/overviews/model-catalog", "", OverviewRead, true},
+		{http.MethodHead, "/admin/v1/overviews/token-resources", "", OverviewRead, true},
+		{http.MethodGet, "/admin/v1/overviews/model-operations", "signed", OverviewRead, true},
+		{http.MethodGet, "/admin/v1/overviews/unknown", "", SnapshotBuild, true},
+		{http.MethodPost, "/admin/v1/overviews/model-catalog", "", "", false},
+		{http.MethodPost, "/admin/v1/models", "", "", false},
+		{http.MethodGet, "/v1/models", "", "", false},
+	} {
 		got, ok := Classify(item.method, item.path, item.cursor)
 		if got != item.want || ok != item.ok {
 			t.Fatalf("Classify(%s,%s,%s)=(%s,%v), want (%s,%v)", item.method, item.path, item.cursor, got, ok, item.want, item.ok)
 		}
+	}
+}
+
+func TestOverviewTimeoutProblemIsExactForTokenAndPortalPaths(t *testing.T) {
+	for _, item := range []struct {
+		path string
+		code string
+	}{
+		{"/admin/v1/overviews/model-catalog", "MODEL_CATALOG_OVERVIEW_TIMEOUT"},
+		{"/api/admin/token/admin/v1/overviews/token-resources", "TOKEN_RESOURCES_OVERVIEW_TIMEOUT"},
+		{"/admin/v1/overviews/model-operations", "MODEL_OPERATIONS_OVERVIEW_TIMEOUT"},
+	} {
+		code, _, ok := OverviewTimeoutProblem(item.path)
+		if !ok || code != item.code {
+			t.Fatalf("OverviewTimeoutProblem(%q)=(%q,%v), want %q", item.path, code, ok, item.code)
+		}
+	}
+	if _, _, ok := OverviewTimeoutProblem("/admin/v1/overviews/model-catalog/extra"); ok {
+		t.Fatal("non-canonical overview path received a stable route error")
 	}
 }
 

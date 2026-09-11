@@ -361,7 +361,17 @@ func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
-	resource := path.Clean("/" + r.PathValue("resource"))
+	rawResource := "/" + r.PathValue("resource")
+	kind, exactPageOverview := tokenPageOverviewKind(r.Method, rawResource)
+	if (!exactPageOverview && tokenPageOverviewAlias(r.Method, rawResource)) || (exactPageOverview && strings.Contains(r.URL.EscapedPath(), "%")) {
+		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	if exactPageOverview && len(s.config.TokenAdminProxyHMACKey) < 32 {
+		writeTokenPageOverviewUnavailable(w, r, kind)
+		return
+	}
+	resource := path.Clean(rawResource)
 	credentialCleanup := tokenCredentialRevokeWindowPath(r.Method, resource)
 	if tokenCredentialIsolationPath(r.Method, resource) && !credentialCleanup && (!s.config.AdminTokenDetailsEnabled || s.config.CredentialOrigin == nil) {
 		api.WriteError(w, http.StatusNotFound, "NOT_FOUND", "the portal endpoint was not found", httpserver.RequestID(r.Context()))
@@ -372,6 +382,52 @@ func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenAdminPathAllowed)
+}
+
+func tokenPageOverviewKind(method, resource string) (string, bool) {
+	if method != http.MethodGet && method != http.MethodHead {
+		return "", false
+	}
+	switch resource {
+	case "/admin/v1/overviews/model-catalog":
+		return "MODEL_CATALOG_OVERVIEW", true
+	case "/admin/v1/overviews/token-resources":
+		return "TOKEN_RESOURCES_OVERVIEW", true
+	case "/admin/v1/overviews/model-operations":
+		return "MODEL_OPERATIONS_OVERVIEW", true
+	default:
+		return "", false
+	}
+}
+
+func tokenPageOverviewAlias(method, resource string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return false
+	}
+	if _, ok := tokenPageOverviewKind(method, path.Clean(resource)); ok {
+		return true
+	}
+	decoded, err := url.PathUnescape(resource)
+	if err != nil {
+		return strings.HasPrefix(strings.ToLower(resource), "/admin/v1/overviews/")
+	}
+	if _, ok := tokenPageOverviewKind(method, path.Clean(decoded)); ok {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(resource), "/admin/v1/overviews/") || strings.HasPrefix(strings.ToLower(decoded), "/admin/v1/overviews/")
+}
+
+func writeTokenPageOverviewUnavailable(w http.ResponseWriter, r *http.Request, kind string) {
+	labels := map[string]string{
+		"MODEL_CATALOG_OVERVIEW":    "model catalog overview",
+		"TOKEN_RESOURCES_OVERVIEW":  "Token resources overview",
+		"MODEL_OPERATIONS_OVERVIEW": "model operations overview",
+	}
+	label, ok := labels[kind]
+	if !ok {
+		label = "Token overview"
+	}
+	api.WriteError(w, http.StatusServiceUnavailable, kind+"_UNAVAILABLE", "the "+label+" is temporarily unavailable", httpserver.RequestID(r.Context()))
 }
 
 func tokenCredentialRevokeWindowPath(method, resource string) bool {
@@ -638,6 +694,13 @@ func writeTokenAdminDeadlineError(w http.ResponseWriter, r *http.Request, class 
 		api.WriteError(w, http.StatusServiceUnavailable, "PAGINATION_SNAPSHOT_UNAVAILABLE", "the pagination snapshot could not be built in time", httpserver.RequestID(r.Context()))
 	case requestdeadline.Precheck:
 		api.WriteError(w, http.StatusGatewayTimeout, "PRECHECK_TIMEOUT", "the impact precheck timed out", httpserver.RequestID(r.Context()))
+	case requestdeadline.OverviewRead:
+		code, message, ok := requestdeadline.OverviewTimeoutProblem(r.URL.Path)
+		if !ok {
+			api.WriteError(w, http.StatusGatewayTimeout, "QUERY_TIMEOUT", "the Token administration query timed out", httpserver.RequestID(r.Context()))
+			return
+		}
+		api.WriteError(w, http.StatusGatewayTimeout, code, message, httpserver.RequestID(r.Context()))
 	default:
 		api.WriteError(w, http.StatusGatewayTimeout, "QUERY_TIMEOUT", "the pagination query timed out", httpserver.RequestID(r.Context()))
 	}
@@ -1085,7 +1148,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/operations-overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/operations-overview", "/admin/v1/overviews/model-catalog", "/admin/v1/overviews/token-resources", "/admin/v1/overviews/model-operations", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings", "/admin/v1/protocols", "/admin/v1/formulas", "/admin/v1/reconciliation-cases", "/admin/v1/owner-candidates", "/admin/v1/resource-audit") {
 		return true
 	}
 	if strings.Contains(resource, "..") {
