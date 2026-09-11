@@ -778,8 +778,12 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		return
 	default:
 	}
-	if scanner.Err() != nil || !usageFound {
-		_ = s.repository.MarkReview(background, usageID, "stream_usage_missing", map[string]any{"stream_error": scanner.Err() != nil})
+	streamErr := scanner.Err()
+	if streamErr == nil && deliveryConnected {
+		_ = s.repository.MarkDelivery(background, usageID, "DELIVERED")
+	}
+	if streamErr != nil || !usageFound {
+		_ = s.repository.MarkReview(background, usageID, "stream_usage_missing", map[string]any{"stream_error": streamErr != nil})
 		return
 	}
 	if err := s.repository.MarkResponseReceived(background, usageID); err != nil {
@@ -790,9 +794,6 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 	if err != nil || s.repository.SaveReplayResult(background, usageID, ReplayResult{Kind: "STREAM_AGGREGATE", HTTPStatus: http.StatusOK, ContentType: "application/json", Payload: aggregatePayload, FinalUsage: &usage, LastSequence: lastSequence}) != nil {
 		_ = s.repository.MarkReview(background, usageID, "result_persistence_failed", map[string]any{"last_sequence": lastSequence})
 		return
-	}
-	if deliveryConnected {
-		_ = s.repository.MarkDelivery(background, usageID, "DELIVERED")
 	}
 	s.settle(background, usageID, holdID, price, usage, authorizedMaximum)
 }

@@ -77,6 +77,16 @@ func newHTTPUpstreamClient(adapterVersion string, referenceHeaders []string) *HT
 }
 
 func newHTTPUpstreamClientWithCA(adapterVersion string, referenceHeaders []string, caFile string) (*HTTPUpstreamClient, error) {
+	transport, err := newProviderHTTPTransport(caFile)
+	if err != nil {
+		return nil, err
+	}
+	transport.ResponseHeaderTimeout = 30 * time.Second
+	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	return &HTTPUpstreamClient{client: &http.Client{Transport: observability.NewHTTPTransport(transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, adapterVersion: adapterVersion, requestPath: "/v1/chat/completions", referenceHeaders: referenceHeaders}, nil
+}
+
+func newProviderHTTPTransport(caFile string) (*http.Transport, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	caFile = strings.TrimSpace(caFile)
 	if caFile != "" {
@@ -93,9 +103,7 @@ func newHTTPUpstreamClientWithCA(adapterVersion string, referenceHeaders []strin
 		}
 		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	}
-	transport.ResponseHeaderTimeout = 30 * time.Second
-	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	return &HTTPUpstreamClient{client: &http.Client{Transport: observability.NewHTTPTransport(transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, adapterVersion: adapterVersion, requestPath: "/v1/chat/completions", referenceHeaders: referenceHeaders}, nil
+	return transport, nil
 }
 
 func (c *HTTPUpstreamClient) AdapterVersion() string { return c.adapterVersion }

@@ -163,10 +163,14 @@ type NewAPIUsageEvidenceClient struct {
 }
 
 func NewNewAPIUsageEvidenceClient(rawURL, token string, userID int64, policy ProviderURLPolicy) (*NewAPIUsageEvidenceClient, error) {
-	return NewNewAPIUsageEvidenceProvider("NEW_API", "new-api-v1", rawURL, token, userID, policy)
+	return NewNewAPIUsageEvidenceProviderWithCA("NEW_API", "new-api-v1", rawURL, token, userID, "", policy)
 }
 
 func NewNewAPIUsageEvidenceProvider(providerID, adapterVersion, rawURL, token string, userID int64, policy ProviderURLPolicy) (*NewAPIUsageEvidenceClient, error) {
+	return NewNewAPIUsageEvidenceProviderWithCA(providerID, adapterVersion, rawURL, token, userID, "", policy)
+}
+
+func NewNewAPIUsageEvidenceProviderWithCA(providerID, adapterVersion, rawURL, token string, userID int64, caFile string, policy ProviderURLPolicy) (*NewAPIUsageEvidenceClient, error) {
 	providerID = strings.ToUpper(strings.TrimSpace(providerID))
 	adapterVersion = strings.TrimSpace(adapterVersion)
 	rawURL = strings.TrimRight(strings.TrimSpace(rawURL), "/")
@@ -177,7 +181,11 @@ func NewNewAPIUsageEvidenceProvider(providerID, adapterVersion, rawURL, token st
 	if err != nil {
 		return nil, errors.New("invalid New API reconciliation URL")
 	}
-	client := observability.NewHTTPClient(10 * time.Second)
+	transport, err := newProviderHTTPTransport(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("configure New API reconciliation trust: %w", err)
+	}
+	client := &http.Client{Timeout: 10 * time.Second, Transport: observability.NewHTTPTransport(transport)}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &NewAPIUsageEvidenceClient{providerID: providerID, adapterVersion: adapterVersion, baseURL: parsed, token: token, userID: userID, client: client}, nil
 }

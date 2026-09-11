@@ -208,7 +208,7 @@ func main() {
 		if reconciliationURL == "" {
 			reconciliationURL = os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL")
 		}
-		evidenceClient, err = token.NewNewAPIUsageEvidenceProvider(defaultProvider, gatewayAdapter.AdapterVersion(), reconciliationURL, os.Getenv("TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN"), reconciliationUserID, providerURLPolicy)
+		evidenceClient, err = token.NewNewAPIUsageEvidenceProviderWithCA(defaultProvider, gatewayAdapter.AdapterVersion(), reconciliationURL, os.Getenv("TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN"), reconciliationUserID, os.Getenv("TOKEN_PROVIDER_CA_FILE"), providerURLPolicy)
 		if err != nil {
 			log.Fatal("New API usage reconciliation is not configured: ", err)
 		}

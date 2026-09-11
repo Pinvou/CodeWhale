@@ -3,9 +3,12 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -41,6 +44,37 @@ func TestNewAPIUsageEvidenceClientReadsConsumptionByRequestID(t *testing.T) {
 	}
 	if evidence.Usage == nil || *evidence.Usage != (Usage{InputTokens: 8, OutputTokens: 3, CachedInputTokens: 4}) || evidence.Rejected {
 		t.Fatalf("unexpected evidence: %#v", evidence)
+	}
+}
+
+func TestNewAPIUsageEvidenceClientUsesConfiguredProviderCA(t *testing.T) {
+	const newAPIRequestID = "newapi-private-ca-request"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"items": []map[string]any{{
+			"request_id": newAPIRequestID, "prompt_tokens": 21, "completion_tokens": 5,
+		}}}})
+	}))
+	defer server.Close()
+
+	caFile := filepath.Join(t.TempDir(), "provider-ca.pem")
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(caFile, certificate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewProviderURLPolicy("development", []string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewNewAPIUsageEvidenceProviderWithCA("NEW_API", "new-api-v1", server.URL, "admin-token", 7, caFile, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := client.Lookup(context.Background(), newAPIRequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.Usage == nil || *evidence.Usage != (Usage{InputTokens: 21, OutputTokens: 5}) {
+		t.Fatalf("provider-specific CA was not applied to reconciliation: %#v", evidence)
 	}
 }
 
