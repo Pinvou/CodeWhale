@@ -214,7 +214,15 @@
         const value = String(rawValue ?? "").replace(/\s+/g, " ").trim();
         if (!value || value === "—" || value === "-" || /^(?:样本不足|暂无数据|未接入|不可用)$/.test(value)) return null;
         const numeric = value.match(/^([-+]?\d[\d,]*(?:\.\d+)?)\s*(?:%|次|台|个|项|毫秒|ms|秒|s|分钟|分|小时|h|天|倍)?(?:\s*\/.*)?$/i);
-        if (numeric) return Number(numeric[1].replace(/,/g, ""));
+        if (numeric) {
+          const amount = Number(numeric[1].replace(/,/g, ""));
+          if (/(?:毫秒|ms)(?:\s*\/.*)?$/i.test(value)) return amount;
+          if (/(?:秒|s)(?:\s*\/.*)?$/i.test(value)) return amount * 1000;
+          if (/(?:分钟|分)(?:\s*\/.*)?$/i.test(value)) return amount * 60_000;
+          if (/(?:小时|h)(?:\s*\/.*)?$/i.test(value)) return amount * 3_600_000;
+          if (/天(?:\s*\/.*)?$/.test(value)) return amount * 86_400_000;
+          return amount;
+        }
         return value;
       }
 
@@ -380,7 +388,7 @@
             node.querySelectorAll?.("table").forEach(initializeTable);
           });
           const table = record.target instanceof Element ? record.target.closest("table") : null;
-          if (table) {
+          if (table?.dataset.statsSortable === "true") {
             updateSortAvailability(table);
             queueSort(table);
           }

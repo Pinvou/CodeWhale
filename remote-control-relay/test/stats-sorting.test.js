@@ -55,6 +55,15 @@ test("numeric values sort in both directions and keep empty values last", () => 
   assert.deepEqual(firstColumn(dom), ["12.5%", "80%", "—"]);
 });
 
+test("durations with mixed units sort by their millisecond value", () => {
+  const dom = renderTable(["Duration"], [["900 ms"], ["2.5 s"], ["1 分钟"]]);
+  const button = dom.window.document.querySelector(".stats-sort-trigger");
+  button.click();
+  assert.deepEqual(firstColumn(dom), ["1 分钟", "2.5 s", "900 ms"]);
+  button.click();
+  assert.deepEqual(firstColumn(dom), ["900 ms", "2.5 s", "1 分钟"]);
+});
+
 test("unavailable statistical values always remain after valid values", () => {
   const dom = renderTable(["成功率"], [["样本不足"], ["12.5%"], ["暂无数据"], ["80%"]]);
   const button = dom.window.document.querySelector(".stats-sort-trigger");
@@ -94,7 +103,7 @@ test("selection sources expose one ranking control per observed source", async (
   assert.deepEqual(firstColumn(dom), ["auto 2 · explicit 7", "auto 8 · explicit 1"]);
 });
 
-test("device details retain their existing state-driven sorting", () => {
+test("device details retain their state-driven sorting after rows rerender", async () => {
   const dom = new JSDOM('<table><thead><tr><th class="sortable sort-active desc" data-sort="turns_7d" aria-sort="descending">近 7 日对话</th></tr></thead><tbody id="deviceRows"><tr><td>8</td></tr><tr><td>2</td></tr></tbody></table>', { runScripts: "outside-only" });
   dom.window.eval(sortingScript);
   const header = dom.window.document.querySelector("th");
@@ -102,4 +111,8 @@ test("device details retain their existing state-driven sorting", () => {
   assert.equal(header.classList.contains("sort-active"), true);
   assert.equal(header.getAttribute("aria-sort"), "descending");
   assert.equal(dom.window.document.querySelector(".stats-sort-trigger"), null);
+  dom.window.document.querySelector("#deviceRows").innerHTML = "<tr><td>2</td></tr><tr><td>8</td></tr>";
+  await flush(dom);
+  assert.equal(header.getAttribute("aria-sort"), "descending");
+  assert.equal(header.classList.contains("stats-sortable-column"), false);
 });
