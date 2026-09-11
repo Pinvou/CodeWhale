@@ -153,7 +153,7 @@ cursor 必须签名绑定主体、授权版本、资源、规范化筛选、排�
 
 “首次快照构建”的 10 秒是整次构建的唯一墙钟预算，不是 SQL statement timeout 外再加应用预算；数据库 statement timeout 使用同一剩余 deadline。“已有快照读取”不允许因为 cursor 无效或页面为空而隐式创建新快照。“跨域预检”不复用 3 秒普通读取预算，也不在各下游分别获得 5 秒；所有下游共享同一绝对 deadline。
 
-容量/速率错误与超时分离：过宽为 422 `PAGINATION_FILTER_REQUIRED`；快照容量或创建速率耗尽为 429 `PAGINATION_SNAPSHOT_LIMITED`；常规限流为 429 `RATE_LIMITED`；非快照查询容量不足为 503 `QUERY_CAPACITY_EXCEEDED`。任何失败均不得返回不完整 200、半快照或静默首页。
+容量/速率错误与超时分离：过宽为 422 `PAGINATION_FILTER_REQUIRED`；快照容量或创建速率耗尽为 429 `PAGINATION_SNAPSHOT_LIMITED`；常规限流为 429 `RATE_LIMITED`；非快照查询容量不足为 503 `QUERY_CAPACITY_EXCEEDED`。任何失败均不得返回不完整 200、半快照或静默首页。创建速率耗尽时服务端按数据库权威分钟窗口返回距下一窗口的真实 `Retry-After`（1～60 秒），Portal 必须原样转发；前端显示倒计时并在冷却结束前禁用该数据源的刷新/重试，保留同一查询上次成功数据，且不得自动重试。完全相同 URL 的并发只读请求在客户端合并为一次网络请求；单个视图离开只取消该调用者等待，不得中断仍有调用者依赖的共享请求。
 
 ### 4.3 快照容量
 

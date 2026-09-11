@@ -1445,6 +1445,22 @@ Object.assign(adminPlatformCopy.en.billing, {
   paymentReference: 'Payment ref / Mobile',
   capabilityLimitations: 'The current payment provider has limited capabilities. Unsupported refund, proactive close, notification, or daily reconciliation actions are disabled.',
 });
+Object.assign(adminPlatformCopy.zh.modelToken, {
+  rateLimited: '请求过于频繁',
+  retryAfter: (seconds) => `请在 ${seconds} 秒后重试；已加载的数据仍可继续查看。`,
+  retryCountdown: (seconds) => `${seconds} 秒后重试`,
+});
+Object.assign(adminPlatformCopy.en.modelToken, {
+  rateLimited: 'Too many requests',
+  retryAfter: (seconds) => `Retry in ${seconds} seconds. Previously loaded data remains available.`,
+  retryCountdown: (seconds) => `Retry in ${seconds}s`,
+});
+Object.assign(adminPlatformCopy.ja.modelToken, {
+  rateLimited: 'リクエストが多すぎます',
+  retryAfter: (seconds) => `${seconds} 秒後に再試行してください。読み込み済みのデータは引き続き表示できます。`,
+  retryCountdown: (seconds) => `${seconds} 秒後に再試行`,
+});
+
 Object.assign(adminPlatformCopy.ja.billing, {
   repair: '補償を確定',
   repairReason: '手動補償の理由（プロバイダー注文を再確認します）',

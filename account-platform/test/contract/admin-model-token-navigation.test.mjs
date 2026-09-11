@@ -379,6 +379,31 @@ test('production source transitions clear stale queries, reject late results, an
   assert.equal(usageState.error, null);
 });
 
+test('rate-limited source preserves successful rows and records the server cooldown', async () => {
+  const queryKey = '{"q":"stable"}';
+  let state = initialAdminSourceState();
+  const transition = (event) => { state = reduceAdminSourceState(state, event); };
+  await executeAdminSourceRequest({
+    requestID: 1,
+    queryKey,
+    query: { q: 'stable' },
+    load: async () => ({ items: [{ id: 'kept' }], as_of: '2026-09-10T00:00:00.000Z' }),
+    transition,
+    now: () => '2026-09-10T00:00:00.000Z',
+  });
+  await executeAdminSourceRequest({
+    requestID: 2,
+    queryKey,
+    query: { q: 'stable' },
+    load: async () => { throw Object.assign(new Error('limited'), { status: 429, retryAfterSeconds: 37 }); },
+    transition,
+    now: () => '2026-09-10T00:01:00.000Z',
+  });
+  assert.deepEqual(state.items, [{ id: 'kept' }]);
+  assert.equal(state.error.status, 429);
+  assert.equal(state.retryAt, Date.parse('2026-09-10T00:01:37.000Z'));
+});
+
 test('history replacement, popstate normalization, and cross-section restoration preserve canonical state', () => {
   const replacementCalls = [];
   const deniedLocation = locationLike('?section=tokens&tab=usage&q=private&cursor=signed');
@@ -503,6 +528,55 @@ test('new collection calls use the paginated BFF contract while gate-off calls k
   assert.equal(requested[12], 'https://portal.example/api/admin/token/admin/v1/usage-requests/00000000-0000-4000-8000-000000000401/evidence?limit=50&evidence_type=SETTLEMENT&cursor=evidence-page');
   assert.equal(requested[13], 'https://portal.example/api/admin/token/admin/v2/provisionings/00000000-0000-4000-8000-000000000301');
   assert.equal(requested[14], 'https://portal.example/api/admin/token/admin/v1/operations-overview?window=7d');
+});
+
+test('identical in-flight admin reads are coalesced and expose Retry-After to every active caller', async () => {
+  let fetchCalls = 0;
+  let resolveFetch;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = () => {
+    fetchCalls += 1;
+    return new Promise((resolve) => { resolveFetch = resolve; });
+  };
+  try {
+    const client = new AdminPlatformClient('https://portal.example');
+    const abandoned = new AbortController();
+    const active = new AbortController();
+    const first = client.catalogModels({ q: 'same' }, abandoned.signal);
+    const second = client.catalogModels({ q: 'same' }, active.signal);
+    assert.equal(fetchCalls, 1);
+    abandoned.abort();
+    await assert.rejects(first, (error) => error?.name === 'AbortError');
+    resolveFetch(new Response(JSON.stringify({ code: 'PAGINATION_SNAPSHOT_LIMITED', message: 'limited' }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '37' },
+    }));
+    await assert.rejects(second, (error) => error?.status === 429 && error?.retryAfterSeconds === 37);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('abandoning the final shared reader cancels transport without poisoning the next request', async () => {
+  let fetchCalls = 0;
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (_url, options) => {
+    fetchCalls += 1;
+    if (fetchCalls > 1) return Promise.resolve(new Response(JSON.stringify({ items: [{ id: 'fresh' }] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true }));
+  };
+  try {
+    const client = new AdminPlatformClient('https://portal.example');
+    const controller = new AbortController();
+    const abandoned = client.catalogModels({ q: 'same' }, controller.signal);
+    controller.abort();
+    await assert.rejects(abandoned, (error) => error?.name === 'AbortError');
+    const fresh = await client.catalogModels({ q: 'same' });
+    assert.deepEqual(fresh.items, [{ id: 'fresh' }]);
+    assert.equal(fetchCalls, 2);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test('Portal BFF explicitly allowlists every APT-127 list source and exposes the gate through session only', async () => {

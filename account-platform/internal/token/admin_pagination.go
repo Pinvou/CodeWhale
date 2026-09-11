@@ -32,6 +32,7 @@ const (
 	AdminSnapshotMaxStorageBytes  = int64(8 * 1024 * 1024 * 1024)
 	AdminSnapshotSubjectPerMinute = 6
 	AdminSnapshotGlobalPerMinute  = 60
+	adminSerializationAttempts    = 5
 )
 
 var (
@@ -171,7 +172,27 @@ type AdminPaginationHTTPError struct {
 	RetryAfter int
 }
 
+type adminPaginationSnapshotRateLimitError struct {
+	retryAfter int
+}
+
+func (e adminPaginationSnapshotRateLimitError) Error() string {
+	return ErrAdminPaginationSnapshotLimited.Error()
+}
+
+func (e adminPaginationSnapshotRateLimitError) Unwrap() error {
+	return ErrAdminPaginationSnapshotLimited
+}
+
 func ClassifyAdminPaginationError(err error) AdminPaginationHTTPError {
+	var rateLimitError adminPaginationSnapshotRateLimitError
+	if errors.As(err, &rateLimitError) {
+		return AdminPaginationHTTPError{
+			Status:     429,
+			Code:       "PAGINATION_SNAPSHOT_LIMITED",
+			RetryAfter: max(1, min(60, rateLimitError.retryAfter)),
+		}
+	}
 	switch {
 	case errors.Is(err, ErrAdminPaginationLimitInvalid), errors.Is(err, ErrAdminPaginationCursorInvalid):
 		code := "INVALID_CURSOR"
@@ -245,10 +266,15 @@ func (r *PostgresRepository) createAdminPaginationPage(ctx context.Context, requ
 	if err := r.reserveAdminPaginationCreation(deadlineCtx, request.SubjectID); err != nil {
 		return AdminPaginationPage{}, err
 	}
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < adminSerializationAttempts; attempt++ {
 		page, createErr := r.createAdminPaginationPageOnce(deadlineCtx, request, scopeDigest, filterDigest, source)
 		if !adminPaginationSerializationFailure(createErr) {
 			return page, createErr
+		}
+		if attempt+1 < adminSerializationAttempts {
+			if retryErr := waitAdminPaginationSerializationRetry(deadlineCtx, attempt); retryErr != nil {
+				return AdminPaginationPage{}, fmt.Errorf("%w: %w", ErrAdminPaginationSnapshotUnavailable, retryErr)
+			}
 		}
 	}
 	return AdminPaginationPage{}, fmt.Errorf("%w: serialization retry exhausted", ErrAdminPaginationSnapshotUnavailable)
@@ -365,13 +391,30 @@ func (r *PostgresRepository) createAdminPaginationPageOnce(ctx context.Context, 
 }
 
 func (r *PostgresRepository) reserveAdminPaginationCreation(ctx context.Context, subjectID uuid.UUID) error {
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < adminSerializationAttempts; attempt++ {
 		err := r.reserveAdminPaginationCreationOnce(ctx, subjectID)
 		if !adminPaginationSerializationFailure(err) {
 			return err
 		}
+		if attempt+1 < adminSerializationAttempts {
+			if retryErr := waitAdminPaginationSerializationRetry(ctx, attempt); retryErr != nil {
+				return fmt.Errorf("%w: %w", ErrAdminPaginationSnapshotUnavailable, retryErr)
+			}
+		}
 	}
 	return fmt.Errorf("%w: quota serialization retry exhausted", ErrAdminPaginationSnapshotUnavailable)
+}
+
+func waitAdminPaginationSerializationRetry(ctx context.Context, attempt int) error {
+	delay := 10 * time.Millisecond * time.Duration(1<<min(attempt, 4))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (r *PostgresRepository) reserveAdminPaginationCreationOnce(ctx context.Context, subjectID uuid.UUID) error {
@@ -409,7 +452,9 @@ func (r *PostgresRepository) reserveAdminPaginationCreationOnce(ctx context.Cont
 		return adminPaginationBuildError(err)
 	}
 	if limited {
-		return ErrAdminPaginationSnapshotLimited
+		remaining := window.Add(time.Minute).Sub(now)
+		retryAfter := int((remaining + time.Second - 1) / time.Second)
+		return adminPaginationSnapshotRateLimitError{retryAfter: max(1, min(60, retryAfter))}
 	}
 	return nil
 }

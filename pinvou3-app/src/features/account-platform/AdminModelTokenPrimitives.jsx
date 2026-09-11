@@ -38,26 +38,59 @@ export function Status({ value, copy }) {
   return <span className={`adm-status ${tone}`}>{label}</span>;
 }
 
+function adminRetrySecondsRemaining(retryAt) {
+  return Math.max(0, Math.ceil((Number(retryAt || 0) - Date.now()) / 1000));
+}
+
+export function useAdminRetryCountdown(retryAt) {
+  const [remaining, setRemaining] = useState(() => adminRetrySecondsRemaining(retryAt));
+  useEffect(() => {
+    let interval;
+    const update = () => {
+      const nextRemaining = adminRetrySecondsRemaining(retryAt);
+      setRemaining(nextRemaining);
+      if (nextRemaining === 0 && interval) {
+        globalThis.clearInterval(interval);
+        interval = undefined;
+      }
+    };
+    update();
+    if (!retryAt || Number(retryAt) <= Date.now()) return undefined;
+    interval = globalThis.setInterval(update, 250);
+    return () => {
+      if (interval) globalThis.clearInterval(interval);
+    };
+  }, [retryAt]);
+  return remaining;
+}
+
 export function SourceHeader({ title, titleID, state, copy, onRetry, actions = null }) {
+  const retryRemaining = useAdminRetryCountdown(state.retryAt);
   return (
     <div className="adm-source-head">
       <div>
         <h2 id={titleID}>{title}</h2>
         <p>{state.updatedAt ? `${copy.lastUpdated} ${new Date(state.updatedAt).toLocaleString()}` : copy.notUpdated}</p>
       </div>
-      <div className="adm-row-actions">{actions}<button type="button" disabled={state.loading} onClick={onRetry}>{state.loading ? copy.loading : copy.refreshSource}</button></div>
+      <div className="adm-row-actions">{actions}<button type="button" disabled={state.loading || retryRemaining > 0} onClick={onRetry}>{state.loading ? copy.loading : retryRemaining > 0 ? copy.retryCountdown(retryRemaining) : copy.refreshSource}</button></div>
     </div>
   );
 }
 
 export function SourceFeedback({ state, copy, onRetry }) {
+  const retryRemaining = useAdminRetryCountdown(state.retryAt);
   if (state.error) {
     const expired = state.error?.status === 410;
+    const rateLimited = state.error?.status === 429;
+    const details = [
+      retryRemaining > 0 ? copy.retryAfter(retryRemaining) : '',
+      state.error.requestID ? `${copy.requestID}: ${state.error.requestID}` : '',
+    ].filter(Boolean).join(' · ') || copy.retryHelp;
     return (
       <div className="adm-source-error" role="alert">
-        <strong>{expired ? copy.cursorExpired : copy.sourceUnavailable}</strong>
-        <span>{state.error.requestID ? `${copy.requestID}: ${state.error.requestID}` : copy.retryHelp}</span>
-        <button type="button" onClick={onRetry}>{copy.retry}</button>
+        <strong>{expired ? copy.cursorExpired : rateLimited ? copy.rateLimited : copy.sourceUnavailable}</strong>
+        <span>{details}</span>
+        <button type="button" disabled={retryRemaining > 0} onClick={onRetry}>{retryRemaining > 0 ? copy.retryCountdown(retryRemaining) : copy.retry}</button>
       </div>
     );
   }

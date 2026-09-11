@@ -33,6 +33,13 @@ func TestAdminPaginationLimitsAndStableErrors(t *testing.T) {
 			t.Fatalf("ClassifyAdminPaginationError(%v)=%+v want=%+v", err, got, want)
 		}
 	}
+	limited := adminPaginationSnapshotRateLimitError{retryAfter: 37}
+	if got, want := ClassifyAdminPaginationError(limited), (AdminPaginationHTTPError{Status: 429, Code: "PAGINATION_SNAPSHOT_LIMITED", RetryAfter: 37}); got != want {
+		t.Fatalf("ClassifyAdminPaginationError(rate limited)=%+v want=%+v", got, want)
+	}
+	if !errors.Is(limited, ErrAdminPaginationSnapshotLimited) {
+		t.Fatal("rate limit error must preserve the stable sentinel")
+	}
 }
 
 func TestAdminPaginationCursorBindsCompleteSnapshotIdentity(t *testing.T) {
@@ -69,5 +76,17 @@ func TestAdminPaginationFeatureGateFailsClosedWithoutState(t *testing.T) {
 	request := AdminPaginationRequest{SubjectID: uuid.New(), AuthorizationVersion: 1, Resource: "models", Sort: "id ASC", Limit: 50}
 	if _, err := repository.AdminPaginationPage(t.Context(), request, func(_ context.Context, _ pgx.Tx, _ uuid.UUID, _ time.Time, _ int) error { return nil }); !errors.Is(err, ErrAdminPaginationDisabled) {
 		t.Fatalf("disabled gate returned %v", err)
+	}
+}
+
+func TestAdminPaginationSerializationRetryRespectsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	started := time.Now()
+	if err := waitAdminPaginationSerializationRetry(ctx, 4); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled retry returned %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("canceled retry waited %s", elapsed)
 	}
 }

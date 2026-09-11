@@ -50,7 +50,52 @@ function errorFromResponse(response, payload) {
   error.status = response.status;
   error.details = payload?.details || null;
   error.requestID = payload?.request_id || '';
+  const retryAfter = String(response.headers.get('Retry-After') || '').trim();
+  const retryAfterNumber = Number.parseInt(retryAfter, 10);
+  const retryAfterDate = Number.isNaN(retryAfterNumber) ? Date.parse(retryAfter) : Number.NaN;
+  const retryAfterSeconds = Number.isNaN(retryAfterNumber)
+    ? Math.ceil((retryAfterDate - Date.now()) / 1000)
+    : retryAfterNumber;
+  error.retryAfterSeconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+    ? Math.min(retryAfterSeconds, 86_400)
+    : 0;
   return error;
+}
+
+function abortRequestError() {
+  if (typeof globalThis.DOMException === 'function') return new globalThis.DOMException('The operation was aborted.', 'AbortError');
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
+}
+
+function waitForSharedRead(entry, signal) {
+  if (signal?.aborted) return Promise.reject(abortRequestError());
+  entry.consumers += 1;
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const finish = (callback, value) => {
+      if (finished) return;
+      finished = true;
+      if (signal) signal.removeEventListener('abort', aborted);
+      entry.consumers -= 1;
+      if (entry.consumers === 0 && !entry.settled) {
+        entry.abandon();
+        entry.controller.abort();
+      }
+      callback(value);
+    };
+    const aborted = () => finish(reject, abortRequestError());
+    if (signal) signal.addEventListener('abort', aborted, { once: true });
+    entry.promise.then(
+      (value) => {
+        finish(resolve, value);
+      },
+      (error) => {
+        finish(reject, error);
+      },
+    );
+  });
 }
 
 export class AdminPlatformClient {
@@ -59,6 +104,7 @@ export class AdminPlatformClient {
     this.csrfToken = '';
     this.authorizationVersions = {};
     this.authorizationVersionListeners = new Set();
+    this.inflightReads = new Map();
   }
 
   onAuthorizationVersion(listener) {
@@ -91,16 +137,34 @@ export class AdminPlatformClient {
   }
 
   async request(area, resource, signal) {
-    const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, {
-      headers: { Accept: 'application/json' },
-      credentials: 'same-origin',
-      cache: 'no-store',
-      signal,
-    });
-    this.observeAuthorizationVersions(response.headers);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) throw errorFromResponse(response, payload);
-    return payload;
+    if (signal?.aborted) throw abortRequestError();
+    const url = `${this.baseURL}/api/admin/${area}${resource}`;
+    let entry = this.inflightReads.get(url);
+    if (!entry) {
+      entry = { controller: new globalThis.AbortController(), consumers: 0, settled: false, promise: null, abandon: null };
+      entry.abandon = () => {
+        if (this.inflightReads.get(url) === entry) this.inflightReads.delete(url);
+      };
+      entry.promise = (async () => {
+        const response = await fetch(url, {
+          headers: { Accept: 'application/json' },
+          credentials: 'same-origin',
+          cache: 'no-store',
+          signal: entry.controller.signal,
+        });
+        this.observeAuthorizationVersions(response.headers);
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw errorFromResponse(response, payload);
+        return payload;
+      })();
+      this.inflightReads.set(url, entry);
+      const cleanup = () => {
+        entry.settled = true;
+        entry.abandon();
+      };
+      entry.promise.then(cleanup, cleanup);
+    }
+    return waitForSharedRead(entry, signal);
   }
 
   async mutate(area, resource, method, body, idempotencyKey = '', signal) {
