@@ -64,6 +64,16 @@ test("durations with mixed units sort by their millisecond value", () => {
   assert.deepEqual(firstColumn(dom), ["900 ms", "2.5 s", "1 分钟", "—"]);
 });
 
+test("composite duration cells with mixed units rank by millisecond value", () => {
+  const dom = renderTable(["总耗时 P50/P90"], [["950 ms / 1.5 s"], ["1.2 s / 800 ms"], ["— / 2 s"]]);
+  const buttons = dom.window.document.querySelectorAll(".stats-sort-trigger");
+  assert.deepEqual(Array.from(buttons, (button) => button.textContent), ["P50", "P90"]);
+  buttons[0].click();
+  assert.deepEqual(firstColumn(dom), ["1.2 s / 800 ms", "950 ms / 1.5 s", "— / 2 s"]);
+  buttons[1].click();
+  assert.deepEqual(firstColumn(dom), ["— / 2 s", "950 ms / 1.5 s", "1.2 s / 800 ms"]);
+});
+
 test("unavailable statistical values always remain after valid values", () => {
   const dom = renderTable(["成功率"], [["样本不足"], ["12.5%"], ["暂无数据"], ["80%"]]);
   const button = dom.window.document.querySelector(".stats-sort-trigger");
