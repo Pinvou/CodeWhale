@@ -135,6 +135,7 @@ fn client_event_field_allowed(field: &str) -> bool {
             | "from_model_key"
             | "to_model_key"
             | "tool_key"
+            | "tool_name"
             | "step"
             | "readiness_source"
             | "has_attachment"

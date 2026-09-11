@@ -762,7 +762,11 @@ pub fn finish_task(
                 .turn(&operation.turn_id)
                 .string("operation_id", operation.operation_id)
                 .integer("attempt_index", 1)
-                .tool(operation.tool_key, &operation.tool_name, operation.tool_type)
+                .tool(
+                    operation.tool_key,
+                    &operation.tool_name,
+                    operation.tool_type,
+                )
                 .success(false)
                 .integer("duration_ms", now_ms().saturating_sub(operation.started_at))
                 .string(
@@ -904,7 +908,11 @@ pub fn track_tool_call_completed(
         .turn(operation.turn_id.clone())
         .string("operation_id", operation.operation_id)
         .integer("attempt_index", 1)
-        .tool(operation.tool_key, &operation.tool_name, operation.tool_type)
+        .tool(
+            operation.tool_key,
+            &operation.tool_name,
+            operation.tool_type,
+        )
         .success(success)
         .integer("duration_ms", now_ms().saturating_sub(operation.started_at));
     if !success {

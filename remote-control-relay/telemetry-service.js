@@ -1230,12 +1230,18 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     const stage = stageNames.get(event.event_name);
     if (!stage) continue;
     const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
-    const toolName = normalizedToolName(event.tool_name) || toolKey;
+    const normalizedName = normalizedToolName(event.tool_name);
+    const toolName = normalizedName || toolKey;
     const toolType = behaviorToolType(event.tool_type);
-    const groupKey = `${toolKey}\u001f${toolType}\u001f${toolName}`;
+    const toolNamePriority = normalizedName
+      ? (event.event_name === "tool_call_completed" ? 3
+        : event.event_name.startsWith("tool_configuration_") ? 2 : 1)
+      : 0;
+    const groupKey = `${toolKey}\u001f${toolType}`;
     const row = funnelGroups.get(groupKey) || {
       tool_key: toolKey,
       tool_name: toolName,
+      tool_name_priority: toolNamePriority,
       tool_type: toolType,
       impressions: new Set(),
       details: new Set(),
@@ -1250,6 +1256,12 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       successful_call_events: [],
       users: new Set(),
     };
+    if (toolNamePriority > row.tool_name_priority
+      || (toolNamePriority === row.tool_name_priority
+        && toolName.localeCompare(row.tool_name, "zh-CN") < 0)) {
+      row.tool_name = toolName;
+      row.tool_name_priority = toolNamePriority;
+    }
     const stageId = scopedEventKey(event, event.operation_id || event.event_id
       || `${event.view_id || "view"}:${groupKey}`);
     const identity = eventIdentity(event);
