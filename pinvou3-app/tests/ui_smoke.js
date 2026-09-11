@@ -206,7 +206,7 @@ function injectSource() {
           });
           return Promise.resolve(null);
         case 'voice_asr_status': return Promise.resolve(window.__VOICE_ASR_MISSING__
-          ? {ready:false,installable:true,missing:['model'],engine:{installed:true}}
+          ? {ready:false,installable:false,missing:['model'],engine:{installed:true}}
           : {ready:true,installable:true,missing:[],engine:{installed:true}});
         case 'create_session': return Promise.resolve({id:'s-new',metadata:{id:'s-new'}});
         case 'set_session_archived':
@@ -273,13 +273,6 @@ function injectSource() {
         case 'artifact_info': return Promise.resolve({exists:true,kind:'md',size:2048,modified:1});
         case 'read_artifact_text': return Promise.resolve('# 会议纪要');
         case 'render_artifact_visual': return Promise.resolve({mode:'unsupported'});
-        case 'detect_local_vllm_setup': {
-          const engineState = window.__VLLM_STATE__ || 'stopped';
-          return Promise.resolve(window.__VLLM_ELIGIBLE__ && engineState !== 'starting'
-            ? {eligible:true,may_offer_setup:true,is_megacube:true,has_packages:true,vllm_online:false,engine_state:engineState,already_bootstrapped:false}
-            : {eligible:false,may_offer_setup:!!window.__VLLM_ELIGIBLE__,is_megacube:engineState==='starting',has_packages:engineState==='starting',vllm_online:false,engine_state:engineState,already_bootstrapped:false});
-        }
-        case 'bootstrap_local_vllm': return new Promise(function(){}); // 永不 resolve,停在 bootstrapping 态供测步骤指示
         default: return Promise.resolve(null);
       }
     }
@@ -1029,211 +1022,75 @@ async function expand(page) {
   await clickText(page, '新对话');
   await sleep(250);
 
-  // Windows 平板尺寸会展示浮动语音按钮。用浏览器输入通道覆盖鼠标、触控笔与触摸，
-  // 并动态验证 capture 丢失、pointercancel、窗口失焦后的视觉态和点击语义。
+  // Voice entry is consolidated into the composer: no page-level floating
+  // bubble even at tablet width; the mic stays next to the send button, and
+  // recording feedback is carried by the in-composer pill.
   await page.setViewport({ width: 1000, height: 800, deviceScaleFactor: 1 });
   await sleep(350);
-  await page.evaluate(() => {
-    const button = document.querySelector('[data-testid="floating-voice-button"]');
-    window.__FLOATING_VOICE_COMPAT_CLICKS__ = 0;
-    if (button) button.addEventListener('click', () => { window.__FLOATING_VOICE_COMPAT_CLICKS__ += 1; });
-  });
-  const floatingVoiceSnapshot = () => page.evaluate(() => {
-    const button = document.querySelector('[data-testid="floating-voice-button"]');
-    if (!button) return null;
-    const rect = button.getBoundingClientRect();
-    const wrapRect = button.parentElement.getBoundingClientRect();
+  const composerVoiceEntry = await page.evaluate(() => {
+    const floatingButton = document.querySelector('[data-testid="floating-voice-button"]');
+    const composerButton = document.querySelector('[data-testid="composer-voice-button"]');
+    const sendButton = document.querySelector('[aria-label="发送"]') || document.querySelector('[title="发送"]');
+    if (!composerButton || !sendButton) {
+      return {
+        floatingFound: !!floatingButton,
+        composerFound: !!composerButton,
+        sendFound: !!sendButton,
+        composerVisible: false,
+        besideSend: false,
+      };
+    }
+    const voiceRect = composerButton.getBoundingClientRect();
+    const sendRect = sendButton.getBoundingClientRect();
     return {
-      x: rect.left + rect.width / 2,
-      y: rect.top + rect.height / 2,
-      left: wrapRect.left,
-      top: wrapRect.top,
-      pressed: button.getAttribute('data-pressed'),
-      voiceCalls: window.__TAURI_INVOKES__.filter(call => call.cmd === 'voice_asr_status').length,
-      clicks: window.__FLOATING_VOICE_COMPAT_CLICKS__,
+      floatingFound: !!floatingButton,
+      composerFound: true,
+      sendFound: true,
+      composerVisible: voiceRect.width > 0 && voiceRect.height > 0,
+      besideSend: voiceRect.right <= sendRect.left + 2 && Math.abs((voiceRect.top + voiceRect.bottom) / 2 - (sendRect.top + sendRect.bottom) / 2) <= 6,
     };
   });
-  const floatingVoiceStart = await floatingVoiceSnapshot();
-  let floatingVoiceDrag = { found: false };
-  if (floatingVoiceStart) {
-    await page.mouse.move(floatingVoiceStart.x, floatingVoiceStart.y);
-    await page.mouse.down();
-    await page.mouse.move(floatingVoiceStart.x + 12, floatingVoiceStart.y);
-    await sleep(60);
-    const mouseDuring = await floatingVoiceSnapshot();
-    await page.mouse.up();
-    await sleep(60);
-    const mouseAfter = await floatingVoiceSnapshot();
-
-    const lostStart = mouseAfter;
-    await page.evaluate(() => {
-      const button = document.querySelector('[data-testid="floating-voice-button"]');
-      window.__FLOATING_VOICE_POINTER_ID__ = null;
-      button?.addEventListener('pointerdown', event => { window.__FLOATING_VOICE_POINTER_ID__ = event.pointerId; }, { once: true });
-    });
-    await page.mouse.move(lostStart.x, lostStart.y);
-    await page.mouse.down();
-    await page.mouse.move(lostStart.x + 12, lostStart.y);
-    await page.evaluate(() => {
-      const button = document.querySelector('[data-testid="floating-voice-button"]');
-      const pointerId = window.__FLOATING_VOICE_POINTER_ID__;
-      if (button && pointerId !== null && button.hasPointerCapture(pointerId)) button.releasePointerCapture(pointerId);
-      if (button && pointerId !== null) {
-        button.dispatchEvent(new PointerEvent('lostpointercapture', {
-          bubbles: true, pointerId, pointerType: 'mouse', isPrimary: true,
-        }));
-      }
-    });
-    await sleep(30);
-    const lostCapture = await floatingVoiceSnapshot();
-    await page.mouse.up();
-    await sleep(60);
-    const lostAfter = await floatingVoiceSnapshot();
-
-    const input = await page.createCDPSession();
-    const penStart = lostAfter;
-    await input.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: penStart.x, y: penStart.y, buttons: 0, pointerType: 'pen' });
-    await input.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: penStart.x, y: penStart.y, button: 'left', buttons: 1, clickCount: 1, pointerType: 'pen' });
-    const penPressed = await floatingVoiceSnapshot();
-    await page.evaluate(() => {
-      const button = document.querySelector('[data-testid="floating-voice-button"]');
-      const rect = button.getBoundingClientRect();
-      const init = {
-        bubbles: true, pointerId: 302, pointerType: 'touch', isPrimary: true, button: 0,
-        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
-      };
-      button.dispatchEvent(new PointerEvent('pointerdown', { ...init, buttons: 1 }));
-      button.dispatchEvent(new PointerEvent('pointerup', { ...init, buttons: 0 }));
-    });
-    await sleep(20);
-    const penAfterTouch = await floatingVoiceSnapshot();
-    await input.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: penStart.x + 12, y: penStart.y, buttons: 1, pointerType: 'pen' });
-    const penDuring = await floatingVoiceSnapshot();
-    await input.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: penStart.x + 12, y: penStart.y, button: 'left', buttons: 0, clickCount: 1, pointerType: 'pen' });
-    await sleep(60);
-    const penAfter = await floatingVoiceSnapshot();
-
-    await page.evaluate(() => {
-      const button = document.querySelector('[data-testid="floating-voice-button"]');
-      const rect = button.getBoundingClientRect();
-      button.dispatchEvent(new PointerEvent('pointerdown', {
-        bubbles: true, pointerId: 301, pointerType: 'pen', isPrimary: false, button: 0, buttons: 1,
-        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
-      }));
-    });
-    await sleep(20);
-    const nonPrimaryPen = await floatingVoiceSnapshot();
-
-    await page.evaluate(() => {
-      const button = document.querySelector('[data-testid="floating-voice-button"]');
-      const rect = button.getBoundingClientRect();
-      const init = {
-        bubbles: true, pointerType: 'touch', button: 0, buttons: 1,
-        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
-      };
-      button.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerId: 401, isPrimary: true }));
-      button.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerId: 402, isPrimary: false }));
-      button.dispatchEvent(new PointerEvent('pointerup', { ...init, pointerId: 402, isPrimary: false, buttons: 0 }));
-    });
-    await sleep(20);
-    const multiTouchSecondaryEnded = await floatingVoiceSnapshot();
-    await page.evaluate(() => {
-      const button = document.querySelector('[data-testid="floating-voice-button"]');
-      const rect = button.getBoundingClientRect();
-      button.dispatchEvent(new PointerEvent('pointercancel', {
-        bubbles: true, pointerId: 401, pointerType: 'touch', isPrimary: true, button: 0, buttons: 0,
-        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2,
-      }));
-    });
-    await sleep(20);
-    const multiTouchCancelled = await floatingVoiceSnapshot();
-
-    const touchStart = penAfter;
-    await input.send('Input.dispatchTouchEvent', {
-      type: 'touchStart',
-      touchPoints: [{ x: touchStart.x, y: touchStart.y, id: 41, radiusX: 1, radiusY: 1, force: 1 }],
-    });
-    await input.send('Input.dispatchTouchEvent', {
-      type: 'touchMove',
-      touchPoints: [{ x: touchStart.x + 12, y: touchStart.y, id: 41, radiusX: 1, radiusY: 1, force: 1 }],
-    });
-    const touchDuring = await floatingVoiceSnapshot();
-    await input.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
-    await sleep(40);
-    const touchCancelled = await floatingVoiceSnapshot();
-
-    const composerBefore = touchCancelled;
-    const composerCenter = await page.evaluate(() => {
-      const button = document.querySelector('[data-testid="composer-voice-button"]');
-      if (!button) return null;
-      const rect = button.getBoundingClientRect();
-      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    });
-    if (composerCenter) await page.mouse.click(composerCenter.x, composerCenter.y);
-    await sleep(80);
-    const composerAfter = await floatingVoiceSnapshot();
-    await page.evaluate(() => window.TauriBridge.voice.clearVoiceInput());
-    await sleep(20);
-
-    const blurStart = touchCancelled;
-    await page.mouse.move(blurStart.x, blurStart.y);
-    await page.mouse.down();
-    await page.mouse.move(blurStart.x + 12, blurStart.y);
-    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
-    await sleep(30);
-    const blurred = await floatingVoiceSnapshot();
-    await page.mouse.move(1, 1);
-    await page.mouse.up();
-    await sleep(40);
-    const blurAfter = await floatingVoiceSnapshot();
-
-    await page.evaluate(() => document.querySelector('[data-testid="floating-voice-button"]')?.focus());
-    await page.keyboard.press('Enter');
-    await sleep(80);
-    const keyboardAfter = await floatingVoiceSnapshot();
-    await page.evaluate(() => window.TauriBridge.voice.clearVoiceInput());
-
-    floatingVoiceDrag = {
-      found: true,
-      mouseMovedImmediately: mouseDuring.pressed === 'true'
-        && (Math.abs(mouseDuring.left - floatingVoiceStart.left) > 4 || Math.abs(mouseDuring.top - floatingVoiceStart.top) > 4),
-      mouseCompatibleClickSuppressed: mouseAfter.pressed === 'false'
-        && mouseAfter.clicks > floatingVoiceStart.clicks
-        && mouseAfter.voiceCalls === floatingVoiceStart.voiceCalls,
-      lostCaptureCleared: lostCapture.pressed === 'false',
-      lostCaptureClickSuppressed: lostAfter.clicks > mouseAfter.clicks
-        && lostAfter.voiceCalls === mouseAfter.voiceCalls,
-      penPathPassed: penPressed.pressed === 'true'
-        && penAfterTouch.pressed === 'true'
-        && penDuring.pressed === 'true'
-        && (Math.abs(penDuring.left - penStart.left) > 4 || Math.abs(penDuring.top - penStart.top) > 4)
-        && penAfter.pressed === 'false'
-        && penAfter.voiceCalls === lostAfter.voiceCalls,
-      nonPrimaryPenIgnored: nonPrimaryPen.pressed === 'false',
-      secondTouchIgnored: multiTouchSecondaryEnded.pressed === 'true' && multiTouchCancelled.pressed === 'false',
-      touchCancelCleared: touchDuring.pressed === 'true'
-        && touchCancelled.pressed === 'false'
-        && touchCancelled.voiceCalls === penAfter.voiceCalls,
-      composerClickWorked: !!composerCenter && composerAfter.voiceCalls > composerBefore.voiceCalls,
-      blurCleared: blurred.pressed === 'false' && blurAfter.voiceCalls === composerAfter.voiceCalls,
-      keyboardClickWorked: keyboardAfter.voiceCalls > blurAfter.voiceCalls,
-    };
-  }
   rec(
-    '⓪b 浮动语音按钮 mouse/touch/pen 拖动及异常终止行为',
-    floatingVoiceDrag.found
-      && floatingVoiceDrag.mouseMovedImmediately
-      && floatingVoiceDrag.mouseCompatibleClickSuppressed
-      && floatingVoiceDrag.lostCaptureCleared
-      && floatingVoiceDrag.lostCaptureClickSuppressed
-      && floatingVoiceDrag.penPathPassed
-      && floatingVoiceDrag.nonPrimaryPenIgnored
-      && floatingVoiceDrag.secondTouchIgnored
-      && floatingVoiceDrag.touchCancelCleared
-      && floatingVoiceDrag.composerClickWorked
-      && floatingVoiceDrag.blurCleared
-      && floatingVoiceDrag.keyboardClickWorked,
-    JSON.stringify(floatingVoiceDrag),
+    '⓪b composer mic sits beside the send button and no floating voice bubble renders',
+    !composerVoiceEntry.floatingFound
+      && composerVoiceEntry.composerFound
+      && composerVoiceEntry.sendFound
+      && composerVoiceEntry.composerVisible
+      && composerVoiceEntry.besideSend,
+    JSON.stringify(composerVoiceEntry),
+  );
+  const composerVoiceInvoke = await page.evaluate(async () => {
+    window.__TAURI_INVOKES__ = [];
+    const composerButton = document.querySelector('[data-testid="composer-voice-button"]');
+    if (!composerButton) return { clicked: false, invoked: false };
+    composerButton.click();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    if (window.TauriBridge && window.TauriBridge.voice && window.TauriBridge.voice.closeVoiceAsrSetup) {
+      window.TauriBridge.voice.closeVoiceAsrSetup();
+    }
+    await new Promise(resolve => setTimeout(resolve, 120));
+    // The first click opens the one-time voice intro modal (a fixed fullscreen
+    // overlay). This smoke does not cover the intro interaction, but the modal
+    // must be explicitly dismissed: the overlay swallows the real puppeteer
+    // clicks later cases depend on (e.g. the ①a-3 task filter button).
+    // Clicking the close button also writes intro-seen back to React state
+    // and localStorage.
+    const introClose = [...document.querySelectorAll('button')]
+      .find(b => (b.getAttribute('aria-label') || '').includes('关闭语音快捷键'));
+    if (introClose) {
+      introClose.click();
+      await new Promise(resolve => setTimeout(resolve, 120));
+    }
+    return {
+      clicked: true,
+      invoked: window.__TAURI_INVOKES__.some(call => call.cmd === 'voice_asr_status'),
+      introDismissed: !document.querySelector('#voice-shortcut-intro-title'),
+    };
+  });
+  rec(
+    '⓪b-2 clicking the composer mic starts the voice capability probe',
+    composerVoiceInvoke.clicked && composerVoiceInvoke.invoked && composerVoiceInvoke.introDismissed,
+    JSON.stringify(composerVoiceInvoke),
   );
   await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
   await sleep(250);
@@ -2577,65 +2434,7 @@ async function expand(page) {
     archiveToastGoto.currentView === 'search' && archiveToastGoto.archivedTabVisible && archiveToastGoto.archivedVisible && archiveToastGoto.noSettingsError,
     JSON.stringify({ archiveMenuOpened, archiveToastBefore, archiveToastGoto }));
 
-  // ⑥ 开机加载中不弹框；确认 stopped 后才渲染启用引导。
-  await page.evaluate(() => { window.__VLLM_ELIGIBLE__ = true; window.__VLLM_STATE__ = 'starting'; });
-  await page.evaluate(() => window.TauriBridge.vllm.detectLocalVllmSetup());
-  await sleep(300);
-  const startingSetup = await page.evaluate(() => document.body.innerText.includes('启用本地大模型'));
-  rec('⑥ MegaCube 引擎 starting 时不弹启用框', !startingSetup, JSON.stringify({ popup: startingSetup }));
-
-  // 将时钟推进到 12 分钟截止之后，等待内部自动轮询一次；卡死的 starting 必须恢复重试入口。
-  await page.evaluate(() => {
-    window.__VLLM_REAL_DATE_NOW__ = Date.now;
-    const base = Date.now();
-    Date.now = () => base + 13 * 60 * 1000;
-  });
-  await sleep(3300);
-  const timedOutSetup = await page.evaluate(() => {
-    const setup = window.TauriBridge.state.getMany(['chat', 'vllm']).vllmSetup || {};
-    return {
-      popup: document.body.innerText.includes('启用本地大模型'),
-      state: setup.engine_state,
-      timedOut: setup.detection_timed_out,
-    };
-  });
-  rec('⑦ MegaCube 引擎 starting 超时后恢复重试入口', timedOutSetup.popup && timedOutSetup.state === 'failed' && timedOutSetup.timedOut === true, JSON.stringify(timedOutSetup));
-
-  await page.evaluate(() => {
-    Date.now = window.__VLLM_REAL_DATE_NOW__;
-    window.__VLLM_STATE__ = 'stopped';
-  });
-  await page.evaluate(() => { window.__VLLM_ELIGIBLE__ = true; });
-  await page.evaluate(() => window.TauriBridge.vllm.detectLocalVllmSetup());
-  await sleep(500);
-  const setup = await page.evaluate(() => {
-    const btns = [...document.querySelectorAll('button')].map(b => (b.textContent || '').trim());
-    return { title: document.body.innerText.includes('启用本地大模型'), enable: btns.includes('启用'), skip: btns.includes('暂不'), never: btns.includes('不再提醒') };
-  });
-  rec('⑧ MegaCube 引导框 eligible 渲染(标题+启用/暂不/不再提醒)', setup.title && setup.enable && setup.skip && setup.never, JSON.stringify(setup));
-
-  // ⑨ 点「不再提醒」→ 二次确认子态(警示文案 + 确认不启用/再想想);点「再想想」回到初始态
-  await clickText(page, '不再提醒');
-  await sleep(300);
-  const decline = await page.evaluate(() => {
-    const btns = [...document.querySelectorAll('button')].map(b => (b.textContent || '').trim());
-    return { warn: document.body.innerText.includes('不再自动弹出'), confirm: btns.includes('确认不启用'), reconsider: btns.includes('再想想') };
-  });
-  await clickText(page, '再想想');
-  await sleep(200);
-  rec('⑨ 不再提醒→二次确认渲染(警示+确认/再想想)', decline.warn && decline.confirm && decline.reconsider, JSON.stringify(decline));
-
-  // ⑩ 点「启用」→ 立即进入等待系统授权；mock bootstrap 永不 resolve 停在进行中。
-  await clickText(page, '启用');
-  await sleep(700);
-  const prog = await page.evaluate(() => {
-    const txt = document.body.innerText;
-    return { auth: txt.includes('等待系统授权'), wait: txt.includes('等待模型加载就绪'), elapsed: txt.includes('已等待') };
-  });
-  rec('⑩ 点启用后等待系统授权+计时渲染', prog.auth && prog.wait && prog.elapsed, JSON.stringify(prog));
-
-  // 旧兼容渲染路径也必须暴露与详情 DOM 一致的展开状态。
-  await page.evaluate(() => localStorage.setItem('pinvou_conversation_ui_v2', 'false'));
+  // 历史 Codex 会话的推理与工具详情也必须暴露与详情 DOM 一致的展开状态。
   await page.reload({ waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.TauriBridge && document.body && document.body.innerText.includes('PINVOU'), { timeout: 20000 }).catch(() => {});
   await sleep(1200);
@@ -2647,7 +2446,6 @@ async function expand(page) {
   await page.waitForFunction(() => (
     document.querySelector('[data-testid="conversation-reasoning-toggle"]')
     && document.querySelector('[data-testid="conversation-tool-group-summary"]')
-    && document.querySelector('[data-testid="conversation-compact-item-toggle"]')
   ), { timeout: 20000 }).catch(() => {});
   const legacyConversationA11y = await page.evaluate(async () => {
     const state = (toggle) => {
@@ -2674,33 +2472,22 @@ async function expand(page) {
     await settle();
     const groupAfter = state(summary);
 
-    const compactToggle = document.querySelector('[data-testid="conversation-compact-item-toggle"]');
-    const compactBefore = state(compactToggle);
-    compactToggle?.click();
-    await settle();
-    const compactAfter = state(compactToggle);
-    compactToggle?.click();
-    await settle();
-    const compactCollapsed = state(compactToggle);
     summary?.click();
     await settle();
     const groupCollapsed = state(summary);
-    const controls = [reasoningAfter.controls, groupAfter.controls, compactAfter.controls].filter(Boolean);
+    const controls = [reasoningAfter.controls, groupBefore.controls].filter(Boolean);
     return {
-      found: Boolean(reasoningToggle && summary && compactToggle),
+      found: Boolean(reasoningToggle && summary),
       reasoningBefore,
       reasoningAfter,
       reasoningCollapsed,
       groupBefore,
       groupAfter,
       groupCollapsed,
-      compactBefore,
-      compactAfter,
-      compactCollapsed,
-      uniqueControls: controls.length === 3 && new Set(controls).size === controls.length,
+      uniqueControls: controls.length === 2 && new Set(controls).size === controls.length,
     };
   });
-  rec('⑩a 旧兼容对话详情向辅助技术同步展开状态',
+  rec('⑩a 历史 Codex 会话详情向辅助技术同步展开状态',
     legacyConversationA11y.found
       && legacyConversationA11y.uniqueControls
       && legacyConversationA11y.reasoningBefore.expanded === 'false'
@@ -2712,24 +2499,15 @@ async function expand(page) {
       && legacyConversationA11y.reasoningCollapsed.expanded === 'false'
       && !legacyConversationA11y.reasoningCollapsed.controls
       && !legacyConversationA11y.reasoningCollapsed.detailsPresent
-      && legacyConversationA11y.groupBefore.expanded === 'false'
-      && !legacyConversationA11y.groupBefore.controls
-      && !legacyConversationA11y.groupBefore.detailsPresent
-      && legacyConversationA11y.groupAfter.expanded === 'true'
-      && Boolean(legacyConversationA11y.groupAfter.controls)
-      && legacyConversationA11y.groupAfter.detailsPresent
-      && legacyConversationA11y.groupCollapsed.expanded === 'false'
-      && !legacyConversationA11y.groupCollapsed.controls
-      && !legacyConversationA11y.groupCollapsed.detailsPresent
-      && legacyConversationA11y.compactBefore.expanded === 'false'
-      && !legacyConversationA11y.compactBefore.controls
-      && !legacyConversationA11y.compactBefore.detailsPresent
-      && legacyConversationA11y.compactAfter.expanded === 'true'
-      && Boolean(legacyConversationA11y.compactAfter.controls)
-      && legacyConversationA11y.compactAfter.detailsPresent
-      && legacyConversationA11y.compactCollapsed.expanded === 'false'
-      && !legacyConversationA11y.compactCollapsed.controls
-      && !legacyConversationA11y.compactCollapsed.detailsPresent,
+      && legacyConversationA11y.groupBefore.expanded === 'true'
+      && Boolean(legacyConversationA11y.groupBefore.controls)
+      && legacyConversationA11y.groupBefore.detailsPresent
+      && legacyConversationA11y.groupAfter.expanded === 'false'
+      && !legacyConversationA11y.groupAfter.controls
+      && !legacyConversationA11y.groupAfter.detailsPresent
+      && legacyConversationA11y.groupCollapsed.expanded === 'true'
+      && Boolean(legacyConversationA11y.groupCollapsed.controls)
+      && legacyConversationA11y.groupCollapsed.detailsPresent,
     JSON.stringify(legacyConversationA11y));
 
   // ⑩b legacy 长会话离屏合成不应为 ChatBubble 返回 null 的项（reasoning / 已忽略记忆候选 /
@@ -2766,7 +2544,9 @@ async function expand(page) {
     legacyReasoningGuard.emptyCount === 0 && !legacyReasoningGuard.reasoningLeaked,
     JSON.stringify(legacyReasoningGuard));
 
-  // ⑩c 侧栏拖拽柄的 WAI-ARIA Window Splitter 键盘交互。
+  // ⑩c Keyboard operability of the sidebar resize handle (WAI-ARIA Window
+  // Splitter): focusable, arrow-key stepping, Home/End land on the clamped
+  // bounds, aria-valuenow tracks the width, persistence matches the pointer path.
   await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
   await sleep(250);
   const sidebarWidthOf = () => page.evaluate(() => {

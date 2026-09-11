@@ -104,22 +104,26 @@ const expectedProtocolHashes = {
   // (chat-events.js). Recomputed for explicit artifact presentation: a
   // successful present_artifact tool_end now emits a session-scoped request
   // that opens the preview even when the existing card is updated in place.
-  chat: '5c4a6aa2e723878746f83d9ecf83e0f364c229dfb35b2f7b7156f98ce93cb1d4',
+  // #148 preserves Official invocation shapes; the callback body now redacts errors.
+  // Recomputed for the preinstalled-model startup removal on top of #148.
+  chat: '1a5d20b1ff210c2fcb9e0d5079da2c6d658f9eb0cafc3c29c6400104f8b1c99a',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
-  memory: 'd92cbabf27c277a64b743e7af25b48d8b8b65513e33aeb0f38c906d4b300616b',
+  // memory recomputed for the backflowed memory-maintenance feature
+  // (Community #419): organize_memory + get_memory_organize_history invokes
+  // added to bridge/memory.js.
+  memory: 'fc10a0538ac12c7b43b9d14d9846726f5847d1f21d578d1e918b9c68cdca35fd',
   monitor: '01bf9a7c9b9b3f313cf49e975e6503627ff373caed0f4b3be07a6a98492a7c43',
   personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
-  remoteControl: 'b48906332b45fecfb5a9b222264edb694ff39a47c6ae2105f8d1c32a47653830',
+  remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
-  // Main integration: typed account-platform model binding and new main session/
-  // telemetry calls coexist; legacy account calls are retired. Updater retains
-  // the account-platform release precheck alongside main's update protocol.
+  // Recomputed after preserving typed account-platform model binding while
+  // integrating main's session rollback, settings, updater, and voice flows.
   sessions: '35c0c7fedacd6f2f6f5d6c829037b77aea80dbb4d01e54d06a9a55b473651e41',
-  settings: 'b878393113917ab41ad44aa748f346db64b2238e78ff7269239eccaca5939651',
+  settings: '748f16e4c90a28128bff8c27a0c21f295e94d9d33aaad7c329741fc2d49cc3d0',
   updater: '3ed106e55a2272d3d103e5e8115f817b60cae953caf0986b591412b01fc4ba23',
-  voice: 'b26fd3ae1fa7d11f3457f757dae29bc518c4c9467ac138ef0b95a3cd118301b2',
+  voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
   teamRelay: '246f7cfd5a5ff4b730e2f3972fe9e74860b51a4781bd323bf10b3d795d24ed1d',
   accountPlatform: 'b27255619e222495aaada496eda619a788e7c876607730d36f08c9188780234d',
 };

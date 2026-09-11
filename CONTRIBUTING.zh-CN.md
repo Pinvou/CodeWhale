@@ -103,13 +103,17 @@ gitlink、`tauri.conf.json` 非版本字段以及门禁自身（`pr-check.yml`�
 API/diff 失败、版本内容异常、Release 混合改动或未知策略状态时 fail closed 强制
 完整 Windows，`required-gate` 不接受此状态下的 skipped。`ci:full-rust` 仍会强制
 普通完整路由。
+仅当条目明确为 `QUEUED`，且 `baseCommit`、`headCommit` 两字段均存在并为 null，
+才将其视为尚未构建并排除出成员链索引。字段缺失、单侧提交或未知状态仍 fail closed；
+事件完整的 base→head 链与每个实际成员的校验仍不可省略。
 发布链路改动只跑轻量契约测试；完整
 deb、dmg、nsis 安装包仅在 `VERSION` 改动进入 `main` 后，或人工明确触发
 `workflow_dispatch` 时构建。
 
 Merge Queue 在入队 PR 与最新 `main` 的实际组合树上运行适用门禁：Rust 改动
 运行格式、Clippy、编译和依赖策略检查；高爆炸半径 Rust 改动还会在组合树上执行
-完整 Linux 行为回归，Windows 已在 Ready PR 验证，不在队列重复。前端改动按
+完整 Linux 行为回归，Windows 已在 Ready PR 验证，除上述 fail-closed 情况外不在
+队列重复。前端改动按
 merge group 的真实 base/head diff 选择浏览器 smoke，共享、未知或测试设施路径
 fail-closed 回退全套。每个保留下来的 `main` push 都执行 Linux 累计编译验证
 （全量测试由 Merge Queue 在同一组合树上完成，push 不重复执行）与 Windows

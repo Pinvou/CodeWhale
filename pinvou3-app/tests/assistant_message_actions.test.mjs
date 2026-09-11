@@ -402,7 +402,6 @@ for (const language of ['zh', 'en', 'ja']) {
 
 const chatView = source('features/chat/ChatView.jsx');
 const timeline = source('features/conversation/ConversationTimeline.jsx');
-const codexView = source('features/codex/CodexAcpView.jsx');
 const actions = source('features/conversation/AssistantMessageActions.jsx');
 const clipboard = source('features/conversation/message-clipboard.js');
 const exportLogic = source('features/conversation/assistant-response-export.js');
@@ -442,7 +441,8 @@ assert.match(nativeHandler, /commands::assistant_response::export_assistant_resp
 assert.match(nativeHandler, /commands::assistant_response::open_assistant_share_target/);
 assert.doesNotMatch(actions, /targetRef|querySelector/);
 assert.doesNotMatch(clipboard, /querySelectorAll|data-assistant-copy-source/);
+// The legacy codex Turn footer was removed along with the old timeline; the completed-response actions contract is carried solely by the unified timeline (codex renders through the same ConversationTimeline).
 assert.match(timeline, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions[\s\S]*?resolveText=\{\(\) => assistantResponseText\(turn\)\}[\s\S]*?copy=\{c\}/);
-assert.match(codexView, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions[\s\S]*?resolveText=\{\(\) => assistantResponseText\(turn\)\}[\s\S]*?copy=\{copy\}/);
+assert.match(timeline, /<AssistantMessageActions[\s\S]*?sessionId=\{sessionId\}[\s\S]*?turnId=\{turn\.lifecycleKnown \? turn\.id : null\}/);
 
 console.log('assistant message actions tests passed');

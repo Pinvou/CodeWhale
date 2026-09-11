@@ -32,7 +32,11 @@ const macos = readJson("config/platforms/macos/tauri.conf.json");
 const windows = readJson("config/platforms/windows/tauri.conf.json");
 const windowsSigning = readJson("config/platforms/windows/signing.wosign.conf.json");
 
-assert.equal(resourceSources(common).length, 0, "common bundle assets are embedded by the Rust runtime");
+assert.deepEqual(
+  resourceSources(common),
+  ["resources/common/config/account-platform.json"],
+  "only the selected account-platform connection config remains a packaged common resource",
+);
 assert.match(common.build.beforeBuildCommand, /scripts\/tauri\/require-wrapper\.js build/);
 assert.match(common.build.beforeBundleCommand, /scripts\/tauri\/require-wrapper\.js bundle/);
 assert.ok(

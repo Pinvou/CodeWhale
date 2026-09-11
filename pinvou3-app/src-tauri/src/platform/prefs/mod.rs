@@ -516,14 +516,6 @@ pub struct AdvancedPrefs {
         skip_serializing_if = "Option::is_none"
     )]
     pub account_platform_default_model: Option<String>,
-    /// MegaCube(GB10) 本地大模型一键引导是否成功跑过一次。
-    /// 置真后首屏引导框永不再弹(见 `local_vllm_setup::detect`)。引导失败/被跳过不置真。
-    #[serde(default)]
-    pub local_vllm_bootstrapped: bool,
-    /// 用户点「不再提醒 → 确认」婉拒预装本地大模型:置真后开机引导框不再自动弹。
-    /// 与 bootstrapped 区别:婉拒是"我先不要",仍可在设置→模型管理「检测本机 vLLM」里手动启用。
-    #[serde(default)]
-    pub local_vllm_setup_declined: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -570,33 +562,53 @@ impl Default for SidebarPrefs {
     }
 }
 
-/// 品悟原生 code 会话权限模式的全局记忆。产品语义（已拍板）：
-/// - 从未用过 code 模式时，新建 code 会话默认 Plan（只读）；
-/// - 新建 code 会话的默认 mode = code lane 的全局 last_mode；
-/// - last_mode 只由「code 页草稿态显式切换」写入（已生成会话的切换只写
-///   会话自己的记录，不再渗全局——三分 lane 语义复审拍板）；
-/// - 首次切 yolo 弹一次性确认卡，确认后全局记住、之后切换不再弹。
+/// Global memory of pinvou's native code-session permission mode. Product
+/// semantics (settled in review):
+/// - when code mode has never been used, a new code session defaults to Plan
+///   (read-only);
+/// - a new code session's default mode = the code lane's global last_mode;
+/// - last_mode is written only by an explicit draft-state switch on the code
+///   page (a switch inside an already-materialized session writes only that
+///   session's own record and never leaks into globals — the two-lane
+///   semantics settled in review);
+/// - the first switch to yolo shows a one-shot confirmation card; once
+///   confirmed it is remembered globally and later switches do not prompt.
 ///
-/// 不进设置 UI；写入走字段级事务（同 PetPrefs），per-session mode 另存
-/// `sessions/_session_mode_states.json`（见 `features::sessions`）。
+/// Not exposed in the settings UI; writes go through field-level
+/// transactions (same as PetPrefs); per-session mode is stored separately in
+/// `sessions/_session_mode_states.json` (see `features::sessions`).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodePermissionPrefs {
-    /// code lane 的全局默认 mode（草稿态显式切换时写入）。None = 从未使用过
-    /// code 模式。
+    /// The code lane's global default mode (written on an explicit
+    /// draft-state switch). None = code mode has never been used.
     pub last_mode: Option<SerializableMode>,
-    /// yolo 一次性确认（"全自动读写项目目录、可执行 shell、无逐步审批"）标志。
+    /// One-shot yolo confirmation ("full read/write of the project directory,
+    /// shell execution allowed, no step-by-step approval") flag.
     pub yolo_confirmed: bool,
 }
 
-/// 工作（work）/ 设计（design）两个 plain lane 的全局默认 mode。
-/// 与 code lane（`code_permission.last_mode`）并列——三个工作区 lane 各有
-/// 独立全局默认；只由对应 lane 草稿态的显式切换写入，已生成会话的切换不碰。
-/// None = 该 lane 从未显式选过 → 缺省 Yolo（与 plain 历史默认一致）。
+/// The work lane's global default mode.
+/// Parallel to the code lane (`code_permission.last_mode`) — each workspace
+/// lane keeps an independent global default; written only by an explicit
+/// draft-state switch in the matching lane, never touched by switches inside
+/// already-materialized sessions.
+/// None = the lane was never explicitly chosen → default Yolo (matching the
+/// historical plain default).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModeDefaultPrefs {
     pub work: Option<SerializableMode>,
+    /// Kept only for backward-compatible reads of legacy settings.json (the
+    /// design lane was merged into work): at startup, if work is empty this
+    /// field backfills the work in-memory mirror (read fold, see
+    /// `features/sessions/store.rs::from_paths`); it never receives a
+    /// semantic write.
+    /// Must round-trip verbatim through whole-preferences writes (no
+    /// skip_serializing): the fold is not written back to disk, so if an
+    /// unrelated preferences write dropped this field, one write plus a
+    /// restart before the user explicitly sets work would leave the fold
+    /// without a source and silently lose the explicitly chosen default.
     pub design: Option<SerializableMode>,
 }
 
@@ -610,6 +622,10 @@ pub struct UserPrefs {
     /// Version 1 stores source-aware global and per-session model references.
     pub model_selection_schema_version: u32,
     pub theme: Theme,
+    /// Color-scheme preference: `system` follows the OS (decided by the
+    /// frontend, light when undeterminable), light/dark are explicit picks.
+    /// Introduced later than `theme`; when missing from old settings, `load`
+    /// derives it from `theme`, while fresh installs keep the `system` default.
     pub color_scheme: ColorScheme,
     pub language: Language,
     pub memory_enabled: bool,
@@ -619,12 +635,27 @@ pub struct UserPrefs {
     pub sidebar: SidebarPrefs,
     pub code_permission: CodePermissionPrefs,
     pub mode_defaults: ModeDefaultPrefs,
+    /// Global Alt voice shortcut switch (native keyboard hook, currently
+    /// effective on Windows only; other platforms keep the in-window Alt
+    /// fallback path). Off by default; the user must opt in. The authoritative
+    /// persistence lives in settings.json (frontend localStorage is only a
+    /// mirror): `set_voice_shortcut_enabled` writes through a field-level
+    /// transaction, and at startup lib.rs setup replays it into the native
+    /// hook's AtomicBool — preventing the setting from being lost when WebView
+    /// storage is cleared, and races where a later multi-window mount invoke
+    /// overwrites an earlier one.
+    pub voice_shortcut_enabled: bool,
     pub advanced: AdvancedPrefs,
 }
 
 struct ParsedSettings {
     prefs: UserPrefs,
     allow_normalization_persist: bool,
+    /// Set when `color_scheme` was just derived from `theme` because the old
+    /// settings lacked the key (see the parse comment). Counted into the
+    /// normalization persist gate so the derived value lands on disk at the
+    /// first load and the file becomes self-describing.
+    color_scheme_derived: bool,
 }
 
 fn should_persist_normalization(allow_persist: bool, requested: bool, changed: bool) -> bool {
@@ -650,6 +681,7 @@ impl UserPrefs {
             return ParsedSettings {
                 prefs: Self::defaults_for_system_locale(system_locale),
                 allow_normalization_persist: false,
+                color_scheme_derived: false,
             };
         };
         let value: serde_json::Value = match serde_json::from_str(raw) {
@@ -661,12 +693,23 @@ impl UserPrefs {
                 return ParsedSettings {
                     prefs: Self::defaults_for_system_locale(system_locale),
                     allow_normalization_persist: false,
+                    color_scheme_derived: false,
                 };
             }
         };
         let has_language = value
             .as_object()
             .is_some_and(|settings| settings.contains_key("language"));
+        // `color_scheme` is the color-scheme preference (system = follow the
+        // OS). The field was introduced later than `theme`: when old settings
+        // lack the key we cannot tell "the user explicitly picked theme" from
+        // "never touched (default genesis, dark)", so derive from the legacy
+        // effective appearance to keep the upgrade invisible; only a true
+        // fresh install (no settings.json, handled by the default branch
+        // above) stays on System and follows the OS.
+        let has_color_scheme = value
+            .as_object()
+            .is_some_and(|settings| settings.contains_key("color_scheme"));
         let mut prefs: Self = match serde_json::from_value(value) {
             Ok(prefs) => prefs,
             Err(error) => {
@@ -676,15 +719,25 @@ impl UserPrefs {
                 return ParsedSettings {
                     prefs: Self::defaults_for_system_locale(system_locale),
                     allow_normalization_persist: false,
+                    color_scheme_derived: false,
                 };
             }
         };
         if !has_language {
             prefs.language = Language::from_system_locale(system_locale);
         }
+        let mut color_scheme_derived = false;
+        if !has_color_scheme {
+            prefs.color_scheme = match prefs.theme {
+                Theme::LiquidLight => ColorScheme::Light,
+                Theme::Genesis | Theme::LiquidDark => ColorScheme::Dark,
+            };
+            color_scheme_derived = true;
+        }
         ParsedSettings {
             prefs,
             allow_normalization_persist: true,
+            color_scheme_derived,
         }
     }
 
@@ -699,6 +752,7 @@ impl UserPrefs {
         let system_locale = crate::platform::os::current_system_locale();
         let mut parsed = Self::parse_settings_with_state(raw.as_deref(), system_locale.as_deref());
         let allow_normalization_persist = parsed.allow_normalization_persist;
+        let color_scheme_derived = parsed.color_scheme_derived;
         let prefs = &mut parsed.prefs;
         // 必须在 migrate_models/normalize 改写前记录；否则只能修正本次运行的内存值，
         // save gate 看不到变化，旧域名会永久留在 settings.json 中、每次启动重复迁移。
@@ -729,7 +783,8 @@ impl UserPrefs {
             || model_selection_migration_changed
             || local_model_alias_changed
             || migration.settings_sanitized
-            || memory_policy_changed;
+            || memory_policy_changed
+            || color_scheme_derived;
         if should_persist_normalization(
             allow_normalization_persist,
             persist_normalized,
@@ -1540,6 +1595,21 @@ mod tests {
     }
 
     #[test]
+    fn voice_shortcut_enabled_defaults_off_and_round_trips() {
+        // Older settings.json lacks the field: the serde container-level
+        // default falls back to false (off by default).
+        let legacy = UserPrefs::parse_settings(Some(r#"{"theme":"genesis"}"#), Some("zh-CN"));
+        assert!(!legacy.voice_shortcut_enabled);
+        let enabled = UserPrefs::parse_settings(
+            Some(r#"{"theme":"genesis","voice_shortcut_enabled":true}"#),
+            Some("zh-CN"),
+        );
+        assert!(enabled.voice_shortcut_enabled);
+        let serialized = serde_json::to_string(&enabled).expect("UserPrefs serialize");
+        assert!(serialized.contains("\"voice_shortcut_enabled\":true"));
+    }
+
+    #[test]
     fn migrate_creates_default_model_for_fresh_prefs() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
@@ -2121,6 +2191,7 @@ mod tests {
             sidebar: SidebarPrefs::default(),
             code_permission: CodePermissionPrefs::default(),
             mode_defaults: ModeDefaultPrefs::default(),
+            voice_shortcut_enabled: false,
             advanced: AdvancedPrefs {
                 allow_shell: Some(false),
                 max_output_tokens: Some(8192),
@@ -2237,6 +2308,95 @@ mod tests {
         let prefs = UserPrefs::parse_settings(Some(r#"{"theme":"genesis"}"#), Some("ja-JP"));
         assert_eq!(prefs.theme, Theme::Genesis);
         assert_eq!(prefs.language, Language::Ja);
+    }
+
+    /// Old settings (no color_scheme key) derive the preference from the legacy
+    /// effective appearance in `theme`, keeping the upgrade invisible; only a
+    /// true fresh install (no settings.json → default branch) stays on System.
+    #[test]
+    fn legacy_settings_derive_color_scheme_from_theme() {
+        for (raw, expected) in [
+            (r#"{"theme":"genesis"}"#, ColorScheme::Dark),
+            (r#"{"theme":"liquid-dark"}"#, ColorScheme::Dark),
+            (r#"{"theme":"liquid-light"}"#, ColorScheme::Light),
+        ] {
+            let parsed = UserPrefs::parse_settings_with_state(Some(raw), Some("en-US"));
+            assert_eq!(parsed.prefs.color_scheme, expected, "raw: {raw}");
+            assert!(parsed.color_scheme_derived, "raw: {raw}");
+            assert!(parsed.allow_normalization_persist, "raw: {raw}");
+        }
+    }
+
+    /// An explicitly saved color_scheme (including system = follow the OS) is
+    /// never overwritten by the theme derivation.
+    #[test]
+    fn explicit_color_scheme_is_never_rederived() {
+        for (raw, expected) in [
+            (
+                r#"{"theme":"liquid-light","color_scheme":"system"}"#,
+                ColorScheme::System,
+            ),
+            (
+                r#"{"theme":"genesis","color_scheme":"light"}"#,
+                ColorScheme::Light,
+            ),
+            (
+                r#"{"theme":"genesis","color_scheme":"dark"}"#,
+                ColorScheme::Dark,
+            ),
+        ] {
+            let parsed = UserPrefs::parse_settings_with_state(Some(raw), Some("en-US"));
+            assert_eq!(parsed.prefs.color_scheme, expected, "raw: {raw}");
+            assert!(!parsed.color_scheme_derived, "raw: {raw}");
+        }
+    }
+
+    /// Fresh install (no settings.json): color_scheme stays System and no
+    /// normalization write-back fires.
+    #[test]
+    fn fresh_settings_keep_color_scheme_system() {
+        let parsed = UserPrefs::parse_settings_with_state(None, Some("en-US"));
+        assert_eq!(parsed.prefs.color_scheme, ColorScheme::System);
+        assert!(!parsed.color_scheme_derived);
+        assert!(!parsed.allow_normalization_persist);
+    }
+
+    /// load writes the derived value for old settings back exactly once so the
+    /// file becomes self-describing; settings with an explicit color_scheme
+    /// are never rewritten.
+    #[test]
+    fn load_persists_derived_color_scheme_once() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _home = TemporaryPrefsHome::new("pinvou3-prefs-color-scheme-derive");
+
+        let settings_path = super::super::paths::settings_path();
+        std::fs::write(&settings_path, r#"{"theme":"liquid-light"}"#).expect("write legacy prefs");
+
+        let loaded = UserPrefs::load();
+        assert_eq!(loaded.color_scheme, ColorScheme::Light);
+        let persisted = std::fs::read_to_string(&settings_path).expect("read normalized prefs");
+        assert!(
+            persisted.contains(r#""color_scheme": "light""#),
+            "persisted: {persisted}"
+        );
+
+        // An explicitly saved system value is not rewritten by load.
+        std::fs::write(
+            &settings_path,
+            r#"{"theme":"genesis","color_scheme":"system"}"#,
+        )
+        .expect("write explicit prefs");
+        let loaded = UserPrefs::load();
+        assert_eq!(loaded.color_scheme, ColorScheme::System);
+        let persisted = std::fs::read_to_string(&settings_path).expect("read explicit prefs");
+        let value: serde_json::Value = serde_json::from_str(&persisted).expect("parse persisted");
+        assert_eq!(
+            value.get("color_scheme").and_then(|v| v.as_str()),
+            Some("system"),
+            "persisted: {persisted}"
+        );
     }
 
     #[test]

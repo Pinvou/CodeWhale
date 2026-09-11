@@ -98,11 +98,20 @@
       }
     });
   }
+  function normalizeVoiceMode(mode) {
+    return mode === "task" ? "task" : mode === "edit" ? "edit" : "dictation";
+  }
   function webRequestId(prefix) {
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
       return prefix + "_" + window.crypto.randomUUID(); // safari14-ok: guarded above
     }
     return prefix + "_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2);
+  }
+  function webTurnTerminal() {
+    return window.PinvouWebTurnTerminal || {};
+  }
+  function bridgeMessages() {
+    return window.PinvouBridgeMessages || {};
   }
 
   // ── Markdown rendering (vendor scripts loaded in index.html) ─────
@@ -216,11 +225,11 @@
     pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
-    // 三个工作区 lane（work/design/code）的全局默认 mode（null=该 lane 未显式
-    // 选过；缺省 code→plan、work/design→yolo）。草稿态 chip 显示与切换的事实源，
-    // 启动时经 get_mode_defaults 拉取；草稿切换经 set_mode_default 写回。
-    modeDefaults: { work: null, design: null, code: null },
-    // 当前聊天页所处 lane（work/design；code 页车道有自己的草稿控件逻辑）。
+    // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
+    // lane 未显式选过；缺省 code→plan、work→yolo）。草稿态 chip 显示与切换的
+    // 事实源，启动时经 get_mode_defaults 拉取；草稿切换经 set_mode_default 写回。
+    modeDefaults: { work: null, code: null },
+    // 当前聊天页所处 lane（work；code 页车道有自己的草稿控件逻辑）。
     // lane 是纯前端概念，由 ChatView 随 pinvouMode 显式传入，bridge 不读
     // localStorage。
     modeLane: "work",
@@ -280,14 +289,6 @@
     depsChecking: false,
     depsInstalling: false,    // 一键安装进行中(pkexec apt)
     depsInstallError: null,   // 安装失败原因(apt stderr 透传/取消/pkexec 不可用)
-    // MegaCube(GB10) 本地大模型一键引导:首屏检测结果 + 引导执行态
-    vllmSetup: null,          // {eligible, may_offer_setup, has_packages, engine_state:ready|starting|stopped|failed, ...}
-    vllmBootstrapping: false, // 引导进行中(pkexec + 拉起 + 轮询就绪)
-    vllmSetupPhase: null,     // 阶段:'authorizing'|'waiting'|'ready'(后端 vllm-setup:phase 事件驱动步骤指示)
-    vllmSetupAttempt: 0,      // waiting 阶段第几次探测(后端报)
-    vllmBootstrapDone: null,  // 成功结果 {base_url, model}, 据此显示「立即重启」
-    vllmBootstrapError: null, // 失败原因(pkexec stderr / 超时透传)
-    vllmSetupDismissed: false,// 本次会话内点了「跳过」,不再弹(不写持久标记)
     voiceInput: {
       status: "idle",         // idle | requesting_permission | recording | transcribing | completed | cancelled | failed
       message: "",
@@ -434,6 +435,7 @@
       attachStillParsing: "⚠️ Attachment still parsing, try again shortly",
       imageUnsupported: "The current model does not support images. Switch to an image-capable model, or configure a vision model in model settings.",
       imageUnknown: "Image input capability of the current model is unknown. If it supports images, set image input to “Supports images” in model settings; you can also configure a vision model.",
+      sessionModelStale: id => `The model selected for this conversation is no longer available (missing saved model: ${id}). Please pick a model again in this conversation.`,
       attachStillUploading: "⚠️ Attachment still uploading, try again shortly",
       deviceUploadTooLarge: name => `⚠️ ${name} exceeds the 20 MB attachment limit`,
       archiveTooManyEntries: "the archive contains more than 50 entries and cannot be attached",
@@ -524,22 +526,30 @@
       depsNotInstallable: "The missing items cannot be installed automatically. Install the offline components per the dependency notes, then re-check.",
       voicePermissionDenied: "Microphone access was denied. Allow this app to use the microphone in system settings, then try again.",
       voiceNoDevice: "No available microphone detected. Check that the recording device is enabled and not in use.",
+      voiceDeviceTimeout: "Microphone detection timed out; no recording device found. Check the device connection and the system microphone settings, then try again.",
       voiceConstraintUnsupported: "Could not start recording: the current microphone or WebView does not support the required audio configuration. Try again; if it still fails, check microphone settings or update system components.",
       voiceEmptyResult: "No speech recognized. Move closer to the microphone and try again.",
       voiceContextMismatch: "Recognition finished, but the active session changed, so the result was not inserted.",
       voiceTimeout: "Voice input timed out. Please try again.",
       voiceRecognitionFailed: "Speech recognition failed. Please try again later.",
+      voiceRecordingTooLong: "Recording is too long. Please shorten it and try again.",
+      voiceAudioInvalid: "The recorded audio is invalid. Please record again.",
+      voiceMicUnavailable: "The microphone is in use by another app. Close it or pick another microphone, then try again.",
       voiceInputFailed: "Voice input failed. Check the microphone and try again.",
       voiceCancelled: "Voice input cancelled",
       voiceTranscribing: "Recognizing speech…",
       voiceTooShort: "Recording too short. Please try again.",
       voiceWritten: "Voice text inserted into the input box",
+      voiceTaskSent: "Voice task sent",
+      voiceEditNoChange: "Voice edit made no changes; original text kept",
+      voiceEditPostprocessFailed: "Voice edit processing failed; your input was not changed. Please try again.",
       voiceNeedDesktopAsr: "Install the speech recognition component on the desktop first, then use the microphone from the browser.",
       voiceRequestingPermission: "Requesting microphone permission…",
       voiceNoMicCapture: "This WebView does not support microphone capture.",
       voiceNoAudioRecording: "This WebView does not support audio recording.",
+      voiceNeedSession: "Select or start a session before using voice input.",
       voiceAudioStartBlocked: "The browser did not allow audio capture to start. Click the microphone again.",
-      voiceRecording: "Recording… click again to stop",
+      voiceRecording: "Recording… press again to stop",
     },
     ja: {
       newChatFailed: "⚠️ 新規チャットの作成に失敗: ", loadChatFailed: "⚠️ チャットの読み込みに失敗: ", deleteFailed: "⚠️ 削除に失敗: ",
@@ -556,6 +566,7 @@
       attachStillParsing: "⚠️ 添付ファイルを解析中です。少し待ってから送信してください",
       imageUnsupported: "現在のモデルは画像に対応していません。画像対応モデルに切り替えるか、モデル設定でビジョンモデルを構成してください。",
       imageUnknown: "現在のモデルの画像入力能力は不明です。画像に対応している場合は、モデル設定で画像入力能力を「画像対応」に設定してください。ビジョンモデルを構成することもできます。",
+      sessionModelStale: id => `この会話で選択したモデルの設定は無効になりました（見つからない設定: ${id}）。会話でモデルを選び直してください。`,
       attachStillUploading: "⚠️ 添付ファイルをアップロード中です。少し待ってから送信してください",
       deviceUploadTooLarge: name => `⚠️ ${name} は添付の上限 20 MB を超えています`,
       archiveTooManyEntries: "アーカイブに 50 個を超える項目が含まれているため添付できません",
@@ -646,22 +657,30 @@
       depsNotInstallable: "不足項目はワンクリックでインストールできません。依存関係の案内に従ってオフラインコンポーネントをインストールし、再検出してください。",
       voicePermissionDenied: "マイクへのアクセスが拒否されました。システム設定でこのアプリのマイク使用を許可してから再試行してください。",
       voiceNoDevice: "利用可能なマイクが検出されませんでした。録音デバイスが有効か、他で使用されていないか確認してください。",
+      voiceDeviceTimeout: "マイク検出がタイムアウトし、録音デバイスが見つかりませんでした。デバイスの接続とシステムのマイク設定を確認して再試行してください。",
       voiceConstraintUnsupported: "録音を開始できません：現在のマイクまたは WebView が必要な録音設定に対応していません。再試行し、それでも失敗する場合はマイク設定を確認するかシステムコンポーネントを更新してください。",
       voiceEmptyResult: "音声を認識できませんでした。マイクに近づいて再試行してください。",
       voiceContextMismatch: "認識は完了しましたが、セッションが切り替わったため結果は自動入力されませんでした。",
       voiceTimeout: "音声入力がタイムアウトしました。もう一度お試しください。",
       voiceRecognitionFailed: "音声認識に失敗しました。しばらくしてから再試行してください。",
+      voiceRecordingTooLong: "録音が長すぎます。短くして再試行してください。",
+      voiceAudioInvalid: "録音データが無効です。もう一度録音してください。",
+      voiceMicUnavailable: "マイクは他のアプリで使用中です。使用中のアプリを終了するか、別のマイクを選んでから再試行してください。",
       voiceInputFailed: "音声入力に失敗しました。マイクを確認して再試行してください。",
       voiceCancelled: "音声入力をキャンセルしました",
       voiceTranscribing: "音声を認識中…",
       voiceTooShort: "録音が短すぎます。もう一度お試しください。",
       voiceWritten: "音声を入力欄に書き込みました",
+      voiceTaskSent: "音声タスクを送信しました",
+      voiceEditNoChange: "音声編集による変更はありません。原文を保持しました",
+      voiceEditPostprocessFailed: "音声編集の処理に失敗しました。入力は変更されていません。再試行してください。",
       voiceNeedDesktopAsr: "先にデスクトップ側で音声認識コンポーネントをインストールしてから、ブラウザーでマイクを使用してください。",
       voiceRequestingPermission: "マイクの権限を要求中…",
       voiceNoMicCapture: "現在の WebView はマイク入力に対応していません。",
       voiceNoAudioRecording: "現在の WebView は音声録音に対応していません。",
+      voiceNeedSession: "音声入力を使う前に、セッションを選択または新規作成してください。",
       voiceAudioStartBlocked: "ブラウザーが音声キャプチャの開始を許可しませんでした。マイクをもう一度クリックしてください。",
-      voiceRecording: "録音中です。もう一度クリックすると終了します",
+      voiceRecording: "録音中です。もう一度押すと終了します",
     },
     zh: {
       newChatFailed: "⚠️ 新建对话失败: ", loadChatFailed: "⚠️ 加载对话失败: ", deleteFailed: "⚠️ 删除失败: ",
@@ -678,6 +697,7 @@
       attachStillParsing: "⚠️ 附件还在解析,请稍后再发",
       imageUnsupported: "当前模型不支持图片。请切换到支持图片的模型，或在模型设置中配置视觉模型。",
       imageUnknown: "当前模型的图片输入能力未知。如果它支持图片，请在模型设置中将图片输入能力设为“支持图片”后重试；也可以配置视觉模型。",
+      sessionModelStale: id => `当前会话选择的模型配置已失效（缺失配置：${id}），请在对话中重新选择模型。`,
       attachStillUploading: "⚠️ 附件还在上传,请稍后再发",
       deviceUploadTooLarge: name => `⚠️ ${name} 超过附件 20 MB 上限`,
       archiveTooManyEntries: "压缩包包含超过 50 个条目，无法添加",
@@ -768,22 +788,30 @@
       depsNotInstallable: "当前缺失项无法一键安装，请按依赖说明安装离线组件后重新检测。",
       voicePermissionDenied: "麦克风权限被拒绝，请在系统设置中允许本应用访问麦克风后重试。",
       voiceNoDevice: "未检测到可用麦克风，请检查录音设备是否启用或被占用。",
+      voiceDeviceTimeout: "麦克风检测超时，未发现可用录音设备。请检查设备连接和系统麦克风设置后重试。",
       voiceConstraintUnsupported: "无法启动录音：当前麦克风或 WebView 不支持所需的录音配置。请重试；若仍失败，请检查麦克风设置或更新系统组件。",
       voiceEmptyResult: "未识别到语音内容，请靠近麦克风后重试。",
       voiceContextMismatch: "识别已完成，但当前会话已切换，结果未自动写入。",
       voiceTimeout: "本次语音输入超时，请重试。",
       voiceRecognitionFailed: "语音识别失败，请稍后重试。",
+      voiceRecordingTooLong: "录音过长，请缩短后重试。",
+      voiceAudioInvalid: "录音数据无效，请重新录制。",
+      voiceMicUnavailable: "麦克风被其他应用占用，请关闭占用它的应用或更换麦克风后重试。",
       voiceInputFailed: "语音输入失败，请检查麦克风后重试。",
       voiceCancelled: "已取消语音输入",
       voiceTranscribing: "正在识别语音…",
       voiceTooShort: "录音时间过短，请重试。",
       voiceWritten: "语音已写入输入框",
+      voiceTaskSent: "语音任务已发送",
+      voiceEditNoChange: "语音编辑无变化，已保留原文",
+      voiceEditPostprocessFailed: "语音编辑整理失败，当前输入未修改，请重试。",
       voiceNeedDesktopAsr: "请先在桌面端安装语音识别组件，再从浏览器使用麦克风。",
       voiceRequestingPermission: "正在请求麦克风权限…",
       voiceNoMicCapture: "当前 WebView 不支持麦克风采集。",
       voiceNoAudioRecording: "当前 WebView 不支持音频录制。",
+      voiceNeedSession: "请先选择或新建一个会话，再使用语音输入。",
       voiceAudioStartBlocked: "浏览器未允许启动音频采集，请再次点击麦克风。",
-      voiceRecording: "正在录音，再点一次结束",
+      voiceRecording: "正在录音，再按一次结束",
     },
   };
   function bt(key) {
@@ -905,7 +933,7 @@
   var PINVOU_SCENE_EVENTS_STORAGE_PREFIX = "pinvou_scene_events_v1:";
   function normalizePinvouScene(scene) {
     scene = String(scene || "").trim();
-    return /^(work:document-writing|work:personal-workbench|design:poster|design:data-visualization)$/.test(scene) ? scene : "";
+    return /^(work:document-writing|work:personal-workbench|design:poster|design:data-visualization|design:ppt)$/.test(scene) ? scene : "";
   }
   function pinvouSceneStorageKey(sid) {
     return PINVOU_SCENE_EVENTS_STORAGE_PREFIX + String(sid || "").trim();
@@ -2812,8 +2840,14 @@
   async function createScheduledTask(input) {
     return runScheduledTaskAction("create", async function () {
       var templateId = input && typeof input.templateId === "string" ? input.templateId.trim() : "";
+      // kind is create-time task metadata (currently only "memory_organize"; the
+      // backend rejects anything else). It deliberately stays out of
+      // SCHEDULED_TASK_WRITABLE_FIELDS so edit flows can never resend it.
+      // Kept identical to the tauri bridge contract (audit alignment).
+      var kind = input && typeof input.kind === "string" ? input.kind.trim() : "";
       var selectAfterCreate = !input || input.selectAfterCreate !== false;
       var backendInput = scheduledTaskBackendInput(input);
+      if (kind) backendInput.kind = kind;
       var created = await invoke("create_scheduled_task", { input: backendInput });
       if (!created || !created.id) {
         throw new Error(bt("scheduledCreateNoId"));
@@ -3103,7 +3137,7 @@
     // 会背离(persona 气泡 / ensureSession 失败的 system 报错卡只进 chatItems),否则残留卡顶掉「你好」。
     if (!state.activeSessionId && state.messages.length === 0 && state.chatItems.length === 0) {
       state.composerDraft = "";
-      // 草稿 mode 显示 = 当前 lane 全局默认（三分 lane 语义）。
+      // 草稿 mode 显示 = 当前 lane 全局默认（两分 lane 语义，design 并入 work）。
       state.modeState = currentDraftModeState();
       notify();
       return;
@@ -3112,7 +3146,7 @@
     state.activeSessionId = null;
     loadWorkingSetFrom(freshBuffer());
     // freshBuffer 的 modeState 是通用缺省（yolo）；草稿显示须覆盖为本 lane
-    // 全局默认（work/design 各自的 last_mode）。
+    // 全局默认（work lane 的 last_mode）。
     state.modeState = currentDraftModeState();
     notify();
   }
@@ -3131,13 +3165,23 @@
   // 会话——in-flight 复用同一 promise；create_session await 期间用户切走会物化在错误
   // 会话（导航被劫持）——物化前校验 activeSessionId 仍为空，已切走则只登记后台 buffer。
   var ensureSessionInFlight = null;
-  async function ensureSession() {
+  var ensureSessionDraftOutcome = null;
+  async function ensureSession(draftOwner) {
     if (state.activeSessionId) return state.activeSessionId;
-    if (ensureSessionInFlight) return ensureSessionInFlight;
+    if (ensureSessionInFlight) {
+      var pendingOutcome = ensureSessionDraftOutcome;
+      var pendingResult = await ensureSessionInFlight;
+      if (draftOwner && pendingOutcome && draftOwner.draftEpoch === pendingOutcome.epoch) {
+        draftOwner.createdSessionId = pendingOutcome.createdSessionId;
+      }
+      return pendingResult;
+    }
     // 捕获导航 token：仅判 activeSessionId 覆盖不了「再进草稿」——enterDraft
     // 只推进 token 不改 activeSessionId（仍为 null），在途 create_session 返回
     // 后必须连同 token 一起校验，否则会劫持用户新进的草稿（三审 P1）。
     var navToken = sessionSwitchRequestToken;
+    var draftOutcome = { epoch: Number(state.draftEpoch || 0), createdSessionId: null };
+    ensureSessionDraftOutcome = draftOutcome;
     var p = (async function () {
       // 多 session 并发:不预热 engine。新建空 session 的 buffer 由 switchActiveTo({fresh}) 起。
       try {
@@ -3153,11 +3197,13 @@
           var bg = sessionStates[meta.id] = freshBuffer();
           bg.loadedFromDisk = true;
           bg.sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+          draftOutcome.createdSessionId = meta.id;
           return null;
         }
         var pendingModelRef = state.pendingDraftModelRef;
         state.pendingDraftModelRef = null;
         switchActiveTo(meta.id, { fresh: true });
+        draftOutcome.createdSessionId = meta.id;
         state.composerDraft = composerDraft;
         sessionStates[meta.id].composerDraft = composerDraft;
         getBuffer(meta.id).sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
@@ -3192,11 +3238,11 @@
         if (state.activeSessionId !== meta.id || navToken !== sessionSwitchRequestToken) return null;
         await refreshHistoryList();
         await syncModeState();
-        // 三分 lane 语义：后端 plain 缺省恒 Yolo、不区分 work/design 两个 lane；
+        // 两分 lane 语义：后端 plain 缺省恒 Yolo、lane 只有 work/code；
         // 新会话所在 lane 的全局默认为 plan 时，在物化此刻显式应用（写入即成为
         // 该会话自己的 per-session 记录，全局默认不受影响）。
         var laneDefault = state.modeDefaults
-          && state.modeDefaults[state.modeLane === "design" ? "design" : "work"];
+          && state.modeDefaults[state.modeLane === "code" ? "code" : "work"];
         // 用物化时捕获的 meta.id 而非 activeSessionId：上面的 await 期间用户
         // 可能已切走，对当前 active 会话执行 set_plan_mode_next 会改错对象。
         if (laneDefault === "plan") {
@@ -3230,7 +3276,11 @@
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; },
       function () { if (ensureSessionInFlight === p) ensureSessionInFlight = null; }
     );
-    return p;
+    var result = await p;
+    if (draftOwner && draftOwner.draftEpoch === draftOutcome.epoch) {
+      draftOwner.createdSessionId = draftOutcome.createdSessionId;
+    }
+    return result;
   }
 
   function reportSessionSwitchFailure(error, errorScope) {
@@ -4379,9 +4429,26 @@
   }
 
   const SHELL_TOOL_NAMES = ["exec_shell", "task_shell_start", "shell", "Bash"];
+  const SHELL_WAIT_TOOL_NAMES = ["exec_shell_wait", "exec_wait", "task_shell_wait"];
 
   function isShellExecutionTool(name) {
     return SHELL_TOOL_NAMES.indexOf(name) >= 0;
+  }
+
+  function latestShellToolIsWaitObserver() {
+    for (let i = state.chatItems.length - 1; i >= 0; i--) {
+      const item = state.chatItems[i];
+      if (item && item.type === "tool" &&
+          (isShellExecutionTool(item.name) || SHELL_WAIT_TOOL_NAMES.includes(item.name))) {
+        // Since engine v0.9.3 the wait observer is the canonical Bash tool
+        // with action="wait"; the exec_shell_wait/exec_wait names survive
+        // only in replayed legacy sessions. Cards carry the action both live
+        // (chat:tool_start) and after history replay.
+        return SHELL_WAIT_TOOL_NAMES.includes(item.name) ||
+          (item.name === "Bash" && item.args != null && item.args.action === "wait");
+      }
+    }
+    return false;
   }
 
   function mentionsShellTool(text) {
@@ -4477,6 +4544,19 @@
       runningCommandCounts[command] = (runningCommandCounts[command] || 0) + 1;
     });
     runSyncOnSession(sid, function () {
+      // A wait tool only observes existing work and cannot create a job, and
+      // the manager retains completed jobs across later waits, so an
+      // unmatched terminal snapshot beside a trailing wait card belongs to
+      // earlier work and must not be appended after newer results. Decide
+      // once per poll from the pre-poll timeline: the synthetic card of a
+      // running job from this same batch (the manager lists running jobs
+      // first) would otherwise disarm the guard for the jobs after it.
+      // Accepted limits until stable origin identity lands: a start tool can
+      // still race with a very short detached job whose first snapshot is
+      // terminal (the guard is off when the latest card is a start tool), and
+      // a brand-new subagent job started after the wait card is conservatively
+      // hidden like retained older work.
+      const suppressUnmatchedTerminal = latestShellToolIsWaitObserver();
       (jobs || []).forEach(function (job) {
         var status = String(job.status || "").toLowerCase();
         var running = status === "running";
@@ -4500,9 +4580,7 @@
           });
           if (item) item.shellHistoryReconciled = true;
         }
-        // A detached job may have been started by a subagent, so no matching
-        // top-level tool card exists. Completed jobs must also get a card: the
-        // first poll may happen after a short detached process already exited.
+        if (!item && !running && suppressUnmatchedTerminal) return;
         if (!item) {
           item = {
             type: "tool", toolId: "shell-task:" + job.id, name: "exec_shell",
@@ -4933,9 +5011,23 @@
   // 透传后端硬编码中文——英/日界面不该看到中文结论;文案与 ChatView 前置警告
   // (t.uiAttachments.*)同源语义。与 tauri bridge chat.js 同一口径。
   function displayTurnError(err) {
-    var text = String(err && err.toString ? err.toString() : err || "");
+    // Web RPC wraps rejections in Error; normalize before stable-code
+    // localization and the shared model-service redaction fallback.
+    var text = String(err && err.message ? err.message : err || "");
     if (text.indexOf("image_input_unsupported") === 0) {
       return text.indexOf("能力未知") >= 0 ? bt("imageUnknown") : bt("imageUnsupported");
+    }
+    if (text.indexOf("session_model_binding_stale:") === 0) {
+      return bt("sessionModelStale")(
+        text.slice("session_model_binding_stale:".length).trim(),
+      );
+    }
+    // Same policy as the tauri bridge: redact raw submit-failure bodies
+    // before display (classification may miss, credentials must not). Pass
+    // state so the placeholder matches the UI language. If the helper is
+    // missing, return raw and keep the previous behavior.
+    if (window.PinvouBridgeMessages && typeof window.PinvouBridgeMessages.redactRawError === "function") {
+      return window.PinvouBridgeMessages.redactRawError(text, state);
     }
     return text;
   }
@@ -5029,26 +5121,11 @@
           });
           trackSceneSubmitted(sid, meta.pinvouScene);
         }
-        if (meta && meta.voiceOperationId) {
-          invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", {
-            request: {
-              eventName: "voice_message_submitted",
-              operationId: meta.voiceOperationId,
-              sessionId: sid,
-            },
-          }).catch(function () {});
-          if (state.voiceInput && state.voiceInput.operationId === meta.voiceOperationId) {
-            state.voiceInput = Object.assign({}, state.voiceInput, {
-              status: "idle",
-              operationId: null,
-              telemetryTerminal: true,
-            });
-            notify();
-          }
-        }
+        if (meta && meta.voiceOperationId) completeVoiceSubmission(meta.voiceOperationId, sid, true);
         return true;
       })
       .catch(function (err) {
+        if (meta && meta.voiceOperationId) completeVoiceSubmission(meta.voiceOperationId, sid, false);
         var errorText = String(err && err.message ? err.message : err || "");
         var concurrentTurn = errorText.indexOf("session_turn_in_progress") >= 0;
         recordAuthoritySyncDiagnostic("local_turn_admission_failed", Object.assign({
@@ -5312,6 +5389,7 @@
   async function runFirstTurnSubmission(submission) {
     if (!submission || submission.inFlight) return;
     submission.inFlight = true;
+    if (submission.voiceOperationId) beginVoiceSubmission(submission.voiceOperationId);
     var item = findFirstTurnItem(submission.clientMessageId);
     if (item) {
       item.deliveryState = "sending";
@@ -5327,20 +5405,7 @@
       // 首轮提交成功 = 新一轮已受理：未提交的「打开」转正锁死（同 doSendFor）。
       try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
       if (submission.voiceOperationId && metadata && metadata.id) {
-        invoke("web_access_track_behavior_event", {
-          request: {
-            eventName: "voice_message_submitted",
-            operationId: submission.voiceOperationId,
-            sessionId: metadata.id,
-          },
-        }).catch(function () {});
-        if (state.voiceInput && state.voiceInput.operationId === submission.voiceOperationId) {
-          state.voiceInput = Object.assign({}, state.voiceInput, {
-            status: "idle",
-            operationId: null,
-            telemetryTerminal: true,
-          });
-        }
+        completeVoiceSubmission(submission.voiceOperationId, metadata.id, true);
       }
       if (submission.pinvouScene && metadata && metadata.id) {
         trackSceneSubmitted(metadata.id, submission.pinvouScene);
@@ -5350,6 +5415,9 @@
       submission.inFlight = false;
       submission.lastErrorCode = String(error && error.code || "rpc_failed");
       submission.lastError = String(error && error.message ? error.message : error || "");
+      if (submission.voiceOperationId && submission.lastErrorCode !== "outcome_unknown") {
+        completeVoiceSubmission(submission.voiceOperationId, null, false);
+      }
       if (!firstTurnStillVisible(submission)) return;
       var failedItem = findFirstTurnItem(submission.clientMessageId);
       if (failedItem) {
@@ -5423,7 +5491,13 @@
   // - false        nothing dispatched and the text was NOT restored
   //                (notice-only early returns / admission rejected) — the
   //                caller owns putting the draft back.
-  async function sendMessage(text, meta) {
+  async function sendMessage(text, meta, voiceOwner) {
+    if (voiceOwner && ((state.activeSessionId || null) !== voiceOwner.sessionId
+      || (!voiceOwner.sessionId && Number(state.draftEpoch || 0) !== voiceOwner.draftEpoch))) return false;
+    if (!meta || !meta.voiceOperationId) {
+      var voiceOperationId = getVoiceOperationId && getVoiceOperationId(state.activeSessionId, "chat");
+      if (voiceOperationId) meta = Object.assign({}, meta || {}, { voiceOperationId: voiceOperationId });
+    }
     text = (text || "").trim();
     var readyAttachments = state.attachments.filter(function (a) { return a.status === "ready" && a.result; });
     if (!text && readyAttachments.length === 0) return false;
@@ -5439,9 +5513,6 @@
 
     var displayText = formatAttachmentDisplayText(text, readyAttachments);
     var attachmentsPayload = readyAttachments.map(function (a) { return a.result; });
-    if (state.voiceInput && state.voiceInput.status === "completed" && state.voiceInput.operationId) {
-      meta = Object.assign({}, meta || {}, { voiceOperationId: state.voiceInput.operationId });
-    }
 
     if (!state.activeSessionId && IS_WEB && canInvoke("web_access_create_session_and_chat")) {
       var existingFirstTurn = state.chatItems.some(function (item) {
@@ -5457,23 +5528,22 @@
       // 必须用返回值判空：切走场景 ensureSession 返回 null 但 activeSessionId
       // 非空（用户已切到别的会话），按 activeSessionId 继续会把本条消息发进
       // 错误会话（审计 #257）。
-      var materialized = await ensureSession();
-      // 物化中止（await 期间切走）→ 把输入放回输入框，不静默丢字
+      var draftOwner = { sessionId: null, draftEpoch: Number(state.draftEpoch || 0),
+        operationId: meta && meta.voiceOperationId, restored: false };
+      var materialized = await ensureSession(draftOwner);
+      // 物化中止（await 期间切走）→ 按原始归属恢复，不写入当前其它会话。
       // （与 tauri 版对齐，二审 F3；错误提示由 ensureSession 内如实给出）。
       // append=true: failure-recovery semantics — the user may have started
       // the next message during the await.
-      if (!materialized) {
-        prefillComposer(text, true);
-        // The prefill IS the restore; "restored" stops the caller from doing
-        // it a second time (the prefill lands asynchronously and would then
-        // append a duplicate).
+      if (!materialized || state.activeSessionId !== materialized) {
+        if (materialized) draftOwner.createdSessionId = materialized;
+        restoreTaskDraft(text, draftOwner);
+        // Scoped recovery owns the restore; the caller must not append again
+        // even when the text is retained in a background buffer or draft epoch.
         return "restored";
       }
     }
     var sid = state.activeSessionId;
-    if (state.voiceInput && state.voiceInput.status === "completed" && state.voiceInput.operationId) {
-      meta = Object.assign({}, meta || {}, { voiceOperationId: state.voiceInput.operationId });
-    }
     var activeTurnBuffer = getBuffer(sid);
     function consumeUiTurnState() {
       var consumed = {
@@ -5585,7 +5655,15 @@
     notify();
     return false;
   }
+  var pendingTaskDraftRecovery = null;
   function getComposerDraft() {
+    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
+      pendingTaskDraftRecovery = null;
+    }
+    if (pendingTaskDraftRecovery && !state.activeSessionId) {
+      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
+      pendingTaskDraftRecovery = null;
+    }
     return String(state.composerDraft || "");
   }
   function setComposerDraft(value) {
@@ -5606,6 +5684,25 @@
     };
     notify();
   }
+  function restoreTaskDraft(text, owner) {
+    if (!owner || owner.restored) return false;
+    const sid = owner.sessionId || owner.createdSessionId || voiceOperationSessionId(owner.operationId);
+    if (sid) {
+      if (owner.operationId) completeVoiceSubmission(owner.operationId, sid, false);
+      restoreComposerText(sid, text);
+    } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      prefillComposer(text, true);
+    } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
+        ? pendingTaskDraftRecovery.text : "";
+      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
+    } else {
+      return false;
+    }
+    owner.restored = true;
+    return true;
+  }
+
   // Session-scoped composer text restore for sends abandoned by a session
   // switch mid-send (issue #406; mirrors the tauri bridge's restoreSteerText).
   // A bare setComposerDraft is invisible (the composer is React-local state
@@ -5640,6 +5737,10 @@
       removed = q;
       return false;
     });
+    if (removed && removed.meta && removed.meta.voiceOperationId) {
+      abandonVoiceResult(removed.meta.voiceOperationId);
+      completeVoiceSubmission(removed.meta.voiceOperationId, state.activeSessionId, false);
+    }
     if (removed && Array.isArray(removed.attachments)) {
       removed.attachments.forEach(releaseAttachmentOnDesktop);
     }
@@ -6481,29 +6582,59 @@
     runSyncOnSession(sid, function () {
       if (isScheduledRunSession(sid)) markScheduledInitialTurnTerminal(sid);
       var error = e.payload && e.payload.error;
-      window.PinvouWebTurnTerminal.recordCompleted(
-        state,
-        latestOpenTimelineStart(),
-        e.payload || {}
-      );
+      var terminal = webTurnTerminal();
+      var terminalRecord = null;
+      if (typeof terminal.recordCompleted === "function") {
+        terminalRecord = terminal.recordCompleted(
+          state,
+          latestOpenTimelineStart(),
+          e.payload || {}
+        );
+      }
       // 401/鉴权失败:刷新 effectiveModelConfig → 前端拦截遮罩自动弹出引导配置。
       // \b401\b 词边界锚定,避免误匹配 "port 4014"/"row 401" 等含 401 子串的无关报错。
       if (error && /\b401\b|unauthorized|authentication/i.test(String(error))) loadEffectiveModelConfig();
       if (error) {
-        var finalNotice = "⚠️ " + error;
-        var finalNoticeItem = state.chatItems.find(function (item) {
-          return item && item.turnErrorNotice && item.text === finalNotice;
-        });
-        if (finalNoticeItem) {
-          finalNoticeItem.legacyConversationOnly = true;
-        } else {
-          addSystemItem(finalNotice, {
-            turnErrorNotice: true,
-            legacyConversationOnly: true,
+        var messages = bridgeMessages();
+        if (!(typeof messages.addModelServiceErrorNotice === "function" && messages.addModelServiceErrorNotice(e.payload || {}, state, addSystemItem, true, terminalRecord))) {
+          // Same premise as addModelServiceErrorNotice: the bubble is only
+          // hidden when the timeline terminal record actually carries an
+          // error (the timeline takes over with the raw error in small
+          // text); otherwise it stays visible.
+          var timelineTakesOver = !!(terminalRecord && terminalRecord.error);
+          // The fallback bubble must share the transient fallback's
+          // redacted text, or the find-based dedup misses over wording
+          // differences and produces a double bubble.
+          var displayError = typeof messages.redactRawError === "function"
+            ? messages.redactRawError(error, state)
+            : error;
+          var finalNotice = "⚠️ " + displayError;
+          var finalNoticeItem = state.chatItems.find(function (item) {
+            return item && item.turnErrorNotice && item.text === finalNotice;
           });
+          if (finalNoticeItem) {
+            if (timelineTakesOver) finalNoticeItem.legacyConversationOnly = true;
+          } else {
+            addSystemItem(finalNotice, {
+              turnErrorNotice: true,
+              legacyConversationOnly: timelineTakesOver,
+            });
+          }
+        }
+      } else {
+        // Successful (error-free) terminal: the turn has recovered, so the
+        // transient bubbles' "will keep retrying" claim is stale and they
+        // are hidden uniformly (sending already cleared the previous
+        // turn's items).
+        var messages = bridgeMessages();
+        if (typeof messages.settleModelServiceErrorNotices === "function") {
+          messages.settleModelServiceErrorNotices(state);
         }
       }
-      window.PinvouBridgeMessages.showShellCleanupFailure(e.payload, state, addSystemItem);
+      var shellMessages = bridgeMessages();
+      if (typeof shellMessages.showShellCleanupFailure === "function") {
+        shellMessages.showShellCleanupFailure(e.payload, state, addSystemItem);
+      }
       var terminalStatus = String(e.payload && e.payload.status || "").toLowerCase();
       var interrupted = terminalStatus === "interrupted" ||
         terminalStatus === "cancelled" || terminalStatus === "canceled";
@@ -6673,11 +6804,17 @@
     if (e.payload && e.payload.session_id) turnUsageDirty[e.payload.session_id] = true; // 重试轮 usage 含重发请求
     var error = e.payload && e.payload.error;
     if (error) {
-      var notice = "⚠️ " + error;
-      var duplicate = state.chatItems.some(function (item) {
-        return item && item.turnErrorNotice && item.text === notice;
-      });
-      if (!duplicate) addSystemItem(notice, { turnErrorNotice: true });
+      var messages = bridgeMessages();
+      if (!(typeof messages.addModelServiceErrorNotice === "function" && messages.addModelServiceErrorNotice(e.payload || {}, state, addSystemItem, false))) {
+        var displayError = typeof messages.redactRawError === "function"
+          ? messages.redactRawError(error, state)
+          : error;
+        var notice = "⚠️ " + displayError;
+        var duplicate = state.chatItems.some(function (item) {
+          return item && item.turnErrorNotice && item.text === notice;
+        });
+        if (!duplicate) addSystemItem(notice, { turnErrorNotice: true });
+      }
     }
     // 401/鉴权失败:刷新 effectiveModelConfig → 前端拦截遮罩自动弹出引导配置。
     // 兜底启动检测被绕过/中途删 key 的场景。
@@ -6707,15 +6844,6 @@
     var p = e && e.payload;
     if (!p) return;
     state.voiceAsrSetup = Object.assign({}, state.voiceAsrSetup, { progress: p });
-    notify();
-  });
-
-  // vllm-setup:phase —— MegaCube 本地大模型引导阶段(authorizing→waiting{attempt}→ready),驱动引导框步骤指示。
-  listen("vllm-setup:phase", function (e) {
-    var p = e.payload || {};
-    if (!p.phase) return;
-    state.vllmSetupPhase = p.phase;
-    if (typeof p.attempt === "number") state.vllmSetupAttempt = p.attempt;
     notify();
   });
 
@@ -7079,7 +7207,9 @@
     try {
       state.settings = await invoke("get_settings");
     } catch (e) {
-      state.settings = { theme: "genesis", language: "zh-Hans" };
+      // Backend unreachable = nothing to judge; fall back to following the
+      // system for the color scheme (color_scheme: system).
+      state.settings = { theme: "genesis", color_scheme: "system", language: "zh-Hans" };
     }
     notify();
   }
@@ -7197,77 +7327,6 @@
     return await invoke("discover_local_vllm", { request: request || null });
   }
 
-  // ── MegaCube(GB10) 本地大模型一键引导 ────────────────────────────
-  var vllmSetupPollTimer = null;
-  var vllmSetupPollStartedAt = 0;
-  var VLLM_SETUP_POLL_INTERVAL_MS = 3000;
-  var VLLM_SETUP_POLL_TIMEOUT_MS = 12 * 60 * 1000;
-  // 首屏检测「预装但未启用」状态;eligible 时前端弹引导框。
-  // 开机加载中不弹框，每 3 秒静默复查；12 分钟后仍 starting 则恢复可重试入口。
-  // autoPoll 只供内部定时器续接；用户手动检测会重置本轮截止时间。
-  async function detectLocalVllmSetup(options) {
-    var autoPoll = !!(options && options.autoPoll);
-    if (vllmSetupPollTimer) {
-      clearTimeout(vllmSetupPollTimer);
-      vllmSetupPollTimer = null;
-    }
-    if (!autoPoll) vllmSetupPollStartedAt = Date.now();
-    try {
-      state.vllmSetup = await invoke("detect_local_vllm_setup");
-    } catch (e) {
-      state.vllmSetup = null; // 检测失败静默,不打扰(等同不弹)
-      vllmSetupPollStartedAt = 0;
-    }
-    if (state.vllmSetup && state.vllmSetup.engine_state === 'starting' && state.vllmSetup.may_offer_setup !== false) {
-      var elapsed = Date.now() - vllmSetupPollStartedAt;
-      if (vllmSetupPollStartedAt > 0 && elapsed >= VLLM_SETUP_POLL_TIMEOUT_MS) {
-        state.vllmSetup = Object.assign({}, state.vllmSetup, {
-          engine_state: 'failed',
-          eligible: !!state.vllmSetup.may_offer_setup,
-          detection_timed_out: true,
-        });
-        vllmSetupPollStartedAt = 0;
-      } else {
-        vllmSetupPollTimer = setTimeout(function () {
-          vllmSetupPollTimer = null;
-          detectLocalVllmSetup({ autoPoll: true });
-        }, VLLM_SETUP_POLL_INTERVAL_MS);
-      }
-    } else {
-      vllmSetupPollStartedAt = 0;
-    }
-    notify();
-    return state.vllmSetup; // 返回供设置页「检测本机 vLLM」判断 has_packages
-  }
-  // 用户点「启用」:后端一次 pkexec 拉起引擎+装 systemd 服务,轮询就绪后写模型配置。
-  // 引擎首次载模型可能几分钟,全程 vllmBootstrapping 显示 spinner。
-  async function bootstrapLocalVllm() {
-    if (state.vllmBootstrapping) return;
-    state.vllmBootstrapping = true;
-    state.vllmBootstrapError = null;
-    state.vllmBootstrapDone = null;
-    state.vllmSetupPhase = 'authorizing'; // 后端事件到达前先本地置首阶段(pkexec 阻塞期也有步骤显示)
-    state.vllmSetupAttempt = 0;
-    notify();
-    try {
-      state.vllmBootstrapDone = await invoke("bootstrap_local_vllm");
-    } catch (e) {
-      state.vllmBootstrapError = String(e && e.message ? e.message : e);
-    }
-    state.vllmBootstrapping = false;
-    notify();
-  }
-  // 点「跳过」:仅本次会话内不再弹(不写持久标记,下次启动若仍未配好会再次友好提示)。
-  function dismissVllmSetup() {
-    state.vllmSetupDismissed = true;
-    notify();
-  }
-  // 点「不再提醒 → 确认」:持久婉拒,开机引导框不再自动弹(仍可在设置→模型管理手动启用)。
-  async function declineVllmSetup() {
-    try { await invoke("decline_local_vllm_setup"); } catch (e) { /* 持久失败也先隐藏本会话,不阻断 */ }
-    state.vllmSetupDismissed = true;
-    notify();
-  }
   async function getEffectiveModelConfig(sessionId) {
     return await invoke("get_effective_model_config", {
       sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
@@ -7433,7 +7492,7 @@
   async function syncModeState() {
     var sid = state.activeSessionId;
     if (!sid) {
-      // 草稿态：显示当前 lane 的全局默认（三分 lane 语义），不再恒 yolo。
+      // 草稿态：显示当前 lane 的全局默认（两分 lane 语义，design 并入 work），不再恒 yolo。
       state.modeState = currentDraftModeState();
       return;
     }
@@ -7455,10 +7514,10 @@
     }
   }
 
-  // ── lane 全局默认（工作/设计/代码三分，与 tauri bridge 对齐）────────
+  // ── lane 全局默认（工作/代码两分，design 并入 work；与 tauri bridge 对齐）──
   // 草稿态（无 active 会话）的 modeState：取当前 lane 的全局默认，缺省 yolo。
   function currentDraftModeState() {
-    var lane = state.modeLane === "design" ? "design" : "work";
+    var lane = state.modeLane === "code" ? "code" : "work";
     var d = state.modeDefaults && state.modeDefaults[lane];
     return { mode: d || "yolo", multiAgent: false };
   }
@@ -7474,7 +7533,7 @@
   }
   // ChatView 随 pinvouMode 传入当前 lane；草稿态立即按新 lane 默认刷新显示。
   function setModeLane(lane) {
-    var next = lane === "design" ? "design" : "work";
+    var next = lane === "code" ? "code" : "work";
     if (state.modeLane === next) return;
     state.modeLane = next;
     if (!state.activeSessionId) {
@@ -7485,7 +7544,7 @@
   // 草稿态 chip 切换：写本 lane 全局默认（不物化会话——物化时由
   // ensureSession 把 lane 默认应用到新会话）。
   async function setDraftMode(target) {
-    var lane = state.modeLane === "design" ? "design" : "work";
+    var lane = state.modeLane === "code" ? "code" : "work";
     try {
       var defaults = await invoke("set_mode_default", { lane: lane, mode: target });
       if (defaults) state.modeDefaults = defaults;
@@ -7925,6 +7984,29 @@
       if (sid === state.activeSessionId) addSystemItem(bt("memoryNeverFailed") + e);
     }
   }
+  // AI organize memory ("AI 整理记忆"; same contract as tauri memory.js):
+  // operates on global memory data; the entry point still captures the session
+  // so success and failure are written back only to the originating session's
+  // panel. On success, reconcile runtime/warnings via applyMemoryWriteState and
+  // refetch the overview; the caller reads the report from the return value. On
+  // failure, rethrow: memory.error is the dedicated load-failure channel (the
+  // settings banner renders it as the generic "加载失败" (load failed) copy),
+  // so the organize failure reason is surfaced by the caller's catch and must
+  // not pollute that channel.
+  async function organizeMemory() {
+    if (!invoke) return null;
+    var sid = state.activeSessionId; // same as saveMemoryProfilePatch: after switching away, never write to B's panel
+    var result = await invoke("organize_memory");
+    if (sid === state.activeSessionId && result) applyMemoryWriteState(result);
+    // Organizing can merge/delete entries: refetch the overview to refresh the
+    // panel; return the raw payload.
+    await loadMemoryOverview();
+    return result;
+  }
+  async function loadOrganizeHistory() {
+    if (!invoke) return [];
+    return invoke("get_memory_organize_history");
+  }
   // ── 思考指示器状态（每次阶段切换重置计时）──────────────────────
   function startThinking() { state.thinking = { active: true, phase: "thinking", toolName: "", startedAt: Date.now() }; }
   function thinkingTool(name) { state.thinking = { active: true, phase: "tool", toolName: name || "", startedAt: Date.now() }; }
@@ -8076,7 +8158,7 @@
   }
   async function exitPlanToYolo() {
     var sid = state.activeSessionId;
-    // 草稿态：不物化会话，改写本 lane 全局默认（三分 lane 语义）。
+    // 草稿态：不物化会话，改写本 lane 全局默认（两分 lane 语义）。
     if (!sid) { await setDraftMode("yolo"); return; }
     try {
       // invoke 形状保持 { sessionId: state.activeSessionId }（协议指纹按文本
@@ -8088,7 +8170,7 @@
   }
   // 灯泡 toggle：plan ↔ yolo
   async function setPlanModeNext() {
-    // 草稿态：不物化会话，改写本 lane 全局默认（三分 lane 语义；旧实现会先
+    // 草稿态：不物化会话，改写本 lane 全局默认（两分 lane 语义；旧实现会先
     // ensureSession 物化——草稿页点 Plan 凭空造出空会话）。
     var sid = state.activeSessionId;
     if (!sid) { await setDraftMode("plan"); return; }
@@ -9307,6 +9389,13 @@
     return Math.max(0, Math.min(86400000, Date.now() - Number(session && session.startedAt || Date.now())));
   }
 
+  function voiceFlowError(category, stage, message) {
+    var error = new Error(message);
+    error.category = category;
+    error.stage = stage;
+    return error;
+  }
+
   function voiceTelemetryErrorCategory(category) {
     if (category === "permission_denied") return "permission_denied";
     if (category === "timeout") return "timeout";
@@ -9317,23 +9406,104 @@
     return "internal_error";
   }
 
+  // Operation ownership outlives the recording/UI. Async writeback and chat admission
+  // share this record; dismissing a notice cannot revive or cancel a submitted operation.
+  var voiceOperations = new Map();
+
+  function rememberVoiceOperation(session) {
+    if (!session.sessionId && session.ownerKind === "chat") {
+      session.draftEpoch = Number(state.draftEpoch || 0);
+    }
+    for (var entry of voiceOperations) {
+      if (entry[1].telemetryTerminal) voiceOperations.delete(entry[0]);
+    }
+    voiceOperations.set(session.operationId, session);
+  }
+
+  function getVoiceOperationId(sessionId, ownerKind) {
+    var candidates = Array.from(voiceOperations.values()).reverse();
+    var operation = candidates.find(function (item) {
+      return !item.telemetryTerminal && !item.pendingSubmission && item.voiceResultReady
+        && (item.sessionId || null) === (sessionId || null)
+        && (item.sessionId || item.ownerKind !== "chat" || item.draftEpoch === Number(state.draftEpoch || 0))
+        && item.ownerKind === (ownerKind || "chat");
+    });
+    return operation ? operation.operationId : null;
+  }
+
+  function beginVoiceSubmission(operationId, sessionId) {
+    var operation = voiceOperations.get(operationId);
+    if (!operation || operation.telemetryTerminal) return;
+    operation.pendingSubmission = true;
+    if (sessionId && !operation.sessionId) {
+      operation.sessionId = sessionId;
+      operation.telemetrySessionId = sessionId;
+    }
+  }
+
+  function voiceOperationSessionId(operationId) {
+    return voiceOperations.get(operationId)?.sessionId || null;
+  }
+
+  function completeVoiceSubmission(operationId, sessionId, accepted) {
+    var operation = voiceOperations.get(operationId);
+    if (!operation || operation.telemetryTerminal) return;
+    operation.pendingSubmission = false;
+    if (sessionId && !operation.sessionId) {
+      operation.sessionId = sessionId;
+      operation.telemetrySessionId = sessionId;
+    }
+    if (accepted) {
+      operation.pendingTerminal = null;
+      operation.telemetryTerminal = true;
+      // ACP has no authoritative behavior task attempt: never invent its identity.
+      if (operation.ownerKind !== "acp") {
+        trackVoiceEvent("voice_message_submitted", operation, { sessionId: sessionId });
+      }
+      if (state.voiceInput && state.voiceInput.operationId === operationId) {
+        state.voiceInput = Object.assign({}, state.voiceInput, {
+          status: "idle", operationId: null, telemetryTerminal: true,
+        });
+        notify();
+      }
+    } else if (operation.pendingTerminal) {
+      var terminal = operation.pendingTerminal;
+      operation.pendingTerminal = null;
+      trackVoiceTerminal(terminal.eventName, operation, terminal.fields);
+    }
+  }
+
+  function dismissVoiceInput() {
+    // Applying an edit or dismissing a finished notice retains the draft's provenance.
+    // An in-flight recording is still an explicit cancellation.
+    if (activeVoiceInput && !activeVoiceInput.voiceResultReady) {
+      clearVoiceInput();
+      return;
+    }
+    setVoiceInputStatus("idle", { message: "", operationId: null });
+  }
+
   function trackVoiceTerminal(eventName, session, fields) {
     if (!session || session.telemetryTerminal) return;
+    if (session.pendingSubmission) {
+      session.pendingTerminal = { eventName: eventName, fields: fields };
+      return;
+    }
     session.telemetryTerminal = true;
     trackVoiceEvent(eventName, session, fields);
   }
 
   function abandonCompletedVoiceResult(stage) {
     var current = state.voiceInput || {};
-    if (current.status !== "completed" || !current.operationId || current.telemetryTerminal) return;
-    trackVoiceEvent("voice_cancelled", {
-      operationId: current.operationId,
-      telemetrySessionId: current.telemetrySessionId,
-    }, {
-      stage: stage || "recognition",
-      durationMs: Math.max(0, Date.now() - Number(current.startedAt || Date.now())),
+    var operation = voiceOperations.get(current.operationId);
+    if (!operation || operation.telemetryTerminal) return;
+    trackVoiceTerminal("voice_cancelled", operation, {
+      stage: stage || "recognition", durationMs: voiceDurationMs(operation),
     });
-    state.voiceInput = Object.assign({}, current, { telemetryTerminal: true, operationId: null });
+    state.voiceInput = Object.assign({}, current, {
+      telemetryTerminal: operation.telemetryTerminal,
+      operationId: operation.pendingSubmission ? operation.operationId : null,
+    });
   }
 
   function setVoiceInputStatus(status, patch) {
@@ -9359,17 +9529,53 @@
     fn.call(console, "[voice-input]", event);
   }
 
+  // Same as the tauri lane: stable error codes of the Rust remote-control voice commands →
+  // trilingual copy keys, codes take precedence over rawMessage (Chinese engineering prose
+  // goes to diagnostics only).
+  const VOICE_ERROR_CODE_KEYS = {
+    asr_timeout: "voiceTimeout",
+    asr_no_speech: "voiceEmptyResult",
+    asr_engine_missing: "voiceRecognitionFailed",
+    asr_engine_start_failed: "voiceRecognitionFailed",
+    asr_engine_error: "voiceRecognitionFailed",
+    asr_runtime_error: "voiceRecognitionFailed",
+    asr_cli_failed: "voiceRecognitionFailed",
+    asr_parse_failed: "voiceRecognitionFailed",
+    asr_join_failed: "voiceInputFailed",
+    recording_too_long: "voiceRecordingTooLong",
+    audio_invalid: "voiceAudioInvalid",
+    audio_empty: "voiceAudioInvalid",
+    temp_file_unavailable: "voiceInputFailed",
+    temp_file_write_failed: "voiceInputFailed",
+    session_mismatch: "voiceContextMismatch",
+    session_load_failed: "voiceContextMismatch",
+  };
+
   function normalizeVoiceError(err, fallbackStage) {
-    var name = String((err && err.name) || "");
-    var rawCategory = (err && err.category) || "";
-    var rawStage = (err && err.stage) || fallbackStage || "recording";
-    var rawMessage = String((err && (err.message || err.toString && err.toString())) || err || "");
-    var constraint = String((err && err.constraint) || "");
+    const name = String((err && err.name) || "");
+    const rawCategory = (err && err.category) || "";
+    const rawStage = (err && err.stage) || fallbackStage || "recording";
+    const rawMessage = String((err && (err.message || err.toString && err.toString())) || err || "");
+    const constraint = String((err && err.constraint) || "");
+    const emptyResultLike = /ASR empty result|empty result|backend returned no usable|no usable result|failed \(exit 6\)|exit 6/i.test(rawMessage);
+    const codeKey = (err && err.code && VOICE_ERROR_CODE_KEYS[err.code]) || "";
     if (name === "NotAllowedError" || name === "SecurityError" || rawCategory === "permission_denied") {
       return { category: "permission_denied", stage: "permission", message: bt("voicePermissionDenied") };
     }
-    if (name === "NotFoundError" || name === "DevicesNotFoundError" || rawCategory === "device_unavailable") {
+    if (rawCategory === "device_unavailable") {
+      // device_unavailable with a custom message (e.g. probe timeout) shows the original first, matching the tauri lane.
+      return { category: "device_unavailable", stage: "device", message: rawMessage || bt("voiceNoDevice") };
+    }
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      // Browser DOMException messages are always non-empty and unlocalized; same policy as
+      // the tauri lane: always use the trilingual guidance copy, not the browser text.
       return { category: "device_unavailable", stage: "device", message: bt("voiceNoDevice") };
+    }
+    // Chrome reports "microphone busy with another app" as NotReadableError / TrackStartError,
+    // distinct from "no device"; the browser message is English, so map it to dedicated
+    // trilingual copy.
+    if (name === "NotReadableError" || name === "TrackStartError") {
+      return { category: "device_unavailable", stage: "device", message: bt("voiceMicUnavailable") };
     }
     // WebKitGTK 可能把不支持的音频约束报为 OverconstrainedError / "Invalid constraint"。
     // 这和没有录音设备不同：设备可能存在，只是不支持 channelCount、降噪等配置。
@@ -9381,8 +9587,13 @@
         diagnostic: constraint ? "unsupported media constraint: " + constraint : "unsupported media constraint",
       };
     }
-    if (rawCategory === "empty_result") {
-      return { category: "empty_result", stage: rawStage, message: bt("voiceEmptyResult") };
+    if (rawCategory === "empty_result" || emptyResultLike) {
+      return {
+        category: "empty_result",
+        stage: rawStage,
+        message: bt("voiceEmptyResult"),
+        diagnostic: rawMessage || "",
+      };
     }
     if (rawCategory === "context_mismatch") {
       return { category: "context_mismatch", stage: "writeback", message: bt("voiceContextMismatch") };
@@ -9391,7 +9602,16 @@
       return { category: "timeout", stage: "recording", message: bt("voiceTimeout") };
     }
     if (rawCategory === "recognition_failed") {
-      return { category: "recognition_failed", stage: rawStage, message: rawMessage || bt("voiceRecognitionFailed") };
+      if (codeKey) {
+        return { category: rawCategory, stage: rawStage, message: bt(codeKey), diagnostic: rawMessage };
+      }
+      return { category: rawCategory, stage: rawStage, message: rawMessage || bt("voiceRecognitionFailed") };
+    }
+    // Remote-control RPC errors rebuilt by bootstrap carry code/category but may not match
+    // any category branch above; with a stable error code, map to trilingual copy by code and
+    // demote the Chinese original to diagnostics (same policy as the tauri lane's tail branch).
+    if (codeKey) {
+      return { category: rawCategory || "recording_failed", stage: rawStage, message: bt(codeKey), diagnostic: rawMessage };
     }
     return {
       category: rawCategory || "recording_failed",
@@ -9408,6 +9628,13 @@
   function cleanupVoiceInputSession(session) {
     if (!session) return;
     if (session.timeoutId) clearTimeout(session.timeoutId);
+    if (session.permissionTimeoutId) clearTimeout(session.permissionTimeoutId);
+    session.permissionTimeoutId = null;
+    if (session.cancelPermissionRequest) {
+      const cancelPermissionRequest = session.cancelPermissionRequest;
+      session.cancelPermissionRequest = null;
+      try { cancelPermissionRequest(); } catch { /* permission request already settled */ }
+    }
     // 先摘掉音频回调：webkit2gtk 的 WebAudio 是 GStreamer 后端，ScriptProcessorNode 的
     // onaudioprocess 跑在音频线程，若在 disconnect/close 期间再触发一次、访问已释放的
     // 缓冲，会让 WebProcess 段错误（表现为「识别出文字后 app 崩溃」）。务必先置 null。
@@ -9427,6 +9654,43 @@
     if (ctx && ctx.state !== "closed") {
       setTimeout(function () { try { ctx.close().catch(function () {}); } catch (_) {} }, 0);
     }
+  }
+
+  // The remote-control lane has two 1MiB gates: first an envelope pre-check on serialized
+  // inputs in the RPC dispatch layer (manager/mod.rs MAX_RPC_REQUEST_BYTES), then the
+  // post-decode validation in remote_control.rs. After base64's 4/3 expansion, a 30s WAV
+  // (0.92MiB → ~1.22MiB as characters) is always rejected by the first gate
+  // (request_too_large); 20s ≈ 0.64MiB → ~0.85MiB of characters, leaving enough envelope
+  // headroom, so this lane caps at 20s (the desktop lane has no relay limit and keeps 60s).
+  const VOICE_RECORDING_MAX_DURATION_MS = 20000;
+  const VOICE_DEVICE_REQUEST_TIMEOUT_MS = 8000;
+
+  function requestVoiceMedia(session, constraints, timeoutMs) {
+    let abandoned = false;
+    const mediaPromise = navigator.mediaDevices.getUserMedia(constraints).then(function (stream) {
+      if (abandoned || activeVoiceInput !== session) {
+        stopMediaTracks(stream);
+        throw voiceFlowError("cancelled", "permission", bt("voiceCancelled"));
+      }
+      return stream;
+    });
+    const timeoutPromise = new Promise(function (_, reject) {
+      session.permissionTimeoutId = setTimeout(function () {
+        abandoned = true;
+        reject(voiceFlowError("device_unavailable", "device", bt("voiceDeviceTimeout")));
+      }, timeoutMs || VOICE_DEVICE_REQUEST_TIMEOUT_MS);
+    });
+    const cancelPromise = new Promise(function (_, reject) {
+      session.cancelPermissionRequest = function () {
+        abandoned = true;
+        reject(voiceFlowError("cancelled", "permission", bt("voiceCancelled")));
+      };
+    });
+    return Promise.race([mediaPromise, timeoutPromise, cancelPromise]).finally(function () {
+      if (session.permissionTimeoutId) clearTimeout(session.permissionTimeoutId);
+      session.permissionTimeoutId = null;
+      session.cancelPermissionRequest = null;
+    });
   }
 
   function mergeFloatChunks(chunks) {
@@ -9499,7 +9763,12 @@
       return;
     }
 
-    setVoiceInputStatus("transcribing", { message: bt("voiceTranscribing"), stage: "transcribing" });
+    let mode = normalizeVoiceMode(session.mode);
+    // Defense in depth: the mode was already downgraded at session creation (edit rewritten
+    // to dictation on the start side); keep this fallback so uncorrected raw ASR text cannot
+    // overwrite the draft through the replace preview.
+    if (mode === "edit") mode = "dictation";
+    setVoiceInputStatus("transcribing", { message: bt("voiceTranscribing"), stage: "transcribing", mode });
     cleanupVoiceInputSession(session);
 
     try {
@@ -9521,35 +9790,65 @@
           })
         : await invoke("transcribe_voice_audio", {
             request: {
-              audio_bytes: Array.from(wavBytes),
+              audio_base64: encodeBase64Bytes(wavBytes),
               session_id: session.sessionId,
             },
           });
       if (activeVoiceInput !== session) return;
       var text = String((res && res.text) || "").trim();
       if (!text) throw { category: "empty_result", stage: "transcribing", message: "未识别到语音内容" };
-      if (state.activeSessionId !== session.sessionId) {
+      if (session.ownerKind === "chat" && state.activeSessionId !== session.sessionId) {
         throw { category: "context_mismatch", stage: "writeback", message: "voice result discarded because active session changed" };
-      }
-      if (typeof session.writeback === "function") {
-        session.writeback(text, session.draftBeforeStart);
       }
       trackVoiceEvent("voice_recognition_completed", session, {
         durationMs: Math.max(0, Date.now() - Number(session.recognitionStartedAt || session.startedAt)),
         recognizerType: "local",
       });
+      session.voiceResultReady = true;
+      if (typeof session.writeback === "function") {
+        await session.writeback(text, session.draftBeforeStart, {
+          mode,
+          operationId: session.operationId,
+          rawText: text,
+          diagnostic: {
+            mode,
+            normalize_strategy: "web_asr_only",
+            // Same as desktop: persist only metadata such as lengths in diagnostics, never the full transcript.
+            raw_text_length: text.length,
+            final_text_length: text.length,
+            // The web lane has no local high-risk term list or LLM post-processing
+            // (web_asr_only), so the desktop's task_send_blocked high-risk gate cannot be
+            // computed; hardcoding false here only keeps the diagnostic field shape aligned
+            // with desktop. Note: the current caller writeback chain only blocks multi-agent
+            // read-only and over-length truncation, with no high-risk term screening — a
+            // latent divergence from the desktop lane. Today no UI entry reaches web voice in
+            // task mode (the mic button is fixed to dictation and gesture auto-upgrade stops
+            // at edit), so the divergence is unreachable; if a web task entry is opened later,
+            // first copy the desktop's
+            // VOICE_SUSPICIOUS_ASR_TERMS/hasVoiceHighRiskResidual into this bridge (classic
+            // scripts cannot share modules) and compute task_send_blocked from their result.
+            task_send_blocked: false,
+          },
+        });
+        // Same policy as the desktop lane: the user may have cancelled during the writeback
+        // await window (cancel clears activeVoiceInput and sets cancelled); never overwrite
+        // that terminal cancelled state with completed.
+        if (activeVoiceInput !== session) return;
+      }
+      if (session.telemetryTerminal) return;
       setVoiceInputStatus("completed", {
-        message: bt("voiceWritten"),
+        message: mode === "task" ? (bt("voiceTaskSent") || bt("voiceWritten")) : bt("voiceWritten"),
+        mode,
         completedAt: Date.now(),
         operationId: session.operationId,
         telemetrySessionId: session.telemetrySessionId,
-        telemetryTerminal: false,
+        telemetryTerminal: session.telemetryTerminal,
         startedAt: session.startedAt,
       });
       emitVoiceDiagnostic("writeback", "info", "voice text written back", "语音已写入输入框", "");
     } catch (err) {
       var normalized = normalizeVoiceError(err, "transcribing");
-      trackVoiceTerminal("voice_recognition_failed", session, {
+      if (!session.voiceResultReady) trackVoiceTerminal("voice_recognition_failed", session, {
         durationMs: Math.max(0, Date.now() - Number(session.recognitionStartedAt || session.startedAt)),
         errorCategory: voiceTelemetryErrorCategory(normalized.category),
       });
@@ -9589,6 +9888,14 @@
     notify();
   }
 
+  // The web lane has no local ASR model download (startVoiceInput fails fast with
+  // dependency_unavailable when missing), so there is no interruptible install process;
+  // keep a same-named cancel entry as desktop that just collapses the install dialog and
+  // resolves, avoiding a TypeError when ChatView calls it on web.
+  async function cancelVoiceAsrSetup() {
+    closeVoiceAsrSetup();
+  }
+
   // 知识库 embedding 模型按需下载（下载 → 校验 → 解压部署 → 热加载），进度走
   // kb_model:progress 事件。resolve 时模型已就绪，调用方据 status.installed 收起 gate。
   async function downloadKbModel(repair) {
@@ -9624,7 +9931,25 @@
     invoke("kb_model_cancel").catch(function () {});
   }
 
-  async function startVoiceInput(draftText, writeback) {
+  // Same as desktop: invoke the beforePermission callback before requesting the microphone
+  // (shortcut-intro first-use gate). Returns true to continue recording; false means the
+  // gate refused (session cleaned up and reset to idle) or the session was already cancelled.
+  async function passVoiceBeforePermissionGate(session, options) {
+    if (!options || typeof options.beforePermission !== "function") return true;
+    const shouldContinue = await options.beforePermission({
+      mode: session.mode,
+      sessionId: session.sessionId,
+      draftBeforeStart: session.draftBeforeStart,
+    });
+    if (activeVoiceInput !== session) return false;
+    if (shouldContinue !== false) return true;
+    cleanupVoiceInputSession(session);
+    activeVoiceInput = null;
+    setVoiceInputStatus("idle", { message: "", stage: null, sessionId: null });
+    return false;
+  }
+
+  async function startVoiceInput(draftText, writeback, options) {
     if (activeVoiceInput && state.voiceInput.status === "recording") {
       finishVoiceInput(false, false);
       return;
@@ -9633,13 +9958,20 @@
       finishVoiceInput(true, false);
       return;
     }
-
+    // Official supports ASR before the first session is materialized.
+    var previousOperationId = getVoiceOperationId(
+      options && Object.prototype.hasOwnProperty.call(options, "sessionId") ? options.sessionId : state.activeSessionId,
+      options && options.ownerKind || "chat"
+    );
+    if (previousOperationId) abandonVoiceResult(previousOperationId);
     abandonCompletedVoiceResult("recognition");
     var pendingVoiceSession = {
       id: voiceToken("voice_"),
       operationId: voiceToken("voiceop_"),
-      sessionId: state.activeSessionId || null,
-      telemetrySessionId: state.activeSessionId || voiceToken("draftsession_"),
+      sessionId: options && Object.prototype.hasOwnProperty.call(options, "sessionId") ? options.sessionId : state.activeSessionId || null,
+      ownerKind: options && options.ownerKind || "chat",
+      modelId: options && options.modelId || null,
+      telemetrySessionId: (options && Object.prototype.hasOwnProperty.call(options, "sessionId") ? options.sessionId : state.activeSessionId) || voiceToken("draftsession_"),
       draftBeforeStart: String(draftText || ""),
       writeback: writeback,
       chunks: [],
@@ -9648,6 +9980,8 @@
       telemetryTerminal: false,
       permissionRecorded: false,
     };
+    rememberVoiceOperation(pendingVoiceSession);
+    state.voiceInput = Object.assign({}, state.voiceInput, { operationId: pendingVoiceSession.operationId });
     trackVoiceEvent("voice_entry_clicked", pendingVoiceSession, { entryPoint: "composer" });
     activeVoiceInput = pendingVoiceSession;
     setVoiceInputStatus("requesting_permission", {
@@ -9707,12 +10041,15 @@
       // 检测失败（如 mock 环境/旧后端）不阻塞，继续走原录音路径（环境变量/兜底引擎）
     }
 
-    var session = Object.assign(pendingVoiceSession, { audioContext: primedAudioContext });
+    const sessionMode = normalizeVoiceMode(options && options.mode);
+    var session = Object.assign(pendingVoiceSession, { audioContext: primedAudioContext, mode: sessionMode === "edit" ? "dictation" : sessionMode });
+    if (!await passVoiceBeforePermissionGate(session, options)) return;
     setVoiceInputStatus("requesting_permission", {
       message: bt("voiceRequestingPermission"),
       sessionId: session.sessionId,
       startedAt: session.startedAt,
       stage: "permission",
+      mode: session.mode,
     });
     emitVoiceDiagnostic("permission", "info", "requesting microphone permission", "", "");
 
@@ -9723,7 +10060,7 @@
       if (!AudioCtor) {
         throw { category: "recording_failed", stage: "recording", message: bt("voiceNoAudioRecording") };
       }
-      session.stream = await navigator.mediaDevices.getUserMedia({
+      session.stream = await requestVoiceMedia(session, {
         audio: {
           channelCount: 1,
           echoCancellation: true,
@@ -9756,13 +10093,22 @@
       session.source.connect(session.processor);
       session.processor.connect(session.zeroGain);
       session.zeroGain.connect(session.audioContext.destination);
-      session.timeoutId = setTimeout(function () { finishVoiceInput(false, true); }, 10000);
+      session.timeoutId = setTimeout(function () { finishVoiceInput(false, true); }, VOICE_RECORDING_MAX_DURATION_MS);
+      // Unplugging / device disconnect ends the track (stop() does not fire onended, so no
+      // recursive teardown); same as the desktop lane: finish immediately with what was
+      // recorded instead of idling until the duration cap.
+      session.stream.getTracks().forEach(function (track) {
+        track.onended = function () {
+          if (activeVoiceInput === session) finishVoiceInput(false);
+        };
+      });
+      setVoiceInputStatus("recording", { message: bt("voiceRecording"), stage: "recording", mode: session.mode });
       session.recognitionStartedAt = Date.now();
-      setVoiceInputStatus("recording", { message: bt("voiceRecording"), stage: "recording" });
       trackVoiceEvent("voice_started", session);
       emitVoiceDiagnostic("recording", "info", "recording started", "", "");
     } catch (err) {
       cleanupVoiceInputSession(session);
+      if (activeVoiceInput !== session) return;
       if (activeVoiceInput === session) activeVoiceInput = null;
       var normalized = normalizeVoiceError(err, "recording");
       if (!session.permissionRecorded && normalized.category !== "cancelled") {
@@ -9812,8 +10158,12 @@
     });
   }
 
-  function abandonVoiceResult() {
-    abandonCompletedVoiceResult("recognition");
+  function abandonVoiceResult(operationId) {
+    var operation = voiceOperations.get(operationId || getVoiceOperationId(state.activeSessionId, "chat"));
+    if (operation) trackVoiceTerminal("voice_cancelled", operation, {
+      stage: "recognition", durationMs: voiceDurationMs(operation),
+    });
+    if (!operationId) abandonCompletedVoiceResult("recognition");
   }
 
   function appendVoiceText(base, text) {
@@ -9927,7 +10277,7 @@
       window.PinvouWebClient.markStateReady();
     }
     if (hasCapability("superPermission")) await refreshSuperPerm();
-    // lane 全局默认（work/design/code）是草稿态 mode chip 的事实源，启动即拉取。
+    // lane 全局默认（work/code）是草稿态 mode chip 的事实源，启动即拉取。
     refreshModeDefaults().catch(function () {});
     loadPersonas(); // 预载卡池(让聊天里草稿"已存入"判定能查到同名自制卡), fire-and-forget
     pollBackendStatus();
@@ -9971,17 +10321,23 @@
     setComposerDraft: setComposerDraft,
     retryFirstTurn: retryFirstTurn,
     prefillComposer: prefillComposer,
+    restoreTaskDraft: restoreTaskDraft,
     removeQueued: removeQueued,
     prioritizeQueued: prioritizeQueued,
     editQueued: editQueued,
     startVoiceInput: startVoiceInput,
     installVoiceAsr: installVoiceAsr,
+    cancelVoiceAsrSetup: cancelVoiceAsrSetup,
     closeVoiceAsrSetup: closeVoiceAsrSetup,
     downloadKbModel: downloadKbModel,
     cancelKbModel: cancelKbModel,
     cancelVoiceInput: cancelVoiceInput,
     clearVoiceInput: clearVoiceInput,
     abandonVoiceResult: abandonVoiceResult,
+    getVoiceOperationId: getVoiceOperationId,
+    beginVoiceSubmission: beginVoiceSubmission,
+    completeVoiceSubmission: completeVoiceSubmission,
+    dismissVoiceInput: dismissVoiceInput,
     appendVoiceText: appendVoiceText,
     runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     loadScheduledTasks: loadScheduledTasks,
@@ -10027,10 +10383,6 @@
     saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
     submitFeedback: submitFeedback,
     discoverLocalVllm: discoverLocalVllm,
-    detectLocalVllmSetup: detectLocalVllmSetup,
-    bootstrapLocalVllm: bootstrapLocalVllm,
-    dismissVllmSetup: dismissVllmSetup,
-    declineVllmSetup: declineVllmSetup,
     getEffectiveModelConfig: getEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,
@@ -10129,6 +10481,8 @@
     confirmMemoryCandidate: confirmMemoryCandidate,
     ignoreMemoryCandidate: ignoreMemoryCandidate,
     neverMemoryCandidate: neverMemoryCandidate,
+    organizeMemory: organizeMemory,
+    loadOrganizeHistory: loadOrganizeHistory,
     // AI 造卡开场引导卡:落一条展示气泡 + 记一条 persona 事件(随会话持久化)。
     // 走 personaEvents 时间线,冷重载时 rerenderFromMessages 按 pos 还原 → 切会话/重启不丢。
     postCardCreatorIntro: postCardCreatorIntro,

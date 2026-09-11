@@ -155,7 +155,6 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | MODEL-05 | 模型增删改与连通性测试 | 条件可用 | 保存显示名、模型名、Base URL 和凭据，测试连接后启用 |
 | MODEL-06 | 环境变量锁定 | 可用 | 被环境变量覆盖的模型字段在设置页标记为不可由普通设置覆盖 |
 | MODEL-07 | 本地 vLLM 自动发现 | 条件可用 | 探测本机服务、模型名和上下文长度 |
-| MODEL-08 | 本地 vLLM 引导安装 | 条件可用 | 支持检测、启动安装、跳过和不再提醒；依赖兼容硬件和本地环境 |
 | MODEL-09 | 会话模型记忆 | 可用 | 各会话保存所用模型，切换会话时恢复 |
 | MODEL-10 | 部署级上下文配置 | 基础能力 | 后端按模型配置、实时探测和路由上限计算上下文与输出预算；当前设置页不展示高级参数输入框 |
 
@@ -561,7 +560,7 @@ npm run build:ui
 - 内置模型账号暂时失败保留缓存、明确不存在时清理。
 - `exec_shell`、`exec_shell_wait` 结束前的实时输出，以及 UTF-8、CRLF 和 ANSI 跨分片拼接。
 - 后台 Shell 跨 `chat:done` 保持、折叠进度、输出尾部补齐、按任务 ID 取消和独立终态。
-- 工具产物归属、记忆候选卡、品悟检阅、Plan/YOLO、vLLM 引导。
+- 工具产物归属、记忆候选卡、品悟检阅、Plan/YOLO。
 - 知识库页面、知识集、文件列表和添加来源。
 - 输入框统一工具菜单，工具市场安装、卸载、OAuth 编排、智慧芽远程 MCP 及凭据不透传到前端安装参数。
 - Markdown 制品直接编辑、保存、选区 AI 编辑和浏览器异常检查。
@@ -650,7 +649,7 @@ npm run build:nsis
 | Shell 实时输出与取消 | `tauri-bridge.js`、`features/chat/ChatView.jsx` | `engine.rs`、`commands.rs` | `DeepSeek-TUI/crates/tui/src/tools/shell.rs`、`tools/shell/tests.rs`、`core/engine/tests.rs` |
 | 附件与文件解析 | `tauri-bridge.js` | `file_ingest.rs`、`os/windows/windows_path.rs`、`windows_system.rs` | `file_ingest.rs` 内单元测试 |
 | 制品预览和编辑 | `features/artifacts/` | `commands.rs` | `tests/markdown_artifact_edit_smoke.js`、`tests/render_markdown_smoke.js` |
-| 模型与内置账号 | `features/settings/SettingsView.jsx`、`tauri-bridge.js` | `llmapi_hub/`、`local_vllm_setup.rs`、`commands.rs` | `tests/ui_smoke.js`、对应 Rust 模块测试 |
+| 模型与内置账号 | `features/settings/SettingsView.jsx`、`platform/tauri/bridge/settings.js` | `llmapi_hub/`、`app/commands/monitor.rs`、`app/commands/settings.rs` | `tests/settings_ui_smoke.js`、对应 Rust 模块测试 |
 | 本地知识库 | `features/knowledge/KnowledgeView.jsx` | `knowledge/`、`file_ingest.rs` | `tests/kb_smoke.js`、`knowledge/` 内单元测试 |
 | 记忆和角色卡 | `SettingsView.jsx`、`features/personas/` | `commands.rs`、`memory.rs`、`personas.rs` | `tests/ui_smoke.js`、对应 Rust 模块测试 |
 | 工作流和技能 | `features/workflow/WorkflowView.jsx`、`tauri-bridge.js` | `commands.rs`、`harness.rs`、`workflow_registry.rs`、`workflow_runs.rs` | `tests/ui_smoke.js`、工作流 Rust 测试 |

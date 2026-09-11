@@ -644,16 +644,6 @@ try {
     path.join(root, 'src', 'features', 'codex', 'runtimeNoticeState.js'),
     'utf8',
   );
-  assert.ok(codexView.includes('copy.permissionRequest(agentName)')
-    && codexView.includes('tool.title || copy.protectedOperation')
-    && codexView.includes('label={copy.command}')
-    && codexView.includes('copy.operationArguments')
-    && codexView.includes('copy.allowOnce')
-    && codexView.includes('copy.allowSession')
-    && codexView.includes('copy.reject')
-    && codexView.includes('copy.handled')
-    && codexView.includes('copy.expired'),
-  'the legacy ACP permission card must use the shared zh/en/ja conversation copy');
   const codexWorkspace = readFileSync(path.join(root, 'src', 'features', 'codex', 'CodexWorkspacePanel.jsx'), 'utf8');
   const runtimeStatus = readFileSync(path.join(root, 'src', 'features', 'codex', 'runtimeStatus.js'), 'utf8');
   const resizableSidePanel = readFileSync(path.join(root, 'src', 'components', 'layout', 'ResizableSidePanel.jsx'), 'utf8');
@@ -665,9 +655,17 @@ try {
   const conversationView = readFileSync(path.join(root, 'src', 'features', 'conversation', 'ConversationTimeline.jsx'), 'utf8');
   const baseStyles = readFileSync(path.join(root, 'src', 'styles', 'base.css'), 'utf8');
   const boundedPermissionOptionClass = 'max-w-full min-w-0 whitespace-normal break-all';
-  assert.ok(codexView.includes(boundedPermissionOptionClass)
-    && conversationView.includes(boundedPermissionOptionClass),
-  'long ACP permission option labels must wrap inside both unified and legacy permission cards');
+  // The permission-card option wrapping contract is now carried solely by the shared timeline implementation.
+  assert.ok(conversationView.includes(boundedPermissionOptionClass),
+  'long ACP permission option labels must wrap inside the shared permission card');
+
+  // The permission card's only implementation is ConversationTimeline (the legacy codex
+  // PermissionCard was removed along with the old timeline); the i18n copy contract is pinned to the shared implementation.
+  assert.ok(conversationView.includes('c.permissionRequest(')
+    && conversationView.includes('c.protectedOperation')
+    && conversationView.includes('c.allowOnce')
+    && conversationView.includes('c.handled'),
+  'the shared ACP permission card must use the zh/en/ja conversation copy');
   assert.ok(conversationView.includes('function runningToolLabel(item, copy)')
     && conversationView.includes("return copy.shellCommand;")
     && !conversationView.includes('runningItem.tool.name || runningItem.tool.title')
@@ -675,11 +673,10 @@ try {
     && conversationView.includes('min-w-0 flex-1 truncate'),
   'running tool groups must use bounded semantic labels instead of rendering raw command titles');
   const boundedLongTextClass = 'whitespace-pre-wrap break-words [overflow-wrap:anywhere]';
-  assert.ok(codexView.includes(boundedLongTextClass)
-    && conversationView.includes(boundedLongTextClass)
-    && codexView.includes('max-h-80 max-w-full overflow-auto whitespace-pre')
+  // The long-text bounding contract is now carried solely by the shared timeline implementation (the legacy codex transcript component was removed).
+  assert.ok(conversationView.includes(boundedLongTextClass)
     && conversationView.includes('max-h-80 max-w-full overflow-auto whitespace-pre'),
-  'reasoning, plan, permission, and terminal content must stay within both timeline implementations');
+  'reasoning, plan, permission, and terminal content must stay within the shared timeline');
   assert.ok(codexView.includes("open_codex_workspace_resource")
     && conversationView.includes('onOpenResource={onOpenResource}')
     && codexWorkspace.includes("const loadedDirectories = ['', ...expanded]")
@@ -776,9 +773,12 @@ try {
   assert.ok(homeModeSwitcher.includes("labelKey: 'work'") && homeModeSwitcher.includes("labelKey: 'code'")
     && homeModeSwitcher.includes("selectedAgentId || 'codex'"),
   'the home composer must expose Work/Code modes and the current Codex code agent');
-  assert.ok(homeModeSwitcher.includes("key: 'design'")
-    && homeModeSwitcher.includes('HOME_DESIGN_MODE_ENABLED = true'),
-  'Design must share the real home mode entry with Work and Code');
+  assert.ok(homeModeSwitcher.includes("key: 'work'") && homeModeSwitcher.includes("key: 'code'")
+    && homeModeSwitcher.includes("testId: 'home-mode-work'")
+    && homeModeSwitcher.includes("testId: 'home-mode-code'")
+    && !homeModeSwitcher.includes("key: 'design'")
+    && !homeModeSwitcher.includes('HOME_DESIGN_MODE_ENABLED'),
+  'the home mode entry must keep only Work/Code segments after the design lane merged into work');
   assert.ok(homeModeSwitcher.includes('function normalizeCodeAgents(codeAgents, selectedAgentId)')
     && homeModeSwitcher.includes("agent?.agent_id || agent?.id")
     && homeModeSwitcher.includes("agent?.agent_name || agent?.display_name || agent?.name")
@@ -797,18 +797,20 @@ try {
     && main.includes("setCurrentView('codex')"),
   'selecting Codex must continue to enter the existing Codex draft page');
   const acpAgentLogo = readFileSync(path.join(root, 'src', 'features', 'codex', 'AcpAgentLogo.jsx'), 'utf8');
-  // 契约（2026-08-12 更新）：Design 入口必须回到 ChatView design 模式；从 code
-  // 页切回时保留原工作会话（不强制 createNewSession，否则新建 plain 会话把
-  // 用户切过的 Plan 顶成 Yolo），仅草稿态才新建会话。
+  // Contract (updated after the design lane merged into work): the Work
+  // entry returns to ChatView work mode; switching back from the code page
+  // keeps the original work session (no forced createNewSession — that
+  // would create a new plain session and clobber the user's chosen Plan
+  // with Yolo); a new session is created only in the draft state.
   assert.match(main,
-    /else if \(mode === 'design'\) \{[\s\S]*?savePinvouModeState\(\{ mode: 'design' \}[^;]*;[\s\S]*?createNewSession\(\);[\s\S]*?setCurrentView\('chat'\)/,
-    'selecting Design from the shared mode entry must return to ChatView design mode');
+    /else if \(mode === 'work'\) \{[\s\S]*?savePinvouModeState\(\{ mode: 'work' \}[^;]*;[\s\S]*?createNewSession\(\);[\s\S]*?setCurrentView\('chat'\)/,
+    'selecting Work from the shared mode entry must return to ChatView work mode');
   assert.ok(
     main.includes("if (bridge.available && !bridge.activeSessionId) bridge.sessions.createNewSession();"),
-    '从 code 页切回 design 时保留原工作会话，仅草稿态新建');
+    'switching back from code to work keeps the original work session; only the draft state creates a new one');
   assert.ok(
     main.includes("createPinvouModeScopeKey(bridge.activeSessionId)"),
-    '切回 design 时 pinvou 模式按会话 scope 保存，ChatView 挂载才能读回');
+    'the pinvou mode is saved under the session scope when switching back to work so ChatView can read it after mounting');
   assert.ok(codexLogo.includes("brand-icons/openai.svg")
     && acpAgentLogo.includes('<CodexLogo')
     && acpAgentLogo.includes("brand-icons/claude.png")
@@ -823,8 +825,13 @@ try {
     && chatView.includes('<PinvouLogo className="h-5 w-5" title={chatViewCopy.agentName}')
     && codexView.includes('<AcpAgentLogo agentId={activeAgentId} className="h-5 w-5"'),
   'assistant avatars must use the Pinvou and selected ACP Agent identity marks');
-  assert.ok(conversationView.includes('思考中'), 'running reasoning must expose a timer label');
-  assert.ok(conversationView.includes('执行步骤'), 'tool items must use a compact presentation group');
+  // Copy fallback has been consolidated into dict.zh.uiConversation (ConversationTimeline references
+  // it via copy keys); assert that the key is consumed in the timeline and the zh entry exists.
+  const conversationZhDict = readFileSync(path.join(root, 'src', 'shared', 'i18n', 'zh.js'), 'utf8');
+  assert.ok(conversationView.includes('c.thinking') && conversationZhDict.includes("thinking:'思考中'"),
+    'running reasoning must expose a timer label');
+  assert.ok(conversationView.includes('c.executionSteps') && conversationZhDict.includes("executionSteps:'执行步骤'"),
+    'tool items must use a compact presentation group');
   assert.ok(!codexView.includes("useState(state === 'failed')"),
     'failed operation details must stay collapsed until the user opens them');
   assert.ok(!codexView.includes('useState(running || failed)'),
@@ -934,8 +941,8 @@ try {
   'Codex must show the shared composer timer only while the active turn is running');
   assert.ok(codexView.includes('data-testid="acp-session-loading"')
     && codexView.includes('const [sessionLoading, setSessionLoading] = useState(false)')
-    && codexView.includes('disabled={!sessionReady')
-    && codexView.includes('if (activeId && !sessionReady) return;')
+    && codexView.includes('disabled={!!nativeVoice.editPreview || !sessionReady')
+    && codexView.includes('if (activeId && !sessionReady) return false;')
     && !codexView.includes('setError(codexCopy.sessionSyncing)')
     && !codexView.includes('throw new Error(codexCopy.sessionSyncing)'),
   'ACP session restoration must show a loading state and suppress sending without reporting a red error');
@@ -970,8 +977,9 @@ try {
     && codexView.includes('triggerTestId="native-tools"')
     && codexView.includes('scope="code"')
     && codexView.includes('mountedId={nativeMountedId}')
-    && codexView.includes('data-testid="codex-voice-input"'),
-  'the native lane must mount the shared composer controls (work/design style) plus the voice input button behind the native-agent gate');
+    && codexView.includes('<VoiceComposerButton')
+    && codexView.includes('testId="codex-voice-input"'),
+  'the native lane must mount the shared composer controls (work lane style) plus the voice input button behind the native-agent gate');
   assert.ok(codexView.includes('renderToolItem={isNativeAgent')
     && !codexView.includes('renderToolItem={isNativeAgent && nativeMultiAgentEnabled')
     && codexView.includes('{subagentPanel && activeSession && isNativeAgent && (')
@@ -993,14 +1001,25 @@ try {
   // 已卸载组件（草稿态 null→null 时守卫放行并显示「已完成」但文本丢失）。
   assert.ok(codexView.includes('nativeVoiceInputRef = useRef(nativeVoiceInput)')
     && codexView.includes('bridge.voice.cancelVoiceInput()')
-    && codexView.includes("voice.status === 'requesting_permission'"),
+    && codexView.includes('isVoiceActive(voice)'),
   'the code page must cancel an in-flight voice input before unmount so results cannot be written back to a detached composer');
   // 语音失败提示条须带 ChatView 同款「去依赖体检」入口（recognition_failed + 本地
   // ASR 可安装 + onGotoSettings 时渲染 voiceGotoDeps 按钮）。
+  const voiceNoticeSource = readFileSync(path.join(root, 'src', 'features', 'voice-composer', 'VoiceNoticeBar.jsx'), 'utf8');
   assert.ok(codexView.includes("can('localModelSetup') && can('dependencyInstall')")
-    && codexView.includes('nativeVoiceInput.category === \'recognition_failed\'')
-    && codexView.includes('t.voiceGotoDeps'),
+    && codexView.includes('<VoiceComposerStatus')
+    && codexView.includes('canInstallLocalAsr={nativeVoiceCanInstallAsr}')
+    && voiceNoticeSource.includes("voiceInput.category === 'recognition_failed'")
+    && voiceNoticeSource.includes('copy.voiceGotoDeps'),
   'the code page voice notice must offer the dependency-check shortcut on recognition failure like ChatView');
+  assert.ok(codexView.includes('useComposerVoiceInput({')
+    && codexView.includes('function canSendNativeVoiceTask(outgoing)')
+    && codexView.includes("if (!String(outgoing || '').trim()) return false;")
+    && codexView.includes('busy || working || activeRuntimeBusy || workspaceUnavailable || sessionSyncing')
+    && codexView.includes('if (!activeId && !draftWorkspacePath) return false;')
+    && codexView.includes("attachments.some(attachment => attachment.status === 'parsing')")
+    && codexView.includes('sendTask: async (outgoing, context) => send(outgoing, context)'),
+  'Codex voice task mode must go through the shared hook, code-lane risk gate, and real send result before reporting success');
   // plain（非 native）车道仍走自绘 CodexComposerConfigSelect 配置组，不随 native 车道
   // 迁移到共享组件；共享 config select 保留 ACP testid 契约。
   assert.ok(codexView.includes('data-testid="codex-composer-configs"')

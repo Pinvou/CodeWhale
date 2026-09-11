@@ -55,7 +55,6 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiHomeMode',
     'uiAttachments',
     'uiCodex',
-    'uiCodexView',
     'uiCodexWorkspace',
     'uiAcpProviders',
     'uiArtifacts',
@@ -109,9 +108,17 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(dict[language].uiChat.sceneModes.poster, `${language}.uiChat.sceneModes.poster must exist`);
   assert.ok(dict[language].uiChat.sceneModes.dataVisualization, `${language}.uiChat.sceneModes.dataVisualization must exist`);
   assert.ok(dict[language].uiChat.sceneModes.pptDesign, `${language}.uiChat.sceneModes.pptDesign must exist`);
-  assert.ok(dict[language].uiChat.sceneModes.pptUnavailable, `${language}.uiChat.sceneModes.pptUnavailable must exist`);
-  assert.ok(dict[language].uiChat.sceneModes.designGeneralPlaceholder, `${language}.uiChat.sceneModes.designGeneralPlaceholder must exist`);
+  // The sceneModes keys retired by the design-lane merge into work must
+  // stay deleted.
+  for (const deadKey of ['designGeneralPlaceholder']) {
+    assert.equal(dict[language].uiChat.sceneModes[deadKey], undefined, `${language}.uiChat.sceneModes.${deadKey} is retired and must stay deleted`);
+  }
+  assert.ok(dict[language].uiChatView.placeholderSceneAdjust, `${language}.uiChatView.placeholderSceneAdjust must exist`);
+  assert.ok(dict[language].uiChatView.placeholderSceneDataViz, `${language}.uiChatView.placeholderSceneDataViz must exist`);
+  assert.ok(dict[language].uiChatView.placeholderScenePoster, `${language}.uiChatView.placeholderScenePoster must exist`);
+  assert.ok(dict[language].uiChatView.placeholderScenePpt, `${language}.uiChatView.placeholderScenePpt must exist`);
   assert.ok(dict[language].uiChatView.placeholderPersonalWorkbench, `${language}.uiChatView.placeholderPersonalWorkbench must exist`);
+  assert.ok(dict[language].uiChatScenes.pptDesign, `${language}.uiChatScenes.pptDesign must exist`);
   assert.equal(
     typeof dict[language].uiChat.sceneModes.clear,
     'function',
@@ -223,17 +230,17 @@ assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|m
 assert.doesNotMatch(accountPlatformPopover, />可用余额</);
 assert.equal(dict.zh.uiAccountPlatform.balance, '可用余额');
 assert.equal(dict.zh.uiAccountPlatform.reservedCredits, '使用中');
-assert.match(main, /<SettingsErrorBoundary[^>]*t=\{t\}/);
+assert.match(main, /<ViewErrorBoundary[^>]*heading=\{t\.uiSettingsDetail\.settingsLoadFailed\}[^>]*detail=\{t\.uiSettingsDetail\.settingsLoadFailedDetail\}[^>]*t=\{t\}/);
 assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
 // The main window renders codex through the LazyCodexAcpView wrapper (which
 // internally consumes the same view-loaders chunk); its error fallback copy
 // still flows through i18n.
 assert.match(main, /<CodexAcpView[^>]*t=\{t\}/);
-const settingsErrorBoundary = source('features/settings/SettingsErrorBoundary.jsx');
-assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailed/);
-assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailedDetail/);
-assert.doesNotMatch(settingsErrorBoundary, /this\.state\.error\.message/);
-assert.doesNotMatch(settingsErrorBoundary, />设置页加载失败</);
+// The settings error boundary has been merged into the shared ViewErrorBoundary; its title flows through i18n via the heading prop, and the settings boundary keeps its friendly detail copy (never the raw error message).
+const viewErrorBoundary = source('shared/ViewErrorBoundary.jsx');
+assert.match(viewErrorBoundary, /this\.props\.heading \|\| copy\.viewLoadFailed/);
+assert.match(viewErrorBoundary, /this\.props\.detail \|\| message/);
+assert.doesNotMatch(viewErrorBoundary, />设置页加载失败</);
 assert.match(main, /t\.uiScheduled\.runStatus\[value\]/);
 assert.doesNotMatch(main, /queued:\s*'等待中'/);
 
@@ -294,7 +301,11 @@ assert.match(chat, /const chatCopy = t\.uiChat/);
 assert.match(chat, /chatCopy\.asrDownloadTitle/);
 assert.match(chat, /chatCopy\.memoryMeta/);
 assert.match(chat, /chatCopy\.sceneModes/);
-assert.match(chat, /sceneCopy\.designGeneralPlaceholder/);
+assert.match(chat, /chatViewCopy\.placeholderSceneAdjust/);
+assert.match(chat, /chatViewCopy\.placeholderSceneDataViz/);
+assert.match(chat, /chatViewCopy\.placeholderScenePoster/);
+assert.match(chat, /chatViewCopy\.placeholderScenePpt/);
+assert.doesNotMatch(chat, /designGeneralPlaceholder/);
 assert.match(chat, /outgoing \|\| t\.uiChatScenes\.attachmentPrompt/);
 assert.doesNotMatch(chat, /outgoing \|\| '请根据附件内容继续处理。'/);
 assert.doesNotMatch(chat, /label:\s*'个人工作台'/);

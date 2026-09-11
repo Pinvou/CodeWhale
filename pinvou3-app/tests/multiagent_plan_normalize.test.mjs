@@ -707,7 +707,9 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
     /const terminalWithoutTranscript =/,
     '子智能体在建 transcript 前失败时必须直接显示 ledger 错误，不能再发必败读取',
   );
-  assert.match(panelSource, /copy\.agentNoTranscript\(agent && agent\.error\)/);
+  // The fallback still shows the ledger error, redacted through the shared
+  // timelineDisplayError before display.
+  assert.match(panelSource, /copy\.agentNoTranscript\(\r?\n[\s\S]*?timelineDisplayError\(agent\.error, \{ language \}\)/);
   assert.match(panelSource, /const agentResolved = !!agent/);
   assert.match(panelSource, /const transcriptUnavailable = !!\(agent && agent\.has_transcript === false\)/);
   assert.match(
@@ -782,17 +784,32 @@ test('开关 UI 挂在模型列表下方，经 interaction 桥调后端', () => 
     '澄清卡在 Web 只读会话呈现为锁定说明，不留"能点但必败"的按钮（复核 P2）',
   );
   const sessionsBridgeSource2 = read('src', 'platform', 'tauri', 'bridge', 'sessions.js');
+  const rollbackStart = sessionsBridgeSource2.indexOf('catch (toggleError)');
+  const rollbackEnd = sessionsBridgeSource2.indexOf('await syncModeState();', rollbackStart);
+  assert.ok(rollbackStart >= 0 && rollbackEnd > rollbackStart, '定位多智能体开关失败的物化回滚分支');
+  const rollback = sessionsBridgeSource2.slice(rollbackStart, rollbackEnd);
+  const cleanup = rollback.indexOf('await invoke("delete_session", { id: meta.id })');
+  const navigationGuard = rollback.indexOf('if (navToken !== sessionSwitchRequestToken || state.activeSessionId !== meta.id) return null;');
+  const reenterDraft = rollback.indexOf('enterDraft();');
+  const preserveIntent = rollback.indexOf('state.pendingDraftMultiAgent = true;');
+  assert.ok(cleanup >= 0 && navigationGuard > cleanup && reenterDraft > navigationGuard && preserveIntent > reenterDraft,
+    '必须先清理物化会话、确认没有真实导航，再回到同一草稿并保留多智能体意图');
   assert.match(
-    sessionsBridgeSource2,
-    /delete_session[\s\S]{0,400}enterDraft\(\)[\s\S]{0,200}pendingDraftMultiAgent = true/,
+    rollback.slice(preserveIntent),
+    /return null;/,
     '草稿开关落盘失败必须中止物化并保留意图——首条消息不得静默退化成普通对话（复核 P1）',
   );
   const chatBridgeSource2 = read('src', 'platform', 'tauri', 'bridge', 'chat.js');
+  const materializationStart = chatBridgeSource2.indexOf('var materialized = await ensureSession(draftOwner);');
+  const materializationEnd = chatBridgeSource2.indexOf('var sid = state.activeSessionId;', materializationStart);
+  assert.ok(materializationStart >= 0 && materializationEnd > materializationStart, '定位首条消息的物化及恢复分支');
+  const materialization = chatBridgeSource2.slice(materializationStart, materializationEnd);
   assert.match(
-    chatBridgeSource2,
-    /prefillComposer\(text,\s*true\);\s*(?:\/\/[^\n]*\n\s*)*return "restored";/,
-    '物化中止时输入必须回填输入框，不得静默丢字（复核 P1；恢复类 prefill 带 append=true，返回 "restored" 阻止调用方二次恢复造成重复——issue #406）',
+    materialization,
+    /restoreTaskDraft\(text, draftOwner\);[\s\S]*return "restored";/,
+    '物化中止必须按原草稿或已创建会话恢复，返回 restored 阻止调用方二次恢复（issue #406）',
   );
+  assert.doesNotMatch(materialization, /prefillComposer\(/, '物化中止不得绕过归属校验直接向当前输入框追加');
   assert.match(
     toolRenderersSource,
     /subagentRoleOrdinals\(list\)/,
@@ -1266,6 +1283,74 @@ test('transcript 适配：内部运行时信封不得渲染为任务指令气泡
   assert.ok(!JSON.stringify(turns[0]).includes('shell_completion'), '仅-provenance 形态同样不上屏');
 });
 
+// Same model-service classifier as main chat: load the classic script
+// so the projection's globalThis probe finds it.
+vm.runInThisContext(
+  read('src', 'shared', 'model-service-errors.js'),
+  { filename: 'model-service-errors.js' },
+);
+
+test('transcript adaptation: model-service failure rebuilds the friendly card and redacts the raw body', () => {
+  const { turns } = projectSubagentTranscript({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: '调研任务' }] },
+      { role: 'assistant', content: [{ type: 'text', text: '我来查一下。' }] },
+    ],
+    agent: {
+      agentId: 'agent_1a2b3c4d',
+      role: 'scout',
+      done: true,
+      failed: true,
+      error: 'SSE stream request failed: HTTP 402 {"error":{"message":"Insufficient Balance","api_key":"sk-secret123"}}',
+    },
+    options: {
+      language: 'zh-Hans',
+      modelServiceState: {
+        currentSessionModelId: 'm1',
+        savedModels: [{ id: 'm1', provider: 'deepseek' }],
+      },
+    },
+  });
+  const turn = turns[0];
+  assert.equal(turn.status, 'Failed');
+  assert.ok(turn.userError, 'a gate-taken-over model service failure must rebuild the userError card');
+  assert.equal(turn.userError.kind, 'billing');
+  assert.doesNotMatch(turn.error, /sk-secret123/, 'the red-text fallback must be redacted before display');
+  assert.doesNotMatch(turn.userError.technicalDetail || '', /sk-secret123/);
+  assert.match(turn.userError.title, /DeepSeek/, 'the provider label must be derived from bridge state');
+});
+
+test('transcript adaptation: local tool errors get no friendly card, raw text redacted as fallback', () => {
+  const { turns } = projectSubagentTranscript({
+    messages: [{ role: 'user', content: [{ type: 'text', text: '跑本地脚本' }] }],
+    agent: {
+      agentId: 'agent_1a2b3c4d',
+      done: true,
+      failed: true,
+      error: 'permission denied while reading local file /etc/hosts',
+    },
+    options: { language: 'en' },
+  });
+  const turn = turns[0];
+  assert.equal(turn.userError, null, 'non-model-service errors must not be hijacked into a model service card');
+  assert.ok(turn.error && turn.error.includes('permission denied'), 'the raw text is kept as the red-text fallback');
+});
+
+test('transcript adaptation: friendly card copy follows the UI language', () => {
+  const { turns } = projectSubagentTranscript({
+    messages: [],
+    agent: {
+      agentId: 'agent_1a2b3c4d',
+      done: true,
+      failed: true,
+      error: 'SSE stream request failed: HTTP 429 rate limit exceeded',
+    },
+    options: { language: 'en' },
+  });
+  assert.equal(turns[0].userError.kind, 'rate_limit');
+  assert.doesNotMatch(turns[0].userError.title, /[\u4e00-\u9fff]/, 'the en interface must not leak a Chinese title');
+});
+
 test('transcript 适配：文件工具归 file_change，终态后不留转圈条目', () => {
   const { turns } = projectSubagentTranscript({
     messages: [
@@ -1509,8 +1594,9 @@ function loadInteractionRuntime() {
     pendingDraftMultiAgent: false,
     chatItems: [],
     messages: [],
-    // 三分 lane：草稿态 mode = 本 lane 全局默认。
-    modeDefaults: { work: null, design: null, code: null },
+    // Two lanes (design merged into work): the draft-state mode = this
+    // lane's global default.
+    modeDefaults: { work: null, code: null },
     modeLane: 'work',
   };
   const deferred = {};
@@ -1554,7 +1640,7 @@ function loadInteractionRuntime() {
     getBuffer() { return null; },
     // 与 bridge.js 同构的草稿态显示解析：当前 lane 全局默认，缺省 yolo。
     currentDraftModeState() {
-      const lane = state.modeLane === 'design' ? 'design' : 'work';
+      const lane = state.modeLane === 'code' ? 'code' : 'work';
       const d = state.modeDefaults && state.modeDefaults[lane];
       return { mode: d || 'yolo', multiAgent: false };
     },
@@ -1670,13 +1756,14 @@ test('setPlanModeNext 权威写回作废在途旧读取：chip 切 Plan 不被�
     'chip 切换的权威值不得被在途旧读取砸回 Yolo（P1 敞口）');
 });
 
-// ── 三分 lane 语义回归：草稿写全局默认、会话写自己、lane 各自独立 ─────
+// ── Two-lane semantics regression: draft switches write the global default,
+//    session switches write their own record, lanes stay independent ─────
 test('草稿态切 Plan：写本 lane 全局默认且不物化会话、不调 per-session 命令', async () => {
   const rt = loadInteractionRuntime();
   rt.state.activeSessionId = null; // 草稿态
   const set = rt.defer('set_mode_default');
   const p = rt.api.setPlanModeNext();
-  set.resolve({ work: 'plan', design: null, code: null });
+  set.resolve({ work: 'plan', code: null });
   await p;
   assert.ok(rt.calls.includes('set_mode_default'), '草稿切换必须写 lane 全局默认');
   assert.equal(rt.invokeArgs.set_mode_default.lane, 'work');
@@ -1687,23 +1774,30 @@ test('草稿态切 Plan：写本 lane 全局默认且不物化会话、不调 pe
   assert.equal(rt.state.modeState.mode, 'plan', '草稿显示跟随新默认');
 });
 
-test('lane 切换即刷新草稿显示；草稿切换写当前 lane（work/design 互不影响）', async () => {
+test('lane switch refreshes the draft display; a draft switch writes the current lane (work/code stay independent)', async () => {
   const rt = loadInteractionRuntime();
   rt.state.activeSessionId = null;
-  rt.state.modeDefaults = { work: 'plan', design: null, code: null };
-  // work → design：草稿显示从 work 默认 plan 变为 design 缺省 yolo。
-  rt.api.setModeLane('design');
+  rt.state.modeDefaults = { work: 'plan', code: null };
+  // work → code: the draft display changes from work's default plan to
+  // code's default yolo.
+  rt.api.setModeLane('code');
   assert.equal(rt.state.modeState.mode, 'yolo');
   rt.api.setModeLane('work');
   assert.equal(rt.state.modeState.mode, 'plan');
-  // design lane 下切 plan：写 design 默认，work 默认不动。
+  // The historical value 'design' folds into work; there is no separate
+  // design lane anymore.
   rt.api.setModeLane('design');
+  assert.equal(rt.state.modeLane, 'work');
+  assert.equal(rt.state.modeState.mode, 'plan');
+  // Switch plan under the code lane: writes code's default, work's default
+  // is untouched.
+  rt.api.setModeLane('code');
   const set = rt.defer('set_mode_default');
   const p = rt.api.setDraftMode('plan');
-  set.resolve({ work: 'plan', design: 'plan', code: null });
+  set.resolve({ work: 'plan', code: 'plan' });
   await p;
-  assert.equal(rt.invokeArgs.set_mode_default.lane, 'design');
-  assert.equal(rt.state.modeDefaults.design, 'plan');
+  assert.equal(rt.invokeArgs.set_mode_default.lane, 'code');
+  assert.equal(rt.state.modeDefaults.code, 'plan');
   assert.equal(rt.state.modeDefaults.work, 'plan');
   assert.equal(rt.state.modeState.mode, 'plan');
 });
@@ -1723,11 +1817,11 @@ test('已生成会话切 mode：只走 per-session 命令，不碰任何全局 l
 test('refreshModeDefaults：草稿态按当前 lane 默认刷新显示', async () => {
   const rt = loadInteractionRuntime();
   rt.state.activeSessionId = null;
-  rt.state.modeLane = 'design';
+  rt.state.modeLane = 'code';
   const get = rt.defer('get_mode_defaults');
   const p = rt.api.refreshModeDefaults();
-  get.resolve({ work: 'yolo', design: 'plan', code: 'plan' });
+  get.resolve({ work: 'yolo', code: 'plan' });
   await p;
-  assert.equal(rt.state.modeDefaults.design, 'plan');
-  assert.equal(rt.state.modeState.mode, 'plan', 'design lane 草稿显示自己的全局默认');
+  assert.equal(rt.state.modeDefaults.code, 'plan');
+  assert.equal(rt.state.modeState.mode, 'plan', 'the code lane draft shows its own global default');
 });

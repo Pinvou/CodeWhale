@@ -27,7 +27,16 @@ test('each configuration operation has one correlated terminal event', () => {
   assert.match(view, /configurationAttemptsRef\.current\.delete\(backendId\)/);
   assert.match(view, /trackToolBehavior\('tool_configuration_finished'[^]*?operationId: attempt\.operationId[^]*?success[^]*?durationMs/);
   assert.match(view, /Array\.from\(configurationAttemptsRef\.current\.keys\(\)\)[^]*?finishToolConfiguration\(backendId, false\)/);
-  for (const connector of ['feishu', 'wecom', 'dingtalk', 'eip', 'zhidao', 'tmeet', 'ima']) {
+  // The four CLI connectors (feishu/wecom/dingtalk/tmeet) share the createConnectorFlow factory, so their
+  // terminal events flow through the injected finishCfg keyed by cfg.key/toolId rather than literal call
+  // sites; the subscription call sites still bind each literal toolId to finishToolConfiguration.
+  for (const connector of ['feishu', 'wecom', 'dingtalk', 'tmeet']) {
+    assert.match(view, new RegExp(`toolId: '${connector}', finishToolConfiguration`));
+  }
+  assert.match(view, /finishCfg\(toolId, true\)/);
+  assert.match(view, /finishCfg\(toolId, false\)/);
+  assert.match(view, /finishCfg\(cfg\.key, false\)/);
+  for (const connector of ['eip', 'zhidao', 'ima']) {
     assert.match(view, new RegExp(`finishToolConfiguration\\('${connector}', true\\)|finishToolConfiguration\\('${connector}', succeeded\\)`));
     assert.match(view, new RegExp(`finishToolConfiguration\\('${connector}', false\\)|finishToolConfiguration\\('${connector}', succeeded\\)`));
   }

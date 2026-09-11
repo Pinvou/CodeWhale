@@ -4,6 +4,7 @@
   var registry = window.__PINVOU_TAURI_BRIDGE_FEATURES__ = window.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry.chat = function (context) {
     var state = context.state;
+    var voice = context.voice || function () { return {}; };
     var invoke = context.invoke;
     var notify = context.notify;
     var TAURI = context.TAURI;
@@ -36,7 +37,15 @@
   // Composer 草稿是纯前端短期状态：写入时不 notify，避免每次按键都克隆
   // 整个 chat slice 并触发 App 重渲染。会话切换本身会 notify，ChatView 会在
   // activeSessionId 变化后主动读取目标 working set 的草稿。
+  var pendingTaskDraftRecovery = null;
   function getComposerDraft() {
+    if (pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch !== Number(state.draftEpoch || 0)) {
+      pendingTaskDraftRecovery = null;
+    }
+    if (pendingTaskDraftRecovery && !state.activeSessionId) {
+      state.composerDraft = [state.composerDraft, pendingTaskDraftRecovery.text].filter(Boolean).join("\n");
+      pendingTaskDraftRecovery = null;
+    }
     return String(state.composerDraft || "");
   }
   function setComposerDraft(value) {
@@ -323,6 +332,7 @@
   }
   function queuedMetaNeedsAdmission(meta) {
     if (!meta || typeof meta !== "object") return false;
+    if (meta.voiceOperationId) return true;
     return Object.keys(meta).some(function (key) {
       return key.indexOf("pinvou") === 0;
     });
@@ -402,6 +412,7 @@
     });
     notify();
     emitPetEvent("pet:turn_start", sid);
+    if (meta && meta.voiceOperationId) voice().beginVoiceSubmission(meta.voiceOperationId);
     return invoke("chat", { message: text, attachments: attachmentsPayload, sessionId: sid, restrictTools: !!restrictTools })
       .then(function () {
         // 新一轮已被后端受理：会话中未提交的「打开」（pending enable）自此进入
@@ -418,26 +429,11 @@
           });
           trackSceneSubmitted(sid, meta.pinvouScene);
         }
-        if (meta && meta.voiceOperationId) {
-          invoke("track_behavior_event", {
-            request: {
-              eventName: "voice_message_submitted",
-              operationId: meta.voiceOperationId,
-              sessionId: sid,
-            },
-          }).catch(function () {});
-          if (state.voiceInput && state.voiceInput.operationId === meta.voiceOperationId) {
-            state.voiceInput = Object.assign({}, state.voiceInput, {
-              status: "idle",
-              operationId: null,
-              telemetryTerminal: true,
-            });
-            notify();
-          }
-        }
+        if (meta && meta.voiceOperationId) voice().completeVoiceSubmission(meta.voiceOperationId, sid, true);
         return true;
       })
       .catch(function (err) {
+        if (meta && meta.voiceOperationId) voice().completeVoiceSubmission(meta.voiceOperationId, sid, false);
         console.warn("[pinvou3][chat-ui] send failed", {
           sid: sid,
           error: err && err.toString ? err.toString() : err,
@@ -469,11 +465,23 @@
           // 透传后端硬编码中文——英/日界面不该看到中文结论;文案与 ChatView
           // 前置警告(t.uiAttachments.*)同源。与 web bridge displayTurnError
           // 同一口径(chat.rs IMAGE_INPUT_*_ERROR)。
-          var errorText = String(err && err.toString ? err.toString() : err || "");
+          // Prefer Error.message: toString() adds "Error: " and prevents
+          // stable-code matching before the model-service redaction fallback.
+          var errorText = String(err && err.message ? err.message : err || "");
           if (errorText.indexOf("image_input_unsupported") === 0) {
             errorText = errorText.indexOf("能力未知") >= 0
               ? bt("imageUnknown")
               : bt("imageUnsupported");
+          } else if (errorText.indexOf("session_model_binding_stale:") === 0) {
+            errorText = bt("sessionModelStale")(
+              errorText.slice("session_model_binding_stale:".length).trim(),
+            );
+          } else if (window.PinvouBridgeMessages && typeof window.PinvouBridgeMessages.redactRawError === "function") {
+            // Raw submit-failure bodies can also carry gateway bodies or
+            // credentials; redact through the same outlet as the
+            // transient/done fallbacks (classification may miss, credentials
+            // must not).
+            errorText = window.PinvouBridgeMessages.redactRawError(errorText, state);
           }
           addSystemItem(concurrentTurn
             ? bt("turnAlreadyInProgress")
@@ -675,7 +683,13 @@
   //                draft back (handleSend's empty-vs-typed restore).
   // Main-path send failures still throw (surfaceFailure) and the caller
   // restores through its catch.
-  async function sendMessage(text, meta) {
+  async function sendMessage(text, meta, voiceOwner) {
+    if (voiceOwner && ((state.activeSessionId || null) !== voiceOwner.sessionId
+      || (!voiceOwner.sessionId && Number(state.draftEpoch || 0) !== voiceOwner.draftEpoch))) return false;
+    if (!meta || !meta.voiceOperationId) {
+      var voiceOperationId = voice().getVoiceOperationId && voice().getVoiceOperationId(state.activeSessionId, "chat");
+      if (voiceOperationId) meta = Object.assign({}, meta || {}, { voiceOperationId: voiceOperationId });
+    }
     text = (text || "").trim();
     var readyAttachments = state.attachments.filter(function (a) { return a.status === "ready" && a.result; });
     if (!text && readyAttachments.length === 0) return false;
@@ -690,23 +704,21 @@
       // 必须用返回值判空：切走场景 ensureSession 返回 null 但 activeSessionId
       // 非空（用户已切到别的会话），按 activeSessionId 继续会把本条消息发进
       // 错误会话（审计 #257）。
-      var materialized = await ensureSession();
-      if (!materialized) {
-        // 物化中止（如草稿态多智能体开关落盘失败 / await 期间切走）：把输入放回
-        // 输入框，不静默丢字；错误提示由 ensureSession 内如实给出（复核 P1）。
-        // append=true: failure-recovery semantics — the user may have started
-        // the next message during the await; replacing would clobber it.
-        prefillComposer(text, true);
-        // The prefill IS the restore; "restored" stops the caller from doing
-        // it a second time (the prefill lands asynchronously and would then
-        // append a duplicate).
+      var draftOwner = { sessionId: null, draftEpoch: Number(state.draftEpoch || 0),
+        operationId: meta && meta.voiceOperationId, restored: false };
+      var materialized = await ensureSession(draftOwner);
+      if (!materialized || state.activeSessionId !== materialized) {
+        if (materialized) draftOwner.createdSessionId = materialized;
+        // Recover in the created session or the original draft epoch, never
+        // the unrelated active composer. Same-draft recovery remains append-only.
+        restoreTaskDraft(text, draftOwner);
+        // Scoped recovery owns the restore; "restored" stops the caller from doing
+        // it a second time, including when recovery stays in a background buffer.
         return "restored";
       }
     }
     var sid = state.activeSessionId;
-    if (state.voiceInput && state.voiceInput.status === "completed" && state.voiceInput.operationId) {
-      meta = Object.assign({}, meta || {}, { voiceOperationId: state.voiceInput.operationId });
-    }
+    if (meta && meta.voiceOperationId) voice().beginVoiceSubmission(meta.voiceOperationId, sid);
     function abandonPreparedAttachments() {
       state.attachments = state.attachments.filter(function (attachment) {
         return readyAttachments.indexOf(attachment) < 0;
@@ -954,6 +966,30 @@
     };
     notify();
   }
+  function restoreTaskDraft(text, owner) {
+    if (!owner || owner.restored) return false;
+    if (owner.operationId && owner.rollbackFromDraftEpoch !== undefined) {
+      voice().rebindVoiceDraftAfterRollback(owner.operationId, owner.rollbackFromDraftEpoch, owner.draftEpoch);
+    }
+    const sid = owner.sessionId || owner.createdSessionId
+      || (owner.operationId && voice().voiceOperationSessionId(owner.operationId));
+    if (sid) {
+      if (owner.operationId) voice().completeVoiceSubmission(owner.operationId, sid, false);
+      restoreSteerText(sid, text);
+    } else if (!state.activeSessionId && Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      prefillComposer(text, true);
+    } else if (Number(state.draftEpoch || 0) === owner.draftEpoch) {
+      // Retain one departed draft in memory, never in the unrelated active session.
+      var retained = pendingTaskDraftRecovery && pendingTaskDraftRecovery.epoch === owner.draftEpoch
+        ? pendingTaskDraftRecovery.text : "";
+      pendingTaskDraftRecovery = { epoch: owner.draftEpoch, text: [retained, text].filter(Boolean).join("\n") };
+    } else {
+      return false;
+    }
+    owner.restored = true;
+    return true;
+  }
+
   // Undo a pending message (chip ×). A plain queued chip (with attachments)
   // = local removal + discard attachments, zero engine calls; a steered chip
   // = optimistic removal + a real withdraw_steer (the withdrawal is confirmed
@@ -961,6 +997,10 @@
   // bubble — see the race notes on settleSteerCommitted).
   function removeQueued(id) {
     var removed = state.queued.find(function (q) { return q.id === id; });
+    if (removed && removed.meta && removed.meta.voiceOperationId) {
+      voice().abandonVoiceResult(removed.meta.voiceOperationId);
+      voice().completeVoiceSubmission(removed.meta.voiceOperationId, state.activeSessionId, false);
+    }
     if (removed && removed.attachments) {
       removed.attachments.forEach(discardManagedAttachment);
     }
@@ -2353,6 +2393,7 @@
       setComposerDraft: setComposerDraft,
       retryFirstTurn: retryFirstTurn,
       prefillComposer: prefillComposer,
+      restoreTaskDraft: restoreTaskDraft,
       removeQueued: removeQueued,
       prioritizeQueued: prioritizeQueued,
       editQueued: editQueued,

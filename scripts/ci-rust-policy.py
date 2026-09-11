@@ -109,6 +109,7 @@ query($owner: String!, $name: String!, $branch: String!, $cursor: String) {
     mergeQueue(branch: $branch) {
       entries(first: 100, after: $cursor) {
         nodes {
+          state
           baseCommit { oid }
           headCommit { oid }
           pullRequest {
@@ -290,6 +291,29 @@ def _parse_queue_page(result: Any) -> tuple[list[dict[str, Any]], bool, str | No
     for raw_entry in entries["nodes"]:
         if not isinstance(raw_entry, dict):
             raise RuntimeError("merge queue entry is not an object")
+        state = raw_entry.get("state")
+        if not isinstance(state, str) or state not in {
+            "QUEUED",
+            "AWAITING_CHECKS",
+            "MERGEABLE",
+            "UNMERGEABLE",
+            "LOCKED",
+        }:
+            raise RuntimeError("merge queue entry state is missing or unknown")
+        _validate_queue_pull_request(raw_entry.get("pullRequest"))
+        # GitHub exposes not-yet-built waiting entries with nullable commits.
+        # They cannot contribute a link to this event's commit chain. Exclude
+        # only the explicit QUEUED + two null fields shape, never missing fields,
+        # partial commits, or another state. The event head must still trace all
+        # the way to its base through the remaining fully validated entries.
+        if (
+            state == "QUEUED"
+            and "baseCommit" in raw_entry
+            and raw_entry["baseCommit"] is None
+            and "headCommit" in raw_entry
+            and raw_entry["headCommit"] is None
+        ):
+            continue
         for commit_field in ("baseCommit", "headCommit"):
             commit = raw_entry.get(commit_field)
             if (
@@ -300,7 +324,6 @@ def _parse_queue_page(result: Any) -> tuple[list[dict[str, Any]], bool, str | No
                 raise RuntimeError(
                     f"merge queue entry {commit_field} is missing or incomplete"
                 )
-        _validate_queue_pull_request(raw_entry.get("pullRequest"))
         nodes.append(raw_entry)
 
     return nodes, page_info["hasNextPage"], page_info["endCursor"]

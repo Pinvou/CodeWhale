@@ -4,7 +4,6 @@ import { Archive, Briefcase, Check, ChevronDown, ChevronLeft, ChevronRight, Code
 import { ArchivedDeleteConfirmDialog } from '../../components/layout/NavigationComponents.jsx';
 import { ComposerPopover } from '../../components/ComposerPopover.jsx';
 import { Toggle } from '../../components/Toggle.jsx';
-import { VllmSetupProgress } from '../../components/VllmSetupProgress.jsx';
 import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
@@ -38,6 +37,18 @@ import {
   LOCAL_CONFIG_SOURCE,
   platformModelSelectableForNewSession,
 } from '../account-platform/model-catalog-selection.js';
+import {
+  VOICE_POSTPROCESS_ENABLED_KEY,
+  VOICE_SHORTCUT_ENABLED_KEY,
+  VOICE_SHORTCUT_SETTINGS_EVENT,
+  setVoicePostprocessEnabled,
+  setVoiceShortcutEnabled,
+  setVoiceShortcutIntroSeen,
+  voicePostprocessEnabled,
+  voiceShortcutEnabled,
+} from '../chat/voice-shortcut-settings.mjs';
+import { VoiceShortcutIntroModal } from '../voice-composer/VoiceShortcutIntroModal.jsx';
+import { ReasoningTierPicker, useLocalServerKindProbe } from './local-server-tiers.jsx';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -735,6 +746,11 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       const [detectResult, setDetectResult] = useState(null); // { candidates } | { error } | null
       const [localDetecting, setLocalDetecting] = useState(false);
       const [localDetectResult, setLocalDetectResult] = useState(null);
+      // Optional custom port for local-model auto-detection (raw user input; empty = default ports only).
+      const [localPortDraft, setLocalPortDraft] = useState('');
+      // Inline validation message for the custom port. Kept separate from
+      // localDetectResult so a failed validation never hides previous candidates.
+      const [localPortError, setLocalPortError] = useState(null);
       // 图片输入能力三档(pinvou/enabled/disabled)与兜底视觉模型引用(阶段 G 设置页控件)。
       // 已下线的「保存时检测」(auto)档残留值按「自动处理」(pinvou)回显。
       // 未人工钉死(非 enabled/disabled)时按目录视觉能力标注预填:命中已验证
@@ -763,9 +779,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       const [imageTesting, setImageTesting] = useState(false);
       const [imageTestResult, setImageTestResult] = useState(null); // { status, verified, summary } | null
       useEffect(() => { setImageTestResult(null); }, [model, baseUrl, apiKey, preset]);
-      // 本机预装大模型「再入口」:检测无运行实例但有预装时,提示启用;走同一 bootstrap。
-      const [offerSetup, setOfferSetup] = useState(false);   // 检测到预装,显示启用提示
-      const [bootstrapHere, setBootstrapHere] = useState(false); // 从本页发起了 bootstrap(隔离全局态,避免开机引导的成功态串到这里)
       const localizeProvider = group => group
         ? { ...group, ...(settingsCopy.providerCatalog[group.key] || {}) }
         : null;
@@ -781,52 +794,17 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       // 本地/私网 openai_compatible 端点：按 Rust 探测结果下发真实档位
       // （vllm→四档、ollama→off/high、lmstudio/generic→不支持），避免 UI
       // 显示档位但 wire 层空操作的「调了个寂寞」。
-      const [probedKind, setProbedKind] = useState(null);
-      const [probePending, setProbePending] = useState(false);
       const isLocalCompatible = preset === 'openai_compatible' && baseUrlUsesLocalOrPrivate(baseUrl.trim());
-      const probeSupported = bridge.available && !!bridge.models && typeof bridge.models.probeLocalServerKind === 'function';
-      useEffect(() => {
-        if (!isLocalCompatible) {
-          // eslint-disable-next-line react-hooks/set-state-in-effect -- leaving the local-compatible state must synchronously clear the probe window so stale tiers never render one commit
-          setProbedKind(null);
-          setProbePending(false);
-          return;
-        }
-        let cancelled = false;
-        // Enter pending during the debounce window (round-6 P2): no tiers are
-        // offered from the moment the probe is scheduled (the default four
-        // tiers from localProbeTiersForKind(null) are only the fallback for an
-        // unreachable probe; they must not be exposed during the "probe
-        // incoming" window, or the user could pick/save a misleading tier
-        // before the result is known). An unreachable probe (bridge
-        // unsupported/failed) is reset by then/catch to null + pending=false,
-        // landing on the default four tiers.
-        setProbePending(true);
-        setProbedKind(null);
-        // debounce：base_url 是原始输入 state，不 debounce 时逐键触发探测
-        // （Rust 侧缓存 key 含端口/路径，每个中间态都是新 key、各自串行
-        // 探测最坏 ~12s）。停键 400ms 后才发起一次。
-        const timer = setTimeout(() => {
-          if (probeSupported) {
-            // Credentials share the same source as handleTest: a freshly typed
-            // form key wins, otherwise the saved model id lets Rust read the
-            // stored credential — probing an authenticated vLLM (--api-key)
-            // without a key 401s into generic and falsely reports "thinking
-            // tiers are not supported".
-            bridge.models.probeLocalServerKind(baseUrl.trim(), apiKey.trim(), initial.__new ? null : initial.id)
-              .then((kind) => { if (!cancelled) setProbedKind(kind); })
-              // 探测调用本身失败（命令被拒/版本不支持）≠ 探测出 generic：
-              // 置回 null 走 localProbeTiersForKind 的默认四档，不误报「不支持」。
-              .catch(() => { if (!cancelled) setProbedKind(null); })
-              .finally(() => { if (!cancelled) setProbePending(false); });
-          } else {
-            // web 预览无探测能力：保持默认四档（与旧行为一致），不误报不支持。
-            if (!cancelled) setProbedKind(null);
-            if (!cancelled) setProbePending(false);
-          }
-        }, 400);
-        return () => { cancelled = true; clearTimeout(timer); };
-      }, [isLocalCompatible, baseUrl, apiKey, initial.id, initial.__new, probeSupported]);
+      // Form entry: baseUrl/apiKey are per-keystroke input state, so the probe is debounced 400ms (fires only
+      // after typing stops); for the pre-probe trim and raw-input dependency semantics see useLocalServerKindProbe.
+      const { probedKind, probePending } = useLocalServerKindProbe({
+        enabled: isLocalCompatible,
+        baseUrl,
+        apiKey,
+        modelId: initial.__new ? null : initial.id,
+        debounceMs: 400,
+        trimInputs: true,
+      });
       const reasoningEffortTiers = isLocalCompatible
         ? (probePending ? [] : (localReasoningTiers(model, probedKind) || []))
         : (reasoningEffortTiersForModel({ preset, model, vendor, base_url: baseUrl, provider_kind: providerKind }) || []);
@@ -863,11 +841,12 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
           const status = Number(httpMatch[1]);
           const legacy = {
             ok: status >= 200 && status < 300,
-            code: status === 401 ? 'auth_invalid' : status === 403 ? 'auth_forbidden' : status === 429 ? 'rate_limited' : 'http_error',
+            code: status === 401 ? 'auth_invalid' : status === 402 ? 'billing' : status === 403 ? 'auth_forbidden' : status === 429 ? 'rate_limited' : 'http_error',
             message: status === 401 ? settingsCopy.connectionMessages.auth_invalid
-              : status === 403 ? settingsCopy.connectionMessages.auth_forbidden
-                : status === 429 ? settingsCopy.connectionMessages.rate_limited
-                  : (status >= 200 && status < 300 ? settingsCopy.connectionMessages.ok : settingsCopy.connectionMessages.http_error),
+              : status === 402 ? settingsCopy.connectionMessages.billing
+                : status === 403 ? settingsCopy.connectionMessages.auth_forbidden
+                  : status === 429 ? settingsCopy.connectionMessages.rate_limited
+                    : (status >= 200 && status < 300 ? settingsCopy.connectionMessages.ok : settingsCopy.connectionMessages.http_error),
             detail: `HTTP ${status}`,
           };
           if (isCodingPlanProvider && (status === 404 || status === 405)) {
@@ -946,9 +925,18 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       function normalizeImageCapabilityTestResult(value) {
         if (value && typeof value === 'object' && !Array.isArray(value)) {
           const status = ['supported', 'unsupported', 'unverified', 'error'].includes(value.status) ? value.status : 'error';
-          return { status, verified: !!value.verified, summary: value.summary ? String(value.summary) : '' };
+          return {
+            status,
+            verified: !!value.verified,
+            summary: value.summary ? String(value.summary) : '',
+            // http_status is the frontend's billing signal: 402 maps to the
+            // tri-lingual connectionMessages.billing copy (the Rust-side
+            // summary is contracted to carry no hardcoded language prefix;
+            // see settings.rs).
+            httpStatus: value.http_status == null ? null : Number(value.http_status),
+          };
         }
-        return { status: 'error', verified: false, summary: String(value || '') };
+        return { status: 'error', verified: false, summary: String(value || ''), httpStatus: null };
       }
       async function handleImageCapabilityTest() {
         if (!bridge.available || !bridge.models.testImageInputCapability) return;
@@ -958,7 +946,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
           const result = await bridge.models.testImageInputCapability(model.trim(), baseUrl.trim(), testKey, initial.__new ? null : initial.id);
           setImageTestResult(normalizeImageCapabilityTestResult(result));
         } catch (e) {
-          setImageTestResult({ status: 'error', verified: false, summary: String(e && e.message ? e.message : e) });
+          setImageTestResult({ status: 'error', verified: false, summary: String(e && e.message ? e.message : e), httpStatus: null });
         }
         finally { setImageTesting(false); }
       }
@@ -982,11 +970,11 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       }
       async function handleDetect() {
         if (!canSetUpLocalModel || !bridge.available || detecting) return;
-        // macOS/Windows 后端无 discover_local_vllm / detect_local_vllm_setup 命令(已 cfg linux),
+        // macOS/Windows 后端无 discover_local_vllm 命令(已 cfg linux),
         // 此处非 Linux 直接返回,避免 invoke 不存在的命令 reject 报错。
         if (!bridge.available || detecting) return;
         if (!localVllmSupported) return;
-        setDetecting(true); setDetectResult(null); setTestResult(null); setOfferSetup(false); setBootstrapHere(false);
+        setDetecting(true); setDetectResult(null); setTestResult(null);
         try {
           const result = await bridge.vllm.discoverLocalVllm({
             currentBaseUrl: baseUrl.trim() || null,
@@ -1004,16 +992,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               : (c.model ? [{ id: c.model, loaded: null }] : []);
             const loadedEntry = entries.find(e => e && e.id && e.loaded === true);
             if (loadedEntry) applyCandidate({ base_url: c.base_url, model: loadedEntry.id });
-          }
-          else if (online.length === 0) {
-            // 没探到运行中的实例:看本机是否有预装大模型,有则提示一键启用(走同一 bootstrap)。
-            const setup = await bridge.vllm.detectLocalVllmSetup();
-            const canStart = setup && setup.has_packages &&
-              (setup.engine_state ? ['stopped', 'failed'].includes(setup.engine_state) : !setup.vllm_online);
-            if (canStart) setOfferSetup(true);
-            if (setup && setup.engine_state === 'starting') {
-              setDetectResult({ candidates: [], engineState: 'starting' });
-            }
           }
         } catch (e) {
           setDetectResult({ error: String(e) });
@@ -1181,12 +1159,26 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       }
       async function handleLocalDetect() {
         if (!bridge.available || !bridge.vllm.discoverLocalVllm || localDetecting) return;
+        // Optional custom port: the draft keeps the raw input as typed; anything
+        // outside 1-65535 (or not plain digits) shows an inline error and issues no probe.
+        const rawPort = localPortDraft.trim();
+        let customPort = null;
+        if (rawPort !== '') {
+          const portNumber = /^\d+$/.test(rawPort) ? Number(rawPort) : NaN;
+          if (!Number.isSafeInteger(portNumber) || portNumber < 1 || portNumber > 65535) {
+            setLocalPortError(settingsCopy.localPortInvalid);
+            return;
+          }
+          customPort = portNumber;
+        }
+        setLocalPortError(null);
         setLocalDetecting(true);
         setLocalDetectResult(null);
         try {
           const result = await bridge.vllm.discoverLocalVllm({
             currentBaseUrl: null,
             savedBaseUrl: null,
+            customPort,
           });
           setLocalDetectResult({ candidates: (result && result.candidates) || [] });
         } catch (error) {
@@ -1309,6 +1301,20 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
           {trailing}
         </div>
       );
+      // API Key input row (three isomorphic sites: cloud provider preset / custom cloud key / local key): the row
+      // content is verbatim identical — the show/hide button goes through toggleApiKeyVisibility (edit mode can
+      // reveal the stored key), and non-empty input sets keyAction='replace'; withBorder only differs in the row
+      // divider (a lone row in a form group has none, multi-row groups carry border-b last:border-b-0).
+      const renderApiKeyField = ({ withBorder = false }) => (
+        <div className={withBorder ? `min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}` : 'min-h-[54px] flex items-center gap-3 px-4 py-2.5'}>
+          {/* biome-ignore lint/a11y/noLabelWithoutControl: field label and input are siblings; the label has no htmlFor association, switching to span would deviate from the existing structure */}
+          <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>API Key</label>
+          <input type={showKey ? 'text' : 'password'} autoComplete="off" value={apiKey} onChange={e => { setApiKey(e.target.value); if (e.target.value.trim()) setKeyAction('replace'); }}
+            placeholder={hasSavedKey ? '••••••••' : settingsCopy.apiKeyPlaceholder}
+            className={`min-w-0 flex-1 bg-transparent text-right text-[14px] leading-5 outline-none text-[#1C1C1E] placeholder:text-[#8A8A8E] dark:text-[#F2F2F7] dark:placeholder:text-[#636366]`} />
+          <button type="button" onClick={toggleApiKeyVisibility} className="shrink-0 text-[14px] text-[#007AFF]">{showKey ? settingsCopy.hide : settingsCopy.show}</button>
+        </div>
+      );
       const renderCloudProviderPicker = () => {
         const bySection = ['coding_plan', 'official_api', 'custom'].map(section => ({
           section,
@@ -1392,9 +1398,26 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                     <span className={`block text-[15px] leading-5 font-normal truncate text-[#1C1C1E] dark:text-[#F2F2F7]`}>{settingsCopy.autoDetectLocalModel}</span>
                     <span className={`block mt-0.5 text-[12px] leading-[17px] truncate ${mutedText}`}>{settingsCopy.localDetectionTargets}</span>
                   </span>
+                  {/* Optional custom port: empty scans default ports only; raw input is kept
+                      as typed and validated when Detect runs. */}
+                  <span className={`shrink-0 text-[12px] leading-[17px] ${mutedText}`}>{settingsCopy.localPortLabel}</span>
+                  <input
+                    value={localPortDraft}
+                    onChange={e => { setLocalPortDraft(e.target.value); setLocalPortError(null); }}
+                    placeholder={settingsCopy.localPortPlaceholder}
+                    aria-label={settingsCopy.localPortLabel}
+                    data-testid="local-detect-port"
+                    disabled={localDetecting}
+                    inputMode="numeric"
+                    spellCheck={false}
+                    className={`shrink-0 w-[72px] min-h-8 px-2.5 rounded-lg text-right text-[13px] leading-[32px] outline-none bg-black/[0.04] text-[#1C1C1E] placeholder:text-[#8A8A8E] dark:bg-white/[0.08] dark:text-[#F2F2F7] dark:placeholder:text-[#636366] disabled:opacity-45`}
+                  />
                   <button type="button" disabled={localDetecting} onClick={handleLocalDetect}
                     className={`${actionClass} disabled:opacity-45`}>{localDetecting ? t.detectingLocalVllm : (localDetectResult ? settingsCopy.redetect : settingsCopy.detect)}</button>
                 </div>
+                {localPortError && (
+                  <div className={`px-3.5 py-3 text-[12px] leading-5 border-b last:border-b-0 border-black/[0.10] text-[#C5221F] dark:border-white/[0.10] dark:text-[#F28B82]`}>{localPortError}</div>
+                )}
                 {localDetectResult && localDetectResult.error && (
                   <div className={`px-3.5 py-3 text-[12px] leading-5 border-b last:border-b-0 border-black/[0.10] text-[#C5221F] dark:border-white/[0.10] dark:text-[#F28B82]`}>{localDetectResult.error}</div>
                 )}
@@ -1513,7 +1536,13 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               : imageTestResult.status === 'unverified'
                 // 后端 summary 已自带「未能正确识别图像，原因未知」完整句,直接展示避免重复。
                 ? (imageTestResult.summary || settingsCopy.imageCapabilityTestUnverified)
-                : settingsCopy.imageCapabilityTestError + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '');
+                // A 402 billing failure matches the connection test: reuse
+                // the tri-lingual connectionMessages.billing copy - the Rust
+                // side only passes http_status and the raw provider summary,
+                // never a single-language guidance string.
+                : imageTestResult.httpStatus === 402
+                  ? settingsCopy.connectionMessages.billing + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '')
+                  : settingsCopy.imageCapabilityTestError + (imageTestResult.summary ? ` · ${imageTestResult.summary}` : '');
         const imageTestColor = !imageTestResult
           ? (isDark ? 'text-[#98989D]' : 'text-[#8A8A8E]')
           : imageTestResult.status === 'supported'
@@ -1643,13 +1672,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               {!isLocalPreset && !customModel && (
                 <section>
                   <div className={formGroup}>
-                    <div className="min-h-[54px] flex items-center gap-3 px-4 py-2.5">
-                      <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>API Key</label>
-                      <input type={showKey ? 'text' : 'password'} autoComplete="off" value={apiKey} onChange={e => { setApiKey(e.target.value); if (e.target.value.trim()) setKeyAction('replace'); }}
-                        placeholder={hasSavedKey ? '••••••••' : settingsCopy.apiKeyPlaceholder}
-                        className={`min-w-0 flex-1 bg-transparent text-right text-[14px] leading-5 outline-none text-[#1C1C1E] placeholder:text-[#8A8A8E] dark:text-[#F2F2F7] dark:placeholder:text-[#636366]`} />
-                      <button type="button" onClick={toggleApiKeyVisibility} className="shrink-0 text-[14px] text-[#007AFF]">{showKey ? settingsCopy.hide : settingsCopy.show}</button>
-                    </div>
+                    {renderApiKeyField({ withBorder: false })}
                   </div>
                   {keyRevealError && <div className="px-1 mt-1.5 text-[12px] leading-4 text-[#FF3B30]">{keyRevealError}</div>}
                 </section>
@@ -1659,30 +1682,15 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                   <div className={formGroup}>
                     <div className="min-h-[54px] flex items-center gap-3 px-4 py-2.5">
                       <span className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>{settingsCopy.reasoningEffort}</span>
-                      {reasoningEffortTiers.length > 0 ? (
-                        <div className="ml-auto flex flex-wrap justify-end gap-1">
-                          {reasoningEffortTiers.map(tier => (
-                            <button
-                              key={tier}
-                              type="button"
-                              onClick={() => setReasoningEffort(tier)}
-                              className={`h-7 min-w-[52px] px-3 rounded-full text-[13px] font-medium transition-colors ${
-                                reasoningEffortDisplay === tier
-                                  ? 'bg-[#007AFF] text-white dark:bg-[#0A84FF]'
-                                  : 'bg-[#E5E5EA] text-[#636366] hover:bg-[#D9D9DE] dark:bg-white/[0.07] dark:text-[#C7C7CC] dark:hover:bg-white/[0.12]'
-                              }`}
-                            >{settingsCopy.reasoningEffortTiers[tier] || tier}</button>
-                          ))}
-                        </div>
-                      ) : (
-                        <span className={`ml-auto text-right text-[12px] leading-4 ${probePending ? 'text-[#8A8A8E] dark:text-[#98989D]' : 'text-[#FF9500] dark:text-[#FFB340]'}`}>
-                          {probePending
-                            ? (settingsCopy.reasoningProbePending || '正在探测服务类型…')
-                            : localNoControlThinking
-                              ? (settingsCopy.reasoningThinkingAlwaysOn || '该模型思考始终开启，无法关闭')
-                              : (settingsCopy.reasoningProbeUnsupported || '该端点不支持思考档位调节')}
-                        </span>
-                      )}
+                      <ReasoningTierPicker
+                        t={t}
+                        variant="form"
+                        tiers={reasoningEffortTiers}
+                        selected={reasoningEffortDisplay}
+                        onSelect={setReasoningEffort}
+                        pending={probePending}
+                        noControlThinking={localNoControlThinking}
+                      />
                     </div>
                   </div>
                 </section>
@@ -1705,15 +1713,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                     })}
                     {showProviderModelField && renderProviderModelField()}
                     {showModelIdField && !showProviderModelField && renderInlineField({ label: isLocalPreset ? settingsCopy.localModelId : settingsCopy.modelId, value: model, onChange: e => handleModelIdChange(e.target.value), placeholder: isLocalPreset ? '' : settingsCopy.modelIdPlaceholder })}
-                    {showCustomCloudKeyField && (
-                      <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
-                        <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>API Key</label>
-                        <input type={showKey ? 'text' : 'password'} autoComplete="off" value={apiKey} onChange={e => { setApiKey(e.target.value); if (e.target.value.trim()) setKeyAction('replace'); }}
-                          placeholder={hasSavedKey ? '••••••••' : settingsCopy.apiKeyPlaceholder}
-                          className={`min-w-0 flex-1 bg-transparent text-right text-[14px] leading-5 outline-none text-[#1C1C1E] placeholder:text-[#8A8A8E] dark:text-[#F2F2F7] dark:placeholder:text-[#636366]`} />
-                        <button type="button" onClick={toggleApiKeyVisibility} className="shrink-0 text-[14px] text-[#007AFF]">{showKey ? settingsCopy.hide : settingsCopy.show}</button>
-                      </div>
-                    )}
+                    {showCustomCloudKeyField && renderApiKeyField({ withBorder: true })}
                     {showBaseUrlField && renderInlineField({ label: t.customBaseUrl, value: baseUrl, onChange: e => handleBaseUrlChange(e.target.value) })}
                     {/* Context window (optional for cloud models): a newly released
                         model ID not yet in the catalog cannot be resolved by it, so
@@ -1747,15 +1747,7 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                         </button>
                       </div>
                     )}
-                    {showLocalKeyField && (
-                      <div className={`min-h-[54px] flex items-center gap-3 px-4 py-2.5 border-b last:border-b-0 ${formDivider}`}>
-                        <label className={`shrink-0 text-[14px] leading-5 text-[#1C1C1E] dark:text-[#F2F2F7]`}>API Key</label>
-                        <input type={showKey ? 'text' : 'password'} autoComplete="off" value={apiKey} onChange={e => { setApiKey(e.target.value); if (e.target.value.trim()) setKeyAction('replace'); }}
-                          placeholder={hasSavedKey ? '••••••••' : settingsCopy.apiKeyPlaceholder}
-                          className={`min-w-0 flex-1 bg-transparent text-right text-[14px] leading-5 outline-none text-[#1C1C1E] placeholder:text-[#8A8A8E] dark:text-[#F2F2F7] dark:placeholder:text-[#636366]`} />
-                        <button type="button" onClick={toggleApiKeyVisibility} className="shrink-0 text-[14px] text-[#007AFF]">{showKey ? settingsCopy.hide : settingsCopy.show}</button>
-                      </div>
-                    )}
+                    {showLocalKeyField && renderApiKeyField({ withBorder: true })}
                   </div>
                   {!isLocalPreset && (
                     <div className={`px-1 mt-1.5 text-[12px] leading-4 ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{settingsCopy.modelContextWindowHint}</div>
@@ -1783,8 +1775,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                 <div className={`rounded-xl border p-3 space-y-2 border-[#E0E3E7] bg-[#F8F9FB] dark:border-[#333537] dark:bg-[#131314]`}>
                   {detectResult.error ? (
                     <span className={`text-[12px] text-[#C5221F] dark:text-[#F28B82]`}>{t.vllmDetectError(detectResult.error)}</span>
-                  ) : detectResult.engineState === 'starting' ? (
-                    <span className={`text-[12px] text-[#0B57D0] dark:text-[#A8C7FA]`}>{t.vllmDetectStarting}</span>
                   ) : detectResult.candidates.length === 0 ? (
                     <span className={`text-[12px] text-[#5F6368] dark:text-[#9AA0A6]`}>{t.vllmDetectNone}</span>
                   ) : (
@@ -1804,44 +1794,6 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                     </>
                   )}
                   <span className={`text-[11px] block text-[#9AA0A6] dark:text-[#5F6368]`}>{t.vllmDetectHint}</span>
-                </div>
-              )}
-              {preset === 'local_vllm' && canSetUpLocalModel && (offerSetup || bootstrapHere) && (
-                <div className={`rounded-xl border p-3 border-[#E0E3E7] bg-[#F8F9FB] dark:border-[#333537] dark:bg-[#131314]`}>
-                  {bootstrapHere ? (
-                    bs && bs.vllmBootstrapDone ? (
-                      <div>
-                        <div className="text-[13px] leading-relaxed mb-3">{t.vllmSetupDone}</div>
-                        <div className="flex justify-end">
-                          <button onClick={() => bridge.available && bridge.updater.restartApp()}
-                            className="h-8 px-4 rounded-lg text-[13px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.restartNow}</button>
-                        </div>
-                      </div>
-                    ) : bs && bs.vllmBootstrapError ? (
-                      <div>
-                        <div className="text-[12px] font-medium mb-1" style={{ color: '#E5484D' }}>{t.vllmSetupFailed}</div>
-                        <div className="text-[12px] leading-relaxed mb-3 break-words" style={{ opacity: .75 }}>{bs.vllmBootstrapError}</div>
-                        <div className="flex justify-end gap-2">
-                          <button onClick={() => { setBootstrapHere(false); setOfferSetup(false); }}
-                            className={`h-8 px-4 rounded-lg text-[13px] bg-[#F0F4F9] text-[#1F1F1F] dark:bg-[#2B2C2F] dark:text-[#E3E3E3]`}>{t.cpCancel}</button>
-                          <button onClick={() => bridge.vllm.bootstrapLocalVllm()}
-                            className="h-8 px-4 rounded-lg text-[13px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.vllmSetupRetry}</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <VllmSetupProgress phase={bs && bs.vllmSetupPhase} attempt={(bs && bs.vllmSetupAttempt) || 0} t={t} />
-                    )
-                  ) : (
-                    <div>
-                      <div className="text-[13px] leading-relaxed mb-3">{t.vllmReentryOffer}</div>
-                      <div className="flex justify-end gap-2">
-                        <button onClick={() => setOfferSetup(false)}
-                          className={`h-8 px-4 rounded-lg text-[13px] bg-[#F0F4F9] text-[#1F1F1F] dark:bg-[#2B2C2F] dark:text-[#E3E3E3]`}>{t.cpCancel}</button>
-                        <button onClick={() => { setBootstrapHere(true); bridge.vllm.bootstrapLocalVllm(); }}
-                          className="h-8 px-4 rounded-lg text-[13px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.vllmSetupEnable}</button>
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -2025,40 +1977,48 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
         </div>
       </div>
     );
-    /** @param {{ model: SettingsModelEntry, settingsCopy: { deleteModelTitle: string, deleteModelDesc: string, deleteModel: string, cancel: string }, onDeleteModel: (model: SettingsModelEntry) => void, setModelDeleteConfirm: (next: SettingsModelEntry | null) => void }} props - Delete-model confirm state and actions. */
-    const ModelDeleteDialog = ({ model, settingsCopy, onDeleteModel, setModelDeleteConfirm }) => (
+    // iOS-style confirm dialog (stacked buttons: red confirm on top, blue cancel below; backdrop click does not close).
+    // Two isomorphic sites: model delete / search source delete; RestartDialog (two-column grid, wider) is not one of them.
+    const SheetConfirmDialog = ({ title, desc, confirmLabel, cancelLabel, onConfirm, onCancel }) => (
       <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
         <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
           <div className="px-5 pt-5 pb-4 text-center">
-            <h3 className="text-[17px] leading-6 font-semibold">{settingsCopy.deleteModelTitle}</h3>
-            <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.deleteModelDesc}</p>
+            <h3 className="text-[17px] leading-6 font-semibold">{title}</h3>
+            <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{desc}</p>
           </div>
           <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
-            <button type="button" onClick={() => { onDeleteModel(model); setModelDeleteConfirm(null); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{settingsCopy.deleteModel}</button>
-            <button type="button" onClick={() => setModelDeleteConfirm(null)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.cancel}</button>
+            <button type="button" onClick={onConfirm} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{confirmLabel}</button>
+            <button type="button" onClick={onCancel} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{cancelLabel}</button>
           </div>
         </div>
       </div>
     );
+    /** @param {{ model: SettingsModelEntry, settingsCopy: { deleteModelTitle: string, deleteModelDesc: string, deleteModel: string, cancel: string }, onDeleteModel: (model: SettingsModelEntry) => void, setModelDeleteConfirm: (next: SettingsModelEntry | null) => void }} props - Delete-model confirm state and actions. */
+    const ModelDeleteDialog = ({ model, settingsCopy, onDeleteModel, setModelDeleteConfirm }) => (
+      <SheetConfirmDialog
+        title={settingsCopy.deleteModelTitle}
+        desc={settingsCopy.deleteModelDesc}
+        confirmLabel={settingsCopy.deleteModel}
+        cancelLabel={settingsCopy.cancel}
+        onConfirm={() => { onDeleteModel(model); setModelDeleteConfirm(null); }}
+        onCancel={() => setModelDeleteConfirm(null)}
+      />
+    );
     /** @param {{ source: { key: string, label: string }, settingsCopy: { deleteSearchTitle: string, deleteSearchDesc: (label: string) => string, deleteSearch: string, cancel: string }, onDeleteSearchProvider?: (key: string) => void, setSearchDeleteConfirm: (next: { key: string, label: string } | null) => void, setRestartDialog: (next: string | null) => void }} props - Delete-search confirm state and actions. */
     const SearchDeleteDialog = ({ source, settingsCopy, onDeleteSearchProvider, setSearchDeleteConfirm, setRestartDialog }) => (
-      <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/35 backdrop-blur-md px-4">
-        <div className={`w-[270px] overflow-hidden rounded-[14px] shadow-2xl bg-white text-[#1C1C1E] dark:bg-[#2C2C2E] dark:text-[#F2F2F7]`}>
-          <div className="px-5 pt-5 pb-4 text-center">
-            <h3 className="text-[17px] leading-6 font-semibold">{settingsCopy.deleteSearchTitle}</h3>
-            <p className={`mt-1 text-[13px] leading-[18px] text-[#8A8A8E] dark:text-[#98989D]`}>{settingsCopy.deleteSearchDesc(source.label)}</p>
-          </div>
-          <div className={`border-t border-black/[0.12] dark:border-white/[0.12]`}>
-            <button type="button" onClick={() => { onDeleteSearchProvider && onDeleteSearchProvider(source.key); setSearchDeleteConfirm(null); setRestartDialog('search'); }} className={`w-full h-12 text-[17px] font-semibold text-[#FF3B30] border-b border-black/[0.12] dark:border-white/[0.12]`}>{settingsCopy.deleteSearch}</button>
-            <button type="button" onClick={() => setSearchDeleteConfirm(null)} className="w-full h-12 text-[17px] font-semibold text-[#007AFF]">{settingsCopy.cancel}</button>
-          </div>
-        </div>
-      </div>
+      <SheetConfirmDialog
+        title={settingsCopy.deleteSearchTitle}
+        desc={settingsCopy.deleteSearchDesc(source.label)}
+        confirmLabel={settingsCopy.deleteSearch}
+        cancelLabel={settingsCopy.cancel}
+        onConfirm={() => { onDeleteSearchProvider && onDeleteSearchProvider(source.key); setSearchDeleteConfirm(null); setRestartDialog('search'); }}
+        onCancel={() => setSearchDeleteConfirm(null)}
+      />
     );
 
     /** @typedef {{ behaviorAnalyticsTitle: string, behaviorAnalyticsEntryTitle: string, behaviorAnalyticsEntryDesc: string, behaviorAnalyticsBack: string, behaviorAnalyticsLabel: string, behaviorAnalyticsDesc: string, behaviorAnalyticsNotConfigured: string, behaviorAnalyticsEnableConfirm: string, behaviorAnalyticsDisableConfirm: string, behaviorAnalyticsStatusEnabled: string, behaviorAnalyticsStatusDisabled: string, behaviorAnalyticsStatusWithdrawalPending: string, behaviorAnalyticsActionFailed: string }} BehaviorAnalyticsSettingsCopy */
     // eslint-disable-next-line no-unused-vars, sonarjs/cognitive-complexity -- contract slot parameters kept; the settings page aggregates many form branches, splitting needs a dedicated design
-    const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, colorScheme, onColorSchemeChange, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = DEFAULT_ENABLED_SEARCH_PROVIDERS, onAddSearchProvider, onDeleteSearchProvider, searchApiKey: _searchApiKey, setSearchApiKey, searchHasSavedKey: _searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart: _searchNeedsRestart, languageNeedsRestart: _languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = /** @type {typeof t.uiSettingsDetail & BehaviorAnalyticsSettingsCopy} */ (t.uiSettingsDetail);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
@@ -2076,6 +2036,10 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
       const canConfigureDesktopNotifications = can('desktopNotifications');
       const canManageModels = can('modelManagement');
       const acpProvidersTabVisible = !!platformCapabilities.codexAcpSupported;
+      // The native hook for the global Alt voice shortcut only works on Windows; grey the
+      // toggle out with an explanation on other platforms (the in-window Alt fallback path
+      // still works) so macOS/Linux users never get a dead switch.
+      const voiceShortcutNativeAvailable = !!platformCapabilities.voiceShortcutNative;
       const canPickHostFiles = can('hostFilePicker');
       const [editingModel, setEditingModel] = useState(null);
       const [modelDeleteConfirm, setModelDeleteConfirm] = useState(/** @type {SettingsModelEntry | null} */ (null));
@@ -2108,6 +2072,9 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
         pending_event_count: 0,
         dropped_event_count: 0,
       };
+      const [voiceShortcutsEnabled, setVoiceShortcutsEnabled] = useState(() => voiceShortcutEnabled());
+      const [voiceShortcutIntroOpen, setVoiceShortcutIntroOpen] = useState(false);
+      const [voicePostprocessOn, setVoicePostprocessOn] = useState(() => voicePostprocessEnabled());
       const feedbackTypes = [
         { key: 'issue', label: t.feedbackIssue },
         { key: 'suggestion', label: t.feedbackSuggestion },
@@ -2175,6 +2142,61 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
           setBehaviorTelemetryBusy(false);
         }
       };
+      useEffect(() => {
+        function syncVoiceShortcutSetting(event) {
+          // storage changes for other keys do not trigger a re-read; a clear with key===null
+          // says nothing about the authoritative switch (Rust-side settings.json, replayed at
+          // startup) and is ignored too — same exact-key filtering as the Router, so a cleared
+          // store's default-false mirror cannot overwrite the display state.
+          if (event && event.type === 'storage' && event.key
+            && event.key !== VOICE_SHORTCUT_ENABLED_KEY
+            && event.key !== VOICE_POSTPROCESS_ENABLED_KEY) return;
+          if (event && event.type === 'storage' && !event.key) return;
+          if (event && event.detail && typeof event.detail.enabled === 'boolean') {
+            setVoiceShortcutsEnabled(event.detail.enabled);
+            return;
+          }
+          if (event && event.detail && typeof event.detail.postprocessEnabled === 'boolean') {
+            setVoicePostprocessOn(event.detail.postprocessEnabled);
+            return;
+          }
+          setVoiceShortcutsEnabled(voiceShortcutEnabled());
+          setVoicePostprocessOn(voicePostprocessEnabled());
+        }
+        window.addEventListener(VOICE_SHORTCUT_SETTINGS_EVENT, syncVoiceShortcutSetting);
+        window.addEventListener('storage', syncVoiceShortcutSetting);
+        return () => {
+          window.removeEventListener(VOICE_SHORTCUT_SETTINGS_EVENT, syncVoiceShortcutSetting);
+          window.removeEventListener('storage', syncVoiceShortcutSetting);
+        };
+      }, []);
+      function handleVoiceShortcutsEnabledChange(enabled) {
+        setVoiceShortcutsEnabled(!!enabled);
+        setVoiceShortcutEnabled(!!enabled);
+      }
+      function handleVoicePostprocessEnabledChange(enabled) {
+        setVoicePostprocessOn(!!enabled);
+        setVoicePostprocessEnabled(!!enabled);
+      }
+      function markVoiceShortcutIntroSeen() {
+        setVoiceShortcutIntroSeen(true);
+      }
+      function handleVoiceShortcutInfoOpen(event) {
+        if (event) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+        setVoiceShortcutIntroOpen(true);
+      }
+      function handleVoiceShortcutInfoClose() {
+        markVoiceShortcutIntroSeen();
+        setVoiceShortcutIntroOpen(false);
+      }
+      function handleVoiceShortcutInfoEnable(enabled) {
+        handleVoiceShortcutsEnabledChange(!!enabled);
+        markVoiceShortcutIntroSeen();
+        setVoiceShortcutIntroOpen(false);
+      }
       const resetFeedback = () => {
         setFeedbackDraft({ type: 'issue', title: '', description: '', attachments: [] });
         setFeedbackStatus({ state: 'idle', message: '', receipt: null });
@@ -2354,8 +2376,53 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
         ...(memory.current_focus || []).filter(item => item.status !== 'archived').map(item => ({ ...item, kind: 'current_focus', type: settingsCopy.memoryTypes.current_focus })),
         ...(memory.recent_activity || []).filter(item => item.status !== 'archived').map(item => ({ ...item, kind: 'recent_activity', type: settingsCopy.memoryTypes.recent_activity })),
       ];
+      const [memoryOrganizing, setMemoryOrganizing] = useState(false);
+      const [memoryOrganizeMessage, setMemoryOrganizeMessage] = useState('');
+      const [memoryLastOrganizedAt, setMemoryLastOrganizedAt] = useState('');
+      // Same app-language relative format as the neighboring memory cards
+      // (formatMemoryTime), not the browser-locale string: the two render side
+      // by side and must not disagree under an OS/app language mismatch.
+      const formatMemoryOrganizedAt = finishedAt => {
+        const time = new Date(finishedAt);
+        return Number.isNaN(time.getTime()) ? '' : formatMemoryTime({ updated_at: finishedAt }, t.uiSettingsView);
+      };
+      const loadMemoryOrganizeHistory = () => {
+        if (!bridge.available || !bridge.memory.loadOrganizeHistory) return;
+        bridge.memory.loadOrganizeHistory().then(history => {
+          if (history && history[0] && history[0].finished_at) {
+            setMemoryLastOrganizedAt(formatMemoryOrganizedAt(history[0].finished_at));
+          }
+        }).catch(() => {});
+      };
+      const organizeMemoryNow = async () => {
+        if (!bridge.available || !bridge.memory.organizeMemory || memoryOrganizing) return;
+        setMemoryOrganizing(true);
+        // Drop the previous run's result/error up front: leaving it rendered
+        // next to the spinner reads as if it described the run in progress.
+        setMemoryOrganizeMessage('');
+        try {
+          const result = await bridge.memory.organizeMemory();
+          const report = (result && result.report) || {};
+          const count = map => Object.values(map || {}).reduce((acc, n) => acc + (n || 0), 0);
+          setMemoryOrganizeMessage(report.no_change
+            ? t.uiSettingsView.memoryOrganizeNoChange
+            : t.uiSettingsView.memoryOrganizeSummary(count(report.merged), count(report.updated), count(report.deleted)));
+          loadMemoryOrganizeHistory();
+        } catch (error) {
+          // organizeMemory failures only throw without writing state: memory.error
+          // is the dedicated load-failure channel (rendered uniformly as the
+          // "加载失败" (load failed) copy, which would mislead about the cause),
+          // so the concrete reason is surfaced right here to the organize result line.
+          const reason = (error && error.message) || String(error);
+          setMemoryOrganizeMessage(t.uiSettingsView.memoryOrganizeFailed(reason));
+        } finally {
+          setMemoryOrganizing(false);
+        }
+      };
       useEffect(() => {
         if (activeSection === 'memory' && memoryEnabled && bridge.available && bridge.memory.loadMemoryOverview) bridge.memory.loadMemoryOverview();
+        if (activeSection === 'memory' && memoryEnabled) loadMemoryOrganizeHistory();
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- dependency list manually reviewed: history load follows the same gated section-open trigger as the overview load
       }, [activeSection, memoryEnabled]);
       useEffect(() => {
         if (updateFocusTick) setActiveSection('update');
@@ -2458,14 +2525,32 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
         if (!bridge.available || !bridge.settings.setSelectedPet) return Promise.resolve();
         return bridge.settings.setSelectedPet(id);
       };
-      const renderGeneral = () => (
+      const renderGeneral = () => {
+        const voiceShortcutLabel = (
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <span className="truncate">{t.uiSettings.voiceShortcutEnable}</span>
+            <button
+              type="button"
+              data-testid="voice-shortcut-info"
+              aria-label={t.uiSettings.voiceShortcutHelp}
+              title={t.uiSettings.voiceShortcutHelp}
+              onClick={handleVoiceShortcutInfoOpen}
+              className={`inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full text-[12px] font-semibold leading-none transition-colors ${
+                'bg-[#E5E5EA] text-[#6E6E73] hover:bg-[#D1D1D6] active:bg-[#C7C7CC] dark:bg-white/[0.10] dark:text-[#C7C7CC] dark:hover:bg-white/[0.16] dark:active:bg-white/[0.20]'
+              }`}
+            >
+              ?
+            </button>
+          </span>
+        );
+        return (
         <>
           <IOSSection title={t.uiSettings.appearance}>
             <IOSRow label={t.uiSettings.language} desc={t.uiSettings.languageDesc}>
               <SSegmented value={language} onChange={v => { setLanguage(v); setRestartDialog('language'); }} options={[{ key: 'zh', label: '中文' }, { key: 'en', label: 'English' }, { key: 'ja', label: '日本語' }]} />
             </IOSRow>
             <IOSRow label={t.uiSettings.theme} desc={t.uiSettings.themeDesc}>
-              <SSegmented value={activeTheme} onChange={setActiveTheme} options={[{ key: 'light', label: t.light }, { key: 'dark', label: t.dark }]} />
+              <SSegmented value={colorScheme} onChange={onColorSchemeChange} options={[{ key: 'system', label: t.followSystem }, { key: 'light', label: t.light }, { key: 'dark', label: t.dark }]} />
             </IOSRow>
           </IOSSection>
           <IOSSection title={t.sidebarSection}>
@@ -2479,6 +2564,35 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
               <IOSSwitch checked={taskCompletedNotif} onChange={setTaskCompletedNotif} />
             </IOSRow>
           </IOSSection>
+          )}
+          <IOSSection title={t.uiSettings.voiceShortcuts}>
+            <IOSRow label={voiceShortcutLabel} desc={voiceShortcutNativeAvailable ? t.uiSettings.voiceShortcutEnableDesc : (isWeb ? t.uiSettings.voiceShortcutWebDesc : t.uiSettings.voiceShortcutUnsupportedDesc)}>
+              {/* On non-Windows platforms, in-window Alt remains an available capability
+                  (except the global hook), so the toggle must stay operable; ANDing in
+                  nativeAvailable would make it impossible to turn the shortcut off here
+                  after enabling it in the intro. */}
+              <IOSSwitch checked={voiceShortcutsEnabled} onChange={handleVoiceShortcutsEnabledChange} />
+            </IOSRow>
+            {/* The web lane has no smart-organize pipeline at all (no
+                postprocess invoke in the web bridge), so rendering the
+                toggle there would be a dead switch contradicting
+                voiceShortcutWebDesc. */}
+            {!isWeb && (
+              <IOSRow label={t.uiSettings.voicePostprocess} desc={t.uiSettings.voicePostprocessDesc}>
+                <IOSSwitch checked={voicePostprocessOn} onChange={handleVoicePostprocessEnabledChange} />
+              </IOSRow>
+            )}
+          </IOSSection>
+          {voiceShortcutIntroOpen && (
+            <VoiceShortcutIntroModal
+              isDark={activeTheme === 'dark'}
+              copy={t}
+              shortcutEnabled={voiceShortcutsEnabled}
+              closeLabel={t.voiceIntroDone}
+              primaryLabel={voiceShortcutsEnabled ? t.voiceIntroDone : (t.voiceShortcutEnableTitle || t.uiSettings.voiceShortcutEnable)}
+              onClose={handleVoiceShortcutInfoClose}
+              onToggleShortcut={handleVoiceShortcutInfoEnable}
+            />
           )}
           {canUsePet && (
           <section className="mb-6">
@@ -2515,7 +2629,8 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
             />
           )}
         </>
-      );
+        );
+      };
       const renderModels = () => (
         <>
           {acpProvidersTabVisible && (
@@ -2671,10 +2786,30 @@ const SCard = React.forwardRef( // eslint-disable-line react/display-name -- for
                   {settingsCopy.memorySaveFailed}
                 </div>
               ) : memoryError && (
-                <div data-testid="memory-settings-error" role="alert" aria-live="polite" className="mb-4 rounded-[14px] bg-[#FF3B30]/10 px-4 py-3 text-[13px] leading-5 text-[#FF3B30]">
+                <div data-testid="memory-settings-error" role="alert" aria-live="polite" className={`mb-4 rounded-[14px] bg-[#FF3B30]/10 px-4 py-3 text-[13px] leading-5 text-[#FF3B30]`}>
                   {memoryErrorMessage}
                 </div>
               )}
+              <IOSSection>
+                <IOSRow label={t.uiSettingsView.memoryOrganize} desc={t.uiSettingsView.memoryOrganizeDesc}>
+                  <button
+                    type="button"
+                    data-testid="memory-organize-section"
+                    onClick={organizeMemoryNow}
+                    disabled={!bridge.available || memoryOrganizing}
+                    className={`shrink-0 inline-flex items-center gap-1.5 text-[14px] px-3 py-1.5 rounded-full disabled:opacity-50 ${actionButton('blue')}`}
+                  >
+                    <Sparkles size={13} className={memoryOrganizing ? 'animate-spin' : ''} />
+                    {memoryOrganizing ? t.uiSettingsView.memoryOrganizing : t.uiSettingsView.memoryOrganize}
+                  </button>
+                </IOSRow>
+                {memoryOrganizeMessage && (
+                  <div data-testid="memory-organize-result" className={`px-4 py-2.5 text-[13px] leading-5 text-[#8A8A8E] dark:text-[#98989D]`}>{memoryOrganizeMessage}</div>
+                )}
+                {memoryLastOrganizedAt && (
+                  <div data-testid="memory-last-organized" className={`px-4 py-2.5 text-[13px] leading-5 text-[#8A8A8E] dark:text-[#98989D]`}>{t.uiSettingsView.memoryLastOrganized(memoryLastOrganizedAt)}</div>
+                )}
+              </IOSSection>
               <IOSSection title={settingsCopy.profile}>
                 <div data-testid="memory-profile-call-name">
                   <IOSRow label={settingsCopy.userCallName} desc={settingsCopy.callNameDesc} value={identity.call_name || settingsCopy.notSet} onClick={() => editProfile('call_name')}>

@@ -14,9 +14,10 @@ import { AcpAgentLogo } from '../features/codex/AcpAgentLogo.jsx';
 import { CodexAcpView } from '../features/codex/LazyCodexAcpView.jsx';
 import { PinvouLogo } from '../components/PinvouLogo.jsx';
 import { MobileMoreSheet, MobileTabBar, MobileTopBar } from '../components/layout/MobileShell.jsx';
-import { VllmSetupProgress } from '../components/VllmSetupProgress.jsx';
 import { bridge, useBridgeState, usePlatformCapability, activeModelIsLocal, shouldShowApiKeyGate } from '../hooks/useBridge.js';
 import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewport.js';
+import { useSystemDarkMode } from '../hooks/useSystemDarkMode.js';
+import { COLOR_SCHEME_STORAGE_KEY, normalizeColorScheme, resolveTheme } from '../shared/color-scheme.js';
 import { DEFAULT_CHAT_TITLES, dict, createLatestLanguageGate, ensureLanguage, LANG_TO_TAG, initialSystemLanguage, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { TEMPORARY_GROUP_KEY, groupSessionsByFolder } from '../shared/sidebar-grouping.js';
@@ -48,11 +49,11 @@ import {
   selectArtifactsPane,
   settleBrowserOpen,
 } from '../features/browser/browser-pane-state.mjs';
-import { SettingsErrorBoundary } from '../features/settings/SettingsErrorBoundary.jsx';
 import { ViewErrorBoundary } from '../shared/ViewErrorBoundary.jsx';
 import { ChatView } from '../features/chat/ChatView.jsx';
 import { createPinvouModeScopeKey, savePinvouModeState } from '../features/chat/pinvou-mode-state.js';
 import { WebConnectionStatus } from '../features/web/WebConnectionStatus.jsx';
+import { VoiceShortcutRouter } from '../features/voice-composer/VoiceShortcutRouter.jsx';
 import { createPetActivationGuard } from '../features/pet/activation-guard.js';
 import { SessionAttachmentTitle } from '../features/attachments/SessionAttachmentTitle.jsx';
 import {
@@ -148,8 +149,8 @@ function emitPetEvent(ev, name, payload) {
   return Promise.resolve(false);
 }
 
-// 当前平台是否支持本地 vLLM。macOS/Windows 后端已 cfg 掉本地 vLLM 命令(discover_local_vllm /
-// detect_local_vllm_setup 等),前端默认预设与探测入口都据此守卫,避免新用户首启落在
+// 当前平台是否支持本地 vLLM。macOS/Windows 后端已 cfg 掉 discover_local_vllm 命令，
+// 前端默认预设与探测入口都据此守卫,避免新用户首启落在
 // 127.0.0.1:8000 永远连不上、或调用不存在的后端命令报错。与 bridge prefs::ModelPreset::default() 对齐。
 function defaultModelPresetForCapabilities(capabilities) {
   return capabilities && capabilities.localVllmSupported ? 'local_vllm' : 'deepseek';
@@ -226,7 +227,13 @@ function workspaceDisplayName(path) {
       const [activeChat, setActiveChat] = useState(null);
       const [currentView, setCurrentViewState] = useState('chat');
       const [sessionSyncEpoch, setSessionSyncEpoch] = useState(0);
-      const [activeTheme, setActiveTheme] = useState('dark');
+      // Color-scheme preference: `system` follows the OS (fresh-install default,
+      // live tracking), light/dark are explicit picks. activeTheme is the resolved
+      // theme to render; light when the system preference is undeterminable
+      // (see shared/color-scheme.js).
+      const systemDark = useSystemDarkMode();
+      const [colorScheme, setColorScheme] = useState('system');
+      const activeTheme = resolveTheme(colorScheme, systemDark);
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
       const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       // Browser state is scoped to workspace sessions: switching chats only shows
@@ -974,13 +981,6 @@ function workspaceDisplayName(path) {
       }, [currentView]);
       // 工具商店/卡片用 Tailwind dark: 变体(darkMode:'class'),全局挂 <html>.dark 让其随 app 主题切换
       useEffect(() => { document.documentElement.classList.toggle('dark', activeTheme === 'dark'); }, [activeTheme]);
-      // MegaCube(GB10) 首屏检测:仅启动一次,检测「预装但未启用」本地大模型环境(后端短路保证普通机零开销)。
-      useEffect(() => {
-        if (bridge.available && platformCapabilities.localVllmSupported) {
-          bridge.vllm.detectLocalVllmSetup();
-        }
-      }, [platformCapabilities.localVllmSupported]);
-      const [vllmDeclineConfirm, setVllmDeclineConfirm] = useState(false); // 引导框「不再提醒」二次确认子态
       const [language, setLanguage] = useState(() => {
         const systemLanguage = initialSystemLanguage();
         if (!isWeb) return systemLanguage;
@@ -1335,15 +1335,18 @@ function workspaceDisplayName(path) {
         if (!uiPrefsInitRef.current && bs.settings) {
           if (isWeb) {
             bootedLanguageRef.current = language;
+            // Retain the existing Web storage key and explicit light/dark choices.
+            let storedScheme = null;
+            try { storedScheme = window.localStorage.getItem(COLOR_SCHEME_STORAGE_KEY); } catch (_) {}
+            setColorScheme(normalizeColorScheme(storedScheme));
           } else {
             const lang = TAG_TO_LANG[bs.settings.language];
             // 落盘语言可能尚未装载(en/ja 惰性 chunk);ensure 后再切,失败停在系统语言
             if (lang && lang !== language) ensureLanguage(lang).then((ok) => { if (ok) setLanguage(lang); }).catch(() => {});
             // engine 已用此语言启动,作为「需重启」基线(切语言不重启 engine,见 commands.rs)
             bootedLanguageRef.current = lang || language;
-            // 后端 Theme 枚举(prefs.rs)只认 genesis/liquid-light/liquid-dark;深色=genesis,浅色=liquid-light
-            const th = bs.settings.theme === 'liquid-light' ? 'light' : 'dark';
-            if (th !== activeTheme) setActiveTheme(th);
+            // The backend migrates missing color_scheme from legacy theme once.
+            setColorScheme(normalizeColorScheme(bs.settings.color_scheme));
           }
           const notifications = bs.settings.notifications || {};
           setTaskCompletedNotif(notifications.task_completed !== false && notifications.enabled !== false);
@@ -1621,7 +1624,7 @@ function workspaceDisplayName(path) {
       const [codeNavExpanded, setCodeNavExpanded] = useState(false);
       // Code mode is a mode, not a page: after entering, navigating to output/monitor
       // pages keeps code mode — the sidebar stays code-styled and New chat still creates
-      // code sessions; only explicitly switching back to work/design, or opening a normal
+      // code sessions; only explicitly switching back to work, or opening a normal
       // chat session, exits it.
       const [codeModeOn, setCodeModeOn] = useState(false);
       // 任务列表的展示形态由 全部/代码 胶囊决定;未显式选择(null)时普通模式
@@ -2082,32 +2085,24 @@ function workspaceDisplayName(path) {
           updateActiveCodexSession(null);
           setCodexDraftEpoch(value => value + 1);
           setCurrentView('codex');
-        } else if (mode === 'design') {
-          setCodeModeOn(false);
-          // 仅草稿态（无活跃会话）才开新会话：从 code 页切回时 bridge 的
-          // activeSessionId 仍是原工作会话，强制 createNewSession 会新建一个
-          // plain 会话（默认 Yolo），把用户切过的 Plan 顶掉——表现为「从代码
-          // 切回工作/设计，审批模式变回 Yolo」。保留原会话，ChatView 挂载后
-          // 显示其实测 mode。与 ChatView 内 work↔design 本地切换（不建会话）
-          // 行为保持一致。
-          const scopeKey = bridge.activeSessionId
-            ? createPinvouModeScopeKey(bridge.activeSessionId)
-            : undefined;
-          savePinvouModeState({ mode: 'design' }, undefined, scopeKey);
-          if (bridge.available && !bridge.activeSessionId) bridge.sessions.createNewSession();
-          // code 页期间原工作会话的 mode 可能已被修改（code 页独立链路），
-          // 切回前拉一次实测值，避免 ChatView 挂载后显示旧 modeState。
-          if (bridge.available && bridge.activeSessionId) {
-            bridge.interaction.syncModeState().catch(() => {});
-          }
-          setCurrentView('chat');
         } else if (mode === 'work') {
           setCodeModeOn(false);
+          // Only the draft state (no active session) starts a new session:
+          // when switching back from the code page, bridge's activeSessionId
+          // is still the original work session; forcing createNewSession
+          // would create a new plain session (default Yolo) and clobber the
+          // user's chosen Plan — surfacing as "switch back from code to work
+          // and the approval mode reverts to Yolo". Keep the original
+          // session; ChatView shows its measured mode after mounting.
           const scopeKey = bridge.activeSessionId
             ? createPinvouModeScopeKey(bridge.activeSessionId)
             : undefined;
           savePinvouModeState({ mode: 'work' }, undefined, scopeKey);
           if (bridge.available && !bridge.activeSessionId) bridge.sessions.createNewSession();
+          // While on the code page the original work session's mode may have
+          // changed (the code page has its own chain), so pull a fresh value
+          // before switching back — ChatView must not mount with a stale
+          // modeState.
           if (bridge.available && bridge.activeSessionId) {
             bridge.interaction.syncModeState().catch(() => {});
           }
@@ -2519,14 +2514,20 @@ function workspaceDisplayName(path) {
         }
       }
 
-      function handleSetTheme(th) {
-        setActiveTheme(th);
+      function handleSetTheme(scheme) {
+        setColorScheme(scheme);
         if (isWeb) {
-          try { window.localStorage.setItem('pinvou.web.theme', th); } catch (_) {}
+          try { window.localStorage.setItem(COLOR_SCHEME_STORAGE_KEY, scheme); } catch (_) {}
           return;
         }
         if (bridge.available) {
-          bridge.settings.saveSettings({ theme: th === 'dark' ? 'genesis' : 'liquid-light' });
+          // Read the current OS snapshot: its change event may not have reached
+          // the React hook yet when the user selects system. Keep old clients
+          // consistent after a downgrade without persisting a stale appearance.
+          bridge.settings.saveSettings({
+            theme: resolveTheme(scheme) === 'dark' ? 'genesis' : 'liquid-light',
+            color_scheme: scheme,
+          });
         }
       }
 
@@ -2781,13 +2782,6 @@ function workspaceDisplayName(path) {
       };
 
       const apiKeyGateOpen = shouldShowApiKeyGate(bs, currentView, bridge.available);
-      const vllmSetupModalOpen = !!(
-        can('localModelSetup')
-        && bs
-        && bs.vllmSetup
-        && bs.vllmSetup.eligible
-        && !bs.vllmSetupDismissed
-      );
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
@@ -2795,7 +2789,6 @@ function workspaceDisplayName(path) {
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
         apiKeyGateOpen ? 'api-key' : '',
-        vllmSetupModalOpen ? 'vllm-setup' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
@@ -2855,6 +2848,35 @@ function workspaceDisplayName(path) {
         return () => { disposed = true; };
       }, [browserOverlayIntent, runBrowserUiTransition]);
 
+      // The 11 props identical across ChatView's two mount points (main chat / scheduled-run chat) are
+      // consolidated into one block; each mount point writes only its differing props (prefill / focus tick / code-mode entry),
+      // so two long prop lists cannot silently drift after copy-paste.
+      // The props below are NOT consolidated and stay as JSX literals (source-string contracts: tests regex-assert
+      // that main.jsx contains these literals; see the individual test files):
+      // - onBackScheduledRun：scheduled_tasks_unit.test.js
+      // - browserDockAvailable / rightDockActivePanelId /
+      //   onRightDockPanelSelectionChange：browser_native_surface.test.mjs
+      const chatViewBaseProps = {
+        theme: activeTheme,
+        t,
+        bs,
+        onOpenEditor: handleOpenPersonaEditor,
+        justInstalledTool,
+        setJustInstalledTool,
+        onGotoSettings: () => openSettingsSection('general'),
+        onGotoModelSettings: () => openSettingsSection('model'),
+        onGotoTools: () => navigateFromScheduledRun('toolStore'),
+        browserDockOpen: browserPaneOpen,
+        onOpenBrowserDock: openBrowserDock,
+        accountPlatformClient,
+      };
+      // The three byte-identical empty states in the sidebar task list (task groups / date groups / flat list) share one node.
+      const sidebarTaskEmptyNode = (
+        <div className={`px-3 py-3 text-[13px] ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#8A8F94]'}`}>
+          {t.sidebarTaskEmpty}
+        </div>
+      );
+
       return (
         <div data-testid="app-root" data-current-view={currentView} data-platform={isWeb ? 'web' : 'desktop'}
           className={`flex flex-col h-screen font-sans overflow-hidden antialiased transition-colors duration-300 ${activeTheme === 'dark' ? 'bg-[#131314] text-[#E3E3E3]' : 'bg-white text-[#1F1F1F]'}`}
@@ -2868,6 +2890,7 @@ function workspaceDisplayName(path) {
             paddingLeft: 'env(safe-area-inset-left)',
           } : undefined}>
 
+          <VoiceShortcutRouter />
           <WebConnectionStatus theme={activeTheme} t={t} />
 
           {/* 撕离拖拽 avatar:被拎起的标签,跟随光标(DOM 实现,丝滑跟手、不选中文字) */}
@@ -3310,16 +3333,12 @@ function workspaceDisplayName(path) {
                           })}
                         </>
                       ) : (
-                        <div className={`px-3 py-3 text-[13px] ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#8A8F94]'}`}>
-                          {t.sidebarTaskEmpty}
-                        </div>
+                        sidebarTaskEmptyNode
                       )
                     ) : !sidebarDateGrouping ? (
                       <div className="space-y-0.5">
                         {sidebarTaskHistory.length > 0 ? sidebarTaskHistory.map(renderSidebarTaskItem) : (
-                          <div className={`px-3 py-3 text-[13px] ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#8A8F94]'}`}>
-                            {t.sidebarTaskEmpty}
-                          </div>
+                          sidebarTaskEmptyNode
                         )}
                       </div>
                     ) : (sidebarPinnedHoisted.length > 0 || sidebarTaskGroups.length > 0) ? (
@@ -3351,9 +3370,7 @@ function workspaceDisplayName(path) {
                         })}
                       </>
                     ) : (
-                      <div className={`px-3 py-3 text-[13px] ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#8A8F94]'}`}>
-                        {t.sidebarTaskEmpty}
-                      </div>
+                      sidebarTaskEmptyNode
                     )}
                   </div>
                 </div>
@@ -3504,9 +3521,9 @@ function workspaceDisplayName(path) {
               <Suspense fallback={<ViewFallback />}>
             {currentView === 'monitor' && <LazyMonitorView theme={activeTheme} t={t} bs={bs} />}
             {currentView === 'settings' && (
-              <SettingsErrorBoundary theme={activeTheme} t={t}>
+              <ViewErrorBoundary heading={t.uiSettingsDetail.settingsLoadFailed} detail={t.uiSettingsDetail.settingsLoadFailedDetail} t={t}>
                 <LazySettingsView
-                  activeTheme={activeTheme} setActiveTheme={handleSetTheme}
+                  activeTheme={activeTheme} colorScheme={colorScheme} onColorSchemeChange={handleSetTheme}
                   language={language} setLanguage={handleSetLanguage}
                   superPerm={superPerm} setSuperPerm={handleToggleSuperPerm}
                   taskCompletedNotif={taskCompletedNotif} setTaskCompletedNotif={handleSetTaskCompletedNotif}
@@ -3543,7 +3560,7 @@ function workspaceDisplayName(path) {
                   initialSection={settingsInitialSection}
                   onCloseSettings={() => navigateFromScheduledRun(settingsReturnViewRef.current || 'chat')}
                 />
-              </SettingsErrorBoundary>
+              </ViewErrorBoundary>
             )}
             {teamRelayAvailable && currentView === 'teamRelay' && <TeamRelayView theme={activeTheme} t={t} onThemeChange={handleSetTheme} onUseAgent={handleTeamRelayUseAgent} onLoadCodeAgents={loadTeamRelayCodeAgents} />}
             {isCompactShell && browserActive && currentView === 'browser' && (
@@ -3557,7 +3574,21 @@ function workspaceDisplayName(path) {
             )}
             {currentView === 'toolStore' && <LazyToolStoreView theme={activeTheme} t={t} onNewChat={handleNewChat} />}
             {currentView === 'cardpool' && <LazyCardPoolView theme={activeTheme} t={t} bs={bs} onEquipped={() => { setCodeModeOn(false); setCurrentView('chat'); }} onAICreate={startAICard} initialMyOnly={poolMyOnly} />}
-            {currentView === 'chat' && <ChatView theme={activeTheme} t={t} bs={bs} prefill={chatPrefill} prefillAppend={chatPrefillAppend} focusComposerTick={petFocusComposerTick} onPrefillConsumed={() => { setChatPrefill(''); setChatPrefillAppend(false); }} onOpenEditor={handleOpenPersonaEditor} justInstalledTool={justInstalledTool} setJustInstalledTool={setJustInstalledTool} onGotoSettings={() => openSettingsSection('general')} onGotoModelSettings={() => openSettingsSection('model')} onGotoTools={() => navigateFromScheduledRun('toolStore')} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} codeModeAvailable={codexAcpSupported} onSwitchHomeMode={handleSwitchHomeMode} browserDockAvailable={browserDockAvailable} browserDockOpen={browserPaneOpen} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} onOpenBrowserDock={openBrowserDock} accountPlatformClient={accountPlatformClient} />}
+            {currentView === 'chat' && (
+              <ChatView
+                {...chatViewBaseProps}
+                prefill={chatPrefill}
+                prefillAppend={chatPrefillAppend}
+                focusComposerTick={petFocusComposerTick}
+                onPrefillConsumed={() => { setChatPrefill(''); setChatPrefillAppend(false); }}
+                onBackScheduledRun={() => navigateFromScheduledRun('scheduled')}
+                codeModeAvailable={codexAcpSupported}
+                onSwitchHomeMode={handleSwitchHomeMode}
+                browserDockAvailable={browserDockAvailable}
+                rightDockActivePanelId={browserDockSelectedPanelId}
+                onRightDockPanelSelectionChange={selectRightDockPanel}
+              />
+            )}
             {codexAcpSupported && currentView === 'codex' && (
               <CodexAcpView
                 theme={activeTheme}
@@ -3578,7 +3609,7 @@ function workspaceDisplayName(path) {
             )}
             {SCHEDULED_TASKS_ENTRY_ENABLED && currentView === 'scheduled' && (
               bs && bs.scheduledRunContext ? (
-                <ChatView theme={activeTheme} t={t} bs={bs} prefill="" onPrefillConsumed={() => {}} onOpenEditor={handleOpenPersonaEditor} justInstalledTool={justInstalledTool} setJustInstalledTool={setJustInstalledTool} onGotoSettings={() => openSettingsSection('general')} onGotoModelSettings={() => openSettingsSection('model')} onGotoTools={() => navigateFromScheduledRun('toolStore')} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} browserDockAvailable={browserDockAvailable} browserDockOpen={browserPaneOpen} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} onOpenBrowserDock={openBrowserDock} accountPlatformClient={accountPlatformClient} />
+                <ChatView {...chatViewBaseProps} prefill="" onPrefillConsumed={() => {}} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} browserDockAvailable={browserDockAvailable} rightDockActivePanelId={browserDockSelectedPanelId} onRightDockPanelSelectionChange={selectRightDockPanel} />
               ) : (
                 <LazyScheduledTasksView theme={activeTheme} t={t} onOpenChat={() => { setCodeModeOn(false); setCurrentView('chat'); }} onGotoModelSettings={() => openSettingsSection('model')} />
               )
@@ -3677,68 +3708,6 @@ function workspaceDisplayName(path) {
                     <button onClick={() => openSettingsSection('model')}
                       className="h-9 px-4 rounded-lg text-[14px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.apiKeyGateBtn}</button>
                   </div>
-                </div>
-              </div>
-            )}
-
-            {/* MegaCube(GB10) 本地大模型一键引导 —— 全局首屏弹窗;引导中禁止背景关窗 */}
-            {vllmSetupModalOpen && browserOverlayPublicationReady && (
-              // biome-ignore lint/a11y/useKeyWithClickEvents: keyboard users close the dialog through its real buttons
-              // biome-ignore lint/a11y/noStaticElementInteractions: this is a pointer-only backdrop around an accessible dialog card
-              <div className="fixed inset-0 z-[56] flex items-center justify-center p-6" style={{ background: 'rgba(0,0,0,.5)' }}
-                   onClick={() => { if (!bs.vllmBootstrapping) bridge.vllm.dismissVllmSetup(); }}>
-                <div className="w-full max-w-[440px] rounded-2xl p-6 ts-modal-in" onClick={(e) => e.stopPropagation()}
-                     style={{ background: activeTheme === 'dark' ? '#1E1F20' : '#FFFFFF', color: activeTheme === 'dark' ? '#E3E3E3' : '#1F1F1F', boxShadow: '0 12px 48px rgba(0,0,0,.35)' }}>
-                  <div className="flex items-center gap-2 mb-3">
-                    <PinvouLogo className="h-[22px] w-[22px] select-none" />
-                    <div className="text-[17px] font-semibold">{vllmDeclineConfirm && !bs.vllmBootstrapping && !bs.vllmBootstrapDone && !bs.vllmBootstrapError ? t.vllmDeclineTitle : t.vllmSetupTitle}</div>
-                  </div>
-                  {bs.vllmBootstrapping ? (
-                    <VllmSetupProgress phase={bs.vllmSetupPhase} attempt={bs.vllmSetupAttempt} isDark={activeTheme === 'dark'} t={t} />
-                  ) : bs.vllmBootstrapDone ? (
-                    <div>
-                      <div className="text-[14px] leading-relaxed mb-4">{t.vllmSetupDone}</div>
-                      <div className="flex justify-end">
-                        <button onClick={() => bridge.available && bridge.updater.restartApp()}
-                          className="h-9 px-4 rounded-lg text-[14px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.restartNow}</button>
-                      </div>
-                    </div>
-                  ) : bs.vllmBootstrapError ? (
-                    <div>
-                      <div className="text-[14px] font-medium mb-1" style={{ color: '#E5484D' }}>{t.vllmSetupFailed}</div>
-                      <div className="text-[13px] leading-relaxed mb-4 break-words" style={{ opacity: .75 }}>{bs.vllmBootstrapError}</div>
-                      <div className="flex justify-end gap-2">
-                        <button onClick={() => bridge.vllm.dismissVllmSetup()}
-                          className="h-9 px-4 rounded-lg text-[14px]" style={{ background: activeTheme === 'dark' ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)' }}>{t.vllmSetupSkip}</button>
-                        <button onClick={() => bridge.vllm.bootstrapLocalVllm()}
-                          className="h-9 px-4 rounded-lg text-[14px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.vllmSetupRetry}</button>
-                      </div>
-                    </div>
-                  ) : vllmDeclineConfirm ? (
-                    <div>
-                      <div className="text-[14px] leading-relaxed mb-4" style={{ opacity: .85 }}>{t.vllmDeclineDesc}</div>
-                      <div className="flex justify-end gap-2">
-                        <button onClick={() => setVllmDeclineConfirm(false)}
-                          className="h-9 px-4 rounded-lg text-[14px]" style={{ background: activeTheme === 'dark' ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)' }}>{t.vllmDeclineReconsider}</button>
-                        <button onClick={() => { setVllmDeclineConfirm(false); bridge.vllm.declineVllmSetup(); }}
-                          className="h-9 px-4 rounded-lg text-[14px] font-medium text-white" style={{ background: '#E5484D' }}>{t.vllmDeclineConfirm}</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <div className="text-[14px] leading-relaxed mb-4" style={{ opacity: .85 }}>{t.vllmSetupDesc}</div>
-                      <div className="flex items-center justify-between gap-2">
-                        <button onClick={() => setVllmDeclineConfirm(true)}
-                          className="h-9 px-3 rounded-lg text-[13px] hover:underline" style={{ color: activeTheme === 'dark' ? '#8E8E8E' : '#757575' }}>{t.vllmSetupNever}</button>
-                        <div className="flex gap-2">
-                          <button onClick={() => bridge.vllm.dismissVllmSetup()}
-                            className="h-9 px-4 rounded-lg text-[14px]" style={{ background: activeTheme === 'dark' ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)' }}>{t.vllmSetupSkip}</button>
-                          <button onClick={() => bridge.vllm.bootstrapLocalVllm()}
-                            className="h-9 px-4 rounded-lg text-[14px] font-medium text-white" style={{ background: '#0A84FF' }}>{t.vllmSetupEnable}</button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
             )}

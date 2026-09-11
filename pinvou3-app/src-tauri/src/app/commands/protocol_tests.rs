@@ -255,15 +255,20 @@ command_protocol!(
         "kb_model_download"
     ]
 );
-command_protocol!(
-    local_llm_protocol,
-    "local_llm.rs",
-    [
+#[test]
+fn preinstalled_model_startup_commands_are_not_registered() {
+    let app_entrypoint = include_str!("../../lib.rs");
+    for removed in [
         "detect_local_vllm_setup",
+        "bootstrap_local_vllm",
         "decline_local_vllm_setup",
-        "bootstrap_local_vllm"
-    ]
-);
+    ] {
+        assert!(
+            !app_entrypoint.contains(removed),
+            "removed preinstalled-model startup command is still registered: {removed}"
+        );
+    }
+}
 command_protocol!(
     marketplace_protocol,
     "marketplace.rs",
@@ -318,6 +323,8 @@ command_protocol!(
         "get_memory_overview",
         "list_pending_memory",
         "suggest_memory",
+        "organize_memory",
+        "get_memory_organize_history",
         "confirm_pending_memory",
         "ignore_pending_memory",
         "never_pending_memory",
@@ -586,7 +593,10 @@ command_protocol!(
     voice_protocol,
     "voice.rs",
     [
+        "set_voice_shortcut_enabled",
+        "set_voice_shortcut_recording",
         "transcribe_voice_audio",
+        "postprocess_voice_text",
         "reset_microphone_permission",
         "voice_asr_status",
         "install_voice_asr",

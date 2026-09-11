@@ -18,6 +18,27 @@ const settingsViewSource = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'features', 'settings', 'SettingsView.jsx'),
   'utf8',
 );
+const settingsI18nSources = ['zh', 'en', 'ja'].map((lang) => fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'shared', 'i18n', `${lang}.js`),
+  'utf8',
+));
+assert.match(
+  settingsViewSource,
+  /status === 402 \? 'billing'/,
+  'settings connection test must classify HTTP 402 as billing',
+);
+assert.match(
+  settingsViewSource,
+  /status === 402 \? settingsCopy\.connectionMessages\.billing/,
+  'settings connection test must provide a user-friendly billing message',
+);
+for (const settingsI18nSource of settingsI18nSources) {
+  assert.match(
+    settingsI18nSource,
+    /connectionMessages:\{[^}]*billing:/,
+    'settings billing message must be provided in every UI language',
+  );
+}
 const detectStart = settingsViewSource.indexOf('async function handleDetect()');
 const detectEnd = settingsViewSource.indexOf('function vllmStatusLabel(', detectStart);
 assert.notStrictEqual(detectStart, -1, 'local model detect handler must exist');
@@ -33,6 +54,38 @@ assert.doesNotMatch(
   /loaded !== false/,
   'unknown model state must not be treated as loaded during automatic fill',
 );
+const localDetectStart = settingsViewSource.indexOf('async function handleLocalDetect()');
+const localDetectEnd = settingsViewSource.indexOf('function startManualLocalModel()', localDetectStart);
+assert.notStrictEqual(localDetectStart, -1, 'local picker detect handler must exist');
+assert.notStrictEqual(localDetectEnd, -1, 'local picker detect handler boundary must exist');
+const localDetectSource = settingsViewSource.slice(localDetectStart, localDetectEnd);
+assert.match(
+  localDetectSource,
+  /customPort/,
+  'local picker detect must pass the optional custom port to the discovery command',
+);
+assert.match(
+  localDetectSource,
+  /65535/,
+  'local picker detect must validate the custom port range before probing',
+);
+for (const settingsI18nSource of settingsI18nSources) {
+  assert.match(
+    settingsI18nSource,
+    /localPortLabel:/,
+    'local model port input label must be provided in every UI language',
+  );
+  assert.match(
+    settingsI18nSource,
+    /localPortPlaceholder:/,
+    'local model port input placeholder must be provided in every UI language',
+  );
+  assert.match(
+    settingsI18nSource,
+    /localPortInvalid:/,
+    'local model port validation message must be provided in every UI language',
+  );
+}
 
 function loadPuppeteer() {
   try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
@@ -72,6 +125,7 @@ function injectSource() {
     var handlers = Object.create(null);
     var settings = {
       theme: 'liquid-light',
+      color_scheme: 'light',
       language: 'zh-Hans',
       memory_enabled: true,
       notifications: { enabled: true, task_completed: true },
@@ -172,6 +226,7 @@ function injectSource() {
           showSuperPermissionSettings: false,
           usesBundledDependencyInstaller: true,
           taskCompletionNotificationsDefault: true,
+          voiceShortcutNative: true,
         });
         case 'get_settings': return Promise.resolve(settings);
         case 'update_settings':
@@ -227,7 +282,6 @@ function injectSource() {
             max_model_len: 262144,
           },
         ] });
-        case 'detect_local_vllm_setup': return Promise.resolve({ eligible: false, has_packages: false, vllm_online: false });
         case 'get_selected_pet': return Promise.resolve('lingling');
         case 'get_behavior_telemetry_status': return Promise.resolve(Object.assign({}, behaviorTelemetry));
         case 'set_behavior_telemetry_enabled':
@@ -450,6 +504,47 @@ async function modalWidth(page, headingText) {
   await page.waitForFunction(() => document.querySelector('[data-testid="app-root"]')?.getAttribute('data-current-view') === 'settings', { timeout: 8000 });
   await sleep(400);
   rec('① 设置页可打开且无错误边界', await page.evaluate(() => document.body.innerText.includes('通用') && !document.body.innerText.includes('设置页加载失败')));
+
+  // Exercise the Official App -> SettingsView callback and actual bridge payload.
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
+  rec('① 旧显式浅色偏好不随系统变深', await page.evaluate(() => !document.documentElement.classList.contains('dark')));
+  await clickExact(page, '跟随系统');
+  await page.waitForFunction(() => document.documentElement.classList.contains('dark')
+    && window.__SETTINGS_TEST__.settings().color_scheme === 'system');
+  rec('① 跟随系统保存权威偏好并兼容旧主题字段', await page.evaluate(() =>
+    window.__SETTINGS_TEST__.settings().theme === 'genesis'));
+  await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'light' }]);
+  await page.waitForFunction(() => !document.documentElement.classList.contains('dark'));
+  await clickExact(page, '深色');
+  await page.waitForFunction(() => document.documentElement.classList.contains('dark')
+    && window.__SETTINGS_TEST__.settings().color_scheme === 'dark');
+  rec('① 显式深色覆盖系统浅色', await page.evaluate(() =>
+    window.__SETTINGS_TEST__.settings().theme === 'genesis'));
+  await clickExact(page, '浅色');
+  await page.waitForFunction(() => !document.documentElement.classList.contains('dark')
+    && window.__SETTINGS_TEST__.settings().color_scheme === 'light');
+
+  const voiceShortcutRow = await page.evaluate(() => {
+    const row = [...document.querySelectorAll('div')].filter(node => (node.textContent || '').includes('启用 Alt 唤醒语音') && node.querySelector('[role="switch"]')).pop();
+    const button = row && row.querySelector('[role="switch"]');
+    return {
+      exists: !!row,
+      enabled: !!button && !button.disabled,
+      nativeDesc: !!row && (row.textContent || '').includes('Alt 可语音输入；输入框已有文本时'),
+      unsupportedDescHidden: !!row && !(row.textContent || '').includes('仅 Windows 支持'),
+    };
+  });
+  rec('①e voice shortcut row renders enabled (not greyed out) on a supported platform', Object.values(voiceShortcutRow).every(Boolean), JSON.stringify(voiceShortcutRow));
+
+  // The info entry reuses the first-use intro card: clicking it must open the
+  // intro modal (without triggering ASR checks, downloads, or recording).
+  await page.click('[data-testid="voice-shortcut-info"]');
+  await page.waitForFunction(() => document.querySelector('#voice-shortcut-intro-title'), { timeout: 4000 });
+  rec('①f shortcut info entry opens the intro card', await page.evaluate(() =>
+    (document.querySelector('#voice-shortcut-intro-title')?.textContent || '').length > 0));
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !document.querySelector('#voice-shortcut-intro-title'), { timeout: 4000 });
+  rec('①g Esc closes the intro card', true);
 
   await page.click('[data-testid="settings-section-memory"]');
   await page.waitForFunction(() => (document.querySelector('[data-testid="memory-profile-call-name"]')?.textContent || '').includes('升级前称呼'));
@@ -870,6 +965,85 @@ async function modalWidth(page, headingText) {
     };
   });
   rec('⑥.3 本地模型自动检测展示多个服务与多个模型 ID', Object.values(localDetectUi).every(Boolean), JSON.stringify(localDetectUi));
+  // Custom port: fill 8080 and re-detect; the probe request must pass through
+  // customPort=8080 (the main path for picking a local model by port).
+  // The value is written through the native value setter: clearing a controlled
+  // input via select+backspace is unreliable.
+  const setPortDraft = value => page.evaluate(text => {
+    const input = document.querySelector('[data-testid="local-detect-port"]');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, text);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
+  await setPortDraft('8080');
+  await clickExact(page, '重新检测');
+  await sleep(500);
+  const localDetectWithPort = await page.evaluate(() => {
+    const calls = window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm');
+    const last = calls[calls.length - 1];
+    return { request: last && last.args && last.args.request };
+  });
+  rec('⑥.3b custom port is passed through to the discovery command',
+    localDetectWithPort.request
+      && localDetectWithPort.request.customPort === 8080
+      && localDetectWithPort.request.currentBaseUrl === null
+      && localDetectWithPort.request.savedBaseUrl === null,
+    JSON.stringify(localDetectWithPort));
+  // Invalid port (out of range): inline error, no probe request, and the
+  // previously detected candidates stay visible.
+  const discoverCallsBeforeInvalidPort = await page.evaluate(() =>
+    window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length);
+  await setPortDraft('99999');
+  await clickExact(page, '重新检测');
+  await sleep(300);
+  const localDetectInvalidPort = await page.evaluate(before => ({
+    errorShown: document.body.innerText.includes('端口无效：请输入 1-65535 之间的数字'),
+    noNewCall: window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length === before,
+    candidatesKept: document.body.innerText.includes('qwen2.5-coder:32b'),
+  }), discoverCallsBeforeInvalidPort);
+  rec('⑥.3c invalid port errors inline without probing and keeps previous candidates', Object.values(localDetectInvalidPort).every(Boolean), JSON.stringify(localDetectInvalidPort));
+  // Negative and decimal inputs: the raw value stays as typed, an inline error
+  // is shown, and no probe request is issued (the input must not silently
+  // rewrite -1 into 1 or 1.5 into 15 before validation).
+  const discoverCallsBeforeNegativePort = await page.evaluate(() =>
+    window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length);
+  await setPortDraft('-1');
+  await clickExact(page, '重新检测');
+  await sleep(300);
+  const localDetectNegativePort = await page.evaluate(before => ({
+    rawValueKept: document.querySelector('[data-testid="local-detect-port"]').value === '-1',
+    errorShown: document.body.innerText.includes('端口无效：请输入 1-65535 之间的数字'),
+    noNewCall: window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length === before,
+  }), discoverCallsBeforeNegativePort);
+  rec('⑥.3e negative port keeps the raw input, errors inline, issues no probe', Object.values(localDetectNegativePort).every(Boolean), JSON.stringify(localDetectNegativePort));
+  const discoverCallsBeforeDecimalPort = await page.evaluate(() =>
+    window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length);
+  await setPortDraft('1.5');
+  await clickExact(page, '重新检测');
+  await sleep(300);
+  const localDetectDecimalPort = await page.evaluate(before => ({
+    rawValueKept: document.querySelector('[data-testid="local-detect-port"]').value === '1.5',
+    errorShown: document.body.innerText.includes('端口无效：请输入 1-65535 之间的数字'),
+    noNewCall: window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length === before,
+  }), discoverCallsBeforeDecimalPort);
+  rec('⑥.3f decimal port keeps the raw input, errors inline, issues no probe', Object.values(localDetectDecimalPort).every(Boolean), JSON.stringify(localDetectDecimalPort));
+  // Clear the port and run a valid detection; this also locks the request shape
+  // for "empty port = default ports only" (customPort null).
+  await setPortDraft('');
+  await clickExact(page, '重新检测');
+  await sleep(500);
+  const localDetectPortCleared = await page.evaluate(() => {
+    const calls = window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm');
+    const last = calls[calls.length - 1];
+    return { request: last && last.args && last.args.request };
+  });
+  rec('⑥.3d cleared port sends a discovery request without a custom port',
+    localDetectPortCleared.request
+      && localDetectPortCleared.request.customPort === null
+      && localDetectPortCleared.request.currentBaseUrl === null
+      && localDetectPortCleared.request.savedBaseUrl === null,
+    JSON.stringify(localDetectPortCleared));
+  await sleep(100);
   const localAddClicked = await page.evaluate(() => {
     const title = [...document.querySelectorAll('span')].find(node => (node.textContent || '').trim() === 'qwen2.5-coder:32b');
     let row = title;

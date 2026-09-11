@@ -1,4 +1,4 @@
-﻿/**
+/**
  * tauri-bridge.js — Tauri 后端通信桥
  *
  * 封装所有 invoke/listen，维护前端状态，通过 pub/sub 推给 React。
@@ -263,11 +263,11 @@
     pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
-    // 三个工作区 lane（work/design/code）的全局默认 mode（null=该 lane 未显式
-    // 选过；缺省 code→plan、work/design→yolo）。草稿态 chip 显示与切换的事实源，
-    // 启动时经 get_mode_defaults 拉取；草稿切换经 set_mode_default 写回。
-    modeDefaults: { work: null, design: null, code: null },
-    // 当前聊天页所处 lane（work/design；code 页车道有自己的草稿控件逻辑）。
+    // 两个工作区 lane（work/code，design 并入 work）的全局默认 mode（null=该
+    // lane 未显式选过；缺省 code→plan、work→yolo）。草稿态 chip 显示与切换的
+    // 事实源，启动时经 get_mode_defaults 拉取；草稿切换经 set_mode_default 写回。
+    modeDefaults: { work: null, code: null },
+    // 当前聊天页所处 lane（work；code 页车道有自己的草稿控件逻辑）。
     // lane 是纯前端概念，由 ChatView 随 pinvouMode 显式传入，bridge 不读
     // localStorage。
     modeLane: "work",
@@ -332,16 +332,8 @@
     depsInstalling: false,    // 一键安装进行中(brew/apt/winget)
     depsInstallError: null,   // 安装失败原因(stderr 透传/取消/包管理器不可用)
     depsInstallProgress: null, // 安装进度 {package,current,total,detail}(后端 deps:install_progress 事件)
-    // MegaCube(GB10) 本地大模型一键引导:首屏检测结果 + 引导执行态
-    vllmSetup: null,          // {eligible, may_offer_setup, has_packages, engine_state:ready|starting|stopped|failed, ...}
-    vllmBootstrapping: false, // 引导进行中(pkexec + 拉起 + 轮询就绪)
-    vllmSetupPhase: null,     // 阶段:'authorizing'|'waiting'|'ready'(后端 vllm-setup:phase 事件驱动步骤指示)
-    vllmSetupAttempt: 0,      // waiting 阶段第几次探测(后端报)
-    vllmBootstrapDone: null,  // 成功结果 {base_url, model}, 据此显示「立即重启」
-    vllmBootstrapError: null, // 失败原因(pkexec stderr / 超时透传)
-    vllmSetupDismissed: false,// 本次会话内点了「跳过」,不再弹(不写持久标记)
     voiceInput: {
-      status: "idle",         // idle | requesting_permission | recording | transcribing | completed | cancelled | failed
+      status: "idle",         // idle | requesting_permission | recording | transcribing | postprocessing | completed | cancelled | failed
       message: "",
       error: null,
       category: null,
@@ -470,6 +462,7 @@
       attachStillParsing: "⚠️ Attachment still parsing, try again shortly",
       imageUnsupported: "The current model does not support images. Switch to an image-capable model, or configure a vision model in model settings.",
       imageUnknown: "Image input capability of the current model is unknown. If it supports images, set image input to “Supports images” in model settings; you can also configure a vision model.",
+      sessionModelStale: id => `The model selected for this conversation is no longer available (missing saved model: ${id}). Please pick a model again in this conversation.`,
       turnAlreadyInProgress: "⚠️ This chat is already processing a turn. The duplicate send was not executed.",
       steerDropped: "Queued message was not delivered (turn interrupted), cancelled",
       steerFailed: "Interrupt failed (session unavailable or engine not running); your text was restored to the input",
@@ -510,8 +503,20 @@
       voiceCancelled: "Voice input cancelled",
       voiceDeviceTimeout: "Microphone detection timed out; no recording device found. Check the device connection and the system microphone settings, then try again.",
       voiceTranscribing: "Transcribing…",
+      voicePostprocessing: "Polishing voice text…",
+      voiceTaskPostprocessing: "Rewriting voice task…",
+      voiceStructuredPostprocessing: "Structuring voice text…",
+      voiceEditPostprocessing: "Editing current input…",
       voiceRecordingTooShort: "Recording is too short. Please try again.",
+      voiceRecordingTooLong: "Recording is too long. Please shorten it and try again.",
+      voiceAudioInvalid: "The recorded audio is invalid. Please record again.",
+      voiceMicUnavailable: "The microphone is in use by another app. Close it or pick another microphone, then try again.",
       voiceWrittenBack: "Transcribed text inserted into the input box",
+      voiceTaskSent: "Voice task sent",
+      voiceEditPreviewReady: "Voice edit ready to review",
+      voiceEditNoChange: "Voice edit made no changes; original text kept",
+      voiceEditPostprocessFailed: "Voice edit processing failed; your input was not changed. Please try again.",
+      voiceEditPostprocessDisabled: "Smart organize is off, so voice edit is unavailable; your input was not changed. Enable smart organize in Settings to use voice edit.",
       voiceCheckingDevice: "Checking microphone…",
       voiceRequestingPermission: "Requesting microphone permission…",
       voiceWebviewNoMic: "This WebView does not support microphone capture.",
@@ -557,6 +562,7 @@
       attachStillParsing: "⚠️ 添付ファイルを解析中です。少し待ってから送信してください",
       imageUnsupported: "現在のモデルは画像に対応していません。画像対応モデルに切り替えるか、モデル設定でビジョンモデルを構成してください。",
       imageUnknown: "現在のモデルの画像入力能力は不明です。画像に対応している場合は、モデル設定で画像入力能力を「画像対応」に設定してください。ビジョンモデルを構成することもできます。",
+      sessionModelStale: id => `この会話で選択したモデルの設定は無効になりました（見つからない設定: ${id}）。会話でモデルを選び直してください。`,
       turnAlreadyInProgress: "⚠️ このチャットでは別のターンを処理中です。重複した送信は実行されませんでした。",
       steerDropped: "キューしたメッセージが未達（ターン中断）のため取り消しました",
       steerFailed: "割り込みに失敗しました（セッション無効またはエンジン未起動）。内容は入力欄に復元しました",
@@ -597,8 +603,20 @@
       voiceCancelled: "音声入力をキャンセルしました",
       voiceDeviceTimeout: "マイク検出がタイムアウトし、録音デバイスが見つかりませんでした。デバイスの接続とシステムのマイク設定を確認して再試行してください。",
       voiceTranscribing: "音声を認識中…",
+      voicePostprocessing: "音声テキストを整えています…",
+      voiceTaskPostprocessing: "音声タスクを整理しています…",
+      voiceStructuredPostprocessing: "リストに整理中…",
+      voiceEditPostprocessing: "現在の入力を編集しています…",
       voiceRecordingTooShort: "録音時間が短すぎます。再試行してください。",
+      voiceRecordingTooLong: "録音が長すぎます。短くして再試行してください。",
+      voiceAudioInvalid: "録音データが無効です。もう一度録音してください。",
+      voiceMicUnavailable: "マイクは他のアプリで使用中です。使用中のアプリを終了するか、別のマイクを選んでから再試行してください。",
       voiceWrittenBack: "音声を入力ボックスに書き込みました",
+      voiceTaskSent: "音声タスクを送信しました",
+      voiceEditPreviewReady: "音声編集を確認してください",
+      voiceEditNoChange: "音声編集による変更はありません。原文を保持しました",
+      voiceEditPostprocessFailed: "音声編集の処理に失敗しました。入力は変更されていません。再試行してください。",
+      voiceEditPostprocessDisabled: "スマート整理がオフのため音声編集は利用できません。入力は変更されていません。設定でスマート整理を有効にすると利用できます。",
       voiceCheckingDevice: "マイクデバイスを確認中…",
       voiceRequestingPermission: "マイクの権限をリクエスト中…",
       voiceWebviewNoMic: "この WebView はマイク入力に対応していません。",
@@ -644,6 +662,7 @@
       attachStillParsing: "⚠️ 附件还在解析,请稍后再发",
       imageUnsupported: "当前模型不支持图片。请切换到支持图片的模型，或在模型设置中配置视觉模型。",
       imageUnknown: "当前模型的图片输入能力未知。如果它支持图片，请在模型设置中将图片输入能力设为“支持图片”后重试；也可以配置视觉模型。",
+      sessionModelStale: id => `当前会话选择的模型配置已失效（缺失配置：${id}），请在对话中重新选择模型。`,
       turnAlreadyInProgress: "⚠️ 当前会话已有一轮正在处理，本次重复发送未执行。",
       steerDropped: "排队消息未送达（回合中断），已取消",
       steerFailed: "插队失败（会话不可用或引擎未运行），内容已恢复到输入框",
@@ -684,8 +703,20 @@
       voiceCancelled: "已取消语音输入",
       voiceDeviceTimeout: "麦克风检测超时，未发现可用录音设备。请检查设备连接和系统麦克风设置后重试。",
       voiceTranscribing: "正在识别语音…",
+      voicePostprocessing: "正在整理语音文本…",
+      voiceTaskPostprocessing: "正在整理语音任务…",
+      voiceStructuredPostprocessing: "正在整理成条目…",
+      voiceEditPostprocessing: "正在编辑当前输入…",
       voiceRecordingTooShort: "录音时间过短，请重试。",
+      voiceRecordingTooLong: "录音过长，请缩短后重试。",
+      voiceAudioInvalid: "录音数据无效，请重新录制。",
+      voiceMicUnavailable: "麦克风被其他应用占用，请关闭占用它的应用或更换麦克风后重试。",
       voiceWrittenBack: "语音已写入输入框",
+      voiceTaskSent: "语音任务已发送",
+      voiceEditPreviewReady: "语音编辑待确认",
+      voiceEditNoChange: "语音编辑无变化，已保留原文",
+      voiceEditPostprocessFailed: "语音编辑整理失败，当前输入未修改，请重试。",
+      voiceEditPostprocessDisabled: "智能整理已关闭，语音编辑不可用；当前输入未修改。可在设置中开启智能整理后使用语音编辑。",
       voiceCheckingDevice: "正在检测麦克风设备…",
       voiceRequestingPermission: "正在请求麦克风权限…",
       voiceWebviewNoMic: "当前 WebView 不支持麦克风采集。",
@@ -765,7 +796,7 @@
   var PINVOU_SCENE_EVENTS_STORAGE_PREFIX = "pinvou_scene_events_v1:";
   function normalizePinvouScene(scene) {
     scene = String(scene || "").trim();
-    return /^(work:document-writing|work:personal-workbench|design:poster|design:data-visualization)$/.test(scene) ? scene : "";
+    return /^(work:document-writing|work:personal-workbench|design:poster|design:data-visualization|design:ppt)$/.test(scene) ? scene : "";
   }
   function pinvouSceneStorageKey(sid) {
     return PINVOU_SCENE_EVENTS_STORAGE_PREFIX + String(sid || "").trim();
@@ -960,6 +991,7 @@
   var presentArtifactAbsPath = artifactTrackerFeature.presentArtifactAbsPath;
 
   var chatFeature = installBridgeFeature("chat", {
+    voice: function () { return voiceFeature; },
     state: state, invoke: invoke, TAURI: TAURI,
     sessionStates: sessionStates, turnUsageDirty: turnUsageDirty,
     personaPlaceholderTitles: personaPlaceholderTitles,
@@ -1202,9 +1234,9 @@
   }
 
   // 草稿态（无 active 会话）的 modeState：取当前 lane 的全局默认，缺省 yolo
-  // （与后端 plain 缺省方向一致）。三分 lane 语义：草稿显示 = 本 lane 全局默认。
+  // （与后端 plain 缺省方向一致）。两分 lane 语义：草稿显示 = 本 lane 全局默认。
   function currentDraftModeState() {
-    var lane = state.modeLane === "design" ? "design" : "work";
+    var lane = state.modeLane === "code" ? "code" : "work";
     var d = state.modeDefaults && state.modeDefaults[lane];
     return { mode: d || "yolo", multiAgent: false };
   }
@@ -1536,7 +1568,7 @@
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet", "behaviorTelemetry"],
     models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels"],
-    vllm: ["vllmBootstrapDone", "vllmBootstrapError", "vllmBootstrapping", "vllmSetup", "vllmSetupAttempt", "vllmSetupDismissed", "vllmSetupPhase"],
+    vllm: [],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     personas: ["activePersona", "personaEvents", "personaPool"],
     memory: ["memory"],
@@ -2310,10 +2342,6 @@
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
-  var detectLocalVllmSetup = settingsFeature.detectLocalVllmSetup;
-  var bootstrapLocalVllm = settingsFeature.bootstrapLocalVllm;
-  var dismissVllmSetup = settingsFeature.dismissVllmSetup;
-  var declineVllmSetup = settingsFeature.declineVllmSetup;
   var getEffectiveModelConfig = settingsFeature.getEffectiveModelConfig;
   var loadModels = settingsFeature.loadModels;
   var saveModel = settingsFeature.saveModel;
@@ -2395,6 +2423,8 @@
   var confirmMemoryCandidate = memoryFeature.confirmMemoryCandidate;
   var ignoreMemoryCandidate = memoryFeature.ignoreMemoryCandidate;
   var neverMemoryCandidate = memoryFeature.neverMemoryCandidate;
+  var organizeMemory = memoryFeature.organizeMemory;
+  var loadOrganizeHistory = memoryFeature.loadOrganizeHistory;
   var artifactsFeature = installBridgeFeature("artifacts", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, dialogOpen: dialogOpen, basename: basename, isDeliverable: isDeliverable, isAbsPath: isAbsPath, sessionStates: sessionStates, discardManagedAttachment: discardManagedAttachment });
   var artifactInfo = artifactsFeature.artifactInfo;
   var readArtifactText = artifactsFeature.readArtifactText;
@@ -2474,6 +2504,8 @@
   var closeVoiceAsrSetup = voiceFeature.closeVoiceAsrSetup;
   var cancelVoiceInput = voiceFeature.cancelVoiceInput;
   var clearVoiceInput = voiceFeature.clearVoiceInput;
+  var setVoiceShortcutEnabled = voiceFeature.setVoiceShortcutEnabled;
+  var syncVoiceShortcutRecording = voiceFeature.syncVoiceShortcutRecording;
   var abandonVoiceResult = voiceFeature.abandonVoiceResult;
   var appendVoiceText = voiceFeature.appendVoiceText;
   var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
@@ -2602,7 +2634,7 @@
       startupMark("bridge:draft_entered");
     }
     if (needsSessionRuntime) {
-      // lane 全局默认（work/design/code）是草稿态 mode chip 的事实源，启动即拉取。
+      // lane 全局默认（work/code）是草稿态 mode chip 的事实源，启动即拉取。
       startupAwait("bridge:refresh_mode_defaults", refreshModeDefaults);
     }
     if (!isDetachedWindow || detachedWindowKind === "session" || detachedWindowKind === "cardpool") {
@@ -2647,6 +2679,7 @@
       setComposerDraft: setComposerDraft,
       retryFirstTurn: retryFirstTurn,
       prefillComposer: prefillComposer,
+      restoreTaskDraft: chatFeature.restoreTaskDraft,
       removeQueued: removeQueued,
       prioritizeQueued: prioritizeQueued,
       editQueued: editQueued,
@@ -2663,7 +2696,13 @@
       closeVoiceAsrSetup: closeVoiceAsrSetup,
       cancelVoiceInput: cancelVoiceInput,
       clearVoiceInput: clearVoiceInput,
+      setVoiceShortcutEnabled: setVoiceShortcutEnabled,
+      syncVoiceShortcutRecording: syncVoiceShortcutRecording,
       abandonVoiceResult: abandonVoiceResult,
+      getVoiceOperationId: voiceFeature.getVoiceOperationId,
+      beginVoiceSubmission: voiceFeature.beginVoiceSubmission,
+      completeVoiceSubmission: voiceFeature.completeVoiceSubmission,
+      dismissVoiceInput: voiceFeature.dismissVoiceInput,
       appendVoiceText: appendVoiceText,
       runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     },
@@ -2732,10 +2771,6 @@
     feedback: { submitFeedback: submitFeedback },
     vllm: {
       discoverLocalVllm: discoverLocalVllm,
-      detectLocalVllmSetup: detectLocalVllmSetup,
-      bootstrapLocalVllm: bootstrapLocalVllm,
-      dismissVllmSetup: dismissVllmSetup,
-      declineVllmSetup: declineVllmSetup,
     },
     models: {
       getEffectiveModelConfig: getEffectiveModelConfig,
@@ -2847,6 +2882,8 @@
       confirmMemoryCandidate: confirmMemoryCandidate,
       ignoreMemoryCandidate: ignoreMemoryCandidate,
       neverMemoryCandidate: neverMemoryCandidate,
+      organizeMemory: organizeMemory,
+      loadOrganizeHistory: loadOrganizeHistory,
     },
     updater: {
       checkForUpdate: checkForUpdate,

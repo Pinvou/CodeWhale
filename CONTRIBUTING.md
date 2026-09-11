@@ -107,6 +107,10 @@ fork, base repository, or non-`main` base uses the unchanged ordinary PR routing
 An incomplete Merge Group member chain, API/diff failure, malformed version field,
 mixed release change, or unknown policy state fails closed to the complete Windows
 job; `required-gate` does not accept a skipped Windows result in that state.
+An entry explicitly reported as `QUEUED` with both `baseCommit` and `headCommit`
+present and null has not been built and is excluded from the member-chain index.
+Missing fields, partial commit pairs, and unknown states still fail closed; the
+event's complete base-to-head chain and every actual member remain mandatory.
 `ci:full-rust` continues to force the ordinary full route.
 Release-chain changes run lightweight contract tests only; full deb, dmg, and nsis
 packages are built only after a
@@ -116,7 +120,8 @@ The merge queue runs the applicable product gates against the actual combined tr
 of the queued pull request and the latest `main`. Rust changes run formatting,
 Clippy, compile, and dependency-policy checks there. High-blast-radius Rust changes
 also run the full Linux behavior regression on the combined tree; Windows coverage
-already ran on the ready PR and is not repeated. Frontend changes run browser smokes
+already ran on the ready PR and is not repeated unless the fail-closed policy
+above requires it. Frontend changes run browser smokes
 selected from the merge group's actual base/head diff; shared, unknown, or test-
 infrastructure paths fall back to the complete smoke set. Every retained `main` push
 runs cumulative Linux compile verification (full test execution stays on the
