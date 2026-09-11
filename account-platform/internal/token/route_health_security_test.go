@@ -2,11 +2,39 @@ package token
 
 import (
 	"context"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 )
+
+func TestNewAPIGatewayAdapterUsesOnlyItsConfiguredProviderCA(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-flash"}]}`))
+	}))
+	defer server.Close()
+
+	caFile := filepath.Join(t.TempDir(), "provider-ca.pem")
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	if err := os.WriteFile(caFile, certificate, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter, err := NewNewAPIGatewayAdapterWithCA(caFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, err := adapter.DiscoverModels(context.Background(), server.URL, []byte("service-token"))
+	if err != nil || len(models) != 1 || models[0].UpstreamModelRef != "deepseek-flash" {
+		t.Fatalf("provider-specific CA was not applied: models=%v err=%v", models, err)
+	}
+	if _, err := NewNewAPIGatewayAdapterWithCA(filepath.Join(t.TempDir(), "missing.pem")); err == nil {
+		t.Fatal("missing provider CA was accepted")
+	}
+}
 
 func TestRouteHealthProbeTargetRequiresProviderAdapterAndAllowedURL(t *testing.T) {
 	policy, err := NewProviderURLPolicy("development", []string{"provider.invalid"})

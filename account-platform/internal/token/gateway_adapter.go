@@ -3,12 +3,15 @@ package token
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -62,11 +65,37 @@ func NewNewAPIGatewayAdapter() *HTTPUpstreamClient {
 	return newHTTPUpstreamClient("new-api-v1", []string{"X-Oneapi-Request-Id"})
 }
 
+// NewNewAPIGatewayAdapterWithCA adds a provider-specific trust root without
+// widening the process-wide trust store used by unrelated HTTP clients.
+func NewNewAPIGatewayAdapterWithCA(caFile string) (*HTTPUpstreamClient, error) {
+	return newHTTPUpstreamClientWithCA("new-api-v1", []string{"X-Oneapi-Request-Id"}, caFile)
+}
+
 func newHTTPUpstreamClient(adapterVersion string, referenceHeaders []string) *HTTPUpstreamClient {
+	client, _ := newHTTPUpstreamClientWithCA(adapterVersion, referenceHeaders, "")
+	return client
+}
+
+func newHTTPUpstreamClientWithCA(adapterVersion string, referenceHeaders []string, caFile string) (*HTTPUpstreamClient, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	caFile = strings.TrimSpace(caFile)
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read model provider CA: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil {
+			roots = x509.NewCertPool()
+		}
+		if !roots.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("model provider CA contains no valid certificates")
+		}
+		transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	}
 	transport.ResponseHeaderTimeout = 30 * time.Second
 	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	return &HTTPUpstreamClient{client: &http.Client{Transport: observability.NewHTTPTransport(transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, adapterVersion: adapterVersion, requestPath: "/v1/chat/completions", referenceHeaders: referenceHeaders}
+	return &HTTPUpstreamClient{client: &http.Client{Transport: observability.NewHTTPTransport(transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, adapterVersion: adapterVersion, requestPath: "/v1/chat/completions", referenceHeaders: referenceHeaders}, nil
 }
 
 func (c *HTTPUpstreamClient) AdapterVersion() string { return c.adapterVersion }

@@ -196,7 +196,10 @@ func main() {
 	var evidenceClient token.UsageEvidenceProvider
 	switch adapterName {
 	case "NEW_API":
-		gatewayAdapter = token.NewNewAPIGatewayAdapter()
+		gatewayAdapter, err = token.NewNewAPIGatewayAdapterWithCA(os.Getenv("TOKEN_PROVIDER_CA_FILE"))
+		if err != nil {
+			log.Fatal("New API provider trust is not configured: ", err)
+		}
 		reconciliationUserID, parseErr := strconv.ParseInt(strings.TrimSpace(os.Getenv("TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID")), 10, 64)
 		if parseErr != nil || reconciliationUserID <= 0 {
 			log.Fatal("TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID must be a positive integer")

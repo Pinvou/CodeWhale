@@ -86,6 +86,7 @@ services:
       TOKEN_SECRET_KEY_ID: ${TOKEN_SECRET_KEY_ID:?set remote secret key reference}
       TOKEN_LOCAL_KEK_BASE64: ""
       TOKEN_PROVIDER_ALLOWED_HOSTS: ${TOKEN_PROVIDER_ALLOWED_HOSTS:?set provider allowlist}
+      TOKEN_PROVIDER_CA_FILE: ${TOKEN_PROVIDER_CA_FILE:-}
     volumes:
       - type: bind
         source: ${WORKLOAD_TOKEN_DIRECTORY:?set externally rotated per-service token directory}/token-gateway
