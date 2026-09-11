@@ -20,6 +20,32 @@
     @media(max-width:1000px){.panels{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}.table-wrap{max-height:none}.table-card{overflow:auto}}
     @media(max-width:680px){.topbar{height:62px;padding:0 16px}.top-brand small,.live{display:none}.content{padding:21px 16px 36px}.headline{align-items:flex-start}.headline h1{font-size:23px}.refresh{display:none}.metrics{grid-template-columns:1fr}.panels{grid-template-columns:1fr}.donut-wrap{justify-content:center}.table-head{align-items:flex-start}.tools .search{display:none}}
   </style>
+  <style>
+    .rank-card-full-width { grid-column: 1 / -1; }
+    th.stats-sortable-column { white-space: nowrap; }
+    .stats-sort-label-line,.stats-sort-options { display:inline-flex;align-items:center;gap:5px; }
+    .stats-sort-trigger { appearance:none;border:0;padding:0;background:transparent;color:inherit;font:inherit;font-weight:inherit;cursor:pointer;white-space:nowrap; }
+    .stats-sort-trigger::after {
+      content: " ↕";
+      color: #94a3b8;
+      font-size: 11px;
+    }
+    th[aria-sort="ascending"] .stats-sort-trigger[aria-pressed="true"]::after {
+      content: " ↑";
+      color: #3267e3;
+    }
+    th[aria-sort="descending"] .stats-sort-trigger[aria-pressed="true"]::after {
+      content: " ↓";
+      color: #3267e3;
+    }
+    .stats-sort-trigger:disabled { cursor:default; }
+    .stats-sort-trigger:disabled::after { content:""; }
+    .stats-sort-trigger:focus-visible {
+      outline: 2px solid #3267e3;
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+  </style>
 </head>
 <body>
 <div class="app">
@@ -73,15 +99,15 @@
           <article class="metric" style="--accent:#ed9153;--tint:#fff3eb"><div class="metric-head"><span>每语音安装触发</span><span class="metric-icon">÷</span></div><div class="metric-main"><div><div class="number"><span id="voiceStartsPerVoiceUser">—</span><span class="number-unit">次</span></div><div class="note">触发次数 / 语音安装</div></div><span class="trend">安装实例</span></div></article>
         </section>
         <section class="rank-grid">
-          <article class="card table-card"><div class="table-head"><div class="table-title"><h2>激活漏斗</h2><p>成熟 cohort 在 24 小时内从环境就绪到首次任务成功</p></div></div><div class="table-wrap"><table><thead><tr><th>进入 cohort</th><th>成熟 cohort</th><th>环境就绪</th><th>任务提交</th><th>任务接纳</th><th>首输出</th><th>任务成功</th><th>激活率</th><th>首次价值 P50/P75/P90</th></tr></thead><tbody id="activationFunnelRows"></tbody></table></div></article>
-          <article class="card table-card"><div class="table-head"><div class="table-title"><h2>语音输入漏斗</h2><p>从入口点击关联到最终任务技术成功</p></div></div><div class="table-wrap"><table><thead><tr><th>入口</th><th>授权</th><th>开始录音</th><th>识别完成</th><th>消息提交</th><th>任务成功</th><th>失败</th><th>取消</th><th>入口→提交</th><th>提交→成功</th></tr></thead><tbody id="voiceFunnelRows"></tbody></table></div></article>
+          <article class="card table-card rank-card-full-width"><div class="table-head"><div class="table-title"><h2>激活漏斗</h2><p>成熟 cohort 在 24 小时内从环境就绪到首次任务成功</p></div></div><div class="table-wrap"><table><thead><tr><th>进入 cohort</th><th>成熟 cohort</th><th>环境就绪</th><th>任务提交</th><th>任务接纳</th><th>首输出</th><th>任务成功</th><th>激活率</th><th>首次价值 P50/P75/P90</th></tr></thead><tbody id="activationFunnelRows"></tbody></table></div></article>
+          <article class="card table-card rank-card-full-width"><div class="table-head"><div class="table-title"><h2>语音输入漏斗</h2><p>从入口点击关联到最终任务技术成功</p></div></div><div class="table-wrap"><table><thead><tr><th>入口</th><th>授权</th><th>开始录音</th><th>识别完成</th><th>消息提交</th><th>任务成功</th><th>失败</th><th>取消</th><th>入口→提交</th><th>提交→成功</th></tr></thead><tbody id="voiceFunnelRows"></tbody></table></div></article>
           <article class="card table-card"><div class="table-head"><div class="table-title"><h2>任务错误分类</h2><p>仅展示受控 error_category</p></div></div><div class="table-wrap"><table><thead><tr><th>错误分类</th><th>次数</th><th>占失败终态</th></tr></thead><tbody id="errorRows"></tbody></table></div></article>
         </section>
         <section class="rank-grid">
-          <article class="card table-card"><div class="table-head"><div class="table-title"><h2>工具调用排行榜</h2><p>按累计调用次数排序；渗透率分母为同期成功活跃安装</p></div><div class="seg behavior-range"><button data-range="today">今日</button><button data-range="7">7 天</button><button class="active" data-range="30">30 天</button></div></div><div class="table-wrap"><table><thead><tr><th>工具</th><th>类型</th><th>调用次数</th><th>调用安装数</th><th>调用渗透率</th><th>成功率</th></tr></thead><tbody id="toolCallRows"></tbody></table></div></article>
-          <article class="card table-card"><div class="table-head"><div class="table-title"><h2>工具采用漏斗</h2><p>曝光 → 安装 → 配置 → 首个成功调用；失败与取消单列</p></div></div><div class="table-wrap"><table><thead><tr><th>工具</th><th>类型</th><th>曝光</th><th>详情</th><th>安装开始</th><th>安装成功</th><th>配置成功</th><th>成功调用</th><th>失败/取消</th><th>曝光→安装</th><th>配置→调用</th><th>配置→调用 P50</th></tr></thead><tbody id="toolInstallRows"></tbody></table></div></article>
-          <article class="card table-card"><div class="table-head"><div class="table-title"><h2>场景价值漏斗</h2><p>曝光 → 选择 → 提交 → 技术成功 → 显性价值</p></div></div><div class="table-wrap"><table><thead><tr><th>一级场景</th><th>二级场景</th><th>曝光</th><th>选择率</th><th>提交率</th><th>任务成功率</th><th>显性价值率</th><th>负向反馈率</th><th>耗时 P50</th><th>置信度</th></tr></thead><tbody id="sceneRows"></tbody></table></div></article>
-          <article class="card table-card"><div class="table-head"><div class="table-title"><h2>模型质量排行榜</h2><p>按成功活跃安装中的使用数排序，渗透率使用同期成功活跃安装分母</p></div></div><div class="table-wrap"><table><thead><tr><th>模型</th><th>厂商</th><th>使用安装数</th><th>使用渗透率</th><th>任务调用次数</th><th>任务成功率</th><th>总耗时 P50/P90</th><th>选择来源</th><th>显式选择</th></tr></thead><tbody id="modelRows"></tbody></table></div></article>
+          <article class="card table-card rank-card-full-width"><div class="table-head"><div class="table-title"><h2>工具调用排行榜</h2><p>按累计调用次数排序；渗透率分母为同期成功活跃安装</p></div><div class="seg behavior-range"><button data-range="today">今日</button><button data-range="7">7 天</button><button class="active" data-range="30">30 天</button></div></div><div class="table-wrap"><table><thead><tr><th>工具</th><th>类型</th><th>调用次数</th><th>调用安装数</th><th>调用渗透率</th><th>成功率</th></tr></thead><tbody id="toolCallRows"></tbody></table></div></article>
+          <article class="card table-card rank-card-full-width"><div class="table-head"><div class="table-title"><h2>工具采用漏斗</h2><p>曝光 → 安装 → 配置 → 首个成功调用；失败与取消单列</p></div></div><div class="table-wrap"><table><thead><tr><th>工具</th><th>类型</th><th>曝光</th><th>详情</th><th>安装开始</th><th>安装成功</th><th>配置成功</th><th>成功调用</th><th>失败/取消</th><th>曝光→安装</th><th>配置→调用</th><th>配置→调用 P50</th></tr></thead><tbody id="toolInstallRows"></tbody></table></div></article>
+          <article class="card table-card rank-card-full-width"><div class="table-head"><div class="table-title"><h2>场景价值漏斗</h2><p>曝光 → 选择 → 提交 → 技术成功 → 显性价值</p></div></div><div class="table-wrap"><table><thead><tr><th>一级场景</th><th>二级场景</th><th>曝光</th><th>选择率</th><th>提交率</th><th>任务成功率</th><th>显性价值率</th><th>负向反馈率</th><th>耗时 P50</th><th>置信度</th></tr></thead><tbody id="sceneRows"></tbody></table></div></article>
+          <article class="card table-card rank-card-full-width"><div class="table-head"><div class="table-title"><h2>模型质量排行榜</h2><p>按成功活跃安装中的使用数排序，渗透率使用同期成功活跃安装分母</p></div></div><div class="table-wrap"><table><thead><tr><th>模型</th><th>厂商</th><th>使用安装数</th><th>使用渗透率</th><th>任务调用次数</th><th>任务成功率</th><th>总耗时 P50/P90</th><th>选择来源</th><th>显式选择</th></tr></thead><tbody id="modelRows"></tbody></table></div></article>
           <article class="card table-card"><div class="table-head"><div class="table-title"><h2>版本质量对比</h2><p>按版本、平台、架构分层；样本不足 30 时不展示百分比</p></div></div><div class="table-wrap"><table><thead><tr><th>版本</th><th>平台 / 架构</th><th>样本</th><th>接纳率</th><th>成功率</th><th>取消率</th><th>首输出 P50/P90</th><th>总耗时 P50/P90</th><th>置信度</th></tr></thead><tbody id="versionQualityRows"></tbody></table></div></article>
         </section>
       </section>
@@ -167,5 +193,198 @@
   $('logout').addEventListener('click',async()=>{try{await api('logout',{method:'POST',body:'{}'})}catch{}state.role=null;showLogin()});
   refreshData().then(()=>{if($('loginLayer').classList.contains('hidden')&&!state.timer)state.timer=setInterval(refreshData,30000)});
 </script>
+  <script id="stats-table-sorting">
+    (() => {
+      const sortStates = new WeakMap();
+      const pendingTables = new Set();
+      let flushScheduled = false;
+
+      function selectionSourceEntries(text) {
+        return String(text || "").split("·").map((part) => {
+          const match = part.trim().match(/^(.*?)\s+([\d,]+)$/);
+          return match ? { key: match[1].trim(), value: Number(match[2].replace(/,/g, "")) } : null;
+        }).filter(Boolean);
+      }
+
+      function sortableValue(text, valueIndex = -1, valueKey = "") {
+        const source = String(text || "");
+        if (valueKey) return selectionSourceEntries(source).find((entry) => entry.key === valueKey)?.value ?? null;
+        const rawValue = valueIndex >= 0 ? source.split(/\s*\/\s*/)[valueIndex] : source;
+        const value = String(rawValue ?? "").replace(/\s+/g, " ").trim();
+        if (!value || value === "—" || value === "-" || /^(?:样本不足|暂无数据|未接入|不可用)$/.test(value)) return null;
+        const numeric = value.match(/^([-+]?\d[\d,]*(?:\.\d+)?)\s*(?:%|次|台|个|项|毫秒|ms|秒|s|分钟|分|小时|h|天|倍)?(?:\s*\/.*)?$/i);
+        if (numeric) return Number(numeric[1].replace(/,/g, ""));
+        return value;
+      }
+
+      function compareValues(left, right, direction) {
+        if (left === null && right === null) return 0;
+        if (left === null) return 1;
+        if (right === null) return -1;
+        const compared = typeof left === "number" && typeof right === "number"
+          ? left - right
+          : String(left).localeCompare(String(right), "zh-CN", { numeric: true, sensitivity: "base" });
+        return direction === "ascending" ? compared : -compared;
+      }
+
+      function hasMultipleRows(table) {
+        return Array.from(table.tBodies).reduce((total, tbody) => total + tbody.rows.length, 0) > 1;
+      }
+
+      function updateSortAvailability(table) {
+        syncDynamicSortOptions(table);
+        const enabled = hasMultipleRows(table);
+        if (!enabled) sortStates.delete(table);
+        const state = sortStates.get(table);
+        const headers = Array.from(table.tHead?.rows[table.tHead.rows.length - 1]?.cells || []);
+        headers.forEach((header, index) => {
+          header.classList.toggle("stats-sortable-column", enabled);
+          Array.from(header.querySelectorAll(".stats-sort-trigger")).forEach((button) => {
+            const selected = state?.column === index
+              && state.valueIndex === Number(button.dataset.valueIndex)
+              && (state.valueKey || "") === (button.dataset.valueKey || "");
+            button.disabled = !enabled;
+            button.setAttribute("aria-pressed", String(selected));
+          });
+          if (enabled) {
+            header.setAttribute("aria-sort", state?.column === index ? state.direction : "none");
+          } else {
+            header.removeAttribute("aria-sort");
+          }
+        });
+      }
+
+      function sortTable(table) {
+        const state = sortStates.get(table);
+        if (!state) return;
+        Array.from(table.tBodies).forEach((tbody) => {
+          const currentRows = Array.from(tbody.rows);
+          if (currentRows.length < 2) return;
+          const sortedRows = currentRows
+            .map((row, index) => ({ row, index, value: sortableValue(row.cells[state.column]?.textContent, state.valueIndex, state.valueKey) }))
+            .sort((left, right) => compareValues(left.value, right.value, state.direction) || left.index - right.index)
+            .map((entry) => entry.row);
+          if (sortedRows.every((row, index) => row === currentRows[index])) return;
+          const fragment = document.createDocumentFragment();
+          sortedRows.forEach((row) => fragment.appendChild(row));
+          tbody.appendChild(fragment);
+        });
+      }
+
+      function queueSort(table) {
+        if (!sortStates.has(table)) return;
+        pendingTables.add(table);
+        if (flushScheduled) return;
+        flushScheduled = true;
+        queueMicrotask(() => {
+          flushScheduled = false;
+          pendingTables.forEach(sortTable);
+          pendingTables.clear();
+        });
+      }
+
+      function activateSort(table, column, valueIndex, valueKey = "") {
+        if (!hasMultipleRows(table)) return;
+        const previous = sortStates.get(table);
+        const sameProperty = previous?.column === column
+          && previous.valueIndex === valueIndex
+          && (previous.valueKey || "") === valueKey;
+        const direction = sameProperty && previous.direction === "descending"
+          ? "ascending"
+          : "descending";
+        sortStates.set(table, { column, valueIndex, valueKey, direction });
+        updateSortAvailability(table);
+        sortTable(table);
+      }
+
+      function compositeOptions(label) {
+        const quantiles = Array.from(label.matchAll(/P\d+/gi), (match) => match[0].toUpperCase());
+        if (quantiles.length > 1) return quantiles;
+        if (label.replace(/\s/g, "") === "失败/取消") return ["失败", "取消"];
+        return null;
+      }
+
+      function createSortButton(table, column, valueIndex, label, valueKey = "") {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "stats-sort-trigger";
+        button.dataset.valueIndex = String(valueIndex);
+        button.dataset.valueKey = valueKey;
+        button.textContent = label;
+        button.setAttribute("aria-pressed", "false");
+        button.title = `按${label}排序；再次点击切换方向`;
+        button.addEventListener("click", (event) => {
+          event.stopPropagation();
+          activateSort(table, column, valueIndex, valueKey);
+        });
+        return button;
+      }
+
+      function syncDynamicSortOptions(table) {
+        const headers = Array.from(table.tHead?.rows[table.tHead.rows.length - 1]?.cells || []);
+        headers.forEach((header, column) => {
+          const optionGroup = header.querySelector('[data-dynamic-sort="selection-source"]');
+          if (!optionGroup) return;
+          const keys = Array.from(new Set(Array.from(table.tBodies).flatMap((tbody) =>
+            Array.from(tbody.rows).flatMap((row) => selectionSourceEntries(row.cells[column]?.textContent).map((entry) => entry.key)),
+          ))).sort((left, right) => left.localeCompare(right, "zh-CN", { numeric: true, sensitivity: "base" }));
+          const signature = keys.join("\u001f");
+          if (optionGroup.dataset.signature === signature) return;
+          optionGroup.dataset.signature = signature;
+          optionGroup.textContent = "";
+          keys.forEach((key) => optionGroup.appendChild(createSortButton(table, column, -1, key, key)));
+          const state = sortStates.get(table);
+          if (state?.column === column && state.valueKey && !keys.includes(state.valueKey)) sortStates.delete(table);
+        });
+      }
+
+      function initializeTable(table) {
+        if (table.dataset.statsSortable === "true" || !table.tHead) return;
+        if (table.querySelector("#deviceRows")) return;
+        table.dataset.statsSortable = "true";
+        const headers = Array.from(table.tHead.rows[table.tHead.rows.length - 1]?.cells || []);
+        headers.forEach((header, column) => {
+          const label = header.textContent.trim();
+          const options = compositeOptions(label);
+          header.classList.remove("sortable", "sort-active", "asc", "desc");
+          header.removeAttribute("data-sort");
+          header.textContent = "";
+          const line = document.createElement("span");
+          line.className = "stats-sort-label-line";
+          if (options || label === "选择来源") {
+            const title = document.createElement("span");
+            title.textContent = label;
+            const optionGroup = document.createElement("span");
+            optionGroup.className = "stats-sort-options";
+            optionGroup.setAttribute("role", "group");
+            optionGroup.setAttribute("aria-label", `${label}排序属性`);
+            if (label === "选择来源") optionGroup.dataset.dynamicSort = "selection-source";
+            else options.forEach((option, valueIndex) => optionGroup.appendChild(createSortButton(table, column, valueIndex, option)));
+            line.append(title, optionGroup);
+          } else {
+            line.appendChild(createSortButton(table, column, -1, label));
+          }
+          header.appendChild(line);
+        });
+        updateSortAvailability(table);
+      }
+
+      document.querySelectorAll("table").forEach(initializeTable);
+      new MutationObserver((records) => {
+        records.forEach((record) => {
+          record.addedNodes.forEach((node) => {
+            if (!(node instanceof Element)) return;
+            if (node.matches("table")) initializeTable(node);
+            node.querySelectorAll?.("table").forEach(initializeTable);
+          });
+          const table = record.target instanceof Element ? record.target.closest("table") : null;
+          if (table) {
+            updateSortAvailability(table);
+            queueSort(table);
+          }
+        });
+      }).observe(document.body, { childList: true, subtree: true });
+    })();
+  </script>
 </body>
 </html>
