@@ -1,7 +1,7 @@
 global:
   environment: staging
   runtimeSecret: pinvou-account-platform-staging
-  trustedTimeSources: [time.cloudflare.com:123, time.google.com:123, time.aws.com:123]
+  trustedTimeSources: [time.cloudflare.com:123, pool.ntp.org:123, ntp.aliyun.com:123, time1.cloud.tencent.com:123, time.windows.com:123]
 
 externalSecrets:
   enabled: true

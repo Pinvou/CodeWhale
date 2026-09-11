@@ -37,7 +37,7 @@ test('payment and model adapters record outcomes without automatic high-risk hal
   assert.match(token, /UncertainResult[\s\S]*UPSTREAM_RESULT_UNKNOWN/);
 });
 
-test('production trusted clock uses three NTP sources and blocks readiness and writes beyond one second', async () => {
+test('production trusted clock uses at least three NTP sources and blocks readiness and writes beyond one second', async () => {
   const [clock, config, server, deployment, policy] = await Promise.all([
     read('internal/platform/trustedclock/clock.go'),
     read('internal/platform/config/config.go'),
