@@ -20,11 +20,14 @@ const indexHtml = [
   'features/scheduled/ScheduledTasksView.jsx',
   'features/conversation/ConversationTimeline.jsx' // second-level countdown tick has been consolidated into useConversationSecondClock
 ].map(file => fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')).join('\n');
-const tauriBridgeFeatureNames = [
-  'artifact-tracker', 'chat', 'chat-events', 'sessions', 'terminal', 'scheduled', 'monitor', 'settings', 'memory', 'artifacts', 'personas', 'updater',
-  'remote-control', 'dependencies', 'voice', 'knowledge-model', 'interaction',
-  'multiagent', 'team-relay'
-];
+// Derived from the bridge feature directory so a new feature file cannot be
+// forgotten here again (a missing entry makes bridge.js throw
+// "Tauri bridge feature not loaded" inside the harness).
+const tauriBridgeFeatureNames = fs.readdirSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge'))
+  .filter(name => name.endsWith('.js'))
+  .map(name => name.slice(0, -3))
+  .sort((a, b) => a.localeCompare(b));
+
 const modelOptionsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'model-options.js'), 'utf8');
 const composerSharedSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'composer-shared.jsx'), 'utf8');
 const bridgeMessages = fs.readFileSync(

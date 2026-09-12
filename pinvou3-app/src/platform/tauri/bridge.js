@@ -1578,7 +1578,7 @@
 
   // ── Pub/Sub ──────────────────────────────────────────────────────
   var subscribers = [];
-  var STATE_SLICE_FIELDS = {
+  const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
     sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch"],
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
@@ -1597,6 +1597,10 @@
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
     teamRelay: ["teamRelay"],
+    // Registered by the projects feature (bridge/projects.js). Must stay in
+    // sync with APP_BRIDGE_STATE_DOMAINS in main.jsx — locked by
+    // tests/bridge_state_domains.test.mjs.
+    projects: ["projectsList"],
   };
   function snapshotStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
@@ -2558,6 +2562,13 @@
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
   var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
+  var projectsFeature = installBridgeFeature("projects", { state: state, notify: notify, invoke: invoke, listen: listen });
+  var loadProjects = projectsFeature.loadProjects;
+  var createProject = projectsFeature.createProject;
+  var renameProject = projectsFeature.renameProject;
+  var deleteProject = projectsFeature.deleteProject;
+  var moveSessionToProject = projectsFeature.moveSessionToProject;
+
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
   var readMultiAgentSubagent = multiAgentFeature.readSubagentTranscript;
@@ -2799,6 +2810,13 @@
       toggleSessionPinned: toggleSessionPinned,
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
+    },
+    projects: {
+      loadProjects,
+      createProject,
+      renameProject,
+      deleteProject,
+      moveSessionToProject,
     },
     monitor: {
       startMonitorPolling: startMonitorPolling,

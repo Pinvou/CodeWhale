@@ -50,6 +50,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiCodex',
     'uiCodexWorkspace',
     'uiAcpProviders',
+    'uiProjects',
     'uiArtifacts',
     'uiToolDetails',
     'uiTeamRelay',
