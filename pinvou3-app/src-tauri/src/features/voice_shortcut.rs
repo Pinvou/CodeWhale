@@ -242,7 +242,8 @@ fn handle_voice_shortcut_with_modifiers(
         }
         return VoiceShortcutDecision::pass();
     }
-    if matches!(key, VoiceShortcutKey::Alt(_)) && key_down && !state.alt_down && other_modifier_down {
+    if matches!(key, VoiceShortcutKey::Alt(_)) && key_down && !state.alt_down && other_modifier_down
+    {
         state.alt_passthrough = true;
         return VoiceShortcutDecision::pass();
     }
