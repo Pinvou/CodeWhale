@@ -2818,13 +2818,6 @@
       deleteProject,
       moveSessionToProject,
     },
-    projects: {
-      loadProjects,
-      createProject,
-      renameProject,
-      deleteProject,
-      moveSessionToProject,
-    },
     monitor: {
       startMonitorPolling: startMonitorPolling,
       stopMonitorPolling: stopMonitorPolling,
