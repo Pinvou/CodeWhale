@@ -89,7 +89,21 @@ mod tests {
 
     #[test]
     fn bin_paths_follow_arch_suffix_convention() {
-        // 资源目录未必随测试释放（bundle_skills_dir 取决于 PINVOU3_HOME），这里
+        // 置空 PINVOU3_HOME 到临时目录：目标二进制必然不存在，eip_bin_path 必走
+        // 错误路径，命名约定断言确定执行（否则在已解包产物的开发机上会被 Ok
+        // 静默短路）。持 crate 级 ENV_LOCK，避免与其他改 env 的测试互相踩。
+        let _g = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "pinvou3-macos-paths-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let prev = std::env::var("PINVOU3_HOME").ok();
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
         // 只锁命名约定：aarch64 主机期望 -aarch64 后缀，x86_64 期望裸名。
         let expected = if std::env::consts::ARCH == "aarch64" {
             "eip-cli-aarch64"
@@ -97,27 +111,48 @@ mod tests {
             "eip-cli"
         };
         let err = eip_bin_path().err().unwrap_or_default();
-        if !err.is_empty() {
-            assert!(
-                err.contains(expected),
-                "错误提示应包含本架构期望的二进制名 {expected}: {err}"
-            );
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; in-process env writes are serialized.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("PINVOU3_HOME", v),
+                None => std::env::remove_var("PINVOU3_HOME"),
+            }
         }
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(
+            !err.is_empty(),
+            "空 PINVOU3_HOME 下二进制必不存在，应返回错误"
+        );
+        assert!(
+            err.contains(expected),
+            "错误提示应包含本架构期望的二进制名 {expected}: {err}"
+        );
     }
 
     #[test]
     fn arch_validation_rejects_foreign_macho() {
-        let tmp = std::env::temp_dir().join(format!("pinvou3-macho-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-macho-{}-{}",
+            std::process::id(),
+            crate::platform::paths::tests::unique_suffix()
+        ));
         std::fs::create_dir_all(&tmp).unwrap();
         let path = tmp.join("cli");
-        // MH_MAGIC_64 + cputype 0x0100000C (arm64)
-        let mut bytes = b"\xCF\xFA\xED\xFE".to_vec();
-        bytes.extend_from_slice(&0x0100_000Cu32.to_le_bytes());
-        std::fs::write(&path, &bytes).unwrap();
-        if std::env::consts::ARCH == "x86_64" {
-            assert!(validate_macos_cli_arch(&path, "eip-cli").is_err());
-        } else {
-            assert!(validate_macos_cli_arch(&path, "eip-cli").is_ok());
+        // MH_MAGIC_64 瘦二进制的两种 cputype 都构造一遍：拒绝路径在任一单架构
+        // 主机上都有执行（CI 的 macOS 测试腿只有 aarch64，单测一种 cputype 会让
+        // 异架构拒绝分支零覆盖）。
+        for (cputype, label) in [(0x0100_000Cu32, "aarch64"), (0x0100_0007u32, "x86_64")] {
+            let mut bytes = b"\xCF\xFA\xED\xFE".to_vec();
+            bytes.extend_from_slice(&cputype.to_le_bytes());
+            std::fs::write(&path, &bytes).unwrap();
+            let result = validate_macos_cli_arch(&path, "eip-cli");
+            assert_eq!(
+                result.is_err(),
+                label != std::env::consts::ARCH,
+                "cputype {label} 在 {} 主机上应{}拦截: {result:?}",
+                std::env::consts::ARCH,
+                if label == std::env::consts::ARCH { "不" } else { "" }
+            );
         }
         // 非 Mach-O 内容（脚本）不拦截
         std::fs::write(&path, b"#!/bin/sh\n").unwrap();

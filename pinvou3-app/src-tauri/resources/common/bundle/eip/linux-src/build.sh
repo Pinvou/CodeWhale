@@ -27,7 +27,7 @@ for target in $targets; do
   mkdir -p "$(dirname "$out")"
   GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" \
     -o "$out" "$src_dir"
-  # darwin/arm64 强制校验签名；Go 链接器对 darwin/amd64 不自动 ad-hoc 签名，补一道。
+  # darwin 两个架构统一补 ad-hoc 签名（Go 链接器只自动签 darwin/arm64，--force 幂等）。
   if [ "$goos" = darwin ] && command -v codesign >/dev/null; then
     codesign --sign - --force "$out"
   fi
