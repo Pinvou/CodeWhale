@@ -45,6 +45,13 @@ import { useOutsidePointerClose } from '../../components/ComposerPopover.jsx';
 const kbCache = { scan: null, stats: null, types: [], loaded: false, colls: [], allDocs: [], embedInfo: null, model: null, outputs: [], outputsLoaded: false };
 let knowledgeImportTelemetryAttempt = null;
 let knowledgeImportAttemptIndex = 0;
+// The full document table (kb_documents limit:0) is unbounded, so the
+// module-level cache keeps only a bounded slice: a remount instantly shows
+// the first rows and loadColls() re-fetches the complete data after mount,
+// so the whole table no longer stays resident for the window's lifetime
+// after the view unmounts.
+const KB_ALL_DOCS_CACHE_CAP = 2000;
+const capCachedAllDocs = (docs) => (docs.length > KB_ALL_DOCS_CACHE_CAP ? docs.slice(0, KB_ALL_DOCS_CACHE_CAP) : docs);
 
 const MODEL_PROGRESS_RADIUS = 31;
 const MODEL_PROGRESS_CIRCUMFERENCE = 2 * Math.PI * MODEL_PROGRESS_RADIUS;
@@ -528,10 +535,16 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         { key: 'ppt', label: t.kbOutCatPpt, color: '#e0773a', icon: PresentationIcon },
       ];
       const outCatMeta = (k) => OUTPUT_CATS.find((c) => c.key === k) || OUTPUT_CATS[0];
+      const outputsDisposedRef = useRef(false);
       const refreshOutputs = useCallback(async () => {
         const list = bridge && bridge.artifacts.listDeliverableIndex
           ? await bridge.artifacts.listDeliverableIndex().catch(() => [])
           : await inv('list_deliverable_index').catch(() => []);
+        // Unmount cleanup already released the big table: an in-flight
+        // request started before unmount must not write the index back into
+        // the module-level cache once it resolves, or it would undo the
+        // cleanup (setOutputs after unmount is a no-op and harmless).
+        if (outputsDisposedRef.current) return;
         const nextList = list || [];
         const nextSig = outputListSig(nextList);
         if (nextSig !== outputsSigRef.current) {
@@ -553,6 +566,18 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
       useEffect(() => {
         if (sub === 'output') refreshOutputs();
       }, [sub, outputArtifactKey, refreshOutputs]);
+      // The view renders conditionally on demand and module-level caches
+      // survive the whole window lifetime after unmount: the deliverables
+      // index is an unbounded table, released on unmount; lightweight fields
+      // (stats/embedInfo/scan cursors etc.) are kept. A remount re-fetches
+      // via the existing sub='output' refreshOutputs() path; resetting
+      // outputsLoaded hands control to the skeleton and avoids flashing the
+      // "empty state". The disposed flag blocks late writebacks.
+      useEffect(() => () => {
+        outputsDisposedRef.current = true;
+        kbCache.outputs = [];
+        kbCache.outputsLoaded = false;
+      }, []);
       const filteredOutputs = React.useMemo(() => {
         const q = outQuery.trim().toLowerCase();
         return outputs.filter((o) => {
@@ -794,10 +819,11 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
           setActiveColl((current) => (current ? c.find((item) => item.id === current.id) || null : null));
           kbCache.colls = c;
         } catch (e) {}
-        try { const d = await inv('kb_documents', { collectionId: 0, limit: 0 }) || []; setAllDocs(d); kbCache.allDocs = d; } catch (e) {}
+        try { const d = await inv('kb_documents', { collectionId: 0, limit: 0 }) || []; setAllDocs(d); kbCache.allDocs = capCachedAllDocs(d); } catch (e) {}
         try { const ei = await inv('kb_embed_info'); setEmbedInfo(ei); kbCache.embedInfo = ei; } catch (e) {}
         try { const m = await inv('kb_model_status'); setKbModel(m); kbCache.model = m; } catch (e) {}
         try { replaceIndexState(await inv('kb_index_status')); } catch (e) {}
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- dependency list manually reviewed: this effect only needs the listed deps; completing it would cause duplicate requests or polling loops
       }, [replaceIndexState]);
       // 本地文件与本地知识库两个分区依赖本机知识集数据；远程分区自行加载服务器数据。
       // 一级「产出物」只读产出物索引，不应触发任何知识库查询。
@@ -964,7 +990,7 @@ const OutputLivePreview = ({ o, onOpen, outPreviewCache, runQueuedPreview, remem
         setDocs((current) => current.filter((item) => item.id !== document.id));
         setAllDocs((current) => {
           const next = current.filter((item) => item.id !== document.id);
-          kbCache.allDocs = next;
+          kbCache.allDocs = capCachedAllDocs(next);
           return next;
         });
         // Optimistic collection-count update (docCount/chunkCount/totalBytes all lowered on delete, clamped >= 0) consolidated into shared.

@@ -302,7 +302,8 @@ export function ProvidersSection({ t }) {
   // 安装进度事件：后端逐行推送（kind=command 为实际执行的命令行，stdout/stderr
   // 为输出最新一行，80ms 限流）。只消费当前标签页 Agent 的事件，避免切页串扰。
   useEffect(() => {
-    if (!isTauriAvailable()) return undefined;
+    if (!isTauriAvailable()) return;
+    let disposed = false;
     let unlisten = null;
     tauriEvents
       .listen('acp:install-progress', event => {
@@ -316,9 +317,13 @@ export function ProvidersSection({ t }) {
         }
       })
       .then(fn => {
+        // Registration is async: if it resolves after unmount, unregister
+        // immediately or the listener leaks.
+        if (disposed) { fn(); return; }
         unlisten = fn;
       });
     return () => {
+      disposed = true;
       if (unlisten) unlisten();
     };
   }, []);
