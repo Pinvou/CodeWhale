@@ -31,6 +31,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up zram and swap
+        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
+
       - name: 清理缓存
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
