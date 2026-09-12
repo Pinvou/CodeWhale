@@ -14,7 +14,7 @@ const repoRoot = path.resolve(appRoot, "..");
 const trackedRuntime = "pinvou3-app/src-tauri/resources/platforms/linux/asr/sense-voice-main";
 const senseVoiceLicense = path.join(
   appRoot,
-  "src-tauri/resources/platforms/linux/asr/SenseVoice.LICENSE",
+  "src-tauri/resources/platforms/linux/asr/LICENSE-SenseVoice.cpp",
 );
 
 const sourceLock = fs.readFileSync(
@@ -32,9 +32,9 @@ const trackedCheck = spawnSync(
   ["ls-files", "--error-unmatch", trackedRuntime],
   { cwd: repoRoot, encoding: "utf8" },
 );
-assert.notEqual(
+assert.equal(
   trackedCheck.status,
-  0,
+  1,
   "precompiled SenseVoice ELF must not be stored in Git",
 );
 assert.match(fs.readFileSync(senseVoiceLicense, "utf8"), /Copyright \(c\) 2024 lovemefan/u);

@@ -70,7 +70,9 @@ if [ -x "$output_path" ] && [ -f "$build_info" ] \
   exit 0
 fi
 
-for command_name in cmake g++ git make sha256sum strip; do
+# 预检校验依赖:无法运行 check-linux-elf-policy.sh 的环境应在完整编译前
+# 失败,而不是编译完才在 validate_runtime 处失败。
+for command_name in cmake g++ git make sha256sum strip dpkg file objdump readelf; do
   command -v "$command_name" >/dev/null || {
     echo "missing SenseVoice build dependency: $command_name" >&2
     exit 1

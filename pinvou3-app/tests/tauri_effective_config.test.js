@@ -551,8 +551,8 @@ assert.equal(
   "runtime/asr/pinvou3-asr-shim.py",
 );
 assert.equal(
-  linux.bundle.resources["resources/platforms/linux/asr/SenseVoice.LICENSE"],
-  "runtime/asr/SenseVoice.LICENSE",
+  linux.bundle.resources["resources/platforms/linux/asr/LICENSE-SenseVoice.cpp"],
+  "runtime/asr/LICENSE-SenseVoice.cpp",
 );
 assert.equal(
   linux.bundle.resources["resources/platforms/linux/knowledge-host/"],
