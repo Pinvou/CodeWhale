@@ -54,6 +54,57 @@ assert.doesNotMatch(
   /loaded !== false/,
   'unknown model state must not be treated as loaded during automatic fill',
 );
+const localDetectStart = settingsViewSource.indexOf('async function handleLocalDetect()');
+const localDetectEnd = settingsViewSource.indexOf('function startManualLocalModel()', localDetectStart);
+assert.notStrictEqual(localDetectStart, -1, 'local picker detect handler must exist');
+assert.notStrictEqual(localDetectEnd, -1, 'local picker detect handler boundary must exist');
+const localDetectSource = settingsViewSource.slice(localDetectStart, localDetectEnd);
+assert.match(
+  localDetectSource,
+  /customPort/,
+  'local picker detect must pass the optional custom port to the discovery command',
+);
+assert.match(
+  localDetectSource,
+  /65535/,
+  'local picker detect must validate the custom port range before probing',
+);
+for (const settingsI18nSource of settingsI18nSources) {
+  assert.match(
+    settingsI18nSource,
+    /localPortLabel:/,
+    'local model port input label must be provided in every UI language',
+  );
+  assert.match(
+    settingsI18nSource,
+    /localPortPlaceholder:/,
+    'local model port input placeholder must be provided in every UI language',
+  );
+  assert.match(
+    settingsI18nSource,
+    /localPortInvalid:/,
+    'local model port validation message must be provided in every UI language',
+  );
+}
+// Memory delete / feedback close must route through in-app confirm dialogs
+// (the native window.confirm does not render in Tauri WebView2; see
+// tests/settings_window_confirm.test.mjs).
+assert.doesNotMatch(
+  settingsViewSource,
+  /window\.confirm\s*\(/,
+  'settings page must not call window.confirm (does not render in Tauri WebView2; use in-app confirm dialogs)',
+);
+for (const confirmTestId of [
+  'memory-delete-confirm',
+  'memory-delete-confirm-ok',
+  'feedback-close-confirm',
+  'feedback-close-confirm-ok',
+]) {
+  assert.ok(
+    settingsViewSource.includes(`data-testid="${confirmTestId}"`),
+    `missing in-app confirm dialog testid: ${confirmTestId}`,
+  );
+}
 
 function loadPuppeteer() {
   try { return require('puppeteer-core'); } catch (_) { /* fall through */ }
@@ -166,7 +217,11 @@ function injectSource() {
     };
     var memoryOverview = {
       profile: { version: 1, revision: 3, identity: { call_name: '升级前称呼', assistant_alias: 'PINVOU' }, conventions: {} },
-      preferences: [], work_context: [], current_focus: [], recent_activity: [], recent_work: [], pending: [], never: [],
+      preferences: [
+        { id: 'pref-to-delete', text: '待删除的偏好记忆', status: 'active' },
+        { id: 'pref-to-keep', text: '保留的偏好记忆', status: 'active' },
+      ],
+      work_context: [{ id: 'wc-to-delete', text: '待删除的工作上下文', status: 'active' }], current_focus: [], recent_activity: [], recent_work: [], pending: [], never: [],
       runtime: null, snapshot_path: '', warnings: [],
       sources: {
         profile: { available: true }, preferences: { available: true }, work_context: { available: true },
@@ -178,8 +233,12 @@ function injectSource() {
     var failMemoryUpdate = false;
     var pendingDownloadResolve = null;
     function record(cmd, args) { calls.push({ cmd: cmd, args: args || null }); }
+    // Deliberately not stubbing window.confirm here. SettingsView now routes
+    // everything through in-app confirm dialogs (the native confirm does not
+    // render in Tauri WebView2); if someone reintroduces a native confirm,
+    // headless auto-dismiss makes the flow assertions fail loudly instead of
+    // being masked by a fake stub.
     window.alert = function (message) { record('window_alert', { message: message }); };
-    window.confirm = function (message) { record('window_confirm', { message: message }); return true; };
     function emit(name, payload) {
       return Promise.all((handlers[name] || []).slice().map(function (handler) {
         return handler({ payload: payload || {} });
@@ -295,6 +354,16 @@ function injectSource() {
             runtime: null,
             warnings: [{ code: 'runtime_refresh_failed', source: 'runtime', detail: 'runtime cache locked' }],
           });
+        case 'delete_memory_preference':
+          memoryOverview = Object.assign({}, memoryOverview, {
+            preferences: (memoryOverview.preferences || []).filter(function (item) { return item.id !== args.id; }),
+          });
+          return Promise.resolve(null);
+        case 'delete_work_context_memory':
+          memoryOverview = Object.assign({}, memoryOverview, {
+            work_context: (memoryOverview.work_context || []).filter(function (item) { return item.id !== args.id; }),
+          });
+          return Promise.resolve(null);
         default: return Promise.resolve(null);
       }
     }
@@ -549,6 +618,36 @@ async function modalWidth(page, headingText) {
     const buttons = dialog ? [...dialog.querySelectorAll('button')] : [];
     if (buttons.length) buttons[0].click();
   });
+
+  // ①e memory delete: row delete button → in-app confirm dialog (no native
+  // confirm in WebView2) → confirming really invokes the delete command and
+  // removes the row, leaving the sibling item untouched.
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="memory-item-delete"]'));
+  await page.click('[data-testid="memory-item-delete"]');
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="memory-delete-confirm"]'));
+  await page.click('[data-testid="memory-delete-confirm-ok"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="memory-delete-confirm"]'));
+  await page.waitForFunction(() => !document.body.innerText.includes('待删除的偏好记忆'), { timeout: 5000 });
+  rec('①e memory delete removes the item after in-app confirmation', await page.evaluate(() =>
+    !document.body.innerText.includes('待删除的偏好记忆')
+      && document.body.innerText.includes('保留的偏好记忆')
+      && window.__SETTINGS_TEST__.calls.some(function (item) { return item.cmd === 'delete_memory_preference'; })));
+
+  // ①f the work-context row delete goes through the same confirm path (the
+  // bridge maps the kind to delete_work_context_memory). ①e already removed the
+  // first preference row, so the last remaining delete button in the long-term
+  // memory list belongs to the work-context row.
+  await page.evaluate(() => {
+    const buttons = [...document.querySelectorAll('[data-testid="memory-item-delete"]')];
+    if (buttons.length) buttons[buttons.length - 1].click();
+  });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="memory-delete-confirm"]'));
+  await page.click('[data-testid="memory-delete-confirm-ok"]');
+  await page.waitForFunction(() => !document.body.innerText.includes('待删除的工作上下文'), { timeout: 5000 });
+  rec('①f work-context delete goes through the same confirm path', await page.evaluate(() =>
+    !document.body.innerText.includes('待删除的工作上下文')
+      && document.body.innerText.includes('保留的偏好记忆')
+      && window.__SETTINGS_TEST__.calls.some(function (item) { return item.cmd === 'delete_work_context_memory'; })));
 
   await clickSettingsSection(page, '更新');
   await page.evaluate(async () => {
@@ -933,6 +1032,85 @@ async function modalWidth(page, headingText) {
     };
   });
   rec('⑥.3 本地模型自动检测展示多个服务与多个模型 ID', Object.values(localDetectUi).every(Boolean), JSON.stringify(localDetectUi));
+  // Custom port: fill 8080 and re-detect; the probe request must pass through
+  // customPort=8080 (the main path for picking a local model by port).
+  // The value is written through the native value setter: clearing a controlled
+  // input via select+backspace is unreliable.
+  const setPortDraft = value => page.evaluate(text => {
+    const input = document.querySelector('[data-testid="local-detect-port"]');
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+    setter.call(input, text);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }, value);
+  await setPortDraft('8080');
+  await clickExact(page, '重新检测');
+  await sleep(500);
+  const localDetectWithPort = await page.evaluate(() => {
+    const calls = window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm');
+    const last = calls[calls.length - 1];
+    return { request: last && last.args && last.args.request };
+  });
+  rec('⑥.3b custom port is passed through to the discovery command',
+    localDetectWithPort.request
+      && localDetectWithPort.request.customPort === 8080
+      && localDetectWithPort.request.currentBaseUrl === null
+      && localDetectWithPort.request.savedBaseUrl === null,
+    JSON.stringify(localDetectWithPort));
+  // Invalid port (out of range): inline error, no probe request, and the
+  // previously detected candidates stay visible.
+  const discoverCallsBeforeInvalidPort = await page.evaluate(() =>
+    window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length);
+  await setPortDraft('99999');
+  await clickExact(page, '重新检测');
+  await sleep(300);
+  const localDetectInvalidPort = await page.evaluate(before => ({
+    errorShown: document.body.innerText.includes('端口无效：请输入 1-65535 之间的数字'),
+    noNewCall: window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length === before,
+    candidatesKept: document.body.innerText.includes('qwen2.5-coder:32b'),
+  }), discoverCallsBeforeInvalidPort);
+  rec('⑥.3c invalid port errors inline without probing and keeps previous candidates', Object.values(localDetectInvalidPort).every(Boolean), JSON.stringify(localDetectInvalidPort));
+  // Negative and decimal inputs: the raw value stays as typed, an inline error
+  // is shown, and no probe request is issued (the input must not silently
+  // rewrite -1 into 1 or 1.5 into 15 before validation).
+  const discoverCallsBeforeNegativePort = await page.evaluate(() =>
+    window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length);
+  await setPortDraft('-1');
+  await clickExact(page, '重新检测');
+  await sleep(300);
+  const localDetectNegativePort = await page.evaluate(before => ({
+    rawValueKept: document.querySelector('[data-testid="local-detect-port"]').value === '-1',
+    errorShown: document.body.innerText.includes('端口无效：请输入 1-65535 之间的数字'),
+    noNewCall: window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length === before,
+  }), discoverCallsBeforeNegativePort);
+  rec('⑥.3e negative port keeps the raw input, errors inline, issues no probe', Object.values(localDetectNegativePort).every(Boolean), JSON.stringify(localDetectNegativePort));
+  const discoverCallsBeforeDecimalPort = await page.evaluate(() =>
+    window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length);
+  await setPortDraft('1.5');
+  await clickExact(page, '重新检测');
+  await sleep(300);
+  const localDetectDecimalPort = await page.evaluate(before => ({
+    rawValueKept: document.querySelector('[data-testid="local-detect-port"]').value === '1.5',
+    errorShown: document.body.innerText.includes('端口无效：请输入 1-65535 之间的数字'),
+    noNewCall: window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm').length === before,
+  }), discoverCallsBeforeDecimalPort);
+  rec('⑥.3f decimal port keeps the raw input, errors inline, issues no probe', Object.values(localDetectDecimalPort).every(Boolean), JSON.stringify(localDetectDecimalPort));
+  // Clear the port and run a valid detection; this also locks the request shape
+  // for "empty port = default ports only" (customPort null).
+  await setPortDraft('');
+  await clickExact(page, '重新检测');
+  await sleep(500);
+  const localDetectPortCleared = await page.evaluate(() => {
+    const calls = window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'discover_local_vllm');
+    const last = calls[calls.length - 1];
+    return { request: last && last.args && last.args.request };
+  });
+  rec('⑥.3d cleared port sends a discovery request without a custom port',
+    localDetectPortCleared.request
+      && localDetectPortCleared.request.customPort === null
+      && localDetectPortCleared.request.currentBaseUrl === null
+      && localDetectPortCleared.request.savedBaseUrl === null,
+    JSON.stringify(localDetectPortCleared));
+  await sleep(100);
   const localAddClicked = await page.evaluate(() => {
     const title = [...document.querySelectorAll('span')].find(node => (node.textContent || '').trim() === 'qwen2.5-coder:32b');
     let row = title;
@@ -1846,12 +2024,18 @@ async function modalWidth(page, headingText) {
     label: document.querySelector('[role="switch"]')?.getAttribute('aria-label') || '',
   }));
   await page.click('[role="switch"]');
+  // 行为遥测开关走应用内确认弹窗（原生 window.confirm 在 Tauri WebView2 不渲染）：
+  // 点击开关先弹确认，点确认后才真正落盘关闭。
+  await page.waitForSelector('[data-testid="behavior-telemetry-confirm"]', { visible: true, timeout: 3000 });
+  const behaviorConfirmShown = await page.evaluate(() =>
+    (document.querySelector('[data-testid="behavior-telemetry-confirm"] h3')?.textContent || '').includes('是否关闭'));
+  await page.click('[data-testid="behavior-telemetry-confirm-ok"]');
   await sleep(100);
   const behaviorDisabled = await page.evaluate(() => ({
     disabled: document.querySelector('[role="switch"]')?.getAttribute('aria-checked') === 'false',
     invoked: window.__SETTINGS_TEST__.calls.some(call => call.cmd === 'set_behavior_telemetry_enabled' && call.args.enabled === false),
   }));
-  rec('⑮a 行为统计开关位于帮助反馈二级页且可持久关闭', !behaviorEntry.topLevel && behaviorEntry.secondLevel && behaviorEntry.entryTitle === '数据管理' && behaviorPanel.hasBack && behaviorPanel.enabled && behaviorPanel.label === '帮助改进 PINVOU' && behaviorDisabled.disabled && behaviorDisabled.invoked, JSON.stringify({ behaviorEntry, behaviorPanel, behaviorDisabled }));
+  rec('⑮a 行为统计开关位于帮助反馈二级页且经应用内确认可持久关闭', !behaviorEntry.topLevel && behaviorEntry.secondLevel && behaviorEntry.entryTitle === '数据管理' && behaviorPanel.hasBack && behaviorPanel.enabled && behaviorPanel.label === '帮助改进 PINVOU' && behaviorConfirmShown && behaviorDisabled.disabled && behaviorDisabled.invoked, JSON.stringify({ behaviorEntry, behaviorPanel, behaviorConfirmShown, behaviorDisabled }));
   await page.click('[data-testid="behavior-analytics-back"]');
   await clickExact(page, '提交反馈');
   await sleep(250);
@@ -1902,6 +2086,48 @@ async function modalWidth(page, headingText) {
     dialogClosed: !document.querySelector('[data-feedback-dialog="true"]'),
   }));
   rec('⑰ 提交反馈成功使用应用内 toast，不弹系统 alert', feedbackTyped === '反馈弹窗测试' && feedbackSubmit.nativeAlertCalls === 0 && feedbackSubmit.submitCalls === 1 && feedbackSubmit.toast && feedbackSubmit.dialogClosed, JSON.stringify({ feedbackTyped, ...feedbackSubmit }));
+  await sleep(200);
+
+  // ⑰.5 dirty-draft close: goes through the in-app confirm layer (no native
+  // confirm in Tauri WebView2); cancel keeps the draft and the panel, confirm
+  // truly closes, and nothing is submitted along the way.
+  await clickExact(page, '提交反馈');
+  await sleep(250);
+  await page.evaluate(() => {
+    const textarea = document.querySelector('[data-feedback-dialog="true"] textarea[placeholder*="请描述"]');
+    if (!textarea) return;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    textarea.focus();
+    setter.call(textarea, '关闭确认测试');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await page.evaluate(() => {
+    const modal = document.querySelector('[data-feedback-dialog="true"]');
+    const button = modal && [...modal.querySelectorAll('button')].find(node => (node.textContent || '').trim() === '取消');
+    if (button) button.click();
+  });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="feedback-close-confirm"]'));
+  await page.evaluate(() => {
+    const layer = document.querySelector('[data-testid="feedback-close-confirm"]');
+    const button = layer && [...layer.querySelectorAll('button')].find(node => (node.textContent || '').trim() === '取消');
+    if (button) button.click();
+  });
+  await page.waitForFunction(() => !document.querySelector('[data-testid="feedback-close-confirm"]'));
+  const feedbackCloseGuard = await page.evaluate(() => ({
+    panelStillOpen: !!document.querySelector('[data-feedback-dialog="true"]'),
+    draftKept: (document.querySelector('[data-feedback-dialog="true"] textarea[placeholder*="请描述"]')?.value || '') === '关闭确认测试',
+  }));
+  await page.evaluate(() => {
+    const modal = document.querySelector('[data-feedback-dialog="true"]');
+    const button = modal && [...modal.querySelectorAll('button')].find(node => (node.textContent || '').trim() === '取消');
+    if (button) button.click();
+  });
+  await page.waitForFunction(() => !!document.querySelector('[data-testid="feedback-close-confirm"]'));
+  await page.click('[data-testid="feedback-close-confirm-ok"]');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="feedback-close-confirm"]') && !document.querySelector('[data-feedback-dialog="true"]'));
+  const feedbackCloseSubmitCalls = await page.evaluate(() =>
+    window.__SETTINGS_TEST__.calls.filter(call => call.cmd === 'submit_feedback').length);
+  rec('⑰.5 dirty-draft close uses the in-app confirm layer: cancel keeps the draft, confirm truly closes without submitting', feedbackCloseGuard.panelStillOpen && feedbackCloseGuard.draftKept && feedbackCloseSubmitCalls === 1, JSON.stringify({ ...feedbackCloseGuard, submitCalls: feedbackCloseSubmitCalls }));
   await sleep(200);
 
   await page.setViewport({ width: 760, height: 620 });

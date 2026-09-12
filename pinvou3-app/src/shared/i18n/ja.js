@@ -392,7 +392,7 @@ const jaBase = {
         feedbackAttachmentHint: 'png、jpg、jpeg、gif、webp、mp4、mov、webm に対応。最大 5 件。',
         feedbackPrivacy: '入力内容、選択した添付、非機密の環境概要を送信します。チャット履歴やキーは自動添付しません。',
         feedbackSubmit: '送信', feedbackSubmitting: '送信中…', feedbackSubmitted: '送信しました。ありがとうございます。',
-        feedbackRetry: '再試行', feedbackCloseConfirm: '未送信の内容があります。閉じますか？',
+        feedbackRetry: '再試行', feedbackCloseConfirm: '未送信の内容があります。閉じますか？', feedbackCloseAnyway: '閉じる',
         feedbackBodyRequired: '内容を入力してください。', feedbackUnsupportedFile: '対応していない添付形式です。',
         feedbackTooManyFiles: '添付は最大 5 件です。', feedbackPickUnavailable: 'ファイル選択を利用できません。',
         chatGreeting: 'こんにちは、今日は何をしましょうか？', artifacts: '成果物とコード', placeholder: 'PINVOU に質問またはコマンドを入力', disclaimer: 'PINVOU は不正確な情報を生成する可能性があります。必ずご確認ください。', ctxUsage: 'コンテキスト',
@@ -945,6 +945,8 @@ dictJa.uiSettingsDetail.memoryLoadFailed = 'メモリプロフィールの読み
 
 dictJa.uiSettingsDetail.memorySaveFailed = 'メモリプロフィールの保存に失敗しました。再試行してください。';
 
+dictJa.uiSettingsDetail.memoryDeleteFailed = 'メモリの削除に失敗しました。再試行してください。';
+
 dictJa.uiSettingsDetail.memorySourceUnavailable = '一部のメモリ情報を一時的に利用できません。前回正常に読み込んだ内容を保持しています。';
 
 dictJa.uiSettingsDetail.memoryRuntimeRefreshFailed = 'メモリは保存されましたが、現在のセッションのメモリコンテキストを更新できませんでした。';
@@ -957,8 +959,8 @@ Object.assign(dictJa.uiSettingsDetail, {
   reasoningEffort:'思考の深さ', reasoningEffortTiers:{ off:'オフ', low:'低', medium:'中', high:'高', max:'最大' },
   reasoningProbePending:'サーバータイプを検出中…', reasoningProbeUnsupported:'このエンドポイントは思考の深さの調整をサポートしていません',
   reasoningThinkingAlwaysOn:'このモデルは常に思考を行い、オフにできません',
-  saving:'保存中', localDetectionTargets:'vLLM、Ollama、LM Studio を検出',
-  redetect:'再検出', detect:'検出', noRunningLocalModel:'実行中のローカルモデルが見つかりません', modelNotLoadedTag:'未読み込み', modelNotLoadedHint:'メモリ未読み込み。初回使用時に自動でロードされます',
+  saving:'保存中', localDetectionTargets:'vLLM、Ollama、LM Studio などのローカルサービスを検出',
+  redetect:'再検出', detect:'検出', noRunningLocalModel:'実行中のローカルモデルが見つかりません', localPortLabel:'ポート', localPortPlaceholder:'例: 8080', localPortInvalid:'ポートが無効です：1〜65535 の数値を入力してください', modelNotLoadedTag:'未読み込み', modelNotLoadedHint:'メモリ未読み込み。初回使用時に自動でロードされます',
   add:'追加', manualLocalModel:'ローカルモデルを手動追加',
   manualLocalModelDesc:'API URL とモデル ID を入力', cloudModels:'クラウドモデル',
   localModels:'ローカルモデル', toolCalling:'ツール呼び出し', apiKeyRequired:'API Key が必要',

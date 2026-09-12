@@ -395,7 +395,7 @@ export const dictEn = {
         feedbackAttachmentHint: 'Supports png, jpg, jpeg, gif, webp, mp4, mov, webm; up to 5 files.',
         feedbackPrivacy: 'This sends your text, selected files, and non-sensitive app context. Chats and keys are not attached automatically.',
         feedbackSubmit: 'Submit', feedbackSubmitting: 'Submitting…', feedbackSubmitted: 'Feedback submitted. Thank you.',
-        feedbackRetry: 'Retry', feedbackCloseConfirm: 'Feedback draft has not been submitted. Close it?',
+        feedbackRetry: 'Retry', feedbackCloseConfirm: 'Feedback draft has not been submitted. Close it?', feedbackCloseAnyway: 'Close anyway',
         feedbackBodyRequired: 'Please enter feedback details.', feedbackUnsupportedFile: 'Unsupported attachment format.',
         feedbackTooManyFiles: 'You can attach up to 5 files.', feedbackPickUnavailable: 'File picker is unavailable.',
         chatGreeting: 'Hi — what would you like to work on today?', artifacts: 'Artifacts', placeholder: 'Ask PINVOU or enter a command', disclaimer: 'PINVOU may display inaccurate info, so double-check.', ctxUsage: 'Context',
@@ -945,6 +945,8 @@ dictEn.uiSettingsDetail.memoryLoadFailed = 'Failed to load memory profile. Pleas
 
 dictEn.uiSettingsDetail.memorySaveFailed = 'Failed to save memory profile. Please try again.';
 
+dictEn.uiSettingsDetail.memoryDeleteFailed = 'Failed to delete memory. Please try again.';
+
 dictEn.uiSettingsDetail.memorySourceUnavailable = 'Some memory sources are temporarily unavailable. The last successfully loaded content is preserved.';
 
 dictEn.uiSettingsDetail.memoryRuntimeRefreshFailed = 'Memory was saved, but the current session context could not be refreshed.';
@@ -957,8 +959,8 @@ Object.assign(dictEn.uiSettingsDetail, {
   reasoningEffort:'Thinking depth', reasoningEffortTiers:{ off:'Off', low:'Low', medium:'Medium', high:'High', max:'Max' },
   reasoningProbePending:'Detecting server type…', reasoningProbeUnsupported:'This endpoint does not support thinking-depth control',
   reasoningThinkingAlwaysOn:'This model always thinks and cannot be turned off',
-  saving:'Saving', localDetectionTargets:'Detect vLLM, Ollama, and LM Studio',
-  redetect:'Check again', detect:'Detect', noRunningLocalModel:'No running local model detected', modelNotLoadedTag:'Not loaded', modelNotLoadedHint:'Not in memory yet; it will load automatically on first use',
+  saving:'Saving', localDetectionTargets:'Detect vLLM, Ollama, LM Studio, and other local servers',
+  redetect:'Check again', detect:'Detect', noRunningLocalModel:'No running local model detected', localPortLabel:'Port', localPortPlaceholder:'e.g. 8080', localPortInvalid:'Invalid port: enter a number between 1 and 65535', modelNotLoadedTag:'Not loaded', modelNotLoadedHint:'Not in memory yet; it will load automatically on first use',
   add:'Add', manualLocalModel:'Add a local model manually',
   manualLocalModelDesc:'Enter the API URL and model ID', cloudModels:'Cloud models',
   localModels:'Local models', toolCalling:'Tool calling', apiKeyRequired:'Requires API Key',
