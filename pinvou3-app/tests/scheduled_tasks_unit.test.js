@@ -8183,8 +8183,8 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
   var writePayload = {
     session_id: sessionId,
     id: "tool-write-snake",
-    name: "File",
-    args: { action: "write", path: "snake-game.html", content: "<!doctype html>" },
+    name: "write",
+    args: { path: "snake-game.html", content: "<!doctype html>" },
   };
   harness.emit("chat:tool_start", writePayload);
   harness.emit("chat:tool_start", writePayload);
@@ -8231,7 +8231,7 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
     messages: [
       { role: "user", content: [{ type: "text", text: "写一个贪吃蛇游戏" }] },
       { role: "assistant", content: [{
-        type: "tool_use", id: writePayload.id, name: "File", input: writePayload.args,
+        type: "tool_use", id: writePayload.id, name: "write", input: writePayload.args,
       }] },
       { role: "user", content: [{
         type: "tool_result", tool_use_id: writePayload.id, content: "Wrote snake-game.html",
@@ -8300,8 +8300,8 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
   var editPayload = {
     session_id: sessionId,
     id: "tool-edit-snake",
-    name: "File",
-    args: { action: "edit", path: "snake-game.html", old_string: "v1", new_string: "v2" },
+    name: "edit",
+    args: { path: "snake-game.html", old_string: "v1", new_string: "v2" },
   };
   harness.emit("chat:tool_start", editPayload);
   harness.emit("chat:tool_end", {
@@ -8386,8 +8386,8 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
   var editOriginalSummary = {
     session_id: sessionId,
     id: "tool-edit-summary-original",
-    name: "File",
-    args: { action: "edit", path: summaryPath, old_string: "v1", new_string: "v2" },
+    name: "edit",
+    args: { path: summaryPath, old_string: "v1", new_string: "v2" },
   };
   harness.emit("chat:tool_start", editOriginalSummary);
   harness.emit("chat:tool_end", {

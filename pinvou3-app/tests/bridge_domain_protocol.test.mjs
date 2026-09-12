@@ -105,11 +105,14 @@ const expectedProtocolHashes = {
   // that opens the preview even when the existing card is updated in place.
   // #148 preserves Official invocation shapes; the callback body now redacts errors.
   // Recomputed for the preinstalled-model startup removal on top of #148.
-  // chat/monitor recomputed for the backflowed memory-footprint reduction
-  // (Community #442): streaming-render trailing-edge timers, terminal
-  // toolMeta sweep, monitor display-equality gate — listener body-internal
-  // edits only, no new invoke or listen entries (capture-text refresh).
-  chat: '1acd2018260ead239b028c259c39364e4018c26cf5ca78e50ad182b76bae6c02',
+  // Recomputed for the CodeWhale v0.9.12 backflow: canonical `bash` name in the
+  // shell background-task projection, compaction cancel phase, and the new
+  // chat:tool_gate_decision audit listener in chat-events.js. Recomputed
+  // again for the backflowed memory-footprint reduction (Community #442):
+  // streaming-render trailing-edge timers, terminal toolMeta sweep, monitor
+  // display-equality gate — listener body-internal edits only, no new invoke
+  // or listen entries (capture-text refresh).
+  chat: 'd2c249c71e5c8da65d9020d547be38fa70ae7c377a0a702a5cf9253730698842',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
