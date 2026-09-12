@@ -53,18 +53,42 @@ log "sysctl tuned (best effort): swappiness=130 watermark_scale_factor=300 min_f
 
 setup_disk_swap() {
   # The runner image pre-creates a swapfile on /mnt via waagent; replace it.
+  #
+  # /mnt safety checks are load bearing: on images where /mnt is tmpfs (RAM
+  # backed) or has less free space than the requested swapfile, fallocate
+  # would exhaust memory instantly and take the runner agent down with the
+  # job (observed 2026-09: instant, log-less job deaths). Size to at most
+  # 60% of the actual free space and skip RAM-backed mounts entirely.
+  local fstype avail_kib cap_kib want_kib
+  fstype="$(findmnt -n -o FSTYPE /mnt 2>/dev/null || true)"
+  if [[ ${fstype} == tmpfs ]]; then
+    warn "/mnt is tmpfs (RAM backed); skipping disk swap"
+    return 0
+  fi
+  avail_kib="$(df -kP /mnt 2>/dev/null | awk 'NR==2 {print $4}')"
+  [[ ${avail_kib} =~ ^[0-9]+$ ]] || { warn "cannot determine /mnt free space; skipping disk swap"; return 0; }
+  want_kib=$((16 * 1024 * 1024))
+  cap_kib=$((avail_kib * 60 / 100))
+  if (( want_kib > cap_kib )); then
+    want_kib=$((cap_kib))
+  fi
+  if (( want_kib < 1024 * 1024 )); then
+    warn "/mnt free space too small for a swapfile; skipping disk swap"
+    return 0
+  fi
   if swapon --show=NAME --noheadings 2>/dev/null | grep -qx '/mnt/swapfile'; then
     swapoff /mnt/swapfile 2>/dev/null || warn "could not swapoff the image swapfile; leaving it in place"
   fi
-  if ! fallocate -l "${DISK_SWAP_SIZE}" /mnt/swapfile 2>/dev/null; then
-    warn "fallocate ${DISK_SWAP_SIZE} /mnt/swapfile failed; keeping the existing swap configuration"
+  rm -f /mnt/swapfile
+  if ! fallocate -l "${want_kib}K" /mnt/swapfile 2>/dev/null; then
+    warn "fallocate ${want_kib}K /mnt/swapfile failed; keeping the existing swap configuration"
     return 0
   fi
   chmod 600 /mnt/swapfile
   mkswap /mnt/swapfile >/dev/null 2>&1 || { warn "mkswap failed"; return 0; }
   swapon -p "${DISK_SWAP_PRIORITY}" /mnt/swapfile 2>/dev/null \
     || warn "swapon /mnt/swapfile failed; keeping the existing swap configuration"
-  log "disk swap ready: /mnt/swapfile ${DISK_SWAP_SIZE}, priority ${DISK_SWAP_PRIORITY}"
+  log "disk swap ready: /mnt/swapfile $((want_kib / 1024)) MiB, priority ${DISK_SWAP_PRIORITY}"
 }
 
 # zram and zswap overlap: zswap is only enabled when the zram device could not
