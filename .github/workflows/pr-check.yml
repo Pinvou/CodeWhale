@@ -1457,7 +1457,8 @@ jobs:
             'artifact_writes_never_expose_partial_utf8_to_concurrent_readers' \
             'artifact_public_read_' \
             'features::voice::platform::windows::tests::closed_temp_wav_can_be_reopened_when_asr_denies_write_sharing' \
-            'features::memory::tests::topic_migration_'; do
+            'features::memory::tests::topic_migration_' \
+            'features::projects::tests::'; do
             index=$((index+1))
             started=$SECONDS
             "$test_exe" "$filter" --test-threads=1 2>&1 | tee /tmp/windows_regression.log
