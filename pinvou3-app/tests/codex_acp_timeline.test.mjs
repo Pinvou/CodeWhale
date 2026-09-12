@@ -538,7 +538,9 @@ try {
     'the lazy ACP workspace must render a dedicated loading state',
   );
   assert.ok(main.includes('codexAcpSupported &&'), 'Codex entry must stay platform capability-gated');
-  assert.ok(main.includes(".concat(codexHistory)"),
+  // #442 backflow: the global task list is built with array spread inside a
+  // useMemo instead of .concat chains; codexHistory stays part of the same list.
+  assert.ok(main.includes('...codexHistory,'),
     'Codex sessions must share the global recent-session list');
   assert.ok(main.includes("taskKind: 'codex'") && main.includes("testId: 'codex-sidebar-item'"),
     'global sessions must visually identify Codex records');
