@@ -1,7 +1,8 @@
 //! H3C EIP 员工门户接入 —— 连接生命周期 + 鉴权编排。
 //!
 //! 路线:A(CLI 连接器)。复用 iClaw 的 `eip-cli` 预编译二进制(多平台:
-//! `eip-cli` / `eip-cli-aarch64` / `eip-cli.exe`),内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`。
+//! `eip-cli` / `eip-cli-aarch64` / `eip-cli.exe`;官方只发 Windows/Linux x86_64,
+//! darwin 由 `linux-src` fallback 源构建,见 `build.sh`),内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`。
 //! 业务命令(考勤/假期/待办…)由模型经 shell 跑 `eip <域> ...`,技能文档教用法
 //! (同飞书 lark-cli)。本模块只负责**连接态**:状态查询、SSO 登录(轮询自动收)、
 //! 取消、登出。

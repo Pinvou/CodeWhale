@@ -1,3 +1,10 @@
+// Portable fallback reimplementation of the H3C EIP employee-portal CLI.
+//
+// H3C IT ships official `eip-cli` binaries only for Windows (eip-cli.exe) and
+// Linux x86_64 (eip-cli); both are packaged as-is. For every other target
+// (linux/arm64, macOS darwin/arm64 + darwin/amd64) no official build exists, so
+// the app carries this clean-room Go reimplementation of the same protocol —
+// see build.sh. Plain stdlib Go, no OS-specific syscalls.
 package main
 
 import (
@@ -13,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +30,10 @@ const (
 	authBaseDefault = "http://api.eos.h3c.com/auth/v1.0"
 	eipBaseDefault  = "http://apieip.h3c.com/eip"
 	credSalt        = "eip-cli-cred-v1"
-	userAgent       = "eip-cli (pinvou3 linux arm64)"
 )
+
+// os/arch 随构建目标走（linux/arm64 与 darwin 构建共用本源码）。
+var userAgent = "eip-cli (pinvou3 " + runtime.GOOS + " " + runtime.GOARCH + ")"
 
 type envelope struct {
 	Code        any             `json:"code"`
@@ -118,7 +128,7 @@ func run(args []string) int {
 		return 0
 	}
 	if args[0] == "version" {
-		emitJSON(map[string]any{"name": "eip-cli", "version": "0.1.0-arm64-pinvou3"})
+		emitJSON(map[string]any{"name": "eip-cli", "version": "0.1.0-" + runtime.GOOS + "-" + runtime.GOARCH + "-pinvou3"})
 		return 0
 	}
 	if args[0] == "config-get" {
@@ -130,7 +140,7 @@ func run(args []string) int {
 			fmt.Println(deviceID())
 			return 0
 		}
-		emitJSON(map[string]any{"ok": true, "message": "config set-env is not persisted by the ARM64 fallback"})
+		emitJSON(map[string]any{"ok": true, "message": "config set-env is not persisted by this fallback build"})
 		return 0
 	}
 	if args[0] == "auth" {
@@ -191,7 +201,7 @@ func cmdLogin(flags map[string]string) int {
 	name := firstNonEmpty(flags["name"], "eip-cli-agent")
 	body := map[string]any{
 		"deviceId": deviceID(),
-		"metaData": map[string]string{"name": name, "os": "linux", "arch": "arm64", "client": "pinvou3"},
+		"metaData": map[string]string{"name": name, "os": runtime.GOOS, "arch": runtime.GOARCH, "client": "pinvou3"},
 	}
 	env, raw, err := postJSON(authBase()+"/api/v2/user/agent/session/login", body, false)
 	if err != nil {
@@ -303,7 +313,7 @@ func runBusiness(args []string) int {
 	}
 	r, ok := routes[key]
 	if !ok {
-		emitJSON(map[string]any{"error": "unsupported EIP command in ARM64 fallback", "command": strings.Join(args, " ")})
+		emitJSON(map[string]any{"error": "unsupported EIP command in this fallback build", "command": strings.Join(args, " ")})
 		return 2
 	}
 	token := ensureToken()
@@ -675,6 +685,6 @@ func emitJSON(v any) {
 }
 
 func printHelp() {
-	fmt.Println("EIP CLI ARM64 fallback")
+	fmt.Println("EIP CLI (pinvou3 fallback build)")
 	fmt.Println("Usage: eip-cli <auth|attendance|leave|vacation|overtime|todo|employee-profile|employee-search|...> [flags]")
 }

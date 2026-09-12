@@ -63,4 +63,4 @@ zhidao search --query "无线配置" --raw-json | zhidao download --stdin-json -
 
 ## 平台差异
 
-Windows 版（zhidao/win-src/main.go）暂不支持 `--from-json`/`--stdin-json` 下载、不支持 `qa --session-id`，`clear` 会连 AIT 一起删除。
+Windows/macOS 版（zhidao/win-src/main.go 清洁室源码，Windows、linux/arm64 与 macOS darwin 构建同出一源）暂不支持 `--from-json`/`--stdin-json` 下载、不支持 `qa --session-id`，`clear` 会连 AIT 一起删除。Linux x86_64 为 H3C IT 官方 ELF。

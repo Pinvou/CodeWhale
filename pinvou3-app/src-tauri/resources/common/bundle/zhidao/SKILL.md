@@ -113,7 +113,7 @@ zhidao qa --question "<问题>" [--deep|--no-deep] [--session-id ID] [--user-id 
 
 ### `search` – 文档搜索
 
-> **⚠️ 面向用户展示搜索结果时禁止加 `--raw-json`**：命令默认输出已包含完整字段（标题、作者、更新时间、下载量、浏览量、数据来源、预览地址、进入目录、下载链接），智能体直接透传输出即可。只有用户明确要求下载文件、且需要用 `download --from-json` / `--stdin-json` 选择搜索结果时，才允许把 `--raw-json` 用作内部管道输入；不得把原始 JSON 展示给用户，且 Windows 暂不支持这两种下载模式。
+> **⚠️ 面向用户展示搜索结果时禁止加 `--raw-json`**：命令默认输出已包含完整字段（标题、作者、更新时间、下载量、浏览量、数据来源、预览地址、进入目录、下载链接），智能体直接透传输出即可。只有用户明确要求下载文件、且需要用 `download --from-json` / `--stdin-json` 选择搜索结果时，才允许把 `--raw-json` 用作内部管道输入；不得把原始 JSON 展示给用户，且 Windows/macOS 构建暂不支持这两种下载模式。
 
 ```bash
 zhidao search --query "<关键词>" [--pageNum N] [--pageSize N] [--source <系统名>] [--sort <排序方式>]
