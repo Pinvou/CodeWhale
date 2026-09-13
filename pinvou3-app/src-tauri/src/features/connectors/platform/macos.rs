@@ -151,7 +151,11 @@ mod tests {
                 label != std::env::consts::ARCH,
                 "cputype {label} 在 {} 主机上应{}拦截: {result:?}",
                 std::env::consts::ARCH,
-                if label == std::env::consts::ARCH { "不" } else { "" }
+                if label == std::env::consts::ARCH {
+                    "不"
+                } else {
+                    ""
+                }
             );
         }
         // 非 Mach-O 内容（脚本）不拦截
