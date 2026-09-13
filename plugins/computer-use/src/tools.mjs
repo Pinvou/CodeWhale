@@ -138,7 +138,7 @@ export const TOOLS = [
   },
   {
     name: "zoom",
-    description: "Close-up crop of the latest screenshot. Choose points from the returned child raster only.",
+    description: "Close-up crop of the latest screenshot. Choose points from the returned child raster only. Local and hdc computers only: over ssh the pixels stay on the remote host, so use a fresh screenshot and coordinate targets there.",
     inputSchema: {
       type: "object",
       required: ["region"],
@@ -246,7 +246,7 @@ export const TOOLS = [
   // ---- recording ----
   {
     name: "recording_start",
-    description: "Start screen recording on a computer (mp4/mov). Darwin: screencapture -v (timed or until recording_stop). Linux: x11grab/wf-recorder. Windows: ffmpeg gdigrab. HarmonyOS: snapshot-series muxed with ffmpeg.",
+    description: "Start screen recording on a computer (mp4/mov). Darwin: screencapture -v (timed or until recording_stop). Linux: x11grab/wf-recorder. Windows: ffmpeg gdigrab. HarmonyOS: snapshot-series muxed with ffmpeg. Local and hdc computers only: over ssh the one-shot agent process cannot keep a recorder running.",
     inputSchema: {
       type: "object",
       properties: {
@@ -267,7 +267,7 @@ export const TOOLS = [
   },
   {
     name: "recording_status",
-    description: "Status of one recording (running, bytes so far).",
+    description: "Status of one recording (running, bytes so far). Local and hdc computers only; unknown over ssh.",
     inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" }, computer: computerParam }, additionalProperties: false },
   },
   {

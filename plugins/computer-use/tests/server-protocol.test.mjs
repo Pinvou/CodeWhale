@@ -159,6 +159,47 @@ test("unknown computer fails closed with a named error", async () => {
   assert.equal(r.error.code, "unknown_computer");
 });
 
+test("ssh computers keep element state host-side so element targets resolve", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  // The wire layer resolves element targets against host-side state
+  // (prepareWireArgs), so get_app_state over ssh must hand back a usable
+  // state_id instead of leaving element actions dead-looping.
+  const st = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
+  if (st.ok) {
+    assert.match(String(st.state_id), /^s-\d+$/u, "ssh get_app_state must return a host-side state_id");
+    assert.ok(Array.isArray(st.elements), "elements returned over the wire");
+    assert.equal(st.computer.id, "box");
+    // A state observed on "box" must be rejected when aimed at "local".
+    if (st.elements.length >= 0) {
+      const cross = await tool("set_value", { computer: "local", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
+      assert.equal(cross.ok, false);
+      assert.equal(cross.error.code, "state_computer_mismatch");
+    }
+  } else {
+    // A headless Linux CI host has no accessibility tree; the remote backend
+    // fails closed with its named reason, which still proves the round trip.
+    assert.equal(process.platform, "linux", JSON.stringify(st.error ?? {}));
+  }
+});
+
+test("ssh zoom and recording fail closed with the ssh reason instead of stranding the model", { skip: process.platform === "win32" && "needs a registered ssh computer, which the shim cannot provide on windows" }, async () => {
+  const zoom = await tool("zoom", { computer: "box", region: [0, 0, 10, 10] });
+  assert.equal(zoom.ok, false);
+  assert.equal(zoom.error.code, "unsupported_over_ssh");
+  assert.match(zoom.error.message, /one-shot ssh agent/u);
+
+  const start = await tool("recording_start", { computer: "box" });
+  assert.equal(start.ok, false);
+  assert.equal(start.error.code, "unsupported_over_ssh");
+
+  const stop = await tool("recording_stop", { computer: "box", id: "nope" });
+  assert.equal(stop.ok, false);
+  assert.equal(stop.error.code, "unsupported_over_ssh");
+
+  const status = await tool("recording_status", { computer: "box", id: "nope" });
+  assert.equal(status.ok, false);
+  assert.equal(status.error.code, "unsupported_over_ssh");
+});
+
 test("kill switch refuses mutating tools but keeps read-only probes", async () => {
   let r = await tool("stop_computer_control", { reason: "protocol-test" });
   assert.equal(r.stopped, true);

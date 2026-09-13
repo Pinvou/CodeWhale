@@ -7,6 +7,7 @@ import * as registry from "../src/registry.mjs";
 import { backendFor, installRemoteAgent, executorFor } from "../src/transport.mjs";
 import { TOOLS, TOOL_NAMES, READ_ONLY_TOOLS, REMOTE_TOOLS, BACKEND_METHOD } from "../src/tools.mjs";
 import { tryJson } from "../src/exec.mjs";
+import { zoomChildRaster } from "../src/raster.mjs";
 
 const VERSION = "0.1.0";
 const SERVER_NAME = "codewhale-cu";
@@ -47,9 +48,12 @@ async function getBackend(computer) {
 }
 
 /** Element target -> enriched target with cached app identity and AX path. */
-function resolveElement(target) {
+function resolveElement(computer, target) {
   const st = appStates.get(target.state_id);
   if (!st) throw new ServerError("unknown_state", `state_id "${target.state_id}" is unknown or expired — call get_app_state again`);
+  if (st.computerId !== computer.id) {
+    throw new ServerError("state_computer_mismatch", `state_id "${target.state_id}" was observed on computer "${st.computerId}", not on "${computer.id}" — observe again on this computer`);
+  }
   const el = st.elements[target.index];
   if (!el) throw new ServerError("unknown_element", `element index ${target.index} is outside state ${target.state_id} (0..${st.elements.length - 1})`);
   return { state: st, element: el };
@@ -74,7 +78,7 @@ function normalizeTarget(computer, target, kind) {
     return { x: Math.round(pt.x), y: Math.round(pt.y), strategy: "event" };
   }
   if (target?.type === "element") {
-    const { state, element } = resolveElement(target);
+    const { state, element } = resolveElement(computer, target);
     if (kind === "semantic") {
       return {
         app_ref: state.app_ref, windowIndex: element.windowIndex ?? 0, path: element.path,
@@ -196,6 +200,12 @@ async function callTool(params) {
     const backendMethod = BACKEND_METHOD[name] === "request_access" ? "probe" : BACKEND_METHOD[name];
     let data;
 
+    if (computer.transport === "ssh" && ["zoom", "recordingStart", "recordingStop", "recordingStatus"].includes(backendMethod)) {
+      // The ssh agent is a fresh process per call: the previous raster and the
+      // recorder registry live (and die) on the remote host. Fail closed with
+      // the reason instead of stranding the model in an unrecoverable loop.
+      throw new ServerError("unsupported_over_ssh", `"${name}" needs state that cannot survive the one-shot ssh agent process${backendMethod === "zoom" ? " (the cropped pixels stay on the remote host)" : " (a recorder started there would be orphaned)"}. Use screenshot + coordinate targets instead${backendMethod === "zoom" ? "" : " on a local or hdc computer"}.`);
+    }
     if (computer.transport === "ssh" && REMOTE_TOOLS.has(backendMethod)) {
       const ex = await executorFor(computer);
       const wireArgs = prepareWireArgs(computer, name, args);
@@ -208,6 +218,15 @@ async function callTool(params) {
         bindRaster(computer, { ...data, file: null });
         data.note = "file lives on the remote computer; pull it with scp if you need the bytes locally";
       }
+      if (backendMethod === "get_app_state" && data?.elements) {
+        // Element targets are resolved host-side (prepareWireArgs), so the
+        // observed remote tree must be remembered here too — otherwise
+        // state_id never exists for ssh computers and element actions
+        // dead-loop on "call get_app_state again".
+        const stateId = rememberState(computer, args.app_ref ?? null, data);
+        data.state_id = stateId;
+        data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
+      }
     } else {
       const backend = await getBackend(computer);
       if (typeof backend[backendMethod] !== "function") {
@@ -217,6 +236,16 @@ async function callTool(params) {
       data = await backend[backendMethod](prepared);
       if (Array.isArray(data)) data = { items: data }; // keep receipts objects
       if (name === "screenshot") bindRaster(computer, data);
+      if (name === "zoom") {
+        // The zoomed image is a 1:1 crop of the previous raster, and the
+        // model was told to aim from the child raster — rebind the frame so
+        // child pixels resolve against the region, not the stale full shot.
+        const prev = lastRasters.get(computer.id);
+        if (prev && (!data.source || !prev.file || data.source === prev.file)) {
+          const child = zoomChildRaster(prev, data.region);
+          if (child) bindRaster(computer, child);
+        }
+      }
       if (name === "get_app_state") {
         const stateId = rememberState(computer, prepared.app_ref, data);
         data.state_id = stateId;
