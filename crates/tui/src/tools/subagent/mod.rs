@@ -365,7 +365,8 @@ const SUBAGENT_QUEUED_RATE_LIMIT_REASON: &str = "queued: waiting for provider ra
 /// period (see `acquire_queued_launch_permit`).
 const LAUNCH_RECOVERY_PROBE_PERIOD: Duration = Duration::from_secs(5);
 /// Placeholder probe period when the runtime has no governor: the probe
-/// branch no-ops, and a queued child's wall-time deadline always fires first.
+/// tick has no governor to recover and no-ops, so a queued child simply
+/// waits for a permit grant or its wall-time deadline.
 const LAUNCH_RECOVERY_PROBE_PERIOD_WITHOUT_GOVERNOR: Duration = Duration::from_secs(3600);
 /// #freeze: minimum spacing between hot-path (per-step checkpoint) state
 /// persists. `update_checkpoint` fires on every step of every agent; at high
@@ -3484,10 +3485,10 @@ impl SubAgentManager {
         self
     }
 
-    /// The rate-limit governor backing [`Self::launch_gate`]; exposed so the
-    /// engine can stamp it onto root runtimes and tests can drive the
-    /// adaptive scheduler. (Surfacing governor state in status events is a
-    /// parent-repo follow-up.)
+    /// The rate-limit governor backing [`Self::launch_gate`]; exposed so
+    /// session bootstrap (`lib.rs`) can stamp it onto root runtimes and tests
+    /// can drive the adaptive scheduler. (Surfacing governor state in status
+    /// events is a parent-repo follow-up.)
     #[must_use]
     pub(crate) fn rate_limit_governor(&self) -> Arc<governor::RateLimitGovernor> {
         Arc::clone(&self.governor)
@@ -4226,7 +4227,7 @@ impl SubAgentManager {
     /// [`governor::DynamicGate`], so the new launch concurrency applies to
     /// the live capacity immediately — children already holding permits keep
     /// running, and no admission above the new capacity is granted until the
-    /// active count drains. Always returns `true`.
+    /// active count drains.
     pub fn update_runtime_limits(
         &mut self,
         max_agents: usize,
@@ -4234,7 +4235,7 @@ impl SubAgentManager {
         running_heartbeat_timeout: Duration,
         launch_concurrency: usize,
         default_token_budget: Option<u64>,
-    ) -> bool {
+    ) {
         self.max_agents = max_agents.clamp(1, crate::config::MAX_SUBAGENTS);
         self.max_admitted_agents =
             max_admitted_agents.clamp(self.max_agents, crate::config::MAX_SUBAGENT_ADMISSION);
@@ -4248,7 +4249,6 @@ impl SubAgentManager {
         // Routed through the governor so a rate-limit pause (gate capacity 0)
         // is not silently lifted by a runtime limit change.
         self.governor.set_max_capacity(launch_concurrency);
-        true
     }
 
     /// Build the [`PersistedSubAgentState`] snapshot from the current fleet.
@@ -11040,6 +11040,17 @@ fn is_transient_subagent_provider_error(error: &anyhow::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+/// Whether a failed sub-agent LLM attempt counts as a provider 429 for the
+/// rate-limit governor's sliding window. `QuotaExhausted` is deliberately
+/// excluded: quota is a billing condition, not a transient throttle, and
+/// keeps its existing fatal/checkpoint path (see the governor module docs).
+fn is_governor_reported_rate_limit(error: &anyhow::Error) -> bool {
+    matches!(
+        error.downcast_ref::<LlmError>(),
+        Some(LlmError::RateLimited { .. })
+    )
+}
+
 async fn request_subagent_model_response_with_retries(
     runtime: &SubAgentRuntime,
     agent_id: &str,
@@ -11059,8 +11070,11 @@ async fn request_subagent_model_response_with_retries(
         let usage_route = runtime
             .client
             .effective_route_envelope(&runtime.model, chrono::Utc::now());
-        // Report the attempt to the fleet's rate-limit governor; the ratio
-        // denominator for the AIMD heuristic counts retried attempts too.
+        // Report the attempt to the fleet's rate-limit governor. The inner
+        // client `with_retry` (default max_retries = 3) hides its real HTTP
+        // attempts: whatever it retried inside, only the final result of
+        // `create_message` reaches this loop, so one iteration is at most
+        // one governor event.
         if let Some(governor) = runtime.governor.as_ref() {
             governor.record_attempt(Instant::now());
         }
@@ -11082,10 +11096,8 @@ async fn request_subagent_model_response_with_retries(
                 // A provider 429 feeds the governor's sliding window (AIMD
                 // multiplicative decrease / pause). `QuotaExhausted` and all
                 // other errors keep their existing paths untouched.
-                if matches!(
-                    err.downcast_ref::<LlmError>(),
-                    Some(LlmError::RateLimited { .. })
-                ) && let Some(governor) = runtime.governor.as_ref()
+                if is_governor_reported_rate_limit(&err)
+                    && let Some(governor) = runtime.governor.as_ref()
                 {
                     governor.record_rate_limited(Instant::now());
                 }
