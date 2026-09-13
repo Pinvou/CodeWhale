@@ -1053,6 +1053,26 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
+      # v0.9.12 底座升级后,dev 对依赖开 O2 时 codewhale-tui 的 LLVM IR/bitcode
+      # 体量使本 job 的 thin LTO 在 7GB Linux runner 上越线:2026-09-12 起 main
+      # push 与 PR 的 rust-test 均在编译最终 crate(pinvou3-tauri lib test,单个
+      # rustc ~7GB)时被内存看门狗按可用内存阈值提前杀掉(连续 8+ 次实证)。
+      # 与 windows-rust-test job 同款缓解(见该 job 同名 step):仅在本 job 内把
+      # codewhale-tui 覆盖回 dev 默认 O0,写入 CARGO_HOME/config.toml(package 级
+      # profile 覆盖只能走 config,Cargo 无对应环境变量),不改动仓库 Cargo.toml,
+      # 本地开发与 release 产物不受影响;overflow-checks 等其余 dev 设置继承,
+      # 测试语义不变。
+      - name: dev profile 内存边界覆盖(codewhale-tui O0,仅本 job)
+        run: |
+          config="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          cat >> "$config" <<'EOF'
+
+          [profile.dev.package.codewhale-tui]
+          opt-level = 0
+          EOF
+          echo "appended codewhale-tui dev O0 override to $config"
+          tail -n 4 "$config"
+
       # remote_control 的真实 relay 下载 e2e 需要 node + relay 依赖,缺 node_modules/ws 时
       # 该 e2e 会自动 skip —— 装上依赖让 CI 真正执行它,而不是绿灯假过。
       # push(main) 只编译不执行测试(见下方 --no-run),不需要 relay/Chrome 运行时依赖。
@@ -1103,6 +1123,16 @@ jobs:
           # 只在 main 保存(暖 cache 唯一来源);PR 侧只读,不占 10GB 限额。
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+
+      # PR #988 started a cold build with only 7.3 GiB free. All 2,100 lib
+      # tests passed, but the separate telemetry library exhausted the disk.
+      # Reserve room after dependencies, cache restore and swap allocation;
+      # only unused SDKs on this disposable hosted runner are removed.
+      - name: 为两轮 Rust 测试准备磁盘空间
+        run: |
+          sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            python3 scripts/ci-rust-disk.py
 
       # High-risk/explicit PRs and matching merge groups run all lib tests
       # (含真实 relay/Chrome e2e)。Linux lib harness 显式关闭 default 的
