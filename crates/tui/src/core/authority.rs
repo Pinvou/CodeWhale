@@ -505,10 +505,12 @@ pub(crate) fn write_carve_out_posture(
 }
 
 /// Whether every target path of a file-write call qualifies for the
-/// in-workspace write carve-out (#5185): each path resolves inside at least
-/// one workspace root (primary or additional), that root is a git work tree,
-/// and the path touches no `.git` internals, runtime state, or sensitive
-/// file. Every root is judged independently.
+/// in-workspace write carve-out (#5185): an absolute path resolves inside at
+/// least one workspace root (primary or additional); a relative path is
+/// judged against the primary root alone, because execution resolves it
+/// there (ToolContext::resolve_path). The qualifying root must be a git work
+/// tree, and the path must touch no `.git` internals, runtime state, or
+/// sensitive file. Every root is judged independently.
 ///
 /// The git work-tree marker is deliberate (the same shape as kimi-code's
 /// `git-cwd-write-approve` policy): the carve-out exists because
@@ -525,9 +527,18 @@ pub(crate) fn paths_within_workspace_write_carve_out(
     }
     let roots = codewhale_core::normalize_workspace_roots(workspace, workspace_roots);
     paths.iter().all(|raw| {
-        roots
-            .iter()
-            .any(|root| carve_out_target_within_root(root, raw))
+        if Path::new(raw.trim()).is_absolute() {
+            roots
+                .iter()
+                .any(|root| carve_out_target_within_root(root, raw))
+        } else {
+            // A relative target is joined onto the primary workspace at
+            // execution time, so approval must judge it there: qualifying it
+            // through an attached git root would let the write land in the
+            // non-git primary tree modal-free and defeat the carve-out's own
+            // reviewability rationale.
+            carve_out_target_within_root(workspace, raw)
+        }
     })
 }
 
@@ -903,6 +914,36 @@ mod tests {
             &[shared
                 .path()
                 .join(".git/config")
+                .to_string_lossy()
+                .into_owned()],
+        ));
+    }
+
+    #[test]
+    fn carve_out_relative_target_keeps_modal_when_only_attached_root_has_git() {
+        // Execution joins a relative target onto the primary workspace, so a
+        // git work tree among the additional roots must not qualify a
+        // relative write into the non-git primary tree: approval judges the
+        // relative target against the primary root alone and keeps the
+        // modal.
+        let primary = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(primary.path().join("src")).expect("primary src dir");
+        let attached = carve_out_workspace();
+
+        assert!(!paths_within_workspace_write_carve_out(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            &["src/main.rs".to_string()],
+        ));
+
+        // The same target spelled absolutely inside the attached git root
+        // still qualifies: absolute targets are judged against every root.
+        assert!(paths_within_workspace_write_carve_out(
+            primary.path(),
+            &[attached.path().to_path_buf()],
+            &[attached
+                .path()
+                .join("src/main.rs")
                 .to_string_lossy()
                 .into_owned()],
         ));
