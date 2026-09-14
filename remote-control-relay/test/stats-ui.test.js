@@ -34,6 +34,64 @@ const devices = [
   { device_id: "gamma", online: true, platform: "macos", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 5, turns_today: 2 },
 ];
 
+test("usage trend exposes exact values on hover and after a range rerender", async () => {
+  const trendOverview = {
+    ...overview,
+    usage_trend: Array.from({ length: 8 }, (_, index) => ({
+      day: `2026-08-${String(index + 3).padStart(2, "0")}`,
+      active_devices: index === 7 ? 3 : index + 1,
+      turns: index === 7 ? 12 : index + 2,
+    })),
+  };
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async (url) => ({
+        ok: true,
+        status: 200,
+        json: async () => String(url).endsWith("/overview") ? trendOverview : { devices },
+      });
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+
+  try {
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 10));
+    const { document } = dom.window;
+    const svg = document.querySelector("#trendSvg");
+    svg.getBoundingClientRect = () => ({ left: 0, width: 780 });
+    let hitArea = document.querySelector("#trendHitArea");
+    const tooltip = document.querySelector("#trendTooltip");
+    hitArea.dispatchEvent(new dom.window.MouseEvent("pointermove", { clientX: 770, bubbles: true }));
+    assert.equal(tooltip.hidden, false);
+    assert.match(tooltip.textContent, /2026-08-10/);
+    assert.match(tooltip.textContent, /活跃设备3 台/);
+    assert.match(tooltip.textContent, /新增设备3 台/);
+    assert.match(tooltip.textContent, /对话次数12 次/);
+    assert.equal(document.querySelector("#trendHover").getAttribute("visibility"), "visible");
+    assert.match(hitArea.getAttribute("aria-valuetext"), /活跃设备 3 台/);
+
+    hitArea.dispatchEvent(new dom.window.MouseEvent("pointerleave", { bubbles: true }));
+    assert.equal(tooltip.hidden, true);
+
+    document.querySelector('[data-days="7"]').click();
+    hitArea = document.querySelector("#trendHitArea");
+    hitArea.dispatchEvent(new dom.window.MouseEvent("pointermove", { clientX: 35, bubbles: true }));
+    assert.equal(tooltip.hidden, false);
+    assert.match(tooltip.textContent, /2026-08-04/);
+    assert.match(tooltip.textContent, /对话次数3 次/);
+    assert.equal(hitArea.getAttribute("aria-valuemax"), "6");
+
+    hitArea.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "End", bubbles: true }));
+    assert.match(tooltip.textContent, /2026-08-10/);
+    assert.match(tooltip.textContent, /对话次数12 次/);
+  } finally {
+    dom.window.close();
+  }
+});
+
 test("behavior analytics views render alongside the device dashboard", async () => {
   const dom = new JSDOM(statsHtml, {
     runScripts: "dangerously",
