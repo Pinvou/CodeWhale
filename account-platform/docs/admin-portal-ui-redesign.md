@@ -1,8 +1,8 @@
 # 账号平台管理后台改版设计——独立修订稿
 
-> 文档状态：基础改版已获产品批准；财务支付两期重构已于第三轮独立复审通过。
+> 文档状态：基础改版已获产品批准；财务支付两期重构已于第三轮独立复审通过；UI-60/ADM-67/NFR-57 治理与安全整改需求已确认、未实现、未部署。
 >
-> 版本日期：2026-08-27
+> 版本日期：2026-09-14
 
 ## 0. 文档效力与来源优先级
 
@@ -17,7 +17,7 @@
 5. `account-platform/contracts/openapi/admin.yaml` 及各服务 OpenAPI：已定义的管理接口。
 6. 当前路由注册、审批策略注册表和真实代码：已实现行为的核验依据。
 
-除第 1.3 节已经产品批准的 `UI-28`～`UI-32`、`UI-37`～`UI-58`、`ADM-54`～`ADM-64`、`BILL-47`、`NFR-55`～`NFR-56` 界面与交互专项需求外，本文不得创造新的业务需求、权限或接口。财务支付重构的领域边界、两期范围和任务顺序以 `admin-finance-payment-redesign.md` 为准；模型与 Token 重构的三页面信息架构、领域边界、两期范围和验收以 `admin-model-token-redesign.md` 为准。原稿中的“新建用户”“新建角色”、KYC、邮箱恢复、Portal 内 2FA、Portal 代理 bootstrap、break-glass 或 IdP 管理等能力全部删除或明确禁用。
+除第 1.3 节已经产品批准的 `UI-28`～`UI-32`、`UI-37`～`UI-60`、`ADM-54`～`ADM-67`、`BILL-47`、`NFR-55`～`NFR-57` 界面与交互专项需求外，本文不得创造新的业务需求、权限或接口。财务支付重构的领域边界、两期范围和任务顺序以 `admin-finance-payment-redesign.md` 为准；模型与 Token 重构的三页面信息架构、领域边界、两期范围和验收以 `admin-model-token-redesign.md` 为准；治理与安全、审批中心 presenter、activation、proof、恢复及八类财务命令的详细边界以 `admin-governance-security-redesign.md` 为准。原稿中的“新建用户”“新建角色”、KYC、邮箱恢复、Portal 内 2FA、Portal 代理 bootstrap、break-glass 或 IdP 管理等能力全部删除或明确禁用。
 
 ---
 
@@ -63,6 +63,7 @@
 | `UI-45` | Billing 全量分页 Portal 适配 | Portal 消费 Billing cursor，并以 URL 恢复目录上下文 | 不把当前页条数显示为全量总数 |
 | `BILL-47` | 财务支付概览口径 | 三个分区分别返回权限裁剪、单位与时间窗明确的概览块 | 局部失败不伪装为 0，不混合积分和 CNY |
 | `UI-46` | 财务支付运营概览界面 | 三个分区独立展示概览、局部失败并可筛选下穿 | 不在前端扫描列表计算平台总量 |
+| `UI-60`、`ADM-67`、`NFR-57` | 治理与安全及审批中心安全整改 | 安全目录、最小列表、closed detail、业务页编辑/fresh superseding、有界 cursor、逐命令 activation/proof/recovery 与历史 APPROVED 收敛 | 不触发 Provider 探测，不新增 DRAFT 撤回，不通用重试，不在 T9 异常索引未完成时显示入口；需求已确认、未实现、未部署 |
 
 ### 1.3.1 设计稿一致性优先级与强制版式
 
@@ -111,7 +112,7 @@
 | 身份与组织 | 用户管理、角色与权限、组织管理、我的组织 | 子页分别要求现有 `platform.users.*` 修复/读取权限、`platform.roles.read`、`platform.organizations.read` 或现有组织作用域读权限；没有可用接口的“我的组织”隐藏 |
 | 财务与支付 | 账户与计费、支付与对账、定价与商品 | `billing/payments/products` section 保持稳定；账户页按钱包/账本/应收/Hold 权限，支付页按订单/案件/对账/控制权限，定价商品页按 `platform.pricing.*` 与 `platform.products.*` 分区块独立显示；一个子页的权限不解锁相邻子页 |
 | 模型与 Token | 模型管理、Token 资源、运行与用量 | 模型管理至少具有 `platform.models.read` 或 `platform.pricing.read`；Token 资源要求 `platform.tokens.read`；运行与用量至少具有 `platform.tokens.read` 或 `platform.usage.read`；页面内继续逐区块鉴权，写权限不替代读权限 |
-| 治理与安全 | 审批中心、审计与导出、系统与安全、偏好设置 | 审批读取沿用 `platform.billing.wallets.read` 且动作继续精确鉴权；审计和系统分别要求 `platform.audit.read`、`platform.system.status.read`；偏好设置只在已有管理页面可访问且存在真实本地偏好时显示 |
+| 治理与安全 | 审批中心、审计与导出、系统与安全、偏好设置 | 审批中心使用 UI-60/ADM-67 的安全只读目录，目录只返回当前主体 `visible/requestable`；具体申请动作只由 detail 的 `allowed_actions` 表达并在决定时重验，不以 `platform.billing.wallets.read` 或 `platform.roles.read` 作为通用审批读取权限。审计和系统分别要求 `platform.audit.read`、`platform.system.status.read`；偏好设置只在已有管理页面可访问且存在真实本地偏好时显示 |
 
 以上五组及页面名称以 `admin-portal-ui-prototype.html` 的 `navGroups` 为视觉信息架构，财务三个 section 的领域归属以 `admin-finance-payment-redesign.md` 为业务真相源，模型与 Token 三个 section 的归属以 `admin-model-token-redesign.md` 为业务真相源，不再保留“总览/治理/运行手册/系统运行”六组旧分类。角色、支付、商品、模型管理、Token 资源、运行与用量、审批、偏好均为独立 URL `section`，不能重新塞回用户、财务或单一 Token 聚合页。只读运行手册作为“系统与安全”或“审计与导出”的内容区存在，不形成第六导航组；面向具体用户的注册、资料与注销修复归入“用户管理”，Keycloak 平台级受控入口及隧道说明归入“系统与安全”，两者使用各自既有精确权限独立显示。
 
@@ -196,7 +197,7 @@
 | `/billing/repairs` | 审批财务修复 | `platform.billing.repairs.approve` | PLATFORM | APPROVAL_REQUIRED；禁自审 |
 | `/billing/provider-controls` | 申请 Provider 恢复 | `platform.billing.payment-controls.resume.request` | PLATFORM | APPROVAL_REQUIRED；只能消费 GET 返回的已有合格证据与 `resume_draft` |
 | `/billing/provider-controls` | 批准 Provider 恢复 | `platform.billing.payment-controls.resume.approve` | PLATFORM | APPROVAL_REQUIRED；独立审批人 |
-| `/billing/provider-controls/probe` | “立即探测” | 无现有端点 | PLATFORM | **NOT_AVAILABLE**：`UIA-005` 前不显示按钮、不由 Portal 直连 Provider |
+| `/billing/provider-controls/probe` | “立即探测” | 不允许人类/浏览器端点 | PLATFORM | **NOT_AVAILABLE**：PAY-57 只允许专用受信工作负载和一次性意图；管理员、审批中心和 Portal 永久不显示按钮、不代理或直连 Provider，只读持久可信结果与 `resume_draft` |
 | `/billing/products` | 商品列表/详情 | `platform.products.read` | PLATFORM | READ_ONLY |
 | `/billing/products` | 新建草稿 | `platform.products.create` | PLATFORM | AUDIT_ONLY |
 | `/billing/products/:id` | 发布、准入验证/重试/撤销 | `platform.products.publish` | PLATFORM | AUDIT_ONLY；准入证据与版本门禁 |
@@ -217,14 +218,14 @@
 | `/usage/requests` | 查询 | `platform.usage.read` | PLATFORM | READ_ONLY |
 | `/usage/reconciliation` | 重试 | `platform.usage.reconcile.retry` | PLATFORM | AUDIT_ONLY；结果未知先对账 |
 | `/system/status` | 状态读取 | `platform.system.status.read` | PLATFORM | READ_ONLY |
-| `/system/events/account` | Account Outbox 查询/重放 | `platform.events.retry`（权限码已定义） | PLATFORM；Account 服务自有库 | **NOT_AVAILABLE**：当前 Account OpenAPI 无端点；候选 `UIA-008`。Account 只能查询/重放自己的 Outbox |
+| `/system/events/account` | Account Outbox 查询/受限重放 | `platform.events.retry`（权限码已定义） | PLATFORM；Account 服务自有库 | **NOT_AVAILABLE**：当前 Account OpenAPI 无端点；候选 `UIA-008`。Account 只能处理自己的 Outbox；`account.approval-command.authorized.v1` 永久只读、无重放动作，权限存在也不能解锁 |
 | `/system/events/billing` | Billing Outbox 查询/重放 | `platform.events.retry`（权限码已定义） | PLATFORM；Billing 服务自有库 | **NOT_AVAILABLE**：当前 Billing OpenAPI 无端点；候选 `UIA-021`。Billing 只能查询/重放自己的 Outbox |
 | `/system/events/token` | Token Outbox 查询/重放 | `platform.events.retry`（权限码已定义） | PLATFORM；Token 服务自有库 | **NOT_AVAILABLE**：当前 Token OpenAPI 无端点；候选 `UIA-022`。Token 只能查询/重放自己的 Outbox |
-| `/system/events` | Portal 只读聚合与所属服务路由 | 每个领域卡片独立要求 `platform.events.retry` | PLATFORM；不持有跨域数据写权限 | **NOT_AVAILABLE**：当前无聚合适配；候选 `UIA-023`。Portal 不代理跨库写，重放请求仅路由到事件所属服务 |
+| `/system/events` | Portal 只读聚合与所属服务路由 | 每个领域卡片独立要求 `platform.events.retry` | PLATFORM；不持有跨域数据写权限 | **NOT_AVAILABLE**：当前无聚合适配；候选 `UIA-023`。Portal 不代理跨库写，允许的普通事件重放请求仅路由到事件所属服务；授权事件固定无动作 |
 | `/audit` | 日志查询 | `platform.audit.read` | PLATFORM | READ_ONLY，默认脱敏 |
 | `/audit/exports` | 默认导出 | `platform.audit.export` | PLATFORM | AUDIT_ONLY，异步、近期认证 |
 | `/audit/exports` | 含 PII 导出 | `platform.audit.export` + 临时 `platform.audit.pii.export` | PLATFORM | AUDIT_ONLY，临时授权且强化审计 |
-| `/approvals/my-requests` | 申请人视图/撤回 | 冻结策略的 `requester_permission` | PLATFORM | APPROVAL_REQUIRED |
+| `/approvals/my-requests` | 申请人视图；仅 SUBMITTED 撤回 | 冻结策略的 `requester_permission` | PLATFORM | APPROVAL_REQUIRED；DRAFT 不可撤回，未激活 DRAFT 只读 |
 | `/approvals/inbox` | 审批人视图/决定 | 冻结策略的 `approver_permission` | PLATFORM | APPROVAL_REQUIRED；禁自审 |
 | `/my-org/profile` | 组织资料读取 | `org.profile.read` | ORGANIZATION | READ_ONLY；当前由 `/me/organizations` 摘要提供 |
 | `/my-org/profile` | 组织资料更新/注销申请 | `org.profile.update` / `org.delete.request`（权限码已定义） | ORGANIZATION | **NOT_AVAILABLE**：当前 OpenAPI 无端点；Account API 见 `UIA-019`，Portal 适配见 `UIA-012` |
@@ -249,14 +250,14 @@
 
 事件候选合同仅在产品批准后进入正式设计，且三域逐项满足以下同构合同：
 
-1. Account、Billing、Token 分别在本服务管理前缀下提供 `GET /outbox-events`、`GET /outbox-events/{event_id}` 与 `POST /outbox-events/{event_id}/replays`，不得由 Account 代查或代写其他库。
-2. GET 只返回 `event_id/event_type/status/attempt_count/occurred_at/last_attempt_at/last_error_category/request_id` 等脱敏摘要，并必须返回 `event_digest`：对不可变事件包络规范序列化结果计算的 64 位小写十六进制 SHA-256。摘要不得包含原始 payload；本域列表定义 `event_type/status/from/to/cursor/limit`。
+1. Account、Billing、Token 分别在本服务管理前缀下提供 `GET /outbox-events`、`GET /outbox-events/{event_id}` 与 `POST /outbox-events/{event_id}/replays`，不得由 Account 代查或代写其他库。以下普通事件候选合同永久不适用于 `account.approval-command.authorized.v1`；该类型只允许脱敏查询且固定 `replayable=false`。
+2. GET 只返回 `event_id/event_type/status/attempt_count/occurred_at/last_attempt_at/last_error_category/request_id/replayable` 等脱敏摘要，并必须返回 `event_digest`：对不可变事件包络规范序列化结果计算的 64 位小写十六进制 SHA-256。`replayable`由所属服务按持久event type和状态计算，授权事件恒为false；摘要不得包含原始 payload。本域列表定义 `event_type/status/from/to/cursor/limit`。
 3. POST 必须同时携带 body `expected_digest`、Header `Idempotency-Key`（16～128 字符）和 body `reason`（去除首尾空白后至少 20 字符）。`expected_digest` 必须等于最近 GET 返回的 `event_digest`。
-4. 只有 `published_at IS NULL AND dead_lettered_at IS NOT NULL` 的**未发布死信**可重放；普通待发布事件、已发布事件、非死信事件以及其他领域 event ID 均失败关闭，且跨域失败不泄露事件是否存在。
-5. 领域执行器使用 Serializable 单一事务：按本域 `event_id` `FOR UPDATE` 读取事件，重新计算不可变包络摘要，复核 `expected_digest` 与未发布死信状态；随后追加不可变 `event_replay_requests`，再原子清除 `dead_lettered_at`、清零尝试计数并把 `next_attempt_at` 设为当前时间重排队。摘要或状态任一变化均回滚整个事务。
+4. 除授权事件外，只有 `published_at IS NULL AND dead_lettered_at IS NOT NULL` 的**未发布死信**可重放；普通待发布事件、已发布事件、非死信事件以及其他领域 event ID 均失败关闭，且跨域失败不泄露事件是否存在。授权事件即使符合该物理状态也必须固定409 `AUTHORIZATION_EVENT_REPLAY_FORBIDDEN`。
+5. 领域执行器使用 Serializable 单一事务：按本域 `event_id` `FOR UPDATE` 读取事件，先由DB受控函数/约束按持久event type拒绝授权事件，再重新计算不可变包络摘要并复核 `expected_digest` 与普通未发布死信状态；随后追加不可变 `event_replay_requests`，再原子清除 `dead_lettered_at`、清零尝试计数并把 `next_attempt_at` 设为当前时间重排队。摘要或状态任一变化均回滚整个事务。授权事件拒绝路径不得追加request或修改Outbox。
 6. 幂等指纹至少覆盖 `event_id + expected_digest + reason + 执行工作负载身份`。同键同请求返回原 `replay_id`；同键异事件、异摘要、异 reason 或异执行身份全部冲突失败，不追加记录、不重排队。
-7. HTTP 人类调用者先由所属领域服务校验 `platform.events.retry`，记录请求者、reason、目标域和 request ID；实际事务只允许 `job_type=EVENT_REPLAY` 的短期工作负载身份执行，并在 `event_replay_requests` 及管理审计中记录 service name/job run ID。人类授权审计与工作负载执行审计是两条可关联但不可互相替代的记录。
-8. Portal 只并列读取三个领域响应，并把重放动作原样路由到该事件所属端点；不持有 Outbox 写权限、不统一执行事务、不跨库。
+7. HTTP 人类调用者先由所属领域服务校验 `platform.events.retry`，记录请求者、reason、目标域和 request ID；实际事务只允许 `job_type=EVENT_REPLAY` 的短期工作负载身份执行，并在 `event_replay_requests` 及管理审计中记录 service name/job run ID。人类授权审计与工作负载执行审计是两条可关联但不可互相替代的记录；两种身份对授权event type都无例外权限。
+8. Portal 只并列读取三个领域响应，并把普通可重放事件的动作原样路由到该事件所属端点；不持有 Outbox 写权限、不统一执行事务、不跨库。授权事件列表/详情不渲染按钮、菜单或快捷动作，构造直连POST仍由HTTP与DB双拒绝。
 
 ### 4.3 Token 权限隔离硬规则
 
@@ -284,10 +285,10 @@ Token 管理查询只有三类互斥的墙钟预算，从入口代理收到请�
 
 | 视图 | 用户可见内容 | 允许动作 | 禁止动作 |
 |---|---|---|---|
-| 我的申请 | 自己创建的申请、冻结快照、当前状态、审批记录、执行结果 | 保存草稿、提交、在允许状态撤回、失败后基于最新资源新建替代申请 | 审批自己的申请、修改已提交快照、直接执行命令 |
+| 我的申请 | 自己创建的申请、closed presenter、当前状态、审批记录、最小执行结果 | 未修改 DRAFT 可在中心快捷 submit；业务页可 Update 同一已激活 DRAFT 后按最新版本/precheck/CAS submit；SUBMITTED 按 `allowed_actions` 撤回；终态按矩阵 fresh superseding | DRAFT 撤回、中心修改复杂表单/刷新快照、审批自己的申请、直接执行命令 |
 | 待我审批 | 当前主体拥有冻结策略 `approver_permission` 且作用域匹配的申请 | 查看差异与风险、批准、拒绝 | 审批自己发起的申请、修改申请参数、代替执行服务执行 |
-| 执行与失败 | 只读展示执行尝试、服务身份、幂等键、错误和重试资格 | 仅策略允许的重新执行/失效操作 | 人工编辑执行结果、伪造成功、绕过 CAS |
-| 审批策略 | 当前注册策略的命令、版本、申请/审批权限、执行身份、时限 | 只读 | Portal 编辑策略或权限 |
+| 执行与失败 | 只读展示最小 attempt 状态、稳定错误分类、retryable、next_retry_at、窗口和脱敏领域引用 | 仅安排逐命令合同允许的安全重试、只查证或失效 | 通用重试、人工编辑执行结果、伪造成功、绕过 CAS、查看工作负载凭据/内部堆栈 |
+| 审批策略 | 安全目录返回的 visible/requestable 命令、版本、最小权限说明、时限和 activation 状态 | 只读 | Portal 编辑策略/activation，或读取需要 `platform.roles.read` 的内部 policy API |
 
 ### 5.2 精确审批策略
 
@@ -298,17 +299,17 @@ Token 管理查询只有三类互斥的墙钟预算，从入口代理收到请�
 | `PAYMENT_PROVIDER_RESUME` | `platform.billing.payment-controls.resume.request` | `platform.billing.payment-controls.resume.approve` | `billing-command-executor` | Provider 独立恢复；当前只能消费 controls GET 返回的合格、未过期探测/评估证据 |
 | `PAYMENT_PRODUCT_RESUME` | 同上 | 同上 | `billing-command-executor` | Provider 已 ACTIVE 后另起新申请；商品逐个恢复 |
 
-实际页面必须从 `approval_command_policies`/审批策略接口读取冻结的 `requester_permission`、`approver_permission`、策略版本、时限和执行身份，不能维护第二份前端常量表。未知命令或策略缺失一律禁止提交和审批。
+实际页面必须读取 UI-60/ADM-67 的安全只读目录和 request/detail 返回的冻结策略摘要，不能维护第二份前端常量表，也不能直接调用需要 `platform.roles.read` 的内部 `approval_command_policies` 接口。目录只声明 `visible`、`requestable`；具体 request 是否出现 APPROVE 只看 detail 的当前 `allowed_actions`，服务端决定时仍结合冻结权限、作用域、非自审、近期认证、policy、activation 与 proof 重验。未知命令、缺 presenter、缺 activation 或版本不兼容一律禁止申请和审批。
 
 ### 5.3 冻结、并发与幂等
 
-1. 提交时冻结命令、参数、目标资源、`critical_resource_versions`、策略版本、申请人身份/权限/作用域、认证绑定、风险摘要和到期时间；字段以 ApprovalDraft OpenAPI 为准。
-2. 提交后请求正文不可编辑；变更必须撤回或失效后创建新申请，并以 `supersedes_request_id` 关联。
+1. 提交时冻结命令、参数、目标资源、`critical_resource_versions`、策略版本、申请人身份/权限/作用域、认证绑定、风险摘要和到期时间；字段以 ApprovalDraft OpenAPI 为准。只有中心快捷提交限于完全未修改的 DRAFT、最新 `allowed_actions/expected_version` 且服务端重新 precheck 通过；业务页可重读事实、Update 同一已激活 DRAFT 后按新版本/precheck/CAS 提交。
+2. 提交后请求正文不可编辑；SUBMITTED 如需变更先按 `allowed_actions` 撤回，其他失效/终态按专项矩阵处理，再跳回业务页重读当前事实并新建 ID、快照、幂等键和 `supersedes_request_id`。中心不得自动刷新快照或重建命令。
 3. 服务端禁止 `requester_actor_id == approver_actor_id`；对支付恢复，审批人还不得是相关异常确认人。
-4. 审批决定当前使用审批请求 `expected_version`、reason 与 `observed_versions`；OpenAPI 未接受决定幂等键，不得宣称同键重放保证。若需显式决定幂等，列入 `UIA-011`。
-5. 执行前重新校验目标资源 CAS、策略仍有效、授权未撤销、执行窗口未过期。任一失败转 `INVALIDATED` 或 `EXECUTION_FAILED`，不执行副作用。
+4. v1 审批决定继续使用 `expected_version`、reason 与 legacy `observed_versions`，v2 closed body 恰为 `{expected_version,decision,reason}` 并拒绝 `observed_versions/proof*`；两线都未接受决定幂等键，不得宣称同键重放保证。若需显式决定幂等，列入 `UIA-011`。
+5. 批准时才由 Account 在鉴权、可见、非自审和逐命令近期认证后，以 2 秒绝对 deadline、请求响应合计64KiB、30秒 clock skew、精确60秒TTL 调用 Account-only closed proof；六个既有 executable command/version 必须按当前持久 target/normalized command/critical/financial 的专项精确映射构造脱敏 `proof_input` closed oneOf，并用新增 typed closed RFC8785 公共 encoder 产生 digest，禁止普通 json.Marshal、前端对象或 Token 专用 canonicalizer 冒充。生命周期proof仅接受current PUBLISHED/DEPRECATED、target DEPRECATED/REMOVED及真实三条迁移，target DRAFT/PUBLISHED等向量失败关闭。浏览器 `observed_versions` 不具权威性，BFF 剥离 proof-like 外部头并拒绝决定 body 的 proof-like 未知字段，REJECT 零领域调用。proof-required 开启后v1/v2 APPROVE均走同一 proof，仅v1接受并忽略observed_versions，v2 closed body拒绝。返回后 Account 只 CAS 本域 request/auth checkpoint/policy/activation/proof binding并持久化关联revision，不做跨库current revision CAS；领域executor在副作用前重读并于领域事务验证revision，漂移零副作用并确定性失效。
 6. 只有策略冻结的最小权限服务身份可执行；Portal 和人类管理员永远不能模拟该身份。
-7. 执行结果不明时按领域进入“结果不确定”展示分类（不是统一 API 状态码），只允许使用已有查询、探测或对账接口，禁止自动重复副作用。
+7. 执行结果不明时按领域进入“结果不确定”展示分类（不是统一 API 状态码），只允许查询原 execution/领域引用、Inbox/result/账本或持久 Provider 证据，禁止自动重复副作用。审批中心和管理员不得以“探测”按钮触发 Payment Provider 主动请求。
 
 ### 5.4 审批生命周期
 
@@ -317,9 +318,23 @@ Token 管理查询只有三类互斥的墙钟预算，从入口代理收到请�
 - `SUBMITTED → REJECTED | WITHDRAWN | EXPIRED | INVALIDATED`
 - `APPROVED → INVALIDATED`
 - `EXECUTING → EXECUTION_FAILED`
-- `EXECUTION_FAILED → EXECUTING | INVALIDATED`，仅策略允许且幂等/CAS 验证通过。
+- `EXECUTION_FAILED → EXECUTING | INVALIDATED` 只能由逐命令错误分类、幂等、CAS、activation、租约、次数和执行窗口共同决定；unknown 只查证，不能统一重试。
 - 终态不可重开；后续操作必须新建替代申请。
 - 提交有效期默认 24 小时、上限 72 小时；批准后的执行窗口默认 5 分钟。界面显示绝对时间和剩余时间。
+
+DRAFT 不存在 withdraw/abandon 转换；未激活 DRAFT 只读且不可 update/submit。未激活 SUBMITTED 仅允许 REJECT/WITHDRAW 安全收口。历史误 APPROVED 不新增、补发或重放授权 Outbox；已有 Outbox、Relay 发布、仅 Inbox、consumer 本地 claim（新鲜/stale）和 Begin 前只读 precheck 均不算执行授权，也不阻止失效。Account Begin 与 reconciler 对同库 request status 的 CAS 是唯一所有权线性化点：失效先赢则迟到 Begin 零领域副作用，Begin 先赢、已有 execution 或已证明 effect 时只按原 execution/fencing 查证；完整合同以 `admin-governance-security-redesign.md` 为准。
+
+proof-required切换前Account持久control进入`QUIESCING`并停止六命令新APPROVE；DRAFT仍由业务页权威Update，SUBMITTED在切换后批准时取得新proof。切换前已APPROVED的请求不补proof、不跨epoch：旧consumer只可在既有5分钟execution_deadline前以旧epoch原event先Begin，expiry worker继续用`EXECUTION_WINDOW_EXPIRED`收敛；20分钟仅是健康broker drain/readiness预算，不能延长或阻止deadline。切换必须先让既有授权Outbox以原event ID完成首次成功投递或确定进入dead-letter/exclusion，并达到授权Outbox DB可发布pending=0、Relay active/reclaimable claim=0、未分类dead-letter=0、每行已确定published/dead-letter/exclusion、Q前consumer pending/ack-pending/handler=0，再持久FENCE Account授权Relay；已验证exclusion可永久保留且不计入前三项。PubAck与DB close不确定时，相同原行以同一Msg-Id/同语义bytes进行自动at-least-once恢复不属于人工replay，超过24小时去重窗也允许重复流消息；Inbox/Begin/execution/领域幂等保证最多一个execution/effect。随后读取可信Q，创建但不启动Q+1三个Billing新durable，停止并删除/永久pause旧durable、撤ACL，最后把APPROVED/EXECUTING/EXECUTION_FAILED、旧epoch非终态execution和未知effect全部收敛为0。gate CAS后才启动新consumer并恢复Relay；新proof/v2只用于此后新批准。Billing物理MaxDeliver=-1、应用层最多12次领域调用并按DLQ PubAck/ACK_PENDING/服务器确认DoubleAck收口，Token保持无限投递；任一精确零值不满足或effect不明都阻断，无legacy豁免。
+
+APPROVE最终事务与subject-specific Relay Claim事务都必须对唯一`ADMIN_APPROVAL` control行取FOR SHARE，分别绑定approval_epoch与authorization_relay_epoch；QUIESCING与FENCE CAS都对这同一行取FOR UPDATE，前者在同一DB快照复核并记录授权subject pending/claim/dead-letter现状，后者必须复核可发布pending、active/reclaimable claim和未分类dead-letter全为0，且每个原行已由DB确定published/dead-letter/exclusion；FENCE提交后才外部确认全副本handler=0，不得另建Relay控制真相。mode/proof与Relay状态分别递增对应epoch，恢复Relay不能误废同一proof epoch批准。授权event type永久排除人工/管理面通用Outbox replay：GET只显示`replayable=false`且无动作，HTTP/DB固定拒绝；同一不可变原行的Relay自动at-least-once恢复不属于该禁止。仅已INVALIDATED且权威确认无Begin/execution/effect的授权DLQ可封存为不可发布cutover exclusion，其他DLQ阻断。exclusion的`event_approval_epoch`必须等于原Outbox不可变`approval_control_epoch`；封存时control epoch只作审计，后续FENCE不得要求它等于当前epoch。
+
+Portal按服务端mode×Relay矩阵显示动作：LEGACY/PROOF_REQUIRED只有Relay RUNNING才可显示由detail `allowed_actions`给出的APPROVE；FENCED时必须清除APPROVE动作，提交或竞态响应固定显示503 `APPROVAL_RELAY_FENCED`，不得自动重试，request仍为SUBMITTED。该响应带`Retry-After: 5`与`Cache-Control: no-store`，入口已见FENCED时服务端零proof/Outbox；竞态中已发起的只读proof必须丢弃且仍零Outbox。Account capability为no-store closed响应，required keys恰为`schema_version/mode/approval_wire_version/proof_required/epoch/authorization_relay_state/authorization_relay_epoch/version/request_id`；v2 detail body required正整数`action_control_version=capability.version`，v1 body保持兼容并以`X-Pinvou-Approval-Action-Control-Version`返回同值，所有detail同样no-store。Portal必须比较版本；缺失、畸形、不等于最新值或mode/state/epoch/version变化时abort并清除旧`allowed_actions`，迟到RUNNING响应不得复活APPROVE。RUNNING→FENCED→RUNNING即使状态回原值也因version单调递增被识别。QUIESCING/SAFE在RUNNING/FENCED两态都不显示APPROVE，Directory仍只显示`visible/requestable`，不得自行派生approvable。Relay边只允许专项第5.4节的受控cutover/maintenance/SAFE流程，非法边或readiness失败不得由Portal提供绕过入口。
+
+v1/v2选择只来自上述Account DB closed capability。Portal BFF在Session首次进入审批中心时以Redis CAS/SETNX写入不可变`approval_wire_version`；旧Redis Session缺字段固定v1，刷新、多Portal副本及多标签保持同值。control合法边仅proof前LEGACY↔QUIESCING、QUIESCING→PROOF_REQUIRED及开启后PROOF_REQUIRED↔SAFE_ROLLBACK；其中QUIESCING仅在授权Relay仍RUNNING、Q未持久化且旧durable/ACL完整时可回LEGACY，越过Relay FENCE、Q或旧durable退役任一边界后不得回退LEGACY。SAFE关闭create/update/submit/APPROVE/Begin但保留SUBMITTED的REJECT/WITHDRAW和鉴权历史GET。gate回退时既有v2 Session显示稳定不可用并中止在途写，不得降级v1或重放决定。proof开启后legacy N-1 Account不得接任何approval写/Begin；回滚候选必须支持control/proof，其他旧二进制由路由和DB写权限强制只读。
+
+SAFE必须显示并按服务端真实区分Relay FENCED/RUNNING，不提供人工解除栅栏、人工事件requeue/replay或直接执行。PROOF_REQUIRED gate后consumer启动失败或Relay恢复CAS未提交发生在Relay FENCED且APPROVE隐藏的阶段，必须显示“未开放批准/零新授权Outbox”的SAFE+FENCED状态；Relay恢复CAS一旦提交即为RUNNING，其后consumer/Relay readiness或健康故障必须考虑已有/并发批准并进入SAFE+RUNNING。后者只允许受控SAFE_DRAIN Claim选择SAFE前已提交且DB尚未确定published/dead-letter/exclusion的原授权Outbox，以原event ID作为相同Msg-Id和sidecar同语义delivery bytes自动恢复；PubAck/DB close不确定与24小时去重窗外均可产生重复流消息，但禁止新Outbox/Begin，失败进入dead-letter并在合法失效后exclusion。前一proof/approval epoch无Begin/execution/effect的APPROVED，以及无活动Begin/lease且确认无effect、不可安全恢复的EXECUTION_FAILED，在deadline内按`APPROVAL_SAFE_ROLLBACK_INVALIDATED`收敛，deadline已到仍显示既有`EXECUTION_WINDOW_EXPIRED`，已有Begin/effect/unknown只查证。SAFE恢复只能先把Relay归一为FENCED并验证、清零旧approval epoch非终态和unknown、验证consumer ready，再递增approval_epoch、启动consumer、最后恢复Relay并单独递增authorization_relay_epoch；Portal在整个过程只读状态，不能改变顺序。
+
+Account Outbox epoch/delivery-bytes sidecar迁移对Portal完全只读：control初值为LEGACY/1/false/RUNNING/1/1/1；未发布/dead-letter授权行（含迁移前DLQ）精确复用当前`events.Event.Marshal` backfill legacy epoch1和可投递bytes/digest，已published历史只生成不可作为broker byte/ACK/effect证据的重构语义摘要/provenance，proof-era新行才使用RFC8785。兼容trigger在旧writer同一SERIALIZABLE事务先取control FOR SHARE，仅在schema1/LEGACY/wire1/proof=false/RUNNING/approval epoch1时填缺失epoch；当前version/relay epoch只须为正整数，维护RUNNING→FENCED→RUNNING后旧writer仍可成功，approval epoch非1则拒绝。QUIESCING取同一行FOR UPDATE并在同一事务最终扫描/VALIDATE，40001/40P01只重试完整事务。新writer/Relay全部滚完、旧writer撤Outbox写权限、最终backfill和约束VALIDATE先于QUIESCING；无法由现有Marshal重构、null/错epoch或sidecar/digest不符均保持LEGACY并隐藏切换动作，不得通过事件页人工重放或把该行伪装成exclusion。
 
 ---
 
@@ -404,14 +419,14 @@ Token 管理查询只有三类互斥的墙钟预算，从入口代理收到请�
 | 模型发布 | `platform.models.manage`，AUDIT_ONLY | body 含领域 expected version、idempotency_key、reason | 当前具备；错误码使用模型领域错误 |
 | 模型生命周期/前向回滚 | 独立 `*.request/*.approve`，APPROVAL_REQUIRED | 申请/决定 15m、一名独立审批人、24h/5m、关键版本快照、`token-command-executor` | 现有 v1 AUDIT_ONLY 仅作不可变历史；新增 v2，关闭人类 direct API |
 | 凭据撤销 | `platform.tokens.credentials.revoke.request/.approve`，APPROVAL_REQUIRED | Portal 申请与 Account 决定均 15m、活动引用预检、秘密不可回显、24h/5m；不启动隔离页 | 新增 v1；一名独立审批人，`token-command-executor` 执行 |
-| 审批 draft/更新/submit/withdraw/decide | 冻结策略的 requester/approver 权限，APPROVAL_REQUIRED | draft 有 idempotency/reason/critical versions；更新、迁移、决定有 `expected_version`，决定另有 reason/observed_versions | 只有 draft 具备显式幂等键；submit/withdraw/decide 无幂等字段，强化见 `UIA-011`；只能依赖审批领域 CAS |
+| 审批 draft/更新/submit/withdraw/decide | 冻结策略的 requester/approver 权限，APPROVAL_REQUIRED | draft 有 idempotency/reason/critical versions；更新、迁移、决定有 `expected_version`；v1 decide 另有 legacy reason/observed_versions，v2 decide closed body 仅 `{expected_version,decision,reason}` | withdraw 仅接受 SUBMITTED，DRAFT 不可撤回；只有 draft 具备显式幂等键，submit/withdraw/decide 无幂等字段，强化见 `UIA-011`；只能依赖审批领域 CAS |
 
 ### 7.1 支付 Provider 与商品双人恢复
 
 1. `GET /billing/admin/v1/payment-provider-controls` 当前提供分层止损事实、版本、观测缺口及 Provider/逐商品独立 `resume_draft`；Portal 只能用返回草稿建立审批申请。
-2. 当前 OpenAPI **没有“立即执行现场只读探测”端点**。在 `UIA-005` 完成前不显示“立即探测”按钮，也不能用前端直连 Provider 代替。恢复草稿缺少合格/未过期探测证据时禁止提交。
+2. OpenAPI 不提供且不得新增人类可触发的“立即执行现场探测”端点。PAY-57 的主动探测只属于专用受信工作负载与一次性意图；Portal 永久不显示“立即探测”按钮，也不能代理或直连 Provider。恢复草稿缺少合格、未过期的持久探测证据时禁止提交。
 3. `PAYMENT_PROVIDER_RESUME` 只恢复 Provider 控制；由有 request 权限者申请、另一名有 approve 权限且非相关异常确认人的管理员批准。
-4. Provider ACTIVE 后，每个商品以 `PAYMENT_PRODUCT_RESUME` 新申请独立恢复，重新冻结商品版本、准入证据和服务端提供的探测证据。
+4. Provider ACTIVE 后，每个商品以 `PAYMENT_PRODUCT_RESUME` 新申请独立恢复，重新冻结商品版本、准入证据和服务端已持久化的可信探测证据。
 5. 商品恢复不得批量“全开”；每个目标的状态、版本和证据单独校验。部分失败只按服务端明确结果展示，不推断未知项成功或失败。
 
 ---
@@ -443,7 +458,7 @@ Token 管理查询只有三类互斥的墙钟预算，从入口代理收到请�
 | Token accounts / admin usage requests | 当前各自仅 `limit`；目标按 ADM-56/NFR-56 增加规范化筛选 | 当前无 cursor/sort；一期改为稳定快照 cursor | Token 有单条详情；用量有单条详情；秘密永不返回 |
 | protocols/formulas/models | 当前无列表参数；目标按 ADM-56/NFR-56 增加规范化筛选 | 当前无 cursor/sort；一期改为稳定快照 cursor | 当前返回版本集合/目录；二期按 UI-53 增加模型详情与版本差异 |
 | provisionings | 当前为 `limit`, `status`；目标增加模型、Token Account、作用域和时间筛选 | 当前无 cursor/sort；一期改为稳定快照 cursor | 已有单条详情含 attempt history；修复逐条，Portal 一期正式接入 |
-| approval requests | `limit`, `command_type`, `status`, `risk_class`, `requester_user_id`, `target`, `submitted_from/to`, `expires_from/to` | 无 cursor/sort | 服务端返回 `allowed_actions`；禁止批量审批；cursor 为 `UIA-007` |
+| approval requests | v1 当前为 `limit`, `command_type`, `status`, `risk_class`, `requester_user_id`, `target`, `submitted_from/to`, `expires_from/to`；v2 目标增加 `cursor` 且仍只接受这些 closed filter | 当前 v1 无 cursor/sort；NFR-57 完成后 v2 使用 Account 冻结的 NFR-56 模式：closed 7键 envelope、默认50/最大200、`updated_at DESC,id DESC`、15分钟 snapshot、v1+kid HMAC cursor，签名固定 sort 与 `scope_digest`，正整数 authorization version 及全部校验先于成员 SQL；完整容量、错误、Retry-After、current/previous轮换见专项第6节 | v2 列表只返回不含 `allowed_actions` 的最小 closed envelope，动作只来自 v2 detail.allowed_actions；v1 在兼容窗口保持既有完整 wire。“全部”只含本人历史+当前有权非本人申请；每页重验权限。detail/decision/events/timeline/execution/result/recovery 的不存在与不可见字节级等价 404，且不可见时零 presenter/proof/摘要；audit.read 只走独立脱敏审计投影。禁止批量审批、v2 原始 ApprovalRequest/command JSON 和前端扫描；NFR-57 未实现前不得发送虚构 cursor |
 | `/me/organizations`、`/me/role-bindings`、`/me/invitations` | 无参数 | 无分页/排序 | 仅当前主体；不得用于全平台枚举 |
 | 组织 units/members/role-bindings | units 可传 `root_unit_id`；members 可传 `unit_id`；role-bindings 无筛选 | 无 cursor/sort | UNIT 必须显式子树；跨节点结果由服务端排除；组织审计列表不存在 |
 | 组织额度/权益列表 | 依 token-gateway 现有 organization balance/packages/quota-grants 合同 | 仅端点已定义的分页字段 | 支持的 batch 仅限合同已有 quota allocate/reclaim；不能推广到其他资源 |
@@ -468,7 +483,7 @@ Token 管理查询只有三类互斥的墙钟预算，从入口代理收到请�
 | 审计导出 | `PENDING, GENERATING, READY, FAILED, EXPIRED, DOWNLOADED` | `GET /account/admin/v1/audit-exports/{export_id}`；只返回任务状态，不返回密钥 | 无 cancel/retry 端点；FAILED/EXPIRED 需创建新导出并计入配额 |
 | 商品准入验证 | `PENDING, VERIFIED, FAILED` | 商品下的 verification history GET；创建返回 `verification_id` | 仅 FAILED 使用显式 `/retry` 创建/返回新尝试；有 `/revoke`，无 cancel |
 | Token Provisioning | 资源 `PENDING, READY, FAILED, REPAIR_REQUIRED`；attempt 为 `RUNNING, SUCCEEDED, FAILED, TIMED_OUT` | list/detail GET；详情含有界 attempt history | 仅符合条件的 terminal failed provisioning 可 POST repair；无 cancel |
-| 审批 | `DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED` | list/detail GET；服务端返回 `allowed_actions` | 只按 allowed_actions submit/withdraw/decide；无通用 cancel/retry，执行失败按策略处理 |
+| 审批 | `DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED` | v2 list/detail GET；v2 list 不含动作，仅 v2 detail 返回服务端当前 `allowed_actions`；v1 兼容线保持既有完整 wire | v2 只能进入详情后按 allowed_actions submit/withdraw/decide；无通用 cancel/retry，执行失败按策略处理 |
 | 注册修复 | list 返回持久 operation；retry 返回 202 当前 operation 摘要 | 可回到 repair queue 查询，但 OpenAPI 未定义通用 task_id/轮询字段 | 仅逐 operation retry/compensate；不显示取消/心跳 |
 | 资料变更修复 | 持久 request；retry 返回 202 摘要 | 可重查 queue，但列表没有过滤/分页参数 | 无 cancel；不虚构 attempt 进度字段 |
 | 注销修复 | 持久 closure request；retry 返回 200 当前 stage | 可重查 queue | 仅 Idempotency-Key + reason 的阶段重试；无 cancel |
@@ -614,7 +629,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 
 | 等级 | 示例 | 交互 |
 |---|---|---|
-| 信息 | 刷新、查看已有探测证据、复制 ID | 普通按钮，不弹确认；“立即探测”在 `UIA-005` 前不存在 |
+| 信息 | 刷新、查看已有持久探测证据、复制 ID | 普通按钮，不弹确认；刷新只 GET 持久事实，“立即探测”永久不存在 |
 | 可逆变更 | 停用用户、下架商品、调整非终态设置 | 二级按钮 + 影响摘要 + 原因 |
 | 高风险 | 角色绑定、所有权转移、财务修复、支付恢复 | 强确认；近期认证、原因、幂等/CAS 仅在真实端点支持时提交，缺失项按第 7 节阻断/任务处理；需要时进入审批 |
 | 不可逆 | 删除组织/商品、一次性 PII 导出下载 | 红色危险区、输入目标编码确认、显示不可逆后果；仍不得绕过状态机 |
@@ -636,7 +651,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | 组织生命周期 | `/organizations` | `platform.organizations.*` | `/account/admin/v1/organizations` 及 status/delete/ownership | 顶层组织 APT-009；节点 APT-010 | DELETED 不可恢复；删除先停用和跨域预检 |
 | 审批框架 | `/approvals/*` | 冻结 policy 精确权限 | approval-policies/approval-requests/actions | APT-008、APT-074、APT-082 | 禁自审、冻结快照、CAS/幂等、服务身份执行 |
 | 服务身份 | 审批执行只读 | 无人类执行权限 | 审批执行内部合同 | APT-047 | 只能最小服务身份执行；环境凭据门禁通过 |
-| 支付恢复 | Provider/商品控制 | payment-controls resume request/approve | payment-provider-controls GET + approval APIs；现场探测端点缺失 | APT-065、APT-067、APT-093；缺口 UIA-005 | 两类独立审批；Provider 不自动开商品；无探测证据不提交 |
+| 支付恢复 | Provider/商品控制 | payment-controls resume request/approve | payment-provider-controls GET + approval APIs；UI 只读持久可信观察和 `resume_draft` | APT-065、APT-067、APT-093；主动探测受 PAY-57 工作负载边界约束 | 两类独立审批；Provider 不自动开商品；无探测证据不提交；管理员/审批中心零 Provider 主动探测 |
 | 充值商品 | `/billing/products` | `platform.products.read/create/publish/unpublish/delete` | recharge-products、publish/unpublish/delete、admission-verifications | APT-083、APT-084、APT-085、APT-093 | ON_SALE 不可删除；证据失效关闭；恢复另审批 |
 | 定价/应收/钱包/订单 | 财务各页 | `platform.pricing.read/manage`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request/approve` | Billing admin APIs | APT-018、APT-019、APT-020、APT-023、APT-024、APT-025；Billing 命令注册 APT-112；生命周期 UI APT-113 | 单位准确；审批动作不走直接接口；新版定价写入按权限、精确空间 ETag、真实幂等合同和未知结果恢复规则开放 |
 | 退款关闭 | `/billing/refunds` 只读及异常案件 | 对应财务读/修复权 | existing refund/admin repair APIs | APT-056 | 无退款发起入口或 API 调用 |
@@ -644,10 +659,10 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | 用量对账 | `/usage/*` | `platform.usage.*` | usage requests/reconciliation APIs | APT-030 | 结果未知先查/对账，不盲重试 |
 | UI-52 模型与 Token 高风险交互整改 | 模型/协议/公式/Token/运行动作结构化面板 | 各 command type 的精确原子权限 | Token/Billing 权威 precheck 与 closed command/result；Account approval create/detail/action；Portal 精确代理 | APT-124-R1 → APT-130-R1 → APT-131-R1 | 完整财务变化证据与执行事件、repair/reconcile 禁模型重放、gate off Token 审批零上游、非 Token create→submit 不受影响、终态/未知矩阵和安全端口 smoke；三批分别经身份 B 审核后提交 |
 | 系统状态 | `/system/status` | `platform.system.status.read` | `GET /system/status` | APT-033 | 只读探针；APT-033 不承担事件重试 |
-| Account 事件查询/重放（预留） | 不显示 | `platform.events.retry` | 当前无 Account OpenAPI | 候选 UIA-008；无正式任务状态 | 产品批准并完成 Account 自有端点前无入口，禁止查询/写入其他服务库 |
+| Account 事件查询/受限重放（预留） | 不显示 | `platform.events.retry` | 当前无 Account OpenAPI | 候选 UIA-008；无正式任务状态 | 产品批准并完成 Account 自有端点前无入口，禁止查询/写入其他服务库；授权event永久只读且无重放动作 |
 | Billing 事件查询/重放（预留） | 不显示 | `platform.events.retry` | 当前无 Billing OpenAPI | 候选 UIA-021；无正式任务状态 | 产品批准并完成 Billing 自有端点前无入口，禁止查询/写入其他服务库 |
 | Token 事件查询/重放（预留） | 不显示 | `platform.events.retry` | 当前无 Token OpenAPI | 候选 UIA-022；无正式任务状态 | 产品批准并完成 Token 自有端点前无入口，禁止查询/写入其他服务库 |
-| 事件 Portal 聚合（预留） | 不显示 | 每个卡片独立校验 `platform.events.retry` | 当前无 Portal 聚合适配 | 候选 UIA-023；无正式任务状态 | 只读聚合和所属服务路由；不实现跨库写或通用事件执行器 |
+| 事件 Portal 聚合（预留） | 不显示 | 每个卡片独立校验 `platform.events.retry` | 当前无 Portal 聚合适配 | 候选 UIA-023；无正式任务状态 | 只读聚合和普通可重放事件所属服务路由；授权event固定`replayable=false`，不实现跨库写或通用事件执行器 |
 | 组织审计（预留） | 不显示 | `org.audit.read/export` | 当前无 OpenAPI | 候选 UIA-009；无正式任务状态 | 产品未批准或正式任务未完成时永久隐藏 |
 | 组织资料写入/注销（预留） | 不显示 | `org.profile.update`、`org.delete.request` | 当前无 Account OpenAPI | 候选 Account API `UIA-019`、Portal `UIA-012`；无正式任务状态 | 产品未批准或两个正式任务未完成时仅资料摘要只读 |
 | 组织全员用量（预留） | 不显示 | `org.usage.read.all` | 当前无 Token OpenAPI | 候选 Token API `UIA-016`、独立 Portal `UIA-024`；无正式任务状态 | 产品未批准或两个正式任务未完成时仅本人用量；不依赖资料/注销能力 |
@@ -675,7 +690,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | S10 | 注册修复 | 只用现有 status/stage/responsibility/older_than/sla/limit；展示响应已有 operation 字段；禁止虚构 attempt、cursor 或批量重试 |
 | S11 | 平台设置 | 删除 2FA、邮箱恢复等无任务能力；语言必须含简中/英文/日文；仅保留有 API/任务的设置 |
 | S12 | 路由管理 | 使用 tokens.read/manage 分权；只提交稳定模型/协议版本，服务端解析 upstream 并产生带 TTL 的探测健康；客户端 health 字段被拒绝；原因、幂等/CAS 按逐动作治理矩阵补齐 |
-| S13 | 系统状态 | 仅使用 `GET /system/status`；卡片独立失败。事件能力未获产品批准时永久隐藏；获批后须由 Account/Billing/Token 各自端点（候选 UIA-008、UIA-021、UIA-022）及 Portal 适配（候选 UIA-023）共同交付，Portal 不跨库重放 |
+| S13 | 系统状态 | 仅使用 `GET /system/status`；卡片独立失败。事件能力未获产品批准时永久隐藏；获批后须由 Account/Billing/Token 各自端点（候选 UIA-008、UIA-021、UIA-022）及 Portal 适配（候选 UIA-023）共同交付，Portal 不跨库重放，授权event永不显示重放动作 |
 | S14 | 我的组织 | 增加组织/节点选择器；已有卡片独立鉴权；UNIT 只覆盖目标子树；组织审计 API 等待 `UIA-009`；资料写/注销由 Account API `UIA-019` + Portal `UIA-012` 闭环；全员用量由 Token API `UIA-016` + Portal `UIA-024` 闭环。两条链互不依赖，任一未批准时只永久隐藏本链入口 |
 | S15 | 定价与商品 | ON_SALE 删除按钮移除；显示准入证据、发布事实不可变、Provider/商品独立恢复；新版定价与计量工作区已按 APT-112、APT-113 开放，并保持各资源独立加载、局部失败与刷新恢复 |
 | S16 | 审计 | 导出额度为“每人每日 10 个”；异步导出、默认脱敏、临时 PII 权限、一次下载/过期/水印/加密签名；密钥一次性面板与 replay 修复依赖 `UIA-006` |
@@ -693,9 +708,9 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | S28 | 用量请求 | 不显示模型正文；列表按 NFR-56 明确 envelope/筛选/排序；一期详情按 usage_request_id 在主内容区脱敏呈现，返回恢复列表上下文 |
 | S29 | 用量对账 | 建立基于用量请求事实的异常队列；重试需 usage.reconcile.retry、Idempotency-Key 和 reason；返回更新后的 usage request，不虚构新 attempt ID、不重发模型请求；不确定时查询/核对 |
 | S30 | 注销修复 | 区分自助注销终态和修复 attempt；后台不恢复已匿名化身份；补幂等/审计 |
-| S31 | 审批策略注册表 | 只读展示命令、版本、申请/审批权限、执行身份、时限；Portal 不编辑策略 |
-| S32 | 审批执行/失败 | 显示服务身份、CAS、幂等、执行窗口和失败可重试性；人类不得直接执行 |
-| S33 | 我的申请 | 仅申请人视图；显示 DRAFT/SUBMITTED 等全状态、撤回条件和替代申请关系 |
+| S31 | 审批策略目录 | 使用不要求 `platform.roles.read` 的安全只读目录，展示 visible/requestable、命令/版本、最小权限说明、时限和 activation；Portal 不编辑策略或 activation；T9 异常索引在完整实现前不显示 |
+| S32 | 审批执行/失败 | 仅显示最小执行状态、稳定错误分类、retryable/next_retry_at/窗口和脱敏领域引用；人类只能安排逐命令安全重试、只查证或失效，不得通用重试或直接执行 |
+| S33 | 我的申请 | 仅申请人视图；DRAFT 不可撤回，SUBMITTED 才按 allowed_actions 撤回；业务页可Update同一已激活DRAFT，SUBMITTED后/终态变更意图才fresh superseding；中心不刷新快照或复制时间线 |
 | S34 | Bootstrap | 删除“开始激活”；只显示状态、受控终端运行手册、审计和联系人；公网不代理 |
 | S35 | Break-glass | 不展示可复制执行命令/秘密；只显示离线受控终端边界、最近演练和审计记录 |
 | S36 | 服务身份 | 只显示非敏感元数据和健康；不显示凭据值、不允许 Portal 冒充/轮换，执行由受控环境管理 |
@@ -714,7 +729,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | AC-04 | 审批提交后资源版本改变 | 执行前 CAS 失败，申请 INVALIDATED；不产生副作用 |
 | AC-05 | 两人并发对同一商品执行带相同 `expected_version` 的命令，或并发迁移同一审批 | 仅首个成功；后一个返回实际 409，刷新后重新确认。顶层组织不纳入 CAS 验收 |
 | AC-06 | 删除 ON_SALE 商品 | UI 无按钮；API 返回当前 `BILLING_CONFLICT`；历史订单不受影响 |
-| AC-07 | Provider 故障恢复 | `UIA-005` 前无“立即探测”按钮；完成后只使用服务端只读探测证据，独立申请与审批后仅 Provider ACTIVE，商品仍关闭 |
+| AC-07 | Provider 故障恢复 | 管理员、财务页与审批中心始终无“立即探测”按钮且零主动探测请求；只使用服务端已持久化可信证据，独立申请与审批后仅 Provider ACTIVE，商品仍关闭 |
 | AC-08 | 商品恢复 | Provider ACTIVE 后另起申请；每商品独立审批/版本/证据校验 |
 | AC-09 | UNIT 管理员伪造兄弟节点 ID | 服务端返回该端点实际 403；导航、列表和详情均不泄露兄弟节点；不要求统一作用域错误码 |
 | AC-10 | 审计导出第 11 次/日 | 返回 `AUDIT_EXPORT_QUOTA_EXCEEDED`；在 API 提供额度元数据前不显示 reset 时间 |
@@ -748,6 +763,18 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | AC-53 | 凭据新增/轮换、验证和撤销交错执行 | 只有新增/轮换产生隔离 origin POST；验证只调用 Token 脱敏命令；撤销只创建 Account 审批，后两者无 launch/隔离页请求，人类 direct revoke 失败关闭 |
 | AC-54 | 三个 Token 强制审批策略发布门禁 | 迁移后 DB 与 `internal/platform/approvalpolicy` 对 lifecycle v2/rollback v2/revoke v1 的专项 7.3 全部 13 字段（含 exact ordered 关键字段数组）相等；`executableApprovalCommands` 保留钱包调整、Provider/商品恢复等既有合法项，新增 `TOKEN_*` 子集恰为三项且无其他 Token 命令；任一偏差阻断发布 |
 | AC-55 | UI-47 feature gate 切换 canonical 入口 | 后续实施任务更新现有管理后台合同测试；gate on 断言三页导航/路由，gate off 断言历史 Token Gateway，本轮只改文档与原型而不改实现测试 |
+| AC-56 | 审批中心目录、列表与详情 | Directory 只返回 visible/requestable；具体批准只看 detail.allowed_actions。v2 列表为最小 closed envelope，v2详情按命令/策略/snapshot schema oneOf脱敏，v1 保持兼容 wire；无 presenter 的历史申请仍返回最小 envelope+`DETAIL_PRESENTATION_UNAVAILABLE`。detail/decision/event 等子资源的不存在与不可见字节级等价404且不可见时零 presenter/proof/摘要；撤权后非本人申请消失，本人历史保留，其他历史仅凭 audit.read 在独立脱敏审计页读取 |
+| AC-57 | DRAFT、撤回与业务页替代 | DRAFT 无撤回动作；只有中心快捷 submit 限完全未修改；业务页可 Update 同一已激活 DRAFT 后按最新expected_version/precheck/CAS提交。SUBMITTED 才可撤回，SUBMITTED后/终态变更意图才fresh superseding，双向链接不复制时间线 |
+| AC-58 | Provider 观察与恢复申请 | 浏览器网络断言管理员、审批中心和支付页零 Provider 主动探测请求；页面只 GET 已持久化观察/`resume_draft`，证据缺失、过期或未知时禁用提交 |
+| AC-59 | activation、proof 与撤权 | Token PRE/ACTIVE/SAFE epoch、Billing 三既有ACTIVE/八类INACTIVE、缺行/未知/混合版本及N/N-1/rollback均与服务端一致；无权、不可见、自审、近期认证失败发生在proof前。BFF剥离proof-like外部头并拒绝body未知字段；六命令按当前持久三列精确映射的closed proof_input、legacy/new RFC8785 golden、2秒/合计64KiB/30秒skew/60秒TTL通过，普通json.Marshal/Token专用canonicalizer不可冒充；生命周期只接受current PUBLISHED/DEPRECATED、target DEPRECATED/REMOVED和真实迁移。Account只CAS本域，executor副作用前重读revision；proof-required后v1/v2 APPROVE同走proof，仅v1忽略observed_versions；REJECT零领域调用，撤权abort且迟到响应不回写 |
+| AC-60 | 历史授权与执行失败 | 既有Outbox保留且不算执行证据；APPROVE/QUIESCING与Claim/FENCE两对同一行锁及crash矩阵线性化。QUIESCING停止新APPROVE后，同一原行以原event ID/Msg-Id和同语义bytes自动at-least-once恢复，直至DB确定published/dead-letter/exclusion；PubAck-close不确定及24小时去重窗内外重复乱序允许，但人工requeue/replay四层永久拒绝。仅INVALIDATED且确认无Begin/execution/effect的授权DLQ可封存为不可发布exclusion，其他DLQ阻断。exclusion的event id/digest/request/version/event approval epoch必须与原Outbox逐项一致，封存control epoch只作审计。授权Outbox可发布pending=0、Relay active/reclaimable claim=0、未分类dead-letter=0、每行DB终态确定且Q前consumer pending/ack-pending/handler=0后，再FENCE授权Relay、读取可信Q、创建空闲Q+1新Billing durable、停用撤权旧durable；合法exclusion永久保留且不计入前三项。旧请求只在既有5分钟execution_deadline前旧epoch Begin，expiry worker不变，20分钟只作健康readiness预算。gate前APPROVED/EXECUTING/EXECUTION_FAILED/旧epoch非终态execution/未知effect均为0；CAS后启动新consumer并恢复Relay。Billing物理无限、应用层恰12次领域尝试后只做幂等DLQ PubAck/ACK_PENDING/服务器确认DoubleAck，Token无限；Inbox/Begin/execution/领域幂等、各crash窗口、迟到Begin拒绝、最多一个execution/一次效果及逐命令恢复均通过 |
+| AC-61 | 治理导航兼容与隐藏项 | 旧 section/settings/history 单次规范化且可前进后退；T9 异常索引在完整实现前无导航、路由或请求，普通 AUDIT_ONLY 仍在原页面 |
+| AC-62 | Account 审批有界分页 | 精确验证7键closed envelope、50/200、updated_at+id全序、15/20分钟、100万/64/2000万/8GiB、6/60、10/3秒、全部HTTP code和Retry-After、70%/85%、v1+kid current/previous 35分钟、固定sort与scope_digest签名、正整数authorization version及成员SQL前失败、gate/hard-disable；既有Billing/Token合同零变化 |
+| AC-63 | 唯一发布与激活顺序 | 只以`admin-governance-security-redesign.md`第14节为准，本表不定义第二套顺序；fence/delivery-bytes-aware新Relay滚动就绪且旧Relay撤claim/publish权限、Portal compatibility都必须先于QUIESCING；授权Outbox可发布pending=0、Relay active/reclaimable claim=0、未分类dead-letter=0、每行DB确定published/dead-letter/exclusion、Q前consumer pending/ack-pending/handler=0、FENCE、可信Q/Q+1新durable、旧durable撤权、5分钟deadline下全部legacy执行状态/未知effect归零、gate后新consumer与Relay恢复均由该节门禁，合法exclusion可永久留存，历史不补proof/跨epoch，N/N-1与rollback不删历史 |
+| AC-64 | v1/v2 升降级 | Account DB唯一`ADMIN_APPROVAL` control行共同控制closed capability与Relay RUNNING/FENCED，不另建Relay真相；mode/proof与Relay状态分别CAS递增approval_epoch/authorization_relay_epoch及共享version。完整8种mode×Relay动作与Relay边以专项第5.4节为准：LEGACY/PROOF_REQUIRED在FENCED时detail无APPROVE，操作固定503`APPROVAL_RELAY_FENCED`且保持SUBMITTED；QUIESCING/SAFE两态均无APPROVE。mode合法边仅LEGACY↔QUIESCING→PROOF_REQUIRED↔SAFE_ROLLBACK，Relay边仅具名cutover/maintenance/SAFE流程。SAFE分别按Relay FENCED/RUNNING收敛：旧proof epoch无执行项稳定失效、已Begin/unknown只查证，恢复严格先FENCE验证与旧approval epoch清零，再递增approval_epoch、启动consumer、恢复Relay。proof后legacy N-1全approval写/Begin双拒绝、兼容回滚候选通过。任一精确零值未满足、Relay未FENCED、Q+1资源未ready、旧durable仍可接收或legacy APPROVED/EXECUTING/EXECUTION_FAILED/未知effect非0时不能开启；合法exclusion永久留存不视为未收敛。v1保持既有wire/observed_versions，v2提供minimal list/closed detail/proof；Portal Session不可变选择，gate回退v2失败不降级，满足回滚/真实零流量门禁后才分阶段停v1 |
+| AC-65 | capability 与动作版本 | capability closed字段、v2 body/v1 header `action_control_version`及no-store逐项校验；缺失/0/畸形/版本不等、RUNNING→FENCED→RUNNING、详情/决定在途切换、多Portal/多标签均abort清缓存且迟到RUNNING响应不复活APPROVE。FENCED批准稳定503并保留SUBMITTED、零新Outbox |
+| AC-66 | SAFE_DRAIN | 区分FENCED下consumer启动失败或Relay恢复CAS未提交（新epoch零APPROVED/Outbox）与Relay恢复CAS已提交后的RUNNING故障。后者SAFE_DRAIN只取SAFE前一epoch且DB未确定published/dead-letter/exclusion的同一原Outbox，以原Msg-Id/同语义bytes自动恢复；Claim先锁、FENCE先锁、提交前crash、publish前crash、PubAck后DB close前crash及24小时去重窗内外重复乱序均无新Outbox/Begin，允许重复流消息但最多一个execution/effect，失败仅dead-letter/合法exclusion |
+| AC-67 | Outbox epoch迁移 | control精确初值；未发布/dead-letter授权行按当前`events.Event.Marshal`生成legacy epoch1及可投递bytes/digest，已published历史只生成不可证明broker bytes/ACK/effect的语义摘要/provenance，proof-era才RFC8785。真实PG覆盖trigger同事务FOR SHARE先锁、QUIESCING FOR UPDATE先锁并同事务最终扫描/VALIDATE、撤权并发、SERIALIZABLE完整事务有界重试、新writer显式写；原event id/payload/发布/dead-letter事实不变，不可重构或null/错epoch/sidecar硬阻断且无exclusion/rewrite/人工replay |
 | AC-44 | 平台结构管理员移动节点 | 使用真实 expected_structure_version；跨组织、自身、后代、停用父节点和旧版本全部失败关闭 |
 | AC-21 | user_code、积分、CNY、技术 ID 展示 | 编码不可变且可复制；积分无 ¥；金额带 CNY；技术 ID 可访问 Tooltip/复制 |
 | AC-22 | 退款页 | 无退款发起入口；既有记录和允许的异常案件仍可查询/处理 |
@@ -758,8 +785,8 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | AC-27 | 创建审计导出后刷新、丢失密钥、重放创建请求 | UI 不持久化密钥且刷新无法恢复；`UIA-006` 完成后 replay 不再返回密钥；丢失只能新建并计入配额 |
 | AC-28 | 检查事件重试、组织审计、组织资料写/注销及全员用量入口 | 未获得产品批准的能力永久无路由、按钮或代理请求；获批能力仅在对应正式任务全部 DONE 后开放；权限码存在不等于能力存在 |
 | AC-31 | 三领域事件 GET/POST 合同 | 每个 GET 返回不可变包络 64 位小写 SHA-256 `event_digest`；每个 POST 缺 `expected_digest`、16～128 字符 `Idempotency-Key` 或去空白后不足 20 字符 reason 均失败且无副作用 |
-| AC-32 | 事件摘要或状态并发变化 | 摘要变化、普通待发布、非死信、已发布或已被另一请求重排队的事件均在 Serializable 事务复核时失败；`event_replay_requests` 与 Outbox 重排队要么同时提交、要么同时回滚 |
-| AC-33 | 事件跨域、身份与幂等隔离 | 跨域 event ID 无存在性泄露且不能写库；人类 `platform.events.retry` 授权审计与 `EVENT_REPLAY` 工作负载执行审计均存在并可关联；同键同请求返回原 replay ID，同键异事件/摘要/reason/执行身份冲突失败；Portal 仅路由所属域 |
+| AC-32 | 事件摘要或状态并发变化 | 摘要变化、普通待发布、非死信、已发布或已被另一请求重排队的事件均在 Serializable 事务复核时失败；`event_replay_requests` 与 Outbox 重排队要么同时提交、要么同时回滚。`account.approval-command.authorized.v1` 无论状态都在HTTP/DB层固定409 `AUTHORIZATION_EVENT_REPLAY_FORBIDDEN`，且零replay request/Outbox mutation |
+| AC-33 | 事件跨域、身份与幂等隔离 | 跨域 event ID 无存在性泄露且不能写库；人类 `platform.events.retry` 授权审计与 `EVENT_REPLAY` 工作负载执行审计均存在并可关联，但均无授权event replay能力；同键同请求返回原 replay ID，同键异事件/摘要/reason/执行身份冲突失败；Portal 仅路由所属域，授权事件只显示`replayable=false`且无动作 |
 | AC-34 | 仅批准组织资料更新/注销 | 只创建 UIA-019、UIA-012 对应的正式任务；资料更新/注销闭环可用，全员用量入口永久隐藏；任务图不引用 UIA-016/UIA-024 对应任务且无缺失依赖 |
 | AC-35 | 仅批准组织全员用量 | 只创建 UIA-016、UIA-024 对应的正式任务；全员/节点子树用量闭环可用，资料更新/注销入口永久隐藏；任务图不引用 UIA-019/UIA-012 对应任务且无缺失依赖 |
 | AC-29 | 创建充值商品草稿的字段、版本与幂等检查 | 缺任一必填商品字段或 reason 返回请求错误；`expected_version != 0` 返回 `BILLING_CONFLICT`；相同 Header 幂等键同正文重放原结果、异正文返回 `IDEMPOTENCY_CONFLICT` |
@@ -794,21 +821,21 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 |---|---|---|---|---|
 | `UIA-002` | `UIR-002` 角色绑定写合同强化 | APT-006、APT-046、APT-069 | **Account 单提交**：OpenAPI、服务、迁移（如需）、合同/权限测试 | reason/recent-auth/幂等/CAS 取舍固化；Identity Admin 对 binding POST/DELETE 均 403；不改 Portal |
 | `UIA-003` | `UIR-003` 用户状态与组织/成员/节点写合同强化 | APT-006、APT-009、APT-010、APT-011、APT-046、APT-069、APT-075 | **Account 单提交**：相关 OpenAPI、服务和并发/审计测试 | 每个端点分别定义 reason/幂等/CAS；旧客户端兼容；无跨节点越权；不改 Portal |
-| `UIA-005` | `UIR-005` 支付恢复只读现场探测 API | APT-008、APT-067、APT-092、APT-093 | **Billing 单提交**：OpenAPI、探测服务、证据存储和无收费副作用测试 | 失败/过期/未知证据不能生成可提交草稿；Provider/商品证据隔离；不改 Portal |
+| `UIA-005` | **已被 PAY-57/ADM-67 安全边界否决的人类现场探测候选** | PAY-57、PAY-58、UI-60、ADM-67 | 不得转换为管理员/审批中心可触发 API 或 Portal 任务；如需补能力，只能建设专用受信工作负载及一次性意图，并由 UI 读取持久结果 | 浏览器、管理员与审批中心零 Provider 主动探测；失败/过期/未知证据不能生成可提交草稿 |
 | `UIA-006` | `UIR-006` 审计导出一次性密钥与配额可观察合同 | APT-006、APT-008、APT-055 | **Account 单提交**：OpenAPI、导出服务和安全测试 | create 首次响应后 replay/GET 不返密钥；丢失需新建；配额字段若不提供则合同明确；不改 Portal |
 | `UIA-007` | `UIR-007` Account 其余高数据量列表合同 | APT-003、APT-004、APT-009、APT-011、APT-014、APT-046、APT-055、APT-074、APT-075 | **Account 单提交**：仅尚未覆盖的 Account 列表 OpenAPI、查询实现和分页测试 | users 的 q 与 user_code 已分离且用户目录 cursor 已实现；继续补齐角色绑定及修复队列等剩余 Account cursor/筛选/稳定排序，不改 Billing、Token、Portal |
-| `UIA-008` | `UIR-008` Account Outbox 查询/重放 API | 产品批准；APT-006、APT-045、APT-069、APT-076 | **Account 单提交**：仅 Account OpenAPI、Account 自有 Outbox/`event_replay_requests`、授权委托与测试 | 完整实现 §4.2.1：GET 返回不可变包络 `event_digest`；POST 强制 `expected_digest`、16～128 字符幂等键、至少 20 字符 reason；仅未发布死信在 Serializable 事务中追加请求并重排队；人类授权与 `EVENT_REPLAY` 身份分别审计；摘要变化、非死信、已发布、跨域 ID、同键异请求均失败关闭 |
+| `UIA-008` | `UIR-008` Account Outbox 查询/受限重放 API | 产品批准；APT-006、APT-045、APT-069、APT-076、ADM-67 | **Account 单提交**：仅 Account OpenAPI、Account 自有 Outbox/`event_replay_requests`、授权委托与测试 | 完整实现 §4.2.1：GET 返回不可变包络 `event_digest`；普通未发布死信POST强制 `expected_digest`、16～128字符幂等键、至少20字符reason，并在Serializable事务追加请求/重排队；授权event type永久`replayable=false`，HTTP/DB/工作负载固定拒绝且无重排队；人类授权与 `EVENT_REPLAY` 身份分别审计；摘要变化、非死信、已发布、跨域ID、同键异请求均失败关闭 |
 | `UIA-009` | `UIR-009` 组织审计查询/导出 API | 产品批准；APT-045、APT-069、APT-075；若含导出再依赖 APT-055 | **Account 单提交**：组织审计 OpenAPI、scope 查询、脱敏/导出测试 | UNIT 子树不可越权；导出继承 NFR-48；不改 Portal |
 | `UIA-010` | `UIR-010` 现有异步领域的 Portal 刷新恢复 | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；APT-003、APT-004、APT-014、APT-028、APT-055、APT-074、APT-083、APT-084 | **Portal 单提交**：仅逐领域状态组件、URL 恢复和前端测试 | 只恢复审计导出/准入/Provisioning/审批等已有 GET；无统一任务服务、心跳或取消 |
 | `UIA-011` | `UIR-011` 审批 submit/withdraw/decide 显式幂等 | APT-008、APT-074、APT-082 | **Account 单提交**：Approval OpenAPI、服务和重放/并发测试 | 同键同参返回原决定，同键异参冲突；保留 expected_version；不改 Portal |
 | `UIA-012` | `UIR-012` 我的组织资料更新/注销 Portal 闭环 | 产品单独批准资料/注销；APT-009、APT-014、APT-069、APT-075；唯一候选任务依赖：UIA-019 | **Portal 单提交**：只接入已完成的 Account 组织资料更新/注销合同 | `org.profile.update` 与 `org.delete.request` 独立鉴权；注销阻断完整；不读取全员用量、不依赖 UIA-016/UIA-024、不改 Account API |
 | `UIA-015` | `UIR-015` Account 其余列表 Portal 适配 | 正式 UI 需求/任务 UI-28、UI-29；候选条件仅 UIA-007 | **Portal 单提交**：用户目录之外的 Account 列表 URL、cursor、筛选、排序和前端合同测试 | Billing 部分已转换为 UI-45/APT-115，Token 部分已转换为 UI-48；继续保证 Account 参数不串用，旧无 cursor 响应安全降级；不改服务 |
 | `UIA-016` | `UIR-016` 组织全员/节点子树用量聚合 API | 产品批准；APT-030、APT-069、APT-075、APT-081 | **Token 单提交**：组织用量 OpenAPI、查询、UNIT scope 与脱敏测试 | `org.usage.read.all` 才可读；UNIT 仅目标子树；不返回模型正文；不改 Account/Portal |
-| `UIA-017` | `UIR-017` 已批准 API gap 的 Portal 适配（不含列表、我的组织和事件专项） | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；以及 UIA-002、UIA-003、UIA-004、UIA-005、UIA-006、UIA-009、UIA-011 中产品已批准且正式任务已创建的子集 | **Portal 单提交**：只适配正式任务已完成的角色/写合同、探测、审计及审批修复 | 未批准能力永久隐藏，已批准但对应正式任务未完成的能力继续隐藏；Account 列表由 UIA-015、Token 列表由 UI-48、资料/注销由 UIA-012、全员用量由 UIA-024、事件由 UIA-023 负责；不改服务/API |
+| `UIA-017` | `UIR-017` 已批准 API gap 的 Portal 适配（不含列表、我的组织和事件专项） | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；以及 UIA-002、UIA-003、UIA-004、UIA-006、UIA-009、UIA-011 中产品已批准且正式任务已创建的子集 | **Portal 单提交**：只适配正式任务已完成的角色/写合同、审计及审批修复；不含已被 PAY-57/ADM-67 否决的人类探测候选 UIA-005 | 未批准能力永久隐藏，已批准但对应正式任务未完成的能力继续隐藏；Account 列表由 UIA-015、Token 列表由 UI-48、资料/注销由 UIA-012、全员用量由 UIA-024、事件由 UIA-023 负责；不改服务/API |
 | `UIA-019` | `UIR-019` 组织资料更新与组织注销申请 API | 产品批准；APT-009、APT-014、APT-069、APT-075 | **Account 单提交**：资料/注销 OpenAPI、服务、阻断和 scope 测试 | 无权/UNIT 写入拒绝；注销不绕过跨域阻断；不改 Token/Portal |
 | `UIA-021` | `UIR-021` Billing Outbox 查询/重放 API | 产品批准；APT-006、APT-045、APT-069、APT-076 | **Billing 单提交**：仅 Billing OpenAPI、Billing 自有 Outbox/`event_replay_requests`、授权委托与测试 | 完整实现 §4.2.1：GET 返回不可变包络 `event_digest`；POST 强制 `expected_digest`、16～128 字符幂等键、至少 20 字符 reason；仅未发布死信在 Serializable 事务中追加请求并重排队；人类授权与 `EVENT_REPLAY` 身份分别审计；摘要变化、非死信、已发布、跨域 ID、同键异请求均失败关闭 |
 | `UIA-022` | `UIR-022` Token Outbox 查询/重放 API | 产品批准；APT-006、APT-045、APT-069、APT-076 | **Token 单提交**：仅 Token OpenAPI、Token 自有 Outbox/`event_replay_requests`、授权委托与测试 | 完整实现 §4.2.1：GET 返回不可变包络 `event_digest`；POST 强制 `expected_digest`、16～128 字符幂等键、至少 20 字符 reason；仅未发布死信在 Serializable 事务中追加请求并重排队；人类授权与 `EVENT_REPLAY` 身份分别审计；摘要变化、非死信、已发布、跨域 ID、同键异请求均失败关闭 |
-| `UIA-023` | `UIR-023` 三领域事件 Portal 只读聚合与路由适配 | 产品批准；APT-076；正式 UI 需求/任务 UI-28、UI-31；候选条件 UIA-008、UIA-021、UIA-022 中产品批准并已创建正式任务的领域子集；若产品目标定义为“全平台事件”，三项领域候选必须全部批准 | **Portal 单提交**：只读聚合脱敏摘要，并把重放动作路由到事件所属服务；不持有 Outbox 写能力 | 三域卡片独立授权/失败；请求不跨域；某领域未批准时永久隐藏，对应正式任务未完成时暂时隐藏；部分获批时页面不得宣称“全平台覆盖”；不改服务/API |
+| `UIA-023` | `UIR-023` 三领域事件 Portal 只读聚合与路由适配 | 产品批准；APT-076；正式 UI 需求/任务 UI-28、UI-31；候选条件 UIA-008、UIA-021、UIA-022 中产品批准并已创建正式任务的领域子集；若产品目标定义为“全平台事件”，三项领域候选必须全部批准 | **Portal 单提交**：只读聚合脱敏摘要，并把普通可重放事件动作路由到所属服务；不持有 Outbox 写能力 | 三域卡片独立授权/失败；请求不跨域；授权事件只显示`replayable=false`且不渲染动作；某领域未批准时永久隐藏，对应正式任务未完成时暂时隐藏；部分获批时页面不得宣称“全平台覆盖”；不改服务/API |
 | `UIA-024` | `UIR-024` 我的组织全员/节点子树用量 Portal 闭环 | 产品单独批准全员用量；APT-030、APT-069、APT-075、APT-081；唯一候选任务依赖：UIA-016 | **Portal 单提交**：只接入已完成的 Token 组织聚合用量合同 | 只有 `org.usage.read.all` 显示；UNIT 仅目标子树；不显示模型正文；不依赖 UIA-019/UIA-012、不改 Token API |
 
 当前实现门禁：

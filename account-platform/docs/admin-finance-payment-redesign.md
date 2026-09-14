@@ -1,8 +1,8 @@
 # 管理后台财务与支付重构设计
 
-> 文档状态：第三轮独立复审通过，可进入 APT-105～APT-117 编码
+> 文档状态：财务支付重构第三轮独立复审通过；UI-60/ADM-67/NFR-57 治理与安全增量需求已确认、未实现、未部署
 >
-> 版本日期：2026-09-02
+> 版本日期：2026-09-14
 >
 > 实施顺序：文档审核通过后，先完成一期，再完成二期；每个任务独立审核、独立提交，全部完成后统一推送。
 
@@ -11,7 +11,7 @@
 当前“财务与支付”导航包含“计费运营、支付与资金、定价与商品”三个页面，但页面归属、能力闭环和高数据量适配存在以下问题：
 
 1. 模型定价属于交易前商业规则，却位于计费运营；支付四方对账属于外部支付事实收敛，却位于计费运营。
-2. 调账申请和支付恢复已经在审批中心存在真实流程，但财务页面缺少清晰的运营入口和状态下穿，审批中心又以原始 JSON 展示支付控制。
+2. 调账申请和支付恢复已经在审批中心存在真实流程，但财务页面缺少清晰的运营入口和状态下穿；审批中心当前展示合同仍需按 `admin-governance-security-redesign.md` 补为最小列表与 closed、脱敏 presenter，不能继续以原始 JSON 作为目标形态。
 3. 计费页面一次加载钱包、应收、调账、价格、Hold、对账六类数据；支付页面一次加载订单、退款、晚到支付和异常四类数据，局部失败和刷新相互牵连。
 4. 多数 Billing 列表固定读取前 100 或 200 条，充值商品虽有稳定 cursor 合同但 Portal 未消费。
 5. 模型定价仍暴露旧版“直接激活价格”入口，不能表达当前已实现的草稿、预览、发布、未来生效和转换生命周期。
@@ -65,7 +65,7 @@
 
 - 支付订单、Provider 交易、退款、拒付、晚到支付和支付异常保留各自领域状态，不用订单摘要覆盖交易事实。
 - 支付对账核对 Provider 账单、订单/交易、退款/拒付和 Billing 账本，必须从计费页面迁入本页。
-- Provider 级和商品级新单控制分别显示；恢复申请必须基于服务端 `resume_draft`，并跳转审批中心完成独立审批。
+- Provider 级和商品级新单控制分别显示；恢复申请必须基于服务端持久 `resume_draft`，并跳转审批中心完成独立审批。页面刷新只能读取持久可信观察，管理员、财务页和审批中心均不得触发、代理或重放 Provider 主动探测。
 - 普通退款产品门禁仍默认关闭；“退款记录”只读展示已有退款，并下穿失败、不确定和强制退款异常，不新增普通退款入口。
 
 ### 3.3 定价与商品
@@ -103,7 +103,7 @@
 ### P1-2 调账申请和审批下穿
 
 - “手工调账”提供创建申请面板，先调用 Billing 调账记录创建，再按服务端返回事实创建并提交 `WALLET_ADJUSTMENT` 审批申请。
-- 调账列表显示审批申请 ID、审批/执行状态和更新时间；申请人可进入审批中心查看或撤回允许的申请。
+- 调账列表显示审批申请 ID、审批/执行状态和更新时间；申请人可进入审批中心查看，只有 `SUBMITTED` 才可按 `allowed_actions` 撤回，DRAFT 不可撤回。
 - 财务页面不提供批准按钮；审批人只能在审批中心按 `allowed_actions` 决定，禁止自审。
 - 创建调账记录成功但审批申请失败时保留恢复入口，不重复创建调整记录。
 
@@ -113,6 +113,7 @@
 - Provider 与商品恢复分别创建审批申请；Provider 恢复不得自动恢复商品。
 - 没有合格 `resume_draft` 时动作禁用并展示服务端事实原因，不允许手工拼装命令快照。
 - 审批决定与执行继续在审批中心，支付页面只展示状态和深链。
+- `resume_draft`、现场观察和控制版本均来自 Billing 持久事实；UI 刷新不得调用 Provider。PAY-57 主动探测仅允许专用受信工作负载和一次性意图，浏览器没有触发接口。
 
 ### P1-4 子页独立加载与局部失败
 
@@ -217,6 +218,25 @@ APT-116 不复用当前外层固定要求 `platform.billing.wallets.read` 的 `/
 - 积分、CNY、数量、比例和累计/时间窗标签清晰区分。
 - APT-117 已按上述口径完成：请求代次与取消控制阻止刷新竞态和离页回写，服务端错误只展示稳定码与 `request_id`；三语、键盘、响应式、403 隐藏、局部 503、重试与筛选下穿均由合同和真实 Chromium smoke 覆盖，且 smoke 已进入 account-platform 定向及全量前端门禁。
 
+### 6.1 治理与安全增量边界
+
+UI-60/ADM-67/NFR-57 不改写本文件已经交付的财务信息架构和普通 `AUDIT_ONLY` 命令，只补齐审批保护命令的安全边界：
+
+- `WALLET_ADJUSTMENT`、`PAYMENT_PROVIDER_RESUME`、`PAYMENT_PRODUCT_RESUME` 通过前向迁移与兼容 activation 投影保持既有 ACTIVE 能力；升级、N/N-1 或回滚不得使这三类命令退化为 policy-only。
+- `ENTITLEMENT_COMPONENT_ADJUSTMENT`、`LEDGER_REPAIR`、`RECEIVABLE_WRITE_OFF`、`PAYMENT_FINANCIAL_REPAIR`、`REFUND_EXCEPTION_REPAIR`、`CHARGEBACK_FINANCIAL_REPAIR`、`RECONCILIATION_FINANCIAL_REPAIR`、`USAGE_SETTLEMENT_REPAIR` 当前只有 policy，默认 INACTIVE。每一类须独立补齐领域不变量、补偿账务、外部证据、closed schema/proof/presenter、consumer/executor/recovery、policy version 与真实 E2E 后才可单独激活。
+- 财务业务页拥有复杂表单、当前事实重读、`resume_draft`、编辑、续提和 fresh superseding；审批中心只展示 closed 申请、决定和安全恢复安排。业务页可以重读事实后以 expected_version Update 同一已激活 DRAFT，并按新版本/precheck/CAS submit；只有中心快捷 submit 要求 DRAFT 完全未修改。SUBMITTED 后或终态变更意图时，业务页才创建新的命令/快照/request ID/幂等键并以 `supersedes_request_id` 关联，不能继承旧批准或复制审批时间线。
+- Provider/商品恢复沿用现有 15 分钟近期认证；钱包调整不在本增量中新增 recent auth。批准 proof 只由 Account 以 2 秒绝对 deadline、请求响应合计64KiB、30秒clock skew、60秒TTL 的受信内部 closed 合同调用 Billing。专项第8.2.1节按当前真实持久结构冻结映射：钱包使用四字段normalized command、`{adjustment_version}` critical和`{wallet_id,delta_microcredits}` financial；Provider/商品的normalized与critical分别为同一8/14字段版本对象，financial为`{new_orders_enabled:false,provider_control_version,product_control_version}`（Provider项最后一值显式null）。Billing按同一closed结构重读权威行；typed RFC8785公共encoder和legacy/new golden必须证明映射，禁止普通json.Marshal、Portal对象或Token专用canonicalizer冒充。Account返回后只CAS本域request/auth checkpoint/policy/activation/proof binding并持久化关联revision，不做跨库current revision CAS；Billing executor在副作用前重读并于本域事务验证revision，漂移零副作用。浏览器不能传proof；proof-required开启后v1/v2 APPROVE都强制该proof，仅v1接受并忽略legacy `observed_versions`，v2拒绝；REJECT零领域调用。Payment Provider主动探测只属于PAY-57专用工作负载。
+- EXECUTION_FAILED 逐命令区分 transient-safe、unknown、permanent、事实/策略变化和窗口结束；unknown 只查证，财务页面与审批中心均不提供通用重试或直接执行。
+- 历史授权Outbox、Relay发布、仅Inbox、本地claim和只读precheck都不是执行授权；Account Begin与reconciler对同库request status的CAS是唯一所有权线性化点。APPROVE与Relay Claim都对唯一`ADMIN_APPROVAL` singleton取FOR SHARE，分别绑定approval_epoch与authorization_relay_epoch；QUIESCING/FENCE都对同一行FOR UPDATE并分别递增对应epoch，前者在事务内复核并记录授权subject计数，后者要求可发布pending、active/reclaimable claim和未分类dead-letter全为0。FENCE提交后才外部确认全副本handler=0，不另建Relay控制真相，恢复Relay不得误废同一proof epoch批准。`account.approval-command.authorized.v1`在HTTP/DB/workload/Portal层永久禁止人工/管理面通用replay；同一不可变Outbox行的自动at-least-once投递恢复不属于replay；只有已INVALIDATED且权威确认无Begin/execution/effect的授权DLQ可不可变封存为不可发布cutover exclusion，其`event_approval_epoch`必须等于原Outbox不可变`approval_control_epoch`，封存current control epoch仅作审计且不参与后续FENCE相等判断；其余阻断。QUIESCING前先滚动部署fence/delivery-bytes-aware新Relay，旧Relay claim/handler=0后撤销其claim/publish权限。随后停止新APPROVE，让所有其余既有授权Outbox以原event ID/Msg-Id和同语义bytes恢复至DB确定published/dead-letter/exclusion，等待/回收in-flight claim，并确保授权Outbox可发布pending=0、Relay active/reclaimable claim=0、未分类dead-letter=0、每行DB终态确定、Q前consumer pending/ack-pending/handler=0；合法exclusion永久保留且不计入前三项。持久FENCE授权Relay，读取可信Q并创建未启动的Q+1三个Billing新durable，再停止并删除/永久pause旧共享durable、撤ACL和探针验证不可接收。历史请求不补proof或跨epoch；旧consumer只能在既有5分钟execution_deadline前用旧epoch原event Begin，expiry worker继续以`EXECUTION_WINDOW_EXPIRED`收敛，20分钟只作健康drain/readiness预算。gate前APPROVED/EXECUTING/EXECUTION_FAILED、旧epoch非终态execution和未知effect必须全部为0；CAS后才启动新consumer并恢复Relay。Billing物理`MaxDeliver=-1`，应用层最多12次领域调用并按稳定ID DLQ PubAck、`DLQ_PUBLISHED_ACK_PENDING`、服务器确认DoubleAck收口；不得用Term/单向Ack冒充或再调领域。Token保持无限投递。
+- 审批中心采用版本化 v1/v2 线：v1 在兼容窗口保持既有完整 wire 与 `observed_versions`，v2 使用 minimal list 与 closed detail；proof-required 开启后两线 APPROVE 使用同一服务端 proof。Portal 会话不得混线，v2 写失败不得降级到 v1。
+- 切换不把Billing三命令置为inactive：Account DB唯一`ADMIN_APPROVAL`持久control同时承载mode/wire/proof与Relay RUNNING/FENCED；不得另建Relay真相。mode/wire/proof变化递增approval_epoch+version，Relay状态变化只递增authorization_relay_epoch+version。合法mode组合仅为LEGACY=(wire1,proof false)、QUIESCING=(wire1,proof false)、PROOF_REQUIRED=(wire2,proof true)、SAFE_ROLLBACK=(wire1,proof true)，合法边仅proof前LEGACY↔QUIESCING、QUIESCING→PROOF_REQUIRED及开启后PROOF_REQUIRED↔SAFE_ROLLBACK，开启proof后不得降为false。QUIESCING只有在Relay仍RUNNING、Q未持久化且旧durable/ACL完整时可回LEGACY；Relay已FENCED、Q已持久化或旧durable已退役时不得回退LEGACY。SAFE关闭create/update/submit/APPROVE/Begin，REJECT/WITHDRAW只对SUBMITTED安全收口，历史GET保留。PROOF_REQUIRED gate提交后、Relay仍FENCED时，consumer启动失败或Relay恢复CAS未提交只能进入零新APPROVED/Outbox的SAFE+FENCED；Relay恢复CAS一旦提交为RUNNING，其后故障才按SAFE+RUNNING处理可能已有或并发的批准。后一分支中，前一proof epoch无Begin/execution/effect的APPROVED及无活动Begin/lease且确认无effect、不可安全恢复的EXECUTION_FAILED在deadline内按`APPROVAL_SAFE_ROLLBACK_INVALIDATED`收敛；deadline已到沿用`EXECUTION_WINDOW_EXPIRED`，已Begin/effect/unknown只查证；Outbox不接受人工replay，同一原行自动恢复按专项合同执行。SAFE按Relay FENCED/RUNNING真实状态先归一为FENCED并验证，清零旧approval epoch非终态/unknown并确认consumer ready，再递增approval_epoch、启动consumer、最后恢复Relay并单独递增authorization_relay_epoch。DRAFT可由业务页权威Update，SUBMITTED在切换后批准时取得新proof；legacy APPROVED只可在deadline内旧epoch Begin，EXECUTING只查证到终态，EXECUTION_FAILED按原execution在deadline内分类收敛且不补proof。只有授权Outbox/Relay/Q前consumer排空、Relay FENCED、Q+1新durable ready、旧durable不可接收、同一快照APPROVED/EXECUTING/EXECUTION_FAILED/旧epoch非终态execution/未知effect全为0且逐副本readiness完成后才原子开启；随后启动新consumer并恢复Relay。开启后legacy N-1 Account不得接任何approval写/Begin，回滚候选必须支持control/proof，其他旧二进制由路由和DB写权限强制只读。混合版本、crash和gate竞态不得产生第二Outbox、execution或财务效果。
+- 完整mode×Relay动作冻结为专项第5.4节八组合：LEGACY/PROOF_REQUIRED仅Relay RUNNING时可按各自协议APPROVE；FENCED时detail无APPROVE，操作固定503`APPROVAL_RELAY_FENCED`、`Retry-After: 5`、`Cache-Control: no-store`并保持SUBMITTED，入口已见FENCED时零proof/Outbox，竞态中已发起只读proof必须丢弃且仍零Outbox。QUIESCING/SAFE两种Relay状态均禁止APPROVE，SAFE另关闭create/update/submit/Begin。Relay状态边只允许受控cutover/maintenance/SAFE流程与同一行锁/CAS；非法mode/purpose、精确零值未满足、readiness失败或crash均保持FENCED/原态，财务页和审批中心不得提供绕过入口。
+- SAFE+RUNNING只允许受控SAFE_DRAIN Claim选择SAFE CAS前已提交、绑定前一approval epoch且DB尚未确定published/dead-letter/exclusion的原授权Outbox，以原event ID作为相同Msg-Id和sidecar同语义delivery bytes自动at-least-once恢复；禁止新Outbox/APPROVE/proof/Begin，失败进入原dead-letter并仅在合法失效后exclusion。PubAck/DB close不确定时允许相同消息再次publish，即使超过24小时去重窗产生重复/乱序流消息；Inbox、Account Begin唯一CAS、execution与领域幂等保证最多一个execution/effect，人工requeue/replay仍永久禁止。Claim/FENCE两种先锁顺序与提交前、publish前、PubAck后DB close前crash均按同一singleton锁/lease幂等收敛，FENCE须等原行在DB确定published/dead-letter/exclusion。consumer启动失败或Relay恢复CAS未提交发生在Relay FENCED且批准未开放的分支，必须零新APPROVED/Outbox；Relay恢复CAS一旦提交即为RUNNING，其后故障才可能存在SAFE_DRAIN输入。
+- Account capability required keys、v2 body/v1 header `action_control_version`及no-store精确沿用专项第5.4节；财务页只按服务端detail动作显示深链，version缺失/畸形/漂移或RUNNING→FENCED→RUNNING时abort、清缓存且不复活APPROVE。
+- Account control初值为LEGACY/1/false/RUNNING/1/1/1。既有未发布/dead-letter授权Outbox（含迁移前DLQ）精确复用当前`events.Event.Marshal` backfill legacy epoch1与可投递delivery bytes/digest sidecar；已published历史只保存重构语义摘要/provenance，不能证明原broker bytes、ACK或effect，proof-era新事件才使用RFC8785。原event id/payload/发布/dead-letter事实不改。兼容trigger在旧writer同一SERIALIZABLE事务先取control FOR SHARE，仅在schema1/LEGACY/wire1/proof=false/RUNNING/approval epoch1时填缺失epoch；当前version/relay epoch只须为正整数，因此RUNNING→FENCED→RUNNING维护使version由1变3后旧writer仍可成功，approval epoch非1则拒绝。QUIESCING取同一行FOR UPDATE并在同一事务最终扫描/VALIDATE，40001/40P01只允许完整事务context-aware有界重试。新writer显式写，旧writer撤权、最终backfill/VALIDATE先于QUIESCING。不可由现有Marshal重构、null/错epoch或sidecar/digest不符硬阻断且不得exclusion/rewrite/人工replay。
+
+详细状态机、activation、历史 APPROVED 收敛、Account 审批分页冻结合同、presenter、proof、唯一发布/激活顺序和 P0/P1/P2 验收以 `admin-governance-security-redesign.md` 为准。以上增量需求已确认，尚未实现、尚未部署。
+
 ## 7. 独立任务与提交顺序
 
 | 顺序 | task_id | 需求 | 阶段 | 独立交付边界 | 依赖 |
@@ -242,7 +262,7 @@ APT-116 不复用当前外层固定要求 `platform.billing.wallets.read` 的 `/
 - 不开放普通退款创建；历史退款继续收敛。
 - 不创建银行账户、提现、资金划拨或平台内“定金”领域；页面名称不使用“定金”。
 - 不在本轮实现真实开票、税务申报、商户结算单和银行到账。若 Pinvou 承担这些职责，必须另立需求、领域事实、权限和接口；仅有 `invoice_product_name` 不等于开票管理能力。
-- 不复制审批中心的数据或状态机；财务页面只创建合法申请、展示状态和深链。
+- 不复制审批中心的数据或状态机；财务业务页负责复杂表单、当前事实重读、创建/续提/fresh superseding，审批中心只负责闭合展示、决定和安全恢复安排；双向链接不复制时间线。
 - 不通过前端聚合代替服务端运营统计，不使用假数据补齐 API 缺口。
 - 不改变普通用户个人中心的信息架构、充值商品购买合同或模型调用结算规则。
 
