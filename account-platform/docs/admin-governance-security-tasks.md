@@ -1,7 +1,7 @@
 # 治理与安全整改实施任务
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED，其余PENDING，均NOT_DEPLOYED。
+> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED（待独立提交），其余PENDING，均NOT_DEPLOYED。
 
 ## 1. 所有权与执行规则
 
@@ -21,7 +21,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 |---|---|---|---|---|---|
 | GSA-01 | APT-141 | policy-only 推进门禁与停用后的撤回/拒绝 | APT-008, APT-138 | CODE | DONE |
 | GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | DONE |
-| GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | PENDING |
+| GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | DONE |
 | GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | PENDING |
 | GSA-05 | APT-141 | typed closed RFC8785 编码与 legacy 编码适配 | GSA-02 | CODE | PENDING |
 | GSA-06 | APT-141 | 授权 Outbox epoch/sidecar 前向迁移及旧 writer 兼容 | GSA-04, GSA-05 | CODE | PENDING |
@@ -66,7 +66,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 
 - **01**：Account create/update 已有静态 executable 检查，保留并补齐 submit/APPROVE/Begin。policy-only 不得APPROVE、写APPROVED决定/授权 Outbox/新 execution；已有 EXECUTING/EXECUTED 结果读取保持。仅 SUBMITTED 的本人 WITHDRAW、独立审批人 REJECT 在 Token PRE/SAFE 和 Billing INACTIVE/policy-only 下均可安全收口，仍检查身份、权限、版本、禁止自审。单元+真实 Account PG 覆盖六可执行/八不可执行、两域安全收口、DRAFT 不可撤回、无权限/并发与零领域调用。此项不宣称完整 owner-domain activation 已交付。
 - **02**：以[逐命令事实与兼容基线](admin-governance-security-command-baseline.md)冻结已有 API、代码位置、版本、实际快照、近期认证、consumer/executor、部署前置与缺口，覆盖六既有及八 policy-only，并映射 GSA 所有权。只做事实与版本矩阵，不新建功能；DESIGN通过不表示目标proof、v2、activation或恢复协议已实现。
-- **03**：当前 Billing 尚无持久 activation 行，三类既有命令以静态`Executable=true`运行、八类以静态`Executable=false`失败关闭；本任务才由 Billing 建立其权威投影，前向迁移保全三命令 ACTIVE、物化八命令 INACTIVE。Account 只消费该投影，Token 三命令继续复用 Token 既有状态。迁移幂等、缺行/未知版本/不可用失败关闭及 N/N-1 回归；无实际生产激活。
+- **03**：当前 Billing 尚无持久 activation 行，三类既有命令以静态`Executable=true`运行、八类以静态`Executable=false`失败关闭；本任务才由 Billing 建立其权威投影，前向迁移保全三命令 ACTIVE、物化八命令 INACTIVE。Account 只消费该投影，Token 三命令继续复用 Token 既有状态。迁移幂等、缺行/未知版本/不可用失败关闭及 N/N-1 回归；无实际生产激活。发布唯一顺序为先执行 Billing `000054` 前向迁移，再部署提供闭合只读投影的 Billing 服务，最后部署强读该投影的 Account；回滚必须先回滚 Account、再回滚 Billing 服务，并永久保留已有事实的 `000054` current/history 表，不执行其数据破坏性 down。
 - **04**：按设计 §5.4 实现唯一 ADMIN_APPROVAL control、双 epoch、8 行动作矩阵、合法边及窄事务接口。共享/排他行锁与 CAS 的真实 PG 双连接测试；安全默认 LEGACY，尚未接线的功能不能开启。
 - **05**：按 §8/§9.1.1 交付独立窄编码包，重复键、整数精度、Unicode/转义、null 与封闭结构拒绝、大小边界及跨实现 golden；LEGACY_TYPED_V1 精确使用 Event.Marshal，历史重构 provenance 不证明原 broker bytes。
 - **06**：epoch/sidecar/additive migrations、原事件不变、旧 writer trigger FOR SHARE、完整事务重试及最终验证；覆盖迁移前 DLQ、并发写、maintenance version3 兼容、错误 epoch、不可重构数据失败关闭，不修改已发布迁移。
@@ -149,3 +149,12 @@ GSA-02：身份A已基于提交`88d37a53`建立[十四命令事实与兼容矩�
 - B审核：原生/BFF路径、六类策略、迁移追加史、现状与目标状态、producer JSON与closed schema、consumer检查点、既有财务操作边界、旧统计与近期认证缺口、唯一实现所有权等问题均经A修订并获B整批复审APPROVED，无剩余阻断。
 - 验证：最终完整`node scripts/account-platform.mjs verify` exit0，Go test/vet、OpenAPI（9项既有warning）、Node 550 PASS/2项既有环境SKIP、三语、observability、architecture全部通过；`node --test scripts/check-account-platform-tasks.test.mjs` 11/11 PASS；任务检查143 tasks/4 remediations/35 incomplete/354 completed PASS，文档基线与diff检查PASS，基线47个相对链接存在。
 - 边界：本项仅文档和文档门禁修复，无产品代码、策略、迁移、activation或部署配置变化；未新增proof/v2/恢复/财务执行能力。APT-141继续IN_PROGRESS，ADM-64/67部分实现，APT-138-R1 PENDING。独立签名提交后才进入GSA-03。
+
+GSA-03：以 Billing 为三类既有及八类 policy-only 命令建立唯一持久 activation current/revision 投影；三类前向物化为 ACTIVE、八类为 INACTIVE。Account 按精确 command/policy/snapshot version 强读闭合投影，Token 三命令仍只使用 Token 既有 activation/epoch，未建立第二真相。
+
+- 迁移与只读边界：Billing `000054` 在同一事务维护 current 与不可变 revision history；state 变化必须逐一递增版本，current/history 的 DELETE/TRUNCATE、history 的 UPDATE 均失败关闭。`billing_service` 只能读取 current；新 workload API 固定返回按命令排序的11行 closed schema，任一缺行、乱序、未知、混合版本、policy-only ACTIVE、仓储错误或畸形时间均整份503且`no-store`。真实签名workload测试证明只有具有`internal.billing.approval-activation.read`的Account身份可读，缺精确权限或其他workload在仓储前拒绝。
+- Account 边界：create/update/submit/APPROVE/新 Begin 按冻结 policy 与 snapshot schema 读取对应 activation；不可用与 INACTIVE 使用独立稳定503，历史 EXECUTING/EXECUTED 读取和 SUBMITTED REJECT/WITHDRAW 安全收口不依赖当前activation。Submit 在任何Billing远调前完成当前强授权及冻结binding/version/policy/schema校验；撤权、授权版本变化或snapshot schema漂移保持DRAFT与版本不变且Billing调用为0。单元表驱动分别覆盖三类Billing命令的ACTIVE/INACTIVE/缺行/错p/s，并确认八类policy-only继续在领域读取前禁止推进。
+- 实际数据库验证：在Account、Token、Billing三个隔离数据库上运行的五组具名PG17用例均PASS/no-SKIP。Billing activation migration/runtime用例1.99s（package 2.739s），覆盖非superuser迁移、初始11行历史、状态修订、事务回滚无孤儿、运行时最小权限、重入与down历史保护；Account Billing集成边界用例1.57s（package 2.491s），使用真实Billing handler/HTTP client与真实Account PG repository，但Billing repository为受控stub，覆盖Wallet activation状态、撤权/版本/schema顺序、零副作用和历史安全读取，不冒称双库领域E2E或三Billing命令真实领域验收。既有三组回归为Advancement 2.14s、SnapshotLifecycle 11.34s、TokenConsumers 88.02s（生命周期40.59s/目录26.57s/凭据20.85s，package 102.570s），均未跳过。
+- 合同与部署验证：AJV 2020-12真实编译并拒绝部分、额外、重复、乱序、错p/s、policy-only ACTIVE、未知命令和额外字段；授权覆盖计数及新路由精确权限测试通过。Compose和Helm模板静态解析证明仅Account获得新权限且原权限集合保留；本机没有Helm CLI，因此这项是模板解析证据，不冒称实际`helm template`渲染或部署证据。迁移manifest当前278文件校验通过，OpenAPI lint通过且仅保留9项既有warning。
+- 审核迭代：B要求并由A补齐不可变revision history/current TRUNCATE封锁、store/handler共享服务端validator、真实workload allow/deny、Submit鉴权顺序、三Billing及八policy-only矩阵、发布/回滚顺序和OAS固定位置schema。首次完整verify只因新增路由后旧授权总数仍断言342而失败（其余550 PASS/2既有环境SKIP）；断言已按实际343更新并增加精确分类回归，未放宽授权checker。第二轮完整`node scripts/account-platform.mjs verify`最终exit0：Node 555项中553 PASS/0 FAIL/2项既有环境SKIP，Go test/vet、OpenAPI（9项既有warning）、i18n、observability、architecture、manifest 278、授权路由343及文档/任务门禁全部通过。B最终复审确认产品代码、迁移、接线与测试APPROVED，无阻断或重要问题。
+- 状态：DONE / B审核APPROVED / NOT_DEPLOYED（待独立Signed-off提交）。APT-141继续IN_PROGRESS，ADM-67保持部分实现，其余GSA任务仍为PENDING；发布固定为Billing迁移→Billing服务→Account，回滚反序且保留`000054`事实。未交付proof、Account control、consumer改造、八类执行能力或任何生产activation。

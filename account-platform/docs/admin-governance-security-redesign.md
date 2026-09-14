@@ -98,7 +98,7 @@ Portal 不直接读取需要 `platform.roles.read` 的内部 policy API。Accoun
 7. `RECONCILIATION_FINANCIAL_REPAIR`；
 8. `USAGE_SETTLEMENT_REPAIR`。
 
-Billing activation 的写入只属于受信前向迁移/运维边界；Directory 只读聚合。同名未知版本、缺 activation 行、policy/activation 混合版本、N/N-1 不可理解状态全部失败关闭。回滚不得删除仍被 Approval request、Outbox、Inbox、execution 或领域效果引用的 policy/activation 历史。
+Billing activation 的写入只属于受信前向迁移/运维边界；Directory 只读聚合。同名未知版本、缺 activation 行、policy/activation 混合版本、N/N-1 不可理解状态全部失败关闭。GSA-03 的兼容发布固定为 Billing activation 前向迁移 → Billing 闭合只读投影 → Account 强读消费者；回滚固定为 Account → Billing 服务，并保留已产生 current/revision 历史的 activation 迁移，不执行破坏性 down。回滚不得删除仍被 Approval request、Outbox、Inbox、execution 或领域效果引用的 policy/activation 历史。
 
 ### 3.3 服务端动作封锁
 

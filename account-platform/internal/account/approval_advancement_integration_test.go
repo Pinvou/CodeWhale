@@ -65,7 +65,7 @@ func TestApprovalAdvancementPostgresIntegration(t *testing.T) {
 	outsider := seedTokenOwnerCandidateActor(t, ctx, repository.pool, "PERSONAL_USER", "advance-outsider")
 	requesterPrincipal, approverPrincipal := approvalIntegrationPrincipal(requester), approvalIntegrationPrincipal(approver)
 	reader := &advancementActivationReader{state: "SAFE_ROLLBACK"}
-	repository.WithTokenGovernanceActivation(reader)
+	repository.WithTokenGovernanceActivation(reader).WithBillingGovernanceActivation(&billingAdvancementReader{snapshot: billingAdvancementSnapshot("ACTIVE")})
 	for _, policy := range approvalpolicy.All() {
 		if policy.Mode != approvalpolicy.ApprovalRequired {
 			continue

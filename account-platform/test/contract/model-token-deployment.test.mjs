@@ -375,10 +375,79 @@ test('workload roles preserve existing permissions and narrowly register credent
   const account = JSON.parse(overlay.services['account-service'].environment.WORKLOAD_IDENTITY_RULES_JSON);
   assert.deepEqual(account.find(rule => rule.service === 'token-credential-portal').permissions, ['internal.authorization.check']);
   const token = JSON.parse(overlay.services['token-gateway'].environment.WORKLOAD_IDENTITY_RULES_JSON);
+  const billing = JSON.parse(overlay.services['billing-service'].environment.WORKLOAD_IDENTITY_RULES_JSON);
   assert.deepEqual(token.find(rule => rule.service === 'token-command-executor').permissions, [
     'internal.token.model-lifecycle.execute', 'internal.token.catalog-rollback.execute', 'internal.token.credential-revoke.execute', 'internal.authorization.check',
   ]);
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-snapshot.read'));
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.authorization.check'));
-  for (const rules of [account, token]) assert.ok(rules.every(rule => rule.subject === `pinvou:service:${rule.service}` && rule.permissions.every(permission => !permission.includes('*'))));
+  assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-activation.read'));
+  assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-activation.read'));
+  for (const rules of [account, billing, token]) assert.ok(rules.every(rule => rule.subject === `pinvou:service:${rule.service}` && rule.permissions.every(permission => !permission.includes('*'))));
+});
+
+const billingWorkloadPermissions = {
+  'account-service': [
+    'internal.billing.wallet.ensure', 'internal.billing.account-closure-assessment.read',
+    'internal.billing.account-closure-grants.isolate', 'internal.billing.organization.lifecycle',
+    'internal.billing.organization-unit.lifecycle', 'internal.billing.organization-member.lifecycle',
+    'internal.billing.approval-activation.read',
+  ],
+  'token-gateway': [
+    'internal.billing.wallet.ensure', 'internal.billing.wallet.read', 'internal.billing.entitlement.read',
+    'internal.billing.hold.reserve', 'internal.billing.hold.extend', 'internal.billing.hold.commit',
+    'internal.billing.hold.release', 'internal.billing.account-closed-grant.reclaim',
+    'internal.billing.pricing.read', 'internal.billing.pricing.bind', 'internal.billing.quota.read',
+    'internal.billing.quota.allocate', 'internal.billing.quota.revoke', 'internal.billing.product.read',
+    'internal.billing.payment-capability.read', 'internal.billing.recharge-order.create',
+    'internal.billing.recharge-order.read', 'internal.billing.recharge-order.close',
+    'internal.billing.payment-claim.create', 'internal.billing.token-account-wallet-provision.execute',
+    'internal.billing.token-account-wallet-provision.read',
+  ],
+};
+
+function assertBillingWorkloadPermissions(rules) {
+  assert.deepEqual(rules.map(rule => rule.service).sort(), Object.keys(billingWorkloadPermissions).sort());
+  for (const rule of rules) {
+    assert.deepEqual([...rule.permissions].sort(), [...billingWorkloadPermissions[rule.service]].sort());
+  }
+}
+
+// Inspect the real template's complete closed list, not a hand-written rendered
+// fixture. Reject unparsed template syntax so additional rules cannot be ignored.
+function billingRulesFromHelmTemplate(source) {
+  const branch = source.match(/\{\{- else if eq \$app\.name "billing-service" \}\}([\s\S]*?)\{\{- else if eq \$app\.name "token-gateway" \}\}/);
+  assert.ok(branch, 'Billing Helm workload branch is missing');
+  const expression = branch[1].match(/^\s*- name: WORKLOAD_IDENTITY_RULES_JSON\s+value: \{\{ toJson \(list ([\s\S]*)\) \| quote \}\}\s*$/);
+  assert.ok(expression, 'Billing Helm workload list must remain explicit and closed');
+  const rulePattern = /\(dict "subject" \(printf "system:serviceaccount:%s:%s-([a-z-]+)" \$root\.Release\.Namespace \$fullname\) "service" "([a-z-]+)" "permissions" \(list ((?:"[^"]+"\s*)+)\)\)/g;
+  const rules = [...expression[1].matchAll(rulePattern)].map(match => {
+    assert.equal(match[1], match[2], 'workload subject does not match service');
+    return { service: match[2], permissions: [...match[3].matchAll(/"([^"]+)"/g)].map(item => item[1]) };
+  });
+  assert.equal(expression[1].replace(rulePattern, '').trim(), '', 'unparsed Billing workload rule');
+  return rules;
+}
+
+test('Billing Compose and real Helm template preserve exact least-privilege workload sets', async () => {
+  const overlay = YAML.parse(await read('deploy/compose/compose.model-token.yaml'), { merge: true });
+  assertBillingWorkloadPermissions(JSON.parse(overlay.services['billing-service'].environment.WORKLOAD_IDENTITY_RULES_JSON));
+  const source = await read('deploy/helm/account-platform/templates/app-deployments.yaml');
+  const rules = billingRulesFromHelmTemplate(source);
+  assertBillingWorkloadPermissions(rules);
+  // Regression oracles: omission, wildcard, wrong recipient, extra workload,
+  // duplicate grants and loss of any existing permission must fail the check.
+  for (const mutate of [
+    rules => { rules[0].permissions.pop(); },
+    rules => { rules[0].permissions.push('internal.billing.*'); },
+    rules => { rules[1].permissions.push(rules[0].permissions.pop()); },
+    rules => { rules.push({ service: 'token-portal', permissions: ['internal.billing.approval-activation.read'] }); },
+    rules => { rules[0].permissions.push('internal.billing.approval-activation.read'); },
+    rules => { rules[1].permissions.shift(); },
+  ]) {
+    const changed = structuredClone(rules);
+    mutate(changed);
+    assert.throws(() => assertBillingWorkloadPermissions(changed));
+  }
+  assert.throws(() => billingRulesFromHelmTemplate(source.replace('"service" "account-service" "permissions" (list "internal.billing.wallet.ensure"', '"service" "token-portal" "permissions" (list "internal.billing.wallet.ensure"')));
 });

@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -40,5 +41,22 @@ func TestApprovalExecutionClientDoesNotSendExecutorIdentity(t *testing.T) {
 	}
 	if err := gate.Complete(context.Background(), requestID, "job-1", "EXECUTED", json.RawMessage(`{}`), json.RawMessage(`{}`), ""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestApprovalGovernanceUnavailableRemainsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"code":"BILLING_COMMAND_GOVERNANCE_UNAVAILABLE"}`))
+	}))
+	t.Cleanup(server.Close)
+	gate, err := NewHTTPApprovalExecutionGate(server.URL, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = gate.Begin(context.Background(), uuid.New(), "job-activation-unavailable", json.RawMessage(`{}`))
+	var responseError approvalGateHTTPError
+	if err == nil || !errors.As(err, &responseError) || responseError.StatusCode != http.StatusServiceUnavailable || responseError.Code != "BILLING_COMMAND_GOVERNANCE_UNAVAILABLE" || !approvalGateUnavailable(err) {
+		t.Fatalf("governance 503 must stay retryable: %#v", err)
 	}
 }

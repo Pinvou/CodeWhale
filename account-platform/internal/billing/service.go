@@ -91,6 +91,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	router := httpserver.NewRouter()
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
+	protected.GET("/internal/v1/approval-command-activations", serviceauth.Require("internal.billing.approval-activation.read"), httpserver.AdaptFunc(s.approvalCommandActivations))
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
 	protected.POST("/internal/v1/token-account-wallet-provisioning-receipts", serviceauth.Require("internal.billing.token-account-wallet-provision.execute"), httpserver.AdaptFunc(s.provisionTokenAccountWallet))
 	protected.GET("/internal/v1/token-account-wallet-provisioning-receipts/:command_reference", serviceauth.Require("internal.billing.token-account-wallet-provision.read"), httpserver.AdaptFunc(s.getTokenAccountWalletProvisioningReceipt))
@@ -863,6 +864,8 @@ func (s *Service) release(w http.ResponseWriter, r *http.Request) {
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the billing request could not be completed"
 	switch {
+	case errors.Is(err, ErrApprovalActivationUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "BILLING_APPROVAL_ACTIVATION_UNAVAILABLE", "billing approval command activation is temporarily unavailable"
 	case errors.Is(err, ErrNormalRefundCreationDisabled):
 		status, code, message = http.StatusConflict, "NORMAL_REFUND_CREATION_DISABLED", "normal refund creation is currently unavailable"
 	case errors.Is(err, ErrPaymentRateLimited):

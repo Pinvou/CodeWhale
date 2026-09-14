@@ -10,6 +10,24 @@ servers:
 security:
   - serviceToken: []
 paths:
+  /internal/v1/approval-command-activations:
+    get:
+      operationId: readBillingApprovalCommandActivations
+      summary: Read the complete Billing-owned approval activation projection
+      description: Workload-only, read-only, and no-store. Requires internal.billing.approval-activation.read; browsers and partial or mixed-version projections fail closed.
+      responses:
+        "200":
+          description: Complete closed activation snapshot for the three compatible executable and eight policy-only Billing commands
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingApprovalActivationSnapshot" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/pricing/impact-coverage:
     post:
       operationId: readImpactPriceCoverage
@@ -502,6 +520,65 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    BillingApprovalActivationSnapshot:
+      type: object
+      additionalProperties: false
+      required: [schema_version, activations]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        activations:
+          type: array
+          minItems: 11
+          maxItems: 11
+          description: Fixed command_type ascending order; unknown, duplicate, missing, or mixed-version rows make the whole projection unavailable.
+          prefixItems:
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: CHARGEBACK_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: ENTITLEMENT_COMPONENT_ADJUSTMENT }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: LEDGER_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: PAYMENT_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: PAYMENT_PRODUCT_RESUME }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { enum: [ACTIVE, INACTIVE] } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: PAYMENT_PROVIDER_RESUME }, policy_version: { const: 2 }, snapshot_schema_version: { const: 1 }, state: { enum: [ACTIVE, INACTIVE] } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: RECEIVABLE_WRITE_OFF }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: RECONCILIATION_FINANCIAL_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: REFUND_EXCEPTION_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: USAGE_SETTLEMENT_REPAIR }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { const: INACTIVE } }
+            - allOf:
+                - { $ref: "#/components/schemas/BillingApprovalCommandActivation" }
+                - properties: { command_type: { const: WALLET_ADJUSTMENT }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, state: { enum: [ACTIVE, INACTIVE] } }
+          items: false
+    BillingApprovalCommandActivation:
+      type: object
+      additionalProperties: false
+      required: [command_type, policy_version, snapshot_schema_version, state, version, updated_at]
+      properties:
+        command_type:
+          type: string
+          enum: [CHARGEBACK_FINANCIAL_REPAIR, ENTITLEMENT_COMPONENT_ADJUSTMENT, LEDGER_REPAIR, PAYMENT_FINANCIAL_REPAIR, PAYMENT_PRODUCT_RESUME, PAYMENT_PROVIDER_RESUME, RECEIVABLE_WRITE_OFF, RECONCILIATION_FINANCIAL_REPAIR, REFUND_EXCEPTION_REPAIR, USAGE_SETTLEMENT_REPAIR, WALLET_ADJUSTMENT]
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        snapshot_schema_version: { type: integer, minimum: 1 }
+        state: { type: string, enum: [ACTIVE, INACTIVE] }
+        version: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
     ImpactPriceCoverageResult:
       type: object
       additionalProperties: false

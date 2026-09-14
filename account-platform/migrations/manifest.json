@@ -1014,6 +1014,16 @@
         "file": "000053_token_account_wallet_provisioning_receipts.up.sql",
         "version": 53,
         "sha256": "d442450f15b36db7c8d1b0bcee5a625c605f05f9380bb78f86b2274192f5f7f6"
+      },
+      {
+        "file": "000054_approval_command_activations.down.sql",
+        "version": 54,
+        "sha256": "57c1248de8104d37dbdb0bd1ec8aa60810d45e7005cf78c050568b5a41ae0009"
+      },
+      {
+        "file": "000054_approval_command_activations.up.sql",
+        "version": 54,
+        "sha256": "6d660ce55d77c53ec2bc8450c80244971a0fe276a78d42b0f698442b972e3c4b"
       }
     ],
     "payment-simulator": [

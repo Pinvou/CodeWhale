@@ -2,11 +2,11 @@
 
 ## 2026-09-14 治理与安全需求变更
 
-需求/设计已由身份B最终审核PASS并以`e15fe698`提交。当前目标总数在此前437项基础上增至440项；GSA-02复核又把未完整落实15分钟审批近期认证的ADM-64从已实现收紧为部分实现，当前汇总为`已实现403 / 部分实现32 / 未实现3 / 移除1 / 非当前范围1`。APT-141～143分别唯一拥有领域、界面、发布目标；[GSA-01～40独立子任务](admin-governance-security-tasks.md)按A修改/B审核逐项推进，任务拆分已获B复审PASS并以`90b2ea08`提交。GSA-01已获B整批代码审核APPROVED，以`88d37a53`提交，新增及既有三组真实PG测试全部PASS/no-SKIP；GSA-02[逐命令事实与兼容基线](admin-governance-security-command-baseline.md)及必要文档门禁修复已获B整批审核APPROVED，状态DESIGN DONE，不新增运行能力。ADM-64/ADM-67仅部分实现，APT-138-R1 PENDING、APT-141继续IN_PROGRESS，其余子任务PENDING，所有新增目标均未部署。
+需求/设计已由身份B最终审核PASS并以`e15fe698`提交。当前目标总数在此前437项基础上增至440项；GSA-02复核又把未完整落实15分钟审批近期认证的ADM-64从已实现收紧为部分实现，当前汇总为`已实现403 / 部分实现32 / 未实现3 / 移除1 / 非当前范围1`。APT-141～143分别唯一拥有领域、界面、发布目标；[GSA-01～40独立子任务](admin-governance-security-tasks.md)按A修改/B审核逐项推进，任务拆分已获B复审PASS并以`90b2ea08`提交。GSA-01已获B整批代码审核APPROVED，以`88d37a53`提交；GSA-02[逐命令事实与兼容基线](admin-governance-security-command-baseline.md)及必要文档门禁修复已获B整批审核APPROVED并以`b8216c97`提交。GSA-03已获B整批代码审核APPROVED、待独立提交；ADM-64/ADM-67仍仅部分实现，APT-138-R1 PENDING、APT-141继续IN_PROGRESS，其余子任务PENDING，所有新增目标均未部署。
 
 | 目标编号 | 实现状态 | 任务与审核 | 证据 | 部署状态 | 已知差距 |
 |---|---|---|---|---|---|
-| ADM-67 | 部分实现 | APT-141-IN_PROGRESS; GSA-01-DONE/B_APPROVED; GSA-02-DESIGN_DONE/B_APPROVED | GSA-01提交`88d37a53`，三组真实PG PASS/no-SKIP；GSA-02整批B审核及最终完整verify exit0、文档门禁11/11 PASS，详见子任务证据 | NOT_DEPLOYED | 已实现静态推进门禁、Token动态动作裁剪和安全收口；GSA-02不新增运行能力。当前没有 Billing 持久 activation 行，三类既有命令仍靠静态`Executable=true`，八类靠静态`Executable=false`有效失败关闭；GSA-03才交付三类ACTIVE/八类INACTIVE权威投影。proof、安全投影、历史收敛、失败恢复和八财务家族增量尚未交付，见GSA-03～16及21～36。 |
+| ADM-67 | 部分实现 | APT-141-IN_PROGRESS; GSA-01-DONE/B_APPROVED; GSA-02-DESIGN_DONE/B_APPROVED; GSA-03-DONE/B_APPROVED | GSA-01提交`88d37a53`；GSA-02提交`b8216c97`且整批B审核/文档门禁PASS；GSA-03整批B审核APPROVED并待独立提交 | NOT_DEPLOYED | 已实现静态推进门禁、Token动态动作裁剪、安全收口，以及Billing三ACTIVE/八INACTIVE权威current/revision投影与Account精确强读；APT-141仍有proof、安全presenter、历史收敛、失败恢复和八财务家族增量未交付，见GSA-04～16及21～36。 |
 | UI-60 | 未实现 | APT-142-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | v1/v2会话兼容、目录/列表/详情、业务编辑替代与治理分区交互尚未整改，见GSA-17～20及37。 |
 | NFR-57 | 未实现 | APT-143-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | 逐项发布工具、生产等价故障/性能/兼容证据及实际授权部署尚未完成，见GSA-38～40；不得以代码测试替代生产证据。 |
 

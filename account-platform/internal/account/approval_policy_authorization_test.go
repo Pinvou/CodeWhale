@@ -15,11 +15,12 @@ func TestApprovalPolicyForItemUsesFrozenPermissions(t *testing.T) {
 			t.Fatal(err)
 		}
 		item := ApprovalRequest{
-			CommandType:         policy.CommandType,
-			PolicyVersion:       policy.PolicyVersion,
-			ApprovalMode:        string(policy.Mode),
-			RequesterPermission: policy.RequesterPermission,
-			ApproverPermission:  policy.ApproverPermission,
+			CommandType:           policy.CommandType,
+			PolicyVersion:         policy.PolicyVersion,
+			SnapshotSchemaVersion: policy.SnapshotSchemaVersion,
+			ApprovalMode:          string(policy.Mode),
+			RequesterPermission:   policy.RequesterPermission,
+			ApproverPermission:    policy.ApproverPermission,
 		}
 		resolved, err := approvalPolicyForItem(item)
 		if err != nil || resolved.ApproverPermission != "platform.billing.payment-controls.resume.approve" {

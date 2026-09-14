@@ -670,6 +670,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "APPROVAL_COMMAND_NOT_EXECUTABLE", "approval command is not executable"
 	case errors.Is(err, ErrTokenGovernanceInactive):
 		status, code, message = http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "Token command governance is not active"
+	case errors.Is(err, ErrBillingGovernanceInactive):
+		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_INACTIVE", "Billing command governance is not active"
+	case errors.Is(err, ErrBillingGovernanceUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_UNAVAILABLE", "Billing command governance is temporarily unavailable"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

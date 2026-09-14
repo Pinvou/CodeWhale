@@ -11,6 +11,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/billinggovernance"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
@@ -86,6 +87,11 @@ func main() {
 		log.Fatal("Token governance reader configuration is invalid: ", err)
 	}
 	repository.WithTokenGovernanceActivation(governance)
+	billingGovernance, err := billinggovernance.NewClient(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal("Billing governance reader configuration is invalid: ", err)
+	}
+	repository.WithBillingGovernanceActivation(billingGovernance)
 	approvalSnapshots, err := account.NewHTTPApprovalSnapshotSource(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)

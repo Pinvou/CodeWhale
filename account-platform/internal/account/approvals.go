@@ -63,6 +63,7 @@ type ApprovalRequest struct {
 	CriticalResourceVersions      json.RawMessage `json:"critical_resource_versions"`
 	FinancialSnapshot             json.RawMessage `json:"financial_snapshot"`
 	PolicySnapshot                json.RawMessage `json:"policy_snapshot"`
+	SnapshotSchemaVersion         int             `json:"-"`
 	AllowedActions                []string        `json:"allowed_actions"`
 	RequesterPermission           string          `json:"-"`
 	ApproverPermission            string          `json:"-"`
@@ -178,7 +179,7 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	// APT-138 owns activation. Existing same-request replays above remain
 	// readable, while a new executable Token approval fails closed only after
 	// policy, actor and strong authorization have been established.
-	if err := r.requireApprovalAdvancement(ctx, policy.CommandType); err != nil {
+	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
 		return ApprovalRequest{}, err
 	}
 	if draft.SupersedesRequestID != nil {
@@ -252,10 +253,14 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	if current.RequesterUserID != *actorID || current.Status != "DRAFT" || current.Version != expectedVersion || current.CommandType != policy.CommandType {
 		return ApprovalRequest{}, ErrConflict
 	}
+	currentPolicy, policyErr := approvalPolicyForItem(current)
+	if policyErr != nil || currentPolicy.PolicyVersion != policy.PolicyVersion || currentPolicy.SnapshotSchemaVersion != policy.SnapshotSchemaVersion {
+		return ApprovalRequest{}, ErrApprovalInvalidated
+	}
 	if _, _, _, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission); err != nil {
 		return ApprovalRequest{}, err
 	}
-	if err := r.requireApprovalAdvancement(ctx, policy.CommandType); err != nil {
+	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
 		return ApprovalRequest{}, err
 	}
 	draft, err = r.authoritativeApprovalDraft(ctx, draft)
@@ -316,8 +321,6 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 		if _, _, _, err := strongPlatformAuthorization(ctx, tx, *actorID, item.RequesterPermission); err != nil {
 			return ApprovalRequest{}, err
 		}
-	} else if err := r.requireApprovalAdvancement(ctx, item.CommandType); err != nil {
-		return ApprovalRequest{}, err
 	}
 	if item.Status != from || item.Version != expectedVersion {
 		now := r.now()
@@ -332,8 +335,8 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 	now := r.now()
 	submittedExpiresAt := item.ExpiresAt
 	if from == "DRAFT" {
-		policy, lookupErr := approvalpolicy.Lookup(item.CommandType)
-		if lookupErr != nil || policy.PolicyVersion != item.PolicyVersion {
+		policy, lookupErr := approvalPolicyForItem(item)
+		if lookupErr != nil {
 			return ApprovalRequest{}, ErrApprovalInvalidated
 		}
 		if err := assertStoredApprovalPolicy(ctx, tx, policy); err != nil {
@@ -342,6 +345,9 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 		bindingID, authVersion, _, authErr := strongPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission)
 		if authErr != nil || bindingID != item.RequesterBindingID || authVersion != item.RequesterAuthorizationVersion {
 			return ApprovalRequest{}, ErrApprovalInvalidated
+		}
+		if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
+			return ApprovalRequest{}, err
 		}
 		if approvalSnapshotCommand(item.CommandType) {
 			if r.approvalSnapshots == nil {
@@ -435,7 +441,7 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 		return ApprovalRequest{}, err
 	}
 	if decision == "APPROVED" {
-		if err := r.requireApprovalAdvancement(ctx, item.CommandType); err != nil {
+		if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
 			return ApprovalRequest{}, err
 		}
 	}
@@ -516,7 +522,8 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 		if err != nil {
 			return nil, err
 		}
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, canAdvance(item.CommandType))
+		policy, policyErr := approvalPolicyForItem(item)
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, policyErr == nil && canAdvance(policy))
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -536,7 +543,8 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 		if err != nil {
 			return ApprovalRequest{}, err
 		}
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false, r.approvalAdvancementProjection(ctx)(item.CommandType))
+		policy, policyErr := approvalPolicyForItem(item)
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy))
 		return item, nil
 	}
 	_, canApprove, err := r.approvalCapabilities(ctx, actorID, item)
@@ -546,7 +554,8 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 	if !canApprove {
 		return ApprovalRequest{}, ErrForbidden
 	}
-	item.AllowedActions = approvalAllowedActions(item, actorID, false, true, r.approvalAdvancementProjection(ctx)(item.CommandType))
+	policy, policyErr := approvalPolicyForItem(item)
+	item.AllowedActions = approvalAllowedActions(item, actorID, false, true, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy))
 	return item, nil
 }
 
@@ -607,7 +616,7 @@ func (r *PostgresRepository) tokenApprovalCreateEnabledForTest(commandType strin
 
 func approvalPolicyForItem(item ApprovalRequest) (approvalpolicy.Policy, error) {
 	policy, err := approvalpolicy.Lookup(item.CommandType)
-	if err != nil || item.PolicyVersion != policy.PolicyVersion || policy.Mode != approvalpolicy.ApprovalRequired || item.RequesterPermission != policy.RequesterPermission || item.ApproverPermission != policy.ApproverPermission {
+	if err != nil || item.PolicyVersion != policy.PolicyVersion || item.SnapshotSchemaVersion != policy.SnapshotSchemaVersion || policy.Mode != approvalpolicy.ApprovalRequired || item.RequesterPermission != policy.RequesterPermission || item.ApproverPermission != policy.ApproverPermission {
 		return approvalpolicy.Policy{}, ErrApprovalInvalidated
 	}
 	return policy, nil
@@ -1075,7 +1084,7 @@ func assertStoredApprovalPolicy(ctx context.Context, database queryable, policy 
 	return nil
 }
 
-const approvalSelect = `SELECT ar.id,ar.command_type,ar.policy_version,p.approval_mode,p.risk_class,ar.requester_user_id,ar.requester_binding_id,ar.requester_authorization_version,ar.normalized_command,encode(ar.command_fingerprint,'hex'),ar.target_resource_type,ar.target_resource_id,ar.reason,ar.redacted_evidence,ar.expected_impact,ar.status,ar.version,ar.supersedes_request_id,ar.expires_at,ar.execution_deadline,ar.invalidation_code,ar.invalidation_details,ar.submitted_at,ar.decided_at,ar.created_at,ar.updated_at,s.critical_resource_versions,s.financial_snapshot,s.policy_snapshot,p.requester_permission,COALESCE(p.approver_permission,'') FROM approval_requests ar JOIN approval_command_policies p ON p.command_type=ar.command_type AND p.policy_version=ar.policy_version JOIN approval_request_snapshots s ON s.approval_request_id=ar.id`
+const approvalSelect = `SELECT ar.id,ar.command_type,ar.policy_version,p.approval_mode,p.risk_class,ar.requester_user_id,ar.requester_binding_id,ar.requester_authorization_version,ar.normalized_command,encode(ar.command_fingerprint,'hex'),ar.target_resource_type,ar.target_resource_id,ar.reason,ar.redacted_evidence,ar.expected_impact,ar.status,ar.version,ar.supersedes_request_id,ar.expires_at,ar.execution_deadline,ar.invalidation_code,ar.invalidation_details,ar.submitted_at,ar.decided_at,ar.created_at,ar.updated_at,s.critical_resource_versions,s.financial_snapshot,s.policy_snapshot,s.snapshot_schema_version,p.requester_permission,COALESCE(p.approver_permission,'') FROM approval_requests ar JOIN approval_command_policies p ON p.command_type=ar.command_type AND p.policy_version=ar.policy_version JOIN approval_request_snapshots s ON s.approval_request_id=ar.id`
 
 type rowScanner interface{ Scan(...any) error }
 
@@ -1085,7 +1094,7 @@ type queryable interface {
 
 func scanApprovalRequest(row rowScanner) (ApprovalRequest, error) {
 	var item ApprovalRequest
-	err := row.Scan(&item.ID, &item.CommandType, &item.PolicyVersion, &item.ApprovalMode, &item.RiskClass, &item.RequesterUserID, &item.RequesterBindingID, &item.RequesterAuthorizationVersion, &item.NormalizedCommand, &item.CommandFingerprint, &item.TargetResourceType, &item.TargetResourceID, &item.Reason, &item.RedactedEvidence, &item.ExpectedImpact, &item.Status, &item.Version, &item.SupersedesRequestID, &item.ExpiresAt, &item.ExecutionDeadline, &item.InvalidationCode, &item.InvalidationDetails, &item.SubmittedAt, &item.DecidedAt, &item.CreatedAt, &item.UpdatedAt, &item.CriticalResourceVersions, &item.FinancialSnapshot, &item.PolicySnapshot, &item.RequesterPermission, &item.ApproverPermission)
+	err := row.Scan(&item.ID, &item.CommandType, &item.PolicyVersion, &item.ApprovalMode, &item.RiskClass, &item.RequesterUserID, &item.RequesterBindingID, &item.RequesterAuthorizationVersion, &item.NormalizedCommand, &item.CommandFingerprint, &item.TargetResourceType, &item.TargetResourceID, &item.Reason, &item.RedactedEvidence, &item.ExpectedImpact, &item.Status, &item.Version, &item.SupersedesRequestID, &item.ExpiresAt, &item.ExecutionDeadline, &item.InvalidationCode, &item.InvalidationDetails, &item.SubmittedAt, &item.DecidedAt, &item.CreatedAt, &item.UpdatedAt, &item.CriticalResourceVersions, &item.FinancialSnapshot, &item.PolicySnapshot, &item.SnapshotSchemaVersion, &item.RequesterPermission, &item.ApproverPermission)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ApprovalRequest{}, ErrNotFound
 	}

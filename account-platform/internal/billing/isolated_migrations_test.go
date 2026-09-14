@@ -16,10 +16,13 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 	}
 	qualified := pgx.Identifier{schema}.Sanitize()
 	for index := range loaded {
-		if loaded[index].Version != 53 {
+		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 {
 			continue
 		}
-		loaded[index].UpSQL = "ALTER SCHEMA " + qualified + " OWNER TO billing_schema_owner;\n" + rewriteBillingPublicSchema(loaded[index].UpSQL, qualified) + "\nRESET ROLE;"
+		loaded[index].UpSQL = rewriteBillingPublicSchema(loaded[index].UpSQL, qualified)
+		if loaded[index].Version == 53 || loaded[index].Version == 54 {
+			loaded[index].UpSQL = "ALTER SCHEMA " + qualified + " OWNER TO billing_schema_owner;\n" + loaded[index].UpSQL + "\nRESET ROLE;"
+		}
 		loaded[index].DownSQL = rewriteBillingPublicSchema(loaded[index].DownSQL, qualified)
 		normalized := strings.ReplaceAll(strings.ReplaceAll(loaded[index].UpSQL, "\r\n", "\n"), "\r", "\n")
 		digest := sha256.Sum256([]byte(normalized))
@@ -31,5 +34,6 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 func rewriteBillingPublicSchema(sql, qualified string) string {
 	sql = strings.ReplaceAll(sql, "to_regnamespace('public')", "to_regnamespace('"+strings.Trim(qualified, "\"")+"')")
 	sql = strings.ReplaceAll(sql, "SCHEMA public", "SCHEMA "+qualified)
+	sql = strings.ReplaceAll(sql, "search_path=public,pg_temp", "search_path="+qualified+",pg_temp")
 	return strings.ReplaceAll(sql, "public.", qualified+".")
 }
