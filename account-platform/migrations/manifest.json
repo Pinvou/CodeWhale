@@ -492,6 +492,16 @@
         "file": "000049_token_route_upsert_policy_v3.up.sql",
         "version": 49,
         "sha256": "3e85209b6455106814ac0783376c68a13c676a93a3b86e2a83dab28b079b66d2"
+      },
+      {
+        "file": "000050_admin_approval_control.down.sql",
+        "version": 50,
+        "sha256": "e272db6c632889a6eff2d50c0c55e775762bab4b490a57ba5f0b1b20203428e0"
+      },
+      {
+        "file": "000050_admin_approval_control.up.sql",
+        "version": 50,
+        "sha256": "c4a5f8617bca2278a30592930a6585343bc9902bf97e2a3e0ffa10a12c77fbd0"
       }
     ],
     "billing": [

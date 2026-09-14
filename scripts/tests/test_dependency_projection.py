@@ -20,6 +20,21 @@ class ProjectionTests(unittest.TestCase):
         for name, expected in PROJECT.TEMPLATES.items():
             self.assertEqual(hashlib.sha256((root / name).read_bytes().replace(b"\r\n", b"\n")).hexdigest(), expected)
 
+    def test_postgres_bootstrap_mapping_is_explicit_and_complete(self):
+        expected = {"ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
+                    "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD",
+                    "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
+                    "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD"}
+        self.assertEqual(set(PROJECT.POSTGRES_BOOTSTRAP_PASSWORD_NAMES), expected)
+        password_bytes = {name: name.encode() for name in PROJECT.PASSWORD.NAMES}
+        projected = PROJECT.postgres_bootstrap_files(password_bytes)
+        expected_paths = {"postgres/bootstrap/" + name for name in expected}
+        self.assertEqual(set(projected), expected_paths)
+        self.assertEqual(projected["postgres/bootstrap/ACCOUNT_MIGRATION_DB_PASSWORD"],
+                         (b"ACCOUNT_MIGRATION_DB_PASSWORD", 999))
+        self.assertEqual(projected["postgres/bootstrap/KEYCLOAK_DB_PASSWORD"],
+                         (b"KEYCLOAK_DB_PASSWORD", 999))
+
     @unittest.skipUnless(os.name == "posix" and os.geteuid() == 0 and os.environ.get("PINVOU_TEST_DEPENDENCY_BIN_DIRECTORY"), "explicit isolated root Linux fixture")
     def test_fixed_projection_and_failures(self):
         bins = Path(os.environ["PINVOU_TEST_DEPENDENCY_BIN_DIRECTORY"])
@@ -80,7 +95,7 @@ class ProjectionTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(), digest)
             self.assertEqual((output / "READY").read_text(), "DEPENDENCY_PROJECTION_READY_V1\n" + digest + "\n")
             expected_files = {f"{s}/tls/server.{x}" for s in ("postgres", "redis", "newapi-redis", "nats") for x in ("crt", "key")}
-            db_names = {"ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD"}
+            db_names = {"ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD"}
             expected_files |= {"postgres/bootstrap/" + n for n in db_names} | {"postgres/admin/password", "postgres/trust/ca.crt", "trust/ca.crt", "nats/authorization/authorization.conf", "redis/authorization/users.acl", "newapi-redis/authorization/users.acl"}
             self.assertEqual(set(manifest["files"]), expected_files)
             for name, metadata in manifest["files"].items():

@@ -404,7 +404,7 @@ func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Conte
 	if _, err := connection.Exec(ctx, `SET search_path TO `+identifier); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := loadAccountIntegrationMigrations(t, ctx, connection, schema)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -428,6 +428,89 @@ func newTokenOwnerCandidateIntegrationRepository(t *testing.T, ctx context.Conte
 	t.Cleanup(pool.Close)
 	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }}
 	return repository, connection, loaded
+}
+
+// loadAccountIntegrationMigrations keeps legacy random-schema fixtures isolated
+// without making the product control schema configurable. Migration 50 is still
+// executed; only its fixed schema name is mechanically replaced by a unique,
+// otherwise-unused fixture schema. The exact occurrence counts make production
+// SQL drift fail this adapter rather than silently producing a partial rewrite.
+func loadAccountIntegrationMigrations(t *testing.T, ctx context.Context, connection *pgx.Conn, fixtureSchema string) ([]migrations.Migration, error) {
+	t.Helper()
+	loaded, err := migrations.Load("../../migrations/account")
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256([]byte(fixtureSchema))
+	controlSchema := "account_control_" + hex.EncodeToString(digest[:8])
+	controlIdentifier := pgx.Identifier{controlSchema}.Sanitize()
+	fixtureIdentifier := pgx.Identifier{fixtureSchema}.Sanitize()
+	replaceExact := func(sql, old, replacement string, expected int) (string, error) {
+		if count := strings.Count(sql, old); count != expected {
+			return "", fmt.Errorf("migration 50 fixture adapter expected %d occurrences of %q, got %d", expected, old, count)
+		}
+		return strings.ReplaceAll(sql, old, replacement), nil
+	}
+	controlMigration := -1
+	for index := range loaded {
+		if loaded[index].Version != 50 {
+			continue
+		}
+		controlMigration = index
+		up := loaded[index].UpSQL
+		for _, replacement := range []struct {
+			old, value string
+			count      int
+		}{
+			{"account_approval_control.", controlIdentifier + ".", 19},
+			{"nspname='account_approval_control'", "nspname='" + controlSchema + "'", 1},
+			{"CREATE SCHEMA account_approval_control AUTHORIZATION", "CREATE SCHEMA " + controlIdentifier + " AUTHORIZATION", 1},
+			{"ON SCHEMA account_approval_control", "ON SCHEMA " + controlIdentifier, 2},
+		} {
+			up, err = replaceExact(up, replacement.old, replacement.value, replacement.count)
+			if err != nil {
+				return nil, err
+			}
+		}
+		down := loaded[index].DownSQL
+		for _, replacement := range []struct {
+			old, value string
+			count      int
+		}{
+			{"account_approval_control.", controlIdentifier + ".", 6},
+			{"DROP SCHEMA IF EXISTS account_approval_control", "DROP SCHEMA IF EXISTS " + controlIdentifier, 1},
+		} {
+			down, err = replaceExact(down, replacement.old, replacement.value, replacement.count)
+			if err != nil {
+				return nil, err
+			}
+		}
+		loaded[index].UpSQL = up + "\nRESET ROLE; SET search_path TO " + fixtureIdentifier + ";"
+		loaded[index].DownSQL = down + "\nRESET ROLE; SET search_path TO " + fixtureIdentifier + ";"
+		normalized := strings.ReplaceAll(strings.ReplaceAll(loaded[index].UpSQL, "\r\n", "\n"), "\r", "\n")
+		checksum := sha256.Sum256([]byte(normalized))
+		loaded[index].Checksum = hex.EncodeToString(checksum[:])
+	}
+	if controlMigration < 0 {
+		return nil, errors.New("migration 50 is missing from account fixture")
+	}
+	// Do not mutate database privileges until every exact rewrite has succeeded.
+	var database string
+	if err := connection.QueryRow(ctx, `SELECT current_database()`).Scan(&database); err != nil {
+		return nil, err
+	}
+	databaseIdentifier := pgx.Identifier{database}.Sanitize()
+	if _, err := connection.Exec(ctx, `GRANT CREATE ON DATABASE `+databaseIdentifier+` TO account_migrator`); err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, cleanupErr := connection.Exec(cleanupCtx, `RESET ROLE; REVOKE CREATE ON DATABASE `+databaseIdentifier+` FROM account_migrator; DROP SCHEMA IF EXISTS `+controlIdentifier+` CASCADE; SET search_path TO `+fixtureIdentifier); cleanupErr != nil {
+			t.Errorf("clean account control fixture privileges and schema: %v", cleanupErr)
+		}
+	})
+	return loaded, nil
 }
 
 func seedTokenOwnerCandidateActor(t *testing.T, ctx context.Context, pool *pgxpool.Pool, role, suffix string) integrationActor {

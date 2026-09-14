@@ -1,13 +1,15 @@
 # 治理与安全整改实施任务
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED（待独立提交），其余PENDING，均NOT_DEPLOYED。
+> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED并以`0dd3d481`提交；GSA-04代码已完成且B代码审核通过、环境验收待补，其余PENDING，均NOT_DEPLOYED。
 
 ## 1. 所有权与执行规则
 
 需求合同唯一引用 [整改设计](admin-governance-security-redesign.md)，不在任务表重新定义协议。主目标唯一归属：APT-141 拥有 ADM-67，APT-142 拥有 UI-60，APT-143 拥有 NFR-57。以下 GSA 编号是可独立审核、测试、提交的执行子任务；主任务作为汇总，不能以一个大提交替代子任务交付。
 
 逐项执行：A 实现及自检 → B 独立审核 → A 修正 → B PASS → Signed-off 独立提交 → 更新证据 → 下一项。B 未通过不得进入下一执行子任务。每次提交只能交付一个 GSA 子任务；设计子任务同样必须审核并独立提交。需求取舍、未经确认的财务规则和互斥方案提交用户决定。
+
+2026-09-15 用户明确授权“跳过pending继续”：仅对当前 GSA-04 的环境验收等待作执行顺序例外。其代码审核及本机完整验证通过后可独立提交，仍保持 CODE_COMPLETE / B_CODE_REVIEW_PASS / IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED，不标记最终 APPROVED 或 DONE；允许继续仅依赖已完成 GSA-02 的 GSA-05，并维持逐任务 A/B 审核。此授权不豁免代码缺陷、技术依赖或生产发布门禁，GSA-04 的三项隔离 Linux 验收须持续追踪并在生产启用前完成。GSA-06/10/13 等依赖 GSA-04 的任务不因此视为依赖已满足；未补齐前不得执行生产部署、activation、cutover 或将 control 宣称为已完成验收的能力。
 
 每项必须记录实际文件、测试命令/结果、B 结论、提交、已知差距。代码任务 DONE 要求真实行为测试及适用数据库集成测试通过，不能用 SKIP 或静态字符串断言代替；有代码完成但缺环境证据时保持 IN_PROGRESS 并记录 CODE_COMPLETE/ENV_PENDING，不关闭主目标。所有产品代码提交执行 `node scripts/account-platform.mjs verify` 和任务定向门禁；文档步骤执行任务覆盖与文档基线检查。只在改动或新失败需要时重跑已经通过的检查。
 
@@ -22,7 +24,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-01 | APT-141 | policy-only 推进门禁与停用后的撤回/拒绝 | APT-008, APT-138 | CODE | DONE |
 | GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | DONE |
 | GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | DONE |
-| GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | PENDING |
+| GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | IN_PROGRESS |
 | GSA-05 | APT-141 | typed closed RFC8785 编码与 legacy 编码适配 | GSA-02 | CODE | PENDING |
 | GSA-06 | APT-141 | 授权 Outbox epoch/sidecar 前向迁移及旧 writer 兼容 | GSA-04, GSA-05 | CODE | PENDING |
 | GSA-07 | APT-141 | fence-aware Relay 与授权事件永久禁止人工 replay | GSA-06 | CODE | PENDING |
@@ -157,4 +159,17 @@ GSA-03：以 Billing 为三类既有及八类 policy-only 命令建立唯一持�
 - 实际数据库验证：在Account、Token、Billing三个隔离数据库上运行的五组具名PG17用例均PASS/no-SKIP。Billing activation migration/runtime用例1.99s（package 2.739s），覆盖非superuser迁移、初始11行历史、状态修订、事务回滚无孤儿、运行时最小权限、重入与down历史保护；Account Billing集成边界用例1.57s（package 2.491s），使用真实Billing handler/HTTP client与真实Account PG repository，但Billing repository为受控stub，覆盖Wallet activation状态、撤权/版本/schema顺序、零副作用和历史安全读取，不冒称双库领域E2E或三Billing命令真实领域验收。既有三组回归为Advancement 2.14s、SnapshotLifecycle 11.34s、TokenConsumers 88.02s（生命周期40.59s/目录26.57s/凭据20.85s，package 102.570s），均未跳过。
 - 合同与部署验证：AJV 2020-12真实编译并拒绝部分、额外、重复、乱序、错p/s、policy-only ACTIVE、未知命令和额外字段；授权覆盖计数及新路由精确权限测试通过。Compose和Helm模板静态解析证明仅Account获得新权限且原权限集合保留；本机没有Helm CLI，因此这项是模板解析证据，不冒称实际`helm template`渲染或部署证据。迁移manifest当前278文件校验通过，OpenAPI lint通过且仅保留9项既有warning。
 - 审核迭代：B要求并由A补齐不可变revision history/current TRUNCATE封锁、store/handler共享服务端validator、真实workload allow/deny、Submit鉴权顺序、三Billing及八policy-only矩阵、发布/回滚顺序和OAS固定位置schema。首次完整verify只因新增路由后旧授权总数仍断言342而失败（其余550 PASS/2既有环境SKIP）；断言已按实际343更新并增加精确分类回归，未放宽授权checker。第二轮完整`node scripts/account-platform.mjs verify`最终exit0：Node 555项中553 PASS/0 FAIL/2项既有环境SKIP，Go test/vet、OpenAPI（9项既有warning）、i18n、observability、architecture、manifest 278、授权路由343及文档/任务门禁全部通过。B最终复审确认产品代码、迁移、接线与测试APPROVED，无阻断或重要问题。
-- 状态：DONE / B审核APPROVED / NOT_DEPLOYED（待独立Signed-off提交）。APT-141继续IN_PROGRESS，ADM-67保持部分实现，其余GSA任务仍为PENDING；发布固定为Billing迁移→Billing服务→Account，回滚反序且保留`000054`事实。未交付proof、Account control、consumer改造、八类执行能力或任何生产activation。
+- 状态：DONE / B审核APPROVED / NOT_DEPLOYED；Signed-off提交`0dd3d481`。APT-141继续IN_PROGRESS，ADM-67保持部分实现，其余GSA任务仍为PENDING；发布固定为Billing迁移→Billing服务→Account，回滚反序且保留`000054`事实。未交付proof、Account control、consumer改造、八类执行能力或任何生产activation。
+
+GSA-04：实现尚未接线的唯一 `ADMIN_APPROVAL` control 持久模型、双 epoch 与窄事务锁接口；状态为 CODE_COMPLETE / B_CODE_REVIEW_PASS / IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED，尚未通过最终环境验收。
+
+- 最新审核收口：B 已复审凭据生成与显式九项数据库秘密映射修复，确认 Account migration 与 Keycloak 均被投递；开发环境示例、Compose/Helm 说明及精确十项 getenv 合同已补齐，暂无新增代码阻断。尚未获得最终 APPROVED；依用户 2026-09-15 顺序例外允许继续 GSA-05，但不提交为 DONE。
+- 环境欠账（均未执行）：隔离 Linux 上的实际 age 密码生成/恢复测试、实际 root-owned 凭据投影测试，以及 `python3 scripts/account-platform-postgres-fixture.py --run` 生产初始化链测试（含新增迁移身份 TLS/HBA 登录与 runtime 无法切换 owner/migrator）。三项均保持 ENV_PENDING，不由静态合同、手工 PG 迁移或用户顺序调整替代。
+- 前两项命令分别为 `python3 -m unittest scripts.tests.test_dependency_passwords.PasswordTests.test_actual_encrypted_first_and_recovery` 和 `python3 -m unittest scripts.tests.test_dependency_projection.ProjectionTests.test_fixed_projection_and_failures`；必须按测试要求配置隔离 Linux 工具目录 `PINVOU_TEST_DEPENDENCY_BIN_DIRECTORY`，后者使用隔离 root 环境，运行结果不得 SKIP。
+- 最终本机完整验证：root 与 B 分别运行完整 `node scripts/account-platform.mjs verify`，均 exit 0；Node 555 项为 553 PASS / 0 FAIL / 2 既有 SKIP，Go/vet/OpenAPI（9 既有 warning）/三语/observability/architecture/manifest280/auth343/任务与文档门禁通过。此处 Node 既有跳过项与 Python 4 PASS / 2 适用 Linux-only SKIP 是不同证据，不能混同。
+- 本机证据：六组真实 PostgreSQL 用例联合 PASS/no-SKIP（package 79.568s），覆盖新控制状态/权限/锁竞争/迁移失败，以及既有 Advancement、SnapshotLifecycle、Billing activation Account 边界和 Token consumers。凭据 Python 用例 4 PASS/2 Linux-only SKIP；生产 PostgreSQL 合同修正旧计数后 4/4 PASS。完整 verify 前次为 552 PASS/1 FAIL/2 SKIP，唯一合同失败为旧凭据数量断言；修复后的最终完整复跑结果见上。
+
+- 当前候选：Account `000050` 仅初始化 `LEGACY/wire1/proof=false/RUNNING/approval_epoch1/relay_epoch1/version1`，数据库约束及守卫冻结四种mode元组、Relay正交状态、合法边、各自epoch/version递增、DB时间、singleton、no-op/跨组/删除/截断拒绝。Go包只提供caller-owned `pgx.Tx` 的普通读、固定SECURITY DEFINER共享锁和owner/migrator直接排他锁，以及8行typed动作分类；没有Transition/CAS写API，也未连接create/update/submit/APPROVE/Begin/Relay/consumer/recovery。
+- 角色边界：受保护对象位于 `account_approval_control` 独立schema并由 `account_approval_control_owner NOLOGIN NOINHERIT` 持有；`account_migrator LOGIN NOINHERIT` 使用独立凭据并显式assume既有`account_service`及新owner角色。三角色高权属性必须全部关闭，runtime不属于owner/migrator且仅有表SELECT、schema USAGE与固定共享锁函数EXECUTE。现有`account_service`仍保留Account数据库owner的既有DoS边界；全Account角色收敛留待proof启用前的后续安全任务，不在本批扩大迁移范围。
+- 迁移前置：fresh install创建新角色及独立迁移凭据；既有集群由DBA在受控窗口验证角色后，仅向`account_migrator`临时授予目标数据库CREATE。迁移成功时创建独立schema后立即撤销；迁移事务失败会回滚schema/ledger并恢复外部前置CREATE，失败runbook必须先撤销该临时授权再调查。随机schema旧fixture只机械改写`000050`的固定schema到唯一测试schema且精确检查命中次数；产品SQL保持固定schema，不接受测试注入。
+- 尚未完成/不得宣称：身份B已通过代码审核，本机完整回归通过，三项隔离Linux环境验收仍待补；未交付capability API、proof、v2、Outbox sidecar、Relay/consumer接线、cutover/readiness、生产角色变更或activation。GSA-05仅按上述用户例外继续，其余技术依赖与验收标准不变。

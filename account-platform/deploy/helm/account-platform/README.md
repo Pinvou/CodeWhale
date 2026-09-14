@@ -61,8 +61,15 @@ Token Account provisioning additionally requires separate secret keys
 `account-migration-database-url`, `billing-migration-database-url`,
 `token-migration-database-url`, and `token-policy-database-url`. The latter uses
 the policy operator login; migration URLs use the domain migrator login, never
-the runtime login. Provision the owner roles and migrator membership before the
-Jobs run. Policy bootstrap also requires `token-policy-max-per-owner`,
+the runtime login. In particular, `account-migration-database-url` must identify
+`account_migrator`, while the Account Job keeps `MIGRATION_ROLE=account_service`
+and must never receive the `account_service` runtime credential. Provision
+`account_approval_control_owner NOLOGIN NOINHERIT`, the low-privilege
+`account_migrator LOGIN NOINHERIT`, their reviewed membership, and the temporary
+Account-database `CREATE` grant before the Job runs; migration `000050` revokes
+that database grant after creating the protected schema. Existing volumes need
+this DBA preparation explicitly because changing a Secret or bootstrap script
+does not alter existing roles. Policy bootstrap also requires `token-policy-max-per-owner`,
 `token-policy-expected-version`, `token-policy-idempotency-key`, and
 `token-policy-reason`; production has no implicit capacity default.
 Each deployment login must have an independent credential, different from all

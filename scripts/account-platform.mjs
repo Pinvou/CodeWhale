@@ -61,6 +61,7 @@ function generatedComposeEnvironment() {
     ACCOUNT_DB_PASSWORD: secret(),
     BILLING_DB_PASSWORD: secret(),
     TOKEN_DB_PASSWORD: secret(),
+    ACCOUNT_MIGRATION_DB_PASSWORD: secret(),
     BILLING_MIGRATION_DB_PASSWORD: secret(),
     TOKEN_MIGRATION_DB_PASSWORD: secret(),
     TOKEN_POLICY_DB_PASSWORD: secret(),

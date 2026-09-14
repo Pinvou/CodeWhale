@@ -5,7 +5,7 @@ import { isDeepStrictEqual as equal } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { parseReleaseJSON } from './account-platform-model-token-release-plan.mjs';
-const roles = { account: ['account_service', 'account_service'], billing: ['billing_migrator', 'billing_service'], token: ['token_migrator', 'token_gateway'] };
+const roles = { account: ['account_migrator', 'account_service'], billing: ['billing_migrator', 'billing_service'], token: ['token_migrator', 'token_gateway'] };
 const keys = (a, b) => equal(Object.keys(a || {}).sort(), Object.keys(b || {}).sort());
 function check(ok, code) { if (!ok) throw new Error(`business_migrations_${code}`); }
 function directory(value) {

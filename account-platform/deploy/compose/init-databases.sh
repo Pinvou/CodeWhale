@@ -9,13 +9,19 @@ psql -X --set=ON_ERROR_STOP=1 \
 \getenv account_password ACCOUNT_DB_PASSWORD
 \getenv billing_password BILLING_DB_PASSWORD
 \getenv token_password TOKEN_DB_PASSWORD
+\getenv account_migration_password ACCOUNT_MIGRATION_DB_PASSWORD
 \getenv billing_migration_password BILLING_MIGRATION_DB_PASSWORD
 \getenv token_migration_password TOKEN_MIGRATION_DB_PASSWORD
 \getenv token_policy_password TOKEN_POLICY_DB_PASSWORD
 \getenv newapi_password NEWAPI_DB_PASSWORD
 \getenv keycloak_password KEYCLOAK_DB_PASSWORD
-SELECT format('CREATE ROLE account_service LOGIN PASSWORD %L', :'account_password')
+SELECT format('CREATE ROLE account_service LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_service') \gexec
+SELECT 'CREATE ROLE account_approval_control_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_control_owner') \gexec
+SELECT format('CREATE ROLE account_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_migration_password')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_migrator') \gexec
+GRANT account_service, account_approval_control_owner TO account_migrator;
 SELECT format('CREATE ROLE billing_service LOGIN PASSWORD %L', :'billing_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing_service') \gexec
 SELECT format('CREATE ROLE token_gateway LOGIN PASSWORD %L', :'token_password')
@@ -51,6 +57,8 @@ SELECT 'CREATE DATABASE account_platform_newapi OWNER new_api'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'account_platform_newapi') \gexec
 SELECT 'CREATE DATABASE account_platform_keycloak OWNER keycloak'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'account_platform_keycloak') \gexec
+\connect account_platform_account
+GRANT CREATE ON DATABASE account_platform_account TO account_migrator;
 \connect account_platform_billing
 ALTER SCHEMA public OWNER TO billing_schema_owner;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;

@@ -53,7 +53,7 @@ func TestApprovalSnapshotLifecyclePostgresIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
-	repository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL)
+	repository, _, accountMigrations := newTokenOwnerCandidateIntegrationRepository(t, ctx, databaseURL)
 	repository.WithBillingGovernanceActivation(&billingAdvancementReader{snapshot: billingAdvancementSnapshot("ACTIVE")})
 	repository.tokenApprovalCreateGate = func(commandType string) bool {
 		return commandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || commandType == "TOKEN_CREDENTIAL_REVOKE"
@@ -456,10 +456,10 @@ INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertex
 	if credentialSubmit.Code != http.StatusOK || json.Unmarshal(credentialSubmit.Body.Bytes(), &credentialSubmitted) != nil || credentialSubmitted.Status != "SUBMITTED" || !sameJSONObject(credentialSubmitted.CriticalResourceVersions, credentialApproval.CriticalResourceVersions) || string(credentialSubmitted.FinancialSnapshot) != "{}" {
 		t.Fatalf("credential approval submit status=%d body=%s", credentialSubmit.Code, credentialSubmit.Body.String())
 	}
-	assertTokenApprovalDraftInvalidationGuard(t, ctx, repository, seeded.ID)
+	assertTokenApprovalDraftInvalidationGuard(t, ctx, repository, seeded.ID, accountMigrations)
 }
 
-func assertTokenApprovalDraftInvalidationGuard(t *testing.T, ctx context.Context, repository *PostgresRepository, exampleID uuid.UUID) {
+func assertTokenApprovalDraftInvalidationGuard(t *testing.T, ctx context.Context, repository *PostgresRepository, exampleID uuid.UUID, accountMigrations []migrations.Migration) {
 	t.Helper()
 	tx, err := repository.pool.Begin(ctx)
 	if err != nil {
@@ -510,12 +510,8 @@ func assertTokenApprovalDraftInvalidationGuard(t *testing.T, ctx context.Context
 	if err := tx.QueryRow(ctx, history).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := migrations.Load("../../migrations/account")
-	if err != nil {
-		t.Fatal(err)
-	}
 	found := false
-	for _, migration := range loaded {
+	for _, migration := range accountMigrations {
 		if migration.Version == 47 {
 			found = true
 			if _, err := tx.Exec(ctx, migration.DownSQL); err != nil {

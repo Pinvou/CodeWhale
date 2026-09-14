@@ -94,6 +94,11 @@ test('production bootstrap fails closed on incomplete data and keeps password ar
   assert.match(init, /sync "\$PGDATA\/\.pinvou-bootstrap-complete"/);
   assert.match(read('deploy/production/postgres-health.sh'), /db_ready[\s\S]*SELECT 1[\s\S]*db_utf8 account_platform_admin/);
   const shared = read('deploy/compose/init-databases.sh');
-  assert.equal((shared.match(/\\getenv /g) || []).length, 9);
+  assert.deepEqual([...shared.matchAll(/\\getenv\s+\w+\s+(\w+)/g)].map(match => match[1]).sort(), [
+    'ACCOUNT_DB_PASSWORD', 'BILLING_DB_PASSWORD', 'TOKEN_DB_PASSWORD',
+    'ACCOUNT_MIGRATION_DB_PASSWORD', 'BILLING_MIGRATION_DB_PASSWORD',
+    'TOKEN_MIGRATION_DB_PASSWORD', 'TOKEN_POLICY_DB_PASSWORD',
+    'NEWAPI_DB_PASSWORD', 'KEYCLOAK_DB_PASSWORD', 'PAYMENT_SIM_DB_PASSWORD',
+  ].sort());
   assert.doesNotMatch(shared, /--set=\w*password=/);
 });

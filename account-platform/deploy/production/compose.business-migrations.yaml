@@ -34,7 +34,7 @@ services:
     command: ["--dir", "/migrations/account", "--direction", "up"]
     environment:
       <<: *environment
-      DATABASE_URL: postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt
+      DATABASE_URL: postgresql://account_migrator@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt
       MIGRATION_ROLE: account_service
     volumes:
       - type: bind

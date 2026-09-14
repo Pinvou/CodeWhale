@@ -18,6 +18,12 @@ def module(name, file):
 
 CHECK = module("dependency_bundle_check", "account-platform-dependency-bundle-check.py")
 PASSWORD = module("dependency_passwords", "account-platform-dependency-passwords.py")
+POSTGRES_BOOTSTRAP_PASSWORD_NAMES = (
+    "ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
+    "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD",
+    "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
+    "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD",
+)
 TEMPLATES = {"redis-accounts.acl.template": "93cb3172373f7e6fd9be2f226540125c030b98109b213069489b31cf01616ff2",
              "redis-newapi.acl.template": "289a73ac98038bc0c3ecaefe6a0fb629f700db86da60c258c8ca3f739b98cc2f"}
 
@@ -58,6 +64,12 @@ def write_file(path, body, uid):
     PASSWORD.sync_directory(path.parent)
 
 
+def postgres_bootstrap_files(passwords):
+    require(set(POSTGRES_BOOTSTRAP_PASSWORD_NAMES) < set(passwords))
+    return {"postgres/bootstrap/" + name: (passwords[name], 999)
+            for name in POSTGRES_BOOTSTRAP_PASSWORD_NAMES}
+
+
 def project(config_file):
     require(os.name == "posix" and os.geteuid() == 0)
     config = json.loads(CHECK.read(config_file), object_pairs_hook=CHECK.closed_object)
@@ -82,7 +94,7 @@ def project(config_file):
     snapshot(source / "nats", config["nats_manifest_sha256"])
     passwords = snapshot(source / "passwords", config["password_manifest_sha256"])
     require(all(re.fullmatch(rb"[0-9a-f]{64}", passwords[name]) for name in PASSWORD.NAMES)
-            and len({passwords[name] for name in PASSWORD.NAMES}) == 12)
+            and len({passwords[name] for name in PASSWORD.NAMES}) == len(PASSWORD.NAMES))
     nats_acl = CHECK.read(source / "nats-authorization.conf")
     require(CHECK.sha(nats_acl) == config["nats_acl_sha256"])
     template = {}
@@ -104,8 +116,7 @@ def project(config_file):
             files[f"{service}/tls/server.{suffix}"] = (pki[f"{service}/server.{suffix}"], uid)
     directories.update({"postgres/admin": 999, "postgres/bootstrap": 999, "postgres/trust": 999, "trust": 65532})
     files["postgres/admin/password"] = (passwords["POSTGRES_ADMIN_PASSWORD"], 999)
-    for name in PASSWORD.NAMES[1:9]:
-        files["postgres/bootstrap/" + name] = (passwords[name], 999)
+    files.update(postgres_bootstrap_files(passwords))
     for service, acl in (("redis", accounts_acl), ("newapi-redis", newapi_acl), ("nats", nats_acl)):
         directories[service + "/authorization"] = 65532
         files[service + "/authorization/" + ("authorization.conf" if service == "nats" else "users.acl")] = (acl, 65532)

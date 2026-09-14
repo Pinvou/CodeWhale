@@ -1,5 +1,14 @@
 # 全新业务库迁移窗口
 
+> GSA-04 兼容增量（尚未部署）：后续含 Account `000050` 的迁移窗口必须使用
+> `account_migrator LOGIN NOINHERIT` 登录并保持 `MIGRATION_ROLE=account_service`；
+> 该身份是 `account_service` 与 `account_approval_control_owner NOLOGIN NOINHERIT` 的成员，
+> 但不具有 SUPERUSER/CREATEDB/CREATEROLE/REPLICATION/BYPASSRLS。DBA 只在窗口前临时
+> 授予目标 Account 数据库 `CREATE`，成功迁移会撤销；失败事务会恢复外部前置授权，
+> 因此失败 runbook 必须先显式撤销该授权再调查。下文 C4C1a/C4C1b 的
+> `account_service` 登录和实测数字是 2026-09-09 已执行窗口的历史证据，不得回写成
+> 本次尚未部署的结果。
+
 状态：C4C1a 模板已交付；C4C1b 正式三库迁移、前后备份及独立现场验收已完成。
 承接 `production-business-cutover.md`，不启动长期业务、不切换公网。
 保留既有正式 PostgreSQL、Keycloak、KMS、身份与备份；不触碰旧测试环境、其他团队服务或恢复材料。

@@ -35,6 +35,7 @@ services:
       PAYMENT_SIM_DB_PASSWORD: ${PAYMENT_SIM_DB_PASSWORD:?set PAYMENT_SIM_DB_PASSWORD}
       NEWAPI_DB_PASSWORD: ${NEWAPI_DB_PASSWORD:?set NEWAPI_DB_PASSWORD}
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
+      ACCOUNT_MIGRATION_DB_PASSWORD: ${ACCOUNT_MIGRATION_DB_PASSWORD:?set ACCOUNT_MIGRATION_DB_PASSWORD}
       BILLING_MIGRATION_DB_PASSWORD: ${BILLING_MIGRATION_DB_PASSWORD:?set BILLING_MIGRATION_DB_PASSWORD}
       TOKEN_MIGRATION_DB_PASSWORD: ${TOKEN_MIGRATION_DB_PASSWORD:?set TOKEN_MIGRATION_DB_PASSWORD}
       TOKEN_POLICY_DB_PASSWORD: ${TOKEN_POLICY_DB_PASSWORD:?set TOKEN_POLICY_DB_PASSWORD}
@@ -528,8 +529,11 @@ services:
         SERVICE: migrate
     command: ["--dir", "/migrations/account"]
     environment:
-      DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
+      DATABASE_URL: postgresql://account_migrator:${ACCOUNT_MIGRATION_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
+      MIGRATION_ROLE: account_service
     depends_on:
+      deployment-credentials-check:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
 

@@ -101,7 +101,7 @@ def main():
             os.chown(path, uid, 0 if uid == 1000 else uid)
         issuer = root / "issuer"
         keys = ("ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
-                "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
+                "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
                 "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD")
         passwords = {key: secrets.token_hex(32) for key in keys}
         pg_admin, admin = secrets.token_hex(32), secrets.token_hex(32)

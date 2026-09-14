@@ -1,4 +1,4 @@
-"""Prepare the fixed twelve first-install secrets; never modifies running services."""
+"""Prepare the fixed thirteen first-install secrets; never modifies running services."""
 import argparse
 import hashlib
 import json
@@ -9,7 +9,7 @@ import secrets
 import stat
 import subprocess
 
-NAMES = ("POSTGRES_ADMIN_PASSWORD", "ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
+NAMES = ("POSTGRES_ADMIN_PASSWORD", "ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD",
          "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
          "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD", "PORTAL_REDIS_PASSWORD", "IDENTITY_REDIS_PASSWORD", "NEWAPI_REDIS_PASSWORD")
 PURPOSE = "pinvou-production-dependency-passwords"
@@ -73,6 +73,12 @@ def write_new(path, data):
     sync_directory(path.parent)
 
 
+def generate_password_values():
+    values = {name: secrets.token_hex(32) for name in NAMES}
+    require(len(values) == len(NAMES) and len(set(values.values())) == len(NAMES))
+    return values
+
+
 def prepare(config_file):
     require(os.name == "posix")
     config = json.loads(read_file(config_file, 8192, private=True), object_pairs_hook=closed_object)
@@ -90,8 +96,7 @@ def prepare(config_file):
     directory.mkdir(mode=0o700)
     sync_directory(directory.parent)
     private_directory(directory)
-    values = {name: secrets.token_hex(32) for name in NAMES}
-    require(len(set(values.values())) == len(NAMES))
+    values = generate_password_values()
     envelope = {"version": 1, "purpose": PURPOSE, "recipient_sha256": config["recipient_sha256"], "passwords": values}
     plain = json.dumps(envelope, sort_keys=True).encode()
     # The recipient is public and fingerprint checked. Passing this verified value

@@ -15,16 +15,17 @@ import tempfile
 import time
 
 IMAGE = "m.daocloud.io/docker.io/library/postgres@sha256:7bade6d532592ca8ce7ee32def7399dad2607c4ea5583839fc4352a095a11ea6"
-KEYS = ("ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
+KEYS = ("ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD",
         "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD",
         "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD")
 LOGINS = (("account_service", "account", KEYS[0]),
           ("billing_service", "billing", KEYS[1]),
           ("token_gateway", "token", KEYS[2]),
-          ("billing_migrator", "billing", KEYS[3]),
-          ("token_migrator", "token", KEYS[4]),
-          ("token_policy_operator", "token", KEYS[5]),
-          ("new_api", "newapi", KEYS[6]), ("keycloak", "keycloak", KEYS[7]))
+          ("account_migrator", "account", KEYS[3]),
+          ("billing_migrator", "billing", KEYS[4]),
+          ("token_migrator", "token", KEYS[5]),
+          ("token_policy_operator", "token", KEYS[6]),
+          ("new_api", "newapi", KEYS[7]), ("keycloak", "keycloak", KEYS[8]))
 
 
 def require(ok, code):
@@ -196,7 +197,7 @@ def main():
             for role, db, key in LOGINS:
                 result = client(role, db, passwords[key])
                 require(result.returncode == 0 and result.stdout.strip() == "1", "TLS_LOGIN_FAILED_" + role)
-            require(local_sql("SELECT count(*) FROM pg_authid WHERE rolcanlogin AND rolpassword LIKE 'SCRAM-SHA-256$%';") == "9", "SCRAM_COUNT")
+            require(local_sql("SELECT count(*) FROM pg_authid WHERE rolcanlogin AND rolpassword LIKE 'SCRAM-SHA-256$%';") == "10", "SCRAM_COUNT")
             require(local_sql("SELECT count(*) FROM pg_roles WHERE rolname='payment_simulator';") == "0", "SIMULATOR_PRESENT")
             require(local_sql("SELECT count(*) FROM pg_hba_file_rules WHERE error IS NOT NULL;") == "0", "HBA_PARSE_ERROR")
             require(client("account_service", "account", passwords[KEYS[0]], "SELECT ssl FROM pg_stat_ssl WHERE pid=pg_backend_pid();").stdout.strip() == "t", "TLS_NOT_USED")
@@ -212,6 +213,10 @@ def main():
                      "permission denied to set role", "BILLING_ESCALATION", status=3)
             rejected(client("token_gateway", "token", passwords[KEYS[2]], "SET ROLE token_schema_owner;"),
                      "permission denied to set role", "TOKEN_ESCALATION", status=3)
+            rejected(client("account_service", "account", passwords[KEYS[0]], "SET ROLE account_approval_control_owner;"),
+                     "permission denied to set role", "ACCOUNT_CONTROL_OWNER_ESCALATION", status=3)
+            rejected(client("account_service", "account", passwords[KEYS[0]], "SET ROLE account_migrator;"),
+                     "permission denied to set role", "ACCOUNT_MIGRATOR_ESCALATION", status=3)
             rejected(client("account_service", "account", passwords[KEYS[0]], trust=False),
                      "certificate verify failed", "WRONG_CA")
             ip = next(iter(inspect()["NetworkSettings"]["Networks"].values()))["IPAddress"]
