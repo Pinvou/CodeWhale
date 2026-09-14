@@ -857,6 +857,8 @@ desktopHint:'先にデスクトップで Obsidian をインストールして保
   connectedTool:name=>`${name} に接続しました`, disconnectedTool:name=>`${name} から切断しました`,
   connectedQuoted:name=>`「${name}」に接続しました`, installedQuoted:name=>`「${name}」をインストールしました`, uninstalledQuoted:name=>`「${name}」をアンインストールしました`,
   connectFailed:name=>`${name} の接続に失敗しました`, connectTitle:name=>`${name} に接続`,
+  connectBusy:name=>`${name} は前回のログインを処理中です`,
+  connectBusyHint:'まもなく完了する場合があります。数秒待ってから再度「接続」を押してください。',
   connectedBanner:name=>`${name} に接続済み · 公式スキルが有効です。そのまま指示できます`,
   connectedBannerIma:'Tencent ima に接続済み · OpenAPI Skill が有効です。そのまま指示できます',
   uploadedSkill:'ユーザーがアップロードしたスキル',
@@ -1772,7 +1774,9 @@ dictJa["uiToolStore"]["sso"] = {
   "qrAlt": name=>`${name} ログイン QR コード`,
   "generating": "QR コードを生成中…",
   "openBrowser": "ブラウザーでログイン",
-  "waiting": "ログインを待機中…"
+  "waiting": "ログインを待機中…",
+  "throttled": seconds => `SSO ログインがレート制限中です。約 ${seconds} 秒後に QR コードが表示されます…`,
+  "previousFlow": "前回のログイン処理の終了を待っています…"
 };
 dictJa["uiToolStore"]["internalDetailDesc"] = "本人の SSO ID で H3C 社内システムに直接接続します。ブラウザーまたは QR コードでログインでき、キー入力は不要です。データは社内ネットワーク内で処理されます。";
 dictJa["uiToolStore"]["internalUsageHint"] = "社内ネットワーク必須 · 初回接続時はブラウザーまたは QR コードで SSO ログインします。キー入力は不要です";

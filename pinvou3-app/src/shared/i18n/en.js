@@ -857,6 +857,8 @@ desktopHint:'Install Obsidian on the desktop and create a vault first, then chec
   connectedTool:name=>`${name} connected`, disconnectedTool:name=>`${name} disconnected`,
   connectedQuoted:name=>`${name} connected`, installedQuoted:name=>`${name} installed`, uninstalledQuoted:name=>`${name} uninstalled`,
   connectFailed:name=>`${name} connection failed`, connectTitle:name=>`Connect ${name}`,
+  connectBusy:name=>`${name} is still finishing the previous sign-in`,
+  connectBusyHint:'It may complete on its own. Wait a few seconds, then press Connect again.',
   connectedBanner:name=>`${name} connected · official skill enabled; you can give it instructions right away`,
   connectedBannerIma:'Tencent ima connected · OpenAPI Skill enabled; you can give it instructions right away',
   uploadedSkill:'User-uploaded skill',
@@ -1772,7 +1774,9 @@ dictEn["uiToolStore"]["sso"] = {
   "qrAlt": name=>`${name} sign-in QR code`,
   "generating": "Generating QR code…",
   "openBrowser": "Open sign-in in browser",
-  "waiting": "Waiting for sign-in…"
+  "waiting": "Waiting for sign-in…",
+  "throttled": seconds => `SSO sign-in is rate-limited. The QR code appears in about ${seconds}s…`,
+  "previousFlow": "Waiting for the previous sign-in to finish…"
 };
 dictEn["uiToolStore"]["internalDetailDesc"] = "Connect directly to H3C internal systems with your SSO identity. Sign in in the browser or by QR code; no key is required, and data stays on the corporate intranet.";
 dictEn["uiToolStore"]["internalUsageHint"] = "Corporate intranet required · On first connection, complete SSO in the browser or by QR code; no key required";
