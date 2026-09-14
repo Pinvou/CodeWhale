@@ -178,7 +178,7 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	// APT-138 owns activation. Existing same-request replays above remain
 	// readable, while a new executable Token approval fails closed only after
 	// policy, actor and strong authorization have been established.
-	if err := r.requireTokenApprovalActive(ctx, policy.CommandType); err != nil {
+	if err := r.requireApprovalAdvancement(ctx, policy.CommandType); err != nil {
 		return ApprovalRequest{}, err
 	}
 	if draft.SupersedesRequestID != nil {
@@ -255,7 +255,7 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	if _, _, _, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.RequesterPermission); err != nil {
 		return ApprovalRequest{}, err
 	}
-	if err := r.requireTokenApprovalActive(ctx, policy.CommandType); err != nil {
+	if err := r.requireApprovalAdvancement(ctx, policy.CommandType); err != nil {
 		return ApprovalRequest{}, err
 	}
 	draft, err = r.authoritativeApprovalDraft(ctx, draft)
@@ -312,7 +312,11 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 	if item.RequesterUserID != *actorID {
 		return ApprovalRequest{}, ErrForbidden
 	}
-	if err := r.requireTokenApprovalActive(ctx, item.CommandType); err != nil {
+	if to == "WITHDRAWN" {
+		if _, _, _, err := strongPlatformAuthorization(ctx, tx, *actorID, item.RequesterPermission); err != nil {
+			return ApprovalRequest{}, err
+		}
+	} else if err := r.requireApprovalAdvancement(ctx, item.CommandType); err != nil {
 		return ApprovalRequest{}, err
 	}
 	if item.Status != from || item.Version != expectedVersion {
@@ -391,9 +395,6 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
-	if err := r.requireTokenApprovalActive(ctx, item.CommandType); err != nil {
-		return ApprovalRequest{}, err
-	}
 	if item.Status != "SUBMITTED" || item.Version != expectedVersion {
 		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
 			if _, _, _, authErr := strongPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission); authErr == nil {
@@ -432,6 +433,11 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 	bindingID, authorizationVersion, validUntil, err := strongPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
 	if err != nil {
 		return ApprovalRequest{}, err
+	}
+	if decision == "APPROVED" {
+		if err := r.requireApprovalAdvancement(ctx, item.CommandType); err != nil {
+			return ApprovalRequest{}, err
+		}
 	}
 	if decision == "APPROVED" && !sameJSONObject(observedVersions, item.CriticalResourceVersions) {
 		return r.invalidateApproval(ctx, tx, item, *actorID, "INVALIDATED", "RESOURCE_VERSION_CHANGED", map[string]any{"observed": jsonOrDefault(observedVersions, `{}`)}, now, ErrApprovalInvalidated)
@@ -500,6 +506,7 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 	}
 	defer rows.Close()
 	items := make([]ApprovalRequest, 0)
+	canAdvance := r.approvalAdvancementProjection(ctx)
 	for rows.Next() {
 		item, err := scanApprovalRequest(rows)
 		if err != nil {
@@ -509,7 +516,7 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 		if err != nil {
 			return nil, err
 		}
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove)
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, canAdvance(item.CommandType))
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -529,7 +536,7 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 		if err != nil {
 			return ApprovalRequest{}, err
 		}
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false)
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false, r.approvalAdvancementProjection(ctx)(item.CommandType))
 		return item, nil
 	}
 	_, canApprove, err := r.approvalCapabilities(ctx, actorID, item)
@@ -539,7 +546,7 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 	if !canApprove {
 		return ApprovalRequest{}, ErrForbidden
 	}
-	item.AllowedActions = approvalAllowedActions(item, actorID, false, true)
+	item.AllowedActions = approvalAllowedActions(item, actorID, false, true, r.approvalAdvancementProjection(ctx)(item.CommandType))
 	return item, nil
 }
 
@@ -562,10 +569,10 @@ func (r *PostgresRepository) approvalCapabilities(ctx context.Context, actorID u
 	return canRequest, canApprove, nil
 }
 
-func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canRequest, canApprove bool) []string {
+func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canRequest, canApprove, canAdvance bool) []string {
 	actions := make([]string, 0, 3)
 	if item.RequesterUserID == actorID && canRequest {
-		if item.Status == "DRAFT" {
+		if item.Status == "DRAFT" && canAdvance && approvalpolicy.Executable(item.CommandType) {
 			actions = append(actions, "EDIT", "SUBMIT")
 		}
 		if item.Status == "SUBMITTED" {
@@ -573,7 +580,10 @@ func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canRequest,
 		}
 	}
 	if canApprove && item.RequesterUserID != actorID && item.Status == "SUBMITTED" {
-		actions = append(actions, "APPROVE", "REJECT")
+		if canAdvance && approvalpolicy.Executable(item.CommandType) {
+			actions = append(actions, "APPROVE")
+		}
+		actions = append(actions, "REJECT")
 	}
 	return actions
 }

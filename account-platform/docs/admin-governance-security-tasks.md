@@ -1,7 +1,7 @@
 # 治理与安全整改实施任务
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分：身份 B 复审 PASS；全部实现任务 PENDING / NOT_DEPLOYED。
+> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS，其余PENDING，均NOT_DEPLOYED。
 
 ## 1. 所有权与执行规则
 
@@ -19,7 +19,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 
 | 子任务 | 主任务 | 独立交付 | 技术依赖 | 类型 | 状态 |
 |---|---|---|---|---|---|
-| GSA-01 | APT-141 | policy-only 推进门禁与停用后的撤回/拒绝 | APT-008, APT-138 | CODE | PENDING |
+| GSA-01 | APT-141 | policy-only 推进门禁与停用后的撤回/拒绝 | APT-008, APT-138 | CODE | DONE |
 | GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | PENDING |
 | GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | PENDING |
 | GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | PENDING |
@@ -130,3 +130,14 @@ APT-141 仅在归属的所有DESIGN与CODE子任务通过并提交后关闭；AP
 - 步骤2：B复审PASS，闭合两域安全收口及DESIGN任务验收分类；任务覆盖检查143主任务/34未完成目标通过，文档基线和diff检查通过。无实现提交。
 
 后续逐项追加：`GSA编号 | A自检 | B轮次与结论 | 测试与skip | 提交 | 已知差距 | 部署状态`。提交哈希可在后续任务的证据记录中补记，禁止伪造自引用commit。
+
+GSA-01：代码候选已补齐静态推进检查、policy-only及未激活Token动作裁剪、两域安全收口，WITHDRAW重验当前request权限，409稳定错误同步OpenAPI。列表每个响应最多读取一次Token activation，读取失败仅关闭推进动作，不阻断历史读取与安全收口。
+
+- A自检：无新增领域执行权限，不修改既有迁移、底座、生产配置或业务执行器；EXECUTING/EXECUTED结果读取保留原executor校验。
+- B审核：首轮指出Token动态动作裁剪、真实PG推进拒绝矩阵及测试撤权列名缺口，均已修复；后续历史fixture的deadline及decision触发器前置也按真实状态链修正。既有fixture的迁移32 schema适配、独立JWKS CA配置均已获B审核PASS；整批最终代码审核APPROVED，无剩余阻断。
+- 实际验证：完整`node scripts/account-platform.mjs verify` exit0；Go test/vet、OpenAPI、三语、observability、architecture通过，Node合同550 PASS/2既有环境SKIP。独立PG17上的`TestApprovalAdvancementPostgresIntegration`实际PASS/no-SKIP，覆盖14命令、PRE/SAFE动作/推进拒绝、安全收口、撤权、并发、零执行授权副作用以及14命令EXECUTING/EXECUTED历史读取。
+- 最终真实PG记录：Account/Token使用独立隔离数据库并补齐既有角色前置，三组具名测试联合运行exit0/no-SKIP：`TestApprovalAdvancementPostgresIntegration` 13.08s、`TestApprovalSnapshotLifecyclePostgresIntegration` 45.49s、`TestTokenApprovalConsumersPostgresIntegration` 212.06s（生命周期、目录回滚、凭据撤销全部PASS）。此记录不是非superuser部署、NATS或生产激活证据。
+- 环境与同类问题：初次同库测试的扩展不可见、角色前置不足已修正；真实回归发现并修复旧快照fixture遗漏迁移32隔离schema适配、以及JWKS测试仍错误依赖全局Transport信任的两个测试缺口。生产迁移与TLS安全边界均未修改。
+- 提交前刷新：并行PG运行期间一次完整verify因两项既有CLI子进程15秒超时失败；单独复跑该文件14/14 PASS，随后无并行PG负载的完整verify最终exit0（550 PASS/2既有环境SKIP），未修改超时阈值或产品代码来绕过测试。
+- 状态：DONE / B审核PASS / NOT_DEPLOYED。签名提交哈希由后续任务证据补记，提交后才进入GSA-02。主目标ADM-67仅部分实现，APT-141继续IN_PROGRESS。
+- 已知边界：v1列表包含Token历史项时最多等待一次5秒activation读取；失败仍返回历史并关闭推进动作。本项不交付Billing持久activation、proof或新财务命令，不构成生产上线验收。

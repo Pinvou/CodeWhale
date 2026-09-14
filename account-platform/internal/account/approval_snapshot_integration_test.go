@@ -7,17 +7,17 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -659,10 +659,10 @@ func newApprovalSnapshotTokenRepository(t *testing.T, ctx context.Context, datab
 		t.Fatal(err)
 	}
 	// This legacy fixture uses an isolated schema, not a deployment-role gate.
-	// Preserve migration 29's qualification inside that schema; real database
+	// Preserve the ownership migrations' qualification inside that schema; real database
 	// ownership/ACL safety is covered by the dedicated non-superuser gates.
 	for index := range loaded {
-		if loaded[index].Version != 29 && loaded[index].Version != 31 {
+		if loaded[index].Version != 29 && loaded[index].Version != 31 && loaded[index].Version != 32 {
 			continue
 		}
 		sql := strings.ReplaceAll(loaded[index].UpSQL, "to_regnamespace('public')", "to_regnamespace('"+schema+"')")
@@ -762,19 +762,13 @@ func newApprovalExecutorTokenHandler(t *testing.T, service *tokenservice.Service
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{map[string]any{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": "approval-executor", "n": n, "e": e}}})
 	}))
 	t.Cleanup(issuer.Close)
-	// Workload JWKS is fetched by the authenticator's background key set,
-	// not the incoming request context. Trust only this test issuer's CA;
-	// certificate verification remains enabled and production is unchanged.
-	previousTransport := http.DefaultTransport
-	trustedTransport := previousTransport.(*http.Transport).Clone()
-	roots := x509.NewCertPool()
-	roots.AddCert(issuer.Certificate())
-	trustedTransport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
-	http.DefaultTransport = trustedTransport
-	t.Cleanup(func() {
-		http.DefaultTransport = previousTransport
-		trustedTransport.CloseIdleConnections()
-	})
+	// The receiver intentionally isolates JWKS trust from DefaultTransport.
+	// Configure its explicit CA boundary, retaining certificate verification.
+	caFile := filepath.Join(t.TempDir(), "issuer-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: issuer.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WORKLOAD_IDENTITY_CA_FILE", caFile)
 	audience := "account-token-approval-integration"
 	t.Setenv("WORKLOAD_IDENTITY_ISSUER", issuer.URL)
 	t.Setenv("WORKLOAD_IDENTITY_AUDIENCE", audience)

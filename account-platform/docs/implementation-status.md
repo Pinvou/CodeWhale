@@ -2,11 +2,11 @@
 
 ## 2026-09-14 治理与安全需求变更
 
-需求/设计已由身份B最终审核PASS并以`e15fe698`提交。新增UI-60、ADM-67、NFR-57均未实现、未部署；当前目标总数在此前437项基础上增至440项，新增三项不能沿用既有审批功能的完成状态。APT-141～143分别唯一拥有领域、界面、发布目标；[GSA-01～40独立子任务](admin-governance-security-tasks.md)按A修改/B审核逐项推进，任务拆分已获B复审PASS，全部PENDING。
+需求/设计已由身份B最终审核PASS并以`e15fe698`提交。当前目标总数在此前437项基础上增至440项，新增三项不能沿用既有审批功能的完成状态。APT-141～143分别唯一拥有领域、界面、发布目标；[GSA-01～40独立子任务](admin-governance-security-tasks.md)按A修改/B审核逐项推进，任务拆分已获B复审PASS并以`90b2ea08`提交。GSA-01已获B整批代码审核APPROVED，新增及既有三组真实PG测试全部PASS/no-SKIP；ADM-67仅部分实现、APT-141继续IN_PROGRESS，其余子任务PENDING，所有新增目标均未部署。
 
 | 目标编号 | 实现状态 | 任务与审核 | 证据 | 部署状态 | 已知差距 |
 |---|---|---|---|---|---|
-| ADM-67 | 未实现 | APT-141-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | 既有六类可执行命令及静态create/update检查保留；持久推进门禁、proof、安全投影、历史收敛、失败恢复和八财务家族增量尚未交付，见GSA-01～16及21～36。 |
+| ADM-67 | 部分实现 | APT-141-IN_PROGRESS; GSA-01-DONE; B_APPROVED | GSA-01三组真实PG PASS/no-SKIP、B整批审核PASS及最终完整verify exit0，详见子任务证据 | NOT_DEPLOYED | 已实现静态推进门禁、Token动态动作裁剪和安全收口；完整持久推进门禁、proof、安全投影、历史收敛、失败恢复和八财务家族增量尚未交付，见GSA-02～16及21～36。 |
 | UI-60 | 未实现 | APT-142-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | v1/v2会话兼容、目录/列表/详情、业务编辑替代与治理分区交互尚未整改，见GSA-17～20及37。 |
 | NFR-57 | 未实现 | APT-143-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | 逐项发布工具、生产等价故障/性能/兼容证据及实际授权部署尚未完成，见GSA-38～40；不得以代码测试替代生产证据。 |
 

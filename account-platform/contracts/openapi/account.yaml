@@ -15,6 +15,7 @@ paths:
       servers: [{ url: / }]
       security: [{ serviceToken: [] }]
       operationId: beginApprovalExecution
+      description: New execution claims require an executable command; policy-only historical requests return 409 APPROVAL_COMMAND_NOT_EXECUTABLE without an execution or authorization effect. Existing EXECUTING or EXECUTED results retain their existing identity-checked read behavior.
       summary: Atomically acquire an approved command execution lease with both frozen snapshots
       parameters:
         - name: approval_request_id

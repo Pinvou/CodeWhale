@@ -50,7 +50,7 @@ func (r *PostgresRepository) BeginApprovalExecution(ctx context.Context, request
 		execution := ApprovalExecution{ApprovalRequestID: requestID, CommandType: item.CommandType, PolicyVersion: item.PolicyVersion, CommandFingerprint: item.CommandFingerprint, NormalizedCommand: item.NormalizedCommand, TargetResourceType: item.TargetResourceType, TargetResourceID: item.TargetResourceID, CriticalResourceVersions: frozenCritical, FinancialSnapshot: frozenFinancial, RequesterUserID: item.RequesterUserID, RequesterAuthorizationVersion: item.RequesterAuthorizationVersion, RequesterReason: item.Reason, ApproverUserID: approverID, DecisionReason: decisionReason, ExecutionIdempotencyKey: idempotencyKey, ExecutorIdentity: executorIdentity, Status: executionStatus}
 		return execution, tx.Commit(ctx)
 	}
-	if err := r.requireTokenApprovalActive(ctx, item.CommandType); err != nil {
+	if err := r.requireApprovalAdvancement(ctx, item.CommandType); err != nil {
 		return ApprovalExecution{}, err
 	}
 	now := r.now()

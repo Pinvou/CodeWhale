@@ -2456,6 +2456,7 @@ paths:
     post:
       operationId: submitAdminApprovalRequest
       summary: Freeze and submit a draft for independent approval
+      description: Policy-only commands cannot advance, including historical drafts; returns 409 APPROVAL_COMMAND_NOT_EXECUTABLE without submitting the request.
       parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
       requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
       responses:
@@ -2468,6 +2469,7 @@ paths:
     post:
       operationId: withdrawAdminApprovalRequest
       summary: Withdraw the requester's own submitted approval request
+      description: Requires the requester's current request permission and matching version. Remains available for submitted policy-only or inactive Token commands without contacting the Token activation service. Draft withdrawal is not supported.
       parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
       requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
       responses:
@@ -2478,6 +2480,7 @@ paths:
     post:
       operationId: decideAdminApprovalRequest
       summary: Approve or reject using an independent current authorization binding
+      description: APPROVED requires an executable command (otherwise 409 APPROVAL_COMMAND_NOT_EXECUTABLE) and applicable activation. Independent authorized REJECTED decisions remain available for inactive or policy-only submitted requests without contacting the Token activation service.
       parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
       requestBody:
         required: true

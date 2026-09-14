@@ -666,6 +666,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusServiceUnavailable, "APPROVAL_SNAPSHOT_UNAVAILABLE", "the authoritative approval snapshot is temporarily unavailable"
 	case errors.Is(err, ErrApprovalSnapshotRejected):
 		status, code, message = http.StatusConflict, "APPROVAL_SNAPSHOT_REJECTED", "the authoritative approval snapshot request was rejected"
+	case errors.Is(err, ErrApprovalCommandNotExecutable):
+		status, code, message = http.StatusConflict, "APPROVAL_COMMAND_NOT_EXECUTABLE", "approval command is not executable"
 	case errors.Is(err, ErrTokenGovernanceInactive):
 		status, code, message = http.StatusServiceUnavailable, "TOKEN_COMMAND_GOVERNANCE_INACTIVE", "Token command governance is not active"
 	}
