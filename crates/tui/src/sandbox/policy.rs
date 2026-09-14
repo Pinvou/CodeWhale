@@ -313,7 +313,14 @@ impl SandboxPolicy {
                 exclude_slash_tmp,
                 ..
             } => {
-                let mut roots: Vec<PathBuf> = writable_roots.clone();
+                // Canonicalize the configured roots the same way as the cwd,
+                // /tmp, and TMPDIR entries below: on macOS a `/var` spelling
+                // and its `/private/var` reality are the same directory, and
+                // the sandbox consumers compare canonical forms.
+                let mut roots: Vec<PathBuf> = writable_roots
+                    .iter()
+                    .map(|root| root.canonicalize().unwrap_or_else(|_| root.clone()))
+                    .collect();
 
                 // Add the current working directory
                 if let Ok(canonical_cwd) = cwd.canonicalize() {

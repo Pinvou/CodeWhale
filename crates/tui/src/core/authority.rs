@@ -999,12 +999,10 @@ mod tests {
             .collect();
         let primary_canonical = primary.path().canonicalize().expect("canonical primary");
         let attached_canonical = attached.path().canonicalize().expect("canonical attached");
-        for expected in [
-            primary.path().to_path_buf(),
-            primary_canonical,
-            attached.path().to_path_buf(),
-            attached_canonical,
-        ] {
+        // `get_writable_roots` canonicalizes every root it enumerates (on
+        // macOS the raw tempdir spelling and its `/private/var` reality
+        // differ), so the canonical form is the guarantee under test.
+        for expected in [primary_canonical, attached_canonical] {
             assert!(
                 writable.contains(&expected),
                 "writable roots {writable:?} must contain {expected:?}"
