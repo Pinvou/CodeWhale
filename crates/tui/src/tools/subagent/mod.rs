@@ -10318,9 +10318,9 @@ async fn acquire_queued_launch_permit(
         LAUNCH_RECOVERY_PROBE_PERIOD_WITHOUT_GOVERNOR
     });
     // Hold the acquire future across select iterations. Re-creating it on
-    // every probe tick would leave one stale queue entry per tick per queued
-    // child inside the gate (purged only by the next grant wave), which adds
-    // up over a long pause with a full swarm queue.
+    // every probe tick would dequeue the child from the gate's FIFO wait
+    // queue and re-enqueue it at the back, so a long pause would keep
+    // reshuffling admission order on every probe tick.
     let mut acquire_permit = std::pin::pin!(gate.acquire());
     loop {
         tokio::select! {

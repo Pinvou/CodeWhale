@@ -5,11 +5,12 @@
 //! case. This module gives the sub-agent module two cooperating pieces:
 //!
 //! 1. [`DynamicGate`] — a launch gate with a *dynamically adjustable*
-//!    capacity, built directly on `tokio::sync::Semaphore`. Tokio 1.53
-//!    added `Semaphore::forget_permits`, which makes shrink-below-active
-//!    possible on the stock primitive: shrinking forgets free slots while
-//!    children already holding permits keep running to completion, and new
-//!    admissions block until the outstanding count drops under capacity.
+//!    capacity, built directly on `tokio::sync::Semaphore`.
+//!    `Semaphore::forget_permits` (stable since tokio 1.37) makes
+//!    shrink-below-active possible on the stock primitive: shrinking forgets
+//!    free slots while children already holding permits keep running to
+//!    completion, and new admissions block until the outstanding count drops
+//!    under capacity.
 //!
 //! 2. [`RateLimitGovernor`] — a sliding-window observer fed by the sub-agent
 //!    LLM call path. Every rate-limited attempt and every successful attempt
@@ -97,8 +98,13 @@ struct GateState {
 /// A thin accounting layer over [`tokio::sync::Semaphore`]: the semaphore
 /// owns the FIFO wait queue and cancellation safety, this struct owns the
 /// `capacity`/`outstanding` bookkeeping that lets capacity drop below the
-/// number of active holders. Invariant: `sem.available_permits() ==
-/// capacity.saturating_sub(outstanding)`.
+/// number of active holders. At rest the invariant is
+/// `sem.available_permits() == capacity.saturating_sub(outstanding)`. It can
+/// bend transiently — an admission sits between taking its semaphore permit
+/// and registering `outstanding`, and a capacity change racing that window
+/// compounds the gap — but the deviation is bounded by the number of
+/// in-flight admissions, no slot is ever lost, and the drop accounting
+/// restores the invariant once holders release.
 ///
 /// `acquire` returns a [`DynamicGatePermit`] whose `Drop` returns the slot.
 /// Reducing capacity below `outstanding` is allowed: the surplus holders
