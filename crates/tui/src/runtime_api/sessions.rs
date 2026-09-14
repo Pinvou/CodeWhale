@@ -774,6 +774,7 @@ pub(super) async fn save_current_session(
                     snapshot.model_provider_id.as_deref(),
                 );
                 updated.metadata.mode = Some(snapshot.mode.clone());
+                updated.metadata.workspace_roots = snapshot.workspace_roots.clone();
                 updated
             }
             Err(e) => {
@@ -791,6 +792,7 @@ pub(super) async fn save_current_session(
                         &snapshot.model_provider,
                         snapshot.model_provider_id.as_deref(),
                     );
+                    session.metadata.workspace_roots = snapshot.workspace_roots.clone();
                     session
                 } else {
                     return Err(ApiError::internal(format!(
@@ -812,6 +814,7 @@ pub(super) async fn save_current_session(
             &snapshot.model_provider,
             snapshot.model_provider_id.as_deref(),
         );
+        session.metadata.workspace_roots = snapshot.workspace_roots.clone();
         session
     };
 
