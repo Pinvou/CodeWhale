@@ -300,6 +300,23 @@ test("computer_remove evicts the removed computer's remembered element states", 
   assert.notEqual(fresh.state_id, st.state_id);
 });
 
+test("computer_remove alone evicts remembered element states, before any re-register", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  const st = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
+  assert.equal(st.ok, true, JSON.stringify(st.error ?? {}));
+  assert.equal((await tool("computer_remove", { computer: "box" })).ok, true);
+  // Probe through a different computer id: if remove had kept the state, it
+  // would resolve far enough to fail with state_wrong_computer — eviction
+  // surfaces earlier as unknown_state. (Re-registering "box" would evict too,
+  // so this is the only vantage that distinguishes the two paths.)
+  assert.equal((await tool("computer_register", { computer: "box2", transport: "ssh", host: "box2.test", user: "me" })).ok, true);
+  const probe = await tool("set_value", { computer: "box2", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
+  assert.equal(probe.ok, false);
+  assert.equal(probe.error.code, "unknown_state");
+  // Leave the registry as later tests expect it: box registered, box2 gone.
+  assert.equal((await tool("computer_remove", { computer: "box2" })).ok, true);
+  assert.equal((await tool("computer_register", { computer: "box", transport: "ssh", host: "box.test", user: "me" })).ok, true);
+});
+
 test("ssh recording fails closed with the ssh reason instead of stranding the model", { skip: process.platform === "win32" && "needs a registered ssh computer, which the shim cannot provide on windows" }, async () => {
   const start = await tool("recording_start", { computer: "box" });
   assert.equal(start.ok, false);
