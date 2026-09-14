@@ -365,6 +365,8 @@ Cache-Control: no-store
 
 “近期认证 15m”表示服务端只信 OIDC `auth_time` 且必须在 15 分钟内；“命令结果查询”是按操作者、command type 和幂等摘要读取已保存的脱敏结果，不是再次执行。所有审计均保存 actor、permission、command type、reason、幂等摘要、预检/关键版本、前后状态、结果和 request_id，绝不保存 Secret 或 Provider 私有信息。
 
+这是 ADM-64 的目标合同，不是当前 Account 审批链已经闭合的实现事实。截至 GSA-02 基线，Account `humanApprovalPrincipal` 只检查 `AuthenticatedAt` 非零，未对生命周期、目录回滚、凭据撤销的 create/update/submit/decide 执行 15 分钟年龄校验；Token 高风险对话框的 `recentAuth` 只显示提示，Token direct `/commands` 的后置年龄检查又会先被 `DIRECT_APPROVAL_COMMAND_FORBIDDEN` 截断。APT-138 已交付的 Token activation、consumer、executor 与静态策略事实继续有效，但三类审批的申请/决定近期认证仍是待实现安全缺口：代码唯一由 ADM-67 / GSA-13 的 Account 通用门禁与 GSA-14 的 Token 三命令适配拥有，APT-138-R1仅在两项独立提交并经B审核后引用证据关闭ADM-64历史缺口，不能以 UI 提示或其他商品写入口的近期认证替代。
+
 | 稳定 `command_type` | 权限 | 治理 | 近期认证 | reason | CAS / 版本 | 幂等 | 影响预检 | 审计 | 未知结果恢复 |
 |---|---|---|---|---|---|---|---|---|---|
 | `TOKEN_PROTOCOL_DRAFT_CREATE` | `platform.pricing.manage` | `AUDIT_ONLY` | 否 | 必填 | `expected_protocol_head_version`，首次为 0 | 必填 | 协议代码冲突、已发布引用 | 通用审计 + 草稿版本 | 命令结果查询；不得重复创建 |
@@ -397,7 +399,7 @@ Cache-Control: no-store
 
 ### 7.3 三个强制审批命令的正式策略
 
-现有 `TOKEN_MODEL_LIFECYCLE_CHANGE` 与 `TOKEN_MODEL_CATALOG_ROLLBACK` 的 policy version 1 已登记为 `AUDIT_ONLY`，属于不可变历史，**不得 UPDATE 或删除**。Account 前向追加迁移为两者各插入 policy version 2；`TOKEN_CREDENTIAL_REVOKE` 尚无策略，插入 version 1。策略发布后继续受现有不可原地修改/删除保护。灰度切换必须同时关闭旧 direct API 和启用新策略，不能出现 v1 direct 与 v2 approval 双写窗口。
+`TOKEN_MODEL_LIFECYCLE_CHANGE` 与 `TOKEN_MODEL_CATALOG_ROLLBACK` 的 policy version 1 已登记为 `AUDIT_ONLY`，属于不可变历史，**不得 UPDATE 或删除**；后续Account迁移已为两者各追加policy version 2。`TOKEN_CREDENTIAL_REVOKE` 在该设计形成时尚无策略，现已由 `000045_token_command_governance` 追加version 1，同样不得原地修改或删除。该段保留版本演进时态，不把已落库追加项写成待办；灰度切换仍必须同时关闭旧 direct API 和启用新策略，不能出现 v1 direct 与 v2 approval 双写窗口。
 
 | command type / 新策略版本 | 申请权限 | 审批权限 | 最低审批人数 / 自审 | 近期认证 | 申请有效期 / 执行窗口 | 执行身份 | 必须冻结的关键版本快照 |
 |---|---|---|---|---|---|---|---|

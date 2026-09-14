@@ -120,33 +120,69 @@ test('rejects a remediation dependency cycle', () => {
   assert.throws(() => validateFixture({ remediations }), /task dependency cycle/);
 });
 
-test('rejects APT-138 progress while any remediation remains unfinished', () => {
-  const statuses = new Map([
-    ['ADM-60', '部分实现'],
-    ['UI-49', '部分实现'],
-    ['ADM-64', '未实现'],
-  ]);
+function activationFixture() {
+  const statuses = new Map();
   const tasks = Array.from({ length: 138 }, (_, index) => {
     const number = index + 1;
     const id = `APT-${String(number).padStart(3, '0')}`;
-    if (number === 1) return { id, target: 'ADM-60', dependencies: '无', status: 'DONE' };
-    if (number === 2) return { id, target: 'UI-49', dependencies: 'APT-001', status: 'DONE' };
-    if (number === 3) return { id, target: 'TOK-1003', dependencies: 'APT-002', status: 'DONE' };
-    if (number === 138) return { id, target: 'ADM-64', dependencies: 'APT-137', status: 'IN_PROGRESS' };
+    const target = number === 138 ? 'ADM-64' : `TOK-${1000 + number}`;
+    statuses.set(target, '已实现');
     return {
       id,
-      target: `TOK-${1000 + number}`,
-      dependencies: `APT-${String(number - 1).padStart(3, '0')}`,
+      target,
+      dependencies: number === 1 ? '无' : `APT-${String(number - 1).padStart(3, '0')}`,
       status: 'DONE',
     };
   });
-  for (const { target } of tasks.slice(2, -1)) statuses.set(target, '已实现');
   const remediations = [
-    { id: 'APT-001-R1', target: 'ADM-60', dependencies: 'APT-001', status: 'PENDING' },
-    { id: 'APT-002-R1', target: 'UI-49', dependencies: 'APT-001-R1, APT-002', status: 'PENDING' },
+    { id: 'APT-122-R2', target: 'TOK-1122', dependencies: 'APT-122', status: 'DONE' },
+    { id: 'APT-123-R2', target: 'TOK-1123', dependencies: 'APT-123, APT-122-R2', status: 'DONE' },
+    { id: 'APT-125-R1', target: 'TOK-1125', dependencies: 'APT-125, APT-123-R2', status: 'DONE' },
   ];
+  return { statuses, tasks, remediations };
+}
+
+test('rejects APT-138 progress while each frozen activation prerequisite remains unfinished', () => {
+  for (let index = 0; index < 3; index += 1) {
+    const fixture = activationFixture();
+    fixture.tasks[137].status = 'IN_PROGRESS';
+    fixture.statuses.set('ADM-64', '未实现');
+    // Later batches cannot complete before the selected prerequisite either.
+    for (const remediation of fixture.remediations.slice(index)) {
+      remediation.status = 'PENDING';
+      fixture.statuses.set(remediation.target, '部分实现');
+    }
+    assert.throws(() => validateFixture(fixture), /APT-138 must remain PENDING until remediations are DONE/);
+  }
+});
+
+test('retains completed activation history with an owned post-completion correction', () => {
+  const fixture = activationFixture();
+  fixture.statuses.set('ADM-64', '部分实现');
+  fixture.remediations.push({ id: 'APT-138-R1', target: 'ADM-64', dependencies: 'APT-138', status: 'PENDING' });
+  assert.equal(validateFixture(fixture).activeOwnerCount, 1);
+  assert.equal(validateFixture(fixture).remediationCount, 4);
+});
+
+test('post-completion correction still cannot close an incomplete target', () => {
+  const fixture = activationFixture();
+  fixture.statuses.set('ADM-64', '部分实现');
+  fixture.remediations.push({ id: 'APT-138-R1', target: 'ADM-64', dependencies: 'APT-138', status: 'DONE' });
   assert.throws(
-    () => validateFixture({ statuses, tasks, remediations }),
-    /APT-138 must remain PENDING until remediations are DONE/,
+    () => validateFixture(fixture),
+    /APT-138-R1 is DONE but ADM-64 remains incomplete/,
+  );
+});
+
+test('post-completion correction still cannot close before its implementation dependency', () => {
+  const fixture = activationFixture();
+  fixture.statuses.set('ADM-67', '部分实现');
+  fixture.tasks.push({ id: 'APT-139', target: 'ADM-67', dependencies: 'APT-138', status: 'IN_PROGRESS' });
+  fixture.remediations.push({
+    id: 'APT-138-R1', target: 'ADM-64', dependencies: 'APT-138, APT-139', status: 'DONE',
+  });
+  assert.throws(
+    () => validateFixture(fixture),
+    /APT-138-R1 is DONE but depends on unfinished APT-139/,
   );
 });

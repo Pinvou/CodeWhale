@@ -212,7 +212,12 @@ export function validateTaskDocuments(statusMarkdown, taskMarkdown) {
   }
 
   if (tasks.has('APT-138')) {
-    const unfinishedRemediations = [...remediations].filter(([, remediation]) => remediation.status !== 'DONE');
+    // Only these frozen pre-activation batches gate APT-138. A later correction
+    // must retain its parent's DONE history while reopening the affected target.
+    const activationPrerequisites = new Set(['APT-122-R2', 'APT-123-R2', 'APT-125-R1']);
+    const unfinishedRemediations = [...remediations].filter(
+      ([id, remediation]) => activationPrerequisites.has(id) && remediation.status !== 'DONE',
+    );
     if (unfinishedRemediations.length > 0) {
       assert.equal(
         tasks.get('APT-138').status,

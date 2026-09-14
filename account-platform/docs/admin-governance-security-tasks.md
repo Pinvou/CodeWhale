@@ -1,7 +1,7 @@
 # 治理与安全整改实施任务
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS，其余PENDING，均NOT_DEPLOYED。
+> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED，其余PENDING，均NOT_DEPLOYED。
 
 ## 1. 所有权与执行规则
 
@@ -20,7 +20,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | 子任务 | 主任务 | 独立交付 | 技术依赖 | 类型 | 状态 |
 |---|---|---|---|---|---|
 | GSA-01 | APT-141 | policy-only 推进门禁与停用后的撤回/拒绝 | APT-008, APT-138 | CODE | DONE |
-| GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | PENDING |
+| GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | DONE |
 | GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | PENDING |
 | GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | PENDING |
 | GSA-05 | APT-141 | typed closed RFC8785 编码与 legacy 编码适配 | GSA-02 | CODE | PENDING |
@@ -65,8 +65,8 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 ### GSA-01～09：推进门禁与持久执行链
 
 - **01**：Account create/update 已有静态 executable 检查，保留并补齐 submit/APPROVE/Begin。policy-only 不得APPROVE、写APPROVED决定/授权 Outbox/新 execution；已有 EXECUTING/EXECUTED 结果读取保持。仅 SUBMITTED 的本人 WITHDRAW、独立审批人 REJECT 在 Token PRE/SAFE 和 Billing INACTIVE/policy-only 下均可安全收口，仍检查身份、权限、版本、禁止自审。单元+真实 Account PG 覆盖六可执行/八不可执行、两域安全收口、DRAFT 不可撤回、无权限/并发与零领域调用。此项不宣称完整 owner-domain activation 已交付。
-- **02**：逐命令冻结已有 API、代码位置、版本、快照、近期认证、consumer/executor、部署前置与缺口，覆盖六既有及八 policy-only，并映射 GSA 所有权。只做事实与版本矩阵，不新建功能。
-- **03**：仅 Billing 拥有其持久 activation，前向迁移保全三命令 ACTIVE、八命令 INACTIVE；Account 只消费权威投影，Token 复用既有状态。迁移幂等、缺行/未知版本/不可用失败关闭及 N/N-1 回归；无实际生产激活。
+- **02**：以[逐命令事实与兼容基线](admin-governance-security-command-baseline.md)冻结已有 API、代码位置、版本、实际快照、近期认证、consumer/executor、部署前置与缺口，覆盖六既有及八 policy-only，并映射 GSA 所有权。只做事实与版本矩阵，不新建功能；DESIGN通过不表示目标proof、v2、activation或恢复协议已实现。
+- **03**：当前 Billing 尚无持久 activation 行，三类既有命令以静态`Executable=true`运行、八类以静态`Executable=false`失败关闭；本任务才由 Billing 建立其权威投影，前向迁移保全三命令 ACTIVE、物化八命令 INACTIVE。Account 只消费该投影，Token 三命令继续复用 Token 既有状态。迁移幂等、缺行/未知版本/不可用失败关闭及 N/N-1 回归；无实际生产激活。
 - **04**：按设计 §5.4 实现唯一 ADMIN_APPROVAL control、双 epoch、8 行动作矩阵、合法边及窄事务接口。共享/排他行锁与 CAS 的真实 PG 双连接测试；安全默认 LEGACY，尚未接线的功能不能开启。
 - **05**：按 §8/§9.1.1 交付独立窄编码包，重复键、整数精度、Unicode/转义、null 与封闭结构拒绝、大小边界及跨实现 golden；LEGACY_TYPED_V1 精确使用 Event.Marshal，历史重构 provenance 不证明原 broker bytes。
 - **06**：epoch/sidecar/additive migrations、原事件不变、旧 writer trigger FOR SHARE、完整事务重试及最终验证；覆盖迁移前 DLQ、并发写、maintenance version3 兼容、错误 epoch、不可重构数据失败关闭，不修改已发布迁移。
@@ -139,5 +139,13 @@ GSA-01：代码候选已补齐静态推进检查、policy-only及未激活Token�
 - 最终真实PG记录：Account/Token使用独立隔离数据库并补齐既有角色前置，三组具名测试联合运行exit0/no-SKIP：`TestApprovalAdvancementPostgresIntegration` 13.08s、`TestApprovalSnapshotLifecyclePostgresIntegration` 45.49s、`TestTokenApprovalConsumersPostgresIntegration` 212.06s（生命周期、目录回滚、凭据撤销全部PASS）。此记录不是非superuser部署、NATS或生产激活证据。
 - 环境与同类问题：初次同库测试的扩展不可见、角色前置不足已修正；真实回归发现并修复旧快照fixture遗漏迁移32隔离schema适配、以及JWKS测试仍错误依赖全局Transport信任的两个测试缺口。生产迁移与TLS安全边界均未修改。
 - 提交前刷新：并行PG运行期间一次完整verify因两项既有CLI子进程15秒超时失败；单独复跑该文件14/14 PASS，随后无并行PG负载的完整verify最终exit0（550 PASS/2既有环境SKIP），未修改超时阈值或产品代码来绕过测试。
-- 状态：DONE / B审核PASS / NOT_DEPLOYED。签名提交哈希由后续任务证据补记，提交后才进入GSA-02。主目标ADM-67仅部分实现，APT-141继续IN_PROGRESS。
+- 状态：DONE / B审核PASS / NOT_DEPLOYED；签名提交`88d37a53`。主目标ADM-67仅部分实现，APT-141继续IN_PROGRESS。
 - 已知边界：v1列表包含Token历史项时最多等待一次5秒activation读取；失败仍返回历史并关闭推进动作。本项不交付Billing持久activation、proof或新财务命令，不构成生产上线验收。
+
+GSA-02：身份A已基于提交`88d37a53`建立[十四命令事实与兼容矩阵](admin-governance-security-command-baseline.md)，状态为DESIGN DONE / B整批审核APPROVED / NOT_DEPLOYED。
+
+- 交付：七份需求/设计/任务/状态文档冻结现有API、p/s/wire、权限、实际快照、近期认证缺口、consumer/executor与后续所有权；纠正ADM-64为部分实现，保留APT-138 DONE历史，新增只引用GSA-13/14实现证据的APT-138-R1 PENDING关闭记录。
+- 必要门禁修复：`scripts/check-account-platform-tasks.mjs` 将APT-138前置约束限于既定三批，允许历史完成后的新整改记录；通用唯一owner、依赖、循环、目标完成约束不放宽。配套测试覆盖三前置分别阻断、历史保留、目标和依赖未完成不得关闭。
+- B审核：原生/BFF路径、六类策略、迁移追加史、现状与目标状态、producer JSON与closed schema、consumer检查点、既有财务操作边界、旧统计与近期认证缺口、唯一实现所有权等问题均经A修订并获B整批复审APPROVED，无剩余阻断。
+- 验证：最终完整`node scripts/account-platform.mjs verify` exit0，Go test/vet、OpenAPI（9项既有warning）、Node 550 PASS/2项既有环境SKIP、三语、observability、architecture全部通过；`node --test scripts/check-account-platform-tasks.test.mjs` 11/11 PASS；任务检查143 tasks/4 remediations/35 incomplete/354 completed PASS，文档基线与diff检查PASS，基线47个相对链接存在。
+- 边界：本项仅文档和文档门禁修复，无产品代码、策略、迁移、activation或部署配置变化；未新增proof/v2/恢复/财务执行能力。APT-141继续IN_PROGRESS，ADM-64/67部分实现，APT-138-R1 PENDING。独立签名提交后才进入GSA-03。

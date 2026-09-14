@@ -8,7 +8,7 @@
 
 ## 0. 文档效力与现状边界
 
-本文是“治理与安全”信息架构、审批中心展示、审批命令激活、批准 proof、失败恢复和财务高风险命令扩展的单一详细真相源。`requirements.md` 定义稳定目标和总体边界；本文细化页面、状态、接口、安全与验收合同。与通用后台设计冲突时，本专项优先；与已经实现的领域不变量、既有审批状态机或安全边界冲突时必须停止实现并修订文档，不能由 Portal 推断或覆盖服务端事实。
+本文是“治理与安全”信息架构、审批中心展示、审批命令激活、批准 proof、失败恢复和财务高风险命令扩展的单一详细真相源。`requirements.md` 定义稳定目标和总体边界；本文细化页面、状态、接口、安全与验收合同。[十四命令事实与兼容基线](admin-governance-security-command-baseline.md)只记录GSA-02核对的当前仓库事实和缺口，不另定义目标协议。与通用后台设计冲突时，本专项优先；与已经实现的领域不变量、既有审批状态机或安全边界冲突时必须停止实现并修订文档，不能由 Portal 推断或覆盖服务端事实。
 
 本次是对既有能力的补齐，不是重建审批系统。当前已经存在且必须保持兼容的能力包括：
 
@@ -87,7 +87,7 @@ Portal 不直接读取需要 `platform.roles.read` 的内部 policy API。Accoun
 
 ### 3.2 Billing 命令
 
-既有 `WALLET_ADJUSTMENT`、`PAYMENT_PROVIDER_RESUME`、`PAYMENT_PRODUCT_RESUME` 通过前向迁移和兼容 activation 投影保持 `ACTIVE`，升级不能使这三类合法命令回退为 policy-only。以下八类目前只有 policy，默认 `INACTIVE`：
+当前仓库尚无 Billing owner-domain 持久 activation 行：三类既有命令由静态 `Executable=true` 维持现有能力，以下八类只有 policy 并由静态 `Executable=false` 有效失败关闭。GSA-03 的前向迁移必须建立兼容 activation 投影，把既有 `WALLET_ADJUSTMENT`、`PAYMENT_PROVIDER_RESUME`、`PAYMENT_PRODUCT_RESUME` 物化为 `ACTIVE`，把以下八类物化为默认 `INACTIVE`；升级不能使三类合法命令回退，也不能在八类各自门禁完成前使其可执行：
 
 1. `ENTITLEMENT_COMPONENT_ADJUSTMENT`；
 2. `LEDGER_REPAIR`；
@@ -286,9 +286,9 @@ Portal N 在第 5.4 节会话被锁定 v1 时继续发送由旧 UI 已有数据�
 
 | 命令 | 申请/提交 | 批准 | 说明 |
 |---|---|---|---|
-| Token 三命令 | 复用现有 15 分钟合同 | 复用现有 15 分钟合同 | recent auth 必须在 precheck/proof 前，失败零领域调用并返回稳定 step-up 错误 |
-| `PAYMENT_PROVIDER_RESUME` | 复用现有 15 分钟合同 | 复用现有 15 分钟合同 | proof 只读已持久化 PAY-57/PAY-58 事实，不触发探测 |
-| `PAYMENT_PRODUCT_RESUME` | 复用现有 15 分钟合同 | 复用现有 15 分钟合同 | Provider ACTIVE 后仍需商品独立申请和 proof |
+| Token 三命令 | 目标合同固定为 15 分钟 | 目标合同固定为 15 分钟 | recent auth 必须在 precheck/proof 前，失败零领域调用并返回稳定 step-up 错误；GSA-02基线确认当前Account审批链尚未落实年龄校验 |
+| `PAYMENT_PROVIDER_RESUME` | 目标合同固定为 15 分钟 | 目标合同固定为 15 分钟 | proof 只读已持久化 PAY-57/PAY-58 事实，不触发探测；当前Account审批链缺口由后续任务补齐 |
+| `PAYMENT_PRODUCT_RESUME` | 目标合同固定为 15 分钟 | 目标合同固定为 15 分钟 | Provider ACTIVE 后仍需商品独立申请和 proof；Billing商品管理的现有recent-auth中间件不等于本审批链已落实 |
 | `WALLET_ADJUSTMENT` | 沿用当前合同，不新增 | 沿用当前合同，不新增 | 如新增 recent auth 或改变关键字段/变化语义，必须追加 policy version |
 
 ### 8.6 proof-required 切换前的历史处置
@@ -476,4 +476,4 @@ Worker 使用独立最小工作负载身份，不由 Portal、审批人或通用
 
 回滚先停止新建/更新/提交/批准和新执行租约，再回 Portal/Account/领域服务；历史 policy、activation、proof schema、Outbox/Inbox、execution 和领域引用保留可读。任何被引用对象都禁止 down 删除。未通过 P0/P1/P2 相应门禁的能力保持隐藏和 inactive。
 
-截至本文日期，本专项仅完成需求确认，尚未实现、尚未部署。
+截至本文日期，本专项需求已确认；GSA-01推进门禁增量已实现并通过B审核，GSA-02事实基线及必要文档门禁修复已通过B整批审核，不新增产品运行能力；其余目标尚未实现，整体仍未部署。
