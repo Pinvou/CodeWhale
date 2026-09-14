@@ -136,6 +136,10 @@ enum MonitorEmission {
     },
 }
 
+pub(super) fn is_shell_execution_tool(name: &str) -> bool {
+    matches!(name, "bash" | "exec_shell" | "task_shell_start" | "Bash")
+}
+
 impl ShellOutputMonitor {
     pub(crate) fn spawn(
         app: AppHandle,
@@ -163,8 +167,9 @@ impl ShellOutputMonitor {
     }
 
     pub(crate) fn tool_started(&self, tool_id: &str, name: &str, input: &Value) {
-        // v0.9.5 的 shell 工具面是 canonical `Bash` 家族；旧名仅旧会话回放出现。
-        if !matches!(name, "exec_shell" | "task_shell_start" | "Bash") {
+        // v0.9.12 exposes lowercase `bash`; retain the older names so restored
+        // transcripts and in-flight sessions can still reconnect to their jobs.
+        if !is_shell_execution_tool(name) {
             return;
         }
         let Some(command) = input.get("command").and_then(Value::as_str) else {
@@ -298,8 +303,19 @@ impl MonitorState {
         for (_, tool_id, command) in pending {
             let candidate = snapshots.iter().find(|job| {
                 job.owner_agent_id.is_none()
-                    && job.command == command
+                    && job.origin_tool_call_id.as_deref() == Some(tool_id.as_str())
                     && !self.claimed_tasks.contains(&job.id)
+            });
+            // Compatibility for runtimes predating stable task origins. Never
+            // bind a job that carries a different explicit origin merely
+            // because its rendered command text happens to match.
+            let candidate = candidate.or_else(|| {
+                snapshots.iter().find(|job| {
+                    job.owner_agent_id.is_none()
+                        && job.origin_tool_call_id.is_none()
+                        && job.command == command
+                        && !self.claimed_tasks.contains(&job.id)
+                })
             });
             let Some(candidate) = candidate else {
                 continue;
@@ -504,6 +520,9 @@ mod tests {
             linked_task_id: None,
             owner_agent_id: None,
             owner_agent_name: None,
+            origin_tool_call_id: None,
+            origin_turn_id: None,
+            owner_session_id: String::new(),
         }
     }
 
@@ -517,6 +536,33 @@ mod tests {
             stdout_tail: stdout.to_string(),
             stderr_tail: String::new(),
         }
+    }
+
+    fn track(state: &mut MonitorState, tool_id: &str, command: &str) {
+        let order = state.next_order;
+        state.next_order = state.next_order.saturating_add(1);
+        state.tools.insert(
+            tool_id.to_string(),
+            TrackedTool {
+                command: command.to_string(),
+                order,
+                task_id: None,
+                stdout: StreamMirror::default(),
+                stderr: StreamMirror::default(),
+                keep_after_tool_end: false,
+            },
+        );
+    }
+
+    #[test]
+    fn tracks_v0912_bash_and_keeps_replay_aliases() {
+        for name in ["bash", "exec_shell", "task_shell_start", "Bash"] {
+            assert!(
+                is_shell_execution_tool(name),
+                "shell tool not tracked: {name}"
+            );
+        }
+        assert!(!is_shell_execution_tool("read"));
     }
 
     #[test]
@@ -556,6 +602,52 @@ mod tests {
                 content: "three\n".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn forkguard_shell_monitor_assigns_identical_commands_by_stable_origin() {
+        let mut state = MonitorState::default();
+        for tool_id in ["tool-1", "tool-2"] {
+            track(&mut state, tool_id, "same command");
+        }
+        let mut second = snapshot("job-2", "same command", ShellStatus::Running);
+        second.origin_tool_call_id = Some("tool-2".to_string());
+        let mut first = snapshot("job-1", "same command", ShellStatus::Running);
+        first.origin_tool_call_id = Some("tool-1".to_string());
+
+        state.assign_unclaimed_tasks(&[second, first]);
+
+        assert_eq!(state.tools["tool-1"].task_id.as_deref(), Some("job-1"));
+        assert_eq!(state.tools["tool-2"].task_id.as_deref(), Some("job-2"));
+    }
+
+    #[test]
+    fn explicit_origin_never_falls_back_to_a_matching_command() {
+        let mut state = MonitorState::default();
+        track(&mut state, "tool-current", "same command");
+        let mut old = snapshot("job-old", "same command", ShellStatus::Running);
+        old.origin_tool_call_id = Some("tool-old".to_string());
+
+        state.assign_unclaimed_tasks(&[old]);
+
+        assert_eq!(state.tools["tool-current"].task_id, None);
+    }
+
+    #[test]
+    fn legacy_fallback_skips_a_foreign_origin_with_the_same_command() {
+        let mut state = MonitorState::default();
+        track(&mut state, "tool-current", "same command");
+        let mut foreign = snapshot("job-foreign", "same command", ShellStatus::Running);
+        foreign.origin_tool_call_id = Some("tool-other".to_string());
+        let legacy = snapshot("job-legacy", "same command", ShellStatus::Running);
+
+        state.assign_unclaimed_tasks(&[foreign, legacy]);
+
+        assert_eq!(
+            state.tools["tool-current"].task_id.as_deref(),
+            Some("job-legacy")
+        );
+        assert!(!state.claimed_tasks.contains("job-foreign"));
     }
 
     #[test]

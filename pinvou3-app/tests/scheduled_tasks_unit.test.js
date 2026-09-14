@@ -20,11 +20,14 @@ const indexHtml = [
   'features/scheduled/ScheduledTasksView.jsx',
   'features/conversation/ConversationTimeline.jsx' // second-level countdown tick has been consolidated into useConversationSecondClock
 ].map(file => fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8')).join('\n');
-const tauriBridgeFeatureNames = [
-  'artifact-tracker', 'chat', 'chat-events', 'sessions', 'terminal', 'scheduled', 'monitor', 'settings', 'memory', 'artifacts', 'personas', 'updater',
-  'remote-control', 'dependencies', 'voice', 'knowledge-model', 'interaction',
-  'multiagent', 'team-relay'
-];
+// Derived from the bridge feature directory so a new feature file cannot be
+// forgotten here again (a missing entry makes bridge.js throw
+// "Tauri bridge feature not loaded" inside the harness).
+const tauriBridgeFeatureNames = fs.readdirSync(path.join(__dirname, '..', 'src', 'platform', 'tauri', 'bridge'))
+  .filter(name => name.endsWith('.js'))
+  .map(name => name.slice(0, -3))
+  .sort((a, b) => a.localeCompare(b));
+
 const modelOptionsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'model-options.js'), 'utf8');
 const composerSharedSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'composer-shared.jsx'), 'utf8');
 const bridgeMessages = fs.readFileSync(
@@ -8183,8 +8186,8 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
   var writePayload = {
     session_id: sessionId,
     id: "tool-write-snake",
-    name: "File",
-    args: { action: "write", path: "snake-game.html", content: "<!doctype html>" },
+    name: "write",
+    args: { path: "snake-game.html", content: "<!doctype html>" },
   };
   harness.emit("chat:tool_start", writePayload);
   harness.emit("chat:tool_start", writePayload);
@@ -8231,7 +8234,7 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
     messages: [
       { role: "user", content: [{ type: "text", text: "写一个贪吃蛇游戏" }] },
       { role: "assistant", content: [{
-        type: "tool_use", id: writePayload.id, name: "File", input: writePayload.args,
+        type: "tool_use", id: writePayload.id, name: "write", input: writePayload.args,
       }] },
       { role: "user", content: [{
         type: "tool_result", tool_use_id: writePayload.id, content: "Wrote snake-game.html",
@@ -8300,8 +8303,8 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
   var editPayload = {
     session_id: sessionId,
     id: "tool-edit-snake",
-    name: "File",
-    args: { action: "edit", path: "snake-game.html", old_string: "v1", new_string: "v2" },
+    name: "edit",
+    args: { path: "snake-game.html", old_string: "v1", new_string: "v2" },
   };
   harness.emit("chat:tool_start", editPayload);
   harness.emit("chat:tool_end", {
@@ -8386,8 +8389,8 @@ async function presentationReconciliationUsesStableEventIdentity(bridgeKind) {
   var editOriginalSummary = {
     session_id: sessionId,
     id: "tool-edit-summary-original",
-    name: "File",
-    args: { action: "edit", path: summaryPath, old_string: "v1", new_string: "v2" },
+    name: "edit",
+    args: { path: summaryPath, old_string: "v1", new_string: "v2" },
   };
   harness.emit("chat:tool_start", editOriginalSummary);
   harness.emit("chat:tool_end", {

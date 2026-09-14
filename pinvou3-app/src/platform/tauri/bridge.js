@@ -474,7 +474,8 @@
       steerFailed: "Interrupt failed (session unavailable or engine not running); your text was restored to the input",
       interruptQueuedFailed: "Interrupt & send failed; the message was restored to the queue",
       interruptBusy: "Another interrupt is already in progress; the message stays queued — retry in a moment",
-      compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactAuto: " (auto)",
+      compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactCancel: "Context compaction canceled", compactAuto: " (auto)",
+      toolGateDecision: "Permission gate", toolGateAllowed: "allowed", toolGateDenied: "denied", toolGateUnavailable: "could not review and denied", toolGateAgent: "agent", toolGateRisk: "risk",
       compactPruneMerged: "Auto-compaction: tool-result cleanup, messages unchanged",
       compactInactive: "The session engine is not running yet. Send a message before compacting the context",
       gpuUnavailable: "GPU info unavailable",
@@ -574,7 +575,8 @@
       steerFailed: "割り込みに失敗しました（セッション無効またはエンジン未起動）。内容は入力欄に復元しました",
       interruptQueuedFailed: "割り込み送信に失敗しました。メッセージはキューに復元しました",
       interruptBusy: "別の割り込みが進行中のため実行できません。メッセージはキューに残ります。しばらくしてから再試行してください",
-      compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactAuto: "（自動）",
+      compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactCancel: "コンテキストの圧縮をキャンセルしました", compactAuto: "（自動）",
+      toolGateDecision: "権限ゲート", toolGateAllowed: "許可", toolGateDenied: "拒否", toolGateUnavailable: "レビュー不能のため拒否", toolGateAgent: "エージェント", toolGateRisk: "リスク",
       compactPruneMerged: "自動圧縮: ツール結果を整理、メッセージ数は不変",
       compactInactive: "セッション Engine はまだ起動していません。メッセージを送信してからコンテキストを圧縮してください",
       gpuUnavailable: "GPU 情報を取得できません",
@@ -674,7 +676,8 @@
       steerFailed: "插队失败（会话不可用或引擎未运行），内容已恢复到输入框",
       interruptQueuedFailed: "插队发送失败，消息已恢复到排队区",
       interruptBusy: "已有打断正在进行，消息保留在排队区，请稍后重试",
-      compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactAuto: "（自动）",
+      compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactCancel: "已取消上下文压缩", compactAuto: "（自动）",
+      toolGateDecision: "权限闸门", toolGateAllowed: "允许", toolGateDenied: "拒绝", toolGateUnavailable: "无法审查并拒绝", toolGateAgent: "子智能体", toolGateRisk: "风险",
       compactPruneMerged: "自动压缩：已整理工具结果，消息数不变",
       compactInactive: "会话引擎尚未运行。请先发送一条消息，再压缩上下文",
       gpuUnavailable: "GPU 信息不可用",
@@ -1575,7 +1578,7 @@
 
   // ── Pub/Sub ──────────────────────────────────────────────────────
   var subscribers = [];
-  var STATE_SLICE_FIELDS = {
+  const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
     sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch"],
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
@@ -1594,6 +1597,10 @@
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
     teamRelay: ["teamRelay"],
+    // Registered by the projects feature (bridge/projects.js). Must stay in
+    // sync with APP_BRIDGE_STATE_DOMAINS in main.jsx — locked by
+    // tests/bridge_state_domains.test.mjs.
+    projects: ["projectsList"],
   };
   function snapshotStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
@@ -2555,6 +2562,13 @@
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
   var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
+  var projectsFeature = installBridgeFeature("projects", { state: state, notify: notify, invoke: invoke, listen: listen });
+  var loadProjects = projectsFeature.loadProjects;
+  var createProject = projectsFeature.createProject;
+  var renameProject = projectsFeature.renameProject;
+  var deleteProject = projectsFeature.deleteProject;
+  var moveSessionToProject = projectsFeature.moveSessionToProject;
+
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
   var readMultiAgentSubagent = multiAgentFeature.readSubagentTranscript;
@@ -2796,6 +2810,13 @@
       toggleSessionPinned: toggleSessionPinned,
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
+    },
+    projects: {
+      loadProjects,
+      createProject,
+      renameProject,
+      deleteProject,
+      moveSessionToProject,
     },
     monitor: {
       startMonitorPolling: startMonitorPolling,

@@ -26,6 +26,7 @@ export const desktopBridgeApi = {
   updater: ['cancelUpdate', 'checkForUpdate', 'downloadAndInstallUpdate', 'restartApp'],
   dependencies: ['checkDependencies', 'installDependencies'],
   teamRelay: ['avatarSource', 'claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'dissolveTeam', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'leaveTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeAvatar', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'transferOwner', 'updateProfile', 'uploadAvatar', 'verifyAccess'],
+  projects: ['createProject', 'deleteProject', 'loadProjects', 'moveSessionToProject', 'renameProject'],
 };
 
 // These methods intentionally depend on desktop lifecycle or local machine
@@ -44,8 +45,9 @@ export const desktopOnlyBridgeApi = {
 };
 
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。
-// 后端 remote_control 漏斗另有权威封禁。
-export const desktopOnlyBridgeDomains = ['multiAgent'];
+// 后端 remote_control 漏斗另有权威封禁。projects 是本地会话归档分组
+// （~/.pinvou3/projects/projects.json），Web 端没有对应后端。
+export const desktopOnlyBridgeDomains = ['multiAgent', 'projects'];
 
 export function expectedWebBridgeApi() {
   return Object.fromEntries(

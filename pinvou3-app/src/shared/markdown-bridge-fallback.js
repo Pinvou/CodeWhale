@@ -39,7 +39,7 @@
   }
 
   if (root.marked) {
-    root.marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
+    root.marked.setOptions({ gfm: true, breaks: true });
   }
 
   root.PinvouMarkdownBridgeFallback = Object.freeze({ renderMarkdown: renderMarkdown });

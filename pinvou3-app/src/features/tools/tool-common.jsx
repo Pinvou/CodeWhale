@@ -112,7 +112,7 @@ const AcFmtIcon = FileTypeIcon;
     // 含 ①只读探查 ②待办/清单的细碎进度操作（易刷屏、对用户价值低）。
     // 批量出方案的 checklist_write/todo_write/update_plan 不在此列（它们走方案卡）。
     const QUIET_TOOLS = new Set([
-      'read_file', 'list_dir', 'grep_files', 'file_search', 'glob',
+      'read', 'read_file', 'list_dir', 'grep_files', 'file_search', 'glob',
       'checklist_update', 'todo_update', 'checklist_add', 'todo_add', 'checklist_list', 'todo_list',
     ]);
 
@@ -134,6 +134,7 @@ const AcFmtIcon = FileTypeIcon;
     const toolSummary = (name, args, t) => {
       if (!args || typeof args !== 'object') return '';
       switch (name) {
+        case 'read':
         case 'read_file': {
           const base = toolBasename(args.path);
           if (args.start_line || args.max_lines) {
@@ -176,6 +177,8 @@ const AcFmtIcon = FileTypeIcon;
           }
           return toolBasename(args.path);
         }
+        case 'write':
+        case 'edit':
         case 'write_file':
         case 'edit_file':
           return toolBasename(args.path);
@@ -185,6 +188,7 @@ const AcFmtIcon = FileTypeIcon;
           return args.pattern ? '"' + args.pattern + '"' : '';
         case 'file_search':
           return args.query ? '"' + args.query + '"' : '';
+        case 'bash':
         case 'exec_shell':
         case 'task_shell_start':
         case 'shell':
@@ -446,7 +450,7 @@ const AcFmtIcon = FileTypeIcon;
         </div>
       );
     };
-    // exec_shell 的 content 其实是纯 stdout 文本（结构化字段在 metadata，前端没拿）→ 给终端样式
+    // bash 的 content 其实是纯 stdout 文本（结构化字段在 metadata，前端没拿）→ 给终端样式
     const ShellTextView = ({ cmd, text }) => {
       const muted = 'text-[#757575] dark:text-[#8E8E8E]';
       return (

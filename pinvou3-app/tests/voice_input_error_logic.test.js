@@ -18,6 +18,8 @@ assert.strictEqual((postprocessCommand.match(/&model_name,/g) || []).length, 2,
   "initial and retry requests must share the prepared user-selected model B, not server-first model A");
 const enginePoolSource = fs.readFileSync(path.join(__dirname, "..", "src-tauri", "src", "features", "assistant", "engine_pool.rs"), "utf8");
 assert.match(enginePoolSource, /resolve_served_model\([\s\S]*?&model\.model,/);
+const rustVoiceTempWavPath = path.join(__dirname, "..", "src-tauri", "src", "features", "voice", "temp_wav.rs");
+const rustVoiceTempWavSource = fs.readFileSync(rustVoiceTempWavPath, "utf8");
 const chatPath = path.join(__dirname, "..", "src", "features", "chat", "ChatView.jsx");
 const chatSource = fs.readFileSync(chatPath, "utf8");
 const routerPath = path.join(__dirname, "..", "src", "features", "voice-composer", "VoiceShortcutRouter.jsx");
@@ -583,19 +585,29 @@ assert.doesNotMatch(
   /voiceEdit(?:PreviewTitle|Apply|ApplyAndSend|Cancel|Original|Result)[^;\n]*\|\| '[^']+'/,
   "voice edit preview must not add single-language fallback copy in the component",
 );
-assert.match(rustVoiceSource, /struct VoiceTempWav/);
+assert.match(rustVoiceTempWavSource, /struct VoiceTempWav/);
 // Temp WAVs use tempfile::NamedTempFile: unpredictable name, 0600 perms,
 // deleted on drop; never revert to self-built pid+millisecond names
 // (predictable and world-readable at 0644).
 assert.match(
-  rustVoiceSource,
+  rustVoiceTempWavSource,
   /file: tempfile::NamedTempFile[\s\S]*?tempfile::Builder::new\(\)[\s\S]*?\.tempfile\(\)\?/,
   "temp wav must use tempfile::NamedTempFile",
 );
 assert.doesNotMatch(
-  rustVoiceSource,
+  rustVoiceTempWavSource,
   /std::process::id\(\)/,
   "temp wav name must not be self-built from pid and milliseconds",
+);
+assert.match(
+  rustVoiceTempWavSource,
+  /write_all\(audio_bytes\)\?[\s\S]*?flush\(\)\?[\s\S]*?into_temp_path\(\)/,
+  "temp wav must close its NamedTempFile handle before external ASR reopens the path",
+);
+assert.match(
+  rustVoiceSource,
+  /VoiceTempWav::create\(\)[\s\S]*?write_and_close\(&audio_bytes\)[\s\S]*?recognize_native\(&wav_path/,
+  "voice transcription must close the temp WAV before starting native ASR",
 );
 const committedAudioDir = path.join(__dirname, "fixtures", "voice-audio-samples");
 assert.ok(
