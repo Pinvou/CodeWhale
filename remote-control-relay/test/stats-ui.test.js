@@ -71,7 +71,14 @@ test("behavior analytics views render alongside the device dashboard", async () 
     assert.ok(document.querySelector("#modelRows"));
     assert.ok(document.querySelector("#versionQualityRows"));
     assert.ok(document.querySelector("#behaviorMeta"));
+    assert.deepEqual(
+      [...document.querySelectorAll(".behavior-range[data-behavior-section]")]
+        .map(control => control.dataset.behaviorSection)
+        .sort(),
+      ["activation", "errors", "models", "scenes", "summary", "toolCalls", "toolInstalls", "versions", "voice"],
+    );
     assert.match(statsHtml, /WEVTA 是可观测价值下界/);
+    assert.match(statsHtml, /固定口径/);
     assert.match(statsHtml, /样本不足 30 时不展示百分比/);
     assert.doesNotMatch(statsHtml, /细分组安装数低于隐私阈值|细分组已抑制|隐私分组阈值/);
     assert.match(statsHtml, /主体：安装实例/);
@@ -111,7 +118,7 @@ test("behavior analyst role never requests or exposes device-level views", async
               task_total_duration_p50_ms: null,
               task_total_duration_p90_ms: null,
             },
-          } : { rows: [], funnel_rows: [], suppressed_group_count: 0 });
+          } : { range: "30", rows: [], funnel_rows: [], suppressed_group_count: 0 });
         return { ok: true, status: 200, json: async () => value };
       };
       window.setInterval = () => 1;
@@ -129,6 +136,163 @@ test("behavior analyst role never requests or exposes device-level views", async
     assert.equal(requested.some(url => url.endsWith("/overview") && !url.includes("/behavior/")), false);
     assert.match(document.querySelector("#taskLatency").textContent, /—/);
     assert.doesNotMatch(document.querySelector("#taskLatency").textContent, /0 ms/);
+  } finally {
+    dom.window.close();
+  }
+});
+
+test("behavior ranges refresh only the selected overview or table section", async () => {
+  const requested = [];
+  let failModelsToday = false;
+  let mismatchScenesToday = false;
+  const rangeValue = (range) => ({ today: 1, 7: 7, 30: 30 })[range] || 30;
+  const dom = new JSDOM(statsHtml, {
+    runScripts: "dangerously",
+    url: "https://www.pinvou.com/pinvou3/stats",
+    beforeParse(window) {
+      window.fetch = async (url) => {
+        const path = String(url);
+        requested.push(path);
+        if (path.endsWith("/session")) {
+          return { ok: true, status: 200, json: async () => ({ role: "behavior_analyst" }) };
+        }
+        const parsed = new URL(path, "https://www.pinvou.com");
+        const range = parsed.searchParams.get("range") || "30";
+        const value = rangeValue(range);
+        if (path.includes("/behavior/overview")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              generated_at: Date.now(),
+              range,
+              data_status: "ready",
+              data_quality: { confidence: "sufficient", warnings: [], task_sample_size: value },
+              metrics: {
+                task_success_count: value,
+                weekly_successful_task_installations: 900,
+                wevta_installations: 800,
+                wevta_rate: 0.8,
+                explicit_value_confidence: "sufficient",
+                positive_feedback_installations: 700,
+                response_copied_installations: 600,
+                artifact_exported_installations: 500,
+                negative_feedback_rate: 0.1,
+              },
+              retention: {
+                d1: { eligible_installations: 100, retained_installations: 50, retention_rate: 0.5, confidence: "sufficient" },
+                d7: { eligible_installations: 90, retained_installations: 36, retention_rate: 0.4, confidence: "sufficient" },
+                d30: { eligible_installations: 80, retained_installations: 24, retention_rate: 0.3, confidence: "sufficient" },
+              },
+              funnels: {
+                activation: { cohort_installations: value, confidence: "sufficient" },
+                voice: { entry_clicked: value, confidence: "sufficient" },
+              },
+              error_categories: { [`error-${range}`]: value },
+              version_quality: [{ app_version: `version-${range}`, platform: "windows", arch: "x64", sample_size: value, confidence: "sufficient" }],
+            }),
+          };
+        }
+        if (path.includes("/behavior/tools") && parsed.searchParams.get("type") === "call") {
+          return { ok: true, status: 200, json: async () => ({ range, rows: [{ tool_name: `calls-${range}`, call_count: value }] }) };
+        }
+        if (path.includes("/behavior/tools") && parsed.searchParams.get("type") === "install") {
+          return { ok: true, status: 200, json: async () => ({ range, funnel_rows: [{ tool_name: `installs-${range}`, impression_count: value }] }) };
+        }
+        if (path.includes("/behavior/scenes")) {
+          const responseRange = mismatchScenesToday && range === "today" ? "30" : range;
+          return { ok: true, status: 200, json: async () => ({ range: responseRange, rows: [{ scene_l1: `scenes-${range}`, impression_count: value, confidence: "sufficient" }] }) };
+        }
+        if (path.includes("/behavior/models")) {
+          if (failModelsToday && range === "today") return { ok: false, status: 500, json: async () => ({}) };
+          return { ok: true, status: 200, json: async () => ({ range, rows: [{ model_key: `models-${range}`, use_count: value, confidence: "sufficient" }] }) };
+        }
+        return { ok: true, status: 200, json: async () => ({}) };
+      };
+      window.setInterval = () => 1;
+      window.clearInterval = () => {};
+    },
+  });
+
+  try {
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    const { document } = dom.window;
+    const activeRange = section => document.querySelector(`[data-behavior-section="${section}"] button.active`)?.dataset.range;
+    const rowText = id => document.querySelector(`#${id}`)?.textContent || "";
+
+    assert.equal(document.querySelector("#taskSuccess").textContent, "30");
+    assert.equal(document.querySelector('[data-behavior-section="summary"] [data-range="30"]').getAttribute("aria-pressed"), "true");
+    assert.match(rowText("activationFunnelRows"), /^30/);
+    assert.match(rowText("voiceFunnelRows"), /^30/);
+    assert.match(rowText("toolCallRows"), /calls-30/);
+    const fixedMetrics = () => [
+      document.querySelector("#valueWsta").textContent,
+      document.querySelector("#valueWevta").textContent,
+      document.querySelector("#valueWevtaRate").textContent,
+      document.querySelector("#valueSignals").textContent,
+      document.querySelector("#retentionD1").textContent,
+      document.querySelector("#retentionD7").textContent,
+      document.querySelector("#retentionD30").textContent,
+    ];
+    const initialFixedMetrics = fixedMetrics();
+
+    let requestStart = requested.length;
+    document.querySelector('[data-behavior-section="toolCalls"] [data-range="today"]').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    assert.deepEqual(requested.slice(requestStart), ["/pinvou3/stats/api/behavior/tools?range=today&type=call"]);
+    assert.equal(activeRange("toolCalls"), "today");
+    assert.equal(document.querySelector('[data-behavior-section="toolCalls"] [data-range="today"]').getAttribute("aria-pressed"), "true");
+    assert.match(rowText("toolCallRows"), /calls-today/);
+    assert.equal(document.querySelector("#taskSuccess").textContent, "30");
+    assert.match(rowText("activationFunnelRows"), /^30/);
+
+    requestStart = requested.length;
+    document.querySelector('[data-behavior-section="activation"] [data-range="7"]').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    assert.deepEqual(requested.slice(requestStart), ["/pinvou3/stats/api/behavior/overview?range=7"]);
+    assert.equal(activeRange("activation"), "7");
+    assert.match(rowText("activationFunnelRows"), /^7/);
+    assert.match(rowText("voiceFunnelRows"), /^30/);
+    assert.equal(document.querySelector("#taskSuccess").textContent, "30");
+
+    requestStart = requested.length;
+    document.querySelector('[data-behavior-section="summary"] [data-range="today"]').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    assert.deepEqual(requested.slice(requestStart), ["/pinvou3/stats/api/behavior/overview?range=today"]);
+    assert.equal(activeRange("summary"), "today");
+    assert.equal(document.querySelector("#taskSuccess").textContent, "1");
+    assert.deepEqual(fixedMetrics(), initialFixedMetrics);
+    assert.match(rowText("activationFunnelRows"), /^7/);
+    assert.match(rowText("voiceFunnelRows"), /^30/);
+
+    requestStart = requested.length;
+    document.querySelector("#refreshButton").click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 20));
+    const refreshRequests = requested.slice(requestStart);
+    assert.equal(refreshRequests.filter(path => path.includes("/behavior/overview?range=today")).length, 1);
+    assert.equal(refreshRequests.filter(path => path.includes("/behavior/overview?range=7")).length, 1);
+    assert.equal(refreshRequests.filter(path => path.includes("/behavior/overview?range=30")).length, 1);
+    assert.equal(activeRange("summary"), "today");
+    assert.equal(activeRange("activation"), "7");
+    assert.equal(activeRange("toolCalls"), "today");
+    assert.match(rowText("toolCallRows"), /calls-today/);
+
+    failModelsToday = true;
+    requestStart = requested.length;
+    document.querySelector('[data-behavior-section="models"] [data-range="today"]').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    assert.deepEqual(requested.slice(requestStart), ["/pinvou3/stats/api/behavior/models?range=today"]);
+    assert.equal(activeRange("models"), "30");
+    assert.match(rowText("modelRows"), /models-30/);
+    assert.equal(document.querySelector('[data-behavior-section="models"]').getAttribute("aria-busy"), "false");
+
+    mismatchScenesToday = true;
+    requestStart = requested.length;
+    document.querySelector('[data-behavior-section="scenes"] [data-range="today"]').click();
+    await new Promise(resolve => dom.window.setTimeout(resolve, 10));
+    assert.deepEqual(requested.slice(requestStart), ["/pinvou3/stats/api/behavior/scenes?range=today"]);
+    assert.equal(activeRange("scenes"), "30");
+    assert.match(rowText("sceneRows"), /scenes-30/);
   } finally {
     dom.window.close();
   }
