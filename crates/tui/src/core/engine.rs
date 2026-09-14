@@ -2133,6 +2133,9 @@ impl Engine {
                 turn_id: turn_id.clone(),
                 created_at: chrono::Utc::now(),
                 route: None,
+                // A composer shell command has no host submission envelope to
+                // correlate with.
+                submission_id: None,
             })
             .await;
 
@@ -2848,6 +2851,9 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::Runtime,
+                // Background shell completion wake: no host submission to
+                // correlate with.
+                None,
             )
             .await;
     }
@@ -2910,6 +2916,7 @@ impl Engine {
                         verbosity,
                         provenance,
                         turn_tool_security,
+                        submission_id,
                     } => {
                         let configured_security = self.config.turn_tool_security.clone();
                         let previous_turn_was_restricted = self.control_plane_restricted;
@@ -2959,6 +2966,7 @@ impl Engine {
                             hook_executor,
                             verbosity,
                             provenance,
+                            submission_id,
                         )
                         .await;
                         if self.control_plane_restricted {
@@ -3084,6 +3092,9 @@ impl Engine {
                                 self.config.hook_executor.clone(),
                                 self.config.verbosity.clone(),
                                 UserInputProvenance::Runtime,
+                                // Engine-scheduled goal continuation: no host
+                                // submission to correlate with.
+                                None,
                             )
                             .await;
                     }
@@ -3611,7 +3622,10 @@ impl Engine {
                         }
                         self.handle_purge().await;
                     }
-                    Op::EditLastTurn { new_message } => {
+                    Op::EditLastTurn {
+                        new_message,
+                        submission_id,
+                    } => {
                         // `/edit` immediately starts another model turn but
                         // carries no replacement process-local policy. A fresh
                         // SendMessage is the only operation that can change
@@ -3702,6 +3716,7 @@ impl Engine {
                             self.config.hook_executor.clone(),
                             self.config.verbosity.clone(),
                             UserInputProvenance::ExternalUser,
+                            submission_id,
                         )
                         .await;
                     }
@@ -4459,6 +4474,9 @@ impl Engine {
                 self.config.hook_executor.clone(),
                 self.config.verbosity.clone(),
                 UserInputProvenance::SubAgentHandoff,
+                // Idle sub-agent completion resume: no host submission to
+                // correlate with.
+                None,
             )
             .await;
         if !outcome.started() {
@@ -5236,6 +5254,7 @@ impl Engine {
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
         provenance: UserInputProvenance,
+        submission_id: Option<String>,
     ) -> SendMessageOutcome {
         let mut goal_objective = goal_objective;
         let mut goal_token_budget = goal_token_budget;
@@ -5485,6 +5504,10 @@ impl Engine {
                 turn_id: turn.id.clone(),
                 created_at: turn_started_at,
                 route: Some(turn_route),
+                // Echo the host's correlation token (`None` when this turn
+                // was self-started without one) so the host can bind its
+                // submit-window actions to the turn that actually started.
+                submission_id,
             })
             .await;
 

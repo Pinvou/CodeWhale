@@ -317,6 +317,20 @@ pub enum Op {
         provenance: UserInputProvenance,
         /// Optional process-local security authority for this turn.
         turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
+        /// Host-supplied correlation token for this submission, echoed
+        /// verbatim on the turn's `Event::TurnStarted`. Hosts that arm
+        /// submit→`TurnStarted` window actions (e.g. a deferred stop replay)
+        /// use the echo to bind those actions to the turn that actually
+        /// started: a runtime self-started turn (idle sub-agent completion,
+        /// background shell wake, goal continuation) and the in-process
+        /// composer shell command turn never carry a submission id, so their
+        /// `TurnStarted` cannot be mistaken for the host's pending submission
+        /// even when it overtakes it in the event stream (Pinvou
+        /// pinvou-agent#254). `None` for callers that do not correlate. The
+        /// token only survives the in-process `EngineHandle` path: the wire
+        /// op projection and the durable-runtime submission path carry none,
+        /// so hosts submitting over those channels cannot correlate.
+        submission_id: Option<String>,
     },
 
     /// Re-check and dispatch an interactive goal continuation when this
@@ -520,7 +534,12 @@ pub enum Op {
     /// Edit the last user message: remove the last user+assistant exchange
     /// from the session, then re-send with the new content.
     #[allow(dead_code)]
-    EditLastTurn { new_message: String },
+    EditLastTurn {
+        new_message: String,
+        /// Host-supplied correlation token, echoed on the replayed turn's
+        /// `Event::TurnStarted` (see `Op::SendMessage::submission_id`).
+        submission_id: Option<String>,
+    },
 
     /// Enable or disable the background advisor watcher for this session.
     /// When enabled, a fire-and-forget background task runs after each turn

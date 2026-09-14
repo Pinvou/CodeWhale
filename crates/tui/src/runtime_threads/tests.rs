@@ -5259,6 +5259,7 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
                     turn_id: "engine_turn_1".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -5353,6 +5354,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             turn_id: "engine_route_receipt".to_string(),
             created_at: started_at,
             route: None,
+            submission_id: None,
         })
         .await?;
     harness
@@ -5482,6 +5484,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
             turn_id: second_engine_turn.to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
     harness
@@ -5556,6 +5559,7 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
                     turn_id: "engine_empty_turn".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -5643,6 +5647,7 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                     turn_id: "engine_empty_after_control_status".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -5698,6 +5703,7 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
                     turn_id: "engine_error_then_complete".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -6441,6 +6447,7 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
                     turn_id: format!("engine_turn_{turn_index}"),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -6672,6 +6679,7 @@ async fn host_goal_loop_kickoff_arms_one_continuation_and_parks_at_engine_cap() 
                     turn_id: format!("engine_goal_{pass}"),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -6784,6 +6792,7 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     turn_id: "engine_goal_no_update".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -6868,6 +6877,7 @@ async fn host_goal_loop_skips_rearm_without_update_goal_and_after_failed_pass() 
                     turn_id: "engine_goal_failed".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = failed_tx_event
@@ -6959,6 +6969,7 @@ async fn host_goal_loop_mirrors_terminal_snapshot_and_does_not_rearm() -> Result
                         turn_id: format!("engine_{status}"),
                         created_at: chrono::Utc::now(),
                         route: None,
+                        submission_id: None,
                     })
                     .await;
                 let _ = tx_event
@@ -7109,6 +7120,7 @@ async fn interrupt_turn_marks_interrupted_after_cleanup() -> Result<()> {
                     turn_id: "engine_turn_interrupt".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             let _ = tx_event
@@ -7812,6 +7824,7 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
             turn_id: "snapshot_terminal".to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
     harness
@@ -7991,6 +8004,7 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
             turn_id: "delta_snapshot".to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
     harness
@@ -8112,6 +8126,7 @@ async fn thread_detail_delta_boundary_is_replay_idempotent() -> Result<()> {
             turn_id: "delta_boundary".to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
     harness
@@ -8349,6 +8364,7 @@ async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() ->
             turn_id: "dynamic_result".to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
 
@@ -8508,6 +8524,7 @@ async fn dynamic_tool_result_receipt_outlives_canceled_delivery_future() -> Resu
             turn_id: "dynamic_detached_settlement".to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
 
@@ -9448,6 +9465,7 @@ async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
             turn_id: "dynamic_timeout".to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
 
@@ -9520,6 +9538,7 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
             turn_id: "dynamic_cancel".to_string(),
             created_at: Utc::now(),
             route: None,
+            submission_id: None,
         })
         .await?;
 
@@ -10190,6 +10209,7 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                     turn_id: "engine_turn_steer".to_string(),
                     created_at: chrono::Utc::now(),
                     route: None,
+                    submission_id: None,
                 })
                 .await;
             if let Some(steer) = rx_steer.recv().await {
@@ -10706,6 +10726,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                             turn_id: "engine_turn_auto".to_string(),
                             created_at: chrono::Utc::now(),
                             route: None,
+                            submission_id: None,
                         })
                         .await;
                     let _ = tx_event

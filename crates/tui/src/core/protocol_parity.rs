@@ -472,12 +472,14 @@ pub fn event_to_protocol(event: &Event, ids: &ProtocolIds) -> wire::EventMsg {
             turn_id,
             created_at,
             route,
+            submission_id,
         } => wire::EventMsg::TurnStarted {
             thread_id,
             session_id,
             turn_id: turn_id.clone(),
             created_at: *created_at,
             route: route.as_ref().map(route_to_wire),
+            submission_id: submission_id.clone(),
         },
         Event::ToolRequestSnapshot { snapshot } => wire::EventMsg::ToolRequestSnapshot {
             thread_id,
@@ -929,6 +931,11 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             verbosity,
             provenance,
             turn_tool_security: _,
+            // The protocol op has no correlation twin; the token is
+            // host-process-local by design. A future wire-op submitter would
+            // see `TurnStarted.submission_id` always absent and could not
+            // correlate submissions on that channel.
+            submission_id: _,
         } => wire_op::Op::SendMessage {
             content: content.clone(),
             mode: app_mode_str(*mode).to_string(),
@@ -1123,7 +1130,10 @@ pub fn op_to_protocol(op: &Op) -> wire_op::Op {
             config_path: config_path.clone(),
         },
         Op::PurgeContext => wire_op::Op::PurgeContext,
-        Op::EditLastTurn { new_message } => wire_op::Op::EditLastTurn {
+        Op::EditLastTurn {
+            new_message,
+            submission_id: _,
+        } => wire_op::Op::EditLastTurn {
             new_message: new_message.clone(),
         },
         Op::SetAdvisorEnabled { enabled } => wire_op::Op::SetAdvisorEnabled { enabled: *enabled },
@@ -1236,6 +1246,9 @@ mod tests {
                 turn_id: "turn-1".into(),
                 created_at: chrono::Utc::now(),
                 route: None,
+                // A host-stamped token, not `None`: the projection must carry
+                // it verbatim or the assertion on `events[7]` below fails.
+                submission_id: Some("sub-host-1".into()),
             },
             Event::TurnComplete {
                 usage: usage.clone(),
@@ -1310,6 +1323,13 @@ mod tests {
                 ..
             }
         ));
+        // The host correlation token must cross the projection verbatim: the
+        // app forwarder binds its submit-window actions to this echo, so a
+        // silently dropped mapping would defeat the contract (pinvou-agent#254).
+        assert_eq!(
+            serde_json::to_value(events[7].to_protocol(&ids)).unwrap()["submission_id"],
+            json!("sub-host-1")
+        );
         assert_eq!(
             serde_json::to_value(events[6].to_protocol(&ids)).unwrap()["result"],
             json!({"outcome": "err", "error": {"kind": "timeout", "seconds": 9}})
@@ -1372,6 +1392,7 @@ mod tests {
             Op::PurgeContext,
             Op::EditLastTurn {
                 new_message: "again".into(),
+                submission_id: None,
             },
             Op::SetAdvisorEnabled { enabled: true },
             Op::Shutdown,

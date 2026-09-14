@@ -355,6 +355,14 @@ pub enum EventMsg {
         created_at: DateTime<Utc>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         route: Option<TurnRoute>,
+        /// Host submission correlation echo (see the TUI `Event::TurnStarted`
+        /// of the same name): the token the host stamped on the originating
+        /// `SendMessage`/`EditLastTurn`, `None` for runtime self-started
+        /// turns. Additive and default-absent on the wire. Only in-process
+        /// engines can stamp a token — the wire `Op` carries no correlation
+        /// field — so wire consumers only ever observe `None` here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        submission_id: Option<String>,
     },
     /// Bounded tool-field projection from a prepared model-client request
     /// (`ToolInspectionSnapshot` serialized).
@@ -1012,6 +1020,7 @@ mod tests {
                 turn_id: "turn-1".into(),
                 created_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
                 route: Some(route.clone()),
+                submission_id: None,
             },
             EventMsg::ToolRequestSnapshot {
                 thread_id: t.clone(),
@@ -1399,5 +1408,45 @@ mod tests {
         assert!(!json.contains("channel"), "{json}");
         let back: EventMsg = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
+    }
+
+    /// The wire contract the app-side forwarder relies on (Pinvou
+    /// pinvou-agent#254): a host-stamped `submission_id` survives the wire
+    /// verbatim, a `None` token stays absent, and a payload from a producer
+    /// that predates the field still deserializes (`serde(default)`).
+    #[test]
+    fn turn_started_submission_id_is_additive_and_default_absent() {
+        let msg = EventMsg::TurnStarted {
+            thread_id: ThreadId::new(),
+            session_id: SessionId::new(),
+            turn_id: "turn-1".into(),
+            created_at: DateTime::<Utc>::from_timestamp(1, 0).unwrap(),
+            route: None,
+            submission_id: Some("sub-host-1".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains(r#""submission_id":"sub-host-1""#),
+            "a host-stamped token must be serialized: {json}"
+        );
+        let back: EventMsg = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+
+        let none = EventMsg::TurnStarted {
+            thread_id: ThreadId::new(),
+            session_id: SessionId::new(),
+            turn_id: "turn-2".into(),
+            created_at: DateTime::<Utc>::from_timestamp(2, 0).unwrap(),
+            route: None,
+            submission_id: None,
+        };
+        let value = serde_json::to_value(&none).unwrap();
+        assert!(
+            value.get("submission_id").is_none(),
+            "a self-started turn's None token must stay absent on the wire: {value}"
+        );
+        // An older producer that predates the field: the absent key defaults.
+        let back: EventMsg = serde_json::from_value(value).unwrap();
+        assert_eq!(back, none);
     }
 }
