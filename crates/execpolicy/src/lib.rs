@@ -313,8 +313,10 @@ pub struct ExecPolicyContext<'a> {
     pub ask_for_approval: AskForApproval,
     /// The sandbox mode in effect, if any (e.g. `"workspace-write"`).
     pub sandbox_mode: Option<&'a str>,
-    /// Additional workspace roots for path/scope matching; `cwd` remains the
-    /// primary root. Empty preserves the historical single-root matching.
+    /// Additional workspace roots for ask/deny path and scope matching;
+    /// `cwd` remains the primary root. Allow rules keep matching the primary
+    /// root only, so an attached root never widens auto-approval. Empty
+    /// preserves the historical single-root matching.
     pub workspace_roots: Vec<std::path::PathBuf>,
 }
 
@@ -432,8 +434,9 @@ impl ExecPolicyEngine {
     fn matching_ask_rule(&self, ctx: &ExecPolicyContext<'_>) -> Option<ToolAskRule> {
         let tool = ctx.tool.unwrap_or("exec_shell");
         // Boundary roots for path/scope matching: the primary cwd plus any
-        // additional roots. A rule path or scope that resolves against any
-        // single root matches; an empty root set keeps single-root behavior.
+        // additional roots. An ask/deny rule path or scope that resolves
+        // against any single root matches — that only adds prompts or blocks;
+        // an empty root set keeps single-root behavior.
         let mut roots: Vec<String> = vec![ctx.cwd.to_string()];
         for root in &ctx.workspace_roots {
             let root = root.to_string_lossy().into_owned();
@@ -461,9 +464,19 @@ impl ExecPolicyEngine {
             .filter(|(_, rule)| rule.tool == tool)
             .filter(|(_, rule)| {
                 rule.workspace.as_deref().is_none_or(|workspace| {
-                    roots
-                        .iter()
-                        .any(|root| workspace_scope_matches(workspace, root))
+                    // An Allow rule widens auto-approval, so its workspace
+                    // scope keeps matching the primary root only: matching
+                    // every attached root would let a rule scoped to one
+                    // repository auto-approve the same command executed
+                    // against a different one (exec always runs in the
+                    // session cwd).
+                    if rule.action == PermissionAction::Allow {
+                        workspace_scope_matches(workspace, ctx.cwd)
+                    } else {
+                        roots
+                            .iter()
+                            .any(|root| workspace_scope_matches(workspace, root))
+                    }
                 })
             })
             .filter(|(_, rule)| match rule.command.as_deref() {
@@ -484,19 +497,23 @@ impl ExecPolicyEngine {
                     // fallback runs on the original call path regardless of
                     // the per-root outcome, so relative semantics and
                     // single-root behavior are unchanged.
-                    roots
-                        .iter()
-                        .zip(&normalized_paths)
-                        .any(|(root, normalized_path)| {
-                            match (
-                                normalize_workspace_relative_path(pattern, root),
-                                normalized_path.as_deref(),
-                            ) {
-                                (Some(ws_rule), Some(ws_call)) => ws_rule == ws_call,
-                                _ => false,
-                            }
-                        })
-                        || absolute_path_rule_matches(pattern, call_path)
+                    //
+                    // Like the workspace scope above, an Allow rule keeps its
+                    // rooted path matching on the primary root only.
+                    let rooted_roots = if rule.action == PermissionAction::Allow {
+                        &roots[..1]
+                    } else {
+                        &roots[..]
+                    };
+                    rooted_roots.iter().zip(&normalized_paths).any(
+                        |(root, normalized_path)| match (
+                            normalize_workspace_relative_path(pattern, root),
+                            normalized_path.as_deref(),
+                        ) {
+                            (Some(ws_rule), Some(ws_call)) => ws_rule == ws_call,
+                            _ => false,
+                        },
+                    ) || absolute_path_rule_matches(pattern, call_path)
                 }
                 (Some(_), None) => false,
                 (None, _) => true,
@@ -2519,13 +2536,33 @@ mod tests {
     }
 
     #[test]
-    fn workspace_scoped_rule_matches_any_workspace_root() {
+    fn workspace_scoped_allow_rule_stays_primary_root_scoped() {
         let rule = ToolAskRule::exec_shell("git push").into_exact_workspace_allow("/shared");
         let engine = ExecPolicyEngine::with_rulesets(vec![
             Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
         ]);
 
+        // Inside the scope the rule auto-approves as before.
         let scoped = engine
+            .check(ExecPolicyContext {
+                command: "git push",
+                cwd: "/shared",
+                tool: Some("exec_shell"),
+                path: None,
+                ask_for_approval: AskForApproval::UnlessTrusted,
+                sandbox_mode: Some("workspace-write"),
+                workspace_roots: Vec::new(),
+            })
+            .unwrap();
+        assert!(
+            scoped.allow && !scoped.requires_approval,
+            "rule scoped to the primary root must apply: {scoped:?}"
+        );
+
+        // An attached root must not widen the auto-approval to a session
+        // running against a different root: exec always runs in the session
+        // cwd, so the same command there may target a different repository.
+        let unscoped = engine
             .check(ExecPolicyContext {
                 command: "git push",
                 cwd: "/workspace",
@@ -2536,13 +2573,26 @@ mod tests {
                 workspace_roots: vec![std::path::PathBuf::from("/shared")],
             })
             .unwrap();
-        assert!(
-            scoped.allow && !scoped.requires_approval,
-            "rule scoped to an additional root must apply: {scoped:?}"
-        );
+        assert_eq!(unscoped.matched_rule, None);
+    }
 
-        // Without the root in the set the scope does not match.
-        let unscoped = engine
+    #[test]
+    fn workspace_scoped_ask_rule_matches_any_workspace_root() {
+        // Unlike Allow, a prompting rule scoped to an attached root still
+        // fires there: multi-root matching for ask/deny only ever adds a
+        // prompt or a block, never an auto-approval.
+        let rule = ToolAskRule {
+            tool: "exec_shell".into(),
+            command: Some("git push".into()),
+            command_exact: true,
+            path: None,
+            workspace: Some("/shared".into()),
+            action: PermissionAction::Ask,
+        };
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]);
+        let decision = engine
             .check(ExecPolicyContext {
                 command: "git push",
                 cwd: "/workspace",
@@ -2550,10 +2600,14 @@ mod tests {
                 path: None,
                 ask_for_approval: AskForApproval::UnlessTrusted,
                 sandbox_mode: Some("workspace-write"),
-                workspace_roots: Vec::new(),
+                workspace_roots: vec![std::path::PathBuf::from("/shared")],
             })
             .unwrap();
-        assert_eq!(unscoped.matched_rule, None);
+        assert_eq!(decision.matched_action, Some(PermissionAction::Ask));
+        assert!(
+            decision.requires_approval,
+            "ask rule scoped to an attached root must prompt: {decision:?}"
+        );
     }
 
     // ── deny / allow action tests ──────────────────────────────────────────
