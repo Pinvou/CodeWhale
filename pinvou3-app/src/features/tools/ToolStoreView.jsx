@@ -10,7 +10,7 @@ import { localizeTool, mergeConfigFields, TsActionBtn, tsCategories, tsSkillIcon
 import { MAX_SKILL_ZIP_BYTES, pickSkillDrop, fileToBase64 } from './skill-import-logic.js';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
 import { can, isWeb } from '../../shared/platform.js';
-import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert } from './connector-ui-state.js';
+import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert, releaseBusy } from './connector-ui-state.js';
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { pathBasename } from '../../shared/path-utils.js';
@@ -529,13 +529,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (ph !== prevPhase) {
             if (ph === 'done') {
               if (finishCfg) finishCfg(toolId, true);
-              setBusyId(null);
+              // 只释放自己的槽位(见 releaseBusy):完成事件可能晚到,彼时 busyId 已易主。
+              setBusyId(busy => releaseBusy(busy, toolId));
               loadBackendState();
               setAlert({ visible: true, loading: false, title: doneTitle, subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
               if (finishCfg) finishCfg(toolId, false);
-              setBusyId(null);
+              setBusyId(busy => releaseBusy(busy, toolId));
             }
             prevPhase = ph;
           }
@@ -1365,7 +1366,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }));
         track(ev.listen('wecom:connected', () => {
           finishToolConfiguration('wecom', true);
-          setWecomQr(null); setBusyId(null);
+          setWecomQr(null); setBusyId(busy => releaseBusy(busy, 'wecom'));
           // 连上 → 按规则写技能(默认启用),企微技能即刻对模型可见;连接态经 readiness 重取。
           invokeTauri('wecom_apply_skills').catch(() => {});
           loadBackendState();
@@ -1375,9 +1376,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         track(ev.listen('wecom:error', (e) => {
           finishToolConfiguration('wecom', false);
           const p = e.payload || {};
-          setWecomQr(null); setBusyId(null);
+          setWecomQr(null); setBusyId(busy => releaseBusy(busy, 'wecom'));
           const failure = reportConnectorFailure('wecom', p, p.phase || 'authorize');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'wecom' });
+        }));
+        // 节流/等旧流程期间的进度,让用户看到"约 N 秒后出码"并能取消(见 sso_wait 弹窗状态)。
+        track(ev.listen('eip:sso_wait', (e) => {
+          const p = e.payload || {};
+          setEipSso({ url: null, qr: null, waitSeconds: p.seconds || 0, previousFlow: !!p.previous_flow });
         }));
         track(ev.listen('eip:sso', (e) => {
           const p = e.payload || {};
@@ -1385,16 +1391,22 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }));
         track(ev.listen('eip:connected', () => {
           finishToolConfiguration('eip', true);
-          setEipSso(null); setEipConnected(true); setBusyId(null);
+          // 只释放自己的忙碌槽位:用户可能已收起弹窗、并发起了另一个工具操作,那时
+          // 无条件清空会把别人未完成的忙碌态一起抹掉(按钮提前可点 → 重复操作)。
+          setEipSso(null); setEipConnected(true); setBusyId(busy => releaseBusy(busy, 'eip'));
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         }));
         track(ev.listen('eip:error', (e) => {
           finishToolConfiguration('eip', false);
           const p = e.payload || {};
-          setEipSso(null); setBusyId(null);
+          setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip'));
           const failure = reportConnectorFailure('eip', p, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
+        }));
+        track(ev.listen('zhidao:sso_wait', (e) => {
+          const p = e.payload || {};
+          setZhidaoSso({ url: null, qr: null, waitSeconds: p.seconds || 0, previousFlow: !!p.previous_flow });
         }));
         track(ev.listen('zhidao:sso', (e) => {
           const p = e.payload || {};
@@ -1402,14 +1414,14 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         }));
         track(ev.listen('zhidao:connected', () => {
           finishToolConfiguration('zhidao', true);
-          setZhidaoSso(null); setZhidaoConnected(true); setBusyId(null);
+          setZhidaoSso(null); setZhidaoConnected(true); setBusyId(busy => releaseBusy(busy, 'zhidao'));
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         }));
         track(ev.listen('zhidao:error', (e) => {
           finishToolConfiguration('zhidao', false);
           const p = e.payload || {};
-          setZhidaoSso(null); setBusyId(null);
+          setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao'));
           const failure = reportConnectorFailure('zhidao', p, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'zhidao' });
         }));
@@ -2142,11 +2154,18 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         beginToolConfiguration(findLocalizedTool('eip'), 'marketplace');
         setBusyId('eip');
         try {
-          await invokeTauri('eip_connect_begin');
+          const res = await invokeTauri('eip_connect_begin');
+          // 后端在等上一个流程归还门闩且超过上限:不是连接失败,提示稍后重试。
+          if (res && res.busy) {
+            finishToolConfiguration('eip', false);
+            setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip'));
+            setAlert({ visible: true, loading: false, connectorAlert: 'retry', isError: false, toolId: 'eip' });
+            return;
+          }
           // 后续:eip:sso 出登录地址 → 用户浏览器 SSO 登录 → eip:connected 收尾。
         } catch (e) {
           finishToolConfiguration('eip', false);
-          setEipSso(null); setBusyId(null);
+          setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip'));
           const failure = reportConnectorFailure('eip', e, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
         }
@@ -2171,10 +2190,17 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         beginToolConfiguration(findLocalizedTool('zhidao'), 'marketplace');
         setBusyId('zhidao');
         try {
-          await invokeTauri('zhidao_connect_begin');
+          const res = await invokeTauri('zhidao_connect_begin');
+          // 同 EIP:等上一个流程归还门闩超时,提示稍后重试而非报连接失败。
+          if (res && res.busy) {
+            finishToolConfiguration('zhidao', false);
+            setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao'));
+            setAlert({ visible: true, loading: false, connectorAlert: 'retry', isError: false, toolId: 'zhidao' });
+            return;
+          }
         } catch (e) {
           finishToolConfiguration('zhidao', false);
-          setZhidaoSso(null); setBusyId(null);
+          setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao'));
           const failure = reportConnectorFailure('zhidao', e, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'zhidao' });
         }
@@ -2441,12 +2467,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           })()}
           <ConnectorSsoDialog state={eipSso} name={storeCopy.toolNames.eip} copy={storeCopy}
             onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }); }}
-            onDismiss={() => { setEipSso(null); setBusyId(null); }}
-            onCancel={() => { finishToolConfiguration('eip', false); invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(null); }} />
+            onDismiss={() => { setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip')); }}
+            onCancel={() => { finishToolConfiguration('eip', false); invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip')); }} />
           <ConnectorSsoDialog state={zhidaoSso} name={storeCopy.toolNames.zhidao} copy={storeCopy}
             onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
-            onDismiss={() => { setZhidaoSso(null); setBusyId(null); }}
-            onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(null); }} />
+            onDismiss={() => { setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }}
+            onCancel={() => { finishToolConfiguration('zhidao', false); invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao')); }} />
           {/* 回收站子页面:点入口后整个插件中心内容区切换为回收站页面(非弹窗),
               返回按钮回到主列表;彻底删除二次确认仍用弹窗(见上方 purgeConfirm) */}
           {showRecycleBin && (

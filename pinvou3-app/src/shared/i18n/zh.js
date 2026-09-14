@@ -887,6 +887,8 @@ desktopHint:'请先在桌面端安装 Obsidian 并创建笔记库，然后在这
   connectedTool:name=>`已连接${name}`, disconnectedTool:name=>`已断开${name}`,
   connectedQuoted:name=>`已连接「${name}」`, installedQuoted:name=>`已安装「${name}」`, uninstalledQuoted:name=>`已卸载「${name}」`,
   connectFailed:name=>`${name}连接失败`, connectTitle:name=>`连接${name}`,
+  connectBusy:name=>`${name}上一个登录流程还在收尾`,
+  connectBusyHint:'它稍后会自己完成，请等几秒再点「连接」。',
   connectedBanner:name=>`已连接${name} · 官方技能已启用，可直接对它下指令`,
   connectedBannerIma:'已连接腾讯 ima · OpenAPI Skill 已启用，可直接对它下指令',
   uploadedSkill:'用户上传的技能',
@@ -1740,7 +1742,9 @@ dictZh["uiToolStore"]["sso"] = {
   "qrAlt": name=>`${name}登录二维码`,
   "generating": "二维码生成中…",
   "openBrowser": "在浏览器打开登录",
-  "waiting": "等待登录中…"
+  "waiting": "等待登录中…",
+  "throttled": seconds => `SSO 登录已被限流，约 ${seconds} 秒后生成二维码…`,
+  "previousFlow": "正在等待上一个登录流程退出…"
 };
 dictZh["uiToolStore"]["internalDetailDesc"] = "以你本人 SSO 身份直连 H3C 集团内部系统，浏览器或扫码登录，全程不填 key；数据经公司内网，不出集团。需连接公司内网使用。";
 dictZh["uiToolStore"]["internalUsageHint"] = "需连接公司内网 · 首次点「连接」后在浏览器或扫码完成 SSO 登录，无需填写 key";
