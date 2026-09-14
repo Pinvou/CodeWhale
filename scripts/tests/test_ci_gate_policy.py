@@ -10,7 +10,6 @@ PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
 MAC_BUILD_WORKFLOW = ROOT / ".github/workflows/mac-build.yml"
 PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
-CI_MEMGUARD = ROOT / "scripts/ci-memguard.sh"
 TAURI_MANIFEST = ROOT / "pinvou3-app/src-tauri/Cargo.toml"
 
 
@@ -108,16 +107,6 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"发布流程仍引用已退役网页模板: {retired_reference}",
             )
 
-    def test_rust_memguard_explains_policy_termination_in_ci_log(self):
-        memguard = CI_MEMGUARD.read_text(encoding="utf-8")
-        self.assertIn("内存占用过高", memguard)
-        self.assertIn("MemAvailable+SwapFree", memguard)
-        self.assertIn("CI 资源保护策略将终止", memguard)
-        self.assertIn(
-            "::error title=Rust CI 因内存占用过高被策略终止::",
-            memguard,
-        )
-
     def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
         verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
         verifier_gate = self.pr_workflow.split(
@@ -127,7 +116,10 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("--allow-registered-candidate", verifier_gate)
         self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
         self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
-        self.assertIn('PINVOU_CODEWHALE_TAG="pinvou-v0.9.5-r13"', verifier)
+        self.assertIn('PINVOU_CODEWHALE_BRANCH="pinvou3-clean"', verifier)
+        self.assertIn('PINVOU_CODEWHALE_TAG="pinvou-v0.9.12-r1"', verifier)
+        self.assertIn('[[ "$branch_target" != "$gitlink" ]]', verifier)
+        self.assertIn('[[ "$branch_target" != "$tag_target" ]]', verifier)
         self.assertIn("unknown argument", verifier)
 
     def test_pr_modes_and_stacked_pr_triggers_are_explicit(self):
@@ -378,7 +370,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "pinvou3-app/src-tauri/src/features/voice/voice_asr.rs",
             "pinvou3-app/src-tauri/src/features/updater/mod.rs",
             "pinvou3-app/src-tauri/src/features/future_feature/mod.rs",
-            "pinvou3-app/src-tauri/tests/headless_bridge_contract.rs",
+            "pinvou3-app/src-tauri/src/features/assistant/product_runtime/headless_bridge_contract_tests.rs",
         )
         for path in high_risk_examples:
             self.assertTrue(
@@ -478,9 +470,9 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
         # 16GB runner 失联防护:编译与执行拆成独立 step(失联后日志全丢,按 step
-        # 状态定位阶段),内存看门狗把 runner 失联转化为带日志的 step 失败,CI 关
-        # DWARF 缩小测试二进制降低链接内存峰值。三条腿(push/MQ 编译/MQ 执行)
-        # 都必须挂看门狗。
+        # 状态定位阶段),CI 关 DWARF 缩小测试二进制降低链接内存峰值。有效内存
+        # 由 job 开头的 zram/swap 扩容 step(scripts/ci-memory-setup.sh)提供;
+        # 看门狗已删除,不再抢先杀编译进程。
         self.assertIn(
             "- name: cargo test --lib --no-run（编译链接测试二进制）\n"
             "        if: ${{ github.event_name != 'push' }}",
@@ -497,11 +489,13 @@ class CiGatePolicyTests(unittest.TestCase):
             "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib",
             rust_test,
         )
-        self.assertEqual(rust_test.count("bash scripts/ci-memguard.sh &"), 4)
+        self.assertIn(
+            'sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+            rust_test,
+        )
+        self.assertNotIn("ci-memguard", self.pr_workflow)
+        self.assertNotIn("fallocate -l 3G", rust_test)
         self.assertIn('CARGO_PROFILE_DEV_CODEGEN_UNITS: "16"', rust_test)
-        self.assertIn("sudo fallocate -l 3G /mnt/pinvou-rust-test.swap", rust_test)
-        self.assertIn("sudo mkswap /mnt/pinvou-rust-test.swap", rust_test)
-        self.assertIn("sudo swapon /mnt/pinvou-rust-test.swap", rust_test)
         self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', rust_test)
         self.assertIn("timeout-minutes: 120", rust_test)
         self.assertIn(
@@ -510,6 +504,41 @@ class CiGatePolicyTests(unittest.TestCase):
             '-C link-arg=-Wl,--threads=1"',
             rust_test,
         )
+
+    def test_all_linux_jobs_enlarge_runner_memory(self):
+        # Every ubuntu-* job must run the zram/swap memory setup right after
+        # checkout; Windows/macOS jobs are out of scope (hosted images there
+        # have different memory characteristics).
+        # Only split at 2-space-indented `key:` lines (job/trigger boundaries),
+        # not at deeper indentation.
+        setup_step = "- name: Set up zram and swap"
+        # rust-lint 例外:该 job 在 Swatinem/rust-cache 恢复阶段与扩容后的
+        # 内存配置组合会稳定杀死 runner(5/5 复现),fmt/clippy 本身不是内存
+        # 密集型,不需要扩容层。
+        excluded_jobs = {"rust-lint"}
+        blocks = re.split(
+            r"\n  (?=[A-Za-z0-9_-]+:\s*$)", self.pr_workflow, flags=re.MULTILINE
+        )
+        linux_jobs = [
+            block
+            for block in blocks
+            if re.search(r"^    runs-on: ubuntu", block, flags=re.MULTILINE)
+            and block.strip().split(":", maxsplit=1)[0] not in excluded_jobs
+        ]
+        self.assertGreaterEqual(len(linux_jobs), 10)
+        for job in linux_jobs:
+            job_name = job.strip().split(":", maxsplit=1)[0]
+            self.assertIn(
+                setup_step,
+                job,
+                f"ubuntu job '{job_name}' must run scripts/ci-memory-setup.sh",
+            )
+            self.assertIn(
+                '"${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+                job,
+                f"ubuntu job '{job_name}' must invoke scripts/ci-memory-setup.sh"
+                " via an absolute path (some jobs set a run working-directory)",
+            )
 
     def test_windows_rust_test_parallel_phases_preserve_routing_and_coverage(self):
         # Both matrix legs retain the exact cumulative/high-risk route; splitting

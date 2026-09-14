@@ -20,6 +20,7 @@ const {
   parseEnvironmentFile,
   prepareCodexBridge,
   prepareChromeDevtoolsMcpForPlatform,
+  prepareWindowsRustcStackWrapper,
   prepareWindowsCodexBridge,
   prepareTauriArgs,
   runTauri,
@@ -253,6 +254,85 @@ Promise.all([accountRustCheck, fallbackRustCheck]).catch((error) => {
   process.exitCode = 1;
 });
 
+{
+  const scriptsPath = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-rustc-stack-wrapper-"));
+  const sourcePath = path.join(scriptsPath, "rustc-stack-wrapper.rs");
+  const wrapperPath = path.join(scriptsPath, "rustc-stack-wrapper.exe");
+  fs.writeFileSync(sourcePath, "fn main() {}\n");
+
+  const compileInvocations = [];
+  const environment = { RUSTUP_TOOLCHAIN: "fixture-toolchain" };
+  const prepared = prepareWindowsRustcStackWrapper({
+    environment,
+    platform: "win32",
+    scriptsPath,
+    log: () => {},
+    spawnCompiler: (command, args, options) => {
+      compileInvocations.push({ command, args, options });
+      fs.writeFileSync(wrapperPath, "fixture executable");
+      return { status: 0 };
+    },
+  });
+  assert.deepEqual(prepared, { path: wrapperPath, source: "compiled" });
+  assert.equal(environment.RUSTC_WRAPPER, wrapperPath);
+  assert.equal(compileInvocations.length, 1);
+  assert.equal(compileInvocations[0].command, "rustc");
+  assert.deepEqual(compileInvocations[0].args, ["-O", sourcePath, "-o", wrapperPath]);
+  assert.equal(compileInvocations[0].options.env.RUSTUP_TOOLCHAIN, "fixture-toolchain");
+  assert.equal(compileInvocations[0].options.windowsHide, true);
+
+  const cachedEnvironment = {};
+  const cached = prepareWindowsRustcStackWrapper({
+    environment: cachedEnvironment,
+    platform: "win32",
+    scriptsPath,
+    log: () => {},
+    spawnCompiler: () => {
+      throw new Error("a fresh wrapper must not be rebuilt");
+    },
+  });
+  assert.deepEqual(cached, { path: wrapperPath, source: "cached" });
+  assert.equal(cachedEnvironment.RUSTC_WRAPPER, wrapperPath);
+
+  const configuredEnvironment = { RUSTC_WRAPPER: "  C:\\custom\\rustc-wrapper.exe  " };
+  const configured = prepareWindowsRustcStackWrapper({
+    environment: configuredEnvironment,
+    platform: "win32",
+    scriptsPath,
+    log: () => {},
+    spawnCompiler: () => {
+      throw new Error("an explicit wrapper must not be rebuilt");
+    },
+  });
+  assert.deepEqual(configured, {
+    path: "C:\\custom\\rustc-wrapper.exe",
+    source: "environment",
+  });
+  assert.equal(configuredEnvironment.RUSTC_WRAPPER, "C:\\custom\\rustc-wrapper.exe");
+  assert.equal(
+    prepareWindowsRustcStackWrapper({
+      environment: {},
+      platform: "linux",
+      scriptsPath,
+      log: () => {},
+    }),
+    null,
+  );
+  fs.rmSync(wrapperPath);
+  assert.throws(
+    () => prepareWindowsRustcStackWrapper({
+      environment: {},
+      platform: "win32",
+      scriptsPath,
+      log: () => {},
+      spawnCompiler: () => ({ status: 1 }),
+    }),
+    /Failed to compile Windows rustc stack wrapper \(exit 1\)/,
+    "a failed wrapper build must stop before Cargo can fall back to the overflowing compiler stack",
+  );
+  fs.rmSync(scriptsPath, { recursive: true, force: true });
+}
+
 let preparedBridge = null;
 prepareCodexBridge({
   platform: "linux",
@@ -448,6 +528,11 @@ assert.match(
 );
 assert.match(
   buildSource,
+  /prepareWindowsRustcStackWrapper\(\{ environment: tauriEnvironment \}\);\s*return runTauri\(preparedArgs, \{ environment: tauriEnvironment \}\);/u,
+  "the direct npm/Tauri entry must inject the Windows compiler stack wrapper",
+);
+assert.match(
+  buildSource,
   /if \(hasTauriBuildCommand\) \{\s*prepareLinuxAsrRuntime\(\);/u,
   "Linux packaging must prepare the architecture-specific SenseVoice runtime before manifest generation",
 );
@@ -578,8 +663,8 @@ assert.equal(
   "runtime/asr/pinvou3-asr-shim.py",
 );
 assert.equal(
-  linux.bundle.resources["resources/platforms/linux/asr/SenseVoice.LICENSE"],
-  "runtime/asr/SenseVoice.LICENSE",
+  linux.bundle.resources["resources/platforms/linux/asr/LICENSE-SenseVoice.cpp"],
+  "runtime/asr/LICENSE-SenseVoice.cpp",
 );
 assert.equal(
   linux.bundle.resources["resources/platforms/linux/knowledge-host/"],

@@ -468,7 +468,8 @@
       steerFailed: "Interrupt failed (session unavailable or engine not running); your text was restored to the input",
       interruptQueuedFailed: "Interrupt & send failed; the message was restored to the queue",
       interruptBusy: "Another interrupt is already in progress; the message stays queued — retry in a moment",
-      compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactAuto: " (auto)",
+      compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactCancel: "Context compaction canceled", compactAuto: " (auto)",
+      toolGateDecision: "Permission gate", toolGateAllowed: "allowed", toolGateDenied: "denied", toolGateUnavailable: "could not review and denied", toolGateAgent: "agent", toolGateRisk: "risk",
       compactPruneMerged: "Auto-compaction: tool-result cleanup, messages unchanged",
       compactInactive: "The session engine is not running yet. Send a message before compacting the context",
       gpuUnavailable: "GPU info unavailable",
@@ -568,7 +569,8 @@
       steerFailed: "割り込みに失敗しました（セッション無効またはエンジン未起動）。内容は入力欄に復元しました",
       interruptQueuedFailed: "割り込み送信に失敗しました。メッセージはキューに復元しました",
       interruptBusy: "別の割り込みが進行中のため実行できません。メッセージはキューに残ります。しばらくしてから再試行してください",
-      compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactAuto: "（自動）",
+      compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactCancel: "コンテキストの圧縮をキャンセルしました", compactAuto: "（自動）",
+      toolGateDecision: "権限ゲート", toolGateAllowed: "許可", toolGateDenied: "拒否", toolGateUnavailable: "レビュー不能のため拒否", toolGateAgent: "エージェント", toolGateRisk: "リスク",
       compactPruneMerged: "自動圧縮: ツール結果を整理、メッセージ数は不変",
       compactInactive: "セッション Engine はまだ起動していません。メッセージを送信してからコンテキストを圧縮してください",
       gpuUnavailable: "GPU 情報を取得できません",
@@ -668,7 +670,8 @@
       steerFailed: "插队失败（会话不可用或引擎未运行），内容已恢复到输入框",
       interruptQueuedFailed: "插队发送失败，消息已恢复到排队区",
       interruptBusy: "已有打断正在进行，消息保留在排队区，请稍后重试",
-      compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactAuto: "（自动）",
+      compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactCancel: "已取消上下文压缩", compactAuto: "（自动）",
+      toolGateDecision: "权限闸门", toolGateAllowed: "允许", toolGateDenied: "拒绝", toolGateUnavailable: "无法审查并拒绝", toolGateAgent: "子智能体", toolGateRisk: "风险",
       compactPruneMerged: "自动压缩：已整理工具结果，消息数不变",
       compactInactive: "会话引擎尚未运行。请先发送一条消息，再压缩上下文",
       gpuUnavailable: "GPU 信息不可用",
@@ -1101,6 +1104,16 @@
       // set with the buffer and no consumer remains for its events.
       if (id && typeof chatFeature.purgeSteerState === "function") {
         chatFeature.purgeSteerState(id);
+      }
+      // The streaming markdown render trailing-edge timers are recorded per
+      // sid in a chat-events internal table; cancel them when the buffer is
+      // evicted/deleted so a timer cannot fire after the buffer is rebuilt
+      // (the callback has a currentStreamId guard, but clearing the entry is
+      // what avoids leaving a dangling timer across lifecycles).
+      // chatEventsFeature is initialized further down this file; purge only
+      // happens at runtime, so there is no TDZ concern.
+      if (id && chatEventsFeature && typeof chatEventsFeature.cancelStreamRenderTimers === "function") {
+        chatEventsFeature.cancelStreamRenderTimers(id);
       }
     },
     runSyncOnSession: runSyncOnSession, persistMessagesFor: persistMessagesFor,
@@ -1558,7 +1571,7 @@
 
   // ── Pub/Sub ──────────────────────────────────────────────────────
   var subscribers = [];
-  var STATE_SLICE_FIELDS = {
+  const STATE_SLICE_FIELDS = {
     platform: ["appVersion", "backendOnline", "platformCapabilities"],
     sessions: ["sessions", "archivedSessions", "activeSessionId", "sessionBusy", "draftEpoch"],
     chat: ["activeSkill", "artifacts", "artifactChange", "attachments", "busy", "chatItems", "composerDraft", "composerPrefill", "messages", "modeState", "planSnapshot", "queued", "thinking", "tokens", "turnDirtyArtifacts", "turnPresentedArtifacts", "turnTimeline"],
@@ -1576,6 +1589,10 @@
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
     teamRelay: ["teamRelay"],
+    // Registered by the projects feature (bridge/projects.js). Must stay in
+    // sync with APP_BRIDGE_STATE_DOMAINS in main.jsx — locked by
+    // tests/bridge_state_domains.test.mjs.
+    projects: ["projectsList"],
   };
   function snapshotStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
@@ -1936,15 +1953,13 @@
   function rerenderFromMessages(opts) {
     state.chatItems = [];
     itemIdSeq = 0;
-    // Replay re-adds every historical tool_use's metadata (including
-    // write/patch's large args) to toolMeta for tool_result backfill and
-    // never deletes after backfill — the residue resides in the buffer
-    // with the working set, and memory is bounded by the 32-entry
-    // all-session LRU cap. Durable replay clears first (when not live
-    // hydrating), reclaiming only orphan entries left by interrupted
-    // turns (the live event path itself stays insert/delete balanced);
-    // the replay then rebuilds the needed entries for the historical
-    // tool_uses inside messages.
+    // Replay rebuilds toolMeta only for historical tool_uses that still have a
+    // matching tool_result to backfill (write/patch's large args otherwise
+    // duplicate the whole transcript inside the 32-entry all-session LRU).
+    // Durable replay clears first (when not live hydrating), reclaiming only
+    // orphan entries left by interrupted turns (the live event path itself
+    // stays insert/delete balanced); entries are deleted again right after
+    // their tool_result backfill lookup — nothing reads them afterwards.
     if (!(opts && opts.keepLiveToolMeta)) toolMeta = {};
     // 卡牌事件按 pos 插回原位(pos=事件发生时的 messages 数)。让重载历史不割裂。
     var pe = Array.isArray(state.personaEvents) ? state.personaEvents : [];
@@ -2055,6 +2070,11 @@
               updateToolItem(c.tool_use_id, contentForCard, !c.is_error);
             }
           }
+          // Delete after backfill: the meta serves exactly this one
+          // tool_result restoration (a late duplicate tool_end exits early
+          // via toolCallAlreadyFinished); leftovers would keep historical
+          // args resident in the session buffer.
+          delete toolMeta[c.tool_use_id];
         }
         continue;
       }
@@ -2082,7 +2102,15 @@
             addChatItem({ type: "assistant", text: textBuf, html: renderMarkdown(textBuf), time: "", streaming: false });
             textBuf = "";
           }
-          toolMeta[b.id] = { name: b.name, args: b.input };
+          // Rebuild meta only for historical tool_use entries that still
+          // have a tool_result pending backfill (the backfill loop above
+          // deletes them right after consuming); leftovers from interrupted
+          // turns with no result have no consumer and are no longer inserted.
+          // live hydration exception (keepLiveToolMeta): the tool_end event
+          // of an in-flight tool still needs the meta.
+          if (resultById[b.id] || (opts && opts.keepLiveToolMeta)) {
+            toolMeta[b.id] = { name: b.name, args: b.input };
+          }
           // request_user_input → 还原只读选择卡（问题来自 input，选项高亮来自 result）
           if (b.name === "request_user_input") {
             var qs = (b.input && b.input.questions) || [];
@@ -2246,7 +2274,7 @@
     return invoke("cancel_shell_task", { sessionId: sessionId, taskId: taskId });
   }
 
-  installBridgeFeature("chat-events", {
+  const chatEventsFeature = installBridgeFeature("chat-events", {
     state: state, listen: listen, invoke: invoke, turnUsageDirty: turnUsageDirty,
     sessionStates: sessionStates, renderMarkdown: renderMarkdown, bt: bt,
     notify: notify, onSessionEvent: onSessionEvent, runSyncOnSession: runSyncOnSession,
@@ -2513,6 +2541,13 @@
   var downloadKbModel = knowledgeModelFeature.downloadKbModel;
   var cancelKbModel = knowledgeModelFeature.cancelKbModel;
 
+  var projectsFeature = installBridgeFeature("projects", { state: state, notify: notify, invoke: invoke, listen: listen });
+  var loadProjects = projectsFeature.loadProjects;
+  var createProject = projectsFeature.createProject;
+  var renameProject = projectsFeature.renameProject;
+  var deleteProject = projectsFeature.deleteProject;
+  var moveSessionToProject = projectsFeature.moveSessionToProject;
+
   var multiAgentFeature = installBridgeFeature("multiagent", { state: state, notify: notify, invoke: invoke, listen: listen });
   var listMultiAgentSubagents = multiAgentFeature.listSubagentTranscripts;
   var readMultiAgentSubagent = multiAgentFeature.readSubagentTranscript;
@@ -2752,6 +2787,13 @@
       toggleSessionPinned: toggleSessionPinned,
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
+    },
+    projects: {
+      loadProjects,
+      createProject,
+      renameProject,
+      deleteProject,
+      moveSessionToProject,
     },
     monitor: {
       startMonitorPolling: startMonitorPolling,

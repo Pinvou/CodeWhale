@@ -138,8 +138,15 @@ fn transcript_is_blocked(path: &Path) -> bool {
     let mut guard = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // When full, evict a single entry instead of clearing the whole table:
+    // burst-style invalidation would make the next inventory poll re-read
+    // every transcript from scratch (a cache avalanche). Hash maps are
+    // unordered, so evicting any one entry converges.
     if guard.len() >= BLOCKED_CACHE_LIMIT && !guard.contains_key(path) {
-        guard.clear();
+        if let Some((evicted, _)) = guard.iter().next() {
+            let evicted = evicted.clone();
+            guard.remove(&evicted);
+        }
     }
     guard.insert(path.to_path_buf(), (stamp, blocked));
     blocked
@@ -864,7 +871,7 @@ mod tests {
         assert_eq!(listed.len(), 1, "没有 transcript 也必须出现在清单里");
         assert_eq!(listed[0].agent_id, "agent_a");
         assert_eq!(listed[0].session_name.as_deref(), Some("build-report"));
-        assert_eq!(listed[0].agent_type.as_deref(), Some("worker"));
+        assert_eq!(listed[0].agent_type.as_deref(), Some("general"));
         assert_eq!(listed[0].parent_run_id, None);
         assert_eq!(listed[0].spawn_depth, Some(1));
         assert_eq!(listed[0].status.as_deref(), Some("starting"));

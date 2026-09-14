@@ -1348,14 +1348,22 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       useEffect(() => {
         const ev = isTauriAvailable() ? tauriEvents : null;
         if (!ev) return;
+        let disposed = false;
         const unlisten = [];
-        ev.listen('wecom:qr', (e) => {
+        // Registration is async: a listener resolving after unmount must be
+        // unregistered immediately — nobody consumes the array entries and
+        // the listener leaks.
+        const track = (p) => p.then((u) => {
+          if (disposed) { try { u(); } catch { /* silent: listeners may already be stale at unmount */ } return; }
+          unlisten.push(u);
+        });
+        track(ev.listen('wecom:qr', (e) => {
           const p = e.payload || {};
           // 二维码到了 → 清掉一直显示的"正在生成…"loading,再弹出二维码弹窗。
           setAlert(a => ({ ...a, visible: false, loading: false }));
           setWecomQr({ qr: p.qr_data_url, url: p.url, phase: p.phase });
-        }).then(u => unlisten.push(u));
-        ev.listen('wecom:connected', () => {
+        }));
+        track(ev.listen('wecom:connected', () => {
           finishToolConfiguration('wecom', true);
           setWecomQr(null); setBusyId(null);
           // 连上 → 按规则写技能(默认启用),企微技能即刻对模型可见;连接态经 readiness 重取。
@@ -1363,49 +1371,53 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           loadBackendState();
           setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.wecom), subtitle: '', isInstall: true, isError: false, toolId: 'wecom' });
           notifyComposerToolsChanged();
-        }).then(u => unlisten.push(u));
-        ev.listen('wecom:error', (e) => {
+        }));
+        track(ev.listen('wecom:error', (e) => {
           finishToolConfiguration('wecom', false);
           const p = e.payload || {};
           setWecomQr(null); setBusyId(null);
           const failure = reportConnectorFailure('wecom', p, p.phase || 'authorize');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'wecom' });
-        }).then(u => unlisten.push(u));
-        ev.listen('eip:sso', (e) => {
+        }));
+        track(ev.listen('eip:sso', (e) => {
           const p = e.payload || {};
           setEipSso({ url: p.url, qr: p.qr_data_url });
-        }).then(u => unlisten.push(u));
-        ev.listen('eip:connected', () => {
+        }));
+        track(ev.listen('eip:connected', () => {
           finishToolConfiguration('eip', true);
           setEipSso(null); setEipConnected(true); setBusyId(null);
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
-        }).then(u => unlisten.push(u));
-        ev.listen('eip:error', (e) => {
+        }));
+        track(ev.listen('eip:error', (e) => {
           finishToolConfiguration('eip', false);
           const p = e.payload || {};
           setEipSso(null); setBusyId(null);
           const failure = reportConnectorFailure('eip', p, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
-        }).then(u => unlisten.push(u));
-        ev.listen('zhidao:sso', (e) => {
+        }));
+        track(ev.listen('zhidao:sso', (e) => {
           const p = e.payload || {};
           setZhidaoSso({ url: p.url, qr: p.qr_data_url });
-        }).then(u => unlisten.push(u));
-        ev.listen('zhidao:connected', () => {
+        }));
+        track(ev.listen('zhidao:connected', () => {
           finishToolConfiguration('zhidao', true);
           setZhidaoSso(null); setZhidaoConnected(true); setBusyId(null);
           setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
-        }).then(u => unlisten.push(u));
-        ev.listen('zhidao:error', (e) => {
+        }));
+        track(ev.listen('zhidao:error', (e) => {
           finishToolConfiguration('zhidao', false);
           const p = e.payload || {};
           setZhidaoSso(null); setBusyId(null);
           const failure = reportConnectorFailure('zhidao', p, 'connect');
           setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'zhidao' });
-        }).then(u => unlisten.push(u));
-        return () => { unlisten.forEach(u => { try { u(); } catch (_) {} }); };
+        }));
+        return () => {
+          disposed = true;
+          unlisten.forEach(u => { try { u(); } catch { /* silent: listeners may already be stale at unmount */ } });
+        };
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- subscription mounts/unmounts only with externalAuthAvailable; the copy snapshot is read on demand by the callback, so resubscribing is unnecessary
       }, [externalAuthAvailable]);
 
       // 合并后端安装状态到 mock 数据（含 Official 专属连接器的已连接状态）。

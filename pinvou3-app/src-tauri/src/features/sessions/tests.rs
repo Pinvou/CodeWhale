@@ -135,6 +135,7 @@ fn assistant_tool_use(id: &str) -> Message {
             name: "Bash".into(),
             input: serde_json::json!({"command": "printf still-running"}),
             caller: None,
+            thought_signature: None,
         }],
     }
 }
@@ -383,7 +384,7 @@ fn scheduled_profile(task_id: &str) -> ScheduledRunProfile {
 
 fn text_message(role: &str, text: &str) -> Message {
     Message {
-        role: role.to_string(),
+        role: role.into(),
         content: vec![ContentBlock::Text {
             text: text.to_string(),
             cache_control: None,
@@ -435,7 +436,7 @@ fn ordinary_session_updated_snapshot_is_persisted_authoritatively() {
     let saved = store
         .persist_chat_engine_state(
             &session.metadata.id,
-            chat_engine_state(authoritative.clone()),
+            &chat_engine_state(authoritative.clone()),
         )
         .expect("persist ordinary SessionUpdated");
 
@@ -1055,10 +1056,7 @@ fn scheduled_agent_mode_round_trips_without_collapsing_profile_or_metadata() {
     let id = scheduled.metadata.id.clone();
 
     assert_eq!(scheduled.metadata.mode.as_deref(), Some("agent"));
-    assert_eq!(
-        profile.mode.to_app_mode(),
-        deepseek_tui::tui::app::AppMode::Agent
-    );
+    assert_eq!(profile.mode.to_app_mode(), deepseek_tui::AppMode::Agent);
     let persisted = store
         .persist_scheduled_engine_state(
             &id,
@@ -3637,7 +3635,7 @@ fn truncate_reports_compaction_summary_residue_in_system_prompt() {
         "前文摘要：Conversation Summary (Auto-Generated)\n……".to_string(),
     ));
     store
-        .persist_chat_engine_state(&with_marker.metadata.id, state)
+        .persist_chat_engine_state(&with_marker.metadata.id, &state)
         .expect("persist with marker");
     store
         .update_messages(&without_marker.metadata.id, messages())

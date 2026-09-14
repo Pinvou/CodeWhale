@@ -38,7 +38,9 @@ display_path() {
 
 dump_dynamic_symbols() {
   local elf="$1" out
-  out="$(objdump -T "$elf" 2>&1)" || {
+  # LC_ALL=C: objdump 输出被本地化后符号版本字段仍稳定,但报错文案会随环境
+  # 变化;统一 C locale 保证解析与失败判定跨 locale 一致。
+  out="$(LC_ALL=C objdump -T "$elf" 2>&1)" || {
     echo "FAIL: $(display_path "$elf") objdump 无法解析(文件损坏或 binutils 不支持?):" >&2
     printf '%s\n' "$out" >&2
     return 1
@@ -66,7 +68,9 @@ check_prefix() {
 
 check_architecture() {
   local elf="$1" machine shown
-  machine="$(readelf -h "$elf" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+  # LC_ALL=C: readelf 会本地化头字段名(如 zh_CN 下 "Machine:" 字段名被翻译),
+  # 导致下面的解析失败。
+  machine="$(LC_ALL=C readelf -h "$elf" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
   shown="$(display_path "$elf")"
   if [ "$machine" != "$expected_machine" ]; then
     echo "FAIL: $shown architecture $machine != expected $expected_machine ($expected_arch)" >&2
@@ -78,9 +82,23 @@ check_architecture() {
 elf_count=0
 failed=0
 while IFS= read -r -d '' elf; do
-  file -b "$elf" | grep -q '^ELF' || continue
+  file_out="$(file -b "$elf")"
+  case "$file_out" in
+    ELF*) ;;
+    *) continue ;;
+  esac
   elf_count=$((elf_count + 1))
   ok=0
+  case "$file_out" in
+    *executable*)
+      # 丢失执行位的问题会在启动引擎/主程序时才以 "Permission denied" 暴露,
+      # 在此提前挡下。
+      [ -x "$elf" ] || {
+        echo "FAIL: $(display_path "$elf") 是 ELF 可执行文件但缺少执行位" >&2
+        ok=1
+      }
+      ;;
+  esac
   check_architecture "$elf" || ok=1
   dynsyms="$(dump_dynamic_symbols "$elf")" || { failed=1; continue; }
   check_prefix "$dynsyms" "$elf" 'GLIBC_' "$glibc_floor" || ok=1

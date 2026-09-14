@@ -116,6 +116,14 @@ Release-chain changes run lightweight contract tests only; full deb, dmg, and ns
 packages are built only after a
 `VERSION` change reaches `main`, or through an explicit `workflow_dispatch`.
 
+The Linux Rust job reserves at least 12 GiB of free disk after dependencies,
+caches, and swap are prepared. `scripts/ci-rust-disk.py` removes only the unused
+Android and .NET SDK directories on disposable GitHub-hosted Linux runners;
+it refuses self-hosted runners, redirected paths, and an undersized disk. Both
+the main library tests and the separate behavior-telemetry tests remain required.
+If runner images change, inspect the preparation step's free-space report instead
+of bypassing the capacity check or skipping either test harness.
+
 The merge queue runs the applicable product gates against the actual combined tree
 of the queued pull request and the latest `main`. Rust changes run formatting,
 Clippy, compile, and dependency-policy checks there. High-blast-radius Rust changes

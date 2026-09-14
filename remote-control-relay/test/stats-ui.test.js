@@ -105,6 +105,12 @@ test("behavior analyst role never requests or exposes device-level views", async
             range: "30",
             data_status: "tracking_not_enabled",
             data_quality: { confidence: "low", warnings: [] },
+            metrics: {
+              task_first_output_p50_ms: null,
+              task_first_output_p90_ms: null,
+              task_total_duration_p50_ms: null,
+              task_total_duration_p90_ms: null,
+            },
           } : { rows: [], funnel_rows: [], suppressed_group_count: 0 });
         return { ok: true, status: 200, json: async () => value };
       };
@@ -121,6 +127,8 @@ test("behavior analyst role never requests or exposes device-level views", async
     assert.equal(document.querySelector("#behaviorView").classList.contains("hidden"), false);
     assert.equal(requested.some(url => url.endsWith("/devices")), false);
     assert.equal(requested.some(url => url.endsWith("/overview") && !url.includes("/behavior/")), false);
+    assert.match(document.querySelector("#taskLatency").textContent, /—/);
+    assert.doesNotMatch(document.querySelector("#taskLatency").textContent, /0 ms/);
   } finally {
     dom.window.close();
   }

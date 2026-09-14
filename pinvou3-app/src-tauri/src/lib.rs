@@ -821,6 +821,40 @@ pub fn run() {
             if let Some(store) = session_store.clone() {
                 app.handle().manage(store);
             }
+            // 项目层(会话逻辑归档分组):纯偏好数据,boot 永不失败,损坏按空
+            // 状态降级。与 session store 的两处接线:
+            // 1) 启动对账——保留策略可能在删除钩子注册前已淘汰会话,剔除孤儿
+            //    归属条目,防映射表膨胀;
+            // 2) 删除钩子——运行期删除会话时同步摘除归属条目。
+            let projects_store = features::projects::ProjectStore::boot();
+            if let Some(store) = session_store.as_ref() {
+                if let Ok(all_sessions) = store.list_sessions_cached() {
+                    let existing: std::collections::HashSet<String> =
+                        all_sessions.iter().map(|metadata| metadata.id.clone()).collect();
+                    let pruned = projects_store.retain_sessions(&existing);
+                    if pruned > 0 {
+                        eprintln!(
+                            "[pinvou3-app] projects store pruned {pruned} orphan assignments"
+                        );
+                    }
+                }
+                let hook_store = projects_store.clone();
+                // 钩子驱动的归属变更也发 list_changed:否则会话删除后项目组的
+                // 成员计数在下次项目操作/整表刷新前是陈旧的(评审 #447 finding 12)。
+                // boot 对账(上文 retain_sessions)不发——前端尚未启动,启动后
+                // 首次拉取即最新。
+                let hook_app = app.handle().clone();
+                store.register_session_deleted_hook(std::sync::Arc::new(move |session_id: &str| {
+                    if hook_store.forget_session(session_id) {
+                        use tauri::Emitter;
+                        let _ = hook_app.emit(
+                            "projects:list_changed",
+                            serde_json::json!({ "action": "session_forgotten" }),
+                        );
+                    }
+                }));
+            }
+            app.handle().manage(projects_store);
             let remote_control_manager = RemoteControlManager::new(app.handle().clone());
             let remote_event_transport = remote_control_manager.clone();
             let remote_event_endpoint = remote_control_manager.clone();
@@ -1060,7 +1094,6 @@ pub fn run() {
             // skills_dir 指向 ~/.pinvou3/sessions/<sid>/skills/)。
             startup::mark("disabled_skills:start");
             let _ = crate::features::assistant::skill_materialization::load_disabled_skills();
-            deepseek_tui::skills::set_disabled_skills(Vec::new());
             startup::mark("disabled_skills:done");
 
             // Monitor 按需采样：state 只持有 session_uptime，sample 由前端调
@@ -1371,6 +1404,11 @@ pub fn run() {
             commands::voice::cancel_voice_asr,
             commands::voice::set_voice_shortcut_enabled,
             commands::voice::set_voice_shortcut_recording,
+            commands::projects::list_projects,
+            commands::projects::create_project,
+            commands::projects::update_project,
+            commands::projects::delete_project,
+            commands::projects::move_session_to_project,
             commands::sessions::list_sessions,
             commands::sessions::create_session,
             commands::sessions::load_session,
@@ -1730,18 +1768,73 @@ pub fn run() {
 
 #[cfg(test)]
 mod tool_allowlist_contract {
+    use std::sync::Arc;
+
     use crate::features::assistant::tool_policy::{
         PINVOU3_ALLOWED_TOOLS, PINVOU3_ALWAYS_LOADED_TOOLS, is_pinvou3_allowed,
     };
+    use async_trait::async_trait;
+    use deepseek_tui::tools::spec::{ToolCapability, ToolError, ToolResult, ToolSpec};
+    use deepseek_tui::tools::{ToolContext, ToolRegistryBuilder};
+    use serde_json::{Value, json};
+
+    /// Host and MCP tools enter the foundation through `ToolSpec`, rather than
+    /// through the native builder. This probe keeps the test on the same
+    /// `model_visible()` -> API-catalog boundary used by a real turn.
+    struct RegistryProbeTool {
+        name: &'static str,
+        model_visible: bool,
+    }
+
+    #[async_trait]
+    impl ToolSpec for RegistryProbeTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "allowlist registry probe"
+        }
+
+        fn input_schema(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        fn capabilities(&self) -> Vec<ToolCapability> {
+            vec![ToolCapability::ReadOnly]
+        }
+
+        fn model_visible(&self) -> bool {
+            self.model_visible
+        }
+
+        async fn execute(
+            &self,
+            _input: Value,
+            _context: &ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::success("unused registry probe"))
+        }
+    }
 
     /// Pinvou 只允许产品需要的 canonical 工具家族；动态 MCP 工具限制在标准命名空间。
     #[test]
     fn pinvou3_allowlist_uses_canonical_families_and_dynamic_mcp_namespace() {
         for core in [
-            "Bash",
-            "File",
+            "bash",
+            "read",
+            "write",
+            "edit",
+            "list_dir",
+            "file_search",
+            "grep_files",
             "Git",
             "Web",
+            "terminal/run",
+            "terminal/send",
+            "terminal/wait",
+            "terminal/cancel",
+            "terminal/reset",
             "agent",
             "load_skill",
             "todo_write",
@@ -1766,6 +1859,12 @@ mod tool_allowlist_contract {
             "work_update",
             "checklist_write",
             "update_plan",
+            // The File action family no longer has a canonical lowercase
+            // counterpart and must not be admitted into new catalogs.
+            "File",
+            // Exact terminal names prevent future execution primitives from
+            // being admitted merely by sharing a prefix.
+            "terminal/future-capability",
         ] {
             assert!(
                 !is_pinvou3_allowed(excluded),
@@ -1777,7 +1876,57 @@ mod tool_allowlist_contract {
             PINVOU3_ALWAYS_LOADED_TOOLS,
             &["request_user_input", "image_analyze"]
         );
+        // `is_pinvou3_allowed` is deliberately case-insensitive, so the
+        // legacy `Bash` spelling remains executable when replaying an old
+        // transcript. The source catalog still teaches only canonical `bash`.
+        assert!(!PINVOU3_ALLOWED_TOOLS.contains(&"Bash"));
+        assert!(!PINVOU3_ALLOWED_TOOLS.contains(&"File"));
         assert!(PINVOU3_ALLOWED_TOOLS.contains(&"mcp_*"));
+    }
+
+    /// Conditional host tools and dynamically discovered MCP tools do not
+    /// appear in every session. Register representative tools through the
+    /// v0.9.12 registry and verify the allowlist sees exactly its
+    /// model-visible API catalog, including the dynamic MCP prefix.
+    #[test]
+    fn conditional_allowlist_rules_match_model_visible_registry_entries() {
+        let visible_names = [
+            "image_analyze",
+            "kb_search",
+            "kb_open_source",
+            "mcp_weather_get_weather",
+            "list_mcp_resources",
+            "list_mcp_resource_templates",
+            "read_mcp_resource",
+        ];
+        let mut builder = ToolRegistryBuilder::new();
+        for name in visible_names {
+            builder = builder.with_tool(Arc::new(RegistryProbeTool {
+                name,
+                model_visible: true,
+            }));
+        }
+        builder = builder.with_tool(Arc::new(RegistryProbeTool {
+            name: "mcp_hidden_replay_alias",
+            model_visible: false,
+        }));
+        let registry = builder.build(ToolContext::new(std::env::temp_dir()));
+        let model_catalog = registry.to_api_tools();
+        let model_names = model_catalog
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            model_names,
+            visible_names.into_iter().collect(),
+            "the probe must exercise the foundation's model-visible registry projection"
+        );
+        assert!(
+            model_names.iter().all(|name| is_pinvou3_allowed(name)),
+            "a conditional host/MCP registry entry has no matching Pinvou allowlist rule: {model_names:?}"
+        );
+        assert!(!model_names.contains("mcp_hidden_replay_alias"));
     }
 }
 

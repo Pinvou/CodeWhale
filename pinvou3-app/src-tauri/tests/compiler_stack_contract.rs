@@ -1,8 +1,8 @@
 //! 契约:编译器栈覆盖不得泄漏到运行时进程。
 //!
 //! 背景:macOS 构建 SIGBUS 的规避通过 `RUSTC_WRAPPER` 环境变量注入
-//! `scripts/rustc-stack-wrapper`(正式 Cargo 入口按平台注入,见 run-dev.sh
-//! 与 CI job env),把 `RUST_MIN_STACK=16MiB` 只注入到编译期 rustc 进程。
+//! `scripts/rustc-stack-wrapper`(正式 Cargo 入口按平台注入,见 build.js、
+//! run-dev.sh 与 CI job env),把 `RUST_MIN_STACK=16MiB` 只注入到编译期 rustc 进程。
 //! cargo test / cargo run 启动的目标进程不经过 wrapper,不得继承该变量,
 //! 默认线程栈语义(约 2 MiB)不变。
 //!

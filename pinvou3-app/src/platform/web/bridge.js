@@ -284,6 +284,11 @@
     updateReady: false,       // 安装完成,等用户点重启
     updateError: null,        // 下载/安装阶段错误(sha256/apt stderr 透传)
     updateCancelling: false,  // 用户点了取消,据此把后端「已取消下载」当正常而非错误
+    // projects 域桌面专属;Web 端不挂载该切片数据,但 domain-adapter 的
+    // fields 注册表中留了键位。桩必须与桌面快照同形
+    // (state.projectsList = { projects, assignments, loadedAt },见
+    // tauri/bridge/projects.js),否则分组读到 undefined 只能靠防御性兜底。
+    projectsList: { projects: [], assignments: {}, loadedAt: null },
     // 依赖体检(设置页): deps = [{key, installed, apt}], null = 尚未检测
     deps: null,
     depsChecking: false,
@@ -446,7 +451,8 @@
       deviceUploadDigestInvalid: "the attachment integrity digest was invalid. Try again.",
       deviceUploadIntegrityMismatch: "the attachment content was corrupted in transit. Upload it again.",
       turnAlreadyInProgress: "⚠️ This chat is already processing a turn. The duplicate send was not executed.",
-      compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactAuto: " (auto)",
+      compactStart: "⏳ Compacting context", compactDone: "✓ Context compacted", compactFail: "⚠️ Compaction failed", compactCancel: "Context compaction canceled", compactAuto: " (auto)",
+      toolGateDecision: "Permission gate", toolGateAllowed: "allowed", toolGateDenied: "denied", toolGateUnavailable: "could not review and denied", toolGateAgent: "agent", toolGateRisk: "risk",
       compactPruneMerged: "Auto-compaction: tool-result cleanup, messages unchanged",
       compactInactive: "The session engine is not running yet. Send a message before compacting the context",
       gpuUnavailable: "GPU info unavailable",
@@ -577,7 +583,8 @@
       deviceUploadDigestInvalid: "添付ファイルの整合性ダイジェストが無効です。もう一度お試しください。",
       deviceUploadIntegrityMismatch: "添付ファイルの内容が転送中に破損しました。再度アップロードしてください。",
       turnAlreadyInProgress: "⚠️ このチャットでは別のターンを処理中です。重複した送信は実行されませんでした。",
-      compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactAuto: "（自動）",
+      compactStart: "⏳ コンテキストを圧縮中", compactDone: "✓ コンテキスト圧縮完了", compactFail: "⚠️ 圧縮に失敗", compactCancel: "コンテキストの圧縮をキャンセルしました", compactAuto: "（自動）",
+      toolGateDecision: "権限ゲート", toolGateAllowed: "許可", toolGateDenied: "拒否", toolGateUnavailable: "レビュー不能のため拒否", toolGateAgent: "エージェント", toolGateRisk: "リスク",
       compactPruneMerged: "自動圧縮: ツール結果を整理、メッセージ数は不変",
       compactInactive: "セッション Engine はまだ起動していません。メッセージを送信してからコンテキストを圧縮してください",
       gpuUnavailable: "GPU 情報を取得できません",
@@ -708,7 +715,8 @@
       deviceUploadDigestInvalid: "附件完整性校验值无效，请重试",
       deviceUploadIntegrityMismatch: "附件内容在传输中损坏，请重新上传",
       turnAlreadyInProgress: "⚠️ 当前会话已有一轮正在处理，本次重复发送未执行。",
-      compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactAuto: "（自动）",
+      compactStart: "⏳ 正在压缩上下文", compactDone: "✓ 上下文压缩完成", compactFail: "⚠️ 压缩失败", compactCancel: "已取消上下文压缩", compactAuto: "（自动）",
+      toolGateDecision: "权限闸门", toolGateAllowed: "允许", toolGateDenied: "拒绝", toolGateUnavailable: "无法审查并拒绝", toolGateAgent: "子智能体", toolGateRisk: "风险",
       compactPruneMerged: "自动压缩：已整理工具结果，消息数不变",
       compactInactive: "会话引擎尚未运行。请先发送一条消息，再压缩上下文",
       gpuUnavailable: "GPU 信息不可用",
@@ -4428,7 +4436,7 @@
     return null;
   }
 
-  const SHELL_TOOL_NAMES = ["exec_shell", "task_shell_start", "shell", "Bash"];
+  const SHELL_TOOL_NAMES = ["bash", "exec_shell", "task_shell_start", "shell", "Bash"];
   const SHELL_WAIT_TOOL_NAMES = ["exec_shell_wait", "exec_wait", "task_shell_wait"];
 
   function isShellExecutionTool(name) {
@@ -4440,10 +4448,8 @@
       const item = state.chatItems[i];
       if (item && item.type === "tool" &&
           (isShellExecutionTool(item.name) || SHELL_WAIT_TOOL_NAMES.includes(item.name))) {
-        // Since engine v0.9.3 the wait observer is the canonical Bash tool
-        // with action="wait"; the exec_shell_wait/exec_wait names survive
-        // only in replayed legacy sessions. Cards carry the action both live
-        // (chat:tool_start) and after history replay.
+        // Lowercase `bash` is canonical in v0.9.12. Uppercase `Bash` and the
+        // dedicated wait names remain here for replayed legacy sessions.
         return SHELL_WAIT_TOOL_NAMES.includes(item.name) ||
           (item.name === "Bash" && item.args != null && item.args.action === "wait");
       }
@@ -4454,7 +4460,7 @@
   function mentionsShellTool(text) {
     // 子智能体的工具调用不产生 chat:tool_start，forwarder 把 mailbox 的
     // ToolCallStarted 转成 multiagent:agent_progress（status 形如
-    // "🔧 exec_shell (step 3)"）。据此调度快照轮询，让子 agent 的后台
+    // "🔧 bash (step 3)"，历史记录也可能是 exec_shell）。据此调度快照轮询，让子 agent 的后台
     // shell 任务被 applyShellSnapshots 发现。
     const raw = String(text || "");
     return SHELL_TOOL_NAMES.some((name) => raw.includes(name));
@@ -4551,11 +4557,12 @@
       // once per poll from the pre-poll timeline: the synthetic card of a
       // running job from this same batch (the manager lists running jobs
       // first) would otherwise disarm the guard for the jobs after it.
-      // Accepted limits until stable origin identity lands: a start tool can
-      // still race with a very short detached job whose first snapshot is
-      // terminal (the guard is off when the latest card is a start tool), and
-      // a brand-new subagent job started after the wait card is conservatively
-      // hidden like retained older work.
+      // Accepted limits when no card binds: a start tool can still race with
+      // a very short detached job whose first snapshot is terminal (the guard
+      // is off when the latest card is a start tool; origin identity shields
+      // root jobs there, but subagent-owned and legacy origin-less jobs can
+      // still append), and a brand-new subagent job started after the wait
+      // card is conservatively hidden like retained older work.
       const suppressUnmatchedTerminal = latestShellToolIsWaitObserver();
       (jobs || []).forEach(function (job) {
         var status = String(job.status || "").toLowerCase();
@@ -4564,9 +4571,21 @@
         var item = state.chatItems.find(function (it) {
           return it.type === "tool" && it.taskId === job.id;
         });
-        if (!item && running) {
-          var command = String(job.command || "");
-          var candidates = state.chatItems.filter(function (it) {
+        if (!item && job.origin_tool_call_id) {
+          // Never steal a card already bound to another job: origins are
+          // unique per root job on the current engine, and if an engine ever
+          // shares one, the later job must fall through to a synthetic card
+          // or the terminal suppression guard instead of redirecting output.
+          item = state.chatItems.find(function (it) {
+            return it.type === "tool" && it.toolId === job.origin_tool_call_id &&
+              (!it.taskId || it.taskId === job.id);
+          });
+        }
+        // Only legacy snapshots without an origin may match by command or
+        // output. A missing origin card must not redirect another tool call.
+        if (!item && running && !job.origin_tool_call_id) {
+          const command = String(job.command || "");
+          const candidates = state.chatItems.filter(function (it) {
             return it.type === "tool" && isShellExecutionTool(it.name) && !it.taskId &&
               it.state === "running" && shellCommandForItem(it) === command;
           });
@@ -4574,16 +4593,21 @@
           // task id. Never guess when identical commands are concurrent.
           if (runningCommandCounts[command] === 1 && candidates.length === 1) item = candidates[0];
         }
-        if (!item && !running) {
+        if (!item && !running && !job.origin_tool_call_id) {
           item = state.chatItems.find(function (it) {
             return terminalShellHistoryMatch(it, job);
           });
           if (item) item.shellHistoryReconciled = true;
         }
         if (!item && !running && suppressUnmatchedTerminal) return;
+        // An identified completed root job must only update its origin card.
+        // If compaction or reload removed that card, do not append historical
+        // output at the current tail. Keep running jobs visible through a
+        // synthetic card; their live status must not disappear after reload.
+        if (!item && !running && job.origin_tool_call_id && !job.owner_agent_id) return;
         if (!item) {
           item = {
-            type: "tool", toolId: "shell-task:" + job.id, name: "exec_shell",
+            type: "tool", toolId: "shell-task:" + job.id, name: "bash",
             args: { command: job.command || "" }, output: null, success: null,
             state: running ? "running" : "failed", shellSnapshot: true,
           };
@@ -4595,6 +4619,8 @@
         item.taskId = job.id;
         item.sessionId = sid;
         item.shellStatus = job.status;
+        item.originToolCallId = job.origin_tool_call_id || null;
+        item.originTurnId = job.origin_turn_id || null;
         item.exitCode = job.exit_code;
         item.elapsedMs = job.elapsed_ms;
         if (!item.shellHistoryReconciled || item.output == null || running) {
@@ -4907,8 +4933,8 @@
       var action = String(args && args.action || "").toLowerCase();
       return action === "write" || action === "edit" || action === "patch" ? action : null;
     }
-    if (name === "write_file") return "write";
-    if (name === "edit_file") return "edit";
+    if (name === "write" || name === "write_file") return "write";
+    if (name === "edit" || name === "edit_file") return "edit";
     return null;
   }
 
@@ -6782,6 +6808,32 @@
     else if (phase === "done" && pruneOnlyAuto) addOrMergePruneCompaction(compactId);
     else if (phase === "done") addSystemItem(bt("compactDone") + auto + " " + msg);
     else if (phase === "fail") addSystemItem(bt("compactFail") + auto + ": " + msg);
+    else if (phase === "cancel") addSystemItem(bt("compactCancel") + auto + (msg ? ": " + msg : ""), { compactId, compactPhase: "cancel" });
+  }); });
+
+  // Foundation sub-agent tool-gate decisions have no approval card. Keep the
+  // final allow/deny outcome visible in the web timeline for auditability.
+  listen("chat:tool_gate_decision", function (e) { onSessionEvent(e, function () {
+    const p = e.payload || {};
+    const decision = String(p.decision || "unavailable");
+    const decisionLabel = decision === "allowed"
+      ? bt("toolGateAllowed")
+      : decision === "denied"
+        ? bt("toolGateDenied")
+        : bt("toolGateUnavailable");
+    let text = bt("toolGateDecision") + ": " + (p.tool_name ? String(p.tool_name) + " — " : "") + decisionLabel;
+    if (p.agent_id) text += " · " + bt("toolGateAgent") + " " + String(p.agent_id);
+    if (p.risk) text += " · " + bt("toolGateRisk") + " " + String(p.risk);
+    if (p.reason) text += " · " + String(p.reason);
+    addSystemItem(text, {
+      toolGateDecision: true,
+      toolId: String(p.tool_id || ""),
+      toolName: String(p.tool_name || ""),
+      agentId: String(p.agent_id || ""),
+      decision,
+      reason: String(p.reason || ""),
+      risk: String(p.risk || ""),
+    });
   }); });
 
   // ── request_user_input：渲染选择卡片（不进 messages.json）─────────

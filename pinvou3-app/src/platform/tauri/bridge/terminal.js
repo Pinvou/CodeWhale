@@ -24,7 +24,7 @@
     return null;
   }
 
-  const SHELL_TOOL_NAMES = ["exec_shell", "exec_shell_wait", "exec_wait", "task_shell_start", "task_shell_wait", "shell", "Bash"];
+  const SHELL_TOOL_NAMES = ["bash", "exec_shell", "exec_shell_wait", "exec_wait", "task_shell_start", "task_shell_wait", "shell", "Bash"];
   const SHELL_WAIT_TOOL_NAMES = ["exec_shell_wait", "exec_wait", "task_shell_wait"];
 
   function isShellExecutionTool(name) {
@@ -35,10 +35,8 @@
     for (let i = state.chatItems.length - 1; i >= 0; i--) {
       const item = state.chatItems[i];
       if (item && item.type === "tool" && isShellExecutionTool(item.name)) {
-        // Since engine v0.9.3 the wait observer is the canonical Bash tool
-        // with action="wait"; the exec_shell_wait/exec_wait names survive
-        // only in replayed legacy sessions. Cards carry the action both live
-        // (chat:tool_start) and after history replay.
+        // Lowercase `bash` is canonical in v0.9.12. Uppercase `Bash` and the
+        // dedicated wait names remain here for replayed legacy sessions.
         return SHELL_WAIT_TOOL_NAMES.includes(item.name) ||
           (item.name === "Bash" && item.args != null && item.args.action === "wait");
       }
@@ -49,7 +47,8 @@
   function mentionsShellTool(text) {
     // 子智能体的工具调用不产生 chat:tool_start（forwarder 只把 Mailbox 的
     // ToolCallStarted 转成 multiagent:agent_progress），只能从进展文本里认出
-    // shell 工具并借此调度快照轮询。status 形如 "🔧 exec_shell (step 3)"。
+    // shell 工具并借此调度快照轮询。status 形如 "🔧 bash (step 3)"；
+    // 历史子智能体也可能仍报告 exec_shell。
     const raw = String(text || "");
     return SHELL_TOOL_NAMES.some((name) => raw.includes(name));
   }
@@ -145,11 +144,12 @@
       // once per poll from the pre-poll timeline: the synthetic card of a
       // running job from this same batch (the manager lists running jobs
       // first) would otherwise disarm the guard for the jobs after it.
-      // Accepted limits until stable origin identity lands: a start tool can
-      // still race with a very short detached job whose first snapshot is
-      // terminal (the guard is off when the latest card is a start tool), and
-      // a brand-new subagent job started after the wait card is conservatively
-      // hidden like retained older work.
+      // Accepted limits when no card binds: a start tool can still race with
+      // a very short detached job whose first snapshot is terminal (the guard
+      // is off when the latest card is a start tool; origin identity shields
+      // root jobs there, but subagent-owned and legacy origin-less jobs can
+      // still append), and a brand-new subagent job started after the wait
+      // card is conservatively hidden like retained older work.
       const suppressUnmatchedTerminal = latestShellToolIsWaitObserver();
       (jobs || []).forEach(function (job) {
         var status = String(job.status || "").toLowerCase();
@@ -158,9 +158,21 @@
         var item = state.chatItems.find(function (it) {
           return it.type === "tool" && it.taskId === job.id;
         });
-        if (!item && running) {
-          var command = String(job.command || "");
-          var candidates = state.chatItems.filter(function (it) {
+        if (!item && job.origin_tool_call_id) {
+          // Never steal a card already bound to another job: origins are
+          // unique per root job on the current engine, and if an engine ever
+          // shares one, the later job must fall through to a synthetic card
+          // or the terminal suppression guard instead of redirecting output.
+          item = state.chatItems.find(function (it) {
+            return it.type === "tool" && it.toolId === job.origin_tool_call_id &&
+              (!it.taskId || it.taskId === job.id);
+          });
+        }
+        // Only legacy snapshots without an origin may match by command or
+        // output. A missing origin card must not redirect another tool call.
+        if (!item && running && !job.origin_tool_call_id) {
+          const command = String(job.command || "");
+          const candidates = state.chatItems.filter(function (it) {
             return it.type === "tool" && isShellExecutionTool(it.name) && !it.taskId &&
               it.state === "running" && shellCommandForItem(it) === command;
           });
@@ -168,16 +180,21 @@
           // task id. Never guess when identical commands are concurrent.
           if (runningCommandCounts[command] === 1 && candidates.length === 1) item = candidates[0];
         }
-        if (!item && !running) {
+        if (!item && !running && !job.origin_tool_call_id) {
           item = state.chatItems.find(function (it) {
             return terminalShellHistoryMatch(it, job);
           });
           if (item) item.shellHistoryReconciled = true;
         }
         if (!item && !running && suppressUnmatchedTerminal) return;
+        // An identified completed root job must only update its origin card.
+        // If compaction or reload removed that card, do not append historical
+        // output at the current tail. Keep running jobs visible through a
+        // synthetic card; their live status must not disappear after reload.
+        if (!item && !running && job.origin_tool_call_id && !job.owner_agent_id) return;
         if (!item) {
           item = {
-            type: "tool", toolId: "shell-task:" + job.id, name: "exec_shell",
+            type: "tool", toolId: "shell-task:" + job.id, name: "bash",
             args: { command: job.command || "" }, output: null, success: null,
             state: running ? "running" : "failed", shellSnapshot: true,
           };
@@ -189,6 +206,8 @@
         item.taskId = job.id;
         item.sessionId = sid;
         item.shellStatus = job.status;
+        item.originToolCallId = job.origin_tool_call_id || null;
+        item.originTurnId = job.origin_turn_id || null;
         item.exitCode = job.exit_code;
         item.elapsedMs = job.elapsed_ms;
         if (!item.shellHistoryReconciled || item.output == null || running) {
@@ -273,6 +292,10 @@
     for (var i = 0; i < state.chatItems.length; i++) {
       var item = state.chatItems[i];
       if (item.type !== "tool" || item.toolId !== toolId) continue;
+      // chat:shell_task_status can repeat for an already finalized task;
+      // re-merging would append the tails a second time, so leave items in a
+      // terminal state untouched.
+      if (item.state === "done" || item.state === "failed") return true;
       var status = payload.status || "Failed";
       var success = status === "Completed";
       item.success = success;
@@ -459,10 +482,16 @@
     );
   }
 
+  // Live and background shell output are display-only; completion replaces
+  // the tail with the normal full result. Both paths must share one cap so a
+  // verbose process cannot grow renderer memory without bound.
+  const MAX_LIVE_OUTPUT_CHARS = 128 * 1024;
+
   function reconcileBackgroundTerminalOutput(previous, payload) {
     var output = String(previous == null ? "" : previous);
     output = mergeTerminalTail(output, normalizeTerminalTail(payload.stdout_tail, ""));
     output = mergeTerminalTail(output, normalizeTerminalTail(payload.stderr_tail, "[STDERR] "));
+    if (output.length > MAX_LIVE_OUTPUT_CHARS) output = "…\n" + output.slice(-MAX_LIVE_OUTPUT_CHARS);
     return output;
   }
 
@@ -483,8 +512,7 @@
       );
       // A verbose long-running process must not grow renderer memory without
       // bound. Completion replaces this tail with the normal full result.
-      var maxLiveChars = 128 * 1024;
-      if (output.length > maxLiveChars) output = "…\n" + output.slice(-maxLiveChars);
+      if (output.length > MAX_LIVE_OUTPUT_CHARS) output = "…\n" + output.slice(-MAX_LIVE_OUTPUT_CHARS);
       item.output = output;
       item.liveOutput = true;
       return true;

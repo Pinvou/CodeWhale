@@ -4,7 +4,7 @@
     "targets": ["deb"],
     "resources": {
       "resources/platforms/linux/asr/pinvou3-asr-shim.py": "runtime/asr/pinvou3-asr-shim.py",
-      "resources/platforms/linux/asr/SenseVoice.LICENSE": "runtime/asr/SenseVoice.LICENSE",
+      "resources/platforms/linux/asr/LICENSE-SenseVoice.cpp": "runtime/asr/LICENSE-SenseVoice.cpp",
       "resources/platforms/linux/codex-bridge/": "runtime/codex-bridge",
       "resources/platforms/linux/knowledge-host/": "runtime/knowledge-host"
     },

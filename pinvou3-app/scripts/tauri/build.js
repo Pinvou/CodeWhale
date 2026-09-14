@@ -79,6 +79,7 @@ function loadDevelopmentEnvironment(
   }
   return { ...fileEnvironment, ...environment };
 }
+const RUSTC_STACK_WRAPPER_SCRIPTS_PATH = path.join(APP_ROOT, "src-tauri", "scripts");
 
 function pinnedRustToolchainChannel(configPath = RUST_TOOLCHAIN_CONFIG_PATH) {
   const config = fs.readFileSync(configPath, "utf8");
@@ -213,6 +214,60 @@ async function ensureWindowsRustToolchain(
     throw new Error(`Isolated Rust toolchain repair failed with exit code ${isolatedExitCode}`);
   }
   return { ...toolchain, source: "isolated" };
+}
+
+function prepareWindowsRustcStackWrapper(
+  {
+    environment = process.env,
+    platform = process.platform,
+    scriptsPath = RUSTC_STACK_WRAPPER_SCRIPTS_PATH,
+    spawnCompiler = spawnSync,
+    log = console.log,
+  } = {},
+) {
+  if (platform !== "win32") return null;
+
+  const configuredWrapper = environment.RUSTC_WRAPPER?.trim();
+  if (configuredWrapper) {
+    environment.RUSTC_WRAPPER = configuredWrapper;
+    log(`[build] Reusing configured rustc stack wrapper: ${configuredWrapper}`);
+    return { path: configuredWrapper, source: "environment" };
+  }
+
+  const sourcePath = path.join(scriptsPath, "rustc-stack-wrapper.rs");
+  const wrapperPath = path.join(scriptsPath, "rustc-stack-wrapper.exe");
+  if (!fs.existsSync(sourcePath)) {
+    throw new Error(`Windows rustc stack wrapper source is missing: ${sourcePath}`);
+  }
+
+  const needsCompilation = !fs.existsSync(wrapperPath)
+    || fs.statSync(sourcePath).mtimeMs > fs.statSync(wrapperPath).mtimeMs;
+  if (needsCompilation) {
+    const result = spawnCompiler(
+      "rustc",
+      ["-O", sourcePath, "-o", wrapperPath],
+      {
+        cwd: APP_ROOT,
+        env: { ...environment },
+        stdio: "inherit",
+        windowsHide: true,
+      },
+    );
+    if (result.error) {
+      throw new Error(`Failed to compile Windows rustc stack wrapper: ${result.error.message}`);
+    }
+    if (result.status !== 0 || !fs.existsSync(wrapperPath)) {
+      throw new Error(
+        `Failed to compile Windows rustc stack wrapper (exit ${result.status ?? "unknown"})`,
+      );
+    }
+  }
+
+  environment.RUSTC_WRAPPER = wrapperPath;
+  log(
+    `[build] ${needsCompilation ? "Prepared" : "Reused"} Windows rustc stack wrapper: ${wrapperPath}`,
+  );
+  return { path: wrapperPath, source: needsCompilation ? "compiled" : "cached" };
 }
 
 function tauriCommandIndex(args) {
@@ -511,12 +566,12 @@ async function main() {
   }
 
   const runtimeEnvironment = tauriRuntimeEnvironment(windowsRuntime || windowsDevRuntime);
-  return runTauri(preparedArgs, {
-    environment: chromeDevtoolsMcpEnvironment(
-      isDev,
-      isDev ? loadDevelopmentEnvironment(runtimeEnvironment) : runtimeEnvironment,
-    ),
-  });
+  const tauriEnvironment = chromeDevtoolsMcpEnvironment(
+    isDev,
+    isDev ? loadDevelopmentEnvironment(runtimeEnvironment) : runtimeEnvironment,
+  );
+  prepareWindowsRustcStackWrapper({ environment: tauriEnvironment });
+  return runTauri(preparedArgs, { environment: tauriEnvironment });
 }
 
 if (require.main === module) {
@@ -542,6 +597,7 @@ module.exports = {
   prepareCodexBridge,
   prepareKnowledgeHost,
   prepareLinuxAsrRuntime,
+  prepareWindowsRustcStackWrapper,
   prepareWindowsCodexBridge,
   stageWindowsInstaller,
   stageWindowsOnnxRuntime,
