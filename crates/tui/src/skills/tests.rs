@@ -177,15 +177,47 @@ fn forkguard_omitted_skills_line_carries_tool_search_fallback() {
 }
 
 // Regression (Pinvou #490 phantom-tool incident): the bundled mcp-discovery
-// skill must condition its registry commands on tool availability instead of
-// commanding `registry_sync` unconditionally, and it must not cite the
+// skill must keep `registry_sync` reachable on stock hosts — where it is
+// deferred but `tool_search`-activatable — instead of declaring the Registry
+// unavailable, must teach a `query`-bearing call (the schema rejects `{}`),
+// must describe the scored-matches contract honestly, and must not cite the
 // retired `exec_shell` alias as if it were callable.
 #[test]
 fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
     const SKILL: &str = include_str!("../../assets/skills/mcp-discovery/SKILL.md");
     assert!(
-        SKILL.contains("If `registry_sync` is in your tool list"),
+        SKILL.contains("If `registry_sync` is not in your tool list"),
         "workflow step 1 must gate the registry_sync command on availability:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("run `tool_search` first to activate it"),
+        "registry_sync is deferred on stock hosts; step 1 must name the \
+         activation path instead of surrendering a reachable capability:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("`registry_sync {query:"),
+        "registry_sync requires a non-empty `query`; the skill must teach a \
+         call that can succeed:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("eight scored matches"),
+        "the skill must describe the scored-matches contract, not a complete \
+         catalog dump:\n{SKILL}"
+    );
+    assert!(
+        !SKILL.contains("`registry_sync {}`"),
+        "registry_sync rejects empty input; never teach a call that cannot \
+         succeed:\n{SKILL}"
+    );
+    assert!(
+        !SKILL.contains("available in the active tool surface"),
+        "both tools are deferred by default; the preamble must not claim an \
+         always-active surface:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("If `start_registry_mcp_server` is not in"),
+        "step 3 must gate the start tool, which can be absent while \
+         registry_sync is registered (pool init failure, tool-security mode):\n{SKILL}"
     );
     assert!(
         SKILL.contains("`start_registry_mcp_server`"),
@@ -1745,6 +1777,11 @@ fn plugin_skills_are_qualified_and_denied_until_trusted_and_enabled() {
     let rendered = super::render_skills_block(&registry, "en", tmp.path()).unwrap();
     assert!(rendered.contains("reviewed plugin snapshot: demo"));
     assert!(rendered.contains("use load_skill"));
+    assert!(
+        rendered.contains("use load_skill — if `load_skill` is not in your tool list"),
+        "plugin rows must carry the same deferred-load_skill fallback as the \
+         Usage line:\n{rendered}"
+    );
     assert!(
         rendered.contains("hello"),
         "plugin skill descriptions must reach the model catalogue like native skills: {rendered}"

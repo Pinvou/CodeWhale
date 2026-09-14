@@ -48,9 +48,11 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
     assert!(SKILL_CREATOR_BODY.contains("<workspace>/.codewhale/skills"));
     assert!(SKILL_CREATOR_BODY.contains("~/.codewhale/skills"));
     assert!(SKILL_INSTALLER_BODY.contains("~/.codewhale/skills"));
-    // Bundled skills must name live tools. `read_file` is retired and cannot
-    // dispatch (crates/tui/src/tools/registry.rs:2067).
-    assert!(PDF_BODY.contains("built-in `File` tool (`action: \"read\"`)"));
+    // Bundled skills must name live, model-visible tools. `read_file` is
+    // retired and cannot dispatch (crates/tui/src/tools/registry.rs:2067);
+    // `File` is a hidden compatibility alias that never appears in a catalog
+    // or in `tool_search`, so `read` is the citable name.
+    assert!(PDF_BODY.contains("built-in `read` tool"));
     for (name, body) in [
         ("pdf", PDF_BODY),
         ("help", HELP_BODY),
@@ -62,6 +64,65 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
             "{name} must not teach a retired tool name"
         );
     }
+}
+
+// Regression (Pinvou #490 phantom-tool class): bundled skill bodies must
+// never cite hidden compatibility aliases or retired dispatch-only names.
+// Those names never appear in a model-visible catalog or in a `tool_search`
+// result, so hosts whose allowlists derive from the wire catalog reject the
+// call outright — the backticked `File` citations in pdf/help stalled real
+// reasoning loops exactly that way. The list is backtick-anchored so plain
+// prose (e.g. "Files or modules") never false-positives.
+#[test]
+fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
+    const PHANTOM_NAMES: &[&str] = &[
+        "`File`",
+        "`Bash`",
+        "`Read`",
+        "`Write`",
+        "`Edit`",
+        "`exec_shell`",
+        "`read_file`",
+        "`write_file`",
+        "`edit_file`",
+        "`list_dir`",
+        "`fetch_url`",
+        "`work_update`",
+        "`TodoWrite`",
+    ];
+    for skill in BUNDLED_SKILLS {
+        for phantom in PHANTOM_NAMES {
+            assert!(
+                !skill.body.contains(phantom),
+                "bundled skill `{}` cites {phantom}, which no model-visible \
+                 catalog or `tool_search` result can ever return:\n{}",
+                skill.name,
+                skill.body
+            );
+        }
+    }
+}
+
+// Regression: `create_goal` is deferred in main sessions and removed from
+// subagent registries entirely (tools/subagent/mod.rs drops it when building
+// the child surface), so the best-of-n body must gate the command on
+// availability instead of commanding it unconditionally.
+#[test]
+fn forkguard_best_of_n_goal_tool_is_availability_gated() {
+    let skill = BUNDLED_SKILLS
+        .iter()
+        .find(|skill| skill.name == "best-of-n")
+        .expect("best-of-n must be bundled");
+    assert!(
+        skill.body.contains("`create_goal` is in your tool list"),
+        "best-of-n must gate create_goal on availability:\n{}",
+        skill.body
+    );
+    assert!(
+        !skill.body.contains("`create_goal` or active `/goal`"),
+        "best-of-n must not command create_goal unconditionally:\n{}",
+        skill.body
+    );
 }
 
 /// #4227 (requested by @JayBeest): the contributor sync/gate/digest skill

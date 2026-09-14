@@ -25,8 +25,9 @@ the user has already chosen the approach.
 3. Give every candidate the same task and rubric. Add only a candidate number;
    do not steer candidates toward different conclusions unless diversity is an
    explicit part of the request.
-4. Prefer a session goal (`create_goal` or active `/goal`) when the tournament
-   spans more than one parent turn.
+4. When the tournament spans more than one parent turn, prefer a session goal
+   if `create_goal` is in your tool list (it is absent in subagent sessions);
+   otherwise track progress in your own notes.
 
 ## Generate Independently
 

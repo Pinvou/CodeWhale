@@ -9935,10 +9935,13 @@ fn subagent_skill_catalog(context: &ToolContext) -> String {
         return String::new();
     }
     // `load_skill` never sits in a child's first-turn active set (skills are
-    // discovered through `tool_search`), and tool-free children also lack
-    // `tool_search`, so the header below must stay honest in both states.
+    // discovered through `tool_search`), but three child classes exist: role
+    // children carry both tools, explicit allowlists can keep `tool_search`
+    // while filtering `load_skill` out of the catalog entirely, and tool-free
+    // children lack `tool_search` too. The header below must stay honest in
+    // all three states.
     let mut output = String::from(
-        "## Skills\n\nIf `tool_search` is in your tool list, use it to activate `load_skill`, then call it with an exact name before applying a Skill; if it is not, you cannot load Skills in this session and must not attempt to. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
+        "## Skills\n\nIf `tool_search` is in your tool list, use it to activate `load_skill`, then call it with an exact name before applying a Skill; if `tool_search` is absent or does not surface `load_skill`, you cannot load Skills in this session and must not attempt to. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
     );
     for skill in registry.list() {
         let source = match &skill.source {

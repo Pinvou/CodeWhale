@@ -21020,9 +21020,10 @@ async fn agent_claim_is_withheld_from_a_role_with_no_write_authority() {
 // Regression: `load_skill` never sits in a child's first-turn active set —
 // skills are discovered through `tool_search`, and tool-free children lack
 // `tool_search` as well. The ## Skills block rendered into a child prompt
-// must therefore stay honest in both states: name tool_search as the
-// discovery path when it exists, and do not command a tool the child cannot
-// see (Pinvou 运动打卡 incident, 2026-09).
+// must therefore stay honest in all three child states: name tool_search as
+// the discovery path when it exists, stay truthful for allowlist children
+// that carry tool_search but no load_skill, and do not command a tool the
+// child cannot see (Pinvou 运动打卡 incident, 2026-09).
 #[test]
 fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
     let tmp = tempdir().expect("tempdir");
@@ -21053,5 +21054,10 @@ fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
     assert!(
         catalog.contains("If `tool_search` is in your tool list"),
         "header must stay honest for tool-free children that also lack tool_search:\n{catalog}"
+    );
+    assert!(
+        catalog.contains("does not surface `load_skill`"),
+        "header must stay honest for allowlist children that carry tool_search \
+         but no load_skill in their catalog:\n{catalog}"
     );
 }
