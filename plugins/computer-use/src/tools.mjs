@@ -138,7 +138,7 @@ export const TOOLS = [
   },
   {
     name: "zoom",
-    description: "Close-up crop of the latest raster (screenshot or zoom). Choose points from the returned child raster only. Over ssh the crop file stays on the remote computer; unavailable on HarmonyOS (hdc) computers.",
+    description: "Close-up crop of the latest raster (screenshot or zoom). Choose points from the returned child raster only. Over ssh aiming stays correct but the crop file stays on the remote computer — view it only with out-of-band access such as scp; unavailable on HarmonyOS (hdc) computers.",
     inputSchema: {
       type: "object",
       required: ["region"],
@@ -198,7 +198,7 @@ export const TOOLS = [
     inputSchema: { type: "object", required: ["from_target", "to"], properties: { from_target: targetSchema, to: targetSchema, computer: computerParam }, additionalProperties: false },
   },
   {
-    name: "left_mouse_down", description: "Press and hold the left button at a target. Release with left_mouse_up.",
+    name: "left_mouse_down", description: "Press and hold the left button at a target. Release with left_mouse_up. Local and hdc computers only: over ssh the agent process ends after every call, so a press could outlive its release.",
     inputSchema: { type: "object", properties: { target: targetSchema, computer: computerParam }, additionalProperties: false },
   },
   {

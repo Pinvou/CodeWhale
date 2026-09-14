@@ -41,8 +41,10 @@ const CANNED = {
     points: { x: 10, y: 20, w: 1280, h: 800 }, pixels: { w: 2560, h: 1600 },
     capturedAt: "2026-09-14T00:00:00.000Z",
   }),
-  zoom: (r) => ({ file: "/remote/zoom-1.png", bytes: 512, region: r.args?.region ?? null, source: r.args?.source ?? null }),
+  // region[0] === 999 is the sentinel for "the agent cropped a stale raster".
+  zoom: (r) => ({ file: "/remote/zoom-1.png", bytes: 512, region: r.args?.region ?? null, source: r.args?.region?.[0] === 999 ? "/remote/stale.png" : (r.args?.source ?? null) }),
   left_click: () => ({ clicked: true }),
+  left_click_drag: () => ({ dragged: true }),
   set_value: () => ({ set: true }),
 };
 
@@ -227,7 +229,7 @@ test("ssh computers keep element state host-side so element targets resolve", { 
   // A state observed on "box" must be rejected when aimed at "local".
   const cross = await tool("set_value", { computer: "local", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
   assert.equal(cross.ok, false);
-  assert.equal(cross.error.code, "state_computer_mismatch");
+  assert.equal(cross.error.code, "state_wrong_computer");
 });
 
 test("ssh zoom rebinds the raster so child pixels aim at the crop region", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
@@ -256,6 +258,32 @@ test("ssh zoom rebinds the raster so child pixels aim at the crop region", { ski
   assert.deepEqual({ x: clickSent.args.target.x, y: clickSent.args.target.y }, { x: 90, y: 68 });
 });
 
+test("ssh drag endpoints resolve against the rebound child raster", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  // The bound frame is still the previous test's zoom child (origin {60,45}
+  // at scale 2), so child pixels (0,0) and (20,10) must cross the wire as
+  // screen points — drag endpoints take the same host-side resolution.
+  const drag = await tool("left_click_drag", { computer: "box", from_target: { type: "coordinate", x: 0, y: 0 }, to: { type: "coordinate", x: 20, y: 10 } });
+  assert.equal(drag.ok, true, JSON.stringify(drag.error ?? {}));
+  const sent = wireCalls("left_click_drag").at(-1);
+  assert.deepEqual({ x: sent.args.from_target.x, y: sent.args.from_target.y }, { x: 60, y: 45 });
+  assert.deepEqual({ x: sent.args.to.x, y: sent.args.to.y }, { x: 70, y: 50 });
+});
+
+test("a zoom that cropped a raster other than the bound one says so and keeps the frame", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  const shot = await tool("screenshot", { computer: "box" });
+  assert.equal(shot.ok, true, JSON.stringify(shot.error ?? {}));
+  // Region [999,...] is the canned-endpoint sentinel for a foreign source.
+  const zoom = await tool("zoom", { computer: "box", region: [999, 0, 10, 10] });
+  assert.equal(zoom.ok, true, JSON.stringify(zoom.error ?? {}));
+  assert.match(String(zoom.note ?? ""), /other than the bound/u);
+  // The binding must be untouched: child pixel (10,10) still resolves
+  // against the previous raster (origin {10,20}, scale 2) -> screen (15,25).
+  const click = await tool("left_click", { computer: "box", target: { type: "coordinate", x: 10, y: 10 } });
+  assert.equal(click.ok, true, JSON.stringify(click.error ?? {}));
+  const sent = wireCalls("left_click").at(-1);
+  assert.deepEqual({ x: sent.args.target.x, y: sent.args.target.y }, { x: 15, y: 25 });
+});
+
 test("computer_remove evicts the removed computer's remembered element states", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
   const st = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
   assert.equal(st.ok, true, JSON.stringify(st.error ?? {}));
@@ -275,15 +303,37 @@ test("computer_remove evicts the removed computer's remembered element states", 
 test("ssh recording fails closed with the ssh reason instead of stranding the model", { skip: process.platform === "win32" && "needs a registered ssh computer, which the shim cannot provide on windows" }, async () => {
   const start = await tool("recording_start", { computer: "box" });
   assert.equal(start.ok, false);
-  assert.equal(start.error.code, "unsupported_over_ssh");
+  assert.equal(start.error.code, "persistent_session_required");
 
   const stop = await tool("recording_stop", { computer: "box", id: "nope" });
   assert.equal(stop.ok, false);
-  assert.equal(stop.error.code, "unsupported_over_ssh");
+  assert.equal(stop.error.code, "persistent_session_required");
 
   const status = await tool("recording_status", { computer: "box", id: "nope" });
   assert.equal(status.ok, false);
-  assert.equal(status.error.code, "unsupported_over_ssh");
+  assert.equal(status.error.code, "persistent_session_required");
+});
+
+test("ssh press-and-hold fails closed so a press cannot outlive its release", { skip: process.platform === "win32" && "needs a registered ssh computer, which the shim cannot provide on windows" }, async () => {
+  const down = await tool("left_mouse_down", { computer: "box", target: { type: "coordinate", x: 1, y: 1 } });
+  assert.equal(down.ok, false);
+  assert.equal(down.error.code, "persistent_session_required");
+});
+
+test("re-registering an id in place forgets the old host's runtime state", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  const st = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
+  assert.equal(st.ok, true, JSON.stringify(st.error ?? {}));
+  // Update the registration in place: same id, different host.
+  assert.equal((await tool("computer_register", { computer: "box", transport: "ssh", host: "other.test", user: "me" })).ok, true);
+  // The observation from box.test must not dispatch onto other.test.
+  const stale = await tool("set_value", { computer: "box", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error.code, "unknown_state");
+  // The raster binding from the old host is gone too: zoom fails closed
+  // instead of cropping the old host's file.
+  const zoom = await tool("zoom", { computer: "box", region: [0, 0, 10, 10] });
+  assert.equal(zoom.ok, false);
+  assert.equal(zoom.error.code, "no_raster");
 });
 
 test("kill switch refuses mutating tools but keeps read-only probes", async () => {

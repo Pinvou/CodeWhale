@@ -24,7 +24,7 @@ test("chained zooms accumulate region offsets at the same scale", () => {
 
 test("zoom child raster falls back to scale 1 for an unnormalized parent", () => {
   const child = zoomChildRaster({ origin: { x: 5, y: 5 } }, [10, 10, 50, 50]);
-  assert.deepEqual(child, { scale: undefined, origin: { x: 15, y: 15 } });
+  assert.deepEqual(child, { scale: 1, origin: { x: 15, y: 15 } });
 });
 
 test("zoom child raster refuses unusable inputs so the caller keeps the previous binding", () => {

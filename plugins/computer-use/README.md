@@ -29,8 +29,8 @@ runs it. Nothing here writes to your Codewhale configuration.
 - **Keyboard & text** — `type` (unicode), `key` (chords + repeat),
   `hold_key`, `set_value` (semantic, background-safe), `select_text`,
   `perform_action` (element's own actions: AXPress / UIA Invoke / AT-SPI / uitest).
-- **Recording** — `recording_start/stop/status/list` on local and hdc
-  computers (see below; unavailable over ssh).
+- **Recording** — `recording_start/stop/status` on local and hdc computers
+  (see below); `recording_list` also lists the files saved on an ssh computer.
 - **Computers** — `computer_list`, `computer_switch`, `computer_register`
   (ssh agent auto-push), `computer_remove`.
 - **Safety** — `stop_computer_control` kill switch; permission probes that
@@ -76,10 +76,14 @@ through it, and pins the result. Remote calls run
 allow-listed tool set executes remotely; arguments travel as data, never as
 shell. Requires publickey ssh (BatchMode) and Node ≥ 20 on the remote.
 
-Zoom works over ssh: the server remembers the remote raster and crops through
-the agent, and the crop file stays on the remote computer (pull it with scp).
-Recording does not — the one-shot agent process cannot keep a recorder
-running, so the recording tools fail closed over ssh.
+Zoom aiming works over ssh: the server remembers the remote raster, crops
+through the agent, and rebinds coordinates to the child raster. The crop file
+stays on the remote computer and the plugin has no pull tool — view it only
+with out-of-band access (scp from a shell). Recording start/stop/status and
+press-and-hold (`left_mouse_down`) do not work over ssh: the one-shot agent
+process cannot keep a recorder alive or guarantee a press its release, so
+they fail closed (`persistent_session_required`). `recording_list` still
+lists the files on the remote computer.
 
 ## HarmonyOS computers
 

@@ -68,9 +68,10 @@ Observe once, act once, then verify.
 ## Recording
 
 `recording_start` → work → `recording_stop` returns the finalized file path.
-Recording works on local and hdc computers only: over ssh the one-shot agent
-process cannot keep a recorder running, so recording tools fail closed — say
-so instead of retrying. macOS uses `screencapture -v` (a receipt warning about
+Recording start/stop/status work on local and hdc computers only: over ssh the
+one-shot agent process cannot keep a recorder running, so they fail closed —
+say so instead of retrying (`recording_list` still lists the remote files).
+macOS uses `screencapture -v` (a receipt warning about
 Screen Recording permission means the user must grant it once). Linux uses
 x11grab/wf-recorder, Windows ffmpeg gdigrab, HarmonyOS snapshot-series (no
 native CLI recorder — the receipt says so). `recording_status` /

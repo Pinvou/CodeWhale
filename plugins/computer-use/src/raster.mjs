@@ -19,7 +19,7 @@ export function zoomChildRaster(prev, region) {
   if (!Number.isFinite(region[0]) || !Number.isFinite(region[1])) return null;
   const scale = prev.scale && prev.scale > 0 ? prev.scale : 1;
   return {
-    scale: prev.scale,
+    scale,
     origin: {
       x: (prev.origin?.x ?? 0) + region[0] / scale,
       y: (prev.origin?.y ?? 0) + region[1] / scale,

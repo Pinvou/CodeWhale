@@ -15,7 +15,7 @@ const SERVER_NAME = "codewhale-cu";
 // ---------- per-session runtime state ----------
 let controlStopped = false;
 let stateCounter = 0;
-/** state_id -> { computerId, app_ref, windowIndex, elements } */
+/** state_id -> { computerId, app_ref, elements, ts } */
 const appStates = new Map();
 /** computerId -> last raster metadata {file, scale, origin} */
 const lastRasters = new Map();
@@ -52,7 +52,7 @@ function resolveElement(computer, target) {
   const st = appStates.get(target.state_id);
   if (!st) throw new ServerError("unknown_state", `state_id "${target.state_id}" is unknown or expired — call get_app_state again`);
   if (st.computerId !== computer.id) {
-    throw new ServerError("state_computer_mismatch", `state_id "${target.state_id}" was observed on computer "${st.computerId}", not on "${computer.id}" — observe again on this computer`);
+    throw new ServerError("state_wrong_computer", `state_id "${target.state_id}" was observed on computer "${st.computerId}", not on "${computer.id}" — observe again on this computer`);
   }
   const el = st.elements[target.index];
   if (!el) throw new ServerError("unknown_element", `element index ${target.index} is outside state ${target.state_id} (0..${st.elements.length - 1})`);
@@ -115,7 +115,10 @@ function bindRaster(computer, shot) {
  */
 function rebindAfterZoom(computer, data) {
   const prev = lastRasters.get(computer.id);
-  if (!prev) return;
+  if (!prev) {
+    data.note = "no raster was bound on this computer, so the zoom child is unbound — screenshot to rebind";
+    return;
+  }
   if (data.source && prev.file && data.source !== prev.file) {
     data.note = "zoom cropped a raster other than the bound one; coordinate targets still resolve against the previous raster — screenshot again to rebind";
     return;
@@ -132,6 +135,16 @@ function rememberState(computer, app_ref, result) {
     for (const k of appStates.keys()) { appStates.delete(k); break; }
   }
   return id;
+}
+
+/** Drop every piece of runtime state remembered for one computer id. */
+function forgetComputer(id) {
+  backendCache.delete(id);
+  lastRasters.delete(id);
+  // Element states observed on this computer must not survive a change of
+  // what the id points at: computer_remove, and computer_register over an
+  // existing id, which may now name another host.
+  for (const [sid, st] of appStates) if (st.computerId === id) appStates.delete(sid);
 }
 
 // ---------- tool dispatch ----------
@@ -168,7 +181,12 @@ async function callTool(params) {
 
   if (name === "computer_register") {
     try {
+      // Re-registering an existing id may repoint it at another host — the
+      // update merges in place, so any state observed under the id before
+      // this call must go with the old host.
+      const existed = registry.list().computers[args.computer] != null;
       const entry = registry.register({ id: args.computer, transport: args.transport, label: args.label, host: args.host, port: args.port, user: args.user, target: args.target });
+      if (existed) forgetComputer(args.computer);
       let installed = null;
       if (entry.transport === "ssh" && args.installAgent !== false) {
         installed = await installRemoteAgent(entry);
@@ -193,11 +211,7 @@ async function callTool(params) {
 
   if (name === "computer_remove") {
     const res = registry.remove(args.computer);
-    backendCache.delete(args.computer);
-    lastRasters.delete(args.computer);
-    // Element states observed on the removed computer must not survive a
-    // re-registration under the same id (possibly pointing at another host).
-    for (const [id, st] of appStates) if (st.computerId === args.computer) appStates.delete(id);
+    forgetComputer(args.computer);
     return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, ...res })) }] };
   }
 
@@ -230,7 +244,13 @@ async function callTool(params) {
       // remote host would be orphaned, and one from an earlier call can no
       // longer be reached (only its files remain). Fail closed with the
       // reason instead of stranding the model in backend errors.
-      throw new ServerError("unsupported_over_ssh", `"${name}" needs recorder state that cannot survive the one-shot ssh agent process. Start, stop, and inspect recordings on a local or hdc computer instead.`);
+      throw new ServerError("persistent_session_required", `"${name}" needs recorder state that cannot survive the one-shot ssh agent process. Start, stop, and inspect recordings on a local or hdc computer instead.`);
+    }
+    if (computer.transport === "ssh" && backendMethod === "left_mouse_down") {
+      // A press outlives the one-shot agent process: if the follow-up
+      // left_mouse_up never arrives (failed call, abandoned session), the
+      // remote button stays stuck with nothing left to detect or release it.
+      throw new ServerError("persistent_session_required", `"${name}" presses and holds across calls, which needs one live session — the ssh agent is a new process per call, so the press could outlive its release. Use a local or hdc computer for press-and-hold.`);
     }
     if (computer.transport === "ssh" && REMOTE_TOOLS.has(backendMethod)) {
       const ex = await executorFor(computer);

@@ -1,6 +1,6 @@
 ---
 name: recording
-description: Capture screen recordings on local and hdc computers (macOS, Windows, Linux, HarmonyOS — not over ssh) and manage the recording library.
+description: Capture screen recordings on local and hdc computers (macOS, Windows, Linux, HarmonyOS; recording start/stop/status are not available over ssh) and manage the recording library.
 ---
 
 # Recording and screenshots
@@ -25,9 +25,11 @@ Platform truths:
 - **HarmonyOS**: no native CLI recorder; the backend captures
   `snapshot_display` frames at `intervalMs` and muxes with ffmpeg on stop.
   The receipt labels the mode `snapshot-series` — never call it real-time.
-- **ssh computers**: recording fails closed (`unsupported_over_ssh`) — the
-  one-shot remote agent process cannot keep a recorder running, nor reach one
-  from an earlier call. Say so instead of retrying; screenshots still work.
+- **ssh computers**: `recording_start/stop/status` fail closed
+  (`persistent_session_required`) — the one-shot remote agent process cannot
+  keep a recorder running, nor reach one from an earlier call. Say so instead
+  of retrying; `recording_list` still lists the remote files, and screenshots
+  still work.
 
 Screenshots: `screenshot` returns the saved path and raster geometry; `zoom`
 crops the latest raster when a target is too small to read (over ssh the crop
