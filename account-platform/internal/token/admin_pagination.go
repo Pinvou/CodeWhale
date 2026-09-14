@@ -3,8 +3,10 @@ package token
 import (
 	"context"
 	"crypto/hmac"
+	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -266,18 +268,22 @@ func (r *PostgresRepository) createAdminPaginationPage(ctx context.Context, requ
 	if err := r.reserveAdminPaginationCreation(deadlineCtx, request.SubjectID); err != nil {
 		return AdminPaginationPage{}, err
 	}
-	for attempt := 0; attempt < adminSerializationAttempts; attempt++ {
-		page, createErr := r.createAdminPaginationPageOnce(deadlineCtx, request, scopeDigest, filterDigest, source)
-		if !adminPaginationSerializationFailure(createErr) {
-			return page, createErr
-		}
-		if attempt+1 < adminSerializationAttempts {
-			if retryErr := waitAdminPaginationSerializationRetry(deadlineCtx, attempt); retryErr != nil {
-				return AdminPaginationPage{}, fmt.Errorf("%w: %w", ErrAdminPaginationSnapshotUnavailable, retryErr)
-			}
-		}
+	var page AdminPaginationPage
+	createErr := retryAdminSerialization(deadlineCtx, func() error {
+		var attemptErr error
+		page, attemptErr = r.createAdminPaginationPageOnce(deadlineCtx, request, scopeDigest, filterDigest, source)
+		return attemptErr
+	})
+	if createErr == nil {
+		return page, nil
 	}
-	return AdminPaginationPage{}, fmt.Errorf("%w: serialization retry exhausted", ErrAdminPaginationSnapshotUnavailable)
+	if adminSerializationFailure(createErr) {
+		return AdminPaginationPage{}, fmt.Errorf("%w: serialization retry exhausted: %w", ErrAdminPaginationSnapshotUnavailable, createErr)
+	}
+	if errors.Is(createErr, context.Canceled) || errors.Is(createErr, context.DeadlineExceeded) {
+		return AdminPaginationPage{}, fmt.Errorf("%w: %w", ErrAdminPaginationSnapshotUnavailable, createErr)
+	}
+	return AdminPaginationPage{}, createErr
 }
 
 func (r *PostgresRepository) createAdminPaginationPageOnce(ctx context.Context, request AdminPaginationRequest, scopeDigest, filterDigest string, source AdminSnapshotMemberSource) (AdminPaginationPage, error) {
@@ -391,22 +397,26 @@ func (r *PostgresRepository) createAdminPaginationPageOnce(ctx context.Context, 
 }
 
 func (r *PostgresRepository) reserveAdminPaginationCreation(ctx context.Context, subjectID uuid.UUID) error {
-	for attempt := 0; attempt < adminSerializationAttempts; attempt++ {
-		err := r.reserveAdminPaginationCreationOnce(ctx, subjectID)
-		if !adminPaginationSerializationFailure(err) {
-			return err
-		}
-		if attempt+1 < adminSerializationAttempts {
-			if retryErr := waitAdminPaginationSerializationRetry(ctx, attempt); retryErr != nil {
-				return fmt.Errorf("%w: %w", ErrAdminPaginationSnapshotUnavailable, retryErr)
-			}
-		}
+	err := retryAdminSerialization(ctx, func() error {
+		return r.reserveAdminPaginationCreationOnce(ctx, subjectID)
+	})
+	if adminSerializationFailure(err) {
+		return fmt.Errorf("%w: quota serialization retry exhausted: %w", ErrAdminPaginationSnapshotUnavailable, err)
 	}
-	return fmt.Errorf("%w: quota serialization retry exhausted", ErrAdminPaginationSnapshotUnavailable)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", ErrAdminPaginationSnapshotUnavailable, err)
+	}
+	return err
 }
 
-func waitAdminPaginationSerializationRetry(ctx context.Context, attempt int) error {
-	delay := 10 * time.Millisecond * time.Duration(1<<min(attempt, 4))
+type adminSerializationRetryWaiter func(context.Context, int) error
+
+func waitAdminSerializationRetry(ctx context.Context, attempt int) error {
+	var entropy [8]byte
+	if _, err := cryptorand.Read(entropy[:]); err != nil {
+		binary.LittleEndian.PutUint64(entropy[:], uint64(time.Now().UnixNano()))
+	}
+	delay := adminSerializationRetryDelay(attempt, binary.LittleEndian.Uint64(entropy[:]))
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
@@ -415,6 +425,40 @@ func waitAdminPaginationSerializationRetry(ctx context.Context, attempt int) err
 	case <-timer.C:
 		return nil
 	}
+}
+
+func adminSerializationRetryDelay(attempt int, jitter uint64) time.Duration {
+	base := 10 * time.Millisecond * time.Duration(1<<min(max(attempt, 0), 4))
+	return base/2 + time.Duration(jitter%uint64(base))
+}
+
+func retryAdminSerialization(ctx context.Context, operation func() error) error {
+	return retryAdminSerializationWithWait(ctx, operation, waitAdminSerializationRetry)
+}
+
+func retryAdminSerializationWithWait(ctx context.Context, operation func() error, wait adminSerializationRetryWaiter) error {
+	var lastErr error
+	for attempt := 0; attempt < adminSerializationAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		lastErr = operation()
+		if !adminSerializationFailure(lastErr) {
+			return lastErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if attempt+1 < adminSerializationAttempts {
+			if err := wait(ctx, attempt); err != nil {
+				return err
+			}
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return lastErr
 }
 
 func (r *PostgresRepository) reserveAdminPaginationCreationOnce(ctx context.Context, subjectID uuid.UUID) error {
@@ -765,9 +809,20 @@ func remainingAdminPaginationBudget(ctx context.Context) (time.Duration, bool) {
 	return remaining, remaining > 0
 }
 
-func adminPaginationSerializationFailure(err error) bool {
+func adminSerializationFailure(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	code := adminPostgresSQLState(err)
+	return code == "40001" || code == "40P01"
+}
+
+func adminPostgresSQLState(err error) string {
 	var postgresError *pgconn.PgError
-	return errors.As(err, &postgresError) && (postgresError.Code == "40001" || postgresError.Code == "40P01")
+	if errors.As(err, &postgresError) {
+		return postgresError.Code
+	}
+	return ""
 }
 
 func adminPaginationBuildError(err error) error {

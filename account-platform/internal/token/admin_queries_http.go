@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -152,6 +153,13 @@ func (s *Service) adminQueryPage(w http.ResponseWriter, r *http.Request, filter 
 		return false
 	}
 	if err := repository.reserveAdminQueryRate(r.Context(), adminSubject(r), resource, s.trustedAdminQuerySource(r), resource == "owner-candidates"); err != nil {
+		if !errors.Is(err, ErrAdminQueryRateLimited) {
+			slog.WarnContext(r.Context(), "admin query rate reservation failed",
+				"request_id", httpserver.RequestID(r.Context()),
+				"resource", resource,
+				"sql_state", adminPostgresSQLState(err),
+			)
+		}
 		writeAdminQueryError(w, r, err)
 		return true
 	}

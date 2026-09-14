@@ -2,6 +2,8 @@ package token
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -387,6 +389,181 @@ func (directory integrationOwnerDirectory) Scan(_ context.Context, _ identity.Pr
 		return consume(nil)
 	}
 	return consume([]AdminOwnerCandidate{directory.item})
+}
+
+// The model-management workspace loads these three first pages together. Each
+// request reserves query and snapshot quota in serializable transactions, so
+// this exercises the production concurrency pattern that previously leaked a
+// transient SQLSTATE 40001 as HTTP 503.
+func TestAdminCatalogInitialQueriesRetrySerializableConflicts(t *testing.T) {
+	databaseURL := tokenPaginationIntegrationDatabaseURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	repository := newTokenQueryIntegrationRepository(t, ctx, databaseURL)
+	if err := repository.ConfigureAdminPagination(AdminPaginationConfig{Enabled: true, CursorHMACKey: []byte("0123456789abcdef0123456789abcdef")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.SetAdminPaginationGate(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+
+	grants := map[string]bool{
+		"platform.models.read":  true,
+		"platform.pricing.read": true,
+	}
+	var authorizationVersion atomic.Int64
+	authorizationVersion.Store(1)
+	paths := []string{
+		"/admin/v1/models?limit=50",
+		"/admin/v1/protocols?limit=50",
+		"/admin/v1/formulas?limit=50",
+	}
+	const rounds = 18
+	subjects := make([]uuid.UUID, 0, rounds)
+
+	type queryResult struct {
+		path     string
+		response *httptest.ResponseRecorder
+	}
+	for round := 0; round < rounds; round++ {
+		subjectID := uuid.New()
+		subjects = append(subjects, subjectID)
+		handler := newAdminQueryIntegrationHandler(t, repository, subjectID, &authorizationVersion, grants)
+		start := make(chan struct{})
+		results := make(chan queryResult, len(paths))
+		var ready sync.WaitGroup
+		var workers sync.WaitGroup
+		ready.Add(len(paths))
+		for _, path := range paths {
+			workers.Add(1)
+			go func(requestPath string) {
+				defer workers.Done()
+				ready.Done()
+				<-start
+				results <- queryResult{path: requestPath, response: performAdminQueryRequest(handler, requestPath)}
+			}(path)
+		}
+		ready.Wait()
+		close(start)
+		workers.Wait()
+		close(results)
+		for result := range results {
+			if result.response.Code != http.StatusOK || !strings.Contains(result.response.Body.String(), `"items"`) {
+				t.Fatalf("round %d concurrent query %s status=%d body=%s", round, result.path, result.response.Code, result.response.Body.String())
+			}
+		}
+	}
+	for _, resource := range []string{"models", "protocols", "formulas"} {
+		var reservations int
+		rateKeySuffix := ":" + resource
+		if err := repository.pool.QueryRow(ctx, `SELECT COALESCE(sum(creation_count),0) FROM token_admin_pagination_creation_windows WHERE rate_key LIKE 'query:subject:%' AND right(rate_key,length($1))=$1`, rateKeySuffix).Scan(&reservations); err != nil {
+			t.Fatal(err)
+		}
+		if reservations != rounds {
+			t.Fatalf("%s query reservations=%d want=%d", resource, reservations, rounds)
+		}
+		sourceDigest := sha256.Sum256([]byte("192.0.2.1"))
+		assertAdminQueryRateCount(t, ctx, repository, "query:source:"+hex.EncodeToString(sourceDigest[:])+":"+resource, rounds)
+	}
+	for _, subjectID := range subjects {
+		var snapshotReservations int
+		if err := repository.pool.QueryRow(ctx, `SELECT COALESCE(sum(creation_count),0) FROM token_admin_pagination_creation_windows WHERE rate_key=$1`, "subject:"+subjectID.String()).Scan(&snapshotReservations); err != nil {
+			t.Fatal(err)
+		}
+		if snapshotReservations != len(paths) {
+			t.Fatalf("subject %s snapshot reservations=%d want=%d", subjectID, snapshotReservations, len(paths))
+		}
+	}
+	assertAdminQueryRateCount(t, ctx, repository, "global", len(subjects)*len(paths))
+}
+
+func TestAdminQueryRateRetryIsAtomicAndExhaustionObservable(t *testing.T) {
+	databaseURL := tokenPaginationIntegrationDatabaseURL(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	repository := newTokenQueryIntegrationRepository(t, ctx, databaseURL)
+
+	if _, err := repository.pool.Exec(ctx, `
+CREATE SEQUENCE admin_query_retry_once_sequence;
+CREATE FUNCTION fail_first_admin_query_source_reservation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.rate_key LIKE 'query:source:%' AND nextval('admin_query_retry_once_sequence') = 1 THEN
+        RAISE EXCEPTION 'synthetic serialization conflict' USING ERRCODE = '40001';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER fail_first_admin_query_source_reservation
+BEFORE INSERT OR UPDATE ON token_admin_pagination_creation_windows
+FOR EACH ROW EXECUTE FUNCTION fail_first_admin_query_source_reservation();`); err != nil {
+		t.Fatal(err)
+	}
+
+	subjectID := uuid.New()
+	source := "203.0.113.41"
+	if err := repository.reserveAdminQueryRate(ctx, subjectID, "models", source, false); err != nil {
+		t.Fatalf("reservation did not recover from one serialization conflict: %v", err)
+	}
+	var triggerAttempts int64
+	if err := repository.pool.QueryRow(ctx, `SELECT last_value FROM admin_query_retry_once_sequence`).Scan(&triggerAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if triggerAttempts != 2 {
+		t.Fatalf("source reservation attempts=%d want=2", triggerAttempts)
+	}
+	assertAdminQueryRateCount(t, ctx, repository, "query:subject:"+subjectID.String()+":models", 1)
+	sourceDigest := sha256.Sum256([]byte(source))
+	assertAdminQueryRateCount(t, ctx, repository, "query:source:"+hex.EncodeToString(sourceDigest[:])+":models", 1)
+
+	if _, err := repository.pool.Exec(ctx, `
+DROP TRIGGER fail_first_admin_query_source_reservation ON token_admin_pagination_creation_windows;
+DROP FUNCTION fail_first_admin_query_source_reservation();
+CREATE FUNCTION fail_every_admin_query_source_reservation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.rate_key LIKE 'query:source:%' THEN
+        RAISE EXCEPTION 'synthetic serialization conflict' USING ERRCODE = '40001';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER fail_every_admin_query_source_reservation
+BEFORE INSERT OR UPDATE ON token_admin_pagination_creation_windows
+FOR EACH ROW EXECUTE FUNCTION fail_every_admin_query_source_reservation();`); err != nil {
+		t.Fatal(err)
+	}
+
+	exhaustedSubject := uuid.New()
+	exhaustedSource := "203.0.113.42"
+	err := repository.reserveAdminQueryRate(ctx, exhaustedSubject, "protocols", exhaustedSource, false)
+	if !errors.Is(err, ErrAdminPaginationSnapshotUnavailable) {
+		t.Fatalf("retry exhaustion error=%v", err)
+	}
+	if sqlState := adminPostgresSQLState(err); sqlState != "40001" {
+		t.Fatalf("retry exhaustion sql_state=%q want=40001", sqlState)
+	}
+	httpError := ClassifyAdminPaginationError(err)
+	if httpError.Status != http.StatusServiceUnavailable || httpError.Code != "PAGINATION_SNAPSHOT_UNAVAILABLE" || httpError.RetryAfter != 5 {
+		t.Fatalf("retry exhaustion HTTP classification=%+v", httpError)
+	}
+	recorder := httptest.NewRecorder()
+	writeAdminQueryError(recorder, httptest.NewRequest(http.MethodGet, "/admin/v1/protocols", nil), err)
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "5" || !strings.Contains(recorder.Body.String(), `"code":"PAGINATION_SNAPSHOT_UNAVAILABLE"`) {
+		t.Fatalf("retry exhaustion response status=%d retry-after=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+	}
+	assertAdminQueryRateCount(t, ctx, repository, "query:subject:"+exhaustedSubject.String()+":protocols", 0)
+	exhaustedSourceDigest := sha256.Sum256([]byte(exhaustedSource))
+	assertAdminQueryRateCount(t, ctx, repository, "query:source:"+hex.EncodeToString(exhaustedSourceDigest[:])+":protocols", 0)
+}
+
+func assertAdminQueryRateCount(t *testing.T, ctx context.Context, repository *PostgresRepository, rateKey string, want int) {
+	t.Helper()
+	var count int
+	if err := repository.pool.QueryRow(ctx, `SELECT COALESCE(sum(creation_count),0) FROM token_admin_pagination_creation_windows WHERE rate_key=$1`, rateKey).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != want {
+		t.Fatalf("rate key %s count=%d want=%d", rateKey, count, want)
+	}
 }
 
 func newAdminQueryIntegrationHandler(t *testing.T, repository *PostgresRepository, subjectID uuid.UUID, version *atomic.Int64, grants map[string]bool) http.Handler {

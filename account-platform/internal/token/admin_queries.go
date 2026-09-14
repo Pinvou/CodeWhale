@@ -223,6 +223,16 @@ type adminQueryFilter struct {
 }
 
 func (r *PostgresRepository) reserveAdminQueryRate(ctx context.Context, subjectID uuid.UUID, resource, source string, owner bool) error {
+	err := retryAdminSerialization(ctx, func() error {
+		return r.reserveAdminQueryRateOnce(ctx, subjectID, resource, source, owner)
+	})
+	if adminSerializationFailure(err) {
+		return fmt.Errorf("%w: query rate serialization retry exhausted: %w", ErrAdminPaginationSnapshotUnavailable, err)
+	}
+	return err
+}
+
+func (r *PostgresRepository) reserveAdminQueryRateOnce(ctx context.Context, subjectID uuid.UUID, resource, source string, owner bool) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err

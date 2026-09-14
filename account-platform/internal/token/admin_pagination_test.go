@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestAdminPaginationLimitsAndStableErrors(t *testing.T) {
@@ -83,10 +84,143 @@ func TestAdminPaginationSerializationRetryRespectsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	started := time.Now()
-	if err := waitAdminPaginationSerializationRetry(ctx, 4); !errors.Is(err, context.Canceled) {
+	if err := waitAdminSerializationRetry(ctx, 4); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled retry returned %v", err)
 	}
 	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
 		t.Fatalf("canceled retry waited %s", elapsed)
+	}
+}
+
+func TestAdminSerializationRetryDelayIsBoundedAndJittered(t *testing.T) {
+	for attempt := 0; attempt < adminSerializationAttempts-1; attempt++ {
+		base := 10 * time.Millisecond * time.Duration(1<<min(attempt, 4))
+		minimum := adminSerializationRetryDelay(attempt, 0)
+		maximum := adminSerializationRetryDelay(attempt, uint64(base-1))
+		if minimum < base/2 || minimum >= base+base/2 {
+			t.Fatalf("attempt %d minimum delay=%s outside [%s,%s)", attempt, minimum, base/2, base+base/2)
+		}
+		if maximum < base/2 || maximum >= base+base/2 {
+			t.Fatalf("attempt %d maximum delay=%s outside [%s,%s)", attempt, maximum, base/2, base+base/2)
+		}
+		if minimum == maximum {
+			t.Fatalf("attempt %d delay did not vary with jitter: %s", attempt, minimum)
+		}
+	}
+}
+
+func TestAdminSerializationRetryRecoversTransientDatabaseConflict(t *testing.T) {
+	for _, sqlState := range []string{"40001", "40P01"} {
+		t.Run(sqlState, func(t *testing.T) {
+			attempts := 0
+			err := retryAdminSerializationWithWait(t.Context(), func() error {
+				attempts++
+				if attempts < 3 {
+					return &pgconn.PgError{Code: sqlState, Message: "synthetic transient conflict"}
+				}
+				return nil
+			}, func(context.Context, int) error { return nil })
+			if err != nil || attempts != 3 {
+				t.Fatalf("retry result attempts=%d err=%v", attempts, err)
+			}
+		})
+	}
+}
+
+func TestAdminSerializationRetryDoesNotRepeatPermanentFailure(t *testing.T) {
+	for _, want := range []error{
+		errors.New("permanent failure"),
+		&pgconn.PgError{Code: "23505", Message: "synthetic permanent constraint violation"},
+	} {
+		attempts := 0
+		err := retryAdminSerialization(t.Context(), func() error {
+			attempts++
+			return want
+		})
+		if !errors.Is(err, want) || attempts != 1 {
+			t.Fatalf("retry result attempts=%d err=%v", attempts, err)
+		}
+	}
+}
+
+func TestAdminSerializationRetryDoesNotStartWithCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	attempts := 0
+	err := retryAdminSerialization(ctx, func() error {
+		attempts++
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || attempts != 0 {
+		t.Fatalf("retry result attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestAdminSerializationRetryStopsWhenContextIsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	attempts := 0
+	err := retryAdminSerialization(ctx, func() error {
+		attempts++
+		cancel()
+		return &pgconn.PgError{Code: "40001", Message: "synthetic serialization conflict"}
+	})
+	if !errors.Is(err, context.Canceled) || attempts != 1 {
+		t.Fatalf("retry result attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestAdminSerializationFailureGivesContextPriority(t *testing.T) {
+	transient := &pgconn.PgError{Code: "40001", Message: "synthetic serialization conflict"}
+	err := errors.Join(context.Canceled, transient)
+	if adminSerializationFailure(err) {
+		t.Fatalf("context cancellation was classified as retryable: %v", err)
+	}
+}
+
+func TestAdminSerializationRetryGivesFinalAttemptContextPriority(t *testing.T) {
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		attempts := 0
+		err := retryAdminSerializationWithWait(ctx, func() error {
+			attempts++
+			if attempts == adminSerializationAttempts {
+				cancel()
+			}
+			return &pgconn.PgError{Code: "40001", Message: "synthetic serialization conflict"}
+		}, func(context.Context, int) error { return nil })
+		if !errors.Is(err, context.Canceled) || attempts != adminSerializationAttempts {
+			t.Fatalf("final cancellation attempts=%d err=%v", attempts, err)
+		}
+	})
+
+	t.Run("deadline exceeded", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+		defer cancel()
+		attempts := 0
+		err := retryAdminSerializationWithWait(ctx, func() error {
+			attempts++
+			if attempts == adminSerializationAttempts {
+				<-ctx.Done()
+			}
+			return &pgconn.PgError{Code: "40P01", Message: "synthetic deadlock conflict"}
+		}, func(context.Context, int) error { return nil })
+		if !errors.Is(err, context.DeadlineExceeded) || attempts != adminSerializationAttempts {
+			t.Fatalf("final deadline attempts=%d err=%v", attempts, err)
+		}
+	})
+}
+
+func TestAdminSerializationRetryIsBounded(t *testing.T) {
+	attempts := 0
+	waits := 0
+	err := retryAdminSerializationWithWait(t.Context(), func() error {
+		attempts++
+		return &pgconn.PgError{Code: "40001", Message: "synthetic serialization conflict"}
+	}, func(context.Context, int) error {
+		waits++
+		return nil
+	})
+	if !adminSerializationFailure(err) || attempts != adminSerializationAttempts || waits != adminSerializationAttempts-1 {
+		t.Fatalf("retry result attempts=%d waits=%d err=%v", attempts, waits, err)
 	}
 }
