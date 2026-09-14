@@ -845,6 +845,7 @@
   // buffer 跑同步逻辑再切回(saveWorkingSetTo/loadWorkingSetFrom),期间 suppressNotify
   // 避免把后台渲染成 active。异步收尾(落盘)按显式 session_id 路由,不依赖工作集。
   var sessionStates = {};
+  var deletedPersonaIds = new Set();
   // Web 草稿首条消息的本地提交记录。内容只留在当前页面内，用固定 RPC ID
   // 支撑断线重发与人工重试；切走草稿后不会把待发内容泄漏到其他会话。
   var firstTurnSubmissions = Object.create(null);
@@ -3302,7 +3303,7 @@
     state.modeState = mode.ok && mode.value
       ? { mode: mode.value.mode || "yolo", multiAgent: !!mode.value.multi_agent }
       : { mode: "yolo", multiAgent: false };
-    state.activePersona = persona.ok ? (persona.value || null) : null;
+    state.activePersona = persona.ok && persona.value && !deletedPersonaIds.has(persona.value.id) ? persona.value : null;
     if (snapshot.ok && snapshot.value && Array.isArray(snapshot.value.collections)) {
       applyMountedCollections(snapshot.value);
     } else if (collections.ok && Array.isArray(collections.value)) {
@@ -8908,18 +8909,28 @@
   // ── 用户自创卡 CRUD(写盘后刷新缓存) ──
   async function createPersona(input) {
     var sum = await invoke("create_persona", { input: input });
+    deletedPersonaIds.delete(sum.id);
     await refreshPersonas();
     return sum;
   }
   async function updatePersona(personaId, input) {
     var sum = await invoke("update_persona", { personaId: personaId, input: input });
     await refreshPersonas();
+    if (deletedPersonaIds.has(personaId)) return null;
     // 若改的正是当前 session 加持的卡, 同步挂件显示
     if (state.activePersona && state.activePersona.id === personaId) { state.activePersona = sum; notify(); }
     return sum;
   }
   async function deletePersona(personaId) {
     await invoke("delete_persona", { personaId: personaId });
+    // Invalidate live and cached selections only after deletion succeeds.
+    // Late reads/equip responses must not restore a card that no longer exists.
+    deletedPersonaIds.add(personaId);
+    if (state.activePersona && state.activePersona.id === personaId) state.activePersona = null;
+    Object.values(sessionStates).forEach(function (buffer) {
+      if (buffer.activePersona && buffer.activePersona.id === personaId) buffer.activePersona = null;
+    });
+    notify();
     await refreshPersonas();
   }
   // 给当前 session 加持一张专家面具。后端存 persona_id + 每 turn 注入人设;
@@ -8957,6 +8968,7 @@
     var sid = state.activeSessionId;
     try {
       var card = await invoke("equip_persona", { sessionId: state.activeSessionId, personaId: personaId });
+      if (deletedPersonaIds.has(personaId)) return null;
       lastEquippedSid = sid; // 成功加持的目标会话(即使已切走)：供紧随其后的引导卡定向(与 tauri 对齐，审计补充)
       if (sid !== state.activeSessionId) return card; // 已切走：不写当前显示
       // 标题仍是默认占位(三语哨兵,见 isDefaultChatTitle)→ 用卡牌名命名(无论草稿态物化还是遗留空会话;
@@ -8976,6 +8988,7 @@
       // 同 session 换了一张不同的卡 → 先弹一条"已卸下旧专家",再弹新加持。
       // 旧专家在写点复核而非入口捕获：同会话快速连续换卡时,入口值可能已被
       // 上一次 equip 的权威写覆盖,陈旧值会播报错误的"已卸下"(与 tauri 对齐,二审补充)。
+      if (deletedPersonaIds.has(personaId)) return null;
       var prev = state.activePersona;
       if (prev && prev.id !== card.id) {
         addChatItem({ type: "system", text: bt("personaUnequipped") + personaName(prev), time: timeStr() });
@@ -9027,7 +9040,7 @@
     try {
       var persona = await invoke("get_active_persona", { sessionId: state.activeSessionId }) || null;
       if (sid !== state.activeSessionId || seq !== personaSyncSeq) return; // 已切走或被权威写/新 sync 作废
-      state.activePersona = persona;
+      state.activePersona = persona && !deletedPersonaIds.has(persona.id) ? persona : null;
     } catch (e) { /* 旧 session 无加持,忽略 */ }
   }
   // 在【指定 session】追加卡牌制造者引导卡并落 sidecar(持久化,重载按 pos 插回)。
