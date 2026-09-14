@@ -1078,10 +1078,11 @@ pub fn run() {
             // 飞书 / 企微共用,供 *_connect_begin / *_cancel 用。
             app.handle().manage(connector_cli::ConnectorConn::default());
 
-            // EIP 连接编排状态(SSO 登录轮询取消标志),供 eip_connect_begin/cancel 用。
+            // EIP 连接编排状态:SSO 登录单飞门闩(进行中复用 / 取消 / 抢占有状态机,
+            // 不再是单个取消标志),供 eip_connect_begin/cancel 用。
             app.handle().manage(eip::EipConn::default());
 
-            // 知道连接编排状态(SSO 登录取消标志),供 zhidao_connect_begin/cancel 用。
+            // 知道连接编排状态:同 EIP 的单飞门闩,供 zhidao_connect_begin/cancel 用。
             app.handle().manage(zhidao::ZhidaoConn::default());
             // File watcher: 监听 ~/.pinvou3/sessions/ 树,新文件 emit artifact:disk
             file_watcher::spawn(app.handle().clone(), bridge::paths::sessions_root());

@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use super::flow_gate::{Begin, CANCEL_WAIT_LIMIT, FlowGuard, SsoFlow};
+
 use qrcode::{QrCode, render::svg};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter, Manager};
@@ -201,15 +203,25 @@ pub async fn zhidao_status() -> Result<Value, String> {
     .map_err(|e| format!("spawn_blocking: {e}"))?
 }
 pub async fn zhidao_connect_begin(app: AppHandle) -> Result<Value, String> {
-    use super::flow_gate::Begin;
     let flow = &app.state::<ZhidaoConn>().flow;
-    // 与 eip_connect_begin 同一套单飞语义：进行中复用、取消中等待归还门闩。
+    // 与 eip_connect_begin 同一套单飞语义:进行中复用、取消中等待归还门闩。
+    // 等待上限与抢占自愈同样见 flow_gate(CANCEL_WAIT_LIMIT / STALL_LIMIT)。
     let wait_start = Instant::now();
+    let mut announced = false;
     let decision = loop {
         match flow.begin() {
             Begin::Busy => {
-                if wait_start.elapsed() > Duration::from_secs(12) {
-                    return Err("上一个知道登录流程仍在取消中，请几秒后再试".to_string());
+                if wait_start.elapsed() > CANCEL_WAIT_LIMIT {
+                    // 不是连接失败:旧流程可能只是这一拍特别慢,稍后大概率自己连上。
+                    return Ok(json!({ "started": false, "busy": true }));
+                }
+                if !announced && wait_start.elapsed() > Duration::from_secs(1) {
+                    announced = true;
+                    emit(
+                        &app,
+                        "zhidao:sso_wait",
+                        json!({ "seconds": 0, "previous_flow": true }),
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -217,9 +229,9 @@ pub async fn zhidao_connect_begin(app: AppHandle) -> Result<Value, String> {
         }
     };
     match decision {
-        Begin::Start => {
+        Begin::Start { epoch } => {
             let app2 = app.clone();
-            tokio::task::spawn_blocking(move || run_login_flow(&app2));
+            tokio::task::spawn_blocking(move || run_login_flow(&app2, epoch));
             Ok(json!({ "started": true }))
         }
         Begin::Reuse { payload } => {
@@ -232,22 +244,31 @@ pub async fn zhidao_connect_begin(app: AppHandle) -> Result<Value, String> {
     }
 }
 
-fn run_login_flow(app: &AppHandle) {
-    let flow = &app.state::<ZhidaoConn>().flow;
-    let login = match get_sso_login() {
-        Ok(login) => login,
+/// 登录流程体。`epoch` 是 [`zhidao_connect_begin`] 从门闩拿到的持有权凭证。
+fn run_login_flow(app: &AppHandle, epoch: u64) {
+    let state = app.state::<ZhidaoConn>();
+    let flow = &state.flow;
+    // 门闩守卫:正常退出、提前 return、panic 都会归还门闩(同一根因见 eip.rs)。
+    let _guard = FlowGuard::new(flow, epoch);
+
+    let login = match get_sso_login(flow, epoch, app) {
+        Ok(Some(login)) => login,
+        Ok(None) => return, // 节流等待中被取消/抢占:静默退出
         Err(e) => {
             emit(
                 app,
                 "zhidao:error",
                 json!({ "code": "sso_start_failed", "message": e }),
             );
-            flow.finish();
             return;
         }
     };
     let qr = make_qr(&login.url);
-    flow.arm_payload(login.url.clone(), qr.clone());
+    // 取消/抢占可能正落在 begin 与出码之间,那时不能再把刚收起的弹窗重新打开。
+    if !flow.is_active(epoch) {
+        return;
+    }
+    flow.arm_payload(epoch, login.url.clone(), qr.clone());
     emit(
         app,
         "zhidao:sso",
@@ -255,15 +276,25 @@ fn run_login_flow(app: &AppHandle) {
     );
 
     let deadline = Instant::now() + Duration::from_secs(300);
-    while Instant::now() < deadline {
-        if flow.is_cancelling() {
-            flow.finish();
+    loop {
+        // 每拍自检 + 心跳:取消、被抢占都从这里静默退场,不再发任何事件。
+        if !flow.is_active(epoch) {
+            return;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        // 心跳贴着阻塞调用放:"卡死"只需由单次调用的最坏耗时界定。
+        if !flow.is_active(epoch) {
             return;
         }
         // 用 zhidao-cli 自己的 poll(复用 H3C session/poll 端点)收 token/AIT 到 zhidao 凭证目录。
         // 成功即由本 CLI 用同一套加密落盘,`load` 随后能读到 —— 不再依赖 eip-cli 的凭证格式。
         if let Ok(cmd) = zhidao(&["poll", "--session-id", &login.session_id, "--timeout", "5"]) {
             let _ = run(cmd);
+        }
+        if !flow.is_active(epoch) {
+            return;
         }
         if is_authed() {
             if set_connected(true) {
@@ -272,7 +303,6 @@ fn run_login_flow(app: &AppHandle) {
                 );
             }
             emit(app, "zhidao:connected", json!({ "ok": true }));
-            flow.finish();
             return;
         }
     }
@@ -284,7 +314,6 @@ fn run_login_flow(app: &AppHandle) {
             "message": "知道 SSO 认证超时，请重新连接"
         }),
     );
-    flow.finish();
 }
 
 struct SsoLogin {
@@ -292,9 +321,18 @@ struct SsoLogin {
     session_id: String,
 }
 
-fn get_sso_login() -> Result<SsoLogin, String> {
+/// `zhidao login` → SSO 登录地址 + sessionId。
+/// 返回 `Ok(None)` = 节流等待期间被取消/抢占,本次登录作废。
+fn get_sso_login(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<SsoLogin>, String> {
     let cmd = zhidao(&["login"])?;
-    super::flow_gate::throttle_sso_login(); // 同源网关限流:与 EIP 的 auth login 至少间隔 65s
+    // 同源网关限流:与 EIP 的 auth login 至少间隔 65s。等待期间出进度,可被取消。
+    let proceed = super::flow_gate::throttle_sso_login(
+        |wait| emit(app, "zhidao:sso_wait", json!({ "seconds": wait.as_secs() + 1 })),
+        || !flow.is_active(epoch),
+    );
+    if !proceed {
+        return Ok(None);
+    }
     let (_ok, _code, so, se) = run(cmd)?;
     let p = parse_json(&so)
         .or_else(|| parse_json(&se))
@@ -336,10 +374,10 @@ fn get_sso_login() -> Result<SsoLogin, String> {
                 .map(str::to_string)
         })
         .ok_or_else(|| "zhidao login 未返回 sessionId/state,无法自动轮询".to_string())?;
-    Ok(SsoLogin {
+    Ok(Some(SsoLogin {
         url: url.to_string(),
         session_id,
-    })
+    }))
 }
 pub async fn zhidao_cancel(app: AppHandle) -> Result<Value, String> {
     app.state::<ZhidaoConn>().flow.request_cancel();
