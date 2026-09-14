@@ -829,6 +829,13 @@ class CiGatePolicyTests(unittest.TestCase):
             "- 'pinvou3-app/tests/knowledge_host_packaging.test.mjs'",
             release_contract_paths,
         )
+        # Keep the l1 section boundary load-bearing: if the split anchor stops
+        # matching, this slice would silently grow and make the assertions above
+        # vacuous instead of exposing the workflow drift.
+        self.assertNotIn(
+            "- 'pinvou3-app/src-tauri/tests/l1_dialog_harness.rs'",
+            release_contract_paths,
+        )
 
         release_contract = self.workflow.split(
             "\n  release-contract-test:", maxsplit=1
