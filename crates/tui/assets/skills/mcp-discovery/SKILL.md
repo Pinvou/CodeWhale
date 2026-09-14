@@ -11,10 +11,10 @@ whether an MCP server already does it. The public MCP Registry ships hundreds
 of ready-made servers (filesystems, databases, browsers, media processing,
 developer utilities, cloud APIs, SaaS integrations, …).
 
-The discovery and structured start tools are registered whenever MCP support
-is enabled and the host's MCP pool initialized, but hosts may defer them out
-of your first-turn tool list or restrict them entirely; check your tool list
-and follow step 1 either way.
+The discovery and structured start tools are registered when MCP support is
+enabled — the start tool once the host's MCP pool is initialized as well —
+but hosts may defer them out of your first-turn tool list or restrict them
+entirely; check your tool list and follow step 1 either way.
 
 ## When to use
 
@@ -52,9 +52,9 @@ and follow step 1 either way.
    clearly irrelevant, or when a matching server fails to start after the retry
    described below.
 3. **Install + run transactionally.** If `start_registry_mcp_server` is not in
-   your tool list after `registry_sync` succeeded, run `tool_search` first to
-   activate it; if `tool_search` cannot surface it either, registry starts
-   are unavailable in this session — fall back to local tools. Otherwise call
+   your tool list after `registry_sync` succeeded, activate it via
+   `tool_search` as in step 1; if that fails, registry starts are
+   unavailable in this session — fall back to local tools. Otherwise call
    `start_registry_mcp_server {registry_name: "<exact name>", arguments: {...}}`.
    Supply only values listed in `required_args`; omit `arguments` when none
    are required. Never install or launch the package through `bash`.

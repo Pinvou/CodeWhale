@@ -21052,12 +21052,13 @@ fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
         "child has no load_skill in its wire catalog; discovery must go through tool_search:\n{catalog}"
     );
     assert!(
-        catalog.contains("If `tool_search` is in your tool list"),
-        "header must stay honest for tool-free children that also lack tool_search:\n{catalog}"
+        catalog.contains("activating it via `tool_search` first if it is not in your tool list"),
+        "child has no load_skill in its first-turn active set; the header must \
+         teach the tool_search activation path:\n{catalog}"
     );
     assert!(
-        catalog.contains("does not surface `load_skill`"),
-        "header must stay honest for allowlist children that carry tool_search \
-         but no load_skill in their catalog:\n{catalog}"
+        catalog.contains("if `tool_search` is absent or does not surface `load_skill`"),
+        "header must stay honest for tool-free and allowlist children that \
+         lack tool_search or load_skill:\n{catalog}"
     );
 }

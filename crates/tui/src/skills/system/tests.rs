@@ -72,18 +72,19 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
 // result, so hosts whose allowlists derive from the wire catalog reject the
 // call outright — the backticked `File` citations in pdf/help stalled real
 // reasoning loops exactly that way. The list is backtick-anchored so plain
-// prose (e.g. "Files or modules") never false-positives. Entries track the
-// registry's hidden compatibility aliases and the canonical retired-name
-// list; `list_dir` is deliberately absent because it is a live, searchable
-// tool (tools/file.rs ListDirTool), not a phantom.
+// prose (e.g. "Files or modules") never false-positives. Entries are the
+// registry's hidden compatibility aliases (`File`, `Bash`, the todo family,
+// `update_plan`, `rlm`) plus the canonical retired-name lists
+// (`RETIRED_TOOL_NAMES`, the `agents/*` family); `list_dir` is deliberately
+// absent because it is a live, searchable tool (tools/file.rs ListDirTool),
+// not a phantom. Scope note: `v4-best-practices` and `feishu` are not in
+// BUNDLED_SKILLS (legacy/optional, never auto-installed), so this sweep does
+// not cover them.
 #[test]
 fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
     const PHANTOM_NAMES: &[&str] = &[
         "`File`",
         "`Bash`",
-        "`Read`",
-        "`Write`",
-        "`Edit`",
         "`exec_shell`",
         "`exec_shell_wait`",
         "`exec_shell_interact`",
@@ -104,9 +105,14 @@ fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
         "`run_tests`",
         "`run_verifiers`",
         "`git_status`",
+        "`git_diff`",
+        "`git_log`",
+        "`git_show`",
+        "`git_blame`",
         "`wait_for_dev_server`",
         "`agents/list`",
         "`agents/message`",
+        "`agents/coordinate`",
         "`agents/followup`",
         "`agents/interrupt`",
         "`agents/wait`",

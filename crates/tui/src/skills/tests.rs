@@ -141,7 +141,9 @@ fn render_available_skills_context_lists_paths_and_usage() {
 // Regression: `load_skill` is deferred, so it is absent from the first-turn
 // tool catalog unless the host force-loads it. The Usage line must name
 // `tool_search` as the activation path, or the model is told to call a tool
-// it cannot see (Pinvou #490 phantom-tool incident).
+// it cannot see (Pinvou #490 phantom-tool incident). It is also the single
+// fallback teaching point in the index: per-skill rows and the omitted tail
+// deliberately do not repeat it.
 #[test]
 fn forkguard_skill_index_usage_names_tool_search_activation() {
     let tmpdir = TempDir::new().unwrap();
@@ -164,24 +166,13 @@ fn forkguard_skill_index_usage_names_tool_search_activation() {
     );
 }
 
-// Regression (Pinvou #490 phantom-tool incident): the omitted-skills tail
-// names `load_skill` too, so it must carry the same `tool_search` fallback
-// as the Usage line instead of commanding a tool the list may not have.
-#[test]
-fn forkguard_omitted_skills_line_carries_tool_search_fallback() {
-    let line = super::omitted_skills_line(2);
-    assert!(
-        line.contains("run `tool_search` first"),
-        "omitted tail must keep the tool_search fallback:\n{line}"
-    );
-}
-
 // Regression (Pinvou #490 phantom-tool incident): the bundled mcp-discovery
 // skill must keep `registry_sync` reachable on stock hosts — where it is
 // deferred but `tool_search`-activatable — instead of declaring the Registry
 // unavailable, must teach a `query`-bearing call (the schema rejects `{}`),
 // must describe the scored-matches contract honestly, and must not cite the
-// retired `exec_shell` alias as if it were callable.
+// retired `exec_shell` alias as if it were callable. Step 3 reuses step 1's
+// activation teaching by reference instead of repeating the full fallback.
 #[test]
 fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
     const SKILL: &str = include_str!("../../assets/skills/mcp-discovery/SKILL.md");
@@ -220,16 +211,16 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
          registry_sync is registered (pool init failure, tool-security mode):\n{SKILL}"
     );
     assert!(
-        SKILL.contains("activate it; if `tool_search` cannot surface it either, registry starts"),
+        SKILL.contains("`tool_search` as in step 1"),
         "the start tool is deferred-but-searchable and its activation does not \
-         follow from registry_sync's, so step 3 must offer the same \
-         tool_search path as step 1 instead of surrendering on visibility \
-         alone:\n{SKILL}"
+         follow from registry_sync's, so step 3 must point at step 1's \
+         tool_search path instead of surrendering on visibility alone:\n{SKILL}"
     );
     assert!(
-        SKILL.contains("and the host's MCP pool initialized"),
-        "the start tool registers only after the pool initializes; the \
-         preamble must not overclaim registration:\n{SKILL}"
+        SKILL.contains("the start tool once the host's MCP pool is initialized"),
+        "the start tool registers only after the pool initializes (the \
+         discovery tool needs only MCP support); the preamble must not \
+         overclaim registration for either side:\n{SKILL}"
     );
     assert!(
         SKILL.contains("drop out of your tool list again"),
@@ -1795,9 +1786,9 @@ fn plugin_skills_are_qualified_and_denied_until_trusted_and_enabled() {
     assert!(rendered.contains("reviewed plugin snapshot: demo"));
     assert!(rendered.contains("use load_skill"));
     assert!(
-        rendered.contains("use load_skill — if `load_skill` is not in your tool list"),
-        "plugin rows must carry the same deferred-load_skill fallback as the \
-         Usage line:\n{rendered}"
+        !rendered.contains("use load_skill —"),
+        "plugin rows stay short; the deferred-load_skill fallback is taught \
+         once in the Usage line:\n{rendered}"
     );
     assert!(
         rendered.contains("hello"),

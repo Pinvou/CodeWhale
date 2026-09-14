@@ -449,6 +449,21 @@ fn forkguard_registry_first_instruction_names_registered_tool_specs() {
         MCP_REGISTRY_FIRST_INSTRUCTION.contains("`start_registry_mcp_server`"),
         "instruction must keep naming the registered `{start}`"
     );
+    // The match cap is quoted as a literal word in the instruction, the
+    // `registry_sync` schema description, and the bundled mcp-discovery
+    // skill; `MAX_REGISTRY_MATCHES` pins the constant to it at compile time,
+    // and these two assertions pin the remaining text sides.
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("eight"),
+        "instruction must keep the match-cap wording in sync with \
+         MAX_REGISTRY_MATCHES"
+    );
+    let schema = ToolSpec::input_schema(&sync).to_string();
+    assert!(
+        schema.contains("eight"),
+        "registry_sync schema must keep the match-cap wording in sync with \
+         MAX_REGISTRY_MATCHES: {schema}"
+    );
 }
 
 #[test]
@@ -16839,10 +16854,12 @@ fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window
 }
 
 // Regression (Pinvou #490 phantom-tool class): the parent-context hint must
-// name tools that are first-turn active on every stock host (`read`, `bash`).
-// `File` is a hidden compatibility alias no catalog or `tool_search` result
-// can return, and `list` is not a tool name at all — the earlier wording
-// commanded calls that allowlist hosts reject outright.
+// name tools that are first-turn active wherever the default native toolset
+// is registered (`read`, `bash`). `File` is a hidden compatibility alias no
+// catalog or `tool_search` result can return, and `list` is not a tool name
+// at all — the earlier wording commanded calls that allowlist hosts reject
+// outright. Shell-restricted sessions that carry neither tool surface the
+// same names through the catalog's core-action fallback explanations.
 #[test]
 fn forkguard_subagent_context_hint_names_active_tools() {
     let long_result = "verified detail\n".repeat(1_000);
