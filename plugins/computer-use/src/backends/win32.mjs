@@ -260,7 +260,9 @@ Write-Output '{"ok": true}';`, { timeoutMs: 20_000 });
       return { action_sent: true, from, to };
     },
     left_mouse_down: async ({ target }) => {
-      await withUser32(target ? `[User32]::SetCursorPos(${Math.round(target.x)}, ${Math.round(target.y)}) | Out-Null;` : "" + `[User32]::mouse_event([User32]::LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Write-Output '{"ok": true}'`);
+      // Parenthesize the conditional: `+` binds tighter than `?:`, so without
+      // them a target-bearing call moved the cursor and never pressed.
+      await withUser32((target ? `[User32]::SetCursorPos(${Math.round(target.x)}, ${Math.round(target.y)}) | Out-Null;` : "") + `[User32]::mouse_event([User32]::LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero); Write-Output '{"ok": true}'`);
       return { action_sent: true };
     },
     left_mouse_up: async () => {
