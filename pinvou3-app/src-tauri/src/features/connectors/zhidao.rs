@@ -241,7 +241,9 @@ pub async fn zhidao_connect_begin(app: AppHandle) -> Result<Value, String> {
         }
         Begin::Reuse { payload } => {
             match payload {
-                Some((url, qr)) => emit(&app, "zhidao:sso", json!({ "url": url, "qr_data_url": qr })),
+                Some((url, qr)) => {
+                    emit(&app, "zhidao:sso", json!({ "url": url, "qr_data_url": qr }))
+                }
                 // 同 eip:URL 还没拿到时先给个"生成中"等待态,别留无反馈的忙碌按钮。
                 None => emit(&app, "zhidao:sso_wait", json!({ "seconds": 0 })),
             }
@@ -342,7 +344,13 @@ fn get_sso_login(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<S
     let cmd = zhidao(&["login"])?;
     // 同源网关限流:与 EIP 的 auth login 至少间隔 65s。等待期间出进度,可被取消。
     let proceed = super::flow_gate::throttle_sso_login(
-        |wait| emit(app, "zhidao:sso_wait", json!({ "seconds": wait.as_secs() + 1 })),
+        |wait| {
+            emit(
+                app,
+                "zhidao:sso_wait",
+                json!({ "seconds": wait.as_secs() + 1 }),
+            )
+        },
         || !flow.is_active(epoch),
     );
     if !proceed {

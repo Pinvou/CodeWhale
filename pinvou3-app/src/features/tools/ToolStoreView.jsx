@@ -2188,7 +2188,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('eip logout failed:', e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isError: true });
         } finally {
-          setBusyId(null);
+          // 断开收尾也只释放自己的槽位：logout 期间别的操作可能已接手 busyId。
+          setBusyId(busy => releaseBusy(busy, 'eip'));
         }
       };
 
@@ -2229,7 +2230,8 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           console.error('zhidao logout failed:', e);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isError: true });
         } finally {
-          setBusyId(null);
+          // 同 disconnectEip：断开收尾只释放自己的槽位。
+          setBusyId(busy => releaseBusy(busy, 'zhidao'));
         }
       };
 

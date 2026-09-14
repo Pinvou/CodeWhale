@@ -317,9 +317,7 @@ pub async fn eip_connect_begin(app: AppHandle) -> Result<Value, String> {
         }
         Begin::Reuse { payload } => {
             match payload {
-                Some((url, qr)) => {
-                    emit(&app, "eip:sso", json!({ "url": url, "qr_data_url": qr }))
-                }
+                Some((url, qr)) => emit(&app, "eip:sso", json!({ "url": url, "qr_data_url": qr })),
                 // 流程在跑但 URL 还没拿到(可能正卡在 65s 节流窗口里):在途的 eip:sso
                 // 随后会送达,**但**这次重连若晚于那个事件发出,用户会面对一个毫无
                 // 反馈的忙碌按钮。给一个"生成中"的等待态(seconds=0 → 前端显示
@@ -426,7 +424,13 @@ fn get_sso_url(flow: &SsoFlow, epoch: u64, app: &AppHandle) -> Result<Option<Str
     let cmd = eip(&["auth", "login", "--no-poll", "--output", "json"])?;
     // 同源网关限流:与知道的 login 至少间隔 65s。等待期间给前端出进度,可被取消。
     let proceed = super::flow_gate::throttle_sso_login(
-        |wait| emit(app, "eip:sso_wait", json!({ "seconds": wait.as_secs() + 1 })),
+        |wait| {
+            emit(
+                app,
+                "eip:sso_wait",
+                json!({ "seconds": wait.as_secs() + 1 }),
+            )
+        },
         || !flow.is_active(epoch),
     );
     if !proceed {

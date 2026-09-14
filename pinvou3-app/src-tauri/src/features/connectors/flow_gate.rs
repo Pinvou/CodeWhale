@@ -290,6 +290,12 @@ fn throttle_at(
     loop {
         let remaining = slot.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            // 窗口耗尽的最后一次出队也要监票：取消/抢占落在最后一个分片内时，
+            // 这次 login 同样不能真的发出去——与免等待路径同一标准。
+            if aborted() {
+                rollback(last, slot, previous);
+                return false;
+            }
             return true;
         }
         if aborted() {
@@ -351,7 +357,10 @@ mod tests {
         let f = SsoFlow::default();
         let epoch = start(&f);
         f.request_cancel();
-        assert!(!f.is_active(epoch), "cancelled flow must stop at next check");
+        assert!(
+            !f.is_active(epoch),
+            "cancelled flow must stop at next check"
+        );
         assert!(matches!(f.begin(), Begin::Busy));
         drop(FlowGuard::new(&f, epoch));
         assert!(matches!(f.begin(), Begin::Start { .. }));
@@ -424,7 +433,10 @@ mod tests {
         assert_ne!(zombie, fresh);
 
         drop(FlowGuard::new(&f, zombie)); // 僵尸流程终于醒来退出
-        assert!(matches!(f.begin(), Begin::Reuse { .. }), "new holder must survive");
+        assert!(
+            matches!(f.begin(), Begin::Reuse { .. }),
+            "new holder must survive"
+        );
         f.arm_payload(zombie, "https://sso/stale".into(), Some("stale-qr".into()));
         assert!(!f.is_active(zombie), "zombie must not report itself active");
         match f.begin() {
@@ -455,10 +467,7 @@ mod tests {
         let epoch = start(&f);
         f.request_cancel(); // 旧流程进入 Cancelling
         let ticket = f.cancel_ticket();
-        assert!(
-            !f.cancelled_since(ticket),
-            "刚取的监票不该立刻算作已取消"
-        );
+        assert!(!f.cancelled_since(ticket), "刚取的监票不该立刻算作已取消");
         assert!(matches!(f.begin(), Begin::Busy), "此时等待者只能排队");
         f.request_cancel(); // 用户在等待期间点取消：相位没变，但意图必须被记下
         assert!(
@@ -492,8 +501,10 @@ mod tests {
         );
     }
 
+    /// 窗口耗尽的最后一次出队也要监票：取消落在最后一个分片内时，这次 login
+    /// 同样不能被放出去，预约也要回滚。
     #[test]
-    fn throttle_enforces_min_interval_between_logins() {
+    fn throttle_final_dequeue_does_not_let_an_aborted_login_through() {
         let last = Mutex::new(None);
         assert!(throttle_at(
             &last,
@@ -501,6 +512,28 @@ mod tests {
             |_| {},
             &mut || false
         ));
+        let previous = *last.lock().unwrap();
+        // abort 在窗口过半后翻真：模拟"取消落在最后一个分片内"。
+        let t0 = Instant::now();
+        let mut abort_midway = || t0.elapsed() >= Duration::from_millis(40);
+        assert!(
+            !throttle_at(&last, Duration::from_millis(80), |_| {}, &mut abort_midway),
+            "最后一次出队已察觉取消，不该把这次 login 放出去"
+        );
+        assert_eq!(
+            *last.lock().unwrap(),
+            previous,
+            "没发生的 login 不该占掉节流窗口（预约要回滚）"
+        );
+    }
+
+    #[test]
+    fn throttle_enforces_min_interval_between_logins() {
+        let last = Mutex::new(None);
+        // 从首次调用之前起计量：第二次调用起步前可能已消耗部分窗口（CI 调度
+        // 停顿甚至可能已越过整个窗口——此时立即放行是正确行为），断言的语义
+        // 是"不得早于自己的预约槽位放行"，扣掉起步前已消耗的量，另留 2ms
+        // 裕量吸收时钟与调度精度；仍能拦住"完全没等"的回归。
         let t0 = Instant::now();
         assert!(throttle_at(
             &last,
@@ -508,9 +541,18 @@ mod tests {
             |_| {},
             &mut || false
         ));
+        let entry = Instant::now();
+        assert!(throttle_at(
+            &last,
+            Duration::from_millis(80),
+            |_| {},
+            &mut || false
+        ));
+        let waited = entry.elapsed();
+        let floor = Duration::from_millis(78).saturating_sub(entry.duration_since(t0));
         assert!(
-            t0.elapsed() >= Duration::from_millis(80),
-            "second login inside the window must be delayed to the interval"
+            waited >= floor,
+            "second login must not pass before its reserved slot (waited {waited:?})"
         );
         assert!(last.lock().unwrap().is_some());
     }
