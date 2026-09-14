@@ -62,6 +62,29 @@ test("validates required fields, controlled enums and server-owned fields", () =
   });
 });
 
+test("accepts only normalized names on tool events", () => {
+  const toolEvent = {
+    ...taskFinished(),
+    event_name: "tool_call_completed",
+    operation_id: "operation_test_001",
+    attempt_index: 1,
+    tool_key: "mcp_custom",
+    tool_name: "mcp__private_crm__lookup",
+    tool_type: "mcp",
+    success: true,
+    duration_ms: 12,
+  };
+  assert.deepEqual(validateBehaviorEventShape(toolEvent, { now: NOW }), { ok: true });
+  for (const tool_name of ["https://private.example/tool", "C:\\private\\tool", "tool --secret=value"]) {
+    assert.deepEqual(validateBehaviorEventShape({ ...toolEvent, tool_name }, { now: NOW }), {
+      ok: false, reason: "invalid_field", field: "tool_name",
+    });
+  }
+  assert.deepEqual(validateBehaviorEventShape(taskFinished({ tool_name: "private_tool" }), { now: NOW }), {
+    ok: false, reason: "invalid_field", field: "tool_name",
+  });
+});
+
 test("rejects unknown, oversized, stale and future events independently", () => {
   assert.deepEqual(validateBehaviorEventShape(taskFinished({ schema_version: 2 }), { now: NOW }), {
     ok: false, reason: "unsupported_schema", field: "schema_version",

@@ -760,12 +760,19 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(overview.metrics.voice_penetration_rate, null);
 
   const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "call", now, { minimumGroupSubjects: 0 });
-    assert.equal(tools.rows[0].tool_key, "search");
-    assert.equal(tools.rows[0].call_count, 2);
-    assert.equal(tools.rows[0].user_count, 1);
-    assert.equal(tools.rows[0].observed_user_count, 2);
-    assert.equal(tools.rows[0].tool_type, "mcp");
-    assert.equal(tools.rows[0].success_rate, null);
+  const mcpTool = tools.rows.find(row => row.tool_type === "mcp");
+  const builtinTool = tools.rows.find(row => row.tool_type === "builtin");
+  assert.equal(mcpTool.tool_key, "search");
+  assert.equal(mcpTool.tool_name, "search");
+  assert.equal(mcpTool.call_count, 1);
+  assert.equal(mcpTool.user_count, 1);
+  assert.equal(mcpTool.observed_user_count, 1);
+  assert.equal(mcpTool.success_rate, null);
+  assert.equal(builtinTool.tool_key, "search");
+  assert.equal(builtinTool.tool_name, "search");
+  assert.equal(builtinTool.call_count, 1);
+  assert.equal(builtinTool.user_count, 0);
+  assert.equal(builtinTool.observed_user_count, 1);
 
   const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "install", now, { minimumGroupSubjects: 0 });
   assert.equal(installs.rows[0].install_count, 1);
@@ -1291,6 +1298,43 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test("tool rankings expose normalized new names without reconstructing historical custom names", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [
+    { event_id: "named_tool", event_name: "tool_call_completed", operation_id: "named_op", identity_id: "dev_a", tool_key: "mcp_custom", tool_name: "mcp__private_crm__lookup", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:00:00") },
+    { event_id: "legacy_tool", event_name: "tool_call_completed", operation_id: "legacy_op", identity_id: "dev_b", tool_key: "mcp_custom", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:01:00") },
+    { event_id: "known_search", event_name: "tool_call_completed", operation_id: "known_search_op", identity_id: "dev_a", tool_key: "search", tool_name: "search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:02:00") },
+    { event_id: "custom_search", event_name: "tool_call_completed", operation_id: "custom_search_op", identity_id: "dev_b", tool_key: "mcp_custom", tool_name: "search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T10:03:00") },
+  ];
+  const result = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "call", now, { minimumGroupSubjects: 0 });
+  assert(result.rows.some(row => row.tool_name === "mcp__private_crm__lookup" && row.tool_key === "mcp_custom"));
+  assert(result.rows.some(row => row.tool_name === "mcp_custom" && row.tool_key === "mcp_custom"));
+  const customFunnel = result.funnel_rows.find(row => row.tool_key === "mcp_custom");
+  assert.equal(result.funnel_rows.filter(row => row.tool_key === "mcp_custom").length, 1);
+  assert.equal(customFunnel.tool_name, "mcp__private_crm__lookup");
+  assert.equal(customFunnel.call_succeeded_count, 3);
+  assert.equal(result.rows.filter(row => row.tool_name === "search").length, 2);
+  assert(result.rows.some(row => row.tool_name === "search" && row.tool_key === "search"));
+  assert(result.rows.some(row => row.tool_name === "search" && row.tool_key === "mcp_custom"));
+});
+
+test("tool adoption funnel joins stages by stable identity and prefers the call-side name", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [
+    { event_id: "tool_seen", event_name: "tool_impression", view_id: "tool_view", identity_id: "dev_a", tool_key: "custom", tool_name: "workspace_helper", tool_type: "skill", occurred_at: at("2026-08-12T09:00:00") },
+    { event_id: "tool_configured", event_name: "tool_configuration_finished", operation_id: "tool_config", identity_id: "dev_a", tool_key: "custom", tool_name: "workspace_helper", tool_type: "skill", success: true, occurred_at: at("2026-08-12T09:01:00") },
+    { event_id: "tool_called", event_name: "tool_call_completed", operation_id: "tool_call", identity_id: "dev_a", tool_key: "custom", tool_name: "skill__workspace_helper", tool_type: "skill", success: true, occurred_at: at("2026-08-12T09:02:00") },
+  ];
+
+  const result = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "install", now, { minimumGroupSubjects: 0 });
+  assert.equal(result.funnel_rows.length, 1);
+  assert.equal(result.funnel_rows[0].tool_name, "skill__workspace_helper");
+  assert.equal(result.funnel_rows[0].impression_count, 1);
+  assert.equal(result.funnel_rows[0].configuration_succeeded_count, 1);
+  assert.equal(result.funnel_rows[0].call_succeeded_count, 1);
+  assert.equal(result.funnel_rows[0].configuration_to_call_p50_ms, 60_000);
 });
 
 test("behavior rankings include small groups and clip per-subject daily contributions", () => {
