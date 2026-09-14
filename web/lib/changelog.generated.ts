@@ -26,15 +26,7 @@ export const CHANGELOG: ChangelogRelease[] = [
     "date": null,
     "unreleased": true,
     "compareUrl": "https://github.com/Hmbown/CodeWhale/compare/v0.9.12...HEAD",
-    "sections": [
-      {
-        "heading": "Fixed",
-        "items": [
-          "API-backed [search] providers now visibly degrade directly to the keyless Bing tail instead of routing through DuckDuckGo when unavailable: DuckDuckGo is unreachable from mainland-China networks (DNS poisoning plus SNI reset), while Bing serves its global and China endpoints without a key. The all-backends-down guidance names every keyed provider (tavily, bocha, metaso, baidu, volcengine, sofya) and the keyless routes (firecrawl, bing), and the web_search tool description no…"
-        ],
-        "itemCount": 1
-      }
-    ]
+    "sections": []
   },
   {
     "version": "0.9.12",
