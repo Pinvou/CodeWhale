@@ -422,9 +422,9 @@ fn registry_first_instruction_only_names_published_tools() {
 /// implementations must stay a paired set: renaming either side alone
 /// resurrects the phantom-tool incident (Pinvou #490) where the instruction
 /// cites a tool absent from the catalog and allowlist. If this test fails
-/// after a rename, update the instruction, the registration in
-/// `tool_setup`, and the pinvou3-app allowlist
-/// (`features/assistant/tool_policy.rs`) in the same change.
+/// after a rename, update the instruction and the registration in
+/// `tool_setup` in the same change; downstream hosts that gate these tool
+/// names by allowlist must follow in the same commit.
 #[test]
 fn forkguard_registry_first_instruction_names_registered_tool_specs() {
     use crate::mcp::{McpConfig, McpPool};
@@ -16838,8 +16838,13 @@ fn codex_tool_retention_uses_oauth_route_window_not_asmall_contract_model_window
     assert!(context.len() < content.len());
 }
 
+// Regression (Pinvou #490 phantom-tool class): the parent-context hint must
+// name tools that are first-turn active on every stock host (`read`, `bash`).
+// `File` is a hidden compatibility alias no catalog or `tool_search` result
+// can return, and `list` is not a tool name at all — the earlier wording
+// commanded calls that allowlist hosts reject outright.
 #[test]
-fn subagent_results_are_summarized_before_parent_context_insertion() {
+fn forkguard_subagent_context_hint_names_active_tools() {
     let long_result = "verified detail\n".repeat(1_000);
     let output = ToolResult::success(
         json!({
@@ -16865,9 +16870,12 @@ fn subagent_results_are_summarized_before_parent_context_insertion() {
     assert!(context.contains("steps=12"));
     assert!(context.len() < output.content.len());
     assert!(context.contains("self-report"));
-    assert!(context.contains("verify side effects"));
-    assert!(context.contains("`File` actions like `read` or `list`"));
-    assert!(!context.contains("read_file") && !context.contains("list_dir"));
+    assert!(context.contains("verify side effects with `read` or `bash`"));
+    assert!(
+        !context.contains("`File`")
+            && !context.contains("read_file")
+            && !context.contains("list_dir")
+    );
     assert!(context.contains("handle_read"));
 }
 

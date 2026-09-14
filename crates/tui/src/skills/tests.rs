@@ -141,7 +141,7 @@ fn render_available_skills_context_lists_paths_and_usage() {
 // Regression: `load_skill` is deferred, so it is absent from the first-turn
 // tool catalog unless the host force-loads it. The Usage line must name
 // `tool_search` as the activation path, or the model is told to call a tool
-// it cannot see (Pinvou 运动打卡 incident, 2026-09).
+// it cannot see (Pinvou #490 phantom-tool incident).
 #[test]
 fn forkguard_skill_index_usage_names_tool_search_activation() {
     let tmpdir = TempDir::new().unwrap();
@@ -218,6 +218,23 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
         SKILL.contains("If `start_registry_mcp_server` is not in"),
         "step 3 must gate the start tool, which can be absent while \
          registry_sync is registered (pool init failure, tool-security mode):\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("activate it; if `tool_search` cannot surface it either, registry starts"),
+        "the start tool is deferred-but-searchable and its activation does not \
+         follow from registry_sync's, so step 3 must offer the same \
+         tool_search path as step 1 instead of surrendering on visibility \
+         alone:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("and the host's MCP pool initialized"),
+        "the start tool registers only after the pool initializes; the \
+         preamble must not overclaim registration:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("drop out of your tool list again"),
+        "connected tools re-defer on later turns; step 4 must teach \
+         re-activation instead of a blind call:\n{SKILL}"
     );
     assert!(
         SKILL.contains("`start_registry_mcp_server`"),

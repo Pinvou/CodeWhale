@@ -584,6 +584,14 @@ const REGISTRY_FIRST_PROMPT: &str = concat!(
 /// Host-side cap on model-visible Registry matches. The complete catalog
 /// stays on disk; only this many matched entries ever reach the model.
 const MAX_REGISTRY_MATCHES: usize = 8;
+// The cap is quoted as a literal number in model-facing text; changing one
+// side alone turns that text into a phantom fact (Pinvou #490 class).
+const _: () = assert!(
+    MAX_REGISTRY_MATCHES == 8,
+    "update the \"eight scored matches\" wording in \
+     assets/skills/mcp-discovery/SKILL.md, the registry_sync schema \
+     description here, and MCP_REGISTRY_FIRST_INSTRUCTION in core/engine.rs",
+);
 
 #[derive(Serialize)]
 struct RegistryCatalogResult {

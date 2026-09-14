@@ -49,9 +49,9 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
     assert!(SKILL_CREATOR_BODY.contains("~/.codewhale/skills"));
     assert!(SKILL_INSTALLER_BODY.contains("~/.codewhale/skills"));
     // Bundled skills must name live, model-visible tools. `read_file` is
-    // retired and cannot dispatch (crates/tui/src/tools/registry.rs:2067);
-    // `File` is a hidden compatibility alias that never appears in a catalog
-    // or in `tool_search`, so `read` is the citable name.
+    // retired and cannot dispatch; `File` is a hidden compatibility alias
+    // that never appears in a catalog or in `tool_search`, so `read` is the
+    // citable name.
     assert!(PDF_BODY.contains("built-in `read` tool"));
     for (name, body) in [
         ("pdf", PDF_BODY),
@@ -72,7 +72,10 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
 // result, so hosts whose allowlists derive from the wire catalog reject the
 // call outright — the backticked `File` citations in pdf/help stalled real
 // reasoning loops exactly that way. The list is backtick-anchored so plain
-// prose (e.g. "Files or modules") never false-positives.
+// prose (e.g. "Files or modules") never false-positives. Entries track the
+// registry's hidden compatibility aliases and the canonical retired-name
+// list; `list_dir` is deliberately absent because it is a live, searchable
+// tool (tools/file.rs ListDirTool), not a phantom.
 #[test]
 fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
     const PHANTOM_NAMES: &[&str] = &[
@@ -82,13 +85,31 @@ fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
         "`Write`",
         "`Edit`",
         "`exec_shell`",
+        "`exec_shell_wait`",
+        "`exec_shell_interact`",
+        "`exec_shell_cancel`",
         "`read_file`",
         "`write_file`",
         "`edit_file`",
-        "`list_dir`",
         "`fetch_url`",
+        "`web_fetch`",
+        "`web_search`",
         "`work_update`",
         "`TodoWrite`",
+        "`todo`",
+        "`checklist_write`",
+        "`checklist_update`",
+        "`update_plan`",
+        "`rlm`",
+        "`run_tests`",
+        "`run_verifiers`",
+        "`git_status`",
+        "`wait_for_dev_server`",
+        "`agents/list`",
+        "`agents/message`",
+        "`agents/followup`",
+        "`agents/interrupt`",
+        "`agents/wait`",
     ];
     for skill in BUNDLED_SKILLS {
         for phantom in PHANTOM_NAMES {
@@ -103,10 +124,11 @@ fn forkguard_bundled_skills_cite_no_hidden_or_retired_tool_names() {
     }
 }
 
-// Regression: `create_goal` is deferred in main sessions and removed from
-// subagent registries entirely (tools/subagent/mod.rs drops it when building
-// the child surface), so the best-of-n body must gate the command on
-// availability instead of commanding it unconditionally.
+// Regression: `create_goal` is deferred-but-`tool_search`-searchable in main
+// sessions and removed from subagent registries entirely (tools/subagent/
+// mod.rs drops it before catalog filtering and search), so the best-of-n body
+// must gate the command on availability, name the activation path instead of
+// surrendering a reachable capability, and stay honest for child sessions.
 #[test]
 fn forkguard_best_of_n_goal_tool_is_availability_gated() {
     let skill = BUNDLED_SKILLS
@@ -116,6 +138,18 @@ fn forkguard_best_of_n_goal_tool_is_availability_gated() {
     assert!(
         skill.body.contains("`create_goal` is in your tool list"),
         "best-of-n must gate create_goal on availability:\n{}",
+        skill.body
+    );
+    assert!(
+        skill.body.contains("run `tool_search` first"),
+        "create_goal is deferred on every stock host, so the visibility gate \
+         alone would always fail; the skill must name the activation path:\n{}",
+        skill.body
+    );
+    assert!(
+        skill.body.contains("does not exist and"),
+        "best-of-n must stay honest for subagent sessions where create_goal \
+         is removed entirely:\n{}",
         skill.body
     );
     assert!(

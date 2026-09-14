@@ -12,8 +12,9 @@ of ready-made servers (filesystems, databases, browsers, media processing,
 developer utilities, cloud APIs, SaaS integrations, …).
 
 The discovery and structured start tools are registered whenever MCP support
-is enabled, but hosts may defer them out of your first-turn tool list or
-restrict them entirely; check your tool list and follow step 1 either way.
+is enabled and the host's MCP pool initialized, but hosts may defer them out
+of your first-turn tool list or restrict them entirely; check your tool list
+and follow step 1 either way.
 
 ## When to use
 
@@ -51,14 +52,17 @@ restrict them entirely; check your tool list and follow step 1 either way.
    clearly irrelevant, or when a matching server fails to start after the retry
    described below.
 3. **Install + run transactionally.** If `start_registry_mcp_server` is not in
-   your tool list after `registry_sync` succeeded, registry starts are
-   unavailable in this session — fall back to local tools. Otherwise call
+   your tool list after `registry_sync` succeeded, run `tool_search` first to
+   activate it; if `tool_search` cannot surface it either, registry starts
+   are unavailable in this session — fall back to local tools. Otherwise call
    `start_registry_mcp_server {registry_name: "<exact name>", arguments: {...}}`.
    Supply only values listed in `required_args`; omit `arguments` when none
    are required. Never install or launch the package through `bash`.
 4. **Solve the task with the new tools.** Their complete schemas are added
    to the current turn immediately after a successful connection; call the
-   exact names returned by the start result.
+   exact names returned by the start result. On a later turn a connected
+   tool may drop out of your tool list again; run `tool_search` first
+   before calling it.
 
 ## If a server fails to start
 

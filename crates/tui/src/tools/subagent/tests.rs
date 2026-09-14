@@ -21023,7 +21023,7 @@ async fn agent_claim_is_withheld_from_a_role_with_no_write_authority() {
 // must therefore stay honest in all three child states: name tool_search as
 // the discovery path when it exists, stay truthful for allowlist children
 // that carry tool_search but no load_skill, and do not command a tool the
-// child cannot see (Pinvou 运动打卡 incident, 2026-09).
+// child cannot see (Pinvou #490 phantom-tool incident).
 #[test]
 fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
     let tmp = tempdir().expect("tempdir");
