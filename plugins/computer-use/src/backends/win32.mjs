@@ -233,7 +233,11 @@ $bmp.Dispose(); $img.Dispose();
 Write-Output '{"ok": true}';`;
       const r = await ps(script, { timeoutMs: 20_000 });
       if (r.code !== 0 || !fs.existsSync(out)) throw new ExecError(`zoom failed: ${(r.stderr || "").slice(0, 250)}`, r);
-      return { file: out, bytes: fs.statSync(out).size, region, source: src };
+      const bytes = fs.statSync(out).size;
+      // The child raster becomes the last raster so a follow-up zoom crops
+      // from the child, matching zoom's "region in last-raster pixels" contract.
+      lastRaster = { ...lastRaster, file: out, bytes, capturedAt: new Date().toISOString() };
+      return { file: out, bytes, region, source: src };
     },
     left_click: ({ target }) => clickAt(0, target.x, target.y, 1),
     double_click: ({ target }) => clickAt(0, target.x, target.y, 2),

@@ -7,8 +7,10 @@
  */
 
 /**
- * Geometry of the raster a zoom returns, given the geometry of the raster the
- * region was taken from. Returns null when either side is unusable — the
+ * Binding geometry of the raster a zoom returns, given the geometry of the
+ * raster the region was taken from. The returned shape is what bindRaster
+ * stores (`origin` in screen points — screenshots carry `points`, a zoom
+ * child carries `origin`). Returns null when either side is unusable — the
  * caller then keeps the previous binding instead of rebinding.
  */
 export function zoomChildRaster(prev, region) {

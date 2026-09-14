@@ -68,11 +68,14 @@ Observe once, act once, then verify.
 ## Recording
 
 `recording_start` → work → `recording_stop` returns the finalized file path.
-macOS uses `screencapture -v` (a receipt warning about Screen Recording
-permission means the user must grant it once). Linux uses x11grab/wf-recorder,
-Windows ffmpeg gdigrab, HarmonyOS snapshot-series (no native CLI recorder —
-the receipt says so). `recording_status` / `recording_list` report bytes and
-paths. Screenshots land in the same directory.
+Recording works on local and hdc computers only: over ssh the one-shot agent
+process cannot keep a recorder running, so recording tools fail closed — say
+so instead of retrying. macOS uses `screencapture -v` (a receipt warning about
+Screen Recording permission means the user must grant it once). Linux uses
+x11grab/wf-recorder, Windows ffmpeg gdigrab, HarmonyOS snapshot-series (no
+native CLI recorder — the receipt says so). `recording_status` /
+`recording_list` report bytes and paths. Screenshots land in the same
+directory.
 
 ## Safety
 
@@ -88,9 +91,10 @@ paths. Screenshots land in the same directory.
   region; call `screenshot`; report path, size, computer/display. Black or
   empty capture means the host lacks Screen Recording permission (macOS):
   say so and stop.
-- **Record** — `recording_start` (parse computer id, fps, display, duration
-  or "record for 30s" → `durationSec` on macOS), then report id, path, mode.
-  To stop, find the running id via `recording_list` and call `recording_stop`.
+- **Record** — `recording_start` (local and hdc computers only; parse
+  computer id, fps, display, duration or "record for 30s" → `durationSec` on
+  macOS), then report id, path, mode. To stop, find the running id via
+  `recording_list` and call `recording_stop`.
 - **Switch computers** — `computer_list`; if asked to add: ssh `user@host`
   (agent is pushed automatically) or `hdc [target]` for a HarmonyOS device;
   otherwise show the registry and remind that any tool accepts `computer`.

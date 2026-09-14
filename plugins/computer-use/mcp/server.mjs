@@ -97,10 +97,32 @@ function bindRaster(computer, shot) {
   lastRasters.set(computer.id, {
     file: shot.file ?? shot.path,
     scale: shot.scale ?? 1,
-    origin: shot.points ?? { x: 0, y: 0 },
+    // Screenshots carry `points` (screen-space origin); a zoom child carries
+    // the precomputed `origin` from zoomChildRaster.
+    origin: shot.points ?? shot.origin ?? { x: 0, y: 0 },
     pixels: shot.pixels ?? null,
     capturedAt: shot.capturedAt ?? new Date().toISOString(),
   });
+}
+
+/**
+ * Rebind the frame after a zoom: the model aims from the child raster, so its
+ * pixels must resolve against the crop region, not the stale parent. The child
+ * file becomes the bound raster — backends also advance their own last raster
+ * to the child, so chained zooms and the `data.source === prev.file` check
+ * stay aligned. A zoom that cropped something else leaves the binding alone
+ * and says so instead of silently keeping a wrong frame.
+ */
+function rebindAfterZoom(computer, data) {
+  const prev = lastRasters.get(computer.id);
+  if (!prev) return;
+  if (data.source && prev.file && data.source !== prev.file) {
+    data.note = "zoom cropped a raster other than the bound one; coordinate targets still resolve against the previous raster — screenshot again to rebind";
+    return;
+  }
+  const child = zoomChildRaster(prev, data.region);
+  if (child) bindRaster(computer, { ...child, file: data.file });
+  else data.note = "zoom region was unusable; coordinate targets still resolve against the previous raster";
 }
 
 function rememberState(computer, app_ref, result) {
@@ -173,6 +195,9 @@ async function callTool(params) {
     const res = registry.remove(args.computer);
     backendCache.delete(args.computer);
     lastRasters.delete(args.computer);
+    // Element states observed on the removed computer must not survive a
+    // re-registration under the same id (possibly pointing at another host).
+    for (const [id, st] of appStates) if (st.computerId === args.computer) appStates.delete(id);
     return { content: [{ type: "text", text: JSON.stringify(receipt(null, { ok: true, ...res })) }] };
   }
 
@@ -200,23 +225,35 @@ async function callTool(params) {
     const backendMethod = BACKEND_METHOD[name] === "request_access" ? "probe" : BACKEND_METHOD[name];
     let data;
 
-    if (computer.transport === "ssh" && ["zoom", "recordingStart", "recordingStop", "recordingStatus"].includes(backendMethod)) {
-      // The ssh agent is a fresh process per call: the previous raster and the
-      // recorder registry live (and die) on the remote host. Fail closed with
-      // the reason instead of stranding the model in an unrecoverable loop.
-      throw new ServerError("unsupported_over_ssh", `"${name}" needs state that cannot survive the one-shot ssh agent process${backendMethod === "zoom" ? " (the cropped pixels stay on the remote host)" : " (a recorder started there would be orphaned)"}. Use screenshot + coordinate targets instead${backendMethod === "zoom" ? "" : " on a local or hdc computer"}.`);
+    if (computer.transport === "ssh" && ["recordingStart", "recordingStop", "recordingStatus"].includes(backendMethod)) {
+      // The ssh agent is a fresh process per call: a recorder started on the
+      // remote host would be orphaned, and one from an earlier call can no
+      // longer be reached (only its files remain). Fail closed with the
+      // reason instead of stranding the model in backend errors.
+      throw new ServerError("unsupported_over_ssh", `"${name}" needs recorder state that cannot survive the one-shot ssh agent process. Start, stop, and inspect recordings on a local or hdc computer instead.`);
     }
     if (computer.transport === "ssh" && REMOTE_TOOLS.has(backendMethod)) {
       const ex = await executorFor(computer);
+      if (backendMethod === "zoom" && !lastRasters.get(computer.id)?.file) {
+        throw new ServerError("no_raster", "no screenshot bound on this computer yet — call screenshot first so the zoom has a raster to crop");
+      }
       const wireArgs = prepareWireArgs(computer, name, args);
+      // The remote backend cannot know which raster "latest" means (its own
+      // state dies with each one-shot process) — the host tells it explicitly.
+      if (backendMethod === "zoom") wireArgs.source = lastRasters.get(computer.id).file;
       const reply = await ex.remote({ tool: backendMethod, args: wireArgs }, { timeoutMs: backendMethod.startsWith("recording") || backendMethod === "get_app_state" ? 60_000 : 30_000 });
       if (!reply.ok) throw new ServerError(reply.error?.code ?? "remote_error", reply.error?.message ?? "remote agent failed");
       data = reply.data;
       if (Array.isArray(data)) data = { items: data };
       if (backendMethod === "screenshot" && data?.file) {
-        // Raster lives on the remote machine; bind geometry for coordinate mapping.
-        bindRaster(computer, { ...data, file: null });
+        // Bind geometry for coordinate mapping; the file field is the remote
+        // path on purpose — the zoom below needs it as the crop source.
+        bindRaster(computer, data);
         data.note = "file lives on the remote computer; pull it with scp if you need the bytes locally";
+      }
+      if (backendMethod === "zoom") {
+        rebindAfterZoom(computer, data);
+        data.note = [data.note, "file lives on the remote computer; pull it with scp if you need the bytes locally"].filter(Boolean).join(" ");
       }
       if (backendMethod === "get_app_state" && data?.elements) {
         // Element targets are resolved host-side (prepareWireArgs), so the
@@ -236,16 +273,7 @@ async function callTool(params) {
       data = await backend[backendMethod](prepared);
       if (Array.isArray(data)) data = { items: data }; // keep receipts objects
       if (name === "screenshot") bindRaster(computer, data);
-      if (name === "zoom") {
-        // The zoomed image is a 1:1 crop of the previous raster, and the
-        // model was told to aim from the child raster — rebind the frame so
-        // child pixels resolve against the region, not the stale full shot.
-        const prev = lastRasters.get(computer.id);
-        if (prev && (!data.source || !prev.file || data.source === prev.file)) {
-          const child = zoomChildRaster(prev, data.region);
-          if (child) bindRaster(computer, child);
-        }
-      }
+      if (name === "zoom") rebindAfterZoom(computer, data);
       if (name === "get_app_state") {
         const stateId = rememberState(computer, prepared.app_ref, data);
         data.state_id = stateId;
@@ -276,20 +304,23 @@ function prepareLocalArgs(computer, name, args) {
   return out;
 }
 
-/** Convert public tool args into remote-agent args (self-contained, element targets resolved to paths). */
+/** Convert public tool args into remote-agent args (self-contained: every
+ *  target is resolved host-side, because the remote never sees the bound
+ *  raster — coordinate targets arrive as raw pixels and must cross to screen
+ *  points here, exactly as prepareLocalArgs does for local backends). */
 function prepareWireArgs(computer, name, args) {
   const out = { ...args };
   delete out.computer;
   const semantic = new Set(["set_value", "select_text", "perform_action"]);
-  if (out.target?.type === "element") {
+  if (out.target?.type) {
     const t = normalizeTarget(computer, out.target, semantic.has(name) ? "semantic" : "pointer");
     out.target = { ...out.target, app_ref: t.app_ref, windowIndex: t.windowIndex, path: t.path, x: t.x, y: t.y };
   }
-  if (out.from_target?.type === "element") {
+  if (out.from_target?.type) {
     const t = normalizeTarget(computer, out.from_target, "pointer");
     out.from_target = { ...out.from_target, x: t.x, y: t.y };
   }
-  if (out.to?.type === "element") {
+  if (out.to?.type) {
     const t = normalizeTarget(computer, out.to, "pointer");
     out.to = { ...out.to, x: t.x, y: t.y };
   }

@@ -29,7 +29,8 @@ runs it. Nothing here writes to your Codewhale configuration.
 - **Keyboard & text** — `type` (unicode), `key` (chords + repeat),
   `hold_key`, `set_value` (semantic, background-safe), `select_text`,
   `perform_action` (element's own actions: AXPress / UIA Invoke / AT-SPI / uitest).
-- **Recording** — `recording_start/stop/status/list` (see below).
+- **Recording** — `recording_start/stop/status/list` on local and hdc
+  computers (see below; unavailable over ssh).
 - **Computers** — `computer_list`, `computer_switch`, `computer_register`
   (ssh agent auto-push), `computer_remove`.
 - **Safety** — `stop_computer_control` kill switch; permission probes that
@@ -74,6 +75,11 @@ through it, and pins the result. Remote calls run
 `node agent.mjs <base64 json>` — one JSON receipt line back. Only an
 allow-listed tool set executes remotely; arguments travel as data, never as
 shell. Requires publickey ssh (BatchMode) and Node ≥ 20 on the remote.
+
+Zoom works over ssh: the server remembers the remote raster and crops through
+the agent, and the crop file stays on the remote computer (pull it with scp).
+Recording does not — the one-shot agent process cannot keep a recorder
+running, so the recording tools fail closed over ssh.
 
 ## HarmonyOS computers
 

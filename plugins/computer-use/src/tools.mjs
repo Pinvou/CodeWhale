@@ -138,7 +138,7 @@ export const TOOLS = [
   },
   {
     name: "zoom",
-    description: "Close-up crop of the latest screenshot. Choose points from the returned child raster only. Local and hdc computers only: over ssh the pixels stay on the remote host, so use a fresh screenshot and coordinate targets there.",
+    description: "Close-up crop of the latest raster (screenshot or zoom). Choose points from the returned child raster only. Over ssh the crop file stays on the remote computer; unavailable on HarmonyOS (hdc) computers.",
     inputSchema: {
       type: "object",
       required: ["region"],
@@ -262,7 +262,7 @@ export const TOOLS = [
   },
   {
     name: "recording_stop",
-    description: "Stop a running recording and finalize the file.",
+    description: "Stop a running recording and finalize the file. Local and hdc computers only: over ssh the one-shot agent process cannot reach a recorder from an earlier call.",
     inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" }, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -272,7 +272,7 @@ export const TOOLS = [
   },
   {
     name: "recording_list",
-    description: "List recordings and screenshots saved on a computer.",
+    description: "List recordings and screenshots saved on a computer. Over ssh: lists the files saved on the remote computer; running recordings never appear there.",
     inputSchema: { type: "object", properties: { computer: computerParam }, additionalProperties: false },
   },
   // ---- kill switch ----

@@ -17,8 +17,45 @@ const recDir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-proto-rec-"));
 const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "cu-proto-home-"));
 const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-proto-bin-"));
 
-// Fake ssh: rebuild the remote command after user@host, then either run the
-// agent or emulate the one remote command the installer needs (mkdir -p).
+// Fake remote ssh endpoint: logs every wire payload the server sends, then
+// either answers from a canned map (deterministic — no desktop or a11y stack
+// needed, so these tests run on headless CI) or falls through to the real
+// pushed agent (real behavior on the same host).
+fs.writeFileSync(path.join(binDir, "fake-remote.mjs"), `
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+
+const [agentPath, b64] = process.argv.slice(2);
+let req = {};
+try { req = JSON.parse(Buffer.from(b64 ?? "", "base64").toString("utf8")); } catch {}
+fs.appendFileSync(path.join(process.env.FAKE_HOME, "cu-wire.log"), JSON.stringify(req) + "\\n");
+
+const CANNED = {
+  get_app_state: () => ({
+    found: true, name: "Fake App", truncated: false,
+    elements: [{ index: 0, path: [0, 1], role: "button", label: "OK", value: "", position: { x: 10, y: 10 }, size: { w: 40, h: 20 }, actions: ["press"] }],
+  }),
+  screenshot: () => ({
+    file: "/remote/shot-1.png", bytes: 2048, scale: 2,
+    points: { x: 10, y: 20, w: 1280, h: 800 }, pixels: { w: 2560, h: 1600 },
+    capturedAt: "2026-09-14T00:00:00.000Z",
+  }),
+  zoom: (r) => ({ file: "/remote/zoom-1.png", bytes: 512, region: r.args?.region ?? null, source: r.args?.source ?? null }),
+  left_click: () => ({ clicked: true }),
+  set_value: () => ({ set: true }),
+};
+
+if (process.env.FAKE_AGENT_CANNED === "1" && CANNED[req.tool]) {
+  console.log(JSON.stringify({ ok: true, platform: process.platform, tool: req.tool, data: CANNED[req.tool](req) }));
+  process.exit(0);
+}
+const r = spawnSync(process.execPath, [agentPath, b64], { stdio: "inherit" });
+process.exit(r.status ?? 0);
+`);
+// Fake ssh: rebuild the remote command after user@host, then either run it
+// through the fake remote endpoint or emulate the one remote command the
+// installer needs (mkdir -p).
 fs.writeFileSync(path.join(binDir, "ssh"), `#!/bin/bash
 CMD=()
 FOUND=0
@@ -28,7 +65,7 @@ for a in "$@"; do
 done
 SUB="\${CMD[0]}"
 if [ "$SUB" = "node" ]; then
-  exec node "$FAKE_HOME/\${CMD[1]}" "\${CMD[2]}"
+  exec node "${binDir}/fake-remote.mjs" "$FAKE_HOME/\${CMD[1]}" "\${CMD[2]}"
 fi
 if [ "$SUB" = "mkdir" ]; then
   LAST="\${CMD[\${#CMD[@]}-1]}"
@@ -68,6 +105,15 @@ async function tool(name, args = {}) {
   return JSON.parse(res.result.content[0].text);
 }
 
+/** Wire payloads the server sent over the fake ssh transport, by tool. */
+function wireCalls(toolName) {
+  const log = path.join(fakeHome, "cu-wire.log");
+  if (!fs.existsSync(log)) return [];
+  return fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .filter((r) => r.tool === toolName);
+}
+
 before(async () => {
   server = spawn("node", [path.join(ROOT, "mcp", "server.mjs")], {
     env: {
@@ -76,6 +122,7 @@ before(async () => {
       FAKE_HOME: fakeHome,
       CODEWHALE_CU_STATE_DIR: stateDir,
       CODEWHALE_CU_RECORDINGS_DIR: recDir,
+      FAKE_AGENT_CANNED: "1",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -162,31 +209,70 @@ test("unknown computer fails closed with a named error", async () => {
 test("ssh computers keep element state host-side so element targets resolve", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
   // The wire layer resolves element targets against host-side state
   // (prepareWireArgs), so get_app_state over ssh must hand back a usable
-  // state_id instead of leaving element actions dead-looping.
+  // state_id instead of leaving element actions dead-looping. The fake
+  // remote answers with a deterministic tree, so this runs on headless CI.
   const st = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
-  if (st.ok) {
-    assert.match(String(st.state_id), /^s-\d+$/u, "ssh get_app_state must return a host-side state_id");
-    assert.ok(Array.isArray(st.elements), "elements returned over the wire");
-    assert.equal(st.computer.id, "box");
-    // A state observed on "box" must be rejected when aimed at "local".
-    if (st.elements.length >= 0) {
-      const cross = await tool("set_value", { computer: "local", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
-      assert.equal(cross.ok, false);
-      assert.equal(cross.error.code, "state_computer_mismatch");
-    }
-  } else {
-    // A headless Linux CI host has no accessibility tree; the remote backend
-    // fails closed with its named reason, which still proves the round trip.
-    assert.equal(process.platform, "linux", JSON.stringify(st.error ?? {}));
-  }
+  assert.equal(st.ok, true, JSON.stringify(st.error ?? {}));
+  assert.match(String(st.state_id), /^s-\d+$/u, "ssh get_app_state must return a host-side state_id");
+  assert.equal(st.computer.id, "box");
+  assert.equal(st.elements.length, 1);
+  // An element action resolves host-side and dispatches the cached app
+  // identity + path over the wire.
+  const act = await tool("set_value", { computer: "box", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
+  assert.equal(act.ok, true, JSON.stringify(act.error ?? {}));
+  const sent = wireCalls("set_value").at(-1);
+  assert.deepEqual(sent.args.target.path, [0, 1]);
+  assert.deepEqual(sent.args.target.app_ref, { name: "node" });
+  assert.equal(sent.args.target.windowIndex, 0);
+  // A state observed on "box" must be rejected when aimed at "local".
+  const cross = await tool("set_value", { computer: "local", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
+  assert.equal(cross.ok, false);
+  assert.equal(cross.error.code, "state_computer_mismatch");
 });
 
-test("ssh zoom and recording fail closed with the ssh reason instead of stranding the model", { skip: process.platform === "win32" && "needs a registered ssh computer, which the shim cannot provide on windows" }, async () => {
-  const zoom = await tool("zoom", { computer: "box", region: [0, 0, 10, 10] });
-  assert.equal(zoom.ok, false);
-  assert.equal(zoom.error.code, "unsupported_over_ssh");
-  assert.match(zoom.error.message, /one-shot ssh agent/u);
+test("ssh zoom rebinds the raster so child pixels aim at the crop region", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  // Without a bound raster the server fails closed with its named reason
+  // before going over the wire.
+  const early = await tool("zoom", { computer: "box", region: [100, 50, 300, 200] });
+  assert.equal(early.ok, false);
+  assert.equal(early.error.code, "no_raster");
 
+  const shot = await tool("screenshot", { computer: "box" });
+  assert.equal(shot.ok, true, JSON.stringify(shot.error ?? {}));
+  assert.match(String(shot.note ?? ""), /scp/u);
+
+  const zoom = await tool("zoom", { computer: "box", region: [100, 50, 300, 200] });
+  assert.equal(zoom.ok, true, JSON.stringify(zoom.error ?? {}));
+  assert.equal(zoom.file, "/remote/zoom-1.png");
+  assert.match(String(zoom.note ?? ""), /scp/u);
+  // The host tells the remote which raster "latest" means.
+  assert.equal(wireCalls("zoom").at(-1).args.source, "/remote/shot-1.png");
+
+  // Child pixel (60,45) must resolve against the rebound frame: origin
+  // {10,20} + region [100,50] at scale 2, then (60,45)/2 -> screen (90,68).
+  const click = await tool("left_click", { computer: "box", target: { type: "coordinate", x: 60, y: 45 } });
+  assert.equal(click.ok, true, JSON.stringify(click.error ?? {}));
+  const clickSent = wireCalls("left_click").at(-1);
+  assert.deepEqual({ x: clickSent.args.target.x, y: clickSent.args.target.y }, { x: 90, y: 68 });
+});
+
+test("computer_remove evicts the removed computer's remembered element states", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
+  const st = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
+  assert.equal(st.ok, true, JSON.stringify(st.error ?? {}));
+  assert.equal((await tool("computer_remove", { computer: "box" })).ok, true);
+  // Re-registering the same id must not resurrect the old observation,
+  // even though the state's computerId still matches the id.
+  assert.equal((await tool("computer_register", { computer: "box", transport: "ssh", host: "box.test", user: "me" })).ok, true);
+  const stale = await tool("set_value", { computer: "box", target: { type: "element", state_id: st.state_id, index: 0 }, value: "x" });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error.code, "unknown_state");
+  // A fresh observation on the new registration works and gets a new id.
+  const fresh = await tool("get_app_state", { computer: "box", app_ref: { name: "node" } });
+  assert.equal(fresh.ok, true, JSON.stringify(fresh.error ?? {}));
+  assert.notEqual(fresh.state_id, st.state_id);
+});
+
+test("ssh recording fails closed with the ssh reason instead of stranding the model", { skip: process.platform === "win32" && "needs a registered ssh computer, which the shim cannot provide on windows" }, async () => {
   const start = await tool("recording_start", { computer: "box" });
   assert.equal(start.ok, false);
   assert.equal(start.error.code, "unsupported_over_ssh");

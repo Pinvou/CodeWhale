@@ -350,7 +350,11 @@ except Exception as e:
       if (!src) throw new ExecError("no screenshot taken yet on this computer — call screenshot first");
       const out = outPath || path.join(recordingsDir(), `zoom-${crypto.randomBytes(4).toString("hex")}.png`);
       await runOk("ffmpeg", ["-y", "-loglevel", "error", "-i", src, "-vf", `crop=${Math.round(region[2])}:${Math.round(region[3])}:${Math.round(region[0])}:${Math.round(region[1])}`, out], { timeoutMs: 20_000 });
-      return { file: out, bytes: fs.statSync(out).size, region, source: src };
+      const bytes = fs.statSync(out).size;
+      // The child raster becomes the last raster so a follow-up zoom crops
+      // from the child, matching zoom's "region in last-raster pixels" contract.
+      lastRaster = { ...lastRaster, file: out, bytes, capturedAt: new Date().toISOString() };
+      return { file: out, bytes, region, source: src };
     },
     left_click: ({ target }) => { assertNum(target.x, "x"); assertNum(target.y, "y"); return inputChain(target.x, target.y, () => clickButton(1, 1)); },
     double_click: ({ target }) => inputChain(target.x, target.y, () => clickButton(1, 2)),
