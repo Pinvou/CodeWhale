@@ -21023,9 +21023,12 @@ async fn agent_claim_is_withheld_from_a_role_with_no_write_authority() {
 // `tool_search` and a deferred, searchable `grep_files`; the hidden `File`
 // alias the brief cited before is filtered from every model-visible catalog
 // (`to_api_tools`), which is what silently broke the release-acceptance
-// explore gate. If a surface reshape fails this test, re-work the fixture
-// brief in the same change instead of leaving it instructing calls the child
-// cannot make.
+// explore gate. The registry is built with the scope the fixture scout really
+// runs under (`leaf_allowed_tools` lowers a read-only leaf to `["File"]`), so
+// the guard also pins the alias-family intersection that keeps `grep_files`
+// discoverable under that legacy rule. If a surface reshape fails this test,
+// re-work the fixture brief in the same change instead of leaving it
+// instructing calls the child cannot make.
 #[tokio::test]
 async fn forkguard_scout_surface_keeps_tool_search_grep_files_activation_path() {
     let tmp = tempdir().expect("tempdir");
@@ -21034,8 +21037,13 @@ async fn forkguard_scout_surface_keeps_tool_search_grep_files_activation_path() 
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     let todo_list = crate::tools::todo::new_shared_todo_list();
     let plan_state = crate::tools::plan::new_shared_plan_state();
-    let registry =
-        SubAgentToolRegistry::new(runtime, FleetRole::Scout, None, todo_list, plan_state);
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Scout,
+        Some(vec!["File".to_string()]),
+        todo_list,
+        plan_state,
+    );
 
     let catalog = registry.deferred_catalog_for_model(&FleetRole::Scout);
     let search = catalog
@@ -21080,8 +21088,105 @@ fn forkguard_workflow_briefs_name_catalog_visible_tools() {
         body.contains("`tool_search`") && body.contains("`grep_files`"),
         "the scout brief must teach the two-step activation path:\n{body}"
     );
+    // Every catalog-invisible execution name (hidden replay aliases and the
+    // retired `search_content` action) is denied as a whole word, so an
+    // unbackticked or renamed citation cannot slip past the guard. `list_dir`
+    // and the lowercase primitives stay legal: they are model-visible.
+    const HIDDEN_EXEC_NAMES: [&str; 8] = [
+        "File",
+        "Bash",
+        "TodoWrite",
+        "work_update",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "search_content",
+    ];
+    let cited: Vec<&str> = body
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| HIDDEN_EXEC_NAMES.iter().any(|hidden| hidden == word))
+        .collect();
     assert!(
-        !body.contains("`File`") && !body.contains("search_content"),
-        "workflow briefs must not command calls a catalog can never return:\n{body}"
+        cited.is_empty(),
+        "workflow briefs must not command calls a catalog can never return: {cited:?}"
     );
+}
+
+// Behavioral counterpart to the two composition guards above: on the scout's
+// live surface, one `tool_search` call must make the deferred `grep_files`
+// dispatchable through the same gate the child step loop uses, while the
+// hidden `File` alias the old brief commanded must keep failing the catalog
+// gate. Composition can drift from behavior; this cannot.
+#[tokio::test]
+async fn forkguard_scout_activation_makes_grep_files_dispatchable() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let todo_list = crate::tools::todo::new_shared_todo_list();
+    let plan_state = crate::tools::plan::new_shared_plan_state();
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        FleetRole::Scout,
+        Some(vec!["File".to_string()]),
+        todo_list,
+        plan_state,
+    );
+    // Mirror the spawn loop: filtered catalog, then a cold surface.
+    let mut surface =
+        SubAgentToolSurface::new(registry.deferred_catalog_for_model(&FleetRole::Scout), &[]);
+
+    let active_names: std::collections::HashSet<String> = surface.active_names.clone();
+    let file_error = registry
+        .execute_from_surface(
+            "agent_unknown",
+            "",
+            &mut surface,
+            &active_names,
+            "File",
+            serde_json::json!({"action": "search_content", "path": "."}),
+        )
+        .await
+        .expect_err("the hidden File alias must fail the scout catalog gate");
+    assert!(
+        file_error
+            .to_string()
+            .contains("not in this child's policy-filtered catalog"),
+        "{file_error}"
+    );
+
+    let active_names: std::collections::HashSet<String> = surface.active_names.clone();
+    registry
+        .execute_from_surface(
+            "agent_unknown",
+            "",
+            &mut surface,
+            &active_names,
+            "tool_search",
+            serde_json::json!({"query": "grep_files"}),
+        )
+        .await
+        .expect("tool_search activation must succeed on the scout surface");
+    assert!(
+        surface.active_names.contains("grep_files"),
+        "activation must admit grep_files into the same surface the dispatch gate reads"
+    );
+
+    let active_names: std::collections::HashSet<String> = surface.active_names.clone();
+    registry
+        .execute_from_surface(
+            "agent_unknown",
+            "",
+            &mut surface,
+            &active_names,
+            "grep_files",
+            serde_json::json!({
+                "path": ".",
+                "pattern": "stopship",
+                "max_results": 5,
+                "context_lines": 1
+            }),
+        )
+        .await
+        .expect("grep_files must dispatch through the real tool after the taught activation");
 }
