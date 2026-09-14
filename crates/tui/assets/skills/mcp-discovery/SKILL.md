@@ -27,7 +27,10 @@ surface whenever MCP support is enabled.
 
 ## Workflow
 
-1. **Check the registry.** Call `registry_sync {}`. It returns the complete
+1. **Check the registry.** If `registry_sync` is in your tool list, call
+   `registry_sync {}`; if it is not, MCP Registry access is unavailable in
+   this session — say so and solve the task with local tools instead of
+   following the rest of this workflow. The call returns the complete
    catalog of eligible local stdio packages, including each server's name,
    description, and required launch arguments. Packages declaring any
    environment variable (including API keys/tokens) are excluded and never
@@ -36,7 +39,7 @@ surface whenever MCP support is enabled.
    task against every server name and description. A candidate is a match when
    it plausibly covers the task's core specialized capability; wording does not
    need to be exact. When such a candidate exists, you **must start it and inspect
-   its tools before** using `exec_shell`, local programs, custom code, or a manual
+   its tools before** using `bash`, local programs, custom code, or a manual
    implementation. The availability or familiarity of a local alternative is
    not a reason to skip the candidate. Skip Registry use only when every entry is
    clearly irrelevant, or when a matching server fails to start after the retry
@@ -44,7 +47,7 @@ surface whenever MCP support is enabled.
 3. **Install + run transactionally.** Call
    `start_registry_mcp_server {registry_name: "<exact name>", arguments: {...}}`.
    Supply only values listed in `required_args`; omit `arguments` when none
-   are required. Never install or launch the package through `exec_shell`.
+   are required. Never install or launch the package through `bash`.
 4. **Solve the task with the new tools.** Their complete schemas are added
    to the current turn immediately after a successful connection; call the
    exact names returned by the start result.

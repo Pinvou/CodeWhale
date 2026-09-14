@@ -138,6 +138,65 @@ fn render_available_skills_context_lists_paths_and_usage() {
     assert!(rendered.contains("### Usage"));
 }
 
+// Regression: `load_skill` is deferred, so it is absent from the first-turn
+// tool catalog unless the host force-loads it. The Usage line must name
+// `tool_search` as the activation path, or the model is told to call a tool
+// it cannot see (Pinvou 运动打卡 incident, 2026-09).
+#[test]
+fn forkguard_skill_index_usage_names_tool_search_activation() {
+    let tmpdir = TempDir::new().unwrap();
+    create_skill_dir(
+        &tmpdir,
+        "test-skill",
+        "---\nname: test-skill\ndescription: A test skill\n---\nDo something special",
+    );
+
+    let rendered = crate::skills::render_available_skills_context(&tmpdir.path().join("skills"))
+        .expect("skill context");
+
+    assert!(
+        rendered.contains("`load_skill` with `name=\"list\""),
+        "usage must keep pointing at load_skill list discovery:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("`tool_search`"),
+        "usage must tell the model how to activate deferred load_skill:\n{rendered}"
+    );
+}
+
+// Regression (Pinvou #490 phantom-tool incident): the omitted-skills tail
+// names `load_skill` too, so it must carry the same `tool_search` fallback
+// as the Usage line instead of commanding a tool the list may not have.
+#[test]
+fn forkguard_omitted_skills_line_carries_tool_search_fallback() {
+    let line = super::omitted_skills_line(2);
+    assert!(
+        line.contains("run `tool_search` first"),
+        "omitted tail must keep the tool_search fallback:\n{line}"
+    );
+}
+
+// Regression (Pinvou #490 phantom-tool incident): the bundled mcp-discovery
+// skill must condition its registry commands on tool availability instead of
+// commanding `registry_sync` unconditionally, and it must not cite the
+// retired `exec_shell` alias as if it were callable.
+#[test]
+fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
+    const SKILL: &str = include_str!("../../assets/skills/mcp-discovery/SKILL.md");
+    assert!(
+        SKILL.contains("If `registry_sync` is in your tool list"),
+        "workflow step 1 must gate the registry_sync command on availability:\n{SKILL}"
+    );
+    assert!(
+        SKILL.contains("`start_registry_mcp_server`"),
+        "the structured start tool must stay documented:\n{SKILL}"
+    );
+    assert!(
+        !SKILL.contains("`exec_shell`"),
+        "exec_shell is a retired alias; cite `bash` instead:\n{SKILL}"
+    );
+}
+
 #[test]
 fn workspace_prompt_omits_disabled_skills_without_configured_directory() {
     let _env_lock = crate::test_support::lock_test_env();

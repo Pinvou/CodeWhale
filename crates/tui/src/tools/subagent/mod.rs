@@ -9934,8 +9934,11 @@ fn subagent_skill_catalog(context: &ToolContext) -> String {
     if registry.list().is_empty() {
         return String::new();
     }
+    // `load_skill` never sits in a child's first-turn active set (skills are
+    // discovered through `tool_search`), and tool-free children also lack
+    // `tool_search`, so the header below must stay honest in both states.
     let mut output = String::from(
-        "## Skills\n\nUse `load_skill` with an exact name before applying a Skill. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
+        "## Skills\n\nIf `tool_search` is in your tool list, use it to activate `load_skill`, then call it with an exact name before applying a Skill; if it is not, you cannot load Skills in this session and must not attempt to. Catalog entries are workspace-scoped snapshots; plugin entries are revalidated at use.\n",
     );
     for skill in registry.list() {
         let source = match &skill.source {

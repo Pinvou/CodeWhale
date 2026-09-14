@@ -21016,3 +21016,42 @@ async fn agent_claim_is_withheld_from_a_role_with_no_write_authority() {
         .to_string();
     assert!(refusal.contains("no write authority to widen"), "{refusal}");
 }
+
+// Regression: `load_skill` never sits in a child's first-turn active set —
+// skills are discovered through `tool_search`, and tool-free children lack
+// `tool_search` as well. The ## Skills block rendered into a child prompt
+// must therefore stay honest in both states: name tool_search as the
+// discovery path when it exists, and do not command a tool the child cannot
+// see (Pinvou 运动打卡 incident, 2026-09).
+#[test]
+fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
+    let tmp = tempdir().expect("tempdir");
+    let skill_dir = tmp
+        .path()
+        .join(".codewhale")
+        .join("skills")
+        .join("demo-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: A demo skill\n---\nDo the demo thing",
+    )
+    .unwrap();
+
+    let context = ToolContext::new(tmp.path());
+    let catalog = subagent_skill_catalog(&context);
+
+    assert!(catalog.contains("## Skills"), "catalog missing:\n{catalog}");
+    assert!(
+        catalog.contains("demo-skill"),
+        "catalog missing skill entry:\n{catalog}"
+    );
+    assert!(
+        catalog.contains("`tool_search`"),
+        "child has no load_skill in its wire catalog; discovery must go through tool_search:\n{catalog}"
+    );
+    assert!(
+        catalog.contains("If `tool_search` is in your tool list"),
+        "header must stay honest for tool-free children that also lack tool_search:\n{catalog}"
+    );
+}

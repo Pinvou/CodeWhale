@@ -417,6 +417,40 @@ fn registry_first_instruction_only_names_published_tools() {
     assert!(MCP_REGISTRY_FIRST_INSTRUCTION.contains("`Web`"));
 }
 
+/// The registry-first instruction commands tools that the host must keep
+/// callable, so the names in the text and the registered `ToolSpec`
+/// implementations must stay a paired set: renaming either side alone
+/// resurrects the phantom-tool incident (Pinvou #490) where the instruction
+/// cites a tool absent from the catalog and allowlist. If this test fails
+/// after a rename, update the instruction, the registration in
+/// `tool_setup`, and the pinvou3-app allowlist
+/// (`features/assistant/tool_policy.rs`) in the same change.
+#[test]
+fn forkguard_registry_first_instruction_names_registered_tool_specs() {
+    use crate::mcp::{McpConfig, McpPool};
+    use crate::tools::mcp_registry::{McpSyncRegistry, StartRegistryMcpServer};
+    use crate::tools::spec::ToolSpec;
+    use std::sync::Arc;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    let sync = McpSyncRegistry::new();
+    let registry_sync = ToolSpec::name(&sync);
+    assert_eq!(registry_sync, "registry_sync");
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("`registry_sync`"),
+        "instruction must keep naming the registered `{registry_sync}`"
+    );
+
+    let pool = Arc::new(AsyncMutex::new(McpPool::new(McpConfig::default())));
+    let start_tool = StartRegistryMcpServer::new(pool);
+    let start = ToolSpec::name(&start_tool);
+    assert_eq!(start, "start_registry_mcp_server");
+    assert!(
+        MCP_REGISTRY_FIRST_INSTRUCTION.contains("`start_registry_mcp_server`"),
+        "instruction must keep naming the registered `{start}`"
+    );
+}
+
 #[test]
 fn registry_first_scenario() {
     // Scenario consolidation of: registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled, registry_first_guidance_is_attached_to_the_shell_fallback_once
@@ -9803,7 +9837,7 @@ impl crate::core::model_client::ModelClient for CompleteOnceThenBlockModelClient
                 canned::message_stop(),
             ];
             return Ok(Box::pin(futures_util::stream::iter(
-                events.into_iter().map(|event| Ok(event)),
+                events.into_iter().map(Ok),
             )));
         }
         let _drop_signal = DropSignal(std::sync::Arc::clone(&self.request_dropped));
