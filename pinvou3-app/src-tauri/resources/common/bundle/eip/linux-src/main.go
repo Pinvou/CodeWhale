@@ -1,3 +1,10 @@
+// Portable fallback reimplementation of the H3C EIP employee-portal CLI.
+//
+// H3C IT ships official `eip-cli` binaries only for Windows (eip-cli.exe) and
+// Linux x86_64 (eip-cli); both are packaged as-is. For every other target
+// (linux/arm64, macOS darwin/arm64 + darwin/amd64) no official build exists, so
+// the app carries this clean-room Go reimplementation of the same protocol —
+// see build.sh. Plain stdlib Go, no OS-specific syscalls.
 package main
 
 import (
@@ -13,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -22,8 +30,10 @@ const (
 	authBaseDefault = "http://api.eos.h3c.com/auth/v1.0"
 	eipBaseDefault  = "http://apieip.h3c.com/eip"
 	credSalt        = "eip-cli-cred-v1"
-	userAgent       = "eip-cli (pinvou3 linux arm64)"
 )
+
+// os/arch 随构建目标走（linux/arm64 与 darwin 构建共用本源码）。
+var userAgent = "eip-cli (pinvou3 " + runtime.GOOS + " " + runtime.GOARCH + ")"
 
 type envelope struct {
 	Code        any             `json:"code"`
@@ -105,6 +115,14 @@ var routes = map[string]route{
 	"survey detail":                     {"POST", "/api/ApiOpinionTemplate/OpinionCollection/%s"},
 	"survey submit":                     {"POST", "/api/ApiOpinionTemplate/SaveOpinionCollectionInfo"},
 	"remote-work":                       {"POST", "/api/ApiCalendarMonthly/ApplyFlowPageList"},
+	// 资讯/学习类公开命令（SKILL.md 命令速查表有载，契约测试把关不漂移）。
+	// path 只含官方 path 部分，前缀在 apiPrefix 按 /app、/announcement、/external
+	// 对齐官方 eip-cli 的 GetAppPrefix/GetAnnouncementPrefix/GetExternalPrefix。
+	"news":          {"POST", "/companyNews/page"},
+	"announcement":  {"POST", "/announcement/page"},
+	"course":        {"POST", "/lms/special/course"},
+	"meeting":       {"GET", "/meeting/list/%s"},
+	"community-hot": {"GET", "/bbs/list/%s"},
 }
 
 func main() {
@@ -118,7 +136,7 @@ func run(args []string) int {
 		return 0
 	}
 	if args[0] == "version" {
-		emitJSON(map[string]any{"name": "eip-cli", "version": "0.1.0-arm64-pinvou3"})
+		emitJSON(map[string]any{"name": "eip-cli", "version": "0.1.0-" + runtime.GOOS + "-" + runtime.GOARCH + "-pinvou3"})
 		return 0
 	}
 	if args[0] == "config-get" {
@@ -130,7 +148,7 @@ func run(args []string) int {
 			fmt.Println(deviceID())
 			return 0
 		}
-		emitJSON(map[string]any{"ok": true, "message": "config set-env is not persisted by the ARM64 fallback"})
+		emitJSON(map[string]any{"ok": true, "message": "config set-env is not persisted by this fallback build"})
 		return 0
 	}
 	if args[0] == "auth" {
@@ -191,7 +209,7 @@ func cmdLogin(flags map[string]string) int {
 	name := firstNonEmpty(flags["name"], "eip-cli-agent")
 	body := map[string]any{
 		"deviceId": deviceID(),
-		"metaData": map[string]string{"name": name, "os": "linux", "arch": "arm64", "client": "pinvou3"},
+		"metaData": map[string]string{"name": name, "os": runtime.GOOS, "arch": runtime.GOARCH, "client": "pinvou3"},
 	}
 	env, raw, err := postJSON(authBase()+"/api/v2/user/agent/session/login", body, false)
 	if err != nil {
@@ -303,7 +321,7 @@ func runBusiness(args []string) int {
 	}
 	r, ok := routes[key]
 	if !ok {
-		emitJSON(map[string]any{"error": "unsupported EIP command in ARM64 fallback", "command": strings.Join(args, " ")})
+		emitJSON(map[string]any{"error": "unsupported EIP command in this fallback build", "command": strings.Join(args, " ")})
 		return 2
 	}
 	token := ensureToken()
@@ -314,8 +332,48 @@ func runBusiness(args []string) int {
 	flags := parseFlags(rest)
 	body := buildBody(flags)
 	path := r.path
+	// 对齐官方 eip-cli 的命令级差异（依官方二进制核对）：
+	//   course     --type hot(默认)走 /lms/special/course，--type mine 走 /lms/my/course；
+	//   news       搜索词同时进 condition，isImage 缺省 false；
+	//   announcement  type 缺省 2，搜索词同时进 condition；
+	//   三者分页键为 pageNum（--page），meeting/community-hot 为路径参数式 GET。
+	switch key {
+	case "course":
+		if flags["type"] == "mine" {
+			path = "/lms/my/course"
+		}
+		if _, ok := body["pageNum"]; !ok {
+			body["pageNum"] = atoiDefault(flags["page"], 1)
+		}
+	case "news":
+		if kw := flags["keyword"]; kw != "" {
+			body["condition"] = kw
+		}
+		if _, ok := body["isImage"]; !ok {
+			body["isImage"] = false
+		}
+		if _, ok := body["pageNum"]; !ok {
+			body["pageNum"] = atoiDefault(flags["page"], 1)
+		}
+	case "announcement":
+		if kw := flags["keyword"]; kw != "" {
+			body["condition"] = kw
+		}
+		if _, ok := body["type"]; !ok {
+			body["type"] = 2
+		}
+		if _, ok := body["pageNum"]; !ok {
+			body["pageNum"] = atoiDefault(flags["page"], 1)
+		}
+	}
 	if strings.Contains(path, "%s") {
 		fill := firstNonEmpty(flags["account"], flags["id"], flags["template-id"])
+		switch key {
+		case "meeting":
+			fill = firstNonEmpty(flags["date"], time.Now().Format("2006-01-02"))
+		case "community-hot":
+			fill = strconv.Itoa(atoiDefault(flags["page-size"], 10))
+		}
 		if fill == "" {
 			emitJSON(map[string]any{"error": "missing required path parameter"})
 			return 2
@@ -417,6 +475,15 @@ func apiPrefix(path string) string {
 		strings.HasPrefix(path, "/api/ApiOpinionTemplate/"),
 		strings.HasPrefix(path, "/api/ApiMyConsumption/"):
 		return "/hr"
+	case strings.HasPrefix(path, "/companyNews/"):
+		return "/app"
+	case strings.HasPrefix(path, "/announcement/"):
+		// 官方前缀恰为 path 首段（/announcement + /page），无需再加前缀
+		return ""
+	case strings.HasPrefix(path, "/lms/"),
+		strings.HasPrefix(path, "/meeting/"),
+		strings.HasPrefix(path, "/bbs/"):
+		return "/external"
 	default:
 		return "/hrss"
 	}
@@ -675,6 +742,6 @@ func emitJSON(v any) {
 }
 
 func printHelp() {
-	fmt.Println("EIP CLI ARM64 fallback")
-	fmt.Println("Usage: eip-cli <auth|attendance|leave|vacation|overtime|todo|employee-profile|employee-search|...> [flags]")
+	fmt.Println("EIP CLI (pinvou3 fallback build)")
+	fmt.Println("Usage: eip-cli <auth|attendance|leave|vacation|overtime|todo|news|announcement|course|meeting|community-hot|employee-profile|employee-search|...> [flags]")
 }

@@ -345,4 +345,22 @@ mod tests {
         assert!(qr.starts_with("data:image/svg+xml;base64,"));
         assert!(qr.len() > 512);
     }
+
+    #[test]
+    fn skill_documented_subcommands_exist_in_win_src_routes() {
+        // SKILL.md「调用方式」公开 qa/search/download 三个业务子命令；darwin 与
+        // linux-arm64 实际执行 win-src fallback 构建（同 PR #1057 对 EIP 的评审
+        // 发现）：公开子命令必须存在于 fallback 路由，防文档与能力漂移。
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/resources/common/bundle/zhidao/win-src/main.go"
+        ))
+        .unwrap();
+        for cmd in ["qa", "search", "download"] {
+            assert!(
+                src.contains(&format!("case \"{cmd}\":")),
+                "win-src fallback 路由缺 SKILL.md 公开子命令 {cmd}"
+            );
+        }
+    }
 }

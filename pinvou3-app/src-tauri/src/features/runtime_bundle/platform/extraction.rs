@@ -565,7 +565,7 @@ impl Pinvou3Bundle {
     /// 本目录无 SKILL.md 不会被注册表扫成常驻技能。
     pub(super) fn write_connector_cli_bins(&self) -> std::io::Result<()> {
         let eip = self.skills_dir.join("eip");
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Self::extract_dir_if_changed(&EIP_PLATFORM_BIN_DIR, &eip.join("bin"))?;
         if let Some(bin) = EIP_SKILL_DIR.get_dir("bin") {
             Self::extract_dir_if_changed(bin, &eip)?;
@@ -573,7 +573,7 @@ impl Pinvou3Bundle {
         Self::chmod_cli_bins(&eip.join("bin"))?;
 
         let zhidao = self.skills_dir.join("zhidao");
-        #[cfg(any(windows, target_os = "linux"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         Self::extract_dir_if_changed(&ZHIDAO_PLATFORM_BIN_DIR, &zhidao.join("bin"))?;
         if let Some(bin) = ZHIDAO_SKILL_DIR.get_dir("bin") {
             Self::extract_dir_if_changed(bin, &zhidao)?;
@@ -1424,8 +1424,8 @@ mod tests {
                 "{skill} 包装脚本未解包: {}",
                 bin.join(wrapper).display()
             );
-            // 平台原生 CLI 仅 windows/linux 内嵌(macOS 无此二进制)。
-            #[cfg(any(windows, target_os = "linux"))]
+            // 平台原生 CLI 按 OS/arch 内嵌（见 EIP/ZHIDAO_PLATFORM_BIN_DIR 的 cfg 表）。
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             {
                 let cli = std::fs::read_dir(&bin)
                     .unwrap()

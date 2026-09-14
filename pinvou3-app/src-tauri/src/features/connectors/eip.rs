@@ -1,7 +1,8 @@
 //! H3C EIP 员工门户接入 —— 连接生命周期 + 鉴权编排。
 //!
 //! 路线:A(CLI 连接器)。复用 iClaw 的 `eip-cli` 预编译二进制(多平台:
-//! `eip-cli` / `eip-cli-aarch64` / `eip-cli.exe`),内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`。
+//! `eip-cli` / `eip-cli-aarch64` / `eip-cli.exe`;官方只发 Windows/Linux x86_64,
+//! darwin 由 `linux-src` fallback 源构建,见 `build.sh`),内置打包到 `~/.pinvou3/bundle/skills/eip/bin/`。
 //! 业务命令(考勤/假期/待办…)由模型经 shell 跑 `eip <域> ...`,技能文档教用法
 //! (同飞书 lark-cli)。本模块只负责**连接态**:状态查询、SSO 登录(轮询自动收)、
 //! 取消、登出。
@@ -370,6 +371,9 @@ pub async fn eip_logout() -> Result<Value, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
     use super::make_qr;
 
     #[test]
@@ -377,5 +381,109 @@ mod tests {
         let qr = make_qr("https://sso.h3c.com/login?sessionId=test-session").unwrap();
         assert!(qr.starts_with("data:image/svg+xml;base64,"));
         assert!(qr.len() > 512);
+    }
+
+    /// 从 SKILL.md 命令速查表提取公开命令键（与 linux-src routes 同一口径：
+    /// `eip attendance get-summary` → "attendance get-summary"，`eip news` → "news"；
+    /// 同格续写命令如 `get-sick-balance` 继承本行首个 eip 命令的域）。
+    fn collect_skill_commands(skill: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for line in skill.lines() {
+            if !line.trim_start().starts_with('|') {
+                continue;
+            }
+            let mut domain = String::new();
+            for span in extract_code_spans(line) {
+                if let Some(rest) = span.strip_prefix("eip ") {
+                    let tokens: Vec<&str> = rest.split_whitespace().collect();
+                    if tokens.is_empty() {
+                        continue;
+                    }
+                    let key = if tokens.len() > 1
+                        && tokens[1].starts_with(|c: char| c.is_ascii_lowercase())
+                    {
+                        format!("{} {}", tokens[0], tokens[1])
+                    } else {
+                        tokens[0].trim_end_matches('[').to_string()
+                    };
+                    domain = key.split(' ').next().unwrap_or("").to_string();
+                    out.insert(key);
+                } else if !domain.is_empty()
+                    && !span.is_empty()
+                    && span
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '-' || c == '[')
+                {
+                    out.insert(format!("{domain} {}", span.trim_end_matches('[')));
+                }
+            }
+        }
+        out
+    }
+
+    /// 提取一行内所有反引号代码段。
+    fn extract_code_spans(line: &str) -> Vec<String> {
+        let mut spans = Vec::new();
+        let mut rest = line;
+        while let Some(start) = rest.find('`') {
+            let after = &rest[start + 1..];
+            if let Some(end) = after.find('`') {
+                spans.push(after[..end].to_string());
+                rest = &after[end + 1..];
+            } else {
+                break;
+            }
+        }
+        spans
+    }
+
+    /// 从 linux-src/main.go 的 routes 表提取命令键（形如 `"key": {"METHOD", ...}`）。
+    fn collect_fallback_routes(source: &str) -> BTreeSet<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                let t = line.trim_start();
+                let rest = t.strip_prefix('"')?;
+                let end = rest.find('"')?;
+                let key = &rest[..end];
+                let after = rest[end + 1..].trim_start().strip_prefix(':')?.trim_start();
+                if after.starts_with("{\"")
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == ' ' || c == '-')
+                {
+                    Some(key.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn skill_documented_commands_exist_in_fallback_routes() {
+        // SKILL.md 命令速查表是模型在全部平台调用 eip 的契约，darwin/linux-arm64
+        // 实际执行 linux-src fallback 构建：路由缺命令时公开命令稳定失败
+        // （#1057 评审发现 news/announcement/course/meeting/community-hot 缺失）。
+        // 契约：文档公开命令必须存在于 fallback 路由，防文档与能力再漂移。
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/common/bundle/eip");
+        let skill = std::fs::read_to_string(base.join("SKILL.md")).unwrap();
+        let source = std::fs::read_to_string(base.join("linux-src/main.go")).unwrap();
+        let routes = collect_fallback_routes(&source);
+        assert!(
+            routes.contains("attendance get-summary") && routes.contains("news"),
+            "fallback 路由解析异常，得到 {} 条",
+            routes.len()
+        );
+        let documented = collect_skill_commands(&skill);
+        assert!(
+            documented.contains("news") && documented.contains("attendance get-summary"),
+            "SKILL.md 命令解析异常，得到 {documented:?}"
+        );
+        let missing: Vec<String> = documented.difference(&routes).cloned().collect();
+        assert!(
+            missing.is_empty(),
+            "SKILL.md 公开命令在 fallback 路由缺失: {missing:?}"
+        );
     }
 }

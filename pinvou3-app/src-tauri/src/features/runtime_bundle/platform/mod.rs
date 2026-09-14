@@ -48,6 +48,18 @@ static EIP_PLATFORM_BIN_DIR: Dir<'_> =
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 static ZHIDAO_PLATFORM_BIN_DIR: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/linux/aarch64/bundle/zhidao/bin");
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static EIP_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/aarch64/bundle/eip/bin");
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static ZHIDAO_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/aarch64/bundle/zhidao/bin");
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+static EIP_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/x86_64/bundle/eip/bin");
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+static ZHIDAO_PLATFORM_BIN_DIR: Dir<'_> =
+    include_dir!("$CARGO_MANIFEST_DIR/resources/platforms/macos/x86_64/bundle/zhidao/bin");
 
 /// 9 个 lark 域技能目录名(门控写/删共用)。skills_dir 下这些目录在不在
 /// = 飞书技能对模型可见与否(引擎 `SkillRegistry` 扫目录)。
@@ -166,8 +178,14 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 /// 0.32: 回流 Community #439 的飞书技能文档审计修复，登记于 lark-skills/NOTICE.md。
 ///       技能树不参与内容哈希，使用新语义版本确保已连接用户启动时刷新，
 ///       并保留 Official 已占用的版本记录及 H3C CLI 内容哈希。
+/// 0.33: H3C 内部 CLI（eip/zhidao）新增 macOS darwin arm64/x86_64 二进制：
+///       eip 由 linux-src fallback 源、zhidao 由 win-src 清洁室源构建
+///       （各自 build.sh），Rust 侧新增 connectors/platform/macos.rs 并把
+///       darwin 纳入 PLATFORM_BIN_DIR/解包/测试的 cfg。内容虽受
+///       BUNDLE_H3C_CLI_HASH 覆盖，仍按登记惯例 bump 语义版本，让 macOS
+///       老装机（此前 unsupported）升级后启动即解包二进制。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.32-",
+    "0.33-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
