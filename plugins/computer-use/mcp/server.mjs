@@ -250,7 +250,7 @@ async function callTool(params) {
       // A press outlives the one-shot agent process: if the follow-up
       // left_mouse_up never arrives (failed call, abandoned session), the
       // remote button stays stuck with nothing left to detect or release it.
-      throw new ServerError("persistent_session_required", `"${name}" presses and holds across calls, which needs one live session — the ssh agent is a new process per call, so the press could outlive its release. Use a local or hdc computer for press-and-hold.`);
+      throw new ServerError("persistent_session_required", `"${name}" presses and holds across calls, which needs one live session — the ssh agent is a new process per call, so the press could outlive its release. Use a local computer for press-and-hold; HarmonyOS (hdc) does not expose it at all (use left_click_drag there).`);
     }
     if (computer.transport === "ssh" && REMOTE_TOOLS.has(backendMethod)) {
       const ex = await executorFor(computer);

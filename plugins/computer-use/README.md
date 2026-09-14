@@ -82,8 +82,10 @@ stays on the remote computer and the plugin has no pull tool — view it only
 with out-of-band access (scp from a shell). Recording start/stop/status and
 press-and-hold (`left_mouse_down`) do not work over ssh: the one-shot agent
 process cannot keep a recorder alive or guarantee a press its release, so
-they fail closed (`persistent_session_required`). `recording_list` still
-lists the files on the remote computer.
+they fail closed (`persistent_session_required`). Press-and-hold additionally
+needs a macOS, Windows, or Linux computer: the HarmonyOS backend does not
+expose it at all (`left_click_drag` is the closest alternative there).
+`recording_list` still lists the files on the remote computer.
 
 ## HarmonyOS computers
 

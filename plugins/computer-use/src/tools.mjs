@@ -82,7 +82,7 @@ export const TOOLS = [
   },
   {
     name: "switch_display",
-    description: "Set which display subsequent screenshots/recordings capture on this computer.",
+    description: "Set which display subsequent screenshots/recordings capture on this computer. Local and hdc computers only: over ssh the choice dies with the one-shot agent process — pass display to screenshot/recording_start instead.",
     inputSchema: { type: "object", required: ["index"], properties: { index: { type: "integer", minimum: 1 }, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -198,7 +198,7 @@ export const TOOLS = [
     inputSchema: { type: "object", required: ["from_target", "to"], properties: { from_target: targetSchema, to: targetSchema, computer: computerParam }, additionalProperties: false },
   },
   {
-    name: "left_mouse_down", description: "Press and hold the left button at a target. Release with left_mouse_up. Local and hdc computers only: over ssh the agent process ends after every call, so a press could outlive its release.",
+    name: "left_mouse_down", description: "Press and hold the left button at a target. Release with left_mouse_up. Local computers only: over ssh the agent process ends after every call, so a press could outlive its release, and the HarmonyOS (hdc) backend does not expose press-and-hold — use left_click_drag there.",
     inputSchema: { type: "object", properties: { target: targetSchema, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -267,7 +267,7 @@ export const TOOLS = [
   },
   {
     name: "recording_status",
-    description: "Status of one recording (running, bytes so far). Local and hdc computers only; unknown over ssh.",
+    description: "Status of one recording (running, bytes so far). Local and hdc computers only: over ssh the one-shot agent process cannot reach a recorder from an earlier call, so this fails closed instead of reporting status.",
     inputSchema: { type: "object", required: ["id"], properties: { id: { type: "string" }, computer: computerParam }, additionalProperties: false },
   },
   {
