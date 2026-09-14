@@ -1,5 +1,17 @@
 # 账号平台实现状态与差距
 
+## 2026-09-14 治理与安全需求变更
+
+需求/设计已由身份B最终审核PASS并以`e15fe698`提交。新增UI-60、ADM-67、NFR-57均未实现、未部署；当前目标总数在此前437项基础上增至440项，新增三项不能沿用既有审批功能的完成状态。APT-141～143分别唯一拥有领域、界面、发布目标；[GSA-01～40独立子任务](admin-governance-security-tasks.md)按A修改/B审核逐项推进，任务拆分已获B复审PASS，全部PENDING。
+
+| 目标编号 | 实现状态 | 任务与审核 | 证据 | 部署状态 | 已知差距 |
+|---|---|---|---|---|---|
+| ADM-67 | 未实现 | APT-141-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | 既有六类可执行命令及静态create/update检查保留；持久推进门禁、proof、安全投影、历史收敛、失败恢复和八财务家族增量尚未交付，见GSA-01～16及21～36。 |
+| UI-60 | 未实现 | APT-142-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | v1/v2会话兼容、目录/列表/详情、业务编辑替代与治理分区交互尚未整改，见GSA-17～20及37。 |
+| NFR-57 | 未实现 | APT-143-PENDING; TASK_REVIEW_PASS | e15fe698需求审核PASS | NOT_DEPLOYED | 逐项发布工具、生产等价故障/性能/兼容证据及实际授权部署尚未完成，见GSA-38～40；不得以代码测试替代生产证据。 |
+
+本批需求提交前`node scripts/account-platform.mjs verify`已通过：Go test/vet、OpenAPI、550项Node合同通过（另2项SKIP）、三语、observability及architecture。该结果只证明现有代码基线，不证明新增需求已实现；新数据库/消息队列行为验收须按子任务取得真实隔离环境证据。
+
 ## 2026-09-07 正式安全基础设施补建
 
 部署负责人已授权补建 KMS 与服务身份签发。SECINF-01 原生 OpenBao/Vault Transit 接入及两入口已通过单元、真实隔离 OpenBao 加解密/轮换/撤销、Go vet 和架构检查；仍 NOT_DEPLOYED。服务身份签发/轮换、正式 OpenBao 初始化/解封托管、部署覆盖与 fresh-install 安全门禁、空库上线尚未完成，详见 [补建设计、串行任务及实测记录](production-security-infrastructure.md)。旧测试数据清除已有明确授权，但尚未执行，其他系统不在清理范围。
