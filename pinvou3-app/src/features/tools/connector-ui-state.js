@@ -70,9 +70,16 @@ function localizeConnectorAlert(alert, storeCopy, detailCopy) {
     return { ...alert, title: storeCopy.disconnectedTool(toolName), subtitle: '' };
   }
   // 'retry' = 后端在等上一个流程归还门闩,不是连接失败,别用失败文案吓人。
-  // subtitle 必须非空:否则 TsAlert 会落到 installHint/removeHint 的兜底文案。
+  // - subtitle 必须非空:否则 TsAlert 会落到 installHint/removeHint 的兜底文案;
+  // - 关掉"新建会话"按钮:那是给"配置成功、需新建会话才生效"用的提示,
+  //   挂在"稍后重试"上语义不符。
   if (alert.connectorAlert === 'retry') {
-    return { ...alert, title: storeCopy.connectBusy(toolName), subtitle: storeCopy.connectBusyHint };
+    return {
+      ...alert,
+      title: storeCopy.connectBusy(toolName),
+      subtitle: storeCopy.connectBusyHint,
+      suppressNewChat: true,
+    };
   }
   return {
     ...alert,

@@ -102,6 +102,10 @@ assert.match(
   /connectorAlert: 'retry'/,
   "busy 结果必须走 'retry' 提示（非 isError 的失败框）",
 );
+// 等待旧流程期间用户点取消：后端放弃起步并回 {cancelled:true}，前端必须静默收尾
+// ——不弹提示，也不能因为这次"没有 started"就把忙碌态漏在那。
+const cancelledBranches = toolStoreSource.match(/if \(res && res\.cancelled\)/g) || [];
+assert.equal(cancelledBranches.length, 2, 'EIP/知道都要处理等待期间的取消结果');
 // 'retry' 是提示而非失败:文案取 connectBusy，且 subtitle 必须非空——TsAlert 在
 // subtitle 为空且 isError=false 时会兜底成 installHint/removeHint（卸载提示），
 // 挂在"稍后重试"上牛头不对马嘴。
@@ -119,6 +123,31 @@ assert.notEqual(
   retryAlert.title,
   dictZh.uiToolStore.connectFailed(dictZh.uiToolStore.toolNames.eip),
   'retry 不是连接失败，不得套用失败文案',
+);
+// "新建会话"按钮是给"配置成功、需新建会话才生效"的提示用的，挂在"稍后重试"上
+// 语义不符：retry 必须显式抑制它，且 TsAlert 要认这个开关。
+assert.equal(retryAlert.suppressNewChat, true, 'retry 提示必须抑制"新建会话"按钮');
+assert.match(
+  toolStoreSource,
+  /!alert\.isError && !alert\.suppressNewChat && \(/,
+  'TsAlert 必须按 suppressNewChat 决定是否渲染"新建会话"按钮',
+);
+assert.equal(
+  localizeConnectorAlert({ visible: true, connectorAlert: 'connected', toolId: 'eip' }, dictZh.uiToolStore, { actions: {} }).suppressNewChat,
+  undefined,
+  'connected 提示仍需保留"新建会话"按钮',
+);
+
+// ── 5b. 遮罩点击只收起：不得回退成"取消"（那会静默杀掉后台登录流程） ───────
+assert.match(
+  dialogSource,
+  /onClick=\{onDismiss\}/,
+  '遮罩点击必须只收起（onDismiss）',
+);
+assert.doesNotMatch(
+  dialogSource,
+  /onDismiss \|\| onCancel/,
+  '不得保留 onDismiss || onCancel 回退链：漏传 onDismiss 时会静默退化成取消',
 );
 
 // ── 6. 契约：限流等待也要有进度与出口（监听 sso_wait + 弹窗占位文案） ────────

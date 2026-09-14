@@ -206,9 +206,14 @@ pub async fn zhidao_connect_begin(app: AppHandle) -> Result<Value, String> {
     let flow = &app.state::<ZhidaoConn>().flow;
     // 与 eip_connect_begin 同一套单飞语义:进行中复用、取消中等待归还门闩。
     // 等待上限与抢占自愈同样见 flow_gate(CANCEL_WAIT_LIMIT / STALL_LIMIT)。
+    // 取消监票同 eip:等待期间用户的"取消"必须能中止本次起步。
     let wait_start = Instant::now();
+    let ticket = flow.cancel_ticket();
     let mut announced = false;
     let decision = loop {
+        if flow.cancelled_since(ticket) {
+            return Ok(json!({ "started": false, "cancelled": true }));
+        }
         match flow.begin() {
             Begin::Busy => {
                 if wait_start.elapsed() > CANCEL_WAIT_LIMIT {
@@ -235,8 +240,10 @@ pub async fn zhidao_connect_begin(app: AppHandle) -> Result<Value, String> {
             Ok(json!({ "started": true }))
         }
         Begin::Reuse { payload } => {
-            if let Some((url, qr)) = payload {
-                emit(&app, "zhidao:sso", json!({ "url": url, "qr_data_url": qr }));
+            match payload {
+                Some((url, qr)) => emit(&app, "zhidao:sso", json!({ "url": url, "qr_data_url": qr })),
+                // 同 eip:URL 还没拿到时先给个"生成中"等待态,别留无反馈的忙碌按钮。
+                None => emit(&app, "zhidao:sso_wait", json!({ "seconds": 0 })),
             }
             Ok(json!({ "started": true, "reused": true }))
         }
@@ -255,6 +262,10 @@ fn run_login_flow(app: &AppHandle, epoch: u64) {
         Ok(Some(login)) => login,
         Ok(None) => return, // 节流等待中被取消/抢占:静默退出
         Err(e) => {
+            // 已被取消/抢占就静默退场(同 eip:僵尸不发事件)。
+            if !flow.is_active(epoch) {
+                return;
+            }
             emit(
                 app,
                 "zhidao:error",
@@ -305,6 +316,10 @@ fn run_login_flow(app: &AppHandle, epoch: u64) {
             emit(app, "zhidao:connected", json!({ "ok": true }));
             return;
         }
+    }
+    // 同源守卫:检查与 emit 之间若被取消/抢占,静默退场。
+    if !flow.is_active(epoch) {
+        return;
     }
     emit(
         app,

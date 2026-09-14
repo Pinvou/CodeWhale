@@ -60,7 +60,16 @@ struct State {
     /// 最近一次心跳。流程每发起一次**可能长时间阻塞**的子进程调用前刷新，
     /// 用于识别"卡死在子进程里"的僵尸流程。
     last_progress: Option<Instant>,
+    /// 取消代次：每次 [`SsoFlow::request_cancel`] 自增。等待门闩归还的调用方记下
+    /// 进入等待时的值，若中途变化说明用户点过取消，它必须放弃起步——否则"取消"
+    /// 会被随后的自动起步吃掉（旧流程归还门闩后等待者照常 spawn 新流程，把用户
+    /// 刚取消的弹窗重新弹出来）。
+    cancel_seq: u64,
 }
+
+/// 等待门闩归还期间的"取消监票"。见 [`SsoFlow::cancel_ticket`]。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct CancelTicket(u64);
 
 #[derive(Default, PartialEq, Debug)]
 enum Phase {
@@ -170,12 +179,31 @@ impl SsoFlow {
         }
     }
 
-    /// 请求取消：Running → Cancelling（Idle 下为 no-op）。
+    /// 等待门闩归还前取一张取消监票，等待循环每拍用 [`SsoFlow::cancelled_since`]
+    /// 核对。等待期间用户点"取消"时，旧流程可能已经是 `Cancelling`（再取消是
+    /// no-op）、新流程又还没起步（无人可取消），只有这张票能记下这个意图。
+    pub(crate) fn cancel_ticket(&self) -> CancelTicket {
+        CancelTicket(self.lock().cancel_seq)
+    }
+
+    /// 自取得 `ticket` 以来是否发生过取消请求。
+    /// 返回 true = 等待者应放弃本次起步（静默，不要发任何事件）。
+    pub(crate) fn cancelled_since(&self, ticket: CancelTicket) -> bool {
+        self.lock().cancel_seq != ticket.0
+    }
+
+    /// 请求取消：Running → Cancelling，并翻新取消代次。
+    ///
+    /// 代次**无条件**自增（哪怕相位已是 `Cancelling`、状态机本身没变化）：
+    /// 它是"用户按了取消"这个事实的记录，等待门闩的调用方靠它决定要不要放弃
+    /// 起步。否则在"旧流程已在取消中 + 用户重连后又取消"这条路径上，这次取消
+    /// 会完全落空。
     pub(crate) fn request_cancel(&self) {
         let mut s = self.lock();
         if s.phase == Phase::Running {
             s.phase = Phase::Cancelling;
         }
+        s.cancel_seq = s.cancel_seq.wrapping_add(1);
     }
 
     /// 归还门闩。只由 [`FlowGuard`] 调用——`epoch` 不符说明本流程已被抢占，
@@ -244,6 +272,13 @@ fn throttle_at(
     };
 
     if slot <= now {
+        // 无需等待也要最后看一眼：否则"取消"之后紧跟着的这次 login 仍会真的发出去
+        // （流程拿到门闩 → 取消落在 throttle 与 run 之间）。同理被抢占的僵尸流程
+        // 也不该再发请求。已预约的槽位要回滚，别让一次没发生的 login 占掉窗口。
+        if aborted() {
+            rollback(last, slot, previous);
+            return false;
+        }
         return true;
     }
     if aborted() {
@@ -408,6 +443,53 @@ mod tests {
         let f = SsoFlow::default();
         start(&f);
         assert!(matches!(f.begin(), Begin::Reuse { .. }));
+    }
+
+    /// Major 回归：等待门闩期间用户点"取消"必须能被等待者察觉。
+    /// 这条路径上旧流程已是 Cancelling（再取消是 no-op）、新流程又还没 begin
+    /// （无人可取消），若没有监票，取消会完全落空，等待者随后照常起步、把用户
+    /// 刚取消的弹窗重新弹出来。
+    #[test]
+    fn waiter_can_observe_a_cancel_during_the_wait() {
+        let f = SsoFlow::default();
+        let epoch = start(&f);
+        f.request_cancel(); // 旧流程进入 Cancelling
+        let ticket = f.cancel_ticket();
+        assert!(
+            !f.cancelled_since(ticket),
+            "刚取的监票不该立刻算作已取消"
+        );
+        assert!(matches!(f.begin(), Begin::Busy), "此时等待者只能排队");
+        f.request_cancel(); // 用户在等待期间点取消：相位没变，但意图必须被记下
+        assert!(
+            f.cancelled_since(ticket),
+            "等待期间的取消必须能被等待者察觉，否则取消会被随后的自动起步吃掉"
+        );
+        drop(FlowGuard::new(&f, epoch));
+        assert!(matches!(f.begin(), Begin::Start { .. }));
+    }
+
+    /// 取消后紧接着的放行不能把 login 漏出去：throttle 的免等待路径也要看 abort。
+    #[test]
+    fn throttle_fast_path_does_not_let_an_aborted_login_through() {
+        let last = Mutex::new(None);
+        assert!(
+            !throttle_at(&last, Duration::from_millis(120), |_| {}, &mut || true),
+            "已取消的调用方不该被放行（否则仍会真的发出一次 login）"
+        );
+        // 且不该占掉窗口：下一个调用方应立即放行。
+        let t0 = Instant::now();
+        assert!(throttle_at(
+            &last,
+            Duration::from_millis(120),
+            |_| {},
+            &mut || false
+        ));
+        assert!(
+            t0.elapsed() < Duration::from_millis(60),
+            "未发生的 login 不该占掉节流窗口，等了 {:?}",
+            t0.elapsed()
+        );
     }
 
     #[test]

@@ -625,7 +625,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                     {copy.ok}
                   </button>
                 </div>
-                {!alert.isError && (
+                {!alert.isError && !alert.suppressNewChat && (
                   <div className={`border-t border-slate-200 dark:border-white/10`}>
                     <button
                       onClick={onNewChat}
@@ -2162,6 +2162,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             setAlert({ visible: true, loading: false, connectorAlert: 'retry', isError: false, toolId: 'eip' });
             return;
           }
+          // 等待旧流程期间用户点了取消:后端已放弃起步,不会再发 sso/sso_wait,
+          // 这里只收尾,不要弹任何提示(用户是主动取消的)。
+          if (res && res.cancelled) {
+            finishToolConfiguration('eip', false);
+            setEipSso(null); setBusyId(busy => releaseBusy(busy, 'eip'));
+            return;
+          }
           // 后续:eip:sso 出登录地址 → 用户浏览器 SSO 登录 → eip:connected 收尾。
         } catch (e) {
           finishToolConfiguration('eip', false);
@@ -2196,6 +2203,12 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             finishToolConfiguration('zhidao', false);
             setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao'));
             setAlert({ visible: true, loading: false, connectorAlert: 'retry', isError: false, toolId: 'zhidao' });
+            return;
+          }
+          // 同 EIP:等待期间用户取消 → 静默收尾。
+          if (res && res.cancelled) {
+            finishToolConfiguration('zhidao', false);
+            setZhidaoSso(null); setBusyId(busy => releaseBusy(busy, 'zhidao'));
             return;
           }
         } catch (e) {

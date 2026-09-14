@@ -276,9 +276,17 @@ pub async fn eip_connect_begin(app: AppHandle) -> Result<Value, String> {
     let flow = &app.state::<EipConn>().flow;
     // 旧流程取消中:等它归还门闩再起步,避免并发双流程。等待上限按最坏取消节拍
     // 推导(见 flow_gate::CANCEL_WAIT_LIMIT);真卡死的流程由 begin() 的超时抢占自愈。
+    //
+    // 等待期间用户仍可能点"取消",而那时旧流程已是 Cancelling(再取消是 no-op)、
+    // 新流程又还没起步(无人可取消)——只有取消监票能记下这个意图。不查它的话,
+    // 旧流程一归还门闩,等待循环就会照常起步,把用户刚取消的弹窗重新弹出来。
     let wait_start = Instant::now();
+    let ticket = flow.cancel_ticket();
     let mut announced = false;
     let decision = loop {
+        if flow.cancelled_since(ticket) {
+            return Ok(json!({ "started": false, "cancelled": true }));
+        }
         match flow.begin() {
             Begin::Busy => {
                 if wait_start.elapsed() > CANCEL_WAIT_LIMIT {
@@ -308,9 +316,15 @@ pub async fn eip_connect_begin(app: AppHandle) -> Result<Value, String> {
             Ok(json!({ "started": true }))
         }
         Begin::Reuse { payload } => {
-            // 流程刚启动、URL 还没拿到时不补发:在途的 eip:sso 随后会送达同一监听器。
-            if let Some((url, qr)) = payload {
-                emit(&app, "eip:sso", json!({ "url": url, "qr_data_url": qr }));
+            match payload {
+                Some((url, qr)) => {
+                    emit(&app, "eip:sso", json!({ "url": url, "qr_data_url": qr }))
+                }
+                // 流程在跑但 URL 还没拿到(可能正卡在 65s 节流窗口里):在途的 eip:sso
+                // 随后会送达,**但**这次重连若晚于那个事件发出,用户会面对一个毫无
+                // 反馈的忙碌按钮。给一个"生成中"的等待态(seconds=0 → 前端显示
+                // generating),让弹窗(连同取消按钮)先出来。
+                None => emit(&app, "eip:sso_wait", json!({ "seconds": 0 })),
             }
             Ok(json!({ "started": true, "reused": true }))
         }
@@ -337,6 +351,11 @@ fn run_login_flow(app: &AppHandle, epoch: u64) {
         Ok(Some(url)) => url,
         Ok(None) => return, // 节流等待中被取消/抢占:静默退出
         Err(e) => {
+            // 已被取消/抢占就静默退场:僵尸流程给新流程的 UI 发 error 会误导用户
+            // (见 flow_gate 模块注释"僵尸不再发任何事件")。
+            if !flow.is_active(epoch) {
+                return;
+            }
             emit(
                 app,
                 "eip:error",
@@ -362,6 +381,10 @@ fn run_login_flow(app: &AppHandle, epoch: u64) {
             return;
         }
         if start.elapsed() > FLOW_TIMEOUT {
+            // 同源守卫:检查与 emit 之间若被取消/抢占,同样静默退场。
+            if !flow.is_active(epoch) {
+                return;
+            }
             emit(
                 app,
                 "eip:error",
