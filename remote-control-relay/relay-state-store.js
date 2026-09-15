@@ -393,9 +393,18 @@ function fileIdentityKey(identity) {
 }
 
 function openError(error) {
-  return error instanceof RelayStateStoreError
+  const result = error instanceof RelayStateStoreError
     ? error
     : new RelayStateStoreError("relay_state_unavailable", "relay_state_unavailable", { cause: error });
+  if (error?.cleanupErrors && !result.cleanupErrors) {
+    Object.defineProperty(result, "cleanupErrors", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: error.cleanupErrors,
+    });
+  }
+  return result;
 }
 
 function attachReleaseError(error, releaseError) {
@@ -405,6 +414,19 @@ function attachReleaseError(error, releaseError) {
     writable: false,
     value: releaseError,
   });
+  return error;
+}
+
+function attachCleanupError(error, cleanupError) {
+  if (!error.cleanupErrors) {
+    Object.defineProperty(error, "cleanupErrors", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: [],
+    });
+  }
+  error.cleanupErrors.push(cleanupError);
   return error;
 }
 
@@ -458,6 +480,7 @@ export class RelayStateStore {
   #ancestorSnapshot = null;
   #state = null;
   #lockOwner = null;
+  #lockTemporaryArtifact = null;
   #closed = false;
   #closing = false;
   #lockRemoved = false;
@@ -538,7 +561,7 @@ export class RelayStateStore {
         await this.#releaseLock();
       } catch (releaseError) {
         if (this.#lockOwner) {
-          ABANDONED_OPEN_STORES.set(comparablePath(this.#path), { store: this, cleanup: null });
+          this.#markAbandonedOpen();
         }
         throw attachReleaseError(primaryError, releaseError);
       }
@@ -894,13 +917,14 @@ export class RelayStateStore {
       await this.#assertAncestorSnapshot();
       const temporaryPath = `${this.#lockPath}.${process.pid}.${this.#randomBytes(8).toString("hex")}.tmp`;
       let handle;
+      let temporaryIdentity = null;
       let publishedIdentity = null;
       try {
         handle = await this.#fs.open(temporaryPath, "wx", 0o600);
+        temporaryIdentity = await this.#handleIdentity(handle);
         await this.#protectFilesystemPath(temporaryPath, "file");
         await handle.writeFile(contents, "utf8");
         await handle.sync();
-        const temporaryIdentity = await this.#handleIdentity(handle);
         await handle.close();
         handle = null;
         await this.#fs.link(temporaryPath, this.#lockPath);
@@ -910,23 +934,33 @@ export class RelayStateStore {
         if (published.isSymbolicLink() || !sameFileIdentity(temporaryIdentity, publishedPathIdentity)) {
           fail("relay_state_lock_publish_failed");
         }
-        await this.#fs.rm(temporaryPath, { force: true });
+        this.#registerProvisionalLock(owner, temporaryPath, temporaryIdentity, processPathKey);
+        await this.#removeOwnedLockTemporary();
         await this.#syncDirectory(dirname(this.#lockPath));
-        this.#lockOwner = owner;
-        PROCESS_HELD_STATE_PATHS.add(processPathKey);
+        this.#clearRecoveryRecord();
         return;
       } catch (error) {
-        try { await handle?.close(); } catch {}
-        if (publishedIdentity) {
-          try {
-            const existing = await this.#fs.lstat(this.#lockPath);
-            if (!existing.isSymbolicLink()
-              && sameFileIdentity(publishedIdentity, await this.#pathIdentity(this.#lockPath))) {
-              await this.#fs.rm(this.#lockPath, { force: true });
-            }
-          } catch {}
+        if (this.#lockOwner === owner) throw error;
+        try {
+          await handle?.close();
+        } catch (cleanupError) {
+          attachCleanupError(error, cleanupError);
         }
-        try { await this.#fs.rm(temporaryPath, { force: true }); } catch {}
+        if (publishedIdentity && temporaryIdentity) {
+          try {
+            await this.#removeOwnedPath(this.#lockPath, publishedIdentity);
+          } catch (cleanupError) {
+            attachCleanupError(error, cleanupError);
+          }
+        }
+        if (temporaryIdentity) {
+          try {
+            await this.#removeOwnedPath(temporaryPath, temporaryIdentity);
+          } catch (cleanupError) {
+            attachCleanupError(error, cleanupError);
+          }
+        }
+        if (error.cleanupErrors?.length) throw error;
         if (error?.code !== "EEXIST") throw error;
         const recovered = await this.#recoverStaleLock(attempt);
         if (!recovered) fail("relay_state_locked");
@@ -935,9 +969,43 @@ export class RelayStateStore {
     fail("relay_state_locked");
   }
 
+  #registerProvisionalLock(owner, temporaryPath, temporaryIdentity, processPathKey) {
+    this.#lockOwner = owner;
+    this.#lockTemporaryArtifact = { path: temporaryPath, identity: temporaryIdentity };
+    PROCESS_HELD_STATE_PATHS.add(processPathKey);
+    ABANDONED_OPEN_STORES.set(processPathKey, {
+      store: this,
+      cleanup: null,
+      recoverable: false,
+    });
+  }
+
+  #markAbandonedOpen() {
+    const processPathKey = comparablePath(this.#path);
+    const existing = ABANDONED_OPEN_STORES.get(processPathKey);
+    if (existing?.store === this) {
+      existing.recoverable = true;
+      existing.cleanup = null;
+      return;
+    }
+    ABANDONED_OPEN_STORES.set(processPathKey, {
+      store: this,
+      cleanup: null,
+      recoverable: true,
+    });
+  }
+
+  #clearRecoveryRecord() {
+    const processPathKey = comparablePath(this.#path);
+    if (ABANDONED_OPEN_STORES.get(processPathKey)?.store === this) {
+      ABANDONED_OPEN_STORES.delete(processPathKey);
+    }
+  }
+
   async #recoverAbandonedOpen(processPathKey) {
     const abandoned = ABANDONED_OPEN_STORES.get(processPathKey);
     if (!abandoned) return;
+    if (!abandoned.recoverable) fail("relay_state_locked");
     if (!abandoned.cleanup) {
       abandoned.cleanup = (async () => {
         await abandoned.store.#releaseLock();
@@ -1019,13 +1087,52 @@ export class RelayStateStore {
         || existing.owner.owner_id !== this.#lockOwner.owner_id) {
         fail("relay_state_lock_ownership_lost");
       }
-      await this.#removeWithRetry(this.#lockPath);
-      this.#lockRemoved = true;
     }
+    let releaseError = null;
+    if (!this.#lockRemoved) {
+      try {
+        await this.#removeWithRetry(this.#lockPath);
+        this.#lockRemoved = true;
+      } catch (error) {
+        releaseError = error;
+      }
+    }
+    try {
+      await this.#removeOwnedLockTemporary();
+    } catch (cleanupError) {
+      if (releaseError) attachCleanupError(releaseError, cleanupError);
+      else releaseError = cleanupError;
+    }
+    if (releaseError) throw releaseError;
     await this.#syncDirectory(dirname(this.#lockPath));
     PROCESS_HELD_STATE_PATHS.delete(comparablePath(this.#path));
     this.#lockOwner = null;
     this.#lockRemoved = false;
+    this.#clearRecoveryRecord();
+  }
+
+  async #removeOwnedLockTemporary() {
+    if (!this.#lockTemporaryArtifact) return;
+    await this.#removeOwnedPath(
+      this.#lockTemporaryArtifact.path,
+      this.#lockTemporaryArtifact.identity,
+    );
+    this.#lockTemporaryArtifact = null;
+  }
+
+  async #removeOwnedPath(target, expectedIdentity) {
+    let metadata;
+    try {
+      metadata = await this.#fs.lstat(target);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    const actualIdentity = await this.#pathIdentity(target);
+    if (metadata.isSymbolicLink() || !sameFileIdentity(expectedIdentity, actualIdentity)) {
+      fail("relay_state_cleanup_ownership_lost");
+    }
+    await this.#removeWithRetry(target);
   }
 
   async #removeWithRetry(target) {

@@ -42,13 +42,17 @@ snapshot and commits with
 `compareAndSwap(name, expectedRevision, value)`; stale revisions fail without a
 write. One process serializes mutations. A complete, synced temporary lock is
 protected and published as the exclusive sibling `.lock` with an atomic
-hardlink, so this implementation never publishes an empty or partial lock. The
-record binds PID, a boot-plus-process-start identity, and a 144-bit per-open
-session nonce. A live matching process is never preempted, and PID reuse is
-detected. Legacy empty/truncated locks and dead owners are re-read for a bounded
-interval, then quarantined and identity-checked before removal. Any
-create/write/sync/publish failure closes the handle and removes files owned by
-the failed attempt.
+hardlink, so this implementation never publishes an empty or partial lock. As
+soon as the published link's inode is verified, the store records a provisional
+owner and process hold before removing the temporary hardlink or syncing the
+directory. The record binds PID, a boot-plus-process-start identity, and a
+144-bit per-open session nonce. A live matching process is never preempted, and
+PID reuse is detected. Legacy empty/truncated locks and dead owners are re-read
+for a bounded interval, then quarantined and identity-checked before removal.
+Failures before verified publication close the handle and remove only matching
+owned inodes; cleanup failures remain attached to the original primary error.
+Failures after verified publication use the same owner-checked release and
+abandoned-owner recovery path as initialization failures.
 
 Lock unlink and directory sync retry bounded Windows sharing failures. `close()`
 does not report success until release completes. After an exhausted failure the

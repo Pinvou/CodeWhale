@@ -759,6 +759,109 @@ test("a failed open retains its primary error and a later open recovers the veri
   await recovered.close();
 });
 
+test("post-publication temp cleanup failure preserves the primary and recoverable owner", async (t) => {
+  const statePath = await temporaryState(t);
+  const initialized = await openStateStore(statePath);
+  await initialized.close();
+  let publishedTemporaryPath;
+  let tempRemoveFault = true;
+  let lockRemoveFault = true;
+  const injectedFs = {
+    ...fs,
+    async link(source, target) {
+      const result = await fs.link(source, target);
+      if (target === lockPath(statePath)) publishedTemporaryPath = source;
+      return result;
+    },
+    async rm(target, options) {
+      if (tempRemoveFault && target === publishedTemporaryPath) {
+        const error = new Error("injected published temp unlink failure");
+        error.code = "EACCES";
+        throw error;
+      }
+      if (lockRemoveFault && target === lockPath(statePath)) {
+        const error = new Error("injected published lock unlink failure");
+        error.code = "EBUSY";
+        throw error;
+      }
+      return fs.rm(target, options);
+    },
+  };
+  let openingError;
+  try {
+    await openStateStore(statePath, { fs: injectedFs, sleep: async () => {} });
+  } catch (error) {
+    openingError = error;
+  }
+  assert.equal(openingError?.code, "relay_state_unavailable");
+  assert.equal(openingError?.cause?.code, "EACCES");
+  assert.equal(openingError?.releaseError?.code, "EBUSY");
+  assert.deepEqual(openingError?.releaseError?.cleanupErrors?.map((error) => error.code), ["EACCES"]);
+  assert.ok(publishedTemporaryPath);
+
+  tempRemoveFault = false;
+  lockRemoveFault = false;
+  await fs.rm(lockPath(statePath));
+  const replacementLock = `${JSON.stringify(lockRecord({ owner: "CCCCCCCCCCCCCCCCCCCCCCCC" }))}\n`;
+  await fs.writeFile(lockPath(statePath), replacementLock, "utf8");
+  await rejectsCode(openStateStore(statePath), "relay_state_locked");
+  assert.equal(await fs.readFile(lockPath(statePath), "utf8"), replacementLock);
+
+  await fs.rm(lockPath(statePath));
+  await fs.link(publishedTemporaryPath, lockPath(statePath));
+  const recovered = await openStateStore(statePath);
+  await recovered.close();
+  await assert.rejects(fs.access(publishedTemporaryPath), (error) => error?.code === "ENOENT");
+});
+
+test("post-publication directory sync and lock removal failures recover in process", async (t) => {
+  const statePath = await temporaryState(t);
+  const directory = path.dirname(statePath);
+  const initialized = await openStateStore(statePath);
+  await initialized.close();
+  let published = false;
+  let directorySyncFault = true;
+  let lockRemoveFault = true;
+  const injectedFs = {
+    ...fs,
+    async link(source, target) {
+      const result = await fs.link(source, target);
+      if (target === lockPath(statePath)) published = true;
+      return result;
+    },
+    async open(target, flags, mode) {
+      if (published && directorySyncFault && target === directory && flags === "r") {
+        const error = new Error("injected post-publication directory sync failure");
+        error.code = "EACCES";
+        throw error;
+      }
+      return fs.open(target, flags, mode);
+    },
+    async rm(target, options) {
+      if (published && lockRemoveFault && target === lockPath(statePath)) {
+        const error = new Error("injected lock cleanup failure");
+        error.code = "EBUSY";
+        throw error;
+      }
+      return fs.rm(target, options);
+    },
+  };
+  let openingError;
+  try {
+    await openStateStore(statePath, { fs: injectedFs, sleep: async () => {} });
+  } catch (error) {
+    openingError = error;
+  }
+  assert.equal(openingError?.code, "relay_state_unavailable");
+  assert.equal(openingError?.cause?.message, "injected post-publication directory sync failure");
+  assert.equal(openingError?.releaseError?.message, "injected lock cleanup failure");
+
+  directorySyncFault = false;
+  lockRemoveFault = false;
+  const recovered = await openStateStore(statePath);
+  await recovered.close();
+});
+
 test("late legacy hardlinks to retired state in each persistence window fail closed", async (t) => {
   for (const phase of ["backup", "primary"]) {
     await t.test(phase, async () => {
