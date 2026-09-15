@@ -13,8 +13,9 @@ export const MAX_ID_CHARS = 128;
 const MAX_TASK_REFERENCES = 32;
 const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
+const MAX_RELAY_TRUST_KEYS = 32;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "f7c8398ca2169d0f43acc11c5c19f7d7852fb10cee254298ee309f9f796c05de";
+export const CONTROLLER_CONTRACT_SHA256 = "6f3c23d36f899d9f61c0c0a231ea52778581ee5a81b94110d2eb566c5e5b8cf3";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -144,6 +145,10 @@ const LEASE_INSTALL_CONTEXT_FIELDS = Object.freeze(["verified_transcript"]);
 const LEASE_INSTALL_CONTEXT_DATA = new WeakMap();
 const VERIFIED_TRANSCRIPT_DATA = new WeakMap();
 const VERIFIED_TRANSCRIPT_TOKEN = Symbol("verified-controller-transcript");
+const PINNED_RELAY_KEY_DATA = new WeakMap();
+const PINNED_RELAY_KEY_TOKEN = Symbol("pinned-relay-key");
+const RELAY_TRUST_STORE_DATA = new WeakMap();
+const RELAY_TRUST_STORE_TOKEN = Symbol("relay-trust-store");
 const NESTED_SCHEMAS = Object.freeze({
   task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
   temporary_model_package_v1: schema(["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], []),
@@ -530,6 +535,52 @@ export class VerifiedTranscript {
   }
 }
 
+export class PinnedRelayKey {
+  constructor(token, data) {
+    if (token !== PINNED_RELAY_KEY_TOKEN) fail("invalid_field", "pinned_relay_key");
+    PINNED_RELAY_KEY_DATA.set(this, Object.freeze({
+      key_id: data.key_id,
+      public_key: Buffer.from(data.public_key),
+    }));
+    Object.freeze(this);
+  }
+}
+
+export class RelayTrustStore {
+  constructor(token, keys) {
+    if (token !== RELAY_TRUST_STORE_TOKEN) fail("invalid_field", "relay_trust_store");
+    RELAY_TRUST_STORE_DATA.set(this, keys);
+    Object.freeze(this);
+  }
+
+  pinnedKey(keyId) {
+    identifier(keyId, "relay_signing_key_id");
+    const keys = RELAY_TRUST_STORE_DATA.get(this);
+    if (!keys) fail("invalid_field", "relay_trust_store");
+    const pinned = keys.get(keyId);
+    if (!pinned) fail("stale_context", "relay_signing_key_id");
+    return pinned;
+  }
+}
+
+export function loadRelayTrustStoreFromEnrollmentConfig(input) {
+  const config = exactObject(input, ["source", "keys"], [], "relay_trust_store_config");
+  oneOf(config.source, ["official_enrollment", "self_hosted_enrollment"], "relay_trust_store_config.source");
+  if (!Array.isArray(config.keys) || config.keys.length === 0 || config.keys.length > MAX_RELAY_TRUST_KEYS) fail("invalid_field", "relay_trust_store_config.keys");
+  const keys = new Map();
+  for (const [index, value] of config.keys.entries()) {
+    const key = exactObject(value, ["key_id", "public_key_b64"], [], `relay_trust_store_config.keys[${index}]`);
+    identifier(key.key_id, `relay_trust_store_config.keys[${index}].key_id`);
+    base64(key.public_key_b64, `relay_trust_store_config.keys[${index}].public_key_b64`, 32, 32);
+    if (keys.has(key.key_id)) fail("invalid_field", "relay_trust_store_config.keys");
+    keys.set(key.key_id, new PinnedRelayKey(PINNED_RELAY_KEY_TOKEN, {
+      key_id: key.key_id,
+      public_key: Buffer.from(key.public_key_b64, "base64"),
+    }));
+  }
+  return new RelayTrustStore(RELAY_TRUST_STORE_TOKEN, keys);
+}
+
 export function validateControllerLeaseInstallMessage(input, senderRole, context) {
   const trustedContext = LEASE_INSTALL_CONTEXT_DATA.get(context);
   if (!trustedContext) fail("missing_field", "lease_install_validation_context");
@@ -816,15 +867,15 @@ function validateReservedTranscript(message) {
   if (message.transcript_hash !== hash) fail("invalid_field", "transcript_hash");
 }
 
-export function verifyControllerPairingTranscript(input, expectedRelaySigningKeyId, relayPublicKeyB64) {
-  identifier(expectedRelaySigningKeyId, "expected_relay_signing_key_id");
-  base64(relayPublicKeyB64, "relay_public_key_b64", 32, 32);
+export function verifyControllerPairingTranscript(input, pinnedRelayKey) {
+  const pinned = PINNED_RELAY_KEY_DATA.get(pinnedRelayKey);
+  if (!pinned) fail("invalid_field", "pinned_relay_key");
   const message = validateControllerMessage(input, "relay");
   if (message.type !== "controller_pairing_reserved") fail("invalid_message", "verified_transcript");
-  if (message.relay_signing_key_id !== expectedRelaySigningKeyId) fail("stale_context", "relay_signing_key_id");
+  if (message.relay_signing_key_id !== pinned.key_id) fail("stale_context", "relay_signing_key_id");
   const keyPrefix = Buffer.from("302a300506032b6570032100", "hex");
   try {
-    const publicKey = createPublicKey({ key: Buffer.concat([keyPrefix, Buffer.from(relayPublicKeyB64, "base64")]), format: "der", type: "spki" });
+    const publicKey = createPublicKey({ key: Buffer.concat([keyPrefix, pinned.public_key]), format: "der", type: "spki" });
     const signature = Buffer.from(message.relay_signature_b64, "base64");
     if (signature.length !== 64 || !verify(null, buildPairingTranscriptPreimage(message.transcript), publicKey, signature)) {
       fail("invalid_field", "relay_signature_b64");
@@ -947,6 +998,12 @@ export function controllerContractManifest() {
     verified_transcript: {
       constructor: "full-canonical-transcript-hash-and-pinned-relay-ed25519-signature",
       lease_install_derivation: "opaque-verified-transcript-only",
+    },
+    relay_trust_store: {
+      sources: ["official_enrollment", "self_hosted_enrollment"],
+      max_keys: MAX_RELAY_TRUST_KEYS,
+      key_binding: "opaque-atomic-key-id-plus-ed25519-public-key",
+      activation_owner: "DEV-01-or-DEV-05",
     },
   };
 }

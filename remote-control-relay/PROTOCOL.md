@@ -331,14 +331,18 @@ identity, public key, algorithm or capability list is `invalid_message`.
 `controller_joined` is the sole `lease_install_messages` entry and never
 requires a pre-existing lease. It is not accepted by the general runtime
 validator. First, the peer passes the complete raw
-`controller_pairing_reserved` envelope, its pinned `relay_signing_key_id`, and
-the corresponding trusted Relay Ed25519 public key to the transcript verifier.
+`controller_pairing_reserved` envelope and the matching `PinnedRelayKey` to the
+transcript verifier. A `PinnedRelayKey` atomically binds `relay_signing_key_id`
+to one 32-byte Ed25519 public key and can only come from an immutable
+`RelayTrustStore`. That store accepts a strict official- or self-hosted-
+enrollment configuration, rejects empty, duplicate, malformed, unknown, or
+more-than-32-key input, and never exposes a constructor for an arbitrary key.
 That verifier validates the strict envelope and transcript, reconstructs and
 hashes the canonical preimage, compares the envelope `transcript_hash`, and
 verifies the Relay signature before returning an opaque `VerifiedTranscript`.
-The Rust protocol model injects the platform Ed25519 adapter as a fail-closed
-callback already bound to that pinned key ID; the callback receives only the
-canonical preimage and decoded 64-byte signature.
+JS uses the built-in Ed25519 verifier; Rust uses the repository's existing
+AWS-LC provider directly. Neither production API accepts a caller-supplied
+boolean verifier or separate key ID/public-key pair.
 Its constructor and fields are private to the protocol module (a module-private
 brand/weak map in JS and private fields in Rust), so ordinary objects cannot
 impersonate it. `LeaseInstallValidationContext` accepts only that verified value
@@ -354,6 +358,9 @@ validate does the validator return a new immutable `LeaseContext` containing
 `connection_id + controller_lease_id + lease_epoch + relay_epoch +
 remote_control_generation`. Thus an attacker cannot make the receiver construct
 its expected identity or epoch from the same unverified result being checked.
+DEV-00 freezes these trust types and validators without activating them. DEV-01
+(official enrollment) and DEV-05 (self-hosted enrollment) own loading the
+authenticated configuration and wiring the store into the runtime.
 
 After reservation, messages carry `pairing_id + reservation_id + relay_epoch +
 remote_control_generation + transcript_hash`. After lease creation, every
@@ -490,7 +497,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`f7c8398ca2169d0f43acc11c5c19f7d7852fb10cee254298ee309f9f796c05de`.
+`6f3c23d36f899d9f61c0c0a231ea52778581ee5a81b94110d2eb566c5e5b8cf3`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
