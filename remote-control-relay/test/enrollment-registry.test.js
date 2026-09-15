@@ -22,6 +22,24 @@ const HMAC_KEY = "test-only-hmac-key-material-32-bytes-minimum";
 const FIRST_CREDENTIAL = "endpoint-credential-one-at-least-32-bytes";
 const SECOND_CREDENTIAL = "endpoint-credential-two-at-least-32-bytes";
 const execFileAsync = promisify(execFile);
+const TEST_RESOURCES = new WeakMap();
+
+function resourcesFor(t) {
+  let resources = TEST_RESOURCES.get(t);
+  if (!resources) {
+    resources = { directories: [], stores: [] };
+    TEST_RESOURCES.set(t, resources);
+    t.after(async () => {
+      for (const store of resources.stores) {
+        try { await store.close(); } catch {}
+      }
+      for (const directory of resources.directories) {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    });
+  }
+  return resources;
+}
 
 function environment(overrides = {}) {
   return {
@@ -37,7 +55,7 @@ function environment(overrides = {}) {
 
 async function temporaryState(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pinvou-enrollment-test-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  resourcesFor(t).directories.push(directory);
   return path.join(directory, "controller", "state.json");
 }
 
@@ -75,7 +93,7 @@ function configForState(statePath, overrides = {}) {
 async function openRegistry(t, { env, clock, storeOptions } = {}) {
   const statePath = await temporaryState(t);
   const store = await openStateStore(statePath, storeOptions);
-  t.after(() => store.close());
+  resourcesFor(t).stores.push(store);
   return {
     statePath,
     store,
@@ -219,7 +237,7 @@ test("a registry opened without the persisted digest key fails closed", async (t
   await store.close();
 
   store = await openStateStore(statePath);
-  t.after(() => store.close());
+  resourcesFor(t).stores.push(store);
   registry = EnrollmentRegistry.open({
     stateStore: store,
     config: configForState(statePath, {
@@ -271,7 +289,7 @@ test("restart reloads committed registry and valid backup restores a corrupted p
 
   await fs.writeFile(statePath, "{corrupt", "utf8");
   store = await openStateStore(statePath);
-  t.after(() => store.close());
+  resourcesFor(t).stores.push(store);
   registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
   await registry.authorizeRegistration({
     endpointId: "endpoint-restart",
@@ -297,7 +315,7 @@ test("legacy controller state migrates once without touching the existing v2 rel
   };
   await fs.writeFile(statePath, JSON.stringify(legacy), "utf8");
   const store = await openStateStore(statePath);
-  t.after(() => store.close());
+  resourcesFor(t).stores.push(store);
   assert.equal(store.readNamespace("future_pairing_tombstones").namespace_revision, "2");
   const current = JSON.parse(await fs.readFile(statePath, "utf8"));
   assert.equal(current.version, 1);
@@ -344,10 +362,42 @@ test("configuration and store reject lexical and hardlink aliases of legacy Web 
       PINVOU_REMOTE_STATE_PATH: statePath.toLowerCase(),
     })), (error) => error?.code === "controller_state_path_aliases_legacy");
   }
+  for (const legacyPath of [
+    `${statePath}.bak`,
+    `${statePath}.lock`,
+    path.join(path.dirname(statePath), ".pinvou-controller-state-directory"),
+    path.join(path.dirname(statePath), "unrelated-legacy-name.json"),
+    `${statePath}.123.0123456789abcdef.tmp`,
+  ]) {
+    assert.throws(() => loadEnrollmentRegistryConfig(environment({
+      PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath,
+      PINVOU_REMOTE_STATE_PATH: legacyPath,
+    })), (error) => error?.code === "legacy_state_path_inside_controller_directory");
+    await rejectsCode(RelayStateStore.open({
+      statePath,
+      legacyStatePath: legacyPath,
+    }), "legacy_state_path_inside_controller_directory");
+  }
+
+  for (const reservedName of [
+    ".pinvou-controller-state-directory", "state.lock", "state.bak", "state.tmp", "state.stale.old",
+  ]) {
+    assert.throws(() => loadEnrollmentRegistryConfig(environment({
+      PINVOU_REMOTE_CONTROLLER_STATE_PATH: path.join(path.dirname(statePath), reservedName),
+      PINVOU_REMOTE_STATE_PATH: legacyStatePath(statePath),
+    })), (error) => error?.code === "controller_state_filename_reserved");
+    await rejectsCode(RelayStateStore.open({
+      statePath: path.join(path.dirname(statePath), reservedName),
+      legacyStatePath: legacyStatePath(statePath),
+    }), "relay_state_filename_reserved");
+  }
 
   let store = await openStateStore(statePath);
   await store.close();
   await fs.link(statePath, legacyStatePath(statePath));
+  await rejectsCode(openStateStore(statePath), "relay_state_aliases_legacy");
+  await fs.rm(legacyStatePath(statePath));
+  await fs.link(path.join(path.dirname(statePath), ".pinvou-controller-state-directory"), legacyStatePath(statePath));
   await rejectsCode(openStateStore(statePath), "relay_state_aliases_legacy");
 });
 
@@ -355,7 +405,7 @@ test("registry rejects a store opened for different configured paths", async (t)
   const statePath = await temporaryState(t);
   const otherStatePath = path.join(path.dirname(path.dirname(statePath)), "other-controller", "state.json");
   const store = await openStateStore(statePath);
-  t.after(() => store.close());
+  resourcesFor(t).stores.push(store);
   assert.throws(() => EnrollmentRegistry.open({
     stateStore: store,
     config: configForState(otherStatePath),
@@ -542,6 +592,10 @@ test("Windows refuses startup when the dedicated ACL cannot be set or verified",
   for (const phase of ["set", "verify"]) {
     await t.test(phase, async () => {
       const statePath = await temporaryState(t);
+      if (phase === "verify") {
+        const initialized = await openStateStore(statePath);
+        await initialized.close();
+      }
       await rejectsCode(RelayStateStore.open({
         statePath,
         legacyStatePath: legacyStatePath(statePath),
@@ -578,6 +632,102 @@ test("live process lock prevents a second writer and is released on close", asyn
   await first.close();
   const second = await openStateStore(statePath);
   await second.close();
+});
+
+test("close retries transient Windows-style lock unlink and directory sync failures", async (t) => {
+  const statePath = await temporaryState(t);
+  const directory = path.dirname(statePath);
+  let armed = false;
+  let removeFailures = 0;
+  let syncFailures = 0;
+  const injectedFs = {
+    ...fs,
+    async rm(target, options) {
+      if (armed && target === lockPath(statePath) && removeFailures < 2) {
+        removeFailures += 1;
+        const error = new Error("transient lock unlink");
+        error.code = removeFailures === 1 ? "EACCES" : "EPERM";
+        throw error;
+      }
+      return fs.rm(target, options);
+    },
+    async open(target, flags, mode) {
+      if (armed && target === directory && flags === "r" && syncFailures < 2) {
+        syncFailures += 1;
+        const error = new Error("transient directory sync");
+        error.code = "EBUSY";
+        throw error;
+      }
+      return fs.open(target, flags, mode);
+    },
+  };
+  const store = await openStateStore(statePath, { fs: injectedFs, sleep: async () => {} });
+  armed = true;
+  await store.close();
+  assert.equal(removeFailures, 2);
+  assert.equal(syncFailures, 2);
+  const reopened = await openStateStore(statePath);
+  await reopened.close();
+});
+
+test("failed close stays locked and the same object can retry release", async (t) => {
+  for (const phase of ["unlink", "sync"]) {
+    await t.test(phase, async () => {
+      const statePath = await temporaryState(t);
+      const directory = path.dirname(statePath);
+      let armed = false;
+      const injectedFs = {
+        ...fs,
+        async rm(target, options) {
+          if (armed && phase === "unlink" && target === lockPath(statePath)) {
+            const error = new Error("persistent lock unlink failure");
+            error.code = "EBUSY";
+            throw error;
+          }
+          return fs.rm(target, options);
+        },
+        async open(target, flags, mode) {
+          if (armed && phase === "sync" && target === directory && flags === "r") {
+            const error = new Error("persistent directory sync failure");
+            error.code = "EBUSY";
+            throw error;
+          }
+          return fs.open(target, flags, mode);
+        },
+      };
+      const store = await openStateStore(statePath, { fs: injectedFs, sleep: async () => {} });
+      armed = true;
+      await assert.rejects(store.close(), (error) => error?.code === "EBUSY");
+      assert.throws(() => store.readNamespace("test"), (error) => error?.code === "relay_state_unavailable");
+      await rejectsCode(openStateStore(statePath), "relay_state_locked");
+      armed = false;
+      await store.close();
+      const reopened = await openStateStore(statePath);
+      await reopened.close();
+    });
+  }
+});
+
+test("a CAS uses one verified Windows ACL application per new state file", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const statePath = await temporaryState(t);
+  let protectionCalls = 0;
+  let verificationCalls = 0;
+  const store = await RelayStateStore.open({
+    statePath,
+    legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `acl-count-test:${pid}`,
+    protectPath: async () => { protectionCalls += 1; },
+    verifyPath: async () => { verificationCalls += 1; },
+    verifyAncestors: async () => {},
+  });
+  protectionCalls = 0;
+  verificationCalls = 0;
+  await store.compareAndSwap("test", "0", { value: 1 });
+  assert.equal(protectionCalls, 2);
+  assert.equal(verificationCalls, 0);
+  await store.close();
 });
 
 test("empty and truncated crash locks are recovered after a bounded retry", async (t) => {
@@ -711,7 +861,7 @@ test("a persistence failure degrades the process and never exposes an unpersiste
     randomBytes: (size) => crypto.createHash("sha256").update(String(size + temporaryOpens)).digest().subarray(0, size),
     sleep: async () => {},
   });
-  t.after(() => store.close());
+  resourcesFor(t).stores.push(store);
   await rejectsCode(store.compareAndSwap("test", "0", { value: 1 }), "relay_state_persist_failed");
   assert.throws(() => store.readNamespace("test"), (error) => error?.code === "relay_state_unavailable");
   assert.equal(JSON.parse(await fs.readFile(statePath, "utf8")).revision, "0");
