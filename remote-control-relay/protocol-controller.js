@@ -10,8 +10,11 @@ export const MAX_TRANSFER_CHUNK_BYTES = 256 * 1024;
 export const MAX_TASK_INPUT_TEXT_BYTES = 64 * 1024;
 export const MAX_TEMPORARY_MODEL_PACKAGE_BYTES = 64 * 1024;
 export const MAX_ID_CHARS = 128;
+const MAX_TASK_REFERENCES = 32;
+const MAX_DESCRIPTORS = 256;
+const MAX_ARTIFACTS = 256;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394";
+export const CONTROLLER_CONTRACT_SHA256 = "e1e511c4819d2298b735e6b049cb59cbd8935858f7da67d43beaf9106a068fd9";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -136,6 +139,19 @@ const TRANSCRIPT_SCALAR_PREFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(0,
 const TRANSCRIPT_SCALAR_SUFFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(13));
 const ROUTE_REQUIRED = Object.freeze(["display_name", "preset", "wire_api", "base_url", "model", "image_capability_override"]);
 const ROUTE_OPTIONAL = Object.freeze(["provider_kind", "vendor", "endpoint_mode", "context_window_tokens", "max_output_tokens", "reasoning_effort"]);
+const NESTED_SCHEMAS = Object.freeze({
+  task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
+  temporary_model_package_v1: schema(["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], []),
+  temporary_model_binding: schema(["connection_id", "controller_lease_id", "lease_epoch", "task_id"], [], []),
+  vision_fallback: schema(["route", "credential"], [], []),
+  route: schema(ROUTE_REQUIRED, ROUTE_OPTIONAL, []),
+  credential: schema(["kind", "secret"], [], []),
+  tool_descriptor: schema(["tool_id", "display_name"], [], []),
+  skill_descriptor: schema(["skill_id", "display_name"], [], []),
+  workspace_descriptor: schema(["workspace_id", "display_name", "code_allowed"], [], []),
+  artifact_descriptor: schema(["artifact_id", "task_id", "display_name", "mime_type", "size_bytes", "sha256", "preview_mode"], [], []),
+  controller_liveness_a: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "role", "liveness_epoch_a", "heartbeat_sequence_a", "challenge_id", "challenge_b64"], [], []),
+});
 
 const PAYLOAD_CAPABILITIES = Object.freeze({
   capability_snapshot_request: "task_v1", capability_snapshot: "task_v1",
@@ -302,7 +318,7 @@ function validateNamedField(object, field) {
     if (Array.isArray(value) && value.some((item) => typeof item === "string" && !CONTROLLER_CAPABILITIES.includes(item))) fail("unsupported_capability", field);
     stringList(value, field, CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
   } else if (field === "attachment_ids" || field === "artifact_ids" || field === "skill_ids") {
-    stringList(value, field, undefined, 32);
+    stringList(value, field, undefined, MAX_TASK_REFERENCES);
   } else if (field === "sender_role" || field === "receiver_role" || field === "role_a" || field === "role_b") {
     oneOf(value, ["A", "B"], field);
   } else if (field === "client_role") {
@@ -447,6 +463,13 @@ function requireNegotiatedCapabilities(runtimeContext) {
   return runtimeContext.negotiated_capabilities;
 }
 
+function requireRuntimeLease(runtimeContext) {
+  if (!runtimeContext || !runtimeContext.lease) fail("missing_field", "runtime_context.lease");
+  const lease = exactObject(runtimeContext.lease, LEASE_CONTEXT_FIELDS, [], "runtime_context.lease");
+  for (const field of LEASE_CONTEXT_FIELDS) validateNamedField(lease, field);
+  return lease;
+}
+
 function enforceNegotiatedPayload(payloadKind, runtimeContext) {
   const capabilities = requireNegotiatedCapabilities(runtimeContext);
   const required = PAYLOAD_CAPABILITIES[payloadKind];
@@ -463,14 +486,19 @@ function enforceNegotiatedMessage(message, runtimeContext) {
 }
 
 export function validateControllerRuntimeMessage(input, senderRole, runtimeContext) {
-  const message = validateControllerMessage(input, senderRole, runtimeContext?.lease);
-  enforceNegotiatedMessage(message, runtimeContext);
+  const shape = validateControllerMessage(input, senderRole);
+  enforceNegotiatedMessage(shape, runtimeContext);
+  const needsLease = MESSAGE_SCHEMAS[shape.type].required.includes("controller_lease_id");
+  const lease = needsLease ? requireRuntimeLease(runtimeContext) : runtimeContext?.lease;
+  const message = lease === undefined ? shape : validateControllerMessage(input, senderRole, lease);
   return message;
 }
 
 export function validateControllerRuntimePayload(input, senderRole, runtimeContext) {
-  const payload = validateControllerPayload(input, senderRole, runtimeContext?.lease);
-  enforceNegotiatedPayload(payload.type, runtimeContext);
+  const shape = validateControllerPayload(input, senderRole);
+  enforceNegotiatedPayload(shape.type, runtimeContext);
+  const lease = requireRuntimeLease(runtimeContext);
+  const payload = validateControllerPayload(input, senderRole, lease);
   return payload;
 }
 
@@ -529,10 +557,10 @@ export function validateControllerRegistrationMessage(input, senderRole, context
 }
 
 function validateTaskSubmit(payload) {
-  const input = exactObject(payload.input, ["text", "attachment_ids", "skill_ids"], ["workspace_id"], "payload.input");
+  const input = exactObject(payload.input, NESTED_SCHEMAS.task_input.required, NESTED_SCHEMAS.task_input.optional, "payload.input");
   text(input.text, "input.text", MAX_TASK_INPUT_TEXT_BYTES, MAX_TASK_INPUT_TEXT_BYTES, 0);
-  stringList(input.attachment_ids, "input.attachment_ids", undefined, 32);
-  stringList(input.skill_ids, "input.skill_ids", undefined, 32);
+  stringList(input.attachment_ids, "input.attachment_ids", undefined, MAX_TASK_REFERENCES);
+  stringList(input.skill_ids, "input.skill_ids", undefined, MAX_TASK_REFERENCES);
   if (input.workspace_id !== undefined) identifier(input.workspace_id, "input.workspace_id");
   if (input.text.length === 0 && input.attachment_ids.length === 0) fail("invalid_field", "payload.input");
   if (payload.model_source === "controller_temporary") {
@@ -553,11 +581,12 @@ function validateCapabilitySnapshot(payload) {
 }
 
 function validateDescriptorList(value, field, idField, workspace) {
-  if (!Array.isArray(value) || value.length > 256) fail("invalid_field", field);
+  if (!Array.isArray(value) || value.length > MAX_DESCRIPTORS) fail("invalid_field", field);
   const ids = new Set();
   for (const [index, item] of value.entries()) {
     const label = `${field}[${index}]`;
-    const descriptor = exactObject(item, workspace ? [idField, "display_name", "code_allowed"] : [idField, "display_name"], [], label);
+    const definition = NESTED_SCHEMAS[workspace ? "workspace_descriptor" : idField === "tool_id" ? "tool_descriptor" : "skill_descriptor"];
+    const descriptor = exactObject(item, definition.required, definition.optional, label);
     identifier(descriptor[idField], `${label}.${idField}`);
     if (ids.has(descriptor[idField])) fail("invalid_field", field);
     ids.add(descriptor[idField]);
@@ -567,11 +596,11 @@ function validateDescriptorList(value, field, idField, workspace) {
 }
 
 function validateArtifactIndex(payload) {
-  if (!Array.isArray(payload.artifacts) || payload.artifacts.length > 256) fail("invalid_field", "artifacts");
+  if (!Array.isArray(payload.artifacts) || payload.artifacts.length > MAX_ARTIFACTS) fail("invalid_field", "artifacts");
   const ids = new Set();
   for (const [index, item] of payload.artifacts.entries()) {
     const label = `artifacts[${index}]`;
-    const artifact = exactObject(item, ["artifact_id", "task_id", "display_name", "mime_type", "size_bytes", "sha256", "preview_mode"], [], label);
+    const artifact = exactObject(item, NESTED_SCHEMAS.artifact_descriptor.required, NESTED_SCHEMAS.artifact_descriptor.optional, label);
     identifier(artifact.artifact_id, `${label}.artifact_id`);
     identifier(artifact.task_id, `${label}.task_id`);
     if (ids.has(artifact.artifact_id)) fail("invalid_field", "artifacts");
@@ -586,17 +615,17 @@ function validateArtifactIndex(payload) {
 
 function validateTemporaryModelPackage(value, task) {
   if (Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_TEMPORARY_MODEL_PACKAGE_BYTES) fail("message_too_large", "temporary_model_package");
-  const object = exactObject(value, ["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], "temporary_model_package");
+  const object = exactObject(value, NESTED_SCHEMAS.temporary_model_package_v1.required, NESTED_SCHEMAS.temporary_model_package_v1.optional, "temporary_model_package");
   if (object.schema !== "temporary_model_package/v1") fail("unsupported_version", "temporary_model_package.schema");
   identifier(object.package_id, "temporary_model_package.package_id");
-  const binding = exactObject(object.binding, ["connection_id", "controller_lease_id", "lease_epoch", "task_id"], [], "temporary_model_package.binding");
+  const binding = exactObject(object.binding, NESTED_SCHEMAS.temporary_model_binding.required, NESTED_SCHEMAS.temporary_model_binding.optional, "temporary_model_package.binding");
   for (const field of ["connection_id", "controller_lease_id", "task_id"]) identifier(binding[field], `temporary_model_package.binding.${field}`);
   decimal(binding.lease_epoch, "temporary_model_package.binding.lease_epoch");
   for (const field of ["connection_id", "controller_lease_id", "lease_epoch", "task_id"]) if (binding[field] !== task[field]) fail("stale_context", `temporary_model_package.binding.${field}`);
   validateRoute(object.primary, "temporary_model_package.primary");
   validateCredential(object.primary_credential, "temporary_model_package.primary_credential");
   if (object.vision_fallback !== undefined) {
-    const fallback = exactObject(object.vision_fallback, ["route", "credential"], [], "temporary_model_package.vision_fallback");
+    const fallback = exactObject(object.vision_fallback, NESTED_SCHEMAS.vision_fallback.required, NESTED_SCHEMAS.vision_fallback.optional, "temporary_model_package.vision_fallback");
     validateRoute(fallback.route, "temporary_model_package.vision_fallback.route");
     validateCredential(fallback.credential, "temporary_model_package.vision_fallback.credential");
   }
@@ -665,7 +694,7 @@ function validUrlSuffix(suffix) {
 }
 
 function validateCredential(value, label) {
-  const credential = exactObject(value, ["kind", "secret"], [], label);
+  const credential = exactObject(value, NESTED_SCHEMAS.credential.required, NESTED_SCHEMAS.credential.optional, label);
   if (credential.kind !== "api_key") fail("invalid_enum", `${label}.kind`);
   text(credential.secret, `${label}.secret`, 8192, 8192);
 }
@@ -741,7 +770,7 @@ export function buildDirectLivenessAad(value) {
 
 export function validateControllerLivenessPayload(input, expectedContext) {
   const { value } = parseJson(input, MAX_CONTROL_MESSAGE_BYTES);
-  const object = exactObject(value, ["v", "type", ...LEASE_CONTEXT_FIELDS, "role", "liveness_epoch_a", "heartbeat_sequence_a", "challenge_id", "challenge_b64"], [], "liveness_payload");
+  const object = exactObject(value, NESTED_SCHEMAS.controller_liveness_a.required, NESTED_SCHEMAS.controller_liveness_a.optional, "liveness_payload");
   if (object.v !== 1) fail("unsupported_version", "v");
   if (object.type !== "controller_liveness_a") fail("unknown_message_type", "liveness_payload.type");
   for (const field of LEASE_CONTEXT_FIELDS) validateNamedField(object, field);
@@ -807,20 +836,9 @@ export function controllerContractManifest() {
     transcript_fields: [...TRANSCRIPT_FIELDS],
     route_required: [...ROUTE_REQUIRED],
     route_optional: [...ROUTE_OPTIONAL],
-    nested_schemas: {
-      task_input: { required: ["text", "attachment_ids", "skill_ids"], optional: ["workspace_id"] },
-      temporary_model_package_v1: { required: ["schema", "package_id", "binding", "primary", "primary_credential"], optional: ["vision_fallback"] },
-      temporary_model_binding: { required: ["connection_id", "controller_lease_id", "lease_epoch", "task_id"], optional: [] },
-      vision_fallback: { required: ["route", "credential"], optional: [] },
-      route: { required: [...ROUTE_REQUIRED], optional: [...ROUTE_OPTIONAL] },
-      credential: { required: ["kind", "secret"], optional: [] },
-      tool_descriptor: { required: ["tool_id", "display_name"], optional: [] },
-      skill_descriptor: { required: ["skill_id", "display_name"], optional: [] },
-      workspace_descriptor: { required: ["workspace_id", "display_name", "code_allowed"], optional: [] },
-      artifact_descriptor: { required: ["artifact_id", "task_id", "display_name", "mime_type", "size_bytes", "sha256", "preview_mode"], optional: [] },
-      controller_liveness_a: { required: ["v", "type", ...LEASE_CONTEXT_FIELDS, "role", "liveness_epoch_a", "heartbeat_sequence_a", "challenge_id", "challenge_b64"], optional: [] },
-    },
-    collection_limits: { task_attachment_ids: 32, task_skill_ids: 32, descriptors: 256, artifacts: 256, capabilities: CONTROLLER_CAPABILITIES.length },
+    nested_schemas: Object.fromEntries(Object.entries(NESTED_SCHEMAS).map(([name, definition]) => [name, { required: [...definition.required], optional: [...definition.optional] }])),
+    runtime_pre_lease_messages: CONTROLLER_MESSAGE_TYPES.filter((type) => !MESSAGE_SCHEMAS[type].required.includes("controller_lease_id")),
+    collection_limits: { task_attachment_ids: MAX_TASK_REFERENCES, task_skill_ids: MAX_TASK_REFERENCES, descriptors: MAX_DESCRIPTORS, artifacts: MAX_ARTIFACTS, capabilities: CONTROLLER_CAPABILITIES.length },
     base_url_grammar: "lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
     liveness_sequence_policy: {
       heartbeat: { lower: "replay", equal: "same_sequence_tighten", greater: "advance" },

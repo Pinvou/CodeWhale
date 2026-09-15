@@ -268,8 +268,20 @@ empty intersection, and never inserts a capability absent from either side.
 Validation has two explicit modes. Shape-only parsing checks schema, size,
 role and any supplied lease context without assuming negotiation state. Runtime
 state-machine dispatch requires a validation context containing the frozen
-`negotiated_capabilities`; omitting it fails closed. Every encrypted payload is
-checked against that list before decryption dispatch. All numeric counters, `lease_epoch`,
+`negotiated_capabilities`; omitting it fails closed. Every message whose schema
+contains `controller_lease_id`, and every decrypted payload, additionally
+requires a non-empty runtime `lease` context containing the complete
+`connection_id + controller_lease_id + lease_epoch + relay_epoch +
+remote_control_generation` tuple. Missing lease context is the stable local
+`missing_field: runtime_context.lease` failure; a supplied cross-lease tuple is
+`stale_context`. Only the manifest's explicit `runtime_pre_lease_messages`
+allowlist may be processed without a lease: `controller_capabilities`,
+`desktop_endpoint_claim`, `desktop_pairing_register`,
+`desktop_pairing_registered`, `desktop_pairing_revoke`,
+`controller_pairing_claim`, `controller_pairing_reserved`,
+`finished_receipt_commit`, `encrypted_handshake_finished`,
+`finished_receipt_ack`, and `error`. Every encrypted payload is checked
+against the negotiated list before decryption dispatch. All numeric counters, `lease_epoch`,
 byte counts and timestamps except literal `v`/`protocol_version` use canonical unsigned 64-bit
 decimal strings matching `0|[1-9][0-9]{0,19}` and bounded by
 `18446744073709551615`; JSON numbers, signs and leading zeroes are invalid.
@@ -436,16 +448,18 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394`.
+`e1e511c4819d2298b735e6b049cb59cbd8935858f7da67d43beaf9106a068fd9`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
 matrix, registry, enum, limit, payload-to-capability mapping, URL grammar and
 transcript field order. `fixture` is the complete shared fixture after removing
 only `contract.sha256`, avoiding self-reference. The expected digest is
-hard-coded in JS and Rust. Rust independently rebuilds the canonical manifest
-from its own required/optional fields, roles, enum registries and limits before
-hashing the shared fixture, so either implementation drifting fails tests;
+hard-coded in JS and Rust. Both validators and both manifests consume their
+production schema descriptors, nested schemas, route fields and capability
+bindings. Rust independently rebuilds the canonical manifest from those
+required/optional fields, roles, enum registries and limits before hashing the
+shared fixture, so either implementation drifting fails tests;
 fixture or schema edits must explicitly regenerate and review the digest.
 
 Logs are allowlist projections only. They must exclude all pairing/lease/
