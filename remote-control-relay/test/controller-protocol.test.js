@@ -1,117 +1,326 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  CONTROLLER_CAPABILITIES,
+  CONTROLLER_ERROR_CODES,
   CONTROLLER_MESSAGE_TYPES,
   CONTROLLER_PAYLOAD_TYPES,
+  TASK_STATUSES,
   ControllerProtocolError,
   LEGACY_WEB_CONFLICT,
   MAX_CONTROL_MESSAGE_BYTES,
   MAX_DECRYPTED_PAYLOAD_BYTES,
   MAX_ENCRYPTED_FRAME_BYTES,
+  MAX_TASK_INPUT_TEXT_BYTES,
   CONTROLLER_SENSITIVE_FIELDS,
+  buildDirectLivenessAad,
+  buildLivenessAttestationPreimage,
+  buildPairingTranscriptPreimage,
+  controllerAllowedRoles,
+  controllerCapabilityHash,
   controllerLogProjection,
+  validateControllerLivenessPayload,
   validateControllerMessage,
   validateControllerPayload,
 } from "../protocol-controller.js";
 
 const fixtureUrl = new URL("./fixtures/controller-protocol-v1.json", import.meta.url);
 const fixture = JSON.parse(await readFile(fixtureUrl, "utf8"));
+const ZERO_HASH = "0".repeat(64);
+const ZERO_KEY = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+const ZERO_NONCE = "AAAAAAAAAAAAAAAAAAAAAA==";
+const LEASE = Object.freeze({
+  connection_id: "connection-0001",
+  controller_lease_id: "lease-0001",
+  lease_epoch: "1",
+  relay_epoch: "epoch-test-1",
+  remote_control_generation: "generation-0001",
+});
 
 function assertProtocolError(expectedCode, callback) {
   assert.throws(callback, (error) => error instanceof ControllerProtocolError && error.code === expectedCode);
 }
 
-function lengthPrefix(value) {
-  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+function lp(value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8");
   const length = Buffer.alloc(4);
   length.writeUInt32BE(bytes.length);
   return Buffer.concat([length, bytes]);
 }
 
-test("controller v1 fixture freezes the complete message and payload registries", () => {
-  assert.deepEqual([...CONTROLLER_MESSAGE_TYPES].sort(), [...fixture.expected_message_types].sort());
-  assert.deepEqual([...CONTROLLER_PAYLOAD_TYPES].sort(), [...fixture.expected_payload_types].sort());
+function fixturePublicKey(rawBase64) {
+  const prefix = Buffer.from("302a300506032b6570032100", "hex");
+  return createPublicKey({ key: Buffer.concat([prefix, Buffer.from(rawBase64, "base64")]), format: "der", type: "spki" });
+}
+
+function contractManifest() {
+  return [
+    fixture.contract.id,
+    `messages:${CONTROLLER_MESSAGE_TYPES.join(",")}`,
+    `payloads:${CONTROLLER_PAYLOAD_TYPES.join(",")}`,
+    `capabilities:${CONTROLLER_CAPABILITIES.join(",")}`,
+    `errors:${CONTROLLER_ERROR_CODES.join(",")}`,
+    `integer:${fixture.contract.integer_wire_format}`,
+    "lease-context:connection_id,controller_lease_id,lease_epoch,relay_epoch,remote_control_generation",
+    `task-statuses:${TASK_STATUSES.join(",")}`,
+    "temporary-model-package:temporary_model_package/v1",
+    "pairing-transcript:controller_pairing_transcript/v1",
+    "direct-liveness:controller_liveness_a",
+    "",
+  ].join("\n");
+}
+
+function validMessage(type, role = fixture.message_role_matrix[type][0]) {
+  const common = { v: 1, type };
+  const request = { request_id: "request-0001" };
+  const pairing = { pairing_id: "pairing-0001", reservation_id: "reservation-0001", remote_control_generation: LEASE.remote_control_generation, relay_epoch: LEASE.relay_epoch };
+  const activation = { ...LEASE, activation_id: "activation-0001" };
+  switch (type) {
+    case "controller_capabilities": return { ...common, ...request, client_role: role === "A" ? "desktop_controller" : "desktop_controlled_endpoint", sender_role: role, protocol_version: 1, capabilities: ["pairing_v1"] };
+    case "desktop_endpoint_claim": return { ...common, ...request, endpoint_id: "endpoint-0001", enrollment_proof_b64: "AQID" };
+    case "desktop_pairing_register": return { ...common, ...request, endpoint_id: "endpoint-0001", remote_control_generation: LEASE.remote_control_generation, code_wrap_public_key_b64: ZERO_KEY, handshake_public_key_b64: ZERO_KEY, key_algorithm: "x25519", capabilities: ["pairing_v1"] };
+    case "desktop_pairing_registered": return { ...common, ...request, pairing_id: "pairing-0001", remote_control_generation: LEASE.remote_control_generation, sealed_code_b64: "AQID", expires_at_ms: "30000", relay_epoch: LEASE.relay_epoch };
+    case "desktop_pairing_revoke": return { ...common, ...request, endpoint_id: "endpoint-0001", remote_control_generation: LEASE.remote_control_generation, reason: "refreshed", pairing_id: "pairing-0001" };
+    case "controller_pairing_claim": return { ...common, ...request, claim_request_id: "claim-0001", pairing_code: "2345678", handshake_public_key_b64: ZERO_KEY, key_algorithm: "x25519", capabilities: ["pairing_v1"] };
+    case "controller_pairing_reserved": return { ...common, ...request, ...pairing, transcript: fixture.transcript_vector.transcript, transcript_hash: fixture.transcript_vector.sha256, relay_signing_key_id: "relay-key-test-1", signature_algorithm: "ed25519", reservation_expires_at_ms: "10000", handshake_expires_at_ms: "20000", relay_signature_b64: fixture.transcript_vector.signature_b64 };
+    case "finished_receipt_commit": return { ...common, ...request, ...pairing, transcript_hash: fixture.transcript_vector.sha256, sender_role: role, commitment: ZERO_HASH };
+    case "encrypted_handshake_finished": return { ...common, ...request, ...pairing, transcript_hash: fixture.transcript_vector.sha256, sender_role: role, ciphertext_b64: "AQID", ciphertext_bytes: "3" };
+    case "finished_receipt_ack": return { ...common, ...request, ...pairing, transcript_hash: fixture.transcript_vector.sha256, sender_role: role === "A" ? "B" : "A", receiver_role: role, receipt_secret_b64: ZERO_KEY };
+    case "controller_joined": return { ...common, ...request, ...LEASE, liveness_epoch_a: "live-a-1", liveness_epoch_b: "live-b-1", resume_token_b64: "AQID", resume_deadline_ms: "30000" };
+    case "controller_liveness": return { ...common, ...LEASE, sender_role: role, liveness_epoch: role === "A" ? "live-a-1" : "live-b-1", heartbeat_sequence: "1" };
+    case "controller_liveness_challenge_a": return { ...common, ...request, ...LEASE, challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE };
+    case "encrypted_controller_liveness_a": return structuredClone(fixture.direct_liveness_vector.outer);
+    case "controller_liveness_attestation_request_a": return { ...common, ...request, ...LEASE, challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE };
+    case "controller_liveness_attestation_a": return structuredClone(fixture.attestation_vector.message);
+    case "controller_resume_prepare": return { ...common, ...request, ...LEASE, sender_role: role, resume_token_b64: "AQID", transport_challenge_b64: ZERO_NONCE, original_deadline_ms: "30000" };
+    case "controller_resume_provisional": return { ...common, ...request, ...activation, original_deadline_ms: "30000" };
+    case "encrypted_resume_confirm": return { ...common, ...request, ...activation, sender_role: role, ciphertext_b64: "AQID", ciphertext_bytes: "3" };
+    case "controller_resume_activation_ack": return { ...common, ...request, ...activation, original_deadline_ms: "30000" };
+    case "controller_resume_activation_pending": return { ...common, ...request, ...activation, original_deadline_ms: "30000" };
+    case "controller_post_activation_liveness":
+    case "controller_post_activation_liveness_confirmed": return { ...common, ...request, ...activation, liveness_epoch_b: "live-b-2", heartbeat_sequence_b: "1" };
+    case "controller_resume_ready_ack": return { ...common, ...request, ...activation, sender_role: role, liveness_epoch_b: "live-b-2", heartbeat_sequence_b: "1" };
+    case "controller_resumed": return { ...common, ...request, ...activation, liveness_epoch_a: "live-a-2", liveness_epoch_b: "live-b-2", new_resume_token_b64: "AQID" };
+    case "encrypted_frame": return { ...common, ...LEASE, frame_sequence: "1", direction: role === "A" ? "a_to_b" : "b_to_a", payload_kind: role === "A" ? "task_submit" : "task_status", ciphertext_b64: "AQID", ciphertext_bytes: "3" };
+    case "controller_disconnect": return { ...common, ...request, ...LEASE, sender_role: role, reason: "local_stop" };
+    case "error": return { ...common, ...request, code: "pairing_code_invalid", message: "连接码无效或已失效" };
+    default: throw new Error(`missing message fixture for ${type}`);
+  }
+}
+
+function validPayload(type) {
+  const base = { v: 1, type, ...LEASE };
+  switch (type) {
+    case "capability_snapshot_request": return { ...base, request_id: "request-capability-1", known_revision: "0" };
+    case "capability_snapshot": return structuredClone(fixture.capability_snapshot_vector);
+    case "task_submit": return structuredClone(fixture.task_submit_vectors.controlled);
+    case "task_cancel": return { ...base, request_id: "request-1", task_id: "task-1", session_id: "session-1" };
+    case "task_status": return { ...base, request_id: "request-1", task_id: "task-1", session_id: "session-1", task_status: "succeeded", result_digest: ZERO_HASH };
+    case "permission_request": return { ...base, task_id: "task-1", permission_request_id: "permission-1", expires_at_ms: "1000", operation_type: "write_file", risk_level: "high", target_scope: "workspace", preview: "write file" };
+    case "permission_decision": return { ...base, task_id: "task-1", permission_request_id: "permission-1", request_id: "request-1", decision: "allow" };
+    case "attachment_begin": return { ...base, task_id: "task-1", session_id: "session-1", transfer_id: "transfer-1", file_name: "input.txt", mime_type: "text/plain", total_bytes: "3", sha256: ZERO_HASH };
+    case "attachment_chunk": return { ...base, task_id: "task-1", session_id: "session-1", transfer_id: "transfer-1", chunk_index: "0", chunk_b64: "AQID", chunk_bytes: "3" };
+    case "attachment_commit": return { ...base, task_id: "task-1", session_id: "session-1", transfer_id: "transfer-1", sha256: ZERO_HASH };
+    case "artifact_index_request": return { ...base, request_id: "request-1", session_id: "session-1" };
+    case "artifact_index": return structuredClone(fixture.artifact_index_vector);
+    case "artifact_read_request": return { ...base, request_id: "request-1", session_id: "session-1", artifact_id: "artifact-1", offset: "0", max_bytes: "1024" };
+    case "artifact_chunk": return { ...base, request_id: "request-1", session_id: "session-1", artifact_id: "artifact-1", offset: "0", chunk_b64: "AQID", chunk_bytes: "3", eof: true, sha256: ZERO_HASH };
+    case "session_snapshot_request": return { ...base, request_id: "request-1", session_id: "session-1" };
+    case "session_snapshot": return { ...base, request_id: "request-1", session_id: "session-1", journal_epoch: "journal-1", base_sequence: "1", snapshot_b64: "AQID", snapshot_bytes: "3", sha256: ZERO_HASH };
+    case "journal_replay_request": return { ...base, request_id: "request-1", session_id: "session-1", journal_epoch: "journal-1", after_sequence: "1" };
+    case "journal_event": return { ...base, session_id: "session-1", journal_epoch: "journal-1", event_sequence: "2", event_kind: "assistant_delta", event_b64: "AQID", event_bytes: "3" };
+    default: throw new Error(`missing payload fixture for ${type}`);
+  }
+}
+
+test("controller v1 fixture freezes registries and contract hash", () => {
+  assert.deepEqual(CONTROLLER_CAPABILITIES, fixture.expected_capabilities);
+  assert.deepEqual(CONTROLLER_ERROR_CODES, fixture.expected_error_codes);
+  assert.deepEqual(CONTROLLER_MESSAGE_TYPES, fixture.expected_message_types);
+  assert.deepEqual(CONTROLLER_PAYLOAD_TYPES, fixture.expected_payload_types);
+  assert.equal(createHash("sha256").update(contractManifest()).digest("hex"), fixture.contract.sha256);
 });
 
-test("controller v1 accepts every shared valid fixture", () => {
-  for (const item of fixture.valid_messages) {
-    assert.deepEqual(validateControllerMessage(item.message, item.sender_role), item.message, item.name);
-  }
-  for (const item of fixture.valid_payloads) {
-    assert.deepEqual(validateControllerPayload(item.payload, item.sender_role), item.payload, item.name);
-  }
-});
-
-test("controller v1 rejects shared unknown, enum, length and cross-role fixtures", () => {
-  for (const item of fixture.invalid_messages) {
-    assertProtocolError(item.expected_error, () => validateControllerMessage(item.message, item.sender_role));
-  }
-  for (const item of fixture.invalid_payloads) {
-    assertProtocolError(item.expected_error, () => validateControllerPayload(item.payload, item.sender_role));
+test("every outer message has an exhaustive transport-role matrix", () => {
+  assert.deepEqual(Object.keys(fixture.message_role_matrix), fixture.expected_message_types);
+  for (const type of CONTROLLER_MESSAGE_TYPES) {
+    const allowed = fixture.message_role_matrix[type];
+    assert.deepEqual(controllerAllowedRoles(type), allowed, type);
+    for (const role of ["A", "B", "relay"]) {
+      if (allowed.includes(role)) assert.deepEqual(validateControllerMessage(validMessage(type, role), role), validMessage(type, role), `${type}/${role}`);
+      else assertProtocolError("role_mismatch", () => validateControllerMessage(validMessage(type), role));
+    }
   }
 });
 
-test("finished receipt commitment has one canonical cross-language vector", () => {
+test("every decrypted payload is strict, role bound and lease bound", () => {
+  for (const type of CONTROLLER_PAYLOAD_TYPES) {
+    const payload = validPayload(type);
+    const role = ["capability_snapshot_request", "task_submit", "task_cancel", "permission_decision", "attachment_begin", "attachment_chunk", "attachment_commit", "artifact_index_request", "artifact_read_request", "session_snapshot_request", "journal_replay_request"].includes(type) ? "A" : "B";
+    assert.deepEqual(validateControllerPayload(payload, role, LEASE), payload, type);
+    assertProtocolError("role_mismatch", () => validateControllerPayload(payload, role === "A" ? "B" : "A", LEASE));
+    const stale = { ...payload, remote_control_generation: "generation-old" };
+    assertProtocolError("stale_context", () => validateControllerPayload(stale, role, LEASE));
+  }
+});
+
+test("task submission carries bounded input, exact statuses and the full temporary model package", () => {
+  assert.deepEqual(TASK_STATUSES, ["admitted", "running", "waiting_permission", "succeeded", "failed", "cancelled", "interrupted", "result_unknown"]);
+  assert.deepEqual(validateControllerPayload(fixture.task_submit_vectors.controlled, "A", LEASE), fixture.task_submit_vectors.controlled);
+  assert.deepEqual(validateControllerPayload(fixture.task_submit_vectors.temporary, "A", LEASE), fixture.task_submit_vectors.temporary);
+  const status = validPayload("task_status");
+  for (const task_status of TASK_STATUSES) validateControllerPayload({ ...status, task_status }, "B", LEASE);
+  assertProtocolError("invalid_enum", () => validateControllerPayload({ ...status, task_status: "completed" }, "B", LEASE));
+  assertProtocolError("invalid_field", () => validateControllerPayload({ ...fixture.task_submit_vectors.controlled, input: { text: "", attachment_ids: [], skill_ids: [] } }, "A", LEASE));
+  assertProtocolError("invalid_field", () => validateControllerPayload({ ...fixture.task_submit_vectors.controlled, input: { text: "x".repeat(MAX_TASK_INPUT_TEXT_BYTES + 1), attachment_ids: [], skill_ids: [] } }, "A", LEASE));
+  const nestedUnknown = structuredClone(fixture.task_submit_vectors.temporary);
+  nestedUnknown.temporary_model_package.primary.cookie = "forbidden";
+  assertProtocolError("unknown_field", () => validateControllerPayload(nestedUnknown, "A", LEASE));
+  const wrongBinding = structuredClone(fixture.task_submit_vectors.temporary);
+  wrongBinding.temporary_model_package.binding.task_id = "task-other";
+  assertProtocolError("stale_context", () => validateControllerPayload(wrongBinding, "A", LEASE));
+  const oauth = structuredClone(fixture.task_submit_vectors.temporary);
+  oauth.temporary_model_package.primary_credential.kind = "oauth";
+  assertProtocolError("invalid_enum", () => validateControllerPayload(oauth, "A", LEASE));
+  const oversizedPackage = structuredClone(fixture.task_submit_vectors.temporary);
+  oversizedPackage.temporary_model_package.primary_credential.secret = "x".repeat(65_536);
+  assertProtocolError("message_too_large", () => validateControllerPayload(oversizedPackage, "A", LEASE));
+});
+
+test("runtime capability and artifact metadata stay minimal, revision-bound and path-free", () => {
+  const capability = validPayload("capability_snapshot");
+  validateControllerPayload(capability, "B", LEASE);
+  const leakedCapability = structuredClone(capability);
+  leakedCapability.workspaces[0].path = "C:\\private";
+  assertProtocolError("unknown_field", () => validateControllerPayload(leakedCapability, "B", LEASE));
+  const artifact = validPayload("artifact_index");
+  validateControllerPayload(artifact, "B", LEASE);
+  const leakedArtifact = structuredClone(artifact);
+  leakedArtifact.artifacts[0].absolute_path = "C:\\private\\report.md";
+  assertProtocolError("unknown_field", () => validateControllerPayload(leakedArtifact, "B", LEASE));
+  assertProtocolError("invalid_enum", () => validateControllerPayload({ ...capability, modes: ["future"] }, "B", LEASE));
+});
+
+test("post-lease messages reject stale generation and epochs, including late frames", () => {
+  for (const type of ["controller_joined", "controller_liveness", "controller_resume_prepare", "controller_resume_activation_ack", "controller_resumed", "encrypted_frame", "controller_disconnect"]) {
+    const role = fixture.message_role_matrix[type][0];
+    const message = validMessage(type, role);
+    validateControllerMessage(message, role, LEASE);
+    for (const [field, stale] of [["remote_control_generation", "generation-old"], ["relay_epoch", "epoch-old"], ["lease_epoch", "0"]]) {
+      assertProtocolError("stale_context", () => validateControllerMessage({ ...message, [field]: stale }, role, LEASE));
+    }
+  }
+  assertProtocolError("role_mismatch", () => validateControllerMessage({ ...validMessage("encrypted_frame", "A"), payload_kind: "task_status" }, "A", LEASE));
+  assertProtocolError("missing_field", () => validateControllerMessage(validMessage("error"), "relay", LEASE));
+  validateControllerMessage({ ...validMessage("error"), ...LEASE }, "relay", LEASE);
+});
+
+test("JSON counters and timestamps use canonical decimal strings", () => {
+  const frame = validMessage("encrypted_frame", "A");
+  for (const invalid of [1, 1.0, 1e0, "01", "18446744073709551616", "-1"]) {
+    assertProtocolError("invalid_field", () => validateControllerMessage({ ...frame, frame_sequence: invalid }, "A"));
+  }
+  validateControllerMessage({ ...frame, frame_sequence: "18446744073709551615" }, "A");
+});
+
+test("capability and signed pairing transcript vectors are canonical and tamper evident", () => {
+  const capabilities = fixture.capability_vector;
+  const capabilityPreimage = Buffer.concat([Buffer.from("pinvou-controller-capabilities-v1", "ascii"), ...[...capabilities.capabilities].sort().map(lp)]);
+  assert.equal(capabilityPreimage.toString("hex"), capabilities.preimage_hex);
+  assert.equal(controllerCapabilityHash(capabilities.capabilities), capabilities.sha256);
+  const vector = fixture.transcript_vector;
+  const preimage = buildPairingTranscriptPreimage(vector.transcript);
+  assert.equal(preimage.toString("hex"), vector.preimage_hex);
+  assert.equal(createHash("sha256").update(preimage).digest("hex"), vector.sha256);
+  assert.equal(verify(null, preimage, fixturePublicKey(vector.public_key_b64), Buffer.from(vector.signature_b64, "base64")), true);
+  assert.equal(buildPairingTranscriptPreimage(structuredClone(vector.transcript)).toString("hex"), preimage.toString("hex"), "A and B reconstruct identical bytes");
+  const reserved = validMessage("controller_pairing_reserved");
+  assertProtocolError("invalid_field", () => validateControllerMessage({ ...reserved, transcript: { ...reserved.transcript, endpoint_id: "endpoint-tampered" } }, "relay"));
+  const tamperedPreimage = buildPairingTranscriptPreimage({ ...vector.transcript, endpoint_id: "endpoint-tampered" });
+  assert.equal(verify(null, tamperedPreimage, fixturePublicKey(vector.public_key_b64), Buffer.from(vector.signature_b64, "base64")), false);
+});
+
+test("finished receipt commitment is built independently from fields", () => {
   const vector = fixture.receipt_commitment_vector;
-  const preimage = Buffer.concat([
-    Buffer.from("pinvou-finished-receipt-commit-v1", "ascii"),
-    lengthPrefix(vector.relay_epoch),
-    lengthPrefix(vector.pairing_id),
-    lengthPrefix(vector.reservation_id),
-    lengthPrefix(vector.transcript_hash),
-    lengthPrefix(vector.sender_role),
-    lengthPrefix(Buffer.from(vector.secret_hex, "hex")),
-  ]);
-  assert.equal(preimage.length, 194);
+  const preimage = Buffer.concat([Buffer.from("pinvou-finished-receipt-commit-v1", "ascii"), lp(vector.relay_epoch), lp(vector.pairing_id), lp(vector.reservation_id), lp(vector.transcript_hash), lp(vector.sender_role), lp(Buffer.from(vector.secret_hex, "hex"))]);
   assert.equal(preimage.toString("hex"), vector.preimage_hex);
   assert.equal(createHash("sha256").update(preimage).digest("hex"), vector.commitment_hex);
 });
 
-test("wire and decrypted payload size limits use encoded bytes", () => {
-  assertProtocolError("invalid_type", () => validateControllerMessage(Buffer.from("binary"), "A"));
-
-  const message = fixture.valid_messages.find((item) => item.name === "capabilities_a").message;
-  const padded = `${JSON.stringify(message)}${" ".repeat(MAX_CONTROL_MESSAGE_BYTES)}`;
-  assertProtocolError("message_too_large", () => validateControllerMessage(padded, "A"));
-
-  const frame = structuredClone(fixture.valid_messages.find((item) => item.name === "encrypted_frame").message);
-  frame.ciphertext_b64 = Buffer.alloc(MAX_ENCRYPTED_FRAME_BYTES + 1).toString("base64");
-  frame.ciphertext_bytes = MAX_ENCRYPTED_FRAME_BYTES + 1;
-  assertProtocolError("invalid_field", () => validateControllerMessage(frame, "A"));
-
-  const payload = fixture.valid_payloads.find((item) => item.name === "task_cancel").payload;
-  const paddedPayload = `${JSON.stringify(payload)}${" ".repeat(MAX_DECRYPTED_PAYLOAD_BYTES)}`;
-  assertProtocolError("message_too_large", () => validateControllerPayload(paddedPayload, "A"));
+test("direct A-to-B liveness exposes routing only and binds strict inner data via AAD", () => {
+  const vector = fixture.direct_liveness_vector;
+  validateControllerMessage(vector.outer, "A", LEASE);
+  assert.deepEqual(Object.keys(vector.outer), ["v", "type", "connection_id", "controller_lease_id", "lease_epoch", "ciphertext_b64", "ciphertext_bytes"]);
+  const expected = { ...LEASE, liveness_epoch_a: "live-a-1", last_heartbeat_sequence_a: "1", challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE };
+  assert.deepEqual(validateControllerLivenessPayload(vector.inner, expected), vector.inner);
+  const aad = buildDirectLivenessAad(vector.aad_binding);
+  assert.equal(aad.toString("hex"), vector.aad_preimage_hex);
+  assert.equal(createHash("sha256").update(aad).digest("hex"), vector.aad_sha256);
+  assertProtocolError("replay", () => validateControllerLivenessPayload({ ...vector.inner, heartbeat_sequence_a: "1" }, expected));
+  assertProtocolError("stale_context", () => validateControllerLivenessPayload({ ...vector.inner, controller_lease_id: "lease-other" }, expected));
+  assertProtocolError("stale_context", () => validateControllerLivenessPayload({ ...vector.inner, remote_control_generation: "generation-old" }, expected));
+  assertProtocolError("unknown_field", () => validateControllerMessage({ ...vector.outer, challenge_id: "leak" }, "A"));
 });
 
-test("log projection excludes routing, pairing, key, token and content fields", () => {
-  const source = {
-    ...fixture.valid_messages.find((item) => item.name === "joined").message,
-    pairing_code: "2345678",
-    ciphertext_b64: "AQID",
-    credential_ref: "secret-ref",
-  };
-  assert.deepEqual(controllerLogProjection(source), { v: 1, type: "controller_joined", request_id: "req-9" });
-  const serialized = JSON.stringify(controllerLogProjection(source));
-  for (const forbidden of ["connection-1", "lease-1", "generation-1", "2345678", "AQID", "secret-ref"]) {
-    assert.equal(serialized.includes(forbidden), false);
+test("Relay liveness attestation vector binds time, generation, epoch, challenge and lease", () => {
+  const vector = fixture.attestation_vector;
+  const expectation = { ...LEASE, liveness_epoch_a: "live-a-1", challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE, last_attestation_sequence: "0" };
+  validateControllerMessage(vector.message, "relay", expectation);
+  const preimage = buildLivenessAttestationPreimage(vector.message);
+  assert.equal(preimage.toString("hex"), vector.preimage_hex);
+  assert.equal(createHash("sha256").update(preimage).digest("hex"), vector.sha256);
+  const key = fixturePublicKey(vector.public_key_b64);
+  assert.equal(verify(null, preimage, key, Buffer.from(vector.message.relay_signature_b64, "base64")), true);
+  for (const [field, value] of [["issued_at_relay", "9001"], ["remote_control_generation", "generation-old"], ["relay_epoch", "epoch-old"], ["controller_lease_id", "lease-other"], ["challenge_b64", "AQEBAQEBAQEBAQEBAQEBAQ=="]]) {
+    assert.equal(verify(null, buildLivenessAttestationPreimage({ ...vector.message, [field]: value }), key, Buffer.from(vector.message.relay_signature_b64, "base64")), false, field);
   }
+  assertProtocolError("replay", () => validateControllerMessage(vector.message, "relay", { ...expectation, last_attestation_sequence: "1" }));
+  assertProtocolError("stale_context", () => validateControllerMessage({ ...vector.message, challenge_id: "challenge-other" }, "relay", expectation));
+});
+
+test("strict validation covers missing, unknown, enums, version/capability combinations and sizes", () => {
+  for (const item of fixture.invalid_wire_examples) {
+    const validator = item.target === "message" ? validateControllerMessage : validateControllerPayload;
+    assertProtocolError(item.expected_error, () => validator(item.value, item.sender_role), item.name);
+  }
+  const claim = validMessage("controller_pairing_claim");
+  const { request_id: ignored, ...missing } = claim;
+  assertProtocolError("missing_field", () => validateControllerMessage(missing, "A"));
+  assertProtocolError("unknown_field", () => validateControllerMessage({ ...claim, future: true }, "A"));
+  assertProtocolError("unknown_message_type", () => validateControllerMessage({ v: 1, type: "future" }, "A"));
+  assertProtocolError("unsupported_version", () => validateControllerMessage({ ...validMessage("controller_capabilities", "A"), v: 2 }, "A"));
+  assertProtocolError("unsupported_version", () => validateControllerMessage({ ...validMessage("controller_capabilities", "A"), protocol_version: 2 }, "A"));
+  assertProtocolError("unsupported_capability", () => validateControllerMessage({ ...validMessage("controller_capabilities", "A"), capabilities: ["future_v2"] }, "A"));
+  assertProtocolError("role_mismatch", () => validateControllerMessage(validMessage("desktop_pairing_register"), "A"));
+  const message = validMessage("controller_capabilities", "A");
+  assertProtocolError("message_too_large", () => validateControllerMessage(`${JSON.stringify(message)}${" ".repeat(MAX_CONTROL_MESSAGE_BYTES)}`, "A"));
+  const frame = validMessage("encrypted_frame", "A");
+  frame.ciphertext_b64 = Buffer.alloc(MAX_ENCRYPTED_FRAME_BYTES + 1).toString("base64");
+  frame.ciphertext_bytes = String(MAX_ENCRYPTED_FRAME_BYTES + 1);
+  assertProtocolError("invalid_field", () => validateControllerMessage(frame, "A"));
+  const payload = validPayload("task_cancel");
+  assertProtocolError("message_too_large", () => validateControllerPayload(`${JSON.stringify(payload)}${" ".repeat(MAX_DECRYPTED_PAYLOAD_BYTES)}`, "A"));
+  assert.deepEqual(new Set(fixture.negative_contracts), new Set(["missing_field", "unknown_field", "overlong_text", "unknown_message_type", "unsupported_version", "unsupported_capability", "capability_version_mismatch", "invalid_enum", "cross_role", "noncanonical_integer", "integer_overflow", "stale_generation", "stale_relay_epoch", "stale_lease_epoch", "late_frame", "transcript_tamper", "liveness_tamper", "liveness_replay", "cross_lease", "attestation_tamper"]));
+});
+
+test("public pairing errors and real legacy WebUI v2 fixture stay stable", () => {
+  for (const cause of ["pairing_absent", "pairing_expired", "pairing_consumed", "pairing_revoked", "generation_stale"]) assert.equal(fixture.public_error_mappings[cause], "pairing_code_invalid");
+  assert.equal(fixture.public_error_mappings.generation_exhausted, "pairing_code_generation_failed");
+  assert.deepEqual(LEGACY_WEB_CONFLICT, fixture.legacy_web_v2.conflict);
+  assert.deepEqual(fixture.legacy_web_v2.client_join, { v: 2, type: "client_join", code: "ABC123" });
+  assert.equal(fixture.legacy_web_v2.conflict.message.message.length > 0, true);
+});
+
+test("log projection excludes routing, keys, tokens, model credentials and content", () => {
+  const source = { ...validMessage("controller_joined"), pairing_code: "2345678", ciphertext_b64: "AQID", credential_ref: "secret-ref", temporary_model_package: fixture.task_submit_vectors.temporary.temporary_model_package };
+  assert.deepEqual(controllerLogProjection(source), { v: 1, type: "controller_joined", request_id: "request-0001" });
+  const serialized = JSON.stringify(controllerLogProjection(source));
+  for (const forbidden of ["connection-0001", "lease-0001", "generation-0001", "2345678", "AQID", "secret-ref", "fixture-not-a-real-secret"]) assert.equal(serialized.includes(forbidden), false);
   const allSensitive = Object.fromEntries(CONTROLLER_SENSITIVE_FIELDS.map((field) => [field, `secret-${field}`]));
   assert.deepEqual(controllerLogProjection({ v: 1, type: "controller_joined", ...allSensitive }), { v: 1, type: "controller_joined" });
-  assert.deepEqual(controllerLogProjection({
-    v: 1,
-    type: "\nforged-log-line",
-    request_id: "x".repeat(129),
-    sender_role: "relay",
-    code: "future_error",
-  }), { v: 1 });
-});
-
-test("legacy WebUI conflict mapping remains the exact v2 envelope", () => {
-  assert.deepEqual(LEGACY_WEB_CONFLICT, fixture.legacy_web_conflict);
 });
 
 test("controller v1 schema is not wired into the live v2 Relay dispatcher", async () => {
