@@ -15,7 +15,7 @@ func TestApprovalDeliveryConcurrentAttemptCASIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	initial := observeApprovalDelivery(t, ctx, repository, binding, 41)
 	const workers = 8
 	type outcome struct {

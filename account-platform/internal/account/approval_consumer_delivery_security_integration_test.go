@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/migrations"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -17,51 +18,58 @@ func TestApprovalConsumerDeliveryClosedMappingAndPrivilegesIntegration(t *testin
 	defer cancel()
 
 	allowed := []struct {
-		durable, workload, command string
-		policy                     int64
+		durable, workload, command, serialization string
+		policy                                    int64
 	}{
-		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", 1},
-		{"billing-payment-provider-resume-executor-p2-v1", "billing-command-executor", "PAYMENT_PROVIDER_RESUME", 2},
-		{"billing-payment-product-resume-executor-p1-v1", "billing-command-executor", "PAYMENT_PRODUCT_RESUME", 1},
-		{"token-model-lifecycle-executor-v1", "token-command-executor", "TOKEN_MODEL_LIFECYCLE_CHANGE", 2},
-		{"token-catalog-rollback-executor-v1", "token-command-executor", "TOKEN_MODEL_CATALOG_ROLLBACK", 2},
-		{"token-credential-revoke-executor-v1", "token-command-executor", "TOKEN_CREDENTIAL_REVOKE", 1},
-		{"billing-command-executor-v1", "billing-command-executor", "WALLET_ADJUSTMENT", 1},
-		{"billing-command-executor-v1", "billing-command-executor", "PAYMENT_PROVIDER_RESUME", 2},
-		{"billing-command-executor-v1", "billing-command-executor", "PAYMENT_PRODUCT_RESUME", 1},
+		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", "APPROVAL_RFC8785_DECIMAL_V1", 1},
+		{"billing-payment-provider-resume-executor-p2-v1", "billing-command-executor", "PAYMENT_PROVIDER_RESUME", "APPROVAL_RFC8785_DECIMAL_V1", 2},
+		{"billing-payment-product-resume-executor-p1-v1", "billing-command-executor", "PAYMENT_PRODUCT_RESUME", "APPROVAL_RFC8785_DECIMAL_V1", 1},
+		{"token-model-lifecycle-executor-v1", "token-command-executor", "TOKEN_MODEL_LIFECYCLE_CHANGE", "LEGACY_TYPED_V1", 2},
+		{"token-model-lifecycle-executor-v1", "token-command-executor", "TOKEN_MODEL_LIFECYCLE_CHANGE", "APPROVAL_RFC8785_DECIMAL_V1", 2},
+		{"token-catalog-rollback-executor-v1", "token-command-executor", "TOKEN_MODEL_CATALOG_ROLLBACK", "LEGACY_TYPED_V1", 2},
+		{"token-catalog-rollback-executor-v1", "token-command-executor", "TOKEN_MODEL_CATALOG_ROLLBACK", "APPROVAL_RFC8785_DECIMAL_V1", 2},
+		{"token-credential-revoke-executor-v1", "token-command-executor", "TOKEN_CREDENTIAL_REVOKE", "LEGACY_TYPED_V1", 1},
+		{"token-credential-revoke-executor-v1", "token-command-executor", "TOKEN_CREDENTIAL_REVOKE", "APPROVAL_RFC8785_DECIMAL_V1", 1},
+		{"billing-command-executor-v1", "billing-command-executor", "WALLET_ADJUSTMENT", "LEGACY_TYPED_V1", 1},
+		{"billing-command-executor-v1", "billing-command-executor", "PAYMENT_PROVIDER_RESUME", "LEGACY_TYPED_V1", 2},
+		{"billing-command-executor-v1", "billing-command-executor", "PAYMENT_PRODUCT_RESUME", "LEGACY_TYPED_V1", 1},
 	}
 	for _, item := range allowed {
 		var valid bool
-		if err := db.adminPool.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_mapping_allows($1,$2,$3,$4,$2)`,
-			item.durable, item.workload, item.command, item.policy).Scan(&valid); err != nil || !valid {
-			t.Fatalf("allowed mapping %s/%s/%s/%d valid=%t err=%v", item.durable, item.workload, item.command, item.policy, valid, err)
+		if err := db.adminPool.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_mapping_allows($1,$2,$3,$4,$2,$5)`,
+			item.durable, item.workload, item.command, item.policy, item.serialization).Scan(&valid); err != nil || !valid {
+			t.Fatalf("allowed mapping %s/%s/%s/%d/%s valid=%t err=%v", item.durable, item.workload, item.command, item.policy, item.serialization, valid, err)
 		}
-		if err := db.adminPool.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_mapping_allows($1,$2,$3,$4+1,$2)`,
-			item.durable, item.workload, item.command, item.policy).Scan(&valid); err != nil || valid {
+		if err := db.adminPool.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_mapping_allows($1,$2,$3,$4+1,$2,$5)`,
+			item.durable, item.workload, item.command, item.policy, item.serialization).Scan(&valid); err != nil || valid {
 			t.Fatalf("cross-version mapping %s/%s/%s/%d valid=%t err=%v", item.durable, item.workload, item.command, item.policy, valid, err)
 		}
 	}
 	invalid := []struct {
-		durable  any
-		workload any
-		command  any
-		policy   any
-		executor any
+		durable       any
+		workload      any
+		command       any
+		policy        any
+		executor      any
+		serialization any
 	}{
-		{"billing-wallet-adjustment-executor-p1-v1", "token-command-executor", "WALLET_ADJUSTMENT", int64(1), "token-command-executor"},
-		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "PAYMENT_PRODUCT_RESUME", int64(1), "billing-command-executor"},
-		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "token-command-executor"},
-		{" billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "billing-command-executor"},
-		{nil, "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "billing-command-executor"},
-		{"billing-wallet-adjustment-executor-p1-v1", nil, "WALLET_ADJUSTMENT", int64(1), "billing-command-executor"},
-		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", nil, int64(1), "billing-command-executor"},
-		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", nil, "billing-command-executor"},
-		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), nil},
+		{"billing-wallet-adjustment-executor-p1-v1", "token-command-executor", "WALLET_ADJUSTMENT", int64(1), "token-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "PAYMENT_PRODUCT_RESUME", int64(1), "billing-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "token-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{" billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "billing-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{nil, "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "billing-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-wallet-adjustment-executor-p1-v1", nil, "WALLET_ADJUSTMENT", int64(1), "billing-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", nil, int64(1), "billing-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", nil, "billing-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), nil, "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-command-executor-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "billing-command-executor", "APPROVAL_RFC8785_DECIMAL_V1"},
+		{"billing-wallet-adjustment-executor-p1-v1", "billing-command-executor", "WALLET_ADJUSTMENT", int64(1), "billing-command-executor", "LEGACY_TYPED_V1"},
+		{"token-model-lifecycle-executor-v1", "token-command-executor", "TOKEN_MODEL_LIFECYCLE_CHANGE", int64(2), "token-command-executor", "UNKNOWN"},
 	}
 	for index, item := range invalid {
 		var valid bool
-		if err := db.adminPool.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_mapping_allows($1,$2,$3,$4,$5)`,
-			item.durable, item.workload, item.command, item.policy, item.executor).Scan(&valid); err != nil || valid {
+		if err := db.adminPool.QueryRow(ctx, `SELECT account_approval_authorization.authorization_consumer_mapping_allows($1,$2,$3,$4,$5,$6)`,
+			item.durable, item.workload, item.command, item.policy, item.executor, item.serialization).Scan(&valid); err != nil || valid {
 			t.Fatalf("invalid mapping %d valid=%t err=%v", index, valid, err)
 		}
 	}
@@ -95,8 +103,8 @@ func TestApprovalConsumerDeliveryClosedMappingAndPrivilegesIntegration(t *testin
     OR pg_catalog.has_function_privilege('account_approval_relay',p.oid,'EXECUTE'))
 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
 WHERE n.nspname='account_approval_authorization'
-	  AND p.proname IN ('authorization_consumer_mapping_allows','authorization_begin_action_allows','protect_approval_delivery_state',
-	    'reject_approval_delivery_state_removal','resolve_authorization_binding','validate_legacy_authorization_begin')`).Scan(&functions, &leaked); err != nil || functions != 6 || leaked != 0 {
+		  AND p.proname IN ('authorization_consumer_mapping_allows','authorization_begin_action_allows','protect_approval_delivery_state',
+	    'reject_approval_delivery_state_removal','resolve_authorization_binding','validate_legacy_authorization_begin')`).Scan(&functions, &leaked); err != nil || functions != 7 || leaked != 0 {
 		t.Fatalf("protected functions=%d leaked=%d err=%v", functions, leaked, err)
 	}
 }
@@ -112,7 +120,7 @@ func TestApprovalConsumerDeliveryDownForbiddenWithoutHistoryIntegration(t *testi
 	}
 	defer migrations.Unlock(ctx, connection.Conn())
 	err := migrations.DownOne(ctx, connection.Conn(), loaded)
-	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000055 approval consumer DLQ failure gate is forward-only; database down is forbidden" {
+	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000057 approval consumer serialization binding is forward-only; database down is forbidden" {
 		t.Fatalf("down state=%s message=%q err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
 	}
 	after := approvalConsumerHardeningSnapshot(t, ctx, db)
@@ -125,7 +133,7 @@ func TestApprovalConsumerDeliveryDownPreservesHistoryIntegration(t *testing.T) {
 	db, repository, relay, loaded := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	observeApprovalDelivery(t, ctx, repository, binding, 81)
 	var before string
 	if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(d)::text FROM account_approval_authorization.approval_delivery_states d
@@ -139,14 +147,14 @@ WHERE original_event_id=$1 AND durable=$2`, binding.EventID, binding.Durable).Sc
 	}
 	defer migrations.Unlock(ctx, connection.Conn())
 	err := migrations.DownOne(ctx, connection.Conn(), loaded)
-	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000055 approval consumer DLQ failure gate is forward-only; database down is forbidden" {
+	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000057 approval consumer serialization binding is forward-only; database down is forbidden" {
 		t.Fatalf("history down state=%s message=%q err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
 	}
 	var after string
 	var version int64
 	if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(d)::text,(SELECT max(version) FROM public.schema_migrations)
 FROM account_approval_authorization.approval_delivery_states d WHERE original_event_id=$1 AND durable=$2`,
-		binding.EventID, binding.Durable).Scan(&after, &version); err != nil || after != before || version != 55 {
+		binding.EventID, binding.Durable).Scan(&after, &version); err != nil || after != before || version != 57 {
 		t.Fatalf("refused down changed history=%t version=%d err=%v", after != before, version, err)
 	}
 	if afterHardening := approvalConsumerHardeningSnapshot(t, ctx, db); afterHardening != beforeHardening {

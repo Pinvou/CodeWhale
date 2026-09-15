@@ -16,7 +16,7 @@ func TestApprovalConsumerDeliveryStateReaderIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	state := observeApprovalDelivery(t, ctx, repository, binding, 71)
 	read, err := repository.ApprovalAuthorizationDeliveryState(ctx, binding.EventID, binding.Durable, binding.Workload)
 	if err != nil || read != state || read.LastErrorCode != nil {
@@ -115,7 +115,7 @@ func TestApprovalConsumerLegacyReadyResultRecoveryIntegration(t *testing.T) {
 	}
 }
 
-func TestApprovalConsumerStateReaderDownForbiddenIntegration(t *testing.T) {
+func TestApprovalConsumerSerializationBindingDownForbiddenIntegration(t *testing.T) {
 	db, _, _, loaded := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -125,8 +125,8 @@ func TestApprovalConsumerStateReaderDownForbiddenIntegration(t *testing.T) {
 	}
 	before := approvalConsumerSecuritySnapshot(t, ctx, db)
 	err := migrations.DownOne(ctx, connection.Conn(), loaded)
-	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000056 approval consumer state reader is forward-only; database down is forbidden" {
-		t.Fatalf("unexpected 000056 down result state=%s message=%s err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
+	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000057 approval consumer serialization binding is forward-only; database down is forbidden" {
+		t.Fatalf("unexpected 000057 down result state=%s message=%s err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
 	}
 	after := approvalConsumerSecuritySnapshot(t, ctx, db)
 	if before != after {

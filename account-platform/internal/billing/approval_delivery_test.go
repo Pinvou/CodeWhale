@@ -242,6 +242,99 @@ func TestAuthorizationCommandConsumerCrashBoundaries(t *testing.T) {
 	}
 }
 
+func TestAuthorizationCommandConsumerCrashBoundariesConvergeOnRedelivery(t *testing.T) {
+	tests := []struct {
+		name                  string
+		failureStage          string
+		persistedState        string
+		persistedDomainResult bool
+		wantFirstAck          int
+		wantFirstNAK          int
+		wantSecondAck         int
+		wantSecondNAK         int
+		wantDomainCalls       int
+	}{
+		{name: "begin-not-persisted", failureStage: "begin", persistedState: "READY", wantFirstNAK: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "begin-response-lost", failureStage: "begin", persistedState: "READY", wantFirstNAK: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "grant-not-persisted", failureStage: "grant", persistedState: "READY", wantFirstNAK: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "grant-response-lost", failureStage: "grant", persistedState: "DOMAIN_INFLIGHT", wantFirstNAK: 1, wantSecondNAK: 1},
+		{name: "complete-response-lost", failureStage: "complete", persistedState: "DOMAIN_INFLIGHT", persistedDomainResult: true, wantFirstNAK: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "result-not-persisted", failureStage: "result", persistedState: "DOMAIN_INFLIGHT", persistedDomainResult: true, wantFirstNAK: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "result-response-lost", failureStage: "result", persistedState: "RESULT_CONFIRMED", persistedDomainResult: true, wantFirstNAK: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "double-ack-unconfirmed", failureStage: "ack", persistedState: "RESULT_CONFIRMED", persistedDomainResult: true, wantFirstAck: 1, wantFirstNAK: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "terminal-not-persisted", failureStage: "terminal", persistedState: "RESULT_CONFIRMED", persistedDomainResult: true, wantFirstAck: 1, wantSecondAck: 1, wantDomainCalls: 1},
+		{name: "terminal-response-lost", failureStage: "terminal", persistedState: "TERMINAL_CONFIRMED", persistedDomainResult: true, wantFirstAck: 1, wantSecondAck: 1, wantDomainCalls: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			consumer, account, domain, first := authorizationConsumerFixture(t, "READY", 0)
+			domain.attempt = authorizationDomainAttempt{Result: authorizationDomainResult{DomainResult: json.RawMessage(`{"ok":true}`)}}
+			if test.failureStage == "ack" {
+				first.errAt = "ack"
+			} else {
+				account.errAt = test.failureStage
+			}
+			consumer.Handle(context.Background(), first)
+			if first.ack != test.wantFirstAck || first.nak != test.wantFirstNAK {
+				t.Fatalf("first delivery ack=%d nak=%d", first.ack, first.nak)
+			}
+
+			account.errAt = ""
+			account.order = nil
+			account.state = ApprovalAuthorizationDeliveryState{DomainAttemptCount: 1, State: test.persistedState, Version: 10}
+			account.read = account.state
+			domain.found = test.persistedDomainResult && test.persistedState == "DOMAIN_INFLIGHT"
+			domain.result = authorizationDomainResult{DomainResult: json.RawMessage(`{"ok":true}`)}
+			second := &authorizationDeliveryStub{raw: first.raw, id: first.id, meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 42, NumDelivered: 2}, order: &account.order}
+			consumer.Handle(context.Background(), second)
+			if second.ack != test.wantSecondAck || second.nak != test.wantSecondNAK || domain.calls != test.wantDomainCalls {
+				t.Fatalf("redelivery did not converge ack=%d nak=%d domain=%d order=%v", second.ack, second.nak, domain.calls, account.order)
+			}
+		})
+	}
+}
+
+func TestAuthorizationCommandConsumerDLQCrashBoundariesConvergeOnRedelivery(t *testing.T) {
+	for _, test := range []struct {
+		name                                string
+		failureStage, persistedState        string
+		firstAck, firstNAK, firstPublish    int
+		secondAck, secondNAK, secondPublish int
+	}{
+		{name: "publish-not-confirmed", failureStage: "publish", persistedState: "DOMAIN_INFLIGHT", firstNAK: 1, firstPublish: 1, secondAck: 1, secondPublish: 1},
+		{name: "dlq-not-persisted", failureStage: "dlq", persistedState: "DOMAIN_INFLIGHT", firstNAK: 1, firstPublish: 1, secondAck: 1, secondPublish: 1},
+		{name: "dlq-response-lost", failureStage: "dlq", persistedState: "DLQ_PUBLISHED_ACK_PENDING", firstNAK: 1, firstPublish: 1, secondAck: 1},
+		{name: "double-ack-unconfirmed", failureStage: "ack", persistedState: "DLQ_PUBLISHED_ACK_PENDING", firstAck: 1, firstNAK: 1, firstPublish: 1, secondAck: 1},
+		{name: "terminal-not-persisted", failureStage: "terminal", persistedState: "DLQ_PUBLISHED_ACK_PENDING", firstAck: 1, firstPublish: 1, secondAck: 1},
+		{name: "terminal-response-lost", failureStage: "terminal", persistedState: "TERMINAL_CONFIRMED", firstAck: 1, firstPublish: 1, secondAck: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			consumer, account, domain, first := authorizationConsumerFixture(t, "DOMAIN_INFLIGHT", approvalconsumer.MaxDomainAttempts)
+			lastError := "DOMAIN_PRECONDITION_REJECTED"
+			account.read = ApprovalAuthorizationDeliveryState{DomainAttemptCount: approvalconsumer.MaxDomainAttempts, State: "DOMAIN_INFLIGHT", Version: account.state.Version, LastErrorCode: &lastError}
+			if test.failureStage == "publish" || test.failureStage == "ack" {
+				first.errAt = test.failureStage
+			} else {
+				account.errAt = test.failureStage
+			}
+			consumer.Handle(context.Background(), first)
+			if first.ack != test.firstAck || first.nak != test.firstNAK || first.publish != test.firstPublish || domain.calls != 0 {
+				t.Fatalf("first delivery ack=%d nak=%d publish=%d domain=%d", first.ack, first.nak, first.publish, domain.calls)
+			}
+
+			account.errAt = ""
+			account.order = nil
+			account.state = ApprovalAuthorizationDeliveryState{DomainAttemptCount: approvalconsumer.MaxDomainAttempts, State: test.persistedState, Version: 10, LastErrorCode: &lastError}
+			account.read = account.state
+			second := &authorizationDeliveryStub{raw: first.raw, id: first.id, meta: events.AuthorizationDeliveryMetadata{Stream: "ACCOUNT_PLATFORM", StreamSequence: 42, NumDelivered: 2}, order: &account.order}
+			consumer.Handle(context.Background(), second)
+			if second.ack != test.secondAck || second.nak != test.secondNAK || second.publish != test.secondPublish || domain.calls != 0 {
+				t.Fatalf("redelivery did not converge ack=%d nak=%d publish=%d domain=%d order=%v", second.ack, second.nak, second.publish, domain.calls, account.order)
+			}
+		})
+	}
+}
+
 func TestAuthorizationCommandConsumerRejectsMalformedTerminalCASAfterAcknowledgement(t *testing.T) {
 	consumer, account, domain, delivery := authorizationConsumerFixture(t, "RESULT_CONFIRMED", 1)
 	account.terminalState = "READY"
@@ -268,6 +361,67 @@ func TestAuthorizationCommandConsumerClosedDurableRegistration(t *testing.T) {
 		if consumer, err := NewAuthorizationCommandConsumer(&Service{}, account, durable); err == nil || consumer != nil {
 			t.Fatalf("non-Billing authorization durable %q was accepted", durable)
 		}
+	}
+}
+
+func TestAuthorizationCommandConsumerBindsDurableToSerialization(t *testing.T) {
+	consumer, _, _, _ := authorizationConsumerFixture(t, "READY", 0)
+	legacy := consumer
+	legacyBinding := legacy.account.(*authorizationAccountStub).binding
+	if !legacy.validBinding(legacyBinding) {
+		t.Fatal("legacy durable rejected its legacy serialization")
+	}
+	legacyBinding.SerializationVersion = approvalencoding.ApprovalSerializationVersion
+	if legacy.validBinding(legacyBinding) {
+		t.Fatal("legacy durable accepted approval serialization")
+	}
+
+	for _, descriptor := range approvalconsumer.BillingCommands() {
+		binding := legacyBinding
+		binding.Durable = descriptor.Durable
+		binding.CommandType = descriptor.CommandType
+		binding.PolicyVersion = descriptor.PolicyVersion
+		binding.SerializationVersion = approvalencoding.ApprovalSerializationVersion
+		candidate := &AuthorizationCommandConsumer{account: legacy.account, domain: legacy.domain, durable: descriptor.Durable, workload: descriptor.Workload}
+		if !candidate.validBinding(binding) {
+			t.Fatalf("new durable %s rejected approval serialization", descriptor.Durable)
+		}
+		binding.SerializationVersion = approvalencoding.LegacySerializationVersion
+		if candidate.validBinding(binding) {
+			t.Fatalf("new durable %s accepted legacy serialization", descriptor.Durable)
+		}
+	}
+}
+
+func TestAuthorizationCommandConsumerRejectsCrossedSerializationBeforeDomain(t *testing.T) {
+	for _, test := range []struct {
+		name, durable, serialization string
+	}{
+		{name: "legacy-durable-approval-wire", durable: approvalconsumer.LegacyBilling().Durable, serialization: approvalencoding.ApprovalSerializationVersion},
+		{name: "dedicated-durable-legacy-wire", durable: "billing-wallet-adjustment-executor-p1-v1", serialization: approvalencoding.LegacySerializationVersion},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			consumer, account, domain, delivery := authorizationConsumerFixture(t, "READY", 0)
+			consumer.durable = test.durable
+			account.binding.Durable = test.durable
+			account.binding.SerializationVersion = test.serialization
+			consumer.Handle(context.Background(), delivery)
+			if domain.calls != 0 || account.begin != 0 || account.grant != 0 || delivery.ack != 0 || delivery.nak != 1 || !equalStrings(account.order, []string{"resolve", "nak"}) {
+				t.Fatalf("crossed serialization reached execution order=%v domain=%d begin=%d grant=%d ack=%d nak=%d", account.order, domain.calls, account.begin, account.grant, delivery.ack, delivery.nak)
+			}
+		})
+	}
+}
+
+func TestSameRawJSONPreservesNumberPrecision(t *testing.T) {
+	if !sameRawJSON(json.RawMessage(`{"a":1,"b":{"c":1.0}}`), json.RawMessage(`{"b":{"c":1e0},"a":1.00}`)) {
+		t.Fatal("equivalent JSON objects were not equal")
+	}
+	if sameRawJSON(json.RawMessage(`{"version":9007199254740992}`), json.RawMessage(`{"version":9007199254740993}`)) {
+		t.Fatal("distinct integers above the float64 exact range were equal")
+	}
+	if sameRawJSON(json.RawMessage(`{"ok":true} trailing`), json.RawMessage(`{"ok":true}`)) {
+		t.Fatal("trailing JSON input was accepted")
 	}
 }
 

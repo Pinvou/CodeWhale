@@ -1,12 +1,15 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"math/big"
 	"strings"
 	"time"
 
@@ -249,6 +252,9 @@ func (consumer *AuthorizationCommandConsumer) validBinding(binding ApprovalAutho
 		return false
 	}
 	if descriptor.StartSource == approvalconsumer.StartLegacySharedPreFenceCompatibility {
+		if binding.SerializationVersion != approvalencoding.LegacySerializationVersion {
+			return false
+		}
 		for _, candidate := range approvalconsumer.BillingCommands() {
 			if candidate.CommandType == binding.CommandType && candidate.PolicyVersion == binding.PolicyVersion && candidate.ExecutorIdentity == binding.ExecutorIdentity {
 				return true
@@ -256,7 +262,8 @@ func (consumer *AuthorizationCommandConsumer) validBinding(binding ApprovalAutho
 		}
 		return false
 	}
-	return approvalconsumer.Match(descriptor, binding.CommandType, binding.PolicyVersion, binding.ExecutorIdentity)
+	return binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion &&
+		approvalconsumer.Match(descriptor, binding.CommandType, binding.PolicyVersion, binding.ExecutorIdentity)
 }
 
 func (consumer *AuthorizationCommandConsumer) validDecoded(binding ApprovalAuthorizationBinding, decoded approvalencoding.DecodedAuthorizationEvent, raw []byte) bool {
@@ -327,12 +334,66 @@ func validAuthorizationFailureCode(code string) bool {
 
 func sameRawJSON(left, right json.RawMessage) bool {
 	var leftValue, rightValue any
-	if json.Unmarshal(left, &leftValue) != nil || json.Unmarshal(right, &rightValue) != nil {
+	if !decodeSingleJSONValue(left, &leftValue) || !decodeSingleJSONValue(right, &rightValue) {
 		return false
 	}
-	leftCanonical, _ := json.Marshal(leftValue)
-	rightCanonical, _ := json.Marshal(rightValue)
-	return string(leftCanonical) == string(rightCanonical)
+	return equalJSONValue(leftValue, rightValue)
+}
+
+func decodeSingleJSONValue(raw json.RawMessage, destination *any) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(destination); err != nil {
+		return false
+	}
+	var trailing any
+	return errors.Is(decoder.Decode(&trailing), io.EOF)
+}
+
+func equalJSONValue(left, right any) bool {
+	switch typedLeft := left.(type) {
+	case nil:
+		return right == nil
+	case bool:
+		typedRight, ok := right.(bool)
+		return ok && typedLeft == typedRight
+	case string:
+		typedRight, ok := right.(string)
+		return ok && typedLeft == typedRight
+	case json.Number:
+		typedRight, ok := right.(json.Number)
+		if !ok {
+			return false
+		}
+		leftNumber, leftOK := new(big.Rat).SetString(typedLeft.String())
+		rightNumber, rightOK := new(big.Rat).SetString(typedRight.String())
+		return leftOK && rightOK && leftNumber.Cmp(rightNumber) == 0
+	case []any:
+		typedRight, ok := right.([]any)
+		if !ok || len(typedLeft) != len(typedRight) {
+			return false
+		}
+		for index := range typedLeft {
+			if !equalJSONValue(typedLeft[index], typedRight[index]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		typedRight, ok := right.(map[string]any)
+		if !ok || len(typedLeft) != len(typedRight) {
+			return false
+		}
+		for key, value := range typedLeft {
+			other, exists := typedRight[key]
+			if !exists || !equalJSONValue(value, other) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func jsonOrEmpty(value json.RawMessage) json.RawMessage {

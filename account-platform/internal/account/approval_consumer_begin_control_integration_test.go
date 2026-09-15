@@ -56,7 +56,7 @@ func TestApprovalConsumerBeginQuiescingFencedExistingOnlyIntegration(t *testing.
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	state := observeApprovalDelivery(t, ctx, repository, binding, approvalconsumer.Sequence(61))
 	state, err := repository.GrantApprovalAuthorizationDomainAttempt(ctx, binding.EventID, binding.Durable, binding.Workload, state.Version)
 	if err != nil {
@@ -87,7 +87,7 @@ func TestApprovalConsumerLegacyBeginControlIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	critical, financial := approvalExecutionSnapshots(t, ctx, db, binding.ApprovalRequestID)
 	setApprovalConsumerControl(t, ctx, db, "QUIESCING", "RUNNING", 1, false, 2)
 	setApprovalConsumerRelay(t, ctx, db, "FENCED")
@@ -123,7 +123,7 @@ func TestApprovalConsumerBeginOldEpochCannotReviveIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	state := observeApprovalDelivery(t, ctx, repository, binding, approvalconsumer.Sequence(62))
 	if _, err := repository.GrantApprovalAuthorizationDomainAttempt(ctx, binding.EventID, binding.Durable, binding.Workload, state.Version); err != nil {
 		t.Fatal(err)

@@ -73,7 +73,7 @@ func TestApprovalAuthorizationBindingBeginIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	state := observeApprovalDelivery(t, ctx, repository, binding, 41)
 	if state != (ApprovalDeliveryState{State: "READY", Version: 1}) {
 		t.Fatalf("initial state=%+v", state)
@@ -131,7 +131,7 @@ func TestBillingApprovalDeliveryAttemptLimitIntegration(t *testing.T) {
 	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	state := observeApprovalDelivery(t, ctx, repository, binding, 51)
 	for attempt := int16(1); attempt <= 12; attempt++ {
 		var err error
@@ -196,7 +196,7 @@ func TestApprovalDeliverySequenceUint64Integration(t *testing.T) {
 		approvalconsumer.Sequence(9223372036854775808),
 		approvalconsumer.Sequence(^uint64(0)),
 	} {
-		binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+		binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 		state := observeApprovalDelivery(t, ctx, repository, binding, sequence)
 		if state != (ApprovalDeliveryState{State: "READY", Version: 1}) {
 			t.Fatalf("sequence=%s state=%+v", sequence.String(), state)
@@ -208,7 +208,7 @@ WHERE original_event_id=$1 AND durable=$2`, binding.EventID, binding.Durable).Sc
 		}
 	}
 
-	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	for _, invalid := range []string{"0", "-1", "1.5", "18446744073709551616", "NaN", "Infinity"} {
 		_, err := db.runtimePool.Exec(ctx, `SELECT * FROM public.observe_approval_authorization_delivery(
 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::NUMERIC,$12,$13,$14)`,
@@ -225,7 +225,7 @@ WHERE original_event_id=$1 AND durable=$2`, binding.EventID, binding.Durable).Sc
 		t.Fatalf("invalid sequences changed state rows=%d err=%v", rows, err)
 	}
 
-	dlqBinding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	dlqBinding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, approvalconsumer.LegacyBilling().Durable)
 	dlqState := observeApprovalDelivery(t, ctx, repository, dlqBinding, approvalconsumer.Sequence(91))
 	dlqMessageID := dlqBinding.EventID.String() + ":" + dlqBinding.Durable + ":dead-letter"
 	maximum := approvalconsumer.Sequence(^uint64(0))
