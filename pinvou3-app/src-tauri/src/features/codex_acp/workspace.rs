@@ -534,6 +534,7 @@ struct DiffFingerprint {
     index_modified: u128,
     head_ref_size: u64,
     head_ref_modified: u128,
+    head_ref_hash: u64,
 }
 
 #[derive(Clone)]
@@ -593,6 +594,7 @@ fn diff_fingerprint(root: &Path, relative: &str) -> DiffFingerprint {
         index_modified: 0,
         head_ref_size: 0,
         head_ref_modified: 0,
+        head_ref_hash: 0,
     };
     if let Ok(metadata) = root.join(relative).metadata() {
         fingerprint.file_size = metadata.len();
@@ -611,6 +613,9 @@ fn diff_fingerprint(root: &Path, relative: &str) -> DiffFingerprint {
         if let Ok(metadata) = head_ref.metadata() {
             fingerprint.head_ref_size = metadata.len();
             fingerprint.head_ref_modified = modified_nanos(&metadata);
+            // 内容哈希兜底:reset --soft / update-ref 与上次指纹落在同一时间戳
+            // 粒度内时 mtime 不变,只有内容(SHA 改写)才能正确失效缓存。
+            fingerprint.head_ref_hash = sample_head_tail_hash(&head_ref, metadata.len());
         }
     }
     fingerprint
@@ -1455,7 +1460,8 @@ mod tests {
         // git diff --cached 比较 index 与 HEAD；reset --soft / update-ref 只改写 HEAD
         // 指向的 ref 文件、不更新 .git/index 或工作区——指纹必须覆盖此场景，否则缓存
         // 会返回陈旧差异。.git/HEAD 多为 symref（ref: refs/heads/<branch>），目标文件
-        // 是 41 字节的 SHA（不同提交同尺寸），故此处以同尺寸重写验证 mtime 失效。
+        // 是 41 字节的 SHA（不同提交同尺寸），且两次改写可能落在同一 mtime 粒度内，
+        // 故此处以同尺寸同 mtime 重写验证内容哈希失效。
         let root = TestDir::new("diff-fingerprint-head");
         fs::create_dir_all(root.path().join(".git/refs/heads")).unwrap();
         let head_ref = root.path().join(".git/refs/heads/main");
