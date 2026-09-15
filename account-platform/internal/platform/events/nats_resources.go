@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -27,6 +28,17 @@ type NATSConfig struct {
 	// RequireExplicitAuthentication forbids falling back to the process-wide
 	// generic relay identity. It is used by the dedicated authorization relay.
 	RequireExplicitAuthentication bool
+	// ApprovalConsumerResources is a closed, verified resource/receipt binding.
+	// A nil binding preserves all generic broker behavior and cannot start a
+	// Q+1 Billing authorization consumer.
+	ApprovalConsumerResources *ApprovalConsumerResourceBinding
+}
+
+// ApprovalConsumerResourceBinding can only be populated by the closed
+// manifest/receipt reader in this package. The maps are intentionally private
+// so callers cannot inject an arbitrary start sequence.
+type ApprovalConsumerResourceBinding struct {
+	startSequences map[string]uint64
 }
 
 func (c NATSConfig) provisioned() (bool, error) {
@@ -61,6 +73,84 @@ func eventConsumerConfig(durable, filter string, retained bool) jetstream.Consum
 	return jetstream.ConsumerConfig{Name: durable, Durable: durable, FilterSubject: filter,
 		AckPolicy: jetstream.AckExplicitPolicy, AckWait: 30 * time.Second, MaxDeliver: maxDeliver,
 		BackOff: []time.Duration{time.Second, 2 * time.Second, 5 * time.Second, 10 * time.Second, 30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute}}
+}
+
+func authorizationConsumerConfig(descriptor approvalconsumer.Descriptor, startSequence uint64) (jetstream.ConsumerConfig, error) {
+	registered, ok := approvalconsumer.LookupDurable(descriptor.Durable)
+	if !ok || registered != descriptor {
+		return jetstream.ConsumerConfig{}, ErrNATSResources
+	}
+	config := jetstream.ConsumerConfig{
+		Name: descriptor.Durable, Durable: descriptor.Durable,
+		FilterSubject: approvalconsumer.AuthorizationSubject,
+		AckPolicy:     jetstream.AckExplicitPolicy, AckWait: approvalconsumer.AckWaitSeconds * time.Second,
+		MaxDeliver: -1, MaxAckPending: approvalconsumer.MaxAckPending,
+	}
+	if descriptor.StartSource == approvalconsumer.StartQuiescingHighWatermarkPlusOne {
+		// An empty stream has Q=0, so its trusted Q+1 start is exactly 1.
+		if startSequence == 0 {
+			return jetstream.ConsumerConfig{}, ErrNATSResources
+		}
+		config.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+		config.OptStartSeq = startSequence
+	} else if startSequence != 0 {
+		return jetstream.ConsumerConfig{}, ErrNATSResources
+	}
+	return config, nil
+}
+
+func validAuthorizationConsumerConfig(actual, expected jetstream.ConsumerConfig) bool {
+	actual.Metadata = withoutNATSServerMetadata(actual.Metadata)
+	if actual.MaxWaiting == 512 {
+		actual.MaxWaiting = 0
+	}
+	if actual.Replicas == 1 {
+		actual.Replicas = 0
+	}
+	// Unlike validConsumerConfig, never normalize AckWait from BackOff[0]
+	// and never normalize MaxAckPending. Both are frozen authorization facts.
+	return reflect.DeepEqual(actual, expected)
+}
+
+func (broker *NATSBroker) authorizationConsumer(ctx context.Context, durable string) (jetstream.Consumer, bool, error) {
+	if broker == nil || broker.stream == nil || broker.publishOnly || !broker.provisioned {
+		return nil, false, ErrNATSResources
+	}
+	descriptor, ok := approvalconsumer.LookupDurable(durable)
+	if !ok || descriptor.Workload != broker.clientName {
+		return nil, false, ErrNATSResources
+	}
+	canDeadLetter := descriptor.Workload == approvalconsumer.BillingWorkload
+	startSequence := uint64(0)
+	if descriptor.StartSource == approvalconsumer.StartQuiescingHighWatermarkPlusOne {
+		if broker.approvalResources == nil {
+			return nil, false, ErrNATSResources
+		}
+		startSequence = broker.approvalResources.startSequences[durable]
+	}
+	expected, err := authorizationConsumerConfig(descriptor, startSequence)
+	if err != nil {
+		return nil, false, err
+	}
+	consumer, err := broker.stream.Consumer(ctx, platformStream, durable)
+	if err != nil {
+		return nil, false, ErrNATSResources
+	}
+	actual := consumer.CachedInfo().Config
+	if validAuthorizationConsumerConfig(actual, expected) {
+		return consumer, canDeadLetter, nil
+	}
+	// Existing Token and shared Billing consumers are accepted only as an
+	// explicitly transitional resource shape. This keeps the new binary usable
+	// before GSA-38 performs the in-place no-BackOff/MaxDeliver convergence;
+	// it is not final resource readiness.
+	if descriptor.StartSource == approvalconsumer.StartExisting || descriptor.StartSource == approvalconsumer.StartLegacySharedPreFenceCompatibility {
+		retained := descriptor.StartSource == approvalconsumer.StartExisting
+		if validConsumerConfig(actual, eventConsumerConfig(durable, approvalconsumer.AuthorizationSubject, retained)) {
+			return consumer, canDeadLetter, nil
+		}
+	}
+	return nil, false, ErrNATSResources
 }
 
 func provisionedConsumers() []jetstream.ConsumerConfig {

@@ -12,11 +12,12 @@ import (
 )
 
 type NATSBroker struct {
-	connection  *nats.Conn
-	stream      jetstream.JetStream
-	provisioned bool
-	publishOnly bool
-	clientName  string
+	connection        *nats.Conn
+	stream            jetstream.JetStream
+	provisioned       bool
+	publishOnly       bool
+	clientName        string
+	approvalResources *ApprovalConsumerResourceBinding
 }
 
 func NewNATSBroker(ctx context.Context, rawURL, clientName string, configuration ...NATSConfig) (*NATSBroker, error) {
@@ -47,7 +48,7 @@ func NewNATSBroker(ctx context.Context, rawURL, clientName string, configuration
 		connection.Close()
 		return nil, ErrNATSResources
 	}
-	return &NATSBroker{connection: connection, stream: stream, provisioned: provisioned, clientName: clientName}, nil
+	return &NATSBroker{connection: connection, stream: stream, provisioned: provisioned, clientName: clientName, approvalResources: cfg.ApprovalConsumerResources}, nil
 }
 
 // NewNATSPublishOnlyBroker creates a broker for a subject-scoped publisher
