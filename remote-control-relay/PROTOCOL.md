@@ -330,16 +330,24 @@ identity, public key, algorithm or capability list is `invalid_message`.
 
 `controller_joined` is the sole `lease_install_messages` entry and never
 requires a pre-existing lease. It is not accepted by the general runtime
-validator: callers must use a `LeaseInstallValidationContext` populated from
-the authenticated claim socket and previously verified signed reservation /
-handshake state, never from fields copied out of the untrusted
-`controller_joined` candidate. The context freezes `request_id`, expected
-`pairing_id`, `reservation_id`, `remote_control_generation`, `relay_epoch`,
-`transcript_hash`, expected signed `controller_connection_identity`, and
-the exact canonical `negotiated_capabilities + capability_hash` copied from the
-already verified transcript. The context constructor recomputes the capability
-hash and requires the list, order, and digest to match exactly; deletion,
-addition, replacement, duplication, or reordering is rejected. The
+validator. First, the peer passes the complete raw
+`controller_pairing_reserved` envelope, its pinned `relay_signing_key_id`, and
+the corresponding trusted Relay Ed25519 public key to the transcript verifier.
+That verifier validates the strict envelope and transcript, reconstructs and
+hashes the canonical preimage, compares the envelope `transcript_hash`, and
+verifies the Relay signature before returning an opaque `VerifiedTranscript`.
+The Rust protocol model injects the platform Ed25519 adapter as a fail-closed
+callback already bound to that pinned key ID; the callback receives only the
+canonical preimage and decoded 64-byte signature.
+Its constructor and fields are private to the protocol module (a module-private
+brand/weak map in JS and private fields in Rust), so ordinary objects cannot
+impersonate it. `LeaseInstallValidationContext` accepts only that verified value
+and derives `request_id`, expected `pairing_id`, `reservation_id`,
+`remote_control_generation`, `relay_epoch`, `transcript_hash`, expected signed
+`controller_connection_identity`, and the exact canonical
+`negotiated_capabilities + capability_hash` from it. It accepts no independently
+overridable copy of those fields. Deleting, adding, replacing, duplicating, or
+reordering capabilities therefore requires a fresh valid Relay signature. The
 Relay result must echo all seven bindings and requires `pairing_v1`; any
 mismatch is `stale_context`. Only after all bindings and the exact result schema
 validate does the validator return a new immutable `LeaseContext` containing
@@ -414,11 +422,14 @@ Ed25519. The envelope repeats and validates reservation/generation/Relay
 context, `transcript_hash`, `relay_signing_key_id`, algorithm and signature.
 
 The fixed transcript vector is fully listed in the shared fixture. It has
-SHA-256 `c78ffff84687ec43bf1b7463df7a7c31cd4ae9a8d58520014d6dc7ae994c40ec`,
-raw public key `HW3xPOxTtGxa5yr5ESVes1hoAnuyIDd4cLuLZ2l1CCk=`, and signature
-`f+CI9aBrxnQBwAC3SmljCihCrbo4nfyMjkBa6L7HhpJQaVtnNy/FEZE98wIZsgQBmi2tIg45BHKlEf4D3kjpCw==`.
+SHA-256 `c98cbd16e78bd50dd49ef2ad0cbdff7e3fa91ec7e33d2e697f002ca7cb408163`,
+raw public key `Z/Wupu8RK99T+q0LnTHaE3Iny4RP1NDVkupAQaGUysE=`, and signature
+`LtNLmSZGf4nRBQEnJSYocA//IlE+ioVLuadCGEBBQoY63U1IivepwONIwvyYXlPJqTz0u2hDbzZqQX3Wq2WQCw==`.
 A and B independently reconstruct the same bytes and verify every field before
-key derivation. Receipt commitment remains the independent sender-secret LP
+key derivation. Shared negative inputs include capability deletion/replacement
+with a synchronously recomputed capability hash but the original transcript
+authentication, plus a full-transcript signature mutation. Receipt commitment
+remains the independent sender-secret LP
 algorithm below; Rust constructs it from individual fields rather than hashing
 a fixture-supplied preimage.
 
@@ -479,7 +490,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`3784ee2f066ebd2d66e7f72bc6a6727a210a329dbefdada60775b3014e93c004`.
+`f7c8398ca2169d0f43acc11c5c19f7d7852fb10cee254298ee309f9f796c05de`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
