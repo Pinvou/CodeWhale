@@ -659,10 +659,16 @@ class CiGatePolicyTests(unittest.TestCase):
         # 与 release 构建同基线(ubuntu-22.04 / ubuntu-22.04-arm)。发布二进制
         # 链接构建机的 glibc,测试/校验必须跑在发布同款系统上;镜像升级必须
         # 全仓一次性协调进行(连同 glibc 下限守卫),禁止 ubuntu-latest 等
-        # 滚动镜像或个别 job 单独换版。
+        # 滚动镜像或个别 job 单独换版。剥掉 YAML 注释再扫:注释里的版本
+        # 记述(如迁移说明)不应触发守卫,守卫只管真实 runs-on。
         allowed = {"ubuntu-22.04", "ubuntu-22.04-arm"}
-        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
-            text = workflow.read_text(encoding="utf-8")
+        workflows = sorted(
+            list((ROOT / ".github/workflows").glob("*.yml"))
+            + list((ROOT / ".github/workflows").glob("*.yaml"))
+        )
+        self.assertTrue(workflows, "no workflow files found under .github/workflows")
+        for workflow in workflows:
+            text = _without_yaml_comments(workflow.read_text(encoding="utf-8"))
             self.assertNotIn(
                 "ubuntu-latest",
                 text,
