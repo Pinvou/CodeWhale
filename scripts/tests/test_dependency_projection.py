@@ -23,6 +23,7 @@ class ProjectionTests(unittest.TestCase):
     def test_postgres_bootstrap_mapping_is_explicit_and_complete(self):
         expected = {"ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
                     "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD",
+                    "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD",
                     "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
                     "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD"}
         self.assertEqual(set(PROJECT.POSTGRES_BOOTSTRAP_PASSWORD_NAMES), expected)

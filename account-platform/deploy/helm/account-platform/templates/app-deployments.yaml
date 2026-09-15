@@ -73,6 +73,10 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ if eq $app.name "token-gateway" }}{{ default $root.Values.global.runtimeSecret $root.Values.tokenGateway.runtimeSecret }}{{ else }}{{ $root.Values.global.runtimeSecret }}{{ end }}, key: {{ $app.name }}-database-url } }
             - { name: MANUAL_REVIEW_ON_CALL_USER_IDS, value: {{ join "," $root.Values.global.manualReviewOnCallUserIds | quote }} }
             {{- end }}
+            {{- if eq $app.name "account-service" }}
+            - name: APPROVAL_WRITER_DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: account-approval-writer-database-url, optional: true } }
+            {{- end }}
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }
             - { name: OIDC_JWKS_URL, value: {{ $jwksURL | quote }} }

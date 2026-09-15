@@ -17,15 +17,15 @@ SPEC.loader.exec_module(PREPARE)
 
 class PasswordTests(unittest.TestCase):
     def test_fixed_identity_set(self):
-        self.assertEqual(set(PREPARE.NAMES), {"POSTGRES_ADMIN_PASSWORD", "ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD", "PORTAL_REDIS_PASSWORD", "IDENTITY_REDIS_PASSWORD", "NEWAPI_REDIS_PASSWORD"})
+        self.assertEqual(set(PREPARE.NAMES), {"POSTGRES_ADMIN_PASSWORD", "ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD", "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD", "PORTAL_REDIS_PASSWORD", "IDENTITY_REDIS_PASSWORD", "NEWAPI_REDIS_PASSWORD"})
         with self.assertRaises(ValueError):
             json.loads('{"age_binary":"a","age_binary":"b"}', object_pairs_hook=PREPARE.closed_object)
 
-    def test_actual_generator_emits_all_thirteen_distinct_values(self):
+    def test_actual_generator_emits_all_fifteen_distinct_values(self):
         values = PREPARE.generate_password_values()
         self.assertEqual(set(values), set(PREPARE.NAMES))
-        self.assertEqual(len(values), 13)
-        self.assertEqual(len(set(values.values())), 13)
+        self.assertEqual(len(values), 15)
+        self.assertEqual(len(set(values.values())), 15)
         self.assertTrue(all(re.fullmatch('[0-9a-f]{64}', value) for value in values.values()))
 
     @unittest.skipUnless(os.name == "posix" and os.environ.get("PINVOU_TEST_DEPENDENCY_BIN_DIRECTORY"), "explicit isolated Linux fixture")

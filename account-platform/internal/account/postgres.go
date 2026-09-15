@@ -19,7 +19,12 @@ import (
 )
 
 type PostgresRepository struct {
-	pool                   *pgxpool.Pool
+	pool               *pgxpool.Pool
+	approvalWriterPool *pgxpool.Pool
+	// approvalWriterCommit is an instance-local fault seam used only by package
+	// integration tests. Production constructors leave it nil, so every commit
+	// goes directly to pgx.Tx.Commit; there is no runtime setting or fallback.
+	approvalWriterCommit   func(context.Context, pgx.Tx) error
 	now                    func() time.Time
 	walletPolicyVersion    string
 	walletProvisioningSLA  time.Duration
@@ -69,7 +74,14 @@ func (r *PostgresRepository) ConfigureWalletProvisioning(policyVersion string, s
 }
 
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
-func (r *PostgresRepository) Close()                         { r.pool.Close() }
+func (r *PostgresRepository) Close() {
+	if r.approvalWriterPool != nil && r.approvalWriterPool != r.pool {
+		r.approvalWriterPool.Close()
+	}
+	if r.pool != nil {
+		r.pool.Close()
+	}
+}
 
 func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.Principal) (Me, bool, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})

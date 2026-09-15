@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('every management write is classified and financial facts use the independent approval executor', async () => {
-  const [policy, accountService, billingService, tokenService, accountMigration, billingMigration, approvals, execution, billingExecution, billingConsumer, billingMain, adminOpenAPI, eventSchema, portal, adminView] = await Promise.all([
+  const [policy, accountService, billingService, tokenService, accountMigration, billingMigration, approvals, approvalAuthorization, execution, billingExecution, billingConsumer, billingMain, adminOpenAPI, eventSchema, portal, adminView] = await Promise.all([
     read('internal/platform/approvalpolicy/registry.go'),
     read('internal/account/service.go'),
     read('internal/billing/service.go'),
@@ -15,6 +15,7 @@ test('every management write is classified and financial facts use the independe
     read('migrations/account/000018_approval_commands.up.sql'),
     read('migrations/billing/000017_approval_execution.up.sql'),
     read('internal/account/approvals.go'),
+    read('internal/account/approval_authorization.go'),
     read('internal/account/approval_execution.go'),
     read('internal/billing/approval_execution_http.go'),
     read('internal/billing/approval_consumer.go'),
@@ -85,7 +86,7 @@ test('every management write is classified and financial facts use the independe
   assert.match(accountMigration, /invalid approval request state transition/);
   assert.match(accountMigration, /approval_decisions_validate/);
   assert.match(accountMigration, /requester=NEW\.approver_user_id/);
-  assert.match(approvals, /account\.approval-command\.authorized\.v1/);
+  assert.match(approvalAuthorization, /account\.approval-command\.authorized\.v1/);
   assert.match(approvals, /ErrApprovalSelfDecision/);
   assert.match(approvals, /rp\.permission_code=p\.approver_permission/);
   assert.match(approvals, /item\.RequesterPermission/);

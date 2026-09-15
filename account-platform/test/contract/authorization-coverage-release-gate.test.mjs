@@ -21,7 +21,7 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 343, tasks: 27, events: 6, cli: 20 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 343, tasks: 27, events: 6, cli: 21 });
 });
 
 test('Billing approval activation projection requires its exact workload permission', async () => {

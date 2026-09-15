@@ -46,6 +46,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
+	if err := repository.ConfigureApprovalWriter(ctx, os.Getenv("APPROVAL_WRITER_DATABASE_URL")); err != nil {
+		log.Print("approval writer is unavailable; APPROVE is disabled")
+	}
 	walletPolicyVersion := strings.TrimSpace(os.Getenv("WALLET_PROVISIONING_POLICY_VERSION"))
 	if walletPolicyVersion == "" {
 		walletPolicyVersion = "wallet-provisioning-v1"
@@ -212,7 +215,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := httpserver.RunWithApplication("account-service", compatibility.Wrap(service.Handler(verify)), repository.Ping); err != nil {
+	if err := httpserver.RunWithApplication("account-service", repository.WithApprovalWriterReadiness(compatibility.Wrap(service.Handler(verify))), repository.Ping); err != nil {
 		log.Fatal(err)
 	}
 }

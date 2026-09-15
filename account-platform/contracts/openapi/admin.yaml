@@ -2480,7 +2480,7 @@ paths:
     post:
       operationId: decideAdminApprovalRequest
       summary: Approve or reject using an independent current authorization binding
-      description: APPROVED requires an executable command (otherwise 409 APPROVAL_COMMAND_NOT_EXECUTABLE) and applicable activation. Independent authorized REJECTED decisions remain available for inactive or policy-only submitted requests without contacting the Token activation service.
+      description: APPROVED requires an executable command (otherwise 409 APPROVAL_COMMAND_NOT_EXECUTABLE), applicable activation, and an available dedicated authorization writer. Writer unavailability returns 503 APPROVAL_WRITER_UNAVAILABLE with Retry-After 5 and Cache-Control no-store; it never falls back to the ordinary database identity. Independent authorized REJECTED decisions remain available for inactive or policy-only submitted requests without contacting the activation service or authorization writer. An uncertain transport or commit outcome must be checked through the original request, never blindly resubmitted.
       parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
       requestBody:
         required: true
@@ -2492,6 +2492,14 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503":
+          description: Approval authorization writer or command activation unavailable; APPROVAL_WRITER_UNAVAILABLE includes the headers below.
+          headers:
+            Retry-After: { schema: { type: string, enum: ["5"] } }
+            Cache-Control: { schema: { type: string, enum: [no-store] } }
+          content:
+            application/json:
+              schema: { $ref: "common.yaml#/components/schemas/Error" }
   /token/admin/v1/commands:precheck:
     post:
       operationId: precheckGovernedTokenCommand

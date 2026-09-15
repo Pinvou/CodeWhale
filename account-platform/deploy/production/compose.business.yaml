@@ -57,6 +57,7 @@ services:
       OIDC_JWKS_URL: "https://account.pinvou.com/realms/pinvou/protocol/openid-connect/certs"
       OIDC_AUDIENCE: "pinvou-desktop"
       DATABASE_URL: "postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      APPROVAL_WRITER_DATABASE_URL: "postgresql://account_approval_writer@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
       PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
       WORKLOAD_IDENTITY_RULES_JSON: "${ACCOUNT_WORKLOAD_RULES_JSON:?set verified ACCOUNT_WORKLOAD_RULES_JSON}"
       BILLING_HTTP_URL: "http://billing-service:8080"

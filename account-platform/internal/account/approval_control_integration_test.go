@@ -600,6 +600,9 @@ func newApprovalControlIntegrationDatabase(t *testing.T, ctx context.Context) (*
 	if err != nil {
 		t.Fatal(err)
 	}
+	for len(loaded) > 0 && loaded[len(loaded)-1].Version > 50 {
+		loaded = loaded[:len(loaded)-1]
+	}
 	if len(loaded) == 0 || loaded[len(loaded)-1].Version != 50 {
 		t.Fatal("control integration fixture must explicitly isolate migration 50 from future migrations")
 	}

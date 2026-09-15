@@ -8,10 +8,13 @@
 
 ## PostgreSQL 投递约束
 
-GSA-04 起首次初始化的 PostgreSQL 凭据集合新增独立
-`ACCOUNT_MIGRATION_DB_PASSWORD`。它只属于 `account_migrator LOGIN NOINHERIT`，
+GSA-04/GSA-06 起首次初始化的 PostgreSQL 凭据集合新增彼此独立的
+`ACCOUNT_MIGRATION_DB_PASSWORD`、`ACCOUNT_APPROVAL_WRITER_DB_PASSWORD`和
+`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`。迁移凭据只属于 `account_migrator LOGIN NOINHERIT`，
+writer/backfill 凭据分别只属于同名低权`LOGIN NOINHERIT`角色，三者不得互相复用；
 不得投递给 `account_service` 或长期业务容器；`account_approval_control_owner`
-固定为 `NOLOGIN NOINHERIT`。初始化仅为 `account_migrator` 在 Account 数据库临时授予
+与`account_approval_authorization_owner`固定为 `NOLOGIN NOINHERIT`。Account服务只接收writer
+DSN，backfill凭据只供独立受控命令使用，详见[授权writer/backfill运行手册](../runbooks/approval-authorization-writer.md)。初始化仅为 `account_migrator` 在 Account 数据库临时授予
 `CREATE`，迁移 `000050` 成功创建受保护 schema 后立即撤销。既有集群在执行该迁移前
 必须由 DBA 以相同角色/成员关系和临时授权完成受控前置；迁移失败时先撤销外部临时
 `CREATE` 再调查，不得向 runtime 临时授予 owner/migrator 成员关系。
@@ -30,11 +33,11 @@ GSA-04 起首次初始化的 PostgreSQL 凭据集合新增独立
 - `POSTGRES_TLS_DIRECTORY` 为本次已核验证书包的 PostgreSQL 单独叶目录，
   999:999/0700；`server.key` 为 0600，证书 SAN 为 `postgres`。不挂根私钥或其他叶私钥。
 - `POSTGRES_ADMIN_DIRECTORY/password` 与 `POSTGRES_BOOTSTRAP_DIRECTORY` 下的
-  九个文件都为 999:999/0600、目录 0700。每个文件保存不同的 32 字节随机值的小写 hex
+  十一个文件都为 999:999/0600、目录 0700。每个文件保存不同的 32 字节随机值的小写 hex
   （64 字符，可有一个结尾换行）。管理员密码不传入 Compose 环境或命令行。
 
-九个引导文件名：`ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、
-`ACCOUNT_MIGRATION_DB_PASSWORD`、
+十一个引导文件名：`ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、
+`ACCOUNT_MIGRATION_DB_PASSWORD`、`ACCOUNT_APPROVAL_WRITER_DB_PASSWORD`、`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`、
 `BILLING_MIGRATION_DB_PASSWORD`、`TOKEN_MIGRATION_DB_PASSWORD`、`TOKEN_POLICY_DB_PASSWORD`、
 `NEWAPI_DB_PASSWORD`、`KEYCLOAK_DB_PASSWORD`。由既有受控秘密投递流程生成/备份，
 此配置不生成秘密、不读取 KMS custody、不自动删除数据。
@@ -52,7 +55,7 @@ docker compose --env-file /controlled/public/dependencies.env -f account-platfor
 
 ## 初始化与异常处理
 
-复用原有五库，初始化九个登录角色与五个 NOLOGIN 角色，禁用模拟器；业务进程无迁移身份。
+复用原有五库，初始化十一个登录角色与六个 NOLOGIN 角色，禁用模拟器；业务进程无迁移或backfill身份。
 只通过文件将密码引入初始化进程环境，psql 使用 `\getenv`，不把密码传为 argv。
 官方入口仍会暂时在进程内使用管理员密码，宿主 root/数据库 OS 用户在信任边界内；
 不得打印环境、执行 shell tracing 或启用记录 SQL/参数的调试日志。
@@ -62,8 +65,8 @@ docker compose --env-file /controlled/public/dependencies.env -f account-platfor
 禁止人为补写标记或删除数据来“修复”正式失败；保留现场，核对原因再受控恢复。
 容器可能按 restart 策略重复拒绝，这不是就绪状态。
 
-完整验证并确认密码已投递给各自服务且有受控恢复副本后，精确移除引导目录中的九份副本，
-保留空目录、管理员文件和恢复包；成功集群此后重启无需九份引导副本。删除副本不撤销数据库权限。
+完整验证并确认密码已投递给各自服务/独立命令且有受控恢复副本后，精确移除引导目录中的十一份副本，
+保留空目录、管理员文件和恢复包；成功集群此后重启无需十一份引导副本。删除副本不撤销数据库权限。
 角色/密码后续变更走独立受控流程，不重跑初始化脚本。健康检查验证标记与实际本机 SQL，
 但不替代客户端 TLS、权限、业务迁移及备份恢复证据。
 

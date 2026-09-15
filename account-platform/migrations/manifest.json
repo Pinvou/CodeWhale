@@ -502,6 +502,16 @@
         "file": "000050_admin_approval_control.up.sql",
         "version": 50,
         "sha256": "c4a5f8617bca2278a30592930a6585343bc9902bf97e2a3e0ffa10a12c77fbd0"
+      },
+      {
+        "file": "000051_approval_authorization_outbox.down.sql",
+        "version": 51,
+        "sha256": "4c499d7dbb0ea8c7361ec79e9e74e14dd16f59684eb2a3b0d042344019d4aa94"
+      },
+      {
+        "file": "000051_approval_authorization_outbox.up.sql",
+        "version": 51,
+        "sha256": "7f948b3dcba4a382937f15c825b6d074f0fdba4b190e788a12c2c30159a60d06"
       }
     ],
     "billing": [

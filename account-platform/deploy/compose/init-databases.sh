@@ -10,6 +10,8 @@ psql -X --set=ON_ERROR_STOP=1 \
 \getenv billing_password BILLING_DB_PASSWORD
 \getenv token_password TOKEN_DB_PASSWORD
 \getenv account_migration_password ACCOUNT_MIGRATION_DB_PASSWORD
+\getenv account_approval_writer_password ACCOUNT_APPROVAL_WRITER_DB_PASSWORD
+\getenv account_approval_backfill_password ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD
 \getenv billing_migration_password BILLING_MIGRATION_DB_PASSWORD
 \getenv token_migration_password TOKEN_MIGRATION_DB_PASSWORD
 \getenv token_policy_password TOKEN_POLICY_DB_PASSWORD
@@ -22,6 +24,13 @@ WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_control
 SELECT format('CREATE ROLE account_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_migration_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_migrator') \gexec
 GRANT account_service, account_approval_control_owner TO account_migrator;
+SELECT 'CREATE ROLE account_approval_authorization_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS'
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_authorization_owner') \gexec
+SELECT format('CREATE ROLE account_approval_writer LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_approval_writer_password')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_writer') \gexec
+SELECT format('CREATE ROLE account_approval_backfill LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_approval_backfill_password')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_backfill') \gexec
+GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE, SET TRUE, ADMIN TRUE;
 SELECT format('CREATE ROLE billing_service LOGIN PASSWORD %L', :'billing_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing_service') \gexec
 SELECT format('CREATE ROLE token_gateway LOGIN PASSWORD %L', :'token_password')

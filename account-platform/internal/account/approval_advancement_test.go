@@ -81,14 +81,14 @@ func TestApprovalAdvancementProjection(t *testing.T) {
 				draftActions = []string{"EDIT", "SUBMIT"}
 				approvalActions = []string{"APPROVE", "REJECT"}
 			}
-			if got := approvalAllowedActions(item, requester, true, false, advance); !slices.Equal(got, draftActions) {
+			if got := approvalAllowedActions(item, requester, true, false, advance, true); !slices.Equal(got, draftActions) {
 				t.Fatalf("draft %s/%s: %v", state, policy.CommandType, got)
 			}
 			item.Status = "SUBMITTED"
-			if got := approvalAllowedActions(item, approver, false, true, advance); !slices.Equal(got, approvalActions) {
+			if got := approvalAllowedActions(item, approver, false, true, advance, true); !slices.Equal(got, approvalActions) {
 				t.Fatalf("approve %s/%s: %v", state, policy.CommandType, got)
 			}
-			if got := approvalAllowedActions(item, requester, true, false, advance); !slices.Equal(got, []string{"WITHDRAW"}) {
+			if got := approvalAllowedActions(item, requester, true, false, advance, true); !slices.Equal(got, []string{"WITHDRAW"}) {
 				t.Fatalf("withdraw: %v", got)
 			}
 		}
@@ -233,17 +233,17 @@ func TestPolicyOnlyActionsPreserveSafeClosure(t *testing.T) {
 			t.Fatalf("%s draft create/update must be rejected", policy.CommandType)
 		}
 		item := ApprovalRequest{CommandType: policy.CommandType, RequesterUserID: requester, Status: "SUBMITTED"}
-		if got := approvalAllowedActions(item, requester, true, false, false); !slices.Equal(got, []string{"WITHDRAW"}) {
+		if got := approvalAllowedActions(item, requester, true, false, false, true); !slices.Equal(got, []string{"WITHDRAW"}) {
 			t.Fatalf("%s requester actions: %v", policy.CommandType, got)
 		}
-		if got := approvalAllowedActions(item, approver, false, true, false); !slices.Equal(got, []string{"REJECT"}) {
+		if got := approvalAllowedActions(item, approver, false, true, false, true); !slices.Equal(got, []string{"REJECT"}) {
 			t.Fatalf("%s approver actions: %v", policy.CommandType, got)
 		}
-		if got := approvalAllowedActions(item, requester, false, true, false); len(got) != 0 {
+		if got := approvalAllowedActions(item, requester, false, true, false, true); len(got) != 0 {
 			t.Fatalf("self/revoked actions: %v", got)
 		}
 		item.Status = "DRAFT"
-		if got := approvalAllowedActions(item, requester, true, false, false); len(got) != 0 {
+		if got := approvalAllowedActions(item, requester, true, false, false, true); len(got) != 0 {
 			t.Fatalf("inactive draft actions: %v", got)
 		}
 	}

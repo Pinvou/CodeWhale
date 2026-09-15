@@ -62,6 +62,8 @@ function generatedComposeEnvironment() {
     BILLING_DB_PASSWORD: secret(),
     TOKEN_DB_PASSWORD: secret(),
     ACCOUNT_MIGRATION_DB_PASSWORD: secret(),
+    ACCOUNT_APPROVAL_WRITER_DB_PASSWORD: secret(),
+    ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD: secret(),
     BILLING_MIGRATION_DB_PASSWORD: secret(),
     TOKEN_MIGRATION_DB_PASSWORD: secret(),
     TOKEN_POLICY_DB_PASSWORD: secret(),
@@ -164,6 +166,7 @@ function security() {
 const [scope, action] = process.argv.slice(2);
 try {
   if (scope === 'verify' && action === undefined) verify();
+  else if (scope === 'approval-backfill') run(executable('go'), ['run', '-tags=nomsgpack', './cmd/approval-authorization-backfill', ...process.argv.slice(3)], { cwd: platformRoot });
   else if (scope === 'dev' && action === 'up') compose('up');
   else if (scope === 'dev' && action === 'down') compose('down');
   else if (scope === 'test' && action === 'unit') run(executable('go'), ['test', '-tags=nomsgpack', './...'], { cwd: platformRoot });
@@ -175,7 +178,7 @@ try {
   else if (scope === 'test' && action === 'fault') fault();
   else if (scope === 'test' && action === 'security') security();
   else {
-    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract|integration|e2e|fault|security>');
+    throw new Error('usage: account-platform.mjs verify | approval-backfill [--batch=100 --deadline=5m] | dev <up|down> | test <unit|contract|integration|e2e|fault|security>');
   }
 } catch (error) {
   console.error(`[account-platform] ${error.message}`);

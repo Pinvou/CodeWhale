@@ -664,6 +664,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusGatewayTimeout, "APPROVAL_SNAPSHOT_TIMEOUT", "the authoritative approval snapshot timed out"
 	case errors.Is(err, ErrApprovalSnapshotUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "APPROVAL_SNAPSHOT_UNAVAILABLE", "the authoritative approval snapshot is temporarily unavailable"
+	case errors.Is(err, ErrApprovalWriterUnavailable):
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Cache-Control", "no-store")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_WRITER_UNAVAILABLE", "the approval authorization writer is temporarily unavailable"
 	case errors.Is(err, ErrApprovalSnapshotRejected):
 		status, code, message = http.StatusConflict, "APPROVAL_SNAPSHOT_REJECTED", "the authoritative approval snapshot request was rejected"
 	case errors.Is(err, ErrApprovalCommandNotExecutable):

@@ -150,6 +150,7 @@
     { "source": "account-platform/cmd/event-relay/main.go", "durable": "source-bound-outbox-relay", "subject": "account|billing|token.>", "permission": "internal.event.publish.source-bound" }
   ],
   "cli": [
+    { "name": "approval-authorization-backfill", "source": "account-platform/cmd/approval-authorization-backfill/main.go", "strategy": "workload.dedicated-database-approval-authorization-backfill" },
     { "name": "event-resources", "source": "account-platform/cmd/event-resources/main.go", "strategy": "protocol.offline-fixed-nats-authorization-or-workload-fixed-resources" },
     { "name": "workload-token-agent", "source": "account-platform/cmd/workload-token-agent/main.go", "strategy": "workload.single-client-verified-token-projection" },
     { "name": "account-security", "source": "account-platform/cmd/account-security/main.go", "strategy": "protocol.controlled-security-terminal" },

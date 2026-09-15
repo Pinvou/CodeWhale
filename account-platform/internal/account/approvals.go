@@ -381,11 +381,18 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 }
 
 func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principal identity.Principal, requestID uuid.UUID, expectedVersion int64, decision, reason string, observedVersions json.RawMessage) (ApprovalRequest, error) {
+	if strings.EqualFold(strings.TrimSpace(decision), "APPROVED") {
+		return r.approveApprovalRequest(ctx, principal, requestID, expectedVersion, reason, observedVersions)
+	}
+	return r.decideApprovalRequestWithoutAuthorization(ctx, principal, requestID, expectedVersion, decision, reason, observedVersions)
+}
+
+func (r *PostgresRepository) decideApprovalRequestWithoutAuthorization(ctx context.Context, principal identity.Principal, requestID uuid.UUID, expectedVersion int64, decision, reason string, observedVersions json.RawMessage) (ApprovalRequest, error) {
 	if !humanApprovalPrincipal(principal) {
 		return ApprovalRequest{}, ErrForbidden
 	}
 	decision, reason = strings.ToUpper(strings.TrimSpace(decision)), strings.TrimSpace(reason)
-	if (decision != "APPROVED" && decision != "REJECTED") || len(reason) < 3 || len(reason) > 2000 {
+	if decision != "REJECTED" || len(reason) < 3 || len(reason) > 2000 {
 		return ApprovalRequest{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -440,37 +447,15 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
-	if decision == "APPROVED" {
-		if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
-			return ApprovalRequest{}, err
-		}
-	}
-	if decision == "APPROVED" && !sameJSONObject(observedVersions, item.CriticalResourceVersions) {
-		return r.invalidateApproval(ctx, tx, item, *actorID, "INVALIDATED", "RESOURCE_VERSION_CHANGED", map[string]any{"observed": jsonOrDefault(observedVersions, `{}`)}, now, ErrApprovalInvalidated)
-	}
-	executionDeadline := now.Add(policy.ExecutionWindow)
-	if decision == "REJECTED" {
-		executionDeadline = time.Time{}
-	}
 	authSnapshot, _ := json.Marshal(map[string]any{"user_id": actorID, "binding_id": bindingID, "authorization_version": authorizationVersion, "valid_until": validUntil})
 	if _, err := tx.Exec(ctx, `INSERT INTO approval_decisions(id,approval_request_id,approver_user_id,approver_binding_id,approver_authorization_version,decision,reason,authorization_snapshot,decided_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.Must(uuid.NewV7()), requestID, *actorID, bindingID, authorizationVersion, decision, reason, authSnapshot, now); err != nil {
 		return ApprovalRequest{}, mapConstraintError(err)
 	}
-	var deadline *time.Time
-	if decision == "APPROVED" {
-		deadline = &executionDeadline
-	}
-	if _, err := tx.Exec(ctx, `UPDATE approval_requests SET status=$2,execution_deadline=$3,decided_at=$4,version=version+1,updated_at=$4 WHERE id=$1`, requestID, decision, deadline, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE approval_requests SET status=$2,execution_deadline=NULL,decided_at=$3,version=version+1,updated_at=$3 WHERE id=$1`, requestID, decision, now); err != nil {
 		return ApprovalRequest{}, err
 	}
 	if err := appendApprovalStateEvent(ctx, tx, requestID, "SUBMITTED", decision, "USER", actorID.String(), "INDEPENDENT_DECISION", map[string]any{"reason": reason}, now); err != nil {
 		return ApprovalRequest{}, err
-	}
-	if decision == "APPROVED" {
-		payload := map[string]any{"approval_request_id": requestID, "command_type": item.CommandType, "command_fingerprint": item.CommandFingerprint, "policy_version": item.PolicyVersion, "executor_identity": policy.ExecutorIdentity, "execution_deadline": executionDeadline, "normalized_command": item.NormalizedCommand, "target_resource_type": item.TargetResourceType, "target_resource_id": item.TargetResourceID, "critical_resource_versions": item.CriticalResourceVersions, "financial_snapshot": item.FinancialSnapshot}
-		if err := appendOutbox(ctx, tx, "account.approval-command.authorized.v1", requestID, item.Version+1, payload); err != nil {
-			return ApprovalRequest{}, err
-		}
 	}
 	item, err = approvalRequestByID(ctx, tx, requestID)
 	if err != nil {
@@ -479,15 +464,241 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 	return item, tx.Commit(ctx)
 }
 
+func (r *PostgresRepository) approveApprovalRequest(ctx context.Context, principal identity.Principal, requestID uuid.UUID, expectedVersion int64, reason string, observedVersions json.RawMessage) (ApprovalRequest, error) {
+	if !humanApprovalPrincipal(principal) {
+		return ApprovalRequest{}, ErrForbidden
+	}
+	reason = strings.TrimSpace(reason)
+	if len(reason) < 3 || len(reason) > 2000 || requestID == uuid.Nil || expectedVersion < 1 {
+		return ApprovalRequest{}, ErrConflict
+	}
+	// A missing or already-known unusable writer must not take the request row
+	// lock or fall back to the broad runtime credential.
+	if err := r.ApprovalWriterReady(ctx); err != nil {
+		return ApprovalRequest{}, ErrApprovalWriterUnavailable
+	}
+	decisionID := uuid.Must(uuid.NewV7())
+	stateEventID := uuid.Must(uuid.NewV7())
+	authorizationEventID := uuid.Must(uuid.NewV7())
+	for attempt := 1; attempt <= 3; attempt++ {
+		item, committed, rolledBack, err := r.approveApprovalRequestAttempt(
+			ctx, principal, requestID, expectedVersion, reason, observedVersions,
+			decisionID, stateEventID, authorizationEventID,
+		)
+		if err == nil || committed {
+			return item, err
+		}
+		if !rolledBack {
+			return item, approvalAuthorizationPublicError(ctx, err)
+		}
+		if retryErr := approvalAuthorizationRetryDelay(ctx, attempt, err, nil); retryErr != nil {
+			return item, approvalAuthorizationPublicError(ctx, retryErr)
+		}
+	}
+	return ApprovalRequest{}, ErrApprovalWriterUnavailable
+}
+
+func (r *PostgresRepository) approveApprovalRequestAttempt(
+	ctx context.Context,
+	principal identity.Principal,
+	requestID uuid.UUID,
+	expectedVersion int64,
+	reason string,
+	observedVersions json.RawMessage,
+	decisionID uuid.UUID,
+	stateEventID uuid.UUID,
+	authorizationEventID uuid.UUID,
+) (ApprovalRequest, bool, bool, error) {
+	tx, err := r.approvalWriterPool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return ApprovalRequest{}, false, false, ErrApprovalWriterUnavailable
+	}
+	rollback := func(result ApprovalRequest, cause error) (ApprovalRequest, bool, bool, error) {
+		rollbackContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		rollbackErr := tx.Rollback(rollbackContext)
+		return result, false, rollbackErr == nil || errors.Is(rollbackErr, pgx.ErrTxClosed), cause
+	}
+	control, err := lockApprovalAuthorizationControl(ctx, tx)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	var now time.Time
+	if err := tx.QueryRow(ctx, `SELECT transaction_timestamp()`).Scan(&now); err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	actorID, err := adminActorID(ctx, tx, principal)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if actorID == nil {
+		return rollback(ApprovalRequest{}, ErrForbidden)
+	}
+	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if item.Status != "SUBMITTED" || item.Version != expectedVersion {
+		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
+			if _, _, _, authErr := strongApprovalWriterAuthorization(ctx, tx, *actorID, policy.ApproverPermission); authErr == nil {
+				if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, requestID, item.Status, item.Status, "USER", actorID.String(), "DECISION_CONFLICT", map[string]any{"expected_version": expectedVersion, "current_version": item.Version}, now); err != nil {
+					return rollback(ApprovalRequest{}, err)
+				}
+				_, committed, rolledBack, commitErr := r.commitApprovalWriterTerminal(ctx, tx, item, stateEventID, "DECISION_CONFLICT")
+				if commitErr != nil {
+					return ApprovalRequest{}, committed, rolledBack, commitErr
+				}
+				return ApprovalRequest{}, true, false, ErrConflict
+			}
+		}
+		return rollback(ApprovalRequest{}, ErrConflict)
+	}
+	if item.RequesterUserID == *actorID {
+		if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, requestID, item.Status, item.Status, "USER", actorID.String(), "SELF_DECISION_REJECTED", map[string]any{}, now); err != nil {
+			return rollback(ApprovalRequest{}, err)
+		}
+		_, committed, rolledBack, commitErr := r.commitApprovalWriterTerminal(ctx, tx, item, stateEventID, "SELF_DECISION_REJECTED")
+		if commitErr != nil {
+			return ApprovalRequest{}, committed, rolledBack, commitErr
+		}
+		return ApprovalRequest{}, true, false, ErrApprovalSelfDecision
+	}
+	if !item.ExpiresAt.After(now) {
+		invalidated, err := r.invalidateApprovalInTransaction(ctx, tx, item, *actorID, "EXPIRED", "REQUEST_EXPIRED", map[string]any{}, now, stateEventID)
+		if err != nil {
+			return rollback(ApprovalRequest{}, err)
+		}
+		invalidated, committed, rolledBack, commitErr := r.commitApprovalWriterTerminal(ctx, tx, invalidated, stateEventID, "REQUEST_EXPIRED")
+		if commitErr != nil {
+			return ApprovalRequest{}, committed, rolledBack, commitErr
+		}
+		return invalidated, true, false, ErrApprovalExpired
+	}
+	policy, err := approvalPolicyForItem(item)
+	if err != nil {
+		invalidated, invalidationErr := r.invalidateApprovalInTransaction(ctx, tx, item, *actorID, "INVALIDATED", "POLICY_VERSION_CHANGED", map[string]any{}, now, stateEventID)
+		if invalidationErr != nil {
+			return rollback(ApprovalRequest{}, invalidationErr)
+		}
+		invalidated, committed, rolledBack, commitErr := r.commitApprovalWriterTerminal(ctx, tx, invalidated, stateEventID, "POLICY_VERSION_CHANGED")
+		if commitErr != nil {
+			return ApprovalRequest{}, committed, rolledBack, commitErr
+		}
+		return invalidated, true, false, ErrApprovalInvalidated
+	}
+	if err := assertStoredApprovalPolicy(ctx, tx, policy); err != nil {
+		invalidated, invalidationErr := r.invalidateApprovalInTransaction(ctx, tx, item, *actorID, "INVALIDATED", "POLICY_VERSION_CHANGED", map[string]any{}, now, stateEventID)
+		if invalidationErr != nil {
+			return rollback(ApprovalRequest{}, invalidationErr)
+		}
+		invalidated, committed, rolledBack, commitErr := r.commitApprovalWriterTerminal(ctx, tx, invalidated, stateEventID, "POLICY_VERSION_CHANGED")
+		if commitErr != nil {
+			return ApprovalRequest{}, committed, rolledBack, commitErr
+		}
+		return invalidated, true, false, ErrApprovalInvalidated
+	}
+	bindingID, authorizationVersion, validUntil, err := strongApprovalWriterAuthorization(ctx, tx, *actorID, policy.ApproverPermission)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if err := r.requireApprovalAdvancement(ctx, policy); err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	if !sameJSONObject(observedVersions, item.CriticalResourceVersions) {
+		invalidated, invalidationErr := r.invalidateApprovalInTransaction(ctx, tx, item, *actorID, "INVALIDATED", "RESOURCE_VERSION_CHANGED", map[string]any{"observed": jsonOrDefault(observedVersions, `{}`)}, now, stateEventID)
+		if invalidationErr != nil {
+			return rollback(ApprovalRequest{}, invalidationErr)
+		}
+		invalidated, committed, rolledBack, commitErr := r.commitApprovalWriterTerminal(ctx, tx, invalidated, stateEventID, "RESOURCE_VERSION_CHANGED")
+		if commitErr != nil {
+			return ApprovalRequest{}, committed, rolledBack, commitErr
+		}
+		return invalidated, true, false, ErrApprovalInvalidated
+	}
+	executionDeadline := now.Add(policy.ExecutionWindow)
+	authSnapshot, _ := json.Marshal(map[string]any{"user_id": actorID, "binding_id": bindingID, "authorization_version": authorizationVersion, "valid_until": validUntil})
+	if _, err := tx.Exec(ctx, `INSERT INTO approval_decisions(id,approval_request_id,approver_user_id,approver_binding_id,approver_authorization_version,decision,reason,authorization_snapshot,decided_at) VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$7,$8)`, decisionID, requestID, *actorID, bindingID, authorizationVersion, reason, authSnapshot, now); err != nil {
+		return rollback(ApprovalRequest{}, mapConstraintError(err))
+	}
+	command, err := tx.Exec(ctx, `UPDATE approval_requests SET status='APPROVED',execution_deadline=$2,decided_at=$3,version=version+1,updated_at=$3 WHERE id=$1 AND status='SUBMITTED' AND version=$4`, requestID, executionDeadline, now, expectedVersion)
+	if err != nil || command.RowsAffected() != 1 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return rollback(ApprovalRequest{}, err)
+	}
+	if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, requestID, "SUBMITTED", "APPROVED", "USER", actorID.String(), "INDEPENDENT_DECISION", map[string]any{"reason": reason}, now); err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	item, err = approvalRequestByID(ctx, tx, requestID)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	authorizationRecord, err := appendLegacyApprovalAuthorization(ctx, tx, control, requestID, authorizationEventID)
+	if err != nil {
+		return rollback(ApprovalRequest{}, err)
+	}
+	committed, rolledBack, commitErr := r.commitApprovalWriterTransaction(ctx, tx)
+	if commitErr != nil {
+		if rolledBack {
+			return ApprovalRequest{}, false, true, commitErr
+		}
+		// Commit errors are outcome-unknown and must never be retried. A fresh
+		// connection may only recognize the already-committed closed fact set.
+		verificationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		var committed bool
+		verificationErr := r.approvalWriterPool.QueryRow(verificationContext,
+			`SELECT account_approval_authorization.authorization_commit_outcome($1,$2,$3,$4,$5,$6,$7,$8)`,
+			authorizationRecord.EventID, requestID, authorizationRecord.AggregateVersion, authorizationRecord.EventDigest,
+			authorizationRecord.SerializationVersion, authorizationRecord.ApprovalControlEpoch, decisionID, stateEventID,
+		).Scan(&committed)
+		if verificationErr == nil && committed {
+			verified, readErr := approvalRequestByID(verificationContext, r.approvalWriterPool, requestID)
+			if readErr == nil {
+				return verified, true, false, nil
+			}
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return ApprovalRequest{}, false, false, contextErr
+		}
+		return ApprovalRequest{}, false, false, ErrApprovalWriterUnavailable
+	}
+	return item, committed, false, nil
+}
+
+func (r *PostgresRepository) commitApprovalWriterTerminal(
+	ctx context.Context,
+	tx pgx.Tx,
+	expected ApprovalRequest,
+	stateEventID uuid.UUID,
+	reasonCode string,
+) (ApprovalRequest, bool, bool, error) {
+	committed, rolledBack, err := r.commitApprovalWriterTransaction(ctx, tx)
+	if err == nil || rolledBack {
+		return expected, committed, rolledBack, err
+	}
+	verificationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	var found bool
+	verificationErr := r.approvalWriterPool.QueryRow(verificationContext,
+		`SELECT account_approval_authorization.approval_terminal_commit_outcome($1,$2,$3,$4,$5)`,
+		expected.ID, expected.Version, expected.Status, stateEventID, reasonCode,
+	).Scan(&found)
+	if verificationErr == nil && found {
+		verified, readErr := approvalRequestByID(verificationContext, r.approvalWriterPool, expected.ID)
+		if readErr == nil {
+			return verified, true, false, nil
+		}
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return ApprovalRequest{}, false, false, contextErr
+	}
+	return ApprovalRequest{}, false, false, ErrApprovalWriterUnavailable
+}
+
 func (r *PostgresRepository) invalidateApproval(ctx context.Context, tx pgx.Tx, item ApprovalRequest, actorID uuid.UUID, status, code string, details map[string]any, now time.Time, result error) (ApprovalRequest, error) {
-	payload, _ := json.Marshal(details)
-	if _, err := tx.Exec(ctx, `UPDATE approval_requests SET status=$2,invalidation_code=$3,invalidation_details=$4,version=version+1,updated_at=$5 WHERE id=$1`, item.ID, status, code, payload, now); err != nil {
-		return ApprovalRequest{}, err
-	}
-	if err := appendApprovalStateEvent(ctx, tx, item.ID, item.Status, status, "USER", actorID.String(), code, details, now); err != nil {
-		return ApprovalRequest{}, err
-	}
-	item, err := approvalRequestByID(ctx, tx, item.ID)
+	item, err := r.invalidateApprovalInTransaction(ctx, tx, item, actorID, status, code, details, now, uuid.Must(uuid.NewV7()))
 	if err != nil {
 		return ApprovalRequest{}, err
 	}
@@ -495,6 +706,21 @@ func (r *PostgresRepository) invalidateApproval(ctx context.Context, tx pgx.Tx, 
 		return ApprovalRequest{}, err
 	}
 	return item, result
+}
+
+func (r *PostgresRepository) invalidateApprovalInTransaction(ctx context.Context, tx pgx.Tx, item ApprovalRequest, actorID uuid.UUID, status, code string, details map[string]any, now time.Time, stateEventID uuid.UUID) (ApprovalRequest, error) {
+	payload, _ := json.Marshal(details)
+	if _, err := tx.Exec(ctx, `UPDATE approval_requests SET status=$2,invalidation_code=$3,invalidation_details=$4,version=version+1,updated_at=$5 WHERE id=$1`, item.ID, status, code, payload, now); err != nil {
+		return ApprovalRequest{}, err
+	}
+	if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, item.ID, item.Status, status, "USER", actorID.String(), code, details, now); err != nil {
+		return ApprovalRequest{}, err
+	}
+	item, err := approvalRequestByID(ctx, tx, item.ID)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	return item, nil
 }
 
 func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal identity.Principal, filter ApprovalFilter) ([]ApprovalRequest, error) {
@@ -513,6 +739,7 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 	defer rows.Close()
 	items := make([]ApprovalRequest, 0)
 	canAdvance := r.approvalAdvancementProjection(ctx)
+	writerReady := r.ApprovalWriterReady(ctx) == nil
 	for rows.Next() {
 		item, err := scanApprovalRequest(rows)
 		if err != nil {
@@ -523,7 +750,7 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 			return nil, err
 		}
 		policy, policyErr := approvalPolicyForItem(item)
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, policyErr == nil && canAdvance(policy))
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove, policyErr == nil && canAdvance(policy), writerReady)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -544,7 +771,7 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 			return ApprovalRequest{}, err
 		}
 		policy, policyErr := approvalPolicyForItem(item)
-		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy))
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy), false)
 		return item, nil
 	}
 	_, canApprove, err := r.approvalCapabilities(ctx, actorID, item)
@@ -555,7 +782,7 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 		return ApprovalRequest{}, ErrForbidden
 	}
 	policy, policyErr := approvalPolicyForItem(item)
-	item.AllowedActions = approvalAllowedActions(item, actorID, false, true, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy))
+	item.AllowedActions = approvalAllowedActions(item, actorID, false, true, policyErr == nil && r.approvalAdvancementProjection(ctx)(policy), r.ApprovalWriterReady(ctx) == nil)
 	return item, nil
 }
 
@@ -578,7 +805,7 @@ func (r *PostgresRepository) approvalCapabilities(ctx context.Context, actorID u
 	return canRequest, canApprove, nil
 }
 
-func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canRequest, canApprove, canAdvance bool) []string {
+func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canRequest, canApprove, canAdvance, writerReady bool) []string {
 	actions := make([]string, 0, 3)
 	if item.RequesterUserID == actorID && canRequest {
 		if item.Status == "DRAFT" && canAdvance && approvalpolicy.Executable(item.CommandType) {
@@ -589,7 +816,7 @@ func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canRequest,
 		}
 	}
 	if canApprove && item.RequesterUserID != actorID && item.Status == "SUBMITTED" {
-		if canAdvance && approvalpolicy.Executable(item.CommandType) {
+		if canAdvance && writerReady && approvalpolicy.Executable(item.CommandType) {
 			actions = append(actions, "APPROVE")
 		}
 		actions = append(actions, "REJECT")
@@ -1062,6 +1289,26 @@ func strongPlatformAuthorization(ctx context.Context, database queryable, userID
 	return bindingID, version, validUntil, nil
 }
 
+// strongApprovalWriterAuthorization preserves the existing authorization-row
+// locks without granting the dedicated approval writer mutable access to user,
+// role-assignment, or authorization-version facts. The fixed SECURITY DEFINER
+// function verifies session_user and exposes only this closed result tuple.
+func strongApprovalWriterAuthorization(ctx context.Context, database queryable, userID uuid.UUID, permission string) (uuid.UUID, int64, *time.Time, error) {
+	var bindingID uuid.UUID
+	var authorizationVersion int64
+	var validUntil *time.Time
+	err := database.QueryRow(ctx, `SELECT * FROM public.lock_approval_writer_authorization($1,$2)`, userID, permission).Scan(
+		&bindingID, &authorizationVersion, &validUntil,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, 0, nil, ErrForbidden
+	}
+	if err != nil {
+		return uuid.Nil, 0, nil, err
+	}
+	return bindingID, authorizationVersion, validUntil, nil
+}
+
 func assertStoredApprovalPolicy(ctx context.Context, database queryable, policy approvalpolicy.Policy) error {
 	var mode, requesterPermission, riskClass, executorIdentity string
 	var approverPermission *string
@@ -1110,12 +1357,16 @@ func approvalRequestByIDForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) 
 }
 
 func appendApprovalStateEvent(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, from, to, actorType, actorID, reason string, details map[string]any, now time.Time) error {
+	return appendApprovalStateEventWithID(ctx, tx, uuid.Must(uuid.NewV7()), requestID, from, to, actorType, actorID, reason, details, now)
+}
+
+func appendApprovalStateEventWithID(ctx context.Context, tx pgx.Tx, eventID, requestID uuid.UUID, from, to, actorType, actorID, reason string, details map[string]any, now time.Time) error {
 	payload, _ := json.Marshal(details)
 	var fromValue *string
 	if from != "" {
 		fromValue = &from
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO approval_state_events(id,approval_request_id,from_status,to_status,actor_type,actor_id,reason_code,details,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.Must(uuid.NewV7()), requestID, fromValue, to, actorType, actorID, reason, payload, now)
+	_, err := tx.Exec(ctx, `INSERT INTO approval_state_events(id,approval_request_id,from_status,to_status,actor_type,actor_id,reason_code,details,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, eventID, requestID, fromValue, to, actorType, actorID, reason, payload, now)
 	return err
 }
 

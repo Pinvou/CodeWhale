@@ -36,13 +36,13 @@ func TestApprovalPolicyForItemUsesFrozenPermissions(t *testing.T) {
 func TestApprovalAllowedActionsRequireExactCurrentCapability(t *testing.T) {
 	requester, approver := uuid.New(), uuid.New()
 	item := ApprovalRequest{CommandType: "WALLET_ADJUSTMENT", RequesterUserID: requester, Status: "SUBMITTED"}
-	if actions := approvalAllowedActions(item, requester, false, false, true); len(actions) != 0 {
+	if actions := approvalAllowedActions(item, requester, false, false, true, true); len(actions) != 0 {
 		t.Fatalf("revoked requester must have no action, got %v", actions)
 	}
-	if actions := approvalAllowedActions(item, requester, true, false, true); len(actions) != 1 || actions[0] != "WITHDRAW" {
+	if actions := approvalAllowedActions(item, requester, true, false, true, true); len(actions) != 1 || actions[0] != "WITHDRAW" {
 		t.Fatalf("authorized requester must be able to withdraw, got %v", actions)
 	}
-	if actions := approvalAllowedActions(item, approver, false, true, true); len(actions) != 2 || actions[0] != "APPROVE" || actions[1] != "REJECT" {
+	if actions := approvalAllowedActions(item, approver, false, true, true, true); len(actions) != 2 || actions[0] != "APPROVE" || actions[1] != "REJECT" {
 		t.Fatalf("authorized independent approver must be able to decide, got %v", actions)
 	}
 }
