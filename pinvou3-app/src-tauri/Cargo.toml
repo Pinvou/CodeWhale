@@ -136,9 +136,6 @@ wait-timeout = "0.2"
 # rustls 直依赖:仅为在启动时调 aws_lc_rs::default_provider().install_default()
 # 选定进程级 CryptoProvider(见上方 panic 根因)。只声明 aws-lc-rs;ring 由传递依赖启用。
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
-# Controller transcript signature verification reuses the same provider;
-# prebuilt-nasm keeps Windows builds independent of a system NASM install.
-aws-lc-rs = { version = "1.18", default-features = false, features = ["non-fips", "alloc", "prebuilt-nasm"] }
 
 # Updater 用：sha256 校验；反馈接口校验码使用 MD5；产物卡封面读 .pptx 里的 thumbnail。
 # 0.11 与 CodeWhale 子模块对齐。digest 的 Output 不实现 LowerHex,统一用 hex_lower 编码

@@ -4,10 +4,9 @@
 //! Tauri command paths. Later tasks may consume these validators after their
 //! state machines and cryptography are implemented.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 
-use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
 use base64::Engine as _;
 use serde_json::{Map, Value};
 
@@ -22,11 +21,10 @@ const MAX_ID_CHARS: usize = 128;
 const MAX_TASK_REFERENCES: usize = 32;
 const MAX_DESCRIPTORS: usize = 256;
 const MAX_ARTIFACTS: usize = 256;
-const MAX_RELAY_TRUST_KEYS: usize = 32;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "6f3c23d36f899d9f61c0c0a231ea52778581ee5a81b94110d2eb566c5e5b8cf3";
+    "bb1e1aebb62fb797155eed4e656cd55c41ef6a1fe278a9fe85be0991409afd70";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -1534,72 +1532,51 @@ pub(crate) struct VerifiedTranscript {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PinnedRelayKey {
-    key_id: String,
-    public_key: [u8; 32],
+pub(crate) struct ParsedTranscript {
+    request_id: String,
+    expected_pairing_id: String,
+    reservation_id: String,
+    remote_control_generation: String,
+    relay_epoch: String,
+    transcript_hash: String,
+    expected_controller_connection_identity: String,
+    negotiated_capabilities: Vec<String>,
+    capability_hash: String,
+    relay_signing_key_id: String,
+    signature_algorithm: String,
+    signature_preimage: Vec<u8>,
+    relay_signature: Vec<u8>,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct RelayTrustStore {
-    keys: HashMap<String, PinnedRelayKey>,
-}
+/// Sealed authentication boundary. DEV-00 deliberately ships no implementation:
+/// DEV-05 must add the enrollment-backed authenticator inside this module before
+/// any production caller can obtain a `VerifiedTranscript`.
+#[allow(dead_code)]
+pub(crate) mod transcript_authentication {
+    use super::{ParsedTranscript, Result, VerifiedTranscript};
 
-impl RelayTrustStore {
-    pub(crate) fn pinned_key(&self, key_id: &str) -> Result<&PinnedRelayKey> {
-        validate_identifier(&Value::String(key_id.to_owned()), "relay_signing_key_id")?;
-        self.keys
-            .get(key_id)
-            .ok_or_else(|| ControllerProtocolError::new("stale_context", "relay_signing_key_id"))
+    mod private {
+        pub trait Sealed {}
+    }
+
+    pub(crate) trait TranscriptAuthenticator: private::Sealed {
+        fn authenticate(&self, parsed: ParsedTranscript) -> Result<VerifiedTranscript>;
     }
 }
 
-/// Trust-boundary loader reserved for the DEV-01/DEV-05 enrollment adapters.
-/// The returned immutable entries atomically bind one key ID to one Ed25519 key.
-pub(crate) fn load_relay_trust_store_from_enrollment_config(
-    input: &Value,
-) -> Result<RelayTrustStore> {
-    let config = exact_nested(input, &["source", "keys"], &[], "relay_trust_store_config")?;
-    validate_enum(
-        config.get("source").expect("trust store source required"),
-        "relay_trust_store_config.source",
-        &["official_enrollment", "self_hosted_enrollment"],
-    )?;
-    let raw_keys = config
-        .get("keys")
-        .and_then(Value::as_array)
-        .filter(|keys| !keys.is_empty() && keys.len() <= MAX_RELAY_TRUST_KEYS)
-        .ok_or_else(|| {
-            ControllerProtocolError::new("invalid_field", "relay_trust_store_config.keys")
-        })?;
-    let mut keys = HashMap::with_capacity(raw_keys.len());
-    for (index, value) in raw_keys.iter().enumerate() {
-        let label = format!("relay_trust_store_config.keys[{index}]");
-        let key = exact_nested(value, &["key_id", "public_key_b64"], &[], &label)?;
-        let key_id = object_string(key, "key_id", &label)?.to_owned();
-        validate_identifier(&Value::String(key_id.clone()), &format!("{label}.key_id"))?;
-        let public_key_b64 = object_string(key, "public_key_b64", &label)?;
-        validate_base64(
-            &Value::String(public_key_b64.to_owned()),
-            &format!("{label}.public_key_b64"),
-            32,
-            Some(32),
-        )?;
-        let public_key: [u8; 32] = base64::engine::general_purpose::STANDARD
-            .decode(public_key_b64)
-            .expect("validated base64")
-            .try_into()
-            .expect("validated key length");
-        if keys
-            .insert(key_id.clone(), PinnedRelayKey { key_id, public_key })
-            .is_some()
-        {
-            return Err(ControllerProtocolError::new(
-                "invalid_field",
-                "relay_trust_store_config.keys",
-            ));
-        }
+#[cfg(test)]
+fn verified_transcript_for_test(parsed: ParsedTranscript) -> VerifiedTranscript {
+    VerifiedTranscript {
+        request_id: parsed.request_id,
+        expected_pairing_id: parsed.expected_pairing_id,
+        reservation_id: parsed.reservation_id,
+        remote_control_generation: parsed.remote_control_generation,
+        relay_epoch: parsed.relay_epoch,
+        transcript_hash: parsed.transcript_hash,
+        expected_controller_connection_identity: parsed.expected_controller_connection_identity,
+        negotiated_capabilities: parsed.negotiated_capabilities,
+        capability_hash: parsed.capability_hash,
     }
-    Ok(RelayTrustStore { keys })
 }
 
 impl LeaseInstallValidationContext {
@@ -3276,45 +3253,27 @@ fn validate_reserved_transcript(message: &Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
-/// Produces the only constructible transcript trust token after verification
-/// with an atomic key-ID/public-key binding loaded from enrollment trust data.
-pub(crate) fn verify_controller_pairing_transcript(
-    input: &str,
-    pinned_relay_key: &PinnedRelayKey,
-) -> Result<VerifiedTranscript> {
+/// Parses and canonically binds a signed reservation without authenticating it.
+/// The result is intentionally not a lease-install trust token. DEV-05 owns the
+/// enrolled trust store and the sealed authenticator which upgrades this value.
+pub(crate) fn parse_controller_pairing_transcript(input: &str) -> Result<ParsedTranscript> {
     let value = validate_controller_message_json(input, RELAY)?;
     let message = as_object(&value, "message")?;
     if message.get("type").and_then(Value::as_str) != Some("controller_pairing_reserved") {
         return Err(ControllerProtocolError::new(
             "invalid_message",
-            "verified_transcript",
-        ));
-    }
-    if object_string(message, "relay_signing_key_id", "message")? != pinned_relay_key.key_id {
-        return Err(ControllerProtocolError::new(
-            "stale_context",
-            "relay_signing_key_id",
+            "parsed_transcript",
         ));
     }
     let transcript = message
         .get("transcript")
         .expect("reserved transcript required");
-    let preimage = build_pairing_transcript_preimage(transcript)?;
-    let signature = base64::engine::general_purpose::STANDARD
+    let signature_preimage = build_pairing_transcript_preimage(transcript)?;
+    let relay_signature = base64::engine::general_purpose::STANDARD
         .decode(object_string(message, "relay_signature_b64", "message")?)
         .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
-    if signature.len() != 64
-        || UnparsedPublicKey::new(&ED25519, pinned_relay_key.public_key)
-            .verify(&preimage, &signature)
-            .is_err()
-    {
-        return Err(ControllerProtocolError::new(
-            "invalid_field",
-            "relay_signature_b64",
-        ));
-    }
     let transcript = as_object(transcript, "transcript")?;
-    Ok(VerifiedTranscript {
+    Ok(ParsedTranscript {
         request_id: object_string(message, "request_id", "message")?.to_owned(),
         expected_pairing_id: object_string(transcript, "pairing_id", "transcript")?.to_owned(),
         reservation_id: object_string(transcript, "reservation_id", "transcript")?.to_owned(),
@@ -3340,6 +3299,10 @@ pub(crate) fn verify_controller_pairing_transcript(
         )
         .expect("validated capabilities are strings"),
         capability_hash: object_string(transcript, "capability_hash", "transcript")?.to_owned(),
+        relay_signing_key_id: object_string(message, "relay_signing_key_id", "message")?.to_owned(),
+        signature_algorithm: object_string(message, "signature_algorithm", "message")?.to_owned(),
+        signature_preimage,
+        relay_signature,
     })
 }
 
@@ -3672,8 +3635,7 @@ mod tests {
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
             "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"},
             "runtime_capability_context":{"order":"bytewise-strict-ascending","invalid_error":{"code":"unsupported_capability","field":"negotiated_capabilities"}},
-            "verified_transcript":{"constructor":"full-canonical-transcript-hash-and-pinned-relay-ed25519-signature","lease_install_derivation":"opaque-verified-transcript-only"},
-            "relay_trust_store":{"sources":["official_enrollment","self_hosted_enrollment"],"max_keys":MAX_RELAY_TRUST_KEYS,"key_binding":"opaque-atomic-key-id-plus-ed25519-public-key","activation_owner":"DEV-01-or-DEV-05"}
+            "verified_transcript":{"parsed_constructor":"strict-envelope-canonical-preimage-and-hash-only-not-authenticated","production_authenticator":"none-in-dev00-sealed-for-dev05","lease_install_derivation":"opaque-authenticated-transcript-only","activation_owner":"DEV-05"}
         })
     }
 
@@ -4205,74 +4167,54 @@ mod tests {
     }
 
     #[test]
-    fn controller_joined_installs_lease_from_trusted_handshake_expectations() {
+    fn parsed_transcript_is_not_trusted_and_test_only_token_binds_lease_install() {
         let fixture = fixture();
         let vector = &fixture["lease_install_vector"];
         let verification = &vector["verification_input"];
-        let trust_store = load_relay_trust_store_from_enrollment_config(
-            &fixture["relay_trust_store_vector"]["trusted_config"],
-        )
-        .unwrap();
-        for invalid in fixture["relay_trust_store_vector"]["invalid_configs"]
+        for candidate in fixture["untrusted_authentication_inputs"]
             .as_array()
             .unwrap()
         {
-            let error =
-                load_relay_trust_store_from_enrollment_config(&invalid["config"]).unwrap_err();
-            assert_eq!(error.code, invalid["expected_error"].as_str().unwrap());
-            assert_eq!(error.field, invalid["expected_field"].as_str().unwrap());
+            assert!(
+                parse_controller_pairing_transcript(
+                    &serde_json::to_string(&candidate["value"]).unwrap()
+                )
+                .is_err(),
+                "{} cannot enter the parsed transcript boundary",
+                candidate["name"].as_str().unwrap()
+            );
         }
-        let pinned_key = trust_store
-            .pinned_key(
-                verification["expected_relay_signing_key_id"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
-        let verify_input = |message: &Value| {
-            verify_controller_pairing_transcript(
-                &serde_json::to_string(message).unwrap(),
-                pinned_key,
-            )
-        };
-        let verified = verify_input(&verification["reserved_message"]).unwrap();
+        let parsed = parse_controller_pairing_transcript(
+            &serde_json::to_string(&verification["reserved_message"]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            verified.negotiated_capabilities,
+            parsed.negotiated_capabilities,
             serde_json::from_value::<Vec<String>>(
                 fixture["transcript_vector"]["transcript"]["negotiated_capabilities"].clone()
             )
             .unwrap()
         );
         assert_eq!(
-            verified.capability_hash,
+            parsed.capability_hash,
             fixture["transcript_vector"]["transcript"]["capability_hash"]
                 .as_str()
                 .unwrap()
         );
+        assert_eq!(parsed.relay_signing_key_id, "relay-key-test-1");
+        assert_eq!(parsed.signature_algorithm, "ed25519");
+        assert_eq!(
+            sha256_hex(&parsed.signature_preimage),
+            verification["reserved_message"]["transcript_hash"]
+                .as_str()
+                .unwrap()
+        );
+        assert_eq!(parsed.relay_signature.len(), 64);
+
+        // This conversion exists only under cfg(test). Production has no
+        // authenticator and therefore no path to construct this token.
+        let verified = verified_transcript_for_test(parsed.clone());
         let install_context = LeaseInstallValidationContext::new(verified);
-        let mut wrong_key_message = verification["reserved_message"].clone();
-        wrong_key_message["relay_signing_key_id"] = json!("relay-key-other");
-        let wrong_key_id = verify_input(&wrong_key_message).unwrap_err();
-        assert_eq!(wrong_key_id.code, "stale_context");
-        assert_eq!(wrong_key_id.field, "relay_signing_key_id");
-        let attacker_store = load_relay_trust_store_from_enrollment_config(
-            &fixture["relay_trust_store_vector"]["attacker_same_id_config"],
-        )
-        .unwrap();
-        let attacker_key = attacker_store
-            .pinned_key(
-                verification["expected_relay_signing_key_id"]
-                    .as_str()
-                    .unwrap(),
-            )
-            .unwrap();
-        let attacker_error = verify_controller_pairing_transcript(
-            &serde_json::to_string(&verification["reserved_message"]).unwrap(),
-            attacker_key,
-        )
-        .unwrap_err();
-        assert_eq!(attacker_error.code, "invalid_field");
-        assert_eq!(attacker_error.field, "relay_signature_b64");
         let result = validate_controller_lease_install_message_json(
             &serde_json::to_string(&vector["message"]).unwrap(),
             RELAY,
@@ -4312,17 +4254,27 @@ mod tests {
             assert_eq!(error.code, vector["expected_error"].as_str().unwrap());
             assert_eq!(error.field, field);
         }
-        for negative in vector["verified_transcript_negative_inputs"]
+        for mutation in vector["unauthenticated_transcript_mutations"]
             .as_array()
             .unwrap()
         {
             let mut message = verification["reserved_message"].clone();
-            message["transcript"] = negative["transcript"].clone();
-            message["transcript_hash"] = negative["transcript_hash"].clone();
-            message["relay_signature_b64"] = negative["relay_signature_b64"].clone();
-            let error = verify_input(&message).unwrap_err();
-            assert_eq!(error.code, negative["expected_error"].as_str().unwrap());
-            assert_eq!(error.field, negative["expected_field"].as_str().unwrap());
+            message["transcript"] = mutation["transcript"].clone();
+            message["transcript_hash"] = mutation["transcript_hash"].clone();
+            message["relay_signature_b64"] = mutation["relay_signature_b64"].clone();
+            let changed =
+                parse_controller_pairing_transcript(&serde_json::to_string(&message).unwrap())
+                    .unwrap();
+            assert_eq!(
+                sha256_hex(&changed.signature_preimage),
+                mutation["transcript_hash"].as_str().unwrap()
+            );
+            assert!(
+                changed.signature_preimage != parsed.signature_preimage
+                    || changed.relay_signature != parsed.relay_signature,
+                "{} must alter authenticated bytes",
+                mutation["name"].as_str().unwrap()
+            );
         }
     }
 

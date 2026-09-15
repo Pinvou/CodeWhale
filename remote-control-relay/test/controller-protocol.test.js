@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import * as controllerProtocol from "../protocol-controller.js";
 
 import {
   CONTROLLER_CAPABILITIES,
@@ -12,10 +13,8 @@ import {
   TASK_STATUSES,
   ControllerProtocolError,
   LeaseInstallValidationContext,
-  PinnedRelayKey,
+  ParsedTranscript,
   RegistrationValidationContext,
-  RelayTrustStore,
-  VerifiedTranscript,
   LEGACY_WEB_CONFLICT,
   MAX_CONTROL_MESSAGE_BYTES,
   MAX_DECRYPTED_PAYLOAD_BYTES,
@@ -32,8 +31,8 @@ import {
   controllerAllowedRoles,
   controllerCapabilityHash,
   controllerLogProjection,
-  loadRelayTrustStoreFromEnrollmentConfig,
   negotiateControllerCapabilities,
+  parseControllerPairingTranscript,
   validateControllerBaseUrl,
   validateControllerLivenessPayload,
   validateControllerLeaseInstallMessage,
@@ -42,7 +41,6 @@ import {
   validateControllerRegistrationMessage,
   validateControllerRuntimeMessage,
   validateControllerRuntimePayload,
-  verifyControllerPairingTranscript,
 } from "../protocol-controller.js";
 
 const fixtureUrl = new URL("./fixtures/controller-protocol-v1.json", import.meta.url);
@@ -306,15 +304,7 @@ test("capability and signed pairing transcript vectors are canonical and tamper 
   assert.equal(createHash("sha256").update(preimage).digest("hex"), vector.sha256);
   assert.equal(verify(null, preimage, fixturePublicKey(vector.public_key_b64), Buffer.from(vector.signature_b64, "base64")), true);
   const verifiedReserved = validMessage("controller_pairing_reserved", "relay");
-  const trustStore = loadRelayTrustStoreFromEnrollmentConfig(fixture.relay_trust_store_vector.trusted_config);
-  assert.ok(trustStore instanceof RelayTrustStore);
-  for (const invalid of fixture.relay_trust_store_vector.invalid_configs) {
-    assertProtocolError(invalid.expected_error, () => loadRelayTrustStoreFromEnrollmentConfig(invalid.config), invalid.name, invalid.expected_field);
-  }
-  assert.ok(verifyControllerPairingTranscript(
-    verifiedReserved,
-    trustStore.pinnedKey(verifiedReserved.relay_signing_key_id),
-  ) instanceof VerifiedTranscript);
+  assert.ok(parseControllerPairingTranscript(verifiedReserved) instanceof ParsedTranscript);
   assert.equal(buildPairingTranscriptPreimage(structuredClone(vector.transcript)).toString("hex"), preimage.toString("hex"), "A and B reconstruct identical bytes");
   assert.equal(controllerCapabilityHash(vector.transcript.negotiated_capabilities), vector.transcript.capability_hash);
   const reserved = validMessage("controller_pairing_reserved");
@@ -359,50 +349,38 @@ test("runtime validation requires negotiated outer and inner capabilities", () =
   }
 });
 
-test("controller_joined installs a new lease only from trusted handshake expectations", () => {
+test("controller_joined has no DEV-00 production path from untrusted data to a lease context", () => {
   const vector = fixture.lease_install_vector;
   const verification = vector.verification_input;
-  const trustStore = loadRelayTrustStoreFromEnrollmentConfig(fixture.relay_trust_store_vector.trusted_config);
-  const pinnedKey = trustStore.pinnedKey(verification.expected_relay_signing_key_id);
-  const verified = verifyControllerPairingTranscript(
-    verification.reserved_message,
-    pinnedKey,
-  );
-  const context = new LeaseInstallValidationContext({ verified_transcript: verified });
-  const result = validateControllerLeaseInstallMessage(vector.message, "relay", context);
-  assert.deepEqual(result.message, vector.message);
-  assert.deepEqual(result.lease, vector.expected_lease);
   assertProtocolError("missing_field", () => validateControllerLeaseInstallMessage(vector.message, "relay"), undefined, "lease_install_validation_context");
-  assertProtocolError("invalid_field", () => new VerifiedTranscript(), "VerifiedTranscript cannot be directly constructed", "verified_transcript");
-  assertProtocolError("invalid_field", () => new PinnedRelayKey(), "PinnedRelayKey cannot be directly constructed", "pinned_relay_key");
-  assertProtocolError("invalid_field", () => new RelayTrustStore(), "RelayTrustStore cannot be directly constructed", "relay_trust_store");
-  assertProtocolError("invalid_field", () => new LeaseInstallValidationContext({ verified_transcript: verification }), "raw verification input cannot impersonate the brand", "lease_install_validation_context.verified_transcript");
+  assert.equal("VerifiedTranscript" in controllerProtocol, false);
+  assert.equal("verifyControllerPairingTranscript" in controllerProtocol, false);
+  assert.equal("PinnedRelayKey" in controllerProtocol, false);
+  assert.equal("RelayTrustStore" in controllerProtocol, false);
+  assert.equal("loadRelayTrustStoreFromEnrollmentConfig" in controllerProtocol, false);
+  for (const candidate of fixture.untrusted_authentication_inputs) {
+    assertProtocolError("invalid_field", () => new LeaseInstallValidationContext({ verified_transcript: candidate.value }), candidate.name, "lease_install_validation_context.verified_transcript");
+  }
   assertProtocolError("missing_field", () => validateControllerLeaseInstallMessage(
     vector.message,
     "relay",
     Object.create(LeaseInstallValidationContext.prototype),
   ), "prototype forgery cannot impersonate the context", "lease_install_validation_context");
-  assertProtocolError("stale_context", () => verifyControllerPairingTranscript({
-    ...verification.reserved_message,
-    relay_signing_key_id: "relay-key-other",
-  }, pinnedKey), "signing key id is pinned", "relay_signing_key_id");
-  const attackerStore = loadRelayTrustStoreFromEnrollmentConfig(fixture.relay_trust_store_vector.attacker_same_id_config);
-  assertProtocolError("invalid_field", () => verifyControllerPairingTranscript(
-    verification.reserved_message,
-    attackerStore.pinnedKey(verification.expected_relay_signing_key_id),
-    () => true,
-  ), "an attacker key and ignored always-true argument cannot replace production verification", "relay_signature_b64");
-  for (const field of vector.mismatch_fields) {
-    const value = field === "transcript_hash" ? ZERO_HASH : `${field}-other`;
-    assertProtocolError(vector.expected_error, () => validateControllerLeaseInstallMessage({ ...vector.message, [field]: value }, "relay", context), field, field);
-  }
-  for (const negative of vector.verified_transcript_negative_inputs) {
-    assertProtocolError(negative.expected_error, () => verifyControllerPairingTranscript({
+  const parsed = parseControllerPairingTranscript(verification.reserved_message);
+  assert.ok(parsed instanceof ParsedTranscript, "parsing is explicitly not an authentication token");
+  assertProtocolError("invalid_field", () => new LeaseInstallValidationContext({ verified_transcript: parsed }), "parsed transcript cannot impersonate an authenticated transcript", "lease_install_validation_context.verified_transcript");
+  const trustedPublicKey = fixturePublicKey(fixture.transcript_vector.public_key_b64);
+  for (const mutation of vector.unauthenticated_transcript_mutations) {
+    const message = {
       ...verification.reserved_message,
-      transcript: negative.transcript,
-      transcript_hash: negative.transcript_hash,
-      relay_signature_b64: negative.relay_signature_b64,
-    }, pinnedKey), negative.name, negative.expected_field);
+      transcript: mutation.transcript,
+      transcript_hash: mutation.transcript_hash,
+      relay_signature_b64: mutation.relay_signature_b64,
+    };
+    assert.ok(parseControllerPairingTranscript(message) instanceof ParsedTranscript, `${mutation.name} remains only parsed`);
+    const mutationPreimage = buildPairingTranscriptPreimage(mutation.transcript);
+    assert.equal(createHash("sha256").update(mutationPreimage).digest("hex"), mutation.transcript_hash, mutation.name);
+    assert.equal(verify(null, mutationPreimage, trustedPublicKey, Buffer.from(mutation.relay_signature_b64, "base64")), false, `${mutation.name} requires DEV-05 authentication rejection`);
   }
 });
 
