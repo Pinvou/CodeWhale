@@ -21061,4 +21061,11 @@ fn forkguard_subagent_skill_catalog_uses_tool_search_discovery() {
         "header must stay honest for tool-free and allowlist children that \
          lack tool_search or load_skill:\n{catalog}"
     );
+    assert!(
+        catalog.contains("try `load_skill` directly anyway"),
+        "tool_search being absent does not make load_skill unreachable — a \
+         registered deferred tool hydrates on demand when called directly; \
+         the header must teach the direct-call fallback instead of declaring \
+         Skills unloadable:\n{catalog}"
+    );
 }

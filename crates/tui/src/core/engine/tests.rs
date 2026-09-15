@@ -16894,6 +16894,31 @@ fn forkguard_subagent_context_hint_names_active_tools() {
             && !context.contains("list_dir")
     );
     assert!(context.contains("handle_read"));
+    assert!(
+        context.contains("activate it via `tool_search` first"),
+        "handle_read is deferred on stock hosts; the hint must name the \
+         activation path instead of commanding a tool the model cannot see:\n\
+         {context}"
+    );
+}
+
+// Regression (Pinvou #490 phantom-tool class): GOAL_CONTINUATION_PROMPT
+// commands `update_goal`, which is deferred on stock hosts — it must name the
+// `tool_search` activation path instead of telling the model to call a tool
+// that is not in its first-turn tool list.
+#[test]
+fn forkguard_goal_continuation_names_tool_search_activation() {
+    let prompt = crate::prompts::GOAL_CONTINUATION_PROMPT;
+    assert!(
+        prompt.contains("`update_goal`"),
+        "the continuation prompt must keep commanding the goal-close tool:\n\
+         {prompt}"
+    );
+    assert!(
+        prompt.contains("activate it via `tool_search` first"),
+        "update_goal is deferred on stock hosts; the prompt must teach \
+         activation instead of commanding an absent tool:\n{prompt}"
+    );
 }
 
 #[test]

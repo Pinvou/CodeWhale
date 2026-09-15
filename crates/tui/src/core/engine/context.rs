@@ -216,7 +216,7 @@ fn compact_subagent_tool_result_for_context(tool_name: &str, raw: &str) -> Optio
     out.push_str(
         "Child results are self-reports; verify side effects with `read` or `bash` before claiming success.\n",
     );
-    out.push_str("Use `handle_read` on `transcript_handle` for bounded transcript slices when the returned summary is not enough.\n");
+    out.push_str("Use `handle_read` on `transcript_handle` for bounded transcript slices when the returned summary is not enough — if `handle_read` is not in your tool list, activate it via `tool_search` first.\n");
     for (idx, snapshot) in snapshots.iter().enumerate() {
         if idx >= 8 {
             out.push_str(&format!(

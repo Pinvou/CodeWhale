@@ -164,6 +164,27 @@ fn forkguard_skill_index_usage_names_tool_search_activation() {
         rendered.contains("`tool_search`"),
         "usage must tell the model how to activate deferred load_skill:\n{rendered}"
     );
+    assert!(
+        rendered.contains("call `load_skill` anyway"),
+        "tool_search being unable to surface load_skill does not make it \
+         unreachable — a registered deferred tool hydrates on demand when \
+         called directly; the usage line must not surrender that path:\n\
+         {rendered}"
+    );
+}
+
+// Regression guard paired with the Usage-line dedup (commit 9f46ac5f0): the
+// omitted tail stays a short pointer and must not re-grow the full fallback
+// teaching — the Usage block appended below it is the single teaching point.
+#[test]
+fn forkguard_omitted_skills_line_stays_short() {
+    let line = super::omitted_skills_line(2);
+    assert!(
+        !line.contains("tool_search"),
+        "omitted tail must not repeat the Usage block's tool_search fallback; \
+         re-adding it reintroduces the per-row duplication the dedup removed:\n\
+         {line}"
+    );
 }
 
 // Regression (Pinvou #490 phantom-tool incident): the bundled mcp-discovery
@@ -197,8 +218,8 @@ fn forkguard_mcp_discovery_skill_conditions_registry_commands() {
     );
     assert!(
         !SKILL.contains("`registry_sync {}`"),
-        "registry_sync rejects empty input; never teach a call that cannot \
-         succeed:\n{SKILL}"
+        "registry_sync requires a `query` field and the host rejects an empty \
+         one; never teach a call that cannot succeed:\n{SKILL}"
     );
     assert!(
         !SKILL.contains("available in the active tool surface"),

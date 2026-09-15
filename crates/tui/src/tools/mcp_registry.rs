@@ -588,9 +588,10 @@ const MAX_REGISTRY_MATCHES: usize = 8;
 // side alone turns that text into a phantom fact (Pinvou #490 class).
 const _: () = assert!(
     MAX_REGISTRY_MATCHES == 8,
-    "update the \"eight scored matches\" wording in \
-     assets/skills/mcp-discovery/SKILL.md, the registry_sync schema \
-     description here, and MCP_REGISTRY_FIRST_INSTRUCTION in core/engine.rs",
+    "update the \"eight\" wording in \
+     crates/tui/assets/skills/mcp-discovery/SKILL.md, the registry_sync \
+     schema description here, and MCP_REGISTRY_FIRST_INSTRUCTION in \
+     core/engine.rs",
 );
 
 #[derive(Serialize)]
