@@ -1,7 +1,7 @@
 # 治理与安全整改实施任务
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED并以`0dd3d481`提交；GSA-04代码已完成且B代码审核通过、环境验收待补，其余PENDING，均NOT_DEPLOYED。
+> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED并以`0dd3d481`提交；GSA-04代码已完成且B代码审核通过、以`0c9db1e2`提交，环境验收待补；GSA-05仅处于协议文档B审核通过，代码未开始；其余PENDING，均NOT_DEPLOYED。
 
 ## 1. 所有权与执行规则
 
@@ -9,7 +9,7 @@
 
 逐项执行：A 实现及自检 → B 独立审核 → A 修正 → B PASS → Signed-off 独立提交 → 更新证据 → 下一项。B 未通过不得进入下一执行子任务。每次提交只能交付一个 GSA 子任务；设计子任务同样必须审核并独立提交。需求取舍、未经确认的财务规则和互斥方案提交用户决定。
 
-2026-09-15 用户明确授权“跳过pending继续”：仅对当前 GSA-04 的环境验收等待作执行顺序例外。其代码审核及本机完整验证通过后可独立提交，仍保持 CODE_COMPLETE / B_CODE_REVIEW_PASS / IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED，不标记最终 APPROVED 或 DONE；允许继续仅依赖已完成 GSA-02 的 GSA-05，并维持逐任务 A/B 审核。此授权不豁免代码缺陷、技术依赖或生产发布门禁，GSA-04 的三项隔离 Linux 验收须持续追踪并在生产启用前完成。GSA-06/10/13 等依赖 GSA-04 的任务不因此视为依赖已满足；未补齐前不得执行生产部署、activation、cutover 或将 control 宣称为已完成验收的能力。
+2026-09-15 用户明确授权“跳过pending继续完成后续任务”：GSA-04的三项隔离Linux验收仍受环境阻断，但基于该前置已有Signed-off提交`0c9db1e2`、身份B代码审核通过及本机适用验证通过，可以继续后续设计/实现、逐项A/B审核和独立提交。该顺序例外可沿依赖链传递地允许推进下一项；任何缺Linux证据的前置及受其影响的下游都必须保留`ENV_PENDING`或`DEPENDENCY_ENV_PENDING`，不得冒充最终`DONE/APPROVED`。checker无法表达最终完成时，统一保持`IN_PROGRESS / CODE_COMPLETE / B_CODE_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED`。例外不豁免代码缺陷、任务自身适用验证、A/B审核、真实技术依赖或生产部署/activation/cutover门禁；所有Linux欠账仍须在生产启用前补齐。GSA-05自身只依赖已DONE的GSA-02，文档与代码各自审核/验证通过后可按通常规则DONE。
 
 每项必须记录实际文件、测试命令/结果、B 结论、提交、已知差距。代码任务 DONE 要求真实行为测试及适用数据库集成测试通过，不能用 SKIP 或静态字符串断言代替；有代码完成但缺环境证据时保持 IN_PROGRESS 并记录 CODE_COMPLETE/ENV_PENDING，不关闭主目标。所有产品代码提交执行 `node scripts/account-platform.mjs verify` 和任务定向门禁；文档步骤执行任务覆盖与文档基线检查。只在改动或新失败需要时重跑已经通过的检查。
 
@@ -25,7 +25,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-02 | APT-141 | 逐命令现状、策略/快照/接口兼容矩阵 | GSA-01 | DESIGN | DONE |
 | GSA-03 | APT-141 | Billing owner-domain activation 投影及既有三命令兼容 | GSA-02 | CODE | DONE |
 | GSA-04 | APT-141 | Account control 模型、持久状态和事务锁接口 | GSA-03 | CODE | IN_PROGRESS |
-| GSA-05 | APT-141 | typed closed RFC8785 编码与 legacy 编码适配 | GSA-02 | CODE | PENDING |
+| GSA-05 | APT-141 | typed closed RFC8785完整整数编码与legacy/新授权wire适配 | GSA-02 | CODE | PENDING |
 | GSA-06 | APT-141 | 授权 Outbox epoch/sidecar 前向迁移及旧 writer 兼容 | GSA-04, GSA-05 | CODE | PENDING |
 | GSA-07 | APT-141 | fence-aware Relay 与授权事件永久禁止人工 replay | GSA-06 | CODE | PENDING |
 | GSA-08 | APT-141 | 六命令 consumer、持久尝试及确认式 DLQ 收口 | GSA-07 | CODE | PENDING |
@@ -163,7 +163,7 @@ GSA-03：以 Billing 为三类既有及八类 policy-only 命令建立唯一持�
 
 GSA-04：实现尚未接线的唯一 `ADMIN_APPROVAL` control 持久模型、双 epoch 与窄事务锁接口；状态为 CODE_COMPLETE / B_CODE_REVIEW_PASS / IN_PROGRESS / ENV_PENDING / NOT_DEPLOYED，尚未通过最终环境验收。
 
-- 最新审核收口：B 已复审凭据生成与显式九项数据库秘密映射修复，确认 Account migration 与 Keycloak 均被投递；开发环境示例、Compose/Helm 说明及精确十项 getenv 合同已补齐，暂无新增代码阻断。尚未获得最终 APPROVED；依用户 2026-09-15 顺序例外允许继续 GSA-05，但不提交为 DONE。
+- 最新审核收口：B 已复审凭据生成与显式九项数据库秘密映射修复，确认 Account migration 与 Keycloak 均被投递；开发环境示例、Compose/Helm 说明及精确十项 getenv 合同已补齐，暂无新增代码阻断。尚未获得最终 APPROVED；依用户 2026-09-15 顺序例外可继续后续设计/实现、逐项A/B审核与独立提交，但GSA-04自身仍不标记DONE。
 - 环境欠账（均未执行）：隔离 Linux 上的实际 age 密码生成/恢复测试、实际 root-owned 凭据投影测试，以及 `python3 scripts/account-platform-postgres-fixture.py --run` 生产初始化链测试（含新增迁移身份 TLS/HBA 登录与 runtime 无法切换 owner/migrator）。三项均保持 ENV_PENDING，不由静态合同、手工 PG 迁移或用户顺序调整替代。
 - 前两项命令分别为 `python3 -m unittest scripts.tests.test_dependency_passwords.PasswordTests.test_actual_encrypted_first_and_recovery` 和 `python3 -m unittest scripts.tests.test_dependency_projection.ProjectionTests.test_fixed_projection_and_failures`；必须按测试要求配置隔离 Linux 工具目录 `PINVOU_TEST_DEPENDENCY_BIN_DIRECTORY`，后者使用隔离 root 环境，运行结果不得 SKIP。
 - 最终本机完整验证：root 与 B 分别运行完整 `node scripts/account-platform.mjs verify`，均 exit 0；Node 555 项为 553 PASS / 0 FAIL / 2 既有 SKIP，Go/vet/OpenAPI（9 既有 warning）/三语/observability/architecture/manifest280/auth343/任务与文档门禁通过。此处 Node 既有跳过项与 Python 4 PASS / 2 适用 Linux-only SKIP 是不同证据，不能混同。
@@ -172,4 +172,11 @@ GSA-04：实现尚未接线的唯一 `ADMIN_APPROVAL` control 持久模型、双
 - 当前候选：Account `000050` 仅初始化 `LEGACY/wire1/proof=false/RUNNING/approval_epoch1/relay_epoch1/version1`，数据库约束及守卫冻结四种mode元组、Relay正交状态、合法边、各自epoch/version递增、DB时间、singleton、no-op/跨组/删除/截断拒绝。Go包只提供caller-owned `pgx.Tx` 的普通读、固定SECURITY DEFINER共享锁和owner/migrator直接排他锁，以及8行typed动作分类；没有Transition/CAS写API，也未连接create/update/submit/APPROVE/Begin/Relay/consumer/recovery。
 - 角色边界：受保护对象位于 `account_approval_control` 独立schema并由 `account_approval_control_owner NOLOGIN NOINHERIT` 持有；`account_migrator LOGIN NOINHERIT` 使用独立凭据并显式assume既有`account_service`及新owner角色。三角色高权属性必须全部关闭，runtime不属于owner/migrator且仅有表SELECT、schema USAGE与固定共享锁函数EXECUTE。现有`account_service`仍保留Account数据库owner的既有DoS边界；全Account角色收敛留待proof启用前的后续安全任务，不在本批扩大迁移范围。
 - 迁移前置：fresh install创建新角色及独立迁移凭据；既有集群由DBA在受控窗口验证角色后，仅向`account_migrator`临时授予目标数据库CREATE。迁移成功时创建独立schema后立即撤销；迁移事务失败会回滚schema/ledger并恢复外部前置CREATE，失败runbook必须先撤销该临时授权再调查。随机schema旧fixture只机械改写`000050`的固定schema到唯一测试schema且精确检查命中次数；产品SQL保持固定schema，不接受测试注入。
-- 尚未完成/不得宣称：身份B已通过代码审核，本机完整回归通过，三项隔离Linux环境验收仍待补；未交付capability API、proof、v2、Outbox sidecar、Relay/consumer接线、cutover/readiness、生产角色变更或activation。GSA-05仅按上述用户例外继续，其余技术依赖与验收标准不变。
+- 尚未完成/不得宣称：身份B已通过代码审核，本机完整回归通过，三项隔离Linux环境验收仍待补；未交付capability API、proof、v2、Outbox sidecar、Relay/consumer接线、cutover/readiness、生产角色变更或activation。后续任务可按上述用户例外继续，但真实技术依赖与验收标准不变，受此环境欠账影响的下游须显式`DEPENDENCY_ENV_PENDING`。GSA-04已以Signed-off提交`0c9db1e2`保存当前证据，但状态仍为IN_PROGRESS/ENV_PENDING，不因提交而改为DONE。
+
+GSA-05：先冻结typed closed RFC8785完整整数协议与legacy/新授权wire适配合同；当前状态为CONTRACT_B_APPROVED / CODE_NOT_STARTED / PENDING / NOT_DEPLOYED。
+
+- 用户裁决：旧业务存储、v1接口、历史摘要及`events.Event.Marshal/Unmarshal`保持不变；初始且尚未部署的`proof_schema_version="1"`直接使用完整精度表示。六命令closed `proof_input`中所有领域`int64`统一编码为规范十进制JSON字符串，只有逐命令常量`policy_version/snapshot_schema_version`保留闭合number。拒绝前导零、`+`、`-0`、指数、小数、空白与int64越界，解码后仍须执行逐字段正/非负/非0/null等业务约束。
+- 独立代码交付范围：新增不依赖普通`json.Marshal`或Token专用canonicalizer的公共typed closed encoder/decoder；提供`LEGACY_TYPED_V1`只读兼容adapter、带显式`serialization_version="APPROVAL_RFC8785_DECIMAL_V1"`的新授权event closed adapter，以及只面向授权event原始bytes的dual decoder窄接口。新envelope的`aggregate_version`、payload中的`approval_control_epoch`和所有嵌套领域int64均为规范字符串；GSA-05只以纯typed `ExpectedAuthorizationBinding`（或等价命名）接收调用方给出的expected approved request version与approval epoch，golden验证wire值与外部expected不等时拒绝，不读取或冒充DB/Outbox/sidecar事实。`trace_id`只沿用当前非空且trim后非空约束，不虚构长度/字符集。不得按number/string或值大小猜协议，也不得parse失败fallback。本项不写Outbox、不发布消息、不接consumer，也不改变六命令业务资格。
+- 后续所有权：GSA-06才在APPROVE同事务从锁定request/control读取expected binding、生成proof-era sidecar/new writer并原子写Outbox version/epoch与冻结bytes，以真实PG证明四者一致，同时保留legacy bytes；GSA-07只逐字节发布冻结delivery bytes；GSA-08必须新增或使用仅授权subject的raw-message consume seam，在当前`events.NATSBroker.ConsumeUntilResolved`调用generic `events.Unmarshal`之前调用GSA-05 dual decoder，且不得修改通用decoder或非授权消费，并由GSA-08/Begin按其合同重验绑定；旧consumer排空前不得投递新wire。`proof_digest`由Account对完整验证后的closed 11字段响应本地派生，领域不传第12字段；`command_fingerprint`单独校验，不能混称。
+- 测试与完成条件：共享Go/JS raw UTF-8 golden覆盖六命令、int64最小/最大/0、小值和所有非法词法，JS必须以词法/BigInt处理，不得先转Number；覆盖U+2028/U+2029、非BMP、控制字符、组合Unicode原样及duplicate/unknown/sensitive/64KiB±1。固定runner和Go版本以`-benchtime=100x -count=5 -benchmem`记录五轮合法最大向量与畸形64KiB输入的`ns/op,B/op,allocs/op`，首次结果经B审核后才成为回归基线；安全校验不得为性能数字删除。GSA-05只有实现、定向测试、适用完整verify、B代码PASS和独立Signed-off提交后才能DONE；当前文档审核不满足代码完成条件。
