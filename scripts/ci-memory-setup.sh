@@ -5,7 +5,7 @@
 # (ubuntu-22.04, ubuntu-24.04, ubuntu-22.04-arm):
 #   - Hosted runners are single-disk: / and /mnt are the same ext4
 #     (/dev/sda1). x64 images total 72G with only ~13-14 GiB free at boot,
-#     arm ~38 GiB. A swapfile on /mnt therefore eats the build disk
+#     arm ~34 GiB free. A swapfile on /mnt therefore eats the build disk
 #     directly, so disk swap is no longer created by default.
 #   - The private-repo hosted runner is 2-core / 7.8 GiB RAM (free -h);
 #     the "16 GiB RAM" claimed by older comments was the public-repo spec.
@@ -19,14 +19,22 @@
 #      34708283784) are re-classified as a transient environment incident:
 #      the same script ran green with zram loaded on the community repo the
 #      same day. The countermeasure is structural, not a rollback: every
-#      external call (modprobe, apt-get, fallocate) runs under a hard
-#      `timeout` cap, and any failure degrades loudly to the next layer
-#      instead of hanging the job.
+#      userspace external call (modprobe, apt-get, fallocate, mkswap,
+#      swapon) runs under `timeout` with a SIGKILL backstop, and any
+#      failure degrades loudly to the next layer. Residual risk that no
+#      userspace measure can remove: an in-kernel hang (module load or a
+#      stuck sysfs write) is uninterruptible; the workflow-side
+#      `timeout 240` + non-fatal wrapper is the last line there, and
+#      PINVOU3_CI_DISABLE_ZRAM=1 is the standing opt-out.
 #   2. Opt-in /mnt/swapfile (priority 10), only with
 #      PINVOU3_CI_ENABLE_DISK_SWAP=1, for self-hosted runners where /mnt is
 #      a real second disk. The default path never fallocates and never
 #      swapoff/rm's the image-provided swap (/swapfile, ~3G, left as is).
-#   3. zswap in front of whatever swap remains, enabled only when no
+#   3. Image swapfile as last resort: only when the runner came up with
+#      zero active swap (probe data: some ubuntu-22.04 boots ship /swapfile
+#      but leave it inactive), activate it so a zram failure degrades to
+#      "plain swap" instead of "7.8 GiB RAM and nothing else".
+#   4. zswap in front of whatever swap remains, enabled only when no
 #      /dev/zram swap is active, so the "compress in RAM first" layer
 #      exists exactly once.
 #
@@ -60,14 +68,17 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 0
 fi
 
-# run_to SECS CMD [ARGS...]: run CMD under a hard timeout so a hung
-# modprobe/apt-get can never hang the job; without coreutils timeout, run
-# CMD bare (every call site stays non-fatal either way).
+# run_to SECS CMD [ARGS...]: run CMD under a hard timeout (TERM, then
+# SIGKILL after 15s) so a hung userspace call can never outlive its cap;
+# without coreutils timeout, run CMD bare (every call site stays non-fatal
+# either way). A call stuck in an uninterruptible kernel state cannot be
+# killed by any userspace measure — that residual is documented in the
+# header above.
 run_to() {
   local secs=$1
   shift
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${secs}" "$@"
+    timeout -k 15 "${secs}" "$@"
   else
     "$@"
   fi
@@ -132,9 +143,9 @@ setup_zram() {
   fi
   log "zram0 disksize set to 24 GiB"
 
-  mkswap /dev/zram0 >/dev/null 2>&1 \
+  run_to 60 mkswap /dev/zram0 >/dev/null 2>&1 \
     || warn "mkswap /dev/zram0 failed; swapon will most likely fail too"
-  if swapon -p "${ZRAM_PRIORITY}" /dev/zram0 2>/dev/null; then
+  if run_to 60 swapon -p "${ZRAM_PRIORITY}" /dev/zram0 2>/dev/null; then
     log "zram swap active: /dev/zram0 24 GiB lz4, priority ${ZRAM_PRIORITY}"
   else
     warn "swapon /dev/zram0 failed"
@@ -170,18 +181,51 @@ setup_disk_swap() {
     return 0
   fi
   if swapon --show=NAME --noheadings 2>/dev/null | grep -qx '/mnt/swapfile'; then
-    swapoff /mnt/swapfile 2>/dev/null || warn "could not swapoff the image swapfile; leaving it in place"
+    if swapoff /mnt/swapfile 2>/dev/null; then
+      rm -f /mnt/swapfile
+    else
+      warn "could not swapoff the active /mnt/swapfile; keeping it as is instead of rebuilding"
+      return 0
+    fi
   fi
-  rm -f /mnt/swapfile
   if ! run_to 60 fallocate -l "${want_kib}K" /mnt/swapfile 2>/dev/null; then
     warn "fallocate ${want_kib}K /mnt/swapfile failed; keeping the existing swap configuration"
     return 0
   fi
   chmod 600 /mnt/swapfile
-  mkswap /mnt/swapfile >/dev/null 2>&1 || { warn "mkswap failed"; return 0; }
-  swapon -p "${DISK_SWAP_PRIORITY}" /mnt/swapfile 2>/dev/null \
-    || warn "swapon /mnt/swapfile failed; keeping the existing swap configuration"
-  log "disk swap ready: /mnt/swapfile $((want_kib / 1024)) MiB, priority ${DISK_SWAP_PRIORITY}"
+  run_to 60 mkswap /mnt/swapfile >/dev/null 2>&1 || { warn "mkswap failed"; return 0; }
+  if run_to 60 swapon -p "${DISK_SWAP_PRIORITY}" /mnt/swapfile 2>/dev/null; then
+    log "disk swap ready: /mnt/swapfile $((want_kib / 1024)) MiB, priority ${DISK_SWAP_PRIORITY}"
+  else
+    warn "swapon /mnt/swapfile failed; keeping the existing swap configuration"
+  fi
+}
+
+# Last-resort layer: when the runner came up with zero active swap (zram
+# unavailable and no opt-in disk swap), activate the image-provided
+# swapfile so the fallback is "plain swap" and never "7.8 GiB RAM and
+# nothing else". Probe data: some ubuntu-22.04 boots ship /swapfile but
+# leave it inactive, so an existing file must not be assumed to be an
+# active swap. Reformatting is attempted only when the file cannot be
+# swapon'd as is (ephemeral runner, no active swap to lose).
+activate_image_swap_fallback() {
+  local cand
+  for cand in /swapfile /mnt/swapfile; do
+    [[ -f ${cand} ]] || continue
+    if run_to 60 swapon "${cand}" 2>/dev/null; then
+      log "last-resort swap active: ${cand} (image-provided)"
+      return 0
+    fi
+    warn "swapon ${cand} failed as is; trying chmod 600 + mkswap + swapon once"
+    chmod 600 "${cand}" 2>/dev/null || true
+    if run_to 60 mkswap "${cand}" >/dev/null 2>&1 \
+      && run_to 60 swapon "${cand}" 2>/dev/null; then
+      log "last-resort swap active after reformat: ${cand}"
+      return 0
+    fi
+    warn "could not activate ${cand} as swap"
+  done
+  warn "no swap layer could be activated; continuing with RAM only"
 }
 
 # zram and zswap overlap: zswap is only enabled when no /dev/zram swap is
@@ -220,6 +264,11 @@ fi
 
 if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'; then
   setup_zswap_fallback
+fi
+
+if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
+  warn "no active swap after all layers; trying the image-provided swapfile"
+  activate_image_swap_fallback
 fi
 
 log "final swap layout:"
