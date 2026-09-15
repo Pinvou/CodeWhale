@@ -30,7 +30,7 @@ class MergeQueuePolicyTests(unittest.TestCase):
 
     def test_backflow_portability_rechecks_merge_group_on_three_platforms(self):
         portability = self._job("backflow-portability", "fast-gate")
-        self.assertIn("os: [ubuntu-latest, windows-latest, macos-15]", portability)
+        self.assertIn("os: [ubuntu-22.04, windows-latest, macos-15]", portability)
         self.assertIn("github.event_name == 'pull_request'", portability)
         self.assertIn("github.event_name == 'merge_group'", portability)
         self.assertIn("github.event.merge_group.base_sha", portability)

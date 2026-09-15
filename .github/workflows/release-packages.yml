@@ -100,7 +100,7 @@ jobs:
   # 同时用 sync-version.mjs --check 校验三处版本文件与 VERSION 一致,不一致 fail。
   check-version-bump:
     name: 检测发布链路变更
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     outputs:
       build_required: ${{ steps.diff.outputs.build_required }}

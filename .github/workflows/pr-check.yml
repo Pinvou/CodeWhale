@@ -81,7 +81,7 @@ jobs:
   commit-message:
     name: commit-message
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -108,7 +108,7 @@ jobs:
   version-consistency:
     name: version-consistency
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - name: Checkout
@@ -143,7 +143,7 @@ jobs:
   changes:
     name: changes
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
     outputs:
       rust_code: ${{ steps.filter.outputs.rust_code }}
@@ -423,7 +423,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-15]
+        os: [ubuntu-22.04, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     steps:
@@ -461,7 +461,7 @@ jobs:
   fast-gate:
     name: fast-gate
     if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - name: Checkout (含 submodule,fork 为 public 直接拉)
@@ -545,7 +545,7 @@ jobs:
     # smokes from their actual base/head diff. Shared, unknown, test-infrastructure,
     # and empty diffs fail closed to the complete smoke set.
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.frontend == 'true' || needs.changes.outputs.pet == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     defaults:
       run:
@@ -655,7 +655,7 @@ jobs:
     name: relay-test
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.relay == 'true' && (github.event_name == 'merge_group' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -683,7 +683,7 @@ jobs:
     name: team-relay-hub-test
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.team_relay_hub == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     services:
       postgres:
@@ -728,7 +728,7 @@ jobs:
     # Ready PR/Queue/main 仅在发布链路相关路径变化时验证版本同步、
     # Tauri overlay 与各平台打包契约，不生成 deb/dmg/nsis。
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.release_contract == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -763,7 +763,7 @@ jobs:
     name: knowledge-rust
     needs: changes
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.knowledge_rust == 'true' || needs.changes.outputs.knowledge_dependencies == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -783,7 +783,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou-knowledge
-          shared-key: knowledge-rust
+          # v2:2026-09 CI 镜像统一到 ubuntu-22.04,旧 key 缓存由 24.04 构建,
+          # 其编译产物与 jammy glibc 不兼容,换代隔离。
+          shared-key: knowledge-rust-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt --check
@@ -835,7 +837,7 @@ jobs:
     # cargo-deny 子步骤(已按 rust_dependencies 门控)需本 job 启动才能运行;
     # 否则 deny.toml 策略改动会静默漏检 cargo-deny。
     if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.pure_release_backflow != 'true' && (needs.changes.outputs.rust_code == 'true' || needs.changes.outputs.rust_dependencies == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
       # Draft 只跑无系统依赖的 fmt 快检；Ready PR、Queue 与 main 跑 clippy。
@@ -868,7 +870,8 @@ jobs:
           workspaces: |
             pinvou3-app/src-tauri
             pinvou-knowledge
-          shared-key: rust-lint
+          # v2:镜像统一到 ubuntu-22.04 后与 24.04 时代缓存隔离(同 knowledge-rust)。
+          shared-key: rust-lint-v2
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # fmt 硬门禁:风格规则见 rustfmt.toml(只用 stable 可用选项)。
@@ -1005,7 +1008,7 @@ jobs:
           )
         )
       }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     # Tauri + fastembed + aws-lc-sys 全冷编译耗时长;设上限避免卡死 runner 占用。
     # High-risk PR, combined-tree, and main runs retain a 120-minute safety limit.
     timeout-minutes: 120
@@ -1139,7 +1142,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
-          shared-key: rust-lint
+          # v2:镜像统一到 ubuntu-22.04 后与 24.04 时代缓存隔离(同 knowledge-rust)。
+          shared-key: rust-lint-v2
           save-if: false
 
       - name: Cargo test cache
@@ -1811,7 +1815,7 @@ jobs:
       - windows-runtime-test
       - windows-rustup-repair-test
     if: ${{ always() && ((github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
       - name: Checkout
