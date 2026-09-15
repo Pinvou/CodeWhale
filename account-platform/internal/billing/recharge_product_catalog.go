@@ -456,6 +456,13 @@ func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, cata
 		return RechargeProductCatalogItem{}, err
 	}
 	defer tx.Rollback(ctx)
+	if target == "ON_SALE" {
+		// Serialize admission checks with revocation before taking the catalog
+		// row lock, matching the revoker's lock order.
+		if err := lockTransactionKey(ctx, tx, "catalog.admission", catalogItemID.String()); err != nil {
+			return RechargeProductCatalogItem{}, err
+		}
+	}
 	var productID, current string
 	var version int64
 	var everPublished bool
@@ -472,9 +479,10 @@ func (r *PostgresRepository) TransitionRechargeProduct(ctx context.Context, cata
 			return RechargeProductCatalogItem{}, ErrConflict
 		}
 		var fingerprint string
-		var expires time.Time
-		err = tx.QueryRow(ctx, `SELECT publish_fingerprint,expires_at FROM product_admission_evidence evidence WHERE evidence_id=$1 AND catalog_item_id=$2 AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id)`, *evidenceID, catalogItemID).Scan(&fingerprint, &expires)
-		if err != nil || !expires.After(now) {
+		// PostgreSQL infinity is a valid non-expiring admission, not time.Time.
+		var unexpired bool
+		err = tx.QueryRow(ctx, `SELECT publish_fingerprint,expires_at>$3 FROM product_admission_evidence evidence WHERE evidence_id=$1 AND catalog_item_id=$2 AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id)`, *evidenceID, catalogItemID, now).Scan(&fingerprint, &unexpired)
+		if err != nil || !unexpired {
 			return RechargeProductCatalogItem{}, ErrConflict
 		}
 		item, loadErr := r.RechargeProductCatalogItem(ctx, catalogItemID)
