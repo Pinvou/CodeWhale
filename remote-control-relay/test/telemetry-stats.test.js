@@ -521,14 +521,14 @@ test("homepage and behavior task totals share clipping before installation-scope
 test("scene and model task associations are isolated by installation", () => {
   const now = at("2026-09-04T12:00:00");
   const events = [
-    { event_id: "scene_a", event_name: "scene_submitted", operation_id: "shared_scene", attempt_id: "shared_attempt", scene_l1: "work", scene_l2: "writing", identity_id: "install_a", occurred_at: now - 6_000 },
-    { event_id: "scene_b", event_name: "scene_submitted", operation_id: "shared_scene", attempt_id: "shared_attempt", scene_l1: "work", scene_l2: "writing", identity_id: "install_b", occurred_at: now - 6_000 },
+    { event_id: "scene_a", event_name: "scene_submitted", operation_id: "shared_scene", attempt_id: "shared_attempt", scene_l1: "work", scene_l2: "writing", identity_id: "install_a", session_id: "session_a", occurred_at: now - 6_000 },
+    { event_id: "scene_b", event_name: "scene_submitted", operation_id: "shared_scene", attempt_id: "shared_attempt", scene_l1: "work", scene_l2: "writing", identity_id: "install_b", session_id: "session_b", occurred_at: now - 6_000 },
     { event_id: "model_a", event_name: "model_used", attempt_id: "shared_attempt", provider_key: "deepseek", model_key: "deepseek", identity_id: "install_a", occurred_at: now - 5_000 },
     { event_id: "model_b", event_name: "model_used", attempt_id: "shared_attempt", provider_key: "deepseek", model_key: "deepseek", identity_id: "install_b", occurred_at: now - 5_000 },
-    { event_id: "finish_a", event_name: "task_finished", attempt_id: "shared_attempt", turn_id: "shared_turn", status: "success", duration_ms: 100, identity_id: "install_a", occurred_at: now - 4_000 },
-    { event_id: "finish_b", event_name: "task_finished", attempt_id: "shared_attempt", turn_id: "shared_turn", status: "failed", duration_ms: 900, identity_id: "install_b", occurred_at: now - 4_000 },
-    { event_id: "feedback_a", event_name: "response_feedback_changed", turn_id: "shared_turn", feedback_action: "set", rating: "positive", identity_id: "install_a", occurred_at: now - 3_000 },
-    { event_id: "feedback_b", event_name: "response_feedback_changed", turn_id: "shared_turn", feedback_action: "set", rating: "negative", identity_id: "install_b", occurred_at: now - 2_000 },
+    { event_id: "finish_a", event_name: "task_finished", attempt_id: "shared_attempt", session_id: "session_a", turn_id: "shared_turn", status: "success", duration_ms: 100, identity_id: "install_a", occurred_at: now - 4_000 },
+    { event_id: "finish_b", event_name: "task_finished", attempt_id: "shared_attempt", session_id: "session_b", turn_id: "shared_turn", status: "failed", duration_ms: 900, identity_id: "install_b", occurred_at: now - 4_000 },
+    { event_id: "feedback_a", event_name: "response_feedback_changed", session_id: "session_a", turn_id: "shared_turn", feedback_action: "set", rating: "positive", identity_id: "install_a", occurred_at: now - 3_000 },
+    { event_id: "feedback_b", event_name: "response_feedback_changed", session_id: "session_b", turn_id: "shared_turn", feedback_action: "set", rating: "negative", identity_id: "install_b", occurred_at: now - 2_000 },
   ];
   const devices = installationDevicesFor(events);
   const scene = buildBehaviorSceneRanking(devices, [], events, "today", now, { minimumGroupSubjects: 0 }).rows[0];
@@ -540,6 +540,34 @@ test("scene and model task associations are isolated by installation", () => {
   assert.equal(model.task_terminal_count, 2);
   assert.equal(model.task_success_count, 1);
   assert.equal(model.task_duration_p50_ms, 100);
+});
+
+test("scene value signals require the same installation, session, and turn", () => {
+  const now = at("2026-09-04T12:00:00");
+  const events = Array.from({ length: 30 }, (_, index) => {
+    const base = now - 60_000 + index * 1_000;
+    return [
+      { event_id: `scene_${index}`, event_name: "scene_submitted", operation_id: `scene_${index}`, attempt_id: `attempt_${index}`, scene_l1: "work", scene_l2: "writing", identity_id: "install_a", session_id: "session_a", occurred_at: base },
+      { event_id: `finish_${index}`, event_name: "task_finished", attempt_id: `attempt_${index}`, session_id: "session_a", turn_id: `turn_${index}`, mode: "assistant", initiator_type: "user", status: "success", duration_ms: 100, identity_id: "install_a", occurred_at: base + 100 },
+      { event_id: `cross_session_copy_${index}`, event_name: "response_copied", session_id: "session_b", turn_id: `turn_${index}`, identity_id: "install_a", occurred_at: base + 200 },
+    ];
+  }).flat();
+  events.push({ event_id: "cross_session_feedback", event_name: "response_feedback_changed", session_id: "session_b", turn_id: "turn_0", feedback_action: "set", rating: "negative", identity_id: "install_a", occurred_at: now - 1_000 });
+
+  const devices = installationDevicesFor(events);
+  const crossSessionOnly = buildBehaviorSceneRanking(devices, [], events, "today", now, { minimumGroupSubjects: 0 }).rows[0];
+  assert.equal(crossSessionOnly.explicit_value_sample_size, 30);
+  assert.equal(crossSessionOnly.explicit_value_rate, 0);
+  assert.equal(crossSessionOnly.negative_feedback_rate, 0);
+
+  const sameSessionEvents = [
+    ...events,
+    { event_id: "same_session_copy", event_name: "response_copied", session_id: "session_a", turn_id: "turn_0", identity_id: "install_a", occurred_at: now - 900 },
+    { event_id: "same_session_feedback", event_name: "response_feedback_changed", session_id: "session_a", turn_id: "turn_1", feedback_action: "set", rating: "negative", identity_id: "install_a", occurred_at: now - 800 },
+  ];
+  const sameSession = buildBehaviorSceneRanking(devices, [], sameSessionEvents, "today", now, { minimumGroupSubjects: 0 }).rows[0];
+  assert.equal(sameSession.explicit_value_rate, 1 / 30);
+  assert.equal(sameSession.negative_feedback_rate, 1 / 30);
 });
 
 test("tool funnel operation identifiers are isolated by installation", () => {
@@ -927,12 +955,14 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     finished("interrupted_terminal", "dev_interrupted_neighbor", "turn-interrupted", "2026-08-10T15:01:00", "session-interrupted", "interrupted"),
     { event_id: "interrupted_artifact", event_name: "artifact_exported", session_id: "session-interrupted", turn_id: "turn-interrupted", identity_id: "dev_interrupted_neighbor", occurred_at: at("2026-08-10T15:02:00") },
     { event_id: "interrupted_feedback", event_name: "response_feedback_changed", feedback_id: "interrupted_feedback", feedback_action: "set", rating: "positive", session_id: "session-interrupted", turn_id: "turn-interrupted", identity_id: "dev_interrupted_neighbor", occurred_at: at("2026-08-10T15:03:00") },
+    successful("legacy", "dev_legacy", "turn-legacy", "2026-08-10T16:00:00"),
     { event_id: "future_copy", event_name: "response_copied", session_id: "session-c", turn_id: "wrong_future_turn", identity_id: "dev_c", occurred_at: at("2026-08-12T12:01:00") },
   ];
   assert.deepEqual(buildWeeklyExplicitValueMetric(events, now), {
     wevta_installations: 1,
-    weekly_successful_task_installations: 8,
+    weekly_successful_task_installations: 9,
     explicit_value_sample_size: 8,
+    explicit_value_ineligible_installations: 1,
     explicit_value_confidence: "low",
     wevta_rate: null,
     positive_feedback_installations: 0,
@@ -942,6 +972,9 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     negative_feedback_rate: null,
     turn_mismatch_value_signal_count: 1,
   });
+  const overview = buildBehaviorOverview(installationDevicesFor(events), [], events, "30", now);
+  assert.equal(overview.metrics.explicit_value_ineligible_installations, 1);
+  assert(overview.data_quality.warnings.includes("explicit_value_join_key_missing"));
 });
 
 test("weekly explicit value feedback state is isolated by installation for explicit and fallback ids", () => {
@@ -971,6 +1004,8 @@ test("weekly explicit value feedback state is isolated by installation for expli
   const metric = buildWeeklyExplicitValueMetric(events, now);
 
   assert.equal(metric.weekly_successful_task_installations, 4);
+  assert.equal(metric.explicit_value_sample_size, 4);
+  assert.equal(metric.explicit_value_ineligible_installations, 0);
   assert.equal(metric.wevta_installations, 2);
   assert.equal(metric.positive_feedback_installations, 2);
 });
@@ -1082,9 +1117,9 @@ test("P1 tool and scene funnels preserve every stage and value outcome", () => {
     { event_id: "tool_call_done", event_name: "tool_call_completed", operation_id: "call_a", tool_key: "search", tool_type: "mcp", success: true, identity_id: "dev_a", occurred_at: at("2026-08-12T09:06:00") },
     { event_id: "scene_seen", event_name: "scene_impression", operation_id: "scene_view", scene_l1: "work", scene_l2: "document-writing", identity_id: "dev_a", occurred_at: at("2026-08-12T10:00:00") },
     { event_id: "scene_pick", event_name: "scene_selected", operation_id: "scene_pick", scene_l1: "work", scene_l2: "document-writing", identity_id: "dev_a", occurred_at: at("2026-08-12T10:01:00") },
-    { event_id: "scene_submit", event_name: "scene_submitted", operation_id: "scene_submit", attempt_id: "scene_attempt", scene_l1: "work", scene_l2: "document-writing", identity_id: "dev_a", occurred_at: at("2026-08-12T10:02:00") },
-    { event_id: "scene_finish", event_name: "task_finished", attempt_id: "scene_attempt", turn_id: "scene_turn", status: "success", duration_ms: 1200, identity_id: "dev_a", occurred_at: at("2026-08-12T10:03:00") },
-    { event_id: "scene_copy", event_name: "response_copied", turn_id: "scene_turn", identity_id: "dev_a", occurred_at: at("2026-08-12T10:04:00") },
+    { event_id: "scene_submit", event_name: "scene_submitted", operation_id: "scene_submit", attempt_id: "scene_attempt", scene_l1: "work", scene_l2: "document-writing", identity_id: "dev_a", session_id: "session_a", occurred_at: at("2026-08-12T10:02:00") },
+    { event_id: "scene_finish", event_name: "task_finished", attempt_id: "scene_attempt", session_id: "session_a", turn_id: "scene_turn", status: "success", duration_ms: 1200, identity_id: "dev_a", occurred_at: at("2026-08-12T10:03:00") },
+    { event_id: "scene_copy", event_name: "response_copied", session_id: "session_a", turn_id: "scene_turn", identity_id: "dev_a", occurred_at: at("2026-08-12T10:04:00") },
   ];
   const tools = buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "install", now, { minimumGroupSubjects: 0 });
   assert.deepEqual(tools.funnel_rows[0], {
@@ -1102,6 +1137,7 @@ test("P1 tool and scene funnels preserve every stage and value outcome", () => {
   assert.equal(scenes.rows[0].submission_rate, null);
   assert.equal(scenes.rows[0].task_success_rate, null);
   assert.equal(scenes.rows[0].explicit_value_rate, null);
+  assert.equal(scenes.rows[0].explicit_value_sample_size, 1);
   assert.equal(scenes.rows[0].task_duration_p50_ms, 1200);
   assert.equal(buildBehaviorToolRanking(installationDevicesFor(events), [], events, "today", "install", now).funnel_rows.length, 1);
   assert.equal(buildBehaviorSceneRanking(installationDevicesFor(events), [], events, "today", now).rows.length, 1);

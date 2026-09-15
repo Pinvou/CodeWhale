@@ -180,6 +180,9 @@ pub fn start_turn(session_id: &str) -> String {
 /// The engine publishes this id only after submission. Keeping it alongside
 /// the pre-submit timing id lets the UI retain its existing lifecycle pairing
 /// while response-value telemetry joins the matching `task_finished` event.
+/// Selecting the queue tail relies on the per-session turn lock keeping at most
+/// one admitted turn in flight; if that invariant changes, callers must bind by
+/// the local timing id instead.
 pub fn bind_behavior_turn_id(session_id: &str, behavior_turn_id: &str) -> bool {
     if behavior_turn_id.is_empty() {
         return false;

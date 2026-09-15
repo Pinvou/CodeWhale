@@ -7,6 +7,35 @@ const source = await readFile(
   new URL('../src/platform/tauri/bridge/artifacts.js', import.meta.url),
   'utf8',
 );
+const webSource = await readFile(
+  new URL('../src/platform/web/bridge.js', import.meta.url),
+  'utf8',
+);
+
+function extractNamedFunction(input, name) {
+  const start = input.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `${name} must exist`);
+  const bodyStart = input.indexOf('{', start);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = bodyStart; index < input.length; index += 1) {
+    const char = input[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === '{') depth += 1;
+    if (char === '}' && --depth === 0) return input.slice(start, index + 1);
+  }
+  throw new Error(`${name} body is not closed`);
+}
 
 function createArtifactsFeature({ failOpen = false, state: stateOverride, sessionStates = {} } = {}) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
@@ -128,4 +157,47 @@ test('desktop artifact basename fallback requires one match in the target sessio
     fixture.calls.filter(call => call.command === 'track_behavior_event').length,
     0,
   );
+});
+
+test('web artifact export attribution stays inside the downloaded session', () => {
+  const calls = [];
+  const state = {
+    activeSessionId: 'session-a',
+    artifacts: [{ path: '/workspace-a/report.pdf', telemetryId: 'artifact-a' }],
+  };
+  const sessionStates = {};
+  const sandbox = vm.createContext({
+    state,
+    sessionStates,
+    IS_WEB: true,
+    basename: value => String(value).split(/[\\/]/).pop(),
+    invoke(command, args) {
+      calls.push({ command, args });
+      return Promise.resolve(true);
+    },
+  });
+  vm.runInContext([
+    extractNamedFunction(webSource, 'artifactExportFormat'),
+    extractNamedFunction(webSource, 'artifactsForSession'),
+    extractNamedFunction(webSource, 'trackArtifactExported'),
+    'globalThis.trackArtifactExportedForTest = trackArtifactExported;',
+  ].join('\n'), sandbox, { filename: 'web-artifact-export-functions.js' });
+
+  sandbox.trackArtifactExportedForTest('/workspace-b/report.pdf', 'session-b');
+  assert.equal(calls.length, 0, 'an unloaded target session must not reuse the active artifact id');
+
+  sessionStates['session-b'] = {
+    artifacts: [{ path: '/workspace-b/report.pdf', telemetryId: 'artifact-b' }],
+  };
+  sandbox.trackArtifactExportedForTest('/workspace-b/report.pdf', 'session-b');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'web_access_track_behavior_event');
+  assert.equal(calls[0].args.request.artifactId, 'artifact-b');
+
+  sessionStates['session-b'].artifacts = [
+    { path: 'one/report.pdf', telemetryId: 'artifact-b-1' },
+    { path: 'two/report.pdf', telemetryId: 'artifact-b-2' },
+  ];
+  sandbox.trackArtifactExportedForTest('/workspace-b/report.pdf', 'session-b');
+  assert.equal(calls.length, 1, 'an ambiguous basename must not emit an export event');
 });
