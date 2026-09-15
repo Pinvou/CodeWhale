@@ -708,6 +708,113 @@ test("failed close stays locked and the same object can retry release", async (t
   }
 });
 
+test("a failed open retains its primary error and a later open recovers the verified owner lock", async (t) => {
+  const statePath = await temporaryState(t);
+  const initialized = await openStateStore(statePath);
+  await initialized.close();
+  let loadFault = true;
+  let releaseFault = true;
+  let releaseAttempts = 0;
+  const injectedFs = {
+    ...fs,
+    async open(target, flags, mode) {
+      if (loadFault && target === statePath && typeof flags === "number") {
+        loadFault = false;
+        const error = new Error("injected state load failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return fs.open(target, flags, mode);
+    },
+    async rm(target, options) {
+      if (releaseFault && target === lockPath(statePath)) {
+        releaseAttempts += 1;
+        const error = new Error("injected abandoned lock release failure");
+        error.code = "EBUSY";
+        throw error;
+      }
+      return fs.rm(target, options);
+    },
+  };
+  let openingError;
+  try {
+    await openStateStore(statePath, { fs: injectedFs, sleep: async () => {} });
+  } catch (error) {
+    openingError = error;
+  }
+  assert.equal(openingError?.code, "relay_state_unavailable");
+  assert.equal(openingError?.cause?.code, "EIO");
+  assert.equal(openingError?.releaseError?.code, "EBUSY");
+  assert.equal(releaseAttempts, 5);
+
+  releaseFault = false;
+  const originalLock = await fs.readFile(lockPath(statePath), "utf8");
+  const replacementLock = `${JSON.stringify(lockRecord({ owner: "BBBBBBBBBBBBBBBBBBBBBBBB" }))}\n`;
+  await fs.writeFile(lockPath(statePath), replacementLock, "utf8");
+  await rejectsCode(openStateStore(statePath), "relay_state_locked");
+  assert.equal(await fs.readFile(lockPath(statePath), "utf8"), replacementLock);
+
+  await fs.writeFile(lockPath(statePath), originalLock, "utf8");
+  const recovered = await openStateStore(statePath);
+  await recovered.close();
+});
+
+test("late legacy hardlinks to retired state in each persistence window fail closed", async (t) => {
+  for (const phase of ["backup", "primary"]) {
+    await t.test(phase, async () => {
+      const statePath = await temporaryState(t);
+      const legacyPath = legacyStatePath(statePath);
+      const targetPath = phase === "backup" ? `${statePath}.bak` : statePath;
+      let armed = false;
+      let injected = false;
+      const injectedFs = {
+        ...fs,
+        async rename(source, target) {
+          if (armed && !injected && target === targetPath) {
+            await fs.link(target, legacyPath);
+            injected = true;
+          }
+          return fs.rename(source, target);
+        },
+      };
+      const store = await openStateStore(statePath, { fs: injectedFs });
+      const retiredContents = await fs.readFile(targetPath, "utf8");
+      armed = true;
+      await assert.rejects(store.compareAndSwap("test", "0", { value: phase }),
+        (error) => error?.code === "relay_state_persist_failed"
+          && error?.cause?.code === "relay_state_aliases_legacy");
+      assert.equal(injected, true);
+      assert.equal(await fs.readFile(legacyPath, "utf8"), retiredContents);
+      assert.throws(() => store.readNamespace("test"),
+        (error) => error?.code === "relay_state_unavailable");
+      await store.close();
+    });
+  }
+});
+
+test("late legacy hardlink during backup restore preserves legacy bytes and aborts open", async (t) => {
+  const statePath = await temporaryState(t);
+  const legacyPath = legacyStatePath(statePath);
+  const initialized = await openStateStore(statePath);
+  await initialized.close();
+  const corrupted = "{corrupt-primary";
+  await fs.writeFile(statePath, corrupted, "utf8");
+  let injected = false;
+  const injectedFs = {
+    ...fs,
+    async rename(source, target) {
+      if (!injected && target === statePath) {
+        await fs.link(target, legacyPath);
+        injected = true;
+      }
+      return fs.rename(source, target);
+    },
+  };
+  await rejectsCode(openStateStore(statePath, { fs: injectedFs }), "relay_state_aliases_legacy");
+  assert.equal(injected, true);
+  assert.equal(await fs.readFile(legacyPath, "utf8"), corrupted);
+});
+
 test("a CAS uses one verified Windows ACL application per new state file", {
   skip: process.platform !== "win32",
 }, async (t) => {

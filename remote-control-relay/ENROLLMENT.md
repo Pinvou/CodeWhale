@@ -57,6 +57,11 @@ hold; another store in that process cannot take over. The caller must retain the
 object, resolve the I/O condition, and retry `close()`. Only that successful
 retry releases the process hold and permits reopening. Dropping an object after
 a failed close intentionally leaves the store unavailable until process restart.
+If initialization itself fails and lock release also exhausts its retries, the
+original initialization error remains primary and carries the release error.
+The module retains that exact unreturned owner and nonce; a later same-process
+open may first retry the owner-verified release after I/O recovers, but can never
+clean up a replaced lock or a lock belonging to another owner.
 
 The empty store is durably initialized before it is exposed. Each successful
 commit is written to a same-revision primary and `.bak` copy via
@@ -73,6 +78,15 @@ oversized, unsupported, or ambiguous candidates otherwise fail closed.
 Operators must back up the primary and `.bak`
 together while the Relay is stopped or through a later coordinated snapshot
 facility.
+
+Every atomic state write snapshots the legacy file and every existing managed
+file identity before replacement. Its transaction ledger also records each
+temporary and retired target inode, then compares the final legacy identity
+against the complete pre-write, in-transaction, and post-write set. A hardlink
+introduced while backup, primary, or backup-restoration replacement is in
+flight therefore cannot turn a successful controller write into a legacy Web
+state overwrite: the legacy path is never removed or written, the operation
+fails, and a live store becomes unavailable.
 
 On Windows the module disables DACL inheritance on the dedicated directory and
 every marker, primary, backup, temporary and lock file. It grants Full Control

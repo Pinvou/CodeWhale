@@ -23,6 +23,7 @@ const LOCK_SCHEMA = "pinvou-relay-controller-state-lock";
 const LOCK_VERSION = 1;
 const execFileAsync = promisify(execFile);
 const PROCESS_HELD_STATE_PATHS = new Set();
+const ABANDONED_OPEN_STORES = new Map();
 
 const WINDOWS_ACL_SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -385,6 +386,28 @@ function sameFileIdentity(left, right) {
     && (left.dev !== "0" || left.ino !== "0");
 }
 
+function fileIdentityKey(identity) {
+  return identity && (identity.dev !== "0" || identity.ino !== "0")
+    ? `${identity.dev}:${identity.ino}`
+    : null;
+}
+
+function openError(error) {
+  return error instanceof RelayStateStoreError
+    ? error
+    : new RelayStateStoreError("relay_state_unavailable", "relay_state_unavailable", { cause: error });
+}
+
+function attachReleaseError(error, releaseError) {
+  Object.defineProperty(error, "releaseError", {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: releaseError,
+  });
+  return error;
+}
+
 function fileIdentity(metadata) {
   if (typeof metadata.dev !== "bigint" || typeof metadata.ino !== "bigint") {
     fail("relay_state_file_identity_unavailable");
@@ -510,9 +533,16 @@ export class RelayStateStore {
       }
       fail("relay_state_unavailable");
     } catch (error) {
-      await this.#releaseLock();
-      if (error instanceof RelayStateStoreError) throw error;
-      fail("relay_state_unavailable", error);
+      const primaryError = openError(error);
+      try {
+        await this.#releaseLock();
+      } catch (releaseError) {
+        if (this.#lockOwner) {
+          ABANDONED_OPEN_STORES.set(comparablePath(this.#path), { store: this, cleanup: null });
+        }
+        throw attachReleaseError(primaryError, releaseError);
+      }
+      throw primaryError;
     }
   }
 
@@ -733,21 +763,30 @@ export class RelayStateStore {
   }
 
   async #assertLegacyStillSeparate() {
+    const managementIdentities = new Set();
+    await this.#captureManagementIdentities(managementIdentities);
+    await this.#assertLegacyAgainstIdentities(managementIdentities);
+  }
+
+  async #captureManagementIdentities(identities) {
+    for (const candidate of await this.#managementPaths()) {
+      const controller = await this.#optionalIdentity(candidate);
+      const key = fileIdentityKey(controller?.identity);
+      if (key) identities.add(key);
+    }
+  }
+
+  async #assertLegacyAgainstIdentities(managementIdentities) {
     await this.#rejectLegacySymlink();
     const legacy = await this.#optionalIdentity(this.#legacyStatePath);
-    if (legacy) {
-      for (const candidate of await this.#managementPaths()) {
-        const controller = await this.#optionalIdentity(candidate);
-        if (controller && sameFileIdentity(controller.identity, legacy.identity)) {
-          fail("relay_state_aliases_legacy");
-        }
-      }
-    }
+    const legacyKey = fileIdentityKey(legacy?.identity);
+    if (legacyKey && managementIdentities.has(legacyKey)) fail("relay_state_aliases_legacy");
     const legacyCanonical = await this.#canonicalCandidate(this.#legacyStatePath);
     const controllerDirectoryCanonical = await this.#fs.realpath(dirname(this.#path));
     if (pathWithin(legacyCanonical, controllerDirectoryCanonical)) {
       fail("legacy_state_path_inside_controller_directory");
     }
+    return legacy?.identity ?? null;
   }
 
   async #rejectLegacySymlink() {
@@ -759,15 +798,35 @@ export class RelayStateStore {
     }
   }
 
-  async #assertNoLegacyAliasBeforeWrite() {
-    await this.#assertAncestorSnapshot();
-    await this.#assertLegacyStillSeparate();
-  }
-
   async #legacyAliasGuardedWrite(path, contents) {
-    await this.#assertNoLegacyAliasBeforeWrite();
-    await this.#writeAtomic(path, contents);
-    await this.#assertLegacyStillSeparate();
+    await this.#assertAncestorSnapshot();
+    const transaction = { protectedIdentities: new Set(), legacyBeforeIdentity: null };
+    await this.#captureManagementIdentities(transaction.protectedIdentities);
+    transaction.legacyBeforeIdentity = await this.#assertLegacyAgainstIdentities(
+      transaction.protectedIdentities,
+    );
+    let operationError = null;
+    try {
+      await this.#writeAtomic(path, contents, transaction);
+    } catch (error) {
+      operationError = error;
+    }
+    let auditError = null;
+    try {
+      await this.#assertAncestorSnapshot();
+      await this.#captureManagementIdentities(transaction.protectedIdentities);
+      const legacyBeforeKey = fileIdentityKey(transaction.legacyBeforeIdentity);
+      if (legacyBeforeKey && transaction.protectedIdentities.has(legacyBeforeKey)) {
+        fail("relay_state_aliases_legacy");
+      }
+      await this.#assertLegacyAgainstIdentities(transaction.protectedIdentities);
+    } catch (error) {
+      auditError = error;
+    }
+    if (operationError) {
+      throw operationError;
+    }
+    if (auditError) throw auditError;
   }
 
   async #readBoundedFile(target, limit, errorCode = "relay_state_file_unsafe", verifyAcl = true) {
@@ -815,6 +874,7 @@ export class RelayStateStore {
 
   async #acquireLock() {
     const processPathKey = comparablePath(this.#path);
+    await this.#recoverAbandonedOpen(processPathKey);
     if (PROCESS_HELD_STATE_PATHS.has(processPathKey)) fail("relay_state_locked");
     const identity = await this.#processIdentity(process.pid);
     if (typeof identity !== "string" || identity.length < 3 || identity.length > 512) {
@@ -873,6 +933,26 @@ export class RelayStateStore {
       }
     }
     fail("relay_state_locked");
+  }
+
+  async #recoverAbandonedOpen(processPathKey) {
+    const abandoned = ABANDONED_OPEN_STORES.get(processPathKey);
+    if (!abandoned) return;
+    if (!abandoned.cleanup) {
+      abandoned.cleanup = (async () => {
+        await abandoned.store.#releaseLock();
+        abandoned.store.#closed = true;
+      })();
+    }
+    try {
+      await abandoned.cleanup;
+      if (ABANDONED_OPEN_STORES.get(processPathKey) === abandoned) {
+        ABANDONED_OPEN_STORES.delete(processPathKey);
+      }
+    } catch (error) {
+      abandoned.cleanup = null;
+      fail("relay_state_locked", error);
+    }
   }
 
   async #inspectLock() {
@@ -997,7 +1077,7 @@ export class RelayStateStore {
     throw lastError;
   }
 
-  async #writeAtomic(path, contents) {
+  async #writeAtomic(path, contents, transaction) {
     const temporaryPath = `${path}.${process.pid}.${this.#randomBytes(8).toString("hex")}.tmp`;
     let handle;
     try {
@@ -1005,6 +1085,8 @@ export class RelayStateStore {
       handle = await this.#fs.open(temporaryPath, "wx", 0o600);
       await this.#protectFilesystemPath(temporaryPath, "file");
       const temporaryIdentity = await this.#handleIdentity(handle);
+      const temporaryKey = fileIdentityKey(temporaryIdentity);
+      if (temporaryKey) transaction.protectedIdentities.add(temporaryKey);
       await handle.writeFile(contents, "utf8");
       await handle.sync();
       await handle.close();
@@ -1014,6 +1096,9 @@ export class RelayStateStore {
         || !sameFileIdentity(temporaryIdentity, await this.#pathIdentity(temporaryPath))) {
         fail("relay_state_temporary_file_changed");
       }
+      const retired = await this.#optionalIdentity(path);
+      const retiredKey = fileIdentityKey(retired?.identity);
+      if (retiredKey) transaction.protectedIdentities.add(retiredKey);
       await this.#replaceWithRetry(temporaryPath, path);
       const installed = await this.#fs.lstat(path);
       if (installed.isSymbolicLink()
