@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { isAbsolute, resolve } from "node:path";
 
 export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
 export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
@@ -166,6 +167,15 @@ function sourceForDeployment(deployment) {
   return "development_tofu";
 }
 
+function configuredAbsolutePath(value, label) {
+  if (typeof value !== "string" || !isAbsolute(value)) fail(`${label}_invalid`);
+  return resolve(value);
+}
+
+function comparablePath(value) {
+  return process.platform === "win32" ? value.toLocaleLowerCase("en-US") : value;
+}
+
 export function loadEnrollmentRegistryConfig(env = process.env) {
   const deployment = env.PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT;
   if (!DEPLOYMENTS.has(deployment)) fail("enrollment_deployment_invalid");
@@ -183,10 +193,23 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
   if (!KEY_ID.test(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID || "")) fail("enrollment_hmac_key_id_invalid");
   const hmacKey = Buffer.from(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY || "", "utf8");
   if (hmacKey.length < 32 || hmacKey.length > 4096) fail("enrollment_hmac_key_invalid");
+  const controllerStatePath = configuredAbsolutePath(
+    env.PINVOU_REMOTE_CONTROLLER_STATE_PATH,
+    "controller_state_path",
+  );
+  const legacyWebStatePath = configuredAbsolutePath(
+    env.PINVOU_REMOTE_STATE_PATH,
+    "legacy_web_state_path",
+  );
+  if (comparablePath(controllerStatePath) === comparablePath(legacyWebStatePath)) {
+    fail("controller_state_path_aliases_legacy");
+  }
   const config = Object.freeze({
     deployment,
     runtime_environment: runtimeEnvironment,
     development_tofu: developmentTofu,
+    controller_state_path: controllerStatePath,
+    legacy_web_state_path: legacyWebStatePath,
   });
   CONFIG.set(config, {
     ...config,
@@ -205,8 +228,14 @@ function configDetails(config) {
 export class EnrollmentRegistry {
   static open({ stateStore, config, clock = Date.now } = {}) {
     if (!stateStore || typeof stateStore.readNamespace !== "function"
-      || typeof stateStore.compareAndSwap !== "function") fail("enrollment_state_store_invalid");
+      || typeof stateStore.compareAndSwap !== "function"
+      || typeof stateStore.getPathPolicy !== "function") fail("enrollment_state_store_invalid");
     const details = configDetails(config);
+    const pathPolicy = stateStore.getPathPolicy();
+    if (comparablePath(pathPolicy.controller_state_path) !== comparablePath(details.controller_state_path)
+      || comparablePath(pathPolicy.legacy_web_state_path) !== comparablePath(details.legacy_web_state_path)) {
+      fail("enrollment_state_store_path_mismatch");
+    }
     const registry = new EnrollmentRegistry(stateStore, details, clock);
     registry.#read();
     return registry;
