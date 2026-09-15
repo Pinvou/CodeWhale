@@ -265,17 +265,22 @@ versions, message/payload types, fields, enum values, capabilities, duplicates
 and role combinations fail closed. Capability negotiation is
 intersection-only: Relay sorts the exact A/B intersection bytewise, rejects an
 empty intersection, and never inserts a capability absent from either side.
-Validation has two explicit modes. Shape-only parsing checks schema, size,
+General validation has two entry modes. Shape-only parsing checks schema, size,
 role and any supplied lease context without assuming negotiation state. Runtime
 state-machine dispatch requires a validation context containing the frozen
-`negotiated_capabilities`; omitting it fails closed. Every message whose schema
+`negotiated_capabilities`; omitting it fails closed as
+`unsupported_capability: negotiated_capabilities`, including for
+`controller_capabilities` and `error`. Their shape-only entry point remains
+available without runtime context, while their runtime entry point requires an
+explicit context whose capability list may be empty. Every message whose schema
 contains `controller_lease_id`, and every decrypted payload, additionally
 requires a non-empty runtime `lease` context containing the complete
 `connection_id + controller_lease_id + lease_epoch + relay_epoch +
 remote_control_generation` tuple. Missing lease context is the stable local
 `missing_field: runtime_context.lease` failure; a supplied cross-lease tuple is
-`stale_context`. Only the manifest's explicit `runtime_pre_lease_messages`
-allowlist may be processed without a lease: `controller_capabilities`,
+`stale_context`. Within the general runtime validator, only the manifest's
+explicit `runtime_pre_lease_messages` allowlist may be processed without a lease:
+`controller_capabilities`,
 `desktop_endpoint_claim`, `desktop_pairing_register`,
 `desktop_pairing_registered`, `desktop_pairing_revoke`,
 `controller_pairing_claim`, `controller_pairing_reserved`,
@@ -315,6 +320,22 @@ context exists, both fields become mandatory on either success or failure and
 must match it. This independent registration context is not a lease context.
 Reusing a stable registration ID with a different generation, endpoint,
 identity, public key, algorithm or capability list is `invalid_message`.
+
+`controller_joined` is the sole `lease_install_messages` entry and never
+requires a pre-existing lease. It is not accepted by the general runtime
+validator: callers must use a `LeaseInstallValidationContext` populated from
+the authenticated claim socket and previously verified signed reservation /
+handshake state, never from fields copied out of the untrusted
+`controller_joined` candidate. The context freezes `request_id`, expected
+`pairing_id`, `reservation_id`, `remote_control_generation`, `relay_epoch`,
+`transcript_hash`, expected signed `controller_connection_identity`, and
+negotiated capabilities. The
+Relay result must echo all seven bindings and requires `pairing_v1`; any
+mismatch is `stale_context`. Only after all bindings and the exact result schema
+validate does the validator return a new immutable `LeaseContext` containing
+`connection_id + controller_lease_id + lease_epoch + relay_epoch +
+remote_control_generation`. Thus an attacker cannot make the receiver construct
+its expected identity or epoch from the same unverified result being checked.
 
 After reservation, messages carry `pairing_id + reservation_id + relay_epoch +
 remote_control_generation + transcript_hash`. After lease creation, every
@@ -448,7 +469,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`e1e511c4819d2298b735e6b049cb59cbd8935858f7da67d43beaf9106a068fd9`.
+`de6e06bc6d5d0213bccea6841d4b256dd5403c493c9601b244bf0533034d2721`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
@@ -538,7 +559,7 @@ transitions.
 | A/B | `finished_receipt_commit` | Commit the role's independently random receipt secret. |
 | A/B | `encrypted_handshake_finished` | Deliver that sender's Finished and receipt secret only inside ciphertext. |
 | A/B | `finished_receipt_ack` | The opposite receiver returns the received secret to the Relay exactly once. |
-| Relay | `controller_joined` | Atomically announce the consumed pairing and new controller lease. |
+| Relay | `controller_joined` | Echo request/pairing/reservation/transcript bindings and atomically announce the consumed pairing and newly installed controller lease. |
 | A/B | `controller_liveness` | Advance only that transport role's epoch and monotonic sequence. |
 | B | `controller_liveness_challenge_a` | Create a one-use challenge for direct A-to-B proof. |
 | A | `encrypted_controller_liveness_a` | Relay-blind E2E liveness response bound to connection, lease and challenge. |
@@ -583,7 +604,8 @@ The outer gate maps pairing messages to `pairing_v1`, receipt/Finished messages
 to `finished_receipt_v1`, liveness messages to `role_liveness_v1`, resume
 messages to `resume_v1`, and encrypted frames/disconnect to
 `encrypted_frames_v1`. Capability announcement and generic errors are the only
-outer messages without a negotiated capability requirement. Capability
+outer messages without a particular negotiated capability requirement; their
+runtime validation still requires an explicit capability context. Capability
 snapshot and task payloads require negotiated `task_v1`; permission,
 attachment and artifact payloads require their same-named `*_v1`; snapshots and
 journal payloads require `snapshot_journal_v1`. `encrypted_frame` requires both
@@ -598,7 +620,11 @@ The pairing code is consumed and the lease is created in one atomic transition
 only after the Relay validates both role commitments and both receipts from the
 opposite authenticated sockets. Timeout, disconnect, bad transcript, wrong
 role, replay or a partial handshake terminates the pairing instance and creates
-no lease.
+no lease. The resulting `controller_joined` additionally carries and validates
+the original reservation's `request_id + pairing_id + reservation_id +
+transcript_hash + relay_epoch + remote_control_generation` and the receiver's
+pre-established signed `controller_connection_identity` before installing the
+new Relay-assigned `connection_id` and returned lease.
 
 Each sender creates an independent 32-byte CSPRNG receipt secret. Its commitment
 has exactly one encoding:

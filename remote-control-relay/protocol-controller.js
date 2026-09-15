@@ -14,7 +14,7 @@ const MAX_TASK_REFERENCES = 32;
 const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "e1e511c4819d2298b735e6b049cb59cbd8935858f7da67d43beaf9106a068fd9";
+export const CONTROLLER_CONTRACT_SHA256 = "de6e06bc6d5d0213bccea6841d4b256dd5403c493c9601b244bf0533034d2721";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -37,6 +37,7 @@ export const CONTROLLER_PAYLOAD_TYPES = Object.freeze([
   "attachment_chunk", "attachment_commit", "artifact_index_request", "artifact_index", "artifact_read_request",
   "artifact_chunk", "session_snapshot_request", "session_snapshot", "journal_replay_request", "journal_event",
 ]);
+export const LEASE_INSTALL_MESSAGE_TYPES = Object.freeze(["controller_joined"]);
 
 export const TASK_STATUSES = Object.freeze([
   "admitted", "running", "waiting_permission", "succeeded", "failed", "cancelled", "interrupted", "result_unknown",
@@ -89,7 +90,7 @@ const MESSAGE_SCHEMAS = Object.freeze({
   finished_receipt_commit: schema(["v", "type", "request_id", "pairing_id", "reservation_id", "remote_control_generation", "relay_epoch", "transcript_hash", "sender_role", "commitment"], [], ["A", "B"]),
   encrypted_handshake_finished: schema(["v", "type", "request_id", "pairing_id", "reservation_id", "remote_control_generation", "relay_epoch", "transcript_hash", "sender_role", "ciphertext_b64", "ciphertext_bytes"], [], ["A", "B"]),
   finished_receipt_ack: schema(["v", "type", "request_id", "pairing_id", "reservation_id", "remote_control_generation", "relay_epoch", "transcript_hash", "sender_role", "receiver_role", "receipt_secret_b64"], [], ["A", "B"]),
-  controller_joined: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "liveness_epoch_a", "liveness_epoch_b", "resume_token_b64", "resume_deadline_ms"], [], ["relay"]),
+  controller_joined: schema(["v", "type", "request_id", "pairing_id", "reservation_id", "transcript_hash", "controller_connection_identity", ...LEASE_CONTEXT_FIELDS, "liveness_epoch_a", "liveness_epoch_b", "resume_token_b64", "resume_deadline_ms"], [], ["relay"]),
   controller_liveness: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "sender_role", "liveness_epoch", "heartbeat_sequence"], [], ["A", "B"]),
   controller_liveness_challenge_a: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "challenge_id", "challenge_b64"], [], ["B"]),
   encrypted_controller_liveness_a: schema(["v", "type", ...ROUTING_CONTEXT_FIELDS, "ciphertext_b64", "ciphertext_bytes"], [], ["A"]),
@@ -139,6 +140,10 @@ const TRANSCRIPT_SCALAR_PREFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(0,
 const TRANSCRIPT_SCALAR_SUFFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(13));
 const ROUTE_REQUIRED = Object.freeze(["display_name", "preset", "wire_api", "base_url", "model", "image_capability_override"]);
 const ROUTE_OPTIONAL = Object.freeze(["provider_kind", "vendor", "endpoint_mode", "context_window_tokens", "max_output_tokens", "reasoning_effort"]);
+const LEASE_INSTALL_CONTEXT_FIELDS = Object.freeze([
+  "request_id", "expected_pairing_id", "reservation_id", "remote_control_generation",
+  "relay_epoch", "transcript_hash", "expected_controller_connection_identity", "negotiated_capabilities",
+]);
 const NESTED_SCHEMAS = Object.freeze({
   task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
   temporary_model_package_v1: schema(["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], []),
@@ -477,8 +482,8 @@ function enforceNegotiatedPayload(payloadKind, runtimeContext) {
 }
 
 function enforceNegotiatedMessage(message, runtimeContext) {
-  if (message.type === "controller_capabilities" || message.type === "error") return;
   const capabilities = requireNegotiatedCapabilities(runtimeContext);
+  if (message.type === "controller_capabilities" || message.type === "error") return;
   for (const required of OUTER_MESSAGE_CAPABILITIES[message.type] ?? []) {
     if (!capabilities.includes(required)) fail("unsupported_capability", message.type);
   }
@@ -486,15 +491,57 @@ function enforceNegotiatedMessage(message, runtimeContext) {
 }
 
 export function validateControllerRuntimeMessage(input, senderRole, runtimeContext) {
+  requireNegotiatedCapabilities(runtimeContext);
   const shape = validateControllerMessage(input, senderRole);
   enforceNegotiatedMessage(shape, runtimeContext);
+  if (LEASE_INSTALL_MESSAGE_TYPES.includes(shape.type)) fail("missing_field", "lease_install_validation_context");
   const needsLease = MESSAGE_SCHEMAS[shape.type].required.includes("controller_lease_id");
   const lease = needsLease ? requireRuntimeLease(runtimeContext) : runtimeContext?.lease;
   const message = lease === undefined ? shape : validateControllerMessage(input, senderRole, lease);
   return message;
 }
 
+export class LeaseInstallValidationContext {
+  constructor(input) {
+    const context = exactObject(input, LEASE_INSTALL_CONTEXT_FIELDS, [], "lease_install_validation_context");
+    for (const field of ["request_id", "expected_pairing_id", "reservation_id", "remote_control_generation", "relay_epoch", "expected_controller_connection_identity"]) {
+      identifier(context[field], `lease_install_validation_context.${field}`);
+    }
+    hex64(context.transcript_hash, "lease_install_validation_context.transcript_hash");
+    stringList(context.negotiated_capabilities, "lease_install_validation_context.negotiated_capabilities", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
+    this.request_id = context.request_id;
+    this.expected_pairing_id = context.expected_pairing_id;
+    this.reservation_id = context.reservation_id;
+    this.remote_control_generation = context.remote_control_generation;
+    this.relay_epoch = context.relay_epoch;
+    this.transcript_hash = context.transcript_hash;
+    this.expected_controller_connection_identity = context.expected_controller_connection_identity;
+    this.negotiated_capabilities = Object.freeze([...context.negotiated_capabilities]);
+    Object.freeze(this);
+  }
+}
+
+export function validateControllerLeaseInstallMessage(input, senderRole, context) {
+  if (!(context instanceof LeaseInstallValidationContext)) fail("missing_field", "lease_install_validation_context");
+  const message = validateControllerMessage(input, senderRole);
+  if (!LEASE_INSTALL_MESSAGE_TYPES.includes(message.type)) fail("invalid_message", "lease_install_message");
+  enforceNegotiatedMessage(message, context);
+  const expected = [
+    ["request_id", context.request_id],
+    ["pairing_id", context.expected_pairing_id],
+    ["reservation_id", context.reservation_id],
+    ["remote_control_generation", context.remote_control_generation],
+    ["relay_epoch", context.relay_epoch],
+    ["transcript_hash", context.transcript_hash],
+    ["controller_connection_identity", context.expected_controller_connection_identity],
+  ];
+  for (const [field, value] of expected) if (message[field] !== value) fail("stale_context", field);
+  const lease = Object.freeze(Object.fromEntries(LEASE_CONTEXT_FIELDS.map((field) => [field, message[field]])));
+  return Object.freeze({ message, lease });
+}
+
 export function validateControllerRuntimePayload(input, senderRole, runtimeContext) {
+  requireNegotiatedCapabilities(runtimeContext);
   const shape = validateControllerPayload(input, senderRole);
   enforceNegotiatedPayload(shape.type, runtimeContext);
   const lease = requireRuntimeLease(runtimeContext);
@@ -837,6 +884,8 @@ export function controllerContractManifest() {
     route_required: [...ROUTE_REQUIRED],
     route_optional: [...ROUTE_OPTIONAL],
     nested_schemas: Object.fromEntries(Object.entries(NESTED_SCHEMAS).map(([name, definition]) => [name, { required: [...definition.required], optional: [...definition.optional] }])),
+    lease_install_messages: [...LEASE_INSTALL_MESSAGE_TYPES],
+    lease_install_context_required: [...LEASE_INSTALL_CONTEXT_FIELDS],
     runtime_pre_lease_messages: CONTROLLER_MESSAGE_TYPES.filter((type) => !MESSAGE_SCHEMAS[type].required.includes("controller_lease_id")),
     collection_limits: { task_attachment_ids: MAX_TASK_REFERENCES, task_skill_ids: MAX_TASK_REFERENCES, descriptors: MAX_DESCRIPTORS, artifacts: MAX_ARTIFACTS, capabilities: CONTROLLER_CAPABILITIES.length },
     base_url_grammar: "lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
@@ -847,6 +896,7 @@ export function controllerContractManifest() {
     validation_modes: {
       shape_only: "schema-role-lease-shape-without-capability-state",
       runtime: "negotiated-capabilities-required-for-state-machine-messages",
+      lease_install: "trusted-handshake-bindings-produce-new-lease",
       registration: "independent-generation-registration-idempotency-context",
     },
   };
