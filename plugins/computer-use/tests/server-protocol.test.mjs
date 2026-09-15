@@ -149,7 +149,7 @@ before(async () => {
 
 after(() => {
   server?.kill("SIGTERM");
-  for (const d of [stateDir, recDir, fakeHome]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
+  for (const d of [stateDir, recDir, fakeHome, binDir]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 });
 
 test("tools/list exposes the full frontier surface with valid schemas", async () => {
@@ -182,7 +182,7 @@ test("computer registry round-trip over the protocol", async () => {
   assert.equal(r.active, "local");
 });
 
-test("registering an ssh computer installs the agent and probes the platform", async () => {
+test("registering an ssh computer installs the agent and probes the platform", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (extensionless ssh/scp shims cannot execute on win32)" }, async () => {
   const r = await tool("computer_register", { computer: "box", transport: "ssh", host: "box.test", user: "me" });
   assert.equal(r.ok, true, JSON.stringify(r.error ?? {}));
   assert.equal(r.agentInstall.remotePlatform, process.platform, "platform probed via agent");
@@ -259,9 +259,14 @@ test("ssh zoom rebinds the raster so child pixels aim at the crop region", { ski
 });
 
 test("ssh drag endpoints resolve against the rebound child raster", { skip: process.platform === "win32" && "ssh shim tests need a POSIX ssh shim (see the registering-ssh test)" }, async () => {
-  // The bound frame is still the previous test's zoom child (origin {60,45}
-  // at scale 2), so child pixels (0,0) and (20,10) must cross the wire as
-  // screen points — drag endpoints take the same host-side resolution.
+  // Bind the same raster the zoom rebind test binds: screenshot, then zoom
+  // region [100,50] at scale 2, so the child frame has origin {60,45}. Child
+  // pixels (0,0) and (20,10) must cross the wire as screen points — drag
+  // endpoints take the same host-side resolution.
+  const shot = await tool("screenshot", { computer: "box" });
+  assert.equal(shot.ok, true, JSON.stringify(shot.error ?? {}));
+  const zoom = await tool("zoom", { computer: "box", region: [100, 50, 300, 200] });
+  assert.equal(zoom.ok, true, JSON.stringify(zoom.error ?? {}));
   const drag = await tool("left_click_drag", { computer: "box", from_target: { type: "coordinate", x: 0, y: 0 }, to: { type: "coordinate", x: 20, y: 10 } });
   assert.equal(drag.ok, true, JSON.stringify(drag.error ?? {}));
   const sent = wireCalls("left_click_drag").at(-1);

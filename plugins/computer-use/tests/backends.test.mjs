@@ -255,9 +255,10 @@ function decodePNG(buf) {
 // coordinate: r=x*4, g=y*5, b=x+y (mod 256).
 const grad = (x, y) => [(x * 4) % 256, (y * 5) % 256, (x + y) % 256];
 
-test("darwin: zoom crops 1:1 in raster pixels and advances the last raster so chained zooms crop from the child", { skip: process.platform !== "darwin" && "pixel check runs real sips (macOS only)" }, async () => {
+test("darwin: zoom crops 1:1 in raster pixels and advances the last raster so chained zooms crop from the child", { skip: process.platform !== "darwin" && "pixel check runs real sips (macOS only)" }, async (t) => {
   const { create } = await import("../src/backends/darwin.mjs");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-darwin-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
   process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
   const backend = create({ exec: { run: async () => ({ code: 0, stdout: "", stderr: "" }) } });
   const src = path.join(dir, "src.png");
@@ -284,9 +285,10 @@ test("darwin: zoom crops 1:1 in raster pixels and advances the last raster so ch
   assert.deepEqual(img2.px(9, 9), grad(39, 25));
 });
 
-test("linux: zoom crops 1:1 in raster pixels and advances the last raster so chained zooms crop from the child", { skip: process.platform !== "linux" && "pixel check runs real ffmpeg (linux CI)" }, async () => {
+test("linux: zoom crops 1:1 in raster pixels and advances the last raster so chained zooms crop from the child", { skip: process.platform !== "linux" && "pixel check runs real ffmpeg (linux CI)" }, async (t) => {
   const { create } = await import("../src/backends/linux.mjs");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cu-zoom-linux-"));
+  t.after(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
   process.env.CODEWHALE_CU_RECORDINGS_DIR = path.join(dir, "rec");
   const backend = create({ exec: {} });
   await backend.list_displays().catch(() => {}); // fills the tool probe cache; headless hosts may fail harmlessly
