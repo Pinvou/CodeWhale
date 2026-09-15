@@ -216,6 +216,9 @@ GSA-07：仅接线Account授权subject的fence-aware Relay与永久人工replay�
 
 GSA-08：六命令consumer、持久尝试及确认式DLQ收口的实施细化；当前状态为PLAN_B_APPROVED / IMPLEMENTATION_IN_PROGRESS / NOT_DEPLOYED。
 
+- **Account 首轮审核未通过**：`3ac6166e` 交付 Account 000053、binding/Begin/持久投递状态及接口授权。签署候选的八组真实 PG 测试通过（88.897秒，无SKIP），但 B 仍提出三项阻断：Begin 未闭合 mode/relay/epoch 动作矩阵、序号 int64/BIGINT 不能覆盖完整 uint64、authorization owner 的 request 表级 SELECT/UPDATE(id) 超出必要列权限。这些既有测试通过不证明遗漏场景正确。本轮保持 CHANGES_REQUESTED，使用新增前向迁移修订，不能改写已提交 000053 的历史校验和；Billing/Token 业务接线暂停，待本轮复审通过。一次测试前置 writer readiness 不可用、相同候选复测通过的间歇风险继续保留，不归零。
+- **基础修订与回归**：`936e03d8` 修复 credential-edge 示例新增权限与 closed checker 不兼容，严格保留完整旧权限集或显式完整新权限集；`5b7c0876` 新增正 uint64 的规范十进制字符串 Sequence 类型，两项均获 B 提交级 PASS，但不等于上述三阻断已经解决。该签署候选独立完整 verify exit 0：Node 574项为572 PASS/0 FAIL/2项既有环境SKIP（84.981秒），Go全包test/vet、OpenAPI（9既有warning）、i18n/observability/architecture及其余门禁通过。新的控制矩阵、NUMERIC/HTTP全链接入及最小列权限仍待实现与复审，完整GSA-08仍未完成。
+
 - **只读回执阶段审结**：计划 `edf7db47` 与实现 `4ed6f79c` 均获 B 提交级 PASS；规范回执、独立摘要、整数精度及漂移定向测试通过（events 5.127秒）。实现候选独立完整 verify exit 0：Node 571项为569 PASS/0 FAIL/2项既有环境SKIP（123.327秒），Go全包test/vet、OpenAPI（9既有warning）、i18n/observability/architecture及其余门禁通过。此阶段只提供读取器，不包含业务启动接线、真实Q捕获或生产投递；Account53仍在联测，完整GSA-08未审结，环境欠账保持。
 
 - **首轮实现边界**：仅交付 `internal/platform/approvalconsumer` closed registry，以及 `internal/platform/events` 原始授权消息处理接口、独立确认操作与专属资源形状校验。Account53、权威binding/Begin、Billing持久尝试、Token业务接线及可信resource manifest读取仍未完成；新Billing durable没有可信Q+1输入时保持不可启动。此轮不是GSA-08完成或生产启用证据；B必须对本轮提交独立审核。
