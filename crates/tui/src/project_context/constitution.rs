@@ -246,7 +246,13 @@ impl RepoConstitution {
         }
         format!(
             "<codewhale_repo_constitution source=\"{}\">\nCodewhale-specific repo authority policy (local law: subordinate to the global Constitution and the current user request, but above memory and old handoffs; WHALE.md is ignored and should be migrated, not treated as law).\n\n{}</codewhale_repo_constitution>",
-            source.display(),
+            // Same origin-label convention as `<project_instructions>`: file
+            // name only (the loader's relative path is a compile-time
+            // constant, so the base name is stable), keeping absolute paths
+            // out of provider-bound prompt labels. Operators still get the
+            // locator via `constitution_source_path` in the report and
+            // `/constitution`.
+            super::project_instructions_source_label(Some(source)),
             body.trim_end()
         )
     }

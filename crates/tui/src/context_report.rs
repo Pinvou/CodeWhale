@@ -449,8 +449,10 @@ fn base_source_entries(
     }
 
     if let Some(content) = project_context.instructions.as_deref() {
-        // 与 ProjectContext::as_system_block 同一 helper:source 只报文件名,
-        // 报告与提示词看到的标签一致,不泄漏绝对路径。
+        // Same helper as ProjectContext::as_system_block, so the report's
+        // source token derives from the same label the prompt shows. (The
+        // entry below still displays the absolute source path for operators;
+        // only the prompt label is relativized.)
         let source = crate::project_context::project_instructions_source_label(
             project_context.source_path.as_deref(),
         );

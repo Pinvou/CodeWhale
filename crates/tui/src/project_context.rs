@@ -1397,10 +1397,28 @@ mod tests {
     }
 
     #[test]
+    fn project_instructions_source_label_falls_back_to_project() {
+        use crate::project_context::project_instructions_source_label;
+        assert_eq!(
+            project_instructions_source_label(None),
+            "project",
+            "a missing source path keeps the historical literal label"
+        );
+        assert_eq!(
+            project_instructions_source_label(Some(std::path::Path::new("/etc/AGENTS.md"))),
+            "AGENTS.md"
+        );
+    }
+
+    #[test]
     fn forkguard_project_instructions_source_is_file_name_not_absolute_path() {
-        // 提示词前缀含 source 标签且位于 KV 缓存稳定区(块 2):同一份
-        // AGENTS.md 被搬到不同目录后重载,块文本必须逐字节一致,否则整段
-        // 请求(含历史)的提供商前缀缓存全损。
+        // The source label sits inside the pinned system prompt: loading the
+        // same AGENTS.md from a different directory must leave the
+        // instructions block byte-identical, so a move emits no spurious
+        // `<context_update>` history append and no absolute path enters a
+        // provider-bound label. Scope note: ancestor-chain and project-rule
+        // labels keep their own (absolute) spellings; relativizing those is
+        // a separate decision.
         let dir_a = tempdir().expect("tempdir a");
         let dir_b = tempdir().expect("tempdir b");
         fs::write(dir_a.path().join("AGENTS.md"), "Pinned content").expect("write a");
@@ -1412,13 +1430,17 @@ mod tests {
         let block_b = load_project_context(dir_b.path())
             .as_system_block()
             .expect("block b");
-        assert_eq!(block_a, block_b, "目录移动不应改变项目指令块");
+        assert_eq!(
+            block_a, block_b,
+            "a directory move must not change the project instructions block"
+        );
         assert!(block_a.contains("source=\"AGENTS.md\""));
         assert!(
             !block_a.contains(&dir_a.path().display().to_string()),
-            "绝对路径不得进入提示词标签"
+            "absolute paths must not enter prompt source labels"
         );
     }
+
     #[test]
     fn test_empty_file_warning() {
         let tmp = tempdir().expect("tempdir");
@@ -1685,6 +1707,14 @@ mod tests {
             .as_deref()
             .expect("constitution block rendered");
         assert!(block.contains("<codewhale_repo_constitution"));
+        // Same origin-label convention as project_instructions: file name
+        // only, no absolute path in the provider-bound label (the locator
+        // stays available via constitution_source_path and /constitution).
+        assert!(block.contains("source=\"constitution.json\""));
+        assert!(
+            !block.contains(&tmp.path().display().to_string()),
+            "the constitution prompt label must not carry the absolute path"
+        );
         assert!(block.contains("current user request"));
         assert!(block.contains("run focused tests"));
         assert!(block.contains("keep the tool-catalog head byte-stable"));

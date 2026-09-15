@@ -123,13 +123,14 @@ impl ProjectContext {
     }
 }
 
-/// The `source` label for `<project_instructions>` blocks: the context
-/// file's name only, never its absolute path. The label sits in the
-/// cache-stable prefix of the system prompt (block 2), so an unchanged file
-/// whose directory moved or was recased must not rewrite it — that would
-/// bust the provider KV prefix cache for the entire request, history
-/// included. Directory identity stays discoverable via the shell; the label
-/// names the origin, it is not a locator.
+/// The `source` label for `<project_instructions>` (and repo constitution)
+/// blocks: the context file's name only, never its absolute path. The label
+/// sits inside the pinned system prompt, so keeping it stable across
+/// directory moves and recasings means an unchanged file does not emit a
+/// spurious `<context_update>` history append after a move, and absolute
+/// project paths stay out of provider-bound prompt labels. Directory
+/// identity stays discoverable via the shell; the label names the origin,
+/// it is not a locator.
 pub(crate) fn project_instructions_source_label(source_path: Option<&Path>) -> String {
     source_path
         .and_then(|path| path.file_name())
