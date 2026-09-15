@@ -105,8 +105,8 @@ def prepare_disk(workspace: Path, *, aggressive: bool = False, min_free_gib: int
     print(f"Rust CI disk available after preparation: {after / 1024**3:.1f} GiB", flush=True)
     if after < min_free_bytes:
         raise RuntimeError(
-            f"Rust jobs require at least {min_free_gib} GiB free "
-            "after dependencies, caches and swap are prepared; refusing an undersized runner"
+            f"Rust jobs require at least {min_free_gib} GiB free right after "
+            "disk preparation; refusing an undersized runner (the build would ENOSPC)"
         )
 
 

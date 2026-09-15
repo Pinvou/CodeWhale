@@ -349,8 +349,9 @@ jobs:
       # hosted runner 是单盘布局(/ 与 /mnt 同一 ext4,x64 镜像开机仅 ~13-14G
       # 可用);发布冷编译(700+ crate,dep-level O2)曾把盘写满(ENOSPC)。在任何
       # 工具链/缓存/依赖落盘之前删掉未使用的预装 SDK。
-      # ARM64 镜像轻量(开机 ~38G 可用)且 setup-node 依赖 hostedtoolcache,
-      # 只删 base 档 SDK,不动 /opt(与 x64 的 aggressive 档不同)。
+      # ARM64 镜像轻量(开机 ~34G 可用),base 档已足够;保守不动 /opt:
+      # hostedtoolcache 删了 setup-node 也只是重装一遍,徒增下载耗时
+      # (与 x64 的 aggressive 档不同)。
       - name: 为发布构建准备磁盘空间
         run: |
           sudo env GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
