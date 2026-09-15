@@ -38,6 +38,9 @@ func TestApprovalConsumerManifestAndExplicitRenderer(t *testing.T) {
 	if result.IdentitySHA256 != identityHash || result.ManifestSHA256 != manifestHash || result.ConfigurationSHA256 != consumerManifestHash(result.Configuration) {
 		t.Fatal("render binding not retained")
 	}
+	if bytes.Contains(result.Configuration, []byte(`\u003e`)) || bytes.Contains(result.Configuration, []byte(`\u003c`)) || bytes.Contains(result.Configuration, []byte(`\u0026`)) {
+		t.Fatal("JSON HTML escapes are not valid NATS configuration")
+	}
 	read := func(raw []byte) map[string]json.RawMessage {
 		t.Helper()
 		var decoded struct {

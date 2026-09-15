@@ -130,10 +130,15 @@ func renderNATSAuthorizationWithConsumersAt(current, previous, manifest []byte, 
 					}
 				}
 			}
-			user.Permissions, err = json.Marshal(permissions)
-			if err != nil {
+			// NATS configuration accepts JSON-shaped input but not JSON \u
+			// escapes. Disable HTML escaping at this intermediate RawMessage too.
+			var permissionBytes bytes.Buffer
+			permissionEncoder := json.NewEncoder(&permissionBytes)
+			permissionEncoder.SetEscapeHTML(false)
+			if permissionEncoder.Encode(permissions) != nil {
 				return result, ErrNATSResources
 			}
+			user.Permissions = bytes.TrimSpace(permissionBytes.Bytes())
 		}
 	}
 	var output bytes.Buffer
