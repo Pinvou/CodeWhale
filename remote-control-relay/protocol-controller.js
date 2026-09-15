@@ -11,6 +11,7 @@ export const MAX_TASK_INPUT_TEXT_BYTES = 64 * 1024;
 export const MAX_TEMPORARY_MODEL_PACKAGE_BYTES = 64 * 1024;
 export const MAX_ID_CHARS = 128;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
+export const CONTROLLER_CONTRACT_SHA256 = "4a5cd258ffaf17839fd86fedbac7bae0f4f32956b8901c0adca73bacbd42e421";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -77,8 +78,8 @@ const ROUTING_CONTEXT_FIELDS = Object.freeze(["connection_id", "controller_lease
 const MESSAGE_SCHEMAS = Object.freeze({
   controller_capabilities: schema(["v", "type", "request_id", "client_role", "sender_role", "protocol_version", "capabilities"], [], ["A", "B"]),
   desktop_endpoint_claim: schema(["v", "type", "request_id", "endpoint_id", "enrollment_proof_b64"], [], ["B"]),
-  desktop_pairing_register: schema(["v", "type", "request_id", "endpoint_id", "remote_control_generation", "code_wrap_public_key_b64", "handshake_public_key_b64", "key_algorithm", "capabilities"], [], ["B"]),
-  desktop_pairing_registered: schema(["v", "type", "request_id", "pairing_id", "remote_control_generation", "sealed_code_b64", "expires_at_ms", "relay_epoch"], [], ["relay"]),
+  desktop_pairing_register: schema(["v", "type", "request_id", "registration_request_id", "endpoint_id", "remote_control_generation", "code_wrap_public_key_b64", "handshake_public_key_b64", "key_algorithm", "capabilities"], [], ["B"]),
+  desktop_pairing_registered: schema(["v", "type", "request_id", "registration_request_id", "pairing_id", "remote_control_generation", "sealed_code_b64", "expires_at_ms", "relay_epoch"], [], ["relay"]),
   desktop_pairing_revoke: schema(["v", "type", "request_id", "endpoint_id", "remote_control_generation", "reason"], ["pairing_id"], ["B"]),
   controller_pairing_claim: schema(["v", "type", "request_id", "claim_request_id", "pairing_code", "handshake_public_key_b64", "key_algorithm", "capabilities"], [], ["A"]),
   controller_pairing_reserved: schema(["v", "type", "request_id", "pairing_id", "reservation_id", "remote_control_generation", "relay_epoch", "transcript", "transcript_hash", "relay_signing_key_id", "signature_algorithm", "reservation_expires_at_ms", "handshake_expires_at_ms", "relay_signature_b64"], [], ["relay"]),
@@ -102,7 +103,7 @@ const MESSAGE_SCHEMAS = Object.freeze({
   controller_resumed: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "activation_id", "liveness_epoch_a", "liveness_epoch_b", "new_resume_token_b64"], [], ["relay"]),
   encrypted_frame: schema(["v", "type", ...LEASE_CONTEXT_FIELDS, "frame_sequence", "direction", "payload_kind", "ciphertext_b64", "ciphertext_bytes"], [], ["A", "B"]),
   controller_disconnect: schema(["v", "type", "request_id", ...LEASE_CONTEXT_FIELDS, "sender_role", "reason"], [], ["A", "B"]),
-  error: schema(["v", "type", "request_id", "code", "message"], LEASE_CONTEXT_FIELDS, ["relay"]),
+  error: schema(["v", "type", "request_id", "code", "message"], [...LEASE_CONTEXT_FIELDS, "registration_request_id"], ["relay"]),
 });
 
 const PAYLOAD_SCHEMAS = Object.freeze({
@@ -129,10 +130,45 @@ const PAYLOAD_SCHEMAS = Object.freeze({
 const TRANSCRIPT_FIELDS = Object.freeze([
   "schema", "relay_epoch", "pairing_id", "reservation_id", "endpoint_id", "remote_control_generation",
   "controller_connection_identity", "role_a", "handshake_public_key_a_b64", "role_b", "handshake_public_key_b_b64",
-  "protocol_version", "capability_hash", "expires_at_ms", "nonce_b64",
+  "protocol_version", "negotiated_capabilities", "capability_hash", "expires_at_ms", "nonce_b64",
 ]);
+const TRANSCRIPT_SCALAR_PREFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(0, 12));
+const TRANSCRIPT_SCALAR_SUFFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(13));
 const ROUTE_REQUIRED = Object.freeze(["display_name", "preset", "wire_api", "base_url", "model", "image_capability_override"]);
 const ROUTE_OPTIONAL = Object.freeze(["provider_kind", "vendor", "endpoint_mode", "context_window_tokens", "max_output_tokens", "reasoning_effort"]);
+
+const PAYLOAD_CAPABILITIES = Object.freeze({
+  capability_snapshot_request: "task_v1", capability_snapshot: "task_v1",
+  task_submit: "task_v1", task_cancel: "task_v1", task_status: "task_v1",
+  permission_request: "permission_v1", permission_decision: "permission_v1",
+  attachment_begin: "attachment_v1", attachment_chunk: "attachment_v1", attachment_commit: "attachment_v1",
+  artifact_index_request: "artifact_v1", artifact_index: "artifact_v1", artifact_read_request: "artifact_v1", artifact_chunk: "artifact_v1",
+  session_snapshot_request: "snapshot_journal_v1", session_snapshot: "snapshot_journal_v1",
+  journal_replay_request: "snapshot_journal_v1", journal_event: "snapshot_journal_v1",
+});
+
+const CONTRACT_ENUMS = Object.freeze({
+  sender_role: ["A", "B"],
+  client_role: ["desktop_controller", "desktop_controlled_endpoint"],
+  key_algorithm: ["x25519"],
+  signature_algorithm: ["ed25519"],
+  direction: ["a_to_b", "b_to_a"],
+  model_source: ["controlled_device", "controller_temporary"],
+  mode: ["chat", "code"],
+  task_status: TASK_STATUSES,
+  decision: ["allow", "deny"],
+  risk_level: ["low", "medium", "high", "critical"],
+  event_kind: ["user_message", "assistant_delta", "reasoning", "tool", "permission", "error", "cancel", "artifact", "terminal"],
+  preset: ["local_vllm", "deepseek", "kimi", "openai_compatible", "qwen", "doubao", "minimax", "glm", "mimo", "openai", "anthropic", "gemini", "xai"],
+  wire_api: ["openai_chat_completions", "anthropic_messages"],
+  provider_kind: ["custom", "official_api"],
+  vendor: ["anthropic", "deepseek", "doubao", "gemini", "glm", "kimi", "mimo", "minimax", "openai", "qwen", "tencent", "xai"],
+  endpoint_mode: ["full_chat_completions"],
+  reasoning_effort: ["off", "low", "medium", "high", "max", "auto"],
+  image_capability_override: ["pinvou", "enabled", "disabled"],
+  artifact_preview_mode: ["inline_text", "inline_image", "download_only"],
+  credential_kind: ["api_key"],
+});
 
 export class ControllerProtocolError extends Error {
   constructor(code, detail) {
@@ -180,6 +216,34 @@ function decimal(value, field, max = U64_MAX) {
   return parsed;
 }
 
+export function classifyMonotonicSequence(incoming, previous, field = "sequence") {
+  const incomingValue = decimal(incoming, field);
+  const previousValue = decimal(previous, `last_${field}`);
+  if (incomingValue < previousValue) fail("replay", field);
+  return incomingValue === previousValue ? "same_sequence_tighten" : "advance";
+}
+
+export function classifyLivenessAttestation(message, expectedContext = {}) {
+  const heartbeat = expectedContext.last_heartbeat_sequence_a === undefined
+    ? "advance"
+    : classifyMonotonicSequence(message.heartbeat_sequence_a, expectedContext.last_heartbeat_sequence_a, "heartbeat_sequence_a");
+  const attestation = expectedContext.last_attestation_sequence === undefined
+    ? "advance"
+    : classifyMonotonicSequence(message.attestation_sequence, expectedContext.last_attestation_sequence, "attestation_sequence");
+  return Object.freeze({
+    heartbeat_sequence: heartbeat,
+    attestation_sequence: attestation,
+    deadline_policy: heartbeat === "advance" && attestation === "advance" ? "replace" : "tighten_only",
+  });
+}
+
+export function applyLivenessDeadline(existingDeadlineMs, candidateDeadlineMs, deadlinePolicy) {
+  const existing = decimal(existingDeadlineMs, "existing_deadline_ms");
+  const candidate = decimal(candidateDeadlineMs, "candidate_deadline_ms");
+  oneOf(deadlinePolicy, ["replace", "tighten_only"], "deadline_policy");
+  return (deadlinePolicy === "tighten_only" && existing < candidate ? existing : candidate).toString();
+}
+
 function oneOf(value, allowed, field) { if (!allowed.includes(value)) fail("invalid_enum", field); }
 function hex64(value, field) { if (typeof value !== "string" || !HEX_64.test(value)) fail("invalid_field", field); }
 
@@ -214,7 +278,7 @@ function validateNamedField(object, field) {
     hex64(value, field);
   } else if (field === "pairing_code") {
     if (typeof value !== "string" || !PAIRING_CODE.test(value)) fail("invalid_field", field);
-  } else if (field === "capabilities") {
+  } else if (field === "capabilities" || field === "negotiated_capabilities") {
     if (Array.isArray(value) && value.some((item) => typeof item === "string" && !CONTROLLER_CAPABILITIES.includes(item))) fail("unsupported_capability", field);
     stringList(value, field, CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
   } else if (field === "attachment_ids" || field === "artifact_ids" || field === "skill_ids") {
@@ -311,6 +375,9 @@ function enforceExpectedContext(object, expectedContext) {
     if (object.type === "error" && !Object.hasOwn(object, field)) fail("missing_field", `message.${field}`);
     if (Object.hasOwn(object, field) && object[field] !== expectedContext[field]) fail("stale_context", field);
   }
+  if ((object.type === "desktop_pairing_register" || object.type === "desktop_pairing_registered")
+    && expectedContext.registration_request_id !== undefined
+    && object.registration_request_id !== expectedContext.registration_request_id) fail("stale_context", "registration_request_id");
 }
 
 function validateWithSchema(input, senderRole, schemas, maxBytes, label, expectedContext) {
@@ -333,6 +400,7 @@ export function validateControllerMessage(input, senderRole, expectedContext) {
   if (result.value.type !== "encrypted_frame" && result.encodedBytes > MAX_CONTROL_MESSAGE_BYTES) fail("message_too_large", "json");
   if (result.value.type === "controller_pairing_reserved") validateReservedTranscript(result.value);
   if (result.value.type === "controller_liveness_attestation_a") validateAttestation(result.value, expectedContext);
+  if (result.value.type === "encrypted_frame") enforceNegotiatedPayload(result.value.payload_kind, expectedContext);
   return result.value;
 }
 
@@ -343,15 +411,22 @@ function validateAttestation(message, expectedContext) {
   if (expectedContext.liveness_epoch_a !== undefined && message.liveness_epoch_a !== expectedContext.liveness_epoch_a) fail("stale_context", "liveness_epoch_a");
   if (expectedContext.challenge_id !== undefined && message.challenge_id !== expectedContext.challenge_id) fail("stale_context", "challenge_id");
   if (expectedContext.challenge_b64 !== undefined && message.challenge_b64 !== expectedContext.challenge_b64) fail("stale_context", "challenge_b64");
-  if (expectedContext.last_attestation_sequence !== undefined && decimal(message.attestation_sequence, "attestation_sequence") <= decimal(expectedContext.last_attestation_sequence, "last_attestation_sequence")) fail("replay", "attestation_sequence");
+  classifyLivenessAttestation(message, expectedContext);
 }
 
 export function validateControllerPayload(input, senderRole, expectedContext) {
   const result = validateWithSchema(input, senderRole, PAYLOAD_SCHEMAS, MAX_DECRYPTED_PAYLOAD_BYTES, "payload", expectedContext);
+  enforceNegotiatedPayload(result.value.type, expectedContext);
   if (result.value.type === "task_submit") validateTaskSubmit(result.value);
   if (result.value.type === "capability_snapshot") validateCapabilitySnapshot(result.value);
   if (result.value.type === "artifact_index") validateArtifactIndex(result.value);
   return result.value;
+}
+
+function enforceNegotiatedPayload(payloadKind, expectedContext) {
+  if (!expectedContext?.negotiated_capabilities) return;
+  const required = PAYLOAD_CAPABILITIES[payloadKind];
+  if (!required || !expectedContext.negotiated_capabilities.includes(required)) fail("unsupported_capability", payloadKind);
 }
 
 function validateTaskSubmit(payload) {
@@ -435,10 +510,7 @@ function validateRoute(value, label) {
   oneOf(route.wire_api, ["openai_chat_completions", "anthropic_messages"], `${label}.wire_api`);
   if ((route.preset === "anthropic") !== (route.wire_api === "anthropic_messages")) fail("invalid_field", `${label}.wire_api`);
   text(route.base_url, `${label}.base_url`, 2048, 2048);
-  if (!/^[\x21-\x7e]+$/u.test(route.base_url)) fail("invalid_field", `${label}.base_url`);
-  let parsed;
-  try { parsed = new URL(route.base_url); } catch { fail("invalid_field", `${label}.base_url`); }
-  if (!["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password) fail("invalid_field", `${label}.base_url`);
+  validateControllerBaseUrl(route.base_url, `${label}.base_url`);
   text(route.model, `${label}.model`, 256, 1024);
   oneOf(route.image_capability_override, ["pinvou", "enabled", "disabled"], `${label}.image_capability_override`);
   if (route.provider_kind !== undefined) oneOf(route.provider_kind, ["custom", "official_api"], `${label}.provider_kind`);
@@ -447,6 +519,50 @@ function validateRoute(value, label) {
   if (route.context_window_tokens !== undefined) decimal(route.context_window_tokens, `${label}.context_window_tokens`, U32_MAX);
   if (route.max_output_tokens !== undefined) decimal(route.max_output_tokens, `${label}.max_output_tokens`, U32_MAX);
   if (route.reasoning_effort !== undefined) oneOf(route.reasoning_effort, ["off", "low", "medium", "high", "max", "auto"], `${label}.reasoning_effort`);
+}
+
+export function validateControllerBaseUrl(value, field = "base_url") {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048 || !/^[\x21-\x7e]+$/u.test(value)) fail("invalid_field", field);
+  const schemeEnd = value.indexOf("://");
+  if (schemeEnd < 0) fail("invalid_field", field);
+  const scheme = value.slice(0, schemeEnd);
+  if (scheme !== "http" && scheme !== "https") fail("invalid_field", field);
+  const rest = value.slice(schemeEnd + 3);
+  const authorityEnd = rest.search(/[/?#]/u);
+  const authority = authorityEnd < 0 ? rest : rest.slice(0, authorityEnd);
+  const suffix = authorityEnd < 0 ? "" : rest.slice(authorityEnd);
+  if (!authority || authority.includes("@") || authority.includes("[") || authority.includes("]") || suffix.includes("#")) fail("invalid_field", field);
+
+  const colon = authority.lastIndexOf(":");
+  const host = colon < 0 ? authority : authority.slice(0, colon);
+  const port = colon < 0 ? undefined : authority.slice(colon + 1);
+  if (!host || !validAsciiHost(host)) fail("invalid_field", field);
+  if (port !== undefined && (!/^(?:[1-9]|[1-9][0-9]{1,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$/u.test(port) || Number(port) > 65_535)) fail("invalid_field", field);
+  if (suffix && suffix[0] !== "/" && suffix[0] !== "?") fail("invalid_field", field);
+  if (!validUrlSuffix(suffix)) fail("invalid_field", field);
+  return value;
+}
+
+function validAsciiHost(host) {
+  if (host.length > 253 || host !== host.toLowerCase() || host.endsWith(".")) return false;
+  if (/^[0-9.]+$/u.test(host)) {
+    const parts = host.split(".");
+    return parts.length === 4 && parts.every((part) => /^(?:0|[1-9][0-9]{0,2})$/u.test(part) && Number(part) <= 255);
+  }
+  return host.split(".").every((label) => /^(?:[a-z0-9]|[a-z0-9][a-z0-9-]{0,61}[a-z0-9])$/u.test(label));
+}
+
+function validUrlSuffix(suffix) {
+  for (let index = 0; index < suffix.length; index += 1) {
+    const char = suffix[index];
+    if (char === "%") {
+      if (!/^[0-9A-F]{2}$/u.test(suffix.slice(index + 1, index + 3))) return false;
+      index += 2;
+    } else if (!/[A-Za-z0-9\-._~!$&'()*+,;=:@/?]/u.test(char)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function validateCredential(value, label) {
@@ -471,7 +587,13 @@ export function controllerCapabilityHash(capabilities) {
 
 export function buildPairingTranscriptPreimage(value) {
   const transcript = validateTranscript(value);
-  return Buffer.concat([Buffer.from("pinvou-controller-pairing-transcript-v1", "ascii"), ...TRANSCRIPT_FIELDS.map((field) => lp(transcript[field]))]);
+  return Buffer.concat([
+    Buffer.from("pinvou-controller-pairing-transcript-v1", "ascii"),
+    ...TRANSCRIPT_SCALAR_PREFIX_FIELDS.map((field) => lp(transcript[field])),
+    lp(String(transcript.negotiated_capabilities.length)),
+    ...transcript.negotiated_capabilities.map(lp),
+    ...TRANSCRIPT_SCALAR_SUFFIX_FIELDS.map((field) => lp(transcript[field])),
+  ]);
 }
 
 function validateTranscript(value) {
@@ -483,10 +605,23 @@ function validateTranscript(value) {
   base64(transcript.handshake_public_key_b_b64, "transcript.handshake_public_key_b_b64", 32, 32);
   if (transcript.handshake_public_key_a_b64 === transcript.handshake_public_key_b_b64) fail("invalid_field", "transcript.handshake_public_keys");
   if (transcript.protocol_version !== CONTROLLER_PROTOCOL_VERSION) fail("unsupported_version", "transcript.protocol_version");
+  stringList(transcript.negotiated_capabilities, "transcript.negotiated_capabilities", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
+  if (transcript.negotiated_capabilities.length === 0) fail("unsupported_capability", "transcript.negotiated_capabilities");
+  if (transcript.negotiated_capabilities.some((item, index, list) => index > 0 && list[index - 1] >= item)) fail("invalid_field", "transcript.negotiated_capabilities");
   hex64(transcript.capability_hash, "transcript.capability_hash");
+  if (controllerCapabilityHash(transcript.negotiated_capabilities) !== transcript.capability_hash) fail("invalid_field", "transcript.capability_hash");
   decimal(transcript.expires_at_ms, "transcript.expires_at_ms");
   base64(transcript.nonce_b64, "transcript.nonce_b64", 16, 16);
   return transcript;
+}
+
+export function negotiateControllerCapabilities(capabilitiesA, capabilitiesB) {
+  stringList(capabilitiesA, "capabilities_a", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
+  stringList(capabilitiesB, "capabilities_b", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
+  const supportedByB = new Set(capabilitiesB);
+  const negotiated = capabilitiesA.filter((capability) => supportedByB.has(capability)).sort();
+  if (negotiated.length === 0) fail("unsupported_capability", "negotiated_capabilities");
+  return Object.freeze(negotiated);
 }
 
 function validateReservedTranscript(message) {
@@ -520,7 +655,7 @@ export function validateControllerLivenessPayload(input, expectedContext) {
   if (expectedContext?.liveness_epoch_a !== undefined && object.liveness_epoch_a !== expectedContext.liveness_epoch_a) fail("stale_context", "liveness_epoch_a");
   if (expectedContext?.challenge_id !== undefined && object.challenge_id !== expectedContext.challenge_id) fail("stale_context", "challenge_id");
   if (expectedContext?.challenge_b64 !== undefined && object.challenge_b64 !== expectedContext.challenge_b64) fail("stale_context", "challenge_b64");
-  if (expectedContext?.last_heartbeat_sequence_a !== undefined && decimal(object.heartbeat_sequence_a, "heartbeat_sequence_a") <= decimal(expectedContext.last_heartbeat_sequence_a, "last_heartbeat_sequence_a")) fail("replay", "heartbeat_sequence_a");
+  if (expectedContext?.last_heartbeat_sequence_a !== undefined) classifyMonotonicSequence(object.heartbeat_sequence_a, expectedContext.last_heartbeat_sequence_a, "heartbeat_sequence_a");
   return Object.freeze({ ...object });
 }
 
@@ -538,6 +673,71 @@ export function buildLivenessAttestationPreimage(message) {
 export function controllerAllowedRoles(type) {
   const definition = MESSAGE_SCHEMAS[type];
   return definition ? [...definition.roles] : undefined;
+}
+
+function normalizedSchemas(schemas) {
+  return Object.fromEntries(Object.entries(schemas).map(([type, definition]) => [type, {
+    required: [...definition.required], optional: [...definition.optional], roles: [...definition.roles],
+  }]));
+}
+
+export function controllerContractManifest() {
+  return {
+    protocol_version: CONTROLLER_PROTOCOL_VERSION,
+    subprotocol: CONTROLLER_SUBPROTOCOL,
+    integer_wire_format: "canonical-u64-decimal-string",
+    limits: {
+      max_control_message_bytes: MAX_CONTROL_MESSAGE_BYTES,
+      max_encrypted_frame_bytes: MAX_ENCRYPTED_FRAME_BYTES,
+      max_decrypted_payload_bytes: MAX_DECRYPTED_PAYLOAD_BYTES,
+      max_transfer_chunk_bytes: MAX_TRANSFER_CHUNK_BYTES,
+      max_task_input_text_bytes: MAX_TASK_INPUT_TEXT_BYTES,
+      max_temporary_model_package_bytes: MAX_TEMPORARY_MODEL_PACKAGE_BYTES,
+      max_id_chars: MAX_ID_CHARS,
+    },
+    capabilities: [...CONTROLLER_CAPABILITIES],
+    message_types: [...CONTROLLER_MESSAGE_TYPES],
+    payload_types: [...CONTROLLER_PAYLOAD_TYPES],
+    task_statuses: [...TASK_STATUSES],
+    error_codes: [...CONTROLLER_ERROR_CODES],
+    message_schemas: normalizedSchemas(MESSAGE_SCHEMAS),
+    payload_schemas: normalizedSchemas(PAYLOAD_SCHEMAS),
+    enums: Object.fromEntries(Object.entries(CONTRACT_ENUMS).map(([key, values]) => [key, [...values]])),
+    payload_capabilities: { ...PAYLOAD_CAPABILITIES },
+    transcript_fields: [...TRANSCRIPT_FIELDS],
+    route_required: [...ROUTE_REQUIRED],
+    route_optional: [...ROUTE_OPTIONAL],
+    nested_schemas: {
+      task_input: { required: ["text", "attachment_ids", "skill_ids"], optional: ["workspace_id"] },
+      temporary_model_package_v1: { required: ["schema", "package_id", "binding", "primary", "primary_credential"], optional: ["vision_fallback"] },
+      temporary_model_binding: { required: ["connection_id", "controller_lease_id", "lease_epoch", "task_id"], optional: [] },
+      vision_fallback: { required: ["route", "credential"], optional: [] },
+      route: { required: [...ROUTE_REQUIRED], optional: [...ROUTE_OPTIONAL] },
+      credential: { required: ["kind", "secret"], optional: [] },
+      tool_descriptor: { required: ["tool_id", "display_name"], optional: [] },
+      skill_descriptor: { required: ["skill_id", "display_name"], optional: [] },
+      workspace_descriptor: { required: ["workspace_id", "display_name", "code_allowed"], optional: [] },
+      artifact_descriptor: { required: ["artifact_id", "task_id", "display_name", "mime_type", "size_bytes", "sha256", "preview_mode"], optional: [] },
+      controller_liveness_a: { required: ["v", "type", ...LEASE_CONTEXT_FIELDS, "role", "liveness_epoch_a", "heartbeat_sequence_a", "challenge_id", "challenge_b64"], optional: [] },
+    },
+    collection_limits: { task_attachment_ids: 32, task_skill_ids: 32, descriptors: 256, artifacts: 256, capabilities: CONTROLLER_CAPABILITIES.length },
+    base_url_grammar: "lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
+    liveness_sequence_policy: { lower: "replay", equal: "same_sequence_tighten", greater: "advance" },
+  };
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function canonicalControllerContractHash(fixture) {
+  const fixtureWithoutHash = structuredClone(fixture);
+  if (fixtureWithoutHash?.contract) delete fixtureWithoutHash.contract.sha256;
+  return createHash("sha256").update(canonicalJson({ contract: controllerContractManifest(), fixture: fixtureWithoutHash }), "utf8").digest("hex");
 }
 
 export function controllerLogProjection(input) {
