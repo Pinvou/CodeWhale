@@ -11,7 +11,7 @@ export const MAX_TASK_INPUT_TEXT_BYTES = 64 * 1024;
 export const MAX_TEMPORARY_MODEL_PACKAGE_BYTES = 64 * 1024;
 export const MAX_ID_CHARS = 128;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "4a5cd258ffaf17839fd86fedbac7bae0f4f32956b8901c0adca73bacbd42e421";
+export const CONTROLLER_CONTRACT_SHA256 = "24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -147,6 +147,19 @@ const PAYLOAD_CAPABILITIES = Object.freeze({
   journal_replay_request: "snapshot_journal_v1", journal_event: "snapshot_journal_v1",
 });
 
+const OUTER_MESSAGE_CAPABILITIES = Object.freeze({
+  desktop_endpoint_claim: ["pairing_v1"],
+  desktop_pairing_register: ["pairing_v1"], desktop_pairing_registered: ["pairing_v1"], desktop_pairing_revoke: ["pairing_v1"],
+  controller_pairing_claim: ["pairing_v1"], controller_pairing_reserved: ["pairing_v1"], controller_joined: ["pairing_v1"],
+  finished_receipt_commit: ["finished_receipt_v1"], encrypted_handshake_finished: ["finished_receipt_v1"], finished_receipt_ack: ["finished_receipt_v1"],
+  controller_liveness: ["role_liveness_v1"], controller_liveness_challenge_a: ["role_liveness_v1"],
+  encrypted_controller_liveness_a: ["role_liveness_v1"], controller_liveness_attestation_request_a: ["role_liveness_v1"], controller_liveness_attestation_a: ["role_liveness_v1"],
+  controller_resume_prepare: ["resume_v1"], controller_resume_provisional: ["resume_v1"], encrypted_resume_confirm: ["resume_v1"],
+  controller_resume_activation_ack: ["resume_v1"], controller_resume_activation_pending: ["resume_v1"], controller_post_activation_liveness: ["resume_v1"],
+  controller_post_activation_liveness_confirmed: ["resume_v1"], controller_resume_ready_ack: ["resume_v1"], controller_resumed: ["resume_v1"],
+  encrypted_frame: ["encrypted_frames_v1"], controller_disconnect: ["encrypted_frames_v1"],
+});
+
 const CONTRACT_ENUMS = Object.freeze({
   sender_role: ["A", "B"],
   client_role: ["desktop_controller", "desktop_controlled_endpoint"],
@@ -229,12 +242,19 @@ export function classifyLivenessAttestation(message, expectedContext = {}) {
     : classifyMonotonicSequence(message.heartbeat_sequence_a, expectedContext.last_heartbeat_sequence_a, "heartbeat_sequence_a");
   const attestation = expectedContext.last_attestation_sequence === undefined
     ? "advance"
-    : classifyMonotonicSequence(message.attestation_sequence, expectedContext.last_attestation_sequence, "attestation_sequence");
+    : classifyStrictSequence(message.attestation_sequence, expectedContext.last_attestation_sequence, "attestation_sequence");
   return Object.freeze({
     heartbeat_sequence: heartbeat,
     attestation_sequence: attestation,
     deadline_policy: heartbeat === "advance" && attestation === "advance" ? "replace" : "tighten_only",
   });
+}
+
+function classifyStrictSequence(incoming, previous, field) {
+  const incomingValue = decimal(incoming, field);
+  const previousValue = decimal(previous, `last_${field}`);
+  if (incomingValue <= previousValue) fail("replay", field);
+  return "advance";
 }
 
 export function applyLivenessDeadline(existingDeadlineMs, candidateDeadlineMs, deadlinePolicy) {
@@ -400,7 +420,6 @@ export function validateControllerMessage(input, senderRole, expectedContext) {
   if (result.value.type !== "encrypted_frame" && result.encodedBytes > MAX_CONTROL_MESSAGE_BYTES) fail("message_too_large", "json");
   if (result.value.type === "controller_pairing_reserved") validateReservedTranscript(result.value);
   if (result.value.type === "controller_liveness_attestation_a") validateAttestation(result.value, expectedContext);
-  if (result.value.type === "encrypted_frame") enforceNegotiatedPayload(result.value.payload_kind, expectedContext);
   return result.value;
 }
 
@@ -416,17 +435,97 @@ function validateAttestation(message, expectedContext) {
 
 export function validateControllerPayload(input, senderRole, expectedContext) {
   const result = validateWithSchema(input, senderRole, PAYLOAD_SCHEMAS, MAX_DECRYPTED_PAYLOAD_BYTES, "payload", expectedContext);
-  enforceNegotiatedPayload(result.value.type, expectedContext);
   if (result.value.type === "task_submit") validateTaskSubmit(result.value);
   if (result.value.type === "capability_snapshot") validateCapabilitySnapshot(result.value);
   if (result.value.type === "artifact_index") validateArtifactIndex(result.value);
   return result.value;
 }
 
-function enforceNegotiatedPayload(payloadKind, expectedContext) {
-  if (!expectedContext?.negotiated_capabilities) return;
+function requireNegotiatedCapabilities(runtimeContext) {
+  if (!runtimeContext || !Array.isArray(runtimeContext.negotiated_capabilities)) fail("unsupported_capability", "negotiated_capabilities");
+  stringList(runtimeContext.negotiated_capabilities, "negotiated_capabilities", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
+  return runtimeContext.negotiated_capabilities;
+}
+
+function enforceNegotiatedPayload(payloadKind, runtimeContext) {
+  const capabilities = requireNegotiatedCapabilities(runtimeContext);
   const required = PAYLOAD_CAPABILITIES[payloadKind];
-  if (!required || !expectedContext.negotiated_capabilities.includes(required)) fail("unsupported_capability", payloadKind);
+  if (!required || !capabilities.includes(required)) fail("unsupported_capability", payloadKind);
+}
+
+function enforceNegotiatedMessage(message, runtimeContext) {
+  if (message.type === "controller_capabilities" || message.type === "error") return;
+  const capabilities = requireNegotiatedCapabilities(runtimeContext);
+  for (const required of OUTER_MESSAGE_CAPABILITIES[message.type] ?? []) {
+    if (!capabilities.includes(required)) fail("unsupported_capability", message.type);
+  }
+  if (message.type === "encrypted_frame") enforceNegotiatedPayload(message.payload_kind, runtimeContext);
+}
+
+export function validateControllerRuntimeMessage(input, senderRole, runtimeContext) {
+  const message = validateControllerMessage(input, senderRole, runtimeContext?.lease);
+  enforceNegotiatedMessage(message, runtimeContext);
+  return message;
+}
+
+export function validateControllerRuntimePayload(input, senderRole, runtimeContext) {
+  const payload = validateControllerPayload(input, senderRole, runtimeContext?.lease);
+  enforceNegotiatedPayload(payload.type, runtimeContext);
+  return payload;
+}
+
+function comparableRegistrationRequest(value) {
+  const clone = { ...value };
+  delete clone.request_id;
+  return canonicalJson(clone);
+}
+
+function comparableRegistrationResult(value) {
+  const clone = { ...value };
+  delete clone.request_id;
+  return canonicalJson(clone);
+}
+
+export class RegistrationValidationContext {
+  constructor(request, sealedResult) {
+    const validated = validateControllerMessage(request, "B");
+    if (validated.type !== "desktop_pairing_register") fail("invalid_message", "registration request");
+    let validatedResult;
+    if (sealedResult !== undefined) {
+      validatedResult = validateControllerMessage(sealedResult, "relay");
+      if (validatedResult.type !== "desktop_pairing_registered" && validatedResult.type !== "error") fail("invalid_message", "registration result");
+      for (const field of ["registration_request_id", "remote_control_generation"]) {
+        if (!Object.hasOwn(validatedResult, field)) fail("missing_field", `message.${field}`);
+        if (validatedResult[field] !== validated[field]) fail("invalid_message", field);
+      }
+    }
+    this.request = validated;
+    this.requestKey = comparableRegistrationRequest(validated);
+    this.sealedResult = validatedResult === undefined ? undefined : comparableRegistrationResult(validatedResult);
+    Object.freeze(this);
+  }
+}
+
+export function validateControllerRegistrationMessage(input, senderRole, context) {
+  if (!(context instanceof RegistrationValidationContext)) fail("invalid_message", "registration_validation_context");
+  const candidate = parseJson(input, MAX_CONTROL_MESSAGE_BYTES).value;
+  if (candidate?.type === "desktop_pairing_register"
+    && candidate.registration_request_id === context.request.registration_request_id
+    && comparableRegistrationRequest(candidate) !== context.requestKey) fail("invalid_message", "registration idempotency conflict");
+  const message = validateControllerMessage(input, senderRole);
+  if (message.type === "desktop_pairing_register") {
+    if (message.registration_request_id === context.request.registration_request_id
+      && comparableRegistrationRequest(message) !== context.requestKey) fail("invalid_message", "registration idempotency conflict");
+    if (message.registration_request_id !== context.request.registration_request_id) fail("invalid_message", "registration_request_id");
+    return message;
+  }
+  if (message.type !== "desktop_pairing_registered" && message.type !== "error") fail("invalid_message", "registration result");
+  for (const field of ["registration_request_id", "remote_control_generation"]) {
+    if (!Object.hasOwn(message, field)) fail("missing_field", `message.${field}`);
+    if (message[field] !== context.request[field]) fail("invalid_message", field);
+  }
+  if (context.sealedResult !== undefined && comparableRegistrationResult(message) !== context.sealedResult) fail("invalid_message", "sealed registration result");
+  return message;
 }
 
 function validateTaskSubmit(payload) {
@@ -704,6 +803,7 @@ export function controllerContractManifest() {
     payload_schemas: normalizedSchemas(PAYLOAD_SCHEMAS),
     enums: Object.fromEntries(Object.entries(CONTRACT_ENUMS).map(([key, values]) => [key, [...values]])),
     payload_capabilities: { ...PAYLOAD_CAPABILITIES },
+    outer_message_capabilities: Object.fromEntries(Object.entries(OUTER_MESSAGE_CAPABILITIES).map(([key, values]) => [key, [...values]])),
     transcript_fields: [...TRANSCRIPT_FIELDS],
     route_required: [...ROUTE_REQUIRED],
     route_optional: [...ROUTE_OPTIONAL],
@@ -722,7 +822,15 @@ export function controllerContractManifest() {
     },
     collection_limits: { task_attachment_ids: 32, task_skill_ids: 32, descriptors: 256, artifacts: 256, capabilities: CONTROLLER_CAPABILITIES.length },
     base_url_grammar: "lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
-    liveness_sequence_policy: { lower: "replay", equal: "same_sequence_tighten", greater: "advance" },
+    liveness_sequence_policy: {
+      heartbeat: { lower: "replay", equal: "same_sequence_tighten", greater: "advance" },
+      attestation: { lower: "replay", equal: "replay", greater: "advance" },
+    },
+    validation_modes: {
+      shape_only: "schema-role-lease-shape-without-capability-state",
+      runtime: "negotiated-capabilities-required-for-state-machine-messages",
+      registration: "independent-generation-registration-idempotency-context",
+    },
   };
 }
 

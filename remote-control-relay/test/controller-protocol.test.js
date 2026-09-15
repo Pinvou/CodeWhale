@@ -11,6 +11,7 @@ import {
   CONTROLLER_PAYLOAD_TYPES,
   TASK_STATUSES,
   ControllerProtocolError,
+  RegistrationValidationContext,
   LEGACY_WEB_CONFLICT,
   MAX_CONTROL_MESSAGE_BYTES,
   MAX_DECRYPTED_PAYLOAD_BYTES,
@@ -32,6 +33,9 @@ import {
   validateControllerLivenessPayload,
   validateControllerMessage,
   validateControllerPayload,
+  validateControllerRegistrationMessage,
+  validateControllerRuntimeMessage,
+  validateControllerRuntimePayload,
 } from "../protocol-controller.js";
 
 const fixtureUrl = new URL("./fixtures/controller-protocol-v1.json", import.meta.url);
@@ -46,6 +50,7 @@ const LEASE = Object.freeze({
   relay_epoch: "epoch-test-1",
   remote_control_generation: "generation-0001",
 });
+const RUNTIME = Object.freeze({ lease: LEASE, negotiated_capabilities: CONTROLLER_CAPABILITIES });
 
 function assertProtocolError(expectedCode, callback) {
   assert.throws(callback, (error) => error instanceof ControllerProtocolError && error.code === expectedCode);
@@ -180,6 +185,21 @@ test("pairing registration has a stable generation-scoped idempotency key", () =
     delete missing.registration_request_id;
     validateControllerMessage(missing, "B");
   });
+  const successContext = new RegistrationValidationContext(request, result);
+  validateControllerRegistrationMessage(retry, "B", successContext);
+  validateControllerRegistrationMessage(retryResult, "relay", successContext);
+  for (const field of fixture.pairing_registration_vector.conflict_fields) {
+    const conflict = structuredClone(retry);
+    conflict[field] = field === "capabilities" ? ["pairing_v1"] : field.endsWith("_b64") ? (conflict[field] === ZERO_KEY ? "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=" : ZERO_KEY) : `${conflict[field]}-other`;
+    assertProtocolError(fixture.pairing_registration_vector.conflict_expected_error, () => validateControllerRegistrationMessage(conflict, "B", successContext));
+  }
+  const failureContext = new RegistrationValidationContext(request, failureResult);
+  validateControllerRegistrationMessage(failureRetryResult, "relay", failureContext);
+  for (const field of ["registration_request_id", "remote_control_generation"]) {
+    const missingResult = structuredClone(failureRetryResult);
+    delete missingResult[field];
+    assertProtocolError("missing_field", () => validateControllerRegistrationMessage(missingResult, "relay", failureContext));
+  }
 });
 
 test("every decrypted payload is strict, role bound and lease bound", () => {
@@ -286,10 +306,22 @@ test("capability and signed pairing transcript vectors are canonical and tamper 
   assertProtocolError("invalid_field", () => buildPairingTranscriptPreimage({ ...vector.transcript, negotiated_capabilities: ["pairing_v1"], capability_hash: vector.transcript.capability_hash }));
   assertProtocolError("unsupported_capability", () => buildPairingTranscriptPreimage({ ...vector.transcript, negotiated_capabilities: [], capability_hash: controllerCapabilityHash([]) }));
 
-  const onlyPairing = { ...LEASE, negotiated_capabilities: ["pairing_v1"] };
-  assertProtocolError("unsupported_capability", () => validateControllerPayload(validPayload("task_submit"), "A", onlyPairing));
-  assertProtocolError("unsupported_capability", () => validateControllerMessage(validMessage("encrypted_frame", "A"), "A", onlyPairing));
-  validateControllerPayload(validPayload("task_submit"), "A", { ...LEASE, negotiated_capabilities: ["task_v1"] });
+  const onlyPairing = { lease: LEASE, negotiated_capabilities: ["pairing_v1"] };
+  assertProtocolError("unsupported_capability", () => validateControllerRuntimePayload(validPayload("task_submit"), "A", onlyPairing));
+  assertProtocolError("unsupported_capability", () => validateControllerRuntimeMessage(validMessage("encrypted_frame", "A"), "A", onlyPairing));
+  validateControllerRuntimePayload(validPayload("task_submit"), "A", { lease: LEASE, negotiated_capabilities: ["task_v1"] });
+});
+
+test("runtime validation requires negotiated outer and inner capabilities", () => {
+  for (const item of fixture.runtime_capability_cases) {
+    const value = item.target === "message" ? validMessage(item.type, item.sender_role) : validPayload(item.type);
+    const validator = item.target === "message" ? validateControllerRuntimeMessage : validateControllerRuntimePayload;
+    const context = item.capabilities === undefined ? undefined : { lease: LEASE, negotiated_capabilities: item.capabilities };
+    assertProtocolError(item.expected_error, () => validator(value, item.sender_role, context));
+  }
+  validateControllerRuntimeMessage(validMessage("encrypted_frame", "A"), "A", { lease: LEASE, negotiated_capabilities: ["encrypted_frames_v1", "task_v1"] });
+  validateControllerRuntimeMessage(validMessage("controller_liveness", "A"), "A", RUNTIME);
+  validateControllerRuntimePayload(validPayload("task_submit"), "A", RUNTIME);
 });
 
 test("finished receipt commitment is built independently from fields", () => {
@@ -335,12 +367,10 @@ test("Relay liveness attestation vector binds time, generation, epoch, challenge
   assert.deepEqual(classifyLivenessAttestation(vector.message, { ...expectation, last_heartbeat_sequence_a: "2" }), {
     heartbeat_sequence: "same_sequence_tighten", attestation_sequence: "advance", deadline_policy: "tighten_only",
   });
-  assert.deepEqual(classifyLivenessAttestation(vector.message, { ...expectation, last_attestation_sequence: "1" }), {
-    heartbeat_sequence: "advance", attestation_sequence: "same_sequence_tighten", deadline_policy: "tighten_only",
-  });
+  assertProtocolError("replay", () => classifyLivenessAttestation(vector.message, { ...expectation, last_attestation_sequence: "1" }));
   assert.equal(applyLivenessDeadline("20000", "25000", "tighten_only"), "20000");
   assert.equal(applyLivenessDeadline("20000", "25000", "replace"), "25000");
-  validateControllerMessage(vector.message, "relay", { ...expectation, last_attestation_sequence: "1" });
+  assertProtocolError("replay", () => validateControllerMessage(vector.message, "relay", { ...expectation, last_attestation_sequence: "1" }));
   assertProtocolError("replay", () => validateControllerMessage({ ...vector.message, heartbeat_sequence_a: "0" }, "relay", expectation));
   assertProtocolError("replay", () => validateControllerMessage({ ...vector.message, attestation_sequence: "0" }, "relay", { ...expectation, last_attestation_sequence: "1" }));
   assertProtocolError("stale_context", () => validateControllerMessage({ ...vector.message, challenge_id: "challenge-other" }, "relay", expectation));
@@ -388,8 +418,8 @@ test("public pairing errors and real legacy WebUI v2 fixture stay stable", () =>
     v: 2, type: "web_client_joined", endpoint_id: "endpoint_fixture", lease_id: "lease_fixture", desktop_connected: true,
   });
   assert.equal(fixture.legacy_web_v2.controller_conflict_expectations.none, "accept_v2");
-  for (const state of ["pairing_reserved", "handshake_pending", "controller_connected"]) {
-    assert.equal(fixture.legacy_web_v2.controller_conflict_expectations[state], "endpoint_not_found");
+  for (const state of ["pairing_reserved", "handshake_pending", "controller_connected", "reconnecting", "resume_provisional", "resume_activated_pending_liveness"]) {
+    assert.deepEqual(fixture.legacy_web_v2.controller_conflict_expectations[state], fixture.legacy_web_v2.conflict);
   }
   assert.equal(fixture.legacy_web_v2.conflict.message.message.length > 0, true);
 });
