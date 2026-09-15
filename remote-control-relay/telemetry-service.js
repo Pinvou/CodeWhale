@@ -836,20 +836,16 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       && Number(event.occurred_at) >= week.start
       && Number(event.occurred_at) <= week.end
   )), "task_finished");
-  const diagnosticSuccessfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
-    event.event_name === "task_finished"
-      && event.status === "success"
-      && event.initiator_type === "user"
-      && ["assistant", "code", "team"].includes(event.mode)
-      && Number(event.occurred_at) <= now
-  )), "task_finished");
-  const diagnosticTasksByIdentity = new Map();
-  for (const task of diagnosticSuccessfulTasks) {
+  const diagnosticTaskTerminals = behaviorEvents.filter((event) => (
+    isCoreUserTask(event, "task_finished") && Number(event.occurred_at) <= now
+  ));
+  const diagnosticTerminalsByIdentity = new Map();
+  for (const task of diagnosticTaskTerminals) {
     const identity = eventIdentity(task);
     if (!identity) continue;
-    const tasks = diagnosticTasksByIdentity.get(identity) || [];
+    const tasks = diagnosticTerminalsByIdentity.get(identity) || [];
     tasks.push(task);
-    diagnosticTasksByIdentity.set(identity, tasks);
+    diagnosticTerminalsByIdentity.set(identity, tasks);
   }
   const weeklySuccessfulInstallations = new Set(successfulTasks.map(eventIdentity).filter(Boolean));
   const valuedInstallations = new Set();
@@ -859,10 +855,12 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
   const negativeFeedbackInstallations = new Set();
   for (const task of successfulTasks) {
     const identity = eventIdentity(task);
-    if (!identity || !task.turn_id) continue;
+    if (!identity || !task.session_id || !task.turn_id) continue;
     const completedAt = Number(task.occurred_at);
     const matchedSignals = valueSignals.filter((signal) => (
       eventIdentity(signal) === identity
+        && signal.session_id
+        && signal.session_id === task.session_id
         && signal.turn_id === task.turn_id
         && Number(signal.occurred_at) >= completedAt
         && Number(signal.occurred_at) <= completedAt + EXPLICIT_VALUE_WINDOW_MS
@@ -875,6 +873,8 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       signal.feedback_action === "set"
         && signal.rating === "negative"
         && eventIdentity(signal) === identity
+        && signal.session_id
+        && signal.session_id === task.session_id
         && signal.turn_id === task.turn_id
         && Number(signal.occurred_at) >= completedAt
         && Number(signal.occurred_at) <= completedAt + EXPLICIT_VALUE_WINDOW_MS
@@ -883,18 +883,18 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
   }
   const turnMismatchValueSignalCount = valueSignals.filter((signal) => {
     const signalAt = Number(signal.occurred_at);
-    if (!signal.turn_id || signalAt < week.start || signalAt > week.end) return false;
-    const nearbyTasks = (diagnosticTasksByIdentity.get(eventIdentity(signal)) || []).filter((task) => (
-      task.turn_id
+    if (!signal.session_id || !signal.turn_id || signalAt < week.start || signalAt > week.end) return false;
+    const taskTerminals = diagnosticTerminalsByIdentity.get(eventIdentity(signal)) || [];
+    if (taskTerminals.some(task => (
+      task.session_id === signal.session_id && task.turn_id === signal.turn_id
+    ))) return false;
+    const nearbySuccessfulTasks = taskTerminals.filter((task) => (
+      task.status === "success"
+        && task.session_id === signal.session_id
         && Number(task.occurred_at) <= signalAt
         && signalAt <= Number(task.occurred_at) + EXPLICIT_VALUE_WINDOW_MS
     ));
-    if (!nearbyTasks.length) return false;
-    const candidateTasks = signal.session_id
-      ? nearbyTasks.filter(task => task.session_id === signal.session_id)
-      : nearbyTasks;
-    if (!candidateTasks.length || candidateTasks.some(task => task.turn_id === signal.turn_id)) return false;
-    return candidateTasks.some(task => task.turn_id !== signal.turn_id);
+    return nearbySuccessfulTasks.some(task => task.turn_id && task.turn_id !== signal.turn_id);
   }).length;
   return {
     wevta_installations: valuedInstallations.size,

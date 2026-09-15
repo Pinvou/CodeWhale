@@ -706,8 +706,8 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
     { event_id: "cohort_b", event_name: "analytics_cohort_started", identity_id: "dev_b", occurred_at: at("2026-08-10T08:00:00") },
     { event_id: "task_a", event_name: "task_submitted", attempt_id: "attempt_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", occurred_at: at("2026-08-10T09:01:00") },
     { event_id: "task_admit_a", event_name: "task_admitted", attempt_id: "attempt_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:01:01") },
-    { event_id: "task_done_a", event_name: "task_finished", attempt_id: "attempt_a", turn_id: "turn_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: at("2026-08-10T09:02:00") },
-    { event_id: "copy_a", event_name: "response_copied", turn_id: "turn_a", identity_id: "dev_a", content_type: "text", occurred_at: at("2026-08-10T09:22:00") },
+    { event_id: "task_done_a", event_name: "task_finished", attempt_id: "attempt_a", session_id: "session-a", turn_id: "turn_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: at("2026-08-10T09:02:00") },
+    { event_id: "copy_a", event_name: "response_copied", session_id: "session-a", turn_id: "turn_a", identity_id: "dev_a", content_type: "text", occurred_at: at("2026-08-10T09:22:00") },
     { event_id: "task_b", event_name: "task_submitted", attempt_id: "attempt_b", identity_id: "dev_b", mode: "code", initiator_type: "user", occurred_at: at("2026-08-10T10:01:00") },
     { event_id: "task_admit_b", event_name: "task_admitted", attempt_id: "attempt_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:01:01") },
     { event_id: "task_done_b", event_name: "task_finished", attempt_id: "attempt_b", identity_id: "dev_b", mode: "code", initiator_type: "user", status: "interrupted", occurred_at: at("2026-08-10T10:02:00") },
@@ -886,7 +886,7 @@ test("behavior event store validates v1 independently, injects identity and dedu
 
 test("WEVTA uses the latest feedback state and same-turn 30 minute window", () => {
   const now = at("2026-08-12T12:00:00");
-  const successful = (id, identity, turn, time, sessionId) => ({
+  const finished = (id, identity, turn, time, sessionId, status = "success") => ({
     event_id: id,
     event_name: "task_finished",
     attempt_id: `attempt_${id}`,
@@ -894,32 +894,45 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     identity_id: identity,
     mode: "assistant",
     initiator_type: "user",
-    status: "success",
+    status,
     ...(sessionId ? { session_id: sessionId } : {}),
     occurred_at: at(time),
   });
+  const successful = (id, identity, turn, time, sessionId) => (
+    finished(id, identity, turn, time, sessionId)
+  );
   const events = [
-    successful("a", "dev_a", "turn_a", "2026-08-10T09:00:00"),
-    { event_id: "positive_a", event_name: "response_feedback_changed", feedback_id: "feedback_a", feedback_action: "set", rating: "positive", turn_id: "turn_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:10:00") },
-    { event_id: "clear_a", event_name: "response_feedback_changed", feedback_id: "feedback_a", feedback_action: "clear", turn_id: "turn_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:11:00") },
-    successful("b", "dev_b", "turn_b", "2026-08-10T10:00:00"),
-    { event_id: "late_copy_b", event_name: "response_copied", turn_id: "turn_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:31:00") },
+    successful("a", "dev_a", "turn_a", "2026-08-10T09:00:00", "session-a"),
+    { event_id: "positive_a", event_name: "response_feedback_changed", feedback_id: "feedback_a", feedback_action: "set", rating: "positive", session_id: "session-a", turn_id: "turn_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:10:00") },
+    { event_id: "clear_a", event_name: "response_feedback_changed", feedback_id: "feedback_a", feedback_action: "clear", rating: "positive", session_id: "session-a", turn_id: "turn_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:11:00") },
+    successful("b", "dev_b", "turn_b", "2026-08-10T10:00:00", "session-b"),
+    { event_id: "late_copy_b", event_name: "response_copied", session_id: "session-b", turn_id: "turn_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:31:00") },
     successful("c", "dev_c", "turn_c", "2026-08-10T11:00:00", "session-c"),
     { event_id: "wrong_turn_c", event_name: "artifact_exported", session_id: "session-c", turn_id: "turn_other", identity_id: "dev_c", occurred_at: at("2026-08-10T11:05:00") },
-    successful("d", "dev_d", "turn_d", "2026-08-10T12:00:00"),
-    { event_id: "copy_d", event_name: "response_copied", turn_id: "turn_d", identity_id: "dev_d", occurred_at: at("2026-08-10T12:30:00") },
-    successful("boundary", "dev_boundary", "turn_boundary", "2026-08-09T23:50:00"),
-    { event_id: "cross_week_copy", event_name: "response_copied", turn_id: "turn_boundary", identity_id: "dev_boundary", occurred_at: at("2026-08-10T00:05:00") },
-    successful("negative", "dev_negative", "turn_negative", "2026-08-10T13:00:00"),
-    { event_id: "negative_feedback", event_name: "response_feedback_changed", feedback_id: "feedback_negative", feedback_action: "set", rating: "negative", turn_id: "wrong_negative_turn", identity_id: "dev_negative", occurred_at: at("2026-08-10T13:05:00") },
-    successful("cross_session", "dev_cross_session", "turn_a", "2026-08-10T10:00:00", "session-a"),
-    { event_id: "cross_session_copy", event_name: "response_copied", session_id: "session-b", turn_id: "turn_b", identity_id: "dev_cross_session", occurred_at: at("2026-08-10T10:01:00") },
+    successful("d", "dev_d", "turn_d", "2026-08-10T12:00:00", "session-d"),
+    { event_id: "copy_d", event_name: "response_copied", session_id: "session-d", turn_id: "turn_d", identity_id: "dev_d", occurred_at: at("2026-08-10T12:30:00") },
+    successful("boundary", "dev_boundary", "turn_boundary", "2026-08-09T23:50:00", "session-boundary"),
+    { event_id: "cross_week_copy", event_name: "response_copied", session_id: "session-boundary", turn_id: "turn_boundary", identity_id: "dev_boundary", occurred_at: at("2026-08-10T00:05:00") },
+    successful("negative", "dev_negative", "turn_negative", "2026-08-10T13:00:00", "session-negative"),
+    { event_id: "negative_feedback", event_name: "response_feedback_changed", feedback_id: "feedback_negative", feedback_action: "set", rating: "negative", session_id: "session-negative", turn_id: "wrong_negative_turn", identity_id: "dev_negative", occurred_at: at("2026-08-10T13:05:00") },
+    successful("cross_session", "dev_cross_session", "shared_turn", "2026-08-10T10:00:00", "session-a"),
+    { event_id: "cross_session_copy", event_name: "response_copied", session_id: "session-b", turn_id: "shared_turn", identity_id: "dev_cross_session", occurred_at: at("2026-08-10T10:01:00") },
+    { event_id: "cross_session_positive", event_name: "response_feedback_changed", feedback_id: "cross_session_positive", feedback_action: "set", rating: "positive", session_id: "session-b", turn_id: "shared_turn", identity_id: "dev_cross_session", occurred_at: at("2026-08-10T10:02:00") },
+    { event_id: "cross_session_artifact", event_name: "artifact_exported", session_id: "session-b", turn_id: "shared_turn", identity_id: "dev_cross_session", occurred_at: at("2026-08-10T10:03:00") },
+    { event_id: "cross_session_negative", event_name: "response_feedback_changed", feedback_id: "cross_session_negative", feedback_action: "set", rating: "negative", session_id: "session-b", turn_id: "shared_turn", identity_id: "dev_cross_session", occurred_at: at("2026-08-10T10:04:00") },
+    successful("failed_neighbor", "dev_failed_neighbor", "turn-ok", "2026-08-10T14:30:00", "session-terminal"),
+    finished("failed_terminal", "dev_failed_neighbor", "turn-failed", "2026-08-10T14:01:00", "session-terminal", "failed"),
+    { event_id: "failed_turn_copy", event_name: "response_copied", session_id: "session-terminal", turn_id: "turn-failed", identity_id: "dev_failed_neighbor", occurred_at: at("2026-08-10T14:40:00") },
+    successful("interrupted_neighbor", "dev_interrupted_neighbor", "turn-ok", "2026-08-10T15:00:00", "session-interrupted"),
+    finished("interrupted_terminal", "dev_interrupted_neighbor", "turn-interrupted", "2026-08-10T15:01:00", "session-interrupted", "interrupted"),
+    { event_id: "interrupted_artifact", event_name: "artifact_exported", session_id: "session-interrupted", turn_id: "turn-interrupted", identity_id: "dev_interrupted_neighbor", occurred_at: at("2026-08-10T15:02:00") },
+    { event_id: "interrupted_feedback", event_name: "response_feedback_changed", feedback_id: "interrupted_feedback", feedback_action: "set", rating: "positive", session_id: "session-interrupted", turn_id: "turn-interrupted", identity_id: "dev_interrupted_neighbor", occurred_at: at("2026-08-10T15:03:00") },
     { event_id: "future_copy", event_name: "response_copied", session_id: "session-c", turn_id: "wrong_future_turn", identity_id: "dev_c", occurred_at: at("2026-08-12T12:01:00") },
   ];
   assert.deepEqual(buildWeeklyExplicitValueMetric(events, now), {
     wevta_installations: 1,
-    weekly_successful_task_installations: 6,
-    explicit_value_sample_size: 6,
+    weekly_successful_task_installations: 8,
+    explicit_value_sample_size: 8,
     explicit_value_confidence: "low",
     wevta_rate: null,
     positive_feedback_installations: 0,
@@ -933,7 +946,7 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
 
 test("weekly explicit value feedback state is isolated by installation for explicit and fallback ids", () => {
   const now = at("2026-08-12T12:00:00");
-  const successful = (identity, attempt, turn, occurredAt) => ({
+  const successful = (identity, attempt, turn, sessionId, occurredAt) => ({
     event_id: `finished_${identity}`,
     event_name: "task_finished",
     attempt_id: attempt,
@@ -942,15 +955,16 @@ test("weekly explicit value feedback state is isolated by installation for expli
     mode: "assistant",
     initiator_type: "user",
     status: "success",
+    session_id: sessionId,
     occurred_at: occurredAt,
   });
   const events = [
-    successful("explicit_a", "shared_attempt", "shared_turn", at("2026-08-10T09:00:00")),
-    successful("explicit_b", "shared_attempt", "shared_turn", at("2026-08-10T09:00:00")),
-    { event_id: "feedback_explicit_a", event_name: "response_feedback_changed", feedback_id: "shared_feedback", feedback_action: "set", rating: "positive", turn_id: "shared_turn", identity_id: "explicit_a", occurred_at: at("2026-08-10T09:05:00") },
-    { event_id: "feedback_explicit_b", event_name: "response_feedback_changed", feedback_id: "shared_feedback", feedback_action: "clear", rating: "positive", turn_id: "shared_turn", identity_id: "explicit_b", occurred_at: at("2026-08-10T09:06:00") },
-    successful("fallback_a", "fallback_attempt", "fallback_turn", at("2026-08-10T10:00:00")),
-    successful("fallback_b", "fallback_attempt", "fallback_turn", at("2026-08-10T10:00:00")),
+    successful("explicit_a", "shared_attempt", "shared_turn", "session-explicit", at("2026-08-10T09:00:00")),
+    successful("explicit_b", "shared_attempt", "shared_turn", "session-explicit", at("2026-08-10T09:00:00")),
+    { event_id: "feedback_explicit_a", event_name: "response_feedback_changed", feedback_id: "shared_feedback", feedback_action: "set", rating: "positive", session_id: "session-explicit", turn_id: "shared_turn", identity_id: "explicit_a", occurred_at: at("2026-08-10T09:05:00") },
+    { event_id: "feedback_explicit_b", event_name: "response_feedback_changed", feedback_id: "shared_feedback", feedback_action: "clear", rating: "positive", session_id: "session-explicit", turn_id: "shared_turn", identity_id: "explicit_b", occurred_at: at("2026-08-10T09:06:00") },
+    successful("fallback_a", "fallback_attempt", "fallback_turn", "shared_session", at("2026-08-10T10:00:00")),
+    successful("fallback_b", "fallback_attempt", "fallback_turn", "shared_session", at("2026-08-10T10:00:00")),
     { event_id: "feedback_fallback_a", event_name: "response_feedback_changed", session_id: "shared_session", turn_id: "fallback_turn", feedback_action: "set", rating: "positive", identity_id: "fallback_a", occurred_at: at("2026-08-10T10:05:00") },
     { event_id: "feedback_fallback_b", event_name: "response_feedback_changed", session_id: "shared_session", turn_id: "fallback_turn", feedback_action: "clear", rating: "positive", identity_id: "fallback_b", occurred_at: at("2026-08-10T10:06:00") },
   ];
