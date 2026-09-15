@@ -543,10 +543,12 @@ class CiGatePolicyTests(unittest.TestCase):
             "        if: ${{ github.event_name == 'push' }}",
             rust_test,
         )
-        # 16GB runner 失联防护:编译与执行拆成独立 step(失联后日志全丢,按 step
-        # 状态定位阶段),CI 关 DWARF 缩小测试二进制降低链接内存峰值。有效内存
-        # 由 job 开头的 zram/swap 扩容 step(scripts/ci-memory-setup.sh)提供;
-        # 看门狗已删除,不再抢先杀编译进程。
+        # hosted runner 失联防护(私有仓规格实测为 2-core/7.8GiB RAM,2026-09
+        # 探针):编译与执行拆成独立 step(失联后日志全丢,按 step 状态定位阶段),
+        # CI 关 DWARF 缩小测试二进制降低链接内存峰值。有效内存由 job 开头的
+        # zram 扩容 step(scripts/ci-memory-setup.sh,zram→zswap→镜像自带 swap
+        # 逐层降级)提供;盘上 swapfile 不再默认创建(hosted runner 单盘布局,
+        # 会挤占构建磁盘,见 ci-memory-setup.sh 头注释);看门狗已删除。
         self.assertIn(
             "- name: cargo test --lib --no-run（编译链接测试二进制）\n"
             "        if: ${{ github.event_name != 'push' }}",
@@ -587,8 +589,8 @@ class CiGatePolicyTests(unittest.TestCase):
         # not at deeper indentation.
         setup_step = "- name: Set up zram and swap"
         # rust-lint 例外:该 job 在 Swatinem/rust-cache 恢复阶段与扩容后的
-        # 内存配置组合会稳定杀死 runner(5/5 复现),fmt/clippy 本身不是内存
-        # 密集型,不需要扩容层。
+        # 内存配置组合曾稳定杀死 runner(2026-09-12 前后 5/5 复现;后定性为
+        # 时间窗环境事故,但 fmt/clippy 非内存密集,保守维持豁免)。
         excluded_jobs = {"rust-lint"}
         blocks = re.split(
             r"\n  (?=[A-Za-z0-9_-]+:\s*$)", self.pr_workflow, flags=re.MULTILINE
@@ -613,6 +615,44 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"ubuntu job '{job_name}' must invoke scripts/ci-memory-setup.sh"
                 " via an absolute path (some jobs set a run working-directory)",
             )
+
+    def test_release_linux_build_jobs_prepare_disk_and_prune_apt(self):
+        # 发布构建 job(单盘 hosted runner,x64 开机仅 ~13-14G 可用)必须在
+        # 工具链/缓存/依赖落盘之前清理未使用预装 SDK,并在装系统依赖后
+        # autoremove + clean;否则冷编译曾把盘写满(ENOSPC,2026-09-13 起)。
+        blocks = re.split(
+            r"\n  (?=[A-Za-z0-9_-]+:\s*$)", self.release_workflow, flags=re.MULTILINE
+        )
+        for job_id in ("build-linux-x64", "build-linux-arm64"):
+            job = next(
+                (b for b in blocks if b.strip().startswith(f"{job_id}:")), None
+            )
+            self.assertIsNotNone(job, f"release job '{job_id}' not found")
+            self.assertIn(
+                "python3 scripts/ci-rust-disk.py",
+                job,
+                f"'{job_id}' must run the disk preparation script",
+            )
+            self.assertIn(
+                "--min-free-gib 24",
+                job,
+                f"'{job_id}' must fail fast below 24 GiB free",
+            )
+            # 磁盘准备必须发生在 setup-node 之前(aggressive 档会删
+            # /opt/hostedtoolcache,删后 setup-node 会重新下载 Node)。
+            self.assertLess(
+                job.index("python3 scripts/ci-rust-disk.py"),
+                job.index("uses: actions/setup-node"),
+                f"'{job_id}' must prepare disk before actions/setup-node",
+            )
+            self.assertIn("sudo apt-get autoremove -y --purge", job)
+            self.assertIn("sudo apt-get clean", job)
+        # x64 镜像预装最重(开机可用最少),用 aggressive 档;arm64 镜像轻量
+        # 且要保住 setup-node 的工具缓存,只用 base 档。
+        x64 = next(b for b in blocks if b.strip().startswith("build-linux-x64:"))
+        arm64 = next(b for b in blocks if b.strip().startswith("build-linux-arm64:"))
+        self.assertIn("--aggressive", x64)
+        self.assertNotIn("--aggressive", arm64)
 
     def test_windows_rust_test_parallel_phases_preserve_routing_and_coverage(self):
         # Both matrix legs retain the exact cumulative/high-risk route; splitting
