@@ -62,7 +62,9 @@ NKey 种子不是短期 workload JWT，不自动过期。正常轮换先在 brok
 
 显式权限模式仅为 Billing/Token 加入六个固定 durable 的 INFO、NEXT、ACK 权限；Token 已有权限不变，旧 Billing shared、refund 及其他身份保持兼容，不给资源操作员额外 CREATE 权限。需要 previous-v1 重叠时仍须显式提供原有 overlap 三参数且满足有限窗口。标准输出给出身份、清单和输出配置三个 SHA-256，供离线产物关联归档；这些不是部署、Q/Q+1、逐消息 ACK 或业务效果证据。
 
-当前阶段未交付运行时可信 Q receipt 读取及生产 consumer 创建/切换。新 Billing 没有可信资源绑定时不可启动；真实 Q 获取、旧 durable 停用/撤权、ACL reload 和 activation 仍归 GSA-38，不可用上述产物绕过。
+代码提供只读 `ApprovalConsumerResourceFiles.Load(now)`，输入身份文件及独立可信摘要、清单文件及独立可信摘要、切换回执文件及独立可信摘要。回执固定为规范紧凑 JSON `approval-consumer-cutover-receipt-v1`：绑定身份和清单摘要、`ACCOUNT_PLATFORM` / `ADMIN_APPROVAL`、捕获时 `QUIESCING` / `FENCED`、控制版本及两类 epoch、UTC 捕获时间、Q 和三个固定 Billing durable 的 Q+1。除 schema_version 外整数均为规范十进制字符串，避免高序号精度损失；未来时间、溢出、非规范字节、额外或重复字段均拒绝。
+
+读取器仅返回私有资源期望，不生成回执、不连接服务、不创建 consumer、不授予执行权限。readiness 应重新读取校验，不能将缓存对象当成当前文件、Account 控制状态或实际 broker ACL 的证明。摘要必须由独立可信投递提供，禁止启动时自行对同一不可信文件计算摘要作为信任来源。当前尚未完成业务启动接线及生产 consumer 创建/切换；新 Billing 没有可信资源绑定时不可启动。真实 Q 获取、可信回执投递、旧 durable 停用/撤权、ACL reload 和 activation 仍归 GSA-38，不可用上述产物绕过。
 
 `PINVOU_TEST_NATS_SERVER_BINARY` 显式指定已核对的本机 NATS server 二进制，运行 `go test ./internal/platform/events -run NATS -count=1 -v`。测试自行新建 loopback/TLS/随机身份/临时 JetStream，不接受已有服务地址，退出清理仅自己创建的进程和临时目录。必须看到具名真实测试及 `NATS_PROVISIONED_TLS_ACTUAL_PASS`，未提供二进制时的跳过不能作为验收。
 
