@@ -555,13 +555,8 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up zram and swap
-        if: runner.os == 'Linux'
         # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
-        run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
-
-
-      - name: Set up zram and swap
-        # 内存扩容为尽力而为:超时/失败只告警不阻断(回退 runner 默认内存)。
+        # 本 job 只跑 ubuntu,无需 runner.os 门控;曾出现重复 step,已收敛为单个。
         run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh" || echo "::warning::ci-memory-setup 未完成,继续使用 runner 默认内存"
 
       - uses: actions/setup-node@v7
@@ -892,6 +887,9 @@ jobs:
             libx11-dev libxi-dev libxtst-dev \
             libayatana-appindicator3-dev \
             build-essential pkg-config cmake
+          # 孤儿依赖与 apt 缓存包不留在构建盘上(单盘 runner 磁盘紧张)。
+          sudo apt-get autoremove -y --purge
+          sudo apt-get clean
 
       # Clippy hard gate (no continue-on-error): lint config lives in the
       # Cargo.toml [lints] table, never CLI -W/-D (avoids divergence from
@@ -1067,6 +1065,9 @@ jobs:
             libayatana-appindicator3-dev \
             build-essential pkg-config cmake lld \
             time
+          # 孤儿依赖与 apt 缓存包不留在构建盘上(单盘 runner 磁盘紧张)。
+          sudo apt-get autoremove -y --purge
+          sudo apt-get clean
 
       # bge-m3 是 gitignored 大资源(559M),CI 干净 checkout 没有它,而 tauri_build::build()
       # 会校验 tauri.conf resources 路径存在。单测用 mem()=embedder None、不加载真模型,真
