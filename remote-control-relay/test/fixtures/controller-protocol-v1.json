@@ -3,7 +3,7 @@
   "contract": {
     "id": "pinvou-desktop-controller/v1",
     "integer_wire_format": "canonical-u64-decimal-string",
-    "sha256": "bb1e1aebb62fb797155eed4e656cd55c41ef6a1fe278a9fe85be0991409afd70"
+    "sha256": "1a66c5be4627e51f5d58ed126f1bb5af92d96ee303feecf2cbf91fea2a433bc3"
   },
   "expected_capabilities": ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1", "task_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1"],
   "expected_error_codes": ["pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required", "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown"],
@@ -27,6 +27,17 @@
     "secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     "preimage_hex": "70696e766f752d66696e69736865642d726563656970742d636f6d6d69742d76310000000c65706f63682d746573742d310000000c70616972696e672d30303031000000107265736572766174696f6e2d303030310000004030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030000000014100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     "commitment_hex": "ed19ab422bae98c4f52b2e18665df08b9109eb916c85812678cfde57448f3a53"
+  },
+  "crypto_vectors": {
+    "suite": "X25519/HKDF-SHA256/AES-256-GCM/Ed25519",
+    "private_a_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+    "private_b_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+    "public_a_hex": "a4e09292b651c278b9772c569f5fa9bb13d906b46ab68c9df9dc2b4409f8a209",
+    "public_b_hex": "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59",
+    "shared_secret_hex": "2ed76ab549b1e73c031eb49c9448f0798aea81b698279a0c3dc3e49fbfc4b953",
+    "binding": {"relay_epoch":"epoch-test-1","pairing_id":"pairing-0001","reservation_id":"reservation-0001","transcript_hash_hex":"0707070707070707070707070707070707070707070707070707070707070707"},
+    "finished": {"sender_role":"A","receipt_secret_hex":"0505050505050505050505050505050505050505050505050505050505050505","nonce_hex":"060606060606060606060606","derived_key_hex":"50dae738df11e467a48f1696b3f58e7c77d0ccbf95c879025c64ccb1c5a4b097","ciphertext_with_nonce_hex":"060606060606060606060606fb8cbe98700bfdd8e867d298727b10e56254f5249dfa531514436674f3931cb610fa6f361d17b6351625b267c41884a119c1ef3717f1c91a3a66ccebfe9c33bb134baceb233bfbb6f130504362a7590ad8c6330f2250e4d40778e248b20c461df19d44a97270479c8eab2b84657ee676629faa69053f334795e0"},
+    "business": {"direction":"a_to_b","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"7","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","frame_sequence":"1","payload_kind":"task_submit","plaintext_hex":"7061796c6f6164","derived_root_hex":"eb0d5b172f11f0df30dbd199881cd402d4aff6ee20e2de3ead76ed662912f919","derived_key_hex":"1231983d543abfd6d7dbae7eda24b115f8f56c6cfeb9180217f35b10eee111fb","nonce_hex":"6b43ad970000000000000001","aad_hex":"70696e766f752d636f6e74726f6c6c65722d627573696e6573732d6161642d76310000000f636f6e6e656374696f6e2d303030310000000a6c656173652d3030303100000001370000000c65706f63682d746573742d310000000f67656e65726174696f6e2d3030303100000006615f746f5f6200000001310000000b7461736b5f7375626d6974","ciphertext_hex":"ac2eb2395ff29059ff25bcf8aa10ba53c8c7b41e5e43da"}
   },
   "capability_vector": {
     "capabilities": ["snapshot_journal_v1", "task_v1", "pairing_v1", "artifact_v1", "role_liveness_v1", "resume_v1", "permission_v1", "finished_receipt_v1", "attachment_v1", "encrypted_frames_v1"],
@@ -84,6 +95,7 @@
     {"name":"missing_capabilities","target":"message","sender_role":"A","expected_error":"missing_field","value":{"v":1,"type":"controller_capabilities","request_id":"request-1","client_role":"desktop_controller","sender_role":"A","protocol_version":1}},
     {"name":"unknown_claim_field","target":"message","sender_role":"A","expected_error":"unknown_field","value":{"v":1,"type":"controller_pairing_claim","request_id":"request-1","claim_request_id":"claim-1","pairing_code":"2345678","handshake_public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","key_algorithm":"x25519","capabilities":[],"future":true}},
     {"name":"unknown_capability","target":"message","sender_role":"A","expected_error":"unsupported_capability","value":{"v":1,"type":"controller_capabilities","request_id":"request-1","client_role":"desktop_controller","sender_role":"A","protocol_version":1,"capabilities":["future_v2"]}},
+    {"name":"reused_code_wrap_and_handshake_key","target":"message","sender_role":"B","expected_error":"invalid_field","value":{"v":1,"type":"desktop_pairing_register","request_id":"request-1","registration_request_id":"registration-1","endpoint_id":"endpoint-1","remote_control_generation":"generation-1","code_wrap_public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","handshake_public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","key_algorithm":"x25519","capabilities":["pairing_v1"]}},
     {"name":"capability_version_mismatch","target":"message","sender_role":"A","expected_error":"unsupported_version","value":{"v":1,"type":"controller_capabilities","request_id":"request-1","client_role":"desktop_controller","sender_role":"A","protocol_version":2,"capabilities":[]}},
     {"name":"noncanonical_lease_epoch","target":"payload","sender_role":"A","expected_error":"invalid_field","value":{"v":1,"type":"task_cancel","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":1,"relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","request_id":"request-1","task_id":"task-1","session_id":"session-1"}},
     {"name":"removed_completed_status","target":"payload","sender_role":"B","expected_error":"invalid_enum","value":{"v":1,"type":"task_status","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","request_id":"request-1","task_id":"task-1","session_id":"session-1","task_status":"completed"}}

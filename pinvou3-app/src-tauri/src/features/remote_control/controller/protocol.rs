@@ -24,7 +24,7 @@ const MAX_ARTIFACTS: usize = 256;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "bb1e1aebb62fb797155eed4e656cd55c41ef6a1fe278a9fe85be0991409afd70";
+    "1a66c5be4627e51f5d58ed126f1bb5af92d96ee303feecf2cbf91fea2a433bc3";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -214,7 +214,7 @@ pub(crate) struct ControllerProtocolError {
 }
 
 impl ControllerProtocolError {
-    fn new(code: &'static str, field: impl Into<String>) -> Self {
+    pub(super) fn new(code: &'static str, field: impl Into<String>) -> Self {
         Self {
             code,
             field: field.into(),
@@ -230,7 +230,7 @@ impl fmt::Display for ControllerProtocolError {
 
 impl std::error::Error for ControllerProtocolError {}
 
-type Result<T> = std::result::Result<T, ControllerProtocolError>;
+pub(super) type Result<T> = std::result::Result<T, ControllerProtocolError>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SequenceDisposition {
@@ -1432,6 +1432,14 @@ pub(crate) fn validate_controller_message_json_in_context(
         return Err(ControllerProtocolError::new("message_too_large", "json"));
     }
     validate_object(object, kind, &schema, sender_role, "message")?;
+    if kind == "desktop_pairing_register"
+        && object.get("code_wrap_public_key_b64") == object.get("handshake_public_key_b64")
+    {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            "message.key_purpose_reuse",
+        ));
+    }
     if kind == "controller_pairing_reserved" {
         validate_reserved_transcript(object)?;
     }
@@ -1548,19 +1556,50 @@ pub(crate) struct ParsedTranscript {
     relay_signature: Vec<u8>,
 }
 
-/// Sealed authentication boundary. DEV-00 deliberately ships no implementation:
-/// DEV-05 must add the enrollment-backed authenticator inside this module before
-/// any production caller can obtain a `VerifiedTranscript`.
+/// Sealed authentication boundary. Only the controller crypto module can
+/// implement the signature primitive; this module alone upgrades a parsed
+/// transcript after that primitive succeeds.
 #[allow(dead_code)]
 pub(crate) mod transcript_authentication {
-    use super::{ParsedTranscript, Result, VerifiedTranscript};
+    use super::{ControllerProtocolError, ParsedTranscript, Result, VerifiedTranscript};
 
-    mod private {
+    pub(in super::super) mod private {
         pub trait Sealed {}
     }
 
     pub(crate) trait TranscriptAuthenticator: private::Sealed {
-        fn authenticate(&self, parsed: ParsedTranscript) -> Result<VerifiedTranscript>;
+        fn verify_relay_signature(
+            &self,
+            key_id: &str,
+            preimage: &[u8],
+            signature: &[u8],
+        ) -> Result<()>;
+
+        fn authenticate(&self, parsed: ParsedTranscript) -> Result<VerifiedTranscript> {
+            if parsed.signature_algorithm != "ed25519" {
+                return Err(ControllerProtocolError::new(
+                    "invalid_field",
+                    "signature_algorithm",
+                ));
+            }
+            self.verify_relay_signature(
+                &parsed.relay_signing_key_id,
+                &parsed.signature_preimage,
+                &parsed.relay_signature,
+            )?;
+            Ok(VerifiedTranscript {
+                request_id: parsed.request_id,
+                expected_pairing_id: parsed.expected_pairing_id,
+                reservation_id: parsed.reservation_id,
+                remote_control_generation: parsed.remote_control_generation,
+                relay_epoch: parsed.relay_epoch,
+                transcript_hash: parsed.transcript_hash,
+                expected_controller_connection_identity: parsed
+                    .expected_controller_connection_identity,
+                negotiated_capabilities: parsed.negotiated_capabilities,
+                capability_hash: parsed.capability_hash,
+            })
+        }
     }
 }
 
@@ -3635,7 +3674,17 @@ mod tests {
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
             "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"},
             "runtime_capability_context":{"order":"bytewise-strict-ascending","invalid_error":{"code":"unsupported_capability","field":"negotiated_capabilities"}},
-            "verified_transcript":{"parsed_constructor":"strict-envelope-canonical-preimage-and-hash-only-not-authenticated","production_authenticator":"none-in-dev00-sealed-for-dev05","lease_install_derivation":"opaque-authenticated-transcript-only","activation_owner":"DEV-05"}
+            "verified_transcript":{"parsed_constructor":"strict-envelope-canonical-preimage-and-hash-only-not-authenticated","production_authenticator":"typed-enrollment-ed25519-ring","lease_install_derivation":"opaque-authenticated-transcript-only","activation_owner":"DEV-05"},
+            "crypto_contract":{
+                "key_agreement":"x25519",
+                "key_derivation":"hkdf-sha256",
+                "aead":"aes-256-gcm",
+                "relay_signature":"ed25519",
+                "receipt_secret_bytes":32,
+                "replay_window_bits":64,
+                "key_domains":["code-wrap","finished/A","finished/B","business/A-to-B","business/B-to-A"],
+                "relay_crypto_scope":"receipt-commitment-only"
+            }
         })
     }
 
