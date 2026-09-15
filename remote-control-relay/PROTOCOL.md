@@ -253,6 +253,144 @@ registration authority.
 
 ## Desktop controller protocol v1 (frozen, not yet enabled)
 
+### DEV-00 normative contract (supersedes summaries below)
+
+The rules in this subsection are normative where an older summary later in
+this section differs. DEV-00 freezes the contract but does not register it in
+the live WebSocket dispatcher; WebUI v2 behavior remains unchanged.
+
+Desktop peers use subprotocol `pinvou-desktop-controller-v1`, JSON `v: 1`, and
+the exact capability registry frozen in `protocol-controller.js`. Unknown
+versions, message/payload types, fields, enum values, capabilities, duplicates
+and role combinations fail closed. Capability negotiation is
+intersection-only and never downgrades. All numeric counters, `lease_epoch`,
+byte counts and timestamps except literal `v`/`protocol_version` use canonical unsigned 64-bit
+decimal strings matching `0|[1-9][0-9]{0,19}` and bounded by
+`18446744073709551615`; JSON numbers, signs and leading zeroes are invalid.
+Nested token counts use the same spelling and are additionally uint32-bounded.
+`relay_epoch`, `liveness_epoch_*`, `journal_epoch` and
+`remote_control_generation` are explicitly opaque, bounded identifiers rather
+than JSON integers; their exact bytes are authenticated and compared.
+
+The capability hash is SHA-256 of ASCII
+`pinvou-controller-capabilities-v1` followed by every negotiated capability in
+bytewise sorted order as `LP(UTF-8(value))`. Its complete-v1 digest is
+`a8cb9f552292fa1bf84874a8cf025dcfdf1b1e103f9a21de845e513830164cb9`.
+
+After reservation, messages carry `pairing_id + reservation_id + relay_epoch +
+remote_control_generation + transcript_hash`. After lease creation, every
+control message and decrypted business request/event carries `connection_id +
+controller_lease_id + lease_epoch + relay_epoch +
+remote_control_generation`. Receivers compare every applicable value before
+mutation. Refresh, stop, Relay epoch change or lease epoch change closes the
+old receive gate, so late frames and replies fail with `stale_context` even if
+their cryptography is otherwise valid.
+
+The only minimal outer exception is `encrypted_controller_liveness_a`, which
+contains exactly `v`, `type`, routing `connection_id/controller_lease_id/
+lease_epoch`, bounded `ciphertext_b64`, and canonical `ciphertext_bytes`.
+Relay cannot see its strict inner payload:
+
+```text
+{v:1,type:"controller_liveness_a",connection_id,controller_lease_id,
+ lease_epoch,relay_epoch,remote_control_generation,role:"A",
+ liveness_epoch_a,heartbeat_sequence_a,challenge_id,challenge_b64}
+```
+
+Its A-to-B AEAD AAD is ASCII `pinvou-controller-liveness-aad-v1` followed
+by LP-encoded `connection_id, controller_lease_id, lease_epoch, relay_epoch,
+remote_control_generation, role` in that exact order. B rejects a changed
+context, role, liveness epoch or challenge, and a sequence not strictly greater
+than the last accepted sequence.
+
+`controller_liveness_attestation_a` carries full lease context plus
+`liveness_epoch_a`, `heartbeat_sequence_a`, `attestation_sequence`,
+`challenge_id`, `challenge_b64`, `observed_age_ms`, `remaining_ttl_ms`,
+`issued_at_relay`, `relay_signing_key_id`, `signature_algorithm=ed25519`, and
+`relay_signature_b64`. The signature preimage is ASCII
+`pinvou-controller-liveness-attestation-v1` followed by LP-encoded
+`relay_epoch, connection_id, controller_lease_id, lease_epoch,
+remote_control_generation, liveness_epoch_a, heartbeat_sequence_a,
+attestation_sequence, challenge_b64, observed_age_ms, remaining_ttl_ms,
+issued_at_relay, signature_algorithm, relay_signing_key_id`. The shared fixture
+freezes the full preimage/signature and tests tampering, replay and cross-lease
+rejection.
+
+`controller_pairing_reserved` delivers the same strict
+`controller_pairing_transcript/v1` object to both peers. Its ordered fields are
+`schema, relay_epoch, pairing_id, reservation_id, endpoint_id,
+remote_control_generation, controller_connection_identity, role_a,
+handshake_public_key_a_b64, role_b, handshake_public_key_b_b64,
+protocol_version, capability_hash, expires_at_ms, nonce_b64`. Roles are exactly
+`A` then `B`; the two 32-byte X25519 public keys are distinct; nonce is 16
+bytes. The canonical preimage is unnulled ASCII
+`pinvou-controller-pairing-transcript-v1` followed by those fields as
+four-byte unsigned big-endian length plus UTF-8 bytes; only numeric literal
+`protocol_version` becomes ASCII `1`. Relay signs this complete preimage with
+Ed25519. The envelope repeats and validates reservation/generation/Relay
+context, `transcript_hash`, `relay_signing_key_id`, algorithm and signature.
+
+The fixed transcript vector is fully listed in the shared fixture. It has
+SHA-256 `13d9e8265a99bbf112fecff86b57a06d120dcc9d2e8a4d6df8d00d7535485618`,
+raw public key `11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=`, and signature
+`ZqbTVYuLk5e8kpAalxTB4TjKptI/H/BwJvmvpkOpF/hxnvFy/tGNdoEKRQFXIEmXZfeIiU/HxxSkuArB70OSAg==`.
+A and B independently reconstruct the same bytes and verify every field before
+key derivation. Receipt commitment remains the independent sender-secret LP
+algorithm below; Rust constructs it from individual fields rather than hashing
+a fixture-supplied preimage.
+
+Every decrypted payload carries full lease context. A requests B's runtime
+allowlist with `capability_snapshot_request {request_id,known_revision}`; B
+returns `capability_snapshot {request_id,capability_revision,expires_at_ms,
+modes,tools,skills,workspaces}`. Tool/Skill entries contain only an opaque ID
+and display name. Workspace entries contain only opaque ID, display name and
+`code_allowed`; paths, configuration, source and credentials are forbidden.
+Lists are bounded to 256 unique entries, revisions are canonical decimal
+strings, and a task binds the exact `capability_revision` it consumed.
+
+`task_submit.input` is exactly `{text:string, attachment_ids:string[],
+skill_ids:string[], workspace_id?:string}` with 64 KiB UTF-8 text and at
+most 32 attachment/Skill references; at least one of text/attachments must be non-empty. Task
+status uses `task_status` with exactly `admitted`, `running`,
+`waiting_permission`, `succeeded`, `failed`, `cancelled`, `interrupted`, or
+`result_unknown`; `completed` is invalid.
+
+For `model_source=controller_temporary`, `task_submit` requires one strict,
+64-KiB `temporary_model_package/v1`; it is forbidden for `controlled_device`.
+The package requires `schema, package_id, binding, primary,
+primary_credential`, with optional one-level `vision_fallback`. Binding is
+exactly `connection_id + controller_lease_id + lease_epoch + task_id` and must
+equal the containing task. A route requires `display_name, preset, wire_api,
+base_url, model, image_capability_override` and only optionally accepts
+`provider_kind, vendor, endpoint_mode, context_window_tokens,
+max_output_tokens, reasoning_effort`. Presets are `local_vllm`, `deepseek`,
+`kimi`, `openai_compatible`, `qwen`, `doubao`, `minimax`, `glm`, `mimo`,
+`openai`, `anthropic`, `gemini`, `xai`; Anthropic alone uses
+`anthropic_messages`, all others use `openai_chat_completions`. Credentials
+are exactly `{kind:"api_key",secret:string}`. OAuth, cookies, subscription
+login, opaque SavedModel fields, credential references and recursive fallback
+are forbidden.
+
+`artifact_index` returns bounded metadata objects rather than bare paths or
+IDs. Each item is exactly `artifact_id, task_id, display_name, mime_type,
+size_bytes, sha256, preview_mode`; preview mode is `inline_text`,
+`inline_image`, or `download_only`. A subsequent read still uses only the
+opaque artifact ID under the same lease/session context.
+
+The shared fixture freezes the contract SHA-256, complete registries, exhaustive
+outer-message role matrix, canonical transcript/receipt/liveness/attestation
+vectors, strict negative categories, public pairing error collapse, and real
+legacy WebUI v2 join/register/conflict shapes. Absent, expired, consumed,
+revoked and stale-generation codes all map to `pairing_code_invalid` and user
+text “连接码无效或已失效”. A legacy conflict remains exactly
+`{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"}`
+plus close code `1008`.
+
+Logs are allowlist projections only. They must exclude all pairing/lease/
+generation/endpoint identifiers, keys, nonces, secrets, tokens, ciphertext,
+task input, model packages and credentials, attachments, artifacts, snapshots
+and journal data.
+
 This section freezes the desktop-to-desktop controller contract before its
 state machines and cryptography are implemented. The current `server.js` does
 not route any message in this section. Implementations must not advertise or
@@ -349,14 +487,15 @@ old connection from addressing a replacement lease. Messages with an old or
 cross-bound identifier are rejected by the later state machine even when their
 JSON shape is valid.
 
-The frozen decrypted `encrypted_frame` payload kinds are `task_submit`,
-`task_cancel`, `task_terminal`, `permission_request`, `permission_decision`,
+The frozen decrypted `encrypted_frame` payload kinds are
+`capability_snapshot_request`, `capability_snapshot`, `task_submit`,
+`task_cancel`, `task_status`, `permission_request`, `permission_decision`,
 `attachment_begin`, `attachment_chunk`, `attachment_commit`,
 `artifact_index_request`, `artifact_index`, `artifact_read_request`,
 `artifact_chunk`, `session_snapshot_request`, `session_snapshot`,
-`journal_replay_request` and `journal_event`. A sends task, cancel, approval,
-upload, read and replay requests. B sends task terminal states, permission
-requests, artifact indexes/chunks, snapshots and journal events. The parser
+`journal_replay_request` and `journal_event`. A sends capability, task, cancel,
+approval, upload, read and replay requests. B sends capability snapshots, task
+states, permission requests, artifact indexes/chunks, snapshots and journal events. The parser
 rejects these payloads when presented by the opposite role. Every task,
 permission, attachment, artifact, snapshot and journal operation is bound to
 the same `connection_id + controller_lease_id + lease_epoch`; task and transfer
@@ -427,7 +566,7 @@ terminates the candidate and prevents reuse of both old and proposed material.
 ### Errors, legacy Web conflict and logging
 
 Controller error envelopes use only these codes: `pairing_code_invalid`,
-`controller_busy`, `version_incompatible`, `endpoint_offline`,
+`pairing_code_generation_failed`, `controller_busy`, `version_incompatible`, `endpoint_offline`,
 `enrollment_required`, `invalid_message`, `unsupported_capability`,
 `permission_already_decided`, `permission_expired` and `result_unknown`.
 Malformed schema errors are local parser failures and are mapped to the bounded
