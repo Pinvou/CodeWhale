@@ -110,6 +110,13 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/approval-requests/:approval_request_id/executions", serviceauth.Require("internal.approval-execution.begin"), approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
 	internal.POST("/approval-requests/:approval_request_id/executions/complete", serviceauth.Require("internal.approval-execution.complete"), approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
+	internal.GET("/approval-authorization/events/:event_id/binding", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.resolveApprovalAuthorizationBinding))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/observe", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.observeApprovalAuthorizationDelivery))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/attempts/grant", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.grantApprovalAuthorizationDomainAttempt))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/attempts/failure", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationDomainFailure))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/result", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationResult))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/dlq-puback", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationDLQPubAck))
+	internal.POST("/approval-authorization/events/:event_id/deliveries/:durable/terminal", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.recordApprovalAuthorizationTerminal))
 	if s.mobileAuth != nil {
 		router.POST("/v1/auth/registration/precheck", httpserver.AdaptFunc(s.precheckMobileRegistration))
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
@@ -678,6 +685,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_INACTIVE", "Billing command governance is not active"
 	case errors.Is(err, ErrBillingGovernanceUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "BILLING_COMMAND_GOVERNANCE_UNAVAILABLE", "Billing command governance is temporarily unavailable"
+	case errors.Is(err, ErrApprovalConsumerBindingInvalid):
+		status, code, message = http.StatusConflict, "APPROVAL_AUTHORIZATION_BINDING_INVALID", "the approval authorization binding or delivery state is invalid"
+	case errors.Is(err, ErrApprovalConsumerBindingUnavailable):
+		w.Header().Set("Retry-After", "5")
+		w.Header().Set("Cache-Control", "no-store")
+		status, code, message = http.StatusServiceUnavailable, "APPROVAL_AUTHORIZATION_UNAVAILABLE", "approval authorization state is temporarily unavailable"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

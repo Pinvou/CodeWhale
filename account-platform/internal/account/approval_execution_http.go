@@ -17,6 +17,10 @@ type approvalExecutionRepository interface {
 	CompleteApprovalExecution(context.Context, uuid.UUID, string, string, string, json.RawMessage, json.RawMessage, string) error
 }
 
+type approvalAuthorizedExecutionRepository interface {
+	BeginApprovalExecutionWithAuthorization(context.Context, uuid.UUID, string, string, json.RawMessage, json.RawMessage, ApprovalAuthorizationBinding) (ApprovalExecution, error)
+}
+
 func (s *Service) requireApprovalExecutionRepository(w http.ResponseWriter, r *http.Request) (approvalExecutionRepository, bool) {
 	repository, ok := s.repository.(approvalExecutionRepository)
 	if !ok {
@@ -39,15 +43,27 @@ func (s *Service) beginApprovalExecution(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var body struct {
-		JobRunID                  string          `json:"job_run_id"`
-		ObservedVersions          json.RawMessage `json:"observed_versions"`
-		ObservedFinancialSnapshot json.RawMessage `json:"observed_financial_snapshot"`
+		JobRunID                  string                        `json:"job_run_id"`
+		ObservedVersions          json.RawMessage               `json:"observed_versions"`
+		ObservedFinancialSnapshot json.RawMessage               `json:"observed_financial_snapshot"`
+		AuthorizationBinding      *ApprovalAuthorizationBinding `json:"authorization_binding,omitempty"`
 	}
 	if api.DecodeJSON(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_EXECUTION", "invalid approval execution request", httpserver.RequestID(r.Context()))
 		return
 	}
-	execution, err := repository.BeginApprovalExecution(r.Context(), requestID, executorIdentity, body.JobRunID, body.ObservedVersions, body.ObservedFinancialSnapshot)
+	var execution ApprovalExecution
+	var err error
+	if body.AuthorizationBinding != nil {
+		authorized, supported := repository.(approvalAuthorizedExecutionRepository)
+		if !supported {
+			err = ErrApprovalConsumerBindingUnavailable
+		} else {
+			execution, err = authorized.BeginApprovalExecutionWithAuthorization(r.Context(), requestID, executorIdentity, body.JobRunID, body.ObservedVersions, body.ObservedFinancialSnapshot, *body.AuthorizationBinding)
+		}
+	} else {
+		execution, err = repository.BeginApprovalExecution(r.Context(), requestID, executorIdentity, body.JobRunID, body.ObservedVersions, body.ObservedFinancialSnapshot)
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -93,5 +109,9 @@ func approvalExecutorFromContext(w http.ResponseWriter, r *http.Request) (string
 		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "trusted executor identity is required", httpserver.RequestID(r.Context()))
 		return "", false
 	}
-	return strings.TrimSpace(workload.Service), true
+	service := strings.TrimSpace(workload.Service)
+	if service == "billing-service" {
+		return "billing-command-executor", true
+	}
+	return service, true
 }

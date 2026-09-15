@@ -522,6 +522,16 @@
         "file": "000052_approval_authorization_relay.up.sql",
         "version": 52,
         "sha256": "50fbfc28846bfdbc03af403f7a42cbecae0c480c0d4ec7398d8bfa10f4756710"
+      },
+      {
+        "file": "000053_approval_consumer_delivery.down.sql",
+        "version": 53,
+        "sha256": "0db0a6ebb4da2c53fc62e09fdf1227578042f0440ba1d253232cd5dc1b1c2383"
+      },
+      {
+        "file": "000053_approval_consumer_delivery.up.sql",
+        "version": 53,
+        "sha256": "493966cdca26e837e4144b4758e6478513766fde052385ba7b1b1222e551f791"
       }
     ],
     "billing": [

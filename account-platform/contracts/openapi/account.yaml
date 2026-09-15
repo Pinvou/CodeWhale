@@ -35,8 +35,122 @@ paths:
                 job_run_id: { type: string, minLength: 1, maxLength: 160 }
                 observed_versions: { type: object, additionalProperties: true }
                 observed_financial_snapshot: { $ref: "#/components/schemas/TokenFinancialSnapshotOrGeneric" }
+                authorization_binding: { $ref: "#/components/schemas/ApprovalAuthorizationBinding" }
       responses:
         "200": { description: Immutable execution lease, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalExecutionLease" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/binding:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: resolveApprovalAuthorizationBinding
+      summary: Resolve the immutable Account-owned binding for one published authorization event
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: query, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      responses:
+        "200": { description: Immutable authorization binding, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationBinding" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}/observe:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: observeApprovalAuthorizationDelivery
+      summary: Bind the first physical delivery sequence without creating domain execution authority
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryObservation" } } }
+      responses:
+        "200": { description: Shared durable delivery state, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryState" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}/attempts/grant:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: grantApprovalAuthorizationDomainAttempt
+      summary: Grant exactly one Billing domain attempt by durable state CAS
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryVersion" } } } }
+      responses:
+        "200": { description: Granted state, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryState" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}/attempts/failure:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: recordApprovalAuthorizationDomainFailure
+      summary: Record a stable Billing domain-attempt failure by CAS
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryFailure" } } } }
+      responses:
+        "200": { description: Updated state, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryState" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}/result:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: recordApprovalAuthorizationResult
+      summary: Persist that the domain result is durably queryable
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryVersion" } } } }
+      responses:
+        "200": { description: Result-confirmed state, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryState" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}/dlq-puback:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: recordApprovalAuthorizationDLQPubAck
+      summary: Persist a Billing-only authorization DLQ PubAck before terminal source acknowledgement
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryDLQPubAck" } } } }
+      responses:
+        "200": { description: DLQ PubAck state, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryState" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}/terminal:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: recordApprovalAuthorizationTerminal
+      summary: Confirm the current physical delivery after checking DoubleAck
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryVersion" } } } }
+      responses:
+        "200": { description: Terminal shared state, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryState" } } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -1095,6 +1209,70 @@ components:
       anyOf:
         - { $ref: "#/components/schemas/TokenFinancialSnapshot" }
         - { type: object, additionalProperties: true }
+    ApprovalAuthorizationBinding:
+      type: object
+      additionalProperties: false
+      required: [event_id, durable, workload, approval_request_id, approved_request_version, approval_epoch, serialization_version, provenance, event_digest, digest_kind, command_type, policy_version, executor_identity]
+      properties:
+        event_id: { type: string, format: uuid }
+        durable: { type: string, minLength: 1, maxLength: 120 }
+        workload: { type: string, enum: [billing-command-executor, token-command-executor] }
+        approval_request_id: { type: string, format: uuid }
+        approved_request_version: { type: integer, format: int64, minimum: 1 }
+        approval_epoch: { type: integer, format: int64, minimum: 1 }
+        serialization_version: { type: string, enum: [LEGACY_TYPED_V1, APPROVAL_RFC8785_DECIMAL_V1] }
+        provenance: { type: string, enum: [FROZEN_AT_APPROVAL, RECONSTRUCTED_FOR_DELIVERY, RECONSTRUCTED_AFTER_PUBLISH] }
+        event_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        digest_kind: { type: string, enum: [DELIVERY_BYTES, LEGACY_SEMANTIC] }
+        command_type: { type: string, minLength: 1, maxLength: 120 }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        executor_identity: { type: string, enum: [billing-command-executor, token-command-executor] }
+    ApprovalAuthorizationDeliveryObservation:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, approved_request_version, approval_epoch, serialization_version, provenance, event_digest, digest_kind, command_type, policy_version, executor_identity, stream, stream_sequence]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        approved_request_version: { type: integer, format: int64, minimum: 1 }
+        approval_epoch: { type: integer, format: int64, minimum: 1 }
+        serialization_version: { type: string, enum: [LEGACY_TYPED_V1, APPROVAL_RFC8785_DECIMAL_V1] }
+        provenance: { type: string, enum: [FROZEN_AT_APPROVAL, RECONSTRUCTED_FOR_DELIVERY, RECONSTRUCTED_AFTER_PUBLISH] }
+        event_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        digest_kind: { type: string, enum: [DELIVERY_BYTES, LEGACY_SEMANTIC] }
+        command_type: { type: string, minLength: 1, maxLength: 120 }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        executor_identity: { type: string, enum: [billing-command-executor, token-command-executor] }
+        stream: { type: string, const: ACCOUNT_PLATFORM }
+        stream_sequence: { type: integer, format: int64, minimum: 1 }
+    ApprovalAuthorizationDeliveryState:
+      type: object
+      additionalProperties: false
+      required: [domain_attempt_count, state, version]
+      properties:
+        domain_attempt_count: { type: integer, minimum: 0, maximum: 12 }
+        state: { type: string, enum: [READY, DOMAIN_INFLIGHT, RESULT_CONFIRMED, DLQ_PUBLISHED_ACK_PENDING, TERMINAL_CONFIRMED] }
+        version: { type: integer, format: int64, minimum: 1 }
+    ApprovalAuthorizationDeliveryVersion:
+      type: object
+      additionalProperties: false
+      required: [expected_version]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+    ApprovalAuthorizationDeliveryFailure:
+      type: object
+      additionalProperties: false
+      required: [expected_version, error_code]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        error_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,119}$' }
+    ApprovalAuthorizationDeliveryDLQPubAck:
+      type: object
+      additionalProperties: false
+      required: [expected_version, message_id, stream_sequence]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        message_id: { type: string, minLength: 1, maxLength: 240 }
+        stream_sequence: { type: integer, format: int64, minimum: 1 }
     ApprovalExecutionLease:
       type: object
       additionalProperties: false
@@ -1118,6 +1296,14 @@ components:
         execution_idempotency_key: { type: string, minLength: 1, maxLength: 512 }
         executor_identity: { type: string, minLength: 1, maxLength: 120 }
         status: { type: string, enum: [EXECUTING, EXECUTED, FAILED] }
+        authorization_event_id: { type: string, format: uuid }
+        authorization_durable: { type: string, minLength: 1, maxLength: 120 }
+        authorization_approved_request_version: { type: integer, format: int64, minimum: 1 }
+        authorization_event_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        authorization_digest_kind: { type: string, enum: [DELIVERY_BYTES, LEGACY_SEMANTIC] }
+        authorization_serialization_version: { type: string, enum: [LEGACY_TYPED_V1, APPROVAL_RFC8785_DECIMAL_V1] }
+        authorization_provenance: { type: string, enum: [FROZEN_AT_APPROVAL, RECONSTRUCTED_FOR_DELIVERY, RECONSTRUCTED_AFTER_PUBLISH] }
+        authorization_approval_epoch: { type: integer, format: int64, minimum: 1 }
       allOf:
         - if: { properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE } }, required: [command_type] }
           then:

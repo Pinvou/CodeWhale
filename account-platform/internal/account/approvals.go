@@ -115,6 +115,14 @@ type ApprovalExecution struct {
 	ExecutionIdempotencyKey       string          `json:"execution_idempotency_key"`
 	ExecutorIdentity              string          `json:"executor_identity"`
 	Status                        string          `json:"status"`
+	AuthorizationEventID          *uuid.UUID      `json:"authorization_event_id,omitempty"`
+	AuthorizationDurable          string          `json:"authorization_durable,omitempty"`
+	AuthorizationApprovedVersion  int64           `json:"authorization_approved_request_version,omitempty"`
+	AuthorizationEventDigest      string          `json:"authorization_event_digest,omitempty"`
+	AuthorizationDigestKind       string          `json:"authorization_digest_kind,omitempty"`
+	AuthorizationSerialization    string          `json:"authorization_serialization_version,omitempty"`
+	AuthorizationProvenance       string          `json:"authorization_provenance,omitempty"`
+	AuthorizationApprovalEpoch    int64           `json:"authorization_approval_epoch,omitempty"`
 }
 
 func (r *PostgresRepository) ApprovalPolicies(context.Context) []approvalpolicy.Policy {
