@@ -55,5 +55,6 @@ test('APT-123 OpenAPI closes command envelopes and keeps executor routes interna
   assert.match(governance, /ExecuteApprovedTokenCommand\(context\.Context, string, string, TokenCommandEnvelope\)/);
   assert.match(accountHTTP, /serviceauth\.FromContext/);
   assert.doesNotMatch(accountHTTP, /ExecutorIdentity\s+string\s+`json:"executor_identity"`/);
-  assert.doesNotMatch(billingGate, /"executor_identity"\s*:/);
+  assert.match(billingGate, /"executor_identity": binding\.ExecutorIdentity/);
+  assert.doesNotMatch(billingGate, /"executor_identity":\s*(?:executorIdentity|payload\.)/);
 });

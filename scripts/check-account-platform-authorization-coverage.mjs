@@ -94,6 +94,9 @@ async function discover(catalog) {
   for (const [relative, text] of textBySource) {
     for (const match of text.matchAll(/RunBackground\([^,\n]+,\s*"([^"]+)"/g)) tasks.push({ source: relative, name: match[1] });
     for (const match of text.matchAll(/broker\.Consume(?:UntilResolved)?\([^,\n]+,\s*"([^"]+)",\s*"([^"]+)"/g)) events.push({ source: relative, durable: match[1], subject: match[2] });
+    for (const match of text.matchAll(/broker\.ConsumeAuthorization\([^,\n]+,\s*"([^"]+)"/g)) {
+      events.push({ source: relative, durable: match[1], subject: 'account.approval-command.authorized.v1' });
+    }
   }
   events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'source-bound-outbox-relay', subject: 'account|billing|token.>' });
   events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'account-approval-relay', subject: 'account.approval-command.authorized.v1' });

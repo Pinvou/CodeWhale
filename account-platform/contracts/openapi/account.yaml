@@ -75,6 +75,24 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: getApprovalAuthorizationDeliveryState
+      summary: Read the closed delivery state needed to recover a confirmed twelfth failure
+      parameters:
+        - { name: event_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: durable, in: path, required: true, schema: { type: string, minLength: 1, maxLength: 120 } }
+      responses:
+        "200":
+          description: Current delivery state without payload or delivery bytes
+          headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalAuthorizationDeliveryState" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/approval-authorization/events/{event_id}/deliveries/{durable}/attempts/grant:
     post:
       servers: [{ url: / }]
@@ -1248,10 +1266,24 @@ components:
       type: object
       additionalProperties: false
       required: [domain_attempt_count, state, version]
+      allOf:
+        - if: { required: [execution_status], properties: { execution_status: { const: FAILED } } }
+          then: { required: [execution_error_class], properties: { execution_error_class: {} } }
+        - if: { required: [execution_error_class], properties: { execution_error_class: {} } }
+          then: { required: [execution_status], properties: { execution_status: { const: FAILED } } }
       properties:
         domain_attempt_count: { type: integer, minimum: 0, maximum: 12 }
         state: { type: string, enum: [READY, DOMAIN_INFLIGHT, RESULT_CONFIRMED, DLQ_PUBLISHED_ACK_PENDING, TERMINAL_CONFIRMED] }
         version: { type: integer, format: int64, minimum: 1 }
+        last_error_code:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{0,119}$'
+          not: { pattern: '(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)' }
+        execution_status: { type: string, enum: [EXECUTING, EXECUTED, FAILED] }
+        execution_error_class:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{0,119}$'
+          not: { pattern: '(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)' }
     ApprovalAuthorizationDeliveryVersion:
       type: object
       additionalProperties: false
@@ -1264,7 +1296,10 @@ components:
       required: [expected_version, error_code]
       properties:
         expected_version: { type: integer, format: int64, minimum: 1 }
-        error_code: { type: string, pattern: '^[A-Z][A-Z0-9_]{0,119}$' }
+        error_code:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{0,119}$'
+          not: { pattern: '(TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)' }
     ApprovalAuthorizationDeliveryDLQPubAck:
       type: object
       additionalProperties: false

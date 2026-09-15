@@ -20,6 +20,10 @@ type approvalConsumerDeliveryRepository interface {
 	RecordApprovalAuthorizationTerminal(context.Context, uuid.UUID, string, string, int64) (ApprovalDeliveryState, error)
 }
 
+type approvalConsumerDeliveryStateRepository interface {
+	ApprovalAuthorizationDeliveryState(context.Context, uuid.UUID, string, string) (ApprovalDeliveryState, error)
+}
+
 func (s *Service) approvalConsumerDeliveryRepository(w http.ResponseWriter, r *http.Request) (approvalConsumerDeliveryRepository, bool) {
 	repository, ok := s.repository.(approvalConsumerDeliveryRepository)
 	if !ok {
@@ -63,6 +67,20 @@ func (s *Service) resolveApprovalAuthorizationBinding(w http.ResponseWriter, r *
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, binding)
+}
+
+func (s *Service) approvalAuthorizationDeliveryState(w http.ResponseWriter, r *http.Request) {
+	repository, eventID, durable, workload, ok := s.approvalConsumerIdentity(w, r)
+	if !ok {
+		return
+	}
+	reader, ok := repository.(approvalConsumerDeliveryStateRepository)
+	if !ok {
+		s.writeError(w, r, ErrApprovalConsumerBindingUnavailable)
+		return
+	}
+	state, err := reader.ApprovalAuthorizationDeliveryState(r.Context(), eventID, durable, workload)
+	s.writeApprovalDeliveryState(w, r, state, err)
 }
 
 func (s *Service) observeApprovalAuthorizationDelivery(w http.ResponseWriter, r *http.Request) {

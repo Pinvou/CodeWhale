@@ -111,7 +111,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer broker.Close()
-	stopApprovalConsumer, err := broker.Consume(workerContext, "billing-command-executor-v1", "account.approval-command.authorized.v1", billing.NewApprovalCommandConsumer(service).Handle)
+	approvalConsumer, err := billing.NewAuthorizationCommandConsumer(service, approvalGate, "billing-command-executor-v1")
+	if err != nil {
+		log.Fatal(err)
+	}
+	stopApprovalConsumer, err := broker.ConsumeAuthorization(workerContext, "billing-command-executor-v1", approvalConsumer.Handle)
 	if err != nil {
 		log.Fatal(err)
 	}

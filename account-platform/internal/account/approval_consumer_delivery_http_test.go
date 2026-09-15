@@ -64,6 +64,34 @@ func (stub *approvalConsumerDeliveryRepositoryStub) RecordApprovalAuthorizationT
 	return stub.state, nil
 }
 
+func (stub *approvalConsumerDeliveryRepositoryStub) ApprovalAuthorizationDeliveryState(_ context.Context, eventID uuid.UUID, durable, workload string) (ApprovalDeliveryState, error) {
+	stub.resolved.EventID, stub.resolved.Durable, stub.resolved.Workload = eventID, durable, workload
+	return stub.state, nil
+}
+
+func TestApprovalConsumerDeliveryStateHTTPUsesOnlyTrustedIdentity(t *testing.T) {
+	eventID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	durable := "billing-wallet-adjustment-executor-p1-v1"
+	errorCode := "DOMAIN_PRECONDITION_REJECTED"
+	stub := &approvalConsumerDeliveryRepositoryStub{state: ApprovalDeliveryState{DomainAttemptCount: 12, State: "DOMAIN_INFLIGHT", Version: 25, LastErrorCode: &errorCode}}
+	ctx, err := serviceauth.ContextForJob(context.Background(), "billing-service", "APPROVAL_AUTHORIZATION_CONSUME", uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/?workload=token-command-executor", nil).WithContext(ctx)
+	request.SetPathValue("event_id", eventID.String())
+	request.SetPathValue("durable", durable)
+	response := httptest.NewRecorder()
+	NewService(stub, nil).approvalAuthorizationDeliveryState(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || stub.resolved.EventID != eventID || stub.resolved.Durable != durable || stub.resolved.Workload != "billing-command-executor" {
+		t.Fatalf("status=%d identity=%+v headers=%v body=%s", response.Code, stub.resolved, response.Header(), response.Body.String())
+	}
+	var body ApprovalDeliveryState
+	if json.Unmarshal(response.Body.Bytes(), &body) != nil || body.LastErrorCode == nil || *body.LastErrorCode != errorCode {
+		t.Fatalf("closed state response=%+v body=%s", body, response.Body.String())
+	}
+}
+
 func TestApprovalConsumerDeliveryHTTPUsesTrustedPathAndWorkloadIdentity(t *testing.T) {
 	eventID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
 	requestID := uuid.MustParse("22222222-2222-4222-8222-222222222222")

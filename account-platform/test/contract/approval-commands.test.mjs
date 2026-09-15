@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('every management write is classified and financial facts use the independent approval executor', async () => {
-  const [policy, accountService, billingService, tokenService, accountMigration, billingMigration, approvals, approvalAuthorization, execution, billingExecution, billingConsumer, billingMain, adminOpenAPI, eventSchema, portal, adminView] = await Promise.all([
+  const [policy, accountService, billingService, tokenService, accountMigration, billingMigration, approvals, approvalAuthorization, execution, billingExecution, billingConsumer, billingAuthorizationDelivery, billingMain, adminOpenAPI, eventSchema, portal, adminView] = await Promise.all([
     read('internal/platform/approvalpolicy/registry.go'),
     read('internal/account/service.go'),
     read('internal/billing/service.go'),
@@ -19,6 +19,7 @@ test('every management write is classified and financial facts use the independe
     read('internal/account/approval_execution.go'),
     read('internal/billing/approval_execution_http.go'),
     read('internal/billing/approval_consumer.go'),
+    read('internal/billing/approval_delivery.go'),
     read('cmd/billing-service/main.go'),
     read('contracts/openapi/admin.yaml'),
     read('contracts/events/account.approval-command.authorized.v1.schema.json'),
@@ -99,8 +100,11 @@ test('every management write is classified and financial facts use the independe
   assert.match(billingMigration, /manual_adjustments_require_approval_execution/);
   assert.match(billingMigration, /manual_adjustments_request_idempotency_unique/);
   assert.match(billingExecution, /ExecuteApprovedAdjustment/);
-  assert.match(billingConsumer, /account\.approval-command\.authorized\.v1/);
-  assert.match(billingMain, /broker\.Consume\(workerContext, "billing-command-executor-v1"/);
+  assert.match(billingConsumer, /generic approval authorization consumption is forbidden/);
+  assert.match(billingAuthorizationDelivery, /DecodeAuthorizationEvent/);
+  assert.match(billingAuthorizationDelivery, /ResolveAuthorizationBinding/);
+  assert.match(billingMain, /broker\.ConsumeAuthorization\(workerContext, "billing-command-executor-v1"/);
+  assert.doesNotMatch(billingMain, /broker\.Consume\(workerContext, "billing-command-executor-v1"/);
   assert.match(billingService, /\/execute-approved/);
   assert.doesNotMatch(billingService, /\/adjustments\/:adjustment_id\/approve", httpserver\.AdaptFunc\(s\.approveAdjustment\)/);
   assert.match(adminOpenAPI, /operationId: createAdminApprovalDraft/);

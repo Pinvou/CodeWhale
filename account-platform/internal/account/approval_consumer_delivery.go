@@ -39,9 +39,27 @@ type ApprovalDeliveryObservation struct {
 }
 
 type ApprovalDeliveryState struct {
-	DomainAttemptCount int16  `json:"domain_attempt_count"`
-	State              string `json:"state"`
-	Version            int64  `json:"version"`
+	DomainAttemptCount  int16   `json:"domain_attempt_count"`
+	State               string  `json:"state"`
+	Version             int64   `json:"version"`
+	LastErrorCode       *string `json:"last_error_code,omitempty"`
+	ExecutionStatus     *string `json:"execution_status,omitempty"`
+	ExecutionErrorClass *string `json:"execution_error_class,omitempty"`
+}
+
+func (r *PostgresRepository) ApprovalAuthorizationDeliveryState(ctx context.Context, eventID uuid.UUID, durable, workload string) (ApprovalDeliveryState, error) {
+	if !validApprovalAuthorizationLookup(eventID, durable, workload) {
+		return ApprovalDeliveryState{}, ErrApprovalConsumerBindingInvalid
+	}
+	var state ApprovalDeliveryState
+	err := r.pool.QueryRow(ctx, `SELECT domain_attempt_count,state,version,last_error_code,execution_status,execution_error_class
+FROM public.read_approval_authorization_delivery_state($1,$2,$3)`, eventID, durable, workload).Scan(
+		&state.DomainAttemptCount, &state.State, &state.Version, &state.LastErrorCode, &state.ExecutionStatus, &state.ExecutionErrorClass,
+	)
+	if err != nil {
+		return ApprovalDeliveryState{}, approvalConsumerError(ctx, err)
+	}
+	return state, nil
 }
 
 func (r *PostgresRepository) ResolveApprovalAuthorizationBinding(ctx context.Context, eventID uuid.UUID, durable, workload string) (ApprovalAuthorizationBinding, error) {

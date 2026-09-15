@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('payment provider and product recovery are version-frozen and independently approved', async () => {
-  const [policy, accountMigration, productPolicyMigration, billingMigration, productBillingMigration, recovery, health, consumer, service, admin, approvalUI, adminView, adminClient, adminFinance] = await Promise.all([
+  const [policy, accountMigration, productPolicyMigration, billingMigration, productBillingMigration, recovery, health, consumer, authorizationDomain, service, admin, approvalUI, adminView, adminClient, adminFinance] = await Promise.all([
     read('internal/platform/approvalpolicy/registry.go'),
     read('migrations/account/000033_payment_provider_resume_policy.up.sql'),
     read('migrations/account/000038_payment_product_resume_policy.up.sql'),
@@ -16,6 +16,7 @@ test('payment provider and product recovery are version-frozen and independently
     read('internal/billing/provider_recovery.go'),
     read('internal/billing/provider_health.go'),
     read('internal/billing/approval_consumer.go'),
+    read('internal/billing/approval_delivery_domain.go'),
     read('internal/billing/service.go'),
     read('contracts/openapi/admin.yaml'),
     read('internal/portal/static/assets/approval-requests.js'),
@@ -55,8 +56,10 @@ test('payment provider and product recovery are version-frozen and independently
   assert.match(health, /TrustedProbe/);
   assert.match(recovery, /billing\.payment-provider\.resumed\.v1/);
   assert.match(recovery, /billing\.payment-product\.resumed\.v1/);
-  assert.match(consumer, /executeApprovedProviderResumeCommand/);
-  assert.match(consumer, /executeApprovedProductResumeCommand/);
+  assert.match(consumer, /generic approval authorization consumption is forbidden/);
+  assert.match(authorizationDomain, /domain\.repository\.executeProviderResume/);
+  assert.match(authorizationDomain, /domain\.repository\.executeProductResume/);
+  assert.match(authorizationDomain, /domain\.probe\(ctx, observed\.ProbeOrderID\)/);
   assert.match(service, /payment-provider-controls/);
   assert.match(admin, /getPaymentProviderControls/);
   assert.doesNotMatch(approvalUI, /createControlResume|resume_draft|productResumeForms/);
