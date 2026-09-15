@@ -59,7 +59,14 @@ export function validateCredentialEdge(config) {
     fields(identity, ['service', 'subject', 'permissions', 'token_source', 'rotation_reference']);
     edgeCheck(typeof identity.service === 'string' && Object.hasOwn(identityPermissions, identity.service) && !seen.has(identity.service) && reference(identity.subject) && !subjects.has(identity.subject)
       && ['projected', 'rotated_file'].includes(identity.token_source) && reference(identity.rotation_reference), 'WORKLOAD_IDENTITY_INVALID');
-    edgeCheck(Array.isArray(identity.permissions) && JSON.stringify(identity.permissions) === JSON.stringify(identityPermissions[identity.service]), 'WORKLOAD_PERMISSION_INVALID');
+    // Preserve the legacy complete permission set during N/N-1 rollout. Only
+    // the explicit consumer variant adds this permission; validation does not
+    // synthesize grants or widen the credential portal identity.
+    const expectedPermissions = identityPermissions[identity.service];
+    const exactLegacy = JSON.stringify(identity.permissions) === JSON.stringify(expectedPermissions);
+    const exactConsumer = identity.service === 'token-command-executor'
+      && JSON.stringify(identity.permissions) === JSON.stringify(['internal.approval-authorization.consume', ...expectedPermissions]);
+    edgeCheck(Array.isArray(identity.permissions) && (exactLegacy || exactConsumer), 'WORKLOAD_PERMISSION_INVALID');
     seen.add(identity.service); subjects.add(identity.subject);
   }
   return { decision: 'EDGE_CONFIG_VALID', environment_status: 'ENV_PENDING', deployment_status: 'NOT_DEPLOYED' };

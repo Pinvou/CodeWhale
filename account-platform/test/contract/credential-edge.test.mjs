@@ -5,6 +5,24 @@ import { credentialOriginPairs, renderCredentialEdge, validateCredentialEdge } f
 
 const baseline = JSON.parse(await readFile(new URL('../../deploy/nginx/credential-edge.example.json', import.meta.url), 'utf8'));
 const copy = () => structuredClone(baseline);
+test('credential edge preserves legacy permissions and accepts only the explicit complete consumer variant', () => {
+  const consume = 'internal.approval-authorization.consume';
+  const legacy = ['internal.approval-execution.begin', 'internal.approval-execution.complete', 'internal.authorization.check', 'internal.token.catalog-rollback.execute', 'internal.token.credential-revoke.execute', 'internal.token.model-lifecycle.execute'];
+  for (const permissions of [legacy, [consume, ...legacy]]) {
+    const config = copy();
+    config.workload.identities[1].permissions = [...permissions];
+    const before = JSON.stringify(config);
+    assert.equal(validateCredentialEdge(config).decision, 'EDGE_CONFIG_VALID');
+    assert.equal(JSON.stringify(config), before, 'validation must not synthesize permissions');
+  }
+  for (const permissions of [[consume], [consume, ...legacy.slice(1)], [consume, consume, ...legacy], [...legacy, 'internal.*'], [...legacy, consume]]) {
+    const config = copy(); config.workload.identities[1].permissions = permissions;
+    assert.throws(() => validateCredentialEdge(config), /CREDENTIAL_EDGE_WORKLOAD_PERMISSION_INVALID/);
+  }
+  const wrongIdentity = copy(); wrongIdentity.workload.identities[0].permissions.push(consume);
+  assert.throws(() => validateCredentialEdge(wrongIdentity), /CREDENTIAL_EDGE_WORKLOAD_PERMISSION_INVALID/);
+});
+
 test('credential edge accepts only frozen pairs and never claims environment verification', () => {
   for (const [environment, pair] of Object.entries(credentialOriginPairs)) {
     const config = { ...copy(), environment, portal_origin: pair.portal, credential_origin: pair.credential };
