@@ -1,10 +1,12 @@
 // Portable fallback reimplementation of the H3C EIP employee-portal CLI.
 //
-// H3C IT ships official `eip-cli` binaries only for Windows (eip-cli.exe) and
-// Linux x86_64 (eip-cli); both are packaged as-is. For every other target
-// (linux/arm64, macOS darwin/arm64 + darwin/amd64) no official build exists, so
-// the app carries this clean-room Go reimplementation of the same protocol —
-// see build.sh. Plain stdlib Go, no OS-specific syscalls.
+// 五端统一由本源码构建（Windows x64 / Linux x64+arm64 / macOS arm64+x64，见
+// build.sh）：官方 eip-cli 二进制因 SSO 服务端把登录响应 data.pollInterval 由
+// string 改为 number 后 Go struct 反序列化必失败，已弃用不再打包。
+//
+// 业务路由表（方法/路径/query/body）已按官方 eip-cli 逐命令实测抓包报文对齐，
+// 唯一事实来源：docs/eip-official-api-golden.md。
+// Plain stdlib Go, no OS-specific syscalls.
 package main
 
 import (
@@ -12,8 +14,12 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,74 +61,292 @@ type sessionData struct {
 
 type route struct {
 	method string
-	path   string
+	path   string                                      // 相对 eipBase 的完整路径（黄金表路径去掉开头的 /eip）
+	query  func(map[string]string) (url.Values, error) // nil = 无 query
+	body   func(map[string]string) map[string]any      // nil = 无 body
 }
 
+// 路由表：每行一个字面量，格式 "key": {"<METHOD>", "<path>", <query 构造器>, <body 构造器>}。
+// key 集合是公开命令契约（eip.rs 的契约测试按行解析本表），逐条对齐
+// docs/eip-official-api-golden.md §4-§16 的 Method/路径/Query/Body 列。
 var routes = map[string]route{
-	"attendance get-summary":            {"POST", "/api/ApiCalendarMonthly/ApplyFlowPageList"},
-	"attendance get-calendar":           {"POST", "/api/ApiAttendance/GetEmpCalendarDetailInfo"},
-	"attendance get-overview":           {"POST", "/api/ApiAttendance/GetEmpMonthSummaryInfo"},
-	"attendance get-annual-days":        {"POST", "/api/ApiAttendance/GetAnnualDays"},
-	"attendance get-schedule":           {"POST", "/api/ApiAttendance/GetWorkSchduleList"},
-	"attendance list-shuttle-bus":       {"POST", "/api/ApiAttendance/GetShuttleBusLineList"},
-	"attendance list-leave-types":       {"POST", "/api/apiAttendance/GetLeaveApplyTypeList"},
-	"attendance calc-days":              {"POST", "/api/ApiAttendance/CalcApplyItemDays"},
-	"attendance get-annual-calc":        {"POST", "/api/ApiAttendance/GetAnnualCaclData"},
-	"attendance list-abnormal":          {"POST", "/api/ApiSapWorkAttendance/GetAbTimeRecordTable"},
-	"attendance list-forget-card":       {"POST", "/api/ApiSapWorkAttendance/GetEmpWSKCS"},
-	"attendance list-forget-badge":      {"POST", "/api/ApiSapWorkAttendance/GetEmpWDKCS"},
-	"attendance list-flex":              {"POST", "/api/ApiSapWorkAttendance/GetEmpOCLAbnormalData"},
-	"attendance get-person-summary":     {"POST", "/api/ApiAttendance/GetPersonCaclAttendanceModelList"},
-	"attendance get-effectived-summary": {"POST", "/api/ApiSapWorkAttendance/GetWorkAttendanceTotalTable"},
-	"leave get-balance":                 {"POST", "/api/ApiAttendance/GetAnnualLeaveBalance"},
-	"leave get-other-balance":           {"POST", "/api/ApiAttendance/GetOtherLeaveBalance"},
-	"leave get-sick-balance":            {"POST", "/api/ApiAttendance/GetFullPaySickLeaveBalance"},
-	"leave get-sick-used":               {"POST", "/api/ApiAttendance/GetSikeLeaveSAPHours"},
-	"leave get-compassionate-used":      {"POST", "/api/ApiAttendance/GetCompassionateLeaveApprovedDays"},
-	"vacation list-annual":              {"POST", "/api/ApiSapWorkAttendance/GetVacationInfoTableList"},
-	"vacation list-sick":                {"POST", "/api/ApiSapWorkAttendance/GetVacationInfoLeaveTableList"},
-	"vacation list-compensatory":        {"POST", "/api/ApiSapWorkAttendance/GetWorkVacationLeaveList"},
-	"vacation get-remaining-hours":      {"POST", "/api/ApiSapWorkAttendance/GetEmpTXCS"},
-	"overtime list-types":               {"POST", "/api/ApiAttendance/GetOvertimeApplyTypeList"},
-	"overtime get-extra-hours":          {"POST", "/api/ApiAttendance/GetOvertimeApplyExtraHours"},
-	"overtime get-approving-hours":      {"POST", "/api/ApiAttendance/GetOvertimeApplyApprovingHours"},
-	"overtime get-approved-hours":       {"POST", "/api/ApiAttendance/GetOvertimeApplyApprovedHours"},
-	"overtime get-effectived-hours":     {"POST", "/api/ApiAttendance/GetOvertimeApplyEffectivedHours"},
-	"overtime get-limit-hours":          {"POST", "/api/ApiAttendance/GetOvertimeLimitHours"},
-	"todo":                              {"POST", "/api/ApiAttendance/GetWorkFlowList"},
-	"todo-count":                        {"POST", "/api/ApiAttendance/GetWorkFlowList"},
-	"todo-detail":                       {"POST", "/api/ApiAttendance/GetApplyWorkFlowInfo"},
-	"apply list":                        {"POST", "/api/ApiCalendarMonthly/ApplyFlowPageList"},
-	"apply get-detail":                  {"POST", "/api/ApiAttendance/GetApplyWorkFlowInfo"},
-	"apply list-attachments":            {"POST", "/api/ApiAttendance/GetApplyBillAttachFileList"},
-	"employee-profile":                  {"POST", "/api/ApiStaffNavigation/NewStaffStatus"},
-	"employee-contact":                  {"POST", "/organisation/user/tel/info/%s"},
-	"employee-handbook sign":            {"POST", "/api/ApiStaffNavigation/SignForReceipt"},
-	"employee-search":                   {"POST", "/api/ApiStaffNavigation/NewStaffStatus"},
-	"commercial-insurance":              {"POST", "/api/ApiStaffNavigation/GetMyInsuranceList"},
-	"contract":                          {"POST", "/api/ApiBenefits/MyContractPageList"},
-	"consumption monthly":               {"POST", "/api/ApiMyConsumption/MyConsumptionMonthly"},
-	"consumption list":                  {"POST", "/api/ApiMyConsumption/MyConsumptionPageList"},
-	"consumption trend":                 {"POST", "/api/ApiMyConsumption/MyConsumptionMonthlyList"},
-	"expense recent":                    {"POST", "/api/ApiCalendarMonthly/ApplyFlowPageList"},
-	"fuel-card list":                    {"POST", "/api/ApiBenefits/MyOilCardPageList"},
-	"fuel-card seasons":                 {"POST", "/api/ApiBenefits/OilCardInvestSeasonly"},
-	"fuel-card apply-records":           {"POST", "/api/ApiBenefits/OilCardApplyRecords"},
-	"union-welfare":                     {"POST", "/api/ApiBenefits/MyUnionWelfarePageList"},
-	"union-apply join":                  {"POST", "/api/ApiStaffNavigation/JoinUnion"},
-	"union-apply status":                {"POST", "/api/ApiStaffNavigation/UnionApply"},
-	"survey":                            {"POST", "/api/ApiOpinionTemplate/GetOpenOpinionTemplateList"},
-	"survey detail":                     {"POST", "/api/ApiOpinionTemplate/OpinionCollection/%s"},
-	"survey submit":                     {"POST", "/api/ApiOpinionTemplate/SaveOpinionCollectionInfo"},
-	"remote-work":                       {"POST", "/api/ApiCalendarMonthly/ApplyFlowPageList"},
+	"attendance get-summary":            {"GET", "/hrss/api/ApiAttendance/GetEmpCalendarSummaryInfo", rsaMonthQuery, nil},
+	"attendance get-calendar":           {"GET", "/hrss/api/ApiAttendance/GetEmpCalendarDetailInfo", rsaMonthQuery, nil},
+	"attendance get-overview":           {"GET", "/hrss/api/ApiAttendance/GetEmpMonthSummaryInfo", plainMonthQuery, nil},
+	"attendance get-annual-days":        {"GET", "/hrss/api/ApiAttendance/GetAnnualDays", nil, nil},
+	"attendance get-schedule":           {"GET", "/hrss/api/ApiAttendance/GetWorkSchduleList", emptyApplyNoQuery, nil},
+	"attendance list-shuttle-bus":       {"GET", "/hrss/api/ApiAttendance/GetShuttleBusLineList", nil, nil},
+	"attendance list-leave-types":       {"GET", "/hrss/api/apiAttendance/GetLeaveApplyTypeList", nil, nil},
+	"attendance calc-days":              {"POST", "/hrss/api/ApiAttendance/CalcApplyItemDays", funcTypeLeavetimeQuery, calcDaysBody},
+	"attendance get-annual-calc":        {"GET", "/hrss/api/ApiAttendance/GetAnnualCaclData", caclDateQuery, nil},
+	"attendance get-person-summary":     {"GET", "/hrss/api/ApiAttendance/GetPersonCaclAttendanceModelList", personSummaryQuery, nil},
+	"attendance get-effectived-summary": {"POST", "/hrss/api/ApiSapWorkAttendance/GetEmpOCLAbnormalData", capDateMonthQuery, pagedBody100},
+	"attendance list-abnormal":          {"POST", "/hrss/api/ApiSapWorkAttendance/GetAbTimeRecordTable", capDateMonthQuery, pagedBody},
+	"attendance list-forget-card":       {"POST", "/hrss/api/ApiSapWorkAttendance/GetEmpWSKCS", capDateMonthQuery, pagedBody},
+	"attendance list-forget-badge":      {"POST", "/hrss/api/ApiSapWorkAttendance/GetEmpWDKCS", capDateMonthQuery, pagedBody},
+	"attendance list-flex":              {"POST", "/hrss/api/ApiSapWorkAttendance/GetEmpTXCS", capDateMonthQuery, pagedBody},
+	"leave get-balance":                 {"GET", "/hrss/api/ApiLeavetime/LeavetimeApply", nil, nil},
+	"leave get-other-balance":           {"GET", "/hrss/api/ApiLeavetime/LeavetimeApply", nil, nil},
+	"leave get-sick-balance":            {"GET", "/hrss/api/ApiLeavetime/LeavetimeApply", nil, nil},
+	"leave get-sick-used":               {"GET", "/hrss/api/ApiLeavetime/LeavetimeApply", nil, nil},
+	"leave get-compassionate-used":      {"GET", "/hrss/api/ApiLeavetime/LeavetimeApply", nil, nil},
+	"vacation list-annual":              {"POST", "/hrss/api/ApiSapWorkAttendance/GetVacationInfoTableList", calcDateQuery, pagedUpperBody},
+	"vacation list-sick":                {"POST", "/hrss/api/ApiSapWorkAttendance/GetVacationInfoLeaveTableList", nil, pagedUpperBody},
+	"vacation list-compensatory":        {"GET", "/hrss/api/ApiSapWorkAttendance/GetWorkVacationLeaveList", pagedUpperQuery, nil},
+	"vacation get-remaining-hours":      {"POST", "/hrss/api/ApiSapWorkAttendance/GetWorkAttendanceTotalTable", yearDateQuery, pagedBody},
+	"overtime list-types":               {"GET", "/hrss/api/ApiAttendance/GetOvertimeApplyTypeList", nil, nil},
+	"overtime get-extra-hours":          {"GET", "/hrss/api/ApiOvertime/OvertimeApply", nil, nil},
+	"overtime get-approving-hours":      {"GET", "/hrss/api/ApiOvertime/OvertimeApply", nil, nil},
+	"overtime get-approved-hours":       {"GET", "/hrss/api/ApiOvertime/OvertimeApply", nil, nil},
+	"overtime get-effectived-hours":     {"GET", "/hrss/api/ApiOvertime/OvertimeApply", nil, nil},
+	"overtime get-limit-hours":          {"GET", "/hrss/api/ApiOvertime/OvertimeApply", nil, nil},
+	"todo":                              {"POST", "/app/app/workFlow/page", nil, todoBody},
+	"todo-count":                        {"POST", "/app/app/workFlow/total/count", nil, nil},
+	"todo-detail":                       {"POST", "/external/external/workflow/detail", nil, todoDetailBody},
+	"apply list":                        {"POST", "/hrss/api/ApiAttendance/GetWorkFlowList", flowCodeQuery, applyListBody},
+	"apply get-detail":                  {"GET", "/hrss/api/ApiAttendance/GetApplyWorkFlowInfo", docNoQuery, nil},
+	"apply list-attachments":            {"GET", "/hrss/api/ApiAttendance/GetApplyBillAttachFileList", docNoQuery, nil},
+	"employee-profile":                  {"GET", "/organisation/organisation/user/info", nil, nil},
+	"employee-contact":                  {"GET", "/organisation/user/tel/info/%s", nil, nil},
+	"employee-handbook sign":            {"GET", "/hrss/api/ApiStaffNavigation/SignForReceipt", typeOneQuery, nil},
+	"employee-search":                   {"POST", "/organisation/organisation/user/page", nil, employeeSearchBody},
+	"commercial-insurance":              {"GET", "/hrss/api/ApiStaffNavigation/GetMyInsuranceList", insuranceQuery, nil},
+	"contract":                          {"POST", "/hrss/api/ApiBenefits/MyContractPageList", nil, pagedBody},
+	"consumption monthly":               {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionMonthly", capDateMonthQuery, nil},
+	"consumption list":                  {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionPageList", consumptionListQuery, nil},
+	"consumption trend":                 {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionMonthlyList", nil, nil},
+	"expense recent":                    {"GET", "/external/external/sse/recent", nil, nil},
+	"fuel-card list":                    {"POST", "/hrss/api/ApiBenefits/MyOilCardPageList", nil, pagedBody},
+	"fuel-card seasons":                 {"GET", "/hrss/api/ApiBenefits/OilCardInvestSeasonly", nil, nil},
+	"fuel-card apply-records":           {"GET", "/hrss/api/ApiBenefits/OilCardApplyRecords", nil, nil},
+	"union-welfare":                     {"POST", "/hrss/api/ApiBenefits/MyUnionWelfarePageList", nil, unionWelfareBody},
+	"union-apply join":                  {"POST", "/hrss/api/ApiStaffNavigation/JoinUnion", nil, nil},
+	"union-apply status":                {"GET", "/hrss/api/ApiStaffNavigation/UnionApply", nil, nil},
+	"survey":                            {"GET", "/hrss/api/ApiOpinionTemplate/GetOpenOpinionTemplateList", nil, nil},
+	"survey detail":                     {"GET", "/hrss/api/ApiOpinionTemplate/OpinionCollection/%s", nil, nil},
+	"survey submit":                     {"POST", "/hrss/api/ApiOpinionTemplate/SaveOpinionCollectionInfo", nil, surveySubmitBody},
+	"remote-work":                       {"GET", "/hr/tempHomeWork/recordInfoList", nil, nil},
 	// 资讯/学习类公开命令（SKILL.md 命令速查表有载，契约测试把关不漂移）。
-	// path 只含官方 path 部分，前缀在 apiPrefix 按 /app、/announcement、/external
-	// 对齐官方 eip-cli 的 GetAppPrefix/GetAnnouncementPrefix/GetExternalPrefix。
-	"news":          {"POST", "/companyNews/page"},
-	"announcement":  {"POST", "/announcement/page"},
-	"course":        {"POST", "/lms/special/course"},
-	"meeting":       {"GET", "/meeting/list/%s"},
-	"community-hot": {"GET", "/bbs/list/%s"},
+	// app/announcement/external/organisation 组的 path 本身以组名开头，官方未去重，
+	// 线上真实路径就是双段（黄金表 §1）；employee-contact 是不加组前缀的单段例外。
+	"news":          {"POST", "/app/app/companyNews/page", nil, newsBody},
+	"announcement":  {"POST", "/announcement/announcement/page", nil, announcementBody},
+	"course":        {"POST", "/external/external/lms/my/course", nil, pagedBody},
+	"meeting":       {"GET", "/external/external/meeting/list/%s", nil, nil},
+	"community-hot": {"GET", "/external/external/bbs/list/%s", nil, nil},
+}
+
+// ---- query 构造器（严格对齐黄金表各命令的 Query 列；GET 参数全部进 query）----
+
+func monthNow() string { return time.Now().Format("2006-01") }
+func todayNow() string { return time.Now().Format("2006-01-02") }
+func yearNow() string  { return time.Now().Format("2006") }
+
+// q 把键值对打包成 url.Values（Encode 时自动 URL encode）。
+func q(pairs ...string) (url.Values, error) {
+	v := url.Values{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		v.Set(pairs[i], pairs[i+1])
+	}
+	return v, nil
+}
+
+// date=<RSA 加密的 YYYY-MM>（attendance get-summary / get-calendar 专用，黄金表 §2）。
+func rsaMonthQuery(f map[string]string) (url.Values, error) {
+	enc, err := encryptRSADate(firstNonEmpty(f["date"], monthNow()))
+	if err != nil {
+		return nil, err
+	}
+	return q("date", enc)
+}
+
+// date=YYYY-MM 明文（attendance get-overview）。
+func plainMonthQuery(f map[string]string) (url.Values, error) {
+	return q("date", firstNonEmpty(f["date"], monthNow()))
+}
+
+// Date=YYYY-MM 大写键（ApiSapWorkAttendance 系与 consumption monthly）。
+func capDateMonthQuery(f map[string]string) (url.Values, error) {
+	return q("Date", firstNonEmpty(f["date"], monthNow()))
+}
+
+// applyNo=（attendance get-schedule）。
+func emptyApplyNoQuery(map[string]string) (url.Values, error) { return q("applyNo", "") }
+
+// funcType=Leavetime（attendance calc-days）。
+func funcTypeLeavetimeQuery(map[string]string) (url.Values, error) {
+	return q("funcType", "Leavetime")
+}
+
+// caclDate=YYYY-MM-DD 缺省当天（attendance get-annual-calc；Cacl 为官方原拼写）。
+func caclDateQuery(f map[string]string) (url.Values, error) {
+	return q("caclDate", firstNonEmpty(f["date"], todayNow()))
+}
+
+// applyNo=&flowType=a（attendance get-person-summary）。
+func personSummaryQuery(map[string]string) (url.Values, error) {
+	return q("applyNo", "", "flowType", "a")
+}
+
+// calcDate=YYYY-MM-DD&resignationCode=（vacation list-annual，calcDate 缺省当天）。
+func calcDateQuery(f map[string]string) (url.Values, error) {
+	return q("calcDate", firstNonEmpty(f["date"], todayNow()), "resignationCode", "")
+}
+
+// PageIndex=1&PageSize=10 在 query（vacation list-compensatory，GET 且分页大写键）。
+func pagedUpperQuery(f map[string]string) (url.Values, error) {
+	return q("PageIndex", strconv.Itoa(atoiDefault(f["page"], 1)),
+		"PageSize", strconv.Itoa(atoiDefault(f["page-size"], 10)))
+}
+
+// Date=YYYY 年份（vacation get-remaining-hours）。
+func yearDateQuery(f map[string]string) (url.Values, error) {
+	return q("Date", firstNonEmpty(f["year"], yearNow()))
+}
+
+// flowCode=a（apply list，固定 "a"）。
+func flowCodeQuery(map[string]string) (url.Values, error) { return q("flowCode", "a") }
+
+// docNo=<--doc-no>（apply get-detail / list-attachments）。
+func docNoQuery(f map[string]string) (url.Values, error) { return q("docNo", f["doc-no"]) }
+
+// type=1（employee-handbook sign）。
+func typeOneQuery(map[string]string) (url.Values, error) { return q("type", "1") }
+
+// type=<1 本人/2 家人>&year=YYYY（commercial-insurance 对应黄金表 commercial-insurance list）。
+func insuranceQuery(f map[string]string) (url.Values, error) {
+	return q("type", firstNonEmpty(f["type"], "1"), "year", firstNonEmpty(f["year"], yearNow()))
+}
+
+// consumption list：Date 用 YYYY/MM/DD 斜杠格式，分页键 PageIndex/PageCount 在 query。
+func consumptionListQuery(f map[string]string) (url.Values, error) {
+	return q("Date", strings.ReplaceAll(firstNonEmpty(f["date"], todayNow()), "-", "/"),
+		"PageCount", strconv.Itoa(atoiDefault(f["page-size"], 10)),
+		"PageIndex", strconv.Itoa(atoiDefault(f["page"], 1)))
+}
+
+// ---- body 构造器（严格对齐黄金表各命令的 Body 列）----
+
+// 多数分页接口：{"pageNum":1,"pageSize":10}（--page/--page-size 可覆盖，缺省与官方一致）。
+func pagedBody(f map[string]string) map[string]any {
+	return map[string]any{"pageNum": atoiDefault(f["page"], 1), "pageSize": atoiDefault(f["page-size"], 10)}
+}
+
+// attendance get-effectived-summary：pageSize 官方固定 100。
+func pagedBody100(f map[string]string) map[string]any {
+	return map[string]any{"pageNum": atoiDefault(f["page"], 1), "pageSize": 100}
+}
+
+// vacation list-annual / list-sick：分页键大写 PageIndex/PageSize。
+func pagedUpperBody(f map[string]string) map[string]any {
+	return map[string]any{"PageIndex": atoiDefault(f["page"], 1), "PageSize": atoiDefault(f["page-size"], 10)}
+}
+
+// attendance calc-days：键全大写开头，Begzt/Endzt 为官方原拼写。
+func calcDaysBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"ApplyType":     f["apply-type"],
+		"ApplyTypeText": "",
+		"BegDate":       f["beg-date"],
+		"Begzt":         "08:30:00",
+		"EndDate":       f["end-date"],
+		"Endzt":         "18:00:00",
+	}
+}
+
+func todoBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"condition": map[string]any{"flowType": 1},
+		"pageNum":   atoiDefault(f["page"], 1),
+		"pageSize":  atoiDefault(f["page-size"], 10),
+	}
+}
+
+func todoDetailBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"systemId":  f["system-id"],
+		"processId": f["process-id"],
+		"docunId":   f["docun-id"],
+	}
+}
+
+// apply list：SearchText 固定 "a"。
+func applyListBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"SearchText": "a",
+		"pageNum":    atoiDefault(f["page"], 1),
+		"pageSize":   atoiDefault(f["page-size"], 10),
+	}
+}
+
+// employee-search：condition 键是 keywords 复数。
+func employeeSearchBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"condition": map[string]any{"keywords": f["keyword"]},
+		"pageNum":   atoiDefault(f["page"], 1),
+		"pageSize":  atoiDefault(f["page-size"], 10),
+	}
+}
+
+// news：无 keyword 时 condition 为 {"isImage":false,"keyword":""}；--with-image 时 isImage:true。
+func newsBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"condition": map[string]any{"isImage": boolFlag(f, "with-image"), "keyword": f["keyword"]},
+		"pageNum":   atoiDefault(f["page"], 1),
+		"pageSize":  atoiDefault(f["page-size"], 10),
+	}
+}
+
+// announcement：type 缺省 2（集团发文）。
+func announcementBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"condition": map[string]any{"keyword": f["keyword"], "type": atoiDefault(f["type"], 2)},
+		"pageNum":   atoiDefault(f["page"], 1),
+		"pageSize":  atoiDefault(f["page-size"], 10),
+	}
+}
+
+// union-welfare 对应黄金表 union-welfare list：SearchText 固定空串。
+func unionWelfareBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"SearchText": "",
+		"pageNum":    atoiDefault(f["page"], 1),
+		"pageSize":   atoiDefault(f["page-size"], 10),
+	}
+}
+
+// survey submit 对应黄金表 survey submit：键大写开头。
+func surveySubmitBody(f map[string]string) map[string]any {
+	return map[string]any{"Id": f["id"], "Opinion": f["opinion"]}
+}
+
+// ---- RSA date 加密（attendance get-summary / get-calendar 专用，黄金表 §2）----
+
+// 官方 eip-cli 内嵌的 1024 位 SPKI 公钥，从官方 exe 原样提取（私钥在服务端）。
+const rsaPublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCghu4j7NRaPkuotWUs/n5adIvOs19GpAfwhs/nTaaYp/paheKNc00Ns7xGbUAJli+Qog8x1iuv/MBoTx7WbjVCz8ZgpqFBb4OkVtG2FRWMkiC1qEsr0Vm1ljHxEW61oDQcI/L66i/BzlMUBIzWC6ogzgqnz5RTGPZKzncofzpqjQIDAQAB
+-----END PUBLIC KEY-----`
+
+// 明文 YYYY-MM → PKCS#1 v1.5 加密（128 字节）→ base64 标准编码。
+// query 值由 url.Values.Encode 负责 URL encode。
+func encryptRSADate(plain string) (string, error) {
+	block, _ := pem.Decode([]byte(rsaPublicKeyPEM))
+	if block == nil {
+		return "", fmt.Errorf("invalid embedded RSA public key")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	key, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		return "", fmt.Errorf("embedded key is not RSA")
+	}
+	ct, err := rsa.EncryptPKCS1v15(rand.Reader, key, []byte(plain))
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(ct), nil
 }
 
 func main() {
@@ -330,47 +554,32 @@ func runBusiness(args []string) int {
 		return 3
 	}
 	flags := parseFlags(rest)
-	body := buildBody(flags)
-	path := r.path
-	// 对齐官方 eip-cli 的命令级差异（依官方二进制核对）：
-	//   course     --type hot(默认)走 /lms/special/course，--type mine 走 /lms/my/course；
-	//   news       搜索词同时进 condition，isImage 缺省 false；
-	//   announcement  type 缺省 2，搜索词同时进 condition；
-	//   三者分页键为 pageNum（--page），meeting/community-hot 为路径参数式 GET。
-	switch key {
-	case "course":
-		if flags["type"] == "mine" {
-			path = "/lms/my/course"
-		}
-		if _, ok := body["pageNum"]; !ok {
-			body["pageNum"] = atoiDefault(flags["page"], 1)
-		}
-	case "news":
-		if kw := flags["keyword"]; kw != "" {
-			body["condition"] = kw
-		}
-		if _, ok := body["isImage"]; !ok {
-			body["isImage"] = false
-		}
-		if _, ok := body["pageNum"]; !ok {
-			body["pageNum"] = atoiDefault(flags["page"], 1)
-		}
-	case "announcement":
-		if kw := flags["keyword"]; kw != "" {
-			body["condition"] = kw
-		}
-		if _, ok := body["type"]; !ok {
-			body["type"] = 2
-		}
-		if _, ok := body["pageNum"]; !ok {
-			body["pageNum"] = atoiDefault(flags["page"], 1)
+	var query url.Values
+	if r.query != nil {
+		var err error
+		query, err = r.query(flags)
+		if err != nil {
+			emitJSON(map[string]any{"error": err.Error()})
+			return 1
 		}
 	}
+	var body map[string]any
+	if r.body != nil {
+		body = r.body(flags)
+	}
+	path := r.path
+	// course 分流（黄金表 §11）：缺省 mine 走 /lms/my/course，--type hot 走
+	// /lms/special/course——官方缺省即 mine，勿反。
+	if key == "course" && flags["type"] == "hot" {
+		path = "/external/external/lms/special/course"
+	}
+	// 路径参数式命令：employee-contact(--account)、survey detail(--id)、
+	// meeting(--date 缺省今天)、community-hot(--page-size 缺省 10 进路径)。
 	if strings.Contains(path, "%s") {
 		fill := firstNonEmpty(flags["account"], flags["id"], flags["template-id"])
 		switch key {
 		case "meeting":
-			fill = firstNonEmpty(flags["date"], time.Now().Format("2006-01-02"))
+			fill = firstNonEmpty(flags["date"], todayNow())
 		case "community-hot":
 			fill = strconv.Itoa(atoiDefault(flags["page-size"], 10))
 		}
@@ -380,13 +589,13 @@ func runBusiness(args []string) int {
 		}
 		path = fmt.Sprintf(path, url.PathEscape(fill))
 	}
-	raw, err := callEIP(r.method, path, body, token)
+	raw, err := callEIP(r.method, path, query, body, token)
 	// token 过期(服务端 Code 51 / "失效"，个别接口 HTTP 401）→ 清 AT、用 AIT 刷新、重试一次。
 	// 对齐真 eip-cli 的自动刷新:此前 ensureToken 只在 AT 为空时才刷新，存量 AT 过期会被原样发出去遭拒。
 	if authExpired(raw, err) {
 		_ = os.Remove(atFile())
 		if nt := ensureToken(); nt != "" && nt != token {
-			raw, err = callEIP(r.method, path, body, nt)
+			raw, err = callEIP(r.method, path, query, body, nt)
 		}
 	}
 	if err != nil {
@@ -400,43 +609,16 @@ func runBusiness(args []string) int {
 	return 0
 }
 
-func buildBody(flags map[string]string) map[string]any {
-	now := time.Now()
-	body := map[string]any{}
-	for k, v := range flags {
-		body[k] = coerce(v)
-		body[toCamel(k)] = coerce(v)
+// callEIP 发业务请求：full = eipBase + path（route 已存黄金表完整路径，前缀错配从结构上消除）。
+// GET 参数全部进 query；无 body 的 POST 不发送 body，但保留 Content-Type（官方如此，
+// GET 也同样带 Content-Type，见黄金表 §1）。
+func callEIP(method, path string, query url.Values, body map[string]any, token string) ([]byte, error) {
+	full := strings.TrimRight(eipBase(), "/") + path
+	if len(query) > 0 {
+		full += "?" + query.Encode()
 	}
-	if _, ok := body["page"]; !ok {
-		body["page"] = 1
-	}
-	if _, ok := body["pageSize"]; !ok {
-		body["pageSize"] = 10
-	}
-	if d, ok := body["date"].(string); ok && len(d) == 7 {
-		body["month"] = d
-		body["caclDate"] = d
-		body["calcDate"] = d
-	}
-	if _, ok := body["date"]; !ok {
-		body["date"] = now.Format("2006-01")
-	}
-	if _, ok := body["year"]; !ok {
-		body["year"] = now.Format("2006")
-	}
-	if _, ok := body["begTime"]; !ok {
-		body["begTime"] = "08:30:00"
-	}
-	if _, ok := body["endTime"]; !ok {
-		body["endTime"] = "18:00:00"
-	}
-	return body
-}
-
-func callEIP(method, path string, body map[string]any, token string) ([]byte, error) {
-	full := strings.TrimRight(eipBase(), "/") + apiPrefix(path) + path
 	var reader io.Reader
-	if method == "POST" {
+	if method == "POST" && body != nil {
 		b, _ := json.Marshal(body)
 		reader = bytes.NewReader(b)
 	}
@@ -465,29 +647,6 @@ func callEIP(method, path string, body map[string]any, token string) ([]byte, er
 
 func authBase() string { return firstNonEmpty(os.Getenv("EIP_AUTH_BASE_URL"), authBaseDefault) }
 func eipBase() string  { return firstNonEmpty(os.Getenv("EIP_BASE_URL"), eipBaseDefault) }
-
-func apiPrefix(path string) string {
-	switch {
-	case strings.HasPrefix(path, "/organisation/"):
-		return "/hr"
-	case strings.HasPrefix(path, "/api/ApiStaffNavigation/"),
-		strings.HasPrefix(path, "/api/ApiBenefits/"),
-		strings.HasPrefix(path, "/api/ApiOpinionTemplate/"),
-		strings.HasPrefix(path, "/api/ApiMyConsumption/"):
-		return "/hr"
-	case strings.HasPrefix(path, "/companyNews/"):
-		return "/app"
-	case strings.HasPrefix(path, "/announcement/"):
-		// 官方前缀恰为 path 首段（/announcement + /page），无需再加前缀
-		return ""
-	case strings.HasPrefix(path, "/lms/"),
-		strings.HasPrefix(path, "/meeting/"),
-		strings.HasPrefix(path, "/bbs/"):
-		return "/external"
-	default:
-		return "/hrss"
-	}
-}
 
 func httpClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: nil}}
@@ -694,26 +853,6 @@ func parseFlags(args []string) map[string]string {
 func boolFlag(m map[string]string, k string) bool {
 	v := strings.ToLower(m[k])
 	return v == "true" || v == "1" || v == "yes"
-}
-
-func coerce(v string) any {
-	if i, err := strconv.Atoi(v); err == nil {
-		return i
-	}
-	if b, err := strconv.ParseBool(v); err == nil {
-		return b
-	}
-	return v
-}
-
-func toCamel(s string) string {
-	parts := strings.Split(s, "-")
-	for i := 1; i < len(parts); i++ {
-		if parts[i] != "" {
-			parts[i] = strings.ToUpper(parts[i][:1]) + parts[i][1:]
-		}
-	}
-	return strings.Join(parts, "")
 }
 
 func atoiDefault(s string, d int) int {
