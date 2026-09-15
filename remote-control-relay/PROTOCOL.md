@@ -265,8 +265,11 @@ versions, message/payload types, fields, enum values, capabilities, duplicates
 and role combinations fail closed. Capability negotiation is
 intersection-only: Relay sorts the exact A/B intersection bytewise, rejects an
 empty intersection, and never inserts a capability absent from either side.
-Every encrypted payload is checked against that frozen negotiated list before
-decryption dispatch. All numeric counters, `lease_epoch`,
+Validation has two explicit modes. Shape-only parsing checks schema, size,
+role and any supplied lease context without assuming negotiation state. Runtime
+state-machine dispatch requires a validation context containing the frozen
+`negotiated_capabilities`; omitting it fails closed. Every encrypted payload is
+checked against that list before decryption dispatch. All numeric counters, `lease_epoch`,
 byte counts and timestamps except literal `v`/`protocol_version` use canonical unsigned 64-bit
 decimal strings matching `0|[1-9][0-9]{0,19}` and bounded by
 `18446744073709551615`; JSON numbers, signs and leading zeroes are invalid.
@@ -295,7 +298,11 @@ stopping invalidates the old generation before a new key may be accepted.
 result from an older request/generation. A sealed registration failure uses the
 ordinary `error` envelope with optional `registration_request_id` and
 `remote_control_generation`; those fields are forbidden from changing across
-retries just like a successful sealed outcome.
+retries just like a successful sealed outcome. When a registration validation
+context exists, both fields become mandatory on either success or failure and
+must match it. This independent registration context is not a lease context.
+Reusing a stable registration ID with a different generation, endpoint,
+identity, public key, algorithm or capability list is `invalid_message`.
 
 After reservation, messages carry `pairing_id + reservation_id + relay_epoch +
 remote_control_generation + transcript_hash`. After lease creation, every
@@ -338,12 +345,11 @@ attestation_sequence, challenge_b64, observed_age_ms, remaining_ttl_ms,
 issued_at_relay, signature_algorithm, relay_signing_key_id`. The shared fixture
 freezes the full preimage/signature and tests tampering, replay and cross-lease
 rejection. B compares `heartbeat_sequence_a` against A's last accepted
-heartbeat and `attestation_sequence` against the independent last Relay
-attestation sequence using the same lower/equal/greater rules. The state layer
-uses the attested candidate deadline only after both comparisons; if either is
-equal it stores `min(existing_deadline, candidate_deadline)`, never extending
-the watchdog from a duplicate proof. Only when both advance may the new
-candidate replace the prior deadline.
+heartbeat using the lower/equal/greater rule above. The independent Relay
+`attestation_sequence` is stricter: both lower and equal values are replay;
+only a greater value is accepted. The state layer may replace the deadline when
+the attestation advances and A's heartbeat advances; an equal A heartbeat may
+only tighten the existing deadline.
 
 `controller_pairing_reserved` delivers the same strict
 `controller_pairing_transcript/v1` object to both peers. Its ordered fields are
@@ -430,15 +436,17 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`4a5cd258ffaf17839fd86fedbac7bae0f4f32956b8901c0adca73bacbd42e421`.
+`24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
 matrix, registry, enum, limit, payload-to-capability mapping, URL grammar and
 transcript field order. `fixture` is the complete shared fixture after removing
 only `contract.sha256`, avoiding self-reference. The expected digest is
-hard-coded in JS and Rust; fixture or schema edits must explicitly regenerate
-and review it.
+hard-coded in JS and Rust. Rust independently rebuilds the canonical manifest
+from its own required/optional fields, roles, enum registries and limits before
+hashing the shared fixture, so either implementation drifting fails tests;
+fixture or schema edits must explicitly regenerate and review the digest.
 
 Logs are allowlist projections only. They must exclude all pairing/lease/
 generation/endpoint identifiers, keys, nonces, secrets, tokens, ciphertext,
@@ -557,10 +565,16 @@ rejects these payloads when presented by the opposite role. Every task,
 permission, attachment, artifact, snapshot and journal operation is bound to
 the same `connection_id + controller_lease_id + lease_epoch`; task and transfer
 messages additionally carry their exact task/session/request identifiers.
-Capability snapshot and task payloads require negotiated `task_v1`; permission,
+The outer gate maps pairing messages to `pairing_v1`, receipt/Finished messages
+to `finished_receipt_v1`, liveness messages to `role_liveness_v1`, resume
+messages to `resume_v1`, and encrypted frames/disconnect to
+`encrypted_frames_v1`. Capability announcement and generic errors are the only
+outer messages without a negotiated capability requirement. Capability
+snapshot and task payloads require negotiated `task_v1`; permission,
 attachment and artifact payloads require their same-named `*_v1`; snapshots and
-journal payloads require `snapshot_journal_v1`. `encrypted_frame` rejects a
-declared `payload_kind` before forwarding when its capability was not negotiated.
+journal payloads require `snapshot_journal_v1`. `encrypted_frame` requires both
+`encrypted_frames_v1` and the capability for its declared `payload_kind` before
+forwarding.
 
 ### Pairing, Finished receipt and lease transition
 
@@ -613,11 +627,11 @@ and Rust tests.
 sequences; one role's transport traffic never advances the other. For an active
 remote task, B advances its at-most-30-second controller watchdog only from a
 valid `encrypted_controller_liveness_a` or the conservative signed attestation
-fallback. Lower sequences are rejected; equal direct or attested sequences can
-only tighten the existing deadline; a greater sequence may replace it. Relay
-attestation tracks both A's heartbeat sequence and a separate Relay
-attestation sequence, and the state layer chooses the earlier deadline for any
-same-sequence proof. Relay transport traffic alone cannot extend it.
+fallback. Lower heartbeat sequences are rejected; equal heartbeat sequences
+can only tighten the existing deadline; a greater heartbeat may replace it.
+Relay attestation tracks a separate sequence that must strictly increase;
+equal or lower attestations are replay. Relay transport traffic alone cannot
+extend the deadline.
 
 Resume passes through `resume_provisional` and
 `resume_activated_pending_liveness`; neither state accepts, buffers or forwards
@@ -656,8 +670,10 @@ types: request/response pairs `desktop_endpoint_register` /
 including endpoint, token/secret, stream cursor, connection flags, nullable or
 actual `lease_id`, and the complete error envelope. It freezes `accept_v2` for
 no controller conflict and the generic `endpoint_not_found` result for
-`pairing_reserved`, `handshake_pending`, or an active controller lease; it does
-not invent controller-only v2 messages.
+every slot-occupying state: `pairing_reserved`, `handshake_pending`,
+`controller_connected`, `reconnecting`, `resume_provisional`, and
+`resume_activated_pending_liveness`. Every state freezes the complete error
+envelope and close code 1008; it does not invent controller-only v2 messages.
 
 Protocol logs and telemetry must be allowlist projections, never serialization
 of the source message. They may contain only protocol version, message type,

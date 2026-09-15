@@ -21,7 +21,7 @@ const MAX_ID_CHARS: usize = 128;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "4a5cd258ffaf17839fd86fedbac7bae0f4f32956b8901c0adca73bacbd42e421";
+    "24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -98,6 +98,62 @@ pub(crate) const TASK_STATUSES: &[&str] = &[
     "interrupted",
     "result_unknown",
 ];
+const SENDER_ROLES: &[&str] = &["A", "B"];
+const CLIENT_ROLES: &[&str] = &["desktop_controller", "desktop_controlled_endpoint"];
+const KEY_ALGORITHMS: &[&str] = &["x25519"];
+const SIGNATURE_ALGORITHMS: &[&str] = &["ed25519"];
+const DIRECTIONS: &[&str] = &["a_to_b", "b_to_a"];
+const MODEL_SOURCES: &[&str] = &["controlled_device", "controller_temporary"];
+const MODES: &[&str] = &["chat", "code"];
+const DECISIONS: &[&str] = &["allow", "deny"];
+const RISK_LEVELS: &[&str] = &["low", "medium", "high", "critical"];
+const EVENT_KINDS: &[&str] = &[
+    "user_message",
+    "assistant_delta",
+    "reasoning",
+    "tool",
+    "permission",
+    "error",
+    "cancel",
+    "artifact",
+    "terminal",
+];
+const PRESETS: &[&str] = &[
+    "local_vllm",
+    "deepseek",
+    "kimi",
+    "openai_compatible",
+    "qwen",
+    "doubao",
+    "minimax",
+    "glm",
+    "mimo",
+    "openai",
+    "anthropic",
+    "gemini",
+    "xai",
+];
+const WIRE_APIS: &[&str] = &["openai_chat_completions", "anthropic_messages"];
+const PROVIDER_KINDS: &[&str] = &["custom", "official_api"];
+const VENDORS: &[&str] = &[
+    "anthropic",
+    "deepseek",
+    "doubao",
+    "gemini",
+    "glm",
+    "kimi",
+    "mimo",
+    "minimax",
+    "openai",
+    "qwen",
+    "tencent",
+    "xai",
+];
+const ENDPOINT_MODES: &[&str] = &["full_chat_completions"];
+const REASONING_EFFORTS: &[&str] = &["off", "low", "medium", "high", "max", "auto"];
+const IMAGE_CAPABILITY_OVERRIDES: &[&str] = &["pinvou", "enabled", "disabled"];
+const ARTIFACT_PREVIEW_MODES: &[&str] = &["inline_text", "inline_image", "download_only"];
+const CREDENTIAL_KINDS: &[&str] = &["api_key"];
 
 const LEASE_CONTEXT_FIELDS: &[&str] = &[
     "connection_id",
@@ -288,7 +344,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "remote_control_generation",
                 "reason",
             ],
-            optional: &[],
+            optional: &["pairing_id"],
             roles: &[B],
         },
         "controller_pairing_claim" => Schema {
@@ -383,8 +439,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
-                "remote_control_generation",
                 "relay_epoch",
+                "remote_control_generation",
                 "liveness_epoch_a",
                 "liveness_epoch_b",
                 "resume_token_b64",
@@ -400,6 +456,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "sender_role",
                 "liveness_epoch",
                 "heartbeat_sequence",
@@ -415,6 +473,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "challenge_id",
                 "challenge_b64",
             ],
@@ -442,6 +502,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "challenge_id",
                 "challenge_b64",
             ],
@@ -481,6 +543,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
                 "remote_control_generation",
                 "sender_role",
                 "resume_token_b64",
@@ -498,6 +561,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "activation_id",
                 "original_deadline_ms",
             ],
@@ -512,6 +577,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "activation_id",
                 "sender_role",
                 "ciphertext_b64",
@@ -528,6 +595,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
                 "remote_control_generation",
                 "activation_id",
                 "original_deadline_ms",
@@ -543,6 +611,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "activation_id",
                 "original_deadline_ms",
             ],
@@ -557,6 +627,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "activation_id",
                 "liveness_epoch_b",
                 "heartbeat_sequence_b",
@@ -572,6 +644,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "activation_id",
                 "liveness_epoch_b",
                 "heartbeat_sequence_b",
@@ -587,6 +661,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "activation_id",
                 "sender_role",
                 "liveness_epoch_b",
@@ -603,6 +679,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "activation_id",
                 "liveness_epoch_a",
                 "liveness_epoch_b",
@@ -618,6 +696,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "frame_sequence",
                 "direction",
                 "payload_kind",
@@ -635,6 +715,8 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "sender_role",
                 "reason",
             ],
@@ -660,6 +742,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "known_revision",
             ],
@@ -673,6 +757,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "capability_revision",
                 "expires_at_ms",
@@ -691,6 +777,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "task_id",
                 "client_request_id",
@@ -711,6 +799,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "task_id",
                 "session_id",
@@ -725,6 +815,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "task_id",
                 "session_id",
@@ -740,6 +832,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
                 "permission_request_id",
                 "expires_at_ms",
@@ -758,6 +852,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
                 "permission_request_id",
                 "request_id",
@@ -773,6 +869,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
                 "session_id",
                 "transfer_id",
@@ -791,6 +889,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
                 "session_id",
                 "transfer_id",
@@ -808,6 +908,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "task_id",
                 "session_id",
                 "transfer_id",
@@ -823,6 +925,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "session_id",
             ],
@@ -836,6 +940,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "session_id",
                 "artifacts",
@@ -850,6 +956,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "session_id",
                 "artifact_id",
@@ -866,6 +974,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "session_id",
                 "artifact_id",
@@ -884,6 +994,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "session_id",
             ],
@@ -897,6 +1009,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "session_id",
                 "journal_epoch",
@@ -915,6 +1029,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "request_id",
                 "session_id",
                 "journal_epoch",
@@ -930,6 +1046,8 @@ fn payload_schema(kind: &str) -> Option<Schema> {
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
                 "session_id",
                 "journal_epoch",
                 "event_sequence",
@@ -990,10 +1108,6 @@ pub(crate) fn validate_controller_message_json_in_context(
         )?;
     }
     enforce_expected_context(object, expected_context)?;
-    if kind == "encrypted_frame" {
-        let payload_kind = object_string(object, "payload_kind", "message")?;
-        enforce_negotiated_payload(payload_kind, expected_context)?;
-    }
     Ok(value)
 }
 
@@ -1029,7 +1143,6 @@ pub(crate) fn validate_controller_payload_json_in_context(
         validate_artifact_index(object)?;
     }
     enforce_expected_context(object, expected_context)?;
-    enforce_negotiated_payload(kind, expected_context)?;
     Ok(value)
 }
 
@@ -1040,7 +1153,132 @@ pub(crate) struct LeaseContext {
     pub(crate) lease_epoch: String,
     pub(crate) relay_epoch: String,
     pub(crate) remote_control_generation: String,
-    pub(crate) negotiated_capabilities: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeValidationContext {
+    pub(crate) lease: Option<LeaseContext>,
+    pub(crate) negotiated_capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RegistrationValidationContext {
+    request: Value,
+    sealed_result: Option<Value>,
+}
+
+impl RegistrationValidationContext {
+    pub(crate) fn new(request: Value, sealed_result: Option<Value>) -> Result<Self> {
+        let encoded = serde_json::to_string(&request)
+            .map_err(|_| ControllerProtocolError::new("invalid_message", "registration request"))?;
+        let validated = validate_controller_message_json(&encoded, B)?;
+        if validated.get("type").and_then(Value::as_str) != Some("desktop_pairing_register") {
+            return Err(ControllerProtocolError::new(
+                "invalid_message",
+                "registration request",
+            ));
+        }
+        let sealed_result = if let Some(value) = sealed_result {
+            let encoded = serde_json::to_string(&value).map_err(|_| {
+                ControllerProtocolError::new("invalid_message", "registration result")
+            })?;
+            let value = validate_controller_message_json(&encoded, RELAY)?;
+            let kind = value.get("type").and_then(Value::as_str);
+            if kind != Some("desktop_pairing_registered") && kind != Some("error") {
+                return Err(ControllerProtocolError::new(
+                    "invalid_message",
+                    "registration result",
+                ));
+            }
+            for field in ["registration_request_id", "remote_control_generation"] {
+                let Some(actual) = value.get(field) else {
+                    return Err(ControllerProtocolError::new(
+                        "missing_field",
+                        format!("message.{field}"),
+                    ));
+                };
+                if Some(actual) != validated.get(field) {
+                    return Err(ControllerProtocolError::new("invalid_message", field));
+                }
+            }
+            Some(value)
+        } else {
+            None
+        };
+        Ok(Self {
+            request: validated,
+            sealed_result,
+        })
+    }
+}
+
+fn registration_comparable(value: &Value) -> Value {
+    let mut value = value.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove("request_id");
+    }
+    value
+}
+
+pub(crate) fn validate_controller_registration_message_json(
+    input: &str,
+    sender_role: SenderRole,
+    context: &RegistrationValidationContext,
+) -> Result<Value> {
+    let candidate: Value = serde_json::from_str(input)
+        .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    if candidate.get("type").and_then(Value::as_str) == Some("desktop_pairing_register")
+        && candidate.get("registration_request_id")
+            == context.request.get("registration_request_id")
+        && registration_comparable(&candidate) != registration_comparable(&context.request)
+    {
+        return Err(ControllerProtocolError::new(
+            "invalid_message",
+            "registration idempotency conflict",
+        ));
+    }
+    let value = validate_controller_message_json(input, sender_role)?;
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .expect("validated type");
+    if kind == "desktop_pairing_register" {
+        if value.get("registration_request_id") != context.request.get("registration_request_id")
+            || registration_comparable(&value) != registration_comparable(&context.request)
+        {
+            return Err(ControllerProtocolError::new(
+                "invalid_message",
+                "registration idempotency conflict",
+            ));
+        }
+        return Ok(value);
+    }
+    if kind != "desktop_pairing_registered" && kind != "error" {
+        return Err(ControllerProtocolError::new(
+            "invalid_message",
+            "registration result",
+        ));
+    }
+    for field in ["registration_request_id", "remote_control_generation"] {
+        let Some(actual) = value.get(field) else {
+            return Err(ControllerProtocolError::new(
+                "missing_field",
+                format!("message.{field}"),
+            ));
+        };
+        if Some(actual) != context.request.get(field) {
+            return Err(ControllerProtocolError::new("invalid_message", field));
+        }
+    }
+    if let Some(sealed) = &context.sealed_result {
+        if registration_comparable(&value) != registration_comparable(sealed) {
+            return Err(ControllerProtocolError::new(
+                "invalid_message",
+                "sealed registration result",
+            ));
+        }
+    }
+    Ok(value)
 }
 
 fn payload_capability(kind: &str) -> Option<&'static str> {
@@ -1064,11 +1302,7 @@ fn payload_capability(kind: &str) -> Option<&'static str> {
     }
 }
 
-fn enforce_negotiated_payload(kind: &str, context: Option<&LeaseContext>) -> Result<()> {
-    let Some(capabilities) = context.and_then(|value| value.negotiated_capabilities.as_ref())
-    else {
-        return Ok(());
-    };
+fn enforce_negotiated_payload(kind: &str, capabilities: &[String]) -> Result<()> {
     let Some(required) = payload_capability(kind) else {
         return Err(ControllerProtocolError::new("unsupported_capability", kind));
     };
@@ -1076,6 +1310,108 @@ fn enforce_negotiated_payload(kind: &str, context: Option<&LeaseContext>) -> Res
         return Err(ControllerProtocolError::new("unsupported_capability", kind));
     }
     Ok(())
+}
+
+fn outer_message_capabilities(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "desktop_endpoint_claim"
+        | "desktop_pairing_register"
+        | "desktop_pairing_registered"
+        | "desktop_pairing_revoke"
+        | "controller_pairing_claim"
+        | "controller_pairing_reserved"
+        | "controller_joined" => &["pairing_v1"],
+        "finished_receipt_commit" | "encrypted_handshake_finished" | "finished_receipt_ack" => {
+            &["finished_receipt_v1"]
+        }
+        "controller_liveness"
+        | "controller_liveness_challenge_a"
+        | "encrypted_controller_liveness_a"
+        | "controller_liveness_attestation_request_a"
+        | "controller_liveness_attestation_a" => &["role_liveness_v1"],
+        "controller_resume_prepare"
+        | "controller_resume_provisional"
+        | "encrypted_resume_confirm"
+        | "controller_resume_activation_ack"
+        | "controller_resume_activation_pending"
+        | "controller_post_activation_liveness"
+        | "controller_post_activation_liveness_confirmed"
+        | "controller_resume_ready_ack"
+        | "controller_resumed" => &["resume_v1"],
+        "encrypted_frame" | "controller_disconnect" => &["encrypted_frames_v1"],
+        _ => &[],
+    }
+}
+
+fn validate_runtime_capabilities(capabilities: &[String]) -> Result<()> {
+    let mut seen = HashSet::new();
+    if capabilities
+        .iter()
+        .any(|value| !CONTROLLER_CAPABILITIES.contains(&value.as_str()) || !seen.insert(value))
+    {
+        return Err(ControllerProtocolError::new(
+            "unsupported_capability",
+            "negotiated_capabilities",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_controller_runtime_message_json(
+    input: &str,
+    sender_role: SenderRole,
+    context: Option<&RuntimeValidationContext>,
+) -> Result<Value> {
+    let context = context.ok_or_else(|| {
+        ControllerProtocolError::new("unsupported_capability", "negotiated_capabilities")
+    })?;
+    validate_runtime_capabilities(&context.negotiated_capabilities)?;
+    let value =
+        validate_controller_message_json_in_context(input, sender_role, context.lease.as_ref())?;
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .expect("validated type");
+    if kind != "controller_capabilities" && kind != "error" {
+        for required in outer_message_capabilities(kind) {
+            if !context
+                .negotiated_capabilities
+                .iter()
+                .any(|value| value == required)
+            {
+                return Err(ControllerProtocolError::new("unsupported_capability", kind));
+            }
+        }
+    }
+    if kind == "encrypted_frame" {
+        enforce_negotiated_payload(
+            value
+                .get("payload_kind")
+                .and_then(Value::as_str)
+                .expect("validated payload kind"),
+            &context.negotiated_capabilities,
+        )?;
+    }
+    Ok(value)
+}
+
+pub(crate) fn validate_controller_runtime_payload_json(
+    input: &str,
+    sender_role: SenderRole,
+    context: Option<&RuntimeValidationContext>,
+) -> Result<Value> {
+    let context = context.ok_or_else(|| {
+        ControllerProtocolError::new("unsupported_capability", "negotiated_capabilities")
+    })?;
+    validate_runtime_capabilities(&context.negotiated_capabilities)?;
+    let value =
+        validate_controller_payload_json_in_context(input, sender_role, context.lease.as_ref())?;
+    let kind = value
+        .get("type")
+        .and_then(Value::as_str)
+        .expect("validated type");
+    enforce_negotiated_payload(kind, &context.negotiated_capabilities)?;
+    Ok(value)
 }
 
 fn requires_full_lease_context(kind: &str, label: &str) -> bool {
@@ -1266,47 +1602,29 @@ fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value)
         || field == "role_a"
         || field == "role_b"
     {
-        validate_enum(value, field, &["A", "B"])?;
+        validate_enum(value, field, SENDER_ROLES)?;
     } else if field == "client_role" {
-        validate_enum(
-            value,
-            field,
-            &["desktop_controller", "desktop_controlled_endpoint"],
-        )?;
+        validate_enum(value, field, CLIENT_ROLES)?;
     } else if field == "key_algorithm" {
-        validate_enum(value, field, &["x25519"])?;
+        validate_enum(value, field, KEY_ALGORITHMS)?;
     } else if field == "signature_algorithm" {
-        validate_enum(value, field, &["ed25519"])?;
+        validate_enum(value, field, SIGNATURE_ALGORITHMS)?;
     } else if field == "direction" {
-        validate_enum(value, field, &["a_to_b", "b_to_a"])?;
+        validate_enum(value, field, DIRECTIONS)?;
     } else if field == "payload_kind" {
         validate_enum(value, field, CONTROLLER_PAYLOAD_TYPES)?;
     } else if field == "model_source" {
-        validate_enum(value, field, &["controlled_device", "controller_temporary"])?;
+        validate_enum(value, field, MODEL_SOURCES)?;
     } else if field == "mode" {
-        validate_enum(value, field, &["chat", "code"])?;
+        validate_enum(value, field, MODES)?;
     } else if field == "task_status" {
         validate_enum(value, field, TASK_STATUSES)?;
     } else if field == "decision" {
-        validate_enum(value, field, &["allow", "deny"])?;
+        validate_enum(value, field, DECISIONS)?;
     } else if field == "risk_level" {
-        validate_enum(value, field, &["low", "medium", "high", "critical"])?;
+        validate_enum(value, field, RISK_LEVELS)?;
     } else if field == "event_kind" {
-        validate_enum(
-            value,
-            field,
-            &[
-                "user_message",
-                "assistant_delta",
-                "reasoning",
-                "tool",
-                "permission",
-                "error",
-                "cancel",
-                "artifact",
-                "terminal",
-            ],
-        )?;
+        validate_enum(value, field, EVENT_KINDS)?;
     } else if field == "code" {
         validate_enum(value, field, CONTROLLER_ERROR_CODES)?;
     } else if field == "eof" {
@@ -1672,7 +1990,7 @@ fn validate_capability_snapshot(payload: &Map<String, Value>) -> Result<()> {
     }
     let mut seen = HashSet::new();
     for mode in modes {
-        validate_enum(mode, "modes", &["chat", "code"])?;
+        validate_enum(mode, "modes", MODES)?;
         if !seen.insert(mode.as_str().expect("mode enum validated")) {
             return Err(ControllerProtocolError::new("invalid_field", "modes"));
         }
@@ -1808,7 +2126,7 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
                 .get("preview_mode")
                 .expect("artifact preview mode required"),
             &format!("{label}.preview_mode"),
-            &["inline_text", "inline_image", "download_only"],
+            ARTIFACT_PREVIEW_MODES,
         )?;
     }
     Ok(())
@@ -1917,35 +2235,6 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
 }
 
 fn validate_route(value: &Value, label: &str) -> Result<()> {
-    const PRESETS: &[&str] = &[
-        "local_vllm",
-        "deepseek",
-        "kimi",
-        "openai_compatible",
-        "qwen",
-        "doubao",
-        "minimax",
-        "glm",
-        "mimo",
-        "openai",
-        "anthropic",
-        "gemini",
-        "xai",
-    ];
-    const VENDORS: &[&str] = &[
-        "anthropic",
-        "deepseek",
-        "doubao",
-        "gemini",
-        "glm",
-        "kimi",
-        "mimo",
-        "minimax",
-        "openai",
-        "qwen",
-        "tencent",
-        "xai",
-    ];
     let route = exact_nested(
         value,
         &[
@@ -1979,7 +2268,7 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
     validate_enum(
         route.get("wire_api").expect("wire API required"),
         &format!("{label}.wire_api"),
-        &["openai_chat_completions", "anthropic_messages"],
+        WIRE_APIS,
     )?;
     let preset = object_string(route, "preset", label)?;
     let wire_api = object_string(route, "wire_api", label)?;
@@ -2005,24 +2294,16 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
             .get("image_capability_override")
             .expect("image override required"),
         &format!("{label}.image_capability_override"),
-        &["pinvou", "enabled", "disabled"],
+        IMAGE_CAPABILITY_OVERRIDES,
     )?;
     if let Some(value) = route.get("provider_kind") {
-        validate_enum(
-            value,
-            &format!("{label}.provider_kind"),
-            &["custom", "official_api"],
-        )?;
+        validate_enum(value, &format!("{label}.provider_kind"), PROVIDER_KINDS)?;
     }
     if let Some(value) = route.get("vendor") {
         validate_enum(value, &format!("{label}.vendor"), VENDORS)?;
     }
     if let Some(value) = route.get("endpoint_mode") {
-        validate_enum(
-            value,
-            &format!("{label}.endpoint_mode"),
-            &["full_chat_completions"],
-        )?;
+        validate_enum(value, &format!("{label}.endpoint_mode"), ENDPOINT_MODES)?;
     }
     for field in ["context_window_tokens", "max_output_tokens"] {
         if let Some(value) = route.get(field) {
@@ -2033,7 +2314,7 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
         validate_enum(
             value,
             &format!("{label}.reasoning_effort"),
-            &["off", "low", "medium", "high", "max", "auto"],
+            REASONING_EFFORTS,
         )?;
     }
     Ok(())
@@ -2147,7 +2428,7 @@ fn validate_credential(value: &Value, label: &str) -> Result<()> {
     validate_enum(
         credential.get("kind").expect("credential kind required"),
         &format!("{label}.kind"),
-        &["api_key"],
+        CREDENTIAL_KINDS,
     )?;
     let secret = bounded_text(
         credential
@@ -2668,19 +2949,20 @@ fn classify_liveness_attestation_sequences(
         last_heartbeat_sequence,
         "heartbeat_sequence_a",
     )?;
-    let attestation = classify_monotonic_sequence(
-        object_string(object, "attestation_sequence", "attestation")?,
-        last_attestation_sequence,
-        "attestation_sequence",
-    )?;
-    Ok(
-        if heartbeat == SequenceDisposition::Advance && attestation == SequenceDisposition::Advance
-        {
-            DeadlineUpdate::Replace
-        } else {
-            DeadlineUpdate::TightenOnly
-        },
-    )
+    let attestation = object_string(object, "attestation_sequence", "attestation")?
+        .parse::<u64>()
+        .map_err(|_| ControllerProtocolError::new("invalid_field", "attestation_sequence"))?;
+    if attestation <= last_attestation_sequence {
+        return Err(ControllerProtocolError::new(
+            "replay",
+            "attestation_sequence",
+        ));
+    }
+    Ok(if heartbeat == SequenceDisposition::Advance {
+        DeadlineUpdate::Replace
+    } else {
+        DeadlineUpdate::TightenOnly
+    })
 }
 
 #[cfg(test)]
@@ -2715,6 +2997,119 @@ mod tests {
             .collect()
     }
 
+    fn schema_manifest(types: &[&str], lookup: fn(&str) -> Option<Schema>) -> Value {
+        let mut output = Map::new();
+        for kind in types {
+            let schema = lookup(kind).expect("registered schema");
+            output.insert(
+                (*kind).into(),
+                json!({
+                    "required": schema.required,
+                    "optional": schema.optional,
+                    "roles": schema.roles.iter().map(|role| role.wire()).collect::<Vec<_>>(),
+                }),
+            );
+        }
+        Value::Object(output)
+    }
+
+    fn rust_contract_manifest() -> Value {
+        json!({
+            "protocol_version": CONTROLLER_PROTOCOL_VERSION,
+            "subprotocol": "pinvou-desktop-controller-v1",
+            "integer_wire_format": "canonical-u64-decimal-string",
+            "limits": {
+                "max_control_message_bytes": MAX_CONTROL_MESSAGE_BYTES,
+                "max_encrypted_frame_bytes": MAX_ENCRYPTED_FRAME_BYTES,
+                "max_decrypted_payload_bytes": MAX_DECRYPTED_PAYLOAD_BYTES,
+                "max_transfer_chunk_bytes": MAX_TRANSFER_CHUNK_BYTES,
+                "max_task_input_text_bytes": MAX_TASK_INPUT_TEXT_BYTES,
+                "max_temporary_model_package_bytes": MAX_TEMPORARY_MODEL_PACKAGE_BYTES,
+                "max_id_chars": MAX_ID_CHARS
+            },
+            "capabilities": CONTROLLER_CAPABILITIES,
+            "message_types": CONTROLLER_MESSAGE_TYPES,
+            "payload_types": CONTROLLER_PAYLOAD_TYPES,
+            "task_statuses": TASK_STATUSES,
+            "error_codes": CONTROLLER_ERROR_CODES,
+            "message_schemas": schema_manifest(CONTROLLER_MESSAGE_TYPES, message_schema),
+            "payload_schemas": schema_manifest(CONTROLLER_PAYLOAD_TYPES, payload_schema),
+            "enums": {
+                "sender_role":SENDER_ROLES, "client_role":CLIENT_ROLES,
+                "key_algorithm":KEY_ALGORITHMS, "signature_algorithm":SIGNATURE_ALGORITHMS, "direction":DIRECTIONS,
+                "model_source":MODEL_SOURCES, "mode":MODES, "task_status":TASK_STATUSES,
+                "decision":DECISIONS, "risk_level":RISK_LEVELS,
+                "event_kind":EVENT_KINDS, "preset":PRESETS,
+                "wire_api":WIRE_APIS, "provider_kind":PROVIDER_KINDS, "vendor":VENDORS,
+                "endpoint_mode":ENDPOINT_MODES, "reasoning_effort":REASONING_EFFORTS,
+                "image_capability_override":IMAGE_CAPABILITY_OVERRIDES, "artifact_preview_mode":ARTIFACT_PREVIEW_MODES,
+                "credential_kind":CREDENTIAL_KINDS
+            },
+            "payload_capabilities": {
+                "capability_snapshot_request":"task_v1","capability_snapshot":"task_v1","task_submit":"task_v1","task_cancel":"task_v1","task_status":"task_v1",
+                "permission_request":"permission_v1","permission_decision":"permission_v1","attachment_begin":"attachment_v1","attachment_chunk":"attachment_v1","attachment_commit":"attachment_v1",
+                "artifact_index_request":"artifact_v1","artifact_index":"artifact_v1","artifact_read_request":"artifact_v1","artifact_chunk":"artifact_v1",
+                "session_snapshot_request":"snapshot_journal_v1","session_snapshot":"snapshot_journal_v1","journal_replay_request":"snapshot_journal_v1","journal_event":"snapshot_journal_v1"
+            },
+            "outer_message_capabilities": {
+                "desktop_endpoint_claim":["pairing_v1"],"desktop_pairing_register":["pairing_v1"],"desktop_pairing_registered":["pairing_v1"],"desktop_pairing_revoke":["pairing_v1"],"controller_pairing_claim":["pairing_v1"],"controller_pairing_reserved":["pairing_v1"],"controller_joined":["pairing_v1"],
+                "finished_receipt_commit":["finished_receipt_v1"],"encrypted_handshake_finished":["finished_receipt_v1"],"finished_receipt_ack":["finished_receipt_v1"],
+                "controller_liveness":["role_liveness_v1"],"controller_liveness_challenge_a":["role_liveness_v1"],"encrypted_controller_liveness_a":["role_liveness_v1"],"controller_liveness_attestation_request_a":["role_liveness_v1"],"controller_liveness_attestation_a":["role_liveness_v1"],
+                "controller_resume_prepare":["resume_v1"],"controller_resume_provisional":["resume_v1"],"encrypted_resume_confirm":["resume_v1"],"controller_resume_activation_ack":["resume_v1"],"controller_resume_activation_pending":["resume_v1"],"controller_post_activation_liveness":["resume_v1"],"controller_post_activation_liveness_confirmed":["resume_v1"],"controller_resume_ready_ack":["resume_v1"],"controller_resumed":["resume_v1"],
+                "encrypted_frame":["encrypted_frames_v1"],"controller_disconnect":["encrypted_frames_v1"]
+            },
+            "transcript_fields":["schema","relay_epoch","pairing_id","reservation_id","endpoint_id","remote_control_generation","controller_connection_identity","role_a","handshake_public_key_a_b64","role_b","handshake_public_key_b_b64","protocol_version","negotiated_capabilities","capability_hash","expires_at_ms","nonce_b64"],
+            "route_required":["display_name","preset","wire_api","base_url","model","image_capability_override"],
+            "route_optional":["provider_kind","vendor","endpoint_mode","context_window_tokens","max_output_tokens","reasoning_effort"],
+            "nested_schemas": {
+                "task_input":{"required":["text","attachment_ids","skill_ids"],"optional":["workspace_id"]},
+                "temporary_model_package_v1":{"required":["schema","package_id","binding","primary","primary_credential"],"optional":["vision_fallback"]},
+                "temporary_model_binding":{"required":["connection_id","controller_lease_id","lease_epoch","task_id"],"optional":[]},
+                "vision_fallback":{"required":["route","credential"],"optional":[]},
+                "route":{"required":["display_name","preset","wire_api","base_url","model","image_capability_override"],"optional":["provider_kind","vendor","endpoint_mode","context_window_tokens","max_output_tokens","reasoning_effort"]},
+                "credential":{"required":["kind","secret"],"optional":[]},
+                "tool_descriptor":{"required":["tool_id","display_name"],"optional":[]},
+                "skill_descriptor":{"required":["skill_id","display_name"],"optional":[]},
+                "workspace_descriptor":{"required":["workspace_id","display_name","code_allowed"],"optional":[]},
+                "artifact_descriptor":{"required":["artifact_id","task_id","display_name","mime_type","size_bytes","sha256","preview_mode"],"optional":[]},
+                "controller_liveness_a":{"required":["v","type","connection_id","controller_lease_id","lease_epoch","relay_epoch","remote_control_generation","role","liveness_epoch_a","heartbeat_sequence_a","challenge_id","challenge_b64"],"optional":[]}
+            },
+            "collection_limits":{"task_attachment_ids":32,"task_skill_ids":32,"descriptors":256,"artifacts":256,"capabilities":CONTROLLER_CAPABILITIES.len()},
+            "base_url_grammar":"lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
+            "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
+            "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","registration":"independent-generation-registration-idempotency-context"}
+        })
+    }
+
+    fn canonical_json(value: &Value) -> String {
+        match value {
+            Value::Array(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(canonical_json)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Value::Object(values) => {
+                let mut keys = values.keys().collect::<Vec<_>>();
+                keys.sort();
+                format!(
+                    "{{{}}}",
+                    keys.into_iter()
+                        .map(|key| format!(
+                            "{}:{}",
+                            serde_json::to_string(key).unwrap(),
+                            canonical_json(&values[key])
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
+            _ => serde_json::to_string(value).unwrap(),
+        }
+    }
+
     fn context() -> LeaseContext {
         LeaseContext {
             connection_id: "connection-0001".into(),
@@ -2722,7 +3117,13 @@ mod tests {
             lease_epoch: "1".into(),
             relay_epoch: "epoch-test-1".into(),
             remote_control_generation: "generation-0001".into(),
-            negotiated_capabilities: None,
+        }
+    }
+
+    fn runtime(capabilities: &[&str]) -> RuntimeValidationContext {
+        RuntimeValidationContext {
+            lease: Some(context()),
+            negotiated_capabilities: capabilities.iter().map(|value| (*value).into()).collect(),
         }
     }
 
@@ -2737,7 +3138,7 @@ mod tests {
 
     #[test]
     fn shared_fixture_freezes_registries_and_contract_hash() {
-        let fixture = fixture();
+        let mut fixture = fixture();
         assert_eq!(
             serde_json::to_value(CONTROLLER_CAPABILITIES).unwrap(),
             fixture["expected_capabilities"]
@@ -2758,6 +3159,13 @@ mod tests {
             CONTROLLER_CONTRACT_SHA256,
             fixture["contract"]["sha256"].as_str().unwrap()
         );
+        fixture["contract"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sha256");
+        let combined = json!({"contract": rust_contract_manifest(), "fixture": fixture.clone()});
+        let rust_hash = sha256_hex(canonical_json(&combined).as_bytes());
+        assert_eq!(rust_hash, CONTROLLER_CONTRACT_SHA256);
 
         let matrix = fixture["message_role_matrix"].as_object().unwrap();
         assert_eq!(matrix.len(), CONTROLLER_MESSAGE_TYPES.len());
@@ -2829,6 +3237,68 @@ mod tests {
                 .code,
             "missing_field"
         );
+        let success_context =
+            RegistrationValidationContext::new(request.clone(), Some(result.clone())).unwrap();
+        validate_controller_registration_message_json(
+            &serde_json::to_string(retry_request).unwrap(),
+            B,
+            &success_context,
+        )
+        .unwrap();
+        validate_controller_registration_message_json(
+            &serde_json::to_string(retry_result).unwrap(),
+            RELAY,
+            &success_context,
+        )
+        .unwrap();
+        for field in fixture["pairing_registration_vector"]["conflict_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+        {
+            let mut conflict = retry_request.clone();
+            conflict[field] = if field == "capabilities" {
+                json!(["pairing_v1"])
+            } else {
+                json!(format!("{}-other", conflict[field].as_str().unwrap()))
+            };
+            assert_eq!(
+                validate_controller_registration_message_json(
+                    &serde_json::to_string(&conflict).unwrap(),
+                    B,
+                    &success_context
+                )
+                .unwrap_err()
+                .code,
+                fixture["pairing_registration_vector"]["conflict_expected_error"]
+                    .as_str()
+                    .unwrap()
+            );
+        }
+        let failure_context =
+            RegistrationValidationContext::new(request.clone(), Some(failure_result.clone()))
+                .unwrap();
+        validate_controller_registration_message_json(
+            &serde_json::to_string(failure_retry_result).unwrap(),
+            RELAY,
+            &failure_context,
+        )
+        .unwrap();
+        for field in ["registration_request_id", "remote_control_generation"] {
+            let mut missing = failure_retry_result.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert_eq!(
+                validate_controller_registration_message_json(
+                    &serde_json::to_string(&missing).unwrap(),
+                    RELAY,
+                    &failure_context
+                )
+                .unwrap_err()
+                .code,
+                "missing_field"
+            );
+        }
     }
 
     #[test]
@@ -2854,6 +3324,19 @@ mod tests {
         assert_eq!(legacy["conflict"]["message"]["type"], "error");
         assert_eq!(legacy["conflict"]["message"]["code"], "endpoint_not_found");
         assert_eq!(legacy["conflict"]["closeCode"], 1008);
+        for state in [
+            "pairing_reserved",
+            "handshake_pending",
+            "controller_connected",
+            "reconnecting",
+            "resume_provisional",
+            "resume_activated_pending_liveness",
+        ] {
+            assert_eq!(
+                legacy["controller_conflict_expectations"][state], legacy["conflict"],
+                "{state}"
+            );
+        }
     }
 
     #[test]
@@ -2946,18 +3429,115 @@ mod tests {
                 .code,
             "invalid_field"
         );
-        let mut no_task = context();
-        no_task.negotiated_capabilities = Some(vec!["pairing_v1".into()]);
         assert_eq!(
-            validate_controller_payload_json_in_context(
+            validate_controller_runtime_payload_json(
                 &serde_json::to_string(&fixture["task_submit_vectors"]["controlled"]).unwrap(),
                 A,
-                Some(&no_task),
+                Some(&runtime(&["pairing_v1"])),
             )
             .unwrap_err()
             .code,
             "unsupported_capability"
         );
+    }
+
+    #[test]
+    fn runtime_capabilities_gate_outer_and_inner_messages() {
+        let fixture = fixture();
+        let frame = json!({
+            "v":1,"type":"encrypted_frame","connection_id":"connection-0001",
+            "controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1",
+            "remote_control_generation":"generation-0001","frame_sequence":"1","direction":"a_to_b",
+            "payload_kind":"task_submit","ciphertext_b64":"AQID","ciphertext_bytes":"3"
+        });
+        let liveness = json!({
+            "v":1,"type":"controller_liveness","connection_id":"connection-0001","controller_lease_id":"lease-0001",
+            "lease_epoch":"1","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001",
+            "sender_role":"A","liveness_epoch":"live-a-1","heartbeat_sequence":"1"
+        });
+        let receipt = json!({"v":1,"type":"finished_receipt_commit","request_id":"request-1","pairing_id":"pairing-0001","reservation_id":"reservation-0001","remote_control_generation":"generation-0001","relay_epoch":"epoch-test-1","transcript_hash":"0000000000000000000000000000000000000000000000000000000000000000","sender_role":"A","commitment":"0000000000000000000000000000000000000000000000000000000000000000"});
+        let resume = json!({"v":1,"type":"controller_resume_prepare","request_id":"request-1","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","sender_role":"A","resume_token_b64":"AQID","transport_challenge_b64":"AAAAAAAAAAAAAAAAAAAAAA==","original_deadline_ms":"30000"});
+        for case in fixture["runtime_capability_cases"].as_array().unwrap() {
+            let kind = case["type"].as_str().unwrap();
+            let capabilities: Option<Vec<String>> = case
+                .get("capabilities")
+                .map(|value| serde_json::from_value(value.clone()).unwrap());
+            let runtime_context = capabilities
+                .as_ref()
+                .map(|values| RuntimeValidationContext {
+                    lease: Some(context()),
+                    negotiated_capabilities: values.clone(),
+                });
+            let error = if case["target"] == "payload" {
+                validate_controller_runtime_payload_json(
+                    &serde_json::to_string(&fixture["task_submit_vectors"]["controlled"]).unwrap(),
+                    A,
+                    runtime_context.as_ref(),
+                )
+                .unwrap_err()
+            } else {
+                let value = match kind {
+                    "desktop_pairing_register" => {
+                        &fixture["pairing_registration_vector"]["request"]
+                    }
+                    "finished_receipt_commit" => &receipt,
+                    "controller_resume_prepare" => &resume,
+                    "encrypted_frame" => &frame,
+                    _ => &liveness,
+                };
+                validate_controller_runtime_message_json(
+                    &serde_json::to_string(value).unwrap(),
+                    if kind == "desktop_pairing_register" {
+                        B
+                    } else {
+                        A
+                    },
+                    runtime_context.as_ref(),
+                )
+                .unwrap_err()
+            };
+            assert_eq!(
+                error.code,
+                case["expected_error"].as_str().unwrap(),
+                "{}",
+                case["name"].as_str().unwrap()
+            );
+        }
+        for capabilities in [&["task_v1"][..], &["encrypted_frames_v1"][..]] {
+            assert_eq!(
+                validate_controller_runtime_message_json(
+                    &serde_json::to_string(&frame).unwrap(),
+                    A,
+                    Some(&runtime(capabilities))
+                )
+                .unwrap_err()
+                .code,
+                "unsupported_capability"
+            );
+        }
+        validate_controller_runtime_message_json(
+            &serde_json::to_string(&frame).unwrap(),
+            A,
+            Some(&runtime(&["encrypted_frames_v1", "task_v1"])),
+        )
+        .unwrap();
+        let payload = &fixture["task_submit_vectors"]["controlled"];
+        assert_eq!(
+            validate_controller_runtime_payload_json(
+                &serde_json::to_string(payload).unwrap(),
+                A,
+                Some(&runtime(&["pairing_v1"]))
+            )
+            .unwrap_err()
+            .code,
+            "unsupported_capability"
+        );
+        validate_controller_runtime_payload_json(
+            &serde_json::to_string(payload).unwrap(),
+            A,
+            Some(&runtime(&["task_v1"])),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3213,8 +3793,10 @@ mod tests {
             DeadlineUpdate::TightenOnly
         );
         assert_eq!(
-            classify_liveness_attestation_sequences(message, 1, 1).unwrap(),
-            DeadlineUpdate::TightenOnly
+            classify_liveness_attestation_sequences(message, 1, 1)
+                .unwrap_err()
+                .code,
+            "replay"
         );
         assert_eq!(
             apply_liveness_deadline(20_000, 25_000, DeadlineUpdate::TightenOnly),
@@ -3224,16 +3806,20 @@ mod tests {
             apply_liveness_deadline(20_000, 25_000, DeadlineUpdate::Replace),
             25_000
         );
-        validate_liveness_attestation_message_json(
-            &serde_json::to_string(&attestation["message"]).unwrap(),
-            &context(),
-            "live-a-1",
-            2,
-            1,
-            "challenge-0001",
-            "AAAAAAAAAAAAAAAAAAAAAA==",
-        )
-        .unwrap();
+        assert_eq!(
+            validate_liveness_attestation_message_json(
+                &serde_json::to_string(&attestation["message"]).unwrap(),
+                &context(),
+                "live-a-1",
+                2,
+                1,
+                "challenge-0001",
+                "AAAAAAAAAAAAAAAAAAAAAA==",
+            )
+            .unwrap_err()
+            .code,
+            "replay"
+        );
         assert_eq!(
             classify_liveness_attestation_sequences(message, 3, 0)
                 .unwrap_err()

@@ -3,7 +3,7 @@
   "contract": {
     "id": "pinvou-desktop-controller/v1",
     "integer_wire_format": "canonical-u64-decimal-string",
-    "sha256": "4a5cd258ffaf17839fd86fedbac7bae0f4f32956b8901c0adca73bacbd42e421"
+    "sha256": "24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394"
   },
   "expected_capabilities": ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1", "task_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1"],
   "expected_error_codes": ["pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required", "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown"],
@@ -18,7 +18,9 @@
     "retry_request": {"v":1,"type":"desktop_pairing_register","request_id":"transport-request-retry","registration_request_id":"registration-request-0001","endpoint_id":"endpoint-0001","remote_control_generation":"generation-0001","code_wrap_public_key_b64":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","handshake_public_key_b64":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","key_algorithm":"x25519","capabilities":["pairing_v1","encrypted_frames_v1"]},
     "retry_result": {"v":1,"type":"desktop_pairing_registered","request_id":"transport-request-retry","registration_request_id":"registration-request-0001","pairing_id":"pairing-0001","remote_control_generation":"generation-0001","sealed_code_b64":"AQID","expires_at_ms":"30000","relay_epoch":"epoch-test-1"},
     "failure_result": {"v":1,"type":"error","request_id":"transport-request-0001","registration_request_id":"registration-request-0001","remote_control_generation":"generation-0001","code":"pairing_code_generation_failed","message":"pairing code generation failed"},
-    "failure_retry_result": {"v":1,"type":"error","request_id":"transport-request-retry","registration_request_id":"registration-request-0001","remote_control_generation":"generation-0001","code":"pairing_code_generation_failed","message":"pairing code generation failed"}
+    "failure_retry_result": {"v":1,"type":"error","request_id":"transport-request-retry","registration_request_id":"registration-request-0001","remote_control_generation":"generation-0001","code":"pairing_code_generation_failed","message":"pairing code generation failed"},
+    "conflict_fields": ["remote_control_generation","endpoint_id","code_wrap_public_key_b64","handshake_public_key_b64","key_algorithm","capabilities"],
+    "conflict_expected_error": "invalid_message"
   },
   "receipt_commitment_vector": {
     "relay_epoch": "epoch-test-1", "pairing_id": "pairing-0001", "reservation_id": "reservation-0001", "transcript_hash": "0000000000000000000000000000000000000000000000000000000000000000", "sender_role": "A",
@@ -69,6 +71,16 @@
     {"name":"noncanonical_lease_epoch","target":"payload","sender_role":"A","expected_error":"invalid_field","value":{"v":1,"type":"task_cancel","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":1,"relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","request_id":"request-1","task_id":"task-1","session_id":"session-1"}},
     {"name":"removed_completed_status","target":"payload","sender_role":"B","expected_error":"invalid_enum","value":{"v":1,"type":"task_status","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","request_id":"request-1","task_id":"task-1","session_id":"session-1","task_status":"completed"}}
   ],
+  "runtime_capability_cases": [
+    {"name":"missing_runtime_context","target":"message","type":"controller_liveness","sender_role":"A","expected_error":"unsupported_capability"},
+    {"name":"liveness_not_negotiated","target":"message","type":"controller_liveness","sender_role":"A","capabilities":["pairing_v1"],"expected_error":"unsupported_capability"},
+    {"name":"pairing_not_negotiated","target":"message","type":"desktop_pairing_register","sender_role":"B","capabilities":["role_liveness_v1"],"expected_error":"unsupported_capability"},
+    {"name":"receipt_not_negotiated","target":"message","type":"finished_receipt_commit","sender_role":"A","capabilities":["pairing_v1"],"expected_error":"unsupported_capability"},
+    {"name":"resume_not_negotiated","target":"message","type":"controller_resume_prepare","sender_role":"A","capabilities":["role_liveness_v1"],"expected_error":"unsupported_capability"},
+    {"name":"task_without_encrypted_frames","target":"message","type":"encrypted_frame","sender_role":"A","capabilities":["task_v1"],"expected_error":"unsupported_capability"},
+    {"name":"encrypted_frame_without_task","target":"message","type":"encrypted_frame","sender_role":"A","capabilities":["encrypted_frames_v1"],"expected_error":"unsupported_capability"},
+    {"name":"task_payload_not_negotiated","target":"payload","type":"task_submit","sender_role":"A","capabilities":["pairing_v1"],"expected_error":"unsupported_capability"}
+  ],
   "negative_contracts": ["missing_field", "unknown_field", "overlong_text", "unknown_message_type", "unsupported_version", "unsupported_capability", "capability_version_mismatch", "invalid_enum", "cross_role", "noncanonical_integer", "integer_overflow", "stale_generation", "stale_relay_epoch", "stale_lease_epoch", "late_frame", "transcript_tamper", "liveness_tamper", "liveness_regression", "same_sequence_tighten", "cross_lease", "attestation_tamper", "url_grammar", "registration_idempotency"],
   "public_error_mappings": {"pairing_absent":"pairing_code_invalid","pairing_expired":"pairing_code_invalid","pairing_consumed":"pairing_code_invalid","pairing_revoked":"pairing_code_invalid","generation_stale":"pairing_code_invalid","generation_exhausted":"pairing_code_generation_failed"},
   "legacy_web_v2": {
@@ -78,6 +90,14 @@
     "web_client_join":{"v":2,"type":"web_client_join","endpoint_id":"endpoint_fixture","access_token":"fixture-access-token","stream_epoch":"stream-fixture","after_seq":7},
     "web_client_joined":{"v":2,"type":"web_client_joined","endpoint_id":"endpoint_fixture","lease_id":"lease_fixture","desktop_connected":true},
     "conflict":{"message":{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"},"closeCode":1008},
-    "controller_conflict_expectations":{"none":"accept_v2","pairing_reserved":"endpoint_not_found","handshake_pending":"endpoint_not_found","controller_connected":"endpoint_not_found"}
+    "controller_conflict_expectations":{
+      "none":"accept_v2",
+      "pairing_reserved":{"message":{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"},"closeCode":1008},
+      "handshake_pending":{"message":{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"},"closeCode":1008},
+      "controller_connected":{"message":{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"},"closeCode":1008},
+      "reconnecting":{"message":{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"},"closeCode":1008},
+      "resume_provisional":{"message":{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"},"closeCode":1008},
+      "resume_activated_pending_liveness":{"message":{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"},"closeCode":1008}
+    }
   }
 }
