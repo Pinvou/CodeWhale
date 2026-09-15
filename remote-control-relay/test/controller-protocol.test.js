@@ -11,6 +11,7 @@ import {
   CONTROLLER_PAYLOAD_TYPES,
   TASK_STATUSES,
   ControllerProtocolError,
+  LeaseInstallValidationContext,
   RegistrationValidationContext,
   LEGACY_WEB_CONFLICT,
   MAX_CONTROL_MESSAGE_BYTES,
@@ -31,6 +32,7 @@ import {
   negotiateControllerCapabilities,
   validateControllerBaseUrl,
   validateControllerLivenessPayload,
+  validateControllerLeaseInstallMessage,
   validateControllerMessage,
   validateControllerPayload,
   validateControllerRegistrationMessage,
@@ -86,7 +88,7 @@ function validMessage(type, role = fixture.message_role_matrix[type][0]) {
     case "finished_receipt_commit": return { ...common, ...request, ...pairing, transcript_hash: fixture.transcript_vector.sha256, sender_role: role, commitment: ZERO_HASH };
     case "encrypted_handshake_finished": return { ...common, ...request, ...pairing, transcript_hash: fixture.transcript_vector.sha256, sender_role: role, ciphertext_b64: "AQID", ciphertext_bytes: "3" };
     case "finished_receipt_ack": return { ...common, ...request, ...pairing, transcript_hash: fixture.transcript_vector.sha256, sender_role: role === "A" ? "B" : "A", receiver_role: role, receipt_secret_b64: ZERO_KEY };
-    case "controller_joined": return { ...common, ...request, ...LEASE, liveness_epoch_a: "live-a-1", liveness_epoch_b: "live-b-1", resume_token_b64: "AQID", resume_deadline_ms: "30000" };
+    case "controller_joined": return structuredClone(fixture.lease_install_vector.message);
     case "controller_liveness": return { ...common, ...LEASE, sender_role: role, liveness_epoch: role === "A" ? "live-a-1" : "live-b-1", heartbeat_sequence: "1" };
     case "controller_liveness_challenge_a": return { ...common, ...request, ...LEASE, challenge_id: "challenge-0001", challenge_b64: ZERO_NONCE };
     case "encrypted_controller_liveness_a": return structuredClone(fixture.direct_liveness_vector.outer);
@@ -262,7 +264,7 @@ test("runtime capability and artifact metadata stay minimal, revision-bound and 
 });
 
 test("post-lease messages reject stale generation and epochs, including late frames", () => {
-  for (const type of ["controller_joined", "controller_liveness", "controller_resume_prepare", "controller_resume_activation_ack", "controller_resumed", "encrypted_frame", "controller_disconnect"]) {
+  for (const type of ["controller_liveness", "controller_resume_prepare", "controller_resume_activation_ack", "controller_resumed", "encrypted_frame", "controller_disconnect"]) {
     const role = fixture.message_role_matrix[type][0];
     const message = validMessage(type, role);
     validateControllerMessage(message, role, LEASE);
@@ -315,6 +317,8 @@ test("capability and signed pairing transcript vectors are canonical and tamper 
 });
 
 test("runtime validation requires negotiated outer and inner capabilities", () => {
+  validateControllerMessage(validMessage("controller_capabilities", "A"), "A");
+  validateControllerMessage(validMessage("error"), "relay");
   for (const item of fixture.runtime_capability_cases) {
     const value = item.target === "message" ? validMessage(item.type, item.sender_role) : validPayload(item.type);
     const validator = item.target === "message" ? validateControllerRuntimeMessage : validateControllerRuntimePayload;
@@ -329,6 +333,23 @@ test("runtime validation requires negotiated outer and inner capabilities", () =
   validateControllerRuntimePayload(validPayload("task_submit"), "A", RUNTIME);
   const preLease = fixture.runtime_pre_lease_case;
   validateControllerRuntimeMessage(validMessage(preLease.type, preLease.sender_role), preLease.sender_role, { negotiated_capabilities: preLease.capabilities });
+  validateControllerRuntimeMessage(validMessage("controller_capabilities", "A"), "A", { negotiated_capabilities: [] });
+  validateControllerRuntimeMessage(validMessage("error"), "relay", { negotiated_capabilities: [] });
+});
+
+test("controller_joined installs a new lease only from trusted handshake expectations", () => {
+  const vector = fixture.lease_install_vector;
+  const context = new LeaseInstallValidationContext(vector.context);
+  const result = validateControllerLeaseInstallMessage(vector.message, "relay", context);
+  assert.deepEqual(result.message, vector.message);
+  assert.deepEqual(result.lease, vector.expected_lease);
+  assertProtocolError("missing_field", () => validateControllerLeaseInstallMessage(vector.message, "relay"), undefined, "lease_install_validation_context");
+  assertProtocolError("unknown_field", () => new LeaseInstallValidationContext(vector.message), "unverified joined message cannot become its own expectation");
+  assertProtocolError("unsupported_capability", () => validateControllerLeaseInstallMessage(vector.message, "relay", new LeaseInstallValidationContext({ ...vector.context, negotiated_capabilities: ["encrypted_frames_v1"] })));
+  for (const field of vector.mismatch_fields) {
+    const value = field === "transcript_hash" ? ZERO_HASH : `${field}-other`;
+    assertProtocolError(vector.expected_error, () => validateControllerLeaseInstallMessage({ ...vector.message, [field]: value }, "relay", context), field, field);
+  }
 });
 
 test("finished receipt commitment is built independently from fields", () => {

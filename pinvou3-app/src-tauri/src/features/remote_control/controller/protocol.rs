@@ -24,7 +24,7 @@ const MAX_ARTIFACTS: usize = 256;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "e1e511c4819d2298b735e6b049cb59cbd8935858f7da67d43beaf9106a068fd9";
+    "de6e06bc6d5d0213bccea6841d4b256dd5403c493c9601b244bf0533034d2721";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -69,6 +69,7 @@ pub(crate) const CONTROLLER_MESSAGE_TYPES: &[&str] = &[
     "controller_disconnect",
     "error",
 ];
+pub(crate) const LEASE_INSTALL_MESSAGE_TYPES: &[&str] = &["controller_joined"];
 
 pub(crate) const CONTROLLER_PAYLOAD_TYPES: &[&str] = &[
     "capability_snapshot_request",
@@ -172,6 +173,16 @@ const ERROR_CONTEXT_FIELDS: &[&str] = &[
     "relay_epoch",
     "remote_control_generation",
     "registration_request_id",
+];
+const LEASE_INSTALL_CONTEXT_FIELDS: &[&str] = &[
+    "request_id",
+    "expected_pairing_id",
+    "reservation_id",
+    "remote_control_generation",
+    "relay_epoch",
+    "transcript_hash",
+    "expected_controller_connection_identity",
+    "negotiated_capabilities",
 ];
 
 pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
@@ -774,6 +785,10 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "v",
                 "type",
                 "request_id",
+                "pairing_id",
+                "reservation_id",
+                "transcript_hash",
+                "controller_connection_identity",
                 "connection_id",
                 "controller_lease_id",
                 "lease_epoch",
@@ -1499,6 +1514,70 @@ pub(crate) struct RuntimeValidationContext {
     pub(crate) negotiated_capabilities: Vec<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LeaseInstallValidationContext {
+    request_id: String,
+    expected_pairing_id: String,
+    reservation_id: String,
+    remote_control_generation: String,
+    relay_epoch: String,
+    transcript_hash: String,
+    expected_controller_connection_identity: String,
+    negotiated_capabilities: Vec<String>,
+}
+
+impl LeaseInstallValidationContext {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        request_id: String,
+        expected_pairing_id: String,
+        reservation_id: String,
+        remote_control_generation: String,
+        relay_epoch: String,
+        transcript_hash: String,
+        expected_controller_connection_identity: String,
+        negotiated_capabilities: Vec<String>,
+    ) -> Result<Self> {
+        for (field, value) in [
+            ("request_id", &request_id),
+            ("expected_pairing_id", &expected_pairing_id),
+            ("reservation_id", &reservation_id),
+            ("remote_control_generation", &remote_control_generation),
+            ("relay_epoch", &relay_epoch),
+            (
+                "expected_controller_connection_identity",
+                &expected_controller_connection_identity,
+            ),
+        ] {
+            validate_identifier(
+                &Value::String(value.clone()),
+                &format!("lease_install_validation_context.{field}"),
+            )?;
+        }
+        validate_hex_64(
+            &Value::String(transcript_hash.clone()),
+            "lease_install_validation_context.transcript_hash",
+        )?;
+        validate_runtime_capabilities(&negotiated_capabilities)?;
+        Ok(Self {
+            request_id,
+            expected_pairing_id,
+            reservation_id,
+            remote_control_generation,
+            relay_epoch,
+            transcript_hash,
+            expected_controller_connection_identity,
+            negotiated_capabilities,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LeaseInstallResult {
+    pub(crate) message: Value,
+    pub(crate) lease: LeaseContext,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RegistrationValidationContext {
     request: Value,
@@ -1665,6 +1744,73 @@ fn require_runtime_lease(context: &RuntimeValidationContext) -> Result<&LeaseCon
         .ok_or_else(|| ControllerProtocolError::new("missing_field", "runtime_context.lease"))
 }
 
+pub(crate) fn validate_controller_lease_install_message_json(
+    input: &str,
+    sender_role: SenderRole,
+    context: &LeaseInstallValidationContext,
+) -> Result<LeaseInstallResult> {
+    validate_runtime_capabilities(&context.negotiated_capabilities)?;
+    let message = validate_controller_message_json(input, sender_role)?;
+    let kind = message
+        .get("type")
+        .and_then(Value::as_str)
+        .expect("validated type");
+    if !LEASE_INSTALL_MESSAGE_TYPES.contains(&kind) {
+        return Err(ControllerProtocolError::new(
+            "invalid_message",
+            "lease_install_message",
+        ));
+    }
+    for required in outer_message_capabilities(kind) {
+        if !context
+            .negotiated_capabilities
+            .iter()
+            .any(|capability| capability == required)
+        {
+            return Err(ControllerProtocolError::new("unsupported_capability", kind));
+        }
+    }
+    let expected = [
+        ("request_id", context.request_id.as_str()),
+        ("pairing_id", context.expected_pairing_id.as_str()),
+        ("reservation_id", context.reservation_id.as_str()),
+        (
+            "remote_control_generation",
+            context.remote_control_generation.as_str(),
+        ),
+        ("relay_epoch", context.relay_epoch.as_str()),
+        ("transcript_hash", context.transcript_hash.as_str()),
+        (
+            "controller_connection_identity",
+            context.expected_controller_connection_identity.as_str(),
+        ),
+    ];
+    for (field, expected) in expected {
+        if message.get(field).and_then(Value::as_str) != Some(expected) {
+            return Err(ControllerProtocolError::new("stale_context", field));
+        }
+    }
+    let lease = LeaseContext {
+        connection_id: object_string(message.as_object().unwrap(), "connection_id", "message")?
+            .into(),
+        controller_lease_id: object_string(
+            message.as_object().unwrap(),
+            "controller_lease_id",
+            "message",
+        )?
+        .into(),
+        lease_epoch: object_string(message.as_object().unwrap(), "lease_epoch", "message")?.into(),
+        relay_epoch: object_string(message.as_object().unwrap(), "relay_epoch", "message")?.into(),
+        remote_control_generation: object_string(
+            message.as_object().unwrap(),
+            "remote_control_generation",
+            "message",
+        )?
+        .into(),
+    };
+    Ok(LeaseInstallResult { message, lease })
+}
+
 pub(crate) fn validate_controller_runtime_message_json(
     input: &str,
     sender_role: SenderRole,
@@ -1679,6 +1825,12 @@ pub(crate) fn validate_controller_runtime_message_json(
         .get("type")
         .and_then(Value::as_str)
         .expect("validated type");
+    if LEASE_INSTALL_MESSAGE_TYPES.contains(&kind) {
+        return Err(ControllerProtocolError::new(
+            "missing_field",
+            "lease_install_validation_context",
+        ));
+    }
     let lease = if message_schema(kind)
         .expect("registered schema")
         .required
@@ -3387,11 +3539,13 @@ mod tests {
             "route_required":ROUTE_REQUIRED,
             "route_optional":ROUTE_OPTIONAL,
             "nested_schemas": nested_schema_manifest(),
+            "lease_install_messages": LEASE_INSTALL_MESSAGE_TYPES,
+            "lease_install_context_required": LEASE_INSTALL_CONTEXT_FIELDS,
             "runtime_pre_lease_messages": runtime_pre_lease_messages(),
             "collection_limits":{"task_attachment_ids":MAX_TASK_REFERENCES,"task_skill_ids":MAX_TASK_REFERENCES,"descriptors":MAX_DESCRIPTORS,"artifacts":MAX_ARTIFACTS,"capabilities":CONTROLLER_CAPABILITIES.len()},
             "base_url_grammar":"lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
-            "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","registration":"independent-generation-registration-idempotency-context"}
+            "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"}
         })
     }
 
@@ -3758,6 +3912,8 @@ mod tests {
     #[test]
     fn runtime_capabilities_gate_outer_and_inner_messages() {
         let fixture = fixture();
+        let capabilities_message = json!({"v":1,"type":"controller_capabilities","request_id":"request-0001","client_role":"desktop_controller","sender_role":"A","protocol_version":1,"capabilities":["pairing_v1"]});
+        let error_message = json!({"v":1,"type":"error","request_id":"request-0001","code":"pairing_code_invalid","message":"连接码无效或已失效"});
         let frame = json!({
             "v":1,"type":"encrypted_frame","connection_id":"connection-0001",
             "controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1",
@@ -3771,6 +3927,10 @@ mod tests {
         });
         let receipt = json!({"v":1,"type":"finished_receipt_commit","request_id":"request-1","pairing_id":"pairing-0001","reservation_id":"reservation-0001","remote_control_generation":"generation-0001","relay_epoch":"epoch-test-1","transcript_hash":"0000000000000000000000000000000000000000000000000000000000000000","sender_role":"A","commitment":"0000000000000000000000000000000000000000000000000000000000000000"});
         let resume = json!({"v":1,"type":"controller_resume_prepare","request_id":"request-1","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","sender_role":"A","resume_token_b64":"AQID","transport_challenge_b64":"AAAAAAAAAAAAAAAAAAAAAA==","original_deadline_ms":"30000"});
+        validate_controller_message_json(&serde_json::to_string(&capabilities_message).unwrap(), A)
+            .unwrap();
+        validate_controller_message_json(&serde_json::to_string(&error_message).unwrap(), RELAY)
+            .unwrap();
         for case in fixture["runtime_capability_cases"].as_array().unwrap() {
             let kind = case["type"].as_str().unwrap();
             let capabilities: Option<Vec<String>> = case
@@ -3803,9 +3963,12 @@ mod tests {
                 .unwrap_err()
             } else {
                 let value = match kind {
+                    "controller_capabilities" => &capabilities_message,
+                    "error" => &error_message,
                     "desktop_pairing_register" => {
                         &fixture["pairing_registration_vector"]["request"]
                     }
+                    "controller_joined" => &fixture["lease_install_vector"]["message"],
                     "finished_receipt_commit" => &receipt,
                     "controller_resume_prepare" => &resume,
                     "encrypted_frame" => &frame,
@@ -3813,11 +3976,7 @@ mod tests {
                 };
                 validate_controller_runtime_message_json(
                     &serde_json::to_string(value).unwrap(),
-                    if kind == "desktop_pairing_register" {
-                        B
-                    } else {
-                        A
-                    },
+                    role(case["sender_role"].as_str().unwrap()),
                     runtime_context.as_ref(),
                 )
                 .unwrap_err()
@@ -3867,6 +4026,24 @@ mod tests {
             Some(&runtime(&["task_v1"])),
         )
         .unwrap();
+        validate_controller_runtime_message_json(
+            &serde_json::to_string(&capabilities_message).unwrap(),
+            A,
+            Some(&RuntimeValidationContext {
+                lease: None,
+                negotiated_capabilities: Vec::new(),
+            }),
+        )
+        .unwrap();
+        validate_controller_runtime_message_json(
+            &serde_json::to_string(&error_message).unwrap(),
+            RELAY,
+            Some(&RuntimeValidationContext {
+                lease: None,
+                negotiated_capabilities: Vec::new(),
+            }),
+        )
+        .unwrap();
         let pre_lease = &fixture["runtime_pre_lease_case"];
         let capabilities: Vec<String> =
             serde_json::from_value(pre_lease["capabilities"].clone()).unwrap();
@@ -3879,6 +4056,102 @@ mod tests {
             }),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn controller_joined_installs_lease_from_trusted_handshake_expectations() {
+        let fixture = fixture();
+        let vector = &fixture["lease_install_vector"];
+        let context_value = &vector["context"];
+        let install_context = LeaseInstallValidationContext::new(
+            context_value["request_id"].as_str().unwrap().into(),
+            context_value["expected_pairing_id"]
+                .as_str()
+                .unwrap()
+                .into(),
+            context_value["reservation_id"].as_str().unwrap().into(),
+            context_value["remote_control_generation"]
+                .as_str()
+                .unwrap()
+                .into(),
+            context_value["relay_epoch"].as_str().unwrap().into(),
+            context_value["transcript_hash"].as_str().unwrap().into(),
+            context_value["expected_controller_connection_identity"]
+                .as_str()
+                .unwrap()
+                .into(),
+            serde_json::from_value(context_value["negotiated_capabilities"].clone()).unwrap(),
+        )
+        .unwrap();
+        let result = validate_controller_lease_install_message_json(
+            &serde_json::to_string(&vector["message"]).unwrap(),
+            RELAY,
+            &install_context,
+        )
+        .unwrap();
+        assert_eq!(result.message, vector["message"]);
+        assert_eq!(
+            json!({
+                "connection_id": result.lease.connection_id,
+                "controller_lease_id": result.lease.controller_lease_id,
+                "lease_epoch": result.lease.lease_epoch,
+                "relay_epoch": result.lease.relay_epoch,
+                "remote_control_generation": result.lease.remote_control_generation,
+            }),
+            vector["expected_lease"]
+        );
+
+        let unsupported_context = LeaseInstallValidationContext::new(
+            context_value["request_id"].as_str().unwrap().into(),
+            context_value["expected_pairing_id"]
+                .as_str()
+                .unwrap()
+                .into(),
+            context_value["reservation_id"].as_str().unwrap().into(),
+            context_value["remote_control_generation"]
+                .as_str()
+                .unwrap()
+                .into(),
+            context_value["relay_epoch"].as_str().unwrap().into(),
+            context_value["transcript_hash"].as_str().unwrap().into(),
+            context_value["expected_controller_connection_identity"]
+                .as_str()
+                .unwrap()
+                .into(),
+            vec!["encrypted_frames_v1".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            validate_controller_lease_install_message_json(
+                &serde_json::to_string(&vector["message"]).unwrap(),
+                RELAY,
+                &unsupported_context,
+            )
+            .unwrap_err()
+            .code,
+            "unsupported_capability"
+        );
+        for field in vector["mismatch_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+        {
+            let mut message = vector["message"].clone();
+            message[field] = if field == "transcript_hash" {
+                json!("0000000000000000000000000000000000000000000000000000000000000000")
+            } else {
+                json!(format!("{field}-other"))
+            };
+            let error = validate_controller_lease_install_message_json(
+                &serde_json::to_string(&message).unwrap(),
+                RELAY,
+                &install_context,
+            )
+            .unwrap_err();
+            assert_eq!(error.code, vector["expected_error"].as_str().unwrap());
+            assert_eq!(error.field, field);
+        }
     }
 
     #[test]
