@@ -18,10 +18,13 @@ pub(crate) const MAX_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_TASK_INPUT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TEMPORARY_MODEL_PACKAGE_BYTES: usize = 64 * 1024;
 const MAX_ID_CHARS: usize = 128;
+const MAX_TASK_REFERENCES: usize = 32;
+const MAX_DESCRIPTORS: usize = 256;
+const MAX_ARTIFACTS: usize = 256;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394";
+    "e1e511c4819d2298b735e6b049cb59cbd8935858f7da67d43beaf9106a068fd9";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -272,6 +275,341 @@ struct Schema {
     required: &'static [&'static str],
     optional: &'static [&'static str],
     roles: &'static [SenderRole],
+}
+
+struct CapabilityBinding {
+    kind: &'static str,
+    capabilities: &'static [&'static str],
+}
+
+const PAYLOAD_CAPABILITY_BINDINGS: &[CapabilityBinding] = &[
+    CapabilityBinding {
+        kind: "capability_snapshot_request",
+        capabilities: &["task_v1"],
+    },
+    CapabilityBinding {
+        kind: "capability_snapshot",
+        capabilities: &["task_v1"],
+    },
+    CapabilityBinding {
+        kind: "task_submit",
+        capabilities: &["task_v1"],
+    },
+    CapabilityBinding {
+        kind: "task_cancel",
+        capabilities: &["task_v1"],
+    },
+    CapabilityBinding {
+        kind: "task_status",
+        capabilities: &["task_v1"],
+    },
+    CapabilityBinding {
+        kind: "permission_request",
+        capabilities: &["permission_v1"],
+    },
+    CapabilityBinding {
+        kind: "permission_decision",
+        capabilities: &["permission_v1"],
+    },
+    CapabilityBinding {
+        kind: "attachment_begin",
+        capabilities: &["attachment_v1"],
+    },
+    CapabilityBinding {
+        kind: "attachment_chunk",
+        capabilities: &["attachment_v1"],
+    },
+    CapabilityBinding {
+        kind: "attachment_commit",
+        capabilities: &["attachment_v1"],
+    },
+    CapabilityBinding {
+        kind: "artifact_index_request",
+        capabilities: &["artifact_v1"],
+    },
+    CapabilityBinding {
+        kind: "artifact_index",
+        capabilities: &["artifact_v1"],
+    },
+    CapabilityBinding {
+        kind: "artifact_read_request",
+        capabilities: &["artifact_v1"],
+    },
+    CapabilityBinding {
+        kind: "artifact_chunk",
+        capabilities: &["artifact_v1"],
+    },
+    CapabilityBinding {
+        kind: "session_snapshot_request",
+        capabilities: &["snapshot_journal_v1"],
+    },
+    CapabilityBinding {
+        kind: "session_snapshot",
+        capabilities: &["snapshot_journal_v1"],
+    },
+    CapabilityBinding {
+        kind: "journal_replay_request",
+        capabilities: &["snapshot_journal_v1"],
+    },
+    CapabilityBinding {
+        kind: "journal_event",
+        capabilities: &["snapshot_journal_v1"],
+    },
+];
+
+const OUTER_MESSAGE_CAPABILITY_BINDINGS: &[CapabilityBinding] = &[
+    CapabilityBinding {
+        kind: "desktop_endpoint_claim",
+        capabilities: &["pairing_v1"],
+    },
+    CapabilityBinding {
+        kind: "desktop_pairing_register",
+        capabilities: &["pairing_v1"],
+    },
+    CapabilityBinding {
+        kind: "desktop_pairing_registered",
+        capabilities: &["pairing_v1"],
+    },
+    CapabilityBinding {
+        kind: "desktop_pairing_revoke",
+        capabilities: &["pairing_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_pairing_claim",
+        capabilities: &["pairing_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_pairing_reserved",
+        capabilities: &["pairing_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_joined",
+        capabilities: &["pairing_v1"],
+    },
+    CapabilityBinding {
+        kind: "finished_receipt_commit",
+        capabilities: &["finished_receipt_v1"],
+    },
+    CapabilityBinding {
+        kind: "encrypted_handshake_finished",
+        capabilities: &["finished_receipt_v1"],
+    },
+    CapabilityBinding {
+        kind: "finished_receipt_ack",
+        capabilities: &["finished_receipt_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_liveness",
+        capabilities: &["role_liveness_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_liveness_challenge_a",
+        capabilities: &["role_liveness_v1"],
+    },
+    CapabilityBinding {
+        kind: "encrypted_controller_liveness_a",
+        capabilities: &["role_liveness_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_liveness_attestation_request_a",
+        capabilities: &["role_liveness_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_liveness_attestation_a",
+        capabilities: &["role_liveness_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_resume_prepare",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_resume_provisional",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "encrypted_resume_confirm",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_resume_activation_ack",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_resume_activation_pending",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_post_activation_liveness",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_post_activation_liveness_confirmed",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_resume_ready_ack",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_resumed",
+        capabilities: &["resume_v1"],
+    },
+    CapabilityBinding {
+        kind: "encrypted_frame",
+        capabilities: &["encrypted_frames_v1"],
+    },
+    CapabilityBinding {
+        kind: "controller_disconnect",
+        capabilities: &["encrypted_frames_v1"],
+    },
+];
+
+const ROUTE_REQUIRED: &[&str] = &[
+    "display_name",
+    "preset",
+    "wire_api",
+    "base_url",
+    "model",
+    "image_capability_override",
+];
+const ROUTE_OPTIONAL: &[&str] = &[
+    "provider_kind",
+    "vendor",
+    "endpoint_mode",
+    "context_window_tokens",
+    "max_output_tokens",
+    "reasoning_effort",
+];
+
+const NESTED_SCHEMAS: &[(&str, Schema)] = &[
+    (
+        "task_input",
+        Schema {
+            required: &["text", "attachment_ids", "skill_ids"],
+            optional: &["workspace_id"],
+            roles: &[],
+        },
+    ),
+    (
+        "temporary_model_package_v1",
+        Schema {
+            required: &[
+                "schema",
+                "package_id",
+                "binding",
+                "primary",
+                "primary_credential",
+            ],
+            optional: &["vision_fallback"],
+            roles: &[],
+        },
+    ),
+    (
+        "temporary_model_binding",
+        Schema {
+            required: &[
+                "connection_id",
+                "controller_lease_id",
+                "lease_epoch",
+                "task_id",
+            ],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+    (
+        "vision_fallback",
+        Schema {
+            required: &["route", "credential"],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+    (
+        "route",
+        Schema {
+            required: ROUTE_REQUIRED,
+            optional: ROUTE_OPTIONAL,
+            roles: &[],
+        },
+    ),
+    (
+        "credential",
+        Schema {
+            required: &["kind", "secret"],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+    (
+        "tool_descriptor",
+        Schema {
+            required: &["tool_id", "display_name"],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+    (
+        "skill_descriptor",
+        Schema {
+            required: &["skill_id", "display_name"],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+    (
+        "workspace_descriptor",
+        Schema {
+            required: &["workspace_id", "display_name", "code_allowed"],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+    (
+        "artifact_descriptor",
+        Schema {
+            required: &[
+                "artifact_id",
+                "task_id",
+                "display_name",
+                "mime_type",
+                "size_bytes",
+                "sha256",
+                "preview_mode",
+            ],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+    (
+        "controller_liveness_a",
+        Schema {
+            required: &[
+                "v",
+                "type",
+                "connection_id",
+                "controller_lease_id",
+                "lease_epoch",
+                "relay_epoch",
+                "remote_control_generation",
+                "role",
+                "liveness_epoch_a",
+                "heartbeat_sequence_a",
+                "challenge_id",
+                "challenge_b64",
+            ],
+            optional: &[],
+            roles: &[],
+        },
+    ),
+];
+
+fn nested_schema(name: &str) -> &'static Schema {
+    &NESTED_SCHEMAS
+        .iter()
+        .find(|(candidate, _)| *candidate == name)
+        .expect("registered nested schema")
+        .1
 }
 
 const A: SenderRole = SenderRole::ControllerA;
@@ -1281,66 +1619,29 @@ pub(crate) fn validate_controller_registration_message_json(
     Ok(value)
 }
 
-fn payload_capability(kind: &str) -> Option<&'static str> {
-    match kind {
-        "capability_snapshot_request"
-        | "capability_snapshot"
-        | "task_submit"
-        | "task_cancel"
-        | "task_status" => Some("task_v1"),
-        "permission_request" | "permission_decision" => Some("permission_v1"),
-        "attachment_begin" | "attachment_chunk" | "attachment_commit" => Some("attachment_v1"),
-        "artifact_index_request"
-        | "artifact_index"
-        | "artifact_read_request"
-        | "artifact_chunk" => Some("artifact_v1"),
-        "session_snapshot_request"
-        | "session_snapshot"
-        | "journal_replay_request"
-        | "journal_event" => Some("snapshot_journal_v1"),
-        _ => None,
-    }
+fn capability_binding<'a>(
+    bindings: &'a [CapabilityBinding],
+    kind: &str,
+) -> Option<&'a CapabilityBinding> {
+    bindings.iter().find(|binding| binding.kind == kind)
 }
 
 fn enforce_negotiated_payload(kind: &str, capabilities: &[String]) -> Result<()> {
-    let Some(required) = payload_capability(kind) else {
+    let Some(binding) = capability_binding(PAYLOAD_CAPABILITY_BINDINGS, kind) else {
         return Err(ControllerProtocolError::new("unsupported_capability", kind));
     };
-    if !capabilities.iter().any(|capability| capability == required) {
-        return Err(ControllerProtocolError::new("unsupported_capability", kind));
+    for required in binding.capabilities {
+        if !capabilities.iter().any(|capability| capability == required) {
+            return Err(ControllerProtocolError::new("unsupported_capability", kind));
+        }
     }
     Ok(())
 }
 
 fn outer_message_capabilities(kind: &str) -> &'static [&'static str] {
-    match kind {
-        "desktop_endpoint_claim"
-        | "desktop_pairing_register"
-        | "desktop_pairing_registered"
-        | "desktop_pairing_revoke"
-        | "controller_pairing_claim"
-        | "controller_pairing_reserved"
-        | "controller_joined" => &["pairing_v1"],
-        "finished_receipt_commit" | "encrypted_handshake_finished" | "finished_receipt_ack" => {
-            &["finished_receipt_v1"]
-        }
-        "controller_liveness"
-        | "controller_liveness_challenge_a"
-        | "encrypted_controller_liveness_a"
-        | "controller_liveness_attestation_request_a"
-        | "controller_liveness_attestation_a" => &["role_liveness_v1"],
-        "controller_resume_prepare"
-        | "controller_resume_provisional"
-        | "encrypted_resume_confirm"
-        | "controller_resume_activation_ack"
-        | "controller_resume_activation_pending"
-        | "controller_post_activation_liveness"
-        | "controller_post_activation_liveness_confirmed"
-        | "controller_resume_ready_ack"
-        | "controller_resumed" => &["resume_v1"],
-        "encrypted_frame" | "controller_disconnect" => &["encrypted_frames_v1"],
-        _ => &[],
-    }
+    capability_binding(OUTER_MESSAGE_CAPABILITY_BINDINGS, kind)
+        .map(|binding| binding.capabilities)
+        .unwrap_or(&[])
 }
 
 fn validate_runtime_capabilities(capabilities: &[String]) -> Result<()> {
@@ -1357,6 +1658,13 @@ fn validate_runtime_capabilities(capabilities: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn require_runtime_lease(context: &RuntimeValidationContext) -> Result<&LeaseContext> {
+    context
+        .lease
+        .as_ref()
+        .ok_or_else(|| ControllerProtocolError::new("missing_field", "runtime_context.lease"))
+}
+
 pub(crate) fn validate_controller_runtime_message_json(
     input: &str,
     sender_role: SenderRole,
@@ -1366,8 +1674,25 @@ pub(crate) fn validate_controller_runtime_message_json(
         ControllerProtocolError::new("unsupported_capability", "negotiated_capabilities")
     })?;
     validate_runtime_capabilities(&context.negotiated_capabilities)?;
-    let value =
-        validate_controller_message_json_in_context(input, sender_role, context.lease.as_ref())?;
+    let shape = validate_controller_message_json(input, sender_role)?;
+    let kind = shape
+        .get("type")
+        .and_then(Value::as_str)
+        .expect("validated type");
+    let lease = if message_schema(kind)
+        .expect("registered schema")
+        .required
+        .contains(&"controller_lease_id")
+    {
+        Some(require_runtime_lease(context)?)
+    } else {
+        context.lease.as_ref()
+    };
+    let value = if lease.is_some() {
+        validate_controller_message_json_in_context(input, sender_role, lease)?
+    } else {
+        shape
+    };
     let kind = value
         .get("type")
         .and_then(Value::as_str)
@@ -1404,14 +1729,14 @@ pub(crate) fn validate_controller_runtime_payload_json(
         ControllerProtocolError::new("unsupported_capability", "negotiated_capabilities")
     })?;
     validate_runtime_capabilities(&context.negotiated_capabilities)?;
-    let value =
-        validate_controller_payload_json_in_context(input, sender_role, context.lease.as_ref())?;
-    let kind = value
+    let shape = validate_controller_payload_json(input, sender_role)?;
+    let kind = shape
         .get("type")
         .and_then(Value::as_str)
         .expect("validated type");
     enforce_negotiated_payload(kind, &context.negotiated_capabilities)?;
-    Ok(value)
+    let lease = require_runtime_lease(context)?;
+    validate_controller_payload_json_in_context(input, sender_role, Some(lease))
 }
 
 fn requires_full_lease_context(kind: &str, label: &str) -> bool {
@@ -1593,7 +1918,10 @@ fn validate_named_field(object: &Map<String, Value>, field: &str, value: &Value)
         }
         validate_string_list(value, field, CONTROLLER_CAPABILITIES)?;
     } else if field == "attachment_ids" || field == "artifact_ids" || field == "skill_ids" {
-        if value.as_array().is_some_and(|items| items.len() > 32) {
+        if value
+            .as_array()
+            .is_some_and(|items| items.len() > MAX_TASK_REFERENCES)
+        {
             return Err(ControllerProtocolError::new("invalid_field", field));
         }
         validate_string_list(value, field, &[])?;
@@ -1899,10 +2227,11 @@ fn object_string<'a>(object: &'a Map<String, Value>, field: &str, label: &str) -
 }
 
 fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
+    let input_schema = nested_schema("task_input");
     let input = exact_nested(
         task.get("input").expect("task input required by schema"),
-        &["text", "attachment_ids", "skill_ids"],
-        &["workspace_id"],
+        input_schema.required,
+        input_schema.optional,
         "payload.input",
     )?;
     let text = object_string(input, "text", "payload.input")?;
@@ -1919,7 +2248,7 @@ fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
     if input
         .get("attachment_ids")
         .and_then(Value::as_array)
-        .is_some_and(|items| items.len() > 32)
+        .is_some_and(|items| items.len() > MAX_TASK_REFERENCES)
     {
         return Err(ControllerProtocolError::new(
             "invalid_field",
@@ -1936,7 +2265,7 @@ fn validate_task_submit(task: &Map<String, Value>) -> Result<()> {
     if input
         .get("skill_ids")
         .and_then(Value::as_array)
-        .is_some_and(|items| items.len() > 32)
+        .is_some_and(|items| items.len() > MAX_TASK_REFERENCES)
     {
         return Err(ControllerProtocolError::new(
             "invalid_field",
@@ -2024,18 +2353,25 @@ fn validate_descriptor_list(
     let items = value
         .as_array()
         .ok_or_else(|| ControllerProtocolError::new("invalid_field", field))?;
-    if items.len() > 256 {
+    if items.len() > MAX_DESCRIPTORS {
         return Err(ControllerProtocolError::new("invalid_field", field));
     }
     let mut ids = HashSet::new();
     for (index, item) in items.iter().enumerate() {
         let label = format!("{field}[{index}]");
-        let required = if workspace {
-            vec![id_field, "display_name", "code_allowed"]
+        let descriptor_schema = if workspace {
+            nested_schema("workspace_descriptor")
+        } else if id_field == "tool_id" {
+            nested_schema("tool_descriptor")
         } else {
-            vec![id_field, "display_name"]
+            nested_schema("skill_descriptor")
         };
-        let descriptor = exact_nested(item, &required, &[], &label)?;
+        let descriptor = exact_nested(
+            item,
+            descriptor_schema.required,
+            descriptor_schema.optional,
+            &label,
+        )?;
         validate_identifier(
             descriptor.get(id_field).expect("descriptor ID required"),
             &format!("{label}.{id_field}"),
@@ -2070,24 +2406,17 @@ fn validate_artifact_index(payload: &Map<String, Value>) -> Result<()> {
         .get("artifacts")
         .and_then(Value::as_array)
         .ok_or_else(|| ControllerProtocolError::new("invalid_field", "artifacts"))?;
-    if artifacts.len() > 256 {
+    if artifacts.len() > MAX_ARTIFACTS {
         return Err(ControllerProtocolError::new("invalid_field", "artifacts"));
     }
     let mut ids = HashSet::new();
     for (index, item) in artifacts.iter().enumerate() {
         let label = format!("artifacts[{index}]");
+        let artifact_schema = nested_schema("artifact_descriptor");
         let artifact = exact_nested(
             item,
-            &[
-                "artifact_id",
-                "task_id",
-                "display_name",
-                "mime_type",
-                "size_bytes",
-                "sha256",
-                "preview_mode",
-            ],
-            &[],
+            artifact_schema.required,
+            artifact_schema.optional,
             &label,
         )?;
         for field in ["artifact_id", "task_id"] {
@@ -2143,16 +2472,11 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
             "temporary_model_package",
         ));
     }
+    let package_schema = nested_schema("temporary_model_package_v1");
     let package = exact_nested(
         package,
-        &[
-            "schema",
-            "package_id",
-            "binding",
-            "primary",
-            "primary_credential",
-        ],
-        &["vision_fallback"],
+        package_schema.required,
+        package_schema.optional,
         "temporary_model_package",
     )?;
     if object_string(package, "schema", "temporary_model_package")? != "temporary_model_package/v1"
@@ -2166,15 +2490,11 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         package.get("package_id").expect("package ID required"),
         "temporary_model_package.package_id",
     )?;
+    let binding_schema = nested_schema("temporary_model_binding");
     let binding = exact_nested(
         package.get("binding").expect("binding required"),
-        &[
-            "connection_id",
-            "controller_lease_id",
-            "lease_epoch",
-            "task_id",
-        ],
-        &[],
+        binding_schema.required,
+        binding_schema.optional,
         "temporary_model_package.binding",
     )?;
     for field in ["connection_id", "controller_lease_id", "task_id"] {
@@ -2214,10 +2534,11 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
         "temporary_model_package.primary_credential",
     )?;
     if let Some(fallback) = package.get("vision_fallback") {
+        let fallback_schema = nested_schema("vision_fallback");
         let fallback = exact_nested(
             fallback,
-            &["route", "credential"],
-            &[],
+            fallback_schema.required,
+            fallback_schema.optional,
             "temporary_model_package.vision_fallback",
         )?;
         validate_route(
@@ -2235,26 +2556,8 @@ fn validate_temporary_model_package(package: &Value, task: &Map<String, Value>) 
 }
 
 fn validate_route(value: &Value, label: &str) -> Result<()> {
-    let route = exact_nested(
-        value,
-        &[
-            "display_name",
-            "preset",
-            "wire_api",
-            "base_url",
-            "model",
-            "image_capability_override",
-        ],
-        &[
-            "provider_kind",
-            "vendor",
-            "endpoint_mode",
-            "context_window_tokens",
-            "max_output_tokens",
-            "reasoning_effort",
-        ],
-        label,
-    )?;
+    let route_schema = nested_schema("route");
+    let route = exact_nested(value, route_schema.required, route_schema.optional, label)?;
     bounded_text(
         route.get("display_name").expect("display name required"),
         &format!("{label}.display_name"),
@@ -2424,7 +2727,13 @@ fn valid_ascii_host(host: &str) -> bool {
 }
 
 fn validate_credential(value: &Value, label: &str) -> Result<()> {
-    let credential = exact_nested(value, &["kind", "secret"], &[], label)?;
+    let credential_schema = nested_schema("credential");
+    let credential = exact_nested(
+        value,
+        credential_schema.required,
+        credential_schema.optional,
+        label,
+    )?;
     validate_enum(
         credential.get("kind").expect("credential kind required"),
         &format!("{label}.kind"),
@@ -2811,23 +3120,11 @@ pub(crate) fn validate_controller_liveness_payload_json(
     }
     let value: Value = serde_json::from_str(input)
         .map_err(|_| ControllerProtocolError::new("invalid_json", "json"))?;
+    let liveness_schema = nested_schema("controller_liveness_a");
     let object = exact_nested(
         &value,
-        &[
-            "v",
-            "type",
-            "connection_id",
-            "controller_lease_id",
-            "lease_epoch",
-            "relay_epoch",
-            "remote_control_generation",
-            "role",
-            "liveness_epoch_a",
-            "heartbeat_sequence_a",
-            "challenge_id",
-            "challenge_b64",
-        ],
-        &[],
+        liveness_schema.required,
+        liveness_schema.optional,
         "liveness_payload",
     )?;
     if object.get("v").and_then(Value::as_u64) != Some(1) {
@@ -3013,6 +3310,45 @@ mod tests {
         Value::Object(output)
     }
 
+    fn capability_manifest(bindings: &[CapabilityBinding], scalar: bool) -> Value {
+        let mut output = Map::new();
+        for binding in bindings {
+            output.insert(
+                binding.kind.into(),
+                if scalar {
+                    json!(binding.capabilities[0])
+                } else {
+                    json!(binding.capabilities)
+                },
+            );
+        }
+        Value::Object(output)
+    }
+
+    fn nested_schema_manifest() -> Value {
+        let mut output = Map::new();
+        for (name, schema) in NESTED_SCHEMAS {
+            output.insert(
+                (*name).into(),
+                json!({"required": schema.required, "optional": schema.optional}),
+            );
+        }
+        Value::Object(output)
+    }
+
+    fn runtime_pre_lease_messages() -> Vec<&'static str> {
+        CONTROLLER_MESSAGE_TYPES
+            .iter()
+            .copied()
+            .filter(|kind| {
+                !message_schema(kind)
+                    .expect("registered schema")
+                    .required
+                    .contains(&"controller_lease_id")
+            })
+            .collect()
+    }
+
     fn rust_contract_manifest() -> Value {
         json!({
             "protocol_version": CONTROLLER_PROTOCOL_VERSION,
@@ -3045,36 +3381,14 @@ mod tests {
                 "image_capability_override":IMAGE_CAPABILITY_OVERRIDES, "artifact_preview_mode":ARTIFACT_PREVIEW_MODES,
                 "credential_kind":CREDENTIAL_KINDS
             },
-            "payload_capabilities": {
-                "capability_snapshot_request":"task_v1","capability_snapshot":"task_v1","task_submit":"task_v1","task_cancel":"task_v1","task_status":"task_v1",
-                "permission_request":"permission_v1","permission_decision":"permission_v1","attachment_begin":"attachment_v1","attachment_chunk":"attachment_v1","attachment_commit":"attachment_v1",
-                "artifact_index_request":"artifact_v1","artifact_index":"artifact_v1","artifact_read_request":"artifact_v1","artifact_chunk":"artifact_v1",
-                "session_snapshot_request":"snapshot_journal_v1","session_snapshot":"snapshot_journal_v1","journal_replay_request":"snapshot_journal_v1","journal_event":"snapshot_journal_v1"
-            },
-            "outer_message_capabilities": {
-                "desktop_endpoint_claim":["pairing_v1"],"desktop_pairing_register":["pairing_v1"],"desktop_pairing_registered":["pairing_v1"],"desktop_pairing_revoke":["pairing_v1"],"controller_pairing_claim":["pairing_v1"],"controller_pairing_reserved":["pairing_v1"],"controller_joined":["pairing_v1"],
-                "finished_receipt_commit":["finished_receipt_v1"],"encrypted_handshake_finished":["finished_receipt_v1"],"finished_receipt_ack":["finished_receipt_v1"],
-                "controller_liveness":["role_liveness_v1"],"controller_liveness_challenge_a":["role_liveness_v1"],"encrypted_controller_liveness_a":["role_liveness_v1"],"controller_liveness_attestation_request_a":["role_liveness_v1"],"controller_liveness_attestation_a":["role_liveness_v1"],
-                "controller_resume_prepare":["resume_v1"],"controller_resume_provisional":["resume_v1"],"encrypted_resume_confirm":["resume_v1"],"controller_resume_activation_ack":["resume_v1"],"controller_resume_activation_pending":["resume_v1"],"controller_post_activation_liveness":["resume_v1"],"controller_post_activation_liveness_confirmed":["resume_v1"],"controller_resume_ready_ack":["resume_v1"],"controller_resumed":["resume_v1"],
-                "encrypted_frame":["encrypted_frames_v1"],"controller_disconnect":["encrypted_frames_v1"]
-            },
-            "transcript_fields":["schema","relay_epoch","pairing_id","reservation_id","endpoint_id","remote_control_generation","controller_connection_identity","role_a","handshake_public_key_a_b64","role_b","handshake_public_key_b_b64","protocol_version","negotiated_capabilities","capability_hash","expires_at_ms","nonce_b64"],
-            "route_required":["display_name","preset","wire_api","base_url","model","image_capability_override"],
-            "route_optional":["provider_kind","vendor","endpoint_mode","context_window_tokens","max_output_tokens","reasoning_effort"],
-            "nested_schemas": {
-                "task_input":{"required":["text","attachment_ids","skill_ids"],"optional":["workspace_id"]},
-                "temporary_model_package_v1":{"required":["schema","package_id","binding","primary","primary_credential"],"optional":["vision_fallback"]},
-                "temporary_model_binding":{"required":["connection_id","controller_lease_id","lease_epoch","task_id"],"optional":[]},
-                "vision_fallback":{"required":["route","credential"],"optional":[]},
-                "route":{"required":["display_name","preset","wire_api","base_url","model","image_capability_override"],"optional":["provider_kind","vendor","endpoint_mode","context_window_tokens","max_output_tokens","reasoning_effort"]},
-                "credential":{"required":["kind","secret"],"optional":[]},
-                "tool_descriptor":{"required":["tool_id","display_name"],"optional":[]},
-                "skill_descriptor":{"required":["skill_id","display_name"],"optional":[]},
-                "workspace_descriptor":{"required":["workspace_id","display_name","code_allowed"],"optional":[]},
-                "artifact_descriptor":{"required":["artifact_id","task_id","display_name","mime_type","size_bytes","sha256","preview_mode"],"optional":[]},
-                "controller_liveness_a":{"required":["v","type","connection_id","controller_lease_id","lease_epoch","relay_epoch","remote_control_generation","role","liveness_epoch_a","heartbeat_sequence_a","challenge_id","challenge_b64"],"optional":[]}
-            },
-            "collection_limits":{"task_attachment_ids":32,"task_skill_ids":32,"descriptors":256,"artifacts":256,"capabilities":CONTROLLER_CAPABILITIES.len()},
+            "payload_capabilities": capability_manifest(PAYLOAD_CAPABILITY_BINDINGS, true),
+            "outer_message_capabilities": capability_manifest(OUTER_MESSAGE_CAPABILITY_BINDINGS, false),
+            "transcript_fields":TRANSCRIPT_FIELDS,
+            "route_required":ROUTE_REQUIRED,
+            "route_optional":ROUTE_OPTIONAL,
+            "nested_schemas": nested_schema_manifest(),
+            "runtime_pre_lease_messages": runtime_pre_lease_messages(),
+            "collection_limits":{"task_attachment_ids":MAX_TASK_REFERENCES,"task_skill_ids":MAX_TASK_REFERENCES,"descriptors":MAX_DESCRIPTORS,"artifacts":MAX_ARTIFACTS,"capabilities":CONTROLLER_CAPABILITIES.len()},
             "base_url_grammar":"lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
             "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","registration":"independent-generation-registration-idempotency-context"}
@@ -3462,12 +3776,24 @@ mod tests {
             let capabilities: Option<Vec<String>> = case
                 .get("capabilities")
                 .map(|value| serde_json::from_value(value.clone()).unwrap());
-            let runtime_context = capabilities
-                .as_ref()
-                .map(|values| RuntimeValidationContext {
-                    lease: Some(context()),
+            let runtime_context = capabilities.as_ref().map(|values| {
+                let mut lease = context();
+                if let Some(overrides) = case.get("lease_overrides").and_then(Value::as_object) {
+                    if let Some(value) =
+                        overrides.get("controller_lease_id").and_then(Value::as_str)
+                    {
+                        lease.controller_lease_id = value.into();
+                    }
+                }
+                RuntimeValidationContext {
+                    lease: if case.get("omit_lease").and_then(Value::as_bool) == Some(true) {
+                        None
+                    } else {
+                        Some(lease)
+                    },
                     negotiated_capabilities: values.clone(),
-                });
+                }
+            });
             let error = if case["target"] == "payload" {
                 validate_controller_runtime_payload_json(
                     &serde_json::to_string(&fixture["task_submit_vectors"]["controlled"]).unwrap(),
@@ -3502,6 +3828,9 @@ mod tests {
                 "{}",
                 case["name"].as_str().unwrap()
             );
+            if let Some(expected_field) = case.get("expected_field").and_then(Value::as_str) {
+                assert_eq!(error.field, expected_field, "{}", case["name"]);
+            }
         }
         for capabilities in [&["task_v1"][..], &["encrypted_frames_v1"][..]] {
             assert_eq!(
@@ -3536,6 +3865,18 @@ mod tests {
             &serde_json::to_string(payload).unwrap(),
             A,
             Some(&runtime(&["task_v1"])),
+        )
+        .unwrap();
+        let pre_lease = &fixture["runtime_pre_lease_case"];
+        let capabilities: Vec<String> =
+            serde_json::from_value(pre_lease["capabilities"].clone()).unwrap();
+        validate_controller_runtime_message_json(
+            &serde_json::to_string(&fixture["pairing_registration_vector"]["request"]).unwrap(),
+            B,
+            Some(&RuntimeValidationContext {
+                lease: None,
+                negotiated_capabilities: capabilities,
+            }),
         )
         .unwrap();
     }

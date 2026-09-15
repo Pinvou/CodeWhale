@@ -3,7 +3,7 @@
   "contract": {
     "id": "pinvou-desktop-controller/v1",
     "integer_wire_format": "canonical-u64-decimal-string",
-    "sha256": "24208afa8f2f1678714a6040e5aebd877051a9503689af4464a9b843a36e5394"
+    "sha256": "e1e511c4819d2298b735e6b049cb59cbd8935858f7da67d43beaf9106a068fd9"
   },
   "expected_capabilities": ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1", "task_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1"],
   "expected_error_codes": ["pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required", "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown"],
@@ -77,11 +77,15 @@
     {"name":"pairing_not_negotiated","target":"message","type":"desktop_pairing_register","sender_role":"B","capabilities":["role_liveness_v1"],"expected_error":"unsupported_capability"},
     {"name":"receipt_not_negotiated","target":"message","type":"finished_receipt_commit","sender_role":"A","capabilities":["pairing_v1"],"expected_error":"unsupported_capability"},
     {"name":"resume_not_negotiated","target":"message","type":"controller_resume_prepare","sender_role":"A","capabilities":["role_liveness_v1"],"expected_error":"unsupported_capability"},
+    {"name":"missing_runtime_lease","target":"message","type":"controller_liveness","sender_role":"A","capabilities":["role_liveness_v1"],"omit_lease":true,"expected_error":"missing_field","expected_field":"runtime_context.lease"},
+    {"name":"payload_without_runtime_lease","target":"payload","type":"task_submit","sender_role":"A","capabilities":["task_v1"],"omit_lease":true,"expected_error":"missing_field","expected_field":"runtime_context.lease"},
+    {"name":"cross_runtime_lease","target":"message","type":"controller_liveness","sender_role":"A","capabilities":["role_liveness_v1"],"lease_overrides":{"controller_lease_id":"lease-other"},"expected_error":"stale_context","expected_field":"controller_lease_id"},
     {"name":"task_without_encrypted_frames","target":"message","type":"encrypted_frame","sender_role":"A","capabilities":["task_v1"],"expected_error":"unsupported_capability"},
     {"name":"encrypted_frame_without_task","target":"message","type":"encrypted_frame","sender_role":"A","capabilities":["encrypted_frames_v1"],"expected_error":"unsupported_capability"},
     {"name":"task_payload_not_negotiated","target":"payload","type":"task_submit","sender_role":"A","capabilities":["pairing_v1"],"expected_error":"unsupported_capability"}
   ],
-  "negative_contracts": ["missing_field", "unknown_field", "overlong_text", "unknown_message_type", "unsupported_version", "unsupported_capability", "capability_version_mismatch", "invalid_enum", "cross_role", "noncanonical_integer", "integer_overflow", "stale_generation", "stale_relay_epoch", "stale_lease_epoch", "late_frame", "transcript_tamper", "liveness_tamper", "liveness_regression", "same_sequence_tighten", "cross_lease", "attestation_tamper", "url_grammar", "registration_idempotency"],
+  "runtime_pre_lease_case": {"type":"desktop_pairing_register","sender_role":"B","capabilities":["pairing_v1"]},
+  "negative_contracts": ["missing_field", "unknown_field", "overlong_text", "unknown_message_type", "unsupported_version", "unsupported_capability", "capability_version_mismatch", "invalid_enum", "cross_role", "noncanonical_integer", "integer_overflow", "stale_generation", "stale_relay_epoch", "stale_lease_epoch", "late_frame", "transcript_tamper", "liveness_tamper", "liveness_regression", "same_sequence_tighten", "cross_lease", "attestation_tamper", "url_grammar", "registration_idempotency", "missing_runtime_lease"],
   "public_error_mappings": {"pairing_absent":"pairing_code_invalid","pairing_expired":"pairing_code_invalid","pairing_consumed":"pairing_code_invalid","pairing_revoked":"pairing_code_invalid","generation_stale":"pairing_code_invalid","generation_exhausted":"pairing_code_generation_failed"},
   "legacy_web_v2": {
     "source":"remote-control-relay/server.js v2 dispatcher",

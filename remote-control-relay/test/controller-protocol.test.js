@@ -52,8 +52,10 @@ const LEASE = Object.freeze({
 });
 const RUNTIME = Object.freeze({ lease: LEASE, negotiated_capabilities: CONTROLLER_CAPABILITIES });
 
-function assertProtocolError(expectedCode, callback) {
-  assert.throws(callback, (error) => error instanceof ControllerProtocolError && error.code === expectedCode);
+function assertProtocolError(expectedCode, callback, label, expectedField) {
+  assert.throws(callback, (error) => error instanceof ControllerProtocolError
+    && error.code === expectedCode
+    && (expectedField === undefined || error.message === `${expectedCode}: ${expectedField}`), label);
 }
 
 function lp(value) {
@@ -316,12 +318,17 @@ test("runtime validation requires negotiated outer and inner capabilities", () =
   for (const item of fixture.runtime_capability_cases) {
     const value = item.target === "message" ? validMessage(item.type, item.sender_role) : validPayload(item.type);
     const validator = item.target === "message" ? validateControllerRuntimeMessage : validateControllerRuntimePayload;
-    const context = item.capabilities === undefined ? undefined : { lease: LEASE, negotiated_capabilities: item.capabilities };
-    assertProtocolError(item.expected_error, () => validator(value, item.sender_role, context));
+    const context = item.capabilities === undefined ? undefined : {
+      ...(item.omit_lease ? {} : { lease: { ...LEASE, ...(item.lease_overrides ?? {}) } }),
+      negotiated_capabilities: item.capabilities,
+    };
+    assertProtocolError(item.expected_error, () => validator(value, item.sender_role, context), item.name, item.expected_field);
   }
   validateControllerRuntimeMessage(validMessage("encrypted_frame", "A"), "A", { lease: LEASE, negotiated_capabilities: ["encrypted_frames_v1", "task_v1"] });
   validateControllerRuntimeMessage(validMessage("controller_liveness", "A"), "A", RUNTIME);
   validateControllerRuntimePayload(validPayload("task_submit"), "A", RUNTIME);
+  const preLease = fixture.runtime_pre_lease_case;
+  validateControllerRuntimeMessage(validMessage(preLease.type, preLease.sender_role), preLease.sender_role, { negotiated_capabilities: preLease.capabilities });
 });
 
 test("finished receipt commitment is built independently from fields", () => {
@@ -398,7 +405,7 @@ test("strict validation covers missing, unknown, enums, version/capability combi
   assertProtocolError("invalid_field", () => validateControllerMessage(frame, "A"));
   const payload = validPayload("task_cancel");
   assertProtocolError("message_too_large", () => validateControllerPayload(`${JSON.stringify(payload)}${" ".repeat(MAX_DECRYPTED_PAYLOAD_BYTES)}`, "A"));
-  assert.deepEqual(new Set(fixture.negative_contracts), new Set(["missing_field", "unknown_field", "overlong_text", "unknown_message_type", "unsupported_version", "unsupported_capability", "capability_version_mismatch", "invalid_enum", "cross_role", "noncanonical_integer", "integer_overflow", "stale_generation", "stale_relay_epoch", "stale_lease_epoch", "late_frame", "transcript_tamper", "liveness_tamper", "liveness_regression", "same_sequence_tighten", "cross_lease", "attestation_tamper", "url_grammar", "registration_idempotency"]));
+  assert.deepEqual(new Set(fixture.negative_contracts), new Set(["missing_field", "unknown_field", "overlong_text", "unknown_message_type", "unsupported_version", "unsupported_capability", "capability_version_mismatch", "invalid_enum", "cross_role", "noncanonical_integer", "integer_overflow", "stale_generation", "stale_relay_epoch", "stale_lease_epoch", "late_frame", "transcript_tamper", "liveness_tamper", "liveness_regression", "same_sequence_tighten", "cross_lease", "attestation_tamper", "url_grammar", "registration_idempotency", "missing_runtime_lease"]));
 });
 
 test("public pairing errors and real legacy WebUI v2 fixture stay stable", () => {
