@@ -588,6 +588,9 @@ pub(crate) fn begin_launch_session(
     let session_id = uuid::Uuid::new_v4().to_string();
     app.current_session_id = Some(session_id.clone());
     app.current_session_metadata = None;
+    // A new session starts single-root: never inherit the previous
+    // session's additional roots.
+    app.workspace_roots = Vec::new();
     app.session_title = Some(app.tr(MessageId::SessionsNewSessionTitle).into_owned());
     app.launch.visible = false;
     app.launch.status = None;
@@ -598,7 +601,7 @@ pub(crate) fn begin_launch_session(
         system_prompt: None,
         model: app.model.clone(),
         workspace: app.workspace.clone(),
-        workspace_roots: Vec::new(),
+        workspace_roots: app.workspace_roots.clone(),
 
         mode: app.mode,
     })
@@ -647,7 +650,7 @@ pub(crate) async fn switch_workspace(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: workspace.clone(),
-                workspace_roots: Vec::new(),
+                workspace_roots: app.workspace_roots.clone(),
 
                 mode: app.mode,
             })
