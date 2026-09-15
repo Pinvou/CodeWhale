@@ -615,6 +615,22 @@ class CiGatePolicyTests(unittest.TestCase):
                 f"ubuntu job '{job_name}' must invoke scripts/ci-memory-setup.sh"
                 " via an absolute path (some jobs set a run working-directory)",
             )
+            # 内核态挂起无法被脚本内部的用户态 timeout 中断,workflow 侧的
+            # timeout 240 + 非致命包装是唯一防线(脚本头注释所声称的最后
+            # 一道防线)。漏写包装的 job 挂死时会烧满整个 job 时限,守卫
+            # 在此强制每个调用点结构一致。
+            self.assertIn(
+                'run: timeout --kill-after=15 240 sudo bash "${{ github.workspace }}/scripts/ci-memory-setup.sh"',
+                job,
+                f"ubuntu job '{job_name}' must hard-cap ci-memory-setup with"
+                " 'timeout --kill-after=15 240' (userspace hang backstop)",
+            )
+            self.assertIn(
+                '|| echo "::warning::ci-memory-setup',
+                job,
+                f"ubuntu job '{job_name}' must keep ci-memory-setup non-fatal"
+                " (degrade to stock runner memory with a ::warning)",
+            )
 
     def test_release_linux_build_jobs_prepare_disk_and_prune_apt(self):
         # 发布构建 job(单盘 hosted runner,x64 开机仅 ~13-14G 可用)必须在
@@ -653,6 +669,36 @@ class CiGatePolicyTests(unittest.TestCase):
         arm64 = next(b for b in blocks if b.strip().startswith("build-linux-arm64:"))
         self.assertIn("--aggressive", x64)
         self.assertNotIn("--aggressive", arm64)
+
+    def test_audited_redundant_apt_packages_stay_pruned(self):
+        # 2026-09-15 探针逐包审计结论(单包模拟安装,安装集合不变即冗余):
+        # libgtk-3-dev/libsoup-3.0-dev/libx11-dev/libxi-dev/libxtst-dev 均被
+        # libwebkit2gtk-4.1-dev 硬依赖链传递安装,librsvg2-dev 构建不需要
+        # (Cargo 无 rsvg crate)。任何 workflow 的安装清单回填它们都会拖慢
+        # 依赖安装并占用单盘 runner 的构建磁盘。守卫剥注释后全文扫描:审计
+        # 注释允许提及这些名字,但非注释文本出现即拒绝(含多行续行)。
+        redundant = (
+            "libgtk-3-dev",
+            "libsoup-3.0-dev",
+            "librsvg2-dev",
+            "libx11-dev",
+            "libxi-dev",
+            "libxtst-dev",
+        )
+        workflows = sorted(
+            list((ROOT / ".github/workflows").glob("*.yml"))
+            + list((ROOT / ".github/workflows").glob("*.yaml"))
+        )
+        self.assertTrue(workflows, "no workflow files found under .github/workflows")
+        for workflow in workflows:
+            text = _without_yaml_comments(workflow.read_text(encoding="utf-8"))
+            for package in redundant:
+                self.assertNotIn(
+                    package,
+                    text,
+                    f"{workflow.name}: 审计判定的冗余 apt 包 '{package}' 不得回填"
+                    "(由 libwebkit2gtk-4.1-dev 传递安装或构建不需要)",
+                )
 
     def test_all_linux_jobs_pin_the_release_runner_image(self):
         # 镜像版本绝不漂移(单一镜像公约):全部 workflow 的 Linux runner 必须
