@@ -115,6 +115,8 @@ try {
   assert.equal(turn.elicitations[0].action, 'accept');
   assert.equal(turn.waitingInput, false);
   assert.equal(turn.status, 'Completed');
+  assert.equal(turn.lifecycleKnown, true);
+  assert.equal(turn.behaviorTurnId, 'turn-1');
   assert.equal(turn.usage.used, 120);
   assert.deepEqual(
     turn.blocks.map(block => block.type),

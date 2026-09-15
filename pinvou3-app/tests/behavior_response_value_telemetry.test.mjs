@@ -12,12 +12,16 @@ const desktopBridge = source('src/platform/tauri/bridge/interaction.js');
 const webBridge = source('src/platform/web/bridge.js');
 const command = source('src-tauri/src/app/commands/behavior_telemetry.rs');
 const retryCommand = source('src-tauri/src/app/commands/memory.rs');
+const timing = source('src-tauri/src/features/assistant/timing.rs');
+const forwarder = source('src-tauri/src/features/assistant/forwarder.rs');
+const projection = source('src/features/conversation/deepseek-conversation.js');
 const telemetry = behaviorTelemetryRust;
 
 test('feedback and copy only send controlled response metadata', () => {
   assert.match(actions, /feedbackAction: clearing \? 'clear' : 'set'/);
   assert.match(actions, /\.\.\.\(clearing \? \{\} : \{ rating: nextRating \}\)/);
-  assert.match(actions, /if \(copied && sessionId && turnId\)/);
+  assert.match(actions, /if \(copied && sessionId && telemetryTurnId\)/);
+  assert.match(actions, /turnId: telemetryTurnId/);
   assert.match(actions, /contentType: responseContentType\(value\)/);
   assert.doesNotMatch(actions.match(/eventName: 'response_copied'[^]*?\}\s*\}/)?.[0] || '', /text:|value:|content:/);
   assert.match(command, /track_response_feedback_changed/);
@@ -42,6 +46,11 @@ test('regeneration creates a new task attempt correlated to the source turn', ()
 });
 
 test('response actions require an authoritative projected turn id', () => {
-  assert.match(timeline, /turnId=\{turn\.lifecycleKnown \? turn\.id : null\}/);
+  assert.match(timeline, /telemetryTurnId=\{turn\.lifecycleKnown \? turn\.behaviorTurnId : null\}/);
+  assert.match(actions, /if \(sessionId && telemetryTurnId\)/);
+  assert.match(timing, /pub fn bind_behavior_turn_id/);
+  assert.match(timing, /entry\["behavior_turn_id"\]/);
+  assert.match(forwarder, /bind_behavior_turn_id\([\s\S]*?&turn_id/);
+  assert.match(projection, /behaviorTurnId = String\(event\.behavior_turn_id\)/);
   assert.match(timeline, /index === turns\.length - 1 \? props\.onRetry : undefined/);
 });

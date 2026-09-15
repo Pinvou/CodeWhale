@@ -122,6 +122,10 @@ pub(crate) fn spawn_event_forwarder(
                     if !admitted {
                         continue;
                     }
+                    crate::features::assistant::timing::bind_behavior_turn_id(
+                        &session_id,
+                        &turn_id,
+                    );
                     if let Some((_, mode)) = pending_cancel {
                         approve_handle
                             .cancel_with_mode(deepseek_tui::core::engine::CancelReason::User, mode);

@@ -60,12 +60,13 @@ export function AssistantMessageFooter({ children }) {
   );
 }
 
-export function AssistantMessageActions({ text, resolveText, copy, sessionId, turnId, onRetry }) {
+export function AssistantMessageActions({ text, resolveText, copy, sessionId, turnId, telemetryTurnId, onRetry }) {
   const instanceId = useId().replace(/:/g, '');
   const [copyStatus, setCopyStatus] = useState('idle');
   const [menu, setMenu] = useState(null);
   const [actionFeedback, setActionFeedback] = useState(null);
   const feedbackKey = sessionId && turnId ? `${sessionId}\u001f${turnId}` : '';
+  const canSubmitFeedback = Boolean(feedbackKey && telemetryTurnId);
   const [rating, setRating] = useState(() => responseRatings.get(feedbackKey) || null);
   const resetTimerRef = useRef(null);
   const exportTriggerRef = useRef(null);
@@ -161,11 +162,11 @@ export function AssistantMessageActions({ text, resolveText, copy, sessionId, tu
 
   const copyResponseToClipboard = async value => {
     const copied = await copyClipboardText(value);
-    if (copied && sessionId && turnId) {
+    if (copied && sessionId && telemetryTurnId) {
       invokeTauri(telemetryCommand(), { request: {
         eventName: 'response_copied',
         sessionId,
-        turnId,
+        turnId: telemetryTurnId,
         contentType: responseContentType(value),
       } }).catch(() => {});
     }
@@ -187,19 +188,21 @@ export function AssistantMessageActions({ text, resolveText, copy, sessionId, tu
   };
 
   const changeRating = nextRating => {
-    if (!feedbackKey) return;
+    if (!canSubmitFeedback) return;
     const clearing = rating === nextRating;
     const next = clearing ? null : nextRating;
     if (next) responseRatings.set(feedbackKey, next);
     else responseRatings.delete(feedbackKey);
     setRating(next);
-    invokeTauri(telemetryCommand(), { request: {
-      eventName: 'response_feedback_changed',
-      sessionId,
-      turnId,
-      feedbackAction: clearing ? 'clear' : 'set',
-      ...(clearing ? {} : { rating: nextRating }),
-    } }).catch(() => {});
+    if (sessionId && telemetryTurnId) {
+      invokeTauri(telemetryCommand(), { request: {
+        eventName: 'response_feedback_changed',
+        sessionId,
+        turnId: telemetryTurnId,
+        feedbackAction: clearing ? 'clear' : 'set',
+        ...(clearing ? {} : { rating: nextRating }),
+      } }).catch(() => {});
+    }
   };
 
   const openMenu = (kind, event) => {
@@ -326,7 +329,7 @@ export function AssistantMessageActions({ text, resolveText, copy, sessionId, tu
               : <Copy size={14} />}
           {copyStatus !== 'idle' && <span aria-live="polite">{copyLabel}</span>}
         </button>
-        {feedbackKey && <>
+        {canSubmitFeedback && <>
           <button type="button" data-testid="assistant-feedback-positive" onClick={() => changeRating('positive')} title={copy.feedbackPositive} aria-label={copy.feedbackPositive} aria-pressed={rating === 'positive'} className={`${actionClass} ${rating === 'positive' ? '!bg-emerald-500/[0.10] !text-emerald-600 dark:!text-emerald-300' : ''}`}>
             <ThumbsUp size={14} />
           </button>

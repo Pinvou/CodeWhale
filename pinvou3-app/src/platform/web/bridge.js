@@ -8485,9 +8485,24 @@
     if (ext === "md") return "markdown";
     return "other";
   }
-  function trackArtifactExported(path) {
+  function artifactsForSession(sessionId) {
+    var targetSessionId = sessionId || state.activeSessionId;
+    if (!targetSessionId) return [];
+    if (targetSessionId === state.activeSessionId) return state.artifacts || [];
+    return sessionStates[targetSessionId] && sessionStates[targetSessionId].artifacts || [];
+  }
+  function trackArtifactExported(path, sessionId) {
     var bn = basename(path);
-    var artifact = state.artifacts.find(function (item) { return basename(item.path) === bn; });
+    var candidates = artifactsForSession(sessionId);
+    var exactMatches = candidates.filter(function (item) {
+      return String(item.path || "") === String(path || "");
+    });
+    var basenameMatches = exactMatches.length ? [] : candidates.filter(function (item) {
+      return basename(item.path) === bn;
+    });
+    var artifact = exactMatches.length === 1
+      ? exactMatches[0]
+      : (basenameMatches.length === 1 ? basenameMatches[0] : null);
     if (!artifact || !artifact.telemetryId) return;
     invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
       eventName: "artifact_exported", artifactId: artifact.telemetryId,
@@ -8502,7 +8517,7 @@
     }
     try {
       var downloaded = await downloadArtifactRaw(path, sessionId);
-      if (downloaded) trackArtifactExported(path);
+      if (downloaded) trackArtifactExported(path, sessionId);
       return downloaded;
     } catch (e) {
       addSystemItem(bt("downloadFailed") + String((e && e.message) || e));

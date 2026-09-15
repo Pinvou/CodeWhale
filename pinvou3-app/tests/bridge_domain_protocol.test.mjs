@@ -85,7 +85,9 @@ const protocolSources = {
 const expectedProtocolHashes = {
   multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
   orchestration: '3dfae00b063d45f76e93c4fb8770c746c2b49e8a25a1e37f80767f08c7051724',
-  artifacts: 'e188b39659ef1f17996807f0effa49fdd6fb6d0b8f7d233121ad529f6579633a',
+  // Recomputed for artifact export telemetry after a successful external open;
+  // attribution is now isolated to the explicitly targeted session.
+  artifacts: 'de912dc47531a442428f1649d933c8b91d0616196a1b7ac6176bf0f59939fa12',
   // Recomputed for #308 follow-ups: prefillComposer(text, append) recovery
   // entry + comment translations touching `invoke(` mentions (the extractor
   // scans raw source, so comment wording is part of the digest). Recomputed
