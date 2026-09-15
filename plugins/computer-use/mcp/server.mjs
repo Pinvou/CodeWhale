@@ -147,6 +147,23 @@ function forgetComputer(id) {
   for (const [sid, st] of appStates) if (st.computerId === id) appStates.delete(sid);
 }
 
+/**
+ * A racing computer_remove/computer_register can repoint an id at another
+ * host while a call is in flight; remembering the result then would tag the
+ * old host's observation with the new host's id. Fail closed instead.
+ */
+function assertComputerUnchanged(computer) {
+  let now;
+  try {
+    now = registry.get(computer.id);
+  } catch {
+    throw new ServerError("computer_repointed", `computer "${computer.id}" was removed while the call was in flight — observe again on the current computer`);
+  }
+  if (now.transport !== computer.transport || now.host !== computer.host) {
+    throw new ServerError("computer_repointed", `computer "${computer.id}" now points at a different computer, so the in-flight result is not its — observe again`);
+  }
+}
+
 // ---------- tool dispatch ----------
 async function callTool(params) {
   const name = params.name;
@@ -246,6 +263,12 @@ async function callTool(params) {
       // reason instead of stranding the model in backend errors.
       throw new ServerError("persistent_session_required", `"${name}" needs recorder state that cannot survive the one-shot ssh agent process. Start, stop, and inspect recordings on a local or hdc computer instead.`);
     }
+    if (computer.transport === "ssh" && backendMethod === "switch_display") {
+      // The display choice lives in backend state, which dies with the
+      // one-shot agent process — the call would report ok and the setting
+      // would silently evaporate. Fail closed with the way out instead.
+      throw new ServerError("persistent_session_required", `"${name}" needs a display choice that cannot survive the one-shot ssh agent process. Pass display to screenshot/recording_start instead.`);
+    }
     if (computer.transport === "ssh" && backendMethod === "left_mouse_down") {
       // A press outlives the one-shot agent process: if the follow-up
       // left_mouse_up never arrives (failed call, abandoned session), the
@@ -268,10 +291,12 @@ async function callTool(params) {
       if (backendMethod === "screenshot" && data?.file) {
         // Bind geometry for coordinate mapping; the file field is the remote
         // path on purpose — the zoom below needs it as the crop source.
+        assertComputerUnchanged(computer);
         bindRaster(computer, data);
         data.note = "file lives on the remote computer; pull it with scp if you need the bytes locally";
       }
       if (backendMethod === "zoom") {
+        assertComputerUnchanged(computer);
         rebindAfterZoom(computer, data);
         data.note = [data.note, "file lives on the remote computer; pull it with scp if you need the bytes locally"].filter(Boolean).join(" ");
       }
@@ -280,6 +305,7 @@ async function callTool(params) {
         // observed remote tree must be remembered here too — otherwise
         // state_id never exists for ssh computers and element actions
         // dead-loop on "call get_app_state again".
+        assertComputerUnchanged(computer);
         const stateId = rememberState(computer, args.app_ref ?? null, data);
         data.state_id = stateId;
         data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";
@@ -292,9 +318,10 @@ async function callTool(params) {
       const prepared = prepareLocalArgs(computer, name, args);
       data = await backend[backendMethod](prepared);
       if (Array.isArray(data)) data = { items: data }; // keep receipts objects
-      if (name === "screenshot") bindRaster(computer, data);
-      if (name === "zoom") rebindAfterZoom(computer, data);
+      if (name === "screenshot") { assertComputerUnchanged(computer); bindRaster(computer, data); }
+      if (name === "zoom") { assertComputerUnchanged(computer); rebindAfterZoom(computer, data); }
       if (name === "get_app_state") {
+        assertComputerUnchanged(computer);
         const stateId = rememberState(computer, prepared.app_ref, data);
         data.state_id = stateId;
         data.note = "Element targets are {type:'element', state_id, index}. State goes stale when the UI changes; observe again.";

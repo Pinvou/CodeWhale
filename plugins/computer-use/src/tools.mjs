@@ -82,7 +82,7 @@ export const TOOLS = [
   },
   {
     name: "switch_display",
-    description: "Set which display subsequent screenshots/recordings capture on this computer. Local and hdc computers only: over ssh the choice dies with the one-shot agent process — pass display to screenshot/recording_start instead.",
+    description: "Set which display subsequent screenshots/recordings capture on this computer. Local and hdc computers only: over ssh the one-shot agent process cannot keep a display choice alive, so this fails closed (persistent_session_required) — pass display to screenshot/recording_start instead.",
     inputSchema: { type: "object", required: ["index"], properties: { index: { type: "integer", minimum: 1 }, computer: computerParam }, additionalProperties: false },
   },
   {
@@ -124,7 +124,7 @@ export const TOOLS = [
   },
   {
     name: "screenshot",
-    description: "Capture the screen (all or one display, optional region) as PNG/JPEG. The receipt carries raster geometry; later coordinate targets refer to this raster.",
+    description: "Capture the screen (all or one display, optional region) as PNG/JPEG. The receipt carries raster geometry; later coordinate targets refer to the latest returned raster (screenshot or zoom).",
     inputSchema: {
       type: "object",
       properties: {
