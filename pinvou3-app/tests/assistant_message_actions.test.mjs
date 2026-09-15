@@ -423,7 +423,7 @@ assert.match(actions, /data-testid="assistant-message-share"/);
 assert.match(actions, /data-testid="assistant-feedback-positive"/);
 assert.match(actions, /data-testid="assistant-feedback-negative"/);
 assert.match(actions, /data-testid="assistant-message-retry"/);
-assert.match(actions, /if \(copied && sessionId && turnId\)/);
+assert.match(actions, /if \(copied && sessionId && telemetryTurnId\)/);
 assert.match(actions, /eventName: 'response_copied'/);
 assert.match(actions, /eventName: 'response_feedback_changed'/);
 assert.match(actions, /data-testid="assistant-export-md"/);
@@ -444,5 +444,6 @@ assert.doesNotMatch(clipboard, /querySelectorAll|data-assistant-copy-source/);
 // The legacy codex Turn footer was removed along with the old timeline; the completed-response actions contract is carried solely by the unified timeline (codex renders through the same ConversationTimeline).
 assert.match(timeline, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions[\s\S]*?resolveText=\{\(\) => assistantResponseText\(turn\)\}[\s\S]*?copy=\{c\}/);
 assert.match(timeline, /<AssistantMessageActions[\s\S]*?sessionId=\{sessionId\}[\s\S]*?turnId=\{turn\.lifecycleKnown \? turn\.id : null\}/);
+assert.match(timeline, /<AssistantMessageActions[\s\S]*?telemetryTurnId=\{turn\.lifecycleKnown \? turn\.behaviorTurnId : null\}/);
 
 console.log('assistant message actions tests passed');

@@ -918,6 +918,7 @@ function ConversationTurnView({
                 copy={c}
                 sessionId={sessionId}
                 turnId={turn.lifecycleKnown ? turn.id : null}
+                telemetryTurnId={turn.lifecycleKnown ? turn.behaviorTurnId : null}
                 onRetry={onRetry ? () => onRetry(turn) : undefined}
               />
             )}

@@ -28,6 +28,10 @@ static EVAL_OBSERVATION_SESSIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::n
 #[derive(Debug)]
 struct ActiveTurnTiming {
     turn_id: String,
+    /// Authoritative engine turn id used by behavior telemetry. The timing id
+    /// remains stable for the local timeline, while value signals must join
+    /// the task lifecycle on the engine-provided id.
+    behavior_turn_id: Option<String>,
     #[cfg(any(feature = "benchmark-hooks", test))]
     recorded_first_events: HashSet<&'static str>,
     #[cfg(any(feature = "benchmark-hooks", test))]
@@ -40,6 +44,7 @@ impl ActiveTurnTiming {
     fn new(turn_id: String) -> Self {
         Self {
             turn_id,
+            behavior_turn_id: None,
             #[cfg(any(feature = "benchmark-hooks", test))]
             recorded_first_events: HashSet::new(),
             #[cfg(any(feature = "benchmark-hooks", test))]
@@ -168,6 +173,26 @@ pub fn start_turn(session_id: &str) -> String {
         }),
     );
     turn_id
+}
+
+/// Bind the local timing record to the authoritative engine turn id.
+///
+/// The engine publishes this id only after submission. Keeping it alongside
+/// the pre-submit timing id lets the UI retain its existing lifecycle pairing
+/// while response-value telemetry joins the matching `task_finished` event.
+pub fn bind_behavior_turn_id(session_id: &str, behavior_turn_id: &str) -> bool {
+    if behavior_turn_id.is_empty() {
+        return false;
+    }
+    active_turns()
+        .lock()
+        .ok()
+        .and_then(|mut map| {
+            let active = map.get_mut(session_id)?.back_mut()?;
+            active.behavior_turn_id = Some(behavior_turn_id.to_string());
+            Some(())
+        })
+        .is_some()
 }
 
 /// On session deletion, clear its residual unpaired turn queues (map keys
@@ -343,6 +368,9 @@ fn finish_turn_internal(
         "status": status,
         "error": error,
     });
+    if let Some(behavior_turn_id) = active_turn.behavior_turn_id {
+        entry["behavior_turn_id"] = json!(behavior_turn_id);
+    }
     if let Some(u) = usage {
         entry["usage"] = json!({
             "input_tokens": u.input_tokens,
@@ -459,6 +487,8 @@ pub fn record_milestone_meta(session_id: &str, milestone: &str, meta: serde_json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEvent {
     pub turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behavior_turn_id: Option<String>,
     pub event: String,  // "user_start" | "assistant_done" | "context_snapshot"
     pub timestamp: i64, // ms epoch
     pub ts: String,     // RFC3339
@@ -603,6 +633,11 @@ fn parse_timeline_line(line: &str) -> Option<TimelineEvent> {
         });
     Some(TimelineEvent {
         turn_id: turn_id.to_string(),
+        behavior_turn_id: v
+            .get("behavior_turn_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
         event: event.to_string(),
         timestamp,
         ts: ts.to_string(),
@@ -778,6 +813,44 @@ mod tests {
         assert_eq!(done["turn_id"].as_str(), Some(turn_id.as_str()));
         // 老路径(无 usage):事件里不应有 usage 字段
         assert!(done.get("usage").is_none() || done["usage"].is_null());
+
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn behavior_turn_id_is_bound_without_replacing_timeline_identity() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "pinvou3-timing-behavior-turn-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+
+        let sid = "session-behavior-turn";
+        let timeline_turn_id = start_turn(sid);
+        assert!(bind_behavior_turn_id(sid, "engine-turn-authoritative"));
+        finish_turn(sid, "completed", None);
+
+        let timeline = read_timeline(sid).unwrap();
+        let start = timeline
+            .iter()
+            .find(|event| event.event == "user_start")
+            .unwrap();
+        let done = timeline
+            .iter()
+            .find(|event| event.event == "assistant_done")
+            .unwrap();
+        assert_eq!(start.turn_id, timeline_turn_id);
+        assert_eq!(done.turn_id, timeline_turn_id);
+        assert_eq!(start.behavior_turn_id, None);
+        assert_eq!(
+            done.behavior_turn_id.as_deref(),
+            Some("engine-turn-authoritative")
+        );
 
         let _ = std::fs::remove_dir_all(tmp);
     }

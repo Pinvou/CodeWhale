@@ -919,6 +919,7 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     artifact_exported_installations: 0,
     negative_feedback_installations: 0,
     negative_feedback_rate: null,
+    unmatched_value_signal_count: 2,
   });
 });
 

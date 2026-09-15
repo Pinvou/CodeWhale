@@ -55,6 +55,7 @@ function mergeTool(current, update) {
 function emptyTurn(id) {
   return {
     id,
+    behaviorTurnId: id,
     userText: '',
     userAttachments: [],
     assistantText: '',
@@ -77,6 +78,7 @@ function emptyTurn(id) {
     error: null,
     startedAt: null,
     completedAt: null,
+    lifecycleKnown: false,
     operationCount: 0,
     failedOperationCount: 0,
   };
@@ -344,6 +346,7 @@ export function projectAcpTimeline(input, options = {}) {
       turn.startedAt = envelope.timestamp;
     } else if (type === 'turn_completed') {
       turn.status = data.status || 'completed';
+      turn.lifecycleKnown = true;
       // ACP-lane error text comes from agent CLIs (codex/claude/gemini)
       // and may carry gateway bodies or credentials verbatim; redact
       // unconditionally before the red-text display (classification may

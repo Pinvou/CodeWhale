@@ -650,7 +650,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
             <p className="text-[13px] max-w-[360px]">{(vis && vis.warning) || t.apUnsupported}</p>
             {vis && dependencyCheckButton(vis.warning)}
             {(!isWeb || canDownloadArtifacts) && (
-              <button onClick={() => sel && bridge.artifacts.openArtifactExternal(sel.path)} className={cardBtnCls('primary')}>
+              <button onClick={() => sel && bridge.artifacts.openArtifactExternal(sel.path, sel.sessionId)} className={cardBtnCls('primary')}>
                 {t.apBtnOpen}
               </button>
             )}
@@ -909,7 +909,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
                     ) : null}
                     <div className="mt-3 flex items-center gap-2">
                       {(!isWeb || canDownloadArtifacts) && (
-                        <button onClick={() => bridge.artifacts.openArtifactExternal(sel.path)}
+                        <button onClick={() => bridge.artifacts.openArtifactExternal(sel.path, sel.sessionId)}
                           className={`flex-1 flex items-center justify-center gap-1.5 ${cardBtnCls('primary')}`}>
                           <ExternalLink size={15} /> {t.apBtnOpen}
                         </button>
