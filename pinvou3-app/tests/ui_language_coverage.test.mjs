@@ -40,6 +40,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiChatExtra',
     'uiChatScenes',
     'uiAccount',
+    'uiChatWorkspace',
     'artifactPreview',
     'uiToolStore',
     'uiPet',

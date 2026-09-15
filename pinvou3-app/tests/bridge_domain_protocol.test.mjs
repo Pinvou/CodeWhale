@@ -117,7 +117,9 @@ const expectedProtocolHashes = {
   // or listen entries (capture-text refresh).
   chat: 'd2c249c71e5c8da65d9020d547be38fa70ae7c377a0a702a5cf9253730698842',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
-  interaction: '2b0f4b3cb53f58a6b2ea62b26b8b97b46da20837ed0415431738e22e8ee131d6',
+  // Recomputed for #445: the YOLO gate threads an adjudicated session id
+  // through exitPlanToYolo and planStuckGo.
+  interaction: 'b62238d0404da126673ed75d74887bae4088861f46f893083c29412fa03d5636',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
   // memory recomputed for the backflowed memory-maintenance feature
   // (Community #419): organize_memory + get_memory_organize_history invokes
@@ -127,9 +129,9 @@ const expectedProtocolHashes = {
   personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
   remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
-  // Recomputed for one-click full-fidelity session log export while retaining
-  // Official's materializeSession and scheduled-session bridge behavior.
-  sessions: '7be9c48126482f3a33b5aa9c770b554629ead1dd3a5d3119fb2648d11f892419',
+  // Recomputed for the combined session archive and #445 workspace binding
+  // surfaces while retaining Official's materialization behavior.
+  sessions: '24c9d103bfa90094b02200441222d387d86131836d0c7029d96c5ec28d071ddc',
   settings: 'd202460012a68b3a0c9cd929e47b2438061bb4b7e5c74c3a4af833c887084117',
   updater: 'f48c27f765bd2dce06cc71299f18348fc734f6390667b20820169e3179cb455b',
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
