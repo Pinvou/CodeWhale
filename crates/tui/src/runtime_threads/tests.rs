@@ -5924,6 +5924,41 @@ fn thread_record_workspace_roots_default_for_legacy_json() {
     );
 }
 
+#[tokio::test]
+async fn create_thread_normalizes_workspace_roots() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let workspace = std::env::temp_dir().join("codewhale-create-roots-ws");
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            workspace: Some(workspace.clone()),
+            workspace_roots: vec![
+                PathBuf::from("/shared"),
+                workspace.clone(),
+                PathBuf::from("/dup"),
+                PathBuf::from("/dup"),
+            ],
+            ..Default::default()
+        })
+        .await?;
+
+    // The workspace is the primary root and leads; additional roots dedupe
+    // in request order.
+    assert_eq!(
+        thread.workspace_roots,
+        vec![
+            workspace.clone(),
+            PathBuf::from("/shared"),
+            PathBuf::from("/dup")
+        ]
+    );
+    assert_eq!(
+        manager.store.load_thread(&thread.id)?.workspace_roots,
+        thread.workspace_roots,
+        "the normalized set must be the persisted set"
+    );
+    Ok(())
+}
+
 #[test]
 fn forkguard_workspace_roots_thread_record_persists_and_legacy_defaults_empty() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
