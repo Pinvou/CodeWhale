@@ -6178,7 +6178,6 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-trait",
- "aws-lc-rs",
  "base64 0.22.1",
  "block2",
  "calamine",

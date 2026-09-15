@@ -330,23 +330,30 @@ identity, public key, algorithm or capability list is `invalid_message`.
 
 `controller_joined` is the sole `lease_install_messages` entry and never
 requires a pre-existing lease. It is not accepted by the general runtime
-validator. First, the peer passes the complete raw
-`controller_pairing_reserved` envelope and the matching `PinnedRelayKey` to the
-transcript verifier. A `PinnedRelayKey` atomically binds `relay_signing_key_id`
-to one 32-byte Ed25519 public key and can only come from an immutable
-`RelayTrustStore`. That store accepts a strict official- or self-hosted-
-enrollment configuration, rejects empty, duplicate, malformed, unknown, or
-more-than-32-key input, and never exposes a constructor for an arbitrary key.
-That verifier validates the strict envelope and transcript, reconstructs and
-hashes the canonical preimage, compares the envelope `transcript_hash`, and
-verifies the Relay signature before returning an opaque `VerifiedTranscript`.
-JS uses the built-in Ed25519 verifier; Rust uses the repository's existing
-AWS-LC provider directly. Neither production API accepts a caller-supplied
-boolean verifier or separate key ID/public-key pair.
-Its constructor and fields are private to the protocol module (a module-private
-brand/weak map in JS and private fields in Rust), so ordinary objects cannot
-impersonate it. `LeaseInstallValidationContext` accepts only that verified value
-and derives `request_id`, expected `pairing_id`, `reservation_id`,
+validator. DEV-00 parses the complete raw `controller_pairing_reserved`
+envelope into a non-authenticated `ParsedTranscript`: strict schema and role
+validation, canonical preimage reconstruction, `transcript_hash` comparison,
+and signature algorithm/length validation all run, but a successful parse does
+not establish signer identity and cannot authorize lease installation. A
+configuration string such as `source=official_enrollment`, raw JSON, an
+arbitrary key, or a caller-supplied boolean/callback is never authentication
+proof.
+
+The JS module exports only the structural parser and canonical preimage builder;
+it does not export `VerifiedTranscript`, a trust-store/key loader, or a
+signature-to-token function. Rust exposes `ParsedTranscript` with private fields
+and reserves `VerifiedTranscript` behind a private-field, sealed
+`TranscriptAuthenticator` contract. DEV-00 contains no production
+`TranscriptAuthenticator` implementation. Its only parsed-to-verified adapter
+is compiled under `cfg(test)` so the pure lease-binding validator can be tested
+without pretending to authenticate a signer.
+
+DEV-05 owns authenticated official/self-hosted enrollment trust loading, atomic
+key-ID/public-key binding, real Ed25519 verification, and the sealed
+authenticator implementation. Only that future implementation may produce the
+opaque `VerifiedTranscript`; the controller business path remains disabled
+until then. `LeaseInstallValidationContext` accepts only that authenticated
+value and derives `request_id`, expected `pairing_id`, `reservation_id`,
 `remote_control_generation`, `relay_epoch`, `transcript_hash`, expected signed
 `controller_connection_identity`, and the exact canonical
 `negotiated_capabilities + capability_hash` from it. It accepts no independently
@@ -358,9 +365,6 @@ validate does the validator return a new immutable `LeaseContext` containing
 `connection_id + controller_lease_id + lease_epoch + relay_epoch +
 remote_control_generation`. Thus an attacker cannot make the receiver construct
 its expected identity or epoch from the same unverified result being checked.
-DEV-00 freezes these trust types and validators without activating them. DEV-01
-(official enrollment) and DEV-05 (self-hosted enrollment) own loading the
-authenticated configuration and wiring the store into the runtime.
 
 After reservation, messages carry `pairing_id + reservation_id + relay_epoch +
 remote_control_generation + transcript_hash`. After lease creation, every
@@ -497,7 +501,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`6f3c23d36f899d9f61c0c0a231ea52778581ee5a81b94110d2eb566c5e5b8cf3`.
+`bb1e1aebb62fb797155eed4e656cd55c41ef6a1fe278a9fe85be0991409afd70`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
