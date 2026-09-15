@@ -6,6 +6,9 @@ import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress,
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
+import { clearInvitationAcceptanceRetries, invitationAcceptanceMayBeCommitted, invitationRecoveryScope, readInvitationAcceptanceRetries, writeInvitationAcceptanceRetries } from './invitation-recovery.js';
+import { invitationSubmissionAttempt } from './invitation-client.js';
+import { PendingInvitations } from './pending-invitations.js';
 import { summarizeUsageRecords } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
@@ -165,12 +168,22 @@ function serviceRequestFailed(result) {
   return status === 0 || status >= 500;
 }
 
+function mergePersonalInvitations(items = [], retained = []) {
+  const merged = new Map();
+  for (const item of [...retained, ...items]) {
+    if (item?.invitation_id) merged.set(item.invitation_id, item);
+  }
+  return [...merged.values()];
+}
+
 export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose }) {
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
   const [organizations, setOrganizations] = useState([]);
   const [units, setUnits] = useState([]);
   const [members, setMembers] = useState([]);
+  const [personalInvitations, setPersonalInvitations] = useState([]);
+  const [personalInvitationsUnavailable, setPersonalInvitationsUnavailable] = useState(false);
   const [products, setProducts] = useState([]);
   const [balance, setBalance] = useState(null);
   const [billingUnavailable, setBillingUnavailable] = useState(false);
@@ -198,6 +211,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const meRef = useRef(null);
   const contextMutationRef = useRef(false);
   const contextRefreshRef = useRef(false);
+  const invitationAcceptRetryRef = useRef([]);
+  const invitationAcceptRetryScopeRef = useRef('');
   const activeOrganizationId = me?.active_context?.organization_id || '';
   const activeOrganization = organizations.find((item) => item.organization_id === activeOrganizationId);
   const personalContext = !activeOrganizationId;
@@ -205,7 +220,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const activePermissions = new Set(me?.active_context?.permissions || []);
   const canReadOrganization = activePermissions.has('org.profile.read') || activePermissions.has('org.units.read') || activePermissions.has('org.members.read') || activePermissions.has('org.models.read');
   const canOpenMyOrganization = canAccessOrganizationPortal(me);
-  const navigationSections = portal ? portalNavigationSections.filter((key) => key === 'accountSettings' || (key === 'creditsUsage' && (access.billingRead || access.usageRead)) || (key === 'ordersInvoices' && personalContext && access.billingRead) || (key === 'myOrganization' && canOpenMyOrganization)) : [...(access.profileRead || access.billingRead ? ['overview'] : []), ...(access.billingRead ? ['credits', 'entitlements'] : []), ...(access.usageRead ? ['usage'] : []), ...(organizations.length > 0 && canReadOrganization ? ['organization'] : []), ...(personalContext && access.billingRead ? ['orders', 'invoice'] : []), 'closure'];
+  const navigationSections = portal ? portalNavigationSections.filter((key) => key === 'accountSettings' || (key === 'creditsUsage' && (access.billingRead || access.usageRead)) || (key === 'ordersInvoices' && personalContext && access.billingRead) || (key === 'myOrganization' && canOpenMyOrganization)) : [...(access.profileRead || access.billingRead || access.invitationsRead ? ['overview'] : []), ...(access.billingRead ? ['credits', 'entitlements'] : []), ...(access.usageRead ? ['usage'] : []), ...(organizations.length > 0 && canReadOrganization ? ['organization'] : []), ...(personalContext && access.billingRead ? ['orders', 'invoice'] : []), 'closure'];
   const pendingOrderRefreshKey = orders
     .filter((item) => ['CREATED', 'PENDING'].includes(item.status) && item.close_status === 'OPEN')
     .map((item) => `${item.order_id}:${item.status}:${item.close_status}:${item.expires_at}`)
@@ -229,6 +244,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     setUsageUnavailable(false);
     setUnits([]);
     setMembers([]);
+    setPersonalInvitations([]);
+    setPersonalInvitationsUnavailable(false);
     setOrder(null);
     setOrders([]);
     setPackages({ summary: null, items: [] });
@@ -247,6 +264,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     try {
       const isPersonal = !organizationId;
       const surfaceAccess = personalSurfaceAccess(nextMe);
+      const retryScope = invitationRecoveryScope(nextMe);
+      if (invitationAcceptRetryScopeRef.current !== retryScope) {
+        invitationAcceptRetryScopeRef.current = retryScope;
+        invitationAcceptRetryRef.current = readInvitationAcceptanceRetries(nextMe);
+      }
       const permissions = new Set(nextMe?.active_context?.permissions || []);
       const canReadOrganizationWallet = permissions.has('org.wallet.read');
       const canReadQuota = permissions.has('org.quota.read.self') || permissions.has('org.quota.read.all');
@@ -261,7 +283,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       const packageRequest = isPersonal
         ? surfaceAccess.billingRead ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] })
         : canReadOrganizationWallet ? client.organizationEntitlementPackages(organizationId, request.signal) : Promise.resolve({ summary: null, items: [] });
-      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), balanceRequest, Promise.resolve({ order: null }), organizationId && canReadUnits ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), packageRequest, isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null)]);
+      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), balanceRequest, Promise.resolve({ order: null }), organizationId && canReadUnits ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), packageRequest, isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null), surfaceAccess.invitationsRead ? client.myInvitations(request.signal) : Promise.resolve({ items: [] })]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = (index) => (results[index].status === 'fulfilled' ? results[index].value : null);
       setOrganizations(value(0)?.items || []);
@@ -281,6 +303,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setQuotaMembers(value(10)?.items || []);
       setCatalogModels(value(11)?.items || []);
       setModelPolicy(value(12));
+      setPersonalInvitations(mergePersonalInvitations(value(13)?.items || [], invitationAcceptRetryRef.current));
+      setPersonalInvitationsUnavailable(results[13].status === 'rejected' && results[13].reason?.name !== 'AbortError');
       const billingFailed = [1, 2, 3].some((index) => serviceRequestFailed(results[index]));
       setBillingUnavailable(billingFailed);
       setBillingDetailsUnavailable([7, 8, 9].some((index) => serviceRequestFailed(results[index])));
@@ -513,12 +537,17 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const logout = () =>
     run(async () => {
       await client.logout();
+      clearInvitationAcceptanceRetries(meRef.current);
       guardRef.current.cancel();
       meRef.current = null;
       setMe(null);
       setOrganizations([]);
       setUnits([]);
       setMembers([]);
+      invitationAcceptRetryRef.current = [];
+      invitationAcceptRetryScopeRef.current = '';
+      setPersonalInvitations([]);
+      setPersonalInvitationsUnavailable(false);
       setProducts([]);
       setOrders([]);
       setPackages({ summary: null, items: [] });
@@ -590,6 +619,56 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setClosure(created);
       setNotice(copy.closure.requested);
     });
+
+  const acceptPersonalInvitation = async (invitation) => {
+    const acceptanceScope = invitationRecoveryScope(meRef.current);
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      await client.acceptInvitation(invitation.invitation_id);
+      if (invitationRecoveryScope(meRef.current) !== acceptanceScope) {
+        setBusy(false);
+        return false;
+      }
+      invitationAcceptRetryRef.current = invitationAcceptRetryRef.current.filter((item) => item.invitation_id !== invitation.invitation_id);
+      writeInvitationAcceptanceRetries(meRef.current, invitationAcceptRetryRef.current);
+      setPersonalInvitations((current) => current.filter((item) => item.invitation_id !== invitation.invitation_id));
+      setNotice(copy.invitationAccepted);
+    } catch (reason) {
+      if (invitationRecoveryScope(meRef.current) !== acceptanceScope) {
+        setBusy(false);
+        return false;
+      }
+      if (reason?.name !== 'AbortError') {
+        if (invitationAcceptanceMayBeCommitted(reason)) {
+          invitationAcceptRetryRef.current = mergePersonalInvitations(invitationAcceptRetryRef.current, [invitation]);
+          writeInvitationAcceptanceRetries(meRef.current, invitationAcceptRetryRef.current);
+          setPersonalInvitations((current) => mergePersonalInvitations(current, [invitation]));
+        } else {
+          invitationAcceptRetryRef.current = invitationAcceptRetryRef.current.filter((item) => item.invitation_id !== invitation.invitation_id);
+          writeInvitationAcceptanceRetries(meRef.current, invitationAcceptRetryRef.current);
+          setPersonalInvitations((current) => current.filter((item) => item.invitation_id !== invitation.invitation_id));
+          await loadContext(meRef.current);
+        }
+        setError(localizedError(copy, reason));
+      }
+      setBusy(false);
+      return false;
+    }
+    try {
+      const account = await client.bootstrap();
+      if (invitationRecoveryScope(meRef.current) !== acceptanceScope) return true;
+      meRef.current = account;
+      setMe(account);
+      await loadContext(account);
+    } catch (reason) {
+      if (reason?.name !== 'AbortError' && invitationRecoveryScope(meRef.current) === acceptanceScope) setError(localizedError(copy, reason));
+    } finally {
+      setBusy(false);
+    }
+    return true;
+  };
 
   const visibleError = error || synchronizationError;
 
@@ -784,10 +863,10 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
                 await loadContext(me);
               })
             }
-            onInvite={(email, roles) =>
+            onInvite={(target, roles, key) =>
               run(async () => {
-                const invite = await client.invite(activeOrganizationId, email, roles);
-                setNotice(`${copy.invitationCreated} ${invite.token}`);
+                await client.invite(activeOrganizationId, target, roles, key);
+                setNotice(copy.invitationCreated);
               })
             }
             onUpdateModelPolicy={(mode, modelIds, reason) =>
@@ -810,6 +889,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         {portal && section === 'accountSettings' && (
           <PortalAccountSettings
             copy={copy}
+            language={language}
             me={me}
             access={access}
             organizations={organizations}
@@ -821,13 +901,23 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             onProfileError={(reason) => localizedError(copy, reason)}
             onProfileChanged={finishProfileChange}
             onProfileRecovering={() => setNotice(copy.profileChangeRecovering)}
+            invitations={personalInvitations}
+            invitationsUnavailable={personalInvitationsUnavailable}
+            canReadInvitations={access.invitationsRead}
+            canAcceptInvitations={access.invitationsAccept}
+            onAcceptInvitation={acceptPersonalInvitation}
             closure={closure}
             onRequestClosure={requestClosure}
           />
         )}
         {!portal && (
           <>
-            {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} canSwitch={access.contextSwitch} onSwitchContext={switchContext} />}
+            {section === 'overview' && (
+              <>
+                <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} canSwitch={access.contextSwitch} onSwitchContext={switchContext} />
+                {access.invitationsRead && <PendingInvitations copy={copy} language={language} items={personalInvitations} unavailable={personalInvitationsUnavailable} busy={busy} canAccept={access.invitationsAccept} onAccept={acceptPersonalInvitation} />}
+              </>
+            )}
             {section === 'credits' && (
               <ResourceSection name="credits" personalContext={personalContext} copy={copy}>
                 {personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} orders={orders} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={access.rechargeCreate} onRecharge={createPersonalRecharge} onActivateRecharge={activatePersonalRecharge} /> : <ContextCredits copy={copy} language={language} balance={balance} />}
@@ -889,10 +979,10 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
                     await loadContext(me);
                   })
                 }
-                onInvite={(email, roles) =>
+                onInvite={(target, roles, key) =>
                   run(async () => {
-                    const invite = await client.invite(activeOrganizationId, email, roles);
-                    setNotice(`${copy.invitationCreated} ${invite.token}`);
+                    await client.invite(activeOrganizationId, target, roles, key);
+                    setNotice(copy.invitationCreated);
                   })
                 }
                 onUpdateModelPolicy={(mode, modelIds, reason) =>
@@ -995,7 +1085,7 @@ function PortalOrdersInvoices({ copy, language, orders, unavailable }) {
   );
 }
 
-function PortalAccountSettings({ copy, me, access, organizations, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, closure, onRequestClosure }) {
+function PortalAccountSettings({ copy, language, me, access, organizations, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, invitations, invitationsUnavailable, canReadInvitations, canAcceptInvitations, onAcceptInvitation, closure, onRequestClosure }) {
   const requestedProfile = new URLSearchParams(globalThis.location?.search || '').get('profile');
   const initialProfile = requestedProfile === 'username' || requestedProfile === 'mobile' ? requestedProfile : '';
   const [profileDialog, setProfileDialog] = useState(initialProfile);
@@ -1010,6 +1100,7 @@ function PortalAccountSettings({ copy, me, access, organizations, activeOrganiza
       <h2>{copy.accountSettingsTitle}</h2>
       <p className="ap-lead">{copy.accountSettingsLead}</p>
       <AccountProfileCard copy={copy} me={me} organizations={organizations} activeOrganization={activeOrganization} canSwitchIdentity={access.contextSwitch} canEditProfile={access.profileUpdate} onSwitchIdentity={() => setIdentityDialog(true)} onEditUsername={() => setProfileDialog('username')} onEditMobile={() => setProfileDialog('mobile')} />
+      {canReadInvitations && <PendingInvitations copy={copy} language={language} items={invitations} unavailable={invitationsUnavailable} busy={busy} canAccept={canAcceptInvitations} onAccept={onAcceptInvitation} />}
       <AccountClosure copy={copy} item={closure} busy={busy} canRequest={access.closureRequest} onRequest={onRequestClosure} embedded />
       {identityDialog && (
         <IdentityDialog
@@ -1612,13 +1703,30 @@ function Overview({ copy, language, me, organizations, balance, activeOrganizati
 function Organization({ copy, organization, units, members, models, modelPolicy, permissions, busy, onCreateUnit, onInvite, onUpdateModelPolicy, embedded = false }) {
   const [unitName, setUnitName] = useState('');
   const [parentId, setParentId] = useState('');
-  const [email, setEmail] = useState('');
+  const [invitationTargetType, setInvitationTargetType] = useState('USERNAME');
+  const [invitationTarget, setInvitationTarget] = useState('');
+  const invitationAttemptRef = useRef(null);
   const permissionSet = new Set(permissions || []);
   const canReadUnits = permissionSet.has('org.units.read');
   const canReadMembers = permissionSet.has('org.members.read');
   const canReadModelPolicy = permissionSet.has('org.models.read');
   const canManageUnits = permissionSet.has('org.units.manage');
   const canManageMembers = permissionSet.has('org.members.manage');
+  useEffect(() => {
+    setInvitationTargetType('USERNAME');
+    setInvitationTarget('');
+    invitationAttemptRef.current = null;
+  }, [organization?.organization_id]);
+  const submitInvitation = async (event) => {
+    event.preventDefault();
+    const value = invitationTarget.trim();
+    if (!value) return;
+    invitationAttemptRef.current = invitationSubmissionAttempt(invitationAttemptRef.current, organization.organization_id, invitationTargetType, value, () => idempotencyKey('org-invitation'));
+    const created = await onInvite({ type: invitationTargetType, value }, ['MEMBER'], invitationAttemptRef.current.key);
+    if (!created) return;
+    setInvitationTarget('');
+    invitationAttemptRef.current = null;
+  };
   if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
   if (!canReadUnits && !canReadMembers && !canReadModelPolicy) return null;
   return (
@@ -1688,15 +1796,25 @@ function Organization({ copy, organization, units, members, models, modelPolicy,
           {canManageMembers && (
             <form
               className="ap-stack"
-              onSubmit={(event) => {
-                event.preventDefault();
-                if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail(''));
-              }}
+              onSubmit={submitInvitation}
             >
-              <Field label={copy.memberEmail}>
-                <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+              <Field label={copy.invitationTargetType}>
+                <select value={invitationTargetType} onChange={(event) => setInvitationTargetType(event.target.value)}>
+                  <option value="USERNAME">{copy.invitationTargetUsername}</option>
+                  <option value="PHONE">{copy.invitationTargetPhone}</option>
+                </select>
               </Field>
-              <button disabled={busy || !email.trim()}>{copy.createInvitation}</button>
+              <Field label={invitationTargetType === 'PHONE' ? copy.memberPhone : copy.memberUsername}>
+                <input
+                  type={invitationTargetType === 'PHONE' ? 'tel' : 'text'}
+                  autoComplete="off"
+                  value={invitationTarget}
+                  onChange={(event) => setInvitationTarget(event.target.value)}
+                  placeholder={invitationTargetType === 'PHONE' ? copy.memberPhonePlaceholder : copy.memberUsernamePlaceholder}
+                />
+              </Field>
+              <small>{invitationTargetType === 'PHONE' ? copy.memberPhoneHint : copy.memberUsernameHint}</small>
+              <button disabled={busy || !invitationTarget.trim()}>{copy.createInvitation}</button>
             </form>
           )}
         </article>}

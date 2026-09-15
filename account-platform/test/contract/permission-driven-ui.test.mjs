@@ -25,7 +25,7 @@ const snapshot = ({ personal = [], platform = [], active = [], organization = ''
 
 test('personal surfaces use personal permissions independently from the active organization', () => {
   const value = snapshot({
-    personal: ['personal.profile.read', 'personal.account.close.read', 'personal.recharge.create'],
+    personal: ['personal.profile.read', 'personal.account.close.read', 'personal.recharge.create', 'personal.invitations.read', 'personal.invitations.accept'],
     active: ['org.usage.read.self'],
     organization: '95f13b84-ccfb-4b78-93c4-445af61e06db',
   });
@@ -35,6 +35,8 @@ test('personal surfaces use personal permissions independently from the active o
     contextSwitch: false,
     closureRead: true,
     closureRequest: false,
+    invitationsRead: true,
+    invitationsAccept: true,
     billingRead: false,
     rechargeCreate: false,
     usageRead: true,
@@ -61,6 +63,8 @@ test('personal bootstrap remains usable while an older Account service omits roo
     contextSwitch: false,
     closureRead: false,
     closureRequest: false,
+    invitationsRead: false,
+    invitationsAccept: false,
     billingRead: true,
     rechargeCreate: true,
     usageRead: true,

@@ -1499,6 +1499,9 @@ components:
       additionalProperties: false
       required: [invitation_id, organization_id, target_type, roles, status, version, expires_at, replayed]
       properties:
+        organization_name:
+          type: string
+          description: Display name of the organization attached to this authorized invitation; does not grant organization directory access.
         invitation_id:
           type: string
           format: uuid

@@ -66,14 +66,17 @@ func invitationRequestHash(targetType string, targetDigest []byte, roles []strin
 func scanInvitation(row pgx.Row) (Invitation, []byte, []byte, error) {
 	var invitation Invitation
 	var rolesJSON, targetDigest []byte
-	err := row.Scan(&invitation.ID, &invitation.OrganizationID, &invitation.TargetType, &targetDigest, &invitation.TargetHint, &rolesJSON, &invitation.Status, &invitation.Version, &invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt)
+	err := row.Scan(&invitation.ID, &invitation.OrganizationID, &invitation.TargetType, &targetDigest, &invitation.TargetHint, &rolesJSON, &invitation.Status, &invitation.Version, &invitation.ExpiresAt, &invitation.AcceptedAt, &invitation.RevokedAt, &invitation.OrganizationName)
 	if err == nil {
 		err = json.Unmarshal(rolesJSON, &invitation.Roles)
 	}
 	return invitation, targetDigest, rolesJSON, err
 }
 
-const invitationSelect = `SELECT id,organization_id,target_type,target_digest,COALESCE(target_hint,''),roles,status,version,expires_at,accepted_at,revoked_at FROM invitations`
+// The target-bound invitation grants visibility of its organization name only;
+// it does not grant access to the organization directory or member list.
+const invitationSelect = `SELECT id,organization_id,target_type,target_digest,COALESCE(target_hint,''),roles,status,version,expires_at,accepted_at,revoked_at,
+    COALESCE((SELECT o.name FROM organizations o WHERE o.id=invitations.organization_id),'') FROM invitations`
 
 func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, request InvitationCreateRequest) (Invitation, error) {
 	roles, err := validateInvitationRoles(request.Roles)

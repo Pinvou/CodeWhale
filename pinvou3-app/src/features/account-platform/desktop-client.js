@@ -1,4 +1,5 @@
 import { mergeObservedVersions } from './authorization-ui.js';
+import { invitationCreateBody } from './invitation-client.js';
 
 function abortError() {
   const error = new Error('The operation was aborted');
@@ -215,8 +216,18 @@ export class AccountPlatformDesktopClient {
   createUnit(organizationId, name, parentId = null) {
     return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } });
   }
-  invite(organizationId, email, roles) {
-    return this.request('account', `/v1/organizations/${organizationId}/invitations`, { method: 'POST', body: { email, roles, expires_in_hours: 72 } });
+  invite(organizationId, target, roles, key = '') {
+    return this.request('account', `/v1/organizations/${organizationId}/invitations`, {
+      method: 'POST',
+      idempotencyKey: key || undefined,
+      body: invitationCreateBody(target, roles),
+    });
+  }
+  myInvitations(signal) {
+    return this.request('account', '/v1/me/invitations', { signal });
+  }
+  acceptInvitation(invitationId, signal) {
+    return this.request('account', '/v1/invitations/accept', { method: 'POST', body: { invitation_id: invitationId }, signal });
   }
   products(signal) {
     return this.request('token', '/v1/recharge/products', { signal });
