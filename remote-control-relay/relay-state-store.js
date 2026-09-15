@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import * as nodeFs from "node:fs/promises";
 import { promisify } from "node:util";
-import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 export const RELAY_CONTROLLER_STATE_SCHEMA = "pinvou-relay-controller-state";
 export const RELAY_CONTROLLER_STATE_VERSION = 1;
@@ -22,6 +22,7 @@ const DIRECTORY_MARKER_CONTENT = "pinvou-controller-state-directory-v1\n";
 const LOCK_SCHEMA = "pinvou-relay-controller-state-lock";
 const LOCK_VERSION = 1;
 const execFileAsync = promisify(execFile);
+const PROCESS_HELD_STATE_PATHS = new Set();
 
 const WINDOWS_ACL_SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -366,6 +367,19 @@ function comparablePath(path) {
   return process.platform === "win32" ? path.toLocaleLowerCase("en-US") : path;
 }
 
+function pathWithin(child, parent) {
+  const relation = relative(comparablePath(parent), comparablePath(child));
+  return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
+}
+
+function validateStateFilename(path) {
+  const name = basename(path);
+  if (comparablePath(name) === comparablePath(DIRECTORY_MARKER)
+    || /(?:^|\.)(?:bak|lock|tmp|stale)(?:\.|$)/iu.test(name)) {
+    fail("relay_state_filename_reserved");
+  }
+}
+
 function sameFileIdentity(left, right) {
   return left && right && left.dev === right.dev && left.ino === right.ino
     && (left.dev !== "0" || left.ino !== "0");
@@ -422,6 +436,9 @@ export class RelayStateStore {
   #state = null;
   #lockOwner = null;
   #closed = false;
+  #closing = false;
+  #lockRemoved = false;
+  #closeInFlight = null;
   #degraded = false;
   #mutation = Promise.resolve();
 
@@ -439,8 +456,12 @@ export class RelayStateStore {
   } = {}) {
     this.#path = safeStatePath(statePath);
     this.#legacyStatePath = safeStatePath(legacyStatePath);
+    validateStateFilename(this.#path);
     if (comparablePath(this.#path) === comparablePath(this.#legacyStatePath)) {
       fail("relay_state_aliases_legacy");
+    }
+    if (pathWithin(this.#legacyStatePath, dirname(this.#path))) {
+      fail("legacy_state_path_inside_controller_directory");
     }
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1024 || maxBytes > 256 * 1024 * 1024) {
       fail("relay_state_limit_invalid");
@@ -484,7 +505,7 @@ export class RelayStateStore {
       }
       if (primary.kind === "invalid" && backup.kind === "valid" && !backup.migrated) {
         this.#state = backup.state;
-        await this.#writeAtomic(this.#path, serializeState(backup.state, this.#maxBytes));
+        await this.#legacyAliasGuardedWrite(this.#path, serializeState(backup.state, this.#maxBytes));
         return;
       }
       fail("relay_state_unavailable");
@@ -536,9 +557,13 @@ export class RelayStateStore {
       }
       if (error?.code !== "EEXIST") throw error;
     }
-    const markerContents = await this.#readBoundedFile(this.#markerPath, 256, "relay_state_directory_unsafe");
+    const markerContents = await this.#readBoundedFile(
+      this.#markerPath,
+      256,
+      "relay_state_directory_unsafe",
+      !markerCreated,
+    );
     if (markerContents !== DIRECTORY_MARKER_CONTENT) fail("relay_state_directory_unsafe");
-    if (!markerCreated) await this.#verifyFilesystemPath(this.#markerPath, "file");
     this.#ancestorSnapshot = await this.#validatePathAncestors(directory, true);
   }
 
@@ -674,20 +699,75 @@ export class RelayStateStore {
 
   async #rejectLegacyAliases() {
     await this.#validatePathAncestors(dirname(this.#legacyStatePath), false);
-    const stateCanonical = await this.#canonicalCandidate(this.#path);
+    await this.#rejectLegacySymlink();
     const legacyCanonical = await this.#canonicalCandidate(this.#legacyStatePath);
-    if (comparablePath(stateCanonical) === comparablePath(legacyCanonical)) {
-      fail("relay_state_aliases_legacy");
+    const controllerDirectoryCanonical = await this.#fs.realpath(dirname(this.#path));
+    if (pathWithin(legacyCanonical, controllerDirectoryCanonical)) {
+      fail("legacy_state_path_inside_controller_directory");
     }
-    const legacy = await this.#optionalIdentity(this.#legacyStatePath);
-    if (!legacy) return;
-    for (const candidate of [this.#path, this.#backupPath]) {
-      const controller = await this.#optionalIdentity(candidate);
-      if (controller && (comparablePath(controller.canonical) === comparablePath(legacy.canonical)
-        || sameFileIdentity(controller.identity, legacy.identity))) {
+    const managementPaths = await this.#managementPaths();
+    for (const candidate of managementPaths) {
+      if (comparablePath(candidate) === comparablePath(this.#legacyStatePath)
+        || comparablePath(await this.#canonicalCandidate(candidate)) === comparablePath(legacyCanonical)) {
         fail("relay_state_aliases_legacy");
       }
     }
+    const legacy = await this.#optionalIdentity(this.#legacyStatePath);
+    if (!legacy) return;
+    for (const candidate of managementPaths) {
+      const controller = await this.#optionalIdentity(candidate);
+      if (controller && sameFileIdentity(controller.identity, legacy.identity)) {
+        fail("relay_state_aliases_legacy");
+      }
+    }
+  }
+
+  async #managementPaths() {
+    const paths = [this.#path, this.#backupPath, this.#lockPath, this.#markerPath];
+    const stateName = basename(this.#path).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const managed = new RegExp(`^${stateName}(?:\\.bak|\\.lock)(?:\\.|$)|^${stateName}\\.[0-9]+\\.[a-f0-9]{16}\\.tmp$`, "u");
+    for (const entry of await this.#fs.readdir(dirname(this.#path), { withFileTypes: true })) {
+      if (managed.test(entry.name)) paths.push(join(dirname(this.#path), entry.name));
+    }
+    return [...new Set(paths)];
+  }
+
+  async #assertLegacyStillSeparate() {
+    await this.#rejectLegacySymlink();
+    const legacy = await this.#optionalIdentity(this.#legacyStatePath);
+    if (legacy) {
+      for (const candidate of await this.#managementPaths()) {
+        const controller = await this.#optionalIdentity(candidate);
+        if (controller && sameFileIdentity(controller.identity, legacy.identity)) {
+          fail("relay_state_aliases_legacy");
+        }
+      }
+    }
+    const legacyCanonical = await this.#canonicalCandidate(this.#legacyStatePath);
+    const controllerDirectoryCanonical = await this.#fs.realpath(dirname(this.#path));
+    if (pathWithin(legacyCanonical, controllerDirectoryCanonical)) {
+      fail("legacy_state_path_inside_controller_directory");
+    }
+  }
+
+  async #rejectLegacySymlink() {
+    try {
+      const metadata = await this.#fs.lstat(this.#legacyStatePath);
+      if (metadata.isSymbolicLink()) fail("relay_state_aliases_legacy");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+
+  async #assertNoLegacyAliasBeforeWrite() {
+    await this.#assertAncestorSnapshot();
+    await this.#assertLegacyStillSeparate();
+  }
+
+  async #legacyAliasGuardedWrite(path, contents) {
+    await this.#assertNoLegacyAliasBeforeWrite();
+    await this.#writeAtomic(path, contents);
+    await this.#assertLegacyStillSeparate();
   }
 
   async #readBoundedFile(target, limit, errorCode = "relay_state_file_unsafe", verifyAcl = true) {
@@ -734,6 +814,8 @@ export class RelayStateStore {
   }
 
   async #acquireLock() {
+    const processPathKey = comparablePath(this.#path);
+    if (PROCESS_HELD_STATE_PATHS.has(processPathKey)) fail("relay_state_locked");
     const identity = await this.#processIdentity(process.pid);
     if (typeof identity !== "string" || identity.length < 3 || identity.length > 512) {
       fail("relay_state_process_identity_unavailable");
@@ -768,10 +850,10 @@ export class RelayStateStore {
         if (published.isSymbolicLink() || !sameFileIdentity(temporaryIdentity, publishedPathIdentity)) {
           fail("relay_state_lock_publish_failed");
         }
-        await this.#verifyFilesystemPath(this.#lockPath, "file");
         await this.#fs.rm(temporaryPath, { force: true });
         await this.#syncDirectory(dirname(this.#lockPath));
         this.#lockOwner = owner;
+        PROCESS_HELD_STATE_PATHS.add(processPathKey);
         return;
       } catch (error) {
         try { await handle?.close(); } catch {}
@@ -850,16 +932,35 @@ export class RelayStateStore {
 
   async #releaseLock() {
     if (!this.#lockOwner) return;
-    try {
+    if (!this.#lockRemoved) {
       const existing = await this.#inspectLock();
-      if (existing.kind === "valid" && existing.owner.pid === this.#lockOwner.pid
-        && existing.owner.process_identity === this.#lockOwner.process_identity
-        && existing.owner.owner_id === this.#lockOwner.owner_id) {
-        await this.#fs.rm(this.#lockPath, { force: true });
-        await this.#syncDirectory(dirname(this.#lockPath));
+      if (existing.kind !== "valid" || existing.owner.pid !== this.#lockOwner.pid
+        || existing.owner.process_identity !== this.#lockOwner.process_identity
+        || existing.owner.owner_id !== this.#lockOwner.owner_id) {
+        fail("relay_state_lock_ownership_lost");
       }
-    } catch {}
+      await this.#removeWithRetry(this.#lockPath);
+      this.#lockRemoved = true;
+    }
+    await this.#syncDirectory(dirname(this.#lockPath));
+    PROCESS_HELD_STATE_PATHS.delete(comparablePath(this.#path));
     this.#lockOwner = null;
+    this.#lockRemoved = false;
+  }
+
+  async #removeWithRetry(target) {
+    let lastError;
+    for (const delay of REPLACE_RETRY_DELAYS_MS) {
+      if (delay > 0) await this.#sleep(delay);
+      try {
+        await this.#fs.rm(target, { force: true });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw error;
+      }
+    }
+    throw lastError;
   }
 
   async #loadCandidate(path) {
@@ -868,7 +969,6 @@ export class RelayStateStore {
       if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > this.#maxBytes) {
         return { kind: "invalid" };
       }
-      await this.#verifyFilesystemPath(path, "file");
       const contents = await this.#readBoundedFile(path, this.#maxBytes, "relay_state_file_unsafe");
       try {
         return { kind: "valid", ...parseState(contents) };
@@ -915,7 +1015,6 @@ export class RelayStateStore {
         fail("relay_state_temporary_file_changed");
       }
       await this.#replaceWithRetry(temporaryPath, path);
-      await this.#verifyFilesystemPath(path, "file");
       const installed = await this.#fs.lstat(path);
       if (installed.isSymbolicLink()
         || !sameFileIdentity(temporaryIdentity, await this.#pathIdentity(path))) {
@@ -931,15 +1030,24 @@ export class RelayStateStore {
   }
 
   async #syncDirectory(path) {
-    let handle;
-    try {
-      handle = await this.#fs.open(path, "r");
-      await handle.sync();
-    } catch (error) {
-      if (!["EACCES", "EINVAL", "EISDIR", "ENOTSUP", "EPERM"].includes(error?.code)) throw error;
-    } finally {
-      try { await handle?.close(); } catch {}
+    let lastError;
+    for (const delay of REPLACE_RETRY_DELAYS_MS) {
+      if (delay > 0) await this.#sleep(delay);
+      let handle;
+      try {
+        handle = await this.#fs.open(path, "r");
+        await handle.sync();
+        return;
+      } catch (error) {
+        if (process.platform === "win32" && error?.code === "EPERM" && error?.syscall === "fsync") return;
+        if (["EINVAL", "EISDIR", "ENOTSUP"].includes(error?.code)) return;
+        lastError = error;
+        if (!["EACCES", "EBUSY", "EPERM"].includes(error?.code)) throw error;
+      } finally {
+        try { await handle?.close(); } catch {}
+      }
     }
+    throw lastError;
   }
 
   async #persist(state) {
@@ -948,8 +1056,8 @@ export class RelayStateStore {
       // Stage the recovery copy first. The primary remains authoritative until
       // its atomic replacement succeeds, so a failed commit cannot roll back a
       // newer primary to an older authorization snapshot on the next restart.
-      await this.#writeAtomic(this.#backupPath, contents);
-      await this.#writeAtomic(this.#path, contents);
+      await this.#legacyAliasGuardedWrite(this.#backupPath, contents);
+      await this.#legacyAliasGuardedWrite(this.#path, contents);
     } catch (error) {
       this.#degraded = true;
       fail("relay_state_persist_failed", error);
@@ -958,7 +1066,7 @@ export class RelayStateStore {
 
   #assertReady() {
     if (this.#closed) fail("relay_state_closed");
-    if (this.#degraded || !this.#state) fail("relay_state_unavailable");
+    if (this.#closing || this.#degraded || !this.#state) fail("relay_state_unavailable");
   }
 
   getPathPolicy() {
@@ -1015,8 +1123,20 @@ export class RelayStateStore {
 
   async close() {
     if (this.#closed) return;
-    await this.#mutation.catch(() => {});
-    this.#closed = true;
-    await this.#releaseLock();
+    if (this.#closeInFlight) return this.#closeInFlight;
+    const attempt = (async () => {
+      if (!this.#closing) {
+        await this.#mutation.catch(() => {});
+        this.#closing = true;
+      }
+      await this.#releaseLock();
+      this.#closed = true;
+    })();
+    this.#closeInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      this.#closeInFlight = null;
+    }
   }
 }

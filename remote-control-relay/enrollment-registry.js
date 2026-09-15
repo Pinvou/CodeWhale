@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
 export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
@@ -172,8 +172,21 @@ function configuredAbsolutePath(value, label) {
   return resolve(value);
 }
 
+function validateControllerStateFilename(path) {
+  const name = basename(path);
+  if (comparablePath(name) === comparablePath(".pinvou-controller-state-directory")
+    || /(?:^|\.)(?:bak|lock|tmp|stale)(?:\.|$)/iu.test(name)) {
+    fail("controller_state_filename_reserved");
+  }
+}
+
 function comparablePath(value) {
   return process.platform === "win32" ? value.toLocaleLowerCase("en-US") : value;
+}
+
+function pathWithin(child, parent) {
+  const relation = relative(comparablePath(parent), comparablePath(child));
+  return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
 }
 
 export function loadEnrollmentRegistryConfig(env = process.env) {
@@ -201,8 +214,12 @@ export function loadEnrollmentRegistryConfig(env = process.env) {
     env.PINVOU_REMOTE_STATE_PATH,
     "legacy_web_state_path",
   );
+  validateControllerStateFilename(controllerStatePath);
   if (comparablePath(controllerStatePath) === comparablePath(legacyWebStatePath)) {
     fail("controller_state_path_aliases_legacy");
+  }
+  if (pathWithin(legacyWebStatePath, dirname(controllerStatePath))) {
+    fail("legacy_state_path_inside_controller_directory");
   }
   const config = Object.freeze({
     deployment,

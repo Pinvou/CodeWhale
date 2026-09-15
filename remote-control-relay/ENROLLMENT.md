@@ -23,7 +23,11 @@ switch. Self-hosted production therefore uses an explicit administrator import
 or enrollment operation; the migration CLI and gateway belong to DEV-02.
 The config loader rejects lexical aliases, including Windows case-only aliases.
 `RelayStateStore.open` receives both paths and also compares resolved paths and
-file identities, rejecting junction aliases and hardlinks.
+file identities, rejecting junction aliases and hardlinks. The legacy path may
+never be anywhere inside the dedicated controller directory or alias the
+primary, backup, lock, marker, temporary, stale-lock, or other reserved
+management path. Controller state filenames using those reserved suffixes are
+also rejected.
 
 ## Persistence and concurrency contract
 
@@ -45,6 +49,14 @@ detected. Legacy empty/truncated locks and dead owners are re-read for a bounded
 interval, then quarantined and identity-checked before removal. Any
 create/write/sync/publish failure closes the handle and removes files owned by
 the failed attempt.
+
+Lock unlink and directory sync retry bounded Windows sharing failures. `close()`
+does not report success until release completes. After an exhausted failure the
+object remains in a non-readable `closing` state and retains a process-local
+hold; another store in that process cannot take over. The caller must retain the
+object, resolve the I/O condition, and retry `close()`. Only that successful
+retry releases the process hold and permits reopening. Dropping an object after
+a failed close intentionally leaves the store unavailable until process restart.
 
 The empty store is durably initialized before it is exposed. Each successful
 commit is written to a same-revision primary and `.bak` copy via
@@ -70,6 +82,10 @@ and protection. Paths are passed to a constant PowerShell program as environment
 data, never interpolated into a command. Any set/read/verification failure keeps
 the store closed. On POSIX, a module-created directory is `0700`, files are
 `0600`, and existing owner/mode are verified without chmodding parent folders.
+The ACL setter itself performs the authoritative readback. Atomic rename/hardlink
+then preserves that verified file identity, avoiding duplicate PowerShell
+processes for each installed target; a normal CAS invokes the setter once for
+each of its two new state files.
 
 The JSON parser rejects unknown schema fields, unsafe object keys, non-integer
 numbers, excessive nesting, oversized strings/files, unsafe paths, symlinks,
