@@ -69,6 +69,15 @@ class ValidateCommitTextTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIn("description is too vague: 修改代码", errors[0])
 
+    def test_subject_only_file_accepts_pr_title_without_signoff(self) -> None:
+        with patch.object(Path, "read_text", return_value="ci(pr): 修复标题校验"):
+            errors = validate_commit_msg.validate_file(
+                Path("pr-title"),
+                require_signoff=False,
+            )
+
+        self.assertEqual(errors, [])
+
 
 class ValidateCommitRangeTests(unittest.TestCase):
     @staticmethod
