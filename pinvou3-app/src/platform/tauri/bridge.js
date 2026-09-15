@@ -1211,6 +1211,7 @@
   var toggleSessionPinned = sessionsFeature.toggleSessionPinned;
   var archiveSession = sessionsFeature.archiveSession;
   var restoreArchivedSession = sessionsFeature.restoreArchivedSession;
+  var exportSessionArchive = sessionsFeature.exportSessionArchive;
   function runSyncOnSession(sid, fn) {
     if (!sid || sid === state.activeSessionId) { fn(); return; }
     var bg = sessionStates[sid]; if (!bg) return;
@@ -2810,6 +2811,7 @@
       toggleSessionPinned: toggleSessionPinned,
       archiveSession: archiveSession,
       restoreArchivedSession: restoreArchivedSession,
+      exportSessionArchive: exportSessionArchive,
     },
     projects: {
       loadProjects,

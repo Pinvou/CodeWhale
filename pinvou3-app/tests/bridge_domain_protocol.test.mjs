@@ -127,7 +127,9 @@ const expectedProtocolHashes = {
   personas: '75845688a405c5dc3590e176238969d846d61810eaeb3d632a0a741d30370239',
   remoteControl: '07b52395ae8c4af6547c9bbbe84d76399884fec0e64f3bcad31cd757b839b798',
   scheduled: '6492813eabb2472f892cb4b199a27b09d78355f56fc3aff24b8409af236799b6',
-  sessions: '43be5b929743f00818492d51d7a725860c71b9a52e7fdcbe72606426472409c0',
+  // Recomputed for one-click full-fidelity session log export while retaining
+  // Official's materializeSession and scheduled-session bridge behavior.
+  sessions: '7be9c48126482f3a33b5aa9c770b554629ead1dd3a5d3119fb2648d11f892419',
   settings: 'd202460012a68b3a0c9cd929e47b2438061bb4b7e5c74c3a4af833c887084117',
   updater: 'f48c27f765bd2dce06cc71299f18348fc734f6390667b20820169e3179cb455b',
   voice: '8581b43940d101353fdd1468232dc778c2d1320854af5fdbbbc0326e5cdedbbb',
