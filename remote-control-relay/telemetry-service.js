@@ -836,13 +836,27 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
       && Number(event.occurred_at) >= week.start
       && Number(event.occurred_at) <= week.end
   )), "task_finished");
+  const diagnosticSuccessfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
+    event.event_name === "task_finished"
+      && event.status === "success"
+      && event.initiator_type === "user"
+      && ["assistant", "code", "team"].includes(event.mode)
+      && Number(event.occurred_at) <= now
+  )), "task_finished");
+  const diagnosticTasksByIdentity = new Map();
+  for (const task of diagnosticSuccessfulTasks) {
+    const identity = eventIdentity(task);
+    if (!identity) continue;
+    const tasks = diagnosticTasksByIdentity.get(identity) || [];
+    tasks.push(task);
+    diagnosticTasksByIdentity.set(identity, tasks);
+  }
   const weeklySuccessfulInstallations = new Set(successfulTasks.map(eventIdentity).filter(Boolean));
   const valuedInstallations = new Set();
   const feedbackInstallations = new Set();
   const copiedInstallations = new Set();
   const exportedInstallations = new Set();
   const negativeFeedbackInstallations = new Set();
-  const matchedValueSignals = new Set();
   for (const task of successfulTasks) {
     const identity = eventIdentity(task);
     if (!identity || !task.turn_id) continue;
@@ -853,9 +867,6 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
         && Number(signal.occurred_at) >= completedAt
         && Number(signal.occurred_at) <= completedAt + EXPLICIT_VALUE_WINDOW_MS
     ));
-    for (const signal of matchedSignals) {
-      matchedValueSignals.add(signal);
-    }
     if (matchedSignals.length) valuedInstallations.add(identity);
     if (matchedSignals.some(signal => signal.event_name === "response_feedback_changed")) feedbackInstallations.add(identity);
     if (matchedSignals.some(signal => signal.event_name === "response_copied")) copiedInstallations.add(identity);
@@ -870,11 +881,21 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
     ));
     if (negativeFeedback) negativeFeedbackInstallations.add(identity);
   }
-  const unmatchedValueSignalCount = valueSignals.filter((signal) => (
-    Number(signal.occurred_at) >= week.start
-      && Number(signal.occurred_at) <= week.end
-      && !matchedValueSignals.has(signal)
-  )).length;
+  const turnMismatchValueSignalCount = valueSignals.filter((signal) => {
+    const signalAt = Number(signal.occurred_at);
+    if (!signal.turn_id || signalAt < week.start || signalAt > week.end) return false;
+    const nearbyTasks = (diagnosticTasksByIdentity.get(eventIdentity(signal)) || []).filter((task) => (
+      task.turn_id
+        && Number(task.occurred_at) <= signalAt
+        && signalAt <= Number(task.occurred_at) + EXPLICIT_VALUE_WINDOW_MS
+    ));
+    if (!nearbyTasks.length || nearbyTasks.some(task => task.turn_id === signal.turn_id)) return false;
+    const sameSessionTasks = signal.session_id
+      ? nearbyTasks.filter(task => task.session_id === signal.session_id)
+      : [];
+    return (sameSessionTasks.length ? sameSessionTasks : nearbyTasks)
+      .some(task => task.turn_id !== signal.turn_id);
+  }).length;
   return {
     wevta_installations: valuedInstallations.size,
     weekly_successful_task_installations: weeklySuccessfulInstallations.size,
@@ -886,7 +907,7 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
     artifact_exported_installations: exportedInstallations.size,
     negative_feedback_installations: negativeFeedbackInstallations.size,
     negative_feedback_rate: reliableRate(negativeFeedbackInstallations.size, weeklySuccessfulInstallations.size),
-    unmatched_value_signal_count: unmatchedValueSignalCount,
+    turn_mismatch_value_signal_count: turnMismatchValueSignalCount,
   };
 }
 
@@ -1083,7 +1104,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   if (pipelineTotal && pipeline.rejected / pipelineTotal > 0.01) qualityWarnings.push("pipeline_rejection_high");
   if (windowEvents.some(event => event.clock_skew_bucket && event.clock_skew_bucket !== "normal")) qualityWarnings.push("clock_skew_present");
   if (contributionClipping.clipped_subject_count) qualityWarnings.push("subject_contribution_clipped");
-  if (explicitValue.unmatched_value_signal_count) qualityWarnings.push("explicit_value_signal_unmatched");
+  if (explicitValue.turn_mismatch_value_signal_count) qualityWarnings.push("explicit_value_signal_turn_mismatch");
   return {
     generated_at: now,
     range: window.range,

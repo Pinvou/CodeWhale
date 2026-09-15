@@ -886,7 +886,7 @@ test("behavior event store validates v1 independently, injects identity and dedu
 
 test("WEVTA uses the latest feedback state and same-turn 30 minute window", () => {
   const now = at("2026-08-12T12:00:00");
-  const successful = (id, identity, turn, time) => ({
+  const successful = (id, identity, turn, time, sessionId) => ({
     event_id: id,
     event_name: "task_finished",
     attempt_id: `attempt_${id}`,
@@ -895,6 +895,7 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     mode: "assistant",
     initiator_type: "user",
     status: "success",
+    ...(sessionId ? { session_id: sessionId } : {}),
     occurred_at: at(time),
   });
   const events = [
@@ -903,15 +904,19 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     { event_id: "clear_a", event_name: "response_feedback_changed", feedback_id: "feedback_a", feedback_action: "clear", turn_id: "turn_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:11:00") },
     successful("b", "dev_b", "turn_b", "2026-08-10T10:00:00"),
     { event_id: "late_copy_b", event_name: "response_copied", turn_id: "turn_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:31:00") },
-    successful("c", "dev_c", "turn_c", "2026-08-10T11:00:00"),
-    { event_id: "wrong_turn_c", event_name: "artifact_exported", turn_id: "turn_other", identity_id: "dev_c", occurred_at: at("2026-08-10T11:05:00") },
+    successful("c", "dev_c", "turn_c", "2026-08-10T11:00:00", "session-c"),
+    { event_id: "wrong_turn_c", event_name: "artifact_exported", session_id: "session-c", turn_id: "turn_other", identity_id: "dev_c", occurred_at: at("2026-08-10T11:05:00") },
     successful("d", "dev_d", "turn_d", "2026-08-10T12:00:00"),
     { event_id: "copy_d", event_name: "response_copied", turn_id: "turn_d", identity_id: "dev_d", occurred_at: at("2026-08-10T12:30:00") },
+    successful("boundary", "dev_boundary", "turn_boundary", "2026-08-09T23:50:00"),
+    { event_id: "cross_week_copy", event_name: "response_copied", turn_id: "turn_boundary", identity_id: "dev_boundary", occurred_at: at("2026-08-10T00:05:00") },
+    successful("negative", "dev_negative", "turn_negative", "2026-08-10T13:00:00"),
+    { event_id: "negative_feedback", event_name: "response_feedback_changed", feedback_id: "feedback_negative", feedback_action: "set", rating: "negative", turn_id: "wrong_negative_turn", identity_id: "dev_negative", occurred_at: at("2026-08-10T13:05:00") },
   ];
   assert.deepEqual(buildWeeklyExplicitValueMetric(events, now), {
     wevta_installations: 1,
-    weekly_successful_task_installations: 4,
-    explicit_value_sample_size: 4,
+    weekly_successful_task_installations: 5,
+    explicit_value_sample_size: 5,
     explicit_value_confidence: "low",
     wevta_rate: null,
     positive_feedback_installations: 0,
@@ -919,7 +924,7 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     artifact_exported_installations: 0,
     negative_feedback_installations: 0,
     negative_feedback_rate: null,
-    unmatched_value_signal_count: 2,
+    turn_mismatch_value_signal_count: 1,
   });
 });
 

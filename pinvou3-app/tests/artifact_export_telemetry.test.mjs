@@ -8,12 +8,12 @@ const source = await readFile(
   'utf8',
 );
 
-function createArtifactsFeature({ failOpen = false } = {}) {
+function createArtifactsFeature({ failOpen = false, state: stateOverride, sessionStates = {} } = {}) {
   const root = { __PINVOU_TAURI_BRIDGE_FEATURES__: {} };
   const sandbox = vm.createContext({ window: root, Uint8Array });
   vm.runInContext(source, sandbox, { filename: 'artifacts.js' });
   const calls = [];
-  const state = {
+  const state = stateOverride || {
     activeSessionId: 'session-a',
     artifacts: [{
       path: 'C:\\workspace\\report.pdf',
@@ -24,7 +24,7 @@ function createArtifactsFeature({ failOpen = false } = {}) {
   };
   const api = root.__PINVOU_TAURI_BRIDGE_FEATURES__.artifacts({
     state,
-    sessionStates: {},
+    sessionStates,
     notify() {},
     async invoke(command, args) {
       calls.push({ command, args });
@@ -39,7 +39,7 @@ function createArtifactsFeature({ failOpen = false } = {}) {
     isAbsPath: () => true,
     discardManagedAttachment: async () => {},
   });
-  return { api, calls };
+  return { api, calls, state, sessionStates };
 }
 
 test('desktop artifact export is emitted only after the external open succeeds', async () => {
@@ -69,5 +69,63 @@ test('desktop download alias does not double emit artifact export', async () => 
   assert.equal(
     fixture.calls.filter(call => call.command === 'track_behavior_event').length,
     1,
+  );
+});
+
+test('desktop artifact export attribution stays inside the target session', async () => {
+  const activeArtifact = {
+    path: 'C:\\workspace-a\\report.pdf',
+    telemetryId: 'artifact-session-a',
+  };
+  const fixture = createArtifactsFeature({
+    state: {
+      activeSessionId: 'session-a',
+      artifacts: [activeArtifact],
+      attachments: [],
+      sessions: [],
+    },
+  });
+
+  await fixture.api.openArtifactExternal('C:\\workspace-b\\report.pdf', 'session-b');
+  assert.deepEqual(
+    fixture.calls.map(call => call.command),
+    ['open_in_system'],
+    'an unloaded target session must not fall back to the active session artifact',
+  );
+
+  fixture.sessionStates['session-b'] = {
+    artifacts: [{
+      path: 'C:\\workspace-b\\report.pdf',
+      telemetryId: 'artifact-session-b',
+    }],
+  };
+  await fixture.api.openArtifactExternal('C:\\workspace-b\\report.pdf', 'session-b');
+  const tracked = fixture.calls.filter(call => call.command === 'track_behavior_event');
+  assert.equal(tracked.length, 1);
+  assert.equal(tracked[0].args.request.artifactId, 'artifact-session-b');
+});
+
+test('desktop artifact basename fallback requires one match in the target session', async () => {
+  const fixture = createArtifactsFeature({
+    state: {
+      activeSessionId: 'session-a',
+      artifacts: [],
+      attachments: [],
+      sessions: [],
+    },
+    sessionStates: {
+      'session-b': {
+        artifacts: [
+          { path: 'relative-a\\report.pdf', telemetryId: 'artifact-b-1' },
+          { path: 'relative-b\\report.pdf', telemetryId: 'artifact-b-2' },
+        ],
+      },
+    },
+  });
+
+  await fixture.api.openArtifactExternal('C:\\workspace-b\\report.pdf', 'session-b');
+  assert.equal(
+    fixture.calls.filter(call => call.command === 'track_behavior_event').length,
+    0,
   );
 });
