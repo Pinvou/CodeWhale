@@ -535,8 +535,10 @@ fn ensure_runtime_env() {
     // 关键:vLLM 在 10.214.74.113 不是 loopback,底座默认拒绝非 loopback HTTP
     set_var_if_unset("DEEPSEEK_ALLOW_INSECURE_HTTP", "1");
     set_var_if_unset("DEEPSEEK_FORCE_HTTP1", "1");
-    // L1 是本地 vLLM headless 测试：24576 与 route_limits_for_model 的 is_local_vllm
-    // 分支显式携带的 24K 预算一致（正式 App 已不再全局注入该 env，此处仅测本地预算）。
+    // L1 is a local vLLM headless test: the production app no longer
+    // injects this env (the host declares output by window tiers); here the
+    // base reads DEEPSEEK_MAX_OUTPUT_TOKENS directly to get an explicit 24K
+    // budget, pinning the base's local behavior under that convention.
     set_var_if_unset("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576");
     // 与正式 App 和底座默认值保持一致，避免 L1 仍用旧 90s 配置，
     // 把慢速本地模型的正常长生成误判为运行时回归。
