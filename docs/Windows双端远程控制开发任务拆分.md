@@ -79,32 +79,41 @@ pinvou3-app/src/features/remote-control/
 DEV-00 协议模型与测试夹具
  ├─ DEV-01 Enrollment registry ── DEV-02 迁移/网关/回滚
  ├─ DEV-03 发码与 tombstone ── DEV-04 共享槽位与 reservation
- └─ DEV-05 客户端密码学 ───────┬─ DEV-06 握手与 controller lease
-                                └──────────────┘
-DEV-06 ── DEV-07 Liveness/resume
-DEV-05 ── DEV-08 Rust 桌面控制 transport 基座
-DEV-06 + DEV-07 + DEV-08 ──┬─ DEV-09 B 被控端生命周期
-                            └─ DEV-10 A 主控端生命周期
-DEV-09 + DEV-10 ── DEV-11 能力快照与工作区 ── DEV-12 Session/任务/幂等
-DEV-12 ──┬─ DEV-13 临时模型包
-         ├─ DEV-14 A 唯一审批
-         ├─ DEV-15 附件传输
-         └─ DEV-16 成果访问
-DEV-12 + DEV-14 + DEV-15 + DEV-16 ── DEV-17 同步 journal 与 A 独立历史
-DEV-09 + DEV-10 + DEV-17 ── DEV-18 前端桥与状态域
-DEV-11 + DEV-13..DEV-18 ── DEV-19 Windows UI/i18n/可访问性
-DEV-03..DEV-17 ── DEV-20 遥测、安全扫描与运维指标
-DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
+ └─ DEV-05 客户端密码学 ── DEV-07 controller transport 基座
+DEV-04 + DEV-05 ── DEV-06 握手与 controller lease
+DEV-06 + DEV-07 ── DEV-08 Liveness/watchdog ── DEV-09 Resume
+DEV-06 + DEV-08 + DEV-09 ──┬─ DEV-10 B 被控端生命周期
+                            └─ DEV-11 A 主控端生命周期
+DEV-10 + DEV-11 ── DEV-12 能力快照与工作区 ── DEV-13 Session/任务/幂等
+DEV-07 + DEV-13 ── DEV-14 transfer core
+DEV-13 ───────────┬─ DEV-15 临时模型包
+                  └─ DEV-16 A 唯一审批
+DEV-14 ───────────┬─ DEV-17 附件上传
+                  └─ DEV-18 成果下载
+DEV-13 + DEV-16 + DEV-17 + DEV-18 ── DEV-19 journal 与 A 独立历史
+DEV-10 + DEV-11 + DEV-19 ── DEV-20 前端桥与状态域
+DEV-10 + DEV-15 + DEV-16 + DEV-20 ── DEV-21 B 面板
+DEV-11 + DEV-20 ──────────────────── DEV-22 A 连接壳
+DEV-13 + DEV-15..DEV-20 + DEV-22 ── DEV-23 远程会话能力 UI
+DEV-03..DEV-19 ───────────────────── DEV-24 遥测与安全门禁
+DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 ```
 
 | 批次 | 可并行任务 | 合入出口 |
 |---|---|---|
 | 0：协议先行 | DEV-00 | 协议常量、fixture、错误模型和兼容矩阵被冻结 |
-| 1：Relay/密码学基座 | DEV-01、DEV-03、DEV-05；随后 DEV-02、DEV-04、DEV-06、DEV-08 | 测试客户端可建立单一密文 controller lease，Web v2 回归不变 |
-| 2：连接生命周期 | DEV-07、DEV-09、DEV-10 | 两个 Windows backend 能配对、断开和安全恢复，不要求完整业务 UI |
-| 3：业务闭环 | DEV-11；随后 DEV-12；再并行 DEV-13～DEV-16；最后 DEV-17 | 普通/代码任务、模型、审批、附件、成果和历史均有端到端 API |
-| 4：产品化 | DEV-18、DEV-19、DEV-20 | 三语 Windows UI 可用，遥测与安全门禁就绪 |
-| 5：公网交付 | DEV-21 | 迁移、灰度、回滚、真实双机 E2E 全部通过 |
+| 1A：独立基座 | DEV-01、DEV-03、DEV-05 | registry、发码存储和密码学原语各自通过定向测试 |
+| 1B：第一层依赖 | DEV-02、DEV-04、DEV-07 可并行；三者分别只依赖已完成的 DEV-01、DEV-03、DEV-05/00 | 迁移工具、共享槽位和 Rust transport 均有稳定接口 |
+| 1C：握手 | DEV-06（等待 DEV-04、DEV-05） | 测试客户端可建立单一密文 controller lease，Web v2 回归不变 |
+| 2A：存活安全 | DEV-08；完成后 DEV-09 | 先证明 30 秒 watchdog，再证明无业务 provisional resume |
+| 2B：双端连接 | DEV-10、DEV-11 可并行（均等待 DEV-06、DEV-08、DEV-09） | 两个 Windows backend 能配对、断开和安全恢复 |
+| 3A：业务入口 | DEV-12；完成后 DEV-13 | 能力/工作区先于任务接纳，任务 ledger 再成为扩展点 |
+| 3B：业务扩展 | DEV-14、DEV-15、DEV-16 可并行（均等待 DEV-13）；DEV-14 完成后 DEV-17、DEV-18 可并行 | transfer core 先冻结，模型/审批/附件/成果各自闭环且不争用共享文件 |
+| 3C：同步 | DEV-19（等待 DEV-13、DEV-16～DEV-18） | journal、快照和 A 独立历史覆盖全部业务事件 |
+| 4A：前端基座 | DEV-20 | 独立 B/A/history 状态域接入且 Web bridge 不变 |
+| 4B：分面 UI | DEV-21、DEV-22 可并行；随后 DEV-23 | B 面板、A 连接壳各自三语可用，再接入完整远程会话能力 |
+| 4C：生产门禁 | DEV-24（后端领域完成后） | 最小化遥测、审计、泄露扫描和告警就绪 |
+| 5：公网交付 | DEV-25 | 迁移、灰度、回滚、真实双机 E2E 全部通过 |
 
 ## 5. 任务明细
 
@@ -188,7 +197,7 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **协议/数据**：发送方只在加密 Finished 内给对端 secret；接收方验证后恰好一次经角色认证 socket 回传；Relay 只验证 commitment，不能导出业务会话密钥。
 - **测试**：文档固定 preimage/commitment 向量、字段顺序/长度/编码、跨角色/跨用途替换、损坏 Finished、secret 重放、nonce/sequence 重放、未知 epoch、Debug/错误脱敏、内存清理钩子。
 - **验收**：Rust/Node 对固定向量完全一致；任何 receipt secret 不出现在明文业务消息和日志；两套 keypair 类型上不能互换。
-- **风险**：密码学组合错误。仅采用经过审计的库原语，安全评审在 DEV-20 设为发布门禁。
+- **风险**：密码学组合错误。仅采用经过审计的库原语，安全评审在 DEV-24 设为发布门禁。
 - **需求映射**：RC-P-018、RC-P-020、RC-L-003～004、RC-M-007、RC-M-012、RC-S-006～007。
 - **建议提交**：`feat(remote-control): 增加端到端加密原语`
 
@@ -206,37 +215,51 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-A-003、RC-P-007～008、RC-P-013～014、RC-P-018、RC-L-001～006、RC-L-009。
 - **建议提交**：`feat(relay): 原子建立桌面控制租约`
 
-### DEV-07：角色隔离 liveness、30 秒 watchdog 与双端 resume
+### DEV-07：Rust 桌面控制 transport 与状态所有者基座
 
-- **依赖**：DEV-06。
-- **目标**：实现 5 秒角色心跳、A→B E2E liveness 主路径、Relay attestation 兜底、总计不超过 30 秒的 B 本地 watchdog，以及无业务 provisional/pending-liveness resume。
-- **范围**：`last_liveness_a/b`、角色专属 epoch/sequence/challenge；15 秒 suspect；直接与 attestation 保守 deadline 公式；A/B 独立单次 token prepare、B activation ACK、首个 post-activation B liveness、Relay 确认、双方 ready、原子轮换/开放业务。
-- **不做**：不执行业务任务；普通 TCP 活动和 B 心跳不能延长 A 缺失 deadline；Relay 重启不恢复 lease。
-- **预计文件**：Relay controller lease/transport 模块、Rust `controller/crypto.rs` 与 `relay_transport.rs`、`test/controller-resume.test.js`（新）、Rust deadline 单测。
-- **协议/数据**：两个 pending resume 状态都禁止业务帧并保留旧 watchdog；新 A liveness sequence 可推进，新鲜度相同只能收紧，旧序号拒绝；token 角色绑定且每次成功分别轮换。
-- **测试**：A 断 B 活、B 断 A 活、黑洞、另一角色/无效/重放心跳；age=5000/RTT=5000 的 19000ms attestation 与直接 24000ms；单边 prepare、token 交换、ACK/ready/final 丢失、deadline 到期、Relay/A/B 重启、pending 状态业务拒绝。
-- **验收**：从任一最后有效 A liveness 观察点到 B 清理任务绝不超过 30000ms；完整激活前 Relay 不转业务帧；旧 token/key 永不可复用。
-- **风险**：跨时钟计算延长窗口。B 只用本地单调时钟和 Relay 提供的 age/remaining TTL，完整扣除测得 RTT 与 1000ms 裕量。
-- **需求映射**：RC-B-015～018、RC-L-008～016、RC-T-007。
-- **建议提交**：`feat(remote-control): 实现安全断线恢复`
-
-### DEV-08：Rust 桌面控制 transport 与状态所有者基座
-
-- **依赖**：DEV-05、DEV-00。
-- **目标**：在不改变现有 WebAccess API 的前提下，建立 A/B 共用的有界 Relay transport、controller frame dispatch 和独立状态所有者接口。
-- **范围**：从当前 `relay_client.rs` 提取可复用连接原语；为 controller 增加有界收发队列、优先级/背压、敏感帧专用序列化、取消 token、事件 sink；明确 Web manager、B manager、A manager 生命周期。
-- **不做**：不实现具体配对业务、不改 Web `access-policy.json`、不把 controller 状态加入 `WebAccessStatusKind`。
-- **预计文件**：`features/remote_control/mod.rs`、`relay_client.rs`、`controller/{mod,relay_transport}.rs`（新）、`lib.rs` 初始化和 transport 单测。
-- **协议/数据**：业务帧只接受已认证 lease context；队列上限不得宽于现有 2/4 MiB Relay 帧与字节预算；断线事件带 generation/lease epoch。
-- **测试**：队列满、敏感帧过大、取消、重连、消息优先级、旧 generation/epoch frame 丢弃；现有 82 个左右 remote_control Rust 测试和 Web contract 不回归。
-- **验收**：三个状态域可独立启动/停止；controller transport 未连接时不能调用 Web RPC 后门；现有 Web 分享行为字节级兼容。
-- **风险**：重构影响 Web。先加适配接口再迁移调用，保留 current public methods 并跑完整 Web 回归。
+- **依赖**：DEV-00、DEV-05。
+- **目标**：在不改变现有 WebAccess API 的前提下，先建立 A/B 共用的有界 Relay transport、controller frame dispatch 和独立状态所有者接口，成为 liveness 与 resume 的唯一网络承载层。
+- **范围**：从当前 `relay_client.rs` 提取可复用连接原语；为 controller 增加有界收发队列、优先级/背压、敏感帧专用序列化、取消 token、事件 sink；明确 Web manager、B manager、A manager 生命周期；提供 transport clock/RTT 注入点。
+- **不做**：不实现具体配对、liveness、watchdog 或 resume；不改 Web `access-policy.json`；不把 controller 状态加入 `WebAccessStatusKind`。
+- **预计文件**：`features/remote_control/mod.rs`、`relay_client.rs`、`controller/{mod,relay_transport}.rs`（新）、`lib.rs` 初始化和 transport 单测。本任务独占 `relay_transport.rs` 与现有 `relay_client.rs` 的结构调整，DEV-08/09 只能调用其公开 trait。
+- **协议/数据**：业务帧只接受已认证 lease context；队列上限不得宽于现有 Relay 帧与字节预算；断线事件带 generation/lease epoch；控制帧和业务帧分队列且都受总字节预算。
+- **测试**：队列满、敏感帧过大、取消、重连、消息优先级、RTT 采样、旧 generation/epoch frame 丢弃；现有 remote_control Rust 测试和 Web contract 不回归。
+- **验收**：三个状态域可独立启动/停止；controller transport 未连接时不能调用 Web RPC 后门；现有 Web 分享行为兼容；后续模块无需编辑 transport 内部实现。
+- **风险**：重构影响 Web。先加适配接口再迁移调用，保留当前 public methods 并跑完整 Web 回归。
 - **需求映射**：RC-B-013、RC-L-003～004、RC-T-008、RC-S-003。
 - **建议提交**：`refactor(remote-control): 拆分桌面控制传输域`
 
-### DEV-09：B 被控端 lifecycle、generation、watchdog 与 Tauri 命令
+### DEV-08：角色隔离 liveness 与 B 本地 30 秒 watchdog
 
-- **依赖**：DEV-06、DEV-07、DEV-08。
+- **依赖**：DEV-06、DEV-07。
+- **目标**：在已冻结的 transport 上实现 5 秒角色心跳、A→B E2E liveness 主路径、Relay attestation 兜底和总计不超过 30 秒的 B 本地 watchdog。
+- **范围**：`last_liveness_a/b`、角色专属 epoch/sequence/challenge；15 秒 suspect；直接与 attestation 保守 deadline 公式；B 本地单调时钟 deadline；Relay 盲转发和签名新鲜证明；断线/黑洞清理 hook。
+- **不做**：不实现 resume token/prepare/activation；不执行业务任务；普通 TCP 活动、B 心跳或重试不能延长 A 缺失 deadline。
+- **预计文件**：`controller/liveness.rs`（新，本任务独占）、Relay `controller-liveness.js`（新，本任务独占）、`test/controller-liveness.test.js`（新）、Rust deadline 单测；只调用 DEV-06 lease 与 DEV-07 transport 的公开接口。
+- **协议/数据**：新 A epoch/sequence 可安装新 candidate deadline；同序号只能收紧，旧序号拒绝；直接证据用 `30000 - RTT - 1000`，attestation 用 `min(remaining_ttl, 30000 - age) - RTT - 1000`。
+- **测试**：A 断 B 活、B 断 A 活、黑洞、另一角色/无效/重放心跳；age=5000/RTT=5000 的 19000ms attestation 与直接 24000ms；新序号推进、同序号收紧、旧序号拒绝、Relay 不可达和本地 deadline 到期。
+- **验收**：从任一最后有效 A liveness 观察点到 B 触发清理绝不超过 30000ms；B 心跳与普通流量永不推进该 deadline。
+- **风险**：跨时钟计算延长窗口。B 只用本地单调时钟和 Relay 提供的 age/remaining TTL，完整扣除测得 RTT 与 1000ms 裕量。
+- **需求映射**：RC-B-015～018、RC-L-008、RC-L-012、RC-L-015～016、RC-T-007。
+- **建议提交**：`feat(remote-control): 实现角色隔离存活看门狗`
+
+### DEV-09：双端 provisional/pending-liveness resume
+
+- **依赖**：DEV-08。
+- **目标**：在同一 watchdog 预算内实现 A/B 独立单次 token 的双端恢复，完整激活前不承载业务。
+- **范围**：A/B 角色绑定 token 摘要、双方 prepare、`resume_provisional`、B activation ACK、`resume_activated_pending_liveness`、首个 post-activation B liveness、Relay 确认、双方 ready、原子轮换 token/密钥和最终开放业务。
+- **不做**：不创建新 liveness 计算公式；不因 prepare/ACK/重试重置 DEV-08 deadline；Relay 重启不恢复 lease。
+- **预计文件**：`controller/resume.rs`（新，本任务独占）、Relay `controller-resume.js`（新，本任务独占）、`test/controller-resume.test.js`（新）；通过 DEV-06 lease、DEV-07 transport 和 DEV-08 liveness 公开接口工作，不修改其内部文件。
+- **协议/数据**：两个 pending 状态均拒绝业务帧；token 不相等、不可跨角色、成功后分别消费轮换；任一步缺失或超时终止原租约。
+- **测试**：单边 prepare、token 交换/重放、B ACK 丢失、首个 liveness/Relay 确认/单边 ready/final 丢失、pending 状态业务拒绝、deadline 到期、Relay/A/B 重启和成功后旧 token/key 拒绝。
+- **验收**：只有完整激活原子提交后才开放业务；B 收到最终 `controller_resumed` 才取消旧 watchdog；失败绝不形成 Relay active/B terminal 分裂。
+- **风险**：多阶段状态遗漏收尾。每一阶段共享单一 transition table 和 deadline，终态统一销毁 lease/token/key。
+- **需求映射**：RC-L-005～006、RC-L-009～014、RC-T-007。
+- **建议提交**：`feat(remote-control): 实现双端安全恢复`
+
+### DEV-10：B 被控端 lifecycle、generation、watchdog 与 Tauri 命令
+
+- **依赖**：DEV-06、DEV-08、DEV-09。
 - **目标**：实现 B 开启、展示码、刷新、停止、立即断开、自动换码、能力状态与本地安全收尾的唯一状态机。
 - **范围**：每次开启/刷新新 generation；稳定 registration request ID；refresh 的 retire→Relay 撤销确认→本地清理→新 generation；完整状态枚举；设备信息只存内存；本地 30 秒 watchdog；任务/审批/密钥/临时模型清理 hook；预授权工作区入口；Tauri commands/events。
 - **不做**：不实现 A UI，不在 B 提供 Allow，不持久记住 A，不在非 Windows 假装支持。
@@ -248,9 +271,9 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-B-001～018、RC-L-006、RC-L-008、RC-T-011～012、RC-C-010、RC-C-014。
 - **建议提交**：`feat(remote-control): 实现Windows被控端状态机`
 
-### DEV-10：A 主控端 claim、连接生命周期与远程历史壳层
+### DEV-11：A 主控端 claim、连接生命周期与远程历史壳层
 
-- **依赖**：DEV-06、DEV-07、DEV-08。
+- **依赖**：DEV-06、DEV-08、DEV-09。
 - **目标**：实现 A 输入码、自动握手、后台连接、显式断开、短暂恢复和非敏感历史容器，为后续业务消息提供稳定 connection context。
 - **范围**：码规范化；连接状态/错误映射；A 临时 claim 身份；后台 transport 与窗口可见性解耦；显式 disconnect；resume token 内存生命周期；远程连接元数据与独立 history ID；Tauri commands/events。
 - **不做**：不持久化码/设备凭证，不实现具体任务/模型/附件，不让关闭窗口等于断开。
@@ -262,9 +285,9 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-A-001～010、RC-L-005、RC-L-009～014、RC-S-008～009。
 - **建议提交**：`feat(remote-control): 实现Windows主控端连接`
 
-### DEV-11：B 能力快照、模式可见性与代码工作区约束
+### DEV-12：B 能力快照、模式可见性与代码工作区约束
 
-- **依赖**：DEV-09、DEV-10。
+- **依赖**：DEV-10、DEV-11。
 - **目标**：让 A 只看到 B 当前允许的普通/代码模式、工具/Skill 摘要和预授权工作区能力，不暴露私有文件或凭证。
 - **范围**：能力快照 schema/revision/过期；从现有 bundle readiness、AcpPool agent/mode、工具与 Skill 启用状态投影；工作区用 opaque ID 而不是路径；B 策略变化时撤销或刷新能力。
 - **不做**：不传 A 的 Skill/安装包，不允许 A 修改 B 工具配置，不扩大现有 workspace grant。
@@ -276,9 +299,9 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-B-011、RC-T-009～011、RC-C-001～004、RC-C-011。
 - **建议提交**：`feat(remote-control): 发布受控能力快照`
 
-### DEV-12：B 权威 Session、远程任务 ledger 与幂等执行
+### DEV-13：B 权威 Session、远程任务 ledger 与幂等执行
 
-- **依赖**：DEV-11。
+- **依赖**：DEV-12。
 - **目标**：打通 A 发起、B 接纳执行、取消和终态提交，保持 B Session 唯一权威并防止断线重试重复副作用。
 - **范围**：远程 Session 创建/切换映射；`task_id + client_request_id` ledger；per-session turn lock；普通 EnginePool 与代码 AcpPool 适配；远程来源标记；窗口隐藏/transport 断线/stop 的真实终态；结果未知处理。
 - **不做**：不实现临时模型、审批 Allow、附件和成果下载；不暴露计划/系统任务。
@@ -290,9 +313,23 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-T-001～012、RC-S-001～002、RC-C-004。
 - **建议提交**：`feat(remote-control): 打通幂等远程任务`
 
-### DEV-13：`temporary_model_package/v1` 构包、校验与全终态清理
+### DEV-14：共享 transfer core、绑定与资源预算
 
-- **依赖**：DEV-12。
+- **依赖**：DEV-07、DEV-13。
+- **目标**：在附件上传和成果下载前冻结共用的分块、摘要、背压、超时、绑定和清理接口，消除两个方向并行修改同一 transfer core 的冲突。
+- **范围**：定义 `TransferContext`、方向化 handle、块序号/摘要、连接总预算、取消/超时、清理注册表和错误模型；创建 upload/download 扩展槽与测试 fixture，但不开放业务命令。
+- **不做**：不读写真实附件/成果，不实现预览，不注册前端 API；不修改现有 Web handle 的 wire 类型。
+- **预计文件**：`controller/transfer/{mod,core,limits,upload,download}.rs`（新）。本任务独占 `mod/core/limits`；DEV-17 只编辑 `upload.rs`，DEV-18 只编辑 `download.rs`，两者不得回改共享 core，接口不足须先单独修订 DEV-14 契约。
+- **协议/数据**：所有 handle 绑定 connection/lease epoch/task/session 并区分 upload/download；块和总内存限制不宽于现有 Web transfer；敏感文件元数据只进 E2E 帧。
+- **测试**：预算竞争、方向混用、跨 lease/task/session、块重复/乱序、摘要、取消/超时、清理幂等、Web handle 与 controller handle 类型隔离。
+- **验收**：upload/download 可仅新增各自模块实现而不修改共享 core；两方向并发共享连接预算且不能相互消费 handle。
+- **风险**：过早冻结遗漏需求。用 DEV-17/18 的 fixture 作为 contract consumer；接口变更必须回到独立 core 提交后再继续。
+- **需求映射**：RC-F-002～003、RC-F-006、RC-T-008。
+- **建议提交**：`feat(remote-control): 冻结远程传输核心契约`
+
+### DEV-15：`temporary_model_package/v1` 构包、校验与全终态清理
+
+- **依赖**：DEV-13。
 - **目标**：实现 A “我的模型”的严格导出和 B 内存临时路由，覆盖视觉兜底、SSRF 防护、绑定校验和所有终态清理。
 - **范围**：SavedModel→v1 映射；本机安全存储解析 API key；可导出筛选；`SensitiveString`；B 独立复算 wire API；URL/DNS/重定向/私网校验；主/视觉双凭证；任务内存上下文；失败不回退 B 模型。
 - **不做**：不发送完整 SavedModel、credential_ref、OAuth/Cookie/订阅态；不持久化或加入 B 模型列表；不支持 A loopback 模型。
@@ -304,9 +341,9 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-B-010、RC-M-001～014、RC-T-008。
 - **建议提交**：`feat(remote-control): 支持任务级临时模型`
 
-### DEV-14：A 唯一审批权威与 dispatch 竞态边界
+### DEV-16：A 唯一审批权威与 dispatch 竞态边界
 
-- **依赖**：DEV-12。
+- **依赖**：DEV-13。
 - **目标**：把远程来源权限请求投影给 A，由 A 独占决定；B 只能查看、停止或断开，并以原子 dispatch 边界报告真实结果。
 - **范围**：审批 binding/expiry、风险预览与脱敏、pending store、首个 A 决定 CAS、同值幂等、冲突/迟到错误、A 断线/lease 变化/任务取消默认拒绝、B stop 与 Allow 竞态、ACP permission/elicitation adapter。
 - **不做**：不允许永久授权、远程超级权限或 B Allow；不削弱 B 原有策略/工作区上限。
@@ -318,13 +355,13 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-B-012、RC-C-004～014、RC-S-002。
 - **建议提交**：`feat(remote-control): 收口远程审批权威`
 
-### DEV-15：A→B 端到端附件上传与 Session 隔离
+### DEV-17：A→B 端到端附件上传与 Session 隔离
 
-- **依赖**：DEV-12。
+- **依赖**：DEV-14。
 - **目标**：复用现有附件类型/大小/摘要/清理约束，在 controller 密文通道内把 A 文件安全写入 B 当前 Session 隔离区。
 - **范围**：upload ID、分块、摘要、断点状态、connection/lease/task/session 绑定、背压、超时/取消/断线清理、普通与 ACP 附件 staging。
 - **不做**：不接受任意 B 路径，不放宽现有 Web 附件上限，不让 Relay 缓存明文，不将上传缓存持久化。
-- **预计文件**：`controller/transfer.rs`（新或复用 manager transfer 的共享原语）、`features/files/attachment_upload.rs`、assistant/Codex attachment adapter、前端后续 bridge fixture。
+- **预计文件**：`controller/transfer/upload.rs`（本任务独占）、`features/files/attachment_upload.rs`、assistant/Codex attachment adapter、独立 `app/commands/remote_control_attachment.rs` 和 fixture；不修改 DEV-14 的 `core/limits/download`。
 - **协议/数据**：元数据和块均在 E2E 帧内；摘要/长度在接纳前校验；成功 handle 只能由同任务消费一次。
 - **测试**：文本/图片/允许文件、块乱序/重复/篡改、超限、连接内存上限、取消/超时/disconnect/stop 清理、跨 lease/task/session handle、普通/代码任务。
 - **验收**：Relay 无法读取文件名/内容；B 只在目标 Session 隔离目录得到完整文件；失败后有界时间内无孤儿缓存。
@@ -332,13 +369,13 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-F-001～004、RC-T-008、RC-S-002。
 - **建议提交**：`feat(remote-control): 支持端到端附件上传`
 
-### DEV-16：B→A 成果索引、预览与下载副本
+### DEV-18：B→A 成果索引、预览与下载副本
 
-- **依赖**：DEV-12。
+- **依赖**：DEV-14。
 - **目标**：让 A 通过 opaque artifact ID 查看 B Session 成果列表、预览受支持类型并下载本地副本，不暴露 B 路径。
 - **范围**：artifact index snapshot/delta、ID→Session 内安全解析、分块下载/摘要、预览能力和大小判定、下载目标选择、本地副本元数据、终态与 lease 校验。
 - **不做**：不支持路径直读，不在 A 历史保存 B 绝对路径，不截断后宣称完整预览；首版不远程编辑 B 成果。
-- **预计文件**：`controller/transfer.rs`、`file_access.rs` 的 opaque-ID 接口、`app/commands/artifacts.rs`/remote_control 命令适配、`src/features/artifacts/` 的复用接口与测试。
+- **预计文件**：`controller/transfer/download.rs`（本任务独占）、`file_access.rs` 的 opaque-ID 接口、独立 `app/commands/remote_control_artifact.rs`、`src/features/artifacts/` 的复用接口与测试；不修改 DEV-14 的 `core/limits/upload`。
 - **协议/数据**：artifact ID 绑定 connection/lease epoch/B session；A 本地只存名称、类型、大小、摘要、终态和已下载副本路径。
 - **测试**：列表、文本/图片/可视化预览、大文件 download-only、摘要失败、跨 session/lease ID、删除竞态、断线续传拒绝或明确重启、路径泄露扫描。
 - **验收**：只凭 B 路径无法访问成果；下载副本摘要一致；不支持/过大类型显示明确下载提示。
@@ -346,9 +383,9 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-F-005～008、RC-S-002、RC-S-007。
 - **建议提交**：`feat(remote-control): 支持远程成果交付`
 
-### DEV-17：权威事件 journal、快照恢复与 A 独立历史
+### DEV-19：权威事件 journal、快照恢复与 A 独立历史
 
-- **依赖**：DEV-12、DEV-14、DEV-15、DEV-16。
+- **依赖**：DEV-13、DEV-16、DEV-17、DEV-18。
 - **目标**：同步消息、流式输出、思考、工具、审批、错误、取消、附件和成果状态，并让 A 建立可离线查看、与 B 删除语义解耦的独立副本。
 - **范围**：per-lease/session event epoch+sequence、bounded journal、ACK/replay、gap→snapshot reset、事件去重、终态 CAS、认证后写入、A history versioned store、删除/归档、敏感字段清洗。
 - **不做**：不让 A 历史成为执行真相源，不把 B Session JSON 原样复制，不同步 API key/绝对路径/工具秘密。
@@ -360,9 +397,9 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-A-008、RC-F-007、RC-S-001～009、RC-T-002、RC-T-005。
 - **建议提交**：`feat(remote-control): 同步远程会话并保存副本`
 
-### DEV-18：前端桥、独立状态域与迟到结果防护
+### DEV-20：前端桥、独立状态域与迟到结果防护
 
-- **依赖**：DEV-09、DEV-10、DEV-17。
+- **依赖**：DEV-10、DEV-11、DEV-19。
 - **目标**：把 B、A 和远程历史 Tauri API 接入前端，同时保持现有 `webAccess` bridge/状态/策略不变。
 - **范围**：新增 feature bridge/domain adapter、`controlledDevice`/`controllerConnection`/`remoteHistories` 独立状态；监听 status/journal；intent sequence + generation/lease epoch 门；窗口隐藏与 transport 连接解耦；平台 capability。
 - **不做**：不在本任务完成视觉 UI；不把 desktop command 加进 Web `access-policy.json`；Web build 不获得桌面敏感 API。
@@ -374,23 +411,51 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-B-001、RC-B-005、RC-B-013～014、RC-A-004～006、RC-A-009、RC-S-003～006。
 - **建议提交**：`feat(remote-control): 接入桌面双端状态桥`
 
-### DEV-19：Windows 双端 UI、三语文案与可访问性
+### DEV-21：Windows B 被控端面板、三语与可访问性
 
-- **依赖**：DEV-11、DEV-13、DEV-14、DEV-15、DEV-16、DEV-18。
-- **目标**：交付 B 面板、A 连接入口和远程消息窗口的完整 Windows 用户旅程。
-- **范围**：B 开关/7 位码/秒级倒计时/刷新/状态/设备/模型来源/立即断开/只读审批；A 输入框/自动规范化/状态错误/短期凭证提示；远程会话明显标识、模型来源、能力/模式、审批、附件、成果、历史副本、显式断开；键盘、焦点、读屏、对比度和 reduced-motion。
-- **不做**：不把入口放到 macOS/Linux；不显示 key/B 绝对路径；不在 B 提供 Allow；不以关闭窗口代替断开。
-- **预计文件**：`src/features/remote-control/*.jsx`（新）、`src/app/main.jsx` 路由/窗口、`SettingsView.jsx` 的独立入口（如产品选址需要）、`src/shared/i18n/{zh,en,ja}.js`、样式和 smoke/a11y 测试。
-- **协议/数据**：服务端码错误统一显示“连接码无效或已失效”；倒计时以 Relay expiry 为基准但只作展示；状态文本不从未知枚举猜测。
-- **测试**：三语 key 完整、无新增单语硬编码、键盘全流程、焦点陷阱/恢复、ARIA live 倒计时节流、颜色之外状态、缩放/高对比、窗口关闭任务继续、B 无 Allow、模型/附件/成果旅程。
-- **验收**：两端用户无需开发工具完成所有主流程；远程/本地执行上下文不会混淆；非 Windows 无可操作入口且底层稳定 unsupported。
-- **风险**：单个视图过大。按连接壳、消息区、审批、传输卡片拆组件，共享业务状态而非复制现有 ChatView。
-- **需求映射**：RC-B-001～012、RC-A-001～010、RC-M-001～003、RC-C-002、RC-C-007～010、RC-F-001、RC-F-005、RC-F-008、RC-S-009。
-- **建议提交**：`feat(remote-control): 完成Windows双端远控界面`
+- **依赖**：DEV-10、DEV-15、DEV-16、DEV-20。
+- **目标**：独立交付 B 的桌面远程控制面板，不与现有 Web 分享设置混淆。
+- **范围**：开关、7 位码、秒级倒计时、刷新、全状态、主控设备/连接时间、模型来源、预授权工作区、立即断开、只读审批与停止任务；中文/英文/日文；键盘、焦点、读屏、对比度和 reduced-motion。
+- **不做**：不提供 Allow/Approve，不显示 key，不改 A 连接/会话 UI，不替换 `SettingsView` 的 Web 分享卡片。
+- **预计文件**：`src/features/remote-control/ControlledDevicePanel.jsx`（新）、B 面板子组件/状态测试、`src/shared/i18n/{zh,en,ja}.js` 的 `controlledDevice` 命名空间、入口路由/设置挂载。
+- **协议/数据**：码和倒计时只存在内存展示状态；状态由后端显式枚举映射；stop/refresh 交互保留 generation 防迟到写入。
+- **测试**：三语 key、无单语硬编码、倒计时 ARIA 节流、键盘操作、焦点恢复、高对比、B 无 Allow、刷新/停止竞态、非 Windows 隐藏。
+- **验收**：B 用户可完成开启、刷新、查看、停止和立即断开；Web 分享功能仍是独立入口；安全状态不只依赖颜色。
+- **风险**：Settings 页概念混淆。使用独立标题、说明和状态域，不复用 Web 二维码/分享文案。
+- **需求映射**：RC-B-001～012、RC-B-013～014、RC-C-010、RC-M-001～002。
+- **建议提交**：`feat(remote-control): 完成Windows被控端面板`
 
-### DEV-20：遥测、审计、安全扫描与运维指标
+### DEV-22：Windows A 连接壳、短期码提示与后台窗口语义
 
-- **依赖**：DEV-03～DEV-17（可随各任务增量开发，最终集中验收）。
+- **依赖**：DEV-11、DEV-20。
+- **目标**：独立交付 A 的“连接远程设备”入口、连接状态壳和后台连接/显式断开语义。
+- **范围**：7 位码输入、粘贴/大写/分隔符规范化、连接中/connected/offline/busy/统一无效码/版本错误、短期 bearer secret 提示、远程设备标识、关闭窗口与断开设备分离；三语和可访问性。
+- **不做**：不实现消息、模型、审批、附件或成果能力；不保存连接码或长期设备凭证。
+- **预计文件**：`src/features/remote-control/ConnectRemoteDeviceDialog.jsx`、`RemoteConnectionShell.jsx`（新）、`src/shared/i18n/{zh,en,ja}.js` 的 `controllerConnection` 命名空间、窗口路由和 smoke/a11y 测试。
+- **协议/数据**：仅本地格式错误给具体提示；所有服务端失效原因统一文案；关闭窗口只改变可见性，显式断开才调用 transport disconnect。
+- **测试**：输入法/粘贴/键盘、错误映射、统一码文案、窗口关闭后台存活、显式断开、焦点陷阱/恢复、读屏状态、三语、非 Windows 隐藏。
+- **验收**：A 可无 B 二次确认建立连接；关闭窗口不终止任务；断开后壳层不可发送/审批且明确安全收尾。
+- **风险**：用户长期保存短码。入口和错误恢复都提示向 B 获取当前码，不展示最近码历史。
+- **需求映射**：RC-A-001～007、RC-A-009～010。
+- **建议提交**：`feat(remote-control): 完成Windows主控连接界面`
+
+### DEV-23：Windows 远程会话能力 UI、三语与可访问性
+
+- **依赖**：DEV-13、DEV-15、DEV-16、DEV-17、DEV-18、DEV-19、DEV-20、DEV-22。
+- **目标**：在 A 连接壳内交付远程消息、模型、能力、审批、附件、成果和独立历史的完整 UI。
+- **范围**：远程 Session 创建/切换、显著远程标识、B/我的模型选择、模式/能力快照、流式/工具/错误/取消、A 审批、附件上传、成果预览/下载、离线副本；三语和键盘/读屏/焦点/高对比测试。
+- **不做**：不复制整套 ChatView 状态机，不显示 B 路径/Key，不允许 B Allow，不把 A 历史误标为在线 Session。
+- **预计文件**：`src/features/remote-control/RemoteConversationView.jsx` 及 model/permission/transfer/history 子组件（新）、`src/shared/i18n/{zh,en,ja}.js` 的 `remoteConversation` 命名空间、UI smoke/a11y 测试。
+- **协议/数据**：所有动作经 DEV-20 bridge；渲染事件需匹配当前 connection/lease/session；download-only、result unknown、offline copy 等状态使用明确文案。
+- **测试**：三语全旅程、模型可导出筛选、审批 allow/deny/timeout、附件/成果、journal reset、重复终态、离线历史、窗口隐藏、键盘与读屏、缩放/高对比。
+- **验收**：用户无需开发工具完成基础与完整能力旅程；远程/本地上下文始终可辨；所有安全失败均有可恢复提示。
+- **风险**：复用现有组件时耦合本地 bridge。抽取纯展示组件，业务调用保持 remote-control domain API。
+- **需求映射**：RC-A-005、RC-A-008、RC-M-001～003、RC-C-002、RC-C-005～010、RC-F-001、RC-F-005、RC-F-008、RC-S-002、RC-S-009。
+- **建议提交**：`feat(remote-control): 完成远程会话能力界面`
+
+### DEV-24：遥测、审计、安全扫描与运维指标
+
+- **依赖**：DEV-03、DEV-04、DEV-06、DEV-08、DEV-09、DEV-10、DEV-11、DEV-13、DEV-15、DEV-16、DEV-17、DEV-18、DEV-19（可在前置任务中增量埋点，最终由本任务统一 schema 与门禁）。
 - **目标**：复用现有行为遥测和 Relay 运维面，增加最小化远控漏斗、爆破/容量/恢复告警与凭证泄露门禁。
 - **范围**：受控事件枚举、客户端去重、Relay 聚合计数、配对/租约/恢复/任务/审批/传输成功率和延迟桶、限流告警、结构化 audit、日志 redaction、持久文件/抓包/崩溃信息哨兵扫描。
 - **不做**：不记录码、endpoint/lease/token/key、IP、设备名、prompt/回复/工具参数、文件名/路径/内容；不新建第二套 telemetry 管线。
@@ -402,9 +467,9 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 - **需求映射**：RC-P-006、RC-P-010～011、RC-M-007、RC-M-012、RC-C-008、RC-F-007、RC-S-007，以及需求第 16 节全部边界。
 - **建议提交**：`feat(remote-control): 增加安全遥测与审计`
 
-### DEV-21：公网部署迁移、灰度、真实双机 E2E 与发布门禁
+### DEV-25：公网部署迁移、灰度、真实双机 E2E 与发布门禁
 
-- **依赖**：DEV-02、DEV-19、DEV-20，以及其余 P0 任务完成。
+- **依赖**：DEV-02、DEV-21、DEV-22、DEV-23、DEV-24，以及其余 P0 任务完成。
 - **目标**：在两台隔离 Windows 设备和生产等价 Relay 拓扑上完成需求第 18.3 节全部旅程，并把 enrollment、回滚、安全和兼容检查固化到 CI/发布流程。
 - **范围**：feature flag；registry 覆盖率灰度；自托管升级说明；容量/限流/故障注入；真实旧 Relay + gateway；旧 Web fixture；双机安装包 E2E；密钥/凭证扫描；监控阈值、回滚 runbook 和证据归档。
 - **不做**：不绕过失败用例上线；不把 mock Relay 结果替代真实双机/真实旧二进制；不宣称抵御恶意 Relay 主动 MITM。
@@ -418,28 +483,135 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 
 ## 6. 需求 ID 覆盖矩阵
 
-下表用于防止任务拆分遗漏；“主任务”负责实现和定向验收，“回归任务”负责跨域复验。
+下表逐项指定唯一的主要实现 owner；括号内任务是该需求不可缺少、但不取代 owner 的前置实现。DEV-25 负责所有项目的跨域/公网回归，涉及敏感数据的条目同时由 DEV-24 做泄露门禁。
 
-| 需求组 | 主任务 | 回归任务 |
+| 需求 ID | 主要实现 owner | 必要协作或回归 |
 |---|---|---|
-| RC-B-001～012 | DEV-09、DEV-19 | DEV-21 |
-| RC-B-013～014 | DEV-08、DEV-09、DEV-18 | DEV-21 |
-| RC-B-015～018 | DEV-07、DEV-09 | DEV-21 |
-| RC-A-001～010 | DEV-10、DEV-19 | DEV-21 |
-| RC-P-001～006 | DEV-03 | DEV-20、DEV-21 |
-| RC-P-007～017 | DEV-03、DEV-04、DEV-06 | DEV-20、DEV-21 |
-| RC-P-018、RC-P-020 | DEV-05、DEV-06 | DEV-21 |
-| RC-P-019、RC-P-022～023 | DEV-01、DEV-02 | DEV-21 |
-| RC-P-021、RC-P-024 | DEV-03 | DEV-21 |
-| RC-L-001～007 | DEV-04、DEV-06 | DEV-09、DEV-10、DEV-21 |
-| RC-L-008～016 | DEV-07 | DEV-09、DEV-10、DEV-21 |
-| RC-T-001～012 | DEV-11、DEV-12 | DEV-13～DEV-17、DEV-21 |
-| RC-M-001～014 | DEV-13、DEV-19 | DEV-20、DEV-21 |
-| RC-C-001～004 | DEV-11、DEV-12 | DEV-21 |
-| RC-C-005～014 | DEV-14 | DEV-19～DEV-21 |
-| RC-F-001～004 | DEV-15 | DEV-19、DEV-21 |
-| RC-F-005～008 | DEV-16 | DEV-17、DEV-19、DEV-21 |
-| RC-S-001～009 | DEV-17 | DEV-18、DEV-19、DEV-21 |
+| RC-B-001 | DEV-21 | DEV-10、DEV-25 |
+| RC-B-002 | DEV-21 | DEV-03、DEV-10、DEV-25 |
+| RC-B-003 | DEV-10 | DEV-03、DEV-21、DEV-25 |
+| RC-B-004 | DEV-10 | DEV-09、DEV-16、DEV-21、DEV-25 |
+| RC-B-005 | DEV-10 | DEV-08、DEV-09、DEV-21、DEV-25 |
+| RC-B-006 | DEV-10 | DEV-21、DEV-24 |
+| RC-B-007 | DEV-10 | DEV-21、DEV-25 |
+| RC-B-008 | DEV-04 | DEV-10、DEV-25 |
+| RC-B-009 | DEV-04 | DEV-10、DEV-25 |
+| RC-B-010 | DEV-21 | DEV-15、DEV-24、DEV-25 |
+| RC-B-011 | DEV-12 | DEV-10、DEV-21、DEV-25 |
+| RC-B-012 | DEV-16 | DEV-10、DEV-21、DEV-25 |
+| RC-B-013 | DEV-10 | DEV-07、DEV-20、DEV-25 |
+| RC-B-014 | DEV-10 | DEV-03、DEV-06、DEV-20、DEV-25 |
+| RC-B-015 | DEV-08 | DEV-10、DEV-25 |
+| RC-B-016 | DEV-08 | DEV-10、DEV-25 |
+| RC-B-017 | DEV-08 | DEV-07、DEV-25 |
+| RC-B-018 | DEV-08 | DEV-05、DEV-07、DEV-25 |
+| RC-A-001 | DEV-22 | DEV-11、DEV-25 |
+| RC-A-002 | DEV-22 | DEV-00、DEV-25 |
+| RC-A-003 | DEV-11 | DEV-06、DEV-22、DEV-25 |
+| RC-A-004 | DEV-22 | DEV-00、DEV-11、DEV-25 |
+| RC-A-005 | DEV-23 | DEV-20、DEV-25 |
+| RC-A-006 | DEV-11 | DEV-22、DEV-25 |
+| RC-A-007 | DEV-11 | DEV-19、DEV-24、DEV-25 |
+| RC-A-008 | DEV-19 | DEV-23、DEV-25 |
+| RC-A-009 | DEV-22 | DEV-11、DEV-13、DEV-25 |
+| RC-A-010 | DEV-22 | DEV-03、DEV-25 |
+| RC-P-001 | DEV-03 | DEV-00、DEV-25 |
+| RC-P-002 | DEV-00 | DEV-03、DEV-21、DEV-22 |
+| RC-P-003 | DEV-03 | DEV-10、DEV-11、DEV-25 |
+| RC-P-004 | DEV-03 | DEV-21、DEV-25 |
+| RC-P-005 | DEV-03 | DEV-24、DEV-25 |
+| RC-P-006 | DEV-03 | DEV-24、DEV-25 |
+| RC-P-007 | DEV-04 | DEV-25 |
+| RC-P-008 | DEV-06 | DEV-03、DEV-04、DEV-25 |
+| RC-P-009 | DEV-04 | DEV-00、DEV-22、DEV-25 |
+| RC-P-010 | DEV-04 | DEV-24、DEV-25 |
+| RC-P-011 | DEV-03 | DEV-21、DEV-22、DEV-24 |
+| RC-P-012 | DEV-01 | DEV-03、DEV-25 |
+| RC-P-013 | DEV-04 | DEV-06、DEV-25 |
+| RC-P-014 | DEV-04 | DEV-03、DEV-06、DEV-10、DEV-25 |
+| RC-P-015 | DEV-03 | DEV-25 |
+| RC-P-016 | DEV-03 | DEV-10、DEV-25 |
+| RC-P-017 | DEV-03 | DEV-24、DEV-25 |
+| RC-P-018 | DEV-06 | DEV-05、DEV-25 |
+| RC-P-019 | DEV-01 | DEV-02、DEV-25 |
+| RC-P-020 | DEV-05 | DEV-06、DEV-25 |
+| RC-P-021 | DEV-03 | DEV-25 |
+| RC-P-022 | DEV-02 | DEV-01、DEV-25 |
+| RC-P-023 | DEV-02 | DEV-01、DEV-25 |
+| RC-P-024 | DEV-03 | DEV-25 |
+| RC-L-001 | DEV-06 | DEV-25 |
+| RC-L-002 | DEV-04 | DEV-06、DEV-25 |
+| RC-L-003 | DEV-06 | DEV-05、DEV-07、DEV-25 |
+| RC-L-004 | DEV-06 | DEV-07、DEV-13、DEV-16、DEV-19 |
+| RC-L-005 | DEV-09 | DEV-11、DEV-25 |
+| RC-L-006 | DEV-09 | DEV-10、DEV-25 |
+| RC-L-007 | DEV-04 | DEV-25 |
+| RC-L-008 | DEV-08 | DEV-09、DEV-10、DEV-25 |
+| RC-L-009 | DEV-09 | DEV-05、DEV-25 |
+| RC-L-010 | DEV-09 | DEV-08、DEV-25 |
+| RC-L-011 | DEV-09 | DEV-25 |
+| RC-L-012 | DEV-08 | DEV-09、DEV-10、DEV-25 |
+| RC-L-013 | DEV-09 | DEV-07、DEV-08、DEV-25 |
+| RC-L-014 | DEV-09 | DEV-08、DEV-25 |
+| RC-L-015 | DEV-08 | DEV-07、DEV-25 |
+| RC-L-016 | DEV-08 | DEV-25 |
+| RC-T-001 | DEV-13 | DEV-11、DEV-23、DEV-25 |
+| RC-T-002 | DEV-13 | DEV-19、DEV-25 |
+| RC-T-003 | DEV-13 | DEV-00、DEV-25 |
+| RC-T-004 | DEV-13 | DEV-25 |
+| RC-T-005 | DEV-13 | DEV-19、DEV-25 |
+| RC-T-006 | DEV-13 | DEV-23、DEV-25 |
+| RC-T-007 | DEV-13 | DEV-08、DEV-09、DEV-22、DEV-25 |
+| RC-T-008 | DEV-13 | DEV-00、DEV-14、DEV-15、DEV-17、DEV-25 |
+| RC-T-009 | DEV-13 | DEV-12、DEV-25 |
+| RC-T-010 | DEV-12 | DEV-13、DEV-23、DEV-25 |
+| RC-T-011 | DEV-12 | DEV-13、DEV-25 |
+| RC-T-012 | DEV-13 | DEV-10、DEV-25 |
+| RC-M-001 | DEV-15 | DEV-21、DEV-23、DEV-25 |
+| RC-M-002 | DEV-15 | DEV-13、DEV-25 |
+| RC-M-003 | DEV-15 | DEV-23、DEV-25 |
+| RC-M-004 | DEV-15 | DEV-24、DEV-25 |
+| RC-M-005 | DEV-15 | DEV-00、DEV-25 |
+| RC-M-006 | DEV-15 | DEV-00、DEV-13、DEV-25 |
+| RC-M-007 | DEV-15 | DEV-19、DEV-24、DEV-25 |
+| RC-M-008 | DEV-15 | DEV-10、DEV-13、DEV-25 |
+| RC-M-009 | DEV-15 | DEV-13、DEV-23、DEV-25 |
+| RC-M-010 | DEV-15 | DEV-25 |
+| RC-M-011 | DEV-15 | DEV-25 |
+| RC-M-012 | DEV-15 | DEV-19、DEV-24、DEV-25 |
+| RC-M-013 | DEV-15 | DEV-00、DEV-25 |
+| RC-M-014 | DEV-15 | DEV-24、DEV-25 |
+| RC-C-001 | DEV-12 | DEV-13、DEV-25 |
+| RC-C-002 | DEV-12 | DEV-23、DEV-24、DEV-25 |
+| RC-C-003 | DEV-12 | DEV-24、DEV-25 |
+| RC-C-004 | DEV-12 | DEV-13、DEV-16、DEV-25 |
+| RC-C-005 | DEV-16 | DEV-13、DEV-23、DEV-25 |
+| RC-C-006 | DEV-16 | DEV-23、DEV-25 |
+| RC-C-007 | DEV-16 | DEV-23、DEV-25 |
+| RC-C-008 | DEV-16 | DEV-24、DEV-25 |
+| RC-C-009 | DEV-16 | DEV-08、DEV-09、DEV-10、DEV-25 |
+| RC-C-010 | DEV-16 | DEV-21、DEV-23、DEV-25 |
+| RC-C-011 | DEV-16 | DEV-12、DEV-25 |
+| RC-C-012 | DEV-16 | DEV-00、DEV-25 |
+| RC-C-013 | DEV-16 | DEV-25 |
+| RC-C-014 | DEV-16 | DEV-10、DEV-13、DEV-25 |
+| RC-F-001 | DEV-17 | DEV-23、DEV-25 |
+| RC-F-002 | DEV-14 | DEV-17、DEV-25 |
+| RC-F-003 | DEV-14 | DEV-17、DEV-25 |
+| RC-F-004 | DEV-17 | DEV-13、DEV-25 |
+| RC-F-005 | DEV-18 | DEV-23、DEV-25 |
+| RC-F-006 | DEV-18 | DEV-14、DEV-25 |
+| RC-F-007 | DEV-18 | DEV-19、DEV-24、DEV-25 |
+| RC-F-008 | DEV-18 | DEV-23、DEV-25 |
+| RC-S-001 | DEV-19 | DEV-13、DEV-25 |
+| RC-S-002 | DEV-19 | DEV-13、DEV-16～DEV-18、DEV-23、DEV-25 |
+| RC-S-003 | DEV-19 | DEV-00、DEV-07、DEV-25 |
+| RC-S-004 | DEV-19 | DEV-25 |
+| RC-S-005 | DEV-19 | DEV-25 |
+| RC-S-006 | DEV-19 | DEV-05、DEV-24、DEV-25 |
+| RC-S-007 | DEV-19 | DEV-15、DEV-16、DEV-18、DEV-24 |
+| RC-S-008 | DEV-19 | DEV-23、DEV-25 |
+| RC-S-009 | DEV-19 | DEV-22、DEV-23、DEV-25 |
 
 ## 7. 每个任务的提交前检查
 
@@ -457,12 +629,29 @@ DEV-02 + DEV-19 + DEV-20 ── DEV-21 公网部署、迁移和双机 E2E
 
 ## 8. 测试与门禁矩阵
 
-### 8.1 公共门禁
+### 8.1 任务内定向反馈
+
+每个任务在开发循环中先运行其“测试”字段列出的最小定向集合，并至少追加：
+
+```bash
+git diff --check
+python scripts/architecture-guard.py
+```
+
+只改 Relay 时运行对应 `node --test remote-control-relay/test/<target>.test.js`；只改前端逻辑时运行对应 `node --test pinvou3-app/tests/<target>.test.mjs`；只改 Rust 时运行最窄模块过滤的 `cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml <target> -- --test-threads=1`。定向反馈用于快速定位，不能作为阶段出口或 PR 完整验证。
+
+### 8.2 阶段/PR 完整出口门禁
+
+任何第 9 节出口、发布候选或覆盖多个实现域的 PR，必须运行以下完整集合：
 
 ```bash
 npm --prefix remote-control-relay test
+npm --prefix pinvou3-app test
+npm --prefix pinvou3-app run build:ui
 npm --prefix pinvou3-app run test:webui
+cargo fmt --manifest-path pinvou3-app/src-tauri/Cargo.toml --all -- --check
 cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml remote_control:: -- --test-threads=1
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib
 python scripts/architecture-guard.py
 git diff --check
 ```
@@ -476,7 +665,9 @@ npm --prefix pinvou3-app run test:ui-language
 npm --prefix pinvou3-app run lint:ui
 ```
 
-### 8.2 分层验收责任
+完整出口不得因为定向测试已经覆盖相同行为而省略 `pinvou3-app test`、`build:ui` 或 `cargo test --lib`。涉及 Windows 私有运行时、安装包、部署/gateway 或系统网络故障注入时，还须运行对应 Windows 专属测试与 DEV-25 旅程。
+
+### 8.3 分层验收责任
 
 | 层级 | 最低证据 | 不能替代的证据 |
 |---|---|---|
@@ -489,9 +680,9 @@ npm --prefix pinvou3-app run lint:ui
 
 ## 9. 合入与灰度出口
 
-1. **协议出口**：DEV-00～DEV-07 完成，测试客户端能建立密文租约；旧 Web v2 全绿。
-2. **基础功能出口**：DEV-08～DEV-12、DEV-18 的 backend/bridge 完成，两台 Windows 可用 B 模型完成普通任务和安全断开。
-3. **完整能力出口**：DEV-13～DEV-17、DEV-19 完成，模型、审批、附件、成果、同步与历史形成闭环。
-4. **生产出口**：DEV-20～DEV-21 完成，enrollment 覆盖率、限流、告警、迁移、回滚和真实双机证据齐全。
+1. **协议出口**：DEV-00～DEV-09 完成，测试客户端能建立密文租约、证明 30 秒 watchdog 并完成无业务 provisional resume；旧 Web v2 全绿。
+2. **基础功能出口**：DEV-10～DEV-13、DEV-20、DEV-22 完成，两台 Windows 可用 B 模型完成普通任务、安全断开和后台窗口旅程。
+3. **完整能力出口**：DEV-14～DEV-19、DEV-21、DEV-23 完成，模型、审批、附件、成果、同步与历史形成闭环。
+4. **生产出口**：DEV-24～DEV-25 完成，enrollment 覆盖率、限流、告警、迁移、回滚和真实双机证据齐全。
 
 任何出口存在以下情况时必须阻断：未 enrolled 公网首次注册可成功；Web/controller 可互相顶替；Relay 可见业务明文/API key；B 可 Allow；30 秒预算可被 B 心跳、重试或网络检测额外延长；旧 token/generation/lease 可复活；任务重试产生重复副作用；裸 v2 可被回滚上线。
