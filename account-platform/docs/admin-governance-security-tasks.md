@@ -3,7 +3,7 @@
 GSA-07 发布约束入口：[审批授权 Relay 手册](../deploy/runbooks/approval-authorization-relay.md)。该手册不构成代码审核通过、环境验收或部署完成证据。
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED并以`0dd3d481`提交；GSA-04代码已完成且B代码审核通过、以`0c9db1e2`提交，环境验收待补；GSA-05协议文档以`16895b97`提交，Provider p2兼容事实修订以`4e06e225`提交，代码获B最终APPROVED并以`cad7f48f`提交；GSA-06代码、迁移与测试已获B代码审核PASS并以`a18397c4`提交，但受依赖环境欠账约束保持IN_PROGRESS；GSA-07设计以`15e7feff`提交，代码、迁移与测试已获B代码审核PASS并以`410d7db0`提交，但受依赖环境欠账约束保持IN_PROGRESS；GSA-08实施细化已获B审核PLAN_APPROVED、产品实施待开始，其余PENDING，均NOT_DEPLOYED。
+> 本任务拆分：身份 B 复审 PASS，提交`90b2ea08`；GSA-01 DONE / B审核PASS并以`88d37a53`提交，GSA-02 DESIGN DONE / B审核APPROVED并以`b8216c97`提交，GSA-03 DONE / B审核APPROVED并以`0dd3d481`提交；GSA-04代码已完成且B代码审核通过、以`0c9db1e2`提交，环境验收待补；GSA-05协议文档以`16895b97`提交，Provider p2兼容事实修订以`4e06e225`提交，代码获B最终APPROVED并以`cad7f48f`提交；GSA-06代码、迁移与测试已获B代码审核PASS并以`a18397c4`提交，但受依赖环境欠账约束保持IN_PROGRESS；GSA-07设计以`15e7feff`提交，代码、迁移与测试已获B代码审核PASS并以`410d7db0`提交，但受依赖环境欠账约束保持IN_PROGRESS；GSA-08实施细化已获B审核PLAN_APPROVED，产品实施为IMPLEMENTATION_IN_PROGRESS，首轮原始消息处理基础已提交`1614d1d7`待B审结，尚不代表完整任务通过；其余PENDING，均NOT_DEPLOYED。
 
 ## 1. 所有权与执行规则
 
