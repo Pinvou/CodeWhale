@@ -532,6 +532,16 @@
         "file": "000053_approval_consumer_delivery.up.sql",
         "version": 53,
         "sha256": "493966cdca26e837e4144b4758e6478513766fde052385ba7b1b1222e551f791"
+      },
+      {
+        "file": "000054_approval_consumer_delivery_hardening.down.sql",
+        "version": 54,
+        "sha256": "e62dd40acb206d4d9eab4b02a7c925ebac4a7d840158d8203d05fb0577af9396"
+      },
+      {
+        "file": "000054_approval_consumer_delivery_hardening.up.sql",
+        "version": 54,
+        "sha256": "248f63c0b7f600df196e5a1b57b9b077c8b06bbe1eaef354eb2a6695ab29dbd7"
       }
     ],
     "billing": [

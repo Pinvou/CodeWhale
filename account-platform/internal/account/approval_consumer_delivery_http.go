@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/google/uuid"
 )
@@ -15,7 +16,7 @@ type approvalConsumerDeliveryRepository interface {
 	GrantApprovalAuthorizationDomainAttempt(context.Context, uuid.UUID, string, string, int64) (ApprovalDeliveryState, error)
 	RecordApprovalAuthorizationDomainFailure(context.Context, uuid.UUID, string, string, int64, string) (ApprovalDeliveryState, error)
 	RecordApprovalAuthorizationResult(context.Context, uuid.UUID, string, string, int64) (ApprovalDeliveryState, error)
-	RecordApprovalAuthorizationDLQPubAck(context.Context, uuid.UUID, string, string, int64, string, int64) (ApprovalDeliveryState, error)
+	RecordApprovalAuthorizationDLQPubAck(context.Context, uuid.UUID, string, string, int64, string, approvalconsumer.Sequence) (ApprovalDeliveryState, error)
 	RecordApprovalAuthorizationTerminal(context.Context, uuid.UUID, string, string, int64) (ApprovalDeliveryState, error)
 }
 
@@ -70,18 +71,18 @@ func (s *Service) observeApprovalAuthorizationDelivery(w http.ResponseWriter, r 
 		return
 	}
 	var body struct {
-		ApprovalRequestID      uuid.UUID `json:"approval_request_id"`
-		ApprovedRequestVersion int64     `json:"approved_request_version"`
-		ApprovalEpoch          int64     `json:"approval_epoch"`
-		SerializationVersion   string    `json:"serialization_version"`
-		Provenance             string    `json:"provenance"`
-		EventDigest            string    `json:"event_digest"`
-		DigestKind             string    `json:"digest_kind"`
-		CommandType            string    `json:"command_type"`
-		PolicyVersion          int64     `json:"policy_version"`
-		ExecutorIdentity       string    `json:"executor_identity"`
-		Stream                 string    `json:"stream"`
-		StreamSequence         int64     `json:"stream_sequence"`
+		ApprovalRequestID      uuid.UUID                 `json:"approval_request_id"`
+		ApprovedRequestVersion int64                     `json:"approved_request_version"`
+		ApprovalEpoch          int64                     `json:"approval_epoch"`
+		SerializationVersion   string                    `json:"serialization_version"`
+		Provenance             string                    `json:"provenance"`
+		EventDigest            string                    `json:"event_digest"`
+		DigestKind             string                    `json:"digest_kind"`
+		CommandType            string                    `json:"command_type"`
+		PolicyVersion          int64                     `json:"policy_version"`
+		ExecutorIdentity       string                    `json:"executor_identity"`
+		Stream                 string                    `json:"stream"`
+		StreamSequence         approvalconsumer.Sequence `json:"stream_sequence"`
 	}
 	if api.DecodeJSON(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_AUTHORIZATION_DELIVERY", "invalid approval authorization delivery request", httpserver.RequestID(r.Context()))
@@ -155,9 +156,9 @@ func (s *Service) recordApprovalAuthorizationDLQPubAck(w http.ResponseWriter, r 
 		return
 	}
 	var body struct {
-		ExpectedVersion int64  `json:"expected_version"`
-		MessageID       string `json:"message_id"`
-		StreamSequence  int64  `json:"stream_sequence"`
+		ExpectedVersion int64                     `json:"expected_version"`
+		MessageID       string                    `json:"message_id"`
+		StreamSequence  approvalconsumer.Sequence `json:"stream_sequence"`
 	}
 	if api.DecodeJSON(w, r, &body) != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_AUTHORIZATION_DELIVERY", "invalid approval authorization delivery request", httpserver.RequestID(r.Context()))

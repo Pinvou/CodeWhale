@@ -26,7 +26,7 @@ func newApprovalDeliveryIntegrationDatabase(t *testing.T) (*approvalAuthorizatio
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err = approvalDeliveryBaselineMigrations(loaded)
+	loaded, err = approvalDeliveryCurrentMigrations(loaded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +63,15 @@ func approvalDeliveryBaselineMigrations(loaded []migrations.Migration) ([]migrat
 	return nil, errors.New("consumer integration fixture requires Account migration 53")
 }
 
+func approvalDeliveryCurrentMigrations(loaded []migrations.Migration) ([]migrations.Migration, error) {
+	for index, migration := range loaded {
+		if migration.Version == 54 {
+			return loaded[:index+1], nil
+		}
+	}
+	return nil, errors.New("consumer integration fixture requires Account migration 54")
+}
+
 func TestApprovalDeliveryHistoricalMigrationBoundary(t *testing.T) {
 	for _, versions := range [][]int64{{52, 53}, {52, 53, 54, 55}} {
 		loaded := make([]migrations.Migration, len(versions))
@@ -79,6 +88,19 @@ func TestApprovalDeliveryHistoricalMigrationBoundary(t *testing.T) {
 	}
 	if _, err := approvalDeliveryBaselineMigrations([]migrations.Migration{{Version: 52}, {Version: 54}}); err == nil {
 		t.Fatal("missing consumer baseline accepted")
+	}
+	for _, versions := range [][]int64{{53, 54}, {53, 54, 55, 56}} {
+		loaded := make([]migrations.Migration, len(versions))
+		for index, version := range versions {
+			loaded[index] = migrations.Migration{Version: version, UpSQL: "original up", DownSQL: "original down", Checksum: "original checksum"}
+		}
+		current, err := approvalDeliveryCurrentMigrations(loaded)
+		if err != nil || len(current) != 2 || current[1] != loaded[1] || current[1].Version != 54 {
+			t.Fatal("consumer current boundary changed")
+		}
+	}
+	if _, err := approvalDeliveryCurrentMigrations([]migrations.Migration{{Version: 53}, {Version: 55}}); err == nil {
+		t.Fatal("missing consumer hardening accepted")
 	}
 }
 
@@ -129,7 +151,7 @@ func TestApprovalDeliveryMigrationSmokeIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	var version, rows int64
-	if err := db.adminPool.QueryRow(ctx, `SELECT max(version) FROM public.schema_migrations`).Scan(&version); err != nil || version != 53 {
+	if err := db.adminPool.QueryRow(ctx, `SELECT max(version) FROM public.schema_migrations`).Scan(&version); err != nil || version != 54 {
 		t.Fatalf("schema version=%d err=%v", version, err)
 	}
 	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM account_approval_authorization.approval_delivery_states`).Scan(&rows); err != nil || rows != 0 {

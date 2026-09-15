@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 )
 
 // Concurrent physical deliveries must share one durable attempt ledger. The
@@ -48,7 +50,7 @@ func TestApprovalDeliveryConcurrentAttemptCASIntegration(t *testing.T) {
 	}
 	// The same event may reappear outside the broker deduplication window with
 	// another sequence; it must neither gain another grant nor reset the anchor.
-	for _, sequence := range []int64{42, 99, 100} {
+	for _, sequence := range []approvalconsumer.Sequence{42, 99, 100} {
 		if got := observeApprovalDelivery(t, ctx, repository, binding, sequence); got != want {
 			t.Fatalf("physical redelivery reset state: %+v", got)
 		}

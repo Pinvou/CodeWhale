@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -57,7 +58,7 @@ FROM public.resolve_approval_authorization_binding($1,$2,$3)`, eventID, durable,
 	return binding
 }
 
-func observeApprovalDelivery(t *testing.T, ctx context.Context, repository *PostgresRepository, binding ApprovalAuthorizationBinding, sequence int64) ApprovalDeliveryState {
+func observeApprovalDelivery(t *testing.T, ctx context.Context, repository *PostgresRepository, binding ApprovalAuthorizationBinding, sequence approvalconsumer.Sequence) ApprovalDeliveryState {
 	t.Helper()
 	state, err := repository.ObserveApprovalAuthorizationDelivery(ctx, ApprovalDeliveryObservation{
 		Binding: binding, Stream: "ACCOUNT_PLATFORM", StreamSequence: sequence,
@@ -182,5 +183,84 @@ func TestApprovalAuthorizationBindingRejectsUnknownPhysicalIdentity(t *testing.T
 	if validApprovalAuthorizationLookup(uuid.New(), " billing-wallet-adjustment-executor-p1-v1", "billing-command-executor") ||
 		validApprovalAuthorizationLookup(uuid.New(), "billing-wallet-adjustment-executor-p1-v1", "billing-command-executor\n") {
 		t.Fatal("noncanonical physical delivery identity was accepted")
+	}
+}
+
+func TestApprovalDeliverySequenceUint64Integration(t *testing.T) {
+	db, repository, relay, _ := newApprovalDeliveryIntegrationDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	for _, sequence := range []approvalconsumer.Sequence{
+		1,
+		approvalconsumer.Sequence(9007199254740993),
+		approvalconsumer.Sequence(9223372036854775808),
+		approvalconsumer.Sequence(^uint64(0)),
+	} {
+		binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+		state := observeApprovalDelivery(t, ctx, repository, binding, sequence)
+		if state != (ApprovalDeliveryState{State: "READY", Version: 1}) {
+			t.Fatalf("sequence=%s state=%+v", sequence.String(), state)
+		}
+		var stored string
+		if err := db.adminPool.QueryRow(ctx, `SELECT stream_sequence::TEXT FROM account_approval_authorization.approval_delivery_states
+WHERE original_event_id=$1 AND durable=$2`, binding.EventID, binding.Durable).Scan(&stored); err != nil || stored != sequence.String() {
+			t.Fatalf("sequence=%s stored=%s err=%v", sequence.String(), stored, err)
+		}
+	}
+
+	binding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	for _, invalid := range []string{"0", "-1", "1.5", "18446744073709551616", "NaN", "Infinity"} {
+		_, err := db.runtimePool.Exec(ctx, `SELECT * FROM public.observe_approval_authorization_delivery(
+$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::NUMERIC,$12,$13,$14)`,
+			binding.EventID, binding.Durable, binding.Workload, binding.EventDigest, binding.DigestKind,
+			binding.SerializationVersion, binding.Provenance, binding.ApprovedRequestVersion, binding.ApprovalEpoch,
+			"ACCOUNT_PLATFORM", invalid, binding.CommandType, binding.PolicyVersion, binding.ExecutorIdentity)
+		if postgresSQLState(err) != "42501" {
+			t.Fatalf("invalid sequence=%s state=%s err=%v", invalid, postgresSQLState(err), err)
+		}
+	}
+	var rows int64
+	if err := db.adminPool.QueryRow(ctx, `SELECT count(*) FROM account_approval_authorization.approval_delivery_states
+WHERE original_event_id=$1 AND durable=$2`, binding.EventID, binding.Durable).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("invalid sequences changed state rows=%d err=%v", rows, err)
+	}
+
+	dlqBinding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
+	dlqState := observeApprovalDelivery(t, ctx, repository, dlqBinding, approvalconsumer.Sequence(91))
+	var err error
+	for attempt := 0; attempt < 12; attempt++ {
+		dlqState, err = repository.GrantApprovalAuthorizationDomainAttempt(ctx, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dlqState, err = repository.RecordApprovalAuthorizationDomainFailure(ctx, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version, "DOMAIN_REJECTED")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	dlqMessageID := dlqBinding.EventID.String() + ":" + dlqBinding.Durable + ":dead-letter"
+	for _, invalid := range []string{"0", "1.5", "18446744073709551616", "NaN", "Infinity"} {
+		_, err := db.runtimePool.Exec(ctx, `SELECT * FROM public.record_approval_authorization_dlq_puback(
+$1,$2,$3,$4,$5,$6::NUMERIC)`, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version, dlqMessageID, invalid)
+		if postgresSQLState(err) != "42501" {
+			t.Fatalf("invalid DLQ sequence=%s state=%s err=%v", invalid, postgresSQLState(err), err)
+		}
+		var persisted ApprovalDeliveryState
+		if err := db.adminPool.QueryRow(ctx, `SELECT domain_attempt_count,state,version
+FROM account_approval_authorization.approval_delivery_states WHERE original_event_id=$1 AND durable=$2`,
+			dlqBinding.EventID, dlqBinding.Durable).Scan(&persisted.DomainAttemptCount, &persisted.State, &persisted.Version); err != nil || persisted != dlqState {
+			t.Fatalf("invalid DLQ sequence changed CAS state=%+v want=%+v err=%v", persisted, dlqState, err)
+		}
+	}
+	maximum := approvalconsumer.Sequence(^uint64(0))
+	dlqState, err = repository.RecordApprovalAuthorizationDLQPubAck(ctx, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version, dlqMessageID, maximum)
+	if err != nil || dlqState.State != "DLQ_PUBLISHED_ACK_PENDING" {
+		t.Fatalf("maximum DLQ sequence state=%+v err=%v", dlqState, err)
+	}
+	var storedDLQ string
+	if err := db.adminPool.QueryRow(ctx, `SELECT dlq_stream_sequence::TEXT
+FROM account_approval_authorization.approval_delivery_states WHERE original_event_id=$1 AND durable=$2`,
+		dlqBinding.EventID, dlqBinding.Durable).Scan(&storedDLQ); err != nil || storedDLQ != maximum.String() {
+		t.Fatalf("maximum DLQ sequence stored=%s err=%v", storedDLQ, err)
 	}
 }

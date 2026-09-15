@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalconsumer"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -34,7 +35,7 @@ type ApprovalAuthorizationBinding struct {
 type ApprovalDeliveryObservation struct {
 	Binding        ApprovalAuthorizationBinding `json:"binding"`
 	Stream         string                       `json:"stream"`
-	StreamSequence int64                        `json:"stream_sequence"`
+	StreamSequence approvalconsumer.Sequence    `json:"stream_sequence"`
 }
 
 type ApprovalDeliveryState struct {
@@ -66,14 +67,14 @@ FROM public.resolve_approval_authorization_binding($1,$2,$3)`, binding.EventID, 
 
 func (r *PostgresRepository) ObserveApprovalAuthorizationDelivery(ctx context.Context, observation ApprovalDeliveryObservation) (ApprovalDeliveryState, error) {
 	binding := observation.Binding
-	if !validApprovalAuthorizationBinding(binding) || observation.Stream != "ACCOUNT_PLATFORM" || observation.StreamSequence <= 0 {
+	if !validApprovalAuthorizationBinding(binding) || observation.Stream != "ACCOUNT_PLATFORM" || observation.StreamSequence == 0 {
 		return ApprovalDeliveryState{}, ErrApprovalConsumerBindingInvalid
 	}
 	return scanApprovalDeliveryState(ctx, r.pool.QueryRow(ctx, `SELECT domain_attempt_count,state,version
-FROM public.observe_approval_authorization_delivery($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+FROM public.observe_approval_authorization_delivery($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::NUMERIC,$12,$13,$14)`,
 		binding.EventID, binding.Durable, binding.Workload, binding.EventDigest, binding.DigestKind,
 		binding.SerializationVersion, binding.Provenance, binding.ApprovedRequestVersion, binding.ApprovalEpoch,
-		observation.Stream, observation.StreamSequence, binding.CommandType, binding.PolicyVersion, binding.ExecutorIdentity))
+		observation.Stream, observation.StreamSequence.String(), binding.CommandType, binding.PolicyVersion, binding.ExecutorIdentity))
 }
 
 func (r *PostgresRepository) GrantApprovalAuthorizationDomainAttempt(ctx context.Context, eventID uuid.UUID, durable, workload string, expectedVersion int64) (ApprovalDeliveryState, error) {
@@ -108,13 +109,13 @@ func (r *PostgresRepository) RecordApprovalAuthorizationTerminal(ctx context.Con
 FROM public.record_approval_authorization_terminal($1,$2,$3,$4)`, eventID, durable, workload, expectedVersion))
 }
 
-func (r *PostgresRepository) RecordApprovalAuthorizationDLQPubAck(ctx context.Context, eventID uuid.UUID, durable, workload string, expectedVersion int64, messageID string, streamSequence int64) (ApprovalDeliveryState, error) {
-	if !validApprovalAuthorizationLookup(eventID, durable, workload) || expectedVersion <= 0 || streamSequence <= 0 ||
+func (r *PostgresRepository) RecordApprovalAuthorizationDLQPubAck(ctx context.Context, eventID uuid.UUID, durable, workload string, expectedVersion int64, messageID string, streamSequence approvalconsumer.Sequence) (ApprovalDeliveryState, error) {
+	if !validApprovalAuthorizationLookup(eventID, durable, workload) || expectedVersion <= 0 || streamSequence == 0 ||
 		!boundedApprovalConsumerString(messageID, 240) || messageID != eventID.String()+":"+durable+":dead-letter" {
 		return ApprovalDeliveryState{}, ErrApprovalConsumerBindingInvalid
 	}
 	return scanApprovalDeliveryState(ctx, r.pool.QueryRow(ctx, `SELECT domain_attempt_count,state,version
-FROM public.record_approval_authorization_dlq_puback($1,$2,$3,$4,$5,$6)`, eventID, durable, workload, expectedVersion, messageID, streamSequence))
+FROM public.record_approval_authorization_dlq_puback($1,$2,$3,$4,$5,$6::NUMERIC)`, eventID, durable, workload, expectedVersion, messageID, streamSequence.String()))
 }
 
 func validateApprovalAuthorizationBegin(ctx context.Context, tx pgx.Tx, binding ApprovalAuthorizationBinding) error {
