@@ -91,7 +91,7 @@ DEV-13 ───────────┬─ DEV-15 临时模型包
 DEV-14 ───────────┬─ DEV-17 附件上传
                   └─ DEV-18 成果下载
 DEV-13 + DEV-16 + DEV-17 + DEV-18 ── DEV-19 journal 与 A 独立历史
-DEV-10 + DEV-11 + DEV-15 + DEV-19 ── DEV-20 Tauri 注册、前端桥与状态域
+DEV-10 + DEV-11 + DEV-12 + DEV-15 + DEV-19 ── DEV-20 Tauri 注册、前端桥与状态域
 DEV-10 + DEV-15 + DEV-16 + DEV-20 ── DEV-21 B 面板
 DEV-11 + DEV-20 + DEV-21 ─────────── DEV-22 A 连接壳
 DEV-13 + DEV-15..DEV-20 + DEV-22 ── DEV-23 远程会话能力 UI
@@ -111,7 +111,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 | 3A：业务入口 | DEV-12；完成后 DEV-13 | 能力/工作区先于任务接纳，任务 ledger 再成为扩展点 |
 | 3B：业务扩展 | DEV-14、DEV-15、DEV-16 可并行（均等待 DEV-13）；DEV-14 完成后 DEV-17、DEV-18 可并行 | transfer core 先冻结，模型/审批/附件/成果各自闭环且不争用共享文件 |
 | 3C：同步 | DEV-19（等待 DEV-13、DEV-16～DEV-18） | journal、快照和 A 独立历史覆盖全部业务事件 |
-| 4A：Tauri/前端基座 | DEV-20（等待 DEV-10、DEV-11、DEV-15、DEV-19） | 单一任务注册所有 desktop commands，独立 B/A/history/model 状态域接入且 Web bridge 不变 |
+| 4A：Tauri/前端基座 | DEV-20（等待 DEV-10、DEV-11、DEV-12、DEV-15、DEV-19） | 单一任务注册所有 desktop commands，独立 B/A/capability/history/model 状态域接入且 Web bridge 不变 |
 | 4B：分面 UI | DEV-21；完成后 DEV-22；完成后 DEV-23 | 三个任务因共享 `main.jsx` 与三语 i18n 中央文件而严格串行，各自仍可独立验收 |
 | 4C：生产门禁 | DEV-24（等待 DEV-23 与全部后端领域） | 最小化遥测、审计、泄露扫描和最终 UI 事件门禁就绪 |
 | 5：公网交付 | DEV-25 | 迁移、灰度、回滚、真实双机 E2E 全部通过 |
@@ -123,7 +123,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 | `remote-control-relay/server.js` / controller router | DEV-06 | DEV-01～04 只交付独立 handler/store；DEV-08/09 使用 DEV-06 预挂载 hook；DEV-24 依赖 DEV-20 且只串行追加审计，不改路由拓扑 |
 | `remote-control-relay/PROTOCOL.md` | DEV-00，DEV-06 串行落实 | 其他并行任务只引用冻结 schema/fixture，不各自改协议中央文档 |
 | Relay 持久化公共接口 | DEV-01 | DEV-03 仅通过 namespace API 写 tombstone；DEV-02 不改 store；接口不足先创建串行契约修订任务 |
-| `pinvou3-app/src-tauri/src/app/commands/mod.rs` | DEV-07 | DEV-07 一次性声明八个 desktop command 子模块；DEV-10/11/13/15～19 只编辑各自预留文件 |
+| `pinvou3-app/src-tauri/src/app/commands/mod.rs` | DEV-07 | DEV-07 一次性声明九个 desktop command 子模块；DEV-10/11/12/13/15～19 只编辑各自预留文件 |
 | `pinvou3-app/src-tauri/src/lib.rs` 的 command/state 注册 | DEV-20 | 所有 backend command 先以模块单测独立验收，最终只由 DEV-20 一次性注册，不允许并行任务修改 invoke 列表 |
 | `controller/task.rs` 与业务扩展 trait | DEV-13 | DEV-15～18 只实现 model/permission/upload/download 扩展，不回改 task core |
 | `controller/transfer/{core,limits,mod}.rs` | DEV-14 | DEV-17/18 分别独占 `upload.rs`/`download.rs`；共享契约变化必须先串行修订 DEV-14 |
@@ -239,7 +239,7 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **目标**：在不改变现有 WebAccess API 的前提下，先建立 A/B 共用的有界 Relay transport、controller frame dispatch 和独立状态所有者接口，成为 liveness 与 resume 的唯一网络承载层。
 - **范围**：从当前 `relay_client.rs` 提取可复用连接原语；为 controller 增加有界收发队列、优先级/背压、敏感帧专用序列化、取消 token、事件 sink；明确 Web manager、B manager、A manager 生命周期；提供 transport clock/RTT 注入点；一次性声明 controller feature 与 desktop command 子模块槽和任务扩展 trait。
 - **不做**：不实现具体配对、liveness、watchdog 或 resume；不改 Web `access-policy.json`；不把 controller 状态加入 `WebAccessStatusKind`。
-- **预计文件**：`features/remote_control/mod.rs`、`relay_client.rs`、`controller/{mod,relay_transport}.rs`（新）、预留的 `controller/{liveness,resume,controlled,controlling,task,temporary_model,permission,journal,history}.rs` 与 `controller/transfer/mod.rs` 可编译槽、`app/commands/mod.rs`（本功能唯一一次模块声明）、预留的 `desktop_remote_{controlled,controller,task,model,permission,attachment,artifact,history}.rs` 可编译模块和 transport 单测。本任务独占 `relay_transport.rs`/`relay_client.rs`/两个中央 `mod.rs`；后续任务分别只实现已分配子模块，DEV-20 独占 `lib.rs` 最终注册。
+- **预计文件**：`features/remote_control/mod.rs`、`relay_client.rs`、`controller/{mod,relay_transport}.rs`（新）、预留的 `controller/{liveness,resume,controlled,controlling,capabilities,task,temporary_model,permission,journal,history}.rs` 与 `controller/transfer/mod.rs` 可编译槽、`app/commands/mod.rs`（本功能唯一一次模块声明）、预留的 `desktop_remote_{controlled,controller,capabilities,task,model,permission,attachment,artifact,history}.rs` 九个可编译 command 模块和 transport 单测。本任务独占 `relay_transport.rs`/`relay_client.rs`/两个中央 `mod.rs`；后续任务分别只实现已分配子模块，DEV-20 独占 `lib.rs` 最终注册。
 - **协议/数据**：业务帧只接受已认证 lease context；队列上限不得宽于现有 Relay 帧与字节预算；断线事件带 generation/lease epoch；控制帧和业务帧分队列且都受总字节预算。
 - **测试**：队列满、敏感帧过大、取消、重连、消息优先级、RTT 采样、旧 generation/epoch frame 丢弃；现有 remote_control Rust 测试和 Web contract 不回归。
 - **验收**：三个状态域可独立启动/停止；controller transport 未连接时不能调用 Web RPC 后门；现有 Web 分享行为兼容；后续模块无需编辑 transport 内部实现。
@@ -309,10 +309,10 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 - **目标**：让 A 只看到 B 当前允许的普通/代码模式、工具/Skill 摘要和预授权工作区能力，不暴露私有文件或凭证。
 - **范围**：能力快照 schema/revision/过期；从现有 bundle readiness、AcpPool agent/mode、工具与 Skill 启用状态投影；工作区用 opaque ID 而不是路径；B 策略变化时撤销或刷新能力。
 - **不做**：不传 A 的 Skill/安装包，不允许 A 修改 B 工具配置，不扩大现有 workspace grant。
-- **预计文件**：`controller/capabilities.rs`（新）、`manager/workspace_grants.rs`、Codex ACP 只读接口、Tauri 命令和 fixture 测试。
+- **预计文件**：DEV-07 预留的 `controller/capabilities.rs` 与 `app/commands/desktop_remote_capabilities.rs`（本任务独占实现）、`manager/workspace_grants.rs`、Codex ACP 只读接口和任务专属 fixture 测试；不修改 `features/remote_control/mod.rs`、`app/commands/mod.rs`、现有 `remote_control.rs` 或 `lib.rs`。
 - **协议/数据**：快照绑定 connection/lease epoch/generation，字段 allowlist；不含绝对路径、Skill 正文、环境变量、工具凭证。
-- **测试**：普通/代码模式显隐、未授权工作区、策略变更、快照过期/跨租约、凭证/路径扫描、缺失能力安全降级。
-- **验收**：A 不能构造未声明 mode 或路径；B 既有权限策略仍是执行上限；快照正文符合最小化清单。
+- **测试**：能力 command 的字段 allowlist 与序列化 contract、普通/代码模式显隐、未授权工作区、策略变更、快照 revision、过期/跨租约、凭证/路径扫描、缺失能力安全降级；中央 module/`lib.rs` 保持未改。
+- **验收**：独立 command 模块可由 DEV-20 直接注册；A 不能构造未声明 mode 或路径；B 既有权限策略仍是执行上限；快照正文符合最小化清单且不含 Skill 私有内容。
 - **风险**：把展示能力误当授权。任务接纳时 B 必须重新校验，不能只信快照。
 - **需求映射**：RC-B-011、RC-T-009～011、RC-C-001～004、RC-C-011。
 - **建议提交**：`feat(remote-control): 发布受控能力快照`
@@ -417,14 +417,14 @@ DEV-02 + DEV-21 + DEV-22 + DEV-23 + DEV-24 ── DEV-25 公网交付 E2E
 
 ### DEV-20：前端桥、独立状态域与迟到结果防护
 
-- **依赖**：DEV-10、DEV-11、DEV-15、DEV-19。
-- **目标**：由单一整合任务注册全部 desktop Tauri commands，把 B、A、临时模型和远程历史 API 接入前端，同时保持现有 `webAccess` bridge/状态/策略不变。
-- **范围**：在 `lib.rs` 一次性注册 DEV-10/11/13/15～19 已实现的独立 command 模块；新增 feature bridge/domain adapter；建立 `controlledDevice`/`controllerConnection`/`remoteModels`/`remoteHistories` 独立状态；监听 status/journal；intent sequence + generation/lease epoch 门；窗口隐藏与 transport 连接解耦；冻结“列出可导出模型描述 → 只提交 selected model ID + 稳定 task/request ID → Rust 解析凭证、构造 v1 包并与任务原子提交”的 bridge contract。
+- **依赖**：DEV-10、DEV-11、DEV-12、DEV-15、DEV-19。
+- **目标**：由单一整合任务注册全部 desktop Tauri commands，把 B、A、能力快照、临时模型和远程历史 API 接入前端，同时保持现有 `webAccess` bridge/状态/策略不变。
+- **范围**：在 `lib.rs` 一次性注册 DEV-10、DEV-11、DEV-12、DEV-13、DEV-15、DEV-16、DEV-17、DEV-18、DEV-19 已实现的九个独立 command 模块；新增 feature bridge/domain adapter；建立 `controlledDevice`/`controllerConnection`/`remoteCapabilities`/`remoteModels`/`remoteHistories` 独立状态；冻结“按当前 connection/lease/revision 读取能力快照”的 bridge contract；监听 status/journal；intent sequence + generation/lease epoch 门；窗口隐藏与 transport 连接解耦；冻结“列出可导出模型描述 → 只提交 selected model ID + 稳定 task/request ID → Rust 解析凭证、构造 v1 包并与任务原子提交”的 bridge contract。
 - **不做**：不在本任务完成视觉 UI；不让 JS 接触 API key、credential_ref 或完整 `SavedModel`；不在 bridge 中构造模型包；不把 desktop command 加进 Web `access-policy.json`；Web build 不获得桌面敏感 API。
 - **预计文件**：`pinvou3-app/src-tauri/src/lib.rs`（本功能中央 command 注册的唯一 owner）、`src/platform/tauri/bridge/desktop-remote-control.js`（新）、`src/platform/tauri/bridge.js`、`src/features/remote-control/remote-control-state.js`（新）、`src/shared/platform.js`、任务专属 bridge contract/race 测试；不修改 DEV-07 已冻结的 `app/commands/mod.rs` 或任一 feature command 实现。
-- **协议/数据**：前端模型列表只含 opaque model ID、显示名、能力和不可导出原因；任务提交只传 model source/ID 与任务绑定字段，由 Rust DEV-15 命令在安全存储解析 key、构包、加密并交给 DEV-13 admission，任一步失败都不发送任务且不回退 B 模型；secret/receipt/token/model key 永不出 Rust；所有异步完成写入校验当前 intent/generation/lease。
-- **测试**：start/stop/refresh/claim/disconnect 交错、旧事件/旧快照、关闭窗口、平台 capability；可导出/不可导出模型投影、选择 model ID、构包失败不提交、构包与 task ID 原子绑定、重试保持 request ID、JS state/event/error 无 key/credential_ref；全部 command 仅注册一次；Web bridge 无新命令；bridge protocol hash/contract。
-- **验收**：迟到回包不能复活旧码、旧连接或旧任务；DEV-23 只消费稳定 bridge API 即可完成模型选择和任务提交，不读取 prefs、不构包、不调用底层 Tauri；WebUI v2 build/fixture 不变；非 Windows capability 为 false。
+- **协议/数据**：能力快照前端投影只含 DEV-12 allowlist，并绑定当前 connection/lease/revision，旧 revision 原子丢弃；前端模型列表只含 opaque model ID、显示名、能力和不可导出原因；任务提交只传 model source/ID 与任务绑定字段，由 Rust DEV-15 命令在安全存储解析 key、构包、加密并交给 DEV-13 admission，任一步失败都不发送任务且不回退 B 模型；secret/receipt/token/model key 永不出 Rust；所有异步完成写入校验当前 intent/generation/lease。
+- **测试**：start/stop/refresh/claim/disconnect 交错、旧事件/旧快照、关闭窗口、平台 capability；能力快照读取、字段 allowlist、跨 lease/revision 丢弃、Skill/工具凭证不进 JS；可导出/不可导出模型投影、选择 model ID、构包失败不提交、构包与 task ID 原子绑定、重试保持 request ID、JS state/event/error 无 key/credential_ref；九个 command 模块各注册一次；Web bridge 无新命令；bridge protocol hash/contract。
+- **验收**：迟到回包不能复活旧码、旧连接、旧能力或旧任务；DEV-23 只消费稳定 bridge API 即可读取能力快照、完成模型选择和任务提交，不读取 prefs/Skill 私有文件、不构包、不调用底层 Tauri；WebUI v2 build/fixture 不变；非 Windows capability 为 false。
 - **风险**：现有 `remoteControl` 名称已指 WebAccess。新域采用不歧义命名并提供一次内部迁移，不能偷换旧 API 语义。
 - **需求映射**：RC-B-001、RC-B-005、RC-B-013～014、RC-A-004～006、RC-A-009、RC-T-003、RC-T-005、RC-T-008、RC-M-001～006、RC-M-009、RC-S-003～006。
 - **建议提交**：`feat(remote-control): 接入桌面双端状态桥`
