@@ -20,6 +20,8 @@ const MAX_TEMPORARY_MODEL_PACKAGE_BYTES: usize = 64 * 1024;
 const MAX_ID_CHARS: usize = 128;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
+const CONTROLLER_CONTRACT_SHA256: &str =
+    "4a5cd258ffaf17839fd86fedbac7bae0f4f32956b8901c0adca73bacbd42e421";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -104,6 +106,14 @@ const LEASE_CONTEXT_FIELDS: &[&str] = &[
     "relay_epoch",
     "remote_control_generation",
 ];
+const ERROR_CONTEXT_FIELDS: &[&str] = &[
+    "connection_id",
+    "controller_lease_id",
+    "lease_epoch",
+    "relay_epoch",
+    "remote_control_generation",
+    "registration_request_id",
+];
 
 pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
     "pairing_code_invalid",
@@ -161,6 +171,47 @@ impl std::error::Error for ControllerProtocolError {}
 
 type Result<T> = std::result::Result<T, ControllerProtocolError>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SequenceDisposition {
+    Advance,
+    SameSequenceTighten,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeadlineUpdate {
+    Replace,
+    TightenOnly,
+}
+
+pub(crate) fn classify_monotonic_sequence(
+    incoming: &str,
+    previous: u64,
+    field: &'static str,
+) -> Result<SequenceDisposition> {
+    let incoming = incoming
+        .parse::<u64>()
+        .map_err(|_| ControllerProtocolError::new("invalid_field", field))?;
+    if incoming < previous {
+        return Err(ControllerProtocolError::new("replay", field));
+    }
+    Ok(if incoming == previous {
+        SequenceDisposition::SameSequenceTighten
+    } else {
+        SequenceDisposition::Advance
+    })
+}
+
+pub(crate) fn apply_liveness_deadline(
+    existing_deadline_ms: u64,
+    candidate_deadline_ms: u64,
+    policy: DeadlineUpdate,
+) -> u64 {
+    match policy {
+        DeadlineUpdate::Replace => candidate_deadline_ms,
+        DeadlineUpdate::TightenOnly => existing_deadline_ms.min(candidate_deadline_ms),
+    }
+}
+
 struct Schema {
     required: &'static [&'static str],
     optional: &'static [&'static str],
@@ -202,6 +253,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "v",
                 "type",
                 "request_id",
+                "registration_request_id",
                 "endpoint_id",
                 "remote_control_generation",
                 "code_wrap_public_key_b64",
@@ -217,6 +269,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
                 "v",
                 "type",
                 "request_id",
+                "registration_request_id",
                 "pairing_id",
                 "remote_control_generation",
                 "sealed_code_b64",
@@ -590,7 +643,7 @@ fn message_schema(kind: &str) -> Option<Schema> {
         },
         "error" => Schema {
             required: &["v", "type", "request_id", "code", "message"],
-            optional: LEASE_CONTEXT_FIELDS,
+            optional: ERROR_CONTEXT_FIELDS,
             roles: &[RELAY],
         },
         _ => return None,
@@ -937,6 +990,10 @@ pub(crate) fn validate_controller_message_json_in_context(
         )?;
     }
     enforce_expected_context(object, expected_context)?;
+    if kind == "encrypted_frame" {
+        let payload_kind = object_string(object, "payload_kind", "message")?;
+        enforce_negotiated_payload(payload_kind, expected_context)?;
+    }
     Ok(value)
 }
 
@@ -972,6 +1029,7 @@ pub(crate) fn validate_controller_payload_json_in_context(
         validate_artifact_index(object)?;
     }
     enforce_expected_context(object, expected_context)?;
+    enforce_negotiated_payload(kind, expected_context)?;
     Ok(value)
 }
 
@@ -982,6 +1040,42 @@ pub(crate) struct LeaseContext {
     pub(crate) lease_epoch: String,
     pub(crate) relay_epoch: String,
     pub(crate) remote_control_generation: String,
+    pub(crate) negotiated_capabilities: Option<Vec<String>>,
+}
+
+fn payload_capability(kind: &str) -> Option<&'static str> {
+    match kind {
+        "capability_snapshot_request"
+        | "capability_snapshot"
+        | "task_submit"
+        | "task_cancel"
+        | "task_status" => Some("task_v1"),
+        "permission_request" | "permission_decision" => Some("permission_v1"),
+        "attachment_begin" | "attachment_chunk" | "attachment_commit" => Some("attachment_v1"),
+        "artifact_index_request"
+        | "artifact_index"
+        | "artifact_read_request"
+        | "artifact_chunk" => Some("artifact_v1"),
+        "session_snapshot_request"
+        | "session_snapshot"
+        | "journal_replay_request"
+        | "journal_event" => Some("snapshot_journal_v1"),
+        _ => None,
+    }
+}
+
+fn enforce_negotiated_payload(kind: &str, context: Option<&LeaseContext>) -> Result<()> {
+    let Some(capabilities) = context.and_then(|value| value.negotiated_capabilities.as_ref())
+    else {
+        return Ok(());
+    };
+    let Some(required) = payload_capability(kind) else {
+        return Err(ControllerProtocolError::new("unsupported_capability", kind));
+    };
+    if !capabilities.iter().any(|capability| capability == required) {
+        return Err(ControllerProtocolError::new("unsupported_capability", kind));
+    }
+    Ok(())
 }
 
 fn requires_full_lease_context(kind: &str, label: &str) -> bool {
@@ -1900,30 +1994,7 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
         &format!("{label}.base_url"),
         2048,
     )?;
-    if base_url.len() > 2048
-        || !base_url
-            .bytes()
-            .all(|byte| byte.is_ascii() && !byte.is_ascii_whitespace())
-    {
-        return Err(ControllerProtocolError::new(
-            "invalid_field",
-            format!("{label}.base_url"),
-        ));
-    }
-    let lower = base_url.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://"))
-        || base_url.split("//").nth(1).is_none_or(|authority| {
-            authority
-                .split('/')
-                .next()
-                .is_none_or(|host| host.is_empty() || host.contains('@'))
-        })
-    {
-        return Err(ControllerProtocolError::new(
-            "invalid_field",
-            format!("{label}.base_url"),
-        ));
-    }
+    validate_controller_base_url(base_url, &format!("{label}.base_url"))?;
     bounded_text(
         route.get("model").expect("model required"),
         &format!("{label}.model"),
@@ -1966,6 +2037,109 @@ fn validate_route(value: &Value, label: &str) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn validate_controller_base_url(value: &str, field: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 2048
+        || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(ControllerProtocolError::new("invalid_field", field));
+    }
+    let rest = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .ok_or_else(|| ControllerProtocolError::new("invalid_field", field))?;
+    let authority_end = rest
+        .bytes()
+        .position(|byte| matches!(byte, b'/' | b'?' | b'#'))
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let suffix = &rest[authority_end..];
+    if authority.is_empty()
+        || authority.contains('@')
+        || authority.contains('[')
+        || authority.contains(']')
+        || suffix.contains('#')
+    {
+        return Err(ControllerProtocolError::new("invalid_field", field));
+    }
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    if !valid_ascii_host(host) {
+        return Err(ControllerProtocolError::new("invalid_field", field));
+    }
+    if let Some(port) = port {
+        if port.is_empty()
+            || (port.len() > 1 && port.starts_with('0'))
+            || !port.bytes().all(|byte| byte.is_ascii_digit())
+            || port.parse::<u16>().map_or(true, |number| number == 0)
+        {
+            return Err(ControllerProtocolError::new("invalid_field", field));
+        }
+    }
+    if !suffix.is_empty() && !suffix.starts_with('/') && !suffix.starts_with('?') {
+        return Err(ControllerProtocolError::new("invalid_field", field));
+    }
+    let bytes = suffix.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_digit() && !(b'A'..=b'F').contains(&bytes[index + 1])
+                || !bytes[index + 2].is_ascii_digit() && !(b'A'..=b'F').contains(&bytes[index + 2])
+            {
+                return Err(ControllerProtocolError::new("invalid_field", field));
+            }
+            index += 3;
+            continue;
+        }
+        if !b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:@/?"
+            .contains(&bytes[index])
+        {
+            return Err(ControllerProtocolError::new("invalid_field", field));
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn valid_ascii_host(host: &str) -> bool {
+    if host.is_empty()
+        || host.len() > 253
+        || host != host.to_ascii_lowercase()
+        || host.ends_with('.')
+    {
+        return false;
+    }
+    if host
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        let parts = host.split('.').collect::<Vec<_>>();
+        return parts.len() == 4
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && (part.len() == 1 || !part.starts_with('0'))
+                    && part.parse::<u8>().is_ok()
+            });
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && label
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && label
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+    })
 }
 
 fn validate_credential(value: &Value, label: &str) -> Result<()> {
@@ -2085,6 +2259,7 @@ const TRANSCRIPT_FIELDS: &[&str] = &[
     "role_b",
     "handshake_public_key_b_b64",
     "protocol_version",
+    "negotiated_capabilities",
     "capability_hash",
     "expires_at_ms",
     "nonce_b64",
@@ -2142,12 +2317,51 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
             "transcript.protocol_version",
         ));
     }
+    let negotiated_value = transcript
+        .get("negotiated_capabilities")
+        .expect("negotiated capabilities required");
+    validate_string_list(
+        negotiated_value,
+        "transcript.negotiated_capabilities",
+        CONTROLLER_CAPABILITIES,
+    )?;
+    let negotiated = negotiated_value
+        .as_array()
+        .expect("capability list validated")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("capability string validated")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    if negotiated.is_empty() {
+        return Err(ControllerProtocolError::new(
+            "unsupported_capability",
+            "transcript.negotiated_capabilities",
+        ));
+    }
+    if negotiated.windows(2).any(|items| items[0] >= items[1]) {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            "transcript.negotiated_capabilities",
+        ));
+    }
     validate_hex_64(
         transcript
             .get("capability_hash")
             .expect("capability hash required"),
         "transcript.capability_hash",
     )?;
+    if controller_capability_hash(&negotiated)?
+        != object_string(transcript, "capability_hash", "transcript")?
+    {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            "transcript.capability_hash",
+        ));
+    }
     validate_uint(
         transcript.get("expires_at_ms").expect("expiry required"),
         "transcript.expires_at_ms",
@@ -2160,13 +2374,20 @@ pub(crate) fn build_pairing_transcript_preimage(value: &Value) -> Result<Vec<u8>
         Some(16),
     )?;
     let mut output = b"pinvou-controller-pairing-transcript-v1".to_vec();
-    for field in TRANSCRIPT_FIELDS {
+    for field in &TRANSCRIPT_FIELDS[..12] {
         let value = if *field == "protocol_version" {
             CONTROLLER_PROTOCOL_VERSION.to_string()
         } else {
             object_string(transcript, field, "transcript")?.to_owned()
         };
         length_prefix_text(&mut output, &value);
+    }
+    length_prefix_text(&mut output, &negotiated.len().to_string());
+    for capability in &negotiated {
+        length_prefix_text(&mut output, capability);
+    }
+    for field in &TRANSCRIPT_FIELDS[13..] {
+        length_prefix_text(&mut output, object_string(transcript, field, "transcript")?);
     }
     Ok(output)
 }
@@ -2194,6 +2415,33 @@ pub(crate) fn controller_capability_hash(capabilities: &[String]) -> Result<Stri
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+pub(crate) fn negotiate_controller_capabilities(
+    capabilities_a: &[String],
+    capabilities_b: &[String],
+) -> Result<Vec<String>> {
+    for (field, capabilities) in [
+        ("capabilities_a", capabilities_a),
+        ("capabilities_b", capabilities_b),
+    ] {
+        let value = Value::Array(capabilities.iter().cloned().map(Value::String).collect());
+        validate_string_list(&value, field, CONTROLLER_CAPABILITIES)?;
+    }
+    let supported_by_b = capabilities_b.iter().collect::<HashSet<_>>();
+    let mut negotiated = capabilities_a
+        .iter()
+        .filter(|capability| supported_by_b.contains(capability))
+        .cloned()
+        .collect::<Vec<_>>();
+    negotiated.sort();
+    if negotiated.is_empty() {
+        return Err(ControllerProtocolError::new(
+            "unsupported_capability",
+            "negotiated_capabilities",
+        ));
+    }
+    Ok(negotiated)
 }
 
 fn validate_reserved_transcript(message: &Map<String, Value>) -> Result<()> {
@@ -2346,16 +2594,11 @@ pub(crate) fn validate_controller_liveness_payload_json(
         "heartbeat_sequence_a",
         u64::MAX,
     )?;
-    if object_string(object, "heartbeat_sequence_a", "liveness_payload")?
-        .parse::<u64>()
-        .expect("canonical u64 validated")
-        <= last_sequence
-    {
-        return Err(ControllerProtocolError::new(
-            "replay",
-            "heartbeat_sequence_a",
-        ));
-    }
+    classify_monotonic_sequence(
+        object_string(object, "heartbeat_sequence_a", "liveness_payload")?,
+        last_sequence,
+        "heartbeat_sequence_a",
+    )?;
     Ok(value)
 }
 
@@ -2391,6 +2634,7 @@ pub(crate) fn validate_liveness_attestation_message_json(
     input: &str,
     context: &LeaseContext,
     expected_liveness_epoch: &str,
+    last_heartbeat_sequence: u64,
     last_attestation_sequence: u64,
     challenge_id: &str,
     challenge_b64: &str,
@@ -2406,16 +2650,37 @@ pub(crate) fn validate_liveness_attestation_message_json(
     {
         return Err(ControllerProtocolError::new("stale_context", "attestation"));
     }
-    let sequence = object_string(object, "attestation_sequence", "attestation")?
-        .parse::<u64>()
-        .expect("canonical u64 validated");
-    if sequence <= last_attestation_sequence {
-        return Err(ControllerProtocolError::new(
-            "replay",
-            "attestation_sequence",
-        ));
-    }
+    classify_liveness_attestation_sequences(
+        object,
+        last_heartbeat_sequence,
+        last_attestation_sequence,
+    )?;
     Ok(value)
+}
+
+fn classify_liveness_attestation_sequences(
+    object: &Map<String, Value>,
+    last_heartbeat_sequence: u64,
+    last_attestation_sequence: u64,
+) -> Result<DeadlineUpdate> {
+    let heartbeat = classify_monotonic_sequence(
+        object_string(object, "heartbeat_sequence_a", "attestation")?,
+        last_heartbeat_sequence,
+        "heartbeat_sequence_a",
+    )?;
+    let attestation = classify_monotonic_sequence(
+        object_string(object, "attestation_sequence", "attestation")?,
+        last_attestation_sequence,
+        "attestation_sequence",
+    )?;
+    Ok(
+        if heartbeat == SequenceDisposition::Advance && attestation == SequenceDisposition::Advance
+        {
+            DeadlineUpdate::Replace
+        } else {
+            DeadlineUpdate::TightenOnly
+        },
+    )
 }
 
 #[cfg(test)]
@@ -2457,6 +2722,7 @@ mod tests {
             lease_epoch: "1".into(),
             relay_epoch: "epoch-test-1".into(),
             remote_control_generation: "generation-0001".into(),
+            negotiated_capabilities: None,
         }
     }
 
@@ -2488,25 +2754,8 @@ mod tests {
             serde_json::to_value(CONTROLLER_PAYLOAD_TYPES).unwrap(),
             fixture["expected_payload_types"]
         );
-        let manifest = format!(
-            concat!(
-                "{}\nmessages:{}\npayloads:{}\ncapabilities:{}\nerrors:{}\ninteger:{}\n",
-                "lease-context:connection_id,controller_lease_id,lease_epoch,relay_epoch,remote_control_generation\n",
-                "task-statuses:{}\n",
-                "temporary-model-package:temporary_model_package/v1\n",
-                "pairing-transcript:controller_pairing_transcript/v1\n",
-                "direct-liveness:controller_liveness_a\n"
-            ),
-            fixture["contract"]["id"].as_str().unwrap(),
-            CONTROLLER_MESSAGE_TYPES.join(","),
-            CONTROLLER_PAYLOAD_TYPES.join(","),
-            CONTROLLER_CAPABILITIES.join(","),
-            CONTROLLER_ERROR_CODES.join(","),
-            fixture["contract"]["integer_wire_format"].as_str().unwrap(),
-            TASK_STATUSES.join(","),
-        );
         assert_eq!(
-            sha256_hex(manifest.as_bytes()),
+            CONTROLLER_CONTRACT_SHA256,
             fixture["contract"]["sha256"].as_str().unwrap()
         );
 
@@ -2527,6 +2776,84 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected, "{kind}");
         }
+    }
+
+    #[test]
+    fn pairing_registration_freezes_generation_scoped_idempotency_key() {
+        let fixture = fixture();
+        let request = &fixture["pairing_registration_vector"]["request"];
+        let result = &fixture["pairing_registration_vector"]["result"];
+        let retry_request = &fixture["pairing_registration_vector"]["retry_request"];
+        let retry_result = &fixture["pairing_registration_vector"]["retry_result"];
+        let failure_result = &fixture["pairing_registration_vector"]["failure_result"];
+        let failure_retry_result = &fixture["pairing_registration_vector"]["failure_retry_result"];
+        validate_controller_message_json(&serde_json::to_string(request).unwrap(), B).unwrap();
+        validate_controller_message_json(&serde_json::to_string(result).unwrap(), RELAY).unwrap();
+        validate_controller_message_json(&serde_json::to_string(retry_request).unwrap(), B)
+            .unwrap();
+        validate_controller_message_json(&serde_json::to_string(retry_result).unwrap(), RELAY)
+            .unwrap();
+        validate_controller_message_json(&serde_json::to_string(failure_result).unwrap(), RELAY)
+            .unwrap();
+        validate_controller_message_json(
+            &serde_json::to_string(failure_retry_result).unwrap(),
+            RELAY,
+        )
+        .unwrap();
+        assert_eq!(
+            request["registration_request_id"],
+            result["registration_request_id"]
+        );
+        assert_eq!(
+            request["remote_control_generation"],
+            result["remote_control_generation"]
+        );
+        let mut sealed_result = result.as_object().unwrap().clone();
+        let mut sealed_retry_result = retry_result.as_object().unwrap().clone();
+        sealed_result.remove("request_id");
+        sealed_retry_result.remove("request_id");
+        assert_eq!(sealed_retry_result, sealed_result);
+        let mut sealed_failure = failure_result.as_object().unwrap().clone();
+        let mut sealed_failure_retry = failure_retry_result.as_object().unwrap().clone();
+        sealed_failure.remove("request_id");
+        sealed_failure_retry.remove("request_id");
+        assert_eq!(sealed_failure_retry, sealed_failure);
+        let mut missing = request.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("registration_request_id");
+        assert_eq!(
+            validate_controller_message_json(&serde_json::to_string(&missing).unwrap(), B)
+                .unwrap_err()
+                .code,
+            "missing_field"
+        );
+    }
+
+    #[test]
+    fn legacy_web_v2_fixture_matches_live_relay_envelopes() {
+        let fixture = fixture();
+        let legacy = &fixture["legacy_web_v2"];
+        assert_eq!(
+            legacy["desktop_endpoint_register"],
+            json!({"v":2,"type":"desktop_endpoint_register","endpoint_id":"endpoint_fixture","access_token":"fixture-access-token","desktop_secret":"fixture-desktop-secret"})
+        );
+        assert_eq!(
+            legacy["desktop_endpoint_registered"],
+            json!({"v":2,"type":"desktop_endpoint_registered","endpoint_id":"endpoint_fixture","web_client_connected":false,"lease_id":null})
+        );
+        assert_eq!(
+            legacy["web_client_join"],
+            json!({"v":2,"type":"web_client_join","endpoint_id":"endpoint_fixture","access_token":"fixture-access-token","stream_epoch":"stream-fixture","after_seq":7})
+        );
+        assert_eq!(
+            legacy["web_client_joined"],
+            json!({"v":2,"type":"web_client_joined","endpoint_id":"endpoint_fixture","lease_id":"lease_fixture","desktop_connected":true})
+        );
+        assert_eq!(legacy["conflict"]["message"]["type"], "error");
+        assert_eq!(legacy["conflict"]["message"]["code"], "endpoint_not_found");
+        assert_eq!(legacy["conflict"]["closeCode"], 1008);
     }
 
     #[test]
@@ -2559,6 +2886,29 @@ mod tests {
             controller_capability_hash(&capabilities).unwrap(),
             fixture["capability_vector"]["sha256"].as_str().unwrap()
         );
+        let subset = &fixture["capability_negotiation_vectors"][0];
+        let subset_a: Vec<String> =
+            serde_json::from_value(subset["capabilities_a"].clone()).unwrap();
+        let subset_b: Vec<String> =
+            serde_json::from_value(subset["capabilities_b"].clone()).unwrap();
+        let negotiated = negotiate_controller_capabilities(&subset_a, &subset_b).unwrap();
+        assert_eq!(
+            serde_json::to_value(&negotiated).unwrap(),
+            subset["negotiated"]
+        );
+        assert_eq!(
+            controller_capability_hash(&negotiated).unwrap(),
+            subset["capability_hash"].as_str().unwrap()
+        );
+        let empty = &fixture["capability_negotiation_vectors"][1];
+        let empty_a: Vec<String> = serde_json::from_value(empty["capabilities_a"].clone()).unwrap();
+        let empty_b: Vec<String> = serde_json::from_value(empty["capabilities_b"].clone()).unwrap();
+        assert_eq!(
+            negotiate_controller_capabilities(&empty_a, &empty_b)
+                .unwrap_err()
+                .code,
+            empty["expected_error"].as_str().unwrap()
+        );
         let transcript = &fixture["transcript_vector"]["transcript"];
         let preimage = build_pairing_transcript_preimage(transcript).unwrap();
         assert_eq!(
@@ -2579,6 +2929,34 @@ mod tests {
         assert_ne!(
             sha256_hex(&build_pairing_transcript_preimage(&tampered).unwrap()),
             fixture["transcript_vector"]["sha256"].as_str().unwrap()
+        );
+        let negotiated: Vec<String> =
+            serde_json::from_value(transcript["negotiated_capabilities"].clone()).unwrap();
+        assert_eq!(
+            controller_capability_hash(&negotiated).unwrap(),
+            transcript["capability_hash"].as_str().unwrap()
+        );
+        let mut unsorted = transcript.clone();
+        unsorted["negotiated_capabilities"] = json!(["task_v1", "pairing_v1"]);
+        unsorted["capability_hash"] =
+            json!(controller_capability_hash(&["task_v1".into(), "pairing_v1".into()]).unwrap());
+        assert_eq!(
+            build_pairing_transcript_preimage(&unsorted)
+                .unwrap_err()
+                .code,
+            "invalid_field"
+        );
+        let mut no_task = context();
+        no_task.negotiated_capabilities = Some(vec!["pairing_v1".into()]);
+        assert_eq!(
+            validate_controller_payload_json_in_context(
+                &serde_json::to_string(&fixture["task_submit_vectors"]["controlled"]).unwrap(),
+                A,
+                Some(&no_task),
+            )
+            .unwrap_err()
+            .code,
+            "unsupported_capability"
         );
     }
 
@@ -2694,6 +3072,32 @@ mod tests {
     }
 
     #[test]
+    fn temporary_model_urls_match_javascript_grammar() {
+        let fixture = fixture();
+        for value in fixture["base_url_vectors"]["valid"].as_array().unwrap() {
+            let url = value.as_str().unwrap();
+            validate_controller_base_url(url, "base_url").unwrap();
+        }
+        for value in fixture["base_url_vectors"]["invalid"].as_array().unwrap() {
+            assert_eq!(
+                validate_controller_base_url(value.as_str().unwrap(), "base_url")
+                    .unwrap_err()
+                    .code,
+                "invalid_field"
+            );
+        }
+        let exact_boundary = format!("https://a/{}", "x".repeat(2038));
+        assert_eq!(exact_boundary.len(), 2048);
+        validate_controller_base_url(&exact_boundary, "base_url").unwrap();
+        assert_eq!(
+            validate_controller_base_url(&(exact_boundary + "x"), "base_url")
+                .unwrap_err()
+                .code,
+            "invalid_field"
+        );
+    }
+
+    #[test]
     fn canonical_decimal_strings_and_stale_context_fail_closed() {
         let base = json!({
             "v": 1, "type": "task_cancel",
@@ -2761,11 +3165,22 @@ mod tests {
         assert_eq!(hex(&aad), direct["aad_preimage_hex"].as_str().unwrap());
         assert_eq!(sha256_hex(&aad), direct["aad_sha256"].as_str().unwrap());
 
-        let mut replay = direct["inner"].clone();
-        replay["heartbeat_sequence_a"] = json!("1");
+        let mut same = direct["inner"].clone();
+        same["heartbeat_sequence_a"] = json!("1");
+        validate_controller_liveness_payload_json(
+            &serde_json::to_string(&same).unwrap(),
+            &context(),
+            "live-a-1",
+            1,
+            "challenge-0001",
+            "AAAAAAAAAAAAAAAAAAAAAA==",
+        )
+        .unwrap();
+        let mut regression = direct["inner"].clone();
+        regression["heartbeat_sequence_a"] = json!("0");
         assert_eq!(
             validate_controller_liveness_payload_json(
-                &serde_json::to_string(&replay).unwrap(),
+                &serde_json::to_string(&regression).unwrap(),
                 &context(),
                 "live-a-1",
                 1,
@@ -2782,22 +3197,53 @@ mod tests {
             &serde_json::to_string(&attestation["message"]).unwrap(),
             &context(),
             "live-a-1",
+            1,
             0,
             "challenge-0001",
             "AAAAAAAAAAAAAAAAAAAAAA==",
         )
         .unwrap();
+        let message = attestation["message"].as_object().unwrap();
         assert_eq!(
-            validate_liveness_attestation_message_json(
-                &serde_json::to_string(&attestation["message"]).unwrap(),
-                &context(),
-                "live-a-1",
-                1,
-                "challenge-0001",
-                "AAAAAAAAAAAAAAAAAAAAAA==",
-            )
-            .unwrap_err()
-            .code,
+            classify_liveness_attestation_sequences(message, 1, 0).unwrap(),
+            DeadlineUpdate::Replace
+        );
+        assert_eq!(
+            classify_liveness_attestation_sequences(message, 2, 0).unwrap(),
+            DeadlineUpdate::TightenOnly
+        );
+        assert_eq!(
+            classify_liveness_attestation_sequences(message, 1, 1).unwrap(),
+            DeadlineUpdate::TightenOnly
+        );
+        assert_eq!(
+            apply_liveness_deadline(20_000, 25_000, DeadlineUpdate::TightenOnly),
+            20_000
+        );
+        assert_eq!(
+            apply_liveness_deadline(20_000, 25_000, DeadlineUpdate::Replace),
+            25_000
+        );
+        validate_liveness_attestation_message_json(
+            &serde_json::to_string(&attestation["message"]).unwrap(),
+            &context(),
+            "live-a-1",
+            2,
+            1,
+            "challenge-0001",
+            "AAAAAAAAAAAAAAAAAAAAAA==",
+        )
+        .unwrap();
+        assert_eq!(
+            classify_liveness_attestation_sequences(message, 3, 0)
+                .unwrap_err()
+                .code,
+            "replay"
+        );
+        assert_eq!(
+            classify_liveness_attestation_sequences(message, 1, 2)
+                .unwrap_err()
+                .code,
             "replay"
         );
         let preimage = build_liveness_attestation_preimage(&attestation["message"]).unwrap();

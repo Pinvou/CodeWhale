@@ -263,7 +263,10 @@ Desktop peers use subprotocol `pinvou-desktop-controller-v1`, JSON `v: 1`, and
 the exact capability registry frozen in `protocol-controller.js`. Unknown
 versions, message/payload types, fields, enum values, capabilities, duplicates
 and role combinations fail closed. Capability negotiation is
-intersection-only and never downgrades. All numeric counters, `lease_epoch`,
+intersection-only: Relay sorts the exact A/B intersection bytewise, rejects an
+empty intersection, and never inserts a capability absent from either side.
+Every encrypted payload is checked against that frozen negotiated list before
+decryption dispatch. All numeric counters, `lease_epoch`,
 byte counts and timestamps except literal `v`/`protocol_version` use canonical unsigned 64-bit
 decimal strings matching `0|[1-9][0-9]{0,19}` and bounded by
 `18446744073709551615`; JSON numbers, signs and leading zeroes are invalid.
@@ -276,6 +279,23 @@ The capability hash is SHA-256 of ASCII
 `pinvou-controller-capabilities-v1` followed by every negotiated capability in
 bytewise sorted order as `LP(UTF-8(value))`. Its complete-v1 digest is
 `a8cb9f552292fa1bf84874a8cf025dcfdf1b1e103f9a21de845e513830164cb9`.
+
+`desktop_pairing_register` carries both a transport `request_id` and a stable
+`registration_request_id`. B creates a new registration ID only after changing
+`remote_control_generation`; reconnect/retry for one generation reuses the
+same registration ID while transport request IDs may change. Relay atomically
+keys idempotency by `(endpoint_id, remote_control_generation,
+registration_request_id)`, seals the first terminal success or failure, and
+returns the same sealed outcome for subsequent matching retries: the response
+echoes the current transport `request_id`, while every other result field is
+byte-identical. Reusing either
+member with different registration inputs is `invalid_message`; refreshing or
+stopping invalidates the old generation before a new key may be accepted.
+`desktop_pairing_registered` echoes the stable ID so B can discard a delayed
+result from an older request/generation. A sealed registration failure uses the
+ordinary `error` envelope with optional `registration_request_id` and
+`remote_control_generation`; those fields are forbidden from changing across
+retries just like a successful sealed outcome.
 
 After reservation, messages carry `pairing_id + reservation_id + relay_epoch +
 remote_control_generation + transcript_hash`. After lease creation, every
@@ -300,8 +320,11 @@ Relay cannot see its strict inner payload:
 Its A-to-B AEAD AAD is ASCII `pinvou-controller-liveness-aad-v1` followed
 by LP-encoded `connection_id, controller_lease_id, lease_epoch, relay_epoch,
 remote_control_generation, role` in that exact order. B rejects a changed
-context, role, liveness epoch or challenge, and a sequence not strictly greater
-than the last accepted sequence.
+context, role, liveness epoch or challenge, and compares the sequence with the
+last accepted value under this precise rule:
+lower rejects with `replay`; equal is an idempotent `same_sequence_tighten`
+update that may only move the existing local deadline earlier; greater replaces
+the stored sequence and may establish the new conservative deadline.
 
 `controller_liveness_attestation_a` carries full lease context plus
 `liveness_epoch_a`, `heartbeat_sequence_a`, `attestation_sequence`,
@@ -314,26 +337,37 @@ remote_control_generation, liveness_epoch_a, heartbeat_sequence_a,
 attestation_sequence, challenge_b64, observed_age_ms, remaining_ttl_ms,
 issued_at_relay, signature_algorithm, relay_signing_key_id`. The shared fixture
 freezes the full preimage/signature and tests tampering, replay and cross-lease
-rejection.
+rejection. B compares `heartbeat_sequence_a` against A's last accepted
+heartbeat and `attestation_sequence` against the independent last Relay
+attestation sequence using the same lower/equal/greater rules. The state layer
+uses the attested candidate deadline only after both comparisons; if either is
+equal it stores `min(existing_deadline, candidate_deadline)`, never extending
+the watchdog from a duplicate proof. Only when both advance may the new
+candidate replace the prior deadline.
 
 `controller_pairing_reserved` delivers the same strict
 `controller_pairing_transcript/v1` object to both peers. Its ordered fields are
 `schema, relay_epoch, pairing_id, reservation_id, endpoint_id,
 remote_control_generation, controller_connection_identity, role_a,
 handshake_public_key_a_b64, role_b, handshake_public_key_b_b64,
-protocol_version, capability_hash, expires_at_ms, nonce_b64`. Roles are exactly
+protocol_version, negotiated_capabilities, capability_hash, expires_at_ms,
+nonce_b64`. `negotiated_capabilities` is the non-empty, unique, bytewise-sorted
+A/B intersection and `capability_hash` must equal the hash of that exact list.
+Roles are exactly
 `A` then `B`; the two 32-byte X25519 public keys are distinct; nonce is 16
 bytes. The canonical preimage is unnulled ASCII
-`pinvou-controller-pairing-transcript-v1` followed by those fields as
-four-byte unsigned big-endian length plus UTF-8 bytes; only numeric literal
-`protocol_version` becomes ASCII `1`. Relay signs this complete preimage with
+`pinvou-controller-pairing-transcript-v1`, then LP encodings of the scalar
+fields through `protocol_version` (`1` becomes ASCII `1`), then
+`LP(decimal capability count)`, one `LP(capability)` per listed value, and
+finally LP encodings of `capability_hash`, `expires_at_ms`, and `nonce_b64`.
+Relay signs this complete preimage with
 Ed25519. The envelope repeats and validates reservation/generation/Relay
 context, `transcript_hash`, `relay_signing_key_id`, algorithm and signature.
 
 The fixed transcript vector is fully listed in the shared fixture. It has
-SHA-256 `13d9e8265a99bbf112fecff86b57a06d120dcc9d2e8a4d6df8d00d7535485618`,
-raw public key `11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=`, and signature
-`ZqbTVYuLk5e8kpAalxTB4TjKptI/H/BwJvmvpkOpF/hxnvFy/tGNdoEKRQFXIEmXZfeIiU/HxxSkuArB70OSAg==`.
+SHA-256 `c78ffff84687ec43bf1b7463df7a7c31cd4ae9a8d58520014d6dc7ae994c40ec`,
+raw public key `HW3xPOxTtGxa5yr5ESVes1hoAnuyIDd4cLuLZ2l1CCk=`, and signature
+`f+CI9aBrxnQBwAC3SmljCihCrbo4nfyMjkBa6L7HhpJQaVtnNy/FEZE98wIZsgQBmi2tIg45BHKlEf4D3kjpCw==`.
 A and B independently reconstruct the same bytes and verify every field before
 key derivation. Receipt commitment remains the independent sender-secret LP
 algorithm below; Rust constructs it from individual fields rather than hashing
@@ -371,6 +405,15 @@ are exactly `{kind:"api_key",secret:string}`. OAuth, cookies, subscription
 login, opaque SavedModel fields, credential references and recursive fallback
 are forbidden.
 
+Model `base_url` has one JS/Rust grammar, with no WHATWG normalization: at most
+2048 ASCII bytes; exact lowercase `http://` or `https://`; a lowercase DNS
+host (labels 1..63, total at most 253, no edge hyphen/trailing dot) or canonical
+dotted IPv4; optional canonical decimal port `1..65535`; no userinfo, bracketed
+or bare IPv6, fragment, whitespace, or backslash. The suffix is an optional
+`/` path and/or `?` query using RFC 3986 ASCII unreserved/reserved characters;
+each percent escape is exactly `%` plus two uppercase hex digits. Lowercase
+escapes and malformed escapes fail rather than normalize.
+
 `artifact_index` returns bounded metadata objects rather than bare paths or
 IDs. Each item is exactly `artifact_id, task_id, display_name, mime_type,
 size_bytes, sha256, preview_mode`; preview mode is `inline_text`,
@@ -385,6 +428,17 @@ revoked and stale-generation codes all map to `pairing_code_invalid` and user
 text “连接码无效或已失效”. A legacy conflict remains exactly
 `{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"}`
 plus close code `1008`.
+
+The contract digest is
+`4a5cd258ffaf17839fd86fedbac7bae0f4f32956b8901c0adca73bacbd42e421`.
+It is SHA-256 over canonical JSON (object keys recursively sorted, array order
+preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
+executable manifest containing every schema required/optional field, role
+matrix, registry, enum, limit, payload-to-capability mapping, URL grammar and
+transcript field order. `fixture` is the complete shared fixture after removing
+only `contract.sha256`, avoiding self-reference. The expected digest is
+hard-coded in JS and Rust; fixture or schema edits must explicitly regenerate
+and review it.
 
 Logs are allowlist projections only. They must exclude all pairing/lease/
 generation/endpoint identifiers, keys, nonces, secrets, tokens, ciphertext,
@@ -454,8 +508,8 @@ transitions.
 | --- | --- | --- |
 | A/B | `controller_capabilities` | Bind authenticated role, protocol version and exact capability list. |
 | B | `desktop_endpoint_claim` | Present an enrollment proof for an existing endpoint. |
-| B | `desktop_pairing_register` | Register one `remote_control_generation` with independent code-wrap and handshake public keys. |
-| Relay | `desktop_pairing_registered` | Return the sealed display code, `pairing_id`, expiry and `relay_epoch`. |
+| B | `desktop_pairing_register` | Register one generation with stable `registration_request_id` and independent code-wrap/handshake keys. |
+| Relay | `desktop_pairing_registered` | Echo the registration ID and return its sealed result, `pairing_id`, expiry and `relay_epoch`. |
 | B | `desktop_pairing_revoke` | Retire the generation before refresh or stop. |
 | A | `controller_pairing_claim` | Claim a seven-character code with a stable `claim_request_id`. |
 | Relay | `controller_pairing_reserved` | Bind the claim socket to one reservation and signed transcript. |
@@ -485,7 +539,10 @@ transitions.
 controller lease identifiers are distinct domains. `lease_epoch` prevents an
 old connection from addressing a replacement lease. Messages with an old or
 cross-bound identifier are rejected by the later state machine even when their
-JSON shape is valid.
+JSON shape is valid. Pairing registration additionally uses the stable
+`registration_request_id`; the tuple with generation is its idempotency key and
+`desktop_pairing_registered` echoes it. A transport reconnect may change only
+`request_id`, while refresh/stop must change generation and registration ID.
 
 The frozen decrypted `encrypted_frame` payload kinds are
 `capability_snapshot_request`, `capability_snapshot`, `task_submit`,
@@ -500,6 +557,10 @@ rejects these payloads when presented by the opposite role. Every task,
 permission, attachment, artifact, snapshot and journal operation is bound to
 the same `connection_id + controller_lease_id + lease_epoch`; task and transfer
 messages additionally carry their exact task/session/request identifiers.
+Capability snapshot and task payloads require negotiated `task_v1`; permission,
+attachment and artifact payloads require their same-named `*_v1`; snapshots and
+journal payloads require `snapshot_journal_v1`. `encrypted_frame` rejects a
+declared `payload_kind` before forwarding when its capability was not negotiated.
 
 ### Pairing, Finished receipt and lease transition
 
@@ -552,7 +613,11 @@ and Rust tests.
 sequences; one role's transport traffic never advances the other. For an active
 remote task, B advances its at-most-30-second controller watchdog only from a
 valid `encrypted_controller_liveness_a` or the conservative signed attestation
-fallback. Relay transport traffic alone cannot extend it.
+fallback. Lower sequences are rejected; equal direct or attested sequences can
+only tighten the existing deadline; a greater sequence may replace it. Relay
+attestation tracks both A's heartbeat sequence and a separate Relay
+attestation sequence, and the state layer chooses the earlier deadline for any
+same-sequence proof. Relay transport traffic alone cannot extend it.
 
 Resume passes through `resume_provisional` and
 `resume_activated_pending_liveness`; neither state accepts, buffers or forwards
@@ -585,6 +650,14 @@ desktop details:
 
 The Relay closes it with code 1008. With no desktop conflict, all WebUI v2
 messages and Web-to-Web takeover semantics remain byte-for-byte compatible.
+The shared fixture is copied from the live v2 dispatcher and uses only its real
+types: request/response pairs `desktop_endpoint_register` /
+`desktop_endpoint_registered` and `web_client_join` / `web_client_joined`,
+including endpoint, token/secret, stream cursor, connection flags, nullable or
+actual `lease_id`, and the complete error envelope. It freezes `accept_v2` for
+no controller conflict and the generic `endpoint_not_found` result for
+`pairing_reserved`, `handshake_pending`, or an active controller lease; it does
+not invent controller-only v2 messages.
 
 Protocol logs and telemetry must be allowlist projections, never serialization
 of the source message. They may contain only protocol version, message type,
