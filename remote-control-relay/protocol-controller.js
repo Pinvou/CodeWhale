@@ -14,7 +14,7 @@ const MAX_TASK_REFERENCES = 32;
 const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "de6e06bc6d5d0213bccea6841d4b256dd5403c493c9601b244bf0533034d2721";
+export const CONTROLLER_CONTRACT_SHA256 = "3784ee2f066ebd2d66e7f72bc6a6727a210a329dbefdada60775b3014e93c004";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -142,7 +142,8 @@ const ROUTE_REQUIRED = Object.freeze(["display_name", "preset", "wire_api", "bas
 const ROUTE_OPTIONAL = Object.freeze(["provider_kind", "vendor", "endpoint_mode", "context_window_tokens", "max_output_tokens", "reasoning_effort"]);
 const LEASE_INSTALL_CONTEXT_FIELDS = Object.freeze([
   "request_id", "expected_pairing_id", "reservation_id", "remote_control_generation",
-  "relay_epoch", "transcript_hash", "expected_controller_connection_identity", "negotiated_capabilities",
+  "relay_epoch", "transcript_hash", "expected_controller_connection_identity",
+  "negotiated_capabilities", "capability_hash",
 ]);
 const NESTED_SCHEMAS = Object.freeze({
   task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
@@ -464,8 +465,16 @@ export function validateControllerPayload(input, senderRole, expectedContext) {
 
 function requireNegotiatedCapabilities(runtimeContext) {
   if (!runtimeContext || !Array.isArray(runtimeContext.negotiated_capabilities)) fail("unsupported_capability", "negotiated_capabilities");
-  stringList(runtimeContext.negotiated_capabilities, "negotiated_capabilities", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
+  validateRuntimeCapabilities(runtimeContext.negotiated_capabilities);
   return runtimeContext.negotiated_capabilities;
+}
+
+function validateRuntimeCapabilities(capabilities) {
+  if (!Array.isArray(capabilities) || capabilities.length > CONTROLLER_CAPABILITIES.length) fail("unsupported_capability", "negotiated_capabilities");
+  for (const [index, capability] of capabilities.entries()) {
+    if (typeof capability !== "string" || !ID.test(capability) || !CONTROLLER_CAPABILITIES.includes(capability)) fail("unsupported_capability", "negotiated_capabilities");
+    if (index > 0 && capabilities[index - 1] >= capability) fail("unsupported_capability", "negotiated_capabilities");
+  }
 }
 
 function requireRuntimeLease(runtimeContext) {
@@ -508,7 +517,9 @@ export class LeaseInstallValidationContext {
       identifier(context[field], `lease_install_validation_context.${field}`);
     }
     hex64(context.transcript_hash, "lease_install_validation_context.transcript_hash");
-    stringList(context.negotiated_capabilities, "lease_install_validation_context.negotiated_capabilities", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
+    validateRuntimeCapabilities(context.negotiated_capabilities);
+    hex64(context.capability_hash, "lease_install_validation_context.capability_hash");
+    if (controllerCapabilityHash(context.negotiated_capabilities) !== context.capability_hash) fail("invalid_field", "lease_install_validation_context.capability_hash");
     this.request_id = context.request_id;
     this.expected_pairing_id = context.expected_pairing_id;
     this.reservation_id = context.reservation_id;
@@ -517,6 +528,7 @@ export class LeaseInstallValidationContext {
     this.transcript_hash = context.transcript_hash;
     this.expected_controller_connection_identity = context.expected_controller_connection_identity;
     this.negotiated_capabilities = Object.freeze([...context.negotiated_capabilities]);
+    this.capability_hash = context.capability_hash;
     Object.freeze(this);
   }
 }
@@ -898,6 +910,10 @@ export function controllerContractManifest() {
       runtime: "negotiated-capabilities-required-for-state-machine-messages",
       lease_install: "trusted-handshake-bindings-produce-new-lease",
       registration: "independent-generation-registration-idempotency-context",
+    },
+    runtime_capability_context: {
+      order: "bytewise-strict-ascending",
+      invalid_error: { code: "unsupported_capability", field: "negotiated_capabilities" },
     },
   };
 }

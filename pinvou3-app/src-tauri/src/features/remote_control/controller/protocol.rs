@@ -24,7 +24,7 @@ const MAX_ARTIFACTS: usize = 256;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "de6e06bc6d5d0213bccea6841d4b256dd5403c493c9601b244bf0533034d2721";
+    "3784ee2f066ebd2d66e7f72bc6a6727a210a329dbefdada60775b3014e93c004";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -183,6 +183,7 @@ const LEASE_INSTALL_CONTEXT_FIELDS: &[&str] = &[
     "transcript_hash",
     "expected_controller_connection_identity",
     "negotiated_capabilities",
+    "capability_hash",
 ];
 
 pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
@@ -1524,6 +1525,7 @@ pub(crate) struct LeaseInstallValidationContext {
     transcript_hash: String,
     expected_controller_connection_identity: String,
     negotiated_capabilities: Vec<String>,
+    capability_hash: String,
 }
 
 impl LeaseInstallValidationContext {
@@ -1537,6 +1539,7 @@ impl LeaseInstallValidationContext {
         transcript_hash: String,
         expected_controller_connection_identity: String,
         negotiated_capabilities: Vec<String>,
+        capability_hash: String,
     ) -> Result<Self> {
         for (field, value) in [
             ("request_id", &request_id),
@@ -1559,6 +1562,16 @@ impl LeaseInstallValidationContext {
             "lease_install_validation_context.transcript_hash",
         )?;
         validate_runtime_capabilities(&negotiated_capabilities)?;
+        validate_hex_64(
+            &Value::String(capability_hash.clone()),
+            "lease_install_validation_context.capability_hash",
+        )?;
+        if controller_capability_hash(&negotiated_capabilities)? != capability_hash {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "lease_install_validation_context.capability_hash",
+            ));
+        }
         Ok(Self {
             request_id,
             expected_pairing_id,
@@ -1568,6 +1581,7 @@ impl LeaseInstallValidationContext {
             transcript_hash,
             expected_controller_connection_identity,
             negotiated_capabilities,
+            capability_hash,
         })
     }
 }
@@ -1724,15 +1738,26 @@ fn outer_message_capabilities(kind: &str) -> &'static [&'static str] {
 }
 
 fn validate_runtime_capabilities(capabilities: &[String]) -> Result<()> {
-    let mut seen = HashSet::new();
-    if capabilities
-        .iter()
-        .any(|value| !CONTROLLER_CAPABILITIES.contains(&value.as_str()) || !seen.insert(value))
-    {
+    if capabilities.len() > CONTROLLER_CAPABILITIES.len() {
         return Err(ControllerProtocolError::new(
             "unsupported_capability",
             "negotiated_capabilities",
         ));
+    }
+    for (index, capability) in capabilities.iter().enumerate() {
+        if validate_identifier(
+            &Value::String(capability.clone()),
+            "negotiated_capabilities",
+        )
+        .is_err()
+            || !CONTROLLER_CAPABILITIES.contains(&capability.as_str())
+            || (index > 0 && capabilities[index - 1].as_str() >= capability.as_str())
+        {
+            return Err(ControllerProtocolError::new(
+                "unsupported_capability",
+                "negotiated_capabilities",
+            ));
+        }
     }
     Ok(())
 }
@@ -3545,7 +3570,8 @@ mod tests {
             "collection_limits":{"task_attachment_ids":MAX_TASK_REFERENCES,"task_skill_ids":MAX_TASK_REFERENCES,"descriptors":MAX_DESCRIPTORS,"artifacts":MAX_ARTIFACTS,"capabilities":CONTROLLER_CAPABILITIES.len()},
             "base_url_grammar":"lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
-            "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"}
+            "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"},
+            "runtime_capability_context":{"order":"bytewise-strict-ascending","invalid_error":{"code":"unsupported_capability","field":"negotiated_capabilities"}}
         })
     }
 
@@ -4044,6 +4070,24 @@ mod tests {
             }),
         )
         .unwrap();
+        for item in fixture["invalid_runtime_capability_contexts"]
+            .as_array()
+            .unwrap()
+        {
+            let capabilities: Vec<String> =
+                serde_json::from_value(item["capabilities"].clone()).unwrap();
+            let error = validate_controller_runtime_message_json(
+                &serde_json::to_string(&capabilities_message).unwrap(),
+                A,
+                Some(&RuntimeValidationContext {
+                    lease: None,
+                    negotiated_capabilities: capabilities,
+                }),
+            )
+            .unwrap_err();
+            assert_eq!(error.code, item["expected_error"].as_str().unwrap());
+            assert_eq!(error.field, item["expected_field"].as_str().unwrap());
+        }
         let pre_lease = &fixture["runtime_pre_lease_case"];
         let capabilities: Vec<String> =
             serde_json::from_value(pre_lease["capabilities"].clone()).unwrap();
@@ -4063,26 +4107,31 @@ mod tests {
         let fixture = fixture();
         let vector = &fixture["lease_install_vector"];
         let context_value = &vector["context"];
-        let install_context = LeaseInstallValidationContext::new(
-            context_value["request_id"].as_str().unwrap().into(),
-            context_value["expected_pairing_id"]
-                .as_str()
-                .unwrap()
-                .into(),
-            context_value["reservation_id"].as_str().unwrap().into(),
-            context_value["remote_control_generation"]
-                .as_str()
-                .unwrap()
-                .into(),
-            context_value["relay_epoch"].as_str().unwrap().into(),
-            context_value["transcript_hash"].as_str().unwrap().into(),
-            context_value["expected_controller_connection_identity"]
-                .as_str()
-                .unwrap()
-                .into(),
-            serde_json::from_value(context_value["negotiated_capabilities"].clone()).unwrap(),
-        )
-        .unwrap();
+        let context_from = |value: &Value| {
+            LeaseInstallValidationContext::new(
+                value["request_id"].as_str().unwrap().into(),
+                value["expected_pairing_id"].as_str().unwrap().into(),
+                value["reservation_id"].as_str().unwrap().into(),
+                value["remote_control_generation"].as_str().unwrap().into(),
+                value["relay_epoch"].as_str().unwrap().into(),
+                value["transcript_hash"].as_str().unwrap().into(),
+                value["expected_controller_connection_identity"]
+                    .as_str()
+                    .unwrap()
+                    .into(),
+                serde_json::from_value(value["negotiated_capabilities"].clone()).unwrap(),
+                value["capability_hash"].as_str().unwrap().into(),
+            )
+        };
+        assert_eq!(
+            context_value["negotiated_capabilities"],
+            fixture["transcript_vector"]["transcript"]["negotiated_capabilities"]
+        );
+        assert_eq!(
+            context_value["capability_hash"],
+            fixture["transcript_vector"]["transcript"]["capability_hash"]
+        );
+        let install_context = context_from(context_value).unwrap();
         let result = validate_controller_lease_install_message_json(
             &serde_json::to_string(&vector["message"]).unwrap(),
             RELAY,
@@ -4101,26 +4150,11 @@ mod tests {
             vector["expected_lease"]
         );
 
-        let unsupported_context = LeaseInstallValidationContext::new(
-            context_value["request_id"].as_str().unwrap().into(),
-            context_value["expected_pairing_id"]
-                .as_str()
-                .unwrap()
-                .into(),
-            context_value["reservation_id"].as_str().unwrap().into(),
-            context_value["remote_control_generation"]
-                .as_str()
-                .unwrap()
-                .into(),
-            context_value["relay_epoch"].as_str().unwrap().into(),
-            context_value["transcript_hash"].as_str().unwrap().into(),
-            context_value["expected_controller_connection_identity"]
-                .as_str()
-                .unwrap()
-                .into(),
-            vec!["encrypted_frames_v1".into()],
-        )
-        .unwrap();
+        let mut unsupported_value = context_value.clone();
+        unsupported_value["negotiated_capabilities"] = json!(["encrypted_frames_v1"]);
+        unsupported_value["capability_hash"] =
+            json!(controller_capability_hash(&["encrypted_frames_v1".into()]).unwrap());
+        let unsupported_context = context_from(&unsupported_value).unwrap();
         assert_eq!(
             validate_controller_lease_install_message_json(
                 &serde_json::to_string(&vector["message"]).unwrap(),
@@ -4151,6 +4185,13 @@ mod tests {
             .unwrap_err();
             assert_eq!(error.code, vector["expected_error"].as_str().unwrap());
             assert_eq!(error.field, field);
+        }
+        for mutation in vector["capability_mutations"].as_array().unwrap() {
+            let mut mutated = context_value.clone();
+            mutated["negotiated_capabilities"] = mutation["negotiated_capabilities"].clone();
+            let error = context_from(&mutated).unwrap_err();
+            assert_eq!(error.code, mutation["expected_error"].as_str().unwrap());
+            assert_eq!(error.field, mutation["expected_field"].as_str().unwrap());
         }
     }
 

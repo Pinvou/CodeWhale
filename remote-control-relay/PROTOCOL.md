@@ -295,6 +295,13 @@ Nested token counts use the same spelling and are additionally uint32-bounded.
 `remote_control_generation` are explicitly opaque, bounded identifiers rather
 than JSON integers; their exact bytes are authenticated and compared.
 
+Every runtime `negotiated_capabilities` list is the bytewise strictly ascending
+canonical A/B intersection. Empty is permitted only where the message requires
+no specific capability. Unknown names, invalid identifier spelling, duplicates,
+or out-of-order entries all fail identically as
+`unsupported_capability: negotiated_capabilities`; callers must not sort or
+deduplicate an invalid inbound context on its behalf.
+
 The capability hash is SHA-256 of ASCII
 `pinvou-controller-capabilities-v1` followed by every negotiated capability in
 bytewise sorted order as `LP(UTF-8(value))`. Its complete-v1 digest is
@@ -329,7 +336,10 @@ handshake state, never from fields copied out of the untrusted
 `controller_joined` candidate. The context freezes `request_id`, expected
 `pairing_id`, `reservation_id`, `remote_control_generation`, `relay_epoch`,
 `transcript_hash`, expected signed `controller_connection_identity`, and
-negotiated capabilities. The
+the exact canonical `negotiated_capabilities + capability_hash` copied from the
+already verified transcript. The context constructor recomputes the capability
+hash and requires the list, order, and digest to match exactly; deletion,
+addition, replacement, duplication, or reordering is rejected. The
 Relay result must echo all seven bindings and requires `pairing_v1`; any
 mismatch is `stale_context`. Only after all bindings and the exact result schema
 validate does the validator return a new immutable `LeaseContext` containing
@@ -469,7 +479,7 @@ text “连接码无效或已失效”. A legacy conflict remains exactly
 plus close code `1008`.
 
 The contract digest is
-`de6e06bc6d5d0213bccea6841d4b256dd5403c493c9601b244bf0533034d2721`.
+`3784ee2f066ebd2d66e7f72bc6a6727a210a329dbefdada60775b3014e93c004`.
 It is SHA-256 over canonical JSON (object keys recursively sorted, array order
 preserved, compact JSON scalars) of `{contract,fixture}`. `contract` is the
 executable manifest containing every schema required/optional field, role
