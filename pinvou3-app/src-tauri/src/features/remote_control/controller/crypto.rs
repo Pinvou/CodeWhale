@@ -21,10 +21,9 @@ use sha2_10::Sha256 as Sha256V10;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, Zeroizing};
 
-use super::protocol::transcript_authentication::{TranscriptAuthenticator, private::Sealed};
 use super::protocol::{
-    ControllerProtocolError, MAX_DECRYPTED_PAYLOAD_BYTES, MAX_ENCRYPTED_FRAME_BYTES, Result,
-    build_receipt_commitment_preimage,
+    ControllerProtocolError, LeaseInstallValidationContext, MAX_DECRYPTED_PAYLOAD_BYTES,
+    MAX_ENCRYPTED_FRAME_BYTES, ParsedTranscript, Result, build_receipt_commitment_preimage,
 };
 
 const AEAD_NONCE_BYTES: usize = 12;
@@ -33,6 +32,10 @@ const RECEIPT_SECRET_BYTES: usize = 32;
 const REPLAY_WINDOW_BITS: u64 = 64;
 const MAX_RECEIPT_REPLAYS: usize = 8;
 const MAX_BINDING_BYTES: usize = 128;
+pub(super) const MAX_SENSITIVE_STRING_BYTES: usize = 8 * 1024;
+const SEALED_CODE_VERSION: u8 = 1;
+const PAIRING_CODE_BYTES: usize = 7;
+const SEALED_CODE_BYTES: usize = 1 + 32 + AEAD_NONCE_BYTES + PAIRING_CODE_BYTES + AEAD_TAG_BYTES;
 #[cfg(test)]
 static SECRET_OWNER_DROPS: AtomicUsize = AtomicUsize::new(0);
 
@@ -83,11 +86,11 @@ fn random_nonce() -> CryptoResult<[u8; AEAD_NONCE_BYTES]> {
 }
 
 fn shared_secret(secret: &StaticSecret, peer: [u8; 32]) -> CryptoResult<Zeroizing<[u8; 32]>> {
-    let shared = secret.diffie_hellman(&PublicKey::from(peer)).to_bytes();
-    if shared.iter().all(|byte| *byte == 0) {
+    let shared = secret.diffie_hellman(&PublicKey::from(peer));
+    if !shared.was_contributory() {
         return Err(ControllerCryptoError::new("invalid_peer_key", "x25519"));
     }
-    Ok(Zeroizing::new(shared))
+    Ok(Zeroizing::new(shared.to_bytes()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,29 +171,101 @@ impl CodeWrapKeyPair {
         self.public
     }
 
-    pub(crate) fn derive_wrapping_key(
+    fn derive_wrapping_key(
         &self,
         peer_public_key: CodeWrapPublicKey,
-        registration_request_id: &str,
-        remote_control_generation: &str,
-    ) -> CryptoResult<CodeWrapKey> {
-        if [registration_request_id, remote_control_generation]
-            .iter()
-            .any(|field| field.is_empty() || field.len() > MAX_BINDING_BYTES)
-        {
-            return Err(ControllerCryptoError::new("invalid_binding", "code_wrap"));
-        }
+        binding: &CodeWrapBinding,
+    ) -> CryptoResult<Zeroizing<[u8; 32]>> {
         let shared = shared_secret(&self.secret, peer_public_key.to_bytes())?;
-        let key = hkdf_expand(
+        let expires = binding.expires_at_ms_decimal();
+        hkdf_expand(
             shared.as_ref(),
             b"pinvou-code-wrap-salt-v1",
             b"pinvou-code-wrap-key-v1",
             &[
-                registration_request_id.as_bytes(),
-                remote_control_generation.as_bytes(),
+                binding.registration_request_id.as_bytes(),
+                binding.pairing_id.as_bytes(),
+                binding.remote_control_generation.as_bytes(),
+                binding.relay_epoch.as_bytes(),
+                expires.as_bytes(),
             ],
+        )
+    }
+
+    pub(crate) fn seal_pairing_code(
+        self,
+        receiver_public_key: CodeWrapPublicKey,
+        binding: &CodeWrapBinding,
+        pairing_code: &str,
+    ) -> CryptoResult<Vec<u8>> {
+        self.seal_pairing_code_with_nonce(
+            receiver_public_key,
+            binding,
+            pairing_code,
+            random_nonce()?,
+        )
+    }
+
+    fn seal_pairing_code_with_nonce(
+        self,
+        receiver_public_key: CodeWrapPublicKey,
+        binding: &CodeWrapBinding,
+        pairing_code: &str,
+        nonce: [u8; AEAD_NONCE_BYTES],
+    ) -> CryptoResult<Vec<u8>> {
+        validate_pairing_code(pairing_code)?;
+        let key = self.derive_wrapping_key(receiver_public_key, binding)?;
+        let aad = binding.aad()?;
+        let ciphertext = seal_aead(
+            &key,
+            nonce,
+            &aad,
+            pairing_code.as_bytes(),
+            PAIRING_CODE_BYTES + AEAD_TAG_BYTES,
         )?;
-        Ok(CodeWrapKey { key })
+        let mut envelope = Vec::with_capacity(SEALED_CODE_BYTES);
+        envelope.push(SEALED_CODE_VERSION);
+        envelope.extend_from_slice(&self.public.to_bytes());
+        envelope.extend_from_slice(&nonce);
+        envelope.extend_from_slice(&ciphertext);
+        debug_assert_eq!(envelope.len(), SEALED_CODE_BYTES);
+        Ok(envelope)
+    }
+
+    pub(crate) fn open_sealed_code(
+        &self,
+        binding: &CodeWrapBinding,
+        envelope: &[u8],
+    ) -> CryptoResult<SensitiveString> {
+        if envelope.len() != SEALED_CODE_BYTES || envelope[0] != SEALED_CODE_VERSION {
+            return Err(ControllerCryptoError::new(
+                "invalid_ciphertext",
+                "sealed_code_v1",
+            ));
+        }
+        let relay_public_key: [u8; 32] = envelope[1..33]
+            .try_into()
+            .expect("sealed-code public key has fixed length");
+        let nonce: [u8; AEAD_NONCE_BYTES] = envelope[33..45]
+            .try_into()
+            .expect("sealed-code nonce has fixed length");
+        let key = self.derive_wrapping_key(CodeWrapPublicKey(relay_public_key), binding)?;
+        let aad = binding.aad()?;
+        let mut plaintext = open_aead(
+            &key,
+            nonce,
+            &aad,
+            &envelope[45..],
+            PAIRING_CODE_BYTES + AEAD_TAG_BYTES,
+        )?;
+        let result = std::str::from_utf8(&plaintext)
+            .map_err(|_| ControllerCryptoError::new("invalid_ciphertext", "sealed_code_v1"))
+            .and_then(|code| {
+                validate_pairing_code(code)?;
+                SensitiveString::new(code)
+            });
+        plaintext.zeroize();
+        result
     }
 
     #[cfg(test)]
@@ -201,6 +276,76 @@ impl CodeWrapKeyPair {
             secret,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodeWrapBinding {
+    registration_request_id: String,
+    pairing_id: String,
+    remote_control_generation: String,
+    relay_epoch: String,
+    expires_at_ms: u64,
+}
+
+impl CodeWrapBinding {
+    pub(crate) fn new(
+        registration_request_id: impl Into<String>,
+        pairing_id: impl Into<String>,
+        remote_control_generation: impl Into<String>,
+        relay_epoch: impl Into<String>,
+        expires_at_ms: u64,
+    ) -> CryptoResult<Self> {
+        let value = Self {
+            registration_request_id: registration_request_id.into(),
+            pairing_id: pairing_id.into(),
+            remote_control_generation: remote_control_generation.into(),
+            relay_epoch: relay_epoch.into(),
+            expires_at_ms,
+        };
+        if value.expires_at_ms == 0
+            || [
+                &value.registration_request_id,
+                &value.pairing_id,
+                &value.remote_control_generation,
+                &value.relay_epoch,
+            ]
+            .iter()
+            .any(|field| field.is_empty() || field.len() > MAX_BINDING_BYTES)
+        {
+            return Err(ControllerCryptoError::new("invalid_binding", "code_wrap"));
+        }
+        Ok(value)
+    }
+
+    fn expires_at_ms_decimal(&self) -> String {
+        self.expires_at_ms.to_string()
+    }
+
+    fn aad(&self) -> CryptoResult<Vec<u8>> {
+        let mut aad = b"pinvou-sealed-code-aad-v1".to_vec();
+        let expires = self.expires_at_ms_decimal();
+        for field in [
+            self.registration_request_id.as_bytes(),
+            self.pairing_id.as_bytes(),
+            self.remote_control_generation.as_bytes(),
+            self.relay_epoch.as_bytes(),
+            expires.as_bytes(),
+        ] {
+            lp(&mut aad, field)?;
+        }
+        Ok(aad)
+    }
+}
+
+fn validate_pairing_code(value: &str) -> CryptoResult<()> {
+    if value.len() != PAIRING_CODE_BYTES
+        || !value
+            .bytes()
+            .all(|byte| b"23456789ABCDEFGHJKMNPQRSTUVWXYZ".contains(&byte))
+    {
+        return Err(ControllerCryptoError::new("invalid_field", "pairing_code"));
+    }
+    Ok(())
 }
 
 /// A key pair used only for A/B handshake and session-key derivation.
@@ -237,8 +382,8 @@ impl HandshakeKeyPair {
         self.public
     }
 
-    pub(crate) fn derive_session_keys(
-        &self,
+    pub(crate) fn into_session_keys(
+        self,
         peer_public_key: HandshakePublicKey,
         binding: &HandshakeBinding,
     ) -> CryptoResult<SessionKeys> {
@@ -259,6 +404,7 @@ impl HandshakeKeyPair {
             finished_b: derive(b"finished/B")?,
             business_a_to_b: derive(b"business/A-to-B")?,
             business_b_to_a: derive(b"business/B-to-A")?,
+            resume_secret: derive(b"resume")?,
         })
     }
 
@@ -269,36 +415,6 @@ impl HandshakeKeyPair {
             public: HandshakePublicKey(PublicKey::from(&secret).to_bytes()),
             secret,
         }
-    }
-}
-
-pub(crate) struct CodeWrapKey {
-    key: Zeroizing<[u8; 32]>,
-}
-
-impl fmt::Debug for CodeWrapKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("CodeWrapKey([REDACTED])")
-    }
-}
-
-impl CodeWrapKey {
-    pub(crate) fn seal(
-        &self,
-        nonce: [u8; AEAD_NONCE_BYTES],
-        aad: &[u8],
-        plaintext: &[u8],
-    ) -> CryptoResult<Vec<u8>> {
-        seal_aead(&self.key, nonce, aad, plaintext, 4096)
-    }
-
-    pub(crate) fn open(
-        &self,
-        nonce: [u8; AEAD_NONCE_BYTES],
-        aad: &[u8],
-        ciphertext: &[u8],
-    ) -> CryptoResult<Vec<u8>> {
-        open_aead(&self.key, nonce, aad, ciphertext, 4096)
     }
 }
 
@@ -423,6 +539,7 @@ pub(crate) struct SessionKeys {
     finished_b: Zeroizing<[u8; 32]>,
     business_a_to_b: Zeroizing<[u8; 32]>,
     business_b_to_a: Zeroizing<[u8; 32]>,
+    resume_secret: Zeroizing<[u8; 32]>,
 }
 
 impl fmt::Debug for SessionKeys {
@@ -431,100 +548,169 @@ impl fmt::Debug for SessionKeys {
     }
 }
 
-impl Drop for SessionKeys {
-    fn drop(&mut self) {
-        #[cfg(test)]
-        SECRET_OWNER_DROPS.fetch_add(1, Ordering::Relaxed);
+impl SessionKeys {
+    pub(crate) fn into_role_ciphers(
+        self,
+        local_role: ControllerRole,
+        binding: LeaseBinding,
+    ) -> CryptoResult<RoleCiphers> {
+        let Self {
+            transcript_hash,
+            finished_a,
+            finished_b,
+            business_a_to_b,
+            business_b_to_a,
+            resume_secret,
+        } = self;
+        let (
+            sender_role,
+            receiver_role,
+            sender_finished,
+            receiver_finished,
+            send_direction,
+            receive_direction,
+            send_root,
+            receive_root,
+        ) = match local_role {
+            ControllerRole::A => (
+                ControllerRole::A,
+                ControllerRole::B,
+                finished_a,
+                finished_b,
+                FrameDirection::AToB,
+                FrameDirection::BToA,
+                business_a_to_b,
+                business_b_to_a,
+            ),
+            ControllerRole::B => (
+                ControllerRole::B,
+                ControllerRole::A,
+                finished_b,
+                finished_a,
+                FrameDirection::BToA,
+                FrameDirection::AToB,
+                business_b_to_a,
+                business_a_to_b,
+            ),
+        };
+        let send_key = derive_business_key(&send_root, &transcript_hash, &binding, send_direction)?;
+        let receive_key =
+            derive_business_key(&receive_root, &transcript_hash, &binding, receive_direction)?;
+        Ok(RoleCiphers {
+            finished_sender: FinishedSender {
+                key: sender_finished,
+                transcript_hash,
+                sender: sender_role,
+            },
+            finished_receiver: FinishedReceiver {
+                key: receiver_finished,
+                transcript_hash,
+                expected_sender: receiver_role,
+            },
+            send: SendCipher {
+                key: send_key,
+                binding: binding.clone(),
+                direction: send_direction,
+                last_sequence: 0,
+                exhausted: false,
+            },
+            receive: ReceiveCipher {
+                key: receive_key,
+                binding,
+                direction: receive_direction,
+                replay: ReplayWindow::default(),
+            },
+            resume_secret: ResumeSecret(resume_secret),
+        })
     }
 }
 
-impl SessionKeys {
-    fn finished_key(&self, sender: ControllerRole) -> &[u8; 32] {
-        match sender {
-            ControllerRole::A => &self.finished_a,
-            ControllerRole::B => &self.finished_b,
-        }
+fn derive_business_key(
+    root: &[u8; 32],
+    transcript_hash: &[u8; 32],
+    binding: &LeaseBinding,
+    direction: FrameDirection,
+) -> CryptoResult<Zeroizing<[u8; 32]>> {
+    let epoch = binding.lease_epoch.to_string();
+    hkdf_expand(
+        root,
+        transcript_hash,
+        b"pinvou-controller-business-key-v1",
+        &[
+            binding.connection_id.as_bytes(),
+            binding.controller_lease_id.as_bytes(),
+            epoch.as_bytes(),
+            binding.relay_epoch.as_bytes(),
+            binding.remote_control_generation.as_bytes(),
+            direction.wire(),
+        ],
+    )
+}
+
+pub(crate) struct RoleCiphers {
+    pub(crate) finished_sender: FinishedSender,
+    pub(crate) finished_receiver: FinishedReceiver,
+    pub(crate) send: SendCipher,
+    pub(crate) receive: ReceiveCipher,
+    pub(crate) resume_secret: ResumeSecret,
+}
+
+pub(crate) struct ResumeSecret(Zeroizing<[u8; 32]>);
+
+impl fmt::Debug for ResumeSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ResumeSecret([REDACTED])")
+    }
+}
+
+pub(crate) struct FinishedSender {
+    key: Zeroizing<[u8; 32]>,
+    transcript_hash: [u8; 32],
+    sender: ControllerRole,
+}
+
+impl FinishedSender {
+    pub(crate) fn seal(self, receipt: &ReceiptSecret) -> CryptoResult<Vec<u8>> {
+        self.seal_with_nonce(receipt, random_nonce()?)
     }
 
-    pub(crate) fn seal_finished(
-        &self,
-        sender: ControllerRole,
+    fn seal_with_nonce(
+        self,
         receipt: &ReceiptSecret,
-    ) -> CryptoResult<Vec<u8>> {
-        self.seal_finished_with_nonce(sender, random_nonce()?, receipt)
-    }
-
-    fn seal_finished_with_nonce(
-        &self,
-        sender: ControllerRole,
         nonce: [u8; AEAD_NONCE_BYTES],
-        receipt: &ReceiptSecret,
     ) -> CryptoResult<Vec<u8>> {
         let mut plaintext = b"pinvou-controller-finished-v1".to_vec();
         lp(&mut plaintext, &self.transcript_hash)?;
-        lp(&mut plaintext, sender.wire())?;
+        lp(&mut plaintext, self.sender.wire())?;
         lp(&mut plaintext, receipt.0.as_ref())?;
-        let aad = finished_aad(&self.transcript_hash, sender)?;
-        let ciphertext = seal_aead(self.finished_key(sender), nonce, &aad, &plaintext, 1024)?;
+        let aad = finished_aad(&self.transcript_hash, self.sender)?;
+        let ciphertext = seal_aead(&self.key, nonce, &aad, &plaintext, 1024)?;
         plaintext.zeroize();
         let mut output = nonce.to_vec();
         output.extend_from_slice(&ciphertext);
         Ok(output)
     }
+}
 
-    pub(crate) fn open_finished(
-        &self,
-        expected_sender: ControllerRole,
-        encrypted: &[u8],
-    ) -> CryptoResult<ReceiptSecret> {
+pub(crate) struct FinishedReceiver {
+    key: Zeroizing<[u8; 32]>,
+    transcript_hash: [u8; 32],
+    expected_sender: ControllerRole,
+}
+
+impl FinishedReceiver {
+    pub(crate) fn open(self, encrypted: &[u8]) -> CryptoResult<ReceiptSecret> {
         if encrypted.len() < AEAD_NONCE_BYTES + AEAD_TAG_BYTES || encrypted.len() > 1024 {
             return Err(ControllerCryptoError::new("invalid_ciphertext", "finished"));
         }
         let mut nonce = [0_u8; AEAD_NONCE_BYTES];
         nonce.copy_from_slice(&encrypted[..AEAD_NONCE_BYTES]);
-        let aad = finished_aad(&self.transcript_hash, expected_sender)?;
-        let mut plaintext = open_aead(
-            self.finished_key(expected_sender),
-            nonce,
-            &aad,
-            &encrypted[AEAD_NONCE_BYTES..],
-            1024,
-        )?;
-        let parsed = parse_finished(&plaintext, &self.transcript_hash, expected_sender);
+        let aad = finished_aad(&self.transcript_hash, self.expected_sender)?;
+        let mut plaintext =
+            open_aead(&self.key, nonce, &aad, &encrypted[AEAD_NONCE_BYTES..], 1024)?;
+        let parsed = parse_finished(&plaintext, &self.transcript_hash, self.expected_sender);
         plaintext.zeroize();
         parsed.map(|secret| ReceiptSecret(Zeroizing::new(secret)))
-    }
-
-    pub(crate) fn business_cipher(
-        &self,
-        direction: FrameDirection,
-        binding: LeaseBinding,
-    ) -> CryptoResult<BusinessCipher> {
-        let root = match direction {
-            FrameDirection::AToB => &self.business_a_to_b,
-            FrameDirection::BToA => &self.business_b_to_a,
-        };
-        let epoch = binding.lease_epoch.to_string();
-        let key = hkdf_expand(
-            root.as_ref(),
-            &self.transcript_hash,
-            b"pinvou-controller-business-key-v1",
-            &[
-                binding.connection_id.as_bytes(),
-                binding.controller_lease_id.as_bytes(),
-                epoch.as_bytes(),
-                binding.relay_epoch.as_bytes(),
-                binding.remote_control_generation.as_bytes(),
-                direction.wire(),
-            ],
-        )?;
-        Ok(BusinessCipher {
-            key,
-            binding,
-            direction,
-            replay: ReplayWindow::default(),
-            last_sealed_sequence: 0,
-        })
     }
 }
 
@@ -613,21 +799,21 @@ impl LeaseBinding {
     }
 }
 
-pub(crate) struct BusinessCipher {
+pub(crate) struct SendCipher {
     key: Zeroizing<[u8; 32]>,
     binding: LeaseBinding,
     direction: FrameDirection,
-    replay: ReplayWindow,
-    last_sealed_sequence: u64,
+    last_sequence: u64,
+    exhausted: bool,
 }
 
-impl fmt::Debug for BusinessCipher {
+impl fmt::Debug for SendCipher {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("BusinessCipher([REDACTED])")
+        formatter.write_str("SendCipher([REDACTED])")
     }
 }
 
-impl BusinessCipher {
+impl SendCipher {
     pub(crate) fn seal(
         &mut self,
         lease_epoch: u64,
@@ -635,20 +821,48 @@ impl BusinessCipher {
         payload_kind: &str,
         plaintext: &[u8],
     ) -> CryptoResult<Vec<u8>> {
-        self.check_epoch_sequence(lease_epoch, sequence)?;
-        if sequence <= self.last_sealed_sequence {
+        if self.exhausted {
+            return Err(ControllerCryptoError::new(
+                "sequence_exhausted",
+                "frame_sequence",
+            ));
+        }
+        check_epoch_sequence(&self.binding, lease_epoch, sequence)?;
+        if sequence <= self.last_sequence {
             return Err(ControllerCryptoError::new("replay", "frame_sequence"));
         }
         if plaintext.len() > MAX_DECRYPTED_PAYLOAD_BYTES {
             return Err(ControllerCryptoError::new("plaintext_too_large", "frame"));
         }
         let nonce = frame_nonce(self.direction, lease_epoch, sequence);
-        let aad = self.frame_aad(lease_epoch, sequence, payload_kind)?;
+        let aad = frame_aad(
+            &self.binding,
+            self.direction,
+            lease_epoch,
+            sequence,
+            payload_kind,
+        )?;
         let ciphertext = seal_aead(&self.key, nonce, &aad, plaintext, MAX_ENCRYPTED_FRAME_BYTES)?;
-        self.last_sealed_sequence = sequence;
+        self.last_sequence = sequence;
+        self.exhausted = sequence == u64::MAX;
         Ok(ciphertext)
     }
+}
 
+pub(crate) struct ReceiveCipher {
+    key: Zeroizing<[u8; 32]>,
+    binding: LeaseBinding,
+    direction: FrameDirection,
+    replay: ReplayWindow,
+}
+
+impl fmt::Debug for ReceiveCipher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ReceiveCipher([REDACTED])")
+    }
+}
+
+impl ReceiveCipher {
     pub(crate) fn open(
         &mut self,
         lease_epoch: u64,
@@ -656,7 +870,7 @@ impl BusinessCipher {
         payload_kind: &str,
         ciphertext: &[u8],
     ) -> CryptoResult<Vec<u8>> {
-        self.check_epoch_sequence(lease_epoch, sequence)?;
+        check_epoch_sequence(&self.binding, lease_epoch, sequence)?;
         if ciphertext.len() < AEAD_TAG_BYTES
             || ciphertext.len() > MAX_DECRYPTED_PAYLOAD_BYTES + AEAD_TAG_BYTES
         {
@@ -664,7 +878,13 @@ impl BusinessCipher {
         }
         self.replay.check(sequence)?;
         let nonce = frame_nonce(self.direction, lease_epoch, sequence);
-        let aad = self.frame_aad(lease_epoch, sequence, payload_kind)?;
+        let aad = frame_aad(
+            &self.binding,
+            self.direction,
+            lease_epoch,
+            sequence,
+            payload_kind,
+        )?;
         let plaintext = open_aead(
             &self.key,
             nonce,
@@ -678,46 +898,51 @@ impl BusinessCipher {
         self.replay.commit(sequence);
         Ok(plaintext)
     }
+}
 
-    fn check_epoch_sequence(&self, lease_epoch: u64, sequence: u64) -> CryptoResult<()> {
-        if lease_epoch != self.binding.lease_epoch {
-            return Err(ControllerCryptoError::new("unknown_epoch", "lease_epoch"));
-        }
-        if sequence == 0 {
-            return Err(ControllerCryptoError::new("replay", "frame_sequence"));
-        }
-        Ok(())
+fn check_epoch_sequence(
+    binding: &LeaseBinding,
+    lease_epoch: u64,
+    sequence: u64,
+) -> CryptoResult<()> {
+    if lease_epoch != binding.lease_epoch {
+        return Err(ControllerCryptoError::new("unknown_epoch", "lease_epoch"));
     }
+    if sequence == 0 {
+        return Err(ControllerCryptoError::new("replay", "frame_sequence"));
+    }
+    Ok(())
+}
 
-    fn frame_aad(
-        &self,
-        lease_epoch: u64,
-        sequence: u64,
-        payload_kind: &str,
-    ) -> CryptoResult<Vec<u8>> {
-        if payload_kind.is_empty() || payload_kind.len() > MAX_BINDING_BYTES {
-            return Err(ControllerCryptoError::new(
-                "invalid_binding",
-                "payload_kind",
-            ));
-        }
-        let mut output = b"pinvou-controller-business-aad-v1".to_vec();
-        let lease_epoch = lease_epoch.to_string();
-        let sequence = sequence.to_string();
-        for value in [
-            self.binding.connection_id.as_bytes(),
-            self.binding.controller_lease_id.as_bytes(),
-            lease_epoch.as_bytes(),
-            self.binding.relay_epoch.as_bytes(),
-            self.binding.remote_control_generation.as_bytes(),
-            self.direction.wire(),
-            sequence.as_bytes(),
-            payload_kind.as_bytes(),
-        ] {
-            lp(&mut output, value)?;
-        }
-        Ok(output)
+fn frame_aad(
+    binding: &LeaseBinding,
+    direction: FrameDirection,
+    lease_epoch: u64,
+    sequence: u64,
+    payload_kind: &str,
+) -> CryptoResult<Vec<u8>> {
+    if payload_kind.is_empty() || payload_kind.len() > MAX_BINDING_BYTES {
+        return Err(ControllerCryptoError::new(
+            "invalid_binding",
+            "payload_kind",
+        ));
     }
+    let mut output = b"pinvou-controller-business-aad-v1".to_vec();
+    let lease_epoch = lease_epoch.to_string();
+    let sequence = sequence.to_string();
+    for value in [
+        binding.connection_id.as_bytes(),
+        binding.controller_lease_id.as_bytes(),
+        lease_epoch.as_bytes(),
+        binding.relay_epoch.as_bytes(),
+        binding.remote_control_generation.as_bytes(),
+        direction.wire(),
+        sequence.as_bytes(),
+        payload_kind.as_bytes(),
+    ] {
+        lp(&mut output, value)?;
+    }
+    Ok(output)
 }
 
 fn frame_nonce(direction: FrameDirection, lease_epoch: u64, sequence: u64) -> [u8; 12] {
@@ -836,12 +1061,26 @@ fn open_aead(
 pub(crate) struct SensitiveString(Zeroizing<String>);
 
 impl SensitiveString {
-    pub(crate) fn new(value: impl Into<String>) -> Self {
-        Self(Zeroizing::new(value.into()))
+    pub(crate) fn new(value: impl Into<String>) -> CryptoResult<Self> {
+        let value = value.into();
+        if value.is_empty() || value.len() > MAX_SENSITIVE_STRING_BYTES {
+            return Err(ControllerCryptoError::new(
+                "invalid_sensitive_value",
+                "sensitive_string",
+            ));
+        }
+        Ok(Self(Zeroizing::new(value)))
     }
 
     pub(crate) fn expose(&self) -> &str {
         self.0.as_str()
+    }
+}
+
+impl Drop for SensitiveString {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        SECRET_OWNER_DROPS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -883,48 +1122,118 @@ impl fmt::Debug for AuthenticatedRelayTrustConfig {
 
 impl AuthenticatedRelayTrustConfig {
     #[cfg(test)]
-    fn from_test_enrollment(entries: impl IntoIterator<Item = (String, [u8; 32])>) -> Self {
+    pub(super) fn from_test_enrollment(
+        entries: impl IntoIterator<Item = (String, [u8; 32])>,
+    ) -> Self {
         Self {
             keys: entries.into_iter().collect(),
         }
     }
 }
 
-pub(crate) struct EnrolledTranscriptAuthenticator {
+pub(crate) struct TranscriptAuthenticator {
     trust: AuthenticatedRelayTrustConfig,
 }
 
-impl EnrolledTranscriptAuthenticator {
-    pub(crate) fn new(trust: AuthenticatedRelayTrustConfig) -> Self {
+impl TranscriptAuthenticator {
+    fn new(trust: AuthenticatedRelayTrustConfig) -> Self {
         Self { trust }
+    }
+
+    pub(crate) fn authenticate(
+        &self,
+        parsed: ParsedTranscript,
+    ) -> Result<LeaseInstallValidationContext> {
+        let parts = parsed.into_parts();
+        if parts.signature_algorithm != "ed25519" {
+            return Err(ControllerProtocolError::new(
+                "invalid_field",
+                "signature_algorithm",
+            ));
+        }
+        let public_key = self
+            .trust
+            .keys
+            .get(&parts.relay_signing_key_id)
+            .ok_or_else(|| ControllerProtocolError::new("invalid_field", "relay_signing_key_id"))?;
+        UnparsedPublicKey::new(&signature::ED25519, public_key)
+            .verify(&parts.signature_preimage, &parts.relay_signature)
+            .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
+        Ok(LeaseInstallValidationContext::new(VerifiedTranscript {
+            request_id: parts.request_id,
+            expected_pairing_id: parts.expected_pairing_id,
+            reservation_id: parts.reservation_id,
+            remote_control_generation: parts.remote_control_generation,
+            relay_epoch: parts.relay_epoch,
+            transcript_hash: parts.transcript_hash,
+            expected_controller_connection_identity: parts.expected_controller_connection_identity,
+            negotiated_capabilities: parts.negotiated_capabilities,
+            capability_hash: parts.capability_hash,
+        }))
     }
 }
 
-impl fmt::Debug for EnrolledTranscriptAuthenticator {
+#[cfg(test)]
+pub(super) fn authenticate_transcript_for_test(
+    parsed: ParsedTranscript,
+    key_id: &str,
+    public_key: [u8; 32],
+) -> Result<LeaseInstallValidationContext> {
+    TranscriptAuthenticator::new(AuthenticatedRelayTrustConfig::from_test_enrollment([(
+        key_id.to_owned(),
+        public_key,
+    )]))
+    .authenticate(parsed)
+}
+
+impl fmt::Debug for TranscriptAuthenticator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("EnrolledTranscriptAuthenticator")
+            .debug_struct("TranscriptAuthenticator")
             .field("trust", &self.trust)
             .finish()
     }
 }
 
-impl Sealed for EnrolledTranscriptAuthenticator {}
+pub(crate) struct VerifiedTranscript {
+    request_id: String,
+    expected_pairing_id: String,
+    reservation_id: String,
+    remote_control_generation: String,
+    relay_epoch: String,
+    transcript_hash: String,
+    expected_controller_connection_identity: String,
+    negotiated_capabilities: Vec<String>,
+    capability_hash: String,
+}
 
-impl TranscriptAuthenticator for EnrolledTranscriptAuthenticator {
-    fn verify_relay_signature(
-        &self,
-        key_id: &str,
-        preimage: &[u8],
-        signature_bytes: &[u8],
-    ) -> Result<()> {
-        let public_key =
-            self.trust.keys.get(key_id).ok_or_else(|| {
-                ControllerProtocolError::new("invalid_field", "relay_signing_key_id")
-            })?;
-        UnparsedPublicKey::new(&signature::ED25519, public_key)
-            .verify(preimage, signature_bytes)
-            .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))
+impl VerifiedTranscript {
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+    pub(crate) fn expected_pairing_id(&self) -> &str {
+        &self.expected_pairing_id
+    }
+    pub(crate) fn reservation_id(&self) -> &str {
+        &self.reservation_id
+    }
+    pub(crate) fn remote_control_generation(&self) -> &str {
+        &self.remote_control_generation
+    }
+    pub(crate) fn relay_epoch(&self) -> &str {
+        &self.relay_epoch
+    }
+    pub(crate) fn transcript_hash(&self) -> &str {
+        &self.transcript_hash
+    }
+    pub(crate) fn expected_controller_connection_identity(&self) -> &str {
+        &self.expected_controller_connection_identity
+    }
+    pub(crate) fn negotiated_capabilities(&self) -> &[String] {
+        &self.negotiated_capabilities
+    }
+    pub(crate) fn capability_hash(&self) -> &str {
+        &self.capability_hash
     }
 }
 
@@ -938,9 +1247,7 @@ mod tests {
     use base64::Engine as _;
     use serde_json::Value;
 
-    use super::super::protocol::{
-        parse_controller_pairing_transcript, transcript_authentication::TranscriptAuthenticator,
-    };
+    use super::super::protocol::parse_controller_pairing_transcript;
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!(
@@ -981,9 +1288,32 @@ mod tests {
     fn session_pair() -> (SessionKeys, SessionKeys) {
         let a = HandshakeKeyPair::from_test_bytes([1_u8; 32]);
         let b = HandshakeKeyPair::from_test_bytes([2_u8; 32]);
-        let a_keys = a.derive_session_keys(b.public_key(), &binding()).unwrap();
-        let b_keys = b.derive_session_keys(a.public_key(), &binding()).unwrap();
+        let a_public = a.public_key();
+        let b_public = b.public_key();
+        let a_keys = a.into_session_keys(b_public, &binding()).unwrap();
+        let b_keys = b.into_session_keys(a_public, &binding()).unwrap();
         (a_keys, b_keys)
+    }
+
+    fn role_pair(epoch: u64) -> (RoleCiphers, RoleCiphers) {
+        let (a, b) = session_pair();
+        (
+            a.into_role_ciphers(ControllerRole::A, lease(epoch))
+                .unwrap(),
+            b.into_role_ciphers(ControllerRole::B, lease(epoch))
+                .unwrap(),
+        )
+    }
+
+    fn code_binding() -> CodeWrapBinding {
+        CodeWrapBinding::new(
+            "registration-0001",
+            "pairing-0001",
+            "generation-0001",
+            "epoch-test-1",
+            300_000,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1015,7 +1345,7 @@ mod tests {
             vector["shared_secret_hex"]
         );
         let binding = binding();
-        let keys = a.derive_session_keys(b.public_key(), &binding).unwrap();
+        let keys = a.into_session_keys(b.public_key(), &binding).unwrap();
         assert_eq!(
             hex_lower(keys.finished_a.as_ref()),
             vector["finished"]["derived_key_hex"]
@@ -1024,19 +1354,26 @@ mod tests {
             hex_lower(keys.business_a_to_b.as_ref()),
             vector["business"]["derived_root_hex"]
         );
+        assert_eq!(
+            hex_lower(keys.resume_secret.as_ref()),
+            vector["resume_secret_hex"]
+        );
+        assert_ne!(keys.resume_secret.as_ref(), keys.finished_a.as_ref());
+        assert_ne!(keys.resume_secret.as_ref(), keys.finished_b.as_ref());
+        assert_ne!(keys.resume_secret.as_ref(), keys.business_a_to_b.as_ref());
+        assert_ne!(keys.resume_secret.as_ref(), keys.business_b_to_a.as_ref());
         let receipt = ReceiptSecret::from_test_bytes([5_u8; 32]);
-        let finished = keys
-            .seal_finished_with_nonce(ControllerRole::A, [6_u8; 12], &receipt)
+        let mut ciphers = keys.into_role_ciphers(ControllerRole::A, lease(7)).unwrap();
+        let finished = ciphers
+            .finished_sender
+            .seal_with_nonce(&receipt, [6_u8; 12])
             .unwrap();
         assert_eq!(
             hex_lower(&finished),
             vector["finished"]["ciphertext_with_nonce_hex"]
         );
-        let mut business = keys
-            .business_cipher(FrameDirection::AToB, lease(7))
-            .unwrap();
         assert_eq!(
-            hex_lower(business.key.as_ref()),
+            hex_lower(ciphers.send.key.as_ref()),
             vector["business"]["derived_key_hex"]
         );
         assert_eq!(
@@ -1044,44 +1381,224 @@ mod tests {
             vector["business"]["nonce_hex"]
         );
         assert_eq!(
-            hex_lower(&business.frame_aad(7, 1, "task_submit").unwrap()),
+            hex_lower(
+                &frame_aad(
+                    &ciphers.send.binding,
+                    FrameDirection::AToB,
+                    7,
+                    1,
+                    "task_submit"
+                )
+                .unwrap()
+            ),
             vector["business"]["aad_hex"]
         );
         assert_eq!(
-            hex_lower(&business.seal(7, 1, "task_submit", b"payload").unwrap()),
+            hex_lower(&ciphers.send.seal(7, 1, "task_submit", b"payload").unwrap()),
             vector["business"]["ciphertext_hex"]
         );
     }
 
     #[test]
-    fn code_wrap_and_handshake_keys_are_domain_separated_types() {
-        let wrap_a = CodeWrapKeyPair::from_test_bytes([3_u8; 32]);
-        let wrap_b = CodeWrapKeyPair::from_test_bytes([4_u8; 32]);
-        let key_a = wrap_a
-            .derive_wrapping_key(wrap_b.public_key(), "registration-1", "generation-1")
+    fn sealed_code_v1_matches_node_vector_and_rejects_every_binding_tamper() {
+        let fixture = fixture();
+        let vector = &fixture["sealed_code_vector"];
+        let receiver_private: [u8; 32] =
+            decode_hex(vector["receiver_private_hex"].as_str().unwrap())
+                .try_into()
+                .unwrap();
+        let relay_private: [u8; 32] = decode_hex(vector["relay_private_hex"].as_str().unwrap())
+            .try_into()
             .unwrap();
-        let key_b = wrap_b
-            .derive_wrapping_key(wrap_a.public_key(), "registration-1", "generation-1")
-            .unwrap();
-        let nonce = [9_u8; 12];
-        let ciphertext = key_a.seal(nonce, b"wrap-aad", b"2345678").unwrap();
+        let receiver = CodeWrapKeyPair::from_test_bytes(receiver_private);
+        let relay = CodeWrapKeyPair::from_test_bytes(relay_private);
         assert_eq!(
-            key_b.open(nonce, b"wrap-aad", &ciphertext).unwrap(),
-            b"2345678"
+            hex_lower(&receiver.public_key().to_bytes()),
+            vector["receiver_public_hex"]
         );
-        assert!(!format!("{wrap_a:?}").contains("030303"));
+        assert_eq!(
+            hex_lower(&relay.public_key().to_bytes()),
+            vector["relay_public_hex"]
+        );
+        assert_eq!(
+            hex_lower(
+                shared_secret(&relay.secret, receiver.public_key().to_bytes())
+                    .unwrap()
+                    .as_ref()
+            ),
+            vector["shared_secret_hex"]
+        );
+        let binding = CodeWrapBinding::new(
+            vector["binding"]["registration_request_id"]
+                .as_str()
+                .unwrap(),
+            vector["binding"]["pairing_id"].as_str().unwrap(),
+            vector["binding"]["remote_control_generation"]
+                .as_str()
+                .unwrap(),
+            vector["binding"]["relay_epoch"].as_str().unwrap(),
+            vector["binding"]["expires_at_ms"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(hex_lower(&binding.aad().unwrap()), vector["aad_hex"]);
+        assert_eq!(
+            hex_lower(
+                relay
+                    .derive_wrapping_key(receiver.public_key(), &binding)
+                    .unwrap()
+                    .as_ref()
+            ),
+            vector["derived_key_hex"]
+        );
+        let nonce: [u8; 12] = decode_hex(vector["nonce_hex"].as_str().unwrap())
+            .try_into()
+            .unwrap();
+        let envelope = relay
+            .seal_pairing_code_with_nonce(
+                receiver.public_key(),
+                &binding,
+                vector["pairing_code"].as_str().unwrap(),
+                nonce,
+            )
+            .unwrap();
+        assert_eq!(hex_lower(&envelope), vector["envelope_hex"]);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(&envelope),
+            vector["sealed_code_b64"]
+        );
+        assert_eq!(
+            receiver
+                .open_sealed_code(&binding, &envelope)
+                .unwrap()
+                .expose(),
+            "2345678"
+        );
+
+        for index in [0, 1, 33, SEALED_CODE_BYTES - 1] {
+            let mut tampered = envelope.clone();
+            tampered[index] ^= 1;
+            assert!(receiver.open_sealed_code(&binding, &tampered).is_err());
+        }
+        let stale_binding = CodeWrapBinding::new(
+            "registration-request-0001",
+            "pairing-other",
+            "generation-0001",
+            "epoch-test-1",
+            30_000,
+        )
+        .unwrap();
+        assert_eq!(
+            receiver
+                .open_sealed_code(&stale_binding, &envelope)
+                .unwrap_err()
+                .code,
+            "authentication_failed"
+        );
+        assert_eq!(
+            receiver
+                .open_sealed_code(&binding, &envelope[..SEALED_CODE_BYTES - 1])
+                .unwrap_err()
+                .code,
+            "invalid_ciphertext"
+        );
+        let source = include_str!("crypto.rs");
+        assert!(source.contains("pub(crate) fn seal_pairing_code(\n        self,"));
+        let forbidden = ["pub(crate) fn seal_pairing_code_with", "_nonce"].concat();
+        assert!(!source.contains(&forbidden));
+    }
+
+    #[test]
+    fn code_wrap_and_handshake_keys_are_domain_separated_types() {
+        let receiver = CodeWrapKeyPair::from_test_bytes([3_u8; 32]);
+        let relay = CodeWrapKeyPair::from_test_bytes([4_u8; 32]);
+        let receiver_public = receiver.public_key();
+        let relay_public = relay.public_key();
+        let envelope = relay
+            .seal_pairing_code_with_nonce(receiver_public, &code_binding(), "2345678", [9_u8; 12])
+            .unwrap();
+        assert_eq!(envelope[0], SEALED_CODE_VERSION);
+        assert_eq!(&envelope[1..33], &relay_public.to_bytes());
+        assert_eq!(
+            receiver
+                .open_sealed_code(&code_binding(), &envelope)
+                .unwrap()
+                .expose(),
+            "2345678"
+        );
+        assert!(!format!("{receiver:?}").contains("030303"));
 
         let handshake = HandshakeKeyPair::from_test_bytes([3_u8; 32]);
         assert_eq!(
-            wrap_a.public_key().to_bytes(),
+            receiver.public_key().to_bytes(),
             handshake.public_key().to_bytes(),
             "the same scalar demonstrates that domain isolation is enforced by distinct types"
         );
         assert_ne!(
-            std::any::type_name_of_val(&wrap_a.public_key()),
+            std::any::type_name_of_val(&receiver.public_key()),
             std::any::type_name_of_val(&handshake.public_key())
         );
         let (_a, _b) = session_pair();
+    }
+
+    #[test]
+    fn production_sealed_code_sealer_is_one_shot_and_owns_its_nonce() {
+        let receiver = CodeWrapKeyPair::from_test_bytes([3_u8; 32]);
+        let receiver_public = receiver.public_key();
+        let first = CodeWrapKeyPair::generate()
+            .unwrap()
+            .seal_pairing_code(receiver_public, &code_binding(), "2345678")
+            .unwrap();
+        let second = CodeWrapKeyPair::generate()
+            .unwrap()
+            .seal_pairing_code(receiver_public, &code_binding(), "2345678")
+            .unwrap();
+        assert_ne!(&first[1..45], &second[1..45]);
+        assert_eq!(
+            receiver
+                .open_sealed_code(&code_binding(), &first)
+                .unwrap()
+                .expose(),
+            "2345678"
+        );
+        assert_eq!(
+            receiver
+                .open_sealed_code(&code_binding(), &second)
+                .unwrap()
+                .expose(),
+            "2345678"
+        );
+    }
+
+    #[test]
+    fn x25519_rejects_non_contributory_peer_points_for_both_key_types() {
+        let code_wrap = CodeWrapKeyPair::from_test_bytes([3_u8; 32]);
+        let handshake = HandshakeKeyPair::from_test_bytes([4_u8; 32]);
+        for peer in [[0_u8; 32], {
+            let mut low_order = [0_u8; 32];
+            low_order[0] = 1;
+            low_order
+        }] {
+            assert_eq!(
+                code_wrap
+                    .derive_wrapping_key(CodeWrapPublicKey::from_bytes(peer), &code_binding())
+                    .unwrap_err()
+                    .code,
+                "invalid_peer_key"
+            );
+            let replacement = HandshakeKeyPair::from_test_bytes([4_u8; 32]);
+            assert_eq!(
+                replacement
+                    .into_session_keys(HandshakePublicKey::from_bytes(peer), &binding())
+                    .unwrap_err()
+                    .code,
+                "invalid_peer_key"
+            );
+        }
+        assert_eq!(handshake.public_key().to_bytes().len(), 32);
     }
 
     #[test]
@@ -1092,7 +1609,7 @@ mod tests {
             let _handshake = HandshakeKeyPair::generate().unwrap();
             let _receipt = ReceiptSecret::generate().unwrap();
             let (a, _b) = session_pair();
-            let _cipher = a.business_cipher(FrameDirection::AToB, lease(1)).unwrap();
+            let _ciphers = a.into_role_ciphers(ControllerRole::A, lease(1)).unwrap();
         }
         assert!(SECRET_OWNER_DROPS.load(Ordering::Relaxed) >= before + 5);
     }
@@ -1112,14 +1629,12 @@ mod tests {
             .unwrap()
             .try_into()
             .unwrap();
-        let authenticator = EnrolledTranscriptAuthenticator::new(
-            AuthenticatedRelayTrustConfig::from_test_enrollment([(
+        let authenticator =
+            TranscriptAuthenticator::new(AuthenticatedRelayTrustConfig::from_test_enrollment([(
                 "relay-key-test-1".to_owned(),
                 key,
-            )]),
-        );
-        let verified = authenticator.authenticate(parsed).unwrap();
-        let context = super::super::protocol::LeaseInstallValidationContext::new(verified);
+            )]));
+        let context = authenticator.authenticate(parsed).unwrap();
         assert!(format!("{context:?}").contains("pairing-0001"));
 
         let attacker_key: [u8; 32] = base64::engine::general_purpose::STANDARD
@@ -1132,12 +1647,11 @@ mod tests {
             .try_into()
             .unwrap();
         let parsed = parse_controller_pairing_transcript(&input).unwrap();
-        let attacker = EnrolledTranscriptAuthenticator::new(
-            AuthenticatedRelayTrustConfig::from_test_enrollment([(
+        let attacker =
+            TranscriptAuthenticator::new(AuthenticatedRelayTrustConfig::from_test_enrollment([(
                 "relay-key-test-1".to_owned(),
                 attacker_key,
-            )]),
-        );
+            )]));
         assert_eq!(
             attacker.authenticate(parsed).unwrap_err().field,
             "relay_signature_b64"
@@ -1166,33 +1680,57 @@ mod tests {
             authenticator.authenticate(parsed).unwrap_err().field,
             "relay_signature_b64"
         );
+
+        let crypto_source = include_str!("crypto.rs");
+        let protocol_source = include_str!("protocol.rs");
+        let public_constructor = ["pub(crate) fn ", "new(trust:"].concat();
+        let replaceable_trait = ["trait Transcript", "Authenticator"].concat();
+        assert!(!crypto_source.contains(&public_constructor));
+        assert!(!crypto_source.contains(&replaceable_trait));
+        assert!(!protocol_source.contains(&replaceable_trait));
+        let concrete_type = ["struct Transcript", "Authenticator"].concat();
+        assert_eq!(crypto_source.matches(&concrete_type).count(), 1);
     }
 
     #[test]
     fn finished_binds_role_transcript_and_receipt() {
-        let (a, b) = session_pair();
+        let (a, b) = role_pair(7);
         let receipt = ReceiptSecret::from_test_bytes([5_u8; 32]);
         let encrypted = a
-            .seal_finished_with_nonce(ControllerRole::A, [6_u8; 12], &receipt)
+            .finished_sender
+            .seal_with_nonce(&receipt, [6_u8; 12])
             .unwrap();
-        let opened = b.open_finished(ControllerRole::A, &encrypted).unwrap();
+        let opened = b.finished_receiver.open(&encrypted).unwrap();
         assert_eq!(
             opened.commitment(&binding(), ControllerRole::A).unwrap(),
             receipt.commitment(&binding(), ControllerRole::A).unwrap()
         );
+
+        let (_a, b_receiver) = role_pair(7);
+        let (_a_other, b_sender) = role_pair(7);
+        let wrong_role = b_sender
+            .finished_sender
+            .seal_with_nonce(&receipt, [6_u8; 12])
+            .unwrap();
         assert_eq!(
-            b.open_finished(ControllerRole::B, &encrypted)
+            b_receiver
+                .finished_receiver
+                .open(&wrong_role)
                 .unwrap_err()
                 .code,
             "authentication_failed"
         );
+
+        let (a, b) = role_pair(7);
+        let encrypted = a
+            .finished_sender
+            .seal_with_nonce(&receipt, [6_u8; 12])
+            .unwrap();
         let last = encrypted.len() - 1;
         let mut damaged = encrypted;
         damaged[last] ^= 1;
         assert_eq!(
-            b.open_finished(ControllerRole::A, &damaged)
-                .unwrap_err()
-                .code,
+            b.finished_receiver.open(&damaged).unwrap_err().code,
             "authentication_failed"
         );
     }
@@ -1228,9 +1766,10 @@ mod tests {
 
     #[test]
     fn business_aead_binds_direction_epoch_sequence_and_replay_window() {
-        let (a, b) = session_pair();
-        let mut sender = a.business_cipher(FrameDirection::AToB, lease(7)).unwrap();
-        let mut receiver = b.business_cipher(FrameDirection::AToB, lease(7)).unwrap();
+        let (a, b) = role_pair(7);
+        let mut sender = a.send;
+        let mut receiver = b.receive;
+        let mut opposite_sender = b.send;
         let ciphertext = sender.seal(7, 1, "task_submit", b"payload").unwrap();
         assert_eq!(
             receiver.open(7, 1, "task_submit", &ciphertext).unwrap(),
@@ -1243,15 +1782,12 @@ mod tests {
                 .code,
             "replay"
         );
-        let mut wrong_direction = b.business_cipher(FrameDirection::BToA, lease(7)).unwrap();
+        let wrong_direction = opposite_sender
+            .seal(7, 1, "task_submit", b"wrong-direction")
+            .unwrap();
         assert_eq!(
-            wrong_direction
-                .open(
-                    7,
-                    2,
-                    "task_submit",
-                    &sender.seal(7, 2, "task_submit", b"x").unwrap()
-                )
+            receiver
+                .open(7, 2, "task_submit", &wrong_direction)
                 .unwrap_err()
                 .code,
             "authentication_failed"
@@ -1268,21 +1804,19 @@ mod tests {
             frame_nonce(FrameDirection::AToB, 8, 1)
         );
 
-        let mut reordered = b.business_cipher(FrameDirection::AToB, lease(7)).unwrap();
-        let mut old_sender = a.business_cipher(FrameDirection::AToB, lease(7)).unwrap();
-        let frame_2 = old_sender.seal(7, 2, "task_submit", b"too-old").unwrap();
+        let frame_2 = sender.seal(7, 2, "task_submit", b"too-old").unwrap();
         let frame_65 = sender.seal(7, 65, "task_submit", b"previous").unwrap();
         let frame_66 = sender.seal(7, 66, "task_submit", b"newest").unwrap();
         assert_eq!(
-            reordered.open(7, 66, "task_submit", &frame_66).unwrap(),
+            receiver.open(7, 66, "task_submit", &frame_66).unwrap(),
             b"newest"
         );
         assert_eq!(
-            reordered.open(7, 65, "task_submit", &frame_65).unwrap(),
+            receiver.open(7, 65, "task_submit", &frame_65).unwrap(),
             b"previous"
         );
         assert_eq!(
-            reordered
+            receiver
                 .open(7, 2, "task_submit", &frame_2)
                 .unwrap_err()
                 .code,
@@ -1298,10 +1832,63 @@ mod tests {
     }
 
     #[test]
+    fn session_keys_split_once_and_max_sequence_exhaustion_is_terminal() {
+        let (a, _b) = session_pair();
+        let mut first_sender = a
+            .into_role_ciphers(ControllerRole::A, lease(7))
+            .unwrap()
+            .send;
+        assert!(
+            first_sender
+                .seal(7, u64::MAX, "task_submit", b"last")
+                .is_ok()
+        );
+        assert_eq!(
+            first_sender
+                .seal(7, u64::MAX, "task_submit", b"again")
+                .unwrap_err()
+                .code,
+            "sequence_exhausted"
+        );
+        assert_eq!(
+            first_sender
+                .seal(7, 1, "task_submit", b"rewind")
+                .unwrap_err()
+                .code,
+            "sequence_exhausted"
+        );
+        assert_eq!(
+            first_sender
+                .seal(8, 1, "task_submit", b"other-epoch")
+                .unwrap_err()
+                .code,
+            "sequence_exhausted"
+        );
+
+        let fresh_a = HandshakeKeyPair::from_test_bytes([11_u8; 32]);
+        let fresh_b = HandshakeKeyPair::from_test_bytes([12_u8; 32]);
+        let mut replacement = fresh_a
+            .into_session_keys(fresh_b.public_key(), &binding())
+            .unwrap()
+            .into_role_ciphers(ControllerRole::A, lease(8))
+            .unwrap()
+            .send;
+        assert_ne!(first_sender.key.as_ref(), replacement.key.as_ref());
+        assert!(replacement.seal(8, 1, "task_submit", b"new").is_ok());
+
+        let source = include_str!("crypto.rs");
+        assert!(source.contains("pub(crate) fn into_role_ciphers(\n        self,"));
+        let reusable_factory = ["fn business_", "cipher(&self"].concat();
+        assert!(!source.contains(&reusable_factory));
+        let clone_impl = ["impl Clone for Session", "Keys"].concat();
+        assert!(!source.contains(&clone_impl));
+    }
+
+    #[test]
     fn ciphertext_lengths_are_rejected_before_aead_and_failed_auth_does_not_consume_sequence() {
-        let (a, b) = session_pair();
-        let mut sender = a.business_cipher(FrameDirection::AToB, lease(1)).unwrap();
-        let mut receiver = b.business_cipher(FrameDirection::AToB, lease(1)).unwrap();
+        let (a, b) = role_pair(1);
+        let mut sender = a.send;
+        let mut receiver = b.receive;
         assert_eq!(
             receiver.open(1, 1, "task_submit", &[]).unwrap_err().code,
             "invalid_ciphertext"
@@ -1328,12 +1915,26 @@ mod tests {
 
     #[test]
     fn sensitive_strings_never_debug_display_or_serialize_the_secret() {
-        let secret = SensitiveString::new("top-secret-value");
+        let before = SECRET_OWNER_DROPS.load(Ordering::Relaxed);
+        let secret = SensitiveString::new("top-secret-value").unwrap();
         assert_eq!(secret.expose(), "top-secret-value");
         assert_eq!(format!("{secret}"), "[REDACTED]");
         assert_eq!(format!("{secret:?}"), "SensitiveString([REDACTED])");
         let error = serde_json::to_string(&secret).unwrap_err().to_string();
         assert!(!error.contains("top-secret-value"));
         assert!(error.contains("serialization forbidden"));
+        assert_eq!(
+            SensitiveString::new("").unwrap_err().code,
+            "invalid_sensitive_value"
+        );
+        assert!(SensitiveString::new("界".repeat(MAX_SENSITIVE_STRING_BYTES / 3)).is_ok());
+        assert_eq!(
+            SensitiveString::new("界".repeat(MAX_SENSITIVE_STRING_BYTES / 3 + 1))
+                .unwrap_err()
+                .code,
+            "invalid_sensitive_value"
+        );
+        drop(secret);
+        assert!(SECRET_OWNER_DROPS.load(Ordering::Relaxed) > before);
     }
 }
