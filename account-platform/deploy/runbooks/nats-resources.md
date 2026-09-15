@@ -49,6 +49,21 @@ NKey 种子不是短期 workload JWT，不自动过期。正常轮换先在 brok
 
 ## 隔离测试
 
+### GSA-08 消费者期望清单与显式离线权限输出
+
+以下入口只生成文件，不连接 NATS、不读取 workload 凭据、不创建或启动 consumer、不获取生产 high-watermark Q，也不代表 readiness 或批准激活。仅接受 GSA-07 的 v2 公开身份文件；原 `-render-authorization` 未提供新参数时输出及 ACL 保持原样。
+
+```text
+/service -render-consumer-manifest -public-keys <v2公开映射绝对路径> -public-keys-sha256 <独立可信身份摘要> -output <新清单绝对路径>
+/service -render-authorization -public-keys <v2公开映射绝对路径> -public-keys-sha256 <独立可信身份摘要> -consumer-manifest <清单绝对路径> -consumer-manifest-sha256 <独立可信清单摘要> -output <新授权配置绝对路径>
+```
+
+清单为规范紧凑 JSON，schema 固定 `approval-consumer-resources-v1`，绑定 v2 身份摘要、固定 stream、六个命令映射、30 秒 AckWait、最大 512 秒显式 NAK、64 个 MaxAckPending 和 MaxDeliver=-1。新 Billing 起点只写来源 `quiescing_high_watermark_plus_one`，不写任意 sequence。渲染器校验独立可信摘要及规范字节；额外/重复字段、改映射、改资源参数、换身份均失败关闭。不要格式化后直接替换受信文件。生成文件本身不授予信任，清单摘要必须经独立审核后投递。
+
+显式权限模式仅为 Billing/Token 加入六个固定 durable 的 INFO、NEXT、ACK 权限；Token 已有权限不变，旧 Billing shared、refund 及其他身份保持兼容，不给资源操作员额外 CREATE 权限。需要 previous-v1 重叠时仍须显式提供原有 overlap 三参数且满足有限窗口。标准输出给出身份、清单和输出配置三个 SHA-256，供离线产物关联归档；这些不是部署、Q/Q+1、逐消息 ACK 或业务效果证据。
+
+当前阶段未交付运行时可信 Q receipt 读取及生产 consumer 创建/切换。新 Billing 没有可信资源绑定时不可启动；真实 Q 获取、旧 durable 停用/撤权、ACL reload 和 activation 仍归 GSA-38，不可用上述产物绕过。
+
 `PINVOU_TEST_NATS_SERVER_BINARY` 显式指定已核对的本机 NATS server 二进制，运行 `go test ./internal/platform/events -run NATS -count=1 -v`。测试自行新建 loopback/TLS/随机身份/临时 JetStream，不接受已有服务地址，退出清理仅自己创建的进程和临时目录。必须看到具名真实测试及 `NATS_PROVISIONED_TLS_ACTUAL_PASS`，未提供二进制时的跳过不能作为验收。
 
 C2B1 要求上述五角色矩阵的 `password` 和 `nkey` 子用例均通过，并取得独立 `NATS_NKEY_RECONNECT_REVOCATION_ACTUAL_PASS`。JWT 检查只覆盖原官方选项/回调的兼容性，不冒称在此 fixture 完成真实 JWT 签发服务联验。

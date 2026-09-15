@@ -31,6 +31,10 @@ func renderAuthorization(current, expected, previous, previousExpected, output s
 	if err != nil {
 		return errRender
 	}
+	return writeRenderedPolicy(output, policy)
+}
+
+func writeRenderedPolicy(output string, policy []byte) error {
 	parent := filepath.Dir(output)
 	resolved, err := filepath.EvalSymlinks(parent)
 	info, statErr := os.Stat(parent)
@@ -63,6 +67,46 @@ func renderAuthorization(current, expected, previous, previousExpected, output s
 		return errRender
 	}
 	return nil
+}
+
+func renderConsumerAuthorization(current, expected, previous, previousExpected, manifest, manifestExpected, output string) (string, error) {
+	primary, err := readPublicArtifact(current, expected)
+	if err != nil {
+		return "", errRender
+	}
+	var old []byte
+	if previous != "" {
+		old, err = readPublicArtifact(previous, previousExpected)
+		if err != nil {
+			return "", errRender
+		}
+	}
+	resources, err := readPublicArtifact(manifest, manifestExpected)
+	if err != nil {
+		return "", errRender
+	}
+	result, err := events.RenderNATSAuthorizationWithConsumers(primary, old, resources, expected, manifestExpected)
+	if err != nil || writeRenderedPolicy(output, result.Configuration) != nil {
+		return "", errRender
+	}
+	return "NATS_CONSUMER_AUTHORIZATION_RENDERED identity_sha256=" + result.IdentitySHA256 + " manifest_sha256=" + result.ManifestSHA256 + " configuration_sha256=" + result.ConfigurationSHA256, nil
+}
+
+func renderConsumerManifest(current, expected, output string) error {
+	primary, err := readPublicArtifact(current, expected)
+	if err != nil {
+		return errRender
+	}
+	manifest, err := events.ApprovalConsumerManifest(expected)
+	if err != nil {
+		return errRender
+	}
+	digest := sha256.Sum256(manifest)
+	// Reuse the v2-only validator without writing or activating its ACL output.
+	if _, err := events.RenderNATSAuthorizationWithConsumers(primary, nil, manifest, expected, hex.EncodeToString(digest[:])); err != nil {
+		return errRender
+	}
+	return writeRenderedPolicy(output, manifest)
 }
 
 func readPublicArtifact(path, expected string) ([]byte, error) {
