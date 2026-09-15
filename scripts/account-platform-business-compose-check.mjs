@@ -39,13 +39,15 @@ function https(value) {
 // The tracked template fixes literal settings and the permitted variable slots.
 // Repeated site variables must resolve identically across every consumer.
 function bindValue(expected, actual, bindings) {
-  check(typeof actual === 'string' && actual.length > 0, 'value_missing');
-  const slots = [...expected.matchAll(/\$\{([A-Z0-9_]+):\?[^}]+\}/g)];
+  const optionalPrevious = /^\$\{APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_(?:FILE|SHA256)\?[^}]+\}$/.test(expected);
+  check(typeof actual === 'string' && (actual.length > 0 || optionalPrevious), 'value_missing');
+  const slots = [...expected.matchAll(/\$\{([A-Z0-9_]+)(:?)\?[^}]+\}/g)];
   if (!slots.length) { check(actual === expected, 'literal_changed'); return; }
   const escape = raw => raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   let pattern = '^', offset = 0;
   for (const slot of slots) {
-    pattern += escape(expected.slice(offset, slot.index)) + '([\\s\\S]+?)';
+    check(slot[2] === ':' || optionalPrevious, 'optional_variable_unreviewed');
+    pattern += escape(expected.slice(offset, slot.index)) + (optionalPrevious ? '([\\s\\S]*?)' : '([\\s\\S]+?)');
     offset = slot.index + slot[0].length;
   }
   const match = new RegExp(pattern + escape(expected.slice(offset)) + '$').exec(actual);
@@ -142,6 +144,13 @@ export function checkProductionBusiness(config, inventory) {
       && !['token_gateway', 'token_migrator', 'token_policy_operator', 'token_credential_runtime', 'account_platform_admin'].includes(bindings[key]), 'release_role_invalid');
   }
   check(bindings.TOKEN_GATEWAY_RELEASE_ROLE !== bindings.TOKEN_CREDENTIAL_RELEASE_ROLE, 'release_role_shared');
+  const previousFile = bindings.APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_FILE;
+  const previousDigest = bindings.APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_SHA256;
+  check((previousFile === '') === (previousDigest === ''), 'approval_previous_pair_invalid');
+  if (previousFile !== '') {
+    check(previousFile === '/var/run/public/pinvou/nats-authorization/previous-v1.json'
+      && /^[0-9a-f]{64}$/.test(previousDigest), 'approval_previous_invalid');
+  }
   const accountPolicyRole = bindings.ACCOUNT_POLICY_RELEASE_ROLE;
   check(typeof accountPolicyRole === 'string' && /^[a-z][a-z0-9_]{0,62}$/.test(accountPolicyRole)
     && /^account_policy_release_[a-z0-9_]+$/.test(accountPolicyRole), 'account_policy_role_invalid');

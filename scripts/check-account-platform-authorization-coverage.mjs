@@ -96,6 +96,7 @@ async function discover(catalog) {
     for (const match of text.matchAll(/broker\.Consume(?:UntilResolved)?\([^,\n]+,\s*"([^"]+)",\s*"([^"]+)"/g)) events.push({ source: relative, durable: match[1], subject: match[2] });
   }
   events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'source-bound-outbox-relay', subject: 'account|billing|token.>' });
+  events.push({ source: 'account-platform/cmd/event-relay/main.go', durable: 'account-approval-relay', subject: 'account.approval-command.authorized.v1' });
   const cliRoot = path.join(repositoryRoot, 'account-platform', 'cmd');
   const cli = (await readdir(cliRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => ({ name: entry.name, source: `account-platform/cmd/${entry.name}/main.go` }));
   return { routes, tasks, events, cli, httpSources, textBySource };

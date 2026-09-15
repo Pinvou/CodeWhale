@@ -18,7 +18,7 @@ IMAGE = "m.daocloud.io/docker.io/library/postgres@sha256:7bade6d532592ca8ce7ee32
 KEYS = ("ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD",
         "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD",
         "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD",
-        "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD")
+        "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD", "ACCOUNT_APPROVAL_RELAY_DB_PASSWORD")
 LOGINS = (("account_service", "account", KEYS[0]),
           ("billing_service", "billing", KEYS[1]),
           ("token_gateway", "token", KEYS[2]),
@@ -28,7 +28,8 @@ LOGINS = (("account_service", "account", KEYS[0]),
           ("token_policy_operator", "token", KEYS[6]),
           ("new_api", "newapi", KEYS[7]), ("keycloak", "keycloak", KEYS[8]),
           ("account_approval_writer", "account", KEYS[9]),
-          ("account_approval_backfill", "account", KEYS[10]))
+          ("account_approval_backfill", "account", KEYS[10]),
+          ("account_approval_relay", "account", KEYS[11]))
 
 
 def require(ok, code):

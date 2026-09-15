@@ -29,6 +29,32 @@ func readPublic(path string) ([]byte, error) {
 	}
 	return b, nil
 }
+
+func readSeed(path string) ([]byte, error) {
+	if privateDirectory(filepath.Dir(path)) != nil {
+		return nil, ErrIdentity
+	}
+	info, err := os.Lstat(path)
+	resolved, resolveErr := filepath.EvalSymlinks(path)
+	if err != nil || resolveErr != nil || resolved != path || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 4096 || (runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0) {
+		return nil, ErrIdentity
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, ErrIdentity
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Size() != info.Size() || (runtime.GOOS != "windows" && opened.Mode().Perm()&0077 != 0) {
+		return nil, ErrIdentity
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil || len(b) > 4096 || !bytes.Equal(b, bytes.TrimSpace(b)) {
+		clear(b)
+		return nil, ErrIdentity
+	}
+	return b, nil
+}
 func privateDirectory(path string) error {
 	resolved, err := filepath.EvalSymlinks(path)
 	info, statErr := os.Stat(path)

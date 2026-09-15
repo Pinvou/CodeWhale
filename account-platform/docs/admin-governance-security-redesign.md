@@ -1,5 +1,7 @@
 # 管理后台治理与安全及审批中心整改设计
 
+GSA-07 的身份投递、迁移、专项就绪及永久 replay 禁令操作约束见[审批授权 Relay 手册](../deploy/runbooks/approval-authorization-relay.md)；实现/环境状态以任务清单为准。
+
 > 状态：需求已确认 / 未实现 / 未部署
 >
 > 版本日期：2026-09-14

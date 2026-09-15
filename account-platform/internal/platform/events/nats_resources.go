@@ -19,9 +19,14 @@ var ErrNATSResources = errors.New("NATS_PROVISIONED_RESOURCES_UNAVAILABLE_OR_MIS
 // NATSConfig is supplied by the process boundary. Production cannot select
 // auto provisioning; an omitted mode resolves according to Environment.
 type NATSConfig struct {
-	Environment  string
-	ResourceMode string
-	CAFile       string
+	Environment     string
+	ResourceMode    string
+	CAFile          string
+	SeedFile        string
+	CredentialsFile string
+	// RequireExplicitAuthentication forbids falling back to the process-wide
+	// generic relay identity. It is used by the dedicated authorization relay.
+	RequireExplicitAuthentication bool
 }
 
 func (c NATSConfig) provisioned() (bool, error) {

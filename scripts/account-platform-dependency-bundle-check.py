@@ -4,6 +4,7 @@ Never decrypts custody packages, writes files, starts services, or reads KMS key
 Prints only independent manifest hashes after all checks pass.
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -15,6 +16,8 @@ import subprocess
 SERVICES = ("postgres", "redis", "nats", "keycloak", "newapi", "newapi-redis")
 ROLES = ("account-outbox-relay", "billing-outbox-relay", "token-outbox-relay",
          "billing-command-executor", "token-command-executor", "event-resource-operator")
+ROLES_V2 = ("account-outbox-relay", "account-approval-relay", "billing-outbox-relay", "token-outbox-relay",
+            "billing-command-executor", "token-command-executor", "event-resource-operator")
 
 
 def require(ok):
@@ -95,7 +98,23 @@ def verify(pki, nats, recipient):
     require(pki != nats and not pki.is_relative_to(nats) and not nats.is_relative_to(pki))
     files = {"ca-private.age", "ca.crt"} | {f"{s}/server.{suffix}" for s in SERVICES for suffix in ("crt", "key")}
     pki_hash = manifest(pki, recipient, 2, "pinvou-platform-internal-pki", files, set(SERVICES), "INFRASTRUCTURE_PKI_READY_V2")
-    nats_hash = manifest(nats, recipient, 1, "pinvou-nats-service-identities", {"identities.age", "public-keys.json"} | {f"{role}/nkey.seed" for role in ROLES}, set(ROLES), "NATS_IDENTITIES_READY_V1")
+    private(nats, True)
+    public_raw = read(nats / "public-keys.json")
+    public = json.loads(public_raw, object_pairs_hook=closed_object)
+    require(type(public) is dict and type(public.get("version")) is int and public.get("purpose") == "pinvou-nats-service-identities")
+    version = public["version"]
+    roles = ROLES if version == 1 else ROLES_V2
+    expected_public_fields = {"version", "purpose", "public_keys"}
+    if version == 2:
+        expected_public_fields |= {"previous_v1_sha256", "overlap_expires_at"}
+        require(type(public.get("previous_v1_sha256")) is str and re.fullmatch("[0-9a-f]{64}", public["previous_v1_sha256"]))
+        require(type(public.get("overlap_expires_at")) is str and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", public["overlap_expires_at"]))
+        try:
+            datetime.datetime.strptime(public["overlap_expires_at"], "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            require(False)
+    require(version in (1, 2) and set(public) == expected_public_fields)
+    nats_hash = manifest(nats, recipient, version, "pinvou-nats-service-identities", {"identities.age", "public-keys.json"} | {f"{role}/nkey.seed" for role in roles}, set(roles), f"NATS_IDENTITIES_READY_V{version}")
     require(read(pki / "ca-private.age").startswith(b"age-encryption.org/v1\n") and read(nats / "identities.age").startswith(b"age-encryption.org/v1\n"))
     ca = pki / "ca.crt"
     single_certificate(ca)
@@ -115,14 +134,12 @@ def verify(pki, nats, recipient):
         public = openssl("x509", "-in", cert, "-pubkey", "-noout")
         require(public == openssl("pkey", "-in", key, "-pubout") and public not in keys)
         keys.add(public)
-    public = json.loads(read(nats / "public-keys.json"), object_pairs_hook=closed_object)
-    require(set(public) == {"version", "purpose", "public_keys"} and type(public["version"]) is int and public["version"] == 1 and public["purpose"] == "pinvou-nats-service-identities")
-    require(type(public["public_keys"]) is dict and set(public["public_keys"]) == set(ROLES))
-    require(all(type(v) is str and re.fullmatch("U[A-Z2-7]{55}", v) for v in public["public_keys"].values()) and len(set(public["public_keys"].values())) == len(ROLES))
+    require(type(public["public_keys"]) is dict and set(public["public_keys"]) == set(roles))
+    require(all(type(v) is str and re.fullmatch("U[A-Z2-7]{55}", v) for v in public["public_keys"].values()) and len(set(public["public_keys"].values())) == len(roles))
     # Official key decoding/CRC checks and authorization still belong to the
     # existing fixed event-resources renderer; the generator proved seed mapping.
     return {"pki_manifest_sha256": pki_hash, "nats_manifest_sha256": nats_hash,
-            "nats_public_keys_sha256": sha(read(nats / "public-keys.json"))}
+            "nats_public_keys_sha256": sha(public_raw)}
 
 
 if __name__ == "__main__":

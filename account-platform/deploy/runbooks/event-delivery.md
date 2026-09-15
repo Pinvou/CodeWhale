@@ -26,14 +26,19 @@ LIMIT 100;
 
 ## 死信重放
 
+本节仅适用于可重放的普通事件。`account.approval-command.authorized.v1` 永久禁止人工重放，包含历史幂等记录；其 inspect 返回 `replayable=false`。授权投递恢复、身份和回滚边界见[审批授权 Relay 手册](approval-authorization-relay.md)。
+
 1. 确认失败根因已修复，核对目标环境和该事件当前业务状态。
 2. 由第二名审批人复核事件 ID、影响范围和重放理由。
-3. 在对应服务数据库凭据作用域下执行：
+3. 由受控环境投递对应服务数据库凭据，先 inspect；核验 `replayable=true` 和摘要后，用稳定幂等 key 确认：
 
 ```sh
-DATABASE_URL=postgresql://... /event-replay \
+/event-replay --event-id 01900000-0000-7000-8000-000000000001 --inspect
+/event-replay \
   --event-id 01900000-0000-7000-8000-000000000001 \
-  --reason "INC-1234 修复消费者后重放" --confirm
+  --expected-digest '<inspect返回的完整SHA-256>' \
+  --idempotency-key 'INC-1234-event-recovery-01' \
+  --reason "INC-1234 已修复消费者并经复核允许恢复此普通事件" --confirm
 ```
 
 4. 观察 Outbox 变为已发布、Consumer pending 收敛，并核对领域状态及审计。

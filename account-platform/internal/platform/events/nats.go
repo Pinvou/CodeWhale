@@ -15,6 +15,7 @@ type NATSBroker struct {
 	connection  *nats.Conn
 	stream      jetstream.JetStream
 	provisioned bool
+	publishOnly bool
 	clientName  string
 }
 
@@ -49,6 +50,21 @@ func NewNATSBroker(ctx context.Context, rawURL, clientName string, configuration
 	return &NATSBroker{connection: connection, stream: stream, provisioned: provisioned, clientName: clientName}, nil
 }
 
+// NewNATSPublishOnlyBroker creates a broker for a subject-scoped publisher
+// which is intentionally unable to inspect or administer the stream. The
+// caller must provide an explicit independent identity; process-wide generic
+// credentials are never consulted.
+func NewNATSPublishOnlyBroker(ctx context.Context, rawURL, clientName string, cfg NATSConfig) (*NATSBroker, error) {
+	if strings.TrimSpace(rawURL) == "" || strings.TrimSpace(clientName) == "" || !cfg.RequireExplicitAuthentication {
+		return nil, ErrNATSResources
+	}
+	connection, stream, err := connectNATS(rawURL, clientName, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &NATSBroker{connection: connection, stream: stream, provisioned: true, publishOnly: true, clientName: clientName}, nil
+}
+
 func (broker *NATSBroker) Publish(ctx context.Context, subject string, body []byte, messageID string) error {
 	ctx, span := observability.StartSpan(ctx, "messaging.publish")
 	defer span.End()
@@ -81,7 +97,7 @@ func (broker *NATSBroker) ConsumeUntilResolved(ctx context.Context, durable, fil
 }
 
 func (broker *NATSBroker) consume(ctx context.Context, durable, filterSubject string, handler ConsumerHandler, retainUnresolved bool) (func(), error) {
-	if strings.TrimSpace(durable) == "" || strings.TrimSpace(filterSubject) == "" || handler == nil {
+	if broker == nil || broker.publishOnly || strings.TrimSpace(durable) == "" || strings.TrimSpace(filterSubject) == "" || handler == nil {
 		return nil, errorsNewConfiguration("consumer durable, filter subject, and handler are required")
 	}
 	expected := eventConsumerConfig(durable, filterSubject, retainUnresolved)

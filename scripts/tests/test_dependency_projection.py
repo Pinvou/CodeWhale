@@ -23,7 +23,7 @@ class ProjectionTests(unittest.TestCase):
     def test_postgres_bootstrap_mapping_is_explicit_and_complete(self):
         expected = {"ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD",
                     "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD",
-                    "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD",
+                    "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD", "ACCOUNT_APPROVAL_RELAY_DB_PASSWORD",
                     "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
                     "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD"}
         self.assertEqual(set(PROJECT.POSTGRES_BOOTSTRAP_PASSWORD_NAMES), expected)
@@ -96,7 +96,7 @@ class ProjectionTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256((output / "manifest.json").read_bytes()).hexdigest(), digest)
             self.assertEqual((output / "READY").read_text(), "DEPENDENCY_PROJECTION_READY_V1\n" + digest + "\n")
             expected_files = {f"{s}/tls/server.{x}" for s in ("postgres", "redis", "newapi-redis", "nats") for x in ("crt", "key")}
-            db_names = {"ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD"}
+            db_names = {"ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD", "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD", "ACCOUNT_APPROVAL_RELAY_DB_PASSWORD", "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD", "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD"}
             expected_files |= {"postgres/bootstrap/" + n for n in db_names} | {"postgres/admin/password", "postgres/trust/ca.crt", "trust/ca.crt", "nats/authorization/authorization.conf", "redis/authorization/users.acl", "newapi-redis/authorization/users.acl"}
             self.assertEqual(set(manifest["files"]), expected_files)
             for name, metadata in manifest["files"].items():

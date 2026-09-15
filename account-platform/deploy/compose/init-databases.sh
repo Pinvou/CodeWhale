@@ -12,6 +12,7 @@ psql -X --set=ON_ERROR_STOP=1 \
 \getenv account_migration_password ACCOUNT_MIGRATION_DB_PASSWORD
 \getenv account_approval_writer_password ACCOUNT_APPROVAL_WRITER_DB_PASSWORD
 \getenv account_approval_backfill_password ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD
+\getenv account_approval_relay_password ACCOUNT_APPROVAL_RELAY_DB_PASSWORD
 \getenv billing_migration_password BILLING_MIGRATION_DB_PASSWORD
 \getenv token_migration_password TOKEN_MIGRATION_DB_PASSWORD
 \getenv token_policy_password TOKEN_POLICY_DB_PASSWORD
@@ -30,6 +31,8 @@ SELECT format('CREATE ROLE account_approval_writer LOGIN NOINHERIT NOSUPERUSER N
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_writer') \gexec
 SELECT format('CREATE ROLE account_approval_backfill LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_approval_backfill_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_backfill') \gexec
+SELECT format('CREATE ROLE account_approval_relay LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD %L', :'account_approval_relay_password')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'account_approval_relay') \gexec
 GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALSE, SET TRUE, ADMIN TRUE;
 SELECT format('CREATE ROLE billing_service LOGIN PASSWORD %L', :'billing_password')
 WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'billing_service') \gexec

@@ -3,6 +3,16 @@ import { readFileSync } from 'node:fs';
 import YAML from 'yaml';
 import { businessPrivateEnvironment } from '../../../scripts/account-platform-business-compose-check.mjs';
 
+// Fixture-only interpolation for the two required-variable forms used by the
+// tracked template. This is not evidence of an actual Compose deployment.
+export function interpolateBusinessFixtureScalar(value, variables) {
+  return value.replace(/\$\{([A-Z0-9_]+)(:?)\?[^}]+\}/g, (_, key, colon) => {
+    if (!Object.hasOwn(variables, key) || variables[key] === undefined || variables[key] === null
+      || (colon === ':' && variables[key] === '')) throw new Error(`required fixture variable: ${key}`);
+    return variables[key];
+  });
+}
+
 export function businessComposeFixture(root = '/fixture/business') {
   const source = readFileSync(new URL('../../deploy/production/compose.business.yaml', import.meta.url), 'utf8');
   const overlay = YAML.parse(readFileSync(new URL('../../deploy/compose/compose.model-token.yaml', import.meta.url), 'utf8'), { merge: true });
@@ -10,7 +20,7 @@ export function businessComposeFixture(root = '/fixture/business') {
   const subjectNames = ['account-service', 'identity-service', 'billing-service', 'token-gateway', 'token-command-executor', 'token-credential-portal', 'keycloak-mobile-authenticator'];
   subjectNames.forEach((name, i) => { subjects[name] = `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`; });
   let imageIndex = 1, port = 29100;
-  for (const [, key] of source.matchAll(/\$\{([A-Z0-9_]+):\?[^}]+\}/g)) {
+  for (const [, key] of source.matchAll(/\$\{([A-Z0-9_]+):?\?[^}]+\}/g)) {
     if (key in variables) continue;
     variables[key] = key.endsWith('_IMAGE') ? `sha256:${String(imageIndex++).padStart(64, '0')}`
       : key.endsWith('_DIRECTORY') ? `${root}/mounts/${key.toLowerCase()}`
@@ -19,6 +29,8 @@ export function businessComposeFixture(root = '/fixture/business') {
             : key.endsWith('_NETWORK') ? `fixture-${key.toLowerCase()}` : 'fixture-public-value';
   }
   Object.assign(variables, {
+    APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_FILE: '',
+    APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_SHA256: '',
     WORKLOAD_IDENTITY_ISSUER: 'https://keycloak:8443/realms/pinvou-workload',
     WORKLOAD_IDENTITY_JWKS_URL: 'https://keycloak:8443/realms/pinvou-workload/protocol/openid-connect/certs',
     TOKEN_SECRET_PROVIDER_URL: 'https://openbao:8200', TOKEN_SECRET_KEY_ID: 'fixture-transit',
@@ -44,7 +56,7 @@ export function businessComposeFixture(root = '/fixture/business') {
     variables[key] = JSON.stringify(JSON.parse(overlay.services[service].environment.WORKLOAD_IDENTITY_RULES_JSON).map(rule => ({ ...rule, subject: subjects[rule.service] })));
   }
   // Substitute parsed scalar values, not raw YAML, so JSON strings retain their quoting.
-  const replace = value => typeof value === 'string' ? value.replace(/\$\{([A-Z0-9_]+):\?[^}]+\}/g, (_, key) => variables[key])
+  const replace = value => typeof value === 'string' ? interpolateBusinessFixtureScalar(value, variables)
     : Array.isArray(value) ? value.map(replace) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, replace(v)])) : value;
   const input = replace(YAML.parse(source, { merge: true }));
   const config = structuredClone(input), envFiles = {}, images = {};

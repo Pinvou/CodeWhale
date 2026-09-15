@@ -6,6 +6,12 @@ global:
   trustedTimeSources: [time.cloudflare.com:123, pool.ntp.org:123, ntp.aliyun.com:123, time1.cloud.tencent.com:123, time.windows.com:123]
   manualReviewOnCallUserIds: ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
 
+approvalRelay:
+  # Public JSON only. Never point this at the Secret containing NKey seeds or
+  # credentials. Trusted SHA-256 values stay in global.runtimeSecret.
+  natsPublicArtifactConfigMap: pinvou-account-platform-nats-public-artifacts
+  previousV1Enabled: false
+
 compatibility:
   contractVersion: account-platform-v1
   upgradeUrl: https://github.com/Pinvou/pinvou3/releases/latest

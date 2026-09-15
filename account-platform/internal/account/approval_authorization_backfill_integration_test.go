@@ -327,7 +327,7 @@ func TestApprovalAuthorizationPreMigrationHistoryIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 	connection := authorizationTestConnection(t, ctx, db.migratorPool)
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := loadApprovalAuthorizationBaselineMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}

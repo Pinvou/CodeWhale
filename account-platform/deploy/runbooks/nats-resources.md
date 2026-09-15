@@ -1,5 +1,7 @@
 # NATS 固定资源初始化与运行隔离
 
+GSA-07 Account 授权专用 Relay 的 v2 七身份、八 key 重叠、撤旧和发布停步约束见[审批授权 Relay 手册](approval-authorization-relay.md)。下文六身份/十二 key 描述保留为 v1 独立合同，不适用于 v2 重叠；该扩展当前 NOT_DEPLOYED。
+
 状态：SECINF-04C1、04C2B1/B2 代码与真实隔离验证通过，NOT_DEPLOYED；不是正式 NATS 部署记录。
 
 生产进程（`production` 及 `production-*`）使用预建资源模式。只查询 `ACCOUNT_PLATFORM` stream，并在开始消费时查询自己实际使用的 durable；不执行创建、更新、删除或 purge。资源缺失、访问拒绝或配置漂移会阻止该业务就绪，不降级到开发初始化。开发测试默认保留既有自动初始化行为。

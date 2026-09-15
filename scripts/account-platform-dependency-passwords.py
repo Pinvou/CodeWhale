@@ -1,4 +1,4 @@
-"""Prepare the fixed fifteen first-install secrets; never modifies running services."""
+"""Prepare the fixed sixteen first-install secrets; never modifies running services."""
 import argparse
 import hashlib
 import json
@@ -10,7 +10,7 @@ import stat
 import subprocess
 
 NAMES = ("POSTGRES_ADMIN_PASSWORD", "ACCOUNT_DB_PASSWORD", "BILLING_DB_PASSWORD", "TOKEN_DB_PASSWORD", "ACCOUNT_MIGRATION_DB_PASSWORD",
-         "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD",
+         "ACCOUNT_APPROVAL_WRITER_DB_PASSWORD", "ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD", "ACCOUNT_APPROVAL_RELAY_DB_PASSWORD",
          "BILLING_MIGRATION_DB_PASSWORD", "TOKEN_MIGRATION_DB_PASSWORD", "TOKEN_POLICY_DB_PASSWORD",
          "NEWAPI_DB_PASSWORD", "KEYCLOAK_DB_PASSWORD", "PORTAL_REDIS_PASSWORD", "IDENTITY_REDIS_PASSWORD", "NEWAPI_REDIS_PASSWORD")
 PURPOSE = "pinvou-production-dependency-passwords"

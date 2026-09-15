@@ -23,8 +23,16 @@ func connectNATS(rawURL, name string, cfg NATSConfig) (*nats.Conn, jetstream.Jet
 	if err != nil {
 		return nil, nil, err
 	}
-	seedFile := strings.TrimSpace(os.Getenv("NATS_NKEY_SEED_FILE"))
-	authentication, err := natsAuthentication(rawURL, seedFile, strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")))
+	seedFile := strings.TrimSpace(cfg.SeedFile)
+	credentialsFile := strings.TrimSpace(cfg.CredentialsFile)
+	if seedFile == "" && credentialsFile == "" && !cfg.RequireExplicitAuthentication {
+		seedFile = strings.TrimSpace(os.Getenv("NATS_NKEY_SEED_FILE"))
+		credentialsFile = strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE"))
+	}
+	if cfg.RequireExplicitAuthentication && (seedFile == "") == (credentialsFile == "") {
+		return nil, nil, ErrNATSResources
+	}
+	authentication, err := natsAuthentication(rawURL, seedFile, credentialsFile)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -44,7 +52,7 @@ func connectNATS(rawURL, name string, cfg NATSConfig) (*nats.Conn, jetstream.Jet
 		}
 		options = append(options, nats.Secure(tlsConfig))
 	}
-	if provisioned {
+	if provisioned || cfg.RequireExplicitAuthentication {
 		if name == "" || strings.ContainsAny(name, ". *>\t\r\n/\\") {
 			return nil, nil, ErrNATSResources
 		}

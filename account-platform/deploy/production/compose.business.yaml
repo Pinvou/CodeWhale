@@ -458,7 +458,13 @@ services:
       NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/nats/nkey.seed"
       NATS_CA_FILE: "/var/run/secrets/pinvou/nats-ca/ca.crt"
       DATABASE_URL: "postgresql://account_service@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
+      APPROVAL_RELAY_DATABASE_URL: "postgresql://account_approval_relay@postgres:5432/account_platform_account?sslmode=verify-full&sslrootcert=/var/run/secrets/pinvou/trust/ca.crt"
       PGPASSFILE: "/var/run/secrets/pinvou/database/pgpass"
+      APPROVAL_RELAY_NATS_NKEY_SEED_FILE: "/var/run/secrets/pinvou/approval-nats/nkey.seed"
+      APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_FILE: "/var/run/public/pinvou/nats-authorization/current-v2.json"
+      APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256: "${APPROVAL_RELAY_NATS_CURRENT_PUBLIC_KEYS_SHA256:?set independently trusted current v2 public artifact digest}"
+      APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_FILE: "${APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_FILE?set explicitly empty when not overlapping}"
+      APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_SHA256: "${APPROVAL_RELAY_NATS_PREVIOUS_PUBLIC_KEYS_SHA256?set explicitly empty when not overlapping}"
     volumes:
       - type: bind
         source: "${ACCOUNT_EVENT_RELAY_DATABASE_DIRECTORY:?set verified ACCOUNT_EVENT_RELAY_DATABASE_DIRECTORY}"
@@ -473,6 +479,16 @@ services:
       - type: bind
         source: "${ACCOUNT_EVENT_RELAY_NATS_DIRECTORY:?set verified ACCOUNT_EVENT_RELAY_NATS_DIRECTORY}"
         target: /var/run/secrets/pinvou/nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${ACCOUNT_APPROVAL_RELAY_NATS_DIRECTORY:?set verified ACCOUNT_APPROVAL_RELAY_NATS_DIRECTORY}"
+        target: /var/run/secrets/pinvou/approval-nats
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: "${NATS_PUBLIC_AUTHORIZATION_DIRECTORY:?set independent public NATS authorization artifact directory}"
+        target: /var/run/public/pinvou/nats-authorization
         read_only: true
         bind: {create_host_path: false}
       - type: bind

@@ -71,13 +71,17 @@ func TestTokenApprovalConsumersPostgresIntegration(t *testing.T) {
 			t.Setenv("WORKLOAD_IDENTITY_JWKS_URL", "")
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			accountRepository, _, _ := newTokenOwnerCandidateIntegrationRepository(t, ctx, accountURL)
+			// Current approval producers require the dedicated authorization
+			// writer. Use the complete real Account database chain, not the old
+			// random-schema fixture which predates migration 51.
+			accountDatabase, _ := newApprovalRelayIntegrationDatabase(t)
+			accountRepository := &PostgresRepository{pool: accountDatabase.runtimePool, approvalWriterPool: accountDatabase.writerPool, now: func() time.Time { return time.Now().UTC() }}
 			tokenRepository, connection := newApprovalSnapshotTokenRepository(t, ctx, tokenURL)
 			activation := &consumerChainActivation{state: "ACTIVE", epoch: 1}
 			accountRepository.WithTokenGovernanceActivation(activation)
 			tokenRepository.WithTokenRouteActivationTransactionGuard(activation)
-			requester := seedTokenOwnerCandidateActor(t, ctx, accountRepository.pool, "PLATFORM_SUPER_ADMIN", "consumer-requester")
-			approver := seedTokenOwnerCandidateActor(t, ctx, accountRepository.pool, "PLATFORM_SUPER_ADMIN", "consumer-approver")
+			requester := seedTokenOwnerCandidateActor(t, ctx, accountDatabase.adminPool, "PLATFORM_SUPER_ADMIN", "consumer-requester")
+			approver := seedTokenOwnerCandidateActor(t, ctx, accountDatabase.adminPool, "PLATFORM_SUPER_ADMIN", "consumer-approver")
 			modelID := seedApprovalSnapshotTokenModel(t, ctx, connection)
 			pricing := &approvalSnapshotPricingStub{modelID: modelID, observedAt: time.Now().UTC(), fingerprint: strings.Repeat("b", 64)}
 			// Rollback validates protocol support through the same concrete adapter

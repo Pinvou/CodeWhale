@@ -1,5 +1,7 @@
 # 生产依赖配置
 
+GSA-07 Account 授权 Relay 的专用身份与 schema-first 切换约束见[发布手册](../runbooks/approval-authorization-relay.md)。该扩展尚未部署；下文既有环境记录不能作为其验收证据。
+
 此目录只包含公开部署制品，不保存 `.env`、密码、证书或恢复包。独立使用
 `compose.dependencies.yaml`，**不与开发 Compose 合并**。当前交付 PostgreSQL 配置及同目录
 独立 NATS `compose.nats.yaml`、隔离缓存 `compose.redis.yaml`；Keycloak、业务发布和数据库备份恢复
@@ -8,13 +10,13 @@
 
 ## PostgreSQL 投递约束
 
-GSA-04/GSA-06 起首次初始化的 PostgreSQL 凭据集合新增彼此独立的
+GSA-04/GSA-06/GSA-07 起首次初始化的 PostgreSQL 凭据集合新增彼此独立的
 `ACCOUNT_MIGRATION_DB_PASSWORD`、`ACCOUNT_APPROVAL_WRITER_DB_PASSWORD`和
-`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`。迁移凭据只属于 `account_migrator LOGIN NOINHERIT`，
-writer/backfill 凭据分别只属于同名低权`LOGIN NOINHERIT`角色，三者不得互相复用；
-不得投递给 `account_service` 或长期业务容器；`account_approval_control_owner`
+`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`及`ACCOUNT_APPROVAL_RELAY_DB_PASSWORD`。迁移凭据只属于 `account_migrator LOGIN NOINHERIT`，
+writer/backfill/relay 凭据分别只属于同名低权`LOGIN NOINHERIT`角色，四者不得互相复用；
+迁移与backfill凭据不得投递给 `account_service` 或长期业务容器；`account_approval_control_owner`
 与`account_approval_authorization_owner`固定为 `NOLOGIN NOINHERIT`。Account服务只接收writer
-DSN，backfill凭据只供独立受控命令使用，详见[授权writer/backfill运行手册](../runbooks/approval-authorization-writer.md)。初始化仅为 `account_migrator` 在 Account 数据库临时授予
+DSN，backfill凭据只供独立受控命令使用；relay凭据仅投递Account event-relay专用DSN，不交给Account service、writer或backfill。详见[授权writer/backfill运行手册](../runbooks/approval-authorization-writer.md)及[授权Relay手册](../runbooks/approval-authorization-relay.md)。初始化仅为 `account_migrator` 在 Account 数据库临时授予
 `CREATE`，迁移 `000050` 成功创建受保护 schema 后立即撤销。既有集群在执行该迁移前
 必须由 DBA 以相同角色/成员关系和临时授权完成受控前置；迁移失败时先撤销外部临时
 `CREATE` 再调查，不得向 runtime 临时授予 owner/migrator 成员关系。
@@ -33,11 +35,11 @@ DSN，backfill凭据只供独立受控命令使用，详见[授权writer/backfil
 - `POSTGRES_TLS_DIRECTORY` 为本次已核验证书包的 PostgreSQL 单独叶目录，
   999:999/0700；`server.key` 为 0600，证书 SAN 为 `postgres`。不挂根私钥或其他叶私钥。
 - `POSTGRES_ADMIN_DIRECTORY/password` 与 `POSTGRES_BOOTSTRAP_DIRECTORY` 下的
-  十一个文件都为 999:999/0600、目录 0700。每个文件保存不同的 32 字节随机值的小写 hex
+  十二个引导文件都为 999:999/0600、目录 0700。每个文件保存不同的 32 字节随机值的小写 hex
   （64 字符，可有一个结尾换行）。管理员密码不传入 Compose 环境或命令行。
 
-十一个引导文件名：`ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、
-`ACCOUNT_MIGRATION_DB_PASSWORD`、`ACCOUNT_APPROVAL_WRITER_DB_PASSWORD`、`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`、
+十二个引导文件名：`ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、
+`ACCOUNT_MIGRATION_DB_PASSWORD`、`ACCOUNT_APPROVAL_WRITER_DB_PASSWORD`、`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`、`ACCOUNT_APPROVAL_RELAY_DB_PASSWORD`、
 `BILLING_MIGRATION_DB_PASSWORD`、`TOKEN_MIGRATION_DB_PASSWORD`、`TOKEN_POLICY_DB_PASSWORD`、
 `NEWAPI_DB_PASSWORD`、`KEYCLOAK_DB_PASSWORD`。由既有受控秘密投递流程生成/备份，
 此配置不生成秘密、不读取 KMS custody、不自动删除数据。
@@ -55,7 +57,7 @@ docker compose --env-file /controlled/public/dependencies.env -f account-platfor
 
 ## 初始化与异常处理
 
-复用原有五库，初始化十一个登录角色与六个 NOLOGIN 角色，禁用模拟器；业务进程无迁移或backfill身份。
+复用原有五库，初始化十二个登录角色（含`account_approval_relay`）与六个 NOLOGIN 角色，禁用模拟器；业务进程无迁移或backfill身份。
 只通过文件将密码引入初始化进程环境，psql 使用 `\getenv`，不把密码传为 argv。
 官方入口仍会暂时在进程内使用管理员密码，宿主 root/数据库 OS 用户在信任边界内；
 不得打印环境、执行 shell tracing 或启用记录 SQL/参数的调试日志。
@@ -65,8 +67,8 @@ docker compose --env-file /controlled/public/dependencies.env -f account-platfor
 禁止人为补写标记或删除数据来“修复”正式失败；保留现场，核对原因再受控恢复。
 容器可能按 restart 策略重复拒绝，这不是就绪状态。
 
-完整验证并确认密码已投递给各自服务/独立命令且有受控恢复副本后，精确移除引导目录中的十一份副本，
-保留空目录、管理员文件和恢复包；成功集群此后重启无需十一份引导副本。删除副本不撤销数据库权限。
+完整验证并确认密码已投递给各自服务/独立命令且有受控恢复副本后，精确移除引导目录中的十二份副本，
+保留空目录、管理员文件和恢复包；成功集群此后重启无需十二份引导副本。删除副本不撤销数据库权限。
 角色/密码后续变更走独立受控流程，不重跑初始化脚本。健康检查验证标记与实际本机 SQL，
 但不替代客户端 TLS、权限、业务迁移及备份恢复证据。
 
@@ -79,9 +81,9 @@ python3 scripts/account-platform-postgres-fixture.py --run
 ```
 
 只创建随机名称的独立项目/私有网络/临时数据与测试秘密，不接受现有数据库连接信息。
-验证真实生产配置、九身份 SCRAM/TLS、错误 CA/主机名/明文/跨库/错密码/身份提升拒绝，
+既有九身份验收范围为真实生产配置的 SCRAM/TLS、错误 CA/主机名/明文/跨库/错密码/身份提升拒绝，
 初始化失败重启拒绝、错绑定拒绝、删除引导副本后重启持久化及日志不含密码。
-结束仅清理该 fixture 的确切容器 ID、私有网络和临时目录；不能将其通过报告当作正式部署。
+GSA-07 新增relay身份的真实SCRAM/TLS/HBA、错密、跨身份及完整初始化链必须补充fixture后在隔离Linux实际执行；既有九身份证据与本机手工PG测试不能替代，继续保留ENV_PENDING。结束仅清理该 fixture 的确切容器 ID、私有网络和临时目录；不能将其通过报告当作正式部署。
 
 ## NATS 投递约束
 
@@ -92,9 +94,9 @@ python3 scripts/account-platform-postgres-fixture.py --run
 - `NATS_DATA_DIRECTORY`：全新独立数据目录，65532:65532/0700，不能复用旧测试 JetStream。
 - `NATS_TLS_DIRECTORY`：只含 NATS 单独叶证书/私钥，DNS SAN 为 `nats`，目录 0700、
   文件 0600、属主 65532:65532；不挂其他服务私钥、根包或 KMS 材料。
-- `NATS_AUTHORIZATION_FILE`：既有 `event-resources -render-authorization` 的固定六公钥
+- `NATS_AUTHORIZATION_FILE`：既有 v1 `event-resources -render-authorization` 的固定六公钥
   ACL 产物，逐制品可信摘要和完整身份包核验后才投递，65532:65532/0600，只读挂载。
-  NATS 不持有任何客户端种子或恢复包，不能手工添加无身份用户/通配管理身份。
+  GSA-07窗口改用v2七身份/重叠八唯一key，须遵守[授权Relay发布手册](../runbooks/approval-authorization-relay.md)。NATS 不持有任何客户端种子或恢复包，不能手工添加无身份用户/通配管理身份。
 
 客户端使用 `tls://nats:4222`、专用 `NATS_CA_FILE` 和自身 `NATS_NKEY_SEED_FILE`，
 不能用全域共享凭据。受控初始化窗口单独投递 `event-resource-operator` 种子，执行已有

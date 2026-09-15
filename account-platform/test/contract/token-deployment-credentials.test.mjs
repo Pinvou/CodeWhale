@@ -8,7 +8,7 @@ import YAML from 'yaml';
 const root = path.resolve(import.meta.dirname, '../..');
 const read = name => readFileSync(path.join(root, name), 'utf8');
 const compose = YAML.parse(read('deploy/compose/compose.yaml'), { merge: true });
-const deploymentKeys = ['ACCOUNT_MIGRATION_DB_PASSWORD', 'ACCOUNT_APPROVAL_WRITER_DB_PASSWORD', 'ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD', 'BILLING_MIGRATION_DB_PASSWORD', 'TOKEN_MIGRATION_DB_PASSWORD', 'TOKEN_POLICY_DB_PASSWORD'];
+const deploymentKeys = ['ACCOUNT_MIGRATION_DB_PASSWORD', 'ACCOUNT_APPROVAL_WRITER_DB_PASSWORD', 'ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD', 'ACCOUNT_APPROVAL_RELAY_DB_PASSWORD', 'BILLING_MIGRATION_DB_PASSWORD', 'TOKEN_MIGRATION_DB_PASSWORD', 'TOKEN_POLICY_DB_PASSWORD'];
 const runtimeKeys = ['ACCOUNT_DB_PASSWORD', 'BILLING_DB_PASSWORD', 'TOKEN_DB_PASSWORD', 'PAYMENT_SIM_DB_PASSWORD', 'NEWAPI_DB_PASSWORD', 'KEYCLOAK_DB_PASSWORD'];
 
 test('migration and bootstrap credentials stay outside runtime and run in Billing then Token order', () => {
@@ -26,13 +26,14 @@ test('migration and bootstrap credentials stay outside runtime and run in Billin
     if (['postgres', 'deployment-credentials-check', 'account-migrate', 'billing-migrate', 'token-migrate', 'token-policy-bootstrap'].includes(name)) continue;
     for (const key of deploymentKeys) {
       if (name === 'account-service' && key === 'ACCOUNT_APPROVAL_WRITER_DB_PASSWORD') continue;
+      if (name === 'account-event-relay' && key === 'ACCOUNT_APPROVAL_RELAY_DB_PASSWORD') continue;
       assert.ok(!JSON.stringify(service.environment || {}).includes(key), `${name} must not receive ${key}`);
     }
   }
   assert.match(read('deploy/compose/init-databases.sh'), /\. \/opt\/pinvou\/validate-database-secrets\.sh/);
   assert.match(read('deploy/compose/init-databases.sh'), /CREATE ROLE account_approval_control_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS/);
   assert.match(read('deploy/compose/init-databases.sh'), /CREATE ROLE account_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS/);
-  assert.match(read('deploy/production/pg_hba.conf'), /account_platform_account account_service,account_migrator,account_approval_writer,account_approval_backfill all scram-sha-256/);
+  assert.match(read('deploy/production/pg_hba.conf'), /account_platform_account account_service,account_migrator,account_approval_writer,account_approval_backfill,account_approval_relay all scram-sha-256/);
   assert.match(read('deploy/compose/.env.example'), /^ACCOUNT_MIGRATION_DB_PASSWORD=replace-with-independent-account-migration-password$/m);
   const helmMigrations = read('deploy/helm/account-platform/templates/migrations.yaml');
   assert.match(helmMigrations, /key: \{\{ \$domain \}\}-migration-database-url/);

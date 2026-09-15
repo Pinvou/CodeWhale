@@ -1,5 +1,7 @@
 # 本地 Compose 环境
 
+GSA-07 专用审批授权 Relay 的独立凭据、专项就绪与迁移顺序见[发布约束](../runbooks/approval-authorization-relay.md)；普通容器健康不能替代授权专项验收，当前扩展 NOT_DEPLOYED。
+
 本目录的 Compose 基线用于开发、测试和单机部署编排；能够启动这些容器不代表能够从空白主机恢复当前账号平台。完整恢复还需要同一恢复集中的四个 PostgreSQL 数据库、NATS JetStream、独立模型网关、站点 Secret/override、边缘代理/证书/网络配置和不可变制品。生产或灾难恢复必须执行 [`../runbooks/full-redeployment.md`](../runbooks/full-redeployment.md)，不得把新建空卷后的健康检查当作恢复成功。
 
 1. 将 `.env.example` 复制为 `.env`，把每个占位值替换为不同的随机值；`.env` 已被仓库忽略。
@@ -23,7 +25,7 @@
 
 gateway 与 Token Relay 共用本代 `TOKEN_GATEWAY_RELEASE_DATABASE_URL`，credential 使用不同本代 `TOKEN_CREDENTIAL_RELEASE_DATABASE_URL`；旧角色 NOLOGIN/fence 覆盖三者及后台实例，executor 不获得数据库 URL。credential 默认只绑定回环 `18108`（`CREDENTIAL_PORTAL_BIND_PORT` 可覆盖，发布前检测占用），外部冻结 origin 不变。专用控制网络隔离新服务与旧 backend；显式 egress 网络不是防火墙，OIDC/KMS/Provider/NATS/观测出站须由站点网络/主机规则限制并留证。内部 New API 通过单独 credential-provider 网络到达，不能因此开放任意 provider host。
 
-Account control/授权Outbox 与 Token 账户配额迁移分别需要独立的 `ACCOUNT_MIGRATION_DB_PASSWORD`、`ACCOUNT_APPROVAL_WRITER_DB_PASSWORD`、`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`、`BILLING_MIGRATION_DB_PASSWORD`、`TOKEN_MIGRATION_DB_PASSWORD` 和 `TOKEN_POLICY_DB_PASSWORD`；不得复用任何服务运行密码，也不得互相复用。Account长期服务仅注入writer DSN，backfill凭据只交给独立受控命令，具体探针、顺序和失败关闭见[授权writer/backfill运行手册](../runbooks/approval-authorization-writer.md)。部署前置检查在已有数据卷上同样执行，发现复用即阻止迁移；迁移和backfill秘密不得注入业务服务。新卷上 Account 与 Billing 迁移在凭据检查及 PostgreSQL 健康后可并行，Token 迁移明确等待 Billing 完成，配额 bootstrap 再等待 Token 完成；Account 不是该 Billing → Token 链的前置。已有数据库不会重新执行初始化脚本，升级前必须由 DBA 通过受控 Secret 渠道创建 `account_migrator`、`account_approval_control_owner`、`account_approval_authorization_owner`、`account_approval_writer`与`account_approval_backfill`，校验成员关系、低权属性和独立密码，并仅按迁移合同向 Account 迁移身份开放受控权限；不能仅修改 `.env`。
+Account control/授权Outbox 与 Token 账户配额迁移分别需要独立的 `ACCOUNT_MIGRATION_DB_PASSWORD`、`ACCOUNT_APPROVAL_WRITER_DB_PASSWORD`、`ACCOUNT_APPROVAL_BACKFILL_DB_PASSWORD`、`ACCOUNT_APPROVAL_RELAY_DB_PASSWORD`、`BILLING_MIGRATION_DB_PASSWORD`、`TOKEN_MIGRATION_DB_PASSWORD` 和 `TOKEN_POLICY_DB_PASSWORD`；不得复用任何服务运行密码，也不得互相复用。Account长期服务仅注入writer DSN，backfill凭据只交给独立受控命令，relay秘密只用于Account event-relay的专用DSN，不得交给Account service、writer或backfill。具体探针、顺序和失败关闭见[授权writer/backfill运行手册](../runbooks/approval-authorization-writer.md)及[授权Relay手册](../runbooks/approval-authorization-relay.md)。部署前置检查在已有数据卷上同样执行，发现复用即阻止迁移；迁移和backfill秘密不得注入业务服务。新卷上 Account 与 Billing 迁移在凭据检查及 PostgreSQL 健康后可并行，Token 迁移明确等待 Billing 完成，配额 bootstrap 再等待 Token 完成；Account 不是该 Billing → Token 链的前置。已有数据库不会重新执行初始化脚本，升级前必须由 DBA 通过受控 Secret 渠道创建 `account_migrator`、`account_approval_control_owner`、`account_approval_authorization_owner`、`account_approval_writer`、`account_approval_backfill`与`account_approval_relay`，校验成员关系、低权属性和独立密码，并仅按迁移合同向 Account 迁移身份开放受控权限；不能仅修改 `.env`。
 
 数据库和 `public` schema 分别交由 `token_schema_owner NOLOGIN`、`billing_schema_owner NOLOGIN` 持有，只有对应 migrator 拥有其成员资格；运行账户和策略操作员不得持有数据库/schema 或继承这些所有者。既有业务表所有权保持不变。首次安装由数据库管理员预装 Token 的 `pgcrypto`，旧迁移阶段临时授予运行账户 schema CREATE，再由 Token `000029`、Billing `000053` 收回。已有数据卷必须在停写窗口由 DBA 完成同样的所有权调整与权限核验，不能仅更新初始化脚本。完整停写、迁移和模式身份说明见 [Helm 部署说明](../helm/account-platform/README.md)。
 

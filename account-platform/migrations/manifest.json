@@ -512,6 +512,16 @@
         "file": "000051_approval_authorization_outbox.up.sql",
         "version": 51,
         "sha256": "7f948b3dcba4a382937f15c825b6d074f0fdba4b190e788a12c2c30159a60d06"
+      },
+      {
+        "file": "000052_approval_authorization_relay.down.sql",
+        "version": 52,
+        "sha256": "56a457f7b6f32d6fd5fc490eed7059cd9c94e137821aba1f88b20df5729e5f23"
+      },
+      {
+        "file": "000052_approval_authorization_relay.up.sql",
+        "version": 52,
+        "sha256": "50fbfc28846bfdbc03af403f7a42cbecae0c480c0d4ec7398d8bfa10f4756710"
       }
     ],
     "billing": [

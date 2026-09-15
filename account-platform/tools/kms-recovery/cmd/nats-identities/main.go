@@ -23,5 +23,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, natsidentity.ErrIdentity)
 		os.Exit(1)
 	}
-	fmt.Println("NATS_IDENTITIES_READY: encrypted custody and six isolated identities; not deployed")
+	version := cfg.ArtifactVersion
+	if version == 0 {
+		version = 1
+	}
+	fmt.Printf("NATS_IDENTITIES_READY_V%d: encrypted custody and closed isolated identity bundle; not deployed\n", version)
 }

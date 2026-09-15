@@ -17,7 +17,8 @@ import (
 )
 
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool               *pgxpool.Pool
+	excludedEventTypes []string
 }
 
 type OutboxStats struct {
@@ -27,6 +28,30 @@ type OutboxStats struct {
 }
 
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
+	return newPostgresStore(ctx, databaseURL, nil)
+}
+
+// NewPartitionedPostgresStore creates a generic outbox store whose claim and
+// stats queries exclude a closed set of event types. The regular constructor
+// retains the original unfiltered SQL path used by Billing and Token.
+func NewPartitionedPostgresStore(ctx context.Context, databaseURL string, excludedEventTypes []string) (*PostgresStore, error) {
+	excluded := make([]string, 0, len(excludedEventTypes))
+	seen := map[string]bool{}
+	for _, eventType := range excludedEventTypes {
+		eventType = strings.TrimSpace(eventType)
+		if eventType == "" || len(eventType) > 160 || strings.ContainsAny(eventType, " \t\r\n*>/") || seen[eventType] {
+			return nil, errors.New("event store partition is invalid")
+		}
+		seen[eventType] = true
+		excluded = append(excluded, eventType)
+	}
+	if len(excluded) == 0 || len(excluded) > 16 {
+		return nil, errors.New("event store partition is invalid")
+	}
+	return newPostgresStore(ctx, databaseURL, excluded)
+}
+
+func newPostgresStore(ctx context.Context, databaseURL string, excludedEventTypes []string) (*PostgresStore, error) {
 	configuration, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse event store database URL: %w", err)
@@ -41,7 +66,7 @@ func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, 
 		pool.Close()
 		return nil, fmt.Errorf("ping event store: %w", err)
 	}
-	return &PostgresStore{pool: pool}, nil
+	return &PostgresStore{pool: pool, excludedEventTypes: excludedEventTypes}, nil
 }
 
 func (store *PostgresStore) Close() { store.pool.Close() }
@@ -51,13 +76,18 @@ func (store *PostgresStore) Ping(ctx context.Context) error { return store.pool.
 func (store *PostgresStore) Stats(ctx context.Context) (OutboxStats, error) {
 	var stats OutboxStats
 	var oldestSeconds float64
-	err := store.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL),count(*) FILTER (WHERE dead_lettered_at IS NOT NULL),COALESCE(EXTRACT(EPOCH FROM now()-min(occurred_at) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL)),0) FROM outbox_events`).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds)
+	var err error
+	if len(store.excludedEventTypes) == 0 {
+		err = store.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL),count(*) FILTER (WHERE dead_lettered_at IS NOT NULL),COALESCE(EXTRACT(EPOCH FROM now()-min(occurred_at) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL)),0) FROM outbox_events`).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds)
+	} else {
+		err = store.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL),count(*) FILTER (WHERE dead_lettered_at IS NOT NULL),COALESCE(EXTRACT(EPOCH FROM now()-min(occurred_at) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL)),0) FROM outbox_events WHERE NOT(event_type=ANY($1::text[]))`, store.excludedEventTypes).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds)
+	}
 	stats.OldestPendingAge = time.Duration(oldestSeconds * float64(time.Second))
 	return stats, err
 }
 
 func (store *PostgresStore) Claim(ctx context.Context, workerID string, limit int, lease time.Duration) ([]Event, error) {
-	rows, err := store.pool.Query(ctx, `
+	query := `
 WITH candidates AS (
     SELECT event_id FROM outbox_events
     WHERE published_at IS NULL AND dead_lettered_at IS NULL AND next_attempt_at <= now()
@@ -70,7 +100,29 @@ UPDATE outbox_events event
 SET locked_by=$2, locked_until=now() + ($3 * interval '1 second')
 FROM candidates
 WHERE event.event_id=candidates.event_id
-RETURNING event.event_id,event.event_type,event.aggregate_id,event.aggregate_version,event.payload,event.trace_id,event.occurred_at,event.attempts`, limit, workerID, max(1, int(lease.Seconds())))
+RETURNING event.event_id,event.event_type,event.aggregate_id,event.aggregate_version,event.payload,event.trace_id,event.occurred_at,event.attempts`
+	var rows pgx.Rows
+	var err error
+	if len(store.excludedEventTypes) == 0 {
+		rows, err = store.pool.Query(ctx, query, limit, workerID, max(1, int(lease.Seconds())))
+	} else {
+		query = `
+WITH candidates AS (
+    SELECT event_id FROM outbox_events
+    WHERE published_at IS NULL AND dead_lettered_at IS NULL AND next_attempt_at <= now()
+      AND (locked_until IS NULL OR locked_until < now())
+      AND NOT(event_type=ANY($4::text[]))
+    ORDER BY occurred_at, event_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $1
+)
+UPDATE outbox_events event
+SET locked_by=$2, locked_until=now() + ($3 * interval '1 second')
+FROM candidates
+WHERE event.event_id=candidates.event_id
+RETURNING event.event_id,event.event_type,event.aggregate_id,event.aggregate_version,event.payload,event.trace_id,event.occurred_at,event.attempts`
+		rows, err = store.pool.Query(ctx, query, limit, workerID, max(1, int(lease.Seconds())), store.excludedEventTypes)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +171,10 @@ type DeadLetterCandidate struct {
 	Attempts         int       `json:"attempts"`
 	LastError        string    `json:"last_error"`
 	DeadLetteredAt   time.Time `json:"dead_lettered_at"`
+	Replayable       bool      `json:"replayable"`
 }
+
+var ErrAuthorizationEventReplayForbidden = errors.New("AUTHORIZATION_EVENT_REPLAY_FORBIDDEN")
 
 type ReplayRequest struct {
 	EventID        uuid.UUID
@@ -142,6 +197,13 @@ func (store *PostgresStore) InspectDeadLetter(ctx context.Context, eventID uuid.
 	if err != nil {
 		return DeadLetterCandidate{}, err
 	}
+	if event.Type == "account.approval-command.authorized.v1" {
+		candidate.Replayable = false
+		candidate.LastError = ""
+		err = store.pool.QueryRow(ctx, `SELECT event_digest FROM public.inspect_authorization_dead_letter($1)`, eventID).Scan(&candidate.EventDigest)
+		return candidate, err
+	}
+	candidate.Replayable = true
 	candidate.EventDigest, err = digestEvent(event)
 	return candidate, err
 }
@@ -160,6 +222,15 @@ func (store *PostgresStore) ReplayDeadLetter(ctx context.Context, request Replay
 		return ReplayResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	// Authorization events are permanently non-replayable. Resolve this from
+	// the persisted event before consulting an old idempotency record, so a
+	// prior generic result can never bypass the prohibition.
+	var persistedEventType string
+	if err := tx.QueryRow(ctx, `SELECT event_type FROM outbox_events WHERE event_id=$1`, request.EventID).Scan(&persistedEventType); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return ReplayResult{}, err
+	} else if err == nil && persistedEventType == "account.approval-command.authorized.v1" {
+		return ReplayResult{}, ErrAuthorizationEventReplayForbidden
+	}
 	var existing ReplayResult
 	var existingHash string
 	err = tx.QueryRow(ctx, `SELECT replay_id,event_id,request_hash FROM event_replay_requests WHERE idempotency_key=$1`, request.IdempotencyKey).Scan(&existing.ReplayID, &existing.EventID, &existingHash)

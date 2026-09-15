@@ -254,7 +254,7 @@ func TestApprovalAuthorizationMigrationRolePreflightIntegration(t *testing.T) {
 	database := newApprovalAuthorizationIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := loadApprovalAuthorizationBaselineMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}

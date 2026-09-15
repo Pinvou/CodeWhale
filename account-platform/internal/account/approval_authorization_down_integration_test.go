@@ -19,7 +19,7 @@ func TestApprovalAuthorizationDownReentryIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
 	connection := authorizationTestConnection(t, ctx, db.migratorPool)
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := loadApprovalAuthorizationBaselineMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestApprovalAuthorizationDownPreservesHistoryIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	connection := authorizationTestConnection(t, ctx, db.migratorPool)
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := loadApprovalAuthorizationBaselineMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestApprovalAuthorizationDownGrantRollbackIntegration(t *testing.T) {
 	db := newApprovalAuthorizationIntegrationDatabase(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	t.Cleanup(cancel)
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := loadApprovalAuthorizationBaselineMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestApprovalAuthorizationDownRejectsControlStateIntegration(t *testing.T) {
 			}
 			before := readControlTuple(t, ctx, db.adminPool)
 			connection := authorizationTestConnection(t, ctx, db.migratorPool)
-			loaded, err := migrations.Load("../../migrations/account")
+			loaded, err := loadApprovalAuthorizationBaselineMigrations()
 			if err != nil {
 				t.Fatal(err)
 			}

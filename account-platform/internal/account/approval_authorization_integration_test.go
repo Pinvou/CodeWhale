@@ -83,12 +83,12 @@ GRANT account_approval_authorization_owner TO account_migrator WITH INHERIT FALS
 	if _, err := migrationConnection.Exec(ctx, `GRANT CREATE ON DATABASE `+identifier+` TO account_migrator; SET SESSION AUTHORIZATION account_migrator; SET ROLE account_service`); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := migrations.Load("../../migrations/account")
+	loaded, err := loadApprovalAuthorizationBaselineMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(loaded) == 0 || loaded[len(loaded)-1].Version != 51 {
-		t.Fatal("authorization integration fixture requires migration 51 as the latest Account migration")
+		t.Fatal("authorization integration fixture requires migration 51 as its historical Account boundary")
 	}
 	if err := migrations.Up(ctx, migrationConnection, loaded); err != nil {
 		t.Fatal(err)
