@@ -250,3 +250,209 @@ production enrollment system. Formal desktop enrollment remains a deployment
 gate and must be provided before exposing unrestricted endpoint registration to
 an untrusted network; protocol v2 intentionally does not design or enable that
 registration authority.
+
+## Desktop controller protocol v1 (frozen, not yet enabled)
+
+This section freezes the desktop-to-desktop controller contract before its
+state machines and cryptography are implemented. The current `server.js` does
+not route any message in this section. Implementations must not advertise or
+accept this protocol until the enrollment, pairing, lease and encryption tasks
+are complete.
+
+Controller clients select the WebSocket subprotocol
+`pinvou-desktop-controller-v1` and send `controller_capabilities` as their first
+application message. That declaration is not authentication: before role
+binding, a B candidate may proceed only to `desktop_endpoint_claim`, and an A
+candidate only to `controller_pairing_claim`. B becomes authenticated only when
+its enrollment proof succeeds; A becomes the temporary authenticated A identity
+only when the Relay atomically binds the successful claim socket to its
+reservation. Every controller envelope and decrypted payload has the
+exact integer `v: 1`; it is a separate namespace from the existing WebUI v2
+protocol. A socket without this subprotocol remains a WebUI v2 socket and its
+wire behavior above is unchanged. There is no automatic downgrade between the
+two protocols.
+
+The two authenticated desktop roles are:
+
+- `A` / `desktop_controller`: the computer initiating remote control.
+- `B` / `desktop_controlled_endpoint`: the computer being controlled.
+
+The Relay is the only sender represented by the internal `relay` transport
+role. A role may send only the message types listed for it below. A claimed
+`sender_role`, `receiver_role`, frame direction, connection, generation or
+lease never changes the role authenticated by the socket.
+
+### Version, capabilities and limits
+
+The frozen capability values are `pairing_v1`, `encrypted_frames_v1`,
+`finished_receipt_v1`, `role_liveness_v1`, `resume_v1`, `task_v1`,
+`permission_v1`, `attachment_v1`, `artifact_v1` and
+`snapshot_journal_v1`. Unknown capabilities, message types, payload types,
+enum values or object fields are errors. All required fields must be present;
+`null` is not a substitute for omission or a typed value.
+
+| Item | Limit |
+| --- | ---: |
+| Non-frame controller JSON message | 64 KiB encoded UTF-8 |
+| Encrypted frame ciphertext | 2 MiB decoded bytes |
+| Decrypted payload JSON | 512 KiB encoded UTF-8 |
+| Attachment/artifact chunk | 256 KiB decoded bytes |
+| Identifier | 128 ASCII characters |
+| File name | 255 Unicode scalar values |
+| MIME type | 128 ASCII characters |
+
+Base64 is standard padded RFC 4648 and must round-trip to the canonical spelling.
+SHA-256 values and commitments are exactly 64 lowercase hexadecimal characters.
+Identifiers begin with an ASCII alphanumeric and then contain only ASCII
+alphanumerics, `.`, `_`, `:`, or `-`. The pairing code is exactly seven
+characters from `23456789ABCDEFGHJKMNPQRSTUVWXYZ`.
+
+Every message schema is an exact object. The authoritative field lists and
+role allowlists are executable in `protocol-controller.js` and the shared
+`test/fixtures/controller-protocol-v1.json`; this table summarizes their state
+transitions.
+
+| Sender | Message | Purpose |
+| --- | --- | --- |
+| A/B | `controller_capabilities` | Bind authenticated role, protocol version and exact capability list. |
+| B | `desktop_endpoint_claim` | Present an enrollment proof for an existing endpoint. |
+| B | `desktop_pairing_register` | Register one `remote_control_generation` with independent code-wrap and handshake public keys. |
+| Relay | `desktop_pairing_registered` | Return the sealed display code, `pairing_id`, expiry and `relay_epoch`. |
+| B | `desktop_pairing_revoke` | Retire the generation before refresh or stop. |
+| A | `controller_pairing_claim` | Claim a seven-character code with a stable `claim_request_id`. |
+| Relay | `controller_pairing_reserved` | Bind the claim socket to one reservation and signed transcript. |
+| A/B | `finished_receipt_commit` | Commit the role's independently random receipt secret. |
+| A/B | `encrypted_handshake_finished` | Deliver that sender's Finished and receipt secret only inside ciphertext. |
+| A/B | `finished_receipt_ack` | The opposite receiver returns the received secret to the Relay exactly once. |
+| Relay | `controller_joined` | Atomically announce the consumed pairing and new controller lease. |
+| A/B | `controller_liveness` | Advance only that transport role's epoch and monotonic sequence. |
+| B | `controller_liveness_challenge_a` | Create a one-use challenge for direct A-to-B proof. |
+| A | `encrypted_controller_liveness_a` | Relay-blind E2E liveness response bound to connection, lease and challenge. |
+| B | `controller_liveness_attestation_request_a` | Request the bounded Relay-signed fallback proof. |
+| Relay | `controller_liveness_attestation_a` | Return observed age, remaining TTL, sequence and signature. |
+| A/B | `controller_resume_prepare` | Consume neither role token; prepare a role-bound resume candidate. |
+| Relay | `controller_resume_provisional` | Announce a candidate on which business frames are forbidden. |
+| A/B | `encrypted_resume_confirm` | Cross-confirm the candidate under the old E2E context. |
+| B | `controller_resume_activation_ack` | Confirm B accepted the candidate before activation. |
+| Relay | `controller_resume_activation_pending` | Reserve replacement material while the old watchdog remains active. |
+| B | `controller_post_activation_liveness` | Supply the first new B liveness for the activation. |
+| Relay | `controller_post_activation_liveness_confirmed` | Cross-notify the exact accepted B liveness. |
+| A/B | `controller_resume_ready_ack` | Each role independently acknowledges the same activation and liveness. |
+| Relay | `controller_resumed` | Atomically rotate the recipient's role token and open the business gate. |
+| A/B | `encrypted_frame` | Carry one encrypted typed payload in the direction fixed by socket role. |
+| A/B | `controller_disconnect` | End the current lease; B local stop remains authoritative. |
+| Relay | `error` | Return a bounded generic error from the controller error registry. |
+
+`remote_control_generation` is owned by B. Pairing, reservation, connection and
+controller lease identifiers are distinct domains. `lease_epoch` prevents an
+old connection from addressing a replacement lease. Messages with an old or
+cross-bound identifier are rejected by the later state machine even when their
+JSON shape is valid.
+
+The frozen decrypted `encrypted_frame` payload kinds are `task_submit`,
+`task_cancel`, `task_terminal`, `permission_request`, `permission_decision`,
+`attachment_begin`, `attachment_chunk`, `attachment_commit`,
+`artifact_index_request`, `artifact_index`, `artifact_read_request`,
+`artifact_chunk`, `session_snapshot_request`, `session_snapshot`,
+`journal_replay_request` and `journal_event`. A sends task, cancel, approval,
+upload, read and replay requests. B sends task terminal states, permission
+requests, artifact indexes/chunks, snapshots and journal events. The parser
+rejects these payloads when presented by the opposite role. Every task,
+permission, attachment, artifact, snapshot and journal operation is bound to
+the same `connection_id + controller_lease_id + lease_epoch`; task and transfer
+messages additionally carry their exact task/session/request identifiers.
+
+### Pairing, Finished receipt and lease transition
+
+The state order is `waiting_for_pairing` → `pairing_reserved` →
+`handshake_pending` → `controller_connected`. Claim creates only a reservation.
+The pairing code is consumed and the lease is created in one atomic transition
+only after the Relay validates both role commitments and both receipts from the
+opposite authenticated sockets. Timeout, disconnect, bad transcript, wrong
+role, replay or a partial handshake terminates the pairing instance and creates
+no lease.
+
+Each sender creates an independent 32-byte CSPRNG receipt secret. Its commitment
+has exactly one encoding:
+
+```text
+SHA-256(
+  "pinvou-finished-receipt-commit-v1" ||
+  LP(relay_epoch) || LP(pairing_id) || LP(reservation_id) ||
+  LP(transcript_hash) || LP(sender_role) || LP(receipt_secret)
+)
+```
+
+`LP(x)` is a four-byte unsigned big-endian byte length followed by the bytes.
+The first five LP values use UTF-8; `transcript_hash` is its 64-byte lowercase
+hexadecimal ASCII spelling, `sender_role` is the single byte `A` or `B`, and
+the final LP value is the raw 32-byte secret. The domain is unprefixed ASCII.
+The sender submits only the commitment before sending Finished. The secret is
+sent to its peer only in `encrypted_handshake_finished`; after verification,
+the opposite receiver returns it to the Relay in `finished_receipt_ack` over
+its role-authenticated socket. The Relay deletes receipt secrets after the
+atomic result and cannot use them to derive any Finished or business key.
+
+The fixed compatibility vector is:
+
+- `relay_epoch`: `epoch-test-1`
+- `pairing_id`: `pairing-0001`
+- `reservation_id`: `reservation-0001`
+- `transcript_hash`: 64 ASCII `0` characters
+- `sender_role`: `A`
+- secret hex: `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`
+- preimage length: 194 bytes
+- commitment: `ed19ab422bae98c4f52b2e18665df08b9109eb916c85812678cfde57448f3a53`
+
+The exact preimage hex is frozen in the shared fixture and asserted by both JS
+and Rust tests.
+
+### Liveness and resume invariants
+
+`last_liveness_a` and `last_liveness_b` have separate epochs and monotonic
+sequences; one role's transport traffic never advances the other. For an active
+remote task, B advances its at-most-30-second controller watchdog only from a
+valid `encrypted_controller_liveness_a` or the conservative signed attestation
+fallback. Relay transport traffic alone cannot extend it.
+
+Resume passes through `resume_provisional` and
+`resume_activated_pending_liveness`; neither state accepts, buffers or forwards
+business frames. A and B have independent single-use resume tokens. Final
+activation occurs only before B's original local deadline, after B's activation
+ACK, the first post-activation B liveness, Relay confirmation and both role
+ready ACKs. Only then are tokens atomically consumed and rotated and business
+frames reopened. Any timeout, missing ACK, Relay restart or ambiguous result
+terminates the candidate and prevents reuse of both old and proposed material.
+
+### Errors, legacy Web conflict and logging
+
+Controller error envelopes use only these codes: `pairing_code_invalid`,
+`controller_busy`, `version_incompatible`, `endpoint_offline`,
+`enrollment_required`, `invalid_message`, `unsupported_capability`,
+`permission_already_decided`, `permission_expired` and `result_unknown`.
+Malformed schema errors are local parser failures and are mapped to the bounded
+`invalid_message` envelope before the later dispatcher closes the socket.
+Non-local pairing failures (missing, expired, consumed, revoked, wrong
+generation or a losing concurrent claim) all produce the same user-facing
+`pairing_code_invalid` message: “连接码无效或已失效”.
+
+When a legacy WebUI v2 `web_client_join` conflicts with a desktop reservation
+or controller lease, compatibility requires the exact existing response and no
+desktop details:
+
+```json
+{"v":2,"type":"error","code":"endpoint_not_found","message":"endpoint not found"}
+```
+
+The Relay closes it with code 1008. With no desktop conflict, all WebUI v2
+messages and Web-to-Web takeover semantics remain byte-for-byte compatible.
+
+Protocol logs and telemetry must be allowlist projections, never serialization
+of the source message. They may contain only protocol version, message type,
+bounded request ID, declared sender role and generic error code. They must not
+contain pairing codes, sealed codes, endpoint/connection/pairing/reservation/
+lease/generation identifiers, ciphertext, receipt secrets, resume tokens,
+public or private key material, enrollment proofs, credential references,
+tasks, prompts, tool arguments/results, filenames, attachment/artifact bytes,
+snapshots or journal contents. Validation errors identify only the bounded field
+name, not its supplied value.
