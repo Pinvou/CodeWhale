@@ -227,18 +227,35 @@ WHERE original_event_id=$1 AND durable=$2`, binding.EventID, binding.Durable).Sc
 
 	dlqBinding := publishedApprovalDeliveryBinding(t, ctx, db, repository, relay, "billing-wallet-adjustment-executor-p1-v1")
 	dlqState := observeApprovalDelivery(t, ctx, repository, dlqBinding, approvalconsumer.Sequence(91))
+	dlqMessageID := dlqBinding.EventID.String() + ":" + dlqBinding.Durable + ":dead-letter"
+	maximum := approvalconsumer.Sequence(^uint64(0))
 	var err error
 	for attempt := 0; attempt < 12; attempt++ {
 		dlqState, err = repository.GrantApprovalAuthorizationDomainAttempt(ctx, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version)
 		if err != nil {
 			t.Fatal(err)
 		}
+		if attempt == 11 {
+			var before, after string
+			if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(d)::TEXT
+FROM account_approval_authorization.approval_delivery_states d WHERE original_event_id=$1 AND durable=$2`,
+				dlqBinding.EventID, dlqBinding.Durable).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := repository.RecordApprovalAuthorizationDLQPubAck(ctx, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version, dlqMessageID, maximum); !errors.Is(err, ErrApprovalConsumerBindingInvalid) {
+				t.Fatalf("twelfth unconfirmed attempt admitted DLQ err=%v", err)
+			}
+			if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(d)::TEXT
+FROM account_approval_authorization.approval_delivery_states d WHERE original_event_id=$1 AND durable=$2`,
+				dlqBinding.EventID, dlqBinding.Durable).Scan(&after); err != nil || after != before {
+				t.Fatalf("rejected unconfirmed DLQ changed row=%t err=%v", after != before, err)
+			}
+		}
 		dlqState, err = repository.RecordApprovalAuthorizationDomainFailure(ctx, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version, "DOMAIN_REJECTED")
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	dlqMessageID := dlqBinding.EventID.String() + ":" + dlqBinding.Durable + ":dead-letter"
 	for _, invalid := range []string{"0", "1.5", "18446744073709551616", "NaN", "Infinity"} {
 		_, err := db.runtimePool.Exec(ctx, `SELECT * FROM public.record_approval_authorization_dlq_puback(
 $1,$2,$3,$4,$5,$6::NUMERIC)`, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version, dlqMessageID, invalid)
@@ -252,15 +269,14 @@ FROM account_approval_authorization.approval_delivery_states WHERE original_even
 			t.Fatalf("invalid DLQ sequence changed CAS state=%+v want=%+v err=%v", persisted, dlqState, err)
 		}
 	}
-	maximum := approvalconsumer.Sequence(^uint64(0))
 	dlqState, err = repository.RecordApprovalAuthorizationDLQPubAck(ctx, dlqBinding.EventID, dlqBinding.Durable, dlqBinding.Workload, dlqState.Version, dlqMessageID, maximum)
 	if err != nil || dlqState.State != "DLQ_PUBLISHED_ACK_PENDING" {
 		t.Fatalf("maximum DLQ sequence state=%+v err=%v", dlqState, err)
 	}
-	var storedDLQ string
-	if err := db.adminPool.QueryRow(ctx, `SELECT dlq_stream_sequence::TEXT
+	var storedDLQ, storedError string
+	if err := db.adminPool.QueryRow(ctx, `SELECT dlq_stream_sequence::TEXT,last_error_code
 FROM account_approval_authorization.approval_delivery_states WHERE original_event_id=$1 AND durable=$2`,
-		dlqBinding.EventID, dlqBinding.Durable).Scan(&storedDLQ); err != nil || storedDLQ != maximum.String() {
-		t.Fatalf("maximum DLQ sequence stored=%s err=%v", storedDLQ, err)
+		dlqBinding.EventID, dlqBinding.Durable).Scan(&storedDLQ, &storedError); err != nil || storedDLQ != maximum.String() || storedError != "DOMAIN_REJECTED" {
+		t.Fatalf("maximum DLQ sequence stored=%s error=%s err=%v", storedDLQ, storedError, err)
 	}
 }
