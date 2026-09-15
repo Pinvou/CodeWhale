@@ -12,16 +12,20 @@
 #
 # Swap layers, preferred first:
 #   1. zram (default ON): 24 GiB lz4, priority 100; compressed pages never
-#      touch disk. Re-qualified on all three images via modprobe zram ->
-#      (on failure: apt-get install linux-modules-extra-$(uname -r), then
-#      modprobe again) -> lz4 -> 24G disksize -> mkswap -> swapon -p 100.
+#      touch disk, and the compressed pool is capped at 50% of RAM
+#      (mem_limit) so an incompressible workload cannot eat the runner's
+#      whole memory through zram itself. Re-qualified on all three images
+#      via modprobe zram ->
+#      (on failure: activate the image swapfile first if nothing is active,
+#      then apt-get install linux-modules-extra-$(uname -r), then modprobe
+#      again) -> lz4 -> 24G disksize -> mem_limit -> mkswap -> swapon -p 100.
 #      The 2026-09-12 hosted job hangs once blamed on zram (run
 #      34708283784) are re-classified as a transient environment incident:
 #      the same script ran green with zram loaded on the community repo the
 #      same day. The countermeasure is structural, not a rollback: every
 #      userspace external call (modprobe, apt-get, fallocate, mkswap,
-#      swapon) runs under `timeout` with a SIGKILL backstop, and any
-#      failure degrades loudly to the next layer. Residual risk that no
+#      swapon, swapoff) runs under `timeout` with a SIGKILL backstop, and
+#      any failure degrades loudly to the next layer. Residual risk that no
 #      userspace measure can remove: an in-kernel hang (module load or a
 #      stuck sysfs write) is uninterruptible; the workflow-side
 #      `timeout 240` + non-fatal wrapper is the last line there, and
@@ -56,7 +60,9 @@
 # The pinvou3 workspace (700+ crates, ThinLTO, dep-level O2) repeatedly
 # exhausts the stock memory budget in rust-test; before memory provisioning
 # existed the failure mode was "hosted runner lost communication" with all
-# logs lost. Every Linux job runs this script right after checkout.
+# logs lost. Every Linux job that needs extra memory runs this script right
+# after checkout (enforced by the gate policy; rust-lint is exempt — its
+# lint-only workload fits in stock memory).
 
 set -uo pipefail
 
@@ -84,6 +90,11 @@ run_to() {
   fi
 }
 
+# True when at least one swap device is currently active.
+any_swap_active() {
+  swapon --show=NAME --noheadings 2>/dev/null | grep -q .
+}
+
 # sysctl tuning: each knob is independent and non-fatal.
 sysctl -w vm.swappiness=130 >/dev/null 2>&1 \
   || warn "vm.swappiness=130 rejected by the running kernel"
@@ -103,16 +114,29 @@ DISK_SWAP_PRIORITY=10
 setup_zram() {
   # Module load first; on hosted images the zram module may live in the
   # linux-modules-extra package, so install it and retry once before
-  # giving up. Every external call is timeout-capped.
-  if ! run_to 60 modprobe zram 2>/dev/null; then
-    warn "modprobe zram failed; installing linux-modules-extra-$(uname -r) and retrying"
-    run_to 180 apt-get update -qq \
-      || warn "apt-get update failed; the module install below may fail too"
-    run_to 180 apt-get install -y -qq --no-install-recommends \
-      "linux-modules-extra-$(uname -r)" \
-      || warn "apt-get install linux-modules-extra-$(uname -r) failed"
-    if ! run_to 60 modprobe zram 2>/dev/null; then
-      warn "modprobe zram still failing after module install; giving up on zram"
+  # giving up. Every external call is timeout-capped, with its stderr kept
+  # in the warning so the actual failure reason survives in the log.
+  local modprobe_err
+  if ! modprobe_err="$(run_to 60 modprobe zram 2>&1)"; then
+    warn "modprobe zram failed${modprobe_err:+: ${modprobe_err}}; installing linux-modules-extra-$(uname -r) and retrying"
+    # The module-install path (apt-get, up to minutes) is the slowest stretch
+    # of this script and the only one the workflow-side `timeout 240` can
+    # realistically interrupt. Activate the image swapfile BEFORE it, so a
+    # mid-apt kill degrades to "plain swap" and never to zero swap; if zram
+    # comes up afterwards it simply takes over as the higher-priority layer.
+    if ! any_swap_active; then
+      warn "no swap active; activating the image swapfile before the slow module install"
+      activate_image_swap_fallback
+    fi
+    if ! run_to 120 apt-get update -qq; then
+      warn "apt-get update failed; the module install below may fail too"
+    fi
+    if ! run_to 120 apt-get install -y -qq --no-install-recommends \
+      "linux-modules-extra-$(uname -r)"; then
+      warn "apt-get install linux-modules-extra-$(uname -r) failed"
+    fi
+    if ! modprobe_err="$(run_to 60 modprobe zram 2>&1)"; then
+      warn "modprobe zram still failing after module install${modprobe_err:+: ${modprobe_err}}; giving up on zram"
       return 1
     fi
   fi
@@ -125,13 +149,23 @@ setup_zram() {
   local current_size
   current_size="$(cat "${size_file}" 2>/dev/null || echo 0)"
   if [[ ${current_size} != 0 ]]; then
-    warn "zram0 already in use (disksize=${current_size} bytes); leaving it untouched"
-    return 0
+    # disksize non-zero only counts as "already in use" when a swap on
+    # /dev/zram0 is actually active; a stale disksize from a killed earlier
+    # run would otherwise report zram ready while providing no swap.
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -qx '/dev/zram0'; then
+      log "zram0 already in use (disksize=${current_size} bytes, swap active); leaving it untouched"
+      return 0
+    fi
+    warn "zram0 has stale disksize=${current_size} bytes without an active swap; resetting it once"
+    if ! echo 0 >"${size_file}" 2>/dev/null; then
+      warn "could not reset the stale zram0 disksize; giving up on zram"
+      return 1
+    fi
   fi
 
-  # Configure zram0: compressor -> size -> mkswap -> swapon. Each step
-  # warns instead of aborting; only an inactive zram swap device counts as
-  # overall failure so the next layer takes over.
+  # Configure zram0: compressor -> size -> pool cap -> mkswap -> swapon.
+  # Each step warns instead of aborting; only an inactive zram swap device
+  # counts as overall failure so the next layer takes over.
   if echo lz4 >/sys/block/zram0/comp_algorithm 2>/dev/null; then
     log "zram0 compressor set to lz4"
   else
@@ -143,14 +177,44 @@ setup_zram() {
   fi
   log "zram0 disksize set to 24 GiB"
 
-  run_to 60 mkswap /dev/zram0 >/dev/null 2>&1 \
-    || warn "mkswap /dev/zram0 failed; swapon will most likely fail too"
-  if run_to 60 swapon -p "${ZRAM_PRIORITY}" /dev/zram0 2>/dev/null; then
-    log "zram swap active: /dev/zram0 24 GiB lz4, priority ${ZRAM_PRIORITY}"
+  # Cap the compressed pool at 50% of RAM. disksize is only the virtual
+  # capacity; the pool grows with stored pages and lz4 keeps incompressible
+  # pages near 1:1, so an unbounded pool on a 7.8 GiB runner could eat all
+  # RAM through zram itself and reproduce the "runner lost communication"
+  # failure this script exists to prevent. Writes beyond mem_limit fail the
+  # swap write and surface as ordinary memory pressure instead.
+  local mem_total_kib mem_limit_bytes
+  mem_total_kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  if [[ ${mem_total_kib} =~ ^[0-9]+$ ]] && ((mem_total_kib > 0)); then
+    mem_limit_bytes=$((mem_total_kib * 1024 / 2))
+    if echo "${mem_limit_bytes}" >/sys/block/zram0/mem_limit 2>/dev/null; then
+      log "zram0 pool capped at $((mem_limit_bytes / 1024 / 1024)) MiB (50% of RAM)"
+    else
+      warn "could not set zram0 mem_limit; the pool grows unbounded"
+    fi
   else
-    warn "swapon /dev/zram0 failed"
+    warn "cannot read MemTotal; zram0 pool left uncapped"
+  fi
+
+  # udev/devtmpfs usually creates the node synchronously, but wait briefly
+  # so a fresh boot does not degrade on a node-creation race.
+  local waits=0
+  while [[ ! -b /dev/zram0 && ${waits} -lt 10 ]]; do
+    sleep 0.5
+    waits=$((waits + 1))
+  done
+  [[ -b /dev/zram0 ]] || warn "/dev/zram0 node still absent after waiting; mkswap/swapon below may fail"
+
+  local mkswap_err
+  if ! mkswap_err="$(run_to 60 mkswap /dev/zram0 2>&1)"; then
+    warn "mkswap /dev/zram0 failed${mkswap_err:+: ${mkswap_err}}; swapon will most likely fail too"
+  fi
+  local swapon_err
+  if ! swapon_err="$(run_to 60 swapon -p "${ZRAM_PRIORITY}" /dev/zram0 2>&1)"; then
+    warn "swapon /dev/zram0 failed${swapon_err:+: ${swapon_err}}"
     return 1
   fi
+  log "zram swap active: /dev/zram0 24 GiB lz4, priority ${ZRAM_PRIORITY}"
   return 0
 }
 
@@ -181,7 +245,9 @@ setup_disk_swap() {
     return 0
   fi
   if swapon --show=NAME --noheadings 2>/dev/null | grep -qx '/mnt/swapfile'; then
-    if swapoff /mnt/swapfile 2>/dev/null; then
+    # swapoff of a large active swapfile can take minutes; the cap keeps it
+    # bounded and on timeout the swap simply stays active (kept below).
+    if run_to 120 swapoff /mnt/swapfile 2>/dev/null; then
       rm -f /mnt/swapfile
     else
       warn "could not swapoff the active /mnt/swapfile; keeping it as is instead of rebuilding"
@@ -266,7 +332,7 @@ if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q '/dev/zram'; then
   setup_zswap_fallback
 fi
 
-if ! swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
+if ! any_swap_active; then
   warn "no active swap after all layers; trying the image-provided swapfile"
   activate_image_swap_fallback
 fi
