@@ -26,6 +26,11 @@ python scripts/architecture-guard.py
   `connector_cli_command(_, "kill")` 等形态）。Unix 组杀必须通过
   `platform::process::kill_process_tree` / `platform::os::kill_pid_tree`
   直接调用 `kill(2)`；该规则对所有 Rust 文件生效且没有文件级例外。
+- `pinvou-cli` crate 不得在代码中直接引用 `deepseek_tui::` 或 `tauri::`（注释文档
+  除外；`use tauri as x`/glob 导入等别名形态同样被 `use` 语句规则拦截）：CLI 一律
+  经由 `pinvou3_lib`（`features`/`platform` 公共面）触达 app，防止无头构建悄悄耦合
+  GUI 栈或绕过 app 自身的分层（2026-09-13 随 PR #478 增补）。扫描范围是
+  `pinvou-cli/crates/`（源码面；这是 tripwire 级规则，极端混淆形态不在其覆盖内）。
 
 门禁只约束可以稳定、客观检测的架构边界，不以文件行数或仓库总代码量作为模块化
 合规条件。模块是否需要拆分，应依据职责、依赖、状态耦合和独立测试能力，遵循根目录
