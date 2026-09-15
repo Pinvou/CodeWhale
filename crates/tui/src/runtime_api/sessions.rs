@@ -312,6 +312,7 @@ pub(super) async fn resume_session_thread(
             model_provider: Some(session.metadata.model_provider.clone()),
             model_provider_id: session.metadata.model_provider_id.clone(),
             workspace: Some(session.metadata.workspace.clone()),
+            workspace_roots: session.metadata.workspace_roots.clone(),
             mode: Some(mode),
             allow_shell: None,
             trust_mode: None,
@@ -418,6 +419,7 @@ pub(super) async fn create_session_from_thread(
         )?;
     }
     session.system_prompt = detail.thread.system_prompt.clone();
+    session.metadata.workspace_roots = detail.thread.workspace_roots.clone();
 
     if let Some(title) =
         session_title_override(req.title.as_deref(), detail.thread.title.as_deref())

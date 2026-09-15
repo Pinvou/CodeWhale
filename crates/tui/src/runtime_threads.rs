@@ -2147,6 +2147,11 @@ pub struct CreateThreadRequest {
     #[serde(default)]
     pub allowed_tools: Option<Vec<String>>,
     pub workspace: Option<PathBuf>,
+    /// Additional accessible roots for the thread; `workspace` stays the
+    /// primary root and the set is normalized on create (workspace first,
+    /// deduped). Empty or omitted preserves the single-root default.
+    #[serde(default)]
+    pub workspace_roots: Vec<PathBuf>,
     pub mode: Option<String>,
     #[serde(default)]
     pub permission_posture: Option<String>,
@@ -5420,6 +5425,8 @@ impl RuntimeThreadManager {
         let trust_mode = req.trust_mode.unwrap_or(false);
         let auto_approve = policy.auto_approve();
 
+        let workspace_roots =
+            codewhale_core::normalize_workspace_roots(&workspace, &req.workspace_roots);
         let thread = ThreadRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: format!("thr_{}", &Uuid::new_v4().to_string()[..8]),
@@ -5443,7 +5450,7 @@ impl RuntimeThreadManager {
             task_id: req.task_id,
             title: None,
             session_id: None,
-            workspace_roots: Vec::new(),
+            workspace_roots,
         };
         self.store.save_thread(&thread)?;
         if let Err(error) = self
