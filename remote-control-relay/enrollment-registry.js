@@ -1,0 +1,383 @@
+import crypto from "node:crypto";
+
+export const ENROLLMENT_NAMESPACE = "endpoint_enrollment";
+export const ENROLLMENT_REGISTRY_SCHEMA = "pinvou-endpoint-enrollment-registry";
+export const ENROLLMENT_REGISTRY_VERSION = 1;
+
+const CONFIG = new WeakMap();
+const ENDPOINT_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/u;
+const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const HEX_64 = /^[a-f0-9]{64}$/u;
+const REVISION = /^(?:0|[1-9][0-9]{0,19})$/u;
+const U64_MAX = 18_446_744_073_709_551_615n;
+const CREDENTIAL_MIN_BYTES = 32;
+const CREDENTIAL_MAX_BYTES = 4096;
+const MAX_ENTRIES = 100_000;
+const PURPOSES = new Set(["web_v2_reregister", "desktop_pairing_register"]);
+const DEPLOYMENTS = new Set(["official", "self_hosted", "development"]);
+
+export class EnrollmentRegistryError extends Error {
+  constructor(code, message = code, options) {
+    super(message, options);
+    this.name = "EnrollmentRegistryError";
+    this.code = code;
+  }
+}
+
+function fail(code, cause) {
+  throw new EnrollmentRegistryError(code, code, cause ? { cause } : undefined);
+}
+
+function exactObject(value, required, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label}_malformed`);
+  const keys = Object.keys(value);
+  if (keys.length !== required.length || required.some((key) => !Object.hasOwn(value, key))) {
+    fail(`${label}_malformed`);
+  }
+  return value;
+}
+
+function parseBoolean(value, label) {
+  if (value === undefined || value === "" || value === "0" || value === "false") return false;
+  if (value === "1" || value === "true") return true;
+  fail(`${label}_invalid`);
+}
+
+function validateEndpointId(endpointId) {
+  if (typeof endpointId !== "string" || !ENDPOINT_ID.test(endpointId)) fail("endpoint_id_invalid");
+  return endpointId;
+}
+
+function validateCredential(credential, label = "enrollment_credential") {
+  if (typeof credential !== "string") fail(`${label}_invalid`);
+  const bytes = Buffer.from(credential, "utf8");
+  if (bytes.length < CREDENTIAL_MIN_BYTES || bytes.length > CREDENTIAL_MAX_BYTES) {
+    fail(`${label}_invalid`);
+  }
+  if (bytes.toString("utf8") !== credential) fail(`${label}_invalid`);
+  return bytes;
+}
+
+function validateRevision(value, label) {
+  if (typeof value !== "string" || !REVISION.test(value) || BigInt(value) > U64_MAX) {
+    fail(`${label}_invalid`);
+  }
+  return value;
+}
+
+function incrementRevision(value) {
+  const next = BigInt(validateRevision(value, "endpoint_revision")) + 1n;
+  if (next > U64_MAX) fail("endpoint_revision_exhausted");
+  return next.toString();
+}
+
+function digestCredential(key, endpointId, credential) {
+  const input = validateCredential(credential);
+  return crypto.createHmac("sha256", key)
+    .update("pinvou-enrollment-credential-v1\0", "utf8")
+    .update(endpointId, "utf8")
+    .update("\0", "utf8")
+    .update(input)
+    .digest("hex");
+}
+
+function safeEqualHex(left, right) {
+  if (!HEX_64.test(left) || !HEX_64.test(right)) return false;
+  return crypto.timingSafeEqual(Buffer.from(left, "hex"), Buffer.from(right, "hex"));
+}
+
+function isoTimestamp(clock) {
+  const milliseconds = clock();
+  if (!Number.isSafeInteger(milliseconds) || milliseconds < 0 || milliseconds > 8_640_000_000_000_000) {
+    fail("enrollment_clock_invalid");
+  }
+  const value = new Date(milliseconds).toISOString();
+  if (value === "Invalid Date") fail("enrollment_clock_invalid");
+  return value;
+}
+
+function validateTimestamp(value, nullable, label) {
+  if (nullable && value === null) return null;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)
+    || Number.isNaN(Date.parse(value))) {
+    fail(`${label}_malformed`);
+  }
+  return value;
+}
+
+function validateEntry(raw) {
+  const entry = exactObject(raw, [
+    "endpoint_id", "status", "revision", "credential", "enrolled_at", "rotated_at", "revoked_at", "audit",
+  ], "enrollment_entry");
+  validateEndpointId(entry.endpoint_id);
+  if (entry.status !== "active" && entry.status !== "revoked") fail("enrollment_entry_malformed");
+  validateRevision(entry.revision, "endpoint_revision");
+  const credential = exactObject(entry.credential, ["algorithm", "key_id", "digest_hex"], "credential_digest");
+  if (credential.algorithm !== "hmac-sha256-v1" || !KEY_ID.test(credential.key_id)
+    || !HEX_64.test(credential.digest_hex)) fail("credential_digest_malformed");
+  validateTimestamp(entry.enrolled_at, false, "enrolled_at");
+  validateTimestamp(entry.rotated_at, true, "rotated_at");
+  validateTimestamp(entry.revoked_at, true, "revoked_at");
+  const audit = exactObject(entry.audit, ["source", "last_action"], "enrollment_audit");
+  if (!["official", "self_hosted", "development_tofu"].includes(audit.source)
+    || !["enrolled", "rotated", "revoked"].includes(audit.last_action)) {
+    fail("enrollment_audit_malformed");
+  }
+  if ((entry.status === "active" && entry.revoked_at !== null)
+    || (entry.status === "revoked" && entry.revoked_at === null)) fail("enrollment_entry_malformed");
+  return structuredClone(entry);
+}
+
+function validateRegistry(raw) {
+  if (raw === null) {
+    return { schema: ENROLLMENT_REGISTRY_SCHEMA, version: ENROLLMENT_REGISTRY_VERSION, entries: [] };
+  }
+  const registry = exactObject(raw, ["schema", "version", "entries"], "enrollment_registry");
+  if (registry.schema !== ENROLLMENT_REGISTRY_SCHEMA || registry.version !== ENROLLMENT_REGISTRY_VERSION) {
+    fail("enrollment_registry_unsupported");
+  }
+  if (!Array.isArray(registry.entries) || registry.entries.length > MAX_ENTRIES) {
+    fail("enrollment_registry_malformed");
+  }
+  const entries = registry.entries.map(validateEntry);
+  for (let index = 0; index < entries.length; index += 1) {
+    if (index > 0 && entries[index - 1].endpoint_id >= entries[index].endpoint_id) {
+      fail("enrollment_registry_malformed");
+    }
+  }
+  return { schema: registry.schema, version: registry.version, entries };
+}
+
+function publicEntry(entry) {
+  if (!entry) return null;
+  return Object.freeze({
+    endpoint_id: entry.endpoint_id,
+    status: entry.status,
+    revision: entry.revision,
+    enrolled_at: entry.enrolled_at,
+    rotated_at: entry.rotated_at,
+    revoked_at: entry.revoked_at,
+  });
+}
+
+function sourceForDeployment(deployment) {
+  if (deployment === "official") return "official";
+  if (deployment === "self_hosted") return "self_hosted";
+  return "development_tofu";
+}
+
+export function loadEnrollmentRegistryConfig(env = process.env) {
+  const deployment = env.PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT;
+  if (!DEPLOYMENTS.has(deployment)) fail("enrollment_deployment_invalid");
+  const runtimeEnvironment = env.NODE_ENV || "production";
+  if (!["production", "development", "test"].includes(runtimeEnvironment)) {
+    fail("enrollment_runtime_environment_invalid");
+  }
+  const developmentTofu = parseBoolean(env.PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU, "development_tofu");
+  if (developmentTofu && (deployment !== "development" || runtimeEnvironment === "production")) {
+    fail("development_tofu_forbidden");
+  }
+  if (deployment === "development" && runtimeEnvironment === "production") {
+    fail("development_mode_forbidden");
+  }
+  if (!KEY_ID.test(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID || "")) fail("enrollment_hmac_key_id_invalid");
+  const hmacKey = Buffer.from(env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY || "", "utf8");
+  if (hmacKey.length < 32 || hmacKey.length > 4096) fail("enrollment_hmac_key_invalid");
+  const config = Object.freeze({
+    deployment,
+    runtime_environment: runtimeEnvironment,
+    development_tofu: developmentTofu,
+  });
+  CONFIG.set(config, {
+    ...config,
+    keyId: env.PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID,
+    hmacKey,
+  });
+  return config;
+}
+
+function configDetails(config) {
+  const details = CONFIG.get(config);
+  if (!details) fail("enrollment_config_invalid");
+  return details;
+}
+
+export class EnrollmentRegistry {
+  static open({ stateStore, config, clock = Date.now } = {}) {
+    if (!stateStore || typeof stateStore.readNamespace !== "function"
+      || typeof stateStore.compareAndSwap !== "function") fail("enrollment_state_store_invalid");
+    const details = configDetails(config);
+    const registry = new EnrollmentRegistry(stateStore, details, clock);
+    registry.#read();
+    return registry;
+  }
+
+  #store;
+  #config;
+  #clock;
+
+  constructor(store, config, clock) {
+    this.#store = store;
+    this.#config = config;
+    this.#clock = clock;
+  }
+
+  #read() {
+    try {
+      const snapshot = this.#store.readNamespace(ENROLLMENT_NAMESPACE);
+      return { ...snapshot, registry: validateRegistry(snapshot.value) };
+    } catch (error) {
+      if (error instanceof EnrollmentRegistryError) throw error;
+      fail("enrollment_registry_unavailable", error);
+    }
+  }
+
+  #credentialDigest(endpointId, credential) {
+    return {
+      algorithm: "hmac-sha256-v1",
+      key_id: this.#config.keyId,
+      digest_hex: digestCredential(this.#config.hmacKey, endpointId, credential),
+    };
+  }
+
+  #find(registry, endpointId) {
+    return registry.entries.find((entry) => entry.endpoint_id === endpointId);
+  }
+
+  async #write(snapshot, registry) {
+    try {
+      const result = await this.#store.compareAndSwap(
+        ENROLLMENT_NAMESPACE,
+        snapshot.namespace_revision,
+        validateRegistry(registry),
+      );
+      return { ...result, registry: validateRegistry(result.value) };
+    } catch (error) {
+      if (error?.code === "namespace_revision_conflict") fail("enrollment_revision_conflict", error);
+      fail("enrollment_registry_unavailable", error);
+    }
+  }
+
+  getStatus(endpointId) {
+    validateEndpointId(endpointId);
+    return publicEntry(this.#find(this.#read().registry, endpointId));
+  }
+
+  async enroll({ endpointId, credential, expectedNamespaceRevision } = {}) {
+    endpointId = validateEndpointId(endpointId);
+    validateCredential(credential);
+    const snapshot = this.#read();
+    if (expectedNamespaceRevision !== undefined
+      && validateRevision(expectedNamespaceRevision, "expected_namespace_revision") !== snapshot.namespace_revision) {
+      fail("enrollment_revision_conflict");
+    }
+    const existing = this.#find(snapshot.registry, endpointId);
+    if (existing) {
+      if (existing.status === "active" && existing.credential.key_id === this.#config.keyId
+        && safeEqualHex(existing.credential.digest_hex, digestCredential(this.#config.hmacKey, endpointId, credential))) {
+        return publicEntry(existing);
+      }
+      fail(existing.status === "revoked" ? "endpoint_revoked" : "endpoint_already_enrolled");
+    }
+    const timestamp = isoTimestamp(this.#clock);
+    const entry = {
+      endpoint_id: endpointId,
+      status: "active",
+      revision: "1",
+      credential: this.#credentialDigest(endpointId, credential),
+      enrolled_at: timestamp,
+      rotated_at: null,
+      revoked_at: null,
+      audit: { source: sourceForDeployment(this.#config.deployment), last_action: "enrolled" },
+    };
+    const registry = {
+      ...snapshot.registry,
+      entries: [...snapshot.registry.entries, entry].sort((left, right) => (
+        left.endpoint_id < right.endpoint_id ? -1 : left.endpoint_id > right.endpoint_id ? 1 : 0
+      )),
+    };
+    await this.#write(snapshot, registry);
+    return publicEntry(entry);
+  }
+
+  async authorizeRegistration({ endpointId, credential, purpose } = {}) {
+    endpointId = validateEndpointId(endpointId);
+    validateCredential(credential);
+    if (!PURPOSES.has(purpose)) fail("registration_purpose_invalid");
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const snapshot = this.#read();
+      let entry = this.#find(snapshot.registry, endpointId);
+      if (!entry && this.#config.development_tofu) {
+        try {
+          await this.enroll({ endpointId, credential, expectedNamespaceRevision: snapshot.namespace_revision });
+          continue;
+        } catch (error) {
+          if (error?.code === "enrollment_revision_conflict") continue;
+          throw error;
+        }
+      }
+      if (!entry) fail("enrollment_required");
+      if (entry.status !== "active") fail("endpoint_revoked");
+      if (entry.credential.key_id !== this.#config.keyId) fail("credential_key_unavailable");
+      const actual = digestCredential(this.#config.hmacKey, endpointId, credential);
+      if (!safeEqualHex(entry.credential.digest_hex, actual)) fail("invalid_enrollment_credential");
+      return Object.freeze({
+        endpoint_id: endpointId,
+        status: entry.status,
+        revision: entry.revision,
+        purpose,
+      });
+    }
+    fail("enrollment_revision_conflict");
+  }
+
+  async rotateCredential({ endpointId, currentCredential, newCredential, expectedEndpointRevision } = {}) {
+    endpointId = validateEndpointId(endpointId);
+    validateCredential(currentCredential, "current_credential");
+    validateCredential(newCredential, "new_credential");
+    expectedEndpointRevision = validateRevision(expectedEndpointRevision, "expected_endpoint_revision");
+    const snapshot = this.#read();
+    const entry = this.#find(snapshot.registry, endpointId);
+    if (!entry) fail("enrollment_required");
+    if (entry.status !== "active") fail("endpoint_revoked");
+    if (entry.revision !== expectedEndpointRevision) fail("endpoint_revision_conflict");
+    if (entry.credential.key_id !== this.#config.keyId) fail("credential_key_unavailable");
+    const currentDigest = digestCredential(this.#config.hmacKey, endpointId, currentCredential);
+    if (!safeEqualHex(entry.credential.digest_hex, currentDigest)) fail("invalid_enrollment_credential");
+    const timestamp = isoTimestamp(this.#clock);
+    const next = {
+      ...entry,
+      revision: incrementRevision(entry.revision),
+      credential: this.#credentialDigest(endpointId, newCredential),
+      rotated_at: timestamp,
+      audit: { ...entry.audit, last_action: "rotated" },
+    };
+    await this.#write(snapshot, {
+      ...snapshot.registry,
+      entries: snapshot.registry.entries.map((candidate) => candidate.endpoint_id === endpointId ? next : candidate),
+    });
+    return publicEntry(next);
+  }
+
+  async revoke({ endpointId, expectedEndpointRevision } = {}) {
+    endpointId = validateEndpointId(endpointId);
+    expectedEndpointRevision = validateRevision(expectedEndpointRevision, "expected_endpoint_revision");
+    const snapshot = this.#read();
+    const entry = this.#find(snapshot.registry, endpointId);
+    if (!entry) fail("enrollment_required");
+    if (entry.status === "revoked") return publicEntry(entry);
+    if (entry.revision !== expectedEndpointRevision) fail("endpoint_revision_conflict");
+    const next = {
+      ...entry,
+      status: "revoked",
+      revision: incrementRevision(entry.revision),
+      revoked_at: isoTimestamp(this.#clock),
+      audit: { ...entry.audit, last_action: "revoked" },
+    };
+    await this.#write(snapshot, {
+      ...snapshot.registry,
+      entries: snapshot.registry.entries.map((candidate) => candidate.endpoint_id === endpointId ? next : candidate),
+    });
+    return publicEntry(next);
+  }
+}
