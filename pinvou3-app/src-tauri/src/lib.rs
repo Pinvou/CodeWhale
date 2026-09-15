@@ -594,6 +594,18 @@ pub fn run() {
     install_rustls_provider();
     ensure_release_env();
     startup_process_env();
+    // GUI 宿主同样必须给 tokio worker 大栈:底座 engine 一次 dispatch 在 debug
+    // 构建下实测栈高水位 2.25–2.5MiB(见 CodeWhale/crates/tui/src/lib.rs:1888
+    // 的说明),tokio 默认 2MiB worker 栈会被顶穿——栈溢出不是 panic,
+    // catch_unwind 看不到,进程直接 0xc00000fd/SIGABRT。headless 路径已同款修复
+    // (headless_bridge.rs run_windowless_host),此处补齐 GUI 路径;勿"优化"回
+    // 默认 runtime。runtime 本体绑定在本函数作用域,随 run() 活到进程退出。
+    let async_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()
+        .expect("build GUI async runtime");
+    tauri::async_runtime::set(async_runtime.handle().clone());
     startup::init();
     startup::mark("environment:ready");
     // 必须早于 Tauri Builder/WebView 创建：避免升级后 WebKit 复用旧 index.html，
