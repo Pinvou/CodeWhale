@@ -3,7 +3,7 @@
   "contract": {
     "id": "pinvou-desktop-controller/v1",
     "integer_wire_format": "canonical-u64-decimal-string",
-    "sha256": "de6e06bc6d5d0213bccea6841d4b256dd5403c493c9601b244bf0533034d2721"
+    "sha256": "3784ee2f066ebd2d66e7f72bc6a6727a210a329dbefdada60775b3014e93c004"
   },
   "expected_capabilities": ["pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1", "task_v1", "permission_v1", "attachment_v1", "artifact_v1", "snapshot_journal_v1"],
   "expected_error_codes": ["pairing_code_invalid", "pairing_code_generation_failed", "controller_busy", "version_incompatible", "endpoint_offline", "enrollment_required", "invalid_message", "unsupported_capability", "permission_already_decided", "permission_expired", "result_unknown"],
@@ -43,11 +43,17 @@
     "sha256": "c78ffff84687ec43bf1b7463df7a7c31cd4ae9a8d58520014d6dc7ae994c40ec", "signature_algorithm": "ed25519", "public_key_b64": "HW3xPOxTtGxa5yr5ESVes1hoAnuyIDd4cLuLZ2l1CCk=", "signature_b64": "f+CI9aBrxnQBwAC3SmljCihCrbo4nfyMjkBa6L7HhpJQaVtnNy/FEZE98wIZsgQBmi2tIg45BHKlEf4D3kjpCw=="
   },
   "lease_install_vector": {
-    "context": {"request_id":"request-0001","expected_pairing_id":"pairing-0001","reservation_id":"reservation-0001","remote_control_generation":"generation-0001","relay_epoch":"epoch-test-1","transcript_hash":"c78ffff84687ec43bf1b7463df7a7c31cd4ae9a8d58520014d6dc7ae994c40ec","expected_controller_connection_identity":"controller-identity-0001","negotiated_capabilities":["pairing_v1","encrypted_frames_v1"]},
+    "context": {"request_id":"request-0001","expected_pairing_id":"pairing-0001","reservation_id":"reservation-0001","remote_control_generation":"generation-0001","relay_epoch":"epoch-test-1","transcript_hash":"c78ffff84687ec43bf1b7463df7a7c31cd4ae9a8d58520014d6dc7ae994c40ec","expected_controller_connection_identity":"controller-identity-0001","negotiated_capabilities":["artifact_v1","attachment_v1","encrypted_frames_v1","finished_receipt_v1","pairing_v1","permission_v1","resume_v1","role_liveness_v1","snapshot_journal_v1","task_v1"],"capability_hash":"a8cb9f552292fa1bf84874a8cf025dcfdf1b1e103f9a21de845e513830164cb9"},
     "message": {"v":1,"type":"controller_joined","request_id":"request-0001","pairing_id":"pairing-0001","reservation_id":"reservation-0001","transcript_hash":"c78ffff84687ec43bf1b7463df7a7c31cd4ae9a8d58520014d6dc7ae994c40ec","controller_connection_identity":"controller-identity-0001","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001","liveness_epoch_a":"live-a-1","liveness_epoch_b":"live-b-1","resume_token_b64":"AQID","resume_deadline_ms":"30000"},
     "expected_lease": {"connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1","relay_epoch":"epoch-test-1","remote_control_generation":"generation-0001"},
     "mismatch_fields": ["request_id","pairing_id","reservation_id","remote_control_generation","relay_epoch","transcript_hash","controller_connection_identity"],
-    "expected_error": "stale_context"
+    "expected_error": "stale_context",
+    "capability_mutations": [
+      {"name":"deleted","negotiated_capabilities":["artifact_v1","attachment_v1","encrypted_frames_v1","finished_receipt_v1","pairing_v1","permission_v1","resume_v1","role_liveness_v1","snapshot_journal_v1"],"expected_error":"invalid_field","expected_field":"lease_install_validation_context.capability_hash"},
+      {"name":"added","negotiated_capabilities":["artifact_v1","attachment_v1","encrypted_frames_v1","finished_receipt_v1","pairing_v1","permission_v1","resume_v1","role_liveness_v1","snapshot_journal_v1","task_v1","task_v1"],"expected_error":"unsupported_capability","expected_field":"negotiated_capabilities"},
+      {"name":"replaced","negotiated_capabilities":["artifact_v1","attachment_v1","encrypted_frames_v1","finished_receipt_v1","pairing_v1","permission_v1","resume_v1","role_liveness_v1","snapshot_journal_v1","task v1"],"expected_error":"unsupported_capability","expected_field":"negotiated_capabilities"},
+      {"name":"unsorted","negotiated_capabilities":["attachment_v1","artifact_v1","encrypted_frames_v1","finished_receipt_v1","pairing_v1","permission_v1","resume_v1","role_liveness_v1","snapshot_journal_v1","task_v1"],"expected_error":"unsupported_capability","expected_field":"negotiated_capabilities"}
+    ]
   },
   "direct_liveness_vector": {
     "outer": {"v":1,"type":"encrypted_controller_liveness_a","connection_id":"connection-0001","controller_lease_id":"lease-0001","lease_epoch":"1","ciphertext_b64":"AQID","ciphertext_bytes":"3"},
@@ -93,6 +99,12 @@
     {"name":"task_without_encrypted_frames","target":"message","type":"encrypted_frame","sender_role":"A","capabilities":["task_v1"],"expected_error":"unsupported_capability"},
     {"name":"encrypted_frame_without_task","target":"message","type":"encrypted_frame","sender_role":"A","capabilities":["encrypted_frames_v1"],"expected_error":"unsupported_capability"},
     {"name":"task_payload_not_negotiated","target":"payload","type":"task_submit","sender_role":"A","capabilities":["pairing_v1"],"expected_error":"unsupported_capability"}
+  ],
+  "invalid_runtime_capability_contexts": [
+    {"name":"unknown","capabilities":["future_v2"],"expected_error":"unsupported_capability","expected_field":"negotiated_capabilities"},
+    {"name":"duplicate","capabilities":["pairing_v1","pairing_v1"],"expected_error":"unsupported_capability","expected_field":"negotiated_capabilities"},
+    {"name":"unsorted","capabilities":["task_v1","pairing_v1"],"expected_error":"unsupported_capability","expected_field":"negotiated_capabilities"},
+    {"name":"invalid_format","capabilities":["pairing v1"],"expected_error":"unsupported_capability","expected_field":"negotiated_capabilities"}
   ],
   "runtime_pre_lease_case": {"type":"desktop_pairing_register","sender_role":"B","capabilities":["pairing_v1"]},
   "negative_contracts": ["missing_field", "unknown_field", "overlong_text", "unknown_message_type", "unsupported_version", "unsupported_capability", "capability_version_mismatch", "invalid_enum", "cross_role", "noncanonical_integer", "integer_overflow", "stale_generation", "stale_relay_epoch", "stale_lease_epoch", "late_frame", "transcript_tamper", "liveness_tamper", "liveness_regression", "same_sequence_tighten", "cross_lease", "attestation_tamper", "url_grammar", "registration_idempotency", "missing_runtime_lease"],

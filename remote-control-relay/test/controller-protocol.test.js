@@ -52,7 +52,7 @@ const LEASE = Object.freeze({
   relay_epoch: "epoch-test-1",
   remote_control_generation: "generation-0001",
 });
-const RUNTIME = Object.freeze({ lease: LEASE, negotiated_capabilities: CONTROLLER_CAPABILITIES });
+const RUNTIME = Object.freeze({ lease: LEASE, negotiated_capabilities: Object.freeze([...CONTROLLER_CAPABILITIES].sort()) });
 
 function assertProtocolError(expectedCode, callback, label, expectedField) {
   assert.throws(callback, (error) => error instanceof ControllerProtocolError
@@ -335,20 +335,39 @@ test("runtime validation requires negotiated outer and inner capabilities", () =
   validateControllerRuntimeMessage(validMessage(preLease.type, preLease.sender_role), preLease.sender_role, { negotiated_capabilities: preLease.capabilities });
   validateControllerRuntimeMessage(validMessage("controller_capabilities", "A"), "A", { negotiated_capabilities: [] });
   validateControllerRuntimeMessage(validMessage("error"), "relay", { negotiated_capabilities: [] });
+  for (const item of fixture.invalid_runtime_capability_contexts) {
+    assertProtocolError(item.expected_error, () => validateControllerRuntimeMessage(
+      validMessage("controller_capabilities", "A"),
+      "A",
+      { negotiated_capabilities: item.capabilities },
+    ), item.name, item.expected_field);
+  }
 });
 
 test("controller_joined installs a new lease only from trusted handshake expectations", () => {
   const vector = fixture.lease_install_vector;
+  assert.deepEqual(vector.context.negotiated_capabilities, fixture.transcript_vector.transcript.negotiated_capabilities);
+  assert.equal(vector.context.capability_hash, fixture.transcript_vector.transcript.capability_hash);
   const context = new LeaseInstallValidationContext(vector.context);
   const result = validateControllerLeaseInstallMessage(vector.message, "relay", context);
   assert.deepEqual(result.message, vector.message);
   assert.deepEqual(result.lease, vector.expected_lease);
   assertProtocolError("missing_field", () => validateControllerLeaseInstallMessage(vector.message, "relay"), undefined, "lease_install_validation_context");
   assertProtocolError("unknown_field", () => new LeaseInstallValidationContext(vector.message), "unverified joined message cannot become its own expectation");
-  assertProtocolError("unsupported_capability", () => validateControllerLeaseInstallMessage(vector.message, "relay", new LeaseInstallValidationContext({ ...vector.context, negotiated_capabilities: ["encrypted_frames_v1"] })));
+  assertProtocolError("unsupported_capability", () => validateControllerLeaseInstallMessage(vector.message, "relay", new LeaseInstallValidationContext({
+    ...vector.context,
+    negotiated_capabilities: ["encrypted_frames_v1"],
+    capability_hash: controllerCapabilityHash(["encrypted_frames_v1"]),
+  })));
   for (const field of vector.mismatch_fields) {
     const value = field === "transcript_hash" ? ZERO_HASH : `${field}-other`;
     assertProtocolError(vector.expected_error, () => validateControllerLeaseInstallMessage({ ...vector.message, [field]: value }, "relay", context), field, field);
+  }
+  for (const mutation of vector.capability_mutations) {
+    assertProtocolError(mutation.expected_error, () => new LeaseInstallValidationContext({
+      ...vector.context,
+      negotiated_capabilities: mutation.negotiated_capabilities,
+    }), mutation.name, mutation.expected_field);
   }
 });
 
