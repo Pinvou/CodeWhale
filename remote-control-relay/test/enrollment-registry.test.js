@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { execFile, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { once } from "node:events";
+import { promisify } from "node:util";
 
 import {
   ENROLLMENT_NAMESPACE,
@@ -18,6 +21,7 @@ import {
 const HMAC_KEY = "test-only-hmac-key-material-32-bytes-minimum";
 const FIRST_CREDENTIAL = "endpoint-credential-one-at-least-32-bytes";
 const SECOND_CREDENTIAL = "endpoint-credential-two-at-least-32-bytes";
+const execFileAsync = promisify(execFile);
 
 function environment(overrides = {}) {
   return {
@@ -25,6 +29,8 @@ function environment(overrides = {}) {
     PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT: "official",
     PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "test-key-1",
     PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: HMAC_KEY,
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: path.join(os.tmpdir(), "pinvou-controller-config", "state.json"),
+    PINVOU_REMOTE_STATE_PATH: path.join(os.tmpdir(), "pinvou-legacy-config.json"),
     ...overrides,
   };
 }
@@ -32,19 +38,50 @@ function environment(overrides = {}) {
 async function temporaryState(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pinvou-enrollment-test-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  return path.join(directory, "controller-state.json");
+  return path.join(directory, "controller", "state.json");
+}
+
+function legacyStatePath(statePath) {
+  return path.join(path.dirname(path.dirname(statePath)), "legacy-web-state.json");
+}
+
+function testSecurityOptions() {
+  if (process.platform !== "win32") return {};
+  return {
+    protectPath: async () => {},
+    verifyPath: async () => {},
+    verifyAncestors: async () => {},
+  };
+}
+
+async function openStateStore(statePath, options = {}) {
+  return RelayStateStore.open({
+    statePath,
+    legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `test-process:${pid}`,
+    ...testSecurityOptions(),
+    ...options,
+  });
+}
+
+function configForState(statePath, overrides = {}) {
+  return loadEnrollmentRegistryConfig(environment({
+    ...overrides,
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath,
+    PINVOU_REMOTE_STATE_PATH: legacyStatePath(statePath),
+  }));
 }
 
 async function openRegistry(t, { env, clock, storeOptions } = {}) {
   const statePath = await temporaryState(t);
-  const store = await RelayStateStore.open({ statePath, ...storeOptions });
+  const store = await openStateStore(statePath, storeOptions);
   t.after(() => store.close());
   return {
     statePath,
     store,
     registry: EnrollmentRegistry.open({
       stateStore: store,
-      config: loadEnrollmentRegistryConfig(env || environment()),
+      config: configForState(statePath, env),
       clock,
     }),
   };
@@ -52,6 +89,20 @@ async function openRegistry(t, { env, clock, storeOptions } = {}) {
 
 async function rejectsCode(promise, code) {
   await assert.rejects(promise, (error) => error?.code === code);
+}
+
+function lockPath(statePath) {
+  return `${statePath}.lock`;
+}
+
+function lockRecord({ pid = process.pid, identity = `test-process:${pid}`, owner = "AAAAAAAAAAAAAAAAAAAAAAAA" } = {}) {
+  return {
+    schema: "pinvou-relay-controller-state-lock",
+    version: 1,
+    pid,
+    process_identity: identity,
+    owner_id: owner,
+  };
 }
 
 test("official registry enrolls explicitly and authorizes both registration paths", async (t) => {
@@ -162,19 +213,19 @@ test("credential rotation invalidates old credential and revocation is terminal"
 
 test("a registry opened without the persisted digest key fails closed", async (t) => {
   const statePath = await temporaryState(t);
-  let store = await RelayStateStore.open({ statePath });
-  let registry = EnrollmentRegistry.open({ stateStore: store, config: loadEnrollmentRegistryConfig(environment()) });
+  let store = await openStateStore(statePath);
+  let registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
   await registry.enroll({ endpointId: "endpoint-keyring", credential: FIRST_CREDENTIAL });
   await store.close();
 
-  store = await RelayStateStore.open({ statePath });
+  store = await openStateStore(statePath);
   t.after(() => store.close());
   registry = EnrollmentRegistry.open({
     stateStore: store,
-    config: loadEnrollmentRegistryConfig(environment({
+    config: configForState(statePath, {
       PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID: "replacement-key",
       PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "replacement-hmac-key-material-at-least-32-bytes",
-    })),
+    }),
   });
   await rejectsCode(registry.authorizeRegistration({
     endpointId: "endpoint-keyring",
@@ -204,13 +255,13 @@ test("endpoint and namespace revisions reject stale concurrent mutations", async
 
 test("restart reloads committed registry and valid backup restores a corrupted primary", async (t) => {
   const statePath = await temporaryState(t);
-  let store = await RelayStateStore.open({ statePath });
-  let registry = EnrollmentRegistry.open({ stateStore: store, config: loadEnrollmentRegistryConfig(environment()) });
+  let store = await openStateStore(statePath);
+  let registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
   await registry.enroll({ endpointId: "endpoint-restart", credential: FIRST_CREDENTIAL });
   await store.close();
 
-  store = await RelayStateStore.open({ statePath });
-  registry = EnrollmentRegistry.open({ stateStore: store, config: loadEnrollmentRegistryConfig(environment()) });
+  store = await openStateStore(statePath);
+  registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
   await registry.authorizeRegistration({
     endpointId: "endpoint-restart",
     credential: FIRST_CREDENTIAL,
@@ -219,9 +270,9 @@ test("restart reloads committed registry and valid backup restores a corrupted p
   await store.close();
 
   await fs.writeFile(statePath, "{corrupt", "utf8");
-  store = await RelayStateStore.open({ statePath });
+  store = await openStateStore(statePath);
   t.after(() => store.close());
-  registry = EnrollmentRegistry.open({ stateStore: store, config: loadEnrollmentRegistryConfig(environment()) });
+  registry = EnrollmentRegistry.open({ stateStore: store, config: configForState(statePath) });
   await registry.authorizeRegistration({
     endpointId: "endpoint-restart",
     credential: FIRST_CREDENTIAL,
@@ -232,6 +283,8 @@ test("restart reloads committed registry and valid backup restores a corrupted p
 
 test("legacy controller state migrates once without touching the existing v2 relay state", async (t) => {
   const statePath = await temporaryState(t);
+  const initialized = await openStateStore(statePath);
+  await initialized.close();
   const legacy = {
     schema: RELAY_CONTROLLER_STATE_SCHEMA,
     version: 0,
@@ -243,7 +296,7 @@ test("legacy controller state migrates once without touching the existing v2 rel
     }],
   };
   await fs.writeFile(statePath, JSON.stringify(legacy), "utf8");
-  const store = await RelayStateStore.open({ statePath });
+  const store = await openStateStore(statePath);
   t.after(() => store.close());
   assert.equal(store.readNamespace("future_pairing_tombstones").namespace_revision, "2");
   const current = JSON.parse(await fs.readFile(statePath, "utf8"));
@@ -254,28 +307,386 @@ test("legacy controller state migrates once without touching the existing v2 rel
 
 test("strict state validation rejects unknown fields, oversized input and unsafe paths", async (t) => {
   const statePath = await temporaryState(t);
-  await fs.writeFile(statePath, JSON.stringify({
+  let initialized = await openStateStore(statePath);
+  await initialized.close();
+  const malformed = JSON.stringify({
     schema: RELAY_CONTROLLER_STATE_SCHEMA,
     version: 1,
     revision: "0",
     namespaces: {},
     unexpected: true,
-  }), "utf8");
-  await rejectsCode(RelayStateStore.open({ statePath }), "relay_state_unavailable");
+  });
+  await fs.writeFile(statePath, malformed, "utf8");
+  await fs.writeFile(`${statePath}.bak`, malformed, "utf8");
+  await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
 
-  const oversizedPath = path.join(path.dirname(statePath), "oversized.json");
+  const oversizedPath = await temporaryState(t);
+  initialized = await openStateStore(oversizedPath);
+  await initialized.close();
   await fs.writeFile(oversizedPath, "x".repeat(2048), "utf8");
-  await rejectsCode(RelayStateStore.open({ statePath: oversizedPath, maxBytes: 1024 }), "relay_state_unavailable");
-  await rejectsCode(RelayStateStore.open({ statePath: "relative.json" }), "relay_state_path_invalid");
+  await fs.writeFile(`${oversizedPath}.bak`, "x".repeat(2048), "utf8");
+  await rejectsCode(openStateStore(oversizedPath, { maxBytes: 1024 }), "relay_state_unavailable");
+  await rejectsCode(RelayStateStore.open({
+    statePath: "relative.json",
+    legacyStatePath: path.resolve("legacy.json"),
+  }), "relay_state_path_invalid");
+});
+
+test("configuration and store reject lexical and hardlink aliases of legacy Web state", async (t) => {
+  const statePath = await temporaryState(t);
+  assert.throws(() => loadEnrollmentRegistryConfig(environment({
+    PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath,
+    PINVOU_REMOTE_STATE_PATH: statePath,
+  })), (error) => error?.code === "controller_state_path_aliases_legacy");
+  if (process.platform === "win32") {
+    assert.throws(() => loadEnrollmentRegistryConfig(environment({
+      PINVOU_REMOTE_CONTROLLER_STATE_PATH: statePath.toUpperCase(),
+      PINVOU_REMOTE_STATE_PATH: statePath.toLowerCase(),
+    })), (error) => error?.code === "controller_state_path_aliases_legacy");
+  }
+
+  let store = await openStateStore(statePath);
+  await store.close();
+  await fs.link(statePath, legacyStatePath(statePath));
+  await rejectsCode(openStateStore(statePath), "relay_state_aliases_legacy");
+});
+
+test("registry rejects a store opened for different configured paths", async (t) => {
+  const statePath = await temporaryState(t);
+  const otherStatePath = path.join(path.dirname(path.dirname(statePath)), "other-controller", "state.json");
+  const store = await openStateStore(statePath);
+  t.after(() => store.close());
+  assert.throws(() => EnrollmentRegistry.open({
+    stateStore: store,
+    config: configForState(otherStatePath),
+  }), (error) => error?.code === "enrollment_state_store_path_mismatch");
+});
+
+test("junction or symlink ancestors and final state links are rejected", async (t) => {
+  const statePath = await temporaryState(t);
+  const root = path.dirname(path.dirname(statePath));
+  const actualParent = path.join(root, "actual-parent");
+  const aliasParent = path.join(root, "alias-parent");
+  await fs.mkdir(actualParent);
+  try {
+    await fs.symlink(actualParent, aliasParent, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) {
+      t.skip(`symlink creation unavailable: ${error.code}`);
+      return;
+    }
+    throw error;
+  }
+  await rejectsCode(openStateStore(path.join(aliasParent, "controller", "state.json")),
+    "relay_state_path_component_unsafe");
+
+  let store = await openStateStore(statePath);
+  await store.close();
+  await fs.rm(statePath);
+  try {
+    await fs.symlink(`${statePath}.bak`, statePath, "file");
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP"].includes(error?.code)) return;
+    throw error;
+  }
+  await assert.rejects(openStateStore(statePath), (error) => [
+    "relay_state_file_unsafe", "relay_state_unavailable",
+  ].includes(error?.code));
+});
+
+test("open-handle identity checks detect final-file exchange", async (t) => {
+  const statePath = await temporaryState(t);
+  let store = await openStateStore(statePath);
+  await store.close();
+  let exchanged = false;
+  const injectedFs = {
+    ...fs,
+    async open(target, flags, mode) {
+      const handle = await fs.open(target, flags, mode);
+      if (!exchanged && target === statePath && typeof flags === "number") {
+        exchanged = true;
+        await fs.rename(statePath, `${statePath}.exchanged`);
+        await fs.copyFile(`${statePath}.bak`, statePath);
+      }
+      return handle;
+    },
+  };
+  await assert.rejects(openStateStore(statePath, { fs: injectedFs }),
+    (error) => error?.code === "relay_state_file_unsafe");
+});
+
+test("ancestor snapshots reject a directory identity exchange before lock publication", async (t) => {
+  const statePath = await temporaryState(t);
+  const dedicatedDirectory = path.dirname(statePath);
+  let dedicatedRealpaths = 0;
+  const injectedFs = {
+    ...fs,
+    async realpath(target, ...args) {
+      const canonical = await fs.realpath(target, ...args);
+      if (target === dedicatedDirectory) {
+        dedicatedRealpaths += 1;
+        if (dedicatedRealpaths > 1) return `${canonical}-exchanged`;
+      }
+      return canonical;
+    },
+  };
+  await rejectsCode(openStateStore(statePath, { fs: injectedFs }), "relay_state_path_changed");
+  assert.equal(await fs.stat(dedicatedDirectory).then(() => true), true);
+  assert.equal((await fs.readdir(dedicatedDirectory)).some((name) => name.endsWith(".lock")), false);
+});
+
+test("bounded handle reads reject a file that grows after fstat", async (t) => {
+  const statePath = await temporaryState(t);
+  let store = await openStateStore(statePath, { maxBytes: 1024 });
+  await store.close();
+  let enlarged = false;
+  const injectedFs = {
+    ...fs,
+    async open(target, flags, mode) {
+      const handle = await fs.open(target, flags, mode);
+      if (!enlarged && target === statePath && typeof flags === "number") {
+        return {
+          stat: (...args) => handle.stat(...args),
+          read: async (...args) => {
+            if (!enlarged) {
+              enlarged = true;
+              await fs.appendFile(statePath, "x".repeat(2048));
+            }
+            return handle.read(...args);
+          },
+          close: (...args) => handle.close(...args),
+        };
+      }
+      return handle;
+    },
+  };
+  await assert.rejects(openStateStore(statePath, { fs: injectedFs, maxBytes: 1024 }),
+    (error) => error?.code === "relay_state_file_unsafe");
+});
+
+test("POSIX setup changes only its dedicated child directory", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const statePath = await temporaryState(t);
+  const callerParent = path.dirname(path.dirname(statePath));
+  await fs.chmod(callerParent, 0o755);
+  const before = (await fs.stat(callerParent)).mode & 0o777;
+  const store = await openStateStore(statePath);
+  await store.close();
+  assert.equal((await fs.stat(callerParent)).mode & 0o777, before);
+  assert.equal((await fs.stat(path.dirname(statePath))).mode & 0o777, 0o700);
+});
+
+test("Windows state directory and every durable/lock file have protected DACLs", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const statePath = await temporaryState(t);
+  const store = await RelayStateStore.open({
+    statePath,
+    legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `acl-test-process:${pid}`,
+  });
+  const inspectScript = `
+    $ErrorActionPreference = 'Stop'
+    $result = @()
+    $index = 0
+    foreach ($target in ($env:PINVOU_ACL_PATHS -split '\\|')) {
+      $acl = Get-Acl -LiteralPath $target
+      $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+      $ownerAccount = New-Object System.Security.Principal.NTAccount -ArgumentList $acl.Owner
+      $ownerSid = $ownerAccount.Translate([System.Security.Principal.SecurityIdentifier]).Value
+      $validRules = $true
+      foreach ($rule in @($acl.Access)) {
+        if ($rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) { $validRules = $false }
+        if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { $validRules = $false }
+        $expectedInheritance = if ($index -eq 0) { [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit' } else { [System.Security.AccessControl.InheritanceFlags]::None }
+        if ($rule.InheritanceFlags -ne $expectedInheritance) { $validRules = $false }
+      }
+      $result += [pscustomobject]@{ protected = $acl.AreAccessRulesProtected; owner = $ownerSid; sids = $sids; count = @($acl.Access).Count; valid_rules = $validRules }
+      $index += 1
+    }
+    [Console]::Out.Write(($result | ConvertTo-Json -Compress))
+  `;
+  const paths = [
+    path.dirname(statePath),
+    path.join(path.dirname(statePath), ".pinvou-controller-state-directory"),
+    statePath,
+    `${statePath}.bak`,
+    lockPath(statePath),
+  ];
+  const { stdout } = await execFileAsync("powershell.exe", [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+    "-EncodedCommand", Buffer.from(inspectScript, "utf16le").toString("base64"),
+  ], {
+    windowsHide: true,
+    env: { ...process.env, PINVOU_ACL_PATHS: paths.join("|") },
+    timeout: 15_000,
+    maxBuffer: 64 * 1024,
+  });
+  const results = JSON.parse(stdout);
+  assert.equal(results.length, paths.length);
+  for (const result of results) {
+    assert.equal(result.protected, true);
+    assert.equal(result.count, result.sids.length);
+    assert.equal(result.valid_rules, true);
+    assert.ok(result.sids.includes(result.owner));
+    assert.ok(result.sids.includes("S-1-5-18"));
+    assert.ok(result.sids.includes("S-1-5-32-544"));
+  }
+  await store.close();
+});
+
+test("Windows refuses startup when the dedicated ACL cannot be set or verified", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  for (const phase of ["set", "verify"]) {
+    await t.test(phase, async () => {
+      const statePath = await temporaryState(t);
+      await rejectsCode(RelayStateStore.open({
+        statePath,
+        legacyStatePath: legacyStatePath(statePath),
+        processIdentity: async (pid) => `acl-failure-test:${pid}`,
+        protectPath: phase === "set" ? async () => { throw new Error("injected ACL set failure"); } : async () => {},
+        verifyPath: phase === "verify" ? async () => { throw new Error("injected ACL verify failure"); } : async () => {},
+        verifyAncestors: async () => {},
+      }), "relay_state_acl_unverified");
+    });
+  }
+});
+
+test("Windows never repairs an existing caller-created directory ACL", {
+  skip: process.platform !== "win32",
+}, async (t) => {
+  const statePath = await temporaryState(t);
+  await fs.mkdir(path.dirname(statePath));
+  let protectionCalls = 0;
+  await rejectsCode(RelayStateStore.open({
+    statePath,
+    legacyStatePath: legacyStatePath(statePath),
+    processIdentity: async (pid) => `acl-existing-test:${pid}`,
+    protectPath: async () => { protectionCalls += 1; },
+    verifyPath: async () => { throw new Error("existing ACL is unsafe"); },
+    verifyAncestors: async () => {},
+  }), "relay_state_acl_unverified");
+  assert.equal(protectionCalls, 0);
 });
 
 test("live process lock prevents a second writer and is released on close", async (t) => {
   const statePath = await temporaryState(t);
-  const first = await RelayStateStore.open({ statePath });
-  await rejectsCode(RelayStateStore.open({ statePath }), "relay_state_locked");
+  const first = await openStateStore(statePath);
+  await rejectsCode(openStateStore(statePath), "relay_state_locked");
   await first.close();
-  const second = await RelayStateStore.open({ statePath });
+  const second = await openStateStore(statePath);
   await second.close();
+});
+
+test("empty and truncated crash locks are recovered after a bounded retry", async (t) => {
+  for (const contents of ["", "{\"schema\":"]) {
+    const statePath = await temporaryState(t);
+    let store = await openStateStore(statePath);
+    await store.close();
+    await fs.writeFile(lockPath(statePath), contents, "utf8");
+    store = await openStateStore(statePath, { sleep: async () => {} });
+    assert.equal(store.readNamespace("test").namespace_revision, "0");
+    await store.close();
+  }
+});
+
+test("a crashed child process leaves a lock that another process can recover", async (t) => {
+  const statePath = await temporaryState(t);
+  const moduleUrl = new URL("../relay-state-store.js", import.meta.url).href;
+  const childSource = `
+    const { RelayStateStore } = await import(${JSON.stringify(moduleUrl)});
+    await RelayStateStore.open({
+      statePath: process.argv[1],
+      legacyStatePath: process.argv[2],
+      processIdentity: async (pid) => 'child-process:' + pid,
+      protectPath: async () => {},
+      verifyPath: async () => {},
+      verifyAncestors: async () => {},
+    });
+    process.stdout.write('ready\\n');
+    setTimeout(() => process.exit(0), 25);
+  `;
+  const child = spawn(process.execPath, [
+    "--input-type=module", "-e", childSource, statePath, legacyStatePath(statePath),
+  ], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const [ready] = await once(child.stdout, "data");
+  assert.match(String(ready), /ready/u);
+  const [exitCode] = await once(child, "exit");
+  assert.equal(exitCode, 0);
+  const store = await openStateStore(statePath, {
+    processIdentity: async (pid) => {
+      try {
+        process.kill(pid, 0);
+        return pid === process.pid ? `parent-process:${pid}` : `child-process:${pid}`;
+      } catch {
+        return null;
+      }
+    },
+    sleep: async () => {},
+  });
+  await store.close();
+});
+
+test("PID reuse cannot make an old lock look live", async (t) => {
+  const statePath = await temporaryState(t);
+  let store = await openStateStore(statePath);
+  await store.close();
+  await fs.writeFile(lockPath(statePath), `${JSON.stringify(lockRecord({ identity: "old-boot:old-start" }))}\n`, "utf8");
+  store = await openStateStore(statePath, {
+    processIdentity: async (pid) => pid === process.pid ? "new-boot:new-start" : null,
+    sleep: async () => {},
+  });
+  await store.close();
+});
+
+test("lock publication cleans its handle and temporary file after create/write/sync failures", async (t) => {
+  for (const phase of ["create", "write", "sync"]) {
+    await t.test(phase, async () => {
+      const statePath = await temporaryState(t);
+      let injected = false;
+      const injectedFs = {
+        ...fs,
+        async open(target, flags, mode) {
+          const isLockTemporary = String(target).includes(`${path.basename(statePath)}.lock.`)
+            && String(target).endsWith(".tmp");
+          if (!injected && isLockTemporary && phase === "create") {
+            injected = true;
+            const error = new Error("injected lock create failure");
+            error.code = "EIO";
+            throw error;
+          }
+          const handle = await fs.open(target, flags, mode);
+          if (!injected && isLockTemporary) {
+            injected = true;
+            return {
+              stat: (...args) => handle.stat(...args),
+              writeFile: phase === "write" ? async () => {
+                const error = new Error("injected lock write failure");
+                error.code = "EIO";
+                throw error;
+              } : (...args) => handle.writeFile(...args),
+              sync: phase === "sync" ? async () => {
+                const error = new Error("injected lock sync failure");
+                error.code = "EIO";
+                throw error;
+              } : (...args) => handle.sync(...args),
+              close: (...args) => handle.close(...args),
+            };
+          }
+          return handle;
+        },
+      };
+      await assert.rejects(openStateStore(statePath, { fs: injectedFs }),
+        (error) => error?.cause?.code === "EIO");
+      const names = await fs.readdir(path.dirname(statePath));
+      assert.equal(names.some((name) => name.includes(".lock.")), false);
+      assert.equal(names.includes(path.basename(lockPath(statePath))), false);
+      const store = await openStateStore(statePath);
+      await store.close();
+    });
+  }
 });
 
 test("a persistence failure degrades the process and never exposes an unpersisted mutation", async (t) => {
@@ -286,7 +697,7 @@ test("a persistence failure degrades the process and never exposes an unpersiste
     async open(target, flags, mode) {
       if (flags === "wx" && String(target).endsWith(".tmp")) {
         temporaryOpens += 1;
-        if (temporaryOpens === 3) {
+        if (temporaryOpens === 4) {
           const error = new Error("injected write failure");
           error.code = "EIO";
           throw error;
@@ -295,8 +706,7 @@ test("a persistence failure degrades the process and never exposes an unpersiste
       return fs.open(target, flags, mode);
     },
   };
-  const store = await RelayStateStore.open({
-    statePath,
+  const store = await openStateStore(statePath, {
     fs: injectedFs,
     randomBytes: (size) => crypto.createHash("sha256").update(String(size + temporaryOpens)).digest().subarray(0, size),
     sleep: async () => {},
@@ -324,26 +734,26 @@ test("a failure after staging backup cannot silently authorize after restart", a
       return fs.rename(source, target);
     },
   };
-  const store = await RelayStateStore.open({ statePath, fs: injectedFs });
+  const store = await openStateStore(statePath, { fs: injectedFs });
   await rejectsCode(store.compareAndSwap("test", "0", { grants_access: true }), "relay_state_persist_failed");
   await store.close();
-  await rejectsCode(RelayStateStore.open({ statePath }), "relay_state_unavailable");
+  await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
 });
 
 test("a damaged or mismatched backup prevents authorization", async (t) => {
   const statePath = await temporaryState(t);
-  let store = await RelayStateStore.open({ statePath });
+  let store = await openStateStore(statePath);
   await store.compareAndSwap("test", "0", { value: 1 });
   await store.close();
 
   await fs.writeFile(`${statePath}.bak`, "{corrupt", "utf8");
-  await rejectsCode(RelayStateStore.open({ statePath }), "relay_state_unavailable");
+  await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
 
   await fs.copyFile(statePath, `${statePath}.bak`);
   const backup = JSON.parse(await fs.readFile(`${statePath}.bak`, "utf8"));
   backup.revision = "2";
   await fs.writeFile(`${statePath}.bak`, JSON.stringify(backup), "utf8");
-  await rejectsCode(RelayStateStore.open({ statePath }), "relay_state_unavailable");
+  await rejectsCode(openStateStore(statePath), "relay_state_unavailable");
 });
 
 test("registry fails closed on corrupted namespace, missing digest key and malformed configuration", async (t) => {
@@ -351,7 +761,7 @@ test("registry fails closed on corrupted namespace, missing digest key and malfo
   await store.compareAndSwap(ENROLLMENT_NAMESPACE, "0", { unexpected: true });
   assert.throws(() => EnrollmentRegistry.open({
     stateStore: store,
-    config: loadEnrollmentRegistryConfig(environment()),
+    config: configForState(store.getPathPolicy().controller_state_path),
   }), (error) => error?.code === "enrollment_registry_malformed");
 
   assert.throws(() => loadEnrollmentRegistryConfig(environment({ PINVOU_REMOTE_ENROLLMENT_HMAC_KEY: "short" })),

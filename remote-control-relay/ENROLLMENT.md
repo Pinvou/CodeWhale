@@ -12,6 +12,7 @@ Set these variables before opening the registry:
 |---|---|
 | `PINVOU_REMOTE_ENROLLMENT_DEPLOYMENT` | Required: `official`, `self_hosted`, or `development`. |
 | `PINVOU_REMOTE_CONTROLLER_STATE_PATH` | Absolute path for the new controller state file. It must not equal the existing `PINVOU_REMOTE_STATE_PATH`. The caller passes this value to `RelayStateStore.open`. |
+| `PINVOU_REMOTE_STATE_PATH` | Required absolute path of the legacy Web v2 state. It is used only for alias detection; this module never reads or changes it. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY_ID` | Stable identifier for the active credential-digest key. |
 | `PINVOU_REMOTE_ENROLLMENT_HMAC_KEY` | Secret HMAC key, 32–4096 UTF-8 bytes. Supply it through the deployment secret manager, never source control or logs. |
 | `PINVOU_REMOTE_ENROLLMENT_DEVELOPMENT_TOFU` | Optional `1`/`true`; accepted only with `deployment=development` and `NODE_ENV=development` or `test`. |
@@ -20,16 +21,30 @@ Set these variables before opening the registry:
 runtime refuses both development deployment mode and the development TOFU
 switch. Self-hosted production therefore uses an explicit administrator import
 or enrollment operation; the migration CLI and gateway belong to DEV-02.
+The config loader rejects lexical aliases, including Windows case-only aliases.
+`RelayStateStore.open` receives both paths and also compares resolved paths and
+file identities, rejecting junction aliases and hardlinks.
 
 ## Persistence and concurrency contract
 
 `relay-state-store.js` owns an independent, versioned controller state file and
-does not rewrite the strict Web v2 revoke file. Each namespace has a canonical
-unsigned-decimal revision. A caller reads a namespace snapshot and commits with
+does not rewrite the strict Web v2 revoke file. The state file must be the child
+of a dedicated directory whose parent already exists. The store creates and
+protects only that final directory. If it already exists, the store verifies its
+owner and protection and never chmods or rewrites a caller-owned parent. A
+marker identifies the directory, and unexpected entries fail closed. Each
+namespace has a canonical unsigned-decimal revision. A caller reads a namespace
+snapshot and commits with
 `compareAndSwap(name, expectedRevision, value)`; stale revisions fail without a
-write. One process serializes mutations, and an exclusive sibling `.lock` file
-prevents concurrent writers in separate processes. A lock owned by a live PID is
-never stolen. A dead-PID lock is quarantined before removal.
+write. One process serializes mutations. A complete, synced temporary lock is
+protected and published as the exclusive sibling `.lock` with an atomic
+hardlink, so this implementation never publishes an empty or partial lock. The
+record binds PID, a boot-plus-process-start identity, and a 144-bit per-open
+session nonce. A live matching process is never preempted, and PID reuse is
+detected. Legacy empty/truncated locks and dead owners are re-read for a bounded
+interval, then quarantined and identity-checked before removal. Any
+create/write/sync/publish failure closes the handle and removes files owned by
+the failed attempt.
 
 The empty store is durably initialized before it is exposed. Each successful
 commit is written to a same-revision primary and `.bak` copy via
@@ -42,16 +57,30 @@ startup the valid primary and backup must be byte-equivalent after canonical
 parsing; a mismatch, a missing peer copy, or a damaged backup fails closed. A
 valid backup may restore a malformed primary; a missing primary fails closed so
 a staged but uncommitted backup cannot become authoritative. Malformed,
-oversized, unsupported, or ambiguous
-candidates otherwise fail closed. Operators must back up the primary and `.bak`
+oversized, unsupported, or ambiguous candidates otherwise fail closed.
+Operators must back up the primary and `.bak`
 together while the Relay is stopped or through a later coordinated snapshot
 facility.
 
+On Windows the module disables DACL inheritance on the dedicated directory and
+every marker, primary, backup, temporary and lock file. It grants Full Control
+only to the Relay process identity, `SYSTEM`, and built-in Administrators, then
+reads the DACL back and verifies owner, principals, rights, inheritance flags
+and protection. Paths are passed to a constant PowerShell program as environment
+data, never interpolated into a command. Any set/read/verification failure keeps
+the store closed. On POSIX, a module-created directory is `0700`, files are
+`0600`, and existing owner/mode are verified without chmodding parent folders.
+
 The JSON parser rejects unknown schema fields, unsafe object keys, non-integer
-numbers, excessive nesting, oversized strings/files, unsafe paths, symlinks and
-unsupported schema versions. A narrowly defined version-0 controller-store
-shape is migrated atomically to version 1. This migration is unrelated to the
-legacy Web v2 Relay state and never reads it.
+numbers, excessive nesting, oversized strings/files, unsafe paths, symlinks,
+junctions/reparse points and unsupported schema versions. Every existing path
+component is checked and snapshotted by canonical path and file identity.
+Critical operations recheck it. Files use `O_NOFOLLOW` where available, are
+validated again through `fstat`, read with a hard byte bound, and rechecked after
+the read to detect final-component exchange and file-growth races. A narrowly
+defined version-0 controller-store shape is migrated atomically to version 1.
+This migration is unrelated to the legacy Web v2 Relay state and never reads
+it.
 
 ## Enrollment data and API
 
