@@ -68,7 +68,9 @@ type route struct {
 
 // 路由表：每行一个字面量，格式 "key": {"<METHOD>", "<path>", <query 构造器>, <body 构造器>}。
 // key 集合是公开命令契约（eip.rs 的契约测试按行解析本表），逐条对齐
-// docs/eip-official-api-golden.md §4-§16 的 Method/路径/Query/Body 列。
+// docs/eip-official-api-golden.md §4-§18 的 Method/路径/Query/Body 列。
+// 与官方命令名不同的既有 key（如 survey→survey list）保留为兼容别名，并补官方名别名，
+// 使本 CLI 与官方 eip-cli 命令面完整对齐（黄金表全部 87 条业务命令）。
 var routes = map[string]route{
 	"attendance get-summary":            {"GET", "/hrss/api/ApiAttendance/GetEmpCalendarSummaryInfo", rsaMonthQuery, nil},
 	"attendance get-calendar":           {"GET", "/hrss/api/ApiAttendance/GetEmpCalendarDetailInfo", rsaMonthQuery, nil},
@@ -103,37 +105,77 @@ var routes = map[string]route{
 	"todo":                              {"POST", "/app/app/workFlow/page", nil, todoBody},
 	"todo-count":                        {"POST", "/app/app/workFlow/total/count", nil, nil},
 	"todo-detail":                       {"POST", "/external/external/workflow/detail", nil, todoDetailBody},
-	"apply list":                        {"POST", "/hrss/api/ApiAttendance/GetWorkFlowList", flowCodeQuery, applyListBody},
-	"apply get-detail":                  {"GET", "/hrss/api/ApiAttendance/GetApplyWorkFlowInfo", docNoQuery, nil},
-	"apply list-attachments":            {"GET", "/hrss/api/ApiAttendance/GetApplyBillAttachFileList", docNoQuery, nil},
-	"employee-profile":                  {"GET", "/organisation/organisation/user/info", nil, nil},
-	"employee-contact":                  {"GET", "/organisation/user/tel/info/%s", nil, nil},
-	"employee-handbook sign":            {"GET", "/hrss/api/ApiStaffNavigation/SignForReceipt", typeOneQuery, nil},
-	"employee-search":                   {"POST", "/organisation/organisation/user/page", nil, employeeSearchBody},
-	"commercial-insurance":              {"GET", "/hrss/api/ApiStaffNavigation/GetMyInsuranceList", insuranceQuery, nil},
-	"contract":                          {"POST", "/hrss/api/ApiBenefits/MyContractPageList", nil, pagedBody},
-	"consumption monthly":               {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionMonthly", capDateMonthQuery, nil},
-	"consumption list":                  {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionPageList", consumptionListQuery, nil},
-	"consumption trend":                 {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionMonthlyList", nil, nil},
-	"expense recent":                    {"GET", "/external/external/sse/recent", nil, nil},
-	"fuel-card list":                    {"POST", "/hrss/api/ApiBenefits/MyOilCardPageList", nil, pagedBody},
-	"fuel-card seasons":                 {"GET", "/hrss/api/ApiBenefits/OilCardInvestSeasonly", nil, nil},
-	"fuel-card apply-records":           {"GET", "/hrss/api/ApiBenefits/OilCardApplyRecords", nil, nil},
-	"union-welfare":                     {"POST", "/hrss/api/ApiBenefits/MyUnionWelfarePageList", nil, unionWelfareBody},
-	"union-apply join":                  {"POST", "/hrss/api/ApiStaffNavigation/JoinUnion", nil, nil},
-	"union-apply status":                {"GET", "/hrss/api/ApiStaffNavigation/UnionApply", nil, nil},
-	"survey":                            {"GET", "/hrss/api/ApiOpinionTemplate/GetOpenOpinionTemplateList", nil, nil},
-	"survey detail":                     {"GET", "/hrss/api/ApiOpinionTemplate/OpinionCollection/%s", nil, nil},
-	"survey submit":                     {"POST", "/hrss/api/ApiOpinionTemplate/SaveOpinionCollectionInfo", nil, surveySubmitBody},
-	"remote-work":                       {"GET", "/hr/tempHomeWork/recordInfoList", nil, nil},
+	"todo-batch-list":                   {"POST", "/external/external/workflow/batch/flow/list", nil, todoBatchListBody},
+	"todo-category":                     {"POST", "/external/external/workflow/batch/category/list", nil, todoCategoryBody},
+	// todo-submit 为写操作，body 需解析 --flow-list（JSON 数组或文件路径），在
+	// runBusiness 特判（表内仅登记方法/路径作为契约锚点）。
+	"todo-submit":            {"POST", "/external/external/workflow/submit", nil, nil},
+	"apply list":             {"POST", "/hrss/api/ApiAttendance/GetWorkFlowList", flowCodeQuery, applyListBody},
+	"apply get-detail":       {"GET", "/hrss/api/ApiAttendance/GetApplyWorkFlowInfo", docNoQuery, nil},
+	"apply list-attachments": {"GET", "/hrss/api/ApiAttendance/GetApplyBillAttachFileList", docNoQuery, nil},
+	"apply list-month-flow":  {"POST", "/hrss/api/ApiCalendarMonthly/ApplyFlowPageList", scopeQueryTypeQuery, pagedBody},
+	"employee-profile":       {"GET", "/organisation/organisation/user/info", nil, nil},
+	"employee-contact":       {"GET", "/organisation/user/tel/info/%s", nil, nil},
+	"employee-special-day":   {"GET", "/organisation/organisation/user/specialDay", optionalDateQuery, nil},
+	// 黄金表 §10：get-status 在 /hrss 不在 /hr（fallback 旧 apiPrefix 曾错配）。
+	"employee-handbook sign":       {"GET", "/hrss/api/ApiStaffNavigation/SignForReceipt", typeOneQuery, nil},
+	"employee-handbook get-status": {"GET", "/hrss/api/ApiStaffNavigation/NewStaffStatus", nil, nil},
+	"employee-search":              {"POST", "/organisation/organisation/user/page", nil, employeeSearchBody},
+	// app-search / ics-search 与 employee-search 同构：condition.keywords + 分页。
+	"app-search":                      {"POST", "/app/app/appPool/page", nil, employeeSearchBody},
+	"ics-search":                      {"POST", "/external/external/ics/page", nil, employeeSearchBody},
+	"commercial-insurance":            {"GET", "/hrss/api/ApiStaffNavigation/GetMyInsuranceList", insuranceQuery, nil},
+	"commercial-insurance list":       {"GET", "/hrss/api/ApiStaffNavigation/GetMyInsuranceList", insuranceQuery, nil},
+	"commercial-insurance list-years": {"GET", "/hrss/api/ApiStaffNavigation/GetAllInsuranceYear", nil, nil},
+	"contract":                        {"POST", "/hrss/api/ApiBenefits/MyContractPageList", nil, pagedBody},
+	"contract list":                   {"POST", "/hrss/api/ApiBenefits/MyContractPageList", nil, pagedBody},
+	"consumption monthly":             {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionMonthly", capDateMonthQuery, nil},
+	"consumption list":                {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionPageList", consumptionListQuery, nil},
+	"consumption trend":               {"GET", "/hrss/api/ApiMyConsumption/MyConsumptionMonthlyList", nil, nil},
+	"expense recent":                  {"GET", "/external/external/sse/recent", nil, nil},
+	"expense monthly":                 {"POST", "/external/external/sse/statistics/month", nil, currencyNameBody},
+	"expense statistics":              {"POST", "/external/external/sse/statistics/status", nil, currencyNameBody},
+	"expense currency":                {"GET", "/external/external/sse/currency", nil, nil},
+	"fuel-card list":                  {"POST", "/hrss/api/ApiBenefits/MyOilCardPageList", nil, pagedBody},
+	"fuel-card seasons":               {"GET", "/hrss/api/ApiBenefits/OilCardInvestSeasonly", nil, nil},
+	"fuel-card apply-records":         {"GET", "/hrss/api/ApiBenefits/OilCardApplyRecords", nil, nil},
+	"union-welfare":                   {"POST", "/hrss/api/ApiBenefits/MyUnionWelfarePageList", nil, unionWelfareBody},
+	"union-welfare list":              {"POST", "/hrss/api/ApiBenefits/MyUnionWelfarePageList", nil, unionWelfareBody},
+	"union-apply join":                {"POST", "/hrss/api/ApiStaffNavigation/JoinUnion", nil, nil},
+	"union-apply status":              {"GET", "/hrss/api/ApiStaffNavigation/UnionApply", nil, nil},
+	"union-apply get-status":          {"GET", "/hrss/api/ApiStaffNavigation/UnionApply", nil, nil},
+	"survey":                          {"GET", "/hrss/api/ApiOpinionTemplate/GetOpenOpinionTemplateList", nil, nil},
+	"survey list":                     {"GET", "/hrss/api/ApiOpinionTemplate/GetOpenOpinionTemplateList", nil, nil},
+	"survey detail":                   {"GET", "/hrss/api/ApiOpinionTemplate/OpinionCollection/%s", nil, nil},
+	"survey get":                      {"GET", "/hrss/api/ApiOpinionTemplate/OpinionCollection/%s", nil, nil},
+	"survey submit":                   {"POST", "/hrss/api/ApiOpinionTemplate/SaveOpinionCollectionInfo", nil, surveySubmitBody},
+	"remote-work":                     {"GET", "/hr/tempHomeWork/recordInfoList", nil, nil},
+	"remote-work list-records":        {"GET", "/hr/tempHomeWork/recordInfoList", nil, nil},
+	"remote-work get-allow-check":     {"GET", "/hr/tempHomeWork/allowInitiate", nil, nil},
+	"remote-work get-detail":          {"GET", "/hr/tempHomeWork/mainDocModel", docNoQuery, nil},
 	// 资讯/学习类公开命令（SKILL.md 命令速查表有载，契约测试把关不漂移）。
 	// app/announcement/external/organisation 组的 path 本身以组名开头，官方未去重，
 	// 线上真实路径就是双段（黄金表 §1）；employee-contact 是不加组前缀的单段例外。
-	"news":          {"POST", "/app/app/companyNews/page", nil, newsBody},
-	"announcement":  {"POST", "/announcement/announcement/page", nil, announcementBody},
-	"course":        {"POST", "/external/external/lms/my/course", nil, pagedBody},
-	"meeting":       {"GET", "/external/external/meeting/list/%s", nil, nil},
-	"community-hot": {"GET", "/external/external/bbs/list/%s", nil, nil},
+	"news":         {"POST", "/app/app/companyNews/page", nil, newsBody},
+	"announcement": {"POST", "/announcement/announcement/page", nil, announcementBody},
+	// code 进路径（黄金表 §11），runBusiness 的 %s 填充按 --code 取值。
+	"announcement-detail": {"GET", "/announcement/announcement/%s", nil, nil},
+	"course":              {"POST", "/external/external/lms/my/course", nil, pagedBody},
+	"meeting":             {"GET", "/external/external/meeting/list/%s", nil, nil},
+	"community-hot":       {"GET", "/external/external/bbs/list/%s", nil, nil},
+	// 消息中心（黄金表 §17）：路径双段 message/message；read-all/send-bless 为写操作。
+	"message count":    {"GET", "/message/message/readFlag", nil, nil},
+	"message list":     {"POST", "/message/message/page", nil, messageListBody},
+	"message get":      {"GET", "/message/message/%s", nil, nil},
+	"message read-all": {"POST", "/message/message/read/all", nil, nil},
+	// send-bless 为多请求编排（--statement 先取祝福语再发），runBusiness 特判。
+	"message send-bless": {"POST", "/message/message/bless", nil, nil},
+	// 慰问申报（黄金表 §18）：均为写/敏感操作；Vaild 为官方原拼写。
+	"condolence list":           {"POST", "/hrss/api/ApiBenefits/CondolenceDeclarationPageList", nil, pagedBody},
+	"condolence validate":       {"POST", "/hrss/api/ApiBenefits/VaildCondolenceDeclarationApply", nil, condolenceValidateBody},
+	"condolence urge":           {"GET", "/hrss/api/ApiBenefits/CondolenceDeclarationMailUrging", condolenceUrgeQuery, nil},
+	"condolence create-funeral": {"POST", "/hrss/api/ApiBenefits/FuneralInfoApply", nil, condolenceFuneralBody},
+	"condolence create-wedding": {"POST", "/hrss/api/ApiBenefits/WeddingFuneralInfoApply", nil, condolenceWeddingBody},
 }
 
 // ---- query 构造器（严格对齐黄金表各命令的 Query 列；GET 参数全部进 query）----
@@ -223,6 +265,28 @@ func consumptionListQuery(f map[string]string) (url.Values, error) {
 	return q("Date", strings.ReplaceAll(firstNonEmpty(f["date"], todayNow()), "-", "/"),
 		"PageCount", strconv.Itoa(atoiDefault(f["page-size"], 10)),
 		"PageIndex", strconv.Itoa(atoiDefault(f["page"], 1)))
+}
+
+// date=YYYY-MM-DD 可选（employee-special-day，不传则无 query）。
+func optionalDateQuery(f map[string]string) (url.Values, error) {
+	if d := f["date"]; d != "" {
+		return q("date", d)
+	}
+	return nil, nil
+}
+
+// queryType=0(personal)/1(all)（apply list-month-flow，缺省 personal）。
+func scopeQueryTypeQuery(f map[string]string) (url.Values, error) {
+	queryType := "0"
+	if f["scope"] == "all" {
+		queryType = "1"
+	}
+	return q("queryType", queryType)
+}
+
+// ApplyId=<--apply-id>&ApproverNo=<--approver-no>（condolence urge）。
+func condolenceUrgeQuery(f map[string]string) (url.Values, error) {
+	return q("ApplyId", f["apply-id"], "ApproverNo", f["approver-no"])
 }
 
 // ---- body 构造器（严格对齐黄金表各命令的 Body 列）----
@@ -318,6 +382,129 @@ func unionWelfareBody(f map[string]string) map[string]any {
 // survey submit 对应黄金表 survey submit：键大写开头。
 func surveySubmitBody(f map[string]string) map[string]any {
 	return map[string]any{"Id": f["id"], "Opinion": f["opinion"]}
+}
+
+// todo-batch-list：--system-id 提供时进 condition，否则 condition 为空对象（黄金表 §8）。
+func todoBatchListBody(f map[string]string) map[string]any {
+	condition := map[string]any{}
+	if s := f["system-id"]; s != "" {
+		condition["systemId"] = s
+	}
+	return map[string]any{
+		"condition": condition,
+		"pageNum":   atoiDefault(f["page"], 1),
+		"pageSize":  atoiDefault(f["page-size"], 10),
+	}
+}
+
+// todo-category：官方只发 pageSize（黄金表 §8）。
+func todoCategoryBody(f map[string]string) map[string]any {
+	return map[string]any{"pageSize": atoiDefault(f["page-size"], 10)}
+}
+
+// todo-submit（写操作）：buttonType 首字母大写；reject 附加 opinion；
+// transfer 附加 targetReceiver/targetReceiverName；flow-list 元素须含 nodeId。
+func todoSubmitBody(f map[string]string) (map[string]any, error) {
+	listRaw := f["flow-list"]
+	if listRaw == "" {
+		return nil, fmt.Errorf("todo-submit: missing --flow-list")
+	}
+	// 官方同时支持内联 JSON 数组与 ./file.json 路径：以 [ 开头按字面量，否则当路径读。
+	if !strings.HasPrefix(listRaw, "[") {
+		b, err := os.ReadFile(listRaw)
+		if err != nil {
+			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
+		}
+		listRaw = string(b)
+	}
+	var flowList []map[string]any
+	if err := json.Unmarshal([]byte(listRaw), &flowList); err != nil {
+		return nil, fmt.Errorf("todo-submit: --flow-list is not a JSON array: %w", err)
+	}
+	for i, item := range flowList {
+		if _, ok := item["nodeId"]; !ok {
+			return nil, fmt.Errorf("todo-submit: flow-list[%d] missing nodeId", i)
+		}
+	}
+	action := strings.ToLower(firstNonEmpty(f["action"], "agree"))
+	buttonType := strings.ToUpper(action[:1]) + action[1:]
+	body := map[string]any{"buttonType": buttonType, "flowInfoList": flowList}
+	switch action {
+	case "reject":
+		body["opinion"] = f["opinion"]
+	case "transfer":
+		body["targetReceiver"] = f["target-receiver"]
+		body["targetReceiverName"] = f["target-receiver-name"]
+	}
+	return body, nil
+}
+
+// expense monthly / statistics：{"currencyName":"..."}（黄金表 §13）。
+func currencyNameBody(f map[string]string) map[string]any {
+	return map[string]any{"currencyName": f["currency-name"]}
+}
+
+// message list：condition 无 --type 时为空对象；sortList 恒定 notice_time 倒序（黄金表 §17）。
+func messageListBody(f map[string]string) map[string]any {
+	condition := map[string]any{}
+	if t := f["type"]; t != "" {
+		condition["typeList"] = []string{t}
+	}
+	return map[string]any{
+		"condition": condition,
+		"pageNum":   atoiDefault(f["page"], 1),
+		"pageSize":  atoiDefault(f["page-size"], 10),
+		"sortList":  []map[string]any{{"asc": false, "column": "notice_time"}},
+	}
+}
+
+// condolence validate：Type 为字符串（黄金表 §18）；Vaild 为官方原拼写（路由侧）。
+func condolenceValidateBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"CertificationDate": f["certification-date"],
+		"IDCard":            f["id-card"],
+		"SpouseIDCard":      f["spouse-id-card"],
+		"SpouseName":        f["spouse-name"],
+		"Type":              firstNonEmpty(f["type"], "1"),
+	}
+}
+
+// condolence create-funeral：Type 固定 "3"（黄金表 §18）。
+func condolenceFuneralBody(f map[string]string) map[string]any {
+	return map[string]any{
+		"DirectSupervisor":      f["supervisor"],
+		"FuneralDate":           f["funeral-date"],
+		"FuneralPersonIdCard":   f["person-id-card"],
+		"FuneralPersonName":     f["person-name"],
+		"FuneralPersonRelation": f["relation"],
+		"IDCard":                f["id-card"],
+		"Type":                  "3",
+	}
+}
+
+// condolence create-wedding：type=1 结婚 / type=2 新生儿（附出生与子女键，黄金表 §18）。
+func condolenceWeddingBody(f map[string]string) map[string]any {
+	body := map[string]any{
+		"CertificationDate": f["certification-date"],
+		"IDCard":            f["id-card"],
+		"SpouseIDCard":      f["spouse-id-card"],
+		"SpouseName":        f["spouse-name"],
+		"Type":              firstNonEmpty(f["type"], "1"),
+	}
+	if body["Type"] == "2" {
+		for key, flag := range map[string]string{
+			"BirthDate":          "birth-date",
+			"BirthType":          "birth-type",
+			"SingleOrTwin":       "single-or-twin",
+			"FirstChildrenName":  "first-children-name",
+			"SecondChildrenName": "second-children-name",
+		} {
+			if v := f[flag]; v != "" {
+				body[key] = v
+			}
+		}
+	}
+	return body
 }
 
 // ---- RSA date 加密（attendance get-summary / get-calendar 专用，黄金表 §2）----
@@ -567,14 +754,29 @@ func runBusiness(args []string) int {
 	if r.body != nil {
 		body = r.body(flags)
 	}
+	// todo-submit：body 依赖 --flow-list 解析（JSON 数组或文件路径），失败要显式报错。
+	if key == "todo-submit" {
+		b, err := todoSubmitBody(flags)
+		if err != nil {
+			emitJSON(map[string]any{"error": err.Error()})
+			return 2
+		}
+		body = b
+	}
+	// message send-bless：多请求编排（黄金表 §17）——--statement 先取
+	// 消息详情与官方祝福语配置再 POST bless；--content 直接 POST bless。
+	if key == "message send-bless" {
+		return runSendBless(flags, token)
+	}
 	path := r.path
 	// course 分流（黄金表 §11）：缺省 mine 走 /lms/my/course，--type hot 走
 	// /lms/special/course——官方缺省即 mine，勿反。
 	if key == "course" && flags["type"] == "hot" {
 		path = "/external/external/lms/special/course"
 	}
-	// 路径参数式命令：employee-contact(--account)、survey detail(--id)、
-	// meeting(--date 缺省今天)、community-hot(--page-size 缺省 10 进路径)。
+	// 路径参数式命令：employee-contact(--account)、survey detail/get(--id)、
+	// message get(--id)、announcement-detail(--code)、meeting(--date 缺省今天)、
+	// community-hot(--page-size 缺省 10 进路径)。
 	if strings.Contains(path, "%s") {
 		fill := firstNonEmpty(flags["account"], flags["id"], flags["template-id"])
 		switch key {
@@ -582,6 +784,8 @@ func runBusiness(args []string) int {
 			fill = firstNonEmpty(flags["date"], todayNow())
 		case "community-hot":
 			fill = strconv.Itoa(atoiDefault(flags["page-size"], 10))
+		case "announcement-detail":
+			fill = flags["code"]
 		}
 		if fill == "" {
 			emitJSON(map[string]any{"error": "missing required path parameter"})
@@ -607,6 +811,75 @@ func runBusiness(args []string) int {
 		fmt.Println()
 	}
 	return 0
+}
+
+// runSendBless 处理 message send-bless 的多请求编排（黄金表 §17）：
+//   - --statement：GET /message/message/{id} 取详情 → GET /message/message/config/statement/1
+//     取官方祝福语文案 → POST /message/message/bless 发送；
+//   - --content：直接 POST /message/message/bless，body 为 {"id":..,"message":..}。
+func runSendBless(flags map[string]string, token string) int {
+	id := flags["id"]
+	if id == "" {
+		emitJSON(map[string]any{"error": "message send-bless: missing --id"})
+		return 2
+	}
+	content := flags["content"]
+	if content == "" && boolFlag(flags, "statement") {
+		if _, err := callEIP("GET", "/message/message/"+url.PathEscape(id), nil, nil, token); err != nil {
+			emitJSON(map[string]any{"error": "fetch message detail: " + err.Error()})
+			return 1
+		}
+		if raw, err := callEIP("GET", "/message/message/config/statement/1", nil, nil, token); err != nil {
+			emitJSON(map[string]any{"error": "fetch statement config: " + err.Error()})
+			return 1
+		} else if text := extractStatement(raw); text != "" {
+			content = text
+		}
+	}
+	if content == "" {
+		emitJSON(map[string]any{"error": "message send-bless: provide --content or --statement"})
+		return 2
+	}
+	raw, err := callEIP("POST", "/message/message/bless", nil,
+		map[string]any{"id": id, "message": content}, token)
+	if authExpired(raw, err) {
+		_ = os.Remove(atFile())
+		if nt := ensureToken(); nt != "" && nt != token {
+			raw, err = callEIP("POST", "/message/message/bless", nil,
+				map[string]any{"id": id, "message": content}, nt)
+		}
+	}
+	if err != nil {
+		emitJSON(map[string]any{"error": err.Error()})
+		return 1
+	}
+	os.Stdout.Write(raw)
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		fmt.Println()
+	}
+	return 0
+}
+
+// extractStatement 从祝福语配置响应里宽容提取文案：Data 为字符串直接用；
+// 为对象时依次尝试常见键。取不到返回空串，由调用方回退 --content。
+func extractStatement(raw []byte) string {
+	var env envelope
+	if err := json.Unmarshal(raw, &env); err != nil || len(env.Data) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(env.Data, &text) == nil {
+		return text
+	}
+	var obj map[string]any
+	if json.Unmarshal(env.Data, &obj) == nil {
+		for _, key := range []string{"content", "statement", "text", "message"} {
+			if v, ok := obj[key].(string); ok && v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // callEIP 发业务请求：full = eipBase + path（route 已存黄金表完整路径，前缀错配从结构上消除）。
@@ -882,5 +1155,5 @@ func emitJSON(v any) {
 
 func printHelp() {
 	fmt.Println("EIP CLI (pinvou3 fallback build)")
-	fmt.Println("Usage: eip-cli <auth|attendance|leave|vacation|overtime|todo|news|announcement|course|meeting|community-hot|employee-profile|employee-search|...> [flags]")
+	fmt.Println("Usage: eip-cli <auth|attendance|leave|vacation|overtime|todo|news|announcement|course|meeting|community-hot|message|condolence|employee-profile|employee-search|expense|remote-work|...> [flags]")
 }

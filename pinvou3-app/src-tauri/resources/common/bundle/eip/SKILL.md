@@ -41,14 +41,18 @@ eip <子命令> [参数]
 | 剩余工时 | `eip vacation get-remaining-hours --year YYYY` |
 | 加班时数 | `eip overtime get-extra-hours` / `get-approving-hours` / `get-approved-hours` / `get-effectived-hours` |
 | 有没有待办 | `eip todo` / `eip todo-count` |
-| 待办详情 | `eip todo-detail --system-id XXX --process-id XXX --docun-id XXX` |
-| 我的申请 | `eip apply list` |
-| 个人信息 | `eip employee-profile` |
+| 待办详情 / 批量待办 | `eip todo-detail --system-id XXX --process-id XXX --docun-id XXX` / `eip todo-batch-list` / `eip todo-category` |
+| 我的申请 / 本月申请流水 | `eip apply list` / `eip apply list-month-flow` |
+| 个人信息 / 特殊纪念日 | `eip employee-profile` / `eip employee-special-day` |
 | 搜人 / 找同事 | `eip employee-search --keyword XXX` |
 | 联系方式 | `eip employee-contact --account XXX` |
-| 集团新闻 / 公告 | `eip news [--keyword XXX]` / `eip announcement` |
+| 应用 / 制度搜索 | `eip app-search --keyword XXX` / `eip ics-search --keyword XXX` |
+| 集团新闻 / 公告 | `eip news [--keyword XXX]` / `eip announcement` / `eip announcement-detail --code XXX` |
 | 课程 / 会议 / 社区 | `eip course` / `eip meeting` / `eip community-hot` |
-| 食堂消费 / 报销 / 油卡 | `eip consumption monthly` / `eip expense recent` / `eip fuel-card list` |
+| 站内消息 | `eip message count` / `eip message list` / `eip message get --id XXX` |
+| 食堂消费 / 报销 / 油卡 | `eip consumption monthly` / `eip expense recent` / `eip expense monthly` / `eip fuel-card list` |
+| 合同 / 保险年份 / 工会福利 / 调研 | `eip contract list` / `eip commercial-insurance list-years` / `eip union-welfare list` / `eip survey list` |
+| 远程办公 | `eip remote-work list-records` / `eip remote-work get-detail --doc-no XXX` |
 
 ## 输出规范
 
@@ -60,5 +64,5 @@ eip <子命令> [参数]
 
 ## 护栏(重要)
 
-- **审批(`todo-submit`)、各类申报(`condolence`/`survey submit`/`union-apply join`/`employee-handbook sign` 等)不可逆**——本版默认只做查询;如要执行写操作,**执行前必须明确向用户确认**,确认后才提交。
+- **审批(`todo-submit`)、各类申报与敏感写操作(`condolence`/`survey submit`/`union-apply join`/`employee-handbook sign`/`message read-all`/`message send-bless`/`condolence urge` 等)不可逆**——本版默认只做查询;如要执行写操作,**执行前必须明确向用户确认**,确认后才提交。
 - 普通待办审批涉及详情/校验判断,复杂;优先展示待办详情让用户自行处理,不替用户判断能否直接批。

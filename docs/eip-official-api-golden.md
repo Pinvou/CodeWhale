@@ -236,6 +236,11 @@ fallback 的 `GetOvertimeApplyExtraHours` 等 5 个 `ApiAttendance/GetOvertime*`
 
 ## 19. 与 fallback 路由表的主要差异(修复清单摘要)
 
+> 2026-09-15 起 fallback 路由表已覆盖本文件全部 87 条业务命令（官方命令名与
+> 既有兼容别名并存，如 `survey list`↔`survey`、`remote-work list-records`↔`remote-work`），
+> 并由 `linux-src/main_test.go` 逐命令固化本文件的 Method/路径/Query/Body 列；
+> 下表保留为重写时的差异清单，供回溯。
+
 1. **方法错误(服务端 405"方法不支持")**:fallback 几乎全 POST;官方大量 GET(考勤查询、余额、
    加班、消费、油卡季充/资格、保险、工会状态、调研列表、班次/班车/假期类型等)。
 2. **端点错误(服务端 404)**:get-summary、todo/todo-count、leave 全部、overtime 时数全部、
