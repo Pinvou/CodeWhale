@@ -1,0 +1,17 @@
+[package]
+name = "pinvou-controller-crypto-harness"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aes-gcm = "0.10.3"
+base64 = "0.22"
+hkdf = "0.12.4"
+ring = "0.17.14"
+serde = "1.0"
+serde_json = "1.0"
+sha2 = "0.11"
+sha2_10 = { package = "sha2", version = "0.10.9" }
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
+zeroize = "1.9.0"

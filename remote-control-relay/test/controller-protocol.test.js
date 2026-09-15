@@ -25,6 +25,7 @@ import {
   buildDirectLivenessAad,
   buildLivenessAttestationPreimage,
   buildPairingTranscriptPreimage,
+  buildReceiptCommitmentPreimage,
   canonicalControllerContractHash,
   classifyLivenessAttestation,
   classifyMonotonicSequence,
@@ -33,6 +34,7 @@ import {
   controllerLogProjection,
   negotiateControllerCapabilities,
   parseControllerPairingTranscript,
+  receiptCommitmentHex,
   validateControllerBaseUrl,
   validateControllerLivenessPayload,
   validateControllerLeaseInstallMessage,
@@ -41,6 +43,7 @@ import {
   validateControllerRegistrationMessage,
   validateControllerRuntimeMessage,
   validateControllerRuntimePayload,
+  verifyReceiptCommitment,
 } from "../protocol-controller.js";
 
 const fixtureUrl = new URL("./fixtures/controller-protocol-v1.json", import.meta.url);
@@ -386,9 +389,22 @@ test("controller_joined has no DEV-00 production path from untrusted data to a l
 
 test("finished receipt commitment is built independently from fields", () => {
   const vector = fixture.receipt_commitment_vector;
-  const preimage = Buffer.concat([Buffer.from("pinvou-finished-receipt-commit-v1", "ascii"), lp(vector.relay_epoch), lp(vector.pairing_id), lp(vector.reservation_id), lp(vector.transcript_hash), lp(vector.sender_role), lp(Buffer.from(vector.secret_hex, "hex"))]);
+  const binding = {
+    relay_epoch: vector.relay_epoch,
+    pairing_id: vector.pairing_id,
+    reservation_id: vector.reservation_id,
+    transcript_hash: vector.transcript_hash,
+    sender_role: vector.sender_role,
+  };
+  const secret = Buffer.from(vector.secret_hex, "hex");
+  const preimage = buildReceiptCommitmentPreimage(binding, secret);
   assert.equal(preimage.toString("hex"), vector.preimage_hex);
-  assert.equal(createHash("sha256").update(preimage).digest("hex"), vector.commitment_hex);
+  assert.equal(receiptCommitmentHex(binding, secret), vector.commitment_hex);
+  assert.equal(verifyReceiptCommitment(binding, secret, vector.commitment_hex), true);
+  assert.equal(verifyReceiptCommitment({ ...binding, sender_role: "B" }, secret, vector.commitment_hex), false);
+  assert.equal(verifyReceiptCommitment(binding, Buffer.alloc(32, 7), vector.commitment_hex), false);
+  assertProtocolError("invalid_field", () => buildReceiptCommitmentPreimage(binding, Buffer.alloc(31)));
+  assertProtocolError("invalid_field", () => verifyReceiptCommitment(binding, secret, "00"));
 });
 
 test("direct A-to-B liveness exposes routing only and binds strict inner data via AAD", () => {

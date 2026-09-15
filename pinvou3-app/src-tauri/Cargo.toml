@@ -141,6 +141,15 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 # 0.11 与 CodeWhale 子模块对齐。digest 的 Output 不实现 LowerHex,统一用 hex_lower 编码
 # (see src/platform/encoding.rs). computer_use's screenshot audit is content-addressed (SHA-256) and shares this crate.
 sha2 = "0.11"
+# Desktop-controller E2E primitives. These versions already exist in the locked
+# dependency graph through age/rustls; direct use is isolated in
+# features/remote_control/controller/crypto.rs.
+aes-gcm = "0.10.3"
+hkdf = "0.12.4"
+sha2_10 = { package = "sha2", version = "0.10.9" }
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
+zeroize = "1.9.0"
+ring = "0.17.14"
 # 8.x 与 calamine 传递引入的 zip 8.6.0 收敛为单一版本（消除旧 zip 2.x + 连带传递依赖）。
 # 仅 deflate（读 .pptx / 写技能 zip 包），关默认 feature 去掉 bzip2/lzma/zstd 等。
 zip = { version = "8", default-features = false, features = ["deflate"] }

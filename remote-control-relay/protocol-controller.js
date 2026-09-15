@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 export const CONTROLLER_PROTOCOL_VERSION = 1;
 export const CONTROLLER_SUBPROTOCOL = "pinvou-desktop-controller-v1";
@@ -14,7 +14,7 @@ const MAX_TASK_REFERENCES = 32;
 const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "bb1e1aebb62fb797155eed4e656cd55c41ef6a1fe278a9fe85be0991409afd70";
+export const CONTROLLER_CONTRACT_SHA256 = "1a66c5be4627e51f5d58ed126f1bb5af92d96ee303feecf2cbf91fea2a433bc3";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -441,6 +441,10 @@ function validateWithSchema(input, senderRole, schemas, maxBytes, label, expecte
 export function validateControllerMessage(input, senderRole, expectedContext) {
   const result = validateWithSchema(input, senderRole, MESSAGE_SCHEMAS, MAX_ENCRYPTED_WIRE_BYTES, "message", expectedContext);
   if (result.value.type !== "encrypted_frame" && result.encodedBytes > MAX_CONTROL_MESSAGE_BYTES) fail("message_too_large", "json");
+  if (result.value.type === "desktop_pairing_register"
+    && result.value.code_wrap_public_key_b64 === result.value.handshake_public_key_b64) {
+    fail("invalid_field", "message.key_purpose_reuse");
+  }
   if (result.value.type === "controller_pairing_reserved") validateReservedTranscript(result.value);
   if (result.value.type === "controller_liveness_attestation_a") validateAttestation(result.value, expectedContext);
   return result.value;
@@ -778,6 +782,43 @@ function lp(value) {
   return Buffer.concat([length, bytes]);
 }
 
+export function buildReceiptCommitmentPreimage(binding, receiptSecret) {
+  const value = exactObject(
+    binding,
+    ["relay_epoch", "pairing_id", "reservation_id", "transcript_hash", "sender_role"],
+    [],
+    "receipt_binding",
+  );
+  for (const field of ["relay_epoch", "pairing_id", "reservation_id"]) identifier(value[field], `receipt_binding.${field}`);
+  hex64(value.transcript_hash, "receipt_binding.transcript_hash");
+  if (!["A", "B"].includes(value.sender_role)) fail("role_mismatch", "receipt_binding.sender_role");
+  if (!Buffer.isBuffer(receiptSecret) || receiptSecret.length !== 32) fail("invalid_field", "receipt_secret");
+  return Buffer.concat([
+    Buffer.from("pinvou-finished-receipt-commit-v1", "ascii"),
+    lp(value.relay_epoch),
+    lp(value.pairing_id),
+    lp(value.reservation_id),
+    lp(value.transcript_hash),
+    lp(value.sender_role),
+    lp(receiptSecret),
+  ]);
+}
+
+export function receiptCommitmentHex(binding, receiptSecret) {
+  const preimage = buildReceiptCommitmentPreimage(binding, receiptSecret);
+  try {
+    return createHash("sha256").update(preimage).digest("hex");
+  } finally {
+    preimage.fill(0);
+  }
+}
+
+export function verifyReceiptCommitment(binding, receiptSecret, expectedCommitment) {
+  hex64(expectedCommitment, "commitment");
+  const actual = Buffer.from(receiptCommitmentHex(binding, receiptSecret), "hex");
+  return timingSafeEqual(actual, Buffer.from(expectedCommitment, "hex"));
+}
+
 export function controllerCapabilityHash(capabilities) {
   if (Array.isArray(capabilities) && capabilities.some((item) => typeof item === "string" && !CONTROLLER_CAPABILITIES.includes(item))) fail("unsupported_capability", "capabilities");
   stringList(capabilities, "capabilities", CONTROLLER_CAPABILITIES, CONTROLLER_CAPABILITIES.length);
@@ -951,9 +992,19 @@ export function controllerContractManifest() {
     },
     verified_transcript: {
       parsed_constructor: "strict-envelope-canonical-preimage-and-hash-only-not-authenticated",
-      production_authenticator: "none-in-dev00-sealed-for-dev05",
+      production_authenticator: "typed-enrollment-ed25519-ring",
       lease_install_derivation: "opaque-authenticated-transcript-only",
       activation_owner: "DEV-05",
+    },
+    crypto_contract: {
+      key_agreement: "x25519",
+      key_derivation: "hkdf-sha256",
+      aead: "aes-256-gcm",
+      relay_signature: "ed25519",
+      receipt_secret_bytes: 32,
+      replay_window_bits: 64,
+      key_domains: ["code-wrap", "finished/A", "finished/B", "business/A-to-B", "business/B-to-A"],
+      relay_crypto_scope: "receipt-commitment-only",
     },
   };
 }

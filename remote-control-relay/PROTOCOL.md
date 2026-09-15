@@ -339,21 +339,25 @@ configuration string such as `source=official_enrollment`, raw JSON, an
 arbitrary key, or a caller-supplied boolean/callback is never authentication
 proof.
 
-The JS module exports only the structural parser and canonical preimage builder;
-it does not export `VerifiedTranscript`, a trust-store/key loader, or a
-signature-to-token function. Rust exposes `ParsedTranscript` with private fields
-and reserves `VerifiedTranscript` behind a private-field, sealed
-`TranscriptAuthenticator` contract. DEV-00 contains no production
-`TranscriptAuthenticator` implementation. Its only parsed-to-verified adapter
-is compiled under `cfg(test)` so the pure lease-binding validator can be tested
-without pretending to authenticate a signer.
+The JS module exports only the structural parser, canonical preimage builder,
+and Relay-side receipt commitment verification. It does not export
+`VerifiedTranscript`, a trust-store/key loader, a signature-to-token function,
+or any A/B session-key primitive. Rust exposes `ParsedTranscript` with private
+fields and reserves `VerifiedTranscript` behind a private-field, sealed
+`TranscriptAuthenticator` contract.
 
-DEV-05 owns authenticated official/self-hosted enrollment trust loading, atomic
-key-ID/public-key binding, real Ed25519 verification, and the sealed
-authenticator implementation. Only that future implementation may produce the
-opaque `VerifiedTranscript`; the controller business path remains disabled
-until then. `LeaseInstallValidationContext` accepts only that authenticated
-value and derives `request_id`, expected `pairing_id`, `reservation_id`,
+DEV-05 implements the sealed authenticator with real Ed25519 verification. Its
+input is an opaque `AuthenticatedRelayTrustConfig` whose key ID and 32-byte
+public key are atomically bound by a trusted enrollment/configuration loader;
+there is deliberately no production raw JSON/string/public-key constructor.
+The fixture-only constructor is compiled under `cfg(test)`. Loading official
+embedded pins or administrator-approved self-hosted pins into this opaque type
+is owned by the later controller configuration/transport wiring; until that
+trusted loader supplies the value, no production caller can obtain a
+`VerifiedTranscript`. A claimed source name, arbitrary key, or always-true
+callback therefore cannot authenticate a transcript. The controller business
+path remains disabled. `LeaseInstallValidationContext` accepts only the opaque
+authenticated result and derives `request_id`, expected `pairing_id`, `reservation_id`,
 `remote_control_generation`, `relay_epoch`, `transcript_hash`, expected signed
 `controller_connection_identity`, and the exact canonical
 `negotiated_capabilities + capability_hash` from it. It accepts no independently
@@ -692,6 +696,68 @@ The fixed compatibility vector is:
 
 The exact preimage hex is frozen in the shared fixture and asserted by both JS
 and Rust tests.
+
+### DEV-05 cryptographic profile (implemented, not yet routed)
+
+The disconnected Rust controller crypto module uses X25519, HKDF-SHA-256,
+AES-256-GCM, Ed25519 verification, an OS CSPRNG, and zeroizing secret owners.
+These primitives are not registered with the live Relay or Tauri command path
+in DEV-05. The Relay JavaScript module receives no X25519 private key, HKDF
+output, Finished key, business key, or plaintext; its only cryptographic helper
+in this stage recomputes and constant-time compares the receipt commitment.
+
+`code_wrap_keypair` and `handshake_keypair` are distinct Rust types and are
+generated independently; their public-key wrapper types are also distinct, and
+`desktop_pairing_register` rejects byte-identical code-wrap and handshake
+public keys as `invalid_field: message.key_purpose_reuse`. Code-wrap key derivation is HKDF-SHA-256 over the
+X25519 shared secret with ASCII salt `pinvou-code-wrap-salt-v1` and info
+`pinvou-code-wrap-key-v1 || LP(registration_request_id) ||
+LP(remote_control_generation)`. Handshake derivation uses the raw 32-byte
+`transcript_hash` as salt and info
+`pinvou-controller-handshake-kdf-v1 || LP(relay_epoch) || LP(pairing_id) ||
+LP(reservation_id) || LP(transcript_hash) || LP(purpose)`. Purpose is exactly
+one of `finished/A`, `finished/B`, `business/A-to-B`, or `business/B-to-A`.
+Consequently a key or ciphertext from one role, direction, lease, or purpose
+cannot be substituted for another.
+
+A Finished plaintext is
+`pinvou-controller-finished-v1 || LP(raw transcript_hash) || LP(sender_role) ||
+LP(raw 32-byte receipt_secret)`. Its AES-GCM AAD is
+`pinvou-controller-finished-aad-v1 || LP(raw transcript_hash) ||
+LP(sender_role)` and its wire bytes are `12-byte nonce || ciphertext ||
+16-byte tag`; the production sealer obtains the nonce directly from the OS
+CSPRNG rather than accepting a caller-supplied nonce. The receiver rejects a wrong role, transcript, domain, length,
+tag, or trailing byte before returning the receipt secret. Receipt secrets are
+zeroizing values and the bounded receipt replay guard accepts each commitment
+at most once.
+
+For business traffic, the direction-specific handshake root is expanded again
+with salt `transcript_hash` and info
+`pinvou-controller-business-key-v1 || LP(connection_id) ||
+LP(controller_lease_id) || LP(lease_epoch) || LP(relay_epoch) ||
+LP(remote_control_generation) || LP(direction)`. The 12-byte nonce is the first
+four bytes of SHA-256 over
+`pinvou-controller-business-nonce-v1 || direction || u64be(lease_epoch)`,
+followed by `u64be(frame_sequence)`. The AAD is
+`pinvou-controller-business-aad-v1` followed by LP encoding of the same five
+lease fields, direction, decimal sequence, and `payload_kind`. The receive
+primitive rejects a zero, repeated, or decreasing outbound sequence before
+encryption, preventing nonce reuse under one derived lease key. The receive
+window accepts authenticated out-of-order frames only within 64 sequence
+numbers, rejects zero, duplicates and older frames, and commits a sequence only
+after successful AEAD authentication. A lease epoch mismatch is rejected before
+decryption. Ciphertext length is bounded against the maximum plaintext plus tag
+before allocation/decryption.
+
+All LP lengths are unsigned four-byte big-endian values. Identifiers are
+non-empty and bounded before derivation. Private X25519 scalars, HKDF results,
+AEAD keys and receipt secrets use zeroizing owners; temporary Finished
+plaintext/preimage buffers are explicitly zeroized after use.
+`SensitiveString` prints `[REDACTED]` for `Display`/`Debug` and refuses Serde
+serialization. The shared fixture freezes X25519 public/shared values, derived
+Finished and business keys, nonce, AAD and ciphertext; Rust reconstructs every
+stage and Node validates the complete contract hash without implementing A/B
+session cryptography.
 
 ### Liveness and resume invariants
 
