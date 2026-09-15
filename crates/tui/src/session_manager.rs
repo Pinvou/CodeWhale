@@ -1674,6 +1674,11 @@ impl SessionManager {
         metadata.created_at = persisted.created_at;
         metadata.parent_session_id = persisted.parent_session_id;
         metadata.forked_from_message_count = persisted.forked_from_message_count;
+        // Like the lifecycle fields above, the persisted root set is the
+        // authority: a host that does not know about multi-root (or a
+        // snapshot built before the roots were loaded) must not erase the
+        // set another host persisted.
+        metadata.workspace_roots = persisted.workspace_roots;
         true
     }
 
@@ -2669,6 +2674,45 @@ mod tests {
         let loaded = manager.load_session("roots-session").expect("load session");
         assert_eq!(
             loaded.metadata.workspace_roots,
+            vec![workspace, tmp.path().join("shared")]
+        );
+    }
+
+    #[test]
+    fn merge_persisted_lifecycle_restores_persisted_workspace_roots() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().to_path_buf()).expect("manager");
+        let workspace = tmp.path().join("ws");
+        let messages = vec![make_test_message("user", "hi")];
+        let mut session = create_saved_session_with_id_and_mode(
+            "merge-roots-session".to_string(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        session.metadata.workspace_roots = vec![workspace.clone(), tmp.path().join("shared")];
+        manager.save_session(&session).expect("save session");
+
+        // A host without multi-root awareness rebuilds the metadata through
+        // the historical constructor and would rewrite the file with an
+        // empty root set; the lifecycle merge must restore the persisted
+        // set instead of letting that rewrite erase it.
+        let mut rewritten = create_saved_session_with_id_and_mode(
+            session.metadata.id.clone(),
+            &messages,
+            "deepseek-v4-flash",
+            &workspace,
+            0,
+            None,
+            Some("agent"),
+        );
+        assert!(rewritten.metadata.workspace_roots.is_empty());
+        assert!(manager.merge_persisted_lifecycle(&mut rewritten.metadata));
+        assert_eq!(
+            rewritten.metadata.workspace_roots,
             vec![workspace, tmp.path().join("shared")]
         );
     }

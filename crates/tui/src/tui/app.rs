@@ -1591,6 +1591,11 @@ pub struct App {
     /// Last effective thinking receipt for the most recently accepted route.
     pub(crate) last_effective_reasoning_effort: Option<EffectiveReasoningEffort>,
     pub workspace: PathBuf,
+    /// Additional accessible roots carried by the current session. The TUI
+    /// has no multi-root UI; this only preserves roots another host (Runtime
+    /// API, exec) persisted on the session, so a resume or re-sync neither
+    /// drops nor invents them.
+    pub workspace_roots: Vec<PathBuf>,
     /// Effective `[workflow]` table for this session (`/workflow settings`).
     pub workflow_config: codewhale_config::WorkflowConfigToml,
     /// Effective `[goal] max_continuations` backstop; `0` means unlimited.

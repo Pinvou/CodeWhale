@@ -1185,7 +1185,7 @@ pub(crate) async fn handle_view_events(
                                 system_prompt_override: false,
                                 model: app.model.clone(),
                                 workspace: app.workspace.clone(),
-                                workspace_roots: Vec::new(),
+                                workspace_roots: app.workspace_roots.clone(),
 
                                 mode: app.mode,
                             })
@@ -2218,7 +2218,7 @@ pub(crate) async fn handle_view_events(
                             system_prompt_override: false,
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
-                            workspace_roots: Vec::new(),
+                            workspace_roots: app.workspace_roots.clone(),
 
                             mode: app.mode,
                         })

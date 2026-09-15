@@ -1096,7 +1096,7 @@ pub(crate) async fn apply_provider_fallback_switch(
                 system_prompt_override: false,
                 model: app.model.clone(),
                 workspace: app.workspace.clone(),
-                workspace_roots: Vec::new(),
+                workspace_roots: app.workspace_roots.clone(),
 
                 mode: app.mode,
             })
@@ -1189,6 +1189,11 @@ pub(crate) async fn apply_command_result(
                         return Ok(false);
                     }
                 };
+                // The persisted metadata is the only roots source in the
+                // TUI (no multi-root UI): carry it into the app state so the
+                // respawned engine, every re-sync, and the next autosave
+                // preserve the set instead of laundering it to single-root.
+                app.workspace_roots = session.metadata.workspace_roots.clone();
                 let fresh_config =
                     match Config::load(app.config_path.clone(), app.config_profile.as_deref()) {
                         Ok(config) => config,
@@ -1233,7 +1238,7 @@ pub(crate) async fn apply_command_result(
                         system_prompt_override: false,
                         model: app.model.clone(),
                         workspace: app.workspace.clone(),
-                        workspace_roots: Vec::new(),
+                        workspace_roots: app.workspace_roots.clone(),
 
                         mode: app.mode,
                     })
@@ -1269,6 +1274,11 @@ pub(crate) async fn apply_command_result(
                 workspace_roots,
                 mode,
             } => {
+                // The action is the roots authority for this transition (a
+                // fork carries the parent's set, a new session carries an
+                // empty one): record it so later re-syncs and autosaves
+                // forward the same set.
+                app.workspace_roots = workspace_roots.clone();
                 let mut session_id = session_id;
                 let is_full_reset = messages.is_empty() && system_prompt.is_none();
                 if is_full_reset && session_id.is_none() {
@@ -1405,7 +1415,7 @@ pub(crate) async fn apply_command_result(
                             system_prompt_override: false,
                             model: app.model.clone(),
                             workspace: app.workspace.clone(),
-                            workspace_roots: Vec::new(),
+                            workspace_roots: app.workspace_roots.clone(),
 
                             mode: app.mode,
                         })
@@ -2294,7 +2304,7 @@ pub(crate) async fn apply_command_result(
                                     system_prompt_override: false,
                                     model: app.model.clone(),
                                     workspace: app.workspace.clone(),
-                                    workspace_roots: Vec::new(),
+                                    workspace_roots: app.workspace_roots.clone(),
 
                                     mode: app.mode,
                                 })
