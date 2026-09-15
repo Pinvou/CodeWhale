@@ -912,11 +912,14 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     { event_id: "cross_week_copy", event_name: "response_copied", turn_id: "turn_boundary", identity_id: "dev_boundary", occurred_at: at("2026-08-10T00:05:00") },
     successful("negative", "dev_negative", "turn_negative", "2026-08-10T13:00:00"),
     { event_id: "negative_feedback", event_name: "response_feedback_changed", feedback_id: "feedback_negative", feedback_action: "set", rating: "negative", turn_id: "wrong_negative_turn", identity_id: "dev_negative", occurred_at: at("2026-08-10T13:05:00") },
+    successful("cross_session", "dev_cross_session", "turn_a", "2026-08-10T10:00:00", "session-a"),
+    { event_id: "cross_session_copy", event_name: "response_copied", session_id: "session-b", turn_id: "turn_b", identity_id: "dev_cross_session", occurred_at: at("2026-08-10T10:01:00") },
+    { event_id: "future_copy", event_name: "response_copied", session_id: "session-c", turn_id: "wrong_future_turn", identity_id: "dev_c", occurred_at: at("2026-08-12T12:01:00") },
   ];
   assert.deepEqual(buildWeeklyExplicitValueMetric(events, now), {
     wevta_installations: 1,
-    weekly_successful_task_installations: 5,
-    explicit_value_sample_size: 5,
+    weekly_successful_task_installations: 6,
+    explicit_value_sample_size: 6,
     explicit_value_confidence: "low",
     wevta_rate: null,
     positive_feedback_installations: 0,

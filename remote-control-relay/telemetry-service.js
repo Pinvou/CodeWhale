@@ -889,12 +889,12 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
         && Number(task.occurred_at) <= signalAt
         && signalAt <= Number(task.occurred_at) + EXPLICIT_VALUE_WINDOW_MS
     ));
-    if (!nearbyTasks.length || nearbyTasks.some(task => task.turn_id === signal.turn_id)) return false;
-    const sameSessionTasks = signal.session_id
+    if (!nearbyTasks.length) return false;
+    const candidateTasks = signal.session_id
       ? nearbyTasks.filter(task => task.session_id === signal.session_id)
-      : [];
-    return (sameSessionTasks.length ? sameSessionTasks : nearbyTasks)
-      .some(task => task.turn_id !== signal.turn_id);
+      : nearbyTasks;
+    if (!candidateTasks.length || candidateTasks.some(task => task.turn_id === signal.turn_id)) return false;
+    return candidateTasks.some(task => task.turn_id !== signal.turn_id);
   }).length;
   return {
     wevta_installations: valuedInstallations.size,
