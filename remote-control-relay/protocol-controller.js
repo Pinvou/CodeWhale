@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify } from "node:crypto";
 
 export const CONTROLLER_PROTOCOL_VERSION = 1;
 export const CONTROLLER_SUBPROTOCOL = "pinvou-desktop-controller-v1";
@@ -14,7 +14,7 @@ const MAX_TASK_REFERENCES = 32;
 const MAX_DESCRIPTORS = 256;
 const MAX_ARTIFACTS = 256;
 export const MAX_ENCRYPTED_WIRE_BYTES = Math.ceil(MAX_ENCRYPTED_FRAME_BYTES / 3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
-export const CONTROLLER_CONTRACT_SHA256 = "3784ee2f066ebd2d66e7f72bc6a6727a210a329dbefdada60775b3014e93c004";
+export const CONTROLLER_CONTRACT_SHA256 = "f7c8398ca2169d0f43acc11c5c19f7d7852fb10cee254298ee309f9f796c05de";
 
 export const CONTROLLER_CAPABILITIES = Object.freeze([
   "pairing_v1", "encrypted_frames_v1", "finished_receipt_v1", "role_liveness_v1", "resume_v1",
@@ -140,11 +140,10 @@ const TRANSCRIPT_SCALAR_PREFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(0,
 const TRANSCRIPT_SCALAR_SUFFIX_FIELDS = Object.freeze(TRANSCRIPT_FIELDS.slice(13));
 const ROUTE_REQUIRED = Object.freeze(["display_name", "preset", "wire_api", "base_url", "model", "image_capability_override"]);
 const ROUTE_OPTIONAL = Object.freeze(["provider_kind", "vendor", "endpoint_mode", "context_window_tokens", "max_output_tokens", "reasoning_effort"]);
-const LEASE_INSTALL_CONTEXT_FIELDS = Object.freeze([
-  "request_id", "expected_pairing_id", "reservation_id", "remote_control_generation",
-  "relay_epoch", "transcript_hash", "expected_controller_connection_identity",
-  "negotiated_capabilities", "capability_hash",
-]);
+const LEASE_INSTALL_CONTEXT_FIELDS = Object.freeze(["verified_transcript"]);
+const LEASE_INSTALL_CONTEXT_DATA = new WeakMap();
+const VERIFIED_TRANSCRIPT_DATA = new WeakMap();
+const VERIFIED_TRANSCRIPT_TOKEN = Symbol("verified-controller-transcript");
 const NESTED_SCHEMAS = Object.freeze({
   task_input: schema(["text", "attachment_ids", "skill_ids"], ["workspace_id"], []),
   temporary_model_package_v1: schema(["schema", "package_id", "binding", "primary", "primary_credential"], ["vision_fallback"], []),
@@ -513,39 +512,38 @@ export function validateControllerRuntimeMessage(input, senderRole, runtimeConte
 export class LeaseInstallValidationContext {
   constructor(input) {
     const context = exactObject(input, LEASE_INSTALL_CONTEXT_FIELDS, [], "lease_install_validation_context");
-    for (const field of ["request_id", "expected_pairing_id", "reservation_id", "remote_control_generation", "relay_epoch", "expected_controller_connection_identity"]) {
-      identifier(context[field], `lease_install_validation_context.${field}`);
-    }
-    hex64(context.transcript_hash, "lease_install_validation_context.transcript_hash");
-    validateRuntimeCapabilities(context.negotiated_capabilities);
-    hex64(context.capability_hash, "lease_install_validation_context.capability_hash");
-    if (controllerCapabilityHash(context.negotiated_capabilities) !== context.capability_hash) fail("invalid_field", "lease_install_validation_context.capability_hash");
-    this.request_id = context.request_id;
-    this.expected_pairing_id = context.expected_pairing_id;
-    this.reservation_id = context.reservation_id;
-    this.remote_control_generation = context.remote_control_generation;
-    this.relay_epoch = context.relay_epoch;
-    this.transcript_hash = context.transcript_hash;
-    this.expected_controller_connection_identity = context.expected_controller_connection_identity;
-    this.negotiated_capabilities = Object.freeze([...context.negotiated_capabilities]);
-    this.capability_hash = context.capability_hash;
+    const verified = VERIFIED_TRANSCRIPT_DATA.get(context.verified_transcript);
+    if (!verified) fail("invalid_field", "lease_install_validation_context.verified_transcript");
+    LEASE_INSTALL_CONTEXT_DATA.set(this, verified);
+    Object.freeze(this);
+  }
+}
+
+export class VerifiedTranscript {
+  constructor(token, data) {
+    if (token !== VERIFIED_TRANSCRIPT_TOKEN) fail("invalid_field", "verified_transcript");
+    VERIFIED_TRANSCRIPT_DATA.set(this, Object.freeze({
+      ...data,
+      negotiated_capabilities: Object.freeze([...data.negotiated_capabilities]),
+    }));
     Object.freeze(this);
   }
 }
 
 export function validateControllerLeaseInstallMessage(input, senderRole, context) {
-  if (!(context instanceof LeaseInstallValidationContext)) fail("missing_field", "lease_install_validation_context");
+  const trustedContext = LEASE_INSTALL_CONTEXT_DATA.get(context);
+  if (!trustedContext) fail("missing_field", "lease_install_validation_context");
   const message = validateControllerMessage(input, senderRole);
   if (!LEASE_INSTALL_MESSAGE_TYPES.includes(message.type)) fail("invalid_message", "lease_install_message");
-  enforceNegotiatedMessage(message, context);
+  enforceNegotiatedMessage(message, trustedContext);
   const expected = [
-    ["request_id", context.request_id],
-    ["pairing_id", context.expected_pairing_id],
-    ["reservation_id", context.reservation_id],
-    ["remote_control_generation", context.remote_control_generation],
-    ["relay_epoch", context.relay_epoch],
-    ["transcript_hash", context.transcript_hash],
-    ["controller_connection_identity", context.expected_controller_connection_identity],
+    ["request_id", trustedContext.request_id],
+    ["pairing_id", trustedContext.expected_pairing_id],
+    ["reservation_id", trustedContext.reservation_id],
+    ["remote_control_generation", trustedContext.remote_control_generation],
+    ["relay_epoch", trustedContext.relay_epoch],
+    ["transcript_hash", trustedContext.transcript_hash],
+    ["controller_connection_identity", trustedContext.expected_controller_connection_identity],
   ];
   for (const [field, value] of expected) if (message[field] !== value) fail("stale_context", field);
   const lease = Object.freeze(Object.fromEntries(LEASE_CONTEXT_FIELDS.map((field) => [field, message[field]])));
@@ -818,6 +816,37 @@ function validateReservedTranscript(message) {
   if (message.transcript_hash !== hash) fail("invalid_field", "transcript_hash");
 }
 
+export function verifyControllerPairingTranscript(input, expectedRelaySigningKeyId, relayPublicKeyB64) {
+  identifier(expectedRelaySigningKeyId, "expected_relay_signing_key_id");
+  base64(relayPublicKeyB64, "relay_public_key_b64", 32, 32);
+  const message = validateControllerMessage(input, "relay");
+  if (message.type !== "controller_pairing_reserved") fail("invalid_message", "verified_transcript");
+  if (message.relay_signing_key_id !== expectedRelaySigningKeyId) fail("stale_context", "relay_signing_key_id");
+  const keyPrefix = Buffer.from("302a300506032b6570032100", "hex");
+  try {
+    const publicKey = createPublicKey({ key: Buffer.concat([keyPrefix, Buffer.from(relayPublicKeyB64, "base64")]), format: "der", type: "spki" });
+    const signature = Buffer.from(message.relay_signature_b64, "base64");
+    if (signature.length !== 64 || !verify(null, buildPairingTranscriptPreimage(message.transcript), publicKey, signature)) {
+      fail("invalid_field", "relay_signature_b64");
+    }
+  } catch (error) {
+    if (error instanceof ControllerProtocolError) throw error;
+    fail("invalid_field", "relay_signature_b64");
+  }
+  const transcript = message.transcript;
+  return new VerifiedTranscript(VERIFIED_TRANSCRIPT_TOKEN, {
+    request_id: message.request_id,
+    expected_pairing_id: transcript.pairing_id,
+    reservation_id: transcript.reservation_id,
+    remote_control_generation: transcript.remote_control_generation,
+    relay_epoch: transcript.relay_epoch,
+    transcript_hash: message.transcript_hash,
+    expected_controller_connection_identity: transcript.controller_connection_identity,
+    negotiated_capabilities: transcript.negotiated_capabilities,
+    capability_hash: transcript.capability_hash,
+  });
+}
+
 export function buildDirectLivenessAad(value) {
   const fields = ["connection_id", "controller_lease_id", "lease_epoch", "relay_epoch", "remote_control_generation", "role"];
   const binding = exactObject(value, fields, [], "liveness_aad");
@@ -914,6 +943,10 @@ export function controllerContractManifest() {
     runtime_capability_context: {
       order: "bytewise-strict-ascending",
       invalid_error: { code: "unsupported_capability", field: "negotiated_capabilities" },
+    },
+    verified_transcript: {
+      constructor: "full-canonical-transcript-hash-and-pinned-relay-ed25519-signature",
+      lease_install_derivation: "opaque-verified-transcript-only",
     },
   };
 }

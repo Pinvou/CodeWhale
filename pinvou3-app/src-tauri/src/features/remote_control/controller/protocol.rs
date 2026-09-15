@@ -24,7 +24,7 @@ const MAX_ARTIFACTS: usize = 256;
 const MAX_ENCRYPTED_WIRE_BYTES: usize =
     MAX_ENCRYPTED_FRAME_BYTES.div_ceil(3) * 4 + MAX_CONTROL_MESSAGE_BYTES;
 const CONTROLLER_CONTRACT_SHA256: &str =
-    "3784ee2f066ebd2d66e7f72bc6a6727a210a329dbefdada60775b3014e93c004";
+    "f7c8398ca2169d0f43acc11c5c19f7d7852fb10cee254298ee309f9f796c05de";
 
 pub(crate) const CONTROLLER_CAPABILITIES: &[&str] = &[
     "pairing_v1",
@@ -174,17 +174,7 @@ const ERROR_CONTEXT_FIELDS: &[&str] = &[
     "remote_control_generation",
     "registration_request_id",
 ];
-const LEASE_INSTALL_CONTEXT_FIELDS: &[&str] = &[
-    "request_id",
-    "expected_pairing_id",
-    "reservation_id",
-    "remote_control_generation",
-    "relay_epoch",
-    "transcript_hash",
-    "expected_controller_connection_identity",
-    "negotiated_capabilities",
-    "capability_hash",
-];
+const LEASE_INSTALL_CONTEXT_FIELDS: &[&str] = &["verified_transcript"];
 
 pub(crate) const CONTROLLER_ERROR_CODES: &[&str] = &[
     "pairing_code_invalid",
@@ -1528,61 +1518,33 @@ pub(crate) struct LeaseInstallValidationContext {
     capability_hash: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VerifiedTranscript {
+    request_id: String,
+    expected_pairing_id: String,
+    reservation_id: String,
+    remote_control_generation: String,
+    relay_epoch: String,
+    transcript_hash: String,
+    expected_controller_connection_identity: String,
+    negotiated_capabilities: Vec<String>,
+    capability_hash: String,
+}
+
 impl LeaseInstallValidationContext {
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        request_id: String,
-        expected_pairing_id: String,
-        reservation_id: String,
-        remote_control_generation: String,
-        relay_epoch: String,
-        transcript_hash: String,
-        expected_controller_connection_identity: String,
-        negotiated_capabilities: Vec<String>,
-        capability_hash: String,
-    ) -> Result<Self> {
-        for (field, value) in [
-            ("request_id", &request_id),
-            ("expected_pairing_id", &expected_pairing_id),
-            ("reservation_id", &reservation_id),
-            ("remote_control_generation", &remote_control_generation),
-            ("relay_epoch", &relay_epoch),
-            (
-                "expected_controller_connection_identity",
-                &expected_controller_connection_identity,
-            ),
-        ] {
-            validate_identifier(
-                &Value::String(value.clone()),
-                &format!("lease_install_validation_context.{field}"),
-            )?;
+    pub(crate) fn new(verified: VerifiedTranscript) -> Self {
+        Self {
+            request_id: verified.request_id,
+            expected_pairing_id: verified.expected_pairing_id,
+            reservation_id: verified.reservation_id,
+            remote_control_generation: verified.remote_control_generation,
+            relay_epoch: verified.relay_epoch,
+            transcript_hash: verified.transcript_hash,
+            expected_controller_connection_identity: verified
+                .expected_controller_connection_identity,
+            negotiated_capabilities: verified.negotiated_capabilities,
+            capability_hash: verified.capability_hash,
         }
-        validate_hex_64(
-            &Value::String(transcript_hash.clone()),
-            "lease_install_validation_context.transcript_hash",
-        )?;
-        validate_runtime_capabilities(&negotiated_capabilities)?;
-        validate_hex_64(
-            &Value::String(capability_hash.clone()),
-            "lease_install_validation_context.capability_hash",
-        )?;
-        if controller_capability_hash(&negotiated_capabilities)? != capability_hash {
-            return Err(ControllerProtocolError::new(
-                "invalid_field",
-                "lease_install_validation_context.capability_hash",
-            ));
-        }
-        Ok(Self {
-            request_id,
-            expected_pairing_id,
-            reservation_id,
-            remote_control_generation,
-            relay_epoch,
-            transcript_hash,
-            expected_controller_connection_identity,
-            negotiated_capabilities,
-            capability_hash,
-        })
     }
 }
 
@@ -3243,6 +3205,79 @@ fn validate_reserved_transcript(message: &Map<String, Value>) -> Result<()> {
     Ok(())
 }
 
+/// Produces the only constructible transcript trust token. The callback is the
+/// platform crypto adapter and must verify Ed25519 with the public key pinned to
+/// `expected_relay_signing_key_id`; it receives only the canonical preimage and
+/// decoded 64-byte signature after all structural bindings have passed.
+pub(crate) fn verify_controller_pairing_transcript<F>(
+    input: &str,
+    expected_relay_signing_key_id: &str,
+    verify_signature: F,
+) -> Result<VerifiedTranscript>
+where
+    F: FnOnce(&[u8], &[u8]) -> bool,
+{
+    validate_identifier(
+        &Value::String(expected_relay_signing_key_id.to_owned()),
+        "expected_relay_signing_key_id",
+    )?;
+    let value = validate_controller_message_json(input, RELAY)?;
+    let message = as_object(&value, "message")?;
+    if message.get("type").and_then(Value::as_str) != Some("controller_pairing_reserved") {
+        return Err(ControllerProtocolError::new(
+            "invalid_message",
+            "verified_transcript",
+        ));
+    }
+    if object_string(message, "relay_signing_key_id", "message")? != expected_relay_signing_key_id {
+        return Err(ControllerProtocolError::new(
+            "stale_context",
+            "relay_signing_key_id",
+        ));
+    }
+    let transcript = message
+        .get("transcript")
+        .expect("reserved transcript required");
+    let preimage = build_pairing_transcript_preimage(transcript)?;
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(object_string(message, "relay_signature_b64", "message")?)
+        .map_err(|_| ControllerProtocolError::new("invalid_field", "relay_signature_b64"))?;
+    if signature.len() != 64 || !verify_signature(&preimage, &signature) {
+        return Err(ControllerProtocolError::new(
+            "invalid_field",
+            "relay_signature_b64",
+        ));
+    }
+    let transcript = as_object(transcript, "transcript")?;
+    Ok(VerifiedTranscript {
+        request_id: object_string(message, "request_id", "message")?.to_owned(),
+        expected_pairing_id: object_string(transcript, "pairing_id", "transcript")?.to_owned(),
+        reservation_id: object_string(transcript, "reservation_id", "transcript")?.to_owned(),
+        remote_control_generation: object_string(
+            transcript,
+            "remote_control_generation",
+            "transcript",
+        )?
+        .to_owned(),
+        relay_epoch: object_string(transcript, "relay_epoch", "transcript")?.to_owned(),
+        transcript_hash: object_string(message, "transcript_hash", "message")?.to_owned(),
+        expected_controller_connection_identity: object_string(
+            transcript,
+            "controller_connection_identity",
+            "transcript",
+        )?
+        .to_owned(),
+        negotiated_capabilities: serde_json::from_value(
+            transcript
+                .get("negotiated_capabilities")
+                .expect("validated capabilities required")
+                .clone(),
+        )
+        .expect("validated capabilities are strings"),
+        capability_hash: object_string(transcript, "capability_hash", "transcript")?.to_owned(),
+    })
+}
+
 pub(crate) fn build_direct_liveness_aad(value: &Value) -> Result<Vec<u8>> {
     const FIELDS: &[&str] = &[
         "connection_id",
@@ -3571,7 +3606,8 @@ mod tests {
             "base_url_grammar":"lowercase-http(s)-dns-or-ipv4-port1-65535-no-userinfo-ipv6-fragment-uppercase-percent",
             "liveness_sequence_policy":{"heartbeat":{"lower":"replay","equal":"same_sequence_tighten","greater":"advance"},"attestation":{"lower":"replay","equal":"replay","greater":"advance"}},
             "validation_modes":{"shape_only":"schema-role-lease-shape-without-capability-state","runtime":"negotiated-capabilities-required-for-state-machine-messages","lease_install":"trusted-handshake-bindings-produce-new-lease","registration":"independent-generation-registration-idempotency-context"},
-            "runtime_capability_context":{"order":"bytewise-strict-ascending","invalid_error":{"code":"unsupported_capability","field":"negotiated_capabilities"}}
+            "runtime_capability_context":{"order":"bytewise-strict-ascending","invalid_error":{"code":"unsupported_capability","field":"negotiated_capabilities"}},
+            "verified_transcript":{"constructor":"full-canonical-transcript-hash-and-pinned-relay-ed25519-signature","lease_install_derivation":"opaque-verified-transcript-only"}
         })
     }
 
@@ -4106,32 +4142,49 @@ mod tests {
     fn controller_joined_installs_lease_from_trusted_handshake_expectations() {
         let fixture = fixture();
         let vector = &fixture["lease_install_vector"];
-        let context_value = &vector["context"];
-        let context_from = |value: &Value| {
-            LeaseInstallValidationContext::new(
-                value["request_id"].as_str().unwrap().into(),
-                value["expected_pairing_id"].as_str().unwrap().into(),
-                value["reservation_id"].as_str().unwrap().into(),
-                value["remote_control_generation"].as_str().unwrap().into(),
-                value["relay_epoch"].as_str().unwrap().into(),
-                value["transcript_hash"].as_str().unwrap().into(),
-                value["expected_controller_connection_identity"]
+        let verification = &vector["verification_input"];
+        let expected_signature = base64::engine::general_purpose::STANDARD
+            .decode(
+                fixture["transcript_vector"]["signature_b64"]
                     .as_str()
-                    .unwrap()
-                    .into(),
-                serde_json::from_value(value["negotiated_capabilities"].clone()).unwrap(),
-                value["capability_hash"].as_str().unwrap().into(),
+                    .unwrap(),
+            )
+            .unwrap();
+        let verify_input = |message: &Value| {
+            verify_controller_pairing_transcript(
+                &serde_json::to_string(message).unwrap(),
+                verification["expected_relay_signing_key_id"]
+                    .as_str()
+                    .unwrap(),
+                |preimage, signature| {
+                    sha256_hex(preimage) == fixture["transcript_vector"]["sha256"].as_str().unwrap()
+                        && signature == expected_signature
+                },
             )
         };
+        let verified = verify_input(&verification["reserved_message"]).unwrap();
         assert_eq!(
-            context_value["negotiated_capabilities"],
-            fixture["transcript_vector"]["transcript"]["negotiated_capabilities"]
+            verified.negotiated_capabilities,
+            serde_json::from_value::<Vec<String>>(
+                fixture["transcript_vector"]["transcript"]["negotiated_capabilities"].clone()
+            )
+            .unwrap()
         );
         assert_eq!(
-            context_value["capability_hash"],
+            verified.capability_hash,
             fixture["transcript_vector"]["transcript"]["capability_hash"]
+                .as_str()
+                .unwrap()
         );
-        let install_context = context_from(context_value).unwrap();
+        let install_context = LeaseInstallValidationContext::new(verified);
+        let wrong_key_id = verify_controller_pairing_transcript(
+            &serde_json::to_string(&verification["reserved_message"]).unwrap(),
+            "relay-key-other",
+            |_, _| true,
+        )
+        .unwrap_err();
+        assert_eq!(wrong_key_id.code, "stale_context");
+        assert_eq!(wrong_key_id.field, "relay_signing_key_id");
         let result = validate_controller_lease_install_message_json(
             &serde_json::to_string(&vector["message"]).unwrap(),
             RELAY,
@@ -4150,21 +4203,6 @@ mod tests {
             vector["expected_lease"]
         );
 
-        let mut unsupported_value = context_value.clone();
-        unsupported_value["negotiated_capabilities"] = json!(["encrypted_frames_v1"]);
-        unsupported_value["capability_hash"] =
-            json!(controller_capability_hash(&["encrypted_frames_v1".into()]).unwrap());
-        let unsupported_context = context_from(&unsupported_value).unwrap();
-        assert_eq!(
-            validate_controller_lease_install_message_json(
-                &serde_json::to_string(&vector["message"]).unwrap(),
-                RELAY,
-                &unsupported_context,
-            )
-            .unwrap_err()
-            .code,
-            "unsupported_capability"
-        );
         for field in vector["mismatch_fields"]
             .as_array()
             .unwrap()
@@ -4186,12 +4224,17 @@ mod tests {
             assert_eq!(error.code, vector["expected_error"].as_str().unwrap());
             assert_eq!(error.field, field);
         }
-        for mutation in vector["capability_mutations"].as_array().unwrap() {
-            let mut mutated = context_value.clone();
-            mutated["negotiated_capabilities"] = mutation["negotiated_capabilities"].clone();
-            let error = context_from(&mutated).unwrap_err();
-            assert_eq!(error.code, mutation["expected_error"].as_str().unwrap());
-            assert_eq!(error.field, mutation["expected_field"].as_str().unwrap());
+        for negative in vector["verified_transcript_negative_inputs"]
+            .as_array()
+            .unwrap()
+        {
+            let mut message = verification["reserved_message"].clone();
+            message["transcript"] = negative["transcript"].clone();
+            message["transcript_hash"] = negative["transcript_hash"].clone();
+            message["relay_signature_b64"] = negative["relay_signature_b64"].clone();
+            let error = verify_input(&message).unwrap_err();
+            assert_eq!(error.code, negative["expected_error"].as_str().unwrap());
+            assert_eq!(error.field, negative["expected_field"].as_str().unwrap());
         }
     }
 
