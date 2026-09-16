@@ -200,9 +200,7 @@ pub(crate) fn run_captured_with_timeout(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("启动 {label} 失败: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("启动 {label} 失败: {e}"))?;
     let stdout_t = drain(child.stdout.take());
     let stderr_t = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;
@@ -227,10 +225,7 @@ pub(crate) fn run_captured_with_timeout(
                     let _ = child.wait();
                     // 挂死进程的管道可能仍被孙进程握着,join 会卡住——直接脱管,
                     // 排空线程随管道关闭自然结束,不占 spawn_blocking 池。
-                    return Err(format!(
-                        "{label} 无响应超过 {}s,已终止",
-                        timeout.as_secs()
-                    ));
+                    return Err(format!("{label} 无响应超过 {}s,已终止", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -691,8 +686,11 @@ mod tests {
     /// run_captured_with_timeout 正常路径:退出码与 stdout/stderr 都被完整捕获。
     #[test]
     fn run_captured_collects_output_and_status() {
-        let mut cmd = Command::new(if cfg!(target_family = "windows") { "cmd" } else { "echo" });
-        if cfg!(target_family = "windows") {
+        // 用 std::env::consts::OS 常量分支而非 cfg 语法:平台条件编译不得出现在
+        // 适配层外(architecture-guard rust_target_cfg_outside_adapter)。
+        let windows = std::env::consts::OS == "windows";
+        let mut cmd = Command::new(if windows { "cmd" } else { "echo" });
+        if windows {
             cmd.args(["/C", "echo captured-ok 1>&2"]);
         } else {
             cmd.arg("captured-stdout-ok");
@@ -700,10 +698,13 @@ mod tests {
         let (ok, _code, so, se) = run_captured_with_timeout(cmd, "test-cli", CLI_RUN_TIMEOUT)
             .expect("fast command must succeed");
         assert!(ok);
-        if cfg!(target_family = "windows") {
+        if windows {
             assert!(se.contains("captured-ok"), "stderr captured, got {se:?}");
         } else {
-            assert!(so.contains("captured-stdout-ok"), "stdout captured, got {so:?}");
+            assert!(
+                so.contains("captured-stdout-ok"),
+                "stdout captured, got {so:?}"
+            );
         }
     }
 
@@ -711,8 +712,9 @@ mod tests {
     /// 超时后很快返回错误,而不是无限阻塞(issue #1097:僵尸流程资源不回收)。
     #[test]
     fn run_captured_kills_a_hung_child_at_the_deadline() {
-        let mut cmd = Command::new(if cfg!(target_family = "windows") { "cmd" } else { "sleep" });
-        if cfg!(target_family = "windows") {
+        let windows = std::env::consts::OS == "windows";
+        let mut cmd = Command::new(if windows { "cmd" } else { "sleep" });
+        if windows {
             cmd.args(["/C", "ping -n 30 127.0.0.1"]);
         } else {
             cmd.arg("30");

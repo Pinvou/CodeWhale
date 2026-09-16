@@ -323,7 +323,11 @@ fn throttle_at<'a>(
             rollback(last, slot);
             return None;
         }
-        return Some(LoginPermit { last, slot, confirmed: false });
+        return Some(LoginPermit {
+            last,
+            slot,
+            confirmed: false,
+        });
     }
     if aborted() {
         rollback(last, slot);
@@ -341,7 +345,11 @@ fn throttle_at<'a>(
                 rollback(last, slot);
                 return None;
             }
-            return Some(LoginPermit { last, slot, confirmed: false });
+            return Some(LoginPermit {
+                last,
+                slot,
+                confirmed: false,
+            });
         }
         if aborted() {
             rollback(last, slot);
@@ -575,8 +583,13 @@ mod tests {
         let t0 = Instant::now();
         let mut abort_midway = || t0.elapsed() >= Duration::from_millis(40);
         assert!(
-            throttle_at(&last, Duration::from_millis(80), &mut |_| {}, &mut abort_midway)
-                .is_none(),
+            throttle_at(
+                &last,
+                Duration::from_millis(80),
+                &mut |_| {},
+                &mut abort_midway
+            )
+            .is_none(),
             "最后一次出队已察觉取消，不该把这次 login 放出去"
         );
         assert_eq!(
@@ -624,12 +637,7 @@ mod tests {
         let waiting = std::thread::scope(|scope| {
             let last = &last;
             scope.spawn(move || {
-                throttle_at(
-                    last,
-                    Duration::from_millis(120),
-                    &mut |_| {},
-                    &mut || false,
-                )
+                throttle_at(last, Duration::from_millis(120), &mut |_| {}, &mut || false)
             });
             // 第一家睡在等待里时，主线程必须能马上拿到锁（旧写法会卡满 120ms）。
             let t0 = Instant::now();
@@ -651,13 +659,9 @@ mod tests {
         let last = Mutex::new(Vec::new());
         assert!(throttle_ok(&last, 120));
         // 第二家预约成功但立刻被中止。
-        assert!(throttle_at(
-            &last,
-            Duration::from_millis(120),
-            &mut |_| {},
-            &mut || true
-        )
-        .is_none());
+        assert!(
+            throttle_at(&last, Duration::from_millis(120), &mut |_| {}, &mut || true).is_none()
+        );
         // 回滚后剩下的窗口应约等于第一家的 120ms，而不是再叠加一个。
         let t0 = Instant::now();
         assert!(throttle_ok(&last, 120));
@@ -682,13 +686,9 @@ mod tests {
             // A:免等待放行,持有**未确认**凭证(模拟"轮到了但请求还没发出")。
             // 等 B 中止回滚后才丢弃凭证,保证 B 回滚时 A 的槽位还在集合里(非 LIFO)。
             let a = scope.spawn(move || {
-                let permit = throttle_at(
-                    last,
-                    Duration::from_millis(200),
-                    &mut |_| {},
-                    &mut || false,
-                )
-                .expect("A fast path must pass");
+                let permit =
+                    throttle_at(last, Duration::from_millis(200), &mut |_| {}, &mut || false)
+                        .expect("A fast path must pass");
                 a_reserved.send(()).expect("notify A reserved");
                 done_rx.recv().expect("wait for B");
                 permit // 线程结束时 drop → 回滚 A 自己的槽位
@@ -697,12 +697,9 @@ mod tests {
             // B:排在 A 之后进入等待,窗口过半被中止 → 摘除 B 自己的槽位。
             let b = scope.spawn(move || {
                 let t0 = Instant::now();
-                throttle_at(
-                    last,
-                    Duration::from_millis(200),
-                    &mut |_| {},
-                    &mut || t0.elapsed() >= Duration::from_millis(60),
-                )
+                throttle_at(last, Duration::from_millis(200), &mut |_| {}, &mut || {
+                    t0.elapsed() >= Duration::from_millis(60)
+                })
             });
             assert!(b.join().unwrap().is_none(), "B 必须在窗口过半后被中止");
             b_done.send(()).expect("notify B done");
@@ -724,12 +721,9 @@ mod tests {
     #[test]
     fn unconfirmed_permit_rolls_back_the_slot() {
         let last = Mutex::new(Vec::new());
-        let permit = throttle_at(
-            &last,
-            Duration::from_millis(120),
-            &mut |_| {},
-            &mut || false,
-        )
+        let permit = throttle_at(&last, Duration::from_millis(120), &mut |_| {}, &mut || {
+            false
+        })
         .expect("first caller must pass");
         drop(permit); // 调用方没能发出请求
         let t0 = Instant::now();
@@ -746,12 +740,9 @@ mod tests {
     #[test]
     fn confirmed_permit_keeps_the_window() {
         let last = Mutex::new(Vec::new());
-        let permit = throttle_at(
-            &last,
-            Duration::from_millis(120),
-            &mut |_| {},
-            &mut || false,
-        )
+        let permit = throttle_at(&last, Duration::from_millis(120), &mut |_| {}, &mut || {
+            false
+        })
         .expect("first caller must pass");
         permit.confirm();
         let t0 = Instant::now();
