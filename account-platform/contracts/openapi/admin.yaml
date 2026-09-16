@@ -2401,6 +2401,18 @@ paths:
         "429": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
         "504": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminApprovalDraftV2
+      summary: Create one governed draft without exposing the raw request projection
+      parameters:
+        - { name: X-Pinvou-Approval-Action-Control-Version, in: header, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalDraft" } } } }
+      responses:
+        "201": { description: Closed draft detail, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Detail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v2/approval-requests/{approval_request_id}:
     get:
       operationId: getAdminApprovalRequestV2
@@ -2410,6 +2422,50 @@ paths:
         "200": { description: Closed detail, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Detail" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateAdminApprovalDraftV2
+      summary: Update the same draft using request and control generations
+      parameters:
+        - { $ref: "#/components/parameters/ApprovalRequestID" }
+        - { name: X-Pinvou-Approval-Action-Control-Version, in: header, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2DraftUpdate" } } } }
+      responses:
+        "200": { description: Closed updated detail, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Detail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /account/admin/v2/approval-requests/{approval_request_id}/actions/submit:
+    post:
+      operationId: submitAdminApprovalRequestV2
+      summary: Submit a v2 draft after a fresh closed detail
+      parameters:
+        - { $ref: "#/components/parameters/ApprovalRequestID" }
+        - { name: X-Pinvou-Approval-Action-Control-Version, in: header, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
+      responses:
+        "200": { description: Closed submitted detail, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Detail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /account/admin/v2/approval-requests/{approval_request_id}/actions/withdraw:
+    post:
+      operationId: withdrawAdminApprovalRequestV2
+      summary: Safely close the requester's submitted v2 approval
+      parameters:
+        - { $ref: "#/components/parameters/ApprovalRequestID" }
+        - { name: X-Pinvou-Approval-Action-Control-Version, in: header, required: true, schema: { type: integer, format: int64, minimum: 1 } }
+      requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
+      responses:
+        "200": { description: Closed withdrawn detail, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalV2Detail" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
   /account/admin/v2/approval-requests/{approval_request_id}/actions/decide:
     post:
@@ -5531,6 +5587,23 @@ components:
               target_resource_id: { type: string, format: uuid }
               critical_resource_versions: { $ref: "#/components/schemas/TokenCredentialRevokeApprovalSnapshot" }
               financial_snapshot: { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
+    ApprovalV2DraftUpdate:
+      type: object
+      additionalProperties: false
+      required: [expected_version, command_type, idempotency_key, normalized_command, target_resource_type, target_resource_id, reason, critical_resource_versions, financial_snapshot]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        command_type: { type: string }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
+        normalized_command: { type: object }
+        target_resource_type: { type: string, minLength: 1, maxLength: 80 }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+        redacted_evidence: { type: [array, object] }
+        expected_impact: { type: object }
+        critical_resource_versions: { type: object }
+        financial_snapshot: { type: object }
+        supersedes_request_id: { type: string, format: uuid }
     ApprovalDecision:
       type: object
       additionalProperties: false

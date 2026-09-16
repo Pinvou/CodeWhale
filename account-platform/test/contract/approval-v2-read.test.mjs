@@ -16,8 +16,8 @@ test('v2 approval reads are versioned, closed, and classified by current actor',
   const catalog = JSON.parse(read('deploy/authorization-entrypoints.json'));
   const list = api.paths['/account/admin/v2/approval-requests'];
   const detail = api.paths['/account/admin/v2/approval-requests/{approval_request_id}'];
-  assert.deepEqual(Object.keys(list), ['get']);
-  assert.deepEqual(Object.keys(detail), ['get']);
+  assert.deepEqual(Object.keys(list), ['get', 'post']);
+  assert.deepEqual(Object.keys(detail), ['get', 'put']);
   assert.match(service, /adminV2\.GET\("\/approval-requests", httpserver\.AdaptFunc\(s\.adminApprovalRequestsV2\)\)/);
   assert.match(service, /adminV2\.GET\("\/approval-requests\/:approval_request_id", httpserver\.AdaptFunc\(s\.adminApprovalRequestV2\)\)/);
   for (const resource of ['/approval-requests', '/approval-requests/:approval_request_id']) {

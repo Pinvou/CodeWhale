@@ -152,6 +152,9 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 		return ApprovalRequest{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := requireApprovalV2WriteControl(ctx, tx); err != nil {
+		return ApprovalRequest{}, err
+	}
 	if err := assertStoredApprovalPolicy(ctx, tx, policy); err != nil {
 		return ApprovalRequest{}, err
 	}
@@ -258,6 +261,9 @@ func (r *PostgresRepository) UpdateApprovalDraft(ctx context.Context, principal 
 	if _, err := approvalRequestVisibilityForActor(ctx, tx, *actorID, requestID); err != nil {
 		return ApprovalRequest{}, err
 	}
+	if err := requireApprovalV2WriteControl(ctx, tx); err != nil {
+		return ApprovalRequest{}, err
+	}
 	current, err := approvalRequestByIDForUpdate(ctx, tx, requestID)
 	if err != nil {
 		return ApprovalRequest{}, approvalVisibleRequestReadError(err)
@@ -323,6 +329,9 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 		return ApprovalRequest{}, ErrForbidden
 	}
 	if _, err := approvalRequestVisibilityForActor(ctx, tx, *actorID, requestID); err != nil {
+		return ApprovalRequest{}, err
+	}
+	if err := requireApprovalV2WriteControl(ctx, tx); err != nil {
 		return ApprovalRequest{}, err
 	}
 	item, err := approvalRequestByIDForUpdate(ctx, tx, requestID)

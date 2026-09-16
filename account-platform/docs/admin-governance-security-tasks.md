@@ -164,6 +164,8 @@ GSA-17 Portal既有Token操作开关兼容修订（仍PARTIAL / REVIEW_PENDING�
 GSA-17 仓库代码范围收口（CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED）：本轮Signed-off并推送`5fc028cf`、`d2ff39dd`、`92e1e4a6`、`8520b669`、`2f1970a1`、`a3bf3898`、`251410e4`，覆盖Account closed capability、Portal Redis原子会话锁、版本中立BFF、v1/v2详情动作代次、决定CAS、迟到响应、旧Token操作开关。最后修订的`node scripts/account-platform.mjs verify`退出码0，定向隔离PostgreSQL审批决定、Portal HTTP及Node竞态合同PASS；真实多副本TLS Redis fixture未具备，GSA-04隔离Linux欠账及生产切换仍待GSA-38～40。静态审批中心尚未使用新客户端、四视图与业务页流转归GSA-18/19；本状态仅说明GSA-17范围内代码完成，不构成审核、部署或端到端验收。
 
 GSA-17 状态纠正（仍PARTIAL / REVIEW_PENDING）：后续依赖检查发现v2线目前缺create/update/submit/withdraw四个Account写入口及对应Portal精确路由；v2 Session不得借v1写入口完成这些动作。前一段`CODE_COMPLETE`是当时检查点，不能作为当前任务结论。设计§5.4的v2 decide三字段旧描述同步纠正为与§5.4动作代次和现行闭合合同一致的四字段。补齐v2写入口、BFF、合同与真实PG测试后才可重新评估CODE_COMPLETE；已提交的各独立检查点与验证记录保留。
+
+GSA-17 Account v2草稿生命周期入口（仍PARTIAL / REVIEW_PENDING / NOT_DEPLOYED）：补齐create/update/submit/withdraw四条独立v2路径，复用既有申请和事务状态机，要求受信动作控制代次并在事务内持共享锁重验；闭合顶层请求字段并拒绝浏览器proof，响应只返回v2投影而非v1原始申请。隔离PostgreSQL验证同一申请从DRAFT创建、编辑、提交到撤回，另验证过期代次零写入和非法输入拒绝。Portal BFF和客户端尚未接入这四条路径，不能据此标记GSA-17完成。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
