@@ -183,14 +183,14 @@ type envelope struct {
 }
 
 type sessionData struct {
-	SessionID    string `json:"sessionId"`
-	SsoLoginURL  string `json:"ssoLoginUrl"`
-	Token        string `json:"token"`
-	Ait          string `json:"ait"`
-	Expire       int64  `json:"expire"`
+	SessionID   string `json:"sessionId"`
+	SsoLoginURL string `json:"ssoLoginUrl"`
+	Token       string `json:"token"`
+	Ait         string `json:"ait"`
+	Expire      int64  `json:"expire"`
 	// Keep untyped (like the sibling eip-cli): the SSO server has flipped field
-	// types before (pollInterval string ↔ number), and one typed field failing
-	// to decode must not poison the whole sessionData parse. Not consumed today.
+	// types before (pollInterval string ↔ number), and a typed int would be
+	// silently dropped on a flip. Not consumed today.
 	PollInterval json.RawMessage `json:"pollInterval"`
 }
 
