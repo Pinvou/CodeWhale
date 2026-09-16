@@ -173,24 +173,6 @@ func (r *PostgresRepository) ReconcileExpiredApproval(ctx context.Context, expec
 	if !sameApprovalReconciliationControl(control, expectedControl) || (control.Mode != AdminApprovalModeQuiescing && control.Mode != AdminApprovalModeSafeRollback) {
 		return "", ErrApprovalReconciliationControlChanged
 	}
-	outboxes, err := reconciliationOutboxesForUpdate(ctx, tx, candidate.RequestID)
-	if err != nil {
-		return "", err
-	}
-	if len(outboxes) != 1 {
-		return ApprovalReconciliationBlockedHistory, nil
-	}
-	outbox := outboxes[0]
-	if outbox.approvalEpoch > control.ApprovalEpoch {
-		return ApprovalReconciliationBlockedHistory, nil
-	}
-	if outbox.deadLetteredAt != nil {
-		if err := tx.QueryRow(ctx, `SELECT event_digest FROM public.inspect_authorization_dead_letter($1)`, outbox.eventID).Scan(&outbox.eventDigest); errors.Is(err, pgx.ErrNoRows) {
-			return ApprovalReconciliationBlockedHistory, nil
-		} else if err != nil {
-			return "", err
-		}
-	}
 	var commandType, commandFingerprint, executorIdentity, status string
 	var policyVersion, version int64
 	var executionDeadline, databaseNow time.Time
@@ -209,6 +191,26 @@ WHERE r.id=$1 FOR UPDATE OF r`, candidate.RequestID).Scan(
 		executorIdentity != candidate.ExecutorIdentity || status != candidate.Status ||
 		version != candidate.Version || !executionDeadline.Equal(candidate.ExecutionDeadline) || executionDeadline.After(databaseNow) {
 		return ApprovalReconciliationStale, nil
+	}
+	// Begin takes control -> request -> Outbox. Use the same ordering so the
+	// request status remains the single linearization point under contention.
+	outboxes, err := reconciliationOutboxesForUpdate(ctx, tx, candidate.RequestID)
+	if err != nil {
+		return "", err
+	}
+	if len(outboxes) != 1 {
+		return ApprovalReconciliationBlockedHistory, nil
+	}
+	outbox := outboxes[0]
+	if outbox.approvalEpoch > control.ApprovalEpoch {
+		return ApprovalReconciliationBlockedHistory, nil
+	}
+	if outbox.deadLetteredAt != nil {
+		if err := tx.QueryRow(ctx, `SELECT event_digest FROM public.inspect_authorization_dead_letter($1)`, outbox.eventID).Scan(&outbox.eventDigest); errors.Is(err, pgx.ErrNoRows) {
+			return ApprovalReconciliationBlockedHistory, nil
+		} else if err != nil {
+			return "", err
+		}
 	}
 	var executionExists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM approval_executions WHERE approval_request_id=$1)`, candidate.RequestID).Scan(&executionExists); err != nil {
