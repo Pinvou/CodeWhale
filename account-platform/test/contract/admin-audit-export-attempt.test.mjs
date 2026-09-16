@@ -38,3 +38,11 @@ test('one-time audit download ticket is reused after an uncertain download', asy
   assert.match(view, /downloadAuditExport\(exportJob\.export_id, exportTicketRef\.current\.download_token\)/);
   assert.match(view, /download_ticket_issued_at && !exportTicketRef\.current/);
 });
+
+test('audit filters have accessible names and invalid dates do not crash export', () => {
+  const view = readFileSync(new URL('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  for (const key of ['actorFilter', 'actionFilter', 'resourceFilter', 'result']) {
+    assert.match(view, new RegExp(`aria-label=\\{copy\\.audit\\.${key}\\}`));
+  }
+  assert.match(view, /try \{ filter = queryFilters\(\); \} catch \{ setError\(copy\.audit\.exportRequestInvalid\); return; \}/);
+});

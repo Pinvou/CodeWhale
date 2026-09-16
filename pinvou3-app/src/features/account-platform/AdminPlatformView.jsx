@@ -5946,7 +5946,8 @@ function Audit({ copy, data, client, setData, permissions }) {
   };
   const createExport = async () => {
     if (!exportAttemptRef.current) {
-      const filter = queryFilters();
+      let filter;
+      try { filter = queryFilters(); } catch { setError(copy.audit.exportRequestInvalid); return; }
       if (!filter.from || !filter.to) { setError(copy.audit.exportRangeRequired); return; }
       try {
         exportAttemptRef.current = newAuditExportAttempt(filter, exportReason, includePII,
@@ -6066,8 +6067,9 @@ function Audit({ copy, data, client, setData, permissions }) {
     <section className="adm-panel">
       <SectionHeader title={copy.audit.title} count={items.length} copy={copy} />
       <form className="adm-ops-form" onSubmit={search}>
-        <input placeholder={copy.audit.actorFilter} value={filters.actor} onChange={(event) => setFilters((current) => ({ ...current, actor: event.target.value }))} />
+        <input aria-label={copy.audit.actorFilter} placeholder={copy.audit.actorFilter} value={filters.actor} onChange={(event) => setFilters((current) => ({ ...current, actor: event.target.value }))} />
         <input
+          aria-label={copy.audit.actionFilter}
           placeholder={copy.audit.actionFilter}
           value={filters.action}
           onChange={(event) =>
@@ -6078,6 +6080,7 @@ function Audit({ copy, data, client, setData, permissions }) {
           }
         />
         <input
+          aria-label={copy.audit.resourceFilter}
           placeholder={copy.audit.resourceFilter}
           value={filters.resource}
           onChange={(event) =>
@@ -6088,6 +6091,7 @@ function Audit({ copy, data, client, setData, permissions }) {
           }
         />
         <select
+          aria-label={copy.audit.result}
           value={filters.result}
           onChange={(event) =>
             setFilters((current) => ({
