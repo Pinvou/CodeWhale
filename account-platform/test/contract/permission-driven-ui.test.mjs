@@ -87,6 +87,19 @@ test('independent admin routes require their exact read capability and hide unsu
   assert.ok(!adminVisibleSections(snapshot({ platform: ['platform.organizations.read'] })).includes('myorg'));
 });
 
+test('each Token approval requester and approver can reach the governed center without unrelated access', () => {
+  for (const permission of [
+    'platform.models.lifecycle.request', 'platform.models.lifecycle.approve',
+    'platform.models.catalog.rollback.request', 'platform.models.catalog.rollback.approve',
+    'platform.tokens.credentials.revoke.request', 'platform.tokens.credentials.revoke.approve',
+  ]) {
+    const value = snapshot({ platform: [permission] });
+    assert.deepEqual(adminVisibleSections(value), ['approvals', 'settings'], permission);
+    assert.equal(adminSectionReadOnly(value, 'approvals'), false, permission);
+  }
+  assert.equal(adminVisibleSections(snapshot({ platform: ['platform.models.sync'] })).includes('approvals'), false);
+});
+
 test('every independent authorization version invalidates a rendered snapshot', () => {
   const current = authorizationVersions(snapshot());
   for (const key of ['context_version', 'personal_authorization_version', 'platform_authorization_version']) {
