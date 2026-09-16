@@ -98,6 +98,11 @@ func main() {
 		log.Fatal("Billing governance reader configuration is invalid: ", err)
 	}
 	repository.WithBillingGovernanceActivation(billingGovernance)
+	approvalProofs, err := account.NewHTTPApprovalProofSource(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), os.Getenv("BILLING_HTTP_URL"), serviceCredential)
+	if err != nil {
+		log.Fatal("Approval proof reader configuration is invalid: ", err)
+	}
+	repository.WithApprovalProofSource(approvalProofs)
 	approvalSnapshots, err := account.NewHTTPApprovalSnapshotSource(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)

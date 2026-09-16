@@ -86,6 +86,14 @@ func (r *PostgresRepository) ConfigureWalletProvisioning(policyVersion string, s
 	return nil
 }
 
+// WithApprovalProofSource registers the Account-only owner-domain reader.
+// It does not activate proof approvals: the persisted ADMIN_APPROVAL control
+// and final locked writer remain the sole authorization gate.
+func (r *PostgresRepository) WithApprovalProofSource(source ApprovalProofSource) *PostgresRepository {
+	r.approvalProofSource = source
+	return r
+}
+
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
 func (r *PostgresRepository) Close() {
 	if r.approvalWriterPool != nil && r.approvalWriterPool != r.pool {
