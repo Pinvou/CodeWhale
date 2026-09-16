@@ -184,8 +184,14 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 ///       darwin 纳入 PLATFORM_BIN_DIR/解包/测试的 cfg。内容虽受
 ///       BUNDLE_H3C_CLI_HASH 覆盖，仍按登记惯例 bump 语义版本，让 macOS
 ///       老装机（此前 unsupported）升级后启动即解包二进制。
+/// 0.34: 回流 Community #512 的连接器 CLI 与第三方技能树全量同步
+///       （wecom-cli 1.2.1 skills、lark-cli 1.0.95、dws 1.0.61、tmeet
+///       1.0.18，均登记于对应 NOTICE）。wecom-cli 最低可接受版本升至
+///       1.2.1，tmeet npm 锁定升至 1.0.18。Official 已占用 0.30-0.33，
+///       extracted-VERSION 门禁只做不等比较，使用新值确保已连接用户
+///       启动时刷新四棵技能树（技能树不参与内容哈希）。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.33-",
+    "0.34-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
