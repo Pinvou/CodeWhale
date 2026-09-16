@@ -107,6 +107,7 @@ func TestApprovalProofClientFailureClasses(t *testing.T) {
 		{"oversized", 200, []byte(strings.Repeat("x", 65<<10)), 0, ErrApprovalProofTooLarge},
 		{"malformed", 200, []byte(`{"verdict":"ALLOW"}`), 0, ErrApprovalProofInvalid},
 		{"denied", 200, []byte(strings.Replace(strings.Replace(string(golden), `"verdict":"ALLOW"`, `"verdict":"DENY"`, 1), `"reason_code":"PROOF_VALID"`, `"reason_code":"RESOURCE_STATE_CHANGED"`, 1)), 0, ErrApprovalProofRejected},
+		{"wrong-command-reason", 200, []byte(strings.Replace(strings.Replace(string(golden), `"verdict":"ALLOW"`, `"verdict":"DENY"`, 1), `"reason_code":"PROOF_VALID"`, `"reason_code":"PROVIDER_STATE_CHANGED"`, 1)), 0, ErrApprovalProofInvalid},
 		{"forbidden", 403, nil, 0, ErrApprovalProofUnavailable},
 		{"gateway-timeout", 504, nil, 0, ErrApprovalProofTimeout},
 		{"deadline", 200, golden, 40 * time.Millisecond, ErrApprovalProofTimeout},
@@ -130,9 +131,24 @@ func TestApprovalProofClientFailureClasses(t *testing.T) {
 				ctx, cancel = context.WithTimeout(ctx, 5*time.Millisecond)
 				defer cancel()
 			}
-			if _, err := source.Proof(ctx, requestID, artifacts); !errors.Is(err, test.want) {
+			result, err := source.Proof(ctx, requestID, artifacts)
+			if !errors.Is(err, test.want) {
 				t.Fatalf("got %v want %v", err, test.want)
 			}
+			if errors.Is(err, ErrApprovalProofRejected) && (result.Response.ReasonCode != "RESOURCE_STATE_CHANGED" || result.Digest == "") {
+				t.Fatalf("verified denial lost audit binding: %+v", result)
+			}
 		})
+	}
+}
+
+func TestApprovalProofCommandReasonWhitelist(t *testing.T) {
+	for _, command := range []string{"WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME", "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE"} {
+		if !approvalProofReasonAllowed(command, "ALLOW", "PROOF_VALID") || approvalProofReasonAllowed(command, "DENY", "PROOF_VALID") || approvalProofReasonAllowed(command, "DENY", "UNKNOWN") {
+			t.Fatalf("invalid reason boundary: %s", command)
+		}
+	}
+	if approvalProofReasonAllowed("WALLET_ADJUSTMENT", "DENY", "PROVIDER_STATE_CHANGED") || approvalProofReasonAllowed("TOKEN_CREDENTIAL_REVOKE", "DENY", "EVIDENCE_MISSING") || approvalProofReasonAllowed("UNKNOWN", "DENY", "RESOURCE_STATE_CHANGED") {
+		t.Fatal("reason whitelist widened across commands")
 	}
 }

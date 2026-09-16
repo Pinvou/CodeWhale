@@ -121,10 +121,50 @@ func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid
 	if err != nil || !approvalencoding.ProofResponseBound(proof, requestID, artifacts) || !approvalencoding.ProofResponseFresh(proof, time.Now().UTC()) {
 		return ApprovalProofResult{}, ErrApprovalProofInvalid
 	}
-	if proof.Verdict == "DENY" {
-		return ApprovalProofResult{}, ErrApprovalProofRejected
+	if !approvalProofReasonAllowed(proof.CommandType, proof.Verdict, proof.ReasonCode) {
+		return ApprovalProofResult{}, ErrApprovalProofInvalid
 	}
-	return ApprovalProofResult{Response: proof, Digest: digest}, nil
+	result := ApprovalProofResult{Response: proof, Digest: digest}
+	if proof.Verdict == "DENY" {
+		// Preserve only the validated closed response for stable redacted audit.
+		return result, ErrApprovalProofRejected
+	}
+	return result, nil
+}
+
+func approvalProofReasonAllowed(command, verdict, reason string) bool {
+	switch command {
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME",
+		"TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+	default:
+		return false
+	}
+	if verdict == "ALLOW" {
+		return reason == "PROOF_VALID"
+	}
+	if verdict != "DENY" {
+		return false
+	}
+	common := map[string]bool{
+		"RESOURCE_NOT_FOUND": true, "RESOURCE_STATE_CHANGED": true, "RESOURCE_VERSION_CHANGED": true,
+		"SNAPSHOT_MISMATCH": true, "POLICY_VERSION_CHANGED": true, "DOMAIN_INVARIANT_FAILED": true,
+		"EXECUTION_WINDOW_EXPIRED": true,
+	}
+	if common[reason] {
+		return true
+	}
+	switch command {
+	case "WALLET_ADJUSTMENT":
+		return false
+	case "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+		return reason == "ACTIVATION_CHANGED" || reason == "EVIDENCE_MISSING" || reason == "EVIDENCE_EXPIRED" || reason == "PROVIDER_STATE_CHANGED"
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK":
+		return reason == "ACTIVATION_CHANGED" || reason == "EVIDENCE_MISSING" || reason == "EVIDENCE_EXPIRED"
+	case "TOKEN_CREDENTIAL_REVOKE":
+		return reason == "ACTIVATION_CHANGED"
+	default:
+		return false
+	}
 }
 
 func approvalProofNetworkError(err error, ctx context.Context) error {
