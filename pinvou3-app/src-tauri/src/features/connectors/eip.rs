@@ -399,7 +399,7 @@ fn run_login_flow(app: &AppHandle, epoch: u64) {
         if !flow.is_active(epoch) {
             return;
         }
-        // auth poll 一轮(自带 30s 轮询窗口);成功与否统一靠 auth status 判定。
+        // auth poll 一轮(CLI 本地轮询窗口默认 5s);成功与否统一靠 auth status 判定。
         if let Ok(cmd) = eip(&["auth", "poll", "--output", "json"]) {
             let _ = run(cmd);
         }

@@ -168,7 +168,7 @@ pub(crate) fn reap_after_kill(child: &mut Child) {
 }
 
 /// 连接器 CLI 单次调用的兜底上限。Rust 侧全部单次调用(eip `auth login
-/// --no-poll` / `auth poll`(服务端窗口默认 5s)/ status / load / logout)
+/// --no-poll` / `auth poll`(CLI 本地轮询窗口默认 5s)/ status / load / logout)
 /// 受 CLI 自带 HTTP 客户端超时 60s 约束(见 eip linux-src/main.go
 /// `httpClient`),合法最坏 ≈ 60s + 启动开销;超过视为进程级挂死。须小于
 /// 门闩抢占阈值 `flow_gate::STALL_LIMIT`(180s),让卡死先在调用点以本超时

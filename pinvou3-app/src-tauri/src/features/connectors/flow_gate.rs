@@ -101,7 +101,8 @@ const STALL_LIMIT: Duration = Duration::from_secs(180);
 
 /// 调用方等待旧流程归还门闩的上限。必须**大于** [`STALL_LIMIT`]，好让"卡死"
 /// 由抢占自愈（`begin` 直接返回 `Start`）而不是把用户推回重试提示；同时也要
-/// 覆盖最坏的一次**合法**取消节拍（3s sleep + poll 90s + status 60s ≈ 153s）。
+/// 覆盖最坏的一次**合法**取消节拍（3s sleep + 单次调用最坏 120s + 等待分片
+/// 250ms 粒度 ≈ 123s）。
 pub(crate) const CANCEL_WAIT_LIMIT: Duration = Duration::from_secs(195);
 
 /// 流程持有的门闩守卫。**在流程体最外层作用域创建**，无论正常返回、提前
@@ -760,13 +761,13 @@ mod tests {
     #[test]
     fn throttle_reports_decreasing_seconds_while_waiting() {
         let last = Mutex::new(Vec::new());
-        assert!(throttle_ok(&last, 1200), "第一个调用方免等待放行");
+        assert!(throttle_ok(&last, 2500), "第一个调用方免等待放行");
         let reports = std::cell::RefCell::new(Vec::new());
         let permit = {
             let reports = &reports;
             throttle_at(
                 &last,
-                Duration::from_millis(1200),
+                Duration::from_millis(2500),
                 &mut |wait| reports.borrow_mut().push(wait),
                 &mut || false,
             )
