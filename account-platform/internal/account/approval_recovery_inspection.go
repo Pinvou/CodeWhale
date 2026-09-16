@@ -49,11 +49,7 @@ func InspectProofRecovery(ctx context.Context, planner ApprovalRecoveryPlanner, 
 	}
 	batch := ApprovalRecoveryInspectionBatch{Plan: plan, Inspections: make([]ApprovalRecoveryInspection, 0, len(plan.Candidates))}
 	for _, candidate := range plan.Candidates {
-		descriptor, ok := approvalconsumer.LookupDurable(candidate.Durable)
-		if !ok || !approvalconsumer.Match(descriptor, candidate.CommandType, candidate.PolicyVersion, candidate.Workload) ||
-			!approvaleffect.ValidFingerprint(candidate.CommandFingerprint) || candidate.RequestID == uuid.Nil ||
-			candidate.OriginalEventID == uuid.Nil || candidate.ExecutionID == uuid.Nil ||
-			candidate.Investigation.Retryable || !candidate.Investigation.QueryOnly || candidate.Investigation.MaxDomainAttempts != 1 {
+		if !validRecoveryInspectionCandidate(candidate) {
 			return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 		}
 		entry := ApprovalRecoveryInspection{Candidate: candidate, EffectObservation: "UNAVAILABLE", Disposition: "UNKNOWN_QUERY_ONLY"}
@@ -81,4 +77,12 @@ func InspectProofRecovery(ctx context.Context, planner ApprovalRecoveryPlanner, 
 		return ApprovalRecoveryInspectionBatch{}, err
 	}
 	return batch, nil
+}
+
+func validRecoveryInspectionCandidate(candidate ApprovalRecoveryCandidate) bool {
+	descriptor, ok := approvalconsumer.LookupDurable(candidate.Durable)
+	return ok && approvalconsumer.Match(descriptor, candidate.CommandType, candidate.PolicyVersion, candidate.Workload) &&
+		approvaleffect.ValidFingerprint(candidate.CommandFingerprint) && candidate.RequestID != uuid.Nil &&
+		candidate.OriginalEventID != uuid.Nil && candidate.ExecutionID != uuid.Nil &&
+		!candidate.Investigation.Retryable && candidate.Investigation.QueryOnly && candidate.Investigation.MaxDomainAttempts == 1
 }
