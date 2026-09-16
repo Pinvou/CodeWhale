@@ -1,0 +1,135 @@
+package account
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"github.com/google/uuid"
+)
+
+var (
+	ErrApprovalProofRejected    = errors.New("approval proof rejected")
+	ErrApprovalProofInvalid     = errors.New("approval proof invalid")
+	ErrApprovalProofTooLarge    = errors.New("approval proof too large")
+	ErrApprovalProofUnavailable = errors.New("approval proof unavailable")
+	ErrApprovalProofTimeout     = errors.New("approval proof timed out")
+)
+
+type ApprovalProofResult struct {
+	Response approvalencoding.ProofResponse
+	Digest   string
+}
+
+type ApprovalProofSource interface {
+	Proof(context.Context, uuid.UUID, approvalencoding.ProofArtifacts) (ApprovalProofResult, error)
+}
+
+type HTTPApprovalProofSource struct {
+	tokenURL     *url.URL
+	billingURL   *url.URL
+	serviceToken string
+	client       *http.Client
+}
+
+func NewHTTPApprovalProofSource(tokenURL, billingURL, serviceToken string) (*HTTPApprovalProofSource, error) {
+	parse := func(raw string) (*url.URL, error) {
+		value, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
+		if err != nil || value == nil || (value.Scheme != "http" && value.Scheme != "https") || value.Host == "" || value.User != nil || value.RawQuery != "" || value.Fragment != "" || value.Path != "" {
+			return nil, ErrApprovalProofUnavailable
+		}
+		return value, nil
+	}
+	token, err := parse(tokenURL)
+	if err != nil {
+		return nil, err
+	}
+	billing, err := parse(billingURL)
+	if err != nil || strings.TrimSpace(serviceToken) == "" {
+		return nil, ErrApprovalProofUnavailable
+	}
+	return &HTTPApprovalProofSource{tokenURL: token, billingURL: billing, serviceToken: strings.TrimSpace(serviceToken), client: observability.NewHTTPClient(2 * time.Second)}, nil
+}
+
+func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid.UUID, artifacts approvalencoding.ProofArtifacts) (ApprovalProofResult, error) {
+	if source == nil || source.client == nil {
+		return ApprovalProofResult{}, ErrApprovalProofUnavailable
+	}
+	payload, err := approvalencoding.EncodeProofRequest(requestID, artifacts)
+	if err != nil {
+		return ApprovalProofResult{}, ErrApprovalProofInvalid
+	}
+	base := source.billingURL
+	switch artifacts.CommandType {
+	case "WALLET_ADJUSTMENT", "PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME":
+	case "TOKEN_MODEL_LIFECYCLE_CHANGE", "TOKEN_MODEL_CATALOG_ROLLBACK", "TOKEN_CREDENTIAL_REVOKE":
+		base = source.tokenURL
+	default:
+		return ApprovalProofResult{}, ErrApprovalProofInvalid
+	}
+	// This absolute deadline is created once, after local encoding and before
+	// any network operation. It includes the entire response read/validation.
+	deadline := time.Now().Add(2 * time.Second)
+	if prior, ok := ctx.Deadline(); ok && prior.Before(deadline) {
+		deadline = prior
+	}
+	requestCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost, base.String()+"/internal/v1/approval-command-proofs", bytes.NewReader(payload))
+	if err != nil {
+		return ApprovalProofResult{}, ErrApprovalProofUnavailable
+	}
+	if err := serviceauth.SetAuthorization(request, source.serviceToken); err != nil {
+		return ApprovalProofResult{}, ErrApprovalProofUnavailable
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := source.client.Do(request)
+	if err != nil {
+		return ApprovalProofResult{}, approvalProofNetworkError(err, requestCtx)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 2048))
+		if response.StatusCode == http.StatusGatewayTimeout || errors.Is(requestCtx.Err(), context.DeadlineExceeded) {
+			return ApprovalProofResult{}, ErrApprovalProofTimeout
+		}
+		return ApprovalProofResult{}, ErrApprovalProofUnavailable
+	}
+	maximumResponse := approvalencoding.MaximumDocumentBytes - len(payload)
+	if maximumResponse <= 0 {
+		return ApprovalProofResult{}, ErrApprovalProofTooLarge
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, int64(maximumResponse)+1))
+	if err != nil {
+		return ApprovalProofResult{}, approvalProofNetworkError(err, requestCtx)
+	}
+	if len(raw) > maximumResponse || !approvalencoding.ProofTransportWithinBudget(payload, raw) {
+		return ApprovalProofResult{}, ErrApprovalProofTooLarge
+	}
+	if err := requestCtx.Err(); err != nil {
+		return ApprovalProofResult{}, approvalProofNetworkError(err, requestCtx)
+	}
+	proof, digest, err := approvalencoding.DecodeProofResponse(raw)
+	if err != nil || !approvalencoding.ProofResponseBound(proof, requestID, artifacts) || !approvalencoding.ProofResponseFresh(proof, time.Now().UTC()) {
+		return ApprovalProofResult{}, ErrApprovalProofInvalid
+	}
+	if proof.Verdict == "DENY" {
+		return ApprovalProofResult{}, ErrApprovalProofRejected
+	}
+	return ApprovalProofResult{Response: proof, Digest: digest}, nil
+}
+
+func approvalProofNetworkError(err error, ctx context.Context) error {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return ErrApprovalProofTimeout
+	}
+	return ErrApprovalProofUnavailable
+}
