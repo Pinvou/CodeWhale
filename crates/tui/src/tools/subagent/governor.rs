@@ -656,6 +656,47 @@ mod tests {
         });
     }
 
+    /// The semaphore permit count — not just the bookkeeping `capacity()`
+    /// field — must track capacity changes while holders are outstanding.
+    /// The capacity-focused tests above assert the bookkeeping alone, so
+    /// this is the direct pin on the `set_capacity` expand/shrink and
+    /// `Drop` absorb arithmetic.
+    #[test]
+    fn forkguard_gate_semaphore_permits_track_capacity_with_holders_outstanding() {
+        let (_governor, gate) = RateLimitGovernor::new(4);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let a = gate.try_acquire().expect("first admission");
+            let b = gate.try_acquire().expect("second admission");
+            assert_eq!(gate.available_permits(), 2);
+
+            // Expand with holders outstanding: the semaphore gains only the
+            // new free headroom (4 - 2 -> 6 - 2).
+            gate.set_capacity(6);
+            assert_eq!(gate.available_permits(), 4);
+
+            // Shrink below the outstanding count: free slots drain to zero
+            // and the surplus holders' releases are absorbed.
+            gate.set_capacity(1);
+            assert_eq!(gate.available_permits(), 0);
+            drop(b);
+            assert_eq!(
+                gate.available_permits(),
+                0,
+                "release above capacity must be absorbed"
+            );
+            drop(a);
+            assert_eq!(
+                gate.available_permits(),
+                1,
+                "release below capacity must return the slot"
+            );
+        });
+    }
+
     #[test]
     fn rate_limit_retry_delay_is_full_jitter_within_base() {
         for retry in 1..=12u32 {
