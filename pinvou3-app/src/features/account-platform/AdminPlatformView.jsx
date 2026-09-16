@@ -7,6 +7,7 @@ import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged
 import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelOperationsOverviewGateEnabled, adminModelPricingEditGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminModelTokenPageOverviewsGateEnabled, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
 import { createFinanceDetailRecovery, financeDetailRouteIsCurrent, isFinanceSnapshotExpired, normalizeFinanceCollection, previousFinanceCursor, rememberFinanceCursor, resetExpiredFinanceQuery, runFinanceDetailRequest } from './admin-finance-pagination.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
+import { AdminApprovalWorkspace } from './AdminApprovalWorkspace.jsx';
 import { AdminModelTokenWorkspace } from './AdminModelTokenWorkspace.jsx';
 import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 import { createFinanceIdempotencyKey, executeStructuredFinanceAction, financeActionRequiresRefresh, isUnknownMutationOutcome, paymentAnomalyResolutionOptions } from './finance-actions.js';
@@ -860,6 +861,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             </>
           )}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'approvals' && <AdminApprovalWorkspace key={JSON.stringify(authorizationVersions(authorization))} client={client} copy={copy} language={language} currentUserID={authorization?.user_id || ''} routeVersion={routeVersion} />}
           {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} />}
           <AdminExtensionSlot section={section} financeTab={financeTab} authorization={authorization} />
         </div>

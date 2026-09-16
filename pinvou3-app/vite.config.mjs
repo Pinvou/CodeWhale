@@ -202,7 +202,6 @@ function preserveAccountPortalExtensions() {
   const extensions = {
     'admin.html': {
       head: [
-        '<script type="module" crossorigin src="/assets/approval-requests.js"></script>',
         '<script type="module" crossorigin src="/assets/product-admin.js"></script>',
         '<link rel="stylesheet" crossorigin href="/assets/approval-requests.css">',
         '<link rel="stylesheet" crossorigin href="/assets/product-admin.css">',

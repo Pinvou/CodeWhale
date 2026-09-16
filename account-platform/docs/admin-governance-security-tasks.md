@@ -173,6 +173,8 @@ GSA-17 客户端写链路收口（CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_EN
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 
 GSA-18 目录读取基础（仍PARTIAL / REVIEW_PENDING）：Portal新增只读、版本中立目录BFF，从当前Session的受信令牌获取Account v2闭合目录；请求前后比对动作控制代次，不接收浏览器查询或原始policy API，不改变旧Session请求写线。对目录schema、权限版本header、可见项和no-store进行封闭验证；客户端同样绑定受信capability及权限版本，迟到响应不得重新呈现目录。Portal HTTP、Node客户端及授权路由门禁定向通过。尚未连接四视图页面、筛选/游标、详情决定，也未解除GSA-16恢复能力与环境待验依赖，不能标记任务完成。
+
+GSA-18 四视图只读页面（仍PARTIAL / REVIEW_PENDING）：新增React审批中心的我的申请、待我审批、执行与失败、策略目录四视图，列表与详情只走受控BFF客户端；目录不读取`platform.roles.read`内部policy API，列表不依赖跨主体平台全量。筛选及cursor写入稳定URL，分页沿服务端next_cursor推进，列表不渲染动作，历史最小详情只读。旧独立脚本保留为历史合同素材但不再由管理页加载，避免在新会话绕开BFF直读v1。三语文案放入管理台集中词库，页面有加载、空、错误、移动宽度状态。决定与提交交互及真实浏览器视觉验收尚未完成，本项不能标记CODE_COMPLETE。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

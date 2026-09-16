@@ -52,6 +52,14 @@ export const adminPlatformCopy = {
       system: '系统与安全',
       settings: '偏好设置',
     },
+    approvalCenter: {
+      views: '审批中心视图', mine: '我的申请', pending: '待我审批', execution: '执行与失败', directory: '审批策略目录',
+      commandType: '命令类型', target: '目标', status: '状态', risk: '风险', requester: '申请人', updated: '更新时间',
+      requestable: '可申请', yes: '是', no: '否', allStatuses: '全部状态', refresh: '刷新', loading: '正在加载审批数据…',
+      listUnavailable: '审批列表暂时不可用，请稍后重试。', detailUnavailable: '申请详情暂时不可用，请刷新后重试。',
+      empty: '当前视图暂无可见申请。', detail: '申请详情', open: '查看', close: '关闭', requestID: '申请 ID',
+      historicalMinimum: '此历史申请仅提供最小只读信息，不能在这里执行动作。', previous: '上一页', next: '下一页',
+    },
     pageLeads: {
       organizations: '管理组织生命周期、所有者、成员与节点结构。',
       users: '按永久用户编码和用户名查找账号，并处理已授权的身份安全操作。',
@@ -526,6 +534,14 @@ export const adminPlatformCopy = {
       system: 'System & security',
       settings: 'Preferences',
     },
+    approvalCenter: {
+      views: 'Approval center views', mine: 'My requests', pending: 'Awaiting my approval', execution: 'Execution & failures', directory: 'Policy directory',
+      commandType: 'Command type', target: 'Target', status: 'Status', risk: 'Risk', requester: 'Requester', updated: 'Updated',
+      requestable: 'Requestable', yes: 'Yes', no: 'No', allStatuses: 'All statuses', refresh: 'Refresh', loading: 'Loading approvals…',
+      listUnavailable: 'Approvals are temporarily unavailable. Try again later.', detailUnavailable: 'Request details are temporarily unavailable. Refresh and retry.',
+      empty: 'No visible requests in this view.', detail: 'Request details', open: 'View', close: 'Close', requestID: 'Request ID',
+      historicalMinimum: 'This historical request has read-only minimal details; no action is available here.', previous: 'Previous', next: 'Next',
+    },
     pageLeads: {
       organizations: 'Manage organization lifecycle, ownership, membership, and unit structure.',
       users: 'Find accounts by permanent user code or username and perform authorized identity-security actions.',
@@ -994,6 +1010,14 @@ export const adminPlatformCopy = {
       audit: '監査とエクスポート',
       system: 'システムとセキュリティ',
       settings: '環境設定',
+    },
+    approvalCenter: {
+      views: '承認センターの表示', mine: '自分の申請', pending: '承認待ち', execution: '実行と失敗', directory: 'ポリシーディレクトリ',
+      commandType: 'コマンド種別', target: '対象', status: '状態', risk: 'リスク', requester: '申請者', updated: '更新日時',
+      requestable: '申請可能', yes: 'はい', no: 'いいえ', allStatuses: 'すべての状態', refresh: '更新', loading: '承認データを読み込み中…',
+      listUnavailable: '承認一覧を取得できません。しばらくしてから再試行してください。', detailUnavailable: '申請の詳細を取得できません。更新して再試行してください。',
+      empty: 'この表示に閲覧可能な申請はありません。', detail: '申請の詳細', open: '表示', close: '閉じる', requestID: '申請 ID',
+      historicalMinimum: 'この履歴申請は最小限の読み取り専用情報のみ表示され、操作できません。', previous: '前へ', next: '次へ',
     },
     pageLeads: {
       organizations: '組織のライフサイクル、所有者、メンバー、組織ツリーを管理します。',
