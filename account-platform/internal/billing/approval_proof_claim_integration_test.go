@@ -64,6 +64,9 @@ func TestBillingWalletApprovalClaimPostgresIntegration(t *testing.T) {
 	if err := repository.ClaimBillingApprovalProof(ctx, binding, event); err != nil {
 		t.Fatalf("claim current wallet facts: %v", err)
 	}
+	if claimed, err := repository.ExistingBillingApprovalProofClaim(ctx, binding); err != nil || !claimed {
+		t.Fatalf("persisted claim must be observable before any replay: claimed=%v err=%v", claimed, err)
+	}
 	mismatched := binding
 	mismatched.ApprovalRequestID = uuid.New()
 	if err := repository.ClaimBillingApprovalProof(ctx, mismatched, event); !errors.Is(err, ErrApprovalSnapshotMismatch) {

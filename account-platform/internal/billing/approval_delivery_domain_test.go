@@ -241,6 +241,7 @@ func TestBillingProofEraExecutionRejectsRevisionBeforeDomainEffect(t *testing.T)
 	domain := &billingAuthorizationDomain{repository: repository, proof: func(_ context.Context, request approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error) {
 		return approvalencoding.ProofResponse{Verdict: "ALLOW", DomainRevision: "1:" + strings.Repeat("b", 64), CommandDigest: request.Artifacts.CommandDigest, SnapshotDigest: request.Artifacts.SnapshotDigest}, nil
 	}}
+	domain.priorClaim = func(context.Context, ApprovalAuthorizationBinding) (bool, error) { return false, nil }
 	attempt := domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
 	if !attempt.FailureIsDefinite || attempt.StableFailureCode != "DOMAIN_REVISION_CHANGED" || repository.adjustmentRuns != 0 {
 		t.Fatalf("drift must not reach adjustment executor: %+v runs=%d", attempt, repository.adjustmentRuns)
@@ -271,6 +272,12 @@ func TestBillingProofEraExecutionRejectsRevisionBeforeDomainEffect(t *testing.T)
 	if attempt.FailureIsDefinite || repository.adjustmentRuns != 1 {
 		t.Fatalf("uncertain claim outcome reached wallet effect: %+v runs=%d", attempt, repository.adjustmentRuns)
 	}
+	domain.priorClaim = func(context.Context, ApprovalAuthorizationBinding) (bool, error) { return true, nil }
+	attempt = domain.ExecuteAuthorizationAttempt(context.Background(), binding, event, command)
+	if attempt.FailureIsDefinite || repository.adjustmentRuns != 1 {
+		t.Fatalf("existing claim must remain unknown without replay: %+v runs=%d", attempt, repository.adjustmentRuns)
+	}
+	domain.priorClaim = func(context.Context, ApprovalAuthorizationBinding) (bool, error) { return false, nil }
 	provider := ProviderResumeVersions{ProviderID: "provider-a", ProviderVersion: "v1", ProviderControlVersion: 3, ProbeOrderID: uuid.New(), PolicyVersion: "p1", ActiveMappingSetFingerprint: strings.Repeat("a", 32)}
 	providerRaw, _ := json.Marshal(provider)
 	providerFinancial := json.RawMessage(`{"new_orders_enabled":false,"provider_control_version":3,"product_control_version":null}`)

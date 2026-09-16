@@ -17,6 +17,7 @@ type billingAuthorizationDomain struct {
 	probe      func(context.Context, uuid.UUID) (PaymentOrder, ProviderOrder, uuid.UUID, error)
 	proof      func(context.Context, approvalencoding.ProofRequest) (approvalencoding.ProofResponse, error)
 	claim      func(context.Context, ApprovalAuthorizationBinding, approvalencoding.AuthorizationEvent) error
+	priorClaim func(context.Context, ApprovalAuthorizationBinding) (bool, error)
 }
 
 type billingAuthorizationExecutionRepository interface {
@@ -42,6 +43,7 @@ func newBillingAuthorizationDomain(service *Service) approvalAuthorizationDomain
 	if repository != nil {
 		domain.database = repository.pool
 		domain.claim = repository.ClaimBillingApprovalProof
+		domain.priorClaim = repository.ExistingBillingApprovalProofClaim
 	}
 	if service.payments != nil {
 		domain.probe = service.payments.probeProviderRecovery
@@ -101,6 +103,13 @@ func (domain *billingAuthorizationDomain) ExecuteAuthorizationAttempt(ctx contex
 		return authorizationDomainAttempt{}
 	}
 	if binding.SerializationVersion == approvalencoding.ApprovalSerializationVersion {
+		if domain.priorClaim == nil {
+			return authorizationDomainAttempt{}
+		}
+		claimed, err := domain.priorClaim(ctx, binding)
+		if err != nil || claimed {
+			return authorizationDomainAttempt{}
+		}
 		if result, valid := domain.executionProof(ctx, binding, event, command); !valid {
 			return result
 		}

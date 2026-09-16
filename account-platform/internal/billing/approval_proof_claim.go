@@ -17,6 +17,17 @@ type billingTxProofFacts struct {
 	tx         pgx.Tx
 }
 
+// A persisted claim is evidence of a possibly-started effect, not evidence
+// that no effect occurred. The result-first consumer must keep it UNKNOWN.
+func (r *PostgresRepository) ExistingBillingApprovalProofClaim(ctx context.Context, binding ApprovalAuthorizationBinding) (bool, error) {
+	var eventID uuid.UUID
+	err := r.pool.QueryRow(ctx, `SELECT authorization_event_id FROM billing_approval_proof_claims WHERE approval_request_id=$1 OR authorization_event_id=$2`, binding.ApprovalRequestID, binding.EventID).Scan(&eventID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (f billingTxProofFacts) AdjustmentForExecution(ctx context.Context, id uuid.UUID) (ManualAdjustment, error) {
 	return getAdjustment(ctx, f.tx, id, false)
 }
