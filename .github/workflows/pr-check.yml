@@ -1678,6 +1678,7 @@ jobs:
             'artifact_public_read_' \
             'features::voice::platform::windows::tests::closed_temp_wav_can_be_reopened_when_asr_denies_write_sharing' \
             'features::memory::tests::topic_migration_' \
+            'connector_introspection_guard_matches_complete_names_only' \
             'features::projects::tests::'; do
             index=$((index+1))
             started=$SECONDS

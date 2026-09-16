@@ -703,6 +703,11 @@ class CiGatePolicyTests(unittest.TestCase):
         )[1]
         self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
         self.assertNotIn("cargo test", regression)
+        self.assertIn(
+            "'connector_introspection_guard_matches_complete_names_only'",
+            regression,
+            "Windows must execute the PowerShell connector-introspection hook regression",
+        )
         for filter_name in (
             "platform::filesystem::tests::windows_",
             "platform::paths::tests::managed_python_",
