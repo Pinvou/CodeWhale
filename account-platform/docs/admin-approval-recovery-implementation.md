@@ -7,6 +7,7 @@
 - Account `000065` 将 proof-era Billing 确定失败保留为 `DOMAIN_INFLIGHT`；`000066` 栅栏化旧版本留下的 `READY + last_error_code`；`000067` 进一步把 `READY + 已有attempt`（即使错误码丢失）迁入只查证态，并使直接 grant 对 proof-era 仅允许第 0 次到第 1 次。Billing consumer 本地也拒绝第二次 Begin/Grant。legacy Billing 的既有 12 次上限不变。
 - `EXECUTION_FAILED` 不由通用过期 worker 直接标记 INVALIDATED；已有执行记录的结果必须先经领域权威查证。未 Begin 的 APPROVED 仍按原五分钟执行窗口过期。
 - 任何已提交 Billing proof claim、已进入 Provider 探测、Token 本地命令已开始、数据库提交结果不明、权威结果读超时或未知错误码，均按 UNKNOWN 处理。一次“未查到结果”不是“没有产生效果”的证明。
+- 六命令 closed 分类已落入 `approvalconsumer.ClassifyProofFailure`。Billing 的 `DOMAIN_REVISION_CHANGED`、`COMMAND_SNAPSHOT_MISMATCH`、`DOMAIN_PRECONDITION_REJECTED` 暂归事实/政策变化调查，`DOMAIN_RESOURCE_NOT_FOUND` 暂归永久失败调查；Token 的合并码 `DOMAIN_EXECUTION_FAILED` 及所有缺码、未知版本都归 UNKNOWN。分类本身不能证明零效果、不能直接 INVALIDATED；当前六命令均不允许自动第二次领域调用，`TRANSIENT_SAFE` 和 `WINDOW_ENDED` 必须待领域证据与绝对窗口核实后才可最终判定。
 
 ## 封闭命令矩阵
 
@@ -23,7 +24,7 @@
 
 ## 后续实现顺序与验收
 
-1. 为六命令分别实现稳定错误到 `TRANSIENT_SAFE / UNKNOWN / PERMANENT / FACT_OR_POLICY_CHANGED / WINDOW_ENDED` 的映射。只有领域返回可验证的“零效果且可按原 execution/idempotency/fencing 重试”证据，才允许 `TRANSIENT_SAFE`；缺码或未识别码一律 UNKNOWN。没有安全证明的命令继续零自动重试。
+1. 六命令的保守错误码分类已落地；继续接入领域权威结果和零效果证据，最终判定 `TRANSIENT_SAFE / UNKNOWN / PERMANENT / FACT_OR_POLICY_CHANGED / WINDOW_ENDED`。只有领域返回可验证的“零效果且可按原 execution/idempotency/fencing 重试”证据，才允许 `TRANSIENT_SAFE`；缺码或未识别码一律 UNKNOWN。没有安全证明的命令继续零自动重试。
 2. 独立最小权限恢复身份持有有界租约，读取 Account 原执行、delivery、epoch、deadline，再读取唯一领域结果和持久证据。UNKNOWN 只能重复只读查询；租约丢失、超时或并发抢占不得创建新执行、调用Provider或复用浏览器请求。
 3. 只有原结果已权威确认才可幂等完成 Account 的同一执行和消息确认；确定永久/漂移失败必须先证明零领域效果，才可在控制行和请求行CAS下 INVALIDATED，供业务页fresh superseding。窗口结束仍有未知效果时留待查，不以时间流逝推定无效果。
 4. 为每个命令验证首调成功/失败、首次响应丢失、提交不明、领域读不可用、broker重投、双worker抢租、租约到期、epoch切换、五分钟窗口前后、原结果晚到、无结果但已有claim/观测、12次界限和N/N-1。验证独立身份的负向权限、零第二execution和零重复领域效果。
