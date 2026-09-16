@@ -45,8 +45,32 @@ func TestTokenApprovalProofRecomputesOwnerFactsAndEpoch(t *testing.T) {
 	if err != nil || proof.Verdict != "ALLOW" || proof.DomainRevision != "7:"+projection.PrecheckFingerprint || !approvalencoding.ProofResponseBound(proof, requestID, artifacts) {
 		t.Fatalf("authoritative proof=%+v err=%v", proof, err)
 	}
+	proofBody := approvedTokenCommandBody{
+		ActivationEpoch: 7, ProofSchemaVersion: proof.ProofSchemaVersion,
+		CommandDigest: proof.CommandDigest, SnapshotDigest: proof.SnapshotDigest,
+		DomainRevision: proof.DomainRevision, ProofDigest: strings.Repeat("f", 64), ApprovalControlEpoch: 3,
+		CriticalResourceVersions: projection.CriticalResourceVersions, FinancialSnapshot: projection.FinancialSnapshot,
+		Envelope: TokenCommandEnvelope{CommandType: "TOKEN_CREDENTIAL_REVOKE", TargetResourceType: "PROVIDER_CREDENTIAL", TargetResourceID: credentialID.String(), Command: command},
+	}
+	selection := tokenRouteActivationSelection{TokenCommandGovernanceActivation: TokenCommandGovernanceActivation{State: "ACTIVE", Epoch: 7}, transactional: true}
+	if err := service.tokenExecutionProof(context.Background(), "TOKEN_CREDENTIAL_REVOKE", proofBody, selection); err != nil {
+		t.Fatalf("unchanged owner revision rejected: %v", err)
+	}
+	malformed := proofBody
+	malformed.SnapshotDigest = strings.Repeat("0", 64)
+	if service.tokenExecutionProof(context.Background(), "TOKEN_CREDENTIAL_REVOKE", malformed, selection) == nil {
+		t.Fatal("altered frozen snapshot digest accepted")
+	}
+	malformed = proofBody
+	malformed.DomainRevision = "8:" + projection.PrecheckFingerprint
+	if service.tokenExecutionProof(context.Background(), "TOKEN_CREDENTIAL_REVOKE", malformed, selection) == nil {
+		t.Fatal("different Token epoch accepted")
+	}
 	evidence.RouteSetFingerprint = strings.Repeat("e", 64)
 	service.WithImpactPrechecks(true, stubImpactRepository{evidence: evidence}, nil)
+	if service.tokenExecutionProof(context.Background(), "TOKEN_CREDENTIAL_REVOKE", proofBody, selection) == nil {
+		t.Fatal("changed owner facts were executed")
+	}
 	proof, err = service.tokenApprovalProof(context.Background(), request)
 	if err != nil || proof.Verdict != "DENY" || proof.ReasonCode != "SNAPSHOT_MISMATCH" {
 		t.Fatalf("drift proof=%+v err=%v", proof, err)
@@ -97,5 +121,10 @@ func TestTokenProofSnapshotIgnoresOnlyPriceObservationClock(t *testing.T) {
 	current.CriticalResourceVersions = json.RawMessage(`{"catalog_version":8}`)
 	if tokenProofSnapshotMatches("TOKEN_MODEL_CATALOG_ROLLBACK", frozen, current) {
 		t.Fatal("Token catalog drift was ignored")
+	}
+	frozen.CriticalResourceVersions = json.RawMessage(`{"catalog_version":9007199254740992}`)
+	current.CriticalResourceVersions = json.RawMessage(`{"catalog_version":9007199254740993}`)
+	if tokenProofSnapshotMatches("TOKEN_MODEL_CATALOG_ROLLBACK", frozen, current) {
+		t.Fatal("adjacent int64 versions collapsed to the same float64")
 	}
 }

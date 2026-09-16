@@ -1071,10 +1071,9 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "the approved Token command body is invalid", httpserver.RequestID(r.Context()))
 		return
 	}
-	if body.ProofSchemaVersion != "" || body.CommandDigest != "" || body.SnapshotDigest != "" || body.DomainRevision != "" || body.ProofDigest != "" || body.ApprovalControlEpoch != 0 {
-		// A v2 authorization may be transported before this domain's execution
-		// revision validator is installed. Never silently execute it as legacy.
-		api.WriteError(w, http.StatusServiceUnavailable, "TOKEN_PROOF_EXECUTION_NOT_READY", "proof execution requires domain revision validation", httpserver.RequestID(r.Context()))
+	hasProof := body.ProofSchemaVersion != "" || body.CommandDigest != "" || body.SnapshotDigest != "" || body.DomainRevision != "" || body.ProofDigest != "" || body.ApprovalControlEpoch != 0
+	if hasProof && (body.ProofSchemaVersion == "" || body.CommandDigest == "" || body.SnapshotDigest == "" || body.DomainRevision == "" || body.ProofDigest == "" || body.ApprovalControlEpoch < 1) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVED_COMMAND", "proof execution binding is incomplete", httpserver.RequestID(r.Context()))
 		return
 	}
 	selection, selected := r.Context().Value(tokenRouteActivationContextKey{}).(tokenRouteActivationSelection)
@@ -1119,6 +1118,10 @@ func (s *Service) executeApprovedTokenCommand(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if errors.Is(loadErr, ErrNotFound) {
+		if hasProof && s.tokenExecutionProof(r.Context(), commandType, body, selection) != nil {
+			api.WriteError(w, http.StatusConflict, "DOMAIN_REVISION_CHANGED", "the frozen proof no longer matches domain facts", httpserver.RequestID(r.Context()))
+			return
+		}
 		// Authoritative lifecycle evidence is intentionally recomputed only for
 		// the first execution claim. A repeated Account event must replay the
 		// frozen result even when dependencies changed after the plan was

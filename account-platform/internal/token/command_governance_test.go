@@ -358,7 +358,7 @@ func TestApprovedTokenExecutorRejectsCrossDomainIdentityAndRequiresStableExecuti
 		{name: "token executor wrong execution key", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.ExecutionIdempotencyKey = "approval:wrong" }, want: http.StatusBadRequest},
 		{name: "missing activation epoch", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.ActivationEpoch = 0 }, want: http.StatusBadRequest},
 		{name: "different activation epoch", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.ActivationEpoch = 3 }, want: http.StatusConflict},
-		{name: "proof cannot execute as legacy", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.DomainRevision = "1:" + fingerprint }, want: http.StatusServiceUnavailable},
+		{name: "partial proof cannot execute as legacy", service: "token-command-executor", mutate: func(item *approvedTokenCommandBody) { item.DomainRevision = "1:" + fingerprint }, want: http.StatusBadRequest},
 		{name: "token executor accepted before repository lookup", service: "token-command-executor", want: http.StatusServiceUnavailable},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {

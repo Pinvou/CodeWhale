@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
@@ -115,11 +116,53 @@ func (s *Service) tokenApprovalProof(ctx context.Context, request approvalencodi
 }
 
 func tokenProofSnapshotMatches(command string, frozen approvalencoding.LegacyProofInput, current ApprovalSnapshotProjection) bool {
-	if !jsonSemanticEqual(frozen.CriticalResourceVersions, current.CriticalResourceVersions) {
+	if !equalTokenApprovalJSONObjects(frozen.CriticalResourceVersions, current.CriticalResourceVersions) {
 		return false
 	}
 	if command == "TOKEN_CREDENTIAL_REVOKE" {
-		return jsonSemanticEqual(frozen.FinancialSnapshot, current.FinancialSnapshot)
+		return equalTokenApprovalJSONObjects(frozen.FinancialSnapshot, current.FinancialSnapshot)
 	}
 	return approvalpolicy.SameTokenModelFinancialFacts(frozen.FinancialSnapshot, current.FinancialSnapshot)
+}
+
+// tokenExecutionProof checks the frozen event binding and a fresh domain read
+// before the first execution claim. Existing result recovery does not take a
+// second proof; downstream command transactions still own their local CAS.
+func (s *Service) tokenExecutionProof(ctx context.Context, command string, body approvedTokenCommandBody, activation tokenRouteActivationSelection) error {
+	if body.ProofSchemaVersion != approvalencoding.ProofSchemaVersion || !validImpactFingerprint(body.CommandDigest) ||
+		!validImpactFingerprint(body.SnapshotDigest) || !validImpactFingerprint(body.ProofDigest) ||
+		body.ApprovalControlEpoch < 1 || !activation.transactional || activation.State != "ACTIVE" ||
+		body.ActivationEpoch != activation.Epoch {
+		return errTokenApprovalProofUnavailable
+	}
+	parts := strings.Split(body.DomainRevision, ":")
+	if len(parts) != 2 || parts[0] != strconv.FormatInt(activation.Epoch, 10) || !validImpactFingerprint(parts[1]) {
+		return errTokenApprovalProofUnavailable
+	}
+	policy, err := approvalpolicy.Lookup(command)
+	if err != nil {
+		return errTokenApprovalProofUnavailable
+	}
+	schemaVersion := 1
+	if command == "TOKEN_MODEL_LIFECYCLE_CHANGE" || command == "TOKEN_MODEL_CATALOG_ROLLBACK" {
+		schemaVersion = 2
+	}
+	frozen := approvalencoding.LegacyProofInput{
+		CommandType: command, PolicyVersion: policy.PolicyVersion, SnapshotSchemaVersion: schemaVersion,
+		TargetResourceType: body.Envelope.TargetResourceType, TargetResourceID: body.Envelope.TargetResourceID,
+		NormalizedCommand: body.Envelope.Command, CriticalResourceVersions: body.CriticalResourceVersions,
+		FinancialSnapshot: body.FinancialSnapshot,
+	}
+	artifacts, err := approvalencoding.ConvertLegacyProofInput(frozen)
+	if err != nil || artifacts.CommandDigest != body.CommandDigest || artifacts.SnapshotDigest != body.SnapshotDigest {
+		return errTokenApprovalProofUnavailable
+	}
+	current, err := s.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{
+		CommandType: command, TargetResourceType: frozen.TargetResourceType, TargetResourceID: frozen.TargetResourceID,
+		NormalizedCommand: frozen.NormalizedCommand,
+	})
+	if err != nil || current.PrecheckFingerprint != parts[1] || !tokenProofSnapshotMatches(command, frozen, current) {
+		return errTokenApprovalProofUnavailable
+	}
+	return nil
 }
