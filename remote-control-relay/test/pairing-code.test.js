@@ -3,6 +3,8 @@ import crypto from "node:crypto";
 import test from "node:test";
 
 import { sealPairingCode } from "../pairing-code-sealer.js";
+import { PairingStore } from "../pairing-store.js";
+import { PairingRegistrationHandler } from "../pairing-registration-handler.js";
 import { buildSealedCodeAad, parseSealedCodeV1 } from "../protocol-controller.js";
 
 const X25519_SPKI_PREFIX = Buffer.from("302a300506032b656e032100", "hex");
@@ -14,6 +16,53 @@ const BINDING = Object.freeze({
   relay_epoch: "epoch-test-1",
   expires_at_ms: "30000",
 });
+
+class MemoryStateStore {
+  revision = "0";
+  value = null;
+  failWrites = false;
+
+  readNamespace() {
+    return { namespace_revision: this.revision, value: structuredClone(this.value) };
+  }
+
+  async compareAndSwap(_name, expected, value) {
+    await new Promise((resolve) => setImmediate(resolve));
+    if (this.failWrites) throw Object.assign(new Error("persist failed"), { code: "persist_failed" });
+    if (expected !== this.revision) throw Object.assign(new Error("conflict"), { code: "namespace_revision_conflict" });
+    this.revision = String(Number(this.revision) + 1);
+    this.value = structuredClone(value);
+    return { namespace_revision: this.revision, value: structuredClone(value) };
+  }
+}
+
+function registration(overrides = {}) {
+  const wrap = crypto.generateKeyPairSync("x25519");
+  const handshake = crypto.generateKeyPairSync("x25519");
+  return {
+    v: 1,
+    type: "desktop_pairing_register",
+    request_id: "transport-request-0001",
+    registration_request_id: "registration-request-0001",
+    endpoint_id: "endpoint-0001",
+    remote_control_generation: "generation-0001",
+    code_wrap_public_key_b64: rawPublic(wrap.publicKey).toString("base64"),
+    handshake_public_key_b64: rawPublic(handshake.publicKey).toString("base64"),
+    key_algorithm: "x25519",
+    capabilities: ["pairing_v1"],
+    ...overrides,
+  };
+}
+
+function keyring(activeKeyId = "digest-key-1", includeOld = true) {
+  const keys = includeOld ? [{ keyId: "digest-key-1", key: "digest-key-one-material-at-least-32-bytes" }] : [];
+  if (activeKeyId !== "digest-key-1") keys.push({ keyId: activeKeyId, key: "digest-key-two-material-at-least-32-bytes" });
+  return { activeKeyId, keys };
+}
+
+function deterministicEntropy(byte = 0) {
+  return (size) => Buffer.alloc(size, byte);
+}
 
 function lp(value) {
   const bytes = Buffer.from(value, "utf8");
@@ -96,4 +145,148 @@ test("production sealer owns ephemeral keys and nonce with no caller-controlled 
     key: Buffer.concat([X25519_PKCS8_PREFIX, Buffer.alloc(32, 7)]), format: "der", type: "pkcs8",
   });
   assert.equal(privateKey.asymmetricKeyType, "x25519");
+});
+
+test("pairing store persists tombstone before returning and replays a sealed result after restart", async () => {
+  const stateStore = new MemoryStateStore();
+  const request = registration();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(0),
+  });
+  const first = await store.register({ request, relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode });
+  assert.equal(first.replayed, false);
+  assert.equal(stateStore.value.tombstones.length, 1);
+  assert.equal(stateStore.value.registrations.length, 1);
+  assert.doesNotMatch(JSON.stringify(stateStore.value), /2222222/u);
+  assert.equal(store.activePairing(first.result.pairing_id).endpoint_id, request.endpoint_id);
+
+  const restarted = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 2000, randomBytes: deterministicEntropy(1),
+  });
+  assert.equal(restarted.activePairing(first.result.pairing_id).remote_control_generation,
+    request.remote_control_generation);
+  const retry = await restarted.register({
+    request: { ...request, request_id: "transport-request-retry" },
+    relayEpoch: "relay-epoch-0001",
+    sealCode: sealPairingCode,
+  });
+  assert.equal(retry.replayed, true);
+  assert.equal(retry.result.request_id, "transport-request-retry");
+  assert.equal(retry.result.sealed_code_b64, first.result.sealed_code_b64);
+  await assert.rejects(restarted.register({
+    request: { ...request, request_id: "transport-conflict", endpoint_id: "endpoint-other" },
+    relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  }), (error) => error?.code === "pairing_registration_conflict");
+});
+
+test("pairing store seals collision exhaustion and checks every retained digest key", async () => {
+  const stateStore = new MemoryStateStore();
+  const firstStore = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(0),
+  });
+  await firstStore.register({ request: registration(), relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode });
+
+  const rotated = await PairingStore.open({
+    stateStore, digestKeyring: keyring("digest-key-2"), clock: () => 2000,
+    randomBytes: deterministicEntropy(0),
+  });
+  const failedRequest = registration({
+    request_id: "transport-request-0002",
+    registration_request_id: "registration-request-0002",
+    remote_control_generation: "generation-0002",
+  });
+  const failed = await rotated.register({
+    request: failedRequest, relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  assert.equal(failed.result.code, "pairing_code_generation_failed");
+  assert.equal(stateStore.value.tombstones.length, 1);
+  const retry = await rotated.register({
+    request: { ...failedRequest, request_id: "transport-request-0002-retry" },
+    relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  });
+  assert.equal(retry.replayed, true);
+  assert.equal(retry.result.code, "pairing_code_generation_failed");
+
+  await assert.rejects(PairingStore.open({
+    stateStore, digestKeyring: keyring("digest-key-2", false), clock: () => 2000,
+  }), (error) => error?.code === "pairing_digest_key_unavailable");
+  const compacted = await PairingStore.open({
+    stateStore, digestKeyring: keyring("digest-key-2", false), clock: () => 700_000,
+    randomBytes: (size) => Buffer.alloc(size, size === 16 ? 0 : 1),
+  });
+  const oldPairingId = stateStore.value.tombstones[0].pairing_id;
+  assert.equal(compacted.activePairing(oldPairingId), null);
+  assert.equal(stateStore.value.tombstones[0].code_digests.length, 0);
+  assert.equal(stateStore.value.registrations.length, 0);
+  const reused = await compacted.register({
+    request: registration({
+      request_id: "transport-request-0003",
+      registration_request_id: "registration-request-0003",
+      remote_control_generation: "generation-0003",
+    }),
+    relayEpoch: "relay-epoch-0001",
+    sealCode: sealPairingCode,
+  });
+  assert.notEqual(reused.result.pairing_id, oldPairingId);
+  assert.equal(stateStore.value.tombstones.length, 2);
+});
+
+test("pairing store never returns a code when the durable CAS fails", async () => {
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(3),
+  });
+  stateStore.failWrites = true;
+  await assert.rejects(store.register({
+    request: registration(), relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode,
+  }), (error) => error?.code === "pairing_persist_failed");
+  assert.equal(store.activePairing("pairing-anything"), null);
+});
+
+test("concurrent registration handlers converge through the global namespace CAS", async () => {
+  const stateStore = new MemoryStateStore();
+  const left = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000 });
+  const right = await PairingStore.open({ stateStore, digestKeyring: keyring(), clock: () => 1000 });
+  const request = registration();
+  const [first, second] = await Promise.all([
+    left.register({ request, relayEpoch: "relay-epoch-0001", sealCode: sealPairingCode }),
+    right.register({
+      request: { ...request, request_id: "transport-request-concurrent" },
+      relayEpoch: "relay-epoch-0001",
+      sealCode: sealPairingCode,
+    }),
+  ]);
+  assert.equal(stateStore.value.tombstones.length, 1);
+  assert.equal(stateStore.value.registrations.length, 1);
+  assert.equal(first.result.sealed_code_b64, second.result.sealed_code_b64);
+  assert.equal([first.replayed, second.replayed].filter((value) => value === false).length, 1);
+  assert.equal([first.replayed, second.replayed].filter((value) => value === true).length, 1);
+});
+
+test("registration handler authorizes B before allocation and returns a strict idempotent result", async () => {
+  const stateStore = new MemoryStateStore();
+  const store = await PairingStore.open({
+    stateStore, digestKeyring: keyring(), clock: () => 1000, randomBytes: deterministicEntropy(4),
+  });
+  const authorized = [];
+  const handler = new PairingRegistrationHandler({
+    pairingStore: store,
+    relayEpoch: "relay-epoch-0001",
+    authorizeEndpoint: async (input) => {
+      authorized.push(input);
+      if (input.context !== "trusted-socket") throw new Error("untrusted");
+    },
+  });
+  const request = registration();
+  const first = await handler.register(request, "trusted-socket");
+  assert.equal(first.type, "desktop_pairing_registered");
+  const retry = await handler.register({ ...request, request_id: "transport-request-retry" }, "trusted-socket");
+  assert.equal(retry.request_id, "transport-request-retry");
+  assert.equal(retry.sealed_code_b64, first.sealed_code_b64);
+  assert.equal(authorized.length, 2);
+  await assert.rejects(handler.register({ ...request, request_id: "transport-untrusted" }, "bad-socket"),
+    (error) => error?.code === "pairing_endpoint_unauthorized");
+  const terminal = await store.terminate({ pairingId: first.pairing_id });
+  assert.equal(terminal.terminal_at_ms, "1000");
+  assert.equal(store.activePairing(first.pairing_id), null);
 });
