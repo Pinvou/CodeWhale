@@ -77,7 +77,7 @@ services:
   token-gateway:
     environment:
       <<: *governed-environment
-      WORKLOAD_IDENTITY_RULES_JSON: '[{"permissions":["internal.token.organization.lifecycle","internal.token.organization-unit.lifecycle","internal.token.replay.delete","internal.token.account-closure-assessment.read","internal.token.approval-snapshot.read","internal.token.approval-effect.read","internal.authorization.check"],"service":"account-service","subject":"pinvou:service:account-service"},{"permissions":["internal.token.model-lifecycle.execute","internal.token.catalog-rollback.execute","internal.token.credential-revoke.execute","internal.authorization.check"],"service":"token-command-executor","subject":"pinvou:service:token-command-executor"}]'
+      WORKLOAD_IDENTITY_RULES_JSON: '[{"permissions":["internal.token.organization.lifecycle","internal.token.organization-unit.lifecycle","internal.token.replay.delete","internal.token.account-closure-assessment.read","internal.token.approval-snapshot.read","internal.token.approval-proof.read","internal.token.approval-effect.read","internal.authorization.check"],"service":"account-service","subject":"pinvou:service:account-service"},{"permissions":["internal.token.model-lifecycle.execute","internal.token.catalog-rollback.execute","internal.token.credential-revoke.execute","internal.authorization.check"],"service":"token-command-executor","subject":"pinvou:service:token-command-executor"}]'
       DATABASE_URL: ${TOKEN_GATEWAY_RELEASE_DATABASE_URL:?set new release-scoped gateway database URL}
       TOKEN_SECRET_PROVIDER: remote
       TOKEN_SECRET_PROVIDER_URL: ${TOKEN_SECRET_PROVIDER_URL:?set remote secret provider}

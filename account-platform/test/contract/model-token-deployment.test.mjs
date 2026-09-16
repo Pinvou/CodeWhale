@@ -380,9 +380,11 @@ test('workload roles preserve existing permissions and narrowly register credent
     'internal.token.model-lifecycle.execute', 'internal.token.catalog-rollback.execute', 'internal.token.credential-revoke.execute', 'internal.authorization.check',
   ]);
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-snapshot.read'));
+  assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-proof.read'));
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.token.approval-effect.read'));
   assert.ok(token.find(rule => rule.service === 'account-service').permissions.includes('internal.authorization.check'));
   assert.ok(!token.find(rule => rule.service === 'token-command-executor').permissions.includes('internal.token.approval-effect.read'));
+  assert.ok(!token.find(rule => rule.service === 'token-command-executor').permissions.includes('internal.token.approval-proof.read'));
   assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-activation.read'));
   assert.ok(billing.find(rule => rule.service === 'account-service').permissions.includes('internal.billing.approval-effect.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-activation.read'));
