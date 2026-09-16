@@ -1190,6 +1190,9 @@ pub(crate) fn retained_user_messages(messages: &[Message], max_tokens: usize) ->
         if remaining == 0 {
             break;
         }
+        if !crate::runtime_handoff::is_user_turn_prompt(msg) {
+            continue;
+        }
         let Some(text) = user_text_of(msg) else {
             continue;
         };

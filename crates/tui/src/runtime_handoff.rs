@@ -430,7 +430,7 @@ fn render_restored_agent_topology(checkpoint: &SavedAgentTopologyCheckpoint) -> 
     display
 }
 
-fn is_agent_topology_checkpoint(message: &Message) -> bool {
+pub(crate) fn is_agent_topology_checkpoint(message: &Message) -> bool {
     let [
         ContentBlock::Text {
             text,
@@ -492,7 +492,7 @@ pub(crate) fn replace_agent_topology_checkpoint(
                     messages
                         .iter()
                         .position(|message| message.role.is_assistant_like())
-                        .unwrap_or(messages.len())
+                        .unwrap_or(0)
                 },
                 |index| index + 1,
             )
@@ -1311,6 +1311,11 @@ mod tests {
         assert_eq!(without_user[0].role, Role::System);
         assert!(is_agent_topology_checkpoint(&without_user[1]));
         assert_eq!(&without_user[2..], &original[1..]);
+
+        let mut corrupt_tool_only = vec![original[2].clone()];
+        replace_agent_topology_checkpoint(&mut corrupt_tool_only, &[]);
+        assert!(is_agent_topology_checkpoint(&corrupt_tool_only[0]));
+        assert_eq!(corrupt_tool_only[1], original[2]);
     }
 
     #[test]

@@ -78,7 +78,10 @@ pub fn inspect_compaction_keep(messages: &[Message]) -> CompactionKeep {
     let last_round = last_round_slice(messages);
     CompactionKeep {
         has_checkpoint: messages.iter().any(is_compaction_checkpoint_message),
-        last_round_messages: last_round.len(),
+        last_round_messages: last_round
+            .iter()
+            .filter(|message| is_round_message(message))
+            .count(),
         last_round_tool_results: last_round.iter().flat_map(tool_result_ids).count(),
         last_round_assistant: last_round
             .iter()
@@ -102,7 +105,20 @@ pub fn pinned_anchors_text(workspace: Option<&std::path::Path>) -> Option<String
 }
 
 fn is_plain_user_text(message: &Message) -> bool {
-    !is_compaction_checkpoint_message(message) && user_text_of(message).is_some()
+    !is_compaction_checkpoint_message(message)
+        && crate::runtime_handoff::is_user_turn_prompt(message)
+        && user_text_of(message).is_some()
+}
+
+fn user_prompt_text_of(message: &Message) -> Option<String> {
+    is_plain_user_text(message)
+        .then(|| user_text_of(message))
+        .flatten()
+}
+
+fn is_round_message(message: &Message) -> bool {
+    !crate::runtime_handoff::is_internal_runtime_handoff(message)
+        && !is_compaction_checkpoint_message(message)
 }
 
 fn last_plain_user_index(messages: &[Message], end: usize) -> Option<usize> {
@@ -166,7 +182,12 @@ pub fn last_round_kept_count(messages: &[Message]) -> Option<usize> {
         return None;
     }
     let start = last_round_start(&messages[..checkpoint]);
-    Some(checkpoint.saturating_sub(start))
+    Some(
+        messages[start..checkpoint]
+            .iter()
+            .filter(|message| is_round_message(message))
+            .count(),
+    )
 }
 
 fn last_round_slice(messages: &[Message]) -> &[Message] {
@@ -283,8 +304,8 @@ pub(crate) fn validate_last_round_coverage(
     // tool-bearing turn, so the round routinely spans two user messages -- and
     // checking only the earliest let a rewrite drop the *latest* one, which is
     // the turn this whole contract exists to keep.
-    for text in last_round.iter().filter_map(user_text_of) {
-        if !survives(&text, replacement, user_text_of) {
+    for text in last_round.iter().filter_map(user_prompt_text_of) {
+        if !survives(&text, replacement, user_prompt_text_of) {
             anyhow::bail!(
                 "Compaction coverage floor: a last-round user message was dropped; history was not replaced."
             );
@@ -393,7 +414,10 @@ pub(super) fn measure_coverage(
     let last_round = last_round_slice(replacement);
     CompactionCoverage {
         path,
-        last_round_messages: last_round.len(),
+        last_round_messages: last_round
+            .iter()
+            .filter(|message| is_round_message(message))
+            .count(),
         last_round_tool_results: last_round.iter().flat_map(tool_result_ids).count(),
         last_round_assistant: last_round
             .iter()
@@ -604,6 +628,36 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn forkguard_mid_round_topology_is_not_a_user_turn_on_recompaction() {
+        let mut messages = vec![
+            msg("user", "Run the suite now."),
+            tool_use("live", "Bash", json!({"command": "cargo test"})),
+            tool_result("live", "ok"),
+            compaction_checkpoint_message(&SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("suite finished", ""),
+            )),
+        ];
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut messages, &[]);
+        assert!(crate::runtime_handoff::is_internal_runtime_handoff(
+            &messages[1]
+        ));
+        assert_eq!(last_round_start(&messages), 0);
+        assert_eq!(inspect_compaction_keep(&messages).last_round_messages, 3);
+        assert_eq!(
+            measure_coverage(&messages, &messages, CompactionPath::Summary, 0).last_round_messages,
+            3
+        );
+
+        let without_prompt = messages[1..].to_vec();
+        assert!(validate_last_round_coverage(&messages, &without_prompt).is_err());
+
+        messages.push(msg("user", "One more question."));
+        let retained = retained_user_messages(&messages, 10_000);
+        let texts: Vec<_> = retained.iter().filter_map(user_text_of).collect();
+        assert_eq!(texts, ["Run the suite now.", "One more question."]);
     }
 
     #[test]
