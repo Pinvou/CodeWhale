@@ -229,14 +229,11 @@ pub fn fork(app: &mut App) -> CommandResult {
             .parent_session_id
             .clone_from(&cached.parent_session_id);
         parent.metadata.forked_from_message_count = cached.forked_from_message_count;
-        parent
-            .metadata
-            .workspace_roots
-            .clone_from(&cached.workspace_roots);
     }
     // The freshly constructed metadata has empty roots; the live App state
-    // is the current set for this session. Stamp it before the save for the
-    // same durable-erasure reason as above.
+    // is the current set for this session (it supersedes the cached copy,
+    // which the App itself wrote at the last snapshot). Stamp it before the
+    // save for the same durable-erasure reason as above.
     parent.metadata.workspace_roots = app.workspace_roots.clone();
     app.sync_cost_to_metadata(&mut parent.metadata);
     parent.context_references = app.session_context_references.clone();

@@ -76,6 +76,7 @@ pub struct ThreadMetadata {
     /// Working directory that was active when the thread was created.
     pub cwd: PathBuf,
     /// Workspace roots attached to the thread; `cwd` is always the primary root.
+    #[serde(default)]
     pub workspace_roots: Vec<PathBuf>,
     /// Version of the CLI that created this thread.
     pub cli_version: String,

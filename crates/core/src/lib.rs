@@ -3319,6 +3319,47 @@ mod tests {
     }
 
     #[test]
+    fn resume_roots_override_writes_back_to_running_cache() {
+        let store = temp_core_state("resume-roots-writeback");
+        let mut manager = ThreadManager::new(store);
+        let spawned = manager
+            .spawn_thread_with_history(
+                "deepseek".to_string(),
+                PathBuf::from("/repo/main"),
+                &[],
+                InitialHistory::New,
+                true,
+            )
+            .expect("spawn thread");
+        let thread_id = spawned.thread.id.clone();
+
+        // Resume with an explicit set: the override lands on the returned
+        // thread and must be written back to the running-thread cache.
+        let mut params = resume_params(&thread_id);
+        params.workspace_roots = Some(vec![PathBuf::from("/repo/shared")]);
+        let first = manager
+            .resume_thread_with_history(&params, "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            first.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")]
+        );
+
+        // A later parameterless resume reads the same cache entry: without
+        // the writeback it would resurrect the stale pre-override set.
+        let second = manager
+            .resume_thread_with_history(&resume_params(&thread_id), "deepseek".to_string())
+            .expect("resume thread")
+            .expect("thread found");
+        assert_eq!(
+            second.thread.workspace_roots,
+            vec![PathBuf::from("/repo/main"), PathBuf::from("/repo/shared")],
+            "the roots override must stick in the running-thread cache"
+        );
+    }
+
+    #[test]
     fn resume_with_empty_roots_clears_back_to_bare_cwd() {
         let store = temp_core_state("resume-roots-clear");
         let mut metadata = test_thread_metadata("thread-roots");

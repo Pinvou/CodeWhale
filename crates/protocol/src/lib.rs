@@ -91,8 +91,11 @@ pub struct Thread {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     pub cwd: PathBuf,
-    // Skipped when empty so a single-root thread keeps the historical wire
-    // frame byte-identical; decode still defaults via `default`.
+    // Omitted only when the set is genuinely empty: legacy rows and the
+    // protocol-parity fixture hit this, but both spawn paths persist at
+    // least the cwd, so a thread created by this build always carries the
+    // key (an additive field legacy decoders tolerate). Decode still
+    // defaults via `default`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_roots: Vec<PathBuf>,
     pub cli_version: String,
