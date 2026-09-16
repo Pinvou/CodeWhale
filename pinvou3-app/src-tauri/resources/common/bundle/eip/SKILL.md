@@ -67,4 +67,5 @@ eip <子命令> [参数]
 ## 护栏(重要)
 
 - **审批(`todo-submit`)、各类申报与敏感写操作(`condolence`/`survey submit`/`union-apply join`/`employee-handbook sign`/`message read-all`/`message send-bless`/`condolence urge` 等)不可逆**——本版默认只做查询;如要执行写操作,**执行前必须明确向用户确认**,确认后才提交。
+- `message send-bless --statement` 固定取官方祝福语池的生日段(段 1):非生日类消息可能取到不贴切文案,发送前把取到的文案原样给用户过目确认。
 - 普通待办审批涉及详情/校验判断,复杂;优先展示待办详情让用户自行处理,不替用户判断能否直接批。

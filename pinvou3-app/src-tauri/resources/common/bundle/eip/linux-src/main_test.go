@@ -910,3 +910,149 @@ func TestStripBearerVariants(t *testing.T) {
 		}
 	}
 }
+
+// captureStdout 在 fn 执行期间捕获标准输出(emitJSON 走 fmt.Println)。
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	fn()
+	_ = w.Close()
+	os.Stdout = old
+	return <-done
+}
+
+// 中间目录符号链接绕过(五轮评审 P1):cwd 内 subdir -> /tmp/outside 时,
+// Lstat 只查末级组件会放行 subdir/secret.json——EvalSymlinks 归一后的真实
+// 路径必须仍在 cwd 内。cwd 内真实嵌套目录不受影响。
+func TestTodoSubmitFlowListDirSymlinkEscape(t *testing.T) {
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.json")
+	if err := os.WriteFile(secret, []byte(`[{"nodeId":"N1"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, "subdir"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "subdir/secret.json"}); err == nil {
+		t.Fatal("dir-symlink escape: want error, got nil (read surface escaped cwd)")
+	}
+
+	if err := os.Mkdir("inner", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("inner", "ok.json"), []byte(`[{"nodeId":"N1"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "inner/ok.json"}); err != nil {
+		t.Fatalf("real nested directory must stay usable: %v", err)
+	}
+}
+
+// 未知/拼错 flag 显式拒绝(五轮评审 P2.1):--Date 大写拼错曾被静默吞、以缺省
+// 数据(当前月)冒充用户要的数据 exit 0——官方 Go flag 对未定义 flag 也是报错的。
+func TestUnknownFlagRejected(t *testing.T) {
+	rs := newRecordingServer(t)
+	out := captureStdout(t, func() {
+		if got := runBusiness([]string{"attendance", "get-overview", "--Date", "2026-05"}); got != 2 {
+			t.Errorf("mistyped flag exit = %d, want 2", got)
+		}
+	})
+	if !strings.Contains(out, "unknown flag --Date") {
+		t.Errorf("output = %q, want unknown-flag error", out)
+	}
+	if rs.remaining(t) != 0 {
+		t.Fatalf("%d requests leaked past flag rejection", rs.remaining(t))
+	}
+	if got := runBusiness([]string{"attendance", "get-overview", "--date", "2026-05"}); got != 0 {
+		t.Errorf("legit flag exit = %d, want 0", got)
+	}
+	rs.take(t)
+}
+
+// allowedFlags 与 routes 键集双向一致:漏配一条命令的 flag 面会让该命令所有
+// 带参调用被拒,多配则是死条目。
+func TestAllowedFlagsCoverAllRoutes(t *testing.T) {
+	routeKeys := make(map[string]bool, len(routes))
+	for k := range routes {
+		routeKeys[k] = true
+	}
+	for k := range allowedFlags {
+		if !routeKeys[k] {
+			t.Errorf("allowedFlags has %q not in routes", k)
+		}
+	}
+	for k := range routes {
+		if _, ok := allowedFlags[k]; !ok {
+			t.Errorf("route %q missing from allowedFlags", k)
+		}
+	}
+}
+
+// 写命令必填参数校验(五轮评审 P2.2):写请求不应带着空参离开本机。
+func TestRequiredWriteFlags(t *testing.T) {
+	newRecordingServer(t) // 环境与凭证
+	if got := runBusiness([]string{"survey", "submit"}); got != 2 {
+		t.Errorf("survey submit without args exit = %d, want 2", got)
+	}
+	if got := runBusiness([]string{"condolence", "urge", "--apply-id", "A1"}); got != 2 {
+		t.Errorf("urge missing approver-no exit = %d, want 2", got)
+	}
+	if got := runBusiness([]string{"condolence", "create-wedding", "--type", "2",
+		"--certification-date", "2026-01-01", "--id-card", "X1", "--spouse-id-card", "Y1", "--spouse-name", "Z1"}); got != 2 {
+		t.Errorf("wedding type2 missing birth flags exit = %d, want 2", got)
+	}
+}
+
+// exit 3 的提示按刷新结果区分(五轮评审 P2.5):exchange 失败时统一报
+// refreshed 会让排障方向跑偏。
+func TestExpiryReportDistinguishesRefreshFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token/exchange") {
+			http.Error(w, "exchange backend down", http.StatusInternalServerError)
+			return
+		}
+		_, _ = io.WriteString(w, `{"Code":51,"Msg":"Token已失效"}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("EIP_BASE_URL", srv.URL)
+	t.Setenv("EIP_AUTH_BASE_URL", srv.URL+"/auth/v1.0")
+	t.Setenv("AGENT_DEVICE_ID", "contract-test-device")
+	t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
+	if err := saveAT("test-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAIT("test-ait"); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if got := runBusiness([]string{"todo-submit", "--flow-list", `[{"nodeId":"N1"}]`}); got != 3 {
+			t.Errorf("write refresh-failed exit = %d, want 3", got)
+		}
+	})
+	if !strings.Contains(out, "refresh failed") {
+		t.Errorf("output = %q, want refresh-failure message", out)
+	}
+	if strings.Contains(out, "and refreshed") {
+		t.Errorf("output = %q must not claim refresh succeeded", out)
+	}
+}

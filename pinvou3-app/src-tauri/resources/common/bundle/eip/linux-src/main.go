@@ -457,15 +457,37 @@ func todoSubmitBody(f map[string]string) (map[string]any, error) {
 		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 			return nil, fmt.Errorf("todo-submit: --flow-list file must stay under the current directory")
 		}
-		// Lstat 不跟符号链接:cwd 内指向任意路径的 symlink 不能成为读取面。
-		fi, err := os.Lstat(clean)
+		// Windows 无盘符 rooted path("/windows/win.ini"):IsAbs 为 false 且
+		// VolumeName 为空,但 os.Open 按当前盘根解析,同样越出 cwd,一并拒绝。
+		if os.IsPathSeparator(clean[0]) {
+			return nil, fmt.Errorf("todo-submit: --flow-list file must be a relative path under the current directory")
+		}
+		// EvalSymlinks 归一全部组件后做 cwd 前缀判断:Lstat 只查末级组件,
+		// cwd 内的中间目录符号链接(subdir -> /tmp/outside)仍会把读取面导出
+		// cwd 外。归一后的真实路径必须仍在 cwd 内。
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, fmt.Errorf("todo-submit: resolve working directory: %w", err)
+		}
+		wdReal, err := filepath.EvalSymlinks(wd)
+		if err != nil {
+			return nil, fmt.Errorf("todo-submit: resolve working directory: %w", err)
+		}
+		real, err := filepath.EvalSymlinks(filepath.Join(wd, clean))
+		if err != nil {
+			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
+		}
+		if real != wdReal && !strings.HasPrefix(real, wdReal+string(filepath.Separator)) {
+			return nil, fmt.Errorf("todo-submit: --flow-list file must stay under the current directory after resolving symlinks")
+		}
+		fi, err := os.Stat(real)
 		if err != nil {
 			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
 		}
 		if !fi.Mode().IsRegular() {
 			return nil, fmt.Errorf("todo-submit: --flow-list file is not a regular file")
 		}
-		fh, err := os.Open(clean)
+		fh, err := os.Open(real)
 		if err != nil {
 			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
 		}
@@ -817,6 +839,135 @@ var unverifiedFlags = map[string][]string{
 	"apply list": []string{"type", "status"},
 }
 
+// allowedFlags：每条命令的完整 flag 面（官方 help + 黄金表 Query/Body 列消费的
+// flag）。未知/拼错的 flag 显式拒绝而非静默吞——「--Date 大写拼错」曾以缺省
+// 数据冒充用户要的数据 exit 0。unverifiedFlags 中的 flag 不在此列（先行拦截、
+// 报更准确的「未接线」错）。同款 []string 字面量,防 eip.rs 误解析。
+var allowedFlags = map[string][]string{
+	"attendance get-summary":            []string{"date"},
+	"attendance get-calendar":           []string{"date"},
+	"attendance get-overview":           []string{"date"},
+	"attendance get-annual-days":        nil,
+	"attendance get-schedule":           nil,
+	"attendance list-shuttle-bus":       nil,
+	"attendance list-leave-types":       nil,
+	"attendance calc-days":              []string{"apply-type", "beg-date", "end-date", "beg-time", "end-time"},
+	"attendance get-annual-calc":        []string{"date"},
+	"attendance get-person-summary":     nil,
+	"attendance get-effectived-summary": []string{"date", "page", "page-size"},
+	"attendance list-abnormal":          []string{"date", "page", "page-size"},
+	"attendance list-forget-card":       []string{"date", "page", "page-size"},
+	"attendance list-forget-badge":      []string{"date", "page", "page-size"},
+	"attendance list-flex":              []string{"date", "page", "page-size"},
+	"leave get-balance":                 nil,
+	"leave get-other-balance":           nil,
+	"leave get-sick-balance":            nil,
+	"leave get-sick-used":               nil,
+	"leave get-compassionate-used":      nil,
+	"vacation list-annual":              []string{"date", "page", "page-size"},
+	"vacation list-sick":                []string{"page", "page-size"},
+	"vacation list-compensatory":        []string{"page", "page-size"},
+	"vacation get-remaining-hours":      []string{"year", "page", "page-size"},
+	"overtime list-types":               nil,
+	"overtime get-extra-hours":          nil,
+	"overtime get-approving-hours":      nil,
+	"overtime get-approved-hours":       nil,
+	"overtime get-effectived-hours":     nil,
+	"overtime get-limit-hours":          nil,
+	"todo":                              []string{"type", "page", "page-size"},
+	"todo-count":                        nil,
+	"todo-detail":                       []string{"system-id", "process-id", "docun-id"},
+	"todo-batch-list":                   []string{"system-id", "page", "page-size"},
+	"todo-category":                     []string{"page-size"},
+	"todo-submit":                       []string{"action", "opinion", "flow-list", "target-receiver", "target-receiver-name"},
+	"apply list":                        []string{"page", "page-size"},
+	"apply get-detail":                  []string{"doc-no"},
+	"apply list-attachments":            []string{"doc-no"},
+	"apply list-month-flow":             []string{"scope", "page", "page-size"},
+	"employee-profile":                  nil,
+	"employee-contact":                  []string{"account"},
+	"employee-special-day":              []string{"date"},
+	"employee-handbook sign":            nil,
+	"employee-handbook get-status":      nil,
+	"employee-search":                   []string{"keyword", "page", "page-size"},
+	"app-search":                        []string{"keyword", "page", "page-size"},
+	"ics-search":                        []string{"keyword", "page", "page-size"},
+	"commercial-insurance":              []string{"type", "year"},
+	"commercial-insurance list":         []string{"type", "year"},
+	"commercial-insurance list-years":   nil,
+	"contract":                          []string{"page", "page-size"},
+	"contract list":                     []string{"page", "page-size"},
+	"consumption monthly":               []string{"date"},
+	"consumption list":                  []string{"date", "page", "page-size"},
+	"consumption trend":                 nil,
+	"expense recent":                    nil,
+	"expense monthly":                   []string{"currency-name"},
+	"expense statistics":                []string{"currency-name"},
+	"expense currency":                  nil,
+	"fuel-card list":                    []string{"page", "page-size"},
+	"fuel-card seasons":                 nil,
+	"fuel-card apply-records":           nil,
+	"union-welfare":                     []string{"search-text", "page", "page-size"},
+	"union-welfare list":                []string{"search-text", "page", "page-size"},
+	"union-apply join":                  nil,
+	"union-apply status":                nil,
+	"union-apply get-status":            nil,
+	"survey":                            nil,
+	"survey list":                       nil,
+	"survey detail":                     []string{"id"},
+	"survey get":                        []string{"id"},
+	"survey submit":                     []string{"id", "opinion", "emp-name", "id-card", "id-card-type"},
+	"remote-work":                       nil,
+	"remote-work list-records":          nil,
+	"remote-work get-allow-check":       nil,
+	"remote-work get-detail":            []string{"doc-no"},
+	"news":                              []string{"keyword", "with-image", "page", "page-size"},
+	"announcement":                      []string{"keyword", "type", "page", "page-size"},
+	"announcement-detail":               []string{"code"},
+	"course":                            []string{"type", "page", "page-size"},
+	"meeting":                           []string{"date"},
+	"community-hot":                     []string{"page-size"},
+	"message count":                     nil,
+	"message list":                      []string{"type", "page", "page-size"},
+	"message get":                       []string{"id"},
+	"message read-all":                  nil,
+	"message send-bless":                []string{"id", "content", "statement"},
+	"condolence list":                   []string{"page", "page-size"},
+	"condolence validate":               []string{"type", "certification-date", "id-card", "spouse-id-card", "spouse-name"},
+	"condolence urge":                   []string{"apply-id", "approver-no"},
+	"condolence create-funeral":         []string{"id-card", "person-name", "person-id-card", "relation", "funeral-date", "supervisor"},
+	"condolence create-wedding":         []string{"type", "certification-date", "id-card", "spouse-id-card", "spouse-name", "birth-date", "birth-type", "single-or-twin", "first-children-name", "second-children-name"},
+}
+
+// requiredFlags：写命令的必填 flag——写请求不应带着空参离开本机（与 todo-submit
+// transfer 的必填校验同款先例）。create-wedding type=2 的附加必填在
+// checkRequiredFlags 内特判。
+func checkRequiredFlags(key string, f map[string]string) error {
+	var required []string
+	switch key {
+	case "survey submit":
+		required = []string{"id", "opinion"}
+	case "condolence urge":
+		required = []string{"apply-id", "approver-no"}
+	case "condolence create-funeral":
+		required = []string{"id-card", "person-name", "person-id-card", "relation", "funeral-date", "supervisor"}
+	case "condolence create-wedding":
+		required = []string{"certification-date", "id-card", "spouse-id-card", "spouse-name"}
+		if firstNonEmpty(f["type"], "1") == "2" {
+			// 新生儿类型:出生与子女信息是申报主体,缺了必被服务端打回。
+			required = append(required, "birth-date", "birth-type", "single-or-twin")
+		}
+	default:
+		return nil
+	}
+	for _, fl := range required {
+		if strings.TrimSpace(f[fl]) == "" {
+			return fmt.Errorf("%s: missing required flag --%s", key, fl)
+		}
+	}
+	return nil
+}
+
 // writeCommands：会改变服务端状态的命令（与 SKILL.md 护栏同款清单）。
 // token 过期时刷新凭证但不自动重放——重发可能让服务端重复受理（重复审批/
 // 重复发送），提示调用方确认后重试。
@@ -902,6 +1053,25 @@ func runBusiness(args []string) int {
 			}
 		}
 	}
+	// 未知/拼错的 flag 一律拒绝（官方 Go flag 同款行为）,不放行到构造器——
+	// 构造器取不到的 flag 只会被静默吞,以缺省数据冒充用户要的数据。
+	if allowed, ok := allowedFlags[key]; ok {
+		known := make(map[string]bool, len(allowed))
+		for _, fl := range allowed {
+			known[fl] = true
+		}
+		for fl := range flags {
+			if !known[fl] {
+				emitJSON(map[string]any{"error": key + ": unknown flag --" + fl})
+				return 2
+			}
+		}
+	}
+	// 写命令必填参数校验:空参照发必被服务端打回,不如在本机大声失败。
+	if err := checkRequiredFlags(key, flags); err != nil {
+		emitJSON(map[string]any{"error": err.Error()})
+		return 2
+	}
 	// todo --type：官方 help 即以线上键名描述语义（flowType 1=待审批 2=已审批
 	// 3=我的申请 4=我的委托），键名与 body 结构已由黄金缺省报文证实，可直接映射；
 	// 1-4 之外显式拒绝，不外推。
@@ -972,7 +1142,7 @@ func runBusiness(args []string) int {
 		_ = os.Remove(atFile())
 		nt := ensureToken()
 		if writeCommands[key] || nt == "" || nt == token {
-			emitJSON(map[string]any{"error": "token expired and refreshed", "message": "please retry this command"})
+			emitJSON(expireReportPayload(nt))
 			return 3
 		}
 		raw, err = callEIP(r.method, path, query, body, nt)
@@ -1007,9 +1177,17 @@ func runBusiness(args []string) int {
 // 刷新凭证但不重放(重复受理风险),统一 exit 3 交还调用方。
 func expireRefreshAndReport() int {
 	_ = os.Remove(atFile())
-	ensureToken()
-	emitJSON(map[string]any{"error": "token expired and refreshed", "message": "please retry this command"})
+	emitJSON(expireReportPayload(ensureToken()))
 	return 3
+}
+
+// expireReportPayload 按刷新结果区分 exit 3 的提示:刷新成功请重试,刷新失败
+// 提示重连——统一报 refreshed 会让 exchange 失败的排障方向跑偏。
+func expireReportPayload(refreshedToken string) map[string]any {
+	if refreshedToken != "" {
+		return map[string]any{"error": "token expired and refreshed", "message": "please retry this command"}
+	}
+	return map[string]any{"error": "token expired and refresh failed", "message": "please reconnect EIP"}
 }
 
 func runSendBless(flags map[string]string, token string) int {

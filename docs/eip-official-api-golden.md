@@ -240,6 +240,11 @@ fallback 的 `GetOvertimeApplyExtraHours` 等 5 个 `ApiAttendance/GetOvertime*`
 > 既有兼容别名并存，如 `survey list`↔`survey`、`remote-work list-records`↔`remote-work`），
 > 并由 `linux-src/main_test.go` 逐命令固化本文件的 Method/路径/Query/Body 列；
 > 下表保留为重写时的差异清单，供回溯。
+>
+> 计数口径（各文档/提交混用易误读，统一说明）：本文件共 90 条抓包报文，其中
+> 认证域 3 条、业务命令 87 条；87 条业务命令中 course 缺省/hot 为同一命令的
+> 双形态报文（按命令去重后官方唯一命令 86 条），fallback 路由表以
+> 86 条官方命令 + 7 条官方名兼容别名 = 93 键与之对应。
 
 1. **方法错误(服务端 405"方法不支持")**:fallback 几乎全 POST;官方大量 GET(考勤查询、余额、
    加班、消费、油卡季充/资格、保险、工会状态、调研列表、班次/班车/假期类型等)。
