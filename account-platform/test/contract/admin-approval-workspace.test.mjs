@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { adminSectionURL } from '../../../pinvou3-app/src/features/account-platform/admin-navigation.js';
 import { adminPlatformCopy } from '../../../pinvou3-app/src/shared/admin-platform-i18n.js';
+import { approvalDetailForRoute } from '../../../pinvou3-app/src/features/account-platform/admin-approval-actions.js';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const read = (relative) => readFileSync(path.join(root, relative), 'utf8');
@@ -25,17 +26,27 @@ test('approval center mounts one governed four-view reader without the legacy di
   assert.match(workspace, /client\.governedApprovalRequest/);
   assert.match(workspace, /client\.decideGovernedApproval/);
   assert.match(workspace, /const decision = approvalDecisionForAction\(action\)/);
-  assert.match(workspace, /client\.decideGovernedApproval\(route\.requestID, detail, decision, reason\.trim\(\)\)/);
+  assert.match(workspace, /client\.decideGovernedApproval\(route\.requestID, currentDetail, decision, reason\.trim\(\)\)/);
   assert.match(workspace, /else if \(action === 'SUBMIT'\)/);
   assert.match(workspace, /client\.withdrawGovernedApprovalRequest/);
   assert.match(workspace, /client\.submitGovernedApprovalRequest/);
-  assert.match(workspace, /approvalBusinessRoute\(detail/);
+  assert.match(workspace, /approvalBusinessRoute\(currentDetail/);
   assert.match(workspace, /visibleSections\.includes\(businessRoute\.section\)/);
   assert.match(workspace, /addEventListener\?\.\('popstate'/);
   assert.match(workspace, /route\.cursor && <button[^>]+/);
   assert.doesNotMatch(workspace, /client\.approvalRequests\(/);
   assert.doesNotMatch(workspace, /allowed_actions/);
   assert.match(built, /approval_view/);
+});
+
+test('approval detail and actions never use a response for another route', () => {
+  const detail = { approval_request_id: 'older-request', status: 'SUBMITTED' };
+  assert.equal(approvalDetailForRoute(detail, { view: 'pending', requestID: 'new-request' }), null);
+  assert.equal(approvalDetailForRoute(detail, { view: 'directory', requestID: 'older-request' }), null);
+  assert.equal(approvalDetailForRoute(detail, { view: 'pending', requestID: 'older-request' }), detail);
+  const source = read('../pinvou3-app/src/features/account-platform/AdminApprovalWorkspace.jsx');
+  assert.match(source, /const currentDetail = approvalDetailForRoute\(detail, route\)/);
+  assert.match(source, /if \(!currentDetail \|\| !action \|\| acting \|\| outcomeUnknown\) return/);
 });
 
 test('approval center labels and error states exist in all three management locales', () => {

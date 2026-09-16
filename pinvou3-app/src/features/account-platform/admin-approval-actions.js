@@ -1,3 +1,8 @@
+export function approvalDetailForRoute(detail, route) {
+  return route?.view !== 'directory' && route?.requestID && detail?.approval_request_id === route.requestID
+    ? detail : null;
+}
+
 export function approvalActionsForDetail(detail, currentUserID) {
   if (!detail || !currentUserID || detail.detail_availability === 'DETAIL_PRESENTATION_UNAVAILABLE' ||
     !Array.isArray(detail.allowed_actions)) return [];

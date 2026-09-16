@@ -207,6 +207,8 @@ GSA-19 支付恢复业务草稿编辑（仍PARTIAL / REVIEW_PENDING）：Provide
 GSA-19 Token终态替代申请边界（仍PARTIAL / REVIEW_PENDING）：三个Token业务申请入口在领域impact/precheck后、创建Account审批前，按命令及精确目标经Session锁BFF读取历史；分页不完整、未知状态、DRAFT/SUBMITTED/APPROVED/EXECUTING/EXECUTION_FAILED均失败关闭。仅REJECTED/WITHDRAWN/EXPIRED/INVALIDATED把最新申请ID作为`supersedes_request_id`，EXECUTED允许基于当前领域事实发起新的业务命令但不继承旧授权。支付控制复用相同资格函数并补挡更早的在途记录。定向状态测试、Portal构建与架构检查通过；Token业务DRAFT编辑、钱包调整及完整跨域E2E仍未交付。
 
 GSA-19 钱包调整草稿编辑（仍PARTIAL / REVIEW_PENDING）：现有待审批调账行若关联DRAFT，业务页提供新原因输入；按钱包与待审批状态从Billing重新读取同一调整ID、版本和原幂等键，不能找到或事实变化时不更新。只更新原Account审批DRAFT并按新版本提交，不重建或更改Billing资金调整记录；未知结果保留原申请引用且不自动二次写入。三语文案、定向合同、Portal构建与架构检查通过；终态调整若需新业务意图仍应新建Billing调整，不能把旧已拒绝目标原地替代。该产品流程及跨域E2E尚未交付。
+
+GSA-18 详情路由并发防错（仍PARTIAL / REVIEW_PENDING）：审批详情的展示、业务返回入口和所有决定动作只消费与当前路由申请ID精确一致的详情；切换详情或视图时关闭旧动作确认框并清理未知结果提示。较慢的旧详情响应即使在路由变化与取消之间到达，也不再在新URL下展示或用于写入。定向路由身份测试、Portal构建与架构检查通过；真实浏览器焦点/读屏/响应式验收仍待完成。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
 

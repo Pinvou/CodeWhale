@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { approvalActionsForDetail, approvalBusinessRoute, approvalDecisionForAction } from './admin-approval-actions.js';
+import { approvalActionsForDetail, approvalBusinessRoute, approvalDecisionForAction, approvalDetailForRoute } from './admin-approval-actions.js';
 import './admin-approval-workspace.css';
 
 const views = ['mine', 'pending', 'execution', 'directory'];
@@ -52,6 +52,7 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
   const [actionError, setActionError] = useState(false);
   const dialogRef = useRef(null);
   const actionSourceRef = useRef(null);
+  const currentDetail = approvalDetailForRoute(detail, route);
 
   useEffect(() => { setRoute(readRoute()); setPrevious([]); }, [routeVersion]);
   useEffect(() => {
@@ -60,6 +61,9 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
     return () => globalThis.removeEventListener?.('popstate', onHistoryChange);
   }, []);
   useEffect(() => { setCommandInput(route.commandType); setTargetInput(route.target); }, [route.commandType, route.target]);
+  useEffect(() => {
+    setAction(''); setReason(''); setActionError(false); setOutcomeUnknown(false);
+  }, [route.requestID, route.view]);
 
   const changeRoute = (patch, { replace = false } = {}) => {
     const next = { ...route, ...patch };
@@ -138,7 +142,7 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
 
   const submitAction = async (event) => {
     event.preventDefault();
-    if (!detail || !action || acting || outcomeUnknown) return;
+    if (!currentDetail || !action || acting || outcomeUnknown) return;
     const decision = approvalDecisionForAction(action);
     if (decision && [...reason.trim()].length < 3) {
       setActionError(true);
@@ -148,11 +152,11 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
     setActionError(false);
     try {
       if (decision) {
-        await client.decideGovernedApproval(route.requestID, detail, decision, reason.trim());
+        await client.decideGovernedApproval(route.requestID, currentDetail, decision, reason.trim());
       } else if (action === 'WITHDRAW') {
-        await client.withdrawGovernedApprovalRequest(route.requestID, detail);
+        await client.withdrawGovernedApprovalRequest(route.requestID, currentDetail);
       } else if (action === 'SUBMIT') {
-        await client.submitGovernedApprovalRequest(route.requestID, detail);
+        await client.submitGovernedApprovalRequest(route.requestID, currentDetail);
       } else {
         throw new Error('unsupported approval action');
       }
@@ -167,8 +171,8 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
     }
   };
 
-  const offeredActions = approvalActionsForDetail(detail, currentUserID);
-  const businessRoute = approvalBusinessRoute(detail, { modelDetailsEnabled, tokenDetailsEnabled });
+  const offeredActions = approvalActionsForDetail(currentDetail, currentUserID);
+  const businessRoute = approvalBusinessRoute(currentDetail, { modelDetailsEnabled, tokenDetailsEnabled });
 
   const rows = (page?.items || []).filter((item) => route.view !== 'pending' || requesterOf(item) !== currentUserID);
   const nextCursor = page?.next_cursor || '';
@@ -215,16 +219,16 @@ export function AdminApprovalWorkspace({ client, copy, language, currentUserID, 
     {route.requestID && route.view !== 'directory' && <aside className="adm-approval-detail" aria-label={c.detail}>
       <div><h3>{c.detail}</h3><button type="button" onClick={() => changeRoute({ requestID: '' })}>{c.close}</button></div>
       {detailError && <p role="alert">{c.detailUnavailable}</p>}
-      {!detail && !detailError && <p role="status">{c.loading}</p>}
-      {detail && <dl>
-        <div><dt>{c.requestID}</dt><dd><code>{detail.approval_request_id}</code></dd></div>
-        <div><dt>{c.status}</dt><dd>{detail.status}</dd></div>
-        <div><dt>{c.commandType}</dt><dd>{detail.command_type || '—'}</dd></div>
-        <div><dt>{c.target}</dt><dd>{targetOf(detail).resource_type || '—'} · {targetOf(detail).resource_id || '—'}</dd></div>
-        <div><dt>{c.requester}</dt><dd>{requesterOf(detail) || '—'}</dd></div>
-        <div><dt>{c.updated}</dt><dd>{date(detail.updated_at, language)}</dd></div>
+      {!currentDetail && !detailError && <p role="status">{c.loading}</p>}
+      {currentDetail && <dl>
+        <div><dt>{c.requestID}</dt><dd><code>{currentDetail.approval_request_id}</code></dd></div>
+        <div><dt>{c.status}</dt><dd>{currentDetail.status}</dd></div>
+        <div><dt>{c.commandType}</dt><dd>{currentDetail.command_type || '—'}</dd></div>
+        <div><dt>{c.target}</dt><dd>{targetOf(currentDetail).resource_type || '—'} · {targetOf(currentDetail).resource_id || '—'}</dd></div>
+        <div><dt>{c.requester}</dt><dd>{requesterOf(currentDetail) || '—'}</dd></div>
+        <div><dt>{c.updated}</dt><dd>{date(currentDetail.updated_at, language)}</dd></div>
       </dl>}
-      {detail?.detail_availability === 'DETAIL_PRESENTATION_UNAVAILABLE' && <p>{c.historicalMinimum}</p>}
+      {currentDetail?.detail_availability === 'DETAIL_PRESENTATION_UNAVAILABLE' && <p>{c.historicalMinimum}</p>}
       {businessRoute && visibleSections.includes(businessRoute.section) && <button type="button"
         onClick={() => onNavigate?.(businessRoute.section, businessRoute.query)}>{c.openBusinessArea}</button>}
       {outcomeUnknown && <div className="adm-approval-uncertain" role="alert"><p>{c.actionUnknown}</p><button type="button" onClick={() => setRefresh((value) => value + 1)}>{c.refreshDetail}</button></div>}
