@@ -239,10 +239,13 @@ WHERE r.id=$1 FOR UPDATE OF r`, candidate.RequestID).Scan(
 	if outbox.approvalEpoch > control.ApprovalEpoch {
 		return ApprovalReconciliationBlockedHistory, nil
 	}
+	if control.Mode == AdminApprovalModeSafeRollback && (control.ApprovalEpoch <= 1 || outbox.approvalEpoch != control.ApprovalEpoch-1) {
+		return ApprovalReconciliationBlockedHistory, nil
+	}
 	invalidationCode := "EXECUTION_WINDOW_EXPIRED"
 	if executionDeadline.After(databaseNow) {
-		if control.Mode != AdminApprovalModeSafeRollback || status != "APPROVED" || control.ApprovalEpoch <= 1 ||
-			outbox.approvalEpoch != control.ApprovalEpoch-1 || candidate.InvalidationCode != "APPROVAL_SAFE_ROLLBACK_INVALIDATED" {
+		if control.Mode != AdminApprovalModeSafeRollback || status != "APPROVED" ||
+			candidate.InvalidationCode != "APPROVAL_SAFE_ROLLBACK_INVALIDATED" {
 			return ApprovalReconciliationBlockedHistory, nil
 		}
 		invalidationCode = "APPROVAL_SAFE_ROLLBACK_INVALIDATED"
@@ -299,7 +302,8 @@ WHERE id=$1 AND version=$3 AND status=$4 AND command_type=$5 AND encode(command_
 			"request_id": candidate.RequestID.String(), "event_digest": outbox.eventDigest, "effect_absent": true,
 			"effect_authority": observation.Authority, "effect_observed_at": observation.ObservedAt,
 			"command_type": candidate.CommandType, "command_fingerprint": candidate.CommandFingerprint,
-			"control_mode": control.Mode, "control_approval_epoch": control.ApprovalEpoch,
+			"invalidation_code": invalidationCode,
+			"control_mode":      control.Mode, "control_approval_epoch": control.ApprovalEpoch,
 		})
 		if err != nil {
 			return "", err

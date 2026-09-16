@@ -50,7 +50,7 @@ invalidation_details='{}',version=version+1,updated_at=transaction_timestamp() W
 	verifiedAt := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := db.runtimePool.Exec(ctx, `INSERT INTO public.audit_logs(id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at)
 VALUES($1,'approval.authorization-exclusion.effect-verified','approval_authorization_event',$2,'SUCCEEDED',$3,$3,
-jsonb_build_object('request_id',$4::text,'event_digest',$5::text,'effect_absent',true),$6)`,
+jsonb_build_object('request_id',$4::text,'event_digest',$5::text,'effect_absent',true,'invalidation_code','EXECUTION_WINDOW_EXPIRED'),$6)`,
 		auditID, eventID.String(), "exclusion-"+eventID.String(), requestID.String(), digest, verifiedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -137,10 +137,21 @@ invalidation_details='{}',version=version+1,updated_at=transaction_timestamp() W
 		eventID, requestVersion, "CUTOVER_INVALIDATED_NO_EXECUTION", missingAudit); err == nil {
 		t.Fatal("missing effect verification was accepted")
 	}
+	mismatchedAuditID := uuid.Must(uuid.NewV7())
+	if _, err := db.runtimePool.Exec(ctx, `INSERT INTO public.audit_logs(id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at)
+VALUES($1,'approval.authorization-exclusion.effect-verified','approval_authorization_event',$2,'SUCCEEDED',$3,$3,
+jsonb_build_object('request_id',$4::text,'event_digest',$5::text,'effect_absent',true,'invalidation_code','RESOURCE_VERSION_CHANGED'),transaction_timestamp())`,
+		mismatchedAuditID, eventID.String(), "exclusion-mismatch-"+eventID.String(), requestID.String(), digest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.runtimePool.Exec(ctx, `SELECT public.seal_approval_authorization_exclusion($1,$2,$3,$4)`,
+		eventID, requestVersion, "CUTOVER_INVALIDATED_NO_EXECUTION", mismatchedAuditID); err == nil {
+		t.Fatal("audit with a mismatched invalidation reason was accepted")
+	}
 	auditID := uuid.Must(uuid.NewV7())
 	if _, err := db.runtimePool.Exec(ctx, `INSERT INTO public.audit_logs(id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at)
 VALUES($1,'approval.authorization-exclusion.effect-verified','approval_authorization_event',$2,'SUCCEEDED',$3,$3,
-jsonb_build_object('request_id',$4::text,'event_digest',$5::text,'effect_absent',true),transaction_timestamp())`,
+jsonb_build_object('request_id',$4::text,'event_digest',$5::text,'effect_absent',true,'invalidation_code','EXECUTION_WINDOW_EXPIRED'),transaction_timestamp())`,
 		auditID, eventID.String(), "exclusion-negative-"+eventID.String(), requestID.String(), digest); err != nil {
 		t.Fatal(err)
 	}

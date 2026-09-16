@@ -592,6 +592,16 @@
         "file": "000059_approval_authorization_exclusions.up.sql",
         "version": 59,
         "sha256": "153691d04b05f5b869065658a9a44505c591feed10fc5a13d90d22335d117fa4"
+      },
+      {
+        "file": "000060_approval_exclusion_reason_binding.down.sql",
+        "version": 60,
+        "sha256": "40e95e804ddf4ad3c7f1e796900805c05b7491a0aceafd64b90f4c2a1ac69b53"
+      },
+      {
+        "file": "000060_approval_exclusion_reason_binding.up.sql",
+        "version": 60,
+        "sha256": "7a0ed6dfb8f706a06b82fe638a449da717eaf4af40eb75b805c75ef8e134c971"
       }
     ],
     "billing": [

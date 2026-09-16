@@ -151,61 +151,78 @@ FROM public.approval_requests r WHERE r.id=$1`, requestByEvent[eventID]).Scan(&s
 	}
 }
 
-func TestExpiredApprovalReconciliationSealsSafeRollbackDeadLetterPostgresIntegration(t *testing.T) {
-	db, repository, _, _ := newApprovalDeliveryIntegrationDatabase(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	eventID := seedBackfillAuthorization(t, ctx, db, true)
-	var requestID uuid.UUID
-	if err := db.adminPool.QueryRow(ctx, `SELECT aggregate_id FROM public.outbox_events WHERE event_id=$1`, eventID).Scan(&requestID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests
-SET execution_deadline=transaction_timestamp()-interval '1 minute',updated_at=transaction_timestamp()
-WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.adminPool.Exec(ctx, `ALTER TABLE public.outbox_events DISABLE TRIGGER USER`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.adminPool.Exec(ctx, `UPDATE public.outbox_events SET attempts=12,dead_lettered_at=transaction_timestamp(),last_error='EVENT_DELIVERY_FAILED' WHERE event_id=$1`, eventID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.adminPool.Exec(ctx, `ALTER TABLE public.outbox_events ENABLE TRIGGER USER`); err != nil {
-		t.Fatal(err)
-	}
-	setApprovalConsumerControl(t, ctx, db, "SAFE_ROLLBACK", "RUNNING", 1, true, 3)
-	plan, err := repository.PlanApprovalReconciliation(ctx, 20)
-	if err != nil || len(plan.Candidates) != 1 {
-		t.Fatalf("plan=%+v err=%v", plan, err)
-	}
-	candidate := plan.Candidates[0]
-	observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
-		ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
-		State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
-	result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation, true)
-	if err != nil || result != ApprovalReconciliationExclusionSealed {
-		t.Fatalf("result=%s err=%v", result, err)
-	}
-	var reason string
-	if err := db.adminPool.QueryRow(ctx, `SELECT reason_code FROM account_approval_authorization.approval_authorization_delivery_exclusions WHERE event_id=$1`, eventID).Scan(&reason); err != nil || reason != "SAFE_ROLLBACK_INVALIDATED_NO_EXECUTION" {
-		t.Fatalf("reason=%s err=%v", reason, err)
+func TestApprovalReconciliationSealsSafeRollbackDeadLetterPostgresIntegration(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		deadlineInterval string
+		wantCode         string
+	}{
+		{name: "expired", deadlineInterval: "-1 minute", wantCode: "EXECUTION_WINDOW_EXPIRED"},
+		{name: "inside execution window", deadlineInterval: "4 minutes", wantCode: "APPROVAL_SAFE_ROLLBACK_INVALIDATED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, repository, _, _ := newApprovalDeliveryIntegrationDatabase(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			eventID := seedBackfillAuthorization(t, ctx, db, true)
+			var requestID uuid.UUID
+			if err := db.adminPool.QueryRow(ctx, `SELECT aggregate_id FROM public.outbox_events WHERE event_id=$1`, eventID).Scan(&requestID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests
+SET execution_deadline=transaction_timestamp()+$2::interval,updated_at=transaction_timestamp()
+WHERE id=$1 AND status='APPROVED'`, requestID, test.deadlineInterval); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.adminPool.Exec(ctx, `ALTER TABLE public.outbox_events DISABLE TRIGGER USER`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.adminPool.Exec(ctx, `UPDATE public.outbox_events SET attempts=12,dead_lettered_at=transaction_timestamp(),last_error='EVENT_DELIVERY_FAILED' WHERE event_id=$1`, eventID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.adminPool.Exec(ctx, `ALTER TABLE public.outbox_events ENABLE TRIGGER USER`); err != nil {
+				t.Fatal(err)
+			}
+			setApprovalConsumerControl(t, ctx, db, "SAFE_ROLLBACK", "RUNNING", 1, true, 2)
+			plan, err := repository.PlanApprovalReconciliation(ctx, 20)
+			if err != nil || len(plan.Candidates) != 1 {
+				t.Fatalf("plan=%+v err=%v", plan, err)
+			}
+			candidate := plan.Candidates[0]
+			observation := approvaleffect.Observation{SchemaVersion: 1, Authority: approvaleffect.AuthorityBilling,
+				ApprovalRequestID: candidate.RequestID, CommandType: candidate.CommandType, CommandFingerprint: candidate.CommandFingerprint,
+				State: approvaleffect.StateAbsent, ObservedAt: time.Now().UTC()}
+			result, err := repository.ReconcileApproval(ctx, plan.Control, candidate, observation, true)
+			if err != nil || result != ApprovalReconciliationExclusionSealed {
+				t.Fatalf("result=%s err=%v", result, err)
+			}
+			var reason, code string
+			if err := db.adminPool.QueryRow(ctx, `SELECT x.reason_code,r.invalidation_code
+FROM account_approval_authorization.approval_authorization_delivery_exclusions x
+JOIN public.approval_requests r ON r.id=x.request_id WHERE x.event_id=$1`, eventID).Scan(&reason, &code); err != nil ||
+				reason != "SAFE_ROLLBACK_INVALIDATED_NO_EXECUTION" || code != test.wantCode {
+				t.Fatalf("reason=%s code=%s err=%v", reason, code, err)
+			}
+		})
 	}
 }
 
 func TestSafeRollbackApprovalReconciliationPostgresIntegration(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		controlEpoch int64
-		wantResult   ApprovalReconciliationResult
-		wantStatus   string
-		wantCode     *string
-		wantEligible int
-		wantHistory  int
+		name             string
+		controlEpoch     int64
+		deadlineInterval string
+		wantResult       ApprovalReconciliationResult
+		wantStatus       string
+		wantCode         *string
+		wantEligible     int
+		wantHistory      int
 	}{
-		{name: "previous epoch is invalidated inside execution window", controlEpoch: 2, wantResult: ApprovalReconciliationInvalidated,
+		{name: "previous epoch is invalidated inside execution window", controlEpoch: 2, deadlineInterval: "4 minutes", wantResult: ApprovalReconciliationInvalidated,
 			wantStatus: "INVALIDATED", wantCode: stringPointer("APPROVAL_SAFE_ROLLBACK_INVALIDATED"), wantEligible: 1},
-		{name: "older epoch remains a hard history blocker", controlEpoch: 3, wantResult: ApprovalReconciliationBlockedHistory,
+		{name: "older epoch remains a hard history blocker", controlEpoch: 3, deadlineInterval: "4 minutes", wantResult: ApprovalReconciliationBlockedHistory,
+			wantStatus: "APPROVED", wantHistory: 1},
+		{name: "expired older epoch remains a hard history blocker", controlEpoch: 3, deadlineInterval: "-1 minute", wantResult: ApprovalReconciliationBlockedHistory,
 			wantStatus: "APPROVED", wantHistory: 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -218,8 +235,8 @@ func TestSafeRollbackApprovalReconciliationPostgresIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := db.adminPool.Exec(ctx, `UPDATE public.approval_requests
-SET execution_deadline=transaction_timestamp()+interval '4 minutes',updated_at=transaction_timestamp()
-WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
+SET execution_deadline=transaction_timestamp()+$2::interval,updated_at=transaction_timestamp()
+WHERE id=$1 AND status='APPROVED'`, requestID, test.deadlineInterval); err != nil {
 				t.Fatal(err)
 			}
 			setApprovalConsumerControl(t, ctx, db, "SAFE_ROLLBACK", "RUNNING", 1, true, test.controlEpoch)
@@ -229,7 +246,7 @@ WHERE id=$1 AND status='APPROVED'`, requestID); err != nil {
 				t.Fatalf("dry-run=%+v err=%v", dryRun, err)
 			}
 			plan, err := repository.PlanApprovalReconciliation(ctx, 20)
-			if err != nil || len(plan.Candidates) != 1 || plan.Candidates[0].InvalidationCode != "APPROVAL_SAFE_ROLLBACK_INVALIDATED" {
+			if err != nil || len(plan.Candidates) != 1 {
 				t.Fatalf("plan=%+v err=%v", plan, err)
 			}
 			candidate := plan.Candidates[0]

@@ -120,7 +120,7 @@ func TestApprovalConsumerDeliveryDownForbiddenWithoutHistoryIntegration(t *testi
 	}
 	defer migrations.Unlock(ctx, connection.Conn())
 	err := migrations.DownOne(ctx, connection.Conn(), loaded)
-	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000058 approval consumer route binding is forward-only; database down is forbidden" {
+	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000060 approval exclusion reason binding is forward-only; database down is forbidden" {
 		t.Fatalf("down state=%s message=%q err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
 	}
 	after := approvalConsumerHardeningSnapshot(t, ctx, db)
@@ -147,14 +147,14 @@ WHERE original_event_id=$1 AND durable=$2`, binding.EventID, binding.Durable).Sc
 	}
 	defer migrations.Unlock(ctx, connection.Conn())
 	err := migrations.DownOne(ctx, connection.Conn(), loaded)
-	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000058 approval consumer route binding is forward-only; database down is forbidden" {
+	if postgresSQLState(err) != "55000" || postgresSQLMessage(err) != "000060 approval exclusion reason binding is forward-only; database down is forbidden" {
 		t.Fatalf("history down state=%s message=%q err=%v", postgresSQLState(err), postgresSQLMessage(err), err)
 	}
 	var after string
 	var version int64
 	if err := db.adminPool.QueryRow(ctx, `SELECT to_jsonb(d)::text,(SELECT max(version) FROM public.schema_migrations)
 FROM account_approval_authorization.approval_delivery_states d WHERE original_event_id=$1 AND durable=$2`,
-		binding.EventID, binding.Durable).Scan(&after, &version); err != nil || after != before || version != 58 {
+		binding.EventID, binding.Durable).Scan(&after, &version); err != nil || after != before || version != 60 {
 		t.Fatalf("refused down changed history=%t version=%d err=%v", after != before, version, err)
 	}
 	if afterHardening := approvalConsumerHardeningSnapshot(t, ctx, db); afterHardening != beforeHardening {
