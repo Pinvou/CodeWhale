@@ -518,6 +518,9 @@ mod tests {
                     out.insert(key);
                 } else if !domain.is_empty()
                     && !span.is_empty()
+                    // flag 说明段（如行内的 `--type`）不是命令：拼成「域 + flag」
+                    // 会得到路由表必然不存在的伪命令，契约测试误报缺失。
+                    && !span.starts_with('-')
                     && span
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c == '-' || c == '[')
@@ -566,6 +569,27 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn skill_command_collector_ignores_flag_spans() {
+        // 速查表行内的 flag 说明段（如 `--type`）不得被「同格续写命令」语法糖
+        // 拼成「域 + flag」伪命令——cc16d7fa 增补 todo-count 说明时踩坑，产生
+        // 路由表必然不存在的 "todo-count --type"，契约测试误报缺失。
+        let skill = "| 有没有待办 | `eip todo` / `eip todo-count`;审批状态加 `--type`:`2` 已审批、`3` 我的申请 |";
+        let cmds = collect_skill_commands(skill);
+        assert!(
+            cmds.contains("todo") && cmds.contains("todo-count"),
+            "{cmds:?}"
+        );
+        assert!(!cmds.contains("todo-count --type"), "{cmds:?}");
+        // 续写命令语法糖本身不受影响：不带 eip 前缀的裸命令段仍继承本行域。
+        let legacy = "| 各类假期余额 | `eip leave get-balance` / `get-sick-balance` |";
+        let cmds = collect_skill_commands(legacy);
+        assert!(
+            cmds.contains("leave get-balance") && cmds.contains("leave get-sick-balance"),
+            "{cmds:?}"
+        );
     }
 
     #[test]
