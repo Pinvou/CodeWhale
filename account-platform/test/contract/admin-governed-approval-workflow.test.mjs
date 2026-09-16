@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createAndSubmitGovernedApproval, recoverGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
 
@@ -64,4 +65,13 @@ test('legacy wire still requires the complete original draft contract', async ()
     submitGovernedApprovalRequest: async () => assert.fail('must not submit incomplete legacy detail') };
   await assert.rejects(createAndSubmitGovernedApproval(client, draft),
     { code: 'INVALID_APPROVAL_RESPONSE', commandReference: requestID });
+});
+
+test('all Token business approval entry points use the session-governed workflow', () => {
+  for (const name of ['AdminModelTokenWorkspace.jsx', 'AdminModelDetailWorkspace.jsx', 'AdminTokenAccountDetailWorkspace.jsx']) {
+    const source = readFileSync(new URL(`../../../pinvou3-app/src/features/account-platform/${name}`, import.meta.url), 'utf8');
+    assert.match(source, /createAndSubmitGovernedApproval\(client, draft, signal\)/, name);
+    assert.match(source, /recoverGovernedApproval\(client, reference, draft, signal\)/, name);
+    assert.doesNotMatch(source, /client\.createApprovalDraft\(|client\.submitApprovalRequest\(/, name);
+  }
 });

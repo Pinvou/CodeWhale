@@ -3,7 +3,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { adminModelTokenQueryUpdates, readAdminModelTokenQuery } from './admin-navigation.js';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
-import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact, validApprovalRequest } from './admin-high-risk-action-state.js';
+import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact } from './admin-high-risk-action-state.js';
+import { createAndSubmitGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
 import { PricingLifecycleWorkspace } from './PricingLifecycleWorkspace.jsx';
 
 const MODEL_DETAIL_TABS = Object.freeze(['overview', 'capabilities', 'operations', 'pricing', 'lifecycle', 'audit']);
@@ -182,24 +183,11 @@ function lifecycleApprovalDraft(plan, reason, impact, idempotencyKey) {
 }
 
 async function submitLifecycleApproval(client, draft, signal) {
-  const created = await client.createApprovalDraft(draft, signal);
-  if (!validApprovalRequest(created, draft, ['DRAFT'])) throw Object.assign(new Error('invalid lifecycle approval draft'), { code: 'INVALID_APPROVAL_RESPONSE' });
-  try {
-    const submitted = await client.submitApprovalRequest(created.approval_request_id, created.version, signal);
-    if (!validApprovalRequest(submitted, draft, ['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'])) throw Object.assign(new Error('invalid lifecycle approval submit'), { code: 'INVALID_APPROVAL_RESPONSE' });
-    return submitted;
-  } catch (error) {
-    throw Object.assign(error instanceof Error ? error : new Error('lifecycle approval submit failed'), { commandReference: created.approval_request_id });
-  }
+  return createAndSubmitGovernedApproval(client, draft, signal);
 }
 
 async function recoverLifecycleApproval(client, reference, draft, signal) {
-  const value = await client.approvalRequest(reference, signal);
-  const statuses = ['DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTING', 'EXECUTED', 'EXECUTION_FAILED'];
-  if (!validApprovalRequest(value, draft, statuses)) throw Object.assign(new Error('invalid lifecycle approval recovery'), { code: 'INVALID_APPROVAL_RESPONSE', commandReference: reference });
-  if (['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'].includes(value.status)) return value;
-  if (value.status === 'DRAFT') throw Object.assign(new Error('approval submission outcome remains unknown'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', commandReference: reference });
-  throw Object.assign(new Error('approval reached terminal state'), { code: `APPROVAL_${value.status}`, commandReference: reference, finalResult: true });
+  return recoverGovernedApproval(client, reference, draft, signal);
 }
 
 function localDateTime(instant) {
