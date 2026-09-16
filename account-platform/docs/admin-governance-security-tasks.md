@@ -3,19 +3,19 @@
 GSA-07 发布约束入口：[审批授权 Relay 手册](../deploy/runbooks/approval-authorization-relay.md)。该手册不构成代码审核通过、环境验收或部署完成证据。
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分的既有A/B审核历史保留；2026-09-16起由单角色执行逐次修改、Signed-off提交、提交级自审与独立修订提交。GSA-01～07既有状态与环境欠账不变；GSA-08～15均为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，其中GSA-11提交链为`ba1b47ac`、`8126615a`、`e8293602`、`fe7219de`，GSA-12～15提交链和适用门禁见下文。GSA-16起其余任务PENDING；真实Q捕获、生产资源、activation与部署仍归GSA-38～40。
+> 既有A/B及单角色审核历史保留，不追溯改写。2026-09-16最新执行指令：从GSA-16后续提交起，逐任务编码、必要验证、Signed-off提交并推送；不逐变更审核，代码完成标记`CODE_COMPLETE / REVIEW_PENDING`，全部任务完成后仅依用户后续指令统一审核。GSA-01～07既有状态与环境欠账不变；GSA-08～15现有代码及历史审核状态保留，GSA-16仍`IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED`；真实Q捕获、生产资源、activation与部署仍归GSA-38～40。
 
 ## 1. 所有权与执行规则
 
 需求合同唯一引用 [整改设计](admin-governance-security-redesign.md)，不在任务表重新定义协议。主目标唯一归属：APT-141 拥有 ADM-67，APT-142 拥有 UI-60，APT-143 拥有 NFR-57。以下 GSA 编号是可独立审核、测试、提交的执行子任务；主任务作为汇总，不能以一个大提交替代子任务交付。
 
-逐项执行（2026-09-16 用户更新）：停止 A/B 多角色行为，全部修改与审核由同一角色完成；每轮仍严格执行“修改与自检 → Signed-off 独立提交 → 针对该提交进行提交级自审 → 若发现问题则新增 Signed-off 修订提交 → 复审直至 PASS → 更新证据 → 下一项”。提交不等于审核通过或任务完成；不得以 amend 抹去审核修订轮次，自审未通过不得进入下一执行子任务。2026-09-16以前已经形成的 A/B 审核结论作为历史证据保留，不改写为单角色结论。一个 GSA 可有多个实现/修订提交，每次提交只能涉及一个 GSA 子任务；设计子任务同样先提交再审核。需求取舍、未经确认的财务规则和互斥方案提交用户决定。
+逐项执行（2026-09-16 最新用户更新）：停止逐次修改/审核循环。每个GSA完成编码、适用的必要测试与文档后，以Signed-off独立提交并推送到当前分支的跟踪远端，再推进下一项；允许任务内为可运行的中间检查点提交，但不得把部分实现标为完成。新交付一律标记`REVIEW_PENDING`，待所有任务完成且用户再次指示后统一审核；已有审核结论仅作历史证据。需求取舍、未经确认的财务规则和互斥方案仍须用户决定，不能因推迟审核而猜填。
 
-2026-09-15 用户明确授权“跳过pending继续完成后续任务”：GSA-04的三项隔离Linux验收仍受环境阻断，但基于该前置已有Signed-off提交`0c9db1e2`、身份B代码审核通过及本机适用验证通过，可以继续后续设计/实现、逐项审核和独立提交。该顺序例外可沿依赖链传递地允许推进下一项；任何缺Linux证据的前置及受其影响的下游都必须保留`ENV_PENDING`或`DEPENDENCY_ENV_PENDING`，不得冒充最终`DONE/APPROVED`。2026-09-16起的新提交在checker无法表达最终完成时，统一保持`IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED`；此前已经通过B审核的任务保留原`B_CODE_REVIEW_PASS`历史状态。例外不豁免代码缺陷、任务自身适用验证、提交级审核、真实技术依赖或生产部署/activation/cutover门禁；所有Linux欠账仍须在生产启用前补齐。GSA-05自身只依赖已DONE的GSA-02，文档与代码各自审核/验证通过后可按通常规则DONE。
+2026-09-15 用户明确授权“跳过pending继续完成后续任务”：GSA-04的三项隔离Linux验收仍受环境阻断，但基于该前置已有Signed-off提交`0c9db1e2`、身份B代码审核通过及本机适用验证通过，可以继续后续设计/实现和独立提交。该顺序例外可沿依赖链传递地允许推进下一项；任何缺Linux证据的前置及受其影响的下游都必须保留`ENV_PENDING`或`DEPENDENCY_ENV_PENDING`，不得冒充最终`DONE/APPROVED`。本次指令后的代码完成项标记`IN_PROGRESS / CODE_COMPLETE / REVIEW_PENDING / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED`；此前已经通过B审核的任务保留原`B_CODE_REVIEW_PASS`历史状态。例外不豁免代码缺陷、任务自身适用验证、真实技术依赖或生产部署/activation/cutover门禁；所有Linux欠账仍须在生产启用前补齐。GSA-05既有DONE状态保留。
 
-每项必须记录实际文件、测试命令/结果、审核结论、提交、已知差距。代码任务 DONE 要求真实行为测试及适用数据库集成测试通过，不能用 SKIP 或静态字符串断言代替；有代码完成但缺环境证据时保持 IN_PROGRESS 并记录 CODE_COMPLETE/ENV_PENDING，不关闭主目标。所有产品代码提交执行 `node scripts/account-platform.mjs verify` 和任务定向门禁；文档步骤执行任务覆盖与文档基线检查。只在改动或新失败需要时重跑已经通过的检查。
+每项必须记录实际文件、测试命令/结果、审核待办、提交与推送、已知差距。代码任务`CODE_COMPLETE`要求真实行为测试及适用数据库集成测试通过，不能用SKIP或静态字符串断言代替；缺环境证据时保持`IN_PROGRESS / CODE_COMPLETE / REVIEW_PENDING / ENV_PENDING`，不关闭主目标。产品代码运行`node scripts/account-platform.mjs verify`和任务定向门禁；文档步骤运行任务覆盖与文档基线检查。只在改动或新失败需要时重跑已通过检查。
 
-DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不变量、验收映射、文档检查、提交级审核PASS及独立提交即可DONE，不要求尚未实现的行为测试，不表示功能已实现。CODE 指仓库实现及本地/隔离环境验证；CODE+ENV 额外要求生产等价环境或部署证据。此次提交授权不等于生产部署/激活授权；发布任务先完成工具与隔离演练，实际生产操作单独取得授权。所有子任务在此文档内顺序执行，表内依赖是最低技术依赖，不能以没有依赖为由并行实现。
+DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不变量、验收映射、文档检查及独立提交推送后标记`DESIGN_COMPLETE / REVIEW_PENDING`，不要求尚未实现的行为测试，不表示功能已实现。CODE 指仓库实现及本地/隔离环境验证；CODE+ENV 额外要求生产等价环境或部署证据。此次提交推送授权不等于生产部署/激活授权；发布任务先完成工具与隔离演练，实际生产操作单独取得授权。所有子任务在此文档内顺序执行，表内依赖是最低技术依赖，不能以没有依赖为由并行实现。
 
 ## 2. 独立执行队列
 
@@ -38,7 +38,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-13 | APT-141 | Account proof 客户端、批准检查点与版本化动作 | GSA-04, GSA-05, GSA-12 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | IN_PROGRESS / PARTIAL / NOT_DEPLOYED |
+| GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
 | GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | PENDING |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | PENDING |
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | PENDING |
@@ -124,7 +124,7 @@ GSA-16 查询租约阶段（仍PARTIAL）：前向Account`000068`新增原execut
 
 ### GSA-21～37：八类财务命令
 
-21/23/25/27/29/31/33/35 分别只交付对应命令的领域设计，逐项落实设计 §11：精确允许/禁止变化、权限/政策新版本、closed command/snapshot/proof/presenter、金额和组成守恒、补偿而非改写历史、外部证据、未知结果、CAS/幂等、迁移与回滚。B 通过后才进入下一实现项；需要用户决定的账务规则先给具体选项及影响，不猜填。每类创建独立领域设计文档，已有AUDIT_ONLY路径不升级冒充新命令。
+21/23/25/27/29/31/33/35 分别只交付对应命令的领域设计，逐项落实设计 §11：精确允许/禁止变化、权限/政策新版本、closed command/snapshot/proof/presenter、金额和组成守恒、补偿而非改写历史、外部证据、未知结果、CAS/幂等、迁移与回滚。设计提交推送后可进入对应实现，审核统一延后；需要用户决定的账务规则先给具体选项及影响，不猜填。每类创建独立领域设计文档，已有AUDIT_ONLY路径不升级冒充新命令。
 
 22/24/26/28/30/32/34/36 各只实现上一设计通过的一个命令：领域schema/handler、补偿账务、proof、executor/consumer/recovery、契约、权限、审计、注册和默认INACTIVE的前向版本。正常/非法/并发/重复/未知/撤权/窗口/回滚及真实领域E2E全部验收。不得发布整组activation；代码完成仍NOT_DEPLOYED。用量结算修复绝不重发模型请求；退款异常修复不开放普通退款产品入口。
 

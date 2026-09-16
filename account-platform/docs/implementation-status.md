@@ -1,5 +1,7 @@
 # 账号平台实现状态与差距
 
+2026-09-16最新执行方式：GSA-16及后续任务逐项编码、必要验证、Signed-off提交并推送；新交付统一标记`REVIEW_PENDING`，全部任务完成后等待用户另行指示审核。既有审核历史不改写；环境待验、生产部署/activation门禁不因推送而关闭。以下较早段落中的“逐次自审”仅描述当时执行历史，不再作为后续流程要求。
+
 ## 2026-09-14 治理与安全需求变更
 
 需求/设计已由身份B最终审核PASS并以`e15fe698`提交。目标总数440项，当前汇总仍为`已实现403 / 部分实现32 / 未实现3 / 移除1 / 非当前范围1`，ADM-64/ADM-67仍仅部分实现。APT-141～143分别唯一拥有领域、界面、发布目标；[GSA-01～40独立子任务](admin-governance-security-tasks.md)保留既有A/B审核历史，2026-09-16起由单角色执行“修改、Signed-off提交、提交级自审、独立修订提交、复审至PASS”。GSA-01～07状态和环境欠账不变；GSA-08～10的授权消息、历史对账、目录与无泄露读取已完成仓库代码和提交级自审。GSA-11以`ba1b47ac`、`8126615a`、`e8293602`、`fe7219de`交付Account有界membership snapshot、签名cursor、当前权限过滤、容量/限流/密钥轮换、清理/水位及前向永久禁止数据库down；真实隔离PostgreSQL覆盖冻结翻页、并发变更、撤权、轮换、限流、容量和迁移边界，000064增量PG/合同/迁移门禁通过。GSA-12交付v2签名游标最小列表、六命令closed detail、未知历史安全envelope、v1动作版本头、默认关闭的分页密钥配置与执行最小脱敏状态；聚合统计不显示。GSA-13交付Account proof客户端/检查点/原子批准链和v2决定入口，真实PG覆盖六命令及竞态；生产入口注册了现有服务身份的proof来源，详见任务证据。GSA-14已接入Token三命令受限proof endpoint、执行前revision/epoch校验，真实Account身份经Token HTTP到隔离PG的三命令proof及目录回滚预检后事务竞态零副作用均通过。GSA-15已接入Billing三命令专用proof、执行前SERIALIZABLE事实claim和未知结果零重探测，真实隔离PG验证三命令ALLOW/claim及Wallet漂移；GSA-08～15均保持IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，GSA-16为IN_PROGRESS / PARTIAL / NOT_DEPLOYED，其余任务PENDING；GSA-16已保守关闭proof-era Billing通用自动重试和失败执行的过期失效，但六命令分类及独立恢复worker未完成。完整批准→consumer→安全恢复与生产等价集成由后续任务接续。真实Q/receipt、生产资源/ACL、activation与部署归GSA-38～40；GSA-04 Linux环境待验继续传递，APT-138-R1仍PENDING，所有新增目标均未部署。
