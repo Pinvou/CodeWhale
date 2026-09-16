@@ -44,6 +44,37 @@ func TestProofTransportClosedGoldenAndBinding(t *testing.T) {
 	}
 }
 
+func TestProofRequestSixClosedVariants(t *testing.T) {
+	id := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+	for _, vector := range frozenLegacyInputs() {
+		t.Run(vector.name, func(t *testing.T) {
+			artifacts, err := ConvertLegacyProofInput(vector.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := EncodeProofRequest(id, artifacts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := DecodeProofRequest(encoded)
+			if err != nil || decoded.ApprovalRequestID != id || !bytes.Equal(decoded.Artifacts.ProofInputJSON, artifacts.ProofInputJSON) ||
+				decoded.Artifacts.CommandDigest != artifacts.CommandDigest || decoded.Artifacts.SnapshotDigest != artifacts.SnapshotDigest {
+				t.Fatalf("closed proof request changed: %v", err)
+			}
+			for _, invalid := range [][]byte{
+				bytes.Replace(encoded, []byte(`"command_digest":`), []byte(`"command_digest":"wrong","command_digest":`), 1),
+				bytes.Replace(encoded, []byte(`"command_digest":`), []byte(`"secret":"untrusted","command_digest":`), 1),
+				bytes.Replace(encoded, []byte(artifacts.CommandDigest), []byte(strings.Repeat("a", 64)), 1),
+				append(append([]byte{}, encoded...), []byte(`{}`)...),
+			} {
+				if _, err := DecodeProofRequest(invalid); err == nil {
+					t.Fatal("accepted malformed owner-domain request")
+				}
+			}
+		})
+	}
+}
+
 func TestProofTransportRejectsMalformedResponse(t *testing.T) {
 	valid := readGolden(t).ProofResponseVectors[0].ResponseJSON
 	for _, raw := range []string{

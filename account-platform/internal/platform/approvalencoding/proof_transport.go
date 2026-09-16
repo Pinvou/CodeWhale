@@ -8,6 +8,58 @@ import (
 	"github.com/google/uuid"
 )
 
+type ProofRequest struct {
+	ApprovalRequestID uuid.UUID
+	Artifacts         ProofArtifacts
+}
+
+// DecodeProofRequest is the owner-domain counterpart to EncodeProofRequest.
+// It checks the exact seven transport fields, the registered command/policy
+// variant, typed closed proof input and both locally recomputed digests.
+func DecodeProofRequest(raw []byte) (ProofRequest, error) {
+	value, err := parseDocument(raw)
+	if err != nil {
+		return ProofRequest{}, err
+	}
+	fields, err := requireObject(value, "approval_request_id", "command_type", "policy_version", "proof_schema_version", "command_digest", "snapshot_digest", "proof_input")
+	if err != nil {
+		return ProofRequest{}, err
+	}
+	id, err := stringValue(fields["approval_request_id"])
+	if err != nil || !validUUID(id) {
+		return ProofRequest{}, ErrInvalidDocument
+	}
+	command, err := stringValue(fields["command_type"])
+	if err != nil {
+		return ProofRequest{}, err
+	}
+	policyVersion, err := integerNumber(fields["policy_version"])
+	if err != nil {
+		return ProofRequest{}, err
+	}
+	schema, err := stringValue(fields["proof_schema_version"])
+	if err != nil || schema != ProofSchemaVersion {
+		return ProofRequest{}, ErrUnsupportedVersion
+	}
+	input, err := canonicalJSON(fields["proof_input"])
+	if err != nil {
+		return ProofRequest{}, err
+	}
+	artifacts, err := DecodeProofInput(command, policyVersion, input)
+	if err != nil {
+		return ProofRequest{}, ErrInvalidDocument
+	}
+	commandDigest, err := stringValue(fields["command_digest"])
+	if err != nil || commandDigest != artifacts.CommandDigest {
+		return ProofRequest{}, ErrInvalidDocument
+	}
+	snapshotDigest, err := stringValue(fields["snapshot_digest"])
+	if err != nil || snapshotDigest != artifacts.SnapshotDigest {
+		return ProofRequest{}, ErrInvalidDocument
+	}
+	return ProofRequest{ApprovalRequestID: uuid.MustParse(id), Artifacts: artifacts}, nil
+}
+
 // EncodeProofRequest validates the typed artifacts again at the transport
 // boundary. No arbitrary browser or presenter JSON can be inserted here.
 func EncodeProofRequest(requestID uuid.UUID, artifacts ProofArtifacts) ([]byte, error) {
