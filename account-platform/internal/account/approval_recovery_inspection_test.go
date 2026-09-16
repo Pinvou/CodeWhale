@@ -73,4 +73,8 @@ func TestProofRecoveryInspectionNeverPromotesAbsenceToZeroEffect(t *testing.T) {
 	if _, err := InspectProofRecovery(context.Background(), planner, effects, 1); !errors.Is(err, ErrApprovalRecoveryPlanInvalid) || effects.calls != 0 {
 		t.Fatalf("forged candidate reached domain: err=%v calls=%d", err, effects.calls)
 	}
+	planner.plan.Candidates = []ApprovalRecoveryCandidate{item, item}
+	if _, err := InspectProofRecovery(context.Background(), planner, effects, 1); !errors.Is(err, ErrApprovalRecoveryPlanInvalid) || effects.calls != 0 {
+		t.Fatalf("oversized plan reached domain: err=%v calls=%d", err, effects.calls)
+	}
 }

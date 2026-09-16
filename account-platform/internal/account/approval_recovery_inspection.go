@@ -36,9 +36,16 @@ func InspectProofRecovery(ctx context.Context, planner ApprovalRecoveryPlanner, 
 	if planner == nil || effects == nil || limit < 1 || limit > 200 {
 		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 	}
+	// One bounded inspection cannot silently run 200 independent five-second
+	// authority requests for an unbounded period.
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	plan, err := planner.PlanProofApprovalRecovery(ctx, limit)
 	if err != nil {
 		return ApprovalRecoveryInspectionBatch{}, err
+	}
+	if len(plan.Candidates) > limit {
+		return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 	}
 	batch := ApprovalRecoveryInspectionBatch{Plan: plan, Inspections: make([]ApprovalRecoveryInspection, 0, len(plan.Candidates))}
 	for _, candidate := range plan.Candidates {
@@ -46,10 +53,11 @@ func InspectProofRecovery(ctx context.Context, planner ApprovalRecoveryPlanner, 
 		if !ok || !approvalconsumer.Match(descriptor, candidate.CommandType, candidate.PolicyVersion, candidate.Workload) ||
 			!approvaleffect.ValidFingerprint(candidate.CommandFingerprint) || candidate.RequestID == uuid.Nil ||
 			candidate.OriginalEventID == uuid.Nil || candidate.ExecutionID == uuid.Nil ||
-			candidate.Investigation.Retryable || !candidate.Investigation.QueryOnly {
+			candidate.Investigation.Retryable || !candidate.Investigation.QueryOnly || candidate.Investigation.MaxDomainAttempts != 1 {
 			return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 		}
 		entry := ApprovalRecoveryInspection{Candidate: candidate, EffectObservation: "UNAVAILABLE", Disposition: "UNKNOWN_QUERY_ONLY"}
+		started := time.Now().UTC()
 		observation, observeErr := effects.Observe(ctx, candidate.RequestID, candidate.CommandType, candidate.CommandFingerprint)
 		if observeErr != nil {
 			if ctx.Err() != nil {
@@ -58,7 +66,8 @@ func InspectProofRecovery(ctx context.Context, planner ApprovalRecoveryPlanner, 
 			batch.Inspections = append(batch.Inspections, entry)
 			continue
 		}
-		if observation.Validate() != nil || observation.ApprovalRequestID != candidate.RequestID ||
+		if observation.Validate() != nil || observation.ObservedAt.Before(started.Add(-30*time.Second)) ||
+			observation.ObservedAt.After(time.Now().UTC().Add(30*time.Second)) || observation.ApprovalRequestID != candidate.RequestID ||
 			observation.CommandType != candidate.CommandType || observation.CommandFingerprint != candidate.CommandFingerprint {
 			return ApprovalRecoveryInspectionBatch{}, ErrApprovalRecoveryPlanInvalid
 		}
