@@ -194,8 +194,13 @@ func q(pairs ...string) (url.Values, error) {
 }
 
 // date=<RSA 加密的 YYYY-MM>（attendance get-summary / get-calendar 专用，黄金表 §2）。
+// 本地先校验 YYYY-MM 形态：非法日期加密后服务端照样拒绝，白费一次请求。
 func rsaMonthQuery(f map[string]string) (url.Values, error) {
-	enc, err := encryptRSADate(firstNonEmpty(f["date"], monthNow()))
+	date := firstNonEmpty(f["date"], monthNow())
+	if _, err := time.Parse("2006-01", date); err != nil {
+		return nil, fmt.Errorf("--date must be YYYY-MM, got %q", date)
+	}
+	enc, err := encryptRSADate(date)
 	if err != nil {
 		return nil, err
 	}
@@ -306,15 +311,17 @@ func pagedUpperBody(f map[string]string) map[string]any {
 	return map[string]any{"PageIndex": atoiDefault(f["page"], 1), "PageSize": atoiDefault(f["page-size"], 10)}
 }
 
-// attendance calc-days：键全大写开头，Begzt/Endzt 为官方原拼写。
+// attendance calc-days：键全大写开头，Begzt/Endzt 为官方原拼写；班次时间官方
+// 缺省 08:30:00/18:00:00，--beg-time/--end-time 可覆盖（官方同款 flag，
+// 非标准班次下算天才不失真）。
 func calcDaysBody(f map[string]string) map[string]any {
 	return map[string]any{
 		"ApplyType":     f["apply-type"],
 		"ApplyTypeText": "",
 		"BegDate":       f["beg-date"],
-		"Begzt":         "08:30:00",
+		"Begzt":         firstNonEmpty(f["beg-time"], "08:30:00"),
 		"EndDate":       f["end-date"],
-		"Endzt":         "18:00:00",
+		"Endzt":         firstNonEmpty(f["end-time"], "18:00:00"),
 	}
 }
 
@@ -379,9 +386,21 @@ func unionWelfareBody(f map[string]string) map[string]any {
 	}
 }
 
-// survey submit 对应黄金表 survey submit：键大写开头。
+// survey submit 对应黄金表 survey submit：键大写开头；1314Salary 类型另有
+// EmpName/IDCard/IDCardType（官方 --emp-name/--id-card/--id-card-type，黄金表
+// §15 备注），提供 flag 时才附加。
 func surveySubmitBody(f map[string]string) map[string]any {
-	return map[string]any{"Id": f["id"], "Opinion": f["opinion"]}
+	body := map[string]any{"Id": f["id"], "Opinion": f["opinion"]}
+	for key, flag := range map[string]string{
+		"EmpName":    "emp-name",
+		"IDCard":     "id-card",
+		"IDCardType": "id-card-type",
+	} {
+		if v := f[flag]; v != "" {
+			body[key] = v
+		}
+	}
+	return body
 }
 
 // todo-batch-list：--system-id 提供时进 condition，否则 condition 为空对象（黄金表 §8）。
@@ -403,15 +422,32 @@ func todoCategoryBody(f map[string]string) map[string]any {
 }
 
 // todo-submit（写操作）：buttonType 首字母大写；reject 附加 opinion；
-// transfer 附加 targetReceiver/targetReceiverName；flow-list 元素须含 nodeId。
+// transfer 附加 targetReceiver/targetReceiverName（缺一不可）；flow-list 元素
+// 须含 nodeId，且不得为空（null/[] 显式拒绝）。
 func todoSubmitBody(f map[string]string) (map[string]any, error) {
 	listRaw := f["flow-list"]
 	if listRaw == "" {
 		return nil, fmt.Errorf("todo-submit: missing --flow-list")
 	}
 	// 官方同时支持内联 JSON 数组与 ./file.json 路径：以 [ 开头按字面量，否则当路径读。
+	// 路径仅限当前目录下的相对常规文件——CLI 运行在模型工具上下文，不能给它
+	// 任意文件读取面（绝对路径、.. 越界、FIFO/设备文件都在拒绝之列）。
 	if !strings.HasPrefix(listRaw, "[") {
-		b, err := os.ReadFile(listRaw)
+		if filepath.IsAbs(listRaw) {
+			return nil, fmt.Errorf("todo-submit: --flow-list file must be a relative path under the current directory")
+		}
+		clean := filepath.Clean(listRaw)
+		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("todo-submit: --flow-list file must stay under the current directory")
+		}
+		fi, err := os.Stat(clean)
+		if err != nil {
+			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
+		}
+		if !fi.Mode().IsRegular() {
+			return nil, fmt.Errorf("todo-submit: --flow-list file is not a regular file")
+		}
+		b, err := os.ReadFile(clean)
 		if err != nil {
 			return nil, fmt.Errorf("todo-submit: read --flow-list file: %w", err)
 		}
@@ -420,6 +456,9 @@ func todoSubmitBody(f map[string]string) (map[string]any, error) {
 	var flowList []map[string]any
 	if err := json.Unmarshal([]byte(listRaw), &flowList); err != nil {
 		return nil, fmt.Errorf("todo-submit: --flow-list is not a JSON array: %w", err)
+	}
+	if len(flowList) == 0 {
+		return nil, fmt.Errorf("todo-submit: --flow-list is empty (null or [])")
 	}
 	for i, item := range flowList {
 		if _, ok := item["nodeId"]; !ok {
@@ -433,6 +472,9 @@ func todoSubmitBody(f map[string]string) (map[string]any, error) {
 	case "reject":
 		body["opinion"] = f["opinion"]
 	case "transfer":
+		if f["target-receiver"] == "" || f["target-receiver-name"] == "" {
+			return nil, fmt.Errorf("todo-submit: transfer requires --target-receiver and --target-receiver-name")
+		}
 		body["targetReceiver"] = f["target-receiver"]
 		body["targetReceiverName"] = f["target-receiver-name"]
 	}
@@ -622,14 +664,18 @@ func cmdLogin(flags map[string]string) int {
 		"deviceId": deviceID(),
 		"metaData": map[string]string{"name": name, "os": runtime.GOOS, "arch": runtime.GOARCH, "client": "pinvou3"},
 	}
-	env, raw, err := postJSON(authBase()+"/api/v2/user/agent/session/login", body, false)
+	env, raw, err := postJSON(authBase()+"/api/v2/user/agent/session/login", body)
 	if err != nil {
 		emitJSON(map[string]any{"error": err.Error()})
 		return 1
 	}
 	d := env.session()
 	if d.SessionID != "" {
-		_ = os.WriteFile(sessionFile(), []byte(d.SessionID), 0o600)
+		// session id 落盘失败不阻断登录（ssoLoginUrl 已取得，poll 可显式传
+		// --session-id），仅 stderr 告警。
+		if werr := os.WriteFile(sessionFile(), []byte(d.SessionID), 0o600); werr != nil {
+			fmt.Fprintf(os.Stderr, "warn: persist session id: %v\n", werr)
+		}
 	}
 	if d.SsoLoginURL == "" {
 		emitJSON(map[string]any{"error": "login did not return ssoLoginUrl", "message": firstNonEmpty(env.Msg, env.Message), "raw": string(raw)})
@@ -648,15 +694,28 @@ func cmdPoll(flags map[string]string) int {
 		emitJSON(map[string]any{"error": "missing --session-id"})
 		return 2
 	}
+	// range 校验：超大值会让 time.Duration 乘法回绕、deadline 失效，轮询永不退出。
 	timeout := atoiDefault(flags["timeout"], 5)
+	if timeout < 1 || timeout > 300 {
+		emitJSON(map[string]any{"error": "--timeout must be 1-300 seconds"})
+		return 2
+	}
 	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
 	for {
-		env, _, err := getURL(authBase()+"/api/v2/user/agent/session/poll/"+url.PathEscape(sid), false)
+		env, _, err := getURL(authBase() + "/api/v2/user/agent/session/poll/" + url.PathEscape(sid))
 		if err == nil {
 			d := env.session()
 			if d.Token != "" {
-				_ = saveAT(d.Token)
-				_ = saveAIT(d.Ait)
+				// 凭证落盘失败必须上抛：否则 poll 报 connected 但凭证未持久化，
+				// 后续业务命令全部 not authenticated。
+				if err := saveAT(d.Token); err != nil {
+					emitJSON(map[string]any{"error": "persist token: " + err.Error()})
+					return 1
+				}
+				if err := saveAIT(d.Ait); err != nil {
+					emitJSON(map[string]any{"error": "persist ait: " + err.Error()})
+					return 1
+				}
 				emitJSON(map[string]any{"hasToken": true, "connected": true})
 				return 0
 			}
@@ -700,27 +759,47 @@ func cmdSave(flags map[string]string) int {
 	return 0
 }
 
-// authExpired 判定响应是否为 token 失效/未授权，需刷新后重试。
-// EIP 业务接口对过期 token 返回 HTTP 200 + {"Code":51,"Msg":"Token已失效"}；
-// 个别接口走 HTTP 401 或以文案表达，一并兜底。
+// writeCommands：会改变服务端状态的命令（与 SKILL.md 护栏同款清单）。
+// token 过期时刷新凭证但不自动重放——重发可能让服务端重复受理（重复审批/
+// 重复发送），提示调用方确认后重试。
+var writeCommands = map[string]bool{
+	"todo-submit":               true,
+	"message read-all":          true,
+	"message send-bless":        true,
+	"condolence urge":           true,
+	"condolence validate":       true,
+	"condolence create-funeral": true,
+	"condolence create-wedding": true,
+	"survey submit":             true,
+	"union-apply join":          true,
+	"employee-handbook sign":    true,
+}
+
+// authExpired 判定响应是否为 token 失效，需刷新凭证。
+// 仅认服务端明确的过期信号：业务信封 Code==51，或 HTTP 401。
+// 不按 Msg 子串猜测：业务文案（如「该申请已失效，请勿重复操作」）命中
+// 子串时请求实际已成功处理，自动重放会构成重复提交面。
 func authExpired(raw []byte, err error) bool {
 	if err != nil {
 		return strings.Contains(err.Error(), "HTTP 401")
 	}
+	return envelopeCode(raw) == "51"
+}
+
+// envelopeCode 提取业务信封 Code（兼容 number/string 形态）；缺失或非 JSON
+// 返回空串。
+func envelopeCode(raw []byte) string {
 	var probe struct {
-		Code json.Number `json:"Code"`
-		Msg  string      `json:"Msg"`
+		Code json.RawMessage `json:"Code"`
 	}
-	if json.Unmarshal(raw, &probe) == nil {
-		if probe.Code.String() == "51" {
-			return true
-		}
-		return strings.Contains(probe.Msg, "失效") ||
-			strings.Contains(probe.Msg, "未登录") ||
-			strings.Contains(probe.Msg, "登录已过期")
+	if json.Unmarshal(raw, &probe) != nil || len(probe.Code) == 0 {
+		return ""
 	}
-	return strings.Contains(string(raw), "Token已失效") ||
-		strings.Contains(string(raw), "登录已过期")
+	var s string
+	if json.Unmarshal(probe.Code, &s) == nil {
+		return s
+	}
+	return strings.Trim(string(probe.Code), `"`)
 }
 
 func runBusiness(args []string) int {
@@ -794,11 +873,15 @@ func runBusiness(args []string) int {
 		path = fmt.Sprintf(path, url.PathEscape(fill))
 	}
 	raw, err := callEIP(r.method, path, query, body, token)
-	// token 过期(服务端 Code 51 / "失效"，个别接口 HTTP 401）→ 清 AT、用 AIT 刷新、重试一次。
-	// 对齐真 eip-cli 的自动刷新:此前 ensureToken 只在 AT 为空时才刷新，存量 AT 过期会被原样发出去遭拒。
+	// token 过期(服务端 Code 51 / 个别接口 HTTP 401)→ 清 AT、用 AIT 换新。
+	// 读命令直接重试一次;写命令绝不自动重放(重复受理风险),刷新后提示重试。
 	if authExpired(raw, err) {
 		_ = os.Remove(atFile())
 		if nt := ensureToken(); nt != "" && nt != token {
+			if writeCommands[key] {
+				emitJSON(map[string]any{"error": "token expired and refreshed", "message": "please retry this command"})
+				return 3
+			}
 			raw, err = callEIP(r.method, path, query, body, nt)
 		}
 	}
@@ -817,6 +900,9 @@ func runBusiness(args []string) int {
 //   - --statement：GET /message/message/{id} 取详情 → GET /message/message/config/statement/1
 //     取官方祝福语文案 → POST /message/message/bless 发送；
 //   - --content：直接 POST /message/message/bless，body 为 {"id":..,"message":..}。
+//
+// 前两步是读操作，但业务错误（HTTP 200 + Code≠1，如消息不存在）必须中止，
+// 否则祝福会照发；整个编排属写命令，token 过期不自动重放（见 writeCommands）。
 func runSendBless(flags map[string]string, token string) int {
 	id := flags["id"]
 	if id == "" {
@@ -825,14 +911,24 @@ func runSendBless(flags map[string]string, token string) int {
 	}
 	content := flags["content"]
 	if content == "" && boolFlag(flags, "statement") {
-		if _, err := callEIP("GET", "/message/message/"+url.PathEscape(id), nil, nil, token); err != nil {
+		detail, err := callEIP("GET", "/message/message/"+url.PathEscape(id), nil, nil, token)
+		if err != nil {
 			emitJSON(map[string]any{"error": "fetch message detail: " + err.Error()})
 			return 1
 		}
-		if raw, err := callEIP("GET", "/message/message/config/statement/1", nil, nil, token); err != nil {
+		if code := envelopeCode(detail); code != "" && code != "1" {
+			emitJSON(map[string]any{"error": "fetch message detail: business error", "code": code})
+			return 1
+		}
+		cfg, err := callEIP("GET", "/message/message/config/statement/1", nil, nil, token)
+		if err != nil {
 			emitJSON(map[string]any{"error": "fetch statement config: " + err.Error()})
 			return 1
-		} else if text := extractStatement(raw); text != "" {
+		}
+		if code := envelopeCode(cfg); code != "" && code != "1" {
+			emitJSON(map[string]any{"error": "fetch statement config: business error", "code": code})
+			return 1
+		} else if text := extractStatement(cfg); text != "" {
 			content = text
 		}
 	}
@@ -842,13 +938,6 @@ func runSendBless(flags map[string]string, token string) int {
 	}
 	raw, err := callEIP("POST", "/message/message/bless", nil,
 		map[string]any{"id": id, "message": content}, token)
-	if authExpired(raw, err) {
-		_ = os.Remove(atFile())
-		if nt := ensureToken(); nt != "" && nt != token {
-			raw, err = callEIP("POST", "/message/message/bless", nil,
-				map[string]any{"id": id, "message": content}, nt)
-		}
-	}
 	if err != nil {
 		emitJSON(map[string]any{"error": err.Error()})
 		return 1
@@ -884,7 +973,8 @@ func extractStatement(raw []byte) string {
 
 // callEIP 发业务请求：full = eipBase + path（route 已存黄金表完整路径，前缀错配从结构上消除）。
 // GET 参数全部进 query；无 body 的 POST 不发送 body，但保留 Content-Type（官方如此，
-// GET 也同样带 Content-Type，见黄金表 §1）。
+// GET 也同样带 Content-Type，见黄金表 §1）。响应体限制在 maxRespBytes 内，错误信息
+// 截断——异常服务端不能借超长 body 撑爆内存或污染模型上下文。
 func callEIP(method, path string, query url.Values, body map[string]any, token string) ([]byte, error) {
 	full := strings.TrimRight(eipBase(), "/") + path
 	if len(query) > 0 {
@@ -911,9 +1001,9 @@ func callEIP(method, path string, query url.Values, body map[string]any, token s
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	if resp.StatusCode >= 400 {
-		return raw, fmt.Errorf("EIP API %s returned HTTP %d: %s", path, resp.StatusCode, string(raw))
+		return raw, fmt.Errorf("EIP API %s returned HTTP %d: %s", path, resp.StatusCode, truncateForError(raw))
 	}
 	return raw, nil
 }
@@ -925,55 +1015,61 @@ func httpClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{Proxy: nil}}
 }
 
-func postJSON(uri string, body any, withToken bool) (*envelope, []byte, error) {
+// maxRespBytes 响应体读取上限（2MiB）：EIP JSON 响应远小于此量级，仅防
+// 异常服务端返回超大 body。
+const maxRespBytes = 2 << 20
+
+// truncateForError 把 body 截到错误信息安全长度，避免整个响应进 error 字符串。
+func truncateForError(b []byte) string {
+	const max = 512
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "...(truncated)"
+}
+
+func postJSON(uri string, body any) (*envelope, []byte, error) {
 	b, _ := json.Marshal(body)
 	req, err := http.NewRequest("POST", uri, bytes.NewReader(b))
 	if err != nil {
 		return nil, nil, err
 	}
-	authHeaders(req, withToken)
+	authHeaders(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	var env envelope
 	_ = json.Unmarshal(raw, &env)
 	return &env, raw, nil
 }
 
-func getURL(uri string, withToken bool) (*envelope, []byte, error) {
+func getURL(uri string) (*envelope, []byte, error) {
 	req, err := http.NewRequest("GET", uri, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	authHeaders(req, withToken)
+	authHeaders(req)
 	resp, err := httpClient().Do(req)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRespBytes))
 	var env envelope
 	_ = json.Unmarshal(raw, &env)
 	return &env, raw, nil
 }
 
-func authHeaders(req *http.Request, withToken bool) {
+// authHeaders 认证域公共头（黄金表 §1：Auth-Type 仅 auth base 请求携带；
+// login/poll/exchange 均无需 Authorization）。
+func authHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Auth-Type", "SSO_NEXT")
 	req.Header.Set("User-Agent", userAgent)
-	if withToken {
-		t := loadAT()
-		if t != "" {
-			if !strings.HasPrefix(t, "Bearer ") {
-				t = "Bearer " + t
-			}
-			req.Header.Set("Authorization", t)
-		}
-	}
 }
 
 func (e *envelope) session() sessionData {
@@ -1086,7 +1182,7 @@ func ensureToken() string {
 		return ""
 	}
 	body := map[string]any{"ait": ait, "deviceId": deviceID()}
-	env, _, err := postJSON(authBase()+"/api/v2/user/agent/token/exchange", body, false)
+	env, _, err := postJSON(authBase()+"/api/v2/user/agent/token/exchange", body)
 	if err != nil {
 		return ""
 	}
@@ -1094,9 +1190,15 @@ func ensureToken() string {
 	if d.Token == "" {
 		return ""
 	}
-	_ = saveAT(d.Token)
+	// 落盘失败仅 stderr 告警：下次 ensureToken 发现 AT 为空会用 AIT 重换，
+	// 行为自愈，不值得让读路径的业务命令报错。
+	if err := saveAT(d.Token); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: persist refreshed token: %v\n", err)
+	}
 	if d.Ait != "" {
-		_ = saveAIT(d.Ait)
+		if err := saveAIT(d.Ait); err != nil {
+			fmt.Fprintf(os.Stderr, "warn: persist refreshed ait: %v\n", err)
+		}
 	}
 	return d.Token
 }
@@ -1144,8 +1246,17 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// stripBearer 剥掉 Bearer 前缀（大小写不敏感、容忍多空格），兼容存量凭证的
+// 各种书写形态。
 func stripBearer(s string) string {
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(s), "Bearer "))
+	for {
+		t := strings.TrimSpace(s)
+		if len(t) >= 7 && strings.EqualFold(t[:7], "bearer ") {
+			s = t[7:]
+			continue
+		}
+		return t
+	}
 }
 
 func emitJSON(v any) {

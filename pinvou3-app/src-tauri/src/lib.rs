@@ -600,6 +600,9 @@ pub fn run() {
     // catch_unwind 看不到,进程直接 0xc00000fd/SIGABRT。headless 路径已同款修复
     // (headless_bridge.rs run_windowless_host),此处补齐 GUI 路径;勿"优化"回
     // 默认 runtime。runtime 本体绑定在本函数作用域,随 run() 活到进程退出。
+    // A runtime build failure (outside OOM-killed process death) leaves the
+    // app without async execution — no degradation path, fail fast.
+    #[allow(clippy::expect_used)]
     let async_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(16 * 1024 * 1024)

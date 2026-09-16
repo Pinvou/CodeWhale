@@ -14,7 +14,7 @@ metadata:
 
 ## 认证
 
-直接跑业务命令即可——未登录时 CLI 会输出 SSO 登录地址。若返回需要登录,把登录地址**单行完整**展示给用户,引导其在应用「工具商店」的「H3C 员工门户（EIP）」卡片点「连接」完成 EIP 登录(或浏览器打开后回来重试),不要自行编造数据。
+直接跑业务命令即可——未登录时 CLI 输出 `{"error":"not authenticated","message":"please connect EIP first"}`(退出码 3,不含登录地址)。此时引导用户在应用「工具商店」的「H3C 员工门户（EIP）」卡片点「连接」完成 EIP 登录后重试,不要自行编造数据。
 
 ## 调用方式
 
@@ -22,6 +22,8 @@ metadata:
 eip <子命令> [参数]
 ```
 不确定参数时 `eip <子命令> --help`。
+
+可选参数补充:`attendance calc-days` 默认按标准班次 08:30–18:00 计算天数,非标准班次可用 `--beg-time HH:MM:SS` / `--end-time HH:MM:SS` 覆盖;`survey submit` 对 1314 薪酬调研可附 `--emp-name` / `--id-card` / `--id-card-type`。
 
 ## 命令速查(按用户意图直接命中)
 

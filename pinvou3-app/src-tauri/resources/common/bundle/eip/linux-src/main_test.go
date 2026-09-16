@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -33,6 +35,9 @@ type recordingServer struct {
 	req []recordedRequest
 }
 
+// newRecordingServer 起录制假服务端并准备隔离凭证环境。
+// 全部子测试共享同一 server 与请求队列（take 按序取），依赖测试顺序执行——
+// 本文件任何测试都不要加 t.Parallel，否则队列会静默错位。
 func newRecordingServer(t *testing.T) *recordingServer {
 	t.Helper()
 	rs := &recordingServer{}
@@ -374,13 +379,22 @@ func TestMessageSendBlessStatementFlow(t *testing.T) {
 }
 
 func TestTodoSubmitFlowListFileAndValidation(t *testing.T) {
+	// flow-list 文件仅认当前目录下的相对常规文件;本测试 chdir 到临时目录,
+	// 进程 cwd 是共享的——不要给本函数加 t.Parallel。
 	dir := t.TempDir()
-	file := dir + "/flows.json"
-	list := `[{"systemId":"BPM","processId":"P1","docunId":"D1","nodeId":"N1"}]`
-	if err := os.WriteFile(file, []byte(list), 0o600); err != nil {
+	wd, err := os.Getwd()
+	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": file})
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	list := `[{"systemId":"BPM","processId":"P1","docunId":"D1","nodeId":"N1"}]`
+	if err := os.WriteFile("flows.json", []byte(list), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "./flows.json"})
 	if err != nil {
 		t.Fatalf("file mode: %v", err)
 	}
@@ -392,5 +406,248 @@ func TestTodoSubmitFlowListFileAndValidation(t *testing.T) {
 	}
 	if _, err := todoSubmitBody(map[string]string{"action": "agree"}); err == nil {
 		t.Error("missing --flow-list: want error, got nil")
+	}
+	// 路径约束:绝对路径与 .. 越界都拒绝（CLI 运行在模型工具上下文，
+	// 不给任意文件读取面）。
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": filepath.Join(dir, "flows.json")}); err == nil {
+		t.Error("absolute path: want error, got nil")
+	}
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "../flows.json"}); err == nil {
+		t.Error("parent-escaping path: want error, got nil")
+	}
+	// 目录不是常规文件（顺带覆盖 FIFO/设备文件分支）。
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": "."}); err == nil {
+		t.Error("directory path: want error, got nil")
+	}
+	// 空列表:null 字面量（按路径读必然失败）与 [] 都显式拒绝,不发空 flowInfoList。
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": `null`}); err == nil {
+		t.Error("null literal: want error, got nil")
+	}
+	if _, err := todoSubmitBody(map[string]string{"action": "agree", "flow-list": `[]`}); err == nil {
+		t.Error("empty array: want error, got nil")
+	}
+	// transfer 缺接收人参数必须显式报错,不得空串照发。
+	if _, err := todoSubmitBody(map[string]string{"action": "transfer", "flow-list": list}); err == nil {
+		t.Error("transfer without receiver: want error, got nil")
+	}
+}
+
+// token 过期重试语义（评审二轮 #2）:过期信号只认 Code==51 / HTTP 401;
+// 读命令 exchange 后自动重试一次,写命令绝不自动重放。
+func TestTokenExpiryRetrySemantics(t *testing.T) {
+	var mu sync.Mutex
+	var business, exchanged int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/token/exchange") {
+			mu.Lock()
+			exchanged++
+			mu.Unlock()
+			_, _ = io.WriteString(w, `{"code":0,"data":{"token":"fresh-at"}}`)
+			return
+		}
+		mu.Lock()
+		business++
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"Code":51,"Msg":"Token已失效"}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("EIP_BASE_URL", srv.URL)
+	t.Setenv("EIP_AUTH_BASE_URL", srv.URL+"/auth/v1.0")
+	t.Setenv("AGENT_DEVICE_ID", "contract-test-device")
+	t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
+	if err := saveAT("test-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAIT("test-ait"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 读命令:Code 51 → 删 AT、exchange 换新、重试一次;第二次仍 51 则原样输出。
+	if got := runBusiness([]string{"todo"}); got != 0 {
+		t.Fatalf("read retry exit = %d, want 0", got)
+	}
+	mu.Lock()
+	b, e := business, exchanged
+	mu.Unlock()
+	if b != 2 || e != 1 {
+		t.Fatalf("read: business=%d exchanged=%d, want 2/1", b, e)
+	}
+
+	// 写命令:Code 51 → exchange 后不重放,显式要求重试(exit 3)。
+	mu.Lock()
+	business, exchanged = 0, 0
+	mu.Unlock()
+	if err := saveAT("test-token"); err != nil {
+		t.Fatal(err)
+	}
+	if got := runBusiness([]string{"todo-submit", "--flow-list", `[{"nodeId":"N1"}]`}); got != 3 {
+		t.Fatalf("write no-replay exit = %d, want 3", got)
+	}
+	mu.Lock()
+	b, e = business, exchanged
+	mu.Unlock()
+	if b != 1 || e != 1 {
+		t.Fatalf("write: business=%d exchanged=%d, want 1/1", b, e)
+	}
+}
+
+// authExpired 只认显式过期信号:业务文案含「失效」但 Code≠51 时不判过期
+// (此前会误删 AT 并自动重放已成功处理的写请求,评审二轮实测复现双发)。
+func TestAuthExpiredOnlyTrustsExplicitExpiry(t *testing.T) {
+	if authExpired([]byte(`{"Code":1,"Msg":"该申请已失效,请勿重复操作"}`), nil) {
+		t.Error("Code=1 with misleading Msg must not count as expired")
+	}
+	if !authExpired([]byte(`{"Code":51,"Msg":"Token已失效"}`), nil) {
+		t.Error("Code=51 must count as expired")
+	}
+	if !authExpired(nil, fmt.Errorf("EIP API /x returned HTTP 401: denied")) {
+		t.Error("HTTP 401 must count as expired")
+	}
+	if authExpired([]byte(`{"Code":404,"Msg":"not found"}`), nil) {
+		t.Error("Code=404 must not count as expired")
+	}
+	if authExpired([]byte(`<html>Token已失效</html>`), nil) {
+		t.Error("non-JSON body must not count as expired")
+	}
+}
+
+func TestEnvelopeCode(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"Code":51}`:   "51",
+		`{"Code":"51"}`: "51",
+		`{"code":1}`:    "1",
+		`{"msg":"x"}`:   "",
+		`not json`:      "",
+		`{"Code":null}`: "",
+	} {
+		if got := envelopeCode([]byte(raw)); got != want {
+			t.Errorf("envelopeCode(%s) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+// send-bless 的前置读步骤遇到业务错误(HTTP 200 + Code≠1)必须中止,祝福不得照发。
+func TestSendBlessStopsOnBusinessError(t *testing.T) {
+	var mu sync.Mutex
+	var bless int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/bless") {
+			mu.Lock()
+			bless++
+			mu.Unlock()
+			_, _ = io.WriteString(w, `{"Code":1}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"Code":404,"Msg":"消息不存在"}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("EIP_BASE_URL", srv.URL)
+	t.Setenv("EIP_AUTH_BASE_URL", srv.URL+"/auth/v1.0")
+	t.Setenv("AGENT_DEVICE_ID", "contract-test-device")
+	t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
+	if err := saveAT("test-token"); err != nil {
+		t.Fatal(err)
+	}
+	if got := runBusiness([]string{"message", "send-bless", "--id", "M1", "--statement"}); got != 1 {
+		t.Fatalf("exit = %d, want 1", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if bless != 0 {
+		t.Fatalf("bless sent %d times after business error, want 0", bless)
+	}
+}
+
+// auth poll --timeout 超界报用法错误:超大值曾使 Duration 乘法回绕、
+// deadline 失效,轮询永不退出。
+func TestCmdPollTimeoutRange(t *testing.T) {
+	t.Setenv("AGENT_CREDENTIALS_DIR", t.TempDir())
+	if got := cmdPoll(map[string]string{"session-id": "S", "timeout": "99999999999999"}); got != 2 {
+		t.Fatalf("oversized timeout exit = %d, want 2", got)
+	}
+	if got := cmdPoll(map[string]string{"session-id": "S", "timeout": "301"}); got != 2 {
+		t.Fatalf("timeout>300 exit = %d, want 2", got)
+	}
+}
+
+// poll 的凭证落盘失败必须上抛:否则 poll 报 connected 但凭证未持久化,
+// 后续业务命令全部 not authenticated。
+func TestCmdPollSurfacesCredentialWriteFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"code":0,"data":{"token":"t1","ait":"a1"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("EIP_AUTH_BASE_URL", srv.URL)
+	// 凭证目录被同名文件占据:MkdirAll/WriteFile 都会失败(ENOTDIR)。
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENT_CREDENTIALS_DIR", blocker)
+	if got := cmdPoll(map[string]string{"session-id": "S"}); got != 1 {
+		t.Fatalf("exit = %d, want 1", got)
+	}
+}
+
+// survey submit 的 1314Salary 附加键(官方 --emp-name/--id-card/--id-card-type,
+// 黄金表 §15 备注):提供 flag 才附加。
+func TestSurveySubmitExtraKeys(t *testing.T) {
+	rs := newRecordingServer(t)
+	if got := runBusiness([]string{"survey", "submit", "--id", "T1", "--opinion", "同意",
+		"--emp-name", "张三", "--id-card", "330106", "--id-card-type", "1"}); got != 0 {
+		t.Fatalf("exit = %d", got)
+	}
+	rec := rs.take(t)
+	var body map[string]any
+	if err := json.Unmarshal(rec.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"Id": "T1", "Opinion": "同意", "EmpName": "张三", "IDCard": "330106", "IDCardType": "1"}
+	if !reflect.DeepEqual(body, want) {
+		t.Errorf("body = %s, want %v", rec.body, want)
+	}
+}
+
+// calc-days 班次时间可用 --beg-time/--end-time 覆盖(缺省仍为官方 08:30/18:00)。
+func TestCalcDaysShiftOverride(t *testing.T) {
+	rs := newRecordingServer(t)
+	if got := runBusiness([]string{"attendance", "calc-days", "--beg-date", "15", "--end-date", "16",
+		"--apply-type", "01", "--beg-time", "09:00:00", "--end-time", "17:30:00"}); got != 0 {
+		t.Fatalf("exit = %d", got)
+	}
+	rec := rs.take(t)
+	var body map[string]any
+	if err := json.Unmarshal(rec.body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["Begzt"] != "09:00:00" || body["Endzt"] != "17:30:00" {
+		t.Errorf("shift override = %v/%v, want 09:00:00/17:30:00", body["Begzt"], body["Endzt"])
+	}
+}
+
+// RSA 加密的 date 参数本地先校验 YYYY-MM,非法输入直接报错不发包。
+func TestRSADateRejectsBadFormat(t *testing.T) {
+	newRecordingServer(t)
+	if got := runBusiness([]string{"attendance", "get-summary", "--date", "2026-13-01"}); got != 1 {
+		t.Fatalf("exit = %d, want 1", got)
+	}
+	if got := runBusiness([]string{"attendance", "get-calendar", "--date", "2026/09"}); got != 1 {
+		t.Fatalf("slash format exit = %d, want 1", got)
+	}
+}
+
+// stripBearer 兼容大小写与多空格的存量凭证书写形态。
+func TestStripBearerVariants(t *testing.T) {
+	for in, want := range map[string]string{
+		"Bearer x":    "x",
+		"bearer x":    "x",
+		"BEARER   x ": "x",
+		" Bearer x ":  "x",
+		"plain":       "plain",
+		"":            "",
+	} {
+		if got := stripBearer(in); got != want {
+			t.Errorf("stripBearer(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
