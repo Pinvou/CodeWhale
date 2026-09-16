@@ -66,3 +66,14 @@ func TestApprovalV2ListPostgresIntegration(t *testing.T) {
 		t.Fatalf("duplicate filter: %d %s", bad.Code, bad.Body.String())
 	}
 }
+
+func TestApprovalV2ListTimeoutClassification(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := approvalV2ListError(context.DeadlineExceeded, ctx, "cursor"); !errors.Is(err, ErrApprovalPaginationQueryTimeout) {
+		t.Fatalf("continuation timeout=%v", err)
+	}
+	if err := approvalV2ListError(context.DeadlineExceeded, ctx, ""); !errors.Is(err, ErrApprovalPaginationSnapshotUnavailable) {
+		t.Fatalf("build timeout=%v", err)
+	}
+}

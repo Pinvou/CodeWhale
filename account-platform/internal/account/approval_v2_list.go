@@ -38,7 +38,7 @@ func (r *PostgresRepository) ListApprovalRequestsV2(ctx context.Context, princip
 	}
 	page, err := r.ApprovalPaginationPage(bounded, principal, filter, cursor, limit, sourceIP)
 	if err != nil {
-		return ApprovalV2Page{}, err
+		return ApprovalV2Page{}, approvalV2ListError(err, bounded, cursor)
 	}
 	items := make([]ApprovalV2Summary, 0, len(page.ApprovalRequestIDs))
 	if len(page.ApprovalRequestIDs) != 0 {
@@ -57,7 +57,7 @@ WHERE ar.requester_user_id=$2 OR EXISTS(
     AND ra.starts_at<=transaction_timestamp() AND (ra.expires_at IS NULL OR ra.expires_at>transaction_timestamp()))
 ORDER BY ids.ordinal`, page.ApprovalRequestIDs, actorID)
 		if err != nil {
-			return ApprovalV2Page{}, err
+			return ApprovalV2Page{}, approvalV2ListError(err, bounded, cursor)
 		}
 		for rows.Next() {
 			var item ApprovalRequest
@@ -74,7 +74,7 @@ ORDER BY ids.ordinal`, page.ApprovalRequestIDs, actorID)
 		}
 		rows.Close()
 		if err != nil {
-			return ApprovalV2Page{}, err
+			return ApprovalV2Page{}, approvalV2ListError(err, bounded, cursor)
 		}
 		if len(items) != len(page.ApprovalRequestIDs) {
 			return ApprovalV2Page{}, ErrApprovalPaginationCursorExpired
@@ -89,9 +89,19 @@ ORDER BY ids.ordinal`, page.ApprovalRequestIDs, actorID)
 		if errors.Is(err, ErrApprovalAuthorizationChanged) {
 			return ApprovalV2Page{}, ErrApprovalPaginationCursorExpired
 		}
-		return ApprovalV2Page{}, err
+		return ApprovalV2Page{}, approvalV2ListError(err, bounded, cursor)
 	}
 	return ApprovalV2Page{Items: items, NextCursor: page.NextCursor, HasMore: page.HasMore,
 		Limit: page.Limit, AsOf: page.AsOf.UTC().Format(time.RFC3339Nano),
 		SnapshotExpiresAt: page.SnapshotExpiresAt.UTC().Format(time.RFC3339Nano)}, nil
+}
+
+func approvalV2ListError(err error, ctx context.Context, cursor string) error {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if strings.TrimSpace(cursor) != "" {
+			return ErrApprovalPaginationQueryTimeout
+		}
+		return ErrApprovalPaginationSnapshotUnavailable
+	}
+	return err
 }

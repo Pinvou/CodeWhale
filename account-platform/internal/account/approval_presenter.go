@@ -90,11 +90,16 @@ func approvalV2Summary(item ApprovalRequest) ApprovalV2Summary {
 	if !approvalPresenterAvailable(item.CommandType, item.PolicyVersion, item.SnapshotSchemaVersion) || approvalV2Command(item) == nil {
 		availability = "DETAIL_PRESENTATION_UNAVAILABLE"
 	}
+	target := ApprovalV2Target{ResourceType: item.TargetResourceType, ResourceID: approvalSafeTargetID(item.TargetResourceID)}
+	if availability != "AVAILABLE" {
+		// Unknown historical rows must not echo arbitrary resource text.
+		target = ApprovalV2Target{}
+	}
 	return ApprovalV2Summary{
 		ApprovalRequestID: item.ID, CommandType: item.CommandType,
 		PolicyVersion: item.PolicyVersion, SnapshotSchemaVersion: item.SnapshotSchemaVersion,
 		RiskClass: item.RiskClass,
-		Target:    ApprovalV2Target{ResourceType: item.TargetResourceType, ResourceID: approvalSafeTargetID(item.TargetResourceID)},
+		Target:    target,
 		Requester: ApprovalV2Requester{UserID: item.RequesterUserID},
 		Status:    item.Status, SubmittedAt: item.SubmittedAt, ExpiresAt: item.ExpiresAt,
 		UpdatedAt: item.UpdatedAt, SupersedesRequestID: item.SupersedesRequestID,

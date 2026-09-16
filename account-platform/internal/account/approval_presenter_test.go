@@ -73,7 +73,12 @@ func TestApprovalPresenterRejectsUnsafeHistoricalTargets(t *testing.T) {
 	}
 	item := ApprovalRequest{CommandType: "TOKEN_MODEL_CATALOG_ROLLBACK", PolicyVersion: 2, SnapshotSchemaVersion: 2,
 		TargetResourceType: "MODEL_CATALOG", TargetResourceID: "9223372036854775808"}
-	if approvalV2Summary(item).DetailAvailability != "DETAIL_PRESENTATION_UNAVAILABLE" {
+	if summary := approvalV2Summary(item); summary.DetailAvailability != "DETAIL_PRESENTATION_UNAVAILABLE" || summary.Target.ResourceID != "" {
 		t.Fatal("out of range version must not be presented")
+	}
+	item = ApprovalRequest{CommandType: "FUTURE_COMMAND", PolicyVersion: 9, SnapshotSchemaVersion: 9,
+		TargetResourceType: "PRIVATE", TargetResourceID: "private-resource"}
+	if summary := approvalV2Summary(item); summary.Target != (ApprovalV2Target{}) {
+		t.Fatalf("unknown historical command leaked target: %+v", summary)
 	}
 }
