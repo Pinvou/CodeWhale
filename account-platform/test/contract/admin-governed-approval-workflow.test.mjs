@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createAndSubmitGovernedApproval, recoverGovernedApproval, submitExistingGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
+import { createAndSubmitGovernedApproval, recoverGovernedApproval, submitExistingGovernedApproval, updateAndSubmitGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
 
 const requestID = '0199a300-0001-7000-8000-000000000017';
 const draft = { command_type: 'TOKEN_MODEL_CATALOG_ROLLBACK', target_resource_type: 'MODEL_CATALOG', target_resource_id: '12' };
@@ -82,13 +82,53 @@ test('existing business draft is re-read and never submitted from a stale list v
   let reads = 0;
   let submits = 0;
   const client = { governedApprovalRequest: async () => ++reads === 1 ? detail('DRAFT', 1) : detail('SUBMITTED', 2),
-    submitGovernedApprovalRequest: async (id, current) => { assert.equal(id, requestID); assert.equal(current.version, 1); submits++; } };
+    submitGovernedApprovalRequest: async (id, current) => { assert.equal(id, requestID); assert.equal(current.version, submits + 1); submits++; } };
   assert.equal((await submitExistingGovernedApproval(client, existing)).status, 'SUBMITTED');
   assert.equal(reads, 2);
   assert.equal(submits, 1);
-  client.governedApprovalRequest = async () => detail('DRAFT', 2);
+  client.governedApprovalRequest = async () => ({ ...detail('DRAFT', 2), allowed_actions: [] });
   await assert.rejects(submitExistingGovernedApproval(client, existing), { code: 'COMMAND_RESULT_UNKNOWN', commandReference: requestID });
   assert.equal(submits, 1);
+  client.governedApprovalRequest = async () => ++reads === 3 ? detail('DRAFT', 2) : detail('SUBMITTED', 3);
+  assert.equal((await submitExistingGovernedApproval(client, existing)).version, 3);
+  assert.equal(submits, 2);
+});
+
+test('business edit CAS-updates the same draft and submits only after a fresh version read', async () => {
+  const existing = { approval_request_id: requestID, command_type: draft.command_type,
+    target: { resource_type: draft.target_resource_type, resource_id: draft.target_resource_id } };
+  const calls = [];
+  const client = {
+    governedApprovalRequest: async () => {
+      calls.push('read');
+      return calls.length === 1 ? { ...detail('DRAFT'), allowed_actions: ['EDIT'] }
+        : calls.length === 3 ? detail('DRAFT', 2) : detail('SUBMITTED', 3);
+    },
+    updateGovernedApprovalDraft: async (id, value, edited) => {
+      assert.equal(id, requestID); assert.equal(value.version, 1); assert.equal(edited, draft); calls.push('update');
+    },
+    submitGovernedApprovalRequest: async (id, value) => {
+      assert.equal(id, requestID); assert.equal(value.version, 2); calls.push('submit');
+    },
+  };
+  assert.equal((await updateAndSubmitGovernedApproval(client, existing, draft)).status, 'SUBMITTED');
+  assert.deepEqual(calls, ['read', 'update', 'read', 'submit', 'read']);
+});
+
+test('business edit never retries an uncertain update or submits an unconfirmed draft', async () => {
+  const existing = { approval_request_id: requestID, command_type: draft.command_type,
+    target: { resource_type: draft.target_resource_type, resource_id: draft.target_resource_id } };
+  let updates = 0;
+  const client = {
+    governedApprovalRequest: async () => ({ ...detail('DRAFT'), allowed_actions: ['EDIT'] }),
+    updateGovernedApprovalDraft: async () => { updates++; throw new Error('network lost'); },
+    submitGovernedApprovalRequest: async () => assert.fail('must not submit after unknown update'),
+  };
+  await assert.rejects(updateAndSubmitGovernedApproval(client, existing, draft), { commandReference: requestID });
+  assert.equal(updates, 1);
+  client.updateGovernedApprovalDraft = async () => { updates++; };
+  await assert.rejects(updateAndSubmitGovernedApproval(client, existing, draft), { code: 'COMMAND_RESULT_UNKNOWN', commandReference: requestID });
+  assert.equal(updates, 2);
 });
 
 test('wallet adjustment approval keeps its existing Billing creation but uses governed Account writes', () => {

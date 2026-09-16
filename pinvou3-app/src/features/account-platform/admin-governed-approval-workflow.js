@@ -63,11 +63,45 @@ export async function submitExistingGovernedApproval(client, existing, signal) {
   try {
     const current = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, draft);
     if (activeStatuses.has(current.status)) return current;
-    if (current.status !== 'DRAFT' || current.version !== 1 || !current.allowed_actions.includes('SUBMIT')) {
+    if (current.status !== 'DRAFT' || !current.allowed_actions.includes('SUBMIT')) {
       throw Object.assign(new Error('approval draft requires business review before submission'),
         { status: 202, code: 'COMMAND_RESULT_UNKNOWN' });
     }
     await client.submitGovernedApprovalRequest(requestID, current, signal);
+    const submitted = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, draft);
+    if (!activeStatuses.has(submitted.status)) {
+      throw Object.assign(new Error('approval submit result remains unconfirmed'),
+        { status: 202, code: 'COMMAND_RESULT_UNKNOWN' });
+    }
+    return submitted;
+  } catch (error) {
+    throw withReference(error, requestID);
+  }
+}
+
+export async function updateAndSubmitGovernedApproval(client, existing, draft, signal) {
+  const requestID = existing?.approval_request_id;
+  if (typeof requestID !== 'string' || !requestID || !draft?.command_type || !draft?.target_resource_type ||
+    !draft?.target_resource_id || existing?.command_type !== draft.command_type ||
+    (existing.target?.resource_type || existing.target_resource_type) !== draft.target_resource_type ||
+    (existing.target?.resource_id || existing.target_resource_id) !== draft.target_resource_id) {
+    throw Object.assign(new Error('approval reference does not match the edited command'), { code: 'INVALID_APPROVAL_RESPONSE' });
+  }
+  try {
+    const reference = { ...existing, target_resource_type: draft.target_resource_type,
+      target_resource_id: draft.target_resource_id };
+    const current = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, reference);
+    if (current.status !== 'DRAFT' || !current.allowed_actions.includes('EDIT')) {
+      throw Object.assign(new Error('approval draft is no longer editable'), { code: 'APPROVAL_DRAFT_NOT_EDITABLE' });
+    }
+    await client.updateGovernedApprovalDraft(requestID, current, draft, signal);
+    const updated = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, draft);
+    if (updated.status !== 'DRAFT' || updated.version !== current.version + 1 ||
+      !updated.allowed_actions.includes('SUBMIT')) {
+      throw Object.assign(new Error('approval update result remains unconfirmed'),
+        { status: 202, code: 'COMMAND_RESULT_UNKNOWN' });
+    }
+    await client.submitGovernedApprovalRequest(requestID, updated, signal);
     const submitted = requireDetail(await client.governedApprovalRequest(requestID, signal), requestID, draft);
     if (!activeStatuses.has(submitted.status)) {
       throw Object.assign(new Error('approval submit result remains unconfirmed'),

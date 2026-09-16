@@ -31,6 +31,8 @@ test('finance discovery uses the governed list and retains newest approval per t
   assert.match(source, /client\.governedApprovalRequests\(\{ command_type: 'PAYMENT_PROVIDER_RESUME'/);
   assert.match(source, /client\.governedApprovalRequests\(\{ command_type: 'PAYMENT_PRODUCT_RESUME'/);
   assert.doesNotMatch(source, /client\.approvalRequests\(/);
+  assert.match(source, /updateAndSubmitGovernedApproval\(client, existingApproval, approvalInput\)/);
+  assert.match(source, /copy\.billing\.updateAndSubmitControlResume/g);
 });
 
 test('fresh payment control draft links the old request without inheriting its frozen facts', () => {

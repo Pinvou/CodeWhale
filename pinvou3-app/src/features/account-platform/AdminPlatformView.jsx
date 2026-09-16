@@ -2,7 +2,7 @@ import { secureRequestID } from './request-id.js';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
 import { adjustmentApprovalAction, buildPaymentControlApprovalDraft, createFinanceTabRequestTracker, financeTabShouldLoad, latestApprovalByTarget, paymentControlApprovalAction, paymentControlSupersedesRequest, readFinanceTabQuery, resetFinanceSurfaceLoading, submitPaymentControlApproval, updateFinanceTabState, updatePaymentCapabilityState } from './admin-finance.js';
-import { createAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
+import { createAndSubmitGovernedApproval, updateAndSubmitGovernedApproval } from './admin-governed-approval-workflow.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT, parsePointsInputToMicrocredits } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminFinanceDetailUpdates, adminFinanceQueryUpdates, adminModelDetailsGateEnabled, adminModelOperationsDetailsGateEnabled, adminModelOperationsOverviewGateEnabled, adminModelPricingEditGateEnabled, adminModelTokenActionsGateEnabled, adminModelTokenIAGateEnabled, adminModelTokenOverviewRoute, adminModelTokenPageOverviewsGateEnabled, adminNavigationGroupsForGate, adminTokenDetailsGateEnabled, adminTokenResourceFormsGateEnabled, clearAdminFinanceDetailUpdates, clearAdminFinanceQueryUpdates, clearAdminModelTokenUpdates, isAdminFinancePaginatedTab, normalizeAdminFinanceDetailQuery, normalizeAdminFinanceQuery, normalizeAdminModelTokenEntry, normalizeAdminModelTokenNavigation, readAdminFinanceDetail, readAdminFinanceQuery, readAdminFinanceTab, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, resolveAdminFinanceTab, writeAdminSection } from './admin-navigation.js';
@@ -2502,16 +2502,16 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
     if (!result) throw new Error('PAYMENT_CONTROLS_RELOAD_FAILED');
     return result.paymentControlApprovals || [];
   };
-  const requestResume = async (product = null, existingApproval = null) => {
+  const requestResume = async (product = null, existingApproval = null, updateDraft = false) => {
     const targetKey = product?.product_id || 'provider';
     const reason = String(reasons[targetKey] || '').trim();
-    if (!canRequest || (!existingApproval && reason.length < 10)) return;
+    if (!canRequest || ((!existingApproval || updateDraft) && reason.length < 10)) return;
     setBusyTarget(targetKey);
     setNotice('');
     setError('');
     try {
       let approvalInput = null;
-      if (!existingApproval) {
+      if (!existingApproval || updateDraft) {
         const freshControl = await client.paymentProviderControls();
         const freshProduct = product ? freshControl?.products?.find((item) => item.product_id === product.product_id) : null;
         if (!freshControl?.provider_id || (!product && freshControl.new_orders_enabled) ||
@@ -2520,14 +2520,15 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
         }
         const commandType = product ? 'PAYMENT_PRODUCT_RESUME' : 'PAYMENT_PROVIDER_RESUME';
         const targetID = product?.product_id || freshControl?.provider_id;
-        const page = await client.governedApprovalRequests({ command_type: commandType, target: targetID, limit: 200 });
-        const supersedesID = paymentControlSupersedesRequest(page, commandType, targetID);
+        const supersedesID = existingApproval ? '' : paymentControlSupersedesRequest(
+          await client.governedApprovalRequests({ command_type: commandType, target: targetID, limit: 200 }), commandType, targetID);
         if (!requestKeysRef.current.has(targetKey)) requestKeysRef.current.set(targetKey, `payment-control-resume-${secureRequestID()}`);
         approvalInput = buildPaymentControlApprovalDraft(freshControl, freshProduct, reason,
           requestKeysRef.current.get(targetKey), supersedesID);
         if (!approvalInput) throw new Error('payment control resume draft unavailable');
       }
-      await submitPaymentControlApproval(client, approvalInput, existingApproval);
+      if (updateDraft) await updateAndSubmitGovernedApproval(client, existingApproval, approvalInput);
+      else await submitPaymentControlApproval(client, approvalInput, existingApproval);
       setReasons((current) => ({ ...current, [targetKey]: '' }));
       requestKeysRef.current.delete(targetKey);
       await reload();
@@ -2569,6 +2570,8 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
           {providerAction === 'create' && <label>{copy.billing.resumeReason}<input minLength="10" maxLength="2000" value={reasons.provider || ''} onChange={(event) => setReasons((current) => ({ ...current, provider: event.target.value }))} /></label>}
           {providerAction === 'create' && <button type="button" disabled={!control.resume_draft || busyTarget === 'provider' || String(reasons.provider || '').trim().length < 10} title={!control.resume_draft ? copy.billing.resumeDraftUnavailable : undefined} onClick={() => requestResume()}>{copy.billing.requestProviderResume}</button>}
           {providerAction === 'submit' && <button type="button" disabled={busyTarget === 'provider'} onClick={() => requestResume(null, providerApproval)}>{copy.billing.continueControlResume}</button>}
+          {providerAction === 'submit' && <label>{copy.billing.resumeReason}<input minLength="10" maxLength="2000" value={reasons.provider || ''} onChange={(event) => setReasons((current) => ({ ...current, provider: event.target.value }))} /></label>}
+          {providerAction === 'submit' && <button type="button" disabled={busyTarget === 'provider' || String(reasons.provider || '').trim().length < 10} onClick={() => requestResume(null, providerApproval, true)}>{copy.billing.updateAndSubmitControlResume}</button>}
           {providerAction === 'create' && !control.resume_draft && <small>{copy.billing.resumeDraftUnavailable}</small>}
           {providerApproval && (canRequest || canApprove) && <button type="button" onClick={() => openApproval('PAYMENT_PROVIDER_RESUME', control.provider_id, providerApproval)}>{copy.billing.viewApproval} · {providerApproval.status}</button>}
         </div>
@@ -2590,6 +2593,8 @@ function PaymentControlsPanel({ copy, data, client, permissions, onNavigate, onR
                     {action === 'create' && <input aria-label={`${copy.billing.resumeReason} · ${product.product_id}`} minLength="10" maxLength="2000" value={reasons[product.product_id] || ''} onChange={(event) => setReasons((current) => ({ ...current, [product.product_id]: event.target.value }))} />}
                     {action === 'create' && <button disabled={!product.resume_draft || busyTarget === product.product_id || String(reasons[product.product_id] || '').trim().length < 10} title={!product.resume_draft ? copy.billing.resumeDraftUnavailable : undefined} onClick={() => requestResume(product)}>{copy.billing.requestProductResume}</button>}
                     {action === 'submit' && <button disabled={busyTarget === product.product_id} onClick={() => requestResume(product, approval)}>{copy.billing.continueControlResume}</button>}
+                    {action === 'submit' && <input aria-label={`${copy.billing.resumeReason} · ${product.product_id}`} minLength="10" maxLength="2000" value={reasons[product.product_id] || ''} onChange={(event) => setReasons((current) => ({ ...current, [product.product_id]: event.target.value }))} />}
+                    {action === 'submit' && <button disabled={busyTarget === product.product_id || String(reasons[product.product_id] || '').trim().length < 10} onClick={() => requestResume(product, approval, true)}>{copy.billing.updateAndSubmitControlResume}</button>}
                     {action === 'create' && !product.resume_draft && <small>{copy.billing.resumeDraftUnavailable}</small>}
                     {approval && (canRequest || canApprove) && <button onClick={() => openApproval('PAYMENT_PRODUCT_RESUME', product.product_id, approval)}>{copy.billing.viewApproval} · {approval.status}</button>}
                   </div>
