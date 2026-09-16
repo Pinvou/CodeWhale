@@ -95,11 +95,51 @@ func ConvertLegacyProofInput(input LegacyProofInput) (ProofArtifacts, error) {
 		if err := deriveLegacyLifecyclePlan(normalized, critical); err != nil {
 			return ProofArtifacts{}, err
 		}
+		if err := normalizeLegacyProofTimes(normalized, "effective_at", "existing_session_cutoff_at"); err != nil {
+			return ProofArtifacts{}, err
+		}
+		if err := normalizeLegacyProofTimes(critical, "effective_at", "existing_session_cutoff_at"); err != nil {
+			return ProofArtifacts{}, err
+		}
+	}
+	if input.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" || input.CommandType == "TOKEN_MODEL_CATALOG_ROLLBACK" {
+		if err := normalizeLegacyProofTimes(financial, "billing_as_of"); err != nil {
+			return ProofArtifacts{}, err
+		}
 	}
 	if err := convertLegacyIntegers(spec, normalized, critical, financial); err != nil {
 		return ProofArtifacts{}, err
 	}
 	return buildProofArtifacts(input.CommandType, input.PolicyVersion, input.SnapshotSchemaVersion, input.TargetResourceType, input.TargetResourceID, normalized, critical, financial)
+}
+
+// Legacy plan persistence may contain an RFC3339 offset while the owner
+// precheck stores its equivalent UTC instant. Proof schema 1 freezes the UTC
+// representation; only these registered time fields may be normalized.
+func normalizeLegacyProofTimes(value *jsonValue, names ...string) error {
+	fields, err := objectValue(value)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		field, ok := fields[name]
+		if !ok {
+			return ErrInvalidDocument
+		}
+		if field.kind == jsonNull && name == "existing_session_cutoff_at" {
+			continue
+		}
+		raw, err := stringValue(field)
+		if err != nil {
+			return err
+		}
+		instant, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil || instant.IsZero() {
+			return ErrInvalidDocument
+		}
+		*field = *jsonString(instant.UTC().Format(time.RFC3339Nano))
+	}
+	return nil
 }
 
 // LegacyExecutionInput converts a fully validated authorization event back to

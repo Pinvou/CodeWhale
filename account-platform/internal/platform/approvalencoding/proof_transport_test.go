@@ -91,6 +91,29 @@ func TestProofRequestSixClosedVariants(t *testing.T) {
 	}
 }
 
+func TestLegacyLifecycleOffsetNormalizesToSameFrozenProof(t *testing.T) {
+	for _, vector := range frozenLegacyInputs() {
+		if vector.input.CommandType != "TOKEN_MODEL_LIFECYCLE_CHANGE" {
+			continue
+		}
+		original, err := ConvertLegacyProofInput(vector.input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		offset := vector.input
+		offset.NormalizedCommand = bytes.ReplaceAll(offset.NormalizedCommand, []byte("2026-09-15T01:02:03Z"), []byte("2026-09-15T09:02:03+08:00"))
+		offset.FinancialSnapshot = bytes.ReplaceAll(offset.FinancialSnapshot, []byte("2026-09-15T01:02:03Z"), []byte("2026-09-15T09:02:03+08:00"))
+		converted, err := ConvertLegacyProofInput(offset)
+		if err != nil || converted.CommandDigest != original.CommandDigest || converted.SnapshotDigest != original.SnapshotDigest {
+			t.Fatalf("equivalent timezone changed proof: %v", err)
+		}
+		offset.NormalizedCommand = bytes.ReplaceAll(offset.NormalizedCommand, []byte("2026-09-15T09:02:03+08:00"), []byte("2026-09-15T09:02:03+99:00"))
+		if _, err := ConvertLegacyProofInput(offset); err == nil {
+			t.Fatal("invalid timezone offset accepted")
+		}
+	}
+}
+
 func TestProofTransportRejectsMalformedResponse(t *testing.T) {
 	valid := readGolden(t).ProofResponseVectors[0].ResponseJSON
 	for _, raw := range []string{
