@@ -1,0 +1,31 @@
+# GSA-16 六命令失败恢复实现合同
+
+状态：实现中；本文不授权生产启用、人工重放或跨 epoch 补发。以 [治理与安全整改 §10](admin-governance-security-redesign.md) 为需求依据。
+
+## 当前安全基线
+
+- Account `000065` 将 proof-era Billing 确定失败保留为 `DOMAIN_INFLIGHT`；`000066` 栅栏化旧版本留下的 `READY + last_error_code`，并使 grant 拒绝该组合。Billing consumer 自身也拒绝 proof-era 第二次 Begin/Grant。legacy Billing 的既有 12 次上限不在这两次迁移中改变。
+- `EXECUTION_FAILED` 不由通用过期 worker 直接标记 INVALIDATED；已有执行记录的结果必须先经领域权威查证。未 Begin 的 APPROVED 仍按原五分钟执行窗口过期。
+- 任何已提交 Billing proof claim、已进入 Provider 探测、Token 本地命令已开始、数据库提交结果不明、权威结果读超时或未知错误码，均按 UNKNOWN 处理。一次“未查到结果”不是“没有产生效果”的证明。
+
+## 封闭命令矩阵
+
+| 命令及 policy version | 工作负载与原结果依据 | 目前可自动再次执行 | 必须查证的领域事实 |
+|---|---|---|---|
+| WALLET_ADJUSTMENT / 1 | Billing；审批请求绑定的调整、钱包与账本 | 否 | 不可变proof claim、调整状态、ledger journal、原execution/idempotency |
+| PAYMENT_PROVIDER_RESUME / 2 | Billing；恢复执行行与Provider observation | 否 | claim、恢复执行、探测订单和原观测证据；不得为查证再探测Provider |
+| PAYMENT_PRODUCT_RESUME / 1 | Billing；恢复执行行与Provider observation | 否 | 同上，另核对商品、mapping和admission版本 |
+| TOKEN_MODEL_LIFECYCLE_CHANGE / 2 | Token；原command reference及生命周期计划 | 否 | 命令结果、计划状态、catalog与price证据 |
+| TOKEN_MODEL_CATALOG_ROLLBACK / 2 | Token；原command reference及目录版本 | 否 | 命令结果、目录写入、路由及价格证据 |
+| TOKEN_CREDENTIAL_REVOKE / 1 | Token；原command reference及凭据隔离结果 | 否 | 命令结果、凭据/路由状态；不能重放外部探针 |
+
+未知命令或版本不回退到相近命令。各项最大尝试次数、指数退避、绝对窗口和租约必须由封闭注册表显式定义；Billing 的12次是 legacy 传输上限，不能当作 proof-era 的可重试许可，Token 不使用 Billing 的 DLQ/12次计数。
+
+## 后续实现顺序与验收
+
+1. 为六命令分别实现稳定错误到 `TRANSIENT_SAFE / UNKNOWN / PERMANENT / FACT_OR_POLICY_CHANGED / WINDOW_ENDED` 的映射。只有领域返回可验证的“零效果且可按原 execution/idempotency/fencing 重试”证据，才允许 `TRANSIENT_SAFE`；缺码或未识别码一律 UNKNOWN。没有安全证明的命令继续零自动重试。
+2. 独立最小权限恢复身份持有有界租约，读取 Account 原执行、delivery、epoch、deadline，再读取唯一领域结果和持久证据。UNKNOWN 只能重复只读查询；租约丢失、超时或并发抢占不得创建新执行、调用Provider或复用浏览器请求。
+3. 只有原结果已权威确认才可幂等完成 Account 的同一执行和消息确认；确定永久/漂移失败必须先证明零领域效果，才可在控制行和请求行CAS下 INVALIDATED，供业务页fresh superseding。窗口结束仍有未知效果时留待查，不以时间流逝推定无效果。
+4. 为每个命令验证首调成功/失败、首次响应丢失、提交不明、领域读不可用、broker重投、双worker抢租、租约到期、epoch切换、五分钟窗口前后、原结果晚到、无结果但已有claim/观测、12次界限和N/N-1。验证独立身份的负向权限、零第二execution和零重复领域效果。
+
+在步骤1～4全部完成及GSA-04/GSA-38～40环境门禁之前，GSA-16只能保持 `IN_PROGRESS / PARTIAL / NOT_DEPLOYED`。
