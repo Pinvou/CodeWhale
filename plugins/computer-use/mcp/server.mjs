@@ -280,7 +280,7 @@ async function callTool(params) {
       // The display choice lives in backend state, which dies with the
       // one-shot agent process — the call would report ok and the setting
       // would silently evaporate. Fail closed with the way out instead.
-      throw new ServerError("persistent_session_required", `"${name}" needs a display choice that cannot survive the one-shot ssh agent process. Pass display to screenshot/recording_start instead.`);
+      throw new ServerError("persistent_session_required", `"${name}" needs a display choice that cannot survive the one-shot ssh agent process. Pass display to screenshot/recording_start instead (honored on macOS; Linux and Windows captures already cover every display).`);
     }
     if (computer.transport === "ssh" && backendMethod === "left_mouse_down") {
       // A press outlives the one-shot agent process: if the follow-up
@@ -297,7 +297,13 @@ async function callTool(params) {
       // The remote backend cannot know which raster "latest" means (its own
       // state dies with each one-shot process) — the host tells it explicitly.
       if (backendMethod === "zoom") wireArgs.source = lastRasters.get(computer.id).file;
-      const reply = await ex.remote({ tool: backendMethod, args: wireArgs }, { timeoutMs: backendMethod.startsWith("recording") || backendMethod === "get_app_state" ? 60_000 : 30_000 });
+      const timeoutMs = backendMethod === "hold_key"
+        // A hold runs down → sleep → up inside the one remote call, so the
+        // wire timeout must cover the hold itself: at the flat 30s ceiling a
+        // 30s hold is killed right as it finishes and the key stays down.
+        ? 30_000 + Math.min(30, Number(wireArgs.duration) || 0) * 1000
+        : backendMethod.startsWith("recording") || backendMethod === "get_app_state" ? 60_000 : 30_000;
+      const reply = await ex.remote({ tool: backendMethod, args: wireArgs }, { timeoutMs });
       if (!reply.ok) throw new ServerError(reply.error?.code ?? "remote_error", reply.error?.message ?? "remote agent failed");
       data = reply.data;
       if (Array.isArray(data)) data = { items: data };

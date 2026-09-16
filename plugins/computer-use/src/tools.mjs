@@ -82,7 +82,7 @@ export const TOOLS = [
   },
   {
     name: "switch_display",
-    description: "Set which display subsequent screenshots/recordings capture on this computer. Local and hdc computers only: over ssh the one-shot agent process cannot keep a display choice alive, so this fails closed (persistent_session_required) — pass display to screenshot/recording_start instead.",
+    description: "Set which display subsequent screenshots/recordings capture on this computer. Local and hdc computers only: over ssh the one-shot agent process cannot keep a display choice alive, so this fails closed (persistent_session_required) — pass display to screenshot/recording_start instead (honored on macOS; Linux/Windows captures cover every display).",
     inputSchema: { type: "object", required: ["index"], properties: { index: { type: "integer", minimum: 1 }, computer: computerParam }, additionalProperties: false },
   },
   {
