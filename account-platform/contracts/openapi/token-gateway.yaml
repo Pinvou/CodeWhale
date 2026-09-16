@@ -69,6 +69,24 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-command-proofs:
+    post:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: establishTokenApprovalProofInternal
+      summary: Recompute a closed Token proof from authoritative owner-domain facts
+      description: Account-service workload with internal.token.approval-proof.read only; browser, Portal and legacy shared service token are forbidden. The request and response together are limited to 64 KiB and the deadline is two seconds. A changed frozen snapshot returns DENY; unavailable facts or inactive Token governance fail closed. Historical immediate lifecycle requests without a persisted plan cannot receive ALLOW.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenApprovalProofRequest" }
+      responses:
+        "200": { description: Closed eleven-field ALLOW or DENY proof with 60-second TTL and no-store, content: { application/json: { schema: { $ref: "#/components/schemas/TokenApprovalProofResponse" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/commands/model-lifecycle/execute:
     post:
       servers: [{ url: / }]
@@ -1052,6 +1070,166 @@ components:
               policy_set_digest: { minLength: 64 }
               handler_set_digest: { minLength: 64 }
               approved_runtime_roles: { minItems: 1 }
+    TokenApprovalProofRequest:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, command_type, policy_version, proof_schema_version, command_digest, snapshot_digest, proof_input]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] }
+        policy_version: { type: integer, enum: [1, 2] }
+        proof_schema_version: { type: string, const: "1" }
+        command_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        snapshot_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        proof_input: { $ref: "#/components/schemas/TokenApprovalProofInput" }
+      allOf:
+        - if: { properties: { command_type: { const: TOKEN_CREDENTIAL_REVOKE } }, required: [command_type] }
+          then: { properties: { policy_version: { const: 1 }, proof_input: { $ref: "#/components/schemas/TokenCredentialProofInput" } } }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_LIFECYCLE_CHANGE } }, required: [command_type] }
+          then: { properties: { policy_version: { const: 2 }, proof_input: { $ref: "#/components/schemas/TokenLifecycleProofInput" } } }
+        - if: { properties: { command_type: { const: TOKEN_MODEL_CATALOG_ROLLBACK } }, required: [command_type] }
+          then: { properties: { policy_version: { const: 2 }, proof_input: { $ref: "#/components/schemas/TokenCatalogProofInput" } } }
+    TokenApprovalProofInput:
+      oneOf:
+        - $ref: "#/components/schemas/TokenLifecycleProofInput"
+        - $ref: "#/components/schemas/TokenCatalogProofInput"
+        - $ref: "#/components/schemas/TokenCredentialProofInput"
+    TokenProofFinancial:
+      type: object
+      additionalProperties: false
+      required: [billing_price_revision, price_set_fingerprint, models_checked, models_covered, fully_covered, billing_as_of]
+      properties:
+        billing_price_revision: { type: string, pattern: '^[1-9][0-9]*$' }
+        price_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        models_checked: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        models_covered: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+        fully_covered: { type: boolean }
+        billing_as_of: { type: string, format: date-time }
+    TokenLifecycleProofInput:
+      type: object
+      additionalProperties: false
+      required: [snapshot_schema_version, target, normalized_command, critical_resource_versions, financial_snapshot]
+      properties:
+        snapshot_schema_version: { type: integer, const: 2 }
+        target:
+          type: object
+          additionalProperties: false
+          required: [resource_type, resource_id]
+          properties: { resource_type: { const: MODEL }, resource_id: { type: string, format: uuid } }
+        normalized_command:
+          type: object
+          additionalProperties: false
+          required: [model_id, lifecycle_plan_id, lifecycle_plan_version, target_lifecycle, effective_at, existing_session_cutoff_at, replacement_model_id]
+          properties:
+            model_id: { type: string, format: uuid }
+            lifecycle_plan_id: { type: [string, "null"], format: uuid }
+            lifecycle_plan_version: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+            target_lifecycle: { enum: [DEPRECATED, REMOVED] }
+            effective_at: { type: string, format: date-time }
+            existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+            replacement_model_id: { type: [string, "null"], format: uuid }
+        critical_resource_versions:
+          type: object
+          additionalProperties: false
+          required: [model_id, catalog_version, current_lifecycle, target_lifecycle, lifecycle_plan_version, effective_at, existing_session_cutoff_at, replacement_model_id, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+          properties:
+            model_id: { type: string, format: uuid }
+            catalog_version: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+            current_lifecycle: { enum: [PUBLISHED, DEPRECATED] }
+            target_lifecycle: { enum: [DEPRECATED, REMOVED] }
+            lifecycle_plan_version: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+            effective_at: { type: string, format: date-time }
+            existing_session_cutoff_at: { type: [string, "null"], format: date-time }
+            replacement_model_id: { type: [string, "null"], format: uuid }
+            billing_price_version: { type: string, pattern: '^[1-9][0-9]*$' }
+            route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            policy_version: { type: string, const: "2" }
+        financial_snapshot: { $ref: "#/components/schemas/TokenProofFinancial" }
+    TokenCatalogProofInput:
+      type: object
+      additionalProperties: false
+      required: [snapshot_schema_version, target, normalized_command, critical_resource_versions, financial_snapshot]
+      properties:
+        snapshot_schema_version: { type: integer, const: 2 }
+        target:
+          type: object
+          additionalProperties: false
+          required: [resource_type, resource_id]
+          properties: { resource_type: { const: MODEL_CATALOG }, resource_id: { type: string, pattern: '^[1-9][0-9]*$' } }
+        normalized_command:
+          type: object
+          additionalProperties: false
+          required: [source_catalog_version]
+          properties: { source_catalog_version: { type: string, pattern: '^[1-9][0-9]*$' } }
+        critical_resource_versions:
+          type: object
+          additionalProperties: false
+          required: [current_catalog_version, source_catalog_version, catalog_diff_fingerprint, billing_price_version, route_set_fingerprint, provisioning_set_fingerprint, inflight_request_set_fingerprint, policy_version]
+          properties:
+            current_catalog_version: { type: string, pattern: '^(0|[1-9][0-9]*)$' }
+            source_catalog_version: { type: string, pattern: '^[1-9][0-9]*$' }
+            catalog_diff_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            billing_price_version: { type: string, pattern: '^[1-9][0-9]*$' }
+            route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            provisioning_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            policy_version: { type: string, const: "2" }
+        financial_snapshot: { $ref: "#/components/schemas/TokenProofFinancial" }
+    TokenCredentialProofInput:
+      type: object
+      additionalProperties: false
+      required: [snapshot_schema_version, target, normalized_command, critical_resource_versions, financial_snapshot]
+      properties:
+        snapshot_schema_version: { type: integer, const: 1 }
+        target:
+          type: object
+          additionalProperties: false
+          required: [resource_type, resource_id]
+          properties: { resource_type: { const: PROVIDER_CREDENTIAL }, resource_id: { type: string, format: uuid } }
+        normalized_command:
+          type: object
+          additionalProperties: false
+          required: [token_account_id, expected_account_version, credential_id, credential_version]
+          properties:
+            token_account_id: { type: string, format: uuid }
+            expected_account_version: { type: string, pattern: '^[1-9][0-9]*$' }
+            credential_id: { type: string, format: uuid }
+            credential_version: { type: string, pattern: '^[1-9][0-9]*$' }
+        critical_resource_versions:
+          type: object
+          additionalProperties: false
+          required: [token_account_id, token_account_version, credential_id, credential_version, credential_status, credential_fingerprint, active_route_set_fingerprint, provisioning_lease_set_fingerprint, inflight_request_set_fingerprint, replacement_credential_version, policy_version]
+          properties:
+            token_account_id: { type: string, format: uuid }
+            token_account_version: { type: string, pattern: '^[1-9][0-9]*$' }
+            credential_id: { type: string, format: uuid }
+            credential_version: { type: string, pattern: '^[1-9][0-9]*$' }
+            credential_status: { enum: [PENDING, ACTIVE, RETIRED, REVOKED] }
+            credential_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            active_route_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            provisioning_lease_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            inflight_request_set_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+            replacement_credential_version: { type: [string, "null"], pattern: '^[1-9][0-9]*$' }
+            policy_version: { type: string, const: "1" }
+        financial_snapshot: { $ref: "#/components/schemas/EmptyFinancialSnapshot" }
+    TokenApprovalProofResponse:
+      type: object
+      additionalProperties: false
+      required: [approval_request_id, command_type, command_digest, snapshot_digest, policy_version, proof_schema_version, domain_revision, verdict, reason_code, issued_at, expires_at]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] }
+        command_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        snapshot_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        policy_version: { type: integer, enum: [1, 2] }
+        proof_schema_version: { type: string, const: "1" }
+        domain_revision: { type: string, pattern: '^[1-9][0-9]*:[0-9a-f]{64}$' }
+        verdict: { enum: [ALLOW, DENY] }
+        reason_code: { enum: [PROOF_VALID, SNAPSHOT_MISMATCH, DOMAIN_INVARIANT_FAILED] }
+        issued_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
     ApprovalSnapshotRequest:
       oneOf:
         - type: object
@@ -1251,7 +1429,20 @@ components:
         execution_idempotency_key: { type: string, minLength: 16, maxLength: 512, description: Account-issued stable execution key; every domain adapter must persist and replay this exact key. }
         critical_resource_versions: { type: object }
         financial_snapshot: { type: object }
+        proof_schema_version: { type: string, const: "1" }
+        command_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        snapshot_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        domain_revision: { type: string, pattern: '^[1-9][0-9]*:[0-9a-f]{64}$' }
+        proof_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        approval_control_epoch: { type: integer, format: int64, minimum: 1 }
         command: { $ref: "#/components/schemas/GovernedTokenCommandEnvelope" }
+      dependentRequired:
+        proof_schema_version: [command_digest, snapshot_digest, domain_revision, proof_digest, approval_control_epoch]
+        command_digest: [proof_schema_version, snapshot_digest, domain_revision, proof_digest, approval_control_epoch]
+        snapshot_digest: [proof_schema_version, command_digest, domain_revision, proof_digest, approval_control_epoch]
+        domain_revision: [proof_schema_version, command_digest, snapshot_digest, proof_digest, approval_control_epoch]
+        proof_digest: [proof_schema_version, command_digest, snapshot_digest, domain_revision, approval_control_epoch]
+        approval_control_epoch: [proof_schema_version, command_digest, snapshot_digest, domain_revision, proof_digest]
       allOf:
         - if:
             properties:
