@@ -609,10 +609,13 @@ fn diff_fingerprint(root: &Path, relative: &str) -> DiffFingerprint {
     // git 暂存区变化会重写 .git/index；非 git 工作区无此文件，字段保持 0。
     // index 条目定长、同路径同 SHA 位数，重写往往尺寸不变，且同样可能落在
     // 同一 mtime 粒度内——与 HEAD ref 一样加内容哈希兜底。
-    if let Ok(metadata) = root.join(".git/index").metadata() {
+    // 路径经 git_path 解析：linked worktree 下 .git 是 gitfile，直接拼
+    // root/.git/index 会读不到真实 index。
+    let index_path = git_path(root, "index").unwrap_or_else(|| root.join(".git/index"));
+    if let Ok(metadata) = index_path.metadata() {
         fingerprint.index_size = metadata.len();
         fingerprint.index_modified = modified_nanos(&metadata);
-        fingerprint.index_hash = sample_head_tail_hash(&root.join(".git/index"), metadata.len());
+        fingerprint.index_hash = sample_head_tail_hash(&index_path, metadata.len());
     }
     // git diff --cached 比较 index 与 HEAD；reset --soft / update-ref / commit 只移动
     // HEAD（改写其指向的 ref 文件），可能不更新 .git/index 或工作区。解析 .git/HEAD
@@ -629,17 +632,41 @@ fn diff_fingerprint(root: &Path, relative: &str) -> DiffFingerprint {
     fingerprint
 }
 
-// 解析 .git/HEAD：symref（`ref: refs/heads/<branch>`）→ `.git/` 下的 ref 文件路径；
-// 分离头（直接存 commit SHA）→ .git/HEAD 本身。reset --soft / update-ref 改写后者，
-// stat 它即可让指纹失效。非 git 工作区无 .git/HEAD 时返回 None。
+// 解析 HEAD 指向的 ref 文件：symref（`ref: refs/heads/<branch>`）→ 该 ref 文件路径；
+// 分离头（直接存 commit SHA）→ HEAD 文件本身。reset --soft / update-ref 改写后者，
+// stat 它即可让指纹失效。非 git 工作区返回 None。
+// 路径经 git_path 解析：linked worktree 下 .git 是 gitfile，HEAD 与分支 ref 都在
+// gitdir/commondir 下，直接拼 root/.git/... 会解析不到。
 fn head_ref_path(root: &Path) -> Option<PathBuf> {
-    let git_dir = root.join(".git");
-    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head_path = git_path(root, "HEAD").unwrap_or_else(|| root.join(".git/HEAD"));
+    let head = fs::read_to_string(&head_path).ok()?;
     match head.trim().strip_prefix("ref:") {
-        // symref 目标相对 .git/（如 refs/heads/main），需在 git_dir 下解析。
-        Some(target) => Some(git_dir.join(target.trim())),
-        None => Some(git_dir.join("HEAD")),
+        // symref 目标（如 refs/heads/main）同样经 git_path 解析，worktree 下
+        // commondir 重定向由 git 自己处理。
+        Some(target) => Some(
+            git_path(root, target.trim()).unwrap_or_else(|| root.join(".git").join(target.trim())),
+        ),
+        None => Some(head_path),
     }
+}
+
+// 经 `git rev-parse --git-path <name>` 解析仓库真实 git 目录内的路径。linked
+// worktree 中 `.git` 是 gitfile，朴素的 `root.join(".git/...")` 启发式读不到
+// index/HEAD/ref 文件，指纹字段会恒为 0 并返回陈旧缓存差异。git 不可用（非 git
+// 工作区、单测里的合成 .git 目录）时返回 None，回退到朴素启发式。
+fn git_path(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut command = crate::platform::process::HiddenCommand::new("git");
+    crate::platform::process::strip_git_override_env(&mut command);
+    let output = command
+        .current_dir(root)
+        .args(["rev-parse", "--git-path", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!relative.is_empty()).then(|| root.join(relative))
 }
 
 fn diff_cache_get(session_id: &str, root: &Path, relative: &str) -> Option<CachedDiff> {
@@ -1602,6 +1629,82 @@ mod tests {
         apply_times(&dev_ref, ref_stamp);
         fs::write(root.path().join(".git/HEAD"), "ref: refs/heads/dev\n").unwrap();
         assert_ne!(baseline, diff_fingerprint(root.path(), "main.py"));
+    }
+
+    // linked worktree 中 `.git` 是 gitfile，指纹必须经 git 自身解析
+    // index/HEAD/ref 路径；朴素 `root.join(".git/...")` 启发式会全部落空、
+    // 字段恒为 0，陈旧缓存差异会被当作命中返回。依赖 git 二进制，缺失时
+    // 跳过（生产路径有 git_path 的启发式回退兜底）。
+    #[test]
+    fn diff_fingerprint_tracks_index_and_head_in_linked_worktree() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!(
+                "skipping diff_fingerprint_tracks_index_and_head_in_linked_worktree: git binary not available"
+            );
+            return;
+        }
+        let root = TestDir::new("diff-fingerprint-worktree");
+        let repo = root.path().join("repo");
+        let linked = root.path().join("linked");
+        fs::create_dir_all(&repo).unwrap();
+        // 与生产 git 调用点一致剥掉进程级 GIT_* 覆盖：并行测试里持锁者可能把
+        // GIT_DIR / GIT_INDEX_FILE 指向无关位置，会把这些子进程带离临时仓库。
+        let run_git = |dir: &Path, args: &[&str]| {
+            let mut command = std::process::Command::new("git");
+            crate::platform::process::strip_all_git_env(&mut command);
+            let output = command
+                .current_dir(dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .args(args)
+                .output()
+                .unwrap_or_else(|error| panic!("failed to spawn git {args:?}: {error}"));
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}\nstderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        };
+        run_git(&repo, &["init", "-b", "main", "."]);
+        run_git(&repo, &["config", "user.name", "test"]);
+        run_git(&repo, &["config", "user.email", "test@example.com"]);
+        fs::write(repo.join("main.py"), "print(1)\n").unwrap();
+        run_git(&repo, &["add", "main.py"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        run_git(&repo, &["worktree", "add", linked.to_str().unwrap()]);
+
+        // git-path 解析必须到达真实的 per-worktree gitdir…
+        let index_path = git_path(&linked, "index").expect("worktree index path");
+        assert!(index_path.is_file(), "{} missing", index_path.display());
+        assert_eq!(
+            fs::canonicalize(&index_path).unwrap(),
+            fs::canonicalize(repo.join(".git/worktrees/linked/index")).unwrap()
+        );
+
+        let baseline = diff_fingerprint(&linked, "main.py");
+        // …index 与 HEAD ref 才会真正进入指纹（朴素 `.git/index` 启发式读到
+        // gitfile，字段保持 0）。
+        assert_ne!(baseline.index_size, 0);
+        assert_ne!(baseline.head_ref_size, 0);
+
+        // worktree 内暂存改动会重写其 index → 指纹变化（暂存变化不得命中陈旧缓存）。
+        fs::write(linked.join("main.py"), "print(2)\n").unwrap();
+        run_git(&linked, &["add", "main.py"]);
+        assert_ne!(baseline, diff_fingerprint(&linked, "main.py"));
+
+        // worktree 内移动 HEAD（空提交只改写 commondir 里的分支 ref，不碰
+        // worktree 文件）→ 经解析出的 HEAD ref 路径让指纹变化。
+        run_git(&linked, &["commit", "--allow-empty", "-m", "second"]);
+        assert_ne!(baseline, diff_fingerprint(&linked, "main.py"));
     }
 
     #[test]
