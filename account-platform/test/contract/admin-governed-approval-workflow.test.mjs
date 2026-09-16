@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { createAndSubmitGovernedApproval, recoverGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
+import { createAndSubmitGovernedApproval, recoverGovernedApproval, submitExistingGovernedApproval } from '../../../pinvou3-app/src/features/account-platform/admin-governed-approval-workflow.js';
 
 const requestID = '0199a300-0001-7000-8000-000000000017';
 const draft = { command_type: 'TOKEN_MODEL_CATALOG_ROLLBACK', target_resource_type: 'MODEL_CATALOG', target_resource_id: '12' };
@@ -74,4 +74,19 @@ test('all Token business approval entry points use the session-governed workflow
     assert.match(source, /recoverGovernedApproval\(client, reference, draft, signal\)/, name);
     assert.doesNotMatch(source, /client\.createApprovalDraft\(|client\.submitApprovalRequest\(/, name);
   }
+});
+
+test('existing business draft is re-read and never submitted from a stale list version', async () => {
+  const existing = { approval_request_id: requestID, command_type: draft.command_type,
+    target_resource_type: draft.target_resource_type, target_resource_id: draft.target_resource_id, status: 'DRAFT', version: 1 };
+  let reads = 0;
+  let submits = 0;
+  const client = { governedApprovalRequest: async () => ++reads === 1 ? detail('DRAFT', 1) : detail('SUBMITTED', 2),
+    submitGovernedApprovalRequest: async (id, current) => { assert.equal(id, requestID); assert.equal(current.version, 1); submits++; } };
+  assert.equal((await submitExistingGovernedApproval(client, existing)).status, 'SUBMITTED');
+  assert.equal(reads, 2);
+  assert.equal(submits, 1);
+  client.governedApprovalRequest = async () => detail('DRAFT', 2);
+  await assert.rejects(submitExistingGovernedApproval(client, existing), { code: 'COMMAND_RESULT_UNKNOWN', commandReference: requestID });
+  assert.equal(submits, 1);
 });

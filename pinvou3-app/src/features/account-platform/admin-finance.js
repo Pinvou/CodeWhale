@@ -1,3 +1,5 @@
+import { createAndSubmitGovernedApproval, submitExistingGovernedApproval } from './admin-governed-approval-workflow.js';
+
 export function adjustmentApprovalAction(adjustment, approval, { canRequest = false, canApprove = false } = {}) {
   const recoverable = Boolean(adjustment?.request_idempotency_key) && adjustment?.status === 'PENDING_APPROVAL';
   if (approval?.status === 'DRAFT' && canRequest && recoverable) return 'resume';
@@ -29,37 +31,9 @@ export function paymentControlApprovalAction(approval, { canRequest = false } = 
 }
 
 export async function submitPaymentControlApproval(client, draftInput, existingApproval = null) {
-  let approval = existingApproval;
-  if (!approval) {
-    try {
-      approval = await client.createApprovalDraft(draftInput);
-    } catch (createError) {
-      try {
-        approval = await client.createApprovalDraft(draftInput);
-      } catch {
-        throw createError;
-      }
-    }
-  }
-  if (approval.status === 'DRAFT') {
-    if (!(approval.allowed_actions || []).includes('SUBMIT')) approval = await client.approvalRequest(approval.approval_request_id);
-    if (!(approval.allowed_actions || []).includes('SUBMIT')) {
-      const error = new Error('APPROVAL_SUBMIT_NOT_ALLOWED');
-      error.code = 'APPROVAL_SUBMIT_NOT_ALLOWED';
-      throw error;
-    }
-    try {
-      return await client.submitApprovalRequest(approval.approval_request_id, approval.version);
-    } catch (submitError) {
-      const refreshed = await client.approvalRequest(approval.approval_request_id);
-      if (refreshed && ['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'].includes(refreshed.status)) return refreshed;
-      throw submitError;
-    }
-  }
-  if (['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'].includes(approval.status)) return approval;
-  const error = new Error(`APPROVAL_${approval.status || 'UNKNOWN'}`);
-  error.code = 'APPROVAL_NOT_ACTIVE';
-  throw error;
+  if (existingApproval) return submitExistingGovernedApproval(client, existingApproval);
+  if (!draftInput) throw Object.assign(new Error('approval draft is unavailable'), { code: 'INVALID_APPROVAL_REQUEST' });
+  return createAndSubmitGovernedApproval(client, draftInput);
 }
 
 export function updateFinanceTabState(current, surface, tab, patch) {

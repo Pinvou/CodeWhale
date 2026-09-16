@@ -67,7 +67,9 @@ test('payment provider and product recovery are version-frozen and independently
   assert.match(adminView, /function PaymentControlsPanel/);
   assert.match(adminFinance, /product \? product\.resume_draft : control\?\.resume_draft/);
   assert.match(adminFinance, /allowed_actions \|\| \[\]\)\.includes\('SUBMIT'\)/);
-  assert.match(adminFinance, /client\.approvalRequest\(approval\.approval_request_id\)/);
+  assert.match(adminFinance, /submitExistingGovernedApproval\(client, existingApproval\)/);
+  assert.match(adminFinance, /createAndSubmitGovernedApproval\(client, draftInput\)/);
+  assert.doesNotMatch(adminFinance, /client\.createApprovalDraft\(|client\.submitApprovalRequest\(/);
   assert.match(adminClient, /approvalRequest\(requestID, signal\)/);
   assert.match(adminView, /PAYMENT_PROVIDER_RESUME/);
   assert.match(adminView, /PAYMENT_PRODUCT_RESUME/);
