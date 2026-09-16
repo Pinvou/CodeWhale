@@ -7981,6 +7981,21 @@ mod tests {
     /// 一致（workflow 也同样可用——不教不荐，但不禁用）。
     #[test]
     fn multi_agent_engine_config_adds_roles_and_resource_guards() {
+        // 引擎配置会读取 PINVOU3_HOME 下的市场禁用注册表（disabled_tool_names），
+        // 本测试本身不写 env，过去一直裸读；#1127 的市场 MCP 清单测试会翻
+        // PINVOU3_HOME 并写入非空禁用条目，并行调度下两次相邻的 build_engine_config*
+        // 可能读到不同快照，"多智能体 == 普通对话"断言随机打红（2026-09-16 本地
+        // 三连复现）。比照本模块惯例锁 ENV_LOCK 并钉住空 home：读取与其他 env 写
+        // 测试串行，且市场状态确定为空，不再随调度与真机 ~/.pinvou3 漂移。
+        let (_lock, _env) = locked_env(&["PINVOU3_HOME"]);
+        let home =
+            std::env::temp_dir().join(format!("pinvou3-bridge-ma-roles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: holding ENV_LOCK via locked_env() (first statement of this
+        // test); env writes in the test process are serialized.
+        unsafe { std::env::set_var("PINVOU3_HOME", &home) };
+
         let bridge = fixture_bridge();
         let workspace = std::env::temp_dir().join(format!(
             "pinvou3-wf-roles-{}-{:p}",
