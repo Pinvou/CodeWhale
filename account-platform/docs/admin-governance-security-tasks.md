@@ -3,7 +3,7 @@
 GSA-07 发布约束入口：[审批授权 Relay 手册](../deploy/runbooks/approval-authorization-relay.md)。该手册不构成代码审核通过、环境验收或部署完成证据。
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分的既有A/B审核历史保留；2026-09-16起由单角色执行逐次修改、Signed-off提交、提交级自审与独立修订提交。GSA-01～07既有状态与环境欠账不变；GSA-08～14均为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，其中GSA-11提交链为`ba1b47ac`、`8126615a`、`e8293602`、`fe7219de`，GSA-12～14提交链和适用门禁见下文。GSA-15起其余任务PENDING；真实Q捕获、生产资源、activation与部署仍归GSA-38～40。
+> 本任务拆分的既有A/B审核历史保留；2026-09-16起由单角色执行逐次修改、Signed-off提交、提交级自审与独立修订提交。GSA-01～07既有状态与环境欠账不变；GSA-08～15均为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，其中GSA-11提交链为`ba1b47ac`、`8126615a`、`e8293602`、`fe7219de`，GSA-12～15提交链和适用门禁见下文。GSA-16起其余任务PENDING；真实Q捕获、生产资源、activation与部署仍归GSA-38～40。
 
 ## 1. 所有权与执行规则
 
@@ -37,7 +37,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-12 | APT-141 | v2 最小列表、统计与六命令 closed detail | GSA-11 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-13 | APT-141 | Account proof 客户端、批准检查点与版本化动作 | GSA-04, GSA-05, GSA-12 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | PENDING |
+| GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | PENDING |
 | GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | PENDING |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | PENDING |
@@ -98,6 +98,8 @@ GSA-14 阶段证据（2026-09-16，已完成提交级自审）：`a781921e`、`5
 
 GSA-14补充提交：`99d9e7e6`、`e492adb6`、`832c6ed9`、`c70eba3f`、`aa42f6b2`。以真实Account服务身份、私有TLS JWKS、Token HTTP handler和隔离PG分别验证三命令ALLOW/DENY及Portal/旧身份拒绝；目录回滚在proof与预检均通过后发生路由版本竞态，本地SERIALIZABLE事务拒绝且command/catalog/audit/outbox零新增，刷新proof后成功并幂等回放。提交级自审PASS：版本/不变量冲突只有能完整重读当前凭据事实时返回精确DENY，否则失败关闭为不可用，不伪造revision；跨Billing价格读与Token本地事务不冒称跨库原子。真实PG定向三命令PASS；完整`node scripts/account-platform.mjs verify` exit0，Node 591项589 PASS/0 FAIL/2既有环境SKIP，Go test/vet、OpenAPI（9既有warning）、i18n、observability、architecture通过。Windows `go test -race` 因当前CGO未启用未运行，不能计入通过。完整Account批准→consumer→执行/恢复、Billing领域proof和生产等价验收分别由GSA-16、GSA-15、GSA-38～40接续；GSA-04 Linux欠账传递，保持IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，不授权activation或部署。
 - **15**：Wallet与Provider/Product三命令proof及领域执行重验，Wallet不新增近期认证；支付恢复沿用15分钟且只读持久 observation/resume_draft，所有浏览器批准链零Provider主动探测。真实三命令成功、漂移、依赖不可用和结果不明测试。
+
+GSA-15 本地代码证据（2026-09-16，提交级自审PASS）：`a064c043`、`c69f5f51`、`e7b498a7`、`5d9c5bc9`、`41d9e27e`、`33792309`、`ac7e490b`、`38de7b0b`、`5674e788`、`2c120332`、`f7049cba`、`2b752dc3`、`9d3f6149`、`59a4b338`、`4625848b`、`6916779c`、`ec7f40d0`。每次修改分别Signed-off提交、自审，后续修订没有amend抹除。Billing三命令的Account专用、2秒/合计64KiB的closed proof endpoint重读持久owner事实与activation，独立权限及Compose/Helm绑定；旧wire不吞v2事件。执行前以真实SERIALIZABLE事务重读冻结事实与activation，唯一不可变claim提交后才允许Wallet领域写或Provider探测；重复claim、提交未知、查证未完成均不二次探测，旧wire维持既有行为。`000055`为前向独立owner迁移，runtime仅SELECT/INSERT，拒绝修改或TRUNCATE。真实隔离PG覆盖Wallet ALLOW、冻结漂移零claim、重复认领、Provider/Product ALLOW及claim；Account身份经Billing HTTP、Portal/旧身份拒绝、三命令Golden合同通过。完整`node scripts/account-platform.mjs verify` exit0，Node 592项590 PASS/0 FAIL/2既有环境SKIP，Go全包test/vet、OpenAPI（9既有warning）、i18n、observability、architecture通过；最后的重复claim修订与Provider/Product PG新增后定向PG/单测再次PASS。尚无真实生产Provider调用或跨域批准→consumer→恢复全链验收，逐命令UNKNOWN查证/安全恢复属于GSA-16，生产等价证据与控制面activation属于GSA-38～40；GSA-04 Linux欠账传递，因此保持IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，不宣称上线。
 - **16**：逐命令 TRANSIENT_SAFE/UNKNOWN/PERMANENT/失效分类，原执行ID、有界退避/次数/窗口、独立worker身份与lease；未知错误默认查询，禁止通用重试。六命令的崩溃、并发、窗口结束及幂等验证。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
