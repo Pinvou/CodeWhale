@@ -46,6 +46,9 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
+	if err := configureApprovalPagination(ctx, repository); err != nil {
+		log.Fatal("approval pagination configuration is invalid: ", err)
+	}
 	if err := repository.ConfigureApprovalWriter(ctx, os.Getenv("APPROVAL_WRITER_DATABASE_URL")); err != nil {
 		log.Print("approval writer is unavailable; APPROVE is disabled")
 	}

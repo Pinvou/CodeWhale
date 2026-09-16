@@ -65,6 +65,7 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 		commerceProviderID: defaultCommerceProviderID, commerceAdapterVersion: defaultCommerceAdapterVersion,
 		approvalPagination:        approvalPaginationRuntime{hardDisabled: true},
 		approvalPaginationMetrics: newApprovalPaginationMetrics(),
+		approvalPresenterReady:    approvalPolicyPresenterReady,
 	}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
