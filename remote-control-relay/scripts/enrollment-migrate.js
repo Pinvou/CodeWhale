@@ -111,19 +111,17 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
       result = { ok: true, ...handler.coverage(document.endpoint_ids) };
     } else if (args.mode === "backup") {
       if (!args.output || args.input) throw cliError("backup_arguments_invalid");
-      result = createEnrollmentBackup(store);
+      result = createEnrollmentBackup(registry);
       await atomicWriteJson(args.output, result);
       result = { ok: true, backup_written: true, namespace_revision: result.namespace_revision };
     } else if (args.mode === "restore") {
       if (!args.input || args.output) throw cliError("restore_arguments_invalid");
       const backup = await secureReadJson(args.input);
-      const current = store.readNamespace("endpoint_enrollment");
       result = {
         ok: true,
         ...(await restoreEnrollmentBackup({
-          stateStore: store,
+          registry,
           backup,
-          expectedCurrentRevision: current.namespace_revision,
         })),
       };
     } else {
@@ -136,7 +134,6 @@ export async function main(argv = process.argv.slice(2), env = process.env, io =
         ok: true,
         ...(await runEnrollmentBatch({
           registry,
-          stateStore: store,
           operations: document.operations,
           dryRun: args.mode === "dry-run",
         })),

@@ -117,10 +117,14 @@ function isoTimestamp(clock) {
 function validateTimestamp(value, nullable, label) {
   if (nullable && value === null) return null;
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)
-    || Number.isNaN(Date.parse(value))) {
+    || Number.isNaN(Date.parse(value)) || new Date(value).toISOString() !== value) {
     fail(`${label}_malformed`);
   }
   return value;
+}
+
+export function compareEnrollmentIdentifiers(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function validateEntry(raw) {
@@ -182,7 +186,9 @@ function validateMigrationRequest(raw) {
   }
   const endpointIds = request.endpoint_ids.map(validateEndpointId);
   for (let index = 1; index < endpointIds.length; index += 1) {
-    if (endpointIds[index - 1] >= endpointIds[index]) fail("migration_request_malformed");
+    if (compareEnrollmentIdentifiers(endpointIds[index - 1], endpointIds[index]) >= 0) {
+      fail("migration_request_malformed");
+    }
   }
   if (request.operation === "batch" && endpointIds.length === 0) fail("migration_request_malformed");
   if (request.operation === "restore" && endpointIds.length !== 0) fail("migration_request_malformed");
@@ -209,7 +215,9 @@ function validateMigrationRequest(raw) {
       if (outcome.code !== null) fail("migration_outcome_malformed");
       if (request.operation === "batch" && outcome.restored_entry_count !== null) fail("migration_outcome_malformed");
       if (request.operation === "batch") {
-        const resultEndpointIds = outcome.results.map((result) => result.endpoint_id).sort();
+        const resultEndpointIds = outcome.results
+          .map((result) => result.endpoint_id)
+          .sort(compareEnrollmentIdentifiers);
         if (JSON.stringify(resultEndpointIds) !== JSON.stringify(endpointIds)) fail("migration_outcome_malformed");
       }
       if (request.operation === "restore"
@@ -252,7 +260,8 @@ function validateRegistry(raw) {
   }
   const entries = registry.entries.map(validateEntry);
   for (let index = 0; index < entries.length; index += 1) {
-    if (index > 0 && entries[index - 1].endpoint_id >= entries[index].endpoint_id) {
+    if (index > 0
+      && compareEnrollmentIdentifiers(entries[index - 1].endpoint_id, entries[index].endpoint_id) >= 0) {
       fail("enrollment_registry_malformed");
     }
   }
@@ -262,7 +271,9 @@ function validateRegistry(raw) {
   }
   const requests = migrationRequests.map(validateMigrationRequest);
   for (let index = 1; index < requests.length; index += 1) {
-    if (requests[index - 1].request_id >= requests[index].request_id) fail("enrollment_registry_malformed");
+    if (compareEnrollmentIdentifiers(requests[index - 1].request_id, requests[index].request_id) >= 0) {
+      fail("enrollment_registry_malformed");
+    }
   }
   return {
     schema: ENROLLMENT_REGISTRY_SCHEMA,
@@ -378,7 +389,9 @@ function migrationDescriptor(prepared) {
   const restore = prepared[0].operation === "restore";
   return {
     operation: restore ? "restore" : "batch",
-    endpointIds: restore ? [] : prepared.map((operation) => operation.endpointId).sort(),
+    endpointIds: restore
+      ? []
+      : prepared.map((operation) => operation.endpointId).sort(compareEnrollmentIdentifiers),
     canonicalParameters: canonicalMigrationParameters(prepared),
   };
 }
@@ -477,7 +490,7 @@ function applyPreparedOperations(registry, prepared, config, clock) {
       legacy_web_link: "invalidated",
     });
   }
-  entries.sort((left, right) => left.endpoint_id.localeCompare(right.endpoint_id));
+  entries.sort((left, right) => compareEnrollmentIdentifiers(left.endpoint_id, right.endpoint_id));
   return {
     registry: { ...registry, entries },
     results,
@@ -676,14 +689,29 @@ export class EnrollmentRegistry {
   }
 
   async importSnapshot({ snapshot, expectedNamespaceRevision } = {}) {
-    const registry = validateRegistry(snapshot);
+    const imported = validateRegistry(snapshot);
     expectedNamespaceRevision = validateRevision(expectedNamespaceRevision, "expected_namespace_revision");
     const current = this.#read();
     if (current.namespace_revision !== expectedNamespaceRevision) fail("enrollment_revision_conflict");
+    const registry = {
+      ...imported,
+      migration_requests: structuredClone(current.registry.migration_requests),
+    };
     const written = await this.#write(current, registry);
     return deepFreeze({
       namespace_revision: written.namespace_revision,
       registry: structuredClone(written.registry),
+    });
+  }
+
+  previewAtomicBatch({ operations } = {}) {
+    const prepared = prepareAtomicOperations(operations);
+    const snapshot = this.#read();
+    const applied = applyPreparedOperations(snapshot.registry, prepared, this.#config, this.#clock);
+    return deepFreeze({
+      namespace_revision: snapshot.namespace_revision,
+      results: applied.results,
+      restored_entry_count: applied.restoredEntryCount,
     });
   }
 
@@ -738,7 +766,7 @@ export class EnrollmentRegistry {
       const registry = {
         ...snapshot.registry,
         migration_requests: [...snapshot.registry.migration_requests, pending]
-          .sort((left, right) => left.request_id.localeCompare(right.request_id)),
+          .sort((left, right) => compareEnrollmentIdentifiers(left.request_id, right.request_id)),
       };
       try {
         await this.#write(snapshot, registry);
@@ -844,9 +872,8 @@ export class EnrollmentRegistry {
     };
     const registry = {
       ...snapshot.registry,
-      entries: [...snapshot.registry.entries, entry].sort((left, right) => (
-        left.endpoint_id < right.endpoint_id ? -1 : left.endpoint_id > right.endpoint_id ? 1 : 0
-      )),
+      entries: [...snapshot.registry.entries, entry]
+        .sort((left, right) => compareEnrollmentIdentifiers(left.endpoint_id, right.endpoint_id)),
     };
     await this.#write(snapshot, registry);
     return publicEntry(entry);

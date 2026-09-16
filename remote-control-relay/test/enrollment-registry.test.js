@@ -1200,6 +1200,37 @@ test("atomic batch validates everything before one namespace CAS", async (t) => 
   assert.deepEqual(rotated.results.map((result) => result.action), ["re_enrolled", "re_enrolled"]);
 });
 
+test("registry and migration ledgers use locale-independent identifier ordering", async (t) => {
+  const { registry } = await openRegistry(t);
+  const first = registry.exportSnapshot();
+  await registry.applyAtomicBatch({
+    expectedNamespaceRevision: first.namespace_revision,
+    operations: [
+      { operation: "allowlist", endpoint_id: "a", credential: FIRST_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "B", credential: SECOND_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "0", credential: THIRD_CREDENTIAL },
+      { operation: "allowlist", endpoint_id: "A._~-", credential: `${FIRST_CREDENTIAL}-mixed` },
+    ],
+  });
+  assert.deepEqual(
+    registry.exportSnapshot().registry.entries.map((entry) => entry.endpoint_id),
+    ["0", "A._~-", "B", "a"],
+  );
+
+  await registry.executeMigrationRequest({
+    requestId: "request-a_mixed-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-a", credential: FIRST_CREDENTIAL }],
+  });
+  await registry.executeMigrationRequest({
+    requestId: "Request-B.mixed-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "ledger-B", credential: SECOND_CREDENTIAL }],
+  });
+  assert.deepEqual(
+    registry.exportSnapshot().registry.migration_requests.map((request) => request.request_id),
+    ["Request-B.mixed-0001", "request-a_mixed-0001"],
+  );
+});
+
 test("public snapshot validation and import are strict, versioned, and one-CAS", async (t) => {
   const { statePath, store, registry } = await openRegistry(t);
   await registry.enroll({ endpointId: "snapshot-b", credential: FIRST_CREDENTIAL });
@@ -1222,6 +1253,9 @@ test("public snapshot validation and import are strict, versioned, and one-CAS",
     (snapshot) => { snapshot.entries[0].status = "unknown"; },
     (snapshot) => { snapshot.entries[0].credential.digest_hex = "bad"; },
     (snapshot) => { snapshot.entries[0].enrolled_at = "yesterday"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "2023-02-29T00:00:00.000Z"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "2024-02-30T00:00:00.000Z"; },
+    (snapshot) => { snapshot.entries[0].enrolled_at = "2024-04-31T00:00:00.000Z"; },
   ]) {
     const malformed = structuredClone(exported.registry);
     mutate(malformed);
@@ -1322,6 +1356,37 @@ test("migration ledger survives a crash after pending and seals a secret-free te
     ...input,
     operations: [{ operation: "allowlist", endpoint_id: "ledger-a", credential: SECOND_CREDENTIAL }],
   }), "migration_request_conflict");
+});
+
+test("snapshot imports preserve pending and terminal migration request monotonicity", async (t) => {
+  const { registry } = await openRegistry(t);
+  const oldSnapshot = registry.exportSnapshot().registry;
+  const terminalInput = {
+    requestId: "migration-preserved-terminal-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "preserved-terminal", credential: FIRST_CREDENTIAL }],
+  };
+  const terminal = await registry.executeMigrationRequest(terminalInput);
+  assert.equal(terminal.status, "succeeded");
+  const pendingInput = {
+    requestId: "migration-preserved-pending-0001",
+    operations: [{ operation: "allowlist", endpoint_id: "preserved-pending", credential: SECOND_CREDENTIAL }],
+  };
+  await registry.beginMigrationRequest(pendingInput);
+
+  const beforeImport = registry.exportSnapshot();
+  await registry.importSnapshot({
+    snapshot: oldSnapshot,
+    expectedNamespaceRevision: beforeImport.namespace_revision,
+  });
+  assert.equal(registry.getMigrationRequest(terminalInput.requestId).status, "succeeded");
+  assert.equal(registry.getMigrationRequest(pendingInput.requestId).status, "pending");
+  assert.deepEqual(await registry.executeMigrationRequest(terminalInput), terminal);
+  await rejectsCode(registry.executeMigrationRequest({
+    requestId: terminalInput.requestId,
+    operations: [{ operation: "allowlist", endpoint_id: "different-endpoint", credential: THIRD_CREDENTIAL }],
+  }), "migration_request_conflict");
+  const completedPending = await registry.completeMigrationRequest(pendingInput);
+  assert.equal(completedPending.status, "succeeded");
 });
 
 test("concurrent handlers converge on one request and one endpoint mutation", async (t) => {

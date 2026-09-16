@@ -1,8 +1,7 @@
 import crypto from "node:crypto";
 import {
-  ENROLLMENT_NAMESPACE,
-  ENROLLMENT_REGISTRY_SCHEMA,
-  ENROLLMENT_REGISTRY_VERSION,
+  compareEnrollmentIdentifiers,
+  validateEnrollmentRegistrySnapshot,
 } from "./enrollment-registry.js";
 
 const REQUEST_ID = /^[A-Za-z0-9][A-Za-z0-9._~-]{7,127}$/u;
@@ -108,7 +107,7 @@ export class EnrollmentMigrationHandler {
     if (!Array.isArray(legacyEndpointIds) || legacyEndpointIds.length > 100_000) {
       fail("migration_inventory_invalid");
     }
-    const unique = [...new Set(legacyEndpointIds.map(endpointId))].sort();
+    const unique = [...new Set(legacyEndpointIds.map(endpointId))].sort(compareEnrollmentIdentifiers);
     const endpoints = unique.map((id) => ({
       endpoint_id: id,
       enrollment_status: this.#registry.getStatus(id)?.status ?? "not_migrated",
@@ -130,43 +129,53 @@ function validateBackup(value) {
     || JSON.stringify(keys) !== JSON.stringify(["namespace_revision", "registry", "registry_sha256", "schema", "version"])
     || value.schema !== BACKUP_SCHEMA || value.version !== BACKUP_VERSION
     || typeof value.namespace_revision !== "string" || !/^(?:0|[1-9][0-9]{0,19})$/u.test(value.namespace_revision)
-    || (value.registry !== null && (typeof value.registry !== "object" || Array.isArray(value.registry)))
-    || (value.registry !== null && (value.registry.schema !== ENROLLMENT_REGISTRY_SCHEMA
-      || value.registry.version !== ENROLLMENT_REGISTRY_VERSION || !Array.isArray(value.registry.entries)))
     || typeof value.registry_sha256 !== "string"
     || value.registry_sha256 !== backupDigest(value.registry)) {
     fail("migration_backup_invalid");
   }
-  return structuredClone(value);
+  try {
+    return {
+      ...structuredClone(value),
+      registry: structuredClone(validateEnrollmentRegistrySnapshot(value.registry)),
+    };
+  } catch (error) {
+    fail("migration_backup_invalid", error);
+  }
 }
 
 function backupDigest(registry) {
   return crypto.createHash("sha256").update(JSON.stringify(registry), "utf8").digest("hex");
 }
 
-export function createEnrollmentBackup(stateStore) {
-  if (!stateStore || typeof stateStore.readNamespace !== "function") fail("migration_state_store_invalid");
-  const snapshot = stateStore.readNamespace(ENROLLMENT_NAMESPACE);
+export function createEnrollmentBackup(registry) {
+  if (!registry || typeof registry.exportSnapshot !== "function") fail("migration_registry_invalid");
+  const snapshot = registry.exportSnapshot();
   return Object.freeze({
     schema: BACKUP_SCHEMA,
     version: BACKUP_VERSION,
     namespace_revision: snapshot.namespace_revision,
-    registry: snapshot.value,
-    registry_sha256: backupDigest(snapshot.value),
+    registry: snapshot.registry,
+    registry_sha256: backupDigest(snapshot.registry),
   });
 }
 
-export async function restoreEnrollmentBackup({ stateStore, backup, expectedCurrentRevision } = {}) {
-  if (!stateStore || typeof stateStore.compareAndSwap !== "function") fail("migration_state_store_invalid");
+export async function restoreEnrollmentBackup({ registry, backup, requestId: stableRequestId } = {}) {
+  if (!registry || typeof registry.executeMigrationRequest !== "function") fail("migration_registry_invalid");
   const parsed = validateBackup(backup);
-  if (typeof expectedCurrentRevision !== "string") fail("migration_restore_revision_invalid");
+  const restoreRequestId = stableRequestId === undefined
+    ? `restore-${parsed.registry_sha256}`
+    : requestId(stableRequestId);
   try {
-    const restored = await stateStore.compareAndSwap(
-      ENROLLMENT_NAMESPACE,
-      expectedCurrentRevision,
-      parsed.registry,
-    );
-    return Object.freeze({ restored: true, namespace_revision: restored.namespace_revision });
+    const restored = await registry.executeMigrationRequest({
+      requestId: restoreRequestId,
+      operations: [{ operation: "restore", snapshot: parsed.registry }],
+    });
+    return Object.freeze({
+      restored: true,
+      request_id: restoreRequestId,
+      status: restored.status,
+      restored_entry_count: restored.outcome.restored_entry_count,
+    });
   } catch (error) {
     fail("migration_restore_failed", error);
   }
@@ -190,31 +199,25 @@ function validateOperation(raw) {
   fail("migration_operation_invalid");
 }
 
-async function preflightOperation(registry, operation) {
-  const existing = registry.getStatus(operation.endpointId);
+function registryOperation(operation) {
   if (operation.operation === "allowlist") {
-    if (!existing) return { action: "would_allowlist", endpoint_id: operation.endpointId };
-    await registry.authorizeRegistration({
-      endpointId: operation.endpointId,
-      credential: operation.credential,
-      purpose: "web_v2_reregister",
-    });
-    return { action: "already_enrolled", endpoint_id: operation.endpointId };
+    return { operation: "allowlist", endpoint_id: operation.endpointId, credential: operation.credential };
   }
-  if (!existing || existing.status !== "active" || existing.revision !== operation.expectedRevision) {
-    fail("migration_re_enroll_precondition_failed");
-  }
-  await registry.authorizeRegistration({
-    endpointId: operation.endpointId,
-    credential: operation.currentCredential,
-    purpose: "web_v2_reregister",
-  });
-  return { action: "would_re_enroll", endpoint_id: operation.endpointId };
+  return {
+    operation: "re_enroll",
+    endpoint_id: operation.endpointId,
+    current_credential: operation.currentCredential,
+    new_credential: operation.newCredential,
+    expected_revision: operation.expectedRevision,
+  };
 }
 
-/** Batch is preflighted first. Apply failures restore the exact registry value by CAS. */
-export async function runEnrollmentBatch({ registry, stateStore, operations, dryRun = true } = {}) {
-  if (!registry || typeof registry.authorizeRegistration !== "function") fail("migration_registry_invalid");
+/** DEV-01 owns validation and the single namespace CAS; no prefix can persist. */
+export async function runEnrollmentBatch({ registry, operations, dryRun = true } = {}) {
+  if (!registry || typeof registry.previewAtomicBatch !== "function"
+    || typeof registry.applyAtomicBatch !== "function" || typeof registry.exportSnapshot !== "function") {
+    fail("migration_registry_invalid");
+  }
   if (!Array.isArray(operations) || operations.length === 0 || operations.length > 100_000) {
     fail("migration_batch_invalid");
   }
@@ -222,54 +225,28 @@ export async function runEnrollmentBatch({ registry, stateStore, operations, dry
   if (new Set(parsed.map((operation) => operation.endpointId)).size !== parsed.length) {
     fail("migration_batch_duplicate_endpoint");
   }
-  const plan = [];
-  for (const operation of parsed) plan.push(await preflightOperation(registry, operation));
-  if (dryRun) return Object.freeze({ dry_run: true, applied: 0, results: plan.map(Object.freeze) });
-
-  const backup = createEnrollmentBackup(stateStore);
-  const results = [];
-  let expectedRollbackRevision = backup.namespace_revision;
+  const atomicOperations = parsed.map(registryOperation);
   try {
-    for (let index = 0; index < parsed.length; index += 1) {
-      const operation = parsed[index];
-      let entry;
-      if (operation.operation === "allowlist") {
-        entry = await registry.enroll({ endpointId: operation.endpointId, credential: operation.credential });
-      } else {
-        entry = await registry.rotateCredential({
-          endpointId: operation.endpointId,
-          currentCredential: operation.currentCredential,
-          newCredential: operation.newCredential,
-          expectedEndpointRevision: operation.expectedRevision,
-        });
-      }
-      results.push({
-        endpoint_id: entry.endpoint_id,
-        revision: entry.revision,
-        action: operation.operation === "re_enroll"
-          ? "re_enrolled"
-          : plan[index].action === "already_enrolled" ? "already_enrolled" : "allowlisted",
-        legacy_web_link: operation.operation === "re_enroll" ? "invalidated" : "preserved",
+    if (dryRun) {
+      const preview = registry.previewAtomicBatch({ operations: atomicOperations });
+      return Object.freeze({
+        dry_run: true,
+        applied: 0,
+        results: preview.results.map((result) => Object.freeze({
+          endpoint_id: result.endpoint_id,
+          action: result.action === "allowlisted"
+            ? "would_allowlist"
+            : result.action === "re_enrolled" ? "would_re_enroll" : "already_enrolled",
+        })),
       });
-      if (plan[index].action !== "already_enrolled") {
-        expectedRollbackRevision = (BigInt(expectedRollbackRevision) + 1n).toString();
-      }
     }
-    return Object.freeze({ dry_run: false, applied: results.length, results: results.map(Object.freeze) });
+    const snapshot = registry.exportSnapshot();
+    const applied = await registry.applyAtomicBatch({
+      operations: atomicOperations,
+      expectedNamespaceRevision: snapshot.namespace_revision,
+    });
+    return Object.freeze({ dry_run: false, applied: applied.results.length, results: applied.results });
   } catch (error) {
-    try {
-      const current = stateStore.readNamespace(ENROLLMENT_NAMESPACE);
-      if (current.namespace_revision !== expectedRollbackRevision) {
-        fail("migration_concurrent_change_detected");
-      }
-      await restoreEnrollmentBackup({
-        stateStore,
-        backup,
-        expectedCurrentRevision: expectedRollbackRevision,
-      });
-    } catch (rollbackError) {
-      fail("migration_batch_rollback_failed", new AggregateError([error, rollbackError], "migration failed and rollback failed"));
-    }
-    fail("migration_batch_rolled_back", error);
+    fail("migration_batch_failed", error);
   }
 }
