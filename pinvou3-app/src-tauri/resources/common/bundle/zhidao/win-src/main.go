@@ -188,7 +188,10 @@ type sessionData struct {
 	Token        string `json:"token"`
 	Ait          string `json:"ait"`
 	Expire       int64  `json:"expire"`
-	PollInterval int    `json:"pollInterval"`
+	// Keep untyped (like the sibling eip-cli): the SSO server has flipped field
+	// types before (pollInterval string ↔ number), and one typed field failing
+	// to decode must not poison the whole sessionData parse. Not consumed today.
+	PollInterval json.RawMessage `json:"pollInterval"`
 }
 
 func postJSON(url string, body interface{}, withToken bool) (*envelope, []byte, error) {
