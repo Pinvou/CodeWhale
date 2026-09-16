@@ -33,7 +33,7 @@
       "crates/tui/src/sandbox/mod.rs",
       "web/scripts/derive-facts.mjs"
     ],
-    "providerCountDefinition": "Website-derived ApiProvider labels in this source snapshot, excluding Custom, DeepseekCN and retired Antigravity; includes protocol/plan variants. Not a count of distinct vendors, ProviderKind identities, live catalogs, or released v0.9.11 providers."
+    "providerCountDefinition": "Website-derived ApiProvider labels in this source snapshot, excluding Custom, DeepseekCN and retired Antigravity; includes protocol/plan variants. Not a count of distinct vendors, ProviderKind identities, live catalogs, or the providers of any published release."
   },
   "latestPublishedRelease": {
     "tag": "v0.9.12",
