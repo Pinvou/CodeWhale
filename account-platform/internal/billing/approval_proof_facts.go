@@ -21,8 +21,12 @@ type billingProofFacts interface {
 }
 
 func (r *PostgresRepository) confirmedResumeProbe(ctx context.Context, providerID, providerVersion, productID string, orderID uuid.UUID) (bool, error) {
+	return r.confirmedResumeProbeFrom(ctx, r.pool, providerID, providerVersion, productID, orderID)
+}
+
+func (r *PostgresRepository) confirmedResumeProbeFrom(ctx context.Context, source recoveryQuerier, providerID, providerVersion, productID string, orderID uuid.UUID) (bool, error) {
 	var confirmed bool
-	err := r.pool.QueryRow(ctx, `SELECT EXISTS (
+	err := source.QueryRow(ctx, `SELECT EXISTS (
 		SELECT 1 FROM payment_provider_failure_confirmations confirmation
 		JOIN payment_orders payment ON payment.id=confirmation.payment_order_id
 		WHERE confirmation.payment_order_id=$1 AND payment.provider_id=$2 AND payment.provider_version=$3
