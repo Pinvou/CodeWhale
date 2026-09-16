@@ -54,3 +54,17 @@ test('approval detail deep link replaces stale cursor and preserves an unrelated
   });
   assert.equal(result, '/admin.html?section=approvals&approval_request_id=request-id&approval_command_type=WALLET_ADJUSTMENT&approval_target=adjustment-id#work');
 });
+
+test('Token approval success surfaces the exact request id in the governed center', () => {
+  const dialog = read('../pinvou3-app/src/features/account-platform/AdminHighRiskActionDialog.jsx');
+  const modelDirectory = read('../pinvou3-app/src/features/account-platform/AdminModelTokenWorkspace.jsx');
+  const modelDetail = read('../pinvou3-app/src/features/account-platform/AdminModelDetailWorkspace.jsx');
+  const credential = read('../pinvou3-app/src/features/account-platform/AdminTokenAccountDetailWorkspace.jsx');
+  assert.match(dialog, /state\.success\.approval_request_id && onOpenApproval/);
+  assert.match(dialog, /closeDialog\(\); onOpenApproval\(id\)/);
+  assert.match(modelDirectory, /approval_command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', approval_target: action\.item\.model_id, approval_request_id: id/);
+  assert.match(modelDirectory, /approval_command_type: 'TOKEN_MODEL_CATALOG_ROLLBACK', approval_target: String\(action\.sourceVersion\), approval_request_id: id/);
+  assert.match(modelDetail, /approval_command_type: 'TOKEN_MODEL_LIFECYCLE_CHANGE', approval_target: model\.model_id, approval_request_id: id/);
+  assert.match(credential, /approval_command_type: 'TOKEN_CREDENTIAL_REVOKE', approval_target: credential\.credential_id, approval_request_id: id/);
+  for (const locale of ['zh', 'en', 'ja']) assert.ok(adminPlatformCopy[locale].modelToken.actionViewApproval);
+});

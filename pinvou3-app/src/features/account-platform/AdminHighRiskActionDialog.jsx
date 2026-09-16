@@ -29,7 +29,7 @@ function ImpactFacts({ impact, copy }) {
 
 const EMPTY_ACTION_DETAILS = Object.freeze({});
 
-export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = EMPTY_ACTION_DETAILS, execute, recover, recoverByIdempotencyKey, onClose, onCompleted, onManualReview, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
+export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDIT_ONLY', recentAuth = false, impactLoader, precheckEnabled = true, impactRequired = true, payloadDetails = EMPTY_ACTION_DETAILS, execute, recover, recoverByIdempotencyKey, onClose, onCompleted, onManualReview, onOpenApproval, reasonMin = 10, reasonMax = 2000, dangerous = false, initialReason = '', children }) {
   const root = useRef(null);
   const first = useRef(null);
   const previousFocus = useRef(document.activeElement);
@@ -122,7 +122,7 @@ export function AdminHighRiskActionDialog({ action, copy, target, policy = 'AUDI
     {recentAuth && <div className="adm-inline-message info" role="status">{copy.recentAuthRequired}</div>}
     {state.loading && <div className="adm-source-state" role="status">{copy.actionLoadingImpact}</div>}
     {state.error && <div className={`adm-inline-message error${state.unknown ? ' adm-command-unknown' : ''}`} role="alert"><strong>{state.unknown ? copy.actionUnknown : state.commandError ? copy.actionSubmitFailed : copy.actionPrecheckFailed}</strong>{state.error.commandReference && <small>{copy.commandReference}: {state.error.commandReference}</small>}{state.error.requestID && <small>{copy.requestID}: {state.error.requestID}</small>}</div>}
-    {state.success && <div className="adm-inline-message success" role="status"><strong>{copy.actionAccepted}</strong>{state.success.command_reference && <small>{copy.commandReference}: {state.success.command_reference}</small>}{state.success.approval_request_id && <small>{copy.actionApprovalReference}: {state.success.approval_request_id}</small>}{state.success.audit_request_id && <small>{copy.actionAuditReference}: {state.success.audit_request_id}</small>}</div>}
+    {state.success && <div className="adm-inline-message success" role="status"><strong>{copy.actionAccepted}</strong>{state.success.command_reference && <small>{copy.commandReference}: {state.success.command_reference}</small>}{state.success.approval_request_id && <small>{copy.actionApprovalReference}: {state.success.approval_request_id}</small>}{state.success.audit_request_id && <small>{copy.actionAuditReference}: {state.success.audit_request_id}</small>}{state.success.approval_request_id && onOpenApproval && <button type="button" onClick={() => { const id = state.success.approval_request_id; closeDialog(); onOpenApproval(id); }}>{copy.actionViewApproval}</button>}</div>}
     {impact && <ImpactFacts impact={impact} copy={copy} />}
     {children && <fieldset className="adm-high-risk-fields" disabled={state.busy || state.unknown || state.terminal}>{children}</fieldset>}
     <label>{copy.reason}<textarea required minLength={reasonMin} maxLength={reasonMax} rows="4" disabled={state.busy || state.unknown || state.terminal} value={reason} onChange={(event) => { setReason(event.target.value); if (state.error && !state.unknown) { resetHighRiskCommandAfterSafeFailure(command); setState((current) => ({ ...current, error: null })); } }} /></label>
