@@ -10,6 +10,18 @@ servers:
 security:
   - oidc: []
 paths:
+  /admin/v2/approval-capability:
+    get:
+      operationId: getApprovalCapabilityV2
+      summary: Read the closed, authenticated approval control capability
+      description: The server reads the single authoritative control row; the browser cannot submit mode, epoch, proof, or wire-version facts. Never cache this response.
+      responses:
+        "200":
+          description: Current approval protocol and action-control generation
+          headers: { Cache-Control: { schema: { type: string, const: no-store } } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalCapability" } } }
+        "401": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/approval-recovery/confirm:
     post:
       servers: [{ url: / }]
@@ -1279,6 +1291,20 @@ components:
         maxLength: 120
       description: Stable operation key; body fallback is accepted for constrained clients.
   schemas:
+    ApprovalCapability:
+      type: object
+      additionalProperties: false
+      required: [schema_version, mode, approval_wire_version, proof_required, epoch, authorization_relay_state, authorization_relay_epoch, version, request_id]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        mode: { type: string, enum: [LEGACY, QUIESCING, PROOF_REQUIRED, SAFE_ROLLBACK] }
+        approval_wire_version: { type: integer, enum: [1, 2] }
+        proof_required: { type: boolean }
+        epoch: { type: integer, format: int64, minimum: 1 }
+        authorization_relay_state: { type: string, enum: [RUNNING, FENCED] }
+        authorization_relay_epoch: { type: integer, format: int64, minimum: 1 }
+        version: { type: integer, format: int64, minimum: 1 }
+        request_id: { type: string, minLength: 1 }
     ApprovalRecoveryPlan:
       type: object
       additionalProperties: false

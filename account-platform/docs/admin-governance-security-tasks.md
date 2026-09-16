@@ -39,7 +39,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-16 | APT-141 | 逐命令失败分类、查证与安全恢复 worker | GSA-09, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
-| GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | PENDING |
+| GSA-17 | APT-142 | Portal v1/v2 会话锁定、BFF、capability 与动作代次 | GSA-12, GSA-15 | CODE | IN_PROGRESS / PARTIAL / REVIEW_PENDING / NOT_DEPLOYED |
 | GSA-18 | APT-142 | 审批中心导航、目录、分页、详情和决定交互 | GSA-16, GSA-17 | CODE | PENDING |
 | GSA-19 | APT-142 | 业务页编辑、中心提交和替代申请双向闭环 | GSA-18 | CODE | PENDING |
 | GSA-20 | APT-142 | 审计/导出、系统/安全、偏好与全分区 UI 验收 | GSA-19 | CODE | PENDING |
@@ -146,6 +146,8 @@ GSA-16 Account独立复查入口（仍PARTIAL / REVIEW_PENDING）：新增仅限
 
 GSA-16 正向收敛调用阶段（仍PARTIAL / REVIEW_PENDING）：独立一次性恢复CLI在原短租约内先只读查原结果和效果；仅原结果为`SUCCEEDED`且效果不与之矛盾时，向Account发送原候选和租约、绝不发送结果载荷。Account独立重查再CAS原执行，CLI只统计`converged`，未确认/租约过期/权威不可用均不得授权领域重试。定向HTTP及同租约测试、真实隔离PG的Account入口→原执行收敛→零第二执行通过。仍无零效果权威证明和安全失效/重试实现，生产数据库恢复角色仍NOLOGIN、无调度部署，整项不标记完成。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
+
+GSA-17 Account capability 起步（仍PARTIAL / REVIEW_PENDING）：新增仅认证用户可读的`GET /admin/v2/approval-capability`，从唯一持久control行返回九字段封闭快照，`epoch`明确对应approval epoch、带服务端request ID且`no-store`；未接受浏览器自报协议或控制状态。定向Go HTTP、授权路径登记与OpenAPI门禁通过。Portal BFF、Redis会话锁定、动作代次比较及迟到响应处理尚未交付，不能标记CODE_COMPLETE。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
 - **20**：审计/导出、系统与安全、偏好按设计 §2 与既有合同核对及修正信息排布、操作状态、标签、无障碍/响应式；运行手册只读、Keycloak受控入口边界、真实导出生命周期。无新API或权限依据的能力不展示。此批不引入T9异常索引。
