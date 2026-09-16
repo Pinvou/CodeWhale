@@ -128,6 +128,9 @@ func (source *HTTPApprovalProofSource) Proof(ctx context.Context, requestID uuid
 	if !approvalProofReasonAllowed(proof.CommandType, proof.Verdict, proof.ReasonCode) {
 		return ApprovalProofResult{}, ErrApprovalProofInvalid
 	}
+	if err := requestCtx.Err(); err != nil {
+		return ApprovalProofResult{}, approvalProofNetworkError(err, requestCtx)
+	}
 	result := ApprovalProofResult{Response: proof, Digest: digest}
 	if proof.Verdict == "DENY" {
 		// Preserve only the validated closed response for stable redacted audit.
