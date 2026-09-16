@@ -165,29 +165,24 @@ pub(crate) fn last_round_start(messages: &[Message]) -> usize {
 #[must_use]
 pub(crate) fn last_round_range(messages: &[Message]) -> (usize, usize) {
     let start = last_round_start(messages).min(messages.len());
-    let end = messages[start..]
-        .iter()
-        .position(is_compaction_checkpoint_message)
-        .map_or(messages.len(), |rel| start + rel);
-    (start, end)
+    // An older summary can sit in the middle once later turns are appended.
+    // The whole suffix must remain in the coverage floor; the old summary is
+    // removed when building the replacement, not used as a cut point.
+    (start, messages.len())
 }
 
 /// How many messages of the open round sit in `messages` before a checkpoint.
 #[must_use]
 pub fn last_round_kept_count(messages: &[Message]) -> Option<usize> {
-    let checkpoint = messages
+    messages
         .iter()
-        .rposition(is_compaction_checkpoint_message)?;
-    if checkpoint == 0 {
-        return None;
-    }
-    let start = last_round_start(&messages[..checkpoint]);
-    Some(
-        messages[start..checkpoint]
-            .iter()
-            .filter(|message| is_round_message(message))
-            .count(),
-    )
+        .any(is_compaction_checkpoint_message)
+        .then(|| {
+            last_round_slice(messages)
+                .iter()
+                .filter(|message| is_round_message(message))
+                .count()
+        })
 }
 
 fn last_round_slice(messages: &[Message]) -> &[Message] {
@@ -196,7 +191,11 @@ fn last_round_slice(messages: &[Message]) -> &[Message] {
 }
 
 pub(super) fn bound_last_round(messages: &[Message]) -> Vec<Message> {
-    let mut round = messages.to_vec();
+    let mut round: Vec<_> = messages
+        .iter()
+        .filter(|message| !is_compaction_checkpoint_message(message))
+        .cloned()
+        .collect();
     for message in &mut round {
         for block in &mut message.content {
             if let ContentBlock::ToolResult {
@@ -658,6 +657,45 @@ mod tests {
         let retained = retained_user_messages(&messages, 10_000);
         let texts: Vec<_> = retained.iter().filter_map(user_text_of).collect();
         assert_eq!(texts, ["Run the suite now.", "One more question."]);
+    }
+
+    #[test]
+    fn forkguard_recompaction_keeps_turns_after_the_previous_summary() {
+        let mut messages = vec![
+            msg("user", "Run the suite now."),
+            tool_use("live", "Bash", json!({"command": "cargo test"})),
+            tool_result("live", "ok"),
+            compaction_checkpoint_message(&SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("suite finished", ""),
+            )),
+        ];
+        crate::runtime_handoff::replace_agent_topology_checkpoint(&mut messages, &[]);
+        messages.push(msg("assistant", "The suite passed."));
+        messages.push(msg("user", "Explain the next step."));
+        messages.push(msg("assistant", "Check the release notes."));
+
+        let (start, end) = last_round_range(&messages);
+        assert_eq!((start, end), (0, messages.len()));
+        let next = crate::compaction::build_compaction_summary_block_text("new summary", "");
+        let replacement = build_replacement_history(&messages, &next, None).unwrap();
+        let texts: Vec<_> = replacement.iter().filter_map(user_text_of).collect();
+        assert!(texts.iter().any(|text| text == "Run the suite now."));
+        assert!(texts.iter().any(|text| text == "Explain the next step."));
+        assert!(replacement.iter().any(|message| {
+            assistant_text_of(message).as_deref() == Some("Check the release notes.")
+        }));
+        assert_eq!(
+            replacement
+                .iter()
+                .filter(|message| is_compaction_checkpoint_message(message))
+                .count(),
+            1
+        );
+        let dropped_new_turn: Vec<_> = replacement
+            .into_iter()
+            .filter(|message| user_text_of(message).as_deref() != Some("Explain the next step."))
+            .collect();
+        assert!(validate_last_round_coverage(&messages, &dropped_new_turn).is_err());
     }
 
     #[test]

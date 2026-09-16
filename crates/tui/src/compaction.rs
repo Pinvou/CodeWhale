@@ -310,6 +310,23 @@ pub(crate) fn is_wire_compaction_checkpoint_message(message: &Message) -> bool {
     message.role == Role::User && text.starts_with(SUMMARY_HEADER)
 }
 
+/// Replace the saved history checkpoint with the authoritative carrier while
+/// keeping its position relative to later turns after a session restore.
+pub(crate) fn restore_compaction_checkpoint(
+    mut messages: Vec<Message>,
+    checkpoint: Option<&SystemPrompt>,
+) -> Vec<Message> {
+    let checkpoint_index = messages.iter().position(is_compaction_checkpoint_message);
+    messages.retain(|message| !is_compaction_checkpoint_message(message));
+    if let Some(checkpoint) = checkpoint {
+        let index = checkpoint_index
+            .unwrap_or(messages.len())
+            .min(messages.len());
+        messages.insert(index, compaction_checkpoint_message(checkpoint));
+    }
+    messages
+}
+
 pub(crate) fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usize {
     message
         .content

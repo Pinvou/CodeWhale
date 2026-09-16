@@ -2607,18 +2607,25 @@ fn build_chat_messages_with_reasoning(
     // Compaction persists its summary after the retained round. On strict
     // alternating templates that puts a user message after a tool result
     // (which the template treats as the user's half of the tool exchange).
-    // Move only a trailing summary after a tool result on the wire, ahead of
-    // the retained user prompt. A user pasting a summary header in a normal
-    // chat turn must keep its original position. Saved history and matching
+    // A persisted summary may no longer be the final message once another
+    // turn is appended. Move the latest summary that directly follows a tool
+    // result ahead of its retained prompt on every request, not just the first
+    // request after compaction. Ordinary user text containing the summary
+    // header in a chat turn keeps its original position. Saved history and
     // assistant/tool call IDs stay untouched.
-    let summary_index = messages.len().checked_sub(1).filter(|&index| {
-        crate::compaction::is_wire_compaction_checkpoint_message(&messages[index])
-            && index > 0
-            && messages[index - 1]
-                .content
-                .iter()
-                .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
-    });
+    let summary_index = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            (index > 0
+                && crate::compaction::is_wire_compaction_checkpoint_message(message)
+                && messages[index - 1]
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ToolResult { .. })))
+            .then_some(index)
+        });
     let summary_target = summary_index.and_then(|summary_index| {
         messages[..summary_index]
             .iter()
@@ -2847,13 +2854,15 @@ fn build_chat_messages_with_reasoning(
                     msg["_turn_meta_budget"] = turn_meta_budget_json(turn_meta);
                 }
                 if (Some(message_index) == summary_target
-                    || crate::runtime_handoff::is_agent_topology_checkpoint(message))
+                    || crate::runtime_handoff::is_agent_topology_checkpoint(message)
+                    || crate::runtime_handoff::restored_subagent_checkpoint_display(message)
+                        .is_some())
                     && let Some(previous) = out.last_mut()
                     && previous.get("role").and_then(Value::as_str) == Some("user")
                 {
                     // Merge only this retained prompt with its moved summary,
-                    // or an adjacent topology checkpoint (also in prune-only
-                    // compaction). Other user turns keep their boundaries.
+                    // or an adjacent runtime checkpoint (including restored
+                    // topology). Other user turns keep their boundaries.
                     let previous_content = previous["content"].take();
                     let current_content = msg["content"].take();
                     previous["content"] =
@@ -6470,6 +6479,69 @@ mod image_block_wire_tests {
         assert_eq!(wire[2]["tool_call_id"], "call_1");
         assert_eq!(wire[3]["tool_calls"][0]["id"], "call_2");
         assert_eq!(wire[4]["tool_call_id"], "call_2");
+
+        messages.push(
+            serde_json::from_value(serde_json::json!({
+                "role":"assistant","content":[{"type":"text","text":"Analysis complete"}]
+            }))
+            .unwrap(),
+        );
+        messages.push(
+            serde_json::from_value(serde_json::json!({
+                "role":"user","content":[{"type":"text","text":"What happened next?"}]
+            }))
+            .unwrap(),
+        );
+        let later_wire = build_chat_messages(None, &messages, "gpt-4o");
+        let later_roles: Vec<&str> = later_wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            later_roles,
+            [
+                "user",
+                "assistant",
+                "tool",
+                "assistant",
+                "tool",
+                "assistant",
+                "user"
+            ]
+        );
+        assert!(
+            later_wire[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Compacted summary")
+        );
+        assert_eq!(later_wire[6]["content"], "What happened next?");
+
+        let restored = crate::compaction::restore_compaction_checkpoint(
+            crate::runtime_handoff::project_messages_for_restore(&messages),
+            Some(&crate::models::SystemPrompt::Text(
+                crate::compaction::build_compaction_summary_block_text("Compacted summary", ""),
+            )),
+        );
+        let restored_wire = build_chat_messages(None, &restored, "gpt-4o");
+        let restored_roles: Vec<&str> = restored_wire
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(restored_roles, later_roles);
+        assert!(
+            restored_wire[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Compacted summary")
+        );
+        assert!(
+            restored_wire[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("restored Agent topology checkpoint")
+        );
+        assert_eq!(restored_wire[6]["content"], "What happened next?");
     }
 
     #[test]
