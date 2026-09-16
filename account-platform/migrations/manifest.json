@@ -1174,6 +1174,16 @@
         "file": "000054_approval_command_activations.up.sql",
         "version": 54,
         "sha256": "6d660ce55d77c53ec2bc8450c80244971a0fe276a78d42b0f698442b972e3c4b"
+      },
+      {
+        "file": "000055_approval_proof_claims.down.sql",
+        "version": 55,
+        "sha256": "d2bf8b9a0b02fca8742a39c5ff9ce7e7bcbd140087419a5e2fe7fe7afa27f95c"
+      },
+      {
+        "file": "000055_approval_proof_claims.up.sql",
+        "version": 55,
+        "sha256": "56895411223495aac858a7ae2ae46b54b89fa66aec3aacd4fde6a3bb02eec92d"
       }
     ],
     "payment-simulator": [

@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalencoding"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestBillingWalletApprovalProofPostgresIntegration(t *testing.T) {
@@ -63,5 +65,31 @@ func TestBillingWalletApprovalProofPostgresIntegration(t *testing.T) {
 	var version int64
 	if err := repository.pool.QueryRow(ctx, `SELECT status,version FROM manual_adjustments WHERE id=$1`, adjustment.ID).Scan(&status, &version); err != nil || status != "PENDING_APPROVAL" || version != adjustment.Version {
 		t.Fatalf("read-only proof changed adjustment status=%s version=%d err=%v", status, version, err)
+	}
+	connection, err := repository.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Release()
+	if _, err := connection.Exec(ctx, `SET ROLE billing_service`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = connection.Exec(context.Background(), `RESET ROLE`) }()
+	if _, err := connection.Exec(ctx, `INSERT INTO billing_approval_proof_claims(approval_request_id,authorization_event_id,command_type,command_digest,snapshot_digest,domain_revision,approval_epoch) VALUES($1,$2,'WALLET_ADJUSTMENT',$3,$4,$5,2)`, request.ApprovalRequestID, uuid.New(), artifacts.CommandDigest, artifacts.SnapshotDigest, allow.DomainRevision); err != nil {
+		t.Fatalf("runtime cannot create an immutable proof claim: %v", err)
+	}
+	for _, test := range []struct {
+		statement string
+		arguments []any
+	}{
+		{`UPDATE billing_approval_proof_claims SET domain_revision=$2 WHERE approval_request_id=$1`, []any{request.ApprovalRequestID, deny.DomainRevision}},
+		{`DELETE FROM billing_approval_proof_claims WHERE approval_request_id=$1`, []any{request.ApprovalRequestID}},
+		{`TRUNCATE billing_approval_proof_claims`, nil},
+	} {
+		_, err := connection.Exec(ctx, test.statement, test.arguments...)
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || (pgErr.Code != "42501" && pgErr.Code != "55000") {
+			t.Fatalf("runtime modified immutable proof claim with %q: %v", test.statement, err)
+		}
 	}
 }

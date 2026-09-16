@@ -47,10 +47,10 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded) == 0 || loaded[len(loaded)-1].Version != 54 {
+	if len(loaded) < 2 || loaded[len(loaded)-2].Version != 54 || loaded[len(loaded)-1].Version != 55 {
 		t.Fatal("integration fixture must explicitly isolate migration 54 from future migrations")
 	}
-	if err := migrations.Up(ctx, connection, loaded[:len(loaded)-1]); err != nil {
+	if err := migrations.Up(ctx, connection, loaded[:len(loaded)-2]); err != nil {
 		t.Fatal(err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -74,9 +74,9 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 	// Only rewrite this test's schema, preserving the production SET ROLE flow.
 	// The generic bootstrap fixture's RESET ROLE would instead reset a
 	// NOINHERIT migrator before its ledger append and is not production SQL.
-	loaded[len(loaded)-1].UpSQL = rewriteBillingPublicSchema(production[len(production)-1].UpSQL, identifier)
-	digest := sha256.Sum256([]byte(strings.ReplaceAll(loaded[len(loaded)-1].UpSQL, "\r\n", "\n")))
-	loaded[len(loaded)-1].Checksum = hex.EncodeToString(digest[:])
+	loaded[len(loaded)-2].UpSQL = rewriteBillingPublicSchema(production[len(production)-2].UpSQL, identifier)
+	digest := sha256.Sum256([]byte(strings.ReplaceAll(loaded[len(loaded)-2].UpSQL, "\r\n", "\n")))
+	loaded[len(loaded)-2].Checksum = hex.EncodeToString(digest[:])
 	if _, err := connection.Exec(ctx, `SET SESSION AUTHORIZATION billing_migrator; SET ROLE billing_service`); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 	if err := connection.QueryRow(ctx, `SELECT session_user,current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=session_user)`).Scan(&sessionRole, &currentRole, &superuser); err != nil || sessionRole != "billing_migrator" || currentRole != "billing_service" || superuser {
 		t.Fatal("migration did not execute as the non-superuser deployment identity")
 	}
-	if err := migrations.Up(ctx, connection, loaded); err != nil {
+	if err := migrations.Up(ctx, connection, loaded[:len(loaded)-1]); err != nil {
 		t.Fatalf("non-superuser activation migration: %v", err)
 	}
 	migrations.Unlock(ctx, connection)
@@ -167,7 +167,7 @@ func TestBillingApprovalCommandActivationsPostgresIntegration(t *testing.T) {
 			_, err := runtime.Exec(ctx, statement)
 			requireActivationSQLState(t, err, "42501")
 		}
-		if _, err := runtime.Exec(ctx, loaded[len(loaded)-1].UpSQL); err == nil {
+		if _, err := runtime.Exec(ctx, loaded[len(loaded)-2].UpSQL); err == nil {
 			t.Fatal("runtime session executed a deployment migration")
 		} else {
 			requireActivationSQLState(t, err, "P0001")

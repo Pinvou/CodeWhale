@@ -16,12 +16,18 @@ func loadBillingIntegrationMigrations(directory, schema string) ([]migrations.Mi
 	}
 	qualified := pgx.Identifier{schema}.Sanitize()
 	for index := range loaded {
-		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 {
+		if loaded[index].Version != 43 && loaded[index].Version != 53 && loaded[index].Version != 54 && loaded[index].Version != 55 {
 			continue
 		}
 		loaded[index].UpSQL = rewriteBillingPublicSchema(loaded[index].UpSQL, qualified)
 		if loaded[index].Version == 53 || loaded[index].Version == 54 {
 			loaded[index].UpSQL = "ALTER SCHEMA " + qualified + " OWNER TO billing_schema_owner;\n" + loaded[index].UpSQL + "\nRESET ROLE;"
+		}
+		if loaded[index].Version == 54 {
+			loaded[index].UpSQL = "GRANT USAGE ON SCHEMA " + qualified + " TO billing_service;\n" + loaded[index].UpSQL
+		}
+		if loaded[index].Version == 55 {
+			loaded[index].UpSQL += "\nRESET ROLE;"
 		}
 		loaded[index].DownSQL = rewriteBillingPublicSchema(loaded[index].DownSQL, qualified)
 		normalized := strings.ReplaceAll(strings.ReplaceAll(loaded[index].UpSQL, "\r\n", "\n"), "\r", "\n")
