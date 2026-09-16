@@ -44,9 +44,18 @@ type ApprovalV2Requester struct {
 
 type ApprovalV2Detail struct {
 	ApprovalV2Summary
-	AllowedActions       []string `json:"allowed_actions"`
-	ActionControlVersion int64    `json:"action_control_version"`
-	Command              any      `json:"command"`
+	AllowedActions       []string             `json:"allowed_actions"`
+	ActionControlVersion int64                `json:"action_control_version"`
+	Command              any                  `json:"command"`
+	Execution            *ApprovalV2Execution `json:"execution"`
+}
+
+type ApprovalV2Execution struct {
+	AttemptStatus     string     `json:"attempt_status"`
+	ErrorClass        *string    `json:"error_class"`
+	Retryable         bool       `json:"retryable"`
+	NextRetryAt       *time.Time `json:"next_retry_at"`
+	ExecutionDeadline *time.Time `json:"execution_deadline"`
 }
 
 // Each variant has a distinct closed JSON shape. Never pass arbitrary

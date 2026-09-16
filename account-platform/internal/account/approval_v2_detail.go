@@ -74,5 +74,41 @@ func (r *PostgresRepository) ApprovalRequestV2(ctx context.Context, principal id
 		summary.DetailAvailability = "DETAIL_PRESENTATION_UNAVAILABLE"
 		return summary, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	detail.Execution, err = r.approvalV2Execution(ctx, item)
+	if err != nil {
+		return nil, err
+	}
 	return detail, err
+}
+
+func (r *PostgresRepository) approvalV2Execution(ctx context.Context, item ApprovalRequest) (*ApprovalV2Execution, error) {
+	var version int64
+	var status, failure *string
+	err := r.pool.QueryRow(ctx, `SELECT ar.version,e.status,e.error_class
+FROM approval_requests ar LEFT JOIN approval_executions e ON e.approval_request_id=ar.id
+WHERE ar.id=$1`, item.ID).Scan(&version, &status, &failure)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrApprovalRequestNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if version != item.Version {
+		return nil, ErrConflict
+	}
+	if status == nil {
+		return nil, nil
+	}
+	// Automatic recovery is not implemented until GSA-16. Never infer a
+	// retryable action or schedule from an execution error or raw result.
+	projection := &ApprovalV2Execution{AttemptStatus: *status, Retryable: false,
+		ExecutionDeadline: item.ExecutionDeadline}
+	if *status == "FAILED" {
+		code := "EXECUTION_FAILED"
+		projection.ErrorClass = &code
+	}
+	return projection, nil
 }

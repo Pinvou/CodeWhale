@@ -5335,7 +5335,7 @@ components:
     ApprovalV2KnownDetail:
       type: object
       additionalProperties: false
-      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability, allowed_actions, action_control_version, command]
+      required: [approval_request_id, command_type, policy_version, snapshot_schema_version, risk_class, target, requester, status, submitted_at, expires_at, updated_at, supersedes_request_id, detail_availability, allowed_actions, action_control_version, command, execution]
       properties:
         approval_request_id: { type: string, format: uuid }
         command_type: { type: string }
@@ -5353,6 +5353,10 @@ components:
         allowed_actions: { type: array, items: { type: string, enum: [EDIT, SUBMIT, WITHDRAW, APPROVE, REJECT] } }
         action_control_version: { type: integer, format: int64, minimum: 1 }
         command: { type: object }
+        execution:
+          oneOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/ApprovalV2Execution" }
       oneOf:
         - properties: { command_type: { const: WALLET_ADJUSTMENT }, policy_version: { const: 1 }, snapshot_schema_version: { const: 1 }, command: { $ref: "#/components/schemas/ApprovalV2WalletCommand" } }
         - properties: { command_type: { const: PAYMENT_PROVIDER_RESUME }, policy_version: { const: 2 }, snapshot_schema_version: { const: 1 }, command: { $ref: "#/components/schemas/ApprovalV2ProviderCommand" } }
@@ -5403,6 +5407,16 @@ components:
       properties:
         credential_id: { type: string, format: uuid }
         token_account_id: { type: string, format: uuid }
+    ApprovalV2Execution:
+      type: object
+      additionalProperties: false
+      required: [attempt_status, error_class, retryable, next_retry_at, execution_deadline]
+      properties:
+        attempt_status: { type: string, enum: [EXECUTING, EXECUTED, FAILED] }
+        error_class: { type: [string, "null"], enum: [EXECUTION_FAILED, null] }
+        retryable: { type: boolean, enum: [false] }
+        next_retry_at: { type: "null" }
+        execution_deadline: { type: [string, "null"], format: date-time }
     ApprovalDirectoryProjection:
       type: object
       additionalProperties: false

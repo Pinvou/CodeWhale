@@ -46,7 +46,7 @@ test('closed v2 detail schema accepts six presenters but rejects raw or mismatch
   const base = { approval_request_id: id, risk_class: 'HIGH', target: { resource_type: 'MODEL', resource_id: id },
     requester: { user_id: id }, status: 'SUBMITTED', submitted_at: null, expires_at: '2026-09-16T12:00:00Z',
     updated_at: '2026-09-16T11:00:00Z', supersedes_request_id: null, detail_availability: 'AVAILABLE',
-    allowed_actions: ['APPROVE'], action_control_version: 1 };
+    allowed_actions: ['APPROVE'], action_control_version: 1, execution: null };
   const cases = [
     ['WALLET_ADJUSTMENT', 1, 1, { adjustment_id: id, wallet_id: id, amount_microcredits: '123' }],
     ['PAYMENT_PROVIDER_RESUME', 2, 1, { provider_id: 'provider-main', provider_control_version: '1' }],
@@ -61,5 +61,7 @@ test('closed v2 detail schema accepts six presenters but rejects raw or mismatch
     assert.equal(valid({ ...response, normalized_command: { secret: 'no' } }), false, command_type);
     assert.equal(valid({ ...response, command: { ...command, secret: 'no' } }), false, command_type);
     assert.equal(valid({ ...response, policy_version: policy_version + 1 }), false, command_type);
+	assert.equal(valid({ ...response, execution: { attempt_status: 'FAILED', error_class: 'EXECUTION_FAILED', retryable: false, next_retry_at: null, execution_deadline: null } }), true, command_type);
+	assert.equal(valid({ ...response, execution: { attempt_status: 'FAILED', error_class: 'raw-provider-failure', retryable: true, next_retry_at: null, execution_deadline: null } }), false, command_type);
   }
 });
