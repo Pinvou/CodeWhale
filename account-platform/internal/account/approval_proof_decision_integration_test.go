@@ -26,6 +26,18 @@ func TestApprovalProofDecisionPostgresIntegration(t *testing.T) {
 	defer cancel()
 	request := seedSubmittedApprovalForAuthorization(t, db, "WALLET_ADJUSTMENT")
 	approver := seedTokenOwnerCandidateActor(t, ctx, db.adminPool, "PLATFORM_SUPER_ADMIN", "proof-decision-"+uuid.NewString())
+	principal := approvalIntegrationPrincipal(approver)
+	legacyService := &Service{repository: &PostgresRepository{pool: db.runtimePool, now: func() time.Time { return time.Now().UTC() }}}
+	legacyPath := "/admin/v2/approval-requests/" + request.ID.String() + "/actions/decide"
+	legacyV2 := performApprovalIntegrationRequest(t, legacyService.adminDecideApprovalRequestV2, principal, http.MethodPost, legacyPath, request.ID.String(),
+		map[string]any{"expected_version": request.Version, "decision": "APPROVED", "reason": "no legacy observed versions"})
+	if legacyV2.Code != http.StatusServiceUnavailable || !strings.Contains(legacyV2.Body.String(), "APPROVAL_PROOF_UNAVAILABLE") {
+		t.Fatalf("v2 approval entered legacy writer without observed versions: %d %s", legacyV2.Code, legacyV2.Body.String())
+	}
+	var legacyStatus string
+	if err := db.adminPool.QueryRow(ctx, `SELECT status FROM approval_requests WHERE id=$1`, request.ID).Scan(&legacyStatus); err != nil || legacyStatus != "SUBMITTED" {
+		t.Fatalf("v2 legacy approval changed request: %s %v", legacyStatus, err)
+	}
 	for _, statement := range []string{
 		`UPDATE account_approval_control.admin_approval_control SET mode='QUIESCING',approval_epoch=approval_epoch+1,version=version+1,updated_at=now()`,
 		`UPDATE account_approval_control.admin_approval_control SET authorization_relay_state='FENCED',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now()`,
@@ -38,7 +50,6 @@ func TestApprovalProofDecisionPostgresIntegration(t *testing.T) {
 	}
 	repository := (&PostgresRepository{pool: db.runtimePool, approvalWriterPool: db.writerPool, now: func() time.Time { return time.Now().UTC() }}).
 		WithBillingGovernanceActivation(&billingAdvancementReader{snapshot: billingAdvancementSnapshot("ACTIVE")})
-	principal := approvalIntegrationPrincipal(approver)
 	if _, err := repository.DecideApprovalRequest(ctx, principal, request.ID, request.Version, "APPROVED", "independent proof", nil); !errors.Is(err, ErrApprovalProofUnavailable) {
 		t.Fatalf("unconfigured domain proof must fail closed: %v", err)
 	}

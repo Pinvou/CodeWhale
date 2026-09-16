@@ -345,6 +345,31 @@ func (s *Service) adminDecideApprovalRequestV2(w http.ResponseWriter, r *http.Re
 		api.WriteError(w, http.StatusBadRequest, "INVALID_APPROVAL_DECISION", "invalid approval decision", httpserver.RequestID(r.Context()))
 		return
 	}
+	if decision.Decision == "APPROVED" {
+		// A v2 body intentionally has no observed_versions. Do not let it
+		// enter the legacy comparison, where nil would invalidate a request.
+		// Check visibility before reading the gate, as for all decision reads.
+		if _, err := repository.ApprovalRequest(r.Context(), mustPrincipal(r.Context()), requestID); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		gate, ok := s.repository.(interface {
+			ApprovalActionControl(context.Context) (AdminApprovalControl, error)
+		})
+		if !ok {
+			s.writeError(w, r, ErrApprovalProofUnavailable)
+			return
+		}
+		control, err := gate.ApprovalActionControl(r.Context())
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+		if control.Mode != AdminApprovalModeProofRequired {
+			s.writeError(w, r, ErrApprovalProofUnavailable)
+			return
+		}
+	}
 	if _, err := repository.DecideApprovalRequest(r.Context(), mustPrincipal(r.Context()), requestID, decision.ExpectedVersion, decision.Decision, decision.Reason, nil); err != nil {
 		s.writeError(w, r, err)
 		return
