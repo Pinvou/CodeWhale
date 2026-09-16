@@ -142,6 +142,14 @@ export class EndpointInteractionSlots {
     this.compareAndSwap(endpointId, current.revision, null);
     return true;
   }
+
+  releaseController({ endpointId, controllerLeaseId } = {}) {
+    const current = this.read(endpointId);
+    if (current.owner?.kind !== "controller_lease"
+      || current.owner.owner_id !== controllerLeaseId) return false;
+    this.compareAndSwap(endpointId, current.revision, null);
+    return true;
+  }
 }
 
 export class ControllerReservationManager {
@@ -320,6 +328,27 @@ export class ControllerReservationManager {
     try { return await operation; } finally { this.#releases.delete(reservation.reservation_id); }
   }
 
+  promoteToLease({ reservationId, socketIdentity, controllerLeaseId } = {}) {
+    const reservation = this.#owned(reservationId, socketIdentity);
+    controllerLeaseId = identifier(controllerLeaseId, "controller_lease_id");
+    if (reservation.state !== "handshake_pending") fail("reservation_state_invalid");
+    if (this.#now() >= Number(reservation.handshake_deadline_ms)) fail("reservation_expired");
+    const slot = this.#slots.read(reservation.endpoint_id);
+    if (slot.owner?.kind !== "desktop_reservation"
+      || slot.owner.owner_id !== reservation.reservation_id) {
+      fail("reservation_slot_lost");
+    }
+    this.#slots.compareAndSwap(reservation.endpoint_id, slot.revision, {
+      kind: "controller_lease", owner_id: controllerLeaseId,
+    });
+    this.#reservations.delete(reservation.reservation_id);
+    this.#requests.delete(reservation.request_id);
+    this.#emit("reservation_promoted");
+    return Object.freeze({
+      ...reservation, state: "controller_connected", controller_lease_id: controllerLeaseId,
+    });
+  }
+
   async #invalidate(reservation) {
     try {
       await this.#pairings.terminate({ pairingId: reservation.pairing_id });
@@ -384,4 +413,5 @@ export class ControllerReservationManager {
 
   acquireWeb(input) { return this.#slots.acquireWeb(input); }
   releaseWeb(input) { return this.#slots.releaseWeb(input); }
+  releaseControllerLease(input) { return this.#slots.releaseController(input); }
 }

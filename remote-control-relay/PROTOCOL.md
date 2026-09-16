@@ -358,6 +358,37 @@ raw pairing code and emits only fixed audit event names. The notification
 receives the pairing, endpoint and generation bindings needed to reject a stale
 refresh result.
 
+DEV-06 composes this authority into the live dispatcher only when
+`PINVOU_DESKTOP_CONTROLLER_ENABLED=1`. Startup then fails closed unless the
+independent pairing digest key and a canonical Ed25519 PKCS#8 signing key are
+present alongside the enrollment configuration. Controller v1 and legacy Web
+v2 share the same endpoint interaction slot, while their wire versions remain
+strictly separate; disabling the controller leaves the v2 rejection and
+takeover behavior unchanged.
+
+The Relay signs the canonical transcript after resolving an online enrolled B
+socket and immediately moves the reservation into its separate 20-second
+handshake window. It forwards commitments and encrypted Finished frames without
+decrypting them. Because v1 intentionally defines no second commitment-ACK
+shape, Relay confirmation is the byte-equivalent validated commitment echoed to
+its sender while the same envelope is forwarded to the peer. A receipt is accepted only from the opposite authenticated
+socket after that sender's commitment and Finished; the decoded 32-byte secret
+is zeroed immediately after constant-time commitment verification. Only both
+opposite receipts invoke PairingStore's revision-CAS consumption. Exactly one
+consumer durably terminates the pairing before the in-process lease is exposed;
+a crash or injected failure can therefore lose an unannounced lease but can
+never revive its one-shot pairing or expose a half-created lease.
+
+The resulting lease binds the connection, lease ID/epoch, Relay epoch,
+endpoint/generation, claim identity, transcript hash, exact negotiated
+capabilities and both authenticated sockets. A and B receive different random
+resume tokens and liveness epochs; Relay retains only role-separated token
+digests bound to role, Relay epoch, connection, lease ID/epoch and generation.
+Any ordering, binding, role, socket, receipt, persistence or delivery
+failure terminates the pairing, releases the shared slot and asks the still
+connected B to register a replacement code. Business frames and resume remain
+closed until their owning tasks install the frozen router hooks.
+
 `controller_joined` is the sole `lease_install_messages` entry and never
 requires a pre-existing lease. It is not accepted by the general runtime
 validator. DEV-00 parses the complete raw `controller_pairing_reserved`

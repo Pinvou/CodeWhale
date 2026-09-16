@@ -333,6 +333,95 @@ export class PairingStore {
     fail("pairing_revision_conflict");
   }
 
+  async consumeForControllerLease({
+    pairingId, endpointId, remoteControlGeneration, reservationId, controllerLeaseId,
+  } = {}) {
+    pairingId = id(pairingId, "pairing_id");
+    endpointId = id(endpointId, "endpoint_id");
+    remoteControlGeneration = id(remoteControlGeneration, "remote_control_generation");
+    reservationId = id(reservationId, "reservation_id");
+    controllerLeaseId = id(controllerLeaseId, "controller_lease_id");
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const snapshot = this.#read();
+      const index = snapshot.state.tombstones.findIndex((row) => row.pairing_id === pairingId);
+      const registration = snapshot.state.registrations.find((row) => row.pairing_id === pairingId);
+      if (index < 0 || !registration || snapshot.state.tombstones[index].terminal_at_ms !== null) {
+        fail("pairing_not_active");
+      }
+      if (registration.endpoint_id !== endpointId
+        || registration.remote_control_generation !== remoteControlGeneration) {
+        fail("pairing_binding_mismatch");
+      }
+      const current = snapshot.state.tombstones[index];
+      const now = this.#clock();
+      if (!Number.isSafeInteger(now) || now < Number(current.issued_at_ms)
+        || now >= Number(current.expires_at_ms)) fail("pairing_not_active");
+      const terminal = {
+        ...current,
+        terminal_at_ms: String(now),
+        reuse_after_ms: String(Math.max(
+          Number(current.reuse_after_ms), now + PAIRING_CODE_TERMINAL_QUARANTINE_MS,
+        )),
+      };
+      const tombstones = [...snapshot.state.tombstones];
+      tombstones[index] = terminal;
+      try {
+        await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, {
+          ...snapshot.state, tombstones,
+        });
+        this.#active.delete(pairingId);
+        return Object.freeze({
+          pairing_id: pairingId,
+          endpoint_id: endpointId,
+          remote_control_generation: remoteControlGeneration,
+          reservation_id: reservationId,
+          controller_lease_id: controllerLeaseId,
+          consumed_at_ms: String(now),
+        });
+      } catch (error) {
+        if (error?.code === "namespace_revision_conflict") continue;
+        fail("pairing_persist_failed", error);
+      }
+    }
+    fail("pairing_revision_conflict");
+  }
+
+  async invalidateForRelayRestart() {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const snapshot = this.#read();
+      const now = this.#clock();
+      if (!Number.isSafeInteger(now) || now < 0) fail("pairing_clock_invalid");
+      let invalidated = 0;
+      const tombstones = snapshot.state.tombstones.map((row) => {
+        if (row.terminal_at_ms !== null || Number(row.expires_at_ms) <= now) return row;
+        invalidated += 1;
+        const terminalAt = Math.max(now, Number(row.issued_at_ms));
+        return {
+          ...row,
+          terminal_at_ms: String(terminalAt),
+          reuse_after_ms: String(Math.max(
+            Number(row.reuse_after_ms), terminalAt + PAIRING_CODE_TERMINAL_QUARANTINE_MS,
+          )),
+        };
+      });
+      if (invalidated === 0) {
+        this.#active.clear();
+        return 0;
+      }
+      try {
+        await this.#store.compareAndSwap(PAIRING_NAMESPACE, snapshot.revision, {
+          ...snapshot.state, tombstones,
+        });
+        this.#active.clear();
+        return invalidated;
+      } catch (error) {
+        if (error?.code === "namespace_revision_conflict") continue;
+        fail("pairing_persist_failed", error);
+      }
+    }
+    fail("pairing_revision_conflict");
+  }
+
   async register({ request, relayEpoch, sealCode } = {}) {
     if (!request || typeof request !== "object" || typeof sealCode !== "function") fail("pairing_registration_invalid");
     const registrationId = id(request.registration_request_id, "registration_request_id");
@@ -345,6 +434,9 @@ export class PairingStore {
       const snapshot = this.#read();
       const known = snapshot.state.registrations.find((row) => row.registration_request_id === registrationId);
       if (known) {
+        if (known.outcome.relay_epoch !== undefined && known.outcome.relay_epoch !== relayEpoch) {
+          fail("pairing_registration_stale_relay_epoch");
+        }
         const knownKey = this.#keyring.keys.get(known.parameter_key_id);
         const knownHash = digest(knownKey, "pinvou-pairing-registration-v1\0", parameters);
         if (!crypto.timingSafeEqual(Buffer.from(known.parameter_digest_hex, "hex"), Buffer.from(knownHash, "hex"))) {
