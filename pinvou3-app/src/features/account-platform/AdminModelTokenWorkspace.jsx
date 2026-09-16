@@ -10,7 +10,8 @@ import { AdminModelDetailWorkspace } from './AdminModelDetailWorkspace.jsx';
 import { AdminTokenAccountDetailWorkspace } from './AdminTokenAccountDetailWorkspace.jsx';
 import { FilterForm, Pagination, SourceFeedback, SourceHeader, Status, useAdminSource } from './AdminModelTokenPrimitives.jsx';
 import { AdminHighRiskActionDialog } from './AdminHighRiskActionDialog.jsx';
-import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact, validApprovalRequest } from './admin-high-risk-action-state.js';
+import { governedTokenEnvelope, requireGovernedTokenCommandResult, requireGovernedTokenPrecheck, requireTokenApprovalImpact } from './admin-high-risk-action-state.js';
+import { createAndSubmitGovernedApproval, recoverGovernedApproval } from './admin-governed-approval-workflow.js';
 
 function tokenApprovalDraft(commandType, targetResourceType, targetResourceID, reason, impact, idempotencyKey, normalizedCommand) {
   return {
@@ -24,24 +25,11 @@ function tokenApprovalDraft(commandType, targetResourceType, targetResourceID, r
 }
 
 async function createAndSubmitTokenApproval(client, draft, signal) {
-  const created = await client.createApprovalDraft(draft, signal);
-  if (!validApprovalRequest(created, draft, ['DRAFT'])) throw Object.assign(new Error('invalid approval draft response'), { code: 'INVALID_APPROVAL_RESPONSE' });
-  try {
-    const submitted = await client.submitApprovalRequest(created.approval_request_id, created.version, signal);
-    if (!validApprovalRequest(submitted, draft, ['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'])) throw Object.assign(new Error('invalid approval submit response'), { code: 'INVALID_APPROVAL_RESPONSE' });
-    return submitted;
-  } catch (error) {
-    throw Object.assign(error instanceof Error ? error : new Error('approval submit failed'), { commandReference: created.approval_request_id });
-  }
+  return createAndSubmitGovernedApproval(client, draft, signal);
 }
 
 async function recoverTokenApproval(client, reference, draft, signal) {
-  const value = await client.approvalRequest(reference, signal);
-  const statuses = ['DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED', 'WITHDRAWN', 'EXPIRED', 'INVALIDATED', 'EXECUTING', 'EXECUTED', 'EXECUTION_FAILED'];
-  if (!validApprovalRequest(value, draft, statuses)) throw Object.assign(new Error('invalid approval recovery response'), { code: 'INVALID_APPROVAL_RESPONSE', commandReference: reference });
-  if (['SUBMITTED', 'APPROVED', 'EXECUTING', 'EXECUTED'].includes(value.status)) return value;
-  if (value.status === 'DRAFT') throw Object.assign(new Error('approval submission outcome remains unknown'), { status: 202, code: 'COMMAND_RESULT_UNKNOWN', commandReference: reference });
-  throw Object.assign(new Error('approval reached a terminal non-success state'), { code: `APPROVAL_${value.status}`, commandReference: reference, finalResult: true });
+  return recoverGovernedApproval(client, reference, draft, signal);
 }
 
 function ModelDirectory({ client, copy, permissions, actionsEnabled, detailsEnabled, routeVersion, onQueryChange, onOpenDetail, onNavigate, cursorHistory }) {
