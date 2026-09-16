@@ -3,7 +3,7 @@
 GSA-07 发布约束入口：[审批授权 Relay 手册](../deploy/runbooks/approval-authorization-relay.md)。该手册不构成代码审核通过、环境验收或部署完成证据。
 
 > 需求基线：`e15fe698`，身份 B 最终需求审核 PASS。
-> 本任务拆分的既有A/B审核历史保留；2026-09-16起由单角色执行逐次修改、Signed-off提交、提交级自审与独立修订提交。GSA-01～07既有状态与环境欠账不变；GSA-08～11均为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，其中GSA-11提交链为`ba1b47ac`、`8126615a`、`e8293602`、`fe7219de`。GSA-12起其余任务PENDING；真实Q捕获、生产资源、activation与部署仍归GSA-38～40。
+> 本任务拆分的既有A/B审核历史保留；2026-09-16起由单角色执行逐次修改、Signed-off提交、提交级自审与独立修订提交。GSA-01～07既有状态与环境欠账不变；GSA-08～12均为IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED，其中GSA-11提交链为`ba1b47ac`、`8126615a`、`e8293602`、`fe7219de`，GSA-12提交链和适用门禁见下文。GSA-13起其余任务PENDING；真实Q捕获、生产资源、activation与部署仍归GSA-38～40。
 
 ## 1. 所有权与执行规则
 
@@ -34,7 +34,7 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 | GSA-09 | APT-141 | 历史审批 reconciler、exclusion 与 SAFE 收敛 | GSA-08 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-10 | APT-141 | 安全命令目录、历史可见集合及无泄露读取 | GSA-03, GSA-04 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-11 | APT-141 | 有界 Account membership snapshot/cursor | GSA-10 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
-| GSA-12 | APT-141 | v2 最小列表、统计与六命令 closed detail | GSA-11 | CODE | PENDING |
+| GSA-12 | APT-141 | v2 最小列表、统计与六命令 closed detail | GSA-11 | CODE | IN_PROGRESS / CODE_COMPLETE / SELF_REVIEW_PASS / DEPENDENCY_ENV_PENDING / NOT_DEPLOYED |
 | GSA-13 | APT-141 | Account proof 客户端、批准检查点与版本化动作 | GSA-04, GSA-05, GSA-12 | CODE | PENDING |
 | GSA-14 | APT-141 | Token 三命令 proof 及执行时 revision/epoch 检查 | GSA-13 | CODE | PENDING |
 | GSA-15 | APT-141 | Billing 三命令 proof 及执行时 revision 检查 | GSA-13, GSA-14 | CODE | PENDING |
@@ -83,6 +83,10 @@ DESIGN 指事实追踪或领域设计：完成代码依据、版本/schema、不
 - **10**：安全目录仅 visible/requestable；本人历史及当前授权可见集合；不可见与不存在的 detail/子资源统一无泄露404。撤权先于 presenter/领域调用，内部 policy API 不暴露给无对应权限浏览器。
 - **11**：设计 §6 的 envelope、排序/主体/scope/key 绑定、容量/限流/TTL/tombstone/deadline/清理；复用有界模式且不改变 Billing/Token 现有默认与错误合同。真实 PG 并发分页无重复遗漏、撤权/密钥轮换/过期、限流及容量；生产规模性能留39。
 - **12**：六命令 oneOf presenters、未知历史安全最小 envelope、聚合权限/分母、v1原合同与v2最小列表。schema验证和真实handler响应测试，禁止原始JSON fallback。
+
+GSA-12 本地代码交付（2026-09-16）：`ca4cb57b`→`95ca7d5b`→`2003e241`→`5b656a23`→`50781d40`→`4f600d76`→`011051c2`→`7c8578f2`→`366bcb89`→`3acab9e9`→`6d11e833`→`be87e740`→`26872f62`→`0c7e40d2`→`fdd8bbc7`。各提交均独立Signed-off、自审；修订处理历史目标泄露、build/read超时、v1动作头缺失、hard-disable优先级、授权路由计数及execution命令关联。Account v2 GET列表使用GSA-11签名快照，只二次读取封闭展示列并重验当前权限与版本，任何成员缺失整页410；v2详情使用六命令typed closed legacy→proof输入验证并只选白名单字段，畸形/未知历史返回最小envelope，不回落原JSON。v1 body保留既有字段、成功详情附控制版本头；v1/v2动作随唯一控制行过滤，均no-store。执行状态只返回状态/泛化错误/窗口，自动retryable=false、next_retry_at=null直到GSA-16，不暴露原始领域结果、job ID或堆栈。顶部统计未实现独立授权聚合，因此两条v2读取接口均**不**返回总数，也不将本页条数作为总量。
+
+验证：六命令共享golden、OpenAPI六分支oneOf拒绝错版本/额外字段、真实Account PG的冻结翻页/撤权游标/不可见与不存在404/v1版本头/有效Wallet handler脱敏详情及异常execution DB拒绝通过；`node scripts/account-platform.mjs verify`在授权计数修订后exit 0，Node 588项586 PASS/0 FAIL/2既有环境SKIP，Go全包test/vet、OpenAPI（9既有warning）、i18n、observability及architecture通过。随后新增最小execution状态及真实PG handler验证的增量定向测试通过；最终完整verify仍须在此末批变更后复跑。分页默认hard-disabled，只有配置有效签名密钥且DB创建gate显式开启才接受首屏；不在本任务投放生产密钥、打开gate、提供聚合统计或v2决定写入口。GSA-04 Linux三项及GSA-39生产性能/N-N-1仍待验，故不标DONE/部署。
 - **13**：设计 §8 的 proof_input 映射、2秒/64KiB/60秒/时钟边界、内部身份、白名单错误和 request/proof 绑定；本域 CAS、远端调用不持锁、REJECT 零领域调用。v1/v2批准共享 proof gate，legacy observed_versions 兼容准确；未就绪保持gate关闭。
 - **14**：三 Token proof、既有 activation/epoch、领域 revision 副作用前检查，Token三命令15分钟认证先于领域调用；漂移/SAFE/重复/响应丢失及三个命令真实跨域E2E。
 - **15**：Wallet与Provider/Product三命令proof及领域执行重验，Wallet不新增近期认证；支付恢复沿用15分钟且只读持久 observation/resume_draft，所有浏览器批准链零Provider主动探测。真实三命令成功、漂移、依赖不可用和结果不明测试。
