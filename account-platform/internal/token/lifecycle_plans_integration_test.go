@@ -164,6 +164,26 @@ func TestModelLifecyclePlansPostgresIntegration(t *testing.T) {
 	if err := service.tokenExecutionProof(ctx, "TOKEN_MODEL_LIFECYCLE_CHANGE", planBody, tokenRouteActivationSelection{TokenCommandGovernanceActivation: activation, transactional: true}); err != nil {
 		t.Fatalf("real lifecycle execution proof=%v", err)
 	}
+	immediateCommand := mustMarshalJSON(t, map[string]any{
+		"model_id": modelID, "target_lifecycle": plan.TargetLifecycle, "effective_at": plan.EffectiveAt,
+		"existing_session_cutoff_at": nil, "replacement_model_id": nil,
+	})
+	immediateProjection, err := service.approvalCommandPrecheck(ctx, ApprovalSnapshotRequest{CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", TargetResourceType: "MODEL", TargetResourceID: modelID.String(), NormalizedCommand: immediateCommand})
+	if err != nil {
+		t.Fatal(err)
+	}
+	immediateArtifacts, err := approvalencoding.ConvertLegacyProofInput(approvalencoding.LegacyProofInput{
+		CommandType: "TOKEN_MODEL_LIFECYCLE_CHANGE", PolicyVersion: 2, SnapshotSchemaVersion: 2,
+		TargetResourceType: "MODEL", TargetResourceID: modelID.String(), NormalizedCommand: immediateCommand,
+		CriticalResourceVersions: immediateProjection.CriticalResourceVersions, FinancialSnapshot: immediateProjection.FinancialSnapshot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	immediateProof, err := service.tokenApprovalProof(ctx, approvalencoding.ProofRequest{ApprovalRequestID: uuid.New(), Artifacts: immediateArtifacts})
+	if err != nil || immediateProof.Verdict != "DENY" || immediateProof.ReasonCode != "DOMAIN_INVARIANT_FAILED" {
+		t.Fatalf("historical immediate plan proof=%+v err=%v", immediateProof, err)
+	}
 	if _, err := repository.pool.Exec(ctx, `UPDATE model_lifecycle_plans SET effective_at=effective_at+interval '1 minute' WHERE id=$1`, plan.ID); err == nil {
 		t.Fatal("immutable lifecycle plan definition was mutated")
 	}

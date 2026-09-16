@@ -108,12 +108,12 @@ func (s *Service) tokenApprovalProof(ctx context.Context, request approvalencodi
 	// billing_as_of is observation metadata and advances on every independent
 	// Billing read. It is frozen in the original proof digest, but a new read
 	// must compare the price facts rather than falsely deny elapsed time.
-	if !tokenProofSnapshotMatches(artifacts.CommandType, input, current) {
-		response.Verdict, response.ReasonCode = "DENY", "SNAPSHOT_MISMATCH"
-	} else if artifacts.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && !tokenLifecyclePlanExecutable(input.NormalizedCommand) {
+	if artifacts.CommandType == "TOKEN_MODEL_LIFECYCLE_CHANGE" && !tokenLifecyclePlanExecutable(input.NormalizedCommand) {
 		// Frozen historical immediate requests remain decodable for audit, but
 		// the owner executor can only schedule an immutable persisted plan.
 		response.Verdict, response.ReasonCode = "DENY", "DOMAIN_INVARIANT_FAILED"
+	} else if !tokenProofSnapshotMatches(artifacts.CommandType, input, current) {
+		response.Verdict, response.ReasonCode = "DENY", "SNAPSHOT_MISMATCH"
 	}
 	if _, err := approvalencoding.EncodeProofResponse(response); err != nil {
 		return approvalencoding.ProofResponse{}, errTokenApprovalProofUnavailable
