@@ -56,12 +56,19 @@ func TestBillingApprovalEffectObservationIsClosedReadOnlyAuthority(t *testing.T)
 	if response.Code != http.StatusBadRequest || reader.calls != 2 {
 		t.Fatal("cross-domain command reached Billing authority")
 	}
+	recovery, _ := serviceauth.ContextForJob(context.Background(), "account-approval-recovery", "APPROVAL_RECOVERY_QUERY", uuid.NewString())
+	recoveryRequest := request.Clone(recovery)
+	recoveryResponse := httptest.NewRecorder()
+	service.approvalEffectObservation(recoveryResponse, recoveryRequest)
+	if recoveryResponse.Code != http.StatusOK || reader.calls != 3 || recoveryResponse.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("dedicated recovery identity cannot query Billing authority: status=%d calls=%d", recoveryResponse.Code, reader.calls)
+	}
 	other, _ := serviceauth.ContextForJob(context.Background(), "token-command-executor", "APPROVAL_EXECUTION", uuid.NewString())
 	denied := request.Clone(other)
 	denied.SetPathValue("approval_request_id", requestID.String())
 	response = httptest.NewRecorder()
 	service.approvalEffectObservation(response, denied)
-	if response.Code != http.StatusForbidden || reader.calls != 2 {
+	if response.Code != http.StatusForbidden || reader.calls != 3 {
 		t.Fatal("non-Account workload reached Billing effect authority")
 	}
 }

@@ -391,6 +391,9 @@ test('workload roles preserve existing permissions and narrowly register credent
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-activation.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-proof.read'));
   assert.ok(!billing.find(rule => rule.service === 'token-gateway').permissions.includes('internal.billing.approval-effect.read'));
+  assert.deepEqual(account.find(rule => rule.service === 'account-approval-recovery').permissions, ['internal.approval-recovery.plan']);
+  assert.deepEqual(billing.find(rule => rule.service === 'account-approval-recovery').permissions, ['internal.billing.approval-effect.read']);
+  assert.deepEqual(token.find(rule => rule.service === 'account-approval-recovery').permissions, ['internal.token.approval-effect.read']);
   for (const rules of [account, billing, token]) assert.ok(rules.every(rule => rule.subject === `pinvou:service:${rule.service}` && rule.permissions.every(permission => !permission.includes('*'))));
 });
 
@@ -401,6 +404,7 @@ const billingWorkloadPermissions = {
     'internal.billing.organization-unit.lifecycle', 'internal.billing.organization-member.lifecycle',
     'internal.billing.approval-activation.read', 'internal.billing.approval-proof.read', 'internal.billing.approval-effect.read',
   ],
+  'account-approval-recovery': ['internal.billing.approval-effect.read'],
   'token-gateway': [
     'internal.billing.wallet.ensure', 'internal.billing.wallet.read', 'internal.billing.entitlement.read',
     'internal.billing.hold.reserve', 'internal.billing.hold.extend', 'internal.billing.hold.commit',

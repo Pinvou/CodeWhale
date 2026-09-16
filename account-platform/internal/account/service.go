@@ -109,6 +109,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal.POST("/token-account-authority/snapshot", serviceauth.Require("internal.account.token-owner-authority.check"), httpserver.AdaptFunc(s.internalTokenOwnerAuthority))
 	internal.GET("/client-compatibility", serviceauth.Require("internal.client-compatibility.read"), httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/users/:user_id/account-closure-state", serviceauth.Require("internal.account-closure-state.read"), httpserver.AdaptFunc(s.internalAccountClosureState))
+	internal.GET("/approval-recovery/plan", serviceauth.Require("internal.approval-recovery.plan"), httpserver.AdaptFunc(s.internalApprovalRecoveryPlan))
 	internal.POST("/approval-requests/:approval_request_id/executions", serviceauth.Require("internal.approval-execution.begin"), approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
 	internal.POST("/approval-requests/:approval_request_id/executions/complete", serviceauth.Require("internal.approval-execution.complete"), approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
 	internal.GET("/approval-authorization/events/:event_id/route", serviceauth.Require("internal.approval-authorization.consume"), httpserver.AdaptFunc(s.resolveApprovalAuthorizationRoute))

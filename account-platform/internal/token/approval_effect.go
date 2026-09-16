@@ -35,8 +35,8 @@ func (s *Service) WithApprovalEffectReader(reader ApprovalEffectReader) *Service
 func (s *Service) approvalEffectObservation(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	workload, ok := serviceauth.FromContext(r.Context())
-	if !ok || workload.ActorType != "SERVICE" || workload.Service != "account-service" {
-		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "Account service identity is required", httpserver.RequestID(r.Context()))
+	if !ok || workload.ActorType != "SERVICE" || (workload.Service != "account-service" && workload.Service != "account-approval-recovery") {
+		api.WriteError(w, http.StatusForbidden, "SERVICE_AUTH_FORBIDDEN", "Account or recovery service identity is required", httpserver.RequestID(r.Context()))
 		return
 	}
 	requestID, err := uuid.Parse(r.PathValue("approval_request_id"))

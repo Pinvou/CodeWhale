@@ -11,6 +11,7 @@ const expected = {
   'token-command-executor': ['internal.authorization.check', consume, 'internal.approval-execution.begin', 'internal.approval-execution.complete'],
   'token-credential-portal': ['internal.authorization.check'],
   'keycloak-mobile-authenticator': ['internal.auth.sms.verify', 'internal.authorization.check'],
+  'account-approval-recovery': ['internal.approval-recovery.plan'],
 };
 
 function exactRules(rules) {

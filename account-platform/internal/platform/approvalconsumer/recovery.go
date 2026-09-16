@@ -14,12 +14,12 @@ const (
 )
 
 type RecoveryAssessment struct {
-	Class             FailureClass
-	Retryable         bool
-	MaxDomainAttempts int
+	Class             FailureClass `json:"class"`
+	Retryable         bool         `json:"retryable"`
+	MaxDomainAttempts int          `json:"max_domain_attempts"`
 	// Result queries are the only permitted automatic operation for proof-era
 	// failures. Classification alone never authorizes invalidation or replay.
-	QueryOnly bool
+	QueryOnly bool `json:"query_only"`
 }
 
 // ClassifyProofFailure is a closed command/version registry. A code is only

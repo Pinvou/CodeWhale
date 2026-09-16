@@ -19,7 +19,7 @@ export const businessPrivateEnvironment = Object.freeze({
   'token-gateway': ['TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64', 'TOKEN_DEFAULT_PROVIDER_API_KEY', 'TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN', 'CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64'],
   'token-portal': ['REDIS_URL', 'TOKEN_ADMIN_PAGINATION_CURSOR_HMAC_KEY_BASE64'],
 });
-const workloadNames = ['account-service', 'identity-service', 'billing-service', 'token-gateway', 'token-command-executor', 'token-credential-portal', 'keycloak-mobile-authenticator'];
+const workloadNames = ['account-service', 'identity-service', 'billing-service', 'token-gateway', 'token-command-executor', 'token-credential-portal', 'keycloak-mobile-authenticator', 'account-approval-recovery'];
 const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 const digest = value => typeof value === 'string' && /^sha256:[0-9a-f]{64}$/.test(value);
 const sameKeys = (a, b) => isDeepStrictEqual(Object.keys(a || {}).sort(), Object.keys(b || {}).sort());

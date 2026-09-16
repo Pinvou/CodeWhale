@@ -17,7 +17,7 @@ export function businessComposeFixture(root = '/fixture/business') {
   const source = readFileSync(new URL('../../deploy/production/compose.business.yaml', import.meta.url), 'utf8');
   const overlay = YAML.parse(readFileSync(new URL('../../deploy/compose/compose.model-token.yaml', import.meta.url), 'utf8'), { merge: true });
   const variables = {}, subjects = {};
-  const subjectNames = ['account-service', 'identity-service', 'billing-service', 'token-gateway', 'token-command-executor', 'token-credential-portal', 'keycloak-mobile-authenticator'];
+  const subjectNames = ['account-service', 'identity-service', 'billing-service', 'token-gateway', 'token-command-executor', 'token-credential-portal', 'keycloak-mobile-authenticator', 'account-approval-recovery'];
   subjectNames.forEach((name, i) => { subjects[name] = `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`; });
   let imageIndex = 1, port = 29100;
   for (const [, key] of source.matchAll(/\$\{([A-Z0-9_]+):?\?[^}]+\}/g)) {
