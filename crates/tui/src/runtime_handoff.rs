@@ -456,13 +456,45 @@ fn is_agent_topology_checkpoint(message: &Message) -> bool {
 /// compaction. A current empty topology is still meaningful: it overrides a
 /// narrative summary or old runtime event that says an Agent remains live.
 /// Replays are idempotent because the previous sidecar is structurally removed
-/// before the replacement is appended.
+/// before the replacement is inserted. At a tool-result boundary, place it
+/// after the latest user input, before that round's assistant/tool chain.
+/// Strict paired chat templates cannot encode a tool result followed by a
+/// user checkpoint. Compaction already replaces history; this does not mutate
+/// the session-pinned system/cache prefix or impersonate an assistant reply.
 pub(crate) fn replace_agent_topology_checkpoint(
     messages: &mut Vec<Message>,
     snapshots: &[SubAgentResult],
 ) {
     messages.retain(|message| !is_agent_topology_checkpoint(message));
-    messages.push(agent_topology_checkpoint_message(snapshots));
+    let ends_with_tool_result = messages.last().is_some_and(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { .. }
+                    | ContentBlock::ToolSearchToolResult { .. }
+                    | ContentBlock::CodeExecutionToolResult { .. }
+            )
+        })
+    });
+    let position = if ends_with_tool_result {
+        messages
+            .iter()
+            .rposition(|message| {
+                classify_user_turn_prompt(message) != UserTurnPromptKind::NotPrompt
+            })
+            .map_or_else(
+                || {
+                    messages
+                        .iter()
+                        .position(|message| message.role.is_assistant_like())
+                        .unwrap_or(messages.len())
+                },
+                |index| index + 1,
+            )
+    } else {
+        messages.len()
+    };
+    messages.insert(position, agent_topology_checkpoint_message(snapshots));
 }
 
 #[cfg(test)]
@@ -1235,6 +1267,45 @@ mod tests {
         assert!(!display.contains("prior worker processes are not assumed active"));
         assert!(!display.contains("\"status\":\"completed\""));
         assert_eq!(project_messages_for_restore(&projected), projected);
+    }
+
+    #[test]
+    fn forkguard_compaction_topology_preserves_tool_round_boundary() {
+        let original: Vec<Message> = serde_json::from_value(serde_json::json!([
+            {"role":"user","content":[{"type":"text","text":"Analyze the data"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"bash","input":{"command":"echo ready"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"ready"}]},
+            {"role":"assistant","content":[{"type":"tool_use","id":"call_2","name":"bash","input":{"command":"echo done"}}]},
+            {"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"done"}]}
+        ])).unwrap();
+        for snapshots in [
+            vec![],
+            vec![topology_snapshot(
+                "agent_alpha",
+                "Tide",
+                SubAgentStatus::Running,
+            )],
+        ] {
+            let mut messages = original.clone();
+            replace_agent_topology_checkpoint(&mut messages, &snapshots);
+            assert_eq!(messages.len(), original.len() + 1);
+            assert_eq!(messages[0], original[0]);
+            assert!(is_agent_topology_checkpoint(&messages[1]));
+            assert_eq!(
+                &messages[2..],
+                &original[1..],
+                "assistant/tool chain must remain intact and end the request"
+            );
+            let once = messages.clone();
+            replace_agent_topology_checkpoint(&mut messages, &snapshots);
+            assert_eq!(messages, once);
+        }
+        let mut without_user = original.clone();
+        without_user[0].role = Role::System;
+        replace_agent_topology_checkpoint(&mut without_user, &[]);
+        assert_eq!(without_user[0].role, Role::System);
+        assert!(is_agent_topology_checkpoint(&without_user[1]));
+        assert_eq!(&without_user[2..], &original[1..]);
     }
 
     #[test]
