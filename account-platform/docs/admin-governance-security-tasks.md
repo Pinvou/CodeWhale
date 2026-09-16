@@ -105,6 +105,8 @@ GSA-15 本地代码证据（2026-09-16，提交级自审PASS）：`a064c043`、`
 GSA-16 阶段证据（2026-09-16，尚未完成整项审核）：`a0be32ab`新增Account前向`000065`，proof-era Billing确定失败保留`DOMAIN_INFLIGHT`及稳定错误，不由通用失败CAS回到`READY`；legacy 12次路径保持不变。隔离PG覆盖新wire首次失败、第二次grant拒绝和旧wire仍有界；迁移临时owner公用模式CREATE在同一事务内撤销，由`c89d83c3`补充负向权限验证。`589e6c04`使审批过期worker不直接失效`EXECUTION_FAILED`，隔离PG覆盖已存在执行且到期仍保留待查状态。`node scripts/account-platform.mjs verify`在`a0be32ab`后exit0，Node 592项590 PASS/0 FAIL/2既有环境SKIP、Go全包test/vet及静态门禁通过；过期修订后定向真实PG PASS。此阶段只是保守关闸，尚未实现六命令独立分类/查证worker、租约与安全恢复，不能标记CODE_COMPLETE或启动proof-era生产流量。
 
 GSA-16 补充（仍PARTIAL）：`ec0d9f18`证明未Begin的APPROVED仍正常到期；`b235570a`新增前向`000066`，把历史proof-era `READY + last_error_code` 行搬至查证态，并使grant显式拒绝旧READY失败；`796160c3`以真实隔离PG验证迁移前后状态、零第二次grant及legacy不变。第一次定向测试遇到夹具审批writer短时不可用，重跑通过，未将它视为产品行为证据。独立恢复worker、逐命令结果权威查证和有界安全重试仍未交付。
+
+GSA-16 防御纵深：`55c3a359`在Billing consumer结果优先查询之后，拒绝proof-era任何既有attempt或错误码的READY行再次Begin/Grant，覆盖混合版本旧Account状态；三种异常READY与legacy状态机定向单测通过。它不是新的重试授权，也不代替独立恢复worker。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
