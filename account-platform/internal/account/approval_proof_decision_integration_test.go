@@ -41,7 +41,7 @@ func TestApprovalProofDecisionPostgresIntegration(t *testing.T) {
 		t.Fatalf("unconfigured domain proof must fail closed: %v", err)
 	}
 	calls := 0
-	deny, fence := false, false
+	deny, fence, changeAuthorization := false, false, false
 	repository.approvalProofSource = approvalProofSourceFunc(func(_ context.Context, id uuid.UUID, artifacts approvalencoding.ProofArtifacts) (ApprovalProofResult, error) {
 		calls++
 		if fence {
@@ -49,6 +49,12 @@ func TestApprovalProofDecisionPostgresIntegration(t *testing.T) {
 SET authorization_relay_state='FENCED',authorization_relay_epoch=authorization_relay_epoch+1,version=version+1,updated_at=now()
 WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 			return ApprovalProofResult{}, err
+			}
+		}
+		if changeAuthorization {
+			if _, err := db.adminPool.Exec(ctx, `UPDATE authorization_versions SET version=version+1
+WHERE user_id=$1 AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'`, approver.ID); err != nil {
+				return ApprovalProofResult{}, err
 			}
 		}
 		issued := time.Now().UTC()
@@ -98,10 +104,16 @@ SET authorization_relay_state='RUNNING',authorization_relay_epoch=authorization_
 WHERE control_id='ADMIN_APPROVAL'`); err != nil {
 		t.Fatal(err)
 	}
+	changeAuthorization = true
+	if _, err := repository.DecideApprovalRequest(ctx, principal, request.ID, request.Version, "APPROVED", "independent proof", nil); !errors.Is(err, ErrApprovalRequestChanged) {
+		t.Fatalf("authorization version changed after proof must roll back: %v", err)
+	}
+	assertNoAuthorization("AUTH_CHANGED")
+	changeAuthorization = false
 	// v1 accepts the legacy transport field, but it is not an authorization
 	// input once the singleton is proof-required.
 	approved, err := repository.DecideApprovalRequest(ctx, principal, request.ID, request.Version, "APPROVED", "independent proof", json.RawMessage(`{"forged":999}`))
-	if err != nil || approved.Status != "APPROVED" || calls != 3 {
+	if err != nil || approved.Status != "APPROVED" || calls != 4 {
 		t.Fatalf("proof decision failed or used observed versions: %v status=%s calls=%d", err, approved.Status, calls)
 	}
 	var serialization string

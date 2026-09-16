@@ -622,6 +622,9 @@ func (r *PostgresRepository) approveApprovalRequestAttempt(
 		return rollback(ApprovalRequest{}, approvalVisibleRequestReadError(err))
 	}
 	if item.Status != "SUBMITTED" || item.Version != expectedVersion {
+		if checkpoint != nil {
+			return rollback(ApprovalRequest{}, ErrApprovalRequestChanged)
+		}
 		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
 			if _, _, _, authErr := strongApprovalWriterAuthorization(ctx, tx, *actorID, policy.ApproverPermission); authErr == nil {
 				if err := appendApprovalStateEventWithID(ctx, tx, stateEventID, requestID, item.Status, item.Status, "USER", actorID.String(), "DECISION_CONFLICT", map[string]any{"expected_version": expectedVersion, "current_version": item.Version}, now); err != nil {
