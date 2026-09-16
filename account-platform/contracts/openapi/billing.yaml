@@ -15,7 +15,7 @@ paths:
       servers: [{ url: / }]
       operationId: observeBillingApprovalEffect
       summary: Authoritatively observe whether a Billing approval attempt or effect exists
-      description: Account-service-only, read-only and no-store. Requires internal.billing.approval-effect.read. ABSENT is the only state eligible for later reconciliation; errors and EFFECT_OR_ATTEMPT_OBSERVED always block invalidation.
+      description: Account-service or dedicated approval-recovery workload, read-only and no-store. Requires internal.billing.approval-effect.read. ABSENT is only a point-in-time negative observation, never proof of zero effect or permission to retry.
       parameters:
         - { name: approval_request_id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: command_type, in: query, required: true, schema: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] } }
@@ -28,6 +28,29 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/BillingApprovalEffectObservation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /internal/v1/approval-recovery/results/{approval_request_id}:
+    get:
+      servers: [{ url: / }]
+      operationId: observeBillingApprovalRecoveryResult
+      summary: Read a positive Billing command result bound to the original immutable proof claim
+      description: Dedicated account-approval-recovery workload only, requiring internal.billing.approval-result.read. UNCONFIRMED never proves zero effect; this route cannot probe a Provider, retry, complete, or invalidate an approval.
+      parameters:
+        - { name: approval_request_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: command_type, in: query, required: true, schema: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] } }
+        - { name: original_event_id, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: approval_epoch, in: query, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200":
+          description: Closed positive-result observation; UNCONFIRMED is not a zero-effect claim
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BillingApprovalRecoveryResult" }
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
@@ -572,6 +595,18 @@ components:
         command_type: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] }
         command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
         state: { type: string, enum: [ABSENT, EFFECT_OR_ATTEMPT_OBSERVED] }
+        observed_at: { type: string, format: date-time }
+    BillingApprovalRecoveryResult:
+      type: object
+      additionalProperties: false
+      required: [schema_version, approval_request_id, original_event_id, approval_epoch, command_type, state, observed_at]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        approval_request_id: { type: string, format: uuid }
+        original_event_id: { type: string, format: uuid }
+        approval_epoch: { type: integer, minimum: 1 }
+        command_type: { type: string, enum: [WALLET_ADJUSTMENT, PAYMENT_PROVIDER_RESUME, PAYMENT_PRODUCT_RESUME] }
+        state: { type: string, enum: [UNCONFIRMED, SUCCEEDED] }
         observed_at: { type: string, format: date-time }
     BillingApprovalProofRequest:
       type: object

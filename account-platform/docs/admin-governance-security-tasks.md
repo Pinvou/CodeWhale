@@ -128,7 +128,9 @@ GSA-16 独立身份只读通道（仍PARTIAL / REVIEW_PENDING）：Account内网
 
 GSA-16 独立一次性调查进程（仍PARTIAL / REVIEW_PENDING）：新增`approval-recovery` CLI，仅接受独立服务凭证与`account_approval_recovery`数据库会话，以5秒封闭Account计划响应和现有效果权威读取驱动短租约查询；拒绝重定向、可缓存/畸形/重复键响应、非专属数据库身份。命令行不提供apply、领域重试、失效或完成选项，输出仅候选/观测/不可用计数。代码与合同可测，但数据库角色仍为NOLOGIN、未配置生产凭据或部署调度；需要六命令结果权威、零效果证明和终态CAS后才可视为完整恢复worker。
 
-GSA-16 Token原结果查证入口（仍PARTIAL / REVIEW_PENDING）：以专属`internal.token.approval-result.read`权限、审批ID/命令/指纹/原幂等键SHA-256摘要四重绑定查询持久Token命令结果，只返回封闭状态与观测时间；`UNCONFIRMED`或`PENDING`不代表零效果或可重试。此只读入口尚未接入恢复CLI或Account终态CAS，也不授予既有执行权限；Billing三命令的同级原结果权威仍待实现。
+GSA-16 Token原结果查证入口（仍PARTIAL / REVIEW_PENDING）：以专属`internal.token.approval-result.read`权限、审批ID/命令/指纹/原幂等键SHA-256摘要四重绑定查询持久Token命令结果，只返回封闭状态与观测时间；`UNCONFIRMED`或`PENDING`不代表零效果或可重试。此只读入口尚未接入恢复CLI或Account终态CAS，也不授予既有执行权限。
+
+GSA-16 Billing原结果查证入口（仍PARTIAL / REVIEW_PENDING）：以专属`internal.billing.approval-result.read`权限和原event/epoch/命令绑定不可变Billing proof claim，再只读检查三命令已持久化的正向领域结果。Wallet必须有POSTED且journal entry，Provider/Product只确认领域结果行；缺claim、结果尚未持久化或信息不一致统一`UNCONFIRMED`，不视为零效果。接口不主动探测Provider，也不执行重试或终态写入；仍需恢复CLI统一消费六命令结果、Account原执行CAS及安全失效证明。
 - **17**：BFF精确路径/字段、proof-like输入拒绝、Redis session v1/v2原子锁定、旧session默认v1、capability/no-store/action_control_version；多副本/多标签、升降级与迟到响应不复活动作测试。
 - **18**：审批中心四视图、权限导航、筛选URL/游标、摘要/详情/动作/状态、禁自审与失效重读。三语、键盘/焦点/读屏、320/768/1440px及200%缩放、真实错误/空/局部失败；截图中的侧栏重复先真实复现，不能把长截图拼接直接断定为代码缺陷。
 - **19**：业务页拥有编辑；中心只提交最新未修改DRAFT；业务页编辑后可提交同一DRAFT，终态fresh superseding新ID。禁止APPROVED/EXECUTING/UNKNOWN替代，step-up后不自动重放，URL回返与六命令流程E2E。
