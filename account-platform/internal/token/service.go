@@ -68,6 +68,7 @@ type Service struct {
 	impactPrechecks             ImpactPrecheckRepository
 	impactPricing               ImpactPriceCoverageClient
 	approvedCommandExecutor     ApprovedTokenCommandExecutor
+	approvalEffects             ApprovalEffectReader
 	operationsOverviewEnabled   bool
 	operationsOverviewMetrics   *tokenOperationsOverviewMetrics
 	pageOverviewsEnabled        bool
@@ -191,6 +192,7 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 		maximumInputTokens = 128_000
 	}
 	service := &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000, breaker: resilience.NewBreaker(), operationsOverviewMetrics: newTokenOperationsOverviewMetrics()}
+	service.approvalEffects, _ = repository.(ApprovalEffectReader)
 	if resolver, ok := contexts.(CommerceCustomerResolver); ok {
 		service.commerceCustomers = resolver
 	}
@@ -202,6 +204,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(serviceToken))
 	internal.GET("/token-governance/activation", serviceauth.Require("internal.authorization.check"), httpserver.AdaptFunc(s.internalTokenGovernanceActivation))
+	internal.GET("/approval-effects/:approval_request_id", serviceauth.Require("internal.token.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
 	internal.PUT("/organizations/:organization_id/lifecycle", serviceauth.Require("internal.token.organization.lifecycle"), approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", serviceauth.Require("internal.token.organization-unit.lifecycle"), approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	internal.DELETE("/users/:user_id/replay-payloads", serviceauth.Require("internal.token.replay.delete"), httpserver.AdaptFunc(s.anonymizeUserReplayPayloads))

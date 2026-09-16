@@ -10,6 +10,29 @@ servers:
 security:
   - oidc: []
 paths:
+  /internal/v1/approval-effects/{approval_request_id}:
+    get:
+      servers: [{ url: / }]
+      security: [{ serviceToken: [] }]
+      operationId: observeTokenApprovalEffect
+      summary: Authoritatively observe whether a Token approval attempt or effect exists
+      description: Account-service-only, read-only and no-store. Requires internal.token.approval-effect.read. ABSENT is the only state eligible for later reconciliation; errors and EFFECT_OR_ATTEMPT_OBSERVED always block invalidation.
+      parameters:
+        - { name: approval_request_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: command_type, in: query, required: true, schema: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] } }
+        - { name: command_fingerprint, in: query, required: true, schema: { type: string, pattern: '^[0-9a-f]{64}$' } }
+      responses:
+        "200":
+          description: Closed authoritative observation without domain result data
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenApprovalEffectObservation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /internal/v1/token-governance/activation:
     get:
       servers: [{ url: / }]
@@ -987,6 +1010,18 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    TokenApprovalEffectObservation:
+      type: object
+      additionalProperties: false
+      required: [schema_version, authority, approval_request_id, command_type, command_fingerprint, state, observed_at]
+      properties:
+        schema_version: { type: integer, const: 1 }
+        authority: { type: string, const: TOKEN }
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string, enum: [TOKEN_MODEL_LIFECYCLE_CHANGE, TOKEN_MODEL_CATALOG_ROLLBACK, TOKEN_CREDENTIAL_REVOKE] }
+        command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        state: { type: string, enum: [ABSENT, EFFECT_OR_ATTEMPT_OBSERVED] }
+        observed_at: { type: string, format: date-time }
     TokenGovernanceActivation:
       type: object
       additionalProperties: false

@@ -151,10 +151,18 @@ VALUES($1,$2,'provider-a','v1','product-a',$3,$4,$5,'approved product recovery',
 		if err != nil || !found || len(result.DomainResult) == 0 || string(result.LedgerReferences) != "{}" {
 			t.Fatalf("%s result-first lookup found=%v result=%s ledger=%s err=%v", command, found, result.DomainResult, result.LedgerReferences, err)
 		}
+		observed, observedAt, err := repository.ObserveApprovalEffect(ctx, requestID, command)
+		if err != nil || !observed || observedAt.IsZero() {
+			t.Fatalf("%s authoritative effect observation observed=%v at=%s err=%v", command, observed, observedAt, err)
+		}
 	}
 	missing, found, err := domain.LookupAuthorizationResult(ctx, ApprovalAuthorizationBinding{ApprovalRequestID: uuid.New(), CommandType: "PAYMENT_PROVIDER_RESUME"}, approvalencoding.AuthorizationEvent{})
 	if err != nil || found || len(missing.DomainResult) != 0 {
 		t.Fatalf("missing effect was treated as a result: found=%v result=%s err=%v", found, missing.DomainResult, err)
+	}
+	absent, observedAt, err := repository.ObserveApprovalEffect(ctx, uuid.New(), "PAYMENT_PROVIDER_RESUME")
+	if err != nil || absent || observedAt.IsZero() {
+		t.Fatalf("missing effect observation absent=%v at=%s err=%v", absent, observedAt, err)
 	}
 
 	pendingID, pendingRequestID := uuid.New(), uuid.New()

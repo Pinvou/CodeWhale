@@ -37,6 +37,7 @@ type Service struct {
 	impactPricing               impactPriceRepository
 	modelPriceProjectionEnabled bool
 	modelPriceProjectionMetrics *modelPriceProjectionMetrics
+	approvalEffects             ApprovalEffectReader
 	now                         func() time.Time
 }
 
@@ -48,6 +49,7 @@ func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepos
 func NewService(repository Repository) *Service {
 	service := &Service{repository: repository, now: func() time.Time { return time.Now().UTC() }, modelPriceProjectionMetrics: newModelPriceProjectionMetrics()}
 	service.impactPricing, _ = repository.(impactPriceRepository)
+	service.approvalEffects, _ = repository.(ApprovalEffectReader)
 	return service
 }
 
@@ -92,6 +94,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
 	protected.GET("/internal/v1/approval-command-activations", serviceauth.Require("internal.billing.approval-activation.read"), httpserver.AdaptFunc(s.approvalCommandActivations))
+	protected.GET("/internal/v1/approval-effects/:approval_request_id", serviceauth.Require("internal.billing.approval-effect.read"), httpserver.AdaptFunc(s.approvalEffectObservation))
 	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
 	protected.POST("/internal/v1/token-account-wallet-provisioning-receipts", serviceauth.Require("internal.billing.token-account-wallet-provision.execute"), httpserver.AdaptFunc(s.provisionTokenAccountWallet))
 	protected.GET("/internal/v1/token-account-wallet-provisioning-receipts/:command_reference", serviceauth.Require("internal.billing.token-account-wallet-provision.read"), httpserver.AdaptFunc(s.getTokenAccountWalletProvisioningReceipt))
